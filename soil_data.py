@@ -73,6 +73,22 @@ def get_soil_data_for_point(latitude: float, longitude: float) -> list[dict]:
     return [dict(zip(result["columns"], row)) for row in result["rows"]]
 
 
+def coordinates_to_wkt_polygon(coordinates: list) -> str:
+    """
+    Converts a list of (longitude, latitude) tuples into the WKT polygon
+    string format this function expects.
+
+    WKT polygons must be "closed" — the first and last point must match.
+    If the input isn't already closed, this closes it automatically.
+    """
+    coords = list(coordinates)
+    if coords[0] != coords[-1]:
+        coords = coords + [coords[0]]
+
+    coord_pairs = ", ".join(f"{lon} {lat}" for lon, lat in coords)
+    return f"polygon(({coord_pairs}))"
+
+
 def get_soil_data_for_polygon(wkt_polygon: str) -> list[dict]:
     """
     Same as get_soil_data_for_point, but for a full parcel boundary instead
