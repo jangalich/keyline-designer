@@ -8,25 +8,47 @@ public USDA endpoint.
 Docs: https://sdmdataaccess.nrcs.usda.gov/webservicehelp.aspx
 """
 
+import time
 import requests
 from typing import Optional
 
 SDA_ENDPOINT = "https://sdmdataaccess.sc.egov.usda.gov/Tabular/post.rest"
 
 
-def _run_sda_query(sql: str) -> dict:
+def _run_sda_query(sql: str, max_retries: int = 2) -> dict:
     """
     Sends a raw SQL query to the SDA REST endpoint and returns the parsed
     JSON response. Raises an exception if the request fails or SDA returns
     an error payload.
+
+    USDA's server is sometimes slow for polygon (whole-boundary) queries
+    specifically, since it has more area to search than a single point —
+    a 30-second timeout that was fine for point queries can occasionally
+    be too short here. This retries once or twice with a longer timeout
+    before giving up, rather than failing on the first slow response.
     """
     payload = {
         "QUERY": sql,
         "FORMAT": "JSON+COLUMNNAME",
     }
 
-    response = requests.post(SDA_ENDPOINT, json=payload, timeout=30)
-    response.raise_for_status()
+    last_error = None
+
+    for attempt in range(max_retries + 1):
+        # Give later attempts more time, in case the server is just
+        # momentarily under load rather than truly unreachable.
+        timeout = 30 + (attempt * 30)
+
+        try:
+            response = requests.post(SDA_ENDPOINT, json=payload, timeout=timeout)
+            response.raise_for_status()
+            break
+        except requests.exceptions.RequestException as e:
+            last_error = e
+            if attempt < max_retries:
+                time.sleep(2)
+                continue
+            raise last_error
 
     data = response.json()
 
