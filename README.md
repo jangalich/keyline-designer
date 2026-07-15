@@ -1,42 +1,79 @@
-# Farm Design Tool — Backend
+# Keyline Designer — Backend
 
 Backend services for the regenerative farm design tool. Fetches public
-geospatial data (soil, elevation, imagery, hydrology) for a given property
-and eventually feeds it into a Scale of Permanence / keyline design report.
+climate and geospatial data (climate, soil, elevation, hydrology) for a
+given property boundary and generates a narrative Scale of Permanence
+report using the Claude API.
 
-## What's here so far
+## What's built and working
 
+- `climate_data.py` — fetches historical wind, rainfall, and temperature
+  data from Open-Meteo (free, no API key). Prevailing wind and rainfall
+  intensity feed directly into the report's design reasoning; temperature
+  is included as reference context.
 - `soil_data.py` — fetches SSURGO soil survey data from USDA's Soil Data
-  Access API for a given point or parcel boundary. No API key needed.
+  Access API, for either a single point or a full parcel boundary.
+- `elevation_data.py` — fetches elevation data from USGS 3DEP for a point
+  or as a grid sampled across a boundary (used to gauge slope/relief).
+- `hydrology_data.py` — fetches nearby streams and standing water from
+  USGS's National Hydrography Dataset, with a buffer zone so features
+  just outside the exact drawn boundary are still caught.
+- `report_generator.py` — combines all of the above and calls the Claude
+  API to generate the narrative Scale of Permanence report.
+- `generate_full_report.py` — the full end-to-end pipeline: give it a
+  boundary once, it runs all four data-fetching steps and generates the
+  final report. This is the main script to run for a real test.
+- `parcel_boundary.py` — fetches legal parcel boundaries from Allegheny
+  County's GIS system specifically. Superseded by manual boundary drawing
+  (see below) as the actual product approach, but kept as a working
+  reference.
 
 ## Running it yourself
 
-This needs internet access to reach USDA's servers, so it won't run inside
-a fully offline/sandboxed environment. To test it:
+Needs internet access (won't run in a fully offline sandbox). Setup:
 
-1. Install Python 3.10+ if you don't have it
-2. From this folder, install dependencies:
-   ```
-   pip install -r requirements.txt
-   ```
-3. Run the test script:
-   ```
-   python soil_data.py
-   ```
+```
+pip install -r requirements.txt
+export ANTHROPIC_API_KEY="sk-ant-..."
+python3 generate_full_report.py
+```
 
-This will fetch real soil data for the test coordinates in the file (your
-property in Richland Township, PA) and print a plain-language summary.
+Individual modules can also be run standalone (`python3 climate_data.py`,
+etc.) to test just one data layer without triggering a full report /
+Claude API call — useful when only testing a new or changed module.
 
-## Next pieces to build
+## Key product decision: manual boundary drawing
 
-- `elevation_data.py` — pull DEM/elevation data from USGS 3DEP
-- `hydrology_data.py` — pull stream/water features from USGS NHD
-- `report_generator.py` — combine all data layers and call the Claude API
-  to generate the narrative Scale of Permanence report
-- A simple web frontend (React) for entering an address and viewing results
+Rather than trying to auto-fetch legal parcel boundaries (which vary by
+county/state with no unified nationwide API), the tool has users draw
+their intended farm area directly on a map. This also correctly handles
+the common case where someone wants to design only part of their land
+(e.g. 50 of 100 acres). See the frontend project for the actual drawing
+tool (built with Leaflet).
+
+## Roadmap / next pieces
+
+**Near-term:**
+- Connect the frontend's drawn boundary to this backend (currently two
+  separate, unconnected pieces — frontend has the map, backend has the
+  pipeline)
+- Imagery/land cover data as an additional layer (NAIP/Sentinel-2)
+- Uploaded soil test result parsing (PDF/photo → structured data →
+  incorporated into the report, alongside SSURGO data)
+
+**Future / potential premium tier:**
+- Real LiDAR-based keypoint detection — downloading actual DEM raster
+  data (not just sampled grid points) and running real terrain-analysis
+  tools (e.g. WhiteboxTools) to mathematically locate keypoints and
+  candidate keylines precisely, rather than having the report estimate
+  their general location from a coarse grid. Meaningfully more complex
+  to build (raster processing, larger data handling) — a plausible
+  candidate for a paid add-on feature once the core free-data pipeline
+  is solid and validated.
 
 ## Deploying
 
-Once there's more built out, this backend gets deployed to Render or
-Railway (connected to the GitHub repo), which gives it a live URL and
-real internet access to reach USDA/USGS APIs.
+Once ready, this backend deploys to Render or Railway (connected to this
+GitHub repo), giving it a live URL with real internet access to reach
+USDA/USGS/Open-Meteo APIs. The frontend (separate repo) deploys to
+Vercel.
