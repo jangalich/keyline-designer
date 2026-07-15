@@ -16,6 +16,7 @@ Docs: https://docs.claude.com/en/api/overview
 """
 
 import os
+from typing import Optional
 from anthropic import Anthropic
 
 MODEL = "claude-sonnet-5"
@@ -27,21 +28,30 @@ Permanence orders design decisions from least changeable to most changeable: cli
 landform/geology, water, access/roads, trees/windbreaks, buildings, fencing/subdivision,
 soil fertility, and finally aesthetics.
 
-You will be given real geospatial data for a specific property: soil survey data,
-an elevation grid, and nearby surface water features. Your job is to:
+You will be given real climate and geospatial data for a specific property: historical
+climate data (prevailing wind, rainfall, temperature), soil survey data, an elevation
+grid, and nearby surface water features. Your job is to:
 
-1. Summarize what the data reveals about this property's landform, water, and soil
-   characteristics — in plain, direct language a landowner (not a GIS professional)
+1. Summarize what the data reveals about this property's climate, landform, water, and
+   soil characteristics — in plain, direct language a landowner (not a GIS professional)
    can understand.
-2. Reason about how these factors interact — for example, how slope and soil drainage
-   together suggest where water tends to move and pool, or where erosion risk is
-   highest.
+2. Reason about how these factors interact — for example, how prevailing wind direction
+   should inform windbreak orientation, how rainfall intensity should inform pond/swale
+   sizing, or how slope and soil drainage together suggest where water tends to move
+   and pool.
 3. Suggest candidate design considerations following Scale of Permanence order: what
-   the landform/water pattern suggests about keyline placement, pond/dam siting,
-   access road routing, and where NOT to place permanent structures.
+   the climate/landform/water pattern suggests about windbreak placement, keyline
+   placement, pond/dam siting, access road routing, and where NOT to place permanent
+   structures.
 4. Be honest about the limits of this data. This is a first-pass analysis from public
    data, not a substitute for walking the land or a professional site visit. Do not
    invent specifics the data doesn't support.
+
+Note on climate data specifically: prevailing wind and rainfall intensity are genuinely
+design-relevant and should shape your recommendations directly. Temperature data is
+useful context (mention it briefly) but is more relevant to future crop/species
+selection than to the land design decisions covered here — don't over-invest in
+reasoning about it.
 
 Write in clear, direct prose. Use section headers. Avoid hedging on every sentence,
 but do flag genuine uncertainty where the data is thin or ambiguous."""
@@ -99,14 +109,36 @@ def _format_water_summary(water_features: dict) -> str:
     return "\n".join(lines)
 
 
+def _format_climate_summary(climate: Optional[dict]) -> str:
+    if not climate:
+        return "No climate data available."
+
+    return (
+        f"Prevailing wind direction: {climate['prevailing_wind_direction']} "
+        f"({climate['prevailing_wind_direction_degrees']}\u00b0)\n"
+        f"Average annual precipitation: {climate['avg_annual_precipitation_mm']} mm\n"
+        f"Heaviest recorded single-day rainfall (last {climate['years_analyzed']} yrs): "
+        f"{climate['max_daily_precipitation_mm']} mm\n"
+        f"Average high/low temperature: {climate['avg_high_temp_c']}\u00b0C / "
+        f"{climate['avg_low_temp_c']}\u00b0C\n"
+        f"Record high/low temperature (last {climate['years_analyzed']} yrs): "
+        f"{climate['record_high_temp_c']}\u00b0C / {climate['record_low_temp_c']}\u00b0C"
+    )
+
+
 def generate_scale_of_permanence_report(
     soil_components: list[dict],
     elevation_grid: list[dict],
     water_features: dict,
+    climate_summary: Optional[dict] = None,
 ) -> str:
     """
-    Given the outputs of the three data-fetching modules, generates a
-    narrative Scale of Permanence report via the Claude API.
+    Given the outputs of the data-fetching modules, generates a narrative
+    Scale of Permanence report via the Claude API. climate_summary (from
+    climate_data.py) is optional so existing callers built before climate
+    data existed don't break — but including it produces a meaningfully
+    better report, since climate is literally the first item in the Scale
+    of Permanence framework.
     """
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
@@ -117,7 +149,10 @@ def generate_scale_of_permanence_report(
 
     client = Anthropic(api_key=api_key)
 
-    data_summary = f"""SOIL DATA:
+    data_summary = f"""CLIMATE DATA:
+{_format_climate_summary(climate_summary)}
+
+SOIL DATA:
 {_format_soil_summary(soil_components)}
 
 ELEVATION DATA:
@@ -128,7 +163,7 @@ WATER FEATURES:
 
     message = client.messages.create(
         model=MODEL,
-        max_tokens=4000,
+        max_tokens=8000,
         system=SYSTEM_PROMPT,
         messages=[
             {
@@ -186,11 +221,29 @@ if __name__ == "__main__":
         "water_bodies": [],
     }
 
+    # Illustrative placeholder climate values for this standalone test —
+    # NOT real fetched data. generate_full_report.py (updated below) calls
+    # climate_data.py for real numbers; this test just exercises the
+    # report-generation logic in isolation without extra API calls.
+    test_climate = {
+        "prevailing_wind_direction": "WSW",
+        "prevailing_wind_direction_degrees": 245.0,
+        "avg_annual_precipitation_mm": 1020.0,
+        "max_daily_precipitation_mm": 95.0,
+        "avg_high_temp_c": 16.5,
+        "avg_low_temp_c": 6.0,
+        "record_high_temp_c": 37.0,
+        "record_low_temp_c": -22.0,
+        "years_analyzed": 10,
+    }
+
     print("Generating Scale of Permanence report...\n")
     print("-" * 60)
 
     try:
-        report = generate_scale_of_permanence_report(test_soil, test_elevation, test_water)
+        report = generate_scale_of_permanence_report(
+            test_soil, test_elevation, test_water, test_climate
+        )
         print(report)
     except RuntimeError as e:
         print(f"Setup issue: {e}")
