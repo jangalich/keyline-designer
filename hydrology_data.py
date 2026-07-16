@@ -12,6 +12,7 @@ drainage that keyline work should account for.
 Docs: https://hydro.nationalmap.gov/arcgis/rest/services/nhd/MapServer
 """
 
+import time
 import requests
 from typing import Optional
 
@@ -64,10 +65,18 @@ def _cos_degrees(degrees: float) -> float:
     return math.cos(math.radians(degrees))
 
 
-def _query_layer(layer_id: int, bbox: tuple[float, float, float, float]) -> list[dict]:
+def _query_layer(
+    layer_id: int, bbox: tuple[float, float, float, float], max_retries: int = 2
+) -> list[dict]:
     """
     Queries a single NHD layer for features intersecting the given
     bounding box. Returns raw GeoJSON-style feature dicts.
+
+    Same reasoning as soil_data.py's retry logic: USGS's server is
+    occasionally slow, and a single 30-second timeout can fail on a
+    request that would have succeeded with a bit more patience. This
+    retries with progressively longer timeouts rather than failing
+    immediately on the first slow response.
     """
     min_lon, min_lat, max_lon, max_lat = bbox
 
@@ -82,11 +91,22 @@ def _query_layer(layer_id: int, bbox: tuple[float, float, float, float]) -> list
     }
 
     url = f"{NHD_BASE}/{layer_id}/query"
-    response = requests.get(url, params=params, timeout=30)
-    response.raise_for_status()
+    last_error = None
 
-    data = response.json()
-    return data.get("features", [])
+    for attempt in range(max_retries + 1):
+        timeout = 30 + (attempt * 30)
+
+        try:
+            response = requests.get(url, params=params, timeout=timeout)
+            response.raise_for_status()
+            data = response.json()
+            return data.get("features", [])
+        except requests.exceptions.RequestException as e:
+            last_error = e
+            if attempt < max_retries:
+                time.sleep(2)
+                continue
+            raise last_error
 
 
 def get_water_features_for_boundary(

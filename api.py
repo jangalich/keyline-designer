@@ -18,6 +18,7 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 
 from generate_full_report import generate_full_report
+from geocode import geocode_address
 
 app = Flask(__name__)
 
@@ -26,6 +27,38 @@ app = Flask(__name__)
 # cross-origin requests by default unless the server explicitly allows
 # it; this line is what allows it during local development.
 CORS(app)
+
+
+@app.route("/api/geocode", methods=["POST"])
+def geocode_endpoint():
+    """
+    Expects a JSON body like:
+        { "address": "5614 N Montour Rd, Gibsonia, PA 15044" }
+
+    Returns:
+        { "latitude": ..., "longitude": ..., "matched_address": "..." }
+        on success, or { "error": "..." } if no match was found.
+    """
+    data = request.get_json(silent=True)
+
+    if not data or "address" not in data:
+        return jsonify({"error": "Request must include an 'address' field."}), 400
+
+    address = data["address"].strip()
+
+    if not address:
+        return jsonify({"error": "Address cannot be empty."}), 400
+
+    try:
+        result = geocode_address(address)
+
+        if result is None:
+            return jsonify({"error": "No match found for that address. Check for typos, or try including city and state."}), 404
+
+        return jsonify(result)
+
+    except Exception as e:
+        return jsonify({"error": f"Geocoding failed: {str(e)}"}), 500
 
 
 @app.route("/api/generate-report", methods=["POST"])
