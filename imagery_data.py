@@ -8,11 +8,19 @@ computes a coarse land-cover breakdown from NDVI.
 
 This does NOT return imagery itself — the report this feeds is a text
 narrative, not a picture — it returns structured stats only: what fraction
-of the parcel is bare/degraded ground, low vegetation (pasture/grass), dense
-vegetation (tree canopy/forest), or open water, plus the average NDVI and how
-current the source scene is. Classification is done with fixed NDVI
-threshold ranges, not a trained classifier — simple, fast, and explainable,
-which is all a first-pass land-cover read needs to be.
+of the parcel is bare/degraded ground, low vegetation (pasture/grass), high
+vigor vegetation (dense pasture, hayfield, or tree canopy — NDVI alone can't
+tell these apart), or open water, plus the average NDVI and how current the
+source scene is. Classification is done with fixed NDVI threshold ranges,
+not a trained classifier — simple, fast, and explainable, which is all a
+first-pass land-cover read needs to be.
+
+NDVI measures photosynthetic vigor, not vegetation type or height. A dense,
+well-watered hayfield in peak growing season can score just as high as
+mature forest canopy — this module has no way to tell them apart, so the
+high-vigor bucket is deliberately labeled as ambiguous rather than as
+"forest" or "tree canopy". Distinguishing them would need ground-truthing
+or a higher-resolution/multi-date source.
 
 This land-cover picture should be read alongside soil_data.py's drainage
 data, not on its own: a bare patch over a poorly-drained soil map unit and a
@@ -49,7 +57,8 @@ NIR_BAND = "B08"
 # NDVI thresholds for the coarse land-cover buckets. Standard, widely-cited
 # ranges for this kind of quick-look classification — not tuned per-site.
 # Anything below NDVI_WATER_MAX reads as open water; the rest is bucketed
-# from bare ground up through dense canopy.
+# from bare ground up through high-vigor vegetation (which, per the module
+# docstring, could be thick pasture just as easily as tree canopy).
 NDVI_WATER_MAX = 0.0
 NDVI_BARE_MAX = 0.2
 NDVI_LOW_VEG_MAX = 0.4
@@ -265,7 +274,8 @@ def summarize_imagery(summary: Optional[dict]) -> str:
         f"Land cover breakdown:\n"
         f"  Bare/degraded soil: {summary['pct_bare_or_degraded_soil']}%\n"
         f"  Low vegetation (pasture/grass): {summary['pct_low_vegetation']}%\n"
-        f"  Dense vegetation (tree canopy/forest): {summary['pct_dense_vegetation']}%\n"
+        f"  High vigor vegetation (dense pasture, hayfield, or tree canopy — "
+        f"NDVI cannot distinguish these): {summary['pct_dense_vegetation']}%\n"
         f"  Open water: {summary['pct_open_water']}%\n"
         f"Average NDVI: {summary['avg_ndvi']} (range: {summary['ndvi_min']} to {summary['ndvi_max']})"
     )

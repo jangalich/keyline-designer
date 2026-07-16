@@ -32,8 +32,8 @@ soil fertility, and finally aesthetics.
 You will be given real climate and geospatial data for a specific property: historical
 climate data (prevailing wind, rainfall, temperature), soil survey data, an elevation
 grid, nearby surface water features, and a satellite-derived land cover snapshot
-(NDVI-based: percent bare/degraded ground, low vegetation, dense vegetation, and open
-water). Your job is to:
+(NDVI-based: percent bare/degraded ground, low vegetation, high-vigor vegetation, and
+open water). Your job is to:
 
 1. Summarize what the data reveals about this property's climate, landform, water, and
    soil characteristics — in plain, direct language a landowner (not a GIS professional)
@@ -68,6 +68,16 @@ soil data to narrow down which explanation fits, and flag it as a hypothesis wor
 walking the ground to confirm, not a certainty. Also note how current the scene is
 (days since capture) — a reading from many months ago is a weaker basis for
 conclusions than a recent one, especially outside the growing season.
+
+Critically, the "high vigor vegetation" bucket in this data is an NDVI reading only —
+NDVI measures photosynthetic activity, not vegetation type or height, and cannot tell
+a lush hayfield or thick pasture apart from mature tree canopy. Do NOT assert or imply
+that this bucket represents forest, woodland, or tree cover — a property that is
+entirely open, actively-grazed or hayed farmland can and does score high in this
+bucket during peak growing season. If the report needs to say anything about the
+presence of woody/forest cover specifically, note explicitly that this dataset can't
+establish that, and that ground-truthing (a site visit) or higher-resolution/multi-
+season imagery would be needed to distinguish vigorous open pasture from tree canopy.
 
 Write in clear, direct prose. Use section headers. Avoid hedging on every sentence,
 but do flag genuine uncertainty where the data is thin or ambiguous."""
@@ -155,7 +165,8 @@ def _format_imagery_summary(imagery: Optional[dict]) -> str:
         f"cloud cover: {imagery['cloud_cover_pct']}%\n"
         f"Bare/degraded soil: {imagery['pct_bare_or_degraded_soil']}%\n"
         f"Low vegetation (pasture/grass): {imagery['pct_low_vegetation']}%\n"
-        f"Dense vegetation (tree canopy/forest): {imagery['pct_dense_vegetation']}%\n"
+        f"High vigor vegetation (dense pasture, hayfield, or tree canopy — "
+        f"NDVI cannot distinguish these): {imagery['pct_dense_vegetation']}%\n"
         f"Open water: {imagery['pct_open_water']}%\n"
         f"Average NDVI: {imagery['avg_ndvi']} (range: {imagery['ndvi_min']} to {imagery['ndvi_max']})"
     )
