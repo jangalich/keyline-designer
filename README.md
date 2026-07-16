@@ -60,6 +60,13 @@ tool (built with Leaflet).
 - Imagery/land cover data as an additional layer (NAIP/Sentinel-2)
 - Uploaded soil test result parsing (PDF/photo → structured data →
   incorporated into the report, alongside SSURGO data)
+- Live address autocomplete — tried using Photon (free, OSM-based), but
+  its coverage is thin for rural addresses specifically, which is most
+  of this tool's actual target audience. Reverted to a simple "type
+  full address, hit Enter" search using the Census geocoder, which is
+  reliable for rural addresses. Worth revisiting with a paid service
+  (e.g. Mapbox, better rural coverage) during a future polish pass if
+  live suggestions turn out to be worth the added cost/complexity.
 
 **Future / potential premium tier:**
 - Real LiDAR-based keypoint detection — downloading actual DEM raster

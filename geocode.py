@@ -4,6 +4,14 @@ geocode.py
 Converts a street address into latitude/longitude coordinates using the
 US Census Bureau's free Geocoding API. No API key required.
 
+Note: an earlier version of this file also had a live-autocomplete
+suggestions function using Photon (OpenStreetMap-based). Removed for now —
+Photon's coverage is thin for rural addresses specifically, which is most
+of this tool's actual target audience (farmland). Worth revisiting with a
+paid service (e.g. Mapbox, which has better rural coverage) during a
+future polish pass, if live suggestions turn out to matter enough to
+justify that cost/complexity.
+
 Docs: https://geocoding.geo.census.gov/geocoder/Geocoding_Services_API.html
 """
 
