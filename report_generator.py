@@ -1,8 +1,9 @@
 """
 report_generator.py
 
-Takes the output of soil_data.py, elevation_data.py, and hydrology_data.py
-and generates a narrative Scale of Permanence report using the Claude API.
+Takes the output of soil_data.py, elevation_data.py, hydrology_data.py,
+climate_data.py, and imagery_data.py and generates a narrative Scale of
+Permanence report using the Claude API.
 
 This is where the "AI" part of the tool actually earns its keep — not by
 inventing a design out of nothing, but by reasoning across multiple real
@@ -30,7 +31,9 @@ soil fertility, and finally aesthetics.
 
 You will be given real climate and geospatial data for a specific property: historical
 climate data (prevailing wind, rainfall, temperature), soil survey data, an elevation
-grid, and nearby surface water features. Your job is to:
+grid, nearby surface water features, and a satellite-derived land cover snapshot
+(NDVI-based: percent bare/degraded ground, low vegetation, high-vigor vegetation, and
+open water). Your job is to:
 
 1. Summarize what the data reveals about this property's climate, landform, water, and
    soil characteristics — in plain, direct language a landowner (not a GIS professional)
@@ -52,6 +55,29 @@ design-relevant and should shape your recommendations directly. Temperature data
 useful context (mention it briefly) but is more relevant to future crop/species
 selection than to the land design decisions covered here — don't over-invest in
 reasoning about it.
+
+Note on imagery/land cover data specifically: NDVI-based land cover findings are a
+snapshot from a single satellite pass and must always be cross-referenced against the
+SSURGO soil drainage data rather than read on their own — the same "bare ground"
+reading means very different things depending on what's underneath it. Bare or
+degraded patches sitting on poorly-drained soil map units suggest seasonal
+waterlogging, compaction, or ponding that's suppressing growth; the same bare
+patches over well-drained soil more likely point to erosion, overgrazing, or simply
+disturbed/exposed subsoil. Don't diagnose a cause from the imagery alone — use the
+soil data to narrow down which explanation fits, and flag it as a hypothesis worth
+walking the ground to confirm, not a certainty. Also note how current the scene is
+(days since capture) — a reading from many months ago is a weaker basis for
+conclusions than a recent one, especially outside the growing season.
+
+Critically, the "high vigor vegetation" bucket in this data is an NDVI reading only —
+NDVI measures photosynthetic activity, not vegetation type or height, and cannot tell
+a lush hayfield or thick pasture apart from mature tree canopy. Do NOT assert or imply
+that this bucket represents forest, woodland, or tree cover — a property that is
+entirely open, actively-grazed or hayed farmland can and does score high in this
+bucket during peak growing season. If the report needs to say anything about the
+presence of woody/forest cover specifically, note explicitly that this dataset can't
+establish that, and that ground-truthing (a site visit) or higher-resolution/multi-
+season imagery would be needed to distinguish vigorous open pasture from tree canopy.
 
 Write in clear, direct prose. Use section headers. Avoid hedging on every sentence,
 but do flag genuine uncertainty where the data is thin or ambiguous."""
@@ -126,19 +152,42 @@ def _format_climate_summary(climate: Optional[dict]) -> str:
     )
 
 
+def _format_imagery_summary(imagery: Optional[dict]) -> str:
+    if not imagery:
+        return (
+            "No recent low-cloud satellite imagery available for this "
+            "property (Planetary Computer had no qualifying Sentinel-2 "
+            "scene within the lookback window)."
+        )
+
+    return (
+        f"Scene date: {imagery['scene_date']} ({imagery['days_since_scene']} days ago), "
+        f"cloud cover: {imagery['cloud_cover_pct']}%\n"
+        f"Bare/degraded soil: {imagery['pct_bare_or_degraded_soil']}%\n"
+        f"Low vegetation (pasture/grass): {imagery['pct_low_vegetation']}%\n"
+        f"High vigor vegetation (dense pasture, hayfield, or tree canopy — "
+        f"NDVI cannot distinguish these): {imagery['pct_dense_vegetation']}%\n"
+        f"Open water: {imagery['pct_open_water']}%\n"
+        f"Average NDVI: {imagery['avg_ndvi']} (range: {imagery['ndvi_min']} to {imagery['ndvi_max']})"
+    )
+
+
 def generate_scale_of_permanence_report(
     soil_components: list[dict],
     elevation_grid: list[dict],
     water_features: dict,
     climate_summary: Optional[dict] = None,
+    imagery_summary: Optional[dict] = None,
 ) -> str:
     """
     Given the outputs of the data-fetching modules, generates a narrative
     Scale of Permanence report via the Claude API. climate_summary (from
-    climate_data.py) is optional so existing callers built before climate
-    data existed don't break — but including it produces a meaningfully
-    better report, since climate is literally the first item in the Scale
-    of Permanence framework.
+    climate_data.py) and imagery_summary (from imagery_data.py) are optional
+    so existing callers built before those layers existed don't break — but
+    including them produces a meaningfully better report, since climate is
+    literally the first item in the Scale of Permanence framework and
+    imagery gives Claude a current land-cover cross-check against the soil
+    data.
     """
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
@@ -159,7 +208,10 @@ ELEVATION DATA:
 {_format_elevation_summary(elevation_grid)}
 
 WATER FEATURES:
-{_format_water_summary(water_features)}"""
+{_format_water_summary(water_features)}
+
+SATELLITE IMAGERY / LAND COVER (NDVI-derived):
+{_format_imagery_summary(imagery_summary)}"""
 
     message = client.messages.create(
         model=MODEL,
@@ -237,12 +289,28 @@ if __name__ == "__main__":
         "years_analyzed": 10,
     }
 
+    # Same reasoning as test_climate above — illustrative placeholder
+    # imagery values for this standalone test, not real fetched data.
+    test_imagery = {
+        "scene_date": "2026-05-14",
+        "days_since_scene": 63,
+        "cloud_cover_pct": 4.2,
+        "pct_bare_or_degraded_soil": 12.3,
+        "pct_low_vegetation": 45.6,
+        "pct_dense_vegetation": 40.1,
+        "pct_open_water": 2.0,
+        "avg_ndvi": 0.35,
+        "ndvi_min": -0.1,
+        "ndvi_max": 0.82,
+        "valid_pixel_count": 10234,
+    }
+
     print("Generating Scale of Permanence report...\n")
     print("-" * 60)
 
     try:
         report = generate_scale_of_permanence_report(
-            test_soil, test_elevation, test_water, test_climate
+            test_soil, test_elevation, test_water, test_climate, test_imagery
         )
         print(report)
     except RuntimeError as e:
