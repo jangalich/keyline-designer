@@ -7,17 +7,30 @@ report using the Claude API.
 
 ## What's built and working
 
+- `feature_schema.py` — the shared GeoJSON FeatureCollection data contract
+  every vector-data layer wraps its output in: `make_feature()`,
+  `make_feature_collection()`, and `validate_feature_collection()`. Every
+  feature requires a `properties.confidence` and a non-empty, plain-language
+  `properties.confidence_notes` — no layer gets to skip stating its own data
+  quality caveats. `hydrology_data.py` and `soil_data.py` are converted to
+  it today (see `get_water_features_geojson()` and `get_soil_data_as_geojson()`
+  respectively); other layers convert to it in later passes. See
+  `test_feature_schema.py` for an offline (no-network) validation example.
 - `climate_data.py` — fetches historical wind, rainfall, and temperature
   data from Open-Meteo (free, no API key). Prevailing wind and rainfall
   intensity feed directly into the report's design reasoning; temperature
   is included as reference context.
 - `soil_data.py` — fetches SSURGO soil survey data from USDA's Soil Data
   Access API, for either a single point or a full parcel boundary.
+  `get_soil_data_as_geojson()` additionally fetches each map unit's actual
+  polygon boundary and returns it as a schema-conformant FeatureCollection.
 - `elevation_data.py` — fetches elevation data from USGS 3DEP for a point
   or as a grid sampled across a boundary (used to gauge slope/relief).
 - `hydrology_data.py` — fetches nearby streams and standing water from
   USGS's National Hydrography Dataset, with a buffer zone so features
   just outside the exact drawn boundary are still caught.
+  `get_water_features_geojson()` returns the same fetch as a
+  schema-conformant FeatureCollection.
 - `report_generator.py` — combines all of the above and calls the Claude
   API to generate the narrative Scale of Permanence report.
 - `generate_full_report.py` — the full end-to-end pipeline: give it a
