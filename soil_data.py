@@ -12,7 +12,30 @@ import time
 import requests
 from typing import Optional
 
+from shapely import wkt as shapely_wkt
+from shapely.geometry import mapping as shapely_mapping
+from shapely.ops import unary_union
+
+from feature_schema import (
+    CONFIDENCE_HIGH,
+    CONFIDENCE_LOW,
+    CONFIDENCE_MEDIUM,
+    make_feature,
+    make_feature_collection,
+)
+
 SDA_ENDPOINT = "https://sdmdataaccess.sc.egov.usda.gov/Tabular/post.rest"
+
+# Applies to every SSURGO feature this module returns — a property of the
+# survey itself, not of any single map unit, so it's the same note on every
+# feature rather than computed per-feature.
+SSURGO_CONFIDENCE_NOTES = (
+    "SSURGO map unit polygon boundaries are digitized from soil surveys "
+    "conducted at roughly 1:24,000 scale and generalized to that scale — "
+    "they may not reflect field-level detail. Component percentages "
+    "describe the typical composition of a map unit as a whole, not a "
+    "guarantee of what's present at any single point within it."
+)
 
 
 def _run_sda_query(sql: str, max_retries: int = 2) -> dict:
@@ -141,6 +164,135 @@ def get_soil_data_for_polygon(wkt_polygon: str) -> list[dict]:
     return [dict(zip(result["columns"], row)) for row in result["rows"]]
 
 
+def get_soil_geometries_for_polygon(wkt_polygon: str) -> dict[str, dict]:
+    """
+    Fetches the actual map unit polygon boundaries (not just the tabular
+    attributes get_soil_data_for_polygon returns) intersecting wkt_polygon,
+    from SSURGO's spatial "mupolygon" table. Returns {mukey: geojson_geometry}.
+
+    SDA stores map unit geometry as a SQL Server geometry column
+    (mupolygongeo); .STAsText() converts it to WKT server-side, which is
+    then parsed into a GeoJSON geometry dict via shapely. A single map unit
+    is frequently made up of several disjoint polygons (the same soil type
+    appearing in separate patches across a property), so rows are grouped
+    by mukey and merged with unary_union before conversion — this can
+    return a MultiPolygon as easily as a Polygon.
+    """
+    sql = f"""
+        SELECT mukey, mupolygongeo.STAsText() AS geom_wkt
+        FROM mupolygon
+        WHERE mukey IN (
+            SELECT mukey FROM SDA_Get_Mukey_from_intersection_with_WktWgs84('{wkt_polygon}')
+        )
+    """
+
+    result = _run_sda_query(sql)
+
+    if not result["rows"]:
+        return {}
+
+    rows = [dict(zip(result["columns"], row)) for row in result["rows"]]
+
+    geometries_by_mukey: dict[str, list] = {}
+    for row in rows:
+        geometries_by_mukey.setdefault(row["mukey"], []).append(
+            shapely_wkt.loads(row["geom_wkt"])
+        )
+
+    return {
+        mukey: shapely_mapping(unary_union(geoms))
+        for mukey, geoms in geometries_by_mukey.items()
+    }
+
+
+def _component_confidence(comppct_r) -> str:
+    """
+    Maps a soil component's percent-of-map-unit (comppct_r) to a
+    confidence level: how well that component's attributes (drainage,
+    slope, etc.) actually characterize the polygon they're attached to. A
+    component making up 60% of its map unit is a much better bet for
+    "what's really there" than one making up 10%.
+    """
+    try:
+        pct = float(comppct_r)
+    except (TypeError, ValueError):
+        return CONFIDENCE_LOW
+
+    if pct >= 50:
+        return CONFIDENCE_HIGH
+    if pct >= 20:
+        return CONFIDENCE_MEDIUM
+    return CONFIDENCE_LOW
+
+
+def get_soil_data_as_geojson(wkt_polygon: str) -> dict:
+    """
+    Same soil survey fetch as get_soil_data_for_polygon, but returns the
+    result as a GeoJSON FeatureCollection following the shared schema (see
+    feature_schema.py): one Feature per map unit polygon, carrying that map
+    unit's components (soil type, drainage, slope, etc.) in properties.
+
+    A map unit commonly has multiple components sharing the same mapped
+    polygon (e.g. two co-occurring soil types), so this emits one feature
+    per map unit — not one per component — with properties.components
+    listing all of them (ordered by comppct_r, most dominant first) and
+    confidence set from the dominant component's share of the map unit.
+    """
+    components = get_soil_data_for_polygon(wkt_polygon)
+    if not components:
+        return make_feature_collection([])
+
+    geometries_by_mukey = get_soil_geometries_for_polygon(wkt_polygon)
+
+    components_by_mukey: dict[str, list[dict]] = {}
+    for comp in components:
+        components_by_mukey.setdefault(comp["mukey"], []).append(comp)
+
+    features = []
+    for mukey, comps in components_by_mukey.items():
+        geometry = geometries_by_mukey.get(mukey)
+        if geometry is None:
+            # Tabular data matched this map unit but the spatial table
+            # returned no polygon for it (a rare gap between SDA's tabular
+            # and spatial data) — skip rather than emit a shapeless feature.
+            continue
+
+        # comps is already ordered by comppct_r DESC (the SQL query sorts
+        # it), so the first entry is the dominant component.
+        dominant = comps[0]
+
+        features.append(
+            make_feature(
+                feature_id=f"ssurgo-mukey-{mukey}",
+                geometry=geometry,
+                layer="soil",
+                label=dominant.get("muname") or f"Map unit {mukey}",
+                confidence=_component_confidence(dominant.get("comppct_r")),
+                confidence_notes=SSURGO_CONFIDENCE_NOTES,
+                extra_properties={
+                    "mukey": mukey,
+                    "dominant_component": dominant.get("compname"),
+                    "drainage_class": dominant.get("drainagecl"),
+                    "slope_pct": dominant.get("slope_r"),
+                    "hydric_rating": dominant.get("hydricrating"),
+                    "components": [
+                        {
+                            "name": c.get("compname"),
+                            "pct_of_map_unit": c.get("comppct_r"),
+                            "drainage_class": c.get("drainagecl"),
+                            "slope_pct": c.get("slope_r"),
+                            "hydric_rating": c.get("hydricrating"),
+                            "tax_order": c.get("taxorder"),
+                        }
+                        for c in comps
+                    ],
+                },
+            )
+        )
+
+    return make_feature_collection(features)
+
+
 def summarize_soil_report(components: list[dict]) -> str:
     """
     Turns the raw component list into a short, plain-language summary —
@@ -176,6 +328,25 @@ if __name__ == "__main__":
     try:
         components = get_soil_data_for_point(lat, lon)
         print(summarize_soil_report(components))
+
+        property_boundary = [
+            (-79.9838154, 40.6458343),
+            (-79.9836701, 40.6428581),
+            (-79.9813665, 40.6440549),
+            (-79.9804741, 40.6445667),
+            (-79.9827466, 40.6458894),
+            (-79.9838258, 40.6458343),
+        ]
+        wkt_polygon = coordinates_to_wkt_polygon(property_boundary)
+
+        geojson = get_soil_data_as_geojson(wkt_polygon)
+        from feature_schema import validate_feature_collection
+
+        validate_feature_collection(geojson)
+        print(
+            f"\nGeoJSON FeatureCollection: {len(geojson['features'])} feature(s), "
+            "schema-valid, every feature has confidence_notes."
+        )
     except requests.exceptions.RequestException as e:
         print(f"Request failed: {e}")
         print("\nNote: this requires internet access to reach USDA's servers.")

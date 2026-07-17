@@ -16,9 +16,23 @@ import time
 import requests
 from typing import Optional
 
+from feature_schema import CONFIDENCE_MEDIUM, make_feature, make_feature_collection
+
 NHD_BASE = "https://hydro.nationalmap.gov/arcgis/rest/services/nhd/MapServer"
 FLOWLINE_LAYER = 6   # Flowline - Large Scale (streams, rivers, canals)
 WATERBODY_LAYER = 12  # Waterbody - Large Scale (ponds, lakes, reservoirs)
+
+# Applies to every NHD feature this module returns — it's a property of the
+# dataset (survey/compilation scale and update cadence), not of any single
+# stream or pond, so it's the same note on every feature rather than
+# computed per-feature.
+NHD_CONFIDENCE_NOTES = (
+    "USGS NHD stream and water body geometry is compiled at roughly "
+    "1:24,000 scale (1:100,000 in some areas). Small, seasonal, or "
+    "recently changed features may be missing, mislocated, or simplified "
+    "relative to what's actually on the ground — treat this as a starting "
+    "map for design purposes, not a survey-grade boundary."
+)
 
 
 def _bounding_box(
@@ -160,6 +174,60 @@ def get_water_features_for_boundary(
     return {"streams": streams, "water_bodies": water_bodies}
 
 
+def _nhd_feature_to_schema(raw_feature: dict, sublayer: str, default_label: str) -> dict:
+    """
+    Converts one raw NHD GeoJSON feature (as returned directly by
+    _query_layer, straight from USGS) into a schema-conformant Feature —
+    see feature_schema.py. NHD geometry is already GeoJSON at the source,
+    so this is a field-mapping/wrapping step, not a geometry transform.
+    """
+    props = raw_feature.get("properties") or {}
+
+    permanent_id = props.get("permanent_identifier") or props.get("objectid")
+    feature_id = f"nhd-{sublayer}-{permanent_id}"
+
+    return make_feature(
+        feature_id=feature_id,
+        geometry=raw_feature["geometry"],
+        layer=f"hydrology-{sublayer}",
+        label=props.get("gnis_name") or default_label,
+        confidence=CONFIDENCE_MEDIUM,
+        confidence_notes=NHD_CONFIDENCE_NOTES,
+        extra_properties={
+            "gnis_id": props.get("gnis_id"),
+            "feature_code": props.get("fcode"),
+            "reach_code": props.get("reachcode"),
+        },
+    )
+
+
+def get_water_features_geojson(
+    boundary_coordinates: list[tuple[float, float]], buffer_meters: float = 150
+) -> dict:
+    """
+    Same fetch as get_water_features_for_boundary, but returns the result
+    as a single GeoJSON FeatureCollection following the shared schema (see
+    feature_schema.py) instead of the {'streams': [...], 'water_bodies':
+    [...]} shape that function returns. Streams and water bodies are both
+    included, distinguished via properties.layer
+    ("hydrology-streams" / "hydrology-water_bodies").
+    """
+    bbox = _bounding_box(boundary_coordinates, buffer_meters=buffer_meters)
+
+    stream_features = _query_layer(FLOWLINE_LAYER, bbox)
+    waterbody_features = _query_layer(WATERBODY_LAYER, bbox)
+
+    features = [
+        _nhd_feature_to_schema(f, "streams", "Unnamed stream")
+        for f in stream_features
+    ] + [
+        _nhd_feature_to_schema(f, "water_bodies", "Unnamed water body")
+        for f in waterbody_features
+    ]
+
+    return make_feature_collection(features)
+
+
 def summarize_water_features(features: dict) -> str:
     """Plain-language summary of what water features were found nearby."""
     streams = features["streams"]
@@ -205,5 +273,14 @@ if __name__ == "__main__":
     try:
         features = get_water_features_for_boundary(property_boundary)
         print(summarize_water_features(features))
+
+        geojson = get_water_features_geojson(property_boundary)
+        from feature_schema import validate_feature_collection
+
+        validate_feature_collection(geojson)
+        print(
+            f"\nGeoJSON FeatureCollection: {len(geojson['features'])} feature(s), "
+            "schema-valid, every feature has confidence_notes."
+        )
     except requests.exceptions.RequestException as e:
         print(f"Request failed: {e}")
