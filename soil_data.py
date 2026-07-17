@@ -164,26 +164,62 @@ def get_soil_data_for_polygon(wkt_polygon: str) -> list[dict]:
     return [dict(zip(result["columns"], row)) for row in result["rows"]]
 
 
+def _polygonal_parts(geom):
+    """
+    STIntersection() against a mapunit polygon can, in edge cases (the
+    input boundary touching a map unit polygon only along a shared edge or
+    at a single vertex), return a GeometryCollection mixing stray points or
+    lines in with the actual polygon area. Only the Polygon/MultiPolygon
+    parts represent real map unit area; this drops everything else and
+    returns None if nothing polygonal survives.
+    """
+    if geom.is_empty:
+        return None
+    if geom.geom_type in ("Polygon", "MultiPolygon"):
+        return geom
+    if geom.geom_type == "GeometryCollection":
+        polys = [g for g in geom.geoms if g.geom_type in ("Polygon", "MultiPolygon")]
+        return unary_union(polys) if polys else None
+    return None
+
+
 def get_soil_geometries_for_polygon(wkt_polygon: str) -> dict[str, dict]:
     """
-    Fetches the actual map unit polygon boundaries (not just the tabular
-    attributes get_soil_data_for_polygon returns) intersecting wkt_polygon,
-    from SSURGO's spatial "mupolygon" table. Returns {mukey: geojson_geometry}.
+    Fetches map unit polygon geometry (not just the tabular attributes
+    get_soil_data_for_polygon returns) for the portion of SSURGO's spatial
+    "mupolygon" table that actually overlaps wkt_polygon, from USDA's
+    spatial "mupolygon" table. Returns {mukey: geojson_geometry}.
 
-    SDA stores map unit geometry as a SQL Server geometry column
-    (mupolygongeo); .STAsText() converts it to WKT server-side, which is
-    then parsed into a GeoJSON geometry dict via shapely. A single map unit
-    is frequently made up of several disjoint polygons (the same soil type
-    appearing in separate patches across a property), so rows are grouped
-    by mukey and merged with unary_union before conversion — this can
-    return a MultiPolygon as easily as a Polygon.
+    mukey identifies a soil map unit *type* (e.g. "Rayne silt loam, 8 to 15
+    percent slopes"), and the same type commonly recurs as many separate,
+    physically scattered polygons across the entire soil survey area — not
+    just the one(s) overlapping this specific parcel. Filtering only on
+    "mukey IN (mukeys that intersect wkt_polygon)" — as an earlier version
+    of this function did — matches on the map unit *type*, so it pulls in
+    every county-wide occurrence of each matched mukey, not just the
+    nearby ones. This queries mupolygon's own geometry column directly
+    with STIntersects (a real per-polygon-row spatial filter) and clips
+    each matching row to wkt_polygon with STIntersection, so both the
+    filter and the returned geometry are constrained to the input
+    boundary itself.
+
+    SDA stores map unit geometry as a SQL Server "geometry" column
+    (mupolygongeo) in WGS84 lon/lat; geometry::STGeomFromText(..., 4326)
+    parses the input WKT into that same type for the STIntersects/
+    STIntersection comparison, and .STAsText() converts the (now-clipped)
+    result back to WKT for transport, which is then parsed into a GeoJSON
+    geometry dict via shapely. A single map unit can still be made up of
+    several disjoint clipped fragments within the boundary (e.g. the same
+    soil type appearing in two separate patches of the same small
+    parcel), so rows are grouped by mukey and merged with unary_union
+    before conversion — this can return a MultiPolygon as easily as a
+    Polygon.
     """
     sql = f"""
-        SELECT mukey, mupolygongeo.STAsText() AS geom_wkt
+        SELECT mukey,
+               mupolygongeo.STIntersection(geometry::STGeomFromText('{wkt_polygon}', 4326)).STAsText() AS geom_wkt
         FROM mupolygon
-        WHERE mukey IN (
-            SELECT mukey FROM SDA_Get_Mukey_from_intersection_with_WktWgs84('{wkt_polygon}')
-        )
+        WHERE mupolygongeo.STIntersects(geometry::STGeomFromText('{wkt_polygon}', 4326)) = 1
     """
 
     result = _run_sda_query(sql)
@@ -195,9 +231,9 @@ def get_soil_geometries_for_polygon(wkt_polygon: str) -> dict[str, dict]:
 
     geometries_by_mukey: dict[str, list] = {}
     for row in rows:
-        geometries_by_mukey.setdefault(row["mukey"], []).append(
-            shapely_wkt.loads(row["geom_wkt"])
-        )
+        geom = _polygonal_parts(shapely_wkt.loads(row["geom_wkt"]))
+        if geom is not None:
+            geometries_by_mukey.setdefault(row["mukey"], []).append(geom)
 
     return {
         mukey: shapely_mapping(unary_union(geoms))
