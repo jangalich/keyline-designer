@@ -5,19 +5,26 @@ Offline (no-network, mocked SDA response) checks for soil_data.py's
 erosion-factor and hydric helpers — the SSURGO-based erosion-prone-soil
 and floodplain/hydric-soil exclusion signals road_corridors.py uses.
 
-Also a regression test for a real bug: get_erosion_factor_for_polygon()
-originally selected c.kwfact directly off the component table, but
-kwfact is a chorizon-table field (per-horizon, not per-component) — SDA
-rejected that query outright with an HTTP 400 every single time, live
-against a real property. Because the mocked _run_sda_query below doesn't
-validate against a real schema, a test that only checks the *parsed
-result* shape (as this file originally did) would have kept passing
-straight through that bug — mocking away the network call also mocks
-away SDA's own schema validation. So this file also asserts the actual
-SQL text takes the right shape (joins chorizon on cokey, filters to the
-representative horizon), the same kind of "check the query, not just the
-result" regression guard test_soil_geometry_scope.py uses for its own
-bug.
+Also a regression test for a real bug — two rounds of it. Round 1:
+get_erosion_factor_for_polygon() originally selected c.kwfact directly
+off the component table, but kwfact is a chorizon-table field (per-
+horizon, not per-component). Round 2: the fix for that joined chorizon
+on cokey and filtered to "ch.rvindicator = 'Yes'", assuming the same
+representative-row convention used elsewhere in SSURGO applied to
+chorizon itself — it doesn't; rvindicator only exists on chorizon's
+child tables (chtexturegrp, chstructgrp, etc.), not chorizon. Both
+versions got an HTTP 400 from SDA every single time, live against a real
+property. Because the mocked _run_sda_query below doesn't validate
+against a real schema, a test that only checks the *parsed result* shape
+(as this file originally did) would have kept passing straight through
+both bugs — mocking away the network call also mocks away SDA's own
+schema validation. So this file asserts the actual SQL text takes the
+correct, documented shape (chorizon joined on cokey, representative
+horizon selected by shallowest depth via a correlated MIN(hzdept_r)
+subquery, per a real published SDA example query) AND explicitly asserts
+neither previous wrong guess (c.kwfact, ch.rvindicator) is present — the
+same kind of "check the query, not just the result" regression guard
+test_soil_geometry_scope.py uses for its own bug.
 """
 
 from unittest.mock import patch
@@ -59,14 +66,22 @@ sql_sent = captured["sql"]
 assert "kwfact" in sql_sent
 assert "chorizon" in sql_sent, "kwfact lives on chorizon, not component -- the query must join it in"
 assert "cokey" in sql_sent, "the chorizon join must be keyed on cokey"
-assert "rvindicator" in sql_sent, (
-    "must filter to the representative horizon (rvindicator = 'Yes'), not sum/average across all horizons"
+assert "hzdept_r" in sql_sent and "MIN(hzdept_r)" in sql_sent, (
+    "must select the representative horizon by shallowest depth (a correlated MIN(hzdept_r) "
+    "subquery) -- the documented SDA pattern; chorizon has no representative-row flag column"
+)
+assert "hzname" in sql_sent, (
+    "should exclude organic surface horizons (hzname NOT LIKE 'O%') in favor of the first "
+    "mineral horizon -- see get_erosion_factor_for_polygon()'s docstring for why"
 )
 assert "c.kwfact" not in sql_sent, (
-    "regression guard: c.kwfact (component.kwfact) doesn't exist in SSURGO's schema -- "
-    "SDA rejects it with an HTTP 400, this is the exact bug being fixed"
+    "regression guard (round 1): c.kwfact (component.kwfact) doesn't exist in SSURGO's schema"
 )
-print("SQL correctly joins chorizon on cokey and filters to the representative horizon (not component.kwfact).")
+assert "rvindicator" not in sql_sent, (
+    "regression guard (round 2): rvindicator doesn't exist on chorizon itself, only on "
+    "chorizon's child tables (chtexturegrp, chstructgrp, etc.) -- this was the second wrong guess"
+)
+print("SQL correctly selects the shallowest mineral horizon per component via chorizon (not component.kwfact or chorizon.rvindicator).")
 
 assert len(erosion_data) == 3, f"expected one dominant-component row per mukey (3 mukeys), got {len(erosion_data)}"
 

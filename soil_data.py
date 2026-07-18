@@ -271,14 +271,31 @@ def get_erosion_factor_for_polygon(wkt_polygon: str) -> list[dict]:
 
     kwfact lives on chorizon (per-horizon), not component — a component
     can have several horizons at different depths, each with its own
-    K-factor, so this joins through chorizon on cokey and filters to
-    rvindicator = 'Yes' (SSURGO's own flag for "the representative horizon
-    for this component," standard convention for collapsing horizons down
-    to a single per-component value). Querying c.kwfact directly (an
-    earlier version of this function did) isn't just wrong data — it's a
-    reference to a column that doesn't exist on component at all, and SDA
-    rejects that query outright with an HTTP 400 rather than returning
-    bad results.
+    K-factor, so this needs to pick ONE representative horizon per
+    component. A first attempt at this joined chorizon on cokey and
+    filtered to "ch.rvindicator = 'Yes'", which seemed like the standard
+    SSURGO "pick the representative row" convention — but that was a
+    second wrong guess: rvindicator only exists on chorizon's own CHILD
+    tables (chtexturegrp, chstructgrp, chunified, etc. — tables that
+    legitimately have multiple rows per horizon and need a flag to mark
+    which one is representative). chorizon itself has no such flag,
+    because its rows are already distinct, real horizons at distinct
+    depths, not duplicates needing disambiguation.
+
+    The correct, documented approach (confirmed against a real published
+    SDA example query, "Be Careful How You Query!") is to pick the
+    shallowest horizon per component by depth (MIN(hzdept_r), top depth),
+    via a correlated subquery — there is no shortcut flag column for this
+    the way rvindicator is for chorizon's child tables. This also
+    excludes organic surface horizons (hzname LIKE 'O%' — leaf litter/
+    duff) in favor of the first mineral horizon: K-factor as an erosion
+    measure is meaningful for mineral soil, and a thin organic litter
+    layer is exactly what gets stripped away first by road cut/fill, not
+    what's actually load-bearing or exposed to erosion afterward. Querying
+    c.kwfact directly, or ch.rvindicator (both tried before this), aren't
+    just wrong data — they're references to columns that don't exist on
+    those tables at all, and SDA rejects the query outright with an HTTP
+    400 rather than returning bad results.
 
     Returns a list of {'mukey', 'muname', 'compname', 'comppct_r', 'kwfact'} dicts.
     """
@@ -287,8 +304,11 @@ def get_erosion_factor_for_polygon(wkt_polygon: str) -> list[dict]:
         FROM mapunit mu
         INNER JOIN component c ON mu.mukey = c.mukey
         INNER JOIN chorizon ch ON c.cokey = ch.cokey
-        WHERE ch.rvindicator = 'Yes'
-        AND mu.mukey IN (
+            AND ch.hzdept_r = (
+                SELECT MIN(hzdept_r) FROM chorizon
+                WHERE hzname NOT LIKE 'O%' AND chorizon.cokey = ch.cokey
+            )
+        WHERE mu.mukey IN (
             SELECT mukey FROM SDA_Get_Mukey_from_intersection_with_WktWgs84('{wkt_polygon}')
         )
         ORDER BY c.comppct_r DESC
