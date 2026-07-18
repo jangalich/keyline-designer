@@ -95,28 +95,48 @@ def _boundary_to_polygon(boundary_coordinates: list) -> Polygon:
     return Polygon(coords)
 
 
-def _retry(operation, max_retries: int = 2):
+# Planetary Computer's STAC API and blob storage have been observed
+# failing/timing out at a much higher rate (up to ~70% per attempt during
+# periods of load) than the "usually fast, occasionally slow" case the
+# 2-retries/fixed-2s-pause pattern elsewhere in this pipeline (soil_data.py,
+# hydrology_data.py) was built for. At a 70% per-attempt failure rate, that
+# pattern's 3 total attempts still fails end-to-end about 1 time in 3
+# (0.7^3 ≈ 34%). 6 attempts (5 retries) brings that down to roughly 1 in 8
+# (0.7^6 ≈ 12%), and exponential backoff between attempts (instead of a
+# fixed 2s pause) gives transient load/connectivity issues more room to
+# clear on later attempts instead of hammering the same failure right away.
+DEFAULT_MAX_RETRIES = 5
+_MAX_TIMEOUT_SECONDS = 90
+_MAX_BACKOFF_SECONDS = 30
+
+
+def _retry(operation, max_retries: int = DEFAULT_MAX_RETRIES):
     """
     Calls operation(timeout), giving later attempts progressively more
-    time. Same reasoning as the retry logic elsewhere in this pipeline
-    (soil_data.py, hydrology_data.py, imagery_data.py): free public
-    services are usually fast but occasionally slow under load.
+    time (ramping up, capped at _MAX_TIMEOUT_SECONDS so a single attempt
+    can't balloon indefinitely) and backing off exponentially between
+    attempts (2s, 4s, 8s, ... capped at _MAX_BACKOFF_SECONDS) rather than
+    retrying immediately or waiting a fixed pause. See the module-level
+    comment above DEFAULT_MAX_RETRIES for why this needed to be more
+    aggressive than the fixed-2-retries pattern used elsewhere in this
+    pipeline.
     """
     last_error = None
 
     for attempt in range(max_retries + 1):
-        timeout = 30 + (attempt * 30)
+        timeout = min(30 + (attempt * 15), _MAX_TIMEOUT_SECONDS)
         try:
             return operation(timeout)
         except Exception as e:
             last_error = e
             if attempt < max_retries:
-                time.sleep(2)
+                backoff = min(2 ** (attempt + 1), _MAX_BACKOFF_SECONDS)
+                time.sleep(backoff)
                 continue
             raise last_error
 
 
-def _search_latest_nlcd_item(polygon: Polygon, max_retries: int = 2):
+def _search_latest_nlcd_item(polygon: Polygon, max_retries: int = DEFAULT_MAX_RETRIES):
     """
     Searches Planetary Computer's "nlcd" STAC collection for the item
     (Planetary Computer publishes one per survey year/region) intersecting
