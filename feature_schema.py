@@ -28,13 +28,20 @@ actually applies. A design tool built on public data is only as trustworthy
 as the caveats attached to it, so this is enforced here rather than left as
 a convention individual layers might skip.
 
-This module only defines and validates the shape — it doesn't fetch or
-vectorize geometry itself. Each layer module (hydrology_data.py,
-soil_data.py, ...) is responsible for producing a GeoJSON geometry dict in
-WGS84 (EPSG:4326) and calling make_feature() to wrap it.
+This module only defines and validates the shape — it doesn't fetch
+geometry itself. Each layer module (hydrology_data.py, soil_data.py,
+nlcd_data.py, ...) is responsible for producing a GeoJSON geometry dict in
+WGS84 (EPSG:4326) and calling make_feature() to wrap it. polygonal_parts()
+is a small shared helper for layers that clip source geometry to a
+boundary (soil_data.py's SQL-side STIntersection, nlcd_data.py's raster
+polygonize-then-clip) — that kind of clip can produce a degenerate
+GeometryCollection when the boundary only grazes a polygon's edge, and
+every clipping layer needs the same fix for it.
 """
 
 from typing import Any, Optional
+
+from shapely.ops import unary_union
 
 CONFIDENCE_HIGH = "high"
 CONFIDENCE_MEDIUM = "medium"
@@ -53,6 +60,26 @@ VALID_GEOMETRY_TYPES = {
     "Polygon",
     "MultiPolygon",
 }
+
+
+def polygonal_parts(geom):
+    """
+    Clipping a source geometry to a boundary (SQL Server's STIntersection,
+    or a raster polygonize-then-intersect) can, in edge cases where the
+    boundary only touches the source shape along a shared edge or at a
+    single vertex, return a GeometryCollection mixing stray points or lines
+    in with the actual polygon area. Only the Polygon/MultiPolygon parts
+    represent real area; this drops everything else and returns None if
+    nothing polygonal survives (or the geometry was already empty).
+    """
+    if geom.is_empty:
+        return None
+    if geom.geom_type in ("Polygon", "MultiPolygon"):
+        return geom
+    if geom.geom_type == "GeometryCollection":
+        polys = [g for g in geom.geoms if g.geom_type in ("Polygon", "MultiPolygon")]
+        return unary_union(polys) if polys else None
+    return None
 
 
 def make_feature(

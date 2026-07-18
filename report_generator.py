@@ -2,8 +2,8 @@
 report_generator.py
 
 Takes the output of soil_data.py, elevation_data.py, hydrology_data.py,
-climate_data.py, and imagery_data.py and generates a narrative Scale of
-Permanence report using the Claude API.
+climate_data.py, nlcd_data.py, and imagery_data.py and generates a
+narrative Scale of Permanence report using the Claude API.
 
 This is where the "AI" part of the tool actually earns its keep — not by
 inventing a design out of nothing, but by reasoning across multiple real
@@ -31,9 +31,12 @@ each step constrains the ones that follow it.
 
 You will be given real climate and geospatial data for a specific property: historical
 climate data (prevailing wind, rainfall, temperature), soil survey data, an elevation
-grid, nearby surface water features, and a satellite-derived land cover snapshot
-(NDVI-based: percent bare/degraded ground, low vegetation, high-vigor vegetation, and
-open water).
+grid, nearby surface water features, USGS NLCD land-cover classification (the
+authoritative source for land-cover TYPE — forest vs. pasture/hay/grassland vs. other),
+and a satellite-derived NDVI vigor snapshot (percent bare/degraded ground, low-vigor
+vegetation, high-vigor vegetation, and open water) that is a health signal only, read
+within whatever type NLCD has already classified — never a basis for determining type
+itself.
 
 REASONING SEQUENCE — follow this exact order, do not skip ahead or reorder it:
 
@@ -71,10 +74,14 @@ REASONING SEQUENCE — follow this exact order, do not skip ahead or reorder it:
 5. TREES (windbreaks, riparian buffers). Use Climate's prevailing wind (step 1) for
    windbreak orientation and Water Supply's stream/pond locations (step 3) for riparian
    buffer needs. Check placement against the production zones (step 2) and road
-   corridors (step 4) so tree lines reinforce rather than block them. Be explicit that
-   the NDVI "high vigor vegetation" reading cannot confirm existing tree canopy (see the
-   imagery note below) — treat any tree-placement recommendation here as a new proposal,
-   not a validation of vegetation already on site.
+   corridors (step 4) so tree lines reinforce rather than block them. Use NLCD's forest
+   classification (Deciduous/Evergreen/Mixed Forest) to state directly where tree canopy
+   already exists on the property versus where it doesn't — a recommendation inside an
+   NLCD-classified forest area should say so explicitly (existing cover, not a new
+   proposal), while the same recommendation inside an NLCD-classified pasture/hay/
+   grassland area is a genuinely new planting proposal. Use NDVI only to note how
+   vigorous that existing or proposed cover currently looks, not to decide whether cover
+   exists.
 
 6. PERMANENT BUILDINGS. Recommend where structures could plausibly go, and just as
    important, rule out any zone already claimed by earlier steps: production land from
@@ -90,39 +97,45 @@ REASONING SEQUENCE — follow this exact order, do not skip ahead or reorder it:
 
 8. SOIL — reasoned about last, and treated as the most changeable and most improvable
    factor, not as a reason to exclude land already zoned in steps 2-7. Bring in the
-   SSURGO soil data here, cross-referenced against the NDVI imagery per the imagery note
-   below. Frame the section around how soil fertility and drainage can be built and
-   managed WITHIN the zones and infrastructure already decided — cover cropping,
-   drainage work, organic matter, animal impact — rather than revisiting or vetoing
-   where production land, water, roads, trees, buildings, or fences were placed above.
+   SSURGO soil data here, cross-referenced against the NDVI vigor reading per the
+   land-cover note below. Frame the section around how soil fertility and drainage can
+   be built and managed WITHIN the zones and infrastructure already decided — cover
+   cropping, drainage work, organic matter, animal impact — rather than revisiting or
+   vetoing where production land, water, roads, trees, buildings, or fences were placed
+   above.
 
 Before each section from step 2 onward, open with a short sentence naming the specific
 constraint(s) it inherits from the prior steps, then give that section's own findings
 and recommendations. This carry-forward reasoning must be visible in the output, not
 just implicit in your internal thinking.
 
-Note on imagery/land cover data specifically: NDVI-based land cover findings are a
-snapshot from a single satellite pass and must always be cross-referenced against the
-SSURGO soil drainage data rather than read on their own — the same "bare ground"
-reading means very different things depending on what's underneath it. Bare or
-degraded patches sitting on poorly-drained soil map units suggest seasonal
-waterlogging, compaction, or ponding that's suppressing growth; the same bare
-patches over well-drained soil more likely point to erosion, overgrazing, or simply
-disturbed/exposed subsoil. Don't diagnose a cause from the imagery alone — use the
-soil data to narrow down which explanation fits, and flag it as a hypothesis worth
-walking the ground to confirm, not a certainty. Also note how current the scene is
-(days since capture) — a reading from many months ago is a weaker basis for
-conclusions than a recent one, especially outside the growing season.
+Note on land-cover data specifically: USGS NLCD is this pipeline's authoritative source
+for land-cover TYPE — state it directly and with confidence (e.g. "NLCD classifies 78%
+of this property as Pasture/Hay and 15% as Deciduous Forest"), not as a hedge. NLCD
+classifies at 30m pixel resolution from its most recent survey year; name that year, and
+note that small features narrower than about 30m (a single hedgerow, a footpath) may
+blend into a neighboring class, and that land-use changes since the survey (recent
+clearing, planting, or construction) won't be reflected yet — these are resolution and
+currency limits, not doubt about the classification method itself.
 
-Critically, the "high vigor vegetation" bucket in this data is an NDVI reading only —
-NDVI measures photosynthetic activity, not vegetation type or height, and cannot tell
-a lush hayfield or thick pasture apart from mature tree canopy. Do NOT assert or imply
-that this bucket represents forest, woodland, or tree cover — a property that is
-entirely open, actively-grazed or hayed farmland can and does score high in this
-bucket during peak growing season. If the report needs to say anything about the
-presence of woody/forest cover specifically, note explicitly that this dataset can't
-establish that, and that ground-truthing (a site visit) or higher-resolution/multi-
-season imagery would be needed to distinguish vigorous open pasture from tree canopy.
+NDVI (from Sentinel-2 imagery) has no role in determining land-cover type — use it only
+as a vigor/health signal WITHIN the type NLCD has already established for a given area
+(e.g. "this NLCD-classified pasture area reads a healthy 0.57 average NDVI for
+mid-season growth," or "this NLCD-classified forest area's NDVI is lower than expected
+for the season, worth walking to check for canopy stress"). Do not use NDVI to question,
+confirm, or second-guess what NLCD says the type is.
+
+NDVI readings are still a snapshot from a single satellite pass and should be
+cross-referenced against the SSURGO soil drainage data for the bare/degraded-ground
+finding specifically — the same "bare ground" reading means very different things
+depending on what's underneath it. Bare or degraded patches sitting on poorly-drained
+soil map units suggest seasonal waterlogging, compaction, or ponding that's suppressing
+growth; the same bare patches over well-drained soil more likely point to erosion,
+overgrazing, or simply disturbed/exposed subsoil. Don't diagnose a cause from the
+imagery alone — use the soil data to narrow down which explanation fits, and flag it as
+a hypothesis worth walking the ground to confirm, not a certainty. Also note how current
+the NDVI scene is (days since capture) — a reading from many months ago is a weaker
+basis for vigor conclusions than a recent one, especially outside the growing season.
 
 DATA HONESTY: Farm Roads, Permanent Buildings, and Subdivision Fences have no dedicated
 data source feeding them in this pipeline — they are inferred only from the climate,
@@ -208,6 +221,16 @@ def _format_climate_summary(climate: Optional[dict]) -> str:
     )
 
 
+def _format_nlcd_summary(nlcd: Optional[dict]) -> str:
+    if not nlcd:
+        return "No USGS NLCD land cover data available for this property."
+
+    lines = [f"USGS NLCD land cover ({nlcd['survey_year']} survey):"]
+    for c in nlcd["classes"]:
+        lines.append(f"  - {c['name']}: {c['pct_of_boundary']}% of boundary")
+    return "\n".join(lines)
+
+
 def _format_imagery_summary(imagery: Optional[dict]) -> str:
     if not imagery:
         return (
@@ -220,9 +243,8 @@ def _format_imagery_summary(imagery: Optional[dict]) -> str:
         f"Scene date: {imagery['scene_date']} ({imagery['days_since_scene']} days ago), "
         f"cloud cover: {imagery['cloud_cover_pct']}%\n"
         f"Bare/degraded soil: {imagery['pct_bare_or_degraded_soil']}%\n"
-        f"Low vegetation (pasture/grass): {imagery['pct_low_vegetation']}%\n"
-        f"High vigor vegetation (dense pasture, hayfield, or tree canopy — "
-        f"NDVI cannot distinguish these): {imagery['pct_dense_vegetation']}%\n"
+        f"Low vigor vegetation: {imagery['pct_low_vegetation']}%\n"
+        f"High vigor vegetation: {imagery['pct_dense_vegetation']}%\n"
         f"Open water: {imagery['pct_open_water']}%\n"
         f"Average NDVI: {imagery['avg_ndvi']} (range: {imagery['ndvi_min']} to {imagery['ndvi_max']})"
     )
@@ -234,16 +256,19 @@ def generate_scale_of_permanence_report(
     water_features: dict,
     climate_summary: Optional[dict] = None,
     imagery_summary: Optional[dict] = None,
+    nlcd_summary: Optional[dict] = None,
 ) -> str:
     """
     Given the outputs of the data-fetching modules, generates a narrative
     Scale of Permanence report via the Claude API. climate_summary (from
-    climate_data.py) and imagery_summary (from imagery_data.py) are optional
-    so existing callers built before those layers existed don't break — but
-    including them produces a meaningfully better report, since climate is
-    literally the first item in the Scale of Permanence framework and
-    imagery gives Claude a current land-cover cross-check against the soil
-    data.
+    climate_data.py), imagery_summary (from imagery_data.py), and
+    nlcd_summary (from nlcd_data.py) are all optional so existing callers
+    built before those layers existed don't break — but including them
+    produces a meaningfully better report: climate is literally the first
+    item in the Scale of Permanence framework, NLCD gives Claude an
+    authoritative land-cover type to reason about directly (instead of
+    guessing type from NDVI), and imagery's NDVI vigor reading is then a
+    genuine health cross-check against that type and against the soil data.
     """
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
@@ -266,7 +291,10 @@ ELEVATION DATA:
 WATER FEATURES:
 {_format_water_summary(water_features)}
 
-SATELLITE IMAGERY / LAND COVER (NDVI-derived):
+LAND COVER TYPE (USGS NLCD — authoritative classification):
+{_format_nlcd_summary(nlcd_summary)}
+
+VEGETATION VIGOR (Sentinel-2 NDVI — health signal only within the NLCD type above, not a basis for type):
 {_format_imagery_summary(imagery_summary)}"""
 
     message = client.messages.create(
@@ -361,12 +389,27 @@ if __name__ == "__main__":
         "valid_pixel_count": 10234,
     }
 
+    # Same reasoning as test_climate/test_imagery above — illustrative
+    # placeholder NLCD values matching the real ground-truth property this
+    # pipeline was validated against (predominantly open pasture with some
+    # tree cover, not the "dense vegetation = forest" reading NDVI alone
+    # used to imply).
+    test_nlcd = {
+        "survey_year": "2021",
+        "classes": [
+            {"code": 81, "name": "Pasture/Hay", "pct_of_boundary": 68.4},
+            {"code": 41, "name": "Deciduous Forest", "pct_of_boundary": 22.1},
+            {"code": 21, "name": "Developed, Open Space", "pct_of_boundary": 9.5},
+        ],
+        "dominant_class": "Pasture/Hay",
+    }
+
     print("Generating Scale of Permanence report...\n")
     print("-" * 60)
 
     try:
         report = generate_scale_of_permanence_report(
-            test_soil, test_elevation, test_water, test_climate, test_imagery
+            test_soil, test_elevation, test_water, test_climate, test_imagery, test_nlcd
         )
         print(report)
     except RuntimeError as e:

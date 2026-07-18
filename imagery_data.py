@@ -4,29 +4,31 @@ imagery_data.py
 Fetches recent Sentinel-2 L2A satellite imagery for a property boundary from
 Microsoft's Planetary Computer STAC catalog (free, no API key — signed access
 URLs are generated automatically by the `planetary-computer` package) and
-computes a coarse land-cover breakdown from NDVI.
+computes a coarse vegetation vigor breakdown from NDVI.
 
 This does NOT return imagery itself — the report this feeds is a text
 narrative, not a picture — it returns structured stats only: what fraction
-of the parcel is bare/degraded ground, low vegetation (pasture/grass), high
-vigor vegetation (dense pasture, hayfield, or tree canopy — NDVI alone can't
-tell these apart), or open water, plus the average NDVI and how current the
-source scene is. Classification is done with fixed NDVI threshold ranges,
-not a trained classifier — simple, fast, and explainable, which is all a
-first-pass land-cover read needs to be.
+of the parcel is bare/degraded ground, low-vigor vegetation, high-vigor
+vegetation, or open water, plus the average NDVI and how current the source
+scene is. Classification is done with fixed NDVI threshold ranges, not a
+trained classifier — simple, fast, and explainable, which is all a vigor
+snapshot needs to be.
 
-NDVI measures photosynthetic vigor, not vegetation type or height. A dense,
-well-watered hayfield in peak growing season can score just as high as
-mature forest canopy — this module has no way to tell them apart, so the
-high-vigor bucket is deliberately labeled as ambiguous rather than as
-"forest" or "tree canopy". Distinguishing them would need ground-truthing
-or a higher-resolution/multi-date source.
+NDVI measures photosynthetic vigor, not vegetation type or height — a
+dense, well-watered hayfield in peak growing season can score just as high
+as mature forest canopy, so this module has no way to tell them apart and
+doesn't try to. Land-cover TYPE (forest vs. pasture/hay/grassland vs.
+other) is nlcd_data.py's job, not this module's: it uses a pre-classified,
+federally validated dataset instead of an NDVI proxy. This module's role is
+downstream and narrower — given a type NLCD has already established for an
+area, how vigorous/healthy does that area's vegetation currently look
+(see report_generator.py, which cross-references the two).
 
-This land-cover picture should be read alongside soil_data.py's drainage
-data, not on its own: a bare patch over a poorly-drained soil map unit and a
-bare patch over a well-drained one imply very different things about the
-property (report_generator.py's system prompt tells Claude to cross-reference
-the two explicitly).
+This vigor picture should also be read alongside soil_data.py's drainage
+data: a bare patch over a poorly-drained soil map unit and a bare patch
+over a well-drained one imply very different things about the property
+(report_generator.py's system prompt tells Claude to cross-reference the
+two explicitly).
 
 Docs:
   https://planetarycomputer.microsoft.com/docs/quickstarts/reading-stac-data/
@@ -54,11 +56,11 @@ LOOKBACK_DAYS = 365
 RED_BAND = "B04"
 NIR_BAND = "B08"
 
-# NDVI thresholds for the coarse land-cover buckets. Standard, widely-cited
-# ranges for this kind of quick-look classification — not tuned per-site.
-# Anything below NDVI_WATER_MAX reads as open water; the rest is bucketed
-# from bare ground up through high-vigor vegetation (which, per the module
-# docstring, could be thick pasture just as easily as tree canopy).
+# NDVI thresholds for the coarse vigor buckets. Standard, widely-cited
+# ranges for this kind of quick-look read — not tuned per-site. Anything
+# below NDVI_WATER_MAX reads as open water; the rest is bucketed from bare
+# ground up through high vigor — a vigor gradient only, not a type claim
+# (see module docstring: nlcd_data.py handles type).
 NDVI_WATER_MAX = 0.0
 NDVI_BARE_MAX = 0.2
 NDVI_LOW_VEG_MAX = 0.4
@@ -187,7 +189,8 @@ def get_imagery_summary_for_boundary(
     hydrology_data.get_water_features_for_boundary), finds the most recent
     Sentinel-2 L2A scene with cloud cover under max_cloud_cover percent
     within the last lookback_days days, clips it to the boundary, and
-    returns a coarse NDVI-based land-cover summary:
+    returns a coarse NDVI-based vegetation vigor summary (not a land-cover
+    TYPE classification — see module docstring):
 
         {
             'scene_date': '2026-05-14',
@@ -271,11 +274,10 @@ def summarize_imagery(summary: Optional[dict]) -> str:
     return (
         f"Scene date: {summary['scene_date']} ({summary['days_since_scene']} days ago), "
         f"cloud cover: {summary['cloud_cover_pct']}%\n"
-        f"Land cover breakdown:\n"
+        f"Vegetation vigor breakdown (see NLCD for cover type):\n"
         f"  Bare/degraded soil: {summary['pct_bare_or_degraded_soil']}%\n"
-        f"  Low vegetation (pasture/grass): {summary['pct_low_vegetation']}%\n"
-        f"  High vigor vegetation (dense pasture, hayfield, or tree canopy — "
-        f"NDVI cannot distinguish these): {summary['pct_dense_vegetation']}%\n"
+        f"  Low vigor vegetation: {summary['pct_low_vegetation']}%\n"
+        f"  High vigor vegetation: {summary['pct_dense_vegetation']}%\n"
         f"  Open water: {summary['pct_open_water']}%\n"
         f"Average NDVI: {summary['avg_ndvi']} (range: {summary['ndvi_min']} to {summary['ndvi_max']})"
     )

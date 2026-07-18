@@ -2,14 +2,15 @@
 generate_full_report.py
 
 The real end-to-end pipeline: give it a property boundary once, and it
-runs soil, elevation, hydrology, climate, and imagery data fetching, then
-generates a full Scale of Permanence report — no manual copy-pasting
-between scripts.
+runs soil, elevation, hydrology, climate, NLCD land-cover, and imagery data
+fetching, then generates a full Scale of Permanence report — no manual
+copy-pasting between scripts.
 
     boundary --> soil_data (polygon)
              --> elevation_data (grid)
              --> hydrology_data
              --> climate_data
+             --> nlcd_data (polygon)
              --> imagery_data (polygon)
              --> report_generator
              --> printed report
@@ -22,6 +23,7 @@ from soil_data import get_soil_data_for_polygon, coordinates_to_wkt_polygon
 from elevation_data import get_elevation_grid
 from hydrology_data import get_water_features_for_boundary
 from climate_data import get_climate_summary_for_point
+from nlcd_data import get_nlcd_summary_for_boundary
 from imagery_data import get_imagery_summary_for_boundary
 from report_generator import generate_scale_of_permanence_report
 
@@ -40,7 +42,7 @@ def generate_full_report(boundary_coordinates: list) -> str:
     Runs the full pipeline for a given property boundary (list of
     (longitude, latitude) tuples) and returns the final narrative report.
     """
-    print("Step 1/6: Fetching climate data (prevailing wind, rainfall)...")
+    print("Step 1/7: Fetching climate data (prevailing wind, rainfall)...")
     center_lat, center_lon = _boundary_center(boundary_coordinates)
     climate_summary = get_climate_summary_for_point(center_lat, center_lon)
     print(
@@ -48,22 +50,39 @@ def generate_full_report(boundary_coordinates: list) -> str:
         f"avg annual precip: {climate_summary['avg_annual_precipitation_mm']}mm\n"
     )
 
-    print("Step 2/6: Fetching soil data for the full boundary...")
+    print("Step 2/7: Fetching soil data for the full boundary...")
     wkt_polygon = coordinates_to_wkt_polygon(boundary_coordinates)
     soil_components = get_soil_data_for_polygon(wkt_polygon)
     print(f"  Found {len(soil_components)} soil component(s).\n")
 
-    print("Step 3/6: Fetching elevation grid...")
+    print("Step 3/7: Fetching elevation grid...")
     elevation_grid = get_elevation_grid(boundary_coordinates, grid_size=6)
     print(f"  Sampled {len(elevation_grid)} elevation points.\n")
 
-    print("Step 4/6: Fetching nearby water features...")
+    print("Step 4/7: Fetching nearby water features...")
     water_features = get_water_features_for_boundary(boundary_coordinates)
     stream_count = len(water_features["streams"])
     waterbody_count = len(water_features["water_bodies"])
     print(f"  Found {stream_count} stream(s), {waterbody_count} water body/bodies.\n")
 
-    print("Step 5/6: Fetching satellite imagery (NDVI land cover)...")
+    print("Step 5/7: Fetching USGS NLCD land cover classification...")
+    try:
+        nlcd_summary = get_nlcd_summary_for_boundary(boundary_coordinates)
+    except Exception as e:
+        # NLCD is a supporting land-cover-TYPE layer, not a hard dependency
+        # for the rest of the pipeline -- a Planetary Computer outage or
+        # network hiccup shouldn't take down the whole report.
+        print(f"  NLCD fetch failed ({e}), continuing without it.\n")
+        nlcd_summary = None
+    if nlcd_summary:
+        print(
+            f"  {nlcd_summary['survey_year']} survey, dominant cover: "
+            f"{nlcd_summary['dominant_class']}\n"
+        )
+    else:
+        print("  No NLCD land cover data available for this boundary.\n")
+
+    print("Step 6/7: Fetching satellite imagery (NDVI vegetation vigor)...")
     try:
         imagery_summary = get_imagery_summary_for_boundary(boundary_coordinates)
     except Exception as e:
@@ -81,9 +100,10 @@ def generate_full_report(boundary_coordinates: list) -> str:
     else:
         print("  No recent low-cloud imagery available for this boundary.\n")
 
-    print("Step 6/6: Generating Scale of Permanence report via Claude...\n")
+    print("Step 7/7: Generating Scale of Permanence report via Claude...\n")
     report = generate_scale_of_permanence_report(
-        soil_components, elevation_grid, water_features, climate_summary, imagery_summary
+        soil_components, elevation_grid, water_features, climate_summary,
+        imagery_summary, nlcd_summary,
     )
 
     return report

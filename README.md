@@ -1,9 +1,9 @@
 # Keyline Designer — Backend
 
 Backend services for the regenerative farm design tool. Fetches public
-climate and geospatial data (climate, soil, elevation, hydrology) for a
-given property boundary and generates a narrative Scale of Permanence
-report using the Claude API.
+climate and geospatial data (climate, soil, elevation, hydrology, land
+cover) for a given property boundary and generates a narrative Scale of
+Permanence report using the Claude API.
 
 ## What's built and working
 
@@ -12,9 +12,10 @@ report using the Claude API.
   `make_feature_collection()`, and `validate_feature_collection()`. Every
   feature requires a `properties.confidence` and a non-empty, plain-language
   `properties.confidence_notes` — no layer gets to skip stating its own data
-  quality caveats. `hydrology_data.py` and `soil_data.py` are converted to
-  it today (see `get_water_features_geojson()` and `get_soil_data_as_geojson()`
-  respectively); other layers convert to it in later passes. See
+  quality caveats. `polygonal_parts()` is a shared clip-cleanup helper used
+  by both `soil_data.py` (SQL-side clip) and `nlcd_data.py` (raster clip).
+  `hydrology_data.py`, `soil_data.py`, and `nlcd_data.py` are converted to
+  the schema today; other layers convert to it in later passes. See
   `test_feature_schema.py` for an offline (no-network) validation example.
 - `climate_data.py` — fetches historical wind, rainfall, and temperature
   data from Open-Meteo (free, no API key). Prevailing wind and rainfall
@@ -31,10 +32,23 @@ report using the Claude API.
   just outside the exact drawn boundary are still caught.
   `get_water_features_geojson()` returns the same fetch as a
   schema-conformant FeatureCollection.
+- `nlcd_data.py` — fetches USGS National Land Cover Database (NLCD)
+  classification from Microsoft's Planetary Computer STAC catalog: the
+  authoritative source for land-cover *type* (forest vs. pasture/hay/
+  grassland vs. other), since it's a pre-classified federal dataset rather
+  than inferred from a vigor proxy. `get_nlcd_features_geojson()` vectorizes
+  the classified raster into a schema-conformant FeatureCollection, one
+  feature per cover class present within the boundary, at "high" confidence.
+- `imagery_data.py` — fetches Sentinel-2 NDVI from Planetary Computer as a
+  vegetation *vigor* signal only (bare/degraded ground, low/high vigor,
+  open water). NDVI can't reliably tell dense pasture from tree canopy, so
+  it no longer has any role in determining cover type — `nlcd_data.py`
+  handles that; this is read only as a health check within whatever type
+  NLCD has already classified for a given area.
 - `report_generator.py` — combines all of the above and calls the Claude
   API to generate the narrative Scale of Permanence report.
 - `generate_full_report.py` — the full end-to-end pipeline: give it a
-  boundary once, it runs all four data-fetching steps and generates the
+  boundary once, it runs all six data-fetching steps and generates the
   final report. This is the main script to run for a real test.
 - `parcel_boundary.py` — fetches legal parcel boundaries from Allegheny
   County's GIS system specifically. Superseded by manual boundary drawing
@@ -70,7 +84,6 @@ tool (built with Leaflet).
 - Connect the frontend's drawn boundary to this backend (currently two
   separate, unconnected pieces — frontend has the map, backend has the
   pipeline)
-- Imagery/land cover data as an additional layer (NAIP/Sentinel-2)
 - Uploaded soil test result parsing (PDF/photo → structured data →
   incorporated into the report, alongside SSURGO data)
 - Live address autocomplete — tried using Photon (free, OSM-based), but

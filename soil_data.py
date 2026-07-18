@@ -22,6 +22,7 @@ from feature_schema import (
     CONFIDENCE_MEDIUM,
     make_feature,
     make_feature_collection,
+    polygonal_parts,
 )
 
 SDA_ENDPOINT = "https://sdmdataaccess.sc.egov.usda.gov/Tabular/post.rest"
@@ -164,25 +165,6 @@ def get_soil_data_for_polygon(wkt_polygon: str) -> list[dict]:
     return [dict(zip(result["columns"], row)) for row in result["rows"]]
 
 
-def _polygonal_parts(geom):
-    """
-    STIntersection() against a mapunit polygon can, in edge cases (the
-    input boundary touching a map unit polygon only along a shared edge or
-    at a single vertex), return a GeometryCollection mixing stray points or
-    lines in with the actual polygon area. Only the Polygon/MultiPolygon
-    parts represent real map unit area; this drops everything else and
-    returns None if nothing polygonal survives.
-    """
-    if geom.is_empty:
-        return None
-    if geom.geom_type in ("Polygon", "MultiPolygon"):
-        return geom
-    if geom.geom_type == "GeometryCollection":
-        polys = [g for g in geom.geoms if g.geom_type in ("Polygon", "MultiPolygon")]
-        return unary_union(polys) if polys else None
-    return None
-
-
 def get_soil_geometries_for_polygon(wkt_polygon: str) -> dict[str, dict]:
     """
     Fetches map unit polygon geometry (not just the tabular attributes
@@ -231,7 +213,7 @@ def get_soil_geometries_for_polygon(wkt_polygon: str) -> dict[str, dict]:
 
     geometries_by_mukey: dict[str, list] = {}
     for row in rows:
-        geom = _polygonal_parts(shapely_wkt.loads(row["geom_wkt"]))
+        geom = polygonal_parts(shapely_wkt.loads(row["geom_wkt"]))
         if geom is not None:
             geometries_by_mukey.setdefault(row["mukey"], []).append(geom)
 
