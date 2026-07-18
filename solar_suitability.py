@@ -45,6 +45,7 @@ from farm_roads_data import get_farm_roads_for_boundary
 from feature_schema import CONFIDENCE_LOW, make_feature, make_feature_collection
 from production_area import identify_production_areas
 from raster_grid import cell_area_acres, connected_components, pixel_center_xy
+from road_corridors import identify_road_corridor_candidates
 from soil_data import coordinates_to_wkt_polygon, get_farmland_classification_for_polygon, is_prime_farmland
 from terrain_metrics import aspect_score, aspect_to_compass_label, compute_shading_score, compute_slope_and_aspect
 
@@ -104,8 +105,15 @@ SOLAR_CONFIDENCE_NOTES_TEMPLATE = (
     "{shading_caveat} It also inherits the limitations of production_area.py "
     "(a slope-only production-zone heuristic) and farm_roads_data.py "
     "(public road/right-of-way data only — may miss private farm tracks). "
-    "{farmland_note}Treat this as a starting shortlist to walk and "
-    "ground-truth, not a final site plan."
+    "{road_fallback_note}{farmland_note}Treat this as a starting shortlist "
+    "to walk and ground-truth, not a final site plan."
+)
+
+ROAD_FALLBACK_NOTE = (
+    "No existing road data was available for this property, so road-proximity "
+    "scoring (distance_to_road_ft) is measured against the top-ranked SUGGESTED "
+    "road corridor (road_corridors.py) instead of a real road — itself a "
+    "topographic suggestion, not a surveyed alignment. "
 )
 
 SHADING_CAVEAT_HORIZON_ONLY = (
@@ -320,11 +328,15 @@ def flag_prime_farmland_conflicts(
     return candidates
 
 
-def candidates_to_geojson(candidates: list[dict], shading_is_rough_proxy: bool = True) -> dict:
+def candidates_to_geojson(
+    candidates: list[dict], shading_is_rough_proxy: bool = True, road_data_is_fallback: bool = False
+) -> dict:
     """Wraps find_candidate_solar_zones() (+ optionally
     flag_prime_farmland_conflicts()) output as the schema-conformant
     GeoJSON FeatureCollection this feature delivers
-    (layer="solar_infrastructure")."""
+    (layer="solar_infrastructure"). road_data_is_fallback flags that
+    road-proximity scoring used a suggested corridor (road_corridors.py)
+    in place of real road data — see identify_solar_candidate_zones()."""
     farmland_note = ""
     if candidates and "prime_farmland_conflict" in candidates[0]:
         farmland_note = (
@@ -334,6 +346,7 @@ def candidates_to_geojson(candidates: list[dict], shading_is_rough_proxy: bool =
 
     confidence_notes = SOLAR_CONFIDENCE_NOTES_TEMPLATE.format(
         shading_caveat=SHADING_CAVEAT_HORIZON_ONLY if shading_is_rough_proxy else "computed from a real canopy height model (DSM-derived), not a rough proxy.",
+        road_fallback_note=ROAD_FALLBACK_NOTE if road_data_is_fallback else "",
         farmland_note=farmland_note,
     )
 
@@ -390,6 +403,34 @@ def candidates_to_geojson(candidates: list[dict], shading_is_rough_proxy: bool =
     return make_feature_collection(features)
 
 
+def _suggested_corridor_as_road_fallback(
+    boundary_coordinates: list[tuple[float, float]], dem: dict
+) -> Optional[list[LineString]]:
+    """
+    Road-proximity fallback for identify_solar_candidate_zones(): when no
+    existing-road data is available, uses the top-ranked
+    "suggested_road_corridor" feature (road_corridors.py) — already
+    rank-ordered, so index 0 is rank 1 — as the proximity anchor instead,
+    reprojected into dem['crs']. Returns None (not an empty list) if
+    corridor generation itself produced nothing or failed, so the caller
+    can tell "no fallback available" apart from "fallback available but
+    empty," matching find_candidate_solar_zones()'s own None-vs-[]
+    convention for road_geometries_utm.
+    """
+    try:
+        corridor_result = identify_road_corridor_candidates(boundary_coordinates, dem=dem)
+        features = corridor_result["zones_geojson"]["features"]
+        if not features:
+            return None
+
+        top_corridor = features[0]
+        coords = top_corridor["geometry"]["coordinates"]
+        xs, ys = warp_transform("EPSG:4326", dem["crs"], [p[0] for p in coords], [p[1] for p in coords])
+        return [LineString(zip(xs, ys))]
+    except Exception:
+        return None
+
+
 def identify_solar_candidate_zones(
     boundary_coordinates: list[tuple[float, float]],
     dem: Optional[dict] = None,
@@ -428,6 +469,16 @@ def identify_solar_candidate_zones(
                 xs, ys = warp_transform("EPSG:4326", dem["crs"], [p[0] for p in line], [p[1] for p in line])
                 road_geometries_utm.append(LineString(zip(xs, ys)))
 
+    # No existing-road data at all (fetch failed, or genuinely none nearby)
+    # -- fall back to the top-ranked suggested road corridor as the
+    # proximity anchor instead, rather than leaving the constraint
+    # disabled/zeroed. This is a fallback only: real existing-road data
+    # (a non-empty road_geometries_utm above) is left untouched.
+    road_data_is_fallback = False
+    if not road_geometries_utm:
+        road_geometries_utm = _suggested_corridor_as_road_fallback(boundary_coordinates, dem)
+        road_data_is_fallback = road_geometries_utm is not None
+
     candidates = find_candidate_solar_zones(dem, production_areas, road_geometries_utm, **zone_kwargs)
 
     if check_prime_farmland and candidates:
@@ -438,7 +489,7 @@ def identify_solar_candidate_zones(
         except Exception:
             pass  # SSURGO outage -- candidates just won't carry a prime_farmland_conflict flag this run
 
-    return {"zones_geojson": candidates_to_geojson(candidates)}
+    return {"zones_geojson": candidates_to_geojson(candidates, road_data_is_fallback=road_data_is_fallback)}
 
 
 def summarize_solar_candidate_zones(result: dict) -> str:

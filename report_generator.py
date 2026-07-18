@@ -67,12 +67,22 @@ REASONING SEQUENCE — follow this exact order, do not skip ahead or reorder it:
    within a zone as a definitive pond/dam site; that requires separate, more detailed
    analysis (storage volume, dam wall geometry) this pipeline doesn't perform.
 
-4. FARM ROADS (contour or ridge placement). Propose access routing that follows the
-   ridge or contour lines identified in step 2, and that avoids cutting through the
-   water infrastructure or catchments identified in step 3. Explicitly check candidate
-   routes against the production zones from step 2 — a road should not run through one
-   without saying so. Note plainly that this pipeline has no surveyed parcel, easement,
-   or existing-access data, so road placement here is a topographic suggestion only.
+4. FARM ROADS (contour or ridge placement). When SUGGESTED ROAD CORRIDOR data is
+   provided below (DEM-derived contour-band and/or ridge-top candidates, already
+   screened against production zones, pond/water-system zones, floodplain/hydric
+   ground, and erosion-prone soil, and ranked by grade consistency, exclusion-zone
+   avoidance, and length), narrate FROM those ranked candidates — name/rank them,
+   compare grade and length where more than one is offered, and say plainly if a
+   candidate's boundary connection point is flagged as arbitrary (no real access-point
+   data) rather than treating it as a confirmed entry. Do not invent a corridor of your
+   own where real candidates are provided. If no candidate data is available for this
+   property (or none cleared the constraint stack), fall back to describing routing
+   that would follow the ridge or contour lines from step 2 and avoid the water
+   infrastructure/catchments from step 3, and say plainly that this is an unverified
+   topographic suggestion, not a placement backed by computed candidate geometry.
+   Either way, explicitly check the routing against the production zones from step 2 —
+   a road should not run through one without saying so — and note that no surveyed
+   parcel or easement data feeds this step regardless of which path was used.
 
 5. TREES (windbreaks, riparian buffers). Use Climate's prevailing wind (step 1) for
    windbreak orientation and Water Supply's stream/pond locations (step 3) for riparian
@@ -139,10 +149,15 @@ presence of woody/forest cover specifically, note explicitly that this dataset c
 establish that, and that ground-truthing (a site visit) or higher-resolution/multi-
 season imagery would be needed to distinguish vigorous open pasture from tree canopy.
 
-DATA HONESTY: Farm Roads, Permanent Buildings, and Subdivision Fences have no dedicated
-data source feeding them in this pipeline — they are inferred only from the climate,
-elevation, water, and imagery data. When reasoning about them, say plainly that no
-dedicated infrastructure/parcel/zoning data exists, rather than inventing a specific-
+DATA HONESTY: Farm Roads has real candidate-corridor geometry (step 4) when the
+constraint stack produced any; Permanent Buildings has real candidate-zone geometry for
+solar siting specifically (step 6), but nothing else about building placement, and
+Subdivision Fences has no dedicated data source at all — that one is inferred only from
+the climate, elevation, water, and imagery data plus whatever zones/corridors earlier
+steps established. When reasoning about parts of these sections that AREN'T backed by
+real candidate geometry (fencing in general, non-solar building siting, or Farm Roads
+when no corridor candidates were available), say plainly that no dedicated
+infrastructure/parcel/zoning data exists there, rather than inventing a specific-
 sounding recommendation the data can't support (an exact building footprint, a precise
 fence-post count, a named legal easement). This is a first-pass analysis from public
 data, not a substitute for walking the land or a professional site visit.
@@ -254,6 +269,44 @@ def _format_water_candidate_zones_summary(zones_geojson: Optional[dict]) -> str:
     return "\n".join(lines)
 
 
+def _format_road_corridor_summary(zones_geojson: Optional[dict]) -> str:
+    """Formats road_corridors.py's "suggested_road_corridor" layer (see
+    that module for the contour-band/ridge-top generation and constraint
+    stack behind it) for the report prompt. Optional, same reasoning as
+    the other DEM/network-backed layers — a fetch failure shouldn't take
+    down the whole report; step 4 of the system prompt falls back to its
+    old prose-inference behavior when this is empty/unavailable."""
+    if not zones_geojson or not zones_geojson.get("features"):
+        return (
+            "No suggested road corridor candidates identified (either "
+            "nothing cleared the constraint stack, or DEM/NHD/SSURGO data "
+            "wasn't available for this property) — fall back to "
+            "topographic reasoning from Land Shape (step 2) for this "
+            "section, and say plainly that it isn't backed by computed "
+            "candidate geometry."
+        )
+
+    lines = [f"{len(zones_geojson['features'])} ranked candidate corridor(s) identified:"]
+    for feature in zones_geojson["features"]:
+        props = feature["properties"]
+        anchor_note = (
+            "boundary connection point is ARBITRARY (no real access-point data)"
+            if props.get("connection_point_is_arbitrary")
+            else "anchored near a real mapped road"
+        )
+        lines.append(
+            f"  - Rank {props['rank']} ({props['corridor_type']}, score {props['suitability_score']}/100): "
+            f"{props['avg_grade_pct']}% avg grade, {props['length_ft']}ft long, {anchor_note}"
+        )
+    lines.append(
+        "\nThese are ranked CANDIDATE CORRIDORS (contour-band and/or ridge-top, no default "
+        "preference between the two types), not a single forced routing — narrate from this "
+        "geometry rather than inventing a corridor, compare candidates where more than one is "
+        "offered, and say plainly wherever a connection point is flagged arbitrary."
+    )
+    return "\n".join(lines)
+
+
 def _format_solar_candidate_zones_summary(zones_geojson: Optional[dict]) -> str:
     """Formats solar_suitability.py's "solar_infrastructure" layer (see
     that module for the exclusion/proximity/scoring constraint stack
@@ -321,22 +374,26 @@ def generate_scale_of_permanence_report(
     imagery_summary: Optional[dict] = None,
     water_candidate_zones_geojson: Optional[dict] = None,
     solar_candidate_zones_geojson: Optional[dict] = None,
+    road_corridor_candidates_geojson: Optional[dict] = None,
 ) -> str:
     """
     Given the outputs of the data-fetching modules, generates a narrative
     Scale of Permanence report via the Claude API. climate_summary (from
     climate_data.py), imagery_summary (from imagery_data.py),
     water_candidate_zones_geojson (the "water_system_candidate" layer from
-    water_candidate_zones.py), and solar_candidate_zones_geojson (the
-    "solar_infrastructure" layer from solar_suitability.py) are all
-    optional so existing callers built before those layers existed don't
-    break — but including them produces a meaningfully better report:
-    climate is literally the first item in the Scale of Permanence
-    framework, imagery gives Claude a current land-cover cross-check
-    against the soil data, the water candidate zones give the WATER
-    SUPPLY section a DEM-grounded answer to "where" instead of reasoning
-    from the coarse elevation grid alone, and the solar candidate zones
-    do the same for PERMANENT BUILDINGS' solar siting discussion.
+    water_candidate_zones.py), solar_candidate_zones_geojson (the
+    "solar_infrastructure" layer from solar_suitability.py), and
+    road_corridor_candidates_geojson (the "suggested_road_corridor" layer
+    from road_corridors.py) are all optional so existing callers built
+    before those layers existed don't break — but including them produces
+    a meaningfully better report: climate is literally the first item in
+    the Scale of Permanence framework, imagery gives Claude a current
+    land-cover cross-check against the soil data, the water candidate
+    zones give the WATER SUPPLY section a DEM-grounded answer to "where"
+    instead of reasoning from the coarse elevation grid alone, the road
+    corridor candidates do the same for FARM ROADS, and the solar
+    candidate zones do the same for PERMANENT BUILDINGS' solar siting
+    discussion.
     """
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
@@ -364,6 +421,9 @@ SATELLITE IMAGERY / LAND COVER (NDVI-derived):
 
 WATER SYSTEM CANDIDATE ZONES (valley-based, DEM/LiDAR-derived):
 {_format_water_candidate_zones_summary(water_candidate_zones_geojson)}
+
+SUGGESTED ROAD CORRIDOR CANDIDATES (contour-band/ridge-top, DEM-derived):
+{_format_road_corridor_summary(road_corridor_candidates_geojson)}
 
 SOLAR INFRASTRUCTURE CANDIDATE ZONES (ranked, DEM-derived):
 {_format_solar_candidate_zones_summary(solar_candidate_zones_geojson)}"""

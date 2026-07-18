@@ -219,6 +219,84 @@ def get_farmland_classification_for_polygon(wkt_polygon: str) -> list[dict]:
     ]
 
 
+# SSURGO's hydricrating is "Yes" / "No" / "Partially hydric" (component
+# table). "Partially hydric" map units still indicate real hydric
+# inclusions worth treating as a floodplain/wet-ground signal for road
+# routing — a mostly-dry map unit with a wet corner is still a place a
+# road corridor should route around, not a place to call "clear."
+def is_hydric(hydric_rating: Optional[str]) -> bool:
+    """True if an SSURGO hydricrating value indicates hydric (or partially
+    hydric) soil. Used by road_corridors.py, combined with NHD stream/
+    water body proximity, as the floodplain/wet-ground exclusion signal —
+    deliberately not inferred from DEM elevation alone."""
+    if not hydric_rating:
+        return False
+    return hydric_rating.strip().lower() in ("yes", "partially hydric")
+
+
+# K-factor (whole soil, "kwfact" in the component table) is SSURGO's
+# standard erodibility measure — how susceptible a soil is to sheet/rill
+# erosion, roughly 0.02 (least erodible) to 0.69 (most). This threshold
+# (0.32) is a commonly-used rule-of-thumb cutoff for "erosion-prone" in
+# NRCS conservation planning guidance, not a precise, single-sourced
+# regulatory value — real Highly Erodible Land (HEL) determination
+# combines K-factor with slope, slope length, and a soil-specific
+# tolerance ("T") value in the full RKLS/T formula, which is out of scope
+# here. Treat this as the same kind of simplified, explainable proxy as
+# production_area.py's slope-only heuristic — good enough to flag "avoid
+# this soil type" for road routing, not an official HEL determination.
+# CONFIGURABLE.
+DEFAULT_EROSION_KWFACT_THRESHOLD = 0.32
+
+
+def is_erosion_prone(kwfact, threshold: float = DEFAULT_EROSION_KWFACT_THRESHOLD) -> bool:
+    """True if an SSURGO K-factor (whole soil) value is at/above
+    threshold. kwfact is stored as text in SDA's schema (like several
+    other nominally-numeric SSURGO fields), so this tolerates a string,
+    None, or an empty value rather than assuming a clean float."""
+    try:
+        return float(kwfact) >= threshold
+    except (TypeError, ValueError):
+        return False
+
+
+def get_erosion_factor_for_polygon(wkt_polygon: str) -> list[dict]:
+    """
+    Returns SSURGO's whole-soil K-factor (erodibility) for the dominant
+    component of every map unit intersecting wkt_polygon — same
+    dominant-component-per-mukey shape as get_soil_data_for_polygon,
+    just a separate query since kwfact isn't in that one's SELECT list
+    and this is the only field road_corridors.py needs from it.
+
+    Returns a list of {'mukey', 'muname', 'compname', 'comppct_r', 'kwfact'} dicts.
+    """
+    sql = f"""
+        SELECT mu.mukey, mu.muname, c.compname, c.comppct_r, c.kwfact
+        FROM mapunit mu
+        INNER JOIN component c ON mu.mukey = c.mukey
+        WHERE mu.mukey IN (
+            SELECT mukey FROM SDA_Get_Mukey_from_intersection_with_WktWgs84('{wkt_polygon}')
+        )
+        ORDER BY c.comppct_r DESC
+    """
+
+    result = _run_sda_query(sql)
+
+    if not result["rows"]:
+        return []
+
+    rows = [dict(zip(result["columns"], row)) for row in result["rows"]]
+
+    dominant_by_mukey: dict[str, dict] = {}
+    for row in rows:
+        # rows are ordered comppct_r DESC, so the first row seen per mukey
+        # is already the dominant component -- same convention as
+        # get_soil_data_for_polygon's ordering.
+        dominant_by_mukey.setdefault(row["mukey"], row)
+
+    return list(dominant_by_mukey.values())
+
+
 def _polygonal_parts(geom):
     """
     STIntersection() against a mapunit polygon can, in edge cases (the
