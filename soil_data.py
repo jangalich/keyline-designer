@@ -164,6 +164,61 @@ def get_soil_data_for_polygon(wkt_polygon: str) -> list[dict]:
     return [dict(zip(result["columns"], row)) for row in result["rows"]]
 
 
+# SSURGO's official "Farmland Classification" values (muaggatt.farmlndcl).
+# Anything starting with "All areas are prime farmland" or "Prime farmland
+# if..." counts as prime for this pipeline's purposes — the conditional
+# variants ("...if drained", "...if irrigated", etc.) still mean the soil
+# itself is prime-grade, just contingent on a management practice, which
+# is exactly the kind of nuance the Scale of Permanence tradeoff note
+# calling code should surface, not silently drop.
+_PRIME_FARMLAND_PREFIXES = ("All areas are prime farmland", "Prime farmland if")
+
+
+def is_prime_farmland(farmland_classification: Optional[str]) -> bool:
+    """True if an SSURGO farmlndcl value indicates prime (or conditionally
+    prime) farmland. Used by solar_suitability.py to flag, not exclude,
+    high-scoring solar zones that overlap prime agricultural soil."""
+    if not farmland_classification:
+        return False
+    return any(farmland_classification.startswith(p) for p in _PRIME_FARMLAND_PREFIXES)
+
+
+def get_farmland_classification_for_polygon(wkt_polygon: str) -> list[dict]:
+    """
+    Returns SSURGO's official Farmland Classification (farmlndcl) for
+    every map unit intersecting wkt_polygon — e.g. "All areas are prime
+    farmland", "Prime farmland if drained", "Not prime farmland". This is
+    a map-unit-level aggregate attribute (muaggatt), not a per-component
+    one like get_soil_data_for_polygon's fields, so it's a separate query
+    rather than an extra column tacked onto that one.
+
+    Returns a list of {'mukey', 'muname', 'farmland_classification'} dicts.
+    """
+    sql = f"""
+        SELECT mu.mukey, mu.muname, ma.farmlndcl
+        FROM mapunit mu
+        INNER JOIN muaggatt ma ON mu.mukey = ma.mukey
+        WHERE mu.mukey IN (
+            SELECT mukey FROM SDA_Get_Mukey_from_intersection_with_WktWgs84('{wkt_polygon}')
+        )
+    """
+
+    result = _run_sda_query(sql)
+
+    if not result["rows"]:
+        return []
+
+    rows = [dict(zip(result["columns"], row)) for row in result["rows"]]
+    return [
+        {
+            "mukey": row["mukey"],
+            "muname": row["muname"],
+            "farmland_classification": row["farmlndcl"],
+        }
+        for row in rows
+    ]
+
+
 def _polygonal_parts(geom):
     """
     STIntersection() against a mapunit polygon can, in edge cases (the

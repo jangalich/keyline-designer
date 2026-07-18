@@ -86,7 +86,16 @@ REASONING SEQUENCE — follow this exact order, do not skip ahead or reorder it:
    important, rule out any zone already claimed by earlier steps: production land from
    step 2, water-storage or drainage areas from step 3, and road or tree corridors from
    steps 4-5. State clearly that no building-code, setback, or utility-access data feeds
-   this step — it is a land-suitability read only, not a permitting-ready siting.
+   this step — it is a land-suitability read only, not a permitting-ready siting. When
+   SOLAR INFRASTRUCTURE CANDIDATE ZONE data is provided below (DEM-derived, ranked
+   candidates already screened for slope, aspect, shading, distance from production
+   land, and proximity to a mapped road), use it as the concrete basis for any solar
+   siting discussion: compare the ranked candidates against each other by name/rank
+   rather than inventing an unranked one, and if a candidate is flagged with a prime-
+   farmland conflict, present that explicitly as a tradeoff (solar value vs. agricultural
+   value of that land) rather than silently picking a side. Do not present any single
+   candidate as a forced final answer when multiple are close in score — say so, and let
+   the ranked list stand as real options.
 
 7. SUBDIVISION FENCES. Propose paddock/subdivision lines that follow the zones and
    infrastructure already established in steps 2-6 (land-shape zones, water points,
@@ -245,6 +254,45 @@ def _format_water_candidate_zones_summary(zones_geojson: Optional[dict]) -> str:
     return "\n".join(lines)
 
 
+def _format_solar_candidate_zones_summary(zones_geojson: Optional[dict]) -> str:
+    """Formats solar_suitability.py's "solar_infrastructure" layer (see
+    that module for the exclusion/proximity/scoring constraint stack
+    behind it) for the report prompt. Optional, same reasoning as the
+    other DEM/network-backed layers above — a fetch failure shouldn't
+    take down the whole report."""
+    if not zones_geojson or not zones_geojson.get("features"):
+        return (
+            "No solar infrastructure candidate zones identified (either "
+            "nothing cleared the exclusion/proximity/suitability "
+            "constraint stack, or DEM/road data wasn't available for "
+            "this property)."
+        )
+
+    lines = [f"{len(zones_geojson['features'])} ranked candidate zone(s) identified:"]
+    for feature in zones_geojson["features"]:
+        props = feature["properties"]
+        conflict = ""
+        if props.get("prime_farmland_conflict"):
+            conflict = f" — PRIME FARMLAND CONFLICT: {props.get('prime_farmland_note', '')}"
+        distance_to_road = (
+            f"{props['distance_to_road_ft']}ft to nearest mapped road"
+            if props.get("distance_to_road_ft") is not None
+            else "distance to road unknown (no road data available)"
+        )
+        lines.append(
+            f"  - Rank {props['rank']} (score {props['suitability_score']}/100): "
+            f"{props['avg_slope_pct']}% slope, {props['aspect']}-facing, "
+            f"{distance_to_road}, {props['distance_to_production_zone_ft']}ft from "
+            f"nearest production zone{conflict}"
+        )
+    lines.append(
+        "\nThese are ranked CANDIDATE ZONES, not a single forced placement — compare "
+        "them against each other in the narrative rather than picking one unprompted, "
+        "and note prime-farmland conflicts as a real tradeoff where flagged."
+    )
+    return "\n".join(lines)
+
+
 def _format_imagery_summary(imagery: Optional[dict]) -> str:
     if not imagery:
         return (
@@ -272,19 +320,23 @@ def generate_scale_of_permanence_report(
     climate_summary: Optional[dict] = None,
     imagery_summary: Optional[dict] = None,
     water_candidate_zones_geojson: Optional[dict] = None,
+    solar_candidate_zones_geojson: Optional[dict] = None,
 ) -> str:
     """
     Given the outputs of the data-fetching modules, generates a narrative
     Scale of Permanence report via the Claude API. climate_summary (from
-    climate_data.py), imagery_summary (from imagery_data.py), and
+    climate_data.py), imagery_summary (from imagery_data.py),
     water_candidate_zones_geojson (the "water_system_candidate" layer from
-    water_candidate_zones.py) are all optional so existing callers built
-    before those layers existed don't break — but including them produces
-    a meaningfully better report: climate is literally the first item in
-    the Scale of Permanence framework, imagery gives Claude a current
-    land-cover cross-check against the soil data, and the candidate zones
-    give the WATER SUPPLY section a DEM-grounded answer to "where" instead
-    of reasoning from the coarse elevation grid alone.
+    water_candidate_zones.py), and solar_candidate_zones_geojson (the
+    "solar_infrastructure" layer from solar_suitability.py) are all
+    optional so existing callers built before those layers existed don't
+    break — but including them produces a meaningfully better report:
+    climate is literally the first item in the Scale of Permanence
+    framework, imagery gives Claude a current land-cover cross-check
+    against the soil data, the water candidate zones give the WATER
+    SUPPLY section a DEM-grounded answer to "where" instead of reasoning
+    from the coarse elevation grid alone, and the solar candidate zones
+    do the same for PERMANENT BUILDINGS' solar siting discussion.
     """
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
@@ -311,7 +363,10 @@ SATELLITE IMAGERY / LAND COVER (NDVI-derived):
 {_format_imagery_summary(imagery_summary)}
 
 WATER SYSTEM CANDIDATE ZONES (valley-based, DEM/LiDAR-derived):
-{_format_water_candidate_zones_summary(water_candidate_zones_geojson)}"""
+{_format_water_candidate_zones_summary(water_candidate_zones_geojson)}
+
+SOLAR INFRASTRUCTURE CANDIDATE ZONES (ranked, DEM-derived):
+{_format_solar_candidate_zones_summary(solar_candidate_zones_geojson)}"""
 
     message = client.messages.create(
         model=MODEL,

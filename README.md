@@ -65,6 +65,37 @@ report using the Claude API.
   `test_valley_delineation.py`, `test_production_area.py`,
   `test_water_candidate_zones.py`, and the end-to-end
   `test_water_system_candidate_pipeline.py`).
+- `terrain_metrics.py` — DEM-derived slope, aspect (Horn's method), and a
+  horizon-based shading proxy (no vegetation/canopy signal — see its
+  docstring), feeding `solar_suitability.py`'s scoring. Numpy-only, no
+  network, unit-tested against synthetic terrain
+  (`test_terrain_metrics.py`).
+- `farm_roads_data.py` — fetches real, existing road geometry near a
+  property from USGS National Map's Transportation dataset (same
+  ArcGIS-`query` pattern as `hydrology_data.py`, different theme).
+  Public road/right-of-way data only — a private farm track or driveway
+  not captured in that dataset won't appear; see its confidence_notes.
+- `soil_data.py` additionally has `get_farmland_classification_for_polygon()`
+  and `is_prime_farmland()` — SSURGO's official Farmland Classification
+  (`farmlndcl`), used to flag (never exclude) solar candidates that
+  overlap prime agricultural soil (`test_farmland_classification.py`).
+- `irradiance_data.py` — a regional (not per-candidate) solar production
+  baseline from NREL's PVWatts API, for a rough "expect about X kWh/kW/
+  year here" report note. Optional (needs a free `NREL_API_KEY`);
+  degrades to `None` without one, same as the other optional layers.
+- `solar_suitability.py` — the solar suitability data layer for Scale of
+  Permanence step 6 (Permanent Buildings): a three-part constraint stack
+  — excluded inside/near production zones (`production_area.py`, already
+  in main, buffered), required within a configurable proximity buffer of
+  a mapped farm road (`farm_roads_data.py`), scored by DEM slope + aspect
+  + shading (`terrain_metrics.py`) — producing RANKED candidate zones
+  (layer `solar_infrastructure`), not one forced placement. Flags (never
+  excludes) SSURGO prime-farmland overlap as a tradeoff note. Same
+  pure-core-logic-vs-network-fetch split as `water_candidate_zones.py`
+  (`find_candidate_solar_zones()` / `flag_prime_farmland_conflicts()` are
+  both network-free and unit-tested against synthetic input —
+  `test_solar_suitability.py`, end-to-end wiring in
+  `test_solar_suitability_pipeline.py`).
 - `report_generator.py` — combines all of the above and calls the Claude
   API to generate the narrative Scale of Permanence report.
 - `generate_full_report.py` — the full end-to-end pipeline: give it a
@@ -82,6 +113,7 @@ Needs internet access (won't run in a fully offline sandbox). Setup:
 ```
 pip install -r requirements.txt
 export ANTHROPIC_API_KEY="sk-ant-..."
+export NREL_API_KEY="..."  # optional -- only needed for irradiance_data.py's regional baseline note
 python3 generate_full_report.py
 ```
 
@@ -131,6 +163,34 @@ tool (built with Leaflet).
   (`production_area.py`), and `MIN_GRAVITY_GRADIENT` /
   `MIN_BOUNDARY_SETBACK_METERS` (`water_candidate_zones.py`) accordingly —
   all deliberately exposed as module-level constants for exactly this.
+- Same ground-truth validation pass for `solar_suitability.py`: check that
+  top-ranked candidates are actually outside production zones, near a
+  real road, low-slope, and south-facing on a known property, and tune
+  `MAX_SOLAR_SLOPE_PCT`, the score weights (`SLOPE_SCORE_WEIGHT` /
+  `ASPECT_SCORE_WEIGHT` / `SHADING_SCORE_WEIGHT`), `MIN_SUITABILITY_SCORE`,
+  `PRODUCTION_ZONE_EXCLUSION_BUFFER_METERS`, and
+  `ROAD_PROXIMITY_BUFFER_METERS` accordingly.
+- `terrain_metrics.py`'s shading proxy is DEM-only horizon/terrain
+  shading — it has no vegetation/canopy signal at all (no DSM-derived
+  canopy height model exists in this pipeline yet). A real canopy height
+  model, or a per-pixel NDVI overlay reprojected onto the DEM grid (using
+  `imagery_data.py`'s already-merged Sentinel-2 fetch — NOT the separate,
+  still-unmerged NLCD/NDVI branch), would be a meaningfully better shading
+  signal and is a reasonable next step once the DEM-only version is
+  validated against real tree cover on the ground.
+- `irradiance_data.py` targets `developer.nlr.gov` per the current
+  guidance this was built against (NREL's API domain migrating off
+  `developer.nrel.gov`). That's the one constant
+  (`NLR_PVWATTS_ENDPOINT`) to double-check/update if that domain changes
+  again — this module was written and unit-tested without live network
+  access to that endpoint in this environment, so it's unverified against
+  a real request.
+- `farm_roads_data.py` targets USGS National Map's Transportation
+  MapServer (`carto.nationalmap.gov`), following the same
+  service-catalog convention as `hydrology_data.py`'s NHD endpoint — also
+  unverified against a live request in this environment (no route to
+  reach it from here). Confirm the layer ID/response shape against a real
+  request before relying on it.
 
 ## Deploying
 
