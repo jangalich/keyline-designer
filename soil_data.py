@@ -234,7 +234,8 @@ def is_hydric(hydric_rating: Optional[str]) -> bool:
     return hydric_rating.strip().lower() in ("yes", "partially hydric")
 
 
-# K-factor (whole soil, "kwfact" in the component table) is SSURGO's
+# K-factor (whole soil, "kwfact" — on the chorizon table, see
+# get_erosion_factor_for_polygon()) is SSURGO's
 # standard erodibility measure — how susceptible a soil is to sheet/rill
 # erosion, roughly 0.02 (least erodible) to 0.69 (most). This threshold
 # (0.32) is a commonly-used rule-of-thumb cutoff for "erosion-prone" in
@@ -268,13 +269,26 @@ def get_erosion_factor_for_polygon(wkt_polygon: str) -> list[dict]:
     just a separate query since kwfact isn't in that one's SELECT list
     and this is the only field road_corridors.py needs from it.
 
+    kwfact lives on chorizon (per-horizon), not component — a component
+    can have several horizons at different depths, each with its own
+    K-factor, so this joins through chorizon on cokey and filters to
+    rvindicator = 'Yes' (SSURGO's own flag for "the representative horizon
+    for this component," standard convention for collapsing horizons down
+    to a single per-component value). Querying c.kwfact directly (an
+    earlier version of this function did) isn't just wrong data — it's a
+    reference to a column that doesn't exist on component at all, and SDA
+    rejects that query outright with an HTTP 400 rather than returning
+    bad results.
+
     Returns a list of {'mukey', 'muname', 'compname', 'comppct_r', 'kwfact'} dicts.
     """
     sql = f"""
-        SELECT mu.mukey, mu.muname, c.compname, c.comppct_r, c.kwfact
+        SELECT mu.mukey, mu.muname, c.compname, c.comppct_r, ch.kwfact
         FROM mapunit mu
         INNER JOIN component c ON mu.mukey = c.mukey
-        WHERE mu.mukey IN (
+        INNER JOIN chorizon ch ON c.cokey = ch.cokey
+        WHERE ch.rvindicator = 'Yes'
+        AND mu.mukey IN (
             SELECT mukey FROM SDA_Get_Mukey_from_intersection_with_WktWgs84('{wkt_polygon}')
         )
         ORDER BY c.comppct_r DESC

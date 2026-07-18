@@ -51,6 +51,7 @@ import math
 from typing import Optional
 
 import numpy as np
+import requests
 from rasterio.warp import transform as warp_transform
 from rasterio.warp import transform_geom
 from shapely.geometry import LineString, Point, Polygon, shape
@@ -611,6 +612,35 @@ def corridors_to_geojson(
     return make_feature_collection(features)
 
 
+def _log_fetch_failure(label: str, exc: Exception) -> None:
+    """
+    Every real-data fetch in this module degrades gracefully on failure
+    (see the module docstring), but "gracefully" shouldn't mean "silently
+    identical whether the cause was a transient network timeout or a real
+    bug in the query itself." A 4xx HTTP status means the server rejected
+    the REQUEST as malformed (bad SQL, a column/table that doesn't exist)
+    — that will fail exactly the same way on every future run, unlike a
+    timeout or connection error, which might not. Anything that isn't
+    even a requests error (a KeyError from an unexpected response shape,
+    etc.) is just as clearly a real bug, not network flakiness. Print a
+    distinct message for each case so this doesn't look like ordinary
+    network unavailability in the logs — this is exactly how
+    get_erosion_factor_for_polygon()'s chorizon/component schema bug went
+    unnoticed for a while: it degraded identically to "SDA is slow today."
+    """
+    if isinstance(exc, requests.exceptions.RequestException):
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+        if status is not None and 400 <= status < 500:
+            print(
+                f"  {label}: request rejected by the server (HTTP {status}) — likely a real "
+                f"query/schema bug, not transient network unavailability: {exc}"
+            )
+        else:
+            print(f"  {label}: network request failed ({exc}), continuing without it.")
+    else:
+        print(f"  {label}: unexpected failure, not a network error ({type(exc).__name__}: {exc}).")
+
+
 def _fetch_floodplain_hydric_union(boundary_coordinates, dem, valleys) -> tuple[Optional[object], bool]:
     """NHD stream/water-body buffers + SSURGO hydric soil polygons,
     unioned; falls back to buffering the already-computed delineated
@@ -626,8 +656,8 @@ def _fetch_floodplain_hydric_union(boundary_coordinates, dem, valleys) -> tuple[
                 continue
             utm_geometry = shape(transform_geom("EPSG:4326", dem["crs"], geometry))
             pieces.append(utm_geometry.buffer(FLOODPLAIN_STREAM_BUFFER_METERS))
-    except Exception:
-        pass
+    except Exception as e:
+        _log_fetch_failure("NHD stream/water-body fetch", e)
 
     try:
         wkt_polygon = coordinates_to_wkt_polygon(boundary_coordinates)
@@ -639,8 +669,8 @@ def _fetch_floodplain_hydric_union(boundary_coordinates, dem, valleys) -> tuple[
                 geometry = geometries_by_mukey.get(mukey)
                 if geometry is not None:
                     pieces.append(shape(transform_geom("EPSG:4326", dem["crs"], geometry)))
-    except Exception:
-        pass
+    except Exception as e:
+        _log_fetch_failure("SSURGO hydric soil fetch", e)
 
     if pieces:
         return unary_union(pieces), False
@@ -676,7 +706,8 @@ def _fetch_erosion_prone_union(boundary_coordinates, dem) -> tuple[Optional[obje
             if mukey in geometries_by_mukey
         ]
         return (unary_union(pieces) if pieces else None), False
-    except Exception:
+    except Exception as e:
+        _log_fetch_failure("Erosion-prone soil (SSURGO K-factor)", e)
         return None, True
 
 
@@ -687,7 +718,8 @@ def _fetch_existing_road_union(boundary_coordinates, dem):
     point rather than raising."""
     try:
         roads = get_farm_roads_for_boundary(boundary_coordinates)
-    except Exception:
+    except Exception as e:
+        _log_fetch_failure("Existing road fetch", e)
         return None
 
     if not roads:
