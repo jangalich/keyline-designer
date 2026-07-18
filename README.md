@@ -31,10 +31,44 @@ report using the Claude API.
   just outside the exact drawn boundary are still caught.
   `get_water_features_geojson()` returns the same fetch as a
   schema-conformant FeatureCollection.
+- `dem_data.py` — fetches a real DEM (digital elevation model) raster grid
+  for a property from USGS 3DEP's ImageServer (`exportImage`), reprojected
+  to the property's local UTM zone so pixels are true meters. This is the
+  raster counterpart of `elevation_data.py`'s point-sampled grid — what
+  flow-direction/accumulation terrain analysis actually needs.
+- `raster_grid.py` — tiny shared, numpy-only helpers (pixel<->coordinate
+  math, 8-connected component labeling) used by every module downstream
+  of the DEM fetch, so their core logic stays unit-testable against a
+  synthetic DEM dict without touching rasterio or the network.
+- `valley_delineation.py` — delineates primary valleys from a DEM via
+  standard D8 terrain analysis (priority-flood depression fill -> flow
+  direction -> flow accumulation -> threshold -> trace). Outputs a
+  schema-conformant `valley` layer.
+- `production_area.py` — a simple slope-threshold heuristic that
+  identifies candidate production/cultivation area(s) from the DEM, as a
+  structured elevation reference for the water-zone logic below (a
+  narrower, purpose-built stand-in for the same judgment
+  `report_generator.py`'s Land Shape narrative section already makes in
+  prose — it doesn't modify that step). Outputs a schema-conformant
+  `production_area_candidate` layer.
+- `water_candidate_zones.py` — the actual water-system candidate-zone
+  feature: for each primary valley, flags the portion sitting above a
+  candidate production area by at least a configurable minimum gravity
+  gradient, outside a configurable property-boundary setback, and
+  buffers the qualifying segment(s) into a zone polygon (not a point).
+  Outputs the schema-conformant `water_system_candidate` layer that
+  `generate_full_report.py`/`report_generator.py` consume. The core
+  filtering logic (`find_candidate_zones()`) is a pure function over
+  already-computed valleys/production areas — deliberately separable from
+  DEM fetching and valley delineation, so "is the terrain data right" and
+  "is the zone logic right" can be debugged independently (see
+  `test_valley_delineation.py`, `test_production_area.py`,
+  `test_water_candidate_zones.py`, and the end-to-end
+  `test_water_system_candidate_pipeline.py`).
 - `report_generator.py` — combines all of the above and calls the Claude
   API to generate the narrative Scale of Permanence report.
 - `generate_full_report.py` — the full end-to-end pipeline: give it a
-  boundary once, it runs all four data-fetching steps and generates the
+  boundary once, it runs every data-fetching step and generates the
   final report. This is the main script to run for a real test.
 - `parcel_boundary.py` — fetches legal parcel boundaries from Allegheny
   County's GIS system specifically. Superseded by manual boundary drawing
@@ -82,14 +116,21 @@ tool (built with Leaflet).
   live suggestions turn out to be worth the added cost/complexity.
 
 **Future / potential premium tier:**
-- Real LiDAR-based keypoint detection — downloading actual DEM raster
-  data (not just sampled grid points) and running real terrain-analysis
-  tools (e.g. WhiteboxTools) to mathematically locate keypoints and
-  candidate keylines precisely, rather than having the report estimate
-  their general location from a coarse grid. Meaningfully more complex
-  to build (raster processing, larger data handling) — a plausible
-  candidate for a paid add-on feature once the core free-data pipeline
-  is solid and validated.
+- Real LiDAR-based *keypoint* detection specifically — a single precise
+  pond/dam siting point (storage volume, dam wall geometry) within a
+  water system candidate zone. The DEM/raster foundation and
+  valley-based *zone* identification this would build on now exists
+  (`dem_data.py`, `valley_delineation.py`, `water_candidate_zones.py`) —
+  deliberately a zone, not a point, in this pass. Precise keypoint/keyline
+  siting on top of it is meaningfully more work (still a plausible paid
+  add-on candidate) and is explicitly out of scope for the current layer.
+- Validate `valley_delineation.py`/`water_candidate_zones.py` against a
+  real property with known ground truth, and tune
+  `MIN_STREAM_CONTRIBUTING_AREA_ACRES` / `MIN_PRIMARY_VALLEY_CONTRIBUTING_AREA_ACRES`
+  (`valley_delineation.py`), `MAX_PRODUCTION_SLOPE_PCT`
+  (`production_area.py`), and `MIN_GRAVITY_GRADIENT` /
+  `MIN_BOUNDARY_SETBACK_METERS` (`water_candidate_zones.py`) accordingly —
+  all deliberately exposed as module-level constants for exactly this.
 
 ## Deploying
 

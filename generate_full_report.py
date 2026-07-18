@@ -11,6 +11,7 @@ between scripts.
              --> hydrology_data
              --> climate_data
              --> imagery_data (polygon)
+             --> water_candidate_zones (DEM/LiDAR valley + gradient/setback zones)
              --> report_generator
              --> printed report
 
@@ -23,6 +24,10 @@ from elevation_data import get_elevation_grid
 from hydrology_data import get_water_features_for_boundary
 from climate_data import get_climate_summary_for_point
 from imagery_data import get_imagery_summary_for_boundary
+from water_candidate_zones import (
+    identify_water_system_candidate_zones,
+    summarize_water_system_candidate_zones,
+)
 from report_generator import generate_scale_of_permanence_report
 
 
@@ -40,7 +45,7 @@ def generate_full_report(boundary_coordinates: list) -> str:
     Runs the full pipeline for a given property boundary (list of
     (longitude, latitude) tuples) and returns the final narrative report.
     """
-    print("Step 1/6: Fetching climate data (prevailing wind, rainfall)...")
+    print("Step 1/7: Fetching climate data (prevailing wind, rainfall)...")
     center_lat, center_lon = _boundary_center(boundary_coordinates)
     climate_summary = get_climate_summary_for_point(center_lat, center_lon)
     print(
@@ -48,22 +53,22 @@ def generate_full_report(boundary_coordinates: list) -> str:
         f"avg annual precip: {climate_summary['avg_annual_precipitation_mm']}mm\n"
     )
 
-    print("Step 2/6: Fetching soil data for the full boundary...")
+    print("Step 2/7: Fetching soil data for the full boundary...")
     wkt_polygon = coordinates_to_wkt_polygon(boundary_coordinates)
     soil_components = get_soil_data_for_polygon(wkt_polygon)
     print(f"  Found {len(soil_components)} soil component(s).\n")
 
-    print("Step 3/6: Fetching elevation grid...")
+    print("Step 3/7: Fetching elevation grid...")
     elevation_grid = get_elevation_grid(boundary_coordinates, grid_size=6)
     print(f"  Sampled {len(elevation_grid)} elevation points.\n")
 
-    print("Step 4/6: Fetching nearby water features...")
+    print("Step 4/7: Fetching nearby water features...")
     water_features = get_water_features_for_boundary(boundary_coordinates)
     stream_count = len(water_features["streams"])
     waterbody_count = len(water_features["water_bodies"])
     print(f"  Found {stream_count} stream(s), {waterbody_count} water body/bodies.\n")
 
-    print("Step 5/6: Fetching satellite imagery (NDVI land cover)...")
+    print("Step 5/7: Fetching satellite imagery (NDVI land cover)...")
     try:
         imagery_summary = get_imagery_summary_for_boundary(boundary_coordinates)
     except Exception as e:
@@ -81,9 +86,28 @@ def generate_full_report(boundary_coordinates: list) -> str:
     else:
         print("  No recent low-cloud imagery available for this boundary.\n")
 
-    print("Step 6/6: Generating Scale of Permanence report via Claude...\n")
+    print("Step 6/7: Identifying valley-based water system candidate zones (DEM/LiDAR)...")
+    try:
+        water_zone_result = identify_water_system_candidate_zones(boundary_coordinates)
+        water_candidate_zones_geojson = water_zone_result["zones_geojson"]
+    except Exception as e:
+        # Same reasoning as imagery above: a USGS 3DEP outage or network
+        # hiccup shouldn't take down the whole report — the WATER SUPPLY
+        # section just falls back to reasoning from the coarse elevation
+        # grid alone, same as it did before this layer existed.
+        print(f"  Water system candidate zone identification failed ({e}), continuing without it.\n")
+        water_candidate_zones_geojson = None
+    if water_candidate_zones_geojson is not None:
+        print(f"  {summarize_water_system_candidate_zones(water_zone_result)}\n")
+
+    print("Step 7/7: Generating Scale of Permanence report via Claude...\n")
     report = generate_scale_of_permanence_report(
-        soil_components, elevation_grid, water_features, climate_summary, imagery_summary
+        soil_components,
+        elevation_grid,
+        water_features,
+        climate_summary,
+        imagery_summary,
+        water_candidate_zones_geojson,
     )
 
     return report

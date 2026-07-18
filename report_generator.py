@@ -59,7 +59,13 @@ REASONING SEQUENCE — follow this exact order, do not skip ahead or reorder it:
    about where water could realistically be captured, stored, or moved (pond/dam
    siting, ram pump feasibility where elevation drop exists). State whether any
    candidate site would sit inside a zone step 2 flagged as strong production land, and
-   if so, say so as a tradeoff rather than silently recommending it.
+   if so, say so as a tradeoff rather than silently recommending it. When valley-based
+   WATER SYSTEM CANDIDATE ZONE data is provided below (DEM/LiDAR-derived valley segments
+   sitting above a candidate production area by a minimum gravity gradient), treat it as
+   the strongest available signal for WHERE gravity-fed infrastructure could go, and
+   describe the general zone(s) it identifies — but do not present any single point
+   within a zone as a definitive pond/dam site; that requires separate, more detailed
+   analysis (storage volume, dam wall geometry) this pipeline doesn't perform.
 
 4. FARM ROADS (contour or ridge placement). Propose access routing that follows the
    ridge or contour lines identified in step 2, and that avoids cutting through the
@@ -208,6 +214,37 @@ def _format_climate_summary(climate: Optional[dict]) -> str:
     )
 
 
+def _format_water_candidate_zones_summary(zones_geojson: Optional[dict]) -> str:
+    """Formats water_candidate_zones.py's "water_system_candidate" layer
+    (see that module for the Step 1-3 valley/gradient/setback logic behind
+    it) for the report prompt. Optional, same reasoning as climate/imagery
+    above — a DEM fetch failure shouldn't take down the whole report."""
+    if not zones_geojson or not zones_geojson.get("features"):
+        return (
+            "No valley-based water system candidate zones identified "
+            "(either no primary valley cleared the minimum gradient above "
+            "a candidate production area, or DEM data wasn't available "
+            "for this property)."
+        )
+
+    lines = [f"{len(zones_geojson['features'])} candidate zone(s) identified:"]
+    for feature in zones_geojson["features"]:
+        props = feature["properties"]
+        lines.append(
+            f"  - {props['label']}: serves production area candidate(s) "
+            f"{props.get('served_production_area_ids', [])}"
+        )
+    lines.append(
+        "\nThese are general zones (valley segments above a candidate production "
+        "area's elevation by a minimum gravity gradient, outside the property "
+        "boundary setback) suitable for keyline plowing patterns, pond/dam "
+        "potential, or ram pump routing — NOT specific pond/dam sites, which "
+        "require separate, more detailed analysis (storage volume, dam wall "
+        "geometry) not performed here."
+    )
+    return "\n".join(lines)
+
+
 def _format_imagery_summary(imagery: Optional[dict]) -> str:
     if not imagery:
         return (
@@ -234,16 +271,20 @@ def generate_scale_of_permanence_report(
     water_features: dict,
     climate_summary: Optional[dict] = None,
     imagery_summary: Optional[dict] = None,
+    water_candidate_zones_geojson: Optional[dict] = None,
 ) -> str:
     """
     Given the outputs of the data-fetching modules, generates a narrative
     Scale of Permanence report via the Claude API. climate_summary (from
-    climate_data.py) and imagery_summary (from imagery_data.py) are optional
-    so existing callers built before those layers existed don't break — but
-    including them produces a meaningfully better report, since climate is
-    literally the first item in the Scale of Permanence framework and
-    imagery gives Claude a current land-cover cross-check against the soil
-    data.
+    climate_data.py), imagery_summary (from imagery_data.py), and
+    water_candidate_zones_geojson (the "water_system_candidate" layer from
+    water_candidate_zones.py) are all optional so existing callers built
+    before those layers existed don't break — but including them produces
+    a meaningfully better report: climate is literally the first item in
+    the Scale of Permanence framework, imagery gives Claude a current
+    land-cover cross-check against the soil data, and the candidate zones
+    give the WATER SUPPLY section a DEM-grounded answer to "where" instead
+    of reasoning from the coarse elevation grid alone.
     """
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
@@ -267,7 +308,10 @@ WATER FEATURES:
 {_format_water_summary(water_features)}
 
 SATELLITE IMAGERY / LAND COVER (NDVI-derived):
-{_format_imagery_summary(imagery_summary)}"""
+{_format_imagery_summary(imagery_summary)}
+
+WATER SYSTEM CANDIDATE ZONES (valley-based, DEM/LiDAR-derived):
+{_format_water_candidate_zones_summary(water_candidate_zones_geojson)}"""
 
     message = client.messages.create(
         model=MODEL,
