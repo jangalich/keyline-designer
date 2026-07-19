@@ -7,28 +7,42 @@ produces RANKED CANDIDATES, not a single placement decision — Claude
 narrates the tradeoffs between them in the report (see report_generator.py
 step 6). Finding "the one best spot" is explicitly not this module's job.
 
-Three-part constraint stack, computed as real geometry:
+Four-part constraint stack, computed as real geometry:
 
-    (production zones, buffered + inverted)   -- exclusion: stay off
-        ∩ (farm road proximity buffer)         -- proximity: stay reachable
-        ∩ (slope + aspect + shading score)      -- suitability: rank what's left
+    (production zones, buffered)               -- exclusion: stay off
+        ∩ (water-candidate zones, buffered)      -- exclusion: stay off pond/dam siting ground
+        ∩ (farm road proximity buffer)           -- proximity: stay reachable
+        ∩ (slope + aspect + shading score)        -- suitability: rank what's left
 
     DEM (dem_data.py, already in main)
         --> slope/aspect/shading (terrain_metrics.py)
         --> production zones (production_area.py, already in main) -- exclusion
+        --> water-candidate zones (water_candidate_zones.py, already in main) -- exclusion
         --> farm roads (farm_roads_data.py) -- proximity
         --> [this module] constraint stack + scoring + ranking
         --> ranked candidate zone polygons (layer="solar_infrastructure")
 
+Water-candidate zones (pond/dam siting ground) are HARD-excluded, the
+same way production zones are, rather than flagged as a soft tradeoff the
+way prime farmland is (see flag_prime_farmland_conflicts()) — a solar
+installation sitting on or immediately next to a candidate pond/dam site
+is a much harder physical conflict than sharing ground with good
+farmland (which is a real, survivable tradeoff; this generally isn't).
+The exclusion buffer reuses road_corridors.py's own
+POND_ZONE_EXCLUSION_BUFFER_METERS rather than a new constant, since
+that's the same buffer already established there for keeping
+infrastructure off a dam face or catchment inlet, not just the pond
+footprint itself.
+
 find_candidate_solar_zones() is the geometric/scoring core: it takes an
-already-fetched DEM dict, production areas, and road geometries (all in
-the DEM's own projected CRS) and does no network I/O itself — same reason
-as water_candidate_zones.py's find_candidate_zones(): so the constraint-
-stack logic is unit-testable against a synthetic DEM independent of
-whether any of the three real data fetches (DEM, roads, SSURGO) are
-working. flag_prime_farmland_conflicts() is a second, separate pure
-function for exactly the same reason, applied to the SSURGO farmland
-lookup specifically.
+already-fetched DEM dict, production areas, water-candidate zones, and
+road geometries (all in the DEM's own projected CRS) and does no network
+I/O itself — same reason as water_candidate_zones.py's
+find_candidate_zones(): so the constraint-stack logic is unit-testable
+against a synthetic DEM independent of whether any of the real data
+fetches (DEM, roads, SSURGO) are working. flag_prime_farmland_conflicts()
+is a second, separate pure function for exactly the same reason, applied
+to the SSURGO farmland lookup specifically.
 """
 
 import math
@@ -36,7 +50,7 @@ from typing import Optional
 
 import numpy as np
 from rasterio.warp import transform as warp_transform
-from shapely.geometry import LineString, MultiPoint, Point
+from shapely.geometry import LineString, MultiPoint, Point, Polygon
 from shapely.ops import unary_union
 from shapely.prepared import prep
 
@@ -45,9 +59,11 @@ from farm_roads_data import get_farm_roads_for_boundary
 from feature_schema import CONFIDENCE_LOW, make_feature, make_feature_collection
 from production_area import identify_production_areas
 from raster_grid import cell_area_acres, connected_components, pixel_center_xy
-from road_corridors import identify_road_corridor_candidates
+from road_corridors import POND_ZONE_EXCLUSION_BUFFER_METERS, identify_road_corridor_candidates
 from soil_data import coordinates_to_wkt_polygon, get_farmland_classification_for_polygon, is_prime_farmland
 from terrain_metrics import aspect_score, aspect_to_compass_label, compute_shading_score, compute_slope_and_aspect
+from valley_delineation import delineate_valleys
+from water_candidate_zones import find_candidate_zones as find_pond_zones
 
 METERS_PER_FOOT = 0.3048
 
@@ -102,9 +118,13 @@ SOLAR_CONFIDENCE_NOTES_TEMPLATE = (
     "a final placement decision — see the report's Permanent Buildings "
     "section for tradeoffs against other ranked candidates. Slope and "
     "aspect are computed directly from the DEM (real geometry). Shading is "
-    "{shading_caveat} It also inherits the limitations of production_area.py "
-    "(a slope-only production-zone heuristic) and farm_roads_data.py "
-    "(public road/right-of-way data only — may miss private farm tracks). "
+    "{shading_caveat} Candidates are hard-excluded (buffered) from production "
+    "zones and from water-candidate (pond/dam siting) zones — not just scored "
+    "down, the way a prime-farmland overlap is. It also inherits the "
+    "limitations of production_area.py (a slope-only production-zone "
+    "heuristic), water_candidate_zones.py (a DEM-derived valley/gradient "
+    "heuristic), and farm_roads_data.py (public road/right-of-way data only "
+    "— may miss private farm tracks). "
     "{road_fallback_note}{farmland_note}Treat this as a starting shortlist "
     "to walk and ground-truth, not a final site plan."
 )
@@ -143,10 +163,12 @@ def _circular_mean_aspect_deg(aspect_values_deg: list[float]) -> Optional[float]
 def find_candidate_solar_zones(
     dem: dict,
     production_areas: list[dict],
+    water_zones: list[dict],
     road_geometries_utm: Optional[list[LineString]],
     max_solar_slope_pct: float = MAX_SOLAR_SLOPE_PCT,
     min_suitability_score: float = MIN_SUITABILITY_SCORE,
     production_zone_exclusion_buffer_meters: float = PRODUCTION_ZONE_EXCLUSION_BUFFER_METERS,
+    water_zone_exclusion_buffer_meters: float = POND_ZONE_EXCLUSION_BUFFER_METERS,
     road_proximity_buffer_meters: float = ROAD_PROXIMITY_BUFFER_METERS,
     min_candidate_area_acres: float = MIN_CANDIDATE_AREA_ACRES,
     max_candidates: int = MAX_CANDIDATES,
@@ -155,11 +177,28 @@ def find_candidate_solar_zones(
     Pure constraint-stack + scoring logic — see module docstring for why
     this takes already-computed inputs rather than fetching anything.
 
+    water_zones is water_candidate_zones.find_candidate_zones()'s own
+    output shape (each entry carrying 'polygon_utm') — hard-excluded
+    (buffered) the same way production_areas is; see module docstring for
+    why this is a hard exclusion rather than a soft flag like prime
+    farmland.
+
     road_geometries_utm=None means "road data unavailable" (the fetch
     itself failed) and disables the road-proximity constraint entirely
     (with that noted by the caller); an empty list [] means "fetched
     successfully, no roads found nearby" and is treated as a real,
     binding constraint (nothing will qualify) — see module docstring.
+
+    Every reported distance (production zone, water zone, road) is the
+    real nearest-EDGE distance from the candidate's own polygon to the
+    RAW (unbuffered) reference geometry — not the candidate's centroid
+    (which overstates distance for any non-trivially-sized polygon, since
+    a centroid sits further from the boundary than the polygon's own
+    nearest edge does) and not the buffered exclusion geometry used for
+    the eligibility test above (which would understate it by roughly the
+    buffer width). The number reported is meant to answer "how far is
+    this candidate from the zone itself," not from some derived
+    intermediate geometry.
 
     Returns up to max_candidates entries, ranked best-first:
         {
@@ -170,6 +209,7 @@ def find_candidate_solar_zones(
             'aspect_label': str,
             'distance_to_road_m': Optional[float],
             'distance_to_production_zone_m': Optional[float],
+            'distance_to_water_zone_m': Optional[float],
             'polygon_utm': shapely Polygon,
             'geometry_wgs84': GeoJSON geometry dict,
         }
@@ -185,14 +225,20 @@ def find_candidate_solar_zones(
     suitability = np.full((rows, cols), np.nan, dtype=np.float32)
     eligible = np.zeros((rows, cols), dtype=bool)
 
-    excluded_union = None
-    if production_areas:
-        excluded_union = unary_union(
-            [p["polygon_utm"].buffer(production_zone_exclusion_buffer_meters) for p in production_areas]
-        )
-        excluded_prepared = prep(excluded_union)
-    else:
-        excluded_prepared = None
+    # Raw (unbuffered) unions, kept separately from the buffered
+    # eligibility exclusion below -- these are what candidate distances
+    # are measured against, so "distance to production/water zone" means
+    # distance to the zone itself, not to the zone-plus-buffer.
+    raw_production_union = unary_union([p["polygon_utm"] for p in production_areas]) if production_areas else None
+    raw_water_union = unary_union([z["polygon_utm"] for z in water_zones]) if water_zones else None
+
+    exclusion_pieces = []
+    if raw_production_union is not None:
+        exclusion_pieces.append(raw_production_union.buffer(production_zone_exclusion_buffer_meters))
+    if raw_water_union is not None:
+        exclusion_pieces.append(raw_water_union.buffer(water_zone_exclusion_buffer_meters))
+    combined_exclusion_union = unary_union(exclusion_pieces) if exclusion_pieces else None
+    excluded_prepared = prep(combined_exclusion_union) if combined_exclusion_union is not None else None
 
     road_union = unary_union(road_geometries_utm) if road_geometries_utm else None
     apply_road_constraint = road_geometries_utm is not None  # None = data unavailable, don't apply
@@ -247,11 +293,13 @@ def find_candidate_solar_zones(
             px, py = resolution
             polygon_utm = polygon_utm.buffer(max(px, py) / 2)
 
-        centroid = polygon_utm.centroid
         distance_to_production_zone_m = (
-            centroid.distance(excluded_union) if excluded_union is not None else None
+            polygon_utm.distance(raw_production_union) if raw_production_union is not None else None
         )
-        distance_to_road_m = centroid.distance(road_union) if road_union is not None else None
+        distance_to_water_zone_m = (
+            polygon_utm.distance(raw_water_union) if raw_water_union is not None else None
+        )
+        distance_to_road_m = polygon_utm.distance(road_union) if road_union is not None else None
 
         mean_aspect = _circular_mean_aspect_deg(cell_aspects)
 
@@ -271,6 +319,11 @@ def find_candidate_solar_zones(
                 "distance_to_production_zone_m": (
                     round(float(distance_to_production_zone_m), 1)
                     if distance_to_production_zone_m is not None
+                    else None
+                ),
+                "distance_to_water_zone_m": (
+                    round(float(distance_to_water_zone_m), 1)
+                    if distance_to_water_zone_m is not None
                     else None
                 ),
                 "polygon_utm": polygon_utm,
@@ -352,7 +405,11 @@ def candidates_to_geojson(
 
     features = []
     for candidate in candidates:
-        constraints_satisfied = ["outside_production_zone", f"suitability_score>={MIN_SUITABILITY_SCORE * 100:.0f}"]
+        constraints_satisfied = [
+            "outside_production_zone",
+            "outside_water_candidate_zone",
+            f"suitability_score>={MIN_SUITABILITY_SCORE * 100:.0f}",
+        ]
         if candidate.get("distance_to_road_m") is not None:
             constraints_satisfied.append("within_road_proximity_buffer")
 
@@ -366,6 +423,11 @@ def candidates_to_geojson(
             if candidate.get("distance_to_production_zone_m") is not None
             else None
         )
+        distance_to_water_zone_ft = (
+            round(candidate["distance_to_water_zone_m"] / METERS_PER_FOOT, 1)
+            if candidate.get("distance_to_water_zone_m") is not None
+            else None
+        )
 
         extra_properties = {
             "rank": candidate["rank"],
@@ -375,6 +437,7 @@ def candidates_to_geojson(
             "aspect_degrees": candidate["aspect_deg"],
             "distance_to_road_ft": distance_to_road_ft,
             "distance_to_production_zone_ft": distance_to_production_zone_ft,
+            "distance_to_water_zone_ft": distance_to_water_zone_ft,
             "constraints_satisfied": constraints_satisfied,
         }
         if "prime_farmland_conflict" in candidate:
@@ -439,19 +502,40 @@ def identify_solar_candidate_zones(
 ) -> dict:
     """
     Full pipeline entry point: fetches the DEM (unless one is passed in),
-    production areas, and farm roads; runs the constraint stack; checks
-    the SSURGO prime-farmland conflict; and returns the
-    "solar_infrastructure" GeoJSON FeatureCollection.
+    production areas, water-candidate zones, and farm roads; runs the
+    constraint stack; checks the SSURGO prime-farmland conflict; and
+    returns the "solar_infrastructure" GeoJSON FeatureCollection.
 
-    Each real-data fetch degrades independently and gracefully — a farm
-    roads or SSURGO outage shouldn't block solar candidates from being
-    identified at all, same reasoning as every other optional layer in
-    this pipeline (imagery, water candidate zones' own DEM fetch, etc.).
+    production_areas and water_zones are both computed directly from the
+    DEM already in hand (identify_production_areas(), delineate_valleys()
+    + water_candidate_zones.find_candidate_zones() — the same pure
+    functions road_corridors.py already calls for its own pond-zone
+    exclusion), so neither needs its own network fetch or its own
+    try/except here — the same reasoning identify_production_areas()
+    already relied on unguarded, just applied consistently to the zone
+    that was previously missing from this constraint stack entirely.
+
+    Each real NETWORK fetch (farm roads, SSURGO) still degrades
+    independently and gracefully — an outage there shouldn't block solar
+    candidates from being identified at all, same reasoning as every
+    other optional layer in this pipeline (imagery, water candidate
+    zones' own DEM fetch, etc.).
     """
     if dem is None:
         dem = get_dem_for_boundary(boundary_coordinates)
 
     production_areas = identify_production_areas(dem)
+
+    boundary_xs, boundary_ys = warp_transform(
+        "EPSG:4326",
+        dem["crs"],
+        [pt[0] for pt in boundary_coordinates],
+        [pt[1] for pt in boundary_coordinates],
+    )
+    boundary_polygon_utm = Polygon(zip(boundary_xs, boundary_ys))
+
+    valleys = delineate_valleys(dem)
+    water_zones = find_pond_zones(valleys, production_areas, boundary_polygon_utm, dem["crs"])
 
     try:
         roads = get_farm_roads_for_boundary(boundary_coordinates)
@@ -479,7 +563,7 @@ def identify_solar_candidate_zones(
         road_geometries_utm = _suggested_corridor_as_road_fallback(boundary_coordinates, dem)
         road_data_is_fallback = road_geometries_utm is not None
 
-    candidates = find_candidate_solar_zones(dem, production_areas, road_geometries_utm, **zone_kwargs)
+    candidates = find_candidate_solar_zones(dem, production_areas, water_zones, road_geometries_utm, **zone_kwargs)
 
     if check_prime_farmland and candidates:
         try:
