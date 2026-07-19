@@ -24,9 +24,9 @@ Requires ANTHROPIC_API_KEY to be set in your environment (see
 report_generator.py for details).
 """
 
-from soil_data import get_soil_data_for_polygon, coordinates_to_wkt_polygon
+from soil_data import get_soil_data_for_polygon, coordinates_to_wkt_polygon, get_soil_data_as_geojson
 from elevation_data import get_elevation_grid
-from hydrology_data import get_water_features_for_boundary
+from hydrology_data import get_water_features_for_boundary, get_water_features_geojson
 from climate_data import get_climate_summary_for_point
 from imagery_data import get_imagery_summary_for_boundary
 from water_candidate_zones import (
@@ -36,6 +36,7 @@ from water_candidate_zones import (
 from road_corridors import identify_road_corridor_candidates, summarize_road_corridor_candidates
 from solar_suitability import identify_solar_candidate_zones, summarize_solar_candidate_zones
 from fencing import identify_fencing, summarize_fencing
+from feature_schema import make_feature_collection
 from report_generator import generate_scale_of_permanence_report
 
 
@@ -48,10 +49,16 @@ def _boundary_center(boundary_coordinates: list) -> tuple:
     return sum(lats) / len(lats), sum(lons) / len(lons)
 
 
-def generate_full_report(boundary_coordinates: list) -> str:
+def generate_full_report(boundary_coordinates: list) -> dict:
     """
     Runs the full pipeline for a given property boundary (list of
-    (longitude, latitude) tuples) and returns the final narrative report.
+    (longitude, latitude) tuples) and returns:
+
+        {
+            "report": "<narrative Scale of Permanence report>",
+            "layers": <merged GeoJSON FeatureCollection of every schema-wrapped
+                       layer this run produced, for map rendering>,
+        }
     """
     print("Step 1/10: Fetching climate data (prevailing wind, rainfall)...")
     center_lat, center_lon = _boundary_center(boundary_coordinates)
@@ -64,6 +71,7 @@ def generate_full_report(boundary_coordinates: list) -> str:
     print("Step 2/10: Fetching soil data for the full boundary...")
     wkt_polygon = coordinates_to_wkt_polygon(boundary_coordinates)
     soil_components = get_soil_data_for_polygon(wkt_polygon)
+    soil_geojson = get_soil_data_as_geojson(wkt_polygon)
     print(f"  Found {len(soil_components)} soil component(s).\n")
 
     print("Step 3/10: Fetching elevation grid...")
@@ -72,6 +80,7 @@ def generate_full_report(boundary_coordinates: list) -> str:
 
     print("Step 4/10: Fetching nearby water features...")
     water_features = get_water_features_for_boundary(boundary_coordinates)
+    hydrology_geojson = get_water_features_geojson(boundary_coordinates)
     stream_count = len(water_features["streams"])
     waterbody_count = len(water_features["water_bodies"])
     print(f"  Found {stream_count} stream(s), {waterbody_count} water body/bodies.\n")
@@ -98,6 +107,7 @@ def generate_full_report(boundary_coordinates: list) -> str:
     try:
         water_zone_result = identify_water_system_candidate_zones(boundary_coordinates)
         water_candidate_zones_geojson = water_zone_result["zones_geojson"]
+        production_areas_geojson = water_zone_result["production_areas_geojson"]
     except Exception as e:
         # Same reasoning as imagery above: a USGS 3DEP outage or network
         # hiccup shouldn't take down the whole report — the WATER SUPPLY
@@ -105,6 +115,7 @@ def generate_full_report(boundary_coordinates: list) -> str:
         # grid alone, same as it did before this layer existed.
         print(f"  Water system candidate zone identification failed ({e}), continuing without it.\n")
         water_candidate_zones_geojson = None
+        production_areas_geojson = None
     if water_candidate_zones_geojson is not None:
         print(f"  {summarize_water_system_candidate_zones(water_zone_result)}\n")
 
@@ -165,7 +176,32 @@ def generate_full_report(boundary_coordinates: list) -> str:
         fencing_geojson,
     )
 
-    return report
+    # A single merged FeatureCollection for the frontend map, combining
+    # every schema-wrapped layer this run produced (any that failed above
+    # degrade to None and are simply omitted here, same graceful-failure
+    # pattern used throughout this pipeline). properties.layer (and, for
+    # suggested_road_corridor, properties.corridor_type) is what the
+    # frontend groups these features by for rendering/legend purposes —
+    # this function doesn't need to know about that grouping itself.
+    layer_collections = [
+        soil_geojson,
+        hydrology_geojson,
+        production_areas_geojson,
+        water_candidate_zones_geojson,
+        solar_candidate_zones_geojson,
+        road_corridor_candidates_geojson,
+        fencing_geojson,
+    ]
+    layers_geojson = make_feature_collection(
+        [
+            feature
+            for collection in layer_collections
+            if collection is not None
+            for feature in collection["features"]
+        ]
+    )
+
+    return {"report": report, "layers": layers_geojson}
 
 
 if __name__ == "__main__":
@@ -179,7 +215,9 @@ if __name__ == "__main__":
         (-79.9838258, 40.6458343),
     ]
 
-    report = generate_full_report(property_boundary)
+    result = generate_full_report(property_boundary)
 
     print("=" * 60)
-    print(report)
+    print(result["report"])
+    print("=" * 60)
+    print(f"{len(result['layers']['features'])} map feature(s) across all layers.")

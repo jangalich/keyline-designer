@@ -68,7 +68,7 @@ def generate_report_endpoint():
         { "boundary": [[lon, lat], [lon, lat], ...] }
 
     Returns:
-        { "report": "..." }  on success
+        { "report": "...", "layers": <GeoJSON FeatureCollection> }  on success
         { "error": "..." }   on failure, with an appropriate HTTP status
     """
     data = request.get_json(silent=True)
@@ -85,8 +85,8 @@ def generate_report_endpoint():
         # generate_full_report expects a list of (lon, lat) tuples; JSON
         # gives us lists, but Python's tuple-unpacking in the downstream
         # functions works the same either way, so no conversion needed.
-        report = generate_full_report(boundary)
-        return jsonify({"report": report})
+        result = generate_full_report(boundary)
+        return jsonify({"report": result["report"], "layers": result["layers"]})
 
     except RuntimeError as e:
         # Covers the missing ANTHROPIC_API_KEY case specifically
