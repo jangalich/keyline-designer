@@ -8,6 +8,7 @@ checks of the classification logic itself, not a real fetched DEM.
 """
 
 import numpy as np
+from shapely.geometry import box
 
 from feature_schema import validate_feature_collection
 from production_area import (
@@ -23,6 +24,12 @@ BASE_DEM = {
     "origin_y": 4500000.0,
     "crs": "EPSG:32617",
 }
+
+# The DEM's own full extent (origin_y is the upper-left/max-y corner) —
+# used wherever a test isn't specifically about parcel clipping, so that
+# behavior matches the pre-clipping expectations exactly (100% on-parcel,
+# nothing to clip).
+FULL_EXTENT_BOUNDARY = box(500000.0, 4500000.0 - 30 * 5.0, 500000.0 + 30 * 5.0, 4500000.0)
 
 
 def _dem(array: np.ndarray) -> dict:
@@ -57,7 +64,7 @@ for row in range(size):
     for col in range(size):
         array[row, col] = 100.0 if row < 15 else 100.0 + (row - 14) * 5.0
 
-patches = identify_production_areas(_dem(array))
+patches = identify_production_areas(_dem(array), FULL_EXTENT_BOUNDARY)
 assert len(patches) == 1, f"expected exactly 1 production-area patch, got {len(patches)}"
 patch = patches[0]
 assert patch["representative_elevation_m"] == 100.0, (
@@ -77,8 +84,79 @@ print(
 # inverse: raising the minimum-area filter above the bench's real size
 # drops it, confirming that filter is actually applied.
 huge_area_threshold = patch["area_acres"] * 100
-assert identify_production_areas(_dem(array), min_area_acres=huge_area_threshold) == []
+assert identify_production_areas(_dem(array), FULL_EXTENT_BOUNDARY, min_area_acres=huge_area_threshold) == []
 print("Raising min_area_acres above the found patch's size correctly drops it.")
+
+
+# --- regression: candidates are clipped to the real parcel boundary, not the buffered DEM extent ---
+#
+# This is the exact live bug found against the real property: dem_data.py
+# fetches a DEM buffered ~100m past the drawn boundary (correct and
+# intentional, for flow-accumulation context), but identify_production_areas()
+# used to return each patch's full footprint over that buffered extent
+# without ever clipping back down to the actual parcel. Checked live
+# against the real six-point property boundary via
+# shapely.Polygon.contains()/.intersection(): of 6 production-area
+# candidates, only 1 was fully on-parcel; the rest ranged from 0% to 34%
+# on-parcel. Point-sampling a single vertex per polygon (the earlier,
+# weaker check) missed this entirely -- only checking the full polygon's
+# overlap against the real boundary catches it.
+
+# Case 1: a boundary covering only the WEST HALF of the flat bench's x-range
+# (the bench spans the full x in [500000, 500150]) -- the bench should be
+# clipped down to roughly half its unclipped size, not returned at its
+# full (partly off-parcel) footprint.
+west_half_boundary = box(500000.0, 4500000.0 - 30 * 5.0, 500075.0, 4500000.0)
+west_half_patches = identify_production_areas(_dem(array), west_half_boundary)
+assert len(west_half_patches) == 1, (
+    f"expected the bench to still qualify as a (smaller) candidate on the west-half boundary, "
+    f"got {len(west_half_patches)} patch(es)"
+)
+west_patch = west_half_patches[0]
+assert west_patch["area_acres"] < patch["area_acres"], (
+    f"a boundary covering only half the bench should clip its area down "
+    f"(full: {patch['area_acres']} acres, west-half boundary: {west_patch['area_acres']} acres)"
+)
+on_parcel_fraction = (
+    west_patch["polygon_utm"].intersection(west_half_boundary).area / west_patch["polygon_utm"].area
+)
+assert on_parcel_fraction > 0.999, (
+    f"the returned candidate geometry must itself be (effectively) 100% on-parcel after clipping, "
+    f"got {on_parcel_fraction * 100:.1f}%"
+)
+assert west_patch["polygon_utm"].within(west_half_boundary.buffer(1e-6)), (
+    "clipped candidate polygon must stay within the real parcel boundary"
+)
+print(
+    f"Parcel clipping: a boundary covering only half the bench correctly shrinks the candidate "
+    f"({patch['area_acres']} acres unclipped -> {west_patch['area_acres']} acres clipped), "
+    f"and the returned geometry checks out as {on_parcel_fraction * 100:.1f}% on-parcel."
+)
+
+# Case 2: a boundary entirely disjoint from the DEM's extent altogether --
+# every candidate patch (built from cells the boundary never covers at
+# all) must be dropped completely (the 0%-on-parcel case actually found
+# live: ids 2, 47, 57, 65 in the real check).
+disjoint_boundary = box(600000.0, 4600000.0, 600100.0, 4600100.0)
+disjoint_patches = identify_production_areas(_dem(array), disjoint_boundary)
+assert disjoint_patches == [], (
+    f"a boundary that doesn't overlap the DEM at all should drop every candidate entirely, "
+    f"got {len(disjoint_patches)} patch(es)"
+)
+print("Parcel clipping: a boundary entirely off the DEM's extent correctly drops every candidate (0% on-parcel).")
+
+# Case 3: a boundary clipping the bench down to a sliver below
+# MIN_PRODUCTION_AREA_ACRES should drop it entirely, same as the
+# unclipped min_area_acres filter above -- confirms clipping and the
+# area-floor filter compose correctly rather than the floor only ever
+# applying to the pre-clip estimate.
+sliver_boundary = box(500000.0, 4500000.0 - 30 * 5.0, 500002.0, 4500000.0)  # 2m wide sliver of the bench
+sliver_patches = identify_production_areas(_dem(array), sliver_boundary)
+assert sliver_patches == [], (
+    f"a boundary clipping the bench down to a sliver below MIN_PRODUCTION_AREA_ACRES should drop it, "
+    f"got {len(sliver_patches)} patch(es)"
+)
+print("Parcel clipping: a boundary clipping the bench below the minimum area correctly drops it.")
 
 
 # --- production_areas_to_geojson: schema-valid with the diagnostic layer name ---

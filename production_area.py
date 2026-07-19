@@ -22,16 +22,32 @@ only this module and water_candidate_zones.py's zone-filtering logic.
 Deliberately as simple as imagery_data.py's fixed NDVI threshold
 classifier — explainable and easy to sanity-check against a real
 property, not a claim of agronomic precision.
+
+PARCEL CLIPPING: dem_data.py deliberately fetches a DEM buffered 100m past
+the drawn boundary (real, legitimate reasons — see its own docstring), so
+a slope-qualifying patch can span both on-parcel and buffered off-parcel
+ground. identify_production_areas() requires the real parcel boundary
+(boundary_polygon_utm) and CLIPS each candidate down to its on-parcel
+portion before returning it — a patch that's 34% on-parcel is returned as
+that smaller, real 34%-sized candidate, not the full (partly off-parcel)
+footprint. A patch with zero on-parcel area, or whose clipped remainder
+falls below MIN_PRODUCTION_AREA_ACRES, is dropped entirely rather than
+returned as a technically-nonempty but meaningless sliver. This was a
+real bug (confirmed live: candidates describing land that isn't part of
+the property), not a hypothetical — see test_production_area.py's
+regression test for the exact scenario.
 """
 
 import math
 
 import numpy as np
 from rasterio.warp import transform as warp_transform
-from shapely.geometry import MultiPoint, mapping
+from rasterio.warp import transform_geom
+from shapely.geometry import MultiPoint, Point, Polygon, box, mapping
+from shapely.prepared import prep
 
 from feature_schema import CONFIDENCE_LOW, make_feature, make_feature_collection
-from raster_grid import cell_area_acres, connected_components, pixel_center_xy
+from raster_grid import SQUARE_METERS_PER_ACRE, cell_area_acres, connected_components, pixel_center_xy
 
 # Cells at or below this slope are considered plausibly workable
 # production/cultivation ground for this heuristic. CONFIGURABLE — tune
@@ -91,17 +107,20 @@ def compute_slope_percent(
 
 def identify_production_areas(
     dem: dict,
+    boundary_polygon_utm: Polygon,
     max_slope_pct: float = MAX_PRODUCTION_SLOPE_PCT,
     min_area_acres: float = MIN_PRODUCTION_AREA_ACRES,
 ) -> list[dict]:
     """
-    Returns one entry per candidate production-area patch:
+    Returns one entry per candidate production-area patch, clipped to the
+    real parcel (boundary_polygon_utm — see module docstring's PARCEL
+    CLIPPING section for why this is required, not optional):
 
         {
             'id': int,
-            'area_acres': float,
-            'representative_elevation_m': float,  # median elevation of the patch
-            'polygon_utm': shapely Polygon,        # convex hull of cell centers
+            'area_acres': float,                  # of the ON-PARCEL (clipped) footprint
+            'representative_elevation_m': float,  # median elevation of the ON-PARCEL cells
+            'polygon_utm': shapely Polygon/MultiPolygon,  # clipped to boundary_polygon_utm
             'geometry_wgs84': GeoJSON geometry dict,
         }
 
@@ -110,6 +129,20 @@ def identify_production_areas(
     for output/display. The convex hull of cell centers is a deliberately
     simple footprint for a heuristic patch — adequate for that proximity
     math, not a precise cadastral-grade boundary.
+
+    A candidate slope-qualifying patch can span the DEM's buffered area
+    past the drawn boundary (dem_data.py fetches ~100m past the parcel on
+    purpose — see its docstring). This function filters each patch's
+    cells down to the ones actually on the parcel BEFORE computing area/
+    elevation/geometry, so every number reported describes real, on-parcel
+    ground — not a mix of real and off-parcel land. A patch with no
+    on-parcel cells at all is skipped entirely; one whose on-parcel
+    remainder is real but tiny is dropped by the same min_area_acres
+    filter already applied to the unclipped case. The final polygon is
+    additionally intersected with boundary_polygon_utm as a defensive
+    safety net — the convex hull of on-parcel cell centers can still bulge
+    slightly past a concave boundary edge even when every contributing
+    cell is itself on-parcel.
     """
     array = dem["array"]
     slope = compute_slope_percent(array, dem["resolution_meters"])
@@ -117,18 +150,27 @@ def identify_production_areas(
 
     labels, num_components = connected_components(candidate_mask)
     area_per_cell = cell_area_acres(dem)
+    boundary_prepared = prep(boundary_polygon_utm)
 
     patches = []
     for component_id in range(num_components):
         cells = np.argwhere(labels == component_id)
-        area_acres = len(cells) * area_per_cell
+        on_parcel_cells = [
+            (int(r), int(c))
+            for r, c in cells
+            if boundary_prepared.contains(Point(pixel_center_xy(dem, int(r), int(c))))
+        ]
+        if not on_parcel_cells:
+            continue  # entire patch sits outside the drawn boundary -- not a real candidate
+
+        area_acres = len(on_parcel_cells) * area_per_cell
         if area_acres < min_area_acres:
             continue
 
-        elevations = [float(array[r, c]) for r, c in cells]
+        elevations = [float(array[r, c]) for r, c in on_parcel_cells]
         representative_elevation_m = float(np.median(elevations))
 
-        utm_points = [pixel_center_xy(dem, int(r), int(c)) for r, c in cells]
+        utm_points = [pixel_center_xy(dem, r, c) for r, c in on_parcel_cells]
         polygon_utm = MultiPoint(utm_points).convex_hull
         if polygon_utm.geom_type != "Polygon":
             # Degenerate hull (near-collinear patch) — buffer to a real
@@ -136,9 +178,19 @@ def identify_production_areas(
             px, py = dem["resolution_meters"]
             polygon_utm = polygon_utm.buffer(max(px, py) / 2)
 
-        xs, ys = zip(*polygon_utm.exterior.coords)
-        lons, lats = warp_transform(dem["crs"], "EPSG:4326", list(xs), list(ys))
-        geometry_wgs84 = {"type": "Polygon", "coordinates": [list(zip(lons, lats))]}
+        polygon_utm = polygon_utm.intersection(boundary_polygon_utm)
+        if polygon_utm.is_empty:
+            continue
+
+        # The clip above can, in principle, trim more than the cell-count
+        # estimate above did (hull bulge past a concave boundary edge) —
+        # recompute area from the actual returned geometry so area_acres
+        # always matches polygon_utm exactly, not the pre-clip estimate.
+        area_acres = polygon_utm.area / SQUARE_METERS_PER_ACRE
+        if area_acres < min_area_acres:
+            continue
+
+        geometry_wgs84 = transform_geom(dem["crs"], "EPSG:4326", mapping(polygon_utm))
 
         patches.append(
             {
@@ -211,5 +263,9 @@ if __name__ == "__main__":
         "crs": "EPSG:32617",
     }
 
-    patches = identify_production_areas(synthetic_dem)
+    # A boundary matching the DEM's full extent — this smoke test isn't
+    # about parcel clipping, just the slope heuristic itself.
+    full_extent_boundary = box(500000.0, 4500000.0 - size * 5.0, 500000.0 + size * 5.0, 4500000.0)
+
+    patches = identify_production_areas(synthetic_dem, full_extent_boundary)
     print(summarize_production_areas(patches))

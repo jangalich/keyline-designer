@@ -284,9 +284,6 @@ def identify_water_system_candidate_zones(
     if dem is None:
         dem = get_dem_for_boundary(boundary_coordinates)
 
-    valleys = delineate_valleys(dem)
-    production_areas = identify_production_areas(dem)
-
     boundary_xs, boundary_ys = warp_transform(
         "EPSG:4326",
         dem["crs"],
@@ -294,6 +291,9 @@ def identify_water_system_candidate_zones(
         [pt[1] for pt in boundary_coordinates],
     )
     boundary_polygon_utm = Polygon(zip(boundary_xs, boundary_ys))
+
+    valleys = delineate_valleys(dem)
+    production_areas = identify_production_areas(dem, boundary_polygon_utm)
 
     zones = find_candidate_zones(
         valleys, production_areas, boundary_polygon_utm, dem["crs"], **zone_kwargs

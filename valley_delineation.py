@@ -69,7 +69,13 @@ VALLEY_CONFIDENCE_NOTES = (
     "steepest descent between grid cells, which can't represent braided "
     "or split flow, and resolution-scale features (below the DEM's pixel "
     "size) won't appear. Treat this as a first-pass drainage network for "
-    "design purposes, not a wetlands or hydrology survey."
+    "design purposes, not a wetlands or hydrology survey. A valley line "
+    "may legitimately extend past the drawn property boundary into the "
+    "DEM's buffered surrounding area (see dem_data.py) — flow paths don't "
+    "stop at a property line, so a branch's head or an inflection point "
+    "sitting just off-parcel is real upstream/downstream context, not an "
+    "error; this is intentionally NOT clipped to the boundary the way "
+    "production-area and other candidate-zone layers are."
 )
 
 

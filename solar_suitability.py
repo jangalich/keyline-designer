@@ -50,7 +50,8 @@ from typing import Optional
 
 import numpy as np
 from rasterio.warp import transform as warp_transform
-from shapely.geometry import LineString, MultiPoint, Point, Polygon
+from rasterio.warp import transform_geom
+from shapely.geometry import LineString, MultiPoint, Point, Polygon, mapping
 from shapely.ops import unary_union
 from shapely.prepared import prep
 
@@ -58,7 +59,7 @@ from dem_data import get_dem_for_boundary
 from farm_roads_data import get_farm_roads_for_boundary
 from feature_schema import CONFIDENCE_LOW, make_feature, make_feature_collection
 from production_area import identify_production_areas
-from raster_grid import cell_area_acres, connected_components, pixel_center_xy
+from raster_grid import SQUARE_METERS_PER_ACRE, cell_area_acres, connected_components, pixel_center_xy
 from road_corridors import POND_ZONE_EXCLUSION_BUFFER_METERS, identify_road_corridor_candidates
 from soil_data import coordinates_to_wkt_polygon, get_farmland_classification_for_polygon, is_prime_farmland
 from terrain_metrics import aspect_score, aspect_to_compass_label, compute_shading_score, compute_slope_and_aspect
@@ -165,6 +166,7 @@ def find_candidate_solar_zones(
     production_areas: list[dict],
     water_zones: list[dict],
     road_geometries_utm: Optional[list[LineString]],
+    boundary_polygon_utm: Polygon,
     max_solar_slope_pct: float = MAX_SOLAR_SLOPE_PCT,
     min_suitability_score: float = MIN_SUITABILITY_SCORE,
     production_zone_exclusion_buffer_meters: float = PRODUCTION_ZONE_EXCLUSION_BUFFER_METERS,
@@ -188,6 +190,17 @@ def find_candidate_solar_zones(
     (with that noted by the caller); an empty list [] means "fetched
     successfully, no roads found nearby" and is treated as a real,
     binding constraint (nothing will qualify) — see module docstring.
+
+    boundary_polygon_utm is the real parcel (NOT the DEM's buffered
+    extent — dem_data.py fetches ~100m past the drawn boundary on
+    purpose). A cell outside it is excluded from eligibility the same way
+    a cell inside a production/water-zone exclusion buffer is: this is
+    what keeps a candidate from being built out of the DEM's buffered
+    margin. The final candidate polygon is additionally intersected with
+    boundary_polygon_utm as a defensive safety net — the convex hull of
+    on-parcel cell centers can still bulge slightly past a concave
+    boundary edge even when every contributing cell is itself on-parcel
+    (see production_area.py's identical reasoning).
 
     Every reported distance (production zone, water zone, road) is the
     real nearest-EDGE distance from the candidate's own polygon to the
@@ -239,6 +252,7 @@ def find_candidate_solar_zones(
         exclusion_pieces.append(raw_water_union.buffer(water_zone_exclusion_buffer_meters))
     combined_exclusion_union = unary_union(exclusion_pieces) if exclusion_pieces else None
     excluded_prepared = prep(combined_exclusion_union) if combined_exclusion_union is not None else None
+    boundary_prepared = prep(boundary_polygon_utm)
 
     road_union = unary_union(road_geometries_utm) if road_geometries_utm else None
     apply_road_constraint = road_geometries_utm is not None  # None = data unavailable, don't apply
@@ -252,6 +266,9 @@ def find_candidate_solar_zones(
 
             x, y = pixel_center_xy(dem, r, c)
             point = Point(x, y)
+
+            if not boundary_prepared.contains(point):
+                continue  # outside the real parcel -- DEM's buffered margin, not eligible ground
 
             if excluded_prepared is not None and excluded_prepared.contains(point):
                 continue
@@ -293,6 +310,17 @@ def find_candidate_solar_zones(
             px, py = resolution
             polygon_utm = polygon_utm.buffer(max(px, py) / 2)
 
+        # Defensive clip: every contributing cell is already on-parcel
+        # (checked above), but the convex hull of those cell centers can
+        # still bulge slightly past a concave boundary edge — see
+        # production_area.py's identical reasoning.
+        polygon_utm = polygon_utm.intersection(boundary_polygon_utm)
+        if polygon_utm.is_empty:
+            continue
+        area_acres = polygon_utm.area / SQUARE_METERS_PER_ACRE
+        if area_acres < min_candidate_area_acres:
+            continue
+
         distance_to_production_zone_m = (
             polygon_utm.distance(raw_production_union) if raw_production_union is not None else None
         )
@@ -303,9 +331,10 @@ def find_candidate_solar_zones(
 
         mean_aspect = _circular_mean_aspect_deg(cell_aspects)
 
-        xs, ys = zip(*polygon_utm.exterior.coords)
-        lons, lats = warp_transform(dem["crs"], "EPSG:4326", list(xs), list(ys))
-        geometry_wgs84 = {"type": "Polygon", "coordinates": [list(zip(lons, lats))]}
+        # transform_geom (not manual exterior.coords extraction) since the
+        # boundary intersection above can turn a simple hull into a
+        # MultiPolygon against a non-convex/complex real parcel.
+        geometry_wgs84 = transform_geom(dem["crs"], "EPSG:4326", mapping(polygon_utm))
 
         candidates.append(
             {
@@ -524,8 +553,6 @@ def identify_solar_candidate_zones(
     if dem is None:
         dem = get_dem_for_boundary(boundary_coordinates)
 
-    production_areas = identify_production_areas(dem)
-
     boundary_xs, boundary_ys = warp_transform(
         "EPSG:4326",
         dem["crs"],
@@ -533,6 +560,8 @@ def identify_solar_candidate_zones(
         [pt[1] for pt in boundary_coordinates],
     )
     boundary_polygon_utm = Polygon(zip(boundary_xs, boundary_ys))
+
+    production_areas = identify_production_areas(dem, boundary_polygon_utm)
 
     valleys = delineate_valleys(dem)
     water_zones = find_pond_zones(valleys, production_areas, boundary_polygon_utm, dem["crs"])
@@ -563,7 +592,9 @@ def identify_solar_candidate_zones(
         road_geometries_utm = _suggested_corridor_as_road_fallback(boundary_coordinates, dem)
         road_data_is_fallback = road_geometries_utm is not None
 
-    candidates = find_candidate_solar_zones(dem, production_areas, water_zones, road_geometries_utm, **zone_kwargs)
+    candidates = find_candidate_solar_zones(
+        dem, production_areas, water_zones, road_geometries_utm, boundary_polygon_utm, **zone_kwargs
+    )
 
     if check_prime_farmland and candidates:
         try:

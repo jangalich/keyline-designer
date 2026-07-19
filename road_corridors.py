@@ -169,21 +169,36 @@ def _invert_dem(dem: dict) -> dict:
     return {**dem, "array": -dem["array"]}
 
 
-def _build_exclusion_cell_mask(dem: dict, excluded_prepared) -> np.ndarray:
+def _build_exclusion_cell_mask(dem: dict, excluded_prepared, boundary_prepared) -> np.ndarray:
     """Per-cell boolean mask (True = excluded), built once by testing
     every valid cell center against the (prepared, unioned) exclusion
-    geometry — reused across every contour band and ridge branch rather
-    than re-testing point-in-polygon per band."""
+    geometry AND against the real parcel boundary — reused across every
+    contour band and ridge branch rather than re-testing point-in-polygon
+    per band.
+
+    A cell outside boundary_prepared is excluded here the same way an
+    excluded-zone cell is — this is what keeps contour-band and ridge-top
+    candidates from being generated out of the DEM's buffered area past
+    the drawn boundary (dem_data.py fetches ~100m past the parcel on
+    purpose; without this, a candidate could be built entirely from
+    off-parcel cells). The only geometry that's still allowed to touch/
+    reach the boundary line is the single connector segment
+    _anchor_to_boundary() adds afterward — that's the already-disclosed
+    "arbitrary boundary anchor" limitation, not something this mask
+    should (or does) affect."""
     array = dem["array"]
     rows, cols = array.shape
     excluded = np.zeros((rows, cols), dtype=bool)
-    if excluded_prepared is None:
-        return excluded
 
     valid = ~np.isnan(array)
     for r in range(rows):
         for c in range(cols):
-            if valid[r, c] and excluded_prepared.contains(Point(pixel_center_xy(dem, r, c))):
+            if not valid[r, c]:
+                continue
+            point = Point(pixel_center_xy(dem, r, c))
+            if not boundary_prepared.contains(point):
+                excluded[r, c] = True
+            elif excluded_prepared is not None and excluded_prepared.contains(point):
                 excluded[r, c] = True
     return excluded
 
@@ -435,6 +450,17 @@ def find_candidate_road_corridors(
     doesn't disable anything here, it just makes every candidate's
     boundary connection point arbitrary rather than road-frontage-based.
 
+    boundary_polygon_utm does double duty: it's both the anchoring target
+    (_anchor_to_boundary) AND, via _build_exclusion_cell_mask(), the hard
+    limit on which DEM cells contour-band/ridge-top generation can draw
+    from at all — the DEM covers ~100m past the drawn boundary on purpose
+    (dem_data.py), but a corridor's own candidate geometry must come from
+    on-parcel cells only. The single connector segment
+    _anchor_to_boundary() adds to reach the boundary line is the one
+    already-disclosed exception (see connection_point_is_arbitrary and
+    its confidence_notes caveat) — it's added AFTER this exclusion, not
+    subject to it.
+
     Returns up to max_candidates entries, both corridor types ranked
     together, best-first:
         {
@@ -467,7 +493,8 @@ def find_candidate_road_corridors(
     ]
     combined_exclusion_union = unary_union(exclusion_pieces) if exclusion_pieces else None
     excluded_prepared = prep(combined_exclusion_union) if combined_exclusion_union is not None else None
-    excluded_mask = _build_exclusion_cell_mask(dem, excluded_prepared)
+    boundary_prepared = prep(boundary_polygon_utm)
+    excluded_mask = _build_exclusion_cell_mask(dem, excluded_prepared, boundary_prepared)
 
     raw_candidates: list[tuple[list[tuple[float, float, float]], str]] = []
 
@@ -753,9 +780,6 @@ def identify_road_corridor_candidates(
     if dem is None:
         dem = get_dem_for_boundary(boundary_coordinates)
 
-    production_areas = identify_production_areas(dem)
-    valleys = delineate_valleys(dem)  # reused for pond zones AND the floodplain fallback below
-
     boundary_xs, boundary_ys = warp_transform(
         "EPSG:4326",
         dem["crs"],
@@ -763,6 +787,9 @@ def identify_road_corridor_candidates(
         [pt[1] for pt in boundary_coordinates],
     )
     boundary_polygon_utm = Polygon(zip(boundary_xs, boundary_ys))
+
+    production_areas = identify_production_areas(dem, boundary_polygon_utm)
+    valleys = delineate_valleys(dem)  # reused for pond zones AND the floodplain fallback below
 
     pond_zones = find_pond_zones(valleys, production_areas, boundary_polygon_utm, dem["crs"])
 

@@ -165,4 +165,50 @@ for feature in geojson["features"]:
     assert "erosion-prone soil data" in notes, "erosion data unavailability should be flagged in confidence_notes"
 print("corridors_to_geojson output is schema-valid, layer='suggested_road_corridor', with required properties and fallback caveats.")
 
+
+# --- regression: corridor candidates stay on-parcel, not drawn from the DEM's buffered margin ---
+#
+# This is the exact live bug found against the real property: dem_data.py
+# fetches a DEM buffered ~100m past the drawn boundary (correct and
+# intentional, for terrain-analysis context), but contour-band/ridge-top
+# generation never restricted its candidate cells to the actual parcel --
+# a corridor could be built entirely from off-parcel ground. Here the DEM
+# is a uniform south-facing slope spanning the FULL 250m x 250m grid (so,
+# unclipped, a natural contour band would span the whole width, well past
+# the parcel on both sides); the boundary below is a smaller 150m x 150m
+# parcel with a 50m buffer margin on every side, mirroring dem_data.py's
+# real buffer relationship at test scale.
+buffered_rows = buffered_cols = 50
+buffered_array = np.zeros((buffered_rows, buffered_cols), dtype=np.float32)
+for row in range(buffered_rows):
+    buffered_array[row, :] = 100.0 - row * 0.3  # uniform south-facing slope, same across every column
+buffered_dem = {
+    "array": buffered_array, "resolution_meters": RESOLUTION,
+    "origin_x": 500000.0, "origin_y": 4500250.0, "crs": CRS,
+}
+# The real parcel: 150m x 150m, with a 50m buffer margin to the DEM's edge
+# on every side -- the DEM covers ground the parcel itself doesn't.
+parcel_boundary = box(500050, 4500050, 500200, 4500200)
+
+buffered_candidates = find_candidate_road_corridors(buffered_dem, [], [], parcel_boundary, max_candidates=50)
+assert buffered_candidates, "expected at least one contour-band candidate on this uniform, buffered hillside"
+
+for candidate in buffered_candidates:
+    # parcel_boundary is convex (a box), so if every contributing cell is
+    # on-parcel, even the anchored connector segment (a straight line from
+    # an interior point to a point ON the boundary ring) can't leave and
+    # re-enter -- the WHOLE anchored line, connector included, must stay
+    # within the parcel. (For a concave real parcel, only the connector
+    # segment itself would be exempt from this -- see this test file's
+    # module docstring and road_corridors.py's own confidence_notes for
+    # that already-disclosed limitation.)
+    assert candidate["line_utm"].within(parcel_boundary.buffer(1e-6)), (
+        f"{candidate['corridor_type']} candidate (rank {candidate['rank']}) extends outside the real parcel "
+        f"boundary -- corridor geometry must be drawn from on-parcel cells only, not the DEM's buffered margin"
+    )
+print(
+    f"Parcel clipping: {len(buffered_candidates)} corridor candidate(s) on a hillside spanning well past the "
+    f"parcel boundary all stay entirely within the real (smaller) parcel, not the DEM's buffered extent."
+)
+
 print("\nAll road_corridors checks passed.")
