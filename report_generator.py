@@ -107,11 +107,40 @@ REASONING SEQUENCE — follow this exact order, do not skip ahead or reorder it:
    candidate as a forced final answer when multiple are close in score — say so, and let
    the ranked list stand as real options.
 
-7. SUBDIVISION FENCES. Propose paddock/subdivision lines that follow the zones and
-   infrastructure already established in steps 2-6 (land-shape zones, water points,
-   roads, tree lines, building sites) rather than an arbitrary grid, so fencing
-   reinforces those decisions instead of cutting across them. Note that no legal parcel
-   or ownership-boundary data feeds this step.
+7. SUBDIVISION FENCES. When STREAM EXCLUSION / PERIMETER FENCING data is provided below
+   (fencing.py: buffered NHD stream geometry for livestock-exclusion fencing, and the
+   property boundary itself for perimeter fencing), lead with those two as REAL COMPUTED
+   GEOMETRY — reference them directly (by label/source_feature_id), state the stream
+   exclusion buffer distance used, and don't re-derive or second-guess their geometry.
+   Perimeter fencing is geometry only — do NOT recommend a fence type, height, or
+   material for it; that is explicitly out of scope.
+
+   Everything else in this section has NO computed geometry behind it and must be
+   framed as narrative-only guidance, explicitly:
+
+   - POND/WATER ZONE EXCLUSION FENCING: if a WATER SYSTEM CANDIDATE ZONE was identified
+     in step 3, note that once a pond/dam is actually sited within it (a future
+     capability this tool doesn't yet perform), exclusion fencing around it would
+     follow — but the candidate zone itself is a band, not a sited feature, and is too
+     imprecise to responsibly draw a fence line around today. Frame this as a future
+     consideration, not a current recommendation, and don't describe specific fence
+     geometry around the candidate zone.
+
+   - TREE CROP/WINDBREAK EXCLUSION FENCING: same treatment — if step 5 proposed a
+     windbreak or tree line, note that exclusion fencing around it would make sense
+     once that planting is actually placed on the ground, but not before.
+
+   - SUBDIVISION/ROTATIONAL FENCING: reason in prose about where it would logically
+     run, referencing the ridge/valley delineation, production zones, and other
+     structured context from steps 2-6 by name (e.g. "following the ridge separating
+     the western and eastern production zones"). This MUST be explicitly conditional —
+     do not assume livestock are part of the operation. Use framing like "if livestock
+     are part of your operation, subdivision fencing would logically follow [feature] —
+     but paddock sizing and layout depend on herd type and stocking rate, which this
+     report doesn't currently account for." Do NOT generate specific paddock sizes,
+     paddock counts, or rotation schedules.
+
+   No legal parcel or ownership-boundary data feeds this step, for any of the above.
 
 8. SOIL — reasoned about last, and treated as the most changeable and most improvable
    factor, not as a reason to exclude land already zoned in steps 2-7. Bring in the
@@ -151,16 +180,20 @@ season imagery would be needed to distinguish vigorous open pasture from tree ca
 
 DATA HONESTY: Farm Roads has real candidate-corridor geometry (step 4) when the
 constraint stack produced any; Permanent Buildings has real candidate-zone geometry for
-solar siting specifically (step 6), but nothing else about building placement, and
-Subdivision Fences has no dedicated data source at all — that one is inferred only from
-the climate, elevation, water, and imagery data plus whatever zones/corridors earlier
-steps established. When reasoning about parts of these sections that AREN'T backed by
-real candidate geometry (fencing in general, non-solar building siting, or Farm Roads
-when no corridor candidates were available), say plainly that no dedicated
-infrastructure/parcel/zoning data exists there, rather than inventing a specific-
-sounding recommendation the data can't support (an exact building footprint, a precise
-fence-post count, a named legal easement). This is a first-pass analysis from public
-data, not a substitute for walking the land or a professional site visit.
+solar siting specifically (step 6), but nothing else about building placement;
+Subdivision Fences has real computed geometry for STREAM EXCLUSION and PERIMETER
+fencing specifically (step 7), but nothing else in that section — pond/water exclusion,
+tree crop/windbreak exclusion, and subdivision/rotational fencing are all narrative-only
+there, reasoned from structured context established in earlier steps rather than their
+own computed geometry (see step 7's guidance above for exactly how to frame each). When
+reasoning about parts of these sections that AREN'T backed by real candidate geometry
+(non-solar building siting, Farm Roads when no corridor candidates were available, or
+any Subdivision Fences content besides stream exclusion/perimeter), say plainly that no
+dedicated infrastructure/parcel/zoning data exists there, rather than inventing a
+specific-sounding recommendation the data can't support (an exact building footprint, a
+precise fence-post count, a named legal easement, a specific paddock count). This is a
+first-pass analysis from public data, not a substitute for walking the land or a
+professional site visit.
 
 OUTPUT STRUCTURE: Write the report as eight sections, in exactly this order, each under
 its own header: Climate, Land Shape, Water Supply, Farm Roads, Trees, Permanent
@@ -346,6 +379,47 @@ def _format_solar_candidate_zones_summary(zones_geojson: Optional[dict]) -> str:
     return "\n".join(lines)
 
 
+def _format_fencing_summary(fencing_geojson: Optional[dict]) -> str:
+    """Formats fencing.py's "exclusion_fencing" (stream) and
+    "perimeter_fencing" (property boundary) layers for the report prompt
+    — see that module for the geometry behind them, and its docstring
+    for why pond/water, tree crop/windbreak, and subdivision/rotational
+    fencing deliberately have NO computed geometry backing them. Optional,
+    same reasoning as the other DEM/network-backed layers — a fetch
+    failure shouldn't take down the whole report; step 7 of the system
+    prompt still gets its narrative-only guidance regardless."""
+    if not fencing_geojson or not fencing_geojson.get("features"):
+        return (
+            "No computed fencing geometry available for this property "
+            "(either no streams were found nearby and boundary data wasn't "
+            "available, or the data wasn't available for this run) — "
+            "reason about all of Subdivision Fences narratively, per the "
+            "system prompt's step 7 guidance, and say plainly that no "
+            "computed geometry backs any of it for this run."
+        )
+
+    lines = [f"{len(fencing_geojson['features'])} computed fencing feature(s):"]
+    for feature in fencing_geojson["features"]:
+        props = feature["properties"]
+        if props["layer"] == "exclusion_fencing":
+            lines.append(
+                f"  - {props['label']}: {props['exclusion_buffer_meters']}m livestock-exclusion "
+                f"buffer around stream (source: {props['source_feature_id']})"
+            )
+        elif props["layer"] == "perimeter_fencing":
+            lines.append(f"  - {props['label']}: the full property boundary, unmodified")
+    lines.append(
+        "\nThese are REAL COMPUTED GEOMETRY (a buffered stream boundary and the property "
+        "boundary itself) — narrate from them directly rather than inventing fence lines, "
+        "and don't recommend fence type/height/material for the perimeter line (out of "
+        "scope). Everything else in Subdivision Fences (pond/water exclusion, tree crop/ "
+        "windbreak exclusion, subdivision/rotational fencing) has NO computed geometry "
+        "backing it — reason about those narratively only, per the system prompt's step 7 "
+        "guidance."
+    )
+    return "\n".join(lines)
+
+
 def _format_imagery_summary(imagery: Optional[dict]) -> str:
     if not imagery:
         return (
@@ -375,6 +449,7 @@ def generate_scale_of_permanence_report(
     water_candidate_zones_geojson: Optional[dict] = None,
     solar_candidate_zones_geojson: Optional[dict] = None,
     road_corridor_candidates_geojson: Optional[dict] = None,
+    fencing_geojson: Optional[dict] = None,
 ) -> str:
     """
     Given the outputs of the data-fetching modules, generates a narrative
@@ -382,18 +457,22 @@ def generate_scale_of_permanence_report(
     climate_data.py), imagery_summary (from imagery_data.py),
     water_candidate_zones_geojson (the "water_system_candidate" layer from
     water_candidate_zones.py), solar_candidate_zones_geojson (the
-    "solar_infrastructure" layer from solar_suitability.py), and
+    "solar_infrastructure" layer from solar_suitability.py),
     road_corridor_candidates_geojson (the "suggested_road_corridor" layer
-    from road_corridors.py) are all optional so existing callers built
-    before those layers existed don't break — but including them produces
-    a meaningfully better report: climate is literally the first item in
-    the Scale of Permanence framework, imagery gives Claude a current
-    land-cover cross-check against the soil data, the water candidate
-    zones give the WATER SUPPLY section a DEM-grounded answer to "where"
-    instead of reasoning from the coarse elevation grid alone, the road
-    corridor candidates do the same for FARM ROADS, and the solar
-    candidate zones do the same for PERMANENT BUILDINGS' solar siting
-    discussion.
+    from road_corridors.py), and fencing_geojson (the combined
+    "exclusion_fencing" + "perimeter_fencing" layers from fencing.py) are
+    all optional so existing callers built before those layers existed
+    don't break — but including them produces a meaningfully better
+    report: climate is literally the first item in the Scale of
+    Permanence framework, imagery gives Claude a current land-cover
+    cross-check against the soil data, the water candidate zones give the
+    WATER SUPPLY section a DEM-grounded answer to "where" instead of
+    reasoning from the coarse elevation grid alone, the road corridor
+    candidates do the same for FARM ROADS, the solar candidate zones do
+    the same for PERMANENT BUILDINGS' solar siting discussion, and the
+    fencing geometry does the same for SUBDIVISION FENCES' stream-
+    exclusion/perimeter content specifically (everything else in that
+    section stays narrative-only — see fencing.py's module docstring).
     """
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
@@ -426,7 +505,11 @@ SUGGESTED ROAD CORRIDOR CANDIDATES (contour-band/ridge-top, DEM-derived):
 {_format_road_corridor_summary(road_corridor_candidates_geojson)}
 
 SOLAR INFRASTRUCTURE CANDIDATE ZONES (ranked, DEM-derived):
-{_format_solar_candidate_zones_summary(solar_candidate_zones_geojson)}"""
+{_format_solar_candidate_zones_summary(solar_candidate_zones_geojson)}
+
+FENCING (stream exclusion + perimeter — real computed geometry; everything else in
+Subdivision Fences is narrative-only, see step 7 guidance above):
+{_format_fencing_summary(fencing_geojson)}"""
 
     message = client.messages.create(
         model=MODEL,

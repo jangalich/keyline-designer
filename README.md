@@ -131,6 +131,30 @@ report using the Claude API.
   `test_solar_road_fallback.py`. This is the only change made to
   `solar_suitability.py` in that pass; its scoring logic itself is
   untouched.
+- `fencing.py` — the Subdivision Fences data layer (Scale of Permanence
+  step 7): real computed geometry for exactly two fencing types.
+  STREAM EXCLUSION fencing buffers each real NHD stream (`hydrology_data.py`,
+  already line geometry, not a candidate zone) by a configurable
+  `STREAM_EXCLUSION_BUFFER_METERS` and outputs the buffer's OUTLINE (a
+  line, not a filled area) as the fence-line layer `exclusion_fencing`.
+  PERIMETER fencing wraps the property boundary itself, unmodified, as
+  layer `perimeter_fencing` — geometry only, no fence type/height/material
+  guidance (explicitly out of scope). Everything else Subdivision Fences
+  covers — pond/water zone exclusion, tree crop/windbreak exclusion,
+  subdivision/rotational fencing — is deliberately NOT computed here: it
+  all keys off candidate/planning geometry (a water system candidate
+  zone, a proposed windbreak) rather than a real, already-sited feature,
+  so buffering it would draw a misleadingly specific fence line around
+  ground that isn't confirmed yet. `report_generator.py`'s step 7 prompt
+  handles those narratively instead — pond/water and tree crop exclusion
+  are framed as a future consideration (once a site is actually sited),
+  and subdivision/rotational fencing is explicitly conditional on
+  livestock being part of the operation, reasoning only about general
+  routing (e.g. along a ridge/valley line) with no specific paddock
+  sizes, counts, or rotation schedules. Same pure-core-logic split as the
+  other candidate-geometry layers (`find_stream_exclusion_fencing()` is
+  network-free and unit-tested against synthetic stream geometry —
+  `test_fencing.py`).
 - `report_generator.py` — combines all of the above and calls the Claude
   API to generate the narrative Scale of Permanence report.
 - `generate_full_report.py` — the full end-to-end pipeline: give it a
@@ -246,6 +270,17 @@ tool (built with Leaflet).
   patch it can produce a less-than-ideal path through the middle of it.
   Reasonable to revisit with a real raster skeletonization approach if
   ground-truthing shows this matters in practice.
+- `fencing.py`'s core buffer/geometry logic is verified offline
+  (`test_fencing.py`, synthetic stream geometry) but not yet run against
+  a live NHD fetch for the user's own property in this environment (no
+  outbound route to `hydro.nationalmap.gov` here — same live-request gap
+  noted above for `farm_roads_data.py` and `irradiance_data.py`). Run
+  `python3 fencing.py` from an environment with real network access to
+  confirm real stream geometry buffers as expected, and tune
+  `STREAM_EXCLUSION_BUFFER_METERS` (currently a commonly-cited rule-of-
+  thumb minimum, not a site-specific or regulatory value — see the
+  module for the current rationale/sourcing caveat) against real
+  livestock-exclusion requirements once ground-truthed.
 
 ## Deploying
 

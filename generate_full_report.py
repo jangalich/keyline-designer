@@ -15,6 +15,8 @@ between scripts.
              --> road_corridors (DEM contour-band/ridge-top corridors + NHD/SSURGO constraints)
              --> solar_suitability (DEM slope/aspect/shading + road/production constraints,
                                      falling back to road_corridors for proximity if needed)
+             --> fencing (real geometry: buffered NHD stream exclusion + property-boundary
+                          perimeter; everything else in Subdivision Fences stays narrative-only)
              --> report_generator
              --> printed report
 
@@ -33,6 +35,7 @@ from water_candidate_zones import (
 )
 from road_corridors import identify_road_corridor_candidates, summarize_road_corridor_candidates
 from solar_suitability import identify_solar_candidate_zones, summarize_solar_candidate_zones
+from fencing import identify_fencing, summarize_fencing
 from report_generator import generate_scale_of_permanence_report
 
 
@@ -50,7 +53,7 @@ def generate_full_report(boundary_coordinates: list) -> str:
     Runs the full pipeline for a given property boundary (list of
     (longitude, latitude) tuples) and returns the final narrative report.
     """
-    print("Step 1/9: Fetching climate data (prevailing wind, rainfall)...")
+    print("Step 1/10: Fetching climate data (prevailing wind, rainfall)...")
     center_lat, center_lon = _boundary_center(boundary_coordinates)
     climate_summary = get_climate_summary_for_point(center_lat, center_lon)
     print(
@@ -58,22 +61,22 @@ def generate_full_report(boundary_coordinates: list) -> str:
         f"avg annual precip: {climate_summary['avg_annual_precipitation_mm']}mm\n"
     )
 
-    print("Step 2/9: Fetching soil data for the full boundary...")
+    print("Step 2/10: Fetching soil data for the full boundary...")
     wkt_polygon = coordinates_to_wkt_polygon(boundary_coordinates)
     soil_components = get_soil_data_for_polygon(wkt_polygon)
     print(f"  Found {len(soil_components)} soil component(s).\n")
 
-    print("Step 3/9: Fetching elevation grid...")
+    print("Step 3/10: Fetching elevation grid...")
     elevation_grid = get_elevation_grid(boundary_coordinates, grid_size=6)
     print(f"  Sampled {len(elevation_grid)} elevation points.\n")
 
-    print("Step 4/9: Fetching nearby water features...")
+    print("Step 4/10: Fetching nearby water features...")
     water_features = get_water_features_for_boundary(boundary_coordinates)
     stream_count = len(water_features["streams"])
     waterbody_count = len(water_features["water_bodies"])
     print(f"  Found {stream_count} stream(s), {waterbody_count} water body/bodies.\n")
 
-    print("Step 5/9: Fetching satellite imagery (NDVI land cover)...")
+    print("Step 5/10: Fetching satellite imagery (NDVI land cover)...")
     try:
         imagery_summary = get_imagery_summary_for_boundary(boundary_coordinates)
     except Exception as e:
@@ -91,7 +94,7 @@ def generate_full_report(boundary_coordinates: list) -> str:
     else:
         print("  No recent low-cloud imagery available for this boundary.\n")
 
-    print("Step 6/9: Identifying valley-based water system candidate zones (DEM/LiDAR)...")
+    print("Step 6/10: Identifying valley-based water system candidate zones (DEM/LiDAR)...")
     try:
         water_zone_result = identify_water_system_candidate_zones(boundary_coordinates)
         water_candidate_zones_geojson = water_zone_result["zones_geojson"]
@@ -105,7 +108,7 @@ def generate_full_report(boundary_coordinates: list) -> str:
     if water_candidate_zones_geojson is not None:
         print(f"  {summarize_water_system_candidate_zones(water_zone_result)}\n")
 
-    print("Step 7/9: Identifying suggested road corridor candidates (DEM contour-band/ridge-top)...")
+    print("Step 7/10: Identifying suggested road corridor candidates (DEM contour-band/ridge-top)...")
     try:
         road_corridor_result = identify_road_corridor_candidates(boundary_coordinates)
         road_corridor_candidates_geojson = road_corridor_result["zones_geojson"]
@@ -119,7 +122,7 @@ def generate_full_report(boundary_coordinates: list) -> str:
     if road_corridor_candidates_geojson is not None:
         print(f"  {summarize_road_corridor_candidates(road_corridor_result)}\n")
 
-    print("Step 8/9: Identifying solar infrastructure candidate zones (DEM slope/aspect/shading)...")
+    print("Step 8/10: Identifying solar infrastructure candidate zones (DEM slope/aspect/shading)...")
     try:
         solar_zone_result = identify_solar_candidate_zones(boundary_coordinates)
         solar_candidate_zones_geojson = solar_zone_result["zones_geojson"]
@@ -134,7 +137,22 @@ def generate_full_report(boundary_coordinates: list) -> str:
     if solar_candidate_zones_geojson is not None:
         print(f"  {summarize_solar_candidate_zones(solar_zone_result)}\n")
 
-    print("Step 9/9: Generating Scale of Permanence report via Claude...\n")
+    print("Step 9/10: Identifying fencing geometry (stream exclusion + perimeter)...")
+    try:
+        fencing_result = identify_fencing(boundary_coordinates)
+        fencing_geojson = fencing_result["fencing_geojson"]
+    except Exception as e:
+        # Same reasoning as the other DEM/network-backed layers above — an
+        # NHD outage here shouldn't take down the whole report; the
+        # SUBDIVISION FENCES section just falls back to narrative-only
+        # reasoning for stream exclusion/perimeter too, same as it always
+        # has for the rest of that section.
+        print(f"  Fencing geometry identification failed ({e}), continuing without it.\n")
+        fencing_geojson = None
+    if fencing_geojson is not None:
+        print(f"  {summarize_fencing(fencing_result)}\n")
+
+    print("Step 10/10: Generating Scale of Permanence report via Claude...\n")
     report = generate_scale_of_permanence_report(
         soil_components,
         elevation_grid,
@@ -144,6 +162,7 @@ def generate_full_report(boundary_coordinates: list) -> str:
         water_candidate_zones_geojson,
         solar_candidate_zones_geojson,
         road_corridor_candidates_geojson,
+        fencing_geojson,
     )
 
     return report
