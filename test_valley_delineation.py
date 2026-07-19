@@ -9,10 +9,14 @@ isn't exercised here), so these checks are about the terrain-analysis
 algorithm itself, independent of whether a specific live DEM fetch worked.
 """
 
+import inspect
+
 import numpy as np
+from shapely.geometry import Point, box
 
 from valley_delineation import (
     MIN_PRIMARY_VALLEY_CONTRIBUTING_AREA_ACRES,
+    VALLEY_CONFIDENCE_NOTES,
     compute_flow_accumulation,
     compute_flow_direction,
     delineate_valleys,
@@ -122,5 +126,51 @@ array_with_gap[10:15, 10:15] = np.nan
 gapped_valleys = delineate_valleys(_dem(array_with_gap))
 assert isinstance(gapped_valleys, list)  # just shouldn't raise
 print("delineate_valleys tolerates a nodata gap in the DEM without raising.")
+
+
+# --- parcel clipping: unlike production_area.py/road_corridors.py/solar_suitability.py, ---
+# --- valleys are INTENTIONALLY NOT clipped to the parcel boundary ---
+#
+# Those other three layers had a real, confirmed live bug: candidates
+# derived from the DEM's ~100m buffered margin (dem_data.py) were returned
+# un-clipped, describing land off the actual parcel. Valleys are
+# different by design, not by oversight: a drainage line's head or an
+# inflection point legitimately sits off-parcel sometimes (flow doesn't
+# stop at a property line), and that's meaningful upstream/downstream
+# context for the water-system candidate-zone logic built on top of this,
+# not noise to filter out. So delineate_valleys() deliberately takes no
+# boundary parameter at all and does no clipping.
+#
+# This is a documentation/API-shape guard, not a bug regression: it
+# confirms (a) that's still true of the current signature, so a future
+# change doesn't silently start requiring/enforcing a boundary here to
+# "match" the other three layers, and (b) a synthetic valley spanning
+# past a plausible smaller "parcel" is returned in full, unclipped.
+assert "boundary" not in inspect.signature(delineate_valleys).parameters, (
+    "delineate_valleys() unexpectedly gained a boundary parameter -- if valleys are now meant to be "
+    "clipped, update this test (and its rationale above) deliberately; don't let it happen by accident"
+)
+
+# The synthetic V-shaped valley above spans the full 30x30 grid (150m x
+# 150m at this DEM's 5m resolution); a plausible smaller "parcel" cut out
+# of the middle of it leaves real valley geometry on both sides.
+plausible_parcel = box(500000 + 50, 4500000 - 100, 500000 + 100, 4500000 - 50)
+branch_points = [Point(x, y) for x, y, _elevation in valley["branches_utm"][0]]
+off_parcel_points = [p for p in branch_points if not plausible_parcel.contains(p)]
+assert off_parcel_points, (
+    "expected at least some of this valley's branch points to fall outside a smaller reference "
+    "parcel cut from the middle of the DEM -- if none do, this test isn't actually exercising anything"
+)
+assert len(off_parcel_points) < len(branch_points), (
+    "expected at least some branch points to remain on-parcel too, so this is a genuine partial-overlap case"
+)
+assert "may legitimately extend past the drawn property boundary" in VALLEY_CONFIDENCE_NOTES, (
+    "VALLEY_CONFIDENCE_NOTES should plainly disclose that valley geometry isn't clipped to the parcel"
+)
+print(
+    f"delineate_valleys() correctly returns valley branches un-clipped: {len(off_parcel_points)}/"
+    f"{len(branch_points)} of this valley's branch points fall outside a smaller reference parcel, "
+    f"and that's disclosed in VALLEY_CONFIDENCE_NOTES rather than silently clipped away."
+)
 
 print("\nAll valley_delineation checks passed.")

@@ -75,10 +75,15 @@ PRODUCTION_AREAS = [
 WATER_ZONES: list[dict] = []
 ROAD = [LineString([(500000, 4500000), (500200, 4500000)])]
 
+# The DEM's own full extent — used everywhere except the parcel-clipping
+# regression test below, so existing behavior/assertions are unaffected
+# (100% on-parcel, nothing to clip).
+BOUNDARY = box(ORIGIN_X, ORIGIN_Y - ROWS * RESOLUTION[1], ORIGIN_X + COLS * RESOLUTION[0], ORIGIN_Y)
+
 
 # --- geometric soundness: both candidates stay outside production zones, ranked correctly ---
 
-candidates = find_candidate_solar_zones(DEM, PRODUCTION_AREAS, WATER_ZONES, ROAD)
+candidates = find_candidate_solar_zones(DEM, PRODUCTION_AREAS, WATER_ZONES, ROAD, BOUNDARY)
 assert len(candidates) == 2, f"expected 2 candidate regions (west + east), got {len(candidates)}"
 
 west, east = candidates[0], candidates[1]
@@ -143,7 +148,7 @@ print(
 water_zone_cutting_west = [
     {"valley_id": 0, "polygon_utm": box(500110, 4500000, 500125, 4500200)}
 ]
-candidates_with_water_zone = find_candidate_solar_zones(DEM, PRODUCTION_AREAS, water_zone_cutting_west, ROAD)
+candidates_with_water_zone = find_candidate_solar_zones(DEM, PRODUCTION_AREAS, water_zone_cutting_west, ROAD, BOUNDARY)
 
 water_zone_exclusion = box(500110, 4500000, 500125, 4500200).buffer(POND_ZONE_EXCLUSION_BUFFER_METERS)
 for candidate in candidates_with_water_zone:
@@ -175,7 +180,7 @@ print(
 
 # --- road data unavailable (None) disables the proximity constraint, extending coverage north ---
 
-candidates_no_road_data = find_candidate_solar_zones(DEM, PRODUCTION_AREAS, WATER_ZONES, None)
+candidates_no_road_data = find_candidate_solar_zones(DEM, PRODUCTION_AREAS, WATER_ZONES, None, BOUNDARY)
 assert len(candidates_no_road_data) == 2
 no_road_max_y = max(c["polygon_utm"].bounds[3] for c in candidates_no_road_data)
 with_road_max_y = max(c["polygon_utm"].bounds[3] for c in candidates)
@@ -189,7 +194,7 @@ print("Road data unavailable (None) disables the proximity constraint instead of
 
 # --- road data present but empty ([]) is a real, binding constraint: zero candidates ---
 
-candidates_empty_roads = find_candidate_solar_zones(DEM, PRODUCTION_AREAS, WATER_ZONES, [])
+candidates_empty_roads = find_candidate_solar_zones(DEM, PRODUCTION_AREAS, WATER_ZONES, [], BOUNDARY)
 assert candidates_empty_roads == [], (
     "an empty road list (successfully fetched, genuinely no roads nearby) should be treated "
     "as a real constraint -- nothing is within any proximity buffer of a nonexistent road"
@@ -245,8 +250,66 @@ print("distance_to_road_ft is correctly converted from meters.")
 
 # --- min suitability score threshold is actually applied ---
 
-strict_candidates = find_candidate_solar_zones(DEM, PRODUCTION_AREAS, WATER_ZONES, ROAD, min_suitability_score=0.99)
+strict_candidates = find_candidate_solar_zones(DEM, PRODUCTION_AREAS, WATER_ZONES, ROAD, BOUNDARY, min_suitability_score=0.99)
 assert strict_candidates == [], "a near-impossible suitability threshold should leave no qualifying candidates"
 print(f"Raising min_suitability_score above what any cell can reach (default is {MIN_SUITABILITY_SCORE}) correctly yields no candidates.")
+
+
+# --- regression: candidates stay on-parcel, not drawn from the DEM's buffered margin ---
+#
+# This is the exact live bug found against the real property: dem_data.py
+# fetches a DEM buffered ~100m past the drawn boundary (correct and
+# intentional, for terrain-analysis context), but find_candidate_solar_zones()
+# never restricted eligible cells to the actual parcel -- a candidate could
+# be built entirely from off-parcel ground. Here the DEM is a uniform,
+# gentle south-facing slope spanning the FULL 300m x 300m grid (so,
+# unclipped, eligible ground spans the whole width, well past the parcel
+# on every side); the boundary below is a smaller 200m x 200m parcel with
+# a 50m buffer margin on every side, mirroring dem_data.py's real buffer
+# relationship at test scale.
+buffered_size = 60
+buffered_array = np.full((buffered_size, buffered_size), 100.0, dtype=np.float32)
+for row in range(buffered_size):
+    buffered_array[row, :] = 100.0 - row * 0.2  # uniform ~4% south-facing grade, same as the WEST region above
+buffered_dem = {
+    "array": buffered_array,
+    "resolution_meters": RESOLUTION,
+    "origin_x": 500000.0,
+    "origin_y": 4500300.0,
+    "crs": CRS,
+}
+# The real parcel: 200m x 200m, with a 50m buffer margin to the DEM's edge
+# on every side -- the DEM covers ground the parcel itself doesn't.
+parcel_boundary = box(500050, 4500050, 500250, 4500250)
+
+clipped_candidates = find_candidate_solar_zones(
+    buffered_dem, [], [], None, parcel_boundary, max_candidates=50
+)
+assert clipped_candidates, "expected at least one solar candidate on this uniform, buffered south-facing slope"
+for candidate in clipped_candidates:
+    assert candidate["polygon_utm"].within(parcel_boundary.buffer(1e-6)), (
+        f"candidate (rank {candidate['rank']}) extends outside the real parcel boundary -- "
+        f"candidate geometry must be drawn from on-parcel cells only, not the DEM's buffered margin"
+    )
+
+# Confirm the regression test is actually meaningful (not vacuously
+# passing): on the SAME terrain, using boundary == the DEM's full extent
+# (i.e., no real clipping, matching the old unclipped behavior) produces
+# candidates that DO extend past the smaller real parcel.
+full_extent_boundary = box(500000, 4500000, 500300, 4500300)
+unclipped_candidates = find_candidate_solar_zones(
+    buffered_dem, [], [], None, full_extent_boundary, max_candidates=50
+)
+outside_parcel = [c for c in unclipped_candidates if not c["polygon_utm"].within(parcel_boundary.buffer(1e-6))]
+assert outside_parcel, (
+    "expected some candidates to extend past the smaller real parcel when boundary == full DEM extent -- "
+    "if none do, this regression test isn't actually exercising the parcel-clipping fix"
+)
+print(
+    f"Parcel clipping: {len(clipped_candidates)} solar candidate(s) on a slope spanning well past the parcel "
+    f"boundary all stay entirely within the real (smaller) parcel, not the DEM's buffered extent "
+    f"(confirmed meaningful: {len(outside_parcel)}/{len(unclipped_candidates)} candidates extend past the "
+    f"parcel when clipping is effectively disabled)."
+)
 
 print("\nAll solar_suitability checks passed.")
