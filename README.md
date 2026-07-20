@@ -169,35 +169,52 @@ report using the Claude API.
   DELIBERATELY NOT a weighted scoring factor: per Scale of Permanence
   sequencing, soil is step 8 — the last step, and the most improvable one
   — so it shouldn't gate/rank where production zones go the way slope/size/
-  aspect (step 2, Land Shape) do. Instead, SSURGO is checked only as a
-  pass/fail EXCLUSION (`soil_exclusion_passed`, `soil_exclusion_reason`)
-  for conditions that disqualify ground for production regardless of
-  topography — hydric/wetland soil or permanently saturated ("very poorly
-  drained") drainage, via a new `soil_data.py` helper,
-  `is_disqualifying_soil_condition()` — the same "avoid, don't rank by
-  quality" use of SSURGO `road_corridors.py`'s `is_erosion_prone()`/
-  `is_hydric()` already make. A zone with merely mediocre-but-workable
-  soil scores identically to one with excellent soil; only a genuinely
-  disqualifying condition has any effect, and that effect is exclusion
-  from `rank` (set to `None`, sorted after every passing candidate), not a
-  score penalty. When SSURGO data isn't available for a patch, the
-  exclusion check defaults to passed (not excluded) and says so in
-  `confidence_notes`. Weights are configurable module-level constants, not
-  yet tuned against a real property (see Roadmap). This is a
-  self-contained, standalone pass — NOT wired into
-  `generate_full_report.py`/`report_generator.py`'s prompt yet; scenario
-  generation and report-narrative wiring are later passes that will
-  consume this score as an input. Same pure-core-logic-vs-network-fetch
-  split as the other candidate-zone features
-  (`score_production_areas()` is network-free and unit-tested against
-  synthetic terrain — `test_production_suitability.py`).
+  aspect (step 2, Land Shape) do. Instead, real SSURGO polygon geometry
+  (not just component ratings — reusing `road_corridors.py`'s
+  fetch-then-filter-then-fetch-geometry pattern, `soil_data.py`'s
+  `get_soil_geometries_for_polygon()`) for conditions that disqualify
+  ground for production regardless of topography — hydric/wetland soil or
+  permanently saturated ("very poorly drained") drainage, via
+  `is_disqualifying_soil_condition()` — is CARVED OUT of each candidate's
+  own footprint before scoring, rather than rejecting the whole candidate
+  for a partial wet inclusion (an earlier version of this module did
+  exactly that — a whole-patch pass/fail — and it excluded BOTH real
+  surviving candidates on the reference property, since most of each
+  patch's soil was fine but a partial wet inclusion vetoed the whole
+  thing). The carve can split one patch into several disconnected
+  candidates (each individually re-scored against its own actual
+  geometry/cells, own id) or drop it entirely if its whole footprint is
+  disqualifying soil; a candidate untouched by carving is reported
+  unmodified (`soil_carved_acres`/`soil_carved_pct` = 0). Every resulting
+  candidate carries `soil_carved_acres`, `soil_carved_pct`, and
+  `source_patch_id` (the pre-carve patch it came from, for traceability),
+  and `confidence_notes` states whether/how much was carved, or that the
+  check couldn't be verified if SSURGO data was unavailable. Weights are
+  configurable module-level constants, not yet tuned against a real
+  property (see Roadmap). This is a self-contained, standalone pass — NOT
+  wired into `generate_full_report.py`/`report_generator.py`'s prompt
+  yet; scenario generation and report-narrative wiring are later passes
+  that will consume this score as an input. Same
+  pure-core-logic-vs-network-fetch split as the other candidate-zone
+  features (`score_production_areas()` is network-free and unit-tested
+  against synthetic terrain — `test_production_suitability.py`).
   `score_production_areas()` requires the same real `boundary_polygon_utm`
-  `identify_production_areas()` does (that layer now clips every candidate
-  to the real parcel — a DEM fetched with ~100m of buffer past the drawn
+  `identify_production_areas()` does (that layer clips every candidate to
+  the real parcel — a DEM fetched with ~100m of buffer past the drawn
   boundary can otherwise leak off-parcel cells into a patch) and filters
   its own recovered DEM cells to the same on-parcel subset, so
   slope/size/aspect are scored from the same ground the reported
   `area_acres`/`polygon_utm` actually describe.
+  **Soil-carving is verified offline only so far** (synthetic
+  passthrough/corner-carve/split/dropped-sliver/full-cover cases,
+  `test_production_suitability.py`) — this sandbox's egress policy blocks
+  both `elevation.nationalmap.gov` and `sdmdataaccess.sc.egov.usda.gov`
+  (confirmed policy denial via the agent proxy status endpoint, not a
+  transient failure), so it has NOT yet been run against the real
+  six-point reference property. Run `python3 production_suitability.py`
+  from an environment with real network access and confirm at least one
+  real candidate survives with a sensible `soil_carved_acres` before
+  treating this as validated — see Roadmap.
 - `report_generator.py` — combines all of the above and calls the Claude
   API to generate the narrative Scale of Permanence report.
 - `generate_full_report.py` — the full end-to-end pipeline: give it a
@@ -293,19 +310,28 @@ tool (built with Leaflet).
   unverified against a live request in this environment (no route to
   reach it from here). Confirm the layer ID/response shape against a real
   request before relying on it.
-- Ground-truth validation pass for `production_suitability.py`: run it
-  against a real property (`python3 production_suitability.py`, needs
-  network for the DEM + SSURGO fetches) and check that the ranking
-  actually matches ground truth — e.g. that a known compact, gently-sloped
-  block outranks a fragmented one, and that any real hydric/wetland ground
-  on the property actually gets excluded — and tune `SLOPE_FACTOR_WEIGHT` /
-  `SIZE_FACTOR_WEIGHT` / `ASPECT_FACTOR_WEIGHT`, the `SIZE_AREA_SUBWEIGHT` /
-  `SIZE_SHAPE_SUBWEIGHT` sub-weights, and `REFERENCE_MAX_AREA_ACRES`
-  accordingly. Soil is intentionally NOT one of the tunable weights (see
-  above — exclusion-only by design, not a scored factor). Once validated,
-  wire `suitability_score` into `report_generator.py`'s narrative and use
-  it as an input to future scenario-selection logic — both deliberately
-  out of scope for this pass.
+- **Outstanding, required, not yet done**: run `production_suitability.py`
+  against the real six-point reference property from an environment with
+  actual network access (this sandbox's egress policy blocks
+  `elevation.nationalmap.gov`/`sdmdataaccess.sc.egov.usda.gov` — confirmed
+  policy denial, not transient) and report the real resulting
+  candidate(s): id, `area_acres`, `soil_carved_acres`, and
+  `suitability_score` for each. Confirm at least one real, non-empty
+  production candidate survives (an earlier whole-patch-exclusion version
+  of this module shipped without this check and excluded BOTH real
+  surviving candidates on this property — see the module's own docstring).
+  Also cross-check the carved geometry's area against the sum of the
+  original patch's non-disqualifying soil component acreages as a rough
+  sanity check that carving didn't remove too much or too little. Once
+  done, check that the ranking matches ground truth more generally (e.g.
+  a known compact, gently-sloped block outranks a fragmented one) and tune
+  `SLOPE_FACTOR_WEIGHT` / `SIZE_FACTOR_WEIGHT` / `ASPECT_FACTOR_WEIGHT`,
+  the `SIZE_AREA_SUBWEIGHT` / `SIZE_SHAPE_SUBWEIGHT` sub-weights, and
+  `REFERENCE_MAX_AREA_ACRES` accordingly. Soil is intentionally NOT one of
+  the tunable weights (see above — carving-only by design, not a scored
+  factor). Once validated, wire `suitability_score` into
+  `report_generator.py`'s narrative and use it as an input to future
+  scenario-selection logic — both deliberately out of scope for this pass.
 - Ground-truth validation pass for `road_corridors.py` against a real
   no-existing-road property (the explicit target case for this layer):
   confirm both contour-band and ridge-top candidates actually show up
