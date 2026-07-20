@@ -36,12 +36,12 @@ step that runs BEFORE scoring:
                         was fine; a real but partial wet inclusion
                         shouldn't veto ground that's mostly workable).
                         Real SSURGO polygon geometry for map units meeting
-                        is_disqualifying_soil_condition() (hydric/wetland,
-                        or permanently saturated drainage — soil_data.py,
-                        reused as-is, not redefined) is subtracted OUT of
-                        each patch's own footprint before anything is
-                        scored. The remainder — one piece, or several if
-                        the subtraction splits the patch into disconnected
+                        is_disqualifying_soil_condition() (hydric/wetland
+                        soil only — soil_data.py, reused as-is, not
+                        redefined here) is subtracted OUT of each patch's
+                        own footprint before anything is scored. The
+                        remainder — one piece, or several if the
+                        subtraction splits the patch into disconnected
                         remainders — is what actually gets scored. See
                         _carve_soil_from_patch().
 
@@ -186,9 +186,10 @@ PRODUCTION_SUITABILITY_CONFIDENCE_NOTES_TEMPLATE = (
     "DELIBERATELY NOT one of these weighted factors -- per Scale of Permanence sequencing, "
     "soil is step 8, the last and most improvable step, so it shouldn't gate/rank where "
     "production zones go the way slope/size/aspect (Land Shape, step 2) do. Instead, real "
-    "SSURGO polygon geometry for disqualifying soil (hydric/wetland, or permanently saturated "
-    "drainage) is CARVED OUT of each candidate's own footprint before scoring, rather than "
-    "rejecting or down-scoring the whole candidate for a partial wet inclusion. {soil_note}"
+    "SSURGO polygon geometry for disqualifying soil (hydric/wetland soil only) is CARVED OUT of "
+    "each candidate's own footprint before scoring, rather than rejecting or down-scoring the "
+    "whole candidate for a partial wet inclusion. This is a topographic + soil-based candidate "
+    "zone, not a certainty -- ground-truth before committing to it. {soil_note}"
 )
 
 _SOIL_UNCARVED_NOTE = (
@@ -212,6 +213,33 @@ _ASPECT_OMITTED_NOTE = (
     "this candidate's ground was too flat for a well-defined downhill direction, so aspect_factor "
     "was defaulted to a neutral 1.0 (flat ground has no unfavorable orientation) -- OMITTED, not measured"
 )
+
+
+def _confidence_notes_for(patch: dict) -> str:
+    """Builds the plain-language confidence_notes string for one scored
+    (sub-)patch -- computed once here and attached directly to the patch
+    dict itself (not just the eventual GeoJSON feature), so it's present
+    on whichever of score_production_areas()'s or
+    production_suitability_to_geojson()'s outputs someone inspects,
+    rather than only existing inside the second one."""
+    if patch["soil_carved_acres"] > 0:
+        soil_note = _SOIL_CARVED_NOTE.format(
+            carved_acres=patch["soil_carved_acres"],
+            carved_pct=patch["soil_carved_pct"],
+            source_id=patch["source_patch_id"],
+        )
+    elif patch["soil_data_available"]:
+        soil_note = _SOIL_UNCARVED_NOTE
+    else:
+        soil_note = _SOIL_UNAVAILABLE_NOTE
+
+    return PRODUCTION_SUITABILITY_CONFIDENCE_NOTES_TEMPLATE.format(
+        slope_weight=SLOPE_FACTOR_WEIGHT,
+        size_weight=SIZE_FACTOR_WEIGHT,
+        aspect_weight=ASPECT_FACTOR_WEIGHT,
+        aspect_availability=_ASPECT_AVAILABLE_NOTE if patch["aspect_available"] else _ASPECT_OMITTED_NOTE,
+        soil_note=soil_note,
+    )
 
 
 def _slope_factor(slope_values_pct: list[float], max_slope_pct: float) -> float:
@@ -298,7 +326,7 @@ def _fetch_disqualifying_soil_union(wkt_polygon: str, dem: dict) -> Optional[obj
     disqualifying_mukeys = {
         row["mukey"]
         for row in soil_components
-        if is_disqualifying_soil_condition(row.get("hydricrating"), row.get("drainagecl"))
+        if is_disqualifying_soil_condition(row.get("hydricrating"))
     }
     if not disqualifying_mukeys:
         return None
@@ -583,6 +611,7 @@ def score_production_areas(
                 "aspect_available": aspect_available,
             }
         )
+        sub_patch["confidence_notes"] = _confidence_notes_for(sub_patch)
 
     all_sub_patches.sort(key=lambda p: -p["suitability_score"])
     for rank, sub_patch in enumerate(all_sub_patches, start=1):
@@ -600,24 +629,11 @@ def production_suitability_to_geojson(scored_patches: list[dict]) -> dict:
     carving outcome -- not a new/different layer."""
     features = []
     for patch in scored_patches:
-        if patch["soil_carved_acres"] > 0:
-            soil_note = _SOIL_CARVED_NOTE.format(
-                carved_acres=patch["soil_carved_acres"],
-                carved_pct=patch["soil_carved_pct"],
-                source_id=patch["source_patch_id"],
-            )
-        elif patch["soil_data_available"]:
-            soil_note = _SOIL_UNCARVED_NOTE
-        else:
-            soil_note = _SOIL_UNAVAILABLE_NOTE
-
-        confidence_notes = PRODUCTION_SUITABILITY_CONFIDENCE_NOTES_TEMPLATE.format(
-            slope_weight=SLOPE_FACTOR_WEIGHT,
-            size_weight=SIZE_FACTOR_WEIGHT,
-            aspect_weight=ASPECT_FACTOR_WEIGHT,
-            aspect_availability=_ASPECT_AVAILABLE_NOTE if patch["aspect_available"] else _ASPECT_OMITTED_NOTE,
-            soil_note=soil_note,
-        )
+        # confidence_notes is computed once by score_production_areas()
+        # itself and attached directly to the patch dict -- reuse it
+        # rather than rebuilding it, so scored_patches and the GeoJSON
+        # features below never diverge or disagree.
+        confidence_notes = patch["confidence_notes"]
 
         label = f"Production area candidate {patch['id']} (suitability rank {patch['rank']})"
 

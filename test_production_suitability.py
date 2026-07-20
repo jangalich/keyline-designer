@@ -36,11 +36,15 @@ equal:
      patch is disqualifying soil -- dropped entirely). Each surviving
      piece is re-scored against its OWN post-carve geometry/cells, not the
      original patch's pre-carve score.
-  5. _fetch_disqualifying_soil_union(): offline, with get_soil_data_for_polygon/
+  5. is_disqualifying_soil_condition() (soil_data.py) and
+     _fetch_disqualifying_soil_union(): offline, with get_soil_data_for_polygon/
      get_soil_geometries_for_polygon mocked (same "mock the already-tested
      fetch layer" approach as test_farmland_classification.py, just one
-     level up) -- confirms it unions only the mukeys that actually meet
-     is_disqualifying_soil_condition(), and returns None when nothing does.
+     level up) -- confirms ONLY hydric rating disqualifies now (a
+     poorly/very-poorly-drained but non-hydric component must NOT be
+     unioned in -- the drainage-class check that used to also disqualify
+     has been removed entirely), and that the union is still None when
+     nothing in the footprint is hydric at all.
 
 Every synthetic DEM using a steep background uses
 elevation = 1000 + (row+col)*constant so that ONLY the deliberately
@@ -50,7 +54,7 @@ carved flat patches qualify as production-area candidates at all.
 from unittest.mock import patch as mock_patch
 
 import numpy as np
-from shapely.geometry import box
+from shapely.geometry import box, shape
 
 import production_suitability as ps
 from feature_schema import validate_feature_collection
@@ -65,6 +69,7 @@ from production_suitability import (
     score_production_areas,
     summarize_production_area_suitability,
 )
+from soil_data import is_disqualifying_soil_condition
 
 RESOLUTION = (5.0, 5.0)
 CRS = "EPSG:32617"
@@ -308,6 +313,37 @@ assert {p["rank"] for p in mixed} == {1, 2}
 print("Every resulting candidate is ranked (soil carving no longer creates an unranked/excluded bucket).")
 
 
+# --- confidence_notes: populated directly on the score_production_areas() dicts, not just the eventual GeoJSON ---
+#
+# Regression coverage for a real bug: confidence_notes came back empty on
+# live-scored candidates. score_production_areas() itself now attaches
+# confidence_notes to every sub-patch dict it returns, so it's present no
+# matter which of its outputs (the raw dicts, or the GeoJSON features
+# production_suitability_to_geojson() wraps them in) gets inspected.
+
+for result_set, label in (
+    (scored_absent, "unchecked"), (scored_clean, "checked-clean"), (scored_corner, "corner-carved"),
+    (scored_split, "split"), (scored_tiny_split, "tiny-split-survivor"), (mixed, "mixed"),
+):
+    for p in result_set:
+        notes = p.get("confidence_notes")
+        assert notes and notes.strip(), f"[{label}] scored_patches entry (id={p.get('id')}) has empty confidence_notes"
+        assert "not a certainty" in notes.lower(), (
+            f"[{label}] confidence_notes must carry the same tone every other layer's confidence_notes uses "
+            f"(e.g. 'not a surveyed alignment', 'not a final placement decision')"
+        )
+print("Every scored_patches entry (not just the GeoJSON wrapper) carries a real, non-empty confidence_notes "
+      "with the required 'not a certainty' framing.")
+
+# confidence_notes must be IDENTICAL between the raw scored dict and its GeoJSON feature -- single source of truth
+geojson_corner = production_suitability_to_geojson(scored_corner)
+assert geojson_corner["features"][0]["properties"]["confidence_notes"] == scored_corner[0]["confidence_notes"], (
+    "production_suitability_to_geojson() must reuse the same confidence_notes already computed on the "
+    "patch dict, not recompute a second, potentially-diverging copy"
+)
+print("confidence_notes is identical between scored_patches and the GeoJSON feature built from it.")
+
+
 # --- output: schema-valid FeatureCollection on the SAME layer as production_area.py's own output ---
 
 geojson = production_suitability_to_geojson(scored_split)
@@ -365,12 +401,25 @@ assert "soil-carved" in summary_split
 print("summarize_production_area_suitability handles empty input and mentions soil-carving when relevant.")
 
 
-# --- 5. _fetch_disqualifying_soil_union(): offline, with the fetch layer mocked ---
+# --- 5. is_disqualifying_soil_condition(): offline, hydric-only now ---
+
+assert is_disqualifying_soil_condition("Yes") is not None
+assert is_disqualifying_soil_condition("Partially hydric") is not None
+assert is_disqualifying_soil_condition("No") is None
+assert is_disqualifying_soil_condition(None) is None
+assert is_disqualifying_soil_condition("") is None
+print("is_disqualifying_soil_condition() correctly flags hydric/partially-hydric and nothing else.")
+
+
+# --- 5b. _fetch_disqualifying_soil_union(): offline, with the fetch layer mocked ---
 
 def _fake_soil_rows_with_hydric(wkt_polygon):
     return [
         {"mukey": "1", "muname": "Rayne silt loam", "drainagecl": "Well drained", "hydricrating": "No"},
         {"mukey": "2", "muname": "Wet inclusion", "drainagecl": "Poorly drained", "hydricrating": "Yes"},
+        # Poorly/very-poorly drained but NOT hydric -- must NOT disqualify (this is the exact
+        # regression this fix addresses: a drainage-class check used to disqualify this too).
+        {"mukey": "3", "muname": "Droughty-but-dry non-wetland", "drainagecl": "Very poorly drained", "hydricrating": "No"},
     ]
 
 
@@ -380,6 +429,10 @@ def _fake_soil_geometries(wkt_polygon):
             "type": "Polygon",
             "coordinates": [[[-79.984, 40.645], [-79.983, 40.645], [-79.983, 40.646], [-79.984, 40.646], [-79.984, 40.645]]],
         },
+        "3": {
+            "type": "Polygon",
+            "coordinates": [[[-79.982, 40.645], [-79.981, 40.645], [-79.981, 40.646], [-79.982, 40.646], [-79.982, 40.645]]],
+        },
     }
 
 
@@ -388,7 +441,37 @@ with mock_patch.object(ps, "get_soil_data_for_polygon", _fake_soil_rows_with_hyd
     union = ps._fetch_disqualifying_soil_union("polygon((-79.99 40.64, -79.98 40.64, -79.98 40.65, -79.99 40.65, -79.99 40.64))", dem_soil)
 
 assert union is not None and union.geom_type in ("Polygon", "MultiPolygon")
-print("_fetch_disqualifying_soil_union() unions only the disqualifying (hydric) mukey's real geometry, not the clean one.")
+# mukey 3 (very poorly drained, non-hydric) must NOT be part of the union -- only mukey 2 (hydric) is.
+mukey_3_geom = shape(_fake_soil_geometries(None)["3"])
+assert not union.covers(mukey_3_geom), (
+    "a non-hydric 'very poorly drained' mukey must NOT be part of the disqualifying union -- "
+    "only hydric rating disqualifies now, per this fix"
+)
+print("_fetch_disqualifying_soil_union() unions only the hydric mukey -- a non-hydric 'very poorly "
+      "drained' mukey is correctly left out (drainage class alone no longer disqualifies).")
+
+
+def _fake_soil_rows_drainage_only(wkt_polygon):
+    """Every component is poorly/very-poorly drained, but NONE are hydric --
+    the exact scenario this fix changes: this must now return None (nothing
+    disqualifying), where an earlier version would have flagged it."""
+    return [
+        {"mukey": "1", "muname": "Wet-looking but non-hydric", "drainagecl": "Very poorly drained", "hydricrating": "No"},
+        {"mukey": "2", "muname": "Also non-hydric", "drainagecl": "Poorly drained", "hydricrating": "No"},
+    ]
+
+
+with mock_patch.object(ps, "get_soil_data_for_polygon", _fake_soil_rows_drainage_only):
+    drainage_only_union = ps._fetch_disqualifying_soil_union(
+        "polygon((-79.99 40.64, -79.98 40.64, -79.98 40.65, -79.99 40.65, -79.99 40.64))", dem_soil
+    )
+
+assert drainage_only_union is None, (
+    "poorly/very-poorly drained components with NO hydric rating must not disqualify at all -- "
+    "the drainage-class check has been removed entirely"
+)
+print("_fetch_disqualifying_soil_union() returns None for drainage-only (non-hydric) components -- "
+      "confirms the drainage-class exclusion is fully removed, not just deprioritized.")
 
 
 def _fake_soil_rows_all_clean(wkt_polygon):
@@ -399,7 +482,7 @@ with mock_patch.object(ps, "get_soil_data_for_polygon", _fake_soil_rows_all_clea
     clean_union = ps._fetch_disqualifying_soil_union("polygon((-79.99 40.64, -79.98 40.64, -79.98 40.65, -79.99 40.65, -79.99 40.64))", dem_soil)
 
 assert clean_union is None, "no disqualifying components at all must return None, not an empty geometry"
-print("_fetch_disqualifying_soil_union() returns None when nothing in the footprint is disqualifying.")
+print("_fetch_disqualifying_soil_union() returns None when nothing in the footprint is hydric.")
 
 
 # --- identify_production_area_suitability: full orchestrator wiring, network-free via dem=+check_soil=False ---

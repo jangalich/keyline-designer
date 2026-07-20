@@ -234,23 +234,21 @@ def is_hydric(hydric_rating: Optional[str]) -> bool:
     return hydric_rating.strip().lower() in ("yes", "partially hydric")
 
 
-# Drainage classes indicating soil that's permanently or near-permanently
-# saturated — genuinely unsuitable for typical cultivation/production
-# regardless of topography, the same tier hydric ground occupies, not just
-# a lower-quality-but-workable limitation. "Poorly drained" is deliberately
-# NOT included here — real, but often improvable with drainage/tile, so it
-# doesn't belong on the disqualifying side of that line; "very poorly
-# drained" is the tier NRCS itself describes as a water table at or near
-# the surface most of the year. CONFIGURABLE.
-_DISQUALIFYING_DRAINAGE_CLASSES = {"very poorly drained"}
-
-
-def is_disqualifying_soil_condition(hydric_rating: Optional[str], drainage_class: Optional[str]) -> Optional[str]:
+def is_disqualifying_soil_condition(hydric_rating: Optional[str]) -> Optional[str]:
     """Returns a short, human-readable reason string if this soil
     component represents a condition that disqualifies ground for
-    production use REGARDLESS of topography (hydric/wetland soil, or
-    permanently/near-permanently saturated drainage) — not merely lower
-    agricultural capability. Returns None if neither condition applies.
+    production use REGARDLESS of topography — currently just hydric/
+    wetland soil (SSURGO hydricrating). Returns None otherwise.
+
+    An earlier version of this also disqualified on drainage class alone
+    (a "very poorly drained" but non-hydric component) — removed: only
+    genuine wetland (hydric) soil should hard-disqualify a production
+    zone. "Poorly/very-poorly drained but non-hydric" ground is arguably
+    still workable, just difficult, and belongs on the graded-quality side
+    of that line, not the absolute-disqualification side (drainagecl is
+    still surfaced elsewhere in this pipeline as a quality signal — see
+    report_generator.py's narrative use of it — just not as a hard
+    exclusion here).
 
     This is an EXCLUSION check, not a graded score — see
     production_suitability.py's module docstring for why soil is
@@ -263,8 +261,6 @@ def is_disqualifying_soil_condition(hydric_rating: Optional[str], drainage_class
     routing."""
     if is_hydric(hydric_rating):
         return "hydric/wetland soil (SSURGO hydricrating)"
-    if drainage_class and drainage_class.strip().lower() in _DISQUALIFYING_DRAINAGE_CLASSES:
-        return f"{drainage_class.strip()} soil (SSURGO drainagecl) -- permanently/near-permanently saturated"
     return None
 
 

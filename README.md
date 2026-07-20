@@ -173,23 +173,33 @@ report using the Claude API.
   (not just component ratings — reusing `road_corridors.py`'s
   fetch-then-filter-then-fetch-geometry pattern, `soil_data.py`'s
   `get_soil_geometries_for_polygon()`) for conditions that disqualify
-  ground for production regardless of topography — hydric/wetland soil or
-  permanently saturated ("very poorly drained") drainage, via
-  `is_disqualifying_soil_condition()` — is CARVED OUT of each candidate's
-  own footprint before scoring, rather than rejecting the whole candidate
-  for a partial wet inclusion (an earlier version of this module did
-  exactly that — a whole-patch pass/fail — and it excluded BOTH real
-  surviving candidates on the reference property, since most of each
-  patch's soil was fine but a partial wet inclusion vetoed the whole
-  thing). The carve can split one patch into several disconnected
-  candidates (each individually re-scored against its own actual
-  geometry/cells, own id) or drop it entirely if its whole footprint is
-  disqualifying soil; a candidate untouched by carving is reported
-  unmodified (`soil_carved_acres`/`soil_carved_pct` = 0). Every resulting
-  candidate carries `soil_carved_acres`, `soil_carved_pct`, and
-  `source_patch_id` (the pre-carve patch it came from, for traceability),
-  and `confidence_notes` states whether/how much was carved, or that the
-  check couldn't be verified if SSURGO data was unavailable. Weights are
+  ground for production regardless of topography — ONLY hydric/wetland
+  soil (SSURGO `hydricrating`), via `is_disqualifying_soil_condition()` —
+  is CARVED OUT of each candidate's own footprint before scoring, rather
+  than rejecting the whole candidate for a partial wet inclusion (an
+  earlier version of this module did exactly that — a whole-patch
+  pass/fail — and it excluded BOTH real surviving candidates on the
+  reference property, since most of each patch's soil was fine but a
+  partial wet inclusion vetoed the whole thing). A second earlier version
+  also disqualified on drainage class alone ("very poorly drained" but
+  non-hydric) — removed: only genuine wetland should hard-disqualify;
+  poorly/very-poorly-drained-but-non-hydric ground is a real limitation
+  but arguably still workable, and belongs on the graded-quality side of
+  that line, not the absolute-exclusion side (`drainagecl` is still
+  surfaced narratively elsewhere in this pipeline — see
+  `report_generator.py` — just not as a hard exclusion here). The carve
+  can split one patch into several disconnected candidates (each
+  individually re-scored against its own actual geometry/cells, own id)
+  or drop it entirely if its whole footprint is disqualifying soil; a
+  candidate untouched by carving is reported unmodified
+  (`soil_carved_acres`/`soil_carved_pct` = 0). Every resulting candidate
+  carries `soil_carved_acres`, `soil_carved_pct`, and `source_patch_id`
+  (the pre-carve patch it came from, for traceability), and
+  `confidence_notes` states whether/how much was carved, or that the
+  check couldn't be verified if SSURGO data was unavailable —
+  `score_production_areas()` computes this once and attaches it directly
+  to every returned candidate dict (not only the eventual GeoJSON
+  feature), fixing a real bug where it shipped empty. Weights are
   configurable module-level constants, not yet tuned against a real
   property (see Roadmap). This is a self-contained, standalone pass — NOT
   wired into `generate_full_report.py`/`report_generator.py`'s prompt
@@ -310,21 +320,31 @@ tool (built with Leaflet).
   unverified against a live request in this environment (no route to
   reach it from here). Confirm the layer ID/response shape against a real
   request before relying on it.
-- **Outstanding, required, not yet done**: run `production_suitability.py`
+- **Outstanding, required, not yet done**: re-run `production_suitability.py`
   against the real six-point reference property from an environment with
   actual network access (this sandbox's egress policy blocks
   `elevation.nationalmap.gov`/`sdmdataaccess.sc.egov.usda.gov` — confirmed
-  policy denial, not transient) and report the real resulting
-  candidate(s): id, `area_acres`, `soil_carved_acres`, and
-  `suitability_score` for each. Confirm at least one real, non-empty
-  production candidate survives (an earlier whole-patch-exclusion version
-  of this module shipped without this check and excluded BOTH real
-  surviving candidates on this property — see the module's own docstring).
-  Also cross-check the carved geometry's area against the sum of the
-  original patch's non-disqualifying soil component acreages as a rough
-  sanity check that carving didn't remove too much or too little. Once
-  done, check that the ranking matches ground truth more generally (e.g.
-  a known compact, gently-sloped block outranks a fragmented one) and tune
+  policy denial, not transient, both before and after the hydric-only fix
+  below) and report the real resulting candidate(s): id, `area_acres`,
+  `soil_carved_acres`, `soil_carved_pct`, `suitability_score`, AND the
+  full `confidence_notes` text for each. A prior live run (before the
+  hydric-only narrowing and the empty-confidence_notes fix, both below)
+  found two candidates — 17a (2.15 ac, 3.08 ac carved) and 19a (1.83 ac,
+  0.18 ac carved) — that run needs repeating to confirm those numbers
+  either hold (expected, if every "poorly drained" component on this
+  property also happened to be hydric — spot-checked and true for what
+  was seen so far, but not exhaustively) or change, and to confirm
+  `confidence_notes` is now actually populated (it shipped empty on that
+  run — see the fix in `score_production_areas()`/`_confidence_notes_for()`).
+  Confirm at least one real, non-empty production candidate survives (an
+  earlier whole-patch-exclusion version of this module shipped without
+  this check at all and excluded BOTH real surviving candidates on this
+  property — see the module's own docstring). Also cross-check the carved
+  geometry's area against the sum of the original patch's non-hydric soil
+  component acreages as a rough sanity check that carving didn't remove
+  too much or too little. Once done, check that the ranking matches
+  ground truth more generally (e.g. a known compact, gently-sloped block
+  outranks a fragmented one) and tune
   `SLOPE_FACTOR_WEIGHT` / `SIZE_FACTOR_WEIGHT` / `ASPECT_FACTOR_WEIGHT`,
   the `SIZE_AREA_SUBWEIGHT` / `SIZE_SHAPE_SUBWEIGHT` sub-weights, and
   `REFERENCE_MAX_AREA_ACRES` accordingly. Soil is intentionally NOT one of
