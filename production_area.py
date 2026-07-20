@@ -50,11 +50,16 @@ from feature_schema import CONFIDENCE_LOW, make_feature, make_feature_collection
 from raster_grid import SQUARE_METERS_PER_ACRE, cell_area_acres, connected_components, pixel_center_xy
 
 # Cells at or below this slope are considered plausibly workable
-# production/cultivation ground for this heuristic. CONFIGURABLE — tune
-# against your own property: if ground you'd actually farm reads as too
-# steep here (or vice versa), adjust this threshold rather than the
-# valley/gradient logic downstream of it.
-MAX_PRODUCTION_SLOPE_PCT = 15.0
+# production/cultivation ground for this heuristic. 15% is a common
+# rule-of-thumb ceiling for mechanized row-crop work specifically, but
+# ground up to ~20-25% is workable for pasture, hay, or contour-managed
+# production — 20% still leaves meaningful separation from genuinely
+# steep, erosion-prone ground (this property's own soil data already
+# identifies 25-80% slope ground as a distinct, clearly-unsuitable
+# category). CONFIGURABLE — tune against your own property: if ground
+# you'd actually farm reads as too steep here (or vice versa), adjust
+# this threshold rather than the valley/gradient logic downstream of it.
+MAX_PRODUCTION_SLOPE_PCT = 20.0
 
 # Drop tiny, likely-noisy contiguous patches below this size.
 # CONFIGURABLE.

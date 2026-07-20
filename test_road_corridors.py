@@ -16,6 +16,7 @@ from shapely.geometry import LineString, box
 from feature_schema import validate_feature_collection
 from road_corridors import (
     MAX_ROAD_GRADE_PCT,
+    STEEP_GRADE_ENGINEERING_NOTE_THRESHOLD_PCT,
     corridors_to_geojson,
     find_candidate_road_corridors,
 )
@@ -146,6 +147,47 @@ print("With no road data available, every candidate's connection point is correc
 strict_candidates = find_candidate_road_corridors(dem, [], [], boundary, max_grade_pct=0.0001)
 assert strict_candidates == [], "an effectively-zero grade allowance should leave no qualifying candidates"
 print(f"Grade threshold is enforced (default {MAX_ROAD_GRADE_PCT}%; near-zero allowance yields no candidates).")
+
+
+# --- steep-grade engineering-consideration note is additive, threshold-gated ---
+
+# A ridge crest graded just above STEEP_GRADE_ENGINEERING_NOTE_THRESHOLD_PCT
+# (10%) but still safely under MAX_ROAD_GRADE_PCT (15%) -- avg_grade_pct
+# for the ridge candidate lands at ~10.1% (confirmed empirically; the
+# crest's own along-ridge grade, not the (steeper, irrelevant) cross-slope
+# flank grade, drives avg_grade_pct here).
+steep_ridge_dem = _diagonal_ridge_dem(rows=30, cols=30, cross_slope=1.2, downhill_per_row=0.75)
+steep_boundary = box(500000, 4500150 - 30 * 5.0, 500000 + 30 * 5.0, 4500150)
+steep_candidates = find_candidate_road_corridors(steep_ridge_dem, [], [], steep_boundary, max_candidates=50)
+steep_geojson = corridors_to_geojson(steep_candidates)
+steep_features = [f for f in steep_geojson["features"] if f["properties"]["avg_grade_pct"] > STEEP_GRADE_ENGINEERING_NOTE_THRESHOLD_PCT]
+assert steep_features, (
+    f"expected at least one candidate above {STEEP_GRADE_ENGINEERING_NOTE_THRESHOLD_PCT}% grade on this ridge crest"
+)
+for feature in steep_features:
+    notes = feature["properties"]["confidence_notes"]
+    assert "real engineering consideration" in notes and "drainage/culverts" in notes and "water bars" in notes, (
+        f"a candidate above {STEEP_GRADE_ENGINEERING_NOTE_THRESHOLD_PCT}% grade "
+        f"(avg_grade_pct={feature['properties']['avg_grade_pct']}) must carry the steep-grade engineering-"
+        f"consideration note, got: {notes}"
+    )
+    assert "TOPOGRAPHIC SUGGESTION only, not a surveyed road alignment" in notes, (
+        "the steep-grade note must be ADDITIVE -- the existing blanket disclaimer must still be present"
+    )
+print(
+    f"Candidates above {STEEP_GRADE_ENGINEERING_NOTE_THRESHOLD_PCT}% grade carry the additive steep-grade "
+    f"engineering-consideration note, with the existing blanket disclaimer still intact."
+)
+
+# A gentle contour band (well below the threshold) must NOT carry the note.
+gentle_candidates = find_candidate_road_corridors(dem, [], [], boundary, max_candidates=50)
+gentle_geojson = corridors_to_geojson(gentle_candidates)
+for feature in gentle_geojson["features"]:
+    assert feature["properties"]["avg_grade_pct"] <= STEEP_GRADE_ENGINEERING_NOTE_THRESHOLD_PCT
+    assert "real engineering consideration" not in feature["properties"]["confidence_notes"], (
+        "a candidate at or below the steep-grade threshold must NOT carry the engineering-consideration note"
+    )
+print(f"Candidates at or below {STEEP_GRADE_ENGINEERING_NOTE_THRESHOLD_PCT}% grade correctly omit the steep-grade note.")
 
 
 # --- output: schema-valid FeatureCollection on the required layer, with required properties ---

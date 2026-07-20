@@ -84,15 +84,30 @@ METERS_PER_FOOT = 0.3048
 # on a low-volume gravel farm/ranch road in USDA NRCS and US Forest
 # Service low-standard-road design guidance: below ~10% sustained, a
 # gravel road is comfortably drivable/haulable and holds up to normal
-# erosion/maintenance; short pitches above that (sometimes cited up to
-# ~12-15%) are tolerated in the wild but push into the range where
-# erosion control and vehicle traction become real problems for a
-# "suggested corridor" meant to be broadly usable, not a knife-edge case.
-# This is a commonly-cited rule-of-thumb figure, not a single pinned
-# regulatory document — stated plainly since this environment has no live
-# network access to verify a specific citation. CONFIGURABLE — replace
-# with a site-specific/regulatory value if one applies to your property.
-MAX_ROAD_GRADE_PCT = 10.0
+# erosion/maintenance. Raised to 15%: short pitches up to ~12-15% are
+# tolerated in the wild on low-volume farm/ranch roads (the same guidance
+# that treats 10% as the comfortable ceiling also cites this range as
+# where real engineering consideration -- surface material, drainage/
+# culverts, water bars -- becomes necessary rather than optional, not
+# where the road becomes unbuildable). This still excludes genuinely
+# unworkable ground above that range. This is a commonly-cited
+# rule-of-thumb figure, not a single pinned regulatory document — stated
+# plainly since this environment has no live network access to verify a
+# specific citation. CONFIGURABLE — replace with a site-specific/
+# regulatory value if one applies to your property.
+MAX_ROAD_GRADE_PCT = 15.0
+
+# Above this average grade, a candidate corridor is steep enough that
+# confidence_notes flags it as needing real engineering consideration
+# (surface material, drainage/culverts, water bars) before construction --
+# not just the blanket "topographic suggestion, not a surveyed alignment"
+# caveat every candidate already carries. Set at the OLD 10% ceiling
+# (rather than some fraction of the new 15% one): grade at or below what
+# used to be the hard cutoff still reads as comfortably within normal
+# gravel-road practice; anything above it is in the range this codebase's
+# own MAX_ROAD_GRADE_PCT reasoning above already treats as "tolerated but
+# needs real engineering attention," not a new/arbitrary line. CONFIGURABLE.
+STEEP_GRADE_ENGINEERING_NOTE_THRESHOLD_PCT = 10.0
 
 # Vertical window (meters) defining one contour-band candidate. Narrow
 # enough that a band's own elevation range doesn't dominate its grade
@@ -160,8 +175,20 @@ ROAD_CORRIDOR_CONFIDENCE_NOTES_TEMPLATE = (
     "corridor to the property is a straight-line approximation to {anchor_note}, "
     "and that connecting segment specifically is NOT itself checked against "
     "the grade or exclusion constraints the rest of the corridor is. "
-    "{floodplain_note}{erosion_note}Treat this as a starting point for a site "
+    "{steep_grade_note}{floodplain_note}{erosion_note}Treat this as a starting point for a site "
     "visit and real survey, not a construction-ready alignment."
+)
+
+# Additive caveat (see STEEP_GRADE_ENGINEERING_NOTE_THRESHOLD_PCT above) —
+# appended only for candidates steep enough that routine grading isn't
+# enough; the blanket "topographic suggestion" disclaimer above still
+# applies to every candidate regardless of grade.
+STEEP_GRADE_ENGINEERING_NOTE = (
+    "This candidate's average grade ({avg_grade_pct}%) is steep enough for an unpaved farm road "
+    "that real engineering consideration — surface material, drainage/culverts, water bars — is "
+    "needed before construction, not just routine grading: erosion, traction, and washout risk all "
+    "increase meaningfully above {threshold_pct:.0f}%, especially under heavy rainfall or "
+    "freeze-thaw conditions. "
 )
 
 
@@ -567,13 +594,23 @@ def find_candidate_road_corridors(
 
 
 def _confidence_notes_for_candidate(
-    is_arbitrary_anchor: bool, floodplain_data_is_fallback: bool, erosion_data_unavailable: bool
+    is_arbitrary_anchor: bool,
+    floodplain_data_is_fallback: bool,
+    erosion_data_unavailable: bool,
+    avg_grade_pct: float,
 ) -> str:
     anchor_note = (
         "an arbitrarily-chosen nearest point on the property boundary "
         "(no real road-frontage/access data was available to anchor to)"
         if is_arbitrary_anchor
         else "the point on the property boundary nearest a real, mapped existing road"
+    )
+    steep_grade_note = (
+        STEEP_GRADE_ENGINEERING_NOTE.format(
+            avg_grade_pct=round(avg_grade_pct, 1), threshold_pct=STEEP_GRADE_ENGINEERING_NOTE_THRESHOLD_PCT
+        )
+        if avg_grade_pct > STEEP_GRADE_ENGINEERING_NOTE_THRESHOLD_PCT
+        else ""
     )
     floodplain_note = (
         "Floodplain/wet-ground exclusion used a DEM-only fallback (buffered delineated valley "
@@ -588,7 +625,10 @@ def _confidence_notes_for_candidate(
         else ""
     )
     return ROAD_CORRIDOR_CONFIDENCE_NOTES_TEMPLATE.format(
-        anchor_note=anchor_note, floodplain_note=floodplain_note, erosion_note=erosion_note
+        anchor_note=anchor_note,
+        steep_grade_note=steep_grade_note,
+        floodplain_note=floodplain_note,
+        erosion_note=erosion_note,
     )
 
 
@@ -622,7 +662,10 @@ def corridors_to_geojson(
                 label=f"Suggested {candidate['corridor_type']} road corridor (rank {candidate['rank']})",
                 confidence=CONFIDENCE_LOW,
                 confidence_notes=_confidence_notes_for_candidate(
-                    candidate["connection_point_is_arbitrary"], floodplain_data_is_fallback, erosion_data_unavailable
+                    candidate["connection_point_is_arbitrary"],
+                    floodplain_data_is_fallback,
+                    erosion_data_unavailable,
+                    candidate["avg_grade_pct"],
                 ),
                 extra_properties={
                     "rank": candidate["rank"],
