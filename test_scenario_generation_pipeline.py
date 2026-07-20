@@ -186,19 +186,21 @@ if len(most_inclusive["production_zones_included"]) > len(least_inclusive["produ
         f"({len(most_inclusive['production_zones_included'])} zone(s)) {most_inclusive_downstream}."
     )
 
-# --- self-consistency: no scenario's own SOLAR candidate overlaps ground
-# that SAME scenario claims as a production zone. Solar is the layer
-# checked here (not water/road): solar_suitability.py hard-excludes
-# production zones via an explicit buffered raster-cell test before any
-# candidate polygon is built, so this is a real, always-applicable
-# guarantee to check. Water-system candidate zones are buffered from a
-# valley LINE using a different distance convention than the production-
-# area service-distance check (a documented, pre-existing property of
-# water_candidate_zones.py, unrelated to this pass and not to be
-# "fixed" here), and road corridors' final boundary-anchor connector
-# segment is explicitly exempted from the exclusion check by
-# road_corridors.py's own design -- neither is the guarantee this test
-# is after.
+# --- self-consistency: each scenario's own SOLAR candidates report their
+# production_zone_relationship correctly against THAT SAME scenario's own
+# claimed production zones. Solar candidates are a point-candidate model
+# (solar_suitability.py) that may legitimately sit inside a production
+# zone -- that's intentional, not a bug -- so the guarantee worth
+# checking here isn't "never overlaps" (the old, now-wrong assumption)
+# but "the reported relationship matches the real geometry against THIS
+# scenario's own zones," i.e. no stale/leftover relationship computed
+# against a different subset. Water-system candidate zones are buffered
+# from a valley LINE using a different distance convention than the
+# production-area service-distance check (a documented, pre-existing
+# property of water_candidate_zones.py, unrelated to this pass), and
+# road corridors' final boundary-anchor connector segment is explicitly
+# exempted from the exclusion check by road_corridors.py's own design --
+# neither is the guarantee this test is after.
 
 suitability_result = identify_production_area_suitability(boundary_coordinates, dem=synthetic_dem, check_soil=False)
 patches_by_id = {str(p["id"]): p for p in suitability_result["scored_patches"]}
@@ -209,12 +211,22 @@ for scenario in scenarios:
 
     for feature in scenario["feature_collections"]["solar_candidates"]["features"]:
         geometry_utm = shape(transform_geom("EPSG:4326", DST_CRS, feature["geometry"]))
+        relationship = feature["properties"]["production_zone_relationship"]
+        actually_overlaps = own_production_union.intersects(geometry_utm)
 
-        assert not own_production_union.intersects(geometry_utm), (
-            f"scenario {scenario['scenario_id']}'s own solar_candidates feature {feature['id']} overlaps "
-            f"ground it itself claims as a production zone ({own_zone_ids})"
-        )
+        if relationship == "inside":
+            assert actually_overlaps, (
+                f"scenario {scenario['scenario_id']}'s solar candidate {feature['id']} is labeled "
+                f"'inside' but doesn't actually overlap this scenario's own production zones ({own_zone_ids})"
+            )
+        else:
+            assert not actually_overlaps, (
+                f"scenario {scenario['scenario_id']}'s solar candidate {feature['id']} is labeled "
+                f"{relationship!r} but actually overlaps this scenario's own production zones "
+                f"({own_zone_ids}) -- should be 'inside'"
+            )
 
-print("Self-consistency confirmed: no scenario's own solar candidates overlap its own claimed production zones.")
+print("Self-consistency confirmed: every scenario's own solar candidates report production_zone_relationship "
+      "correctly against that SAME scenario's own claimed production zones (overlap is allowed and expected).")
 
 print("\nAll scenario generation pipeline checks passed.")

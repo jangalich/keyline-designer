@@ -9,25 +9,22 @@ excluding every candidate — but ONLY as a fallback; real existing-road
 data must still win when it's actually available.
 
 Uses a hand-built DEM with two distinct regions (west: a narrow ridge
-with steep flanks, road-corridor-friendly; east: a small flat plateau —
-too small for production_area.py's own MIN_PRODUCTION_AREA_ACRES floor
-(0.5 acres) but comfortably above solar_suitability.py's own, more
-permissive MIN_CANDIDATE_AREA_ACRES floor (0.25 acres), surrounded by
-much steeper ground on every side so it never merges into a larger
-patch) so both road-corridor generation and solar-candidate generation
-have real, independent terrain to work with in the same DEM — see
-test_road_corridors.py and test_solar_suitability.py for those
-mechanisms tested in isolation; this file is specifically about the
+with steep flanks, road-corridor-friendly; east: a broad, gentle uniform
+slope, solar-eligible) so both road-corridor generation and solar-
+candidate generation have real, independent terrain to work with in the
+same DEM — see test_road_corridors.py and test_solar_suitability.py for
+those mechanisms tested in isolation; this file is specifically about the
 integration glue between the two.
 
-NOTE: this used to carve the east region as a uniform ~17% south slope —
-too steep for production_area.py's OLD 15% ceiling but within
-solar_suitability.py's 20% one. Production's ceiling was raised to 20%
-(matching solar's own), so that slope-based gap no longer exists; the
-area-floor gap above is the real, still-valid discriminator between the
-two layers now (same reasoning test_road_corridors_pipeline.py's own
-ridge-crest design already relies on, not slope, for keeping its
-corridor-worthy crest out of production_area.py's own candidate set).
+NOTE: earlier versions of this fixture carved the east region as a small
+isolated plateau, specifically sized to stay too small for
+production_area.py's own area floor -- that mattered under the OLD
+zone-exclusion solar model, where a solar candidate overlapping a
+production zone was hard-excluded. Under the point-candidate model
+(solar_suitability.py), production-zone overlap is no longer excluded at
+all (a candidate can legitimately sit INSIDE a production zone), so the
+east region can simply be a broad gentle slope like any other layer's
+fixture -- no special small-area carving needed anymore.
 """
 
 from unittest.mock import patch
@@ -47,7 +44,8 @@ center_x, center_y = warp_transform("EPSG:4326", DST_CRS, [CENTER_LON], [CENTER_
 center_x, center_y = center_x[0], center_y[0]
 
 RESOLUTION = 5.0
-ROWS, COLS = 30, 60
+ROWS, COLS = 40, 60  # 200m x 300m -- big enough for CANDIDATE_POINT_SPACING_METERS (75m) to sample several points
+RIDGE_COLS = 15  # west ridge is only 75m wide, so the gentle east region starts close enough to stay within the road-proximity buffer
 origin_x = center_x - COLS * RESOLUTION / 2
 origin_y = center_y + ROWS * RESOLUTION / 2
 
@@ -56,33 +54,14 @@ utm_corners_y = [origin_y, origin_y, origin_y - ROWS * RESOLUTION, origin_y - RO
 lons, lats = warp_transform(DST_CRS, "EPSG:4326", utm_corners_x, utm_corners_y)
 boundary_coordinates = list(zip(lons, lats))
 
-# East plateau footprint (local to the east half): a flat disk (radius
-# PLATEAU_FLAT_RADIUS_CELLS around PLATEAU_CENTER) falling away at
-# PLATEAU_OUTER_GRADE_PCT beyond that -- continuous at the flat/falloff
-# boundary (no artificial cliff, which would otherwise wreck the
-# DEM-only shading proxy for cells right at the edge). The flat core
-# registers ~0.4 acres of true 0% slope, comfortably between solar's
-# 0.25-acre floor and production's 0.5-acre one (see module docstring).
-PLATEAU_CENTER = (15, 45)
-PLATEAU_FLAT_RADIUS_CELLS = 4
-PLATEAU_OUTER_GRADE_PCT = 25.0
-PLATEAU_PEAK_ELEVATION = 300.0
-
 array = np.zeros((ROWS, COLS), dtype=np.float32)
-plateau_row, plateau_col = PLATEAU_CENTER
 for row in range(ROWS):
     for col in range(COLS):
-        if col < 30:
+        if col < RIDGE_COLS:
             distance_from_ridge = abs((ROWS - 1 - row) - col)
             array[row, col] = 100.0 - distance_from_ridge * 1.2 - row * 0.15  # west: road-corridor-friendly ridge
         else:
-            # east: a small flat plateau falling away radially -- too
-            # small for production, solar-eligible (see comment above).
-            dist_cells = ((row - plateau_row) ** 2 + (col - plateau_col) ** 2) ** 0.5
-            dist_m = dist_cells * RESOLUTION
-            flat_radius_m = PLATEAU_FLAT_RADIUS_CELLS * RESOLUTION
-            drop = max(0.0, dist_m - flat_radius_m) * (PLATEAU_OUTER_GRADE_PCT / 100.0)
-            array[row, col] = PLATEAU_PEAK_ELEVATION - drop
+            array[row, col] = 100.0 - row * 0.2  # east: gentle ~4% uniform slope, solar-eligible
 
 dem = {
     "array": array, "resolution_meters": (RESOLUTION, RESOLUTION),
@@ -110,7 +89,7 @@ with patch.object(solar_suitability, "get_farm_roads_for_boundary", side_effect=
     result = identify_solar_candidate_zones(boundary_coordinates, dem=dem)
 
 features = result["zones_geojson"]["features"]
-assert len(features) >= 1, "expected at least one solar candidate on the east plateau (too small for production, solar-eligible)"
+assert len(features) >= 1, "expected at least one solar candidate on the gentle east slope"
 
 for feature in features:
     props = feature["properties"]
@@ -118,14 +97,7 @@ for feature in features:
         "with no real road data but a real suggested corridor available, distance_to_road_ft "
         "should be a real fallback-based value, not None"
     )
-    # Not asserting > 0 here: this synthetic plateau's own flat core is
-    # simultaneously the best available road-corridor material (a real,
-    # legitimate 0%-grade contour-band candidate) AND the best available
-    # solar site, so the top-ranked suggested corridor and the solar
-    # candidate can genuinely coincide -- a real computed 0.0 in that
-    # case, not a fabricated placeholder (which "is not None" above
-    # already rules out).
-    assert props["distance_to_road_ft"] >= 0
+    assert props["distance_to_road_ft"] > 0
     notes = props["confidence_notes"]
     assert "SUGGESTED road corridor" in notes and "road_corridors.py" in notes, (
         "the road-proximity fallback must be flagged explicitly in confidence_notes"

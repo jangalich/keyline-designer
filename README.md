@@ -83,19 +83,37 @@ report using the Claude API.
   baseline from NREL's PVWatts API, for a rough "expect about X kWh/kW/
   year here" report note. Optional (needs a free `NREL_API_KEY`);
   degrades to `None` without one, same as the other optional layers.
-- `solar_suitability.py` — the solar suitability data layer for Scale of
-  Permanence step 6 (Permanent Buildings): a three-part constraint stack
-  — excluded inside/near production zones (`production_area.py`, already
-  in main, buffered), required within a configurable proximity buffer of
-  a mapped farm road (`farm_roads_data.py`), scored by DEM slope + aspect
-  + shading (`terrain_metrics.py`) — producing RANKED candidate zones
-  (layer `solar_infrastructure`), not one forced placement. Flags (never
-  excludes) SSURGO prime-farmland overlap as a tradeoff note. Same
-  pure-core-logic-vs-network-fetch split as `water_candidate_zones.py`
-  (`find_candidate_solar_zones()` / `flag_prime_farmland_conflicts()` are
-  both network-free and unit-tested against synthetic input —
-  `test_solar_suitability.py`, end-to-end wiring in
-  `test_solar_suitability_pipeline.py`).
+- `solar_suitability.py` — the solar/structure siting data layer for
+  Scale of Permanence step 6 (Permanent Buildings): a POINT-CANDIDATE
+  model — candidate SITES for a small, fixed-footprint structure (a barn
+  or shed with rooftop panels, not a ground-mounted array), sampled on a
+  `CANDIDATE_POINT_SPACING_METERS` grid across the property, each capped
+  at `MAX_STRUCTURE_FOOTPRINT_ACRES` (1 acre by default) and scored by
+  DEM slope + aspect + shading (`terrain_metrics.py`, averaged over a
+  local window matching the candidate's own footprint) plus a scored
+  PREFERENCE (not exclusion) for proximity to a production zone's own
+  edge — producing RANKED candidates (layer `solar_infrastructure`,
+  properties `production_zone_relationship` = inside/adjacent/outside
+  and `distance_to_production_zone_ft`), not one forced placement.
+  Water-candidate (pond/dam siting) zones are still HARD-excluded
+  (buffered); road proximity is still a hard constraint with a reported
+  distance. Flags (never excludes) SSURGO prime-farmland overlap as a
+  tradeoff note, unchanged. This REPLACED an earlier eligible-AREA/
+  connected-component "zone" model (production zones hard-excluded, the
+  same shape `production_area.py` itself uses) after `production_area.py`'s
+  own slope ceiling was raised to match this module's — with both layers
+  drawing eligibility from nearly the same gentle-ground footprint,
+  production's exclusion started consuming essentially all of solar's
+  own eligible area, and real-property runs returned ZERO candidates. A
+  small structure isn't actually a competing zone the way production,
+  water, or a future trees/windbreak layer are — it can coexist with
+  production land around and under it — so modeling it as point
+  candidates instead of a shared eligible-area pool fixes the collision
+  at the root. Same pure-core-logic-vs-network-fetch split as
+  `water_candidate_zones.py` (`find_candidate_solar_zones()` /
+  `flag_prime_farmland_conflicts()` are both network-free and
+  unit-tested against synthetic input — `test_solar_suitability.py`,
+  end-to-end wiring in `test_solar_suitability_pipeline.py`).
 - `soil_data.py` additionally has `get_erosion_factor_for_polygon()` and
   `is_erosion_prone()` (SSURGO K-factor, `kwfact`) and `is_hydric()`
   (SSURGO `hydricrating`) — the erosion-prone-soil and hydric/floodplain
@@ -128,9 +146,9 @@ report using the Claude API.
   top-ranked `suggested_road_corridor` when no existing-road data is
   reachable (real road data always wins when available) — see
   `_suggested_corridor_as_road_fallback()` and
-  `test_solar_road_fallback.py`. This is the only change made to
-  `solar_suitability.py` in that pass; its scoring logic itself is
-  untouched.
+  `test_solar_road_fallback.py`. Unchanged by the later point-candidate
+  redesign above — the fallback logic works the same way against a
+  candidate footprint's own distance to the corridor.
 - `fencing.py` — the Subdivision Fences data layer (Scale of Permanence
   step 7): real computed geometry for exactly two fencing types.
   STREAM EXCLUSION fencing buffers each real NHD stream (`hydrology_data.py`,
@@ -328,13 +346,16 @@ tool (built with Leaflet).
   (`production_area.py`), and `MIN_GRAVITY_GRADIENT` /
   `MIN_BOUNDARY_SETBACK_METERS` (`water_candidate_zones.py`) accordingly —
   all deliberately exposed as module-level constants for exactly this.
-- Same ground-truth validation pass for `solar_suitability.py`: check that
-  top-ranked candidates are actually outside production zones, near a
-  real road, low-slope, and south-facing on a known property, and tune
-  `MAX_SOLAR_SLOPE_PCT`, the score weights (`SLOPE_SCORE_WEIGHT` /
-  `ASPECT_SCORE_WEIGHT` / `SHADING_SCORE_WEIGHT`), `MIN_SUITABILITY_SCORE`,
-  `PRODUCTION_ZONE_EXCLUSION_BUFFER_METERS`, and
-  `ROAD_PROXIMITY_BUFFER_METERS` accordingly.
+- Same ground-truth validation pass for `solar_suitability.py`'s
+  point-candidate model: check that top-ranked candidates are near a
+  real road, low-slope, south-facing, and (per the new proximity
+  preference, not exclusion) sensibly close to a production zone's edge
+  when one is nearby, on a known property, and tune `MAX_SOLAR_SLOPE_PCT`,
+  the score weights (`SLOPE_SCORE_WEIGHT` / `ASPECT_SCORE_WEIGHT` /
+  `SHADING_SCORE_WEIGHT` / `PRODUCTION_PROXIMITY_SCORE_WEIGHT`),
+  `MIN_SUITABILITY_SCORE`, `CANDIDATE_POINT_SPACING_METERS`,
+  `MAX_STRUCTURE_FOOTPRINT_ACRES`, `PRODUCTION_PROXIMITY_REFERENCE_METERS`,
+  and `ROAD_PROXIMITY_BUFFER_METERS` accordingly.
 - `terrain_metrics.py`'s shading proxy is DEM-only horizon/terrain
   shading — it has no vegetation/canopy signal at all (no DSM-derived
   canopy height model exists in this pipeline yet). A real canopy height

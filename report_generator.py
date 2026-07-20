@@ -97,15 +97,20 @@ REASONING SEQUENCE — follow this exact order, do not skip ahead or reorder it:
    step 2, water-storage or drainage areas from step 3, and road or tree corridors from
    steps 4-5. State clearly that no building-code, setback, or utility-access data feeds
    this step — it is a land-suitability read only, not a permitting-ready siting. When
-   SOLAR INFRASTRUCTURE CANDIDATE ZONE data is provided below (DEM-derived, ranked
-   candidates already screened for slope, aspect, shading, distance from production
-   land, and proximity to a mapped road), use it as the concrete basis for any solar
-   siting discussion: compare the ranked candidates against each other by name/rank
-   rather than inventing an unranked one, and if a candidate is flagged with a prime-
-   farmland conflict, present that explicitly as a tradeoff (solar value vs. agricultural
-   value of that land) rather than silently picking a side. Do not present any single
-   candidate as a forced final answer when multiple are close in score — say so, and let
-   the ranked list stand as real options.
+   SOLAR STRUCTURE CANDIDATE data is provided below (DEM-derived, ranked candidate SITES
+   for a small, fixed-footprint structure — a barn or shed with rooftop panels, not a
+   ground-mounted array — already screened for slope, aspect, shading, and proximity to a
+   mapped road), use it as the concrete basis for any solar siting discussion: compare the
+   ranked candidates against each other by name/rank rather than inventing an unranked
+   one. A candidate MAY sit inside or right at the edge of a production zone —
+   properties.production_zone_relationship reports this, and proximity to a production
+   zone's edge is scored as a real preference (a small structure can coexist with
+   production land), not something to apologize for or treat as a conflict; only flag it
+   as a tradeoff if the candidate ALSO carries a prime-farmland conflict (solar value vs.
+   agricultural value of that specific land) — present that explicitly rather than
+   silently picking a side. Do not present any single candidate as a forced final answer
+   when multiple are close in score — say so, and let the ranked list stand as real
+   options.
 
 7. SUBDIVISION FENCES. When STREAM EXCLUSION / PERIMETER FENCING data is provided below
    (fencing.py: buffered NHD stream geometry for livestock-exclusion fencing, and the
@@ -365,16 +370,28 @@ def _format_solar_candidate_zones_summary(zones_geojson: Optional[dict]) -> str:
             if props.get("distance_to_road_ft") is not None
             else "distance to road unknown (no road data available)"
         )
+        relationship = props.get("production_zone_relationship")
+        if relationship == "inside":
+            production_note = "sits INSIDE a production zone (intentional — a small structure can coexist with production land)"
+        elif relationship == "adjacent":
+            production_note = f"{props['distance_to_production_zone_ft']}ft from the nearest production zone's edge"
+        else:
+            production_note = (
+                f"{props['distance_to_production_zone_ft']}ft from the nearest production zone's edge"
+                if props.get("distance_to_production_zone_ft") is not None
+                else "no production zones identified on this property"
+            )
         lines.append(
             f"  - Rank {props['rank']} (score {props['suitability_score']}/100): "
-            f"{props['avg_slope_pct']}% slope, {props['aspect']}-facing, "
-            f"{distance_to_road}, {props['distance_to_production_zone_ft']}ft from "
-            f"nearest production zone{conflict}"
+            f"{props.get('footprint_area_acres', '?')}ac footprint, {props['avg_slope_pct']}% slope, "
+            f"{props['aspect']}-facing, {distance_to_road}, {production_note}{conflict}"
         )
     lines.append(
-        "\nThese are ranked CANDIDATE ZONES, not a single forced placement — compare "
-        "them against each other in the narrative rather than picking one unprompted, "
-        "and note prime-farmland conflicts as a real tradeoff where flagged."
+        "\nThese are ranked CANDIDATE SITES for a small, fixed-footprint structure (not a single "
+        "forced placement, and not a large ground-mounted array) — compare them against each other "
+        "in the narrative rather than picking one unprompted, note prime-farmland conflicts as a "
+        "real tradeoff where flagged, and note that a candidate sitting inside or near a production "
+        "zone is a genuine, intentional option here, not a caveat."
     )
     return "\n".join(lines)
 

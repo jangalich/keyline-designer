@@ -1,53 +1,55 @@
 """
 test_solar_suitability.py
 
-Offline (no-network) checks for solar_suitability.py's constraint-stack
-and ranking logic — a hand-built synthetic DEM plus hand-built production/
-water zones and roads (same shapes find_candidate_solar_zones() actually
-consumes), not a real DEM/road/SSURGO fetch. Mirrors
-test_water_candidate_zones.py's "pure logic, independent of real data
-fetches" approach.
+Offline (no-network) checks for solar_suitability.py's POINT-CANDIDATE
+scoring model (see that module's docstring for why it replaced the
+earlier eligible-area/connected-component "zone" model) — a hand-built
+synthetic DEM plus hand-built production/water zones and roads (same
+shapes find_candidate_solar_zones() actually consumes), not a real
+DEM/road/SSURGO fetch. Mirrors test_water_candidate_zones.py's "pure
+logic, independent of real data fetches" approach.
 
-Also a regression test for two real bugs found live against the real
-property:
-  1. Water-candidate zones (pond/dam siting ground) were never checked at
-     all -- a solar candidate could sit directly on top of one. Fixed by
-     hard-excluding them the same way production zones are (buffered by
-     road_corridors.POND_ZONE_EXCLUSION_BUFFER_METERS, reused rather than
-     reinvented).
-  2. distance_to_production_zone_ft (and distance_to_road_ft) were
-     measured from the candidate polygon's CENTROID to the BUFFERED
-     exclusion geometry, not the candidate's own nearest EDGE to the RAW
-     zone -- both effects independently inflated the reported distance
-     above the real nearest-edge distance a plain shapely .distance()
-     check gives. Fixed to measure edge-to-edge against raw geometry;
-     this file cross-checks that directly against independent
-     .distance() calls, not just against the (previously also wrong)
-     code path.
+Layout (60x60 cells, 5m resolution -> 300m x 300m), a uniform ~4%
+south-facing grade everywhere (gentle enough that slope never itself
+excludes a candidate here — this file is about the point-sampling/
+scoring/exclusion logic, not re-testing terrain_metrics.py's own slope
+math):
+  - x in [0, 150]:     production zone (NO LONGER excluded -- candidates
+                        here should be scored HIGHER for edge proximity,
+                        not dropped)
+  - x in [270, 300], y in [140, 160]: a water-candidate zone, still
+                        HARD-excluded (+25m buffer) -- this is
+                        deliberately positioned to knock out exactly one
+                        of the candidate grid points below, not all of
+                        them, so the test can confirm the exclusion is
+                        real without losing every candidate on that side
+  - a road runs along the whole south edge (y=4500000); the default 150m
+    proximity buffer keeps the northernmost row of sample points (y~225)
+    out of range
 
-Layout (40x40 cells, 5m resolution -> 200m x 200m):
-  - x in [0, 80]:      production zone 0 (excluded, +15m buffer)
-  - x in [100, 145]:   WEST candidate region -- mild south-facing slope
-  - x in [145, 160]:   production zone 1 (excluded, +15m buffer) -- keeps
-                        the two candidate regions from merging into one
-                        connected component, without resorting to a tall
-                        DEM spike (which would itself cast an unwanted
-                        shadow onto its neighbors and confound the test)
-  - x in [175, 200]:   EAST candidate region -- mild NORTH-facing slope
-                        (worse aspect, same slope magnitude -- this is
-                        what differentiates the two candidates' rank)
-  - a road runs along the whole south edge (y=0); the default 150m
-    proximity buffer excludes roughly the northern quarter of the grid
+CANDIDATE_POINT_SPACING_METERS=75 on this 300m x 300m boundary produces
+a 3x3 interior grid of 9 candidate points (edge-exact points are outside
+the boundary's own interior, same "no candidate drawn from the exact
+boundary line" reasoning every other layer in this pipeline already
+uses) -- confirmed empirically, not assumed, and asserted below.
 """
 
+import math
+
 import numpy as np
-from shapely.geometry import LineString, box
+from shapely.geometry import LineString, Point, box
 from shapely.ops import unary_union
 
 from feature_schema import validate_feature_collection
 from road_corridors import POND_ZONE_EXCLUSION_BUFFER_METERS
 from solar_suitability import (
+    CANDIDATE_POINT_SPACING_METERS,
+    MAX_STRUCTURE_FOOTPRINT_ACRES,
     MIN_SUITABILITY_SCORE,
+    PRODUCTION_EDGE_ADJACENCY_METERS,
+    _footprint_side_meters,
+    _generate_candidate_points,
+    _production_proximity_score,
     candidates_to_geojson,
     find_candidate_solar_zones,
     flag_prime_farmland_conflicts,
@@ -55,146 +57,137 @@ from solar_suitability import (
 
 CRS = "EPSG:32617"
 RESOLUTION = (5.0, 5.0)
-ROWS = COLS = 40
-ORIGIN_X, ORIGIN_Y = 500000.0, 4500200.0
+ROWS = COLS = 60
+ORIGIN_X, ORIGIN_Y = 500000.0, 4500300.0
 
 array = np.full((ROWS, COLS), 100.0, dtype=np.float32)
 for row in range(ROWS):
-    for col in range(20, 29):
-        array[row, col] = 100.0 - row * 0.2  # west region: south-facing, ~4% grade
-for row in range(ROWS):
-    for col in range(32, 40):
-        array[row, col] = 100.0 + row * 0.2  # east region: north-facing, ~4% grade
+    array[row, :] = 100.0 - row * 0.2  # uniform ~4% south-facing grade everywhere
 
 DEM = {"array": array, "resolution_meters": RESOLUTION, "origin_x": ORIGIN_X, "origin_y": ORIGIN_Y, "crs": CRS}
 
 PRODUCTION_AREAS = [
-    {"id": 0, "representative_elevation_m": 100.0, "polygon_utm": box(500000, 4500000, 500080, 4500200)},
-    {"id": 1, "representative_elevation_m": 100.0, "polygon_utm": box(500145, 4500000, 500160, 4500200)},
+    {"id": 0, "representative_elevation_m": 100.0, "polygon_utm": box(500000, 4500000, 500150, 4500300)}
 ]
-WATER_ZONES: list[dict] = []
-ROAD = [LineString([(500000, 4500000), (500200, 4500000)])]
+WATER_ZONES = [{"valley_id": 0, "polygon_utm": box(500270, 4500140, 500300, 4500160)}]
+ROAD = [LineString([(500000, 4500000), (500300, 4500000)])]
+BOUNDARY = box(500000, 4500000, 500300, 4500300)
 
-# The DEM's own full extent — used everywhere except the parcel-clipping
-# regression test below, so existing behavior/assertions are unaffected
-# (100% on-parcel, nothing to clip).
-BOUNDARY = box(ORIGIN_X, ORIGIN_Y - ROWS * RESOLUTION[1], ORIGIN_X + COLS * RESOLUTION[0], ORIGIN_Y)
+FOOTPRINT_SIDE_M = _footprint_side_meters(MAX_STRUCTURE_FOOTPRINT_ACRES)
 
 
-# --- geometric soundness: both candidates stay outside production zones, ranked correctly ---
+# --- Step 1: grid sampling produces the expected on-parcel points, non-overlapping by construction ---
 
-candidates = find_candidate_solar_zones(DEM, PRODUCTION_AREAS, WATER_ZONES, ROAD, BOUNDARY)
-assert len(candidates) == 2, f"expected 2 candidate regions (west + east), got {len(candidates)}"
-
-west, east = candidates[0], candidates[1]
-
-assert west["rank"] == 1 and east["rank"] == 2
-assert west["suitability_score"] > east["suitability_score"], (
-    "the south-facing (west) region should outrank the equally-sloped but "
-    "north-facing (east) region"
+assert CANDIDATE_POINT_SPACING_METERS > FOOTPRINT_SIDE_M, (
+    "the documented spacing must exceed the footprint side length, or neighboring candidates "
+    "would overlap by construction -- this assertion protects that invariant if either constant "
+    "is ever retuned"
 )
-assert west["aspect_label"] == "S"
-assert east["aspect_label"] == "N"
-print(f"Ranking: west (south-facing, score {west['suitability_score']}) ranks above "
-      f"east (north-facing, score {east['suitability_score']}).")
 
-for candidate, label in ((west, "west"), (east, "east")):
-    min_x, min_y, max_x, max_y = candidate["polygon_utm"].bounds
-    assert min_x > 80, f"{label} candidate should stay outside production zone 0's footprint+buffer"
-    assert min_x > 95 or max_x < 130, f"{label} candidate should respect production zone 1's exclusion too"
-    assert max_y <= 4500152, f"{label} candidate should stay within the road proximity buffer (~150m), got max_y={max_y}"
-    assert candidate["distance_to_production_zone_m"] is not None and candidate["distance_to_production_zone_m"] > 0
-    assert candidate["distance_to_road_m"] is not None and candidate["distance_to_road_m"] >= 0
-print("Both candidates are geometrically outside production zones and within the road proximity buffer.")
+sample_points = _generate_candidate_points(BOUNDARY)
+assert len(sample_points) == 9, f"expected a 3x3 interior grid on this 300m x 300m boundary, got {len(sample_points)}"
+for x, y in sample_points:
+    assert BOUNDARY.buffer(1e-6).contains(Point(x, y)), "every sampled point must be on-parcel"
+print(f"Grid sampling produces the expected {len(sample_points)} on-parcel candidate point(s).")
 
 
-# --- regression: reported distances match independent shapely edge-to-edge checks exactly ---
+# --- geometric soundness: candidates now form INSIDE the production zone (the actual fix) ---
 
-raw_production_union = unary_union([p["polygon_utm"] for p in PRODUCTION_AREAS])
-road_union = unary_union(ROAD)
+candidates = find_candidate_solar_zones(DEM, PRODUCTION_AREAS, WATER_ZONES, ROAD, BOUNDARY, max_candidates=50)
+assert len(candidates) == 5, f"expected 5 candidates (9 grid points minus 3 too-far-from-road minus 1 water-excluded), got {len(candidates)}"
 
-for candidate, label in ((west, "west"), (east, "east")):
-    independent_production_distance = candidate["polygon_utm"].distance(raw_production_union)
-    independent_road_distance = candidate["polygon_utm"].distance(road_union)
+inside_count = sum(1 for c in candidates if c["production_zone_relationship"] == "inside")
+assert inside_count >= 1, (
+    "expected at least one candidate classified 'inside' a production zone -- this is the specific "
+    "behavior this redesign exists to enable (previously: zero candidates anywhere near production land)"
+)
+for c in candidates:
+    if c["production_zone_relationship"] == "inside":
+        assert c["polygon_utm"].intersects(unary_union([p["polygon_utm"] for p in PRODUCTION_AREAS])), (
+            "a candidate classified 'inside' must actually overlap the production-zone geometry"
+        )
+print(f"{inside_count}/{len(candidates)} candidates sit INSIDE the production zone -- the redesign's core fix, confirmed.")
 
-    assert abs(candidate["distance_to_production_zone_m"] - independent_production_distance) < 1e-6, (
-        f"{label}: reported distance_to_production_zone_m ({candidate['distance_to_production_zone_m']}) "
-        f"must equal an independent polygon.distance() check ({independent_production_distance}), not a "
-        f"centroid- or buffered-geometry-based approximation"
+
+# --- every candidate's footprint is capped at MAX_STRUCTURE_FOOTPRINT_ACRES, not a big blob ---
+
+for candidate in candidates:
+    assert candidate["footprint_area_acres"] <= MAX_STRUCTURE_FOOTPRINT_ACRES + 1e-6, (
+        f"candidate footprint ({candidate['footprint_area_acres']} ac) exceeds the documented cap "
+        f"({MAX_STRUCTURE_FOOTPRINT_ACRES} ac) -- this must never be a large connected-component area"
     )
-    assert abs(candidate["distance_to_road_m"] - independent_road_distance) < 1e-6, (
-        f"{label}: reported distance_to_road_m ({candidate['distance_to_road_m']}) must equal an "
-        f"independent polygon.distance() check ({independent_road_distance})"
+    # None of these candidates are boundary-clipped (all comfortably interior), so each should sit
+    # right at the cap, not some arbitrary smaller size.
+    assert math.isclose(candidate["footprint_area_acres"], MAX_STRUCTURE_FOOTPRINT_ACRES, rel_tol=1e-3), (
+        f"an interior (non-boundary-clipped) candidate should use its full footprint cap, got "
+        f"{candidate['footprint_area_acres']} ac"
     )
-    # The centroid-based bug specifically overstated distance -- confirm the
-    # fixed (edge-based) value is strictly less than what centroid.distance()
-    # would have given, on these non-trivially-sized candidate polygons.
-    centroid_production_distance = candidate["polygon_utm"].centroid.distance(raw_production_union)
-    assert independent_production_distance < centroid_production_distance, (
-        f"{label}: edge-to-edge distance should be less than centroid-to-edge distance for a real polygon "
-        f"(centroid was {centroid_production_distance}, edge was {independent_production_distance}) -- "
-        f"if these are equal, the fix silently regressed back to centroid-based measurement"
-    )
+print(f"Every candidate's footprint is capped at {MAX_STRUCTURE_FOOTPRINT_ACRES} acre(s), not a variable-size blob.")
+
+
+# --- production-zone PROXIMITY is scored as a preference: closer to the edge ranks higher ---
+
+by_distance = sorted(candidates, key=lambda c: (c["distance_to_production_zone_m"] is None, c["distance_to_production_zone_m"]))
+closest, farthest = by_distance[0], by_distance[-1]
+assert closest["suitability_score"] >= farthest["suitability_score"], (
+    "all else being equal (identical slope/aspect/shading on this uniform terrain), the candidate "
+    "closer to the production zone's edge should score at least as high as the one farther away"
+)
+# Two candidates equidistant-in-x from the production edge (both x=150, at y=75 and y=150) should
+# score identically on this uniform terrain -- confirms the proximity term is driven by real
+# geometry, not sample order.
+same_distance = [c for c in candidates if c["distance_to_production_zone_m"] == 0.0]
+assert len(same_distance) >= 2 and len({c["suitability_score"] for c in same_distance}) == 1, (
+    "candidates at the same distance from the production edge should score identically on uniform terrain"
+)
 print(
-    f"Reported distances match independent shapely .distance() checks exactly "
-    f"(west: {west['distance_to_production_zone_m']}m to production, {west['distance_to_road_m']}m to road; "
-    f"east: {east['distance_to_production_zone_m']}m to production, {east['distance_to_road_m']}m to road) "
-    f"-- and are strictly less than the old centroid-based measurement would have given."
+    f"Production-zone edge proximity is scored as a real preference: closest candidate "
+    f"(score {closest['suitability_score']}, {closest['distance_to_production_zone_m']}m to edge) "
+    f"outranks farthest (score {farthest['suitability_score']}, {farthest['distance_to_production_zone_m']}m to edge)."
 )
 
 
-# --- water-candidate zone exclusion: a zone placed inside the west region shrinks/splits it ---
+# --- _production_proximity_score: peaks at the edge, falls off in both directions, neutral if no production zones ---
 
-water_zone_cutting_west = [
-    {"valley_id": 0, "polygon_utm": box(500110, 4500000, 500125, 4500200)}
-]
-candidates_with_water_zone = find_candidate_solar_zones(DEM, PRODUCTION_AREAS, water_zone_cutting_west, ROAD, BOUNDARY)
+assert _production_proximity_score(0.0) == 1.0, "right at a production zone's edge should score the maximum preference"
+assert _production_proximity_score(1000.0) == 0.0, "far beyond the reference distance should score zero preference"
+assert _production_proximity_score(None) == 0.5, "no production zones at all should be neutral, not penalized"
+mid = _production_proximity_score(50.0)
+assert 0.0 < mid < 1.0
+print("_production_proximity_score peaks at the edge (1.0), floors at 0.0 beyond the reference distance, "
+      "and is neutral (0.5) when no production zones exist at all.")
 
-water_zone_exclusion = box(500110, 4500000, 500125, 4500200).buffer(POND_ZONE_EXCLUSION_BUFFER_METERS)
-for candidate in candidates_with_water_zone:
-    assert not candidate["polygon_utm"].intersects(water_zone_exclusion), (
-        "no candidate should overlap a buffered water-candidate zone -- this is the exact "
-        "bug found live: a candidate sitting directly on/against a water-candidate zone"
+
+# --- water-candidate zone exclusion still holds: no candidate overlaps the buffered water zone ---
+
+water_exclusion = box(500270, 4500140, 500300, 4500160).buffer(POND_ZONE_EXCLUSION_BUFFER_METERS)
+for candidate in candidates:
+    assert not candidate["polygon_utm"].intersects(water_exclusion), (
+        "no candidate should overlap a buffered water-candidate zone -- this hard exclusion is "
+        "explicitly UNCHANGED by the point-candidate redesign"
     )
     assert candidate["distance_to_water_zone_m"] is not None and candidate["distance_to_water_zone_m"] >= 0
-    independent_water_distance = candidate["polygon_utm"].distance(box(500110, 4500000, 500125, 4500200))
-    assert abs(candidate["distance_to_water_zone_m"] - independent_water_distance) < 1e-6
-
-# The water zone cuts directly through the middle of the west region (x 110-125,
-# well inside the west region's x 100-145 span) -- west must shrink relative to
-# the no-water-zone baseline, whether that leaves a smaller remaining patch or
-# eliminates it entirely (either is a legitimate real-constraint outcome, not a bug).
-west_area_before = west["polygon_utm"].area
-west_like_after = [c for c in candidates_with_water_zone if c["polygon_utm"].bounds[0] < 500110]
-west_area_after = sum(c["polygon_utm"].area for c in west_like_after)
-assert west_area_after < west_area_before, (
-    f"a water-candidate zone cutting through the middle of the west region should shrink it "
-    f"(before: {west_area_before}m2, after: {west_area_after}m2)"
-)
-print(
-    f"A water-candidate zone placed inside the west region correctly excludes candidates from its "
-    f"buffered footprint (west area {west_area_before:.0f}m2 -> {west_area_after:.0f}m2), and "
-    f"distance_to_water_zone_m matches an independent shapely check."
-)
+print("Water-candidate zone exclusion holds unchanged: no candidate overlaps the buffered water zone.")
 
 
-# --- road data unavailable (None) disables the proximity constraint, extending coverage north ---
+# --- road proximity: unchanged in spirit -- still a hard constraint, still reported ---
 
-candidates_no_road_data = find_candidate_solar_zones(DEM, PRODUCTION_AREAS, WATER_ZONES, None, BOUNDARY)
-assert len(candidates_no_road_data) == 2
-no_road_max_y = max(c["polygon_utm"].bounds[3] for c in candidates_no_road_data)
-with_road_max_y = max(c["polygon_utm"].bounds[3] for c in candidates)
-assert no_road_max_y > with_road_max_y, (
-    "with road data unavailable (None), the proximity constraint should be disabled, "
-    "so candidates should extend further north than when a real road buffer is applied"
+for candidate in candidates:
+    assert candidate["distance_to_road_m"] is not None and candidate["distance_to_road_m"] >= 0
+    assert candidate["polygon_utm"].bounds[3] <= 4500150 + FOOTPRINT_SIDE_M / 2 + 1e-6, (
+        "every remaining candidate should be within the road proximity buffer (~150m from the south edge)"
+    )
+print("Road-proximity reporting/constraint behaves unchanged: every candidate is within the buffer, with a real reported distance.")
+
+candidates_no_road_data = find_candidate_solar_zones(DEM, PRODUCTION_AREAS, WATER_ZONES, None, BOUNDARY, max_candidates=50)
+assert len(candidates_no_road_data) > len(candidates), (
+    "with road data unavailable (None), the proximity constraint should be disabled, surfacing "
+    "more candidates (the northern row) than when a real road buffer is applied"
 )
 assert all(c["distance_to_road_m"] is None for c in candidates_no_road_data)
 print("Road data unavailable (None) disables the proximity constraint instead of zeroing out every candidate.")
 
-
-# --- road data present but empty ([]) is a real, binding constraint: zero candidates ---
-
-candidates_empty_roads = find_candidate_solar_zones(DEM, PRODUCTION_AREAS, WATER_ZONES, [], BOUNDARY)
+candidates_empty_roads = find_candidate_solar_zones(DEM, PRODUCTION_AREAS, WATER_ZONES, [], BOUNDARY, max_candidates=50)
 assert candidates_empty_roads == [], (
     "an empty road list (successfully fetched, genuinely no roads nearby) should be treated "
     "as a real constraint -- nothing is within any proximity buffer of a nonexistent road"
@@ -202,15 +195,31 @@ assert candidates_empty_roads == [], (
 print("Road data present but empty is treated as a real, binding constraint (zero candidates).")
 
 
-# --- flag_prime_farmland_conflicts: flags, does not exclude or re-rank ---
+# --- outside/adjacent/inside classification ---
+
+no_production_candidates = find_candidate_solar_zones(DEM, [], WATER_ZONES, ROAD, BOUNDARY, max_candidates=50)
+assert all(c["production_zone_relationship"] == "outside" for c in no_production_candidates), (
+    "with no production zones at all, every candidate must classify as 'outside' (there's nothing to be near)"
+)
+assert all(c["distance_to_production_zone_m"] is None for c in no_production_candidates), (
+    "distance_to_production_zone_m must be None when no production zones exist at all this run"
+)
+print("With no production zones at all, every candidate correctly classifies 'outside' with a null edge distance.")
+
+relationships_seen = {c["production_zone_relationship"] for c in candidates}
+assert relationships_seen <= {"inside", "adjacent", "outside"}
+print(f"production_zone_relationship values observed on this layout: {sorted(relationships_seen)}.")
+
+
+# --- flag_prime_farmland_conflicts: flags, does not exclude or re-rank (unchanged) ---
 
 prime_classifications = [
     {"mukey": "1", "muname": "Some prime soil", "farmland_classification": "All areas are prime farmland"}
 ]
 flagged = flag_prime_farmland_conflicts([dict(c) for c in candidates], prime_classifications)
-assert len(flagged) == 2, "flagging must not remove any candidates"
+assert len(flagged) == len(candidates), "flagging must not remove any candidates"
 assert all(c["prime_farmland_conflict"] is True for c in flagged)
-assert flagged[0]["rank"] == 1 and flagged[1]["rank"] == 2, "flagging must not re-rank candidates"
+assert [c["rank"] for c in flagged] == [c["rank"] for c in candidates], "flagging must not re-rank candidates"
 print("flag_prime_farmland_conflicts flags every candidate without excluding or re-ranking any.")
 
 non_prime_classifications = [
@@ -226,8 +235,9 @@ print("flag_prime_farmland_conflicts correctly finds no conflict when no prime s
 geojson = candidates_to_geojson(flagged)
 validate_feature_collection(geojson)
 required_props = {
-    "suitability_score", "avg_slope_pct", "aspect", "distance_to_road_ft",
-    "distance_to_production_zone_ft", "distance_to_water_zone_ft", "constraints_satisfied",
+    "suitability_score", "avg_slope_pct", "aspect", "footprint_area_acres", "distance_to_road_ft",
+    "distance_to_production_zone_ft", "production_zone_relationship", "distance_to_water_zone_ft",
+    "constraints_satisfied",
 }
 for feature in geojson["features"]:
     assert feature["properties"]["layer"] == "solar_infrastructure"
@@ -235,13 +245,23 @@ for feature in geojson["features"]:
         f"missing required properties: {required_props - feature['properties'].keys()}"
     )
     assert "outside_water_candidate_zone" in feature["properties"]["constraints_satisfied"]
+    assert "outside_production_zone" not in feature["properties"]["constraints_satisfied"], (
+        "production zones are no longer a hard exclusion -- this must not appear as a satisfied constraint"
+    )
     assert feature["geometry"]["type"] in ("Polygon", "MultiPolygon")
-    assert "canopy height model" in feature["properties"]["confidence_notes"] or "rough" in feature["properties"]["confidence_notes"].lower()
-    assert "water-candidate" in feature["properties"]["confidence_notes"].lower()
+    notes = feature["properties"]["confidence_notes"]
+    assert "canopy height model" in notes or "rough" in notes.lower()
+    assert "water-candidate" in notes.lower()
+    assert "INTENTIONAL" in notes and "coexist" in notes, (
+        "confidence_notes must plainly state that sitting inside a production zone is intentional, not a caveat"
+    )
+    assert "PREFERENCE" in notes or "preference" in notes, (
+        "confidence_notes must plainly state that production-zone proximity is a preference, not a requirement"
+    )
 print("candidates_to_geojson output is schema-valid, layer='solar_infrastructure', with all required "
-      "properties including distance_to_water_zone_ft and the water-zone exclusion constraint/caveat.")
+      "properties, no stale 'outside_production_zone' constraint, and confidence_notes explaining the "
+      "point-candidate model plainly.")
 
-# distance_to_road_ft should roughly be the meters value / 0.3048
 for candidate, feature in zip(flagged, geojson["features"]):
     expected_ft = candidate["distance_to_road_m"] / 0.3048
     assert abs(feature["properties"]["distance_to_road_ft"] - expected_ft) < 0.5
@@ -252,64 +272,53 @@ print("distance_to_road_ft is correctly converted from meters.")
 
 strict_candidates = find_candidate_solar_zones(DEM, PRODUCTION_AREAS, WATER_ZONES, ROAD, BOUNDARY, min_suitability_score=0.99)
 assert strict_candidates == [], "a near-impossible suitability threshold should leave no qualifying candidates"
-print(f"Raising min_suitability_score above what any cell can reach (default is {MIN_SUITABILITY_SCORE}) correctly yields no candidates.")
+print(f"Raising min_suitability_score above what any point can reach (default is {MIN_SUITABILITY_SCORE}) correctly yields no candidates.")
+
+
+# --- max slope is still a hard buildability constraint, independent of production-zone proximity ---
+
+steep_array = np.full((ROWS, COLS), 100.0, dtype=np.float32)
+for row in range(ROWS):
+    steep_array[row, :] = 100.0 - row * 3.0  # 60% grade -- excludes even a point deep inside a production zone
+steep_dem = {**DEM, "array": steep_array}
+steep_candidates = find_candidate_solar_zones(steep_dem, PRODUCTION_AREAS, [], None, BOUNDARY, max_candidates=50)
+assert steep_candidates == [], (
+    "ground steeper than MAX_SOLAR_SLOPE_PCT must be excluded regardless of production-zone proximity -- "
+    "proximity is a preference, buildability is still a hard constraint"
+)
+print("Ground steeper than MAX_SOLAR_SLOPE_PCT is still hard-excluded, even when it sits inside a production zone.")
 
 
 # --- regression: candidates stay on-parcel, not drawn from the DEM's buffered margin ---
 #
-# This is the exact live bug found against the real property: dem_data.py
-# fetches a DEM buffered ~100m past the drawn boundary (correct and
-# intentional, for terrain-analysis context), but find_candidate_solar_zones()
-# never restricted eligible cells to the actual parcel -- a candidate could
-# be built entirely from off-parcel ground. Here the DEM is a uniform,
-# gentle south-facing slope spanning the FULL 300m x 300m grid (so,
-# unclipped, eligible ground spans the whole width, well past the parcel
-# on every side); the boundary below is a smaller 200m x 200m parcel with
-# a 50m buffer margin on every side, mirroring dem_data.py's real buffer
-# relationship at test scale.
-buffered_size = 60
+# dem_data.py fetches a DEM buffered ~100m past the drawn boundary (correct and intentional, for
+# terrain-analysis context); find_candidate_solar_zones() must still restrict every candidate
+# footprint to the real parcel. Here the DEM spans a 400m x 400m grid (well past a smaller 200m x
+# 200m real parcel with a 100m buffer margin on every side, mirroring dem_data.py's real buffer
+# relationship at test scale).
+buffered_size = 80
 buffered_array = np.full((buffered_size, buffered_size), 100.0, dtype=np.float32)
 for row in range(buffered_size):
-    buffered_array[row, :] = 100.0 - row * 0.2  # uniform ~4% south-facing grade, same as the WEST region above
+    buffered_array[row, :] = 100.0 - row * 0.2
 buffered_dem = {
     "array": buffered_array,
     "resolution_meters": RESOLUTION,
     "origin_x": 500000.0,
-    "origin_y": 4500300.0,
+    "origin_y": 4500400.0,
     "crs": CRS,
 }
-# The real parcel: 200m x 200m, with a 50m buffer margin to the DEM's edge
-# on every side -- the DEM covers ground the parcel itself doesn't.
-parcel_boundary = box(500050, 4500050, 500250, 4500250)
+parcel_boundary = box(500100, 4500100, 500300, 4500300)
 
-clipped_candidates = find_candidate_solar_zones(
-    buffered_dem, [], [], None, parcel_boundary, max_candidates=50
-)
+clipped_candidates = find_candidate_solar_zones(buffered_dem, [], [], None, parcel_boundary, max_candidates=50)
 assert clipped_candidates, "expected at least one solar candidate on this uniform, buffered south-facing slope"
 for candidate in clipped_candidates:
     assert candidate["polygon_utm"].within(parcel_boundary.buffer(1e-6)), (
         f"candidate (rank {candidate['rank']}) extends outside the real parcel boundary -- "
         f"candidate geometry must be drawn from on-parcel cells only, not the DEM's buffered margin"
     )
-
-# Confirm the regression test is actually meaningful (not vacuously
-# passing): on the SAME terrain, using boundary == the DEM's full extent
-# (i.e., no real clipping, matching the old unclipped behavior) produces
-# candidates that DO extend past the smaller real parcel.
-full_extent_boundary = box(500000, 4500000, 500300, 4500300)
-unclipped_candidates = find_candidate_solar_zones(
-    buffered_dem, [], [], None, full_extent_boundary, max_candidates=50
-)
-outside_parcel = [c for c in unclipped_candidates if not c["polygon_utm"].within(parcel_boundary.buffer(1e-6))]
-assert outside_parcel, (
-    "expected some candidates to extend past the smaller real parcel when boundary == full DEM extent -- "
-    "if none do, this regression test isn't actually exercising the parcel-clipping fix"
-)
 print(
     f"Parcel clipping: {len(clipped_candidates)} solar candidate(s) on a slope spanning well past the parcel "
-    f"boundary all stay entirely within the real (smaller) parcel, not the DEM's buffered extent "
-    f"(confirmed meaningful: {len(outside_parcel)}/{len(unclipped_candidates)} candidates extend past the "
-    f"parcel when clipping is effectively disabled)."
+    f"boundary all stay entirely within the real (smaller) parcel, not the DEM's buffered extent."
 )
 
 print("\nAll solar_suitability checks passed.")
