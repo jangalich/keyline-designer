@@ -24,8 +24,35 @@ access lane that was never surveyed into a public transportation dataset
 won't appear here — see FARM_ROAD_CONFIDENCE_NOTES.
 
 Docs: https://carto.nationalmap.gov/arcgis/rest/services/transportation/MapServer
+
+REAL BUG, FOUND LIVE (fixed here): this module originally queried layer 0
+("Small-Scale"), which is a CONTAINER/GROUP layer in the MapServer's
+layer hierarchy, not a real, queryable Feature Layer. Querying it
+directly returns an ArcGIS error embedded in the response body
+(`{"error": {"code": 400, "message": "Invalid or missing input
+parameters."}}`) while the HTTP status is still 200 OK — `raise_for_
+status()` never catches this, since the HTTP layer reports success while
+the ArcGIS payload reports failure. The old code only checked
+`data.get("features", [])`, so this error silently read as "zero roads
+found," identically at every buffer size (150m/300m/500m/800m all tested
+live, all zero) — which in hindsight should have been the tell, since a
+genuine "no nearby road" case wouldn't behave identically regardless of
+how far out the search radius grows. Confirmed against the live service:
+querying layer 32 ("Local Roads") with the same bounding box returns real
+features immediately, including the road this reference property
+actually fronts. Real road data was reachable this whole time; the code
+was just asking the wrong layer for it. Fixed two ways, not one:
+  1. ROAD_LAYERS below now points at real, confirmed Feature Layers
+     (30/31/32), queried together and merged — not a single layer ID,
+     so a property fronting a road classified under a different one of
+     these isn't silently missed the same way.
+  2. _query_road_layer() now checks the JSON body for an "error" key even
+     on HTTP 200 and raises explicitly — this exact failure mode (a
+     bad/wrong layer ID masquerading as "zero results") can't hide
+     silently again, for these layers or any future ones.
 """
 
+import json
 import math
 import time
 
@@ -34,7 +61,23 @@ import requests
 from feature_schema import CONFIDENCE_MEDIUM, make_feature, make_feature_collection
 
 TRANSPORTATION_BASE = "https://carto.nationalmap.gov/arcgis/rest/services/transportation/MapServer"
-ROAD_LAYER = 0  # "Road" — see the MapServer's layer listing at the URL above
+
+# Real, queryable road-FEATURE layers (each confirmed live to be an actual
+# Feature Layer via its own `<TRANSPORTATION_BASE>/<id>?f=json` endpoint,
+# not a container/group layer like the old, wrong layer 0 — see module
+# docstring) — queried together and merged, rather than a single layer ID,
+# so a property fronting a road classified under any one of these isn't
+# missed. Deliberately excludes layers 8/9 ("Roads," small-scale
+# 10M/1M — much coarser than a farm-property use case needs).
+#   30: Secondary Highways
+#   31: Local Connecting Roads
+#   32: Local Roads (this is where a typical rural county road, e.g. the
+#       reference property's own frontage road, is classified)
+# CONFIGURABLE — re-verify against the MapServer's own layer listing
+# (`{TRANSPORTATION_BASE}?f=json`) if USGS ever restructures this service;
+# don't assume a layer is a real feature layer from its name alone (that
+# assumption is exactly how the original bug happened).
+ROAD_LAYERS = [30, 31, 32]
 
 FARM_ROAD_CONFIDENCE_NOTES = (
     "Road geometry is USGS National Map Transportation data — public "
@@ -73,10 +116,21 @@ def _bounding_box(
 
 
 def _query_road_layer(
-    bbox: tuple[float, float, float, float], max_retries: int = 2
+    layer_id: int, bbox: tuple[float, float, float, float], max_retries: int = 2
 ) -> list[dict]:
     """Same retry-with-increasing-timeout pattern as hydrology_data.py's
-    _query_layer — USGS's map services are occasionally slow, not down."""
+    _query_layer — USGS's map services are occasionally slow, not down.
+
+    Also checks the JSON body itself for an "error" key even when the
+    HTTP status is 200 — ArcGIS reports some failures (e.g. querying a
+    non-queryable container/group layer) this way, and raise_for_status()
+    alone never catches it (see module docstring: this exact failure mode
+    is how the old ROAD_LAYER=0 bug silently read as "zero roads found"
+    for every request). That kind of error is NOT transient — retrying
+    the same bad layer/parameters won't fix it — so it's raised
+    immediately rather than folded into the retry loop above, which is
+    for genuine network/timeout errors only.
+    """
     min_lon, min_lat, max_lon, max_lat = bbox
 
     params = {
@@ -89,7 +143,7 @@ def _query_road_layer(
         "f": "geojson",
     }
 
-    url = f"{TRANSPORTATION_BASE}/{ROAD_LAYER}/query"
+    url = f"{TRANSPORTATION_BASE}/{layer_id}/query"
     last_error = None
 
     for attempt in range(max_retries + 1):
@@ -98,13 +152,48 @@ def _query_road_layer(
             response = requests.get(url, params=params, timeout=timeout)
             response.raise_for_status()
             data = response.json()
-            return data.get("features", [])
         except requests.exceptions.RequestException as e:
             last_error = e
             if attempt < max_retries:
                 time.sleep(2)
                 continue
             raise last_error
+        else:
+            if "error" in data:
+                error_info = data["error"]
+                raise RuntimeError(
+                    f"ArcGIS query to transportation layer {layer_id} returned an error despite "
+                    f"HTTP 200 (code {error_info.get('code', 'unknown')}): "
+                    f"{error_info.get('message', error_info)} — likely querying a non-queryable "
+                    f"container/group layer (this is exactly how the old ROAD_LAYER=0 bug silently "
+                    f"returned zero roads for every request; see module docstring). Verify layer "
+                    f"{layer_id} is a real Feature Layer via {TRANSPORTATION_BASE}/{layer_id}?f=json "
+                    f"before using it."
+                )
+            return data.get("features", [])
+
+
+def _deduplicate_road_features(features: list[dict]) -> list[dict]:
+    """
+    ROAD_LAYERS are distinct road classifications (secondary highway vs.
+    connecting road vs. local road) and shouldn't normally return the
+    same real segment twice, but this is a cheap safety net against that
+    regardless — exact-geometry duplicates (identical coordinates) are
+    dropped, keeping the first occurrence. Keyed on the geometry itself
+    (not a name/id field, whose presence/naming can vary by layer) so
+    this doesn't depend on any particular schema assumption holding
+    across all three layers.
+    """
+    seen_geometries = set()
+    deduped = []
+    for feature in features:
+        geometry = feature.get("geometry")
+        key = json.dumps(geometry, sort_keys=True) if geometry else None
+        if key in seen_geometries:
+            continue
+        seen_geometries.add(key)
+        deduped.append(feature)
+    return deduped
 
 
 def get_farm_roads_for_boundary(
@@ -115,9 +204,37 @@ def get_farm_roads_for_boundary(
     {'name', 'geometry'} dicts, geometry already GeoJSON LineString/
     MultiLineString in WGS84 (lon/lat) — the same raw shape
     hydrology_data.get_water_features_for_boundary uses for streams.
+
+    Queries every layer in ROAD_LAYERS and merges the results (see module
+    docstring for why this is multiple layers, not one). Each layer's
+    query degrades independently: a real failure (network or the ArcGIS-
+    error-on-HTTP-200 case _query_road_layer() detects) on ONE layer
+    doesn't discard data successfully fetched from the others — only if
+    EVERY layer fails does this raise, so callers' existing "the whole
+    fetch failed, fall back" handling still triggers on a genuine total
+    outage, not on one flaky/misconfigured layer among several working
+    ones.
     """
     bbox = _bounding_box(boundary_coordinates, buffer_meters=buffer_meters)
-    road_features = _query_road_layer(bbox)
+
+    all_features = []
+    layer_errors = []
+    for layer_id in ROAD_LAYERS:
+        try:
+            all_features.extend(_query_road_layer(layer_id, bbox))
+        except Exception as e:
+            layer_errors.append((layer_id, e))
+
+    if len(layer_errors) == len(ROAD_LAYERS):
+        # every layer failed -- a real, total fetch failure, not a
+        # partial-data case; raise so this behaves the same way a single-
+        # layer fetch failure always has for callers' own try/except.
+        raise layer_errors[0][1]
+
+    for layer_id, error in layer_errors:
+        print(f"  farm_roads_data: layer {layer_id} query failed ({error}), continuing with the other layers.")
+
+    road_features = _deduplicate_road_features(all_features)
 
     return [
         {
@@ -183,7 +300,13 @@ if __name__ == "__main__":
     try:
         roads = get_farm_roads_for_boundary(property_boundary)
         print(summarize_farm_roads(roads))
-    except requests.exceptions.RequestException as e:
+
+        geojson = get_farm_roads_geojson(property_boundary)
+        from feature_schema import validate_feature_collection
+
+        validate_feature_collection(geojson)
+        print(f"\nGeoJSON FeatureCollection: {len(geojson['features'])} feature(s), schema-valid.")
+    except Exception as e:
         print(f"Request failed: {e}")
         print(
             "\nNote: this requires internet access to reach USGS's National "

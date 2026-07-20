@@ -75,6 +75,17 @@ report using the Claude API.
   ArcGIS-`query` pattern as `hydrology_data.py`, different theme).
   Public road/right-of-way data only — a private farm track or driveway
   not captured in that dataset won't appear; see its confidence_notes.
+  Queries `ROAD_LAYERS` (30/31/32 — Secondary Highways, Local Connecting
+  Roads, Local Roads) together and merges the results, rather than a
+  single layer id. **Real bug found and fixed live**: this originally
+  queried layer 0 ("Small-Scale"), a container/group layer, not a real
+  Feature Layer — ArcGIS returned an error embedded in the JSON body
+  while the HTTP status stayed 200, which `raise_for_status()` never
+  catches, so it silently read as "zero roads found" at every buffer
+  size, every time. `_query_road_layer()` now checks the response body
+  itself for an `error` key even on HTTP 200 and raises explicitly, so
+  this exact failure mode can't hide silently again
+  (`test_farm_roads_data.py`).
 - `soil_data.py` additionally has `get_farmland_classification_for_polygon()`
   and `is_prime_farmland()` — SSURGO's official Farmland Classification
   (`farmlndcl`), used to flag (never exclude) solar candidates that
@@ -373,10 +384,12 @@ tool (built with Leaflet).
   a real request.
 - `farm_roads_data.py` targets USGS National Map's Transportation
   MapServer (`carto.nationalmap.gov`), following the same
-  service-catalog convention as `hydrology_data.py`'s NHD endpoint — also
-  unverified against a live request in this environment (no route to
-  reach it from here). Confirm the layer ID/response shape against a real
-  request before relying on it.
+  service-catalog convention as `hydrology_data.py`'s NHD endpoint. This
+  note used to say the layer ID was unverified against a live request —
+  it turned out to matter: the original layer id (0) was a
+  container/group layer, not real road data, and silently returned zero
+  results forever. Confirmed live and fixed — see `farm_roads_data.py`'s
+  own module docstring and the `ROAD_LAYERS` bullet above.
 - **Outstanding, required, not yet done**: re-run `production_suitability.py`
   against the real six-point reference property from an environment with
   actual network access (this sandbox's egress policy blocks
