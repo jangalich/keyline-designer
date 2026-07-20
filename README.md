@@ -159,19 +159,32 @@ report using the Claude API.
   production-zone candidates `production_area.py` already identifies —
   it does not change which ground counts as a candidate or its boundary,
   only enriches the same `production_area_candidate` layer with a 0-100
-  `suitability_score` plus four independently-stored 0-1 factors:
-  `slope_factor` (DEM, real), `soil_factor` (SSURGO prime-farmland
-  classification + drainage class via two new `soil_data.py` helpers,
-  `farmland_classification_score()`/`drainage_class_score()`; defaults to
-  a neutral 0.5 and says so in `confidence_notes` when SSURGO data isn't
-  available for a given patch), `size_factor` (real acreage + Polsby-Popper
-  compactness of the patch's own cell footprint, not its convex hull — a
-  large irregular sliver scores lower than a compact block of the same
-  acreage), and `aspect_factor` (DEM-derived aspect, deliberately the
-  smallest weight — orientation matters far less for general production
-  than it did for solar siting). Weights are configurable module-level
-  constants, not yet tuned against a real property (see Roadmap). This is
-  a self-contained, standalone pass — NOT wired into
+  `suitability_score` plus three independently-stored, positively-weighted
+  0-1 factors: `slope_factor` (DEM, real), `size_factor` (real acreage +
+  Polsby-Popper compactness of the patch's own cell footprint, not its
+  convex hull — a large irregular sliver scores lower than a compact block
+  of the same acreage), and `aspect_factor` (DEM-derived aspect,
+  deliberately the smallest weight — orientation matters far less for
+  general production than it did for solar siting). Soil quality is
+  DELIBERATELY NOT a weighted scoring factor: per Scale of Permanence
+  sequencing, soil is step 8 — the last step, and the most improvable one
+  — so it shouldn't gate/rank where production zones go the way slope/size/
+  aspect (step 2, Land Shape) do. Instead, SSURGO is checked only as a
+  pass/fail EXCLUSION (`soil_exclusion_passed`, `soil_exclusion_reason`)
+  for conditions that disqualify ground for production regardless of
+  topography — hydric/wetland soil or permanently saturated ("very poorly
+  drained") drainage, via a new `soil_data.py` helper,
+  `is_disqualifying_soil_condition()` — the same "avoid, don't rank by
+  quality" use of SSURGO `road_corridors.py`'s `is_erosion_prone()`/
+  `is_hydric()` already make. A zone with merely mediocre-but-workable
+  soil scores identically to one with excellent soil; only a genuinely
+  disqualifying condition has any effect, and that effect is exclusion
+  from `rank` (set to `None`, sorted after every passing candidate), not a
+  score penalty. When SSURGO data isn't available for a patch, the
+  exclusion check defaults to passed (not excluded) and says so in
+  `confidence_notes`. Weights are configurable module-level constants, not
+  yet tuned against a real property (see Roadmap). This is a
+  self-contained, standalone pass — NOT wired into
   `generate_full_report.py`/`report_generator.py`'s prompt yet; scenario
   generation and report-narrative wiring are later passes that will
   consume this score as an input. Same pure-core-logic-vs-network-fetch
@@ -276,15 +289,16 @@ tool (built with Leaflet).
 - Ground-truth validation pass for `production_suitability.py`: run it
   against a real property (`python3 production_suitability.py`, needs
   network for the DEM + SSURGO fetches) and check that the ranking
-  actually matches ground truth — e.g. that a known compact, well-drained,
-  gently-sloped block outranks a fragmented or poorly-drained one — and
-  tune `SLOPE_FACTOR_WEIGHT` / `SOIL_FACTOR_WEIGHT` / `SIZE_FACTOR_WEIGHT`
-  / `ASPECT_FACTOR_WEIGHT`, the `SIZE_AREA_SUBWEIGHT` /
-  `SIZE_SHAPE_SUBWEIGHT` and `SOIL_FARMLAND_SUBWEIGHT` /
-  `SOIL_DRAINAGE_SUBWEIGHT` sub-weights, and `REFERENCE_MAX_AREA_ACRES`
-  accordingly. Once validated, wire `suitability_score` into
-  `report_generator.py`'s narrative and use it as an input to future
-  scenario-selection logic — both deliberately out of scope for this pass.
+  actually matches ground truth — e.g. that a known compact, gently-sloped
+  block outranks a fragmented one, and that any real hydric/wetland ground
+  on the property actually gets excluded — and tune `SLOPE_FACTOR_WEIGHT` /
+  `SIZE_FACTOR_WEIGHT` / `ASPECT_FACTOR_WEIGHT`, the `SIZE_AREA_SUBWEIGHT` /
+  `SIZE_SHAPE_SUBWEIGHT` sub-weights, and `REFERENCE_MAX_AREA_ACRES`
+  accordingly. Soil is intentionally NOT one of the tunable weights (see
+  above — exclusion-only by design, not a scored factor). Once validated,
+  wire `suitability_score` into `report_generator.py`'s narrative and use
+  it as an input to future scenario-selection logic — both deliberately
+  out of scope for this pass.
 - Ground-truth validation pass for `road_corridors.py` against a real
   no-existing-road property (the explicit target case for this layer):
   confirm both contour-band and ridge-top candidates actually show up
