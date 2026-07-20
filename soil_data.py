@@ -234,6 +234,77 @@ def is_hydric(hydric_rating: Optional[str]) -> bool:
     return hydric_rating.strip().lower() in ("yes", "partially hydric")
 
 
+# Neutral score used by both scoring functions below when the input is
+# missing/unrecognized — "unknown" shouldn't read as either good or bad
+# soil, it should read as exactly the midpoint, so a caller averaging or
+# weighting this in isn't silently penalizing (or crediting) a gap in the
+# data. CONFIGURABLE.
+NEUTRAL_SOIL_SCORE = 0.5
+
+# SSURGO's official Farmland Classification (farmlndcl) values, mapped to a
+# 0-1 agricultural-capability score for production_suitability.py's
+# soil_factor. Ordered most- to least-specific so startswith() matching
+# (same convention as is_prime_farmland() above) finds the right tier even
+# for the conditional "Prime farmland if <condition>" variants, which name
+# a specific practice (drained/irrigated/etc.) after the shared prefix.
+# Values and relative ordering follow SSURGO's own farmland-quality
+# hierarchy (prime > statewide > unique/local > not prime); the exact
+# scores are a reasonable, explainable spread within that ordering, not an
+# officially-published numeric scale — CONFIGURABLE, tune once real
+# classifications are seen for your own property.
+_FARMLAND_CLASSIFICATION_SCORES = (
+    ("All areas are prime farmland", 1.0),
+    ("Prime farmland if", 0.75),
+    ("Farmland of statewide importance", 0.6),
+    ("Farmland of unique importance", 0.55),
+    ("Farmland of local importance", 0.5),
+    ("Not prime farmland", 0.2),
+)
+
+
+def farmland_classification_score(farmland_classification: Optional[str]) -> float:
+    """0-1 agricultural-capability score for an SSURGO farmlndcl value —
+    a graded version of is_prime_farmland()'s boolean, for
+    production_suitability.py's soil_factor (which needs a scale, not a
+    flag). Unrecognized or missing values score NEUTRAL_SOIL_SCORE rather
+    than being treated as either prime or not-prime."""
+    if not farmland_classification:
+        return NEUTRAL_SOIL_SCORE
+    for prefix, score in _FARMLAND_CLASSIFICATION_SCORES:
+        if farmland_classification.startswith(prefix):
+            return score
+    return NEUTRAL_SOIL_SCORE
+
+
+# SSURGO's component-level drainagecl values, mapped to a 0-1 general
+# cultivation-suitability score. Well/moderately-well drained soil is best
+# for most row-crop and pasture production; both ends of the spectrum
+# (excessively drained/droughty, and poorly/very poorly drained/waterlogged)
+# are worse for general production, not just one extreme — this is
+# deliberately NOT a monotonic mapping from "most drained" to "least
+# drained" for that reason. CONFIGURABLE — a specific crop's real
+# preference can differ (rice wants wet soil; this is a general-production
+# default, not a crop-specific model).
+_DRAINAGE_CLASS_SCORES = {
+    "excessively drained": 0.5,
+    "somewhat excessively drained": 0.65,
+    "well drained": 1.0,
+    "moderately well drained": 0.85,
+    "somewhat poorly drained": 0.5,
+    "poorly drained": 0.25,
+    "very poorly drained": 0.1,
+}
+
+
+def drainage_class_score(drainage_class: Optional[str]) -> float:
+    """0-1 general cultivation-suitability score for an SSURGO drainagecl
+    value, for production_suitability.py's soil_factor. Unrecognized or
+    missing values score NEUTRAL_SOIL_SCORE."""
+    if not drainage_class:
+        return NEUTRAL_SOIL_SCORE
+    return _DRAINAGE_CLASS_SCORES.get(drainage_class.strip().lower(), NEUTRAL_SOIL_SCORE)
+
+
 # K-factor (whole soil, "kwfact" — on the chorizon table, see
 # get_erosion_factor_for_polygon()) is SSURGO's
 # standard erodibility measure — how susceptible a soil is to sheet/rill

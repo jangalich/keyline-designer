@@ -155,6 +155,29 @@ report using the Claude API.
   other candidate-geometry layers (`find_stream_exclusion_fencing()` is
   network-free and unit-tested against synthetic stream geometry —
   `test_fencing.py`).
+- `production_suitability.py` — adds a suitability RANKING to the
+  production-zone candidates `production_area.py` already identifies —
+  it does not change which ground counts as a candidate or its boundary,
+  only enriches the same `production_area_candidate` layer with a 0-100
+  `suitability_score` plus four independently-stored 0-1 factors:
+  `slope_factor` (DEM, real), `soil_factor` (SSURGO prime-farmland
+  classification + drainage class via two new `soil_data.py` helpers,
+  `farmland_classification_score()`/`drainage_class_score()`; defaults to
+  a neutral 0.5 and says so in `confidence_notes` when SSURGO data isn't
+  available for a given patch), `size_factor` (real acreage + Polsby-Popper
+  compactness of the patch's own cell footprint, not its convex hull — a
+  large irregular sliver scores lower than a compact block of the same
+  acreage), and `aspect_factor` (DEM-derived aspect, deliberately the
+  smallest weight — orientation matters far less for general production
+  than it did for solar siting). Weights are configurable module-level
+  constants, not yet tuned against a real property (see Roadmap). This is
+  a self-contained, standalone pass — NOT wired into
+  `generate_full_report.py`/`report_generator.py`'s prompt yet; scenario
+  generation and report-narrative wiring are later passes that will
+  consume this score as an input. Same pure-core-logic-vs-network-fetch
+  split as the other candidate-zone features
+  (`score_production_areas()` is network-free and unit-tested against
+  synthetic terrain — `test_production_suitability.py`).
 - `report_generator.py` — combines all of the above and calls the Claude
   API to generate the narrative Scale of Permanence report.
 - `generate_full_report.py` — the full end-to-end pipeline: give it a
@@ -250,6 +273,18 @@ tool (built with Leaflet).
   unverified against a live request in this environment (no route to
   reach it from here). Confirm the layer ID/response shape against a real
   request before relying on it.
+- Ground-truth validation pass for `production_suitability.py`: run it
+  against a real property (`python3 production_suitability.py`, needs
+  network for the DEM + SSURGO fetches) and check that the ranking
+  actually matches ground truth — e.g. that a known compact, well-drained,
+  gently-sloped block outranks a fragmented or poorly-drained one — and
+  tune `SLOPE_FACTOR_WEIGHT` / `SOIL_FACTOR_WEIGHT` / `SIZE_FACTOR_WEIGHT`
+  / `ASPECT_FACTOR_WEIGHT`, the `SIZE_AREA_SUBWEIGHT` /
+  `SIZE_SHAPE_SUBWEIGHT` and `SOIL_FARMLAND_SUBWEIGHT` /
+  `SOIL_DRAINAGE_SUBWEIGHT` sub-weights, and `REFERENCE_MAX_AREA_ACRES`
+  accordingly. Once validated, wire `suitability_score` into
+  `report_generator.py`'s narrative and use it as an input to future
+  scenario-selection logic — both deliberately out of scope for this pass.
 - Ground-truth validation pass for `road_corridors.py` against a real
   no-existing-road property (the explicit target case for this layer):
   confirm both contour-band and ridge-top candidates actually show up
