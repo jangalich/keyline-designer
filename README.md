@@ -225,6 +225,42 @@ report using the Claude API.
   from an environment with real network access and confirm at least one
   real candidate survives with a sensible `soil_carved_acres` before
   treating this as validated — see Roadmap.
+- `scenario_generation.py` — replaces computing water/solar/road/fencing
+  candidates ONCE against the union of every production-zone candidate
+  (which over-excludes: a zone the user won't actually use still blocks
+  candidates from being evaluated on that ground) with N ranked, complete
+  scenarios, each with its own production-zone subset and its own
+  downstream layers computed only against that subset. Reuses every
+  per-layer computation UNCHANGED (`water_candidate_zones.find_candidate_zones()`,
+  `road_corridors.find_candidate_road_corridors()`,
+  `solar_suitability.find_candidate_solar_zones()`,
+  `fencing.identify_fencing()`) — this only changes what exclusion
+  geometry each is invoked with and how results are grouped, not any
+  siting algorithm itself. Four steps: (1) bounded subset enumeration
+  over `production_suitability.py`'s already-scored candidates — every
+  non-empty subset at or below `MAX_ZONES_FOR_FULL_ENUMERATION` (default
+  5), else a ranked top-K-by-score heuristic above it; (2) the existing
+  downstream logic re-run once per subset; (3) a concrete, documented
+  pairwise diversity test (`_is_meaningfully_different()` — top water/
+  solar candidate location shift past a threshold, or available-acreage
+  change clearing both an absolute and a relative bar) that collapses
+  near-identical subsets to one representative; (4) greedy farthest-point
+  selection of the top `DEFAULT_SCENARIO_COUNT` (default 3) most-diverse
+  survivors, each labeled/rationale'd from its own concrete acreage/zone
+  differentiators ("Maximum Production" / "Balanced" / "Minimum
+  Production Footprint"), not a generic naming scheme. Every feature id
+  is prefixed with its own `scenario_id` so ids stay globally unique
+  across scenarios. This is a self-contained, standalone pass — NOT
+  wired into `generate_full_report.py`/`report_generator.py`'s prompt;
+  report-narrative wiring per scenario is a separate, later pass, same
+  "not yet wired in" framing `production_suitability.py` used for
+  itself. Offline unit tests for the pure enumeration/diversity/
+  selection/labeling logic are in `test_scenario_generation.py`; an
+  end-to-end synthetic-DEM check (three disjoint production-zone
+  candidates, confirming a genuine multi-zone combination survives
+  selection and that excluding fewer zones measurably frees more solar/
+  road candidates — the actual bug this pass fixes) is in
+  `test_scenario_generation_pipeline.py`.
 - `report_generator.py` — combines all of the above and calls the Claude
   API to generate the narrative Scale of Permanence report.
 - `generate_full_report.py` — the full end-to-end pipeline: give it a
