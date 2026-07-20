@@ -57,9 +57,11 @@ logic can explain WHY a zone scored/was excluded the way it did ("good
 slope and shape, but excluded — hydric soil"), not just the final number.
 
     DEM (dem_data.py, already fetched for production_area.py)
-        --> identify_production_areas() (production_area.py, UNCHANGED)
-        --> [this module] per-patch slope/size/aspect scoring + soil
-            exclusion check
+        --> identify_production_areas(dem, boundary_polygon_utm) (production_area.py,
+            UNCHANGED logic -- already clips each patch to the real parcel)
+        --> [this module] per-patch slope/size/aspect scoring (against the
+            SAME on-parcel cells, via the same boundary_polygon_utm) +
+            soil exclusion check
         --> enriched production_area_candidate features (same layer,
             same zones -- just with suitability_score/*_factor/
             soil_exclusion_* properties added)
@@ -84,8 +86,10 @@ import math
 from typing import Optional
 
 import numpy as np
-from shapely.geometry import box
+from rasterio.warp import transform as warp_transform
+from shapely.geometry import Point, Polygon, box
 from shapely.ops import unary_union
+from shapely.prepared import prep
 
 from dem_data import get_dem_for_boundary
 from feature_schema import CONFIDENCE_LOW, make_feature, make_feature_collection
@@ -267,6 +271,7 @@ def _soil_exclusion_check(soil_component_rows: Optional[list[dict]]) -> tuple[bo
 def score_production_areas(
     patches: list[dict],
     dem: dict,
+    boundary_polygon_utm: Polygon,
     soil_components_by_patch_id: Optional[dict[int, Optional[list[dict]]]] = None,
     max_slope_pct: float = MAX_PRODUCTION_SLOPE_PCT,
     reference_max_area_acres: float = REFERENCE_MAX_AREA_ACRES,
@@ -278,6 +283,17 @@ def score_production_areas(
     patches is identify_production_areas()'s own output (production_area.py,
     UNCHANGED -- this function does not alter membership, geometry, or
     which patches exist, only adds score/exclusion fields to each).
+
+    boundary_polygon_utm MUST be the same real parcel boundary passed to
+    identify_production_areas() to produce `patches` (see module
+    docstring's cell-recovery note below for why). identify_production_areas()
+    itself already clips each patch's own area_acres/polygon_utm down to
+    on-parcel ground (a DEM fetched with ~100m of buffer past the drawn
+    boundary can otherwise leak off-parcel cells into a patch) -- this
+    function needs the same boundary to filter its OWN recovered cells
+    the same way, so slope_factor/size_factor are computed from the same
+    on-parcel ground the reported area_acres/polygon_utm actually
+    describe, not a mix that includes off-parcel filler cells.
 
     soil_components_by_patch_id maps patch['id'] to that patch's own
     pre-fetched get_soil_data_for_polygon() rows (or None -- see
@@ -298,7 +314,10 @@ def score_production_areas(
     raster_grid.connected_components()) -- deterministic, so patch['id']
     lines up with the recomputed component label exactly. This is reusing
     production_area.py's own building blocks, not reimplementing or
-    changing its detection logic.
+    changing its detection logic. Recovered cells are then filtered down
+    to the on-parcel subset (same boundary_prepared.contains() test
+    identify_production_areas() itself uses) before any factor is
+    computed from them.
 
     Returns patches (list of dicts, same objects extended in place; also
     returned for convenience) each with these fields added:
@@ -338,9 +357,20 @@ def score_production_areas(
 
     candidate_mask = (~np.isnan(slope)) & (slope <= max_slope_pct)
     labels, _ = connected_components(candidate_mask)
+    boundary_prepared = prep(boundary_polygon_utm)
 
     for patch in patches:
-        cells = [(int(r), int(c)) for r, c in np.argwhere(labels == patch["id"])]
+        raw_cells = [(int(r), int(c)) for r, c in np.argwhere(labels == patch["id"])]
+        cells = [
+            (r, c) for r, c in raw_cells if boundary_prepared.contains(Point(pixel_center_xy(dem, r, c)))
+        ]
+        if not cells:
+            # Shouldn't happen in practice -- identify_production_areas()
+            # already dropped any patch with no on-parcel cells at all --
+            # but fall back to the raw (unclipped) cells rather than
+            # dividing by zero if it's ever called with a mismatched
+            # boundary/patches pair.
+            cells = raw_cells
 
         slope_values = [float(slope[r, c]) for r, c in cells]
         slope_factor = _slope_factor(slope_values, max_slope_pct)
@@ -481,11 +511,26 @@ def identify_production_area_suitability(
     block scoring for the others, or block the whole pass) -- same
     reasoning solar_suitability.py's prime-farmland check and every other
     optional network layer in this pipeline already uses.
+
+    Computes boundary_polygon_utm the same way road_corridors.py/
+    solar_suitability.py already do (reproject the drawn boundary into
+    the DEM's own CRS) and passes it to BOTH identify_production_areas()
+    (now required there, for on-parcel clipping) and score_production_areas()
+    (so its own recovered cells stay on-parcel too -- see that function's
+    docstring).
     """
     if dem is None:
         dem = get_dem_for_boundary(boundary_coordinates)
 
-    patches = identify_production_areas(dem)
+    boundary_xs, boundary_ys = warp_transform(
+        "EPSG:4326",
+        dem["crs"],
+        [pt[0] for pt in boundary_coordinates],
+        [pt[1] for pt in boundary_coordinates],
+    )
+    boundary_polygon_utm = Polygon(zip(boundary_xs, boundary_ys))
+
+    patches = identify_production_areas(dem, boundary_polygon_utm)
 
     soil_components_by_patch_id: dict[int, Optional[list[dict]]] = {}
 
@@ -497,7 +542,7 @@ def identify_production_area_suitability(
             except Exception:
                 soil_components_by_patch_id[patch["id"]] = None
 
-    scored = score_production_areas(patches, dem, soil_components_by_patch_id, **score_kwargs)
+    scored = score_production_areas(patches, dem, boundary_polygon_utm, soil_components_by_patch_id, **score_kwargs)
 
     return {"zones_geojson": production_suitability_to_geojson(scored), "scored_patches": scored}
 

@@ -8,6 +8,16 @@ approach as test_solar_suitability.py, plus offline checks for the
 soil_data.py exclusion helper (is_disqualifying_soil_condition()) this
 module's exclusion check is built on.
 
+identify_production_areas() (production_area.py) now REQUIRES a real
+parcel boundary_polygon_utm and clips every patch to on-parcel ground
+(see production_area.py's own "Clip DEM-derived candidate layers to the
+real parcel boundary" change) -- score_production_areas() here does the
+same, filtering its own recovered cells to the same on-parcel subset, so
+every synthetic DEM below passes a FULL_EXTENT boundary (a box exactly
+matching the DEM's own extent, same convention test_production_area.py
+uses) wherever a test isn't specifically about clipping itself, so
+clipping is a no-op there and doesn't confound the factor being isolated.
+
 Synthetic-DEM layouts, each isolating ONE factor while holding the others
 equal, so a difference in the final ranking can be attributed to the
 intended cause and not a confound:
@@ -28,6 +38,12 @@ intended cause and not a confound:
      zone with better soil (there's no graded soil score to differ), while
      a genuinely disqualifying condition (hydric) drops the zone out of
      ranking entirely rather than just lowering its score.
+  4. A boundary that clips the compact square (from #1) down to roughly
+     half its footprint -- tests that score_production_areas()'s own
+     factor computation follows the SAME on-parcel clipping
+     identify_production_areas() already applied to area_acres/polygon_utm,
+     rather than silently scoring off-parcel filler cells that were
+     dropped from the reported geometry.
 
 Every synthetic DEM here uses a very steep background ramp
 (elevation = 1000 + (row+col)*constant) so that ONLY the deliberately
@@ -38,6 +54,8 @@ would defeat the point of isolating two separate, comparable regions.
 """
 
 import numpy as np
+from rasterio.warp import transform as warp_transform
+from shapely.geometry import box
 
 from feature_schema import validate_feature_collection
 from production_area import identify_production_areas
@@ -75,6 +93,17 @@ def _dem(array: np.ndarray, origin_y: float = 4500120.0) -> dict:
     }
 
 
+def _full_extent_boundary(dem: dict):
+    """A boundary box exactly matching a synthetic DEM's own extent --
+    same convention as test_production_area.py's FULL_EXTENT_BOUNDARY --
+    so parcel clipping is a no-op wherever a test isn't specifically
+    about clipping itself."""
+    rows, cols = dem["array"].shape
+    px, py = dem["resolution_meters"]
+    x0, y0 = dem["origin_x"], dem["origin_y"]
+    return box(x0, y0 - rows * py, x0 + cols * px, y0)
+
+
 # --- weights: documented, sum to 1.0, soil is NOT one of them ---
 
 assert abs(_WEIGHT_SUM - 1.0) < 1e-6, f"suitability factor weights must sum to 1.0, got {_WEIGHT_SUM}"
@@ -92,21 +121,31 @@ print(f"Factor weights sum to 1.0 ({SLOPE_FACTOR_WEIGHT}+{SIZE_FACTOR_WEIGHT}+{A
 
 
 # --- 1. size_factor: compact square outranks an elongated sliver of similar acreage ---
+#
+# Dimensions are chosen (not arbitrary) so the POST-EROSION, POST-CONVEX-HULL
+# acreage identify_production_areas() actually reports comes out close for
+# both shapes -- compute_slope_percent's steepest-neighbor test erodes one
+# cell ring off every candidate patch's edge (a real effect, not a bug), and
+# a narrow shape loses proportionally more of itself to that erosion than a
+# block does, so naively picking "same nominal cell count" rectangles (as an
+# earlier version of this test did) leaves the sliver ~17% smaller after
+# erosion+hull -- a confound this test needs to rule out, not just accept.
 
-rows, cols = 60, 80
+rows, cols = 30, 90
 array = _steep_background(rows, cols)
-for r in range(3, 17):        # compact 14x14 square
-    for c in range(3, 17):
+for r in range(3, 23):        # 20x20 nominal square -> 18x18 post-erosion -> ~1.79ac hull
+    for c in range(3, 23):
         array[r, c] = 100.0
-for r in range(3, 10):        # elongated 7x28 sliver, similar total cell count
-    for c in range(30, 58):
+for r in range(3, 12):        # 9x51 nominal sliver -> 7x49 post-erosion -> ~1.78ac hull
+    for c in range(30, 81):
         array[r, c] = 100.0
 
 dem_shape = _dem(array)
-shape_patches = identify_production_areas(dem_shape)  # default min_area_acres -- both regions clear it
+full_extent_shape = _full_extent_boundary(dem_shape)
+shape_patches = identify_production_areas(dem_shape, full_extent_shape)  # default min_area_acres -- both clear it
 assert len(shape_patches) == 2, f"expected 2 isolated patches, got {len(shape_patches)}"
 
-scored_shape = score_production_areas(shape_patches, dem_shape)
+scored_shape = score_production_areas(shape_patches, dem_shape, full_extent_shape)
 square = next(p for p in scored_shape if p["compactness_score"] == max(x["compactness_score"] for x in scored_shape))
 sliver = next(p for p in scored_shape if p is not square)
 
@@ -141,10 +180,11 @@ for r in range(3, 17):
         array[r, c] = 100.0 + (r - 3) * 0.1  # north-facing, ~5% grade (mirrored)
 
 dem_aspect = _dem(array)
-aspect_patches = identify_production_areas(dem_aspect)
+full_extent_aspect = _full_extent_boundary(dem_aspect)
+aspect_patches = identify_production_areas(dem_aspect, full_extent_aspect)
 assert len(aspect_patches) == 2
 
-scored_aspect = score_production_areas(aspect_patches, dem_aspect)
+scored_aspect = score_production_areas(aspect_patches, dem_aspect, full_extent_aspect)
 south = next(p for p in scored_aspect if p["aspect_deg"] is not None and abs(p["aspect_deg"] - 180.0) < 1.0)
 north = next(p for p in scored_aspect if p["aspect_deg"] is not None and abs(p["aspect_deg"] - 0.0) < 1.0)
 
@@ -172,7 +212,8 @@ print(
 
 array = np.full((20, 20), 100.0, dtype=np.float32)
 dem_soil = _dem(array, origin_y=4500040.0)
-soil_patches = identify_production_areas(dem_soil)  # uniformly flat -- one big patch, well above min_area_acres
+full_extent_soil = _full_extent_boundary(dem_soil)
+soil_patches = identify_production_areas(dem_soil, full_extent_soil)  # uniformly flat -- one big patch
 assert len(soil_patches) == 1
 patch_id = soil_patches[0]["id"]
 
@@ -185,8 +226,8 @@ hydric_soil = [{"mukey": "1", "muname": "Wet soil", "compname": "x", "comppct_r"
 saturated_soil = [{"mukey": "1", "muname": "Saturated soil", "compname": "x", "comppct_r": 90,
                     "drainagecl": "Very poorly drained", "hydricrating": "No"}]
 
-scored_clean = score_production_areas([dict(soil_patches[0])], dem_soil, {patch_id: clean_soil})
-scored_excellent = score_production_areas([dict(soil_patches[0])], dem_soil, {patch_id: excellent_soil})
+scored_clean = score_production_areas([dict(soil_patches[0])], dem_soil, full_extent_soil, {patch_id: clean_soil})
+scored_excellent = score_production_areas([dict(soil_patches[0])], dem_soil, full_extent_soil, {patch_id: excellent_soil})
 assert scored_clean[0]["soil_exclusion_passed"] is True
 assert scored_clean[0]["soil_data_available"] is True
 assert scored_clean[0]["soil_exclusion_reason"] is None
@@ -199,7 +240,7 @@ print(
     f"(score={scored_excellent[0]['suitability_score']}) -- soil quality has no graded effect on the composite."
 )
 
-scored_hydric = score_production_areas([dict(soil_patches[0])], dem_soil, {patch_id: hydric_soil})
+scored_hydric = score_production_areas([dict(soil_patches[0])], dem_soil, full_extent_soil, {patch_id: hydric_soil})
 assert scored_hydric[0]["soil_exclusion_passed"] is False
 assert scored_hydric[0]["soil_exclusion_reason"] is not None and "hydric" in scored_hydric[0]["soil_exclusion_reason"]
 assert scored_hydric[0]["rank"] is None, "an excluded zone must not receive a rank"
@@ -212,12 +253,12 @@ print(
     "and the zone is excluded from ranking (rank=None), even though its topographic score is still reported."
 )
 
-scored_saturated = score_production_areas([dict(soil_patches[0])], dem_soil, {patch_id: saturated_soil})
+scored_saturated = score_production_areas([dict(soil_patches[0])], dem_soil, full_extent_soil, {patch_id: saturated_soil})
 assert scored_saturated[0]["soil_exclusion_passed"] is False
 assert "saturated" in scored_saturated[0]["soil_exclusion_reason"].lower()
 print("Permanently saturated (very poorly drained, non-hydric) soil also fails the exclusion check.")
 
-scored_no_soil = score_production_areas([dict(soil_patches[0])], dem_soil, {patch_id: None})
+scored_no_soil = score_production_areas([dict(soil_patches[0])], dem_soil, full_extent_soil, {patch_id: None})
 assert scored_no_soil[0]["soil_data_available"] is False
 assert scored_no_soil[0]["soil_exclusion_passed"] is True, (
     "unavailable soil data must default to PASSED (not excluded) rather than assuming a "
@@ -230,6 +271,7 @@ print("Unavailable SSURGO data defaults the exclusion check to passed (not exclu
 mixed = score_production_areas(
     [dict(soil_patches[0]), {**dict(soil_patches[0]), "id": 999}],
     dem_soil,
+    full_extent_soil,
     {patch_id: clean_soil, 999: hydric_soil},
 )
 assert mixed[0]["soil_exclusion_passed"] is True and mixed[0]["rank"] == 1
@@ -265,6 +307,40 @@ assert is_disqualifying_soil_condition("No", "Excessively drained") is None, (
     "only permanently/near-permanently saturated ground is"
 )
 print("is_disqualifying_soil_condition correctly flags hydric and very-poorly-drained soil, and nothing else.")
+
+
+# --- 4. boundary clipping: score_production_areas() follows the same on-parcel cells identify_production_areas() clipped to ---
+
+# A boundary covering only the WEST portion of the grid, cutting through the
+# middle of the square (nominal cols 3-23, midpoint ~col 13) -- clips it down
+# to roughly half its footprint, the same live bug scenario
+# test_production_area.py's own regression test covers for identify_production_areas()
+# itself; this checks score_production_areas() follows suit.
+west_half_boundary = box(500000.0, 4500120.0 - rows * 5.0, 500000.0 + 13 * 5.0, 4500120.0)
+clipped_patches = identify_production_areas(dem_shape, west_half_boundary)
+clipped_square = next(p for p in clipped_patches if p["id"] == square["id"])
+
+assert clipped_square["area_acres"] < square["area_acres"], (
+    "clipping to the west half should shrink the compact square's reported area"
+)
+
+clipped_scored = score_production_areas([dict(clipped_square)], dem_shape, west_half_boundary)
+assert clipped_scored[0]["compactness_score"] != square["compactness_score"] or clipped_scored[0]["area_score"] < square["area_score"], (
+    "clipping should change the factors actually computed, not just the reported area_acres left untouched from before"
+)
+# the unclipped (full-extent) score used the WHOLE 14x14 block's cells; re-scoring the SAME component id
+# against a boundary that clips it in half must use fewer cells, so area_score must drop accordingly.
+assert clipped_scored[0]["area_score"] < square["area_score"], (
+    f"clipped area_score ({clipped_scored[0]['area_score']}) should be lower than the unclipped square's "
+    f"({square['area_score']}) -- confirms score_production_areas() is scoring the ON-PARCEL cells only, "
+    "not silently including the off-parcel half that identify_production_areas() itself dropped"
+)
+print(
+    f"Clipping the compact square to its west half correctly shrinks both its reported area_acres "
+    f"({square['area_acres']} -> {clipped_square['area_acres']}) AND its scored area_score "
+    f"({square['area_score']} -> {clipped_scored[0]['area_score']}) -- score_production_areas() tracks "
+    "the same on-parcel cells identify_production_areas() itself clipped to, not the full unclipped patch."
+)
 
 
 # --- output: schema-valid FeatureCollection on the SAME layer as production_area.py's own output ---
@@ -314,15 +390,18 @@ print("summarize_production_area_suitability handles empty input and produces a 
       "that lists excluded patches separately.")
 
 # --- identify_production_area_suitability: full orchestrator wiring, network-free via dem=+check_soil=False ---
+#
+# boundary_coordinates must be real WGS84 lon/lat that reproject BACK to (approximately) dem_shape's own
+# UTM extent -- built by inverse-transforming the same full-extent box's corners, so the orchestrator's
+# internal boundary_polygon_utm construction actually overlaps the synthetic DEM instead of landing
+# nowhere near it (an arbitrary real property boundary, e.g. Richland Township PA, would reproject to a
+# UTM location nowhere near this synthetic DEM's origin_x/origin_y and every candidate would be dropped
+# as off-parcel -- the same "disjoint boundary" case test_production_area.py itself checks separately).
+minx, miny, maxx, maxy = full_extent_shape.bounds
+corner_xs, corner_ys = [minx, maxx, maxx, minx, minx], [miny, miny, maxy, maxy, miny]
+lons, lats = warp_transform(CRS, "EPSG:4326", corner_xs, corner_ys)
+boundary = list(zip(lons, lats))
 
-boundary = [
-    (-79.9838154, 40.6458343),
-    (-79.9836701, 40.6428581),
-    (-79.9813665, 40.6440549),
-    (-79.9804741, 40.6445667),
-    (-79.9827466, 40.6458894),
-    (-79.9838258, 40.6458343),
-]
 result = identify_production_area_suitability(boundary, dem=dem_shape, check_soil=False)
 assert result["zones_geojson"]["features"], "expected at least one scored feature from the orchestrator"
 assert all(f["properties"]["soil_data_available"] is False for f in result["zones_geojson"]["features"]), (
@@ -331,7 +410,7 @@ assert all(f["properties"]["soil_data_available"] is False for f in result["zone
 assert all(f["properties"]["soil_exclusion_passed"] is True for f in result["zones_geojson"]["features"]), (
     "with no soil data fetched, the exclusion check must default to passed, not excluded"
 )
-print("identify_production_area_suitability wires DEM->identify_production_areas->score_production_areas->geojson "
-      "correctly with check_soil=False (no network call).")
+print("identify_production_area_suitability wires DEM->boundary_polygon_utm->identify_production_areas->"
+      "score_production_areas->geojson correctly with check_soil=False (no network call).")
 
 print("\nAll production_suitability checks passed.")

@@ -191,6 +191,13 @@ report using the Claude API.
   split as the other candidate-zone features
   (`score_production_areas()` is network-free and unit-tested against
   synthetic terrain — `test_production_suitability.py`).
+  `score_production_areas()` requires the same real `boundary_polygon_utm`
+  `identify_production_areas()` does (that layer now clips every candidate
+  to the real parcel — a DEM fetched with ~100m of buffer past the drawn
+  boundary can otherwise leak off-parcel cells into a patch) and filters
+  its own recovered DEM cells to the same on-parcel subset, so
+  slope/size/aspect are scored from the same ground the reported
+  `area_acres`/`polygon_utm` actually describe.
 - `report_generator.py` — combines all of the above and calls the Claude
   API to generate the narrative Scale of Permanence report.
 - `generate_full_report.py` — the full end-to-end pipeline: give it a
