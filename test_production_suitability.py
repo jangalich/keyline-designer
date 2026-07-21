@@ -69,6 +69,7 @@ from production_suitability import (
     score_production_areas,
     summarize_production_area_suitability,
 )
+import soil_data
 from soil_data import is_disqualifying_soil_condition
 
 RESOLUTION = (5.0, 5.0)
@@ -412,14 +413,20 @@ print("is_disqualifying_soil_condition() correctly flags hydric/partially-hydric
 
 
 # --- 5b. _fetch_disqualifying_soil_union(): offline, with the fetch layer mocked ---
+#
+# comppct_r is now load-bearing here (hydric_disqualifying_mukeys() sums it
+# per mukey against MIN_HYDRIC_COMPONENT_PCT_TO_EXCLUDE), unlike before this
+# fix -- every fake row below carries a real value, not just a hydricrating.
 
 def _fake_soil_rows_with_hydric(wkt_polygon):
     return [
-        {"mukey": "1", "muname": "Rayne silt loam", "drainagecl": "Well drained", "hydricrating": "No"},
-        {"mukey": "2", "muname": "Wet inclusion", "drainagecl": "Poorly drained", "hydricrating": "Yes"},
+        {"mukey": "1", "muname": "Rayne silt loam", "compname": "Rayne", "comppct_r": 100, "drainagecl": "Well drained", "hydricrating": "No"},
+        # Dominant (90%) hydric component -- a genuine wet inclusion, well above the threshold.
+        {"mukey": "2", "muname": "Wet inclusion", "compname": "Atkins", "comppct_r": 90, "drainagecl": "Poorly drained", "hydricrating": "Yes"},
+        {"mukey": "2", "muname": "Wet inclusion", "compname": "Upland part", "comppct_r": 10, "drainagecl": "Well drained", "hydricrating": "No"},
         # Poorly/very-poorly drained but NOT hydric -- must NOT disqualify (this is the exact
-        # regression this fix addresses: a drainage-class check used to disqualify this too).
-        {"mukey": "3", "muname": "Droughty-but-dry non-wetland", "drainagecl": "Very poorly drained", "hydricrating": "No"},
+        # regression an earlier fix addressed: a drainage-class check used to disqualify this too).
+        {"mukey": "3", "muname": "Droughty-but-dry non-wetland", "compname": "Ernest", "comppct_r": 100, "drainagecl": "Very poorly drained", "hydricrating": "No"},
     ]
 
 
@@ -441,14 +448,14 @@ with mock_patch.object(ps, "get_soil_data_for_polygon", _fake_soil_rows_with_hyd
     union = ps._fetch_disqualifying_soil_union("polygon((-79.99 40.64, -79.98 40.64, -79.98 40.65, -79.99 40.65, -79.99 40.64))", dem_soil)
 
 assert union is not None and union.geom_type in ("Polygon", "MultiPolygon")
-# mukey 3 (very poorly drained, non-hydric) must NOT be part of the union -- only mukey 2 (hydric) is.
+# mukey 3 (very poorly drained, non-hydric) must NOT be part of the union -- only mukey 2 (90% hydric) is.
 mukey_3_geom = shape(_fake_soil_geometries(None)["3"])
 assert not union.covers(mukey_3_geom), (
     "a non-hydric 'very poorly drained' mukey must NOT be part of the disqualifying union -- "
     "only hydric rating disqualifies now, per this fix"
 )
-print("_fetch_disqualifying_soil_union() unions only the hydric mukey -- a non-hydric 'very poorly "
-      "drained' mukey is correctly left out (drainage class alone no longer disqualifies).")
+print("_fetch_disqualifying_soil_union() unions only the majority-hydric mukey -- a non-hydric 'very "
+      "poorly drained' mukey is correctly left out (drainage class alone no longer disqualifies).")
 
 
 def _fake_soil_rows_drainage_only(wkt_polygon):
@@ -456,8 +463,8 @@ def _fake_soil_rows_drainage_only(wkt_polygon):
     the exact scenario this fix changes: this must now return None (nothing
     disqualifying), where an earlier version would have flagged it."""
     return [
-        {"mukey": "1", "muname": "Wet-looking but non-hydric", "drainagecl": "Very poorly drained", "hydricrating": "No"},
-        {"mukey": "2", "muname": "Also non-hydric", "drainagecl": "Poorly drained", "hydricrating": "No"},
+        {"mukey": "1", "muname": "Wet-looking but non-hydric", "compname": "A", "comppct_r": 60, "drainagecl": "Very poorly drained", "hydricrating": "No"},
+        {"mukey": "2", "muname": "Also non-hydric", "compname": "B", "comppct_r": 40, "drainagecl": "Poorly drained", "hydricrating": "No"},
     ]
 
 
@@ -475,7 +482,7 @@ print("_fetch_disqualifying_soil_union() returns None for drainage-only (non-hyd
 
 
 def _fake_soil_rows_all_clean(wkt_polygon):
-    return [{"mukey": "1", "muname": "Rayne silt loam", "drainagecl": "Well drained", "hydricrating": "No"}]
+    return [{"mukey": "1", "muname": "Rayne silt loam", "compname": "Rayne", "comppct_r": 100, "drainagecl": "Well drained", "hydricrating": "No"}]
 
 
 with mock_patch.object(ps, "get_soil_data_for_polygon", _fake_soil_rows_all_clean):
@@ -483,6 +490,77 @@ with mock_patch.object(ps, "get_soil_data_for_polygon", _fake_soil_rows_all_clea
 
 assert clean_union is None, "no disqualifying components at all must return None, not an empty geometry"
 print("_fetch_disqualifying_soil_union() returns None when nothing in the footprint is hydric.")
+
+
+# --- 5c. Regression test for the reported bug: a trace hydric component must NOT carve out
+# an entire, mostly well-drained map unit's polygon. Real live numbers from the bug report:
+# mukey 541700 (Guernsey-Vandergrift) is hydric via a component that's only 1% of composition;
+# mukey 541683 (Ernest-Vandergrift) is hydric via components totaling 5%+3%=8%. Both were
+# previously excluded/carved in full despite being 90%+ well/moderately-well-drained.
+
+def _fake_soil_rows_trace_hydric(wkt_polygon):
+    return [
+        # Genuinely, overwhelmingly wet -- 85% dominant hydric component (mirrors the real
+        # Atkins mukey from the bug report). Must still disqualify.
+        {"mukey": "541658", "muname": "Atkins silt loam, frequently flooded", "compname": "Atkins", "comppct_r": 85, "hydricrating": "Yes"},
+        {"mukey": "541658", "muname": "Atkins silt loam, frequently flooded", "compname": "Atkins channery part", "comppct_r": 10, "hydricrating": "No"},
+        # Only 1% hydric -- a trace inclusion in an otherwise well/moderately-well-drained
+        # map unit (mirrors the real Guernsey-Vandergrift mukey). Must NOT disqualify.
+        {"mukey": "541700", "muname": "Guernsey-Vandergrift silt loams", "compname": "Guernsey", "comppct_r": 55, "hydricrating": "No"},
+        {"mukey": "541700", "muname": "Guernsey-Vandergrift silt loams", "compname": "Vandergrift", "comppct_r": 44, "hydricrating": "No"},
+        {"mukey": "541700", "muname": "Guernsey-Vandergrift silt loams", "compname": "Wet inclusion", "comppct_r": 1, "hydricrating": "Yes"},
+        # 5%+3%=8% hydric across two components -- still a trace share of the map unit
+        # (mirrors the real Ernest-Vandergrift mukey). Must NOT disqualify.
+        {"mukey": "541683", "muname": "Ernest-Vandergrift silt loams", "compname": "Ernest", "comppct_r": 50, "hydricrating": "No"},
+        {"mukey": "541683", "muname": "Ernest-Vandergrift silt loams", "compname": "Vandergrift", "comppct_r": 42, "hydricrating": "No"},
+        {"mukey": "541683", "muname": "Ernest-Vandergrift silt loams", "compname": "Wet inclusion A", "comppct_r": 5, "hydricrating": "Yes"},
+        {"mukey": "541683", "muname": "Ernest-Vandergrift silt loams", "compname": "Wet inclusion B", "comppct_r": 3, "hydricrating": "Yes"},
+    ]
+
+
+def _fake_soil_geometries_trace_hydric(wkt_polygon):
+    return {
+        "541658": {  # small -- the genuinely wet Atkins floodplain
+            "type": "Polygon",
+            "coordinates": [[[-79.984, 40.645], [-79.9838, 40.645], [-79.9838, 40.6452], [-79.984, 40.6452], [-79.984, 40.645]]],
+        },
+        "541700": {  # ~58x larger, per the bug report
+            "type": "Polygon",
+            "coordinates": [[[-79.99, 40.63], [-79.96, 40.63], [-79.96, 40.66], [-79.99, 40.66], [-79.99, 40.63]]],
+        },
+        "541683": {  # ~40x larger, per the bug report
+            "type": "Polygon",
+            "coordinates": [[[-79.98, 40.60], [-79.95, 40.60], [-79.95, 40.63], [-79.98, 40.63], [-79.98, 40.60]]],
+        },
+    }
+
+
+assert soil_data.hydric_disqualifying_mukeys(_fake_soil_rows_trace_hydric(None)) == {"541658"}, (
+    "only the 85%-dominant-hydric Atkins mukey should meet the disqualifying threshold -- "
+    "the 1% (Guernsey-Vandergrift) and 8% (Ernest-Vandergrift) trace inclusions must not"
+)
+print("hydric_disqualifying_mukeys() correctly excludes trace hydric mukeys (1%, 5%+3%=8%) while "
+      "still flagging the genuinely, dominantly hydric one (85%).")
+
+with mock_patch.object(ps, "get_soil_data_for_polygon", _fake_soil_rows_trace_hydric), \
+     mock_patch.object(ps, "get_soil_geometries_for_polygon", _fake_soil_geometries_trace_hydric):
+    trace_union = ps._fetch_disqualifying_soil_union(
+        "polygon((-79.99 40.62, -79.95 40.62, -79.95 40.66, -79.99 40.66, -79.99 40.62))", dem_soil
+    )
+
+assert trace_union is not None
+guernsey_geom = shape(_fake_soil_geometries_trace_hydric(None)["541700"])
+ernest_geom = shape(_fake_soil_geometries_trace_hydric(None)["541683"])
+assert not trace_union.intersects(guernsey_geom), (
+    "the 1%-hydric Guernsey-Vandergrift mukey's large, mostly well-drained polygon must NOT be "
+    "carved out over a trace hydric inclusion"
+)
+assert not trace_union.intersects(ernest_geom), (
+    "the 8%-hydric Ernest-Vandergrift mukey's large, mostly well-drained polygon must NOT be "
+    "carved out over trace hydric inclusions"
+)
+print("_fetch_disqualifying_soil_union() carves only the genuinely, dominantly hydric Atkins mukey -- "
+      "the two large, mostly well-drained mukeys with only trace hydric inclusions are correctly left whole.")
 
 
 # --- identify_production_area_suitability: full orchestrator wiring, network-free via dem=+check_soil=False ---

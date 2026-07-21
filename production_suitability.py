@@ -35,11 +35,13 @@ step that runs BEFORE scoring:
                         property even though most of each patch's soil
                         was fine; a real but partial wet inclusion
                         shouldn't veto ground that's mostly workable).
-                        Real SSURGO polygon geometry for map units meeting
-                        is_disqualifying_soil_condition() (hydric/wetland
-                        soil only — soil_data.py, reused as-is, not
-                        redefined here) is subtracted OUT of each patch's
-                        own footprint before anything is scored. The
+                        Real SSURGO polygon geometry for map units whose
+                        SUMMED hydric component share meets
+                        MIN_HYDRIC_COMPONENT_PCT_TO_EXCLUDE
+                        (soil_data.hydric_disqualifying_mukeys(), reused
+                        as-is, shared with road_corridors.py) is
+                        subtracted OUT of each patch's own footprint
+                        before anything is scored. The
                         remainder — one piece, or several if the
                         subtraction splits the patch into disconnected
                         remainders — is what actually gets scored. See
@@ -117,7 +119,7 @@ from soil_data import (
     coordinates_to_wkt_polygon,
     get_soil_data_for_polygon,
     get_soil_geometries_for_polygon,
-    is_disqualifying_soil_condition,
+    hydric_disqualifying_mukeys,
 )
 from terrain_metrics import aspect_score, compute_slope_and_aspect
 
@@ -306,13 +308,24 @@ def _size_factor(area_acres: float, cells: list[tuple[int, int]], dem: dict, ref
 def _fetch_disqualifying_soil_union(wkt_polygon: str, dem: dict) -> Optional[object]:
     """
     Real SSURGO polygon geometry (not just component ratings) for every
-    map unit with at least one disqualifying component within
-    wkt_polygon, unioned and reprojected into dem['crs']. Returns None if
-    nothing disqualifying was found (the common, clean case -- not an
-    error).
+    map unit whose SUMMED hydric component percentage meets
+    soil_data.MIN_HYDRIC_COMPONENT_PCT_TO_EXCLUDE, within wkt_polygon,
+    unioned and reprojected into dem['crs']. Returns None if nothing
+    disqualifying was found (the common, clean case -- not an error).
 
-    is_disqualifying_soil_condition() (soil_data.py) decides what counts
-    as disqualifying -- reused as-is, not redefined here.
+    soil_data.hydric_disqualifying_mukeys() decides which mukeys qualify
+    -- shared, not reimplemented here, with road_corridors.py's
+    _fetch_floodplain_hydric_union(), which used to independently flag a
+    mukey as disqualifying/excludable off ANY hydric component at all,
+    regardless of its share of the map unit's composition. That was a
+    real bug (found live, alongside this module's own use of the same
+    old flawed rollup): a map unit 99%+ well/moderately-well-drained but
+    hydric via a single 1%-of-composition component got its ENTIRE
+    polygon carved out here, the same as a genuinely, overwhelmingly wet
+    one. See hydric_disqualifying_mukeys()'s own docstring and
+    MIN_HYDRIC_COMPONENT_PCT_TO_EXCLUDE's comment (soil_data.py) for the
+    threshold and reasoning -- this module intentionally does NOT
+    redefine or duplicate that logic.
 
     Same fetch-then-filter-then-fetch-geometry pattern as
     road_corridors.py's _fetch_erosion_prone_union()/
@@ -323,11 +336,7 @@ def _fetch_disqualifying_soil_union(wkt_polygon: str, dem: dict) -> Optional[obj
     than reimplementing hydric-geometry fetching from scratch.
     """
     soil_components = get_soil_data_for_polygon(wkt_polygon)
-    disqualifying_mukeys = {
-        row["mukey"]
-        for row in soil_components
-        if is_disqualifying_soil_condition(row.get("hydricrating"))
-    }
+    disqualifying_mukeys = hydric_disqualifying_mukeys(soil_components)
     if not disqualifying_mukeys:
         return None
 

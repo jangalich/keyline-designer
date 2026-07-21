@@ -164,7 +164,7 @@ report using the Claude API.
   network-free and unit-tested against synthetic terrain —
   `test_road_corridors.py`, end-to-end wiring in
   `test_road_corridors_pipeline.py`).
-  `_fetch_floodplain_hydric_union()`'s NHD stream/water-body piece had a
+- `_fetch_floodplain_hydric_union()`'s NHD stream/water-body piece had a
   bug of the same root-cause CATEGORY as the original
   `soil_data.get_soil_geometries_for_polygon()` bug below: `query`
   operation returns each matching feature's FULL, un-clipped geometry for
@@ -191,6 +191,39 @@ report using the Claude API.
   is mathematically bounded by the parcel's own area; 13.17/13.23 acres is
   a plausible real finding (most of this parcel's soil is erosion-prone per
   SSURGO K-factor), not a bug — left unmodified.
+- **A second, separate bug** in the same `_fetch_floodplain_hydric_union()`
+  hydric-soil piece, found live AFTER the NHD-clipping fix above landed and
+  was re-checked against the real property: a mukey was flagged
+  hydric-disqualifying (and its FULL mapped polygon pulled into the
+  exclusion) if ANY component within it was hydric at all, regardless of
+  that component's share of the map unit's composition. Confirmed live: two
+  large, mostly well/moderately-well-drained map units — hydric via a
+  1%-of-composition component (Guernsey-Vandergrift) and via components
+  totaling 5%+3%=8% (Ernest-Vandergrift) — had their entire polygons
+  (~58x and ~40x larger than the genuinely, overwhelmingly wet Atkins
+  floodplain mukey, itself hydric via an 85%-dominant component) excluded
+  right alongside it, producing an 18.77-acre union on the 13.23-acre
+  parcel even with the NHD fix in place. `production_suitability.py`'s
+  hydric-soil-carving logic (`_fetch_disqualifying_soil_union()`) had the
+  IDENTICAL bug, sourced from the same flawed rollup pattern. Fixed with
+  one shared function, `soil_data.hydric_disqualifying_mukeys()`, used by
+  both: sums `comppct_r` across a mukey's hydric (`is_hydric()`-true)
+  components and only flags the mukey once that sum meets
+  `soil_data.MIN_HYDRIC_COMPONENT_PCT_TO_EXCLUDE` (50%, mirroring
+  SSURGO/NRCS's own "predominantly hydric" majority-share map-unit
+  convention rather than an arbitrary invented number — see that
+  constant's own comment). `is_hydric()`/`is_disqualifying_soil_condition()`'s
+  PER-COMPONENT definition of hydric is unchanged — this only changes how
+  per-component flags roll up to a whole-mukey decision. Regression-tested
+  offline against the real mukeys/percentages from the live bug report in
+  both `test_floodplain_union_scope.py` and `test_production_suitability.py`.
+  **Outstanding**: the NHD stream piece separately showed some spillover
+  across N Montour Rd onto the far side of Montour Run, outside the parcel,
+  per a plotted-GeoJSON visual check — flagged as secondary to the
+  whole-mukey bug above and not yet re-checked against live data now that
+  this fix has landed (this sandbox's network policy blocks live
+  verification of any of this — see the outstanding item under
+  `road_corridors.py`'s ground-truth validation section below).
 - `solar_suitability.py`'s road-proximity scoring falls back to the
   top-ranked `suggested_road_corridor` when no existing-road data is
   reachable (real road data always wins when available) — see
@@ -444,6 +477,16 @@ tool (built with Leaflet).
   was seen so far, but not exhaustively) or change, and to confirm
   `confidence_notes` is now actually populated (it shipped empty on that
   run — see the fix in `score_production_areas()`/`_confidence_notes_for()`).
+  **A later live run reported patch 17's carve at 59% — that number is
+  now suspected inflated by the whole-mukey hydric bug documented in the
+  `road_corridors.py` section above** (`_fetch_disqualifying_soil_union()`
+  had the identical bug, now fixed via the same shared
+  `soil_data.hydric_disqualifying_mukeys()` threshold). This 59% figure
+  needs re-checking live against the fix, not assumed either fixed or
+  still accurate — this sandbox could only verify the fix offline/
+  synthetically (see `test_production_suitability.py`'s trace-hydric
+  regression section, built from this property's own real mukeys/
+  percentages).
   Confirm at least one real, non-empty production candidate survives (an
   earlier whole-patch-exclusion version of this module shipped without
   this check at all and excluded BOTH real surviving candidates on this
@@ -469,18 +512,29 @@ tool (built with Leaflet).
   production zone genuinely scores lower than a comparable non-crossing
   one (the preference, not exclusion, model), and that anchoring prefers
   real road frontage over the arbitrary boundary fallback where a road is
-  reachable nearby. **Specifically re-confirm the floodplain/hydric union
-  clipping fix above against live NHD data** — report the actual
-  `hydric_floodplain_union` / `erosion_prone_union` area in acres compared
-  to the real parcel's own acreage (the size-comparison test that caught
-  the original 33.9-acre-on-a-13.23-acre-parcel bug), and the resulting
-  candidate count/types/grades/scores from
-  `identify_road_corridor_candidates()` with both exclusions active — this
-  session's sandbox could only verify the fix offline/synthetically
-  (a mocked 10km+ unclipped stream feature clipped back down to a bounded,
-  sane union), never against the real property, due to the same blocked
-  `hydro.nationalmap.gov`/`sdmdataaccess.sc.egov.usda.gov` egress noted
-  throughout this file. Tune `MAX_ROAD_GRADE_PCT` (see the module for the
+  reachable nearby. **Specifically re-confirm BOTH floodplain/hydric union
+  fixes above against live data** — the NHD-clipping fix AND the
+  whole-mukey hydric threshold fix (`MIN_HYDRIC_COMPONENT_PCT_TO_EXCLUDE`)
+  — report the actual `hydric_floodplain_union` / `erosion_prone_union`
+  area in acres compared to the real parcel's own acreage (the
+  size-comparison test that caught both bugs: 33.9 acres, then 18.77 acres
+  after the first fix, on a 13.23-acre parcel), which mukeys are now
+  included/excluded from the exclusion set and their summed hydric
+  composition percentage, and the resulting candidate count/types/grades/
+  scores/`crosses_production_zone`/anchor info from
+  `identify_road_corridor_candidates()` with both exclusions active. Also
+  re-check whether the NHD stream piece's spillover across N Montour Rd
+  onto the far side of Montour Run (flagged secondary to the whole-mukey
+  bug, visually confirmed via a plotted-GeoJSON check, not yet re-examined
+  since) is still meaningfully present now that the dominant over-exclusion
+  issue is fixed. This session's sandbox could only verify both fixes
+  offline/synthetically (a mocked 10km+ unclipped stream feature clipped
+  back down to a bounded, sane union; and the real property's own reported
+  mukeys/percentages — Atkins 85%, Guernsey-Vandergrift 1%,
+  Ernest-Vandergrift 5%+3%=8% — mocked to confirm only the genuinely
+  dominant one disqualifies), never against the real property, due to the
+  same blocked `hydro.nationalmap.gov`/`sdmdataaccess.sc.egov.usda.gov`
+  egress noted throughout this file. Tune `MAX_ROAD_GRADE_PCT` (see the module for the
   current rationale/sourcing caveat), `CONTOUR_BAND_WIDTH_METERS`, the
   ridge `RIDGE_MIN_AREA_ACRES` / `RIDGE_MIN_PRIMARY_AREA_ACRES`
   thresholds, the exclusion buffers (`POND_ZONE_EXCLUSION_BUFFER_METERS`,

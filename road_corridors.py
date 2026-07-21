@@ -94,8 +94,8 @@ from soil_data import (
     get_erosion_factor_for_polygon,
     get_soil_data_for_polygon,
     get_soil_geometries_for_polygon,
+    hydric_disqualifying_mukeys,
     is_erosion_prone,
-    is_hydric,
 )
 from terrain_metrics import compute_slope_and_aspect
 from valley_delineation import delineate_valleys
@@ -892,6 +892,16 @@ def _fetch_floodplain_hydric_union(
     already comes back clipped to the parcel's own wkt_polygon from
     get_soil_geometries_for_polygon() itself (STIntersection), so it can
     never exceed the parcel's own area in the first place.
+
+    A mukey only contributes its hydric geometry here if its SUMMED hydric
+    component percentage meets soil_data.MIN_HYDRIC_COMPONENT_PCT_TO_EXCLUDE
+    (soil_data.hydric_disqualifying_mukeys()) — a real, second bug found
+    live alongside the NHD-clipping one above: a map unit that's 99%+
+    well/moderately-well-drained but has a single 1%-of-composition hydric
+    component was previously flagged the SAME as a map unit that's 85%+
+    hydric, and its entire (much larger) mapped polygon got excluded right
+    alongside genuinely wet ground. See that constant's own comment for the
+    live numbers this fixes.
     """
     context_region = boundary_polygon_utm.buffer(FLOODPLAIN_FETCH_CONTEXT_BUFFER_METERS)
     pieces = []
@@ -913,7 +923,7 @@ def _fetch_floodplain_hydric_union(
     try:
         wkt_polygon = coordinates_to_wkt_polygon(boundary_coordinates)
         soil_components = get_soil_data_for_polygon(wkt_polygon)
-        hydric_mukeys = {c["mukey"] for c in soil_components if is_hydric(c.get("hydricrating"))}
+        hydric_mukeys = hydric_disqualifying_mukeys(soil_components)
         if hydric_mukeys:
             geometries_by_mukey = get_soil_geometries_for_polygon(wkt_polygon)
             for mukey in hydric_mukeys:

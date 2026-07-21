@@ -234,6 +234,67 @@ def is_hydric(hydric_rating: Optional[str]) -> bool:
     return hydric_rating.strip().lower() in ("yes", "partially hydric")
 
 
+# NRCS/SSURGO's own convention for rolling per-component hydric ratings up
+# to a map-unit-level judgment (the "Hydric Rating by Map Unit" derivation
+# behind Web Soil Survey's own hydric soils layer) is majority-share:
+# "Predominantly Hydric" if hydric components make up 50% or more of a map
+# unit's composition, "Partially Hydric" below that. A component's own
+# hydricrating (Yes / Partially hydric / No) only characterizes that ONE
+# component -- it says nothing about how much of the map unit's total
+# mapped area that component actually represents. Treating ANY hydric
+# component as disqualifying for the WHOLE mapped polygon, regardless of
+# its comppct_r share, is a real bug this constant exists to fix --
+# confirmed live: a map unit 99%+ well/moderately-well-drained, hydric via
+# a single component at just 1% of composition, had its entire polygon
+# (~58x larger than the genuinely, overwhelmingly wet Atkins floodplain
+# mukey elsewhere on the same property) excluded/carved right alongside
+# it. 50% mirrors SSURGO/NRCS's own existing "predominantly hydric"
+# majority-share convention rather than an arbitrary invented number, and
+# cleanly separates every case seen live so far: Atkins (85% hydric, one
+# component) is well above it; the trace inclusions (1%, and 5%+3%=8%)
+# are well below it. CONFIGURABLE.
+MIN_HYDRIC_COMPONENT_PCT_TO_EXCLUDE = 50.0
+
+
+def hydric_disqualifying_mukeys(
+    soil_components: list[dict], threshold: float = MIN_HYDRIC_COMPONENT_PCT_TO_EXCLUDE
+) -> set[str]:
+    """
+    Given component-table rows (get_soil_data_for_polygon()'s return shape
+    -- one row per component, each with 'mukey', 'comppct_r', and
+    'hydricrating'), returns the set of mukeys whose SUMMED hydric
+    component percentage (comppct_r summed across that mukey's rows where
+    is_hydric(hydricrating) is True) meets or exceeds threshold.
+
+    Shared by road_corridors.py's _fetch_floodplain_hydric_union() and
+    production_suitability.py's _fetch_disqualifying_soil_union() -- both
+    used to flag a mukey as disqualifying/excludable if ANY component
+    within it was hydric at all, regardless of that component's share of
+    the map unit's total composition. See MIN_HYDRIC_COMPONENT_PCT_TO_EXCLUDE's
+    own comment for the live bug this fixes and the reasoning behind the
+    threshold value. Deliberately does NOT change what counts as hydric at
+    the per-component level -- that's still exactly is_hydric()'s call,
+    unmodified; this only changes how per-component flags roll up to a
+    whole-mukey decision.
+
+    An unparseable/missing comppct_r on a hydric row is treated as 0 (not
+    counted toward the sum) rather than raising -- comppct_r is a required,
+    always-populated SDA column in practice, but a mukey should never be
+    excluded on the strength of a value that couldn't actually be read.
+    """
+    hydric_pct_by_mukey: dict[str, float] = {}
+    for row in soil_components:
+        if not is_hydric(row.get("hydricrating")):
+            continue
+        try:
+            pct = float(row.get("comppct_r"))
+        except (TypeError, ValueError):
+            pct = 0.0
+        mukey = row["mukey"]
+        hydric_pct_by_mukey[mukey] = hydric_pct_by_mukey.get(mukey, 0.0) + pct
+    return {mukey for mukey, pct in hydric_pct_by_mukey.items() if pct >= threshold}
+
+
 def is_disqualifying_soil_condition(hydric_rating: Optional[str]) -> Optional[str]:
     """Returns a short, human-readable reason string if this soil
     component represents a condition that disqualifies ground for
