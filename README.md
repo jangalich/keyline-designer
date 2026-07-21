@@ -370,6 +370,71 @@ report using the Claude API.
   from an environment with real network access and confirm at least one
   real candidate survives with a sensible `soil_carved_acres` before
   treating this as validated — see Roadmap.
+- `production_area_ceiling.py` — a global, cross-patch trim on top of
+  `production_area.py`'s identified candidates, addressing a real number
+  found on the reference property: its slope-only heuristic identified
+  ~95% of the parcel as eligible production ground (a single connected
+  patch), which reads as implausible once water systems, tree/windbreak
+  zones, roads, structures, and fencing all need room too. Does NOT
+  change `production_area.py`'s slope-eligibility detection or
+  `production_suitability.py`'s soil-carving/slope/size/aspect scoring
+  math — both are reused completely unchanged — it only changes what
+  GEOMETRY feeds into that scoring:
+  1. **Combined pool**: every on-parcel cell across EVERY currently-
+     identified patch, pooled together — NOT kept separate by which
+     patch a cell came from. There is no protected zone; only a cell's
+     own quality counts from here on.
+  2. **Per-cell scoring**: each cell's own real slope/aspect run through
+     the SAME `_slope_factor`/`aspect_score` functions
+     `production_suitability.py`'s zone-level composite already uses —
+     reused directly (a length-1 list for slope; `aspect_score` is
+     already per-value). `size_factor` has no per-cell meaning (it's a
+     whole-patch shape/acreage property), so it's excluded rather than
+     approximated; the remaining slope:aspect weights are the EXISTING
+     0.55:0.15 zone-level ratio, just renormalized to sum to 1.0
+     (`PER_CELL_SLOPE_WEIGHT`/`PER_CELL_ASPECT_WEIGHT`) — not a new
+     ratio invented for this pass.
+  3. **Trim to ceiling**: sort worst-to-best, remove cells one at a time
+     (worst first) until the remaining total lands at or just above
+     `PRODUCTION_CEILING_PCT_OF_PARCEL` (80.0, CONFIGURABLE) percent of
+     the real, FULL parcel boundary's area — NOT a percent of the
+     pre-trim eligible acreage. If eligible acreage is already at/under
+     the ceiling, nothing is removed and `production_ceiling_target_met`
+     is honestly reported `False` rather than claiming 80% was hit.
+  4. **Rebuild geometry**: fresh connected-component labeling of the
+     surviving cell mask. Worst-first removal can fragment one original
+     patch into several disconnected pieces — every piece clearing
+     `MIN_PRODUCTION_AREA_ACRES` is kept as its own independent
+     candidate, never forced back into one shape.
+  5. **Existing carving + scoring, unchanged**: each surviving piece is
+     fed into `production_suitability.py`'s own
+     `score_production_areas()` via a new, backward-compatible
+     `cells_by_patch_id` parameter (an optional direct cell-membership
+     override every existing caller omits, added specifically so this
+     module's freshly-relabeled post-trim patches don't get their cells
+     silently recomputed against the wrong, pre-trim low-slope mask) —
+     the same hydric soil-carving and slope/size/aspect scoring runs
+     exactly as it does for `production_suitability.py`'s own untrimmed
+     patches.
+
+  `identify_optimized_production_areas()` is the fetch-and-score entry
+  point, returning the same `production_area_candidate` GeoJSON/
+  `scored_patches` shape `identify_production_area_suitability()` does,
+  plus top-level summary fields: `total_selected_acreage`,
+  `percent_of_parcel` (of the full parcel), `production_ceiling_target_met`,
+  and `total_cells_removed` (from the global trim step only — soil
+  carving is separate and not counted here). Same pure-core-vs-network-
+  fetch split as the rest of this pipeline (`test_production_area_ceiling.py`,
+  offline synthetic-DEM checks covering per-cell weighting, cross-patch
+  "no protected zone" trimming, fragmentation into multiple survivors,
+  the already-under-ceiling edge case, and that soil carving still
+  applies correctly on the newly-trimmed geometry). This is a
+  self-contained, standalone pass — like `production_suitability.py`,
+  NOT yet wired into `generate_full_report.py`/`report_generator.py`,
+  and it does not touch water/tree/road/solar/fencing logic, which still
+  consume whatever production-area output currently exists (wiring them
+  to consume this optimized output specifically is a separate, later
+  pass).
 - **`scenario_generation.py` (REMOVED)** — an earlier N-ranked-scenario
   design (computing water/solar/road/fencing candidates once per
   production-zone subset instead of once against the union of every
@@ -458,6 +523,17 @@ tool (built with Leaflet).
   (`production_area.py`), and `MIN_GRAVITY_GRADIENT` /
   `MIN_BOUNDARY_SETBACK_METERS` (`water_candidate_zones.py`) accordingly —
   all deliberately exposed as module-level constants for exactly this.
+- `production_area_ceiling.py`'s `PRODUCTION_CEILING_PCT_OF_PARCEL` (80.0)
+  is a documented starting ceiling, not a value derived from or validated
+  against a real property yet — same "tune once ground-truthed" status
+  as `production_suitability.py`'s own composite weights. Verified only
+  offline against synthetic terrain so far (`test_production_area_ceiling.py`);
+  run `python3 production_area_ceiling.py` against the real six-point
+  reference property (blocked in this sandbox for the same egress-policy
+  reason as `production_suitability.py`, above) and confirm the trimmed
+  result's `percent_of_parcel`/`production_ceiling_target_met` look
+  sensible before treating the 80% figure as validated rather than just
+  a reasonable-sounding default.
 - Same ground-truth validation pass for `solar_suitability.py`'s
   point-candidate model: check that top-ranked candidates are near a
   real road, low-slope, south-facing, and (per the new proximity

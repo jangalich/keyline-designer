@@ -492,6 +492,7 @@ def score_production_areas(
     max_slope_pct: float = MAX_PRODUCTION_SLOPE_PCT,
     reference_max_area_acres: float = REFERENCE_MAX_AREA_ACRES,
     min_area_acres: float = MIN_PRODUCTION_AREA_ACRES,
+    cells_by_patch_id: Optional[dict] = None,
 ) -> list[dict]:
     """
     Pure carving + scoring logic -- see module docstring for why this
@@ -502,6 +503,21 @@ def score_production_areas(
     which original patches exist; it may SPLIT a patch into several
     scored sub-patches during soil carving, or drop one entirely if its
     whole footprint is disqualifying soil).
+
+    cells_by_patch_id (optional): maps patch['id'] to that patch's own
+    on-parcel constituent DEM cells directly, bypassing the recompute-
+    from-the-original-low-slope-mask recovery described below entirely
+    for that patch. Every EXISTING caller omits this (default None), so
+    existing behavior is completely unchanged -- it exists only for a
+    caller whose patches did NOT come from thresholding+labeling this
+    same DEM's own low-slope mask in the first place (e.g.
+    production_area_ceiling.py's post-global-trim, re-labeled patches,
+    where patch['id'] is a fresh connected-component id over a DIFFERENT,
+    already-trimmed cell mask -- recomputing cells from THIS module's own
+    max_slope_pct mask for those ids would silently recover the wrong
+    cells, or none at all). A patch['id'] absent from this dict still
+    falls back to the recompute path below, so the two sourcing strategies
+    can be mixed across one `patches` list if ever needed.
 
     boundary_polygon_utm MUST be the same real parcel boundary passed to
     identify_production_areas() to produce `patches` (see cell-recovery
@@ -567,16 +583,21 @@ def score_production_areas(
 
     all_sub_patches: list[dict] = []
 
+    cells_by_patch_id = cells_by_patch_id or {}
+
     for patch in patches:
-        raw_cells = [(int(r), int(c)) for r, c in np.argwhere(labels == patch["id"])]
-        cells = [(r, c) for r, c in raw_cells if boundary_prepared.contains(Point(pixel_center_xy(dem, r, c)))]
-        if not cells:
-            # Shouldn't happen -- identify_production_areas() already
-            # dropped any patch with no on-parcel cells at all -- but
-            # fall back to the raw (unclipped) cells rather than
-            # producing an empty candidate if it's ever called with a
-            # mismatched boundary/patches pair.
-            cells = raw_cells
+        if patch["id"] in cells_by_patch_id:
+            cells = cells_by_patch_id[patch["id"]]
+        else:
+            raw_cells = [(int(r), int(c)) for r, c in np.argwhere(labels == patch["id"])]
+            cells = [(r, c) for r, c in raw_cells if boundary_prepared.contains(Point(pixel_center_xy(dem, r, c)))]
+            if not cells:
+                # Shouldn't happen -- identify_production_areas() already
+                # dropped any patch with no on-parcel cells at all -- but
+                # fall back to the raw (unclipped) cells rather than
+                # producing an empty candidate if it's ever called with a
+                # mismatched boundary/patches pair.
+                cells = raw_cells
 
         entry = disqualifying_soil_by_patch_id.get(patch["id"], _SOIL_CHECK_UNAVAILABLE)
         soil_data_available = entry is not _SOIL_CHECK_UNAVAILABLE
