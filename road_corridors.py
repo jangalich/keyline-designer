@@ -1145,39 +1145,6 @@ def _fetch_existing_road_features_utm(boundary_coordinates, dem) -> Optional[lis
     return features if features else None
 
 
-def _fetch_existing_road_union(boundary_coordinates, dem):
-    """Real existing-road geometry, for anchoring only (see
-    _anchor_to_boundary) — returns None on any failure or if nothing is
-    nearby, which just makes anchoring fall back to an arbitrary boundary
-    point rather than raising.
-
-    UNCHANGED return shape (Optional[shapely geometry], no names) —
-    scenario_generation.py imports and calls this directly for its own
-    shared, per-report road fetch, and expects exactly this plain-union
-    shape. identify_road_corridor_candidates() below no longer calls this
-    (it uses _fetch_existing_road_features_utm() instead, to also get
-    road names for anchor reporting without a second, redundant fetch);
-    this stays as its own function purely for that external caller."""
-    try:
-        roads = get_farm_roads_for_boundary(boundary_coordinates)
-    except Exception as e:
-        _log_fetch_failure("Existing road fetch", e)
-        return None
-
-    if not roads:
-        return None
-
-    pieces = []
-    for road in roads:
-        geometry = road["geometry"]
-        line_lists = geometry["coordinates"] if geometry["type"] == "MultiLineString" else [geometry["coordinates"]]
-        for line in line_lists:
-            xs, ys = warp_transform("EPSG:4326", dem["crs"], [p[0] for p in line], [p[1] for p in line])
-            pieces.append(LineString(zip(xs, ys)))
-
-    return unary_union(pieces) if pieces else None
-
-
 def identify_road_corridor_candidates(
     boundary_coordinates: list[tuple[float, float]],
     dem: Optional[dict] = None,

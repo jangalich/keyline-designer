@@ -348,8 +348,8 @@ report using the Claude API.
   configurable module-level constants, not yet tuned against a real
   property (see Roadmap). This is a self-contained, standalone pass — NOT
   wired into `generate_full_report.py`/`report_generator.py`'s prompt
-  yet; scenario generation and report-narrative wiring are later passes
-  that will consume this score as an input. Same
+  yet; report-narrative wiring is a later pass that will consume this
+  score as an input. Same
   pure-core-logic-vs-network-fetch split as the other candidate-zone
   features (`score_production_areas()` is network-free and unit-tested
   against synthetic terrain — `test_production_suitability.py`).
@@ -370,42 +370,27 @@ report using the Claude API.
   from an environment with real network access and confirm at least one
   real candidate survives with a sensible `soil_carved_acres` before
   treating this as validated — see Roadmap.
-- `scenario_generation.py` — replaces computing water/solar/road/fencing
-  candidates ONCE against the union of every production-zone candidate
-  (which over-excludes: a zone the user won't actually use still blocks
-  candidates from being evaluated on that ground) with N ranked, complete
-  scenarios, each with its own production-zone subset and its own
-  downstream layers computed only against that subset. Reuses every
-  per-layer computation UNCHANGED (`water_candidate_zones.find_candidate_zones()`,
-  `road_corridors.find_candidate_road_corridors()`,
-  `solar_suitability.find_candidate_solar_zones()`,
-  `fencing.identify_fencing()`) — this only changes what exclusion
-  geometry each is invoked with and how results are grouped, not any
-  siting algorithm itself. Four steps: (1) bounded subset enumeration
-  over `production_suitability.py`'s already-scored candidates — every
-  non-empty subset at or below `MAX_ZONES_FOR_FULL_ENUMERATION` (default
-  5), else a ranked top-K-by-score heuristic above it; (2) the existing
-  downstream logic re-run once per subset; (3) a concrete, documented
-  pairwise diversity test (`_is_meaningfully_different()` — top water/
-  solar candidate location shift past a threshold, or available-acreage
-  change clearing both an absolute and a relative bar) that collapses
-  near-identical subsets to one representative; (4) greedy farthest-point
-  selection of the top `DEFAULT_SCENARIO_COUNT` (default 3) most-diverse
-  survivors, each labeled/rationale'd from its own concrete acreage/zone
-  differentiators ("Maximum Production" / "Balanced" / "Minimum
-  Production Footprint"), not a generic naming scheme. Every feature id
-  is prefixed with its own `scenario_id` so ids stay globally unique
-  across scenarios. This is a self-contained, standalone pass — NOT
-  wired into `generate_full_report.py`/`report_generator.py`'s prompt;
-  report-narrative wiring per scenario is a separate, later pass, same
-  "not yet wired in" framing `production_suitability.py` used for
-  itself. Offline unit tests for the pure enumeration/diversity/
-  selection/labeling logic are in `test_scenario_generation.py`; an
-  end-to-end synthetic-DEM check (three disjoint production-zone
-  candidates, confirming a genuine multi-zone combination survives
-  selection and that excluding fewer zones measurably frees more solar/
-  road candidates — the actual bug this pass fixes) is in
-  `test_scenario_generation_pipeline.py`.
+- **`scenario_generation.py` (REMOVED)** — an earlier N-ranked-scenario
+  design (computing water/solar/road/fencing candidates once per
+  production-zone subset instead of once against the union of every
+  candidate) was implemented, offline-tested, and merged, then deleted
+  before ever being wired into `report_generator.py`'s prompt or
+  ground-truthed against a real property: it was abandoned in favor of a
+  different approach, and had never been re-verified against several
+  downstream changes that landed after it (the production slope/road
+  grade threshold changes, the solar/road exclusion-to-preference
+  softening, the hydric-composition-threshold and NHD-clipping fixes).
+  Deleted alongside its two test files
+  (`test_scenario_generation.py`/`test_scenario_generation_pipeline.py`)
+  rather than carrying unverified, unwired code forward — nothing else in
+  the codebase imported from it (confirmed via a full-repo grep
+  immediately before deletion). `road_corridors.py`'s
+  `_fetch_existing_road_union()` was also removed in the same pass — it
+  existed solely as `scenario_generation.py`'s own shared per-report road
+  fetch (unnamed-union shape, as opposed to
+  `_fetch_existing_road_features_utm()`, which
+  `identify_road_corridor_candidates()` itself uses) and had no other
+  caller left once `scenario_generation.py` was gone.
 - `report_generator.py` — combines all of the above and calls the Claude
   API to generate the narrative Scale of Permanence report.
 - `generate_full_report.py` — the full end-to-end pipeline: give it a
