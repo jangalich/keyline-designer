@@ -28,18 +28,43 @@ hardcoded type preference — see find_candidate_road_corridors()):
   see that module for the algorithm itself (untouched here).
 
 Constraint stack (both corridor types, before scoring):
-  - outside identified production zones (production_area.py, buffered)
-  - outside pond/water-system candidate zones (water_candidate_zones.py,
-    buffered wider — routing on the uphill side of a pond/dam, not across
-    its face or catchment inlet)
-  - outside floodplain/hydric ground, sourced from real NHD stream/water-
-    body buffers + SSURGO hydric soil polygons (NOT inferred from DEM
-    elevation alone) — falls back to a buffer around delineated valley
-    lines only if neither NHD nor SSURGO data is reachable, and flags
-    that fallback explicitly in confidence_notes
-  - outside erosion-prone soil per SSURGO's K-factor (see
-    soil_data.is_erosion_prone for the threshold and its caveats)
-  - within a pinned maximum grade (MAX_ROAD_GRADE_PCT)
+  - HARD exclusions (a candidate cannot be generated through these at all):
+      - outside pond/water-system candidate zones (water_candidate_zones.py,
+        buffered wider — routing on the uphill side of a pond/dam, not
+        across its face or catchment inlet)
+      - outside floodplain/hydric ground, sourced from real NHD stream/
+        water-body buffers + SSURGO hydric soil polygons (NOT inferred
+        from DEM elevation alone) — falls back to a buffer around
+        delineated valley lines only if neither NHD nor SSURGO data is
+        reachable, and flags that fallback explicitly in confidence_notes
+      - outside erosion-prone soil per SSURGO's K-factor (see
+        soil_data.is_erosion_prone for the threshold and its caveats)
+      - within a pinned maximum grade (MAX_ROAD_GRADE_PCT)
+  - SOFT preference (scored, not excluded):
+      - production zones (production_area.py) — a road is a thin linear
+        feature, not a large permanent land claim the way a pond/dam
+        site is, so crossing production land is a real, valid routing
+        option (same reasoning as solar_suitability.py's own production-
+        zone-proximity redesign). A candidate that avoids crossing any
+        production zone still scores somewhat higher than an otherwise-
+        comparable one that crosses through one — see
+        PRODUCTION_AVOIDANCE_SCORE_WEIGHT and _production_avoidance_score().
+        This was a hard exclusion in an earlier version of this module;
+        with production_area.py's own slope ceiling now at 20%, one large
+        production zone can cover most of a property's gentle ground,
+        and hard-excluding it left nowhere for a corridor to exist at
+        all (confirmed live: zero corridor candidates with the exclusion,
+        real candidates once it was removed).
+
+Corridor anchoring (connecting the near-boundary end of a generated
+corridor to the property line) prefers a real, mapped existing road when
+one is reachable nearby (farm_roads_data.py) — the connector snaps toward
+the nearest point on that real road's own frontage, and
+properties.anchor_road_name / connection_point_is_arbitrary=False report
+which one. Falls back to an arbitrary nearest-boundary-point anchor
+(connection_point_is_arbitrary=True) only when no real road data is
+available — same fallback pattern solar_suitability.py's own road-
+proximity logic already uses.
 
 find_candidate_road_corridors() is the pure geometric/scoring core — see
 water_candidate_zones.py's and solar_suitability.py's docstrings for why
@@ -131,9 +156,12 @@ MIN_CONTOUR_BAND_CELLS = 6
 RIDGE_MIN_AREA_ACRES = 0.5
 RIDGE_MIN_PRIMARY_AREA_ACRES = 1.0
 
-# Buffer beyond a production zone's own footprint that a corridor must
-# stay clear of -- route around, not through. CONFIGURABLE.
-PRODUCTION_ZONE_EXCLUSION_BUFFER_METERS = 15.0
+# Distance beyond which a corridor sitting entirely clear of every
+# production zone stops gaining extra preference score -- mirrors
+# EXCLUSION_MARGIN_REFERENCE_METERS's role for the (still-hard) pond/
+# floodplain/erosion exclusions, just for this softer preference (see
+# _production_avoidance_score()). CONFIGURABLE.
+PRODUCTION_AVOIDANCE_REFERENCE_METERS = 50.0
 
 # Buffer beyond a pond/water-system candidate zone's own footprint --
 # wider than the production-zone buffer, since this needs to keep a
@@ -153,11 +181,25 @@ MIN_CORRIDOR_LENGTH_METERS = 30.0
 
 # Scoring weights (must sum to 1.0), in the priority order this feature's
 # spec lists: grade consistency first, exclusion-zone avoidance second,
-# length third ("shorter generally preferable, all else equal" -- the
-# lightest weight of the three). CONFIGURABLE.
-GRADE_SCORE_WEIGHT = 0.5
-EXCLUSION_MARGIN_WEIGHT = 0.3
-LENGTH_SCORE_WEIGHT = 0.2
+# length third ("shorter generally preferable, all else equal"), plus
+# PRODUCTION_AVOIDANCE_SCORE_WEIGHT -- production zones are no longer a
+# hard exclusion here (see module docstring), so avoiding one is instead
+# a scored preference. Deliberately the smallest weight -- same reasoning
+# AND the same value (0.15) as solar_suitability.PRODUCTION_PROXIMITY_SCORE_WEIGHT
+# for the analogous preference there: this is a secondary layout
+# consideration on top of a candidate's real buildability (grade/
+# consistency) and its clearance from the still-hard exclusions, not a
+# substitute for either. The original three weights' relative proportions
+# (grade highest, margin second, length lightest) are preserved, just
+# scaled down (multiplied by 0.85) to leave room for this new term.
+# CONFIGURABLE.
+GRADE_SCORE_WEIGHT = 0.42
+EXCLUSION_MARGIN_WEIGHT = 0.26
+LENGTH_SCORE_WEIGHT = 0.17
+PRODUCTION_AVOIDANCE_SCORE_WEIGHT = 0.15
+
+_WEIGHT_SUM = GRADE_SCORE_WEIGHT + EXCLUSION_MARGIN_WEIGHT + LENGTH_SCORE_WEIGHT + PRODUCTION_AVOIDANCE_SCORE_WEIGHT
+assert math.isclose(_WEIGHT_SUM, 1.0, abs_tol=1e-6), f"road corridor scoring weights must sum to 1.0, got {_WEIGHT_SUM}"
 
 # Clearance beyond the mandatory exclusion buffers at which extra margin
 # stops adding more score -- avoids the length/margin score being
@@ -171,12 +213,24 @@ MAX_CANDIDATES = 5
 ROAD_CORRIDOR_CONFIDENCE_NOTES_TEMPLATE = (
     "This is a TOPOGRAPHIC SUGGESTION only, not a surveyed road alignment — "
     "generated from DEM slope/ridge analysis (contour-band or ridge-top), "
-    "not a civil engineering design. The final segment connecting the "
+    "not a civil engineering design. Production zones are NOT excluded here — "
+    "a road is a thin linear feature, not a large permanent land claim the way "
+    "a pond/dam site is, so crossing production land is a real, valid routing "
+    "option; avoiding one is scored as a PREFERENCE only, not a requirement "
+    "(see properties.crosses_production_zone). {production_crossing_note}"
+    "Pond/water-system candidate zones, floodplain/hydric ground, and erosion-"
+    "prone soil ARE still hard-excluded. The final segment connecting the "
     "corridor to the property is a straight-line approximation to {anchor_note}, "
     "and that connecting segment specifically is NOT itself checked against "
     "the grade or exclusion constraints the rest of the corridor is. "
     "{steep_grade_note}{floodplain_note}{erosion_note}Treat this as a starting point for a site "
     "visit and real survey, not a construction-ready alignment."
+)
+
+PRODUCTION_CROSSING_NOTE = (
+    "This specific candidate DOES cross a production zone — that's intentional/expected under this "
+    "model, not a caveat to apologize for; it simply scored lower on the avoidance preference than an "
+    "otherwise-comparable non-crossing candidate would have. "
 )
 
 # Additive caveat (see STEEP_GRADE_ENGINEERING_NOTE_THRESHOLD_PCT above) —
@@ -389,12 +443,22 @@ def _anchor_to_boundary(
     points_xyz: list[tuple[float, float, float]],
     boundary_polygon_utm: Polygon,
     road_union_utm,
-) -> tuple[list[tuple[float, float, float]], bool]:
+    road_features_utm: Optional[list[dict]] = None,
+) -> tuple[list[tuple[float, float, float]], bool, Optional[str], Optional[float]]:
     """Extends whichever end of the corridor is closer to the property
     boundary with one connecting vertex on the boundary line — snapped to
     the point nearest a real mapped road if road_union_utm is available
     (a genuine plausible frontage point), otherwise just the nearest
-    boundary point (arbitrary, flagged via the returned bool)."""
+    boundary point (arbitrary, flagged via the returned bool).
+
+    road_features_utm (optional, each {'name': str, 'line_utm': LineString})
+    is used ONLY to report WHICH real road the anchor snapped toward, when
+    one is available — passing None still anchors correctly via
+    road_union_utm, it just leaves the reported road name generic/absent.
+
+    Returns (extended_points, is_arbitrary, anchor_road_name, anchor_road_distance_m).
+    The last two are None when anchoring is arbitrary (no real road data).
+    """
     boundary_line = boundary_polygon_utm.boundary
     end_a = Point(points_xyz[0][0], points_xyz[0][1])
     end_b = Point(points_xyz[-1][0], points_xyz[-1][1])
@@ -402,10 +466,17 @@ def _anchor_to_boundary(
     anchor_at_start = end_a.distance(boundary_line) <= end_b.distance(boundary_line)
     anchor_end = end_a if anchor_at_start else end_b
 
+    anchor_road_name = None
+    anchor_road_distance_m = None
+
     if road_union_utm is not None:
         nearest_road_point = nearest_points(anchor_end, road_union_utm)[1]
         boundary_anchor_point = nearest_points(nearest_road_point, boundary_line)[1]
         is_arbitrary = False
+        anchor_road_distance_m = float(anchor_end.distance(road_union_utm))
+        if road_features_utm:
+            nearest_feature = min(road_features_utm, key=lambda f: f["line_utm"].distance(anchor_end))
+            anchor_road_name = nearest_feature["name"]
     else:
         boundary_anchor_point = nearest_points(anchor_end, boundary_line)[1]
         is_arbitrary = True
@@ -414,7 +485,7 @@ def _anchor_to_boundary(
     connector = (float(boundary_anchor_point.x), float(boundary_anchor_point.y), connector_elevation)
 
     extended = [connector] + points_xyz if anchor_at_start else points_xyz + [connector]
-    return extended, is_arbitrary
+    return extended, is_arbitrary, anchor_road_name, anchor_road_distance_m
 
 
 def _grade_stats(points_xyz: list[tuple[float, float, float]]) -> tuple[float, float]:
@@ -428,6 +499,26 @@ def _grade_stats(points_xyz: list[tuple[float, float, float]]) -> tuple[float, f
     return float(np.mean(grades)), float(np.std(grades))
 
 
+def _production_avoidance_score(
+    line_utm, raw_production_union, reference_meters: float = PRODUCTION_AVOIDANCE_REFERENCE_METERS
+) -> float:
+    """
+    0-1 PREFERENCE score (NOT an exclusion — see module docstring) for how
+    much a corridor avoids production zones: 1.0 if it doesn't cross or
+    come within reference_meters of any production zone (or none exist on
+    this property at all), 0.0 if it actually crosses/touches one, linear
+    in between. A production-zone-crossing candidate still gets a real,
+    non-zero composite score from its other factors — this only softens
+    its RANKING relative to an otherwise-comparable non-crossing
+    alternative; it never drops or excludes the candidate.
+    """
+    if raw_production_union is None or raw_production_union.is_empty:
+        return 1.0
+    if line_utm.intersects(raw_production_union):
+        return 0.0
+    return min(1.0, line_utm.distance(raw_production_union) / reference_meters)
+
+
 def _corridor_score(
     avg_grade_pct: float,
     grade_stddev_pct: float,
@@ -435,6 +526,7 @@ def _corridor_score(
     length_m: float,
     longest_length_m: float,
     max_grade_pct: float,
+    production_avoidance_score: float,
 ) -> float:
     grade_score = max(0.0, 1.0 - avg_grade_pct / max_grade_pct)
     consistency_score = max(0.0, 1.0 - grade_stddev_pct / max_grade_pct)
@@ -447,6 +539,7 @@ def _corridor_score(
         GRADE_SCORE_WEIGHT * grade_consistency_score
         + EXCLUSION_MARGIN_WEIGHT * margin_score
         + LENGTH_SCORE_WEIGHT * length_score
+        + PRODUCTION_AVOIDANCE_SCORE_WEIGHT * production_avoidance_score
     )
 
 
@@ -458,6 +551,7 @@ def find_candidate_road_corridors(
     hydric_floodplain_union=None,
     erosion_prone_union=None,
     road_union_utm=None,
+    road_features_utm: Optional[list[dict]] = None,
     max_grade_pct: float = MAX_ROAD_GRADE_PCT,
     min_corridor_length_meters: float = MIN_CORRIDOR_LENGTH_METERS,
     max_candidates: int = MAX_CANDIDATES,
@@ -465,17 +559,27 @@ def find_candidate_road_corridors(
     """
     Pure geometric/scoring core — see module docstring for why this takes
     already-computed inputs (production/pond zones, floodplain/erosion
-    exclusion unions, optional real-road union for anchoring) rather than
+    exclusion unions, optional real-road data for anchoring) rather than
     fetching or delineating anything itself.
 
     pond_zones is water_candidate_zones.find_candidate_zones()'s own
-    output shape (each entry carrying 'polygon_utm').
+    output shape (each entry carrying 'polygon_utm'), still HARD-excluded
+    (buffered). production_areas is production_area.py's/
+    production_suitability.py's own patch shape (each entry carrying
+    'polygon_utm') but is NOT a hard exclusion here — see module
+    docstring's "SOFT preference" section and _production_avoidance_score().
     hydric_floodplain_union/erosion_prone_union are shapely
-    geometries (or None to skip that exclusion) already in dem['crs'].
-    road_union_utm is a shapely geometry (or None) of existing real roads,
-    used ONLY for anchoring (see _anchor_to_boundary) — passing None
+    geometries (or None to skip that exclusion) already in dem['crs'],
+    both still HARD-excluded.
+
+    road_union_utm is a shapely geometry (or None) of existing real
+    roads, used for anchoring (see _anchor_to_boundary) — passing None
     doesn't disable anything here, it just makes every candidate's
     boundary connection point arbitrary rather than road-frontage-based.
+    road_features_utm (optional, each {'name': str, 'line_utm': LineString})
+    additionally lets an anchored candidate report WHICH real road it
+    anchored to (properties.anchor_road_name); omitting it still anchors
+    correctly via road_union_utm, it just leaves the road name generic.
 
     boundary_polygon_utm does double duty: it's both the anchoring target
     (_anchor_to_boundary) AND, via _build_exclusion_cell_mask(), the hard
@@ -497,17 +601,22 @@ def find_candidate_road_corridors(
             'avg_grade_pct': float,
             'length_m': float,
             'connection_point_is_arbitrary': bool,
+            'anchor_road_name': Optional[str],       # None if anchor is arbitrary or unnamed
+            'anchor_road_distance_m': Optional[float],  # None if anchor is arbitrary
+            'crosses_production_zone': bool,
             'points_xyz': [(x, y, elevation_m), ...],
             'geometry_wgs84': GeoJSON LineString,
         }
     """
     slope_pct, _aspect_deg = compute_slope_and_aspect(dem["array"], dem["resolution_meters"])
 
-    production_union = (
-        unary_union([p["polygon_utm"].buffer(PRODUCTION_ZONE_EXCLUSION_BUFFER_METERS) for p in production_areas])
-        if production_areas
-        else None
-    )
+    # Production zones are NOT a hard exclusion here (see module
+    # docstring) -- raw_production_union (unbuffered) is kept only for
+    # _production_avoidance_score()'s scoring preference and the
+    # crosses_production_zone report below, never fed into the exclusion
+    # mask that constrains where candidate geometry can be generated from.
+    raw_production_union = unary_union([p["polygon_utm"] for p in production_areas]) if production_areas else None
+
     pond_union = (
         unary_union([z["polygon_utm"].buffer(POND_ZONE_EXCLUSION_BUFFER_METERS) for z in pond_zones])
         if pond_zones
@@ -515,7 +624,7 @@ def find_candidate_road_corridors(
     )
 
     exclusion_pieces = [
-        u for u in (production_union, pond_union, hydric_floodplain_union, erosion_prone_union)
+        u for u in (pond_union, hydric_floodplain_union, erosion_prone_union)
         if u is not None and not u.is_empty
     ]
     combined_exclusion_union = unary_union(exclusion_pieces) if exclusion_pieces else None
@@ -539,7 +648,9 @@ def find_candidate_road_corridors(
 
     scored = []
     for points, corridor_type in raw_candidates:
-        anchored_points, is_arbitrary = _anchor_to_boundary(points, boundary_polygon_utm, road_union_utm)
+        anchored_points, is_arbitrary, anchor_road_name, anchor_road_distance_m = _anchor_to_boundary(
+            points, boundary_polygon_utm, road_union_utm, road_features_utm
+        )
         line = LineString([(p[0], p[1]) for p in anchored_points])
 
         length_m = line.length
@@ -552,6 +663,8 @@ def find_candidate_road_corridors(
             if combined_exclusion_union is not None
             else EXCLUSION_MARGIN_REFERENCE_METERS
         )
+        production_avoidance_score = _production_avoidance_score(line, raw_production_union)
+        crosses_production_zone = raw_production_union is not None and line.intersects(raw_production_union)
 
         scored.append(
             {
@@ -562,7 +675,11 @@ def find_candidate_road_corridors(
                 "avg_grade_pct": avg_grade_pct,
                 "grade_stddev_pct": grade_stddev_pct,
                 "margin_m": margin_m,
+                "production_avoidance_score": production_avoidance_score,
+                "crosses_production_zone": crosses_production_zone,
                 "connection_point_is_arbitrary": is_arbitrary,
+                "anchor_road_name": anchor_road_name,
+                "anchor_road_distance_m": anchor_road_distance_m,
             }
         )
 
@@ -578,6 +695,7 @@ def find_candidate_road_corridors(
             candidate["length_m"],
             longest_length_m,
             max_grade_pct,
+            candidate["production_avoidance_score"],
         )
 
     scored.sort(key=lambda c: -c["suitability_score"])
@@ -595,16 +713,24 @@ def find_candidate_road_corridors(
 
 def _confidence_notes_for_candidate(
     is_arbitrary_anchor: bool,
+    anchor_road_name: Optional[str],
     floodplain_data_is_fallback: bool,
     erosion_data_unavailable: bool,
     avg_grade_pct: float,
+    crosses_production_zone: bool,
 ) -> str:
-    anchor_note = (
-        "an arbitrarily-chosen nearest point on the property boundary "
-        "(no real road-frontage/access data was available to anchor to)"
-        if is_arbitrary_anchor
-        else "the point on the property boundary nearest a real, mapped existing road"
-    )
+    if is_arbitrary_anchor:
+        anchor_note = (
+            "an arbitrarily-chosen nearest point on the property boundary "
+            "(no real road-frontage/access data was available to anchor to)"
+        )
+    elif anchor_road_name:
+        anchor_note = f"the point on the property boundary nearest {anchor_road_name} (a real, mapped existing road)"
+    else:
+        anchor_note = "the point on the property boundary nearest a real, mapped existing road"
+
+    production_crossing_note = PRODUCTION_CROSSING_NOTE if crosses_production_zone else ""
+
     steep_grade_note = (
         STEEP_GRADE_ENGINEERING_NOTE.format(
             avg_grade_pct=round(avg_grade_pct, 1), threshold_pct=STEEP_GRADE_ENGINEERING_NOTE_THRESHOLD_PCT
@@ -626,6 +752,7 @@ def _confidence_notes_for_candidate(
     )
     return ROAD_CORRIDOR_CONFIDENCE_NOTES_TEMPLATE.format(
         anchor_note=anchor_note,
+        production_crossing_note=production_crossing_note,
         steep_grade_note=steep_grade_note,
         floodplain_note=floodplain_note,
         erosion_note=erosion_note,
@@ -643,7 +770,6 @@ def corridors_to_geojson(
     features = []
     for candidate in candidates:
         constraints_satisfied = [
-            "outside_production_zone",
             "outside_pond_zone",
             f"avg_grade<={MAX_ROAD_GRADE_PCT:.0f}pct",
         ]
@@ -654,6 +780,12 @@ def corridors_to_geojson(
         else:
             constraints_satisfied.append("floodplain_excluded_via_elevation_fallback")
 
+        anchor_road_distance_ft = (
+            round(candidate["anchor_road_distance_m"] / METERS_PER_FOOT, 1)
+            if candidate.get("anchor_road_distance_m") is not None
+            else None
+        )
+
         features.append(
             make_feature(
                 feature_id=f"road-corridor-{candidate['corridor_type']}-{candidate['rank']}",
@@ -663,9 +795,11 @@ def corridors_to_geojson(
                 confidence=CONFIDENCE_LOW,
                 confidence_notes=_confidence_notes_for_candidate(
                     candidate["connection_point_is_arbitrary"],
+                    candidate.get("anchor_road_name"),
                     floodplain_data_is_fallback,
                     erosion_data_unavailable,
                     candidate["avg_grade_pct"],
+                    candidate["crosses_production_zone"],
                 ),
                 extra_properties={
                     "rank": candidate["rank"],
@@ -674,6 +808,9 @@ def corridors_to_geojson(
                     "avg_grade_pct": round(candidate["avg_grade_pct"], 1),
                     "length_ft": round(candidate["length_m"] / METERS_PER_FOOT, 1),
                     "connection_point_is_arbitrary": candidate["connection_point_is_arbitrary"],
+                    "anchor_road_name": candidate.get("anchor_road_name"),
+                    "anchor_road_distance_ft": anchor_road_distance_ft,
+                    "crosses_production_zone": candidate["crosses_production_zone"],
                     "constraints_satisfied": constraints_satisfied,
                 },
             )
@@ -781,11 +918,46 @@ def _fetch_erosion_prone_union(boundary_coordinates, dem) -> tuple[Optional[obje
         return None, True
 
 
+def _fetch_existing_road_features_utm(boundary_coordinates, dem) -> Optional[list[dict]]:
+    """Real existing-road geometry WITH names (each {'name': str,
+    'line_utm': LineString}), for anchor-road reporting (see
+    _anchor_to_boundary's road_features_utm param and module docstring's
+    "Corridor anchoring" section) — returns None on any failure or if
+    nothing is nearby, which just leaves the eventual anchor's
+    anchor_road_name generic/absent rather than raising."""
+    try:
+        roads = get_farm_roads_for_boundary(boundary_coordinates)
+    except Exception as e:
+        _log_fetch_failure("Existing road fetch", e)
+        return None
+
+    if not roads:
+        return None
+
+    features = []
+    for road in roads:
+        geometry = road["geometry"]
+        line_lists = geometry["coordinates"] if geometry["type"] == "MultiLineString" else [geometry["coordinates"]]
+        for line in line_lists:
+            xs, ys = warp_transform("EPSG:4326", dem["crs"], [p[0] for p in line], [p[1] for p in line])
+            features.append({"name": road["name"], "line_utm": LineString(zip(xs, ys))})
+
+    return features if features else None
+
+
 def _fetch_existing_road_union(boundary_coordinates, dem):
     """Real existing-road geometry, for anchoring only (see
     _anchor_to_boundary) — returns None on any failure or if nothing is
     nearby, which just makes anchoring fall back to an arbitrary boundary
-    point rather than raising."""
+    point rather than raising.
+
+    UNCHANGED return shape (Optional[shapely geometry], no names) —
+    scenario_generation.py imports and calls this directly for its own
+    shared, per-report road fetch, and expects exactly this plain-union
+    shape. identify_road_corridor_candidates() below no longer calls this
+    (it uses _fetch_existing_road_features_utm() instead, to also get
+    road names for anchor reporting without a second, redundant fetch);
+    this stays as its own function purely for that external caller."""
     try:
         roads = get_farm_roads_for_boundary(boundary_coordinates)
     except Exception as e:
@@ -840,7 +1012,14 @@ def identify_road_corridor_candidates(
         boundary_coordinates, dem, valleys
     )
     erosion_prone_union, erosion_data_unavailable = _fetch_erosion_prone_union(boundary_coordinates, dem)
-    road_union_utm = _fetch_existing_road_union(boundary_coordinates, dem)
+
+    # One fetch (not two): _fetch_existing_road_features_utm() carries
+    # both the per-feature list (for anchor_road_name reporting) and
+    # everything needed to derive the plain union find_candidate_road_corridors()
+    # actually anchors against -- deriving the union locally here avoids
+    # a second, redundant get_farm_roads_for_boundary() call.
+    road_features_utm = _fetch_existing_road_features_utm(boundary_coordinates, dem)
+    road_union_utm = unary_union([f["line_utm"] for f in road_features_utm]) if road_features_utm else None
 
     candidates = find_candidate_road_corridors(
         dem,
@@ -850,6 +1029,7 @@ def identify_road_corridor_candidates(
         hydric_floodplain_union=hydric_floodplain_union,
         erosion_prone_union=erosion_prone_union,
         road_union_utm=road_union_utm,
+        road_features_utm=road_features_utm,
         **corridor_kwargs,
     )
 
@@ -870,10 +1050,16 @@ def summarize_road_corridor_candidates(result: dict) -> str:
     lines = [f"Suggested road corridor candidates: {len(features)}"]
     for feature in features:
         props = feature["properties"]
-        anchor = " [arbitrary boundary anchor]" if props["connection_point_is_arbitrary"] else ""
+        if props["connection_point_is_arbitrary"]:
+            anchor = " [arbitrary boundary anchor]"
+        elif props.get("anchor_road_name"):
+            anchor = f" [anchored to {props['anchor_road_name']}, {props.get('anchor_road_distance_ft')}ft]"
+        else:
+            anchor = " [anchored to a real road]"
+        crossing = " [crosses production zone]" if props.get("crosses_production_zone") else ""
         lines.append(
             f"  - Rank {props['rank']} ({props['corridor_type']}): score {props['suitability_score']}/100, "
-            f"{props['avg_grade_pct']}% avg grade, {props['length_ft']}ft{anchor}"
+            f"{props['avg_grade_pct']}% avg grade, {props['length_ft']}ft{anchor}{crossing}"
         )
     return "\n".join(lines)
 

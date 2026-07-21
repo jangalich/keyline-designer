@@ -17,6 +17,7 @@ from feature_schema import validate_feature_collection
 from road_corridors import (
     MAX_ROAD_GRADE_PCT,
     STEEP_GRADE_ENGINEERING_NOTE_THRESHOLD_PCT,
+    _production_avoidance_score,
     corridors_to_geojson,
     find_candidate_road_corridors,
 )
@@ -48,27 +49,76 @@ def _diagonal_ridge_dem(rows=30, cols=30, cross_slope=0.3, downhill_per_row=0.2,
     return {"array": array, "resolution_meters": RESOLUTION, "origin_x": origin_x, "origin_y": origin_y, "crs": CRS}
 
 
-# --- contour-band generation + production-zone exclusion ---
+# --- contour-band generation on a plain hillside (no production zones at all) ---
 
 dem = _flat_hillside_dem()
 boundary = box(500000, 4500000, 500200, 4500200)
-# a production zone splitting the hillside straight down the middle
-production_areas = [
-    {"id": 0, "representative_elevation_m": 100.0, "polygon_utm": box(500095, 4500000, 500115, 4500200)}
-]
 
-candidates = find_candidate_road_corridors(dem, production_areas, [], boundary, max_candidates=50)
+candidates = find_candidate_road_corridors(dem, [], [], boundary, max_candidates=50)
 assert candidates, "expected at least one contour-band candidate on a uniform hillside"
 assert all(c["corridor_type"] == "contour" for c in candidates), (
     "a uniform hillside with no ridge feature should only produce contour-band candidates"
 )
+print(f"Contour-band generation produces {len(candidates)} candidate(s) on a plain hillside.")
 
-production_exclusion = box(500095, 4500000, 500115, 4500200).buffer(15)  # matches the module's own exclusion buffer
-for candidate in candidates:
-    assert not candidate["line_utm"].intersects(production_exclusion), (
-        "no contour-band candidate should cross the (buffered) production zone"
-    )
-print(f"Contour-band generation produces {len(candidates)} candidate(s), all routing around the production zone.")
+
+# --- production zones are a PREFERENCE, not an exclusion: a candidate MAY cross one ---
+#
+# Two regions with disjoint elevation ranges (so contour-band slicing
+# naturally keeps them as separate candidates, not merged into one band)
+# -- west sits inside a production zone, east doesn't. Both are otherwise
+# identical (same grade, same shape), so any score difference is purely
+# the production-avoidance preference term, not grade/consistency/length.
+crossing_test_array = np.zeros((40, 40), dtype=np.float32)
+for row in range(40):
+    for col in range(40):
+        if col < 20:
+            crossing_test_array[row, col] = 100.0 - row * 0.3  # west: inside the production zone
+        else:
+            crossing_test_array[row, col] = 50.0 - row * 0.3  # east: disjoint elevation range, outside it
+crossing_test_dem = {
+    "array": crossing_test_array, "resolution_meters": RESOLUTION,
+    "origin_x": 500000.0, "origin_y": 4500200.0, "crs": CRS,
+}
+crossing_test_boundary = box(500000, 4500000, 500200, 4500200)
+production_areas = [
+    {"id": 0, "representative_elevation_m": 100.0, "polygon_utm": box(500000, 4500000, 500100, 4500200)}
+]
+
+crossing_test_candidates = find_candidate_road_corridors(
+    crossing_test_dem, production_areas, [], crossing_test_boundary, max_candidates=50
+)
+crossing = [c for c in crossing_test_candidates if c["crosses_production_zone"]]
+noncrossing = [c for c in crossing_test_candidates if not c["crosses_production_zone"]]
+assert crossing, (
+    "expected at least one candidate that actually crosses the production zone -- production must NOT be a "
+    "hard exclusion anymore"
+)
+assert noncrossing, "expected at least one candidate that doesn't cross the production zone, for comparison"
+assert max(c["suitability_score"] for c in noncrossing) > max(c["suitability_score"] for c in crossing), (
+    "all else being comparable (same grade/shape), a non-crossing candidate should score higher than a "
+    "crossing one -- this is the production-avoidance PREFERENCE, not an exclusion"
+)
+print(
+    f"Production zones are a preference, not an exclusion: {len(crossing)} candidate(s) legitimately cross "
+    f"one (max score {max(c['suitability_score'] for c in crossing):.3f}), while comparable non-crossing "
+    f"candidates score higher (max score {max(c['suitability_score'] for c in noncrossing):.3f})."
+)
+
+
+# --- _production_avoidance_score: 1.0 clear of production, 0.0 crossing, linear in between ---
+
+far_line = box(500000, 4500000, 500010, 4500010).exterior
+crossing_line = box(500000, 4500000, 500050, 4500010).exterior  # overlaps the production polygon below
+production_polygon = box(500020, 4500000, 500040, 4500010)
+
+assert _production_avoidance_score(far_line, None) == 1.0, "no production zones at all should score the maximum preference"
+assert _production_avoidance_score(crossing_line, production_polygon) == 0.0, "a crossing line should score zero preference"
+clear_line = box(500100, 4500000, 500110, 4500010).exterior
+mid_score = _production_avoidance_score(clear_line, production_polygon)
+assert 0.0 < mid_score <= 1.0
+print("_production_avoidance_score scores 1.0 when clear/no production zones exist, 0.0 when crossing, and a "
+      "real intermediate value when nearby but clear.")
 
 
 # --- ranking is score-driven, not hardcoded to "always rank left before right" ---
@@ -133,13 +183,53 @@ assert anchored_candidates, "expected candidates for the anchoring check"
 assert all(not c["connection_point_is_arbitrary"] for c in anchored_candidates), (
     "with real road data available, no candidate's connection point should be flagged as arbitrary"
 )
+assert all(c["anchor_road_distance_m"] is not None for c in anchored_candidates), (
+    "with real road data available, anchor_road_distance_m should be a real reported value"
+)
 print("With real road data available, connection points are anchored (not flagged arbitrary).")
 
 no_road_candidates = find_candidate_road_corridors(dem, [], [], boundary, road_union_utm=None, max_candidates=50)
 assert all(c["connection_point_is_arbitrary"] for c in no_road_candidates), (
     "with no road data available, every candidate's connection point should be flagged arbitrary"
 )
+assert all(c["anchor_road_name"] is None and c["anchor_road_distance_m"] is None for c in no_road_candidates), (
+    "with no road data available, anchor_road_name/anchor_road_distance_m should both be None, not fabricated"
+)
 print("With no road data available, every candidate's connection point is correctly flagged as arbitrary.")
+
+
+# --- anchoring prefers real road FRONTAGE (named) when road_features_utm is available ---
+
+named_road_features = [{"name": "N Montour Rd", "line_utm": road_union}]
+named_anchor_candidates = find_candidate_road_corridors(
+    dem, [], [], boundary, road_union_utm=road_union, road_features_utm=named_road_features, max_candidates=50
+)
+assert named_anchor_candidates, "expected candidates for the named-anchor check"
+assert all(c["anchor_road_name"] == "N Montour Rd" for c in named_anchor_candidates), (
+    "with road_features_utm available, every anchored candidate should report the real road's name"
+)
+named_geojson = corridors_to_geojson(named_anchor_candidates)
+for feature in named_geojson["features"]:
+    props = feature["properties"]
+    assert props["anchor_road_name"] == "N Montour Rd"
+    assert props["anchor_road_distance_ft"] is not None
+    assert "N Montour Rd" in props["confidence_notes"], (
+        "confidence_notes should name the specific real road the corridor anchored to"
+    )
+print("With road_features_utm available, anchored candidates report the specific real road's name and "
+      "distance, both in properties and in confidence_notes.")
+
+# Without road_features_utm (only the plain union), anchoring still works but the name is generically omitted.
+unnamed_anchor_candidates = find_candidate_road_corridors(
+    dem, [], [], boundary, road_union_utm=road_union, road_features_utm=None, max_candidates=50
+)
+assert all(not c["connection_point_is_arbitrary"] for c in unnamed_anchor_candidates)
+assert all(c["anchor_road_name"] is None for c in unnamed_anchor_candidates), (
+    "without road_features_utm, anchor_road_name should be None (not fabricated), even though anchoring "
+    "itself still works via road_union_utm alone"
+)
+print("Without road_features_utm, anchoring still works via road_union_utm alone, with anchor_road_name "
+      "correctly omitted rather than fabricated.")
 
 
 # --- grade threshold is actually applied ---
@@ -194,18 +284,29 @@ print(f"Candidates at or below {STEEP_GRADE_ENGINEERING_NOTE_THRESHOLD_PCT}% gra
 
 geojson = corridors_to_geojson(candidates, floodplain_data_is_fallback=True, erosion_data_unavailable=True)
 validate_feature_collection(geojson)
-required_props = {"corridor_type", "avg_grade_pct", "length_ft", "constraints_satisfied"}
+required_props = {
+    "corridor_type", "avg_grade_pct", "length_ft", "connection_point_is_arbitrary",
+    "anchor_road_name", "anchor_road_distance_ft", "crosses_production_zone", "constraints_satisfied",
+}
 for feature in geojson["features"]:
     assert feature["properties"]["layer"] == "suggested_road_corridor"
     assert required_props.issubset(feature["properties"].keys()), (
         f"missing required properties: {required_props - feature['properties'].keys()}"
+    )
+    assert "outside_production_zone" not in feature["properties"]["constraints_satisfied"], (
+        "production zones are no longer a hard exclusion -- this must not appear as a satisfied constraint"
     )
     assert feature["geometry"]["type"] == "LineString"
     notes = feature["properties"]["confidence_notes"].lower()
     assert "topographic suggestion" in notes and "not a surveyed" in notes
     assert "elevation fallback" in notes or "fallback" in notes, "floodplain fallback should be flagged in confidence_notes"
     assert "erosion-prone soil data" in notes, "erosion data unavailability should be flagged in confidence_notes"
-print("corridors_to_geojson output is schema-valid, layer='suggested_road_corridor', with required properties and fallback caveats.")
+    assert "preference" in notes.lower() and "production zone" in notes.lower(), (
+        "confidence_notes must plainly explain the production-zone preference (not exclusion) model"
+    )
+print("corridors_to_geojson output is schema-valid, layer='suggested_road_corridor', with required properties "
+      "(including the new anchor_road_name/crosses_production_zone), no stale 'outside_production_zone' "
+      "constraint, and confidence_notes explaining the preference model.")
 
 
 # --- regression: corridor candidates stay on-parcel, not drawn from the DEM's buffered margin ---

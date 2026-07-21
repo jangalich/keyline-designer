@@ -102,27 +102,22 @@ for feature in features:
 
 # Existing-road data was unreachable in this sandbox -> the farm-roads
 # fetch fails -> road_lines_wgs84 is None -> falls back to the top-ranked
-# SUGGESTED road corridor instead (road_corridors.py, DEM-only). On THIS
-# terrain, road_corridors.py's own (unchanged, out-of-scope-for-this-pass)
-# production-zone exclusion also excludes essentially the whole parcel
-# from corridor generation -- there simply is no corridor to fall back
-# to, so distance_to_road_ft staying None here is correct, real
-# degradation (not a fabricated value), same as the "no road data and no
-# fallback available" path test_solar_road_fallback.py exercises
-# directly with terrain built specifically to produce a real fallback
-# corridor instead.
+# SUGGESTED road corridor instead (road_corridors.py, DEM-only). Production
+# zones are now a scored PREFERENCE for road corridors too (a separate,
+# later pass on top of this one), not a hard exclusion, so a real
+# fallback corridor DOES form here even though this terrain's whole
+# parcel is production land -- distance_to_road_ft should be a real
+# fallback-based value, not None.
 road_distances = {f["properties"]["distance_to_road_ft"] for f in features}
-assert road_distances == {None}, (
-    f"expected every candidate's distance_to_road_ft to be None on this terrain (no real road data, "
-    f"and road_corridors.py's own production-zone exclusion leaves no fallback corridor to use "
-    f"either), got {road_distances}"
+assert None not in road_distances and all(d >= 0 for d in road_distances), (
+    f"expected every candidate's distance_to_road_ft to be a real fallback-based value (production zones "
+    f"no longer hard-exclude road corridor generation), got {road_distances}"
 )
 for feature in features:
     notes = feature["properties"]["confidence_notes"]
-    assert "SUGGESTED road corridor" not in notes, (
-        "confidence_notes should not claim a corridor fallback was used when none was actually available"
+    assert "SUGGESTED road corridor" in notes, (
+        "confidence_notes should flag that a corridor fallback was used for road-proximity scoring"
     )
-print("With no reachable road data AND no fallback corridor available (this terrain's whole parcel is "
-      "production land, which road_corridors.py's own unchanged exclusion logic keeps corridors off of), "
-      "distance_to_road_ft correctly stays None rather than fabricating a value.")
+print(f"With no reachable existing-road data, distance_to_road_ft correctly falls back to a real "
+      f"suggested-corridor-based value (road_distances={sorted(road_distances)}), flagged in confidence_notes.")
 print("\nAll solar suitability pipeline checks passed.")

@@ -159,32 +159,36 @@ if len(zone_id_sets_seen) >= 2:
     )
 print(f"Scenario zone-subset sizes selected: {sorted(sizes_seen)}.")
 
-# --- the core bug fix: fewer claimed production zones frees real acreage
-# for solar/road candidates that a more-inclusive scenario has none of ---
+# --- the core bug fix: production zones no longer starve solar/road
+# candidates out entirely in the scenario claiming the most zones ---
+#
+# Both solar_suitability.py (point-candidate model) and road_corridors.py
+# (production softened to a scored preference, this pass) no longer hard-
+# exclude production zones, so neither layer should go all the way to
+# zero just because a scenario claims more production land than another
+# -- that WAS the original over-exclusion bug (confirmed live: zero
+# candidates for both layers under full production coverage), and it's
+# now fixed at the root in both layers, not just re-tuned. The
+# corresponding assertion here is no longer "fewer zones means strictly
+# more candidates" (that was true only while the bug existed) but "the
+# most-inclusive scenario still gets real road corridor candidates,
+# not zero" -- road corridors are the layer this pass specifically
+# touched; see test_scenario_generation_pipeline.py's solar-specific
+# coverage in test_solar_suitability.py / test_solar_suitability_pipeline.py
+# for that layer's own equivalent regression check.
 
 most_inclusive = max(scenarios, key=lambda s: len(s["production_zones_included"]))
-least_inclusive = min(scenarios, key=lambda s: len(s["production_zones_included"]))
-
-if len(most_inclusive["production_zones_included"]) > len(least_inclusive["production_zones_included"]):
-    most_inclusive_downstream = (
-        len(most_inclusive["feature_collections"]["solar_candidates"]["features"])
-        + len(most_inclusive["feature_collections"]["road_corridors"]["features"])
-    )
-    least_inclusive_downstream = (
-        len(least_inclusive["feature_collections"]["solar_candidates"]["features"])
-        + len(least_inclusive["feature_collections"]["road_corridors"]["features"])
-    )
-    assert least_inclusive_downstream > most_inclusive_downstream, (
-        "expected the scenario claiming fewer production zones to free strictly more solar/road candidates "
-        f"than the most-inclusive one (over-exclusion fix) -- got {least_inclusive_downstream} vs. "
-        f"{most_inclusive_downstream}"
-    )
-    print(
-        f"Confirmed the over-exclusion fix: the least-inclusive scenario "
-        f"({len(least_inclusive['production_zones_included'])} zone(s)) surfaces "
-        f"{least_inclusive_downstream} solar+road candidate(s) vs. the most-inclusive scenario's "
-        f"({len(most_inclusive['production_zones_included'])} zone(s)) {most_inclusive_downstream}."
-    )
+most_inclusive_road_count = len(most_inclusive["feature_collections"]["road_corridors"]["features"])
+assert most_inclusive_road_count > 0, (
+    f"expected the most-inclusive scenario ({len(most_inclusive['production_zones_included'])} zone(s)) to "
+    f"still surface real road corridor candidates, not zero -- production zones are a scored preference "
+    f"for road corridors now, not a hard exclusion that can starve them out entirely"
+)
+print(
+    f"Confirmed the over-exclusion fix holds for road corridors: the most-inclusive scenario "
+    f"({len(most_inclusive['production_zones_included'])} zone(s)) still surfaces "
+    f"{most_inclusive_road_count} road corridor candidate(s), not zero."
+)
 
 # --- self-consistency: each scenario's own SOLAR candidates report their
 # production_zone_relationship correctly against THAT SAME scenario's own

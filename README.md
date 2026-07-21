@@ -138,21 +138,32 @@ report using the Claude API.
   slicing + PCA/binned-median centerline extraction) and RIDGE-TOP
   (reuses `valley_delineation.py`'s own flow-routing algorithm against an
   *inverted* DEM — a ridge in real terrain is a valley in its negation).
-  Excludes production zones (`production_area.py`) and pond/water-system
-  zones (`water_candidate_zones.py`, both already in main, reused not
-  modified) with their own buffers, plus floodplain/hydric ground (real
-  NHD stream/water-body buffers + SSURGO hydric soil — falls back to
-  buffered valley lines, flagged in confidence_notes, only if neither
-  reachable) and erosion-prone soil (SSURGO K-factor). Grade-capped at a
-  pinned, documented `MAX_ROAD_GRADE_PCT` (see the module for the
-  rationale). Anchors each candidate to the property boundary — via a
-  real mapped road's frontage point where one exists, otherwise an
-  explicitly-flagged arbitrary nearest point. Outputs the
-  `suggested_road_corridor` layer. Same pure-core-logic-vs-network-fetch
-  split as the other candidate-zone features
-  (`find_candidate_road_corridors()` is network-free and unit-tested
-  against synthetic terrain — `test_road_corridors.py`, end-to-end wiring
-  in `test_road_corridors_pipeline.py`).
+  HARD-excludes pond/water-system zones (`water_candidate_zones.py`,
+  buffered), floodplain/hydric ground (real NHD stream/water-body buffers
+  + SSURGO hydric soil — falls back to buffered valley lines, flagged in
+  confidence_notes, only if neither reachable), and erosion-prone soil
+  (SSURGO K-factor). Production zones (`production_area.py`) are a scored
+  PREFERENCE, not an exclusion — a road is a thin linear feature, not a
+  large permanent land claim, so a candidate may cross one; a non-crossing
+  candidate scores higher, all else equal (`PRODUCTION_AVOIDANCE_SCORE_WEIGHT`,
+  same reasoning and weight as `solar_suitability.py`'s analogous
+  preference). This was a hard exclusion in an earlier version — with
+  `production_area.py`'s own slope ceiling at 20%, one large production
+  zone can cover most of a property's gentle ground, and hard-excluding it
+  left nowhere for a corridor to exist at all (confirmed live: zero
+  candidates with the exclusion, real candidates once it was softened).
+  Grade-capped at a pinned, documented `MAX_ROAD_GRADE_PCT` (see the
+  module for the rationale). Anchors each candidate to the property
+  boundary — preferring the nearest point on real, mapped road frontage
+  (`farm_roads_data.py`, reporting `anchor_road_name`/
+  `anchor_road_distance_ft`) where one is reachable nearby, otherwise an
+  explicitly-flagged arbitrary nearest boundary point
+  (`connection_point_is_arbitrary`). Outputs the `suggested_road_corridor`
+  layer. Same pure-core-logic-vs-network-fetch split as the other
+  candidate-zone features (`find_candidate_road_corridors()` is
+  network-free and unit-tested against synthetic terrain —
+  `test_road_corridors.py`, end-to-end wiring in
+  `test_road_corridors_pipeline.py`).
 - `solar_suitability.py`'s road-proximity scoring falls back to the
   top-ranked `suggested_road_corridor` when no existing-road data is
   reachable (real road data always wins when available) — see
@@ -423,19 +434,22 @@ tool (built with Leaflet).
   `report_generator.py`'s narrative and use it as an input to future
   scenario-selection logic — both deliberately out of scope for this pass.
 - Ground-truth validation pass for `road_corridors.py` against a real
-  no-existing-road property (the explicit target case for this layer):
-  confirm both contour-band and ridge-top candidates actually show up
-  where terrain supports them, that they route around real production/
-  pond zones and real floodplain/erosion-prone soil rather than the
-  DEM-only fallback, and tune `MAX_ROAD_GRADE_PCT` (see the module for
-  the current rationale/sourcing caveat), `CONTOUR_BAND_WIDTH_METERS`,
-  the ridge `RIDGE_MIN_AREA_ACRES` / `RIDGE_MIN_PRIMARY_AREA_ACRES`
-  thresholds, the exclusion buffers
-  (`PRODUCTION_ZONE_EXCLUSION_BUFFER_METERS`,
-  `POND_ZONE_EXCLUSION_BUFFER_METERS`,
-  `FLOODPLAIN_STREAM_BUFFER_METERS`), `soil_data.DEFAULT_EROSION_KWFACT_THRESHOLD`,
+  property with real existing-road data now reachable (see
+  `farm_roads_data.py`'s layer fix): confirm both contour-band and
+  ridge-top candidates actually show up where terrain supports them, that
+  they route around real pond zones and real floodplain/erosion-prone
+  soil rather than the DEM-only fallback, that a candidate crossing a
+  production zone genuinely scores lower than a comparable non-crossing
+  one (the preference, not exclusion, model), and that anchoring prefers
+  real road frontage over the arbitrary boundary fallback where a road is
+  reachable nearby. Tune `MAX_ROAD_GRADE_PCT` (see the module for the
+  current rationale/sourcing caveat), `CONTOUR_BAND_WIDTH_METERS`, the
+  ridge `RIDGE_MIN_AREA_ACRES` / `RIDGE_MIN_PRIMARY_AREA_ACRES`
+  thresholds, the exclusion buffers (`POND_ZONE_EXCLUSION_BUFFER_METERS`,
+  `FLOODPLAIN_STREAM_BUFFER_METERS`), the production-avoidance preference
+  (`PRODUCTION_AVOIDANCE_REFERENCE_METERS`), `soil_data.DEFAULT_EROSION_KWFACT_THRESHOLD`,
   and the scoring weights (`GRADE_SCORE_WEIGHT` / `EXCLUSION_MARGIN_WEIGHT`
-  / `LENGTH_SCORE_WEIGHT`) accordingly.
+  / `LENGTH_SCORE_WEIGHT` / `PRODUCTION_AVOIDANCE_SCORE_WEIGHT`) accordingly.
 - `road_corridors.py`'s PCA-based centerline extraction (contour-band
   candidates) is a simple, explainable thinning heuristic, not a proper
   skeletonization algorithm — on an oddly-shaped or branching low-slope

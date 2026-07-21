@@ -68,21 +68,24 @@ REASONING SEQUENCE — follow this exact order, do not skip ahead or reorder it:
    analysis (storage volume, dam wall geometry) this pipeline doesn't perform.
 
 4. FARM ROADS (contour or ridge placement). When SUGGESTED ROAD CORRIDOR data is
-   provided below (DEM-derived contour-band and/or ridge-top candidates, already
-   screened against production zones, pond/water-system zones, floodplain/hydric
-   ground, and erosion-prone soil, and ranked by grade consistency, exclusion-zone
-   avoidance, and length), narrate FROM those ranked candidates — name/rank them,
-   compare grade and length where more than one is offered, and say plainly if a
-   candidate's boundary connection point is flagged as arbitrary (no real access-point
-   data) rather than treating it as a confirmed entry. Do not invent a corridor of your
-   own where real candidates are provided. If no candidate data is available for this
-   property (or none cleared the constraint stack), fall back to describing routing
+   provided below (DEM-derived contour-band and/or ridge-top candidates, hard-screened
+   against pond/water-system zones, floodplain/hydric ground, and erosion-prone soil,
+   ranked by grade consistency, a production-zone-avoidance PREFERENCE, and length),
+   narrate FROM those ranked candidates — name/rank them, compare grade and length where
+   more than one is offered, and say plainly if a candidate's boundary connection point
+   is flagged as arbitrary (no real access-point data) or anchored to a real, named
+   mapped road, rather than treating either as unremarkable. Do not invent a corridor of
+   your own where real candidates are provided. If no candidate data is available for
+   this property (or none cleared the constraint stack), fall back to describing routing
    that would follow the ridge or contour lines from step 2 and avoid the water
    infrastructure/catchments from step 3, and say plainly that this is an unverified
    topographic suggestion, not a placement backed by computed candidate geometry.
-   Either way, explicitly check the routing against the production zones from step 2 —
-   a road should not run through one without saying so — and note that no surveyed
-   parcel or easement data feeds this step regardless of which path was used.
+   A candidate MAY cross a production zone from step 2 — properties.crosses_production_zone
+   reports this, and it's a real, valid routing option (a road is a thin linear feature,
+   not a large permanent land claim), not something to flag as a problem; only note it as
+   a genuine tradeoff (interrupted field access/operations) where it's actually material,
+   not as a blanket caveat on every crossing candidate. Note that no surveyed parcel or
+   easement data feeds this step regardless of which path was used.
 
 5. TREES (windbreaks, riparian buffers). Use Climate's prevailing wind (step 1) for
    windbreak orientation and Water Supply's stream/pond locations (step 3) for riparian
@@ -327,20 +330,24 @@ def _format_road_corridor_summary(zones_geojson: Optional[dict]) -> str:
     lines = [f"{len(zones_geojson['features'])} ranked candidate corridor(s) identified:"]
     for feature in zones_geojson["features"]:
         props = feature["properties"]
-        anchor_note = (
-            "boundary connection point is ARBITRARY (no real access-point data)"
-            if props.get("connection_point_is_arbitrary")
-            else "anchored near a real mapped road"
-        )
+        if props.get("connection_point_is_arbitrary"):
+            anchor_note = "boundary connection point is ARBITRARY (no real access-point data)"
+        elif props.get("anchor_road_name"):
+            anchor_note = f"anchored to {props['anchor_road_name']} ({props.get('anchor_road_distance_ft')}ft)"
+        else:
+            anchor_note = "anchored near a real mapped road"
+        crossing_note = " [crosses a production zone]" if props.get("crosses_production_zone") else ""
         lines.append(
             f"  - Rank {props['rank']} ({props['corridor_type']}, score {props['suitability_score']}/100): "
-            f"{props['avg_grade_pct']}% avg grade, {props['length_ft']}ft long, {anchor_note}"
+            f"{props['avg_grade_pct']}% avg grade, {props['length_ft']}ft long, {anchor_note}{crossing_note}"
         )
     lines.append(
         "\nThese are ranked CANDIDATE CORRIDORS (contour-band and/or ridge-top, no default "
         "preference between the two types), not a single forced routing — narrate from this "
         "geometry rather than inventing a corridor, compare candidates where more than one is "
-        "offered, and say plainly wherever a connection point is flagged arbitrary."
+        "offered, say plainly wherever a connection point is flagged arbitrary (vs. anchored to a "
+        "named real road), and treat a production-zone crossing as a real, valid routing option "
+        "(not a caveat) unless it's a genuine material tradeoff worth naming."
     )
     return "\n".join(lines)
 
