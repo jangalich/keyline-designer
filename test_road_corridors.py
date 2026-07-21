@@ -17,6 +17,7 @@ from feature_schema import validate_feature_collection
 from road_corridors import (
     MAX_ROAD_GRADE_PCT,
     STEEP_GRADE_ENGINEERING_NOTE_THRESHOLD_PCT,
+    _erosion_avoidance_score,
     _production_avoidance_score,
     corridors_to_geojson,
     find_candidate_road_corridors,
@@ -118,6 +119,64 @@ clear_line = box(500100, 4500000, 500110, 4500010).exterior
 mid_score = _production_avoidance_score(clear_line, production_polygon)
 assert 0.0 < mid_score <= 1.0
 print("_production_avoidance_score scores 1.0 when clear/no production zones exist, 0.0 when crossing, and a "
+      "real intermediate value when nearby but clear.")
+
+
+# --- erosion-prone soil is a PREFERENCE too, not an exclusion: a candidate MAY cross it ---
+#
+# Same disjoint-elevation-range trick as the production-zone check above,
+# so contour-band slicing keeps the two halves as separate candidates:
+# west sits inside erosion-prone soil, east doesn't.
+erosion_test_array = np.zeros((40, 40), dtype=np.float32)
+for row in range(40):
+    for col in range(40):
+        if col < 20:
+            erosion_test_array[row, col] = 100.0 - row * 0.3  # west: inside erosion-prone soil
+        else:
+            erosion_test_array[row, col] = 50.0 - row * 0.3  # east: disjoint elevation range, outside it
+erosion_test_dem = {
+    "array": erosion_test_array, "resolution_meters": RESOLUTION,
+    "origin_x": 500000.0, "origin_y": 4500200.0, "crs": CRS,
+}
+erosion_test_boundary = box(500000, 4500000, 500200, 4500200)
+erosion_prone_union = box(500000, 4500000, 500100, 4500200)
+
+erosion_test_candidates = find_candidate_road_corridors(
+    erosion_test_dem, [], [], erosion_test_boundary, erosion_prone_union=erosion_prone_union, max_candidates=50
+)
+erosion_crossing = [c for c in erosion_test_candidates if c["crosses_erosion_prone_soil"]]
+erosion_noncrossing = [c for c in erosion_test_candidates if not c["crosses_erosion_prone_soil"]]
+assert erosion_crossing, (
+    "expected at least one candidate that actually crosses the erosion-prone soil -- it must NOT be a hard "
+    "exclusion anymore"
+)
+assert erosion_noncrossing, "expected at least one candidate clear of the erosion-prone soil, for comparison"
+assert max(c["suitability_score"] for c in erosion_noncrossing) > max(c["suitability_score"] for c in erosion_crossing), (
+    "all else being comparable (same grade/shape), a candidate clear of erosion-prone soil should score higher "
+    "than a crossing one -- this is the erosion-avoidance PREFERENCE, not an exclusion"
+)
+print(
+    f"Erosion-prone soil is a preference, not an exclusion: {len(erosion_crossing)} candidate(s) legitimately "
+    f"cross it (max score {max(c['suitability_score'] for c in erosion_crossing):.3f}), while comparable "
+    f"clear candidates score higher (max score {max(c['suitability_score'] for c in erosion_noncrossing):.3f})."
+)
+
+erosion_geojson = corridors_to_geojson(erosion_crossing[:1])
+assert erosion_geojson["features"][0]["properties"]["crosses_erosion_prone_soil"] is True
+assert "real drainage/erosion-control engineering" in erosion_geojson["features"][0]["properties"]["confidence_notes"], (
+    "a candidate crossing erosion-prone soil must carry the drainage/erosion-control engineering-consideration note"
+)
+print("crosses_erosion_prone_soil is correctly reported, with the drainage/erosion-control engineering note "
+      "present for a crossing candidate.")
+
+
+# --- _erosion_avoidance_score: 1.0 clear of erosion-prone soil, 0.0 crossing, linear in between ---
+
+assert _erosion_avoidance_score(far_line, None) == 1.0, "no erosion-prone soil at all should score the maximum preference"
+assert _erosion_avoidance_score(crossing_line, production_polygon) == 0.0, "a crossing line should score zero preference"
+erosion_mid_score = _erosion_avoidance_score(clear_line, production_polygon)
+assert 0.0 < erosion_mid_score <= 1.0
+print("_erosion_avoidance_score scores 1.0 when clear/no erosion-prone soil exists, 0.0 when crossing, and a "
       "real intermediate value when nearby but clear.")
 
 
@@ -286,7 +345,8 @@ geojson = corridors_to_geojson(candidates, floodplain_data_is_fallback=True, ero
 validate_feature_collection(geojson)
 required_props = {
     "corridor_type", "avg_grade_pct", "length_ft", "connection_point_is_arbitrary",
-    "anchor_road_name", "anchor_road_distance_ft", "crosses_production_zone", "constraints_satisfied",
+    "anchor_road_name", "anchor_road_distance_ft", "crosses_production_zone",
+    "crosses_erosion_prone_soil", "constraints_satisfied",
 }
 for feature in geojson["features"]:
     assert feature["properties"]["layer"] == "suggested_road_corridor"
@@ -296,6 +356,9 @@ for feature in geojson["features"]:
     assert "outside_production_zone" not in feature["properties"]["constraints_satisfied"], (
         "production zones are no longer a hard exclusion -- this must not appear as a satisfied constraint"
     )
+    assert "erosion_prone_soil_excluded" not in feature["properties"]["constraints_satisfied"], (
+        "erosion-prone soil is no longer a hard exclusion -- this must not appear as a satisfied constraint"
+    )
     assert feature["geometry"]["type"] == "LineString"
     notes = feature["properties"]["confidence_notes"].lower()
     assert "topographic suggestion" in notes and "not a surveyed" in notes
@@ -304,9 +367,12 @@ for feature in geojson["features"]:
     assert "preference" in notes.lower() and "production zone" in notes.lower(), (
         "confidence_notes must plainly explain the production-zone preference (not exclusion) model"
     )
+    assert "erosion-prone soil" in notes and "preference" in notes, (
+        "confidence_notes must plainly explain the erosion-prone-soil preference (not exclusion) model too"
+    )
 print("corridors_to_geojson output is schema-valid, layer='suggested_road_corridor', with required properties "
-      "(including the new anchor_road_name/crosses_production_zone), no stale 'outside_production_zone' "
-      "constraint, and confidence_notes explaining the preference model.")
+      "(including the new crosses_erosion_prone_soil), no stale 'outside_production_zone'/"
+      "'erosion_prone_soil_excluded' constraints, and confidence_notes explaining both preference models.")
 
 
 # --- regression: corridor candidates stay on-parcel, not drawn from the DEM's buffered margin ---

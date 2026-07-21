@@ -127,8 +127,8 @@ report using the Claude API.
   end-to-end wiring in `test_solar_suitability_pipeline.py`).
 - `soil_data.py` additionally has `get_erosion_factor_for_polygon()` and
   `is_erosion_prone()` (SSURGO K-factor, `kwfact`) and `is_hydric()`
-  (SSURGO `hydricrating`) — the erosion-prone-soil and hydric/floodplain
-  exclusion signals `road_corridors.py` uses
+  (SSURGO `hydricrating`) — the erosion-prone-soil (scored preference) and
+  hydric/floodplain (hard exclusion) signals `road_corridors.py` uses
   (`test_erosion_hydric_soil.py`).
 - `road_corridors.py` — computes suggested road corridor geometry from
   the DEM, replacing having Claude infer a plausible-sounding corridor in
@@ -139,19 +139,25 @@ report using the Claude API.
   (reuses `valley_delineation.py`'s own flow-routing algorithm against an
   *inverted* DEM — a ridge in real terrain is a valley in its negation).
   HARD-excludes pond/water-system zones (`water_candidate_zones.py`,
-  buffered), floodplain/hydric ground (real NHD stream/water-body buffers
-  + SSURGO hydric soil — falls back to buffered valley lines, flagged in
-  confidence_notes, only if neither reachable), and erosion-prone soil
-  (SSURGO K-factor). Production zones (`production_area.py`) are a scored
-  PREFERENCE, not an exclusion — a road is a thin linear feature, not a
-  large permanent land claim, so a candidate may cross one; a non-crossing
-  candidate scores higher, all else equal (`PRODUCTION_AVOIDANCE_SCORE_WEIGHT`,
-  same reasoning and weight as `solar_suitability.py`'s analogous
-  preference). This was a hard exclusion in an earlier version — with
-  `production_area.py`'s own slope ceiling at 20%, one large production
-  zone can cover most of a property's gentle ground, and hard-excluding it
+  buffered) and floodplain/hydric ground (real NHD stream/water-body
+  buffers + SSURGO hydric soil — falls back to buffered valley lines,
+  flagged in confidence_notes, only if neither reachable). Production
+  zones (`production_area.py`) AND erosion-prone soil (SSURGO K-factor)
+  are both scored PREFERENCES, not exclusions — a road is a thin linear
+  feature, not a large permanent land claim, so a candidate may cross
+  either; a non-crossing candidate scores higher, all else equal
+  (`PRODUCTION_AVOIDANCE_SCORE_WEIGHT` / `EROSION_AVOIDANCE_SCORE_WEIGHT`,
+  same reasoning as `solar_suitability.py`'s analogous production
+  preference; erosion's weight is smaller — a mitigatable engineering
+  concern, not a committed alternate land use). Both were hard exclusions
+  in earlier versions — with `production_area.py`'s own slope ceiling at
+  20%, one large production zone can cover most of a property's gentle
+  ground, and 6 of this property's 7 real soil units clear
+  `soil_data.DEFAULT_EROSION_KWFACT_THRESHOLD` — hard-excluding either
   left nowhere for a corridor to exist at all (confirmed live: zero
-  candidates with the exclusion, real candidates once it was softened).
+  candidates with the production exclusion, then zero again with the
+  erosion exclusion even after production was softened; real candidates
+  once both were softened — see the bullet below).
   Grade-capped at a pinned, documented `MAX_ROAD_GRADE_PCT` (see the
   module for the rationale). Anchors each candidate to the property
   boundary — preferring the nearest point on real, mapped road frontage
@@ -217,13 +223,52 @@ report using the Claude API.
   per-component flags roll up to a whole-mukey decision. Regression-tested
   offline against the real mukeys/percentages from the live bug report in
   both `test_floodplain_union_scope.py` and `test_production_suitability.py`.
-  **Outstanding**: the NHD stream piece separately showed some spillover
-  across N Montour Rd onto the far side of Montour Run, outside the parcel,
-  per a plotted-GeoJSON visual check — flagged as secondary to the
-  whole-mukey bug above and not yet re-checked against live data now that
-  this fix has landed (this sandbox's network policy blocks live
-  verification of any of this — see the outstanding item under
-  `road_corridors.py`'s ground-truth validation section below).
+  The NHD stream piece separately showed some spillover across N Montour
+  Rd onto the far side of Montour Run, outside the parcel, per a
+  plotted-GeoJSON visual check — see the THIRD bug/fix below for that.
+- **A third bug**, found live after fixing the two above: even with the
+  whole-mukey hydric fix in place, erosion-prone soil was STILL a hard
+  exclusion — and confirmed live, 6 of this property's 7 real soil units
+  (K-factor 0.32-0.37) clear `DEFAULT_EROSION_KWFACT_THRESHOLD`, so that
+  exclusion alone covered 99.5% of the parcel (13.17 of 13.23 acres) and
+  was, by itself, enough to keep zeroing out every road corridor candidate.
+  There's no real, citable "K-factor >= X means physically unsafe to build
+  a road" threshold the way there is for a water zone — K-factor measures
+  water-erosion susceptibility, a mitigatable engineering concern
+  (drainage, surfacing, ground cover), not a genuine physical
+  impossibility. Fixed the same way production-zone crossing was already
+  softened: erosion-prone soil is now a scored PREFERENCE
+  (`_erosion_avoidance_score()`, `EROSION_AVOIDANCE_SCORE_WEIGHT` — see
+  the `road_corridors.py` bullet above), with a new
+  `crosses_erosion_prone_soil` property and a confidence_notes caveat
+  (real drainage/erosion-control engineering — surfacing, culverts,
+  grading — would be needed) when a candidate crosses it, mirroring
+  `crosses_production_zone`'s existing treatment.
+- **A fourth bug**, the N Montour Rd/Montour Run spillover flagged above:
+  even after the fetch-context clip (`FLOODPLAIN_FETCH_CONTEXT_BUFFER_METERS`)
+  bounded each raw NHD feature before buffering, nothing bounded the
+  result AFTER buffering — the buffer stroke itself (and however much
+  stream length survived the looser fetch-context clip) could still
+  produce a final exclusion piece extending well past any distance
+  actually relevant to the parcel. Confirmed live and visually (plotted
+  GeoJSON): an 11.2-acre union of which only 0.077 acres (0.6% of the
+  parcel) actually overlapped it — a long buffered band along Montour Run,
+  entirely on the far side of N Montour Rd from the field. Fixed by
+  intersecting each buffered NHD stream/water-body piece against
+  `boundary_polygon_utm.buffer(FLOODPLAIN_FINAL_RELEVANCE_BUFFER_METERS)`
+  (75m — meaningfully smaller than the 200m fetch-context buffer, but
+  meaningfully larger than the 30m stream buffer alone, so genuine
+  near-parcel floodplain risk on a differently-shaped property isn't
+  clipped away) before adding it to the union. Scoped to the NHD piece
+  only — the SSURGO hydric piece is already bounded to the parcel via
+  `STIntersection` (a strict subset of any buffer around it), so this
+  clip is a no-op there and was left untouched, along with the
+  whole-mukey hydric threshold fix above.
+  Both the erosion-preference and NHD-final-clip fixes are regression-
+  tested offline (`test_road_corridors.py`'s new erosion-preference
+  section; `test_floodplain_union_scope.py`'s new "bug 3" section, which
+  mocks a distant stream mirroring the real Montour Run finding and a near
+  one to confirm genuine near-parcel floodplain risk survives the clip).
 - `solar_suitability.py`'s road-proximity scoring falls back to the
   top-ranked `suggested_road_corridor` when no existing-road data is
   reachable (real road data always wins when available) — see
@@ -507,41 +552,51 @@ tool (built with Leaflet).
   property with real existing-road data now reachable (see
   `farm_roads_data.py`'s layer fix): confirm both contour-band and
   ridge-top candidates actually show up where terrain supports them, that
-  they route around real pond zones and real floodplain/erosion-prone
-  soil rather than the DEM-only fallback, that a candidate crossing a
-  production zone genuinely scores lower than a comparable non-crossing
-  one (the preference, not exclusion, model), and that anchoring prefers
-  real road frontage over the arbitrary boundary fallback where a road is
-  reachable nearby. **Specifically re-confirm BOTH floodplain/hydric union
-  fixes above against live data** — the NHD-clipping fix AND the
-  whole-mukey hydric threshold fix (`MIN_HYDRIC_COMPONENT_PCT_TO_EXCLUDE`)
-  — report the actual `hydric_floodplain_union` / `erosion_prone_union`
-  area in acres compared to the real parcel's own acreage (the
-  size-comparison test that caught both bugs: 33.9 acres, then 18.77 acres
-  after the first fix, on a 13.23-acre parcel), which mukeys are now
-  included/excluded from the exclusion set and their summed hydric
-  composition percentage, and the resulting candidate count/types/grades/
-  scores/`crosses_production_zone`/anchor info from
-  `identify_road_corridor_candidates()` with both exclusions active. Also
-  re-check whether the NHD stream piece's spillover across N Montour Rd
-  onto the far side of Montour Run (flagged secondary to the whole-mukey
-  bug, visually confirmed via a plotted-GeoJSON check, not yet re-examined
-  since) is still meaningfully present now that the dominant over-exclusion
-  issue is fixed. This session's sandbox could only verify both fixes
-  offline/synthetically (a mocked 10km+ unclipped stream feature clipped
-  back down to a bounded, sane union; and the real property's own reported
-  mukeys/percentages — Atkins 85%, Guernsey-Vandergrift 1%,
-  Ernest-Vandergrift 5%+3%=8% — mocked to confirm only the genuinely
-  dominant one disqualifies), never against the real property, due to the
-  same blocked `hydro.nationalmap.gov`/`sdmdataaccess.sc.egov.usda.gov`
-  egress noted throughout this file. Tune `MAX_ROAD_GRADE_PCT` (see the module for the
+  they route around real pond zones and real floodplain/hydric ground
+  (the only two HARD exclusions left) rather than the DEM-only fallback,
+  that a candidate crossing a production zone OR erosion-prone soil
+  genuinely scores lower than a comparable non-crossing one (both are now
+  the preference, not exclusion, model), and that anchoring prefers real
+  road frontage over the arbitrary boundary fallback where a road is
+  reachable nearby. **Specifically re-confirm ALL FOUR floodplain/erosion
+  fixes above against live data**: the NHD-clipping fix, the whole-mukey
+  hydric threshold fix (`MIN_HYDRIC_COMPONENT_PCT_TO_EXCLUDE`), the
+  erosion-prone-soil hard-exclusion-to-preference fix
+  (`EROSION_AVOIDANCE_SCORE_WEIGHT`/`crosses_erosion_prone_soil`), and the
+  NHD final-relevance clip (`FLOODPLAIN_FINAL_RELEVANCE_BUFFER_METERS`) —
+  report the actual `hydric_floodplain_union` area in acres compared to
+  the real parcel's own acreage (the size-comparison/plotted-GeoJSON
+  approach that caught all of these: 33.9 acres, then 18.77 acres after
+  the NHD-clip fix, on a 13.23-acre parcel; separately, an 11.2-acre union
+  of which only 0.077 acres actually overlapped the parcel, before the
+  final-relevance clip), which mukeys are now included/excluded from the
+  hydric exclusion set and their summed hydric composition percentage,
+  and whether the corrected union visually looks like a plausible
+  near-parcel floodplain exclusion rather than a band reaching across N
+  Montour Rd to the far side of Montour Run. Also report the resulting
+  candidate count/types/grades/scores/`crosses_production_zone`/
+  `crosses_erosion_prone_soil`/anchor info from
+  `identify_road_corridor_candidates()` — confirm real candidates exist
+  again (previously confirmed possible: 5 candidates once all three
+  exclusions — production, floodplain/hydric, erosion — were set aside).
+  This session's sandbox could only verify all four fixes offline/
+  synthetically (mocked unclipped/distant/near stream features; the real
+  property's own reported mukeys/percentages — Atkins 85%,
+  Guernsey-Vandergrift 1%, Ernest-Vandergrift 5%+3%=8% — mocked to confirm
+  only the genuinely dominant one disqualifies; synthetic erosion-prone-
+  soil crossing/non-crossing candidates to confirm the preference, not
+  exclusion, scoring), never against the real property, due to the same
+  blocked `hydro.nationalmap.gov`/`sdmdataaccess.sc.egov.usda.gov` egress
+  noted throughout this file. Tune `MAX_ROAD_GRADE_PCT` (see the module for the
   current rationale/sourcing caveat), `CONTOUR_BAND_WIDTH_METERS`, the
   ridge `RIDGE_MIN_AREA_ACRES` / `RIDGE_MIN_PRIMARY_AREA_ACRES`
   thresholds, the exclusion buffers (`POND_ZONE_EXCLUSION_BUFFER_METERS`,
-  `FLOODPLAIN_STREAM_BUFFER_METERS`), the production-avoidance preference
-  (`PRODUCTION_AVOIDANCE_REFERENCE_METERS`), `soil_data.DEFAULT_EROSION_KWFACT_THRESHOLD`,
+  `FLOODPLAIN_STREAM_BUFFER_METERS`, `FLOODPLAIN_FINAL_RELEVANCE_BUFFER_METERS`),
+  the avoidance preferences (`PRODUCTION_AVOIDANCE_REFERENCE_METERS`,
+  `EROSION_AVOIDANCE_REFERENCE_METERS`), `soil_data.DEFAULT_EROSION_KWFACT_THRESHOLD`,
   and the scoring weights (`GRADE_SCORE_WEIGHT` / `EXCLUSION_MARGIN_WEIGHT`
-  / `LENGTH_SCORE_WEIGHT` / `PRODUCTION_AVOIDANCE_SCORE_WEIGHT`) accordingly.
+  / `LENGTH_SCORE_WEIGHT` / `PRODUCTION_AVOIDANCE_SCORE_WEIGHT` /
+  `EROSION_AVOIDANCE_SCORE_WEIGHT`) accordingly.
 - `road_corridors.py`'s PCA-based centerline extraction (contour-band
   candidates) is a simple, explainable thinning heuristic, not a proper
   skeletonization algorithm — on an oddly-shaped or branching low-slope

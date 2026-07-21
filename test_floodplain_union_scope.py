@@ -47,6 +47,24 @@ live repro (Atkins 85% hydric; Guernsey-Vandergrift 1% hydric;
 Ernest-Vandergrift 5%+3%=8% hydric) and confirms only the genuinely,
 dominantly hydric Atkins polygon is pulled into the union.
 
+Bug 3 (missing post-buffer bound, found after bugs 1 and 2 were both
+fixed): bug 1's fix clips each fetched NHD feature's RAW geometry to a
+context region around the parcel BEFORE buffering it by
+FLOODPLAIN_STREAM_BUFFER_METERS -- but nothing bounded the result AFTER
+buffering, so the buffer stroke (and however much stream length survived
+the looser fetch-context clip) could still produce a final exclusion
+piece extending well past any distance actually relevant to the parcel.
+Confirmed live and visually (plotted GeoJSON): an 11.2-acre union of which
+only 0.077 acres (0.6%) actually overlapped the real parcel -- a long
+buffered band along Montour Run, entirely on the far side of N Montour Rd
+from the field. Fixed by intersecting the final unioned/buffered result
+against boundary_polygon_utm.buffer(FLOODPLAIN_FINAL_RELEVANCE_BUFFER_METERS)
+(75m -- meaningfully smaller than the 200m fetch-context buffer, but
+meaningfully larger than the 30m stream buffer alone, so genuine near-
+parcel floodplain risk on a differently-shaped property isn't clipped
+away just because its own buffer stroke doesn't quite reach the
+boundary).
+
 Also directly documents (and would catch a regression of) the secondary
 finding from the bug 1 report: _fetch_erosion_prone_union() looked
 suspicious by the same size-comparison test (13.17 acres on the same
@@ -230,6 +248,79 @@ assert not trace_union.intersects(ernest_geom), (
 print("_fetch_floodplain_hydric_union() excludes only the genuinely, dominantly hydric Atkins mukey "
       "(85%) -- the two large, mostly well-drained mukeys with only trace hydric inclusions (1%, "
       "5%+3%=8%) are correctly left out of the exclusion union.")
+
+
+# --- bug 3: nothing bounded the final buffered union to a region actually near the parcel ---
+#
+# Two synthetic streams, both fully inside FLOODPLAIN_FETCH_CONTEXT_BUFFER_METERS
+# (200m) so bug 1's fix doesn't clip either one away at fetch time:
+#   - a DISTANT one, offset well beyond FLOODPLAIN_FINAL_RELEVANCE_BUFFER_METERS
+#     (75m) from the parcel -- mirrors the real Montour Run/N Montour Rd
+#     finding (real, mapped, but too far from the field to matter) -- must
+#     be fully excluded from the final union by the new post-buffer clip.
+#   - a NEAR one, close enough that its buffer stroke reaches the parcel --
+#     genuine near-parcel floodplain risk -- must NOT be clipped away.
+DISTANT_OFFSET_M = rc.FLOODPLAIN_FINAL_RELEVANCE_BUFFER_METERS + 50.0  # well past the final-relevance bound
+NEAR_OFFSET_M = 10.0  # well within it
+
+parcel_north_edge_y = boundary_polygon_utm.bounds[3]
+
+DISTANT_STREAM_GEOMETRY = {
+    "type": "LineString",
+    "coordinates": [
+        [center_x - 3000, parcel_north_edge_y + DISTANT_OFFSET_M, 0],
+        [center_x + 3000, parcel_north_edge_y + DISTANT_OFFSET_M, 0],
+    ],
+}
+NEAR_STREAM_GEOMETRY = {
+    "type": "LineString",
+    "coordinates": [
+        [center_x - 100, parcel_north_edge_y + NEAR_OFFSET_M, 0],
+        [center_x + 100, parcel_north_edge_y + NEAR_OFFSET_M, 0],
+    ],
+}
+
+
+def fake_two_streams(boundary_coordinates):
+    return {
+        "streams": [
+            {"geometry": DISTANT_STREAM_GEOMETRY, "name": "Distant Regional Creek (far side of a road)"},
+            {"geometry": NEAR_STREAM_GEOMETRY, "name": "Near Stream (genuine floodplain risk)"},
+        ],
+        "water_bodies": [],
+    }
+
+
+with patch.object(rc, "get_water_features_for_boundary", fake_two_streams), \
+     patch.object(rc, "transform_geom", fake_transform_geom), \
+     patch.object(rc, "get_soil_data_for_polygon", fake_get_soil_data_for_polygon):
+    bug3_union, bug3_is_fallback = rc._fetch_floodplain_hydric_union(
+        BOUNDARY, DEM, valleys=[], boundary_polygon_utm=boundary_polygon_utm
+    )
+
+assert bug3_union is not None and not bug3_is_fallback
+
+# The distant stream's buffered corridor must be fully clipped away --
+# nowhere in the final union should reach out to it.
+distant_stream_buffered = shape(DISTANT_STREAM_GEOMETRY).buffer(rc.FLOODPLAIN_STREAM_BUFFER_METERS)
+assert not bug3_union.intersects(distant_stream_buffered), (
+    "the distant stream (beyond FLOODPLAIN_FINAL_RELEVANCE_BUFFER_METERS from the parcel) must be fully "
+    "excluded from the final union -- this is exactly the live Montour Run/N Montour Rd finding "
+    "(an 11.2-acre union of which only 0.077 acres actually overlapped the real parcel)"
+)
+
+# The near stream's buffered corridor (genuine near-parcel floodplain risk)
+# must survive -- specifically, it must still overlap the parcel itself,
+# since it was placed close enough that its 30m buffer reaches the boundary.
+assert bug3_union.intersects(boundary_polygon_utm), (
+    "the near stream's buffered corridor was placed close enough to genuinely reach the parcel -- it must "
+    "NOT be clipped away by the final-relevance bound (that bound must catch distant geometry without "
+    "removing real near-parcel floodplain risk)"
+)
+bug3_union_acres = bug3_union.area / SQUARE_METERS_PER_ACRE
+print(f"Post-buffer relevance clip: final union is {bug3_union_acres:.2f} acres, correctly excludes the "
+      f"distant stream (>{rc.FLOODPLAIN_FINAL_RELEVANCE_BUFFER_METERS:.0f}m away, mirroring the real Montour "
+      f"Run/N Montour Rd spillover) while keeping the near stream's genuine on-parcel-adjacent floodplain risk.")
 
 
 # --- secondary check: _fetch_erosion_prone_union() is NOT subject to the same bug ---
