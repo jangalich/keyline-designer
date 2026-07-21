@@ -164,6 +164,33 @@ report using the Claude API.
   network-free and unit-tested against synthetic terrain —
   `test_road_corridors.py`, end-to-end wiring in
   `test_road_corridors_pipeline.py`).
+  `_fetch_floodplain_hydric_union()`'s NHD stream/water-body piece had a
+  bug of the same root-cause CATEGORY as the original
+  `soil_data.get_soil_geometries_for_polygon()` bug below: `query`
+  operation returns each matching feature's FULL, un-clipped geometry for
+  anything merely intersecting the query bounding box, so a long stream or
+  large waterbody just touching that box could come back with geometry
+  extending far past the property — buffered and unioned into the
+  floodplain exclusion mask wholesale. Confirmed live: a 33.9-acre
+  floodplain/hydric union on a 13.23-acre parcel, large enough alone to
+  zero out every corridor candidate. Fixed by clipping each fetched NHD
+  feature to a generous context region around the parcel
+  (`FLOODPLAIN_FETCH_CONTEXT_BUFFER_METERS`, comfortably larger than both
+  `dem_data.py`'s own DEM fetch buffer and `FLOODPLAIN_STREAM_BUFFER_METERS`
+  itself) client-side in `road_corridors.py`, since NHD's ArcGIS `query`
+  endpoint — unlike SDA's SQL-based query used for SSURGO — has no
+  server-side clip parameter. `hydrology_data.py` itself was left
+  unmodified since its other consumers (e.g. `generate_full_report.py`'s
+  narrative) may legitimately want full, unclipped geometry. Separately
+  checked `_fetch_erosion_prone_union()` against the same suspicion (its
+  13.17-acre result on the same 13.23-acre parcel looked suspicious by the
+  same size-comparison test) and confirmed it does NOT share this bug — it
+  exclusively sources geometry from the already-fixed
+  `get_soil_geometries_for_polygon()`, which clips server-side via SQL
+  Server `STIntersection` against the parcel's own boundary, so its result
+  is mathematically bounded by the parcel's own area; 13.17/13.23 acres is
+  a plausible real finding (most of this parcel's soil is erosion-prone per
+  SSURGO K-factor), not a bug — left unmodified.
 - `solar_suitability.py`'s road-proximity scoring falls back to the
   top-ranked `suggested_road_corridor` when no existing-road data is
   reachable (real road data always wins when available) — see
@@ -442,7 +469,18 @@ tool (built with Leaflet).
   production zone genuinely scores lower than a comparable non-crossing
   one (the preference, not exclusion, model), and that anchoring prefers
   real road frontage over the arbitrary boundary fallback where a road is
-  reachable nearby. Tune `MAX_ROAD_GRADE_PCT` (see the module for the
+  reachable nearby. **Specifically re-confirm the floodplain/hydric union
+  clipping fix above against live NHD data** — report the actual
+  `hydric_floodplain_union` / `erosion_prone_union` area in acres compared
+  to the real parcel's own acreage (the size-comparison test that caught
+  the original 33.9-acre-on-a-13.23-acre-parcel bug), and the resulting
+  candidate count/types/grades/scores from
+  `identify_road_corridor_candidates()` with both exclusions active — this
+  session's sandbox could only verify the fix offline/synthetically
+  (a mocked 10km+ unclipped stream feature clipped back down to a bounded,
+  sane union), never against the real property, due to the same blocked
+  `hydro.nationalmap.gov`/`sdmdataaccess.sc.egov.usda.gov` egress noted
+  throughout this file. Tune `MAX_ROAD_GRADE_PCT` (see the module for the
   current rationale/sourcing caveat), `CONTOUR_BAND_WIDTH_METERS`, the
   ridge `RIDGE_MIN_AREA_ACRES` / `RIDGE_MIN_PRIMARY_AREA_ACRES`
   thresholds, the exclusion buffers (`POND_ZONE_EXCLUSION_BUFFER_METERS`,

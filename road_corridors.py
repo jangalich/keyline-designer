@@ -175,6 +175,30 @@ POND_ZONE_EXCLUSION_BUFFER_METERS = 25.0
 # rule of thumb, not a site-specific regulatory setback. CONFIGURABLE.
 FLOODPLAIN_STREAM_BUFFER_METERS = 30.0
 
+# How far past the parcel boundary to still care about a fetched NHD
+# stream/water-body's own geometry before it gets buffered into the
+# floodplain exclusion union. REAL BUG, FOUND LIVE (fixed here):
+# hydrology_data.py's NHD query (an ArcGIS `query` operation) returns
+# each matching feature's FULL, un-clipped geometry for anything that
+# merely intersects the query bounding box -- a long stream or a large
+# waterbody that just touches that box can come back with geometry
+# extending far past the property, which then got buffered (widening it
+# further) and unioned into this exclusion mask WHOLESALE. Confirmed
+# live: a 33.9-ACRE floodplain/hydric union on a 13.23-acre parcel,
+# which alone was large enough to swallow every corridor candidate.
+# Same root-cause CATEGORY (a fetch returning geometry far beyond the
+# input boundary's actual relevant extent, not clipped to it) as the
+# earlier soil_data.get_soil_geometries_for_polygon() bug -- that one's
+# already fixed at the SSURGO query itself (real STIntersects +
+# STIntersection clipping); NHD's ArcGIS `query` endpoint has no
+# equivalent server-side clip parameter here, so this clips CLIENT-SIDE
+# instead, against a generous context region around the parcel --
+# comfortably larger than both dem_data.py's own ~100m DEM fetch buffer
+# and FLOODPLAIN_STREAM_BUFFER_METERS itself, so clipping here can never
+# cut off a stream segment that would otherwise matter to on-parcel
+# corridor generation or its exclusion-margin scoring. CONFIGURABLE.
+FLOODPLAIN_FETCH_CONTEXT_BUFFER_METERS = 200.0
+
 # Drop candidates shorter than this -- not a meaningful road.
 # CONFIGURABLE.
 MIN_CORRIDOR_LENGTH_METERS = 30.0
@@ -848,11 +872,28 @@ def _log_fetch_failure(label: str, exc: Exception) -> None:
         print(f"  {label}: unexpected failure, not a network error ({type(exc).__name__}: {exc}).")
 
 
-def _fetch_floodplain_hydric_union(boundary_coordinates, dem, valleys) -> tuple[Optional[object], bool]:
+def _fetch_floodplain_hydric_union(
+    boundary_coordinates, dem, valleys, boundary_polygon_utm
+) -> tuple[Optional[object], bool]:
     """NHD stream/water-body buffers + SSURGO hydric soil polygons,
     unioned; falls back to buffering the already-computed delineated
     valley lines (an elevation-only proxy) only if BOTH real sources are
-    unreachable. Returns (union_or_None, is_fallback)."""
+    unreachable. Returns (union_or_None, is_fallback).
+
+    Each fetched NHD feature is clipped to a generous context region
+    around boundary_polygon_utm (FLOODPLAIN_FETCH_CONTEXT_BUFFER_METERS)
+    BEFORE being buffered into the union — see that constant's own
+    comment for the real bug this fixes: NHD's query returns each
+    matching feature's full, un-clipped geometry, so a stream or
+    waterbody merely touching the (already-buffered) fetch bounding box
+    could come back with geometry extending far past the property,
+    ballooning the resulting exclusion union to many times the parcel's
+    own size. The SSURGO hydric piece needs no equivalent clip here — it
+    already comes back clipped to the parcel's own wkt_polygon from
+    get_soil_geometries_for_polygon() itself (STIntersection), so it can
+    never exceed the parcel's own area in the first place.
+    """
+    context_region = boundary_polygon_utm.buffer(FLOODPLAIN_FETCH_CONTEXT_BUFFER_METERS)
     pieces = []
 
     try:
@@ -862,7 +903,10 @@ def _fetch_floodplain_hydric_union(boundary_coordinates, dem, valleys) -> tuple[
             if geometry is None:
                 continue
             utm_geometry = shape(transform_geom("EPSG:4326", dem["crs"], geometry))
-            pieces.append(utm_geometry.buffer(FLOODPLAIN_STREAM_BUFFER_METERS))
+            clipped_geometry = utm_geometry.intersection(context_region)
+            if clipped_geometry.is_empty:
+                continue
+            pieces.append(clipped_geometry.buffer(FLOODPLAIN_STREAM_BUFFER_METERS))
     except Exception as e:
         _log_fetch_failure("NHD stream/water-body fetch", e)
 
@@ -1009,7 +1053,7 @@ def identify_road_corridor_candidates(
     pond_zones = find_pond_zones(valleys, production_areas, boundary_polygon_utm, dem["crs"])
 
     hydric_floodplain_union, floodplain_data_is_fallback = _fetch_floodplain_hydric_union(
-        boundary_coordinates, dem, valleys
+        boundary_coordinates, dem, valleys, boundary_polygon_utm
     )
     erosion_prone_union, erosion_data_unavailable = _fetch_erosion_prone_union(boundary_coordinates, dem)
 

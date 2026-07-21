@@ -567,7 +567,7 @@ def generate_production_scenarios(
     valleys = delineate_valleys(dem)
     shared_road_geometries_utm = _fetch_shared_road_geometries_utm(boundary_coordinates, dem)
     hydric_floodplain_union, floodplain_is_fallback = _fetch_floodplain_hydric_union(
-        boundary_coordinates, dem, valleys
+        boundary_coordinates, dem, valleys, boundary_polygon_utm
     )
     erosion_prone_union, erosion_data_unavailable = _fetch_erosion_prone_union(boundary_coordinates, dem)
     existing_road_union_utm = _fetch_existing_road_union(boundary_coordinates, dem)
