@@ -45,7 +45,8 @@ from unittest.mock import patch as mock_patch
 
 import numpy as np
 from rasterio.warp import transform as warp_transform
-from shapely.geometry import box
+from rasterio.warp import transform_geom
+from shapely.geometry import box, mapping
 from shapely.ops import unary_union
 from shapely.prepared import prep
 
@@ -53,6 +54,7 @@ import production_area_ceiling as pac
 import production_suitability as ps
 from feature_schema import validate_feature_collection
 from production_area import compute_slope_percent, identify_production_areas
+from soil_data import coordinates_to_wkt_polygon
 from production_suitability import (
     ASPECT_FACTOR_WEIGHT,
     SLOPE_FACTOR_WEIGHT,
@@ -206,14 +208,104 @@ assert len(optimized_band["patches"]) >= 2, (
     f"trimming the worse middle band should fragment the one original patch into multiple survivors, "
     f"got {len(optimized_band['patches'])}"
 )
+area_per_cell_band = pac.cell_area_acres(dem_band)
 for p in optimized_band["patches"]:
     assert p["area_acres"] >= pac.MIN_PRODUCTION_AREA_ACRES, "every reported fragment must clear the minimum area"
-    cols_used = {c for _, c in p["cells"]}
-    assert not cols_used.issubset(set(range(40, 50))), "no surviving fragment should sit entirely inside the removed worse-quality band"
+    # Core regression check for the hull-inflation fix: area_acres must be the REAL cell-union
+    # area (exactly cell_count * area_per_cell, modulo the boundary-intersection/rounding), not a
+    # convex-hull estimate that fills in gaps between actual surviving cells.
+    exact_cell_area = len(p["cells"]) * area_per_cell_band
+    assert abs(p["area_acres"] - exact_cell_area) < 0.01, (
+        f"patch {p['id']}: area_acres ({p['area_acres']}) must match the real cell-union area "
+        f"({round(exact_cell_area, 2)}) -- a mismatch means area_acres is still hull-inflated"
+    )
 print(
     f"Fragmentation: trimming the worse-quality middle band split the single original patch into "
     f"{len(optimized_band['patches'])} disconnected survivors "
-    f"(areas: {[p['area_acres'] for p in optimized_band['patches']]}), none forced back into one shape."
+    f"(areas: {[p['area_acres'] for p in optimized_band['patches']]}), none forced back into one shape, "
+    "and every survivor's area_acres exactly matches its real cell-union area (not a convex hull)."
+)
+
+
+# --- 3b. hull-inflation bug fix: direct regression test against the exact reported real-property numbers ---
+#
+# The confirmed live bug: an UNCHANGED survivor set (0 cells removed) whose true cell-summed area
+# is smaller than what MultiPoint(...).convex_hull reported, because the hull fills in concave gaps
+# between actual surviving cells with ground that was never actually a qualifying cell at all.
+# polygon_utm/area_acres must reflect the real per-cell-square-union footprint; a convex hull may
+# still be exposed separately as display_polygon_utm for rendering, but nothing spatial should read it.
+
+areas_differ_from_hull = False
+for p in optimized_band["patches"]:
+    real_area_acres = pac._cell_union_footprint(p["cells"], dem_band).intersection(tight_boundary_band).area / SQUARE_METERS_PER_ACRE
+    hull_area_acres = p["display_polygon_utm"].area / SQUARE_METERS_PER_ACRE
+    assert abs(p["polygon_utm"].area / SQUARE_METERS_PER_ACRE - real_area_acres) < 1e-6, (
+        "polygon_utm's own area must exactly equal the real cell-union footprint's area, "
+        "independently recomputed via _cell_union_footprint()"
+    )
+    # NOTE: a convex hull of cell CENTERS is not guaranteed to bound the real cell-SQUARE-union
+    # footprint in either direction -- it overestimates a solid block by filling concave interior
+    # gaps (the original confirmed bug, e.g. real 9.98ac reported as an 11.9ac hull), but can
+    # UNDERestimate a sparse/scattered fragment, which never gets each cell's own half-cell-width
+    # margin the way the real union does. The fix is using the accurate area either way, not
+    # asserting hull area sits on one particular side of the real area.
+    if abs(p["area_acres"] - round(hull_area_acres, 2)) > 0.01:
+        areas_differ_from_hull = True
+assert areas_differ_from_hull, "test setup should include at least one patch where hull and real areas actually differ"
+print(
+    "Every survivor's polygon_utm.area exactly matches its real per-cell-square-union footprint "
+    "(computed independently via _cell_union_footprint()) -- confirming area_acres is no longer "
+    "hull-inflated (hull area can over- OR under-estimate the true footprint depending on shape)."
+)
+
+
+# --- 3c. MultiPolygon handling: cells touching only diagonally (8-connected) produce a real MultiPolygon ---
+#
+# connected_components() is 8-connected (diagonal neighbors count as ONE component), but two cells'
+# real ground SQUARES touching only at a shared corner do NOT merge into one solid Polygon under
+# unary_union -- the accurate footprint for such a component is legitimately a MultiPolygon. This is
+# a real consequence of fixing the hull-inflation bug (a convex hull of cell CENTERS is always a
+# single Polygon, which silently papered over this), so it must not crash downstream.
+
+diagonal_dem = _dem(np.full((20, 20), 100.0, dtype=np.float32), origin_y=4499990.0)
+diagonal_boundary = _full_extent_boundary(diagonal_dem)
+diagonal_survivors = {(5, 5), (6, 6)}  # touch only at a corner point -- one 8-connected component
+
+diagonal_patches = pac.rebuild_patches_from_survivors(diagonal_survivors, diagonal_dem, diagonal_boundary, min_area_acres=0.0)
+assert len(diagonal_patches) == 1, f"expected the diagonal pair to form exactly 1 component, got {len(diagonal_patches)}"
+diagonal_patch = diagonal_patches[0]
+assert diagonal_patch["polygon_utm"].geom_type == "MultiPolygon", (
+    f"two only-diagonally-touching cells' real footprint should be a MultiPolygon, "
+    f"got {diagonal_patch['polygon_utm'].geom_type}"
+)
+assert diagonal_patch["display_polygon_utm"].geom_type == "Polygon", (
+    "display_polygon_utm (convex hull) must always stay a single Polygon, even when the real "
+    "footprint is a MultiPolygon -- that's exactly why it exists as a separate display-only field"
+)
+expected_diagonal_area = 2 * pac.cell_area_acres(diagonal_dem)
+assert abs(diagonal_patch["area_acres"] - round(expected_diagonal_area, 2)) < 1e-9
+
+# The soil-fetch WKT-query codepath (identify_optimized_production_areas()) deliberately builds its
+# query polygon from display_polygon_utm, NOT the possibly-Multi real polygon_utm/geometry_wgs84 --
+# coordinates_to_wkt_polygon() expects a single ring, which a MultiPolygon's coordinates[0] is not.
+# Exercise exactly that codepath directly against this MultiPolygon-producing patch.
+query_geometry_wgs84 = transform_geom(diagonal_dem["crs"], "EPSG:4326", mapping(diagonal_patch["display_polygon_utm"]))
+assert query_geometry_wgs84["type"] == "Polygon"
+wkt_query_polygon = coordinates_to_wkt_polygon(query_geometry_wgs84["coordinates"][0])
+assert wkt_query_polygon.startswith("polygon((")
+
+# Also confirm scoring itself (STEP 5, unchanged) tolerates a MultiPolygon patch end-to-end via
+# score_production_areas()'s cells_by_patch_id override, same as any other rebuilt patch.
+diagonal_scored = score_production_areas(
+    [dict(diagonal_patch)], diagonal_dem, diagonal_boundary,
+    cells_by_patch_id={diagonal_patch["id"]: diagonal_patch["cells"]},
+)
+assert len(diagonal_scored) == 1, "the diagonal-pair MultiPolygon patch must still score successfully"
+print(
+    "MultiPolygon handling: two only-diagonally-touching survivor cells correctly produce a real "
+    "MultiPolygon polygon_utm (area exactly matching 2 cells' worth), a single-Polygon "
+    "display_polygon_utm that the soil-fetch WKT query is safely built from, and STEP 5 scoring "
+    "still succeeds end-to-end."
 )
 
 

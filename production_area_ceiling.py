@@ -94,7 +94,8 @@ from typing import Optional
 import numpy as np
 from rasterio.warp import transform as warp_transform
 from rasterio.warp import transform_geom
-from shapely.geometry import MultiPoint, Point, Polygon, mapping
+from shapely.geometry import MultiPoint, Point, Polygon, box, mapping
+from shapely.ops import unary_union
 from shapely.prepared import prep
 
 from dem_data import get_dem_for_boundary
@@ -278,6 +279,32 @@ def trim_to_ceiling(
     }
 
 
+def _cell_union_footprint(cells: list[tuple[int, int]], dem: dict):
+    """
+    The REAL footprint of a set of DEM cells: the union of each cell's own
+    ground square at the DEM's resolution -- NOT a convex hull of cell
+    CENTER points. Same technique already established in
+    production_suitability.py's _compactness_score() (see that function's
+    own docstring), reused here for the same reason: a convex hull of
+    centers fills in any concave gaps between the actual qualifying
+    cells with ground that was never actually a surviving cell at all --
+    for a large, roughly-solid patch (the common, important case) this
+    means the hull reports MORE area than the true footprint, sometimes
+    by a lot (a real, confirmed bug -- see rebuild_patches_from_survivors()'s
+    docstring). It isn't a one-directional error in general (a sparse,
+    scattered fragment's hull can under-report instead, since it misses
+    each individual cell's own half-cell-width margin that the real
+    union always includes) -- either way, the hull is an approximation
+    and this function is the accurate one.
+    """
+    px, py = dem["resolution_meters"]
+    squares = []
+    for r, c in cells:
+        x, y = pixel_center_xy(dem, r, c)
+        squares.append(box(x - px / 2, y - py / 2, x + px / 2, y + py / 2))
+    return unary_union(squares)
+
+
 def rebuild_patches_from_survivors(
     survivor_cells: set,
     dem: dict,
@@ -293,14 +320,56 @@ def rebuild_patches_from_survivors(
     legitimate fragments are kept rather than discarded, and pieces are
     never forced back into one shape.
 
+    polygon_utm/area_acres/geometry_wgs84 are built from the REAL
+    per-cell-square UNION footprint (_cell_union_footprint(), reusing
+    production_suitability.py's _compactness_score() technique) -- NOT a
+    convex hull of cell centers. A prior version of this function used
+    MultiPoint(...).convex_hull, the same construction
+    identify_production_areas() itself still uses -- deliberately
+    unchanged there, see this module's README entry -- but that hull
+    fills in concave gaps between actual surviving cells with ground that
+    was never actually low-slope/surviving at all, which for a large,
+    roughly-solid patch means it over-reports area (see
+    _cell_union_footprint()'s own docstring for why this isn't strictly
+    one-directional in general). Confirmed live on the real reference
+    property: an unchanged (0-cells-removed) survivor set whose true
+    cell-summed area was 9.98 acres reported as an 11.9-acre hull
+    instead -- enough to flip percent_of_parcel from correctly under the
+    ceiling to (incorrectly) reading as over it. Since polygon_utm is the
+    actual geometry every downstream spatial consumer (water zones,
+    solar, trees, road corridors) treats as "the real production zone,"
+    not just a display number, this must be the real cell-accurate shape.
+
+    A convex hull IS still exposed, separately, as display_polygon_utm --
+    useful purely for rendering smoothness -- but nothing reads that
+    field for area/spatial-relationship purposes; polygon_utm/area_acres
+    are the accurate ones every existing and future consumer should use.
+    It is ALWAYS a single Polygon (never Multi -- the buffer fallback
+    below guarantees this even for a degenerate hull), which is also why
+    identify_optimized_production_areas() builds its soil-fetch query
+    polygon from THIS field rather than the real (possibly MultiPolygon --
+    see below) polygon_utm.
+
     Returns dicts in the SAME shape identify_production_areas() itself
     returns (id/area_acres/representative_elevation_m/polygon_utm/
-    geometry_wgs84), same convex-hull-then-clip-then-recompute-area
-    convention, PLUS each patch's own 'cells' list -- consumed directly by
-    score_production_areas()'s cells_by_patch_id parameter downstream, so
-    STEP 5's scoring runs against these exact post-trim cells instead of
-    (incorrectly) recomputing membership from the original, pre-trim low-
-    slope mask.
+    geometry_wgs84), PLUS display_polygon_utm and each patch's own
+    'cells' list -- consumed directly by score_production_areas()'s
+    cells_by_patch_id parameter downstream, so STEP 5's scoring runs
+    against these exact post-trim cells instead of (incorrectly)
+    recomputing membership from the original, pre-trim low-slope mask.
+
+    polygon_utm/geometry_wgs84 CAN legitimately come back as a
+    MultiPolygon here, unlike identify_production_areas()'s own patches:
+    connected_components() is 8-connected (diagonal neighbors count as
+    one component), but two cells whose real ground SQUARES touch only
+    at a shared corner do not merge into one solid Polygon under
+    unary_union -- their true combined footprint really is disconnected.
+    feature_schema.py's GeoJSON schema already accepts MultiPolygon, and
+    score_production_areas()'s soil-carving already flattens
+    Polygon/MultiPolygon/GeometryCollection alike via its own
+    _polygon_pieces() helper, so this needs no special handling
+    downstream -- see test_production_area_ceiling.py's dedicated
+    MultiPolygon regression case.
     """
     rows, cols = dem["array"].shape
     survivor_mask = np.zeros((rows, cols), dtype=bool)
@@ -317,21 +386,24 @@ def rebuild_patches_from_survivors(
             continue
 
         elevations = [float(dem["array"][r, c]) for r, c in cells]
-        utm_points = [pixel_center_xy(dem, r, c) for r, c in cells]
-        polygon_utm = MultiPoint(utm_points).convex_hull
-        if polygon_utm.geom_type != "Polygon":
-            # Degenerate hull (near-collinear survivors) -- buffer to a
-            # real polygon, same fallback identify_production_areas() uses.
-            px, py = dem["resolution_meters"]
-            polygon_utm = polygon_utm.buffer(max(px, py) / 2)
 
-        polygon_utm = polygon_utm.intersection(boundary_polygon_utm)
+        footprint = _cell_union_footprint(cells, dem)
+        polygon_utm = footprint.intersection(boundary_polygon_utm)
         if polygon_utm.is_empty:
             continue
 
         area_acres = polygon_utm.area / SQUARE_METERS_PER_ACRE
         if area_acres < min_area_acres:
             continue
+
+        # Display-only convex hull -- NOT used for area_acres or any
+        # spatial relationship; see docstring above.
+        utm_points = [pixel_center_xy(dem, r, c) for r, c in cells]
+        display_polygon_utm = MultiPoint(utm_points).convex_hull
+        if display_polygon_utm.geom_type != "Polygon":
+            px, py = dem["resolution_meters"]
+            display_polygon_utm = display_polygon_utm.buffer(max(px, py) / 2)
+        display_polygon_utm = display_polygon_utm.intersection(boundary_polygon_utm)
 
         geometry_wgs84 = transform_geom(dem["crs"], "EPSG:4326", mapping(polygon_utm))
 
@@ -341,6 +413,7 @@ def rebuild_patches_from_survivors(
                 "area_acres": round(float(area_acres), 2),
                 "representative_elevation_m": float(np.median(elevations)),
                 "polygon_utm": polygon_utm,
+                "display_polygon_utm": display_polygon_utm,
                 "geometry_wgs84": geometry_wgs84,
                 "cells": cells,
             }
@@ -439,7 +512,21 @@ def identify_optimized_production_areas(
     disqualifying_soil_by_patch_id: dict = {}
     if check_soil:
         for patch in new_patches:
-            wkt_polygon = coordinates_to_wkt_polygon(patch["geometry_wgs84"]["coordinates"][0])
+            # The real polygon_utm/geometry_wgs84 (the accurate, per-cell-square-
+            # union footprint -- see rebuild_patches_from_survivors()) can
+            # legitimately come back as a MultiPolygon: worst-first trimming
+            # can leave cells that are only DIAGONALLY (8-connected) touching,
+            # whose real ground squares only meet at a corner point rather than
+            # merging into one solid shape. coordinates_to_wkt_polygon() expects
+            # a single ring, so the soil QUERY polygon here uses
+            # display_polygon_utm (the convex hull -- always a single Polygon,
+            # same as production_area.py's own patches) instead: a
+            # conservative, slightly-larger query region is fine for "what
+            # SSURGO geometry intersects this footprint at all" -- the actual
+            # carving math downstream still intersects/subtracts against the
+            # real, precise polygon_utm, not this query shape.
+            query_geometry_wgs84 = transform_geom(dem["crs"], "EPSG:4326", mapping(patch["display_polygon_utm"]))
+            wkt_polygon = coordinates_to_wkt_polygon(query_geometry_wgs84["coordinates"][0])
             try:
                 disqualifying_soil_by_patch_id[patch["id"]] = _fetch_disqualifying_soil_union(wkt_polygon, dem)
             except Exception:

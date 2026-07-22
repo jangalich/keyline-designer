@@ -405,7 +405,39 @@ report using the Claude API.
      surviving cell mask. Worst-first removal can fragment one original
      patch into several disconnected pieces — every piece clearing
      `MIN_PRODUCTION_AREA_ACRES` is kept as its own independent
-     candidate, never forced back into one shape.
+     candidate, never forced back into one shape. `polygon_utm`/
+     `area_acres`/`geometry_wgs84` are built from the REAL per-cell-square
+     UNION footprint (`_cell_union_footprint()`, reusing
+     `production_suitability.py`'s `_compactness_score()` technique), NOT
+     a convex hull of cell centers. **Real bug found and fixed**: an
+     earlier version used `MultiPoint(...).convex_hull` here (the same
+     construction `production_area.py`'s own `identify_production_areas()`
+     still uses, deliberately left unchanged there — see below); a hull
+     fills in concave gaps between actual surviving cells with ground
+     that was never actually a qualifying cell, so a large, roughly-solid
+     survivor set over-reports its true area (confirmed live: an
+     unchanged, 0-cells-removed survivor set whose true cell-summed area
+     was 9.98 acres reported as an 11.9-acre hull — enough to flip
+     `percent_of_parcel` from correctly under the ceiling to incorrectly
+     reading as over it). Since `polygon_utm` is the real geometry every
+     downstream spatial consumer (water zones, solar, trees, road
+     corridors) would treat as "the real production zone," not just a
+     display number, this had to be the accurate shape. A convex hull is
+     still exposed separately as `display_polygon_utm` (useful purely for
+     rendering smoothness — note the hull error isn't strictly
+     one-directional in general: a sparse/scattered fragment's hull can
+     instead UNDER-report, since it misses each cell's own half-cell-width
+     margin), but nothing spatial reads that field. This also means
+     `polygon_utm`/`geometry_wgs84` can legitimately come back as a
+     `MultiPolygon` (two cells whose real ground squares touch only at a
+     shared corner under 8-connectivity don't merge into one solid
+     Polygon) — `identify_optimized_production_areas()` builds its
+     soil-fetch query polygon from `display_polygon_utm` (always a single
+     Polygon) specifically to avoid that breaking
+     `coordinates_to_wkt_polygon()`'s single-ring assumption; carving
+     itself already handles `MultiPolygon` patches fine via
+     `_polygon_pieces()`. See `test_production_area_ceiling.py`'s
+     dedicated hull-vs-union and `MultiPolygon` regression cases.
   5. **Existing carving + scoring, unchanged**: each surviving piece is
      fed into `production_suitability.py`'s own
      `score_production_areas()` via a new, backward-compatible
@@ -534,6 +566,20 @@ tool (built with Leaflet).
   result's `percent_of_parcel`/`production_ceiling_target_met` look
   sensible before treating the 80% figure as validated rather than just
   a reasonable-sounding default.
+- `production_area.py`'s own `identify_production_areas()` has the EXACT
+  SAME convex-hull-inflation pattern `production_area_ceiling.py`'s
+  `rebuild_patches_from_survivors()` had until it was fixed (above): its
+  `polygon_utm`/`area_acres`/`geometry_wgs84` are built from
+  `MultiPoint(cell centers).convex_hull`, which can over- or under-report
+  the real cell footprint's area the same way. Deliberately NOT touched
+  in that fix's pass — this is the ORIGINAL patch geometry every other
+  already-verified layer this session (water zones, solar, trees, road
+  corridors, fencing) has been built and tested against, so changing it
+  would likely shift numbers across all of them. Scope this as its own
+  deliberate, separate fix later, with full awareness of that wider
+  blast radius — probably following the same real-cell-square-union
+  approach (`_cell_union_footprint()`/`_compactness_score()`) rather than
+  reimplementing it a third way.
 - Same ground-truth validation pass for `solar_suitability.py`'s
   point-candidate model: check that top-ranked candidates are near a
   real road, low-slope, south-facing, and (per the new proximity
