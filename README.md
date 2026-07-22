@@ -52,12 +52,20 @@ report using the Claude API.
   prose — it doesn't modify that step). Outputs a schema-conformant
   `production_area_candidate` layer.
 - `water_candidate_zones.py` — the actual water-system candidate-zone
-  feature: for each primary valley, flags the portion sitting above a
-  candidate production area by at least a configurable minimum gravity
-  gradient, outside a configurable property-boundary setback, and
-  buffers the qualifying segment(s) into a zone polygon (not a point).
-  Outputs the schema-conformant `water_system_candidate` layer that
-  `generate_full_report.py`/`report_generator.py` consume. The core
+  feature: for each primary valley, finds the portion within a configurable
+  service-distance window of a candidate production area, outside a
+  configurable property-boundary setback, and buffers the qualifying
+  segment(s) into a zone polygon (not a point). Outputs the
+  schema-conformant `water_system_candidate` layer that
+  `generate_full_report.py`/`report_generator.py` consume. Elevation
+  relative to the production area(s) a zone could serve is NOT a
+  generation-time exclusion (it used to be — a hard "must clear a minimum
+  gravity gradient" gate — removed because it discarded genuinely
+  well-suited ground before scoring ever weighed it: a site that needs a
+  pump is a real, valid candidate, not a disqualified one); the raw
+  elevation-differential/gradient data is instead attached to each zone
+  (`production_area_relationships` / `primary_production_area_relationship`)
+  for `water_suitability.py` to turn into a scored preference. The core
   filtering logic (`find_candidate_zones()`) is a pure function over
   already-computed valleys/production areas — deliberately separable from
   DEM fetching and valley delineation, so "is the terrain data right" and
@@ -65,6 +73,24 @@ report using the Claude API.
   `test_valley_delineation.py`, `test_production_area.py`,
   `test_water_candidate_zones.py`, and the end-to-end
   `test_water_system_candidate_pipeline.py`).
+- `water_suitability.py` — adds a suitability RANKING to the water-system
+  candidate zones `water_candidate_zones.py` already identifies (same
+  "score, don't regenerate" pattern as `production_suitability.py`):
+  enriches the same `water_system_candidate` layer with a 0-100
+  `suitability_score`, real differentiated `confidence`, and four
+  independently-stored, positively-weighted 0-1 factors — gravity-feed
+  preference (real elevation differential/gradient vs. the production
+  area served, `production_area_relationships`; below-elevation/
+  pump-required candidates score lower but remain valid, scored
+  candidates, not excluded ones), soil water-holding capacity (SSURGO
+  `chorizon.ksat_r`, saturated hydraulic conductivity — lower conductivity
+  holds water better, verified against the chorizon table the same way
+  `soil_data.get_erosion_factor_for_polygon()`'s `kwfact` horizon-selection
+  was), NHD stream-permanence proximity (`FCode` perennial/intermittent/
+  ephemeral — a real weighted factor, with a documented, known ~100-300m
+  DEM-vs-NHD offset limitation surfaced in `confidence_notes`), and
+  existing topographic signals (valley gradient steepness + contributing
+  area, from `valley_delineation.py`). See `test_water_suitability.py`.
 - `terrain_metrics.py` — DEM-derived slope, aspect (Horn's method), and a
   horizon-based shading proxy (no vegetation/canopy signal — see its
   docstring), feeding `solar_suitability.py`'s scoring. Numpy-only, no
@@ -552,9 +578,11 @@ tool (built with Leaflet).
   real property with known ground truth, and tune
   `MIN_STREAM_CONTRIBUTING_AREA_ACRES` / `MIN_PRIMARY_VALLEY_CONTRIBUTING_AREA_ACRES`
   (`valley_delineation.py`), `MAX_PRODUCTION_SLOPE_PCT`
-  (`production_area.py`), and `MIN_GRAVITY_GRADIENT` /
-  `MIN_BOUNDARY_SETBACK_METERS` (`water_candidate_zones.py`) accordingly —
-  all deliberately exposed as module-level constants for exactly this.
+  (`production_area.py`), `MIN_BOUNDARY_SETBACK_METERS` /
+  `MAX_SERVICE_DISTANCE_METERS` / `MIN_SERVICE_DISTANCE_METERS`
+  (`water_candidate_zones.py`), and `water_suitability.py`'s own composite
+  factor weights accordingly — all deliberately exposed as module-level
+  constants for exactly this.
 - `production_area_ceiling.py`'s `PRODUCTION_CEILING_PCT_OF_PARCEL` (80.0)
   is a documented starting ceiling, not a value derived from or validated
   against a real property yet — same "tune once ground-truthed" status

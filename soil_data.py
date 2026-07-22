@@ -422,6 +422,88 @@ def get_erosion_factor_for_polygon(wkt_polygon: str) -> list[dict]:
     return list(dominant_by_mukey.values())
 
 
+# Saturated hydraulic conductivity ("ksat_r" -- the representative value
+# of the "Ksat" column group, chorizon table) is SSURGO's standard measure
+# of how readily water moves through saturated soil, in micrometers/second
+# -- confirmed against real SSURGO/NRCS field documentation before use
+# here (same "verify against real documentation, don't trust a plausible
+# column name alone" discipline get_erosion_factor_for_polygon()'s kwfact
+# fix and this module's own hydric-rollup fix both already required):
+# ksat_r lives on chorizon (per-horizon, one row per component per depth),
+# NOT component -- the same table kwfact lives on, confirmed the same way
+# (NRCS/NPS Ksat documentation explicitly describes it as a CHORIZON
+# column). It measures PERMEABILITY/seepage rate, which is what actually
+# matters for a POND site (a lower Ksat means less water lost to seepage
+# through the pond floor/walls) -- a meaningfully different soil property
+# from SSURGO's "available water capacity" (awc_r, also chorizon-level),
+# which measures water held in the ROOT ZONE and available to PLANTS
+# between field capacity and wilting point. awc_r answers "how much water
+# can a crop draw on here"; ksat_r answers "how much water would leak out
+# of a pond built on this soil" -- the latter is the real question for
+# water-system siting, so ksat_r (not awc_r, despite its more
+# literally-matching "water capacity" name) is what
+# water_suitability.py's soil factor uses.
+#
+# NRCS's own standard Ksat class breakpoints (Soil Survey Manual;
+# micrometers/second): very low <0.01, low 0.01-0.1, moderately low
+# 0.1-1.0, moderately high 1-10, high 10-100, very high 100-705. A soil at
+# or below the low/moderately-low boundary (0.1) is genuinely good at
+# holding water for a pond; at or above the high/very-high boundary (100,
+# rapid -- typically sand/gravel) it's genuinely poor without a liner.
+# water_suitability.py scores between these two real, documented
+# breakpoints on a log scale (ksat spans orders of magnitude, so a linear
+# scale would barely differentiate the moderately-low/moderately-high
+# range where most real soils actually fall) rather than inventing its own
+# thresholds.
+def get_saturated_hydraulic_conductivity_for_polygon(wkt_polygon: str) -> list[dict]:
+    """
+    Returns SSURGO's saturated hydraulic conductivity (Ksat, chorizon.ksat_r)
+    for the dominant component of every map unit intersecting wkt_polygon --
+    same dominant-component-per-mukey shape as get_erosion_factor_for_polygon,
+    and the SAME shallowest-mineral-horizon selection approach (confirmed
+    against a real published SDA example query, see that function's own
+    docstring for the full reasoning and the rvindicator/wrong-table dead
+    end it avoids repeating): ksat_r, like kwfact, is recorded per HORIZON
+    (a component can have several, at different depths), so this picks one
+    representative horizon per component the same way -- shallowest
+    mineral horizon (MIN(hzdept_r), excluding organic 'O%' surface
+    horizons) via a correlated subquery, not a nonexistent representative-
+    row flag column.
+
+    Returns a list of {'mukey', 'muname', 'compname', 'comppct_r', 'ksat_r'} dicts.
+    """
+    sql = f"""
+        SELECT mu.mukey, mu.muname, c.compname, c.comppct_r, ch.ksat_r
+        FROM mapunit mu
+        INNER JOIN component c ON mu.mukey = c.mukey
+        INNER JOIN chorizon ch ON c.cokey = ch.cokey
+            AND ch.hzdept_r = (
+                SELECT MIN(hzdept_r) FROM chorizon
+                WHERE hzname NOT LIKE 'O%' AND chorizon.cokey = ch.cokey
+            )
+        WHERE mu.mukey IN (
+            SELECT mukey FROM SDA_Get_Mukey_from_intersection_with_WktWgs84('{wkt_polygon}')
+        )
+        ORDER BY c.comppct_r DESC
+    """
+
+    result = _run_sda_query(sql)
+
+    if not result["rows"]:
+        return []
+
+    rows = [dict(zip(result["columns"], row)) for row in result["rows"]]
+
+    dominant_by_mukey: dict[str, dict] = {}
+    for row in rows:
+        # rows are ordered comppct_r DESC, so the first row seen per mukey
+        # is already the dominant component -- same convention as
+        # get_soil_data_for_polygon's/get_erosion_factor_for_polygon's ordering.
+        dominant_by_mukey.setdefault(row["mukey"], row)
+
+    return list(dominant_by_mukey.values())
+
+
 def _polygonal_parts(geom):
     """
     STIntersection() against a mapunit polygon can, in edge cases (the
