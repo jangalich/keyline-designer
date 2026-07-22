@@ -21,12 +21,25 @@ tree zones (a later, separate pass), not the reverse.
     STEP 1 -- SEARCH SPACE (compute_tree_search_space()):
         the full property boundary, minus real geometry (via .difference(),
         not a heuristic mask) for:
-          - EVERY production-zone candidate (production_suitability.py's
-            scored/soil-carved output -- ALL of them; production_area_
-            ceiling.py's own global trim/optimization is a separate,
-            already-agreed later pass this module doesn't wire to yet, so
-            "all currently-identified candidates" remains the correct
-            input here for now)
+          - EVERY OPTIMIZED production-zone candidate
+            (production_area_ceiling.identify_optimized_production_areas()'s
+            scored/soil-carved/ceiling-trimmed output -- ALL of them; no
+            zone-SELECTION mechanism exists for production, so "every
+            currently-optimized candidate" is the correct input here).
+            This is the ceiling-trimmed result, NOT
+            production_suitability.identify_production_area_suitability()'s
+            full, un-trimmed patches -- production_area.py's slope-only
+            heuristic on its own claims ~95% of a real reference property
+            as one connected patch, which production_area_ceiling.py
+            already exists specifically to trim toward a documented,
+            more-plausible ceiling (PRODUCTION_CEILING_PCT_OF_PARCEL,
+            80% of parcel by default) before anything downstream treats it
+            as "claimed." Confirmed live: search space barely changed
+            (0.72 -> 0.56 acres) when only water/road selection was
+            rewired, because the un-trimmed ~95%-of-parcel patch already
+            consumed almost everything selection could have freed up --
+            swapping in the optimized output is what actually recovers
+            the withheld acreage.
           - the SINGLE selected water-system zone
             (water_suitability.select_optimal_water_zone()) -- not every
             water candidate. Per product decision, this app targets small
@@ -125,7 +138,7 @@ from dem_data import get_dem_for_boundary
 from feature_schema import CONFIDENCE_LOW, make_feature, make_feature_collection
 from hydrology_data import get_water_features_for_boundary
 from production_area import MIN_PRODUCTION_AREA_ACRES, compute_slope_percent
-from production_suitability import identify_production_area_suitability
+from production_area_ceiling import identify_optimized_production_areas
 from raster_grid import SQUARE_METERS_PER_ACRE, connected_components, pixel_center_xy
 from road_corridors import identify_road_corridor_candidates
 from soil_data import (
@@ -244,9 +257,9 @@ _NEUTRAL_FACTOR_VALUE = 0.5
 
 TREE_ZONE_CONFIDENCE_NOTES_TEMPLATE = (
     "This identifies GENERAL tree-suitable land -- ground within the property's leftover, "
-    "non-claimed area (the full boundary minus every current production-zone candidate plus the "
-    "single SELECTED water-system zone and single SELECTED road corridor's own geometry) that "
-    "scores above a minimum suitability threshold on "
+    "non-claimed area (the full boundary minus every current OPTIMIZED (ceiling-trimmed) "
+    "production-zone candidate plus the single SELECTED water-system zone and single SELECTED "
+    "road corridor's own geometry) that scores above a minimum suitability threshold on "
     "marginality relative to production use. It is NOT a windbreak, riparian buffer, habitat "
     "corridor, or any other specific planting plan -- assigning that kind of function/purpose to "
     "this ground is deliberately left to report narrative, a separate later pass, and is NOT "
@@ -274,10 +287,10 @@ TREE_ZONE_CONFIDENCE_NOTES_TEMPLATE = (
 
 TREE_SEARCH_SPACE_CONFIDENCE_NOTES = (
     "Diagnostic layer only, not a deliverable candidate zone: the full property boundary minus "
-    "every current production-zone candidate plus the single SELECTED water-system zone and single "
-    "SELECTED road corridor's own geometry (see tree_zone_candidates.py's module docstring, Step 1). "
-    "Useful for checking the search space independently of the suitability scoring/thresholding "
-    "built on top of it (Steps 2-3)."
+    "every current OPTIMIZED (ceiling-trimmed) production-zone candidate plus the single SELECTED "
+    "water-system zone and single SELECTED road corridor's own geometry (see "
+    "tree_zone_candidates.py's module docstring, Step 1). Useful for checking the search space "
+    "independently of the suitability scoring/thresholding built on top of it (Steps 2-3)."
 )
 
 
@@ -722,15 +735,17 @@ def identify_tree_zone_candidates(
             'patches': list[dict],                        # score_tree_search_space()'s own raw output
         }
 
-    production_suitability.py's own SSURGO fetch (soil carving),
-    water_suitability.py's own per-zone SSURGO/NHD fetches, and
-    road_corridors.py's own several fetches (floodplain/erosion/farm roads)
-    are all reused via their own full entry points
-    (identify_production_area_suitability(), identify_water_suitability(),
+    production_area_ceiling.py's own SSURGO fetch (soil carving, reused
+    unchanged from production_suitability.py via its cells_by_patch_id
+    parameter), water_suitability.py's own per-zone SSURGO/NHD fetches,
+    and road_corridors.py's own several fetches (floodplain/erosion/farm
+    roads) are all reused via their own full entry points
+    (identify_optimized_production_areas(), identify_water_suitability(),
     identify_road_corridor_candidates()) rather than reimplemented here --
     this guarantees Step 1's "claimed" geometry is exactly what those
-    layers currently, independently report as their own candidates (and,
-    for water/road, their own SELECTED candidate specifically -- see
+    layers currently, independently report as their own candidates (the
+    OPTIMIZED, ceiling-trimmed candidates for production; for water/road,
+    their own SELECTED candidate specifically -- see
     water_suitability.select_optimal_water_zone()/
     road_corridors.select_optimal_road_corridor()), not a re-derived
     approximation of it.
@@ -746,14 +761,20 @@ def identify_tree_zone_candidates(
     )
     boundary_polygon_utm = Polygon(zip(boundary_xs, boundary_ys))
 
-    # --- Step 1 inputs: EVERY current production-zone candidate (no
-    # zone-selection mechanism exists for production in this pass -- see
-    # module docstring), plus only the SINGLE selected water zone and
-    # SINGLE selected road corridor from their own optimized-selection
-    # entry points. Per product decision, this app targets small farms
-    # only: one well-suited water zone / road corridor is sufficient, so
-    # only that one candidate's own geometry counts as "claimed" for each. ---
-    production_result = identify_production_area_suitability(boundary_coordinates, dem=dem)
+    # --- Step 1 inputs: the OPTIMIZED (ceiling-trimmed) production-zone
+    # output (production_area_ceiling.identify_optimized_production_areas(),
+    # not production_suitability.identify_production_area_suitability()'s
+    # full, un-trimmed patches -- see module docstring), plus only the
+    # SINGLE selected water zone and SINGLE selected road corridor from
+    # their own optimized-selection entry points. Per product decision,
+    # this app targets small farms only: one well-suited water zone / road
+    # corridor is sufficient, so only that one candidate's own geometry
+    # counts as "claimed" for each. Each optimized patch's own 'polygon_utm'
+    # is the real, accurate cell-union footprint (NOT 'display_polygon_utm',
+    # a convex hull kept only for rendering smoothness -- see
+    # production_area_ceiling.py's own rebuild_patches_from_survivors()
+    # docstring for why the hull over-reports true area). ---
+    production_result = identify_optimized_production_areas(boundary_coordinates, dem=dem)
     production_polygons_utm = [p["polygon_utm"] for p in production_result["scored_patches"]]
 
     water_result = identify_water_suitability(boundary_coordinates, dem=dem)
