@@ -851,6 +851,23 @@ def find_candidate_road_corridors(
     return scored
 
 
+def select_optimal_road_corridor(scored_candidates: list[dict]) -> Optional[dict]:
+    """
+    Explicit selection step on top of find_candidate_road_corridors()'s own
+    ranking: returns the single candidate with rank == 1 (highest
+    suitability_score) -- no logic beyond that. Same pattern as
+    water_suitability.select_optimal_water_zone(); per product decision,
+    this app targets small farms only, where one well-suited road corridor
+    is sufficient -- no multi-candidate coexistence logic is needed here.
+
+    Returns None if scored_candidates is empty -- a real, reportable "no
+    candidates at all" outcome, not an error.
+    """
+    if not scored_candidates:
+        return None
+    return max(scored_candidates, key=lambda c: c["suitability_score"])
+
+
 def _confidence_notes_for_candidate(
     is_arbitrary_anchor: bool,
     anchor_road_name: Optional[str],
@@ -1158,6 +1175,15 @@ def identify_road_corridor_candidates(
     GeoJSON FeatureCollection. Every real-data fetch degrades
     independently and gracefully, same pattern as
     water_candidate_zones.py and solar_suitability.py.
+
+    Returns:
+        {
+            'zones_geojson': dict,                       # every scored candidate, ranked
+            'all_scored_candidates': list[dict],         # find_candidate_road_corridors()'s own
+                                                            # raw scored list (carries line_utm)
+            'selected_road_corridor': Optional[dict],    # select_optimal_road_corridor()'s single
+                                                            # rank-1 answer, or None if no candidates exist
+        }
     """
     if dem is None:
         dem = get_dem_for_boundary(boundary_coordinates)
@@ -1205,7 +1231,9 @@ def identify_road_corridor_candidates(
             candidates,
             floodplain_data_is_fallback=floodplain_data_is_fallback,
             erosion_data_unavailable=erosion_data_unavailable,
-        )
+        ),
+        "all_scored_candidates": candidates,
+        "selected_road_corridor": select_optimal_road_corridor(candidates),
     }
 
 

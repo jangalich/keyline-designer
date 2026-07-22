@@ -577,6 +577,35 @@ def flag_prime_farmland_conflicts(
     return candidates
 
 
+def select_optimal_structure_site(scored_candidates: list[dict]) -> Optional[dict]:
+    """
+    Explicit selection step on top of find_candidate_solar_zones()'s own
+    ranking: returns the single candidate with rank == 1 (highest
+    suitability_score) -- no logic beyond that. Same pattern as
+    water_suitability.select_optimal_water_zone() and
+    road_corridors.select_optimal_road_corridor(); per product decision,
+    this app targets small farms only, where one well-suited structure
+    site is sufficient -- no multi-candidate coexistence logic is needed
+    here.
+
+    Deliberately does NOT attempt to reconcile this selection with
+    road_corridors.select_optimal_road_corridor() (e.g. re-scoring this
+    site's road-proximity against the newly-selected corridor specifically)
+    -- solar's own road-proximity fallback (real mapped road vs. suggested-
+    corridor fallback, see _suggested_corridor_as_road_fallback()) is left
+    exactly as-is. That interplay is deliberately deferred, same as the
+    fencing/roads-and-structures interplay already deferred elsewhere in
+    this pipeline, until real results from both selections independently
+    are available to look at.
+
+    Returns None if scored_candidates is empty -- a real, reportable "no
+    candidates at all" outcome, not an error.
+    """
+    if not scored_candidates:
+        return None
+    return max(scored_candidates, key=lambda c: c["suitability_score"])
+
+
 def candidates_to_geojson(
     candidates: list[dict],
     shading_is_rough_proxy: bool = True,
@@ -713,6 +742,16 @@ def identify_solar_candidate_zones(
     UNCHANGED call shape from before the point-candidate redesign — only
     find_candidate_solar_zones()'s own internal model changed.
 
+    Returns:
+        {
+            'zones_geojson': dict,                   # every scored candidate, ranked
+            'all_scored_candidates': list[dict],     # find_candidate_solar_zones()'s own raw
+                                                        # scored list (post-farmland-flagging)
+            'selected_structure_site': Optional[dict],  # select_optimal_structure_site()'s
+                                                           # single rank-1 answer, or None if no
+                                                           # candidates exist
+        }
+
     production_areas and water_zones are both computed directly from the
     DEM already in hand (identify_production_areas(), delineate_valleys()
     + water_candidate_zones.find_candidate_zones() — the same pure
@@ -782,7 +821,11 @@ def identify_solar_candidate_zones(
         except Exception:
             pass  # SSURGO outage -- candidates just won't carry a prime_farmland_conflict flag this run
 
-    return {"zones_geojson": candidates_to_geojson(candidates, road_data_is_fallback=road_data_is_fallback)}
+    return {
+        "zones_geojson": candidates_to_geojson(candidates, road_data_is_fallback=road_data_is_fallback),
+        "all_scored_candidates": candidates,
+        "selected_structure_site": select_optimal_structure_site(candidates),
+    }
 
 
 def summarize_solar_candidate_zones(result: dict) -> str:

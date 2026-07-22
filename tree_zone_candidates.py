@@ -22,17 +22,26 @@ tree zones (a later, separate pass), not the reverse.
         the full property boundary, minus real geometry (via .difference(),
         not a heuristic mask) for:
           - EVERY production-zone candidate (production_suitability.py's
-            scored/soil-carved output -- ALL of them; no zone-SELECTION
-            mechanism exists anywhere in this pipeline yet, so every
-            current candidate counts as "claimed")
-          - EVERY water-system candidate zone (water_candidate_zones.py)
-          - EVERY road-corridor candidate LINE (road_corridors.py) --
-            subtracted as real, zero-width LineString geometry, not
-            buffered. A zero-width line has a practically negligible
-            effect on the resulting search-space AREA -- that's expected,
-            not a bug: an eventual pass modeling actual road construction/
+            scored/soil-carved output -- ALL of them; production_area_
+            ceiling.py's own global trim/optimization is a separate,
+            already-agreed later pass this module doesn't wire to yet, so
+            "all currently-identified candidates" remains the correct
+            input here for now)
+          - the SINGLE selected water-system zone
+            (water_suitability.select_optimal_water_zone()) -- not every
+            water candidate. Per product decision, this app targets small
+            farms only: one well-suited water zone is sufficient, so only
+            that one zone's own geometry counts as "claimed."
+          - the SINGLE selected road corridor
+            (road_corridors.select_optimal_road_corridor()) -- not every
+            road candidate, same "one well-suited candidate is enough for
+            a small farm" reasoning. Still subtracted as real, zero-width
+            LineString geometry, not buffered -- unchanged in spirit from
+            before: a zero-width line has a practically negligible effect
+            on the resulting search-space AREA, which is expected, not a
+            bug (an eventual pass modeling actual road construction/
             right-of-way would be the place to introduce a real cleared
-            buffer, not this one.
+            buffer, not this one).
         The remainder is the search space Step 2 scores.
 
     STEP 2 -- SUITABILITY SCORING (score_tree_search_space()):
@@ -108,14 +117,14 @@ from typing import Optional
 import numpy as np
 from rasterio.warp import transform as warp_transform
 from rasterio.warp import transform_geom
-from shapely.geometry import LineString, Point, Polygon, box, mapping, shape
+from shapely.geometry import Point, Polygon, box, mapping, shape
 from shapely.ops import unary_union
 from shapely.prepared import prep
 
 from dem_data import get_dem_for_boundary
 from feature_schema import CONFIDENCE_LOW, make_feature, make_feature_collection
 from hydrology_data import get_water_features_for_boundary
-from production_area import MIN_PRODUCTION_AREA_ACRES, compute_slope_percent, identify_production_areas
+from production_area import MIN_PRODUCTION_AREA_ACRES, compute_slope_percent
 from production_suitability import identify_production_area_suitability
 from raster_grid import SQUARE_METERS_PER_ACRE, connected_components, pixel_center_xy
 from road_corridors import identify_road_corridor_candidates
@@ -127,8 +136,7 @@ from soil_data import (
     hydric_disqualifying_mukeys,
     is_prime_farmland,
 )
-from valley_delineation import delineate_valleys
-from water_candidate_zones import find_candidate_zones as find_pond_zones
+from water_suitability import identify_water_suitability
 
 # --- composite weights (must sum to 1.0). CONFIGURABLE -- tune against a
 # real property once ground-truthed, same "documented but adjustable"
@@ -236,8 +244,9 @@ _NEUTRAL_FACTOR_VALUE = 0.5
 
 TREE_ZONE_CONFIDENCE_NOTES_TEMPLATE = (
     "This identifies GENERAL tree-suitable land -- ground within the property's leftover, "
-    "non-claimed area (the full boundary minus every current production-zone, water-system, and "
-    "road-corridor candidate's own geometry) that scores above a minimum suitability threshold on "
+    "non-claimed area (the full boundary minus every current production-zone candidate plus the "
+    "single SELECTED water-system zone and single SELECTED road corridor's own geometry) that "
+    "scores above a minimum suitability threshold on "
     "marginality relative to production use. It is NOT a windbreak, riparian buffer, habitat "
     "corridor, or any other specific planting plan -- assigning that kind of function/purpose to "
     "this ground is deliberately left to report narrative, a separate later pass, and is NOT "
@@ -265,9 +274,10 @@ TREE_ZONE_CONFIDENCE_NOTES_TEMPLATE = (
 
 TREE_SEARCH_SPACE_CONFIDENCE_NOTES = (
     "Diagnostic layer only, not a deliverable candidate zone: the full property boundary minus "
-    "every current production-zone, water-system, and road-corridor candidate's own geometry (see "
-    "tree_zone_candidates.py's module docstring, Step 1). Useful for checking the search space "
-    "independently of the suitability scoring/thresholding built on top of it (Steps 2-3)."
+    "every current production-zone candidate plus the single SELECTED water-system zone and single "
+    "SELECTED road corridor's own geometry (see tree_zone_candidates.py's module docstring, Step 1). "
+    "Useful for checking the search space independently of the suitability scoring/thresholding "
+    "built on top of it (Steps 2-3)."
 )
 
 
@@ -695,33 +705,35 @@ def identify_tree_zone_candidates(
 ) -> dict:
     """
     Full pipeline entry point: fetches the DEM (unless one is passed in),
-    computes the Step 1 search space from EVERY current production/water/
-    road candidate on this property, fetches the Step 2 soil/stream
-    geometry (each degrading independently and gracefully -- same pattern
-    as every other network-backed layer in this pipeline), scores and
-    thresholds the result, and returns:
+    computes the Step 1 search space from EVERY current production
+    candidate plus the SINGLE selected water zone and SINGLE selected road
+    corridor on this property, fetches the Step 2 soil/stream geometry
+    (each degrading independently and gracefully -- same pattern as every
+    other network-backed layer in this pipeline), scores and thresholds
+    the result, and returns:
 
         {
             'zones_geojson': FeatureCollection,          # layer="tree_zone_candidate" -- the deliverable
             'search_space_geojson': FeatureCollection,    # layer="tree_search_space_diagnostic" -- Step 1 diagnostic
             'search_space_acres': float,
-            'claimed_acres': float,                       # production+water+road union's own area (roads ~0, zero-width)
+            'claimed_acres': float,                       # production+selected-water+selected-road union's own
+                                                             # area (roads ~0, zero-width)
             'boundary_acres': float,
             'patches': list[dict],                        # score_tree_search_space()'s own raw output
         }
 
-    production_suitability.py's own SSURGO fetch (soil carving) and
+    production_suitability.py's own SSURGO fetch (soil carving),
+    water_suitability.py's own per-zone SSURGO/NHD fetches, and
     road_corridors.py's own several fetches (floodplain/erosion/farm roads)
-    are reused via their own full entry points
-    (identify_production_area_suitability(), identify_road_corridor_
-    candidates()) rather than reimplemented here -- this guarantees Step 1's
-    "claimed" geometry is exactly what those layers currently, independently
-    report as their own candidates, not a re-derived approximation of it.
-    water_candidate_zones.py's own zone-finding is instead called directly
-    via its pure find_candidate_zones() (same as road_corridors.py already
-    does for its own pond-zone exclusion) since its full entry point only
-    exposes WGS84 zones_geojson, not the polygon_utm geometry this module's
-    own Step 1 subtraction needs.
+    are all reused via their own full entry points
+    (identify_production_area_suitability(), identify_water_suitability(),
+    identify_road_corridor_candidates()) rather than reimplemented here --
+    this guarantees Step 1's "claimed" geometry is exactly what those
+    layers currently, independently report as their own candidates (and,
+    for water/road, their own SELECTED candidate specifically -- see
+    water_suitability.select_optimal_water_zone()/
+    road_corridors.select_optimal_road_corridor()), not a re-derived
+    approximation of it.
     """
     if dem is None:
         dem = get_dem_for_boundary(boundary_coordinates)
@@ -734,23 +746,23 @@ def identify_tree_zone_candidates(
     )
     boundary_polygon_utm = Polygon(zip(boundary_xs, boundary_ys))
 
-    # --- Step 1 inputs: ALL current candidates from every upstream
-    # zone-type layer (see module docstring -- no zone-selection mechanism
-    # exists yet, so "all" is the only well-defined choice). ---
+    # --- Step 1 inputs: EVERY current production-zone candidate (no
+    # zone-selection mechanism exists for production in this pass -- see
+    # module docstring), plus only the SINGLE selected water zone and
+    # SINGLE selected road corridor from their own optimized-selection
+    # entry points. Per product decision, this app targets small farms
+    # only: one well-suited water zone / road corridor is sufficient, so
+    # only that one candidate's own geometry counts as "claimed" for each. ---
     production_result = identify_production_area_suitability(boundary_coordinates, dem=dem)
     production_polygons_utm = [p["polygon_utm"] for p in production_result["scored_patches"]]
 
-    valleys = delineate_valleys(dem)
-    raw_production_areas = identify_production_areas(dem, boundary_polygon_utm)
-    water_zones = find_pond_zones(valleys, raw_production_areas, boundary_polygon_utm, dem["crs"])
-    water_polygons_utm = [z["polygon_utm"] for z in water_zones]
+    water_result = identify_water_suitability(boundary_coordinates, dem=dem)
+    selected_water_zone = water_result["selected_water_zone"]
+    water_polygons_utm = [selected_water_zone["polygon_utm"]] if selected_water_zone else []
 
     road_result = identify_road_corridor_candidates(boundary_coordinates, dem=dem)
-    road_lines_utm = []
-    for feature in road_result["zones_geojson"]["features"]:
-        coords = feature["geometry"]["coordinates"]
-        xs, ys = warp_transform("EPSG:4326", dem["crs"], [pt[0] for pt in coords], [pt[1] for pt in coords])
-        road_lines_utm.append(LineString(zip(xs, ys)))
+    selected_road_corridor = road_result["selected_road_corridor"]
+    road_lines_utm = [selected_road_corridor["line_utm"]] if selected_road_corridor else []
 
     search_space, claimed_union = compute_tree_search_space(
         boundary_polygon_utm, production_polygons_utm, water_polygons_utm, road_lines_utm
