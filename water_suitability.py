@@ -174,26 +174,71 @@ GRAVITY_MAX_DEFICIT_GRADIENT_PCT = -5.0
 # out a candidate's composite score. CONFIGURABLE.
 GRAVITY_MIN_FACTOR = 0.2
 
+# water_candidate_zones.py's MIN_SERVICE_DISTANCE_METERS fix means a real
+# zone can legitimately sit AT distance_m == 0 from the production area it
+# serves (inside/touching a patch that covers most of the parcel — see
+# that module's own comment). At distance 0, gradient (rise/run) is
+# mathematically undefined -- there's no run to divide the real elevation
+# differential by. Silently defaulting the resulting gradient_pct to 0.0
+# (water_candidate_zones._aggregate_production_area_relationships()'s
+# div-by-zero guard) was a real bug found live: every distance-0 zone
+# scored an IDENTICAL, uninformative GRAVITY_LEVEL_GROUND_FACTOR (0.6)
+# regardless of whether its real elevation_differential_m was +7m or -9m
+# -- discarding exactly the signal this factor exists to report. Rather
+# than inventing a fake "run" to force a percent-gradient number out of a
+# 0m distance, a distance-0 zone is scored DIRECTLY off its real
+# elevation_differential_m (meters of head, not percent grade) against its
+# own, separate reference scale below -- deliberately smaller than
+# GRAVITY_FULL_CREDIT_GRADIENT_PCT's implied meters-at-typical-distance,
+# since there's no run diluting it here: a zone already sitting inside/
+# against the production area only needs a modest, real few meters of
+# elevation edge to be a comfortably usable gravity-feed relationship at
+# that scale. CONFIGURABLE.
+GRAVITY_ZERO_DISTANCE_FULL_CREDIT_METERS = 3.0
+GRAVITY_ZERO_DISTANCE_MAX_DEFICIT_METERS = -3.0
 
-def _gravity_feed_factor(gradient_pct: float) -> float:
+
+def _scaled_gravity_score(value: float, full_credit_ref: float, max_deficit_ref: float) -> float:
+    """
+    Shared 0-1 interpolation shape for BOTH the percent-gradient scale
+    (typical case, real distance > 0) and the meters-of-head scale
+    (distance == 0 case, see GRAVITY_ZERO_DISTANCE_FULL_CREDIT_METERS
+    above): 1.0 at/above full_credit_ref, GRAVITY_LEVEL_GROUND_FACTOR at
+    exactly 0 (level ground), floors at GRAVITY_MIN_FACTOR at/beyond
+    max_deficit_ref — never 0.0, see that constant's own comment for why.
+    """
+    if value >= full_credit_ref:
+        return 1.0
+    if value >= 0:
+        fraction = value / full_credit_ref
+        return GRAVITY_LEVEL_GROUND_FACTOR + fraction * (1.0 - GRAVITY_LEVEL_GROUND_FACTOR)
+    if value <= max_deficit_ref:
+        return GRAVITY_MIN_FACTOR
+    fraction = value / max_deficit_ref  # in (0, 1)
+    return GRAVITY_LEVEL_GROUND_FACTOR - fraction * (GRAVITY_LEVEL_GROUND_FACTOR - GRAVITY_MIN_FACTOR)
+
+
+def _gravity_feed_factor(elevation_differential_m: float, distance_m: float, gradient_pct: float) -> float:
     """
     0-1 score for a zone's real elevation relationship to the production
     area it could best serve (water_candidate_zones.py's
-    primary_production_area_relationship). Continuous and monotonic:
-    1.0 at/above GRAVITY_FULL_CREDIT_GRADIENT_PCT, GRAVITY_LEVEL_GROUND_FACTOR
-    at exactly 0% (level ground), floors at GRAVITY_MIN_FACTOR at/beyond
-    GRAVITY_MAX_DEFICIT_GRADIENT_PCT — never 0.0, see that constant's own
-    comment for why.
+    primary_production_area_relationship). Continuous and monotonic.
+
+    distance_m == 0 (the zone sits inside/touching the production area --
+    a real, expected case, not an edge case to special-case away) scores
+    directly off elevation_differential_m against the
+    GRAVITY_ZERO_DISTANCE_*_METERS references, NOT off gradient_pct (which
+    water_candidate_zones.py reports as 0.0 there, a real "undefined
+    gradient" placeholder, not a real 0% grade — see this module's
+    GRAVITY_ZERO_DISTANCE_FULL_CREDIT_METERS comment for why scoring that
+    placeholder directly was a real bug). Every distance_m > 0 case scores
+    off the normal percent-gradient scale, unchanged.
     """
-    if gradient_pct >= GRAVITY_FULL_CREDIT_GRADIENT_PCT:
-        return 1.0
-    if gradient_pct >= 0:
-        fraction = gradient_pct / GRAVITY_FULL_CREDIT_GRADIENT_PCT
-        return GRAVITY_LEVEL_GROUND_FACTOR + fraction * (1.0 - GRAVITY_LEVEL_GROUND_FACTOR)
-    if gradient_pct <= GRAVITY_MAX_DEFICIT_GRADIENT_PCT:
-        return GRAVITY_MIN_FACTOR
-    fraction = gradient_pct / GRAVITY_MAX_DEFICIT_GRADIENT_PCT  # in (0, 1)
-    return GRAVITY_LEVEL_GROUND_FACTOR - fraction * (GRAVITY_LEVEL_GROUND_FACTOR - GRAVITY_MIN_FACTOR)
+    if distance_m == 0:
+        return _scaled_gravity_score(
+            elevation_differential_m, GRAVITY_ZERO_DISTANCE_FULL_CREDIT_METERS, GRAVITY_ZERO_DISTANCE_MAX_DEFICIT_METERS
+        )
+    return _scaled_gravity_score(gradient_pct, GRAVITY_FULL_CREDIT_GRADIENT_PCT, GRAVITY_MAX_DEFICIT_GRADIENT_PCT)
 
 
 # --- soil water-holding factor (SSURGO chorizon.ksat_r) ------------------
@@ -760,7 +805,11 @@ def score_water_zones(
         valley = valleys_by_id.get(zone["valley_id"])
         primary_relationship = zone["primary_production_area_relationship"]
 
-        gravity_factor = _gravity_feed_factor(primary_relationship["gradient_pct"])
+        gravity_factor = _gravity_feed_factor(
+            primary_relationship["elevation_differential_m"],
+            primary_relationship["distance_m"],
+            primary_relationship["gradient_pct"],
+        )
 
         soil_entry = soil_data_by_zone_id.get(zone["valley_id"], _DATA_CHECK_UNAVAILABLE)
         soil_data_available = soil_entry is not _DATA_CHECK_UNAVAILABLE

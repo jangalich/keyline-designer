@@ -22,6 +22,8 @@ from water_suitability import (
     GRAVITY_LEVEL_GROUND_FACTOR,
     GRAVITY_MAX_DEFICIT_GRADIENT_PCT,
     GRAVITY_MIN_FACTOR,
+    GRAVITY_ZERO_DISTANCE_FULL_CREDIT_METERS,
+    GRAVITY_ZERO_DISTANCE_MAX_DEFICIT_METERS,
     STREAM_NEUTRAL_FACTOR,
     STREAM_PROXIMITY_REFERENCE_METERS,
     WATER_HOLDING_GOOD_KSAT_UM_PER_S,
@@ -44,19 +46,67 @@ print("Composite factor weights sum to 1.0.")
 
 
 # --- _gravity_feed_factor(): continuous, monotonic, never truly zero ----
+# --- (distance_m > 0 case: scores off gradient_pct, the original scale) --
 
-assert _gravity_feed_factor(GRAVITY_FULL_CREDIT_GRADIENT_PCT) == 1.0
-assert _gravity_feed_factor(GRAVITY_FULL_CREDIT_GRADIENT_PCT * 5) == 1.0, "extra-comfortable gradient still caps at 1.0"
-assert _gravity_feed_factor(0.0) == GRAVITY_LEVEL_GROUND_FACTOR
-assert _gravity_feed_factor(GRAVITY_MAX_DEFICIT_GRADIENT_PCT) == GRAVITY_MIN_FACTOR
-assert _gravity_feed_factor(GRAVITY_MAX_DEFICIT_GRADIENT_PCT * 5) == GRAVITY_MIN_FACTOR, "extreme deficit floors, doesn't go below GRAVITY_MIN_FACTOR"
+# distance_m is nonzero (100.0) and elevation_differential_m is irrelevant
+# in this branch -- only gradient_pct drives the score when distance_m > 0.
+assert _gravity_feed_factor(999.0, 100.0, GRAVITY_FULL_CREDIT_GRADIENT_PCT) == 1.0
+assert _gravity_feed_factor(999.0, 100.0, GRAVITY_FULL_CREDIT_GRADIENT_PCT * 5) == 1.0, "extra-comfortable gradient still caps at 1.0"
+assert _gravity_feed_factor(999.0, 100.0, 0.0) == GRAVITY_LEVEL_GROUND_FACTOR
+assert _gravity_feed_factor(999.0, 100.0, GRAVITY_MAX_DEFICIT_GRADIENT_PCT) == GRAVITY_MIN_FACTOR
+assert _gravity_feed_factor(999.0, 100.0, GRAVITY_MAX_DEFICIT_GRADIENT_PCT * 5) == GRAVITY_MIN_FACTOR, "extreme deficit floors, doesn't go below GRAVITY_MIN_FACTOR"
 assert GRAVITY_MIN_FACTOR > 0.0, "a below-elevation (pump-required) candidate must never score literally 0 on this factor"
-mild_above = _gravity_feed_factor(0.5)
-mild_below = _gravity_feed_factor(-1.0)
+mild_above = _gravity_feed_factor(999.0, 100.0, 0.5)
+mild_below = _gravity_feed_factor(999.0, 100.0, -1.0)
 assert GRAVITY_LEVEL_GROUND_FACTOR < mild_above < 1.0
 assert GRAVITY_MIN_FACTOR < mild_below < GRAVITY_LEVEL_GROUND_FACTOR
-assert _gravity_feed_factor(1.0) > _gravity_feed_factor(0.0) > _gravity_feed_factor(-1.0) > _gravity_feed_factor(-5.0)
-print("_gravity_feed_factor() is continuous/monotonic and never zero, even at an extreme pump-required deficit.")
+assert (
+    _gravity_feed_factor(999.0, 100.0, 1.0) > _gravity_feed_factor(999.0, 100.0, 0.0)
+    > _gravity_feed_factor(999.0, 100.0, -1.0) > _gravity_feed_factor(999.0, 100.0, -5.0)
+)
+print("_gravity_feed_factor() is continuous/monotonic and never zero (distance_m > 0, gradient_pct-driven case).")
+
+
+# --- _gravity_feed_factor(): distance_m == 0 case -- real bug, fixed ----
+#
+# Live-confirmed bug: with distance_m == 0 (a zone sitting inside/touching
+# a production area — a real, common case since MIN_SERVICE_DISTANCE_METERS
+# no longer rejects it), water_candidate_zones.py reports gradient_pct as a
+# 0.0 div-by-zero placeholder, NOT a real 0% grade. Scoring directly off
+# that placeholder collapsed every distance-0 zone to the same
+# GRAVITY_LEVEL_GROUND_FACTOR (0.6), regardless of real elevation_differential_m
+# -- on the real property, a +7.01m (strong gravity-feed), a +0.63m (barely
+# above), and a -8.68m (pump-required) zone all scored identically. Fixed:
+# distance_m == 0 must score off elevation_differential_m directly, not
+# gradient_pct.
+
+real_property_valley4 = _gravity_feed_factor(7.01, 0.0, 0.0)   # strong gravity-feed
+real_property_valley2 = _gravity_feed_factor(0.63, 0.0, 0.0)   # barely above
+real_property_valley11 = _gravity_feed_factor(-8.68, 0.0, 0.0)  # pump-required
+
+assert real_property_valley4 > real_property_valley2 > real_property_valley11, (
+    f"real, differentiated elevation differentials at distance_m==0 must score in the correct rank order -- got "
+    f"valley4={real_property_valley4}, valley2={real_property_valley2}, valley11={real_property_valley11}"
+)
+assert real_property_valley11 > 0.0, "even the pump-required zone must never score literally 0 on this factor"
+print(
+    f"REGRESSION (real property scenario, all distance_m==0): gravity_feed_factor correctly differentiates "
+    f"by elevation_differential_m alone -- valley4 (+7.01m)={real_property_valley4} > "
+    f"valley2 (+0.63m)={real_property_valley2} > valley11 (-8.68m)={real_property_valley11}."
+)
+
+assert _gravity_feed_factor(GRAVITY_ZERO_DISTANCE_FULL_CREDIT_METERS, 0.0, 0.0) == 1.0
+assert _gravity_feed_factor(0.0, 0.0, 0.0) == GRAVITY_LEVEL_GROUND_FACTOR
+assert _gravity_feed_factor(GRAVITY_ZERO_DISTANCE_MAX_DEFICIT_METERS, 0.0, 0.0) == GRAVITY_MIN_FACTOR
+assert _gravity_feed_factor(GRAVITY_ZERO_DISTANCE_MAX_DEFICIT_METERS * 5, 0.0, 0.0) == GRAVITY_MIN_FACTOR
+print("_gravity_feed_factor() at distance_m==0 hits the same real reference breakpoints (full credit / level / max deficit).")
+
+# A gradient_pct of 0.0 alongside a nonzero distance_m must still be
+# treated as a genuine, real 0% grade (level ground), NOT collapsed to the
+# distance==0 meters-based path -- confirms the dispatch is keyed strictly
+# off distance_m, not off gradient_pct happening to read 0.0.
+assert _gravity_feed_factor(7.01, 50.0, 0.0) == GRAVITY_LEVEL_GROUND_FACTOR
+print("A real, nonzero distance with a genuine 0% gradient still scores as level ground, not the distance==0 path.")
 
 
 # --- _water_holding_factor(): log-scale, real NRCS breakpoints ----------
