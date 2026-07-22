@@ -1,0 +1,301 @@
+"""
+test_water_suitability.py
+
+Offline (no-network) checks for water_suitability.py's per-factor scoring
+and weighted composite ranking. Same "pure logic, independent of real data
+fetches" approach as test_production_suitability.py/test_solar_suitability.py:
+score_water_zones() is exercised directly against hand-built zones/valleys
+(the same synthetic shapes test_water_candidate_zones.py already uses for
+water_candidate_zones.find_candidate_zones()) plus pre-fetched soil/stream
+data dicts, with no network calls anywhere in this file except the final
+offline wiring check (identify_water_suitability() with check_soil=False,
+check_streams=False and a synthetic dem= passed directly, mirroring
+test_water_system_candidate_pipeline.py's approach).
+"""
+
+from shapely.geometry import box
+
+from feature_schema import validate_feature_collection
+from water_candidate_zones import find_candidate_zones
+from water_suitability import (
+    GRAVITY_FULL_CREDIT_GRADIENT_PCT,
+    GRAVITY_LEVEL_GROUND_FACTOR,
+    GRAVITY_MAX_DEFICIT_GRADIENT_PCT,
+    GRAVITY_MIN_FACTOR,
+    STREAM_NEUTRAL_FACTOR,
+    STREAM_PROXIMITY_REFERENCE_METERS,
+    WATER_HOLDING_GOOD_KSAT_UM_PER_S,
+    WATER_HOLDING_POOR_KSAT_UM_PER_S,
+    WATER_HOLDING_UNAVAILABLE_FACTOR,
+    _WEIGHT_SUM,
+    _gravity_feed_factor,
+    _stream_permanence_factor,
+    _topographic_factor,
+    _water_holding_factor,
+    identify_water_suitability,
+    score_water_zones,
+    water_suitability_to_geojson,
+)
+
+CRS = "EPSG:32617"
+
+assert abs(_WEIGHT_SUM - 1.0) < 1e-6, f"composite weights must sum to 1.0, got {_WEIGHT_SUM}"
+print("Composite factor weights sum to 1.0.")
+
+
+# --- _gravity_feed_factor(): continuous, monotonic, never truly zero ----
+
+assert _gravity_feed_factor(GRAVITY_FULL_CREDIT_GRADIENT_PCT) == 1.0
+assert _gravity_feed_factor(GRAVITY_FULL_CREDIT_GRADIENT_PCT * 5) == 1.0, "extra-comfortable gradient still caps at 1.0"
+assert _gravity_feed_factor(0.0) == GRAVITY_LEVEL_GROUND_FACTOR
+assert _gravity_feed_factor(GRAVITY_MAX_DEFICIT_GRADIENT_PCT) == GRAVITY_MIN_FACTOR
+assert _gravity_feed_factor(GRAVITY_MAX_DEFICIT_GRADIENT_PCT * 5) == GRAVITY_MIN_FACTOR, "extreme deficit floors, doesn't go below GRAVITY_MIN_FACTOR"
+assert GRAVITY_MIN_FACTOR > 0.0, "a below-elevation (pump-required) candidate must never score literally 0 on this factor"
+mild_above = _gravity_feed_factor(0.5)
+mild_below = _gravity_feed_factor(-1.0)
+assert GRAVITY_LEVEL_GROUND_FACTOR < mild_above < 1.0
+assert GRAVITY_MIN_FACTOR < mild_below < GRAVITY_LEVEL_GROUND_FACTOR
+assert _gravity_feed_factor(1.0) > _gravity_feed_factor(0.0) > _gravity_feed_factor(-1.0) > _gravity_feed_factor(-5.0)
+print("_gravity_feed_factor() is continuous/monotonic and never zero, even at an extreme pump-required deficit.")
+
+
+# --- _water_holding_factor(): log-scale, real NRCS breakpoints ----------
+
+assert _water_holding_factor(WATER_HOLDING_GOOD_KSAT_UM_PER_S) == 1.0
+assert _water_holding_factor(WATER_HOLDING_GOOD_KSAT_UM_PER_S / 10) == 1.0, "even better (lower) than the good reference still caps at 1.0"
+assert _water_holding_factor(WATER_HOLDING_POOR_KSAT_UM_PER_S) == 0.0
+assert _water_holding_factor(WATER_HOLDING_POOR_KSAT_UM_PER_S * 10) == 0.0
+assert _water_holding_factor(None) == WATER_HOLDING_UNAVAILABLE_FACTOR
+mid_ksat = (WATER_HOLDING_GOOD_KSAT_UM_PER_S * WATER_HOLDING_POOR_KSAT_UM_PER_S) ** 0.5  # geometric midpoint
+mid_score = _water_holding_factor(mid_ksat)
+assert 0.4 < mid_score < 0.6, f"log-scale geometric midpoint should score near 0.5, got {mid_score}"
+assert _water_holding_factor(1.0) > _water_holding_factor(10.0) > _water_holding_factor(50.0)
+print("_water_holding_factor() scores real ksat_r on a log scale between the documented NRCS breakpoints, unavailable defaults neutral.")
+
+
+# --- _stream_permanence_factor(): real permanence classes, real proximity ---
+
+perennial_close = {"name": "Real Creek", "fcode": 46006, "distance_m": 0.0}
+intermittent_close = {"name": "Seasonal Run", "fcode": 46003, "distance_m": 0.0}
+ephemeral_close = {"name": "Draw", "fcode": 46007, "distance_m": 0.0}
+unknown_close = {"name": "General Stream", "fcode": 46000, "distance_m": 0.0}
+
+perennial_factor, perennial_label = _stream_permanence_factor(perennial_close)
+intermittent_factor, intermittent_label = _stream_permanence_factor(intermittent_close)
+ephemeral_factor, ephemeral_label = _stream_permanence_factor(ephemeral_close)
+unknown_factor, unknown_label = _stream_permanence_factor(unknown_close)
+
+assert perennial_label == "perennial" and intermittent_label == "intermittent" and ephemeral_label == "ephemeral" and unknown_label == "unknown"
+assert perennial_factor > intermittent_factor > ephemeral_factor, (
+    f"perennial ({perennial_factor}) must outscore intermittent ({intermittent_factor}) "
+    f"must outscore ephemeral ({ephemeral_factor}) at equal proximity"
+)
+assert intermittent_factor > STREAM_NEUTRAL_FACTOR > ephemeral_factor or ephemeral_factor >= STREAM_NEUTRAL_FACTOR
+assert perennial_factor == 1.0, "right at a perennial stream (distance=0) should reach the ceiling"
+print(f"Stream permanence ordering confirmed at equal proximity: perennial={perennial_factor} > intermittent={intermittent_factor} > ephemeral={ephemeral_factor}, unknown={unknown_factor}.")
+
+far_perennial = {"name": "Real Creek", "fcode": 46006, "distance_m": STREAM_PROXIMITY_REFERENCE_METERS * 2}
+far_factor, far_label = _stream_permanence_factor(far_perennial)
+assert far_factor == STREAM_NEUTRAL_FACTOR and far_label is None, "a stream beyond the proximity reference contributes no real credit -- same as no stream at all"
+
+none_factor, none_label = _stream_permanence_factor(None)
+assert none_factor == STREAM_NEUTRAL_FACTOR and none_label is None
+print("A stream beyond the proximity reference, or no stream at all, both correctly fall back to the neutral baseline.")
+
+
+# --- _topographic_factor(): sweet-spot gradient + contributing area -----
+
+flat_factor, flat_grad_score, _ = _topographic_factor(0.1, 5.0)
+sweet_factor, sweet_grad_score, _ = _topographic_factor(8.0, 5.0)
+steep_factor, steep_grad_score, _ = _topographic_factor(40.0, 5.0)
+assert sweet_grad_score == 1.0
+assert flat_grad_score == 0.0 and steep_grad_score == 0.0
+assert sweet_factor > flat_factor and sweet_factor > steep_factor
+_, _, small_area_score = _topographic_factor(8.0, 1.0)
+_, _, big_area_score = _topographic_factor(8.0, 50.0)
+assert big_area_score > small_area_score
+print("_topographic_factor() correctly scores a moderate valley gradient highest and rewards larger contributing area.")
+
+
+# --- score_water_zones(): full composite, using the same fixtures ------
+# --- test_water_candidate_zones.py already uses for zone generation ----
+
+BOUNDARY = box(0, 0, 200, 300)
+PRODUCTION_AREAS = [
+    {"id": 0, "representative_elevation_m": 100.0, "polygon_utm": box(50, 0, 150, 30)}
+]
+VALLEY_TOWARD_PATCH = {
+    "id": 0,
+    "max_contributing_area_acres": 5.0,
+    "branches_utm": [[(100.0, y, 100.0 + 0.02 * (y - 30)) for y in range(295, 0, -5)]],
+}
+VALLEY_BELOW_PATCH = {
+    "id": 2,
+    "max_contributing_area_acres": 5.0,
+    "branches_utm": [[(160.0, y, 80.0) for y in range(295, 30, -5)]],
+}
+VALLEYS = [VALLEY_TOWARD_PATCH, VALLEY_BELOW_PATCH]
+
+zones = find_candidate_zones(VALLEYS, PRODUCTION_AREAS, BOUNDARY, CRS)
+zone_ids = {z["valley_id"] for z in zones}
+assert zone_ids == {0, 2}, f"expected both the above- and below-elevation valleys to produce zones, got {zone_ids}"
+
+zone0 = next(z for z in zones if z["valley_id"] == 0)
+zone2 = next(z for z in zones if z["valley_id"] == 2)
+
+GOOD_SOIL = {"ksat_r_um_per_s": 0.05, "coverage_fraction": 0.9}
+POOR_SOIL = {"ksat_r_um_per_s": 300.0, "coverage_fraction": 0.9}
+
+GOOD_STREAM = {"name": "Real Creek", "fcode": 46006, "distance_m": 5.0}
+
+# A dummy DEM dict -- score_water_zones() only reads dem['crs'] indirectly
+# via valleys/zones already in UTM meters here, so this doesn't need real
+# raster data, same "pure logic" reasoning test_water_candidate_zones.py
+# already applies to find_candidate_zones().
+DUMMY_DEM = {"crs": CRS}
+
+# Best case: zone 0 (above production area, real gradient) + good soil +
+# close perennial stream should clearly outscore zone 2 (below production
+# area/pump-required) with poor soil and no stream.
+best_case_scored = score_water_zones(
+    [zone0, zone2],
+    VALLEYS,
+    DUMMY_DEM,
+    soil_data_by_zone_id={0: GOOD_SOIL, 2: POOR_SOIL},
+    stream_data_by_zone_id={0: GOOD_STREAM, 2: None},
+)
+scored_by_id = {z["valley_id"]: z for z in best_case_scored}
+assert scored_by_id[0]["suitability_score"] > scored_by_id[2]["suitability_score"]
+print(
+    f"Above-elevation/good-soil/near-perennial-stream zone (score={scored_by_id[0]['suitability_score']}) "
+    f"correctly outscores below-elevation/poor-soil/no-stream zone (score={scored_by_id[2]['suitability_score']})."
+)
+
+# Below-elevation zone must still be a REAL, scoreable, non-excluded, non-zero candidate.
+assert scored_by_id[2]["suitability_score"] > 0.0, "a below-elevation (pump-required) candidate must still score > 0, never be zeroed out"
+assert scored_by_id[2]["primary_production_area_relationship"]["above_production_area"] is False
+print(f"Below-elevation (pump-required) candidate remains a real, scoreable, non-zero candidate: score={scored_by_id[2]['suitability_score']}/100.")
+
+# rank is assigned over ALL returned zones, best-first, no exclusion.
+assert len(best_case_scored) == 2
+assert {z["rank"] for z in best_case_scored} == {1, 2}
+assert next(z for z in best_case_scored if z["rank"] == 1)["valley_id"] == 0
+print("rank is assigned over all returned zones (no MIN_SUITABILITY_SCORE-style exclusion).")
+
+
+# --- confidence differentiation: same zone, different data availability ---
+
+both_available = score_water_zones([zone0], VALLEYS, DUMMY_DEM, {0: GOOD_SOIL}, {0: GOOD_STREAM})[0]
+one_available = score_water_zones([zone0], VALLEYS, DUMMY_DEM, {0: GOOD_SOIL}, {})[0]
+none_available = score_water_zones([zone0], VALLEYS, DUMMY_DEM, {}, {})[0]
+
+assert both_available["confidence"] == "high"
+assert one_available["confidence"] == "medium"
+assert none_available["confidence"] == "low"
+assert both_available["confidence"] != one_available["confidence"] != none_available["confidence"]
+print(
+    f"Confidence genuinely differentiates by real data availability for the SAME zone: "
+    f"both-available={both_available['confidence']}, one-available={one_available['confidence']}, "
+    f"none-available={none_available['confidence']} -- no longer a flat 'low' across the board."
+)
+
+# Confidence also differs ACROSS zones within one scoring call when their
+# real data genuinely differs -- the actual scenario the live property run
+# needs to demonstrate.
+mixed_scored = score_water_zones(
+    [zone0, zone2], VALLEYS, DUMMY_DEM,
+    soil_data_by_zone_id={0: GOOD_SOIL},  # zone 2 absent -- never checked
+    stream_data_by_zone_id={0: GOOD_STREAM, 2: None},  # zone 2 checked, none found
+)
+mixed_by_id = {z["valley_id"]: z for z in mixed_scored}
+assert mixed_by_id[0]["confidence"] == "high"
+assert mixed_by_id[2]["confidence"] == "low"
+assert mixed_by_id[0]["confidence"] != mixed_by_id[2]["confidence"]
+print(f"Confidence differs across candidates in the SAME run: zone 0={mixed_by_id[0]['confidence']}, zone 2={mixed_by_id[2]['confidence']}.")
+
+
+# --- gravity confidence_notes framing: plain tradeoff, not an apology ---
+
+below_notes = scored_by_id[2]["confidence_notes"].lower()
+assert "pump" in below_notes
+assert "cost/maintenance tradeoff" in below_notes or "tradeoff" in below_notes
+apology_phrases = ["unfortunately", "sadly", "poor choice", "bad site", "should be avoided"]
+assert not any(phrase in below_notes for phrase in apology_phrases), (
+    "below-elevation confidence_notes must state the pump tradeoff plainly, not apologize for it"
+)
+print("Below-elevation candidate's confidence_notes states the pump tradeoff plainly, without apologizing for it.")
+
+nhd_offset_zone = scored_by_id[0]  # has a real, close, in-range stream
+assert "100-300m" in nhd_offset_zone["confidence_notes"], "NHD offset limitation must be stated when stream proximity meaningfully affects score"
+print("NHD 100-300m DEM-offset limitation is stated in confidence_notes when stream proximity meaningfully affects the score.")
+
+
+# --- output is a schema-valid FeatureCollection on the required layer ---
+
+geojson = water_suitability_to_geojson(best_case_scored)
+validate_feature_collection(geojson)
+confidences_seen = {f["properties"]["confidence"] for f in geojson["features"]}
+for feature in geojson["features"]:
+    assert feature["properties"]["layer"] == "water_system_candidate"
+    assert "suitability_score" in feature["properties"]
+    assert "gravity_feed_factor" in feature["properties"]
+    assert "soil_water_holding_factor" in feature["properties"]
+    assert "stream_permanence_factor" in feature["properties"]
+    assert "topographic_factor" in feature["properties"]
+print(f"water_suitability_to_geojson() output is schema-valid, layer='water_system_candidate', confidences observed: {confidences_seen}.")
+
+
+# --- offline full-pipeline wiring check (synthetic DEM, no network) ----
+
+import numpy as np
+from rasterio.warp import transform as warp_transform
+
+from dem_data import _utm_epsg_for_lonlat
+
+CENTER_LON, CENTER_LAT = -79.98, 40.64
+EPSG = _utm_epsg_for_lonlat(CENTER_LON, CENTER_LAT)
+DST_CRS = f"EPSG:{EPSG}"
+center_x, center_y = warp_transform("EPSG:4326", DST_CRS, [CENTER_LON], [CENTER_LAT])
+center_x, center_y = center_x[0], center_y[0]
+
+RESOLUTION = 5.0
+SIZE = 40
+HALF_EXTENT = SIZE * RESOLUTION / 2
+origin_x = center_x - HALF_EXTENT
+origin_y = center_y + HALF_EXTENT
+
+utm_corners_x = [origin_x, origin_x + SIZE * RESOLUTION, origin_x + SIZE * RESOLUTION, origin_x, origin_x]
+utm_corners_y = [origin_y, origin_y, origin_y - SIZE * RESOLUTION, origin_y - SIZE * RESOLUTION, origin_y]
+lons, lats = warp_transform(DST_CRS, "EPSG:4326", utm_corners_x, utm_corners_y)
+boundary_coordinates = list(zip(lons, lats))
+
+array = np.zeros((SIZE, SIZE), dtype=np.float32)
+for row in range(SIZE):
+    for col in range(SIZE):
+        if row >= SIZE - 8:
+            array[row, col] = 100.0
+        else:
+            distance_from_center_col = abs(col - SIZE // 2)
+            array[row, col] = 100.0 + (SIZE - 8 - row) * 3.0 + distance_from_center_col * 1.5
+
+synthetic_dem = {
+    "array": array,
+    "resolution_meters": (RESOLUTION, RESOLUTION),
+    "origin_x": origin_x,
+    "origin_y": origin_y,
+    "crs": DST_CRS,
+}
+
+pipeline_result = identify_water_suitability(
+    boundary_coordinates, dem=synthetic_dem, check_soil=False, check_streams=False,
+    zone_kwargs={"min_boundary_setback_meters": 5.0},
+)
+validate_feature_collection(pipeline_result["zones_geojson"])
+assert len(pipeline_result["scored_zones"]) >= 1, "expected at least one scored water system candidate zone"
+for zone in pipeline_result["scored_zones"]:
+    assert zone["confidence"] == "low", "with both soil and stream checks disabled, confidence must fall back to low"
+    assert zone["soil_data_available"] is False
+    assert zone["stream_data_available"] is False
+print(f"identify_water_suitability() full pipeline wiring works end-to-end offline: {len(pipeline_result['scored_zones'])} scored zone(s), check_soil/check_streams=False correctly yields confidence='low'.")
+
+print("\nAll water_suitability checks passed.")
