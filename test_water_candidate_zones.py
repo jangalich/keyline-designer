@@ -128,20 +128,28 @@ print("No production-area candidates means no water system candidate zones.")
 
 
 # --- min/max service distance bounds are still real generation-time filters ---
+#
+# Uses a valley genuinely OUTSIDE any patch (not VALLEY_TOWARD_PATCH,
+# whose southernmost points fall INSIDE PRODUCTION_AREAS's own patch --
+# see the distance==0 regression section below for why an inside point is
+# no longer subject to either bound at all) so this isolates the max-
+# distance filter's own behavior for a real, separate, too-far point.
+FAR_PRODUCTION_AREA = [{"id": 6, "representative_elevation_m": 50.0, "polygon_utm": box(50, 0, 150, 10)}]
+VALLEY_FAR_FROM_PATCH = {"id": 5, "branches_utm": [[(100.0, 200.0, 80.0), (100.0, 195.0, 80.0)]]}
 
 no_service_zones = find_candidate_zones(
-    [VALLEY_TOWARD_PATCH],
-    PRODUCTION_AREAS,
+    [VALLEY_FAR_FROM_PATCH],
+    FAR_PRODUCTION_AREA,
     BOUNDARY,
     CRS,
-    max_service_distance_meters=5.0,  # far tighter than valley 0's actual distance to the patch
+    max_service_distance_meters=5.0,  # far tighter than this valley's actual (~185m) distance to the patch
 )
 assert no_service_zones == [], (
-    "a max_service_distance_meters tighter than the valley's actual distance to any "
-    "production area should still exclude it -- service-distance bounds are unchanged "
-    "real filters, not preferences"
+    "a max_service_distance_meters tighter than a genuinely-outside valley's actual distance to any "
+    "production area should still exclude it -- service-distance bounds are unchanged real filters "
+    "for a point outside a patch, not preferences"
 )
-print("Max service distance is still a real, enforced generation-time filter.")
+print("Max service distance is still a real, enforced generation-time filter for a point outside a patch.")
 
 
 # --- output is a schema-valid FeatureCollection on the required layer ---
@@ -163,5 +171,66 @@ print("zones_to_geojson output is schema-valid, layer='water_system_candidate', 
 below_feature = next(f for f in geojson["features"] if f["properties"]["source_valley_id"] == 2)
 assert below_feature["properties"]["primary_production_area_relationship"]["above_production_area"] is False
 print("Below-elevation zone's GeoJSON feature reports above_production_area=False, not omitted or excluded.")
+
+
+# --- regression: MIN_SERVICE_DISTANCE_METERS must not reject points -----
+# --- already INSIDE a production area's own polygon (real bug, fixed) ---
+#
+# On a real reference property, a single production-area patch covered
+# ~95% of the parcel (production_area.py's own slope threshold at that
+# scale) -- nearly every valley point on that property sat AT OR INSIDE
+# its own footprint, so point.distance(patch['polygon_utm']) == 0.0m for
+# essentially every point tested. The original "if distance <
+# min_service_distance: continue" check rejected every one of those
+# points outright as "too close," cascading into ZERO qualifying zones
+# property-wide. This fixture reproduces that exact shape: a production
+# area covering ~97% of a 200x300 boundary, with a valley whose points
+# sit entirely inside it.
+
+LARGE_PRODUCTION_AREA = [
+    {"id": 99, "representative_elevation_m": 100.0, "polygon_utm": box(0, 0, 200, 290)}
+]
+
+VALLEY_INSIDE_LARGE_PATCH = {
+    "id": 3,
+    "branches_utm": [[(100.0, y, 110.0) for y in range(280, 15, -5)]],
+}
+
+regression_zones = find_candidate_zones([VALLEY_INSIDE_LARGE_PATCH], LARGE_PRODUCTION_AREA, BOUNDARY, CRS)
+assert len(regression_zones) == 1, (
+    "a valley sitting entirely INSIDE a production area that covers most of the parcel must still "
+    f"produce a real zone -- MIN_SERVICE_DISTANCE_METERS must not reject distance==0 points -- got "
+    f"{len(regression_zones)} zones"
+)
+regression_primary = regression_zones[0]["primary_production_area_relationship"]
+assert regression_primary["distance_m"] == 0.0, "every point in this fixture sits inside the patch -- distance must be 0"
+assert regression_primary["above_production_area"] is True
+assert regression_primary["elevation_differential_m"] > 0
+print(
+    "Regression: a valley sitting entirely inside a production area covering most of the parcel "
+    "still produces a real zone -- distance_m=0.0 is correctly exempt from the "
+    "MIN_SERVICE_DISTANCE_METERS floor."
+)
+
+# A point genuinely OUTSIDE a patch but closer than MIN_SERVICE_DISTANCE_METERS
+# must still be rejected -- the fix only exempts distance==0 (inside/touching),
+# it does not weaken the floor for a real near-but-separate siting.
+NEARBY_SMALL_PATCH = [
+    {"id": 100, "representative_elevation_m": 90.0, "polygon_utm": box(90, 100, 110, 120)}
+]
+VALLEY_JUST_OUTSIDE_SMALL_PATCH = {
+    "id": 4,
+    # x=100 sits directly above the patch (x in [90,110]); y=125/128 are
+    # 5m/8m north of the patch's own y=120 edge -- outside the patch
+    # (distance > 0) but inside the 10m minimum service distance floor
+    # (both < 10, so both should still be rejected).
+    "branches_utm": [[(100.0, 125.0, 200.0), (100.0, 128.0, 200.0)]],
+}
+still_rejected = find_candidate_zones([VALLEY_JUST_OUTSIDE_SMALL_PATCH], NEARBY_SMALL_PATCH, BOUNDARY, CRS)
+assert still_rejected == [], (
+    "a point genuinely OUTSIDE a patch but closer than MIN_SERVICE_DISTANCE_METERS must still be "
+    "rejected -- the distance==0 exemption must not weaken the floor for real near-but-separate siting"
+)
+print("A point outside (but too close to) a small, separate patch is still correctly rejected by the service-distance floor.")
 
 print("\nAll water_candidate_zones checks passed.")

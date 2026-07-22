@@ -67,9 +67,23 @@ MIN_BOUNDARY_SETBACK_METERS = 15.0
 # run. CONFIGURABLE.
 MAX_SERVICE_DISTANCE_METERS = 800.0
 
-# Guards against a valley point sitting inside/immediately adjacent to the
-# production-area patch itself, where "above by X% grade over Y meters" no
-# longer means anything (Y too small to be meaningful). CONFIGURABLE.
+# Guards against a valley point sitting immediately adjacent to (but
+# genuinely OUTSIDE) a production-area patch, where "above by X% grade
+# over Y meters" no longer means anything (Y too small to be meaningful).
+# Deliberately NOT applied to a point already INSIDE/touching a patch
+# (distance == 0 — see _elevation_relationships_for_branch()): that guard
+# is about rejecting a near-but-separate siting as too close for the
+# distance math to mean anything, not about rejecting siting inside the
+# production area at all. That distinction is real, not academic — a
+# single production-area patch can legitimately cover most of a parcel
+# (production_area.py's own slope threshold, confirmed live: ~95% of one
+# real reference property), and a strict "distance < 10m is always too
+# close" reading would then reject nearly every valley point on that
+# property outright, since almost everywhere on it genuinely IS inside
+# that one patch. Same "gate becomes a genuinely-inapplicable rule at this
+# property's real scale, fix it, don't just re-tune the number" pattern as
+# road_corridors.py's/production_suitability.py's own earlier softened-
+# exclusion fixes documented in README.md. CONFIGURABLE.
 MIN_SERVICE_DISTANCE_METERS = 10.0
 
 # Half-width of the buffered zone band drawn around each qualifying valley
@@ -115,6 +129,23 @@ def _elevation_relationships_for_branch(
     (see module docstring for why gravity moved from a generation-time
     gate to a water_suitability.py scoring input).
 
+    min_service_distance is only applied to a point genuinely OUTSIDE a
+    patch's own polygon (distance > 0) — a point already inside/touching
+    the patch (distance == 0) is never rejected by it. Real bug, found
+    live: with a single production-area patch covering ~95% of a real
+    reference property, "distance < 10m is too close" rejected every
+    valley point on that property outright, since a point genuinely
+    inside a patch that large has nowhere else to be relative to it.
+    MIN_SERVICE_DISTANCE_METERS exists to reject a near-but-SEPARATE
+    siting (where "above by X% grade over Y meters" stops meaning
+    anything for Y too small) — it was never meant to reject siting
+    INSIDE the production area entirely, and shouldn't, per this whole
+    feature's "elevation/proximity is a preference, not a gate" direction
+    (see module docstring): a water zone genuinely inside/adjacent to the
+    production area it serves is a legitimate, common real-world
+    scenario, the same way solar_suitability.py now allows a structure
+    candidate to sit fully inside a production zone.
+
     Returns the same points, each tagged with either the closest-to-
     gravity-favorable patch relationship
     ({'id', 'elevation_differential_m', 'distance_m'}) or None (no
@@ -126,7 +157,9 @@ def _elevation_relationships_for_branch(
         best = None
         for patch in production_areas:
             distance = point.distance(patch["polygon_utm"])
-            if distance < min_service_distance or distance > max_service_distance:
+            if distance > max_service_distance:
+                continue
+            if 0 < distance < min_service_distance:
                 continue
             elevation_differential_m = elevation - patch["representative_elevation_m"]
             if best is None or elevation_differential_m > best["elevation_differential_m"]:
