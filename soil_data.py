@@ -164,7 +164,7 @@ def get_soil_data_for_polygon(wkt_polygon: str) -> list[dict]:
     return [dict(zip(result["columns"], row)) for row in result["rows"]]
 
 
-# SSURGO's official "Farmland Classification" values (muaggatt.farmlndcl).
+# SSURGO's official "Farmland Classification" values (mapunit.farmlndcl).
 # Anything starting with "All areas are prime farmland" or "Prime farmland
 # if..." counts as prime for this pipeline's purposes — the conditional
 # variants ("...if drained", "...if irrigated", etc.) still mean the soil
@@ -187,17 +187,29 @@ def get_farmland_classification_for_polygon(wkt_polygon: str) -> list[dict]:
     """
     Returns SSURGO's official Farmland Classification (farmlndcl) for
     every map unit intersecting wkt_polygon — e.g. "All areas are prime
-    farmland", "Prime farmland if drained", "Not prime farmland". This is
-    a map-unit-level aggregate attribute (muaggatt), not a per-component
-    one like get_soil_data_for_polygon's fields, so it's a separate query
-    rather than an extra column tacked onto that one.
+    farmland", "Prime farmland if drained", "Not prime farmland".
+
+    farmlndcl lives directly on the mapunit table in SDA's real, live
+    schema — NOT on muaggatt. An earlier version of this query joined
+    muaggatt for this field (going by gSSURGO documentation, which
+    describes ESRI's derived file-geodatabase product aggregating columns
+    from several source tables for convenience — a DIFFERENT product from
+    the live SDA tabular service this code actually queries), which
+    returned HTTP 400 (no such column on muaggatt in SDA's real schema).
+    Confirmed against USDA's own published "Advanced Queries" SDA example
+    (sdmdataaccess.sc.egov.usda.gov/documents/AdvancedQueries.html):
+    `select nationalmusym, muname, mukey, farmlndcl from mapunit where
+    mukey in (...)` — farmlndcl selected directly from mapunit, no
+    muaggatt join at all. Same "verify against a real published SDA
+    example query" standard already applied for the chorizon/hzdept_r fix
+    (get_erosion_factor_for_polygon()/get_saturated_hydraulic_
+    conductivity_for_polygon()).
 
     Returns a list of {'mukey', 'muname', 'farmland_classification'} dicts.
     """
     sql = f"""
-        SELECT mu.mukey, mu.muname, ma.farmlndcl
+        SELECT mu.mukey, mu.muname, mu.farmlndcl
         FROM mapunit mu
-        INNER JOIN muaggatt ma ON mu.mukey = ma.mukey
         WHERE mu.mukey IN (
             SELECT mukey FROM SDA_Get_Mukey_from_intersection_with_WktWgs84('{wkt_polygon}')
         )

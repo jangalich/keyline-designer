@@ -41,7 +41,13 @@ def fake_run_sda_query(sql, max_retries=2):
 with patch.object(soil_data, "_run_sda_query", fake_run_sda_query):
     classifications = soil_data.get_farmland_classification_for_polygon(wkt_polygon)
 
-assert "muaggatt" in captured["sql"], "query must join the muaggatt table for farmlndcl"
+assert "muaggatt" not in captured["sql"], (
+    "farmlndcl lives on mapunit in SDA's real schema, not muaggatt -- joining muaggatt for this "
+    "field is exactly the wrong-table bug that caused a real HTTP 400 live (confirmed against "
+    "USDA's own published Advanced Queries SDA example, see get_farmland_classification_for_"
+    "polygon()'s own docstring)"
+)
+assert "mapunit" in captured["sql"] and "farmlndcl" in captured["sql"]
 assert len(classifications) == 3
 
 by_mukey = {c["mukey"]: c for c in classifications}
