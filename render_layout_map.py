@@ -41,6 +41,7 @@ from typing import Optional
 
 import contextily as cx
 import matplotlib
+import xyzservices
 
 matplotlib.use("Agg")  # headless rendering -- no display server in this pipeline's runtime
 import matplotlib.pyplot as plt
@@ -64,6 +65,33 @@ WEB_MERCATOR = "EPSG:3857"
 # substitutes the {x}/{y}/{z} tokens wherever they appear in the string,
 # so this works regardless of their order in the URL path.
 NAIP_TILE_URL_TEMPLATE = "https://basemap.nationalmap.gov/arcgis/rest/services/USGSImageryOnly/MapServer/tile/{z}/{y}/{x}"
+
+# Confirmed directly against this service's own metadata
+# (https://basemap.nationalmap.gov/arcgis/rest/services/USGSImageryOnly/MapServer?f=json):
+# tileInfo.lods only defines levels 0-23 -- level 24+ doesn't exist on this
+# service and 404s. contextily's own auto-zoom (zoom='auto') has no way to
+# know that on its own when `source` is passed as a bare URL string --
+# _process_source() wraps a bare string into a TileProvider with no
+# max_zoom set, so contextily's own zoom validation falls back to an
+# "unknown max, allow up to 30" default and lets an over-high computed
+# zoom through uncapped (confirmed live: a small property's extent
+# produced zoom 27, a real 404 against this service). Passing `source` as
+# an xyzservices.TileProvider with an explicit max_zoom (below) instead of
+# a bare string makes contextily's OWN _validate_zoom() clip any
+# auto-computed zoom that exceeds this service's real maximum, the same
+# way it already does for providers whose max_zoom ships in their own
+# metadata -- the extent-based auto calculation itself (small property ->
+# higher zoom, large property -> lower zoom) is untouched; only the
+# ceiling is now enforced. This must be a real TileProvider, not a plain
+# dict: contextily's tile-fetch path calls provider.build_url(...), which
+# only TileProvider (not a plain dict, even one with the right keys)
+# implements.
+NAIP_TILE_SOURCE = xyzservices.TileProvider(
+    name="USGSImageryOnly",
+    url=NAIP_TILE_URL_TEMPLATE,
+    max_zoom=23,
+    attribution="",
+)
 
 # How far past the property boundary's own bounding box the halo/context
 # view extends, as a fraction of the boundary's larger dimension -- gives
@@ -230,7 +258,7 @@ def render_layout_map(
     ax.set_axis_off()
 
     try:
-        cx.add_basemap(ax, source=NAIP_TILE_URL_TEMPLATE, crs=WEB_MERCATOR, attribution=False)
+        cx.add_basemap(ax, source=NAIP_TILE_SOURCE, crs=WEB_MERCATOR, attribution=False)
         basemap_note = None
     except Exception as e:
         # A NAIP tile-service outage or network restriction shouldn't
