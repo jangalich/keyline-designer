@@ -785,7 +785,7 @@ def identify_solar_candidate_zones(
     return {"zones_geojson": candidates_to_geojson(candidates, road_data_is_fallback=road_data_is_fallback)}
 
 
-def select_optimal_structure_site(
+def fetch_and_select_optimal_structure_site(
     boundary_coordinates: list[tuple[float, float]],
     dem: Optional[dict] = None,
     **zone_kwargs,

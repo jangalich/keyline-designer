@@ -7,18 +7,18 @@ Permanence report, meant to be the last page of the assembled PDF (see
 generate_pdf_report.py). This module does not identify, score, or select
 anything itself: every layer it draws is the already-computed output of
 production_area_ceiling.py (optimized production zones),
-water_suitability.py (select_optimal_water_zone -- the top-ranked
-candidate), road_corridors.py (select_optimal_road_corridor -- the
-top-ranked candidate), solar_suitability.py (select_optimal_structure_site
+water_suitability.py (fetch_and_select_optimal_water_zone -- the top-ranked
+candidate), road_corridors.py (fetch_and_select_optimal_road_corridor -- the
+top-ranked candidate), solar_suitability.py (fetch_and_select_optimal_structure_site
 -- the top-ranked candidate), and hydrology_data.py (real NHD streams, for
 background context only -- no soil/hydrology POLYGON data is drawn here,
 that's covered in the narrative text).
 
     boundary --> dem_data (fetched once, shared across all four layers)
              --> production_area_ceiling.identify_optimized_production_areas
-             --> water_suitability.select_optimal_water_zone
-             --> road_corridors.select_optimal_road_corridor
-             --> solar_suitability.select_optimal_structure_site
+             --> water_suitability.fetch_and_select_optimal_water_zone
+             --> road_corridors.fetch_and_select_optimal_road_corridor
+             --> solar_suitability.fetch_and_select_optimal_structure_site
              --> hydrology_data.get_water_features_for_boundary (streams)
              --> rendered PNG (basemap + halo + streams + boundary +
                  layout layers + numbered legend box, all one image)
@@ -53,9 +53,9 @@ from shapely.plotting import plot_line, plot_points, plot_polygon
 from dem_data import get_dem_for_boundary
 from hydrology_data import get_water_features_for_boundary
 from production_area_ceiling import identify_optimized_production_areas
-from road_corridors import select_optimal_road_corridor
-from solar_suitability import select_optimal_structure_site
-from water_suitability import select_optimal_water_zone
+from road_corridors import fetch_and_select_optimal_road_corridor
+from solar_suitability import fetch_and_select_optimal_structure_site
+from water_suitability import fetch_and_select_optimal_water_zone
 
 WGS84 = "EPSG:4326"
 WEB_MERCATOR = "EPSG:3857"
@@ -155,9 +155,9 @@ def fetch_layout_layers(boundary_coordinates: list[tuple[float, float]], dem: Op
         dem = get_dem_for_boundary(boundary_coordinates)
 
     production_result = identify_optimized_production_areas(boundary_coordinates, dem=dem)
-    water_zone = select_optimal_water_zone(boundary_coordinates, dem=dem)
-    road_corridor = select_optimal_road_corridor(boundary_coordinates, dem=dem)
-    structure_site = select_optimal_structure_site(boundary_coordinates, dem=dem)
+    water_zone = fetch_and_select_optimal_water_zone(boundary_coordinates, dem=dem)
+    road_corridor = fetch_and_select_optimal_road_corridor(boundary_coordinates, dem=dem)
+    structure_site = fetch_and_select_optimal_structure_site(boundary_coordinates, dem=dem)
     water_features = get_water_features_for_boundary(boundary_coordinates)
 
     return {

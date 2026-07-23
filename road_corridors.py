@@ -1209,7 +1209,7 @@ def identify_road_corridor_candidates(
     }
 
 
-def select_optimal_road_corridor(
+def fetch_and_select_optimal_road_corridor(
     boundary_coordinates: list[tuple[float, float]],
     dem: Optional[dict] = None,
     **corridor_kwargs,

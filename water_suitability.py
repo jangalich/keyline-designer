@@ -1001,7 +1001,7 @@ def identify_water_suitability(
     return {"zones_geojson": water_suitability_to_geojson(scored), "scored_zones": scored}
 
 
-def select_optimal_water_zone(
+def fetch_and_select_optimal_water_zone(
     boundary_coordinates: list[tuple[float, float]],
     dem: Optional[dict] = None,
     **suitability_kwargs,
