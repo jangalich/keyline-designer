@@ -14,10 +14,14 @@ Run locally with:
 Then it's reachable at http://localhost:5000
 """
 
-from flask import Flask, request, jsonify
+import os
+import tempfile
+
+from flask import Flask, after_this_request, request, jsonify, send_file
 from flask_cors import CORS
 
 from generate_full_report import generate_full_report
+from generate_pdf_report import generate_full_report_pdf
 from geocode import geocode_address
 
 app = Flask(__name__)
@@ -94,6 +98,72 @@ def generate_report_endpoint():
 
     except Exception as e:
         return jsonify({"error": f"Report generation failed: {str(e)}"}), 500
+
+
+@app.route("/api/generate-report-pdf", methods=["POST"])
+def generate_report_pdf_endpoint():
+    """
+    Expects a JSON body like:
+        { "boundary": [[lon, lat], ...], "property_label": "..." }
+    ("property_label" is optional -- a display label for the report's
+    cover page, e.g. the geocoded address; defaults to a generic label.)
+
+    Returns the assembled PDF (the existing narrative Scale of Permanence
+    report, unchanged, plus the new final-page static layout map) as a
+    binary file download, or { "error": "..." } with an appropriate HTTP
+    status on failure.
+
+    This is a NEW, SEPARATE endpoint from /api/generate-report rather
+    than an addition to that endpoint's response -- the return type here
+    is fundamentally different (a binary PDF file, not JSON), so folding
+    it into the existing response would mean either always paying the
+    map-rendering + PDF-assembly cost for callers who only want the
+    narrative text, or awkwardly base64-encoding a PDF into a JSON field.
+    A separate endpoint also means the frontend's "Generate Report"
+    button (which calls /api/generate-report today) is completely
+    unaffected by this addition -- wiring the button to PDF output is a
+    deliberate, separate next step, not part of this change.
+    """
+    data = request.get_json(silent=True)
+
+    if not data or "boundary" not in data:
+        return jsonify({"error": "Request must include a 'boundary' field."}), 400
+
+    boundary = data["boundary"]
+
+    if not isinstance(boundary, list) or len(boundary) < 3:
+        return jsonify({"error": "Boundary must be a list of at least 3 [lon, lat] points."}), 400
+
+    property_label = data.get("property_label") or "Property Design Report"
+
+    try:
+        tmp_dir = tempfile.mkdtemp(prefix="keyline-report-")
+        pdf_path = os.path.join(tmp_dir, "scale_of_permanence_report.pdf")
+
+        generate_full_report_pdf(boundary, pdf_path, property_label=property_label)
+
+        @after_this_request
+        def _cleanup_temp_pdf(response):
+            try:
+                os.remove(pdf_path)
+                os.rmdir(tmp_dir)
+            except OSError:
+                pass
+            return response
+
+        return send_file(
+            pdf_path,
+            mimetype="application/pdf",
+            as_attachment=True,
+            download_name="scale_of_permanence_report.pdf",
+        )
+
+    except RuntimeError as e:
+        # Covers the missing ANTHROPIC_API_KEY case specifically
+        return jsonify({"error": str(e)}), 500
+
+    except Exception as e:
+        return jsonify({"error": f"PDF report generation failed: {str(e)}"}), 500
 
 
 @app.route("/api/health", methods=["GET"])

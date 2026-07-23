@@ -1209,6 +1209,25 @@ def identify_road_corridor_candidates(
     }
 
 
+def select_optimal_road_corridor(
+    boundary_coordinates: list[tuple[float, float]],
+    dem: Optional[dict] = None,
+    **corridor_kwargs,
+) -> Optional[dict]:
+    """
+    Convenience wrapper for callers (e.g. render_layout_map.py) that want
+    a single best suggested road corridor rather than the full ranked
+    FeatureCollection -- identify_road_corridor_candidates() already
+    returns candidates rank-ordered best-first (feature 0 = rank 1), so
+    this just returns that top GeoJSON Feature (or None if nothing
+    cleared the constraint stack). Selects nothing new -- it picks the #1
+    entry an existing, unchanged ranking already produced.
+    """
+    result = identify_road_corridor_candidates(boundary_coordinates, dem=dem, **corridor_kwargs)
+    features = result["zones_geojson"]["features"]
+    return features[0] if features else None
+
+
 def summarize_road_corridor_candidates(result: dict) -> str:
     features = result["zones_geojson"]["features"]
     if not features:

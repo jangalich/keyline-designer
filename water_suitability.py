@@ -1001,6 +1001,25 @@ def identify_water_suitability(
     return {"zones_geojson": water_suitability_to_geojson(scored), "scored_zones": scored}
 
 
+def select_optimal_water_zone(
+    boundary_coordinates: list[tuple[float, float]],
+    dem: Optional[dict] = None,
+    **suitability_kwargs,
+) -> Optional[dict]:
+    """
+    Convenience wrapper for callers (e.g. render_layout_map.py) that want
+    a single best water system candidate zone rather than the full ranked
+    list -- identify_water_suitability() already sorts scored_zones by
+    suitability_score descending with rank 1 = best, so this just returns
+    that top entry (or None if no candidate zones were found for this
+    boundary). Selects nothing new -- it picks the #1 entry an existing,
+    unchanged ranking already produced.
+    """
+    result = identify_water_suitability(boundary_coordinates, dem=dem, **suitability_kwargs)
+    scored_zones = result["scored_zones"]
+    return scored_zones[0] if scored_zones else None
+
+
 if __name__ == "__main__":
     property_boundary = [
         (-79.9838154, 40.6458343),

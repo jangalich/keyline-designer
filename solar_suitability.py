@@ -785,6 +785,25 @@ def identify_solar_candidate_zones(
     return {"zones_geojson": candidates_to_geojson(candidates, road_data_is_fallback=road_data_is_fallback)}
 
 
+def select_optimal_structure_site(
+    boundary_coordinates: list[tuple[float, float]],
+    dem: Optional[dict] = None,
+    **zone_kwargs,
+) -> Optional[dict]:
+    """
+    Convenience wrapper for callers (e.g. render_layout_map.py) that want
+    a single best solar structure site candidate rather than the full
+    ranked FeatureCollection -- identify_solar_candidate_zones() already
+    returns candidates rank-ordered best-first (feature 0 = rank 1), so
+    this just returns that top GeoJSON Feature (or None if nothing
+    cleared the constraint stack). Selects nothing new -- it picks the #1
+    entry an existing, unchanged ranking already produced.
+    """
+    result = identify_solar_candidate_zones(boundary_coordinates, dem=dem, **zone_kwargs)
+    features = result["zones_geojson"]["features"]
+    return features[0] if features else None
+
+
 def summarize_solar_candidate_zones(result: dict) -> str:
     features = result["zones_geojson"]["features"]
     if not features:
