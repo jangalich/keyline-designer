@@ -41,6 +41,8 @@ from typing import Optional
 
 import contextily as cx
 import matplotlib
+import mercantile
+import requests
 import xyzservices
 
 matplotlib.use("Agg")  # headless rendering -- no display server in this pipeline's runtime
@@ -86,12 +88,114 @@ NAIP_TILE_URL_TEMPLATE = "https://basemap.nationalmap.gov/arcgis/rest/services/U
 # dict: contextily's tile-fetch path calls provider.build_url(...), which
 # only TileProvider (not a plain dict, even one with the right keys)
 # implements.
+#
+# tileInfo.lods' 0-23 range is this service's OVERALL documented
+# capability, not what's actually cached for any specific point --
+# confirmed live: a real rural property's actual cache tops out at zoom
+# 16, with every level 17-23 returning an identical tiny 404 placeholder
+# (572 bytes), not real image data. The majority of this service's
+# coverage is 1m NAIP, not the 6-inch imagery that reaches deeper zooms
+# in some areas, so real cache depth varies by location and can't be
+# assumed from the documented max alone. See _probe_max_available_zoom()
+# below, which live-probes the actual property's own centroid tile by
+# tile, starting from this documented max (or the extent-appropriate
+# auto zoom, whichever is lower) and stepping down until a genuine tile
+# is found -- NAIP_SERVICE_MAX_ZOOM here remains the correct, necessary
+# ceiling that starting point can never exceed.
+NAIP_SERVICE_MAX_ZOOM = 23
+
 NAIP_TILE_SOURCE = xyzservices.TileProvider(
     name="USGSImageryOnly",
     url=NAIP_TILE_URL_TEMPLATE,
-    max_zoom=23,
+    max_zoom=NAIP_SERVICE_MAX_ZOOM,
     attribution="",
 )
+
+# Real "not found" tiles from this service come back as a tiny, fixed-size
+# placeholder (confirmed live: 572 bytes) rather than a clean HTTP error in
+# every case -- a genuine NAIP tile is tens of KB or more, so this
+# threshold sits comfortably between the two with real margin, not a
+# hair-trigger cutoff.
+MIN_VALID_TILE_BYTES = 4096
+
+# Floor for the zoom-availability probe below: past this point, an empty
+# cache says something else is wrong (wrong tile scheme, wrong host, a
+# genuinely uncovered region) rather than "just needs a lower zoom," so
+# _probe_max_available_zoom() raises instead of continuing to step down.
+MIN_PROBE_ZOOM = 10
+
+TILE_PROBE_TIMEOUT_SECONDS = 10.0
+
+
+def _extent_based_auto_zoom(west: float, south: float, east: float, north: float) -> int:
+    """
+    Mirrors contextily's own zoom='auto' calculation exactly (see
+    contextily.tile._calculate_zoom) -- reimplemented directly here rather
+    than importing that private, underscore-prefixed function, since this
+    module needs the raw auto-computed value BEFORE calling
+    add_basemap() (as the real-tile-availability probe's starting point/
+    ceiling below), not just as an opaque 'auto' string handed to
+    contextily itself. west/south/east/north are plain lon/lat degrees.
+    """
+    lon_length = abs(east - west)
+    lat_length = abs(north - south)
+    zoom_lon = math.ceil(math.log2(360 * 2.0 / lon_length))
+    zoom_lat = math.ceil(math.log2(360 * 2.0 / lat_length))
+    return min(zoom_lon, zoom_lat)
+
+
+def _is_real_tile_response(response: "requests.Response") -> bool:
+    """A genuine tile: HTTP 200, real image content-type, and a real
+    payload size -- this service's own 404s can otherwise look
+    deceptively like a normal response (a small, fixed-size placeholder
+    body), so status code alone is not a reliable enough check here."""
+    if response.status_code != 200:
+        return False
+    content_type = response.headers.get("Content-Type", "")
+    if not content_type.startswith("image/"):
+        return False
+    return len(response.content) >= MIN_VALID_TILE_BYTES
+
+
+def _probe_max_available_zoom(
+    centroid_lon: float,
+    centroid_lat: float,
+    ceiling_zoom: int,
+    tile_url_template: str = NAIP_TILE_URL_TEMPLATE,
+    min_zoom: int = MIN_PROBE_ZOOM,
+) -> int:
+    """
+    Live-probes this specific property's own real tile cache depth,
+    starting at ceiling_zoom (the lower of this service's documented max
+    and the extent-appropriate auto zoom -- this function only ever
+    steps DOWN from that ceiling, never above it) and fetching one real
+    tile at a time at the property's own centroid until a genuine tile is
+    found (see _is_real_tile_response()) or min_zoom is reached.
+
+    Raises RuntimeError if no real tile is found down to min_zoom --
+    at that point something else is wrong (wrong host/scheme, a
+    genuinely uncovered region), not "just needs a lower zoom," and
+    should surface as a real failure rather than loop indefinitely. The
+    caller (render_layout_map()) already wraps basemap fetching in a
+    try/except that degrades gracefully, same as every other
+    network-backed layer in this pipeline.
+    """
+    zoom = ceiling_zoom
+    last_zoom_tried = None
+    last_status = None
+    last_size = None
+    while zoom >= min_zoom:
+        tile = mercantile.tile(centroid_lon, centroid_lat, zoom)
+        url = tile_url_template.format(z=tile.z, y=tile.y, x=tile.x)
+        response = requests.get(url, timeout=TILE_PROBE_TIMEOUT_SECONDS)
+        if _is_real_tile_response(response):
+            return zoom
+        last_zoom_tried, last_status, last_size = zoom, response.status_code, len(response.content)
+        zoom -= 1
+    raise RuntimeError(
+        f"No real NAIP tile found for this property down to zoom {min_zoom} "
+        f"(last attempt: zoom {last_zoom_tried}, status {last_status}, {last_size} bytes)"
+    )
 
 # How far past the property boundary's own bounding box the halo/context
 # view extends, as a fraction of the boundary's larger dimension -- gives
@@ -258,7 +362,19 @@ def render_layout_map(
     ax.set_axis_off()
 
     try:
-        cx.add_basemap(ax, source=NAIP_TILE_SOURCE, crs=WEB_MERCATOR, attribution=False)
+        corner_lons, corner_lats = warp_transform(
+            WEB_MERCATOR, WGS84, [minx - pad, maxx + pad], [miny - pad, maxy + pad]
+        )
+        west, east = corner_lons
+        south, north = corner_lats
+        auto_zoom = _extent_based_auto_zoom(west, south, east, north)
+        ceiling_zoom = min(auto_zoom, NAIP_SERVICE_MAX_ZOOM)
+
+        centroid = Polygon(boundary_coordinates).representative_point()
+        resolved_zoom = _probe_max_available_zoom(centroid.x, centroid.y, ceiling_zoom)
+        print(f"  Basemap zoom: extent-appropriate ceiling {ceiling_zoom}, real available zoom {resolved_zoom}")
+
+        cx.add_basemap(ax, source=NAIP_TILE_SOURCE, zoom=resolved_zoom, crs=WEB_MERCATOR, attribution=False)
         basemap_note = None
     except Exception as e:
         # A NAIP tile-service outage or network restriction shouldn't
