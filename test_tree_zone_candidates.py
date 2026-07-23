@@ -43,6 +43,7 @@ from shapely.ops import unary_union
 import road_corridors as rc
 import tree_zone_candidates as tzc
 import production_suitability as ps
+import water_suitability as ws
 from feature_schema import validate_feature_collection
 from tree_zone_candidates import (
     HYDRIC_OVERLAP_FACTOR_WEIGHT,
@@ -363,6 +364,9 @@ def _fake_farm_roads_empty(boundary_coordinates):
 # ~100% grade) that production won't touch -- real leftover ground this
 # module's own scoring should be able to pick up as a tree candidate via
 # slope alone, with every network fetch (production's soil check,
+# water_suitability's own per-zone soil/stream check -- reached now via its
+# full identify_water_suitability() entry point, since tree_zone_candidates
+# subtracts only its SELECTED zone, not the raw pure zone list --
 # road_corridors' floodplain/erosion/farm-roads checks, and this module's
 # own farmland/hydric/stream checks) mocked to "reachable, found nothing."
 size = 30
@@ -394,6 +398,9 @@ with mock_patch.object(ps, "get_soil_data_for_polygon", _fake_soil_rows_empty), 
      mock_patch.object(rc, "get_erosion_factor_for_polygon", _fake_erosion_empty), \
      mock_patch.object(rc, "get_water_features_for_boundary", _fake_water_features_empty), \
      mock_patch.object(rc, "get_farm_roads_for_boundary", _fake_farm_roads_empty), \
+     mock_patch.object(ws, "get_saturated_hydraulic_conductivity_for_polygon", _fake_soil_rows_empty), \
+     mock_patch.object(ws, "get_soil_geometries_for_polygon", _fake_soil_geometries_empty), \
+     mock_patch.object(ws, "get_water_features_for_boundary", _fake_water_features_empty), \
      mock_patch.object(tzc, "get_farmland_classification_for_polygon", _fake_farmland_empty), \
      mock_patch.object(tzc, "get_soil_data_for_polygon", _fake_soil_rows_empty), \
      mock_patch.object(tzc, "get_soil_geometries_for_polygon", _fake_soil_geometries_empty), \

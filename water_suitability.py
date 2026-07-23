@@ -87,11 +87,17 @@ exclusion of exactly the kind Part 1 of this feature removed (a real
 below-elevation or otherwise imperfect candidate that scores low should
 still be visible, not disappear before anyone sees the number).
 
-Selecting a single "best" zone is explicitly OUT of scope here — same
-"zone, not a point, not a final answer" framing water_candidate_zones.py
-already states in its own confidence_notes. This module ranks
-(`rank` — 1 = highest suitability_score, over ALL returned zones), it
-does not choose.
+This module ranks (`rank` — 1 = highest suitability_score, over ALL
+returned zones) every zone water_candidate_zones.py generated — nothing is
+filtered out of the ranked list itself, same "zone, not a point" framing
+water_candidate_zones.py already states in its own confidence_notes.
+select_optimal_water_zone() adds one further, explicit, deliberately
+simple step on top of that ranking: picking the single rank-1 zone as
+"the plan" for downstream consumers (e.g. tree_zone_candidates.py's search-
+space subtraction) that need one unambiguous answer rather than the full
+candidate set. Per product decision, this app targets small farms only —
+one well-suited water zone is sufficient, so no multi-candidate
+coexistence logic sits on top of this selection.
 
     water_candidate_zones.find_candidate_zones() zones
         + valley_delineation.delineate_valleys() valleys (same DEM run)
@@ -870,6 +876,23 @@ def score_water_zones(
     return scored
 
 
+def select_optimal_water_zone(scored_zones: list[dict]) -> Optional[dict]:
+    """
+    Explicit selection step on top of score_water_zones()'s own ranking:
+    returns the single zone with rank == 1 (highest suitability_score) --
+    no logic beyond that. Per product decision, this app targets small
+    farms only, where one well-suited water zone is sufficient; no
+    multi-candidate coexistence logic is needed here (unlike, say, a
+    working landscape large enough to justify several ponds).
+
+    Returns None if scored_zones is empty -- a real, reportable "no
+    candidates at all" outcome, not an error.
+    """
+    if not scored_zones:
+        return None
+    return max(scored_zones, key=lambda z: z["suitability_score"])
+
+
 def water_suitability_to_geojson(scored_zones: list[dict]) -> dict:
     """Wraps score_water_zones() output as a schema-conformant GeoJSON
     FeatureCollection on the SAME layer water_candidate_zones.py's own
@@ -960,6 +983,15 @@ def identify_water_suitability(
     factor falls back to neutral together (all real per-zone
     differentiation from the soil signal / real per-zone stream distance
     still applies otherwise).
+
+    Returns:
+        {
+            'zones_geojson': dict,             # every scored zone, ranked
+            'scored_zones': list[dict],        # same list, kept for backward compatibility
+            'all_scored_zones': list[dict],    # same list -- the full, unfiltered ranking
+            'selected_water_zone': Optional[dict],  # select_optimal_water_zone()'s single
+                                                       # rank-1 answer, or None if no zones exist
+        }
     """
     if dem is None:
         dem = get_dem_for_boundary(boundary_coordinates)
@@ -998,7 +1030,12 @@ def identify_water_suitability(
 
     scored = score_water_zones(zones, valleys, dem, soil_data_by_zone_id, stream_data_by_zone_id, **score_kwargs)
 
-    return {"zones_geojson": water_suitability_to_geojson(scored), "scored_zones": scored}
+    return {
+        "zones_geojson": water_suitability_to_geojson(scored),
+        "scored_zones": scored,
+        "all_scored_zones": scored,
+        "selected_water_zone": select_optimal_water_zone(scored),
+    }
 
 
 def fetch_and_select_optimal_water_zone(

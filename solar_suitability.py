@@ -54,7 +54,17 @@ against a candidate pond/dam site is a real physical conflict a small
 building can't route around the way it can sit near/inside production
 land. The exclusion buffer reuses road_corridors.py's own
 POND_ZONE_EXCLUSION_BUFFER_METERS rather than a new constant, same as
-before.
+before. find_candidate_solar_zones() itself still hard-excludes every
+water zone it's GIVEN (unchanged) — but identify_solar_candidate_zones(),
+its full-pipeline caller, now passes only the SINGLE selected water zone
+(water_suitability.select_optimal_water_zone(), same selection already
+reused by tree_zone_candidates.py in this pipeline), not every water
+candidate. Confirmed live: excluding all of a real property's several
+separately-legitimate, separately-buffered water zones can together cover
+enough of a small parcel to zero out every solar candidate, even though
+each zone's own geometry is individually normal — per product decision,
+this app targets small farms only, so one well-suited water zone is
+sufficient to exclude against.
 
 find_candidate_solar_zones() is the geometric/scoring core: it takes an
 already-fetched DEM dict, production areas, water-candidate zones, and
@@ -85,8 +95,7 @@ from raster_grid import SQUARE_METERS_PER_ACRE, pixel_center_xy
 from road_corridors import POND_ZONE_EXCLUSION_BUFFER_METERS, identify_road_corridor_candidates
 from soil_data import coordinates_to_wkt_polygon, get_farmland_classification_for_polygon, is_prime_farmland
 from terrain_metrics import aspect_score, aspect_to_compass_label, compute_shading_score, compute_slope_and_aspect
-from valley_delineation import delineate_valleys
-from water_candidate_zones import find_candidate_zones as find_pond_zones
+from water_suitability import identify_water_suitability
 
 METERS_PER_FOOT = 0.3048
 
@@ -577,6 +586,35 @@ def flag_prime_farmland_conflicts(
     return candidates
 
 
+def select_optimal_structure_site(scored_candidates: list[dict]) -> Optional[dict]:
+    """
+    Explicit selection step on top of find_candidate_solar_zones()'s own
+    ranking: returns the single candidate with rank == 1 (highest
+    suitability_score) -- no logic beyond that. Same pattern as
+    water_suitability.select_optimal_water_zone() and
+    road_corridors.select_optimal_road_corridor(); per product decision,
+    this app targets small farms only, where one well-suited structure
+    site is sufficient -- no multi-candidate coexistence logic is needed
+    here.
+
+    Deliberately does NOT attempt to reconcile this selection with
+    road_corridors.select_optimal_road_corridor() (e.g. re-scoring this
+    site's road-proximity against the newly-selected corridor specifically)
+    -- solar's own road-proximity fallback (real mapped road vs. suggested-
+    corridor fallback, see _suggested_corridor_as_road_fallback()) is left
+    exactly as-is. That interplay is deliberately deferred, same as the
+    fencing/roads-and-structures interplay already deferred elsewhere in
+    this pipeline, until real results from both selections independently
+    are available to look at.
+
+    Returns None if scored_candidates is empty -- a real, reportable "no
+    candidates at all" outcome, not an error.
+    """
+    if not scored_candidates:
+        return None
+    return max(scored_candidates, key=lambda c: c["suitability_score"])
+
+
 def candidates_to_geojson(
     candidates: list[dict],
     shading_is_rough_proxy: bool = True,
@@ -713,20 +751,47 @@ def identify_solar_candidate_zones(
     UNCHANGED call shape from before the point-candidate redesign — only
     find_candidate_solar_zones()'s own internal model changed.
 
-    production_areas and water_zones are both computed directly from the
-    DEM already in hand (identify_production_areas(), delineate_valleys()
-    + water_candidate_zones.find_candidate_zones() — the same pure
-    functions road_corridors.py already calls for its own pond-zone
-    exclusion), so neither needs its own network fetch or its own
-    try/except here. production_areas is passed through to
-    find_candidate_solar_zones() for its (now scoring-only, not
-    exclusion) role — see that function's docstring.
+    Returns:
+        {
+            'zones_geojson': dict,                   # every scored candidate, ranked
+            'all_scored_candidates': list[dict],     # find_candidate_solar_zones()'s own raw
+                                                        # scored list (post-farmland-flagging)
+            'selected_structure_site': Optional[dict],  # select_optimal_structure_site()'s
+                                                           # single rank-1 answer, or None if no
+                                                           # candidates exist
+        }
 
-    Each real NETWORK fetch (farm roads, SSURGO) still degrades
-    independently and gracefully — an outage there shouldn't block solar
-    candidates from being identified at all, same reasoning as every
-    other optional layer in this pipeline (imagery, water candidate
-    zones' own DEM fetch, etc.).
+    production_areas is computed directly from the DEM already in hand
+    (identify_production_areas()) so it needs no network fetch or try/
+    except here, and is passed through to find_candidate_solar_zones()
+    for its (now scoring-only, not exclusion) role — see that function's
+    docstring. water-zone exclusion, by contrast, is now scoped to only
+    the SINGLE selected water zone (water_suitability.
+    select_optimal_water_zone(), same selection function
+    tree_zone_candidates.py's own rewiring in this same pipeline already
+    reuses) rather than every water candidate — confirmed live that
+    excluding all of a real property's several legitimate, separately-
+    buffered water zones can together cover enough of a small parcel to
+    zero out every solar candidate, even though each zone's own geometry
+    is individually normal. Per product decision, this app targets small
+    farms only: one well-suited water zone is sufficient, so only that
+    one zone's own (buffered) footprint should ever be excluded here.
+    water_suitability.identify_water_suitability() is called directly
+    (its own real per-zone SSURGO/NHD fetches degrade independently and
+    gracefully, same as every other network-backed layer in this
+    pipeline) so this reaches the exact same selected zone every other
+    consumer of select_optimal_water_zone() in this pipeline does, not an
+    independently re-derived approximation of it. An empty candidate list
+    (no water zone could be selected at all) is a real, valid outcome —
+    solar's water-zone exclusion then simply has nothing to exclude, same
+    as today's behavior when water_zones=[] is passed to
+    find_candidate_solar_zones().
+
+    Each real NETWORK fetch (farm roads, SSURGO, water suitability)
+    still degrades independently and gracefully — an outage there
+    shouldn't block solar candidates from being identified at all, same
+    reasoning as every other optional layer in this pipeline (imagery,
+    water candidate zones' own DEM fetch, etc.).
     """
     if dem is None:
         dem = get_dem_for_boundary(boundary_coordinates)
@@ -741,8 +806,9 @@ def identify_solar_candidate_zones(
 
     production_areas = identify_production_areas(dem, boundary_polygon_utm)
 
-    valleys = delineate_valleys(dem)
-    water_zones = find_pond_zones(valleys, production_areas, boundary_polygon_utm, dem["crs"])
+    water_result = identify_water_suitability(boundary_coordinates, dem=dem)
+    selected_water_zone = water_result["selected_water_zone"]
+    water_zones = [selected_water_zone] if selected_water_zone else []
 
     try:
         roads = get_farm_roads_for_boundary(boundary_coordinates)
@@ -782,7 +848,11 @@ def identify_solar_candidate_zones(
         except Exception:
             pass  # SSURGO outage -- candidates just won't carry a prime_farmland_conflict flag this run
 
-    return {"zones_geojson": candidates_to_geojson(candidates, road_data_is_fallback=road_data_is_fallback)}
+    return {
+        "zones_geojson": candidates_to_geojson(candidates, road_data_is_fallback=road_data_is_fallback),
+        "all_scored_candidates": candidates,
+        "selected_structure_site": select_optimal_structure_site(candidates),
+    }
 
 
 def fetch_and_select_optimal_structure_site(
