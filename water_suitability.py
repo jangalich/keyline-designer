@@ -1045,16 +1045,19 @@ def fetch_and_select_optimal_water_zone(
 ) -> Optional[dict]:
     """
     Convenience wrapper for callers (e.g. render_layout_map.py) that want
-    a single best water system candidate zone rather than the full ranked
-    list -- identify_water_suitability() already sorts scored_zones by
-    suitability_score descending with rank 1 = best, so this just returns
-    that top entry (or None if no candidate zones were found for this
-    boundary). Selects nothing new -- it picks the #1 entry an existing,
-    unchanged ranking already produced.
+    a single best water system candidate zone directly from a boundary --
+    fetches the DEM (unless one is passed in) and runs the full
+    identify_water_suitability() pipeline, then returns its own
+    selected_water_zone (select_optimal_water_zone()'s rank-1 answer, or
+    None if no candidate zones were found). A thin fetch-and-select
+    convenience call, not a second/different selection -- reuses
+    identify_water_suitability()'s own selected_water_zone rather than
+    re-deriving "the best one" independently, so there is exactly one
+    definition of "selected" for callers working from a boundary and
+    callers working from an already-scored list to agree on.
     """
     result = identify_water_suitability(boundary_coordinates, dem=dem, **suitability_kwargs)
-    scored_zones = result["scored_zones"]
-    return scored_zones[0] if scored_zones else None
+    return result["selected_water_zone"]
 
 
 if __name__ == "__main__":

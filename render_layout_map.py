@@ -150,6 +150,23 @@ def fetch_layout_layers(boundary_coordinates: list[tuple[float, float]], dem: Op
     optimize/select calls below, rather than letting each independently
     re-fetch the same DEM -- a pure efficiency choice, doesn't change any
     of their identification/scoring/selection logic.
+
+    water_zone reuses identify_water_suitability()'s own selected_water_zone
+    field directly (see fetch_and_select_optimal_water_zone()) -- that field
+    and this function's return value are the exact same scored-zone dict
+    shape, so there was real duplicate "pick the best" logic to remove.
+    road_corridor/structure_site, by contrast, are read here as GeoJSON
+    Features (via identify_road_corridor_candidates()'s/
+    identify_solar_candidate_zones()'s own zones_geojson, same as every
+    other GeoJSON-shaped input this module reprojects with
+    _reproject_geometry_to_mercator()) rather than their identify_*()'s
+    newer selected_road_corridor/selected_structure_site fields -- those
+    are a DIFFERENT shape (raw scored dicts carrying UTM shapely geometry:
+    line_utm/polygon_utm, un-reprojected, 0-1 scores), so using them here
+    would mean adding one-off reprojection/property-translation code for
+    each, for zero fetch-count benefit (both paths still call the same
+    identify_*() exactly once). Left as GeoJSON for now; worth
+    reconsidering only if a future caller needs the raw UTM geometry too.
     """
     if dem is None:
         dem = get_dem_for_boundary(boundary_coordinates)
