@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.venv/
+*.png
+*.pdf
+.git/
+README.md
+test_*.py
