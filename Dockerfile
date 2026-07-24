@@ -23,4 +23,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-CMD gunicorn api:app --bind 0.0.0.0:$PORT
+
+# The full report pipeline (climate/soil/elevation/hydrology/imagery
+# fetches, LLM narrative generation, and -- for the PDF endpoint --
+# DEM fetch + map rendering + PDF assembly) genuinely runs well past
+# gunicorn's 30s default worker timeout, which kills in-flight
+# requests and returns a generic 500 instead of letting them finish.
+CMD gunicorn api:app --bind 0.0.0.0:$PORT --workers 1 --timeout 600
