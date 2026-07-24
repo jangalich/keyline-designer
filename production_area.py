@@ -36,6 +36,37 @@ returned as a technically-nonempty but meaningless sliver. This was a
 real bug (confirmed live: candidates describing land that isn't part of
 the property), not a hypothetical — see test_production_area.py's
 regression test for the exact scenario.
+
+FOOTPRINT GEOMETRY: polygon_utm/area_acres/geometry_wgs84 are built from
+the REAL per-cell-square union footprint (production_area_ceiling.py's
+_cell_union_footprint(), reused here rather than reimplemented -- see that
+function's own docstring), NOT a convex hull of cell center points. A
+convex hull fills in concave gaps between actual qualifying cells with
+ground that was never actually eligible, over-reporting the real
+footprint -- the same real, confirmed bug production_area_ceiling.py's own
+rebuild_patches_from_survivors() already fixed for its post-trim geometry
+(see that module's docstring for the live numbers). Since polygon_utm is
+what every spatial consumer downstream (water zones, solar, trees, road
+corridors, and this module's own soil-carving in production_suitability.py)
+treats as the real production-zone shape, not just a display number, it
+must be the accurate cell-based one. A convex hull IS still exposed
+separately as display_polygon_utm -- useful for rendering smoothness and
+for building a single-ring soil-fetch query polygon (coordinates_to_wkt_
+polygon() assumes a single ring; see identify_production_area_suitability()
+in production_suitability.py, which uses display_polygon_utm for exactly
+this reason, same pattern production_area_ceiling.py's own
+identify_optimized_production_areas() already uses) -- but nothing reads
+display_polygon_utm for area or spatial-relationship purposes.
+
+polygon_utm/geometry_wgs84 CAN legitimately come back as a MultiPolygon:
+connected_components() is 8-connected (diagonal neighbors count as one
+component), but two cells whose real ground squares only touch at a
+shared corner don't merge into one solid Polygon under unary_union --
+their true combined footprint really is disconnected. feature_schema.py's
+GeoJSON schema already accepts MultiPolygon, and production_suitability.py's
+soil-carving already flattens Polygon/MultiPolygon/GeometryCollection
+alike via its own _polygon_pieces() helper, so this needs no special
+handling downstream.
 """
 
 import math
@@ -126,14 +157,21 @@ def identify_production_areas(
             'area_acres': float,                  # of the ON-PARCEL (clipped) footprint
             'representative_elevation_m': float,  # median elevation of the ON-PARCEL cells
             'polygon_utm': shapely Polygon/MultiPolygon,  # clipped to boundary_polygon_utm
+            'display_polygon_utm': shapely Polygon,       # convex hull, ALWAYS a single Polygon
             'geometry_wgs84': GeoJSON geometry dict,
         }
 
     polygon_utm is what water_candidate_zones.py does distance math
-    against (real meters, DEM's own projected CRS); geometry_wgs84 is only
-    for output/display. The convex hull of cell centers is a deliberately
-    simple footprint for a heuristic patch — adequate for that proximity
-    math, not a precise cadastral-grade boundary.
+    against (real meters, DEM's own projected CRS) and is the accurate,
+    real per-cell-square-union footprint (see module docstring's FOOTPRINT
+    GEOMETRY section) -- NOT a convex hull of cell centers, and it can
+    legitimately be a MultiPolygon. geometry_wgs84 is the same geometry,
+    reprojected, for output/display. display_polygon_utm is a convex
+    hull of the same cells -- ALWAYS a single Polygon -- exposed only for
+    callers that need a single-ring geometry (e.g. a soil-fetch WKT query
+    polygon; see production_suitability.py's identify_production_area_
+    suitability()) or smoother rendering; nothing here or downstream reads
+    it for area or spatial-relationship purposes.
 
     A candidate slope-qualifying patch can span the DEM's buffered area
     past the drawn boundary (dem_data.py fetches ~100m past the parcel on
@@ -145,10 +183,12 @@ def identify_production_areas(
     remainder is real but tiny is dropped by the same min_area_acres
     filter already applied to the unclipped case. The final polygon is
     additionally intersected with boundary_polygon_utm as a defensive
-    safety net — the convex hull of on-parcel cell centers can still bulge
-    slightly past a concave boundary edge even when every contributing
-    cell is itself on-parcel.
+    safety net — the real cell-union footprint of on-parcel cells can
+    still bulge slightly past a concave boundary edge even when every
+    contributing cell is itself on-parcel.
     """
+    from production_area_ceiling import _cell_union_footprint  # deferred: production_area_ceiling imports THIS module at its own top level, so a top-level import here would be circular
+
     array = dem["array"]
     slope = compute_slope_percent(array, dem["resolution_meters"])
     candidate_mask = (~np.isnan(slope)) & (slope <= max_slope_pct)
@@ -175,25 +215,30 @@ def identify_production_areas(
         elevations = [float(array[r, c]) for r, c in on_parcel_cells]
         representative_elevation_m = float(np.median(elevations))
 
-        utm_points = [pixel_center_xy(dem, r, c) for r, c in on_parcel_cells]
-        polygon_utm = MultiPoint(utm_points).convex_hull
-        if polygon_utm.geom_type != "Polygon":
-            # Degenerate hull (near-collinear patch) — buffer to a real
-            # polygon rather than passing a Point/LineString downstream.
-            px, py = dem["resolution_meters"]
-            polygon_utm = polygon_utm.buffer(max(px, py) / 2)
-
-        polygon_utm = polygon_utm.intersection(boundary_polygon_utm)
+        footprint = _cell_union_footprint(on_parcel_cells, dem)
+        polygon_utm = footprint.intersection(boundary_polygon_utm)
         if polygon_utm.is_empty:
             continue
 
         # The clip above can, in principle, trim more than the cell-count
-        # estimate above did (hull bulge past a concave boundary edge) —
-        # recompute area from the actual returned geometry so area_acres
-        # always matches polygon_utm exactly, not the pre-clip estimate.
+        # estimate above did (footprint bulge past a concave boundary
+        # edge) — recompute area from the actual returned geometry so
+        # area_acres always matches polygon_utm exactly, not the pre-clip
+        # estimate.
         area_acres = polygon_utm.area / SQUARE_METERS_PER_ACRE
         if area_acres < min_area_acres:
             continue
+
+        # Display-only convex hull -- NOT used for area_acres or any
+        # spatial relationship; see docstring above.
+        utm_points = [pixel_center_xy(dem, r, c) for r, c in on_parcel_cells]
+        display_polygon_utm = MultiPoint(utm_points).convex_hull
+        if display_polygon_utm.geom_type != "Polygon":
+            # Degenerate hull (near-collinear patch) — buffer to a real
+            # polygon rather than exposing a Point/LineString.
+            px, py = dem["resolution_meters"]
+            display_polygon_utm = display_polygon_utm.buffer(max(px, py) / 2)
+        display_polygon_utm = display_polygon_utm.intersection(boundary_polygon_utm)
 
         geometry_wgs84 = transform_geom(dem["crs"], "EPSG:4326", mapping(polygon_utm))
 
@@ -203,6 +248,7 @@ def identify_production_areas(
                 "area_acres": round(float(area_acres), 2),
                 "representative_elevation_m": representative_elevation_m,
                 "polygon_utm": polygon_utm,
+                "display_polygon_utm": display_polygon_utm,
                 "geometry_wgs84": geometry_wgs84,
             }
         )

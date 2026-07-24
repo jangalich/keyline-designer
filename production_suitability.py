@@ -371,6 +371,19 @@ def _polygon_pieces(geom) -> list:
     return []
 
 
+def _sub_patch_suffix(index: int) -> str:
+    """Spreadsheet-column-style suffix (a, b, ..., z, aa, ab, ...) -- unlike
+    a fixed 26-letter alphabet index, this never overflows regardless of
+    how many real sub-patches a soil carve produces."""
+    letters = "abcdefghijklmnopqrstuvwxyz"
+    result = ""
+    index += 1
+    while index > 0:
+        index, remainder = divmod(index - 1, 26)
+        result = letters[remainder] + result
+    return result
+
+
 def _carve_soil_from_patch(
     patch: dict,
     cells: list[tuple[int, int]],
@@ -441,10 +454,10 @@ def _carve_soil_from_patch(
         return []  # this patch's entire footprint was disqualifying soil
 
     split = len(pieces) > 1  # only assign lettered sub-ids for a REAL disconnected split
-    suffix_letters = "abcdefghijklmnopqrstuvwxyz"
 
     sub_patches = []
-    for index, piece in enumerate(pieces):
+    kept_index = 0  # advances only for pieces actually kept (post-filter) -- see _sub_patch_suffix()
+    for piece in pieces:
         piece_area_acres = piece.area / SQUARE_METERS_PER_ACRE
         if piece_area_acres < min_area_acres:
             continue
@@ -468,7 +481,7 @@ def _carve_soil_from_patch(
 
         sub_patches.append(
             {
-                "id": f"{patch['id']}{suffix_letters[index]}" if split else patch["id"],
+                "id": f"{patch['id']}{_sub_patch_suffix(kept_index)}" if split else patch["id"],
                 "source_patch_id": patch["id"],
                 "polygon_utm": piece,
                 "geometry_wgs84": geometry_wgs84,
@@ -480,6 +493,7 @@ def _carve_soil_from_patch(
                 "soil_data_available": soil_data_available,
             }
         )
+        kept_index += 1
 
     return sub_patches
 
@@ -734,6 +748,18 @@ def identify_production_area_suitability(
     the DEM's own CRS) and passes it to BOTH identify_production_areas()
     (required there, for on-parcel clipping) and score_production_areas()
     (so its own recovered cells stay on-parcel too).
+
+    identify_production_areas()'s own polygon_utm/geometry_wgs84 are now
+    the real per-cell-square-union footprint (see that module's docstring)
+    and can legitimately be a MultiPolygon, so the soil-fetch WKT query
+    polygon here is built from each patch's display_polygon_utm (the
+    convex hull -- always a single Polygon) instead, same reasoning and
+    pattern as production_area_ceiling.py's identify_optimized_production_
+    areas(): coordinates_to_wkt_polygon() expects a single ring, and a
+    conservative, slightly-larger query region is fine for "what SSURGO
+    geometry intersects this footprint at all" -- the actual carving math
+    downstream still intersects/subtracts against each patch's real,
+    precise polygon_utm, not this query shape.
     """
     if dem is None:
         dem = get_dem_for_boundary(boundary_coordinates)
@@ -752,7 +778,8 @@ def identify_production_area_suitability(
 
     if check_soil:
         for patch in patches:
-            wkt_polygon = coordinates_to_wkt_polygon(patch["geometry_wgs84"]["coordinates"][0])
+            query_geometry_wgs84 = transform_geom(dem["crs"], "EPSG:4326", mapping(patch["display_polygon_utm"]))
+            wkt_polygon = coordinates_to_wkt_polygon(query_geometry_wgs84["coordinates"][0])
             try:
                 disqualifying_soil_by_patch_id[patch["id"]] = _fetch_disqualifying_soil_union(wkt_polygon, dem)
             except Exception:

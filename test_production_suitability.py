@@ -248,7 +248,9 @@ assert scored_clean[0]["suitability_score"] == scored_absent[0]["suitability_sco
 print("Disqualifying geometry present but None (checked, clean) -> also unmodified, soil_data_available=True.")
 
 # 4c. Corner carve: removes a chunk from one corner, leaves a single smaller connected remainder (same id).
-corner = box(500002.5, 4499942.5, 500050.0, 4499990.0)
+# Anchored at base_patch's own real footprint corner (500000.0, 4499940.0) -- the real per-cell-square-union
+# footprint (not a convex hull of cell centers), per the production_area.py fix.
+corner = box(500000.0, 4499940.0, 500047.5, 4499987.5)
 scored_corner = score_production_areas([dict(base_patch)], dem_soil, full_extent_soil, {patch_id: corner})
 assert len(scored_corner) == 1, "a corner carve must not split the patch"
 assert scored_corner[0]["id"] == patch_id, "an unsplit carve keeps the original patch id"
@@ -265,7 +267,11 @@ print(
 )
 
 # 4d. Mid-band carve: splits the patch into two disconnected survivors, each individually re-scored.
-midband = box(500045.0, 4499942.5, 500055.0, 4500037.5)
+# The y-range overshoots base_patch's real footprint bounds (4499940.0-4500040.0) on both ends so the
+# carve fully bisects it top-to-bottom -- the real per-cell-square-union footprint extends slightly past
+# the old convex-hull-of-centers bounds, so a strip only as tall as the hull would leave thin bridges
+# connecting the two halves instead of actually disconnecting them.
+midband = box(500045.0, 4499930.0, 500055.0, 4500050.0)
 scored_split = score_production_areas([dict(base_patch)], dem_soil, full_extent_soil, {patch_id: midband})
 assert len(scored_split) == 2, f"expected a 2-way split, got {len(scored_split)} piece(s)"
 ids = {p["id"] for p in scored_split}
@@ -285,7 +291,9 @@ print(
 )
 
 # 4e. Split where one resulting piece is below MIN_PRODUCTION_AREA_ACRES -- dropped, the surviving piece kept.
-smallband = box(500010.0, 4499942.5, 500020.0, 4500037.5)  # leaves a ~0.18ac sliver + a ~1.8ac remainder
+# Same y-overshoot reasoning as 4d's midband -- the carve must fully bisect the real footprint, not just
+# the old hull's shorter bounds, or the sliver stays connected to the remainder via a thin bridge.
+smallband = box(500007.5, 4499930.0, 500017.5, 4500050.0)  # leaves a ~0.18ac sliver + a ~2.0ac remainder
 scored_tiny_split = score_production_areas([dict(base_patch)], dem_soil, full_extent_soil, {patch_id: smallband})
 assert len(scored_tiny_split) == 1, (
     f"expected exactly 1 surviving piece (the tiny sliver should be dropped below MIN_PRODUCTION_AREA_ACRES), "
