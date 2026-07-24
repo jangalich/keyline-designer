@@ -43,6 +43,59 @@ def cell_area_acres(dem: dict) -> float:
 D8_OFFSETS = [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)]
 
 
+def _shift(arr: np.ndarray, dr: int, dc: int) -> np.ndarray:
+    """Returns a same-shape array where out[r, c] == arr[r + dr, c + dc],
+    treating anything outside arr's own bounds as False -- i.e. "shift the
+    grid by (-dr, -dc)" with the vacated edge filled with background,
+    never wrapped. Shared building block for binary_erode()'s per-
+    neighbor AND."""
+    rows, cols = arr.shape
+    out = np.zeros_like(arr)
+
+    r_src_start, r_src_end = max(0, dr), min(rows, rows + dr)
+    c_src_start, c_src_end = max(0, dc), min(cols, cols + dc)
+    r_dst_start = max(0, -dr)
+    c_dst_start = max(0, -dc)
+    r_dst_end = r_dst_start + (r_src_end - r_src_start)
+    c_dst_end = c_dst_start + (c_src_end - c_src_start)
+
+    out[r_dst_start:r_dst_end, c_dst_start:c_dst_end] = arr[r_src_start:r_src_end, c_src_start:c_src_end]
+    return out
+
+
+def binary_erode(mask: np.ndarray, radius_cells: int) -> np.ndarray:
+    """
+    8-connected (Chebyshev/square) binary erosion by radius_cells, treating
+    everything outside `mask`'s own bounds as background -- same D8
+    adjacency connected_components() already uses, so a shape that eroded
+    down to 2+ separate components is genuinely pinched by this grid's own
+    connectivity rule, not by an inconsistent one.
+
+    Implemented as radius_cells repeated single-ring (3x3) erosions rather
+    than one direct radius-N structuring element -- applying the 3x3
+    erosion r times is mathematically equivalent to eroding once with a
+    single (2r+1)-square structuring element, and this keeps the whole
+    operation plain numpy (shift-and-AND over the 8 neighbor offsets), no
+    scipy dependency. Deliberately implemented here rather than adding
+    scipy: this module's own docstring commits to staying dependency-free
+    (numpy only) so every terrain-analysis module downstream can unit-test
+    against a synthetic DEM without a heavier, unvetted new requirement for
+    what is otherwise a single, simple, self-contained operation.
+
+    radius_cells <= 0 returns a copy of `mask` unchanged (no erosion).
+    """
+    if radius_cells <= 0:
+        return mask.copy()
+
+    eroded = mask.copy()
+    for _ in range(radius_cells):
+        shrunk = eroded.copy()
+        for dr, dc in D8_OFFSETS:
+            shrunk &= _shift(eroded, dr, dc)
+        eroded = shrunk
+    return eroded
+
+
 def connected_components(mask: np.ndarray) -> tuple[np.ndarray, int]:
     """
     8-connected component labeling of a 2D boolean grid, via iterative

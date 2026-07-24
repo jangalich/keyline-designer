@@ -144,7 +144,21 @@ for r in range(3, 23):  # one big contiguous eligible region
         array[r, c] = 100.0
 for r in range(3, 23):  # a worse-quality band running through the middle of it
     for c in range(40, 50):
-        array[r, c] = 100.0 + (r - 3) * 0.4  # up to 8% grade -- still eligible, but far worse than the flat flanks
+        # A gentle gradient (~1.1% max internal grade) -- worse than the
+        # perfectly flat flanks (0%), but deliberately gentle enough that
+        # the ELEVATION JUMP AT THE SEAM (this band column vs its flat
+        # neighbor at the SAME row) never approaches MAX_PRODUCTION_SLOPE_PCT
+        # either. A steeper gradient here (previously up to 8%) makes that
+        # transverse seam jump exceed 20% at the higher rows, which
+        # slope-excludes a thin real neck along the low-row end of the
+        # band and gets legitimately caught by production_area.py's own
+        # waist detection (MIN_ZONE_WAIST_METERS) -- a real pinch, just
+        # not the one this specific scenario is isolating (STEP 2's
+        # worst-first trim fragmentation, not STEP 3's waist split). This
+        # value keeps the raw eligible region a single, un-waisted
+        # component (matching the assertion right below), same as this
+        # scenario always intended.
+        array[r, c] = 100.0 + (r - 3) * 0.03
 
 dem_band = _dem(array)
 tight_boundary_band = box(x0 + 3 * px, y0 - 23 * py, x0 + 83 * px, y0 - 3 * py)

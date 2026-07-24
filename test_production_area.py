@@ -24,7 +24,7 @@ suitability() already established elsewhere in this pipeline.
 from unittest.mock import patch as mock_patch
 
 import numpy as np
-from shapely.geometry import Polygon, box
+from shapely.geometry import MultiPoint, Polygon, box
 from shapely.ops import unary_union
 
 import production_area as pa
@@ -477,6 +477,275 @@ assert not trace_union.intersects(ernest_geom), (
 )
 print("_fetch_disqualifying_soil_union() carves only the genuinely, dominantly hydric Atkins mukey -- "
       "the two large, mostly well-drained mukeys with only trace hydric inclusions are correctly left whole.")
+
+
+# =====================================================================
+# Part 1/2/3: waist detection/splitting, true-hole detection, and
+# display_polygon_utm hole-punching -- offline synthetic cell-mask tests.
+#
+# These feed a hand-built boolean cell_mask directly into cluster_and_gate()
+# (bypassing compute_step1_eligible_cells()'s own slope/soil derivation
+# entirely -- cluster_and_gate() accepts "whatever cell mask a caller
+# passes in", per its own docstring), so each shape below tests ONLY the
+# raster morphology (erosion-based waist splitting / edge-anchored flood-
+# fill hole detection), independent of slope or hydric-soil semantics.
+# =====================================================================
+
+WAIST_RESOLUTION = (5.0, 5.0)
+WAIST_DEM_SHAPE = (12, 24)
+WAIST_CELL_AREA_ACRES = (WAIST_RESOLUTION[0] * WAIST_RESOLUTION[1]) / pa.SQUARE_METERS_PER_ACRE
+
+
+def _waist_dem(rows: int, cols: int) -> dict:
+    # Perfectly flat -- compute_step1_eligible_cells() on this is only used
+    # to hand cluster_and_gate() a well-formed step1 dict (it reads
+    # step1['slope_source_labels'] for source_patch_id bookkeeping); the
+    # actual cell_mask under test is built and passed in by hand below.
+    array = np.full((rows, cols), 100.0, dtype=np.float32)
+    return {
+        "array": array,
+        "resolution_meters": WAIST_RESOLUTION,
+        "origin_x": 500000.0,
+        "origin_y": 4500000.0,
+        "crs": "EPSG:32617",
+    }
+
+
+def _mask_from_cells(shape: tuple[int, int], cells) -> np.ndarray:
+    mask = np.zeros(shape, dtype=bool)
+    for r, c in cells:
+        mask[r, c] = True
+    return mask
+
+
+def _rect_cells(r0: int, r1: int, c0: int, c1: int) -> list[tuple[int, int]]:
+    """All (row, col) cells in [r0, r1) x [c0, c1)."""
+    return [(r, c) for r in range(r0, r1) for c in range(c0, c1)]
+
+
+def _step1_for(dem: dict) -> dict:
+    boundary = _full_extent_boundary(dem)
+    return compute_step1_eligible_cells(dem, boundary, disqualifying_soil_union_utm=None)
+
+
+def _gate(cell_mask: np.ndarray, dem: dict, step1: dict) -> list[dict]:
+    boundary = _full_extent_boundary(dem)
+    return cluster_and_gate(cell_mask, dem, boundary, step1)
+
+
+# --- Dumbbell with a strip NARROWER than MIN_ZONE_WAIST_METERS: must split ---
+
+dumbbell_dem = _waist_dem(*WAIST_DEM_SHAPE)
+dumbbell_step1 = _step1_for(dumbbell_dem)
+
+lobe_a = _rect_cells(0, 10, 0, 10)   # 10x10
+lobe_b = _rect_cells(0, 10, 14, 24)  # 10x10
+narrow_strip = _rect_cells(4, 6, 10, 14)  # 2 rows tall -- narrower than the 12m (~2-cell radius) erosion
+dumbbell_cells = lobe_a + lobe_b + narrow_strip
+dumbbell_mask = _mask_from_cells(WAIST_DEM_SHAPE, dumbbell_cells)
+
+unsplit_footprint_acres = pa._cell_union_footprint(dumbbell_cells, dumbbell_dem).area / pa.SQUARE_METERS_PER_ACRE
+
+dumbbell_patches = _gate(dumbbell_mask, dumbbell_dem, dumbbell_step1)
+assert len(dumbbell_patches) == 2, (
+    f"a dumbbell with a strip narrower than MIN_ZONE_WAIST_METERS must split into 2 clusters, "
+    f"got {len(dumbbell_patches)}"
+)
+for p in dumbbell_patches:
+    assert p["area_acres"] >= pa.MIN_PRODUCTION_AREA_ACRES, "every split sub-cluster must clear the area floor"
+split_total = sum(p["area_acres"] for p in dumbbell_patches)
+assert abs(split_total - round(unsplit_footprint_acres, 2)) < 0.02, (
+    f"the two split sub-clusters' reclaimed acreage ({split_total}) should sum to ~the original unsplit "
+    f"footprint ({round(unsplit_footprint_acres, 2)}) -- erosion only decides the split, it must not "
+    "permanently lose real ground"
+)
+print(
+    f"Waist split: a dumbbell joined by a strip narrower than MIN_ZONE_WAIST_METERS correctly splits into "
+    f"{len(dumbbell_patches)} clusters (areas {[p['area_acres'] for p in dumbbell_patches]}), summing to "
+    f"~{split_total} acres vs {round(unsplit_footprint_acres, 2)} unsplit."
+)
+
+
+# --- Same dumbbell, but the connecting strip is WIDER than MIN_ZONE_WAIST_METERS: must NOT split ---
+
+wide_strip = _rect_cells(0, 10, 10, 14)  # full lobe height -- no pinch at all
+wide_dumbbell_cells = lobe_a + lobe_b + wide_strip
+wide_dumbbell_mask = _mask_from_cells(WAIST_DEM_SHAPE, wide_dumbbell_cells)
+
+wide_dumbbell_patches = _gate(wide_dumbbell_mask, dumbbell_dem, dumbbell_step1)
+assert len(wide_dumbbell_patches) == 1, (
+    f"a dumbbell whose connecting strip is wider than MIN_ZONE_WAIST_METERS must NOT split, "
+    f"got {len(wide_dumbbell_patches)} cluster(s)"
+)
+assert len(wide_dumbbell_patches[0]["cells"]) == len(wide_dumbbell_cells), (
+    "an un-split cluster must pass through with every one of its original cells intact"
+)
+print(
+    "Waist split: the same dumbbell shape with a WIDE connecting strip correctly stays as 1 unsplit cluster, "
+    "unchanged from before this feature."
+)
+
+
+# --- Dumbbell where erosion produces 2 components, but one sub-cluster would fall below
+#     MIN_PRODUCTION_AREA_ACRES after reclaiming -- must NOT split (step 2c) ---
+
+small_lobe = _rect_cells(0, 6, 0, 6)     # 6x6 -- small, but its eroded interior still survives on its own
+big_lobe = _rect_cells(0, 10, 10, 20)    # 10x10
+tiny_strip = _rect_cells(2, 4, 6, 10)    # 2 rows tall -- narrow, same as the real-split case above
+undersized_split_cells = small_lobe + big_lobe + tiny_strip
+undersized_split_mask = _mask_from_cells(WAIST_DEM_SHAPE, undersized_split_cells)
+undersized_dem = _waist_dem(*WAIST_DEM_SHAPE)
+undersized_step1 = _step1_for(undersized_dem)
+
+# Confirm the test setup actually exercises step 2c: erosion alone (before
+# reclaiming/gating) must find 2+ components here, so the "no split"
+# outcome below comes from the area gate, not from erosion failing to
+# separate the shape at all.
+radius_cells = pa._waist_erosion_radius_cells(undersized_dem, pa.MIN_ZONE_WAIST_METERS)
+from raster_grid import binary_erode as _binary_erode, connected_components as _connected_components
+
+eroded_probe = _binary_erode(undersized_split_mask, radius_cells)
+_, num_eroded_probe = _connected_components(eroded_probe)
+assert num_eroded_probe >= 2, (
+    f"test setup should genuinely erode into 2+ components (isolating step 2c's area gate specifically), "
+    f"got {num_eroded_probe}"
+)
+
+undersized_patches = _gate(undersized_split_mask, undersized_dem, undersized_step1)
+assert len(undersized_patches) == 1, (
+    f"erosion producing 2+ components must NOT commit a split if any resulting sub-cluster would fall "
+    f"below MIN_PRODUCTION_AREA_ACRES after reclaiming, got {len(undersized_patches)} cluster(s)"
+)
+assert len(undersized_patches[0]["cells"]) == len(undersized_split_cells), (
+    "a rejected split must keep the ORIGINAL, unsplit cluster exactly as cluster_and_gate would have "
+    "produced it without this feature -- not a partial/one-sided split"
+)
+print(
+    "Waist split: a dumbbell whose erosion technically yields 2 components, but one sub-cluster would fall "
+    "below MIN_PRODUCTION_AREA_ACRES after reclaiming, correctly does NOT split (step 2c) -- the original "
+    "cluster passes through unchanged."
+)
+
+
+# --- Ring/donut (true hole): must NOT split, hole_footprints populated, display_polygon_utm has an interior ring ---
+
+RING_SHAPE = (18, 18)
+ring_dem = _waist_dem(*RING_SHAPE)
+ring_step1 = _step1_for(ring_dem)
+
+outer = set(_rect_cells(1, 17, 1, 17))     # 16x16 solid block
+hole = set(_rect_cells(6, 12, 6, 12))      # 6x6 hole, well clear of the outer edge (5-cell wall all around)
+ring_cells = list(outer - hole)
+ring_mask = _mask_from_cells(RING_SHAPE, ring_cells)
+
+ring_patches = _gate(ring_mask, ring_dem, ring_step1)
+assert len(ring_patches) == 1, f"a true hole must NOT trigger a split -- got {len(ring_patches)} cluster(s)"
+ring_patch = ring_patches[0]
+assert len(ring_patch["cells"]) == len(ring_cells), "the ring's own cells must pass through unchanged (no split)"
+
+assert len(ring_patch["hole_footprints"]) == 1, (
+    f"expected exactly 1 detected hole, got {len(ring_patch['hole_footprints'])}"
+)
+detected_hole = ring_patch["hole_footprints"][0]
+real_hole_footprint = pa._cell_union_footprint(list(hole), ring_dem)
+hole_area_diff = detected_hole.symmetric_difference(real_hole_footprint).area
+assert hole_area_diff < 1e-6, (
+    f"detected hole_footprints must match the real enclosed region's own cell-union footprint exactly, "
+    f"symmetric difference area {hole_area_diff}"
+)
+
+display = ring_patch["display_polygon_utm"]
+assert display.geom_type == "Polygon", "display_polygon_utm must stay a single Polygon even with a hole punched out"
+assert len(display.interiors) == 1, (
+    f"display_polygon_utm must carry exactly one interior ring for the one true hole, got {len(display.interiors)}"
+)
+interior_ring_polygon = Polygon(display.interiors[0])
+interior_diff = interior_ring_polygon.symmetric_difference(real_hole_footprint).area
+assert interior_diff < 1e-6, (
+    f"display_polygon_utm's interior ring must match the real hole footprint, symmetric difference area {interior_diff}"
+)
+print(
+    f"True hole: a ring/donut mask correctly does NOT split (1 cluster), hole_footprints holds the real "
+    f"{round(real_hole_footprint.area / pa.SQUARE_METERS_PER_ACRE, 3)}-acre enclosed region, and "
+    "display_polygon_utm carries a matching interior ring."
+)
+
+
+# --- Solid square (neither waist nor hole): passes through completely unchanged ---
+
+SQUARE_SHAPE = (12, 12)
+square_dem = _waist_dem(*SQUARE_SHAPE)
+square_step1 = _step1_for(square_dem)
+square_cells = _rect_cells(1, 11, 1, 11)  # solid 10x10, well clear of the DEM edge
+square_mask = _mask_from_cells(SQUARE_SHAPE, square_cells)
+
+square_patches = _gate(square_mask, square_dem, square_step1)
+assert len(square_patches) == 1, f"a solid, roughly-square mask must not split, got {len(square_patches)} cluster(s)"
+square_patch = square_patches[0]
+assert len(square_patch["cells"]) == len(square_cells), "a normal field must pass through with every cell intact"
+assert square_patch["hole_footprints"] == [], "a solid mask with no enclosed gap must report hole_footprints=[]"
+plain_hull = MultiPoint([pa.pixel_center_xy(square_dem, r, c) for r, c in square_cells]).convex_hull
+plain_hull = plain_hull.intersection(_full_extent_boundary(square_dem))
+assert square_patch["display_polygon_utm"].symmetric_difference(plain_hull).area < 1e-6, (
+    "with no holes, display_polygon_utm must be exactly the plain convex hull, unchanged from before this feature"
+)
+assert len(square_patch["display_polygon_utm"].interiors) == 0, "a plain hull must carry no interior rings"
+print(
+    "Idempotence: a solid, roughly-square mask with neither a waist nor a hole passes through completely "
+    "unchanged -- 1 cluster, hole_footprints=[], and a plain convex hull display_polygon_utm."
+)
+
+
+# --- Combined: a waist split AND a separate, unrelated true hole in one of the two resulting lobes ---
+
+COMBINED_SHAPE = (16, 30)
+combined_dem = _waist_dem(*COMBINED_SHAPE)
+combined_step1 = _step1_for(combined_dem)
+
+combined_lobe_a = set(_rect_cells(0, 10, 0, 10))     # 10x10, no hole
+combined_lobe_b = set(_rect_cells(0, 16, 14, 30))    # 16x16, WITH a hole below
+# 6x6 hole, walled by a 5-cell margin on every side of lobe B -- same
+# thickness the standalone ring/donut test above uses, so it survives
+# Part 1's erosion as its own thin ring rather than eroding away to
+# nothing (a hole positioned too close to its own cluster's edge would
+# vanish under erosion along with the outer boundary, which would just
+# make lobe B smaller, not preserve a real hole to detect).
+combined_hole = set(_rect_cells(5, 11, 19, 25))
+combined_lobe_b -= combined_hole
+combined_strip = set(_rect_cells(4, 6, 10, 14))      # 2 rows tall -- narrow, same as the split case above
+
+combined_cells = list(combined_lobe_a | combined_lobe_b | combined_strip)
+combined_mask = _mask_from_cells(COMBINED_SHAPE, combined_cells)
+
+combined_patches = _gate(combined_mask, combined_dem, combined_step1)
+assert len(combined_patches) == 2, (
+    f"the waist must still split into 2 clusters even with an unrelated hole present, got {len(combined_patches)}"
+)
+
+# Identify which resulting sub-cluster is the "lobe B" side (its cells sit at column >= 14).
+lobe_b_patch = next(p for p in combined_patches if any(c >= 14 for _, c in p["cells"]))
+lobe_a_patch = next(p for p in combined_patches if p is not lobe_b_patch)
+
+assert lobe_a_patch["hole_footprints"] == [], "lobe A (no hole) must report hole_footprints=[]"
+assert len(lobe_b_patch["hole_footprints"]) == 1, (
+    f"lobe B's own hole must be preserved on the correct resulting sub-cluster, got "
+    f"{len(lobe_b_patch['hole_footprints'])} hole(s)"
+)
+real_combined_hole_footprint = pa._cell_union_footprint(list(combined_hole), combined_dem)
+combined_hole_diff = lobe_b_patch["hole_footprints"][0].symmetric_difference(real_combined_hole_footprint).area
+assert combined_hole_diff < 1e-6, (
+    f"lobe B's detected hole must match the real hole geometry, symmetric difference area {combined_hole_diff}"
+)
+assert len(lobe_b_patch["display_polygon_utm"].interiors) == 1, (
+    "lobe B's display_polygon_utm must carry an interior ring for its own hole"
+)
+assert len(lobe_a_patch["display_polygon_utm"].interiors) == 0, (
+    "lobe A's display_polygon_utm must carry no interior ring -- the hole belongs to lobe B only"
+)
+print(
+    f"Combined: a dumbbell with BOTH a waist and a separate hole in one lobe correctly splits into "
+    f"{len(combined_patches)} clusters, with the hole preserved on the correct resulting sub-cluster only."
+)
 
 
 print("\nAll production_area checks passed.")

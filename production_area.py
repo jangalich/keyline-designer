@@ -37,7 +37,17 @@ point in the other two files reuses rather than recomputing:
         soil check, since hydric cells were already excluded at STEP 1.
         Shared by this module's own identify_production_areas() (no ceiling
         trim) and production_area_ceiling.py's identify_optimized_production_
-        areas() (with the trim) -- one implementation, not two.
+        areas() (with the trim) -- one implementation, not two. Also runs two
+        further sub-steps per cluster, each cluster mask's own raster
+        morphology, NOT continuous-geometry polygon work: WAIST detection/
+        splitting (a narrower-than-MIN_ZONE_WAIST_METERS pinch reads as two
+        zones, not one -- see _attempt_waist_split()) and true-HOLE
+        detection (excluded ground fully enclosed by a cluster's own
+        eligible cells, with no path to its outer boundary -- see
+        _detect_hole_footprints()). See cluster_and_gate()'s own docstring
+        for the full detail; a waist triggers a split, a hole doesn't (there
+        is nothing to split -- it's one solid lobe with a gap) but is
+        preserved as real, visible information via display_polygon_utm.
 
 identify_production_areas() is STEP 1 (no trim) + STEP 3 chained together,
 plus its own disqualifying-soil fetch (graceful-degrading, same
@@ -64,15 +74,30 @@ the REAL per-cell-square union footprint (_cell_union_footprint()), NOT a
 convex hull of cell center points -- a convex hull fills in concave gaps
 between actual qualifying cells with ground that was never actually
 eligible, over-reporting the real footprint. display_polygon_utm is a
-convex hull of the same cells -- ALWAYS a single Polygon -- exposed only
-for rendering convenience; nothing here or downstream reads it for area or
-spatial-relationship purposes. polygon_utm/geometry_wgs84 CAN legitimately
-come back as a MultiPolygon: two cells whose real ground squares only
-touch at a shared corner don't merge into one solid Polygon under
-unary_union.
+convex hull of the same cells -- ALWAYS a single Polygon (a Polygon CAN
+have interior rings/holes and still be geom_type "Polygon"; see below) --
+exposed only for rendering convenience; nothing here or downstream reads
+it for area or spatial-relationship purposes. polygon_utm/geometry_wgs84
+CAN legitimately come back as a MultiPolygon: two cells whose real ground
+squares only touch at a shared corner don't merge into one solid Polygon
+under unary_union.
+
+TRUE HOLES vs WAISTS: cluster_and_gate() also carries each cluster's own
+'hole_footprints' (list[Polygon], [] if none) -- real, excluded ground
+fully enclosed by that cluster's own eligible cells, with no path to its
+outer boundary. This is DIFFERENT from a "waist" (a pinch narrower than
+MIN_ZONE_WAIST_METERS that DOES have an opening to the outside on both
+sides): a waist triggers a split into independent clusters; a hole does
+not (there's nothing to split -- it's one solid lobe with a gap) and is
+instead punched back out of display_polygon_utm's hull so it stays
+visible on the rendered map as real information, rather than getting
+silently smoothed away. polygon_utm/area_acres are unaffected either way
+-- the real cell-union footprint already excludes hole cells by
+construction, same as it always has.
 """
 
 import math
+from collections import deque
 
 import numpy as np
 from rasterio.warp import transform as warp_transform
@@ -83,7 +108,14 @@ from shapely.prepared import prep
 
 from feature_schema import CONFIDENCE_LOW, make_feature, make_feature_collection
 from production_suitability import ASPECT_FACTOR_WEIGHT, SLOPE_FACTOR_WEIGHT
-from raster_grid import SQUARE_METERS_PER_ACRE, cell_area_acres, connected_components, pixel_center_xy
+from raster_grid import (
+    D8_OFFSETS,
+    SQUARE_METERS_PER_ACRE,
+    binary_erode,
+    cell_area_acres,
+    connected_components,
+    pixel_center_xy,
+)
 from soil_data import (
     coordinates_to_wkt_polygon,
     get_soil_data_for_polygon,
@@ -105,6 +137,18 @@ MAX_PRODUCTION_SLOPE_PCT = 20.0
 
 # Drop tiny, likely-noisy contiguous patches below this size. CONFIGURABLE.
 MIN_PRODUCTION_AREA_ACRES = 0.5
+
+# A single 8-connected cluster can legitimately contain a narrow "waist" --
+# real, physically connected eligible ground that pinches down to
+# something too narrow to sensibly treat as one zone (e.g. two decent-
+# sized fields joined by a thin strip). Narrower than this, and it reads
+# as two separate zones rather than one -- see cluster_and_gate()'s own
+# docstring for the erosion-based detection this feeds. 40 ft (~12m) is a
+# documented STARTING value only -- like every other threshold in this
+# pipeline (MAX_PRODUCTION_SLOPE_PCT, MIN_PRODUCTION_AREA_ACRES), it is
+# UNVALIDATED against real ground-truth and needs tuning against real
+# properties, not a derived or measured figure. CONFIGURABLE.
+MIN_ZONE_WAIST_METERS = 12.0  # ~40 ft
 
 # --- per-cell weighting (STEP 1's own scoring, used to order STEP 2's
 # worst-first ceiling trim) ---
@@ -376,6 +420,196 @@ def compute_step1_eligible_cells(
     }
 
 
+def _waist_erosion_radius_cells(dem: dict, min_waist_meters: float) -> int:
+    """
+    Converts MIN_ZONE_WAIST_METERS (a real-world distance) into a cell-
+    count erosion radius using the DEM's own resolution_meters -- same
+    meters-to-cell-units conversion pattern this pipeline's other
+    ground-distance thresholds already use, just applied to a radius
+    instead of an area. Eroding a mask by radius r cells strips away
+    anything narrower than roughly (2r) cells wide, so the radius is half
+    the minimum waist width, rounded UP (via ceil) so any real waist
+    genuinely narrower than min_waist_meters is reliably eroded away
+    rather than surviving due to a too-small radius. Always at least 1
+    cell, so a nonzero min_waist_meters always does *something*.
+    """
+    px, py = dem["resolution_meters"]
+    cell_size = (px + py) / 2.0
+    return max(1, math.ceil(min_waist_meters / cell_size / 2.0))
+
+
+def _reclaim_stripped_cells(
+    cluster_cells: set[tuple[int, int]],
+    seed_labels: dict[tuple[int, int], int],
+) -> dict[tuple[int, int], int]:
+    """
+    Part 1, step 2a: recovers the cells erosion stripped away -- erosion
+    only exists to DECIDE whether a cluster splits, never to permanently
+    remove real, eligible ground. Multi-source 8-connected BFS, confined
+    to `cluster_cells` (the ORIGINAL, pre-erosion cluster footprint):
+    every stripped cell (a cell in cluster_cells not already in
+    seed_labels) is assigned to whichever eroded sub-component's frontier
+    reaches it first, expanding one ring at a time from every surviving
+    sub-component simultaneously. BFS ring distance under 8-connected
+    (D8_OFFSETS) adjacency is exactly Chebyshev pixel distance -- the same
+    adjacency connected_components() already uses -- so this is a simple
+    per-cell nearest-surviving-component assignment by pixel distance,
+    staying entirely in cell-space: not a hull, not a buffer.
+    """
+    assignment = dict(seed_labels)
+    queue = deque(seed_labels.items())
+    while queue:
+        (r, c), label = queue.popleft()
+        for dr, dc in D8_OFFSETS:
+            neighbor = (r + dr, c + dc)
+            if neighbor in cluster_cells and neighbor not in assignment:
+                assignment[neighbor] = label
+                queue.append((neighbor, label))
+    return assignment
+
+
+def _attempt_waist_split(
+    cells: list[tuple[int, int]],
+    grid_shape: tuple[int, int],
+    dem: dict,
+    min_area_acres: float,
+    min_waist_meters: float = MIN_ZONE_WAIST_METERS,
+) -> list[list[tuple[int, int]]]:
+    """
+    Part 1: waist detection and splitting for ONE cluster's own cell mask
+    -- a raster morphological operation on the cell mask itself (via
+    raster_grid.binary_erode()), NOT a continuous-geometry operation on
+    any polygon. See cluster_and_gate()'s own docstring for how this
+    fits into STEP 3.
+
+    Erodes the cluster by MIN_ZONE_WAIST_METERS (converted to a cell
+    radius via _waist_erosion_radius_cells()) and re-labels the result. If
+    erosion doesn't produce 2+ components, there's no real waist here --
+    returns [cells] completely unchanged (this function is idempotent and
+    side-effect-free for clusters with no real waist, e.g. a normal,
+    roughly-convex field).
+
+    If erosion DOES produce 2+ components, reclaims every stripped cell
+    back onto its nearest surviving sub-component
+    (_reclaim_stripped_cells()) and checks each reclaimed sub-cluster's
+    own REAL cell-union footprint (_cell_union_footprint(), not a cell
+    count) against min_area_acres. The split is committed -- returning one
+    cells-list per sub-cluster -- only if EVERY sub-cluster clears
+    min_area_acres on its own; otherwise this returns [cells] unchanged
+    (step 2c: a technically-2+-component erosion result that can't
+    actually support 2+ real zones isn't a split).
+    """
+    if len(cells) <= 1:
+        return [cells]
+
+    rows, cols = grid_shape
+    cell_mask = np.zeros((rows, cols), dtype=bool)
+    for r, c in cells:
+        cell_mask[r, c] = True
+
+    radius_cells = _waist_erosion_radius_cells(dem, min_waist_meters)
+    eroded_mask = binary_erode(cell_mask, radius_cells)
+
+    eroded_labels, num_eroded = connected_components(eroded_mask)
+    if num_eroded < 2:
+        return [cells]
+
+    cluster_cells = set(cells)
+    seed_labels = {
+        (int(r), int(c)): int(eroded_labels[r, c]) for r, c in np.argwhere(eroded_mask)
+    }
+    assignment = _reclaim_stripped_cells(cluster_cells, seed_labels)
+
+    sub_groups: dict[int, list[tuple[int, int]]] = {}
+    for cell, label in assignment.items():
+        sub_groups.setdefault(label, []).append(cell)
+
+    if len(sub_groups) < 2:
+        return [cells]
+
+    for group_cells in sub_groups.values():
+        footprint = _cell_union_footprint(group_cells, dem)
+        area_acres = footprint.area / SQUARE_METERS_PER_ACRE
+        if area_acres < min_area_acres:
+            return [cells]
+
+    return list(sub_groups.values())
+
+
+def _detect_hole_footprints(cells: list[tuple[int, int]], dem: dict) -> list[Polygon]:
+    """
+    Part 2: true-hole detection for one FINAL cluster (post-waist-
+    splitting) -- run independently of Part 1's erosion (a cluster can
+    have neither, either, or both a waist AND a separate hole). A true
+    hole is excluded (ineligible) ground fully enclosed by this cluster's
+    own eligible cells, with NO path to the cluster's outer boundary --
+    different from a waist, which has an opening to the outside on both
+    sides of the pinch.
+
+    Standard flood-fill-from-the-border approach: builds a local sub-grid
+    covering just this cluster's own bounding box, then floods the
+    BACKGROUND (non-cluster cells) starting from the sub-grid's own outer
+    edges. Any background cell the flood never reaches has no path to the
+    outside -- a real, enclosed hole. Uses 4-connected flood-fill for the
+    background against this cluster's 8-connected foreground (the
+    standard foreground/background connectivity pairing that keeps "is
+    this enclosed" well-defined instead of ambiguous at diagonal
+    touches).
+
+    Returns one Polygon per enclosed hole component (its own real
+    cell-union footprint via _cell_union_footprint()) -- [] if the
+    cluster has no true hole.
+    """
+    if not cells:
+        return []
+
+    rows = [r for r, _ in cells]
+    cols = [c for _, c in cells]
+    r0, r1 = min(rows), max(rows)
+    c0, c1 = min(cols), max(cols)
+    height, width = r1 - r0 + 1, c1 - c0 + 1
+
+    cluster_mask = np.zeros((height, width), dtype=bool)
+    for r, c in cells:
+        cluster_mask[r - r0, c - c0] = True
+    background = ~cluster_mask
+
+    reached = np.zeros((height, width), dtype=bool)
+    queue: deque = deque()
+
+    def _seed(r: int, c: int) -> None:
+        if background[r, c] and not reached[r, c]:
+            reached[r, c] = True
+            queue.append((r, c))
+
+    for r in range(height):
+        _seed(r, 0)
+        _seed(r, width - 1)
+    for c in range(width):
+        _seed(0, c)
+        _seed(height - 1, c)
+
+    four_offsets = [(-1, 0), (1, 0), (0, -1), (0, 1)]
+    while queue:
+        r, c = queue.popleft()
+        for dr, dc in four_offsets:
+            nr, nc = r + dr, c + dc
+            if 0 <= nr < height and 0 <= nc < width and background[nr, nc] and not reached[nr, nc]:
+                reached[nr, nc] = True
+                queue.append((nr, nc))
+
+    enclosed_mask = background & ~reached
+    if not enclosed_mask.any():
+        return []
+
+    hole_labels, num_holes = connected_components(enclosed_mask)
+    footprints = []
+    for label in range(num_holes):
+        hole_cells = [(int(r) + r0, int(c) + c0) for r, c in np.argwhere(hole_labels == label)]
+        footprints.append(_cell_union_footprint(hole_cells, dem))
+    return footprints
+
+
 def cluster_and_gate(
     cell_mask: np.ndarray,
     dem: dict,
@@ -393,6 +627,39 @@ def cluster_and_gate(
     Nothing else gates survival here: soil was already excluded at STEP 1,
     so there is nothing left to carve or reject at this stage.
 
+    Two sub-steps run on top of the base connected-component labeling,
+    each cluster at a time:
+
+      PART 1 -- waist detection/splitting (_attempt_waist_split()): a
+        single 8-connected cluster can contain a narrow "waist" -- real,
+        physically connected eligible ground that pinches down to
+        something narrower than MIN_ZONE_WAIST_METERS (e.g. two decent-
+        sized fields joined by a thin strip) and reads as two zones, not
+        one. Detected via raster erosion of the cluster's own cell mask
+        (NOT continuous-geometry polygon differencing), and committed only
+        if every resulting sub-cluster still clears min_area_acres on its
+        own real, reclaimed footprint. This is DIFFERENT from a true hole
+        (Part 2 below): a waist has an opening to the outside on both
+        sides of the pinch, so it can be split into two standalone zones;
+        a hole doesn't connect to the outside at all, so there's nothing
+        to split -- it's one solid lobe with a gap.
+
+      PART 2 -- true-hole detection (_detect_hole_footprints()): runs
+        independently of Part 1, once per FINAL cluster (i.e. after any
+        Part-1 split). A hole is excluded ground fully enclosed by that
+        cluster's own eligible cells. Stored as 'hole_footprints' -- does
+        NOT alter polygon_utm/area_acres (the real cell-union footprint
+        already correctly excludes hole cells) -- purely so the hole's own
+        geometry can be carried forward for display (Part 3).
+
+      PART 3 -- display_polygon_utm: a convex hull of the FINAL cluster's
+        own cells (smoothing the outer boundary is cosmetic and fine),
+        with Part 2's hole_footprints punched back out via .difference()
+        so real, enclosed holes stay visible on the rendered map as real
+        information, rather than being silently smoothed away by the
+        hull. A cluster with no holes just gets a plain hull, unchanged
+        from before this addition.
+
     `step1` is compute_step1_eligible_cells()'s own return dict -- used
     here only to attach each surviving cluster's 'source_patch_id' (the
     connected-component label of STEP 1's pre-hydric slope_only_mask that
@@ -402,10 +669,14 @@ def cluster_and_gate(
     one built with disqualifying_soil_union_utm=None.
 
     Returns the same shape identify_production_areas() itself returns,
-    PLUS 'cells' (this cluster's own constituent DEM cells) and
-    'source_patch_id' -- consumed directly by production_suitability.py's
+    PLUS 'cells' (this cluster's own constituent DEM cells), 'hole_
+    footprints' (list[Polygon], [] if none), and 'source_patch_id' --
+    consumed directly by production_suitability.py's
     score_production_areas(), so STEP 4 never has to recompute/recover
-    cluster membership from a mask a second time.
+    cluster membership from a mask a second time. 'id' is assigned
+    sequentially across the FINAL patch list (after any Part-1 splitting),
+    not the pre-split connected-component label, so a waist split's two
+    resulting sub-clusters each get their own distinct id.
 
     polygon_utm/geometry_wgs84 CAN legitimately come back as a
     MultiPolygon: connected_components() is 8-connected (diagonal
@@ -416,52 +687,61 @@ def cluster_and_gate(
     MultiPolygon.
     """
     labels, num_components = connected_components(cell_mask)
-    area_per_cell = cell_area_acres(dem)
     slope_source_labels = step1["slope_source_labels"]
 
     patches = []
+    next_id = 0
     for component_id in range(num_components):
-        cells = [(int(r), int(c)) for r, c in np.argwhere(labels == component_id)]
-        if not cells:
+        component_cells = [(int(r), int(c)) for r, c in np.argwhere(labels == component_id)]
+        if not component_cells:
             continue
 
-        elevations = [float(dem["array"][r, c]) for r, c in cells]
+        for cluster_cells in _attempt_waist_split(component_cells, cell_mask.shape, dem, min_area_acres):
+            elevations = [float(dem["array"][r, c]) for r, c in cluster_cells]
 
-        footprint = _cell_union_footprint(cells, dem)
-        polygon_utm = footprint.intersection(boundary_polygon_utm)
-        if polygon_utm.is_empty:
-            continue
+            footprint = _cell_union_footprint(cluster_cells, dem)
+            polygon_utm = footprint.intersection(boundary_polygon_utm)
+            if polygon_utm.is_empty:
+                continue
 
-        area_acres = polygon_utm.area / SQUARE_METERS_PER_ACRE
-        if area_acres < min_area_acres:
-            continue
+            area_acres = polygon_utm.area / SQUARE_METERS_PER_ACRE
+            if area_acres < min_area_acres:
+                continue
 
-        # Display-only convex hull -- NOT used for area_acres or any
-        # spatial relationship; see module docstring.
-        utm_points = [pixel_center_xy(dem, r, c) for r, c in cells]
-        display_polygon_utm = MultiPoint(utm_points).convex_hull
-        if display_polygon_utm.geom_type != "Polygon":
-            px, py = dem["resolution_meters"]
-            display_polygon_utm = display_polygon_utm.buffer(max(px, py) / 2)
-        display_polygon_utm = display_polygon_utm.intersection(boundary_polygon_utm)
+            hole_footprints = _detect_hole_footprints(cluster_cells, dem)
 
-        geometry_wgs84 = transform_geom(dem["crs"], "EPSG:4326", mapping(polygon_utm))
+            # Display-only convex hull -- NOT used for area_acres or any
+            # spatial relationship; see module docstring. Real, enclosed
+            # holes (Part 2) are punched back out so they stay visible
+            # rather than getting smoothed away by the hull.
+            utm_points = [pixel_center_xy(dem, r, c) for r, c in cluster_cells]
+            display_polygon_utm = MultiPoint(utm_points).convex_hull
+            if display_polygon_utm.geom_type != "Polygon":
+                px, py = dem["resolution_meters"]
+                display_polygon_utm = display_polygon_utm.buffer(max(px, py) / 2)
+            if hole_footprints:
+                display_polygon_utm = display_polygon_utm.difference(unary_union(hole_footprints))
+            display_polygon_utm = display_polygon_utm.intersection(boundary_polygon_utm)
 
-        first_r, first_c = cells[0]
-        source_patch_id = int(slope_source_labels[first_r, first_c])
+            geometry_wgs84 = transform_geom(dem["crs"], "EPSG:4326", mapping(polygon_utm))
 
-        patches.append(
-            {
-                "id": int(component_id),
-                "area_acres": round(float(area_acres), 2),
-                "representative_elevation_m": float(np.median(elevations)),
-                "polygon_utm": polygon_utm,
-                "display_polygon_utm": display_polygon_utm,
-                "geometry_wgs84": geometry_wgs84,
-                "cells": cells,
-                "source_patch_id": source_patch_id,
-            }
-        )
+            first_r, first_c = cluster_cells[0]
+            source_patch_id = int(slope_source_labels[first_r, first_c])
+
+            patches.append(
+                {
+                    "id": next_id,
+                    "area_acres": round(float(area_acres), 2),
+                    "representative_elevation_m": float(np.median(elevations)),
+                    "polygon_utm": polygon_utm,
+                    "display_polygon_utm": display_polygon_utm,
+                    "geometry_wgs84": geometry_wgs84,
+                    "cells": cluster_cells,
+                    "hole_footprints": hole_footprints,
+                    "source_patch_id": source_patch_id,
+                }
+            )
+            next_id += 1
 
     return patches
 
@@ -485,6 +765,7 @@ def identify_production_areas(
             'display_polygon_utm': shapely Polygon,
             'geometry_wgs84': GeoJSON geometry dict,
             'cells': list[(row, col)],
+            'hole_footprints': list[shapely Polygon],  # [] if none -- see module docstring's TRUE HOLES vs WAISTS
             'source_patch_id': int,
         }
 
