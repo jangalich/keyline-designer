@@ -26,11 +26,15 @@ from geocode import geocode_address
 
 app = Flask(__name__)
 
-# CORS (Cross-Origin Resource Sharing) lets the frontend — running on a
-# different local port (5173) — actually call this API. Browsers block
-# cross-origin requests by default unless the server explicitly allows
-# it; this line is what allows it during local development.
-CORS(app)
+# CORS (Cross-Origin Resource Sharing) lets the frontend call this API
+# from a different origin. Browsers block cross-origin requests by
+# default unless the server explicitly allows it. Restricted to the
+# deployed frontend's real origin plus the local Vite dev server --
+# not left wide open, now that a real frontend origin exists.
+CORS(app, origins=[
+    "https://keyline-designer-frontend.vercel.app",
+    "http://localhost:5173",
+])
 
 
 @app.route("/api/geocode", methods=["POST"])
