@@ -44,13 +44,103 @@ report using the Claude API.
   standard D8 terrain analysis (priority-flood depression fill -> flow
   direction -> flow accumulation -> threshold -> trace). Outputs a
   schema-conformant `valley` layer.
-- `production_area.py` — a simple slope-threshold heuristic that
-  identifies candidate production/cultivation area(s) from the DEM, as a
-  structured elevation reference for the water-zone logic below (a
-  narrower, purpose-built stand-in for the same judgment
-  `report_generator.py`'s Land Shape narrative section already makes in
-  prose — it doesn't modify that step). Outputs a schema-conformant
-  `production_area_candidate` layer.
+- `production_area.py` / `production_area_ceiling.py` /
+  `production_suitability.py` — the consolidated production-zone
+  pipeline, restructured (see Roadmap history) from an earlier three-pass
+  architecture that independently rebuilt the same slope-eligibility mask
+  in three places and carved hydric soil out via continuous-geometry
+  `Polygon.difference()` against real, jagged SSURGO polygons — a real,
+  confirmed bug (crash risk from an unbounded lettered-sub-id suffix, and
+  ~65% of genuinely usable ground lost to spurious sub-minimum-area
+  slivers on a real reference boundary, since differencing two complex
+  polygons can fragment cleanly-contiguous ground into artifacts that
+  were never a reflection of real cell eligibility). The pipeline is now
+  ONE linear pass, each step computed once and reused everywhere it's
+  needed:
+  - **STEP 1** (`production_area.compute_step1_eligible_cells()`) — for
+    every on-parcel DEM cell, two HARD, cell-level gates: slope
+    (`MAX_PRODUCTION_SLOPE_PCT`, 20.0 by default) and hydric/disqualifying
+    soil (`soil_data.hydric_disqualifying_mukeys()`, tested against each
+    cell's own CENTER POINT against a single disqualifying-soil union
+    fetched once for the whole parcel — not per-patch, since patches
+    don't exist yet). A cell is either in the eligible mask or it isn't —
+    no continuous-geometry differencing, so no spurious slivers are
+    possible by construction. Every eligible cell is also scored on
+    slope+aspect only (`per_cell_score()`, the existing zone-level
+    0.55:0.15 slope:aspect ratio renormalized — `PER_CELL_SLOPE_WEIGHT`/
+    `PER_CELL_ASPECT_WEIGHT`); size/compactness has no per-cell meaning,
+    so it isn't computed until STEP 4.
+  - **STEP 2** (`production_area_ceiling.trim_to_ceiling()`, conditional)
+    — sorts STEP 1's eligible cells worst-to-best by that per-cell score
+    and removes cells one at a time (worst first) until the remainder
+    lands at or just above `PRODUCTION_CEILING_PCT_OF_PARCEL` (80.0) of
+    the REAL, FULL parcel — not the pre-trim eligible acreage. If
+    eligible acreage is already at/under the ceiling, nothing is removed
+    and `production_ceiling_target_met` is honestly reported `False`
+    rather than claiming 80% was hit. `production_area.identify_production_
+    areas()` (the "raw" entry point every existing consumer below already
+    reads) skips this step entirely and clusters STEP 1's mask directly —
+    a deliberate, already-tracked wiring gap (see below), not something
+    this consolidation changes.
+  - **STEP 3** (`production_area.cluster_and_gate()`) — 8-connected-
+    component labeling of whichever cell mask a caller passes (STEP 1's
+    raw mask, or STEP 2's post-trim survivor mask), each cluster's REAL
+    per-cell-square-union footprint (`_cell_union_footprint()` — NOT a
+    convex hull of cell centers, which fills in concave gaps with ground
+    that was never actually eligible and over-reports area), and a PURE
+    area survival gate (`MIN_PRODUCTION_AREA_ACRES`) — nothing else gates
+    survival here; soil was already excluded at STEP 1, so there's
+    nothing left to carve. One shared implementation for both the raw and
+    ceiling-optimized entry points, not two. `polygon_utm`/`geometry_wgs84`
+    can legitimately come back as a `MultiPolygon` (two cells whose real
+    ground squares touch only at a shared corner under 8-connectivity
+    don't merge into one solid Polygon) — a convex hull is still exposed
+    separately as `display_polygon_utm` (always a single Polygon, useful
+    for rendering smoothness), but nothing spatial reads that field.
+  - **STEP 4** (`production_suitability.score_production_areas()`) —
+    PURELY ADVISORY description of survivors, not a gate: `slope_factor`/
+    `aspect_factor` are averaged directly from STEP 1's ALREADY-COMPUTED
+    per-cell scores (no second recomputation), `size_factor`/compactness
+    is computed fresh (the one thing that can't exist before clustering),
+    and `soil_carved_acres`/`soil_carved_pct` are now simple bookkeeping
+    (how much of a cluster's own originally slope-eligible source region
+    was excluded at STEP 1) rather than a second carving pass. Combined
+    into `suitability_score`/`rank` via the existing weights
+    (`SLOPE_FACTOR_WEIGHT`/`SIZE_FACTOR_WEIGHT`/`ASPECT_FACTOR_WEIGHT`,
+    0.55/0.30/0.15) — soil is deliberately NOT one of these (Scale of
+    Permanence sequencing: soil is step 8, the last and most improvable
+    step, so it shouldn't gate/rank where production zones go the way
+    slope/size/aspect, step 2, do; it already had an ABSOLUTE effect via
+    STEP 1's hard exclusion). This module is now fully offline/
+    network-free — it takes already-computed clusters and STEP 1's
+    already-computed per-cell arrays, and does no fetching or
+    recomputation of its own.
+
+  `production_area.identify_production_areas()` (STEP 1, no trim, + STEP
+  3) is the "raw" candidate list `water_candidate_zones.py`,
+  `road_corridors.py`, and `solar_suitability.py` already consume via
+  this exact function/signature — they get STEP 1's cell-level hydric
+  exclusion automatically, with no changes needed on their end (their own
+  wiring to the RAW rather than ceiling-optimized output is a separate,
+  already-tracked roadmap item, unchanged by this consolidation).
+  `production_area_ceiling.identify_optimized_production_areas()` (STEPs
+  1-4, with the ceiling trim) is the entry point `tree_zone_candidates.py`
+  and `render_layout_map.py` consume, returning the same
+  `production_area_candidate` GeoJSON / `scored_patches` shape plus
+  top-level summary fields (`total_selected_acreage`, `percent_of_parcel`,
+  `production_ceiling_target_met`, `total_cells_removed`). Every module-
+  level tunable (`MAX_PRODUCTION_SLOPE_PCT`, `MIN_PRODUCTION_AREA_ACRES`,
+  `PRODUCTION_CEILING_PCT_OF_PARCEL`, `MIN_HYDRIC_COMPONENT_PCT_TO_EXCLUDE`,
+  the three composite weights, the two per-cell weights) kept its exact
+  existing value through this restructuring — only where each lives/how
+  many times each is computed changed. Offline, synthetic-DEM-only tests
+  throughout (`test_production_area.py`, `test_production_area_ceiling.py`,
+  `test_production_suitability.py`), including a dedicated regression
+  test constructing a jagged disqualifying-soil polygon that would
+  fragment a real footprint into dozens of sub-minimum-area slivers under
+  the OLD continuous-geometry differencing approach, but which the NEW
+  cell-level gate (correctly) excludes zero cells from, since no cell's
+  own center falls inside the jagged polygon's thin teeth.
 - `water_candidate_zones.py` — the actual water-system candidate-zone
   feature: for each primary valley, finds the portion within a configurable
   service-distance window of a candidate production area, outside a
@@ -326,173 +416,6 @@ report using the Claude API.
   other candidate-geometry layers (`find_stream_exclusion_fencing()` is
   network-free and unit-tested against synthetic stream geometry —
   `test_fencing.py`).
-- `production_suitability.py` — adds a suitability RANKING to the
-  production-zone candidates `production_area.py` already identifies —
-  it does not change which ground counts as a candidate or its boundary,
-  only enriches the same `production_area_candidate` layer with a 0-100
-  `suitability_score` plus three independently-stored, positively-weighted
-  0-1 factors: `slope_factor` (DEM, real), `size_factor` (real acreage +
-  Polsby-Popper compactness of the patch's own cell footprint, not its
-  convex hull — a large irregular sliver scores lower than a compact block
-  of the same acreage), and `aspect_factor` (DEM-derived aspect,
-  deliberately the smallest weight — orientation matters far less for
-  general production than it did for solar siting). Soil quality is
-  DELIBERATELY NOT a weighted scoring factor: per Scale of Permanence
-  sequencing, soil is step 8 — the last step, and the most improvable one
-  — so it shouldn't gate/rank where production zones go the way slope/size/
-  aspect (step 2, Land Shape) do. Instead, real SSURGO polygon geometry
-  (not just component ratings — reusing `road_corridors.py`'s
-  fetch-then-filter-then-fetch-geometry pattern, `soil_data.py`'s
-  `get_soil_geometries_for_polygon()`) for conditions that disqualify
-  ground for production regardless of topography — ONLY hydric/wetland
-  soil (SSURGO `hydricrating`), via `is_disqualifying_soil_condition()` —
-  is CARVED OUT of each candidate's own footprint before scoring, rather
-  than rejecting the whole candidate for a partial wet inclusion (an
-  earlier version of this module did exactly that — a whole-patch
-  pass/fail — and it excluded BOTH real surviving candidates on the
-  reference property, since most of each patch's soil was fine but a
-  partial wet inclusion vetoed the whole thing). A second earlier version
-  also disqualified on drainage class alone ("very poorly drained" but
-  non-hydric) — removed: only genuine wetland should hard-disqualify;
-  poorly/very-poorly-drained-but-non-hydric ground is a real limitation
-  but arguably still workable, and belongs on the graded-quality side of
-  that line, not the absolute-exclusion side (`drainagecl` is still
-  surfaced narratively elsewhere in this pipeline — see
-  `report_generator.py` — just not as a hard exclusion here). The carve
-  can split one patch into several disconnected candidates (each
-  individually re-scored against its own actual geometry/cells, own id)
-  or drop it entirely if its whole footprint is disqualifying soil; a
-  candidate untouched by carving is reported unmodified
-  (`soil_carved_acres`/`soil_carved_pct` = 0). Every resulting candidate
-  carries `soil_carved_acres`, `soil_carved_pct`, and `source_patch_id`
-  (the pre-carve patch it came from, for traceability), and
-  `confidence_notes` states whether/how much was carved, or that the
-  check couldn't be verified if SSURGO data was unavailable —
-  `score_production_areas()` computes this once and attaches it directly
-  to every returned candidate dict (not only the eventual GeoJSON
-  feature), fixing a real bug where it shipped empty. Weights are
-  configurable module-level constants, not yet tuned against a real
-  property (see Roadmap). This is a self-contained, standalone pass — NOT
-  wired into `generate_full_report.py`/`report_generator.py`'s prompt
-  yet; report-narrative wiring is a later pass that will consume this
-  score as an input. Same
-  pure-core-logic-vs-network-fetch split as the other candidate-zone
-  features (`score_production_areas()` is network-free and unit-tested
-  against synthetic terrain — `test_production_suitability.py`).
-  `score_production_areas()` requires the same real `boundary_polygon_utm`
-  `identify_production_areas()` does (that layer clips every candidate to
-  the real parcel — a DEM fetched with ~100m of buffer past the drawn
-  boundary can otherwise leak off-parcel cells into a patch) and filters
-  its own recovered DEM cells to the same on-parcel subset, so
-  slope/size/aspect are scored from the same ground the reported
-  `area_acres`/`polygon_utm` actually describe.
-  **Soil-carving is verified offline only so far** (synthetic
-  passthrough/corner-carve/split/dropped-sliver/full-cover cases,
-  `test_production_suitability.py`) — this sandbox's egress policy blocks
-  both `elevation.nationalmap.gov` and `sdmdataaccess.sc.egov.usda.gov`
-  (confirmed policy denial via the agent proxy status endpoint, not a
-  transient failure), so it has NOT yet been run against the real
-  six-point reference property. Run `python3 production_suitability.py`
-  from an environment with real network access and confirm at least one
-  real candidate survives with a sensible `soil_carved_acres` before
-  treating this as validated — see Roadmap.
-- `production_area_ceiling.py` — a global, cross-patch trim on top of
-  `production_area.py`'s identified candidates, addressing a real number
-  found on the reference property: its slope-only heuristic identified
-  ~95% of the parcel as eligible production ground (a single connected
-  patch), which reads as implausible once water systems, tree/windbreak
-  zones, roads, structures, and fencing all need room too. Does NOT
-  change `production_area.py`'s slope-eligibility detection or
-  `production_suitability.py`'s soil-carving/slope/size/aspect scoring
-  math — both are reused completely unchanged — it only changes what
-  GEOMETRY feeds into that scoring:
-  1. **Combined pool**: every on-parcel cell across EVERY currently-
-     identified patch, pooled together — NOT kept separate by which
-     patch a cell came from. There is no protected zone; only a cell's
-     own quality counts from here on.
-  2. **Per-cell scoring**: each cell's own real slope/aspect run through
-     the SAME `_slope_factor`/`aspect_score` functions
-     `production_suitability.py`'s zone-level composite already uses —
-     reused directly (a length-1 list for slope; `aspect_score` is
-     already per-value). `size_factor` has no per-cell meaning (it's a
-     whole-patch shape/acreage property), so it's excluded rather than
-     approximated; the remaining slope:aspect weights are the EXISTING
-     0.55:0.15 zone-level ratio, just renormalized to sum to 1.0
-     (`PER_CELL_SLOPE_WEIGHT`/`PER_CELL_ASPECT_WEIGHT`) — not a new
-     ratio invented for this pass.
-  3. **Trim to ceiling**: sort worst-to-best, remove cells one at a time
-     (worst first) until the remaining total lands at or just above
-     `PRODUCTION_CEILING_PCT_OF_PARCEL` (80.0, CONFIGURABLE) percent of
-     the real, FULL parcel boundary's area — NOT a percent of the
-     pre-trim eligible acreage. If eligible acreage is already at/under
-     the ceiling, nothing is removed and `production_ceiling_target_met`
-     is honestly reported `False` rather than claiming 80% was hit.
-  4. **Rebuild geometry**: fresh connected-component labeling of the
-     surviving cell mask. Worst-first removal can fragment one original
-     patch into several disconnected pieces — every piece clearing
-     `MIN_PRODUCTION_AREA_ACRES` is kept as its own independent
-     candidate, never forced back into one shape. `polygon_utm`/
-     `area_acres`/`geometry_wgs84` are built from the REAL per-cell-square
-     UNION footprint (`_cell_union_footprint()`, reusing
-     `production_suitability.py`'s `_compactness_score()` technique), NOT
-     a convex hull of cell centers. **Real bug found and fixed**: an
-     earlier version used `MultiPoint(...).convex_hull` here (the same
-     construction `production_area.py`'s own `identify_production_areas()`
-     still uses, deliberately left unchanged there — see below); a hull
-     fills in concave gaps between actual surviving cells with ground
-     that was never actually a qualifying cell, so a large, roughly-solid
-     survivor set over-reports its true area (confirmed live: an
-     unchanged, 0-cells-removed survivor set whose true cell-summed area
-     was 9.98 acres reported as an 11.9-acre hull — enough to flip
-     `percent_of_parcel` from correctly under the ceiling to incorrectly
-     reading as over it). Since `polygon_utm` is the real geometry every
-     downstream spatial consumer (water zones, solar, trees, road
-     corridors) would treat as "the real production zone," not just a
-     display number, this had to be the accurate shape. A convex hull is
-     still exposed separately as `display_polygon_utm` (useful purely for
-     rendering smoothness — note the hull error isn't strictly
-     one-directional in general: a sparse/scattered fragment's hull can
-     instead UNDER-report, since it misses each cell's own half-cell-width
-     margin), but nothing spatial reads that field. This also means
-     `polygon_utm`/`geometry_wgs84` can legitimately come back as a
-     `MultiPolygon` (two cells whose real ground squares touch only at a
-     shared corner under 8-connectivity don't merge into one solid
-     Polygon) — `identify_optimized_production_areas()` builds its
-     soil-fetch query polygon from `display_polygon_utm` (always a single
-     Polygon) specifically to avoid that breaking
-     `coordinates_to_wkt_polygon()`'s single-ring assumption; carving
-     itself already handles `MultiPolygon` patches fine via
-     `_polygon_pieces()`. See `test_production_area_ceiling.py`'s
-     dedicated hull-vs-union and `MultiPolygon` regression cases.
-  5. **Existing carving + scoring, unchanged**: each surviving piece is
-     fed into `production_suitability.py`'s own
-     `score_production_areas()` via a new, backward-compatible
-     `cells_by_patch_id` parameter (an optional direct cell-membership
-     override every existing caller omits, added specifically so this
-     module's freshly-relabeled post-trim patches don't get their cells
-     silently recomputed against the wrong, pre-trim low-slope mask) —
-     the same hydric soil-carving and slope/size/aspect scoring runs
-     exactly as it does for `production_suitability.py`'s own untrimmed
-     patches.
-
-  `identify_optimized_production_areas()` is the fetch-and-score entry
-  point, returning the same `production_area_candidate` GeoJSON/
-  `scored_patches` shape `identify_production_area_suitability()` does,
-  plus top-level summary fields: `total_selected_acreage`,
-  `percent_of_parcel` (of the full parcel), `production_ceiling_target_met`,
-  and `total_cells_removed` (from the global trim step only — soil
-  carving is separate and not counted here). Same pure-core-vs-network-
-  fetch split as the rest of this pipeline (`test_production_area_ceiling.py`,
-  offline synthetic-DEM checks covering per-cell weighting, cross-patch
-  "no protected zone" trimming, fragmentation into multiple survivors,
-  the already-under-ceiling edge case, and that soil carving still
-  applies correctly on the newly-trimmed geometry). This is a
-  self-contained, standalone pass — like `production_suitability.py`,
-  NOT yet wired into `generate_full_report.py`/`report_generator.py`,
-  and it does not touch water/tree/road/solar/fencing logic, which still
-  consume whatever production-area output currently exists (wiring them
-  to consume this optimized output specifically is a separate, later
-  pass).
 - **`scenario_generation.py` (REMOVED)** — an earlier N-ranked-scenario
   design (computing water/solar/road/fencing candidates once per
   production-zone subset instead of once against the union of every
@@ -589,25 +512,23 @@ tool (built with Leaflet).
   as `production_suitability.py`'s own composite weights. Verified only
   offline against synthetic terrain so far (`test_production_area_ceiling.py`);
   run `python3 production_area_ceiling.py` against the real six-point
-  reference property (blocked in this sandbox for the same egress-policy
-  reason as `production_suitability.py`, above) and confirm the trimmed
-  result's `percent_of_parcel`/`production_ceiling_target_met` look
-  sensible before treating the 80% figure as validated rather than just
-  a reasonable-sounding default.
-- `production_area.py`'s own `identify_production_areas()` has the EXACT
-  SAME convex-hull-inflation pattern `production_area_ceiling.py`'s
-  `rebuild_patches_from_survivors()` had until it was fixed (above): its
-  `polygon_utm`/`area_acres`/`geometry_wgs84` are built from
-  `MultiPoint(cell centers).convex_hull`, which can over- or under-report
-  the real cell footprint's area the same way. Deliberately NOT touched
-  in that fix's pass — this is the ORIGINAL patch geometry every other
-  already-verified layer this session (water zones, solar, trees, road
-  corridors, fencing) has been built and tested against, so changing it
-  would likely shift numbers across all of them. Scope this as its own
-  deliberate, separate fix later, with full awareness of that wider
-  blast radius — probably following the same real-cell-square-union
-  approach (`_cell_union_footprint()`/`_compactness_score()`) rather than
-  reimplementing it a third way.
+  reference property (blocked in this sandbox by egress policy) and
+  confirm the trimmed result's `percent_of_parcel`/
+  `production_ceiling_target_met` look sensible before treating the 80%
+  figure as validated rather than just a reasonable-sounding default.
+- **RESOLVED** — `production_area.py`'s own `identify_production_areas()`
+  used to have the same convex-hull-inflation pattern noted here in an
+  earlier revision of this Roadmap: `polygon_utm`/`area_acres`/
+  `geometry_wgs84` built from `MultiPoint(cell centers).convex_hull`
+  rather than the real cell-square-union footprint. The production-zone
+  pipeline consolidation (`production_area.py`/`production_area_ceiling.py`/
+  `production_suitability.py`) fixed this by construction: STEP 3
+  (`production_area.cluster_and_gate()`) is now the ONE shared
+  implementation building every candidate's `polygon_utm` from
+  `_cell_union_footprint()`, used by both the raw and ceiling-optimized
+  entry points — there is no longer a second, hull-based code path to
+  drift out of sync. `display_polygon_utm` (the convex hull) remains, but
+  only as an explicitly rendering-only convenience field.
 - Same ground-truth validation pass for `solar_suitability.py`'s
   point-candidate model: check that top-ranked candidates are near a
   real road, low-slope, south-facing, and (per the new proximity

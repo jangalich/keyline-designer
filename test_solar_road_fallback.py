@@ -32,9 +32,21 @@ from unittest.mock import patch
 import numpy as np
 from rasterio.warp import transform as warp_transform
 
+import production_area
 import solar_suitability
 from dem_data import _utm_epsg_for_lonlat
 from solar_suitability import _suggested_corridor_as_road_fallback, identify_solar_candidate_zones
+
+# _suggested_corridor_as_road_fallback()/identify_solar_candidate_zones() both reach
+# production_area.identify_production_areas() (unchanged wiring), which -- post-
+# consolidation -- now does its own disqualifying-soil fetch by default
+# (check_soil=True), gracefully degrading on failure same as every other optional
+# network layer already exercised in this file. Patched for the file's whole
+# duration (not just one call site, since this file makes several) purely to keep
+# this "offline" test fast and deterministic instead of depending on how quickly a
+# given environment's proxy rejects the call.
+_soil_patch = patch.object(production_area, "_fetch_disqualifying_soil_union", return_value=None)
+_soil_patch.start()
 
 CENTER_LON, CENTER_LAT = -79.98, 40.64
 EPSG = _utm_epsg_for_lonlat(CENTER_LON, CENTER_LAT)
@@ -128,5 +140,7 @@ for feature in result_with_real_road["zones_geojson"]["features"]:
         "confidence_notes should not claim a corridor fallback was used when real road data was available"
     )
 print("With real existing-road data available, the corridor fallback is never invoked (real data takes priority).")
+
+_soil_patch.stop()
 
 print("\nAll solar road-fallback checks passed.")

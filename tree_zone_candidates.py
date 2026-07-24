@@ -27,10 +27,10 @@ tree zones (a later, separate pass), not the reverse.
             zone-SELECTION mechanism exists for production, so "every
             currently-optimized candidate" is the correct input here).
             This is the ceiling-trimmed result, NOT
-            production_suitability.identify_production_area_suitability()'s
-            full, un-trimmed patches -- production_area.py's slope-only
-            heuristic on its own claims ~95% of a real reference property
-            as one connected patch, which production_area_ceiling.py
+            production_area.identify_production_areas()'s full, un-trimmed
+            candidates -- production_area.py's slope+hydric eligibility
+            gate on its own claims a very large fraction of a real
+            reference property as eligible ground, which production_area_ceiling.py
             already exists specifically to trim toward a documented,
             more-plausible ceiling (PRODUCTION_CEILING_PCT_OF_PARCEL,
             80% of parcel by default) before anything downstream treats it
@@ -323,9 +323,9 @@ def _polygonal_parts(geom):
     """A .difference()/.intersection() between real-world polygons can, in
     edge cases (touching only along a shared edge or at a single vertex),
     return a GeometryCollection mixing stray points/lines in with the real
-    remaining area -- same reasoning as soil_data.py's _polygonal_parts()/
-    production_suitability.py's _polygon_pieces(). Only Polygon/MultiPolygon
-    parts represent real ground; this drops everything else."""
+    remaining area -- same reasoning as soil_data.py's own _polygonal_parts().
+    Only Polygon/MultiPolygon parts represent real ground; this drops
+    everything else."""
     if geom is None or geom.is_empty:
         return None
     if geom.geom_type in ("Polygon", "MultiPolygon"):
@@ -763,17 +763,17 @@ def identify_tree_zone_candidates(
 
     # --- Step 1 inputs: the OPTIMIZED (ceiling-trimmed) production-zone
     # output (production_area_ceiling.identify_optimized_production_areas(),
-    # not production_suitability.identify_production_area_suitability()'s
-    # full, un-trimmed patches -- see module docstring), plus only the
-    # SINGLE selected water zone and SINGLE selected road corridor from
-    # their own optimized-selection entry points. Per product decision,
-    # this app targets small farms only: one well-suited water zone / road
-    # corridor is sufficient, so only that one candidate's own geometry
-    # counts as "claimed" for each. Each optimized patch's own 'polygon_utm'
-    # is the real, accurate cell-union footprint (NOT 'display_polygon_utm',
-    # a convex hull kept only for rendering smoothness -- see
-    # production_area_ceiling.py's own rebuild_patches_from_survivors()
-    # docstring for why the hull over-reports true area). ---
+    # not production_area.identify_production_areas()'s full, un-trimmed
+    # candidates -- see module docstring), plus only the SINGLE selected
+    # water zone and SINGLE selected road corridor from their own
+    # optimized-selection entry points. Per product decision, this app
+    # targets small farms only: one well-suited water zone / road corridor
+    # is sufficient, so only that one candidate's own geometry counts as
+    # "claimed" for each. Each optimized patch's own 'polygon_utm' is the
+    # real, accurate cell-union footprint (NOT 'display_polygon_utm', a
+    # convex hull kept only for rendering smoothness -- see
+    # production_area.py's own cluster_and_gate() docstring for why the
+    # hull over-reports true area). ---
     production_result = identify_optimized_production_areas(boundary_coordinates, dem=dem)
     production_polygons_utm = [p["polygon_utm"] for p in production_result["scored_patches"]]
 

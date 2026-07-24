@@ -17,9 +17,12 @@ falls back to an arbitrary boundary point, flagged per-candidate). This
 test doubles as a live check of that whole degradation path.
 """
 
+from unittest.mock import patch as mock_patch
+
 import numpy as np
 from rasterio.warp import transform as warp_transform
 
+import production_area
 from dem_data import _utm_epsg_for_lonlat
 from feature_schema import validate_feature_collection
 from road_corridors import identify_road_corridor_candidates
@@ -66,7 +69,15 @@ synthetic_dem = {
     "crs": DST_CRS,
 }
 
-result = identify_road_corridor_candidates(boundary_coordinates, dem=synthetic_dem)
+# identify_road_corridor_candidates() calls production_area.identify_production_areas()
+# internally (unchanged wiring), which -- post-consolidation -- now does its own
+# disqualifying-soil fetch by default (check_soil=True), gracefully degrading on
+# failure same as every other optional network layer already exercised below. Mocked
+# here (rather than left to the sandbox's own network policy, unlike the other
+# fetches below) purely to keep this "offline" pipeline test fast and deterministic
+# instead of depending on how quickly a given environment's proxy rejects the call.
+with mock_patch.object(production_area, "_fetch_disqualifying_soil_union", return_value=None):
+    result = identify_road_corridor_candidates(boundary_coordinates, dem=synthetic_dem)
 
 assert "zones_geojson" in result
 validate_feature_collection(result["zones_geojson"])

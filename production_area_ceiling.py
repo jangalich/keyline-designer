@@ -1,251 +1,120 @@
 """
 production_area_ceiling.py
 
-Global, cross-patch trim of production_area.py's identified production-
-area candidates down toward a documented ceiling on how much of the
-PARCEL (not the originally-identified eligible acreage) may be claimed as
-production area at all.
+STEP 2 of the consolidated production-zone pipeline (this file /
+production_area.py / production_suitability.py together), plus this
+pipeline's own full orchestration entry point.
 
-Why this exists: production_area.py's slope-threshold heuristic, on a
-real reference property, identifies ~95% of the parcel as a single
-connected eligible patch. That's a real number, but 95% of a property
-being "production area" reads as implausible for a Scale of Permanence
-design that also needs room for water systems, tree/windbreak zones,
-roads, structures, and fencing. This module does NOT change
-production_area.py's slope-eligibility detection (untouched, imported
-as-is) or production_suitability.py's soil-carving/slope/size/aspect
-scoring math (also untouched, reused as-is via score_production_areas()'s
-existing cells_by_patch_id parameter) -- it only changes what GEOMETRY
-feeds into that scoring, by removing the worst-quality individual cells
-from the combined eligible pool first, regardless of which original
-patch they came from.
+Why this exists: production_area.py's slope+hydric eligibility gate, on a
+real reference property, can identify a very large fraction of the parcel
+as eligible production ground. That's a real number, but a Scale of
+Permanence design also needs room for water systems, tree/windbreak
+zones, roads, structures, and fencing -- so this module trims the
+ELIGIBLE cell pool (STEP 1's own output, already hydric-excluded) down
+toward a documented ceiling on how much of the PARCEL (not the eligible
+acreage) may be claimed as production area at all, before STEP 3
+(production_area.cluster_and_gate()) ever runs.
 
-    STEP 1 -- combined pool (build_combined_pool()): every on-parcel cell
-        across EVERY currently-identified patch, pooled together as one
-        flat list. A cell's origin patch doesn't matter from here on --
-        there is no protected zone; only each cell's own quality counts.
-
-    STEP 2 -- per-cell scoring (per_cell_score()): each cell's own real
-        slope (production_area.py's compute_slope_percent) and aspect
-        (terrain_metrics.py's Horn-method aspect) run through the SAME
-        _slope_factor/aspect_score functions production_suitability.py's
-        zone-level composite already uses -- reused directly, just
-        applied to one cell (a length-1 list) instead of averaged across
-        a whole patch. See the weighting section below for exactly how
-        slope and aspect combine here.
-
-    STEP 3 -- trim to ceiling (trim_to_ceiling()): sort the pool
-        worst-to-best by per-cell score, remove cells one at a time
-        (worst first) until the remaining total is at or just above
+    STEP 2 -- trim_to_ceiling(): sort STEP 1's eligible cells worst-to-best
+        by their own per-cell score (production_area.compute_step1_
+        eligible_cells()'s per_cell_score -- slope+aspect, the SAME
+        composite that decided eligibility at all) and remove cells one at
+        a time (worst first) until the remaining total is at or just above
         PRODUCTION_CEILING_PCT_OF_PARCEL percent of the REAL, FULL parcel
-        boundary's area -- not a percent of the pre-trim eligible
-        acreage. If the pool's pre-trim acreage is already at or under
-        that ceiling, there aren't enough (or any) poor-quality cells to
-        trim away without going the wrong direction -- see that
-        function's docstring for exactly how that's reported rather than
-        silently claimed as a hit.
+        boundary's area. If the pool's pre-trim acreage is already at or
+        under that ceiling, nothing is removed and
+        production_ceiling_target_met is reported False honestly, exactly
+        as before this consolidation -- this conditional behavior is
+        UNCHANGED, just now operating on a mask that already has hydric
+        cells excluded (which it didn't, pre-consolidation).
 
-    STEP 4 -- rebuild geometry (rebuild_patches_from_survivors()):
-        fresh 8-connected-component labeling of the SURVIVING cell mask.
-        Worst-first removal can fragment what was one contiguous patch
-        into several disconnected pieces -- every piece that clears
-        MIN_PRODUCTION_AREA_ACRES becomes its own independent output
-        candidate (same dict shape identify_production_areas() itself
-        returns), not forced back into one shape, and small legitimate
-        fragments are not discarded.
+STEP 3 (clustering the post-trim survivor mask) and STEP 4 (advisory
+scoring) are NOT reimplemented here -- this module calls directly into
+production_area.cluster_and_gate() and production_suitability.
+score_production_areas(), the same functions production_area.py's own
+(un-trimmed) identify_production_areas() uses, just fed the post-trim
+survivor mask instead of STEP 1's raw eligible mask. One implementation of
+each step, reused by both entry points.
 
-    STEP 5 -- existing carving + scoring (identify_optimized_production_areas()):
-        each STEP 4 patch is fed into score_production_areas() UNCHANGED
-        (its own existing hydric soil-carving and slope/size/aspect
-        scoring math runs exactly as it does for production_suitability.py's
-        own un-trimmed patches) via that function's cells_by_patch_id
-        parameter, so scoring recovers each patch's cells directly from
-        this module's own STEP 4 labeling rather than (incorrectly)
-        recomputing membership against the ORIGINAL, pre-trim low-slope
-        mask.
-
---- per-cell weighting (STEP 2) ---
-
-production_suitability.py's zone-level composite score weights three
-factors: SLOPE_FACTOR_WEIGHT (0.55), SIZE_FACTOR_WEIGHT (0.30, acreage +
-Polsby-Popper shape compactness), ASPECT_FACTOR_WEIGHT (0.15). size_factor
-is a ZONE-level shape property -- "is this patch's footprint compact or a
-thin sliver" has no meaning for a single grid cell, so it's excluded from
-per-cell scoring entirely rather than forced onto cells it can't
-describe (there's nothing to differ on: the other two factors ARE real
-per-cell physical quantities, so no substitute weighting was invented for
-them either). The remaining two factors' EXISTING relative weight
-(0.55 : 0.15, i.e. 11 : 3) is preserved here, just renormalized to sum to
-1.0 on its own -- not a new ratio chosen for this pass:
-
-    PER_CELL_SLOPE_WEIGHT  = 0.55 / (0.55 + 0.15)  ~= 0.7857
-    PER_CELL_ASPECT_WEIGHT = 0.15 / (0.55 + 0.15)  ~= 0.2143
+identify_optimized_production_areas() is the fetch-and-score entry point:
+fetches the DEM (unless one is passed in) and real disqualifying-soil
+geometry ONCE for the whole parcel boundary (STEP 1 needs it before
+clustering ever happens -- no per-patch soil fetch, unlike the
+pre-consolidation architecture, since patches don't exist yet at this
+point), then chains STEP 1 -> STEP 2 -> STEP 3 -> STEP 4.
 
 This is a self-contained, standalone pass, same "validate on its own
-first" framing as production_suitability.py's own module docstring: NOT
-wired into generate_full_report.py/report_generator.py in this pass, and
-does not touch water/tree/road/solar/fencing logic, which still consume
-whatever production-area output currently exists.
+first" framing as the rest of this pipeline: NOT wired into
+generate_full_report.py/report_generator.py's prompt in this pass, but
+render_layout_map.py and tree_zone_candidates.py both already consume its
+output shape directly.
 """
 
-import math
 from typing import Optional
 
 import numpy as np
 from rasterio.warp import transform as warp_transform
-from rasterio.warp import transform_geom
-from shapely.geometry import MultiPoint, Point, Polygon, box, mapping
-from shapely.ops import unary_union
-from shapely.prepared import prep
 
 from dem_data import get_dem_for_boundary
 from production_area import (
     MAX_PRODUCTION_SLOPE_PCT,
     MIN_PRODUCTION_AREA_ACRES,
-    compute_slope_percent,
-    identify_production_areas,
+    _SOIL_CHECK_UNCHECKED,
+    _fetch_disqualifying_soil_union,
+    cluster_and_gate,
+    compute_step1_eligible_cells,
 )
 from production_suitability import (
-    ASPECT_FACTOR_WEIGHT,
-    SLOPE_FACTOR_WEIGHT,
-    _fetch_disqualifying_soil_union,
-    _slope_factor,
+    REFERENCE_MAX_AREA_ACRES,
     production_suitability_to_geojson,
     score_production_areas,
 )
-from raster_grid import SQUARE_METERS_PER_ACRE, cell_area_acres, connected_components, pixel_center_xy
+from raster_grid import SQUARE_METERS_PER_ACRE, cell_area_acres
+from shapely.geometry import Polygon
 from soil_data import coordinates_to_wkt_polygon
-from terrain_metrics import aspect_score, compute_slope_and_aspect
 
 # Ceiling on how much of the FULL PARCEL boundary's own area may be
 # claimed as production area, after the global worst-first trim below --
-# NOT a percent of production_area.py's originally-identified eligible
-# acreage (which, on a real reference property, was itself ~95% of the
-# parcel -- see module docstring). CONFIGURABLE -- tune against a real
-# property; 80% is a documented starting ceiling, not a derived value.
+# NOT a percent of the eligible acreage STEP 1 identified (which, on a
+# real reference property, was itself a very large fraction of the
+# parcel). CONFIGURABLE -- tune against a real property; 80% is a
+# documented starting ceiling, not a derived value.
 PRODUCTION_CEILING_PCT_OF_PARCEL = 80.0
-
-# --- per-cell weighting -- see module docstring for the full reasoning ---
-_PER_CELL_WEIGHT_SUM = SLOPE_FACTOR_WEIGHT + ASPECT_FACTOR_WEIGHT
-PER_CELL_SLOPE_WEIGHT = SLOPE_FACTOR_WEIGHT / _PER_CELL_WEIGHT_SUM
-PER_CELL_ASPECT_WEIGHT = ASPECT_FACTOR_WEIGHT / _PER_CELL_WEIGHT_SUM
-
-assert math.isclose(PER_CELL_SLOPE_WEIGHT + PER_CELL_ASPECT_WEIGHT, 1.0, abs_tol=1e-9), (
-    "per-cell slope/aspect weights must sum to 1.0"
-)
-
-
-def per_cell_score(slope_pct: float, aspect_deg: float, max_slope_pct: float = MAX_PRODUCTION_SLOPE_PCT) -> float:
-    """
-    0-1 per-cell quality score for one DEM cell's own real slope/aspect,
-    reusing production_suitability.py's own _slope_factor (called on a
-    length-1 list -- the SAME formula it already uses, just applied to a
-    single cell instead of averaged across a whole patch) and aspect_score
-    (already a per-value function, not an aggregate, so it needs no
-    adaptation at all -- NaN/flat ground already scores a neutral 1.0
-    there, same as it does at the zone level). See module docstring for
-    the slope:aspect weighting used here and why size_factor has no
-    per-cell counterpart.
-    """
-    slope_factor = _slope_factor([slope_pct], max_slope_pct)
-    aspect_factor = aspect_score(aspect_deg)
-    return PER_CELL_SLOPE_WEIGHT * slope_factor + PER_CELL_ASPECT_WEIGHT * aspect_factor
-
-
-def _recover_patch_cells(patch: dict, labels: np.ndarray, boundary_prepared, dem: dict) -> list[tuple[int, int]]:
-    """Recovers one patch's own on-parcel constituent DEM cells by
-    filtering the recomputed low-slope-mask connected-component labeling
-    down to patch['id'] and the real parcel boundary -- the exact same
-    recompute pattern score_production_areas() already uses for this
-    reason (see that function's own docstring): production_area.py's
-    patches don't carry their own cell list, so it has to be re-derived
-    deterministically from the same mask/labeling it was built from."""
-    raw_cells = [(int(r), int(c)) for r, c in np.argwhere(labels == patch["id"])]
-    cells = [(r, c) for r, c in raw_cells if boundary_prepared.contains(Point(pixel_center_xy(dem, r, c)))]
-    return cells if cells else raw_cells
-
-
-def build_combined_pool(
-    patches: list[dict],
-    dem: dict,
-    boundary_polygon_utm: Polygon,
-    max_slope_pct: float = MAX_PRODUCTION_SLOPE_PCT,
-) -> list[tuple[int, int]]:
-    """
-    STEP 1: every on-parcel cell belonging to ANY of `patches`
-    (production_area.py's identify_production_areas() output), combined
-    into one flat list -- not grouped or kept separate by which original
-    patch a cell came from. Every patch's connected-component label is
-    distinct by construction (raster_grid.connected_components()), so no
-    cell can be recovered twice across different patches.
-    """
-    array = dem["array"]
-    slope = compute_slope_percent(array, dem["resolution_meters"])
-    candidate_mask = (~np.isnan(slope)) & (slope <= max_slope_pct)
-    labels, _ = connected_components(candidate_mask)
-    boundary_prepared = prep(boundary_polygon_utm)
-
-    pool: list[tuple[int, int]] = []
-    for patch in patches:
-        pool.extend(_recover_patch_cells(patch, labels, boundary_prepared, dem))
-    return pool
-
-
-def score_pool_cells(
-    pool: list[tuple[int, int]], dem: dict, max_slope_pct: float = MAX_PRODUCTION_SLOPE_PCT
-) -> list[tuple[int, int, float]]:
-    """STEP 2: (row, col, per_cell_score) for every pooled cell, from real
-    per-cell slope (production_area.py's compute_slope_percent -- the
-    same slope values that already decided pool membership at all) and
-    real per-cell aspect (terrain_metrics.py's Horn-method aspect --
-    the same computation production_suitability.py's zone-level
-    aspect_factor already uses, just read per-cell instead of
-    circular-mean-averaged across a whole patch)."""
-    array = dem["array"]
-    resolution = dem["resolution_meters"]
-    slope = compute_slope_percent(array, resolution)
-    _, aspect_deg = compute_slope_and_aspect(array, resolution)
-
-    return [
-        (r, c, per_cell_score(float(slope[r, c]), float(aspect_deg[r, c]), max_slope_pct))
-        for r, c in pool
-    ]
 
 
 def trim_to_ceiling(
-    pool_scored: list[tuple[int, int, float]],
+    step1: dict,
     dem: dict,
     boundary_polygon_utm: Polygon,
     ceiling_pct: float = PRODUCTION_CEILING_PCT_OF_PARCEL,
 ) -> dict:
     """
-    STEP 3: sorts the pool worst-to-best by per-cell score and removes
-    cells one at a time (worst first), stopping the INSTANT removing the
-    next-worst cell would drop the remaining total below ceiling_pct
-    percent of the real, FULL parcel boundary's area (not the pre-trim
-    eligible acreage -- see module docstring). This lands the result at
-    the closest point AT OR JUST ABOVE the ceiling that whole-cell
-    removal can reach, never below it.
+    STEP 2: sorts STEP 1's eligible cells worst-to-best by their own
+    per-cell score (step1['per_cell_score']) and removes cells one at a
+    time (worst first), stopping the INSTANT removing the next-worst cell
+    would drop the remaining total below ceiling_pct percent of the real,
+    FULL parcel boundary's area (not the pre-trim eligible acreage). This
+    lands the result at the closest point AT OR JUST ABOVE the ceiling
+    that whole-cell removal can reach, never below it.
 
-    If the pool's pre-trim total is already at or under the ceiling (not
-    enough -- or any -- poor-quality cells exist to trim toward it
-    without going the wrong direction, which only happens when the
-    originally-identified eligible acreage was already a modest fraction
-    of the parcel), the loop's very first check fails immediately: zero
-    cells are removed, and the achieved percentage is reported exactly as
-    it naturally is (which may be below ceiling_pct) rather than forced
-    or padded to look like the ceiling was hit.
-    `production_ceiling_target_met` is False in that case -- "met" here
-    specifically means "the ceiling was actually approached from above via
-    real trimming," not merely "the parcel isn't over-claimed," so an
-    already-under-ceiling starting point is flagged honestly rather than
-    silently reported as a successful 80% trim.
+    If the pool's pre-trim total is already at or under the ceiling, the
+    loop's very first check fails immediately: zero cells are removed, and
+    the achieved percentage is reported exactly as it naturally is (which
+    may be below ceiling_pct) rather than forced or padded to look like
+    the ceiling was hit. `production_ceiling_target_met` is False in that
+    case -- "met" here specifically means "the ceiling was actually
+    approached from above via real trimming," not merely "the parcel isn't
+    over-claimed," so an already-under-ceiling starting point is flagged
+    honestly rather than silently reported as a successful 80% trim.
     """
     parcel_acres = boundary_polygon_utm.area / SQUARE_METERS_PER_ACRE
     target_acres = parcel_acres * ceiling_pct / 100.0
     area_per_cell = cell_area_acres(dem)
 
-    ordered = sorted(pool_scored, key=lambda cell: cell[2])  # worst (lowest score) first
+    eligible_cells = [(int(r), int(c)) for r, c in np.argwhere(step1["eligible_mask"])]
+    per_cell_score = step1["per_cell_score"]
+    scored = [(r, c, float(per_cell_score[r, c])) for r, c in eligible_cells]
+    ordered = sorted(scored, key=lambda cell: cell[2])  # worst (lowest score) first
     survivors = {(r, c) for r, c, _ in ordered}
 
     pre_trim_acres = len(survivors) * area_per_cell
@@ -263,8 +132,7 @@ def trim_to_ceiling(
     achieved_pct = (achieved_acres / parcel_acres * 100.0) if parcel_acres > 0 else 0.0
     # The loop above only ever removes a cell when doing so keeps the
     # remainder >= target_acres, so target_met is exactly equivalent to
-    # "the pool started at/above the ceiling in the first place" -- see
-    # docstring.
+    # "the pool started at/above the ceiling in the first place".
     target_met = pre_trim_acres >= target_acres - 1e-9
 
     return {
@@ -279,168 +147,26 @@ def trim_to_ceiling(
     }
 
 
-def _cell_union_footprint(cells: list[tuple[int, int]], dem: dict):
-    """
-    The REAL footprint of a set of DEM cells: the union of each cell's own
-    ground square at the DEM's resolution -- NOT a convex hull of cell
-    CENTER points. Same technique already established in
-    production_suitability.py's _compactness_score() (see that function's
-    own docstring), reused here for the same reason: a convex hull of
-    centers fills in any concave gaps between the actual qualifying
-    cells with ground that was never actually a surviving cell at all --
-    for a large, roughly-solid patch (the common, important case) this
-    means the hull reports MORE area than the true footprint, sometimes
-    by a lot (a real, confirmed bug -- see rebuild_patches_from_survivors()'s
-    docstring). It isn't a one-directional error in general (a sparse,
-    scattered fragment's hull can under-report instead, since it misses
-    each individual cell's own half-cell-width margin that the real
-    union always includes) -- either way, the hull is an approximation
-    and this function is the accurate one.
-    """
-    px, py = dem["resolution_meters"]
-    squares = []
-    for r, c in cells:
-        x, y = pixel_center_xy(dem, r, c)
-        squares.append(box(x - px / 2, y - py / 2, x + px / 2, y + py / 2))
-    return unary_union(squares)
-
-
-def rebuild_patches_from_survivors(
-    survivor_cells: set,
-    dem: dict,
-    boundary_polygon_utm: Polygon,
-    min_area_acres: float = MIN_PRODUCTION_AREA_ACRES,
-) -> list[dict]:
-    """
-    STEP 4: fresh 8-connected-component labeling of the surviving
-    (post-trim) cell mask -- may naturally produce one or several
-    disconnected pieces, since worst-first removal can fragment what was
-    one contiguous patch. Every resulting piece that clears
-    min_area_acres becomes its own independent output candidate, small
-    legitimate fragments are kept rather than discarded, and pieces are
-    never forced back into one shape.
-
-    polygon_utm/area_acres/geometry_wgs84 are built from the REAL
-    per-cell-square UNION footprint (_cell_union_footprint(), reusing
-    production_suitability.py's _compactness_score() technique) -- NOT a
-    convex hull of cell centers. A prior version of this function used
-    MultiPoint(...).convex_hull, the same construction
-    identify_production_areas() itself still uses -- deliberately
-    unchanged there, see this module's README entry -- but that hull
-    fills in concave gaps between actual surviving cells with ground that
-    was never actually low-slope/surviving at all, which for a large,
-    roughly-solid patch means it over-reports area (see
-    _cell_union_footprint()'s own docstring for why this isn't strictly
-    one-directional in general). Confirmed live on the real reference
-    property: an unchanged (0-cells-removed) survivor set whose true
-    cell-summed area was 9.98 acres reported as an 11.9-acre hull
-    instead -- enough to flip percent_of_parcel from correctly under the
-    ceiling to (incorrectly) reading as over it. Since polygon_utm is the
-    actual geometry every downstream spatial consumer (water zones,
-    solar, trees, road corridors) treats as "the real production zone,"
-    not just a display number, this must be the real cell-accurate shape.
-
-    A convex hull IS still exposed, separately, as display_polygon_utm --
-    useful purely for rendering smoothness -- but nothing reads that
-    field for area/spatial-relationship purposes; polygon_utm/area_acres
-    are the accurate ones every existing and future consumer should use.
-    It is ALWAYS a single Polygon (never Multi -- the buffer fallback
-    below guarantees this even for a degenerate hull), which is also why
-    identify_optimized_production_areas() builds its soil-fetch query
-    polygon from THIS field rather than the real (possibly MultiPolygon --
-    see below) polygon_utm.
-
-    Returns dicts in the SAME shape identify_production_areas() itself
-    returns (id/area_acres/representative_elevation_m/polygon_utm/
-    geometry_wgs84), PLUS display_polygon_utm and each patch's own
-    'cells' list -- consumed directly by score_production_areas()'s
-    cells_by_patch_id parameter downstream, so STEP 5's scoring runs
-    against these exact post-trim cells instead of (incorrectly)
-    recomputing membership from the original, pre-trim low-slope mask.
-
-    polygon_utm/geometry_wgs84 CAN legitimately come back as a
-    MultiPolygon here, unlike identify_production_areas()'s own patches:
-    connected_components() is 8-connected (diagonal neighbors count as
-    one component), but two cells whose real ground SQUARES touch only
-    at a shared corner do not merge into one solid Polygon under
-    unary_union -- their true combined footprint really is disconnected.
-    feature_schema.py's GeoJSON schema already accepts MultiPolygon, and
-    score_production_areas()'s soil-carving already flattens
-    Polygon/MultiPolygon/GeometryCollection alike via its own
-    _polygon_pieces() helper, so this needs no special handling
-    downstream -- see test_production_area_ceiling.py's dedicated
-    MultiPolygon regression case.
-    """
-    rows, cols = dem["array"].shape
-    survivor_mask = np.zeros((rows, cols), dtype=bool)
-    for r, c in survivor_cells:
-        survivor_mask[r, c] = True
-
-    labels, num_components = connected_components(survivor_mask)
-    area_per_cell = cell_area_acres(dem)
-
-    patches = []
-    for component_id in range(num_components):
-        cells = [(int(r), int(c)) for r, c in np.argwhere(labels == component_id)]
-        if not cells:
-            continue
-
-        elevations = [float(dem["array"][r, c]) for r, c in cells]
-
-        footprint = _cell_union_footprint(cells, dem)
-        polygon_utm = footprint.intersection(boundary_polygon_utm)
-        if polygon_utm.is_empty:
-            continue
-
-        area_acres = polygon_utm.area / SQUARE_METERS_PER_ACRE
-        if area_acres < min_area_acres:
-            continue
-
-        # Display-only convex hull -- NOT used for area_acres or any
-        # spatial relationship; see docstring above.
-        utm_points = [pixel_center_xy(dem, r, c) for r, c in cells]
-        display_polygon_utm = MultiPoint(utm_points).convex_hull
-        if display_polygon_utm.geom_type != "Polygon":
-            px, py = dem["resolution_meters"]
-            display_polygon_utm = display_polygon_utm.buffer(max(px, py) / 2)
-        display_polygon_utm = display_polygon_utm.intersection(boundary_polygon_utm)
-
-        geometry_wgs84 = transform_geom(dem["crs"], "EPSG:4326", mapping(polygon_utm))
-
-        patches.append(
-            {
-                "id": int(component_id),
-                "area_acres": round(float(area_acres), 2),
-                "representative_elevation_m": float(np.median(elevations)),
-                "polygon_utm": polygon_utm,
-                "display_polygon_utm": display_polygon_utm,
-                "geometry_wgs84": geometry_wgs84,
-                "cells": cells,
-            }
-        )
-
-    return patches
-
-
 def optimize_production_areas(
-    patches: list[dict],
     dem: dict,
     boundary_polygon_utm: Polygon,
+    disqualifying_soil_union_utm=_SOIL_CHECK_UNCHECKED,
     ceiling_pct: float = PRODUCTION_CEILING_PCT_OF_PARCEL,
     max_slope_pct: float = MAX_PRODUCTION_SLOPE_PCT,
     min_area_acres: float = MIN_PRODUCTION_AREA_ACRES,
 ) -> dict:
     """
-    Pure logic core (no network I/O) chaining STEPS 1-4: combined pool
-    (build_combined_pool()) -> per-cell scoring (score_pool_cells()) ->
-    worst-first trim to ceiling_pct (trim_to_ceiling()) -> connected-
-    component rebuild of the survivors (rebuild_patches_from_survivors()).
+    Pure logic core (no network I/O) chaining STEP 1 (production_area.
+    compute_step1_eligible_cells()) -> STEP 2 (trim_to_ceiling()) -> STEP 3
+    (production_area.cluster_and_gate(), on the post-trim survivor mask).
 
     Returns:
         {
-            'patches': list[dict],  # STEP 4 output, ready for
-                                     # score_production_areas() via its
-                                     # cells_by_patch_id parameter
+            'patches': list[dict],  # STEP 3 output, ready for
+                                     # production_suitability.score_
+                                     # production_areas() via its step1 param
+            'step1': dict,          # STEP 1's own return dict -- reused
+                                     # directly by STEP 4, never recomputed
             'cells_removed': int,
             'parcel_acres': float,
             'target_acres': float,
@@ -450,15 +176,19 @@ def optimize_production_areas(
             'production_ceiling_target_met': bool,
         }
     """
-    pool = build_combined_pool(patches, dem, boundary_polygon_utm, max_slope_pct)
-    pool_scored = score_pool_cells(pool, dem, max_slope_pct)
-    trim_result = trim_to_ceiling(pool_scored, dem, boundary_polygon_utm, ceiling_pct)
-    new_patches = rebuild_patches_from_survivors(
-        trim_result["survivor_cells"], dem, boundary_polygon_utm, min_area_acres
-    )
+    step1 = compute_step1_eligible_cells(dem, boundary_polygon_utm, disqualifying_soil_union_utm, max_slope_pct)
+    trim_result = trim_to_ceiling(step1, dem, boundary_polygon_utm, ceiling_pct)
+
+    rows, cols = dem["array"].shape
+    survivor_mask = np.zeros((rows, cols), dtype=bool)
+    for r, c in trim_result["survivor_cells"]:
+        survivor_mask[r, c] = True
+
+    patches = cluster_and_gate(survivor_mask, dem, boundary_polygon_utm, step1, min_area_acres)
 
     result = {k: v for k, v in trim_result.items() if k != "survivor_cells"}
-    result["patches"] = new_patches
+    result["patches"] = patches
+    result["step1"] = step1
     return result
 
 
@@ -467,31 +197,35 @@ def identify_optimized_production_areas(
     dem: Optional[dict] = None,
     check_soil: bool = True,
     ceiling_pct: float = PRODUCTION_CEILING_PCT_OF_PARCEL,
-    **score_kwargs,
+    max_slope_pct: float = MAX_PRODUCTION_SLOPE_PCT,
+    min_area_acres: float = MIN_PRODUCTION_AREA_ACRES,
+    reference_max_area_acres: float = REFERENCE_MAX_AREA_ACRES,
 ) -> dict:
     """
-    Full pipeline entry point: fetches the DEM (unless one is passed in),
-    identifies production-area candidates (production_area.py, unchanged),
-    runs the global worst-first trim toward ceiling_pct (STEPS 1-4 above),
-    then fetches real disqualifying-soil geometry and (re)scores each
-    surviving connected piece via production_suitability.py's EXISTING,
-    UNCHANGED score_production_areas() (STEP 5) -- same
-    fetch-degrades-independently-and-gracefully reasoning as
-    identify_production_area_suitability().
+    Full pipeline entry point: fetches the DEM (unless one is passed in)
+    and real disqualifying-soil geometry ONCE for the whole parcel
+    boundary (STEP 1 needs it before any patch exists -- unlike the
+    pre-consolidation architecture's per-patch soil fetch), runs STEP 1 ->
+    STEP 2 (the global worst-first trim toward ceiling_pct) -> STEP 3
+    (cluster_and_gate() on the survivors) -> STEP 4 (production_
+    suitability.score_production_areas(), advisory ranking only).
+
+    Each fetch (DEM, soil) degrades independently and gracefully -- a
+    USDA SDA outage doesn't block scoring, it just means hydric exclusion
+    couldn't be verified (soil_data_available=False on every result) --
+    same reasoning as every other optional network layer in this
+    pipeline.
 
     Returns the same "production_area_candidate" GeoJSON FeatureCollection
-    / scored_patches shape identify_production_area_suitability() does,
-    plus top-level summary fields describing the global trim:
+    / scored_patches shape this pipeline has always returned, plus
+    top-level summary fields describing the global trim:
         {
             'zones_geojson': dict,
             'scored_patches': list[dict],
-            'total_selected_acreage': float,   # final, post-soil-carve total
-            'percent_of_parcel': float,        # of the FULL parcel, not the
-                                                 # pre-trim eligible acreage
+            'total_selected_acreage': float,
+            'percent_of_parcel': float,        # of the FULL parcel
             'production_ceiling_target_met': bool,
-            'total_cells_removed': int,        # in the STEP 3 global trim only
-                                                 # (soil carving is separate and
-                                                 # unaffected by this count)
+            'total_cells_removed': int,        # STEP 2's global trim only
         }
     """
     if dem is None:
@@ -505,42 +239,25 @@ def identify_optimized_production_areas(
     )
     boundary_polygon_utm = Polygon(zip(boundary_xs, boundary_ys))
 
-    original_patches = identify_production_areas(dem, boundary_polygon_utm)
-    optimized = optimize_production_areas(original_patches, dem, boundary_polygon_utm, ceiling_pct=ceiling_pct)
-    new_patches = optimized["patches"]
-
-    disqualifying_soil_by_patch_id: dict = {}
+    disqualifying_soil_union_utm = _SOIL_CHECK_UNCHECKED
     if check_soil:
-        for patch in new_patches:
-            # The real polygon_utm/geometry_wgs84 (the accurate, per-cell-square-
-            # union footprint -- see rebuild_patches_from_survivors()) can
-            # legitimately come back as a MultiPolygon: worst-first trimming
-            # can leave cells that are only DIAGONALLY (8-connected) touching,
-            # whose real ground squares only meet at a corner point rather than
-            # merging into one solid shape. coordinates_to_wkt_polygon() expects
-            # a single ring, so the soil QUERY polygon here uses
-            # display_polygon_utm (the convex hull -- always a single Polygon,
-            # same as production_area.py's own patches) instead: a
-            # conservative, slightly-larger query region is fine for "what
-            # SSURGO geometry intersects this footprint at all" -- the actual
-            # carving math downstream still intersects/subtracts against the
-            # real, precise polygon_utm, not this query shape.
-            query_geometry_wgs84 = transform_geom(dem["crs"], "EPSG:4326", mapping(patch["display_polygon_utm"]))
-            wkt_polygon = coordinates_to_wkt_polygon(query_geometry_wgs84["coordinates"][0])
-            try:
-                disqualifying_soil_by_patch_id[patch["id"]] = _fetch_disqualifying_soil_union(wkt_polygon, dem)
-            except Exception:
-                pass  # left absent from the dict -- score_production_areas() treats that as "never checked"
+        try:
+            wkt_polygon = coordinates_to_wkt_polygon(list(boundary_coordinates))
+            disqualifying_soil_union_utm = _fetch_disqualifying_soil_union(wkt_polygon, dem)
+        except Exception:
+            disqualifying_soil_union_utm = _SOIL_CHECK_UNCHECKED
 
-    cells_by_patch_id = {p["id"]: p["cells"] for p in new_patches}
-
-    scored = score_production_areas(
-        new_patches,
+    optimized = optimize_production_areas(
         dem,
         boundary_polygon_utm,
-        disqualifying_soil_by_patch_id,
-        cells_by_patch_id=cells_by_patch_id,
-        **score_kwargs,
+        disqualifying_soil_union_utm,
+        ceiling_pct=ceiling_pct,
+        max_slope_pct=max_slope_pct,
+        min_area_acres=min_area_acres,
+    )
+
+    scored = score_production_areas(
+        optimized["patches"], dem, optimized["step1"], reference_max_area_acres=reference_max_area_acres
     )
 
     total_selected_acreage = round(sum(p["area_acres"] for p in scored), 2)

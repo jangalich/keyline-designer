@@ -40,6 +40,7 @@ from rasterio.warp import transform as warp_transform
 from shapely.geometry import LineString, Point, box, mapping
 from shapely.ops import unary_union
 
+import production_area as pa
 import road_corridors as rc
 import tree_zone_candidates as tzc
 import production_suitability as ps
@@ -391,8 +392,8 @@ corner_xs, corner_ys = [minx, maxx, maxx, minx, minx], [miny, miny, maxy, maxy, 
 lons, lats = warp_transform(CRS, "EPSG:4326", corner_xs, corner_ys)
 orchestrator_boundary_coordinates = list(zip(lons, lats))
 
-with mock_patch.object(ps, "get_soil_data_for_polygon", _fake_soil_rows_empty), \
-     mock_patch.object(ps, "get_soil_geometries_for_polygon", _fake_soil_geometries_empty), \
+with mock_patch.object(pa, "get_soil_data_for_polygon", _fake_soil_rows_empty), \
+     mock_patch.object(pa, "get_soil_geometries_for_polygon", _fake_soil_geometries_empty), \
      mock_patch.object(rc, "get_soil_data_for_polygon", _fake_soil_rows_empty), \
      mock_patch.object(rc, "get_soil_geometries_for_polygon", _fake_soil_geometries_empty), \
      mock_patch.object(rc, "get_erosion_factor_for_polygon", _fake_erosion_empty), \
