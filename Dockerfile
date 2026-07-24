@@ -1,4 +1,4 @@
-FROM python:3.11-slim
+FROM python:3.11-slim-bookworm
 
 # WeasyPrint needs Pango, Cairo, and GDK-Pixbuf (and their dependencies)
 # at the system level -- pip can't provide these, and Render's native
