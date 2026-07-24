@@ -414,7 +414,12 @@ def render_layout_map(
     zone_stats = _production_zone_legend_stats(production_result) if production_result else []
     multiple_zones = len(scored_patches) > 1
     for patch, (_, stat_line) in zip(scored_patches, zone_stats):
-        geom = _reproject_geometry_to_mercator(patch["geometry_wgs84"])
+        # display_geometry_wgs84 (production_area.py's smoothed, hole-
+        # punched hull), NOT geometry_wgs84 (the real cell-union
+        # footprint) -- rendering-only convenience; zones_geojson and
+        # every other consumer of this patch still reason over the real
+        # footprint via geometry_wgs84/polygon_utm, untouched here.
+        geom = _reproject_geometry_to_mercator(patch["display_geometry_wgs84"])
         polygons = geom.geoms if geom.geom_type == "MultiPolygon" else [geom]
         for polygon in polygons:
             plot_polygon(

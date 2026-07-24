@@ -724,6 +724,12 @@ def cluster_and_gate(
             display_polygon_utm = display_polygon_utm.intersection(boundary_polygon_utm)
 
             geometry_wgs84 = transform_geom(dem["crs"], "EPSG:4326", mapping(polygon_utm))
+            # Same reprojection, applied to the display-only hull instead of
+            # the real footprint -- a rendering convenience field only (see
+            # module docstring); render_layout_map.py is the only consumer,
+            # and this must never feed zones_geojson or any narrative/area
+            # reasoning, which stays on geometry_wgs84/polygon_utm.
+            display_geometry_wgs84 = transform_geom(dem["crs"], "EPSG:4326", mapping(display_polygon_utm))
 
             first_r, first_c = cluster_cells[0]
             source_patch_id = int(slope_source_labels[first_r, first_c])
@@ -736,6 +742,7 @@ def cluster_and_gate(
                     "polygon_utm": polygon_utm,
                     "display_polygon_utm": display_polygon_utm,
                     "geometry_wgs84": geometry_wgs84,
+                    "display_geometry_wgs84": display_geometry_wgs84,
                     "cells": cluster_cells,
                     "hole_footprints": hole_footprints,
                     "source_patch_id": source_patch_id,
@@ -764,6 +771,7 @@ def identify_production_areas(
             'polygon_utm': shapely Polygon/MultiPolygon,
             'display_polygon_utm': shapely Polygon,
             'geometry_wgs84': GeoJSON geometry dict,
+            'display_geometry_wgs84': GeoJSON geometry dict,  # display_polygon_utm, reprojected the same way
             'cells': list[(row, col)],
             'hole_footprints': list[shapely Polygon],  # [] if none -- see module docstring's TRUE HOLES vs WAISTS
             'source_patch_id': int,
