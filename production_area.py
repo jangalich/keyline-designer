@@ -47,7 +47,11 @@ point in the other two files reuses rather than recomputing:
         _detect_hole_footprints()). See cluster_and_gate()'s own docstring
         for the full detail; a waist triggers a split, a hole doesn't (there
         is nothing to split -- it's one solid lobe with a gap) but is
-        preserved as real, visible information via display_polygon_utm.
+        surfaced as narrative metadata via 'hole_footprints' (e.g. "a wet
+        spot mid-field" worth calling out in report text) -- production
+        zones render as clipped contour-line texture (contour_lines.py),
+        not a filled/smoothed shape, so there is no separate display
+        geometry to punch a hole out of anymore.
 
 identify_production_areas() is STEP 1 (no trim) + STEP 3 chained together,
 plus its own disqualifying-soil fetch (graceful-degrading, same
@@ -73,18 +77,21 @@ FOOTPRINT GEOMETRY: polygon_utm/area_acres/geometry_wgs84 are built from
 the REAL per-cell-square union footprint (_cell_union_footprint()), NOT a
 convex hull of cell center points -- a convex hull fills in concave gaps
 between actual qualifying cells with ground that was never actually
-eligible, over-reporting the real footprint. display_polygon_utm is ALSO
-a real cell-union footprint, not a hull -- of a LOCALLY SMOOTHED copy of
-the cluster's own cell mask (small-radius morphological opening+closing,
-see cluster_and_gate()'s own docstring and _smooth_display_mask()) --
-exposed only for rendering convenience; nothing here or downstream reads
-it for area or spatial-relationship purposes. Both polygon_utm/
-geometry_wgs84 AND display_polygon_utm/display_geometry_wgs84 CAN
-legitimately come back as a MultiPolygon (two cells whose real ground
-squares only touch at a shared corner don't merge into one solid Polygon
-under unary_union) and CAN legitimately carry interior rings (a real,
-sizeable excluded region survives both the real footprint and the small
-display-smoothing radius intact).
+eligible, over-reporting the real footprint. _cell_union_footprint()
+snaps each cell square's corners to a shared coordinate expression
+(derived directly from the DEM's own origin/resolution, not a cell
+CENTER offset by +/- half a width) so adjacent cells' shared edges are
+bit-for-bit identical -- confirmed live: without this, floating-point
+rounding on realistic (large-magnitude UTM) origin values left visible
+razor-thin sliver gaps in the unary_union'd footprint instead of a fully
+dissolved polygon. polygon_utm/geometry_wgs84 CAN legitimately come back
+as a MultiPolygon: two cells whose real ground squares only touch at a
+shared corner don't merge into one solid Polygon under unary_union.
+render_layout_map.py draws production zones directly from geometry_wgs84
+(clipped contour-line texture, via contour_lines.py) -- there is no
+separate display/smoothed geometry field; see that module's own docstring
+for why filled-shape rendering (and the cosmetic hull-smoothing it used
+to need) was replaced.
 
 TRUE HOLES vs WAISTS: cluster_and_gate() also carries each cluster's own
 'hole_footprints' (list[Polygon], [] if none) -- real, excluded ground
@@ -93,18 +100,11 @@ outer boundary. This is DIFFERENT from a "waist" (a pinch narrower than
 MIN_ZONE_WAIST_METERS that DOES have an opening to the outside on both
 sides): a waist triggers a split into independent clusters; a hole does
 not (there's nothing to split -- it's one solid lobe with a gap).
-hole_footprints is NOT an input to display_polygon_utm -- it's narrative
-metadata only (e.g. "a wet spot mid-field" worth calling out in report
-text). display_polygon_utm's own local smoothing independently surfaces
-any real, sizeable excluded region on its own merits, whether or not it
-passes hole_footprints' strict full-enclosure test -- a real exclusion
-pattern is often a scattered mix of interior patches that are MOSTLY but
-not topologically 100% enclosed (a thin leaky channel back to the outer
-edge), which the old hull-minus-hole_footprints design swallowed
-entirely; local smoothing keeps them visible regardless. polygon_utm/
-area_acres are unaffected by any of this either way -- the real
-cell-union footprint already excludes hole cells by construction, same as
-it always has.
+hole_footprints is narrative metadata only (e.g. "a wet spot mid-field"
+worth calling out in report text) -- it does not feed rendering or any
+other geometry, and polygon_utm/area_acres are unaffected either way --
+the real cell-union footprint already excludes hole cells by
+construction.
 """
 
 import math
@@ -122,7 +122,6 @@ from production_suitability import ASPECT_FACTOR_WEIGHT, SLOPE_FACTOR_WEIGHT
 from raster_grid import (
     D8_OFFSETS,
     SQUARE_METERS_PER_ACRE,
-    binary_dilate,
     binary_erode,
     cell_area_acres,
     connected_components,
@@ -161,17 +160,6 @@ MIN_PRODUCTION_AREA_ACRES = 0.5
 # UNVALIDATED against real ground-truth and needs tuning against real
 # properties, not a derived or measured figure. CONFIGURABLE.
 MIN_ZONE_WAIST_METERS = 12.0  # ~40 ft
-
-# Radius for display_polygon_utm's own local morphological smoothing
-# (cluster_and_gate()'s Part 3) -- deliberately small and DISTINCT from
-# MIN_ZONE_WAIST_METERS: that constant decides real zone identity/
-# splitting (Part 1); this one is purely cosmetic, meant only to erase
-# genuine single-or-few-cell staircase noise on a cluster's own real cell
-# mask, nowhere near hull-scale smoothing. 12 ft (~3.7m) is a documented
-# STARTING value only -- like every other threshold in this pipeline, it
-# is UNVALIDATED against real ground-truth and needs tuning against real
-# properties, not a derived or measured figure. CONFIGURABLE.
-DISPLAY_SMOOTHING_RADIUS_METERS = 3.7  # ~12 ft
 
 # --- per-cell weighting (STEP 1's own scoring, used to order STEP 2's
 # worst-first ceiling trim) ---
@@ -316,13 +304,41 @@ def _cell_union_footprint(cells: list[tuple[int, int]], dem: dict):
     individual cell's own half-cell-width margin the real union always
     includes). Either way, the hull is only an approximation and this
     function is the accurate one every spatial consumer should use.
+
+    GRID-SEAM FIX: each square's corners are computed directly from its
+    own row/col boundary via `origin +/- N * resolution` -- NOT via
+    pixel_center_xy() (a cell's CENTER) offset by +/- half a cell width.
+    The old center-then-half-width approach computed each shared edge via
+    two DIFFERENT floating-point expressions depending on which
+    neighboring cell was doing the computing (e.g. cell c's right edge as
+    `(origin + (c+0.5)*px) + px/2` vs cell c+1's left edge as
+    `(origin + (c+1.5)*px) - px/2`) -- mathematically identical, but not
+    bit-for-bit identical once origin_x/origin_y are realistic
+    large-magnitude UTM values (confirmed live: this left visible
+    razor-thin sliver gaps in rendered output, unary_union() failing to
+    fully dissolve adjacent squares' shared edges). Computing both cell
+    c's right edge and cell c+1's left edge from the exact same expression
+    (`origin + (c+1) * resolution`) makes every shared edge bit-for-bit
+    identical by construction, regardless of origin's magnitude -- a real
+    correctness fix to the geometry itself, not a cosmetic one, since
+    every consumer of this function (polygon_utm/area_acres/
+    geometry_wgs84, not just rendering) was getting the same
+    sliver-fragmented footprint. buffer(0) afterward is cheap, defensive
+    cleanup against any remaining near-zero-area topology noise from
+    unary_union'ing many touching squares -- the corner-snapping above
+    should already make it a no-op in practice.
     """
     px, py = dem["resolution_meters"]
+    origin_x = dem["origin_x"]
+    origin_y = dem["origin_y"]
     squares = []
     for r, c in cells:
-        x, y = pixel_center_xy(dem, r, c)
-        squares.append(box(x - px / 2, y - py / 2, x + px / 2, y + py / 2))
-    return unary_union(squares)
+        x0 = origin_x + c * px
+        x1 = origin_x + (c + 1) * px
+        y1 = origin_y - r * py
+        y0 = origin_y - (r + 1) * py
+        squares.append(box(x0, y0, x1, y1))
+    return unary_union(squares).buffer(0)
 
 
 def compute_step1_eligible_cells(
@@ -633,60 +649,6 @@ def _detect_hole_footprints(cells: list[tuple[int, int]], dem: dict) -> list[Pol
     return footprints
 
 
-def _display_smoothing_radius_cells(dem: dict, radius_meters: float) -> int:
-    """
-    Converts DISPLAY_SMOOTHING_RADIUS_METERS into a cell-count radius,
-    same meters-to-cell-units conversion _waist_erosion_radius_cells()
-    uses -- but applied directly as the morphological opening/closing
-    radius itself, no /2 halving: DISPLAY_SMOOTHING_RADIUS_METERS already
-    denotes a radius (unlike MIN_ZONE_WAIST_METERS, which denotes a
-    minimum FEATURE WIDTH that erosion needs to fully clear on both
-    sides).
-    """
-    px, py = dem["resolution_meters"]
-    cell_size = (px + py) / 2.0
-    return max(1, math.ceil(radius_meters / cell_size))
-
-
-def _smooth_display_mask(
-    cluster_cells: list[tuple[int, int]],
-    grid_shape: tuple[int, int],
-    radius_cells: int,
-) -> list[tuple[int, int]]:
-    """
-    Part 3: local morphological smoothing of one FINAL cluster's own real
-    cell mask (raster_grid.binary_erode()/binary_dilate(), NOT continuous-
-    geometry hull/buffer work) -- see cluster_and_gate()'s own docstring
-    for why this replaced the earlier hull-minus-holes approach.
-
-    Morphological OPENING (erode then dilate) first, shaving off tiny
-    isolated protruding bumps on the exterior boundary; morphological
-    CLOSING (dilate then erode) on that result second, filling genuinely
-    tiny (smaller than radius_cells) excluded noise WITHIN the mask. A
-    real, sizeable excluded region -- whether or not it's topologically
-    fully enclosed (_detect_hole_footprints() is the separate, stricter
-    test for that) -- survives this untouched; it is only ever erased if
-    it's smaller than radius_cells itself.
-
-    Falls back to the cluster's own UNSMOOTHED cells if smoothing
-    (pathologically) erases the whole cluster -- shouldn't happen for any
-    real, min_area_acres-sized cluster at the small radii this constant
-    is meant for, but stays graceful (a real display shape, even an
-    unsmoothed one) rather than ever handing back an empty display
-    geometry for a cluster that otherwise survived STEP 3's gate.
-    """
-    rows, cols = grid_shape
-    mask = np.zeros((rows, cols), dtype=bool)
-    for r, c in cluster_cells:
-        mask[r, c] = True
-
-    opened = binary_dilate(binary_erode(mask, radius_cells), radius_cells)
-    smoothed = binary_erode(binary_dilate(opened, radius_cells), radius_cells)
-
-    smoothed_cells = [(int(r), int(c)) for r, c in np.argwhere(smoothed)]
-    return smoothed_cells if smoothed_cells else list(cluster_cells)
-
-
 def cluster_and_gate(
     cell_mask: np.ndarray,
     dem: dict,
@@ -726,32 +688,12 @@ def cluster_and_gate(
         Part-1 split). A hole is excluded ground fully enclosed by that
         cluster's own eligible cells. Stored as 'hole_footprints' -- does
         NOT alter polygon_utm/area_acres (the real cell-union footprint
-        already correctly excludes hole cells) -- purely so the hole's own
-        geometry can be carried forward for display (Part 3).
-
-      PART 3 -- display_polygon_utm: LOCAL MORPHOLOGICAL SMOOTHING
-        (raster opening then closing, via raster_grid.binary_erode()/
-        binary_dilate() at DISPLAY_SMOOTHING_RADIUS_METERS -- a small,
-        purely cosmetic radius, deliberately distinct from
-        MIN_ZONE_WAIST_METERS) of the FINAL cluster's own real cell mask,
-        vectorized back into a real cell-union polygon via
-        _cell_union_footprint() (_smooth_display_mask()). This supersedes
-        an earlier convex-hull-minus-hole_footprints design: real
-        exclusion patterns inside a cluster are often a scattered mix of
-        interior patches that are MOSTLY, but not topologically 100%,
-        enclosed (a thin leaky channel connects them back to the outer
-        edge) -- these read as an obvious real gap on the ground but fail
-        Part 2's strict "true hole" flood-fill test outright, and a hull
-        would swallow them completely. Local smoothing erases only
-        genuine single-or-few-cell staircase noise (smaller than the
-        smoothing radius); any real, sizeable excluded region -- enclosed
-        or not -- survives untouched, so display_polygon_utm now shows
-        real clusters of excluded ground between slivers of kept ground,
-        not a fully smoothed blob or a single unexpectedly-placed hole.
-        hole_footprints (Part 2) is NOT an input to this step anymore --
-        it remains separately available as narrative metadata (e.g. "a
-        wet spot mid-field" worth calling out in report text), just no
-        longer the mechanism controlling what display_polygon_utm shows.
+        already correctly excludes hole cells) -- purely narrative
+        metadata (e.g. "a wet spot mid-field" worth calling out in report
+        text); it feeds no geometry downstream. Production zones render
+        as clipped contour-line texture directly against geometry_wgs84
+        (see contour_lines.py/render_layout_map.py), not a filled or
+        smoothed shape, so there is no separate display step here to feed.
 
     `step1` is compute_step1_eligible_cells()'s own return dict -- used
     here only to attach each surviving cluster's 'source_patch_id' (the
@@ -803,32 +745,7 @@ def cluster_and_gate(
 
             hole_footprints = _detect_hole_footprints(cluster_cells, dem)
 
-            # Display-only local morphological smoothing of this cluster's
-            # own real cell mask -- NOT used for area_acres or any spatial
-            # relationship; see module docstring and _smooth_display_mask().
-            # hole_footprints (above) is narrative metadata only now, not
-            # an input here -- real excluded regions (enclosed or not)
-            # survive smoothing on their own merits.
-            display_radius_cells = _display_smoothing_radius_cells(dem, DISPLAY_SMOOTHING_RADIUS_METERS)
-            smoothed_cells = _smooth_display_mask(cluster_cells, cell_mask.shape, display_radius_cells)
-            display_footprint = _cell_union_footprint(smoothed_cells, dem)
-            display_polygon_utm = display_footprint.intersection(boundary_polygon_utm)
-            if display_polygon_utm.is_empty:
-                # Smoothing + boundary clipping pathologically erased the
-                # whole display shape (e.g. a sliver cluster right at the
-                # parcel edge) -- fall back to the real, unsmoothed
-                # footprint rather than ever handing back empty display
-                # geometry for a cluster that otherwise survived STEP 3.
-                display_polygon_utm = polygon_utm
-
             geometry_wgs84 = transform_geom(dem["crs"], "EPSG:4326", mapping(polygon_utm))
-            # Same reprojection, applied to the smoothed display footprint
-            # instead of the real one -- a rendering convenience field only
-            # (see module docstring); render_layout_map.py is the only
-            # consumer, and this must never feed zones_geojson or any
-            # narrative/area reasoning, which stays on geometry_wgs84/
-            # polygon_utm.
-            display_geometry_wgs84 = transform_geom(dem["crs"], "EPSG:4326", mapping(display_polygon_utm))
 
             first_r, first_c = cluster_cells[0]
             source_patch_id = int(slope_source_labels[first_r, first_c])
@@ -839,9 +756,7 @@ def cluster_and_gate(
                     "area_acres": round(float(area_acres), 2),
                     "representative_elevation_m": float(np.median(elevations)),
                     "polygon_utm": polygon_utm,
-                    "display_polygon_utm": display_polygon_utm,
                     "geometry_wgs84": geometry_wgs84,
-                    "display_geometry_wgs84": display_geometry_wgs84,
                     "cells": cluster_cells,
                     "hole_footprints": hole_footprints,
                     "source_patch_id": source_patch_id,
@@ -868,9 +783,7 @@ def identify_production_areas(
             'area_acres': float,
             'representative_elevation_m': float,
             'polygon_utm': shapely Polygon/MultiPolygon,
-            'display_polygon_utm': shapely Polygon/MultiPolygon,  # locally smoothed real footprint, not a hull
             'geometry_wgs84': GeoJSON geometry dict,
-            'display_geometry_wgs84': GeoJSON geometry dict,  # display_polygon_utm, reprojected the same way
             'cells': list[(row, col)],
             'hole_footprints': list[shapely Polygon],  # [] if none -- see module docstring's TRUE HOLES vs WAISTS
             'source_patch_id': int,

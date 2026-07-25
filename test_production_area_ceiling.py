@@ -182,7 +182,6 @@ for p in optimized_band["patches"]:
         f"patch {p['id']}: area_acres ({p['area_acres']}) must match the real cell-union area "
         f"({round(exact_cell_area, 2)}) -- a mismatch means area_acres is hull-inflated"
     )
-    assert p["display_polygon_utm"].geom_type == "Polygon", "display_polygon_utm must always be a single Polygon"
 print(
     f"Fragmentation: trimming the worse-quality middle band split the single original region into "
     f"{len(optimized_band['patches'])} disconnected survivors "

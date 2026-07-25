@@ -2,47 +2,50 @@
 test_render_layout_map.py
 
 Offline (no-network) checks for render_layout_map.py's production-zone
-drawing, specifically the switch from geometry_wgs84 (the real cell-union
-footprint) to display_geometry_wgs84 (production_area.py's LOCALLY
-SMOOTHED real cell-union footprint -- small-radius morphological opening
-then closing of the cluster's own cell mask, NOT a convex hull -- see
-cluster_and_gate()'s own docstring for why the earlier hull-minus-
-hole_footprints design was replaced).
+rendering: contour-line texture (contour_lines.py's global contour lines,
+clipped per zone at render time against that zone's own real polygon_utm),
+not a filled/outlined shape -- see production_area.py's and
+render_layout_map.py's own module docstrings for why the earlier
+display_polygon_utm/display_geometry_wgs84 fields were removed entirely
+in favor of this.
 
 Builds real patch dicts via production_area.cluster_and_gate() +
-production_suitability.score_production_areas() against small synthetic
-DEMs (the same dumbbell/ring fixtures test_production_area.py's own Part
-1/2/3 tests use), then feeds them to render_layout_map.py through its
-`layers` pre-fetch parameter -- no DEM/soil/basemap network calls
-required; the basemap fetch itself degrades gracefully (same as every
-other network-backed layer in this pipeline) when unreachable, so
-render_layout_map() runs fully offline here.
+production_suitability.score_production_areas() against small synthetic,
+SLOPED DEMs (a real elevation gradient is required here -- unlike
+test_production_area.py's own flat fixtures, which only needed cell-mask
+shape, contour lines need real elevation variation to exist at all), then
+feeds them to render_layout_map.py through its `layers` pre-fetch
+parameter -- no DEM/soil/basemap network calls required; the basemap
+fetch itself degrades gracefully (same as every other network-backed
+layer in this pipeline) when unreachable, so render_layout_map() runs
+fully offline here.
 
 The one invariant this whole pass depends on: zones_geojson (and every
-patch's geometry_wgs84/polygon_utm) must stay byte-for-byte the real
-footprint, never the cosmetic display geometry -- see the dedicated
-regression check at the bottom.
+patch's geometry_wgs84/polygon_utm) is completely unaffected by this
+rendering-only change -- see the dedicated regression check near the
+bottom.
 """
 
 import os
 import tempfile
 
 import numpy as np
-from matplotlib.path import Path
-from shapely.geometry import Polygon
-from shapely.plotting import patch_from_polygon
+from shapely.geometry import box
 
 import production_area as pa
 import render_layout_map as rlm
+from contour_lines import compute_contour_lines
 from production_area import cluster_and_gate, compute_step1_eligible_cells
-from production_area_ceiling import identify_optimized_production_areas  # noqa: F401  (import-shape sanity check)
 from production_suitability import score_production_areas
 
 RESOLUTION = (5.0, 5.0)
+RISE_PER_ROW = 0.4  # meters -- a real, modest gradient so contour lines actually exist
 
 
-def _dem(rows: int, cols: int) -> dict:
-    array = np.full((rows, cols), 100.0, dtype=np.float32)
+def _sloped_dem(rows: int, cols: int) -> dict:
+    array = np.zeros((rows, cols), dtype=np.float32)
+    for row in range(rows):
+        array[row, :] = 100.0 + row * RISE_PER_ROW
     return {
         "array": array,
         "resolution_meters": RESOLUTION,
@@ -53,8 +56,6 @@ def _dem(rows: int, cols: int) -> dict:
 
 
 def _full_extent_boundary(dem: dict):
-    from shapely.geometry import box
-
     rows, cols = dem["array"].shape
     px, py = dem["resolution_meters"]
     x0, y0 = dem["origin_x"], dem["origin_y"]
@@ -75,105 +76,135 @@ def _mask_from_cells(shape, cells):
 def _scored_patches_for(cell_mask, dem):
     """Real end-to-end patch dicts (cluster_and_gate + score_production_areas),
     exactly the shape render_layout_map.py's own production_result['scored_patches']
-    already carries -- same 'rank'/'area_acres'/'display_geometry_wgs84' fields."""
+    already carries."""
     boundary = _full_extent_boundary(dem)
     step1 = compute_step1_eligible_cells(dem, boundary, disqualifying_soil_union_utm=None)
     patches = cluster_and_gate(cell_mask, dem, boundary, step1)
     return score_production_areas(patches, dem, step1)
 
 
-# --- Ring/donut (true hole): display_geometry_wgs84 must carry an interior ring,
-#     and shapely.plotting's own patch construction must draw it as a real
-#     compound Matplotlib path (2 sub-paths), not silently drop it ---
+def _clip_contours_to_zone(contour_lines: list[dict], patch: dict):
+    """Exactly what render_layout_map.py's own rendering loop does per
+    production zone -- real shapely intersection of the GLOBAL contour
+    lines against that zone's own polygon_utm (same CRS, no reprojection
+    needed) -- returns the list of non-empty clipped geometries."""
+    clipped = []
+    for contour in contour_lines:
+        piece = contour["lines_utm"].intersection(patch["polygon_utm"])
+        if not piece.is_empty:
+            clipped.append(piece)
+    return clipped
 
-RING_SHAPE = (18, 18)
-ring_dem = _dem(*RING_SHAPE)
-outer = set(_rect_cells(1, 17, 1, 17))
-hole = set(_rect_cells(6, 12, 6, 12))
-ring_cells = list(outer - hole)
-ring_mask = _mask_from_cells(RING_SHAPE, ring_cells)
 
-ring_scored = _scored_patches_for(ring_mask, ring_dem)
-assert len(ring_scored) == 1, f"expected 1 scored patch for the ring fixture, got {len(ring_scored)}"
-ring_patch = ring_scored[0]
-assert len(ring_patch["hole_footprints"]) == 1
+# --- Solid zone smaller than the DEM's full extent: clipped contours must stay
+#     entirely within the zone's own real boundary -- no segment outside it ---
 
-# The exact reprojection render_layout_map.py itself performs for
-# production zones -- reusing the real function, not a reimplementation.
-ring_geom_mercator = rlm._reproject_geometry_to_mercator(ring_patch["display_geometry_wgs84"])
-assert ring_geom_mercator.geom_type == "Polygon"
-assert len(ring_geom_mercator.interiors) == 1, (
-    f"display_geometry_wgs84 (reprojected via render_layout_map.py's own helper) must carry exactly one "
-    f"interior ring for the one true hole, got {len(ring_geom_mercator.interiors)}"
+SINGLE_SHAPE = (30, 30)
+single_dem = _sloped_dem(*SINGLE_SHAPE)
+single_cells = _rect_cells(5, 15, 5, 15)  # a 10x10 block -- well inside the 30x30 DEM, not the full extent
+single_mask = _mask_from_cells(SINGLE_SHAPE, single_cells)
+single_scored = _scored_patches_for(single_mask, single_dem)
+assert len(single_scored) == 1, f"expected 1 scored patch, got {len(single_scored)}"
+single_patch = single_scored[0]
+
+global_contours = compute_contour_lines(single_dem)
+assert len(global_contours) > 0, "test setup should produce real global contour lines on a sloped DEM"
+
+zone_bounds = single_patch["polygon_utm"].bounds
+full_extent_bounds = _full_extent_boundary(single_dem).bounds
+assert full_extent_bounds != zone_bounds, (
+    "test setup should genuinely have contours extending past the zone's own (smaller) extent, "
+    "otherwise clipping isn't actually being exercised"
+)
+some_contour_exceeds_zone = any(
+    not box(*zone_bounds).buffer(1e-6).contains(c["lines_utm"]) for c in global_contours
+)
+assert some_contour_exceeds_zone, (
+    "test setup should genuinely have at least one global contour line extending past the zone's own "
+    "bounds -- otherwise this test wouldn't be exercising real clipping"
 )
 
-# shapely.plotting.plot_polygon draws via patch_from_polygon() internally
-# (see plot_polygon's own source) -- calling it directly on the exact
-# geometry render_layout_map.py hands to plot_polygon() confirms the real
-# code path, not just the abstract claim that shapely "supports holes".
-mpl_patch = patch_from_polygon(ring_geom_mercator)
-path = mpl_patch.get_path()
-num_subpaths = int((path.codes == Path.MOVETO).sum())
-assert num_subpaths == 2, (
-    f"a Polygon with 1 interior ring must compile to a 2-subpath compound Matplotlib path "
-    f"(1 exterior MOVETO + 1 interior MOVETO), got {num_subpaths}"
-)
+clipped_pieces = _clip_contours_to_zone(global_contours, single_patch)
+assert clipped_pieces, "expected at least one contour segment to survive clipping into this zone"
+zone_polygon_buffered = single_patch["polygon_utm"].buffer(1e-6)
+for piece in clipped_pieces:
+    assert zone_polygon_buffered.contains(piece), (
+        "every clipped contour segment must lie entirely within the zone's own real boundary "
+        "(polygon_utm) -- no segment should exist outside it in the clipped output"
+    )
 print(
-    "Hole rendering: display_geometry_wgs84 for a ring/donut cluster reprojects (via render_layout_map.py's "
-    "own _reproject_geometry_to_mercator) to a Polygon with 1 interior ring, and shapely.plotting's real "
-    "patch_from_polygon() compiles it to a genuine 2-subpath compound Matplotlib path -- the hole is drawn, "
-    "not smoothed over."
+    f"Clipping: {len(clipped_pieces)} of {len(global_contours)} global contour line(s) survive clipping into "
+    "a single zone smaller than the DEM's full extent, and every clipped segment stays entirely within that "
+    "zone's own real boundary."
 )
 
 
-# --- Solid square (no hole): confirm the same real code path draws a single-subpath patch ---
+# --- Split (waist) cluster: the two resulting zones must each get their own independently-clipped
+#     contour segments, with no segments appearing in the gap between them ---
 
-SQUARE_SHAPE = (12, 12)
-square_dem = _dem(*SQUARE_SHAPE)
-square_cells = _rect_cells(1, 11, 1, 11)
-square_mask = _mask_from_cells(SQUARE_SHAPE, square_cells)
-square_scored = _scored_patches_for(square_mask, square_dem)
-assert len(square_scored) == 1
-square_geom_mercator = rlm._reproject_geometry_to_mercator(square_scored[0]["display_geometry_wgs84"])
-assert len(square_geom_mercator.interiors) == 0
-square_mpl_patch = patch_from_polygon(square_geom_mercator)
-square_num_subpaths = int((square_mpl_patch.get_path().codes == Path.MOVETO).sum())
-assert square_num_subpaths == 1, "a hole-free cluster must compile to a single-subpath Matplotlib path"
-print("Hole rendering: a solid, hole-free cluster correctly compiles to a single-subpath Matplotlib path.")
-
-
-# --- Split cluster (waist split): the two resulting display geometries must render as
-#     independent, non-overlapping shapes with a real gap -- not touching, not overlapping ---
-
-DUMBBELL_SHAPE = (12, 24)
-dumbbell_dem = _dem(*DUMBBELL_SHAPE)
+DUMBBELL_SHAPE = (16, 30)
+dumbbell_dem = _sloped_dem(*DUMBBELL_SHAPE)
 lobe_a = _rect_cells(0, 10, 0, 10)
-lobe_b = _rect_cells(0, 10, 14, 24)
-narrow_strip = _rect_cells(4, 6, 10, 14)  # narrower than MIN_ZONE_WAIST_METERS -- same fixture as production_area.py's own test
+lobe_b = _rect_cells(0, 10, 16, 26)
+narrow_strip = _rect_cells(4, 6, 10, 16)  # narrower than MIN_ZONE_WAIST_METERS -- same fixture style as production_area.py's own tests
 dumbbell_cells = lobe_a + lobe_b + narrow_strip
 dumbbell_mask = _mask_from_cells(DUMBBELL_SHAPE, dumbbell_cells)
 
+# The real, permanently EXCLUDED ground between the lobes -- the rest of
+# the connecting corridor (same column range as narrow_strip, but the
+# rows OUTSIDE it) that was never part of the dumbbell mask at all, on
+# either side of the split. This is the actual "gap" a farmer would see
+# on the ground; it's distinct from the reclaimed narrow_strip cells
+# themselves, which Part 1 splits down the middle between the two zones
+# -- the two zones' own real footprints are allowed to TOUCH exactly
+# along that internal dividing line (adjacent cells sharing an edge,
+# zero-area/zero-length overlap), that's expected and not a "gap
+# violation"; what must never happen is a contour segment actually
+# drawn INSIDE this real excluded corridor.
+gap_cells = _rect_cells(0, 4, 10, 16) + _rect_cells(6, 10, 10, 16)
+
 dumbbell_scored = _scored_patches_for(dumbbell_mask, dumbbell_dem)
 assert len(dumbbell_scored) == 2, f"expected the waist split to produce 2 scored patches, got {len(dumbbell_scored)}"
+zone_1, zone_2 = dumbbell_scored
 
-geom_1 = rlm._reproject_geometry_to_mercator(dumbbell_scored[0]["display_geometry_wgs84"])
-geom_2 = rlm._reproject_geometry_to_mercator(dumbbell_scored[1]["display_geometry_wgs84"])
-
-assert not geom_1.intersects(geom_2), (
-    "the two split production zones' display geometries must be genuinely disjoint (no touching, no "
-    "overlap) -- the excluded waist ground between them must not be filled in by either hull"
+gap_footprint = pa._cell_union_footprint(gap_cells, dumbbell_dem)
+assert zone_1["polygon_utm"].intersection(gap_footprint).area < 1e-9, (
+    "test sanity check: zone 1's real footprint must not actually cover any of the excluded gap ground "
+    "(touching its edge is fine, covering real area of it is not)"
 )
-gap_distance = geom_1.distance(geom_2)
-assert gap_distance > 0, f"expected a real, positive gap between the two split zones, got {gap_distance}"
+assert zone_2["polygon_utm"].intersection(gap_footprint).area < 1e-9, (
+    "test sanity check: zone 2's real footprint must not actually cover any of the excluded gap ground"
+)
+
+dumbbell_global_contours = compute_contour_lines(dumbbell_dem)
+assert len(dumbbell_global_contours) > 0, "test setup should produce real global contour lines on a sloped DEM"
+
+clipped_1 = _clip_contours_to_zone(dumbbell_global_contours, zone_1)
+clipped_2 = _clip_contours_to_zone(dumbbell_global_contours, zone_2)
+assert clipped_1 and clipped_2, "both split zones should get at least one clipped contour segment each"
+
+zone_1_buffered = zone_1["polygon_utm"].buffer(1e-6)
+zone_2_buffered = zone_2["polygon_utm"].buffer(1e-6)
+for piece in clipped_1:
+    assert zone_1_buffered.contains(piece), "zone 1's clipped contours must stay entirely within zone 1's own boundary"
+for piece in clipped_2:
+    assert zone_2_buffered.contains(piece), "zone 2's clipped contours must stay entirely within zone 2's own boundary"
+
+gap_overlap_length = sum(piece.intersection(gap_footprint).length for piece in clipped_1 + clipped_2)
+assert gap_overlap_length < 1e-9, (
+    f"no clipped contour segment (from EITHER zone) may actually run through the real excluded gap ground "
+    f"between the two split zones -- got {gap_overlap_length}m of overlap"
+)
 print(
-    f"Split rendering: the two waist-split production zones' display geometries are genuinely disjoint, "
-    f"with a real {round(gap_distance, 2)}m gap between them -- neither hull swallows the excluded ground."
+    f"Split rendering: the two waist-split zones each get their own independently-clipped contour segments "
+    f"({len(clipped_1)} and {len(clipped_2)} respectively), with zero overlap into the real excluded gap "
+    f"ground ({round(gap_footprint.area, 1)} sq m) between them."
 )
 
 
-# --- Full render_layout_map() pass, offline: confirms the swapped field flows through the
-#     entire rendering pipeline (basemap fallback, halo, boundary, legend, PNG assembly)
-#     without crashing, for a production_result carrying BOTH a hole and a split ---
+# --- Full render_layout_map() pass, offline: confirms the whole contour-clipping pipeline
+#     (fetch_layout_layers' own contour_lines computation, per-zone clipping, reprojection,
+#     drawing, legend, PNG assembly) runs without crashing for a production_result with a split ---
 
 property_boundary = [
     (-79.9838154, 40.6458343),
@@ -184,21 +215,21 @@ property_boundary = [
     (-79.9838258, 40.6458343),
 ]
 
-combined_scored = ring_scored + dumbbell_scored
-for rank, patch in enumerate(sorted(combined_scored, key=lambda p: -p["suitability_score"]), start=1):
+for rank, patch in enumerate(sorted(dumbbell_scored, key=lambda p: -p["suitability_score"]), start=1):
     patch["rank"] = rank
 
 synthetic_layers = {
-    "dem": None,
+    "dem": dumbbell_dem,
     "production_result": {
-        "scored_patches": combined_scored,
-        "total_selected_acreage": round(sum(p["area_acres"] for p in combined_scored), 2),
+        "scored_patches": dumbbell_scored,
+        "total_selected_acreage": round(sum(p["area_acres"] for p in dumbbell_scored), 2),
         "percent_of_parcel": 42.0,
     },
     "water_zone": None,
     "road_corridor": None,
     "structure_site": None,
     "water_features": {"streams": []},
+    "contour_lines": dumbbell_global_contours,
 }
 
 with tempfile.TemporaryDirectory() as tmpdir:
@@ -210,70 +241,45 @@ with tempfile.TemporaryDirectory() as tmpdir:
 
 print(
     "Full pipeline: render_layout_map() runs offline end-to-end (basemap fetch degrades gracefully) with a "
-    "production_result carrying both a hole and a split, producing a real, non-empty PNG."
+    "split production_result, drawing clipped contour-line texture for each zone and producing a real, "
+    "non-empty PNG."
 )
 
 
 # =====================================================================
 # Invariant: zones_geojson (and every patch's geometry_wgs84/polygon_utm)
-# stays the real cell-union footprint, byte-for-byte, regardless of this
-# rendering-only display_geometry_wgs84 addition. This is the specific
-# thing this whole pass -- and any future edit to render_layout_map.py --
-# must never break.
+# is completely unaffected by this rendering-only change -- this only
+# changes HOW production zones are drawn and removes the now-unused
+# display_polygon_utm/display_geometry_wgs84 fields, not the canonical
+# geometry any other consumer reasons over.
 # =====================================================================
 
 from production_area import production_areas_to_geojson
 from production_suitability import production_suitability_to_geojson
 
-# The ring fixture's own display geometry now happens to equal its real
-# footprint exactly (Part 3 is local morphological smoothing of the real
-# mask, not a hull -- a clean, noise-free shape like the ring's 5-cell-
-# wall donut has nothing for smoothing to change), so it's no longer a
-# case where geometry_wgs84 and display_geometry_wgs84 genuinely diverge.
-# A small blob with a couple of genuinely tiny (sub-smoothing-radius)
-# noise gaps IS such a case -- smoothing fills the gaps in the display
-# shape while the real footprint (geometry_wgs84) still excludes them
-# exactly -- so it's the fixture that makes this invariant test meaningful
-# rather than vacuously true.
-NOISY_SHAPE = (14, 14)
-noisy_dem = _dem(*NOISY_SHAPE)
-noisy_block = set(_rect_cells(1, 13, 1, 13))  # 12x12
-noisy_gap = {(6, 6)}  # 1 cell -- smaller than DISPLAY_SMOOTHING_RADIUS_METERS, smoothed away in display
-noisy_cells = list(noisy_block - noisy_gap)
-noisy_mask = _mask_from_cells(NOISY_SHAPE, noisy_cells)
-noisy_scored = _scored_patches_for(noisy_mask, noisy_dem)
-assert len(noisy_scored) == 1
-noisy_patch = noisy_scored[0]
-assert noisy_patch["display_geometry_wgs84"] != noisy_patch["geometry_wgs84"], (
-    "test sanity check: this fixture's tiny noise gap must genuinely differ between the real footprint "
-    "(still excludes it) and the smoothed display geometry (fills it in) -- otherwise the assertion below "
-    "wouldn't be a meaningful regression guard"
+zone_1_geojson = production_suitability_to_geojson([dict(zone_1)])
+assert zone_1_geojson["features"][0]["geometry"] == zone_1["geometry_wgs84"], (
+    "production_suitability_to_geojson() must still embed geometry_wgs84 exactly, byte-for-byte"
+)
+assert "display_polygon_utm" not in zone_1 and "display_geometry_wgs84" not in zone_1, (
+    "the removed display fields must not reappear on a scored patch dict"
 )
 
-noisy_geojson = production_suitability_to_geojson([dict(noisy_patch)])
-noisy_feature_geometry = noisy_geojson["features"][0]["geometry"]
-assert noisy_feature_geometry == noisy_patch["geometry_wgs84"], (
-    "production_suitability_to_geojson() must embed geometry_wgs84 (the real footprint) exactly -- "
-    "byte-for-byte -- unaffected by the new display_geometry_wgs84 field"
+raw_patches = cluster_and_gate(
+    dumbbell_mask, dumbbell_dem, _full_extent_boundary(dumbbell_dem),
+    compute_step1_eligible_cells(dumbbell_dem, _full_extent_boundary(dumbbell_dem), disqualifying_soil_union_utm=None),
 )
-assert noisy_feature_geometry != noisy_patch["display_geometry_wgs84"], (
-    "production_suitability_to_geojson() must NOT have been switched to the smoothed display geometry"
-)
-
-raw_noisy_patches = cluster_and_gate(
-    noisy_mask, noisy_dem, _full_extent_boundary(noisy_dem),
-    compute_step1_eligible_cells(noisy_dem, _full_extent_boundary(noisy_dem), disqualifying_soil_union_utm=None),
-)
-raw_geojson = production_areas_to_geojson(raw_noisy_patches)
-assert raw_geojson["features"][0]["geometry"] == raw_noisy_patches[0]["geometry_wgs84"], (
-    "production_areas_to_geojson() must also embed geometry_wgs84 exactly, unaffected by display_geometry_wgs84"
-)
+raw_geojson = production_areas_to_geojson(raw_patches)
+for feature, patch in zip(raw_geojson["features"], raw_patches):
+    assert feature["geometry"] == patch["geometry_wgs84"], (
+        "production_areas_to_geojson() must also embed geometry_wgs84 exactly for every patch"
+    )
+    assert "display_polygon_utm" not in patch and "display_geometry_wgs84" not in patch
 
 print(
     "zones_geojson invariant: both production_areas_to_geojson() and production_suitability_to_geojson() "
-    "still embed geometry_wgs84 (the real cell-union footprint) exactly, byte-for-byte -- unaffected by the "
-    "new rendering-only display_geometry_wgs84 field, and genuinely different from it where local smoothing "
-    "actually changed something."
+    "still embed geometry_wgs84 exactly, byte-for-byte -- unaffected by the switch to contour-line "
+    "rendering, and the removed display fields are genuinely gone from every patch dict."
 )
 
 

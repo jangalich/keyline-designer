@@ -10,9 +10,10 @@ production_area_ceiling.py (optimized production zones),
 water_suitability.py (fetch_and_select_optimal_water_zone -- the top-ranked
 candidate), road_corridors.py (fetch_and_select_optimal_road_corridor -- the
 top-ranked candidate), solar_suitability.py (fetch_and_select_optimal_structure_site
--- the top-ranked candidate), and hydrology_data.py (real NHD streams, for
+-- the top-ranked candidate), hydrology_data.py (real NHD streams, for
 background context only -- no soil/hydrology POLYGON data is drawn here,
-that's covered in the narrative text).
+that's covered in the narrative text), and contour_lines.py (global
+elevation contour lines over the full DEM extent).
 
     boundary --> dem_data (fetched once, shared across all four layers)
              --> production_area_ceiling.identify_optimized_production_areas
@@ -20,8 +21,20 @@ that's covered in the narrative text).
              --> road_corridors.fetch_and_select_optimal_road_corridor
              --> solar_suitability.fetch_and_select_optimal_structure_site
              --> hydrology_data.get_water_features_for_boundary (streams)
+             --> contour_lines.compute_contour_lines (global, unclipped)
              --> rendered PNG (basemap + halo + streams + boundary +
                  layout layers + numbered legend box, all one image)
+
+PRODUCTION ZONE STYLE: production zones render as CONTOUR-LINE TEXTURE,
+not a filled/outlined shape -- contour_lines.py's global contour lines
+(computed once, over the DEM's full extent) are clipped per zone at
+render time (real shapely intersection against that zone's own
+polygon_utm, not a pre-clipped raster), and only the clipped segments
+within that zone are drawn. No fill, no boundary stroke for production
+zones -- zone identity is conveyed by the numbered marker alone, same as
+every other layer. This is a deliberate, scoped styling split: water,
+road corridors, structure sites, and the property boundary all keep
+their existing solid fill/line rendering exactly as before.
 
 Basemap: NAIP aerial imagery via USGS's cached USGSImageryOnly tile
 service, fetched and composited with contextily (a well-established
@@ -49,10 +62,11 @@ matplotlib.use("Agg")  # headless rendering -- no display server in this pipelin
 import matplotlib.pyplot as plt
 from rasterio.warp import transform as warp_transform
 from rasterio.warp import transform_geom
-from shapely.geometry import Polygon, box, shape
+from shapely.geometry import Polygon, box, mapping, shape
 from shapely.ops import unary_union
 from shapely.plotting import plot_line, plot_points, plot_polygon
 
+from contour_lines import compute_contour_lines
 from dem_data import get_dem_for_boundary
 from hydrology_data import get_water_features_for_boundary
 from production_area_ceiling import identify_optimized_production_areas
@@ -212,6 +226,7 @@ OUTPUT_DPI = 300
 STREAM_COLOR = "#3B82C4"
 BOUNDARY_COLOR = "#1A1A1A"
 PRODUCTION_ZONE_COLOR = "#4C9A2A"
+PRODUCTION_ZONE_CONTOUR_LINEWIDTH = 0.7
 WATER_ZONE_COLOR = "#1F6FB2"
 ROAD_CORRIDOR_COLOR = "#B5651D"
 STRUCTURE_SITE_COLOR = "#D64545"
@@ -228,6 +243,34 @@ def _reproject_geometry_to_mercator(geometry_wgs84: dict):
     shapely geometry, ready to draw directly on the map axes."""
     geometry_3857 = transform_geom(WGS84, WEB_MERCATOR, geometry_wgs84)
     return shape(geometry_3857)
+
+
+def _reproject_utm_geometry_to_mercator(geometry_utm, source_crs: str):
+    """geometry_utm is a shapely geometry already in `source_crs` (a
+    DEM's own UTM zone, e.g. contour_lines.py's lines_utm clipped against
+    a production zone's own polygon_utm -- both already share that same
+    CRS, so no WGS84 round-trip is needed first) -- reprojects directly
+    to Web Mercator (one hop) and returns it as a shapely geometry, ready
+    to draw."""
+    geometry_3857 = transform_geom(source_crs, WEB_MERCATOR, mapping(geometry_utm))
+    return shape(geometry_3857)
+
+
+def _iter_line_parts(geometry):
+    """Yields real LineString parts out of a LineString/MultiLineString/
+    GeometryCollection -- shapely's intersection() of a (Multi)LineString
+    against a (Multi)Polygon can legitimately come back as any of those,
+    or mix in degenerate Point touches where a line only grazes the
+    polygon's boundary; only real line segments are worth drawing."""
+    if geometry.is_empty:
+        return
+    if geometry.geom_type == "LineString":
+        yield geometry
+    elif geometry.geom_type == "MultiLineString":
+        yield from geometry.geoms
+    elif geometry.geom_type == "GeometryCollection":
+        for part in geometry.geoms:
+            yield from _iter_line_parts(part)
 
 
 def _boundary_polygon_mercator(boundary_coordinates: list[tuple[float, float]]) -> Polygon:
@@ -299,6 +342,14 @@ def fetch_layout_layers(boundary_coordinates: list[tuple[float, float]], dem: Op
     each, for zero fetch-count benefit (both paths still call the same
     identify_*() exactly once). Left as GeoJSON for now; worth
     reconsidering only if a future caller needs the raw UTM geometry too.
+
+    contour_lines is contour_lines.compute_contour_lines()'s own output --
+    GLOBAL elevation contour lines over the DEM's full extent, computed
+    ONCE here and shared across every production zone at render time
+    (each zone clips its own segments out of this same list via real
+    shapely intersection against its own polygon_utm -- see
+    render_layout_map()'s own docstring), rather than recomputing contour
+    lines per zone.
     """
     if dem is None:
         dem = get_dem_for_boundary(boundary_coordinates)
@@ -308,6 +359,7 @@ def fetch_layout_layers(boundary_coordinates: list[tuple[float, float]], dem: Op
     road_corridor = fetch_and_select_optimal_road_corridor(boundary_coordinates, dem=dem)
     structure_site = fetch_and_select_optimal_structure_site(boundary_coordinates, dem=dem)
     water_features = get_water_features_for_boundary(boundary_coordinates)
+    contour_lines = compute_contour_lines(dem)
 
     return {
         "dem": dem,
@@ -316,6 +368,7 @@ def fetch_layout_layers(boundary_coordinates: list[tuple[float, float]], dem: Op
         "road_corridor": road_corridor,
         "structure_site": structure_site,
         "water_features": water_features,
+        "contour_lines": contour_lines,
     }
 
 
@@ -338,11 +391,13 @@ def render_layout_map(
     if layers is None:
         layers = fetch_layout_layers(boundary_coordinates, dem=dem)
 
+    dem = layers["dem"]
     production_result = layers["production_result"]
     water_zone = layers["water_zone"]
     road_corridor = layers["road_corridor"]
     structure_site = layers["structure_site"]
     water_features = layers["water_features"]
+    contour_lines = layers["contour_lines"]
 
     boundary_polygon = _boundary_polygon_mercator(boundary_coordinates)
     minx, miny, maxx, maxy = boundary_polygon.bounds
@@ -414,25 +469,30 @@ def render_layout_map(
     zone_stats = _production_zone_legend_stats(production_result) if production_result else []
     multiple_zones = len(scored_patches) > 1
     for patch, (_, stat_line) in zip(scored_patches, zone_stats):
-        # display_geometry_wgs84 (production_area.py's locally smoothed
-        # real cell-union footprint, NOT a hull), NOT geometry_wgs84 (the
-        # unsmoothed real footprint) -- rendering-only convenience;
-        # zones_geojson and every other consumer of this patch still
-        # reason over the real footprint via geometry_wgs84/polygon_utm,
-        # untouched here.
-        geom = _reproject_geometry_to_mercator(patch["display_geometry_wgs84"])
-        polygons = geom.geoms if geom.geom_type == "MultiPolygon" else [geom]
-        for polygon in polygons:
-            plot_polygon(
-                polygon,
-                ax=ax,
-                add_points=False,
-                facecolor=PRODUCTION_ZONE_COLOR,
-                edgecolor=PRODUCTION_ZONE_COLOR,
-                alpha=0.35,
-                linewidth=1.5,
-                zorder=40,
-            )
+        # geometry_wgs84 -- the real, grid-bug-fixed cell-union footprint
+        # (see production_area.py's own module docstring) -- used here
+        # only for label placement; no fill, no boundary stroke drawn for
+        # production zones (see this module's own docstring). Real zone
+        # geometry is what clips the contour lines below, too
+        # (patch["polygon_utm"], same CRS as contour_lines' lines_utm --
+        # no reprojection needed before intersecting).
+        geom = _reproject_geometry_to_mercator(patch["geometry_wgs84"])
+
+        for contour in contour_lines:
+            clipped = contour["lines_utm"].intersection(patch["polygon_utm"])
+            if clipped.is_empty:
+                continue
+            for line in _iter_line_parts(_reproject_utm_geometry_to_mercator(clipped, dem["crs"])):
+                plot_line(
+                    line,
+                    ax=ax,
+                    add_points=False,
+                    color=PRODUCTION_ZONE_COLOR,
+                    linewidth=PRODUCTION_ZONE_CONTOUR_LINEWIDTH,
+                    alpha=0.85,
+                    zorder=40,
+                )
+
         label = f"Production Zone {patch['rank']}" if multiple_zones else "Production Zone"
         _draw_numbered_marker(ax, geom.representative_point(), marker_number)
         legend_entries.append(f"{marker_number} — {label}, {stat_line}")

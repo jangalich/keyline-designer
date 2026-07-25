@@ -770,10 +770,8 @@ def identify_tree_zone_candidates(
     # targets small farms only: one well-suited water zone / road corridor
     # is sufficient, so only that one candidate's own geometry counts as
     # "claimed" for each. Each optimized patch's own 'polygon_utm' is the
-    # real, accurate cell-union footprint (NOT 'display_polygon_utm', a
-    # convex hull kept only for rendering smoothness -- see
-    # production_area.py's own cluster_and_gate() docstring for why the
-    # hull over-reports true area). ---
+    # real, accurate cell-union footprint -- see production_area.py's own
+    # cluster_and_gate() docstring. ---
     production_result = identify_optimized_production_areas(boundary_coordinates, dem=dem)
     production_polygons_utm = [p["polygon_utm"] for p in production_result["scored_patches"]]
 

@@ -8,6 +8,7 @@ rasterio>=1.4.0
 shapely>=2.1.0
 numpy>=2.0.0
 matplotlib>=3.9.0
+contourpy>=1.2.0
 contextily>=1.6.0
 xyzservices>=2023.10.0
 mercantile>=1.2.1
