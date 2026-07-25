@@ -3,8 +3,11 @@ test_render_layout_map.py
 
 Offline (no-network) checks for render_layout_map.py's production-zone
 drawing, specifically the switch from geometry_wgs84 (the real cell-union
-footprint) to display_geometry_wgs84 (production_area.py's smoothed,
-hole-punched convex hull -- see cluster_and_gate()'s own docstring).
+footprint) to display_geometry_wgs84 (production_area.py's LOCALLY
+SMOOTHED real cell-union footprint -- small-radius morphological opening
+then closing of the cluster's own cell mask, NOT a convex hull -- see
+cluster_and_gate()'s own docstring for why the earlier hull-minus-
+hole_footprints design was replaced).
 
 Builds real patch dicts via production_area.cluster_and_gate() +
 production_suitability.score_production_areas() against small synthetic
@@ -222,35 +225,55 @@ print(
 from production_area import production_areas_to_geojson
 from production_suitability import production_suitability_to_geojson
 
-# The ring fixture is the most telling case here: display_geometry_wgs84
-# (hull, hole punched out) and geometry_wgs84 (real footprint) are
-# GENUINELY different geometries for it (different point sets), so this
-# also proves the geojson wasn't accidentally switched to the display
-# field, not just that no crash occurred.
-ring_geojson = production_suitability_to_geojson([dict(ring_patch)])
-ring_feature_geometry = ring_geojson["features"][0]["geometry"]
-assert ring_feature_geometry == ring_patch["geometry_wgs84"], (
+# The ring fixture's own display geometry now happens to equal its real
+# footprint exactly (Part 3 is local morphological smoothing of the real
+# mask, not a hull -- a clean, noise-free shape like the ring's 5-cell-
+# wall donut has nothing for smoothing to change), so it's no longer a
+# case where geometry_wgs84 and display_geometry_wgs84 genuinely diverge.
+# A small blob with a couple of genuinely tiny (sub-smoothing-radius)
+# noise gaps IS such a case -- smoothing fills the gaps in the display
+# shape while the real footprint (geometry_wgs84) still excludes them
+# exactly -- so it's the fixture that makes this invariant test meaningful
+# rather than vacuously true.
+NOISY_SHAPE = (14, 14)
+noisy_dem = _dem(*NOISY_SHAPE)
+noisy_block = set(_rect_cells(1, 13, 1, 13))  # 12x12
+noisy_gap = {(6, 6)}  # 1 cell -- smaller than DISPLAY_SMOOTHING_RADIUS_METERS, smoothed away in display
+noisy_cells = list(noisy_block - noisy_gap)
+noisy_mask = _mask_from_cells(NOISY_SHAPE, noisy_cells)
+noisy_scored = _scored_patches_for(noisy_mask, noisy_dem)
+assert len(noisy_scored) == 1
+noisy_patch = noisy_scored[0]
+assert noisy_patch["display_geometry_wgs84"] != noisy_patch["geometry_wgs84"], (
+    "test sanity check: this fixture's tiny noise gap must genuinely differ between the real footprint "
+    "(still excludes it) and the smoothed display geometry (fills it in) -- otherwise the assertion below "
+    "wouldn't be a meaningful regression guard"
+)
+
+noisy_geojson = production_suitability_to_geojson([dict(noisy_patch)])
+noisy_feature_geometry = noisy_geojson["features"][0]["geometry"]
+assert noisy_feature_geometry == noisy_patch["geometry_wgs84"], (
     "production_suitability_to_geojson() must embed geometry_wgs84 (the real footprint) exactly -- "
     "byte-for-byte -- unaffected by the new display_geometry_wgs84 field"
 )
-assert ring_feature_geometry != ring_patch["display_geometry_wgs84"], (
-    "test sanity check: for a cluster with a real hole, geometry_wgs84 and display_geometry_wgs84 must "
-    "actually differ, otherwise the assertion above wouldn't be a meaningful regression guard"
+assert noisy_feature_geometry != noisy_patch["display_geometry_wgs84"], (
+    "production_suitability_to_geojson() must NOT have been switched to the smoothed display geometry"
 )
 
-raw_ring_patches = cluster_and_gate(
-    ring_mask, ring_dem, _full_extent_boundary(ring_dem),
-    compute_step1_eligible_cells(ring_dem, _full_extent_boundary(ring_dem), disqualifying_soil_union_utm=None),
+raw_noisy_patches = cluster_and_gate(
+    noisy_mask, noisy_dem, _full_extent_boundary(noisy_dem),
+    compute_step1_eligible_cells(noisy_dem, _full_extent_boundary(noisy_dem), disqualifying_soil_union_utm=None),
 )
-raw_geojson = production_areas_to_geojson(raw_ring_patches)
-assert raw_geojson["features"][0]["geometry"] == raw_ring_patches[0]["geometry_wgs84"], (
+raw_geojson = production_areas_to_geojson(raw_noisy_patches)
+assert raw_geojson["features"][0]["geometry"] == raw_noisy_patches[0]["geometry_wgs84"], (
     "production_areas_to_geojson() must also embed geometry_wgs84 exactly, unaffected by display_geometry_wgs84"
 )
 
 print(
     "zones_geojson invariant: both production_areas_to_geojson() and production_suitability_to_geojson() "
     "still embed geometry_wgs84 (the real cell-union footprint) exactly, byte-for-byte -- unaffected by the "
-    "new rendering-only display_geometry_wgs84 field, and genuinely different from it where a hole exists."
+    "new rendering-only display_geometry_wgs84 field, and genuinely different from it where local smoothing "
+    "actually changed something."
 )
 
 

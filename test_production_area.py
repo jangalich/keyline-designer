@@ -24,7 +24,7 @@ suitability() already established elsewhere in this pipeline.
 from unittest.mock import patch as mock_patch
 
 import numpy as np
-from shapely.geometry import MultiPoint, Polygon, box
+from shapely.geometry import Point, Polygon, box
 from shapely.ops import unary_union
 
 import production_area as pa
@@ -627,7 +627,10 @@ print(
 )
 
 
-# --- Ring/donut (true hole): must NOT split, hole_footprints populated, display_polygon_utm has an interior ring ---
+# --- Ring/donut (true hole): must NOT split, hole_footprints populated, display_polygon_utm has an interior
+#     ring matching it (the hole's own 5-cell wall margin is well clear of DISPLAY_SMOOTHING_RADIUS_METERS'
+#     own small cell radius, so local smoothing leaves this clean shape untouched -- same result the old
+#     hull-minus-hole_footprints design produced for this exact case, just via a different mechanism now) ---
 
 RING_SHAPE = (18, 18)
 ring_dem = _waist_dem(*RING_SHAPE)
@@ -671,7 +674,10 @@ print(
 )
 
 
-# --- Solid square (neither waist nor hole): passes through completely unchanged ---
+# --- Solid square (neither waist nor hole nor noise): passes through completely unchanged. Local smoothing
+#     (opening then closing) is a no-op on a perfectly clean rectangle -- no protrusions to shave, no gaps
+#     to fill -- so display_polygon_utm now equals the real cell-union footprint exactly (NOT a hull; the
+#     hull-based design this pass supersedes is gone). ---
 
 SQUARE_SHAPE = (12, 12)
 square_dem = _waist_dem(*SQUARE_SHAPE)
@@ -684,15 +690,16 @@ assert len(square_patches) == 1, f"a solid, roughly-square mask must not split, 
 square_patch = square_patches[0]
 assert len(square_patch["cells"]) == len(square_cells), "a normal field must pass through with every cell intact"
 assert square_patch["hole_footprints"] == [], "a solid mask with no enclosed gap must report hole_footprints=[]"
-plain_hull = MultiPoint([pa.pixel_center_xy(square_dem, r, c) for r, c in square_cells]).convex_hull
-plain_hull = plain_hull.intersection(_full_extent_boundary(square_dem))
-assert square_patch["display_polygon_utm"].symmetric_difference(plain_hull).area < 1e-6, (
-    "with no holes, display_polygon_utm must be exactly the plain convex hull, unchanged from before this feature"
+real_footprint = pa._cell_union_footprint(square_cells, square_dem).intersection(_full_extent_boundary(square_dem))
+assert square_patch["display_polygon_utm"].symmetric_difference(real_footprint).area < 1e-6, (
+    "with no noise to smooth, display_polygon_utm must exactly match the real cell-union footprint, "
+    "not a hull or any other approximation"
 )
-assert len(square_patch["display_polygon_utm"].interiors) == 0, "a plain hull must carry no interior rings"
+assert len(square_patch["display_polygon_utm"].interiors) == 0, "a clean solid mask must carry no interior rings"
 print(
-    "Idempotence: a solid, roughly-square mask with neither a waist nor a hole passes through completely "
-    "unchanged -- 1 cluster, hole_footprints=[], and a plain convex hull display_polygon_utm."
+    "Idempotence: a solid, roughly-square mask with neither a waist, a hole, nor any noise to smooth passes "
+    "through completely unchanged -- 1 cluster, hole_footprints=[], and display_polygon_utm exactly matching "
+    "the real cell-union footprint."
 )
 
 
@@ -745,6 +752,169 @@ assert len(lobe_a_patch["display_polygon_utm"].interiors) == 0, (
 print(
     f"Combined: a dumbbell with BOTH a waist and a separate hole in one lobe correctly splits into "
     f"{len(combined_patches)} clusters, with the hole preserved on the correct resulting sub-cluster only."
+)
+
+
+# =====================================================================
+# NEW Part 3 behavior: local morphological smoothing (opening then closing
+# of the cluster's own real cell mask) supersedes the old convex-hull-
+# minus-hole_footprints design. Part 2 (hole_footprints) is UNCHANGED --
+# these tests confirm display_polygon_utm now diverges from
+# hole_footprints in exactly the cases the old design got wrong.
+# =====================================================================
+
+display_radius_probe_dem = _waist_dem(18, 18)
+DISPLAY_RADIUS_CELLS = pa._display_smoothing_radius_cells(display_radius_probe_dem, pa.DISPLAY_SMOOTHING_RADIUS_METERS)
+assert DISPLAY_RADIUS_CELLS < pa._waist_erosion_radius_cells(display_radius_probe_dem, pa.MIN_ZONE_WAIST_METERS), (
+    "DISPLAY_SMOOTHING_RADIUS_METERS must convert to a strictly smaller cell radius than MIN_ZONE_WAIST_METERS "
+    "at this resolution -- it's meant to be cosmetic noise-erasure, nowhere near waist/hull scale"
+)
+
+
+def _cell_contained(display_geom, dem: dict, r: int, c: int) -> bool:
+    return display_geom.contains(Point(pa.pixel_center_xy(dem, r, c)))
+
+
+# --- A. Solid blob with a few genuinely tiny (1-2 cell) noise gaps, smaller than the smoothing radius:
+#     smoothed away in display_polygon_utm -- but hole_footprints (Part 2, unchanged) still reports them,
+#     since they ARE genuinely, strictly enclosed. ---
+
+NOISE_SHAPE = (18, 18)
+noise_dem = _waist_dem(*NOISE_SHAPE)
+noise_step1 = _step1_for(noise_dem)
+
+noise_block = set(_rect_cells(1, 17, 1, 17))  # 16x16, well clear of the DEM edge
+noise_gap_1cell = {(8, 8)}
+noise_gap_2cell = {(8, 12), (8, 13)}
+noise_cells = list(noise_block - noise_gap_1cell - noise_gap_2cell)
+noise_mask = _mask_from_cells(NOISE_SHAPE, noise_cells)
+
+noise_patches = _gate(noise_mask, noise_dem, noise_step1)
+assert len(noise_patches) == 1, f"tiny noise gaps must not trigger a waist split, got {len(noise_patches)}"
+noise_patch = noise_patches[0]
+assert len(noise_patch["hole_footprints"]) == 2, (
+    f"Part 2 is unchanged -- both tiny gaps ARE strictly enclosed and must still be reported as real holes "
+    f"(narrative metadata), got {len(noise_patch['hole_footprints'])}"
+)
+noise_display = noise_patch["display_polygon_utm"]
+assert len(noise_display.interiors) == 0, (
+    f"display_polygon_utm must smooth away noise gaps smaller than DISPLAY_SMOOTHING_RADIUS_METERS -- "
+    f"got {len(noise_display.interiors)} interior ring(s)"
+)
+for r, c in noise_gap_1cell | noise_gap_2cell:
+    assert _cell_contained(noise_display, noise_dem, r, c), (
+        f"noise gap cell ({r},{c}) must be smoothed INTO display_polygon_utm (filled), not left as a visible gap"
+    )
+print(
+    "Local smoothing: a solid blob with a few genuinely tiny (1-2 cell) noise gaps has them completely "
+    "smoothed away in display_polygon_utm (clean shape, 0 interior rings), while hole_footprints still "
+    "reports both as real (if narratively minor) enclosed holes -- Part 2 is unaffected by this change."
+)
+
+
+# --- B/C. A sizeable excluded patch (bigger than the smoothing radius), once with a thin leaky channel
+#     back to the cluster's own edge (fails Part 2's strict enclosure test) and once fully sealed (passes
+#     it) -- in BOTH cases the patch must show up as real excluded ground in display_polygon_utm, unlike
+#     the old hull-minus-hole_footprints design, which would have swallowed the leaky case whole (hull,
+#     no hole_footprints entry to punch out) and only shown the sealed one. ---
+
+LEAK_SHAPE = (22, 22)
+block_20 = set(_rect_cells(1, 21, 1, 21))       # 20x20, own bounding box == its own cell extent
+sizeable_patch = set(_rect_cells(9, 13, 9, 13))  # 4x4 -- much bigger than DISPLAY_RADIUS_CELLS
+leak_channel = {(10, c) for c in range(1, 9)}    # 1-cell-wide channel from the block's own left edge (col 1)
+# into the patch (col 9) -- a real path to the outside that Part 2's
+# strict flood-fill sees and follows, but it doesn't come close to
+# bisecting the block (plenty of solid ground above/below row 10), so it
+# must not trip Part 1's waist detection either.
+
+sealed_dem = _waist_dem(*LEAK_SHAPE)
+sealed_step1 = _step1_for(sealed_dem)
+sealed_cells = list(block_20 - sizeable_patch)
+sealed_mask = _mask_from_cells(LEAK_SHAPE, sealed_cells)
+sealed_patch = _gate(sealed_mask, sealed_dem, sealed_step1)[0]
+
+leaky_dem = _waist_dem(*LEAK_SHAPE)
+leaky_step1 = _step1_for(leaky_dem)
+leaky_cells = list(block_20 - sizeable_patch - leak_channel)
+leaky_mask = _mask_from_cells(LEAK_SHAPE, leaky_cells)
+leaky_patches = _gate(leaky_mask, leaky_dem, leaky_step1)
+assert len(leaky_patches) == 1, (
+    f"the leak channel must not trip the waist split (plenty of solid ground on either side of it), "
+    f"got {len(leaky_patches)} cluster(s)"
+)
+leaky_patch = leaky_patches[0]
+
+assert len(sealed_patch["hole_footprints"]) == 1, "the fully-enclosed patch must pass Part 2's strict test"
+assert leaky_patch["hole_footprints"] == [], (
+    "the leaky-channel patch must FAIL Part 2's strict enclosure test -- it genuinely has a path to the "
+    "outside, so it is not a true hole"
+)
+
+sealed_patch_excluded = not any(_cell_contained(sealed_patch["display_polygon_utm"], sealed_dem, r, c) for r, c in sizeable_patch)
+leaky_patch_excluded = not any(_cell_contained(leaky_patch["display_polygon_utm"], leaky_dem, r, c) for r, c in sizeable_patch)
+assert sealed_patch_excluded, "the sealed patch must show up as real excluded ground in display_polygon_utm"
+assert leaky_patch_excluded, (
+    "the LEAKY patch -- despite failing Part 2's strict enclosure test -- must STILL show up as real "
+    "excluded ground in display_polygon_utm: this is exactly what the old hull-minus-hole_footprints "
+    "design got wrong (no hole_footprints entry to punch out of the hull, so it would have been silently "
+    "swallowed whole)"
+)
+print(
+    "Local smoothing: a sizeable excluded patch shows up as real excluded ground in display_polygon_utm "
+    "whether it's fully sealed (hole_footprints=1) or has a thin leaky channel to the cluster's own edge "
+    "(hole_footprints=0, fails the strict enclosure test) -- both cases correctly diverge from the old "
+    "hull-based design, which only preserved the sealed one."
+)
+
+
+# --- D. Several real excluded patches of varying size, with real slivers of eligible ground between them
+#     (closer to the messy real-world case) -- confirm the result reads as clusters of removed cells
+#     between slivers of kept cells: the big patches and the tiny noise speck are all correctly detected
+#     as enclosed (hole_footprints), but only the big ones survive smoothing into display_polygon_utm's
+#     interior rings, while the sliver of kept ground in between remains fully visible/included. ---
+
+MESSY_SHAPE = (24, 34)
+messy_dem = _waist_dem(*MESSY_SHAPE)
+messy_step1 = _step1_for(messy_dem)
+
+messy_block = set(_rect_cells(1, 23, 1, 33))         # 22x32
+messy_patch_1 = set(_rect_cells(5, 10, 5, 10))       # 5x5 -- big, survives smoothing
+messy_patch_2 = set(_rect_cells(5, 10, 20, 25))      # 5x5 -- big, survives smoothing
+messy_sliver = set(_rect_cells(1, 23, 14, 18))       # 4-cell-wide vertical sliver of KEPT ground, between the two patches
+messy_tiny_noise = {(15, 15)}                        # 1-cell speck elsewhere -- smoothed away
+
+messy_excluded = messy_patch_1 | messy_patch_2 | messy_tiny_noise
+messy_cells = list(messy_block - messy_excluded)
+messy_mask = _mask_from_cells(MESSY_SHAPE, messy_cells)
+
+messy_patches = _gate(messy_mask, messy_dem, messy_step1)
+assert len(messy_patches) == 1, f"this messy scattered-exclusion mask must not trip a waist split, got {len(messy_patches)}"
+messy_patch = messy_patches[0]
+
+assert len(messy_patch["hole_footprints"]) == 3, (
+    f"all three excluded regions (both real patches + the tiny speck) are genuinely, strictly enclosed by "
+    f"this solid block -- Part 2 must report all 3, got {len(messy_patch['hole_footprints'])}"
+)
+
+messy_display = messy_patch["display_polygon_utm"]
+patch_1_excluded = not any(_cell_contained(messy_display, messy_dem, r, c) for r, c in messy_patch_1)
+patch_2_excluded = not any(_cell_contained(messy_display, messy_dem, r, c) for r, c in messy_patch_2)
+tiny_noise_smoothed_away = all(_cell_contained(messy_display, messy_dem, r, c) for r, c in messy_tiny_noise)
+sliver_included = all(_cell_contained(messy_display, messy_dem, r, c) for r, c in messy_sliver)
+
+assert patch_1_excluded and patch_2_excluded, (
+    "both sizeable excluded patches must remain visible as real excluded ground in display_polygon_utm"
+)
+assert tiny_noise_smoothed_away, "the tiny 1-cell speck must be smoothed away, unlike the two real patches"
+assert sliver_included, (
+    "the 4-cell-wide sliver of kept ground between the two patches must remain fully included -- local "
+    "smoothing must not erase real, wider-than-the-radius kept ground along with the noise"
+)
+print(
+    "Local smoothing (messy case): with 2 real excluded patches, a tiny noise speck, and a real sliver of "
+    "kept ground between the patches, display_polygon_utm reads as real clusters of removed cells between "
+    "slivers of kept cells -- both patches stay excluded, the speck is smoothed away, and the sliver stays "
+    "fully included. Not one smooth blob, not one smooth hole."
 )
 
 

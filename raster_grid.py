@@ -96,6 +96,29 @@ def binary_erode(mask: np.ndarray, radius_cells: int) -> np.ndarray:
     return eroded
 
 
+def binary_dilate(mask: np.ndarray, radius_cells: int) -> np.ndarray:
+    """
+    8-connected (Chebyshev/square) binary dilation by radius_cells -- the
+    inverse of binary_erode(), same D8 adjacency, same plain-numpy
+    shift-and-OR construction (radius_cells repeated single-ring (3x3)
+    dilations, equivalent to one direct (2r+1)-square structuring
+    element), no scipy dependency, for the same reasons documented on
+    binary_erode().
+
+    radius_cells <= 0 returns a copy of `mask` unchanged (no dilation).
+    """
+    if radius_cells <= 0:
+        return mask.copy()
+
+    dilated = mask.copy()
+    for _ in range(radius_cells):
+        grown = dilated.copy()
+        for dr, dc in D8_OFFSETS:
+            grown |= _shift(dilated, dr, dc)
+        dilated = grown
+    return dilated
+
+
 def connected_components(mask: np.ndarray) -> tuple[np.ndarray, int]:
     """
     8-connected component labeling of a 2D boolean grid, via iterative
