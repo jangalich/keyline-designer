@@ -13,19 +13,31 @@ together). It owns STEP 1 and STEP 3 of that pipeline, which every entry
 point in the other two files reuses rather than recomputing:
 
     STEP 1 -- compute_step1_eligible_cells(): for every on-parcel DEM
-        cell, TWO hard, cell-level gates -- slope (MAX_PRODUCTION_SLOPE_PCT)
-        and hydric/disqualifying soil (soil_data.hydric_disqualifying_mukeys(),
-        tested against each cell's own CENTER POINT, not a continuous-
-        geometry difference) -- decide eligibility outright. Every eligible
-        cell is then scored on slope+aspect only (size/compactness isn't a
-        per-cell property; see production_suitability.py's STEP 4 for that).
-        Computed ONCE per pipeline run and reused by every step after it --
-        this is what replaces the old architecture's three independent mask
-        rebuilds (identify_production_areas(), production_suitability.py's
+        cell, hard, cell-level gates decide eligibility outright: slope
+        (MAX_PRODUCTION_SLOPE_PCT), hydric/disqualifying soil (soil_data.
+        hydric_disqualifying_mukeys(), tested against each cell's own
+        CENTER POINT, not a continuous-geometry difference), and woody-
+        vegetation root zone (canopy_height_data.tree_root_zone_mask() --
+        USGS 3DEP lidar height-above-ground thresholded and DILATED as a
+        raster mask, same reasoning as below, never vectorized). "On-
+        parcel" itself is tested against the real parcel boundary shrunk
+        inward by PRODUCTION_BOUNDARY_SETBACK_METERS, not the raw
+        boundary -- a plain shapely negative buffer, since that's a single
+        clean polygon operation on already-known parcel geometry, not
+        raster-derived. Every eligible cell is then scored on slope+aspect
+        only (size/compactness isn't a per-cell property; see production_
+        suitability.py's STEP 4 for that). Computed ONCE per pipeline run
+        and reused by every step after it -- this is what replaces the old
+        architecture's three independent mask rebuilds
+        (identify_production_areas(), production_suitability.py's
         cell-recovery, production_area_ceiling.py's pool-building) and the
-        old continuous-geometry soil-carving pass entirely. A cell is either
-        in the eligible mask or it isn't -- no polygon differencing, so no
-        spurious slivers can be created by construction.
+        old continuous-geometry soil-carving pass entirely. A cell is
+        either in the eligible mask or it isn't -- no polygon differencing,
+        so no spurious slivers can be created by construction. The same
+        logic applies to the tree-root-zone gate: threshold-then-dilate
+        stays a raster operation on the cell mask throughout, precisely to
+        avoid reintroducing that same sliver-fragmentation failure mode via
+        a vectorize-then-buffer/difference shortcut.
 
     STEP 3 -- cluster_and_gate(): 8-connected-component labeling
         (raster_grid.connected_components()) of WHATEVER cell mask a caller
@@ -117,6 +129,7 @@ from shapely.geometry import Point, Polygon, box, mapping, shape
 from shapely.ops import unary_union
 from shapely.prepared import prep
 
+from canopy_height_data import get_canopy_height_for_boundary, tree_root_zone_mask
 from feature_schema import CONFIDENCE_LOW, make_feature, make_feature_collection
 from production_suitability import ASPECT_FACTOR_WEIGHT, SLOPE_FACTOR_WEIGHT
 from raster_grid import (
@@ -161,6 +174,24 @@ MIN_PRODUCTION_AREA_ACRES = 0.5
 # properties, not a derived or measured figure. CONFIGURABLE.
 MIN_ZONE_WAIST_METERS = 12.0  # ~40 ft
 
+METERS_PER_FOOT = 0.3048
+
+# Cells within this distance of the real parcel boundary are excluded from
+# eligibility outright -- production ground shouldn't be planned flush
+# against a property line. 10ft, CONFIGURABLE, unvalidated against a real
+# property yet (same caveat every other threshold in this pipeline
+# carries). Applied as a single clean shapely negative buffer on the
+# boundary polygon itself, not a raster operation -- the parcel boundary
+# is already known, clean polygon geometry, so unlike the tree-root-zone
+# mask below there's no raster-fragmentation risk here to avoid. This
+# SHRINKS the polygon compute_step1_eligible_cells() tests each cell
+# CENTER against for its existing on-parcel filter (see that function's
+# docstring) -- it does not change boundary_polygon_utm itself, which
+# callers (cluster_and_gate()'s footprint clip,
+# production_area_ceiling.py's parcel-acreage ceiling math) still use as
+# the real, full parcel boundary.
+PRODUCTION_BOUNDARY_SETBACK_METERS = 10 * METERS_PER_FOOT  # ~3.05m
+
 # --- per-cell weighting (STEP 1's own scoring, used to order STEP 2's
 # worst-first ceiling trim) ---
 #
@@ -187,15 +218,33 @@ assert math.isclose(PER_CELL_SLOPE_WEIGHT + PER_CELL_ASPECT_WEIGHT, 1.0, abs_tol
 # pipeline's None-vs-"unavailable" conventions.
 _SOIL_CHECK_UNCHECKED = object()
 
+# Same convention as _SOIL_CHECK_UNCHECKED, for the tree-root-zone mask.
+# Unlike soil's disqualifying_soil_union_utm, a real "checked, found no
+# HAG coverage" outcome (canopy_height_data.get_canopy_height_for_
+# boundary() returning None) is NOT represented as a real value here --
+# there's no meaningful all-False-mask difference between "checked and
+# genuinely no trees" and "never checked", so callers collapse a no-
+# coverage fetch result to this same sentinel (see
+# _fetch_tree_root_zone_mask_utm()) rather than passing a real value.
+_CANOPY_CHECK_UNCHECKED = object()
+
 PRODUCTION_AREA_CONFIDENCE_NOTES = (
-    "This is a slope + hydric-soil heuristic (contiguous ground at or below "
-    f"{MAX_PRODUCTION_SLOPE_PCT}% grade, with hydric/wetland soil excluded "
-    "cell-by-cell before clustering -- see soil_data.hydric_disqualifying_"
-    "mukeys()), not a validated production-area determination. It doesn't "
-    "account for soil quality beyond that hard hydric exclusion, drainage, "
-    "existing land use, or the property owner's actual crop/grazing plans "
-    "— see soil_data.py and the Land Shape section of the full Scale of "
-    "Permanence report for those factors."
+    "This is a slope + hydric-soil + woody-vegetation heuristic (contiguous "
+    f"ground at or below {MAX_PRODUCTION_SLOPE_PCT}% grade, with hydric/"
+    "wetland soil excluded cell-by-cell before clustering -- see soil_data."
+    "hydric_disqualifying_mukeys() -- and tree-root-zone cells excluded "
+    f"cell-by-cell via USGS 3DEP lidar height-above-ground, see canopy_"
+    f"height_data.py), not a validated production-area determination. Cells "
+    f"within {PRODUCTION_BOUNDARY_SETBACK_METERS:.1f}m of the real parcel "
+    "boundary are also excluded (a fixed inward setback, not derived from "
+    "any of the above). If USGS 3DEP lidar HAG coverage was unavailable "
+    "for this property, the woody-vegetation exclusion could not be "
+    "verified and this candidate's geometry may still include tree-root-"
+    "zone ground that wasn't caught -- see canopy_height_data.py. It "
+    "doesn't account for soil quality beyond the hard hydric exclusion, "
+    "drainage, existing land use, or the property owner's actual crop/"
+    "grazing plans — see soil_data.py and the Land Shape section of the "
+    "full Scale of Permanence report for those factors."
 )
 
 
@@ -292,6 +341,24 @@ def _fetch_disqualifying_soil_union(wkt_polygon: str, dem: dict):
     return unary_union(pieces) if pieces else None
 
 
+def _fetch_tree_root_zone_mask_utm(boundary_coordinates: list, dem: dict):
+    """
+    Fetches USGS 3DEP lidar HAG coverage for this boundary and returns the
+    dilated tree-root-zone cell mask (canopy_height_data.tree_root_zone_
+    mask()'s own output -- already on dem's own grid, so it can be used
+    directly against compute_step1_eligible_cells()'s cell indices with no
+    further alignment work). Returns None if no HAG coverage exists for
+    this boundary -- a genuine no-data outcome (see canopy_height_data.py's
+    own docstring), not an error; the caller (identify_production_areas())
+    collapses that to _CANOPY_CHECK_UNCHECKED, same fetch-then-let-caller-
+    degrade shape as _fetch_disqualifying_soil_union() above.
+    """
+    canopy = get_canopy_height_for_boundary(boundary_coordinates, dem)
+    if canopy is None:
+        return None
+    return tree_root_zone_mask(canopy["array"], canopy["resolution_meters"])
+
+
 def _cell_union_footprint(cells: list[tuple[int, int]], dem: dict):
     """
     The REAL footprint of a set of DEM cells: the union of each cell's own
@@ -346,6 +413,8 @@ def compute_step1_eligible_cells(
     boundary_polygon_utm: Polygon,
     disqualifying_soil_union_utm=_SOIL_CHECK_UNCHECKED,
     max_slope_pct: float = MAX_PRODUCTION_SLOPE_PCT,
+    tree_root_zone_mask_utm=_CANOPY_CHECK_UNCHECKED,
+    boundary_setback_meters: float = PRODUCTION_BOUNDARY_SETBACK_METERS,
 ) -> dict:
     """
     STEP 1 of the consolidated production-zone pipeline -- computed ONCE
@@ -361,12 +430,32 @@ def compute_step1_eligible_cells(
     same convention as every other optional network layer in this
     pipeline).
 
+    tree_root_zone_mask_utm: a pre-fetched boolean np.ndarray the same
+    shape as dem['array'] (canopy_height_data.tree_root_zone_mask()'s own
+    output -- already dilated, already cell-aligned to this exact DEM
+    grid) marking woody-vegetation root-zone cells, or the default
+    sentinel meaning "not checked at all" (canopy_data_available will be
+    False and every cell that clears the other gates is treated as
+    eligible, same graceful degradation as the soil case above). Unlike
+    disqualifying_soil_union_utm, there is no real-None state here -- a
+    boundary with NO USGS 3DEP lidar HAG coverage can't be distinguished
+    from "genuinely no trees" by an all-False mask, so callers collapse
+    that outcome to the sentinel too (see production_area.
+    _fetch_tree_root_zone_mask_utm()).
+
+    boundary_setback_meters: shrinks (via a plain negative buffer) the
+    polygon used ONLY for this function's own on-parcel cell-center test
+    below -- boundary_polygon_utm itself is untouched and still what
+    cluster_and_gate()'s footprint clip and any caller's own parcel-
+    acreage math use as the real, full parcel boundary.
+
     Returns:
         {
-            'eligible_mask': np.ndarray[bool],       # slope- AND soil-eligible, on-parcel
-            'slope_only_mask': np.ndarray[bool],     # slope-eligible + on-parcel, BEFORE
-                                                       # the hydric gate -- this is the
-                                                       # connectivity source used for
+            'eligible_mask': np.ndarray[bool],       # slope-, soil-, canopy-eligible, on-parcel
+                                                       # (post-setback)
+            'slope_only_mask': np.ndarray[bool],     # slope-eligible + on-parcel (post-setback),
+                                                       # BEFORE the hydric/canopy gates -- this is
+                                                       # the connectivity source used for
                                                        # source_patch_id/soil_carved
                                                        # bookkeeping, not a second scoring pass
             'slope_source_labels': np.ndarray[int],  # 8-connected-component labels of
@@ -383,7 +472,9 @@ def compute_step1_eligible_cells(
                                                                # slope-only source region --
                                                                # bookkeeping only, not per-cell
             'soil_carved_pct_by_cell': np.ndarray[float],
-            'soil_data_available': bool,   # whether the hydric check actually ran
+            'soil_data_available': bool,     # whether the hydric check actually ran
+            'canopy_data_available': bool,   # whether the woody-vegetation check actually ran
+            'tree_root_zone_hit': np.ndarray[bool],  # cells excluded by the canopy gate specifically
         }
     """
     array = dem["array"]
@@ -395,7 +486,12 @@ def compute_step1_eligible_cells(
 
     slope_ok = (~np.isnan(slope_pct)) & (slope_pct <= max_slope_pct)
 
-    boundary_prepared = prep(boundary_polygon_utm)
+    on_parcel_boundary_utm = (
+        boundary_polygon_utm.buffer(-boundary_setback_meters)
+        if boundary_setback_meters > 0
+        else boundary_polygon_utm
+    )
+    boundary_prepared = prep(on_parcel_boundary_utm)
     slope_only_mask = np.zeros((rows, cols), dtype=bool)
     for r, c in np.argwhere(slope_ok):
         r, c = int(r), int(c)
@@ -413,7 +509,12 @@ def compute_step1_eligible_cells(
             if soil_prepared.contains(Point(pixel_center_xy(dem, r, c))):
                 hydric_hit[r, c] = True
 
-    eligible_mask = slope_only_mask & (~hydric_hit)
+    canopy_data_available = tree_root_zone_mask_utm is not _CANOPY_CHECK_UNCHECKED
+    tree_root_zone_hit = np.zeros((rows, cols), dtype=bool)
+    if canopy_data_available:
+        tree_root_zone_hit = slope_only_mask & tree_root_zone_mask_utm
+
+    eligible_mask = slope_only_mask & (~hydric_hit) & (~tree_root_zone_hit)
 
     per_cell_slope_factor = np.full((rows, cols), np.nan, dtype=np.float32)
     per_cell_aspect_factor = np.full((rows, cols), np.nan, dtype=np.float32)
@@ -456,6 +557,8 @@ def compute_step1_eligible_cells(
         "soil_carved_acres_by_cell": soil_carved_acres_by_cell,
         "soil_carved_pct_by_cell": soil_carved_pct_by_cell,
         "soil_data_available": soil_data_available,
+        "canopy_data_available": canopy_data_available,
+        "tree_root_zone_hit": tree_root_zone_hit,
     }
 
 
@@ -773,6 +876,7 @@ def identify_production_areas(
     max_slope_pct: float = MAX_PRODUCTION_SLOPE_PCT,
     min_area_acres: float = MIN_PRODUCTION_AREA_ACRES,
     check_soil: bool = True,
+    check_canopy: bool = True,
 ) -> list[dict]:
     """
     Returns one entry per candidate production-area patch, clipped to the
@@ -800,6 +904,19 @@ def identify_production_areas(
     solar_suitability.py) that already call this exact function/signature
     get STEP 1's hydric exclusion automatically, with no changes needed on
     their end.
+
+    check_canopy works the same way, for the woody-vegetation gate: when
+    True (the default), this fetches USGS 3DEP lidar HAG coverage for the
+    real parcel boundary ONCE (canopy_height_data.get_canopy_height_for_
+    boundary()) and feeds the dilated tree-root-zone mask it derives into
+    STEP 1's cell-level canopy gate; both "no HAG coverage for this
+    boundary" (canopy_height_data.py's own genuine no-data outcome) and
+    any fetch failure degrade gracefully to canopy_data_available=False,
+    not a crash -- existing callers get the same automatic exclusion, with
+    no changes needed on their end, exactly as check_soil already works.
+    The fixed boundary-setback exclusion (PRODUCTION_BOUNDARY_SETBACK_
+    METERS) always applies regardless of either flag -- it's plain polygon
+    geometry on the known parcel boundary, not a network-backed layer.
     """
     disqualifying_soil_union_utm = _SOIL_CHECK_UNCHECKED
     if check_soil:
@@ -811,7 +928,20 @@ def identify_production_areas(
         except Exception:
             disqualifying_soil_union_utm = _SOIL_CHECK_UNCHECKED
 
-    step1 = compute_step1_eligible_cells(dem, boundary_polygon_utm, disqualifying_soil_union_utm, max_slope_pct)
+    tree_root_zone_mask_utm = _CANOPY_CHECK_UNCHECKED
+    if check_canopy:
+        try:
+            xs, ys = boundary_polygon_utm.exterior.coords.xy
+            lons, lats = warp_transform(dem["crs"], "EPSG:4326", list(xs), list(ys))
+            boundary_coordinates = list(zip(lons, lats))
+            fetched_mask = _fetch_tree_root_zone_mask_utm(boundary_coordinates, dem)
+            tree_root_zone_mask_utm = fetched_mask if fetched_mask is not None else _CANOPY_CHECK_UNCHECKED
+        except Exception:
+            tree_root_zone_mask_utm = _CANOPY_CHECK_UNCHECKED
+
+    step1 = compute_step1_eligible_cells(
+        dem, boundary_polygon_utm, disqualifying_soil_union_utm, max_slope_pct, tree_root_zone_mask_utm
+    )
     return cluster_and_gate(step1["eligible_mask"], dem, boundary_polygon_utm, step1, min_area_acres)
 
 

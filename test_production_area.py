@@ -14,10 +14,11 @@ already reads).
 Runs against small synthetic DEMs built by hand, same "pure logic,
 independent of real data fetches" philosophy as the rest of this
 pipeline's tests. identify_production_areas() defaults to check_soil=True
-(it does its own disqualifying-soil fetch, gracefully degrading on
-failure) -- every test below that isn't specifically about the hydric
-gate passes check_soil=False to stay fully offline, same convention
-identify_optimized_production_areas()/identify_production_area_
+and check_canopy=True (it does its own disqualifying-soil and
+disqualifying-canopy fetches, each gracefully degrading on failure) --
+every test below that isn't specifically about the hydric or canopy gate
+passes check_soil=False, check_canopy=False to stay fully offline, same
+convention identify_optimized_production_areas()/identify_production_area_
 suitability() already established elsewhere in this pipeline.
 """
 
@@ -48,11 +49,28 @@ BASE_DEM = {
     "crs": "EPSG:32617",
 }
 
-# The DEM's own full extent (origin_y is the upper-left/max-y corner) —
-# used wherever a test isn't specifically about parcel clipping, so that
-# behavior matches the pre-clipping expectations exactly (100% on-parcel,
-# nothing to clip).
-FULL_EXTENT_BOUNDARY = box(500000.0, 4500000.0 - 30 * 5.0, 500000.0 + 30 * 5.0, 4500000.0)
+# How far past the DEM's own true extent these "full extent" boundary
+# fixtures below are padded outward -- compute_step1_eligible_cells() now
+# always shrinks the boundary it tests cell centers against by
+# PRODUCTION_BOUNDARY_SETBACK_METERS (see the dedicated boundary-setback
+# tests in test_canopy_height_data.py for THAT gate specifically). Padding
+# these shared fixtures by more than that setback keeps every test below
+# that isn't about the setback itself isolated from it, exactly as it was
+# isolated from parcel clipping before this gate existed -- the DEM's own
+# extent stays fully "on-parcel" after the shrink.
+_SETBACK_TEST_PADDING_METERS = pa.PRODUCTION_BOUNDARY_SETBACK_METERS + 1.0
+
+# The DEM's own full extent (origin_y is the upper-left/max-y corner),
+# padded outward by _SETBACK_TEST_PADDING_METERS — used wherever a test
+# isn't specifically about parcel clipping or the boundary setback, so
+# that behavior matches the pre-clipping expectations exactly (100%
+# on-parcel, nothing to clip).
+FULL_EXTENT_BOUNDARY = box(
+    500000.0 - _SETBACK_TEST_PADDING_METERS,
+    4500000.0 - 30 * 5.0 - _SETBACK_TEST_PADDING_METERS,
+    500000.0 + 30 * 5.0 + _SETBACK_TEST_PADDING_METERS,
+    4500000.0 + _SETBACK_TEST_PADDING_METERS,
+)
 
 
 def _dem(array: np.ndarray, origin_y: float = 4500000.0) -> dict:
@@ -63,7 +81,8 @@ def _full_extent_boundary(dem: dict) -> Polygon:
     rows, cols = dem["array"].shape
     px, py = dem["resolution_meters"]
     x0, y0 = dem["origin_x"], dem["origin_y"]
-    return box(x0, y0 - rows * py, x0 + cols * px, y0)
+    pad = _SETBACK_TEST_PADDING_METERS
+    return box(x0 - pad, y0 - rows * py - pad, x0 + cols * px + pad, y0 + pad)
 
 
 # --- compute_slope_percent: flat ground is ~0%, a real rise is high ---
@@ -187,7 +206,7 @@ for row in range(size):
     for col in range(size):
         array[row, col] = 100.0 if row < 15 else 100.0 + (row - 14) * 5.0
 
-patches = identify_production_areas(_dem(array), FULL_EXTENT_BOUNDARY, check_soil=False)
+patches = identify_production_areas(_dem(array), FULL_EXTENT_BOUNDARY, check_soil=False, check_canopy=False)
 assert len(patches) == 1, f"expected exactly 1 production-area patch, got {len(patches)}"
 patch = patches[0]
 assert patch["representative_elevation_m"] == 100.0, (
@@ -204,14 +223,14 @@ print(
 )
 
 huge_area_threshold = patch["area_acres"] * 100
-assert identify_production_areas(_dem(array), FULL_EXTENT_BOUNDARY, min_area_acres=huge_area_threshold, check_soil=False) == []
+assert identify_production_areas(_dem(array), FULL_EXTENT_BOUNDARY, min_area_acres=huge_area_threshold, check_soil=False, check_canopy=False) == []
 print("Raising min_area_acres above the found patch's size correctly drops it.")
 
 
 # --- regression: candidates are clipped to the real parcel boundary, not the buffered DEM extent ---
 
 west_half_boundary = box(500000.0, 4500000.0 - 30 * 5.0, 500075.0, 4500000.0)
-west_half_patches = identify_production_areas(_dem(array), west_half_boundary, check_soil=False)
+west_half_patches = identify_production_areas(_dem(array), west_half_boundary, check_soil=False, check_canopy=False)
 assert len(west_half_patches) == 1, (
     f"expected the bench to still qualify as a (smaller) candidate on the west-half boundary, "
     f"got {len(west_half_patches)} patch(es)"
@@ -238,7 +257,7 @@ print(
 )
 
 disjoint_boundary = box(600000.0, 4600000.0, 600100.0, 4600100.0)
-disjoint_patches = identify_production_areas(_dem(array), disjoint_boundary, check_soil=False)
+disjoint_patches = identify_production_areas(_dem(array), disjoint_boundary, check_soil=False, check_canopy=False)
 assert disjoint_patches == [], (
     f"a boundary that doesn't overlap the DEM at all should drop every candidate entirely, "
     f"got {len(disjoint_patches)} patch(es)"
@@ -246,7 +265,7 @@ assert disjoint_patches == [], (
 print("Parcel clipping: a boundary entirely off the DEM's extent correctly drops every candidate (0% on-parcel).")
 
 sliver_boundary = box(500000.0, 4500000.0 - 30 * 5.0, 500002.0, 4500000.0)  # 2m wide sliver of the bench
-sliver_patches = identify_production_areas(_dem(array), sliver_boundary, check_soil=False)
+sliver_patches = identify_production_areas(_dem(array), sliver_boundary, check_soil=False, check_canopy=False)
 assert sliver_patches == [], (
     f"a boundary clipping the bench down to a sliver below MIN_PRODUCTION_AREA_ACRES should drop it, "
     f"got {len(sliver_patches)} patch(es)"
@@ -417,8 +436,10 @@ print(
 )
 
 # Also confirm identify_production_areas() end-to-end (with the soil fetch mocked) reaches the same conclusion.
+# check_canopy=False keeps this offline -- this test is specifically about the hydric-gate integration
+# (soil fetch mocked above), not the canopy gate, which has its own dedicated tests/mocking elsewhere.
 with mock_patch.object(pa, "_fetch_disqualifying_soil_union", lambda wkt, dem: jagged_hydric_union):
-    end_to_end_patches = identify_production_areas(strip_dem, strip_boundary, check_soil=True)
+    end_to_end_patches = identify_production_areas(strip_dem, strip_boundary, check_soil=True, check_canopy=False)
 assert len(end_to_end_patches) == 1
 assert abs(end_to_end_patches[0]["area_acres"] - recovered_acres) < 0.01
 print("identify_production_areas() end-to-end (soil fetch mocked) reaches the identical, non-fragmented result.")
