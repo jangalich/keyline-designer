@@ -17,7 +17,7 @@ validation already has.
 import math
 
 import numpy as np
-from shapely.geometry import box
+from shapely.geometry import Point, box
 
 import production_area as pa
 from canopy_height_data import (
@@ -26,20 +26,16 @@ from canopy_height_data import (
     tree_root_zone_mask,
 )
 from production_area import compute_step1_eligible_cells
+from raster_grid import pixel_center_xy
 
 RESOLUTION = (5.0, 5.0)
 
-# TREE_ROOT_ZONE_BUFFER_METERS (~3.05m) converted to a whole-cell radius at
-# this resolution -- ceil(3.048 / 5.0) = 1, i.e. dilation reaches exactly
-# the 8-connected ring of immediate neighbors and no further. Computed
-# here the same way tree_root_zone_mask() computes it internally, so this
-# test's expectations track the real function instead of a hand-guessed
-# number.
+# TREE_ROOT_ZONE_BUFFER_METERS converted to a whole-cell radius at this
+# resolution, computed here the same way tree_root_zone_mask() computes it
+# internally -- so the adjacency checks below track the real function's
+# current buffer distance instead of a hand-guessed cell count that would
+# go stale the next time TREE_ROOT_ZONE_BUFFER_METERS is retuned.
 _BUFFER_RADIUS_CELLS = max(1, math.ceil(TREE_ROOT_ZONE_BUFFER_METERS / ((RESOLUTION[0] + RESOLUTION[1]) / 2.0)))
-assert _BUFFER_RADIUS_CELLS == 1, (
-    f"test below assumes a 1-cell buffer radius at 5m resolution -- got {_BUFFER_RADIUS_CELLS}, "
-    "update the adjacency assertions if TREE_ROOT_ZONE_BUFFER_METERS or RESOLUTION ever change"
-)
 
 
 # =====================================================================
@@ -53,51 +49,83 @@ assert not bare_mask.any(), "an entirely below-threshold HAG array must produce 
 print("tree_root_zone_mask(): a bare (below-threshold) HAG array excludes nothing.")
 
 # --- Tree cell: a single cell at/above the threshold reads as a tree cell itself ---
-single_tree = np.full((9, 9), 1.0, dtype=np.float32)
-single_tree[4, 4] = CANOPY_HEIGHT_THRESHOLD_METERS  # exactly at the threshold -- must count (>=)
+# Grid sized with enough margin around the center for _BUFFER_RADIUS_CELLS worth of
+# dilation plus one extra ring beyond it, so the "further out" checks below stay
+# meaningfully in-bounds regardless of how large TREE_ROOT_ZONE_BUFFER_METERS is tuned to.
+_CENTER_GRID_MARGIN = _BUFFER_RADIUS_CELLS + 2
+_CENTER_GRID_SIZE = 2 * _CENTER_GRID_MARGIN + 1
+_CENTER = _CENTER_GRID_MARGIN
+
+single_tree = np.full((_CENTER_GRID_SIZE, _CENTER_GRID_SIZE), 1.0, dtype=np.float32)
+single_tree[_CENTER, _CENTER] = CANOPY_HEIGHT_THRESHOLD_METERS  # exactly at the threshold -- must count (>=)
 single_tree_mask = tree_root_zone_mask(single_tree, RESOLUTION)
-assert single_tree_mask[4, 4], "a cell at exactly CANOPY_HEIGHT_THRESHOLD_METERS must count as a tree cell (>= not >)"
+assert single_tree_mask[_CENTER, _CENTER], "a cell at exactly CANOPY_HEIGHT_THRESHOLD_METERS must count as a tree cell (>= not >)"
 print("tree_root_zone_mask(): a cell at exactly the height threshold counts as a tree cell.")
 
-# --- Tree-adjacent buffered cell: dilation reaches exactly _BUFFER_RADIUS_CELLS out,
-#     including diagonals (8-connected) -- cells within that radius but NOT themselves
-#     tall must still be excluded (root zone); cells further out must not. ---
-assert single_tree_mask[4, 5] and single_tree_mask[4, 3], "orthogonal neighbors within the buffer radius must be excluded (root zone)"
-assert single_tree_mask[3, 3] and single_tree_mask[5, 5], "diagonal neighbors within the buffer radius must also be excluded (8-connected dilation)"
-assert not single_tree_mask[4, 6], "a cell 2 columns away (beyond the 1-cell buffer radius) must NOT be excluded"
-assert not single_tree_mask[2, 4], "a cell 2 rows away (beyond the 1-cell buffer radius) must NOT be excluded"
-assert not single_tree_mask[6, 6], "a cell 2 cells away diagonally (beyond the 1-cell buffer radius) must NOT be excluded"
+# --- Tree-adjacent buffered cell: dilation reaches exactly _BUFFER_RADIUS_CELLS out
+#     (Chebyshev/8-connected distance), including diagonals -- cells within that radius
+#     but NOT themselves tall must still be excluded (root zone); cells one cell further
+#     out must not. ---
+r = _BUFFER_RADIUS_CELLS
+assert single_tree_mask[_CENTER, _CENTER + r] and single_tree_mask[_CENTER, _CENTER - r], (
+    "orthogonal cells exactly at the buffer radius must be excluded (root zone)"
+)
+assert single_tree_mask[_CENTER + r, _CENTER + r] and single_tree_mask[_CENTER - r, _CENTER - r], (
+    "diagonal cells exactly at the buffer radius must also be excluded (8-connected/Chebyshev dilation)"
+)
+assert not single_tree_mask[_CENTER, _CENTER + r + 1], "a cell one column beyond the buffer radius must NOT be excluded"
+assert not single_tree_mask[_CENTER - r - 1, _CENTER], "a cell one row beyond the buffer radius must NOT be excluded"
+assert not single_tree_mask[_CENTER + r + 1, _CENTER + r + 1], "a cell one diagonal step beyond the buffer radius must NOT be excluded"
 print(
-    "tree_root_zone_mask(): dilation correctly buffers a single tree cell out to its own root-zone radius "
-    "(including diagonals) and no further."
+    f"tree_root_zone_mask(): dilation correctly buffers a single tree cell out to its own {r}-cell root-zone "
+    "radius (including diagonals) and no further."
 )
 
 # --- buffer_meters <= 0: threshold with no dilation at all ---
 no_buffer_mask = tree_root_zone_mask(single_tree, RESOLUTION, buffer_meters=0.0)
-assert no_buffer_mask[4, 4] and not no_buffer_mask[4, 5], "buffer_meters=0 must threshold without dilating"
+assert no_buffer_mask[_CENTER, _CENTER] and not no_buffer_mask[_CENTER, _CENTER + 1], "buffer_meters=0 must threshold without dilating"
 print("tree_root_zone_mask(): buffer_meters=0 thresholds without any dilation.")
 
 # --- Edge-of-grid case: a tree cell right at the grid's own edge must dilate only
-#     within bounds -- no wraparound, no crash, correct shape preserved. ---
-edge_array = np.full((5, 5), 1.0, dtype=np.float32)
+#     within bounds -- no wraparound, no crash, correct shape preserved. Grid sized to
+#     _BUFFER_RADIUS_CELLS plus margin so there's still a genuinely far, unaffected
+#     corner to check regardless of how large the buffer radius is tuned to. ---
+edge_grid_size = _BUFFER_RADIUS_CELLS + 3
+edge_array = np.full((edge_grid_size, edge_grid_size), 1.0, dtype=np.float32)
 edge_array[0, 0] = CANOPY_HEIGHT_THRESHOLD_METERS  # top-left corner cell
 edge_mask = tree_root_zone_mask(edge_array, RESOLUTION)
 assert edge_mask.shape == edge_array.shape
 assert edge_mask[0, 0] and edge_mask[0, 1] and edge_mask[1, 0] and edge_mask[1, 1], (
     "the corner tree cell and its in-bounds neighbors (right, down, diagonal) must all be excluded"
 )
-assert not edge_mask[4, 4] and not edge_mask[0, 4] and not edge_mask[4, 0], (
-    "dilation at a grid edge must never wrap around to the opposite edge"
+far_corner = edge_grid_size - 1
+far_chebyshev_distance = far_corner  # distance from (0, 0) to (far_corner, far_corner)
+assert far_chebyshev_distance > r, "test grid must be large enough that its far corner sits genuinely beyond the buffer radius"
+assert not edge_mask[far_corner, far_corner] and not edge_mask[0, far_corner] and not edge_mask[far_corner, 0], (
+    "dilation at a grid edge must never wrap around to the opposite edge, and must not reach a cell "
+    "genuinely beyond its own buffer radius"
 )
-assert int(edge_mask.sum()) == 4, f"a corner tree cell should only excuse its own 2x2 in-bounds corner, got {int(edge_mask.sum())} cells"
+expected_corner_cells = (r + 1) ** 2  # a (r+1)x(r+1) in-bounds block from the corner, per Chebyshev dilation
+assert int(edge_mask.sum()) == expected_corner_cells, (
+    f"a corner tree cell should excuse exactly its own in-bounds {r + 1}x{r + 1} corner block "
+    f"({expected_corner_cells} cells), got {int(edge_mask.sum())} cells"
+)
 print("tree_root_zone_mask(): a tree cell at the grid's own edge dilates only within bounds, no wraparound.")
 
 # --- NaN (no-HAG-data) cells never count as trees themselves ---
-nan_array = np.full((5, 5), np.nan, dtype=np.float32)
+# Grid sized so the tree cell's own buffer radius doesn't reach the far corner --
+# that corner needs to stay genuinely out of range to prove NaN alone isn't what
+# keeps it excluded.
+nan_grid_size = _BUFFER_RADIUS_CELLS + 5
+nan_array = np.full((nan_grid_size, nan_grid_size), np.nan, dtype=np.float32)
 nan_array[2, 2] = 10.0  # one real, tall tree cell amid otherwise no-data ground
 nan_mask = tree_root_zone_mask(nan_array, RESOLUTION)
 assert nan_mask[2, 2], "a real tree cell amid NaN neighbors must still be thresholded correctly"
-assert not nan_mask[0, 0], "a NaN (no-data) cell outside the real tree cell's buffer radius must not be excluded"
+far_nan_corner = nan_grid_size - 1
+assert far_nan_corner - 2 > _BUFFER_RADIUS_CELLS, "test grid must be large enough that its far corner sits genuinely beyond the buffer radius"
+assert not nan_mask[far_nan_corner, far_nan_corner], (
+    "a NaN (no-data) cell genuinely outside the real tree cell's buffer radius must not be excluded"
+)
 print("tree_root_zone_mask(): NaN (no-HAG-data) cells are never mistaken for trees by the threshold itself.")
 
 
@@ -124,50 +152,65 @@ print(
 )
 
 # --- Wired into compute_step1_eligible_cells()'s on-parcel filter: a boundary matching
-#     a DEM's exact extent (no padding) should now exclude the outer ring of cells whose
-#     centers fall within the setback of the true edge, on a flat (slope-eligible-
-#     everywhere) 10x10 grid at 5m resolution. Cell centers sit 2.5m from the nearest
-#     true edge (outer ring) or 7.5m+ (interior) -- setback_m (~3.05m) falls strictly
-#     between those two distances, so this is a clean, unambiguous ring-vs-interior split. ---
-assert 2.5 < setback_m < 7.5, (
-    f"this test's ring-vs-interior split assumes PRODUCTION_BOUNDARY_SETBACK_METERS falls strictly between "
-    f"2.5m and 7.5m at 5m resolution -- got {setback_m}m, update the grid size/resolution if this ever changes"
-)
+#     a DEM's exact extent (no padding) should now exclude every cell whose center falls
+#     within the setback of the true edge. The grid is sized dynamically off setback_m
+#     itself (comfortably larger than the setback, so a genuine, non-degenerate interior
+#     survives) and the expected result is computed directly from the same geometric
+#     definition compute_step1_eligible_cells() itself uses -- a cell's center tested
+#     against the boundary shrunk by setback_m -- rather than a hand-derived ring count,
+#     so this test stays correct no matter how PRODUCTION_BOUNDARY_SETBACK_METERS is
+#     retuned. ---
+px, py = RESOLUTION
+_setback_margin_cells = math.ceil(setback_m / ((px + py) / 2.0)) + 2
+setback_grid_size = 2 * _setback_margin_cells
+setback_extent = setback_grid_size * px  # px == py here, so this is exact in both dimensions
 
 setback_dem = {
-    "array": np.full((10, 10), 100.0, dtype=np.float32),  # perfectly flat -- slope excludes nothing
+    "array": np.full((setback_grid_size, setback_grid_size), 100.0, dtype=np.float32),  # flat -- slope excludes nothing
     "resolution_meters": RESOLUTION,
     "origin_x": 500000.0,
-    "origin_y": 4500050.0,
+    "origin_y": 4500000.0 + setback_extent,
     "crs": "EPSG:32617",
 }
-exact_extent_boundary = box(500000.0, 4500000.0, 500050.0, 4500050.0)  # exactly the DEM's own extent, unpadded
+exact_extent_boundary = box(500000.0, 4500000.0, 500000.0 + setback_extent, 4500000.0 + setback_extent)  # unpadded
 
 step1_setback = compute_step1_eligible_cells(setback_dem, exact_extent_boundary, disqualifying_soil_union_utm=None)
-on_parcel_count = int(step1_setback["slope_only_mask"].sum())
-assert on_parcel_count == 64, (
-    f"expected the interior 8x8 block (64 cells) to survive the {setback_m:.2f}m setback on a 10x10 grid at "
-    f"5m resolution (36 outer-ring cells excluded), got {on_parcel_count} surviving cells"
+
+shrunk_boundary = exact_extent_boundary.buffer(-setback_m)
+expected_slope_only_mask = np.zeros((setback_grid_size, setback_grid_size), dtype=bool)
+for r_idx in range(setback_grid_size):
+    for c_idx in range(setback_grid_size):
+        if shrunk_boundary.contains(Point(*pixel_center_xy(setback_dem, r_idx, c_idx))):
+            expected_slope_only_mask[r_idx, c_idx] = True
+
+on_parcel_count = int(expected_slope_only_mask.sum())
+assert 0 < on_parcel_count < setback_grid_size * setback_grid_size, (
+    f"test setup should produce a genuine partial exclusion (some cells survive the setback, some don't) -- "
+    f"got {on_parcel_count} of {setback_grid_size * setback_grid_size}"
 )
-assert not step1_setback["slope_only_mask"][0, 5], "a top-edge-ring cell must be excluded by the boundary setback"
-assert not step1_setback["slope_only_mask"][5, 0], "a left-edge-ring cell must be excluded by the boundary setback"
-assert not step1_setback["slope_only_mask"][9, 5], "a bottom-edge-ring cell must be excluded by the boundary setback"
-assert not step1_setback["slope_only_mask"][5, 9], "a right-edge-ring cell must be excluded by the boundary setback"
-assert step1_setback["slope_only_mask"][5, 5], "an interior cell (well clear of the setback) must remain eligible"
+assert np.array_equal(step1_setback["slope_only_mask"], expected_slope_only_mask), (
+    "compute_step1_eligible_cells()'s on-parcel test must match testing each cell's own center against the "
+    "boundary shrunk by boundary_setback_meters exactly"
+)
+center = setback_grid_size // 2
+assert step1_setback["slope_only_mask"][center, center], "the grid's own center cell (well clear of the setback) must remain eligible"
+assert not step1_setback["slope_only_mask"][0, 0], "the corner cell (closest to the true boundary edge) must be excluded by the setback"
 print(
     f"Boundary setback wired into compute_step1_eligible_cells(): an exact-extent boundary correctly excludes "
-    f"the outer ring (36 cells) via the {setback_m:.2f}m setback, leaving the interior 8x8 block ({on_parcel_count} "
-    "cells) eligible."
+    f"every cell within the {setback_m:.2f}m setback, leaving {on_parcel_count} of "
+    f"{setback_grid_size * setback_grid_size} cells eligible -- matching a direct cell-center-vs-shrunk-boundary "
+    "test exactly."
 )
 
 # --- boundary_setback_meters=0 opts out entirely -- every on-parcel cell survives, same as before this gate ---
 step1_no_setback = compute_step1_eligible_cells(
     setback_dem, exact_extent_boundary, disqualifying_soil_union_utm=None, boundary_setback_meters=0.0
 )
-assert int(step1_no_setback["slope_only_mask"].sum()) == 100, (
+total_setback_cells = setback_grid_size * setback_grid_size
+assert int(step1_no_setback["slope_only_mask"].sum()) == total_setback_cells, (
     "boundary_setback_meters=0 must disable the setback entirely, leaving every on-parcel cell eligible"
 )
-print("Boundary setback: boundary_setback_meters=0 correctly disables the setback (all 100 cells survive).")
+print(f"Boundary setback: boundary_setback_meters=0 correctly disables the setback (all {total_setback_cells} cells survive).")
 
 
 # =====================================================================
@@ -183,10 +226,15 @@ FLAT_DEM = {
     "origin_y": 4500050.0,
     "crs": "EPSG:32617",
 }
-# Padded well past the setback so this section's assertions are about the canopy gate
-# specifically, not incidentally about the boundary setback tested above.
+# Padded well past the setback (dynamically, off the real constant) so this section's
+# assertions are about the canopy gate specifically, not incidentally about the boundary
+# setback tested above.
+_canopy_test_padding = setback_m + 10.0
 CANOPY_TEST_BOUNDARY = box(
-    500000.0 - 20.0, 4500000.0 - 20.0, 500050.0 + 20.0, 4500050.0 + 20.0
+    500000.0 - _canopy_test_padding,
+    4500000.0 - _canopy_test_padding,
+    500050.0 + _canopy_test_padding,
+    4500050.0 + _canopy_test_padding,
 )
 
 step1_canopy_unchecked = compute_step1_eligible_cells(FLAT_DEM, CANOPY_TEST_BOUNDARY, disqualifying_soil_union_utm=None)

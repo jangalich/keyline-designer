@@ -178,7 +178,7 @@ METERS_PER_FOOT = 0.3048
 
 # Cells within this distance of the real parcel boundary are excluded from
 # eligibility outright -- production ground shouldn't be planned flush
-# against a property line. 10ft, CONFIGURABLE, unvalidated against a real
+# against a property line. 50ft, CONFIGURABLE, unvalidated against a real
 # property yet (same caveat every other threshold in this pipeline
 # carries). Applied as a single clean shapely negative buffer on the
 # boundary polygon itself, not a raster operation -- the parcel boundary
@@ -190,7 +190,7 @@ METERS_PER_FOOT = 0.3048
 # callers (cluster_and_gate()'s footprint clip,
 # production_area_ceiling.py's parcel-acreage ceiling math) still use as
 # the real, full parcel boundary.
-PRODUCTION_BOUNDARY_SETBACK_METERS = 10 * METERS_PER_FOOT  # ~3.05m
+PRODUCTION_BOUNDARY_SETBACK_METERS = 50 * METERS_PER_FOOT  # ~15.24m
 
 # --- per-cell weighting (STEP 1's own scoring, used to order STEP 2's
 # worst-first ceiling trim) ---

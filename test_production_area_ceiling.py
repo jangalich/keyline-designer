@@ -36,6 +36,7 @@ Scenarios, each isolating ONE thing:
      via a mocked fetch layer.
 """
 
+import functools
 from unittest.mock import patch as mock_patch
 
 import numpy as np
@@ -47,6 +48,21 @@ import production_area as pa
 import production_area_ceiling as pac
 from feature_schema import validate_feature_collection
 from production_area import compute_step1_eligible_cells, cluster_and_gate
+
+# This file is entirely about STEP 2 (trim_to_ceiling()'s worst-first trim algorithm) --
+# not about the hard, always-on boundary-setback gate compute_step1_eligible_cells() also
+# applies (that has its own dedicated tests in test_canopy_height_data.py). Every scenario
+# below deliberately uses TIGHT boundaries sized exactly to its own eligible region for
+# precise area comparisons; left as-is, PRODUCTION_BOUNDARY_SETBACK_METERS would shave an
+# unpredictable ring off those tight fixtures and break assertions that have nothing to do
+# with the setback itself. Patched both as this file's own name AND inside
+# production_area_ceiling.py's own module namespace (optimize_production_areas()/
+# identify_optimized_production_areas() call their own internal reference), so every path
+# through STEP 1 in this file consistently sees boundary_setback_meters=0 -- same "isolate
+# from a concern this file isn't testing" reasoning as check_soil=False elsewhere in this
+# pipeline's tests.
+compute_step1_eligible_cells = functools.partial(compute_step1_eligible_cells, boundary_setback_meters=0.0)
+pac.compute_step1_eligible_cells = compute_step1_eligible_cells
 
 RESOLUTION = (5.0, 5.0)
 CRS = "EPSG:32617"
