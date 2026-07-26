@@ -227,6 +227,11 @@ STREAM_COLOR = "#3B82C4"
 BOUNDARY_COLOR = "#1A1A1A"
 PRODUCTION_ZONE_COLOR = "#4C9A2A"
 PRODUCTION_ZONE_CONTOUR_LINEWIDTH = 0.7
+CONTOUR_LINE_COLOR = "#6B4423"  # muted brown -- traditional topo-map
+# contour color, chosen for contrast against green/tan aerial imagery
+# and to stay visually distinct from every other layer color already
+# in use (production green, water blue, road rust-orange, structure
+# red)
 WATER_ZONE_COLOR = "#1F6FB2"
 ROAD_CORRIDOR_COLOR = "#B5651D"
 STRUCTURE_SITE_COLOR = "#D64545"
@@ -487,7 +492,7 @@ def render_layout_map(
                     line,
                     ax=ax,
                     add_points=False,
-                    color=PRODUCTION_ZONE_COLOR,
+                    color=CONTOUR_LINE_COLOR,
                     linewidth=PRODUCTION_ZONE_CONTOUR_LINEWIDTH,
                     alpha=0.85,
                     zorder=40,
