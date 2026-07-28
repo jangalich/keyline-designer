@@ -64,6 +64,29 @@ from production_area import compute_step1_eligible_cells, cluster_and_gate
 compute_step1_eligible_cells = functools.partial(compute_step1_eligible_cells, boundary_setback_meters=0.0)
 pac.compute_step1_eligible_cells = compute_step1_eligible_cells
 
+# identify_optimized_production_areas() (scenario 4 below) now fetches a REQUIRED
+# tree-root-zone mask via production_area.get_required_tree_root_zone_mask_utm() -- the
+# woody-vegetation gate is mandatory there too, same as production_area.identify_
+# production_areas(), and a fetch failure raises rather than degrading. Patched here
+# (production_area's own module-level name, which is what that shared helper actually
+# looks up) to a fixed offline stub so this file's full-pipeline scenario stays fully
+# offline; the gate's own hard-failure behavior has its own dedicated tests in
+# test_canopy_height_data.py. optimize_production_areas() itself (scenarios 1/2, called
+# directly) never reaches this fetch at all -- it stays "pure logic, no network I/O" per
+# its own docstring, taking tree_root_zone_mask_utm as an already-fetched, optional input.
+def _fake_clean_canopy(boundary_coordinates, dem):
+    return {
+        "array": np.full(dem["array"].shape, 1.0, dtype=np.float32),  # below threshold everywhere -- no trees
+        "resolution_meters": dem["resolution_meters"],
+        "origin_x": dem["origin_x"],
+        "origin_y": dem["origin_y"],
+        "crs": dem["crs"],
+        "source_item_id": "offline-test-stub",
+    }
+
+
+pa.get_canopy_height_for_boundary = _fake_clean_canopy
+
 RESOLUTION = (5.0, 5.0)
 CRS = "EPSG:32617"
 
@@ -303,5 +326,147 @@ print(
     f"{total_carved} acres carved (bookkeeping), final total_selected_acreage "
     f"{carved_result['total_selected_acreage']} (vs {result['total_selected_acreage']} without the mocked union)."
 )
+
+# =====================================================================
+# Regression: identify_optimized_production_areas()/optimize_production_areas() must
+# apply the SAME woody-vegetation gate production_area.identify_production_areas() does.
+# The real bug this wiring fixes: optimize_production_areas()'s own STEP 1 call used to
+# pass compute_step1_eligible_cells() only 4 positional arguments, leaving
+# tree_root_zone_mask_utm on its "skip this gate" sentinel default -- so canopy exclusion
+# was NEVER active on this entry point (the one render_layout_map.py/tree_zone_
+# candidates.py actually use), even after the gate was hardened everywhere else.
+# =====================================================================
+
+canopy_gate_grid_size = 20  # 20x20 @ 5m = 100x100m, comfortably above MIN_PRODUCTION_AREA_ACRES
+canopy_gate_dem = {
+    "array": np.full((canopy_gate_grid_size, canopy_gate_grid_size), 100.0, dtype=np.float32),  # flat
+    "resolution_meters": RESOLUTION,
+    "origin_x": 500000.0,
+    "origin_y": 4500000.0 + canopy_gate_grid_size * RESOLUTION[1],
+    "crs": CRS,
+}
+# Padded generously past the boundary setback -- this section is about the canopy gate
+# specifically, not incidentally about the setback (which is disabled file-wide anyway).
+canopy_gate_padding = pa.PRODUCTION_BOUNDARY_SETBACK_METERS + 50.0
+canopy_gate_extent = canopy_gate_grid_size * RESOLUTION[0]
+canopy_gate_boundary_utm = box(
+    500000.0 - canopy_gate_padding,
+    4500000.0 - canopy_gate_padding,
+    500000.0 + canopy_gate_extent + canopy_gate_padding,
+    4500000.0 + canopy_gate_extent + canopy_gate_padding,
+)
+canopy_gate_lons, canopy_gate_lats = warp_transform(CRS, "EPSG:4326", *canopy_gate_boundary_utm.exterior.coords.xy)
+canopy_gate_boundary_coords = list(zip(canopy_gate_lons, canopy_gate_lats))
+
+
+def _fake_half_tree_canopy(boundary_coordinates, dem):
+    array = np.full(dem["array"].shape, 1.0, dtype=np.float32)  # below threshold everywhere...
+    array[:, : dem["array"].shape[1] // 2] = 20.0  # ...except the west half: real trees
+    return {
+        "array": array,
+        "resolution_meters": dem["resolution_meters"],
+        "origin_x": dem["origin_x"],
+        "origin_y": dem["origin_y"],
+        "crs": dem["crs"],
+        "source_item_id": "offline-test-half-tree-stub",
+    }
+
+
+# --- STEP 1 cross-check: fed the IDENTICAL tree-root-zone mask, optimize_production_areas()
+#     and compute_step1_eligible_cells() (as identify_production_areas() itself calls it)
+#     must produce the exact same eligible-cell geometry -- not two different gate stacks. ---
+with mock_patch.object(pa, "get_canopy_height_for_boundary", _fake_half_tree_canopy):
+    shared_tree_mask = pa.get_required_tree_root_zone_mask_utm(canopy_gate_boundary_utm, canopy_gate_dem)
+
+assert shared_tree_mask.any() and not shared_tree_mask.all(), (
+    "test setup should produce a genuine partial tree mask (some cells treed, some not)"
+)
+
+step1_via_direct_call = pa.compute_step1_eligible_cells(
+    canopy_gate_dem, canopy_gate_boundary_utm, disqualifying_soil_union_utm=None, tree_root_zone_mask_utm=shared_tree_mask
+)
+optimized_via_ceiling = pac.optimize_production_areas(
+    canopy_gate_dem,
+    canopy_gate_boundary_utm,
+    disqualifying_soil_union_utm=None,
+    ceiling_pct=100.0,  # no trim -- isolates the canopy gate from STEP 2's own removal
+    tree_root_zone_mask_utm=shared_tree_mask,
+)
+assert np.array_equal(step1_via_direct_call["eligible_mask"], optimized_via_ceiling["step1"]["eligible_mask"]), (
+    "production_area_ceiling.optimize_production_areas() must produce the SAME STEP 1 eligible-cell mask as "
+    "production_area.compute_step1_eligible_cells() when fed the identical tree-root-zone mask"
+)
+assert int(optimized_via_ceiling["step1"]["tree_root_zone_hit"].sum()) > 0, (
+    "the canopy gate must have actually excluded some cells here, not just been present and inert"
+)
+print(
+    "Regression: production_area_ceiling.optimize_production_areas(), fed the same tree-root-zone mask, "
+    "produces the IDENTICAL STEP 1 eligible-cell mask production_area.compute_step1_eligible_cells() does -- "
+    f"{int(optimized_via_ceiling['step1']['tree_root_zone_hit'].sum())} cells genuinely excluded by the canopy gate."
+)
+
+# --- Full entry point: identify_optimized_production_areas() with real trees present
+#     selects meaningfully less acreage than with the (file-wide, tree-free) default stub. ---
+tree_free_result = pac.identify_optimized_production_areas(
+    canopy_gate_boundary_coords, dem=canopy_gate_dem, check_soil=False, ceiling_pct=100.0
+)
+with mock_patch.object(pa, "get_canopy_height_for_boundary", _fake_half_tree_canopy):
+    half_tree_result = pac.identify_optimized_production_areas(
+        canopy_gate_boundary_coords, dem=canopy_gate_dem, check_soil=False, ceiling_pct=100.0
+    )
+assert half_tree_result["total_selected_acreage"] < tree_free_result["total_selected_acreage"], (
+    f"a boundary with real tree cover over its west half must select LESS acreage than the same boundary "
+    f"read as tree-free ({half_tree_result['total_selected_acreage']} vs {tree_free_result['total_selected_acreage']}) "
+    "-- if these are equal, the canopy gate isn't actually wired into this entry point"
+)
+print(
+    f"Regression: identify_optimized_production_areas() selects meaningfully less acreage with real tree "
+    f"cover present ({half_tree_result['total_selected_acreage']} ac) than the tree-free case "
+    f"({tree_free_result['total_selected_acreage']} ac) -- the canopy gate is genuinely active on this entry point."
+)
+
+
+# =====================================================================
+# identify_optimized_production_areas(): the woody-vegetation gate is mandatory here too
+# (no check_canopy flag) -- a fetch failure must propagate as a hard error, not be caught
+# and degraded into a second, more lenient behavior for this entry point.
+# =====================================================================
+
+# --- no HAG coverage at all (None) -> RuntimeError ---
+with mock_patch.object(pa, "get_canopy_height_for_boundary", lambda boundary_coordinates, dem: None):
+    try:
+        pac.identify_optimized_production_areas(canopy_gate_boundary_coords, dem=canopy_gate_dem, check_soil=False)
+        raised_none = None
+    except Exception as e:
+        raised_none = e
+assert isinstance(raised_none, RuntimeError), f"no HAG coverage must raise RuntimeError, got {type(raised_none)}"
+assert "Canopy height data unavailable" in str(raised_none)
+print("identify_optimized_production_areas(): no HAG coverage for the boundary raises RuntimeError, same as identify_production_areas().")
+
+
+class _FakeCeilingCanopyFailure(Exception):
+    """Stand-in for a real network exception (e.g. retries exhausted) from the fetch."""
+
+
+def _raise_ceiling_network_failure(boundary_coordinates, dem):
+    raise _FakeCeilingCanopyFailure("simulated: retries exhausted")
+
+
+# --- a fetch exception propagates UNCHANGED -- not swallowed, not converted, not softened ---
+with mock_patch.object(pa, "get_canopy_height_for_boundary", _raise_ceiling_network_failure):
+    try:
+        pac.identify_optimized_production_areas(canopy_gate_boundary_coords, dem=canopy_gate_dem, check_soil=False)
+        raised_network = None
+    except Exception as e:
+        raised_network = e
+assert isinstance(raised_network, _FakeCeilingCanopyFailure), (
+    f"a canopy fetch exception must propagate unchanged through identify_optimized_production_areas(), "
+    f"got {type(raised_network)}"
+)
+print(
+    "identify_optimized_production_areas(): a canopy fetch exception propagates unchanged rather than being "
+    "caught or softened into a second, more lenient behavior for this entry point."
+)
+
 
 print("\nAll production_area_ceiling checks passed.")

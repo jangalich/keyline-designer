@@ -219,13 +219,17 @@ assert math.isclose(PER_CELL_SLOPE_WEIGHT + PER_CELL_ASPECT_WEIGHT, 1.0, abs_tol
 _SOIL_CHECK_UNCHECKED = object()
 
 # Same convention as _SOIL_CHECK_UNCHECKED, for the tree-root-zone mask --
-# still used by compute_step1_eligible_cells()'s own default (and by
-# production_area_ceiling.py's callers, which never pass canopy data at
-# all) as the generic STEP 1 primitive's optional/graceful-degrade
-# parameter. identify_production_areas() itself no longer has an
-# "unchecked" path -- see that function's own docstring: the woody-
-# vegetation gate is mandatory there, so it always passes a real, checked
-# mask (or raises before ever reaching compute_step1_eligible_cells).
+# still used by compute_step1_eligible_cells()'s own default, and by
+# production_area_ceiling.optimize_production_areas()'s own default (the
+# "pure logic, no network I/O" core, which can still be called directly,
+# e.g. in tests, without any canopy data at all -- see that function's own
+# docstring). Both this module's identify_production_areas() and
+# production_area_ceiling.identify_optimized_production_areas() -- the
+# two real NETWORK entry points -- no longer have an "unchecked" path of
+# their own: the woody-vegetation gate is mandatory there, so each always
+# passes a real, checked mask into compute_step1_eligible_cells() (or
+# raises before ever reaching it). See get_required_tree_root_zone_mask_
+# utm(), the shared fetch-or-raise helper both entry points call.
 _CANOPY_CHECK_UNCHECKED = object()
 
 PRODUCTION_AREA_CONFIDENCE_NOTES = (
@@ -364,6 +368,45 @@ def _fetch_tree_root_zone_mask_utm(boundary_coordinates: list, dem: dict):
     if canopy is None:
         return None
     return tree_root_zone_mask(canopy["array"], canopy["resolution_meters"])
+
+
+def get_required_tree_root_zone_mask_utm(boundary_polygon_utm: Polygon, dem: dict):
+    """
+    Fetches a REQUIRED (non-optional) tree-root-zone mask for
+    boundary_polygon_utm -- the shared "fetch canopy, or fail hard"
+    building block behind the woody-vegetation gate, so every entry point
+    that ultimately calls compute_step1_eligible_cells() applies it
+    identically instead of each reimplementing (or, worse, quietly
+    omitting) its own copy. identify_production_areas() (this module) and
+    production_area_ceiling.identify_optimized_production_areas() both
+    call this directly, rather than either duplicating the boundary-
+    reprojection + fetch + raise sequence itself.
+
+    Reprojects boundary_polygon_utm to WGS84 (the lon/lat convention
+    canopy_height_data.get_canopy_height_for_boundary() takes) and calls
+    _fetch_tree_root_zone_mask_utm().
+
+    Raises RuntimeError if no HAG coverage exists for this boundary at
+    all -- "can't verify this is free of tree cover" is treated as a hard
+    failure here, not a lower-confidence result to hand back with a
+    caveat (see this module's own identify_production_areas() docstring
+    for the reasoning). Any OTHER fetch failure -- retries exhausted, or
+    canopy_height_data.CanopyCoverageIncompleteError for coverage that
+    exists but is too sparse to trust -- is left to propagate up
+    UNCAUGHT, unchanged: this function does no exception handling beyond
+    the None-vs-RuntimeError translation.
+    """
+    xs, ys = boundary_polygon_utm.exterior.coords.xy
+    lons, lats = warp_transform(dem["crs"], "EPSG:4326", list(xs), list(ys))
+    boundary_coordinates = list(zip(lons, lats))
+    tree_root_zone_mask_utm = _fetch_tree_root_zone_mask_utm(boundary_coordinates, dem)
+    if tree_root_zone_mask_utm is None:
+        raise RuntimeError(
+            "Canopy height data unavailable for this property -- cannot verify "
+            "production zones are free of tree cover. Refusing to generate a "
+            "production zone without this check."
+        )
+    return tree_root_zone_mask_utm
 
 
 def _cell_union_footprint(cells: list[tuple[int, int]], dem: dict):
@@ -913,23 +956,26 @@ def identify_production_areas(
 
     The woody-vegetation gate is NOT optional, unlike check_soil above --
     there is no check_canopy flag and no degrade-on-failure path. This
+    calls get_required_tree_root_zone_mask_utm() (the SAME shared fetch
+    production_area_ceiling.identify_optimized_production_areas() also
+    calls, so both entry points into compute_step1_eligible_cells() apply
+    this gate identically rather than one silently omitting it), which
     fetches USGS 3DEP lidar HAG coverage for the real parcel boundary ONCE
-    (canopy_height_data.get_canopy_height_for_boundary()) and feeds the
-    dilated tree-root-zone mask it derives into STEP 1's cell-level canopy
-    gate; a fetch failure (network exhausted after retries, or the HAG
-    coverage that DID come back being too sparse to trust --
+    and derives the dilated tree-root-zone mask STEP 1's cell-level canopy
+    gate needs; a fetch failure (network exhausted after retries, or the
+    HAG coverage that DID come back being too sparse to trust --
     canopy_height_data.CanopyCoverageIncompleteError) is deliberately left
     to propagate up UNCAUGHT here, and "no HAG coverage at all for this
-    boundary" raises RuntimeError below rather than silently proceeding
-    without the check. Reasoning: unlike hydric soil (a soft, "reduce
-    confidence and continue" concern), a production zone this pipeline
-    can't verify is free of tree cover is not a safe thing to hand back
-    with a caveat attached -- it's a wrong answer, not a lower-confidence
-    one, so the whole pipeline call fails rather than returning candidates
-    that were never actually checked for woody vegetation. The fixed
-    boundary-setback exclusion (PRODUCTION_BOUNDARY_SETBACK_METERS) always
-    applies too -- it's plain polygon geometry on the known parcel
-    boundary, not a network-backed layer, so there's nothing to fail on.
+    boundary" raises RuntimeError rather than silently proceeding without
+    the check. Reasoning: unlike hydric soil (a soft, "reduce confidence
+    and continue" concern), a production zone this pipeline can't verify
+    is free of tree cover is not a safe thing to hand back with a caveat
+    attached -- it's a wrong answer, not a lower-confidence one, so the
+    whole pipeline call fails rather than returning candidates that were
+    never actually checked for woody vegetation. The fixed boundary-
+    setback exclusion (PRODUCTION_BOUNDARY_SETBACK_METERS) always applies
+    too -- it's plain polygon geometry on the known parcel boundary, not a
+    network-backed layer, so there's nothing to fail on.
     """
     disqualifying_soil_union_utm = _SOIL_CHECK_UNCHECKED
     if check_soil:
@@ -941,16 +987,7 @@ def identify_production_areas(
         except Exception:
             disqualifying_soil_union_utm = _SOIL_CHECK_UNCHECKED
 
-    xs, ys = boundary_polygon_utm.exterior.coords.xy
-    lons, lats = warp_transform(dem["crs"], "EPSG:4326", list(xs), list(ys))
-    boundary_coordinates = list(zip(lons, lats))
-    tree_root_zone_mask_utm = _fetch_tree_root_zone_mask_utm(boundary_coordinates, dem)
-    if tree_root_zone_mask_utm is None:
-        raise RuntimeError(
-            "Canopy height data unavailable for this property -- cannot verify "
-            "production zones are free of tree cover. Refusing to generate a "
-            "production zone without this check."
-        )
+    tree_root_zone_mask_utm = get_required_tree_root_zone_mask_utm(boundary_polygon_utm, dem)
 
     step1 = compute_step1_eligible_cells(
         dem, boundary_polygon_utm, disqualifying_soil_union_utm, max_slope_pct, tree_root_zone_mask_utm

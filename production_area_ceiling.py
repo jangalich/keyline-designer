@@ -36,12 +36,24 @@ score_production_areas(), the same functions production_area.py's own
 survivor mask instead of STEP 1's raw eligible mask. One implementation of
 each step, reused by both entry points.
 
+STEP 1 itself (compute_step1_eligible_cells()) is likewise not
+reimplemented -- optimize_production_areas() calls the exact same
+function identify_production_areas() does, with the exact same gates:
+slope, hydric soil, the woody-vegetation tree-root-zone mask, and the
+fixed boundary setback. The soil and canopy inputs are passed IN (already
+fetched) rather than fetched here, so this stays "pure logic, no network
+I/O" and can be exercised directly against synthetic data; see
+optimize_production_areas()'s own docstring.
+
 identify_optimized_production_areas() is the fetch-and-score entry point:
-fetches the DEM (unless one is passed in) and real disqualifying-soil
-geometry ONCE for the whole parcel boundary (STEP 1 needs it before
-clustering ever happens -- no per-patch soil fetch, unlike the
-pre-consolidation architecture, since patches don't exist yet at this
-point), then chains STEP 1 -> STEP 2 -> STEP 3 -> STEP 4.
+fetches the DEM (unless one is passed in), real disqualifying-soil
+geometry, and the required tree-root-zone mask, ONCE each for the whole
+parcel boundary (STEP 1 needs all of it before clustering ever happens --
+no per-patch fetch, unlike the pre-consolidation architecture, since
+patches don't exist yet at this point), then chains STEP 1 -> STEP 2 ->
+STEP 3 -> STEP 4. Soil degrades gracefully on fetch failure; canopy does
+NOT -- see this function's own docstring for why, and production_area.py's
+identify_production_areas() docstring for the shared reasoning.
 
 This is a self-contained, standalone pass, same "validate on its own
 first" framing as the rest of this pipeline: NOT wired into
@@ -59,10 +71,12 @@ from dem_data import get_dem_for_boundary
 from production_area import (
     MAX_PRODUCTION_SLOPE_PCT,
     MIN_PRODUCTION_AREA_ACRES,
+    _CANOPY_CHECK_UNCHECKED,
     _SOIL_CHECK_UNCHECKED,
     _fetch_disqualifying_soil_union,
     cluster_and_gate,
     compute_step1_eligible_cells,
+    get_required_tree_root_zone_mask_utm,
 )
 from production_suitability import (
     REFERENCE_MAX_AREA_ACRES,
@@ -154,11 +168,23 @@ def optimize_production_areas(
     ceiling_pct: float = PRODUCTION_CEILING_PCT_OF_PARCEL,
     max_slope_pct: float = MAX_PRODUCTION_SLOPE_PCT,
     min_area_acres: float = MIN_PRODUCTION_AREA_ACRES,
+    tree_root_zone_mask_utm=_CANOPY_CHECK_UNCHECKED,
 ) -> dict:
     """
     Pure logic core (no network I/O) chaining STEP 1 (production_area.
     compute_step1_eligible_cells()) -> STEP 2 (trim_to_ceiling()) -> STEP 3
     (production_area.cluster_and_gate(), on the post-trim survivor mask).
+
+    tree_root_zone_mask_utm follows compute_step1_eligible_cells()'s own
+    convention exactly (a pre-fetched boolean mask, or the default
+    _CANOPY_CHECK_UNCHECKED sentinel meaning "skip this gate") -- this
+    function does no fetching of its own, same as disqualifying_soil_
+    union_utm above; it stays true to its own "pure logic, no network I/O"
+    contract precisely so it (and trim_to_ceiling()) can still be called
+    directly against a synthetic DEM/mask with no canopy data at all, e.g.
+    in tests. The real, MANDATORY canopy fetch (fail hard if unavailable)
+    lives in identify_optimized_production_areas() below, the actual
+    network entry point -- same split as the soil fetch already has.
 
     Returns:
         {
@@ -176,7 +202,9 @@ def optimize_production_areas(
             'production_ceiling_target_met': bool,
         }
     """
-    step1 = compute_step1_eligible_cells(dem, boundary_polygon_utm, disqualifying_soil_union_utm, max_slope_pct)
+    step1 = compute_step1_eligible_cells(
+        dem, boundary_polygon_utm, disqualifying_soil_union_utm, max_slope_pct, tree_root_zone_mask_utm
+    )
     trim_result = trim_to_ceiling(step1, dem, boundary_polygon_utm, ceiling_pct)
 
     rows, cols = dem["array"].shape
@@ -202,19 +230,35 @@ def identify_optimized_production_areas(
     reference_max_area_acres: float = REFERENCE_MAX_AREA_ACRES,
 ) -> dict:
     """
-    Full pipeline entry point: fetches the DEM (unless one is passed in)
-    and real disqualifying-soil geometry ONCE for the whole parcel
-    boundary (STEP 1 needs it before any patch exists -- unlike the
-    pre-consolidation architecture's per-patch soil fetch), runs STEP 1 ->
-    STEP 2 (the global worst-first trim toward ceiling_pct) -> STEP 3
-    (cluster_and_gate() on the survivors) -> STEP 4 (production_
-    suitability.score_production_areas(), advisory ranking only).
+    Full pipeline entry point: fetches the DEM (unless one is passed in),
+    real disqualifying-soil geometry ONCE for the whole parcel boundary
+    (STEP 1 needs it before any patch exists -- unlike the pre-
+    consolidation architecture's per-patch soil fetch), and the required
+    woody-vegetation tree-root-zone mask, then runs STEP 1 -> STEP 2 (the
+    global worst-first trim toward ceiling_pct) -> STEP 3 (cluster_and_
+    gate() on the survivors) -> STEP 4 (production_suitability.score_
+    production_areas(), advisory ranking only).
 
-    Each fetch (DEM, soil) degrades independently and gracefully -- a
-    USDA SDA outage doesn't block scoring, it just means hydric exclusion
-    couldn't be verified (soil_data_available=False on every result) --
-    same reasoning as every other optional network layer in this
-    pipeline.
+    The soil fetch degrades gracefully -- a USDA SDA outage doesn't block
+    scoring, it just means hydric exclusion couldn't be verified
+    (soil_data_available=False on every result) -- same reasoning as
+    every other optional network layer in this pipeline. The canopy fetch
+    does NOT: it is mandatory (no check_canopy flag), via production_
+    area.get_required_tree_root_zone_mask_utm() -- the SAME shared
+    fetch-or-raise helper production_area.identify_production_areas()
+    itself calls, so this entry point (the one render_layout_map.py and
+    tree_zone_candidates.py actually use) produces the identical
+    eligible-cell geometry that function does, rather than silently
+    omitting the woody-vegetation gate on this path the way it used to (a
+    real bug: this function's own STEP 1 call previously passed
+    compute_step1_eligible_cells() only 4 positional arguments, leaving
+    tree_root_zone_mask_utm on its "skip this gate" sentinel default). A
+    fetch failure -- retries exhausted, or canopy_height_data.
+    CanopyCoverageIncompleteError for coverage too sparse to trust --
+    propagates up UNCAUGHT, same hard-fail behavior as production_area.
+    identify_production_areas(); callers (render_layout_map.py, tree_
+    zone_candidates.py) are expected to let this raise, not catch and
+    degrade it.
 
     Returns the same "production_area_candidate" GeoJSON FeatureCollection
     / scored_patches shape this pipeline has always returned, plus
@@ -247,6 +291,8 @@ def identify_optimized_production_areas(
         except Exception:
             disqualifying_soil_union_utm = _SOIL_CHECK_UNCHECKED
 
+    tree_root_zone_mask_utm = get_required_tree_root_zone_mask_utm(boundary_polygon_utm, dem)
+
     optimized = optimize_production_areas(
         dem,
         boundary_polygon_utm,
@@ -254,6 +300,7 @@ def identify_optimized_production_areas(
         ceiling_pct=ceiling_pct,
         max_slope_pct=max_slope_pct,
         min_area_acres=min_area_acres,
+        tree_root_zone_mask_utm=tree_root_zone_mask_utm,
     )
 
     scored = score_production_areas(
