@@ -218,14 +218,14 @@ assert math.isclose(PER_CELL_SLOPE_WEIGHT + PER_CELL_ASPECT_WEIGHT, 1.0, abs_tol
 # pipeline's None-vs-"unavailable" conventions.
 _SOIL_CHECK_UNCHECKED = object()
 
-# Same convention as _SOIL_CHECK_UNCHECKED, for the tree-root-zone mask.
-# Unlike soil's disqualifying_soil_union_utm, a real "checked, found no
-# HAG coverage" outcome (canopy_height_data.get_canopy_height_for_
-# boundary() returning None) is NOT represented as a real value here --
-# there's no meaningful all-False-mask difference between "checked and
-# genuinely no trees" and "never checked", so callers collapse a no-
-# coverage fetch result to this same sentinel (see
-# _fetch_tree_root_zone_mask_utm()) rather than passing a real value.
+# Same convention as _SOIL_CHECK_UNCHECKED, for the tree-root-zone mask --
+# still used by compute_step1_eligible_cells()'s own default (and by
+# production_area_ceiling.py's callers, which never pass canopy data at
+# all) as the generic STEP 1 primitive's optional/graceful-degrade
+# parameter. identify_production_areas() itself no longer has an
+# "unchecked" path -- see that function's own docstring: the woody-
+# vegetation gate is mandatory there, so it always passes a real, checked
+# mask (or raises before ever reaching compute_step1_eligible_cells).
 _CANOPY_CHECK_UNCHECKED = object()
 
 PRODUCTION_AREA_CONFIDENCE_NOTES = (
@@ -237,10 +237,11 @@ PRODUCTION_AREA_CONFIDENCE_NOTES = (
     f"height_data.py), not a validated production-area determination. Cells "
     f"within {PRODUCTION_BOUNDARY_SETBACK_METERS:.1f}m of the real parcel "
     "boundary are also excluded (a fixed inward setback, not derived from "
-    "any of the above). If USGS 3DEP lidar HAG coverage was unavailable "
-    "for this property, the woody-vegetation exclusion could not be "
-    "verified and this candidate's geometry may still include tree-root-"
-    "zone ground that wasn't caught -- see canopy_height_data.py. It "
+    "any of the above). Unlike the soil check, the woody-vegetation check "
+    "is mandatory: identify_production_areas() refuses to return any "
+    "candidate at all if USGS 3DEP lidar HAG coverage couldn't be fetched "
+    "or was too sparse to trust, rather than returning geometry that was "
+    "never actually checked for tree cover -- see canopy_height_data.py. It "
     "doesn't account for soil quality beyond the hard hydric exclusion, "
     "drainage, existing land use, or the property owner's actual crop/"
     "grazing plans — see soil_data.py and the Land Shape section of the "
@@ -347,11 +348,17 @@ def _fetch_tree_root_zone_mask_utm(boundary_coordinates: list, dem: dict):
     dilated tree-root-zone cell mask (canopy_height_data.tree_root_zone_
     mask()'s own output -- already on dem's own grid, so it can be used
     directly against compute_step1_eligible_cells()'s cell indices with no
-    further alignment work). Returns None if no HAG coverage exists for
-    this boundary -- a genuine no-data outcome (see canopy_height_data.py's
-    own docstring), not an error; the caller (identify_production_areas())
-    collapses that to _CANOPY_CHECK_UNCHECKED, same fetch-then-let-caller-
-    degrade shape as _fetch_disqualifying_soil_union() above.
+    further alignment work).
+
+    Returns None if no HAG coverage exists for this boundary at all -- a
+    genuine no-data outcome (see canopy_height_data.py's own docstring),
+    passed straight through unchanged; the caller (identify_production_
+    areas()) treats a None result here as a hard failure (raises
+    RuntimeError), NOT something to gracefully degrade on. Coverage that
+    exists but is too sparse to trust (canopy_height_data.
+    CanopyCoverageIncompleteError) and any other fetch failure are left to
+    propagate up uncaught -- this function does no exception handling of
+    its own beyond the None pass-through.
     """
     canopy = get_canopy_height_for_boundary(boundary_coordinates, dem)
     if canopy is None:
@@ -876,7 +883,6 @@ def identify_production_areas(
     max_slope_pct: float = MAX_PRODUCTION_SLOPE_PCT,
     min_area_acres: float = MIN_PRODUCTION_AREA_ACRES,
     check_soil: bool = True,
-    check_canopy: bool = True,
 ) -> list[dict]:
     """
     Returns one entry per candidate production-area patch, clipped to the
@@ -905,18 +911,25 @@ def identify_production_areas(
     get STEP 1's hydric exclusion automatically, with no changes needed on
     their end.
 
-    check_canopy works the same way, for the woody-vegetation gate: when
-    True (the default), this fetches USGS 3DEP lidar HAG coverage for the
-    real parcel boundary ONCE (canopy_height_data.get_canopy_height_for_
-    boundary()) and feeds the dilated tree-root-zone mask it derives into
-    STEP 1's cell-level canopy gate; both "no HAG coverage for this
-    boundary" (canopy_height_data.py's own genuine no-data outcome) and
-    any fetch failure degrade gracefully to canopy_data_available=False,
-    not a crash -- existing callers get the same automatic exclusion, with
-    no changes needed on their end, exactly as check_soil already works.
-    The fixed boundary-setback exclusion (PRODUCTION_BOUNDARY_SETBACK_
-    METERS) always applies regardless of either flag -- it's plain polygon
-    geometry on the known parcel boundary, not a network-backed layer.
+    The woody-vegetation gate is NOT optional, unlike check_soil above --
+    there is no check_canopy flag and no degrade-on-failure path. This
+    fetches USGS 3DEP lidar HAG coverage for the real parcel boundary ONCE
+    (canopy_height_data.get_canopy_height_for_boundary()) and feeds the
+    dilated tree-root-zone mask it derives into STEP 1's cell-level canopy
+    gate; a fetch failure (network exhausted after retries, or the HAG
+    coverage that DID come back being too sparse to trust --
+    canopy_height_data.CanopyCoverageIncompleteError) is deliberately left
+    to propagate up UNCAUGHT here, and "no HAG coverage at all for this
+    boundary" raises RuntimeError below rather than silently proceeding
+    without the check. Reasoning: unlike hydric soil (a soft, "reduce
+    confidence and continue" concern), a production zone this pipeline
+    can't verify is free of tree cover is not a safe thing to hand back
+    with a caveat attached -- it's a wrong answer, not a lower-confidence
+    one, so the whole pipeline call fails rather than returning candidates
+    that were never actually checked for woody vegetation. The fixed
+    boundary-setback exclusion (PRODUCTION_BOUNDARY_SETBACK_METERS) always
+    applies too -- it's plain polygon geometry on the known parcel
+    boundary, not a network-backed layer, so there's nothing to fail on.
     """
     disqualifying_soil_union_utm = _SOIL_CHECK_UNCHECKED
     if check_soil:
@@ -928,16 +941,16 @@ def identify_production_areas(
         except Exception:
             disqualifying_soil_union_utm = _SOIL_CHECK_UNCHECKED
 
-    tree_root_zone_mask_utm = _CANOPY_CHECK_UNCHECKED
-    if check_canopy:
-        try:
-            xs, ys = boundary_polygon_utm.exterior.coords.xy
-            lons, lats = warp_transform(dem["crs"], "EPSG:4326", list(xs), list(ys))
-            boundary_coordinates = list(zip(lons, lats))
-            fetched_mask = _fetch_tree_root_zone_mask_utm(boundary_coordinates, dem)
-            tree_root_zone_mask_utm = fetched_mask if fetched_mask is not None else _CANOPY_CHECK_UNCHECKED
-        except Exception:
-            tree_root_zone_mask_utm = _CANOPY_CHECK_UNCHECKED
+    xs, ys = boundary_polygon_utm.exterior.coords.xy
+    lons, lats = warp_transform(dem["crs"], "EPSG:4326", list(xs), list(ys))
+    boundary_coordinates = list(zip(lons, lats))
+    tree_root_zone_mask_utm = _fetch_tree_root_zone_mask_utm(boundary_coordinates, dem)
+    if tree_root_zone_mask_utm is None:
+        raise RuntimeError(
+            "Canopy height data unavailable for this property -- cannot verify "
+            "production zones are free of tree cover. Refusing to generate a "
+            "production zone without this check."
+        )
 
     step1 = compute_step1_eligible_cells(
         dem, boundary_polygon_utm, disqualifying_soil_union_utm, max_slope_pct, tree_root_zone_mask_utm

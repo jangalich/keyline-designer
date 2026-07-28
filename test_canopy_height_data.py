@@ -2,27 +2,37 @@
 test_canopy_height_data.py
 
 Offline (no-network) checks for canopy_height_data.py's network-free
-tree_root_zone_mask() (threshold + raster-dilate cell-mask logic) and for
-the two new gates it and the boundary setback wire into production_area.
-compute_step1_eligible_cells(). Runs against small synthetic HAG arrays /
-DEMs / boundary polygons built by hand, same "pure logic, independent of
-real data fetches" philosophy as test_production_area.py/
-test_erosion_hydric_soil.py. Live fetch validation against a real
-reference property (canopy_height_data.get_canopy_height_for_boundary())
-is a separate follow-up step -- this sandbox has no network egress to
-Planetary Computer, same documented gap the hydric/slope gates' own live
-validation already has.
+tree_root_zone_mask() (threshold + raster-dilate cell-mask logic), the
+boundary setback, and production_area.py's now-MANDATORY woody-vegetation
+gate: identify_production_areas() has no check_canopy flag and no
+degrade-on-failure path anymore -- a fetch failure or too-sparse HAG
+coverage must propagate as a real exception, not be swallowed. Runs
+against small synthetic HAG arrays / DEMs / boundary polygons built by
+hand, same "pure logic, independent of real data fetches" philosophy as
+test_production_area.py/test_erosion_hydric_soil.py, using
+unittest.mock to exercise the fetch-layer wiring (retry exhaustion,
+CanopyCoverageIncompleteError, the None/no-coverage case) without any
+real network access. Live fetch validation against a real reference
+property is a separate follow-up step -- this sandbox has no network
+egress to Planetary Computer, same documented gap the hydric/slope gates'
+own live validation already has.
 """
 
 import math
+from types import SimpleNamespace
+from unittest.mock import patch as mock_patch
 
 import numpy as np
+from rasterio.warp import transform as warp_transform
 from shapely.geometry import Point, box
 
+import canopy_height_data as chd
 import production_area as pa
 from canopy_height_data import (
     CANOPY_HEIGHT_THRESHOLD_METERS,
+    MAX_ACCEPTABLE_CANOPY_NODATA_PCT,
     TREE_ROOT_ZONE_BUFFER_METERS,
+    CanopyCoverageIncompleteError,
     tree_root_zone_mask,
 )
 from production_area import compute_step1_eligible_cells
@@ -279,6 +289,193 @@ step1_canopy_clean = compute_step1_eligible_cells(
 assert step1_canopy_clean["canopy_data_available"] is True, "a real (all-False) mask must read as checked, unlike the sentinel default"
 assert int(step1_canopy_clean["eligible_mask"].sum()) == 100
 print("compute_step1_eligible_cells(): a checked, genuinely tree-free mask reads as available and excludes nothing.")
+
+
+# =====================================================================
+# get_canopy_height_for_boundary()'s completeness check: CanopyCoverageIncompleteError
+# when on-parcel HAG coverage is too sparse to trust. Tested offline by mocking the two
+# network-touching helpers it calls (_search_hag_items(), _read_clipped_hag()) and using
+# an IDENTITY source transform/CRS (matching the DEM's own grid exactly) so
+# _reproject_to_dem_grid()'s real reprojection logic still runs, just with a fully
+# controlled, predictable source array -- no actual HTTP/STAC access anywhere.
+# =====================================================================
+
+_coverage_rows, _coverage_cols = 10, 10
+_coverage_dem = {
+    "array": np.full((_coverage_rows, _coverage_cols), 100.0, dtype=np.float32),
+    "resolution_meters": RESOLUTION,
+    "origin_x": 500000.0,
+    "origin_y": 4500000.0 + _coverage_rows * RESOLUTION[1],
+    "crs": "EPSG:32617",
+}
+# Boundary covering the DEM's exact full extent (reprojected to WGS84) so every cell in
+# the grid is "on-parcel" -- this keeps the on-parcel nan-fraction math simple and exact:
+# it's just the fraction of the whole array that's nodata.
+_cov_x0, _cov_y0 = _coverage_dem["origin_x"], _coverage_dem["origin_y"] - _coverage_rows * RESOLUTION[1]
+_cov_x1, _cov_y1 = _coverage_dem["origin_x"] + _coverage_cols * RESOLUTION[0], _coverage_dem["origin_y"]
+_cov_lons, _cov_lats = warp_transform(
+    _coverage_dem["crs"], "EPSG:4326", [_cov_x0, _cov_x1, _cov_x1, _cov_x0], [_cov_y0, _cov_y0, _cov_y1, _cov_y1]
+)
+_coverage_boundary_coordinates = list(zip(_cov_lons, _cov_lats))
+
+_coverage_nodata = -9999.0
+_fake_item = SimpleNamespace(
+    id="fake-hag-tile", assets={chd.HAG_ASSET_KEY: SimpleNamespace(href="https://example.invalid/fake-hag.tif")}
+)
+# IDENTICAL transform/CRS to what _reproject_to_dem_grid() builds internally for the
+# destination grid -- an identity reprojection, so the synthetic nodata pattern below
+# lands in hag_on_grid exactly as constructed, with no resampling ambiguity.
+from rasterio.transform import Affine as _Affine
+
+_coverage_identity_transform = _Affine(
+    RESOLUTION[0], 0.0, _coverage_dem["origin_x"], 0.0, -RESOLUTION[1], _coverage_dem["origin_y"]
+)
+
+
+def _make_fake_clipped_array(nodata_fraction: float) -> np.ndarray:
+    """A synthetic 'clipped' HAG array (real values elsewhere, nodata for the given
+    fraction of cells, row-major from the top) for feeding through the mocked fetch."""
+    total = _coverage_rows * _coverage_cols
+    nodata_count = round(total * nodata_fraction)
+    flat = np.full(total, 2.0, dtype=np.float32)  # a real, below-threshold HAG value
+    flat[:nodata_count] = _coverage_nodata
+    return flat.reshape(_coverage_rows, _coverage_cols)
+
+
+# --- (b) coverage too sparse (NaN fraction above the threshold) -> CanopyCoverageIncompleteError ---
+_sparse_array = _make_fake_clipped_array(nodata_fraction=(MAX_ACCEPTABLE_CANOPY_NODATA_PCT / 100.0) + 0.10)
+
+with mock_patch.object(chd, "_search_hag_items", lambda polygon, max_retries=5: [_fake_item]), mock_patch.object(
+    chd,
+    "_read_clipped_hag",
+    lambda href, polygon, timeout: (_sparse_array, _coverage_identity_transform, _coverage_dem["crs"], _coverage_nodata),
+):
+    try:
+        chd.get_canopy_height_for_boundary(_coverage_boundary_coordinates, _coverage_dem, max_retries=0)
+        raised = None
+    except Exception as e:
+        raised = e
+
+assert isinstance(raised, CanopyCoverageIncompleteError), (
+    f"HAG coverage with NaN fraction above MAX_ACCEPTABLE_CANOPY_NODATA_PCT must raise "
+    f"CanopyCoverageIncompleteError, got {type(raised)}: {raised}"
+)
+print(
+    f"get_canopy_height_for_boundary(): on-parcel NaN coverage above {MAX_ACCEPTABLE_CANOPY_NODATA_PCT}% "
+    f"correctly raises CanopyCoverageIncompleteError ({raised})."
+)
+
+# --- (c) coverage comfortably complete (NaN fraction below the threshold) -> proceeds normally ---
+_complete_array = _make_fake_clipped_array(nodata_fraction=(MAX_ACCEPTABLE_CANOPY_NODATA_PCT / 100.0) - 0.05)
+
+with mock_patch.object(chd, "_search_hag_items", lambda polygon, max_retries=5: [_fake_item]), mock_patch.object(
+    chd,
+    "_read_clipped_hag",
+    lambda href, polygon, timeout: (_complete_array, _coverage_identity_transform, _coverage_dem["crs"], _coverage_nodata),
+):
+    canopy_result = chd.get_canopy_height_for_boundary(_coverage_boundary_coordinates, _coverage_dem, max_retries=0)
+
+assert canopy_result is not None, "coverage below the no-data threshold must not raise or return None"
+assert canopy_result["source_item_id"] == "fake-hag-tile"
+assert canopy_result["array"].shape == _coverage_dem["array"].shape
+recovered_mask = tree_root_zone_mask(canopy_result["array"], canopy_result["resolution_meters"])
+assert not recovered_mask.any(), "every real (non-nodata) synthetic value here is below the tree-height threshold"
+print(
+    f"get_canopy_height_for_boundary(): on-parcel NaN coverage below {MAX_ACCEPTABLE_CANOPY_NODATA_PCT}% proceeds "
+    "normally -- a real result dict is returned and tree_root_zone_mask() computes correctly against it."
+)
+
+
+# =====================================================================
+# production_area.identify_production_areas(): the woody-vegetation gate is now
+# MANDATORY -- no check_canopy flag, no degrade-on-failure path. A fetch failure of any
+# kind must propagate as a real exception (or the specific RuntimeError for genuine
+# no-coverage), never silently proceed without the check. Exercised offline by mocking
+# pa.get_canopy_height_for_boundary directly -- the exact seam _fetch_tree_root_zone_
+# mask_utm() calls -- so the real identify_production_areas()/_fetch_tree_root_zone_
+# mask_utm() wiring is what's under test, not a stand-in.
+# =====================================================================
+
+_hard_gate_grid_size = 20  # 20x20 cells @ 5m = 100x100m ~= 2.47 acres, comfortably above MIN_PRODUCTION_AREA_ACRES
+_hard_gate_dem = {
+    "array": np.full((_hard_gate_grid_size, _hard_gate_grid_size), 100.0, dtype=np.float32),  # flat -- slope excludes nothing
+    "resolution_meters": RESOLUTION,
+    "origin_x": 500000.0,
+    "origin_y": 4500000.0 + _hard_gate_grid_size * RESOLUTION[1],
+    "crs": "EPSG:32617",
+}
+# Padded generously past the boundary setback -- this section is about the canopy gate's
+# hard-failure behavior, not incidentally about the setback tested earlier.
+_hard_gate_padding = pa.PRODUCTION_BOUNDARY_SETBACK_METERS + 50.0
+_hard_gate_extent = _hard_gate_grid_size * RESOLUTION[0]
+_hard_gate_boundary = box(
+    500000.0 - _hard_gate_padding,
+    4500000.0 - _hard_gate_padding,
+    500000.0 + _hard_gate_extent + _hard_gate_padding,
+    4500000.0 + _hard_gate_extent + _hard_gate_padding,
+)
+
+
+def _run_hard_gate(fake_get_canopy_height_for_boundary):
+    with mock_patch.object(pa, "get_canopy_height_for_boundary", fake_get_canopy_height_for_boundary):
+        try:
+            result = pa.identify_production_areas(_hard_gate_dem, _hard_gate_boundary, check_soil=False)
+            return result, None
+        except Exception as e:
+            return None, e
+
+
+# --- (a) no HAG coverage at all (None) -> RuntimeError, not a silent proceed ---
+_, raised_none = _run_hard_gate(lambda boundary_coordinates, dem, **_: None)
+assert isinstance(raised_none, RuntimeError), f"no HAG coverage must raise RuntimeError, got {type(raised_none)}"
+assert "Canopy height data unavailable" in str(raised_none)
+print("identify_production_areas(): no HAG coverage for the boundary raises RuntimeError instead of proceeding silently.")
+
+
+class _FakeCanopyNetworkFailure(Exception):
+    """Stand-in for a real network exception (e.g. retries exhausted) from the fetch."""
+
+
+def _raise_network_failure(boundary_coordinates, dem, **_):
+    raise _FakeCanopyNetworkFailure("simulated: retries exhausted")
+
+
+# --- (a) a fetch exception propagates UNCHANGED -- not swallowed, not converted to RuntimeError ---
+_, raised_network = _run_hard_gate(_raise_network_failure)
+assert isinstance(raised_network, _FakeCanopyNetworkFailure), (
+    f"a canopy fetch exception must propagate unchanged (not be caught/converted), got {type(raised_network)}"
+)
+print("identify_production_areas(): a canopy fetch exception propagates unchanged rather than being caught or swallowed.")
+
+
+def _raise_incomplete_coverage(boundary_coordinates, dem, **_):
+    raise CanopyCoverageIncompleteError("simulated: on-parcel coverage too sparse to trust")
+
+
+# --- CanopyCoverageIncompleteError specifically also propagates unchanged, not wrapped ---
+_, raised_incomplete = _run_hard_gate(_raise_incomplete_coverage)
+assert isinstance(raised_incomplete, CanopyCoverageIncompleteError), (
+    f"CanopyCoverageIncompleteError from the fetch must propagate unchanged, got {type(raised_incomplete)}"
+)
+print("identify_production_areas(): CanopyCoverageIncompleteError from the fetch also propagates unchanged.")
+
+
+def _fake_clean_canopy(boundary_coordinates, dem, **_):
+    return {
+        "array": np.full(dem["array"].shape, 1.0, dtype=np.float32),  # below threshold everywhere -- no trees
+        "resolution_meters": dem["resolution_meters"],
+        "origin_x": dem["origin_x"],
+        "origin_y": dem["origin_y"],
+        "crs": dem["crs"],
+        "source_item_id": "fake-clean-tile",
+    }
+
+
+# --- sanity: a real, checked (tree-free) canopy result lets the pipeline proceed as normal ---
+patches, raised_clean = _run_hard_gate(_fake_clean_canopy)
+assert raised_clean is None, f"a real canopy result must not raise, got {raised_clean}"
+assert isinstance(patches, list) and len(patches) >= 1, "a flat, fully eligible DEM should still produce a patch"
+print("identify_production_areas(): a real (tree-free) canopy result lets the pipeline proceed normally, as before.")
 
 
 print("\nAll canopy_height_data / boundary-setback / canopy-gate checks passed.")

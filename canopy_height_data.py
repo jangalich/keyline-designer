@@ -37,9 +37,21 @@ lidar-hag` tile intersects this boundary, or if every clipped/reprojected
 pixel is nodata -- 3DEP lidar coverage is real but not yet nationwide, so
 "no HAG data here" is a genuine outcome, the same "no scene met the
 filter" / "no API key" convention imagery_data.py and irradiance_data.py
-already use. Callers should surface that as a confidence_notes caveat
-(the woody-vegetation gate couldn't be checked, not that the check found
-no trees), not fail the pipeline.
+already use for THEIR OWN "nothing usable was found" cases. Unlike those
+modules, though, this is NOT a soft, degrade-and-continue signal for
+production_area.py's woody-vegetation gate: the caller there treats a
+None result as a hard failure (raises RuntimeError) rather than
+proceeding without the check -- see production_area.identify_production_
+areas()'s own docstring for why. Coverage that DOES exist but is too
+sparse to trust is a separate, real exception (CanopyCoverageIncomplete
+Error below), not folded into the None case.
+
+RETRY BUDGET: max_retries defaults to 5 (not the 2 most other network
+layers in this pipeline use) on both _search_hag_items() and
+get_canopy_height_for_boundary() -- since a fetch failure here is no
+longer something the pipeline quietly shrugs off, it's worth spending
+more attempts to distinguish "genuinely unreachable" from "flaky this
+one time" before giving up and failing the whole production-zone call.
 
 CELL MASK LOGIC: tree_root_zone_mask() is deliberately network-free and
 takes a plain HAG array, the same offline/network split raster_grid.py's
@@ -72,9 +84,10 @@ from pystac_client import Client
 from rasterio.mask import mask
 from rasterio.transform import Affine
 from rasterio.warp import Resampling, reproject, transform_geom
-from shapely.geometry import Polygon, mapping, shape
+from shapely.geometry import Point, Polygon, mapping, shape
+from shapely.prepared import prep
 
-from raster_grid import binary_dilate
+from raster_grid import binary_dilate, pixel_center_xy
 
 STAC_API_URL = "https://planetarycomputer.microsoft.com/api/stac/v1"
 COLLECTION = "3dep-lidar-hag"
@@ -109,6 +122,31 @@ CANOPY_HEIGHT_THRESHOLD_METERS = 4.5  # 15 ft
 # figure.
 TREE_ROOT_ZONE_BUFFER_METERS = 50 * METERS_PER_FOOT  # ~15.24m
 
+# Max percent of ON-PARCEL cells (see _on_parcel_nan_fraction()) that may
+# be nodata in the clipped/reprojected HAG array before this module treats
+# the fetch as unreliable rather than usable. CONFIGURABLE, unvalidated
+# against a real property yet, same caveat every other threshold in this
+# pipeline carries. This is deliberately NOT the same thing as "zero
+# coverage" (get_canopy_height_for_boundary() already returns None for
+# that, unchanged) -- this catches the in-between case where a tile
+# technically intersects the boundary but only covers a sliver of it, which
+# would otherwise silently produce an array that reads as "mostly no
+# trees" when it's actually "mostly unchecked".
+MAX_ACCEPTABLE_CANOPY_NODATA_PCT = 10.0
+
+
+class CanopyCoverageIncompleteError(Exception):
+    """
+    Raised by get_canopy_height_for_boundary() when HAG coverage exists
+    for this boundary (so it isn't the "no coverage at all" -> None case)
+    but leaves more than MAX_ACCEPTABLE_CANOPY_NODATA_PCT of the ON-PARCEL
+    grid as nodata after clipping/reprojection -- too sparse to trust as a
+    real "no trees here" signal. Deliberately a real exception, not a
+    return value: production_area.py's woody-vegetation gate treats
+    "can't verify" the same as "found trees" would be treated -- as a hard
+    stop, not a lower-confidence result to hand back with a caveat.
+    """
+
 
 def _boundary_to_polygon(boundary_coordinates: list) -> Polygon:
     """Same convention as imagery_data._boundary_to_polygon()/soil_data.
@@ -140,7 +178,7 @@ def _retry(operation, max_retries: int = 2):
             raise last_error
 
 
-def _search_hag_items(polygon: Polygon, max_retries: int = 2) -> list:
+def _search_hag_items(polygon: Polygon, max_retries: int = 5) -> list:
     """
     Searches the Planetary Computer STAC catalog for 3dep-lidar-hag items
     intersecting the boundary. Unlike imagery_data._search_scenes()
@@ -233,10 +271,44 @@ def _reproject_to_dem_grid(
     return destination
 
 
+def _on_parcel_nan_fraction(hag_on_grid: np.ndarray, boundary_coordinates: list, dem: dict) -> tuple[float, int]:
+    """
+    Fraction of ON-PARCEL cells (cell center inside the real property
+    boundary, reprojected into dem['crs']) that are NaN in hag_on_grid --
+    same cell-center-containment on-parcel test compute_step1_eligible_
+    cells() applies against the real parcel boundary, not the full
+    rectangular DEM grid (dem_data.py deliberately fetches a buffer past
+    the drawn boundary for terrain analysis -- counting THAT off-parcel
+    buffer ground as "missing" would understate real on-parcel coverage,
+    since nobody needs HAG data out there).
+
+    Returns (nan_fraction, on_parcel_cell_count) -- nan_fraction is 0.0
+    when there are no on-parcel cells at all (degenerate boundary/DEM
+    mismatch; nothing to be incomplete about).
+    """
+    boundary_polygon = _boundary_to_polygon(boundary_coordinates)
+    boundary_polygon_utm = shape(transform_geom("EPSG:4326", dem["crs"], mapping(boundary_polygon)))
+    boundary_prepared = prep(boundary_polygon_utm)
+
+    rows, cols = hag_on_grid.shape
+    on_parcel_count = 0
+    on_parcel_nan_count = 0
+    for r in range(rows):
+        for c in range(cols):
+            if boundary_prepared.contains(Point(pixel_center_xy(dem, r, c))):
+                on_parcel_count += 1
+                if np.isnan(hag_on_grid[r, c]):
+                    on_parcel_nan_count += 1
+
+    if on_parcel_count == 0:
+        return 0.0, 0
+    return on_parcel_nan_count / on_parcel_count, on_parcel_count
+
+
 def get_canopy_height_for_boundary(
     boundary_coordinates: list,
     dem: dict,
-    max_retries: int = 2,
+    max_retries: int = 5,
 ) -> Optional[dict]:
     """
     Given a property boundary (list of (longitude, latitude) points, same
@@ -261,13 +333,23 @@ def get_canopy_height_for_boundary(
 
     Returns None if no 3dep-lidar-hag tile intersects this boundary at
     all, or if the best-covering tile's clipped/reprojected result has no
-    valid (non-nodata) pixels -- a genuine "no lidar HAG coverage here"
-    outcome (3DEP lidar coverage is real but not yet nationwide) rather
-    than a failed request, same convention imagery_data.get_imagery_
-    summary_for_boundary() and irradiance_data.get_regional_irradiance_
-    baseline() already use for their own "nothing usable was found"
-    cases. Callers should treat this the same way: skip/caveat the
-    woody-vegetation gate rather than fail the whole pipeline.
+    valid (non-nodata) pixels anywhere -- a genuine "no lidar HAG coverage
+    here" outcome (3DEP lidar coverage is real but not yet nationwide)
+    rather than a failed request, same convention imagery_data.get_
+    imagery_summary_for_boundary() and irradiance_data.get_regional_
+    irradiance_baseline() already use for their own "nothing usable was
+    found" cases.
+
+    Raises CanopyCoverageIncompleteError if coverage exists (so it isn't
+    the None case above) but leaves more than MAX_ACCEPTABLE_CANOPY_
+    NODATA_PCT of the ON-PARCEL grid (see _on_parcel_nan_fraction()) as
+    nodata -- a tile that only grazes the boundary can technically
+    "intersect" it while covering almost none of the actual parcel, which
+    would otherwise silently read as "checked, mostly no trees" rather
+    than "barely checked at all". Unlike the None case, this is
+    deliberately a hard failure, not a value for callers to degrade
+    gracefully on -- see production_area.py's woody-vegetation gate,
+    which does not catch it.
     """
     polygon = _boundary_to_polygon(boundary_coordinates)
 
@@ -289,6 +371,15 @@ def get_canopy_height_for_boundary(
     hag_on_grid = _reproject_to_dem_grid(clipped, clipped_transform, clipped_crs, nodata, dem)
     if not np.any(~np.isnan(hag_on_grid)):
         return None
+
+    nan_fraction, on_parcel_count = _on_parcel_nan_fraction(hag_on_grid, boundary_coordinates, dem)
+    if on_parcel_count > 0 and nan_fraction * 100 > MAX_ACCEPTABLE_CANOPY_NODATA_PCT:
+        raise CanopyCoverageIncompleteError(
+            f"USGS 3DEP lidar HAG coverage for this property is only "
+            f"{100 - nan_fraction * 100:.1f}% complete on-parcel ({nan_fraction * 100:.1f}% "
+            f"no-data), exceeding the {MAX_ACCEPTABLE_CANOPY_NODATA_PCT}% max acceptable "
+            f"no-data threshold (source tile: {item.id})."
+        )
 
     return {
         "array": hag_on_grid,

@@ -62,6 +62,27 @@ from tree_zone_candidates import (
     tree_zones_to_geojson,
 )
 
+# production_area.identify_production_areas() (reached transitively through this file's
+# own identify_tree_zone_candidates()/road_corridors.py wiring checks) now has a
+# MANDATORY, non-degrading woody-vegetation gate -- no check_canopy flag, and a fetch
+# failure raises rather than proceeding without the check. Patched once, globally, to a
+# fixed offline stub returning a real, checked, tree-free HAG result for whatever DEM
+# it's called with, so every code path in this file stays offline instead of hitting the
+# network. The gate's own hard-failure behavior has its own dedicated tests in
+# test_canopy_height_data.py.
+def _fake_clean_canopy(boundary_coordinates, dem):
+    return {
+        "array": np.full(dem["array"].shape, 1.0, dtype=np.float32),  # below threshold everywhere -- no trees
+        "resolution_meters": dem["resolution_meters"],
+        "origin_x": dem["origin_x"],
+        "origin_y": dem["origin_y"],
+        "crs": dem["crs"],
+        "source_item_id": "offline-test-stub",
+    }
+
+
+pa.get_canopy_height_for_boundary = _fake_clean_canopy
+
 CRS = "EPSG:32617"
 
 

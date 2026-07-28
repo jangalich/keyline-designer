@@ -15,6 +15,7 @@ test_water_system_candidate_pipeline.py's approach).
 
 from shapely.geometry import box
 
+import production_area as pa
 from feature_schema import validate_feature_collection
 from water_candidate_zones import find_candidate_zones
 from water_suitability import (
@@ -335,6 +336,26 @@ synthetic_dem = {
     "origin_y": origin_y,
     "crs": DST_CRS,
 }
+
+# identify_water_suitability() calls production_area.identify_production_areas()
+# internally with no check_soil/check_canopy passthrough of its own (water_suitability.py
+# is unchanged by the canopy-gate work) -- and that gate is now mandatory, with a fetch
+# failure raising rather than degrading. Patched here (production_area's own module-level
+# name, which is what identify_production_areas() actually looks up) to a fixed offline
+# stub so this wiring check stays fully offline; the gate's own hard-failure behavior has
+# its own dedicated tests in test_canopy_height_data.py.
+def _fake_clean_canopy(boundary_coordinates, dem):
+    return {
+        "array": np.full(dem["array"].shape, 1.0, dtype=np.float32),  # below threshold everywhere -- no trees
+        "resolution_meters": dem["resolution_meters"],
+        "origin_x": dem["origin_x"],
+        "origin_y": dem["origin_y"],
+        "crs": dem["crs"],
+        "source_item_id": "offline-test-stub",
+    }
+
+
+pa.get_canopy_height_for_boundary = _fake_clean_canopy
 
 pipeline_result = identify_water_suitability(
     boundary_coordinates, dem=synthetic_dem, check_soil=False, check_streams=False,

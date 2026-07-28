@@ -14,12 +14,24 @@ already reads).
 Runs against small synthetic DEMs built by hand, same "pure logic,
 independent of real data fetches" philosophy as the rest of this
 pipeline's tests. identify_production_areas() defaults to check_soil=True
-and check_canopy=True (it does its own disqualifying-soil and
-disqualifying-canopy fetches, each gracefully degrading on failure) --
-every test below that isn't specifically about the hydric or canopy gate
-passes check_soil=False, check_canopy=False to stay fully offline, same
-convention identify_optimized_production_areas()/identify_production_area_
+(it does its own disqualifying-soil fetch, gracefully degrading on
+failure) -- every test below that isn't specifically about the hydric
+gate passes check_soil=False to stay fully offline, same convention
+identify_optimized_production_areas()/identify_production_area_
 suitability() already established elsewhere in this pipeline.
+
+The woody-vegetation gate, unlike check_soil, is NOT optional (no
+check_canopy flag exists -- see production_area.identify_production_
+areas()'s own docstring) and a fetch failure is a hard error, not
+something to degrade past. pa.get_canopy_height_for_boundary is patched
+once, globally, right below to a fixed offline stub returning a real,
+checked, tree-free HAG result for whatever DEM it's called with -- every
+identify_production_areas() call in this file goes through the real
+canopy-gate code path (STEP 1's cell-level exclusion, tree_root_zone_
+mask(), etc.) with a controlled, always-clean input, rather than hitting
+the network. The gate's own hard-failure behavior (RuntimeError on no
+coverage, exceptions propagating unchanged) has its own dedicated tests
+in test_canopy_height_data.py.
 """
 
 from unittest.mock import patch as mock_patch
@@ -40,6 +52,20 @@ from production_area import (
 )
 import soil_data
 from soil_data import is_disqualifying_soil_condition
+
+
+def _fake_clean_canopy(boundary_coordinates, dem):
+    return {
+        "array": np.full(dem["array"].shape, 1.0, dtype=np.float32),  # below threshold everywhere -- no trees
+        "resolution_meters": dem["resolution_meters"],
+        "origin_x": dem["origin_x"],
+        "origin_y": dem["origin_y"],
+        "crs": dem["crs"],
+        "source_item_id": "offline-test-stub",
+    }
+
+
+pa.get_canopy_height_for_boundary = _fake_clean_canopy
 
 RESOLUTION = (5.0, 5.0)
 BASE_DEM = {
@@ -206,7 +232,7 @@ for row in range(size):
     for col in range(size):
         array[row, col] = 100.0 if row < 15 else 100.0 + (row - 14) * 5.0
 
-patches = identify_production_areas(_dem(array), FULL_EXTENT_BOUNDARY, check_soil=False, check_canopy=False)
+patches = identify_production_areas(_dem(array), FULL_EXTENT_BOUNDARY, check_soil=False)
 assert len(patches) == 1, f"expected exactly 1 production-area patch, got {len(patches)}"
 patch = patches[0]
 assert patch["representative_elevation_m"] == 100.0, (
@@ -223,14 +249,14 @@ print(
 )
 
 huge_area_threshold = patch["area_acres"] * 100
-assert identify_production_areas(_dem(array), FULL_EXTENT_BOUNDARY, min_area_acres=huge_area_threshold, check_soil=False, check_canopy=False) == []
+assert identify_production_areas(_dem(array), FULL_EXTENT_BOUNDARY, min_area_acres=huge_area_threshold, check_soil=False) == []
 print("Raising min_area_acres above the found patch's size correctly drops it.")
 
 
 # --- regression: candidates are clipped to the real parcel boundary, not the buffered DEM extent ---
 
 west_half_boundary = box(500000.0, 4500000.0 - 30 * 5.0, 500075.0, 4500000.0)
-west_half_patches = identify_production_areas(_dem(array), west_half_boundary, check_soil=False, check_canopy=False)
+west_half_patches = identify_production_areas(_dem(array), west_half_boundary, check_soil=False)
 assert len(west_half_patches) == 1, (
     f"expected the bench to still qualify as a (smaller) candidate on the west-half boundary, "
     f"got {len(west_half_patches)} patch(es)"
@@ -257,7 +283,7 @@ print(
 )
 
 disjoint_boundary = box(600000.0, 4600000.0, 600100.0, 4600100.0)
-disjoint_patches = identify_production_areas(_dem(array), disjoint_boundary, check_soil=False, check_canopy=False)
+disjoint_patches = identify_production_areas(_dem(array), disjoint_boundary, check_soil=False)
 assert disjoint_patches == [], (
     f"a boundary that doesn't overlap the DEM at all should drop every candidate entirely, "
     f"got {len(disjoint_patches)} patch(es)"
@@ -265,7 +291,7 @@ assert disjoint_patches == [], (
 print("Parcel clipping: a boundary entirely off the DEM's extent correctly drops every candidate (0% on-parcel).")
 
 sliver_boundary = box(500000.0, 4500000.0 - 30 * 5.0, 500002.0, 4500000.0)  # 2m wide sliver of the bench
-sliver_patches = identify_production_areas(_dem(array), sliver_boundary, check_soil=False, check_canopy=False)
+sliver_patches = identify_production_areas(_dem(array), sliver_boundary, check_soil=False)
 assert sliver_patches == [], (
     f"a boundary clipping the bench down to a sliver below MIN_PRODUCTION_AREA_ACRES should drop it, "
     f"got {len(sliver_patches)} patch(es)"
@@ -436,10 +462,11 @@ print(
 )
 
 # Also confirm identify_production_areas() end-to-end (with the soil fetch mocked) reaches the same conclusion.
-# check_canopy=False keeps this offline -- this test is specifically about the hydric-gate integration
-# (soil fetch mocked above), not the canopy gate, which has its own dedicated tests/mocking elsewhere.
+# The module-level pa.get_canopy_height_for_boundary stub keeps this offline for the (now-mandatory)
+# canopy gate too -- this test is specifically about the hydric-gate integration (soil fetch mocked
+# above), not the canopy gate, which has its own dedicated tests/mocking in test_canopy_height_data.py.
 with mock_patch.object(pa, "_fetch_disqualifying_soil_union", lambda wkt, dem: jagged_hydric_union):
-    end_to_end_patches = identify_production_areas(strip_dem, strip_boundary, check_soil=True, check_canopy=False)
+    end_to_end_patches = identify_production_areas(strip_dem, strip_boundary, check_soil=True)
 assert len(end_to_end_patches) == 1
 assert abs(end_to_end_patches[0]["area_acres"] - recovered_acres) < 0.01
 print("identify_production_areas() end-to-end (soil fetch mocked) reaches the identical, non-fragmented result.")
