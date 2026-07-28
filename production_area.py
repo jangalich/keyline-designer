@@ -130,6 +130,7 @@ from shapely.ops import unary_union
 from shapely.prepared import prep
 
 from canopy_height_data import get_canopy_height_for_boundary, tree_root_zone_mask
+from farm_roads_data import get_road_exclusion_union_utm
 from feature_schema import CONFIDENCE_LOW, make_feature, make_feature_collection
 from production_suitability import ASPECT_FACTOR_WEIGHT, SLOPE_FACTOR_WEIGHT
 from raster_grid import (
@@ -178,7 +179,7 @@ METERS_PER_FOOT = 0.3048
 
 # Cells within this distance of the real parcel boundary are excluded from
 # eligibility outright -- production ground shouldn't be planned flush
-# against a property line. 50ft, CONFIGURABLE, unvalidated against a real
+# against a property line. 10ft, CONFIGURABLE, unvalidated against a real
 # property yet (same caveat every other threshold in this pipeline
 # carries). Applied as a single clean shapely negative buffer on the
 # boundary polygon itself, not a raster operation -- the parcel boundary
@@ -190,7 +191,7 @@ METERS_PER_FOOT = 0.3048
 # callers (cluster_and_gate()'s footprint clip,
 # production_area_ceiling.py's parcel-acreage ceiling math) still use as
 # the real, full parcel boundary.
-PRODUCTION_BOUNDARY_SETBACK_METERS = 50 * METERS_PER_FOOT  # ~15.24m
+PRODUCTION_BOUNDARY_SETBACK_METERS = 10 * METERS_PER_FOOT  # ~3.048m
 
 # --- per-cell weighting (STEP 1's own scoring, used to order STEP 2's
 # worst-first ceiling trim) ---
@@ -218,6 +219,18 @@ assert math.isclose(PER_CELL_SLOPE_WEIGHT + PER_CELL_ASPECT_WEIGHT, 1.0, abs_tol
 # pipeline's None-vs-"unavailable" conventions.
 _SOIL_CHECK_UNCHECKED = object()
 
+# Same convention as _SOIL_CHECK_UNCHECKED, for existing-road exclusion --
+# and, unlike the tree-root-zone mask below, a real None here DOES mean
+# the same thing None means for soil: "checked, and genuinely no roads
+# found nearby" (farm_roads_data.get_road_exclusion_union_utm()'s own
+# clean-result convention), a real value distinct from "never checked at
+# all" (fetch failed, or check_roads=False). Road exclusion degrades
+# GRACEFULLY on fetch failure, same as soil -- unlike the woody-vegetation
+# gate, this is not a newly-closed detection gap, just the same known-
+# incomplete (public-ROW-only) signal farm_roads_data.py already was; see
+# that module's own docstring.
+_ROAD_CHECK_UNCHECKED = object()
+
 # Same convention as _SOIL_CHECK_UNCHECKED, for the tree-root-zone mask --
 # still used by compute_step1_eligible_cells()'s own default, and by
 # production_area_ceiling.optimize_production_areas()'s own default (the
@@ -233,23 +246,31 @@ _SOIL_CHECK_UNCHECKED = object()
 _CANOPY_CHECK_UNCHECKED = object()
 
 PRODUCTION_AREA_CONFIDENCE_NOTES = (
-    "This is a slope + hydric-soil + woody-vegetation heuristic (contiguous "
-    f"ground at or below {MAX_PRODUCTION_SLOPE_PCT}% grade, with hydric/"
-    "wetland soil excluded cell-by-cell before clustering -- see soil_data."
-    "hydric_disqualifying_mukeys() -- and tree-root-zone cells excluded "
-    f"cell-by-cell via USGS 3DEP lidar height-above-ground, see canopy_"
-    f"height_data.py), not a validated production-area determination. Cells "
-    f"within {PRODUCTION_BOUNDARY_SETBACK_METERS:.1f}m of the real parcel "
-    "boundary are also excluded (a fixed inward setback, not derived from "
-    "any of the above). Unlike the soil check, the woody-vegetation check "
-    "is mandatory: identify_production_areas() refuses to return any "
-    "candidate at all if USGS 3DEP lidar HAG coverage couldn't be fetched "
-    "or was too sparse to trust, rather than returning geometry that was "
-    "never actually checked for tree cover -- see canopy_height_data.py. It "
-    "doesn't account for soil quality beyond the hard hydric exclusion, "
-    "drainage, existing land use, or the property owner's actual crop/"
-    "grazing plans — see soil_data.py and the Land Shape section of the "
-    "full Scale of Permanence report for those factors."
+    "This is a slope + hydric-soil + woody-vegetation + existing-road "
+    f"heuristic (contiguous ground at or below {MAX_PRODUCTION_SLOPE_PCT}% "
+    "grade, with hydric/wetland soil excluded cell-by-cell before "
+    "clustering -- see soil_data.hydric_disqualifying_mukeys() -- tree-"
+    "root-zone cells excluded cell-by-cell via USGS 3DEP lidar height-"
+    "above-ground, see canopy_height_data.py -- and existing mapped road "
+    "right-of-way excluded cell-by-cell, see farm_roads_data.get_road_"
+    "exclusion_union_utm()), not a validated production-area "
+    f"determination. Cells within {PRODUCTION_BOUNDARY_SETBACK_METERS:.1f}m "
+    "of the real parcel boundary are also excluded (a fixed inward "
+    "setback, not derived from any of the above). Unlike the soil and "
+    "road checks, the woody-vegetation check is mandatory: identify_"
+    "production_areas() refuses to return any candidate at all if USGS "
+    "3DEP lidar HAG coverage couldn't be fetched or was too sparse to "
+    "trust, rather than returning geometry that was never actually "
+    "checked for tree cover -- see canopy_height_data.py. Road exclusion "
+    "degrades gracefully like the soil check: if USGS National Map road "
+    "data couldn't be fetched, this candidate's geometry may still "
+    "include ground within existing road right-of-way that wasn't caught "
+    "-- see farm_roads_data.py, which is itself a known-incomplete "
+    "(public-ROW-only) signal even when the fetch succeeds. It doesn't "
+    "account for soil quality beyond the hard hydric exclusion, drainage, "
+    "existing land use, or the property owner's actual crop/grazing plans "
+    "— see soil_data.py and the Land Shape section of the full Scale of "
+    "Permanence report for those factors."
 )
 
 
@@ -344,6 +365,28 @@ def _fetch_disqualifying_soil_union(wkt_polygon: str, dem: dict):
         if mukey in geometries_by_mukey
     ]
     return unary_union(pieces) if pieces else None
+
+
+def _fetch_road_exclusion_union_utm(boundary_coordinates: list, dem: dict):
+    """
+    Thin wrapper around farm_roads_data.get_road_exclusion_union_utm() --
+    exists so BOTH identify_production_areas() (this module) and
+    production_area_ceiling.identify_optimized_production_areas() call
+    the SAME function (imported from here, not straight from farm_roads_
+    data.py independently in each caller), the same "shared helper, one
+    definition" reasoning _fetch_disqualifying_soil_union() above already
+    established for the hydric-soil fetch -- among other things, this
+    means a single test mock of get_road_exclusion_union_utm here covers
+    both entry points, rather than needing to patch two independent
+    import bindings.
+
+    Returns None if no roads were found nearby -- the common, clean case,
+    same "checked and genuinely nothing there" convention _fetch_
+    disqualifying_soil_union() uses. Any fetch failure is left to
+    propagate up uncaught; callers degrade gracefully on their own (see
+    identify_production_areas()'s own check_roads handling).
+    """
+    return get_road_exclusion_union_utm(boundary_coordinates, dem)
 
 
 def _fetch_tree_root_zone_mask_utm(boundary_coordinates: list, dem: dict):
@@ -465,6 +508,7 @@ def compute_step1_eligible_cells(
     max_slope_pct: float = MAX_PRODUCTION_SLOPE_PCT,
     tree_root_zone_mask_utm=_CANOPY_CHECK_UNCHECKED,
     boundary_setback_meters: float = PRODUCTION_BOUNDARY_SETBACK_METERS,
+    road_exclusion_union_utm=_ROAD_CHECK_UNCHECKED,
 ) -> dict:
     """
     STEP 1 of the consolidated production-zone pipeline -- computed ONCE
@@ -499,13 +543,23 @@ def compute_step1_eligible_cells(
     cluster_and_gate()'s footprint clip and any caller's own parcel-
     acreage math use as the real, full parcel boundary.
 
+    road_exclusion_union_utm: a pre-fetched shapely Polygon/MultiPolygon
+    (already reprojected into dem['crs']) of existing road right-of-way
+    (farm_roads_data.get_road_exclusion_union_utm()'s own output), a real
+    None (roads WERE checked and genuinely none found nearby -- same
+    real-None convention disqualifying_soil_union_utm above uses, unlike
+    the canopy case), or the default sentinel meaning "not checked at
+    all" (road_data_available will be False and every cell that clears
+    the other gates is treated as eligible, same graceful degradation as
+    the soil case above).
+
     Returns:
         {
-            'eligible_mask': np.ndarray[bool],       # slope-, soil-, canopy-eligible, on-parcel
-                                                       # (post-setback)
+            'eligible_mask': np.ndarray[bool],       # slope-, soil-, canopy-, road-eligible,
+                                                       # on-parcel (post-setback)
             'slope_only_mask': np.ndarray[bool],     # slope-eligible + on-parcel (post-setback),
-                                                       # BEFORE the hydric/canopy gates -- this is
-                                                       # the connectivity source used for
+                                                       # BEFORE the hydric/canopy/road gates -- this
+                                                       # is the connectivity source used for
                                                        # source_patch_id/soil_carved
                                                        # bookkeeping, not a second scoring pass
             'slope_source_labels': np.ndarray[int],  # 8-connected-component labels of
@@ -525,6 +579,8 @@ def compute_step1_eligible_cells(
             'soil_data_available': bool,     # whether the hydric check actually ran
             'canopy_data_available': bool,   # whether the woody-vegetation check actually ran
             'tree_root_zone_hit': np.ndarray[bool],  # cells excluded by the canopy gate specifically
+            'road_data_available': bool,     # whether the existing-road check actually ran
+            'road_hit': np.ndarray[bool],    # cells excluded by the existing-road gate specifically
         }
     """
     array = dem["array"]
@@ -564,7 +620,18 @@ def compute_step1_eligible_cells(
     if canopy_data_available:
         tree_root_zone_hit = slope_only_mask & tree_root_zone_mask_utm
 
-    eligible_mask = slope_only_mask & (~hydric_hit) & (~tree_root_zone_hit)
+    road_data_available = road_exclusion_union_utm is not _ROAD_CHECK_UNCHECKED
+    road_union = road_exclusion_union_utm if road_data_available else None
+
+    road_hit = np.zeros((rows, cols), dtype=bool)
+    if road_union is not None:
+        road_prepared = prep(road_union)
+        for r, c in np.argwhere(slope_only_mask):
+            r, c = int(r), int(c)
+            if road_prepared.contains(Point(pixel_center_xy(dem, r, c))):
+                road_hit[r, c] = True
+
+    eligible_mask = slope_only_mask & (~hydric_hit) & (~tree_root_zone_hit) & (~road_hit)
 
     per_cell_slope_factor = np.full((rows, cols), np.nan, dtype=np.float32)
     per_cell_aspect_factor = np.full((rows, cols), np.nan, dtype=np.float32)
@@ -609,6 +676,8 @@ def compute_step1_eligible_cells(
         "soil_data_available": soil_data_available,
         "canopy_data_available": canopy_data_available,
         "tree_root_zone_hit": tree_root_zone_hit,
+        "road_data_available": road_data_available,
+        "road_hit": road_hit,
     }
 
 
@@ -926,6 +995,7 @@ def identify_production_areas(
     max_slope_pct: float = MAX_PRODUCTION_SLOPE_PCT,
     min_area_acres: float = MIN_PRODUCTION_AREA_ACRES,
     check_soil: bool = True,
+    check_roads: bool = True,
 ) -> list[dict]:
     """
     Returns one entry per candidate production-area patch, clipped to the
@@ -976,6 +1046,19 @@ def identify_production_areas(
     setback exclusion (PRODUCTION_BOUNDARY_SETBACK_METERS) always applies
     too -- it's plain polygon geometry on the known parcel boundary, not a
     network-backed layer, so there's nothing to fail on.
+
+    check_roads works the same way check_soil does (graceful degrade, NOT
+    the canopy gate's hard-fail behavior): when True (the default), this
+    fetches real existing-road geometry for the real parcel boundary ONCE
+    (farm_roads_data.get_road_exclusion_union_utm()) and feeds it into
+    STEP 1's cell-level road-exclusion gate; a fetch failure degrades
+    gracefully to road_data_available=False, not a crash. This is
+    deliberately NOT hardened like canopy was: farm_roads_data.py is
+    already a known-incomplete signal (public right-of-way only, see that
+    module's own docstring), not a newly-closed detection gap, so a fetch
+    failure here doesn't change what kind of answer this pipeline is
+    already giving -- it's noted via road_data_available/confidence_notes,
+    same as the soil check.
     """
     disqualifying_soil_union_utm = _SOIL_CHECK_UNCHECKED
     if check_soil:
@@ -989,8 +1072,23 @@ def identify_production_areas(
 
     tree_root_zone_mask_utm = get_required_tree_root_zone_mask_utm(boundary_polygon_utm, dem)
 
+    road_exclusion_union_utm = _ROAD_CHECK_UNCHECKED
+    if check_roads:
+        try:
+            xs, ys = boundary_polygon_utm.exterior.coords.xy
+            lons, lats = warp_transform(dem["crs"], "EPSG:4326", list(xs), list(ys))
+            boundary_coordinates = list(zip(lons, lats))
+            road_exclusion_union_utm = _fetch_road_exclusion_union_utm(boundary_coordinates, dem)
+        except Exception:
+            road_exclusion_union_utm = _ROAD_CHECK_UNCHECKED
+
     step1 = compute_step1_eligible_cells(
-        dem, boundary_polygon_utm, disqualifying_soil_union_utm, max_slope_pct, tree_root_zone_mask_utm
+        dem,
+        boundary_polygon_utm,
+        disqualifying_soil_union_utm=disqualifying_soil_union_utm,
+        max_slope_pct=max_slope_pct,
+        tree_root_zone_mask_utm=tree_root_zone_mask_utm,
+        road_exclusion_union_utm=road_exclusion_union_utm,
     )
     return cluster_and_gate(step1["eligible_mask"], dem, boundary_polygon_utm, step1, min_area_acres)
 

@@ -45,6 +45,12 @@ def _fake_clean_canopy(boundary_coordinates, dem):
 
 pa.get_canopy_height_for_boundary = _fake_clean_canopy
 
+# The existing-road exclusion gate is optional (degrades gracefully, unlike canopy) but
+# still defaults to check_roads=True and attempts a real fetch otherwise -- stubbed the
+# same way, to "no roads found nearby" (None), so this end-to-end wiring check stays
+# fully offline.
+pa.get_road_exclusion_union_utm = lambda boundary_coordinates, dem: None
+
 # Real-world centroid (western PA, same region as this repo's other test
 # fixtures) so the UTM zone/CRS math is genuine, not made up.
 CENTER_LON, CENTER_LAT = -79.98, 40.64

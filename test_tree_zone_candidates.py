@@ -83,6 +83,15 @@ def _fake_clean_canopy(boundary_coordinates, dem):
 
 pa.get_canopy_height_for_boundary = _fake_clean_canopy
 
+# The existing-road exclusion gate is optional (degrades gracefully, unlike canopy) but
+# still defaults to check_roads=True and attempts a real fetch otherwise -- patched the
+# same way, to a stub that reports "no roads found nearby" (None), so this file's
+# identify_production_areas() calls stay offline instead of just eventually timing out
+# and degrading. get_road_exclusion_union_utm() is the shared fetch pa._fetch_road_
+# exclusion_union_utm() (identify_production_areas()'s own call) and production_area_
+# ceiling.identify_optimized_production_areas() both route through.
+pa.get_road_exclusion_union_utm = lambda boundary_coordinates, dem: None
+
 CRS = "EPSG:32617"
 
 

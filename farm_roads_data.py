@@ -23,6 +23,16 @@ road/right-of-way sources. A private farm track, driveway, or internal
 access lane that was never surveyed into a public transportation dataset
 won't appear here — see FARM_ROAD_CONFIDENCE_NOTES.
 
+get_road_exclusion_union_utm() below is a second consumer of the same
+fetch: production_area.py's production-zone eligibility pipeline uses it
+as a hard, cell-level exclusion (existing road right-of-way isn't
+production ground), same shapely-polygon-union-plus-per-cell-.contains()
+pattern hydric soil already uses there — see that function's own
+docstring. Both consumers (this proximity-scoring one, and that hard-
+exclusion one) share the SAME underlying incomplete-by-construction
+caveat above; that's the "known-incomplete signal" this module already
+was, not a newly-closed detection gap the way the canopy/HAG gate was.
+
 Docs: https://carto.nationalmap.gov/arcgis/rest/services/transportation/MapServer
 
 REAL BUG, FOUND LIVE (fixed here): this module originally queried layer 0
@@ -57,6 +67,9 @@ import math
 import time
 
 import requests
+from rasterio.warp import transform_geom
+from shapely.geometry import shape
+from shapely.ops import unary_union
 
 from feature_schema import CONFIDENCE_MEDIUM, make_feature, make_feature_collection
 
@@ -87,6 +100,18 @@ FARM_ROAD_CONFIDENCE_NOTES = (
     "here; treat an absence of nearby roads as 'no mapped public road,' "
     "not necessarily 'no access.'"
 )
+
+# How far past each fetched road line's own mapped geometry the hard
+# production-zone exclusion (get_road_exclusion_union_utm() below) extends.
+# Default 0.0 -- we don't yet know whether a buffer beyond the road
+# geometry itself is needed; this is deliberately easy to tune once
+# visually validated against a real property, same as every other buffer
+# constant in this pipeline (canopy_height_data.TREE_ROOT_ZONE_BUFFER_
+# METERS, production_area.PRODUCTION_BOUNDARY_SETBACK_METERS). NOTE: at
+# the 0.0 default, buffering a LineString produces a zero-area geometry,
+# so the exclusion union is effectively empty and this gate is a no-op
+# until a real, nonzero value is set here. CONFIGURABLE.
+ROAD_EXCLUSION_BUFFER_METERS = 0.0
 
 
 def _bounding_box(
@@ -244,6 +269,47 @@ def get_farm_roads_for_boundary(
         for f in road_features
         if f.get("geometry") is not None
     ]
+
+
+def get_road_exclusion_union_utm(
+    boundary_coordinates: list[tuple[float, float]],
+    dem: dict,
+    buffer_meters: float = ROAD_EXCLUSION_BUFFER_METERS,
+):
+    """
+    Real road geometry (get_farm_roads_for_boundary()'s own fetch, WGS84
+    LineString/MultiLineString), each line reprojected into dem['crs'] and
+    buffered by buffer_meters, unioned into a single polygon -- the hard
+    production-zone exclusion input production_area.compute_step1_
+    eligible_cells() tests each eligible cell's own CENTER POINT against.
+
+    Same shapely-polygon-union-plus-per-cell-.contains() pattern
+    production_area._fetch_disqualifying_soil_union() already uses for
+    hydric soil, NOT the raster-dilation approach canopy_height_data.py
+    uses for the tree-root-zone gate -- road data here is already clean
+    vector geometry fetched directly from USGS, not derived from a raster
+    source the way HAG is, so there is no reason to rasterize it (and
+    doing so would only risk reintroducing the sliver-fragmentation
+    concern the raster-based gates exist specifically to avoid on their
+    own, raster-sourced inputs).
+
+    Returns None if no roads were found near this boundary -- the common,
+    clean case, not an error, same "checked and genuinely nothing there"
+    convention _fetch_disqualifying_soil_union() uses. A road fetch
+    failure (network exhausted, every ROAD_LAYERS query failing) is left
+    to propagate up UNCAUGHT -- this function does no exception handling
+    of its own; callers degrade gracefully the same way they already do
+    for the hydric-soil fetch (see production_area._ROAD_CHECK_UNCHECKED).
+    """
+    roads = get_farm_roads_for_boundary(boundary_coordinates)
+    if not roads:
+        return None
+
+    buffered_pieces = [
+        shape(transform_geom("EPSG:4326", dem["crs"], road["geometry"])).buffer(buffer_meters) for road in roads
+    ]
+    union = unary_union(buffered_pieces)
+    return union if not union.is_empty else None
 
 
 def get_farm_roads_geojson(

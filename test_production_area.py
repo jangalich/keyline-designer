@@ -14,11 +14,12 @@ already reads).
 Runs against small synthetic DEMs built by hand, same "pure logic,
 independent of real data fetches" philosophy as the rest of this
 pipeline's tests. identify_production_areas() defaults to check_soil=True
-(it does its own disqualifying-soil fetch, gracefully degrading on
-failure) -- every test below that isn't specifically about the hydric
-gate passes check_soil=False to stay fully offline, same convention
-identify_optimized_production_areas()/identify_production_area_
-suitability() already established elsewhere in this pipeline.
+and check_roads=True (it does its own disqualifying-soil and existing-
+road fetches, each gracefully degrading on failure) -- every test below
+that isn't specifically about the hydric or road gate passes
+check_soil=False, check_roads=False to stay fully offline, same
+convention identify_optimized_production_areas()/identify_production_
+area_suitability() already established elsewhere in this pipeline.
 
 The woody-vegetation gate, unlike check_soil, is NOT optional (no
 check_canopy flag exists -- see production_area.identify_production_
@@ -232,7 +233,7 @@ for row in range(size):
     for col in range(size):
         array[row, col] = 100.0 if row < 15 else 100.0 + (row - 14) * 5.0
 
-patches = identify_production_areas(_dem(array), FULL_EXTENT_BOUNDARY, check_soil=False)
+patches = identify_production_areas(_dem(array), FULL_EXTENT_BOUNDARY, check_soil=False, check_roads=False)
 assert len(patches) == 1, f"expected exactly 1 production-area patch, got {len(patches)}"
 patch = patches[0]
 assert patch["representative_elevation_m"] == 100.0, (
@@ -249,14 +250,14 @@ print(
 )
 
 huge_area_threshold = patch["area_acres"] * 100
-assert identify_production_areas(_dem(array), FULL_EXTENT_BOUNDARY, min_area_acres=huge_area_threshold, check_soil=False) == []
+assert identify_production_areas(_dem(array), FULL_EXTENT_BOUNDARY, min_area_acres=huge_area_threshold, check_soil=False, check_roads=False) == []
 print("Raising min_area_acres above the found patch's size correctly drops it.")
 
 
 # --- regression: candidates are clipped to the real parcel boundary, not the buffered DEM extent ---
 
 west_half_boundary = box(500000.0, 4500000.0 - 30 * 5.0, 500075.0, 4500000.0)
-west_half_patches = identify_production_areas(_dem(array), west_half_boundary, check_soil=False)
+west_half_patches = identify_production_areas(_dem(array), west_half_boundary, check_soil=False, check_roads=False)
 assert len(west_half_patches) == 1, (
     f"expected the bench to still qualify as a (smaller) candidate on the west-half boundary, "
     f"got {len(west_half_patches)} patch(es)"
@@ -283,7 +284,7 @@ print(
 )
 
 disjoint_boundary = box(600000.0, 4600000.0, 600100.0, 4600100.0)
-disjoint_patches = identify_production_areas(_dem(array), disjoint_boundary, check_soil=False)
+disjoint_patches = identify_production_areas(_dem(array), disjoint_boundary, check_soil=False, check_roads=False)
 assert disjoint_patches == [], (
     f"a boundary that doesn't overlap the DEM at all should drop every candidate entirely, "
     f"got {len(disjoint_patches)} patch(es)"
@@ -291,7 +292,7 @@ assert disjoint_patches == [], (
 print("Parcel clipping: a boundary entirely off the DEM's extent correctly drops every candidate (0% on-parcel).")
 
 sliver_boundary = box(500000.0, 4500000.0 - 30 * 5.0, 500002.0, 4500000.0)  # 2m wide sliver of the bench
-sliver_patches = identify_production_areas(_dem(array), sliver_boundary, check_soil=False)
+sliver_patches = identify_production_areas(_dem(array), sliver_boundary, check_soil=False, check_roads=False)
 assert sliver_patches == [], (
     f"a boundary clipping the bench down to a sliver below MIN_PRODUCTION_AREA_ACRES should drop it, "
     f"got {len(sliver_patches)} patch(es)"
@@ -367,6 +368,68 @@ print(
     f"overlapping cells ({eligible_before - partial_eligible} of {eligible_before}), leaving the eastern half "
     "intact as one clean surviving cluster -- a partial wet inclusion doesn't veto the whole region."
 )
+
+
+# =====================================================================
+# STEP 1 cell-level existing-road exclusion: same shapely-polygon-union-plus-
+# per-cell-.contains() pattern as hydric soil above (NOT canopy's raster
+# dilation) -- road_exclusion_union_utm follows disqualifying_soil_union_utm's
+# EXACT convention, including the real-None-means-checked-and-clean state.
+# =====================================================================
+
+road_full_bench = box(500000.0, 4500000.0 - 15 * 5.0, 500000.0 + 30 * 5.0, 4500000.0)  # same footprint as hydric_half
+
+step1_road_unchecked = compute_step1_eligible_cells(_dem(array), FULL_EXTENT_BOUNDARY)
+assert step1_road_unchecked["road_data_available"] is False, "omitting road_exclusion_union_utm must read as 'never checked'"
+assert np.array_equal(step1_road_unchecked["eligible_mask"], step1_road_unchecked["slope_only_mask"])
+print("compute_step1_eligible_cells(): omitting the road exclusion union reads as 'never checked' and excludes nothing (degrades gracefully).")
+
+step1_road_clean = compute_step1_eligible_cells(_dem(array), FULL_EXTENT_BOUNDARY, road_exclusion_union_utm=None)
+assert step1_road_clean["road_data_available"] is True
+assert np.array_equal(step1_road_clean["eligible_mask"], step1_road_clean["slope_only_mask"]), (
+    "a real, checked, but empty (None) road exclusion union must exclude nothing"
+)
+print("compute_step1_eligible_cells(): a checked-and-clean (None) road exclusion union excludes nothing.")
+
+step1_road_full = compute_step1_eligible_cells(_dem(array), FULL_EXTENT_BOUNDARY, road_exclusion_union_utm=road_full_bench)
+assert step1_road_full["road_data_available"] is True
+road_eligible_before = int(step1_road_full["slope_only_mask"].sum())
+road_eligible_after = int(step1_road_full["eligible_mask"].sum())
+assert road_eligible_after == 0, (
+    f"the road exclusion polygon covers exactly the flat bench's own rows -- every slope-eligible cell should be "
+    f"excluded, but {road_eligible_after} remain"
+)
+assert int(step1_road_full["road_hit"].sum()) == road_eligible_before, "road_hit must mark every excluded cell"
+print(
+    f"compute_step1_eligible_cells(): a road exclusion union covering the entire slope-eligible bench correctly "
+    f"excludes all {road_eligible_before} of its cells at the cell level, before any clustering happens."
+)
+
+road_west_of_bench = box(500000.0, 4500000.0 - 15 * 5.0, 500000.0 + 15 * 5.0, 4500000.0)
+step1_road_partial = compute_step1_eligible_cells(_dem(array), FULL_EXTENT_BOUNDARY, road_exclusion_union_utm=road_west_of_bench)
+road_partial_eligible = int(step1_road_partial["eligible_mask"].sum())
+assert 0 < road_partial_eligible < road_eligible_before, (
+    f"a road exclusion polygon covering only the west half of the bench should exclude some, but not all, of its "
+    f"cells, got {road_partial_eligible} of {road_eligible_before} remaining eligible"
+)
+print(
+    f"compute_step1_eligible_cells(): a PARTIAL road exclusion overlap (west half of the bench) excludes only the "
+    f"overlapping cells ({road_eligible_before - road_partial_eligible} of {road_eligible_before}), leaving the "
+    "eastern half eligible -- a partial road overlap doesn't veto the whole region."
+)
+
+# --- combined gate stack: hydric AND road exclusion both apply simultaneously, disjoint halves ---
+step1_combined = compute_step1_eligible_cells(
+    _dem(array),
+    FULL_EXTENT_BOUNDARY,
+    disqualifying_soil_union_utm=hydric_west_of_bench,
+    road_exclusion_union_utm=road_west_of_bench,
+)
+assert int(step1_combined["eligible_mask"].sum()) == road_partial_eligible, (
+    "hydric and road exclusion covering the exact same west-half footprint should exclude the same cells whether "
+    "applied by one gate or both together -- combining them must not double-exclude or under-exclude"
+)
+print("compute_step1_eligible_cells(): hydric-soil and road-exclusion gates combine correctly (both applied, no double-counting).")
 
 
 # =====================================================================
@@ -466,10 +529,40 @@ print(
 # canopy gate too -- this test is specifically about the hydric-gate integration (soil fetch mocked
 # above), not the canopy gate, which has its own dedicated tests/mocking in test_canopy_height_data.py.
 with mock_patch.object(pa, "_fetch_disqualifying_soil_union", lambda wkt, dem: jagged_hydric_union):
-    end_to_end_patches = identify_production_areas(strip_dem, strip_boundary, check_soil=True)
+    end_to_end_patches = identify_production_areas(strip_dem, strip_boundary, check_soil=True, check_roads=False)
 assert len(end_to_end_patches) == 1
 assert abs(end_to_end_patches[0]["area_acres"] - recovered_acres) < 0.01
 print("identify_production_areas() end-to-end (soil fetch mocked) reaches the identical, non-fragmented result.")
+
+
+# =====================================================================
+# identify_production_areas(): check_roads works end-to-end, and -- unlike the
+# mandatory canopy gate -- degrades GRACEFULLY on fetch failure rather than raising.
+# =====================================================================
+
+with mock_patch.object(pa, "get_road_exclusion_union_utm", lambda boundary_coordinates, dem: road_full_bench):
+    end_to_end_road_patches = identify_production_areas(_dem(array), FULL_EXTENT_BOUNDARY, check_soil=False, check_roads=True)
+assert end_to_end_road_patches == [], (
+    "identify_production_areas() end-to-end: a mocked road exclusion covering the entire slope-eligible bench "
+    "should leave zero surviving patches, same conclusion as the direct compute_step1_eligible_cells() check above"
+)
+print("identify_production_areas(): a real (mocked) road exclusion union is correctly wired through end-to-end.")
+
+
+def _raise_road_network_failure(boundary_coordinates, dem):
+    raise RuntimeError("simulated: road fetch retries exhausted")
+
+
+with mock_patch.object(pa, "get_road_exclusion_union_utm", _raise_road_network_failure):
+    degraded_patches = identify_production_areas(_dem(array), FULL_EXTENT_BOUNDARY, check_soil=False, check_roads=True)
+assert len(degraded_patches) == 1, (
+    "unlike the canopy gate, a road fetch failure must degrade GRACEFULLY (slope-only eligibility), not raise or "
+    "crash identify_production_areas()"
+)
+print(
+    "identify_production_areas(): a road fetch failure degrades gracefully (unlike the mandatory canopy gate) -- "
+    "no exception, proceeds without the road exclusion."
+)
 
 
 # =====================================================================

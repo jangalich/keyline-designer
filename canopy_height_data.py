@@ -118,9 +118,9 @@ CANOPY_HEIGHT_THRESHOLD_METERS = 4.5  # 15 ft
 
 # How far past a tree cell's own footprint its root zone is presumed to
 # extend, for the buffer this module dilates the thresholded tree mask
-# by. 50ft, CONFIGURABLE -- a starting value, not a measured root-radius
+# by. 10ft, CONFIGURABLE -- a starting value, not a measured root-radius
 # figure.
-TREE_ROOT_ZONE_BUFFER_METERS = 50 * METERS_PER_FOOT  # ~15.24m
+TREE_ROOT_ZONE_BUFFER_METERS = 10 * METERS_PER_FOOT  # ~3.048m
 
 # Max percent of ON-PARCEL cells (see _on_parcel_nan_fraction()) that may
 # be nodata in the clipped/reprojected HAG array before this module treats

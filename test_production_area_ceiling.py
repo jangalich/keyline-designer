@@ -258,7 +258,7 @@ corner_xs, corner_ys = [minx, maxx, maxx, minx, minx], [miny, miny, maxy, maxy, 
 lons, lats = warp_transform(CRS, "EPSG:4326", corner_xs, corner_ys)
 boundary_coords = list(zip(lons, lats))
 
-result = pac.identify_optimized_production_areas(boundary_coords, dem=dem_band, check_soil=False)
+result = pac.identify_optimized_production_areas(boundary_coords, dem=dem_band, check_soil=False, check_roads=False)
 required_top_level = {
     "zones_geojson", "scored_patches", "total_selected_acreage", "percent_of_parcel",
     "production_ceiling_target_met", "total_cells_removed",
@@ -312,7 +312,7 @@ def _fake_soil_geometries(wkt_polygon):
 
 with mock_patch.object(pa, "get_soil_data_for_polygon", _fake_soil_rows), \
      mock_patch.object(pa, "get_soil_geometries_for_polygon", _fake_soil_geometries):
-    carved_result = pac.identify_optimized_production_areas(boundary_coords, dem=dem_band, check_soil=True)
+    carved_result = pac.identify_optimized_production_areas(boundary_coords, dem=dem_band, check_soil=True, check_roads=False)
 
 assert carved_result["scored_patches"], "expected survivors after a mocked partial hydric union"
 total_carved = sum(p["soil_carved_acres"] for p in carved_result["scored_patches"])
@@ -408,11 +408,11 @@ print(
 # --- Full entry point: identify_optimized_production_areas() with real trees present
 #     selects meaningfully less acreage than with the (file-wide, tree-free) default stub. ---
 tree_free_result = pac.identify_optimized_production_areas(
-    canopy_gate_boundary_coords, dem=canopy_gate_dem, check_soil=False, ceiling_pct=100.0
+    canopy_gate_boundary_coords, dem=canopy_gate_dem, check_soil=False, check_roads=False, ceiling_pct=100.0
 )
 with mock_patch.object(pa, "get_canopy_height_for_boundary", _fake_half_tree_canopy):
     half_tree_result = pac.identify_optimized_production_areas(
-        canopy_gate_boundary_coords, dem=canopy_gate_dem, check_soil=False, ceiling_pct=100.0
+        canopy_gate_boundary_coords, dem=canopy_gate_dem, check_soil=False, check_roads=False, ceiling_pct=100.0
     )
 assert half_tree_result["total_selected_acreage"] < tree_free_result["total_selected_acreage"], (
     f"a boundary with real tree cover over its west half must select LESS acreage than the same boundary "
@@ -435,7 +435,7 @@ print(
 # --- no HAG coverage at all (None) -> RuntimeError ---
 with mock_patch.object(pa, "get_canopy_height_for_boundary", lambda boundary_coordinates, dem: None):
     try:
-        pac.identify_optimized_production_areas(canopy_gate_boundary_coords, dem=canopy_gate_dem, check_soil=False)
+        pac.identify_optimized_production_areas(canopy_gate_boundary_coords, dem=canopy_gate_dem, check_soil=False, check_roads=False)
         raised_none = None
     except Exception as e:
         raised_none = e
@@ -455,7 +455,7 @@ def _raise_ceiling_network_failure(boundary_coordinates, dem):
 # --- a fetch exception propagates UNCHANGED -- not swallowed, not converted, not softened ---
 with mock_patch.object(pa, "get_canopy_height_for_boundary", _raise_ceiling_network_failure):
     try:
-        pac.identify_optimized_production_areas(canopy_gate_boundary_coords, dem=canopy_gate_dem, check_soil=False)
+        pac.identify_optimized_production_areas(canopy_gate_boundary_coords, dem=canopy_gate_dem, check_soil=False, check_roads=False)
         raised_network = None
     except Exception as e:
         raised_network = e
@@ -466,6 +466,80 @@ assert isinstance(raised_network, _FakeCeilingCanopyFailure), (
 print(
     "identify_optimized_production_areas(): a canopy fetch exception propagates unchanged rather than being "
     "caught or softened into a second, more lenient behavior for this entry point."
+)
+
+
+# =====================================================================
+# Regression: identify_optimized_production_areas()/optimize_production_areas() must
+# apply the SAME existing-road exclusion gate production_area.identify_production_areas()
+# does -- the same "confirm production_area_ceiling.py isn't left calling the shared
+# function with this parameter omitted" concern the canopy/boundary-setback wiring above
+# already covers, now for road_exclusion_union_utm. Both entry points route through
+# production_area._fetch_road_exclusion_union_utm() -> production_area.get_road_exclusion_
+# union_utm() (imported from farm_roads_data), so a single mock on pa.get_road_exclusion_
+# union_utm covers both -- same reasoning as the canopy mock above.
+# =====================================================================
+
+road_gate_south_half_union = box(
+    500000.0, 4500000.0, 500000.0 + canopy_gate_extent, 4500000.0 + canopy_gate_extent / 2
+)  # south half of canopy_gate_dem's own footprint
+
+step1_road_via_direct_call = pa.compute_step1_eligible_cells(
+    canopy_gate_dem, canopy_gate_boundary_utm, disqualifying_soil_union_utm=None, road_exclusion_union_utm=road_gate_south_half_union
+)
+optimized_road_via_ceiling = pac.optimize_production_areas(
+    canopy_gate_dem,
+    canopy_gate_boundary_utm,
+    disqualifying_soil_union_utm=None,
+    ceiling_pct=100.0,
+    road_exclusion_union_utm=road_gate_south_half_union,
+)
+assert np.array_equal(step1_road_via_direct_call["eligible_mask"], optimized_road_via_ceiling["step1"]["eligible_mask"]), (
+    "production_area_ceiling.optimize_production_areas() must produce the SAME STEP 1 eligible-cell mask as "
+    "production_area.compute_step1_eligible_cells() when fed the identical road exclusion union"
+)
+assert int(optimized_road_via_ceiling["step1"]["road_hit"].sum()) > 0, (
+    "the road exclusion gate must have actually excluded some cells here, not just been present and inert"
+)
+print(
+    "Regression: production_area_ceiling.optimize_production_areas(), fed the same road exclusion union, produces "
+    f"the IDENTICAL STEP 1 eligible-cell mask production_area.compute_step1_eligible_cells() does -- "
+    f"{int(optimized_road_via_ceiling['step1']['road_hit'].sum())} cells genuinely excluded by the road gate."
+)
+
+# --- full entry point: identify_optimized_production_areas() applies real road exclusion too ---
+with mock_patch.object(pa, "get_road_exclusion_union_utm", lambda boundary_coordinates, dem: road_gate_south_half_union):
+    road_excluded_result = pac.identify_optimized_production_areas(
+        canopy_gate_boundary_coords, dem=canopy_gate_dem, check_soil=False, check_roads=True, ceiling_pct=100.0
+    )
+assert road_excluded_result["total_selected_acreage"] < tree_free_result["total_selected_acreage"], (
+    f"a boundary with real road exclusion present must select LESS acreage than the same boundary with roads "
+    f"unchecked ({road_excluded_result['total_selected_acreage']} vs {tree_free_result['total_selected_acreage']}) "
+    "-- if these are equal, the road exclusion gate isn't actually wired into this entry point"
+)
+print(
+    f"Regression: identify_optimized_production_areas() selects meaningfully less acreage with real road "
+    f"exclusion present ({road_excluded_result['total_selected_acreage']} ac) than without it "
+    f"({tree_free_result['total_selected_acreage']} ac) -- the road gate is genuinely active on this entry point."
+)
+
+
+def _raise_road_ceiling_failure(boundary_coordinates, dem):
+    raise RuntimeError("simulated: road fetch retries exhausted")
+
+
+# --- road fetch failure degrades gracefully here too (unlike canopy) -- no exception ---
+with mock_patch.object(pa, "get_road_exclusion_union_utm", _raise_road_ceiling_failure):
+    road_degraded_result = pac.identify_optimized_production_areas(
+        canopy_gate_boundary_coords, dem=canopy_gate_dem, check_soil=False, check_roads=True, ceiling_pct=100.0
+    )
+assert road_degraded_result["total_selected_acreage"] == tree_free_result["total_selected_acreage"], (
+    "unlike the canopy gate, a road fetch failure must degrade GRACEFULLY (same result as check_roads=False), "
+    "not raise or crash identify_optimized_production_areas()"
+)
+print(
+    "identify_optimized_production_areas(): a road fetch failure degrades gracefully (unlike the mandatory "
+    "canopy gate) -- no exception, proceeds without the road exclusion."
 )
 
 

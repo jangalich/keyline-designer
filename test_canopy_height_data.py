@@ -419,7 +419,7 @@ _hard_gate_boundary = box(
 def _run_hard_gate(fake_get_canopy_height_for_boundary):
     with mock_patch.object(pa, "get_canopy_height_for_boundary", fake_get_canopy_height_for_boundary):
         try:
-            result = pa.identify_production_areas(_hard_gate_dem, _hard_gate_boundary, check_soil=False)
+            result = pa.identify_production_areas(_hard_gate_dem, _hard_gate_boundary, check_soil=False, check_roads=False)
             return result, None
         except Exception as e:
             return None, e

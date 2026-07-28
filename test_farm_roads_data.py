@@ -22,10 +22,12 @@ import requests
 
 import farm_roads_data
 from farm_roads_data import (
+    ROAD_EXCLUSION_BUFFER_METERS,
     ROAD_LAYERS,
     _deduplicate_road_features,
     _query_road_layer,
     get_farm_roads_for_boundary,
+    get_road_exclusion_union_utm,
 )
 
 BBOX = (-80.0, 40.6, -79.9, 40.7)
@@ -145,5 +147,66 @@ duplicate_features = [_feature("N Montour Rd", LINE_A), _feature("N Montour Rd",
 deduped = _deduplicate_road_features(duplicate_features)
 assert len(deduped) == 2, f"expected the exact-geometry duplicate dropped, got {len(deduped)} feature(s)"
 print("_deduplicate_road_features drops exact-geometry duplicates while keeping distinct segments.")
+
+# =====================================================================
+# get_road_exclusion_union_utm(): buffers+unions get_farm_roads_for_boundary()'s
+# own fetch into a single polygon in dem['crs'] -- the shapely-polygon-union
+# input production_area.compute_step1_eligible_cells() tests each eligible
+# cell's own center point against (the SAME pattern hydric soil already
+# uses there, NOT canopy_height_data.py's raster-dilation approach -- road
+# data is already clean vector geometry, not derived from a raster source).
+# =====================================================================
+
+ROAD_EXCLUSION_DEM = {
+    "resolution_meters": (5.0, 5.0),
+    "origin_x": 500000.0,
+    "origin_y": 4500000.0,
+    "crs": "EPSG:32617",
+}
+
+# --- no roads found nearby -> None (the common, clean case, not an error) ---
+with patch.object(farm_roads_data, "get_farm_roads_for_boundary", lambda boundary_coordinates: []):
+    no_roads_union = get_road_exclusion_union_utm(boundary, ROAD_EXCLUSION_DEM)
+assert no_roads_union is None, "no roads found nearby must return None, same convention as _fetch_disqualifying_soil_union()"
+print("get_road_exclusion_union_utm(): no roads found nearby correctly returns None.")
+
+# --- ROAD_EXCLUSION_BUFFER_METERS default (0.0): buffering a LineString by 0 yields an
+#     empty geometry, so the exclusion union is empty -> None (a documented, deliberate
+#     consequence of the 0.0 default -- see that constant's own comment). ---
+assert ROAD_EXCLUSION_BUFFER_METERS == 0.0, (
+    f"this test documents the CURRENT default's consequence -- update it if "
+    f"ROAD_EXCLUSION_BUFFER_METERS (currently {ROAD_EXCLUSION_BUFFER_METERS}) is ever retuned off exactly 0.0"
+)
+with patch.object(farm_roads_data, "get_farm_roads_for_boundary", lambda boundary_coordinates: [{"name": "N Montour Rd", "geometry": LINE_A}]):
+    zero_buffer_union = get_road_exclusion_union_utm(boundary, ROAD_EXCLUSION_DEM)
+assert zero_buffer_union is None, (
+    "at the 0.0 default buffer, a real road line still produces an empty (zero-area) buffered union, "
+    "which must read as None -- this gate is a documented no-op until a real buffer value is set"
+)
+print("get_road_exclusion_union_utm(): the 0.0 default buffer produces an empty union (None) even with a real road present.")
+
+# --- a real, nonzero buffer produces a real polygon, reprojected into dem['crs'] ---
+with patch.object(farm_roads_data, "get_farm_roads_for_boundary", lambda boundary_coordinates: [{"name": "N Montour Rd", "geometry": LINE_A}]):
+    buffered_union = get_road_exclusion_union_utm(boundary, ROAD_EXCLUSION_DEM, buffer_meters=10.0)
+assert buffered_union is not None and not buffered_union.is_empty
+assert buffered_union.geom_type in ("Polygon", "MultiPolygon")
+assert buffered_union.area > 0
+print(
+    f"get_road_exclusion_union_utm(): a real road line buffered by 10m produces a real "
+    f"{buffered_union.geom_type} ({buffered_union.area:.1f} sq m) in the DEM's own CRS."
+)
+
+# --- multiple road lines union into one combined polygon, not separately returned ---
+with patch.object(
+    farm_roads_data,
+    "get_farm_roads_for_boundary",
+    lambda boundary_coordinates: [{"name": "N Montour Rd", "geometry": LINE_A}, {"name": "S Montour Rd", "geometry": LINE_B}],
+):
+    two_road_union = get_road_exclusion_union_utm(boundary, ROAD_EXCLUSION_DEM, buffer_meters=10.0)
+assert two_road_union is not None and two_road_union.area > buffered_union.area, (
+    "unioning a second, disjoint road line should produce strictly more excluded area than just the first"
+)
+print("get_road_exclusion_union_utm(): multiple fetched road lines union into a single combined exclusion polygon.")
+
 
 print("\nAll farm_roads_data checks passed.")
