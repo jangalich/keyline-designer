@@ -1,45 +1,55 @@
 """
 water_candidate_zones.py
 
-Step 3 of valley-based water-system candidate-zone identification: for
-each primary valley (valley_delineation.py) and each candidate production
-area it could plausibly serve (production_area.py), finds the portion of
-that valley within plausible service distance of a production area,
-excludes anything too close to the property boundary to actually develop,
-and outputs the qualifying segment(s) as a buffered zone polygon — a zone,
-not a point. Finding one "best" pond/dam site within that zone is
-explicitly out of scope here (see the confidence_notes on the output
-feature) — that's future, separate, more detailed work (storage volume,
-dam wall geometry).
+Step 3 of water-system candidate-zone identification: a purely cell-based
+eligibility mask + real cell-union footprint, mirroring the pattern
+production_area.py's own pipeline uses (eligibility mask -> connected
+components -> per-cell-square union geometry, not a smoothed buffer or
+convex hull) -- see compute_water_eligible_cells()'s docstring.
 
     DEM (dem_data.py)
-        --> valleys (valley_delineation.py)
+        --> raw flow-accumulation grid (valley_delineation.
+            get_flow_accumulation_for_dem() -- the same grid
+            delineate_valleys() thresholds/traces internally)
         --> production areas (production_area.py)
-        --> [this module] service-distance + boundary-setback filtering
-        --> buffered candidate-zone polygons, one per qualifying valley
+        --> [this module] per-DEM-cell eligibility mask (contributing
+            area + service distance + boundary setback)
+        --> connected components -> cell-union footprint per cluster
+        --> candidate-zone polygons, one per qualifying cluster
+
+This REPLACES the earlier per-traced-valley-branch line-walk entirely:
+there is no valley/branch identity carried into a zone anymore. A zone is
+now just "a connected cluster of individually-eligible DEM cells" --
+exactly the same "cluster's own connectivity defines it" logic
+production_area.py's clusters already use, just applied to a different
+per-cell eligibility test. Finding one "best" pond/dam site within that
+zone is explicitly out of scope here (see the confidence_notes on the
+output feature) -- that's future, separate, more detailed work (storage
+volume, dam wall geometry).
 
 Elevation relative to the production area(s) a zone could serve is NOT a
-generation-time exclusion here — it used to be (a hard "must clear
+generation-time exclusion here -- it used to be (a hard "must clear
 MIN_GRAVITY_GRADIENT" gate), but that discarded genuinely well-suited
 water-system ground before scoring ever got to weigh it: a site that's
 otherwise excellent but sits below its nearest production area (requiring
-a pump) is a real, valid candidate — a pump is a cost/maintenance
+a pump) is a real, valid candidate -- a pump is a cost/maintenance
 tradeoff, not a disqualification. This module instead computes and
 attaches the raw elevation-differential/gradient data for every candidate
 zone's relationship to each production area it could plausibly serve
 (see production_area_relationships below), and leaves turning that into a
-"gravity is preferred" SCORE to water_suitability.py — the same
+"gravity is preferred" SCORE to water_suitability.py -- the same
 gate-to-preference move production_suitability.py already made for soil
 (see that module's own docstring) and solar_suitability.py already made
 for production-zone proximity.
 
-find_candidate_zones() below is deliberately a pure function over already-
-computed valleys/production_areas/boundary — no DEM fetch, no network.
-That split is what makes Stage 2 ("is the zone-filtering logic correct")
-testable independently of Stage 1 ("is the DEM/valley delineation
-accurate") — see test_water_candidate_zones.py, and the module docstrings
-on dem_data.py/valley_delineation.py/production_area.py for the same
-reasoning applied to the layers underneath this one.
+find_candidate_zones() below is deliberately a pure function over an
+already-fetched dem plus already-computed production_areas/boundary -- no
+DEM fetch, no network. That split is what makes Stage 2 ("is the
+zone-filtering logic correct") testable independently of Stage 1 ("is the
+DEM/valley delineation accurate") -- see test_water_candidate_zones.py,
+and the module docstrings on dem_data.py/valley_delineation.py/
+production_area.py for the same reasoning applied to the layers underneath
+this one.
 """
 
 from typing import Optional
@@ -47,13 +57,14 @@ from typing import Optional
 import numpy as np
 from rasterio.warp import transform as warp_transform
 from rasterio.warp import transform_geom
-from shapely.geometry import LineString, Point, Polygon, mapping
-from shapely.ops import unary_union
+from shapely.geometry import Point, Polygon, mapping
+from shapely.prepared import prep
 
 from dem_data import get_dem_for_boundary
 from feature_schema import CONFIDENCE_LOW, make_feature, make_feature_collection
 from production_area import identify_production_areas, production_areas_to_geojson
-from valley_delineation import delineate_valleys, valleys_to_geojson
+from raster_grid import SQUARE_METERS_PER_ACRE, cell_area_acres, cell_union_footprint, connected_components, pixel_center_xy
+from valley_delineation import delineate_valleys, get_flow_accumulation_for_dem, valleys_to_geojson
 
 # Zones within this distance of the property boundary are excluded even
 # if geometrically valid — too close to the property line to realistically
@@ -61,24 +72,24 @@ from valley_delineation import delineate_valleys, valleys_to_geojson
 # pipeline has no data on). CONFIGURABLE.
 MIN_BOUNDARY_SETBACK_METERS = 15.0
 
-# How far downhill a valley point's elevation advantage is considered
+# How far downhill a candidate cell's elevation advantage is considered
 # relevant to a given production-area patch at all. Beyond this, even a
 # technically-qualifying gradient isn't a plausible single contour-channel
 # run. CONFIGURABLE.
 MAX_SERVICE_DISTANCE_METERS = 800.0
 
-# Guards against a valley point sitting immediately adjacent to (but
+# Guards against a candidate cell sitting immediately adjacent to (but
 # genuinely OUTSIDE) a production-area patch, where "above by X% grade
 # over Y meters" no longer means anything (Y too small to be meaningful).
-# Deliberately NOT applied to a point already INSIDE/touching a patch
-# (distance == 0 — see _elevation_relationships_for_branch()): that guard
-# is about rejecting a near-but-separate siting as too close for the
+# Deliberately NOT applied to a cell already INSIDE/touching a patch
+# (distance == 0 — see compute_water_eligible_cells()): that guard is
+# about rejecting a near-but-separate siting as too close for the
 # distance math to mean anything, not about rejecting siting inside the
 # production area at all. That distinction is real, not academic — a
 # single production-area patch can legitimately cover most of a parcel
 # (production_area.py's own slope threshold, confirmed live: ~95% of one
 # real reference property), and a strict "distance < 10m is always too
-# close" reading would then reject nearly every valley point on that
+# close" reading would then reject nearly every candidate cell on that
 # property outright, since almost everywhere on it genuinely IS inside
 # that one patch. Same "gate becomes a genuinely-inapplicable rule at this
 # property's real scale, fix it, don't just re-tune the number" pattern as
@@ -86,80 +97,147 @@ MAX_SERVICE_DISTANCE_METERS = 800.0
 # exclusion fixes documented in README.md. CONFIGURABLE.
 MIN_SERVICE_DISTANCE_METERS = 10.0
 
-# Half-width of the buffered zone band drawn around each qualifying valley
-# segment — deliberately a zone/band, not the valley centerline itself,
-# per the "zone, not a point" framing of this whole feature. CONFIGURABLE.
-ZONE_BUFFER_METERS = 20.0
+# Minimum upstream contributing area for a DEM cell to count as sitting on
+# a genuine drainage feature at all, replacing the old "is this cell near
+# a traced valley branch LINE" test. Mirrors valley_delineation.py's own
+# MIN_STREAM_CONTRIBUTING_AREA_ACRES stream threshold (same reasoning:
+# concentrated flow, not diffuse sheet flow off a slope) but kept as a
+# separate, independently-tunable constant since this module's use case
+# (water-system siting) doesn't have to move in lockstep with
+# valley_delineation.py's own general-purpose valley threshold.
+# CONFIGURABLE — tune against your own property.
+MIN_VALLEY_CONTRIBUTING_AREA_ACRES = 0.5
+
+# Drop tiny, noise-sized eligible-cell clusters below this real cell-union
+# footprint area. A small first-pass default, deliberately NOT yet
+# validated against a real property the way production_area.py's own
+# MIN_PRODUCTION_AREA_ACRES has been — tune once ground-truthed.
+# CONFIGURABLE.
+MIN_WATER_ZONE_AREA_ACRES = 0.1
 
 WATER_SYSTEM_CANDIDATE_CONFIDENCE_NOTES = (
     "This identifies a general candidate zone for water-system "
     "infrastructure (keyline plowing patterns, pond/dam potential, ram "
-    "pump routing) — a stretch of valley within plausible service "
-    "distance of a candidate production area, outside the boundary "
-    "setback. Elevation relative to that production area is NOT a "
-    "generation-time filter here: a candidate sitting BELOW its nearest "
-    "production area (which would need a pump to deliver water uphill) is "
-    "still reported, same as one sitting comfortably above it (which "
-    "could gravity-feed) — see properties.production_area_relationships "
-    "for the real elevation differential/gradient this candidate was "
-    "measured against, and water_suitability.py for how that's turned "
-    "into a real, weighted preference score rather than a pass/fail gate. "
-    "This is NOT a specific pond or dam site: actual siting requires "
-    "separate, more detailed analysis (storage volume, dam wall geometry, "
-    "spillway design) not covered here. It also inherits the limitations "
-    "of the layers it's built on — DEM-derived valley delineation and a "
+    "pump routing) — a connected cluster of DEM cells, each individually "
+    "on a genuine drainage feature and within plausible service distance "
+    "of a candidate production area, outside the boundary setback. "
+    "Elevation relative to that production area is NOT a generation-time "
+    "filter here: a candidate sitting BELOW its nearest production area "
+    "(which would need a pump to deliver water uphill) is still reported, "
+    "same as one sitting comfortably above it (which could gravity-feed) "
+    "— see properties.production_area_relationships for the real "
+    "elevation differential/gradient this candidate was measured against, "
+    "and water_suitability.py for how that's turned into a real, weighted "
+    "preference score rather than a pass/fail gate. This is NOT a "
+    "specific pond or dam site: actual siting requires separate, more "
+    "detailed analysis (storage volume, dam wall geometry, spillway "
+    "design) not covered here. It also inherits the limitations of the "
+    "layers it's built on — DEM-derived flow accumulation and a "
     "slope-only production-area heuristic — so treat this as a starting "
     "area to walk and ground-truth, not a final answer."
 )
 
 
-def _elevation_relationships_for_branch(
-    branch_utm: list[tuple[float, float, float]],
+def compute_water_eligible_cells(
+    dem: dict,
     production_areas: list[dict],
-    max_service_distance: float,
-    min_service_distance: float,
-) -> list[tuple[float, float, float, Optional[dict]]]:
+    boundary_polygon_utm: Polygon,
+    min_valley_contributing_area_acres: float = MIN_VALLEY_CONTRIBUTING_AREA_ACRES,
+    max_service_distance_meters: float = MAX_SERVICE_DISTANCE_METERS,
+    min_service_distance_meters: float = MIN_SERVICE_DISTANCE_METERS,
+    min_boundary_setback_meters: float = MIN_BOUNDARY_SETBACK_METERS,
+) -> tuple[np.ndarray, dict[tuple[int, int], dict]]:
     """
-    For each (x, y, elevation) point along a valley branch, finds the
-    production area (within the plausible service-distance window) with
-    the most GRAVITY-FAVORABLE elevation relationship to that point —
-    "best" = the largest elevation_differential_m, whether or not it's
-    actually above the production area. This is a real measurement, not a
-    qualification check: no minimum gradient is required to be tagged here
-    (see module docstring for why gravity moved from a generation-time
-    gate to a water_suitability.py scoring input).
+    Cell-based STEP 1/2: computes the raw flow-accumulation grid directly
+    from `dem` (valley_delineation.get_flow_accumulation_for_dem() — the
+    same contributing-cell-count grid delineate_valleys() thresholds/
+    traces internally, recomputed here rather than reusing a traced
+    branch) and gates each cell on THREE independent checks, ALL of which
+    must pass for a cell to be eligible:
 
-    min_service_distance is only applied to a point genuinely OUTSIDE a
-    patch's own polygon (distance > 0) — a point already inside/touching
-    the patch (distance == 0) is never rejected by it. Real bug, found
-    live: with a single production-area patch covering ~95% of a real
-    reference property, "distance < 10m is too close" rejected every
-    valley point on that property outright, since a point genuinely
-    inside a patch that large has nowhere else to be relative to it.
-    MIN_SERVICE_DISTANCE_METERS exists to reject a near-but-SEPARATE
-    siting (where "above by X% grade over Y meters" stops meaning
-    anything for Y too small) — it was never meant to reject siting
-    INSIDE the production area entirely, and shouldn't, per this whole
-    feature's "elevation/proximity is a preference, not a gate" direction
-    (see module docstring): a water zone genuinely inside/adjacent to the
-    production area it serves is a legitimate, common real-world
-    scenario, the same way solar_suitability.py now allows a structure
-    candidate to sit fully inside a production zone.
+      1. Contributing area at that cell — converted from the raw
+         cell-count grid to acres via cell_area_acres(dem), since
+         get_flow_accumulation_for_dem() returns a cell-count grid, not an
+         area — meets min_valley_contributing_area_acres. This replaces
+         the old "is this cell near a traced valley branch LINE" test
+         with "is this cell genuinely part of a drainage feature," with
+         no valley/branch identity involved at all: a cell qualifies (or
+         doesn't) purely on its own local flow accumulation.
 
-    Returns the same points, each tagged with either the closest-to-
-    gravity-favorable patch relationship
-    ({'id', 'elevation_differential_m', 'distance_m'}) or None (no
-    production area at all within the service-distance window).
+      2. Within max_service_distance_meters of at least one production
+         area's polygon_utm, and NOT within min_service_distance_meters of
+         it UNLESS the cell is already inside/touching that patch
+         (distance == 0). Real bug, found live and fixed for the old
+         per-branch-point version of this same check: with a single
+         production-area patch covering ~95% of a real reference
+         property, "distance < min_service_distance is too close" rejected
+         every point on that property outright, since a point genuinely
+         inside a patch that large has nowhere else to be relative to it.
+         min_service_distance_meters exists to reject a near-but-SEPARATE
+         siting (where "above by X% grade over Y meters" stops meaning
+         anything for Y too small) — it was never meant to reject siting
+         INSIDE the production area entirely, and shouldn't, per this
+         whole feature's "elevation/proximity is a preference, not a
+         gate" direction (see module docstring).
+
+      3. On-parcel (boundary_polygon_utm.contains(cell center)) AND at
+         least min_boundary_setback_meters from boundary_polygon_utm's own
+         boundary.
+
+    Elevation/gradient is deliberately NOT a gate here (see module
+    docstring's "gravity is a preference, not a gate" framing) — do not
+    add a min-gradient or elevation-band exclusion; a cell otherwise
+    eligible is never excluded for sitting below its best-matching
+    production area.
+
+    While gating, each eligible cell is also tagged with its own best
+    (most gravity-favorable) production-area relationship — "best" = the
+    largest elevation_differential_m among production areas within the
+    service-distance window, whether or not it's actually above the
+    production area. This is a real measurement, not a second
+    qualification check: no minimum gradient is required to be tagged.
+
+    Returns (eligible_mask, cell_relationships):
+        eligible_mask: np.ndarray[bool], same shape as dem['array'].
+        cell_relationships: dict mapping each eligible cell's (row, col)
+            to its tagged relationship
+            ({'id', 'elevation_differential_m', 'distance_m'}), so
+            find_candidate_zones() can aggregate it per cluster without
+            recomputing anything after connected-component labeling.
     """
-    results = []
-    for x, y, elevation in branch_utm:
+    flow_accumulation_cells = get_flow_accumulation_for_dem(dem)
+    area_per_cell = cell_area_acres(dem)
+    min_contributing_cells = min_valley_contributing_area_acres / area_per_cell
+    valley_mask = flow_accumulation_cells >= min_contributing_cells
+
+    rows, cols = dem["array"].shape
+    eligible_mask = np.zeros((rows, cols), dtype=bool)
+    cell_relationships: dict[tuple[int, int], dict] = {}
+
+    boundary_prepared = prep(boundary_polygon_utm)
+    boundary_line = boundary_polygon_utm.boundary
+    array = dem["array"]
+
+    for r, c in np.argwhere(valley_mask):
+        r, c = int(r), int(c)
+        elevation = float(array[r, c])
+        if np.isnan(elevation):
+            continue
+
+        x, y = pixel_center_xy(dem, r, c)
         point = Point(x, y)
+
+        if not boundary_prepared.contains(point):
+            continue
+        if point.distance(boundary_line) < min_boundary_setback_meters:
+            continue
+
         best = None
         for patch in production_areas:
             distance = point.distance(patch["polygon_utm"])
-            if distance > max_service_distance:
+            if distance > max_service_distance_meters:
                 continue
-            if 0 < distance < min_service_distance:
+            if 0 < distance < min_service_distance_meters:
                 continue
             elevation_differential_m = elevation - patch["representative_elevation_m"]
             if best is None or elevation_differential_m > best["elevation_differential_m"]:
@@ -168,63 +246,24 @@ def _elevation_relationships_for_branch(
                     "elevation_differential_m": elevation_differential_m,
                     "distance_m": distance,
                 }
-        results.append((x, y, elevation, best))
-    return results
 
+        if best is None:
+            continue
 
-def _runs_of_qualifying_points(
-    tagged_points: list[tuple[float, float, float, Optional[dict]]],
-    boundary_polygon_utm: Polygon,
-    min_boundary_setback: float,
-) -> list[tuple[list[tuple[float, float]], list[dict]]]:
-    """
-    Groups consecutive service-distance-qualifying points along a branch
-    into contiguous runs, additionally dropping any point that's outside
-    the property boundary or within min_boundary_setback of it — a point
-    failing either check breaks the run. Elevation/gradient is NOT part of
-    what breaks a run here (see module docstring) — a point is included as
-    long as some production area is within the service-distance window,
-    regardless of whether that point sits above or below it.
+        eligible_mask[r, c] = True
+        cell_relationships[(r, c)] = best
 
-    Returns a list of (points, relationships) per run — relationships is
-    the parallel list of each included point's tagged patch relationship
-    dict, for water_suitability.py's scoring (and this module's own
-    per-zone aggregation) to consume.
-    """
-    runs = []
-    current_points: list[tuple[float, float]] = []
-    current_relationships: list[dict] = []
-
-    def _flush():
-        if current_points:
-            runs.append((list(current_points), list(current_relationships)))
-
-    for x, y, _elevation, relationship in tagged_points:
-        point = Point(x, y)
-        on_property = boundary_polygon_utm.contains(point)
-        far_enough_from_boundary = (
-            point.distance(boundary_polygon_utm.boundary) >= min_boundary_setback
-        )
-
-        if relationship is not None and on_property and far_enough_from_boundary:
-            current_points.append((x, y))
-            current_relationships.append(relationship)
-        else:
-            _flush()
-            current_points, current_relationships = [], []
-
-    _flush()
-    return runs
+    return eligible_mask, cell_relationships
 
 
 def _aggregate_production_area_relationships(relationships: list[dict]) -> list[dict]:
     """
-    Rolls up the per-point elevation relationships collected across every
-    run/branch contributing to one valley's zone into one entry per served
+    Rolls up the per-cell elevation relationships collected across every
+    cell contributing to one zone's cluster into one entry per served
     production area — the MEDIAN elevation differential/distance across
-    every point that picked that production area as its best match
-    (median, not mean, for the same "resist a single outlier point
-    skewing the reported number" reasoning as production_area.py's own
+    every cell that picked that production area as its best match
+    (median, not mean, for the same "resist a single outlier cell skewing
+    the reported number" reasoning as production_area.py's own
     representative-elevation choice).
 
     Returns a list of:
@@ -268,26 +307,37 @@ def _aggregate_production_area_relationships(relationships: list[dict]) -> list[
 
 
 def find_candidate_zones(
-    valleys: list[dict],
+    dem: dict,
     production_areas: list[dict],
     boundary_polygon_utm: Polygon,
-    dem_crs: str,
+    min_valley_contributing_area_acres: float = MIN_VALLEY_CONTRIBUTING_AREA_ACRES,
     min_boundary_setback_meters: float = MIN_BOUNDARY_SETBACK_METERS,
     max_service_distance_meters: float = MAX_SERVICE_DISTANCE_METERS,
     min_service_distance_meters: float = MIN_SERVICE_DISTANCE_METERS,
-    zone_buffer_meters: float = ZONE_BUFFER_METERS,
+    min_water_zone_area_acres: float = MIN_WATER_ZONE_AREA_ACRES,
 ) -> list[dict]:
     """
-    Pure zone-filtering logic (Step 3) — see module docstring for why this
-    takes already-computed valleys/production_areas rather than fetching
-    or delineating anything itself, and for why elevation/gradient is no
-    longer one of the filters applied here (min_gravity_gradient is gone
-    from this signature entirely — it's now water_suitability.py's scoring
-    concern, not a generation-time parameter).
+    Cell-based zone-filtering logic (Step 3) — see module docstring for
+    why this takes the already-fetched `dem` (to derive its own flow-
+    accumulation grid directly) plus already-computed production_areas
+    rather than a list of pre-traced valley branches, and for why
+    elevation/gradient is not one of the filters applied here
+    (min_gravity_gradient is not part of this signature at all — it's
+    water_suitability.py's scoring concern, not a generation-time
+    parameter).
 
-    Returns one entry per valley with at least one qualifying segment:
+    Builds the per-cell eligibility mask (compute_water_eligible_cells()),
+    clusters it via raster_grid.connected_components() — exactly the same
+    "cluster's own connectivity defines a zone" pattern
+    production_area.py's own patches use, with no valley identity carried
+    into this pass at all — and builds each surviving cluster's REAL
+    cell-union footprint (raster_grid.cell_union_footprint()), not a hull
+    or a line buffer. Clusters below min_water_zone_area_acres (after
+    clipping to boundary_polygon_utm) are dropped as noise.
+
+    Returns one entry per qualifying cell cluster:
         {
-            'valley_id': int,
+            'id': int,
             'served_production_area_ids': [int, ...],
             'polygon_utm': shapely Polygon/MultiPolygon,
             'geometry_wgs84': GeoJSON geometry dict,
@@ -300,48 +350,51 @@ def find_candidate_zones(
                 gravity-favorable one, for callers that just want one
                 headline number
         }
+    'id' is assigned sequentially across the surviving cluster list, same
+    convention production_area.py's own patches use — there is no more
+    stable "valley identity" to key a zone off of, since a zone's own
+    cell-cluster connectivity is what defines it now.
     """
     if not production_areas:
         return []
 
+    eligible_mask, cell_relationships = compute_water_eligible_cells(
+        dem,
+        production_areas,
+        boundary_polygon_utm,
+        min_valley_contributing_area_acres,
+        max_service_distance_meters,
+        min_service_distance_meters,
+        min_boundary_setback_meters,
+    )
+
+    labels, num_components = connected_components(eligible_mask)
+
     zones = []
-
-    for valley in valleys:
-        run_geometries = []
-        relationships: list[dict] = []
-
-        for branch in valley["branches_utm"]:
-            tagged_points = _elevation_relationships_for_branch(
-                branch,
-                production_areas,
-                max_service_distance_meters,
-                min_service_distance_meters,
-            )
-            for run_points, run_relationships in _runs_of_qualifying_points(
-                tagged_points, boundary_polygon_utm, min_boundary_setback_meters
-            ):
-                geometry = (
-                    LineString(run_points).buffer(zone_buffer_meters)
-                    if len(run_points) >= 2
-                    else Point(run_points[0]).buffer(zone_buffer_meters)
-                )
-                run_geometries.append(geometry)
-                relationships.extend(run_relationships)
-
-        if not run_geometries:
+    next_id = 0
+    for component_id in range(num_components):
+        cluster_mask = labels == component_id
+        cluster_cells = [(int(r), int(c)) for r, c in np.argwhere(cluster_mask)]
+        if not cluster_cells:
             continue
 
-        polygon_utm = unary_union(run_geometries).intersection(boundary_polygon_utm)
+        footprint = cell_union_footprint(dem, cluster_mask)
+        polygon_utm = footprint.intersection(boundary_polygon_utm)
         if polygon_utm.is_empty:
             continue
 
-        geometry_wgs84 = transform_geom(dem_crs, "EPSG:4326", mapping(polygon_utm))
+        area_acres = polygon_utm.area / SQUARE_METERS_PER_ACRE
+        if area_acres < min_water_zone_area_acres:
+            continue
 
+        relationships = [cell_relationships[cell] for cell in cluster_cells]
         production_area_relationships = _aggregate_production_area_relationships(relationships)
+
+        geometry_wgs84 = transform_geom(dem["crs"], "EPSG:4326", mapping(polygon_utm))
 
         zones.append(
             {
-                "valley_id": valley["id"],
+                "id": next_id,
                 "served_production_area_ids": sorted(
                     r["production_area_id"] for r in production_area_relationships
                 ),
@@ -351,6 +404,7 @@ def find_candidate_zones(
                 "primary_production_area_relationship": production_area_relationships[0],
             }
         )
+        next_id += 1
 
     return zones
 
@@ -366,14 +420,13 @@ def zones_to_geojson(zones: list[dict]) -> dict:
     same layer, following that exact precedent."""
     features = [
         make_feature(
-            feature_id=f"water-system-candidate-{z['valley_id']}",
+            feature_id=f"water-system-candidate-{z['id']}",
             geometry=z["geometry_wgs84"],
             layer="water_system_candidate",
-            label=f"Water system candidate zone (valley {z['valley_id']})",
+            label=f"Water system candidate zone {z['id']}",
             confidence=CONFIDENCE_LOW,
             confidence_notes=WATER_SYSTEM_CANDIDATE_CONFIDENCE_NOTES,
             extra_properties={
-                "source_valley_id": z["valley_id"],
                 "served_production_area_ids": z["served_production_area_ids"],
                 "production_area_relationships": z["production_area_relationships"],
                 "primary_production_area_relationship": z["primary_production_area_relationship"],
@@ -392,8 +445,8 @@ def identify_water_system_candidate_zones(
     """
     Full pipeline entry point: fetches the DEM (unless one is passed in —
     e.g. reused from generate_full_report.py already fetching it, or
-    supplied directly in a test), delineates valleys, identifies
-    production-area candidates, and returns:
+    supplied directly in a test), identifies production-area candidates,
+    and returns:
 
         {
             'zones_geojson': FeatureCollection,             # layer="water_system_candidate" — the deliverable
@@ -401,11 +454,14 @@ def identify_water_system_candidate_zones(
             'production_areas_geojson': FeatureCollection,   # layer="production_area_candidate" — diagnostic
         }
 
-    The valley/production-area layers are returned alongside the final
-    zones deliberately, not just internally — per this feature's stated
-    debugging goal, being able to inspect "did we find the right valleys"
-    and "is the zone logic right" as two separate, independently checkable
-    outputs matters more here than it would for a simpler layer.
+    valleys_geojson is still produced via valley_delineation.
+    delineate_valleys() purely as diagnostic output (unchanged, own
+    traced-branch geometry, own thresholds) — useful for inspecting "did
+    we find the right valleys" independently of "is the zone logic
+    right," per this feature's stated debugging goal — but
+    find_candidate_zones() itself no longer consumes delineate_valleys()'s
+    traced branches at all; it derives its own flow-accumulation grid
+    directly from `dem` (see find_candidate_zones()'s own docstring).
     """
     if dem is None:
         dem = get_dem_for_boundary(boundary_coordinates)
@@ -421,9 +477,7 @@ def identify_water_system_candidate_zones(
     valleys = delineate_valleys(dem)
     production_areas = identify_production_areas(dem, boundary_polygon_utm)
 
-    zones = find_candidate_zones(
-        valleys, production_areas, boundary_polygon_utm, dem["crs"], **zone_kwargs
-    )
+    zones = find_candidate_zones(dem, production_areas, boundary_polygon_utm, **zone_kwargs)
 
     return {
         "zones_geojson": zones_to_geojson(zones),
@@ -440,7 +494,7 @@ def summarize_water_system_candidate_zones(result: dict) -> str:
     if zone_count == 0:
         return (
             f"{valley_count} primary valley(s) and {production_area_count} "
-            "production-area candidate(s) found, but no valley segment falls "
+            "production-area candidate(s) found, but no drainage cell falls "
             "within the service-distance/boundary-setback thresholds — no "
             "water system candidate zones identified."
         )

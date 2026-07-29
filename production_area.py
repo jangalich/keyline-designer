@@ -138,6 +138,7 @@ from raster_grid import (
     SQUARE_METERS_PER_ACRE,
     binary_erode,
     cell_area_acres,
+    cell_union_footprint,
     connected_components,
     pixel_center_xy,
 )
@@ -487,18 +488,25 @@ def _cell_union_footprint(cells: list[tuple[int, int]], dem: dict):
     cleanup against any remaining near-zero-area topology noise from
     unary_union'ing many touching squares -- the corner-snapping above
     should already make it a no-op in practice.
+
+    Thin, list-of-cells wrapper around raster_grid.cell_union_footprint()
+    (the same corner-computation logic, generalized to take a boolean
+    mask so water_candidate_zones.py's own cell clusters can reuse it too)
+    -- every call site here already has a `cells` list rather than a mask,
+    so this just builds a mask sized to bound `cells` and delegates.
+    Sized off `cells` itself (not dem['array'].shape) since this function
+    only ever needs a mask large enough to hold the given cells --
+    cell_union_footprint() derives each square's real coordinates from
+    dem's origin/resolution directly, never from the mask's own shape.
     """
-    px, py = dem["resolution_meters"]
-    origin_x = dem["origin_x"]
-    origin_y = dem["origin_y"]
-    squares = []
+    if not cells:
+        return Polygon()
+    rows = max(r for r, _ in cells) + 1
+    cols = max(c for _, c in cells) + 1
+    mask = np.zeros((rows, cols), dtype=bool)
     for r, c in cells:
-        x0 = origin_x + c * px
-        x1 = origin_x + (c + 1) * px
-        y1 = origin_y - r * py
-        y0 = origin_y - (r + 1) * py
-        squares.append(box(x0, y0, x1, y1))
-    return unary_union(squares).buffer(0)
+        mask[r, c] = True
+    return cell_union_footprint(dem, mask)
 
 
 def compute_step1_eligible_cells(

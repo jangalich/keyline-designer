@@ -12,16 +12,19 @@ dem_data.get_dem_for_boundary() returns:
         'crs': 'EPSG:<utm zone>',
     }
 
-The only real dependency here is numpy (already required project-wide, no
-network involved) — this deliberately has no rasterio or requests import,
-so every terrain-analysis module downstream of the DEM fetch
-(valley_delineation.py, production_area.py, water_candidate_zones.py) can
-depend on this and stay unit-testable against a synthetic DEM dict without
-hitting the network. dem_data.py is the only module in this pipeline that
-talks to rasterio/the network directly.
+The only real dependencies here are numpy and shapely (both already
+required project-wide, no network involved) — this deliberately has no
+rasterio or requests import, so every terrain-analysis module downstream
+of the DEM fetch (valley_delineation.py, production_area.py,
+water_candidate_zones.py) can depend on this and stay unit-testable
+against a synthetic DEM dict without hitting the network. dem_data.py is
+the only module in this pipeline that talks to rasterio/the network
+directly.
 """
 
 import numpy as np
+from shapely.geometry import Polygon, box
+from shapely.ops import unary_union
 
 SQUARE_METERS_PER_ACRE = 4046.8564224
 
@@ -120,6 +123,58 @@ def binary_dilate(mask: np.ndarray, radius_cells: int) -> np.ndarray:
             grown |= _shift(dilated, dr, dc)
         dilated = grown
     return dilated
+
+
+def cell_union_footprint(dem: dict, cell_mask: np.ndarray):
+    """
+    The REAL footprint of every True cell in `cell_mask`: the union of
+    each cell's own ground square at the DEM's resolution — NOT a convex
+    hull of cell CENTER points, and not a smoothed continuous-geometry
+    buffer. A hull of centers fills in concave gaps between actual cells
+    with ground that was never really eligible; a buffer rounds away real
+    corners. This is the accurate footprint every spatial consumer that
+    clusters DEM cells (production_area.py, water_candidate_zones.py,
+    ...) should build from a boolean cell mask.
+
+    GRID-SEAM FIX: each square's corners are computed directly from its
+    own row/col boundary via `origin +/- N * resolution` — NOT via
+    pixel_center_xy() (a cell's CENTER) offset by +/- half a cell width.
+    The center-then-half-width approach computes each shared edge via two
+    DIFFERENT floating-point expressions depending on which neighboring
+    cell is doing the computing (e.g. cell c's right edge as
+    `(origin + (c+0.5)*px) + px/2` vs cell c+1's left edge as
+    `(origin + (c+1.5)*px) - px/2`) — mathematically identical, but not
+    bit-for-bit identical once origin_x/origin_y are realistic
+    large-magnitude UTM values (confirmed live: this left visible
+    razor-thin sliver gaps in rendered output, unary_union() failing to
+    fully dissolve adjacent squares' shared edges). Computing both cell
+    c's right edge and cell c+1's left edge from the exact same
+    expression (`origin + (c+1) * resolution`) makes every shared edge
+    bit-for-bit identical by construction, regardless of origin's
+    magnitude. buffer(0) afterward is cheap, defensive cleanup against any
+    remaining near-zero-area topology noise from unary_union'ing many
+    touching squares — the corner-snapping above should already make it a
+    no-op in practice.
+
+    Returns an empty Polygon if `cell_mask` has no True cells at all.
+    """
+    px, py = dem["resolution_meters"]
+    origin_x = dem["origin_x"]
+    origin_y = dem["origin_y"]
+
+    squares = []
+    for r, c in np.argwhere(cell_mask):
+        r, c = int(r), int(c)
+        x0 = origin_x + c * px
+        x1 = origin_x + (c + 1) * px
+        y1 = origin_y - r * py
+        y0 = origin_y - (r + 1) * py
+        squares.append(box(x0, y0, x1, y1))
+
+    if not squares:
+        return Polygon()
+
+    return unary_union(squares).buffer(0)
 
 
 def connected_components(mask: np.ndarray) -> tuple[np.ndarray, int]:
