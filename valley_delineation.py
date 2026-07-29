@@ -251,6 +251,31 @@ def _branch_to_wgs84_linestring(dem: dict, branch: list[tuple[int, int]]) -> dic
     return {"type": "LineString", "coordinates": list(zip(lons, lats))}
 
 
+def get_flow_accumulation_for_dem(dem: dict) -> np.ndarray:
+    """
+    Runs the fill -> flow-direction -> flow-accumulation prefix of the
+    delineate_valleys() pipeline (see module docstring) and stops there,
+    before the stream threshold/tracing steps that turn it into discrete
+    valley branches.
+
+    Returns the raw upstream contributing-cell-count grid (same shape as
+    dem["array"], same row/col alignment as every other DEM-shaped array
+    in this codebase — nodata cells count as 1, matching what
+    compute_flow_accumulation always does; they're never valley cells
+    themselves but flow accumulation doesn't zero them out). This is for
+    a downstream module that wants to test individual DEM cells against
+    the accumulation grid directly (e.g. "is this cell on high-enough
+    contributing area to be a channel") rather than only consuming traced
+    branch polylines. It intentionally does not multiply by
+    cell_area_acres(dem) or apply either area threshold — callers that
+    want acres or "is this a valley cell" should do that conversion
+    themselves, same as delineate_valleys() does internally.
+    """
+    filled = fill_depressions(dem["array"])
+    flow_to_row, flow_to_col = compute_flow_direction(filled, dem["resolution_meters"])
+    return compute_flow_accumulation(filled, flow_to_row, flow_to_col)
+
+
 def delineate_valleys(
     dem: dict,
     min_stream_area_acres: float = MIN_STREAM_CONTRIBUTING_AREA_ACRES,
