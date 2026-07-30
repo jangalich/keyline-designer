@@ -83,14 +83,17 @@ def _scored_patches_for(cell_mask, dem):
     return score_production_areas(patches, dem, step1)
 
 
-def _clip_contours_to_zone(contour_lines: list[dict], patch: dict):
+def _clip_contours_to_zone(contour_lines: list[dict], patch: dict, geometry_key: str = "render_polygon_utm"):
     """Exactly what render_layout_map.py's own rendering loop does per
     production zone -- real shapely intersection of the GLOBAL contour
-    lines against that zone's own polygon_utm (same CRS, no reprojection
-    needed) -- returns the list of non-empty clipped geometries."""
+    lines against that zone's own render_polygon_utm (same CRS, no
+    reprojection needed) -- returns the list of non-empty clipped
+    geometries. geometry_key defaults to render_polygon_utm (the real
+    production behavior); pass "polygon_utm" to reproduce the PRE-fix
+    clipping behavior for comparison."""
     clipped = []
     for contour in contour_lines:
-        piece = contour["lines_utm"].intersection(patch["polygon_utm"])
+        piece = contour["lines_utm"].intersection(patch[geometry_key])
         if not piece.is_empty:
             clipped.append(piece)
     return clipped
@@ -179,16 +182,16 @@ assert zone_2["polygon_utm"].intersection(gap_footprint).area < 1e-9, (
 dumbbell_global_contours = compute_contour_lines(dumbbell_dem)
 assert len(dumbbell_global_contours) > 0, "test setup should produce real global contour lines on a sloped DEM"
 
-clipped_1 = _clip_contours_to_zone(dumbbell_global_contours, zone_1)
+clipped_1 = _clip_contours_to_zone(dumbbell_global_contours, zone_1)  # default: clips against render_polygon_utm
 clipped_2 = _clip_contours_to_zone(dumbbell_global_contours, zone_2)
 assert clipped_1 and clipped_2, "both split zones should get at least one clipped contour segment each"
 
-zone_1_buffered = zone_1["polygon_utm"].buffer(1e-6)
-zone_2_buffered = zone_2["polygon_utm"].buffer(1e-6)
+zone_1_buffered = zone_1["render_polygon_utm"].buffer(1e-6)
+zone_2_buffered = zone_2["render_polygon_utm"].buffer(1e-6)
 for piece in clipped_1:
-    assert zone_1_buffered.contains(piece), "zone 1's clipped contours must stay entirely within zone 1's own boundary"
+    assert zone_1_buffered.contains(piece), "zone 1's clipped contours must stay entirely within zone 1's own render boundary"
 for piece in clipped_2:
-    assert zone_2_buffered.contains(piece), "zone 2's clipped contours must stay entirely within zone 2's own boundary"
+    assert zone_2_buffered.contains(piece), "zone 2's clipped contours must stay entirely within zone 2's own render boundary"
 
 gap_overlap_length = sum(piece.intersection(gap_footprint).length for piece in clipped_1 + clipped_2)
 assert gap_overlap_length < 1e-9, (
@@ -199,6 +202,40 @@ print(
     f"Split rendering: the two waist-split zones each get their own independently-clipped contour segments "
     f"({len(clipped_1)} and {len(clipped_2)} respectively), with zero overlap into the real excluded gap "
     f"ground ({round(gap_footprint.area, 1)} sq m) between them."
+)
+
+
+# --- Confirmed-live bug reproduction: polygon_utm for the two split zones is directly adjacent (ZERO
+#     distance) -- reclaim reassigns every eroded-away cell to whichever piece is nearest, so there is
+#     nothing between them in the real, reported geometry. Clipping against render_polygon_utm (the fix)
+#     instead of polygon_utm (the pre-fix behavior) is what actually produces a visible blank strip at the
+#     waist itself -- not just in the pre-existing gap_cells corridor checked above. ---
+
+assert zone_1["polygon_utm"].distance(zone_2["polygon_utm"]) < 1e-9, (
+    "test setup should reproduce the confirmed-live bug: polygon_utm for the two split zones must be "
+    "directly adjacent with ZERO distance -- reclaim leaves nothing between them"
+)
+assert zone_1["render_polygon_utm"].distance(zone_2["render_polygon_utm"]) > 0, (
+    "render_polygon_utm for the two split zones must have a real gap, unlike polygon_utm"
+)
+
+narrow_strip_footprint = pa._cell_union_footprint(narrow_strip, dumbbell_dem)
+old_clipped_1 = _clip_contours_to_zone(dumbbell_global_contours, zone_1, geometry_key="polygon_utm")
+old_clipped_2 = _clip_contours_to_zone(dumbbell_global_contours, zone_2, geometry_key="polygon_utm")
+old_waist_overlap = sum(p.intersection(narrow_strip_footprint).length for p in old_clipped_1 + old_clipped_2)
+new_waist_overlap = sum(p.intersection(narrow_strip_footprint).length for p in clipped_1 + clipped_2)
+assert old_waist_overlap > 0, (
+    "test sanity check: clipping against the PRE-fix polygon_utm should genuinely draw contour segments "
+    "through the reclaimed waist cells (narrow_strip) -- otherwise this isn't reproducing the real bug"
+)
+assert new_waist_overlap < 1e-9, (
+    f"clipping against render_polygon_utm (the fix) must produce ZERO contour overlap with the reclaimed "
+    f"waist cells themselves -- got {new_waist_overlap}m of overlap"
+)
+print(
+    f"Waist-gap fix: clipping against the pre-fix polygon_utm draws {round(old_waist_overlap, 1)}m of "
+    "contour line directly through the reclaimed waist cells (the confirmed-live bug); clipping against "
+    "render_polygon_utm (the fix) draws zero."
 )
 
 
@@ -280,6 +317,64 @@ print(
     "zones_geojson invariant: both production_areas_to_geojson() and production_suitability_to_geojson() "
     "still embed geometry_wgs84 exactly, byte-for-byte -- unaffected by the switch to contour-line "
     "rendering, and the removed display fields are genuinely gone from every patch dict."
+)
+
+
+# =====================================================================
+# Invariant: area_acres, zones_geojson (geometry_wgs84), and suitability
+# scoring for a SPLIT cluster all continue to reflect the FULL,
+# POST-reclaim polygon_utm -- render_polygon_utm exists purely for
+# display and must play no role in any reported number or geometry.
+# Same invariant every prior rendering-only pass in this pipeline has
+# needed (see the zones_geojson invariant directly above).
+# =====================================================================
+
+from rasterio.warp import transform_geom as _transform_geom_check
+from shapely.geometry import shape as _shape_check
+
+for zone in (zone_1, zone_2):
+    assert zone["render_polygon_utm"].area < zone["polygon_utm"].area, (
+        "test sanity check: this is a real split fixture, render_polygon_utm must genuinely be smaller"
+    )
+    assert zone["area_acres"] == round(zone["polygon_utm"].area / pa.SQUARE_METERS_PER_ACRE, 2), (
+        "area_acres must be computed from the full, POST-reclaim polygon_utm, not render_polygon_utm"
+    )
+    geometry_utm_reprojected = _shape_check(
+        _transform_geom_check("EPSG:4326", dumbbell_dem["crs"], zone["geometry_wgs84"])
+    )
+    reprojection_diff = geometry_utm_reprojected.symmetric_difference(zone["polygon_utm"]).area
+    assert reprojection_diff < 1e-6, (
+        f"geometry_wgs84 must reproject back to the full polygon_utm, not the narrower render_polygon_utm "
+        f"(symmetric difference area {reprojection_diff})"
+    )
+
+# Direct proof that render_polygon_utm plays no role in suitability scoring: rebuild the same split from
+# scratch, strip render_polygon_utm off each raw patch entirely before scoring, and confirm
+# score_production_areas() produces byte-identical numeric results either way.
+fresh_step1 = compute_step1_eligible_cells(dumbbell_dem, _full_extent_boundary(dumbbell_dem), disqualifying_soil_union_utm=None)
+fresh_patches = cluster_and_gate(dumbbell_mask, dumbbell_dem, _full_extent_boundary(dumbbell_dem), fresh_step1)
+for p in fresh_patches:
+    del p["render_polygon_utm"]
+stripped_scored = {p["id"]: p for p in score_production_areas(fresh_patches, dumbbell_dem, fresh_step1)}
+
+
+def _same_score(a: float, b: float) -> bool:
+    return a == b or (a != a and b != b)  # NaN != NaN, but both-NaN counts as "identical" here
+
+
+for zone in (zone_1, zone_2):
+    stripped = stripped_scored[zone["id"]]
+    assert _same_score(stripped["suitability_score"], zone["suitability_score"]), (
+        "suitability_score must be identical whether or not render_polygon_utm is present on the patch dict"
+    )
+    assert _same_score(stripped["area_score"], zone["area_score"]) and _same_score(
+        stripped["compactness_score"], zone["compactness_score"]
+    ), "size_factor's sub-scores must be identical whether or not render_polygon_utm is present"
+
+print(
+    "render_polygon_utm invariant: area_acres, geometry_wgs84 (zones_geojson), and suitability scoring for "
+    "both split zones all continue to reflect the full, post-reclaim polygon_utm -- byte-identical whether "
+    "or not render_polygon_utm is even present on the patch dict."
 )
 
 

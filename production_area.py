@@ -735,7 +735,7 @@ def _attempt_waist_split(
     dem: dict,
     min_area_acres: float,
     min_waist_meters: float = MIN_ZONE_WAIST_METERS,
-) -> list[list[tuple[int, int]]]:
+) -> list[dict]:
     """
     Part 1: waist detection and splitting for ONE cluster's own cell mask
     -- a raster morphological operation on the cell mask itself (via
@@ -746,22 +746,30 @@ def _attempt_waist_split(
     Erodes the cluster by MIN_ZONE_WAIST_METERS (converted to a cell
     radius via _waist_erosion_radius_cells()) and re-labels the result. If
     erosion doesn't produce 2+ components, there's no real waist here --
-    returns [cells] completely unchanged (this function is idempotent and
-    side-effect-free for clusters with no real waist, e.g. a normal,
-    roughly-convex field).
+    returns [{"cells": cells, "render_cells": cells}] completely unchanged
+    (this function is idempotent and side-effect-free for clusters with no
+    real waist, e.g. a normal, roughly-convex field).
 
     If erosion DOES produce 2+ components, reclaims every stripped cell
     back onto its nearest surviving sub-component
     (_reclaim_stripped_cells()) and checks each reclaimed sub-cluster's
     own REAL cell-union footprint (_cell_union_footprint(), not a cell
     count) against min_area_acres. The split is committed -- returning one
-    cells-list per sub-cluster -- only if EVERY sub-cluster clears
-    min_area_acres on its own; otherwise this returns [cells] unchanged
-    (step 2c: a technically-2+-component erosion result that can't
-    actually support 2+ real zones isn't a split).
+    dict per sub-cluster, each with "cells" (the full, POST-reclaim cell
+    set -- every stripped cell reassigned back to its nearest surviving
+    piece, used for everything reported: area_acres, polygon_utm,
+    geometry_wgs84, suitability scoring) and "render_cells" (the narrower
+    PRE-reclaim cell set -- exactly the cells that survived erosion and
+    landed on this sub-component, before any stripped cell was reassigned
+    anywhere; used ONLY to build render_polygon_utm for display, see
+    cluster_and_gate()) -- only if EVERY sub-cluster clears min_area_acres
+    on its own POST-reclaim footprint; otherwise this returns
+    [{"cells": cells, "render_cells": cells}] unchanged (step 2c: a
+    technically-2+-component erosion result that can't actually support
+    2+ real zones isn't a split).
     """
     if len(cells) <= 1:
-        return [cells]
+        return [{"cells": cells, "render_cells": cells}]
 
     rows, cols = grid_shape
     cell_mask = np.zeros((rows, cols), dtype=bool)
@@ -773,7 +781,7 @@ def _attempt_waist_split(
 
     eroded_labels, num_eroded = connected_components(eroded_mask)
     if num_eroded < 2:
-        return [cells]
+        return [{"cells": cells, "render_cells": cells}]
 
     cluster_cells = set(cells)
     seed_labels = {
@@ -786,15 +794,22 @@ def _attempt_waist_split(
         sub_groups.setdefault(label, []).append(cell)
 
     if len(sub_groups) < 2:
-        return [cells]
+        return [{"cells": cells, "render_cells": cells}]
 
     for group_cells in sub_groups.values():
         footprint = _cell_union_footprint(group_cells, dem)
         area_acres = footprint.area / SQUARE_METERS_PER_ACRE
         if area_acres < min_area_acres:
-            return [cells]
+            return [{"cells": cells, "render_cells": cells}]
 
-    return list(sub_groups.values())
+    pre_reclaim_groups: dict[int, list[tuple[int, int]]] = {}
+    for cell, label in seed_labels.items():
+        pre_reclaim_groups.setdefault(label, []).append(cell)
+
+    return [
+        {"cells": group_cells, "render_cells": pre_reclaim_groups[label]}
+        for label, group_cells in sub_groups.items()
+    ]
 
 
 def _detect_hole_footprints(cells: list[tuple[int, int]], dem: dict) -> list[Polygon]:
@@ -905,6 +920,27 @@ def cluster_and_gate(
         a hole doesn't connect to the outside at all, so there's nothing
         to split -- it's one solid lobe with a gap.
 
+        Erosion's reclaim step (_reclaim_stripped_cells()) reassigns every
+        stripped cell back onto whichever resulting piece is nearest, so
+        no real acreage is lost -- but it also means two split zones can
+        end up directly adjacent, sharing cells at the pinch with ZERO
+        real gap between their polygon_utm footprints. 'render_polygon_utm'
+        exists to make the split visually legible without touching the
+        reported geometry at all: for each committed split, it's built
+        from that sub-cluster's PRE-reclaim cells only (exactly what
+        survived erosion, before any stripped cell was reassigned), via
+        the same real cell-union approach (_cell_union_footprint()) used
+        everywhere else in this pipeline -- not a hull, not a buffer. Every
+        reclaimed cell (from BOTH resulting pieces) is excluded from BOTH
+        pieces' render_polygon_utm, so render_layout_map.py's contour
+        clipping (see that module) shows a real blank strip at the waist.
+        For a cluster with no waist split at all, render_polygon_utm is
+        simply polygon_utm -- no change in rendering for the ordinary
+        case. polygon_utm/geometry_wgs84/area_acres and every other
+        downstream consumer (zones_geojson, suitability scoring) continue
+        to reflect the full, POST-reclaim footprint, completely unaffected
+        by render_polygon_utm.
+
       PART 2 -- true-hole detection (_detect_hole_footprints()): runs
         independently of Part 1, once per FINAL cluster (i.e. after any
         Part-1 split). A hole is excluded ground fully enclosed by that
@@ -926,8 +962,9 @@ def cluster_and_gate(
     one built with disqualifying_soil_union_utm=None.
 
     Returns the same shape identify_production_areas() itself returns,
-    PLUS 'cells' (this cluster's own constituent DEM cells), 'hole_
-    footprints' (list[Polygon], [] if none), and 'source_patch_id' --
+    PLUS 'render_polygon_utm' (see PART 1 above), 'cells' (this cluster's
+    own constituent DEM cells), 'hole_footprints' (list[Polygon], [] if
+    none), and 'source_patch_id' --
     consumed directly by production_suitability.py's
     score_production_areas(), so STEP 4 never has to recompute/recover
     cluster membership from a mask a second time. 'id' is assigned
@@ -953,7 +990,9 @@ def cluster_and_gate(
         if not component_cells:
             continue
 
-        for cluster_cells in _attempt_waist_split(component_cells, cell_mask.shape, dem, min_area_acres):
+        for split_result in _attempt_waist_split(component_cells, cell_mask.shape, dem, min_area_acres):
+            cluster_cells = split_result["cells"]
+            render_cells = split_result["render_cells"]
             elevations = [float(dem["array"][r, c]) for r, c in cluster_cells]
 
             footprint = _cell_union_footprint(cluster_cells, dem)
@@ -964,6 +1003,15 @@ def cluster_and_gate(
             area_acres = polygon_utm.area / SQUARE_METERS_PER_ACRE
             if area_acres < min_area_acres:
                 continue
+
+            if render_cells is cluster_cells:
+                # No waist split for this cluster -- render_polygon_utm
+                # must simply equal polygon_utm, same object, no change
+                # in rendering behavior for the ordinary, non-split case.
+                render_polygon_utm = polygon_utm
+            else:
+                render_footprint = _cell_union_footprint(render_cells, dem)
+                render_polygon_utm = render_footprint.intersection(boundary_polygon_utm)
 
             hole_footprints = _detect_hole_footprints(cluster_cells, dem)
 
@@ -978,6 +1026,7 @@ def cluster_and_gate(
                     "area_acres": round(float(area_acres), 2),
                     "representative_elevation_m": float(np.median(elevations)),
                     "polygon_utm": polygon_utm,
+                    "render_polygon_utm": render_polygon_utm,
                     "geometry_wgs84": geometry_wgs84,
                     "cells": cluster_cells,
                     "hole_footprints": hole_footprints,
@@ -1006,6 +1055,8 @@ def identify_production_areas(
             'area_acres': float,
             'representative_elevation_m': float,
             'polygon_utm': shapely Polygon/MultiPolygon,
+            'render_polygon_utm': shapely Polygon/MultiPolygon,  # == polygon_utm unless this cluster went
+                                                                   # through a waist split -- see cluster_and_gate()
             'geometry_wgs84': GeoJSON geometry dict,
             'cells': list[(row, col)],
             'hole_footprints': list[shapely Polygon],  # [] if none -- see module docstring's TRUE HOLES vs WAISTS

@@ -29,12 +29,25 @@ PRODUCTION ZONE STYLE: production zones render as CONTOUR-LINE TEXTURE,
 not a filled/outlined shape -- contour_lines.py's global contour lines
 (computed once, over the DEM's full extent) are clipped per zone at
 render time (real shapely intersection against that zone's own
-polygon_utm, not a pre-clipped raster), and only the clipped segments
-within that zone are drawn. No fill, no boundary stroke for production
-zones -- zone identity is conveyed by the numbered marker alone, same as
-every other layer. This is a deliberate, scoped styling split: water,
-road corridors, structure sites, and the property boundary all keep
-their existing solid fill/line rendering exactly as before.
+render_polygon_utm, not a pre-clipped raster), and only the clipped
+segments within that zone are drawn. No fill, no boundary stroke for
+production zones -- zone identity is conveyed by the numbered marker
+alone, same as every other layer. This is a deliberate, scoped styling
+split: water, road corridors, structure sites, and the property boundary
+all keep their existing solid fill/line rendering exactly as before.
+
+Contours clip against render_polygon_utm rather than polygon_utm
+specifically so a waist split (production_area.py's Part 1) shows a
+real, visible gap at the pinch: erosion's reclaim step reassigns every
+stripped cell back onto whichever resulting piece is nearest, so a
+split's two zones can end up directly adjacent with ZERO real distance
+between their reported polygon_utm footprints. render_polygon_utm is
+built from each piece's PRE-reclaim cells only (see production_area.py's
+own module docstring), so clipping against it excludes the whole
+reclaimed strip from BOTH pieces rather than assigning it whole to
+whichever piece happens to own it -- render_polygon_utm equals
+polygon_utm exactly for every ordinary, non-split zone, so this changes
+nothing for the common case.
 
 Basemap: NAIP aerial imagery via USGS's cached USGSImageryOnly tile
 service, fetched and composited with contextily (a well-established
@@ -253,8 +266,8 @@ def _reproject_geometry_to_mercator(geometry_wgs84: dict):
 def _reproject_utm_geometry_to_mercator(geometry_utm, source_crs: str):
     """geometry_utm is a shapely geometry already in `source_crs` (a
     DEM's own UTM zone, e.g. contour_lines.py's lines_utm clipped against
-    a production zone's own polygon_utm -- both already share that same
-    CRS, so no WGS84 round-trip is needed first) -- reprojects directly
+    a production zone's own render_polygon_utm -- both already share that
+    same CRS, so no WGS84 round-trip is needed first) -- reprojects directly
     to Web Mercator (one hop) and returns it as a shapely geometry, ready
     to draw."""
     geometry_3857 = transform_geom(source_crs, WEB_MERCATOR, mapping(geometry_utm))
@@ -352,7 +365,7 @@ def fetch_layout_layers(boundary_coordinates: list[tuple[float, float]], dem: Op
     GLOBAL elevation contour lines over the DEM's full extent, computed
     ONCE here and shared across every production zone at render time
     (each zone clips its own segments out of this same list via real
-    shapely intersection against its own polygon_utm -- see
+    shapely intersection against its own render_polygon_utm -- see
     render_layout_map()'s own docstring), rather than recomputing contour
     lines per zone.
     """
@@ -477,14 +490,16 @@ def render_layout_map(
         # geometry_wgs84 -- the real, grid-bug-fixed cell-union footprint
         # (see production_area.py's own module docstring) -- used here
         # only for label placement; no fill, no boundary stroke drawn for
-        # production zones (see this module's own docstring). Real zone
-        # geometry is what clips the contour lines below, too
-        # (patch["polygon_utm"], same CRS as contour_lines' lines_utm --
-        # no reprojection needed before intersecting).
+        # production zones (see this module's own docstring). The contour
+        # lines below clip against render_polygon_utm instead (same CRS
+        # as contour_lines' lines_utm -- no reprojection needed before
+        # intersecting) -- render_polygon_utm equals polygon_utm exactly
+        # except for a waist-split zone, where it excludes the reclaimed
+        # cells at the pinch so the split actually shows on the render.
         geom = _reproject_geometry_to_mercator(patch["geometry_wgs84"])
 
         for contour in contour_lines:
-            clipped = contour["lines_utm"].intersection(patch["polygon_utm"])
+            clipped = contour["lines_utm"].intersection(patch["render_polygon_utm"])
             if clipped.is_empty:
                 continue
             for line in _iter_line_parts(_reproject_utm_geometry_to_mercator(clipped, dem["crs"])):
