@@ -52,6 +52,7 @@ production_area.py for the same reasoning applied to the layers underneath
 this one.
 """
 
+import math
 from typing import Optional
 
 import numpy as np
@@ -63,7 +64,14 @@ from shapely.prepared import prep
 from dem_data import get_dem_for_boundary
 from feature_schema import CONFIDENCE_LOW, make_feature, make_feature_collection
 from production_area import identify_production_areas, production_areas_to_geojson
-from raster_grid import SQUARE_METERS_PER_ACRE, cell_area_acres, cell_union_footprint, connected_components, pixel_center_xy
+from raster_grid import (
+    SQUARE_METERS_PER_ACRE,
+    binary_dilate,
+    cell_area_acres,
+    cell_union_footprint,
+    connected_components,
+    pixel_center_xy,
+)
 from valley_delineation import delineate_valleys, get_flow_accumulation_for_dem, valleys_to_geojson
 
 # Zones within this distance of the property boundary are excluded even
@@ -115,6 +123,21 @@ MIN_VALLEY_CONTRIBUTING_AREA_ACRES = 0.5
 # CONFIGURABLE.
 MIN_WATER_ZONE_AREA_ACRES = 0.1
 
+# The raw flow-accumulation-qualifying mask is only ever one cell wide
+# along the exact drainage path (a single line of cells clearing
+# MIN_VALLEY_CONTRIBUTING_AREA_ACRES) -- confirmed live: without widening
+# it, real zones came back as thin, one-cell-wide traces rather than a
+# surveyable area, and most separate drainage segments never cleared
+# MIN_WATER_ZONE_AREA_ACRES at all. This dilates the drainage-only mask by
+# this many meters (converted to a cell radius, see
+# _survey_buffer_radius_cells()) BEFORE the service-distance/on-parcel/
+# boundary-setback tests run, so a genuinely qualifying drainage cell
+# reads as a walkable-width band, not a hairline. Reuses
+# ZONE_BUFFER_METERS's old value (the pre-rearchitecture line-buffer half-
+# width) as a reasonable starting point for "how wide should this zone
+# read" on this property -- CONFIGURABLE, tune against real ground truth.
+WATER_ZONE_SURVEY_BUFFER_METERS = 20.0
+
 WATER_SYSTEM_CANDIDATE_CONFIDENCE_NOTES = (
     "This identifies a general candidate zone for water-system "
     "infrastructure (keyline plowing patterns, pond/dam potential, ram "
@@ -138,6 +161,23 @@ WATER_SYSTEM_CANDIDATE_CONFIDENCE_NOTES = (
 )
 
 
+def _survey_buffer_radius_cells(dem: dict, buffer_meters: float) -> int:
+    """
+    Converts WATER_ZONE_SURVEY_BUFFER_METERS (a real-world distance) into a
+    cell-count dilation radius using the DEM's own resolution_meters --
+    same meters-to-cell-units conversion pattern production_area.py's own
+    _waist_erosion_radius_cells() already uses (average of the two axis
+    resolutions, in case they ever differ). Unlike that function, this is
+    a direct radius (not a width being halved into one), so it's rounded
+    UP (via ceil) with no further halving -- the buffer is never narrower
+    than requested. buffer_meters <= 0 correctly yields 0 (no dilation at
+    all), since ceil(0 / cell_size) == 0.
+    """
+    px, py = dem["resolution_meters"]
+    cell_size = (px + py) / 2.0
+    return math.ceil(buffer_meters / cell_size)
+
+
 def compute_water_eligible_cells(
     dem: dict,
     production_areas: list[dict],
@@ -146,6 +186,7 @@ def compute_water_eligible_cells(
     max_service_distance_meters: float = MAX_SERVICE_DISTANCE_METERS,
     min_service_distance_meters: float = MIN_SERVICE_DISTANCE_METERS,
     min_boundary_setback_meters: float = MIN_BOUNDARY_SETBACK_METERS,
+    survey_buffer_meters: float = WATER_ZONE_SURVEY_BUFFER_METERS,
 ) -> tuple[np.ndarray, dict[tuple[int, int], dict]]:
     """
     Cell-based STEP 1/2: computes the raw flow-accumulation grid directly
@@ -163,6 +204,19 @@ def compute_water_eligible_cells(
          with "is this cell genuinely part of a drainage feature," with
          no valley/branch identity involved at all: a cell qualifies (or
          doesn't) purely on its own local flow accumulation.
+
+         This raw per-cell test only ever qualifies a thin, one-cell-wide
+         trace along the exact drainage path -- before checks 2/3 below
+         run at all, this drainage-only mask is WIDENED by dilating it
+         (raster_grid.binary_dilate()) by survey_buffer_meters (converted
+         to a cell radius via _survey_buffer_radius_cells()), so a real
+         zone reads as a walkable-width band, not a hairline. Dilation
+         happens on this drainage-only mask specifically, NOT on the
+         final combined eligible_mask below -- dilating the final mask
+         would let a cell that fails the service-distance/setback tests
+         qualify just by sitting next to one that passes, which isn't the
+         intent; every dilated drainage cell must still independently
+         clear checks 2/3 on its own.
 
       2. Within max_service_distance_meters of at least one production
          area's polygon_utm, and NOT within min_service_distance_meters of
@@ -209,6 +263,9 @@ def compute_water_eligible_cells(
     area_per_cell = cell_area_acres(dem)
     min_contributing_cells = min_valley_contributing_area_acres / area_per_cell
     valley_mask = flow_accumulation_cells >= min_contributing_cells
+
+    survey_buffer_radius_cells = _survey_buffer_radius_cells(dem, survey_buffer_meters)
+    valley_mask = binary_dilate(valley_mask, survey_buffer_radius_cells)
 
     rows, cols = dem["array"].shape
     eligible_mask = np.zeros((rows, cols), dtype=bool)
@@ -315,6 +372,7 @@ def find_candidate_zones(
     max_service_distance_meters: float = MAX_SERVICE_DISTANCE_METERS,
     min_service_distance_meters: float = MIN_SERVICE_DISTANCE_METERS,
     min_water_zone_area_acres: float = MIN_WATER_ZONE_AREA_ACRES,
+    survey_buffer_meters: float = WATER_ZONE_SURVEY_BUFFER_METERS,
 ) -> list[dict]:
     """
     Cell-based zone-filtering logic (Step 3) — see module docstring for
@@ -326,8 +384,11 @@ def find_candidate_zones(
     water_suitability.py's scoring concern, not a generation-time
     parameter).
 
-    Builds the per-cell eligibility mask (compute_water_eligible_cells()),
-    clusters it via raster_grid.connected_components() — exactly the same
+    Builds the per-cell eligibility mask (compute_water_eligible_cells() —
+    including its own survey_buffer_meters dilation of the raw drainage-
+    only mask, see that function's docstring for why a zone needs to be
+    wider than a one-cell-wide drainage trace), clusters it via
+    raster_grid.connected_components() — exactly the same
     "cluster's own connectivity defines a zone" pattern
     production_area.py's own patches use, with no valley identity carried
     into this pass at all — and builds each surviving cluster's REAL
@@ -366,6 +427,7 @@ def find_candidate_zones(
         max_service_distance_meters,
         min_service_distance_meters,
         min_boundary_setback_meters,
+        survey_buffer_meters,
     )
 
     labels, num_components = connected_components(eligible_mask)

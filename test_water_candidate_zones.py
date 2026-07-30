@@ -18,13 +18,16 @@ identify_production_areas() actually produces (representative elevation +
 a real UTM polygon), same as before.
 """
 
+import math
+
 import numpy as np
 from shapely.geometry import box
 
 from feature_schema import validate_feature_collection
-from raster_grid import cell_area_acres, cell_union_footprint
+from raster_grid import SQUARE_METERS_PER_ACRE, cell_area_acres, cell_union_footprint
 from water_candidate_zones import (
     MIN_WATER_ZONE_AREA_ACRES,
+    WATER_ZONE_SURVEY_BUFFER_METERS,
     compute_water_eligible_cells,
     find_candidate_zones,
     zones_to_geojson,
@@ -70,10 +73,17 @@ PRODUCTION_AREA_ABOVE = [
 
 CELL_AREA_ACRES = cell_area_acres(SINGLE_COLUMN_DEM)
 
+# The raw flow-accumulation-qualifying mask is only ever one cell wide
+# (exactly col=20); WATER_ZONE_SURVEY_BUFFER_METERS dilates it by this
+# many cells (rounded up) on every side before the other gates run -- see
+# _survey_buffer_radius_cells()'s own conversion in water_candidate_zones.py.
+SURVEY_BUFFER_RADIUS_CELLS = math.ceil(WATER_ZONE_SURVEY_BUFFER_METERS / RESOLUTION[0])
+assert SURVEY_BUFFER_RADIUS_CELLS > 0, "this test assumes a real, nonzero default survey buffer"
+
 
 # --- compute_water_eligible_cells(): shape, no valley/branch identity, ---
-# --- and the drainage column (not the off-column noise) is what        ---
-# --- survives all three gates                                          ---
+# --- and the drainage column WIDENED by the survey buffer (not just a  ---
+# --- one-cell-wide trace) is what survives all three gates             ---
 
 eligible_mask, cell_relationships = compute_water_eligible_cells(
     SINGLE_COLUMN_DEM, PRODUCTION_AREA_ABOVE, BOUNDARY
@@ -84,10 +94,12 @@ assert eligible_mask.shape == SINGLE_COLUMN_DEM["array"].shape, (
 assert eligible_mask.dtype == bool
 eligible_cells = [(int(r), int(c)) for r, c in np.argwhere(eligible_mask)]
 assert eligible_cells, "expected at least one eligible cell on this synthetic drainage column"
-assert all(c == MID_COL for _r, c in eligible_cells), (
-    "every eligible cell on this synthetic DEM should sit on the drainage column (col=20) -- "
-    f"off-column noise cells should never clear MIN_VALLEY_CONTRIBUTING_AREA_ACRES, got columns "
-    f"{sorted(set(c for _r, c in eligible_cells))}"
+
+eligible_cols = sorted(set(c for _r, c in eligible_cells))
+expected_cols = list(range(MID_COL - SURVEY_BUFFER_RADIUS_CELLS, MID_COL + SURVEY_BUFFER_RADIUS_CELLS + 1))
+assert eligible_cols == expected_cols, (
+    f"the raw one-cell-wide drainage column (col=20) should be dilated by the survey buffer "
+    f"({SURVEY_BUFFER_RADIUS_CELLS} cells each side) to columns {expected_cols}, got {eligible_cols}"
 )
 assert set(cell_relationships.keys()) == set(eligible_cells), (
     "cell_relationships should have exactly one entry per eligible cell, no more, no less"
@@ -98,8 +110,9 @@ for cell, relationship in cell_relationships.items():
     assert relationship["elevation_differential_m"] > 0, "every column cell sits above this low patch"
 print(
     f"compute_water_eligible_cells() returns a DEM-shaped boolean mask with {len(eligible_cells)} eligible "
-    "cells, all on the real drainage column, each tagged with its own per-cell production-area relationship "
-    "-- no valley/branch identity involved."
+    f"cells, correctly WIDENED from the raw one-cell-wide drainage column to columns {expected_cols[0]}-"
+    f"{expected_cols[-1]} by the survey buffer, each tagged with its own per-cell production-area "
+    "relationship -- no valley/branch identity involved."
 )
 
 
@@ -132,6 +145,32 @@ print(
 )
 
 
+# --- the survey buffer produces a genuinely WIDER zone -- checked via ---
+# --- real area, not visual inspection: with the buffer disabled       ---
+# --- (survey_buffer_meters=0), the same drainage column collapses     ---
+# --- back to its old one-cell-wide trace, an order of magnitude       ---
+# --- smaller than the buffered zone above                             ---
+
+zone_area_acres = zone["polygon_utm"].area / SQUARE_METERS_PER_ACRE
+assert zone_area_acres >= 1.0, (
+    f"the buffered zone should be a genuinely surveyable, acre-scale area, got {zone_area_acres:.3f} acres"
+)
+
+unbuffered_zones = find_candidate_zones(SINGLE_COLUMN_DEM, PRODUCTION_AREA_ABOVE, BOUNDARY, survey_buffer_meters=0.0)
+assert len(unbuffered_zones) == 1
+unbuffered_area_acres = unbuffered_zones[0]["polygon_utm"].area / SQUARE_METERS_PER_ACRE
+assert zone_area_acres > unbuffered_area_acres * 5, (
+    f"the survey-buffered zone ({zone_area_acres:.3f} acres) should be dramatically larger than the same "
+    f"drainage column with survey_buffer_meters=0 ({unbuffered_area_acres:.3f} acres) -- otherwise the "
+    "buffer isn't actually widening anything"
+)
+print(
+    f"The survey buffer produces a genuinely wider zone by real area: {zone_area_acres:.3f} acres buffered "
+    f"vs. {unbuffered_area_acres:.3f} acres with survey_buffer_meters=0 (the old one-cell-wide-trace shape) "
+    "-- not just a thin line, confirmed via area, not visual inspection."
+)
+
+
 # --- gravity is a preference, not a gate: a production area SITTING ---
 # --- ABOVE the drainage column (pump-required) still produces a     ---
 # --- real, qualifying zone, just tagged with a negative differential ---
@@ -156,15 +195,20 @@ print(
 
 # --- max service distance is still a real, enforced generation-time ---
 # --- filter                                                          ---
+#
+# Tighter than even the CLOSEST widened cell's real distance to the patch
+# (the survey-buffered column's nearest edge, col=24, sits ~35.5m away --
+# closer than the original single column's ~50.6m, since widening brings
+# some cells nearer) -- so this must still exclude every cell, widened or not.
 
 too_far_zones = find_candidate_zones(
-    SINGLE_COLUMN_DEM, PRODUCTION_AREA_ABOVE, BOUNDARY, max_service_distance_meters=40.0
+    SINGLE_COLUMN_DEM, PRODUCTION_AREA_ABOVE, BOUNDARY, max_service_distance_meters=30.0
 )
 assert too_far_zones == [], (
-    "a max_service_distance_meters tighter than the column's actual (~50m) distance to the patch should "
-    "exclude every cell -- service-distance bounds are unchanged real filters, not preferences"
+    "a max_service_distance_meters tighter than even the widened column's closest cell to the patch "
+    "should exclude every cell -- service-distance bounds are unchanged real filters, not preferences"
 )
-print("Max service distance is still a real, enforced generation-time filter.")
+print("Max service distance is still a real, enforced generation-time filter (checked against the widened mask).")
 
 
 # --- min service distance floor rejects a near-but-SEPARATE patch, ---
@@ -179,7 +223,11 @@ TOUCHING = [
     {"id": 1, "representative_elevation_m": 100.0, "polygon_utm": box(500095.0, 4499900.0, 500110.0, 4499950.0)}
 ]
 touching_mask, touching_relationships = compute_water_eligible_cells(SINGLE_COLUMN_DEM, TOUCHING, BOUNDARY)
-touching_rows = sorted(int(r) for r, c in np.argwhere(touching_mask))
+# Filtered to the original col=20 slice specifically -- the survey buffer
+# now widens the mask to columns 16-24 (see above), but this check is
+# about the service-distance/carve-out behavior at a single, known column,
+# same as touching_relationships[(r, MID_COL)]'s own lookup below.
+touching_rows = sorted(int(r) for r, c in np.argwhere(touching_mask) if c == MID_COL)
 
 inside_rows = [r for r in range(10, 20) if r in touching_rows]
 assert inside_rows == list(range(10, 20)), (
@@ -217,12 +265,13 @@ print("Boundary setback is still a real, enforced generation-time filter.")
 
 # --- MIN_WATER_ZONE_AREA_ACRES drops a cluster too small to matter ---
 
+huge_min_area_threshold = zone_area_acres * 10
 huge_min_area_zones = find_candidate_zones(
-    SINGLE_COLUMN_DEM, PRODUCTION_AREA_ABOVE, BOUNDARY, min_water_zone_area_acres=1.0
+    SINGLE_COLUMN_DEM, PRODUCTION_AREA_ABOVE, BOUNDARY, min_water_zone_area_acres=huge_min_area_threshold
 )
 assert huge_min_area_zones == [], (
-    "raising min_water_zone_area_acres above the real cluster's own area "
-    f"({zone['polygon_utm'].area / 4046.8564224:.3f} acres) should drop it entirely"
+    f"raising min_water_zone_area_acres ({huge_min_area_threshold:.3f}) well above the real cluster's own "
+    f"area ({zone_area_acres:.3f} acres) should drop it entirely"
 )
 print("Raising min_water_zone_area_acres above the found zone's size correctly drops it.")
 
@@ -258,18 +307,28 @@ BETWEEN_PRODUCTION_AREA = [
 
 two_zone_mask, _ = compute_water_eligible_cells(TWO_COLUMN_DEM, BETWEEN_PRODUCTION_AREA, BOUNDARY)
 eligible_columns = sorted(set(int(c) for _r, c in np.argwhere(two_zone_mask)))
-assert eligible_columns == [8, 32], (
-    f"expected eligible cells confined to the two known drainage columns (8, 32), got columns {eligible_columns}"
+expected_left_cols = list(range(8 - SURVEY_BUFFER_RADIUS_CELLS, 8 + SURVEY_BUFFER_RADIUS_CELLS + 1))
+expected_right_cols = list(range(32 - SURVEY_BUFFER_RADIUS_CELLS, 32 + SURVEY_BUFFER_RADIUS_CELLS + 1))
+assert eligible_columns == expected_left_cols + expected_right_cols, (
+    f"expected eligible cells confined to the two known drainage columns, each widened by the survey "
+    f"buffer ({expected_left_cols}, {expected_right_cols}), got columns {eligible_columns}"
+)
+assert max(expected_left_cols) < min(expected_right_cols), (
+    "test setup should keep the two widened columns genuinely disconnected -- otherwise this isn't "
+    "actually testing fragmentation"
 )
 
 two_zones = find_candidate_zones(TWO_COLUMN_DEM, BETWEEN_PRODUCTION_AREA, BOUNDARY)
 assert len(two_zones) == 2, f"expected exactly 2 separate zones (one per disconnected column), got {len(two_zones)}"
 assert {z["id"] for z in two_zones} == {0, 1}
 for z in two_zones:
-    assert z["polygon_utm"].area / 4046.8564224 >= MIN_WATER_ZONE_AREA_ACRES
+    area_acres = z["polygon_utm"].area / SQUARE_METERS_PER_ACRE
+    assert area_acres >= MIN_WATER_ZONE_AREA_ACRES
+    assert area_acres >= 1.0, f"each widened zone should be acre-scale too, got {area_acres:.3f} acres"
 print(
-    f"Fragmentation: two genuinely disconnected eligible drainage columns correctly produce 2 separate "
-    f"zones (ids {sorted(z['id'] for z in two_zones)}), not one merged shape."
+    f"Fragmentation: two genuinely disconnected eligible drainage columns (each widened by the survey "
+    f"buffer to a real, acre-scale footprint) correctly produce 2 separate zones "
+    f"(ids {sorted(z['id'] for z in two_zones)}), not one merged shape."
 )
 
 
