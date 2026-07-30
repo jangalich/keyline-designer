@@ -283,6 +283,29 @@ print(
 )
 
 
+# --- Same full pipeline, but with a real (non-empty) road_tree_exclusion_polygon_utm present too --
+#     confirms the bridging code path itself (not just the "key absent" default) runs end-to-end without
+#     crashing and still produces a real PNG. ---
+
+synthetic_layers_with_road_tree = dict(synthetic_layers)
+synthetic_layers_with_road_tree["production_result"] = dict(synthetic_layers["production_result"])
+synthetic_layers_with_road_tree["production_result"]["road_tree_exclusion_polygon_utm"] = pa._cell_union_footprint(
+    narrow_strip, dumbbell_dem
+)
+
+with tempfile.TemporaryDirectory() as tmpdir:
+    output_path = os.path.join(tmpdir, "layout_map_with_bridging.png")
+    result_path = rlm.render_layout_map(property_boundary, output_path, layers=synthetic_layers_with_road_tree)
+    assert result_path == output_path
+    assert os.path.exists(output_path) and os.path.getsize(output_path) > 0, (
+        "render_layout_map() must still produce a real, non-empty PNG with a real road_tree_exclusion_polygon_utm present"
+    )
+print(
+    "Full pipeline: render_layout_map() also runs end-to-end with a real road_tree_exclusion_polygon_utm "
+    "present, exercising the contour-bridging draw path without crashing."
+)
+
+
 # =====================================================================
 # Invariant: zones_geojson (and every patch's geometry_wgs84/polygon_utm)
 # is completely unaffected by this rendering-only change -- this only
@@ -375,6 +398,167 @@ print(
     "render_polygon_utm invariant: area_acres, geometry_wgs84 (zones_geojson), and suitability scoring for "
     "both split zones all continue to reflect the full, post-reclaim polygon_utm -- byte-identical whether "
     "or not render_polygon_utm is even present on the patch dict."
+)
+
+
+# =====================================================================
+# Contour bridging: genuinely excluded (steep/hydric) ground sandwiched
+# between two stretches of the SAME zone's own contour texture must
+# render bridged (in BRIDGE_CONTOUR_COLOR); a gap that's genuinely
+# road/tree (above BRIDGE_ROAD_TREE_OVERLAP_THRESHOLD of the candidate's
+# own LENGTH) must stay unbridged. See render_layout_map.py's own module
+# docstring for the full picture; _bridge_candidates_for_zone()/
+# _bridge_segments_for_zone() are pure geometry, hand-testable directly
+# against a synthetic zone + a single synthetic contour line, no DEM or
+# cluster_and_gate() needed for THESE cases (the waist-split
+# generalization check below reuses the real dumbbell fixture instead).
+# =====================================================================
+
+from shapely.geometry import LineString, Polygon as ShapelyPolygon
+
+# A 30x10 zone (x:0-30, y:0-10) with a real interior notch (x:12-18, y:3-7)
+# -- excluded ground with NO connection to the notch's own top/bottom/left/
+# right edges relative to the zone's own boundary except through the zone
+# itself, so a horizontal line through it is "inside zone -> outside notch
+# -> inside zone -> outside (real off-zone ground, unbounded to the right)".
+bridging_zone = box(0, 0, 30, 10).difference(box(12, 3, 18, 7))
+bridging_contour = [{"elevation_m": 100.6, "lines_utm": LineString([(-5, 5), (35, 5)])}]
+
+bridge_candidates = rlm._bridge_candidates_for_zone(bridging_contour, bridging_zone)
+assert len(bridge_candidates) == 1, (
+    f"test setup should find exactly 1 bridge candidate (the interior notch, flanked by the SAME zone on "
+    f"both sides) -- got {len(bridge_candidates)}"
+)
+assert abs(bridge_candidates[0].length - 6.0) < 1e-9, (
+    f"the bridge candidate must be exactly the notch's own span (x: 12 to 18, length 6), "
+    f"got length {bridge_candidates[0].length}"
+)
+
+# --- Case 1: no road/tree data at all -- genuinely excluded (steep/hydric) ground bridges ---
+no_road_tree = ShapelyPolygon()
+bridged_no_road_tree = rlm._bridge_segments_for_zone(bridging_contour, bridging_zone, no_road_tree)
+assert len(bridged_no_road_tree) == 1, "a bridge candidate with no road/tree overlap at all must render bridged"
+print("Contour bridging: a genuinely excluded (steep/hydric) gap, flanked by the same zone on both sides, renders bridged.")
+
+# --- Case 2: road/tree covers 80% of the candidate's own length (above the 0.5 threshold) -- stays unbridged ---
+road_tree_high_overlap = box(12, 0, 16.8, 10)  # covers x:12-16.8 of the notch's x:12-18 span = 80%
+bridged_high_overlap = rlm._bridge_segments_for_zone(bridging_contour, bridging_zone, road_tree_high_overlap)
+assert bridged_high_overlap == [], (
+    f"a bridge candidate that's 80% road/tree (above the {rlm.BRIDGE_ROAD_TREE_OVERLAP_THRESHOLD} threshold) "
+    f"must stay unbridged, got {len(bridged_high_overlap)} bridged segment(s)"
+)
+print(
+    "Contour bridging: a bridge candidate that's genuinely road/tree (80% overlap, above the "
+    f"{rlm.BRIDGE_ROAD_TREE_OVERLAP_THRESHOLD} threshold) correctly stays unbridged."
+)
+
+# --- Case 3: road/tree covers only 20% of the candidate's own length (below threshold) -- still bridges ---
+road_tree_low_overlap = box(12, 0, 13.2, 10)  # covers x:12-13.2 of the notch's x:12-18 span = 20%
+bridged_low_overlap = rlm._bridge_segments_for_zone(bridging_contour, bridging_zone, road_tree_low_overlap)
+assert len(bridged_low_overlap) == 1, (
+    f"a bridge candidate that only brushes a small (20%) edge of real road/tree ground -- below the "
+    f"{rlm.BRIDGE_ROAD_TREE_OVERLAP_THRESHOLD} threshold -- must still bridge, consistent with the "
+    f"percentage-threshold approach (not 'any overlap disqualifies')"
+)
+print(
+    "Contour bridging: a candidate that only brushes a small (20%) edge of real road/tree ground -- below "
+    "the threshold -- still bridges, consistent with the percentage-threshold approach."
+)
+
+
+# --- Generalization: the waist-split pair's real inter-zone gap must NEVER bridge, for either zone,
+#     regardless of what road/tree data is (or isn't) available -- reusing the real dumbbell fixture
+#     already established above (zone_1/zone_2/dumbbell_global_contours). ---
+
+waist_gap_cells = narrow_strip + gap_cells  # the FULL real corridor between the two lobes (waist + surrounding gap)
+waist_gap_footprint = pa._cell_union_footprint(waist_gap_cells, dumbbell_dem)
+
+for zone in (zone_1, zone_2):
+    zone_candidates = rlm._bridge_candidates_for_zone(dumbbell_global_contours, zone["render_polygon_utm"])
+    for candidate in zone_candidates:
+        overlap = candidate.intersection(waist_gap_footprint).length
+        assert overlap < 1e-9, (
+            f"a candidate for one split zone must never run through the real inter-zone waist gap -- "
+            f"that gap is flanked by TWO DIFFERENT zones, never the same zone on both sides -- got "
+            f"{overlap}m of overlap"
+        )
+    # Even with NO road/tree data at all (the most permissive case -- everything else would bridge),
+    # the inter-zone gap specifically must still produce zero bridged segments through it.
+    zone_bridged = rlm._bridge_segments_for_zone(dumbbell_global_contours, zone["render_polygon_utm"], ShapelyPolygon())
+    for segment in zone_bridged:
+        assert segment.intersection(waist_gap_footprint).length < 1e-9, (
+            "no bridged segment may run through the real inter-zone waist gap, regardless of road/tree data"
+        )
+print(
+    "Contour bridging generalization: the waist-split pair's real inter-zone gap never bridges for either "
+    "zone, regardless of what's in it -- a gap between two DIFFERENT zones is never a bridge candidate."
+)
+
+
+# =====================================================================
+# render_polygon_utm (unsmoothed) is what classification MUST use -- not any future smoothed
+# geometry (this branch has no such field yet, but the reasoning is tested directly): a
+# smoothed/closed boundary can fill in a real concave notch, causing a genuine gap to be missed.
+# =====================================================================
+
+# A notch touching the zone's own TOP edge (a concave "bay", not a fully enclosed hole) --
+# affects the convex/closed hull, unlike a fully interior hole would.
+bay_zone = box(0, 0, 30, 10).difference(box(12, 6, 18, 10))
+bay_contour = [{"elevation_m": 100.6, "lines_utm": LineString([(-5, 7), (35, 7)])}]  # row y=7, inside the bay's y-range
+
+exact_candidates = rlm._bridge_candidates_for_zone(bay_contour, bay_zone)
+assert len(exact_candidates) == 1, (
+    f"test setup should find exactly 1 real candidate against the EXACT (unsmoothed) zone geometry, "
+    f"got {len(exact_candidates)}"
+)
+
+smoothed_bay_zone = bay_zone.buffer(4).buffer(-4)  # morphological closing -- fills the bay in
+assert smoothed_bay_zone.area > bay_zone.area + 1.0, (
+    "test setup should genuinely produce a smoothed geometry that's meaningfully different (larger, bay "
+    "filled in) from the exact zone -- otherwise this isn't exercising real sensitivity to the choice"
+)
+smoothed_candidates = rlm._bridge_candidates_for_zone(bay_contour, smoothed_bay_zone)
+assert smoothed_candidates == [], (
+    f"using a SMOOTHED geometry for classification would incorrectly miss this real gap (the smoothing "
+    f"fills in the bay) -- got {len(smoothed_candidates)} candidate(s) against the smoothed geometry, "
+    "confirming why render_polygon_utm (unsmoothed) specifically must be used"
+)
+print(
+    "Sensitivity check: classifying against a SMOOTHED zone geometry misses a real gap that the exact "
+    "(unsmoothed) render_polygon_utm correctly finds -- confirms why classification must use the unsmoothed "
+    "geometry specifically."
+)
+
+# --- Confirm the real render loop's call site actually passes render_polygon_utm (not any smoothed
+#     field) into the bridging functions, and that this is unaffected by any OTHER, unrelated field a
+#     future patch dict might carry (simulating a future render_fill_polygon_utm). ---
+import inspect
+
+render_loop_source = inspect.getsource(rlm.render_layout_map)
+assert 'patch["render_polygon_utm"]' in render_loop_source, (
+    "render_layout_map()'s own render loop must pass patch['render_polygon_utm'] into the contour-clipping "
+    "and bridging calls"
+)
+assert "render_fill_polygon_utm" not in render_loop_source, (
+    "render_layout_map() must not reference any smoothed/fill geometry field for contour rendering or "
+    "bridging classification -- this branch has none, and none should be introduced here"
+)
+
+# A patch dict carrying an extra, unrelated 'render_fill_polygon_utm'-style field (simulating a future
+# smoothed-geometry addition elsewhere in the pipeline) must have ZERO effect on bridge classification,
+# since _bridge_candidates_for_zone()/_bridge_segments_for_zone() only ever accept a raw geometry
+# argument -- there is no dict key for a smoothed field to be accidentally read from.
+decoy_patch = dict(zone_1)
+decoy_patch["render_fill_polygon_utm"] = zone_1["render_polygon_utm"].buffer(50).buffer(-50)  # drastically different
+candidates_without_decoy = rlm._bridge_candidates_for_zone(dumbbell_global_contours, zone_1["render_polygon_utm"])
+candidates_with_decoy = rlm._bridge_candidates_for_zone(dumbbell_global_contours, decoy_patch["render_polygon_utm"])
+assert len(candidates_without_decoy) == len(candidates_with_decoy), (
+    "the presence of an unrelated smoothed-geometry field on the patch dict must have zero effect on bridge "
+    "classification -- only render_polygon_utm is ever read"
+)
+print(
+    "render_polygon_utm wiring: the real render loop passes render_polygon_utm (never a smoothed field) into "
+    "bridging, and an unrelated smoothed-geometry field on the patch dict has zero effect on classification."
 )
 
 

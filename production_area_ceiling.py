@@ -75,6 +75,7 @@ from production_area import (
     _CANOPY_CHECK_UNCHECKED,
     _ROAD_CHECK_UNCHECKED,
     _SOIL_CHECK_UNCHECKED,
+    _cell_union_footprint,
     _fetch_disqualifying_soil_union,
     _fetch_road_exclusion_union_utm,
     cluster_and_gate,
@@ -199,6 +200,20 @@ def optimize_production_areas(
                                      # production_areas() via its step1 param
             'step1': dict,          # STEP 1's own return dict -- reused
                                      # directly by STEP 4, never recomputed
+            'road_tree_exclusion_polygon_utm': shapely Polygon/MultiPolygon,
+                # the real cell-union footprint (_cell_union_footprint(),
+                # same "not a hull" approach as every other footprint in
+                # this pipeline) of every cell STEP 1 excluded specifically
+                # via the existing-road or woody-vegetation gates
+                # (step1['road_hit'] | step1['tree_root_zone_hit']) --
+                # deliberately NOT including slope- or hydric-excluded
+                # ground. Used by render_layout_map.py's contour-bridging
+                # logic to tell a genuinely road/tree-covered gap in a
+                # zone's own contour texture (leave unbridged) apart from
+                # a genuinely excluded (steep/hydric) one (bridge it) --
+                # see that module's own docstring. Empty (not None) when
+                # neither gate excluded anything, or when road/canopy data
+                # was never checked at all.
             'cells_removed': int,
             'parcel_acres': float,
             'target_acres': float,
@@ -225,9 +240,14 @@ def optimize_production_areas(
 
     patches = cluster_and_gate(survivor_mask, dem, boundary_polygon_utm, step1, min_area_acres)
 
+    road_tree_hit = step1["road_hit"] | step1["tree_root_zone_hit"]
+    road_tree_exclusion_cells = [(int(r), int(c)) for r, c in np.argwhere(road_tree_hit)]
+    road_tree_exclusion_polygon_utm = _cell_union_footprint(road_tree_exclusion_cells, dem)
+
     result = {k: v for k, v in trim_result.items() if k != "survivor_cells"}
     result["patches"] = patches
     result["step1"] = step1
+    result["road_tree_exclusion_polygon_utm"] = road_tree_exclusion_polygon_utm
     return result
 
 
@@ -287,6 +307,10 @@ def identify_optimized_production_areas(
             'percent_of_parcel': float,        # of the FULL parcel
             'production_ceiling_target_met': bool,
             'total_cells_removed': int,        # STEP 2's global trim only
+            'road_tree_exclusion_polygon_utm': shapely Polygon/MultiPolygon,
+                # passed straight through from optimize_production_areas()
+                # -- see that function's own docstring. render_layout_map.py
+                # reads this directly off production_result.
         }
     """
     if dem is None:
@@ -341,6 +365,7 @@ def identify_optimized_production_areas(
         "scored_patches": scored,
         "total_selected_acreage": total_selected_acreage,
         "percent_of_parcel": percent_of_parcel,
+        "road_tree_exclusion_polygon_utm": optimized["road_tree_exclusion_polygon_utm"],
         "production_ceiling_target_met": optimized["production_ceiling_target_met"],
         "total_cells_removed": optimized["cells_removed"],
     }

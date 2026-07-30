@@ -405,6 +405,22 @@ print(
     f"{int(optimized_via_ceiling['step1']['tree_root_zone_hit'].sum())} cells genuinely excluded by the canopy gate."
 )
 
+# --- road_tree_exclusion_polygon_utm: real cell-union footprint of every tree-hit cell
+#     (render_layout_map.py's contour-bridging feature reads this to tell a genuinely
+#     road/tree-covered gap apart from a genuinely excluded steep/hydric one). ---
+tree_hit_cells = [(int(r), int(c)) for r, c in np.argwhere(optimized_via_ceiling["step1"]["tree_root_zone_hit"])]
+expected_tree_footprint = pa._cell_union_footprint(tree_hit_cells, canopy_gate_dem)
+tree_footprint_diff = optimized_via_ceiling["road_tree_exclusion_polygon_utm"].symmetric_difference(
+    expected_tree_footprint
+).area
+assert tree_footprint_diff < 1e-6, (
+    f"road_tree_exclusion_polygon_utm must be the real cell-union footprint of every tree_root_zone_hit cell, "
+    f"symmetric difference area {tree_footprint_diff}"
+)
+print(
+    "road_tree_exclusion_polygon_utm: matches the real cell-union footprint of every tree-hit cell exactly."
+)
+
 # --- Full entry point: identify_optimized_production_areas() with real trees present
 #     selects meaningfully less acreage than with the (file-wide, tree-free) default stub. ---
 tree_free_result = pac.identify_optimized_production_areas(
@@ -507,6 +523,18 @@ print(
     f"{int(optimized_road_via_ceiling['step1']['road_hit'].sum())} cells genuinely excluded by the road gate."
 )
 
+# --- road_tree_exclusion_polygon_utm also includes road-hit cells, not just tree-hit ones ---
+road_hit_cells = [(int(r), int(c)) for r, c in np.argwhere(optimized_road_via_ceiling["step1"]["road_hit"])]
+expected_road_footprint = pa._cell_union_footprint(road_hit_cells, canopy_gate_dem)
+road_footprint_diff = optimized_road_via_ceiling["road_tree_exclusion_polygon_utm"].symmetric_difference(
+    expected_road_footprint
+).area
+assert road_footprint_diff < 1e-6, (
+    f"road_tree_exclusion_polygon_utm must be the real cell-union footprint of every road_hit cell too, "
+    f"symmetric difference area {road_footprint_diff}"
+)
+print("road_tree_exclusion_polygon_utm: matches the real cell-union footprint of every road-hit cell exactly.")
+
 # --- full entry point: identify_optimized_production_areas() applies real road exclusion too ---
 with mock_patch.object(pa, "get_road_exclusion_union_utm", lambda boundary_coordinates, dem: road_gate_south_half_union):
     road_excluded_result = pac.identify_optimized_production_areas(
@@ -521,6 +549,17 @@ print(
     f"Regression: identify_optimized_production_areas() selects meaningfully less acreage with real road "
     f"exclusion present ({road_excluded_result['total_selected_acreage']} ac) than without it "
     f"({tree_free_result['total_selected_acreage']} ac) -- the road gate is genuinely active on this entry point."
+)
+
+assert "road_tree_exclusion_polygon_utm" in road_excluded_result and not road_excluded_result[
+    "road_tree_exclusion_polygon_utm"
+].is_empty, (
+    "identify_optimized_production_areas() must also thread road_tree_exclusion_polygon_utm through to its "
+    "own top-level return dict, non-empty here since real road exclusion was active"
+)
+print(
+    "identify_optimized_production_areas(): road_tree_exclusion_polygon_utm is threaded through to the "
+    "top-level result dict, ready for render_layout_map.py to read directly off production_result."
 )
 
 
