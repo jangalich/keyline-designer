@@ -519,7 +519,7 @@ def render_layout_map(
             )
         _draw_numbered_marker(ax, geom.representative_point(), marker_number)
         legend_entries.append(
-            f"{marker_number} — Water System, Valley {water_zone['valley_id']}, "
+            f"{marker_number} — Water System, Zone {water_zone['id']}, "
             f"score {water_zone['suitability_score']}"
         )
         marker_number += 1

@@ -550,49 +550,74 @@ GRADIENT_STEEPNESS_SUBWEIGHT = 0.5
 CONTRIBUTING_AREA_SUBWEIGHT = 0.5
 
 
-def _valley_gradient_pct_for_zone(zone_polygon_utm: Polygon, valley: Optional[dict]) -> Optional[float]:
+def _valley_topographic_inputs_for_zone(
+    zone_polygon_utm: Polygon, valleys: list[dict]
+) -> tuple[Optional[float], Optional[float]]:
     """
-    Real topographic descent rate of the valley segment actually inside
-    this zone's own footprint -- NOT the gravity-to-production-area
-    gradient (that's _gravity_feed_factor()'s job, a completely different
-    relationship). Reuses valley_delineation.py's own branches_utm
-    elevation data directly (already computed, nothing refetched):
-    for each branch, the points that fall inside zone_polygon_utm mark the
-    start/end of that branch's own contribution to this zone; net
-    elevation drop over planar distance between the first and last such
-    point, in percent grade.
+    Real topographic descent rate + max contributing area of whichever
+    traced valley(s) actually pass through this zone's own footprint --
+    NOT the gravity-to-production-area gradient (that's
+    _gravity_feed_factor()'s job, a completely different relationship).
 
-    Multiple branches/segments can contribute to one zone (a valley with
-    tributaries, or several buffered runs merged into one zone) -- their
-    individual gradients are combined weighted by how many points each
+    Since water_candidate_zones.py's cell-based rearchitecture, a zone is
+    a connected cluster of individually-eligible DEM cells, not something
+    traced from a single valley branch -- there's no more zone['valley_id']
+    to join against a matching valley['id'] by. This finds every valley
+    (valley_delineation.delineate_valleys()'s own output, a SEPARATE
+    traced-branch pass with its own, higher
+    MIN_PRIMARY_VALLEY_CONTRIBUTING_AREA_ACRES threshold) whose branches
+    actually pass through the zone's real footprint (spatial containment,
+    checked directly against zone_polygon_utm), rather than looking one up
+    by id. A zone genuinely can overlap more than one traced valley (or
+    none at all, if its own cells never reached the traced-valley
+    threshold) -- both are real, expected outcomes now, not caller error.
+
+    Gradient: for each branch of each overlapping valley, the points that
+    fall inside zone_polygon_utm mark the start/end of that branch's own
+    contribution; net elevation drop over planar distance between the
+    first and last such point, in percent grade. Multiple contributing
+    branches (from one valley's tributaries, or several distinct
+    overlapping valleys) are combined weighted by how many points each
     contributed, so a long, well-sampled segment isn't diluted equally
-    with a short, noisy one.
+    with a short, noisy one -- unchanged combination logic from before
+    this rearchitecture, just applied across however many valleys
+    actually overlap instead of one valley matched by id.
 
-    Returns None if valley is missing (shouldn't happen in practice --
-    every zone's valley_id comes from a real valleys list -- but a
-    mismatched valleys list is a real possible caller error) or no
-    branch has 2+ points actually inside the zone.
+    Contributing area: the LARGEST max_contributing_area_acres among the
+    valleys that actually overlap this zone -- not summed, since two
+    overlapping valleys' watersheds aren't independent contributing area
+    to add together.
+
+    Returns (None, None) if no valley's branches pass through this zone at
+    all.
     """
-    if valley is None:
-        return None
-
     segment_gradients: list[tuple[float, int]] = []
-    for branch in valley["branches_utm"]:
-        points_in_zone = [(x, y, z) for x, y, z in branch if zone_polygon_utm.contains(Point(x, y))]
-        if len(points_in_zone) < 2:
-            continue
-        x0, y0, z0 = points_in_zone[0]
-        x1, y1, z1 = points_in_zone[-1]
-        planar_length = Point(x0, y0).distance(Point(x1, y1))
-        if planar_length <= 0:
-            continue
-        segment_gradients.append((abs(z0 - z1) / planar_length * 100, len(points_in_zone)))
+    contributing_areas: list[float] = []
 
-    if not segment_gradients:
-        return None
+    for valley in valleys:
+        valley_overlaps = False
+        for branch in valley["branches_utm"]:
+            points_in_zone = [(x, y, z) for x, y, z in branch if zone_polygon_utm.contains(Point(x, y))]
+            if len(points_in_zone) < 2:
+                continue
+            x0, y0, z0 = points_in_zone[0]
+            x1, y1, z1 = points_in_zone[-1]
+            planar_length = Point(x0, y0).distance(Point(x1, y1))
+            if planar_length <= 0:
+                continue
+            segment_gradients.append((abs(z0 - z1) / planar_length * 100, len(points_in_zone)))
+            valley_overlaps = True
+        if valley_overlaps:
+            contributing_areas.append(valley["max_contributing_area_acres"])
 
-    total_weight = sum(w for _, w in segment_gradients)
-    return sum(g * w for g, w in segment_gradients) / total_weight
+    gradient_pct = None
+    if segment_gradients:
+        total_weight = sum(w for _, w in segment_gradients)
+        gradient_pct = sum(g * w for g, w in segment_gradients) / total_weight
+
+    contributing_area_acres = max(contributing_areas) if contributing_areas else None
+
+    return gradient_pct, contributing_area_acres
 
 
 def _gradient_steepness_score(gradient_pct: Optional[float]) -> float:
@@ -782,12 +807,15 @@ def score_water_zones(
     zones is water_candidate_zones.find_candidate_zones()'s own output,
     UNCHANGED -- this function does not alter membership or geometry, only
     scores it. valleys is valley_delineation.delineate_valleys()'s own
-    output from the SAME dem/run zones came from (matched by
-    zone['valley_id'] == valley['id']) -- required for the topographic
-    factor's real gradient computation.
+    output from the SAME dem/run zones came from -- matched to each zone
+    by real spatial overlap now, not by id (see
+    _valley_topographic_inputs_for_zone()'s own docstring for why: a zone
+    is a cell cluster since water_candidate_zones.py's cell-based
+    rearchitecture, with no more valley/branch identity of its own to join
+    against by id).
 
-    soil_data_by_zone_id / stream_data_by_zone_id map zone['valley_id'] to
-    that zone's own pre-fetched data (_area_weighted_ksat()'s dict /
+    soil_data_by_zone_id / stream_data_by_zone_id map zone['id'] to that
+    zone's own pre-fetched data (_area_weighted_ksat()'s dict /
     _nearest_stream_for_zone()'s dict), or a real None if the fetch ran
     and genuinely found nothing usable. A zone id simply ABSENT from
     either dict (or the whole argument omitted) means "never checked" --
@@ -803,12 +831,10 @@ def score_water_zones(
     """
     soil_data_by_zone_id = soil_data_by_zone_id or {}
     stream_data_by_zone_id = stream_data_by_zone_id or {}
-    valleys_by_id = {v["id"]: v for v in valleys}
 
     scored: list[dict] = []
 
     for zone in zones:
-        valley = valleys_by_id.get(zone["valley_id"])
         primary_relationship = zone["primary_production_area_relationship"]
 
         gravity_factor = _gravity_feed_factor(
@@ -817,20 +843,22 @@ def score_water_zones(
             primary_relationship["gradient_pct"],
         )
 
-        soil_entry = soil_data_by_zone_id.get(zone["valley_id"], _DATA_CHECK_UNAVAILABLE)
+        soil_entry = soil_data_by_zone_id.get(zone["id"], _DATA_CHECK_UNAVAILABLE)
         soil_data_available = soil_entry is not _DATA_CHECK_UNAVAILABLE
         soil_data = soil_entry if soil_data_available else None
         ksat_r_um_per_s = soil_data["ksat_r_um_per_s"] if soil_data is not None else None
         soil_factor = _water_holding_factor(ksat_r_um_per_s)
 
-        stream_entry = stream_data_by_zone_id.get(zone["valley_id"], _DATA_CHECK_UNAVAILABLE)
+        stream_entry = stream_data_by_zone_id.get(zone["id"], _DATA_CHECK_UNAVAILABLE)
         stream_data_available = stream_entry is not _DATA_CHECK_UNAVAILABLE
         nearest_stream = stream_entry if stream_data_available else None
         stream_factor, permanence_label = _stream_permanence_factor(nearest_stream, stream_proximity_reference_meters)
 
-        gradient_steepness_pct = _valley_gradient_pct_for_zone(zone["polygon_utm"], valley)
+        gradient_steepness_pct, valley_contributing_area_acres = _valley_topographic_inputs_for_zone(
+            zone["polygon_utm"], valleys
+        )
         topo_factor, gradient_score, contributing_area_score = _topographic_factor(
-            gradient_steepness_pct, valley["max_contributing_area_acres"] if valley else None
+            gradient_steepness_pct, valley_contributing_area_acres
         )
 
         composite = (
@@ -859,7 +887,7 @@ def score_water_zones(
             ),
             "stream_data_available": stream_data_available,
             "gradient_steepness_pct": round(gradient_steepness_pct, 2) if gradient_steepness_pct is not None else None,
-            "valley_contributing_area_acres": valley["max_contributing_area_acres"] if valley else None,
+            "valley_contributing_area_acres": valley_contributing_area_acres,
             "confidence": _confidence_for(soil_data, nearest_stream),
             # underscore-prefixed: intermediate data confidence_notes needs, not part of the
             # reported property set (water_suitability_to_geojson() doesn't emit these directly)
@@ -902,17 +930,16 @@ def water_suitability_to_geojson(scored_zones: list[dict]) -> dict:
     layer, same precedent as production_suitability_to_geojson()."""
     features = []
     for zone in scored_zones:
-        label = f"Water system candidate zone (valley {zone['valley_id']}, suitability rank {zone['rank']})"
+        label = f"Water system candidate zone {zone['id']} (suitability rank {zone['rank']})"
         features.append(
             make_feature(
-                feature_id=f"water-system-candidate-{zone['valley_id']}",
+                feature_id=f"water-system-candidate-{zone['id']}",
                 geometry=zone["geometry_wgs84"],
                 layer="water_system_candidate",
                 label=label,
                 confidence=zone["confidence"],
                 confidence_notes=zone["confidence_notes"],
                 extra_properties={
-                    "source_valley_id": zone["valley_id"],
                     "served_production_area_ids": zone["served_production_area_ids"],
                     "rank": zone["rank"],
                     "suitability_score": zone["suitability_score"],
@@ -948,7 +975,7 @@ def summarize_water_suitability(scored_zones: list[dict]) -> str:
         relationship = zone["primary_production_area_relationship"]
         gravity_note = "gravity-feeds" if relationship["above_production_area"] else "PUMP-REQUIRED"
         lines.append(
-            f"  - Rank {zone['rank']}: valley {zone['valley_id']}, score {zone['suitability_score']}/100 "
+            f"  - Rank {zone['rank']}: zone {zone['id']}, score {zone['suitability_score']}/100 "
             f"(confidence={zone['confidence']}), gravity={zone['gravity_feed_factor']} ({gravity_note}), "
             f"soil={zone['soil_water_holding_factor']}, stream={zone['stream_permanence_factor']} "
             f"({zone['nearest_stream_permanence'] or 'none nearby'}), topo={zone['topographic_factor']}"
@@ -1006,15 +1033,13 @@ def identify_water_suitability(
 
     valleys = delineate_valleys(dem)
     production_areas = identify_production_areas(dem, boundary_polygon_utm)
-    zones = find_candidate_zones(
-        valleys, production_areas, boundary_polygon_utm, dem["crs"], **(zone_kwargs or {})
-    )
+    zones = find_candidate_zones(dem, production_areas, boundary_polygon_utm, **(zone_kwargs or {}))
 
     soil_data_by_zone_id: dict = {}
     if check_soil:
         for zone in zones:
             try:
-                soil_data_by_zone_id[zone["valley_id"]] = _fetch_water_holding_data_for_zone(zone, dem)
+                soil_data_by_zone_id[zone["id"]] = _fetch_water_holding_data_for_zone(zone, dem)
             except Exception:
                 pass  # left absent from the dict -- score_water_zones() treats that as "never checked"
 
@@ -1024,7 +1049,7 @@ def identify_water_suitability(
             water_features = get_water_features_for_boundary(boundary_coordinates)
             streams_utm = _reproject_streams_to_utm(water_features["streams"], dem["crs"])
             for zone in zones:
-                stream_data_by_zone_id[zone["valley_id"]] = _nearest_stream_for_zone(zone["polygon_utm"], streams_utm)
+                stream_data_by_zone_id[zone["id"]] = _nearest_stream_for_zone(zone["polygon_utm"], streams_utm)
         except Exception:
             pass  # left absent for every zone -- "never checked", not "checked, none found"
 
