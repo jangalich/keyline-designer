@@ -49,32 +49,6 @@ whichever piece happens to own it -- render_polygon_utm equals
 polygon_utm exactly for every ordinary, non-split zone, so this changes
 nothing for the common case.
 
-CONTOUR BRIDGING: genuinely excluded ground (steep slope or hydric soil --
-NOT road or tree canopy) sitting between two stretches of the SAME
-production zone's own contour texture would otherwise render as an
-unexplained blank gap in the middle of a field, even though that ground
-is real and the zone reads as one continuous, cautionary area to a
-farmer standing on it. For each zone, _bridge_candidates_for_zone()
-splits every global contour line into ordered inside/outside runs
-against that zone's own render_polygon_utm (the precise, PRE-smoothing
-geometry -- never any future smoothed geometry, which exists ONLY to
-decide where a zone's own interior fill gets clipped and must play no
-role in this classification, since a smoothed boundary could shift
-enough to misclassify a real gap); any "outside" run flanked by "inside"
-runs of THIS SAME zone on both sides (not at either end of the line) is
-a bridge candidate. _bridge_segments_for_zone() then tests each
-candidate's own OVERLAP FRACTION (not "any overlap disqualifies" --
-confirmed too aggressive) against production_area_ceiling.py's real
-road_tree_exclusion_polygon_utm; a candidate that's mostly real road/tree
-ground (>= BRIDGE_ROAD_TREE_OVERLAP_THRESHOLD) stays unbridged (the
-original blank gap is correct there), everything else gets drawn in
-BRIDGE_CONTOUR_COLOR -- visually distinct from the zone's own ordinary
-brown contour segments -- layered on top of them. This generalizes
-correctly to a waist split's own inter-zone gap (see above): a run
-flanked by two DIFFERENT zones is never a candidate for either zone,
-since "flanked on both sides" is always evaluated against ONE zone's own
-render_polygon_utm at a time.
-
 Basemap: NAIP aerial imagery via USGS's cached USGSImageryOnly tile
 service, fetched and composited with contextily (a well-established
 static-basemap library built for exactly this -- fetch+stitch XYZ tiles
@@ -102,9 +76,8 @@ import matplotlib.pyplot as plt
 from rasterio.warp import transform as warp_transform
 from rasterio.warp import transform_geom
 from shapely.geometry import Polygon, box, mapping, shape
-from shapely.ops import split, unary_union
+from shapely.ops import unary_union
 from shapely.plotting import plot_line, plot_points, plot_polygon
-from shapely.prepared import prep
 
 from contour_lines import compute_contour_lines
 from dem_data import get_dem_for_boundary
@@ -272,19 +245,6 @@ CONTOUR_LINE_COLOR = "#6B4423"  # muted brown -- traditional topo-map
 # and to stay visually distinct from every other layer color already
 # in use (production green, water blue, road rust-orange, structure
 # red)
-BRIDGE_CONTOUR_COLOR = "#B8860B"  # muted amber/goldenrod -- deliberately
-# distinct from CONTOUR_LINE_COLOR's brown (and from ROAD_CORRIDOR_COLOR's
-# rust-orange below): reads as "caution, real but excluded ground" rather
-# than blending into the zone's own ordinary contour texture. See
-# _bridge_segments_for_zone()'s own docstring for what gets drawn in
-# this color.
-BRIDGE_ROAD_TREE_OVERLAP_THRESHOLD = 0.5  # a bridge candidate whose length
-# overlaps a real road/tree exclusion footprint by AT LEAST this fraction
-# is left unbridged (genuinely road/tree, not a rendering artifact) --
-# a percentage threshold, not "any overlap disqualifies" (confirmed too
-# aggressive). Documented STARTING value, like every other threshold in
-# this pipeline -- unvalidated against real ground-truth, open to
-# revisiting. CONFIGURABLE.
 WATER_ZONE_COLOR = "#1F6FB2"
 ROAD_CORRIDOR_COLOR = "#B5651D"
 STRUCTURE_SITE_COLOR = "#D64545"
@@ -329,121 +289,6 @@ def _iter_line_parts(geometry):
     elif geometry.geom_type == "GeometryCollection":
         for part in geometry.geoms:
             yield from _iter_line_parts(part)
-
-
-def _ordered_zone_runs(line, zone_geom: Polygon) -> list[tuple[bool, "LineString"]]:
-    """
-    Splits a single, continuous LineString into an ORDERED sequence of
-    (is_inside, piece) runs against one zone's own reference geometry --
-    the foundation _bridge_candidates_for_zone() below builds on.
-    shapely.ops.split(line, zone_geom.boundary) cuts `line` at every exact
-    point it crosses zone_geom's own boundary, returning pieces in the
-    SAME walking order as the original line's own vertex sequence
-    (confirmed real behavior, not assumed) -- exactly what's needed here,
-    since "flanked on both sides" is a question about adjacency ALONG the
-    line, not about set membership alone. Each piece, having no further
-    boundary crossing inside it, is entirely inside or entirely outside
-    zone_geom, so a single midpoint membership test (via prep() for real
-    two-geometry performance, same pattern compute_step1_eligible_cells()
-    already uses for its own per-cell containment tests) classifies it
-    exactly. Degenerate zero-length pieces (a tangent touch, not a real
-    crossing) are dropped rather than treated as a real run.
-    """
-    boundary = zone_geom.boundary
-    pieces = [line] if boundary.is_empty else list(split(line, boundary).geoms)
-    zone_prepared = prep(zone_geom)
-    runs = []
-    for piece in pieces:
-        if piece.is_empty or piece.length < 1e-9:
-            continue
-        midpoint = piece.interpolate(0.5, normalized=True)
-        runs.append((zone_prepared.covers(midpoint), piece))
-    return runs
-
-
-def _bridge_candidates_for_zone(contour_lines: list[dict], zone_render_polygon_utm: Polygon) -> list:
-    """
-    For one production zone's own render_polygon_utm (the precise,
-    PRE-smoothing render geometry -- see production_area.py's own module
-    docstring on why waist-split reclaim needs this, and NOT any future
-    smoothed geometry: a smoothed boundary could shift enough to
-    misclassify a real gap as inside, or vice versa), finds every
-    "outside" run of every GLOBAL contour line that is flanked by
-    "inside" runs of THIS SAME zone on BOTH sides -- i.e. the contour
-    line re-enters this exact zone further along, not some other zone.
-
-    Each global contour entry's own lines_utm can already be a
-    MultiLineString (contourpy legitimately splits a level into several
-    disconnected pieces, e.g. across a DEM nodata gap) -- each constituent
-    LineString is walked independently via _ordered_zone_runs(), since
-    "flanked on both sides" only makes sense within one continuous line.
-    An outside run at either END of a line's own run sequence (index 0 or
-    the last index) is NEVER a candidate -- by definition it isn't flanked
-    on both sides, so this generalizes correctly to the waist-split pair
-    already on this branch: a genuine inter-zone gap (this zone's
-    contour-line runs ending in "outside" all the way to the line's own
-    end, once the line crosses into the OTHER zone's territory) never
-    qualifies, regardless of what real ground sits in it.
-
-    Returns bridge CANDIDATES only -- the road/tree overlap-fraction test
-    (see _bridge_segments_for_zone()) still needs to run before any of
-    these are actually drawn.
-    """
-    if zone_render_polygon_utm.is_empty:
-        return []
-
-    candidates = []
-    for contour in contour_lines:
-        raw_line = contour["lines_utm"]
-        line_parts = raw_line.geoms if raw_line.geom_type == "MultiLineString" else [raw_line]
-        for part in line_parts:
-            runs = _ordered_zone_runs(part, zone_render_polygon_utm)
-            for i in range(1, len(runs) - 1):
-                is_inside, piece = runs[i]
-                if is_inside:
-                    continue
-                prev_inside, _ = runs[i - 1]
-                next_inside, _ = runs[i + 1]
-                if prev_inside and next_inside:
-                    candidates.append(piece)
-    return candidates
-
-
-def _bridge_segments_for_zone(
-    contour_lines: list[dict],
-    zone_render_polygon_utm: Polygon,
-    road_tree_exclusion_polygon_utm: Polygon,
-    overlap_threshold: float = BRIDGE_ROAD_TREE_OVERLAP_THRESHOLD,
-) -> list:
-    """
-    Filters _bridge_candidates_for_zone()'s output down to the candidates
-    that should actually be DRAWN (in BRIDGE_CONTOUR_COLOR): a candidate
-    is genuinely road/tree -- left unbridged, same blank gap as before --
-    only if the FRACTION of its own length overlapping
-    road_tree_exclusion_polygon_utm (production_area_ceiling.py's real
-    cell-union footprint of every road_hit/tree_root_zone_hit cell, see
-    that module's own docstring) is AT LEAST overlap_threshold. This is a
-    percentage threshold, not "any overlap disqualifies" -- a candidate
-    that only brushes a small edge of real road/tree ground is still
-    genuinely excluded (steep/hydric) ground for MOST of its own length,
-    so it still bridges.
-
-    road_tree_exclusion_polygon_utm may legitimately be empty (no road or
-    canopy data available, or genuinely none nearby) -- every candidate's
-    overlap fraction is then 0.0, so everything bridges, the same
-    "can't disqualify what we can't check" degradation this pipeline
-    already uses elsewhere (soil_data_available/road_data_available).
-    """
-    bridged = []
-    for candidate in _bridge_candidates_for_zone(contour_lines, zone_render_polygon_utm):
-        if candidate.length <= 0:
-            continue
-        overlap_length = candidate.intersection(road_tree_exclusion_polygon_utm).length
-        overlap_fraction = overlap_length / candidate.length
-        if overlap_fraction >= overlap_threshold:
-            continue  # genuinely road/tree -- leave unbridged, same blank gap as before
-        bridged.append(candidate)
-    return bridged
 
 
 def _boundary_polygon_mercator(boundary_coordinates: list[tuple[float, float]]) -> Polygon:
@@ -638,12 +483,6 @@ def render_layout_map(
     legend_entries: list[str] = []
     marker_number = 1
 
-    road_tree_exclusion_polygon_utm = (
-        production_result.get("road_tree_exclusion_polygon_utm") if production_result else None
-    )
-    if road_tree_exclusion_polygon_utm is None:
-        road_tree_exclusion_polygon_utm = Polygon()
-
     scored_patches = production_result.get("scored_patches", []) if production_result else []
     zone_stats = _production_zone_legend_stats(production_result) if production_result else []
     multiple_zones = len(scored_patches) > 1
@@ -669,27 +508,6 @@ def render_layout_map(
                     ax=ax,
                     add_points=False,
                     color=CONTOUR_LINE_COLOR,
-                    linewidth=PRODUCTION_ZONE_CONTOUR_LINEWIDTH,
-                    alpha=0.85,
-                    zorder=40,
-                )
-
-        # Bridges a genuinely excluded (steep/hydric) gap in THIS zone's
-        # own contour texture -- see _bridge_segments_for_zone()'s own
-        # docstring, and this module's own docstring for why. Drawn in a
-        # visually distinct color (BRIDGE_CONTOUR_COLOR) so the "caution,
-        # real but excluded ground" reading is unambiguous, layered right
-        # on top of the ordinary brown contour segments above.
-        bridge_segments = _bridge_segments_for_zone(
-            contour_lines, patch["render_polygon_utm"], road_tree_exclusion_polygon_utm
-        )
-        for segment in bridge_segments:
-            for line in _iter_line_parts(_reproject_utm_geometry_to_mercator(segment, dem["crs"])):
-                plot_line(
-                    line,
-                    ax=ax,
-                    add_points=False,
-                    color=BRIDGE_CONTOUR_COLOR,
                     linewidth=PRODUCTION_ZONE_CONTOUR_LINEWIDTH,
                     alpha=0.85,
                     zorder=40,
