@@ -836,6 +836,64 @@ print(
 )
 
 
+# --- render_fill_polygon_utm: the HARD CONSTRAINT -- fill-smoothing (a morphological closing of
+#     render_polygon_utm's own cells, radius FILL_SMOOTHING_RADIUS_METERS) must swallow small excluded
+#     pockets whole for display, but must NEVER bridge a real waist-split gap. This dumbbell's own gap
+#     (computed above) is comfortably wider than 2x FILL_SMOOTHING_RADIUS_METERS, so it must survive
+#     fill-smoothing fully intact, same as render_polygon_utm did. ---
+
+assert render_distance > 2 * pa.FILL_SMOOTHING_RADIUS_METERS, (
+    f"test setup should produce a real waist gap ({render_distance}m) comfortably wider than twice "
+    f"FILL_SMOOTHING_RADIUS_METERS ({2 * pa.FILL_SMOOTHING_RADIUS_METERS}m) -- otherwise this isn't a "
+    "meaningful hard-constraint check"
+)
+fill_distance = p1["render_fill_polygon_utm"].distance(p2["render_fill_polygon_utm"])
+assert fill_distance > 0, (
+    f"HARD CONSTRAINT VIOLATION: render_fill_polygon_utm bridges this waist-split gap -- FILL_SMOOTHING_"
+    f"RADIUS_METERS ({pa.FILL_SMOOTHING_RADIUS_METERS}m) is too large relative to the real gap "
+    f"({render_distance}m)"
+)
+assert p1["render_fill_polygon_utm"].intersection(p2["render_fill_polygon_utm"]).area < 1e-9, (
+    "HARD CONSTRAINT VIOLATION: render_fill_polygon_utm for the two split zones overlaps"
+)
+print(
+    f"render_fill_polygon_utm hard constraint: at FILL_SMOOTHING_RADIUS_METERS={pa.FILL_SMOOTHING_RADIUS_METERS}m, "
+    f"this dumbbell's real waist-split gap ({render_distance}m) survives fill-smoothing fully intact "
+    f"(render_fill_polygon_utm gap {fill_distance}m) -- no touch, no overlap."
+)
+
+
+# --- render_fill_polygon_utm: a small excluded (steep/hydric) pocket entirely inside a solid, non-split
+#     cluster must be fully closed over -- the confirmed-live screenshot problem this feature fixes. ---
+
+pocket_dem = _waist_dem(40, 40)
+pocket_step1 = _step1_for(pocket_dem)
+pocket_solid = set(_rect_cells(5, 35, 5, 35))  # 30x30 solid block
+pocket_hole = set(_rect_cells(18, 22, 18, 22))  # 4x4 cells = 20x20m -- within 2x FILL_SMOOTHING_RADIUS_METERS
+pocket_cells = list(pocket_solid - pocket_hole)
+pocket_mask = _mask_from_cells((40, 40), pocket_cells)
+pocket_patches = _gate(pocket_mask, pocket_dem, pocket_step1)
+assert len(pocket_patches) == 1, f"a solid block with one small interior pocket must stay one cluster, got {len(pocket_patches)}"
+pocket_patch = pocket_patches[0]
+
+pocket_hole_footprint = pa._cell_union_footprint(list(pocket_hole), pocket_dem)
+assert pocket_patch["polygon_utm"].intersection(pocket_hole_footprint).area < 1e-6, (
+    "test sanity check: the pocket must genuinely be excluded ground -- polygon_utm must not cover it"
+)
+assert pocket_patch["render_polygon_utm"].intersection(pocket_hole_footprint).area < 1e-6, (
+    "test sanity check: render_polygon_utm (unsmoothed) must also not cover the pocket"
+)
+fill_recovered_area = pocket_patch["render_fill_polygon_utm"].intersection(pocket_hole_footprint).area
+assert abs(fill_recovered_area - pocket_hole_footprint.area) < 1e-6, (
+    f"render_fill_polygon_utm must fully close over a small (20x20m) excluded pocket -- recovered "
+    f"{fill_recovered_area} of {pocket_hole_footprint.area} sq m"
+)
+print(
+    f"render_fill_polygon_utm: a small (20x20m) excluded pocket entirely inside a solid, non-split cluster "
+    f"is fully closed over (FILL_SMOOTHING_RADIUS_METERS={pa.FILL_SMOOTHING_RADIUS_METERS}m)."
+)
+
+
 # --- Same dumbbell, but the connecting strip is WIDER than MIN_ZONE_WAIST_METERS: must NOT split ---
 
 wide_strip = _rect_cells(0, 10, 10, 14)  # full lobe height -- no pinch at all
@@ -962,9 +1020,19 @@ assert square_patch["render_polygon_utm"] is square_patch["polygon_utm"], (
     "an ordinary, non-split cluster's render_polygon_utm must simply BE polygon_utm -- no change in "
     "rendering behavior for the ordinary case"
 )
+# This fixture's own cells (rows/cols 1-10) sit within FILL_SMOOTHING_RADIUS_METERS of SQUARE_SHAPE's own
+# grid edges (0 and 11) -- deliberately exercises _close_cell_mask()'s padding: a solid block with NO real
+# pockets must close back to its EXACT original footprint, not get nibbled by a grid-edge border artifact.
+fill_diff = square_patch["render_fill_polygon_utm"].symmetric_difference(square_patch["polygon_utm"]).area
+assert fill_diff < 1e-6, (
+    f"a solid mask with nothing to close over must have render_fill_polygon_utm exactly equal to "
+    f"polygon_utm, even when its cells sit close to the DEM grid's own edge -- symmetric difference area "
+    f"{fill_diff} (a grid-edge border artifact in the closing operation would show up here)"
+)
 print(
     "Idempotence: a solid, roughly-square mask with neither a waist nor a hole passes through completely "
-    "unchanged -- 1 cluster, hole_footprints=[], render_polygon_utm is polygon_utm."
+    "unchanged -- 1 cluster, hole_footprints=[], render_polygon_utm is polygon_utm, and render_fill_"
+    "polygon_utm matches exactly even with cells close to the DEM grid's own edge."
 )
 
 

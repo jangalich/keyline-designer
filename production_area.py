@@ -136,6 +136,7 @@ from production_suitability import ASPECT_FACTOR_WEIGHT, SLOPE_FACTOR_WEIGHT
 from raster_grid import (
     D8_OFFSETS,
     SQUARE_METERS_PER_ACRE,
+    binary_dilate,
     binary_erode,
     cell_area_acres,
     connected_components,
@@ -174,6 +175,37 @@ MIN_PRODUCTION_AREA_ACRES = 0.5
 # UNVALIDATED against real ground-truth and needs tuning against real
 # properties, not a derived or measured figure. CONFIGURABLE.
 MIN_ZONE_WAIST_METERS = 12.0  # ~40 ft
+
+# Genuinely excluded ground (steep slope or hydric soil -- STEP 1's own
+# gates, NOT road/tree) can sit as a small, scattered pocket entirely
+# inside an otherwise-solid zone, rendering as an unexplained blank gap
+# in that zone's own contour-line texture -- confirmed live. render_
+# fill_polygon_utm (see cluster_and_gate()'s own docstring) closes over
+# pockets up to roughly TWICE this radius wide via a morphological
+# CLOSING (dilate-then-erode, see _close_cell_mask()) of the zone's own
+# render cell mask, so contour lines drawn against it simply continue
+# across a small real pocket instead of leaving a hole.
+#
+# HARD CONSTRAINT: closing operates on render_polygon_utm's own
+# PRE-reclaim cells (see _attempt_waist_split()) -- a radius large
+# enough to also close over a real inter-zone waist-split gap would
+# silently defeat the whole reason render_polygon_utm exists, re-fusing
+# two zones that are genuinely separate. Since closing can bridge a gap
+# up to roughly 2x this radius wide, this value must stay under HALF the
+# smallest real waist-split gap this pipeline can produce. Empirically
+# probed against this pipeline's own erosion math at dem_data.py's fixed
+# 5m DEM resolution (dem_data.DEFAULT_RESOLUTION_METERS): the most
+# adversarial synthetic case (a single-pixel-wide, single-row-long throat
+# right at the MIN_ZONE_WAIST_METERS threshold -- about as thin a real
+# waist as this pipeline can split on) produces a ~25m render_polygon_utm
+# gap, so this value is kept comfortably under half of that (12.5m) with
+# real margin. Documented STARTING value, like every other threshold in
+# this pipeline -- UNVALIDATED against real ground-truth beyond that
+# synthetic probe, tuned against live screenshots showing small excluded
+# pockets not yet fully closed. CONFIGURABLE, but re-run test_production_
+# area.py's/test_render_layout_map.py's waist-split non-overlap
+# regressions before raising it further.
+FILL_SMOOTHING_RADIUS_METERS = 10.0
 
 METERS_PER_FOOT = 0.3048
 
@@ -699,6 +731,78 @@ def _waist_erosion_radius_cells(dem: dict, min_waist_meters: float) -> int:
     return max(1, math.ceil(min_waist_meters / cell_size / 2.0))
 
 
+def _fill_smoothing_radius_cells(dem: dict, radius_meters: float) -> int:
+    """
+    Converts FILL_SMOOTHING_RADIUS_METERS (a real-world distance) into a
+    cell-count structuring-element radius, same meters-to-cell-units
+    conversion _waist_erosion_radius_cells() above uses -- but WITHOUT
+    that function's halving: this radius IS the closing operation's own
+    structuring-element radius directly (not half a minimum width), so a
+    pocket up to roughly TWICE radius_meters wide gets fully closed over
+    by _close_cell_mask() below. Always at least 1 cell.
+    """
+    px, py = dem["resolution_meters"]
+    cell_size = (px + py) / 2.0
+    return max(1, math.ceil(radius_meters / cell_size))
+
+
+def _close_cell_mask(
+    cells: list[tuple[int, int]],
+    grid_shape: tuple[int, int],
+    dem: dict,
+    radius_meters: float,
+) -> np.ndarray:
+    """
+    Morphological CLOSING (dilate then erode, via raster_grid.py's own
+    D8/Chebyshev binary_dilate()/binary_erode() -- the exact same
+    structuring element _attempt_waist_split()'s own erosion uses, just
+    run dilate-first instead of erode-first) of the boolean mask built
+    from `cells`. Closing is the standard technique for "fill small
+    interior pockets/gaps without meaningfully altering the mask's own
+    outer boundary": dilating first fuses together anything narrower than
+    roughly 2x radius_meters (a real pocket of excluded ground, or a
+    narrow neck of it), and the matching erode afterward shrinks the
+    result back toward the original boundary everywhere EXCEPT where two
+    dilated fronts fused across a gap -- there, erosion can't re-open
+    what dilation already sealed. A gap wider than roughly 2x
+    radius_meters never fuses in the first place, so it survives fully
+    intact -- this is exactly what keeps a real waist-split gap (see
+    render_polygon_utm/FILL_SMOOTHING_RADIUS_METERS's own docstring)
+    open as long as the radius stays under half that gap's real width.
+
+    PADDED by radius_cells on every side before dilating, then cropped
+    back to grid_shape afterward -- both binary_dilate()/binary_erode()
+    treat anything outside their own array bounds as background, so
+    without this padding, a mask sitting close to grid_shape's own edge
+    (e.g. a cluster whose real cells extend near the DEM's own grid
+    boundary, not just near ITS OWN mask boundary) would have its
+    dilation step artificially clipped there -- the following erode step
+    would then shrink that edge back further than the original boundary,
+    a real border artifact, not a genuine gap being closed. Padding gives
+    dilation the same room to grow on every side that an unbounded
+    closing would have, so the result nets back to the exact original
+    boundary along any genuine outer edge, same as closing's own
+    standard mathematical guarantee (confirmed against a mask deliberately
+    placed within radius_cells of grid_shape's own edge, not assumed).
+
+    Returns the closed boolean mask (same grid_shape as `cells` came
+    from) -- callers build the real footprint via _cell_union_footprint()
+    on its True cells, same "not a hull" convention as every other
+    footprint in this pipeline.
+    """
+    rows, cols = grid_shape
+    radius_cells = _fill_smoothing_radius_cells(dem, radius_meters)
+
+    padded_rows, padded_cols = rows + 2 * radius_cells, cols + 2 * radius_cells
+    padded_mask = np.zeros((padded_rows, padded_cols), dtype=bool)
+    for r, c in cells:
+        padded_mask[r + radius_cells, c + radius_cells] = True
+
+    dilated = binary_dilate(padded_mask, radius_cells)
+    closed_padded = binary_erode(dilated, radius_cells)
+    return closed_padded[radius_cells : radius_cells + rows, radius_cells : radius_cells + cols]
+
+
 def _reclaim_stripped_cells(
     cluster_cells: set[tuple[int, int]],
     seed_labels: dict[tuple[int, int], int],
@@ -941,6 +1045,26 @@ def cluster_and_gate(
         to reflect the full, POST-reclaim footprint, completely unaffected
         by render_polygon_utm.
 
+        'render_fill_polygon_utm' is a SECOND, separate render-only field,
+        built from render_polygon_utm's own cells (render_cells) closed
+        over via _close_cell_mask() at FILL_SMOOTHING_RADIUS_METERS (see
+        that constant's own docstring) -- genuinely excluded (steep or
+        hydric, NOT road/tree -- those were already excluded at STEP 1)
+        ground can sit as a small, scattered pocket entirely inside an
+        otherwise-solid zone, rendering as an unexplained blank gap in
+        that zone's own contour-line texture. Closing fills a pocket up
+        to roughly 2x FILL_SMOOTHING_RADIUS_METERS wide while leaving a
+        real waist-split gap (always wider than that, by construction --
+        see FILL_SMOOTHING_RADIUS_METERS's own docstring for the hard
+        constraint) genuinely open. render_layout_map.py clips contour
+        lines against render_fill_polygon_utm, NOT render_polygon_utm --
+        see that module's own docstring. Computed for EVERY cluster, split
+        or not (a small excluded pocket can sit inside an ordinary,
+        non-split zone just as easily) -- never equal to render_polygon_utm
+        by construction (closing always grows-then-shrinks, even when it
+        nets back to the identical boundary), but geometrically identical
+        whenever there's nothing to close over.
+
       PART 2 -- true-hole detection (_detect_hole_footprints()): runs
         independently of Part 1, once per FINAL cluster (i.e. after any
         Part-1 split). A hole is excluded ground fully enclosed by that
@@ -948,10 +1072,11 @@ def cluster_and_gate(
         NOT alter polygon_utm/area_acres (the real cell-union footprint
         already correctly excludes hole cells) -- purely narrative
         metadata (e.g. "a wet spot mid-field" worth calling out in report
-        text); it feeds no geometry downstream. Production zones render
-        as clipped contour-line texture directly against geometry_wgs84
-        (see contour_lines.py/render_layout_map.py), not a filled or
-        smoothed shape, so there is no separate display step here to feed.
+        text); it feeds no geometry downstream (render_fill_polygon_utm
+        above already independently smooths over small enclosed pockets
+        for DISPLAY, but that's a separate concern from this narrative
+        field, which still reports every real enclosed hole regardless of
+        whether it got closed over for rendering).
 
     `step1` is compute_step1_eligible_cells()'s own return dict -- used
     here only to attach each surviving cluster's 'source_patch_id' (the
@@ -962,9 +1087,9 @@ def cluster_and_gate(
     one built with disqualifying_soil_union_utm=None.
 
     Returns the same shape identify_production_areas() itself returns,
-    PLUS 'render_polygon_utm' (see PART 1 above), 'cells' (this cluster's
-    own constituent DEM cells), 'hole_footprints' (list[Polygon], [] if
-    none), and 'source_patch_id' --
+    PLUS 'render_polygon_utm'/'render_fill_polygon_utm' (see PART 1
+    above), 'cells' (this cluster's own constituent DEM cells),
+    'hole_footprints' (list[Polygon], [] if none), and 'source_patch_id' --
     consumed directly by production_suitability.py's
     score_production_areas(), so STEP 4 never has to recompute/recover
     cluster membership from a mask a second time. 'id' is assigned
@@ -1013,6 +1138,19 @@ def cluster_and_gate(
                 render_footprint = _cell_union_footprint(render_cells, dem)
                 render_polygon_utm = render_footprint.intersection(boundary_polygon_utm)
 
+            # render_fill_polygon_utm: render_polygon_utm's own cells
+            # (render_cells -- the waist-aware, PRE-reclaim set), closed
+            # over (see FILL_SMOOTHING_RADIUS_METERS/_close_cell_mask()'s
+            # own docstrings) to swallow small excluded (steep/hydric)
+            # pockets whole, while leaving a real waist-split gap open
+            # (it's wider than the closing radius can bridge). Always
+            # computed, split or not -- a small excluded pocket can sit
+            # inside an ordinary, non-split zone just as easily.
+            closed_mask = _close_cell_mask(render_cells, cell_mask.shape, dem, FILL_SMOOTHING_RADIUS_METERS)
+            closed_cells = [(int(r), int(c)) for r, c in np.argwhere(closed_mask)]
+            render_fill_footprint = _cell_union_footprint(closed_cells, dem)
+            render_fill_polygon_utm = render_fill_footprint.intersection(boundary_polygon_utm)
+
             hole_footprints = _detect_hole_footprints(cluster_cells, dem)
 
             geometry_wgs84 = transform_geom(dem["crs"], "EPSG:4326", mapping(polygon_utm))
@@ -1027,6 +1165,7 @@ def cluster_and_gate(
                     "representative_elevation_m": float(np.median(elevations)),
                     "polygon_utm": polygon_utm,
                     "render_polygon_utm": render_polygon_utm,
+                    "render_fill_polygon_utm": render_fill_polygon_utm,
                     "geometry_wgs84": geometry_wgs84,
                     "cells": cluster_cells,
                     "hole_footprints": hole_footprints,
@@ -1057,6 +1196,8 @@ def identify_production_areas(
             'polygon_utm': shapely Polygon/MultiPolygon,
             'render_polygon_utm': shapely Polygon/MultiPolygon,  # == polygon_utm unless this cluster went
                                                                    # through a waist split -- see cluster_and_gate()
+            'render_fill_polygon_utm': shapely Polygon/MultiPolygon,  # render_polygon_utm's own cells,
+                                                                   # closed over -- see cluster_and_gate()
             'geometry_wgs84': GeoJSON geometry dict,
             'cells': list[(row, col)],
             'hole_footprints': list[shapely Polygon],  # [] if none -- see module docstring's TRUE HOLES vs WAISTS
