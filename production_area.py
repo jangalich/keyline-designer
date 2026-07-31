@@ -175,39 +175,6 @@ MIN_PRODUCTION_AREA_ACRES = 0.5
 # properties, not a derived or measured figure. CONFIGURABLE.
 MIN_ZONE_WAIST_METERS = 12.0  # ~40 ft
 
-# Genuinely excluded ground (steep slope or hydric soil -- STEP 1's own
-# gates, NOT road/tree) can sit as a small, scattered pocket entirely
-# inside an otherwise-solid zone, rendering as an unexplained blank gap
-# in that zone's own contour-line texture -- confirmed live. render_
-# fill_polygon_utm (see cluster_and_gate()'s own docstring) closes over
-# pockets up to roughly TWICE this radius wide via a direct vector
-# buffer round-trip on render_polygon_utm itself (buffer(+r) then
-# buffer(-r), real shapely geometry, no raster grid involved -- see
-# cluster_and_gate()'s own docstring for why this replaced an earlier
-# raster dilate/erode implementation), so contour lines drawn against it
-# simply continue across a small real pocket instead of leaving a hole.
-#
-# HARD CONSTRAINT: the buffer round-trip operates on render_polygon_utm
-# itself (its own PRE-reclaim cells -- see _attempt_waist_split()) -- a
-# radius large enough to also close over a real inter-zone waist-split
-# gap would silently defeat the whole reason render_polygon_utm exists,
-# re-fusing two zones that are genuinely separate. Since this can bridge
-# a gap up to roughly 2x this radius wide, this value must stay under
-# HALF the smallest real waist-split gap this pipeline can produce.
-# Empirically probed against this pipeline's own erosion math at
-# dem_data.py's fixed 5m DEM resolution (dem_data.DEFAULT_RESOLUTION_
-# METERS): the most adversarial synthetic case (a single-pixel-wide,
-# single-row-long throat right at the MIN_ZONE_WAIST_METERS threshold --
-# about as thin a real waist as this pipeline can split on) produces a
-# ~25m render_polygon_utm gap, so this value is kept comfortably under
-# half of that (12.5m) with real margin. Documented STARTING value, like
-# every other threshold in this pipeline -- UNVALIDATED against real
-# ground-truth beyond that synthetic probe, tuned against live
-# screenshots showing small excluded pockets not yet fully closed.
-# CONFIGURABLE, but re-run test_production_area.py's/test_render_layout_
-# map.py's waist-split non-overlap regressions before raising it further.
-FILL_SMOOTHING_RADIUS_METERS = 10.0
-
 METERS_PER_FOOT = 0.3048
 
 # Cells within this distance of the real parcel boundary are excluded from
@@ -974,32 +941,57 @@ def cluster_and_gate(
         to reflect the full, POST-reclaim footprint, completely unaffected
         by render_polygon_utm.
 
-        'render_fill_polygon_utm' is a SECOND, separate render-only field,
-        built from render_polygon_utm itself via a direct vector buffer
-        round-trip -- render_polygon_utm.buffer(FILL_SMOOTHING_RADIUS_
-        METERS).buffer(-FILL_SMOOTHING_RADIUS_METERS), real shapely
-        geometry, no raster grid involved (an earlier raster dilate/erode
-        implementation was replaced with this: two separate hand-rolled-
-        morphology bugs -- a border-clipping artifact near a DEM grid's
-        own edges, and an inconsistent smoothing effect between similarly
-        -sized clusters -- both traced back to array-bounds edge cases in
-        reimplementing closing on a raster grid by hand, which a direct
-        polygon operation simply doesn't have). Genuinely excluded (steep
-        or hydric, NOT road/tree -- those were already excluded at STEP
-        1) ground can sit as a small, scattered pocket entirely inside an
-        otherwise-solid zone, rendering as an unexplained blank gap in
-        that zone's own contour-line texture. The buffer round-trip fills
-        a pocket up to roughly 2x FILL_SMOOTHING_RADIUS_METERS wide while
-        leaving a real waist-split gap (always wider than that, by
-        construction -- see FILL_SMOOTHING_RADIUS_METERS's own docstring
-        for the hard constraint) genuinely open. render_layout_map.py
-        clips contour lines against render_fill_polygon_utm, NOT
-        render_polygon_utm -- see that module's own docstring. Computed
-        for EVERY cluster, split or not (a small excluded pocket can sit
-        inside an ordinary, non-split zone just as easily) -- geometrically
-        equal to render_polygon_utm (up to shapely's own buffer-curve
-        approximation, not bit-identical) whenever there's nothing to
-        close over.
+        'render_fill_polygon_utm' is a SECOND, separate render-only field:
+        the PLAIN CONVEX HULL of render_polygon_utm, re-intersected with
+        boundary_polygon_utm --
+
+            render_polygon_utm.convex_hull.intersection(boundary_polygon_utm)
+
+        -- nothing else. This replaced two earlier smoothing attempts (a
+        raster dilate/erode implementation, then a vector buffer(+r).
+        buffer(-r) round-trip) -- both were confirmed, in a live in-
+        process diagnostic, to compute genuinely correct/different
+        geometry that render_layout_map.py was ALSO confirmed to read
+        correctly (same object, same .area, at the actual clip line) --
+        yet the specific real-world gaps this was meant to close turned
+        out to be far wider than any tunable radius could safely reach
+        without also risking a real waist-split gap (see PART 1 above).
+        A hull has no radius or per-pocket logic to tune at all, so
+        there's no equivalent conflict to hit.
+
+        HULL/WAIST-SPLIT INTERACTION: a convex hull can only extend as
+        far as render_polygon_utm's own most-extreme cells already reach
+        in any direction -- it can never bulge past whichever of its own
+        points was already farthest out (a convex hull is always
+        contained in the convex hull of its own defining points, which
+        is itself contained in any halfspace all those points already
+        lie within). For two split pieces whose cells are linearly
+        separable near the pinch (the case _reclaim_stripped_cells()'s
+        own nearest-BFS-distance assignment naturally tends to produce),
+        each hull therefore stays on its own side of that separator and
+        cannot cross into the other's territory. Empirically confirmed
+        (not assumed) against both a simple convex-lobe dumbbell and a
+        deliberately non-convex one (a lobe with a real notch carved out
+        of the side facing the other piece, its hull area nearly
+        doubling to fill it in) -- in both cases the two hulls' distance
+        and non-overlap matched render_polygon_utm's own exactly. This
+        was NOT verified against a real, live waist-split pair (no
+        network access to real property data in this environment) --
+        an arbitrarily irregular real field boundary that is NOT linearly
+        separable near its own pinch remains a theoretical, unverified
+        edge case where two independently-computed hulls could overlap;
+        if that's ever observed live, it needs a real decision (e.g. hull
+        per FINAL cluster before the split, not per split piece), not a
+        silent workaround here.
+
+        render_layout_map.py clips contour lines against render_fill_
+        polygon_utm, NOT render_polygon_utm -- see that module's own
+        docstring. Computed for EVERY cluster, split or not (this simply
+        rounds off whatever real jagged edges a cell-union footprint
+        naturally has, split or not) -- geometrically equal to
+        render_polygon_utm exactly whenever render_polygon_utm is already
+        convex (e.g. a clean rectangular field), strictly larger
+        otherwise.
 
       PART 2 -- true-hole detection (_detect_hole_footprints()): runs
         independently of Part 1, once per FINAL cluster (i.e. after any
@@ -1074,23 +1066,14 @@ def cluster_and_gate(
                 render_footprint = _cell_union_footprint(render_cells, dem)
                 render_polygon_utm = render_footprint.intersection(boundary_polygon_utm)
 
-            # render_fill_polygon_utm: a real vector buffer round-trip
-            # (grow by FILL_SMOOTHING_RADIUS_METERS, then shrink back by
-            # the same amount -- standard "morphological closing" done
-            # directly on the polygon via shapely, see FILL_SMOOTHING_
-            # RADIUS_METERS's own docstring) of render_polygon_utm itself,
-            # to swallow small excluded (steep/hydric) pockets whole while
-            # leaving a real waist-split gap open (it's wider than the
-            # buffer radius can bridge). Always computed, split or not --
-            # a small excluded pocket can sit inside an ordinary,
-            # non-split zone just as easily. Re-intersected with
-            # boundary_polygon_utm at the end, same safety convention
-            # every other footprint in this function already follows --
-            # the buffer's outward growth could otherwise poke past the
-            # real parcel boundary before shrinking back.
-            render_fill_polygon_utm = render_polygon_utm.buffer(FILL_SMOOTHING_RADIUS_METERS).buffer(
-                -FILL_SMOOTHING_RADIUS_METERS
-            ).intersection(boundary_polygon_utm)
+            # render_fill_polygon_utm: the plain convex hull of
+            # render_polygon_utm, re-intersected with boundary_polygon_utm
+            # (same safety convention every other footprint in this
+            # function already follows -- a hull can extend past the real
+            # parcel boundary near an edge cell). No radius, no per-pocket
+            # logic at all -- see cluster_and_gate()'s own docstring for
+            # why this replaced the earlier buffer-round-trip smoothing.
+            render_fill_polygon_utm = render_polygon_utm.convex_hull.intersection(boundary_polygon_utm)
 
             hole_footprints = _detect_hole_footprints(cluster_cells, dem)
 
@@ -1137,8 +1120,8 @@ def identify_production_areas(
             'polygon_utm': shapely Polygon/MultiPolygon,
             'render_polygon_utm': shapely Polygon/MultiPolygon,  # == polygon_utm unless this cluster went
                                                                    # through a waist split -- see cluster_and_gate()
-            'render_fill_polygon_utm': shapely Polygon/MultiPolygon,  # render_polygon_utm's own cells,
-                                                                   # closed over -- see cluster_and_gate()
+            'render_fill_polygon_utm': shapely Polygon/MultiPolygon,  # render_polygon_utm's own convex
+                                                                   # hull -- see cluster_and_gate()
             'geometry_wgs84': GeoJSON geometry dict,
             'cells': list[(row, col)],
             'hole_footprints': list[shapely Polygon],  # [] if none -- see module docstring's TRUE HOLES vs WAISTS

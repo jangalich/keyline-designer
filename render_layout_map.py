@@ -52,18 +52,18 @@ production_area.py's own module docstring:
   2. Genuinely excluded ground (steep slope or hydric soil) can also sit
      as a small, scattered pocket entirely INSIDE an otherwise-solid
      zone, rendering as an unexplained blank gap in the middle of a
-     field. render_fill_polygon_utm closes over pockets like this (a
-     direct vector buffer round-trip on render_polygon_utm itself --
-     buffer(+FILL_SMOOTHING_RADIUS_METERS) then
-     buffer(-FILL_SMOOTHING_RADIUS_METERS), real shapely geometry, no
-     raster grid involved -- see that constant's own docstring) while
-     leaving a real waist-split gap open, since that gap is always wider
-     than the buffer radius can bridge.
+     field. render_fill_polygon_utm is render_polygon_utm's own PLAIN
+     CONVEX HULL (see production_area.py's own module docstring for why
+     two earlier smoothing attempts -- a raster dilate/erode
+     implementation, then a vector buffer round-trip -- were both
+     replaced with this) -- a hull necessarily covers any real interior
+     pocket/notch, whatever its size, since a pocket is by definition a
+     concavity the hull fills in.
 
 render_fill_polygon_utm equals render_polygon_utm (which itself equals
-polygon_utm) geometrically whenever there's nothing to close over -- e.g.
-an ordinary zone with no small excluded pockets -- so this changes nothing
-for the common case.
+polygon_utm) exactly whenever render_polygon_utm is already convex --
+e.g. an ordinary, roughly-rectangular zone with no notches or holes --
+so this changes nothing for the common case.
 
 Basemap: NAIP aerial imagery via USGS's cached USGSImageryOnly tile
 service, fetched and composited with contextily (a well-established

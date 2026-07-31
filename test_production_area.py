@@ -836,118 +836,119 @@ print(
 )
 
 
-# --- render_fill_polygon_utm: the HARD CONSTRAINT -- fill-smoothing (a direct vector buffer round-trip,
-#     render_polygon_utm.buffer(+FILL_SMOOTHING_RADIUS_METERS).buffer(-FILL_SMOOTHING_RADIUS_METERS)) must
-#     swallow small excluded pockets whole for display, but must NEVER bridge a real waist-split gap. This
-#     dumbbell's own gap (computed above) is comfortably wider than 2x FILL_SMOOTHING_RADIUS_METERS, so it
-#     must survive fill-smoothing fully intact, same as render_polygon_utm did. ---
+# --- render_fill_polygon_utm: a plain convex hull -- no radius, no per-pocket logic. Confirm it's a
+#     genuine convex hull (equals its own convex_hull, no concave notches survive) on a deliberately
+#     non-convex cluster (an "L" shape), and that it fully covers a real excluded pocket regardless of
+#     the pocket's SIZE (unlike the earlier radius-limited buffer approach, a hull has no size ceiling
+#     on what it can close over). ---
 
-assert render_distance > 2 * pa.FILL_SMOOTHING_RADIUS_METERS, (
-    f"test setup should produce a real waist gap ({render_distance}m) comfortably wider than twice "
-    f"FILL_SMOOTHING_RADIUS_METERS ({2 * pa.FILL_SMOOTHING_RADIUS_METERS}m) -- otherwise this isn't a "
-    "meaningful hard-constraint check"
+hull_dem = _waist_dem(40, 40)
+hull_step1 = _step1_for(hull_dem)
+l_shape_cells = list(set(_rect_cells(5, 35, 5, 20)) | set(_rect_cells(20, 35, 5, 35)))  # a real "L", concave at its inner corner
+l_shape_mask = _mask_from_cells((40, 40), l_shape_cells)
+l_shape_patches = _gate(l_shape_mask, hull_dem, hull_step1)
+assert len(l_shape_patches) == 1, f"a single L-shaped mask must stay one cluster, got {len(l_shape_patches)} cluster(s)"
+l_patch = l_shape_patches[0]
+
+assert not l_patch["render_polygon_utm"].equals(l_patch["render_polygon_utm"].convex_hull), (
+    "test sanity check: this L-shaped fixture's own render_polygon_utm must genuinely be non-convex, "
+    "otherwise the hull check below isn't exercising real hull behavior"
 )
-fill_distance = p1["render_fill_polygon_utm"].distance(p2["render_fill_polygon_utm"])
-assert fill_distance > 0, (
-    f"HARD CONSTRAINT VIOLATION: render_fill_polygon_utm bridges this waist-split gap -- FILL_SMOOTHING_"
-    f"RADIUS_METERS ({pa.FILL_SMOOTHING_RADIUS_METERS}m) is too large relative to the real gap "
-    f"({render_distance}m)"
+assert l_patch["render_fill_polygon_utm"].equals(l_patch["render_polygon_utm"].convex_hull.intersection(_full_extent_boundary(hull_dem))), (
+    "render_fill_polygon_utm must be EXACTLY render_polygon_utm.convex_hull.intersection(boundary_polygon_utm) "
+    "-- no radius, no buffer, nothing else"
+)
+assert l_patch["render_fill_polygon_utm"].area > l_patch["render_polygon_utm"].area, (
+    "the hull of a genuinely non-convex shape must have strictly more area than the shape itself"
+)
+print(
+    f"Convex hull: render_fill_polygon_utm for a deliberately non-convex ('L'-shaped) cluster is exactly "
+    f"render_polygon_utm.convex_hull.intersection(boundary_polygon_utm) -- area grew from "
+    f"{l_patch['render_polygon_utm'].area} to {l_patch['render_fill_polygon_utm'].area} sq m closing the L's "
+    "own concave inner corner."
+)
+
+# A hull has no size ceiling on what it closes over -- confirm with a pocket far larger than the old
+# buffer approach's effective 2x-radius reach (FILL_SMOOTHING_RADIUS_METERS was 10m, reaching ~20m pockets;
+# this pocket is 60x60m, deliberately much bigger).
+big_pocket_dem = _waist_dem(60, 60)
+big_pocket_step1 = _step1_for(big_pocket_dem)
+big_pocket_solid = set(_rect_cells(2, 58, 2, 58))
+big_pocket_hole = set(_rect_cells(20, 32, 20, 32))  # 12x12 cells = 60x60m
+big_pocket_cells = list(big_pocket_solid - big_pocket_hole)
+big_pocket_mask = _mask_from_cells((60, 60), big_pocket_cells)
+big_pocket_patches = _gate(big_pocket_mask, big_pocket_dem, big_pocket_step1)
+assert len(big_pocket_patches) == 1, f"a solid block with one large interior pocket must stay one cluster, got {len(big_pocket_patches)}"
+big_pocket_patch = big_pocket_patches[0]
+big_pocket_footprint = pa._cell_union_footprint(list(big_pocket_hole), big_pocket_dem)
+assert big_pocket_patch["polygon_utm"].intersection(big_pocket_footprint).area < 1e-6, (
+    "test sanity check: the pocket must genuinely be excluded ground"
+)
+big_recovered = big_pocket_patch["render_fill_polygon_utm"].intersection(big_pocket_footprint).area
+assert abs(big_recovered - big_pocket_footprint.area) < 1e-6, (
+    f"a convex hull must fully close over a pocket regardless of its size (60x60m here, far bigger than "
+    f"the old buffer approach's ~20m reach) -- recovered {big_recovered} of {big_pocket_footprint.area} sq m"
+)
+print("Convex hull: fully closes over a large (60x60m) excluded pocket -- no radius ceiling on pocket size.")
+
+
+# --- render_fill_polygon_utm: EMPIRICAL waist-split hull-overlap check -- a convex hull, in principle,
+#     can only extend as far as render_polygon_utm's own most-extreme cells already reach (it can never
+#     bulge past its own defining points), so two split pieces whose cells are linearly separable near
+#     the pinch should keep their hulls on separate sides too. Checked here, not assumed, against BOTH the
+#     dumbbell above (convex lobes -- hull changes nothing) AND a deliberately non-convex pair (each lobe
+#     has a real notch carved into the side FACING the other lobe, so its hull genuinely bulges toward the
+#     other piece) -- reporting the real result either way. ---
+
+assert p1["render_fill_polygon_utm"].distance(p2["render_fill_polygon_utm"]) > 0, (
+    "render_fill_polygon_utm for the dumbbell's two split zones must not touch or overlap"
 )
 assert p1["render_fill_polygon_utm"].intersection(p2["render_fill_polygon_utm"]).area < 1e-9, (
-    "HARD CONSTRAINT VIOLATION: render_fill_polygon_utm for the two split zones overlaps"
+    "render_fill_polygon_utm for the dumbbell's two split zones must not overlap"
 )
 print(
-    f"render_fill_polygon_utm hard constraint: at FILL_SMOOTHING_RADIUS_METERS={pa.FILL_SMOOTHING_RADIUS_METERS}m, "
-    f"this dumbbell's real waist-split gap ({render_distance}m) survives fill-smoothing fully intact "
-    f"(render_fill_polygon_utm gap {fill_distance}m) -- no touch, no overlap."
+    f"Waist-split hull check (convex lobes): render_fill_polygon_utm stays exactly as far apart as "
+    f"render_polygon_utm did ({p1['render_fill_polygon_utm'].distance(p2['render_fill_polygon_utm'])}m) -- "
+    "no change, since each lobe was already convex."
 )
 
-
-# --- render_fill_polygon_utm: a small excluded (steep/hydric) pocket entirely inside a solid, non-split
-#     cluster must be fully closed over -- the confirmed-live screenshot problem this feature fixes. ---
-
-pocket_dem = _waist_dem(40, 40)
-pocket_step1 = _step1_for(pocket_dem)
-pocket_solid = set(_rect_cells(5, 35, 5, 35))  # 30x30 solid block
-pocket_hole = set(_rect_cells(18, 22, 18, 22))  # 4x4 cells = 20x20m -- within 2x FILL_SMOOTHING_RADIUS_METERS
-pocket_cells = list(pocket_solid - pocket_hole)
-pocket_mask = _mask_from_cells((40, 40), pocket_cells)
-pocket_patches = _gate(pocket_mask, pocket_dem, pocket_step1)
-assert len(pocket_patches) == 1, f"a solid block with one small interior pocket must stay one cluster, got {len(pocket_patches)}"
-pocket_patch = pocket_patches[0]
-
-pocket_hole_footprint = pa._cell_union_footprint(list(pocket_hole), pocket_dem)
-assert pocket_patch["polygon_utm"].intersection(pocket_hole_footprint).area < 1e-6, (
-    "test sanity check: the pocket must genuinely be excluded ground -- polygon_utm must not cover it"
+NOTCH_SHAPE = (44, 100)
+notch_dem = _waist_dem(*NOTCH_SHAPE)
+notch_step1 = _step1_for(notch_dem)
+notch_lobe_a = set(_rect_cells(0, 40, 0, 40)) - set(_rect_cells(10, 30, 10, 40))  # "C" opening toward lobe B
+notch_lobe_b = set(_rect_cells(0, 40, 60, 100)) - set(_rect_cells(10, 30, 60, 90))  # "C" opening toward lobe A
+notch_strip = set(_rect_cells(40, 42, 40, 60))  # narrow connector, well clear of both notches
+notch_cells = list(notch_lobe_a | notch_lobe_b | notch_strip)
+notch_mask = _mask_from_cells(NOTCH_SHAPE, notch_cells)
+notch_patches = _gate(notch_mask, notch_dem, notch_step1)
+assert len(notch_patches) == 2, f"expected the notched dumbbell to split into 2 clusters, got {len(notch_patches)}"
+n1, n2 = notch_patches
+assert not n1["render_polygon_utm"].equals(n1["render_polygon_utm"].convex_hull), (
+    "test sanity check: lobe 1 must genuinely be non-convex (its own notch must survive erosion) -- "
+    "otherwise this isn't exercising real hull-bulge risk"
 )
-assert pocket_patch["render_polygon_utm"].intersection(pocket_hole_footprint).area < 1e-6, (
-    "test sanity check: render_polygon_utm (unsmoothed) must also not cover the pocket"
+assert not n2["render_polygon_utm"].equals(n2["render_polygon_utm"].convex_hull), (
+    "test sanity check: lobe 2 must genuinely be non-convex too"
 )
-fill_recovered_area = pocket_patch["render_fill_polygon_utm"].intersection(pocket_hole_footprint).area
-assert abs(fill_recovered_area - pocket_hole_footprint.area) < 1e-6, (
-    f"render_fill_polygon_utm must fully close over a small (20x20m) excluded pocket -- recovered "
-    f"{fill_recovered_area} of {pocket_hole_footprint.area} sq m"
+notch_render_distance = n1["render_polygon_utm"].distance(n2["render_polygon_utm"])
+notch_hull_distance = n1["render_fill_polygon_utm"].distance(n2["render_fill_polygon_utm"])
+notch_hull_overlap = n1["render_fill_polygon_utm"].intersection(n2["render_fill_polygon_utm"]).area
+print(
+    f"Waist-split hull check (non-convex lobes, real notches facing each other -- hull area grew from "
+    f"{n1['render_polygon_utm'].area} to {n1['render_fill_polygon_utm'].area} sq m for lobe 1 alone): "
+    f"render_polygon_utm distance={notch_render_distance}m, render_fill_polygon_utm (hull) distance="
+    f"{notch_hull_distance}m, hull overlap area={notch_hull_overlap} sq m."
+)
+assert notch_hull_distance > 0 and notch_hull_overlap < 1e-9, (
+    f"EMPIRICAL FINDING: convex hulls for this non-convex waist-split pair DO overlap or touch "
+    f"(distance={notch_hull_distance}m, overlap={notch_hull_overlap} sq m) -- reporting this plainly rather "
+    f"than papering over it. This fixture was NOT verified against a real, live waist-split pair (no network "
+    f"access to real property data here) -- see production_area.py's own module docstring for the caveat."
 )
 print(
-    f"render_fill_polygon_utm: a small (20x20m) excluded pocket entirely inside a solid, non-split cluster "
-    f"is fully closed over (FILL_SMOOTHING_RADIUS_METERS={pa.FILL_SMOOTHING_RADIUS_METERS}m)."
-)
-
-
-# --- render_fill_polygon_utm: regression for the 0.0%-vs-5.74% inconsistency the earlier RASTER closing
-#     implementation had -- two IDENTICALLY shaped-and-sized clusters (each with the same small notch),
-#     one sitting right at the DEM grid's own [0,0] corner, the other deep in the interior. The old
-#     dilate/erode-on-a-raster-grid approach nibbled the edge-touching cluster's smoothing effect down
-#     toward 0% (its dilation step got clipped by the array's own bounds) while the interior cluster showed
-#     the real, expected effect -- a genuine inconsistency between two clusters that should behave
-#     identically. The vector buffer round-trip has no array bounds at all, so both must now show the SAME
-#     real, non-zero effect regardless of position. ---
-
-consistency_dem = _waist_dem(70, 70)
-consistency_step1 = _step1_for(consistency_dem)
-
-
-def _block_with_notch(r0, size=20, notch=4, c0=None):
-    c0 = r0 if c0 is None else c0
-    solid = set(_rect_cells(r0, r0 + size, c0, c0 + size))
-    nr, nc = r0 + size // 2 - notch // 2, c0 + size // 2 - notch // 2
-    hole = set(_rect_cells(nr, nr + notch, nc, nc + notch))
-    return list(solid - hole)
-
-
-edge_touching_cells = _block_with_notch(0)  # cells literally include row/col 0 -- the DEM grid's own corner
-interior_cells = _block_with_notch(25)  # true interior, 5-cell (non-diagonal) gap from the edge cluster and every DEM edge
-
-consistency_mask = _mask_from_cells((70, 70), edge_touching_cells + interior_cells)
-consistency_patches = _gate(consistency_mask, consistency_dem, consistency_step1)
-assert len(consistency_patches) == 2, (
-    f"test setup should produce 2 genuinely separate clusters (no accidental waist split from the two "
-    f"blocks touching), got {len(consistency_patches)}"
-)
-for p in consistency_patches:
-    assert p["render_polygon_utm"] is p["polygon_utm"], (
-        "test sanity check: neither cluster should go through a waist split here -- otherwise this isn't "
-        "isolating the fill-smoothing consistency question"
-    )
-
-pct_changes = []
-for p in consistency_patches:
-    pct_change = (p["render_fill_polygon_utm"].area - p["polygon_utm"].area) / p["polygon_utm"].area * 100
-    pct_changes.append(pct_change)
-    assert pct_change > 1.0, (
-        f"BOTH clusters (including the one touching the DEM grid's own edge) must show a genuine, "
-        f"non-suspicious smoothing effect, not a near-zero one masking a border artifact -- cluster {p['id']} "
-        f"showed only {pct_change:.4f}%"
-    )
-assert abs(pct_changes[0] - pct_changes[1]) < 0.01, (
-    f"two identically shaped-and-sized clusters must show the SAME smoothing effect regardless of position "
-    f"relative to the DEM grid's own edges -- got {pct_changes[0]:.4f}% vs {pct_changes[1]:.4f}% "
-    "(this exact inconsistency is what the vector buffer approach replaced the raster closing implementation to fix)"
-)
-print(
-    f"render_fill_polygon_utm consistency: two identically shaped clusters (one touching the DEM grid's own "
-    f"[0,0] corner, one in the true interior) both show the same real smoothing effect "
-    f"({pct_changes[0]:.2f}%) -- the 0.0%-vs-5.74%-style position-dependent inconsistency is gone."
+    "Waist-split hull check: confirmed EMPIRICALLY (not assumed) that both a convex-lobe pair and a "
+    "deliberately non-convex, notch-facing pair keep their independently-computed hulls separate, matching "
+    "render_polygon_utm's own non-overlap exactly in both cases."
 )
 
 
@@ -1077,36 +1078,24 @@ assert square_patch["render_polygon_utm"] is square_patch["polygon_utm"], (
     "an ordinary, non-split cluster's render_polygon_utm must simply BE polygon_utm -- no change in "
     "rendering behavior for the ordinary case"
 )
-# render_fill_polygon_utm is a real vector buffer(+r).buffer(-r) round-trip on render_polygon_utm --
-# no raster grid, no DEM-grid-shape/array-bounds concept involved at all, so a solid mask with nothing to
-# close over must come back with essentially the same real area, not bit-exact (shapely's buffer curve
-# approximation rounds sharp corners by a tiny amount -- this fixture's own cells sitting close to
-# SQUARE_SHAPE's own grid edges (rows/cols 1-10 within a 0-11 grid) is irrelevant to render_fill_polygon_utm
-# now, unlike the earlier raster-based implementation this replaced).
-fill_diff = square_patch["render_fill_polygon_utm"].symmetric_difference(square_patch["polygon_utm"]).area
-assert fill_diff / square_patch["polygon_utm"].area < 0.01, (
-    f"a solid mask with nothing to close over must have render_fill_polygon_utm essentially equal to "
-    f"polygon_utm (within the buffer round-trip's own curve-approximation tolerance) -- got a "
-    f"{fill_diff / square_patch['polygon_utm'].area:.4%} relative difference"
+# render_fill_polygon_utm is a plain convex hull -- a solid, already-convex rectangle's hull is EXACTLY
+# itself (no radius, no buffer-curve approximation noise to tolerate), just with its cell-union footprint's
+# own seam-driven collinear vertices simplified away.
+assert square_patch["render_fill_polygon_utm"].equals(square_patch["polygon_utm"]), (
+    "a solid, already-convex mask's render_fill_polygon_utm (its own convex hull) must be geometrically "
+    "IDENTICAL to polygon_utm -- a hull of an already-convex shape changes nothing"
 )
-# "Rounder shape": the buffer round-trip shaves each of the block's 4 sharp corners by a tiny amount
-# (polygon_utm.difference(render_fill_polygon_utm) is non-empty only at the corners) and simplifies the
-# real cell-union footprint's own seam-driven vertex count down to a cleaner, near-rectangular outline.
-corner_rounding = square_patch["polygon_utm"].difference(square_patch["render_fill_polygon_utm"])
-assert 0 < corner_rounding.area < 1.0, (
-    f"the buffer round-trip should shave a small, real amount off each sharp corner -- got "
-    f"{corner_rounding.area} sq m (0 would mean no rounding happened at all; a large value would mean "
-    f"something's wrong beyond ordinary corner-rounding)"
+assert abs(square_patch["render_fill_polygon_utm"].area - square_patch["polygon_utm"].area) < 1e-9, (
+    "a solid, already-convex mask's hull must have the EXACT same real area as polygon_utm"
 )
 assert len(square_patch["render_fill_polygon_utm"].exterior.coords) < len(square_patch["polygon_utm"].exterior.coords), (
-    "render_fill_polygon_utm should come out as a visibly simpler (rounder, fewer-vertex) outline than the "
-    "real cell-union footprint's own vertex-dense edges"
+    "render_fill_polygon_utm should come out as a visibly simpler (fewer-vertex) outline than the real "
+    "cell-union footprint's own seam-driven, vertex-dense edges, even though the SHAPE is identical"
 )
 print(
     "Idempotence: a solid, roughly-square mask with neither a waist nor a hole passes through completely "
     "unchanged -- 1 cluster, hole_footprints=[], render_polygon_utm is polygon_utm, and render_fill_"
-    "polygon_utm matches within the buffer round-trip's own small curve-approximation tolerance while "
-    "genuinely rounding off the shape's corners."
+    "polygon_utm (its own convex hull) is geometrically IDENTICAL, just with fewer vertices."
 )
 
 

@@ -8,8 +8,9 @@ polygon_utm), not a filled/outlined shape -- see production_area.py's and
 render_layout_map.py's own module docstrings for why the earlier
 display_polygon_utm/display_geometry_wgs84 fields were removed entirely
 in favor of this, and for render_polygon_utm (waist-split visual
-separation) / render_fill_polygon_utm (small-excluded-pocket closing)'s
-own separate roles.
+separation) / render_fill_polygon_utm (render_polygon_utm's own plain
+convex hull, closing over any real excluded pocket or notch regardless
+of size)'s own separate roles.
 
 Builds real patch dicts via production_area.cluster_and_gate() +
 production_suitability.score_production_areas() against small synthetic,
@@ -131,14 +132,11 @@ assert some_contour_exceeds_zone, (
 
 clipped_pieces = _clip_contours_to_zone(global_contours, single_patch)
 assert clipped_pieces, "expected at least one contour segment to survive clipping into this zone"
-# render_fill_polygon_utm is now a real vector buffer(+r).buffer(-r) round-trip on render_polygon_utm --
-# a solid zone with no small excluded pockets to close over must come back with essentially the same area,
-# not bit-exact (shapely's buffer curve approximation rounds sharp corners by a tiny amount).
-single_fill_diff = single_patch["render_fill_polygon_utm"].symmetric_difference(single_patch["polygon_utm"]).area
-assert single_fill_diff / single_patch["polygon_utm"].area < 0.01, (
-    f"a solid zone with no small excluded pockets to close over must have render_fill_polygon_utm "
-    f"essentially equal to polygon_utm (within the buffer round-trip's own curve-approximation tolerance) "
-    f"-- got a {single_fill_diff / single_patch['polygon_utm'].area:.4%} relative difference"
+# render_fill_polygon_utm is render_polygon_utm's own plain convex hull -- a solid, already-convex zone's
+# hull is geometrically IDENTICAL to polygon_utm (no radius, no buffer-curve approximation to tolerate).
+assert single_patch["render_fill_polygon_utm"].equals(single_patch["polygon_utm"]), (
+    "a solid, already-convex zone's render_fill_polygon_utm (its own convex hull) must be geometrically "
+    "identical to polygon_utm"
 )
 zone_polygon_buffered = single_patch["render_fill_polygon_utm"].buffer(1e-6)
 for piece in clipped_pieces:
@@ -222,8 +220,10 @@ print(
 #     current production behavior) instead of polygon_utm (the pre-fix behavior) is what actually produces
 #     a visible blank strip at the waist itself -- not just in the pre-existing gap_cells corridor checked
 #     above. render_polygon_utm (the intermediate, unsmoothed waist-split fix) must ALSO still show the
-#     same real gap -- render_fill_polygon_utm's closing operation must never bridge it (the whole point of
-#     FILL_SMOOTHING_RADIUS_METERS's own hard constraint, see production_area.py's docstring). ---
+#     same real gap -- render_fill_polygon_utm (each piece's own convex hull) must not bridge it either;
+#     this fixture's own lobes are convex rectangles, so their hulls change nothing (see
+#     test_production_area.py's own deliberately non-convex, notch-facing fixture for the empirical check
+#     against a genuinely non-convex pair). ---
 
 assert zone_1["polygon_utm"].distance(zone_2["polygon_utm"]) < 1e-9, (
     "test setup should reproduce the confirmed-live bug: polygon_utm for the two split zones must be "
@@ -233,8 +233,8 @@ assert zone_1["render_polygon_utm"].distance(zone_2["render_polygon_utm"]) > 0, 
     "render_polygon_utm for the two split zones must have a real gap, unlike polygon_utm"
 )
 assert zone_1["render_fill_polygon_utm"].distance(zone_2["render_fill_polygon_utm"]) > 0, (
-    "render_fill_polygon_utm for the two split zones must ALSO still have a real gap -- the fill-smoothing "
-    "closing operation must never bridge a genuine waist-split gap, only small excluded pockets"
+    "render_fill_polygon_utm (each piece's own convex hull) for the two split zones must ALSO still have "
+    "a real gap"
 )
 assert zone_1["render_fill_polygon_utm"].intersection(zone_2["render_fill_polygon_utm"]).area < 1e-9, (
     "render_fill_polygon_utm for the two split zones must not overlap"
@@ -404,11 +404,10 @@ print(
 
 
 # =====================================================================
-# Fill-smoothing: a small excluded (steep/hydric) pocket entirely inside an otherwise-solid zone must be
+# Convex hull: a small excluded (steep/hydric) pocket entirely inside an otherwise-solid zone must be
 # fully closed over in render_fill_polygon_utm (so contour lines drawn against it continue right through
-# the pocket, matching the confirmed-live screenshot problem this feature fixes) -- while a real waist-
-# split gap (see above) must NEVER be bridged, since it's always wider than FILL_SMOOTHING_RADIUS_METERS
-# can reach. This is the "hard constraint": re-run at whatever radius gets chosen.
+# the pocket, matching the confirmed-live screenshot problem this feature fixes) -- no radius, no size
+# ceiling on the pocket at all (a hull always fully encloses any real interior concavity/hole).
 # =====================================================================
 
 POCKET_SHAPE = (40, 40)
@@ -416,7 +415,7 @@ pocket_dem = _sloped_dem(*POCKET_SHAPE)
 pocket_boundary = _full_extent_boundary(pocket_dem)
 
 solid_cells = set(_rect_cells(5, 35, 5, 35))  # 30x30 solid block
-small_pocket = set(_rect_cells(18, 22, 18, 22))  # 4x4 cells = 20x20m -- well within 2x FILL_SMOOTHING_RADIUS_METERS
+small_pocket = set(_rect_cells(18, 22, 18, 22))  # 4x4 cells = 20x20m
 pocket_cells = list(solid_cells - small_pocket)
 pocket_mask = _mask_from_cells(POCKET_SHAPE, pocket_cells)
 
@@ -431,8 +430,8 @@ assert pocket_patch["polygon_utm"].intersection(pocket_footprint).area < 1e-6, (
 )
 fill_recovered_area = pocket_patch["render_fill_polygon_utm"].intersection(pocket_footprint).area
 assert abs(fill_recovered_area - pocket_footprint.area) < 1e-6, (
-    f"render_fill_polygon_utm must fully close over a small (20x20m) excluded pocket -- recovered "
-    f"{fill_recovered_area} of {pocket_footprint.area} sq m"
+    f"render_fill_polygon_utm (the convex hull) must fully close over a small (20x20m) excluded pocket -- "
+    f"recovered {fill_recovered_area} of {pocket_footprint.area} sq m"
 )
 
 pocket_global_contours = compute_contour_lines(pocket_dem)
@@ -441,7 +440,7 @@ pocket_clipped_new = _clip_contours_to_zone(pocket_global_contours, pocket_patch
 old_pocket_overlap = sum(p.intersection(pocket_footprint).length for p in pocket_clipped_old)
 new_pocket_overlap = sum(p.intersection(pocket_footprint).length for p in pocket_clipped_new)
 assert old_pocket_overlap < 1e-9, (
-    "test sanity check: clipping against render_polygon_utm (pre-fill-smoothing) should leave the pocket "
+    "test sanity check: clipping against render_polygon_utm (pre-hull) should leave the pocket "
     "as a real blank gap -- otherwise this isn't reproducing the live screenshot problem"
 )
 assert new_pocket_overlap > 0, (
@@ -449,15 +448,16 @@ assert new_pocket_overlap > 0, (
     f"pocket (closed over), got {new_pocket_overlap}m of overlap"
 )
 print(
-    f"Fill-smoothing: a small (20x20m) excluded pocket entirely inside a zone is fully closed over in "
-    f"render_fill_polygon_utm (FILL_SMOOTHING_RADIUS_METERS={pa.FILL_SMOOTHING_RADIUS_METERS}m) -- contour "
-    f"lines now draw {round(new_pocket_overlap, 1)}m through it instead of leaving a blank gap."
+    f"Convex hull: a small (20x20m) excluded pocket entirely inside a zone is fully closed over in "
+    f"render_fill_polygon_utm -- contour lines now draw {round(new_pocket_overlap, 1)}m through it instead "
+    "of leaving a blank gap."
 )
 
 
-# --- Hard constraint, worst case: the tightest real waist-split gap this pipeline's own erosion math can
-#     produce (a single-pixel-wide, single-row-long throat, right at the MIN_ZONE_WAIST_METERS threshold,
-#     at dem_data.py's fixed 5m production DEM resolution) must survive fill-smoothing fully intact. ---
+# --- Waist-split hull check, worst case: the tightest real waist-split gap this pipeline's own erosion
+#     math can produce (a single-pixel-wide, single-row-long throat, right at the MIN_ZONE_WAIST_METERS
+#     threshold, at dem_data.py's fixed 5m production DEM resolution) -- confirmed empirically, not
+#     assumed, that render_fill_polygon_utm (each piece's own convex hull) stays separate here too. ---
 
 TIGHT_SHAPE = (30, 20)
 tight_dem = _sloped_dem(*TIGHT_SHAPE)
@@ -477,24 +477,18 @@ assert len(tight_patches) == 2, (
 tight_1, tight_2 = tight_patches
 tight_render_gap = tight_1["render_polygon_utm"].distance(tight_2["render_polygon_utm"])
 tight_fill_gap = tight_1["render_fill_polygon_utm"].distance(tight_2["render_fill_polygon_utm"])
-assert tight_render_gap > 2 * pa.FILL_SMOOTHING_RADIUS_METERS, (
-    f"test setup should produce a real waist gap ({tight_render_gap}m) comfortably wider than twice "
-    f"FILL_SMOOTHING_RADIUS_METERS ({2 * pa.FILL_SMOOTHING_RADIUS_METERS}m) -- otherwise this isn't a "
-    "meaningful hard-constraint check"
-)
 assert tight_fill_gap > 0, (
-    f"HARD CONSTRAINT VIOLATION: FILL_SMOOTHING_RADIUS_METERS ({pa.FILL_SMOOTHING_RADIUS_METERS}m) bridges "
-    f"the tightest real waist-split gap this pipeline's own erosion math can produce ({tight_render_gap}m) "
-    "-- render_fill_polygon_utm for the two zones now touch or overlap, silently defeating the waist split"
+    f"render_fill_polygon_utm (each piece's own convex hull) bridges the tightest real waist-split gap "
+    f"this pipeline's own erosion math can produce ({tight_render_gap}m) -- the two zones now touch or "
+    "overlap, silently defeating the waist split"
 )
 assert tight_1["render_fill_polygon_utm"].intersection(tight_2["render_fill_polygon_utm"]).area < 1e-9, (
-    "HARD CONSTRAINT VIOLATION: render_fill_polygon_utm for the two split zones overlaps at the tightest "
-    "possible real waist"
+    "render_fill_polygon_utm for the two split zones overlaps at the tightest possible real waist"
 )
 print(
-    f"Hard constraint: at FILL_SMOOTHING_RADIUS_METERS={pa.FILL_SMOOTHING_RADIUS_METERS}m, even the "
-    f"tightest real waist-split gap this pipeline's erosion math can produce ({tight_render_gap}m) survives "
-    f"fill-smoothing fully intact (render_fill_polygon_utm gap {tight_fill_gap}m) -- no touch, no overlap."
+    f"Waist-split hull check: even the tightest real waist-split gap this pipeline's erosion math can "
+    f"produce ({tight_render_gap}m) survives as render_fill_polygon_utm's own hull "
+    f"(gap {tight_fill_gap}m) -- no touch, no overlap."
 )
 
 
