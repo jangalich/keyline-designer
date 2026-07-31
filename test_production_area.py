@@ -836,11 +836,11 @@ print(
 )
 
 
-# --- render_fill_polygon_utm: the HARD CONSTRAINT -- fill-smoothing (a morphological closing of
-#     render_polygon_utm's own cells, radius FILL_SMOOTHING_RADIUS_METERS) must swallow small excluded
-#     pockets whole for display, but must NEVER bridge a real waist-split gap. This dumbbell's own gap
-#     (computed above) is comfortably wider than 2x FILL_SMOOTHING_RADIUS_METERS, so it must survive
-#     fill-smoothing fully intact, same as render_polygon_utm did. ---
+# --- render_fill_polygon_utm: the HARD CONSTRAINT -- fill-smoothing (a direct vector buffer round-trip,
+#     render_polygon_utm.buffer(+FILL_SMOOTHING_RADIUS_METERS).buffer(-FILL_SMOOTHING_RADIUS_METERS)) must
+#     swallow small excluded pockets whole for display, but must NEVER bridge a real waist-split gap. This
+#     dumbbell's own gap (computed above) is comfortably wider than 2x FILL_SMOOTHING_RADIUS_METERS, so it
+#     must survive fill-smoothing fully intact, same as render_polygon_utm did. ---
 
 assert render_distance > 2 * pa.FILL_SMOOTHING_RADIUS_METERS, (
     f"test setup should produce a real waist gap ({render_distance}m) comfortably wider than twice "
@@ -891,6 +891,63 @@ assert abs(fill_recovered_area - pocket_hole_footprint.area) < 1e-6, (
 print(
     f"render_fill_polygon_utm: a small (20x20m) excluded pocket entirely inside a solid, non-split cluster "
     f"is fully closed over (FILL_SMOOTHING_RADIUS_METERS={pa.FILL_SMOOTHING_RADIUS_METERS}m)."
+)
+
+
+# --- render_fill_polygon_utm: regression for the 0.0%-vs-5.74% inconsistency the earlier RASTER closing
+#     implementation had -- two IDENTICALLY shaped-and-sized clusters (each with the same small notch),
+#     one sitting right at the DEM grid's own [0,0] corner, the other deep in the interior. The old
+#     dilate/erode-on-a-raster-grid approach nibbled the edge-touching cluster's smoothing effect down
+#     toward 0% (its dilation step got clipped by the array's own bounds) while the interior cluster showed
+#     the real, expected effect -- a genuine inconsistency between two clusters that should behave
+#     identically. The vector buffer round-trip has no array bounds at all, so both must now show the SAME
+#     real, non-zero effect regardless of position. ---
+
+consistency_dem = _waist_dem(70, 70)
+consistency_step1 = _step1_for(consistency_dem)
+
+
+def _block_with_notch(r0, size=20, notch=4, c0=None):
+    c0 = r0 if c0 is None else c0
+    solid = set(_rect_cells(r0, r0 + size, c0, c0 + size))
+    nr, nc = r0 + size // 2 - notch // 2, c0 + size // 2 - notch // 2
+    hole = set(_rect_cells(nr, nr + notch, nc, nc + notch))
+    return list(solid - hole)
+
+
+edge_touching_cells = _block_with_notch(0)  # cells literally include row/col 0 -- the DEM grid's own corner
+interior_cells = _block_with_notch(25)  # true interior, 5-cell (non-diagonal) gap from the edge cluster and every DEM edge
+
+consistency_mask = _mask_from_cells((70, 70), edge_touching_cells + interior_cells)
+consistency_patches = _gate(consistency_mask, consistency_dem, consistency_step1)
+assert len(consistency_patches) == 2, (
+    f"test setup should produce 2 genuinely separate clusters (no accidental waist split from the two "
+    f"blocks touching), got {len(consistency_patches)}"
+)
+for p in consistency_patches:
+    assert p["render_polygon_utm"] is p["polygon_utm"], (
+        "test sanity check: neither cluster should go through a waist split here -- otherwise this isn't "
+        "isolating the fill-smoothing consistency question"
+    )
+
+pct_changes = []
+for p in consistency_patches:
+    pct_change = (p["render_fill_polygon_utm"].area - p["polygon_utm"].area) / p["polygon_utm"].area * 100
+    pct_changes.append(pct_change)
+    assert pct_change > 1.0, (
+        f"BOTH clusters (including the one touching the DEM grid's own edge) must show a genuine, "
+        f"non-suspicious smoothing effect, not a near-zero one masking a border artifact -- cluster {p['id']} "
+        f"showed only {pct_change:.4f}%"
+    )
+assert abs(pct_changes[0] - pct_changes[1]) < 0.01, (
+    f"two identically shaped-and-sized clusters must show the SAME smoothing effect regardless of position "
+    f"relative to the DEM grid's own edges -- got {pct_changes[0]:.4f}% vs {pct_changes[1]:.4f}% "
+    "(this exact inconsistency is what the vector buffer approach replaced the raster closing implementation to fix)"
+)
+print(
+    f"render_fill_polygon_utm consistency: two identically shaped clusters (one touching the DEM grid's own "
+    f"[0,0] corner, one in the true interior) both show the same real smoothing effect "
+    f"({pct_changes[0]:.2f}%) -- the 0.0%-vs-5.74%-style position-dependent inconsistency is gone."
 )
 
 
@@ -1020,19 +1077,36 @@ assert square_patch["render_polygon_utm"] is square_patch["polygon_utm"], (
     "an ordinary, non-split cluster's render_polygon_utm must simply BE polygon_utm -- no change in "
     "rendering behavior for the ordinary case"
 )
-# This fixture's own cells (rows/cols 1-10) sit within FILL_SMOOTHING_RADIUS_METERS of SQUARE_SHAPE's own
-# grid edges (0 and 11) -- deliberately exercises _close_cell_mask()'s padding: a solid block with NO real
-# pockets must close back to its EXACT original footprint, not get nibbled by a grid-edge border artifact.
+# render_fill_polygon_utm is a real vector buffer(+r).buffer(-r) round-trip on render_polygon_utm --
+# no raster grid, no DEM-grid-shape/array-bounds concept involved at all, so a solid mask with nothing to
+# close over must come back with essentially the same real area, not bit-exact (shapely's buffer curve
+# approximation rounds sharp corners by a tiny amount -- this fixture's own cells sitting close to
+# SQUARE_SHAPE's own grid edges (rows/cols 1-10 within a 0-11 grid) is irrelevant to render_fill_polygon_utm
+# now, unlike the earlier raster-based implementation this replaced).
 fill_diff = square_patch["render_fill_polygon_utm"].symmetric_difference(square_patch["polygon_utm"]).area
-assert fill_diff < 1e-6, (
-    f"a solid mask with nothing to close over must have render_fill_polygon_utm exactly equal to "
-    f"polygon_utm, even when its cells sit close to the DEM grid's own edge -- symmetric difference area "
-    f"{fill_diff} (a grid-edge border artifact in the closing operation would show up here)"
+assert fill_diff / square_patch["polygon_utm"].area < 0.01, (
+    f"a solid mask with nothing to close over must have render_fill_polygon_utm essentially equal to "
+    f"polygon_utm (within the buffer round-trip's own curve-approximation tolerance) -- got a "
+    f"{fill_diff / square_patch['polygon_utm'].area:.4%} relative difference"
+)
+# "Rounder shape": the buffer round-trip shaves each of the block's 4 sharp corners by a tiny amount
+# (polygon_utm.difference(render_fill_polygon_utm) is non-empty only at the corners) and simplifies the
+# real cell-union footprint's own seam-driven vertex count down to a cleaner, near-rectangular outline.
+corner_rounding = square_patch["polygon_utm"].difference(square_patch["render_fill_polygon_utm"])
+assert 0 < corner_rounding.area < 1.0, (
+    f"the buffer round-trip should shave a small, real amount off each sharp corner -- got "
+    f"{corner_rounding.area} sq m (0 would mean no rounding happened at all; a large value would mean "
+    f"something's wrong beyond ordinary corner-rounding)"
+)
+assert len(square_patch["render_fill_polygon_utm"].exterior.coords) < len(square_patch["polygon_utm"].exterior.coords), (
+    "render_fill_polygon_utm should come out as a visibly simpler (rounder, fewer-vertex) outline than the "
+    "real cell-union footprint's own vertex-dense edges"
 )
 print(
     "Idempotence: a solid, roughly-square mask with neither a waist nor a hole passes through completely "
     "unchanged -- 1 cluster, hole_footprints=[], render_polygon_utm is polygon_utm, and render_fill_"
-    "polygon_utm matches exactly even with cells close to the DEM grid's own edge."
+    "polygon_utm matches within the buffer round-trip's own small curve-approximation tolerance while "
+    "genuinely rounding off the shape's corners."
 )
 
 

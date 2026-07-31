@@ -131,9 +131,14 @@ assert some_contour_exceeds_zone, (
 
 clipped_pieces = _clip_contours_to_zone(global_contours, single_patch)
 assert clipped_pieces, "expected at least one contour segment to survive clipping into this zone"
-assert single_patch["render_fill_polygon_utm"].equals(single_patch["polygon_utm"]), (
-    "a solid zone with no small excluded pockets to close over must have render_fill_polygon_utm exactly "
-    "equal to polygon_utm -- nothing for the closing operation to change here"
+# render_fill_polygon_utm is now a real vector buffer(+r).buffer(-r) round-trip on render_polygon_utm --
+# a solid zone with no small excluded pockets to close over must come back with essentially the same area,
+# not bit-exact (shapely's buffer curve approximation rounds sharp corners by a tiny amount).
+single_fill_diff = single_patch["render_fill_polygon_utm"].symmetric_difference(single_patch["polygon_utm"]).area
+assert single_fill_diff / single_patch["polygon_utm"].area < 0.01, (
+    f"a solid zone with no small excluded pockets to close over must have render_fill_polygon_utm "
+    f"essentially equal to polygon_utm (within the buffer round-trip's own curve-approximation tolerance) "
+    f"-- got a {single_fill_diff / single_patch['polygon_utm'].area:.4%} relative difference"
 )
 zone_polygon_buffered = single_patch["render_fill_polygon_utm"].buffer(1e-6)
 for piece in clipped_pieces:

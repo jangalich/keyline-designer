@@ -53,14 +53,16 @@ production_area.py's own module docstring:
      as a small, scattered pocket entirely INSIDE an otherwise-solid
      zone, rendering as an unexplained blank gap in the middle of a
      field. render_fill_polygon_utm closes over pockets like this (a
-     morphological closing of render_polygon_utm's own cells, radius
-     FILL_SMOOTHING_RADIUS_METERS -- see that constant's own docstring)
-     while leaving a real waist-split gap open, since that gap is always
-     wider than the closing radius can bridge.
+     direct vector buffer round-trip on render_polygon_utm itself --
+     buffer(+FILL_SMOOTHING_RADIUS_METERS) then
+     buffer(-FILL_SMOOTHING_RADIUS_METERS), real shapely geometry, no
+     raster grid involved -- see that constant's own docstring) while
+     leaving a real waist-split gap open, since that gap is always wider
+     than the buffer radius can bridge.
 
 render_fill_polygon_utm equals render_polygon_utm (which itself equals
-polygon_utm) exactly whenever there's nothing to close over -- e.g. an
-ordinary zone with no small excluded pockets -- so this changes nothing
+polygon_utm) geometrically whenever there's nothing to close over -- e.g.
+an ordinary zone with no small excluded pockets -- so this changes nothing
 for the common case.
 
 Basemap: NAIP aerial imagery via USGS's cached USGSImageryOnly tile
