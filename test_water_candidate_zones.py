@@ -263,6 +263,53 @@ assert huge_setback_zones == [], (
 print("Boundary setback is still a real, enforced generation-time filter.")
 
 
+# --- regression: the boundary-setback gate flips exactly at            ---
+# --- MIN_BOUNDARY_SETBACK_METERS, not approximately -- found live via  ---
+# --- diagnose_water_zone_mask.py: a diagnostic sampling bug there once ---
+# --- made a genuinely-passing on-parcel cell's real 68-80m distance    ---
+# --- look contradictory against a 0-survivor setback mask. That bug    ---
+# --- turned out to be in the diagnostic's own sample selection, not    ---
+# --- this gate -- but this test pins the real gate's exact behavior    ---
+# --- directly, with the flow-accumulation and service-distance checks  ---
+# --- bypassed (min_valley_contributing_area_acres=0.0, survey_buffer_  ---
+# --- meters=0.0, a distant production area) so only the boundary/      ---
+# --- setback test itself is exercised, at an exactly-controlled        ---
+# --- distance from the boundary's own edge.
+_setback_probe_array = np.zeros((3, 30), dtype=np.float32)
+SETBACK_PROBE_DEM = {
+    "array": _setback_probe_array,
+    "resolution_meters": (1.0, 1.0),
+    "origin_x": -0.5,
+    "origin_y": 100.5,
+    "crs": CRS,
+}
+# Cell (row=0, col=C)'s center sits at x=C exactly (origin_x=-0.5, so
+# x = -0.5 + (C + 0.5) * 1.0 = C) and y=100 -- 100m from the north/south
+# edges of the box(0,0,200,200) boundary below (comfortably irrelevant),
+# so boundary.distance() reduces to exactly C (the nearest edge, x=0).
+SETBACK_PROBE_BOUNDARY = box(0.0, 0.0, 200.0, 200.0)
+SETBACK_PROBE_PRODUCTION_AREAS = [
+    {"id": 0, "representative_elevation_m": -5.0, "polygon_utm": box(495.0, 95.0, 505.0, 105.0)}
+]
+
+setback_probe_mask, _ = compute_water_eligible_cells(
+    SETBACK_PROBE_DEM, SETBACK_PROBE_PRODUCTION_AREAS, SETBACK_PROBE_BOUNDARY,
+    min_valley_contributing_area_acres=0.0,  # bypass the flow-accumulation threshold entirely
+    survey_buffer_meters=0.0,  # no dilation -- exact 1:1 cell correspondence
+)
+assert bool(setback_probe_mask[0, 20]), (
+    "a cell exactly 20m from the boundary (> MIN_BOUNDARY_SETBACK_METERS=15.0m) must pass the setback gate"
+)
+assert not bool(setback_probe_mask[0, 10]), (
+    "a cell exactly 10m from the boundary (< MIN_BOUNDARY_SETBACK_METERS=15.0m) must fail the setback gate"
+)
+print(
+    "Regression: the boundary-setback gate flips exactly at MIN_BOUNDARY_SETBACK_METERS -- a cell at "
+    "exactly 20m (> 15m) passes, a cell at exactly 10m (< 15m) fails, with the flow-accumulation and "
+    "service-distance checks bypassed so only the setback test itself is exercised."
+)
+
+
 # --- MIN_WATER_ZONE_AREA_ACRES drops a cluster too small to matter ---
 
 huge_min_area_threshold = zone_area_acres * 10

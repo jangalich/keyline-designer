@@ -222,15 +222,28 @@ def main(
 
     # 3. If on-parcel cells exist but NONE clear setback, show real
     #    boundary.distance() numbers instead of just a pass/fail count --
-    #    5 sample cells from the dilated post-dilation mask, first 5 in
-    #    raster order (np.argwhere()'s own row-major order), regardless of
-    #    their own on-parcel status.
+    #    5 sample cells, first 5 in raster order (np.argwhere()'s own
+    #    row-major order).
+    #
+    #    BUG FIXED HERE: this used to sample from drainage_mask_after (the
+    #    FULL dilated mask, on-parcel or not) instead of on_parcel_mask
+    #    (the actual candidate pool setback_survivor_mask is drawn from).
+    #    Since on_parcel_mask is typically a small subset of
+    #    drainage_mask_after, the "first 5" cells in raster order were
+    #    almost always OFF-parcel cells that were never even tested for
+    #    setback at all -- their boundary.distance() values (measured to
+    #    the boundary LINE, which says nothing about inside-vs-outside)
+    #    could easily be large despite having nothing to do with why
+    #    setback_survivor_mask came back empty, producing exactly the
+    #    "large real distance, 0 survivors" contradiction this section
+    #    exists to explain. Sampling on_parcel_mask directly means every
+    #    printed cell is one setback_survivor_mask actually evaluated.
     if on_parcel_mask.any() and not setback_survivor_mask.any():
         print(
             "3. setback_survivor_mask is empty despite on-parcel cells existing -- "
-            "sample boundary.distance() values (first 5 dilated-mask cells, raster order):"
+            "sample boundary.distance() values (first 5 ON-PARCEL cells, raster order):"
         )
-        sample_cells = np.argwhere(drainage_mask_after)[:5]
+        sample_cells = np.argwhere(on_parcel_mask)[:5]
         for r, c in sample_cells:
             r, c = int(r), int(c)
             x, y = pixel_center_xy(dem, r, c)
