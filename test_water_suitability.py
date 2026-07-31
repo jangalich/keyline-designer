@@ -203,12 +203,12 @@ zones = find_candidate_zones(WATER_SUITABILITY_DEM, PRODUCTION_AREAS, BOUNDARY)
 zone_ids = {z["id"] for z in zones}
 assert zone_ids == {0, 1}, f"expected exactly 2 zones (one per disconnected drainage column), got {zone_ids}"
 
-zone0 = next(z for z in zones if z["id"] == 0)  # column at x~[500040, 500045]
-zone1 = next(z for z in zones if z["id"] == 1)  # column at x~[500160, 500165]
+zone0 = next(z for z in zones if z["id"] == 0)  # column at x~[500030, 500055]
+zone1 = next(z for z in zones if z["id"] == 1)  # column at x~[500150, 500175]
 
 # A real valley (valley_delineation.delineate_valleys()'s own output shape)
 # whose branch points sit spatially inside zone0's own footprint (bounds
-# confirmed directly: (500040.0, 4499815.0, 500045.0, 4499985.0)) -- the
+# confirmed directly: (500030.0, 4499905.0, 500055.0, 4499985.0)) -- the
 # NEW spatial-overlap matching _valley_topographic_inputs_for_zone() uses
 # instead of a zone['valley_id'] == valley['id'] join. zone1 deliberately
 # has NO overlapping valley at all, to exercise the "no traced valley
@@ -219,7 +219,7 @@ zone1 = next(z for z in zones if z["id"] == 1)  # column at x~[500160, 500165]
 VALLEY_OVERLAPPING_ZONE0 = {
     "id": 0,
     "max_contributing_area_acres": 5.0,
-    "branches_utm": [[(500042.5, 4499950.0, 120.0), (500042.5, 4499850.0, 100.0)]],
+    "branches_utm": [[(500042.5, 4499970.0, 120.0), (500042.5, 4499920.0, 100.0)]],
 }
 VALLEYS = [VALLEY_OVERLAPPING_ZONE0]
 

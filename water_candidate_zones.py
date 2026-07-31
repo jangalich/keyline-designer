@@ -113,8 +113,19 @@ MIN_SERVICE_DISTANCE_METERS = 10.0
 # separate, independently-tunable constant since this module's use case
 # (water-system siting) doesn't have to move in lockstep with
 # valley_delineation.py's own general-purpose valley threshold.
-# CONFIGURABLE — tune against your own property.
-MIN_VALLEY_CONTRIBUTING_AREA_ACRES = 0.5
+#
+# TUNED live against the real reference property via
+# diagnose_water_zone_mask.py's threshold sweep (0.5/1.0/2.0/2.5/3.0
+# acres, all at the 10m buffer below): pre-dilation connected-component
+# count dropped from 20 at the old 0.5-acre default (scattered terrain
+# noise, not real channels) down to 4, stabilizing at 3.0 acres -- 2.5
+# acres still let one pair of components merge, 3.0 acres reports the
+# same 4 components both before AND after dilation (no further merging).
+# 4 also matches the original, pre-rearchitecture line-based pipeline's
+# own zone count on this property, as an independent sanity check.
+# CONFIGURABLE — re-tune with diagnose_water_zone_mask.py against your
+# own property.
+MIN_VALLEY_CONTRIBUTING_AREA_ACRES = 3.0
 
 # Drop tiny, noise-sized eligible-cell clusters below this real cell-union
 # footprint area. A small first-pass default, deliberately NOT yet
@@ -132,11 +143,19 @@ MIN_WATER_ZONE_AREA_ACRES = 0.1
 # this many meters (converted to a cell radius, see
 # _survey_buffer_radius_cells()) BEFORE the service-distance/on-parcel/
 # boundary-setback tests run, so a genuinely qualifying drainage cell
-# reads as a walkable-width band, not a hairline. Reuses
-# ZONE_BUFFER_METERS's old value (the pre-rearchitecture line-buffer half-
-# width) as a reasonable starting point for "how wide should this zone
-# read" on this property -- CONFIGURABLE, tune against real ground truth.
-WATER_ZONE_SURVEY_BUFFER_METERS = 20.0
+# reads as a walkable-width band, not a hairline.
+#
+# TUNED live against the real reference property alongside
+# MIN_VALLEY_CONTRIBUTING_AREA_ACRES above via diagnose_water_zone_mask.py:
+# at 10m, the 3.0-acre contributing-area threshold's 4 connected
+# components stay 4 components after dilation too -- no extra merging
+# from widening at this buffer size. The original 20.0m value (reused
+# from the pre-rearchitecture ZONE_BUFFER_METERS line-buffer half-width)
+# was tuned before the contributing-area threshold itself was fixed, and
+# turned out wider than this property's real, separate drainage segments
+# needed once 3.0 acres stopped conflating them. CONFIGURABLE -- re-tune
+# with diagnose_water_zone_mask.py against your own property.
+WATER_ZONE_SURVEY_BUFFER_METERS = 10.0
 
 WATER_SYSTEM_CANDIDATE_CONFIDENCE_NOTES = (
     "This identifies a general candidate zone for water-system "
