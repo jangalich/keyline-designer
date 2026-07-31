@@ -41,12 +41,14 @@ MIN_BOUNDARY_SETBACK_METERS), not separately overridable here.
 
 import argparse
 
+import numpy as np
 from rasterio.warp import transform as warp_transform
-from shapely.geometry import Polygon, box
+from shapely.geometry import Point, Polygon, box
+from shapely.prepared import prep
 
 from dem_data import get_dem_for_boundary
 from production_area import identify_production_areas
-from raster_grid import binary_dilate, cell_area_acres, connected_components
+from raster_grid import binary_dilate, cell_area_acres, connected_components, pixel_center_xy
 from valley_delineation import get_flow_accumulation_for_dem
 from water_candidate_zones import (
     MAX_SERVICE_DISTANCE_METERS,
@@ -180,6 +182,78 @@ def main(
 
     drainage_mask_after = binary_dilate(drainage_mask_before, radius_cells)
     _report_mask_stats("AFTER dilation (survey-buffered drainage mask)", drainage_mask_after, dem)
+
+    # --- direct on-parcel vs boundary-setback split (unconditional, no ---
+    # --- dependence on production areas at all) -- the gate-breakdown  ---
+    # --- section further down only reports the COMBINED on-parcel-    ---
+    # --- and-setback result; this checks each of those two tests      ---
+    # --- separately, directly against boundary_polygon_utm itself, so ---
+    # --- a "0 combined" result can't hide which of the two is actually ---
+    # --- responsible.
+    print("=== On-parcel vs boundary-setback (direct, separated check) ===\n")
+
+    boundary_prepared = prep(boundary_polygon_utm)
+    boundary_line = boundary_polygon_utm.boundary
+
+    on_parcel_mask = np.zeros(drainage_mask_after.shape, dtype=bool)
+    setback_survivor_mask = np.zeros(drainage_mask_after.shape, dtype=bool)
+
+    for r, c in np.argwhere(drainage_mask_after):
+        r, c = int(r), int(c)
+        x, y = pixel_center_xy(dem, r, c)
+        point = Point(x, y)
+        if boundary_prepared.contains(point):
+            on_parcel_mask[r, c] = True
+            if boundary_line.distance(point) >= MIN_BOUNDARY_SETBACK_METERS:
+                setback_survivor_mask[r, c] = True
+
+    # 1. On-parcel alone, no setback applied.
+    _report_mask_stats(
+        "1. On-parcel cells within the dilated drainage mask (NO setback applied)",
+        on_parcel_mask, dem,
+    )
+
+    # 2. Of those on-parcel cells, how many ALSO clear the real setback.
+    _report_mask_stats(
+        f"2. Of those, cells ALSO clearing MIN_BOUNDARY_SETBACK_METERS={MIN_BOUNDARY_SETBACK_METERS}m "
+        "from the boundary",
+        setback_survivor_mask, dem,
+    )
+
+    # 3. If on-parcel cells exist but NONE clear setback, show real
+    #    boundary.distance() numbers instead of just a pass/fail count --
+    #    5 sample cells from the dilated post-dilation mask, first 5 in
+    #    raster order (np.argwhere()'s own row-major order), regardless of
+    #    their own on-parcel status.
+    if on_parcel_mask.any() and not setback_survivor_mask.any():
+        print(
+            "3. setback_survivor_mask is empty despite on-parcel cells existing -- "
+            "sample boundary.distance() values (first 5 dilated-mask cells, raster order):"
+        )
+        sample_cells = np.argwhere(drainage_mask_after)[:5]
+        for r, c in sample_cells:
+            r, c = int(r), int(c)
+            x, y = pixel_center_xy(dem, r, c)
+            distance_to_boundary = boundary_line.distance(Point(x, y))
+            print(
+                f"     (row={r}, col={c}) UTM=({x:.2f}, {y:.2f}) "
+                f"boundary_polygon_utm.boundary.distance() = {distance_to_boundary:.3f}m"
+            )
+        print()
+
+    # 4. Direct negative-buffer sanity check -- runs UNCONDITIONALLY,
+    #    regardless of what 1-3 found: if the boundary shrunk inward by
+    #    15m is already empty, the parcel is narrower than 2x that setback
+    #    everywhere, and NO cell could ever clear
+    #    MIN_BOUNDARY_SETBACK_METERS=15.0m from this boundary at all --
+    #    the cleanest possible explanation for a setback_survivor_mask
+    #    that's empty even though on-parcel cells exist.
+    shrunk_boundary = boundary_polygon_utm.buffer(-15.0)
+    print(
+        f"4. boundary_polygon_utm.buffer(-15.0).is_empty = {shrunk_boundary.is_empty}, "
+        f".area = {shrunk_boundary.area:.3f} sq m"
+    )
+    print()
 
     if not production_areas_available:
         print(
