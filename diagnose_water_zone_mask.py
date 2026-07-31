@@ -20,7 +20,15 @@ Requires real network access (a real USGS DEM fetch via dem_data.py, plus
 production_area.py's own SSURGO/canopy/road fetches) -- this is a live
 diagnostic against a real property, not the offline/synthetic-DEM tests
 in test_water_candidate_zones.py.
+
+--min-contributing-acres and --buffer-meters override
+MIN_VALLEY_CONTRIBUTING_AREA_ACRES / WATER_ZONE_SURVEY_BUFFER_METERS for
+this run only (default: the current module constants) -- for
+experimentation while tuning either value; the actual module constants
+themselves are never changed.
 """
+
+import argparse
 
 from rasterio.warp import transform as warp_transform
 from shapely.geometry import Polygon
@@ -58,10 +66,17 @@ def _report_mask_stats(label: str, mask, dem: dict) -> None:
     print()
 
 
-def main() -> None:
+def main(
+    min_contributing_acres: float = MIN_VALLEY_CONTRIBUTING_AREA_ACRES,
+    buffer_meters: float = WATER_ZONE_SURVEY_BUFFER_METERS,
+) -> None:
     print("diagnose_water_zone_mask.py -- pre/post survey-buffer-dilation mask stats\n")
     print(f"Property: real reference boundary, {len(PROPERTY_BOUNDARY)} vertices")
     print(f"Boundary coordinates (lon, lat): {PROPERTY_BOUNDARY}\n")
+    print(f"min_contributing_acres (this run) = {min_contributing_acres} acres "
+          f"(module default: {MIN_VALLEY_CONTRIBUTING_AREA_ACRES})")
+    print(f"buffer_meters (this run)          = {buffer_meters}m "
+          f"(module default: {WATER_ZONE_SURVEY_BUFFER_METERS})\n")
 
     dem = get_dem_for_boundary(PROPERTY_BOUNDARY)
     print(f"DEM fetched: {dem['array'].shape[0]}x{dem['array'].shape[1]} cells, "
@@ -87,28 +102,51 @@ def main() -> None:
 
     # Same computation compute_water_eligible_cells() does internally, just
     # stopped short of the service-distance/boundary-setback loop so the
-    # BEFORE/AFTER dilation stats can be reported directly.
+    # BEFORE/AFTER dilation stats can be reported directly. Uses this run's
+    # min_contributing_acres/buffer_meters (module constants unless
+    # overridden via --min-contributing-acres/--buffer-meters).
     flow_accumulation_cells = get_flow_accumulation_for_dem(dem)
     area_per_cell = cell_area_acres(dem)
-    min_contributing_cells = MIN_VALLEY_CONTRIBUTING_AREA_ACRES / area_per_cell
+    min_contributing_cells = min_contributing_acres / area_per_cell
     drainage_mask_before = flow_accumulation_cells >= min_contributing_cells
 
-    print(f"MIN_VALLEY_CONTRIBUTING_AREA_ACRES = {MIN_VALLEY_CONTRIBUTING_AREA_ACRES} acres "
-          f"({min_contributing_cells:.2f} cells at this DEM's resolution)\n")
+    print(f"(min_contributing_acres = {min_contributing_acres} acres -> "
+          f"{min_contributing_cells:.2f} cells at this DEM's resolution)\n")
 
     _report_mask_stats("BEFORE dilation (raw flow-accumulation-qualifying mask)", drainage_mask_before, dem)
 
-    radius_cells = _survey_buffer_radius_cells(dem, WATER_ZONE_SURVEY_BUFFER_METERS)
-    print(f"WATER_ZONE_SURVEY_BUFFER_METERS = {WATER_ZONE_SURVEY_BUFFER_METERS}m "
-          f"-> dilation radius = {radius_cells} cell(s)\n")
+    radius_cells = _survey_buffer_radius_cells(dem, buffer_meters)
+    print(f"(buffer_meters = {buffer_meters}m -> dilation radius = {radius_cells} cell(s))\n")
 
     drainage_mask_after = binary_dilate(drainage_mask_before, radius_cells)
     _report_mask_stats("AFTER dilation (survey-buffered drainage mask)", drainage_mask_after, dem)
 
 
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Report pre/post survey-buffer-dilation drainage mask stats for the real reference property."
+    )
+    parser.add_argument(
+        "--min-contributing-acres",
+        type=float,
+        default=MIN_VALLEY_CONTRIBUTING_AREA_ACRES,
+        help=f"Override MIN_VALLEY_CONTRIBUTING_AREA_ACRES for this run only "
+        f"(default: the current module constant, {MIN_VALLEY_CONTRIBUTING_AREA_ACRES}).",
+    )
+    parser.add_argument(
+        "--buffer-meters",
+        type=float,
+        default=WATER_ZONE_SURVEY_BUFFER_METERS,
+        help=f"Override WATER_ZONE_SURVEY_BUFFER_METERS for this run only "
+        f"(default: the current module constant, {WATER_ZONE_SURVEY_BUFFER_METERS}).",
+    )
+    return parser.parse_args()
+
+
 if __name__ == "__main__":
+    args = _parse_args()
     try:
-        main()
+        main(min_contributing_acres=args.min_contributing_acres, buffer_meters=args.buffer_meters)
     except Exception as e:
         print(f"Request failed: {e}")
         print(
