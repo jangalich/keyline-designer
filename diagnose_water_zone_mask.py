@@ -2,19 +2,27 @@
 diagnose_water_zone_mask.py
 
 Standalone, read-only diagnostic: reports pre- and post-dilation stats for
-compute_water_eligible_cells()'s drainage-only mask (water_candidate_zones.py)
-against the real reference property boundary -- the same coordinates
-render_layout_map.py's own __main__ block uses.
+compute_water_eligible_cells()'s drainage-only mask (water_candidate_zones.py),
+then breaks the post-dilation mask down further by the real service-
+distance/boundary-setback gates that function applies -- against the real
+reference property boundary (the same coordinates render_layout_map.py's
+own __main__ block uses).
 
 This does NOT modify compute_water_eligible_cells() itself, and does not
-reimplement its flow-accumulation-threshold/dilation logic independently
--- it calls the exact same building blocks that function already uses
+reimplement any of its gate logic independently -- the pre/post-dilation
+section calls the exact same building blocks that function already uses
 internally (valley_delineation.get_flow_accumulation_for_dem(),
 water_candidate_zones.MIN_VALLEY_CONTRIBUTING_AREA_ACRES,
 water_candidate_zones._survey_buffer_radius_cells(),
-raster_grid.binary_dilate()) in the same order, just stopping to report
-stats BEFORE and AFTER the dilation step rather than continuing on into
-the service-distance/boundary-setback tests and full eligibility mask.
+raster_grid.binary_dilate()) in the same order; the gate-breakdown section
+calls compute_water_eligible_cells() itself directly, several times, with
+individual gate thresholds swapped for "always pass" values (0/infinity)
+to isolate one real gate at a time -- the gate math itself is never
+duplicated, only which of the function's own real checks can actually
+bind is varied per call. See _full_extent_boundary()'s own docstring for
+how the on-parcel/boundary-setback gate specifically is isolated out (no
+existing parameter disables that check directly, since boundary_polygon_utm
+is required, not optional).
 
 Requires real network access (a real USGS DEM fetch via dem_data.py, plus
 production_area.py's own SSURGO/canopy/road fetches) -- this is a live
@@ -25,22 +33,29 @@ in test_water_candidate_zones.py.
 MIN_VALLEY_CONTRIBUTING_AREA_ACRES / WATER_ZONE_SURVEY_BUFFER_METERS for
 this run only (default: the current module constants) -- for
 experimentation while tuning either value; the actual module constants
-themselves are never changed.
+themselves are never changed. The service-distance/boundary-setback
+thresholds used in the gate breakdown are always the module's real
+current defaults (MAX_SERVICE_DISTANCE_METERS/MIN_SERVICE_DISTANCE_METERS/
+MIN_BOUNDARY_SETBACK_METERS), not separately overridable here.
 """
 
 import argparse
 
 from rasterio.warp import transform as warp_transform
-from shapely.geometry import Polygon
+from shapely.geometry import Polygon, box
 
 from dem_data import get_dem_for_boundary
 from production_area import identify_production_areas
 from raster_grid import binary_dilate, cell_area_acres, connected_components
 from valley_delineation import get_flow_accumulation_for_dem
 from water_candidate_zones import (
+    MAX_SERVICE_DISTANCE_METERS,
+    MIN_BOUNDARY_SETBACK_METERS,
+    MIN_SERVICE_DISTANCE_METERS,
     MIN_VALLEY_CONTRIBUTING_AREA_ACRES,
     WATER_ZONE_SURVEY_BUFFER_METERS,
     _survey_buffer_radius_cells,
+    compute_water_eligible_cells,
 )
 
 # The user's real, drawn property boundary -- same one render_layout_map.py's
@@ -64,6 +79,40 @@ def _report_mask_stats(label: str, mask, dem: dict) -> None:
     print(f"  Acreage:               {acres:.3f} acres")
     print(f"  Connected components:  {num_components}")
     print()
+
+
+def _report_cell_count(label: str, mask, dem: dict) -> None:
+    """Same numbers as _report_mask_stats() minus the connected-component
+    count -- used for the gate-isolation breakdown below, where component
+    count isn't the useful signal (an isolated gate's survivor mask is a
+    diagnostic intermediate, not a candidate zone shape)."""
+    cell_count = int(mask.sum())
+    acres = cell_count * cell_area_acres(dem)
+    print(f"  {label}: {cell_count} cells, {acres:.3f} acres")
+
+
+def _full_extent_boundary(dem: dict, margin_meters: float = 10_000.0) -> Polygon:
+    """
+    A synthetic boundary polygon covering the DEM's entire extent plus a
+    large margin -- used ONLY to isolate compute_water_eligible_cells()'s
+    service-distance gate from its on-parcel/boundary-setback gate for
+    diagnostic purposes. There's no parameter that disables the on-parcel
+    check directly (boundary_polygon_utm is a required argument, not a
+    toggle, and every real DEM cell must be tested against SOME boundary
+    polygon) -- so instead, every real DEM cell's center is guaranteed to
+    fall on-parcel and comfortably past any setback against THIS polygon,
+    making that gate a real no-op for this input, without touching or
+    reimplementing the gate's own logic at all.
+    """
+    rows, cols = dem["array"].shape
+    px, py = dem["resolution_meters"]
+    origin_x = dem["origin_x"]
+    origin_y = dem["origin_y"]
+    min_x = origin_x - margin_meters
+    max_x = origin_x + cols * px + margin_meters
+    max_y = origin_y + margin_meters
+    min_y = origin_y - rows * py - margin_meters
+    return box(min_x, min_y, max_x, max_y)
 
 
 def main(
@@ -90,15 +139,26 @@ def main(
     )
     boundary_polygon_utm = Polygon(zip(boundary_xs, boundary_ys))
 
+    production_areas: list = []
+    production_areas_available = False
     try:
         production_areas = identify_production_areas(dem, boundary_polygon_utm)
-        print(f"Production areas found: {len(production_areas)} (context only -- the mask stats "
-              "below don't depend on this)\n")
+        production_areas_available = True
+        print(f"Production areas found: {len(production_areas)} (the pre/post-dilation mask stats "
+              "below don't depend on this, but the gate-breakdown section further down does)\n")
     except Exception as e:
         print(
-            f"Production-area fetch failed ({e}) -- proceeding anyway, since the drainage-mask "
-            "stats below only depend on the DEM's own flow accumulation, not production areas.\n"
+            f"Production-area fetch failed ({e}) -- proceeding anyway for the pre/post-dilation "
+            "mask stats (which only depend on the DEM's own flow accumulation), but the "
+            "gate-breakdown section further down needs real production areas and will be skipped.\n"
         )
+
+    print(f"Boundary polygon extent (UTM, {dem['crs']}): {boundary_polygon_utm.bounds}")
+    if production_areas_available:
+        for patch in production_areas:
+            centroid = patch["polygon_utm"].centroid
+            print(f"  Production area id={patch['id']}: centroid=({centroid.x:.1f}, {centroid.y:.1f})")
+    print()
 
     # Same computation compute_water_eligible_cells() does internally, just
     # stopped short of the service-distance/boundary-setback loop so the
@@ -120,6 +180,106 @@ def main(
 
     drainage_mask_after = binary_dilate(drainage_mask_before, radius_cells)
     _report_mask_stats("AFTER dilation (survey-buffered drainage mask)", drainage_mask_after, dem)
+
+    if not production_areas_available:
+        print(
+            "Skipping the service-distance/boundary-setback gate breakdown below -- it needs real "
+            "production areas, which failed to fetch above.\n"
+        )
+        return
+
+    # Gate breakdown: every call below is the REAL compute_water_eligible_cells()
+    # itself, just with individual gate thresholds swapped for "always pass"
+    # values (0 / infinity, or a synthetic full-extent boundary -- see
+    # _full_extent_boundary()'s own docstring) to isolate one real gate at a
+    # time. No gate logic is reimplemented here.
+    print("=== Service-distance / boundary-setback gate breakdown (post-dilation mask) ===\n")
+
+    full_extent_boundary = _full_extent_boundary(dem)
+
+    # 1. On-parcel + boundary-setback gate ALONE (service-distance disabled
+    #    via max=infinity/min=0, using the REAL property boundary/setback).
+    parcel_setback_mask, _ = compute_water_eligible_cells(
+        dem, production_areas, boundary_polygon_utm,
+        min_valley_contributing_area_acres=min_contributing_acres,
+        max_service_distance_meters=float("inf"),
+        min_service_distance_meters=0.0,
+        min_boundary_setback_meters=MIN_BOUNDARY_SETBACK_METERS,
+        survey_buffer_meters=buffer_meters,
+    )
+    _report_cell_count(
+        f"On-parcel + boundary-setback gate alone (MIN_BOUNDARY_SETBACK_METERS={MIN_BOUNDARY_SETBACK_METERS}m, "
+        "service-distance disabled)",
+        parcel_setback_mask, dem,
+    )
+
+    # 2. Service-distance gate ALONE (boundary/setback disabled via the
+    #    synthetic full-extent boundary + min_boundary_setback_meters=0,
+    #    using the REAL MAX/MIN_SERVICE_DISTANCE_METERS).
+    service_distance_mask, _ = compute_water_eligible_cells(
+        dem, production_areas, full_extent_boundary,
+        min_valley_contributing_area_acres=min_contributing_acres,
+        max_service_distance_meters=MAX_SERVICE_DISTANCE_METERS,
+        min_service_distance_meters=MIN_SERVICE_DISTANCE_METERS,
+        min_boundary_setback_meters=0.0,
+        survey_buffer_meters=buffer_meters,
+    )
+    _report_cell_count(
+        f"Service-distance gate alone (MAX={MAX_SERVICE_DISTANCE_METERS}m, "
+        f"MIN={MIN_SERVICE_DISTANCE_METERS}m, on-parcel/setback disabled)",
+        service_distance_mask, dem,
+    )
+
+    # 2a. "Too far" only: max-distance real, min-distance disabled (0) --
+    #     a cell excluded here failed to find ANY production area within
+    #     MAX_SERVICE_DISTANCE_METERS.
+    too_far_mask, _ = compute_water_eligible_cells(
+        dem, production_areas, full_extent_boundary,
+        min_valley_contributing_area_acres=min_contributing_acres,
+        max_service_distance_meters=MAX_SERVICE_DISTANCE_METERS,
+        min_service_distance_meters=0.0,
+        min_boundary_setback_meters=0.0,
+        survey_buffer_meters=buffer_meters,
+    )
+    _report_cell_count(
+        f"  -> excluded as TOO FAR (exceeds MAX_SERVICE_DISTANCE_METERS={MAX_SERVICE_DISTANCE_METERS}m "
+        "from every production area)",
+        drainage_mask_after & ~too_far_mask, dem,
+    )
+
+    # 2b. "Too close" only: min-distance real, max-distance disabled (inf) --
+    #     a cell excluded here sits within (0, MIN_SERVICE_DISTANCE_METERS)
+    #     of EVERY production area (genuinely near but not touching any of
+    #     them) -- the opposite problem from "too far," needing the
+    #     opposite fix (a smaller MIN_SERVICE_DISTANCE_METERS, not a
+    #     larger MAX_SERVICE_DISTANCE_METERS).
+    too_close_mask, _ = compute_water_eligible_cells(
+        dem, production_areas, full_extent_boundary,
+        min_valley_contributing_area_acres=min_contributing_acres,
+        max_service_distance_meters=float("inf"),
+        min_service_distance_meters=MIN_SERVICE_DISTANCE_METERS,
+        min_boundary_setback_meters=0.0,
+        survey_buffer_meters=buffer_meters,
+    )
+    _report_cell_count(
+        f"  -> excluded as TOO CLOSE (within MIN_SERVICE_DISTANCE_METERS={MIN_SERVICE_DISTANCE_METERS}m "
+        "of every production area, but not touching any of them)",
+        drainage_mask_after & ~too_close_mask, dem,
+    )
+    print()
+
+    # 3. BOTH gates combined -- this is compute_water_eligible_cells()'s own
+    #    real, default-parameter output, i.e. exactly what find_candidate_zones()
+    #    (the real pipeline) works from.
+    combined_mask, _ = compute_water_eligible_cells(
+        dem, production_areas, boundary_polygon_utm,
+        min_valley_contributing_area_acres=min_contributing_acres,
+        survey_buffer_meters=buffer_meters,
+    )
+    _report_mask_stats(
+        "BOTH gates combined (real pipeline output -- matches find_candidate_zones()'s own eligible_mask)",
+        combined_mask, dem,
+    )
 
 
 def _parse_args() -> argparse.Namespace:
