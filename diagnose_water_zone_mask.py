@@ -64,7 +64,7 @@ from raster_grid import (
     connected_components,
     pixel_center_xy,
 )
-from valley_delineation import get_flow_accumulation_for_dem
+from valley_delineation import delineate_valleys, get_flow_accumulation_for_dem, get_flow_direction_for_dem
 from water_candidate_zones import (
     MAX_SERVICE_DISTANCE_METERS,
     MIN_BOUNDARY_SETBACK_METERS,
@@ -444,16 +444,52 @@ def main(
         combined_mask, dem,
     )
 
-    _report_percentile_band_and_waist_split(
+    zone_cell_lists = _report_percentile_band_and_waist_split(
         dem, combined_mask, zone_min_waist_meters,
     )
+
+    ranked_zones = _report_zone_elevation_ranges(dem, boundary_polygon_utm, zone_cell_lists)
+
+    if not ranked_zones:
+        print("No surviving post-waist-split zone to run the confluence check against -- skipping.\n")
+        return
+
+    top_zone_cells = ranked_zones[0]
+    _report_confluence_check(dem, boundary_polygon_utm, top_zone_cells)
+
+
+def _zone_cell_lists_from_eligible_mask(
+    dem: dict,
+    eligible_mask,
+    min_zone_waist_meters: float,
+) -> list[list[tuple[int, int]]]:
+    """
+    Runs find_candidate_zones()'s own clustering pipeline directly against
+    `eligible_mask` (connected_components() -> raster_grid.
+    attempt_waist_split() per component, same order, same functions --
+    not reimplemented) and returns one list of member (row, col) cells per
+    surviving (possibly split) sub-cluster. find_candidate_zones()'s own
+    zone dicts don't carry raw cell membership (see that function's
+    docstring), so this diagnostic exposes it directly for the elevation-
+    range and confluence checks below, which both need each zone's actual
+    member cells, not just its polygon footprint.
+    """
+    labels, num_components = connected_components(eligible_mask)
+    zone_cell_lists = []
+    for component_id in range(num_components):
+        cluster_cells = [(int(r), int(c)) for r, c in np.argwhere(labels == component_id)]
+        sub_clusters = attempt_waist_split(
+            cluster_cells, eligible_mask.shape, dem, MIN_WATER_ZONE_AREA_ACRES, min_zone_waist_meters
+        )
+        zone_cell_lists.extend(sub_clusters)
+    return zone_cell_lists
 
 
 def _report_percentile_band_and_waist_split(
     dem: dict,
     eligible_mask,
     min_zone_waist_meters: float,
-) -> None:
+) -> list[list[tuple[int, int]]]:
     """
     Reports how find_candidate_zones()'s own waist-splitting step
     (raster_grid.attempt_waist_split(), applied to each connected
@@ -469,26 +505,25 @@ def _report_percentile_band_and_waist_split(
     MIN_WATER_ZONE_AREA_ACRES, in which case the whole split is rejected
     and the original, unsplit cluster passes through unchanged instead --
     see raster_grid.attempt_waist_split()'s own docstring).
+
+    Returns the flat list of post-split zone cell-lists (via
+    _zone_cell_lists_from_eligible_mask()) so the caller can reuse the
+    exact same zones for the elevation-range/confluence checks below,
+    without recomputing the clustering a second time.
     """
     print("=== Waist-split before/after (post-dilation, all-three-gates mask) ===\n")
 
-    labels, num_components_before = connected_components(eligible_mask)
     cell_count_before = int(eligible_mask.sum())
     area_per_cell = cell_area_acres(dem)
     acres_before = cell_count_before * area_per_cell
+    _, num_components_before = connected_components(eligible_mask)
 
     print(f"PRE-waist-split:  {cell_count_before} cells, {acres_before:.3f} acres, "
           f"{num_components_before} connected component(s)")
 
-    total_cells_after = 0
-    num_components_after = 0
-    for component_id in range(num_components_before):
-        cluster_cells = [(int(r), int(c)) for r, c in np.argwhere(labels == component_id)]
-        sub_clusters = attempt_waist_split(
-            cluster_cells, eligible_mask.shape, dem, MIN_WATER_ZONE_AREA_ACRES, min_zone_waist_meters
-        )
-        num_components_after += len(sub_clusters)
-        total_cells_after += sum(len(sub_cells) for sub_cells in sub_clusters)
+    zone_cell_lists = _zone_cell_lists_from_eligible_mask(dem, eligible_mask, min_zone_waist_meters)
+    total_cells_after = sum(len(cells) for cells in zone_cell_lists)
+    num_components_after = len(zone_cell_lists)
 
     acres_after = total_cells_after * area_per_cell
     print(f"POST-waist-split: {total_cells_after} cells, {acres_after:.3f} acres, "
@@ -500,6 +535,323 @@ def _report_percentile_band_and_waist_split(
         )
     elif num_components_after == num_components_before:
         print("  -> component count unchanged: no waist was detected (or none survived the area gate).")
+    print()
+
+    return zone_cell_lists
+
+
+def _report_zone_elevation_ranges(
+    dem: dict,
+    boundary_polygon_utm: Polygon,
+    zone_cell_lists: list[list[tuple[int, int]]],
+) -> list[list[tuple[int, int]]]:
+    """
+    For each post-waist-split zone (see _zone_cell_lists_from_eligible_mask()),
+    reports its member cells' real elevation range (min/max, straight from
+    dem['array'] -- no recomputation), alongside its cell count/acreage,
+    and the property's own overall ON-PARCEL elevation range (every cell
+    whose center falls inside boundary_polygon_utm, NaN cells excluded)
+    for direct comparison -- this is what actually tests whether a zone
+    spans most of the parcel's real elevation range ("ridge to valley
+    bottom") or just a modest slice of it, rather than eyeballing acreage
+    alone.
+
+    Zones are reported ranked by real footprint acreage descending (a
+    zone's own cell count, since every cell has the same area) -- a
+    simple, self-contained proxy for "top-ranked" that doesn't require
+    fetching soil/stream data or running the full water_suitability.py
+    scoring pipeline (this diagnostic's own established scope: real
+    generation-time gates and clustering, not full suitability scoring).
+    Explicitly NOT the same ranking identify_water_suitability()'s
+    score_water_zones() would produce.
+
+    Returns the same zone cell-lists, re-sorted largest-first, so the
+    caller can pick the top-ranked one for the confluence check below
+    without re-deriving the ranking a second time.
+    """
+    array = dem["array"]
+    area_per_cell = cell_area_acres(dem)
+
+    boundary_prepared = prep(boundary_polygon_utm)
+    on_parcel_elevations = [
+        float(array[r, c])
+        for r in range(array.shape[0])
+        for c in range(array.shape[1])
+        if not np.isnan(array[r, c]) and boundary_prepared.contains(Point(*pixel_center_xy(dem, r, c)))
+    ]
+
+    print("=== Zone elevation ranges (post-waist-split, ranked by acreage) ===\n")
+
+    if not on_parcel_elevations:
+        print("No on-parcel DEM cells at all -- cannot report an overall elevation range.\n")
+        overall_min = overall_max = overall_span = None
+    else:
+        overall_min = min(on_parcel_elevations)
+        overall_max = max(on_parcel_elevations)
+        overall_span = overall_max - overall_min
+        print(
+            f"Property's overall on-parcel elevation range: {overall_min:.2f}m - {overall_max:.2f}m "
+            f"(span {overall_span:.2f}m, over {len(on_parcel_elevations)} on-parcel cell(s))\n"
+        )
+
+    if not zone_cell_lists:
+        print("No surviving post-waist-split zones.\n")
+        return []
+
+    ranked = sorted(zone_cell_lists, key=len, reverse=True)
+
+    for rank, cells in enumerate(ranked):
+        elevations = [float(array[r, c]) for r, c in cells if not np.isnan(array[r, c])]
+        acres = len(cells) * area_per_cell
+        label = f"Zone rank {rank} (largest)" if rank == 0 else f"Zone rank {rank}"
+        if not elevations:
+            print(f"--- {label}: {len(cells)} cells, {acres:.3f} acres -- all-NaN, no elevation data ---")
+            continue
+
+        zone_min, zone_max = min(elevations), max(elevations)
+        zone_span = zone_max - zone_min
+        print(f"--- {label}: {len(cells)} cells, {acres:.3f} acres ---")
+        print(f"  Elevation range: {zone_min:.2f}m - {zone_max:.2f}m (span {zone_span:.2f}m)")
+        if overall_span is not None and overall_span > 0:
+            coverage_pct = zone_span / overall_span * 100
+            print(
+                f"  Spans {coverage_pct:.1f}% of the property's overall on-parcel elevation range "
+                f"({overall_span:.2f}m) -- "
+                + (
+                    "a broad span consistent with a 'ridge to valley bottom' read across most of the parcel."
+                    if coverage_pct >= 50
+                    else "a modest slice of the parcel's full elevation range, not most of it."
+                )
+            )
+        print()
+
+    return ranked
+
+
+def _trace_flow_path_cells(
+    flow_direction_cells: np.ndarray,
+    start_row: int,
+    start_col: int,
+    boundary_prepared,
+    dem: dict,
+    max_steps: int = 500,
+) -> tuple[list[tuple[int, int]], bool]:
+    """
+    Simplified re-implementation of the walking logic
+    water_candidate_zones._downstream_clearance_meters() used before the
+    downstream-clearance gate was removed: walks a cell's D8 flow path
+    (flow_direction_cells, valley_delineation.get_flow_direction_for_dem()'s
+    own (rows, cols, 2) array -- each [row, col] holds the absolute
+    (target_row, target_col) of that cell's downhill neighbor, or (-1, -1)
+    if there is none) forward, cell by cell, until it either exits
+    boundary_polygon_utm (via boundary_prepared, a shapely prepared
+    geometry) or hits a dead end/cycle/the max_steps budget.
+
+    Unlike the original gate, this does NOT accumulate real ground
+    distance or compare against any threshold -- it exists purely to
+    return the actual SEQUENCE of (row, col) cells visited, so callers
+    can check whether two independently-traced paths ever share a cell
+    (a real confluence) rather than measuring how far a single path
+    travels.
+
+    Returns (path_cells, exited): path_cells includes the starting cell
+    itself as its first entry. exited is True only if the walk left
+    boundary_polygon_utm before hitting a dead end, a cycle, or max_steps.
+    """
+    path_cells = [(start_row, start_col)]
+    visited = {(start_row, start_col)}
+    row, col = start_row, start_col
+
+    for _ in range(max_steps):
+        target_row, target_col = flow_direction_cells[row, col]
+        target_row, target_col = int(target_row), int(target_col)
+
+        if target_row < 0:
+            return path_cells, False
+
+        target_cell = (target_row, target_col)
+        if target_cell in visited:
+            return path_cells, False
+
+        path_cells.append(target_cell)
+        x, y = pixel_center_xy(dem, target_row, target_col)
+        if not boundary_prepared.contains(Point(x, y)):
+            return path_cells, True
+
+        visited.add(target_cell)
+        row, col = target_row, target_col
+
+    return path_cells, False
+
+
+def _report_confluence_check(
+    dem: dict,
+    boundary_polygon_utm: Polygon,
+    top_zone_cells: list[tuple[int, int]],
+) -> None:
+    """
+    Tests whether the top-ranked zone's own eligible cells -- and the
+    real, coarser-threshold valley branches (valley_delineation.
+    delineate_valleys()'s own output) that reach it -- actually converge
+    on a shared downstream cell (a true confluence) before exiting the
+    parcel, versus running roughly parallel without ever merging (which
+    would point toward the "one broad hillside, no real confluence"
+    explanation instead of "ridge to valley bottom, channels converging").
+
+    PART A -- the zone's own member cells: traces every one of
+    top_zone_cells's own D8 flow paths forward (_trace_flow_path_cells())
+    and checks whether any two of those paths ever share a cell before
+    either exits. Since the zone's member cells are already one
+    8-connected cluster by construction, a high merge rate here is
+    expected and confirms the zone itself reads as one confluent band,
+    not proof on its own of a real valley-bottom confluence -- PART B is
+    the more meaningful test.
+
+    PART B -- real valley branches: for every branch of every valley
+    delineate_valleys() finds (a SEPARATE, coarser-threshold trace than
+    this zone's own per-cell eligibility -- see water_candidate_zones.py's
+    own module docstring), checks whether it has any cell inside
+    top_zone_cells ("within") OR its own outlet cell's real D8 flow target
+    (flow_direction_cells, one step PAST wherever delineate_valleys()'s own
+    contributing-area threshold stopped tracing it -- not just the
+    branch's own recorded cell list, which would make this redundant with
+    "within") lands inside top_zone_cells ("immediately upstream") --
+    reported as the count of qualifying branches out of the total found.
+    For each qualifying branch, continues its OWN flow trace forward from
+    its own outlet cell (past wherever delineate_valleys()'s own
+    contributing-area threshold stopped tracing it) and checks whether any
+    two qualifying branches' continued traces ever share a cell before
+    exiting the parcel -- a real, literal confluence -- versus never
+    sharing one at all (parallel, non-converging flow paths).
+    """
+    print("=== Confluence check (top-ranked zone) ===\n")
+
+    flow_direction_cells = get_flow_direction_for_dem(dem)
+    boundary_prepared = prep(boundary_polygon_utm)
+
+    # --- PART A: the zone's own member cells ---
+    zone_cells_set = set(top_zone_cells)
+    zone_traces = [
+        {"start": cell, "path": _trace_flow_path_cells(flow_direction_cells, cell[0], cell[1], boundary_prepared, dem)[0]}
+        for cell in top_zone_cells
+    ]
+
+    first_owner: dict = {}
+    merged_starts: set = set()
+    for trace in zone_traces:
+        for cell in trace["path"]:
+            owner = first_owner.get(cell)
+            if owner is None:
+                first_owner[cell] = trace["start"]
+            elif owner != trace["start"]:
+                merged_starts.add(trace["start"])
+                merged_starts.add(owner)
+
+    print(
+        f"PART A -- zone's own {len(top_zone_cells)} member cell(s): {len(merged_starts)} of them "
+        f"({len(merged_starts) / len(top_zone_cells) * 100:.1f}%) have a flow path that shares at least one "
+        "downstream cell with another member cell's flow path before exiting -- "
+        + (
+            "the large majority converge onto a shared downstream path, consistent with one confluent band."
+            if len(merged_starts) >= 0.5 * len(top_zone_cells)
+            else "less than half converge -- this zone's own cells may not all funnel through one shared channel."
+        )
+    )
+    print()
+
+    # --- PART B: real valley branches (delineate_valleys(), coarser threshold) ---
+    valleys = delineate_valleys(dem)
+    all_branches = [
+        (valley["id"], branch_index, branch)
+        for valley in valleys
+        for branch_index, branch in enumerate(valley["branches_rowcol"])
+    ]
+    total_branch_count = len(all_branches)
+
+    qualifying = []
+    for valley_id, branch_index, branch in all_branches:
+        touches_zone = any(cell in zone_cells_set for cell in branch)
+
+        # "Immediately upstream": delineate_valleys() traces each branch
+        # only down to ITS OWN (coarser) contributing-area threshold, which
+        # can stop just short of ever reaching the zone -- so this can't be
+        # answered from the branch's own recorded cell list alone (any cell
+        # of the branch landing in the zone is already "touches_zone" by
+        # construction, making a same-list check redundant). Instead, take
+        # ONE more real D8 step (flow_direction_cells, not the branch's own
+        # truncated trace) past the branch's own outlet (its last recorded
+        # cell) and check whether THAT step lands in the zone.
+        immediately_upstream = False
+        if not touches_zone:
+            outlet_row, outlet_col = branch[-1]
+            next_row, next_col = flow_direction_cells[outlet_row, outlet_col]
+            next_row, next_col = int(next_row), int(next_col)
+            immediately_upstream = next_row >= 0 and (next_row, next_col) in zone_cells_set
+
+        if touches_zone or immediately_upstream:
+            qualifying.append(
+                {
+                    "valley_id": valley_id,
+                    "branch_index": branch_index,
+                    "branch": branch,
+                    "touches_zone": touches_zone,
+                    "immediately_upstream": immediately_upstream,
+                }
+            )
+
+    print(
+        f"PART B -- delineate_valleys() found {len(valleys)} primary valley(s), {total_branch_count} branch(es) "
+        f"total. {len(qualifying)} of those branch(es) have a cell within (or immediately upstream of) the "
+        "top-ranked zone's footprint:"
+    )
+    for q in qualifying:
+        outlet = q["branch"][-1]
+        print(
+            f"    valley id={q['valley_id']}, branch #{q['branch_index']}: "
+            f"{'passes through' if q['touches_zone'] else 'flows directly into'} the zone, "
+            f"own outlet cell=(row={outlet[0]}, col={outlet[1]})"
+        )
+    print()
+
+    if len(qualifying) < 2:
+        print(
+            "Fewer than 2 qualifying branches -- a confluence needs at least 2 converging paths, so this "
+            "check can't distinguish confluence from broad-hillside with only 0 or 1 branch reaching the zone.\n"
+        )
+        return
+
+    branch_traces = []
+    for q in qualifying:
+        outlet_row, outlet_col = q["branch"][-1]
+        path_cells, exited = _trace_flow_path_cells(flow_direction_cells, outlet_row, outlet_col, boundary_prepared, dem)
+        branch_traces.append({"valley_id": q["valley_id"], "branch_index": q["branch_index"], "path": path_cells, "exited": exited})
+
+    first_owner = {}
+    confluence_events = []
+    for trace in branch_traces:
+        key = (trace["valley_id"], trace["branch_index"])
+        for cell in trace["path"]:
+            owner = first_owner.get(cell)
+            if owner is None:
+                first_owner[cell] = key
+            elif owner != key:
+                confluence_events.append((cell, owner, key))
+
+    if confluence_events:
+        example_cell, owner_a, owner_b = confluence_events[0]
+        merged_branch_ids = {e[1] for e in confluence_events} | {e[2] for e in confluence_events}
+        print(
+            f"TRUE CONFLUENCE detected: {len(merged_branch_ids)} of {len(qualifying)} qualifying branches' "
+            f"continued flow paths converge on a shared cell before exiting the parcel (e.g. valley "
+            f"{owner_a} and valley {owner_b} both reach row={example_cell[0]}, col={example_cell[1]}) -- "
+            "this supports the 'ridge to valley bottom, channels converging' read."
+        )
+    else:
+        print(
+            f"NO CONFLUENCE: none of the {len(qualifying)} qualifying branches' continued flow paths ever "
+            "share a cell before exiting the parcel -- they run roughly parallel without merging, which "
+            "points back toward the broad-hillside explanation instead of a true valley confluence."
+        )
     print()
 
 
