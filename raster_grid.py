@@ -22,6 +22,9 @@ the only module in this pipeline that talks to rasterio/the network
 directly.
 """
 
+import math
+from collections import deque
+
 import numpy as np
 from shapely.geometry import Polygon, box
 from shapely.ops import unary_union
@@ -175,6 +178,130 @@ def cell_union_footprint(dem: dict, cell_mask: np.ndarray):
         return Polygon()
 
     return unary_union(squares).buffer(0)
+
+
+def waist_erosion_radius_cells(dem: dict, min_waist_meters: float) -> int:
+    """
+    Converts a real-world minimum waist width into a cell-count erosion
+    radius using the DEM's own resolution_meters -- shared by every
+    cluster-splitting caller (production_area.py's production-zone waist
+    detection, water_candidate_zones.py's post-dilation water-zone waist
+    detection: same "a single connected cluster can pinch down to
+    something too narrow to sensibly treat as one zone" logic, just
+    applied to a different per-cell eligibility mask in each caller).
+    Eroding a mask by radius r cells strips away anything narrower than
+    roughly (2r) cells wide, so the radius is half the minimum waist
+    width, rounded UP (via ceil) so a real waist genuinely narrower than
+    min_waist_meters is reliably eroded away rather than surviving due to
+    a too-small radius. Always at least 1 cell, so a nonzero
+    min_waist_meters always does *something*.
+    """
+    px, py = dem["resolution_meters"]
+    cell_size = (px + py) / 2.0
+    return max(1, math.ceil(min_waist_meters / cell_size / 2.0))
+
+
+def reclaim_stripped_cells(
+    cluster_cells: set[tuple[int, int]],
+    seed_labels: dict[tuple[int, int], int],
+) -> dict[tuple[int, int], int]:
+    """
+    Recovers the cells erosion stripped away -- erosion only exists to
+    DECIDE whether a cluster splits, never to permanently remove real,
+    eligible ground. Multi-source 8-connected BFS, confined to
+    `cluster_cells` (the ORIGINAL, pre-erosion cluster footprint): every
+    stripped cell (a cell in cluster_cells not already in seed_labels) is
+    assigned to whichever eroded sub-component's frontier reaches it
+    first, expanding one ring at a time from every surviving sub-component
+    simultaneously. BFS ring distance under 8-connected (D8_OFFSETS)
+    adjacency is exactly Chebyshev pixel distance -- the same adjacency
+    connected_components() already uses -- so this is a simple per-cell
+    nearest-surviving-component assignment by pixel distance, staying
+    entirely in cell-space: not a hull, not a buffer.
+    """
+    assignment = dict(seed_labels)
+    queue = deque(seed_labels.items())
+    while queue:
+        (r, c), label = queue.popleft()
+        for dr, dc in D8_OFFSETS:
+            neighbor = (r + dr, c + dc)
+            if neighbor in cluster_cells and neighbor not in assignment:
+                assignment[neighbor] = label
+                queue.append((neighbor, label))
+    return assignment
+
+
+def attempt_waist_split(
+    cells: list[tuple[int, int]],
+    grid_shape: tuple[int, int],
+    dem: dict,
+    min_area_acres: float,
+    min_waist_meters: float,
+) -> list[list[tuple[int, int]]]:
+    """
+    Waist detection and splitting for ONE cluster's own cell mask -- a
+    raster morphological operation on the cell mask itself (via
+    binary_erode()), NOT a continuous-geometry operation on any polygon.
+    Shared by production_area.py's production-zone clustering
+    (originally built there; extracted here so water_candidate_zones.py's
+    water-zone clustering can reuse the exact same detection/splitting
+    logic against its own post-dilation eligibility mask, rather than a
+    second, independently-maintained copy).
+
+    Erodes the cluster by min_waist_meters (converted to a cell radius via
+    waist_erosion_radius_cells()) and re-labels the result. If erosion
+    doesn't produce 2+ components, there's no real waist here -- returns
+    [cells] completely unchanged (this function is idempotent and
+    side-effect-free for clusters with no real waist, e.g. a normal,
+    roughly-convex field/drainage band).
+
+    If erosion DOES produce 2+ components, reclaims every stripped cell
+    back onto its nearest surviving sub-component (reclaim_stripped_cells())
+    and checks each reclaimed sub-cluster's own REAL cell-union footprint
+    (cell_union_footprint(), not a cell count) against min_area_acres. The
+    split is committed -- returning one cells-list per sub-cluster -- only
+    if EVERY sub-cluster clears min_area_acres on its own; otherwise this
+    returns [cells] unchanged (a technically-2+-component erosion result
+    that can't actually support 2+ real zones isn't a split).
+    """
+    if len(cells) <= 1:
+        return [cells]
+
+    rows, cols = grid_shape
+    cell_mask = np.zeros((rows, cols), dtype=bool)
+    for r, c in cells:
+        cell_mask[r, c] = True
+
+    radius_cells = waist_erosion_radius_cells(dem, min_waist_meters)
+    eroded_mask = binary_erode(cell_mask, radius_cells)
+
+    eroded_labels, num_eroded = connected_components(eroded_mask)
+    if num_eroded < 2:
+        return [cells]
+
+    cluster_cells = set(cells)
+    seed_labels = {
+        (int(r), int(c)): int(eroded_labels[r, c]) for r, c in np.argwhere(eroded_mask)
+    }
+    assignment = reclaim_stripped_cells(cluster_cells, seed_labels)
+
+    sub_groups: dict[int, list[tuple[int, int]]] = {}
+    for cell, label in assignment.items():
+        sub_groups.setdefault(label, []).append(cell)
+
+    if len(sub_groups) < 2:
+        return [cells]
+
+    for group_cells in sub_groups.values():
+        group_mask = np.zeros((rows, cols), dtype=bool)
+        for r, c in group_cells:
+            group_mask[r, c] = True
+        footprint = cell_union_footprint(dem, group_mask)
+        area_acres = footprint.area / SQUARE_METERS_PER_ACRE
+        if area_acres < min_area_acres:
+            return [cells]
+
+    return list(sub_groups.values())
 
 
 def connected_components(mask: np.ndarray) -> tuple[np.ndarray, int]:

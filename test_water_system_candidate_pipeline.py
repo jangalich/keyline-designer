@@ -75,39 +75,15 @@ utm_corners_y = [origin_y, origin_y, origin_y - SIZE * RESOLUTION, origin_y - SI
 lons, lats = warp_transform(DST_CRS, "EPSG:4326", utm_corners_x, utm_corners_y)
 boundary_coordinates = list(zip(lons, lats))
 
-# Terrain: a valley descending from the north edge (high) down to a
-# gently-sloped bench along the south edge (low) — same shape as the
-# individual-module smoke tests, combined into one DEM so a valley and a
-# servable production area both genuinely exist on the same synthetic
-# property.
-#
-# MARGIN_ROWS: the property boundary below is still exactly the ORIGINAL
-# SIZE x SIZE extent (boundary_coordinates, built from SIZE just below,
-# is unchanged), but the DEM array itself now has MARGIN_ROWS extra rows
-# south of that boundary's own south edge -- real, valid DEM cells (a
-# continuation of the same gentle downhill slope) sitting just off-parcel,
-# so the new downstream-clearance gate (water_candidate_zones.py) has
-# somewhere to register a real exit. Without this margin, flow reaching
-# the bench would have nowhere further to go within the grid at all
-# (see the bench's own gentle slope below -- previously flat, which was
-# an even more literal dead end: zero gradient means zero downhill
-# neighbors anywhere on it, so a flow path could never leave the bench
-# under D8 routing regardless of any margin).
-MARGIN_ROWS = 6
-TOTAL_ROWS = SIZE + MARGIN_ROWS
-
-array = np.zeros((TOTAL_ROWS, SIZE), dtype=np.float32)
-for row in range(TOTAL_ROWS):
+# Terrain: a valley descending from the north edge (high) down to a flat
+# bench along the south edge (low) — same shape as the individual-module
+# smoke tests, combined into one DEM so a valley and a servable production
+# area both genuinely exist on the same synthetic property.
+array = np.zeros((SIZE, SIZE), dtype=np.float32)
+for row in range(SIZE):
     for col in range(SIZE):
         if row >= SIZE - 8:
-            # Gently sloped bench (was perfectly flat before the
-            # downstream-clearance gate existed) -- a real, if tiny,
-            # gradient (1% grade at this 5m resolution) so flow keeps
-            # moving south through it and into the margin rows below,
-            # rather than dead-ending the instant it arrives. Small
-            # enough it doesn't affect production_area.py's own slope-
-            # based eligibility (MAX_PRODUCTION_SLOPE_PCT=20% default).
-            array[row, col] = 100.0 - (row - (SIZE - 8)) * 0.05
+            array[row, col] = 100.0  # flat southern bench (production area)
         else:
             distance_from_center_col = abs(col - SIZE // 2)
             array[row, col] = 100.0 + (SIZE - 8 - row) * 3.0 + distance_from_center_col * 1.5

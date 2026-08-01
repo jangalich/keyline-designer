@@ -186,7 +186,7 @@ GRAVITY_MIN_FACTOR = 0.2
 # that module's own comment). At distance 0, gradient (rise/run) is
 # mathematically undefined -- there's no run to divide the real elevation
 # differential by. Silently defaulting the resulting gradient_pct to 0.0
-# (water_candidate_zones._aggregate_production_area_relationships()'s
+# (water_candidate_zones._zone_production_area_relationships()'s
 # div-by-zero guard) was a real bug found live: every distance-0 zone
 # scored an IDENTICAL, uninformative GRAVITY_LEVEL_GROUND_FACTOR (0.6)
 # regardless of whether its real elevation_differential_m was +7m or -9m

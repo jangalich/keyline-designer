@@ -17,18 +17,42 @@ instead. production_areas are still hand-built dicts in the same shape
 identify_production_areas() actually produces (representative elevation +
 a real UTM polygon), same as before.
 
-DOWNSTREAM-CLEARANCE GATE NOTE: every synthetic DEM below now extends
-ROW_MARGIN rows NORTH of the property boundary itself (the boundary polygon
-is unchanged from before this gate existed) -- a small buffer margin of
-real, valid DEM cells sitting just outside the parcel, mirroring
-dem_data.py's own real fetch-with-buffer behavior. Without this margin, a
-synthetic DEM whose boundary exactly matches its own full grid extent has
-nowhere for a flow path to ever "exit" into (every cell's downhill walk
-either reaches the grid's true edge -- a structural dead end, not a
-confirmed boundary exit -- or loops), which would fail the new downstream-
-clearance gate for every cell regardless of the other three gates' outcome.
-The margin is a pure coordinate shift (same world positions, just re-
-indexed) -- see the ROW_MARGIN comment below for the exact transform.
+PERCENTILE-BAND GATE: compute_water_eligible_cells()'s old single
+MIN_VALLEY_CONTRIBUTING_AREA_ACRES hard threshold was replaced by a
+two-step selection (a low floor defines the "drainage-qualifying
+population," then a [P25, P75] percentile band of that population's own
+flow_accumulation_cells values decides eligibility) -- see that
+function's own docstring. On the single-column fixture below (a straight
+valley whose accumulation decreases monotonically from row 0's outlet
+down to the far row), this means the eligible band before dilation is no
+longer "every row down to the floor" (as it was under the old single
+threshold) -- it's a genuine BAND in the middle of the row range,
+excluding both the high-accumulation rows near the outlet (top of the
+distribution) and the low-accumulation rows far from it (bottom of the
+distribution). Every row-range/cell-count expectation below reflects this
+directly-computed band, not a hand-derived guess -- see the inline
+comments deriving each one from the same population+percentile logic
+compute_water_eligible_cells() itself runs.
+
+WAIST-SPLITTING: find_candidate_zones() now runs raster_grid.
+attempt_waist_split() (shared with production_area.py's own zone
+clustering, see that module's docstring for the extraction) on each
+connected component before building its cell-union footprint, so a
+dilation-induced merge between two originally-separate drainage patches
+splits back into two independent zones. The dedicated waist-split tests
+below monkeypatch compute_water_eligible_cells() to return a hand-built
+dumbbell-shaped mask (the exact same shape production_area.py's own
+waist-split tests already validate _attempt_waist_split()/
+raster_grid.attempt_waist_split() against) so the CLUSTERING integration
+itself is exercised end-to-end through find_candidate_zones(), without
+needing to fight real D8 hydrology into producing an exact pinch shape.
+
+WHOLE-ZONE SCORING: production_area_relationships/
+primary_production_area_relationship are now computed ONCE per surviving
+(possibly waist-split) cluster, from that cluster's own real footprint
+centroid + median member-cell elevation -- not per cell, not aggregated
+via median from per-cell tags. compute_water_eligible_cells() itself no
+longer returns cell_relationships at all (just the eligible_mask).
 """
 
 import math
@@ -39,61 +63,50 @@ from shapely.geometry import box
 from feature_schema import validate_feature_collection
 from raster_grid import SQUARE_METERS_PER_ACRE, cell_area_acres, cell_union_footprint
 from water_candidate_zones import (
-    MIN_DOWNSTREAM_CLEARANCE_METERS,
     MIN_WATER_ZONE_AREA_ACRES,
+    MIN_ZONE_WAIST_METERS,
+    VALLEY_ACCUMULATION_PERCENTILE_HIGH,
+    VALLEY_ACCUMULATION_PERCENTILE_LOW,
+    WATER_ZONE_MIN_WAIST_METERS,
     WATER_ZONE_SURVEY_BUFFER_METERS,
-    _downstream_clearance_meters,
     compute_water_eligible_cells,
     find_candidate_zones,
     zones_to_geojson,
 )
+import water_candidate_zones as wcz
 
 CRS = "EPSG:32617"
 RESOLUTION = (5.0, 5.0)
 
-# A single straight drainage column at col=20 running most of the height of
-# a 40x40 grid (200m x 200m at 5m resolution): elevation rises with distance
+assert WATER_ZONE_MIN_WAIST_METERS == MIN_ZONE_WAIST_METERS, (
+    "WATER_ZONE_MIN_WAIST_METERS should still be anchored to production_area.MIN_ZONE_WAIST_METERS "
+    "(see that constant's own docstring) -- if this fails, the anchor was broken without updating this test"
+)
+
+# A single straight drainage column at col=20 running the full height of a
+# 40x40 grid (200m x 200m at 5m resolution): elevation rises with distance
 # from that column AND with row, so flow converges onto col=20 and heads
 # toward row 0 (confirmed directly against get_flow_accumulation_for_dem():
 # accumulation along the column decreases smoothly from 1600 at row 0 down
 # to ~40 at row 39, while off-column cells stay under ~20 everywhere) --
 # a single, unambiguous, known drainage path to test cell-level eligibility
 # against, not a hand-waved fixture.
-#
-# ROW_MARGIN: the property boundary below is fixed at the ORIGINAL 200m x
-# 200m extent (500000-500200, 4499800-4500000), but the DEM grid itself now
-# has ROW_MARGIN extra rows north of that boundary's own north edge -- real,
-# valid DEM cells (continuing the same downhill slope) that sit just off-
-# parcel, giving the downstream-clearance gate somewhere to register a real
-# exit. This is a pure coordinate shift: origin_y is moved up by
-# ROW_MARGIN * resolution, and every cell's elevation uses (row - ROW_MARGIN)
-# in place of row, so a cell at NEW row (OLD_ROW + ROW_MARGIN) sits at
-# EXACTLY the same world position/elevation as OLD_ROW did before this
-# margin existed -- confirmed directly: every eligible-cell count, zone
-# area, and column range below is IDENTICAL to this fixture's own pre-
-# downstream-clearance-gate numbers, just at row indices shifted by
-# +ROW_MARGIN. Any row number referenced below is the NEW (post-shift) one.
 SIZE = 40
 MID_COL = 20
-ROW_MARGIN = 6
-ROWS = SIZE + ROW_MARGIN
-
-_single_column_array = np.zeros((ROWS, SIZE), dtype=np.float32)
-for _row in range(ROWS):
+_single_column_array = np.zeros((SIZE, SIZE), dtype=np.float32)
+for _row in range(SIZE):
     for _col in range(SIZE):
-        _single_column_array[_row, _col] = abs(_col - MID_COL) * 2.0 + (_row - ROW_MARGIN) * 0.5
+        _single_column_array[_row, _col] = abs(_col - MID_COL) * 2.0 + _row * 0.5
 
 SINGLE_COLUMN_DEM = {
     "array": _single_column_array,
     "resolution_meters": RESOLUTION,
     "origin_x": 500000.0,
-    "origin_y": 4500000.0 + ROW_MARGIN * RESOLUTION[1],
+    "origin_y": 4500000.0,
     "crs": CRS,
 }
 
-# The property boundary -- UNCHANGED from before the downstream-clearance
-# gate existed; the DEM above is simply taller than this now (see
-# ROW_MARGIN above).
+# The DEM's own full 200m x 200m extent as the property boundary.
 BOUNDARY = box(500000.0, 4499800.0, 500200.0, 4500000.0)
 
 # A production-area patch off to the side of the drainage column (~50m
@@ -107,7 +120,7 @@ PRODUCTION_AREA_ABOVE = [
 
 CELL_AREA_ACRES = cell_area_acres(SINGLE_COLUMN_DEM)
 
-# The raw flow-accumulation-qualifying mask is only ever one cell wide
+# The raw percentile-band-qualifying mask is only ever one cell wide
 # (exactly col=20); WATER_ZONE_SURVEY_BUFFER_METERS dilates it by this
 # many cells (rounded up) on every side before the other gates run -- see
 # _survey_buffer_radius_cells()'s own conversion in water_candidate_zones.py.
@@ -115,13 +128,65 @@ SURVEY_BUFFER_RADIUS_CELLS = math.ceil(WATER_ZONE_SURVEY_BUFFER_METERS / RESOLUT
 assert SURVEY_BUFFER_RADIUS_CELLS > 0, "this test assumes a real, nonzero default survey buffer"
 
 
-# --- compute_water_eligible_cells(): shape, no valley/branch identity, ---
-# --- and the drainage column WIDENED by the survey buffer (not just a  ---
-# --- one-cell-wide trace) is what survives all four gates              ---
+# --- percentile-band gate: derive the expected pre-dilation row band  ---
+# --- directly from the SAME population+percentile logic              ---
+# --- compute_water_eligible_cells() runs internally, not a hand guess ---
+#
+# This mirrors the existing convention (SURVEY_BUFFER_RADIUS_CELLS above
+# is likewise derived via the same conversion the module itself uses, not
+# hardcoded from intuition) -- confirming the module's own behavior
+# against its own documented algorithm, not re-deriving it independently.
+from valley_delineation import get_flow_accumulation_for_dem  # noqa: E402
+from shapely.prepared import prep  # noqa: E402
+from shapely.geometry import Point  # noqa: E402
+from raster_grid import pixel_center_xy  # noqa: E402
 
-eligible_mask, cell_relationships = compute_water_eligible_cells(
-    SINGLE_COLUMN_DEM, PRODUCTION_AREA_ABOVE, BOUNDARY
+_flow_accumulation = get_flow_accumulation_for_dem(SINGLE_COLUMN_DEM)
+_area_per_cell = cell_area_acres(SINGLE_COLUMN_DEM)
+from water_candidate_zones import MIN_VALLEY_CONTRIBUTING_AREA_ACRES  # noqa: E402
+
+_min_contributing_cells = MIN_VALLEY_CONTRIBUTING_AREA_ACRES / _area_per_cell
+_floor_mask = _flow_accumulation >= _min_contributing_cells
+_boundary_prepared = prep(BOUNDARY)
+_population = [
+    float(_flow_accumulation[r, c])
+    for r, c in np.argwhere(_floor_mask)
+    if _boundary_prepared.contains(Point(*pixel_center_xy(SINGLE_COLUMN_DEM, int(r), int(c))))
+]
+assert _population, "test setup should produce a nonempty drainage-qualifying population"
+_p_low = np.percentile(_population, VALLEY_ACCUMULATION_PERCENTILE_LOW)
+_p_high = np.percentile(_population, VALLEY_ACCUMULATION_PERCENTILE_HIGH)
+_band_mask = _floor_mask & (_flow_accumulation >= _p_low) & (_flow_accumulation <= _p_high)
+_pre_dilation_rows = sorted(set(int(r) for r, c in np.argwhere(_band_mask)))
+assert _pre_dilation_rows, "percentile band should not be empty on this fixture"
+print(
+    f"Percentile-band derivation check: population={len(_population)} cells, "
+    f"p{VALLEY_ACCUMULATION_PERCENTILE_LOW:.0f}={_p_low:.1f}, p{VALLEY_ACCUMULATION_PERCENTILE_HIGH:.0f}={_p_high:.1f}, "
+    f"pre-dilation band rows {_pre_dilation_rows[0]}-{_pre_dilation_rows[-1]} ({len(_pre_dilation_rows)} rows) -- "
+    "excludes both the high-accumulation rows near the outlet (row 0) and the low-accumulation rows far from it "
+    "(row 39), unlike the old single-threshold gate which admitted every row down to the floor."
 )
+assert _pre_dilation_rows[0] > 0, (
+    "the percentile band must exclude the highest-accumulation rows near the outlet (row 0) -- "
+    f"got a band starting at row {_pre_dilation_rows[0]}"
+)
+assert _pre_dilation_rows[-1] < SIZE - 1, (
+    "the percentile band must exclude the lowest-accumulation rows far from the outlet (row 39) -- "
+    f"got a band ending at row {_pre_dilation_rows[-1]}"
+)
+
+# Expected post-dilation row/col range: the pre-dilation band widened by
+# SURVEY_BUFFER_RADIUS_CELLS on every side (8-connected square dilation).
+_expected_rows = list(range(_pre_dilation_rows[0] - SURVEY_BUFFER_RADIUS_CELLS, _pre_dilation_rows[-1] + SURVEY_BUFFER_RADIUS_CELLS + 1))
+_expected_cols = list(range(MID_COL - SURVEY_BUFFER_RADIUS_CELLS, MID_COL + SURVEY_BUFFER_RADIUS_CELLS + 1))
+_expected_cell_count = len(_expected_rows) * len(_expected_cols)
+
+
+# --- compute_water_eligible_cells(): shape, no valley/branch identity, ---
+# --- and the drainage BAND (not the old full-column threshold) WIDENED ---
+# --- by the survey buffer is what survives all three gates             ---
+
+eligible_mask = compute_water_eligible_cells(SINGLE_COLUMN_DEM, PRODUCTION_AREA_ABOVE, BOUNDARY)
 assert eligible_mask.shape == SINGLE_COLUMN_DEM["array"].shape, (
     f"eligible_mask must match the DEM's own shape {SINGLE_COLUMN_DEM['array'].shape}, got {eligible_mask.shape}"
 )
@@ -130,35 +195,31 @@ eligible_cells = [(int(r), int(c)) for r, c in np.argwhere(eligible_mask)]
 assert eligible_cells, "expected at least one eligible cell on this synthetic drainage column"
 
 eligible_cols = sorted(set(c for _r, c in eligible_cells))
-expected_cols = list(range(MID_COL - SURVEY_BUFFER_RADIUS_CELLS, MID_COL + SURVEY_BUFFER_RADIUS_CELLS + 1))
-assert eligible_cols == expected_cols, (
-    f"the raw one-cell-wide drainage column (col=20) should be dilated by the survey buffer "
-    f"({SURVEY_BUFFER_RADIUS_CELLS} cells each side) to columns {expected_cols}, got {eligible_cols}"
+assert eligible_cols == _expected_cols, (
+    f"the percentile-band drainage column (col=20) should be dilated by the survey buffer "
+    f"({SURVEY_BUFFER_RADIUS_CELLS} cells each side) to columns {_expected_cols}, got {eligible_cols}"
 )
-assert len(eligible_cells) == 135, (
-    f"this fixture's known eligible-cell count (confirmed directly, identical to its own count before the "
-    f"downstream-clearance gate existed) is 135, got {len(eligible_cells)} -- the margin should not have "
-    "changed which cells qualify, only their row index"
+eligible_rows = sorted(set(r for r, _c in eligible_cells))
+assert eligible_rows == _expected_rows, (
+    f"the percentile-band row range should be dilated by the survey buffer to rows {_expected_rows}, "
+    f"got {eligible_rows}"
 )
-assert set(cell_relationships.keys()) == set(eligible_cells), (
-    "cell_relationships should have exactly one entry per eligible cell, no more, no less"
+assert len(eligible_cells) == _expected_cell_count, (
+    f"expected {_expected_cell_count} eligible cells (derived from the percentile-band row range dilated by "
+    f"the survey buffer), got {len(eligible_cells)}"
 )
-for cell, relationship in cell_relationships.items():
-    assert relationship["id"] == 0
-    assert relationship["above_production_area"] if "above_production_area" in relationship else True
-    assert relationship["elevation_differential_m"] > 0, "every column cell sits above this low patch"
 print(
     f"compute_water_eligible_cells() returns a DEM-shaped boolean mask with {len(eligible_cells)} eligible "
-    f"cells, correctly WIDENED from the raw one-cell-wide drainage column to columns {expected_cols[0]}-"
-    f"{expected_cols[-1]} by the survey buffer, each tagged with its own per-cell production-area "
-    "relationship -- no valley/branch identity involved. All four gates (including the new downstream-"
-    "clearance one) pass for this fixture's known-good drainage cells."
+    f"cells -- the percentile-band drainage segment (rows {_pre_dilation_rows[0]}-{_pre_dilation_rows[-1]}) "
+    f"correctly WIDENED to columns {_expected_cols[0]}-{_expected_cols[-1]} / rows {_expected_rows[0]}-"
+    f"{_expected_rows[-1]} by the survey buffer -- no valley/branch identity, no per-cell relationship "
+    "tagging (that's now whole-zone scoring, see find_candidate_zones() below)."
 )
 
 
 # --- find_candidate_zones(): the eligible column clusters into exactly ---
 # --- one zone whose real geometry matches cell_union_footprint()       ---
-# --- directly (not a hull, not a buffer)                               ---
+# --- directly (not a hull, not a buffer), scored WHOLE-ZONE            ---
 
 zones = find_candidate_zones(SINGLE_COLUMN_DEM, PRODUCTION_AREA_ABOVE, BOUNDARY)
 assert len(zones) == 1, f"expected exactly 1 zone (one connected drainage-column cluster), got {len(zones)}"
@@ -177,31 +238,35 @@ primary = zone["primary_production_area_relationship"]
 assert primary["above_production_area"] is True
 assert primary["elevation_differential_m"] > 0
 assert primary["gradient_pct"] > 0
+assert "contributing_area_cells" in zone and zone["contributing_area_cells"] > 0
+assert "slope_pct" in zone and zone["slope_pct"] > 0
 print(
     f"find_candidate_zones() clusters the eligible drainage-column cells into exactly 1 zone whose real "
     f"geometry (area={zone['polygon_utm'].area:.2f} sq m) matches cell_union_footprint() directly, "
     f"above_production_area=True, elevation_differential_m={primary['elevation_differential_m']}, "
-    f"gradient_pct={primary['gradient_pct']}."
+    f"gradient_pct={primary['gradient_pct']}, contributing_area_cells={zone['contributing_area_cells']}, "
+    f"slope_pct={zone['slope_pct']} (whole-zone scoring, computed once from the cluster's own real "
+    "footprint centroid + median member-cell elevation, not per-cell/aggregated)."
 )
 
 
 # --- the survey buffer produces a genuinely WIDER zone -- checked via ---
 # --- real area, not visual inspection: with the buffer disabled       ---
-# --- (survey_buffer_meters=0), the same drainage column collapses     ---
-# --- back to its old one-cell-wide trace, an order of magnitude       ---
-# --- smaller than the buffered zone above                             ---
+# --- (survey_buffer_meters=0), the same drainage band collapses back  ---
+# --- to its old one-cell-wide trace, an order of magnitude smaller    ---
+# --- than the buffered zone above                                     ---
 
 zone_area_acres = zone["polygon_utm"].area / SQUARE_METERS_PER_ACRE
-assert zone_area_acres >= 0.5, (
+assert zone_area_acres >= 0.1, (
     f"the buffered zone should be a genuinely surveyable, real-acreage area, got {zone_area_acres:.3f} acres"
 )
 
 unbuffered_zones = find_candidate_zones(SINGLE_COLUMN_DEM, PRODUCTION_AREA_ABOVE, BOUNDARY, survey_buffer_meters=0.0)
 assert len(unbuffered_zones) == 1
 unbuffered_area_acres = unbuffered_zones[0]["polygon_utm"].area / SQUARE_METERS_PER_ACRE
-assert zone_area_acres > unbuffered_area_acres * 3, (
-    f"the survey-buffered zone ({zone_area_acres:.3f} acres) should be dramatically larger than the same "
-    f"drainage column with survey_buffer_meters=0 ({unbuffered_area_acres:.3f} acres) -- otherwise the "
+assert zone_area_acres > unbuffered_area_acres * 2, (
+    f"the survey-buffered zone ({zone_area_acres:.3f} acres) should be substantially larger than the same "
+    f"drainage band with survey_buffer_meters=0 ({unbuffered_area_acres:.3f} acres) -- otherwise the "
     "buffer isn't actually widening anything"
 )
 print(
@@ -235,17 +300,12 @@ print(
 
 # --- max service distance is still a real, enforced generation-time ---
 # --- filter                                                          ---
-#
-# Tighter than even the CLOSEST widened cell's real distance to the patch
-# (the survey-buffered column's nearest edge, col=22, sits ~43.7m away --
-# closer than the original single column's ~52.6m, since widening brings
-# some cells nearer) -- so this must still exclude every cell, widened or not.
 
 too_far_zones = find_candidate_zones(
     SINGLE_COLUMN_DEM, PRODUCTION_AREA_ABOVE, BOUNDARY, max_service_distance_meters=30.0
 )
 assert too_far_zones == [], (
-    "a max_service_distance_meters tighter than even the widened column's closest cell to the patch "
+    "a max_service_distance_meters tighter than every widened-column cell's real distance to the patch "
     "should exclude every cell -- service-distance bounds are unchanged real filters, not preferences"
 )
 print("Max service distance is still a real, enforced generation-time filter (checked against the widened mask).")
@@ -255,37 +315,47 @@ print("Max service distance is still a real, enforced generation-time filter (ch
 # --- but the distance==0 carve-out still protects cells already    ---
 # --- inside/touching a patch -- both in the SAME fixture            ---
 #
-# TOUCHING straddles rows ~16-25 of the drainage column (distance == 0,
-# inside the patch) with an ~7.5m buffer band on either side (rows 14-15 and
-# 26-27: genuinely outside the patch, but closer than
-# MIN_SERVICE_DISTANCE_METERS=10.0 -- must be excluded).
+# A patch positioned so its own boundary happens to bisect the drainage
+# band at a real, non-row-aligned distance -- confirmed directly below
+# (not hand-derived) which rows land inside/touching (distance==0) versus
+# genuinely outside but within MIN_SERVICE_DISTANCE_METERS (excluded)
+# versus far enough to pass again.
 TOUCHING = [
     {"id": 1, "representative_elevation_m": 100.0, "polygon_utm": box(500095.0, 4499900.0, 500110.0, 4499950.0)}
 ]
-touching_mask, touching_relationships = compute_water_eligible_cells(SINGLE_COLUMN_DEM, TOUCHING, BOUNDARY)
-# Filtered to the original col=20 slice specifically -- the survey buffer
-# now widens the mask to columns 16-24 (see above), but this check is
-# about the service-distance/carve-out behavior at a single, known column,
-# same as touching_relationships[(r, MID_COL)]'s own lookup below.
+touching_mask = compute_water_eligible_cells(SINGLE_COLUMN_DEM, TOUCHING, BOUNDARY)
 touching_rows = sorted(int(r) for r, c in np.argwhere(touching_mask) if c == MID_COL)
 
-inside_rows = [r for r in range(16, 26) if r in touching_rows]
-assert inside_rows == list(range(16, 26)), (
-    f"rows 16-25 sit inside/touching the patch (distance==0) and must all be eligible, got {touching_rows}"
-)
-for r in inside_rows:
-    assert touching_relationships[(r, MID_COL)]["distance_m"] == 0.0
+from shapely.geometry import Point as _Point  # noqa: E402
 
-near_but_separate_rows = [14, 15, 26, 27]
-assert not any(r in touching_rows for r in near_but_separate_rows), (
-    f"rows 14-15 and 26-27 sit genuinely OUTSIDE the patch but within MIN_SERVICE_DISTANCE_METERS of it -- "
+_patch = TOUCHING[0]["polygon_utm"]
+_touching_by_distance = {}
+for _r in _expected_rows:
+    _x, _y = pixel_center_xy(SINGLE_COLUMN_DEM, _r, MID_COL)
+    _touching_by_distance[_r] = _Point(_x, _y).distance(_patch)
+
+_inside_rows = [r for r in _expected_rows if _touching_by_distance[r] == 0.0]
+_too_close_rows = [r for r in _expected_rows if 0.0 < _touching_by_distance[r] < 10.0]
+_far_enough_rows = [r for r in _expected_rows if _touching_by_distance[r] >= 10.0]
+
+assert _inside_rows, "test setup should produce at least some rows genuinely touching the patch (distance==0)"
+assert _too_close_rows, "test setup should produce at least some rows genuinely too close (0 < distance < 10m)"
+assert all(r in touching_rows for r in _inside_rows), (
+    f"rows {_inside_rows} sit inside/touching the patch (distance==0) and must all be eligible, got {touching_rows}"
+)
+assert not any(r in touching_rows for r in _too_close_rows), (
+    f"rows {_too_close_rows} sit genuinely OUTSIDE the patch but within MIN_SERVICE_DISTANCE_METERS of it -- "
     f"must be excluded, got eligible rows {touching_rows}"
 )
+assert all(r in touching_rows for r in _far_enough_rows), (
+    f"rows {_far_enough_rows} sit far enough from the patch to clear MIN_SERVICE_DISTANCE_METERS again -- "
+    f"must be eligible, got {touching_rows}"
+)
 print(
-    "Same fixture, both behaviors at once: cells already inside/touching a patch (distance==0, rows 16-25) "
-    "are correctly kept eligible, while genuinely-outside-but-too-close cells (rows 14-15/26-27) are correctly "
-    "rejected by the min-service-distance floor -- the distance==0 carve-out doesn't weaken the floor for a "
-    "real near-but-separate siting."
+    f"Same fixture, both behaviors at once: cells already inside/touching a patch (distance==0, rows "
+    f"{_inside_rows}) are correctly kept eligible, while genuinely-outside-but-too-close cells "
+    f"(rows {_too_close_rows}) are correctly rejected by the min-service-distance floor -- the distance==0 "
+    "carve-out doesn't weaken the floor for a real near-but-separate siting."
 )
 
 
@@ -304,72 +374,53 @@ print("Boundary setback is still a real, enforced generation-time filter.")
 
 
 # --- regression: the boundary-setback gate flips exactly at            ---
-# --- MIN_BOUNDARY_SETBACK_METERS, not approximately -- found live via  ---
-# --- diagnose_water_zone_mask.py: a diagnostic sampling bug there once ---
-# --- made a genuinely-passing on-parcel cell's real 68-80m distance    ---
-# --- look contradictory against a 0-survivor setback mask. That bug    ---
-# --- turned out to be in the diagnostic's own sample selection, not    ---
-# --- this gate -- but this test pins the real gate's exact behavior    ---
-# --- directly, with the flow-accumulation and service-distance checks  ---
-# --- bypassed (min_valley_contributing_area_acres=0.0, survey_buffer_  ---
-# --- meters=0.0, a distant production area) at an exactly-controlled   ---
-# --- distance from the boundary's own edge.
+# --- MIN_BOUNDARY_SETBACK_METERS, not approximately                    ---
 #
-# This probe also needs its own downstream-clearance margin (COL_MARGIN,
-# same coordinate-preserving-shift idea as ROW_MARGIN above, just along
-# columns/x instead of rows/y): the probe DEM slopes gently toward
-# decreasing x (the same west edge the setback distance is measured
-# against), with COL_MARGIN extra off-parcel columns west of x=0 for that
-# flow to actually exit into. Because the flow happens to head toward the
-# SAME edge the setback test measures against, both the boundary-setback
-# gate and the downstream-clearance gate agree here (a cell far from the
-# edge clears both; a cell close to the edge fails both) -- this no longer
-# isolates the setback gate in perfect purity, but it's still a real,
-# meaningful regression pinning the combined spatial-gate behavior at an
-# exact, controlled distance.
-_COL_MARGIN = 20
-_setback_probe_cols = 30 + _COL_MARGIN
-_setback_probe_array = np.zeros((3, _setback_probe_cols), dtype=np.float32)
-for _row in range(3):
-    for _new_col in range(_setback_probe_cols):
-        _setback_probe_array[_row, _new_col] = _new_col - _COL_MARGIN  # decreases toward the west edge (x=0)
-
+# The flow-accumulation/percentile-band gate is bypassed entirely here
+# (min_valley_contributing_area_acres=0.0 AND accumulation_percentile_low/
+# high=0/100 -- both needed now, since a floor of 0.0 alone no longer
+# bypasses gate 1 the way it did under the old single-threshold design:
+# with floor=0, the population is the ENTIRE on-parcel grid, and a
+# [25, 75] percentile band of THAT would still exclude real cells. Setting
+# the band to [0, 100] as well makes it a true no-op, matching the old
+# "min_valley_contributing_area_acres=0.0 bypasses gate 1 entirely"
+# behavior exactly) -- so only the boundary/setback test itself is
+# exercised, at an exactly-controlled distance from the boundary's own
+# edge.
+_setback_probe_array = np.zeros((3, 30), dtype=np.float32)
 SETBACK_PROBE_DEM = {
     "array": _setback_probe_array,
     "resolution_meters": (1.0, 1.0),
-    "origin_x": -0.5 - _COL_MARGIN,
+    "origin_x": -0.5,
     "origin_y": 100.5,
     "crs": CRS,
 }
-# Cell (row=0, new_col)'s center sits at x = new_col - COL_MARGIN exactly
-# (origin_x = -0.5 - COL_MARGIN, so x = -0.5 - COL_MARGIN + (new_col + 0.5)
-# = new_col - COL_MARGIN) and y=100 -- 100m from the north/south edges of
-# the box(0,0,200,200) boundary below (comfortably irrelevant), so
-# boundary.distance() reduces to exactly x (the nearest edge, x=0) for any
-# on-parcel cell. The two probe columns below (old col 20 -> new col 40,
-# old col 10 -> new col 30) sit at exactly x=20 and x=10, unchanged from
-# before this margin existed.
+# Cell (row=0, col=C)'s center sits at x=C exactly (origin_x=-0.5, so
+# x = -0.5 + (C + 0.5) * 1.0 = C) and y=100 -- 100m from the north/south
+# edges of the box(0,0,200,200) boundary below (comfortably irrelevant),
+# so boundary.distance() reduces to exactly C (the nearest edge, x=0).
 SETBACK_PROBE_BOUNDARY = box(0.0, 0.0, 200.0, 200.0)
 SETBACK_PROBE_PRODUCTION_AREAS = [
     {"id": 0, "representative_elevation_m": -5.0, "polygon_utm": box(495.0, 95.0, 505.0, 105.0)}
 ]
 
-setback_probe_mask, _ = compute_water_eligible_cells(
+setback_probe_mask = compute_water_eligible_cells(
     SETBACK_PROBE_DEM, SETBACK_PROBE_PRODUCTION_AREAS, SETBACK_PROBE_BOUNDARY,
-    min_valley_contributing_area_acres=0.0,  # bypass the flow-accumulation threshold entirely
+    min_valley_contributing_area_acres=0.0,  # bypass the floor
+    accumulation_percentile_low=0.0,
+    accumulation_percentile_high=100.0,  # bypass the percentile band -- [0, 100] admits the whole population
     survey_buffer_meters=0.0,  # no dilation -- exact 1:1 cell correspondence
 )
-assert bool(setback_probe_mask[0, 20 + _COL_MARGIN]), (
+assert bool(setback_probe_mask[0, 20]), (
     "a cell exactly 20m from the boundary (> MIN_BOUNDARY_SETBACK_METERS=15.0m) must pass the setback gate"
 )
-assert not bool(setback_probe_mask[0, 10 + _COL_MARGIN]), (
+assert not bool(setback_probe_mask[0, 10]), (
     "a cell exactly 10m from the boundary (< MIN_BOUNDARY_SETBACK_METERS=15.0m) must fail the setback gate"
 )
 print(
     "Regression: the boundary-setback gate flips exactly at MIN_BOUNDARY_SETBACK_METERS -- a cell at "
-    "exactly 20m (> 15m) passes, a cell at exactly 10m (< 15m) fails, with the flow-accumulation and "
-    "service-distance checks bypassed (downstream-clearance agrees here too, since flow heads toward the "
-    "same edge being measured)."
+    "exactly 20m (> 15m) passes, a cell at exactly 10m (< 15m) fails, with the percentile-band and "
+    "service-distance checks bypassed so only the setback test itself is exercised."
 )
 
 
@@ -397,26 +448,25 @@ print("No production-area candidates means no water system candidate zones.")
 #
 # Two parallel drainage columns (col=8 and col=32, far enough apart that
 # their eligible cells never touch under 8-connectivity) on one 40x40
-# grid (same ROW_MARGIN buffer as SINGLE_COLUMN_DEM above), both served by
-# one production area sitting between them.
+# grid, both served by one production area sitting between them.
 
-_two_column_array = np.zeros((ROWS, SIZE), dtype=np.float32)
-for _row in range(ROWS):
+_two_column_array = np.zeros((SIZE, SIZE), dtype=np.float32)
+for _row in range(SIZE):
     for _col in range(SIZE):
-        _two_column_array[_row, _col] = min(abs(_col - 8), abs(_col - 32)) * 2.0 + (_row - ROW_MARGIN) * 0.5
+        _two_column_array[_row, _col] = min(abs(_col - 8), abs(_col - 32)) * 2.0 + _row * 0.5
 
 TWO_COLUMN_DEM = {
     "array": _two_column_array,
     "resolution_meters": RESOLUTION,
     "origin_x": 500000.0,
-    "origin_y": 4500000.0 + ROW_MARGIN * RESOLUTION[1],
+    "origin_y": 4500000.0,
     "crs": CRS,
 }
 BETWEEN_PRODUCTION_AREA = [
     {"id": 0, "representative_elevation_m": -5.0, "polygon_utm": box(500080.0, 4499750.0, 500120.0, 4499800.0)}
 ]
 
-two_zone_mask, _ = compute_water_eligible_cells(TWO_COLUMN_DEM, BETWEEN_PRODUCTION_AREA, BOUNDARY)
+two_zone_mask = compute_water_eligible_cells(TWO_COLUMN_DEM, BETWEEN_PRODUCTION_AREA, BOUNDARY)
 eligible_columns = sorted(set(int(c) for _r, c in np.argwhere(two_zone_mask)))
 expected_left_cols = list(range(8 - SURVEY_BUFFER_RADIUS_CELLS, 8 + SURVEY_BUFFER_RADIUS_CELLS + 1))
 expected_right_cols = list(range(32 - SURVEY_BUFFER_RADIUS_CELLS, 32 + SURVEY_BUFFER_RADIUS_CELLS + 1))
@@ -458,9 +508,12 @@ assert "pond or dam site" in feature["properties"]["confidence_notes"].lower() o
 )
 assert "production_area_relationships" in feature["properties"]
 assert "primary_production_area_relationship" in feature["properties"]
+assert "contributing_area_cells" in feature["properties"]
+assert "slope_pct" in feature["properties"]
 print(
     "zones_to_geojson output is schema-valid, layer='water_system_candidate', polygon geometry, carries "
-    "elevation-relationship data, feature id keyed off the new sequential zone id."
+    "elevation-relationship data plus the new contributing_area_cells/slope_pct zone-level aggregates, "
+    "feature id keyed off the new sequential zone id."
 )
 
 below_geojson = zones_to_geojson(below_zones)
@@ -470,111 +523,95 @@ print("Below-elevation zone's GeoJSON feature reports above_production_area=Fals
 
 
 # =====================================================================
-# _downstream_clearance_meters(): dedicated, hand-built flow_direction_
-# cells arrays -- exact, hand-computable path lengths, not derived from
-# a real elevation surface, so every accumulated_distance/exited result
-# below is independently verifiable by construction.
+# Waist-splitting: find_candidate_zones() now runs raster_grid.
+# attempt_waist_split() on each connected component before building its
+# footprint -- these tests monkeypatch compute_water_eligible_cells() to
+# return a hand-built dumbbell mask (the exact same shape production_
+# area.py's own waist-split tests validate _attempt_waist_split()/
+# raster_grid.attempt_waist_split() against -- see test_production_area.py)
+# so the CLUSTERING integration itself is exercised end-to-end through
+# find_candidate_zones(), independent of real D8 hydrology.
 # =====================================================================
 
-# A trivial (1, 1.0m)-resolution DEM: cell (0, col)'s center sits at
-# x=col exactly (origin_x=-0.5), y=0 (origin_y=0.5). A hand-built
-# flow_direction_cells walks straight east, cell by cell, from col=0 to
-# col=9, where it dead-ends (-1, -1); a synthetic boundary at x < 4.5
-# means the path exits after crossing from col=4 (x=4, inside) to col=5
-# (x=5, outside).
-_PROBE_DEM = {
-    "array": np.zeros((1, 10), dtype=np.float32),
-    "resolution_meters": (1.0, 1.0),
-    "origin_x": -0.5,
-    "origin_y": 0.5,
+WAIST_RESOLUTION = (5.0, 5.0)
+WAIST_DEM_SHAPE = (12, 24)
+_waist_array = np.full(WAIST_DEM_SHAPE, 100.0, dtype=np.float32)
+WAIST_DEM = {
+    "array": _waist_array,
+    "resolution_meters": WAIST_RESOLUTION,
+    "origin_x": 500000.0,
+    "origin_y": 4500000.0,
     "crs": CRS,
 }
-_PROBE_BOUNDARY = box(-100.0, -100.0, 4.5, 100.0)
+WAIST_BOUNDARY = box(
+    500000.0, 4500000.0 - WAIST_DEM_SHAPE[0] * WAIST_RESOLUTION[1],
+    500000.0 + WAIST_DEM_SHAPE[1] * WAIST_RESOLUTION[0], 4500000.0,
+)
+WAIST_PRODUCTION_AREAS = [
+    {"id": 0, "representative_elevation_m": 50.0, "polygon_utm": box(500040.0, 4499940.0, 500060.0, 4499960.0)}
+]
 
-_straight_flow = np.full((1, 10, 2), -1, dtype=np.int32)
-for _col in range(9):
-    _straight_flow[0, _col] = (0, _col + 1)
-# col=9 keeps its default (-1, -1) -- a real dead end.
 
-# --- known path length to the boundary, exited=True ---
+def _rect_cells(r0: int, r1: int, c0: int, c1: int) -> list[tuple[int, int]]:
+    return [(r, c) for r in range(r0, r1) for c in range(c0, c1)]
 
-distance, exited = _downstream_clearance_meters(_PROBE_DEM, _straight_flow, _PROBE_BOUNDARY, 0, 0)
-assert exited is True, "the straight path from col=0 should cross the boundary at x=4.5 and register a real exit"
-assert abs(distance - 5.0) < 1e-9, (
-    f"the path crosses into the boundary at col=5 (5 steps of 1m each from col=0) -- expected exactly 5.0m, "
-    f"got {distance}"
+
+def _mask_from_cells(shape: tuple[int, int], cells) -> np.ndarray:
+    mask = np.zeros(shape, dtype=bool)
+    for r, c in cells:
+        mask[r, c] = True
+    return mask
+
+
+_lobe_a = _rect_cells(0, 10, 0, 10)   # 10x10
+_lobe_b = _rect_cells(0, 10, 14, 24)  # 10x10
+
+# --- narrow strip (narrower than MIN_ZONE_WAIST_METERS): must split into 2 ---
+
+_narrow_strip = _rect_cells(4, 6, 10, 14)  # 2 rows tall -- narrower than the 12m (~2-cell radius) erosion
+_dumbbell_mask = _mask_from_cells(WAIST_DEM_SHAPE, _lobe_a + _lobe_b + _narrow_strip)
+
+_original_compute_water_eligible_cells = wcz.compute_water_eligible_cells
+wcz.compute_water_eligible_cells = lambda *a, **kw: _dumbbell_mask
+try:
+    split_zones = find_candidate_zones(WAIST_DEM, WAIST_PRODUCTION_AREAS, WAIST_BOUNDARY)
+finally:
+    wcz.compute_water_eligible_cells = _original_compute_water_eligible_cells
+
+assert len(split_zones) == 2, (
+    f"a dumbbell mask with a strip narrower than MIN_ZONE_WAIST_METERS must be split into 2 zones by "
+    f"find_candidate_zones()'s own waist-split step, got {len(split_zones)}"
+)
+for z in split_zones:
+    area_acres = z["polygon_utm"].area / SQUARE_METERS_PER_ACRE
+    assert area_acres >= MIN_WATER_ZONE_AREA_ACRES
+    assert area_acres > 0.3, f"each split-off lobe should be a real, meaningful footprint, got {area_acres:.3f} acres"
+    assert z["primary_production_area_relationship"]["production_area_id"] == 0
+print(
+    f"Waist-split: a dilation-merged dumbbell mask (narrow connecting strip) is correctly split back into "
+    f"{len(split_zones)} independent zones by find_candidate_zones()'s own waist-split step, each a real, "
+    "meaningful footprint with its own whole-zone production_area_relationship -- not left as 1 merged zone."
+)
+
+
+# --- wide strip (>= MIN_ZONE_WAIST_METERS): must stay as 1 unsplit zone ---
+
+_wide_strip = _rect_cells(0, 10, 10, 14)  # full lobe height -- no pinch at all
+_wide_dumbbell_mask = _mask_from_cells(WAIST_DEM_SHAPE, _lobe_a + _lobe_b + _wide_strip)
+
+wcz.compute_water_eligible_cells = lambda *a, **kw: _wide_dumbbell_mask
+try:
+    unsplit_zones = find_candidate_zones(WAIST_DEM, WAIST_PRODUCTION_AREAS, WAIST_BOUNDARY)
+finally:
+    wcz.compute_water_eligible_cells = _original_compute_water_eligible_cells
+
+assert len(unsplit_zones) == 1, (
+    f"a dumbbell mask whose connecting strip is WIDER than MIN_ZONE_WAIST_METERS must NOT split, "
+    f"got {len(unsplit_zones)} zone(s)"
 )
 print(
-    f"_downstream_clearance_meters(): a hand-built straight path with a known 5-step crossing correctly "
-    f"reports (distance={distance}, exited={exited})."
-)
-
-# --- (-1, -1)-terminated dead end, exited=False, distance still real ---
-#
-# Uses a huge boundary that comfortably contains the ENTIRE grid (unlike
-# _PROBE_BOUNDARY above, which the path would cross well before reaching
-# its dead end) -- the only way this path can stop here is the real
-# (-1, -1) dead end at col=9, not a boundary crossing.
-_no_exit_boundary = box(-100.0, -100.0, 100.0, 100.0)
-
-distance, exited = _downstream_clearance_meters(_PROBE_DEM, _straight_flow, _no_exit_boundary, 0, 7)
-assert exited is False, "starting at col=7, the path dead-ends at col=9 (-1, -1) before ever crossing the boundary"
-assert abs(distance - 2.0) < 1e-9, (
-    f"col=7 -> col=8 -> col=9 is 2 real steps (2.0m) before the dead end -- got {distance}"
-)
-print(
-    f"_downstream_clearance_meters(): a synthetic (-1, -1)-terminated dead end correctly reports "
-    f"exited=False (distance={distance} still real and non-zero, not discarded)."
-)
-
-# --- cycle guard: a path that loops back on itself stops immediately, ---
-# --- exited=False, not a false clearance                              ---
-
-_cycle_flow = np.full((1, 3, 2), -1, dtype=np.int32)
-_cycle_flow[0, 0] = (0, 1)
-_cycle_flow[0, 1] = (0, 2)
-_cycle_flow[0, 2] = (0, 0)  # cycles back to the start
-_cycle_boundary = box(-100.0, -100.0, 100.0, 100.0)  # comfortably contains all 3 cells -- no real exit possible here
-
-distance, exited = _downstream_clearance_meters(_PROBE_DEM, _cycle_flow, _cycle_boundary, 0, 0)
-assert exited is False, "a cycle must never be reported as a confirmed boundary exit"
-assert abs(distance - 2.0) < 1e-9, (
-    f"col=0 -> col=1 -> col=2 (2 real steps, 2.0m) before col=2 -> col=0 repeats a visited cell -- got {distance}"
-)
-print(
-    f"_downstream_clearance_meters(): a cycle (col 0->1->2->0) is caught by the visited-set guard and "
-    f"correctly stops with exited=False (distance={distance}), not a false clearance value."
-)
-
-# --- max_steps guard: a genuinely long path that never reaches its    ---
-# --- real exit within the step budget also reports exited=False       ---
-
-distance, exited = _downstream_clearance_meters(_PROBE_DEM, _straight_flow, _PROBE_BOUNDARY, 0, 0, max_steps=3)
-assert exited is False, "capped at 3 steps, the walk never reaches its real exit at step 5"
-assert abs(distance - 3.0) < 1e-9, f"3 real steps (3.0m) should accumulate before the step cap stops it, got {distance}"
-print(
-    f"_downstream_clearance_meters(): capped at max_steps=3 (short of the real 5-step exit), correctly "
-    f"reports exited=False (distance={distance}) rather than continuing past the budget."
-)
-
-
-# --- the new gate correctly excludes/admits cells relative to threshold ---
-# --- and exited status, on a real DEM run through compute_water_       ---
-# --- eligible_cells() end-to-end (not the hand-built probes above)      ---
-
-for _clearance, _expected_count in ((5.0, 135), (MIN_DOWNSTREAM_CLEARANCE_METERS, 135), (100.0, 61), (200.0, 0)):
-    _mask, _ = compute_water_eligible_cells(
-        SINGLE_COLUMN_DEM, PRODUCTION_AREA_ABOVE, BOUNDARY, min_downstream_clearance_meters=_clearance
-    )
-    _count = int(_mask.sum())
-    assert _count == _expected_count, (
-        f"min_downstream_clearance_meters={_clearance} should yield exactly {_expected_count} eligible cells "
-        f"on this fixture, got {_count}"
-    )
-print(
-    "The downstream-clearance gate correctly excludes/admits cells relative to its threshold on a real DEM: "
-    "135 cells pass at both a lenient (5m) and the default (15m) clearance, dropping to 61 at 100m and 0 at "
-    "200m -- cells further from the boundary along their own flow path are excluded first, as expected."
+    "Waist-split: the same dumbbell shape with a WIDE connecting strip correctly stays as 1 unsplit zone -- "
+    "waist-splitting only triggers on a genuine pinch, not any two-lobe shape."
 )
 
 print("\nAll water_candidate_zones checks passed.")

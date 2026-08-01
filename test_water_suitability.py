@@ -182,30 +182,18 @@ print("_topographic_factor() correctly scores a moderate valley gradient highest
 # test uses -- served by one production area sitting between them, so
 # find_candidate_zones() returns exactly 2 real zones (ids 0 and 1).
 #
-# ROW_MARGIN: same coordinate-preserving-shift technique
-# test_water_candidate_zones.py's own fixtures use -- the boundary below
-# is the ORIGINAL 200m x 200m extent, but the DEM array has ROW_MARGIN
-# extra rows north of the boundary's own north edge (a real, valid,
-# off-parcel buffer), so water_candidate_zones.py's downstream-clearance
-# gate has somewhere to register a real exit. origin_y is shifted up by
-# ROW_MARGIN * resolution and every cell's elevation uses (row -
-# ROW_MARGIN) in place of row, so world positions/elevations are
-# unchanged from before this gate existed -- confirmed directly: zone
-# count and areas below are identical, just at shifted row indices.
 BOUNDARY = box(500000.0, 4499800.0, 500200.0, 4500000.0)
 _size = 40
-_row_margin = 6
-_rows = _size + _row_margin
-_array = np.zeros((_rows, _size), dtype=np.float32)
-for _row in range(_rows):
+_array = np.zeros((_size, _size), dtype=np.float32)
+for _row in range(_size):
     for _col in range(_size):
-        _array[_row, _col] = min(abs(_col - 8), abs(_col - 32)) * 2.0 + (_row - _row_margin) * 0.5
+        _array[_row, _col] = min(abs(_col - 8), abs(_col - 32)) * 2.0 + _row * 0.5
 
 WATER_SUITABILITY_DEM = {
     "array": _array,
     "resolution_meters": (5.0, 5.0),
     "origin_x": 500000.0,
-    "origin_y": 4500000.0 + _row_margin * 5.0,
+    "origin_y": 4500000.0,
     "crs": CRS,
 }
 PRODUCTION_AREAS = [
@@ -216,75 +204,95 @@ zones = find_candidate_zones(WATER_SUITABILITY_DEM, PRODUCTION_AREAS, BOUNDARY)
 zone_ids = {z["id"] for z in zones}
 assert zone_ids == {0, 1}, f"expected exactly 2 zones (one per disconnected drainage column), got {zone_ids}"
 
-zone0 = next(z for z in zones if z["id"] == 0)  # column at x~[500030, 500055]
-zone1 = next(z for z in zones if z["id"] == 1)  # column at x~[500150, 500175]
+# Which real id ends up on which column is an implementation detail of
+# connected_components()'s own labeling order (not hardcoded -- looked up
+# here by real footprint bounds instead), so this identifies the "column
+# at col=8" zone/the "column at col=32" zone directly by geometry rather
+# than assuming a fixed id per column.
+zone_col8 = next(z for z in zones if z["polygon_utm"].bounds[0] < 500100.0)   # column at x~[500030, 500055]
+zone_col32 = next(z for z in zones if z["polygon_utm"].bounds[0] >= 500100.0)  # column at x~[500150, 500175]
+VALLEY_ZONE_ID = zone_col8["id"]
+NO_VALLEY_ZONE_ID = zone_col32["id"]
 
 # A real valley (valley_delineation.delineate_valleys()'s own output shape)
-# whose branch points sit spatially inside zone0's own footprint (bounds
-# confirmed directly: (500030.0, 4499905.0, 500055.0, 4499985.0)) -- the
-# NEW spatial-overlap matching _valley_topographic_inputs_for_zone() uses
-# instead of a zone['valley_id'] == valley['id'] join. zone1 deliberately
-# has NO overlapping valley at all, to exercise the "no traced valley
-# overlaps this real drainage-cell zone" degradation path (a real,
-# expected outcome now -- valley_delineation.py's own traced-valley
-# threshold is separate from, and higher than, water_candidate_zones.py's
-# own per-cell drainage threshold).
-VALLEY_OVERLAPPING_ZONE0 = {
+# whose branch points sit spatially inside zone_col8's own real footprint
+# (confirmed directly via .contains(), not just a bounding-box guess) --
+# the NEW spatial-overlap matching _valley_topographic_inputs_for_zone()
+# uses instead of a zone['valley_id'] == valley['id'] join. zone_col32
+# deliberately has NO overlapping valley at all, to exercise the "no
+# traced valley overlaps this real drainage-cell zone" degradation path
+# (a real, expected outcome now -- valley_delineation.py's own
+# traced-valley threshold is separate from, and higher than,
+# water_candidate_zones.py's own per-cell drainage threshold).
+_valley_point_a = (500042.5, 4499945.0, 120.0)
+_valley_point_b = (500042.5, 4499850.0, 100.0)
+from shapely.geometry import Point as _ValleyPoint  # noqa: E402
+assert zone_col8["polygon_utm"].contains(_ValleyPoint(_valley_point_a[0], _valley_point_a[1])), (
+    "test setup: valley branch point A must fall inside zone_col8's real footprint"
+)
+assert zone_col8["polygon_utm"].contains(_ValleyPoint(_valley_point_b[0], _valley_point_b[1])), (
+    "test setup: valley branch point B must fall inside zone_col8's real footprint"
+)
+VALLEY_OVERLAPPING_ZONE = {
     "id": 0,
     "max_contributing_area_acres": 5.0,
-    "branches_utm": [[(500042.5, 4499970.0, 120.0), (500042.5, 4499920.0, 100.0)]],
+    "branches_utm": [[_valley_point_a, _valley_point_b]],
 }
-VALLEYS = [VALLEY_OVERLAPPING_ZONE0]
+VALLEYS = [VALLEY_OVERLAPPING_ZONE]
 
 GOOD_SOIL = {"ksat_r_um_per_s": 0.05, "coverage_fraction": 0.9}
 POOR_SOIL = {"ksat_r_um_per_s": 300.0, "coverage_fraction": 0.9}
 
 GOOD_STREAM = {"name": "Real Creek", "fcode": 46006, "distance_m": 5.0}
 
-# Best case: zone 0 (real overlapping valley -- real gradient/contributing
-# area feed the topographic factor) + good soil + close perennial stream
-# should clearly outscore zone 1 (no overlapping valley -- topographic
-# factor degrades to neutral) with poor soil and no stream.
+# Best case: zone_col8 (real overlapping valley -- real gradient/
+# contributing area feed the topographic factor) + good soil + close
+# perennial stream should clearly outscore zone_col32 (no overlapping
+# valley -- topographic factor degrades to neutral) with poor soil and no
+# stream.
 best_case_scored = score_water_zones(
-    [zone0, zone1],
+    [zone_col8, zone_col32],
     VALLEYS,
     WATER_SUITABILITY_DEM,
-    soil_data_by_zone_id={0: GOOD_SOIL, 1: POOR_SOIL},
-    stream_data_by_zone_id={0: GOOD_STREAM, 1: None},
+    soil_data_by_zone_id={VALLEY_ZONE_ID: GOOD_SOIL, NO_VALLEY_ZONE_ID: POOR_SOIL},
+    stream_data_by_zone_id={VALLEY_ZONE_ID: GOOD_STREAM, NO_VALLEY_ZONE_ID: None},
 )
 scored_by_id = {z["id"]: z for z in best_case_scored}
-assert scored_by_id[0]["gradient_steepness_pct"] is not None, "zone 0's overlapping valley must feed a real gradient"
-assert scored_by_id[0]["valley_contributing_area_acres"] == 5.0
-assert scored_by_id[1]["gradient_steepness_pct"] is None, "zone 1 has no overlapping valley -- must degrade to None, not crash or fabricate a value"
-assert scored_by_id[1]["valley_contributing_area_acres"] is None
-assert scored_by_id[0]["suitability_score"] > scored_by_id[1]["suitability_score"]
+assert scored_by_id[VALLEY_ZONE_ID]["gradient_steepness_pct"] is not None, "zone_col8's overlapping valley must feed a real gradient"
+assert scored_by_id[VALLEY_ZONE_ID]["valley_contributing_area_acres"] == 5.0
+assert scored_by_id[NO_VALLEY_ZONE_ID]["gradient_steepness_pct"] is None, "zone_col32 has no overlapping valley -- must degrade to None, not crash or fabricate a value"
+assert scored_by_id[NO_VALLEY_ZONE_ID]["valley_contributing_area_acres"] is None
+assert scored_by_id[VALLEY_ZONE_ID]["suitability_score"] > scored_by_id[NO_VALLEY_ZONE_ID]["suitability_score"]
 print(
-    f"Zone 0 (real overlapping valley, good soil, near-perennial-stream, score={scored_by_id[0]['suitability_score']}) "
-    f"correctly outscores zone 1 (no overlapping valley, poor soil, no stream, score={scored_by_id[1]['suitability_score']})."
+    f"Zone {VALLEY_ZONE_ID} (real overlapping valley, good soil, near-perennial-stream, "
+    f"score={scored_by_id[VALLEY_ZONE_ID]['suitability_score']}) correctly outscores zone {NO_VALLEY_ZONE_ID} "
+    f"(no overlapping valley, poor soil, no stream, score={scored_by_id[NO_VALLEY_ZONE_ID]['suitability_score']})."
 )
 print(
-    "The new spatial-overlap valley matching correctly feeds zone 0's real gradient/contributing area into "
-    "topographic_factor, and correctly degrades zone 1 (no overlapping valley) to None/None rather than "
+    "The new spatial-overlap valley matching correctly feeds the overlapping zone's real gradient/contributing "
+    "area into topographic_factor, and correctly degrades the non-overlapping zone to None/None rather than "
     "crashing or reusing a stale valley_id join."
 )
 
 # Every zone find_candidate_zones() returns must still be a REAL,
 # scoreable, non-zero candidate, even with no overlapping valley at all.
-assert scored_by_id[1]["suitability_score"] > 0.0, "a zone with no overlapping valley must still score > 0, never be zeroed out"
-print(f"A zone with no overlapping valley remains a real, scoreable, non-zero candidate: score={scored_by_id[1]['suitability_score']}/100.")
+assert scored_by_id[NO_VALLEY_ZONE_ID]["suitability_score"] > 0.0, "a zone with no overlapping valley must still score > 0, never be zeroed out"
+print(f"A zone with no overlapping valley remains a real, scoreable, non-zero candidate: score={scored_by_id[NO_VALLEY_ZONE_ID]['suitability_score']}/100.")
 
 # rank is assigned over ALL returned zones, best-first, no exclusion.
 assert len(best_case_scored) == 2
 assert {z["rank"] for z in best_case_scored} == {1, 2}
-assert next(z for z in best_case_scored if z["rank"] == 1)["id"] == 0
+assert next(z for z in best_case_scored if z["rank"] == 1)["id"] == VALLEY_ZONE_ID
 print("rank is assigned over all returned zones (no MIN_SUITABILITY_SCORE-style exclusion).")
 
 
 # --- confidence differentiation: same zone, different data availability ---
 
-both_available = score_water_zones([zone0], VALLEYS, WATER_SUITABILITY_DEM, {0: GOOD_SOIL}, {0: GOOD_STREAM})[0]
-one_available = score_water_zones([zone0], VALLEYS, WATER_SUITABILITY_DEM, {0: GOOD_SOIL}, {})[0]
-none_available = score_water_zones([zone0], VALLEYS, WATER_SUITABILITY_DEM, {}, {})[0]
+both_available = score_water_zones(
+    [zone_col8], VALLEYS, WATER_SUITABILITY_DEM, {VALLEY_ZONE_ID: GOOD_SOIL}, {VALLEY_ZONE_ID: GOOD_STREAM}
+)[0]
+one_available = score_water_zones([zone_col8], VALLEYS, WATER_SUITABILITY_DEM, {VALLEY_ZONE_ID: GOOD_SOIL}, {})[0]
+none_available = score_water_zones([zone_col8], VALLEYS, WATER_SUITABILITY_DEM, {}, {})[0]
 
 assert both_available["confidence"] == "high"
 assert one_available["confidence"] == "medium"
@@ -300,15 +308,18 @@ print(
 # real data genuinely differs -- the actual scenario the live property run
 # needs to demonstrate.
 mixed_scored = score_water_zones(
-    [zone0, zone1], VALLEYS, WATER_SUITABILITY_DEM,
-    soil_data_by_zone_id={0: GOOD_SOIL},  # zone 1 absent -- never checked
-    stream_data_by_zone_id={0: GOOD_STREAM, 1: None},  # zone 1 checked, none found
+    [zone_col8, zone_col32], VALLEYS, WATER_SUITABILITY_DEM,
+    soil_data_by_zone_id={VALLEY_ZONE_ID: GOOD_SOIL},  # the other zone absent -- never checked
+    stream_data_by_zone_id={VALLEY_ZONE_ID: GOOD_STREAM, NO_VALLEY_ZONE_ID: None},  # checked, none found
 )
 mixed_by_id = {z["id"]: z for z in mixed_scored}
-assert mixed_by_id[0]["confidence"] == "high"
-assert mixed_by_id[1]["confidence"] == "low"
-assert mixed_by_id[0]["confidence"] != mixed_by_id[1]["confidence"]
-print(f"Confidence differs across candidates in the SAME run: zone 0={mixed_by_id[0]['confidence']}, zone 1={mixed_by_id[1]['confidence']}.")
+assert mixed_by_id[VALLEY_ZONE_ID]["confidence"] == "high"
+assert mixed_by_id[NO_VALLEY_ZONE_ID]["confidence"] == "low"
+assert mixed_by_id[VALLEY_ZONE_ID]["confidence"] != mixed_by_id[NO_VALLEY_ZONE_ID]["confidence"]
+print(
+    f"Confidence differs across candidates in the SAME run: zone {VALLEY_ZONE_ID}="
+    f"{mixed_by_id[VALLEY_ZONE_ID]['confidence']}, zone {NO_VALLEY_ZONE_ID}={mixed_by_id[NO_VALLEY_ZONE_ID]['confidence']}."
+)
 
 
 # --- gravity confidence_notes framing: plain tradeoff, not an apology ---
@@ -335,7 +346,7 @@ assert not any(phrase in below_notes for phrase in apology_phrases), (
 )
 print("Below-elevation candidate's confidence_notes states the pump tradeoff plainly, without apologizing for it.")
 
-nhd_offset_zone = scored_by_id[0]  # has a real, close, in-range stream
+nhd_offset_zone = scored_by_id[VALLEY_ZONE_ID]  # has a real, close, in-range stream
 assert "100-300m" in nhd_offset_zone["confidence_notes"], "NHD offset limitation must be stated when stream proximity meaningfully affects score"
 print("NHD 100-300m DEM-offset limitation is stated in confidence_notes when stream proximity meaningfully affects the score.")
 
@@ -379,22 +390,11 @@ utm_corners_y = [origin_y, origin_y, origin_y - SIZE * RESOLUTION, origin_y - SI
 lons, lats = warp_transform(DST_CRS, "EPSG:4326", utm_corners_x, utm_corners_y)
 boundary_coordinates = list(zip(lons, lats))
 
-# MARGIN_ROWS: same reasoning as test_water_system_candidate_pipeline.py's
-# own fix -- boundary_coordinates above is still exactly the ORIGINAL
-# SIZE x SIZE extent, but the array has MARGIN_ROWS extra rows south of
-# it (a real, valid, off-parcel buffer) so the downstream-clearance gate
-# has somewhere to register a real exit. The bench is also given a gentle
-# slope (was perfectly flat) for the same reason: a flat bench has zero
-# downhill neighbors anywhere on it, so flow could never leave it under
-# D8 routing at all, margin or not.
-MARGIN_ROWS = 6
-TOTAL_ROWS = SIZE + MARGIN_ROWS
-
-array = np.zeros((TOTAL_ROWS, SIZE), dtype=np.float32)
-for row in range(TOTAL_ROWS):
+array = np.zeros((SIZE, SIZE), dtype=np.float32)
+for row in range(SIZE):
     for col in range(SIZE):
         if row >= SIZE - 8:
-            array[row, col] = 100.0 - (row - (SIZE - 8)) * 0.05
+            array[row, col] = 100.0  # flat southern bench (production area)
         else:
             distance_from_center_col = abs(col - SIZE // 2)
             array[row, col] = 100.0 + (SIZE - 8 - row) * 3.0 + distance_from_center_col * 1.5

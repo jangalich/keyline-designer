@@ -12,11 +12,12 @@ convex hull) -- see compute_water_eligible_cells()'s docstring.
             get_flow_accumulation_for_dem() -- the same grid
             delineate_valleys() thresholds/traces internally)
         --> production areas (production_area.py)
-        --> [this module] per-DEM-cell eligibility mask (contributing
-            area + service distance + boundary setback + downstream
-            clearance)
-        --> connected components -> cell-union footprint per cluster
-        --> candidate-zone polygons, one per qualifying cluster
+        --> [this module] per-DEM-cell eligibility mask (contributing-area
+            PERCENTILE BAND + service distance + boundary setback)
+        --> connected components -> waist-split -> cell-union footprint
+            per cluster
+        --> whole-zone scoring (one representative point per zone) ->
+            candidate-zone polygons, one per qualifying cluster
 
 This REPLACES the earlier per-traced-valley-branch line-walk entirely:
 there is no valley/branch identity carried into a zone anymore. A zone is
@@ -64,9 +65,15 @@ from shapely.prepared import prep
 
 from dem_data import get_dem_for_boundary
 from feature_schema import CONFIDENCE_LOW, make_feature, make_feature_collection
-from production_area import identify_production_areas, production_areas_to_geojson
+from production_area import (
+    MIN_ZONE_WAIST_METERS,
+    compute_slope_percent,
+    identify_production_areas,
+    production_areas_to_geojson,
+)
 from raster_grid import (
     SQUARE_METERS_PER_ACRE,
+    attempt_waist_split,
     binary_dilate,
     cell_area_acres,
     cell_union_footprint,
@@ -76,7 +83,6 @@ from raster_grid import (
 from valley_delineation import (
     delineate_valleys,
     get_flow_accumulation_for_dem,
-    get_flow_direction_for_dem,
     valleys_to_geojson,
 )
 
@@ -120,18 +126,40 @@ MIN_SERVICE_DISTANCE_METERS = 10.0
 # (water-system siting) doesn't have to move in lockstep with
 # valley_delineation.py's own general-purpose valley threshold.
 #
-# TUNED live against the real reference property via
-# diagnose_water_zone_mask.py's threshold sweep (0.5/1.0/2.0/2.5/3.0
-# acres, all at the 10m buffer below): pre-dilation connected-component
-# count dropped from 20 at the old 0.5-acre default (scattered terrain
-# noise, not real channels) down to 4, stabilizing at 3.0 acres -- 2.5
-# acres still let one pair of components merge, 3.0 acres reports the
-# same 4 components both before AND after dilation (no further merging).
-# 4 also matches the original, pre-rearchitecture line-based pipeline's
-# own zone count on this property, as an independent sanity check.
-# CONFIGURABLE — re-tune with diagnose_water_zone_mask.py against your
-# own property.
-MIN_VALLEY_CONTRIBUTING_AREA_ACRES = 3.0
+# ROLE CHANGED: this used to be the gate itself (a cell qualified iff its
+# own contributing area cleared this bar, full stop). It is now only the
+# FLOOR that defines the "drainage-qualifying population" a percentile
+# band (VALLEY_ACCUMULATION_PERCENTILE_LOW/HIGH below) is computed over --
+# see compute_water_eligible_cells()'s own docstring for why a single hard
+# threshold was replaced: it admitted every cell from the parcel's single
+# dominant master channel/outlet down to the bar equally, with no way to
+# distinguish "the real drainage band" from "technically-qualifying but
+# marginal ground barely above the floor." A single, low floor here casts
+# a wide net for the population; the percentile band is what actually
+# decides eligibility now.
+#
+# Since the role changed from gate to floor, the real-property-tuned
+# 3.0-acre value from the old single-threshold gate no longer applies --
+# a floor should be LOW (cast a wide net for the population), not itself
+# a selective threshold. 0.25 acres is a low, deliberately unvalidated
+# STARTING value for this new role. CONFIGURABLE — re-tune with
+# diagnose_water_zone_mask.py against your own property.
+MIN_VALLEY_CONTRIBUTING_AREA_ACRES = 0.25
+
+# The percentile band (numpy percentile, 0-100 scale) applied to the
+# drainage-qualifying population's own flow_accumulation_cells values --
+# see compute_water_eligible_cells()'s own docstring for the two-step
+# selection (population, then band) this replaces the old single
+# MIN_VALLEY_CONTRIBUTING_AREA_ACRES hard threshold with. A cell qualifies
+# for this gate iff its own value falls within
+# [LOW percentile, HIGH percentile] of the population's distribution --
+# excluding both the diffuse, barely-above-the-floor tail (bottom of the
+# distribution) and the single dominant master channel/outlet (top of the
+# distribution, concentrated enough to read as one drainage LINE rather
+# than a genuine candidate BAND). NOT YET VALIDATED against a real
+# property -- re-tune with diagnose_water_zone_mask.py. CONFIGURABLE.
+VALLEY_ACCUMULATION_PERCENTILE_LOW = 25.0
+VALLEY_ACCUMULATION_PERCENTILE_HIGH = 75.0
 
 # Drop tiny, noise-sized eligible-cell clusters below this real cell-union
 # footprint area. A small first-pass default, deliberately NOT yet
@@ -140,46 +168,40 @@ MIN_VALLEY_CONTRIBUTING_AREA_ACRES = 3.0
 # CONFIGURABLE.
 MIN_WATER_ZONE_AREA_ACRES = 0.1
 
-# The raw flow-accumulation-qualifying mask is only ever one cell wide
-# along the exact drainage path (a single line of cells clearing
-# MIN_VALLEY_CONTRIBUTING_AREA_ACRES) -- confirmed live: without widening
-# it, real zones came back as thin, one-cell-wide traces rather than a
-# surveyable area, and most separate drainage segments never cleared
-# MIN_WATER_ZONE_AREA_ACRES at all. This dilates the drainage-only mask by
-# this many meters (converted to a cell radius, see
-# _survey_buffer_radius_cells()) BEFORE the service-distance/on-parcel/
-# boundary-setback tests run, so a genuinely qualifying drainage cell
-# reads as a walkable-width band, not a hairline.
+# The raw percentile-band-qualifying mask is only ever one cell wide along
+# the exact drainage path (see compute_water_eligible_cells()'s own
+# docstring) -- confirmed live: without widening it, real zones came back
+# as thin, one-cell-wide traces rather than a surveyable area, and most
+# separate drainage segments never cleared MIN_WATER_ZONE_AREA_ACRES at
+# all. This dilates the band mask by this many meters (converted to a
+# cell radius, see _survey_buffer_radius_cells()) BEFORE the service-
+# distance/on-parcel/boundary-setback tests run, so a genuinely
+# qualifying drainage cell reads as a walkable-width band, not a hairline.
 #
-# TUNED live against the real reference property alongside
-# MIN_VALLEY_CONTRIBUTING_AREA_ACRES above via diagnose_water_zone_mask.py:
-# at 10m, the 3.0-acre contributing-area threshold's 4 connected
-# components stay 4 components after dilation too -- no extra merging
-# from widening at this buffer size. The original 20.0m value (reused
-# from the pre-rearchitecture ZONE_BUFFER_METERS line-buffer half-width)
-# was tuned before the contributing-area threshold itself was fixed, and
-# turned out wider than this property's real, separate drainage segments
-# needed once 3.0 acres stopped conflating them. CONFIGURABLE -- re-tune
-# with diagnose_water_zone_mask.py against your own property.
+# TUNED live against the real reference property alongside the OLD
+# single-threshold gate this replaced (see MIN_VALLEY_CONTRIBUTING_AREA_
+# ACRES's own history above) -- NOT YET RE-VALIDATED against the
+# percentile-band approach specifically. CONFIGURABLE -- re-tune with
+# diagnose_water_zone_mask.py against your own property.
 WATER_ZONE_SURVEY_BUFFER_METERS = 10.0
 
-# How much real ground distance a candidate cell's D8 flow path
-# (valley_delineation.get_flow_direction_for_dem()) needs to cover
-# on-parcel before it actually exits the property, not just "is this cell
-# ITSELF far enough from the boundary" (that's MIN_BOUNDARY_SETBACK_METERS's
-# job -- a purely local, single-cell check with no notion of where the
-# water actually GOES from here). Without this gate, eligible cells skew
-# toward the parcel's own drainage OUTLET -- which is frequently near the
-# boundary itself, since that's where flow naturally exits -- so the
-# boundary-setback gate alone ends up rejecting nearly everything on a
-# real property. Confirmed live this session.
+# A single 8-connected cluster of eligible water-zone cells can pinch down
+# to a narrow "waist" the same way a production-zone cluster can (see
+# production_area.py's own MIN_ZONE_WAIST_METERS/attempt_waist_split()) --
+# here the pinch is typically an artifact of WATER_ZONE_SURVEY_BUFFER_METERS's
+# own dilation bridging two genuinely separate drainage patches that never
+# actually touched before widening. raster_grid.attempt_waist_split()
+# (shared with production_area.py -- extracted there from what used to be
+# this pipeline's own private helper, see that module's docstring for the
+# extraction note) is applied to the post-dilation eligibility mask,
+# before clustering, so a dilation-induced merge is split back into two
+# independent zones.
 #
-# Starting value reuses MIN_BOUNDARY_SETBACK_METERS's own answer to "how
-# much room does infrastructure need" as the anchor -- NOT independently
-# derived, and NOT YET VALIDATED against a real property. Re-tune with
-# diagnose_water_zone_mask.py's --sweep-downstream (15/25/40m) once
-# ground-truthed. CONFIGURABLE.
-MIN_DOWNSTREAM_CLEARANCE_METERS = 15.0
+# Starting value reuses production_area.MIN_ZONE_WAIST_METERS's own answer
+# to "how narrow before this reads as two things, not one" as the anchor --
+# NOT independently derived, and NOT YET VALIDATED against a real
+# property. CONFIGURABLE.
+WATER_ZONE_MIN_WAIST_METERS = MIN_ZONE_WAIST_METERS
 
 WATER_SYSTEM_CANDIDATE_CONFIDENCE_NOTES = (
     "This identifies a general candidate zone for water-system "
@@ -208,8 +230,8 @@ def _survey_buffer_radius_cells(dem: dict, buffer_meters: float) -> int:
     """
     Converts WATER_ZONE_SURVEY_BUFFER_METERS (a real-world distance) into a
     cell-count dilation radius using the DEM's own resolution_meters --
-    same meters-to-cell-units conversion pattern production_area.py's own
-    _waist_erosion_radius_cells() already uses (average of the two axis
+    same meters-to-cell-units conversion pattern raster_grid.
+    waist_erosion_radius_cells() uses (average of the two axis
     resolutions, in case they ever differ). Unlike that function, this is
     a direct radius (not a width being halved into one), so it's rounded
     UP (via ceil) with no further halving -- the buffer is never narrower
@@ -221,117 +243,69 @@ def _survey_buffer_radius_cells(dem: dict, buffer_meters: float) -> int:
     return math.ceil(buffer_meters / cell_size)
 
 
-def _downstream_clearance_meters(
-    dem: dict,
-    flow_direction_cells: np.ndarray,
-    boundary_polygon_utm: Polygon,
-    start_row: int,
-    start_col: int,
-    max_steps: int = 500,
-) -> tuple[float, bool]:
-    """
-    Walks a candidate cell's D8 flow path downstream (flow_direction_cells
-    is valley_delineation.get_flow_direction_for_dem()'s own (rows, cols,
-    2) array -- each [row, col] holds the absolute (target_row,
-    target_col) of that cell's downhill neighbor, or (-1, -1) if there is
-    none -- see that function's own docstring for the encoding) and
-    reports how far it travels on-parcel before it actually exits
-    boundary_polygon_utm.
-
-    At each step: read this cell's downhill target from
-    flow_direction_cells. If it's (-1, -1) (no downhill neighbor -- a
-    grid-edge outlet already, or a flat-plateau tie), or if the target has
-    already been visited (a cycle -- shouldn't happen for a real filled
-    DEM's flow direction, whose targets strictly decrease in elevation,
-    but guarded against here regardless), stop immediately and return
-    (accumulated_distance, False): neither case is a confirmed on-parcel
-    exit, so treating either as "cleared" would be a false clearance.
-    Otherwise, add the REAL ground distance between the current and
-    target cell's pixel centers (via raster_grid.pixel_center_xy() --
-    never a fixed orthogonal/diagonal step length, since resolution_meters
-    can differ per axis and even a fixed diagonal step is only exactly
-    sqrt(2)x the cardinal one when the two axis resolutions are equal) to
-    accumulated_distance, then check whether the TARGET cell's own center
-    falls outside boundary_polygon_utm -- if so, the path has genuinely
-    exited the parcel after this much on-parcel travel: stop and return
-    (accumulated_distance, True). Otherwise move to the target cell and
-    repeat.
-
-    max_steps caps the walk (default 500) -- if neither a real exit nor a
-    dead end/cycle is reached within that many steps, stop and return
-    (accumulated_distance, False), same as the other two non-exit cases.
-    """
-    boundary_prepared = prep(boundary_polygon_utm)
-    accumulated_distance = 0.0
-    visited = {(start_row, start_col)}
-    row, col = start_row, start_col
-
-    for _ in range(max_steps):
-        target_row, target_col = flow_direction_cells[row, col]
-        target_row, target_col = int(target_row), int(target_col)
-
-        if target_row < 0:
-            return accumulated_distance, False
-
-        target_cell = (target_row, target_col)
-        if target_cell in visited:
-            return accumulated_distance, False
-
-        x0, y0 = pixel_center_xy(dem, row, col)
-        x1, y1 = pixel_center_xy(dem, target_row, target_col)
-        accumulated_distance += math.hypot(x1 - x0, y1 - y0)
-
-        if not boundary_prepared.contains(Point(x1, y1)):
-            return accumulated_distance, True
-
-        visited.add(target_cell)
-        row, col = target_row, target_col
-
-    return accumulated_distance, False
-
-
 def compute_water_eligible_cells(
     dem: dict,
     production_areas: list[dict],
     boundary_polygon_utm: Polygon,
     min_valley_contributing_area_acres: float = MIN_VALLEY_CONTRIBUTING_AREA_ACRES,
+    accumulation_percentile_low: float = VALLEY_ACCUMULATION_PERCENTILE_LOW,
+    accumulation_percentile_high: float = VALLEY_ACCUMULATION_PERCENTILE_HIGH,
     max_service_distance_meters: float = MAX_SERVICE_DISTANCE_METERS,
     min_service_distance_meters: float = MIN_SERVICE_DISTANCE_METERS,
     min_boundary_setback_meters: float = MIN_BOUNDARY_SETBACK_METERS,
     survey_buffer_meters: float = WATER_ZONE_SURVEY_BUFFER_METERS,
-    min_downstream_clearance_meters: float = MIN_DOWNSTREAM_CLEARANCE_METERS,
-) -> tuple[np.ndarray, dict[tuple[int, int], dict]]:
+) -> np.ndarray:
     """
     Cell-based STEP 1/2: computes the raw flow-accumulation grid directly
     from `dem` (valley_delineation.get_flow_accumulation_for_dem() — the
     same contributing-cell-count grid delineate_valleys() thresholds/
     traces internally, recomputed here rather than reusing a traced
-    branch) and gates each cell on FOUR independent checks, ALL of which
+    branch) and gates each cell on THREE independent checks, ALL of which
     must pass for a cell to be eligible:
 
-      1. Contributing area at that cell — converted from the raw
-         cell-count grid to acres via cell_area_acres(dem), since
-         get_flow_accumulation_for_dem() returns a cell-count grid, not an
-         area — meets min_valley_contributing_area_acres. This replaces
-         the old "is this cell near a traced valley branch LINE" test
-         with "is this cell genuinely part of a drainage feature," with
-         no valley/branch identity involved at all: a cell qualifies (or
-         doesn't) purely on its own local flow accumulation.
+      1. Contributing-area PERCENTILE BAND, not a single hard threshold:
+         first, the "drainage-qualifying population" is every ON-PARCEL
+         cell whose own flow_accumulation_cells value clears
+         min_valley_contributing_area_acres (a low floor -- see that
+         constant's own docstring for its changed role). Then the
+         accumulation_percentile_low/high percentiles (numpy.percentile,
+         0-100 scale) of THAT population's own values are computed --
+         NOT over the whole on-parcel grid, just the population that
+         already cleared the floor. A cell (on-parcel or not -- on-parcel-
+         ness is checked separately by gate 2 below, same architecture the
+         old single-threshold gate used) qualifies for THIS gate iff its
+         own flow_accumulation_cells value falls within
+         [p_low, p_high] of that population's distribution. This replaces
+         the old single hard threshold, which admitted every cell from a
+         parcel's single dominant master channel/outlet down to the floor
+         equally -- unable to distinguish "the real drainage band" from
+         "technically-qualifying but marginal ground barely above the
+         floor," or to exclude a single dominant channel so concentrated
+         it reads as one drainage LINE rather than a genuine candidate
+         BAND.
+
+         If the population is empty (no on-parcel cell clears the floor
+         at all), this gate produces an all-False mask -- there's nothing
+         to compute a percentile band over.
 
          This raw per-cell test only ever qualifies a thin, one-cell-wide
          trace along the exact drainage path -- before checks 2/3 below
-         run at all, this drainage-only mask is WIDENED by dilating it
+         run at all, this band mask is WIDENED by dilating it
          (raster_grid.binary_dilate()) by survey_buffer_meters (converted
          to a cell radius via _survey_buffer_radius_cells()), so a real
          zone reads as a walkable-width band, not a hairline. Dilation
-         happens on this drainage-only mask specifically, NOT on the
-         final combined eligible_mask below -- dilating the final mask
-         would let a cell that fails the service-distance/setback tests
-         qualify just by sitting next to one that passes, which isn't the
-         intent; every dilated drainage cell must still independently
-         clear checks 2/3 on its own.
+         happens on this band mask specifically, NOT on the final combined
+         eligible_mask below -- dilating the final mask would let a cell
+         that fails the service-distance/setback tests qualify just by
+         sitting next to one that passes, which isn't the intent; every
+         dilated band cell must still independently clear checks 2/3 on
+         its own.
 
-      2. Within max_service_distance_meters of at least one production
+      2. On-parcel (boundary_polygon_utm.contains(cell center)) AND at
+         least min_boundary_setback_meters from boundary_polygon_utm's own
+         boundary.
+
+      3. Within max_service_distance_meters of at least one production
          area's polygon_utm, and NOT within min_service_distance_meters of
          it UNLESS the cell is already inside/touching that patch
          (distance == 0). Real bug, found live and fixed for the old
@@ -345,29 +319,13 @@ def compute_water_eligible_cells(
          anything for Y too small) — it was never meant to reject siting
          INSIDE the production area entirely, and shouldn't, per this
          whole feature's "elevation/proximity is a preference, not a
-         gate" direction (see module docstring).
-
-      3. On-parcel (boundary_polygon_utm.contains(cell center)) AND at
-         least min_boundary_setback_meters from boundary_polygon_utm's own
-         boundary.
-
-      4. Downstream clearance (_downstream_clearance_meters()): walking
-         this cell's own D8 flow path (valley_delineation.
-         get_flow_direction_for_dem()) must actually EXIT
-         boundary_polygon_utm within max_steps, after at least
-         min_downstream_clearance_meters of real on-parcel travel. This
-         is a genuinely different check from #3's boundary-setback test —
-         #3 only asks "is THIS cell far enough from the edge," with no
-         notion of where its water actually goes; #4 asks "does this
-         cell's downstream flow path have real, confirmed room to leave
-         the parcel at all." Without it, eligible cells skew toward the
-         parcel's own drainage OUTLET (frequently near the boundary
-         itself, since that's structurally where flow exits), which is
-         exactly what made #3 alone reject nearly everything on a real
-         property — confirmed live this session. A cell whose D8 path
-         never confirms an exit (no downhill neighbor, a cycle, or
-         max_steps reached) fails this gate outright, regardless of how
-         much distance it accumulated first.
+         gate" direction (see module docstring). This gate only tests
+         whether ANY production area is within range -- it does NOT pick
+         a "best" one; that's find_candidate_zones()'s own whole-zone
+         scoring now, computed once per surviving cluster from a single
+         representative point, not per cell (see that function's own
+         docstring for why per-cell tagging + per-cluster aggregation was
+         removed in favor of this).
 
     Elevation/gradient is deliberately NOT a gate here (see module
     docstring's "gravity is a preference, not a gate" framing) — do not
@@ -375,43 +333,37 @@ def compute_water_eligible_cells(
     eligible is never excluded for sitting below its best-matching
     production area.
 
-    While gating, each eligible cell is also tagged with its own best
-    (most gravity-favorable) production-area relationship — "best" = the
-    largest elevation_differential_m among production areas within the
-    service-distance window, whether or not it's actually above the
-    production area. This is a real measurement, not a second
-    qualification check: no minimum gradient is required to be tagged.
-
-    Performance: check #4 is the most expensive (it walks a real path per
-    candidate cell) and runs LAST, only on cells that already passed
-    checks #1-3 — never against the full raw grid.
-
-    Returns (eligible_mask, cell_relationships):
-        eligible_mask: np.ndarray[bool], same shape as dem['array'].
-        cell_relationships: dict mapping each eligible cell's (row, col)
-            to its tagged relationship
-            ({'id', 'elevation_differential_m', 'distance_m'}), so
-            find_candidate_zones() can aggregate it per cluster without
-            recomputing anything after connected-component labeling.
+    Returns eligible_mask: np.ndarray[bool], same shape as dem['array'].
     """
     flow_accumulation_cells = get_flow_accumulation_for_dem(dem)
     area_per_cell = cell_area_acres(dem)
     min_contributing_cells = min_valley_contributing_area_acres / area_per_cell
-    valley_mask = flow_accumulation_cells >= min_contributing_cells
-
-    survey_buffer_radius_cells = _survey_buffer_radius_cells(dem, survey_buffer_meters)
-    valley_mask = binary_dilate(valley_mask, survey_buffer_radius_cells)
-
-    rows, cols = dem["array"].shape
-    eligible_mask = np.zeros((rows, cols), dtype=bool)
-    cell_relationships: dict[tuple[int, int], dict] = {}
+    floor_mask = flow_accumulation_cells >= min_contributing_cells
 
     boundary_prepared = prep(boundary_polygon_utm)
     boundary_line = boundary_polygon_utm.boundary
-    flow_direction_cells = get_flow_direction_for_dem(dem)
+
+    population_values = [
+        float(flow_accumulation_cells[r, c])
+        for r, c in np.argwhere(floor_mask)
+        if boundary_prepared.contains(Point(*pixel_center_xy(dem, int(r), int(c))))
+    ]
+
+    rows, cols = dem["array"].shape
+    if not population_values:
+        return np.zeros((rows, cols), dtype=bool)
+
+    p_low = np.percentile(population_values, accumulation_percentile_low)
+    p_high = np.percentile(population_values, accumulation_percentile_high)
+    band_mask = floor_mask & (flow_accumulation_cells >= p_low) & (flow_accumulation_cells <= p_high)
+
+    survey_buffer_radius_cells = _survey_buffer_radius_cells(dem, survey_buffer_meters)
+    band_mask = binary_dilate(band_mask, survey_buffer_radius_cells)
+
+    eligible_mask = np.zeros((rows, cols), dtype=bool)
     array = dem["array"]
 
-    for r, c in np.argwhere(valley_mask):
+    for r, c in np.argwhere(band_mask):
         r, c = int(r), int(c)
         elevation = float(array[r, c])
         if np.isnan(elevation):
@@ -425,47 +377,41 @@ def compute_water_eligible_cells(
         if point.distance(boundary_line) < min_boundary_setback_meters:
             continue
 
-        best = None
+        within_service_distance = False
         for patch in production_areas:
             distance = point.distance(patch["polygon_utm"])
             if distance > max_service_distance_meters:
                 continue
             if 0 < distance < min_service_distance_meters:
                 continue
-            elevation_differential_m = elevation - patch["representative_elevation_m"]
-            if best is None or elevation_differential_m > best["elevation_differential_m"]:
-                best = {
-                    "id": patch["id"],
-                    "elevation_differential_m": elevation_differential_m,
-                    "distance_m": distance,
-                }
+            within_service_distance = True
+            break
 
-        if best is None:
-            continue
-
-        clearance_meters, exited = _downstream_clearance_meters(
-            dem, flow_direction_cells, boundary_polygon_utm, r, c
-        )
-        if not (exited and clearance_meters >= min_downstream_clearance_meters):
+        if not within_service_distance:
             continue
 
         eligible_mask[r, c] = True
-        cell_relationships[(r, c)] = best
 
-    return eligible_mask, cell_relationships
+    return eligible_mask
 
 
-def _aggregate_production_area_relationships(relationships: list[dict]) -> list[dict]:
+def _zone_production_area_relationships(
+    representative_point: Point,
+    representative_elevation_m: float,
+    production_areas: list[dict],
+    max_service_distance_meters: float,
+    min_service_distance_meters: float,
+) -> list[dict]:
     """
-    Rolls up the per-cell elevation relationships collected across every
-    cell contributing to one zone's cluster into one entry per served
-    production area — the MEDIAN elevation differential/distance across
-    every cell that picked that production area as its best match
-    (median, not mean, for the same "resist a single outlier cell skewing
-    the reported number" reasoning as production_area.py's own
-    representative-elevation choice).
+    Whole-zone version of the old per-cell "best production-area
+    relationship" tagging + per-cluster median aggregation: computed ONCE
+    per surviving cluster from a single representative point/elevation
+    (see find_candidate_zones()'s own docstring) rather than rolled up
+    (median) across every member cell's own per-cell tag. Same output
+    shape the old aggregation produced, so every downstream consumer
+    (zones_to_geojson(), water_suitability.py) is unaffected by this
+    change:
 
-    Returns a list of:
         {
             'production_area_id': int,
             'elevation_differential_m': float,  # + = zone sits above the
@@ -480,29 +426,38 @@ def _aggregate_production_area_relationships(relationships: list[dict]) -> list[
             'above_production_area': bool,
         }
     sorted by elevation_differential_m descending (most gravity-favorable
-    first), so callers that just want "the best one" can take index 0.
-    """
-    points_by_id: dict = {}
-    for r in relationships:
-        points_by_id.setdefault(r["id"], []).append(r)
+    first), same convention as before.
 
-    aggregated = []
-    for production_area_id, points in points_by_id.items():
-        differential = float(np.median([p["elevation_differential_m"] for p in points]))
-        distance = float(np.median([p["distance_m"] for p in points]))
-        gradient_pct = (differential / distance * 100) if distance > 0 else 0.0
-        aggregated.append(
+    Only production areas within max_service_distance_meters (and outside
+    min_service_distance_meters, unless distance == 0 -- same carve-out as
+    compute_water_eligible_cells()'s own gate) are included -- a zone
+    whose representative point falls outside every production area's
+    service-distance window returns [] (see find_candidate_zones()'s own
+    handling of this case: such a zone is dropped, since there's no single
+    headline "served" relationship left to report for it).
+    """
+    relationships = []
+    for patch in production_areas:
+        distance = representative_point.distance(patch["polygon_utm"])
+        if distance > max_service_distance_meters:
+            continue
+        if 0 < distance < min_service_distance_meters:
+            continue
+
+        elevation_differential_m = representative_elevation_m - patch["representative_elevation_m"]
+        gradient_pct = (elevation_differential_m / distance * 100) if distance > 0 else 0.0
+        relationships.append(
             {
-                "production_area_id": production_area_id,
-                "elevation_differential_m": round(differential, 2),
+                "production_area_id": patch["id"],
+                "elevation_differential_m": round(elevation_differential_m, 2),
                 "distance_m": round(distance, 1),
                 "gradient_pct": round(gradient_pct, 2),
-                "above_production_area": differential > 0,
+                "above_production_area": elevation_differential_m > 0,
             }
         )
 
-    aggregated.sort(key=lambda r: -r["elevation_differential_m"])
-    return aggregated
+    relationships.sort(key=lambda r: -r["elevation_differential_m"])
+    return relationships
 
 
 def find_candidate_zones(
@@ -510,12 +465,14 @@ def find_candidate_zones(
     production_areas: list[dict],
     boundary_polygon_utm: Polygon,
     min_valley_contributing_area_acres: float = MIN_VALLEY_CONTRIBUTING_AREA_ACRES,
+    accumulation_percentile_low: float = VALLEY_ACCUMULATION_PERCENTILE_LOW,
+    accumulation_percentile_high: float = VALLEY_ACCUMULATION_PERCENTILE_HIGH,
     min_boundary_setback_meters: float = MIN_BOUNDARY_SETBACK_METERS,
     max_service_distance_meters: float = MAX_SERVICE_DISTANCE_METERS,
     min_service_distance_meters: float = MIN_SERVICE_DISTANCE_METERS,
     min_water_zone_area_acres: float = MIN_WATER_ZONE_AREA_ACRES,
     survey_buffer_meters: float = WATER_ZONE_SURVEY_BUFFER_METERS,
-    min_downstream_clearance_meters: float = MIN_DOWNSTREAM_CLEARANCE_METERS,
+    min_zone_waist_meters: float = WATER_ZONE_MIN_WAIST_METERS,
 ) -> list[dict]:
     """
     Cell-based zone-filtering logic (Step 3) — see module docstring for
@@ -528,16 +485,57 @@ def find_candidate_zones(
     parameter).
 
     Builds the per-cell eligibility mask (compute_water_eligible_cells() —
-    including its own survey_buffer_meters dilation of the raw drainage-
-    only mask, see that function's docstring for why a zone needs to be
-    wider than a one-cell-wide drainage trace), clusters it via
-    raster_grid.connected_components() — exactly the same
-    "cluster's own connectivity defines a zone" pattern
-    production_area.py's own patches use, with no valley identity carried
-    into this pass at all — and builds each surviving cluster's REAL
-    cell-union footprint (raster_grid.cell_union_footprint()), not a hull
-    or a line buffer. Clusters below min_water_zone_area_acres (after
-    clipping to boundary_polygon_utm) are dropped as noise.
+    including its own survey_buffer_meters dilation of the raw
+    percentile-band mask, see that function's docstring for why a zone
+    needs to be wider than a one-cell-wide drainage trace), clusters it
+    via raster_grid.connected_components() — exactly the same "cluster's
+    own connectivity defines a zone" pattern production_area.py's own
+    patches use, with no valley identity carried into this pass at all —
+    then attempts a WAIST split on each cluster (raster_grid.
+    attempt_waist_split(), shared with production_area.py's own zone
+    clustering -- see that module's docstring for why: the survey-buffer
+    dilation above can bridge two genuinely separate drainage patches that
+    never actually touched before widening, and a narrower-than-
+    min_zone_waist_meters pinch reads as two zones, not one). Each
+    resulting (possibly split) sub-cluster's REAL cell-union footprint
+    (raster_grid.cell_union_footprint()) is built -- not a hull or a line
+    buffer -- and clipped to boundary_polygon_utm; clusters below
+    min_water_zone_area_acres after clipping are dropped as noise (the
+    same min_water_zone_area_acres also gates whether a waist split is
+    committed at all -- see attempt_waist_split()'s own docstring).
+
+    Scoring is WHOLE-ZONE, computed once per surviving cluster, not per
+    cell and not aggregated from per-cell tags: a representative elevation
+    (median of the cluster's own member cells' elevations -- same pattern
+    production_area.py's own representative_elevation_m uses) and a
+    representative point (the cluster's own real footprint centroid) are
+    computed once, and _zone_production_area_relationships() measures
+    that single point/elevation against every production area within
+    service distance. A cluster whose representative point falls outside
+    every production area's service-distance window (a real, if rare,
+    possibility for an oddly-shaped or elongated cluster whose individual
+    member cells were each near SOME patch, but whose centroid isn't near
+    any) is dropped -- there is no single headline "served" relationship
+    to report for it, the same trade-off "aggregate up from individual
+    cells" always carried, just now paid at the whole-zone level instead
+    of the per-cell level.
+
+    Two zone-level aggregates carried alongside the above, for
+    water_suitability.py's topographic_factor: contributing_area_cells
+    (median flow_accumulation_cells cell-count value, NOT acres, across
+    the cluster's own member cells) and slope_pct (median local slope
+    percent, production_area.compute_slope_percent()'s own steepest-
+    neighbor definition, reused rather than reinvented). These are new,
+    additive zone-level fields -- water_suitability.py's own
+    topographic_factor still derives its gradient_pct/contributing_area_
+    acres inputs from a SEPARATE spatial match against traced valley
+    branches (delineate_valleys() output, see water_suitability.
+    _valley_topographic_inputs_for_zone()'s own docstring), unaffected by
+    and not yet wired to these two fields -- confirmed compatible with
+    waist-split (possibly-smaller, possibly-more-numerous) clusters via
+    the existing test suite, since that matching is purely geometric
+    (zone_polygon_utm containment), not keyed off any per-zone field this
+    change touches.
 
     Returns one entry per qualifying cell cluster:
         {
@@ -546,13 +544,15 @@ def find_candidate_zones(
             'polygon_utm': shapely Polygon/MultiPolygon,
             'geometry_wgs84': GeoJSON geometry dict,
             'production_area_relationships': [...],   # see
-                _aggregate_production_area_relationships()'s docstring —
-                one entry per served production area, sorted most-
-                gravity-favorable first
+                _zone_production_area_relationships()'s docstring — one
+                entry per served production area, sorted most-gravity-
+                favorable first
             'primary_production_area_relationship': dict,  # same shape as
                 one production_area_relationships entry — the single most
                 gravity-favorable one, for callers that just want one
                 headline number
+            'contributing_area_cells': float,  # median, see above
+            'slope_pct': float,                # median, see above
         }
     'id' is assigned sequentially across the surviving cluster list, same
     convention production_area.py's own patches use — there is no more
@@ -562,19 +562,24 @@ def find_candidate_zones(
     if not production_areas:
         return []
 
-    eligible_mask, cell_relationships = compute_water_eligible_cells(
+    eligible_mask = compute_water_eligible_cells(
         dem,
         production_areas,
         boundary_polygon_utm,
         min_valley_contributing_area_acres,
+        accumulation_percentile_low,
+        accumulation_percentile_high,
         max_service_distance_meters,
         min_service_distance_meters,
         min_boundary_setback_meters,
         survey_buffer_meters,
-        min_downstream_clearance_meters,
     )
 
     labels, num_components = connected_components(eligible_mask)
+
+    flow_accumulation_cells = get_flow_accumulation_for_dem(dem)
+    slope_pct_grid = compute_slope_percent(dem["array"], dem["resolution_meters"])
+    array = dem["array"]
 
     zones = []
     next_id = 0
@@ -584,33 +589,58 @@ def find_candidate_zones(
         if not cluster_cells:
             continue
 
-        footprint = cell_union_footprint(dem, cluster_mask)
-        polygon_utm = footprint.intersection(boundary_polygon_utm)
-        if polygon_utm.is_empty:
-            continue
+        for sub_cells in attempt_waist_split(
+            cluster_cells, eligible_mask.shape, dem, min_water_zone_area_acres, min_zone_waist_meters
+        ):
+            sub_mask = np.zeros(eligible_mask.shape, dtype=bool)
+            for r, c in sub_cells:
+                sub_mask[r, c] = True
 
-        area_acres = polygon_utm.area / SQUARE_METERS_PER_ACRE
-        if area_acres < min_water_zone_area_acres:
-            continue
+            footprint = cell_union_footprint(dem, sub_mask)
+            polygon_utm = footprint.intersection(boundary_polygon_utm)
+            if polygon_utm.is_empty:
+                continue
 
-        relationships = [cell_relationships[cell] for cell in cluster_cells]
-        production_area_relationships = _aggregate_production_area_relationships(relationships)
+            area_acres = polygon_utm.area / SQUARE_METERS_PER_ACRE
+            if area_acres < min_water_zone_area_acres:
+                continue
 
-        geometry_wgs84 = transform_geom(dem["crs"], "EPSG:4326", mapping(polygon_utm))
+            representative_elevation_m = float(np.median([array[r, c] for r, c in sub_cells]))
+            representative_point = polygon_utm.centroid
 
-        zones.append(
-            {
-                "id": next_id,
-                "served_production_area_ids": sorted(
-                    r["production_area_id"] for r in production_area_relationships
-                ),
-                "polygon_utm": polygon_utm,
-                "geometry_wgs84": geometry_wgs84,
-                "production_area_relationships": production_area_relationships,
-                "primary_production_area_relationship": production_area_relationships[0],
-            }
-        )
-        next_id += 1
+            production_area_relationships = _zone_production_area_relationships(
+                representative_point,
+                representative_elevation_m,
+                production_areas,
+                max_service_distance_meters,
+                min_service_distance_meters,
+            )
+            if not production_area_relationships:
+                continue
+
+            contributing_area_cells = float(np.median([flow_accumulation_cells[r, c] for r, c in sub_cells]))
+            cluster_slopes = [
+                float(slope_pct_grid[r, c]) for r, c in sub_cells if not np.isnan(slope_pct_grid[r, c])
+            ]
+            slope_pct = float(np.median(cluster_slopes)) if cluster_slopes else 0.0
+
+            geometry_wgs84 = transform_geom(dem["crs"], "EPSG:4326", mapping(polygon_utm))
+
+            zones.append(
+                {
+                    "id": next_id,
+                    "served_production_area_ids": sorted(
+                        r["production_area_id"] for r in production_area_relationships
+                    ),
+                    "polygon_utm": polygon_utm,
+                    "geometry_wgs84": geometry_wgs84,
+                    "production_area_relationships": production_area_relationships,
+                    "primary_production_area_relationship": production_area_relationships[0],
+                    "contributing_area_cells": round(contributing_area_cells, 2),
+                    "slope_pct": round(slope_pct, 2),
+                }
+            )
+            next_id += 1
 
     return zones
 
@@ -636,6 +666,8 @@ def zones_to_geojson(zones: list[dict]) -> dict:
                 "served_production_area_ids": z["served_production_area_ids"],
                 "production_area_relationships": z["production_area_relationships"],
                 "primary_production_area_relationship": z["primary_production_area_relationship"],
+                "contributing_area_cells": z["contributing_area_cells"],
+                "slope_pct": z["slope_pct"],
             },
         )
         for z in zones
