@@ -19,7 +19,14 @@ gate-breakdown section calls compute_water_eligible_cells() itself
 directly, several times, with individual gate thresholds swapped for
 "always pass" values (0/infinity) to isolate one real gate at a time --
 the gate math itself is never duplicated, only which of the function's
-own real checks can actually bind is varied per call.
+own real checks can actually bind is varied per call. This covers all
+FIVE of compute_water_eligible_cells()'s real gates: percentile-band,
+on-parcel/boundary-setback, service-distance, canopy (woody-vegetation
+root zone), and existing-road right-of-way -- the real canopy_root_zone_
+mask_utm/road_exclusion_union_utm this run actually fetches (see below)
+are held REAL across every isolation call except the ones specifically
+isolating canopy or road themselves, the same way the percentile-band
+gate is already held real throughout.
 
 Every isolation call uses the REAL boundary_polygon_utm, never a
 synthetic stand-in -- an earlier version of this section used a
@@ -31,10 +38,25 @@ distance can be disabled (min_boundary_setback_meters=0.0), so the
 service-distance isolation below is "on-parcel required, setback
 waived," not a pure isolation from every other gate.
 
+The post-waist-split zone section below (elevation ranges, optimal
+survey sub-area, confluence check) calls water_candidate_zones.
+find_candidate_zones() directly -- the real, full pipeline entry point,
+including its own waist-splitting and select_optimal_survey_subarea()
+wiring -- rather than reimplementing clustering/scoring independently a
+second time.
+
 Requires real network access (a real USGS DEM fetch via dem_data.py, plus
-production_area.py's own SSURGO/canopy/road fetches) -- this is a live
+production_area.py's own SSURGO/canopy/road fetches, plus this script's
+own canopy/road fetches for the gate-breakdown section) -- this is a live
 diagnostic against a real property, not the offline/synthetic-DEM tests
-in test_water_candidate_zones.py.
+in test_water_candidate_zones.py. Canopy fetch failure degrades
+gracefully HERE (unlike the real pipeline's own hard-fail via
+get_required_tree_root_zone_mask_utm() -- see identify_water_system_
+candidate_zones()'s own docstring): this diagnostic proceeds with the
+canopy gate unchecked and says so, rather than aborting the whole run,
+since a debugging tool that can't run at all when one optional-to-this-
+script fetch fails is less useful than one that reports what it can and
+flags the gap plainly.
 
 --min-contributing-acres and --buffer-meters override
 MIN_VALLEY_CONTRIBUTING_AREA_ACRES / WATER_ZONE_SURVEY_BUFFER_METERS for
@@ -56,9 +78,13 @@ from shapely.geometry import Point, Polygon
 from shapely.prepared import prep
 
 from dem_data import get_dem_for_boundary
-from production_area import identify_production_areas
+from production_area import (
+    _fetch_road_exclusion_union_utm,
+    get_required_tree_root_zone_mask_utm,
+    identify_production_areas,
+)
 from raster_grid import (
-    attempt_waist_split,
+    SQUARE_METERS_PER_ACRE,
     binary_dilate,
     cell_area_acres,
     connected_components,
@@ -70,13 +96,19 @@ from water_candidate_zones import (
     MIN_BOUNDARY_SETBACK_METERS,
     MIN_SERVICE_DISTANCE_METERS,
     MIN_VALLEY_CONTRIBUTING_AREA_ACRES,
-    MIN_WATER_ZONE_AREA_ACRES,
     VALLEY_ACCUMULATION_PERCENTILE_HIGH,
     VALLEY_ACCUMULATION_PERCENTILE_LOW,
+    WATER_ZONE_CANOPY_BUFFER_METERS,
     WATER_ZONE_MIN_WAIST_METERS,
+    WATER_ZONE_ROAD_BUFFER_METERS,
+    WATER_ZONE_SUBAREA_TARGET_ACRES,
+    WATER_ZONE_SUBAREA_TRIGGER_ACRES,
     WATER_ZONE_SURVEY_BUFFER_METERS,
+    _CANOPY_CHECK_UNCHECKED,
+    _ROAD_CHECK_UNCHECKED,
     _survey_buffer_radius_cells,
     compute_water_eligible_cells,
+    find_candidate_zones,
 )
 
 # The user's real, drawn property boundary -- same one render_layout_map.py's
@@ -164,6 +196,52 @@ def main(
             centroid = patch["polygon_utm"].centroid
             print(f"  Production area id={patch['id']}: centroid=({centroid.x:.1f}, {centroid.y:.1f})")
     print()
+
+    # Fetches the same two real, cell-level hard-exclusion inputs
+    # compute_water_eligible_cells()'s gates 4/5 apply -- reused directly
+    # (production_area.get_required_tree_root_zone_mask_utm()/
+    # _fetch_road_exclusion_union_utm(), the exact same functions
+    # identify_water_system_candidate_zones() calls for the real
+    # pipeline), not refetched or reimplemented independently. Unlike that
+    # real entry point, canopy fetch failure degrades GRACEFULLY here
+    # (this is a debugging tool, not the production pipeline) -- the gate
+    # is left unchecked and every downstream section says so plainly,
+    # rather than the whole diagnostic aborting.
+    canopy_root_zone_mask_utm = _CANOPY_CHECK_UNCHECKED
+    canopy_available = False
+    try:
+        canopy_root_zone_mask_utm = get_required_tree_root_zone_mask_utm(
+            boundary_polygon_utm, dem, buffer_meters=WATER_ZONE_CANOPY_BUFFER_METERS
+        )
+        canopy_available = True
+        print(
+            f"Canopy root-zone mask fetched (WATER_ZONE_CANOPY_BUFFER_METERS={WATER_ZONE_CANOPY_BUFFER_METERS}m): "
+            f"{int(canopy_root_zone_mask_utm.sum())} tree-root-zone cell(s) on this DEM's own grid\n"
+        )
+    except Exception as e:
+        print(
+            f"Canopy fetch failed ({e}) -- proceeding with the canopy gate UNCHECKED for this diagnostic run. "
+            "The real pipeline (identify_water_system_candidate_zones()) would hard-fail here instead -- see "
+            "get_required_tree_root_zone_mask_utm()'s own docstring -- so every number below that depends on "
+            "canopy exclusion is a LOWER BOUND on what the real pipeline would actually exclude.\n"
+        )
+
+    road_exclusion_union_utm = _ROAD_CHECK_UNCHECKED
+    try:
+        road_exclusion_union_utm = _fetch_road_exclusion_union_utm(
+            PROPERTY_BOUNDARY, dem, buffer_meters=WATER_ZONE_ROAD_BUFFER_METERS
+        )
+        if road_exclusion_union_utm is None:
+            print("Road exclusion fetch succeeded: no roads found nearby (checked, genuinely none -- not the "
+                  "same as unchecked).\n")
+        else:
+            print(f"Road exclusion union fetched (WATER_ZONE_ROAD_BUFFER_METERS={WATER_ZONE_ROAD_BUFFER_METERS}m).\n")
+    except Exception as e:
+        print(
+            f"Road exclusion fetch failed ({e}) -- proceeding with the road gate UNCHECKED for this diagnostic "
+            "run (this gate degrades gracefully in the real pipeline too, same behavior here).\n"
+        )
+        road_exclusion_union_utm = _ROAD_CHECK_UNCHECKED
 
     # Same two-step computation compute_water_eligible_cells() does
     # internally, just stopped short of the service-distance/boundary-
@@ -304,6 +382,8 @@ def main(
 
     # 1. On-parcel + boundary-setback gate ALONE (service-distance disabled
     #    via max=infinity/min=0, using the REAL property boundary/setback).
+    #    Canopy/road held REAL (this isn't what's being isolated here) --
+    #    same as the percentile-band gate already being held real.
     parcel_setback_mask = compute_water_eligible_cells(
         dem, production_areas, boundary_polygon_utm,
         min_valley_contributing_area_acres=min_contributing_acres,
@@ -313,6 +393,8 @@ def main(
         min_service_distance_meters=0.0,
         min_boundary_setback_meters=MIN_BOUNDARY_SETBACK_METERS,
         survey_buffer_meters=buffer_meters,
+        canopy_root_zone_mask_utm=canopy_root_zone_mask_utm,
+        road_exclusion_union_utm=road_exclusion_union_utm,
     )
     _report_cell_count(
         f"On-parcel + boundary-setback gate alone (MIN_BOUNDARY_SETBACK_METERS={MIN_BOUNDARY_SETBACK_METERS}m, "
@@ -323,7 +405,7 @@ def main(
     # 2. Service-distance gate (boundary-SETBACK disabled via
     #    min_boundary_setback_meters=0, using the REAL boundary_polygon_utm
     #    -- on-parcel containment still required, using the REAL
-    #    MAX/MIN_SERVICE_DISTANCE_METERS).
+    #    MAX/MIN_SERVICE_DISTANCE_METERS). Canopy/road held REAL.
     service_distance_mask = compute_water_eligible_cells(
         dem, production_areas, boundary_polygon_utm,
         min_valley_contributing_area_acres=min_contributing_acres,
@@ -333,6 +415,8 @@ def main(
         min_service_distance_meters=MIN_SERVICE_DISTANCE_METERS,
         min_boundary_setback_meters=0.0,
         survey_buffer_meters=buffer_meters,
+        canopy_root_zone_mask_utm=canopy_root_zone_mask_utm,
+        road_exclusion_union_utm=road_exclusion_union_utm,
     )
     _report_cell_count(
         f"Service-distance gate (MAX={MAX_SERVICE_DISTANCE_METERS}m, "
@@ -342,7 +426,7 @@ def main(
 
     # 2a. "Too far" only: max-distance real, min-distance disabled (0) --
     #     a cell excluded here failed to find ANY production area within
-    #     MAX_SERVICE_DISTANCE_METERS.
+    #     MAX_SERVICE_DISTANCE_METERS. Canopy/road held REAL.
     too_far_mask = compute_water_eligible_cells(
         dem, production_areas, boundary_polygon_utm,
         min_valley_contributing_area_acres=min_contributing_acres,
@@ -352,6 +436,8 @@ def main(
         min_service_distance_meters=0.0,
         min_boundary_setback_meters=0.0,
         survey_buffer_meters=buffer_meters,
+        canopy_root_zone_mask_utm=canopy_root_zone_mask_utm,
+        road_exclusion_union_utm=road_exclusion_union_utm,
     )
     # too_far_mask is on-parcel-required (compute_water_eligible_cells()'s
     # on-parcel gate has no override), so it can only ever contain a
@@ -372,7 +458,7 @@ def main(
     #     of EVERY production area (genuinely near but not touching any of
     #     them) -- the opposite problem from "too far," needing the
     #     opposite fix (a smaller MIN_SERVICE_DISTANCE_METERS, not a
-    #     larger MAX_SERVICE_DISTANCE_METERS).
+    #     larger MAX_SERVICE_DISTANCE_METERS). Canopy/road held REAL.
     too_close_mask = compute_water_eligible_cells(
         dem, production_areas, boundary_polygon_utm,
         min_valley_contributing_area_acres=min_contributing_acres,
@@ -382,12 +468,57 @@ def main(
         min_service_distance_meters=MIN_SERVICE_DISTANCE_METERS,
         min_boundary_setback_meters=0.0,
         survey_buffer_meters=buffer_meters,
+        canopy_root_zone_mask_utm=canopy_root_zone_mask_utm,
+        road_exclusion_union_utm=road_exclusion_union_utm,
     )
     too_close_excluded_mask = on_parcel_mask & ~too_close_mask
     _report_cell_count(
         f"  -> excluded as TOO CLOSE (within MIN_SERVICE_DISTANCE_METERS={MIN_SERVICE_DISTANCE_METERS}m "
         "of every production area, but not touching any of them)",
         too_close_excluded_mask, dem,
+    )
+    print()
+
+    # 2c. Canopy gate ALONE: service-distance/setback disabled (max=inf/
+    #     min=0/setback=0), road skipped -- isolates canopy specifically.
+    canopy_alone_mask = compute_water_eligible_cells(
+        dem, production_areas, boundary_polygon_utm,
+        min_valley_contributing_area_acres=min_contributing_acres,
+        accumulation_percentile_low=accumulation_percentile_low,
+        accumulation_percentile_high=accumulation_percentile_high,
+        max_service_distance_meters=float("inf"),
+        min_service_distance_meters=0.0,
+        min_boundary_setback_meters=0.0,
+        survey_buffer_meters=buffer_meters,
+        canopy_root_zone_mask_utm=canopy_root_zone_mask_utm,
+        road_exclusion_union_utm=_ROAD_CHECK_UNCHECKED,
+    )
+    canopy_excluded_mask = on_parcel_mask & ~canopy_alone_mask
+    _report_cell_count(
+        f"Canopy gate alone (woody-vegetation root zone, WATER_ZONE_CANOPY_BUFFER_METERS="
+        f"{WATER_ZONE_CANOPY_BUFFER_METERS}m)"
+        + ("" if canopy_available else " [canopy fetch FAILED above -- unchecked, reads 0, not a real result]"),
+        canopy_excluded_mask, dem,
+    )
+
+    # 2d. Road gate ALONE: service-distance/setback disabled, canopy
+    #     skipped -- isolates existing-road right-of-way specifically.
+    road_alone_mask = compute_water_eligible_cells(
+        dem, production_areas, boundary_polygon_utm,
+        min_valley_contributing_area_acres=min_contributing_acres,
+        accumulation_percentile_low=accumulation_percentile_low,
+        accumulation_percentile_high=accumulation_percentile_high,
+        max_service_distance_meters=float("inf"),
+        min_service_distance_meters=0.0,
+        min_boundary_setback_meters=0.0,
+        survey_buffer_meters=buffer_meters,
+        canopy_root_zone_mask_utm=_CANOPY_CHECK_UNCHECKED,
+        road_exclusion_union_utm=road_exclusion_union_utm,
+    )
+    road_excluded_mask = on_parcel_mask & ~road_alone_mask
+    _report_cell_count(
+        f"Road gate alone (existing right-of-way, WATER_ZONE_ROAD_BUFFER_METERS={WATER_ZONE_ROAD_BUFFER_METERS}m)",
+        road_excluded_mask, dem,
     )
     print()
 
@@ -426,92 +557,78 @@ def main(
               "service_distance_mask. Treat the TOO FAR/TOO CLOSE numbers above as unreliable "
               "until this is investigated.\n")
 
-    # 3. ALL THREE gates combined -- this is compute_water_eligible_cells()'s
+    # 3. ALL FIVE gates combined -- this is compute_water_eligible_cells()'s
     #    own real output at this run's actual parameters, i.e. exactly what
     #    find_candidate_zones() (the real pipeline) works from (BEFORE
-    #    waist-splitting/clustering -- see the percentile-band-detail
-    #    section below for the post-waist-split numbers).
+    #    waist-splitting/clustering -- see the zone section below for the
+    #    post-waist-split numbers).
     combined_mask = compute_water_eligible_cells(
         dem, production_areas, boundary_polygon_utm,
         min_valley_contributing_area_acres=min_contributing_acres,
         accumulation_percentile_low=accumulation_percentile_low,
         accumulation_percentile_high=accumulation_percentile_high,
         survey_buffer_meters=buffer_meters,
+        canopy_root_zone_mask_utm=canopy_root_zone_mask_utm,
+        road_exclusion_union_utm=road_exclusion_union_utm,
     )
     _report_mask_stats(
-        "ALL THREE gates combined (real pipeline output -- matches find_candidate_zones()'s own eligible_mask, "
+        "ALL FIVE gates combined (real pipeline output -- matches find_candidate_zones()'s own eligible_mask, "
         "pre-waist-split)",
         combined_mask, dem,
     )
 
-    zone_cell_lists = _report_percentile_band_and_waist_split(
-        dem, combined_mask, zone_min_waist_meters,
+    # The real, full pipeline entry point itself -- not a re-implementation
+    # of clustering/waist-splitting/whole-zone scoring/sub-area selection.
+    # zones carries every field find_candidate_zones() itself produces
+    # (cells, polygon_utm, primary_production_area_relationship,
+    # optimal_subarea_polygon_utm/geometry_wgs84/acres, ...) so the
+    # sections below report on the REAL thing, not a diagnostic-only
+    # approximation of it.
+    zones = find_candidate_zones(
+        dem, production_areas, boundary_polygon_utm,
+        min_valley_contributing_area_acres=min_contributing_acres,
+        accumulation_percentile_low=accumulation_percentile_low,
+        accumulation_percentile_high=accumulation_percentile_high,
+        survey_buffer_meters=buffer_meters,
+        min_zone_waist_meters=zone_min_waist_meters,
+        canopy_root_zone_mask_utm=canopy_root_zone_mask_utm,
+        road_exclusion_union_utm=road_exclusion_union_utm,
     )
 
-    ranked_zones = _report_zone_elevation_ranges(dem, boundary_polygon_utm, zone_cell_lists)
+    _report_waist_split(combined_mask, zones, dem)
+
+    ranked_zones = _report_zone_elevation_ranges(dem, boundary_polygon_utm, zones)
 
     if not ranked_zones:
-        print("No surviving post-waist-split zone to run the confluence check against -- skipping.\n")
+        print("No surviving post-waist-split zone to run the sub-area/confluence checks against -- skipping.\n")
         return
 
-    top_zone_cells = ranked_zones[0]
-    _report_confluence_check(dem, boundary_polygon_utm, top_zone_cells)
+    top_zone = ranked_zones[0]
+    _report_optimal_subarea(dem, production_areas, top_zone)
+    _report_confluence_check(dem, boundary_polygon_utm, top_zone["cells"])
 
 
-def _zone_cell_lists_from_eligible_mask(
-    dem: dict,
-    eligible_mask,
-    min_zone_waist_meters: float,
-) -> list[list[tuple[int, int]]]:
+def _report_waist_split(eligible_mask, zones: list[dict], dem: dict) -> None:
     """
-    Runs find_candidate_zones()'s own clustering pipeline directly against
-    `eligible_mask` (connected_components() -> raster_grid.
-    attempt_waist_split() per component, same order, same functions --
-    not reimplemented) and returns one list of member (row, col) cells per
-    surviving (possibly split) sub-cluster. find_candidate_zones()'s own
-    zone dicts don't carry raw cell membership (see that function's
-    docstring), so this diagnostic exposes it directly for the elevation-
-    range and confluence checks below, which both need each zone's actual
-    member cells, not just its polygon footprint.
-    """
-    labels, num_components = connected_components(eligible_mask)
-    zone_cell_lists = []
-    for component_id in range(num_components):
-        cluster_cells = [(int(r), int(c)) for r, c in np.argwhere(labels == component_id)]
-        sub_clusters = attempt_waist_split(
-            cluster_cells, eligible_mask.shape, dem, MIN_WATER_ZONE_AREA_ACRES, min_zone_waist_meters
-        )
-        zone_cell_lists.extend(sub_clusters)
-    return zone_cell_lists
+    Reports how find_candidate_zones()'s own waist-splitting step changes
+    the cell/acreage/component-count numbers relative to the pre-split
+    connected-component labeling of `eligible_mask` (the "ALL FIVE gates
+    combined" mask reported by the caller above) -- a dilation-induced
+    merge between two originally-separate drainage patches should show up
+    here as component count ticking UP after the split, with total cell
+    count and acreage roughly unchanged (waist-splitting only re-labels
+    which cells belong to which cluster; it can discard cells only if a
+    resulting sub-cluster would fall below MIN_WATER_ZONE_AREA_ACRES, in
+    which case the whole split is rejected and the original, unsplit
+    cluster passes through instead -- see raster_grid.attempt_waist_
+    split()'s own docstring).
 
-
-def _report_percentile_band_and_waist_split(
-    dem: dict,
-    eligible_mask,
-    min_zone_waist_meters: float,
-) -> list[list[tuple[int, int]]]:
+    `zones` is find_candidate_zones()'s own real output (already waist-
+    split, already clipped to boundary_polygon_utm, already gated on
+    min_water_zone_area_acres) -- POST numbers are read directly off it,
+    not recomputed independently.
     """
-    Reports how find_candidate_zones()'s own waist-splitting step
-    (raster_grid.attempt_waist_split(), applied to each connected
-    component of `eligible_mask` before that component's own cell-union
-    footprint is built) changes the cell/acreage/component-count numbers
-    relative to the pre-split connected-component labeling already
-    reported by the caller above ("ALL THREE gates combined") -- a
-    dilation-induced merge between two originally-separate drainage
-    patches should show up here as component count ticking UP after the
-    split, with total cell count and acreage unchanged (waist-splitting
-    only re-labels which cells belong to which cluster; it never discards
-    a cell UNLESS a resulting sub-cluster would fall below
-    MIN_WATER_ZONE_AREA_ACRES, in which case the whole split is rejected
-    and the original, unsplit cluster passes through unchanged instead --
-    see raster_grid.attempt_waist_split()'s own docstring).
-
-    Returns the flat list of post-split zone cell-lists (via
-    _zone_cell_lists_from_eligible_mask()) so the caller can reuse the
-    exact same zones for the elevation-range/confluence checks below,
-    without recomputing the clustering a second time.
-    """
-    print("=== Waist-split before/after (post-dilation, all-three-gates mask) ===\n")
+    print("=== Waist-split before/after (post-dilation, all-five-gates mask) ===\n")
 
     cell_count_before = int(eligible_mask.sum())
     area_per_cell = cell_area_acres(dem)
@@ -521,10 +638,8 @@ def _report_percentile_band_and_waist_split(
     print(f"PRE-waist-split:  {cell_count_before} cells, {acres_before:.3f} acres, "
           f"{num_components_before} connected component(s)")
 
-    zone_cell_lists = _zone_cell_lists_from_eligible_mask(dem, eligible_mask, min_zone_waist_meters)
-    total_cells_after = sum(len(cells) for cells in zone_cell_lists)
-    num_components_after = len(zone_cell_lists)
-
+    total_cells_after = sum(len(zone["cells"]) for zone in zones)
+    num_components_after = len(zones)
     acres_after = total_cells_after * area_per_cell
     print(f"POST-waist-split: {total_cells_after} cells, {acres_after:.3f} acres, "
           f"{num_components_after} connected component(s)")
@@ -537,27 +652,24 @@ def _report_percentile_band_and_waist_split(
         print("  -> component count unchanged: no waist was detected (or none survived the area gate).")
     print()
 
-    return zone_cell_lists
-
 
 def _report_zone_elevation_ranges(
     dem: dict,
     boundary_polygon_utm: Polygon,
-    zone_cell_lists: list[list[tuple[int, int]]],
-) -> list[list[tuple[int, int]]]:
+    zones: list[dict],
+) -> list[dict]:
     """
-    For each post-waist-split zone (see _zone_cell_lists_from_eligible_mask()),
-    reports its member cells' real elevation range (min/max, straight from
-    dem['array'] -- no recomputation), alongside its cell count/acreage,
-    and the property's own overall ON-PARCEL elevation range (every cell
-    whose center falls inside boundary_polygon_utm, NaN cells excluded)
-    for direct comparison -- this is what actually tests whether a zone
-    spans most of the parcel's real elevation range ("ridge to valley
-    bottom") or just a modest slice of it, rather than eyeballing acreage
-    alone.
+    For each real zone find_candidate_zones() returns, reports its member
+    cells' real elevation range (min/max, straight from dem['array']),
+    alongside its real footprint acreage (zone['polygon_utm'].area, not a
+    cell-count approximation), and the property's own overall ON-PARCEL
+    elevation range (every cell whose center falls inside
+    boundary_polygon_utm, NaN cells excluded) for direct comparison --
+    this is what actually tests whether a zone spans most of the parcel's
+    real elevation range ("ridge to valley bottom") or just a modest
+    slice of it, rather than eyeballing acreage alone.
 
-    Zones are reported ranked by real footprint acreage descending (a
-    zone's own cell count, since every cell has the same area) -- a
+    Zones are reported ranked by real footprint acreage descending -- a
     simple, self-contained proxy for "top-ranked" that doesn't require
     fetching soil/stream data or running the full water_suitability.py
     scoring pipeline (this diagnostic's own established scope: real
@@ -565,12 +677,11 @@ def _report_zone_elevation_ranges(
     Explicitly NOT the same ranking identify_water_suitability()'s
     score_water_zones() would produce.
 
-    Returns the same zone cell-lists, re-sorted largest-first, so the
-    caller can pick the top-ranked one for the confluence check below
+    Returns the same zones, re-sorted largest-first, so the caller can
+    pick the top-ranked one for the sub-area/confluence checks below
     without re-deriving the ranking a second time.
     """
     array = dem["array"]
-    area_per_cell = cell_area_acres(dem)
 
     boundary_prepared = prep(boundary_polygon_utm)
     on_parcel_elevations = [
@@ -584,7 +695,7 @@ def _report_zone_elevation_ranges(
 
     if not on_parcel_elevations:
         print("No on-parcel DEM cells at all -- cannot report an overall elevation range.\n")
-        overall_min = overall_max = overall_span = None
+        overall_span = None
     else:
         overall_min = min(on_parcel_elevations)
         overall_max = max(on_parcel_elevations)
@@ -594,16 +705,17 @@ def _report_zone_elevation_ranges(
             f"(span {overall_span:.2f}m, over {len(on_parcel_elevations)} on-parcel cell(s))\n"
         )
 
-    if not zone_cell_lists:
+    if not zones:
         print("No surviving post-waist-split zones.\n")
         return []
 
-    ranked = sorted(zone_cell_lists, key=len, reverse=True)
+    ranked = sorted(zones, key=lambda z: z["polygon_utm"].area, reverse=True)
 
-    for rank, cells in enumerate(ranked):
+    for rank, zone in enumerate(ranked):
+        cells = zone["cells"]
         elevations = [float(array[r, c]) for r, c in cells if not np.isnan(array[r, c])]
-        acres = len(cells) * area_per_cell
-        label = f"Zone rank {rank} (largest)" if rank == 0 else f"Zone rank {rank}"
+        acres = zone["polygon_utm"].area / SQUARE_METERS_PER_ACRE
+        label = f"Zone rank {rank} (largest, id={zone['id']})" if rank == 0 else f"Zone rank {rank} (id={zone['id']})"
         if not elevations:
             print(f"--- {label}: {len(cells)} cells, {acres:.3f} acres -- all-NaN, no elevation data ---")
             continue
@@ -626,6 +738,86 @@ def _report_zone_elevation_ranges(
         print()
 
     return ranked
+
+
+def _report_optimal_subarea(dem: dict, production_areas: list[dict], zone: dict) -> None:
+    """
+    Reports water_candidate_zones.select_optimal_survey_subarea()'s own
+    real output for the top-ranked zone -- already computed and attached
+    by find_candidate_zones() itself (zone['optimal_subarea_polygon_utm']/
+    'optimal_subarea_geometry_wgs84'/'optimal_subarea_acres'), not
+    recomputed here. Reports the sub-area's own acreage plus its member
+    cells' elevation range and distance-to-primary-production-area range/
+    average, directly against the full zone's own equivalents, so a
+    "smaller, higher-confidence pointer" claim can actually be checked
+    (higher elevation, closer to the production area it serves) rather
+    than taken on faith.
+    """
+    print("=== Optimal survey sub-area (top-ranked zone) ===\n")
+
+    zone_area_acres = zone["polygon_utm"].area / SQUARE_METERS_PER_ACRE
+    print(f"Zone's own full footprint: {zone_area_acres:.3f} acres ({len(zone['cells'])} cells)")
+
+    if zone_area_acres <= WATER_ZONE_SUBAREA_TRIGGER_ACRES:
+        print(
+            f"At/under WATER_ZONE_SUBAREA_TRIGGER_ACRES ({WATER_ZONE_SUBAREA_TRIGGER_ACRES} acres) -- "
+            "select_optimal_survey_subarea() correctly returns None here: the full zone footprint is "
+            "already a reasonable survey pointer at this size.\n"
+        )
+        return
+
+    subarea_acres = zone["optimal_subarea_acres"]
+    if subarea_acres is None or zone["optimal_subarea_polygon_utm"] is None:
+        print(
+            "No valid sub-area could be selected -- every zone cell fell inside the production area it "
+            "serves, or its primary production area couldn't be resolved (see select_optimal_survey_"
+            "subarea()'s own docstring).\n"
+        )
+        return
+
+    primary_production_area_id = zone["primary_production_area_relationship"]["production_area_id"]
+    primary_patch = next((p for p in production_areas if p["id"] == primary_production_area_id), None)
+    if primary_patch is None:
+        print(
+            f"Sub-area reports {subarea_acres:.3f} acres, but the primary production area id="
+            f"{primary_production_area_id} is no longer in this run's production_areas list -- can't report "
+            "elevation/distance comparisons.\n"
+        )
+        return
+
+    production_polygon = primary_patch["polygon_utm"]
+    subarea_polygon = zone["optimal_subarea_polygon_utm"]
+    subarea_cells = [
+        (r, c) for r, c in zone["cells"]
+        if subarea_polygon.intersects(Point(*pixel_center_xy(dem, r, c)))
+    ]
+
+    array = dem["array"]
+    zone_elevations = [float(array[r, c]) for r, c in zone["cells"] if not np.isnan(array[r, c])]
+    subarea_elevations = [float(array[r, c]) for r, c in subarea_cells if not np.isnan(array[r, c])]
+    zone_distances = [
+        Point(*pixel_center_xy(dem, r, c)).distance(production_polygon) for r, c in zone["cells"]
+    ]
+    subarea_distances = [
+        Point(*pixel_center_xy(dem, r, c)).distance(production_polygon) for r, c in subarea_cells
+    ]
+
+    print(
+        f"Optimal sub-area: {subarea_acres:.3f} acres ({len(subarea_cells)} of {len(zone['cells'])} zone "
+        f"cells), capped near WATER_ZONE_SUBAREA_TARGET_ACRES ({WATER_ZONE_SUBAREA_TARGET_ACRES} acres)"
+    )
+    if zone_elevations and subarea_elevations:
+        print(
+            f"  Elevation:  sub-area avg={np.mean(subarea_elevations):.2f}m "
+            f"(range {min(subarea_elevations):.2f}-{max(subarea_elevations):.2f}m) vs. full zone avg="
+            f"{np.mean(zone_elevations):.2f}m (range {min(zone_elevations):.2f}-{max(zone_elevations):.2f}m)"
+        )
+    print(
+        f"  Distance to primary production area (id={primary_production_area_id}): "
+        f"sub-area avg={np.mean(subarea_distances):.1f}m vs. full zone avg={np.mean(zone_distances):.1f}m"
+    )
+    print()
+
 
 
 def _trace_flow_path_cells(
