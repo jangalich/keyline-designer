@@ -19,10 +19,23 @@ calls compute_water_eligible_cells() itself directly, several times, with
 individual gate thresholds swapped for "always pass" values (0/infinity)
 to isolate one real gate at a time -- the gate math itself is never
 duplicated, only which of the function's own real checks can actually
-bind is varied per call. See _full_extent_boundary()'s own docstring for
-how the on-parcel/boundary-setback gate specifically is isolated out (no
-existing parameter disables that check directly, since boundary_polygon_utm
-is required, not optional).
+bind is varied per call.
+
+Every isolation call uses the REAL boundary_polygon_utm, never a
+synthetic stand-in -- an earlier version of this section used a
+synthetic boundary covering the DEM's entire extent (to make the
+on-parcel/setback gate a no-op) for the service-distance isolation
+calls specifically. That inadvertently broke the downstream-clearance
+gate too: that gate checks for a confirmed exit from the SAME
+boundary_polygon_utm argument, and a boundary large enough to contain
+the whole DEM makes a confirmed exit structurally impossible for every
+cell (a flow path only ever walks within the DEM's own grid). Fixed --
+see the gate-breakdown section's own comment for the full regression
+note. The on-parcel containment check has no override at all
+(boundary_polygon_utm is required, not optional) -- only its SETBACK
+distance can be disabled (min_boundary_setback_meters=0.0), so the
+service-distance isolation below is "on-parcel required, setback
+waived," not a pure isolation from every other gate.
 
 Requires real network access (a real USGS DEM fetch via dem_data.py, plus
 production_area.py's own SSURGO/canopy/road fetches) -- this is a live
@@ -43,7 +56,7 @@ import argparse
 
 import numpy as np
 from rasterio.warp import transform as warp_transform
-from shapely.geometry import Point, Polygon, box
+from shapely.geometry import Point, Polygon
 from shapely.prepared import prep
 
 from dem_data import get_dem_for_boundary
@@ -98,30 +111,6 @@ def _report_cell_count(label: str, mask, dem: dict) -> None:
     cell_count = int(mask.sum())
     acres = cell_count * cell_area_acres(dem)
     print(f"  {label}: {cell_count} cells, {acres:.3f} acres")
-
-
-def _full_extent_boundary(dem: dict, margin_meters: float = 10_000.0) -> Polygon:
-    """
-    A synthetic boundary polygon covering the DEM's entire extent plus a
-    large margin -- used ONLY to isolate compute_water_eligible_cells()'s
-    service-distance gate from its on-parcel/boundary-setback gate for
-    diagnostic purposes. There's no parameter that disables the on-parcel
-    check directly (boundary_polygon_utm is a required argument, not a
-    toggle, and every real DEM cell must be tested against SOME boundary
-    polygon) -- so instead, every real DEM cell's center is guaranteed to
-    fall on-parcel and comfortably past any setback against THIS polygon,
-    making that gate a real no-op for this input, without touching or
-    reimplementing the gate's own logic at all.
-    """
-    rows, cols = dem["array"].shape
-    px, py = dem["resolution_meters"]
-    origin_x = dem["origin_x"]
-    origin_y = dem["origin_y"]
-    min_x = origin_x - margin_meters
-    max_x = origin_x + cols * px + margin_meters
-    max_y = origin_y + margin_meters
-    min_y = origin_y - rows * py - margin_meters
-    return box(min_x, min_y, max_x, max_y)
 
 
 def main(
@@ -288,23 +277,48 @@ def main(
 
     # Gate breakdown: every call below is the REAL compute_water_eligible_cells()
     # itself, just with individual gate thresholds swapped for "always pass"
-    # values (0 / infinity, or a synthetic full-extent boundary -- see
-    # _full_extent_boundary()'s own docstring) to isolate one real gate at a
-    # time. No gate logic is reimplemented here.
+    # values (0 / infinity) to isolate one real gate at a time. No gate logic
+    # is reimplemented here.
     #
-    # Items 1/2/2a/2b below pass min_downstream_clearance_meters=0.0 to keep
-    # the NEW downstream-clearance gate's own THRESHOLD out of these
-    # isolation numbers as much as possible -- but note this can't fully
-    # isolate them from that gate's structural "the flow path must actually
-    # confirm an exit" requirement (no downhill neighbor, a cycle, or
-    # max_steps all still fail it regardless of threshold); a real property
-    # where the traced flow paths never confirm an exit at all would still
-    # depress these numbers somewhat. Item 3 (now "ALL FOUR gates combined")
-    # uses the real downstream_clearance_meters value, since it's meant to
-    # match find_candidate_zones()'s own real, complete output.
+    # REGRESSION FIXED HERE: items 2/2a/2b used to pass a synthetic
+    # "_full_extent_boundary()" (the DEM's own extent plus a 10,000m margin)
+    # in place of boundary_polygon_utm, specifically to make the on-parcel/
+    # setback gate (#3) a trivial no-op. That inadvertently ALSO broke the
+    # downstream-clearance gate (#4) added since -- #4 checks for a confirmed
+    # exit from that SAME boundary_polygon_utm argument, and a boundary large
+    # enough to contain the entire DEM makes a confirmed exit structurally
+    # IMPOSSIBLE for every single cell (a flow path only ever walks within the
+    # DEM's own grid, which is always smaller than a 10,000m-margin box) --
+    # min_downstream_clearance_meters=0.0 only relaxes gate #4's DISTANCE
+    # threshold, not its separate "must actually confirm an exit" requirement,
+    # so it could never rescue this. The result: service_distance_mask was
+    # unconditionally empty regardless of real service distance, which made
+    # BOTH too_far_mask and too_close_mask unconditionally empty too --
+    # reporting "excluded as TOO FAR" and "excluded as TOO CLOSE" as the same
+    # full drainage_mask_after count simultaneously, which cannot be true for
+    # a real per-cell distance test (confirmed directly: the same candidate
+    # cell that never registers a confirmed exit against the huge boundary
+    # exits cleanly, with real distance, against the REAL boundary_polygon_utm).
+    #
+    # Fix: items 2/2a/2b now use the REAL boundary_polygon_utm (same as items
+    # 1 and 3) with min_boundary_setback_meters=0.0 -- this disables gate #3's
+    # SETBACK distance specifically (its only overridable knob) while leaving
+    # on-parcel containment intact, since on-parcel-ness can't be waived
+    # without breaking gate #4 the same way the old synthetic boundary did.
+    # These three items are therefore "service-distance + downstream-
+    # clearance, on-parcel required, setback waived" rather than pure
+    # service-distance isolation -- the closest isolation achievable without
+    # the same structural conflict. Items 1/2/2a/2b all still pass
+    # min_downstream_clearance_meters=0.0 to keep gate #4's THRESHOLD out of
+    # these numbers as much as possible; its "must confirm an exit"
+    # requirement remains (unavoidable via any parameter), so a real property
+    # where a candidate's flow path never confirms an exit at all would still
+    # depress these numbers somewhat -- a real, bounded caveat now, not the
+    # unconditional 100% failure the old synthetic boundary caused. Item 3
+    # ("ALL FOUR gates combined") uses the real downstream_clearance_meters
+    # value, since it's meant to match find_candidate_zones()'s own real,
+    # complete output.
     print("=== Service-distance / boundary-setback gate breakdown (post-dilation mask) ===\n")
-
-    full_extent_boundary = _full_extent_boundary(dem)
 
     # 1. On-parcel + boundary-setback gate ALONE (service-distance disabled
     #    via max=infinity/min=0, using the REAL property boundary/setback).
@@ -323,11 +337,12 @@ def main(
         parcel_setback_mask, dem,
     )
 
-    # 2. Service-distance gate ALONE (boundary/setback disabled via the
-    #    synthetic full-extent boundary + min_boundary_setback_meters=0,
-    #    using the REAL MAX/MIN_SERVICE_DISTANCE_METERS).
+    # 2. Service-distance gate (boundary-SETBACK disabled via
+    #    min_boundary_setback_meters=0, using the REAL boundary_polygon_utm
+    #    -- on-parcel containment still required, using the REAL
+    #    MAX/MIN_SERVICE_DISTANCE_METERS).
     service_distance_mask, _ = compute_water_eligible_cells(
-        dem, production_areas, full_extent_boundary,
+        dem, production_areas, boundary_polygon_utm,
         min_valley_contributing_area_acres=min_contributing_acres,
         max_service_distance_meters=MAX_SERVICE_DISTANCE_METERS,
         min_service_distance_meters=MIN_SERVICE_DISTANCE_METERS,
@@ -336,8 +351,8 @@ def main(
         min_downstream_clearance_meters=0.0,
     )
     _report_cell_count(
-        f"Service-distance gate alone (MAX={MAX_SERVICE_DISTANCE_METERS}m, "
-        f"MIN={MIN_SERVICE_DISTANCE_METERS}m, on-parcel/setback disabled)",
+        f"Service-distance gate (MAX={MAX_SERVICE_DISTANCE_METERS}m, "
+        f"MIN={MIN_SERVICE_DISTANCE_METERS}m, setback disabled, on-parcel still required)",
         service_distance_mask, dem,
     )
 
@@ -345,7 +360,7 @@ def main(
     #     a cell excluded here failed to find ANY production area within
     #     MAX_SERVICE_DISTANCE_METERS.
     too_far_mask, _ = compute_water_eligible_cells(
-        dem, production_areas, full_extent_boundary,
+        dem, production_areas, boundary_polygon_utm,
         min_valley_contributing_area_acres=min_contributing_acres,
         max_service_distance_meters=MAX_SERVICE_DISTANCE_METERS,
         min_service_distance_meters=0.0,
@@ -366,7 +381,7 @@ def main(
     #     opposite fix (a smaller MIN_SERVICE_DISTANCE_METERS, not a
     #     larger MAX_SERVICE_DISTANCE_METERS).
     too_close_mask, _ = compute_water_eligible_cells(
-        dem, production_areas, full_extent_boundary,
+        dem, production_areas, boundary_polygon_utm,
         min_valley_contributing_area_acres=min_contributing_acres,
         max_service_distance_meters=float("inf"),
         min_service_distance_meters=MIN_SERVICE_DISTANCE_METERS,
