@@ -251,6 +251,42 @@ def _branch_to_wgs84_linestring(dem: dict, branch: list[tuple[int, int]]) -> dic
     return {"type": "LineString", "coordinates": list(zip(lons, lats))}
 
 
+def get_flow_direction_for_dem(dem: dict) -> np.ndarray:
+    """
+    Runs the fill -> flow-direction prefix of the delineate_valleys()
+    pipeline (see module docstring) and stops there -- one step before
+    get_flow_accumulation_for_dem() itself, and well before the stream
+    threshold/tracing steps that turn any of this into discrete valley
+    branches.
+
+    Returns a single (rows, cols, 2) int32 array, same rows/cols shape and
+    alignment as dem['array'] and get_flow_accumulation_for_dem()'s own
+    output (a cell at (row, col) means the same thing across all three).
+
+    ENCODING: this is NOT the classic D8 8-direction bitmask/integer code
+    (1, 2, 4, 8, 16, 32, 64, 128 for N/NE/E/SE/S/SW/W/NW) --
+    compute_flow_direction() itself never computes that code, so this
+    doesn't invent one just to expose it. Instead, the last axis holds
+    compute_flow_direction()'s own (flow_to_row, flow_to_col) pair,
+    stacked into one array:
+
+        target_row, target_col = get_flow_direction_for_dem(dem)[row, col]
+
+    i.e. the ABSOLUTE (row, col) of the single downhill neighbor that
+    cell flows into (not a relative offset or direction code). (-1, -1)
+    means no downhill neighbor at all (a grid-edge outlet, or a flat-
+    plateau tie -- see module docstring) -- matches
+    compute_flow_direction()'s own -1 sentinel exactly.
+
+    A caller walking the grid cell-to-cell reads target_row, target_col =
+    get_flow_direction_for_dem(dem)[row, col]; if target_row < 0, stop
+    (outlet/tie); otherwise move to (target_row, target_col) and repeat.
+    """
+    filled = fill_depressions(dem["array"])
+    flow_to_row, flow_to_col = compute_flow_direction(filled, dem["resolution_meters"])
+    return np.stack([flow_to_row, flow_to_col], axis=-1)
+
+
 def get_flow_accumulation_for_dem(dem: dict) -> np.ndarray:
     """
     Runs the fill -> flow-direction -> flow-accumulation prefix of the

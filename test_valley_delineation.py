@@ -22,6 +22,7 @@ from valley_delineation import (
     delineate_valleys,
     fill_depressions,
     get_flow_accumulation_for_dem,
+    get_flow_direction_for_dem,
     valleys_to_geojson,
 )
 from feature_schema import validate_feature_collection
@@ -138,6 +139,43 @@ print(
     "get_flow_accumulation_for_dem returns a DEM-aligned, non-negative grid with the synthetic "
     f"drainage path (max {max(valley_floor_accumulation)}) accumulating far more than an off-path "
     f"ridge cell ({ridge_accumulation})."
+)
+
+
+# --- get_flow_direction_for_dem: exposes the SAME (row,col)-target pair ---
+# --- compute_flow_direction() itself computes, stacked into one array   ---
+
+flow_direction_grid = get_flow_direction_for_dem(_dem(ramp))
+assert flow_direction_grid.shape == ramp.shape + (2,), (
+    f"flow direction grid should be shaped (rows, cols, 2) = {ramp.shape + (2,)}, got {flow_direction_grid.shape}"
+)
+
+# Cross-check against fill_depressions() + compute_flow_direction() run
+# directly, by hand, on the same ramp -- get_flow_direction_for_dem()
+# should be nothing more than those two calls stacked into one array.
+filled_ramp = fill_depressions(ramp)
+expected_ftr, expected_ftc = compute_flow_direction(filled_ramp, RESOLUTION)
+assert np.array_equal(flow_direction_grid[:, :, 0], expected_ftr) and np.array_equal(
+    flow_direction_grid[:, :, 1], expected_ftc
+), "get_flow_direction_for_dem() must match fill_depressions() + compute_flow_direction() run directly, cell for cell"
+
+# The center cell (elev 20) flows to (2, 1) (elev 10) -- same known
+# result the compute_flow_direction() check above already confirmed.
+assert tuple(flow_direction_grid[1, 1]) == (2, 1), (
+    f"center cell should flow to (2, 1), got {tuple(flow_direction_grid[1, 1])}"
+)
+
+# (2, 1) (elev 10) is the ramp's global minimum -- no neighbor is lower,
+# so it must have no downhill target at all: (-1, -1), matching
+# compute_flow_direction()'s own no-target sentinel exactly.
+assert tuple(flow_direction_grid[2, 1]) == (-1, -1), (
+    f"the ramp's global minimum cell has no downhill neighbor and should read (-1, -1), "
+    f"got {tuple(flow_direction_grid[2, 1])}"
+)
+print(
+    "get_flow_direction_for_dem returns a (rows, cols, 2) grid matching fill_depressions() + "
+    "compute_flow_direction() run directly: center cell flows to (2, 1), the grid's own minimum "
+    "correctly reads (-1, -1) (no downhill neighbor)."
 )
 
 
