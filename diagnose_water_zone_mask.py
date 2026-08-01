@@ -368,10 +368,21 @@ def main(
         survey_buffer_meters=buffer_meters,
         min_downstream_clearance_meters=0.0,
     )
+    # BUG FIXED HERE: this used to subtract too_far_mask from
+    # drainage_mask_after (the full post-dilation mask, on-parcel or not).
+    # too_far_mask itself is on-parcel-required (compute_water_eligible_cells()'s
+    # on-parcel gate has no override), so it can only ever contain a subset
+    # of on_parcel_mask -- subtracting it from the much larger
+    # drainage_mask_after counted every off-parcel cell as spuriously
+    # "excluded as too far" too, even though those cells were never in
+    # too_far_mask's own universe to begin with. The correct complement is
+    # on_parcel_mask (item 1 above), the same on-parcel-filtered universe
+    # the "gate alone" line uses.
+    too_far_excluded_mask = on_parcel_mask & ~too_far_mask
     _report_cell_count(
         f"  -> excluded as TOO FAR (exceeds MAX_SERVICE_DISTANCE_METERS={MAX_SERVICE_DISTANCE_METERS}m "
         "from every production area)",
-        drainage_mask_after & ~too_far_mask, dem,
+        too_far_excluded_mask, dem,
     )
 
     # 2b. "Too close" only: min-distance real, max-distance disabled (inf) --
@@ -389,12 +400,51 @@ def main(
         survey_buffer_meters=buffer_meters,
         min_downstream_clearance_meters=0.0,
     )
+    # Same fix as too_far_excluded_mask above: complement against
+    # on_parcel_mask, not drainage_mask_after.
+    too_close_excluded_mask = on_parcel_mask & ~too_close_mask
     _report_cell_count(
         f"  -> excluded as TOO CLOSE (within MIN_SERVICE_DISTANCE_METERS={MIN_SERVICE_DISTANCE_METERS}m "
         "of every production area, but not touching any of them)",
-        drainage_mask_after & ~too_close_mask, dem,
+        too_close_excluded_mask, dem,
     )
     print()
+
+    # --- Internal consistency check -----------------------------------
+    # By construction, too_far_mask = {on-parcel cells passing gate4 AND
+    # the max-distance test} and too_close_mask = {on-parcel cells passing
+    # gate4 AND the min-distance test}, both restricted to on_parcel_mask
+    # and sharing the same gate1/gate4(min_downstream_clearance_meters=0.0)
+    # conditions as service_distance_mask (which requires BOTH distance
+    # tests). So (on_parcel_mask \ too_far_mask) union (on_parcel_mask \
+    # too_close_mask) == on_parcel_mask \ service_distance_mask exactly,
+    # and by inclusion-exclusion:
+    #   too_far_excluded_count + too_close_excluded_count - overlap_count
+    #   == on_parcel_count - service_distance_pass_count
+    # A mismatch here means the isolation calls above no longer share the
+    # same universe/gate conditions as service_distance_mask -- exactly
+    # the class of regression that produced the TOO FAR/TOO CLOSE bug this
+    # check exists to catch automatically next time.
+    on_parcel_count = int(on_parcel_mask.sum())
+    service_distance_pass_count = int(service_distance_mask.sum())
+    too_far_excluded_count = int(too_far_excluded_mask.sum())
+    too_close_excluded_count = int(too_close_excluded_mask.sum())
+    overlap_count = int((too_far_excluded_mask & too_close_excluded_mask).sum())
+
+    lhs = too_far_excluded_count + too_close_excluded_count - overlap_count
+    rhs = on_parcel_count - service_distance_pass_count
+    print("Internal consistency check: (too_far_excluded + too_close_excluded - overlap) "
+          "== (on_parcel_count - service_distance_pass_count)")
+    print(f"  too_far_excluded_count={too_far_excluded_count}, too_close_excluded_count={too_close_excluded_count}, "
+          f"overlap_count={overlap_count} -> lhs={lhs}")
+    print(f"  on_parcel_count={on_parcel_count}, service_distance_pass_count={service_distance_pass_count} -> rhs={rhs}")
+    if lhs == rhs:
+        print(f"  PASS: {lhs} == {rhs}\n")
+    else:
+        print(f"  WARNING: consistency check FAILED ({lhs} != {rhs}) -- the gate-breakdown "
+              "isolation calls above may no longer share the same universe/gate conditions as "
+              "service_distance_mask. Treat the TOO FAR/TOO CLOSE numbers above as unreliable "
+              "until this is investigated.\n")
 
     # 3. ALL FOUR gates combined -- this is compute_water_eligible_cells()'s
     #    own real output at this run's actual parameters, i.e. exactly what
