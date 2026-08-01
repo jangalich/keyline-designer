@@ -614,4 +614,126 @@ print(
     "waist-splitting only triggers on a genuine pinch, not any two-lobe shape."
 )
 
+# =====================================================================
+# Canopy / existing-road hard exclusions: additional cell-level AND'd
+# gates in compute_water_eligible_cells(), reusing production_area.py's
+# already-validated canopy_height_data.tree_root_zone_mask()/farm_roads_
+# data.get_road_exclusion_union_utm() building blocks directly (see that
+# function's own docstring, gates 4/5) rather than reimplementing either.
+# Both default to a sentinel meaning "never checked at all" (skip the
+# gate) so every existing call above -- none of which pass either
+# parameter -- is completely unaffected; identify_water_system_candidate_
+# zones() is what actually makes canopy MANDATORY (see that function's
+# own dedicated offline check in test_water_system_candidate_pipeline.py/
+# test_canopy_height_data.py-style hard-fail coverage).
+# =====================================================================
+
+from canopy_height_data import TREE_ROOT_ZONE_BUFFER_METERS  # noqa: E402
+from farm_roads_data import ROAD_EXCLUSION_BUFFER_METERS  # noqa: E402
+
+assert wcz.WATER_ZONE_CANOPY_BUFFER_METERS == TREE_ROOT_ZONE_BUFFER_METERS, (
+    "WATER_ZONE_CANOPY_BUFFER_METERS is numerically identical to production's own TREE_ROOT_ZONE_BUFFER_METERS "
+    "today, but must stay a SEPARATE, independently-named constant (see its own docstring) -- if this fails, "
+    "check whether that was an intentional retune or an accidental re-coupling"
+)
+assert wcz.WATER_ZONE_ROAD_BUFFER_METERS != ROAD_EXCLUSION_BUFFER_METERS, (
+    "WATER_ZONE_ROAD_BUFFER_METERS (10ft) is deliberately a real, nonzero buffer, unlike production's own "
+    f"ROAD_EXCLUSION_BUFFER_METERS default ({ROAD_EXCLUSION_BUFFER_METERS}, a no-op) -- these must stay distinct"
+)
+print(
+    f"WATER_ZONE_CANOPY_BUFFER_METERS ({wcz.WATER_ZONE_CANOPY_BUFFER_METERS}m) and WATER_ZONE_ROAD_BUFFER_METERS "
+    f"({wcz.WATER_ZONE_ROAD_BUFFER_METERS}m) are separate, independently-tunable constants from production_area.py's "
+    "own canopy/road buffers, per this pipeline's established convention."
+)
+
+
+# --- canopy: sentinel default (never checked) leaves the baseline mask unchanged ---
+
+_canopy_baseline_mask = compute_water_eligible_cells(SINGLE_COLUMN_DEM, PRODUCTION_AREA_ABOVE, BOUNDARY)
+assert int(_canopy_baseline_mask.sum()) == len(eligible_cells), (
+    "with canopy_root_zone_mask_utm left at its default sentinel, the gate must be a complete no-op"
+)
+print("Canopy gate: left unchecked (default sentinel), compute_water_eligible_cells() is completely unaffected.")
+
+
+# --- canopy: a real mask marking every cell as tree-root-zone excludes everything ---
+
+_all_trees_mask = np.ones(SINGLE_COLUMN_DEM["array"].shape, dtype=bool)
+_canopy_excluded_mask = compute_water_eligible_cells(
+    SINGLE_COLUMN_DEM, PRODUCTION_AREA_ABOVE, BOUNDARY, canopy_root_zone_mask_utm=_all_trees_mask
+)
+assert int(_canopy_excluded_mask.sum()) == 0, (
+    "a canopy_root_zone_mask_utm marking every cell as tree-root-zone must exclude every cell -- a hard, "
+    "cell-level AND gate, not a soft preference"
+)
+
+# --- canopy: a real all-False mask (checked, genuinely no trees) matches baseline ---
+
+_no_trees_mask = np.zeros(SINGLE_COLUMN_DEM["array"].shape, dtype=bool)
+_canopy_clean_mask = compute_water_eligible_cells(
+    SINGLE_COLUMN_DEM, PRODUCTION_AREA_ABOVE, BOUNDARY, canopy_root_zone_mask_utm=_no_trees_mask
+)
+assert int(_canopy_clean_mask.sum()) == len(eligible_cells), (
+    "a real, checked, all-False canopy mask (genuinely no trees anywhere) must match the no-canopy-check baseline"
+)
+print(
+    "Canopy gate: a real tree-root-zone mask hard-excludes every marked cell (0 eligible cells with an "
+    "all-trees mask), while a real, checked all-clear mask matches the unchecked baseline exactly -- "
+    "confirming this is a genuine per-cell AND gate, not a no-op regardless of mask content."
+)
+
+
+# --- roads: sentinel default / real None (checked, nothing found) are both no-ops ---
+
+_road_sentinel_mask = compute_water_eligible_cells(SINGLE_COLUMN_DEM, PRODUCTION_AREA_ABOVE, BOUNDARY)
+_road_none_mask = compute_water_eligible_cells(
+    SINGLE_COLUMN_DEM, PRODUCTION_AREA_ABOVE, BOUNDARY, road_exclusion_union_utm=None
+)
+assert int(_road_sentinel_mask.sum()) == int(_road_none_mask.sum()) == len(eligible_cells), (
+    "both the default sentinel (never checked) and a real None (checked, no roads found nearby) must leave "
+    "the mask unaffected"
+)
+print("Road gate: both the unchecked sentinel and a real 'no roads found' None result are correctly no-ops.")
+
+
+# --- roads: a real union covering the whole eligible band excludes everything ---
+
+_whole_band_road_union = BOUNDARY
+_road_excluded_mask = compute_water_eligible_cells(
+    SINGLE_COLUMN_DEM, PRODUCTION_AREA_ABOVE, BOUNDARY, road_exclusion_union_utm=_whole_band_road_union
+)
+assert int(_road_excluded_mask.sum()) == 0, (
+    "a road_exclusion_union_utm covering the entire eligible band must exclude every cell -- a hard, "
+    "cell-level AND gate"
+)
+
+# --- roads: a union covering only PART of the eligible band excludes only that part ---
+
+_half_band_road_union = box(500000.0, 4499800.0, 500110.0, 4500000.0)  # west half only
+_partial_road_mask = compute_water_eligible_cells(
+    SINGLE_COLUMN_DEM, PRODUCTION_AREA_ABOVE, BOUNDARY, road_exclusion_union_utm=_half_band_road_union
+)
+_partial_count = int(_partial_road_mask.sum())
+assert 0 < _partial_count < len(eligible_cells), (
+    f"a road union covering only part of the eligible band should exclude only the overlapping cells, not "
+    f"all-or-nothing -- got {_partial_count} of {len(eligible_cells)}"
+)
+print(
+    f"Road gate: a real road union hard-excludes every cell it covers (0 of {len(eligible_cells)} survive a "
+    f"whole-band union; {_partial_count} of {len(eligible_cells)} survive a west-half-only union) -- a genuine "
+    "cell-level AND gate, never vectorized into a polygon buffer/difference."
+)
+
+
+# --- find_candidate_zones() forwards both new gates through to compute_water_eligible_cells() ---
+
+_zones_all_trees = find_candidate_zones(
+    SINGLE_COLUMN_DEM, PRODUCTION_AREA_ABOVE, BOUNDARY, canopy_root_zone_mask_utm=_all_trees_mask
+)
+assert _zones_all_trees == [], (
+    "find_candidate_zones() must forward canopy_root_zone_mask_utm through to compute_water_eligible_cells() -- "
+    "an all-trees mask should leave no eligible cells to cluster into zones at all"
+)
+print("find_candidate_zones() correctly forwards canopy_root_zone_mask_utm/road_exclusion_union_utm through to compute_water_eligible_cells().")
+
 print("\nAll water_candidate_zones checks passed.")

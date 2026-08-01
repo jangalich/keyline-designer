@@ -540,7 +540,7 @@ print("identify_production_areas() end-to-end (soil fetch mocked) reaches the id
 # mandatory canopy gate -- degrades GRACEFULLY on fetch failure rather than raising.
 # =====================================================================
 
-with mock_patch.object(pa, "get_road_exclusion_union_utm", lambda boundary_coordinates, dem: road_full_bench):
+with mock_patch.object(pa, "get_road_exclusion_union_utm", lambda boundary_coordinates, dem, buffer_meters=None: road_full_bench):
     end_to_end_road_patches = identify_production_areas(_dem(array), FULL_EXTENT_BOUNDARY, check_soil=False, check_roads=True)
 assert end_to_end_road_patches == [], (
     "identify_production_areas() end-to-end: a mocked road exclusion covering the entire slope-eligible bench "
@@ -549,7 +549,7 @@ assert end_to_end_road_patches == [], (
 print("identify_production_areas(): a real (mocked) road exclusion union is correctly wired through end-to-end.")
 
 
-def _raise_road_network_failure(boundary_coordinates, dem):
+def _raise_road_network_failure(boundary_coordinates, dem, buffer_meters=None):
     raise RuntimeError("simulated: road fetch retries exhausted")
 
 

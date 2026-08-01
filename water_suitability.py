@@ -131,10 +131,15 @@ from shapely.geometry import LineString, MultiLineString, Point, Polygon, shape
 from dem_data import get_dem_for_boundary
 from feature_schema import CONFIDENCE_HIGH, CONFIDENCE_LOW, CONFIDENCE_MEDIUM, make_feature, make_feature_collection
 from hydrology_data import get_water_features_for_boundary
-from production_area import identify_production_areas
+from production_area import _fetch_road_exclusion_union_utm, get_required_tree_root_zone_mask_utm, identify_production_areas
 from soil_data import get_saturated_hydraulic_conductivity_for_polygon, get_soil_geometries_for_polygon
 from valley_delineation import delineate_valleys
-from water_candidate_zones import find_candidate_zones
+from water_candidate_zones import (
+    WATER_ZONE_CANOPY_BUFFER_METERS,
+    WATER_ZONE_ROAD_BUFFER_METERS,
+    _ROAD_CHECK_UNCHECKED,
+    find_candidate_zones,
+)
 
 # --- composite weights (must sum to 1.0). See module docstring for the
 # full reasoning behind each. CONFIGURABLE.
@@ -1033,7 +1038,31 @@ def identify_water_suitability(
 
     valleys = delineate_valleys(dem)
     production_areas = identify_production_areas(dem, boundary_polygon_utm)
-    zones = find_candidate_zones(dem, production_areas, boundary_polygon_utm, **(zone_kwargs or {}))
+
+    # Same mandatory-canopy/optional-road wiring identify_water_system_
+    # candidate_zones() uses -- this entry point also reaches
+    # find_candidate_zones() directly (not through that function), so it
+    # needs its own copy of the same fetch-or-raise/fetch-or-degrade calls
+    # rather than silently leaving these new gates unchecked on this path.
+    canopy_root_zone_mask_utm = get_required_tree_root_zone_mask_utm(
+        boundary_polygon_utm, dem, buffer_meters=WATER_ZONE_CANOPY_BUFFER_METERS
+    )
+
+    try:
+        road_exclusion_union_utm = _fetch_road_exclusion_union_utm(
+            boundary_coordinates, dem, buffer_meters=WATER_ZONE_ROAD_BUFFER_METERS
+        )
+    except Exception:
+        road_exclusion_union_utm = _ROAD_CHECK_UNCHECKED
+
+    zones = find_candidate_zones(
+        dem,
+        production_areas,
+        boundary_polygon_utm,
+        canopy_root_zone_mask_utm=canopy_root_zone_mask_utm,
+        road_exclusion_union_utm=road_exclusion_union_utm,
+        **(zone_kwargs or {}),
+    )
 
     soil_data_by_zone_id: dict = {}
     if check_soil:

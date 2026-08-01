@@ -13,7 +13,8 @@ convex hull) -- see compute_water_eligible_cells()'s docstring.
             delineate_valleys() thresholds/traces internally)
         --> production areas (production_area.py)
         --> [this module] per-DEM-cell eligibility mask (contributing-area
-            PERCENTILE BAND + service distance + boundary setback)
+            PERCENTILE BAND + service distance + boundary setback +
+            canopy root-zone exclusion + existing-road exclusion)
         --> connected components -> waist-split -> cell-union footprint
             per cluster
         --> whole-zone scoring (one representative point per zone) ->
@@ -67,7 +68,9 @@ from dem_data import get_dem_for_boundary
 from feature_schema import CONFIDENCE_LOW, make_feature, make_feature_collection
 from production_area import (
     MIN_ZONE_WAIST_METERS,
+    _fetch_road_exclusion_union_utm,
     compute_slope_percent,
+    get_required_tree_root_zone_mask_utm,
     identify_production_areas,
     production_areas_to_geojson,
 )
@@ -203,6 +206,48 @@ WATER_ZONE_SURVEY_BUFFER_METERS = 10.0
 # property. CONFIGURABLE.
 WATER_ZONE_MIN_WAIST_METERS = MIN_ZONE_WAIST_METERS
 
+# How far past a tree-cell's own footprint the woody-vegetation hard
+# exclusion extends for water zones specifically -- reuses canopy_height_
+# data.tree_root_zone_mask() (the SAME threshold-then-dilate raster
+# operation production_area.py's own woody-vegetation gate uses), but at
+# its OWN buffer distance, not canopy_height_data.TREE_ROOT_ZONE_BUFFER_
+# METERS directly: a separate, independently-named constant even though
+# it happens to currently equal the same 10ft value -- same "constants
+# stay separate even when numerically identical" convention this
+# pipeline already applies elsewhere (e.g. this module's own
+# MIN_BOUNDARY_SETBACK_METERS/MIN_DOWNSTREAM_CLEARANCE_METERS history),
+# so a future retune of one doesn't silently couple to the other.
+# CONFIGURABLE.
+WATER_ZONE_CANOPY_BUFFER_METERS = 3.048  # 10ft
+
+# How far past a fetched road/right-of-way line's own mapped geometry the
+# hard water-zone exclusion extends -- reuses farm_roads_data.
+# get_road_exclusion_union_utm() (the SAME real vector road/ROW fetch
+# production_area.py's own existing-road gate uses), but at its OWN
+# buffer distance, not farm_roads_data.ROAD_EXCLUSION_BUFFER_METERS
+# directly (production's own default there is 0.0 -- a no-op buffer) --
+# same separate-constant reasoning as WATER_ZONE_CANOPY_BUFFER_METERS
+# above. This is a genuinely NEW exclusion for this module: water zones
+# haven't excluded roads before. CONFIGURABLE.
+WATER_ZONE_ROAD_BUFFER_METERS = 3.048  # 10ft
+
+# Sentinel distinguishing "the canopy/road check genuinely ran" from
+# "never checked at all" -- same convention production_area.py's own
+# _CANOPY_CHECK_UNCHECKED/_ROAD_CHECK_UNCHECKED use, for the same reason:
+# compute_water_eligible_cells()/find_candidate_zones() stay pure,
+# network-free, and directly unit-testable with these gates simply
+# skipped by default (see test_water_candidate_zones.py, which never
+# fetches either), while identify_water_system_candidate_zones() (the
+# real network entry point) is what actually makes the canopy gate
+# MANDATORY -- by always calling get_required_tree_root_zone_mask_utm()
+# (which itself either returns a real mask or raises/propagates, see that
+# function's own docstring), never leaving this sentinel active on the
+# real path. The road gate stays genuinely optional even at the network
+# layer (graceful degrade on fetch failure), same as production's own
+# check_roads handling.
+_CANOPY_CHECK_UNCHECKED = object()
+_ROAD_CHECK_UNCHECKED = object()
+
 WATER_SYSTEM_CANDIDATE_CONFIDENCE_NOTES = (
     "This identifies a general candidate zone for water-system "
     "infrastructure (keyline plowing patterns, pond/dam potential, ram "
@@ -254,13 +299,15 @@ def compute_water_eligible_cells(
     min_service_distance_meters: float = MIN_SERVICE_DISTANCE_METERS,
     min_boundary_setback_meters: float = MIN_BOUNDARY_SETBACK_METERS,
     survey_buffer_meters: float = WATER_ZONE_SURVEY_BUFFER_METERS,
+    canopy_root_zone_mask_utm=_CANOPY_CHECK_UNCHECKED,
+    road_exclusion_union_utm=_ROAD_CHECK_UNCHECKED,
 ) -> np.ndarray:
     """
     Cell-based STEP 1/2: computes the raw flow-accumulation grid directly
     from `dem` (valley_delineation.get_flow_accumulation_for_dem() — the
     same contributing-cell-count grid delineate_valleys() thresholds/
     traces internally, recomputed here rather than reusing a traced
-    branch) and gates each cell on THREE independent checks, ALL of which
+    branch) and gates each cell on FIVE independent checks, ALL of which
     must pass for a cell to be eligible:
 
       1. Contributing-area PERCENTILE BAND, not a single hard threshold:
@@ -327,6 +374,38 @@ def compute_water_eligible_cells(
          docstring for why per-cell tagging + per-cluster aggregation was
          removed in favor of this).
 
+      4. NOT within the woody-vegetation root zone: canopy_root_zone_mask_
+         utm (canopy_height_data.tree_root_zone_mask()'s own output, at
+         this module's own WATER_ZONE_CANOPY_BUFFER_METERS -- see that
+         constant's docstring) must be False at this cell. Reuses
+         production_area.py's already-validated canopy gate directly
+         (same fetch, same threshold-then-dilate raster mask, just a
+         separately-tunable buffer distance) rather than reimplementing
+         it -- pure raster AND, never vectorized into a polygon buffer/
+         difference (see canopy_height_data.py's own module docstring for
+         why that path caused the original hydric-soil sliver-
+         fragmentation bug). If canopy_root_zone_mask_utm is left at its
+         default sentinel (_CANOPY_CHECK_UNCHECKED -- "never checked at
+         all," the same convention production_area.py's own
+         _CANOPY_CHECK_UNCHECKED uses), this gate is skipped entirely --
+         see identify_water_system_candidate_zones() for how the real
+         network entry point makes this gate MANDATORY instead, by always
+         fetching-or-raising before this function is ever called.
+
+      5. NOT inside road_exclusion_union_utm: real road/right-of-way
+         vector geometry (farm_roads_data.get_road_exclusion_union_utm()'s
+         own output, at this module's own WATER_ZONE_ROAD_BUFFER_METERS),
+         tested via cell-center .contains(), same pattern production_
+         area.py's own existing-road gate uses -- a genuinely NEW
+         exclusion for this module (water zones haven't excluded roads
+         before). A real None (checked, no roads found nearby -- the
+         common, clean case) or the default sentinel (_ROAD_CHECK_
+         UNCHECKED, "never checked at all") both mean this gate is
+         skipped; only a real fetched union polygon excludes anything.
+         Unlike canopy, this stays OPTIONAL even on the real network path
+         (graceful degrade on fetch failure, mirroring production_area.py's
+         own check_roads handling) -- see module docstring.
+
     Elevation/gradient is deliberately NOT a gate here (see module
     docstring's "gravity is a preference, not a gate" framing) — do not
     add a min-gradient or elevation-band exclusion; a cell otherwise
@@ -363,6 +442,15 @@ def compute_water_eligible_cells(
     eligible_mask = np.zeros((rows, cols), dtype=bool)
     array = dem["array"]
 
+    canopy_checked = canopy_root_zone_mask_utm is not _CANOPY_CHECK_UNCHECKED
+
+    road_union = (
+        road_exclusion_union_utm
+        if road_exclusion_union_utm is not _ROAD_CHECK_UNCHECKED and road_exclusion_union_utm is not None
+        else None
+    )
+    road_prepared = prep(road_union) if road_union is not None else None
+
     for r, c in np.argwhere(band_mask):
         r, c = int(r), int(c)
         elevation = float(array[r, c])
@@ -375,6 +463,10 @@ def compute_water_eligible_cells(
         if not boundary_prepared.contains(point):
             continue
         if point.distance(boundary_line) < min_boundary_setback_meters:
+            continue
+        if canopy_checked and canopy_root_zone_mask_utm[r, c]:
+            continue
+        if road_prepared is not None and road_prepared.contains(point):
             continue
 
         within_service_distance = False
@@ -473,6 +565,8 @@ def find_candidate_zones(
     min_water_zone_area_acres: float = MIN_WATER_ZONE_AREA_ACRES,
     survey_buffer_meters: float = WATER_ZONE_SURVEY_BUFFER_METERS,
     min_zone_waist_meters: float = WATER_ZONE_MIN_WAIST_METERS,
+    canopy_root_zone_mask_utm=_CANOPY_CHECK_UNCHECKED,
+    road_exclusion_union_utm=_ROAD_CHECK_UNCHECKED,
 ) -> list[dict]:
     """
     Cell-based zone-filtering logic (Step 3) — see module docstring for
@@ -483,6 +577,13 @@ def find_candidate_zones(
     (min_gravity_gradient is not part of this signature at all — it's
     water_suitability.py's scoring concern, not a generation-time
     parameter).
+
+    canopy_root_zone_mask_utm/road_exclusion_union_utm are forwarded
+    straight through to compute_water_eligible_cells() -- see that
+    function's own docstring (gates 4/5) for what each does and its
+    default-sentinel/skipped-when-unset behavior. This function itself
+    does no fetching of either -- identify_water_system_candidate_zones()
+    is what actually fetches them for the real network path.
 
     Builds the per-cell eligibility mask (compute_water_eligible_cells() —
     including its own survey_buffer_meters dilation of the raw
@@ -573,6 +674,8 @@ def find_candidate_zones(
         min_service_distance_meters,
         min_boundary_setback_meters,
         survey_buffer_meters,
+        canopy_root_zone_mask_utm,
+        road_exclusion_union_utm,
     )
 
     labels, num_components = connected_components(eligible_mask)
@@ -700,6 +803,20 @@ def identify_water_system_candidate_zones(
     find_candidate_zones() itself no longer consumes delineate_valleys()'s
     traced branches at all; it derives its own flow-accumulation grid
     directly from `dem` (see find_candidate_zones()'s own docstring).
+
+    This is the network entry point that makes find_candidate_zones()'s
+    canopy exclusion genuinely MANDATORY: it always calls production_area.
+    get_required_tree_root_zone_mask_utm() (at this module's own
+    WATER_ZONE_CANOPY_BUFFER_METERS) before find_candidate_zones() ever
+    runs, so a missing/unreliable canopy fetch raises (RuntimeError for no
+    coverage at all, canopy_height_data.CanopyCoverageIncompleteError for
+    coverage too sparse to trust) rather than silently proceeding without
+    the check -- same hard-fail behavior as production_area.identify_
+    production_areas()'s own woody-vegetation gate, reusing that exact
+    function rather than a parallel copy. The road exclusion, by
+    contrast, is fetched too but degrades GRACEFULLY on failure (falls
+    back to "not checked," same as production's own check_roads default)
+    -- see compute_water_eligible_cells()'s own docstring (gates 4/5).
     """
     if dem is None:
         dem = get_dem_for_boundary(boundary_coordinates)
@@ -715,7 +832,25 @@ def identify_water_system_candidate_zones(
     valleys = delineate_valleys(dem)
     production_areas = identify_production_areas(dem, boundary_polygon_utm)
 
-    zones = find_candidate_zones(dem, production_areas, boundary_polygon_utm, **zone_kwargs)
+    canopy_root_zone_mask_utm = get_required_tree_root_zone_mask_utm(
+        boundary_polygon_utm, dem, buffer_meters=WATER_ZONE_CANOPY_BUFFER_METERS
+    )
+
+    try:
+        road_exclusion_union_utm = _fetch_road_exclusion_union_utm(
+            boundary_coordinates, dem, buffer_meters=WATER_ZONE_ROAD_BUFFER_METERS
+        )
+    except Exception:
+        road_exclusion_union_utm = _ROAD_CHECK_UNCHECKED
+
+    zones = find_candidate_zones(
+        dem,
+        production_areas,
+        boundary_polygon_utm,
+        canopy_root_zone_mask_utm=canopy_root_zone_mask_utm,
+        road_exclusion_union_utm=road_exclusion_union_utm,
+        **zone_kwargs,
+    )
 
     return {
         "zones_geojson": zones_to_geojson(zones),

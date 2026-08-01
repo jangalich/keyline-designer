@@ -129,8 +129,8 @@ from shapely.geometry import Point, Polygon, box, mapping, shape
 from shapely.ops import unary_union
 from shapely.prepared import prep
 
-from canopy_height_data import get_canopy_height_for_boundary, tree_root_zone_mask
-from farm_roads_data import get_road_exclusion_union_utm
+from canopy_height_data import TREE_ROOT_ZONE_BUFFER_METERS, get_canopy_height_for_boundary, tree_root_zone_mask
+from farm_roads_data import ROAD_EXCLUSION_BUFFER_METERS, get_road_exclusion_union_utm
 from feature_schema import CONFIDENCE_LOW, make_feature, make_feature_collection
 from production_suitability import ASPECT_FACTOR_WEIGHT, SLOPE_FACTOR_WEIGHT
 from raster_grid import (
@@ -370,18 +370,28 @@ def _fetch_disqualifying_soil_union(wkt_polygon: str, dem: dict):
     return unary_union(pieces) if pieces else None
 
 
-def _fetch_road_exclusion_union_utm(boundary_coordinates: list, dem: dict):
+def _fetch_road_exclusion_union_utm(
+    boundary_coordinates: list, dem: dict, buffer_meters: float = ROAD_EXCLUSION_BUFFER_METERS
+):
     """
     Thin wrapper around farm_roads_data.get_road_exclusion_union_utm() --
-    exists so BOTH identify_production_areas() (this module) and
-    production_area_ceiling.identify_optimized_production_areas() call
-    the SAME function (imported from here, not straight from farm_roads_
-    data.py independently in each caller), the same "shared helper, one
-    definition" reasoning _fetch_disqualifying_soil_union() above already
-    established for the hydric-soil fetch -- among other things, this
-    means a single test mock of get_road_exclusion_union_utm here covers
-    both entry points, rather than needing to patch two independent
-    import bindings.
+    exists so every entry point that needs a road-exclusion union
+    (identify_production_areas() and production_area_ceiling.
+    identify_optimized_production_areas() in this pipeline;
+    water_candidate_zones.py's own water-zone road exclusion, at its own
+    WATER_ZONE_ROAD_BUFFER_METERS) calls the SAME function (imported from
+    here, not straight from farm_roads_data.py independently in each
+    caller), the same "shared helper, one definition" reasoning _fetch_
+    disqualifying_soil_union() above already established for the
+    hydric-soil fetch -- among other things, this means a single test
+    mock of get_road_exclusion_union_utm here covers every entry point,
+    rather than needing to patch several independent import bindings.
+
+    buffer_meters defaults to ROAD_EXCLUSION_BUFFER_METERS (production's
+    own buffer) but is a real, independent parameter -- a caller with its
+    own separately-tunable buffer constant (e.g.
+    water_candidate_zones.WATER_ZONE_ROAD_BUFFER_METERS) passes it
+    explicitly rather than this module's value silently applying instead.
 
     Returns None if no roads were found nearby -- the common, clean case,
     same "checked and genuinely nothing there" convention _fetch_
@@ -389,16 +399,25 @@ def _fetch_road_exclusion_union_utm(boundary_coordinates: list, dem: dict):
     propagate up uncaught; callers degrade gracefully on their own (see
     identify_production_areas()'s own check_roads handling).
     """
-    return get_road_exclusion_union_utm(boundary_coordinates, dem)
+    return get_road_exclusion_union_utm(boundary_coordinates, dem, buffer_meters=buffer_meters)
 
 
-def _fetch_tree_root_zone_mask_utm(boundary_coordinates: list, dem: dict):
+def _fetch_tree_root_zone_mask_utm(
+    boundary_coordinates: list, dem: dict, buffer_meters: float = TREE_ROOT_ZONE_BUFFER_METERS
+):
     """
     Fetches USGS 3DEP lidar HAG coverage for this boundary and returns the
     dilated tree-root-zone cell mask (canopy_height_data.tree_root_zone_
     mask()'s own output -- already on dem's own grid, so it can be used
     directly against compute_step1_eligible_cells()'s cell indices with no
     further alignment work).
+
+    buffer_meters defaults to TREE_ROOT_ZONE_BUFFER_METERS (production's
+    own buffer) but is threaded through to tree_root_zone_mask() as a
+    real, independent parameter -- a caller with its own separately-
+    tunable buffer constant (e.g. water_candidate_zones.
+    WATER_ZONE_CANOPY_BUFFER_METERS) passes it explicitly rather than
+    this module's value silently applying instead.
 
     Returns None if no HAG coverage exists for this boundary at all -- a
     genuine no-data outcome (see canopy_height_data.py's own docstring),
@@ -413,20 +432,28 @@ def _fetch_tree_root_zone_mask_utm(boundary_coordinates: list, dem: dict):
     canopy = get_canopy_height_for_boundary(boundary_coordinates, dem)
     if canopy is None:
         return None
-    return tree_root_zone_mask(canopy["array"], canopy["resolution_meters"])
+    return tree_root_zone_mask(canopy["array"], canopy["resolution_meters"], buffer_meters=buffer_meters)
 
 
-def get_required_tree_root_zone_mask_utm(boundary_polygon_utm: Polygon, dem: dict):
+def get_required_tree_root_zone_mask_utm(
+    boundary_polygon_utm: Polygon, dem: dict, buffer_meters: float = TREE_ROOT_ZONE_BUFFER_METERS
+):
     """
     Fetches a REQUIRED (non-optional) tree-root-zone mask for
     boundary_polygon_utm -- the shared "fetch canopy, or fail hard"
     building block behind the woody-vegetation gate, so every entry point
-    that ultimately calls compute_step1_eligible_cells() applies it
-    identically instead of each reimplementing (or, worse, quietly
-    omitting) its own copy. identify_production_areas() (this module) and
-    production_area_ceiling.identify_optimized_production_areas() both
-    call this directly, rather than either duplicating the boundary-
-    reprojection + fetch + raise sequence itself.
+    that ultimately needs one applies it identically instead of each
+    reimplementing (or, worse, quietly omitting) its own copy.
+    identify_production_areas() (this module), production_area_ceiling.
+    identify_optimized_production_areas(), and water_candidate_zones.py's
+    own mandatory canopy exclusion (at its own WATER_ZONE_CANOPY_BUFFER_
+    METERS) all call this directly, rather than any of them duplicating
+    the boundary-reprojection + fetch + raise sequence itself.
+
+    buffer_meters defaults to TREE_ROOT_ZONE_BUFFER_METERS (production's
+    own buffer) and is threaded straight through to _fetch_tree_root_
+    zone_mask_utm() -- see that function's own docstring for why this
+    stays a real, independent parameter rather than a shared constant.
 
     Reprojects boundary_polygon_utm to WGS84 (the lon/lat convention
     canopy_height_data.get_canopy_height_for_boundary() takes) and calls
@@ -445,7 +472,7 @@ def get_required_tree_root_zone_mask_utm(boundary_polygon_utm: Polygon, dem: dic
     xs, ys = boundary_polygon_utm.exterior.coords.xy
     lons, lats = warp_transform(dem["crs"], "EPSG:4326", list(xs), list(ys))
     boundary_coordinates = list(zip(lons, lats))
-    tree_root_zone_mask_utm = _fetch_tree_root_zone_mask_utm(boundary_coordinates, dem)
+    tree_root_zone_mask_utm = _fetch_tree_root_zone_mask_utm(boundary_coordinates, dem, buffer_meters=buffer_meters)
     if tree_root_zone_mask_utm is None:
         raise RuntimeError(
             "Canopy height data unavailable for this property -- cannot verify "

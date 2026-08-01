@@ -430,7 +430,7 @@ pa.get_canopy_height_for_boundary = _fake_clean_canopy
 # The existing-road exclusion gate is optional (degrades gracefully, unlike canopy) but
 # still defaults to check_roads=True and attempts a real fetch otherwise -- stubbed the
 # same way, to "no roads found nearby" (None), so this wiring check stays fully offline.
-pa.get_road_exclusion_union_utm = lambda boundary_coordinates, dem: None
+pa.get_road_exclusion_union_utm = lambda boundary_coordinates, dem, buffer_meters=None: None
 
 pipeline_result = identify_water_suitability(
     boundary_coordinates, dem=synthetic_dem, check_soil=False, check_streams=False,
