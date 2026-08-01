@@ -75,6 +75,7 @@ from production_area import (
     production_areas_to_geojson,
 )
 from raster_grid import (
+    D8_OFFSETS,
     SQUARE_METERS_PER_ACRE,
     attempt_waist_split,
     binary_dilate,
@@ -247,6 +248,22 @@ WATER_ZONE_ROAD_BUFFER_METERS = 3.048  # 10ft
 # check_roads handling.
 _CANOPY_CHECK_UNCHECKED = object()
 _ROAD_CHECK_UNCHECKED = object()
+
+# Zones at or under this size already read as a reasonable survey pointer
+# on their own -- select_optimal_survey_subarea() (see that function's own
+# docstring) skips sub-area selection entirely for them, returning None,
+# rather than carving an even-smaller sub-region out of ground that's
+# already a modest, walkable size. CONFIGURABLE, unvalidated against a
+# real property yet, same caveat every other threshold in this pipeline
+# carries.
+WATER_ZONE_SUBAREA_TRIGGER_ACRES = 1.0
+
+# The optimal sub-area's own size cap -- greedy region-growing (see
+# select_optimal_survey_subarea()) stops once this acreage is reached (or
+# no adjacent candidate cells remain, if the zone itself is smaller than
+# this after excluding cells inside the production area it serves). A
+# starting value, not yet validated against a real property. CONFIGURABLE.
+WATER_ZONE_SUBAREA_TARGET_ACRES = 0.5
 
 WATER_SYSTEM_CANDIDATE_CONFIDENCE_NOTES = (
     "This identifies a general candidate zone for water-system "
@@ -552,6 +569,152 @@ def _zone_production_area_relationships(
     return relationships
 
 
+def select_optimal_survey_subarea(
+    zone: dict,
+    production_areas: list[dict],
+    dem: dict,
+) -> Optional[dict]:
+    """
+    For a zone whose full footprint is large enough that pointing someone
+    at the WHOLE thing isn't a very actionable survey instruction, picks a
+    smaller, higher-confidence sub-region within it -- favoring elevation
+    advantage and proximity to the production area the zone actually
+    serves. This is a SUGGESTION layered alongside the zone's own real,
+    full geometry (see module docstring's "REPLACES the earlier
+    per-traced-valley-branch line-walk" framing for why the full zone
+    footprint itself stays the authoritative candidate area) -- it never
+    replaces or shrinks polygon_utm/area_acres, which remain the source
+    of truth for narrative use.
+
+    zone must be one of find_candidate_zones()'s own zone dicts (needs
+    'cells' -- the zone's own member (row, col) cells, same list
+    find_candidate_zones() already built via attempt_waist_split(), not
+    refetched or reclassified from the raw DEM here -- and
+    'primary_production_area_relationship', to identify which production
+    area to measure against without re-deriving it).
+
+    Returns None if the zone's own real area (zone['polygon_utm'].area)
+    is at or under WATER_ZONE_SUBAREA_TRIGGER_ACRES -- the full zone
+    already reads as a reasonable, walkable survey pointer at that size,
+    so there's nothing smaller worth carving out. Also returns None if,
+    after excluding every zone cell that falls INSIDE the primary
+    production area's own polygon_utm (a survey sub-area must sit outside
+    land already claimed for production), no candidate cell remains.
+
+    SCORING (per remaining candidate cell):
+      - Elevation advantage: this cell's own elevation minus the primary
+        production area's representative_elevation_m -- higher is more
+        gravity-favorable. Normalized 0-1 across the candidate
+        population's own min/max (NOT the whole zone's, since excluded
+        cells shouldn't skew the scale) -- a flat range (every candidate
+        tied) normalizes to a neutral 0.5 for every cell, not an arbitrary
+        1.0, since there's no real differentiation to reward.
+      - Proximity: planar distance from this cell's center to the
+        production area's own polygon_utm boundary -- closer is better,
+        so this is 1 - the same min/max normalization applied to
+        elevation advantage.
+      Composite score is a simple, UNWEIGHTED average of the two --
+      deliberately a starting point (like every other equal-weighting
+      choice in this pipeline), not a tuned composite.
+
+    GROWING: seeds the sub-area at the single highest-scoring candidate
+    cell, then greedily adds whichever remaining candidate cell is
+    8-connected-adjacent (raster_grid.D8_OFFSETS) to the CURRENT sub-area
+    and has the highest score, repeating until WATER_ZONE_SUBAREA_TARGET_
+    ACRES is reached or no adjacent candidate remains (e.g. the zone
+    itself, after exclusions, is smaller than the target). This keeps the
+    result one real, contiguous patch -- not just the top-N cells by
+    score scattered across the zone, which wouldn't be a walkable
+    sub-area at all.
+
+    Builds the sub-area's real geometry via raster_grid.
+    cell_union_footprint() -- the same shared utility every other cell-
+    cluster footprint in this pipeline uses, never a hull or a buffer.
+
+    Returns:
+        {
+            'polygon_utm': shapely Polygon/MultiPolygon,
+            'geometry_wgs84': GeoJSON geometry dict,
+            'area_acres': float,
+        }
+    """
+    area_acres = zone["polygon_utm"].area / SQUARE_METERS_PER_ACRE
+    if area_acres <= WATER_ZONE_SUBAREA_TRIGGER_ACRES:
+        return None
+
+    primary_production_area_id = zone["primary_production_area_relationship"]["production_area_id"]
+    primary_patch = next((p for p in production_areas if p["id"] == primary_production_area_id), None)
+    if primary_patch is None:
+        return None
+
+    production_polygon = primary_patch["polygon_utm"]
+    production_elevation = primary_patch["representative_elevation_m"]
+    array = dem["array"]
+
+    candidates = []
+    for r, c in zone["cells"]:
+        x, y = pixel_center_xy(dem, r, c)
+        point = Point(x, y)
+        if production_polygon.contains(point):
+            continue
+        elevation = float(array[r, c])
+        if np.isnan(elevation):
+            continue
+        candidates.append((r, c, elevation - production_elevation, point.distance(production_polygon)))
+
+    if not candidates:
+        return None
+
+    def _normalize(value: float, lo: float, hi: float) -> float:
+        if hi - lo <= 0:
+            return 0.5
+        return (value - lo) / (hi - lo)
+
+    advantages = [adv for _r, _c, adv, _dist in candidates]
+    distances = [dist for _r, _c, _adv, dist in candidates]
+    adv_lo, adv_hi = min(advantages), max(advantages)
+    dist_lo, dist_hi = min(distances), max(distances)
+
+    scores: dict[tuple[int, int], float] = {}
+    for r, c, adv, dist in candidates:
+        elevation_score = _normalize(adv, adv_lo, adv_hi)
+        proximity_score = 1.0 - _normalize(dist, dist_lo, dist_hi)
+        scores[(r, c)] = (elevation_score + proximity_score) / 2.0
+
+    remaining = set(scores.keys())
+    seed = max(remaining, key=lambda cell: (scores[cell], -cell[0], -cell[1]))
+    subarea_cells = {seed}
+    remaining.discard(seed)
+
+    area_per_cell = cell_area_acres(dem)
+    target_cell_count = max(1, round(WATER_ZONE_SUBAREA_TARGET_ACRES / area_per_cell))
+
+    while len(subarea_cells) < target_cell_count and remaining:
+        frontier = [
+            cell for cell in remaining
+            if any((cell[0] + dr, cell[1] + dc) in subarea_cells for dr, dc in D8_OFFSETS)
+        ]
+        if not frontier:
+            break
+        best = max(frontier, key=lambda cell: (scores[cell], -cell[0], -cell[1]))
+        subarea_cells.add(best)
+        remaining.discard(best)
+
+    subarea_mask = np.zeros(array.shape, dtype=bool)
+    for r, c in subarea_cells:
+        subarea_mask[r, c] = True
+
+    polygon_utm = cell_union_footprint(dem, subarea_mask)
+    subarea_area_acres = polygon_utm.area / SQUARE_METERS_PER_ACRE
+    geometry_wgs84 = transform_geom(dem["crs"], "EPSG:4326", mapping(polygon_utm))
+
+    return {
+        "polygon_utm": polygon_utm,
+        "geometry_wgs84": geometry_wgs84,
+        "area_acres": round(subarea_area_acres, 3),
+    }
+
+
 def find_candidate_zones(
     dem: dict,
     production_areas: list[dict],
@@ -654,6 +817,22 @@ def find_candidate_zones(
                 headline number
             'contributing_area_cells': float,  # median, see above
             'slope_pct': float,                # median, see above
+            'cells': [(row, col), ...],  # the zone's own member DEM cells --
+                same "expose raw cluster membership on the dict" precedent
+                production_area.py's own patches already establish, so a
+                consumer (select_optimal_survey_subarea() below, or a
+                future one) never has to recover cluster membership from
+                a mask a second time
+            'optimal_subarea_polygon_utm': shapely Polygon/MultiPolygon or None,
+            'optimal_subarea_geometry_wgs84': GeoJSON geometry dict or None,
+            'optimal_subarea_acres': float or None,
+                # select_optimal_survey_subarea()'s own output, attached to
+                # every zone (always present, never a missing key) --
+                # None for a zone at or under WATER_ZONE_SUBAREA_TRIGGER_
+                # ACRES, a real smaller sub-region otherwise. A suggestion
+                # layered ALONGSIDE polygon_utm/area_acres, which stay the
+                # full, real, unchanged zone geometry -- see that
+                # function's own docstring.
         }
     'id' is assigned sequentially across the surviving cluster list, same
     convention production_area.py's own patches use — there is no more
@@ -729,20 +908,31 @@ def find_candidate_zones(
 
             geometry_wgs84 = transform_geom(dem["crs"], "EPSG:4326", mapping(polygon_utm))
 
-            zones.append(
-                {
-                    "id": next_id,
-                    "served_production_area_ids": sorted(
-                        r["production_area_id"] for r in production_area_relationships
-                    ),
-                    "polygon_utm": polygon_utm,
-                    "geometry_wgs84": geometry_wgs84,
-                    "production_area_relationships": production_area_relationships,
-                    "primary_production_area_relationship": production_area_relationships[0],
-                    "contributing_area_cells": round(contributing_area_cells, 2),
-                    "slope_pct": round(slope_pct, 2),
-                }
-            )
+            zone = {
+                "id": next_id,
+                "served_production_area_ids": sorted(
+                    r["production_area_id"] for r in production_area_relationships
+                ),
+                "polygon_utm": polygon_utm,
+                "geometry_wgs84": geometry_wgs84,
+                "cells": sub_cells,
+                "production_area_relationships": production_area_relationships,
+                "primary_production_area_relationship": production_area_relationships[0],
+                "contributing_area_cells": round(contributing_area_cells, 2),
+                "slope_pct": round(slope_pct, 2),
+            }
+
+            optimal_subarea = select_optimal_survey_subarea(zone, production_areas, dem)
+            if optimal_subarea is not None:
+                zone["optimal_subarea_polygon_utm"] = optimal_subarea["polygon_utm"]
+                zone["optimal_subarea_geometry_wgs84"] = optimal_subarea["geometry_wgs84"]
+                zone["optimal_subarea_acres"] = optimal_subarea["area_acres"]
+            else:
+                zone["optimal_subarea_polygon_utm"] = None
+                zone["optimal_subarea_geometry_wgs84"] = None
+                zone["optimal_subarea_acres"] = None
+
+            zones.append(zone)
             next_id += 1
 
     return zones
@@ -771,6 +961,8 @@ def zones_to_geojson(zones: list[dict]) -> dict:
                 "primary_production_area_relationship": z["primary_production_area_relationship"],
                 "contributing_area_cells": z["contributing_area_cells"],
                 "slope_pct": z["slope_pct"],
+                "optimal_subarea_geometry_wgs84": z["optimal_subarea_geometry_wgs84"],
+                "optimal_subarea_acres": z["optimal_subarea_acres"],
             },
         )
         for z in zones

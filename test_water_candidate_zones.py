@@ -61,16 +61,19 @@ import numpy as np
 from shapely.geometry import box
 
 from feature_schema import validate_feature_collection
-from raster_grid import SQUARE_METERS_PER_ACRE, cell_area_acres, cell_union_footprint
+from raster_grid import SQUARE_METERS_PER_ACRE, cell_area_acres, cell_union_footprint, connected_components
 from water_candidate_zones import (
     MIN_WATER_ZONE_AREA_ACRES,
     MIN_ZONE_WAIST_METERS,
     VALLEY_ACCUMULATION_PERCENTILE_HIGH,
     VALLEY_ACCUMULATION_PERCENTILE_LOW,
     WATER_ZONE_MIN_WAIST_METERS,
+    WATER_ZONE_SUBAREA_TARGET_ACRES,
+    WATER_ZONE_SUBAREA_TRIGGER_ACRES,
     WATER_ZONE_SURVEY_BUFFER_METERS,
     compute_water_eligible_cells,
     find_candidate_zones,
+    select_optimal_survey_subarea,
     zones_to_geojson,
 )
 import water_candidate_zones as wcz
@@ -735,5 +738,180 @@ assert _zones_all_trees == [], (
     "an all-trees mask should leave no eligible cells to cluster into zones at all"
 )
 print("find_candidate_zones() correctly forwards canopy_root_zone_mask_utm/road_exclusion_union_utm through to compute_water_eligible_cells().")
+
+
+# =====================================================================
+# select_optimal_survey_subarea(): a smaller, higher-confidence sub-region
+# within a zone that's large enough that the whole footprint isn't a very
+# actionable survey pointer -- favoring elevation advantage and proximity
+# to the zone's own primary served production area. Wired into
+# find_candidate_zones() itself (every zone dict always carries
+# optimal_subarea_polygon_utm/optimal_subarea_geometry_wgs84/
+# optimal_subarea_acres, None when not applicable), tested here both via
+# the standalone function and through find_candidate_zones()'s own
+# wiring.
+# =====================================================================
+
+# A wide drainage BAND (not a single column) so a zone this size clears
+# WATER_ZONE_SUBAREA_TRIGGER_ACRES with real elevation variation across
+# it: elevation rises with distance from col=30 AND with row, so the
+# zone's own cells span a real, known elevation gradient (low near
+# col=30/high row, high toward the edges/low row) to score against.
+_SUBAREA_SIZE = 60
+_SUBAREA_MID_COL = 30
+_subarea_array = np.zeros((_SUBAREA_SIZE, _SUBAREA_SIZE), dtype=np.float32)
+for _row in range(_SUBAREA_SIZE):
+    for _col in range(_SUBAREA_SIZE):
+        _subarea_array[_row, _col] = abs(_col - _SUBAREA_MID_COL) * 2.0 + _row * 0.5
+
+SUBAREA_DEM = {
+    "array": _subarea_array,
+    "resolution_meters": (5.0, 5.0),
+    "origin_x": 500000.0,
+    "origin_y": 4500000.0,
+    "crs": CRS,
+}
+SUBAREA_BOUNDARY = box(
+    500000.0, 4500000.0 - _SUBAREA_SIZE * 5.0, 500000.0 + _SUBAREA_SIZE * 5.0, 4500000.0
+)
+SUBAREA_PRODUCTION_POLYGON = box(500220.0, 4499850.0, 500250.0, 4499900.0)
+SUBAREA_PRODUCTION_AREAS = [
+    {"id": 0, "representative_elevation_m": -5.0, "polygon_utm": SUBAREA_PRODUCTION_POLYGON}
+]
+
+# A wide survey buffer so the resulting zone footprint clears
+# WATER_ZONE_SUBAREA_TRIGGER_ACRES (1.0 acre) by a real, comfortable margin.
+subarea_zones = find_candidate_zones(
+    SUBAREA_DEM, SUBAREA_PRODUCTION_AREAS, SUBAREA_BOUNDARY, survey_buffer_meters=20.0
+)
+assert len(subarea_zones) == 1, f"expected exactly 1 large zone on this fixture, got {len(subarea_zones)}"
+big_zone = subarea_zones[0]
+big_zone_area_acres = big_zone["polygon_utm"].area / SQUARE_METERS_PER_ACRE
+assert big_zone_area_acres > WATER_ZONE_SUBAREA_TRIGGER_ACRES, (
+    f"test setup should produce a zone comfortably over the {WATER_ZONE_SUBAREA_TRIGGER_ACRES}-acre trigger, "
+    f"got {big_zone_area_acres:.3f} acres"
+)
+
+# --- (a) a zone at/under the trigger returns None for all three fields ---
+
+small_zones = find_candidate_zones(SINGLE_COLUMN_DEM, PRODUCTION_AREA_ABOVE, BOUNDARY, survey_buffer_meters=0.0)
+assert len(small_zones) == 1
+small_zone = small_zones[0]
+small_zone_area_acres = small_zone["polygon_utm"].area / SQUARE_METERS_PER_ACRE
+assert small_zone_area_acres <= WATER_ZONE_SUBAREA_TRIGGER_ACRES, (
+    f"test setup should produce a zone at/under the {WATER_ZONE_SUBAREA_TRIGGER_ACRES}-acre trigger, "
+    f"got {small_zone_area_acres:.3f} acres"
+)
+assert small_zone["optimal_subarea_polygon_utm"] is None
+assert small_zone["optimal_subarea_geometry_wgs84"] is None
+assert small_zone["optimal_subarea_acres"] is None
+print(
+    f"(a) A zone at/under WATER_ZONE_SUBAREA_TRIGGER_ACRES ({small_zone_area_acres:.3f} <= "
+    f"{WATER_ZONE_SUBAREA_TRIGGER_ACRES} acres) correctly returns None for all three optimal_subarea_* fields."
+)
+
+
+# --- (b) a zone over the trigger returns a real sub-area capped near the target ---
+
+assert big_zone["optimal_subarea_polygon_utm"] is not None
+assert big_zone["optimal_subarea_geometry_wgs84"] is not None
+subarea_acres = big_zone["optimal_subarea_acres"]
+assert subarea_acres is not None
+# "Capped at approximately the target": the greedy grower stops once the
+# target is reached (so it can overshoot by at most the last cell added,
+# a single cell's own area) or once candidates run out (so it can also
+# undershoot if the zone itself -- after production-area exclusion -- is
+# smaller than the target).
+cell_acres = cell_area_acres(SUBAREA_DEM)
+assert subarea_acres <= WATER_ZONE_SUBAREA_TARGET_ACRES + cell_acres, (
+    f"sub-area ({subarea_acres:.3f} acres) should be capped at approximately "
+    f"WATER_ZONE_SUBAREA_TARGET_ACRES ({WATER_ZONE_SUBAREA_TARGET_ACRES} acres, +/- one cell), overshot by too much"
+)
+assert subarea_acres >= WATER_ZONE_SUBAREA_TARGET_ACRES - cell_acres, (
+    f"sub-area ({subarea_acres:.3f} acres) is well under WATER_ZONE_SUBAREA_TARGET_ACRES "
+    f"({WATER_ZONE_SUBAREA_TARGET_ACRES} acres) despite the zone having comfortably enough candidate cells"
+)
+print(
+    f"(b) A zone over the trigger ({big_zone_area_acres:.3f} acres) returns a real sub-area "
+    f"({subarea_acres:.3f} acres), capped at approximately WATER_ZONE_SUBAREA_TARGET_ACRES "
+    f"({WATER_ZONE_SUBAREA_TARGET_ACRES} acres)."
+)
+
+
+# --- (c)/(d)/(e): recover the sub-area's own member cells (by real footprint ---
+# --- containment against the zone's own known cell list) to check elevation/  ---
+# --- distance/exclusion/contiguity directly, not just acreage.                ---
+
+_subarea_polygon = big_zone["optimal_subarea_polygon_utm"]
+subarea_cells = [
+    (r, c) for r, c in big_zone["cells"]
+    if _subarea_polygon.intersects(Point(*pixel_center_xy(SUBAREA_DEM, r, c)))
+]
+assert subarea_cells, "should be able to recover the sub-area's own member cells from the zone's cell list"
+
+zone_elevations = [SUBAREA_DEM["array"][r, c] for r, c in big_zone["cells"]]
+subarea_elevations = [SUBAREA_DEM["array"][r, c] for r, c in subarea_cells]
+zone_distances = [
+    Point(*pixel_center_xy(SUBAREA_DEM, r, c)).distance(SUBAREA_PRODUCTION_POLYGON) for r, c in big_zone["cells"]
+]
+subarea_distances = [
+    Point(*pixel_center_xy(SUBAREA_DEM, r, c)).distance(SUBAREA_PRODUCTION_POLYGON) for r, c in subarea_cells
+]
+
+assert np.mean(subarea_elevations) > np.mean(zone_elevations), (
+    f"the sub-area's own average elevation ({np.mean(subarea_elevations):.2f}m) should be measurably higher "
+    f"than the zone's own average ({np.mean(zone_elevations):.2f}m) -- it's supposed to favor elevation advantage"
+)
+assert np.mean(subarea_distances) < np.mean(zone_distances), (
+    f"the sub-area's own average distance to the production area ({np.mean(subarea_distances):.1f}m) should be "
+    f"measurably LESS than the zone's own average ({np.mean(zone_distances):.1f}m) -- it's supposed to favor proximity"
+)
+print(
+    f"(c) The selected sub-area's cells are measurably higher elevation ({np.mean(subarea_elevations):.2f}m avg "
+    f"vs. zone's {np.mean(zone_elevations):.2f}m avg) and closer to the production area "
+    f"({np.mean(subarea_distances):.1f}m avg vs. zone's {np.mean(zone_distances):.1f}m avg)."
+)
+
+assert not any(
+    SUBAREA_PRODUCTION_POLYGON.contains(Point(*pixel_center_xy(SUBAREA_DEM, r, c))) for r, c in subarea_cells
+), "no selected sub-area cell should fall within the production area's own polygon_utm"
+print("(d) No selected sub-area cell falls within the production area's own polygon_utm.")
+
+_subarea_mask = np.zeros(SUBAREA_DEM["array"].shape, dtype=bool)
+for r, c in subarea_cells:
+    _subarea_mask[r, c] = True
+_, _subarea_component_count = connected_components(_subarea_mask)
+assert _subarea_component_count == 1, (
+    f"the sub-area must be a single contiguous patch, not scattered cells -- got {_subarea_component_count} "
+    "connected component(s)"
+)
+print("(e) The sub-area is a single contiguous 8-connected patch, not scattered cells.")
+
+
+# --- select_optimal_survey_subarea() called standalone matches the wired-in result ---
+
+standalone_subarea = select_optimal_survey_subarea(big_zone, SUBAREA_PRODUCTION_AREAS, SUBAREA_DEM)
+assert standalone_subarea is not None
+assert abs(standalone_subarea["area_acres"] - big_zone["optimal_subarea_acres"]) < 1e-9
+assert standalone_subarea["polygon_utm"].equals(big_zone["optimal_subarea_polygon_utm"])
+print("select_optimal_survey_subarea() called standalone reproduces find_candidate_zones()'s own wired-in result.")
+
+# The full zone's own real geometry/acreage are unchanged by any of the above.
+assert big_zone["polygon_utm"].area / SQUARE_METERS_PER_ACRE == big_zone_area_acres
+print("The zone's own full polygon_utm/area remain the unchanged source of truth alongside the sub-area suggestion.")
+
+
+# --- zones_to_geojson() carries the new fields (None when not applicable) ---
+
+subarea_geojson = zones_to_geojson(subarea_zones)
+subarea_feature_props = subarea_geojson["features"][0]["properties"]
+assert subarea_feature_props["optimal_subarea_acres"] == big_zone["optimal_subarea_acres"]
+assert subarea_feature_props["optimal_subarea_geometry_wgs84"] == big_zone["optimal_subarea_geometry_wgs84"]
+
+small_zone_geojson = zones_to_geojson(small_zones)
+small_feature_props = small_zone_geojson["features"][0]["properties"]
+assert small_feature_props["optimal_subarea_acres"] is None
+assert small_feature_props["optimal_subarea_geometry_wgs84"] is None
+print("zones_to_geojson() carries optimal_subarea_geometry_wgs84/optimal_subarea_acres, None when not applicable.")
 
 print("\nAll water_candidate_zones checks passed.")
