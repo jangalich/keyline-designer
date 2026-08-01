@@ -48,11 +48,18 @@ from shapely.prepared import prep
 
 from dem_data import get_dem_for_boundary
 from production_area import identify_production_areas
-from raster_grid import binary_dilate, cell_area_acres, connected_components, pixel_center_xy
+from raster_grid import (
+    binary_dilate,
+    cell_area_acres,
+    cell_union_footprint,
+    connected_components,
+    pixel_center_xy,
+)
 from valley_delineation import get_flow_accumulation_for_dem
 from water_candidate_zones import (
     MAX_SERVICE_DISTANCE_METERS,
     MIN_BOUNDARY_SETBACK_METERS,
+    MIN_DOWNSTREAM_CLEARANCE_METERS,
     MIN_SERVICE_DISTANCE_METERS,
     MIN_VALLEY_CONTRIBUTING_AREA_ACRES,
     WATER_ZONE_SURVEY_BUFFER_METERS,
@@ -120,14 +127,18 @@ def _full_extent_boundary(dem: dict, margin_meters: float = 10_000.0) -> Polygon
 def main(
     min_contributing_acres: float = MIN_VALLEY_CONTRIBUTING_AREA_ACRES,
     buffer_meters: float = WATER_ZONE_SURVEY_BUFFER_METERS,
+    downstream_clearance_meters: float = MIN_DOWNSTREAM_CLEARANCE_METERS,
+    sweep_downstream: bool = False,
 ) -> None:
     print("diagnose_water_zone_mask.py -- pre/post survey-buffer-dilation mask stats\n")
     print(f"Property: real reference boundary, {len(PROPERTY_BOUNDARY)} vertices")
     print(f"Boundary coordinates (lon, lat): {PROPERTY_BOUNDARY}\n")
-    print(f"min_contributing_acres (this run) = {min_contributing_acres} acres "
+    print(f"min_contributing_acres (this run)      = {min_contributing_acres} acres "
           f"(module default: {MIN_VALLEY_CONTRIBUTING_AREA_ACRES})")
-    print(f"buffer_meters (this run)          = {buffer_meters}m "
-          f"(module default: {WATER_ZONE_SURVEY_BUFFER_METERS})\n")
+    print(f"buffer_meters (this run)               = {buffer_meters}m "
+          f"(module default: {WATER_ZONE_SURVEY_BUFFER_METERS})")
+    print(f"downstream_clearance_meters (this run) = {downstream_clearance_meters}m "
+          f"(module default: {MIN_DOWNSTREAM_CLEARANCE_METERS}) -- ignored if --sweep-downstream is set\n")
 
     dem = get_dem_for_boundary(PROPERTY_BOUNDARY)
     print(f"DEM fetched: {dem['array'].shape[0]}x{dem['array'].shape[1]} cells, "
@@ -280,6 +291,17 @@ def main(
     # values (0 / infinity, or a synthetic full-extent boundary -- see
     # _full_extent_boundary()'s own docstring) to isolate one real gate at a
     # time. No gate logic is reimplemented here.
+    #
+    # Items 1/2/2a/2b below pass min_downstream_clearance_meters=0.0 to keep
+    # the NEW downstream-clearance gate's own THRESHOLD out of these
+    # isolation numbers as much as possible -- but note this can't fully
+    # isolate them from that gate's structural "the flow path must actually
+    # confirm an exit" requirement (no downhill neighbor, a cycle, or
+    # max_steps all still fail it regardless of threshold); a real property
+    # where the traced flow paths never confirm an exit at all would still
+    # depress these numbers somewhat. Item 3 (now "ALL FOUR gates combined")
+    # uses the real downstream_clearance_meters value, since it's meant to
+    # match find_candidate_zones()'s own real, complete output.
     print("=== Service-distance / boundary-setback gate breakdown (post-dilation mask) ===\n")
 
     full_extent_boundary = _full_extent_boundary(dem)
@@ -293,6 +315,7 @@ def main(
         min_service_distance_meters=0.0,
         min_boundary_setback_meters=MIN_BOUNDARY_SETBACK_METERS,
         survey_buffer_meters=buffer_meters,
+        min_downstream_clearance_meters=0.0,
     )
     _report_cell_count(
         f"On-parcel + boundary-setback gate alone (MIN_BOUNDARY_SETBACK_METERS={MIN_BOUNDARY_SETBACK_METERS}m, "
@@ -310,6 +333,7 @@ def main(
         min_service_distance_meters=MIN_SERVICE_DISTANCE_METERS,
         min_boundary_setback_meters=0.0,
         survey_buffer_meters=buffer_meters,
+        min_downstream_clearance_meters=0.0,
     )
     _report_cell_count(
         f"Service-distance gate alone (MAX={MAX_SERVICE_DISTANCE_METERS}m, "
@@ -327,6 +351,7 @@ def main(
         min_service_distance_meters=0.0,
         min_boundary_setback_meters=0.0,
         survey_buffer_meters=buffer_meters,
+        min_downstream_clearance_meters=0.0,
     )
     _report_cell_count(
         f"  -> excluded as TOO FAR (exceeds MAX_SERVICE_DISTANCE_METERS={MAX_SERVICE_DISTANCE_METERS}m "
@@ -347,6 +372,7 @@ def main(
         min_service_distance_meters=MIN_SERVICE_DISTANCE_METERS,
         min_boundary_setback_meters=0.0,
         survey_buffer_meters=buffer_meters,
+        min_downstream_clearance_meters=0.0,
     )
     _report_cell_count(
         f"  -> excluded as TOO CLOSE (within MIN_SERVICE_DISTANCE_METERS={MIN_SERVICE_DISTANCE_METERS}m "
@@ -355,18 +381,77 @@ def main(
     )
     print()
 
-    # 3. BOTH gates combined -- this is compute_water_eligible_cells()'s own
-    #    real, default-parameter output, i.e. exactly what find_candidate_zones()
-    #    (the real pipeline) works from.
+    # 3. ALL FOUR gates combined -- this is compute_water_eligible_cells()'s
+    #    own real output at this run's actual parameters, i.e. exactly what
+    #    find_candidate_zones() (the real pipeline) works from.
     combined_mask, _ = compute_water_eligible_cells(
         dem, production_areas, boundary_polygon_utm,
         min_valley_contributing_area_acres=min_contributing_acres,
         survey_buffer_meters=buffer_meters,
+        min_downstream_clearance_meters=downstream_clearance_meters,
     )
     _report_mask_stats(
-        "BOTH gates combined (real pipeline output -- matches find_candidate_zones()'s own eligible_mask)",
+        "ALL FOUR gates combined (real pipeline output -- matches find_candidate_zones()'s own eligible_mask)",
         combined_mask, dem,
     )
+
+    if sweep_downstream:
+        _report_downstream_sweep(dem, production_areas, boundary_polygon_utm, min_contributing_acres, buffer_meters)
+
+
+def _report_downstream_sweep(
+    dem: dict,
+    production_areas: list[dict],
+    boundary_polygon_utm: Polygon,
+    min_contributing_acres: float,
+    buffer_meters: float,
+) -> None:
+    """
+    Runs the REAL, full pipeline (compute_water_eligible_cells() -- all
+    four gates, unmodified) at MIN_DOWNSTREAM_CLEARANCE_METERS =
+    15/25/40m, at whatever min_contributing_acres/buffer_meters this run
+    otherwise used, so a threshold sweep can show whether the surviving
+    cell set genuinely shifts from outlet-hugging (clustered near the
+    boundary, where flow structurally exits soonest) toward a real
+    interior band (further from the boundary, needing a longer confirmed
+    downstream run) as the clearance requirement tightens -- not just
+    shrinking in place.
+
+    Per value, reports: qualifying cell count, acreage, connected-
+    component count, and each surviving component's own centroid distance
+    to the nearest boundary edge (via cell_union_footprint()'s real
+    footprint, not a hull or a cell-count average) -- a sweep where that
+    distance grows as clearance tightens is exactly the "outlet-hugging
+    -> interior band" shift this gate exists to produce.
+    """
+    print("=== Downstream-clearance sweep (all four gates, real pipeline) ===\n")
+    boundary_line = boundary_polygon_utm.boundary
+
+    for clearance_meters in (15.0, 25.0, 40.0):
+        eligible_mask, _ = compute_water_eligible_cells(
+            dem, production_areas, boundary_polygon_utm,
+            min_valley_contributing_area_acres=min_contributing_acres,
+            survey_buffer_meters=buffer_meters,
+            min_downstream_clearance_meters=clearance_meters,
+        )
+        cell_count = int(eligible_mask.sum())
+        acres = cell_count * cell_area_acres(dem)
+        labels, num_components = connected_components(eligible_mask)
+
+        print(f"--- MIN_DOWNSTREAM_CLEARANCE_METERS = {clearance_meters}m ---")
+        print(f"  Qualifying cell count: {cell_count}")
+        print(f"  Acreage:               {acres:.3f} acres")
+        print(f"  Connected components:  {num_components}")
+        for component_id in range(num_components):
+            component_mask = labels == component_id
+            footprint = cell_union_footprint(dem, component_mask)
+            centroid = footprint.centroid
+            distance_to_boundary = boundary_line.distance(centroid)
+            print(
+                f"    component {component_id}: centroid=({centroid.x:.1f}, {centroid.y:.1f}), "
+                f"distance to nearest boundary edge = {distance_to_boundary:.2f}m"
+            )
+        print()
 
 
 def _parse_args() -> argparse.Namespace:
@@ -387,13 +472,33 @@ def _parse_args() -> argparse.Namespace:
         help=f"Override WATER_ZONE_SURVEY_BUFFER_METERS for this run only "
         f"(default: the current module constant, {WATER_ZONE_SURVEY_BUFFER_METERS}).",
     )
+    parser.add_argument(
+        "--downstream-clearance-meters",
+        type=float,
+        default=MIN_DOWNSTREAM_CLEARANCE_METERS,
+        help=f"Override MIN_DOWNSTREAM_CLEARANCE_METERS for this run only "
+        f"(default: the current module constant, {MIN_DOWNSTREAM_CLEARANCE_METERS}). Ignored if "
+        "--sweep-downstream is set.",
+    )
+    parser.add_argument(
+        "--sweep-downstream",
+        action="store_true",
+        help="Run the full pipeline (all four gates) at MIN_DOWNSTREAM_CLEARANCE_METERS = 15/25/40m, "
+        "at whatever --min-contributing-acres/--buffer-meters were otherwise passed, reporting "
+        "per-value cell count/acreage/component count/component centroid distance to the boundary.",
+    )
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = _parse_args()
     try:
-        main(min_contributing_acres=args.min_contributing_acres, buffer_meters=args.buffer_meters)
+        main(
+            min_contributing_acres=args.min_contributing_acres,
+            buffer_meters=args.buffer_meters,
+            downstream_clearance_meters=args.downstream_clearance_meters,
+            sweep_downstream=args.sweep_downstream,
+        )
     except Exception as e:
         print(f"Request failed: {e}")
         print(

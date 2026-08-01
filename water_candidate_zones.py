@@ -13,7 +13,8 @@ convex hull) -- see compute_water_eligible_cells()'s docstring.
             delineate_valleys() thresholds/traces internally)
         --> production areas (production_area.py)
         --> [this module] per-DEM-cell eligibility mask (contributing
-            area + service distance + boundary setback)
+            area + service distance + boundary setback + downstream
+            clearance)
         --> connected components -> cell-union footprint per cluster
         --> candidate-zone polygons, one per qualifying cluster
 
@@ -72,7 +73,12 @@ from raster_grid import (
     connected_components,
     pixel_center_xy,
 )
-from valley_delineation import delineate_valleys, get_flow_accumulation_for_dem, valleys_to_geojson
+from valley_delineation import (
+    delineate_valleys,
+    get_flow_accumulation_for_dem,
+    get_flow_direction_for_dem,
+    valleys_to_geojson,
+)
 
 # Zones within this distance of the property boundary are excluded even
 # if geometrically valid — too close to the property line to realistically
@@ -157,6 +163,24 @@ MIN_WATER_ZONE_AREA_ACRES = 0.1
 # with diagnose_water_zone_mask.py against your own property.
 WATER_ZONE_SURVEY_BUFFER_METERS = 10.0
 
+# How much real ground distance a candidate cell's D8 flow path
+# (valley_delineation.get_flow_direction_for_dem()) needs to cover
+# on-parcel before it actually exits the property, not just "is this cell
+# ITSELF far enough from the boundary" (that's MIN_BOUNDARY_SETBACK_METERS's
+# job -- a purely local, single-cell check with no notion of where the
+# water actually GOES from here). Without this gate, eligible cells skew
+# toward the parcel's own drainage OUTLET -- which is frequently near the
+# boundary itself, since that's where flow naturally exits -- so the
+# boundary-setback gate alone ends up rejecting nearly everything on a
+# real property. Confirmed live this session.
+#
+# Starting value reuses MIN_BOUNDARY_SETBACK_METERS's own answer to "how
+# much room does infrastructure need" as the anchor -- NOT independently
+# derived, and NOT YET VALIDATED against a real property. Re-tune with
+# diagnose_water_zone_mask.py's --sweep-downstream (15/25/40m) once
+# ground-truthed. CONFIGURABLE.
+MIN_DOWNSTREAM_CLEARANCE_METERS = 15.0
+
 WATER_SYSTEM_CANDIDATE_CONFIDENCE_NOTES = (
     "This identifies a general candidate zone for water-system "
     "infrastructure (keyline plowing patterns, pond/dam potential, ram "
@@ -197,6 +221,75 @@ def _survey_buffer_radius_cells(dem: dict, buffer_meters: float) -> int:
     return math.ceil(buffer_meters / cell_size)
 
 
+def _downstream_clearance_meters(
+    dem: dict,
+    flow_direction_cells: np.ndarray,
+    boundary_polygon_utm: Polygon,
+    start_row: int,
+    start_col: int,
+    max_steps: int = 500,
+) -> tuple[float, bool]:
+    """
+    Walks a candidate cell's D8 flow path downstream (flow_direction_cells
+    is valley_delineation.get_flow_direction_for_dem()'s own (rows, cols,
+    2) array -- each [row, col] holds the absolute (target_row,
+    target_col) of that cell's downhill neighbor, or (-1, -1) if there is
+    none -- see that function's own docstring for the encoding) and
+    reports how far it travels on-parcel before it actually exits
+    boundary_polygon_utm.
+
+    At each step: read this cell's downhill target from
+    flow_direction_cells. If it's (-1, -1) (no downhill neighbor -- a
+    grid-edge outlet already, or a flat-plateau tie), or if the target has
+    already been visited (a cycle -- shouldn't happen for a real filled
+    DEM's flow direction, whose targets strictly decrease in elevation,
+    but guarded against here regardless), stop immediately and return
+    (accumulated_distance, False): neither case is a confirmed on-parcel
+    exit, so treating either as "cleared" would be a false clearance.
+    Otherwise, add the REAL ground distance between the current and
+    target cell's pixel centers (via raster_grid.pixel_center_xy() --
+    never a fixed orthogonal/diagonal step length, since resolution_meters
+    can differ per axis and even a fixed diagonal step is only exactly
+    sqrt(2)x the cardinal one when the two axis resolutions are equal) to
+    accumulated_distance, then check whether the TARGET cell's own center
+    falls outside boundary_polygon_utm -- if so, the path has genuinely
+    exited the parcel after this much on-parcel travel: stop and return
+    (accumulated_distance, True). Otherwise move to the target cell and
+    repeat.
+
+    max_steps caps the walk (default 500) -- if neither a real exit nor a
+    dead end/cycle is reached within that many steps, stop and return
+    (accumulated_distance, False), same as the other two non-exit cases.
+    """
+    boundary_prepared = prep(boundary_polygon_utm)
+    accumulated_distance = 0.0
+    visited = {(start_row, start_col)}
+    row, col = start_row, start_col
+
+    for _ in range(max_steps):
+        target_row, target_col = flow_direction_cells[row, col]
+        target_row, target_col = int(target_row), int(target_col)
+
+        if target_row < 0:
+            return accumulated_distance, False
+
+        target_cell = (target_row, target_col)
+        if target_cell in visited:
+            return accumulated_distance, False
+
+        x0, y0 = pixel_center_xy(dem, row, col)
+        x1, y1 = pixel_center_xy(dem, target_row, target_col)
+        accumulated_distance += math.hypot(x1 - x0, y1 - y0)
+
+        if not boundary_prepared.contains(Point(x1, y1)):
+            return accumulated_distance, True
+
+        visited.add(target_cell)
+        row, col = target_row, target_col
+
+    return accumulated_distance, False
+
+
 def compute_water_eligible_cells(
     dem: dict,
     production_areas: list[dict],
@@ -206,13 +299,14 @@ def compute_water_eligible_cells(
     min_service_distance_meters: float = MIN_SERVICE_DISTANCE_METERS,
     min_boundary_setback_meters: float = MIN_BOUNDARY_SETBACK_METERS,
     survey_buffer_meters: float = WATER_ZONE_SURVEY_BUFFER_METERS,
+    min_downstream_clearance_meters: float = MIN_DOWNSTREAM_CLEARANCE_METERS,
 ) -> tuple[np.ndarray, dict[tuple[int, int], dict]]:
     """
     Cell-based STEP 1/2: computes the raw flow-accumulation grid directly
     from `dem` (valley_delineation.get_flow_accumulation_for_dem() — the
     same contributing-cell-count grid delineate_valleys() thresholds/
     traces internally, recomputed here rather than reusing a traced
-    branch) and gates each cell on THREE independent checks, ALL of which
+    branch) and gates each cell on FOUR independent checks, ALL of which
     must pass for a cell to be eligible:
 
       1. Contributing area at that cell — converted from the raw
@@ -257,6 +351,24 @@ def compute_water_eligible_cells(
          least min_boundary_setback_meters from boundary_polygon_utm's own
          boundary.
 
+      4. Downstream clearance (_downstream_clearance_meters()): walking
+         this cell's own D8 flow path (valley_delineation.
+         get_flow_direction_for_dem()) must actually EXIT
+         boundary_polygon_utm within max_steps, after at least
+         min_downstream_clearance_meters of real on-parcel travel. This
+         is a genuinely different check from #3's boundary-setback test —
+         #3 only asks "is THIS cell far enough from the edge," with no
+         notion of where its water actually goes; #4 asks "does this
+         cell's downstream flow path have real, confirmed room to leave
+         the parcel at all." Without it, eligible cells skew toward the
+         parcel's own drainage OUTLET (frequently near the boundary
+         itself, since that's structurally where flow exits), which is
+         exactly what made #3 alone reject nearly everything on a real
+         property — confirmed live this session. A cell whose D8 path
+         never confirms an exit (no downhill neighbor, a cycle, or
+         max_steps reached) fails this gate outright, regardless of how
+         much distance it accumulated first.
+
     Elevation/gradient is deliberately NOT a gate here (see module
     docstring's "gravity is a preference, not a gate" framing) — do not
     add a min-gradient or elevation-band exclusion; a cell otherwise
@@ -269,6 +381,10 @@ def compute_water_eligible_cells(
     service-distance window, whether or not it's actually above the
     production area. This is a real measurement, not a second
     qualification check: no minimum gradient is required to be tagged.
+
+    Performance: check #4 is the most expensive (it walks a real path per
+    candidate cell) and runs LAST, only on cells that already passed
+    checks #1-3 — never against the full raw grid.
 
     Returns (eligible_mask, cell_relationships):
         eligible_mask: np.ndarray[bool], same shape as dem['array'].
@@ -292,6 +408,7 @@ def compute_water_eligible_cells(
 
     boundary_prepared = prep(boundary_polygon_utm)
     boundary_line = boundary_polygon_utm.boundary
+    flow_direction_cells = get_flow_direction_for_dem(dem)
     array = dem["array"]
 
     for r, c in np.argwhere(valley_mask):
@@ -324,6 +441,12 @@ def compute_water_eligible_cells(
                 }
 
         if best is None:
+            continue
+
+        clearance_meters, exited = _downstream_clearance_meters(
+            dem, flow_direction_cells, boundary_polygon_utm, r, c
+        )
+        if not (exited and clearance_meters >= min_downstream_clearance_meters):
             continue
 
         eligible_mask[r, c] = True
@@ -392,6 +515,7 @@ def find_candidate_zones(
     min_service_distance_meters: float = MIN_SERVICE_DISTANCE_METERS,
     min_water_zone_area_acres: float = MIN_WATER_ZONE_AREA_ACRES,
     survey_buffer_meters: float = WATER_ZONE_SURVEY_BUFFER_METERS,
+    min_downstream_clearance_meters: float = MIN_DOWNSTREAM_CLEARANCE_METERS,
 ) -> list[dict]:
     """
     Cell-based zone-filtering logic (Step 3) — see module docstring for
@@ -447,6 +571,7 @@ def find_candidate_zones(
         min_service_distance_meters,
         min_boundary_setback_meters,
         survey_buffer_meters,
+        min_downstream_clearance_meters,
     )
 
     labels, num_components = connected_components(eligible_mask)

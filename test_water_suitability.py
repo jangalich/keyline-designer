@@ -181,18 +181,31 @@ print("_topographic_factor() correctly scores a moderate valley gradient highest
 # same fixture shape test_water_candidate_zones.py's own fragmentation
 # test uses -- served by one production area sitting between them, so
 # find_candidate_zones() returns exactly 2 real zones (ids 0 and 1).
+#
+# ROW_MARGIN: same coordinate-preserving-shift technique
+# test_water_candidate_zones.py's own fixtures use -- the boundary below
+# is the ORIGINAL 200m x 200m extent, but the DEM array has ROW_MARGIN
+# extra rows north of the boundary's own north edge (a real, valid,
+# off-parcel buffer), so water_candidate_zones.py's downstream-clearance
+# gate has somewhere to register a real exit. origin_y is shifted up by
+# ROW_MARGIN * resolution and every cell's elevation uses (row -
+# ROW_MARGIN) in place of row, so world positions/elevations are
+# unchanged from before this gate existed -- confirmed directly: zone
+# count and areas below are identical, just at shifted row indices.
 BOUNDARY = box(500000.0, 4499800.0, 500200.0, 4500000.0)
 _size = 40
-_array = np.zeros((_size, _size), dtype=np.float32)
-for _row in range(_size):
+_row_margin = 6
+_rows = _size + _row_margin
+_array = np.zeros((_rows, _size), dtype=np.float32)
+for _row in range(_rows):
     for _col in range(_size):
-        _array[_row, _col] = min(abs(_col - 8), abs(_col - 32)) * 2.0 + _row * 0.5
+        _array[_row, _col] = min(abs(_col - 8), abs(_col - 32)) * 2.0 + (_row - _row_margin) * 0.5
 
 WATER_SUITABILITY_DEM = {
     "array": _array,
     "resolution_meters": (5.0, 5.0),
     "origin_x": 500000.0,
-    "origin_y": 4500000.0,
+    "origin_y": 4500000.0 + _row_margin * 5.0,
     "crs": CRS,
 }
 PRODUCTION_AREAS = [
@@ -366,11 +379,22 @@ utm_corners_y = [origin_y, origin_y, origin_y - SIZE * RESOLUTION, origin_y - SI
 lons, lats = warp_transform(DST_CRS, "EPSG:4326", utm_corners_x, utm_corners_y)
 boundary_coordinates = list(zip(lons, lats))
 
-array = np.zeros((SIZE, SIZE), dtype=np.float32)
-for row in range(SIZE):
+# MARGIN_ROWS: same reasoning as test_water_system_candidate_pipeline.py's
+# own fix -- boundary_coordinates above is still exactly the ORIGINAL
+# SIZE x SIZE extent, but the array has MARGIN_ROWS extra rows south of
+# it (a real, valid, off-parcel buffer) so the downstream-clearance gate
+# has somewhere to register a real exit. The bench is also given a gentle
+# slope (was perfectly flat) for the same reason: a flat bench has zero
+# downhill neighbors anywhere on it, so flow could never leave it under
+# D8 routing at all, margin or not.
+MARGIN_ROWS = 6
+TOTAL_ROWS = SIZE + MARGIN_ROWS
+
+array = np.zeros((TOTAL_ROWS, SIZE), dtype=np.float32)
+for row in range(TOTAL_ROWS):
     for col in range(SIZE):
         if row >= SIZE - 8:
-            array[row, col] = 100.0
+            array[row, col] = 100.0 - (row - (SIZE - 8)) * 0.05
         else:
             distance_from_center_col = abs(col - SIZE // 2)
             array[row, col] = 100.0 + (SIZE - 8 - row) * 3.0 + distance_from_center_col * 1.5
