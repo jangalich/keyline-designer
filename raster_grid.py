@@ -273,6 +273,19 @@ def attempt_waist_split(
     otherwise this returns [{"cells": cells, "render_cells": cells}]
     unchanged (a technically-2+-component erosion result that can't
     actually support 2+ real zones isn't a split).
+
+    Enforces a cell-count invariant right after reclaim_stripped_cells()
+    runs: every one of the `cells` passed in must come back out across the
+    sub-groups (nothing is ever supposed to vanish during a split -- only
+    find_candidate_zones()'s/cluster_and_gate()'s own SEPARATE, later
+    min_area_acres/boundary-clipping rejection of an entire small
+    sub-cluster is allowed to shrink the real final zone/patch count).
+    Raises RuntimeError, loudly, with the exact stripped/reclaimed/
+    unreachable cell counts, if this doesn't hold -- see the check's own
+    inline comment for why it should be mathematically impossible given a
+    correctly-constructed single connected component, and therefore always
+    points at an upstream caller bug rather than something to silently
+    paper over.
     """
     if len(cells) <= 1:
         return [{"cells": cells, "render_cells": cells}]
@@ -294,6 +307,36 @@ def attempt_waist_split(
         (int(r), int(c)): int(eroded_labels[r, c]) for r, c in np.argwhere(eroded_mask)
     }
     assignment = reclaim_stripped_cells(cluster_cells, seed_labels)
+
+    # Cell-count invariant: reclaim_stripped_cells() is a multi-source BFS
+    # confined to cluster_cells, seeded from every surviving eroded cell --
+    # since cluster_cells is (by every caller's own construction, via
+    # connected_components()'s own labeling) always ONE single 8-connected
+    # component under this exact D8_OFFSETS adjacency, and seed_labels is a
+    # nonempty subset of it (num_eroded >= 2 guarantees eroded_mask has at
+    # least 2 True cells), every cell in cluster_cells is reachable from
+    # SOME seed and must end up in `assignment`. A mismatch here means
+    # cluster_cells was NOT actually one connected component -- e.g. a
+    # stripped cell sits in a pocket whose own eroded survivors all
+    # vanished (fully eroded away) while a DIFFERENT, spatially
+    # disconnected pocket kept its own -- a caller bug upstream (the input
+    # `cells` list wasn't really one connected blob), not something to
+    # silently paper over by dropping ground that was real, eligible
+    # cluster membership going in.
+    if len(assignment) != len(cluster_cells):
+        unreachable_cells = cluster_cells - set(assignment)
+        num_stripped = len(cluster_cells) - len(seed_labels)
+        num_reclaimed = len(assignment) - len(seed_labels)
+        raise RuntimeError(
+            f"attempt_waist_split(): cell-count invariant violated -- {len(cluster_cells)} cell(s) went "
+            f"in, only {len(assignment)} came back out of reclaim_stripped_cells(). "
+            f"{len(seed_labels)} cell(s) survived erosion (never stripped); of the {num_stripped} "
+            f"stripped cell(s), {num_reclaimed} were successfully reclaimed onto a surviving "
+            f"sub-component, but {len(unreachable_cells)} had NO reachable surviving sub-component at "
+            f"all (example cell(s): {sorted(unreachable_cells)[:5]}). This means the `cells` argument "
+            "was not actually one single 8-connected component -- check the caller's own clustering "
+            "(e.g. connected_components()'s labeling) rather than treating this as expected loss."
+        )
 
     sub_groups: dict[int, list[tuple[int, int]]] = {}
     for cell, label in assignment.items():
