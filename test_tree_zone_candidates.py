@@ -90,7 +90,7 @@ pa.get_canopy_height_for_boundary = _fake_clean_canopy
 # and degrading. get_road_exclusion_union_utm() is the shared fetch pa._fetch_road_
 # exclusion_union_utm() (identify_production_areas()'s own call) and production_area_
 # ceiling.identify_optimized_production_areas() both route through.
-pa.get_road_exclusion_union_utm = lambda boundary_coordinates, dem: None
+pa.get_road_exclusion_union_utm = lambda boundary_coordinates, dem, buffer_meters=None: None
 
 CRS = "EPSG:32617"
 

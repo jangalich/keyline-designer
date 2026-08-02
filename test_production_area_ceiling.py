@@ -508,7 +508,7 @@ print(
 )
 
 # --- full entry point: identify_optimized_production_areas() applies real road exclusion too ---
-with mock_patch.object(pa, "get_road_exclusion_union_utm", lambda boundary_coordinates, dem: road_gate_south_half_union):
+with mock_patch.object(pa, "get_road_exclusion_union_utm", lambda boundary_coordinates, dem, buffer_meters=None: road_gate_south_half_union):
     road_excluded_result = pac.identify_optimized_production_areas(
         canopy_gate_boundary_coords, dem=canopy_gate_dem, check_soil=False, check_roads=True, ceiling_pct=100.0
     )
@@ -524,7 +524,7 @@ print(
 )
 
 
-def _raise_road_ceiling_failure(boundary_coordinates, dem):
+def _raise_road_ceiling_failure(boundary_coordinates, dem, buffer_meters=None):
     raise RuntimeError("simulated: road fetch retries exhausted")
 
 

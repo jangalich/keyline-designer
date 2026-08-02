@@ -129,17 +129,20 @@ from shapely.geometry import Point, Polygon, box, mapping, shape
 from shapely.ops import unary_union
 from shapely.prepared import prep
 
-from canopy_height_data import get_canopy_height_for_boundary, tree_root_zone_mask
-from farm_roads_data import get_road_exclusion_union_utm
+from canopy_height_data import TREE_ROOT_ZONE_BUFFER_METERS, get_canopy_height_for_boundary, tree_root_zone_mask
+from farm_roads_data import ROAD_EXCLUSION_BUFFER_METERS, get_road_exclusion_union_utm
 from feature_schema import CONFIDENCE_LOW, make_feature, make_feature_collection
 from production_suitability import ASPECT_FACTOR_WEIGHT, SLOPE_FACTOR_WEIGHT
 from raster_grid import (
     D8_OFFSETS,
     SQUARE_METERS_PER_ACRE,
+    attempt_waist_split,
     binary_erode,
     cell_area_acres,
+    cell_union_footprint,
     connected_components,
     pixel_center_xy,
+    waist_erosion_radius_cells,
 )
 from soil_data import (
     coordinates_to_wkt_polygon,
@@ -367,18 +370,28 @@ def _fetch_disqualifying_soil_union(wkt_polygon: str, dem: dict):
     return unary_union(pieces) if pieces else None
 
 
-def _fetch_road_exclusion_union_utm(boundary_coordinates: list, dem: dict):
+def _fetch_road_exclusion_union_utm(
+    boundary_coordinates: list, dem: dict, buffer_meters: float = ROAD_EXCLUSION_BUFFER_METERS
+):
     """
     Thin wrapper around farm_roads_data.get_road_exclusion_union_utm() --
-    exists so BOTH identify_production_areas() (this module) and
-    production_area_ceiling.identify_optimized_production_areas() call
-    the SAME function (imported from here, not straight from farm_roads_
-    data.py independently in each caller), the same "shared helper, one
-    definition" reasoning _fetch_disqualifying_soil_union() above already
-    established for the hydric-soil fetch -- among other things, this
-    means a single test mock of get_road_exclusion_union_utm here covers
-    both entry points, rather than needing to patch two independent
-    import bindings.
+    exists so every entry point that needs a road-exclusion union
+    (identify_production_areas() and production_area_ceiling.
+    identify_optimized_production_areas() in this pipeline;
+    water_candidate_zones.py's own water-zone road exclusion, at its own
+    WATER_ZONE_ROAD_BUFFER_METERS) calls the SAME function (imported from
+    here, not straight from farm_roads_data.py independently in each
+    caller), the same "shared helper, one definition" reasoning _fetch_
+    disqualifying_soil_union() above already established for the
+    hydric-soil fetch -- among other things, this means a single test
+    mock of get_road_exclusion_union_utm here covers every entry point,
+    rather than needing to patch several independent import bindings.
+
+    buffer_meters defaults to ROAD_EXCLUSION_BUFFER_METERS (production's
+    own buffer) but is a real, independent parameter -- a caller with its
+    own separately-tunable buffer constant (e.g.
+    water_candidate_zones.WATER_ZONE_ROAD_BUFFER_METERS) passes it
+    explicitly rather than this module's value silently applying instead.
 
     Returns None if no roads were found nearby -- the common, clean case,
     same "checked and genuinely nothing there" convention _fetch_
@@ -386,16 +399,25 @@ def _fetch_road_exclusion_union_utm(boundary_coordinates: list, dem: dict):
     propagate up uncaught; callers degrade gracefully on their own (see
     identify_production_areas()'s own check_roads handling).
     """
-    return get_road_exclusion_union_utm(boundary_coordinates, dem)
+    return get_road_exclusion_union_utm(boundary_coordinates, dem, buffer_meters=buffer_meters)
 
 
-def _fetch_tree_root_zone_mask_utm(boundary_coordinates: list, dem: dict):
+def _fetch_tree_root_zone_mask_utm(
+    boundary_coordinates: list, dem: dict, buffer_meters: float = TREE_ROOT_ZONE_BUFFER_METERS
+):
     """
     Fetches USGS 3DEP lidar HAG coverage for this boundary and returns the
     dilated tree-root-zone cell mask (canopy_height_data.tree_root_zone_
     mask()'s own output -- already on dem's own grid, so it can be used
     directly against compute_step1_eligible_cells()'s cell indices with no
     further alignment work).
+
+    buffer_meters defaults to TREE_ROOT_ZONE_BUFFER_METERS (production's
+    own buffer) but is threaded through to tree_root_zone_mask() as a
+    real, independent parameter -- a caller with its own separately-
+    tunable buffer constant (e.g. water_candidate_zones.
+    WATER_ZONE_CANOPY_BUFFER_METERS) passes it explicitly rather than
+    this module's value silently applying instead.
 
     Returns None if no HAG coverage exists for this boundary at all -- a
     genuine no-data outcome (see canopy_height_data.py's own docstring),
@@ -410,20 +432,28 @@ def _fetch_tree_root_zone_mask_utm(boundary_coordinates: list, dem: dict):
     canopy = get_canopy_height_for_boundary(boundary_coordinates, dem)
     if canopy is None:
         return None
-    return tree_root_zone_mask(canopy["array"], canopy["resolution_meters"])
+    return tree_root_zone_mask(canopy["array"], canopy["resolution_meters"], buffer_meters=buffer_meters)
 
 
-def get_required_tree_root_zone_mask_utm(boundary_polygon_utm: Polygon, dem: dict):
+def get_required_tree_root_zone_mask_utm(
+    boundary_polygon_utm: Polygon, dem: dict, buffer_meters: float = TREE_ROOT_ZONE_BUFFER_METERS
+):
     """
     Fetches a REQUIRED (non-optional) tree-root-zone mask for
     boundary_polygon_utm -- the shared "fetch canopy, or fail hard"
     building block behind the woody-vegetation gate, so every entry point
-    that ultimately calls compute_step1_eligible_cells() applies it
-    identically instead of each reimplementing (or, worse, quietly
-    omitting) its own copy. identify_production_areas() (this module) and
-    production_area_ceiling.identify_optimized_production_areas() both
-    call this directly, rather than either duplicating the boundary-
-    reprojection + fetch + raise sequence itself.
+    that ultimately needs one applies it identically instead of each
+    reimplementing (or, worse, quietly omitting) its own copy.
+    identify_production_areas() (this module), production_area_ceiling.
+    identify_optimized_production_areas(), and water_candidate_zones.py's
+    own mandatory canopy exclusion (at its own WATER_ZONE_CANOPY_BUFFER_
+    METERS) all call this directly, rather than any of them duplicating
+    the boundary-reprojection + fetch + raise sequence itself.
+
+    buffer_meters defaults to TREE_ROOT_ZONE_BUFFER_METERS (production's
+    own buffer) and is threaded straight through to _fetch_tree_root_
+    zone_mask_utm() -- see that function's own docstring for why this
+    stays a real, independent parameter rather than a shared constant.
 
     Reprojects boundary_polygon_utm to WGS84 (the lon/lat convention
     canopy_height_data.get_canopy_height_for_boundary() takes) and calls
@@ -442,7 +472,7 @@ def get_required_tree_root_zone_mask_utm(boundary_polygon_utm: Polygon, dem: dic
     xs, ys = boundary_polygon_utm.exterior.coords.xy
     lons, lats = warp_transform(dem["crs"], "EPSG:4326", list(xs), list(ys))
     boundary_coordinates = list(zip(lons, lats))
-    tree_root_zone_mask_utm = _fetch_tree_root_zone_mask_utm(boundary_coordinates, dem)
+    tree_root_zone_mask_utm = _fetch_tree_root_zone_mask_utm(boundary_coordinates, dem, buffer_meters=buffer_meters)
     if tree_root_zone_mask_utm is None:
         raise RuntimeError(
             "Canopy height data unavailable for this property -- cannot verify "
@@ -487,18 +517,25 @@ def _cell_union_footprint(cells: list[tuple[int, int]], dem: dict):
     cleanup against any remaining near-zero-area topology noise from
     unary_union'ing many touching squares -- the corner-snapping above
     should already make it a no-op in practice.
+
+    Thin, list-of-cells wrapper around raster_grid.cell_union_footprint()
+    (the same corner-computation logic, generalized to take a boolean
+    mask so water_candidate_zones.py's own cell clusters can reuse it too)
+    -- every call site here already has a `cells` list rather than a mask,
+    so this just builds a mask sized to bound `cells` and delegates.
+    Sized off `cells` itself (not dem['array'].shape) since this function
+    only ever needs a mask large enough to hold the given cells --
+    cell_union_footprint() derives each square's real coordinates from
+    dem's origin/resolution directly, never from the mask's own shape.
     """
-    px, py = dem["resolution_meters"]
-    origin_x = dem["origin_x"]
-    origin_y = dem["origin_y"]
-    squares = []
+    if not cells:
+        return Polygon()
+    rows = max(r for r, _ in cells) + 1
+    cols = max(c for _, c in cells) + 1
+    mask = np.zeros((rows, cols), dtype=bool)
     for r, c in cells:
-        x0 = origin_x + c * px
-        x1 = origin_x + (c + 1) * px
-        y1 = origin_y - r * py
-        y0 = origin_y - (r + 1) * py
-        squares.append(box(x0, y0, x1, y1))
-    return unary_union(squares).buffer(0)
+        mask[r, c] = True
+    return cell_union_footprint(dem, mask)
 
 
 def compute_step1_eligible_cells(
@@ -682,51 +719,15 @@ def compute_step1_eligible_cells(
 
 
 def _waist_erosion_radius_cells(dem: dict, min_waist_meters: float) -> int:
-    """
-    Converts MIN_ZONE_WAIST_METERS (a real-world distance) into a cell-
-    count erosion radius using the DEM's own resolution_meters -- same
-    meters-to-cell-units conversion pattern this pipeline's other
-    ground-distance thresholds already use, just applied to a radius
-    instead of an area. Eroding a mask by radius r cells strips away
-    anything narrower than roughly (2r) cells wide, so the radius is half
-    the minimum waist width, rounded UP (via ceil) so any real waist
-    genuinely narrower than min_waist_meters is reliably eroded away
-    rather than surviving due to a too-small radius. Always at least 1
-    cell, so a nonzero min_waist_meters always does *something*.
-    """
-    px, py = dem["resolution_meters"]
-    cell_size = (px + py) / 2.0
-    return max(1, math.ceil(min_waist_meters / cell_size / 2.0))
-
-
-def _reclaim_stripped_cells(
-    cluster_cells: set[tuple[int, int]],
-    seed_labels: dict[tuple[int, int], int],
-) -> dict[tuple[int, int], int]:
-    """
-    Part 1, step 2a: recovers the cells erosion stripped away -- erosion
-    only exists to DECIDE whether a cluster splits, never to permanently
-    remove real, eligible ground. Multi-source 8-connected BFS, confined
-    to `cluster_cells` (the ORIGINAL, pre-erosion cluster footprint):
-    every stripped cell (a cell in cluster_cells not already in
-    seed_labels) is assigned to whichever eroded sub-component's frontier
-    reaches it first, expanding one ring at a time from every surviving
-    sub-component simultaneously. BFS ring distance under 8-connected
-    (D8_OFFSETS) adjacency is exactly Chebyshev pixel distance -- the same
-    adjacency connected_components() already uses -- so this is a simple
-    per-cell nearest-surviving-component assignment by pixel distance,
-    staying entirely in cell-space: not a hull, not a buffer.
-    """
-    assignment = dict(seed_labels)
-    queue = deque(seed_labels.items())
-    while queue:
-        (r, c), label = queue.popleft()
-        for dr, dc in D8_OFFSETS:
-            neighbor = (r + dr, c + dc)
-            if neighbor in cluster_cells and neighbor not in assignment:
-                assignment[neighbor] = label
-                queue.append((neighbor, label))
-    return assignment
+    """Thin wrapper around raster_grid.waist_erosion_radius_cells() -- the
+    meters-to-cell-radius conversion this module's own waist detection
+    used to own directly, extracted to raster_grid.py as a shared utility
+    so water_candidate_zones.py's water-zone clustering can reuse the
+    exact same conversion (same pattern already used for
+    cell_union_footprint() -- see _cell_union_footprint() below). Kept
+    here, thin, because test_production_area.py calls this exact name
+    directly; zero behavior change from before the extraction."""
+    return waist_erosion_radius_cells(dem, min_waist_meters)
 
 
 def _attempt_waist_split(
@@ -736,80 +737,17 @@ def _attempt_waist_split(
     min_area_acres: float,
     min_waist_meters: float = MIN_ZONE_WAIST_METERS,
 ) -> list[dict]:
-    """
-    Part 1: waist detection and splitting for ONE cluster's own cell mask
-    -- a raster morphological operation on the cell mask itself (via
-    raster_grid.binary_erode()), NOT a continuous-geometry operation on
-    any polygon. See cluster_and_gate()'s own docstring for how this
-    fits into STEP 3.
-
-    Erodes the cluster by MIN_ZONE_WAIST_METERS (converted to a cell
-    radius via _waist_erosion_radius_cells()) and re-labels the result. If
-    erosion doesn't produce 2+ components, there's no real waist here --
-    returns [{"cells": cells, "render_cells": cells}] completely unchanged
-    (this function is idempotent and side-effect-free for clusters with no
-    real waist, e.g. a normal, roughly-convex field).
-
-    If erosion DOES produce 2+ components, reclaims every stripped cell
-    back onto its nearest surviving sub-component
-    (_reclaim_stripped_cells()) and checks each reclaimed sub-cluster's
-    own REAL cell-union footprint (_cell_union_footprint(), not a cell
-    count) against min_area_acres. The split is committed -- returning one
-    dict per sub-cluster, each with "cells" (the full, POST-reclaim cell
-    set -- every stripped cell reassigned back to its nearest surviving
-    piece, used for everything reported: area_acres, polygon_utm,
-    geometry_wgs84, suitability scoring) and "render_cells" (the narrower
-    PRE-reclaim cell set -- exactly the cells that survived erosion and
-    landed on this sub-component, before any stripped cell was reassigned
-    anywhere; used ONLY to build render_polygon_utm for display, see
-    cluster_and_gate()) -- only if EVERY sub-cluster clears min_area_acres
-    on its own POST-reclaim footprint; otherwise this returns
-    [{"cells": cells, "render_cells": cells}] unchanged (step 2c: a
-    technically-2+-component erosion result that can't actually support
-    2+ real zones isn't a split).
-    """
-    if len(cells) <= 1:
-        return [{"cells": cells, "render_cells": cells}]
-
-    rows, cols = grid_shape
-    cell_mask = np.zeros((rows, cols), dtype=bool)
-    for r, c in cells:
-        cell_mask[r, c] = True
-
-    radius_cells = _waist_erosion_radius_cells(dem, min_waist_meters)
-    eroded_mask = binary_erode(cell_mask, radius_cells)
-
-    eroded_labels, num_eroded = connected_components(eroded_mask)
-    if num_eroded < 2:
-        return [{"cells": cells, "render_cells": cells}]
-
-    cluster_cells = set(cells)
-    seed_labels = {
-        (int(r), int(c)): int(eroded_labels[r, c]) for r, c in np.argwhere(eroded_mask)
-    }
-    assignment = _reclaim_stripped_cells(cluster_cells, seed_labels)
-
-    sub_groups: dict[int, list[tuple[int, int]]] = {}
-    for cell, label in assignment.items():
-        sub_groups.setdefault(label, []).append(cell)
-
-    if len(sub_groups) < 2:
-        return [{"cells": cells, "render_cells": cells}]
-
-    for group_cells in sub_groups.values():
-        footprint = _cell_union_footprint(group_cells, dem)
-        area_acres = footprint.area / SQUARE_METERS_PER_ACRE
-        if area_acres < min_area_acres:
-            return [{"cells": cells, "render_cells": cells}]
-
-    pre_reclaim_groups: dict[int, list[tuple[int, int]]] = {}
-    for cell, label in seed_labels.items():
-        pre_reclaim_groups.setdefault(label, []).append(cell)
-
-    return [
-        {"cells": group_cells, "render_cells": pre_reclaim_groups[label]}
-        for label, group_cells in sub_groups.items()
-    ]
+    """Thin wrapper around raster_grid.attempt_waist_split() -- Part 1's
+    waist detection/splitting for ONE cluster's own cell mask, extracted
+    to raster_grid.py as a shared utility (see cluster_and_gate()'s own
+    docstring for how this fits into STEP 3) so water_candidate_zones.py's
+    water-zone clustering can reuse the exact same detection/splitting
+    logic against its own post-dilation eligibility mask, rather than a
+    second, independently-maintained copy. Zero behavior change from
+    before the extraction; see raster_grid.attempt_waist_split()'s own
+    docstring for the full algorithm, including the "cells"/"render_cells"
+    distinction each returned dict carries."""
+    return attempt_waist_split(cells, grid_shape, dem, min_area_acres, min_waist_meters)
 
 
 def _detect_hole_footprints(cells: list[tuple[int, int]], dem: dict) -> list[Polygon]:

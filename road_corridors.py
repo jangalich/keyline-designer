@@ -1199,7 +1199,7 @@ def identify_road_corridor_candidates(
     production_areas = identify_production_areas(dem, boundary_polygon_utm)
     valleys = delineate_valleys(dem)  # reused for pond zones AND the floodplain fallback below
 
-    pond_zones = find_pond_zones(valleys, production_areas, boundary_polygon_utm, dem["crs"])
+    pond_zones = find_pond_zones(dem, production_areas, boundary_polygon_utm)
 
     hydric_floodplain_union, floodplain_data_is_fallback = _fetch_floodplain_hydric_union(
         boundary_coordinates, dem, valleys, boundary_polygon_utm
