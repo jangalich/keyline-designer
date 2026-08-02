@@ -53,6 +53,21 @@ DEM/valley delineation accurate") -- see test_water_candidate_zones.py,
 and the module docstrings on dem_data.py/valley_delineation.py/
 production_area.py for the same reasoning applied to the layers underneath
 this one.
+
+Each zone also carries render_fill_polygon_utm/render_fill_geometry_wgs84
+-- a DISPLAY-ONLY convex hull of the real cell-union footprint,
+re-intersected with the parcel boundary, same construction and same
+reasoning as production_area.py's own render_fill_polygon_utm (see that
+module's docstring): a water zone traced along a narrow, winding drainage
+band is a genuinely concave, notched shape, and the hull reads as one
+coherent blob at render time instead. This NEVER replaces polygon_utm/
+geometry_wgs84 for scoring, eligibility, or the narrative report -- those
+stay the real, unsmoothed cell-union footprint, untouched. It is
+deliberately allowed to overlap a production area's own
+render_fill_polygon_utm at render time -- that overlap is a display-only
+coincidence, not a real siting conflict (the eligibility-gate production
+exclusion above already keeps a water zone's REAL geometry off real
+production ground; see WATER_ZONE_PRODUCTION_SETBACK_METERS).
 """
 
 import math
@@ -868,6 +883,17 @@ def find_candidate_zones(
             'served_production_area_ids': [int, ...],
             'polygon_utm': shapely Polygon/MultiPolygon,
             'geometry_wgs84': GeoJSON geometry dict,
+            'render_fill_polygon_utm': shapely Polygon/MultiPolygon,
+                # DISPLAY-ONLY -- the real cell-union footprint's plain
+                # convex hull, re-intersected with boundary_polygon_utm --
+                # NEVER used for scoring/eligibility/the narrative report,
+                # which all stay on polygon_utm/geometry_wgs84 untouched.
+                # Same construction production_area.py's own
+                # render_fill_polygon_utm uses -- see render_layout_map.py
+                # for where this is actually drawn.
+            'render_fill_geometry_wgs84': GeoJSON geometry dict,
+                # render_fill_polygon_utm's WGS84 reprojection, same
+                # polygon_utm/geometry_wgs84 pairing convention.
             'production_area_relationships': [...],   # see
                 _zone_production_area_relationships()'s docstring — one
                 entry per served production area, sorted most-gravity-
@@ -971,6 +997,22 @@ def find_candidate_zones(
 
             geometry_wgs84 = transform_geom(dem["crs"], "EPSG:4326", mapping(polygon_utm))
 
+            # render_fill_polygon_utm: a DISPLAY-ONLY geometry, never used
+            # for scoring/eligibility/the narrative report -- same
+            # construction production_area.py's own render_fill_polygon_utm
+            # uses (the real cell-union footprint's plain convex hull,
+            # re-intersected with boundary_polygon_utm so it never extends
+            # past the real parcel edge). A water zone traced along a
+            # narrow drainage band can be a long, winding, concave shape;
+            # the hull reads as a single coherent "this is the water zone"
+            # blob at render time instead of a blocky, notched outline --
+            # see render_layout_map.py for where this is actually drawn.
+            # render_fill_geometry_wgs84 is its WGS84-reprojected pairing,
+            # same polygon_utm/geometry_wgs84 pairing convention this zone
+            # dict already follows.
+            render_fill_polygon_utm = footprint.convex_hull.intersection(boundary_polygon_utm)
+            render_fill_geometry_wgs84 = transform_geom(dem["crs"], "EPSG:4326", mapping(render_fill_polygon_utm))
+
             zone = {
                 "id": next_id,
                 "served_production_area_ids": sorted(
@@ -978,6 +1020,8 @@ def find_candidate_zones(
                 ),
                 "polygon_utm": polygon_utm,
                 "geometry_wgs84": geometry_wgs84,
+                "render_fill_polygon_utm": render_fill_polygon_utm,
+                "render_fill_geometry_wgs84": render_fill_geometry_wgs84,
                 "cells": sub_cells,
                 "production_area_relationships": production_area_relationships,
                 "primary_production_area_relationship": production_area_relationships[0],
@@ -1024,6 +1068,7 @@ def zones_to_geojson(zones: list[dict]) -> dict:
                 "primary_production_area_relationship": z["primary_production_area_relationship"],
                 "contributing_area_cells": z["contributing_area_cells"],
                 "slope_pct": z["slope_pct"],
+                "render_fill_geometry_wgs84": z["render_fill_geometry_wgs84"],
                 "optimal_subarea_geometry_wgs84": z["optimal_subarea_geometry_wgs84"],
                 "optimal_subarea_acres": z["optimal_subarea_acres"],
             },

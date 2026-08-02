@@ -33,8 +33,9 @@ render_fill_polygon_utm, not a pre-clipped raster), and only the clipped
 segments within that zone are drawn. No fill, no boundary stroke for
 production zones -- zone identity is conveyed by the numbered marker
 alone, same as every other layer. This is a deliberate, scoped styling
-split: water, road corridors, structure sites, and the property boundary
-all keep their existing solid fill/line rendering exactly as before.
+split: road corridors, structure sites, and the property boundary all
+keep their existing solid fill/line rendering exactly as before -- the
+water zone (below) has its OWN render-only treatment.
 
 Contours clip against render_fill_polygon_utm rather than polygon_utm
 for two separate reasons layered on top of each other, both from
@@ -65,6 +66,26 @@ polygon_utm) exactly whenever render_polygon_utm is already convex --
 e.g. an ordinary, roughly-rectangular zone with no notches or holes --
 so this changes nothing for the common case.
 
+WATER ZONE STYLE: the water zone's FILL is drawn from its own
+render_fill_polygon_utm too (water_candidate_zones.find_candidate_zones()'s
+own convex hull of the zone's real cell-union footprint, re-intersected
+with the parcel boundary) rather than its real, often long/winding/concave
+geometry_wgs84 -- same reasoning as production's own hull, applied here
+for the same "reads as one coherent shape, not a blocky, notched outline"
+purpose. This is DISPLAY-ONLY: the zone's real polygon_utm/geometry_wgs84
+(used for scoring, eligibility, and the narrative report) are completely
+untouched by this. The fill is drawn fully OPAQUE (alpha=1.0, not the
+0.35 an earlier version used) specifically so it occludes any production-
+zone contour lines beneath it, then a subtle sine-wave ripple texture is
+drawn directly over the opaque fill (matplotlib has no built-in wavy
+`hatch` character, so this is hand-drawn as clipped Line2D paths -- see
+_ripple_lines_for_polygon()) so the shape reads as water at a glance. The
+water zone's hull is allowed to overlap a production zone's own hull at
+render time -- that's a display-only coincidence between two convex
+hulls, not a real siting conflict; the real geometries stay separated by
+water_candidate_zones.py's own production-zone eligibility exclusion gate
+(WATER_ZONE_PRODUCTION_SETBACK_METERS), unaffected by anything here.
+
 Basemap: NAIP aerial imagery via USGS's cached USGSImageryOnly tile
 service, fetched and composited with contextily (a well-established
 static-basemap library built for exactly this -- fetch+stitch XYZ tiles
@@ -84,6 +105,7 @@ from typing import Optional
 import contextily as cx
 import matplotlib
 import mercantile
+import numpy as np
 import requests
 import xyzservices
 
@@ -91,7 +113,7 @@ matplotlib.use("Agg")  # headless rendering -- no display server in this pipelin
 import matplotlib.pyplot as plt
 from rasterio.warp import transform as warp_transform
 from rasterio.warp import transform_geom
-from shapely.geometry import Polygon, box, mapping, shape
+from shapely.geometry import LineString, Polygon, box, mapping, shape
 from shapely.ops import unary_union
 from shapely.plotting import plot_line, plot_points, plot_polygon
 
@@ -262,6 +284,11 @@ CONTOUR_LINE_COLOR = "#6B4423"  # muted brown -- traditional topo-map
 # in use (production green, water blue, road rust-orange, structure
 # red)
 WATER_ZONE_COLOR = "#1F6FB2"
+# A lighter tint of WATER_ZONE_COLOR, for the ripple texture drawn over
+# the opaque fill below -- see _ripple_lines_for_polygon()'s own
+# docstring. Distinct from WATER_ZONE_COLOR so the ripples read as a
+# texture ON the water fill, not a second, competing shape.
+WATER_ZONE_RIPPLE_COLOR = "#7EC1E8"
 ROAD_CORRIDOR_COLOR = "#B5651D"
 STRUCTURE_SITE_COLOR = "#D64545"
 
@@ -305,6 +332,61 @@ def _iter_line_parts(geometry):
     elif geometry.geom_type == "GeometryCollection":
         for part in geometry.geoms:
             yield from _iter_line_parts(part)
+
+
+# Ripple-texture tuning for the water zone's opaque fill -- deliberately
+# subtle (few waves, low amplitude) so this reads as "this is water" at a
+# glance rather than a decorative pattern competing with the numbered
+# marker drawn on top of it (zorder=50, well above the ripples).
+WATER_ZONE_RIPPLE_COUNT = 4
+WATER_ZONE_RIPPLE_AMPLITUDE_FRACTION = 0.06  # fraction of the polygon's own bounding-box height
+WATER_ZONE_RIPPLE_WAVELENGTH_FRACTION = 0.5  # fraction of the polygon's own bounding-box width, per full sine cycle
+WATER_ZONE_RIPPLE_LINEWIDTH = 1.0
+WATER_ZONE_RIPPLE_ALPHA = 0.6
+WATER_ZONE_RIPPLE_SAMPLES = 200  # points sampled along each wave before clipping to the polygon
+
+
+def _ripple_lines_for_polygon(polygon) -> list:
+    """
+    Generates WATER_ZONE_RIPPLE_COUNT evenly-spaced horizontal sine-wave
+    lines across `polygon`'s own bounding box, each clipped to the real
+    polygon shape (shapely intersection, not a rectangular crop) -- a
+    lightweight water-texture hatch drawn over the solid opaque fill,
+    not a real second geometry. Matplotlib has no built-in wavy `hatch`
+    character, so this draws the waves directly as clipped LineStrings
+    instead.
+
+    Returns a list of clipped (Multi)LineString/GeometryCollection
+    geometries (possibly empty if the polygon is degenerate) -- callers
+    should iterate real line parts out of each via _iter_line_parts()
+    before drawing, same as every other clipped-line consumer in this
+    module (e.g. the production-zone contour clipping above).
+    """
+    minx, miny, maxx, maxy = polygon.bounds
+    height = maxy - miny
+    width = maxx - minx
+    if height <= 0 or width <= 0:
+        return []
+
+    amplitude = height * WATER_ZONE_RIPPLE_AMPLITUDE_FRACTION
+    wavelength = width * WATER_ZONE_RIPPLE_WAVELENGTH_FRACTION
+    if wavelength <= 0:
+        return []
+
+    xs = np.linspace(minx, maxx, WATER_ZONE_RIPPLE_SAMPLES)
+    clipped_lines = []
+    for i in range(WATER_ZONE_RIPPLE_COUNT):
+        # Evenly spaced across the polygon's own vertical extent (not
+        # hugging the top/bottom edge) -- (i + 1) / (count + 1) puts
+        # WATER_ZONE_RIPPLE_COUNT waves at fractions 1/(n+1) .. n/(n+1)
+        # of the bounding-box height.
+        y_center = miny + height * (i + 1) / (WATER_ZONE_RIPPLE_COUNT + 1)
+        ys = y_center + amplitude * np.sin(2 * np.pi * (xs - minx) / wavelength)
+        wave_line = LineString(zip(xs, ys))
+        clipped = wave_line.intersection(polygon)
+        if not clipped.is_empty:
+            clipped_lines.append(clipped)
+    return clipped_lines
 
 
 def _boundary_polygon_mercator(boundary_coordinates: list[tuple[float, float]]) -> Polygon:
@@ -536,20 +618,56 @@ def render_layout_map(
         marker_number += 1
 
     if water_zone is not None:
-        geom = _reproject_geometry_to_mercator(water_zone["geometry_wgs84"])
-        polygons = geom.geoms if geom.geom_type == "MultiPolygon" else [geom]
+        # DISPLAY-ONLY fill geometry: render_fill_polygon_utm is a plain
+        # convex hull of the zone's real cell-union footprint (see
+        # water_candidate_zones.find_candidate_zones()'s own docstring),
+        # already in the DEM's own UTM CRS -- reprojected in one hop
+        # (_reproject_utm_geometry_to_mercator(), same pattern the
+        # production-zone contour clipping above already uses), never the
+        # real geometry_wgs84 used for scoring/eligibility/the narrative
+        # report. Crossing over a production zone's own rendered fill is
+        # expected and fine here -- that overlap is a display-only
+        # coincidence between two convex hulls, not a real siting
+        # conflict (the real, unsmoothed geometries stay clear of each
+        # other via the production-zone eligibility exclusion gate).
+        render_fill_geom = _reproject_utm_geometry_to_mercator(water_zone["render_fill_polygon_utm"], dem["crs"])
+        polygons = render_fill_geom.geoms if render_fill_geom.geom_type == "MultiPolygon" else [render_fill_geom]
         for polygon in polygons:
+            # Opaque fill (alpha=1.0) so it fully occludes any production-
+            # zone contour lines beneath it (zorder=41 > those zones'
+            # zorder=40) -- then a subtle sine-wave ripple texture drawn
+            # directly over it, so this reads as water at a glance.
             plot_polygon(
                 polygon,
                 ax=ax,
                 add_points=False,
                 facecolor=WATER_ZONE_COLOR,
                 edgecolor=WATER_ZONE_COLOR,
-                alpha=0.35,
+                alpha=1.0,
                 linewidth=1.5,
                 zorder=41,
             )
-        _draw_numbered_marker(ax, geom.representative_point(), marker_number)
+            for ripple in _ripple_lines_for_polygon(polygon):
+                for line in _iter_line_parts(ripple):
+                    plot_line(
+                        line,
+                        ax=ax,
+                        add_points=False,
+                        color=WATER_ZONE_RIPPLE_COLOR,
+                        linewidth=WATER_ZONE_RIPPLE_LINEWIDTH,
+                        alpha=WATER_ZONE_RIPPLE_ALPHA,
+                        zorder=41.5,
+                    )
+        # The marker sits on the geometry actually drawn above (the hull,
+        # not the real blocky footprint) -- representative_point() is
+        # guaranteed by shapely to fall within its own geometry, so this
+        # can never land outside the visible fill even though the hull's
+        # own representative point can differ from geometry_wgs84's.
+        marker_point = render_fill_geom.representative_point()
+        assert render_fill_geom.contains(marker_point) or render_fill_geom.intersects(marker_point), (
+            "water zone marker point must fall on the geometry actually drawn"
+        )
+        _draw_numbered_marker(ax, marker_point, marker_number)
         legend_entries.append(
             f"{marker_number} — Water System, Zone {water_zone['id']}, "
             f"score {water_zone['suitability_score']}"

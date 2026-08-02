@@ -1043,4 +1043,173 @@ assert small_feature_props["optimal_subarea_acres"] is None
 assert small_feature_props["optimal_subarea_geometry_wgs84"] is None
 print("zones_to_geojson() carries optimal_subarea_geometry_wgs84/optimal_subarea_acres, None when not applicable.")
 
+# =====================================================================
+# render_fill_polygon_utm: a DISPLAY-ONLY convex hull of the zone's real
+# cell-union footprint, re-intersected with the parcel boundary -- same
+# construction production_area.py's own render_fill_polygon_utm uses.
+# Never used for scoring/eligibility/the narrative report (those stay on
+# polygon_utm/geometry_wgs84, untested here since every prior test in
+# this file already covers that). It is explicitly ALLOWED to overlap a
+# production area's own render_fill_polygon_utm -- a display-only
+# coincidence, not a real siting conflict -- unlike the real polygon_utm,
+# which the production-zone eligibility exclusion gate keeps clear of
+# real production ground.
+# =====================================================================
+
+RENDER_HULL_SIZE = (20, 20)
+RENDER_HULL_DEM = {
+    "array": np.full(RENDER_HULL_SIZE, 100.0, dtype=np.float32),
+    "resolution_meters": (5.0, 5.0),
+    "origin_x": 500000.0,
+    "origin_y": 4500000.0,
+    "crs": CRS,
+}
+
+# An L-shaped (genuinely non-convex, unlike every other rectangular
+# fixture above) eligible mask -- a real drainage band winding around a
+# corner, same as a real water zone can plausibly look like -- so the
+# convex hull actually differs from the blocky cell-union footprint
+# (a rectangular fixture's hull is geometrically identical to its own
+# footprint, which wouldn't prove anything).
+_l_vertical_arm = _rect_cells(0, 15, 0, 5)
+_l_horizontal_arm = _rect_cells(10, 15, 0, 15)
+L_SHAPE_CELLS = list(set(_l_vertical_arm + _l_horizontal_arm))
+L_SHAPE_MASK = _mask_from_cells(RENDER_HULL_SIZE, L_SHAPE_CELLS)
+
+RENDER_HULL_FULL_EXTENT = box(500000.0, 4500000.0 - 100.0, 500000.0 + 100.0, 4500000.0)
+RENDER_HULL_PRODUCTION_AREA = [
+    {
+        "id": 0,
+        "representative_elevation_m": 50.0,
+        "polygon_utm": box(500000.0, 4500000.0 - 130.0, 500000.0 + 20.0, 4500000.0 - 100.0),
+        "render_fill_polygon_utm": box(500000.0, 4500000.0 - 130.0, 500000.0 + 20.0, 4500000.0 - 100.0),
+    }
+]
+
+_original_compute_water_eligible_cells = wcz.compute_water_eligible_cells
+wcz.compute_water_eligible_cells = lambda *a, **kw: L_SHAPE_MASK
+try:
+    l_shape_zones = find_candidate_zones(RENDER_HULL_DEM, RENDER_HULL_PRODUCTION_AREA, RENDER_HULL_FULL_EXTENT)
+finally:
+    wcz.compute_water_eligible_cells = _original_compute_water_eligible_cells
+
+assert len(l_shape_zones) == 1, f"expected exactly 1 zone on the L-shaped fixture, got {len(l_shape_zones)}"
+l_shape_zone = l_shape_zones[0]
+
+assert "render_fill_polygon_utm" in l_shape_zone and "render_fill_geometry_wgs84" in l_shape_zone, (
+    "every zone must carry render_fill_polygon_utm/render_fill_geometry_wgs84"
+)
+
+# (a) The hull genuinely differs from (and exceeds the area of) the real, blocky polygon_utm --
+#     proof this is an actual convex hull, not just polygon_utm renamed.
+assert l_shape_zone["render_fill_polygon_utm"].area > l_shape_zone["polygon_utm"].area, (
+    "render_fill_polygon_utm (a convex hull) must have STRICTLY more area than the real, blocky, "
+    "non-convex polygon_utm on this L-shaped fixture -- otherwise it isn't actually a hull"
+)
+expected_hull = cell_union_footprint(RENDER_HULL_DEM, L_SHAPE_MASK).convex_hull.intersection(RENDER_HULL_FULL_EXTENT)
+assert l_shape_zone["render_fill_polygon_utm"].equals(expected_hull), (
+    "render_fill_polygon_utm must equal cell_union_footprint(...).convex_hull.intersection(boundary_polygon_utm) exactly"
+)
+print(
+    f"render_fill_polygon_utm is a genuine convex hull on a non-convex L-shaped zone: "
+    f"{l_shape_zone['render_fill_polygon_utm'].area:.1f} sq m (hull) vs. "
+    f"{l_shape_zone['polygon_utm'].area:.1f} sq m (real, blocky footprint)."
+)
+
+# (b) The hull is genuinely clipped to a SMALLER-than-full-extent parcel boundary -- a boundary
+#     that removes part of the hull's own bulge (not the real footprint itself) produces a
+#     measurably smaller hull than the full-extent case, while polygon_utm stays identical either way.
+RENDER_HULL_NOTCH = box(500025.0, 4499950.0, 500050.0, 4500000.0)
+RENDER_HULL_CLIP_BOUNDARY = RENDER_HULL_FULL_EXTENT.difference(RENDER_HULL_NOTCH)
+
+wcz.compute_water_eligible_cells = lambda *a, **kw: L_SHAPE_MASK
+try:
+    clipped_zones = find_candidate_zones(RENDER_HULL_DEM, RENDER_HULL_PRODUCTION_AREA, RENDER_HULL_CLIP_BOUNDARY)
+finally:
+    wcz.compute_water_eligible_cells = _original_compute_water_eligible_cells
+
+assert len(clipped_zones) == 1
+clipped_zone = clipped_zones[0]
+assert clipped_zone["polygon_utm"].area == l_shape_zone["polygon_utm"].area, (
+    "the real, blocky polygon_utm must be unaffected by a boundary that only clips the hull's own bulge"
+)
+assert clipped_zone["render_fill_polygon_utm"].area < l_shape_zone["render_fill_polygon_utm"].area, (
+    "a boundary that removes part of the hull's own bulge must produce a measurably SMALLER hull than "
+    "the unclipped, full-extent case"
+)
+assert RENDER_HULL_CLIP_BOUNDARY.buffer(1e-6).contains(clipped_zone["render_fill_polygon_utm"]), (
+    "render_fill_polygon_utm must stay entirely within boundary_polygon_utm -- no part of the hull may "
+    "extend past the real parcel edge"
+)
+print(
+    f"render_fill_polygon_utm is genuinely clipped to boundary_polygon_utm: {clipped_zone['render_fill_polygon_utm'].area:.1f} "
+    f"sq m clipped vs. {l_shape_zone['render_fill_polygon_utm'].area:.1f} sq m unclipped, while polygon_utm "
+    f"({clipped_zone['polygon_utm'].area:.1f} sq m) stays identical either way."
+)
+
+# (c) render_fill_geometry_wgs84 reprojects back to render_fill_polygon_utm exactly.
+from rasterio.warp import transform_geom as transform_geom_check  # noqa: E402
+from shapely.geometry import shape as shape_check  # noqa: E402
+
+render_fill_reprojected = shape_check(
+    transform_geom_check("EPSG:4326", RENDER_HULL_DEM["crs"], l_shape_zone["render_fill_geometry_wgs84"])
+)
+assert render_fill_reprojected.symmetric_difference(l_shape_zone["render_fill_polygon_utm"]).area < 1e-6, (
+    "render_fill_geometry_wgs84 must reproject back to render_fill_polygon_utm exactly"
+)
+
+# (d) Overlap with a production area's own render_fill_polygon_utm is explicitly ALLOWED (not
+#     filtered/excluded) -- intentionally different from the real eligibility-gate exclusion, which
+#     stays on the real geometry (polygon_utm) and is untouched by any of this.
+OVERLAPPING_PRODUCTION_AREA = [
+    {
+        "id": 0,
+        "representative_elevation_m": 50.0,
+        "polygon_utm": box(500000.0, 4500000.0 - 130.0, 500000.0 + 20.0, 4500000.0 - 100.0),
+        # Deliberately positioned to overlap the L-shaped zone's own hull bulge directly.
+        "render_fill_polygon_utm": box(500025.0, 4499950.0, 500075.0, 4500000.0),
+    }
+]
+
+wcz.compute_water_eligible_cells = lambda *a, **kw: L_SHAPE_MASK
+try:
+    overlap_zones = find_candidate_zones(RENDER_HULL_DEM, OVERLAPPING_PRODUCTION_AREA, RENDER_HULL_FULL_EXTENT)
+finally:
+    wcz.compute_water_eligible_cells = _original_compute_water_eligible_cells
+
+assert len(overlap_zones) == 1, (
+    "a water zone whose render_fill_polygon_utm overlaps a production area's own render_fill_polygon_utm "
+    "must still survive as a real zone -- render-fill overlap is allowed, not a rejection criterion"
+)
+overlap_zone = overlap_zones[0]
+render_overlap_area = overlap_zone["render_fill_polygon_utm"].intersection(
+    OVERLAPPING_PRODUCTION_AREA[0]["render_fill_polygon_utm"]
+).area
+real_overlap_area = overlap_zone["polygon_utm"].intersection(OVERLAPPING_PRODUCTION_AREA[0]["polygon_utm"]).area
+assert render_overlap_area > 0, (
+    "test setup should genuinely produce real render_fill_polygon_utm overlap with the production area -- "
+    "otherwise this isn't exercising the overlap-is-allowed behavior at all"
+)
+assert real_overlap_area == 0, (
+    "the zone's REAL polygon_utm must never overlap a production area's own real polygon_utm -- that's the "
+    "eligibility-gate exclusion's job, untouched by render_fill_polygon_utm existing at all"
+)
+print(
+    f"render_fill_polygon_utm is explicitly ALLOWED to overlap a production area's own render_fill_polygon_utm "
+    f"({render_overlap_area:.1f} sq m of display-only overlap) while the zone's real polygon_utm stays at "
+    f"{real_overlap_area:.1f} sq m of overlap with the production area's real polygon_utm -- the render-only "
+    "hull never affects real eligibility."
+)
+
+
+# --- zones_to_geojson() carries render_fill_geometry_wgs84 ---
+
+render_hull_geojson = zones_to_geojson(l_shape_zones)
+render_hull_props = render_hull_geojson["features"][0]["properties"]
+assert render_hull_props["render_fill_geometry_wgs84"] == l_shape_zone["render_fill_geometry_wgs84"], (
+    "zones_to_geojson() must carry render_fill_geometry_wgs84 exactly"
+)
+print("zones_to_geojson() carries render_fill_geometry_wgs84 exactly.")
+
+
 print("\nAll water_candidate_zones checks passed.")
