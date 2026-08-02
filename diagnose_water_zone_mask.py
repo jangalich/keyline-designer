@@ -746,7 +746,9 @@ def _report_optimal_subarea(dem: dict, production_areas: list[dict], zone: dict)
     real output for the top-ranked zone -- already computed and attached
     by find_candidate_zones() itself (zone['optimal_subarea_polygon_utm']/
     'optimal_subarea_geometry_wgs84'/'optimal_subarea_acres'), not
-    recomputed here. Reports the sub-area's own acreage plus its member
+    recomputed here. Reports the sub-area's own acreage, centroid (UTM and
+    lon/lat, same style as the production-area centroid line printed near
+    the top of this script) and real bounding extent, plus its member
     cells' elevation range and distance-to-primary-production-area range/
     average, directly against the full zone's own equivalents, so a
     "smaller, higher-confidence pointer" claim can actually be checked
@@ -806,6 +808,23 @@ def _report_optimal_subarea(dem: dict, production_areas: list[dict], zone: dict)
         f"Optimal sub-area: {subarea_acres:.3f} acres ({len(subarea_cells)} of {len(zone['cells'])} zone "
         f"cells), capped near WATER_ZONE_SUBAREA_TARGET_ACRES ({WATER_ZONE_SUBAREA_TARGET_ACRES} acres)"
     )
+
+    # Centroid/extent -- same style as the production-area centroid line
+    # printed near the top of this script (centroid=(x, y)), plus the
+    # lon/lat reprojection (same warp_transform() call every other
+    # UTM->WGS84 conversion in this file already uses) and the polygon's
+    # own real bounding box (same style boundary_polygon_utm.bounds is
+    # already printed in).
+    subarea_centroid = subarea_polygon.centroid
+    subarea_lons, subarea_lats = warp_transform(
+        dem["crs"], "EPSG:4326", [subarea_centroid.x], [subarea_centroid.y]
+    )
+    print(
+        f"  Centroid: UTM=({subarea_centroid.x:.1f}, {subarea_centroid.y:.1f}), "
+        f"lon/lat=({subarea_lons[0]:.6f}, {subarea_lats[0]:.6f})"
+    )
+    print(f"  Bounding extent (UTM, {dem['crs']}): {subarea_polygon.bounds}")
+
     if zone_elevations and subarea_elevations:
         print(
             f"  Elevation:  sub-area avg={np.mean(subarea_elevations):.2f}m "
