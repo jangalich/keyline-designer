@@ -53,6 +53,21 @@ DEM/valley delineation accurate") -- see test_water_candidate_zones.py,
 and the module docstrings on dem_data.py/valley_delineation.py/
 production_area.py for the same reasoning applied to the layers underneath
 this one.
+
+Each zone also carries render_fill_polygon_utm/render_fill_geometry_wgs84
+-- a DISPLAY-ONLY convex hull of the real cell-union footprint,
+re-intersected with the parcel boundary, same construction and same
+reasoning as production_area.py's own render_fill_polygon_utm (see that
+module's docstring): a water zone traced along a narrow, winding drainage
+band is a genuinely concave, notched shape, and the hull reads as one
+coherent blob at render time instead. This NEVER replaces polygon_utm/
+geometry_wgs84 for scoring, eligibility, or the narrative report -- those
+stay the real, unsmoothed cell-union footprint, untouched. It is
+deliberately allowed to overlap a production area's own
+render_fill_polygon_utm at render time -- that overlap is a display-only
+coincidence, not a real siting conflict (the eligibility-gate production
+exclusion above already keeps a water zone's REAL geometry off real
+production ground; see WATER_ZONE_PRODUCTION_SETBACK_METERS).
 """
 
 import math
@@ -62,6 +77,7 @@ import numpy as np
 from rasterio.warp import transform as warp_transform
 from rasterio.warp import transform_geom
 from shapely.geometry import Point, Polygon, mapping
+from shapely.ops import unary_union
 from shapely.prepared import prep
 
 from dem_data import get_dem_for_boundary
@@ -232,6 +248,26 @@ WATER_ZONE_CANOPY_BUFFER_METERS = 3.048  # 10ft
 # haven't excluded roads before. CONFIGURABLE.
 WATER_ZONE_ROAD_BUFFER_METERS = 3.048  # 10ft
 
+# A cell inside ANY production area's own render_fill_polygon_utm
+# (production_area.py's cluster_and_gate()/identify_production_areas() --
+# the waist-split-aware convex hull, reclipped to the real parcel
+# boundary, NOT polygon_utm's raw cell-union footprint -- chosen
+# specifically because it reins in slivers/branches rather than
+# ballooning past them) is hard-excluded from water-zone eligibility
+# outright: production ground and water-system infrastructure ground are
+# mutually exclusive uses of the same ground, the same cell-level AND'd
+# hard-exclusion pattern already applied to canopy/road above, just
+# against a different real footprint, and checked against the UNION of
+# every production area's render_fill_polygon_utm, not just whichever one
+# a zone might eventually be scored against (find_candidate_zones()'s own
+# whole-zone scoring picks that afterward — this gate runs before any
+# zone even exists). 0.0 is a hard edge-to-edge boundary with no
+# additional margin beyond the polygon itself -- this constant exists so
+# a future buffer can be added if that proves too tight in practice once
+# ground-truthed. NOT YET VALIDATED against a real property, same caveat
+# every other threshold in this pipeline carries. CONFIGURABLE.
+WATER_ZONE_PRODUCTION_SETBACK_METERS = 0.0
+
 # Sentinel distinguishing "the canopy/road check genuinely ran" from
 # "never checked at all" -- same convention production_area.py's own
 # _CANOPY_CHECK_UNCHECKED/_ROAD_CHECK_UNCHECKED use, for the same reason:
@@ -318,13 +354,14 @@ def compute_water_eligible_cells(
     survey_buffer_meters: float = WATER_ZONE_SURVEY_BUFFER_METERS,
     canopy_root_zone_mask_utm=_CANOPY_CHECK_UNCHECKED,
     road_exclusion_union_utm=_ROAD_CHECK_UNCHECKED,
+    production_setback_meters: float = WATER_ZONE_PRODUCTION_SETBACK_METERS,
 ) -> np.ndarray:
     """
     Cell-based STEP 1/2: computes the raw flow-accumulation grid directly
     from `dem` (valley_delineation.get_flow_accumulation_for_dem() — the
     same contributing-cell-count grid delineate_valleys() thresholds/
     traces internally, recomputed here rather than reusing a traced
-    branch) and gates each cell on FIVE independent checks, ALL of which
+    branch) and gates each cell on SIX independent checks, ALL of which
     must pass for a cell to be eligible:
 
       1. Contributing-area PERCENTILE BAND, not a single hard threshold:
@@ -423,6 +460,30 @@ def compute_water_eligible_cells(
          (graceful degrade on fetch failure, mirroring production_area.py's
          own check_roads handling) -- see module docstring.
 
+      6. NOT inside any production area's own render_fill_polygon_utm
+         (production_area.py's cluster_and_gate()/identify_production_
+         areas() -- the waist-split-aware convex hull, reclipped to the
+         real parcel boundary, NOT polygon_utm's raw cell-union footprint;
+         chosen over polygon_utm specifically because it reins in
+         slivers/branches rather than ballooning past them), buffered by
+         production_setback_meters (see WATER_ZONE_PRODUCTION_SETBACK_
+         METERS's own docstring -- 0.0 by default, a hard edge-to-edge
+         boundary). Tested against the UNION of every production area's
+         render_fill_polygon_utm, not just whichever one a zone might
+         eventually be scored against -- gate 3 above (service distance)
+         explicitly ALLOWS a cell to sit inside a production area's
+         polygon_utm (distance == 0 is not "too close"), but that's a
+         distance-math carve-out, not a statement that production ground
+         and water-system ground are the same ground; this gate is what
+         actually keeps them mutually exclusive. Unlike canopy/road, this
+         has no "unchecked" sentinel -- production_areas is always a
+         required, already-computed argument here (never optionally
+         fetched by this function), so the exclusion union is always built
+         from whatever was passed in; an empty production_areas list
+         yields no exclusion at all (nothing to exclude), which is moot in
+         practice since gate 3 above already returns nothing eligible with
+         no production areas to serve.
+
     Elevation/gradient is deliberately NOT a gate here (see module
     docstring's "gravity is a preference, not a gate" framing) — do not
     add a min-gradient or elevation-band exclusion; a cell otherwise
@@ -468,6 +529,16 @@ def compute_water_eligible_cells(
     )
     road_prepared = prep(road_union) if road_union is not None else None
 
+    production_footprints = [patch["render_fill_polygon_utm"] for patch in production_areas]
+    production_exclusion_union_utm = (
+        unary_union(production_footprints).buffer(production_setback_meters)
+        if production_footprints
+        else None
+    )
+    production_prepared = (
+        prep(production_exclusion_union_utm) if production_exclusion_union_utm is not None else None
+    )
+
     for r, c in np.argwhere(band_mask):
         r, c = int(r), int(c)
         elevation = float(array[r, c])
@@ -484,6 +555,8 @@ def compute_water_eligible_cells(
         if canopy_checked and canopy_root_zone_mask_utm[r, c]:
             continue
         if road_prepared is not None and road_prepared.contains(point):
+            continue
+        if production_prepared is not None and production_prepared.contains(point):
             continue
 
         within_service_distance = False
@@ -730,6 +803,7 @@ def find_candidate_zones(
     min_zone_waist_meters: float = WATER_ZONE_MIN_WAIST_METERS,
     canopy_root_zone_mask_utm=_CANOPY_CHECK_UNCHECKED,
     road_exclusion_union_utm=_ROAD_CHECK_UNCHECKED,
+    production_setback_meters: float = WATER_ZONE_PRODUCTION_SETBACK_METERS,
 ) -> list[dict]:
     """
     Cell-based zone-filtering logic (Step 3) — see module docstring for
@@ -741,12 +815,14 @@ def find_candidate_zones(
     water_suitability.py's scoring concern, not a generation-time
     parameter).
 
-    canopy_root_zone_mask_utm/road_exclusion_union_utm are forwarded
-    straight through to compute_water_eligible_cells() -- see that
-    function's own docstring (gates 4/5) for what each does and its
-    default-sentinel/skipped-when-unset behavior. This function itself
-    does no fetching of either -- identify_water_system_candidate_zones()
-    is what actually fetches them for the real network path.
+    canopy_root_zone_mask_utm/road_exclusion_union_utm/
+    production_setback_meters are forwarded straight through to
+    compute_water_eligible_cells() -- see that function's own docstring
+    (gates 4/5/6) for what each does and its default-sentinel/skipped-
+    when-unset behavior. This function itself does no fetching of
+    either -- identify_water_system_candidate_zones() is what actually
+    fetches canopy/road for the real network path (production_setback_
+    meters is not fetched at all, just a plain configurable distance).
 
     Builds the per-cell eligibility mask (compute_water_eligible_cells() —
     including its own survey_buffer_meters dilation of the raw
@@ -807,6 +883,17 @@ def find_candidate_zones(
             'served_production_area_ids': [int, ...],
             'polygon_utm': shapely Polygon/MultiPolygon,
             'geometry_wgs84': GeoJSON geometry dict,
+            'render_fill_polygon_utm': shapely Polygon/MultiPolygon,
+                # DISPLAY-ONLY -- the real cell-union footprint's plain
+                # convex hull, re-intersected with boundary_polygon_utm --
+                # NEVER used for scoring/eligibility/the narrative report,
+                # which all stay on polygon_utm/geometry_wgs84 untouched.
+                # Same construction production_area.py's own
+                # render_fill_polygon_utm uses -- see render_layout_map.py
+                # for where this is actually drawn.
+            'render_fill_geometry_wgs84': GeoJSON geometry dict,
+                # render_fill_polygon_utm's WGS84 reprojection, same
+                # polygon_utm/geometry_wgs84 pairing convention.
             'production_area_relationships': [...],   # see
                 _zone_production_area_relationships()'s docstring — one
                 entry per served production area, sorted most-gravity-
@@ -855,6 +942,7 @@ def find_candidate_zones(
         survey_buffer_meters,
         canopy_root_zone_mask_utm,
         road_exclusion_union_utm,
+        production_setback_meters,
     )
 
     labels, num_components = connected_components(eligible_mask)
@@ -909,6 +997,22 @@ def find_candidate_zones(
 
             geometry_wgs84 = transform_geom(dem["crs"], "EPSG:4326", mapping(polygon_utm))
 
+            # render_fill_polygon_utm: a DISPLAY-ONLY geometry, never used
+            # for scoring/eligibility/the narrative report -- same
+            # construction production_area.py's own render_fill_polygon_utm
+            # uses (the real cell-union footprint's plain convex hull,
+            # re-intersected with boundary_polygon_utm so it never extends
+            # past the real parcel edge). A water zone traced along a
+            # narrow drainage band can be a long, winding, concave shape;
+            # the hull reads as a single coherent "this is the water zone"
+            # blob at render time instead of a blocky, notched outline --
+            # see render_layout_map.py for where this is actually drawn.
+            # render_fill_geometry_wgs84 is its WGS84-reprojected pairing,
+            # same polygon_utm/geometry_wgs84 pairing convention this zone
+            # dict already follows.
+            render_fill_polygon_utm = footprint.convex_hull.intersection(boundary_polygon_utm)
+            render_fill_geometry_wgs84 = transform_geom(dem["crs"], "EPSG:4326", mapping(render_fill_polygon_utm))
+
             zone = {
                 "id": next_id,
                 "served_production_area_ids": sorted(
@@ -916,6 +1020,8 @@ def find_candidate_zones(
                 ),
                 "polygon_utm": polygon_utm,
                 "geometry_wgs84": geometry_wgs84,
+                "render_fill_polygon_utm": render_fill_polygon_utm,
+                "render_fill_geometry_wgs84": render_fill_geometry_wgs84,
                 "cells": sub_cells,
                 "production_area_relationships": production_area_relationships,
                 "primary_production_area_relationship": production_area_relationships[0],
@@ -962,6 +1068,7 @@ def zones_to_geojson(zones: list[dict]) -> dict:
                 "primary_production_area_relationship": z["primary_production_area_relationship"],
                 "contributing_area_cells": z["contributing_area_cells"],
                 "slope_pct": z["slope_pct"],
+                "render_fill_geometry_wgs84": z["render_fill_geometry_wgs84"],
                 "optimal_subarea_geometry_wgs84": z["optimal_subarea_geometry_wgs84"],
                 "optimal_subarea_acres": z["optimal_subarea_acres"],
             },

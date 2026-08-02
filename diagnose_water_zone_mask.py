@@ -20,13 +20,22 @@ directly, several times, with individual gate thresholds swapped for
 "always pass" values (0/infinity) to isolate one real gate at a time --
 the gate math itself is never duplicated, only which of the function's
 own real checks can actually bind is varied per call. This covers all
-FIVE of compute_water_eligible_cells()'s real gates: percentile-band,
+SIX of compute_water_eligible_cells()'s real gates: percentile-band,
 on-parcel/boundary-setback, service-distance, canopy (woody-vegetation
-root zone), and existing-road right-of-way -- the real canopy_root_zone_
-mask_utm/road_exclusion_union_utm this run actually fetches (see below)
-are held REAL across every isolation call except the ones specifically
-isolating canopy or road themselves, the same way the percentile-band
-gate is already held real throughout.
+root zone), existing-road right-of-way, and the production-zone
+exclusion (any cell inside the UNION of every production area's own
+render_fill_polygon_utm is hard-excluded, buffered by WATER_ZONE_
+PRODUCTION_SETBACK_METERS -- see that constant's own docstring in
+water_candidate_zones.py) -- the real canopy_root_zone_mask_utm/
+road_exclusion_union_utm this run actually fetches (see below) are held
+REAL across every isolation call except the ones specifically isolating
+canopy or road themselves, the same way the percentile-band gate is
+already held real throughout. Unlike canopy/road, the production-zone
+exclusion has no "unchecked" sentinel to disable for isolation -- it's
+always built directly from whatever production_areas this run already
+fetched, so its own isolation call below relaxes every OTHER gate
+instead, the same technique the canopy-alone/road-alone isolation calls
+already use.
 
 Every isolation call uses the REAL boundary_polygon_utm, never a
 synthetic stand-in -- an earlier version of this section used a
@@ -85,6 +94,7 @@ from production_area import (
 )
 from raster_grid import (
     SQUARE_METERS_PER_ACRE,
+    attempt_waist_split,
     binary_dilate,
     cell_area_acres,
     connected_components,
@@ -96,10 +106,12 @@ from water_candidate_zones import (
     MIN_BOUNDARY_SETBACK_METERS,
     MIN_SERVICE_DISTANCE_METERS,
     MIN_VALLEY_CONTRIBUTING_AREA_ACRES,
+    MIN_WATER_ZONE_AREA_ACRES,
     VALLEY_ACCUMULATION_PERCENTILE_HIGH,
     VALLEY_ACCUMULATION_PERCENTILE_LOW,
     WATER_ZONE_CANOPY_BUFFER_METERS,
     WATER_ZONE_MIN_WAIST_METERS,
+    WATER_ZONE_PRODUCTION_SETBACK_METERS,
     WATER_ZONE_ROAD_BUFFER_METERS,
     WATER_ZONE_SUBAREA_TARGET_ACRES,
     WATER_ZONE_SUBAREA_TRIGGER_ACRES,
@@ -162,7 +174,9 @@ def main(
     print(f"accumulation_percentile_low/high (run)    = {accumulation_percentile_low}/{accumulation_percentile_high} "
           f"(module default: {VALLEY_ACCUMULATION_PERCENTILE_LOW}/{VALLEY_ACCUMULATION_PERCENTILE_HIGH})")
     print(f"zone_min_waist_meters (this run)          = {zone_min_waist_meters}m "
-          f"(module default: {WATER_ZONE_MIN_WAIST_METERS})\n")
+          f"(module default: {WATER_ZONE_MIN_WAIST_METERS})")
+    print(f"production_setback_meters (module default, not overridable this run) = "
+          f"{WATER_ZONE_PRODUCTION_SETBACK_METERS}m\n")
 
     dem = get_dem_for_boundary(PROPERTY_BOUNDARY)
     print(f"DEM fetched: {dem['array'].shape[0]}x{dem['array'].shape[1]} cells, "
@@ -520,6 +534,33 @@ def main(
         f"Road gate alone (existing right-of-way, WATER_ZONE_ROAD_BUFFER_METERS={WATER_ZONE_ROAD_BUFFER_METERS}m)",
         road_excluded_mask, dem,
     )
+
+    # 2e. Production-zone exclusion gate ALONE: service-distance/setback
+    #     disabled, canopy/road skipped -- isolates the hard exclusion
+    #     against every production area's own render_fill_polygon_utm
+    #     specifically. Unlike canopy/road, this gate has no "unchecked"
+    #     sentinel of its own to disable directly (it's always built from
+    #     whichever production_areas this run already fetched) -- so
+    #     isolating it means relaxing every OTHER gate instead, same
+    #     technique 2c/2d above use.
+    production_alone_mask = compute_water_eligible_cells(
+        dem, production_areas, boundary_polygon_utm,
+        min_valley_contributing_area_acres=min_contributing_acres,
+        accumulation_percentile_low=accumulation_percentile_low,
+        accumulation_percentile_high=accumulation_percentile_high,
+        max_service_distance_meters=float("inf"),
+        min_service_distance_meters=0.0,
+        min_boundary_setback_meters=0.0,
+        survey_buffer_meters=buffer_meters,
+        canopy_root_zone_mask_utm=_CANOPY_CHECK_UNCHECKED,
+        road_exclusion_union_utm=_ROAD_CHECK_UNCHECKED,
+    )
+    production_excluded_mask = on_parcel_mask & ~production_alone_mask
+    _report_cell_count(
+        "Production-zone exclusion gate alone (any cell inside the union of every production area's own "
+        f"render_fill_polygon_utm, WATER_ZONE_PRODUCTION_SETBACK_METERS={WATER_ZONE_PRODUCTION_SETBACK_METERS}m)",
+        production_excluded_mask, dem,
+    )
     print()
 
     # --- Internal consistency check -----------------------------------
@@ -557,11 +598,14 @@ def main(
               "service_distance_mask. Treat the TOO FAR/TOO CLOSE numbers above as unreliable "
               "until this is investigated.\n")
 
-    # 3. ALL FIVE gates combined -- this is compute_water_eligible_cells()'s
+    # 3. ALL SIX gates combined -- this is compute_water_eligible_cells()'s
     #    own real output at this run's actual parameters, i.e. exactly what
     #    find_candidate_zones() (the real pipeline) works from (BEFORE
     #    waist-splitting/clustering -- see the zone section below for the
-    #    post-waist-split numbers).
+    #    post-waist-split numbers). production_setback_meters is left at
+    #    its module default (WATER_ZONE_PRODUCTION_SETBACK_METERS) --
+    #    not overridable by this script, same as the service-distance/
+    #    boundary-setback thresholds (see module docstring).
     combined_mask = compute_water_eligible_cells(
         dem, production_areas, boundary_polygon_utm,
         min_valley_contributing_area_acres=min_contributing_acres,
@@ -572,7 +616,7 @@ def main(
         road_exclusion_union_utm=road_exclusion_union_utm,
     )
     _report_mask_stats(
-        "ALL FIVE gates combined (real pipeline output -- matches find_candidate_zones()'s own eligible_mask, "
+        "ALL SIX gates combined (real pipeline output -- matches find_candidate_zones()'s own eligible_mask, "
         "pre-waist-split)",
         combined_mask, dem,
     )
@@ -595,7 +639,7 @@ def main(
         road_exclusion_union_utm=road_exclusion_union_utm,
     )
 
-    _report_waist_split(combined_mask, zones, dem)
+    _report_waist_split(combined_mask, zones, dem, zone_min_waist_meters)
 
     ranked_zones = _report_zone_elevation_ranges(dem, boundary_polygon_utm, zones)
 
@@ -608,41 +652,99 @@ def main(
     _report_confluence_check(dem, boundary_polygon_utm, top_zone["cells"])
 
 
-def _report_waist_split(eligible_mask, zones: list[dict], dem: dict) -> None:
+def _report_waist_split(eligible_mask, zones: list[dict], dem: dict, min_zone_waist_meters: float) -> None:
     """
     Reports how find_candidate_zones()'s own waist-splitting step changes
     the cell/acreage/component-count numbers relative to the pre-split
-    connected-component labeling of `eligible_mask` (the "ALL FIVE gates
-    combined" mask reported by the caller above) -- a dilation-induced
-    merge between two originally-separate drainage patches should show up
-    here as component count ticking UP after the split, with total cell
-    count and acreage roughly unchanged (waist-splitting only re-labels
-    which cells belong to which cluster; it can discard cells only if a
-    resulting sub-cluster would fall below MIN_WATER_ZONE_AREA_ACRES, in
-    which case the whole split is rejected and the original, unsplit
-    cluster passes through instead -- see raster_grid.attempt_waist_
-    split()'s own docstring).
+    connected-component labeling of `eligible_mask` (the "ALL SIX gates
+    combined" mask reported by the caller above), broken into TWO
+    separate stages so a real cell-count drop can be attributed to the
+    right one rather than lumped into one PRE/POST number:
+
+      STAGE 1 (attempt_waist_split() itself, called directly here per
+      component -- the exact same shared function find_candidate_zones()
+      calls internally, not reimplemented): raster_grid.attempt_waist_
+      split() now enforces its own cell-count invariant internally (see
+      that function's own docstring) and raises RuntimeError, loudly, if
+      reclaim_stripped_cells() ever leaves a stripped cell with no
+      reachable surviving sub-component -- so if this stage's own total
+      doesn't match cell_count_before, something already blew up above
+      with a detailed count of stripped/reclaimed/unreachable cells; it
+      is never silently swallowed here.
+
+      STAGE 2 (find_candidate_zones()'s OWN, separate, later rejection):
+      each attempt_waist_split() sub-cluster is still clipped to
+      boundary_polygon_utm and gated on min_water_zone_area_acres
+      AFTER the split -- a real, legitimate cell-count drop that has
+      nothing to do with reclaim_stripped_cells(): a small split-off
+      piece near the parcel boundary (or now, with the production-zone
+      exclusion gate carving real holes into the eligible mask, a piece
+      whose remaining footprint after a production area bites into it)
+      can genuinely fail to clear min_water_zone_area_acres, or clip to
+      an empty polygon, and gets dropped from `zones` entirely.
 
     `zones` is find_candidate_zones()'s own real output (already waist-
     split, already clipped to boundary_polygon_utm, already gated on
-    min_water_zone_area_acres) -- POST numbers are read directly off it,
-    not recomputed independently.
+    min_water_zone_area_acres) -- STAGE 2 numbers are read directly off
+    it, not recomputed independently.
     """
-    print("=== Waist-split before/after (post-dilation, all-five-gates mask) ===\n")
+    print("=== Waist-split before/after (post-dilation, all-six-gates mask) ===\n")
 
     cell_count_before = int(eligible_mask.sum())
     area_per_cell = cell_area_acres(dem)
     acres_before = cell_count_before * area_per_cell
-    _, num_components_before = connected_components(eligible_mask)
+    labels, num_components_before = connected_components(eligible_mask)
 
     print(f"PRE-waist-split:  {cell_count_before} cells, {acres_before:.3f} acres, "
           f"{num_components_before} connected component(s)")
 
+    # STAGE 1: attempt_waist_split() itself, called directly per component
+    # -- isolates reclaim_stripped_cells()'s own cell-count behavior from
+    # find_candidate_zones()'s SEPARATE, later zone-rejection filtering.
+    stage1_cell_total = 0
+    stage1_piece_count = 0
+    for component_id in range(num_components_before):
+        component_cells = [(int(r), int(c)) for r, c in np.argwhere(labels == component_id)]
+        if not component_cells:
+            continue
+        split_result = attempt_waist_split(
+            component_cells, eligible_mask.shape, dem, MIN_WATER_ZONE_AREA_ACRES, min_zone_waist_meters
+        )
+        stage1_piece_count += len(split_result)
+        stage1_cell_total += sum(len(piece["cells"]) for piece in split_result)
+
+    print(
+        f"STAGE 1 (attempt_waist_split() alone, before zone-level rejection): {stage1_cell_total} cells across "
+        f"{stage1_piece_count} piece(s)"
+    )
+    if stage1_cell_total == cell_count_before:
+        print("  -> Exact match: attempt_waist_split()/reclaim_stripped_cells() preserves every cell through "
+              "the split step itself (its own internal invariant would have raised RuntimeError otherwise).")
+    else:
+        print(
+            f"  -> MISMATCH: {cell_count_before - stage1_cell_total} cell(s) unaccounted for at STAGE 1 alone -- "
+            "this should be impossible without attempt_waist_split() itself having already raised RuntimeError "
+            "above; investigate immediately if you see this line."
+        )
+
+    # STAGE 2: find_candidate_zones()'s own real output -- separate,
+    # later min_water_zone_area_acres/boundary-clipping rejection of an
+    # entire small sub-cluster (not a reclaim/attempt_waist_split() loss).
     total_cells_after = sum(len(zone["cells"]) for zone in zones)
     num_components_after = len(zones)
     acres_after = total_cells_after * area_per_cell
-    print(f"POST-waist-split: {total_cells_after} cells, {acres_after:.3f} acres, "
-          f"{num_components_after} connected component(s)")
+    print(f"STAGE 2 (find_candidate_zones()'s own output, after zone-level rejection): {total_cells_after} "
+          f"cells, {acres_after:.3f} acres, {num_components_after} zone(s)")
+    if total_cells_after < stage1_cell_total:
+        print(
+            f"  -> {stage1_cell_total - total_cells_after} cell(s) lost to STAGE 2's zone-level rejection "
+            "(a split sub-cluster's area, after clipping to boundary_polygon_utm, fell below "
+            "MIN_WATER_ZONE_AREA_ACRES, or clipped to an empty polygon entirely) -- a real, legitimate "
+            "outcome, NOT a reclaim_stripped_cells()/attempt_waist_split() bug."
+        )
+    elif total_cells_after == stage1_cell_total:
+        print("  -> No further loss at STAGE 2: every split piece cleared the zone-level area/clipping gate.")
+
     if num_components_after > num_components_before:
         print(
             f"  -> component count ticked UP ({num_components_before} -> {num_components_after}): "

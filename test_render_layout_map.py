@@ -492,4 +492,196 @@ print(
 )
 
 
+# =====================================================================
+# WATER ZONE STYLE: the water zone's FILL is now drawn from its own
+# render_fill_polygon_utm (a DISPLAY-ONLY convex hull -- see water_
+# candidate_zones.find_candidate_zones()'s own docstring), fully opaque,
+# with a subtle sine-wave ripple texture drawn over it -- see this
+# module's own "WATER ZONE STYLE" docstring section.
+# =====================================================================
+
+import water_candidate_zones as wcz
+from water_candidate_zones import find_candidate_zones
+from render_layout_map import (
+    WATER_ZONE_COLOR,
+    WATER_ZONE_RIPPLE_COLOR,
+    _ripple_lines_for_polygon,
+    _iter_line_parts,
+)
+
+# --- _ripple_lines_for_polygon(): a real polygon gets real, clipped ripple lines ---
+
+RIPPLE_TEST_POLYGON = box(0.0, 0.0, 100.0, 40.0)
+ripple_lines = _ripple_lines_for_polygon(RIPPLE_TEST_POLYGON)
+assert 0 < len(ripple_lines) <= rlm.WATER_ZONE_RIPPLE_COUNT, (
+    f"expected between 1 and {rlm.WATER_ZONE_RIPPLE_COUNT} ripple line(s) for a normal rectangular polygon, "
+    f"got {len(ripple_lines)}"
+)
+buffered_polygon = RIPPLE_TEST_POLYGON.buffer(1e-9)
+total_ripple_length = 0.0
+for ripple in ripple_lines:
+    for line in _iter_line_parts(ripple):
+        assert buffered_polygon.contains(line), "every ripple line segment must stay within the polygon it's clipped to"
+        total_ripple_length += line.length
+assert total_ripple_length > 0, "test setup should produce real, nonzero-length ripple line segments"
+print(
+    f"_ripple_lines_for_polygon() produces {len(ripple_lines)} real sine-wave line(s) on a rectangular test "
+    f"polygon, every segment clipped entirely within the polygon's own bounds ({total_ripple_length:.1f}m total)."
+)
+
+# --- _ripple_lines_for_polygon(): a degenerate (zero-area) polygon returns no ripples, doesn't crash ---
+
+degenerate_polygon = box(0.0, 0.0, 0.0, 10.0)  # zero width
+assert _ripple_lines_for_polygon(degenerate_polygon) == [], "a degenerate zero-area polygon must return no ripple lines, without raising"
+print("_ripple_lines_for_polygon() returns no ripples for a degenerate (zero-area) polygon, without raising.")
+
+
+# --- Full render_layout_map() pass: a synthetic water zone whose render_fill_polygon_utm is a genuine
+#     convex hull (differing from its real, blocky geometry_wgs84) and DELIBERATELY overlaps a production
+#     zone's own render_fill_polygon_utm -- confirms the whole pipeline still renders correctly, the water
+#     zone's numbered marker lands on the HULL (not the blocky footprint), and the overlap is allowed. ---
+
+WATER_ZONE_TEST_SIZE = (20, 20)
+water_zone_test_dem = {
+    "array": np.full(WATER_ZONE_TEST_SIZE, 100.0, dtype=np.float32),
+    "resolution_meters": (5.0, 5.0),
+    "origin_x": 500000.0,
+    "origin_y": 4500000.0,
+    "crs": "EPSG:32617",
+}
+
+# Same L-shaped (non-convex) fixture pattern as test_water_candidate_zones.py's own render_fill_polygon_utm
+# tests -- a real drainage band winding around a corner, so the hull genuinely differs from the blocky shape.
+wz_vertical_arm = _rect_cells(0, 15, 0, 5)
+wz_horizontal_arm = _rect_cells(10, 15, 0, 15)
+wz_l_shape_mask = _mask_from_cells(WATER_ZONE_TEST_SIZE, list(set(wz_vertical_arm + wz_horizontal_arm)))
+
+wz_full_extent = box(500000.0, 4500000.0 - 100.0, 500000.0 + 100.0, 4500000.0)
+wz_production_area = {
+    "id": 0,
+    "representative_elevation_m": 50.0,
+    "polygon_utm": box(500000.0, 4500000.0 - 130.0, 500000.0 + 20.0, 4500000.0 - 100.0),
+    # Deliberately overlaps the water zone's own hull bulge -- see the corresponding
+    # test_water_candidate_zones.py check for why this is the expected, allowed outcome.
+    "render_fill_polygon_utm": box(500025.0, 4499950.0, 500075.0, 4500000.0),
+    "area_acres": 0.5,
+    "rank": 1,
+    "suitability_score": 50.0,
+}
+
+_original_compute_water_eligible_cells = wcz.compute_water_eligible_cells
+wcz.compute_water_eligible_cells = lambda *a, **kw: wz_l_shape_mask
+try:
+    wz_zones = find_candidate_zones(water_zone_test_dem, [wz_production_area], wz_full_extent)
+finally:
+    wcz.compute_water_eligible_cells = _original_compute_water_eligible_cells
+
+assert len(wz_zones) == 1, f"expected exactly 1 water zone on this fixture, got {len(wz_zones)}"
+water_zone_fixture = dict(wz_zones[0])
+water_zone_fixture["suitability_score"] = 72.5  # render_layout_map() only reads this + 'id', never re-scores
+
+# Sanity check: the hull's own representative point genuinely differs from the real, blocky
+# geometry_wgs84's representative point -- otherwise this fixture wouldn't actually be testing anything
+# different from the pre-existing (blocky-footprint) marker placement.
+blocky_point = _shape_check(
+    _transform_geom_check("EPSG:4326", water_zone_test_dem["crs"], water_zone_fixture["geometry_wgs84"])
+).representative_point()
+hull_point = water_zone_fixture["render_fill_polygon_utm"].representative_point()
+assert blocky_point.distance(hull_point) > 0, (
+    "test setup should produce a hull whose representative_point() genuinely differs from the real, blocky "
+    "geometry_wgs84's own representative_point() -- otherwise the marker-placement check below is trivial"
+)
+
+recorded_markers = []
+_original_draw_numbered_marker = rlm._draw_numbered_marker
+rlm._draw_numbered_marker = lambda ax, point, number: recorded_markers.append((point, number)) or _original_draw_numbered_marker(ax, point, number)
+
+# Also record every plot_polygon()/plot_line() call render_layout_map() makes, so the fill's own
+# alpha/zorder and the ripple lines' own color can be confirmed directly against what's actually
+# drawn, not just inferred from the module's constants.
+recorded_polygon_calls = []
+_original_plot_polygon = rlm.plot_polygon
+
+
+def _recording_plot_polygon(geometry, **kwargs):
+    recorded_polygon_calls.append(kwargs)
+    return _original_plot_polygon(geometry, **kwargs)
+
+
+recorded_line_calls = []
+_original_plot_line = rlm.plot_line
+
+
+def _recording_plot_line(geometry, **kwargs):
+    recorded_line_calls.append(kwargs)
+    return _original_plot_line(geometry, **kwargs)
+
+
+rlm.plot_polygon = _recording_plot_polygon
+rlm.plot_line = _recording_plot_line
+
+wz_synthetic_layers = {
+    "dem": water_zone_test_dem,
+    "production_result": None,
+    "water_zone": water_zone_fixture,
+    "road_corridor": None,
+    "structure_site": None,
+    "water_features": {"streams": []},
+    "contour_lines": [],
+}
+
+try:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        wz_output_path = os.path.join(tmpdir, "layout_map.png")
+        wz_result_path = rlm.render_layout_map(property_boundary, wz_output_path, layers=wz_synthetic_layers)
+        assert wz_result_path == wz_output_path
+        assert os.path.getsize(wz_output_path) > 0, "render_layout_map() must produce a real, non-empty PNG"
+finally:
+    rlm._draw_numbered_marker = _original_draw_numbered_marker
+    rlm.plot_polygon = _original_plot_polygon
+    rlm.plot_line = _original_plot_line
+
+water_fill_calls = [kw for kw in recorded_polygon_calls if kw.get("facecolor") == WATER_ZONE_COLOR]
+assert len(water_fill_calls) == 1, f"expected exactly 1 water zone fill plot_polygon() call, got {len(water_fill_calls)}"
+water_fill_kwargs = water_fill_calls[0]
+assert water_fill_kwargs["alpha"] == 1.0, (
+    f"the water zone fill must be drawn fully OPAQUE (alpha=1.0), not the earlier 0.35, got "
+    f"{water_fill_kwargs['alpha']}"
+)
+assert water_fill_kwargs["zorder"] == 41, f"the water zone fill's zorder must stay above production zones' zorder=40, got {water_fill_kwargs['zorder']}"
+
+ripple_calls = [kw for kw in recorded_line_calls if kw.get("color") == WATER_ZONE_RIPPLE_COLOR]
+assert ripple_calls, "expected at least one plot_line() call drawing the ripple texture in WATER_ZONE_RIPPLE_COLOR"
+assert all(kw["zorder"] > water_fill_kwargs["zorder"] for kw in ripple_calls), (
+    "every ripple line must render ABOVE the opaque fill it textures (higher zorder), not underneath it"
+)
+print(
+    f"Water zone fill draws fully opaque (alpha=1.0) at zorder={water_fill_kwargs['zorder']} (above production "
+    f"zones' zorder=40), with {len(ripple_calls)} ripple line segment(s) drawn above the fill in "
+    f"WATER_ZONE_RIPPLE_COLOR."
+)
+
+assert len(recorded_markers) == 1, f"expected exactly 1 marker drawn (the water zone), got {len(recorded_markers)}"
+marker_point_mercator, marker_number = recorded_markers[0]
+
+# The marker must land on the HULL geometry actually drawn (reprojected to Mercator), not the real,
+# blocky geometry_wgs84 -- confirmed by reprojecting the whole hull POLYGON the same way render_layout_map()
+# does and taking ITS OWN representative_point() in Mercator (representative_point() is not guaranteed to
+# correspond to the same point across a reprojection of a single point vs. the whole polygon, so this
+# reproduces render_layout_map()'s own exact computation rather than a point-then-reproject shortcut).
+expected_render_fill_mercator = rlm._reproject_utm_geometry_to_mercator(
+    water_zone_fixture["render_fill_polygon_utm"], water_zone_test_dem["crs"]
+)
+expected_marker_point = expected_render_fill_mercator.representative_point()
+assert marker_point_mercator.distance(expected_marker_point) < 1e-6, (
+    "the water zone's numbered marker must be placed at render_fill_polygon_utm's own representative_point(), "
+    "not geometry_wgs84's -- got a marker point that doesn't match the hull's reprojected representative point"
+)
+print(
+    "Full pipeline with a synthetic water zone: render_layout_map() runs offline end-to-end, draws the water "
+    "zone's numbered marker on the HULL geometry (render_fill_polygon_utm) rather than the real, blocky "
+    "footprint, and completes successfully even though the hull deliberately overlaps a production area's "
+    "own render_fill_polygon_utm."
+)
+
 print("\nAll render_layout_map checks passed.")
