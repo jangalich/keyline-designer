@@ -118,7 +118,12 @@ BOUNDARY = box(500000.0, 4499800.0, 500200.0, 4500000.0)
 # elevation range (0 - ~19.5m) so every eligible cell sits above it
 # (gravity-favorable).
 PRODUCTION_AREA_ABOVE = [
-    {"id": 0, "representative_elevation_m": -5.0, "polygon_utm": box(500150.0, 4499850.0, 500180.0, 4499900.0)}
+    {
+        "id": 0,
+        "representative_elevation_m": -5.0,
+        "polygon_utm": box(500150.0, 4499850.0, 500180.0, 4499900.0),
+        "render_fill_polygon_utm": box(500150.0, 4499850.0, 500180.0, 4499900.0),
+    }
 ]
 
 CELL_AREA_ACRES = cell_area_acres(SINGLE_COLUMN_DEM)
@@ -284,7 +289,12 @@ print(
 # --- real, qualifying zone, just tagged with a negative differential ---
 
 PRODUCTION_AREA_BELOW = [
-    {"id": 5, "representative_elevation_m": 100.0, "polygon_utm": box(500150.0, 4499850.0, 500180.0, 4499900.0)}
+    {
+        "id": 5,
+        "representative_elevation_m": 100.0,
+        "polygon_utm": box(500150.0, 4499850.0, 500180.0, 4499900.0),
+        "render_fill_polygon_utm": box(500150.0, 4499850.0, 500180.0, 4499900.0),
+    }
 ]
 below_zones = find_candidate_zones(SINGLE_COLUMN_DEM, PRODUCTION_AREA_BELOW, BOUNDARY)
 assert len(below_zones) == 1, (
@@ -323,8 +333,22 @@ print("Max service distance is still a real, enforced generation-time filter (ch
 # (not hand-derived) which rows land inside/touching (distance==0) versus
 # genuinely outside but within MIN_SERVICE_DISTANCE_METERS (excluded)
 # versus far enough to pass again.
+#
+# render_fill_polygon_utm is deliberately a DIFFERENT, disjoint polygon
+# (far from the drainage column entirely) rather than the same box as
+# polygon_utm -- this fixture isolates gate 3's own distance==0 carve-out
+# (which reads patch["polygon_utm"]), and gate 6's own hard production
+# exclusion (which reads patch["render_fill_polygon_utm"]) would otherwise
+# reject these same "inside" cells for an unrelated reason, making it
+# impossible to tell which gate is actually responsible for the observed
+# eligibility. Gate 6 gets its own dedicated tests further down.
 TOUCHING = [
-    {"id": 1, "representative_elevation_m": 100.0, "polygon_utm": box(500095.0, 4499900.0, 500110.0, 4499950.0)}
+    {
+        "id": 1,
+        "representative_elevation_m": 100.0,
+        "polygon_utm": box(500095.0, 4499900.0, 500110.0, 4499950.0),
+        "render_fill_polygon_utm": box(0.0, 0.0, 1.0, 1.0),
+    }
 ]
 touching_mask = compute_water_eligible_cells(SINGLE_COLUMN_DEM, TOUCHING, BOUNDARY)
 touching_rows = sorted(int(r) for r, c in np.argwhere(touching_mask) if c == MID_COL)
@@ -404,7 +428,12 @@ SETBACK_PROBE_DEM = {
 # so boundary.distance() reduces to exactly C (the nearest edge, x=0).
 SETBACK_PROBE_BOUNDARY = box(0.0, 0.0, 200.0, 200.0)
 SETBACK_PROBE_PRODUCTION_AREAS = [
-    {"id": 0, "representative_elevation_m": -5.0, "polygon_utm": box(495.0, 95.0, 505.0, 105.0)}
+    {
+        "id": 0,
+        "representative_elevation_m": -5.0,
+        "polygon_utm": box(495.0, 95.0, 505.0, 105.0),
+        "render_fill_polygon_utm": box(495.0, 95.0, 505.0, 105.0),
+    }
 ]
 
 setback_probe_mask = compute_water_eligible_cells(
@@ -466,7 +495,12 @@ TWO_COLUMN_DEM = {
     "crs": CRS,
 }
 BETWEEN_PRODUCTION_AREA = [
-    {"id": 0, "representative_elevation_m": -5.0, "polygon_utm": box(500080.0, 4499750.0, 500120.0, 4499800.0)}
+    {
+        "id": 0,
+        "representative_elevation_m": -5.0,
+        "polygon_utm": box(500080.0, 4499750.0, 500120.0, 4499800.0),
+        "render_fill_polygon_utm": box(500080.0, 4499750.0, 500120.0, 4499800.0),
+    }
 ]
 
 two_zone_mask = compute_water_eligible_cells(TWO_COLUMN_DEM, BETWEEN_PRODUCTION_AREA, BOUNDARY)
@@ -551,7 +585,12 @@ WAIST_BOUNDARY = box(
     500000.0 + WAIST_DEM_SHAPE[1] * WAIST_RESOLUTION[0], 4500000.0,
 )
 WAIST_PRODUCTION_AREAS = [
-    {"id": 0, "representative_elevation_m": 50.0, "polygon_utm": box(500040.0, 4499940.0, 500060.0, 4499960.0)}
+    {
+        "id": 0,
+        "representative_elevation_m": 50.0,
+        "polygon_utm": box(500040.0, 4499940.0, 500060.0, 4499960.0),
+        "render_fill_polygon_utm": box(500040.0, 4499940.0, 500060.0, 4499960.0),
+    }
 ]
 
 
@@ -741,6 +780,91 @@ print("find_candidate_zones() correctly forwards canopy_root_zone_mask_utm/road_
 
 
 # =====================================================================
+# Production-zone exclusion gate: a cell inside ANY production area's own
+# render_fill_polygon_utm is hard-excluded from water-zone eligibility,
+# even if it would otherwise pass every other gate -- production ground
+# and water-system ground are mutually exclusive uses of the same ground.
+# =====================================================================
+
+# --- a production area whose render_fill_polygon_utm covers the whole ---
+# --- eligible band excludes every cell, even though the SAME          ---
+# --- polygon_utm (used for the service-distance gate) is the one that ---
+# --- normally produces a real, full-sized zone (PRODUCTION_AREA_ABOVE) ---
+
+PRODUCTION_AREA_FULL_OVERLAP = [
+    {
+        "id": 0,
+        "representative_elevation_m": -5.0,
+        "polygon_utm": box(500150.0, 4499850.0, 500180.0, 4499900.0),  # same as PRODUCTION_AREA_ABOVE -- passes service distance normally
+        "render_fill_polygon_utm": BOUNDARY,  # covers the ENTIRE property, including every otherwise-eligible cell
+    }
+]
+_full_overlap_mask = compute_water_eligible_cells(SINGLE_COLUMN_DEM, PRODUCTION_AREA_FULL_OVERLAP, BOUNDARY)
+assert int(_full_overlap_mask.sum()) == 0, (
+    "a production area whose render_fill_polygon_utm covers the entire property must exclude every cell -- "
+    f"got {int(_full_overlap_mask.sum())} eligible cells (baseline with the same polygon_utm is "
+    f"{len(eligible_cells)} eligible cells)"
+)
+print(
+    f"Production-zone exclusion gate: a cell inside a production area's render_fill_polygon_utm is hard-excluded "
+    f"even though it passes every other gate -- 0 eligible cells with render_fill_polygon_utm covering the whole "
+    f"property, versus {len(eligible_cells)} eligible cells for the identical polygon_utm/service-distance "
+    "relationship without that overlap."
+)
+
+# --- a zone straddling a production area's boundary survives as a      ---
+# --- smaller, reshaped cluster, not entirely rejected                  ---
+#
+# render_fill_polygon_utm covers only the NORTH half of the eligible
+# drainage band (split at a real row boundary, not an approximation), so
+# only the SOUTH half should survive -- confirmed both at the raw mask
+# level and through find_candidate_zones()'s own clustering.
+
+_split_index = len(_expected_rows) // 2
+_split_row = _expected_rows[_split_index]
+_row_boundary_y = SINGLE_COLUMN_DEM["origin_y"] - _split_row * SINGLE_COLUMN_DEM["resolution_meters"][1]
+PARTIAL_OVERLAP_EXCLUSION = box(500000.0, _row_boundary_y, 500200.0, 4500000.0)  # north half only
+PRODUCTION_AREA_PARTIAL_OVERLAP = [
+    {
+        "id": 0,
+        "representative_elevation_m": -5.0,
+        "polygon_utm": box(500150.0, 4499850.0, 500180.0, 4499900.0),
+        "render_fill_polygon_utm": PARTIAL_OVERLAP_EXCLUSION,
+    }
+]
+_partial_overlap_mask = compute_water_eligible_cells(SINGLE_COLUMN_DEM, PRODUCTION_AREA_PARTIAL_OVERLAP, BOUNDARY)
+_partial_overlap_rows = sorted(set(int(r) for r, c in np.argwhere(_partial_overlap_mask)))
+assert _partial_overlap_rows, (
+    "a zone straddling a production area's boundary must survive as a smaller cluster, not be entirely rejected"
+)
+assert all(r >= _split_row for r in _partial_overlap_rows), (
+    f"every surviving cell should sit at/after the excluded north half's own row boundary (row >= {_split_row}), "
+    f"got rows {_partial_overlap_rows}"
+)
+assert len(_partial_overlap_rows) < len(_expected_rows), (
+    f"the straddling zone's surviving rows ({len(_partial_overlap_rows)}) must be measurably FEWER than the "
+    f"unexcluded baseline's rows ({len(_expected_rows)}), not identical"
+)
+
+_partial_overlap_zones = find_candidate_zones(SINGLE_COLUMN_DEM, PRODUCTION_AREA_PARTIAL_OVERLAP, BOUNDARY)
+assert len(_partial_overlap_zones) == 1, (
+    f"expected exactly 1 reshaped (smaller) zone surviving the straddled production boundary, got "
+    f"{len(_partial_overlap_zones)}"
+)
+_baseline_zones = find_candidate_zones(SINGLE_COLUMN_DEM, PRODUCTION_AREA_ABOVE, BOUNDARY)
+assert len(_baseline_zones) == 1
+assert _partial_overlap_zones[0]["polygon_utm"].area < _baseline_zones[0]["polygon_utm"].area, (
+    "the straddling zone's real area must shrink relative to the unexcluded baseline zone, not stay the same"
+)
+print(
+    f"Production-zone exclusion gate: a zone straddling a production area's own boundary survives as a smaller, "
+    f"reshaped cluster ({_partial_overlap_zones[0]['polygon_utm'].area:.1f} sq m, rows {_partial_overlap_rows[0]}-"
+    f"{_partial_overlap_rows[-1]}) rather than being entirely rejected (unexcluded baseline area "
+    f"{_baseline_zones[0]['polygon_utm'].area:.1f} sq m)."
+)
+
+
+# =====================================================================
 # select_optimal_survey_subarea(): a smaller, higher-confidence sub-region
 # within a zone that's large enough that the whole footprint isn't a very
 # actionable survey pointer -- favoring elevation advantage and proximity
@@ -776,7 +900,12 @@ SUBAREA_BOUNDARY = box(
 )
 SUBAREA_PRODUCTION_POLYGON = box(500220.0, 4499850.0, 500250.0, 4499900.0)
 SUBAREA_PRODUCTION_AREAS = [
-    {"id": 0, "representative_elevation_m": -5.0, "polygon_utm": SUBAREA_PRODUCTION_POLYGON}
+    {
+        "id": 0,
+        "representative_elevation_m": -5.0,
+        "polygon_utm": SUBAREA_PRODUCTION_POLYGON,
+        "render_fill_polygon_utm": SUBAREA_PRODUCTION_POLYGON,
+    }
 ]
 
 # A wide survey buffer so the resulting zone footprint clears

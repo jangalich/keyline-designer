@@ -197,7 +197,12 @@ WATER_SUITABILITY_DEM = {
     "crs": CRS,
 }
 PRODUCTION_AREAS = [
-    {"id": 0, "representative_elevation_m": -5.0, "polygon_utm": box(500080.0, 4499750.0, 500120.0, 4499800.0)}
+    {
+        "id": 0,
+        "representative_elevation_m": -5.0,
+        "polygon_utm": box(500080.0, 4499750.0, 500120.0, 4499800.0),
+        "render_fill_polygon_utm": box(500080.0, 4499750.0, 500120.0, 4499800.0),
+    }
 ]
 
 zones = find_candidate_zones(WATER_SUITABILITY_DEM, PRODUCTION_AREAS, BOUNDARY)
@@ -328,7 +333,12 @@ print(
 # drainage columns, but served by a HIGH-elevation production area so
 # both zones sit below it.
 BELOW_PRODUCTION_AREAS = [
-    {"id": 0, "representative_elevation_m": 100.0, "polygon_utm": box(500080.0, 4499750.0, 500120.0, 4499800.0)}
+    {
+        "id": 0,
+        "representative_elevation_m": 100.0,
+        "polygon_utm": box(500080.0, 4499750.0, 500120.0, 4499800.0),
+        "render_fill_polygon_utm": box(500080.0, 4499750.0, 500120.0, 4499800.0),
+    }
 ]
 below_zones = find_candidate_zones(WATER_SUITABILITY_DEM, BELOW_PRODUCTION_AREAS, BOUNDARY)
 below_zone = next(z for z in below_zones if z["id"] == 0)

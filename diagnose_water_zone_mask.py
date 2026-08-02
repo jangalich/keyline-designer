@@ -20,13 +20,22 @@ directly, several times, with individual gate thresholds swapped for
 "always pass" values (0/infinity) to isolate one real gate at a time --
 the gate math itself is never duplicated, only which of the function's
 own real checks can actually bind is varied per call. This covers all
-FIVE of compute_water_eligible_cells()'s real gates: percentile-band,
+SIX of compute_water_eligible_cells()'s real gates: percentile-band,
 on-parcel/boundary-setback, service-distance, canopy (woody-vegetation
-root zone), and existing-road right-of-way -- the real canopy_root_zone_
-mask_utm/road_exclusion_union_utm this run actually fetches (see below)
-are held REAL across every isolation call except the ones specifically
-isolating canopy or road themselves, the same way the percentile-band
-gate is already held real throughout.
+root zone), existing-road right-of-way, and the production-zone
+exclusion (any cell inside the UNION of every production area's own
+render_fill_polygon_utm is hard-excluded, buffered by WATER_ZONE_
+PRODUCTION_SETBACK_METERS -- see that constant's own docstring in
+water_candidate_zones.py) -- the real canopy_root_zone_mask_utm/
+road_exclusion_union_utm this run actually fetches (see below) are held
+REAL across every isolation call except the ones specifically isolating
+canopy or road themselves, the same way the percentile-band gate is
+already held real throughout. Unlike canopy/road, the production-zone
+exclusion has no "unchecked" sentinel to disable for isolation -- it's
+always built directly from whatever production_areas this run already
+fetched, so its own isolation call below relaxes every OTHER gate
+instead, the same technique the canopy-alone/road-alone isolation calls
+already use.
 
 Every isolation call uses the REAL boundary_polygon_utm, never a
 synthetic stand-in -- an earlier version of this section used a
@@ -100,6 +109,7 @@ from water_candidate_zones import (
     VALLEY_ACCUMULATION_PERCENTILE_LOW,
     WATER_ZONE_CANOPY_BUFFER_METERS,
     WATER_ZONE_MIN_WAIST_METERS,
+    WATER_ZONE_PRODUCTION_SETBACK_METERS,
     WATER_ZONE_ROAD_BUFFER_METERS,
     WATER_ZONE_SUBAREA_TARGET_ACRES,
     WATER_ZONE_SUBAREA_TRIGGER_ACRES,
@@ -162,7 +172,9 @@ def main(
     print(f"accumulation_percentile_low/high (run)    = {accumulation_percentile_low}/{accumulation_percentile_high} "
           f"(module default: {VALLEY_ACCUMULATION_PERCENTILE_LOW}/{VALLEY_ACCUMULATION_PERCENTILE_HIGH})")
     print(f"zone_min_waist_meters (this run)          = {zone_min_waist_meters}m "
-          f"(module default: {WATER_ZONE_MIN_WAIST_METERS})\n")
+          f"(module default: {WATER_ZONE_MIN_WAIST_METERS})")
+    print(f"production_setback_meters (module default, not overridable this run) = "
+          f"{WATER_ZONE_PRODUCTION_SETBACK_METERS}m\n")
 
     dem = get_dem_for_boundary(PROPERTY_BOUNDARY)
     print(f"DEM fetched: {dem['array'].shape[0]}x{dem['array'].shape[1]} cells, "
@@ -520,6 +532,33 @@ def main(
         f"Road gate alone (existing right-of-way, WATER_ZONE_ROAD_BUFFER_METERS={WATER_ZONE_ROAD_BUFFER_METERS}m)",
         road_excluded_mask, dem,
     )
+
+    # 2e. Production-zone exclusion gate ALONE: service-distance/setback
+    #     disabled, canopy/road skipped -- isolates the hard exclusion
+    #     against every production area's own render_fill_polygon_utm
+    #     specifically. Unlike canopy/road, this gate has no "unchecked"
+    #     sentinel of its own to disable directly (it's always built from
+    #     whichever production_areas this run already fetched) -- so
+    #     isolating it means relaxing every OTHER gate instead, same
+    #     technique 2c/2d above use.
+    production_alone_mask = compute_water_eligible_cells(
+        dem, production_areas, boundary_polygon_utm,
+        min_valley_contributing_area_acres=min_contributing_acres,
+        accumulation_percentile_low=accumulation_percentile_low,
+        accumulation_percentile_high=accumulation_percentile_high,
+        max_service_distance_meters=float("inf"),
+        min_service_distance_meters=0.0,
+        min_boundary_setback_meters=0.0,
+        survey_buffer_meters=buffer_meters,
+        canopy_root_zone_mask_utm=_CANOPY_CHECK_UNCHECKED,
+        road_exclusion_union_utm=_ROAD_CHECK_UNCHECKED,
+    )
+    production_excluded_mask = on_parcel_mask & ~production_alone_mask
+    _report_cell_count(
+        "Production-zone exclusion gate alone (any cell inside the union of every production area's own "
+        f"render_fill_polygon_utm, WATER_ZONE_PRODUCTION_SETBACK_METERS={WATER_ZONE_PRODUCTION_SETBACK_METERS}m)",
+        production_excluded_mask, dem,
+    )
     print()
 
     # --- Internal consistency check -----------------------------------
@@ -557,11 +596,14 @@ def main(
               "service_distance_mask. Treat the TOO FAR/TOO CLOSE numbers above as unreliable "
               "until this is investigated.\n")
 
-    # 3. ALL FIVE gates combined -- this is compute_water_eligible_cells()'s
+    # 3. ALL SIX gates combined -- this is compute_water_eligible_cells()'s
     #    own real output at this run's actual parameters, i.e. exactly what
     #    find_candidate_zones() (the real pipeline) works from (BEFORE
     #    waist-splitting/clustering -- see the zone section below for the
-    #    post-waist-split numbers).
+    #    post-waist-split numbers). production_setback_meters is left at
+    #    its module default (WATER_ZONE_PRODUCTION_SETBACK_METERS) --
+    #    not overridable by this script, same as the service-distance/
+    #    boundary-setback thresholds (see module docstring).
     combined_mask = compute_water_eligible_cells(
         dem, production_areas, boundary_polygon_utm,
         min_valley_contributing_area_acres=min_contributing_acres,
@@ -572,7 +614,7 @@ def main(
         road_exclusion_union_utm=road_exclusion_union_utm,
     )
     _report_mask_stats(
-        "ALL FIVE gates combined (real pipeline output -- matches find_candidate_zones()'s own eligible_mask, "
+        "ALL SIX gates combined (real pipeline output -- matches find_candidate_zones()'s own eligible_mask, "
         "pre-waist-split)",
         combined_mask, dem,
     )
