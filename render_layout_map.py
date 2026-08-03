@@ -686,7 +686,7 @@ def render_layout_map(
         else:
             anchor_clause = ", anchored to a real road"
         legend_entries.append(
-            f"{marker_number} — Road Corridor, {props['corridor_type']}{anchor_clause}"
+            f"{marker_number} — Road Corridor{anchor_clause}"
         )
         marker_number += 1
 

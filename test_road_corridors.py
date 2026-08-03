@@ -2,8 +2,8 @@
 test_road_corridors.py
 
 Offline (no-network) checks for road_corridors.py's constraint-stack,
-corridor-generation, and ranking logic — hand-built synthetic DEMs and
-hand-built production areas/selected water zone (same shapes
+cost-driven candidate generation, and ranking logic — hand-built synthetic
+DEMs and hand-built production areas/selected water zone (same shapes
 find_candidate_road_corridors() actually consumes: production areas carry
 'render_fill_polygon_utm', the OPTIMIZED/final production geometry
 production_area_ceiling.py produces, and the water zone is the single
@@ -11,16 +11,31 @@ SELECTED zone water_suitability.py's own scoring picks, not a list of
 unscored candidates), not a real DEM/NHD/SSURGO/road fetch. Mirrors
 test_water_candidate_zones.py's and test_solar_suitability.py's "pure
 logic, independent of real data fetches" approach.
+
+Candidate generation is now routing-based (road_cost_path.py's cost
+raster + Dijkstra least-cost path), not the old contour-band/ridge-top
+generators — see road_corridors.py's own module docstring for the
+quadrant-source / two-tier-destination / cost-driven-ranking model this
+exercises. There is no more 'corridor_type' field anywhere in the output;
+this file no longer asserts anything about it.
 """
 
 import numpy as np
-from shapely.geometry import LineString, box
+from shapely.geometry import LineString, Point, box
+from shapely.prepared import prep
 
 from feature_schema import validate_feature_collection
+from raster_grid import pixel_center_xy
 from road_corridors import (
     MAX_ROAD_GRADE_PCT,
+    ROAD_BOUNDARY_ADJACENT_METERS,
+    ROAD_DESTINATION_SEARCH_METERS,
+    ROAD_SOURCE_GRID_COLS,
+    ROAD_SOURCE_GRID_ROWS,
     STEEP_GRADE_ENGINEERING_NOTE_THRESHOLD_PCT,
-    _production_avoidance_score,
+    _build_production_cell_mask,
+    _select_destination_cells,
+    _select_quadrant_source_cells,
     corridors_to_geojson,
     find_candidate_road_corridors,
 )
@@ -29,144 +44,144 @@ CRS = "EPSG:32617"
 RESOLUTION = (5.0, 5.0)
 
 
-def _flat_hillside_dem(rows=40, cols=40, grade_per_row=0.3, origin_x=500000.0, origin_y=4500200.0):
+def _flat_dem(size=41, origin_x=500000.0, origin_y=4500205.0, elevation=100.0):
+    """A perfectly flat DEM -- every cell the same elevation, so slope is
+    0 everywhere the Horn kernel can compute it at all (the outer 1-cell
+    ring stays NaN regardless -- compute_slope_and_aspect() never visits
+    the border, see terrain_metrics.py). Useful whenever a test wants
+    grade entirely out of the way."""
+    array = np.full((size, size), elevation, dtype=np.float32)
+    return {"array": array, "resolution_meters": RESOLUTION, "origin_x": origin_x, "origin_y": origin_y, "crs": CRS}
+
+
+def _hillside_dem(size=41, grade_per_row=0.3, origin_x=500000.0, origin_y=4500205.0):
     """Uniform south-facing slope: every column at a given row is the same
-    elevation, so a whole row is a natural contour band -- ideal for
-    exercising contour-band generation deterministically."""
-    array = np.zeros((rows, cols), dtype=np.float32)
-    for row in range(rows):
+    elevation, so a north-south route climbs/descends while an east-west
+    route stays level -- lets a single DEM produce both a ~0%-grade and a
+    meaningfully-graded candidate for comparison."""
+    array = np.zeros((size, size), dtype=np.float32)
+    for row in range(size):
         array[row, :] = 100.0 - row * grade_per_row
     return {"array": array, "resolution_meters": RESOLUTION, "origin_x": origin_x, "origin_y": origin_y, "crs": CRS}
 
 
-def _diagonal_ridge_dem(rows=30, cols=30, cross_slope=0.3, downhill_per_row=0.2, origin_x=500000.0, origin_y=4500150.0):
-    """A gentle ridge crest running along the grid's diagonal, tapering
-    off (and descending overall) away from it -- exercises ridge-top
-    generation deterministically (see road_corridors.py's module
-    docstring for why this is 'delineate_valleys on an inverted DEM')."""
-    array = np.zeros((rows, cols), dtype=np.float32)
-    for row in range(rows):
-        for col in range(cols):
-            distance_from_ridge = abs((rows - 1 - row) - col)
-            array[row, col] = 100.0 - distance_from_ridge * cross_slope - row * downhill_per_row
-    return {"array": array, "resolution_meters": RESOLUTION, "origin_x": origin_x, "origin_y": origin_y, "crs": CRS}
+# --- basic candidate generation: up to one per quadrant, ranked by ascending total_cost ---
 
-
-# --- contour-band generation on a plain hillside (no production zones at all) ---
-
-dem = _flat_hillside_dem()
-boundary = box(500000, 4500000, 500200, 4500200)
+dem = _flat_dem()
+boundary = box(500000, 4500000, 500205, 4500205)
 
 candidates = find_candidate_road_corridors(dem, [], None, boundary, max_candidates=50)
-assert candidates, "expected at least one contour-band candidate on a uniform hillside"
-assert all(c["corridor_type"] == "contour" for c in candidates), (
-    "a uniform hillside with no ridge feature should only produce contour-band candidates"
+assert candidates, "expected at least one candidate on an open, flat, unconstrained property"
+assert len(candidates) <= ROAD_SOURCE_GRID_ROWS * ROAD_SOURCE_GRID_COLS, (
+    f"expected at most {ROAD_SOURCE_GRID_ROWS * ROAD_SOURCE_GRID_COLS} candidates (one per quadrant), "
+    f"got {len(candidates)}"
 )
-print(f"Contour-band generation produces {len(candidates)} candidate(s) on a plain hillside.")
+for candidate in candidates:
+    assert len(candidate["points_xyz"]) >= 2, "a returned candidate must have at least 2 points to form a line"
+    assert candidate["line_utm"].length > 0
+costs = [candidate["total_cost"] for candidate in candidates]
+assert costs == sorted(costs), "candidates must be ranked by ascending total_cost, cheapest first"
+scores = [candidate["suitability_score"] for candidate in candidates]
+assert scores == sorted(scores, reverse=True), "suitability_score must be descending as total_cost ascends"
+ranks = [candidate["rank"] for candidate in candidates]
+assert ranks == sorted(ranks) == list(range(1, len(candidates) + 1))
+print(f"Cost-driven generation produces {len(candidates)} candidate(s) on an open property, ranked by ascending total_cost.")
 
 
-# --- production zones are a PREFERENCE, not an exclusion: a candidate MAY cross one ---
-#
-# Two regions with disjoint elevation ranges (so contour-band slicing
-# naturally keeps them as separate candidates, not merged into one band)
-# -- west sits inside a production zone, east doesn't. Both are otherwise
-# identical (same grade, same shape), so any score difference is purely
-# the production-avoidance preference term, not grade/consistency/length.
-crossing_test_array = np.zeros((40, 40), dtype=np.float32)
-for row in range(40):
-    for col in range(40):
-        if col < 20:
-            crossing_test_array[row, col] = 100.0 - row * 0.3  # west: inside the production zone
-        else:
-            crossing_test_array[row, col] = 50.0 - row * 0.3  # east: disjoint elevation range, outside it
-crossing_test_dem = {
-    "array": crossing_test_array, "resolution_meters": RESOLUTION,
-    "origin_x": 500000.0, "origin_y": 4500200.0, "crs": CRS,
-}
-crossing_test_boundary = box(500000, 4500000, 500200, 4500200)
-production_areas = [
-    {
-        "id": 0,
-        "representative_elevation_m": 100.0,
-        "render_fill_polygon_utm": box(500000, 4500000, 500100, 4500200),
-    }
-]
+# --- _select_quadrant_source_cells: one source per quadrant with eligible ground, none forced ---
 
+full_eligible = np.ones((40, 40), dtype=bool)
+all_quadrant_sources = _select_quadrant_source_cells(dem, full_eligible, boundary)
+assert len(all_quadrant_sources) == ROAD_SOURCE_GRID_ROWS * ROAD_SOURCE_GRID_COLS, (
+    "every quadrant has eligible ground -- expected one source cell per quadrant"
+)
+
+partially_eligible = np.ones((40, 40), dtype=bool)
+partially_eligible[0:20, 0:20] = False  # empty top-left quadrant
+partial_sources = _select_quadrant_source_cells(dem, partially_eligible, boundary)
+assert len(partial_sources) == ROAD_SOURCE_GRID_ROWS * ROAD_SOURCE_GRID_COLS - 1, (
+    "a quadrant with zero eligible cells must be skipped entirely, not forced to contribute a source"
+)
+assert all(not (r < 20 and c < 20) for r, c in partial_sources), (
+    "no source cell should come from the quadrant that has no eligible ground at all"
+)
+print("_select_quadrant_source_cells skips quadrants with no eligible ground and never forces a source from them.")
+
+
+# --- _select_destination_cells: Tier 1 (near real road) with Tier 2 (boundary-adjacent) fallback ---
+
+eligible_everywhere = np.ones((41, 41), dtype=bool)
+nearby_road = LineString([(500204, 4500000), (500204, 4500205)])  # runs along the east edge
+tier1_cells = _select_destination_cells(dem, eligible_everywhere, boundary, nearby_road)
+assert tier1_cells, "expected Tier 1 destinations near a real, reachable road"
+tier1_prepared = prep(nearby_road.buffer(ROAD_DESTINATION_SEARCH_METERS))
+assert all(tier1_prepared.contains(Point(pixel_center_xy(dem, r, c))) for r, c in tier1_cells), (
+    "every Tier 1 destination cell must actually fall within ROAD_DESTINATION_SEARCH_METERS of the road"
+)
+
+distant_road = LineString([(600000, 4600000), (600001, 4600001)])  # real but unreachable within the search radius
+fallback_cells = _select_destination_cells(dem, eligible_everywhere, boundary, distant_road)
+no_road_cells = _select_destination_cells(dem, eligible_everywhere, boundary, None)
+assert fallback_cells and sorted(fallback_cells) == sorted(no_road_cells), (
+    "when Tier 1 comes back empty (road exists but nothing eligible is within reach), destination selection "
+    "must fall through to the same Tier 2 boundary-adjacent result as having no road data at all"
+)
+boundary_prepared_test = prep(boundary.exterior.buffer(ROAD_BOUNDARY_ADJACENT_METERS))
+assert all(boundary_prepared_test.contains(Point(pixel_center_xy(dem, r, c))) for r, c in no_road_cells), (
+    "every Tier 2 destination cell must actually fall within ROAD_BOUNDARY_ADJACENT_METERS of the boundary exterior"
+)
+
+isolated_eligible = np.zeros((41, 41), dtype=bool)
+isolated_eligible[20, 20] = True  # a single eligible cell, deep in the interior, far from any tier
+assert _select_destination_cells(dem, isolated_eligible, boundary, None) == [], (
+    "both tiers coming back empty must return [], not raise or fabricate a destination"
+)
+print(
+    "_select_destination_cells finds real road-adjacent destinations first, correctly falls through to "
+    "boundary-adjacent destinations when Tier 1 is empty (whether because no road exists or none is reachable), "
+    "and returns [] honestly when neither tier has anything."
+)
+
+
+# --- _build_production_cell_mask: True only inside the production union AND on-parcel ---
+
+production_polygon = box(500000, 4500000, 500100, 4500205)
+production_prepared = prep(production_polygon)
+boundary_prepared = prep(boundary)
+production_mask = _build_production_cell_mask(dem, production_prepared, boundary_prepared)
+for r in range(1, 40):
+    for c in range(1, 40):
+        point = Point(pixel_center_xy(dem, r, c))
+        expected = boundary_prepared.contains(point) and production_prepared.contains(point)
+        assert production_mask[r, c] == expected, f"production mask mismatch at ({r}, {c})"
+assert _build_production_cell_mask(dem, None, boundary_prepared).sum() == 0, (
+    "a None production_prepared (no production zones at all) must produce an all-False mask"
+)
+print("_build_production_cell_mask correctly flags only on-parcel cells actually inside the production union.")
+
+
+# --- production zones are a cost PREFERENCE, not a hard exclusion: a candidate MAY still cross one ---
+
+crossing_production_areas = [{"id": 0, "render_fill_polygon_utm": box(500000, 4500000, 500102, 4500205)}]  # west half
 crossing_test_candidates = find_candidate_road_corridors(
-    crossing_test_dem, production_areas, None, crossing_test_boundary, max_candidates=50
+    dem, crossing_production_areas, None, boundary, max_candidates=50
 )
 crossing = [c for c in crossing_test_candidates if c["crosses_production_zone"]]
 noncrossing = [c for c in crossing_test_candidates if not c["crosses_production_zone"]]
 assert crossing, (
     "expected at least one candidate that actually crosses the production zone -- production must NOT be a "
-    "hard exclusion anymore"
+    "hard exclusion anymore (a west-half quadrant's own source cell sits inside it)"
 )
 assert noncrossing, "expected at least one candidate that doesn't cross the production zone, for comparison"
-assert max(c["suitability_score"] for c in noncrossing) > max(c["suitability_score"] for c in crossing), (
-    "all else being comparable (same grade/shape), a non-crossing candidate should score higher than a "
-    "crossing one -- this is the production-avoidance PREFERENCE, not an exclusion"
+assert min(c["total_cost"] for c in crossing) > min(c["total_cost"] for c in noncrossing), (
+    "crossing the production zone should cost more than an otherwise-comparable route that doesn't -- this is "
+    "the production-crossing cost PENALTY, not an exclusion"
 )
 print(
-    f"Production zones are a preference, not an exclusion: {len(crossing)} candidate(s) legitimately cross "
-    f"one (max score {max(c['suitability_score'] for c in crossing):.3f}), while comparable non-crossing "
-    f"candidates score higher (max score {max(c['suitability_score'] for c in noncrossing):.3f})."
+    f"Production zones are a cost preference, not an exclusion: {len(crossing)} candidate(s) legitimately cross "
+    f"one (min cost {min(c['total_cost'] for c in crossing):.1f}), while comparable non-crossing candidates cost "
+    f"less (min cost {min(c['total_cost'] for c in noncrossing):.1f})."
 )
-
-
-# --- _production_avoidance_score: 1.0 clear of production, 0.0 crossing, linear in between ---
-
-far_line = box(500000, 4500000, 500010, 4500010).exterior
-crossing_line = box(500000, 4500000, 500050, 4500010).exterior  # overlaps the production polygon below
-production_polygon = box(500020, 4500000, 500040, 4500010)
-
-assert _production_avoidance_score(far_line, None) == 1.0, "no production zones at all should score the maximum preference"
-assert _production_avoidance_score(crossing_line, production_polygon) == 0.0, "a crossing line should score zero preference"
-clear_line = box(500100, 4500000, 500110, 4500010).exterior
-mid_score = _production_avoidance_score(clear_line, production_polygon)
-assert 0.0 < mid_score <= 1.0
-print("_production_avoidance_score scores 1.0 when clear/no production zones exist, 0.0 when crossing, and a "
-      "real intermediate value when nearby but clear.")
-
-
-# --- ranking is score-driven, not hardcoded to "always rank left before right" ---
-
-ranks = [c["rank"] for c in candidates]
-scores = [c["suitability_score"] for c in candidates]
-assert ranks == sorted(ranks)
-assert scores == sorted(scores, reverse=True), "candidates must be ranked by suitability_score, descending"
-print("Candidates are ranked strictly by suitability_score.")
-
-
-# --- both corridor types are generated where terrain supports them, ranked together ---
-
-rows = 30
-combined_cols = 60
-combined_array = np.zeros((rows, combined_cols), dtype=np.float32)
-for row in range(rows):
-    for col in range(combined_cols):
-        if col < 30:
-            combined_array[row, col] = 100.0 - row * 0.3  # west half: contour-friendly
-        else:
-            rc = col - 30
-            distance_from_ridge = abs((rows - 1 - row) - rc)
-            combined_array[row, col] = 130.0 - distance_from_ridge * 0.3 - row * 0.2  # east half: ridge
-
-combined_dem = {
-    "array": combined_array, "resolution_meters": RESOLUTION,
-    "origin_x": 500000.0, "origin_y": 4500150.0, "crs": CRS,
-}
-combined_boundary = box(500000, 4500000, 500300, 4500150)
-
-combined_candidates = find_candidate_road_corridors(combined_dem, [], None, combined_boundary, max_candidates=50)
-combined_types = {c["corridor_type"] for c in combined_candidates}
-assert combined_types == {"contour", "ridge"}, (
-    f"expected both corridor types on terrain supporting both, got only {combined_types}"
-)
-combined_scores = [c["suitability_score"] for c in combined_candidates]
-assert combined_scores == sorted(combined_scores, reverse=True), (
-    "contour and ridge candidates must be ranked together in one list, not two separate rankings"
-)
-print(f"Both corridor types generated on mixed terrain ({len(combined_candidates)} total), ranked together by score.")
 
 
 # --- selected water zone exclusion: a candidate must not cross the (buffered) SELECTED water zone ---
@@ -174,20 +189,21 @@ print(f"Both corridor types generated on mixed terrain ({len(combined_candidates
 # selected_water_zone is water_suitability.fetch_and_select_optimal_water_zone()'s
 # own single rank-1 answer shape -- carries 'render_fill_polygon_utm', same
 # optimized/final-geometry field production_areas above uses, not 'polygon_utm'.
-selected_water_zone = {"id": 0, "render_fill_polygon_utm": box(500080, 4500000, 500130, 4500200)}
+selected_water_zone = {"id": 0, "render_fill_polygon_utm": box(500080, 4500000, 500130, 4500205)}
 pond_candidates = find_candidate_road_corridors(dem, [], selected_water_zone, boundary, max_candidates=50)
-pond_exclusion = box(500080, 4500000, 500130, 4500200).buffer(25)  # matches the module's own pond buffer
+pond_exclusion = box(500080, 4500000, 500130, 4500205).buffer(25)  # matches the module's own pond buffer
+assert pond_candidates, "expected candidates for the pond-exclusion check"
 for candidate in pond_candidates:
     assert not candidate["line_utm"].intersects(pond_exclusion), (
-        "no candidate should cross the (buffered) selected water-system zone"
+        "no candidate should cross the (buffered) selected water-system zone -- still a HARD exclusion"
     )
 print("Selected water-system zone exclusion correctly keeps candidates clear of the buffered zone.")
 
 
 # --- anchoring: real named road data connects the corridor; no road data omits the connector entirely ---
 
-# a real road running along the west edge of the boundary
-road_union = LineString([(500000, 4500000), (500000, 4500200)])
+# a real road running along the east edge of the boundary
+road_union = LineString([(500204, 4500000), (500204, 4500205)])
 anchored_candidates = find_candidate_road_corridors(dem, [], None, boundary, road_union_utm=road_union, max_candidates=50)
 assert anchored_candidates, "expected candidates for the anchoring check"
 assert all(c["anchor_status"] == "connected_to_named_road" for c in anchored_candidates), (
@@ -199,6 +215,7 @@ assert all(c["anchor_road_distance_m"] is not None for c in anchored_candidates)
 print("With real road data available, connection points are anchored (connected_to_named_road).")
 
 unanchored_candidates = find_candidate_road_corridors(dem, [], None, boundary, road_union_utm=None, max_candidates=50)
+assert unanchored_candidates, "expected candidates for the unanchored check"
 assert all(c["anchor_status"] == "no_named_road_available" for c in unanchored_candidates), (
     "with no road data available, every candidate should report anchor_status='no_named_road_available'"
 )
@@ -247,26 +264,30 @@ print("Without road_features_utm, anchoring still works via road_union_utm alone
 
 # --- grade threshold is actually applied ---
 
-strict_candidates = find_candidate_road_corridors(dem, [], None, boundary, max_grade_pct=0.0001)
+hillside = _hillside_dem(grade_per_row=0.3)
+hillside_boundary = box(500000, 4500000, 500205, 4500205)
+normal_grade_candidates = find_candidate_road_corridors(hillside, [], None, hillside_boundary, max_candidates=50)
+assert normal_grade_candidates, "expected candidates on a gentle hillside well under the grade ceiling"
+
+strict_candidates = find_candidate_road_corridors(hillside, [], None, hillside_boundary, max_grade_pct=0.0001)
 assert strict_candidates == [], "an effectively-zero grade allowance should leave no qualifying candidates"
 print(f"Grade threshold is enforced (default {MAX_ROAD_GRADE_PCT}%; near-zero allowance yields no candidates).")
 
 
 # --- steep-grade engineering-consideration note is additive, threshold-gated ---
 
-# A ridge crest graded just above STEEP_GRADE_ENGINEERING_NOTE_THRESHOLD_PCT
-# (10%) but still safely under MAX_ROAD_GRADE_PCT (15%) -- avg_grade_pct
-# for the ridge candidate lands at ~10.1% (confirmed empirically; the
-# crest's own along-ridge grade, not the (steeper, irrelevant) cross-slope
-# flank grade, drives avg_grade_pct here).
-steep_ridge_dem = _diagonal_ridge_dem(rows=30, cols=30, cross_slope=1.2, downhill_per_row=0.75)
-steep_boundary = box(500000, 4500150 - 30 * 5.0, 500000 + 30 * 5.0, 4500150)
-steep_candidates = find_candidate_road_corridors(steep_ridge_dem, [], None, steep_boundary, max_candidates=50)
+# A hillside graded steep enough (12%) that the north-south candidates
+# land above STEEP_GRADE_ENGINEERING_NOTE_THRESHOLD_PCT (10%) but still
+# safely under MAX_ROAD_GRADE_PCT (15%); the east-west candidates on the
+# same DEM stay near 0% grade (a contour line), giving both a steep and a
+# gentle candidate to check in the same pass.
+steep_hillside = _hillside_dem(grade_per_row=0.6)
+steep_candidates = find_candidate_road_corridors(steep_hillside, [], None, hillside_boundary, max_candidates=50)
 steep_geojson = corridors_to_geojson(steep_candidates)
 steep_features = [f for f in steep_geojson["features"] if f["properties"]["avg_grade_pct"] > STEEP_GRADE_ENGINEERING_NOTE_THRESHOLD_PCT]
-assert steep_features, (
-    f"expected at least one candidate above {STEEP_GRADE_ENGINEERING_NOTE_THRESHOLD_PCT}% grade on this ridge crest"
-)
+gentle_features = [f for f in steep_geojson["features"] if f["properties"]["avg_grade_pct"] <= STEEP_GRADE_ENGINEERING_NOTE_THRESHOLD_PCT]
+assert steep_features, f"expected at least one candidate above {STEEP_GRADE_ENGINEERING_NOTE_THRESHOLD_PCT}% grade on this hillside"
+assert gentle_features, "expected at least one near-contour (gentle) candidate on this hillside, for comparison"
 for feature in steep_features:
     notes = feature["properties"]["confidence_notes"]
     assert "real engineering consideration" in notes and "drainage/culverts" in notes and "water bars" in notes, (
@@ -277,20 +298,15 @@ for feature in steep_features:
     assert "TOPOGRAPHIC SUGGESTION only, not a surveyed road alignment" in notes, (
         "the steep-grade note must be ADDITIVE -- the existing blanket disclaimer must still be present"
     )
-print(
-    f"Candidates above {STEEP_GRADE_ENGINEERING_NOTE_THRESHOLD_PCT}% grade carry the additive steep-grade "
-    f"engineering-consideration note, with the existing blanket disclaimer still intact."
-)
-
-# A gentle contour band (well below the threshold) must NOT carry the note.
-gentle_candidates = find_candidate_road_corridors(dem, [], None, boundary, max_candidates=50)
-gentle_geojson = corridors_to_geojson(gentle_candidates)
-for feature in gentle_geojson["features"]:
-    assert feature["properties"]["avg_grade_pct"] <= STEEP_GRADE_ENGINEERING_NOTE_THRESHOLD_PCT
+for feature in gentle_features:
     assert "real engineering consideration" not in feature["properties"]["confidence_notes"], (
         "a candidate at or below the steep-grade threshold must NOT carry the engineering-consideration note"
     )
-print(f"Candidates at or below {STEEP_GRADE_ENGINEERING_NOTE_THRESHOLD_PCT}% grade correctly omit the steep-grade note.")
+print(
+    f"Candidates above {STEEP_GRADE_ENGINEERING_NOTE_THRESHOLD_PCT}% grade carry the additive steep-grade "
+    f"engineering-consideration note; candidates at or below it correctly omit it; the blanket disclaimer "
+    f"stays present either way."
+)
 
 
 # --- output: schema-valid FeatureCollection on the required layer, with required properties ---
@@ -298,7 +314,7 @@ print(f"Candidates at or below {STEEP_GRADE_ENGINEERING_NOTE_THRESHOLD_PCT}% gra
 geojson = corridors_to_geojson(candidates, floodplain_data_is_fallback=True)
 validate_feature_collection(geojson)
 required_props = {
-    "corridor_type", "avg_grade_pct", "length_ft", "anchor_status",
+    "avg_grade_pct", "length_ft", "anchor_status",
     "anchor_road_name", "anchor_road_distance_ft", "crosses_production_zone",
     "constraints_satisfied",
 }
@@ -307,6 +323,10 @@ for feature in geojson["features"]:
     assert required_props.issubset(feature["properties"].keys()), (
         f"missing required properties: {required_props - feature['properties'].keys()}"
     )
+    assert "corridor_type" not in feature["properties"], (
+        "corridor_type has been removed outright -- contour-band/ridge-top generation no longer exists"
+    )
+    assert 0.0 <= feature["properties"]["suitability_score"] <= 100.0
     assert "crosses_erosion_prone_soil" not in feature["properties"], (
         "the erosion-prone-soil preference has been removed outright (KSOP: Soil is step 8, below "
         "Farm Roads at step 4) -- this property must no longer be reported at all"
@@ -322,56 +342,55 @@ for feature in geojson["features"]:
         "the erosion-avoidance preference has been removed outright -- confidence_notes must no longer "
         "mention erosion at all"
     )
-    assert "preference" in notes.lower() and "production zone" in notes.lower(), (
-        "confidence_notes must plainly explain the production-zone preference (not exclusion) model"
+    assert "least-cost-path" in notes or "cost surface" in notes, (
+        "confidence_notes should describe the cost-driven routing model, not the removed contour-band/ridge-top one"
+    )
+    assert "contour-band" not in notes and "ridge-top" not in notes, (
+        "confidence_notes must no longer reference the removed contour-band/ridge-top generation model"
     )
 print("corridors_to_geojson output is schema-valid, layer='suggested_road_corridor', with required properties "
-      "(crosses_erosion_prone_soil correctly absent), no stale 'outside_production_zone' constraint, and "
-      "confidence_notes explaining the production-zone preference model with no erosion mention at all.")
+      "(corridor_type and crosses_erosion_prone_soil correctly absent), no stale 'outside_production_zone' "
+      "constraint, and confidence_notes describing the cost-driven routing model with no erosion mention at all.")
 
 
 # --- regression: corridor candidates stay on-parcel, not drawn from the DEM's buffered margin ---
 #
 # This is the exact live bug found against the real property: dem_data.py
 # fetches a DEM buffered ~100m past the drawn boundary (correct and
-# intentional, for terrain-analysis context), but contour-band/ridge-top
-# generation never restricted its candidate cells to the actual parcel --
-# a corridor could be built entirely from off-parcel ground. Here the DEM
-# is a uniform south-facing slope spanning the FULL 250m x 250m grid (so,
-# unclipped, a natural contour band would span the whole width, well past
-# the parcel on both sides); the boundary below is a smaller 150m x 150m
-# parcel with a 50m buffer margin on every side, mirroring dem_data.py's
-# real buffer relationship at test scale.
-buffered_rows = buffered_cols = 50
-buffered_array = np.zeros((buffered_rows, buffered_cols), dtype=np.float32)
-for row in range(buffered_rows):
-    buffered_array[row, :] = 100.0 - row * 0.3  # uniform south-facing slope, same across every column
+# intentional, for terrain-analysis context), but candidate generation
+# must still be structurally confined to the actual parcel. Here the DEM
+# spans a full 400m x 400m grid while the real parcel is a smaller,
+# centered 300m x 300m box with a 50m buffer margin on every side,
+# mirroring dem_data.py's real buffer relationship at test scale. Large
+# enough that the quadrant grid (computed over the DEM's own full extent,
+# see _select_quadrant_source_cells()) lands its sources well inside the
+# parcel's interior rather than immediately adjacent to the boundary.
+buffered_size = 80
+buffered_array = np.full((buffered_size, buffered_size), 100.0, dtype=np.float32)
 buffered_dem = {
     "array": buffered_array, "resolution_meters": RESOLUTION,
-    "origin_x": 500000.0, "origin_y": 4500250.0, "crs": CRS,
+    "origin_x": 500000.0, "origin_y": 4500400.0, "crs": CRS,
 }
-# The real parcel: 150m x 150m, with a 50m buffer margin to the DEM's edge
-# on every side -- the DEM covers ground the parcel itself doesn't.
-parcel_boundary = box(500050, 4500050, 500200, 4500200)
+parcel_boundary = box(500050, 4500050, 500350, 4500350)
 
 buffered_candidates = find_candidate_road_corridors(buffered_dem, [], None, parcel_boundary, max_candidates=50)
-assert buffered_candidates, "expected at least one contour-band candidate on this uniform, buffered hillside"
+assert buffered_candidates, "expected at least one candidate on this uniform, buffered DEM"
 
 for candidate in buffered_candidates:
     # parcel_boundary is convex (a box), so if every contributing cell is
     # on-parcel, even the anchored connector segment (a straight line from
     # an interior point to a point ON the boundary ring) can't leave and
-    # re-enter -- the WHOLE anchored line, connector included, must stay
+    # re-enter -- the WHOLE candidate line, connector included, must stay
     # within the parcel. (For a concave real parcel, only the connector
     # segment itself would be exempt from this -- see this test file's
     # module docstring and road_corridors.py's own confidence_notes for
     # that already-disclosed limitation.)
     assert candidate["line_utm"].within(parcel_boundary.buffer(1e-6)), (
-        f"{candidate['corridor_type']} candidate (rank {candidate['rank']}) extends outside the real parcel "
-        f"boundary -- corridor geometry must be drawn from on-parcel cells only, not the DEM's buffered margin"
+        f"candidate (rank {candidate['rank']}) extends outside the real parcel boundary -- corridor geometry "
+        f"must be drawn from on-parcel cells only, not the DEM's buffered margin"
     )
 print(
-    f"Parcel clipping: {len(buffered_candidates)} corridor candidate(s) on a hillside spanning well past the "
+    f"Parcel clipping: {len(buffered_candidates)} corridor candidate(s) on a DEM extending well past the "
     f"parcel boundary all stay entirely within the real (smaller) parcel, not the DEM's buffered extent."
 )
 

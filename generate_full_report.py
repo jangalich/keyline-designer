@@ -12,7 +12,7 @@ between scripts.
              --> climate_data
              --> imagery_data (polygon)
              --> water_candidate_zones (DEM/LiDAR valley + gradient/setback zones)
-             --> road_corridors (DEM contour-band/ridge-top corridors + NHD/SSURGO constraints)
+             --> road_corridors (DEM least-cost-path corridors + NHD/SSURGO constraints)
              --> solar_suitability (DEM slope/aspect/shading + road/production constraints,
                                      falling back to road_corridors for proximity if needed)
              --> fencing (real geometry: buffered NHD stream exclusion + property-boundary

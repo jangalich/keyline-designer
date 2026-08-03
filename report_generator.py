@@ -315,8 +315,8 @@ def _format_water_candidate_zones_summary(zones_geojson: Optional[dict]) -> str:
 
 def _format_road_corridor_summary(zones_geojson: Optional[dict]) -> str:
     """Formats road_corridors.py's "suggested_road_corridor" layer (see
-    that module for the contour-band/ridge-top generation and constraint
-    stack behind it) for the report prompt. Optional, same reasoning as
+    that module for the least-cost-path routing and constraint stack
+    behind it) for the report prompt. Optional, same reasoning as
     the other DEM/network-backed layers — a fetch failure shouldn't take
     down the whole report; step 4 of the system prompt falls back to its
     old prose-inference behavior when this is empty/unavailable."""
@@ -341,12 +341,12 @@ def _format_road_corridor_summary(zones_geojson: Optional[dict]) -> str:
             anchor_note = "anchored near a real mapped road"
         crossing_note = " [crosses a production zone]" if props.get("crosses_production_zone") else ""
         lines.append(
-            f"  - Rank {props['rank']} ({props['corridor_type']}, score {props['suitability_score']}/100): "
+            f"  - Rank {props['rank']} (score {props['suitability_score']}/100): "
             f"{props['avg_grade_pct']}% avg grade, {props['length_ft']}ft long, {anchor_note}{crossing_note}"
         )
     lines.append(
-        "\nThese are ranked CANDIDATE CORRIDORS (contour-band and/or ridge-top, no default "
-        "preference between the two types), not a single forced routing — narrate from this "
+        "\nThese are ranked CANDIDATE CORRIDORS from a cost-driven least-cost-path routing model "
+        "(up to one per quadrant of the property), not a single forced routing — narrate from this "
         "geometry rather than inventing a corridor, compare candidates where more than one is "
         "offered, say plainly wherever a candidate has no connector reaching the boundary (vs. "
         "anchored to a named real road — this feature never anchors to an arbitrary boundary "
