@@ -29,9 +29,13 @@ hardcoded type preference — see find_candidate_road_corridors()):
 
 Constraint stack (both corridor types, before scoring):
   - HARD exclusions (a candidate cannot be generated through these at all):
-      - outside pond/water-system candidate zones (water_candidate_zones.py,
-        buffered wider — routing on the uphill side of a pond/dam, not
-        across its face or catchment inlet)
+      - outside the single SELECTED water-system candidate zone
+        (water_suitability.fetch_and_select_optimal_water_zone() — the
+        one rank-1 zone this property's own water-suitability scoring
+        actually picked, not every unscored candidate zone
+        water_candidate_zones.py generates), buffered wider — routing on
+        the uphill side of a pond/dam, not across its face or catchment
+        inlet
       - outside floodplain/hydric ground, sourced from real NHD stream/
         water-body buffers + SSURGO hydric soil polygons (NOT inferred
         from DEM elevation alone) — falls back to a buffer around
@@ -39,36 +43,32 @@ Constraint stack (both corridor types, before scoring):
         reachable, and flags that fallback explicitly in confidence_notes
       - within a pinned maximum grade (MAX_ROAD_GRADE_PCT)
   - SOFT preference (scored, not excluded):
-      - production zones (production_area.py) — a road is a thin linear
-        feature, not a large permanent land claim the way a pond/dam
-        site is, so crossing production land is a real, valid routing
-        option (same reasoning as solar_suitability.py's own production-
-        zone-proximity redesign). A candidate that avoids crossing any
-        production zone still scores somewhat higher than an otherwise-
-        comparable one that crosses through one — see
-        PRODUCTION_AVOIDANCE_SCORE_WEIGHT and _production_avoidance_score().
-        This was a hard exclusion in an earlier version of this module;
-        with production_area.py's own slope ceiling now at 20%, one large
-        production zone can cover most of a property's gentle ground,
-        and hard-excluding it left nowhere for a corridor to exist at
-        all (confirmed live: zero corridor candidates with the exclusion,
-        real candidates once it was removed).
-      - erosion-prone soil per SSURGO's K-factor (soil_data.is_erosion_prone)
-        — K-factor measures water-erosion susceptibility, a mitigation
-        concern (drainage, surfacing, ground cover), not structural safety
-        or buildability the way a water zone represents a genuine physical
-        impossibility; there's no real, citable "K-factor >= X means
-        physically unsafe to build a road" threshold the way there is for,
-        say, a pond catchment. A candidate that avoids crossing erosion-
-        prone soil still scores somewhat higher than an otherwise-
-        comparable one that crosses it — see EROSION_AVOIDANCE_SCORE_WEIGHT
-        and _erosion_avoidance_score(). This was ALSO a hard exclusion in
-        an earlier version: confirmed live, 6 of this property's 7 real
-        soil units clear DEFAULT_EROSION_KWFACT_THRESHOLD, so the exclusion
-        alone covered 99.5% of the parcel (13.17 of 13.23 acres) and, by
-        itself, was enough to zero out every corridor candidate even after
-        the production-zone and hydric-composition-threshold fixes above
-        had already landed.
+      - production zones — scored against the OPTIMIZED/final production
+        geometry (production_area_ceiling.identify_optimized_production_
+        areas()'s own render_fill_polygon_utm per patch, the same
+        ceiling-trimmed, clustered/gated result actually selected for
+        this property, not production_area.py's raw pre-optimization
+        patches). A road is a thin linear feature, not a large permanent
+        land claim the way a pond/dam site is, so crossing production
+        land is a real, valid routing option (same reasoning as
+        solar_suitability.py's own production-zone-proximity redesign).
+        A candidate that avoids crossing any production zone still
+        scores somewhat higher than an otherwise-comparable one that
+        crosses through one — see PRODUCTION_AVOIDANCE_SCORE_WEIGHT and
+        _production_avoidance_score(). This was a hard exclusion in an
+        earlier version of this module; with production_area.py's own
+        slope ceiling now at 20%, one large production zone can cover
+        most of a property's gentle ground, and hard-excluding it left
+        nowhere for a corridor to exist at all (confirmed live: zero
+        corridor candidates with the exclusion, real candidates once it
+        was removed).
+
+Erosion-prone soil (SSURGO K-factor) is deliberately NOT part of this
+module's constraint stack at all, hard or soft — this pipeline's own
+KSOP (Keyline Scale of Permanence) ordering puts Soil at step 8, well
+below Farm Roads at step 4; scoring a step-4 feature against step-8 data
+inverted that ordering, so the erosion-avoidance preference this module
+used to carry has been removed outright, not just softened further.
 
 Corridor anchoring (connecting the near-boundary end of a generated
 corridor to the property line) anchors to a real, NAMED mapped existing
@@ -103,19 +103,17 @@ from dem_data import get_dem_for_boundary
 from farm_roads_data import get_farm_roads_for_boundary
 from feature_schema import CONFIDENCE_LOW, make_feature, make_feature_collection
 from hydrology_data import get_water_features_for_boundary
-from production_area import identify_production_areas
+from production_area_ceiling import identify_optimized_production_areas
 from raster_grid import connected_components, pixel_center_xy
 from soil_data import (
     coordinates_to_wkt_polygon,
-    get_erosion_factor_for_polygon,
     get_soil_data_for_polygon,
     get_soil_geometries_for_polygon,
     hydric_disqualifying_mukeys,
-    is_erosion_prone,
 )
 from terrain_metrics import compute_slope_and_aspect
 from valley_delineation import delineate_valleys
-from water_candidate_zones import find_candidate_zones as find_pond_zones
+from water_suitability import fetch_and_select_optimal_water_zone
 
 METERS_PER_FOOT = 0.3048
 
@@ -178,14 +176,6 @@ RIDGE_MIN_PRIMARY_AREA_ACRES = 1.0
 # floodplain exclusions, just for this softer preference (see
 # _production_avoidance_score()). CONFIGURABLE.
 PRODUCTION_AVOIDANCE_REFERENCE_METERS = 50.0
-
-# Same role as PRODUCTION_AVOIDANCE_REFERENCE_METERS, for the erosion-
-# prone-soil preference (see _erosion_avoidance_score()) -- distance
-# beyond which a corridor clear of erosion-prone soil stops gaining extra
-# preference score. Same value as the production one: no evidence either
-# preference deserves a different "how far is far enough" distance.
-# CONFIGURABLE.
-EROSION_AVOIDANCE_REFERENCE_METERS = 50.0
 
 # Buffer beyond a pond/water-system candidate zone's own footprint --
 # wider than the production-zone buffer, since this needs to keep a
@@ -255,36 +245,25 @@ MIN_CORRIDOR_LENGTH_METERS = 30.0
 
 # Scoring weights (must sum to 1.0), in the priority order this feature's
 # spec lists: grade consistency first, exclusion-zone avoidance second,
-# length third ("shorter generally preferable, all else equal"), plus two
-# SOFT-preference terms -- PRODUCTION_AVOIDANCE_SCORE_WEIGHT (production
-# zones) and EROSION_AVOIDANCE_SCORE_WEIGHT (erosion-prone soil) -- neither
-# is a hard exclusion here (see module docstring), so avoiding either is
-# instead a scored preference. PRODUCTION_AVOIDANCE_SCORE_WEIGHT keeps the
-# same value (0.15) it already had, matching
-# solar_suitability.PRODUCTION_PROXIMITY_SCORE_WEIGHT for the analogous
-# preference there. EROSION_AVOIDANCE_SCORE_WEIGHT is deliberately smaller
-# (0.10) than the production one: crossing a production zone trades off
-# against a committed alternate LAND USE, while erosion-prone soil is a
-# mitigatable ENGINEERING concern (surfacing, drainage, culverts solve it
-# wherever the road goes) -- a real preference worth scoring, but a lighter
-# one. Both are secondary layout considerations on top of a candidate's
-# real buildability (grade/consistency) and its clearance from the
-# still-hard exclusions (pond, floodplain/hydric), not a substitute for
-# either. The original three weights' relative proportions (grade highest,
-# margin second, length lightest) are preserved, just scaled down
-# (multiplied by 0.75, leaving 0.25 total for the two preference terms) --
-# same technique used when PRODUCTION_AVOIDANCE_SCORE_WEIGHT was first
-# added. CONFIGURABLE.
-GRADE_SCORE_WEIGHT = 0.37
-EXCLUSION_MARGIN_WEIGHT = 0.23
-LENGTH_SCORE_WEIGHT = 0.15
-PRODUCTION_AVOIDANCE_SCORE_WEIGHT = 0.15
-EROSION_AVOIDANCE_SCORE_WEIGHT = 0.10
+# length third ("shorter generally preferable, all else equal"), plus one
+# SOFT-preference term -- PRODUCTION_AVOIDANCE_SCORE_WEIGHT (production
+# zones) -- which is NOT a hard exclusion here (see module docstring), so
+# avoiding it is instead a scored preference. An erosion-prone-soil
+# avoidance term used to sit alongside this one (EROSION_AVOIDANCE_
+# SCORE_WEIGHT, 0.10) but has been removed outright: this pipeline's own
+# KSOP ordering puts Soil at step 8, well below Farm Roads at step 4, so
+# scoring a step-4 feature against step-8 data was itself the bug, not
+# something a smaller weight could fix. The remaining four weights are
+# rescaled proportionally from their prior (pre-erosion-removal) values
+# by dividing by 0.90 (1.0 minus the erosion term's old 0.10 share) --
+# same rescaling technique already used here when
+# PRODUCTION_AVOIDANCE_SCORE_WEIGHT was first added. CONFIGURABLE.
+GRADE_SCORE_WEIGHT = 0.41
+EXCLUSION_MARGIN_WEIGHT = 0.26
+LENGTH_SCORE_WEIGHT = 0.165
+PRODUCTION_AVOIDANCE_SCORE_WEIGHT = 0.165
 
-_WEIGHT_SUM = (
-    GRADE_SCORE_WEIGHT + EXCLUSION_MARGIN_WEIGHT + LENGTH_SCORE_WEIGHT
-    + PRODUCTION_AVOIDANCE_SCORE_WEIGHT + EROSION_AVOIDANCE_SCORE_WEIGHT
-)
+_WEIGHT_SUM = GRADE_SCORE_WEIGHT + EXCLUSION_MARGIN_WEIGHT + LENGTH_SCORE_WEIGHT + PRODUCTION_AVOIDANCE_SCORE_WEIGHT
 assert math.isclose(_WEIGHT_SUM, 1.0, abs_tol=1e-6), f"road corridor scoring weights must sum to 1.0, got {_WEIGHT_SUM}"
 
 # Clearance beyond the mandatory exclusion buffers at which extra margin
@@ -302,16 +281,12 @@ ROAD_CORRIDOR_CONFIDENCE_NOTES_TEMPLATE = (
     "not a civil engineering design. Production zones are NOT excluded here — "
     "a road is a thin linear feature, not a large permanent land claim the way "
     "a pond/dam site is, so crossing production land is a real, valid routing "
-    "option; avoiding one is scored as a PREFERENCE only, not a requirement "
-    "(see properties.crosses_production_zone). {production_crossing_note}"
-    "Erosion-prone soil (SSURGO K-factor) is ALSO not excluded — there's no "
-    "citable K-factor threshold for physical buildability, only water-erosion "
-    "susceptibility, a mitigatable engineering concern rather than a hard "
-    "impossibility; avoiding it is likewise scored as a PREFERENCE only (see "
-    "properties.crosses_erosion_prone_soil). {erosion_crossing_note}"
-    "Pond/water-system candidate zones and floodplain/hydric ground ARE still "
-    "hard-excluded. {connector_note}"
-    "{steep_grade_note}{floodplain_note}{erosion_note}Treat this as a starting point for a site "
+    "option; avoiding one is scored as a PREFERENCE only, not a requirement, "
+    "against the property's own optimized/final production geometry (see "
+    "properties.crosses_production_zone). {production_crossing_note}"
+    "The single selected water-system candidate zone and floodplain/hydric "
+    "ground ARE still hard-excluded. {connector_note}"
+    "{steep_grade_note}{floodplain_note}Treat this as a starting point for a site "
     "visit and real survey, not a construction-ready alignment."
 )
 
@@ -319,17 +294,6 @@ PRODUCTION_CROSSING_NOTE = (
     "This specific candidate DOES cross a production zone — that's intentional/expected under this "
     "model, not a caveat to apologize for; it simply scored lower on the avoidance preference than an "
     "otherwise-comparable non-crossing candidate would have. "
-)
-
-# Analogous to PRODUCTION_CROSSING_NOTE, for the erosion-prone-soil
-# preference -- unlike that one, this specifically calls out the real,
-# concrete mitigation a builder would need (surfacing/culverts/grading),
-# same spirit as STEEP_GRADE_ENGINEERING_NOTE below.
-EROSION_CROSSING_NOTE = (
-    "This specific candidate DOES cross erosion-prone soil (SSURGO K-factor) — real drainage/"
-    "erosion-control engineering (surfacing, culverts, grading) would be needed there; it simply "
-    "scored lower on the avoidance preference than an otherwise-comparable non-crossing candidate "
-    "would have, not disqualified outright. "
 )
 
 # Additive caveat (see STEEP_GRADE_ENGINEERING_NOTE_THRESHOLD_PCT above) —
@@ -624,28 +588,6 @@ def _production_avoidance_score(
     return min(1.0, line_utm.distance(raw_production_union) / reference_meters)
 
 
-def _erosion_avoidance_score(
-    line_utm, erosion_prone_union, reference_meters: float = EROSION_AVOIDANCE_REFERENCE_METERS
-) -> float:
-    """
-    0-1 PREFERENCE score (NOT an exclusion — see module docstring) for how
-    much a corridor avoids erosion-prone soil (SSURGO K-factor): 1.0 if it
-    doesn't cross or come within reference_meters of any erosion-prone
-    soil (or none exists on this property, or the data wasn't reachable --
-    same "treat unknown as clear" convention _production_avoidance_score()
-    uses), 0.0 if it actually crosses/touches it, linear in between. Same
-    shape as _production_avoidance_score() -- an erosion-crossing candidate
-    still gets a real, non-zero composite score from its other factors;
-    this only softens its RANKING relative to an otherwise-comparable
-    non-crossing alternative, it never drops or excludes the candidate.
-    """
-    if erosion_prone_union is None or erosion_prone_union.is_empty:
-        return 1.0
-    if line_utm.intersects(erosion_prone_union):
-        return 0.0
-    return min(1.0, line_utm.distance(erosion_prone_union) / reference_meters)
-
-
 def _corridor_score(
     avg_grade_pct: float,
     grade_stddev_pct: float,
@@ -654,7 +596,6 @@ def _corridor_score(
     longest_length_m: float,
     max_grade_pct: float,
     production_avoidance_score: float,
-    erosion_avoidance_score: float,
 ) -> float:
     grade_score = max(0.0, 1.0 - avg_grade_pct / max_grade_pct)
     consistency_score = max(0.0, 1.0 - grade_stddev_pct / max_grade_pct)
@@ -668,17 +609,15 @@ def _corridor_score(
         + EXCLUSION_MARGIN_WEIGHT * margin_score
         + LENGTH_SCORE_WEIGHT * length_score
         + PRODUCTION_AVOIDANCE_SCORE_WEIGHT * production_avoidance_score
-        + EROSION_AVOIDANCE_SCORE_WEIGHT * erosion_avoidance_score
     )
 
 
 def find_candidate_road_corridors(
     dem: dict,
     production_areas: list[dict],
-    pond_zones: list[dict],
+    selected_water_zone: Optional[dict],
     boundary_polygon_utm: Polygon,
     hydric_floodplain_union=None,
-    erosion_prone_union=None,
     road_union_utm=None,
     road_features_utm: Optional[list[dict]] = None,
     max_grade_pct: float = MAX_ROAD_GRADE_PCT,
@@ -687,22 +626,22 @@ def find_candidate_road_corridors(
 ) -> list[dict]:
     """
     Pure geometric/scoring core — see module docstring for why this takes
-    already-computed inputs (production/pond zones, floodplain/erosion
-    exclusion unions, optional real-road data for anchoring) rather than
-    fetching or delineating anything itself.
+    already-computed inputs (production areas, the single selected water
+    zone, floodplain exclusion union, optional real-road data for
+    anchoring) rather than fetching or delineating anything itself.
 
-    pond_zones is water_candidate_zones.find_candidate_zones()'s own
-    output shape (each entry carrying 'polygon_utm'), still HARD-excluded
-    (buffered). production_areas is production_area.py's/
-    production_suitability.py's own patch shape (each entry carrying
-    'polygon_utm') but is NOT a hard exclusion here — see module
-    docstring's "SOFT preference" section and _production_avoidance_score().
+    selected_water_zone is water_suitability.fetch_and_select_optimal_
+    water_zone()'s own single rank-1 answer (or None if no water zone was
+    identified) -- each entry carrying 'render_fill_polygon_utm' (SAME
+    optimized/final geometry production_areas below uses, not the raw
+    'polygon_utm'), still HARD-excluded (buffered). production_areas is
+    production_area_ceiling.identify_optimized_production_areas()'s own
+    'scored_patches' -- the OPTIMIZED/final, ceiling-trimmed patch shape
+    (each entry carrying 'render_fill_polygon_utm') -- but is NOT a hard
+    exclusion here — see module docstring's "SOFT preference" section and
+    _production_avoidance_score().
     hydric_floodplain_union is a shapely geometry (or None to skip that
     exclusion) already in dem['crs'], still HARD-excluded.
-    erosion_prone_union is ALSO a shapely geometry (or None) already in
-    dem['crs'], but — like production_areas — is NOT a hard exclusion
-    here; see module docstring's "SOFT preference" section and
-    _erosion_avoidance_score().
 
     road_union_utm is a shapely geometry (or None) of existing real,
     NAMED roads only, used for anchoring (see _anchor_to_boundary) —
@@ -738,7 +677,6 @@ def find_candidate_road_corridors(
             'anchor_road_name': Optional[str],       # None if no named road available
             'anchor_road_distance_m': Optional[float],  # None if no named road available
             'crosses_production_zone': bool,
-            'crosses_erosion_prone_soil': bool,
             'points_xyz': [(x, y, elevation_m), ...],
             'geometry_wgs84': GeoJSON LineString,
         }
@@ -750,18 +688,17 @@ def find_candidate_road_corridors(
     # _production_avoidance_score()'s scoring preference and the
     # crosses_production_zone report below, never fed into the exclusion
     # mask that constrains where candidate geometry can be generated from.
-    raw_production_union = unary_union([p["polygon_utm"] for p in production_areas]) if production_areas else None
-
-    # Erosion-prone soil is likewise NOT a hard exclusion here (see module
-    # docstring) -- erosion_prone_union (as passed in, unbuffered) is kept
-    # only for _erosion_avoidance_score()'s scoring preference and the
-    # crosses_erosion_prone_soil report below, never fed into the
-    # exclusion mask.
-    raw_erosion_union = erosion_prone_union
+    # Scored against render_fill_polygon_utm -- the OPTIMIZED/final
+    # production geometry production_area_ceiling.py's own ceiling trim
+    # and clustering already settled on for this property, not the raw
+    # pre-optimization polygon_utm.
+    raw_production_union = (
+        unary_union([p["render_fill_polygon_utm"] for p in production_areas]) if production_areas else None
+    )
 
     pond_union = (
-        unary_union([z["polygon_utm"].buffer(POND_ZONE_EXCLUSION_BUFFER_METERS) for z in pond_zones])
-        if pond_zones
+        selected_water_zone["render_fill_polygon_utm"].buffer(POND_ZONE_EXCLUSION_BUFFER_METERS)
+        if selected_water_zone is not None
         else None
     )
 
@@ -807,8 +744,6 @@ def find_candidate_road_corridors(
         )
         production_avoidance_score = _production_avoidance_score(line, raw_production_union)
         crosses_production_zone = raw_production_union is not None and line.intersects(raw_production_union)
-        erosion_avoidance_score = _erosion_avoidance_score(line, raw_erosion_union)
-        crosses_erosion_prone_soil = raw_erosion_union is not None and line.intersects(raw_erosion_union)
 
         scored.append(
             {
@@ -821,8 +756,6 @@ def find_candidate_road_corridors(
                 "margin_m": margin_m,
                 "production_avoidance_score": production_avoidance_score,
                 "crosses_production_zone": crosses_production_zone,
-                "erosion_avoidance_score": erosion_avoidance_score,
-                "crosses_erosion_prone_soil": crosses_erosion_prone_soil,
                 "anchor_status": anchor_status,
                 "anchor_road_name": anchor_road_name,
                 "anchor_road_distance_m": anchor_road_distance_m,
@@ -842,7 +775,6 @@ def find_candidate_road_corridors(
             longest_length_m,
             max_grade_pct,
             candidate["production_avoidance_score"],
-            candidate["erosion_avoidance_score"],
         )
 
     scored.sort(key=lambda c: -c["suitability_score"])
@@ -879,10 +811,8 @@ def _confidence_notes_for_candidate(
     anchor_status: AnchorStatus,
     anchor_road_name: Optional[str],
     floodplain_data_is_fallback: bool,
-    erosion_data_unavailable: bool,
     avg_grade_pct: float,
     crosses_production_zone: bool,
-    crosses_erosion_prone_soil: bool,
 ) -> str:
     if anchor_status == "connected_to_named_road":
         if anchor_road_name:
@@ -904,7 +834,6 @@ def _confidence_notes_for_candidate(
         )
 
     production_crossing_note = PRODUCTION_CROSSING_NOTE if crosses_production_zone else ""
-    erosion_crossing_note = EROSION_CROSSING_NOTE if crosses_erosion_prone_soil else ""
 
     steep_grade_note = (
         STEEP_GRADE_ENGINEERING_NOTE.format(
@@ -919,26 +848,17 @@ def _confidence_notes_for_candidate(
         if floodplain_data_is_fallback
         else ""
     )
-    erosion_note = (
-        "Erosion-prone soil data (SSURGO K-factor) was not available for this run, so the "
-        "erosion-avoidance preference could not be scored (treated as fully clear). "
-        if erosion_data_unavailable
-        else ""
-    )
     return ROAD_CORRIDOR_CONFIDENCE_NOTES_TEMPLATE.format(
         connector_note=connector_note,
         production_crossing_note=production_crossing_note,
-        erosion_crossing_note=erosion_crossing_note,
         steep_grade_note=steep_grade_note,
         floodplain_note=floodplain_note,
-        erosion_note=erosion_note,
     )
 
 
 def corridors_to_geojson(
     candidates: list[dict],
     floodplain_data_is_fallback: bool = False,
-    erosion_data_unavailable: bool = False,
 ) -> dict:
     """Wraps find_candidate_road_corridors() output as the schema-
     conformant GeoJSON FeatureCollection this feature delivers
@@ -971,10 +891,8 @@ def corridors_to_geojson(
                     candidate["anchor_status"],
                     candidate.get("anchor_road_name"),
                     floodplain_data_is_fallback,
-                    erosion_data_unavailable,
                     candidate["avg_grade_pct"],
                     candidate["crosses_production_zone"],
-                    candidate["crosses_erosion_prone_soil"],
                 ),
                 extra_properties={
                     "rank": candidate["rank"],
@@ -986,7 +904,6 @@ def corridors_to_geojson(
                     "anchor_road_name": candidate.get("anchor_road_name"),
                     "anchor_road_distance_ft": anchor_road_distance_ft,
                     "crosses_production_zone": candidate["crosses_production_zone"],
-                    "crosses_erosion_prone_soil": candidate["crosses_erosion_prone_soil"],
                     "constraints_satisfied": constraints_satisfied,
                 },
             )
@@ -1008,7 +925,8 @@ def _log_fetch_failure(label: str, exc: Exception) -> None:
     etc.) is just as clearly a real bug, not network flakiness. Print a
     distinct message for each case so this doesn't look like ordinary
     network unavailability in the logs — this is exactly how
-    get_erosion_factor_for_polygon()'s chorizon/component schema bug went
+    soil_data.get_erosion_factor_for_polygon()'s chorizon/component schema
+    bug (from this module's now-removed erosion-avoidance preference) went
     unnoticed for a while: it degraded identically to "SDA is slow today."
     """
     if isinstance(exc, requests.exceptions.RequestException):
@@ -1127,30 +1045,6 @@ def _fetch_floodplain_hydric_union(
     return (unary_union(fallback_pieces) if fallback_pieces else None), True
 
 
-def _fetch_erosion_prone_union(boundary_coordinates, dem) -> tuple[Optional[object], bool]:
-    """SSURGO K-factor-based erosion-prone soil union. Returns
-    (union_or_None, data_unavailable) — data_unavailable is True only if
-    the fetch itself failed, not if it succeeded and simply found no
-    erosion-prone soil in the area."""
-    try:
-        wkt_polygon = coordinates_to_wkt_polygon(boundary_coordinates)
-        erosion_rows = get_erosion_factor_for_polygon(wkt_polygon)
-        erosion_prone_mukeys = {row["mukey"] for row in erosion_rows if is_erosion_prone(row.get("kwfact"))}
-        if not erosion_prone_mukeys:
-            return None, False
-
-        geometries_by_mukey = get_soil_geometries_for_polygon(wkt_polygon)
-        pieces = [
-            shape(transform_geom("EPSG:4326", dem["crs"], geometries_by_mukey[mukey]))
-            for mukey in erosion_prone_mukeys
-            if mukey in geometries_by_mukey
-        ]
-        return (unary_union(pieces) if pieces else None), False
-    except Exception as e:
-        _log_fetch_failure("Erosion-prone soil (SSURGO K-factor)", e)
-        return None, True
-
-
 def _fetch_existing_road_features_utm(boundary_coordinates, dem) -> Optional[list[dict]]:
     """Real existing-road geometry WITH names (each {'name': str,
     'line_utm': LineString}), for anchor-road reporting (see
@@ -1199,8 +1093,8 @@ def identify_road_corridor_candidates(
 ) -> dict:
     """
     Full pipeline entry point: fetches/derives everything
-    find_candidate_road_corridors() needs (production zones, pond zones,
-    floodplain/hydric exclusion, erosion-prone soil exclusion, existing
+    find_candidate_road_corridors() needs (optimized production areas,
+    the single selected water zone, floodplain/hydric exclusion, existing
     roads for anchoring) and returns the "suggested_road_corridor"
     GeoJSON FeatureCollection. Every real-data fetch degrades
     independently and gracefully, same pattern as
@@ -1226,15 +1120,33 @@ def identify_road_corridor_candidates(
     )
     boundary_polygon_utm = Polygon(zip(boundary_xs, boundary_ys))
 
-    production_areas = identify_production_areas(dem, boundary_polygon_utm)
-    valleys = delineate_valleys(dem)  # reused for pond zones AND the floodplain fallback below
+    # Optimized/final production geometry (production_area_ceiling.py's
+    # own ceiling-trimmed, clustered/gated result) -- NOT production_area.
+    # identify_production_areas()'s raw pre-optimization patches. Each
+    # patch is expected to carry 'render_fill_polygon_utm' (production_
+    # area.py's own render-only convex-hull field), the same field
+    # find_candidate_road_corridors() scores production avoidance against
+    # below; fail loudly here rather than let a KeyError surface deep
+    # inside that scoring code if this pipeline's own patch shape ever
+    # changes.
+    production_areas = identify_optimized_production_areas(boundary_coordinates, dem=dem)["scored_patches"]
+    if production_areas and "render_fill_polygon_utm" not in production_areas[0]:
+        raise RuntimeError(
+            "identify_optimized_production_areas()'s scored_patches no longer carry "
+            "'render_fill_polygon_utm' -- road_corridors.py's production-avoidance scoring "
+            "depends on this field; update find_candidate_road_corridors() to match the new shape."
+        )
 
-    pond_zones = find_pond_zones(dem, production_areas, boundary_polygon_utm)
+    valleys = delineate_valleys(dem)  # reused for the floodplain fallback below
+
+    # The single water zone this property's OWN water-suitability scoring
+    # actually selected (rank 1), not every unscored candidate zone
+    # water_candidate_zones.py generates -- see module docstring.
+    selected_water_zone = fetch_and_select_optimal_water_zone(boundary_coordinates, dem=dem)
 
     hydric_floodplain_union, floodplain_data_is_fallback = _fetch_floodplain_hydric_union(
         boundary_coordinates, dem, valleys, boundary_polygon_utm
     )
-    erosion_prone_union, erosion_data_unavailable = _fetch_erosion_prone_union(boundary_coordinates, dem)
 
     # One fetch (not two): _fetch_existing_road_features_utm() carries
     # both the per-feature list (for anchor_road_name reporting) and
@@ -1247,10 +1159,9 @@ def identify_road_corridor_candidates(
     candidates = find_candidate_road_corridors(
         dem,
         production_areas,
-        pond_zones,
+        selected_water_zone,
         boundary_polygon_utm,
         hydric_floodplain_union=hydric_floodplain_union,
-        erosion_prone_union=erosion_prone_union,
         road_union_utm=road_union_utm,
         road_features_utm=road_features_utm,
         **corridor_kwargs,
@@ -1260,7 +1171,6 @@ def identify_road_corridor_candidates(
         "zones_geojson": corridors_to_geojson(
             candidates,
             floodplain_data_is_fallback=floodplain_data_is_fallback,
-            erosion_data_unavailable=erosion_data_unavailable,
         ),
         "all_scored_candidates": candidates,
         "selected_road_corridor": select_optimal_road_corridor(candidates),
@@ -1301,10 +1211,9 @@ def summarize_road_corridor_candidates(result: dict) -> str:
         else:
             anchor = " [anchored to a real road]"
         crossing = " [crosses production zone]" if props.get("crosses_production_zone") else ""
-        erosion_crossing = " [crosses erosion-prone soil]" if props.get("crosses_erosion_prone_soil") else ""
         lines.append(
             f"  - Rank {props['rank']} ({props['corridor_type']}): score {props['suitability_score']}/100, "
-            f"{props['avg_grade_pct']}% avg grade, {props['length_ft']}ft{anchor}{crossing}{erosion_crossing}"
+            f"{props['avg_grade_pct']}% avg grade, {props['length_ft']}ft{anchor}{crossing}"
         )
     return "\n".join(lines)
 

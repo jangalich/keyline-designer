@@ -3,11 +3,14 @@ test_road_corridors.py
 
 Offline (no-network) checks for road_corridors.py's constraint-stack,
 corridor-generation, and ranking logic — hand-built synthetic DEMs and
-hand-built production/pond zones (same shapes
-find_candidate_road_corridors() actually consumes), not a real DEM/NHD/
-SSURGO/road fetch. Mirrors test_water_candidate_zones.py's and
-test_solar_suitability.py's "pure logic, independent of real data
-fetches" approach.
+hand-built production areas/selected water zone (same shapes
+find_candidate_road_corridors() actually consumes: production areas carry
+'render_fill_polygon_utm', the OPTIMIZED/final production geometry
+production_area_ceiling.py produces, and the water zone is the single
+SELECTED zone water_suitability.py's own scoring picks, not a list of
+unscored candidates), not a real DEM/NHD/SSURGO/road fetch. Mirrors
+test_water_candidate_zones.py's and test_solar_suitability.py's "pure
+logic, independent of real data fetches" approach.
 """
 
 import numpy as np
@@ -17,7 +20,6 @@ from feature_schema import validate_feature_collection
 from road_corridors import (
     MAX_ROAD_GRADE_PCT,
     STEEP_GRADE_ENGINEERING_NOTE_THRESHOLD_PCT,
-    _erosion_avoidance_score,
     _production_avoidance_score,
     corridors_to_geojson,
     find_candidate_road_corridors,
@@ -55,7 +57,7 @@ def _diagonal_ridge_dem(rows=30, cols=30, cross_slope=0.3, downhill_per_row=0.2,
 dem = _flat_hillside_dem()
 boundary = box(500000, 4500000, 500200, 4500200)
 
-candidates = find_candidate_road_corridors(dem, [], [], boundary, max_candidates=50)
+candidates = find_candidate_road_corridors(dem, [], None, boundary, max_candidates=50)
 assert candidates, "expected at least one contour-band candidate on a uniform hillside"
 assert all(c["corridor_type"] == "contour" for c in candidates), (
     "a uniform hillside with no ridge feature should only produce contour-band candidates"
@@ -83,11 +85,15 @@ crossing_test_dem = {
 }
 crossing_test_boundary = box(500000, 4500000, 500200, 4500200)
 production_areas = [
-    {"id": 0, "representative_elevation_m": 100.0, "polygon_utm": box(500000, 4500000, 500100, 4500200)}
+    {
+        "id": 0,
+        "representative_elevation_m": 100.0,
+        "render_fill_polygon_utm": box(500000, 4500000, 500100, 4500200),
+    }
 ]
 
 crossing_test_candidates = find_candidate_road_corridors(
-    crossing_test_dem, production_areas, [], crossing_test_boundary, max_candidates=50
+    crossing_test_dem, production_areas, None, crossing_test_boundary, max_candidates=50
 )
 crossing = [c for c in crossing_test_candidates if c["crosses_production_zone"]]
 noncrossing = [c for c in crossing_test_candidates if not c["crosses_production_zone"]]
@@ -122,64 +128,6 @@ print("_production_avoidance_score scores 1.0 when clear/no production zones exi
       "real intermediate value when nearby but clear.")
 
 
-# --- erosion-prone soil is a PREFERENCE too, not an exclusion: a candidate MAY cross it ---
-#
-# Same disjoint-elevation-range trick as the production-zone check above,
-# so contour-band slicing keeps the two halves as separate candidates:
-# west sits inside erosion-prone soil, east doesn't.
-erosion_test_array = np.zeros((40, 40), dtype=np.float32)
-for row in range(40):
-    for col in range(40):
-        if col < 20:
-            erosion_test_array[row, col] = 100.0 - row * 0.3  # west: inside erosion-prone soil
-        else:
-            erosion_test_array[row, col] = 50.0 - row * 0.3  # east: disjoint elevation range, outside it
-erosion_test_dem = {
-    "array": erosion_test_array, "resolution_meters": RESOLUTION,
-    "origin_x": 500000.0, "origin_y": 4500200.0, "crs": CRS,
-}
-erosion_test_boundary = box(500000, 4500000, 500200, 4500200)
-erosion_prone_union = box(500000, 4500000, 500100, 4500200)
-
-erosion_test_candidates = find_candidate_road_corridors(
-    erosion_test_dem, [], [], erosion_test_boundary, erosion_prone_union=erosion_prone_union, max_candidates=50
-)
-erosion_crossing = [c for c in erosion_test_candidates if c["crosses_erosion_prone_soil"]]
-erosion_noncrossing = [c for c in erosion_test_candidates if not c["crosses_erosion_prone_soil"]]
-assert erosion_crossing, (
-    "expected at least one candidate that actually crosses the erosion-prone soil -- it must NOT be a hard "
-    "exclusion anymore"
-)
-assert erosion_noncrossing, "expected at least one candidate clear of the erosion-prone soil, for comparison"
-assert max(c["suitability_score"] for c in erosion_noncrossing) > max(c["suitability_score"] for c in erosion_crossing), (
-    "all else being comparable (same grade/shape), a candidate clear of erosion-prone soil should score higher "
-    "than a crossing one -- this is the erosion-avoidance PREFERENCE, not an exclusion"
-)
-print(
-    f"Erosion-prone soil is a preference, not an exclusion: {len(erosion_crossing)} candidate(s) legitimately "
-    f"cross it (max score {max(c['suitability_score'] for c in erosion_crossing):.3f}), while comparable "
-    f"clear candidates score higher (max score {max(c['suitability_score'] for c in erosion_noncrossing):.3f})."
-)
-
-erosion_geojson = corridors_to_geojson(erosion_crossing[:1])
-assert erosion_geojson["features"][0]["properties"]["crosses_erosion_prone_soil"] is True
-assert "real drainage/erosion-control engineering" in erosion_geojson["features"][0]["properties"]["confidence_notes"], (
-    "a candidate crossing erosion-prone soil must carry the drainage/erosion-control engineering-consideration note"
-)
-print("crosses_erosion_prone_soil is correctly reported, with the drainage/erosion-control engineering note "
-      "present for a crossing candidate.")
-
-
-# --- _erosion_avoidance_score: 1.0 clear of erosion-prone soil, 0.0 crossing, linear in between ---
-
-assert _erosion_avoidance_score(far_line, None) == 1.0, "no erosion-prone soil at all should score the maximum preference"
-assert _erosion_avoidance_score(crossing_line, production_polygon) == 0.0, "a crossing line should score zero preference"
-erosion_mid_score = _erosion_avoidance_score(clear_line, production_polygon)
-assert 0.0 < erosion_mid_score <= 1.0
-print("_erosion_avoidance_score scores 1.0 when clear/no erosion-prone soil exists, 0.0 when crossing, and a "
-      "real intermediate value when nearby but clear.")
-
-
 # --- ranking is score-driven, not hardcoded to "always rank left before right" ---
 
 ranks = [c["rank"] for c in candidates]
@@ -209,7 +157,7 @@ combined_dem = {
 }
 combined_boundary = box(500000, 4500000, 500300, 4500150)
 
-combined_candidates = find_candidate_road_corridors(combined_dem, [], [], combined_boundary, max_candidates=50)
+combined_candidates = find_candidate_road_corridors(combined_dem, [], None, combined_boundary, max_candidates=50)
 combined_types = {c["corridor_type"] for c in combined_candidates}
 assert combined_types == {"contour", "ridge"}, (
     f"expected both corridor types on terrain supporting both, got only {combined_types}"
@@ -221,23 +169,26 @@ assert combined_scores == sorted(combined_scores, reverse=True), (
 print(f"Both corridor types generated on mixed terrain ({len(combined_candidates)} total), ranked together by score.")
 
 
-# --- pond zone exclusion: a candidate must not cross a (buffered) pond/water zone ---
-
-pond_zones = [{"valley_id": 0, "polygon_utm": box(500080, 4500000, 500130, 4500200)}]
-pond_candidates = find_candidate_road_corridors(dem, [], pond_zones, boundary, max_candidates=50)
+# --- selected water zone exclusion: a candidate must not cross the (buffered) SELECTED water zone ---
+#
+# selected_water_zone is water_suitability.fetch_and_select_optimal_water_zone()'s
+# own single rank-1 answer shape -- carries 'render_fill_polygon_utm', same
+# optimized/final-geometry field production_areas above uses, not 'polygon_utm'.
+selected_water_zone = {"id": 0, "render_fill_polygon_utm": box(500080, 4500000, 500130, 4500200)}
+pond_candidates = find_candidate_road_corridors(dem, [], selected_water_zone, boundary, max_candidates=50)
 pond_exclusion = box(500080, 4500000, 500130, 4500200).buffer(25)  # matches the module's own pond buffer
 for candidate in pond_candidates:
     assert not candidate["line_utm"].intersects(pond_exclusion), (
-        "no candidate should cross the (buffered) pond/water-system zone"
+        "no candidate should cross the (buffered) selected water-system zone"
     )
-print("Pond/water-system zone exclusion correctly keeps candidates clear of the buffered zone.")
+print("Selected water-system zone exclusion correctly keeps candidates clear of the buffered zone.")
 
 
 # --- anchoring: real named road data connects the corridor; no road data omits the connector entirely ---
 
 # a real road running along the west edge of the boundary
 road_union = LineString([(500000, 4500000), (500000, 4500200)])
-anchored_candidates = find_candidate_road_corridors(dem, [], [], boundary, road_union_utm=road_union, max_candidates=50)
+anchored_candidates = find_candidate_road_corridors(dem, [], None, boundary, road_union_utm=road_union, max_candidates=50)
 assert anchored_candidates, "expected candidates for the anchoring check"
 assert all(c["anchor_status"] == "connected_to_named_road" for c in anchored_candidates), (
     "with real road data available, every candidate should report anchor_status='connected_to_named_road'"
@@ -247,7 +198,7 @@ assert all(c["anchor_road_distance_m"] is not None for c in anchored_candidates)
 )
 print("With real road data available, connection points are anchored (connected_to_named_road).")
 
-unanchored_candidates = find_candidate_road_corridors(dem, [], [], boundary, road_union_utm=None, max_candidates=50)
+unanchored_candidates = find_candidate_road_corridors(dem, [], None, boundary, road_union_utm=None, max_candidates=50)
 assert all(c["anchor_status"] == "no_named_road_available" for c in unanchored_candidates), (
     "with no road data available, every candidate should report anchor_status='no_named_road_available'"
 )
@@ -264,7 +215,7 @@ print(
 
 named_road_features = [{"name": "N Montour Rd", "line_utm": road_union}]
 named_anchor_candidates = find_candidate_road_corridors(
-    dem, [], [], boundary, road_union_utm=road_union, road_features_utm=named_road_features, max_candidates=50
+    dem, [], None, boundary, road_union_utm=road_union, road_features_utm=named_road_features, max_candidates=50
 )
 assert named_anchor_candidates, "expected candidates for the named-anchor check"
 assert all(c["anchor_road_name"] == "N Montour Rd" for c in named_anchor_candidates), (
@@ -283,7 +234,7 @@ print("With road_features_utm available, anchored candidates report the specific
 
 # Without road_features_utm (only the plain union), anchoring still works but the name is generically omitted.
 unnamed_anchor_candidates = find_candidate_road_corridors(
-    dem, [], [], boundary, road_union_utm=road_union, road_features_utm=None, max_candidates=50
+    dem, [], None, boundary, road_union_utm=road_union, road_features_utm=None, max_candidates=50
 )
 assert all(c["anchor_status"] == "connected_to_named_road" for c in unnamed_anchor_candidates)
 assert all(c["anchor_road_name"] is None for c in unnamed_anchor_candidates), (
@@ -296,7 +247,7 @@ print("Without road_features_utm, anchoring still works via road_union_utm alone
 
 # --- grade threshold is actually applied ---
 
-strict_candidates = find_candidate_road_corridors(dem, [], [], boundary, max_grade_pct=0.0001)
+strict_candidates = find_candidate_road_corridors(dem, [], None, boundary, max_grade_pct=0.0001)
 assert strict_candidates == [], "an effectively-zero grade allowance should leave no qualifying candidates"
 print(f"Grade threshold is enforced (default {MAX_ROAD_GRADE_PCT}%; near-zero allowance yields no candidates).")
 
@@ -310,7 +261,7 @@ print(f"Grade threshold is enforced (default {MAX_ROAD_GRADE_PCT}%; near-zero al
 # flank grade, drives avg_grade_pct here).
 steep_ridge_dem = _diagonal_ridge_dem(rows=30, cols=30, cross_slope=1.2, downhill_per_row=0.75)
 steep_boundary = box(500000, 4500150 - 30 * 5.0, 500000 + 30 * 5.0, 4500150)
-steep_candidates = find_candidate_road_corridors(steep_ridge_dem, [], [], steep_boundary, max_candidates=50)
+steep_candidates = find_candidate_road_corridors(steep_ridge_dem, [], None, steep_boundary, max_candidates=50)
 steep_geojson = corridors_to_geojson(steep_candidates)
 steep_features = [f for f in steep_geojson["features"] if f["properties"]["avg_grade_pct"] > STEEP_GRADE_ENGINEERING_NOTE_THRESHOLD_PCT]
 assert steep_features, (
@@ -332,7 +283,7 @@ print(
 )
 
 # A gentle contour band (well below the threshold) must NOT carry the note.
-gentle_candidates = find_candidate_road_corridors(dem, [], [], boundary, max_candidates=50)
+gentle_candidates = find_candidate_road_corridors(dem, [], None, boundary, max_candidates=50)
 gentle_geojson = corridors_to_geojson(gentle_candidates)
 for feature in gentle_geojson["features"]:
     assert feature["properties"]["avg_grade_pct"] <= STEEP_GRADE_ENGINEERING_NOTE_THRESHOLD_PCT
@@ -344,38 +295,39 @@ print(f"Candidates at or below {STEEP_GRADE_ENGINEERING_NOTE_THRESHOLD_PCT}% gra
 
 # --- output: schema-valid FeatureCollection on the required layer, with required properties ---
 
-geojson = corridors_to_geojson(candidates, floodplain_data_is_fallback=True, erosion_data_unavailable=True)
+geojson = corridors_to_geojson(candidates, floodplain_data_is_fallback=True)
 validate_feature_collection(geojson)
 required_props = {
     "corridor_type", "avg_grade_pct", "length_ft", "anchor_status",
     "anchor_road_name", "anchor_road_distance_ft", "crosses_production_zone",
-    "crosses_erosion_prone_soil", "constraints_satisfied",
+    "constraints_satisfied",
 }
 for feature in geojson["features"]:
     assert feature["properties"]["layer"] == "suggested_road_corridor"
     assert required_props.issubset(feature["properties"].keys()), (
         f"missing required properties: {required_props - feature['properties'].keys()}"
     )
+    assert "crosses_erosion_prone_soil" not in feature["properties"], (
+        "the erosion-prone-soil preference has been removed outright (KSOP: Soil is step 8, below "
+        "Farm Roads at step 4) -- this property must no longer be reported at all"
+    )
     assert "outside_production_zone" not in feature["properties"]["constraints_satisfied"], (
         "production zones are no longer a hard exclusion -- this must not appear as a satisfied constraint"
-    )
-    assert "erosion_prone_soil_excluded" not in feature["properties"]["constraints_satisfied"], (
-        "erosion-prone soil is no longer a hard exclusion -- this must not appear as a satisfied constraint"
     )
     assert feature["geometry"]["type"] == "LineString"
     notes = feature["properties"]["confidence_notes"].lower()
     assert "topographic suggestion" in notes and "not a surveyed" in notes
     assert "elevation fallback" in notes or "fallback" in notes, "floodplain fallback should be flagged in confidence_notes"
-    assert "erosion-prone soil data" in notes, "erosion data unavailability should be flagged in confidence_notes"
+    assert "erosion" not in notes, (
+        "the erosion-avoidance preference has been removed outright -- confidence_notes must no longer "
+        "mention erosion at all"
+    )
     assert "preference" in notes.lower() and "production zone" in notes.lower(), (
         "confidence_notes must plainly explain the production-zone preference (not exclusion) model"
     )
-    assert "erosion-prone soil" in notes and "preference" in notes, (
-        "confidence_notes must plainly explain the erosion-prone-soil preference (not exclusion) model too"
-    )
 print("corridors_to_geojson output is schema-valid, layer='suggested_road_corridor', with required properties "
-      "(including the new crosses_erosion_prone_soil), no stale 'outside_production_zone'/"
-      "'erosion_prone_soil_excluded' constraints, and confidence_notes explaining both preference models.")
+      "(crosses_erosion_prone_soil correctly absent), no stale 'outside_production_zone' constraint, and "
+      "confidence_notes explaining the production-zone preference model with no erosion mention at all.")
 
 
 # --- regression: corridor candidates stay on-parcel, not drawn from the DEM's buffered margin ---
@@ -402,7 +354,7 @@ buffered_dem = {
 # on every side -- the DEM covers ground the parcel itself doesn't.
 parcel_boundary = box(500050, 4500050, 500200, 4500200)
 
-buffered_candidates = find_candidate_road_corridors(buffered_dem, [], [], parcel_boundary, max_candidates=50)
+buffered_candidates = find_candidate_road_corridors(buffered_dem, [], None, parcel_boundary, max_candidates=50)
 assert buffered_candidates, "expected at least one contour-band candidate on this uniform, buffered hillside"
 
 for candidate in buffered_candidates:

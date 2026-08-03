@@ -65,15 +65,12 @@ parcel floodplain risk on a differently-shaped property isn't clipped
 away just because its own buffer stroke doesn't quite reach the
 boundary).
 
-Also directly documents (and would catch a regression of) the secondary
-finding from the bug 1 report: _fetch_erosion_prone_union() looked
-suspicious by the same size-comparison test (13.17 acres on the same
-13.23-acre parcel) but is NOT buggy -- it exclusively sources geometry
-from get_soil_geometries_for_polygon(), which is mathematically bounded
-by the parcel's own boundary (STIntersection clipping server-side), so it
-can never exceed the parcel's own area. That's asserted directly here
-too, against a mocked soil union that (correctly) never exceeds the
-parcel.
+(This file used to also carry a secondary check confirming the module's
+now-removed erosion-prone-soil fetch, _fetch_erosion_prone_union(), was
+NOT subject to the same over-broad-union bug. That fetch -- and the
+erosion-avoidance preference it fed -- has been removed outright, not
+merely relocated; see road_corridors.py's own module docstring for why.
+The floodplain/hydric regression checks below are unaffected.)
 """
 
 from unittest.mock import patch
@@ -321,33 +318,5 @@ bug3_union_acres = bug3_union.area / SQUARE_METERS_PER_ACRE
 print(f"Post-buffer relevance clip: final union is {bug3_union_acres:.2f} acres, correctly excludes the "
       f"distant stream (>{rc.FLOODPLAIN_FINAL_RELEVANCE_BUFFER_METERS:.0f}m away, mirroring the real Montour "
       f"Run/N Montour Rd spillover) while keeping the near stream's genuine on-parcel-adjacent floodplain risk.")
-
-
-# --- secondary check: _fetch_erosion_prone_union() is NOT subject to the same bug ---
-#
-# It exclusively sources geometry from get_soil_geometries_for_polygon(),
-# which clips server-side (STIntersection) against the parcel's own
-# boundary -- so, unlike the NHD piece above, its result is mathematically
-# bounded by the parcel's own area no matter what SDA returns for
-# "geometries near this mukey". A large-but-plausible result (like the real
-# 13.17-of-13.23-acre live finding) is expected here, not a symptom of the
-# same bug -- this is confirmed by construction, not by re-testing SDA's
-# query shape (that's already covered by test_soil_geometry_scope.py).
-import inspect
-
-erosion_source = inspect.getsource(rc._fetch_erosion_prone_union)
-assert "get_soil_geometries_for_polygon" in erosion_source, (
-    "expected _fetch_erosion_prone_union to source geometry exclusively from "
-    "get_soil_geometries_for_polygon() (parcel-bounded via STIntersection) -- "
-    "if this changed, re-check whether it can now return over-broad geometry too"
-)
-assert "get_water_features_for_boundary" not in erosion_source, (
-    "_fetch_erosion_prone_union should not touch the un-clipped NHD fetch path -- "
-    "if it does, it needs the same context-region clipping as the floodplain/hydric union"
-)
-print("Confirmed by source inspection: _fetch_erosion_prone_union() exclusively sources geometry from "
-      "the parcel-bounded get_soil_geometries_for_polygon() (STIntersection-clipped), so it cannot "
-      "exceed the parcel's own area -- its real 13.17-of-13.23-acre live finding is a plausible result, "
-      "not the same bug as the NHD/floodplain union above.")
 
 print("\nAll floodplain union scope checks passed.")

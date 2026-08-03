@@ -2,20 +2,44 @@
 test_road_corridors_pipeline.py
 
 End-to-end offline check that identify_road_corridor_candidates()'s
-wiring (DEM -> production zones -> pond zones -> floodplain/erosion/road
-fetches -> constraint stack -> ranked GeoJSON) fits together, using a
-hand-built synthetic DEM passed via `dem=` (same approach as
-test_water_system_candidate_pipeline.py / test_solar_suitability_pipeline.py).
+wiring (DEM -> optimized production areas -> the single selected water
+zone -> floodplain/road fetches -> constraint stack -> ranked GeoJSON)
+fits together, using a hand-built synthetic DEM passed via `dem=` (same
+approach as test_water_system_candidate_pipeline.py /
+test_solar_suitability_pipeline.py).
+
+production_areas now comes from production_area_ceiling.identify_
+optimized_production_areas() (the OPTIMIZED/final, ceiling-trimmed patch
+shape, scored against render_fill_polygon_utm) rather than production_
+area.identify_production_areas()'s raw pre-optimization patches, and the
+water-zone hard exclusion now comes from water_suitability.fetch_and_
+select_optimal_water_zone() -- the single rank-1 SELECTED zone -- rather
+than every unscored candidate zone water_candidate_zones.py generates.
+The erosion-prone-soil preference this module used to carry has been
+removed outright (KSOP: Soil is step 8, below Farm Roads at step 4), so
+this test no longer exercises or mocks anything erosion-related.
+
+Both the production-area and water-zone pipelines share production_area.
+py's mandatory woody-vegetation (canopy) gate -- a real network fetch
+this sandbox can't reach, and one that deliberately does NOT degrade
+gracefully (see production_area.identify_production_areas()'s own
+docstring), so it's mocked here with a synthetic "no trees anywhere"
+canopy result, same convention test_production_area_ceiling.py /
+test_water_suitability.py already use. The disqualifying-soil fetch (used
+internally by both production_area.py and production_area_ceiling.py) is
+ALSO mocked here purely to keep this "offline" test fast and deterministic
+rather than depending on how quickly a given environment's proxy rejects
+the call -- it already degrades gracefully on its own if left unmocked.
 
 The NHD, SSURGO, and farm-roads fetches inside
-identify_road_corridor_candidates() are real network calls this sandbox
+identify_road_corridor_candidates() (and inside water_suitability.py's
+own per-zone soil/stream scoring) are real network calls this sandbox
 can't reach — by design, each is wrapped in its own try/except and
 degrades gracefully (no NHD/SSURGO data -> floodplain exclusion falls
-back to buffered valley lines, flagged in confidence_notes; no erosion
-data -> that exclusion is skipped, flagged; no road data -> no connector
-segment is added at all, anchor_status="no_named_road_available",
-flagged per-candidate). This test doubles as a live check of that whole
-degradation path.
+back to buffered valley lines, flagged in confidence_notes; no road data
+-> no connector segment is added at all, anchor_status=
+"no_named_road_available", flagged per-candidate). This test doubles as a
+live check of that whole degradation path.
 """
 
 from unittest.mock import patch as mock_patch
@@ -24,9 +48,21 @@ import numpy as np
 from rasterio.warp import transform as warp_transform
 
 import production_area
+import production_area_ceiling
 from dem_data import _utm_epsg_for_lonlat
 from feature_schema import validate_feature_collection
 from road_corridors import identify_road_corridor_candidates
+
+
+def _fake_clean_canopy(boundary_coordinates, dem):
+    return {
+        "array": np.full(dem["array"].shape, 1.0, dtype=np.float32),  # below threshold everywhere -- no trees
+        "resolution_meters": dem["resolution_meters"],
+        "origin_x": dem["origin_x"],
+        "origin_y": dem["origin_y"],
+        "crs": dem["crs"],
+        "source_item_id": "offline-test-stub",
+    }
 
 CENTER_LON, CENTER_LAT = -79.98, 40.64
 EPSG = _utm_epsg_for_lonlat(CENTER_LON, CENTER_LAT)
@@ -70,14 +106,19 @@ synthetic_dem = {
     "crs": DST_CRS,
 }
 
-# identify_road_corridor_candidates() calls production_area.identify_production_areas()
-# internally (unchanged wiring), which -- post-consolidation -- now does its own
-# disqualifying-soil fetch by default (check_soil=True), gracefully degrading on
-# failure same as every other optional network layer already exercised below. Mocked
-# here (rather than left to the sandbox's own network policy, unlike the other
-# fetches below) purely to keep this "offline" pipeline test fast and deterministic
-# instead of depending on how quickly a given environment's proxy rejects the call.
-with mock_patch.object(production_area, "_fetch_disqualifying_soil_union", return_value=None):
+# identify_road_corridor_candidates() now calls production_area_ceiling.
+# identify_optimized_production_areas() and water_suitability.fetch_and_
+# select_optimal_water_zone() -- both of which, via production_area.py's
+# shared helpers, do their own disqualifying-soil fetch (gracefully
+# degrading on failure) and MANDATORY canopy fetch (hard-fails on failure,
+# see this file's own docstring). The soil fetch is mocked here purely to
+# keep this "offline" pipeline test fast and deterministic rather than
+# depending on how quickly a given environment's proxy rejects the call;
+# the canopy fetch MUST be mocked, since an unreachable network would
+# otherwise raise instead of degrading.
+with mock_patch.object(production_area, "_fetch_disqualifying_soil_union", return_value=None), \
+     mock_patch.object(production_area_ceiling, "_fetch_disqualifying_soil_union", return_value=None), \
+     mock_patch.object(production_area, "get_canopy_height_for_boundary", _fake_clean_canopy):
     result = identify_road_corridor_candidates(boundary_coordinates, dem=synthetic_dem)
 
 assert "zones_geojson" in result
