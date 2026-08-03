@@ -2,7 +2,7 @@
 test_road_corridors.py
 
 Offline (no-network) checks for road_corridors.py's constraint-stack,
-anchor-to-farthest-point routing, and ranking logic — hand-built synthetic
+fan-based anchor-driven routing, and ranking logic — hand-built synthetic
 DEMs and hand-built production areas/selected water zone (same shapes
 find_road_routes() actually consumes: production areas carry
 'render_fill_polygon_utm', the OPTIMIZED/final production geometry
@@ -12,16 +12,24 @@ unscored candidates), not a real DEM/NHD/SSURGO fetch. Mirrors
 test_water_candidate_zones.py's and test_solar_suitability.py's "pure
 logic, independent of real data fetches" approach.
 
-Route generation is now anchor-driven (road_cost_path.py's cost raster +
-k_shortest_paths(), routed from a single given anchor point to the
-farthest eligible point on the property) — see road_corridors.py's own
-module docstring for the current constraint-stack split (water + production
-HARD-excluded, floodplain + grade now SOFT cost penalties). There is no
-more 'corridor_type', 'anchor_status', 'anchor_road_name', or
-'crosses_production_zone' field anywhere in the output; this file no
-longer asserts anything about any of them (except asserting their
-absence).
+Route generation now casts up to three "fan" rays from the anchor point --
+the primary axis toward boundary_polygon_utm's own centroid, plus that
+axis rotated ±22.5° -- and routes independently (one least_cost_path()
+call each) to wherever each ray exits the boundary, snapped to the
+nearest eligible cell (_select_fan_destination_cells()). This replaced an
+earlier "single farthest-point destination, several k_shortest_paths()
+alternates to it" design -- k_shortest_paths() itself is untouched and
+still exported by road_cost_path.py, just not called from this module
+right now. See road_corridors.py's own module docstring for the current
+constraint-stack split (water + production HARD-excluded, floodplain +
+grade SOFT cost penalties). There is no more 'corridor_type',
+'anchor_status', 'anchor_road_name', or 'crosses_production_zone' field
+anywhere in the output; this file no longer asserts anything about any of
+them (except asserting their absence).
 """
+
+import io
+from contextlib import redirect_stdout
 
 import numpy as np
 from rasterio.warp import transform as warp_transform
@@ -33,7 +41,7 @@ from raster_grid import pixel_center_xy
 from road_corridors import (
     STEEP_GRADE_ENGINEERING_NOTE_THRESHOLD_PCT,
     _build_production_cell_mask,
-    _find_farthest_eligible_cell,
+    _select_fan_destination_cells,
     _snap_anchor_to_eligible_cell,
     corridors_to_geojson,
     find_road_routes,
@@ -71,6 +79,16 @@ def _lon_lat_for_cell(dem: dict, row: int, col: int) -> tuple[float, float]:
     return (lons[0], lats[0])
 
 
+def _flat_cost_raster(dem: dict, excluded_mask=None) -> np.ndarray:
+    """A finite-everywhere-except-excluded cost raster over a flat DEM,
+    for tests that only care about fan-ray/snapping geometry, not slope."""
+    rows, cols = dem["array"].shape
+    slope_pct = np.zeros((rows, cols), dtype=np.float32)
+    if excluded_mask is None:
+        excluded_mask = np.zeros((rows, cols), dtype=bool)
+    return build_cost_raster(dem, slope_pct, excluded_mask)
+
+
 dem = _flat_dem()
 boundary = box(500000, 4500000, 500205, 4500205)
 sw_corner_anchor = _lon_lat_for_cell(dem, 38, 2)  # near the SW corner, well inside the boundary
@@ -83,6 +101,7 @@ assert routes, "expected at least one route on an open, flat, unconstrained prop
 for route in routes:
     assert len(route["points_xyz"]) >= 2, "a returned route must have at least 2 points to form a line"
     assert route["line_utm"].length > 0
+    assert route["fan_direction"] in ("primary", "left", "right")
 costs = [route["total_cost"] for route in routes]
 assert costs == sorted(costs), "routes must be ranked by ascending total_cost, cheapest first"
 ranks = [route["rank"] for route in routes]
@@ -96,17 +115,17 @@ else:
     scores = [route["suitability_score"] for route in routes]
     assert scores == sorted(scores, reverse=True), "suitability_score must be descending as total_cost ascends"
 print(
-    f"Anchor-driven generation produces {len(routes)} route(s) on an open property, ranked by ascending "
-    f"total_cost, with the degenerate single-route scoring case handled correctly."
+    f"Fan-based generation produces {len(routes)} route(s) on an open property, ranked by ascending "
+    f"total_cost, each carrying a real fan_direction, with the degenerate single-route scoring case "
+    f"handled correctly."
 )
 
 
-# --- _snap_anchor_to_eligible_cell: snaps to the nearest FINITE-cost cell, not the raw anchor cell ---
+# --- _snap_anchor_to_eligible_cell: snaps to the nearest FINITE-cost cell, not the raw anchor cell (unchanged) ---
 
-slope_pct = np.zeros((41, 41), dtype=np.float32)
 excluded_mask = np.zeros((41, 41), dtype=bool)
 excluded_mask[38, 2] = True  # exclude the exact cell the anchor above points at
-cost_raster_with_hole = build_cost_raster(dem, slope_pct, excluded_mask)
+cost_raster_with_hole = _flat_cost_raster(dem, excluded_mask)
 snapped = _snap_anchor_to_eligible_cell(dem, cost_raster_with_hole, sw_corner_anchor)
 assert snapped is not None and snapped != (38, 2), (
     "the anchor's own raw cell is hard-excluded -- snapping must land on a DIFFERENT, actually-eligible cell"
@@ -114,7 +133,7 @@ assert snapped is not None and snapped != (38, 2), (
 assert np.isfinite(cost_raster_with_hole[snapped]), "the snapped cell itself must be finite-cost"
 
 fully_excluded = np.ones((41, 41), dtype=bool)
-cost_raster_none_eligible = build_cost_raster(dem, slope_pct, fully_excluded)
+cost_raster_none_eligible = _flat_cost_raster(dem, fully_excluded)
 assert _snap_anchor_to_eligible_cell(dem, cost_raster_none_eligible, sw_corner_anchor) is None, (
     "with literally no eligible cell anywhere, snapping must return None, not raise or fabricate a cell"
 )
@@ -122,16 +141,104 @@ print("_snap_anchor_to_eligible_cell correctly snaps past a hard-excluded anchor
       "and returns None honestly when nothing is eligible at all.")
 
 
-# --- _find_farthest_eligible_cell: maximum cell-grid distance from the source ---
+# --- _select_fan_destination_cells: up to 3 destinations, one per fan direction, spread across the property ---
 
-eligible = np.zeros((41, 41), dtype=bool)
-eligible[5, 5] = True
-eligible[5, 6] = True  # a closer eligible cell
-eligible[35, 38] = True  # the genuinely farthest eligible cell from (5, 5)
-farthest = _find_farthest_eligible_cell(dem, np.where(eligible, 1.0, np.inf), (5, 5), boundary)
-assert farthest == (35, 38), f"expected the genuinely farthest eligible cell (35, 38), got {farthest}"
-print("_find_farthest_eligible_cell correctly picks the maximum cell-grid-distance eligible cell, not just "
-      "any eligible cell.")
+open_cost_raster = _flat_cost_raster(dem)
+center_anchor_cell = (20, 20)
+fan_cells = _select_fan_destination_cells(dem, open_cost_raster, center_anchor_cell, boundary)
+assert len(fan_cells) == 3, f"expected all 3 fan rays to succeed on an open square property, got {len(fan_cells)}"
+assert len(set(fan_cells)) == 3, "expected 3 genuinely DISTINCT destination cells (not deduplicated away)"
+# Every fan destination must itself be a real eligible cell (finite cost).
+for cell in fan_cells:
+    assert np.isfinite(open_cost_raster[cell]), f"fan destination {cell} is not itself finite-cost"
+# And every fan destination must land ON (or extremely near) the boundary's
+# own exterior ring -- that's the whole point of casting a ray OUT to it.
+boundary_ring_prepared = prep(boundary.exterior.buffer(RESOLUTION[0]))  # 1-cell tolerance for raster snapping
+for cell in fan_cells:
+    x, y = pixel_center_xy(dem, *cell)
+    assert boundary_ring_prepared.contains(Point(x, y)), (
+        f"fan destination {cell} at ({x}, {y}) doesn't actually sit near the boundary's own exterior ring"
+    )
+print(f"_select_fan_destination_cells finds {len(fan_cells)} genuinely distinct destinations on an open "
+      f"square property, each landing on the boundary's own exterior ring.")
+
+
+# --- _select_fan_destination_cells: dedup -- multiple rays snapping to the SAME real destination collapse to one ---
+
+tiny_cluster_mask = np.ones((41, 41), dtype=bool)
+tiny_cluster_mask[1:4, 1:4] = False  # the ONLY eligible ground anywhere is this tiny NW cluster
+tiny_cluster_cost_raster = _flat_cost_raster(dem, tiny_cluster_mask)
+deduped_cells = _select_fan_destination_cells(dem, tiny_cluster_cost_raster, (20, 20), boundary)
+assert len(deduped_cells) == 1, (
+    f"with only one real eligible cluster anywhere on the property, every fan ray's own exit point should "
+    f"snap to it and collapse to a single deduplicated destination, got {len(deduped_cells)}"
+)
+print("_select_fan_destination_cells correctly deduplicates when multiple rays snap to the same real cell, "
+      "rather than returning duplicate destinations.")
+
+
+# --- _select_fan_destination_cells: defensive fallback -- an anchor cell outside boundary_polygon_utm ---
+
+small_boundary = box(500150, 4500150, 500200, 4500200)  # far from the SW-corner anchor cell used below
+outside_anchor_cell = (38, 2)
+buffer = io.StringIO()
+with redirect_stdout(buffer):
+    outside_result = _select_fan_destination_cells(dem, open_cost_raster, outside_anchor_cell, small_boundary)
+log_output = buffer.getvalue()
+assert outside_result, (
+    "the primary ray (pointed straight at the boundary's own centroid) should still succeed even from an "
+    "anchor cell well outside the boundary -- only the off-axis rays are expected to miss such a small, "
+    "distant target"
+)
+assert "falls outside boundary_polygon_utm" in log_output, (
+    "a ray failing because the anchor itself is outside the boundary should be logged as exactly that "
+    "condition, not confused with the (shouldn't-happen) ray-too-short case"
+)
+assert "shouldn't be possible" not in log_output, (
+    "this scenario is the anchor-outside-boundary condition, not the defensive ray-too-short one -- the "
+    "wrong condition must not be logged"
+)
+print("_select_fan_destination_cells logs the correct condition (anchor cell outside boundary_polygon_utm) "
+      "when a ray misses, and drops that fan point rather than forcing one.")
+
+
+# --- narrow/sliver-shaped parcel: exercises the ±22.5° fan geometry somewhere other than a square/hexagon parcel ---
+#
+# A 20m-wide x 400m-tall sliver -- narrow enough that the off-axis
+# (left/right) rays exit through the parcel's own SIDE wall almost
+# immediately, close to the anchor itself, rather than traveling the
+# sliver's own length the way the primary ray does. Real, worth knowing
+# behavior this surfaces: a fan destination that lands only a few cells
+# from the anchor can have a post-snap bearing that reads as close to
+# the PRIMARY axis (see find_road_routes()'s own bearing-based
+# fan_direction classification) even though it was genuinely cast as an
+# off-axis ray -- direction labels reflect the resulting route's own
+# geometry, not a guaranteed one-to-one tag per original ray. A square/
+# hexagon-shaped parcel (every other test in this file) doesn't surface
+# this at all, since its own off-axis rays travel far enough from the
+# anchor before exiting that bearing drift after snapping is negligible.
+sliver_rows, sliver_cols = 80, 4
+sliver_array = np.full((sliver_rows, sliver_cols), 100.0, dtype=np.float32)
+sliver_dem = {
+    "array": sliver_array, "resolution_meters": RESOLUTION,
+    "origin_x": 500000.0, "origin_y": 4500400.0, "crs": CRS,
+}
+sliver_boundary = box(500000, 4500000, 500020, 4500400)
+sliver_anchor = _lon_lat_for_cell(sliver_dem, 78, 1)  # near the sliver's own south end
+
+sliver_routes = find_road_routes(sliver_dem, [], None, sliver_boundary, sliver_anchor)
+assert sliver_routes, "expected at least one route on the sliver parcel (the primary, along-the-sliver direction)"
+for route in sliver_routes:
+    assert route["line_utm"].within(sliver_boundary.buffer(1e-6)), (
+        "every route on the sliver parcel must still stay entirely within its own (narrow) boundary"
+    )
+    assert route["length_m"] >= 30.0  # MIN_CORRIDOR_LENGTH_METERS -- degenerate near-anchor destinations are dropped
+print(
+    f"Sliver parcel: {len(sliver_routes)} route(s) survive min-length filtering (fan directions: "
+    f"{[r['fan_direction'] for r in sliver_routes]}) -- confirms the ±22.5° fan geometry doesn't crash or "
+    f"produce nonsensical/degenerate output on an extreme narrow parcel, even where off-axis rays exit "
+    f"close enough to the anchor that their resulting bearing can read as 'primary'."
+)
 
 
 # --- _build_production_cell_mask: True only inside the given union AND on-parcel (unchanged logic) ---
@@ -151,7 +258,7 @@ assert _build_production_cell_mask(dem, None, boundary_prepared).sum() == 0, (
 print("_build_production_cell_mask correctly flags only on-parcel cells actually inside the given union.")
 
 
-# --- production zones are now a HARD exclusion: no route may use a cell inside one ---
+# --- production zones are a HARD exclusion: no route may use a cell inside one ---
 
 production_areas = [{"id": 0, "render_fill_polygon_utm": box(500080, 4500080, 500125, 4500125)}]
 production_prepared2 = prep(production_areas[0]["render_fill_polygon_utm"])
@@ -170,15 +277,25 @@ for route in production_routes:
 print("Production zones are a HARD exclusion: no generated route ever actually occupies a production cell.")
 
 
-# --- a production zone that fully blocks every route leaves NO route at all (confirms it's genuinely hard) ---
-
-blocking_wall = [{"id": 0, "render_fill_polygon_utm": box(500090, 4500000, 500115, 4500205)}]  # full N-S span
-blocked_routes = find_road_routes(dem, blocking_wall, None, boundary, sw_corner_anchor)
-assert blocked_routes == [], (
-    "a production zone spanning the full property height with no gap should leave NO legal route at all -- "
-    "if any route were still found crossing it, production wouldn't really be hard-excluded"
+# --- a production zone surrounding the anchor on every side leaves NO route at all (confirms it's genuinely hard) ---
+#
+# With up to 3 independent fan-direction routes now (not one destination),
+# an obstacle has to block EVERY direction to leave zero routes total --
+# a single N-S wall (an earlier version of this test's own obstacle)
+# no longer reliably does that, since a fan ray on the SAME side of the
+# wall as the anchor never needs to cross it at all. Encircling the
+# anchor's own small pocket entirely in production land is the genuinely
+# unambiguous "every direction is blocked" construction instead.
+anchor_x, anchor_y = pixel_center_xy(dem, 38, 2)
+anchor_pocket = box(anchor_x - 7, anchor_y - 7, anchor_x + 7, anchor_y + 7)
+surrounding_production = [{"id": 0, "render_fill_polygon_utm": boundary.difference(anchor_pocket)}]
+surrounded_routes = find_road_routes(dem, surrounding_production, None, boundary, sw_corner_anchor)
+assert surrounded_routes == [], (
+    "a production zone surrounding the anchor's own small pocket on every side should leave NO legal route "
+    "at all in any fan direction -- if any route were still found, production wouldn't really be hard-excluded"
 )
-print("A production zone with no gap at all correctly blocks every route -- confirms the exclusion is genuinely hard.")
+print("A production zone surrounding the anchor on every side correctly blocks every fan direction -- "
+      "confirms the exclusion is genuinely hard.")
 
 
 # --- selected water zone is still a HARD exclusion: a route must not cross the (buffered) selected zone ---
@@ -197,30 +314,30 @@ for route in pond_routes:
 print("Selected water-system zone exclusion correctly keeps routes clear of the buffered zone.")
 
 
-# --- floodplain is now a SOFT cost penalty: a route MAY still cross it, and isn't blocked outright ---
+# --- floodplain is a SOFT cost penalty: a route MAY still cross it, and isn't blocked outright ---
 
 # A floodplain band spanning the FULL property height -- if this were still
-# a hard exclusion (as in an earlier version of this module), NO route
-# could exist at all, the same way the full-height production wall above
-# left zero routes. Since floodplain is soft now, a route must still be
-# found, crossing straight through it.
+# a hard exclusion (as in an earlier version of this module), no route in
+# ANY fan direction crossing it could exist. Since floodplain is soft,
+# every fan direction that would otherwise need to cross it still finds a
+# route straight through.
 full_span_floodplain = box(500090, 4500000, 500115, 4500205)
 floodplain_routes = find_road_routes(
     dem, [], None, boundary, sw_corner_anchor, hydric_floodplain_union=full_span_floodplain
 )
 assert floodplain_routes, (
     "a full-height floodplain band must NOT block routing entirely -- floodplain is a SOFT cost penalty now, "
-    "not a hard exclusion (contrast with the production-wall test above, which correctly found zero routes)"
+    "not a hard exclusion"
 )
 assert any(r["crosses_floodplain"] for r in floodplain_routes), (
     "expected at least one route to actually cross the floodplain band, proving it's traversable"
 )
 open_routes = find_road_routes(dem, [], None, boundary, sw_corner_anchor)
 assert min(r["total_cost"] for r in floodplain_routes) > min(r["total_cost"] for r in open_routes), (
-    "crossing the floodplain penalty region should cost more than the same route on otherwise-open ground"
+    "crossing the floodplain penalty region should cost more than the same routes on otherwise-open ground"
 )
 print(
-    "Floodplain/hydric ground is a SOFT cost penalty, not a hard exclusion: a route can still cross a "
+    "Floodplain/hydric ground is a SOFT cost penalty, not a hard exclusion: routes can still cross a "
     "full-height floodplain band (correctly flagged crosses_floodplain=True), at a real cost premium over "
     "equivalent open ground."
 )
@@ -274,14 +391,8 @@ print(
 )
 
 
-# --- distinct routes actually differ meaningfully when real alternatives exist (k_shortest_paths + dedup) ---
-#
-# A narrower (shorter, less laterally-open) property than the other tests
-# above -- a wide-open 2D gap leaves enough lateral wiggle room that
-# several slightly-offset crossings of the SAME gap can all legitimately
-# clear the dedup overlap threshold without representing a meaningfully
-# different route choice; a single-cell-wide gap on a narrower property
-# keeps this test's two scenarios clean and unambiguous.
+# --- distinct fan-direction routes actually differ meaningfully (low mutual cell overlap) ---
+
 gap_rows, gap_cols = 21, 41
 gap_array = np.full((gap_rows, gap_cols), 100.0, dtype=np.float32)
 gap_dem = {
@@ -291,49 +402,42 @@ gap_dem = {
 gap_boundary = box(500000, 4500000, 500205, 4500105)
 gap_anchor = _lon_lat_for_cell(gap_dem, 10, 2)
 
-wall = box(500100, 4500000, 500105, 4500105)
-gap_bottom = box(500095, 4500002.5, 500110, 4500007.5)  # single-cell-tall gap near the south edge
-gap_top = box(500095, 4500097.5, 500110, 4500102.5)  # single-cell-tall gap near the north edge
-two_gap_wall = wall.difference(gap_bottom).difference(gap_top)
-two_gap_production = [{"id": 0, "render_fill_polygon_utm": two_gap_wall}]
-
-two_gap_routes = find_road_routes(gap_dem, two_gap_production, None, gap_boundary, gap_anchor)
-assert len(two_gap_routes) >= 2, (
-    f"expected at least 2 distinct routes with two legal gaps around the production wall, got {len(two_gap_routes)}"
+gap_routes = find_road_routes(gap_dem, [], None, gap_boundary, gap_anchor)
+assert len(gap_routes) >= 2, f"expected at least 2 fan-direction routes on this open property, got {len(gap_routes)}"
+directions_seen = {r["fan_direction"] for r in gap_routes}
+assert len(directions_seen) == len(gap_routes), (
+    f"expected every surviving route to carry a DISTINCT fan_direction label, got {[r['fan_direction'] for r in gap_routes]}"
 )
-top_cells = set((p[0], p[1]) for p in two_gap_routes[0]["points_xyz"])
-second_cells = set((p[0], p[1]) for p in two_gap_routes[1]["points_xyz"])
-overlap = len(top_cells & second_cells) / min(len(top_cells), len(second_cells))
-assert overlap < 0.7, (
-    f"the top two routes overlap {overlap:.2f} -- expected genuinely distinct routes (through different "
-    f"gaps), not near-duplicates that should have been caught by k_shortest_paths()'s own dedup"
+cellsets = [set((p[0], p[1]) for p in r["points_xyz"]) for r in gap_routes]
+max_overlap = max(
+    len(cellsets[i] & cellsets[j]) / min(len(cellsets[i]), len(cellsets[j]))
+    for i in range(len(cellsets)) for j in range(i + 1, len(cellsets))
+)
+assert max_overlap < 0.7, (
+    f"the fan-direction routes overlap up to {max_overlap:.2f} -- expected genuinely distinct routes headed "
+    f"to different regions of the property, not near-duplicates"
 )
 print(
-    f"With two legal gaps around a hard obstacle, {len(two_gap_routes)} genuinely distinct routes are found "
-    f"(top-2 cell overlap only {overlap:.2f}), not near-duplicates slipping past dedup."
+    f"Fan-direction routes are genuinely distinct: {len(gap_routes)} routes with unique fan_direction labels "
+    f"({sorted(directions_seen)}), maximum pairwise cell overlap only {max_overlap:.2f}."
 )
-
-one_gap_wall = wall.difference(gap_bottom)
-one_gap_production = [{"id": 0, "render_fill_polygon_utm": one_gap_wall}]
-one_gap_routes = find_road_routes(gap_dem, one_gap_production, None, gap_boundary, gap_anchor)
-assert len(one_gap_routes) == 1, (
-    f"expected exactly one route with only one legal gap, got {len(one_gap_routes)}"
-)
-assert one_gap_routes[0]["suitability_score"] == 100.0
-print("With only one legal gap, exactly one route is found, correctly scored 100.0 (the degenerate case).")
 
 
 # --- output: schema-valid FeatureCollection on the required layer, with required (and NO stale) properties ---
 
 geojson = corridors_to_geojson(routes, floodplain_data_is_fallback=True)
 validate_feature_collection(geojson)
-required_props = {"rank", "suitability_score", "avg_grade_pct", "length_ft", "crosses_floodplain", "constraints_satisfied"}
+required_props = {
+    "rank", "suitability_score", "avg_grade_pct", "length_ft",
+    "crosses_floodplain", "fan_direction", "constraints_satisfied",
+}
 removed_props = {"corridor_type", "anchor_status", "anchor_road_name", "anchor_road_distance_ft", "crosses_production_zone"}
 for feature in geojson["features"]:
     assert feature["properties"]["layer"] == "suggested_road_corridor"
     assert required_props.issubset(feature["properties"].keys()), (
         f"missing required properties: {required_props - feature['properties'].keys()}"
     )
+    assert feature["properties"]["fan_direction"] in ("primary", "left", "right")
     present_removed = removed_props & feature["properties"].keys()
     assert not present_removed, f"these properties should no longer exist at all: {present_removed}"
     assert 0.0 <= feature["properties"]["suitability_score"] <= 100.0
@@ -352,9 +456,9 @@ for feature in geojson["features"]:
     assert "least-cost-path" in notes, "confidence_notes should describe the cost-driven routing model"
     assert "anchor" in notes, "confidence_notes should describe the anchor-point routing model"
 print("corridors_to_geojson output is schema-valid, layer='suggested_road_corridor', with required properties "
-      "present and every removed property (corridor_type/anchor_status/anchor_road_name/"
-      "crosses_production_zone) correctly absent; constraints_satisfied correctly lists production+pond as "
-      "hard, omits grade entirely.")
+      "(including fan_direction) present and every removed property (corridor_type/anchor_status/"
+      "anchor_road_name/crosses_production_zone) correctly absent; constraints_satisfied correctly lists "
+      "production+pond as hard, omits grade entirely.")
 
 
 # --- regression: routes stay on-parcel, not drawn from the DEM's buffered margin ---

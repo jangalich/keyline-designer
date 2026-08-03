@@ -21,18 +21,28 @@ driveway location) to the farthest eligible point on the property:
   might land on hard-excluded or off-parcel ground, so routing starts
   from wherever eligible ground is actually closest to it.
 
-  DESTINATION: the single eligible cell with maximum cell-grid distance
-  from the (snapped) source (_find_farthest_eligible_cell()) — a route
-  spanning as much of the property's own routable ground as legitimately
-  possible, rather than stopping at an arbitrary nearby point.
+  DESTINATIONS: up to three candidate destinations, one per compass-ish
+  "fan" direction radiating from the anchor (_select_fan_destination_
+  cells()) — the primary axis toward boundary_polygon_utm's own centroid,
+  plus that same axis rotated ±22.5°. Each direction casts a ray from the
+  anchor far past the property's own extent and takes where it exits
+  boundary_polygon_utm's exterior ring, snapped to the nearest eligible
+  cell. This deliberately spreads candidate destinations across different
+  REGIONS of the property (not just "the single farthest point," an
+  earlier version of this module's approach, which only ever explores one
+  direction) — a narrow/sliver-shaped parcel can still legitimately
+  collapse two or three fan rays onto the same real destination, or drop
+  a ray entirely if it produces no usable boundary crossing; this returns
+  whatever survives, never fewer than genuinely exist and never padded.
 
-  ROUTING: road_cost_path.k_shortest_paths() from that one source to that
-  one destination — several genuinely distinct alternative routes (not
-  near-duplicate variants of each other; see that function's own
-  dedup-by-cell-overlap logic), not a single forced path and not one
-  candidate per quadrant the way an earlier version of this module worked.
+  ROUTING: one road_cost_path.least_cost_path() call per fan destination
+  (not a single k_shortest_paths() call the way an earlier version of
+  this module worked) — each fan direction gets its own independent
+  route. road_cost_path.k_shortest_paths() stays available in this
+  codebase for a later prompt to layer route ALTERNATES within a single
+  direction on top of this; it isn't called here at all right now.
 
-  RANKING: routes are ranked by ascending total_cost (k_shortest_paths()'s
+  RANKING: routes are ranked by ascending total_cost (least_cost_path()'s
   own Dijkstra path cost — the running sum of grade- and floodplain-
   penalized edge weights along the route), not a separate weighted
   composite score. suitability_score is a simple normalization of that
@@ -98,7 +108,7 @@ without any of the several real network fetches this feature depends on).
 """
 
 import math
-from typing import Optional
+from typing import Literal, Optional
 
 import numpy as np
 from rasterio.warp import transform as warp_transform
@@ -113,7 +123,7 @@ from feature_schema import CONFIDENCE_LOW, make_feature, make_feature_collection
 from hydrology_data import get_water_features_for_boundary
 from production_area_ceiling import identify_optimized_production_areas
 from raster_grid import pixel_center_xy
-from road_cost_path import build_cost_raster, k_shortest_paths, path_cells_to_points_xyz
+from road_cost_path import build_cost_raster, least_cost_path, path_cells_to_points_xyz
 from soil_data import (
     coordinates_to_wkt_polygon,
     get_soil_data_for_polygon,
@@ -215,6 +225,26 @@ FLOODPLAIN_FINAL_RELEVANCE_BUFFER_METERS = 75.0
 
 # Drop routes shorter than this -- not a meaningful road. CONFIGURABLE.
 MIN_CORRIDOR_LENGTH_METERS = 30.0
+
+# Angular offset (degrees) of the two off-axis fan rays
+# _select_fan_destination_cells() casts from the anchor, on either side
+# of the primary anchor-to-centroid axis. A fixed spread, not (yet)
+# informed by parcel shape/size. CONFIGURABLE, deliberately unvalidated
+# starting value.
+FAN_RAY_ANGLE_DEG = 22.5
+
+# Multiplier applied to boundary_polygon_utm's own bounding-box diagonal
+# to build each fan ray's length in _select_fan_destination_cells() --
+# long enough that a ray cast from anywhere at or near the parcel
+# (including a raster-snapped anchor sitting fractionally outside the
+# true boundary polygon) is practically guaranteed to cross its exterior
+# ring at least once, regardless of parcel shape or anchor placement.
+# Not really a tuning knob the way the CONFIGURABLE constants above are --
+# larger only costs a cheap extra bit of ray-geometry math, never changes
+# behavior for a ray that already reaches the boundary.
+FAN_RAY_LENGTH_DIAGONAL_MULTIPLIER = 3.0
+
+FanDirection = Literal["primary", "left", "right"]
 
 ROAD_CORRIDOR_CONFIDENCE_NOTES_TEMPLATE = (
     "This is a TOPOGRAPHIC SUGGESTION only, not a surveyed road alignment — "
@@ -361,37 +391,161 @@ def _snap_anchor_to_eligible_cell(
     return (int(nearest[0]), int(nearest[1]))
 
 
-def _find_farthest_eligible_cell(
-    dem: dict,
-    cost_raster: np.ndarray,
-    from_cell: tuple[int, int],
-    boundary_polygon_utm: Polygon,
-) -> tuple[int, int]:
+def _snap_utm_point_to_eligible_cell(
+    dem: dict, cost_raster: np.ndarray, x: float, y: float
+) -> Optional[tuple[int, int]]:
     """
-    Among every finite-cost cell in cost_raster, the one with maximum
-    cell-grid (row/col) Euclidean distance from from_cell -- cheap
-    grid-index arithmetic, no shapely geometry needed for this part (same
-    reasoning as the row/col distance math an earlier, quadrant-based
-    version of this module used for its own source-cell selection). The
-    goal is a route that spans as much of the property's own routable
-    ground as legitimately possible starting from the given anchor, not
-    one that stops at an arbitrary nearby point.
+    Same "nearest finite-cost cell" pattern as _snap_anchor_to_eligible_
+    cell() -- deliberately a parallel, standalone implementation rather
+    than a shared extraction, since that function is left untouched here
+    -- but starting from a point already in the DEM's own UTM CRS (e.g. a
+    fan ray's boundary-exit point, see _select_fan_destination_cells())
+    instead of a raw (lon, lat) that still needs warping first.
 
-    boundary_polygon_utm is accepted for signature symmetry with
-    _snap_anchor_to_eligible_cell() and other cell-selection helpers in
-    this module but isn't used directly: cost_raster's own eligible cells
-    (np.isfinite) already reflect the boundary (any off-parcel cell is
-    hard-excluded upstream, in _build_exclusion_cell_mask()), so a second
-    boundary check here would be redundant.
-
-    from_cell is itself always a finite-cost cell (guaranteed by
-    _snap_anchor_to_eligible_cell()), so eligible_rc is never empty here.
+    Returns None if cost_raster has no finite-cost cell anywhere at all,
+    same "nothing to snap to" convention as _snap_anchor_to_eligible_cell().
     """
     eligible_rc = np.argwhere(np.isfinite(cost_raster))
-    from_row, from_col = from_cell
-    distances_sq = (eligible_rc[:, 0] - from_row) ** 2 + (eligible_rc[:, 1] - from_col) ** 2
-    farthest = eligible_rc[np.argmax(distances_sq)]
-    return (int(farthest[0]), int(farthest[1]))
+    if eligible_rc.size == 0:
+        return None
+
+    px, py = dem["resolution_meters"]
+    approx_col = (x - dem["origin_x"]) / px - 0.5
+    approx_row = (dem["origin_y"] - y) / py - 0.5
+
+    distances_sq = (eligible_rc[:, 0] - approx_row) ** 2 + (eligible_rc[:, 1] - approx_col) ** 2
+    nearest = eligible_rc[np.argmin(distances_sq)]
+    return (int(nearest[0]), int(nearest[1]))
+
+
+def _farthest_intersection_point(anchor_point: Point, intersection) -> Optional[Point]:
+    """
+    Given the (possibly empty, possibly multi-part) result of
+    intersecting a fan ray with boundary_polygon_utm's own exterior ring,
+    returns whichever resulting point is FARTHEST from anchor_point --
+    the ray's LAST crossing of the boundary. A concave parcel can cross a
+    long ray more than once (enter/exit/enter/exit...); the farthest
+    crossing is the one that actually represents "where this ray exits
+    the parcel for good," which is what casting a ray out to a boundary-
+    exit destination means here. Returns None if the intersection is
+    empty (see _select_fan_destination_cells() for when/why that happens).
+    """
+    if intersection.is_empty:
+        return None
+
+    candidate_points = []
+    if intersection.geom_type == "Point":
+        candidate_points = [intersection]
+    elif intersection.geom_type == "LineString":
+        candidate_points = [Point(c) for c in intersection.coords]
+    elif hasattr(intersection, "geoms"):
+        for geom in intersection.geoms:
+            if geom.geom_type == "Point":
+                candidate_points.append(geom)
+            elif geom.geom_type == "LineString":
+                candidate_points.extend(Point(c) for c in geom.coords)
+
+    if not candidate_points:
+        return None
+    return max(candidate_points, key=lambda p: p.distance(anchor_point))
+
+
+def _select_fan_destination_cells(
+    dem: dict,
+    cost_raster: np.ndarray,
+    anchor_cell: tuple[int, int],
+    boundary_polygon_utm: Polygon,
+) -> list[tuple[int, int]]:
+    """
+    Up to three candidate destination cells, one per "fan" direction
+    radiating from the anchor cell: the PRIMARY axis toward
+    boundary_polygon_utm's own centroid, plus that same axis rotated
+    +FAN_RAY_ANGLE_DEG ("left") and -FAN_RAY_ANGLE_DEG ("right"). This
+    deliberately spreads candidate destinations across different REGIONS
+    of the property, instead of the single farthest-point destination an
+    earlier version of this module used (which only ever explored one
+    direction).
+
+    For each direction: casts a ray from the anchor's own UTM position,
+    FAN_RAY_LENGTH_DIAGONAL_MULTIPLIER times longer than
+    boundary_polygon_utm's own bounding-box diagonal -- long enough to be
+    practically guaranteed to cross the boundary's exterior ring
+    regardless of parcel shape or exactly where the anchor sits -- and
+    takes the FARTHEST intersection with that ring
+    (_farthest_intersection_point(), handling a concave parcel's own
+    possible multiple crossings), then snaps that boundary-exit point to
+    the nearest eligible cell (_snap_utm_point_to_eligible_cell()).
+
+    Defensive-only fallback: if a ray genuinely produces zero boundary
+    intersections at all (shouldn't happen given the ray's own length),
+    logs which condition triggered it -- the anchor cell falling outside
+    boundary_polygon_utm entirely (a real possibility: the anchor's raw
+    grid cell is only ever an ESTIMATE snapped to nearby eligible ground,
+    see _snap_anchor_to_eligible_cell()'s own docstring, not guaranteed to
+    itself sit inside the true boundary polygon) vs. a ray that's
+    somehow still too short despite its own length (shouldn't occur at
+    all) -- and drops that one fan point rather than forcing one.
+
+    Two (or all three) rays can legitimately snap to the SAME real
+    destination cell on a narrow/sliver-shaped parcel -- deduplicated
+    here, so the result may hold fewer than 3 cells even when every ray
+    itself succeeds. Returns [] only if every ray failed outright (e.g.
+    the anchor cell is entirely outside the boundary).
+    """
+    anchor_x, anchor_y = pixel_center_xy(dem, *anchor_cell)
+    anchor_point = Point(anchor_x, anchor_y)
+    centroid = boundary_polygon_utm.centroid
+
+    primary_dx, primary_dy = centroid.x - anchor_x, centroid.y - anchor_y
+    primary_length = math.hypot(primary_dx, primary_dy)
+    if primary_length == 0:
+        # The anchor sits exactly on the centroid (a real, if unlikely,
+        # possibility) -- pick an arbitrary primary direction (due east)
+        # so the ±22.5° rotation is still well-defined; the fan still
+        # spreads out normally from there.
+        primary_dx, primary_dy, primary_length = 1.0, 0.0, 1.0
+    primary_unit_x, primary_unit_y = primary_dx / primary_length, primary_dy / primary_length
+
+    minx, miny, maxx, maxy = boundary_polygon_utm.bounds
+    ray_length = math.hypot(maxx - minx, maxy - miny) * FAN_RAY_LENGTH_DIAGONAL_MULTIPLIER
+    boundary_exterior = boundary_polygon_utm.exterior
+    anchor_inside_boundary = boundary_polygon_utm.contains(anchor_point) or boundary_polygon_utm.touches(anchor_point)
+
+    destination_cells: list[tuple[int, int]] = []
+    seen_cells: set[tuple[int, int]] = set()
+
+    for direction_label, angle_deg in (("primary", 0.0), ("left", FAN_RAY_ANGLE_DEG), ("right", -FAN_RAY_ANGLE_DEG)):
+        angle_rad = math.radians(angle_deg)
+        cos_a, sin_a = math.cos(angle_rad), math.sin(angle_rad)
+        ray_dx = primary_unit_x * cos_a - primary_unit_y * sin_a
+        ray_dy = primary_unit_x * sin_a + primary_unit_y * cos_a
+        ray = LineString([anchor_point, Point(anchor_x + ray_dx * ray_length, anchor_y + ray_dy * ray_length)])
+
+        exit_point = _farthest_intersection_point(anchor_point, ray.intersection(boundary_exterior))
+        if exit_point is None:
+            if not anchor_inside_boundary:
+                print(
+                    f"  _select_fan_destination_cells: {direction_label} ray produced no boundary "
+                    f"intersection -- the anchor cell itself falls outside boundary_polygon_utm, "
+                    f"dropping this fan point rather than forcing one."
+                )
+            else:
+                print(
+                    f"  _select_fan_destination_cells: {direction_label} ray produced no boundary "
+                    f"intersection despite a length of {ray_length:.0f}m "
+                    f"({FAN_RAY_LENGTH_DIAGONAL_MULTIPLIER}x the boundary's own bounding-box diagonal) -- "
+                    f"this shouldn't be possible for an anchor genuinely inside the boundary; dropping "
+                    f"this fan point rather than forcing one."
+                )
+            continue
+
+        cell = _snap_utm_point_to_eligible_cell(dem, cost_raster, exit_point.x, exit_point.y)
+        if cell is None or cell in seen_cells:
+            continue
+        seen_cells.add(cell)
+        destination_cells.append(cell)
+
+    return destination_cells
 
 
 def _grade_stats(points_xyz: list[tuple[float, float, float]]) -> tuple[float, float]:
@@ -436,17 +590,20 @@ def find_road_routes(
 
     anchor_lon_lat is the single (lon, lat) point routing starts from
     (snapped to the nearest eligible cell -- see
-    _snap_anchor_to_eligible_cell()); every returned route ends at the
-    single farthest eligible point on the property from that anchor (see
-    _find_farthest_eligible_cell()). There is no named-road anchoring or
-    boundary-connector step here at all (see module docstring) -- a route
-    IS the anchor-to-farthest-point path, not something extended
-    afterward.
+    _snap_anchor_to_eligible_cell()); each returned route ends at one of
+    up to three fan-direction destinations from that anchor (see
+    _select_fan_destination_cells()) -- primary, left, and right, one
+    independent least_cost_path() route per surviving destination. There
+    is no named-road anchoring or boundary-connector step here at all
+    (see module docstring) -- a route IS the anchor-to-fan-destination
+    path, not something extended afterward.
 
     boundary_polygon_utm is the hard limit on which DEM cells routing can
     draw from at all, via _build_exclusion_cell_mask() -- the DEM covers
     ~100m past the drawn boundary on purpose (dem_data.py), but a route's
-    own geometry must come from on-parcel cells only.
+    own geometry must come from on-parcel cells only. It's also the
+    target boundary_polygon_utm.exterior each fan ray is cast against in
+    _select_fan_destination_cells().
 
     Returns a list of routes, ranked by ascending total_cost (cheapest
     first):
@@ -456,14 +613,16 @@ def find_road_routes(
             'avg_grade_pct': float,
             'length_m': float,
             'crosses_floodplain': bool,
+            'fan_direction': 'primary' | 'left' | 'right',
             'points_xyz': [(x, y, elevation_m), ...],
             'geometry_wgs84': GeoJSON LineString,
         }
 
-    Returns [] if the anchor snaps to no eligible cell at all, if no
-    farthest-point route is reachable, or if every route k_shortest_paths()
-    finds is dropped by min_corridor_length_meters -- a real, reportable
-    "no routes" outcome, not an error.
+    Returns [] if the anchor snaps to no eligible cell at all, if every
+    fan ray fails to produce a usable destination
+    (_select_fan_destination_cells() returns []), or if every fan
+    direction's own route is dropped by min_corridor_length_meters -- a
+    real, reportable "no routes" outcome, not an error.
     """
     slope_pct, _aspect_deg = compute_slope_and_aspect(dem["array"], dem["resolution_meters"])
 
@@ -508,15 +667,25 @@ def find_road_routes(
     if source_cell is None:
         return []
 
-    destination_cell = _find_farthest_eligible_cell(dem, cost_raster, source_cell, boundary_polygon_utm)
-
-    route_results = k_shortest_paths(dem, cost_raster, source_cell, destination_cell)
-    if not route_results:
+    destination_cells = _select_fan_destination_cells(dem, cost_raster, source_cell, boundary_polygon_utm)
+    if not destination_cells:
         return []
 
+    # Direction labels are re-derived from each SURVIVING destination's own
+    # bearing (relative to the same anchor->centroid primary axis
+    # _select_fan_destination_cells() itself used), not just zipped
+    # positionally against destination_cells -- that function can legitimately
+    # drop a middle fan ray (e.g. "left" fails but "primary"/"right" both
+    # succeed), and positional zipping would then mislabel "right"'s cell as
+    # "left".
+    anchor_x, anchor_y = pixel_center_xy(dem, *source_cell)
+    centroid = boundary_polygon_utm.centroid
+    primary_angle = math.atan2(centroid.y - anchor_y, centroid.x - anchor_x)
+
     routes = []
-    for result in route_results:
-        if len(result["cells"]) < 2:
+    for destination_cell in destination_cells:
+        result = least_cost_path(dem, cost_raster, [source_cell], [destination_cell])
+        if result is None or len(result["cells"]) < 2:
             # source_cell == destination_cell (a degenerate, essentially
             # zero-eligible-ground property) has no length/direction to
             # form a LineString from at all -- dropped here the same way
@@ -534,6 +703,16 @@ def find_road_routes(
         avg_grade_pct, _grade_stddev_pct = _grade_stats(points)
         crosses_floodplain = hydric_floodplain_union is not None and line.intersects(hydric_floodplain_union)
 
+        dest_x, dest_y = pixel_center_xy(dem, *destination_cell)
+        dest_angle = math.atan2(dest_y - anchor_y, dest_x - anchor_x)
+        delta_deg = (math.degrees(dest_angle - primary_angle) + 180.0) % 360.0 - 180.0
+        if delta_deg > FAN_RAY_ANGLE_DEG / 2.0:
+            fan_direction: FanDirection = "left"
+        elif delta_deg < -FAN_RAY_ANGLE_DEG / 2.0:
+            fan_direction = "right"
+        else:
+            fan_direction = "primary"
+
         routes.append(
             {
                 "points_xyz": points,
@@ -542,6 +721,7 @@ def find_road_routes(
                 "length_m": length_m,
                 "avg_grade_pct": avg_grade_pct,
                 "crosses_floodplain": crosses_floodplain,
+                "fan_direction": fan_direction,
             }
         )
 
@@ -631,7 +811,7 @@ def corridors_to_geojson(
                 feature_id=f"road-corridor-{route['rank']}",
                 geometry=route["geometry_wgs84"],
                 layer="suggested_road_corridor",
-                label=f"Suggested road route (rank {route['rank']})",
+                label=f"Suggested road route (rank {route['rank']}, {route['fan_direction']})",
                 confidence=CONFIDENCE_LOW,
                 confidence_notes=_confidence_notes_for_route(
                     floodplain_data_is_fallback,
@@ -644,6 +824,7 @@ def corridors_to_geojson(
                     "avg_grade_pct": round(route["avg_grade_pct"], 1),
                     "length_ft": round(route["length_m"] / METERS_PER_FOOT, 1),
                     "crosses_floodplain": route["crosses_floodplain"],
+                    "fan_direction": route["fan_direction"],
                     # Both genuinely HARD exclusions under the current
                     # design (see module docstring) -- unlike an earlier
                     # version of this module, grade and floodplain are NOT
@@ -912,7 +1093,7 @@ def summarize_road_corridor_candidates(result: dict) -> str:
         props = feature["properties"]
         crossing = " [crosses floodplain]" if props.get("crosses_floodplain") else ""
         lines.append(
-            f"  - Rank {props['rank']}: score {props['suitability_score']}/100, "
+            f"  - Rank {props['rank']} ({props['fan_direction']}): score {props['suitability_score']}/100, "
             f"{props['avg_grade_pct']}% avg grade, {props['length_ft']}ft{crossing}"
         )
     return "\n".join(lines)
