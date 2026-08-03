@@ -335,8 +335,8 @@ def _format_road_corridor_summary(zones_geojson: Optional[dict]) -> str:
     lines = [f"{len(zones_geojson['features'])} ranked candidate corridor(s) identified:"]
     for feature in zones_geojson["features"]:
         props = feature["properties"]
-        if props.get("connection_point_is_arbitrary"):
-            anchor_note = "boundary connection point is ARBITRARY (no real access-point data)"
+        if props.get("anchor_status") == "no_named_road_available":
+            anchor_note = "does NOT reach the property boundary (no real named road was nearby to anchor to)"
         elif props.get("anchor_road_name"):
             anchor_note = f"anchored to {props['anchor_road_name']} ({props.get('anchor_road_distance_ft')}ft)"
         else:
@@ -351,10 +351,11 @@ def _format_road_corridor_summary(zones_geojson: Optional[dict]) -> str:
         "\nThese are ranked CANDIDATE CORRIDORS (contour-band and/or ridge-top, no default "
         "preference between the two types), not a single forced routing — narrate from this "
         "geometry rather than inventing a corridor, compare candidates where more than one is "
-        "offered, say plainly wherever a connection point is flagged arbitrary (vs. anchored to a "
-        "named real road), and treat a production-zone crossing OR an erosion-prone-soil crossing "
-        "as a real, valid routing option (not a caveat) unless it's a genuine material tradeoff "
-        "worth naming."
+        "offered, say plainly wherever a candidate has no connector reaching the boundary (vs. "
+        "anchored to a named real road — this feature never anchors to an arbitrary boundary "
+        "point), and treat a production-zone crossing OR an erosion-prone-soil crossing as a "
+        "real, valid routing option (not a caveat) unless it's a genuine material tradeoff worth "
+        "naming."
     )
     return "\n".join(lines)
 

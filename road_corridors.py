@@ -71,14 +71,16 @@ Constraint stack (both corridor types, before scoring):
         had already landed.
 
 Corridor anchoring (connecting the near-boundary end of a generated
-corridor to the property line) prefers a real, mapped existing road when
-one is reachable nearby (farm_roads_data.py) — the connector snaps toward
-the nearest point on that real road's own frontage, and
-properties.anchor_road_name / connection_point_is_arbitrary=False report
-which one. Falls back to an arbitrary nearest-boundary-point anchor
-(connection_point_is_arbitrary=True) only when no real road data is
-available — same fallback pattern solar_suitability.py's own road-
-proximity logic already uses.
+corridor to the property line) anchors to a real, NAMED mapped existing
+road only (farm_roads_data.py, filtered here to drop its "Unnamed road"
+fallback entries — an anonymous fetched segment, e.g. an unlabeled
+driveway, is not a plausible frontage to claim by name) — the connector
+snaps toward the nearest point on that real named road's own frontage,
+and properties.anchor_road_name / anchor_status="connected_to_named_road"
+report which one. When no named road is reachable nearby, this does NOT
+fall back to an arbitrary boundary point — the candidate is kept as-is,
+with no connector segment at all, and anchor_status is
+"no_named_road_available".
 
 find_candidate_road_corridors() is the pure geometric/scoring core — see
 water_candidate_zones.py's and solar_suitability.py's docstrings for why
@@ -87,7 +89,7 @@ without any of the several real network fetches this feature depends on).
 """
 
 import math
-from typing import Optional
+from typing import Literal, Optional
 
 import numpy as np
 import requests
@@ -308,10 +310,7 @@ ROAD_CORRIDOR_CONFIDENCE_NOTES_TEMPLATE = (
     "impossibility; avoiding it is likewise scored as a PREFERENCE only (see "
     "properties.crosses_erosion_prone_soil). {erosion_crossing_note}"
     "Pond/water-system candidate zones and floodplain/hydric ground ARE still "
-    "hard-excluded. The final segment connecting the "
-    "corridor to the property is a straight-line approximation to {anchor_note}, "
-    "and that connecting segment specifically is NOT itself checked against "
-    "the grade or exclusion constraints the rest of the corridor is. "
+    "hard-excluded. {connector_note}"
     "{steep_grade_note}{floodplain_note}{erosion_note}Treat this as a starting point for a site "
     "visit and real survey, not a construction-ready alignment."
 )
@@ -364,9 +363,8 @@ def _build_exclusion_cell_mask(dem: dict, excluded_prepared, boundary_prepared) 
     purpose; without this, a candidate could be built entirely from
     off-parcel cells). The only geometry that's still allowed to touch/
     reach the boundary line is the single connector segment
-    _anchor_to_boundary() adds afterward — that's the already-disclosed
-    "arbitrary boundary anchor" limitation, not something this mask
-    should (or does) affect."""
+    _anchor_to_boundary() adds afterward, when a named road is available
+    to anchor to — not something this mask should (or does) affect."""
     array = dem["array"]
     rows, cols = array.shape
     excluded = np.zeros((rows, cols), dtype=bool)
@@ -539,26 +537,40 @@ def _generate_ridge_candidate_runs(
     return runs
 
 
+AnchorStatus = Literal["connected_to_named_road", "no_named_road_available"]
+
+
 def _anchor_to_boundary(
     points_xyz: list[tuple[float, float, float]],
     boundary_polygon_utm: Polygon,
     road_union_utm,
     road_features_utm: Optional[list[dict]] = None,
-) -> tuple[list[tuple[float, float, float]], bool, Optional[str], Optional[float]]:
+) -> tuple[list[tuple[float, float, float]], AnchorStatus, Optional[str], Optional[float]]:
     """Extends whichever end of the corridor is closer to the property
-    boundary with one connecting vertex on the boundary line — snapped to
-    the point nearest a real mapped road if road_union_utm is available
-    (a genuine plausible frontage point), otherwise just the nearest
-    boundary point (arbitrary, flagged via the returned bool).
+    boundary with one connecting vertex on the boundary line, snapped to
+    the point nearest a real, NAMED mapped road — road_union_utm and
+    road_features_utm are already filtered to named roads only by
+    _fetch_existing_road_features_utm() before reaching here (see module
+    docstring's "Corridor anchoring" section), so a non-None road_union_utm
+    always means a genuine, nameable frontage candidate.
+
+    When no named road is nearby (road_union_utm is None), this does NOT
+    fall back to an arbitrary boundary point — it returns points_xyz
+    completely unchanged, with no connector vertex appended at all. The
+    candidate's own interior geometry is still real DEM-derived routing;
+    it simply doesn't reach the boundary.
 
     road_features_utm (optional, each {'name': str, 'line_utm': LineString})
     is used ONLY to report WHICH real road the anchor snapped toward, when
     one is available — passing None still anchors correctly via
     road_union_utm, it just leaves the reported road name generic/absent.
 
-    Returns (extended_points, is_arbitrary, anchor_road_name, anchor_road_distance_m).
-    The last two are None when anchoring is arbitrary (no real road data).
+    Returns (points, anchor_status, anchor_road_name, anchor_road_distance_m).
+    The last two are None when anchor_status is "no_named_road_available".
     """
+    if road_union_utm is None:
+        return points_xyz, "no_named_road_available", None, None
+
     boundary_line = boundary_polygon_utm.boundary
     end_a = Point(points_xyz[0][0], points_xyz[0][1])
     end_b = Point(points_xyz[-1][0], points_xyz[-1][1])
@@ -566,26 +578,19 @@ def _anchor_to_boundary(
     anchor_at_start = end_a.distance(boundary_line) <= end_b.distance(boundary_line)
     anchor_end = end_a if anchor_at_start else end_b
 
+    nearest_road_point = nearest_points(anchor_end, road_union_utm)[1]
+    boundary_anchor_point = nearest_points(nearest_road_point, boundary_line)[1]
+    anchor_road_distance_m = float(anchor_end.distance(road_union_utm))
     anchor_road_name = None
-    anchor_road_distance_m = None
-
-    if road_union_utm is not None:
-        nearest_road_point = nearest_points(anchor_end, road_union_utm)[1]
-        boundary_anchor_point = nearest_points(nearest_road_point, boundary_line)[1]
-        is_arbitrary = False
-        anchor_road_distance_m = float(anchor_end.distance(road_union_utm))
-        if road_features_utm:
-            nearest_feature = min(road_features_utm, key=lambda f: f["line_utm"].distance(anchor_end))
-            anchor_road_name = nearest_feature["name"]
-    else:
-        boundary_anchor_point = nearest_points(anchor_end, boundary_line)[1]
-        is_arbitrary = True
+    if road_features_utm:
+        nearest_feature = min(road_features_utm, key=lambda f: f["line_utm"].distance(anchor_end))
+        anchor_road_name = nearest_feature["name"]
 
     connector_elevation = points_xyz[0][2] if anchor_at_start else points_xyz[-1][2]
     connector = (float(boundary_anchor_point.x), float(boundary_anchor_point.y), connector_elevation)
 
     extended = [connector] + points_xyz if anchor_at_start else points_xyz + [connector]
-    return extended, is_arbitrary, anchor_road_name, anchor_road_distance_m
+    return extended, "connected_to_named_road", anchor_road_name, anchor_road_distance_m
 
 
 def _grade_stats(points_xyz: list[tuple[float, float, float]]) -> tuple[float, float]:
@@ -699,14 +704,16 @@ def find_candidate_road_corridors(
     here; see module docstring's "SOFT preference" section and
     _erosion_avoidance_score().
 
-    road_union_utm is a shapely geometry (or None) of existing real
-    roads, used for anchoring (see _anchor_to_boundary) — passing None
-    doesn't disable anything here, it just makes every candidate's
-    boundary connection point arbitrary rather than road-frontage-based.
-    road_features_utm (optional, each {'name': str, 'line_utm': LineString})
-    additionally lets an anchored candidate report WHICH real road it
-    anchored to (properties.anchor_road_name); omitting it still anchors
-    correctly via road_union_utm, it just leaves the road name generic.
+    road_union_utm is a shapely geometry (or None) of existing real,
+    NAMED roads only, used for anchoring (see _anchor_to_boundary) —
+    passing None doesn't disable anything here, it just means every
+    candidate is returned with no connector segment at all
+    (anchor_status="no_named_road_available") rather than reaching the
+    boundary. road_features_utm (optional, each {'name': str, 'line_utm':
+    LineString}) additionally lets an anchored candidate report WHICH real
+    road it anchored to (properties.anchor_road_name); omitting it still
+    anchors correctly via road_union_utm, it just leaves the road name
+    generic.
 
     boundary_polygon_utm does double duty: it's both the anchoring target
     (_anchor_to_boundary) AND, via _build_exclusion_cell_mask(), the hard
@@ -714,10 +721,10 @@ def find_candidate_road_corridors(
     from at all — the DEM covers ~100m past the drawn boundary on purpose
     (dem_data.py), but a corridor's own candidate geometry must come from
     on-parcel cells only. The single connector segment
-    _anchor_to_boundary() adds to reach the boundary line is the one
-    already-disclosed exception (see connection_point_is_arbitrary and
-    its confidence_notes caveat) — it's added AFTER this exclusion, not
-    subject to it.
+    _anchor_to_boundary() adds to reach the boundary line, when a named
+    road is available to anchor to, is the one already-disclosed exception
+    (see anchor_status and its confidence_notes caveat) — it's added AFTER
+    this exclusion, not subject to it.
 
     Returns up to max_candidates entries, both corridor types ranked
     together, best-first:
@@ -727,9 +734,9 @@ def find_candidate_road_corridors(
             'suitability_score': float,      # 0-1
             'avg_grade_pct': float,
             'length_m': float,
-            'connection_point_is_arbitrary': bool,
-            'anchor_road_name': Optional[str],       # None if anchor is arbitrary or unnamed
-            'anchor_road_distance_m': Optional[float],  # None if anchor is arbitrary
+            'anchor_status': 'connected_to_named_road' | 'no_named_road_available',
+            'anchor_road_name': Optional[str],       # None if no named road available
+            'anchor_road_distance_m': Optional[float],  # None if no named road available
             'crosses_production_zone': bool,
             'crosses_erosion_prone_soil': bool,
             'points_xyz': [(x, y, elevation_m), ...],
@@ -783,7 +790,7 @@ def find_candidate_road_corridors(
 
     scored = []
     for points, corridor_type in raw_candidates:
-        anchored_points, is_arbitrary, anchor_road_name, anchor_road_distance_m = _anchor_to_boundary(
+        anchored_points, anchor_status, anchor_road_name, anchor_road_distance_m = _anchor_to_boundary(
             points, boundary_polygon_utm, road_union_utm, road_features_utm
         )
         line = LineString([(p[0], p[1]) for p in anchored_points])
@@ -816,7 +823,7 @@ def find_candidate_road_corridors(
                 "crosses_production_zone": crosses_production_zone,
                 "erosion_avoidance_score": erosion_avoidance_score,
                 "crosses_erosion_prone_soil": crosses_erosion_prone_soil,
-                "connection_point_is_arbitrary": is_arbitrary,
+                "anchor_status": anchor_status,
                 "anchor_road_name": anchor_road_name,
                 "anchor_road_distance_m": anchor_road_distance_m,
             }
@@ -869,7 +876,7 @@ def select_optimal_road_corridor(scored_candidates: list[dict]) -> Optional[dict
 
 
 def _confidence_notes_for_candidate(
-    is_arbitrary_anchor: bool,
+    anchor_status: AnchorStatus,
     anchor_road_name: Optional[str],
     floodplain_data_is_fallback: bool,
     erosion_data_unavailable: bool,
@@ -877,15 +884,24 @@ def _confidence_notes_for_candidate(
     crosses_production_zone: bool,
     crosses_erosion_prone_soil: bool,
 ) -> str:
-    if is_arbitrary_anchor:
-        anchor_note = (
-            "an arbitrarily-chosen nearest point on the property boundary "
-            "(no real road-frontage/access data was available to anchor to)"
+    if anchor_status == "connected_to_named_road":
+        if anchor_road_name:
+            anchor_note = f"the point on the property boundary nearest {anchor_road_name} (a real, mapped existing road)"
+        else:
+            anchor_note = "the point on the property boundary nearest a real, mapped existing road"
+        connector_note = (
+            f"The final segment connecting the corridor to the property is a straight-line "
+            f"approximation to {anchor_note}, and that connecting segment specifically is NOT "
+            f"itself checked against the grade or exclusion constraints the rest of the corridor "
+            f"is. "
         )
-    elif anchor_road_name:
-        anchor_note = f"the point on the property boundary nearest {anchor_road_name} (a real, mapped existing road)"
     else:
-        anchor_note = "the point on the property boundary nearest a real, mapped existing road"
+        connector_note = (
+            "No connector segment was added to reach the property boundary: no real, named "
+            "mapped road was found nearby to anchor to, and this candidate is NOT anchored to "
+            "an arbitrary boundary point instead. The corridor's own interior geometry below is "
+            "still real, DEM-derived routing — it simply doesn't reach the property line. "
+        )
 
     production_crossing_note = PRODUCTION_CROSSING_NOTE if crosses_production_zone else ""
     erosion_crossing_note = EROSION_CROSSING_NOTE if crosses_erosion_prone_soil else ""
@@ -910,7 +926,7 @@ def _confidence_notes_for_candidate(
         else ""
     )
     return ROAD_CORRIDOR_CONFIDENCE_NOTES_TEMPLATE.format(
-        anchor_note=anchor_note,
+        connector_note=connector_note,
         production_crossing_note=production_crossing_note,
         erosion_crossing_note=erosion_crossing_note,
         steep_grade_note=steep_grade_note,
@@ -952,7 +968,7 @@ def corridors_to_geojson(
                 label=f"Suggested {candidate['corridor_type']} road corridor (rank {candidate['rank']})",
                 confidence=CONFIDENCE_LOW,
                 confidence_notes=_confidence_notes_for_candidate(
-                    candidate["connection_point_is_arbitrary"],
+                    candidate["anchor_status"],
                     candidate.get("anchor_road_name"),
                     floodplain_data_is_fallback,
                     erosion_data_unavailable,
@@ -966,7 +982,7 @@ def corridors_to_geojson(
                     "corridor_type": candidate["corridor_type"],
                     "avg_grade_pct": round(candidate["avg_grade_pct"], 1),
                     "length_ft": round(candidate["length_m"] / METERS_PER_FOOT, 1),
-                    "connection_point_is_arbitrary": candidate["connection_point_is_arbitrary"],
+                    "anchor_status": candidate["anchor_status"],
                     "anchor_road_name": candidate.get("anchor_road_name"),
                     "anchor_road_distance_ft": anchor_road_distance_ft,
                     "crosses_production_zone": candidate["crosses_production_zone"],
@@ -1139,9 +1155,19 @@ def _fetch_existing_road_features_utm(boundary_coordinates, dem) -> Optional[lis
     """Real existing-road geometry WITH names (each {'name': str,
     'line_utm': LineString}), for anchor-road reporting (see
     _anchor_to_boundary's road_features_utm param and module docstring's
-    "Corridor anchoring" section) — returns None on any failure or if
-    nothing is nearby, which just leaves the eventual anchor's
-    anchor_road_name generic/absent rather than raising."""
+    "Corridor anchoring" section) — returns None on any failure, if
+    nothing is nearby, or if nothing NAMED is nearby.
+
+    Filters out entries whose name is exactly "Unnamed road" — the exact
+    fallback label get_farm_roads_for_boundary() assigns when a fetched
+    feature has no name/fullname field of its own (farm_roads_data.py,
+    untouched — that fallback label is a real, deliberate default there for
+    OTHER consumers, e.g. get_farm_roads_geojson()'s diagnostic layer; it's
+    simply not a plausible thing to anchor a corridor connector to by name).
+    A candidate is anchored to a NAMED real road or not anchored at all —
+    see module docstring's "Corridor anchoring" section and
+    _anchor_to_boundary(). Zero roads fetched and zero NAMED roads fetched
+    both return None here, so downstream anchoring treats them identically."""
     try:
         roads = get_farm_roads_for_boundary(boundary_coordinates)
     except Exception as e:
@@ -1151,8 +1177,12 @@ def _fetch_existing_road_features_utm(boundary_coordinates, dem) -> Optional[lis
     if not roads:
         return None
 
+    named_roads = [road for road in roads if road["name"] != "Unnamed road"]
+    if not named_roads:
+        return None
+
     features = []
-    for road in roads:
+    for road in named_roads:
         geometry = road["geometry"]
         line_lists = geometry["coordinates"] if geometry["type"] == "MultiLineString" else [geometry["coordinates"]]
         for line in line_lists:
@@ -1264,8 +1294,8 @@ def summarize_road_corridor_candidates(result: dict) -> str:
     lines = [f"Suggested road corridor candidates: {len(features)}"]
     for feature in features:
         props = feature["properties"]
-        if props["connection_point_is_arbitrary"]:
-            anchor = " [arbitrary boundary anchor]"
+        if props.get("anchor_status") == "no_named_road_available":
+            anchor = " [no named road nearby — no connector segment]"
         elif props.get("anchor_road_name"):
             anchor = f" [anchored to {props['anchor_road_name']}, {props.get('anchor_road_distance_ft')}ft]"
         else:

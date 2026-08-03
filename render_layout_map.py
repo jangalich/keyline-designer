@@ -679,14 +679,14 @@ def render_layout_map(
         props = road_corridor["properties"]
         plot_line(geom, ax=ax, add_points=False, color=ROAD_CORRIDOR_COLOR, linewidth=3.0, zorder=42)
         _draw_numbered_marker(ax, geom.interpolate(0.5, normalized=True), marker_number)
-        if props.get("connection_point_is_arbitrary"):
-            anchor_note = "arbitrary boundary anchor"
+        if props.get("anchor_status") == "no_named_road_available":
+            anchor_clause = ""
         elif props.get("anchor_road_name"):
-            anchor_note = f"anchored to {props['anchor_road_name']}"
+            anchor_clause = f", anchored to {props['anchor_road_name']}"
         else:
-            anchor_note = "anchored to a real road"
+            anchor_clause = ", anchored to a real road"
         legend_entries.append(
-            f"{marker_number} — Road Corridor, {props['corridor_type']}, {anchor_note}"
+            f"{marker_number} — Road Corridor, {props['corridor_type']}{anchor_clause}"
         )
         marker_number += 1
 

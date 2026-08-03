@@ -12,9 +12,10 @@ identify_road_corridor_candidates() are real network calls this sandbox
 can't reach — by design, each is wrapped in its own try/except and
 degrades gracefully (no NHD/SSURGO data -> floodplain exclusion falls
 back to buffered valley lines, flagged in confidence_notes; no erosion
-data -> that exclusion is skipped, flagged; no road data -> anchoring
-falls back to an arbitrary boundary point, flagged per-candidate). This
-test doubles as a live check of that whole degradation path.
+data -> that exclusion is skipped, flagged; no road data -> no connector
+segment is added at all, anchor_status="no_named_road_available",
+flagged per-candidate). This test doubles as a live check of that whole
+degradation path.
 """
 
 from unittest.mock import patch as mock_patch
@@ -93,13 +94,17 @@ for feature in features:
     props = feature["properties"]
     assert props["layer"] == "suggested_road_corridor"
     assert feature["geometry"]["type"] == "LineString"
-    # No road data was reachable in this sandbox -> anchoring falls back
-    # to an arbitrary boundary point on every candidate.
-    assert props["connection_point_is_arbitrary"] is True, (
-        "with no reachable road data, every candidate should have an arbitrary connection point"
+    # No road data was reachable in this sandbox -> no connector segment
+    # is added on any candidate at all.
+    assert props["anchor_status"] == "no_named_road_available", (
+        "with no reachable road data, every candidate should report anchor_status="
+        "'no_named_road_available'"
     )
+    assert props["anchor_road_name"] is None and props["anchor_road_distance_ft"] is None
     notes = props["confidence_notes"].lower()
-    assert "arbitrarily-chosen" in notes, "the arbitrary-anchor caveat should appear in confidence_notes"
+    assert "no connector segment was added" in notes, (
+        "the no-connector caveat should appear in confidence_notes"
+    )
 
-print("Candidates correctly reflect unreachable road data (arbitrary anchor, flagged in confidence_notes).")
+print("Candidates correctly reflect unreachable road data (no connector segment, flagged in confidence_notes).")
 print("\nAll road corridor pipeline checks passed.")

@@ -233,28 +233,31 @@ for candidate in pond_candidates:
 print("Pond/water-system zone exclusion correctly keeps candidates clear of the buffered zone.")
 
 
-# --- anchoring: real road data gives a non-arbitrary connection point; no road data flags it ---
+# --- anchoring: real named road data connects the corridor; no road data omits the connector entirely ---
 
 # a real road running along the west edge of the boundary
 road_union = LineString([(500000, 4500000), (500000, 4500200)])
 anchored_candidates = find_candidate_road_corridors(dem, [], [], boundary, road_union_utm=road_union, max_candidates=50)
 assert anchored_candidates, "expected candidates for the anchoring check"
-assert all(not c["connection_point_is_arbitrary"] for c in anchored_candidates), (
-    "with real road data available, no candidate's connection point should be flagged as arbitrary"
+assert all(c["anchor_status"] == "connected_to_named_road" for c in anchored_candidates), (
+    "with real road data available, every candidate should report anchor_status='connected_to_named_road'"
 )
 assert all(c["anchor_road_distance_m"] is not None for c in anchored_candidates), (
     "with real road data available, anchor_road_distance_m should be a real reported value"
 )
-print("With real road data available, connection points are anchored (not flagged arbitrary).")
+print("With real road data available, connection points are anchored (connected_to_named_road).")
 
-no_road_candidates = find_candidate_road_corridors(dem, [], [], boundary, road_union_utm=None, max_candidates=50)
-assert all(c["connection_point_is_arbitrary"] for c in no_road_candidates), (
-    "with no road data available, every candidate's connection point should be flagged arbitrary"
+unanchored_candidates = find_candidate_road_corridors(dem, [], [], boundary, road_union_utm=None, max_candidates=50)
+assert all(c["anchor_status"] == "no_named_road_available" for c in unanchored_candidates), (
+    "with no road data available, every candidate should report anchor_status='no_named_road_available'"
 )
-assert all(c["anchor_road_name"] is None and c["anchor_road_distance_m"] is None for c in no_road_candidates), (
+assert all(c["anchor_road_name"] is None and c["anchor_road_distance_m"] is None for c in unanchored_candidates), (
     "with no road data available, anchor_road_name/anchor_road_distance_m should both be None, not fabricated"
 )
-print("With no road data available, every candidate's connection point is correctly flagged as arbitrary.")
+print(
+    "With no road data available, no connector segment is added at all -- every candidate's own interior "
+    "geometry is returned unchanged, correctly flagged 'no_named_road_available'."
+)
 
 
 # --- anchoring prefers real road FRONTAGE (named) when road_features_utm is available ---
@@ -282,7 +285,7 @@ print("With road_features_utm available, anchored candidates report the specific
 unnamed_anchor_candidates = find_candidate_road_corridors(
     dem, [], [], boundary, road_union_utm=road_union, road_features_utm=None, max_candidates=50
 )
-assert all(not c["connection_point_is_arbitrary"] for c in unnamed_anchor_candidates)
+assert all(c["anchor_status"] == "connected_to_named_road" for c in unnamed_anchor_candidates)
 assert all(c["anchor_road_name"] is None for c in unnamed_anchor_candidates), (
     "without road_features_utm, anchor_road_name should be None (not fabricated), even though anchoring "
     "itself still works via road_union_utm alone"
@@ -344,7 +347,7 @@ print(f"Candidates at or below {STEEP_GRADE_ENGINEERING_NOTE_THRESHOLD_PCT}% gra
 geojson = corridors_to_geojson(candidates, floodplain_data_is_fallback=True, erosion_data_unavailable=True)
 validate_feature_collection(geojson)
 required_props = {
-    "corridor_type", "avg_grade_pct", "length_ft", "connection_point_is_arbitrary",
+    "corridor_type", "avg_grade_pct", "length_ft", "anchor_status",
     "anchor_road_name", "anchor_road_distance_ft", "crosses_production_zone",
     "crosses_erosion_prone_soil", "constraints_satisfied",
 }
