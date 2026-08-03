@@ -15,22 +15,27 @@ existing road_corridors.py pipeline it will eventually feed.
 Pipeline:
 
     DEM + slope + exclusions --> per-cell traversal cost raster -->
-    multi-source/multi-destination Dijkstra over that raster --> ordered
-    path cells --> (x, y, elevation) points
+    multi-source/multi-destination Dijkstra over that raster (or Yen's
+    algorithm, layered on top, for several distinct alternatives) -->
+    ordered path cells --> (x, y, elevation) points
 
-build_cost_raster() keeps today's two HARD exclusions (excluded_mask,
-max-grade ceiling) exactly as hard as they are in road_corridors.py's own
-constraint stack — a corridor still cannot be generated through a
-water-system buffer, floodplain, or a grade over the pinned ceiling, full
-stop, not just discouraged. Everything else becomes a finite, differentiable
-cost: gentler cells cost close to their raw travel distance, cells near the
-legal grade ceiling cost meaningfully more (a quadratic grade penalty, not
-linear, so the cost curve steepens sharply as a candidate route approaches
-the ceiling rather than staying comfortably below it), and cells inside a
-production zone carry a flat additive penalty (a real but soft preference,
-same "crossing production land is a valid option, just a worse one" stance
-road_corridors.py's own docstring already takes towards production zones).
+Hard exclusion vs. soft cost penalty, current design (this module's own
+responsibility only covers the SLOPE half of that split -- see each
+constant/param's own docstring below for exactly what moved where):
+  - HARD (np.inf in cost_raster, a route genuinely cannot cross it at
+    all): excluded_mask -- which is now the CALLER's responsibility to
+    build correctly, expected to already fold in off-boundary ground, the
+    selected water-system zone (buffered), AND production zone(s) (see
+    road_corridors.py once a later prompt wires this in) -- plus any cell
+    where slope_pct itself is NaN (undefined terrain, see build_cost_
+    raster()'s own docstring).
+  - SOFT (a finite cost penalty, a route CAN still choose to pay it):
+    grade (an unbounded quadratic penalty -- there is no grade ceiling in
+    this design anymore, unlike the hard MAX_ROAD_GRADE_PCT cutoff earlier
+    prompts used) and floodplain/riparian ground (a flat additive penalty,
+    moved here from being a hard exclusion in earlier prompts).
 
+build_cost_raster() turns that split into one per-cell cost grid.
 least_cost_path() is Dijkstra, structurally modeled on
 valley_delineation.fill_depressions()'s own heap loop: same "a min-heap of
 (priority, tie-break counter, row, col) tuples, popped in ascending
@@ -39,6 +44,10 @@ differences are what fill_depressions() seeds the heap from and what it
 compares (multi-source at cost 0 here vs. the grid's own valid border at
 its own elevation there; a real edge weight — real ground distance times
 the target cell's traversal cost — instead of an elevation comparison).
+k_shortest_paths() layers Yen's algorithm on top of least_cost_path()
+itself (calls it repeatedly against small, per-spur raster copies) to
+surface several genuinely distinct alternative routes, not just the one
+cheapest path.
 """
 
 import heapq
@@ -49,76 +58,117 @@ import numpy as np
 
 from raster_grid import D8_OFFSETS, pixel_center_xy
 
-# How sharply a cell's cost rises as its slope approaches max_grade_pct:
-# cost adds GRADE_PENALTY_WEIGHT * (slope_pct / max_grade_pct) ** 2 cost-
-# units per cell (so a cell right at the legal ceiling costs
-# GRADE_PENALTY_WEIGHT above a flat cell's cost of 1.0, and a cell at half
-# the ceiling costs only a quarter of that). CONFIGURABLE — a deliberately
-# unvalidated starting value, not tuned against any real diagnostic sweep
-# yet; same caveat every other threshold in this pipeline carries (see e.g.
-# water_candidate_zones.py's own CONFIGURABLE constants) and same
-# expectation that it gets re-tuned once there's a real property to check
-# routed candidates against.
-GRADE_PENALTY_WEIGHT = 3.0
+# How sharply a cell's cost rises with slope: cost adds
+# grade_penalty_weight * slope_pct ** 2 cost-units per cell. UNBOUNDED --
+# there is no grade ceiling in this design (unlike earlier prompts' hard
+# MAX_ROAD_GRADE_PCT cutoff), so this has no ceiling to normalize against
+# either; slope_pct itself (a raw percent grade, e.g. 15.0 for 15%) is
+# squared directly. Rescaled from this constant's own earlier
+# ceiling-normalized value (weight * (slope_pct / max_grade_pct) ** 2,
+# where a cell AT the old 15%-grade ceiling cost 3.0x base) to keep
+# roughly the same real-world behavior at that same 15% grade under the
+# new unnormalized formula: 3.0 / 15.0**2 = 0.0133 -- same "rescale a
+# weight when the formula it's expressed against changes" technique
+# road_corridors.py's own scoring weights already use elsewhere in this
+# pipeline. CONFIGURABLE — still a deliberately unvalidated starting
+# value, not tuned against any real diagnostic sweep yet; same caveat
+# every other threshold in this pipeline carries and same expectation
+# that it gets re-tuned once there's a real property to check routed
+# candidates against.
+GRADE_PENALTY_WEIGHT = 0.0133
 
-# Flat additive cost-units added to any cell inside a production zone, on
-# top of its grade-based cost. CONFIGURABLE, same unvalidated-starting-
-# value caveat as GRADE_PENALTY_WEIGHT above — this is a placeholder
-# magnitude (comparable to a few cells' worth of flat-ground travel cost),
-# not a tuned trade-off between "acres of production land crossed" and
-# "extra route distance."
-PRODUCTION_CROSSING_COST_PENALTY = 5.0
+# Flat additive cost-units added to any cell inside a floodplain/riparian
+# buffer, on top of its grade-based cost -- floodplain/riparian ground
+# moved from a HARD exclusion (earlier prompts) to this SOFT penalty under
+# the current design: a route can still cross it when the alternative is
+# a costly enough detour, it just costs more per cell. CONFIGURABLE, same
+# unvalidated-starting-value caveat as GRADE_PENALTY_WEIGHT above -- a
+# placeholder magnitude (comparable to a few cells' worth of flat-ground
+# travel cost, the same order of magnitude the old, now-removed
+# PRODUCTION_CROSSING_COST_PENALTY used), not a tuned trade-off between
+# "meters of floodplain crossed" and "extra route distance."
+FLOODPLAIN_CROSSING_COST_PENALTY = 5.0
 
 # Baseline cost-per-cell for perfectly flat, unpenalized ground — the
-# reference GRADE_PENALTY_WEIGHT and PRODUCTION_CROSSING_COST_PENALTY are
+# reference GRADE_PENALTY_WEIGHT and FLOODPLAIN_CROSSING_COST_PENALTY are
 # additions on top of. Not itself CONFIGURABLE: it only sets the unit scale
 # the other two are expressed in (cost-units per cell of pure travel
 # distance), so changing it would just rescale every cost uniformly.
 _BASE_TRAVEL_COST = 1.0
+
+# Safety ceiling on how many alternative routes k_shortest_paths() will
+# ever generate -- NOT a design target every call is expected to reach.
+# Real terrain rarely offers this many genuinely distinct (post-dedup)
+# alternatives between one source and one destination; this just bounds
+# the worst-case work (each additional route costs up to one full
+# least_cost_path() call per cell already on the previous route).
+# CONFIGURABLE.
+MAX_ROUTES_TO_GENERATE = 8
+
+# A candidate route is rejected as a near-duplicate of an already-accepted
+# one if the fraction of its own cells also present in that accepted
+# route's cells is at or above this threshold (see _cell_overlap_fraction()
+# -- the fraction is computed against the SMALLER of the two routes' own
+# cell counts, so a short near-duplicate spur off a much longer accepted
+# route is still caught correctly, not diluted by the longer route's
+# extra unique cells the way a plain Jaccard/union-based fraction would
+# be). 0.7 is a deliberately unvalidated starting value, same CONFIGURABLE
+# caveat as every other threshold in this module.
+ROUTE_DEDUP_OVERLAP_THRESHOLD = 0.7
 
 
 def build_cost_raster(
     dem: dict,
     slope_pct: np.ndarray,
     excluded_mask: np.ndarray,
-    max_grade_pct: float,
-    production_mask: Optional[np.ndarray] = None,
+    floodplain_mask: Optional[np.ndarray] = None,
+    grade_penalty_weight: float = GRADE_PENALTY_WEIGHT,
+    floodplain_penalty: float = FLOODPLAIN_CROSSING_COST_PENALTY,
 ) -> np.ndarray:
     """
     Per-cell traversal-cost grid, same shape as dem['array'].
 
-    np.inf wherever excluded_mask is True, slope_pct > max_grade_pct, or
-    slope_pct is NaN (an edge/nodata-adjacent cell terrain_metrics.
-    compute_slope_and_aspect() can't compute a real slope for at all --
-    folded into the same "not real, traversable ground" bucket
-    excluded_mask represents, rather than left to produce a NaN cost that
-    would silently corrupt the Dijkstra heap comparisons in
-    least_cost_path()). These stay HARD exclusions, exactly as they are in
-    today's road_corridors.py constraint stack -- not softened into a large
-    finite cost.
+    np.inf wherever excluded_mask is True or slope_pct is NaN (an edge/
+    nodata-adjacent cell terrain_metrics.compute_slope_and_aspect() can't
+    compute a real slope for at all -- folded into the same "not real,
+    traversable ground" bucket excluded_mask represents, rather than left
+    to produce a NaN cost that would silently corrupt the Dijkstra heap
+    comparisons in least_cost_path()).
+
+    excluded_mask is entirely the CALLER's own responsibility to build
+    correctly -- under the current design it's expected to already
+    include off-boundary cells, the selected water-system zone (buffered),
+    AND production zone(s), all HARD exclusions (see road_corridors.py
+    once a later prompt wires this in). This module has no
+    max_grade_pct or production_mask parameter anymore: grade has no hard
+    ceiling here at all (an arbitrarily steep, non-excluded cell is always
+    traversable, just increasingly expensive -- see grade_penalty_weight
+    below), and production is no longer this module's own soft term --
+    it's now the caller's job to fold into excluded_mask before calling
+    this at all, since the current design treats it as hard, not soft.
 
     Every other cell gets a finite cost: _BASE_TRAVEL_COST (raw travel
-    distance) plus GRADE_PENALTY_WEIGHT * (slope_pct / max_grade_pct) ** 2
-    (a quadratic grade penalty -- cells near the legal ceiling cost
-    meaningfully more than comfortably-gentle ones), plus
-    PRODUCTION_CROSSING_COST_PENALTY for any cell where production_mask is
-    True (production_mask omitted or None means no production-zone
-    penalty at all, e.g. a caller that hasn't computed one yet).
+    distance) plus grade_penalty_weight * slope_pct ** 2 -- an UNBOUNDED
+    quadratic grade penalty (see that constant's own comment for why it's
+    no longer normalized against any ceiling) -- plus floodplain_penalty
+    for any cell where floodplain_mask is True (floodplain_mask omitted or
+    None means no floodplain penalty at all, e.g. a caller that hasn't
+    computed one yet).
     """
     array = dem["array"]
     rows, cols = array.shape
 
-    hard_excluded = excluded_mask | np.isnan(slope_pct) | (slope_pct > max_grade_pct)
+    hard_excluded = excluded_mask | np.isnan(slope_pct)
     traversable = ~hard_excluded
 
-    grade_ratio = np.zeros((rows, cols), dtype=np.float64)
-    grade_ratio[traversable] = slope_pct[traversable] / max_grade_pct
+    grade_pct_squared = np.zeros((rows, cols), dtype=np.float64)
+    grade_pct_squared[traversable] = slope_pct[traversable].astype(np.float64) ** 2
 
     cost = np.full((rows, cols), _BASE_TRAVEL_COST, dtype=np.float64)
-    cost += GRADE_PENALTY_WEIGHT * grade_ratio**2
+    cost += grade_penalty_weight * grade_pct_squared
 
-    if production_mask is not None:
-        cost[production_mask] += PRODUCTION_CROSSING_COST_PENALTY
+    if floodplain_mask is not None:
+        cost[floodplain_mask] += floodplain_penalty
 
     cost[hard_excluded] = np.inf
     return cost
@@ -217,6 +267,160 @@ def least_cost_path(
     return None
 
 
+def _path_cumulative_costs(dem: dict, cost_raster: np.ndarray, cells: list[tuple[int, int]]) -> list[float]:
+    """Running cost total at each index of an already-found path's own
+    `cells` list (index 0 is always 0.0, the source itself), using the
+    exact same edge-weight formula least_cost_path() itself accumulates
+    with (real ground distance to the next cell times that next cell's own
+    cost_raster value) -- lets k_shortest_paths() know the true cost of
+    the ROOT portion of a previous route up to any given spur node,
+    without re-running Dijkstra just to ask that question."""
+    px, py = dem["resolution_meters"]
+    cumulative = [0.0]
+    for (r1, c1), (r2, c2) in zip(cells, cells[1:]):
+        step_cost = math.hypot((c2 - c1) * px, (r2 - r1) * py) * cost_raster[r2, c2]
+        cumulative.append(cumulative[-1] + step_cost)
+    return cumulative
+
+
+def _cell_overlap_fraction(cells_a: list[tuple[int, int]], cells_b: list[tuple[int, int]]) -> float:
+    """
+    Fraction of the SMALLER route's own cells that also appear in the
+    other route -- deliberately divided by min(len(a), len(b)), not
+    len(union) (Jaccard): a short near-duplicate deviation off a much
+    longer accepted route should still register as heavily overlapping,
+    and a plain union-based fraction would understate that (diluted by
+    the longer route's many extra unique cells). 0.0 if either route is
+    empty.
+    """
+    set_a, set_b = set(cells_a), set(cells_b)
+    if not set_a or not set_b:
+        return 0.0
+    return len(set_a & set_b) / min(len(set_a), len(set_b))
+
+
+def k_shortest_paths(
+    dem: dict,
+    cost_raster: np.ndarray,
+    source_cell: tuple[int, int],
+    destination_cell: tuple[int, int],
+    max_routes: int = MAX_ROUTES_TO_GENERATE,
+    dedup_overlap_threshold: float = ROUTE_DEDUP_OVERLAP_THRESHOLD,
+) -> list[dict]:
+    """
+    Yen's algorithm, layered on top of least_cost_path() (calls it
+    repeatedly, never reimplements Dijkstra itself): generates the single
+    shortest source->destination route first, then repeatedly finds the
+    next-cheapest genuine DEVIATION from an already-accepted route --
+    a "spur" path from each node along that route, searched against a
+    per-spur COPY of cost_raster with already-used ground temporarily
+    blocked (np.inf) so the spur is forced to actually diverge rather than
+    immediately rediscovering the same route:
+
+      - every node on the route's own root path UP TO (not including) the
+        spur node is blocked outright, so the spur can't loop back through
+        ground this route already used to get there;
+      - whichever specific next cell any already-accepted OR already-
+        queued candidate route sharing this exact same root took from the
+        spur node is ALSO blocked -- a node-level stand-in for excluding
+        that one directed edge (this raster-based Dijkstra has no separate
+        per-edge cost to exclude), forcing the spur into a genuinely
+        different next step. Checking already-queued candidates too (not
+        just accepted routes, which is all classic Yen's algorithm
+        requires) isn't necessary for correctness -- an exact-duplicate
+        candidate is already caught by the cells-based dedup below -- but
+        it steers the search toward discovering a genuinely NEW deviation
+        at that spur point instead of just re-deriving one already sitting
+        in the candidate pool, which serves this function's actual goal
+        (real diversity, not just distinctness) better.
+
+    A candidate deviation is only ACCEPTED if its cell-overlap fraction
+    (_cell_overlap_fraction()) against EVERY already-accepted route is
+    below dedup_overlap_threshold -- once a candidate fails that check
+    against some accepted route, it can never pass later (the accepted
+    set only grows), so a rejected candidate is dropped for good, not
+    reconsidered. Stops as soon as max_routes routes are accepted OR the
+    candidate pool is exhausted (no undiscovered deviation exists, or
+    every remaining one is too similar to something already accepted) --
+    returns whatever was actually found either way, never padded to
+    max_routes with a manufactured near-duplicate.
+
+    Returns a list of dicts, each the exact same shape least_cost_path()
+    itself returns ({"cells", "total_cost", "source_cell",
+    "destination_cell"}), so path_cells_to_points_xyz() works unchanged on
+    any of them. Returns [] if even the first (cheapest) route isn't
+    reachable at all -- same "no path found" outcome least_cost_path()
+    itself reports as None, just list-shaped here since every OTHER
+    return path from this function is a list.
+    """
+    first_path = least_cost_path(dem, cost_raster, [source_cell], [destination_cell])
+    if first_path is None:
+        return []
+
+    accepted = [first_path]
+
+    candidates: list[dict] = []
+    seen_candidate_cells: set[tuple[tuple[int, int], ...]] = set()
+
+    while len(accepted) < max_routes:
+        previous_cells = accepted[-1]["cells"]
+        cumulative_costs = _path_cumulative_costs(dem, cost_raster, previous_cells)
+
+        for i in range(len(previous_cells) - 1):
+            spur_node = previous_cells[i]
+            root_path = previous_cells[: i + 1]
+
+            spur_cost_raster = cost_raster.copy()
+            for node in root_path[:-1]:
+                spur_cost_raster[node] = np.inf
+            for other in accepted + candidates:
+                other_cells = other["cells"]
+                if len(other_cells) > i and other_cells[: i + 1] == root_path:
+                    spur_cost_raster[other_cells[i + 1]] = np.inf
+
+            spur_result = least_cost_path(dem, spur_cost_raster, [spur_node], [destination_cell])
+            if spur_result is None:
+                continue
+
+            full_cells = root_path[:-1] + spur_result["cells"]
+            full_cells_key = tuple(full_cells)
+            if full_cells_key in seen_candidate_cells:
+                continue
+            seen_candidate_cells.add(full_cells_key)
+
+            candidates.append(
+                {
+                    "cells": full_cells,
+                    "total_cost": cumulative_costs[i] + spur_result["total_cost"],
+                    "source_cell": source_cell,
+                    "destination_cell": destination_cell,
+                }
+            )
+
+        if not candidates:
+            break  # candidate pool exhausted -- no undiscovered deviation exists at all
+
+        candidates.sort(key=lambda c: c["total_cost"])
+        next_route = None
+        remaining = []
+        for candidate in candidates:
+            if next_route is None and all(
+                _cell_overlap_fraction(candidate["cells"], a["cells"]) < dedup_overlap_threshold
+                for a in accepted
+            ):
+                next_route = candidate
+            else:
+                remaining.append(candidate)
+        candidates = remaining
+
+        if next_route is None:
+            break  # every remaining candidate is too similar to something already accepted
+
+        accepted.append(next_route)
+
+    return accepted
+
+
 def path_cells_to_points_xyz(dem: dict, cells: list[tuple[int, int]]) -> list[tuple[float, float, float]]:
     """
     Thin wrapper over raster_grid.pixel_center_xy() + dem['array']: turns
@@ -232,25 +436,34 @@ def path_cells_to_points_xyz(dem: dict, cells: list[tuple[int, int]]) -> list[tu
 
 
 if __name__ == "__main__":
-    # Offline smoke test: a flat synthetic DEM with a deliberate obstacle
-    # -- a production-zone band sitting squarely on the straight line
-    # between a source and a destination, with a clear, cheap detour
-    # around one end of it. Confirms least_cost_path() actually detours
-    # around the obstacle instead of paying to cross it, and that the
-    # detour's total_cost beats what a straight line through the obstacle
-    # would have cost.
+    # Offline smoke test, two DEMs sharing the same source/destination row
+    # and the same central column obstacle band, differing only in which
+    # gaps that band leaves open:
+    #
+    #   - TWO-ROUTE DEM: the obstacle leaves a gap near the top AND a gap
+    #     near the bottom -- two genuinely distinct, roughly comparable-
+    #     cost ways around it. k_shortest_paths() should return both,
+    #     as two DIFFERENT routes (one through each gap), not two
+    #     near-identical variants of the same detour.
+    #   - ONE-ROUTE DEM: the same obstacle, but the top gap is closed too
+    #     -- only the bottom gap offers a legal way across at all.
+    #     k_shortest_paths() should return exactly one route (dedup
+    #     correctly refuses to manufacture a near-duplicate second one
+    #     just to pad the list).
     size = 21
-    array = np.zeros((size, size), dtype=np.float32)
-    slope_pct = np.zeros((size, size), dtype=np.float32)
-    excluded_mask = np.zeros((size, size), dtype=bool)
-
     center_row = size // 2
     obstacle_col = size // 2
-    # A short vertical wall of production land, centered on the direct
-    # source->destination row, with open lanes a few cells above and below
-    # it -- a real detour, not a dead end.
-    production_mask = np.zeros((size, size), dtype=bool)
-    production_mask[center_row - 2 : center_row + 3, obstacle_col] = True
+    array = np.zeros((size, size), dtype=np.float32)
+    slope_pct = np.zeros((size, size), dtype=np.float32)
+
+    def _obstacle_mask(top_gap: bool, bottom_gap: bool) -> np.ndarray:
+        mask = np.zeros((size, size), dtype=bool)
+        mask[:, obstacle_col] = True
+        if top_gap:
+            mask[1, obstacle_col] = False
+        if bottom_gap:
+            mask[size - 2, obstacle_col] = False
+        return mask
 
     dem = {
         "array": array,
@@ -259,32 +472,56 @@ if __name__ == "__main__":
         "origin_y": 4500000.0,
         "crs": "EPSG:32617",
     }
+    source_cell = (center_row, 0)
+    destination_cell = (center_row, size - 1)
 
-    max_grade_pct = 15.0
-    cost_raster = build_cost_raster(dem, slope_pct, excluded_mask, max_grade_pct, production_mask)
+    print("--- Two legal routes (gaps at both ends of the obstacle) ---")
+    two_route_excluded = _obstacle_mask(top_gap=True, bottom_gap=True)
+    two_route_cost_raster = build_cost_raster(dem, slope_pct, two_route_excluded)
+    two_routes = k_shortest_paths(dem, two_route_cost_raster, source_cell, destination_cell, max_routes=4)
 
-    source_cells = [(center_row, 0)]
-    destination_cells = [(center_row, size - 1)]
-
-    result = least_cost_path(dem, cost_raster, source_cells, destination_cells)
-
-    if result is None:
-        print("No path found -- smoke test DEM is misconfigured (obstacle fully blocks the grid).")
-    else:
-        crosses_obstacle = any(production_mask[r, c] for r, c in result["cells"])
-        straight_line_cells = [(center_row, col) for col in range(size)]
-        straight_line_cost = sum(
-            5.0 * cost_raster[r, c] for r, c in straight_line_cells[1:]  # first cell is the source, cost-free
+    print(f"Routes found: {len(two_routes)}")
+    for i, route in enumerate(two_routes):
+        uses_top_gap = (1, obstacle_col) in route["cells"]
+        uses_bottom_gap = (size - 2, obstacle_col) in route["cells"]
+        print(
+            f"  Route {i}: {len(route['cells'])} cells, total_cost={route['total_cost']:.2f}, "
+            f"via top gap={uses_top_gap}, via bottom gap={uses_bottom_gap}"
         )
 
-        print(f"Path found: {len(result['cells'])} cells, total_cost={result['total_cost']:.2f}")
-        print(f"Source: {result['source_cell']}, destination: {result['destination_cell']}")
-        print(f"Path crosses the production obstacle: {crosses_obstacle}")
-        print(f"Straight-line-through-obstacle cost would have been: {straight_line_cost:.2f}")
+    assert len(two_routes) >= 2, f"expected at least 2 distinct routes around a two-sided obstacle, got {len(two_routes)}"
+    gap_sides = set()
+    for route in two_routes[:2]:
+        if (1, obstacle_col) in route["cells"]:
+            gap_sides.add("top")
+        if (size - 2, obstacle_col) in route["cells"]:
+            gap_sides.add("bottom")
+    assert gap_sides == {"top", "bottom"}, (
+        f"expected the top-2 routes to use DIFFERENT gaps (one each), got sides used: {gap_sides}"
+    )
+    overlap = _cell_overlap_fraction(two_routes[0]["cells"], two_routes[1]["cells"])
+    assert overlap < ROUTE_DEDUP_OVERLAP_THRESHOLD, (
+        f"the two accepted routes overlap {overlap:.2f}, at or above the dedup threshold -- they should be "
+        f"genuinely distinct, not near-identical variants of the same detour"
+    )
+    print(f"First two routes use different gaps and overlap only {overlap:.2f} (below the dedup threshold).\n")
 
-        assert not crosses_obstacle, "expected the path to detour around the production obstacle, not cross it"
-        assert result["total_cost"] < straight_line_cost, (
-            f"expected the detour ({result['total_cost']:.2f}) to cost less than "
-            f"a straight line through the obstacle ({straight_line_cost:.2f})"
-        )
-        print("Smoke test passed: least-cost path detours around the obstacle and beats the straight-line cost.")
+    print("--- One legal route (the top gap is also blocked) ---")
+    one_route_excluded = _obstacle_mask(top_gap=False, bottom_gap=True)
+    one_route_cost_raster = build_cost_raster(dem, slope_pct, one_route_excluded)
+    one_routes = k_shortest_paths(dem, one_route_cost_raster, source_cell, destination_cell, max_routes=4)
+
+    print(f"Routes found: {len(one_routes)}")
+    for i, route in enumerate(one_routes):
+        print(f"  Route {i}: {len(route['cells'])} cells, total_cost={route['total_cost']:.2f}")
+
+    assert len(one_routes) == 1, (
+        f"expected exactly one route when only one side of the obstacle is legal, got {len(one_routes)} -- "
+        f"dedup should have refused to pad the list with a near-duplicate"
+    )
+    assert all((size - 2, obstacle_col) in one_routes[0]["cells"] for _ in [None]), (
+        "the one route found must actually use the only open gap"
+    )
+    print("Exactly one route found, correctly not padded with a manufactured near-duplicate.\n")
+
+    print("Smoke test passed.")
