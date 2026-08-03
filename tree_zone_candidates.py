@@ -779,7 +779,22 @@ def identify_tree_zone_candidates(
     selected_water_zone = water_result["selected_water_zone"]
     water_polygons_utm = [selected_water_zone["polygon_utm"]] if selected_water_zone else []
 
-    road_result = identify_road_corridor_candidates(boundary_coordinates, dem=dem)
+    # identify_road_corridor_candidates() now requires a real anchor_lon_lat
+    # to generate any routes at all (see road_corridors.py's own module
+    # docstring) -- there's no real one available in this module's own
+    # context yet (a genuine product decision, not derivable from the
+    # boundary alone), so this borrows render_layout_map.py's TEMPORARY
+    # placeholder reference-property anchor purely to unblock testing/live
+    # runs, same as render_layout_map.py's own call. Imported locally
+    # rather than at module level so importing tree_zone_candidates.py
+    # doesn't also eagerly pull in render_layout_map.py's own heavier
+    # rendering dependencies (matplotlib/contextily/xyzservices) for
+    # callers that never actually render a map.
+    from render_layout_map import _PLACEHOLDER_REFERENCE_PROPERTY_ANCHOR_LON_LAT
+
+    road_result = identify_road_corridor_candidates(
+        boundary_coordinates, dem=dem, anchor_lon_lat=_PLACEHOLDER_REFERENCE_PROPERTY_ANCHOR_LON_LAT
+    )
     selected_road_corridor = road_result["selected_road_corridor"]
     road_lines_utm = [selected_road_corridor["line_utm"]] if selected_road_corridor else []
 

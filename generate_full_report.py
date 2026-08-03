@@ -108,9 +108,24 @@ def generate_full_report(boundary_coordinates: list) -> str:
     if water_candidate_zones_geojson is not None:
         print(f"  {summarize_water_system_candidate_zones(water_zone_result)}\n")
 
-    print("Step 7/10: Identifying suggested road corridor candidates (DEM contour-band/ridge-top)...")
+    print("Step 7/10: Identifying suggested road corridor candidates (DEM least-cost-path routing)...")
     try:
-        road_corridor_result = identify_road_corridor_candidates(boundary_coordinates)
+        # identify_road_corridor_candidates() now requires a real
+        # anchor_lon_lat to generate any routes at all (see
+        # road_corridors.py's own module docstring) -- there's no real one
+        # available in this pipeline's own context yet (a genuine product
+        # decision, not derivable from the boundary alone), so this
+        # borrows render_layout_map.py's TEMPORARY placeholder reference-
+        # property anchor purely to unblock testing/live runs, same as
+        # render_layout_map.py's own call. Imported locally rather than at
+        # module level so this script doesn't also eagerly pull in
+        # render_layout_map.py's own heavier rendering dependencies
+        # (matplotlib/contextily/xyzservices) just to fetch this constant.
+        from render_layout_map import _PLACEHOLDER_REFERENCE_PROPERTY_ANCHOR_LON_LAT
+
+        road_corridor_result = identify_road_corridor_candidates(
+            boundary_coordinates, anchor_lon_lat=_PLACEHOLDER_REFERENCE_PROPERTY_ANCHOR_LON_LAT
+        )
         road_corridor_candidates_geojson = road_corridor_result["zones_geojson"]
     except Exception as e:
         # Same reasoning as the other DEM/network-backed layers above — an

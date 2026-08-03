@@ -722,9 +722,24 @@ def _suggested_corridor_as_road_fallback(
     empty," matching find_candidate_solar_zones()'s own None-vs-[]
     convention for road_geometries_utm. UNCHANGED by the point-candidate
     redesign.
+
+    identify_road_corridor_candidates() now requires a real anchor_lon_lat
+    to generate any routes at all (see road_corridors.py's own module
+    docstring) -- there's no real one available in this module's own
+    context yet (a genuine product decision, not derivable from the
+    boundary alone), so this borrows render_layout_map.py's TEMPORARY
+    placeholder reference-property anchor purely to unblock testing/live
+    runs, same as render_layout_map.py's own call. Imported locally
+    (inside this function, not at module level) because render_layout_map.py
+    itself imports FROM solar_suitability.py (fetch_and_select_optimal_
+    structure_site) -- a top-level import here would be circular.
     """
+    from render_layout_map import _PLACEHOLDER_REFERENCE_PROPERTY_ANCHOR_LON_LAT
+
     try:
-        corridor_result = identify_road_corridor_candidates(boundary_coordinates, dem=dem)
+        corridor_result = identify_road_corridor_candidates(
+            boundary_coordinates, dem=dem, anchor_lon_lat=_PLACEHOLDER_REFERENCE_PROPERTY_ANCHOR_LON_LAT
+        )
         features = corridor_result["zones_geojson"]["features"]
         if not features:
             return None

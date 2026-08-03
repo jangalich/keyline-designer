@@ -125,6 +125,11 @@ from road_corridors import fetch_and_select_optimal_road_corridor
 from solar_suitability import fetch_and_select_optimal_structure_site
 from water_suitability import fetch_and_select_optimal_water_zone
 
+# TEMPORARY: hardcoded to Jordan's reference property until frontend
+# anchor-point selection ships. NOT a real default — do not reuse for
+# any other property. Remove once callers supply a real user-picked point.
+_PLACEHOLDER_REFERENCE_PROPERTY_ANCHOR_LON_LAT = (-79.98356157031265, 40.64303511679458)
+
 WGS84 = "EPSG:4326"
 WEB_MERCATOR = "EPSG:3857"
 
@@ -472,7 +477,9 @@ def fetch_layout_layers(boundary_coordinates: list[tuple[float, float]], dem: Op
 
     production_result = identify_optimized_production_areas(boundary_coordinates, dem=dem)
     water_zone = fetch_and_select_optimal_water_zone(boundary_coordinates, dem=dem)
-    road_corridor = fetch_and_select_optimal_road_corridor(boundary_coordinates, dem=dem)
+    road_corridor = fetch_and_select_optimal_road_corridor(
+        boundary_coordinates, dem=dem, anchor_lon_lat=_PLACEHOLDER_REFERENCE_PROPERTY_ANCHOR_LON_LAT
+    )
     structure_site = fetch_and_select_optimal_structure_site(boundary_coordinates, dem=dem)
     water_features = get_water_features_for_boundary(boundary_coordinates)
     contour_lines = compute_contour_lines(dem)
