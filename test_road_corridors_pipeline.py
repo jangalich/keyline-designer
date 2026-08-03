@@ -3,21 +3,24 @@ test_road_corridors_pipeline.py
 
 End-to-end offline check that identify_road_corridor_candidates()'s
 wiring (DEM -> optimized production areas -> the single selected water
-zone -> floodplain/road fetches -> constraint stack -> ranked GeoJSON)
-fits together, using a hand-built synthetic DEM passed via `dem=` (same
-approach as test_water_system_candidate_pipeline.py /
+zone -> floodplain fetch -> anchor-to-farthest-point routing -> ranked
+GeoJSON) fits together, using a hand-built synthetic DEM passed via `dem=`
+(same approach as test_water_system_candidate_pipeline.py /
 test_solar_suitability_pipeline.py).
 
-production_areas now comes from production_area_ceiling.identify_
-optimized_production_areas() (the OPTIMIZED/final, ceiling-trimmed patch
-shape, scored against render_fill_polygon_utm) rather than production_
-area.identify_production_areas()'s raw pre-optimization patches, and the
-water-zone hard exclusion now comes from water_suitability.fetch_and_
+production_areas comes from production_area_ceiling.identify_optimized_
+production_areas() (the OPTIMIZED/final, ceiling-trimmed patch shape,
+scored against render_fill_polygon_utm) rather than production_area.
+identify_production_areas()'s raw pre-optimization patches, and the
+water-zone hard exclusion comes from water_suitability.fetch_and_
 select_optimal_water_zone() -- the single rank-1 SELECTED zone -- rather
 than every unscored candidate zone water_candidate_zones.py generates.
-The erosion-prone-soil preference this module used to carry has been
-removed outright (KSOP: Soil is step 8, below Farm Roads at step 4), so
-this test no longer exercises or mocks anything erosion-related.
+Both production and water are now HARD exclusions (an earlier version of
+this module treated production as a soft cost preference); floodplain
+moved the other way, from a hard exclusion to a soft cost penalty. The
+erosion-prone-soil preference this module used to carry has been removed
+outright (KSOP: Soil is step 8, below Farm Roads at step 4), so this test
+no longer exercises or mocks anything erosion-related.
 
 Both the production-area and water-zone pipelines share production_area.
 py's mandatory woody-vegetation (canopy) gate -- a real network fetch
@@ -31,15 +34,17 @@ ALSO mocked here purely to keep this "offline" test fast and deterministic
 rather than depending on how quickly a given environment's proxy rejects
 the call -- it already degrades gracefully on its own if left unmocked.
 
-The NHD, SSURGO, and farm-roads fetches inside
-identify_road_corridor_candidates() (and inside water_suitability.py's
-own per-zone soil/stream scoring) are real network calls this sandbox
-can't reach — by design, each is wrapped in its own try/except and
-degrades gracefully (no NHD/SSURGO data -> floodplain exclusion falls
-back to buffered valley lines, flagged in confidence_notes; no road data
--> no connector segment is added at all, anchor_status=
-"no_named_road_available", flagged per-candidate). This test doubles as a
-live check of that whole degradation path.
+The NHD and SSURGO fetches inside identify_road_corridor_candidates()
+(and inside water_suitability.py's own per-zone soil/stream scoring) are
+real network calls this sandbox can't reach — by design, each is wrapped
+in its own try/except and degrades gracefully (no NHD/SSURGO data ->
+floodplain cost-penalty union falls back to buffered valley lines,
+flagged in confidence_notes). This test doubles as a live check of that
+degradation path. anchor_lon_lat is a real, required input now (see
+road_corridors.py's own module docstring) -- there's no farm-roads fetch
+or named-road anchoring/connector search left in this module at all, so
+unlike an earlier version of this test, no road-data mocking is needed
+here.
 """
 
 from unittest.mock import patch as mock_patch
@@ -106,6 +111,15 @@ synthetic_dem = {
     "crs": DST_CRS,
 }
 
+# A real anchor point ON the ridge crest itself (row=15, col=14 satisfies
+# distance_from_ridge == 0 in the array-building loop above) -- routing
+# starts from here and heads to the farthest eligible point on the ridge.
+anchor_row, anchor_col = 15, 14
+anchor_x = origin_x + (anchor_col + 0.5) * RESOLUTION
+anchor_y = origin_y - (anchor_row + 0.5) * RESOLUTION
+anchor_lons, anchor_lats = warp_transform(DST_CRS, "EPSG:4326", [anchor_x], [anchor_y])
+anchor_lon_lat = (anchor_lons[0], anchor_lats[0])
+
 # identify_road_corridor_candidates() now calls production_area_ceiling.
 # identify_optimized_production_areas() and water_suitability.fetch_and_
 # select_optimal_water_zone() -- both of which, via production_area.py's
@@ -119,33 +133,33 @@ synthetic_dem = {
 with mock_patch.object(production_area, "_fetch_disqualifying_soil_union", return_value=None), \
      mock_patch.object(production_area_ceiling, "_fetch_disqualifying_soil_union", return_value=None), \
      mock_patch.object(production_area, "get_canopy_height_for_boundary", _fake_clean_canopy):
-    result = identify_road_corridor_candidates(boundary_coordinates, dem=synthetic_dem)
+    result = identify_road_corridor_candidates(boundary_coordinates, dem=synthetic_dem, anchor_lon_lat=anchor_lon_lat)
 
 assert "zones_geojson" in result
 validate_feature_collection(result["zones_geojson"])
 
 features = result["zones_geojson"]["features"]
-print(f"Pipeline ran end-to-end with unreachable NHD/SSURGO/road data: {len(features)} corridor candidate(s).")
+print(f"Pipeline ran end-to-end with unreachable NHD/SSURGO data: {len(features)} road route(s).")
 assert len(features) >= 1, (
-    "expected at least one corridor candidate: the ridge crest is too narrow to be claimed as "
-    "production land but stays under the road grade threshold"
+    "expected at least one road route: the ridge crest is too narrow to be claimed as "
+    "production land, giving the anchor point real eligible ground to route across"
 )
 
 for feature in features:
     props = feature["properties"]
     assert props["layer"] == "suggested_road_corridor"
     assert feature["geometry"]["type"] == "LineString"
-    # No road data was reachable in this sandbox -> no connector segment
-    # is added on any candidate at all.
-    assert props["anchor_status"] == "no_named_road_available", (
-        "with no reachable road data, every candidate should report anchor_status="
-        "'no_named_road_available'"
+    assert "anchor_status" not in props, "anchor_status no longer exists -- anchoring is bypassed entirely"
+    assert "anchor_road_name" not in props, "anchor_road_name no longer exists -- anchoring is bypassed entirely"
+    assert "crosses_production_zone" not in props, (
+        "crosses_production_zone no longer exists -- production is a hard exclusion, it can never fire"
     )
-    assert props["anchor_road_name"] is None and props["anchor_road_distance_ft"] is None
+    assert "crosses_floodplain" in props
     notes = props["confidence_notes"].lower()
-    assert "no connector segment was added" in notes, (
-        "the no-connector caveat should appear in confidence_notes"
-    )
+    # No NHD/SSURGO data was reachable in this sandbox -> the floodplain
+    # cost-penalty union fell back to buffered valley lines, flagged here.
+    assert "dem-only fallback" in notes, "the floodplain-fallback caveat should appear in confidence_notes"
 
-print("Candidates correctly reflect unreachable road data (no connector segment, flagged in confidence_notes).")
+print("Routes correctly reflect unreachable NHD/SSURGO data (floodplain fallback flagged in confidence_notes), "
+      "with no stale anchor/production-crossing properties.")
 print("\nAll road corridor pipeline checks passed.")
