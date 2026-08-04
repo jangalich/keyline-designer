@@ -9,6 +9,101 @@ single placement decision — Claude narrates the tradeoffs between them in
 the report (see report_generator.py step 6). Finding "the one best spot"
 is explicitly not this module's job.
 
+CONSTRAINT STACK, this pass (brings this layer in line with the rest of
+the pipeline, which has since moved to render_fill_polygon_utm-based
+exclusions, optimized/ceiling-trimmed production geometry, and a real
+selected road corridor):
+  - Production geometry is now production_area_ceiling.
+    identify_optimized_production_areas()'s OPTIMIZED, ceiling-trimmed
+    'scored_patches' (NOT production_area.identify_production_areas()'s
+    raw, un-trimmed candidates), and every union built from it uses each
+    patch's own 'render_fill_polygon_utm' (NOT 'polygon_utm') — same
+    "reads as one coherent shape" field/reasoning tree_zone_candidates.py
+    already uses. Still NOT a hard exclusion for solar — production stays
+    a scored edge-proximity PREFERENCE (see PRODUCTION_PROXIMITY_SCORE_
+    WEIGHT below); only the source geometry/field changed.
+  - Water-candidate zone exclusion now also uses the single selected
+    water zone's own 'render_fill_polygon_utm' (not 'polygon_utm') —
+    still a HARD, buffered exclusion (POND_ZONE_EXCLUSION_BUFFER_METERS,
+    reused from road_corridors.py), unchanged in spirit.
+  - Real, existing tree canopy is now a NEW hard exclusion: a candidate
+    footprint touching real USGS 3DEP lidar canopy coverage (production_
+    area.get_required_tree_root_zone_mask_utm(), buffered by
+    TREE_ROOT_ZONE_BUFFER_METERS) is excluded outright, before any
+    scoring happens — same "excluded before scoring" treatment as water.
+    THIS FETCH IS MANDATORY AND DOES NOT DEGRADE: unlike every other
+    network-backed layer in this module (which all fail gracefully — a
+    real outage shouldn't block candidates from being identified at
+    all), a canopy-data outage here is left to propagate UNCAUGHT and
+    fails the whole run. This is a deliberate, intentional asymmetry, not
+    an oversight: siting a structure on or under real, existing tree
+    cover without knowing it is a genuine physical siting error, not a
+    lower-confidence result worth handing back with a caveat — the exact
+    same "can't verify this is free of tree cover, refuse rather than
+    guess" reasoning production_area.py's/production_area_ceiling.py's/
+    tree_zone_candidates.py's own mandatory canopy gates already use.
+    Switching production to optimized geometry (above) already pulls in
+    a SECOND, fully independent mandatory canopy gate inside
+    identify_optimized_production_areas() itself (its own
+    CanopyCoverageIncompleteError/RuntimeError) — both are expected to
+    hard-fail independently on a canopy outage; neither is caught here.
+  - A NEW hard exclusion against EVERY ranked tree-zone candidate
+    (tree_zone_candidates.identify_tree_zone_candidates()'s own 'patches'
+    — the full ranked list, not just the top one: unlike water/road,
+    trees has no single "selected" zone by design, since each ranked
+    patch is independently, separately plantable). A candidate footprint
+    intersecting the union of every tree-zone candidate's own
+    'render_fill_polygon_utm', buffered by
+    TREE_ZONE_STRUCTURE_EXCLUSION_BUFFER_METERS (10ft — a real,
+    independently-tunable clearance, NOT reused from
+    POND_ZONE_EXCLUSION_BUFFER_METERS or TREE_ROOT_ZONE_BUFFER_METERS,
+    which mean different things), is excluded. UNLIKE the canopy gate
+    above, this call degrades GRACEFULLY on an ordinary fetch failure
+    (network outage, etc. — noted in confidence_notes) — identify_tree_
+    zone_candidates() itself is a real, network-fetch-heavy dependency
+    (it calls into production/water/road and does its own soil/stream
+    fetches), not a single mandatory building block the way the canopy
+    mask itself is. The ONE exception: if that failure is specifically
+    canopy_height_data.CanopyCoverageIncompleteError bubbling up from
+    INSIDE identify_tree_zone_candidates()'s own mandatory canopy gate,
+    it is left to propagate uncaught here too, same reasoning as above —
+    not caught and downgraded to "couldn't check this run."
+  - Road proximity is now TWO-TIER instead of "real road, else a
+    DEM-only suggested corridor treated as a road stand-in":
+      Tier 1 (primary): the property's own single SELECTED road corridor
+        (road_corridors.identify_road_corridor_candidates(), internally
+        using the same "borrow render_layout_map.py's TEMPORARY
+        placeholder anchor via a local import" pattern tree_zone_
+        candidates.py already uses) — its 'cell_footprint_polygon_utm',
+        within ROAD_CORRIDOR_PROXIMITY_METERS (15m). This corridor is the
+        real primary source now, not a stand-in for missing data.
+      Tier 2 (fallback): only if Tier 1 produces ZERO candidates (no
+        selected corridor exists at all, OR one exists but nothing
+        survives every other constraint near it) — real mapped roads
+        (farm_roads_data.get_farm_roads_for_boundary()), at the original
+        ROAD_PROXIMITY_BUFFER_METERS (150m). This is exactly the
+        pre-this-pass road-proximity logic, demoted from primary to
+        fallback.
+    If Tier 2's own fetch fails outright (a network error, not "zero
+    roads found") AND Tier 1 also produced nothing, the road constraint
+    is disabled entirely (flagged in confidence_notes) — same terminal
+    fallback behavior as before. properties.road_proximity_source
+    reports which tier actually produced the result: "selected_road_
+    corridor" | "real_mapped_road" | "unavailable".
+  - Before grid-sampling candidate points at all, the SEARCH REGION is
+    restricted to boundary_polygon_utm intersected with whichever tier's
+    road source geometry, buffered by its own proximity buffer plus one
+    footprint side length (so a footprint reaching the buffer from just
+    outside isn't missed) — a pure GENERATION-TIME optimization, not a
+    correctness change: the real per-footprint distance gate
+    (footprint.distance(road_union) <= proximity_buffer) still runs
+    unchanged and is what actually decides eligibility.
+  - Scoring weights are now an even 0.25/0.25/0.25/0.25 split across
+    slope/aspect/shading/production-proximity (see SLOPE_SCORE_WEIGHT
+    etc. below) — a deliberate simplification from the previous
+    0.35/0.25/0.25/0.15 split, unrelated to this pass's constraint
+    changes.
+
 POINT-CANDIDATE MODEL (this module's second design; see below for why the
 first one — a broad eligible-AREA polygon — was replaced):
 
@@ -22,9 +117,16 @@ first one — a broad eligible-AREA polygon — was replaced):
                 + production-zone-edge PROXIMITY (a preference, not an
                     exclusion — see below)
         --> water-candidate zones (water_candidate_zones.py) -- still a
-            HARD exclusion (buffered), unchanged
-        --> farm roads (farm_roads_data.py) -- still a hard proximity
-            constraint + reported distance, unchanged in spirit
+            HARD exclusion (buffered), unchanged in spirit (source field
+            updated, see CONSTRAINT STACK above)
+        --> real, existing tree canopy -- NEW hard exclusion, mandatory/
+            non-degrading (see CONSTRAINT STACK above)
+        --> every ranked tree-zone candidate (tree_zone_candidates.py) --
+            NEW hard exclusion, buffered, gracefully degrading (see
+            CONSTRAINT STACK above)
+        --> the selected road corridor, else farm roads (farm_roads_data.py)
+            -- two-tier hard proximity constraint + reported distance (see
+            CONSTRAINT STACK above)
         --> ranked candidate structure-footprint polygons
             (layer="solar_infrastructure")
 
@@ -67,14 +169,23 @@ this app targets small farms only, so one well-suited water zone is
 sufficient to exclude against.
 
 find_candidate_solar_zones() is the geometric/scoring core: it takes an
-already-fetched DEM dict, production areas, water-candidate zones, and
-road geometries (all in the DEM's own projected CRS) and does no network
-I/O itself — same reason as water_candidate_zones.py's
+already-fetched DEM dict, production areas, water-candidate zones, a
+road source geometry (called once per tier — see CONSTRAINT STACK above),
+an already-fetched canopy mask, and an already-computed tree-zone
+exclusion polygon (all in the DEM's own projected CRS) and does no
+network I/O itself — same reason as water_candidate_zones.py's
 find_candidate_zones(): so the scoring logic is unit-testable against a
 synthetic DEM independent of whether any of the real data fetches (DEM,
-roads, SSURGO) are working. flag_prime_farmland_conflicts() is a second,
-separate pure function for exactly the same reason, applied to the SSURGO
-farmland lookup specifically — unchanged by this pass.
+roads, SSURGO, canopy) are working. canopy_mask_utm/tree_zone_exclusion_
+polygon_utm both default to None ("gate not applied at all" — useful for
+callers/tests that don't care about either exclusion, same "pure-logic
+core's own default" reasoning tree_zone_candidates.score_tree_search_
+space() already uses for its own canopy mask parameter); identify_solar_
+candidate_zones() (the full pipeline entry point) always supplies a real
+canopy mask, since its own fetch is mandatory and non-degrading.
+flag_prime_farmland_conflicts() is a second, separate pure function for
+exactly the same reason, applied to the SSURGO farmland lookup
+specifically — unchanged by this pass.
 """
 
 import math
@@ -87,14 +198,17 @@ from shapely.geometry import LineString, Point, Polygon, box, mapping
 from shapely.ops import unary_union
 from shapely.prepared import prep
 
+from canopy_height_data import CanopyCoverageIncompleteError, TREE_ROOT_ZONE_BUFFER_METERS
 from dem_data import get_dem_for_boundary
 from farm_roads_data import get_farm_roads_for_boundary
 from feature_schema import CONFIDENCE_LOW, make_feature, make_feature_collection
-from production_area import identify_production_areas
+from production_area import get_required_tree_root_zone_mask_utm
+from production_area_ceiling import identify_optimized_production_areas
 from raster_grid import SQUARE_METERS_PER_ACRE, pixel_center_xy
 from road_corridors import POND_ZONE_EXCLUSION_BUFFER_METERS, identify_road_corridor_candidates
 from soil_data import coordinates_to_wkt_polygon, get_farmland_classification_for_polygon, is_prime_farmland
 from terrain_metrics import aspect_score, aspect_to_compass_label, compute_shading_score, compute_slope_and_aspect
+from tree_zone_candidates import identify_tree_zone_candidates
 from water_suitability import identify_water_suitability
 
 METERS_PER_FOOT = 0.3048
@@ -145,22 +259,18 @@ MAX_STRUCTURE_FOOTPRINT_ACRES = 1.0
 # technically-nonempty but meaningless remainder. CONFIGURABLE.
 MIN_STRUCTURE_FOOTPRINT_FRACTION = 0.5
 
-# Weights for the combined 0-1 suitability score (must sum to 1.0).
-# PRODUCTION_PROXIMITY_SCORE_WEIGHT is new in the point-candidate model
-# (Step 4) — a real but secondary preference (a structure sited at a
-# production zone's edge is more useful to that zone's own operation than
-# one far away), deliberately smaller than any of the three physical-
-# suitability factors it sits alongside: slope/aspect/shading determine
+# Weights for the combined 0-1 suitability score (must sum to 1.0). Even
+# 0.25 split across all four factors — slope/aspect/shading determine
 # whether a site is buildable and productive at all, while production
-# proximity is a layout nicety on top of that, not a substitute for it.
-# The other three keep their original relative proportions (slope still
-# weighted highest, aspect and shading equal) scaled down to leave room
-# for the new term. CONFIGURABLE — tune against your own property once
-# real production data is available to check the ranking against.
-SLOPE_SCORE_WEIGHT = 0.35
+# proximity is a layout nicety on top of that; an equal split is a
+# deliberate simplification from an earlier 0.35/0.25/0.25/0.15 split
+# that weighted slope highest and production proximity lowest.
+# CONFIGURABLE — tune against your own property once real production
+# data is available to check the ranking against.
+SLOPE_SCORE_WEIGHT = 0.25
 ASPECT_SCORE_WEIGHT = 0.25
 SHADING_SCORE_WEIGHT = 0.25
-PRODUCTION_PROXIMITY_SCORE_WEIGHT = 0.15
+PRODUCTION_PROXIMITY_SCORE_WEIGHT = 0.25
 
 _WEIGHT_SUM = SLOPE_SCORE_WEIGHT + ASPECT_SCORE_WEIGHT + SHADING_SCORE_WEIGHT + PRODUCTION_PROXIMITY_SCORE_WEIGHT
 assert math.isclose(_WEIGHT_SUM, 1.0, abs_tol=1e-6), f"solar suitability factor weights must sum to 1.0, got {_WEIGHT_SUM}"
@@ -199,12 +309,35 @@ PRODUCTION_PROXIMITY_REFERENCE_METERS = 100.0
 # CONFIGURABLE.
 PRODUCTION_EDGE_ADJACENCY_METERS = 15.0
 
-# Candidates must be within this distance of a mapped road to be
-# considered reachable/wireable at all — a hard constraint, not just a
-# scoring input. Unchanged by this pass (road-proximity reporting stays
-# as-is; road CORRIDOR GENERATION's own exclusion logic is a separate,
-# already-agreed follow-on task, not touched here). CONFIGURABLE.
+# TIER 1 (primary): candidates must be within this distance of the
+# property's own single SELECTED road corridor (road_corridors.
+# identify_road_corridor_candidates()'s own 'cell_footprint_polygon_utm')
+# to be considered reachable/wireable at all — a hard constraint, not
+# just a scoring input. Deliberately much tighter than the TIER 2
+# fallback buffer below: a corridor is a real, specific routed alignment
+# on THIS property, not a generic "somewhere near a mapped road" signal,
+# so a candidate can reasonably be expected to sit close to it, not just
+# within the same broad neighborhood. CONFIGURABLE.
+ROAD_CORRIDOR_PROXIMITY_METERS = 15.0
+
+# TIER 2 (fallback, only used when Tier 1 produces zero candidates — see
+# module docstring): candidates must be within this distance of a real
+# mapped road (farm_roads_data.py) instead. This is the original,
+# pre-this-pass road-proximity buffer, demoted from primary to fallback.
+# CONFIGURABLE.
 ROAD_PROXIMITY_BUFFER_METERS = 150.0
+
+# Buffer (meters) around the union of EVERY ranked tree-zone candidate
+# (tree_zone_candidates.identify_tree_zone_candidates()'s own 'patches' —
+# the full list, not just the top-ranked one, since trees has no single
+# "selected" zone by design) within which a solar candidate footprint is
+# HARD-excluded — see module docstring. Deliberately NOT the same
+# constant as POND_ZONE_EXCLUSION_BUFFER_METERS (a dam-face/catchment-
+# inlet clearance) or TREE_ROOT_ZONE_BUFFER_METERS (an existing-canopy
+# root-zone clearance) even though the values may currently be close —
+# this one means "structure-to-planned-tree-zone clearance" specifically
+# and should be free to drift independently later. 10ft. CONFIGURABLE.
+TREE_ZONE_STRUCTURE_EXCLUSION_BUFFER_METERS = 10 * METERS_PER_FOOT
 
 # How many top-ranked candidates to return. Deliberately more than 1 —
 # per this feature's framing, ties/close calls should surface as multiple
@@ -228,19 +361,42 @@ SOLAR_CONFIDENCE_NOTES_TEMPLATE = (
     "properties.distance_to_production_zone_ft) — a candidate far from any production zone, or "
     "sitting deep inside a large one away from its edge, is still a valid, real candidate, just a "
     "lower-preference one. Water-candidate (pond/dam siting) zones ARE still hard-excluded "
-    "(buffered) — a structure should not sit on or immediately against that ground. It also "
-    "inherits the limitations of production_area.py (a slope-only production-zone heuristic), "
-    "water_candidate_zones.py (a DEM-derived valley/gradient heuristic), and farm_roads_data.py "
-    "(public road/right-of-way data only — may miss private farm tracks). "
-    "{road_fallback_note}{farmland_note}Treat this as a starting shortlist to walk and "
+    "(buffered) — a structure should not sit on or immediately against that ground. Real, EXISTING "
+    "tree canopy (USGS 3DEP lidar) is ALSO hard-excluded (buffered by "
+    "{canopy_buffer_ft:.0f}ft) — this check is MANDATORY and does not degrade; a canopy-data outage "
+    "fails this run outright rather than silently skip it. Every ranked TREE-ZONE CANDIDATE "
+    "(tree_zone_candidates.py, the full ranked list, not just the top one) is ALSO hard-excluded, "
+    "buffered by {tree_zone_buffer_ft:.0f}ft{tree_zone_availability_note}. It also "
+    "inherits the limitations of production_area_ceiling.py (a slope-only production-zone "
+    "heuristic, ceiling-trimmed), water_candidate_zones.py (a DEM-derived valley/gradient "
+    "heuristic), road_corridors.py (a DEM-only topographic suggestion, not a surveyed alignment), "
+    "and farm_roads_data.py (public road/right-of-way data only — may miss private farm tracks). "
+    "{road_proximity_note}{farmland_note}Treat this as a starting shortlist to walk and "
     "ground-truth, not a final site plan."
 )
 
-ROAD_FALLBACK_NOTE = (
-    "No existing road data was available for this property, so road-proximity "
-    "scoring (distance_to_road_ft) is measured against the top-ranked SUGGESTED "
-    "road corridor (road_corridors.py) instead of a real road — itself a "
-    "topographic suggestion, not a surveyed alignment. "
+ROAD_PROXIMITY_NOTE_BY_SOURCE = {
+    "selected_road_corridor": (
+        "Road-proximity scoring (distance_to_road_ft) is measured against the property's own single "
+        "SELECTED road corridor (road_corridors.py) — a real, ridge-routed topographic suggestion "
+        "specific to this property, not a surveyed alignment — within "
+        f"{ROAD_CORRIDOR_PROXIMITY_METERS:.0f}m. "
+    ),
+    "real_mapped_road": (
+        "No selected road corridor was available (or nothing survived the constraint stack near it), "
+        "so road-proximity scoring fell back to real mapped road data (farm_roads_data.py, public "
+        f"road/right-of-way data only) within {ROAD_PROXIMITY_BUFFER_METERS:.0f}m instead. "
+    ),
+    "unavailable": (
+        "Neither a selected road corridor nor real mapped road data was available for this run, so "
+        "the road-proximity constraint is disabled entirely for these candidates — "
+        "distance_to_road_ft is null. "
+    ),
+}
+
+TREE_ZONE_EXCLUSION_UNAVAILABLE_NOTE = (
+    " (tree-zone candidate data was not available for this run, so this exclusion could not be "
+    "checked — candidates here are NOT confirmed clear of planned tree-zone ground)"
 )
 
 SHADING_CAVEAT_HORIZON_ONLY = (
@@ -367,8 +523,10 @@ def find_candidate_solar_zones(
     dem: dict,
     production_areas: list[dict],
     water_zones: list[dict],
-    road_geometries_utm: Optional[list[LineString]],
+    road_geometries_utm: Optional[list],
     boundary_polygon_utm: Polygon,
+    canopy_mask_utm: Optional[np.ndarray] = None,
+    tree_zone_exclusion_polygon_utm: Optional[object] = None,
     max_solar_slope_pct: float = MAX_SOLAR_SLOPE_PCT,
     min_suitability_score: float = MIN_SUITABILITY_SCORE,
     water_zone_exclusion_buffer_meters: float = POND_ZONE_EXCLUSION_BUFFER_METERS,
@@ -384,28 +542,69 @@ def find_candidate_solar_zones(
     takes already-computed inputs rather than fetching anything, and for
     why this samples independently-scored POINT candidates rather than
     computing one shared eligible-AREA polygon the way this module used
-    to.
+    to. Called ONCE PER ROAD TIER by identify_solar_candidate_zones() (see
+    module docstring) — road_geometries_utm/road_proximity_buffer_meters
+    are the generalized "road source geometry + its own proximity buffer"
+    parameters that make that possible without duplicating the rest of
+    this scoring core per tier.
 
-    water_zones is water_candidate_zones.find_candidate_zones()'s own
-    output shape (each entry carrying 'polygon_utm') — hard-excluded
-    (buffered) exactly as before; production_areas is
-    production_area.py's/production_suitability.py's own patch shape
-    (each entry carrying 'polygon_utm') but is NO LONGER a hard exclusion
-    here — see PRODUCTION_PROXIMITY_SCORE_WEIGHT above for how it's used
-    instead (a scored edge-proximity preference).
+    water_zones is water_suitability.py's own selected-zone shape (each
+    entry carrying 'render_fill_polygon_utm', NOT 'polygon_utm' — see
+    module docstring) — hard-excluded (buffered) exactly as before;
+    production_areas is production_area_ceiling.identify_optimized_
+    production_areas()'s own OPTIMIZED 'scored_patches' shape (each entry
+    carrying 'render_fill_polygon_utm', NOT 'polygon_utm') but is NOT a
+    hard exclusion here — see PRODUCTION_PROXIMITY_SCORE_WEIGHT above for
+    how it's used instead (a scored edge-proximity preference).
 
-    road_geometries_utm=None means "road data unavailable" (the fetch
-    itself failed) and disables the road-proximity constraint entirely
-    (with that noted by the caller); an empty list [] means "fetched
-    successfully, no roads found nearby" and is treated as a real,
-    binding constraint (nothing will qualify) — unchanged from before.
+    canopy_mask_utm is a per-cell boolean np.ndarray on the DEM's own
+    grid (production_area.get_required_tree_root_zone_mask_utm()'s own
+    output) or None. A candidate whose footprint touches ANY True cell is
+    HARD-excluded before any scoring happens, same "excluded before
+    scoring, not merely scored low" treatment as water. None means "gate
+    not applied at all" — this pure-logic core's own default, useful for
+    callers/tests that don't care about canopy (same convention tree_
+    zone_candidates.score_tree_search_space() already uses for its own
+    canopy mask parameter); identify_solar_candidate_zones() (the full
+    pipeline entry point) always supplies a real mask, since its own
+    canopy fetch is MANDATORY and does not degrade (see module
+    docstring).
+
+    tree_zone_exclusion_polygon_utm is an already-buffered shapely
+    geometry (the union of every ranked tree-zone candidate's own
+    'render_fill_polygon_utm', buffered by
+    TREE_ZONE_STRUCTURE_EXCLUSION_BUFFER_METERS — see module docstring)
+    or None. A candidate footprint intersecting it is HARD-excluded, same
+    pattern as the water exclusion below. None means either "gate not
+    applied" (a caller/test that doesn't care) or "checked, but genuinely
+    no tree-zone candidates exist on this property" — both cases result
+    in no exclusion, which is correct either way; a fetch that failed
+    outright is the caller's (identify_solar_candidate_zones()'s) own
+    concern to flag in confidence_notes, not this pure core's.
+
+    road_geometries_utm=None means "road data unavailable for this tier"
+    (the fetch itself failed, or there's no selected road corridor at
+    all) and disables the road-proximity constraint entirely for this
+    call (with that noted by the caller); an empty list [] means
+    "fetched successfully, no roads found nearby" and is treated as a
+    real, binding constraint (nothing will qualify) — unchanged from
+    before.
 
     boundary_polygon_utm is the real parcel (NOT the DEM's buffered
     extent — dem_data.py fetches ~100m past the drawn boundary on
     purpose). Each candidate's nominal (fixed-size) footprint is
     intersected with it — a footprint sampled near the boundary can come
     back smaller than the nominal cap, or be dropped entirely if too
-    little survives (see MIN_STRUCTURE_FOOTPRINT_FRACTION).
+    little survives (see MIN_STRUCTURE_FOOTPRINT_FRACTION). Before
+    sampling even starts, the SEARCH REGION passed to
+    _generate_candidate_points() is further restricted to
+    boundary_polygon_utm.intersection(road_union.buffer(road_proximity_
+    buffer_meters + footprint_side_m)) whenever the road constraint is
+    active — a pure GENERATION-TIME optimization (avoids sampling points
+    that can never survive the real per-footprint distance gate below),
+    not a correctness change: that real gate still runs unchanged and is
+    what actually decides eligibility, since a footprint can straddle the
+    restricted region's own edge.
 
     Every reported distance (production-zone EDGE, water zone, road) is
     the real nearest-geometry distance from the candidate's own clipped
@@ -437,10 +636,14 @@ def find_candidate_solar_zones(
     slope_pct, aspect_deg = compute_slope_and_aspect(array, resolution)
     shading = compute_shading_score(array, resolution)
 
-    raw_production_union = unary_union([p["polygon_utm"] for p in production_areas]) if production_areas else None
+    raw_production_union = (
+        unary_union([p["render_fill_polygon_utm"] for p in production_areas]) if production_areas else None
+    )
     production_boundary_geom = raw_production_union.boundary if raw_production_union is not None else None
 
-    raw_water_union = unary_union([z["polygon_utm"] for z in water_zones]) if water_zones else None
+    raw_water_union = (
+        unary_union([z["render_fill_polygon_utm"] for z in water_zones]) if water_zones else None
+    )
     water_exclusion = (
         raw_water_union.buffer(water_zone_exclusion_buffer_meters) if raw_water_union is not None else None
     )
@@ -453,9 +656,23 @@ def find_candidate_solar_zones(
         max_structure_footprint_acres * SQUARE_METERS_PER_ACRE * MIN_STRUCTURE_FOOTPRINT_FRACTION
     )
 
+    # Generation-time-only optimization (see this function's own
+    # docstring): restrict the sampled search region to stay near the
+    # active road source, rather than scanning the full parcel. The real
+    # per-footprint distance gate below is unchanged and is what actually
+    # decides eligibility -- this purely avoids wasting a sample point on
+    # ground that gate could never let through.
+    search_region = boundary_polygon_utm
+    if apply_road_constraint and road_union is not None and not road_union.is_empty:
+        restricted = boundary_polygon_utm.intersection(
+            road_union.buffer(road_proximity_buffer_meters + footprint_side_m)
+        )
+        if not restricted.is_empty:
+            search_region = restricted
+
     candidates = []
 
-    for x, y in _generate_candidate_points(boundary_polygon_utm, candidate_point_spacing_meters):
+    for x, y in _generate_candidate_points(search_region, candidate_point_spacing_meters):
         nominal_footprint = box(
             x - footprint_side_m / 2, y - footprint_side_m / 2, x + footprint_side_m / 2, y + footprint_side_m / 2
         )
@@ -467,9 +684,15 @@ def find_candidate_solar_zones(
         if water_exclusion is not None and footprint.intersects(water_exclusion):
             continue  # hard exclusion, unchanged in spirit -- a structure can't sit on/against pond-siting ground
 
+        if tree_zone_exclusion_polygon_utm is not None and footprint.intersects(tree_zone_exclusion_polygon_utm):
+            continue  # hard exclusion -- a structure shouldn't sit on/against planned tree-zone ground
+
         cells = _cells_within_polygon(dem, footprint, rows, cols)
         if not cells:
             continue  # no DEM data at all under this footprint
+
+        if canopy_mask_utm is not None and any(canopy_mask_utm[r, c] for r, c in cells):
+            continue  # hard exclusion, before any scoring -- footprint touches real, existing tree canopy
 
         cell_slopes = [float(slope_pct[r, c]) for r, c in cells if not math.isnan(slope_pct[r, c])]
         if not cell_slopes:
@@ -598,14 +821,13 @@ def select_optimal_structure_site(scored_candidates: list[dict]) -> Optional[dic
     here.
 
     Deliberately does NOT attempt to reconcile this selection with
-    road_corridors.select_optimal_road_corridor() (e.g. re-scoring this
-    site's road-proximity against the newly-selected corridor specifically)
-    -- solar's own road-proximity fallback (real mapped road vs. suggested-
-    corridor fallback, see _suggested_corridor_as_road_fallback()) is left
-    exactly as-is. That interplay is deliberately deferred, same as the
-    fencing/roads-and-structures interplay already deferred elsewhere in
-    this pipeline, until real results from both selections independently
-    are available to look at.
+    road_corridors.select_optimal_road_corridor() beyond the two-tier
+    road-proximity constraint identify_solar_candidate_zones() already
+    applies (selected corridor primary, real mapped roads as fallback --
+    see module docstring). That interplay is deliberately deferred, same
+    as the fencing/roads-and-structures interplay already deferred
+    elsewhere in this pipeline, until real results from both selections
+    independently are available to look at.
 
     Returns None if scored_candidates is empty -- a real, reportable "no
     candidates at all" outcome, not an error.
@@ -618,16 +840,20 @@ def select_optimal_structure_site(scored_candidates: list[dict]) -> Optional[dic
 def candidates_to_geojson(
     candidates: list[dict],
     shading_is_rough_proxy: bool = True,
-    road_data_is_fallback: bool = False,
+    road_proximity_source: str = "unavailable",
+    tree_zone_exclusion_available: bool = True,
     spacing_meters: float = CANDIDATE_POINT_SPACING_METERS,
     max_structure_footprint_acres: float = MAX_STRUCTURE_FOOTPRINT_ACRES,
 ) -> dict:
     """Wraps find_candidate_solar_zones() (+ optionally
     flag_prime_farmland_conflicts()) output as the schema-conformant
     GeoJSON FeatureCollection this feature delivers
-    (layer="solar_infrastructure"). road_data_is_fallback flags that
-    road-proximity scoring used a suggested corridor (road_corridors.py)
-    in place of real road data — see identify_solar_candidate_zones()."""
+    (layer="solar_infrastructure"). road_proximity_source reports which
+    tier actually produced these candidates ("selected_road_corridor" |
+    "real_mapped_road" | "unavailable" — see module docstring);
+    tree_zone_exclusion_available flags whether the tree-zone-candidate
+    exclusion could be checked this run at all (a graceful-degradation
+    outcome, see identify_solar_candidate_zones())."""
     farmland_note = ""
     if candidates and "prime_farmland_conflict" in candidates[0]:
         farmland_note = (
@@ -640,7 +866,10 @@ def candidates_to_geojson(
         max_footprint_acres=max_structure_footprint_acres,
         footprint_side_m=_footprint_side_meters(max_structure_footprint_acres),
         shading_caveat=SHADING_CAVEAT_HORIZON_ONLY if shading_is_rough_proxy else "computed from a real canopy height model (DSM-derived), not a rough proxy.",
-        road_fallback_note=ROAD_FALLBACK_NOTE if road_data_is_fallback else "",
+        canopy_buffer_ft=TREE_ROOT_ZONE_BUFFER_METERS / METERS_PER_FOOT,
+        tree_zone_buffer_ft=TREE_ZONE_STRUCTURE_EXCLUSION_BUFFER_METERS / METERS_PER_FOOT,
+        tree_zone_availability_note="" if tree_zone_exclusion_available else TREE_ZONE_EXCLUSION_UNAVAILABLE_NOTE,
+        road_proximity_note=ROAD_PROXIMITY_NOTE_BY_SOURCE[road_proximity_source],
         farmland_note=farmland_note,
     )
 
@@ -648,9 +877,12 @@ def candidates_to_geojson(
     for candidate in candidates:
         constraints_satisfied = [
             "outside_water_candidate_zone",
+            "outside_existing_canopy",
             f"max_slope<={MAX_SOLAR_SLOPE_PCT:.0f}pct",
             f"suitability_score>={MIN_SUITABILITY_SCORE * 100:.0f}",
         ]
+        if tree_zone_exclusion_available:
+            constraints_satisfied.append("outside_tree_zone_candidate_buffer")
         if candidate.get("distance_to_road_m") is not None:
             constraints_satisfied.append("within_road_proximity_buffer")
 
@@ -678,6 +910,7 @@ def candidates_to_geojson(
             "aspect_degrees": candidate["aspect_deg"],
             "footprint_area_acres": candidate["footprint_area_acres"],
             "distance_to_road_ft": distance_to_road_ft,
+            "road_proximity_source": road_proximity_source,
             "distance_to_production_zone_ft": distance_to_production_zone_ft,
             "production_zone_relationship": candidate["production_zone_relationship"],
             "distance_to_water_zone_ft": distance_to_water_zone_ft,
@@ -708,50 +941,6 @@ def candidates_to_geojson(
     return make_feature_collection(features)
 
 
-def _suggested_corridor_as_road_fallback(
-    boundary_coordinates: list[tuple[float, float]], dem: dict
-) -> Optional[list[LineString]]:
-    """
-    Road-proximity fallback for identify_solar_candidate_zones(): when no
-    existing-road data is available, uses the top-ranked
-    "suggested_road_corridor" feature (road_corridors.py) — already
-    rank-ordered, so index 0 is rank 1 — as the proximity anchor instead,
-    reprojected into dem['crs']. Returns None (not an empty list) if
-    corridor generation itself produced nothing or failed, so the caller
-    can tell "no fallback available" apart from "fallback available but
-    empty," matching find_candidate_solar_zones()'s own None-vs-[]
-    convention for road_geometries_utm. UNCHANGED by the point-candidate
-    redesign.
-
-    identify_road_corridor_candidates() now requires a real anchor_lon_lat
-    to generate any routes at all (see road_corridors.py's own module
-    docstring) -- there's no real one available in this module's own
-    context yet (a genuine product decision, not derivable from the
-    boundary alone), so this borrows render_layout_map.py's TEMPORARY
-    placeholder reference-property anchor purely to unblock testing/live
-    runs, same as render_layout_map.py's own call. Imported locally
-    (inside this function, not at module level) because render_layout_map.py
-    itself imports FROM solar_suitability.py (fetch_and_select_optimal_
-    structure_site) -- a top-level import here would be circular.
-    """
-    from render_layout_map import _PLACEHOLDER_REFERENCE_PROPERTY_ANCHOR_LON_LAT
-
-    try:
-        corridor_result = identify_road_corridor_candidates(
-            boundary_coordinates, dem=dem, anchor_lon_lat=_PLACEHOLDER_REFERENCE_PROPERTY_ANCHOR_LON_LAT
-        )
-        features = corridor_result["zones_geojson"]["features"]
-        if not features:
-            return None
-
-        top_corridor = features[0]
-        coords = top_corridor["geometry"]["coordinates"]
-        xs, ys = warp_transform("EPSG:4326", dem["crs"], [p[0] for p in coords], [p[1] for p in coords])
-        return [LineString(zip(xs, ys))]
-    except Exception:
-        return None
-
-
 def identify_solar_candidate_zones(
     boundary_coordinates: list[tuple[float, float]],
     dem: Optional[dict] = None,
@@ -760,11 +949,13 @@ def identify_solar_candidate_zones(
 ) -> dict:
     """
     Full pipeline entry point: fetches the DEM (unless one is passed in),
-    production areas, water-candidate zones, and farm roads; runs the
-    point-candidate scoring; checks the SSURGO prime-farmland conflict;
-    and returns the "solar_infrastructure" GeoJSON FeatureCollection.
-    UNCHANGED call shape from before the point-candidate redesign — only
-    find_candidate_solar_zones()'s own internal model changed.
+    the mandatory canopy exclusion mask, optimized production areas, the
+    single selected water zone, every ranked tree-zone candidate, and the
+    two-tier road-proximity source; runs the point-candidate scoring
+    (once, or twice if Tier 1 produces nothing — see below); checks the
+    SSURGO prime-farmland conflict; and returns the "solar_infrastructure"
+    GeoJSON FeatureCollection. See module docstring for the full
+    constraint-stack rationale; this docstring covers wiring/ordering.
 
     Returns:
         {
@@ -776,37 +967,68 @@ def identify_solar_candidate_zones(
                                                            # candidates exist
         }
 
-    production_areas is computed directly from the DEM already in hand
-    (identify_production_areas()) so it needs no network fetch or try/
-    except here, and is passed through to find_candidate_solar_zones()
-    for its (now scoring-only, not exclusion) role — see that function's
-    docstring. water-zone exclusion, by contrast, is now scoped to only
-    the SINGLE selected water zone (water_suitability.
-    select_optimal_water_zone(), same selection function
-    tree_zone_candidates.py's own rewiring in this same pipeline already
-    reuses) rather than every water candidate — confirmed live that
-    excluding all of a real property's several legitimate, separately-
-    buffered water zones can together cover enough of a small parcel to
-    zero out every solar candidate, even though each zone's own geometry
-    is individually normal. Per product decision, this app targets small
-    farms only: one well-suited water zone is sufficient, so only that
-    one zone's own (buffered) footprint should ever be excluded here.
-    water_suitability.identify_water_suitability() is called directly
-    (its own real per-zone SSURGO/NHD fetches degrade independently and
-    gracefully, same as every other network-backed layer in this
-    pipeline) so this reaches the exact same selected zone every other
-    consumer of select_optimal_water_zone() in this pipeline does, not an
-    independently re-derived approximation of it. An empty candidate list
-    (no water zone could be selected at all) is a real, valid outcome —
-    solar's water-zone exclusion then simply has nothing to exclude, same
-    as today's behavior when water_zones=[] is passed to
-    find_candidate_solar_zones().
+    CANOPY (mandatory, non-degrading — see module docstring): fetched
+    directly via production_area.get_required_tree_root_zone_mask_utm(),
+    NOT wrapped in try/except — a fetch failure is left to propagate
+    UNCAUGHT and fails this whole call, same as production_area.py's/
+    production_area_ceiling.py's/tree_zone_candidates.py's own mandatory
+    canopy gates. identify_optimized_production_areas() below pulls in a
+    SECOND, fully independent copy of this same mandatory gate internally
+    — both are expected to hard-fail independently on a canopy outage;
+    neither is caught here.
 
-    Each real NETWORK fetch (farm roads, SSURGO, water suitability)
-    still degrades independently and gracefully — an outage there
-    shouldn't block solar candidates from being identified at all, same
-    reasoning as every other optional layer in this pipeline (imagery,
-    water candidate zones' own DEM fetch, etc.).
+    PRODUCTION is production_area_ceiling.identify_optimized_production_
+    areas()'s own OPTIMIZED, ceiling-trimmed 'scored_patches' (not
+    production_area.identify_production_areas()'s raw candidates), passed
+    through to find_candidate_solar_zones() for its scoring-only (not
+    exclusion) role — see that function's docstring.
+
+    WATER exclusion is scoped to only the SINGLE selected water zone
+    (water_suitability.select_optimal_water_zone(), same selection
+    function tree_zone_candidates.py's own rewiring in this same pipeline
+    already reuses), using its 'render_fill_polygon_utm' — confirmed live
+    that excluding all of a real property's several legitimate,
+    separately-buffered water zones can together cover enough of a small
+    parcel to zero out every solar candidate, even though each zone's own
+    geometry is individually normal. water_suitability.
+    identify_water_suitability()'s own real per-zone SSURGO/NHD fetches
+    degrade independently and gracefully.
+
+    TREE-ZONE-CANDIDATE exclusion (identify_tree_zone_candidates(), the
+    full ranked 'patches' list) degrades GRACEFULLY on an ordinary fetch
+    failure — noted in confidence_notes via candidates_to_geojson()'s own
+    tree_zone_exclusion_available flag — UNLESS the failure is
+    specifically canopy_height_data.CanopyCoverageIncompleteError
+    bubbling up from that call's own internal mandatory canopy gate, in
+    which case it propagates uncaught here too, same reasoning as the
+    module's own primary canopy gate above.
+
+    ROAD PROXIMITY is two-tier (see module docstring for the full
+    rationale):
+      Tier 1 (primary): road_corridors.identify_road_corridor_candidates()
+        is called directly here (borrowing render_layout_map.py's
+        TEMPORARY placeholder anchor via a local import — see below — the
+        same pattern tree_zone_candidates.py already uses), and its own
+        'selected_road_corridor' (None if no corridor exists) is used as
+        the road source at ROAD_CORRIDOR_PROXIMITY_METERS. Not wrapped in
+        try/except: this call's own internal production-zone fetch is
+        ALSO a mandatory canopy gate (a THIRD independent one), same
+        "expected to hard-fail independently" reasoning as above.
+      Tier 2 (fallback, only if Tier 1 produced zero candidates — whether
+        because no corridor exists at all, or one exists but nothing
+        survives near it): real mapped roads
+        (farm_roads_data.get_farm_roads_for_boundary(), unchanged fetch
+        logic) at ROAD_PROXIMITY_BUFFER_METERS — this IS today's
+        pre-this-pass road-proximity logic, demoted from primary to
+        fallback. If this fetch fails outright (a real network error, not
+        "zero roads found") and Tier 1 also produced nothing, the road
+        constraint is disabled entirely for a final find_candidate_solar_
+        zones() call (road_geometries_utm=None) — same terminal fallback
+        behavior this module has always had.
+    road_proximity_source ("selected_road_corridor" | "real_mapped_road" |
+    "unavailable") records which tier actually produced the result and is
+    threaded into candidates_to_geojson()'s confidence_notes/per-feature
+    properties.
     """
     if dem is None:
         dem = get_dem_for_boundary(boundary_coordinates)
@@ -819,41 +1041,122 @@ def identify_solar_candidate_zones(
     )
     boundary_polygon_utm = Polygon(zip(boundary_xs, boundary_ys))
 
-    production_areas = identify_production_areas(dem, boundary_polygon_utm)
+    # MANDATORY, non-degrading -- see module docstring and this
+    # function's own docstring. Deliberately NOT wrapped in try/except.
+    canopy_mask_utm = get_required_tree_root_zone_mask_utm(
+        boundary_polygon_utm, dem, buffer_meters=TREE_ROOT_ZONE_BUFFER_METERS
+    )
+
+    # Optimized/ceiling-trimmed production geometry -- pulls in its own
+    # SECOND, independent mandatory canopy gate internally; also not
+    # caught here (see this function's own docstring).
+    production_result = identify_optimized_production_areas(boundary_coordinates, dem=dem)
+    production_areas = production_result["scored_patches"]
 
     water_result = identify_water_suitability(boundary_coordinates, dem=dem)
     selected_water_zone = water_result["selected_water_zone"]
     water_zones = [selected_water_zone] if selected_water_zone else []
 
+    # Tree-zone-candidate exclusion: graceful degradation on an ordinary
+    # fetch failure, EXCEPT for CanopyCoverageIncompleteError bubbling up
+    # from this call's own internal mandatory canopy gate -- see this
+    # function's own docstring.
+    tree_zone_exclusion_polygon_utm = None
+    tree_zone_exclusion_available = True
     try:
-        roads = get_farm_roads_for_boundary(boundary_coordinates)
-        road_lines_wgs84 = [g["geometry"] for g in roads]
+        tree_zone_result = identify_tree_zone_candidates(boundary_coordinates, dem=dem)
+        tree_zone_patches = tree_zone_result["patches"]
+        if tree_zone_patches:
+            tree_zone_union = unary_union([p["render_fill_polygon_utm"] for p in tree_zone_patches])
+            tree_zone_exclusion_polygon_utm = tree_zone_union.buffer(TREE_ZONE_STRUCTURE_EXCLUSION_BUFFER_METERS)
+    except CanopyCoverageIncompleteError:
+        raise
     except Exception:
-        road_lines_wgs84 = None  # fetch failed -- disables the road constraint, see find_candidate_solar_zones
+        tree_zone_exclusion_available = False
 
-    road_geometries_utm = None
-    if road_lines_wgs84 is not None:
-        road_geometries_utm = []
-        for geometry in road_lines_wgs84:
-            coords = geometry["coordinates"]
-            line_lists = coords if geometry["type"] == "MultiLineString" else [coords]
-            for line in line_lists:
-                xs, ys = warp_transform("EPSG:4326", dem["crs"], [p[0] for p in line], [p[1] for p in line])
-                road_geometries_utm.append(LineString(zip(xs, ys)))
+    # identify_road_corridor_candidates() now requires a real anchor_lon_lat
+    # to generate any routes at all (see road_corridors.py's own module
+    # docstring) -- there's no real one available in this module's own
+    # context yet (a genuine product decision, not derivable from the
+    # boundary alone), so this borrows render_layout_map.py's TEMPORARY
+    # placeholder reference-property anchor, same as tree_zone_candidates.py's
+    # own call. Imported locally (not at module level) because
+    # render_layout_map.py itself imports FROM solar_suitability.py
+    # (fetch_and_select_optimal_structure_site) -- a top-level import
+    # here would be circular.
+    from render_layout_map import _PLACEHOLDER_REFERENCE_PROPERTY_ANCHOR_LON_LAT
 
-    # No existing-road data at all (fetch failed, or genuinely none nearby)
-    # -- fall back to the top-ranked suggested road corridor as the
-    # proximity anchor instead, rather than leaving the constraint
-    # disabled/zeroed. This is a fallback only: real existing-road data
-    # (a non-empty road_geometries_utm above) is left untouched.
-    road_data_is_fallback = False
-    if not road_geometries_utm:
-        road_geometries_utm = _suggested_corridor_as_road_fallback(boundary_coordinates, dem)
-        road_data_is_fallback = road_geometries_utm is not None
-
-    candidates = find_candidate_solar_zones(
-        dem, production_areas, water_zones, road_geometries_utm, boundary_polygon_utm, **zone_kwargs
+    common_zone_kwargs = dict(
+        canopy_mask_utm=canopy_mask_utm,
+        tree_zone_exclusion_polygon_utm=tree_zone_exclusion_polygon_utm,
     )
+    common_zone_kwargs.update(zone_kwargs)
+
+    # --- Tier 1 (primary): the property's own single selected road
+    # corridor, within ROAD_CORRIDOR_PROXIMITY_METERS. Not wrapped in
+    # try/except -- see this function's own docstring. ---
+    candidates = []
+    road_proximity_source = "unavailable"
+
+    corridor_result = identify_road_corridor_candidates(
+        boundary_coordinates, dem=dem, anchor_lon_lat=_PLACEHOLDER_REFERENCE_PROPERTY_ANCHOR_LON_LAT
+    )
+    selected_road_corridor = corridor_result["selected_road_corridor"]
+    if selected_road_corridor is not None:
+        candidates = find_candidate_solar_zones(
+            dem,
+            production_areas,
+            water_zones,
+            [selected_road_corridor["cell_footprint_polygon_utm"]],
+            boundary_polygon_utm,
+            road_proximity_buffer_meters=ROAD_CORRIDOR_PROXIMITY_METERS,
+            **common_zone_kwargs,
+        )
+        if candidates:
+            road_proximity_source = "selected_road_corridor"
+
+    # --- Tier 2 (fallback): only reached if Tier 1 produced zero
+    # candidates -- either no corridor existed at all, or one existed but
+    # nothing survived the rest of the constraint stack near it. ---
+    if not candidates:
+        try:
+            roads = get_farm_roads_for_boundary(boundary_coordinates)
+            road_lines_wgs84 = [g["geometry"] for g in roads]
+        except Exception:
+            road_lines_wgs84 = None  # real fetch failure, not "zero roads found"
+
+        if road_lines_wgs84 is not None:
+            road_geometries_utm = []
+            for geometry in road_lines_wgs84:
+                coords = geometry["coordinates"]
+                line_lists = coords if geometry["type"] == "MultiLineString" else [coords]
+                for line in line_lists:
+                    xs, ys = warp_transform("EPSG:4326", dem["crs"], [p[0] for p in line], [p[1] for p in line])
+                    road_geometries_utm.append(LineString(zip(xs, ys)))
+
+            candidates = find_candidate_solar_zones(
+                dem,
+                production_areas,
+                water_zones,
+                road_geometries_utm,
+                boundary_polygon_utm,
+                road_proximity_buffer_meters=ROAD_PROXIMITY_BUFFER_METERS,
+                **common_zone_kwargs,
+            )
+            road_proximity_source = "real_mapped_road"
+        else:
+            # Tier 2's own fetch failed outright, AND Tier 1 produced
+            # nothing -- fall through to the terminal behavior: disable
+            # the road constraint entirely for a final scoring pass.
+            candidates = find_candidate_solar_zones(
+                dem,
+                production_areas,
+                water_zones,
+                None,
+                boundary_polygon_utm,
+                **common_zone_kwargs,
+            )
+            road_proximity_source = "unavailable"
 
     if check_prime_farmland and candidates:
         try:
@@ -864,7 +1167,11 @@ def identify_solar_candidate_zones(
             pass  # SSURGO outage -- candidates just won't carry a prime_farmland_conflict flag this run
 
     return {
-        "zones_geojson": candidates_to_geojson(candidates, road_data_is_fallback=road_data_is_fallback),
+        "zones_geojson": candidates_to_geojson(
+            candidates,
+            road_proximity_source=road_proximity_source,
+            tree_zone_exclusion_available=tree_zone_exclusion_available,
+        ),
         "all_scored_candidates": candidates,
         "selected_structure_site": select_optimal_structure_site(candidates),
     }

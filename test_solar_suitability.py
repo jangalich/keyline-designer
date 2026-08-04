@@ -43,10 +43,15 @@ from shapely.ops import unary_union
 from feature_schema import validate_feature_collection
 from road_corridors import POND_ZONE_EXCLUSION_BUFFER_METERS
 from solar_suitability import (
+    ASPECT_SCORE_WEIGHT,
     CANDIDATE_POINT_SPACING_METERS,
     MAX_STRUCTURE_FOOTPRINT_ACRES,
     MIN_SUITABILITY_SCORE,
     PRODUCTION_EDGE_ADJACENCY_METERS,
+    PRODUCTION_PROXIMITY_SCORE_WEIGHT,
+    SHADING_SCORE_WEIGHT,
+    SLOPE_SCORE_WEIGHT,
+    _cells_within_polygon,
     _footprint_side_meters,
     _generate_candidate_points,
     _production_proximity_score,
@@ -67,9 +72,9 @@ for row in range(ROWS):
 DEM = {"array": array, "resolution_meters": RESOLUTION, "origin_x": ORIGIN_X, "origin_y": ORIGIN_Y, "crs": CRS}
 
 PRODUCTION_AREAS = [
-    {"id": 0, "representative_elevation_m": 100.0, "polygon_utm": box(500000, 4500000, 500150, 4500300)}
+    {"id": 0, "representative_elevation_m": 100.0, "render_fill_polygon_utm": box(500000, 4500000, 500150, 4500300)}
 ]
-WATER_ZONES = [{"valley_id": 0, "polygon_utm": box(500270, 4500140, 500300, 4500160)}]
+WATER_ZONES = [{"valley_id": 0, "render_fill_polygon_utm": box(500270, 4500140, 500300, 4500160)}]
 ROAD = [LineString([(500000, 4500000), (500300, 4500000)])]
 BOUNDARY = box(500000, 4500000, 500300, 4500300)
 
@@ -103,9 +108,9 @@ assert inside_count >= 1, (
 )
 for c in candidates:
     if c["production_zone_relationship"] == "inside":
-        assert c["polygon_utm"].intersects(unary_union([p["polygon_utm"] for p in PRODUCTION_AREAS])), (
-            "a candidate classified 'inside' must actually overlap the production-zone geometry"
-        )
+        assert c["polygon_utm"].intersects(
+            unary_union([p["render_fill_polygon_utm"] for p in PRODUCTION_AREAS])
+        ), "a candidate classified 'inside' must actually overlap the production-zone geometry"
 print(f"{inside_count}/{len(candidates)} candidates sit INSIDE the production zone -- the redesign's core fix, confirmed.")
 
 
@@ -320,5 +325,88 @@ print(
     f"Parcel clipping: {len(clipped_candidates)} solar candidate(s) on a slope spanning well past the parcel "
     f"boundary all stay entirely within the real (smaller) parcel, not the DEM's buffered extent."
 )
+
+
+# --- weights: even 0.25/0.25/0.25/0.25 split is actually applied, not just asserted ---
+
+assert SLOPE_SCORE_WEIGHT == ASPECT_SCORE_WEIGHT == SHADING_SCORE_WEIGHT == PRODUCTION_PROXIMITY_SCORE_WEIGHT == 0.25
+print("Scoring weights are an even 0.25/0.25/0.25/0.25 split across slope/aspect/shading/production-proximity.")
+
+
+# --- canopy_mask_utm: hard exclusion, before scoring; None (default) applies no gate at all ---
+
+no_gate_candidates = find_candidate_solar_zones(DEM, PRODUCTION_AREAS, WATER_ZONES, ROAD, BOUNDARY, max_candidates=50)
+assert len(no_gate_candidates) == len(candidates), "canopy_mask_utm=None (the default) must apply no gate at all"
+
+# Build a canopy mask that covers exactly one known-surviving candidate's own footprint (interior,
+# not the water-excluded one) -- see the module docstring for the "excluded before scoring, not
+# merely scored low" reasoning this mirrors from the water exclusion.
+target_x, target_y = 500075.0, 4500075.0
+footprint_side_m = _footprint_side_meters(MAX_STRUCTURE_FOOTPRINT_ACRES)
+target_footprint = box(
+    target_x - footprint_side_m / 2, target_y - footprint_side_m / 2,
+    target_x + footprint_side_m / 2, target_y + footprint_side_m / 2,
+).intersection(BOUNDARY)
+target_cells = _cells_within_polygon(DEM, target_footprint, ROWS, COLS)
+assert target_cells, "expected at least one DEM cell under the target candidate's own footprint"
+
+canopy_mask = np.zeros((ROWS, COLS), dtype=bool)
+for r, c in target_cells:
+    canopy_mask[r, c] = True
+
+canopy_gated_candidates = find_candidate_solar_zones(
+    DEM, PRODUCTION_AREAS, WATER_ZONES, ROAD, BOUNDARY, canopy_mask_utm=canopy_mask, max_candidates=50
+)
+assert len(canopy_gated_candidates) == len(candidates) - 1, (
+    "a canopy mask covering exactly one surviving candidate's footprint should hard-exclude only that one"
+)
+assert not any(
+    c["polygon_utm"].intersects(target_footprint) for c in canopy_gated_candidates
+), "the canopy-covered candidate must not survive"
+print(
+    f"canopy_mask_utm hard-excludes a candidate whose footprint touches real, existing canopy "
+    f"({len(candidates)} -> {len(canopy_gated_candidates)} candidates), before any scoring."
+)
+
+
+# --- tree_zone_exclusion_polygon_utm: hard exclusion, buffered, same pattern as water ---
+
+tree_zone_exclusion = target_footprint.buffer(5.0)  # comfortably covers the same target footprint
+tree_gated_candidates = find_candidate_solar_zones(
+    DEM, PRODUCTION_AREAS, WATER_ZONES, ROAD, BOUNDARY,
+    tree_zone_exclusion_polygon_utm=tree_zone_exclusion, max_candidates=50,
+)
+assert len(tree_gated_candidates) == len(candidates) - 1, (
+    "a tree-zone exclusion polygon covering exactly one surviving candidate's footprint should "
+    "hard-exclude only that one"
+)
+assert not any(
+    c["polygon_utm"].intersects(target_footprint) for c in tree_gated_candidates
+), "the tree-zone-excluded candidate must not survive"
+print(
+    f"tree_zone_exclusion_polygon_utm hard-excludes an intersecting candidate "
+    f"({len(candidates)} -> {len(tree_gated_candidates)} candidates), same pattern as the water exclusion."
+)
+
+
+# --- candidates_to_geojson: road_proximity_source / tree_zone_exclusion_available reporting ---
+
+for source in ("selected_road_corridor", "real_mapped_road", "unavailable"):
+    tiered_geojson = candidates_to_geojson(flagged, road_proximity_source=source)
+    for feature in tiered_geojson["features"]:
+        assert feature["properties"]["road_proximity_source"] == source
+    if source == "selected_road_corridor":
+        assert all("SELECTED road corridor" in f["properties"]["confidence_notes"] for f in tiered_geojson["features"])
+    if source == "real_mapped_road":
+        assert all("fell back" in f["properties"]["confidence_notes"] for f in tiered_geojson["features"])
+    if source == "unavailable":
+        assert all("disabled entirely" in f["properties"]["confidence_notes"] for f in tiered_geojson["features"])
+print("candidates_to_geojson correctly reports road_proximity_source per tier, in properties and confidence_notes.")
+
+unavailable_geojson = candidates_to_geojson(flagged, tree_zone_exclusion_available=False)
+assert all(
+    "could not be checked" in f["properties"]["confidence_notes"] for f in unavailable_geojson["features"]
+), "confidence_notes must flag when tree-zone-candidate exclusion couldn't be checked this run"
+print("candidates_to_geojson correctly flags when tree-zone-candidate exclusion data was unavailable.")
 
 print("\nAll solar_suitability checks passed.")
