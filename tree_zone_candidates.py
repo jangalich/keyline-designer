@@ -57,6 +57,51 @@ tree zones (a later, separate pass), not the reverse.
             buffer, not this one).
         The remainder is the search space Step 2 scores.
 
+        GEOMETRY FORM CLAIMED: each of the three inputs above is
+        subtracted using that zone's own OPTIMIZED/render form, NOT its
+        raw cell-footprint geometry -- the same shapes render_layout_map.py
+        itself draws, per the reasoning already established there
+        (production_area.py's/water_candidate_zones.py's own module
+        docstrings for the two hulls, this module's own ROAD CORRIDOR
+        STYLE section for the smoothed line):
+          - production: render_fill_polygon_utm (production_area.py's
+            plain convex hull of each patch's own render_polygon_utm,
+            re-intersected with the boundary) -- NOT polygon_utm, the
+            blocky, notched raw cell-union footprint. A real interior
+            pocket (excluded steep/hydric cells) or waist-split pinch in
+            polygon_utm would otherwise read as "still open" ground here,
+            when the property's actual final layout (what render_layout_
+            map.py draws, what a reader actually sees) shows it as part of
+            one coherent production zone.
+          - water: same reasoning, same field --
+            water_candidate_zones.find_candidate_zones()'s own
+            render_fill_polygon_utm for the single selected zone, not its
+            polygon_utm.
+          - road: render_layout_map.py's own _smooth_line_for_render()
+            (Douglas-Peucker simplify, then Chaikin corner-cutting) run
+            directly on the selected route's real line_utm -- the same
+            display transform render_layout_map.py applies before
+            plotting, applied here in the DEM's own real UTM meters
+            (line_utm's native CRS) rather than the approximate,
+            latitude-distorted meters render_layout_map.py's own Web
+            Mercator rendering pass uses. road_corridors.py's raw
+            line_utm is a literal per-DEM-cell stairstepped polyline (see
+            that module's own module docstring) -- smoothing it here
+            before subtraction keeps this module's claimed road geometry
+            visually consistent with the corridor actually shown on the
+            final map, not an artificially blockier one. Still a
+            zero-width LineString either way, so this remains a
+            practically negligible effect on the resulting search-space
+            AREA (see above) -- this only changes the line's SHAPE, not
+            whether it's buffered.
+        In every case this is the SAME "reads as one coherent shape/
+        alignment" reasoning already established for rendering -- applied
+        here to what tree zones treat as already-claimed, not just to
+        what's drawn on the map. None of this touches any zone's own real
+        polygon_utm/geometry_wgs84/line_utm (used for that zone's own
+        scoring, eligibility, and narrative report) -- only the copy of
+        the geometry handed to compute_tree_search_space() here.
+
     STEP 2 -- SUITABILITY SCORING (score_tree_search_space()):
         every DEM cell inside the search space is scored against four
         independently-stored 0-1 factors, reusing data this pipeline
@@ -769,15 +814,17 @@ def identify_tree_zone_candidates(
     # optimized-selection entry points. Per product decision, this app
     # targets small farms only: one well-suited water zone / road corridor
     # is sufficient, so only that one candidate's own geometry counts as
-    # "claimed" for each. Each optimized patch's own 'polygon_utm' is the
-    # real, accurate cell-union footprint -- see production_area.py's own
-    # cluster_and_gate() docstring. ---
+    # "claimed" for each. Each geometry claimed here is that zone's own
+    # OPTIMIZED/render form, NOT its raw cell/DEM-walk footprint -- see
+    # this module's own "GEOMETRY FORM CLAIMED" docstring section above
+    # for why (production_area.py's own cluster_and_gate() docstring for
+    # render_fill_polygon_utm itself). ---
     production_result = identify_optimized_production_areas(boundary_coordinates, dem=dem)
-    production_polygons_utm = [p["polygon_utm"] for p in production_result["scored_patches"]]
+    production_polygons_utm = [p["render_fill_polygon_utm"] for p in production_result["scored_patches"]]
 
     water_result = identify_water_suitability(boundary_coordinates, dem=dem)
     selected_water_zone = water_result["selected_water_zone"]
-    water_polygons_utm = [selected_water_zone["polygon_utm"]] if selected_water_zone else []
+    water_polygons_utm = [selected_water_zone["render_fill_polygon_utm"]] if selected_water_zone else []
 
     # identify_road_corridor_candidates() now requires a real anchor_lon_lat
     # to generate any routes at all (see road_corridors.py's own module
@@ -785,18 +832,26 @@ def identify_tree_zone_candidates(
     # context yet (a genuine product decision, not derivable from the
     # boundary alone), so this borrows render_layout_map.py's TEMPORARY
     # placeholder reference-property anchor purely to unblock testing/live
-    # runs, same as render_layout_map.py's own call. Imported locally
-    # rather than at module level so importing tree_zone_candidates.py
-    # doesn't also eagerly pull in render_layout_map.py's own heavier
-    # rendering dependencies (matplotlib/contextily/xyzservices) for
-    # callers that never actually render a map.
-    from render_layout_map import _PLACEHOLDER_REFERENCE_PROPERTY_ANCHOR_LON_LAT
+    # runs, same as render_layout_map.py's own call. _smooth_line_for_
+    # render() is render_layout_map.py's own display-smoothing transform
+    # for a road corridor's real, per-DEM-cell-stairstepped line_utm (see
+    # this module's "GEOMETRY FORM CLAIMED" section above) -- reused
+    # directly here rather than reimplemented, so there's exactly one
+    # definition of "the road's optimized alignment" for both the map and
+    # this exclusion. Both imported locally rather than at module level
+    # so importing tree_zone_candidates.py doesn't also eagerly pull in
+    # render_layout_map.py's own heavier rendering dependencies
+    # (matplotlib/contextily/xyzservices) for callers that never actually
+    # render a map.
+    from render_layout_map import _PLACEHOLDER_REFERENCE_PROPERTY_ANCHOR_LON_LAT, _smooth_line_for_render
 
     road_result = identify_road_corridor_candidates(
         boundary_coordinates, dem=dem, anchor_lon_lat=_PLACEHOLDER_REFERENCE_PROPERTY_ANCHOR_LON_LAT
     )
     selected_road_corridor = road_result["selected_road_corridor"]
-    road_lines_utm = [selected_road_corridor["line_utm"]] if selected_road_corridor else []
+    road_lines_utm = (
+        [_smooth_line_for_render(selected_road_corridor["line_utm"])] if selected_road_corridor else []
+    )
 
     search_space, claimed_union = compute_tree_search_space(
         boundary_polygon_utm, production_polygons_utm, water_polygons_utm, road_lines_utm

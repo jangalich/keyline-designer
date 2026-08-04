@@ -381,14 +381,6 @@ def _fake_water_features_empty(boundary_coordinates, buffer_meters=150):
     return {"streams": [], "water_bodies": []}
 
 
-def _fake_erosion_empty(wkt_polygon):
-    return []
-
-
-def _fake_farm_roads_empty(boundary_coordinates):
-    return []
-
-
 # Same bench-and-rise synthetic DEM as production_area.py's own smoke test:
 # a flat, workable bench (rows < 15) production_area.py will claim as a
 # production candidate, bordered by a genuinely steep rise (rows >= 15,
@@ -398,8 +390,9 @@ def _fake_farm_roads_empty(boundary_coordinates):
 # water_suitability's own per-zone soil/stream check -- reached now via its
 # full identify_water_suitability() entry point, since tree_zone_candidates
 # subtracts only its SELECTED zone, not the raw pure zone list --
-# road_corridors' floodplain/erosion/farm-roads checks, and this module's
-# own farmland/hydric/stream checks) mocked to "reachable, found nothing."
+# road_corridors' own floodplain (NHD stream/hydric soil) check, and this
+# module's own farmland/hydric/stream checks) mocked to "reachable, found
+# nothing."
 size = 30
 orchestrator_array = np.zeros((size, size), dtype=np.float32)
 for row in range(size):
@@ -426,9 +419,7 @@ with mock_patch.object(pa, "get_soil_data_for_polygon", _fake_soil_rows_empty), 
      mock_patch.object(pa, "get_soil_geometries_for_polygon", _fake_soil_geometries_empty), \
      mock_patch.object(rc, "get_soil_data_for_polygon", _fake_soil_rows_empty), \
      mock_patch.object(rc, "get_soil_geometries_for_polygon", _fake_soil_geometries_empty), \
-     mock_patch.object(rc, "get_erosion_factor_for_polygon", _fake_erosion_empty), \
      mock_patch.object(rc, "get_water_features_for_boundary", _fake_water_features_empty), \
-     mock_patch.object(rc, "get_farm_roads_for_boundary", _fake_farm_roads_empty), \
      mock_patch.object(ws, "get_saturated_hydraulic_conductivity_for_polygon", _fake_soil_rows_empty), \
      mock_patch.object(ws, "get_soil_geometries_for_polygon", _fake_soil_geometries_empty), \
      mock_patch.object(ws, "get_water_features_for_boundary", _fake_water_features_empty), \

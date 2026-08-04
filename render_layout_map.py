@@ -11,16 +11,20 @@ water_suitability.py (fetch_and_select_optimal_water_zone -- the top-ranked
 candidate), road_corridors.py (fetch_and_select_optimal_road_corridor -- the
 single selected road corridor road_corridors.py's own ridge-line
 identification/scoring picks, see that module's own module docstring),
-solar_suitability.py (fetch_and_select_optimal_structure_site -- the
-top-ranked candidate), hydrology_data.py (real NHD streams, for
+tree_zone_candidates.py (identify_tree_zone_candidates -- every ranked
+tree-suitable candidate patch left over once production/water/road's own
+claimed geometry is subtracted out, see that module's own module
+docstring), solar_suitability.py (fetch_and_select_optimal_structure_site
+-- the top-ranked candidate), hydrology_data.py (real NHD streams, for
 background context only -- no soil/hydrology POLYGON data is drawn here,
 that's covered in the narrative text), and contour_lines.py (global
 elevation contour lines over the full DEM extent).
 
-    boundary --> dem_data (fetched once, shared across all four layers)
+    boundary --> dem_data (fetched once, shared across every layer below)
              --> production_area_ceiling.identify_optimized_production_areas
              --> water_suitability.fetch_and_select_optimal_water_zone
              --> road_corridors.fetch_and_select_optimal_road_corridor
+             --> tree_zone_candidates.identify_tree_zone_candidates
              --> solar_suitability.fetch_and_select_optimal_structure_site
              --> hydrology_data.get_water_features_for_boundary (streams)
              --> contour_lines.compute_contour_lines (global, unclipped)
@@ -108,6 +112,31 @@ points_xyz/geometry_wgs84 (used for length_m, avg_grade_pct, and every
 other scoring/narrative value) are never touched -- only the copy handed
 to the plotting calls is simplified/smoothed.
 
+TREE ZONE STYLE: each ranked tree-zone candidate patch (there can be
+several, same "possibly-multiple, ranked" shape as production zones, not
+a single selection like water/road/structure) renders as a solid,
+hatched fill (TREE_ZONE_COLOR, TREE_ZONE_FILL_ALPHA, TREE_ZONE_HATCH) --
+its own real geometry_wgs84 directly, not a cosmetic display-only hull
+the way production/water's own render_fill_polygon_utm is (a tree-zone
+patch is already this layer's own leftover, non-claimed search space --
+see tree_zone_candidates.py's own module docstring for why its exclusion
+inputs were switched to production/water's render_fill_polygon_utm and
+the road corridor's own render-smoothed line, precisely so what's claimed
+here lines up with what's actually drawn for those three zones on this
+same map). The hatch (rather than a flat fill like structure_site's own
+solid red) is a deliberate, visible "candidate, not a committed site"
+cue, consistent with this layer's own CONFIDENCE_LOW rating and its
+explicit "not a definite planting plan" framing (see
+tree_zone_candidates.py's own TREE_ZONE_CONFIDENCE_NOTES_TEMPLATE).
+Rendered after the road corridor and before the structure site, matching
+Scale of Permanence step ordering (Trees is step 5, immediately before
+Permanent Buildings' step 6) -- and z-ordered accordingly (below
+structure_site's own solid fill), so a real, expected overlap between a
+tree candidate and the structure site (tree_zone_candidates.py's own
+search space deliberately has no awareness of solar/structure siting,
+see that module's own docstring) still reads as the structure site
+sitting visibly on top, not a confusing double-fill blend.
+
 Basemap: NAIP aerial imagery via USGS's cached USGSImageryOnly tile
 service, fetched and composited with contextily (a well-established
 static-basemap library built for exactly this -- fetch+stitch XYZ tiles
@@ -145,6 +174,7 @@ from hydrology_data import get_water_features_for_boundary
 from production_area_ceiling import identify_optimized_production_areas
 from road_corridors import fetch_and_select_optimal_road_corridor
 from solar_suitability import fetch_and_select_optimal_structure_site
+from tree_zone_candidates import identify_tree_zone_candidates
 from water_suitability import fetch_and_select_optimal_water_zone
 
 # TEMPORARY: hardcoded to Jordan's reference property until frontend
@@ -316,6 +346,14 @@ WATER_ZONE_COLOR = "#1F6FB2"
 # texture ON the water fill, not a second, competing shape.
 WATER_ZONE_RIPPLE_COLOR = "#7EC1E8"
 STRUCTURE_SITE_COLOR = "#D64545"
+# A dark forest green -- deliberately distinct from PRODUCTION_ZONE_COLOR's
+# lighter, more saturated green (production is active farm ground; trees
+# are a candidate, not-yet-decided layer) and from every other layer color
+# already in use. See this module's own TREE ZONE STYLE docstring section
+# for why this fill is hatched rather than flat, unlike structure_site's own.
+TREE_ZONE_COLOR = "#2D5A27"
+TREE_ZONE_FILL_ALPHA = 0.45
+TREE_ZONE_HATCH = "///"
 
 MARKER_FACE_COLOR = "#1A1A1A"
 MARKER_TEXT_COLOR = "white"
@@ -603,6 +641,20 @@ def fetch_layout_layers(boundary_coordinates: list[tuple[float, float]], dem: Op
     module docstring), so there's nothing left to rank/discard here the
     way an earlier fan-based version of this module needed to.
 
+    tree_zone_result reuses identify_tree_zone_candidates()'s own full
+    return dict directly (like production_result above, not narrowed down
+    to a single selection -- there can be several ranked tree-zone
+    candidates, same shape as production). This call independently
+    recomputes production/water/road's own candidate geometry a second
+    time internally (identify_tree_zone_candidates()'s own Step 1 needs
+    it to build its search space) -- the same "each optimize/select call
+    below re-derives its own upstream dependencies, only the DEM fetch
+    itself is shared" pattern every other call in this function already
+    follows (e.g. fetch_and_select_optimal_road_corridor() already
+    re-runs identify_optimized_production_areas() and
+    fetch_and_select_optimal_water_zone() internally); not a new
+    inefficiency this call introduces.
+
     contour_lines is contour_lines.compute_contour_lines()'s own output --
     GLOBAL elevation contour lines over the DEM's full extent, computed
     ONCE here and shared across every production zone at render time
@@ -619,6 +671,7 @@ def fetch_layout_layers(boundary_coordinates: list[tuple[float, float]], dem: Op
     road_corridor = fetch_and_select_optimal_road_corridor(
         boundary_coordinates, dem=dem, anchor_lon_lat=_PLACEHOLDER_REFERENCE_PROPERTY_ANCHOR_LON_LAT
     )
+    tree_zone_result = identify_tree_zone_candidates(boundary_coordinates, dem=dem)
     structure_site = fetch_and_select_optimal_structure_site(boundary_coordinates, dem=dem)
     water_features = get_water_features_for_boundary(boundary_coordinates)
     contour_lines = compute_contour_lines(dem)
@@ -628,6 +681,7 @@ def fetch_layout_layers(boundary_coordinates: list[tuple[float, float]], dem: Op
         "production_result": production_result,
         "water_zone": water_zone,
         "road_corridor": road_corridor,
+        "tree_zone_result": tree_zone_result,
         "structure_site": structure_site,
         "water_features": water_features,
         "contour_lines": contour_lines,
@@ -657,6 +711,7 @@ def render_layout_map(
     production_result = layers["production_result"]
     water_zone = layers["water_zone"]
     road_corridor = layers["road_corridor"]
+    tree_zone_result = layers["tree_zone_result"]
     structure_site = layers["structure_site"]
     water_features = layers["water_features"]
     contour_lines = layers["contour_lines"]
@@ -836,6 +891,39 @@ def render_layout_map(
         # water zone's own marker placement above already uses).
         _draw_numbered_marker(ax, render_geom.interpolate(0.5, normalized=True), marker_number)
         legend_entries.append(f"{marker_number} — Road Corridor, score {props['suitability_score']}")
+        marker_number += 1
+
+    # Tree zone candidates: possibly several, ranked (same "possibly-
+    # multiple" shape as production zones above, not a single selection
+    # like water_zone/road_corridor/structure_site) -- see this module's
+    # own TREE ZONE STYLE docstring section for the hatched-fill styling
+    # rationale. Drawn from each patch's own real geometry_wgs84 directly
+    # (score_tree_search_space()'s own output already IS this layer's
+    # leftover, non-claimed search space -- there's no separate cosmetic
+    # display-only hull for it the way production/water each have their
+    # own render_fill_polygon_utm).
+    tree_zone_patches = tree_zone_result.get("patches", []) if tree_zone_result else []
+    multiple_tree_zones = len(tree_zone_patches) > 1
+    for patch in tree_zone_patches:
+        geom = _reproject_geometry_to_mercator(patch["geometry_wgs84"])
+        polygons = geom.geoms if geom.geom_type == "MultiPolygon" else [geom]
+        for polygon in polygons:
+            plot_polygon(
+                polygon,
+                ax=ax,
+                add_points=False,
+                facecolor=TREE_ZONE_COLOR,
+                edgecolor=TREE_ZONE_COLOR,
+                alpha=TREE_ZONE_FILL_ALPHA,
+                linewidth=1.0,
+                hatch=TREE_ZONE_HATCH,
+                zorder=42.8,
+            )
+        label = f"Tree Zone Candidate {patch['rank']}" if multiple_tree_zones else "Tree Zone Candidate"
+        _draw_numbered_marker(ax, geom.representative_point(), marker_number)
+        legend_entries.append(
+            f"{marker_number} — {label}, score {patch['tree_suitability_score']}/100, {patch['area_acres']} ac"
+        )
         marker_number += 1
 
     if structure_site is not None:
