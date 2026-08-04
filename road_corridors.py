@@ -34,19 +34,23 @@ Pipeline (find_road_routes()):
   2. GROUP: connected_components() on that mask — one candidate "network"
      per originally-contiguous ridge landform.
   3. PRUNE: _prune_ridge_networks() removes every cell inside
-     excluded_mask (the HARD water-zone + production-zone exclusions
+     excluded_mask (the HARD water-zone + boundary exclusions below —
+     production is NOT part of this mask anymore, see constraint stack
      below) from each network, then keeps only the single LARGEST
      surviving fragment per original network — an exclusion can sever one
      ridge into several disconnected pieces; only the biggest piece per
      original ridge stays a candidate (a severed sliver isn't a
-     meaningfully separate ridge worth scoring on its own).
+     meaningfully separate ridge worth scoring on its own). A ridge may
+     freely walk through a production zone now; that's what the 4th
+     scoring term below is for.
   4. SCORE: _score_ridge_candidates() ranks the surviving fragments on
-     three normalized, equally-weighted-by-default terms — how gentle the
-     fragment's own average slope is, how long it is, and how cheap
+     four normalized, equally-weighted-by-default terms — how gentle the
+     fragment's own average slope is, how long it is, how cheap
      (road_cost_path.least_cost_path()'s own total_cost, from the anchor)
-     it is to actually reach — see that function's own docstring for the
-     exact formula and RIDGE_SLOPE_WEIGHT / RIDGE_LENGTH_WEIGHT /
-     RIDGE_PROXIMITY_WEIGHT below.
+     it is to actually reach, and how few of its own cells fall inside a
+     production zone — see that function's own docstring for the exact
+     formula and RIDGE_SLOPE_WEIGHT / RIDGE_LENGTH_WEIGHT /
+     RIDGE_PROXIMITY_WEIGHT / RIDGE_PRODUCTION_WEIGHT below.
   5. SELECT: the single highest weighted-score candidate wins. The final
      route is that candidate's own CONNECTOR path (anchor -> whichever
      ridge cell the connector actually reaches) concatenated with the
@@ -58,15 +62,13 @@ list of alternates the way an earlier fan-based version of this module
 returned up to three. Per product decision, this app targets small farms
 only, where one well-suited road corridor is sufficient.
 
-Constraint stack, current design — HARD exclusions (baked into
-cost_raster as np.inf, AND stripped out of ridge candidates outright by
-_prune_ridge_networks() before scoring ever starts) vs. a SOFT cost
-preference (a cost_raster penalty only the CONNECTOR portion of the final
-route can choose to pay — a ridge fragment itself is never floodplain/
-hydric ground in practice, since flow-accumulation ridge cells are by
-definition high, well-drained terrain, so this penalty never really
-applies inside a fragment):
-  - HARD exclusions:
+Constraint stack, current design — the HARD/SOFT split is no longer a
+single property-wide line; it now differs between the ridge fragment
+itself and the anchor-to-ridge CONNECTOR:
+  - HARD exclusions on the RIDGE (stops the ridge walk outright —
+    _prune_ridge_networks() strips these cells before scoring ever
+    starts, and _order_fragment_from_entry()'s own BFS can never route
+    through them either, since they're gone from the fragment entirely):
       - outside the single SELECTED water-system candidate zone
         (water_suitability.fetch_and_select_optimal_water_zone() — the
         one rank-1 zone this property's own water-suitability scoring
@@ -74,10 +76,19 @@ applies inside a fragment):
         water_candidate_zones.py generates), buffered wider — routing on
         the uphill side of a pond/dam, not across its face or catchment
         inlet
+      - the parcel boundary itself (off-parcel cells)
+  - HARD exclusion on the CONNECTOR only (baked into cost_raster as
+    np.inf, via build_cost_raster()'s own excluded_mask argument):
       - production zone(s) (production_area_ceiling.py's own optimized/
-        final geometry) — a road may not cross or sit on production land
-        at all under the current design (see _build_production_cell_
-        mask(), whose own output gets folded into excluded_mask)
+        final geometry) — the anchor-to-ridge connector may never cross
+        or sit on production land, same as before.
+  - SOFT, cell-based SCORING term on the RIDGE fragment itself (the 4th
+    _score_ridge_candidates() term — see RIDGE_PRODUCTION_WEIGHT below):
+      - production zone(s) — a ridge fragment MAY now walk across
+        production land (it's no longer pruned out), but a fragment with
+        more of its own cells inside a production zone scores worse,
+        exactly the same normalized "more is worse, relative to the
+        worst candidate in the set" shape length_score already uses.
   - SOFT cost preference (connector only):
       - floodplain/hydric ground, sourced from real NHD stream/water-body
         buffers + SSURGO hydric soil polygons (NOT inferred from DEM
@@ -247,17 +258,18 @@ MIN_CORRIDOR_LENGTH_METERS = 30.0
 # CONFIGURABLE.
 RIDGE_MIN_AREA_ACRES = 0.5
 
-# Weights for _score_ridge_candidates()'s three-term weighted score
-# (slope, length, proximity-to-anchor -- see that function's own
-# docstring for the exact normalized formula each term feeds). Starting
-# equal-weighted (as close to 1/3 each as three two-decimal numbers
-# summing to 1.0 allow) -- CONFIGURABLE, deliberately UNVALIDATED starting
+# Weights for _score_ridge_candidates()'s four-term weighted score
+# (slope, length, proximity-to-anchor, production-zone crossing -- see
+# that function's own docstring for the exact normalized formula each
+# term feeds). Equal-weighted (a clean 0.25 each, now that four terms
+# divide 1.0 evenly) -- CONFIGURABLE, deliberately UNVALIDATED starting
 # values, same caveat as every other weight/threshold in this pipeline:
 # pending a real diagnostic sweep against actual scored candidates on a
 # real property, not tuned against anything yet.
-RIDGE_SLOPE_WEIGHT = 0.34
-RIDGE_LENGTH_WEIGHT = 0.33
-RIDGE_PROXIMITY_WEIGHT = 0.33
+RIDGE_SLOPE_WEIGHT = 0.25
+RIDGE_LENGTH_WEIGHT = 0.25
+RIDGE_PROXIMITY_WEIGHT = 0.25
+RIDGE_PRODUCTION_WEIGHT = 0.25
 
 ROAD_CORRIDOR_CONFIDENCE_NOTES_TEMPLATE = (
     "This is a TOPOGRAPHIC SUGGESTION only, not a surveyed road alignment — "
@@ -266,20 +278,31 @@ ROAD_CORRIDOR_CONFIDENCE_NOTES_TEMPLATE = (
     "to a single given anchor point via a least-cost path (an unbounded grade "
     "penalty plus a floodplain cost surface — see road_cost_path.py), not a "
     "civil engineering design. The single selected water-system candidate "
-    "zone and production zone(s) are HARD-excluded from the ridge itself — a "
-    "route cannot be generated through either at all. Floodplain/hydric "
+    "zone is HARD-excluded from the ridge itself — a route cannot be "
+    "generated through it at all. Production zone(s) are a SOFT scoring "
+    "preference on the ridge itself (see properties.ridge_production_score "
+    "and properties.crosses_production_zone) but stay a HARD exclusion on "
+    "the anchor-to-ridge connector — the connector may never cross "
+    "production land, only the ridge fragment itself may. Floodplain/hydric "
     "ground is a SOFT cost preference on the anchor-to-ridge connector only "
     "— it may still cross it when the alternative is a costly enough detour "
     "(see properties.crosses_floodplain). {floodplain_crossing_note}"
-    "{steep_grade_note}{floodplain_fallback_note}Treat this as a starting "
-    "point for a site visit and real survey, not a construction-ready "
-    "alignment."
+    "{production_crossing_note}{steep_grade_note}{floodplain_fallback_note}"
+    "Treat this as a starting point for a site visit and real survey, not a "
+    "construction-ready alignment."
 )
 
 FLOODPLAIN_CROSSING_NOTE = (
     "This specific route DOES cross floodplain/hydric ground — that's intentional/expected under "
     "this model, not a caveat to apologize for; the least-cost-path routing found crossing it was "
     "still cheaper overall than detouring around it. "
+)
+
+PRODUCTION_CROSSING_NOTE = (
+    "This specific route's ridge fragment DOES cross a production zone — that's intentional/expected "
+    "under this model, not a caveat to apologize for; production crossing is a soft scoring preference "
+    "on the ridge now, not a hard exclusion, so the highest-scoring ridge can still cross production "
+    "land when its other terms (slope/length/proximity) outweigh the penalty. "
 )
 
 # Additive caveat (see STEEP_GRADE_ENGINEERING_NOTE_THRESHOLD_PCT above) —
@@ -334,12 +357,15 @@ def _build_production_cell_mask(dem: dict, production_prepared, boundary_prepare
     Despite the name (this function's own logic is unchanged from when it
     was first added purely for production-zone masking), find_road_routes()
     now reuses it for TWO different geometries: production_areas' own
-    render_fill_polygon_utm union (its original purpose, now folded into
-    excluded_mask as a HARD exclusion under the current design, not a
-    separate soft cost term) AND, separately, the floodplain/hydric union
-    (a SOFT cost penalty instead) -- the underlying "is this on-parcel
-    cell inside that prepared geometry" test is identical either way, so
-    there's no reason to duplicate it under a second name.
+    render_fill_polygon_utm union (this mask's own cells are now used
+    THREE ways -- OR'd into the connector's own cost_raster excluded_mask
+    as a HARD exclusion, counted per-candidate as _score_ridge_candidates()'s
+    4th, SOFT scoring term against the ridge fragment itself, and reused
+    to compute crosses_production_zone -- see module docstring) AND,
+    separately, the floodplain/hydric union (a SOFT cost penalty on the
+    connector only) -- the underlying "is this on-parcel cell inside that
+    prepared geometry" test is identical either way, so there's no reason
+    to duplicate it under a second name.
 
     production_prepared may be None (no production zones at all, or --
     when reused for floodplain -- no floodplain data at all), in which
@@ -451,11 +477,14 @@ def _prune_ridge_networks(
     Takes _identify_ridge_cell_mask()'s own whole-DEM boolean mask,
     groups it into whole-parcel ridge NETWORKS (connected_components(),
     one network per originally-contiguous ridge landform), then strips
-    every HARD-excluded cell (excluded_mask -- production zone + the
-    selected water zone, both already buffered/prepared by the caller;
-    NOT floodplain, which stays a soft cost penalty applied only to the
-    anchor-to-ridge connector, never to the ridge itself -- see module
-    docstring) out of each network.
+    every HARD-excluded cell (excluded_mask -- the selected water zone
+    (already buffered/prepared by the caller) + off-parcel/boundary cells
+    ONLY; production zones are deliberately NOT part of this mask
+    anymore -- a ridge fragment may walk straight through a production
+    zone now, scored (not pruned) on how much of it does, see
+    _score_ridge_candidates()'s 4th term; floodplain also stays a soft
+    cost penalty applied only to the anchor-to-ridge connector, never to
+    the ridge itself -- see module docstring) out of each network.
 
     Excluding cells can sever one originally-contiguous ridge into
     several disconnected pieces -- re-running connected_components()
@@ -537,12 +566,13 @@ def _score_ridge_candidates(
     cost_raster: np.ndarray,
     ridge_candidates: list[list[tuple[int, int]]],
     anchor_cell: tuple[int, int],
+    production_mask: np.ndarray,
 ) -> list[dict]:
     """
     Scores each surviving ridge fragment (_prune_ridge_networks()'s own
-    output) on three normalized terms, then combines them into one
-    RIDGE_SLOPE_WEIGHT/RIDGE_LENGTH_WEIGHT/RIDGE_PROXIMITY_WEIGHT-weighted
-    score:
+    output) on four normalized terms, then combines them into one
+    RIDGE_SLOPE_WEIGHT/RIDGE_LENGTH_WEIGHT/RIDGE_PROXIMITY_WEIGHT/
+    RIDGE_PRODUCTION_WEIGHT-weighted score:
 
       - avg_slope_pct: mean per-cell slope across the fragment's own
         cells (gentler is better).
@@ -555,17 +585,26 @@ def _score_ridge_candidates(
         better) AND the actual connector route (anchor -> whichever of
         the candidate's own cells the search reaches first/cheapest,
         "cells"/"destination_cell" in its return) in one shot, rather
-        than computing distance separately from the route.
+        than computing distance separately from the route. cost_raster
+        is expected to already hard-exclude production_mask (see
+        find_road_routes()) -- the connector itself can never cross
+        production land even though the fragment it's reaching for may.
+      - production_cells_crossed: count of the fragment's own cells that
+        fall inside production_mask (fewer is better) -- production is no
+        longer pruned out of a ridge candidate outright (see
+        _prune_ridge_networks()), just scored, the same cell-count basis
+        length_m already uses.
 
     Normalized against the candidate SET (not any fixed reference value):
-        slope_score      = 1 - avg_slope_pct / max_avg_slope_pct
-        length_score      = length_m / max_length_m
-        proximity_score   = 1 - total_cost / max_total_cost
+        slope_score       = 1 - avg_slope_pct / max_avg_slope_pct
+        length_score       = length_m / max_length_m
+        proximity_score    = 1 - total_cost / max_total_cost
+        production_score   = 1 - production_cells_crossed / max_production_cells_crossed
     each clamped to [0, 1] and, where the max itself is 0 (every surviving
     candidate tied at the best possible value for that term -- e.g. every
-    ridge fragment perfectly flat), treated as 1.0 rather than dividing by
-    zero -- every candidate is equally best on that term, not equally
-    worst.
+    ridge fragment perfectly flat, or none of them touching a production
+    zone at all), treated as 1.0 rather than dividing by zero -- every
+    candidate is equally best on that term, not equally worst.
 
     A candidate that road_cost_path.least_cost_path() can't reach at all
     from anchor_cell (blocked by hard exclusions on every side) is
@@ -579,11 +618,13 @@ def _score_ridge_candidates(
             'avg_slope_pct': float,
             'length_m': float,
             'total_cost': float,                    # anchor -> fragment Dijkstra cost
+            'production_cells_crossed': int,         # count of the fragment's own cells inside a production zone
             'connector_cells': [(row, col), ...],    # anchor -> entry_cell, in order
             'entry_cell': (row, col),                # whichever fragment cell the connector reaches
             'slope_score': float,                    # each in [0, 1]
             'length_score': float,
             'proximity_score': float,
+            'production_score': float,
             'weighted_score': float,
         }
     Returns [] if ridge_candidates is empty, or if none of them are
@@ -604,6 +645,7 @@ def _score_ridge_candidates(
 
         cell_slopes = [float(slope_pct[r, c]) for r, c in cells if not np.isnan(slope_pct[r, c])]
         avg_slope_pct = float(np.mean(cell_slopes)) if cell_slopes else 0.0
+        production_cells_crossed = sum(1 for r, c in cells if production_mask[r, c])
 
         scored.append(
             {
@@ -611,6 +653,7 @@ def _score_ridge_candidates(
                 "avg_slope_pct": avg_slope_pct,
                 "length_m": len(cells) * cell_size_m,
                 "total_cost": connector["total_cost"],
+                "production_cells_crossed": production_cells_crossed,
                 "connector_cells": connector["cells"],
                 "entry_cell": connector["destination_cell"],
             }
@@ -622,19 +665,27 @@ def _score_ridge_candidates(
     max_avg_slope_pct = max(c["avg_slope_pct"] for c in scored)
     max_length_m = max(c["length_m"] for c in scored)
     max_total_cost = max(c["total_cost"] for c in scored)
+    max_production_cells_crossed = max(c["production_cells_crossed"] for c in scored)
 
     for candidate in scored:
         slope_score = 1.0 - candidate["avg_slope_pct"] / max_avg_slope_pct if max_avg_slope_pct > 0 else 1.0
         length_score = candidate["length_m"] / max_length_m if max_length_m > 0 else 1.0
         proximity_score = 1.0 - candidate["total_cost"] / max_total_cost if max_total_cost > 0 else 1.0
+        production_score = (
+            1.0 - candidate["production_cells_crossed"] / max_production_cells_crossed
+            if max_production_cells_crossed > 0
+            else 1.0
+        )
 
         candidate["slope_score"] = max(0.0, min(1.0, slope_score))
         candidate["length_score"] = max(0.0, min(1.0, length_score))
         candidate["proximity_score"] = max(0.0, min(1.0, proximity_score))
+        candidate["production_score"] = max(0.0, min(1.0, production_score))
         candidate["weighted_score"] = (
             RIDGE_SLOPE_WEIGHT * candidate["slope_score"]
             + RIDGE_LENGTH_WEIGHT * candidate["length_score"]
             + RIDGE_PROXIMITY_WEIGHT * candidate["proximity_score"]
+            + RIDGE_PRODUCTION_WEIGHT * candidate["production_score"]
         )
 
     return scored
@@ -670,12 +721,15 @@ def find_road_routes(
     water_zone()'s own single rank-1 answer (or None if no water zone was
     identified) -- each entry carrying 'render_fill_polygon_utm' (SAME
     optimized/final geometry production_areas below uses, not the raw
-    'polygon_utm'), HARD-excluded (buffered). production_areas is
-    production_area_ceiling.identify_optimized_production_areas()'s own
-    'scored_patches' -- the OPTIMIZED/final, ceiling-trimmed patch shape
-    (each entry carrying 'render_fill_polygon_utm') -- ALSO now HARD-
-    excluded (see module docstring; an earlier version of this module
-    treated production as a soft cost preference instead).
+    'polygon_utm'), HARD-excluded (buffered) from the ridge itself.
+    production_areas is production_area_ceiling.identify_optimized_
+    production_areas()'s own 'scored_patches' -- the OPTIMIZED/final,
+    ceiling-trimmed patch shape (each entry carrying
+    'render_fill_polygon_utm') -- HARD-excluded from the anchor-to-ridge
+    CONNECTOR only; the ridge fragment itself may cross it now, scored
+    (not pruned) by _score_ridge_candidates()'s 4th, production-crossing
+    term (see module docstring; an earlier version of this module treated
+    production as hard on the ridge too).
     hydric_floodplain_union is a shapely geometry (or None to skip that
     penalty entirely) already in dem['crs'] -- a SOFT cost penalty now,
     not a hard exclusion.
@@ -702,10 +756,13 @@ def find_road_routes(
             'avg_grade_pct': float,
             'length_m': float,
             'crosses_floodplain': bool,
+            'crosses_production_zone': bool, # True if the winning ridge fragment itself enters a production zone
             'avg_slope_pct': float,          # the winning ridge fragment's own mean per-cell slope
+            'production_cells_crossed': int, # count of the fragment's own cells inside a production zone
             'slope_score': float,            # each in [0, 1] -- see _score_ridge_candidates()
             'length_score': float,
             'proximity_score': float,
+            'production_score': float,
             'weighted_score': float,
             'points_xyz': [(x, y, elevation_m), ...],
             'geometry_wgs84': GeoJSON LineString,
@@ -730,14 +787,21 @@ def find_road_routes(
     combined_hard_exclusion_union = unary_union(hard_exclusion_pieces) if hard_exclusion_pieces else None
     excluded_prepared = prep(combined_hard_exclusion_union) if combined_hard_exclusion_union is not None else None
     boundary_prepared = prep(boundary_polygon_utm)
-    excluded_mask = _build_exclusion_cell_mask(dem, excluded_prepared, boundary_prepared)
+    # Water zone + off-parcel/boundary cells ONLY -- the only two things
+    # that stop the ridge walk itself (see module docstring). Production
+    # is deliberately NOT folded in here anymore: _prune_ridge_networks()
+    # (below) receives this mask as-is, so a ridge fragment may freely
+    # walk through a production zone now, scored (not pruned) by
+    # _score_ridge_candidates()'s 4th, production-crossing term.
+    ridge_exclusion_mask = _build_exclusion_cell_mask(dem, excluded_prepared, boundary_prepared)
 
-    # Production zones are a HARD exclusion (see module docstring) --
-    # _build_production_cell_mask()'s own output is OR'd directly into
-    # excluded_mask here. This same excluded_mask (water + production,
-    # both hard) is what _prune_ridge_networks() strips out of every
-    # ridge network below -- NOT floodplain, which stays a soft cost
-    # penalty applied only to the connector, via cost_raster.
+    # Production zones stay a HARD exclusion for the anchor-to-ridge
+    # CONNECTOR only (see module docstring) -- _build_production_cell_
+    # mask()'s own output is OR'd into a SEPARATE mask used just for
+    # cost_raster/the connector's own least_cost_path() search, never
+    # passed to _prune_ridge_networks(). Also reused, unmodified, as
+    # _score_ridge_candidates()'s own per-candidate production-crossing
+    # count against the ridge fragment itself.
     raw_production_union = (
         unary_union([p["render_fill_polygon_utm"] for p in production_areas]) if production_areas else None
     )
@@ -745,19 +809,20 @@ def find_road_routes(
         prep(raw_production_union) if raw_production_union is not None and not raw_production_union.is_empty else None
     )
     production_mask = _build_production_cell_mask(dem, production_prepared, boundary_prepared)
-    excluded_mask = excluded_mask | production_mask
+    connector_exclusion_mask = ridge_exclusion_mask | production_mask
 
     # Floodplain/hydric is a SOFT cost penalty under the current design --
-    # NOT folded into excluded_mask at all, passed to build_cost_raster()
-    # as its own floodplain_mask instead. Reuses _build_production_cell_
-    # mask()'s exact "on-parcel cell inside this prepared geometry" test
-    # (see that function's own docstring) against a different geometry.
+    # NOT folded into either exclusion mask at all, passed to
+    # build_cost_raster() as its own floodplain_mask instead. Reuses
+    # _build_production_cell_mask()'s exact "on-parcel cell inside this
+    # prepared geometry" test (see that function's own docstring) against
+    # a different geometry.
     floodplain_mask = None
     if hydric_floodplain_union is not None and not hydric_floodplain_union.is_empty:
         floodplain_prepared = prep(hydric_floodplain_union)
         floodplain_mask = _build_production_cell_mask(dem, floodplain_prepared, boundary_prepared)
 
-    cost_raster = build_cost_raster(dem, slope_pct, excluded_mask, floodplain_mask=floodplain_mask)
+    cost_raster = build_cost_raster(dem, slope_pct, connector_exclusion_mask, floodplain_mask=floodplain_mask)
 
     source_cell = _snap_anchor_to_eligible_cell(dem, cost_raster, anchor_lon_lat)
     if source_cell is None:
@@ -771,21 +836,22 @@ def find_road_routes(
         f"{sorted((int((_pre_prune_labels == nid).sum()) for nid in range(_pre_prune_count)), reverse=True)})."
     )
 
-    ridge_candidates = _prune_ridge_networks(ridge_mask, excluded_mask)
+    ridge_candidates = _prune_ridge_networks(ridge_mask, ridge_exclusion_mask)
     print(
-        f"  find_road_routes: {len(ridge_candidates)} candidate(s) survive production/water pruning "
+        f"  find_road_routes: {len(ridge_candidates)} candidate(s) survive water/boundary pruning "
         f"(sizes: {sorted((len(c) for c in ridge_candidates), reverse=True)})."
     )
     if not ridge_candidates:
         return []
 
-    scored_candidates = _score_ridge_candidates(dem, cost_raster, ridge_candidates, source_cell)
+    scored_candidates = _score_ridge_candidates(dem, cost_raster, ridge_candidates, source_cell, production_mask)
     for c in scored_candidates:
         print(
             f"  find_road_routes: candidate ({len(c['cells'])} cells) -- avg_slope_pct={c['avg_slope_pct']:.1f} "
-            f"length_m={c['length_m']:.0f} total_cost={c['total_cost']:.1f} -> slope_score={c['slope_score']:.3f} "
+            f"length_m={c['length_m']:.0f} total_cost={c['total_cost']:.1f} "
+            f"production_cells_crossed={c['production_cells_crossed']} -> slope_score={c['slope_score']:.3f} "
             f"length_score={c['length_score']:.3f} proximity_score={c['proximity_score']:.3f} "
-            f"weighted_score={c['weighted_score']:.3f}"
+            f"production_score={c['production_score']:.3f} weighted_score={c['weighted_score']:.3f}"
         )
     if not scored_candidates:
         print("  find_road_routes: no candidate is reachable from the anchor at all.")
@@ -816,6 +882,7 @@ def find_road_routes(
 
     avg_grade_pct, _grade_stddev_pct = _grade_stats(points)
     crosses_floodplain = hydric_floodplain_union is not None and line.intersects(hydric_floodplain_union)
+    crosses_production_zone = winner["production_cells_crossed"] > 0
 
     suitability_score = max(0.0, min(100.0, winner["weighted_score"] * 100.0))
 
@@ -830,10 +897,13 @@ def find_road_routes(
         "length_m": length_m,
         "avg_grade_pct": avg_grade_pct,
         "crosses_floodplain": crosses_floodplain,
+        "crosses_production_zone": crosses_production_zone,
         "avg_slope_pct": winner["avg_slope_pct"],
+        "production_cells_crossed": winner["production_cells_crossed"],
         "slope_score": winner["slope_score"],
         "length_score": winner["length_score"],
         "proximity_score": winner["proximity_score"],
+        "production_score": winner["production_score"],
         "weighted_score": winner["weighted_score"],
         "suitability_score": suitability_score,
         "geometry_wgs84": {"type": "LineString", "coordinates": list(zip(lons, lats))},
@@ -863,8 +933,10 @@ def _confidence_notes_for_route(
     floodplain_data_is_fallback: bool,
     avg_grade_pct: float,
     crosses_floodplain: bool,
+    crosses_production_zone: bool,
 ) -> str:
     floodplain_crossing_note = FLOODPLAIN_CROSSING_NOTE if crosses_floodplain else ""
+    production_crossing_note = PRODUCTION_CROSSING_NOTE if crosses_production_zone else ""
 
     steep_grade_note = (
         STEEP_GRADE_ENGINEERING_NOTE.format(
@@ -881,6 +953,7 @@ def _confidence_notes_for_route(
     )
     return ROAD_CORRIDOR_CONFIDENCE_NOTES_TEMPLATE.format(
         floodplain_crossing_note=floodplain_crossing_note,
+        production_crossing_note=production_crossing_note,
         steep_grade_note=steep_grade_note,
         floodplain_fallback_note=floodplain_fallback_note,
     )
@@ -905,6 +978,7 @@ def corridors_to_geojson(
                     floodplain_data_is_fallback,
                     route["avg_grade_pct"],
                     route["crosses_floodplain"],
+                    route["crosses_production_zone"],
                 ),
                 extra_properties={
                     "rank": route["rank"],
@@ -912,26 +986,35 @@ def corridors_to_geojson(
                     "avg_grade_pct": round(route["avg_grade_pct"], 1),
                     "length_ft": round(route["length_m"] / METERS_PER_FOOT, 1),
                     "crosses_floodplain": route["crosses_floodplain"],
+                    "crosses_production_zone": route["crosses_production_zone"],
                     # Diagnostic breakdown of _score_ridge_candidates()'s
-                    # own three-term weighted score for the winning ridge
+                    # own four-term weighted score for the winning ridge
                     # candidate -- lets a caller (or a live diagnostic
                     # sweep, see RIDGE_SLOPE_WEIGHT/RIDGE_LENGTH_WEIGHT/
-                    # RIDGE_PROXIMITY_WEIGHT's own unvalidated-starting-
-                    # value caveat) see how each term actually contributed,
-                    # not just the combined suitability_score.
+                    # RIDGE_PROXIMITY_WEIGHT/RIDGE_PRODUCTION_WEIGHT's own
+                    # unvalidated-starting-value caveat) see how each term
+                    # actually contributed, not just the combined
+                    # suitability_score.
                     "ridge_avg_slope_pct": round(route["avg_slope_pct"], 1),
+                    "ridge_production_cells_crossed": route["production_cells_crossed"],
                     "ridge_slope_score": round(route["slope_score"], 3),
                     "ridge_length_score": round(route["length_score"], 3),
                     "ridge_proximity_score": round(route["proximity_score"], 3),
+                    "ridge_production_score": round(route["production_score"], 3),
                     "ridge_weighted_score": round(route["weighted_score"], 3),
-                    # Both genuinely HARD exclusions under the current
-                    # design (see module docstring) -- grade and
-                    # floodplain are NOT listed here at all: neither is a
-                    # real enforced constraint on the connector (both are
-                    # soft cost penalties a route may or may not have
-                    # paid), so claiming either "satisfied" would be
-                    # misleading.
-                    "constraints_satisfied": ["outside_pond_zone", "outside_production_zone"],
+                    # Only the selected water zone is a genuinely HARD
+                    # exclusion the WHOLE route satisfies under the
+                    # current design (see module docstring). Production is
+                    # NOT listed here anymore -- it's hard on the
+                    # connector only, but a SOFT scoring preference on the
+                    # ridge fragment itself (see crosses_production_zone/
+                    # ridge_production_score above), so the route as a
+                    # whole no longer unconditionally satisfies it. Grade
+                    # and floodplain stay excluded from this list entirely
+                    # for the same reason they always were: both are soft
+                    # cost penalties a route may or may not have paid, so
+                    # claiming either "satisfied" would be misleading.
+                    "constraints_satisfied": ["outside_pond_zone"],
                 },
             )
         )
@@ -1191,6 +1274,7 @@ def summarize_road_corridor_candidates(result: dict) -> str:
     for feature in features:
         props = feature["properties"]
         crossing = " [crosses floodplain]" if props.get("crosses_floodplain") else ""
+        crossing += " [crosses production zone]" if props.get("crosses_production_zone") else ""
         lines.append(
             f"  - Rank {props['rank']}: score {props['suitability_score']}/100, "
             f"{props['avg_grade_pct']}% avg grade, {props['length_ft']}ft{crossing}"

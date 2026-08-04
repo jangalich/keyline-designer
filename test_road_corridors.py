@@ -15,19 +15,21 @@ logic, independent of real data fetches" approach.
 Route generation now identifies genuine ridge lines from the DEM (D8
 flow accumulation against an inverted DEM — see road_corridors.py's own
 module docstring and _identify_ridge_cell_mask()), prunes them against
-the HARD water/production exclusions, scores the survivors on a
-slope/length/proximity-to-anchor weighted formula, and routes a single
-least-cost connector from the anchor to the single highest-scoring
-candidate. This replaced an earlier "three fan-direction destinations
-from the anchor" design — there is no more 'fan_direction' field, no
-_select_fan_destination_cells()/_farthest_intersection_point()/
+the HARD water/boundary exclusions, scores the survivors on a
+slope/length/proximity-to-anchor/production-crossing weighted formula,
+and routes a single least-cost connector from the anchor to the single
+highest-scoring candidate. This replaced an earlier "three fan-direction
+destinations from the anchor" design — there is no more 'fan_direction'
+field, no _select_fan_destination_cells()/_farthest_intersection_point()/
 _snap_utm_point_to_eligible_cell(), and find_road_routes() now returns
 AT MOST ONE route, not a ranked list of up to three. k_shortest_paths()
 itself is untouched and still exported by road_cost_path.py, just not
 called from this module. See road_corridors.py's own module docstring
-for the current constraint-stack split (water + production HARD-excluded
-from ridge candidates outright, floodplain + grade SOFT cost penalties
-on the anchor-to-ridge connector only).
+for the current constraint-stack split (water + boundary HARD-excluded
+from ridge candidates outright; production is a HARD exclusion for the
+anchor-to-ridge connector only, but a SOFT, cell-based scoring term
+against the ridge fragment itself; floodplain + grade stay SOFT cost
+penalties on the anchor-to-ridge connector only).
 """
 
 import numpy as np
@@ -40,6 +42,7 @@ from raster_grid import D8_OFFSETS, connected_components, pixel_center_xy
 from road_corridors import (
     RIDGE_LENGTH_WEIGHT,
     RIDGE_MIN_AREA_ACRES,
+    RIDGE_PRODUCTION_WEIGHT,
     RIDGE_PROXIMITY_WEIGHT,
     RIDGE_SLOPE_WEIGHT,
     STEEP_GRADE_ENGINEERING_NOTE_THRESHOLD_PCT,
@@ -272,7 +275,7 @@ print(
 
 
 # =====================================================================
-# _score_ridge_candidates: three-term normalized weighted scoring
+# _score_ridge_candidates: four-term normalized weighted scoring
 # =====================================================================
 
 split_row = 20
@@ -298,20 +301,29 @@ score_excluded_mask[35, 10:15] = True
 score_slope_pct, _ = compute_slope_and_aspect(two_zone_dem["array"], two_zone_dem["resolution_meters"])
 score_cost_raster = build_cost_raster(two_zone_dem, score_slope_pct, score_excluded_mask)
 
+# Half of flat_long's own cells sit inside a production zone -- production
+# is a SOFT, cell-based scoring term on the ridge fragment now (not a hard
+# prune), so flat_long must still be scored (not dropped), just penalized
+# on production_score relative to the other, production-free candidates.
+score_production_mask = np.zeros((41, 41), dtype=bool)
+score_production_mask[15, 5:20] = True  # first 15 of flat_long's 30 cells
+
 scored = _score_ridge_candidates(
-    two_zone_dem, score_cost_raster, [flat_short, flat_long, steep_short, unreachable], anchor_cell
+    two_zone_dem, score_cost_raster, [flat_short, flat_long, steep_short, unreachable], anchor_cell,
+    score_production_mask,
 )
 assert len(scored) == 3, f"the unreachable (hard-excluded) candidate must be dropped, expected 3 survivors, got {len(scored)}"
 scored_cell_sets = [set(c["cells"]) for c in scored]
 assert set(map(tuple, unreachable)) not in scored_cell_sets, "the unreachable candidate must not appear in the output at all"
 
 for candidate in scored:
-    for key in ("slope_score", "length_score", "proximity_score", "weighted_score"):
+    for key in ("slope_score", "length_score", "proximity_score", "production_score", "weighted_score"):
         assert 0.0 <= candidate[key] <= 1.0, f"{key}={candidate[key]} out of [0, 1] range"
     expected_weighted = (
         RIDGE_SLOPE_WEIGHT * candidate["slope_score"]
         + RIDGE_LENGTH_WEIGHT * candidate["length_score"]
         + RIDGE_PROXIMITY_WEIGHT * candidate["proximity_score"]
+        + RIDGE_PRODUCTION_WEIGHT * candidate["production_score"]
     )
     assert abs(candidate["weighted_score"] - expected_weighted) < 1e-9, (
         f"weighted_score must equal the RIDGE_*_WEIGHT-combined formula exactly, got "
@@ -321,6 +333,7 @@ for candidate in scored:
 by_cells = {tuple(c["cells"]): c for c in scored}
 steep_candidate = by_cells[tuple(steep_short)]
 long_candidate = by_cells[tuple(flat_long)]
+short_candidate = by_cells[tuple(flat_short)]
 assert steep_candidate["slope_score"] == 0.0, (
     "the steep candidate has the WORST (highest) avg_slope_pct among survivors, so its slope_score must "
     "be exactly 0.0 (1 - max/max)"
@@ -328,10 +341,24 @@ assert steep_candidate["slope_score"] == 0.0, (
 assert long_candidate["length_score"] == 1.0, (
     "the longest candidate (30 cells, the max in this batch) must score exactly 1.0 on length_score"
 )
+assert long_candidate["production_cells_crossed"] == 15, (
+    f"flat_long has exactly 15 of its own cells inside score_production_mask, got "
+    f"{long_candidate['production_cells_crossed']}"
+)
+assert long_candidate["production_score"] == 0.0, (
+    "flat_long has the WORST (highest) production_cells_crossed among survivors, so its production_score "
+    "must be exactly 0.0 (1 - max/max)"
+)
+assert steep_candidate["production_cells_crossed"] == 0 and steep_candidate["production_score"] == 1.0, (
+    "a candidate with zero production-zone cells must score exactly 1.0 on production_score"
+)
+assert short_candidate["production_cells_crossed"] == 0 and short_candidate["production_score"] == 1.0
 print(
     "_score_ridge_candidates drops unreachable candidates, keeps every score within [0, 1], computes "
     "weighted_score as the exact RIDGE_*_WEIGHT-combined formula, and correctly gives the worst-slope "
-    "candidate a 0.0 slope_score and the longest candidate a 1.0 length_score."
+    "candidate a 0.0 slope_score, the longest candidate a 1.0 length_score, and the most production-zone-"
+    "crossed candidate a 0.0 production_score (a candidate is now SCORED for crossing production, never "
+    "dropped for it)."
 )
 
 
@@ -369,30 +396,63 @@ assert too_strict_routes == [], "an unreasonably high min_corridor_length_meters
 print("min_corridor_length_meters still correctly drops a too-short final route (connector + ridge fragment).")
 
 
-# --- production zone is a HARD exclusion: it prunes/shrinks the ridge candidate, never appears under the route ---
+# --- production zone is now a SOFT, cell-based scoring term on the RIDGE itself (no longer a prune) -- but stays a HARD exclusion on the anchor-to-ridge CONNECTOR ---
 
-production_areas = [{"id": 0, "render_fill_polygon_utm": box(500000, 4500000, 500410, 4500205)}]  # southern half
+production_areas = [{"id": 0, "render_fill_polygon_utm": box(500000, 4500205, 500410, 4500410)}]  # northern half, far from the (southern) anchor
 production_prepared = prep(production_areas[0]["render_fill_polygon_utm"])
 boundary_prepared = prep(ridge_boundary)
 production_mask = _build_production_cell_mask(ridge_dem, production_prepared, boundary_prepared)
 
-production_routes = find_road_routes(ridge_dem, production_areas, None, ridge_boundary, ridge_anchor)
-assert production_routes, "expected a route using the surviving (northern) portion of the ridge"
-for x, y, _z in production_routes[0]["points_xyz"]:
-    px, py = RIDGE_RESOLUTION
-    col = round((x - ridge_dem["origin_x"]) / px - 0.5)
-    row = round((ridge_dem["origin_y"] - y) / py - 0.5)
-    assert not production_mask[row, col], (
-        f"route cell ({row}, {col}) falls inside the production zone -- production must be a HARD "
-        f"exclusion, no route cell (connector OR ridge fragment) may ever be inside it"
-    )
-print("A production zone correctly prunes the ridge candidate and never appears under the final route.")
+# Independently recover the FULL, un-pruned ridge candidate (production is
+# no longer part of the mask _prune_ridge_networks() ever sees at all) to
+# know exactly how many of its own cells genuinely fall inside the
+# production zone -- the expected value the route below must match if
+# (and only if) the candidate survives pruning fully intact.
+no_water_or_production_mask = np.zeros_like(production_mask)
+full_ridge_candidates = _prune_ridge_networks(_identify_ridge_cell_mask(ridge_dem), no_water_or_production_mask)
+assert len(full_ridge_candidates) == 1
+expected_production_cells_crossed = sum(1 for r, c in full_ridge_candidates[0] if production_mask[r, c])
+assert expected_production_cells_crossed > 0, "test setup: the production zone must actually overlap part of the ridge"
 
-# A production zone swallowing the ENTIRE ridge leaves no route at all.
+production_routes = find_road_routes(ridge_dem, production_areas, None, ridge_boundary, ridge_anchor)
+assert production_routes, (
+    "a production zone overlapping PART of the ridge must no longer eliminate the route entirely -- "
+    "production is a soft scoring term on the ridge fragment now, not a hard prune"
+)
+route = production_routes[0]
+assert route["crosses_production_zone"] is True, "the winning ridge fragment must be free to cross the production zone now"
+assert route["production_cells_crossed"] == expected_production_cells_crossed, (
+    f"the ridge candidate must survive pruning FULLY INTACT (not shrunk by production) -- expected "
+    f"{expected_production_cells_crossed} production-zone cells actually crossed (the ridge's real "
+    f"overlap), got {route['production_cells_crossed']}"
+)
+assert route["production_score"] < 1.0, "a candidate that crosses any production cells must be penalized on production_score"
+print(
+    "A production zone overlapping part of the ridge no longer prunes/shrinks the candidate -- it survives "
+    "fully intact, crosses the production zone, and is instead penalized via production_score/"
+    "crosses_production_zone."
+)
+
+# A production zone swallowing the ENTIRE ridge still leaves no route at
+# all -- NOT because pruning ate the candidate anymore (it isn't pruned),
+# but because the anchor-to-ridge CONNECTOR stays a HARD exclusion against
+# production: least_cost_path() can never treat a production-zone cell as
+# a reachable destination, so if literally every one of the ridge's own
+# cells sits inside production, none of them is a valid connector
+# destination at all -- the candidate gets dropped by _score_ridge_
+# candidates() as unreachable, same real "no route" outcome as before,
+# for the connector-hard-exclusion reason now, not a ridge-prune reason.
 whole_ridge_production = [{"id": 0, "render_fill_polygon_utm": ridge_boundary.buffer(1.0)}]
 swallowed_routes = find_road_routes(ridge_dem, whole_ridge_production, None, ridge_boundary, ridge_anchor)
-assert swallowed_routes == [], "a production zone covering the entire property must leave NO ridge candidate and NO route at all"
-print("A production zone covering the entire ridge network correctly leaves zero routes -- confirms the exclusion is genuinely hard.")
+assert swallowed_routes == [], (
+    "a production zone covering the entire ridge must still leave NO route at all -- the connector can "
+    "never reach into production, so a fully-swallowed ridge has no reachable entry point left"
+)
+print(
+    "A production zone covering the entire ridge still leaves zero routes -- not because pruning removes "
+    "the candidate anymore, but because the anchor-to-ridge connector can never reach into production, "
+    "confirming production is still genuinely hard for the connector."
+)
 
 
 # --- selected water zone is still a HARD exclusion on the ridge candidate ---
@@ -459,12 +519,12 @@ geojson = corridors_to_geojson(routes, floodplain_data_is_fallback=True)
 validate_feature_collection(geojson)
 required_props = {
     "rank", "suitability_score", "avg_grade_pct", "length_ft", "crosses_floodplain",
-    "ridge_avg_slope_pct", "ridge_slope_score", "ridge_length_score", "ridge_proximity_score",
+    "crosses_production_zone", "ridge_avg_slope_pct", "ridge_production_cells_crossed",
+    "ridge_slope_score", "ridge_length_score", "ridge_proximity_score", "ridge_production_score",
     "ridge_weighted_score", "constraints_satisfied",
 }
 removed_props = {
-    "corridor_type", "anchor_status", "anchor_road_name", "anchor_road_distance_ft",
-    "crosses_production_zone", "fan_direction",
+    "corridor_type", "anchor_status", "anchor_road_name", "anchor_road_distance_ft", "fan_direction",
 }
 assert len(geojson["features"]) <= 1, "the current design produces at most ONE feature, never a ranked alternates list"
 for feature in geojson["features"]:
@@ -475,10 +535,15 @@ for feature in geojson["features"]:
     present_removed = removed_props & feature["properties"].keys()
     assert not present_removed, f"these properties should no longer exist at all: {present_removed}"
     assert 0.0 <= feature["properties"]["suitability_score"] <= 100.0
-    for score_key in ("ridge_slope_score", "ridge_length_score", "ridge_proximity_score", "ridge_weighted_score"):
+    for score_key in (
+        "ridge_slope_score", "ridge_length_score", "ridge_proximity_score", "ridge_production_score",
+        "ridge_weighted_score",
+    ):
         assert 0.0 <= feature["properties"][score_key] <= 1.0, f"{score_key} out of [0, 1] range"
-    assert "outside_production_zone" in feature["properties"]["constraints_satisfied"]
-    assert "outside_pond_zone" in feature["properties"]["constraints_satisfied"]
+    assert feature["properties"]["constraints_satisfied"] == ["outside_pond_zone"], (
+        "production is a hard exclusion on the connector only now, not the whole route -- it must NOT "
+        "appear in constraints_satisfied anymore, only the still-fully-hard pond zone should"
+    )
     assert not any("grade" in c for c in feature["properties"]["constraints_satisfied"]), (
         "grade is a soft cost penalty now, not a hard-satisfied constraint -- it must not appear here"
     )
@@ -489,9 +554,10 @@ for feature in geojson["features"]:
     assert "ridge" in notes, "confidence_notes should describe the ridge-line routing model"
 print(
     "corridors_to_geojson output is schema-valid, layer='suggested_road_corridor', with required properties "
-    "(including the ridge_* score breakdown) present, at most one feature ever returned, and every removed "
-    "property (fan_direction/corridor_type/anchor_status/anchor_road_name/crosses_production_zone) correctly "
-    "absent; constraints_satisfied correctly lists production+pond as hard, omits grade entirely."
+    "(including the ridge_* four-term score breakdown and crosses_production_zone) present, at most one "
+    "feature ever returned, and every removed property (fan_direction/corridor_type/anchor_status/"
+    "anchor_road_name) correctly absent; constraints_satisfied now lists only pond as hard, omits "
+    "production and grade entirely."
 )
 
 

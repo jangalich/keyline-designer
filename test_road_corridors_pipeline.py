@@ -15,9 +15,11 @@ identify_production_areas()'s raw pre-optimization patches, and the
 water-zone hard exclusion comes from water_suitability.fetch_and_
 select_optimal_water_zone() -- the single rank-1 SELECTED zone -- rather
 than every unscored candidate zone water_candidate_zones.py generates.
-Both production and water are now HARD exclusions (an earlier version of
-this module treated production as a soft cost preference); floodplain
-moved the other way, from a hard exclusion to a soft cost penalty. The
+Water stays a HARD exclusion on the ridge itself; production is a HARD
+exclusion for the anchor-to-ridge connector only, but a SOFT, cell-based
+scoring term against the ridge fragment (an earlier version of this
+module treated production as hard on the ridge too). Floodplain stays a
+soft cost penalty on the connector. The
 erosion-prone-soil preference this module used to carry has been removed
 outright (KSOP: Soil is step 8, below Farm Roads at step 4), so this test
 no longer exercises or mocks anything erosion-related.
@@ -151,8 +153,9 @@ for feature in features:
     assert feature["geometry"]["type"] == "LineString"
     assert "anchor_status" not in props, "anchor_status no longer exists -- anchoring is bypassed entirely"
     assert "anchor_road_name" not in props, "anchor_road_name no longer exists -- anchoring is bypassed entirely"
-    assert "crosses_production_zone" not in props, (
-        "crosses_production_zone no longer exists -- production is a hard exclusion, it can never fire"
+    assert "crosses_production_zone" in props, (
+        "crosses_production_zone must exist -- production is a soft scoring term on the ridge fragment "
+        "itself now, not a hard exclusion (it stays hard for the anchor-to-ridge connector only)"
     )
     assert "crosses_floodplain" in props
     notes = props["confidence_notes"].lower()
