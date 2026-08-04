@@ -879,13 +879,24 @@ def cluster_and_gate(
         to reflect the full, POST-reclaim footprint, completely unaffected
         by render_polygon_utm.
 
-        'render_fill_polygon_utm' is a SECOND, separate render-only field:
-        the PLAIN CONVEX HULL of render_polygon_utm, re-intersected with
+        'render_fill_polygon_utm' is a SECOND, separate field: the PLAIN
+        CONVEX HULL of render_polygon_utm, re-intersected with
         boundary_polygon_utm --
 
             render_polygon_utm.convex_hull.intersection(boundary_polygon_utm)
 
-        -- nothing else. This replaced two earlier smoothing attempts (a
+        -- nothing else. Despite the "render_" name, this is NOT purely a
+        cosmetic display-only field anymore -- water_candidate_zones.py's
+        own eligibility gate and road_corridors.py's own production hard-
+        exclusion mask both already reuse this exact field (not
+        polygon_utm) so a water/road candidate can't sit inside what a
+        reader would actually see as one coherent production zone on the
+        rendered map, and tree_zone_candidates.py reuses it the same way
+        for its own claimed-geometry exclusion (see that module's own
+        "GEOMETRY FORM CLAIMED" docstring section) -- all three treat
+        "the coherent, hole-free shape render_layout_map.py draws" as the
+        correct thing to avoid overlapping, not just the correct thing to
+        look at. This replaced two earlier smoothing attempts (a
         raster dilate/erode implementation, then a vector buffer(+r).
         buffer(-r) round-trip) -- both were confirmed, in a live in-
         process diagnostic, to compute genuinely correct/different

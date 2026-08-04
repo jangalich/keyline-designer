@@ -428,6 +428,28 @@ print(
     f"with suitability_score ({route['suitability_score']:.1f}) correctly derived from weighted_score."
 )
 
+# --- cell_footprint_polygon_utm: the REAL, non-zero-width footprint of the route's own path cells,
+#     traced back from line_utm's own zero-width centerline to the cell-based form routing computed it in ---
+
+footprint = route["cell_footprint_polygon_utm"]
+assert footprint is not None and not footprint.is_empty, "the winning route must have a real, non-empty cell footprint"
+assert footprint.area > 0, "cell_footprint_polygon_utm must have REAL, non-zero area -- unlike line_utm, a zero-width LineString"
+px, py = ridge_dem["resolution_meters"]
+min_expected_area = len(route["points_xyz"]) * 0.25 * px * py  # a loose floor: at least a quarter-cell per point, well below any real per-cell union
+assert footprint.area > min_expected_area, (
+    f"cell_footprint_polygon_utm ({footprint.area} sq m) looks too small to be a real per-cell union along "
+    f"the whole route -- got suspiciously close to zero-width"
+)
+assert footprint.buffer(1e-6).contains(route["line_utm"]), (
+    "the route's own zero-width line_utm must fall entirely within (a tiny buffer of) its own cell footprint -- "
+    "same path cells, just the line vs. the real footprint built from them"
+)
+assert footprint.within(ridge_boundary.buffer(1e-6)), "the cell footprint must also stay entirely within the parcel boundary"
+print(
+    f"find_road_routes()'s cell_footprint_polygon_utm is a real, non-zero-area polygon ({footprint.area:.1f} sq m) "
+    f"built from the same path cells as line_utm, fully containing line_utm and staying on-parcel."
+)
+
 
 # --- min_corridor_length_meters can still drop the winning candidate's own final route ---
 

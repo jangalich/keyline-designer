@@ -46,6 +46,7 @@ import tree_zone_candidates as tzc
 import production_suitability as ps
 import water_suitability as ws
 from feature_schema import validate_feature_collection
+from raster_grid import cell_union_footprint
 from tree_zone_candidates import (
     HYDRIC_OVERLAP_FACTOR_WEIGHT,
     SLOPE_FACTOR_WEIGHT,
@@ -53,6 +54,8 @@ from tree_zone_candidates import (
     STREAM_PROXIMITY_FACTOR_WEIGHT,
     TREE_SLOPE_REFERENCE_PCT,
     STREAM_PROXIMITY_REFERENCE_METERS,
+    TREE_ZONE_ROAD_BUFFER_CELLS,
+    _road_corridor_exclusion_polygon,
     _slope_factor,
     _stream_proximity_factor,
     compute_tree_search_space,
@@ -143,18 +146,24 @@ print("_stream_proximity_factor() falls linearly from 1.0 at distance 0 to 0.0 a
 boundary = box(0, 0, 100, 100)  # 10,000 sqm
 production_polys = [box(0, 0, 30, 30)]   # 900 sqm
 water_polys = [box(70, 70, 100, 100)]     # 900 sqm
-road_lines = [LineString([(0, 50), (100, 50)])]  # zero-width
+# A REAL, non-zero-width road polygon (road_corridors.find_road_routes()'s own
+# cell_footprint_polygon_utm shape -- a strip, not a zero-width LineString), disjoint
+# from both production_polys and water_polys so the union area is a simple, exact sum.
+road_polys = [box(0, 45, 100, 55)]  # 1,000 sqm
 
-search_space, claimed = compute_tree_search_space(boundary, production_polys, water_polys, road_lines)
+search_space, claimed = compute_tree_search_space(boundary, production_polys, water_polys, road_polys)
 assert claimed is not None
-assert abs(claimed.area - 1800.0) < 1e-6, "claimed union area should be exactly production+water (roads contribute 0 -- zero width)"
-assert search_space is not None and not search_space.is_empty
-assert abs(search_space.area - (10000.0 - 1800.0)) < 1e-6, (
-    "search space area must equal boundary minus claimed EXACTLY -- the road LineString subtraction has zero "
-    "practical effect on area, as documented (a future pass would introduce a real cleared buffer, not this one)"
+assert abs(claimed.area - 2800.0) < 1e-6, (
+    "claimed union area should be exactly production+water+road -- the road's own REAL cell-footprint polygon "
+    "must contribute its own real area, unlike the old zero-width LineString it replaced"
 )
-print(f"compute_tree_search_space(): claimed={claimed.area} sqm (roads contributed 0, as expected for zero-width "
-      f"line subtraction), search_space={search_space.area} sqm = boundary - claimed exactly.")
+assert search_space is not None and not search_space.is_empty
+assert abs(search_space.area - (10000.0 - 2800.0)) < 1e-6, (
+    "search space area must equal boundary minus claimed EXACTLY, including the road's own real, "
+    "non-negligible contribution"
+)
+print(f"compute_tree_search_space(): claimed={claimed.area} sqm (production+water+road, road contributing its "
+      f"own real, non-zero area), search_space={search_space.area} sqm = boundary - claimed exactly.")
 
 # No claims at all -- search_space is the boundary itself, claimed is None (not just empty).
 empty_search_space, empty_claimed = compute_tree_search_space(boundary, [], [], [])
@@ -167,6 +176,73 @@ fully_claimed_search_space, fully_claimed_union = compute_tree_search_space(boun
 assert fully_claimed_union is not None
 assert fully_claimed_search_space is None, "a boundary fully claimed by production/water/roads must report search_space=None"
 print("compute_tree_search_space() with the ENTIRE boundary claimed returns search_space=None (a real, reportable outcome).")
+
+
+# =====================================================================
+# _road_corridor_exclusion_polygon(): the road's OWN buffered cell-footprint --
+# closes the corner-only gap a plain, unbuffered cell-square union can still leave
+# =====================================================================
+
+ROAD_TEST_RESOLUTION = (5.0, 5.0)
+road_test_dem = {
+    "array": np.full((10, 10), 100.0, dtype=np.float32),
+    "resolution_meters": ROAD_TEST_RESOLUTION,
+    "origin_x": 600000.0,
+    "origin_y": 4600050.0,
+    "crs": CRS,
+}
+
+
+def _road_test_cell_box(row, col):
+    """The real ground square for one (row, col) cell of road_test_dem -- same corner
+    convention raster_grid.cell_union_footprint() itself uses."""
+    px, py = ROAD_TEST_RESOLUTION
+    x0 = road_test_dem["origin_x"] + col * px
+    x1 = road_test_dem["origin_x"] + (col + 1) * px
+    y1 = road_test_dem["origin_y"] - row * py
+    y0 = road_test_dem["origin_y"] - (row + 1) * py
+    return box(x0, y0, x1, y1)
+
+
+# A single road cell at (5, 5). Diagonal-only neighbor cell (4, 6) (NE) shares
+# exactly one CORNER with it, no edge -- exactly the real, live-confirmed gap case.
+single_road_cell = {"cells": [(5, 5)]}
+diagonal_neighbor_box = _road_test_cell_box(4, 6)
+edge_neighbor_box = _road_test_cell_box(5, 6)  # shares a full EDGE with (5, 5), for comparison
+far_box = _road_test_cell_box(0, 0)  # nowhere near (5, 5) at all
+
+unbuffered_mask = np.zeros((10, 10), dtype=bool)
+unbuffered_mask[5, 5] = True
+unbuffered_footprint = cell_union_footprint(road_test_dem, unbuffered_mask)
+assert unbuffered_footprint.intersection(diagonal_neighbor_box).area < 1e-9, (
+    "test sanity check: the UNBUFFERED single-cell footprint must NOT already overlap its diagonal "
+    "neighbor's square (only a shared corner point, zero area) -- otherwise this isn't reproducing the "
+    "real corner-touching gap at all"
+)
+
+buffered_footprint = _road_corridor_exclusion_polygon(road_test_dem, single_road_cell)
+assert buffered_footprint.area > unbuffered_footprint.area, (
+    "the buffered footprint must be strictly larger than the unbuffered one -- TREE_ZONE_ROAD_BUFFER_CELLS "
+    f"({TREE_ZONE_ROAD_BUFFER_CELLS}) must have actually grown the mask"
+)
+assert diagonal_neighbor_box.difference(buffered_footprint).area < 1e-9, (
+    "the diagonal-only neighbor cell (sharing just a corner with the road cell) must be FULLY absorbed into "
+    "the buffered footprint -- this is the exact real, live-confirmed gap this buffer exists to close"
+)
+assert edge_neighbor_box.difference(buffered_footprint).area < 1e-9, (
+    "the direct edge neighbor must also be fully absorbed (a strictly easier case than the diagonal one)"
+)
+assert far_box.intersection(buffered_footprint).area < 1e-9, (
+    "a cell far from the road must NOT be swept into the buffer -- this is a bounded, local dilation, "
+    "not an unbounded growth"
+)
+print(
+    f"_road_corridor_exclusion_polygon(): a single road cell's plain footprint ({unbuffered_footprint.area} sq m) "
+    f"leaves its diagonal neighbor touching at a bare corner (confirmed, zero overlap); after "
+    f"TREE_ZONE_ROAD_BUFFER_CELLS={TREE_ZONE_ROAD_BUFFER_CELLS} dilation, the buffered footprint "
+    f"({buffered_footprint.area} sq m) fully absorbs both the diagonal AND edge neighbor, while a cell "
+    "further away stays completely untouched."
+)
 
 
 # =====================================================================
@@ -298,6 +374,133 @@ print(f"Region 6 (tiny hydric patch, {region6_only_patches[0]['area_acres']}ac) 
       f"({tzc.MIN_TREE_ZONE_ACRES}ac) -- proves the size/shape filter, not just the score threshold, is doing real work.")
 
 
+# =====================================================================
+# CANOPY EXCLUSION GATE: a cell inside tree_root_zone_mask_utm is HARD-excluded
+# BEFORE scoring, even when every other factor would otherwise clearly qualify it
+# (region 1 -- hydric, flat -- scores well above threshold on hydric overlap alone)
+# =====================================================================
+
+region1_ungated_patches = score_tree_search_space(
+    dem, region1_hydric_flat, boundary_polygon_utm, hydric_union=hydric_union, min_score=0.0, min_area_acres=0.0,
+)
+assert len(region1_ungated_patches) == 1
+region1_ungated_area = region1_ungated_patches[0]["area_acres"]
+
+# Left half of region 1's own column range (0-20) reads as already under existing tree canopy.
+half_canopy_mask_utm = np.zeros((ROWS, COLS), dtype=bool)
+half_canopy_mask_utm[:, 0:10] = True
+
+region1_half_gated_patches = score_tree_search_space(
+    dem, region1_hydric_flat, boundary_polygon_utm, hydric_union=hydric_union,
+    tree_root_zone_mask_utm=half_canopy_mask_utm, min_score=0.0, min_area_acres=0.0,
+)
+assert len(region1_half_gated_patches) == 1, "the non-canopy half of region 1 should still qualify as its own candidate"
+region1_half_gated_area = region1_half_gated_patches[0]["area_acres"]
+assert region1_half_gated_area < region1_ungated_area * 0.6, (
+    f"excluding half of region 1's cells as already under canopy should meaningfully shrink the resulting "
+    f"patch area -- ungated={region1_ungated_area}ac, gated={region1_half_gated_area}ac"
+)
+
+canopy_footprint = _col_box(0, 10)
+gated_polygon = region1_half_gated_patches[0]["polygon_utm"]
+overlap_area = gated_polygon.intersection(canopy_footprint).area
+assert overlap_area < 1e-6, (
+    f"the surviving candidate patch must not include any cell inside the canopy-excluded region -- got "
+    f"{overlap_area} sq m of overlap"
+)
+print(f"Canopy exclusion gate (partial): gating half of region 1 as already under existing canopy shrinks its "
+      f"candidate area from {region1_ungated_area}ac to {region1_half_gated_area}ac, with zero overlap between "
+      "the surviving patch and the canopy-excluded cells -- confirms cells are HARD-excluded before scoring, "
+      "not merely scored down.")
+
+# The ENTIRE region under canopy -- must yield zero candidates, no matter how strong its other factors are.
+full_canopy_mask_utm = np.zeros((ROWS, COLS), dtype=bool)
+full_canopy_mask_utm[:, 0:20] = True
+region1_fully_gated_patches = score_tree_search_space(
+    dem, region1_hydric_flat, boundary_polygon_utm, hydric_union=hydric_union,
+    tree_root_zone_mask_utm=full_canopy_mask_utm, min_score=0.0, min_area_acres=0.0,
+)
+assert region1_fully_gated_patches == [], (
+    "a region entirely under existing canopy must yield zero candidates, even with hydric overlap alone "
+    "otherwise clearing the threshold easily"
+)
+print("Canopy exclusion gate (full): gating the ENTIRE region under existing canopy yields zero candidates, "
+      "even though hydric overlap alone would otherwise clear the threshold easily.")
+
+# tree_root_zone_mask_utm=None (the default) must reproduce the ungated result exactly -- confirms the gate is a
+# genuine opt-in that changes nothing for every OTHER call in this file that never passes it.
+region1_explicit_none_patches = score_tree_search_space(
+    dem, region1_hydric_flat, boundary_polygon_utm, hydric_union=hydric_union,
+    tree_root_zone_mask_utm=None, min_score=0.0, min_area_acres=0.0,
+)
+assert region1_explicit_none_patches[0]["area_acres"] == region1_ungated_area, (
+    "tree_root_zone_mask_utm=None must be a true no-op, identical to the parameter's own default"
+)
+print("Canopy exclusion gate: tree_root_zone_mask_utm=None reproduces the ungated result exactly (a true no-op).")
+
+
+# =====================================================================
+# render_fill_polygon_utm: DISPLAY-ONLY plain convex hull, closes over a real interior
+# notch the CANOPY EXCLUSION GATE can carve -- same field/reasoning production_area.py's
+# and water_candidate_zones.py's own patches/zones already carry
+# =====================================================================
+
+# A small canopy pocket sitting STRICTLY INSIDE region 1's own interior (rows 8-11, cols
+# 8-11 -- well clear of region 1's own cols 0-20 edges) -- carves a real hole out of an
+# otherwise-contiguous candidate, same shape of artifact production_area.py's own render_
+# fill_polygon_utm test already exercises for production zones.
+interior_pocket_canopy_mask = np.zeros((ROWS, COLS), dtype=bool)
+interior_pocket_canopy_mask[8:12, 8:12] = True
+pocket_box = box(ORIGIN_X + 8 * 5.0, ORIGIN_Y - 12 * 5.0, ORIGIN_X + 12 * 5.0, ORIGIN_Y - 8 * 5.0)
+
+region1_notched_patches = score_tree_search_space(
+    dem, region1_hydric_flat, boundary_polygon_utm, hydric_union=hydric_union,
+    tree_root_zone_mask_utm=interior_pocket_canopy_mask, min_score=0.0, min_area_acres=0.0,
+)
+assert len(region1_notched_patches) == 1, (
+    "a canopy pocket strictly inside region 1's own interior must still leave ONE single surrounding "
+    "candidate (a real hole, not a split into separate patches)"
+)
+notched_patch = region1_notched_patches[0]
+assert "render_fill_polygon_utm" in notched_patch, "every patch must carry a render_fill_polygon_utm field"
+hull = notched_patch["render_fill_polygon_utm"]
+real_footprint = notched_patch["polygon_utm"]
+
+assert real_footprint.intersection(pocket_box).area < 1e-6, (
+    "the real, un-hulled footprint must genuinely EXCLUDE the canopy pocket -- area_acres/scoring must "
+    "never reflect ground that's actually under canopy"
+)
+assert pocket_box.difference(hull).area < 1e-6, (
+    "render_fill_polygon_utm (the convex hull) must fully CLOSE OVER the interior canopy pocket -- a hull "
+    "necessarily covers any real interior notch, whatever caused it"
+)
+assert hull.area > real_footprint.area, (
+    "the hull must have strictly MORE area than the real footprint once it's closed over a real notch"
+)
+print(
+    f"render_fill_polygon_utm: a canopy pocket carved out of region 1's own interior leaves the real "
+    f"footprint ({real_footprint.area}sqm) genuinely excluding it, while render_fill_polygon_utm "
+    f"({hull.area}sqm) fully closes over it -- confirms the hull, not the real footprint, is what render_"
+    "layout_map.py should draw."
+)
+
+# The ordinary, un-notched case (region 2, no canopy gate at all): the hull must equal the real
+# footprint exactly whenever the real footprint is already convex -- no visible change for the common case.
+region2_plain_patches = score_tree_search_space(
+    dem, region2_steep, boundary_polygon_utm, min_score=0.0, min_area_acres=0.0,
+)
+assert len(region2_plain_patches) == 1
+plain_patch = region2_plain_patches[0]
+assert plain_patch["render_fill_polygon_utm"].equals(plain_patch["polygon_utm"]), (
+    "a solid, already-convex patch's render_fill_polygon_utm (its own convex hull) must be geometrically "
+    "IDENTICAL to its real, un-hulled polygon_utm -- no change in rendering for the ordinary case"
+)
+print(
+    "render_fill_polygon_utm: an ordinary, already-convex candidate's hull is geometrically identical to "
+    "its own real footprint -- no visible change for the common, un-notched case."
+)
+
+
 # --- data-unavailable factors default to a neutral 0.5, not the "checked and clean" 0.0/1.0 ---
 
 tiny_dem = {
@@ -381,14 +584,6 @@ def _fake_water_features_empty(boundary_coordinates, buffer_meters=150):
     return {"streams": [], "water_bodies": []}
 
 
-def _fake_erosion_empty(wkt_polygon):
-    return []
-
-
-def _fake_farm_roads_empty(boundary_coordinates):
-    return []
-
-
 # Same bench-and-rise synthetic DEM as production_area.py's own smoke test:
 # a flat, workable bench (rows < 15) production_area.py will claim as a
 # production candidate, bordered by a genuinely steep rise (rows >= 15,
@@ -398,8 +593,9 @@ def _fake_farm_roads_empty(boundary_coordinates):
 # water_suitability's own per-zone soil/stream check -- reached now via its
 # full identify_water_suitability() entry point, since tree_zone_candidates
 # subtracts only its SELECTED zone, not the raw pure zone list --
-# road_corridors' floodplain/erosion/farm-roads checks, and this module's
-# own farmland/hydric/stream checks) mocked to "reachable, found nothing."
+# road_corridors' own floodplain (NHD stream/hydric soil) check, and this
+# module's own farmland/hydric/stream checks) mocked to "reachable, found
+# nothing."
 size = 30
 orchestrator_array = np.zeros((size, size), dtype=np.float32)
 for row in range(size):
@@ -426,9 +622,7 @@ with mock_patch.object(pa, "get_soil_data_for_polygon", _fake_soil_rows_empty), 
      mock_patch.object(pa, "get_soil_geometries_for_polygon", _fake_soil_geometries_empty), \
      mock_patch.object(rc, "get_soil_data_for_polygon", _fake_soil_rows_empty), \
      mock_patch.object(rc, "get_soil_geometries_for_polygon", _fake_soil_geometries_empty), \
-     mock_patch.object(rc, "get_erosion_factor_for_polygon", _fake_erosion_empty), \
      mock_patch.object(rc, "get_water_features_for_boundary", _fake_water_features_empty), \
-     mock_patch.object(rc, "get_farm_roads_for_boundary", _fake_farm_roads_empty), \
      mock_patch.object(ws, "get_saturated_hydraulic_conductivity_for_polygon", _fake_soil_rows_empty), \
      mock_patch.object(ws, "get_soil_geometries_for_polygon", _fake_soil_geometries_empty), \
      mock_patch.object(ws, "get_water_features_for_boundary", _fake_water_features_empty), \

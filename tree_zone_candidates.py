@@ -48,18 +48,101 @@ tree zones (a later, separate pass), not the reverse.
           - the SINGLE selected road corridor
             (road_corridors.select_optimal_road_corridor()) -- not every
             road candidate, same "one well-suited candidate is enough for
-            a small farm" reasoning. Still subtracted as real, zero-width
-            LineString geometry, not buffered -- unchanged in spirit from
-            before: a zero-width line has a practically negligible effect
-            on the resulting search-space AREA, which is expected, not a
-            bug (an eventual pass modeling actual road construction/
-            right-of-way would be the place to introduce a real cleared
-            buffer, not this one).
+            a small farm" reasoning. Subtracted as a REAL, non-zero-width,
+            BUFFERED polygon built from the route's own real path cells
+            (road_corridors.find_road_routes()'s own 'cells' -- see
+            GEOMETRY FORM CLAIMED below), NOT road_corridors.py's
+            zero-width 'line_utm'. An earlier version of this module
+            subtracted line_utm directly, which (correctly, by
+            construction -- a 1-dimensional line has zero area) had a
+            confirmed-live, deliberately negligible effect on the
+            resulting search-space AREA -- confirmed live AGAIN the other
+            way once real tree-zone candidates started rendering directly
+            alongside the road corridor on render_layout_map.py's own
+            output: candidates were being proposed right along, and
+            effectively ON, the road itself, since a zero-area
+            subtraction leaves those cells fully available to Step 2's
+            own scoring. Switching to the route's own real, dilated cell
+            footprint (see TREE_ZONE_ROAD_BUFFER_CELLS) fixes this the
+            same way production/water's own real polygons already did --
+            a real subtraction actually clears real ground, and the
+            dilation closes the corner-only gaps a plain, unbuffered
+            cell-square union can still leave against a diagonally-
+            adjacent tree-suitable cell (also confirmed live).
         The remainder is the search space Step 2 scores.
 
-    STEP 2 -- SUITABILITY SCORING (score_tree_search_space()):
-        every DEM cell inside the search space is scored against four
-        independently-stored 0-1 factors, reusing data this pipeline
+        GEOMETRY FORM CLAIMED: each of the three inputs above is
+        subtracted using that zone's own REAL, non-zero-width form, not a
+        display-only approximation or a zero-area line:
+          - production: render_fill_polygon_utm (production_area.py's
+            plain convex hull of each patch's own render_polygon_utm,
+            re-intersected with the boundary) -- NOT polygon_utm, the
+            blocky, notched raw cell-union footprint. A real interior
+            pocket (excluded steep/hydric cells) or waist-split pinch in
+            polygon_utm would otherwise read as "still open" ground here,
+            when the property's actual final layout (what render_layout_
+            map.py draws, what a reader actually sees) shows it as part of
+            one coherent production zone. This is the SAME reasoning
+            render_layout_map.py's own module docstring documents for why
+            it draws this field, not polygon_utm, for production zones --
+            reused here for the same "reads as one coherent shape"
+            purpose, not just for rendering.
+          - water: same reasoning, same field --
+            water_candidate_zones.find_candidate_zones()'s own
+            render_fill_polygon_utm for the single selected zone, not its
+            polygon_utm.
+          - road: built from road_corridors.find_road_routes()'s own
+            'cells' -- the selected route's own path cells
+            (least_cost_path()'s connector cells + the winning ridge
+            fragment's own cells, in walk order -- the SAME cells
+            _order_fragment_from_entry()/path_cells_to_points_xyz() use
+            to build the route's own zero-width line_utm), traced back to
+            that cell-based form, dilated by TREE_ZONE_ROAD_BUFFER_CELLS
+            via raster_grid.binary_dilate() (see that constant's own
+            reasoning -- an unbuffered cell-square union can still leave
+            a real tree-suitable cell touching the road at a shared
+            CORNER, confirmed live), then turned into a real polygon via
+            raster_grid.cell_union_footprint() (the SAME real per-cell-
+            square union production_area.py's/water_candidate_zones.py's
+            own footprints already use) -- NOT a hull, NOT
+            road_corridors.py's own 'cell_footprint_polygon_utm' field
+            directly (that field is the route's real but UNBUFFERED
+            footprint -- this module needs its own buffered variant, see
+            identify_tree_zone_candidates()'s own inline comment), and
+            NOT render_layout_map.py's own render-smoothed line (that
+            smoothing is a purely cosmetic transform for how the road
+            SYMBOL looks on the final map; it has nothing to do with what
+            ground the route actually occupies). At least one DEM cell
+            wider than the route's own real path on every side -- real,
+            non-negligible, gap-guaranteeing area, unlike line_utm.
+        None of this touches any zone's own real polygon_utm/
+        geometry_wgs84/line_utm (used for that zone's own scoring,
+        eligibility, and narrative report) -- only the copy of the
+        geometry handed to compute_tree_search_space() here.
+
+    STEP 2 -- CANOPY EXCLUSION GATE, THEN SUITABILITY SCORING
+        (score_tree_search_space()):
+        before any of the four factors below are even computed, a cell
+        already inside real, EXISTING tree canopy (production_area.
+        get_required_tree_root_zone_mask_utm() -- the SAME mandatory,
+        non-degrading "fetch canopy, or fail hard" building block
+        production_area.py/production_area_ceiling.py/water_candidate_
+        zones.py all already use for their own canopy gates, at this
+        module's own TREE_ZONE_CANOPY_BUFFER_METERS, which reuses
+        production's own TREE_ROOT_ZONE_BUFFER_METERS, 10ft, unchanged)
+        is HARD-EXCLUDED from candidacy entirely -- it never enters the
+        composite score at all, the same "excluded before scoring, not
+        merely scored low" treatment as being outside the search space in
+        the first place. This module identifies NEW tree-suitable ground;
+        ground that's already wooded doesn't need a "candidate"
+        designation. A canopy fetch failure is NOT gracefully degraded
+        here (unlike the three Step 2 factors below) -- same "can't
+        verify this is free of/covered by tree cover, refuse rather than
+        guess" hard-failure reasoning production_area.py's own mandatory
+        canopy gate already uses.
+
+        Every DEM cell that survives this gate is then scored against
+        four independently-stored 0-1 factors, reusing data this pipeline
         already fetches elsewhere -- no new data sources:
           - soil_marginality_factor: real SSURGO Farmland Classification
             (soil_data.get_farmland_classification_for_polygon() +
@@ -134,12 +217,13 @@ from shapely.geometry import Point, Polygon, box, mapping, shape
 from shapely.ops import unary_union
 from shapely.prepared import prep
 
+from canopy_height_data import TREE_ROOT_ZONE_BUFFER_METERS
 from dem_data import get_dem_for_boundary
 from feature_schema import CONFIDENCE_LOW, make_feature, make_feature_collection
 from hydrology_data import get_water_features_for_boundary
-from production_area import MIN_PRODUCTION_AREA_ACRES, compute_slope_percent
+from production_area import MIN_PRODUCTION_AREA_ACRES, compute_slope_percent, get_required_tree_root_zone_mask_utm
 from production_area_ceiling import identify_optimized_production_areas
-from raster_grid import SQUARE_METERS_PER_ACRE, connected_components, pixel_center_xy
+from raster_grid import SQUARE_METERS_PER_ACRE, binary_dilate, cell_union_footprint, connected_components, pixel_center_xy
 from road_corridors import identify_road_corridor_candidates
 from soil_data import (
     coordinates_to_wkt_polygon,
@@ -226,14 +310,25 @@ STREAM_PROXIMITY_REFERENCE_METERS = 100.0
 # fairly weak condition -- soil_marginality_factor 1.0, contributing only
 # SOIL_MARGINALITY_FACTOR_WEIGHT*100 = 20 points) with no stream nearby
 # (stream_proximity_factor 0.0) composites to ~20/100 -- well below this
-# threshold, so "just not prime farmland" alone never qualifies. Set at the
-# midpoint of the 0-100 scale so a genuine candidate needs a real, positive
-# signal from at least one of the two stronger factors (hydric overlap or
-# meaningfully steep slope), not just the default/common absence of
-# prime-farmland status. CONFIGURABLE -- same "documented, not just
+# threshold, so "just not prime farmland" alone never qualifies. Lowered
+# from an earlier, stricter 50.0 (the 0-100 midpoint) to 31.0 -- a real
+# product call to admit more marginal, merely-not-prime ground as a tree
+# candidate than the original midpoint allowed. 31.0 (not some lower
+# number, e.g. 25.0) is deliberately chosen to sit one point ABOVE the
+# highest score soil_marginality_factor + stream_proximity_factor can
+# EVER reach together with no hydric or slope signal at all (a non-prime
+# patch sitting directly on a mapped stream: SOIL_MARGINALITY_FACTOR_
+# WEIGHT*100 + STREAM_PROXIMITY_FACTOR_WEIGHT*100 = 20 + 10 = 30) -- so a
+# real, positive hydric_overlap_factor or slope_factor signal is still
+# REQUIRED for any candidate to qualify, exactly as at 50.0; stream
+# proximity alone still can never clear this threshold on its own, even
+# at maximum proximity. CONFIGURABLE -- same "documented, not just
 # asserted" standard as MIN_PRODUCTION_AREA_ACRES/solar_suitability.py's
-# own MIN_SUITABILITY_SCORE.
-MIN_TREE_SUITABILITY_SCORE = 50.0
+# own MIN_SUITABILITY_SCORE. If this ever needs to move again, keep this
+# invariant in mind: it must stay strictly above SOIL_MARGINALITY_FACTOR_
+# WEIGHT*100 + STREAM_PROXIMITY_FACTOR_WEIGHT*100 for that invariant to
+# keep holding.
+MIN_TREE_SUITABILITY_SCORE = 31.0
 
 # Minimum contiguous size for a scored patch to be reported as a real tree
 # zone candidate, not a fragmented sliver -- reuses production_area.py's
@@ -244,6 +339,49 @@ MIN_TREE_SUITABILITY_SCORE = 50.0
 # directly if a real property ever needs a different floor for this layer
 # specifically).
 MIN_TREE_ZONE_ACRES = MIN_PRODUCTION_AREA_ACRES
+
+# Buffer (meters) around EXISTING tree canopy (real USGS 3DEP lidar HAG
+# coverage, canopy_height_data.tree_root_zone_mask()) within which a DEM
+# cell is HARD-EXCLUDED from tree-zone candidacy entirely -- a cell
+# already under (or within this buffer of) real, existing tree cover
+# doesn't need a "candidate" designation; this layer identifies NEW
+# tree-suitable ground, not ground that's already wooded. This is a
+# GATE, not one of the four scored factors above: an excluded cell never
+# enters composite_grid at all, same "excluded before scoring, not
+# merely scored low" treatment production_area.py's own tree_root_zone_
+# hit gate gives production zones (see that module's own
+# get_required_tree_root_zone_mask_utm()). Reuses production_area.py's
+# own TREE_ROOT_ZONE_BUFFER_METERS value directly (10ft) rather than an
+# independently-tuned buffer -- there's no evidence this layer needs a
+# different existing-canopy clearance than production zones do, and
+# reusing the same constant means the two can never silently drift apart
+# (same reasoning as MIN_TREE_ZONE_ACRES reusing MIN_PRODUCTION_AREA_ACRES
+# directly, just above). CONFIGURABLE (override get_required_tree_root_
+# zone_mask_utm's own buffer_meters kwarg directly if a real property
+# ever needs a different clearance for this layer specifically).
+TREE_ZONE_CANOPY_BUFFER_METERS = TREE_ROOT_ZONE_BUFFER_METERS
+
+# Whole-cell dilation radius applied to the selected road corridor's own
+# path cells (road_corridors.find_road_routes()'s own 'cells', see that
+# module's own docstring) before building the real cell-footprint polygon
+# subtracted from the search space -- see GEOMETRY FORM CLAIMED above.
+# Without this, two grid-aligned squares that only share a CORNER (not an
+# edge) -- a road path cell and a diagonally-adjacent tree-suitable cell
+# just outside it -- leave zero real gap between them: real, live output
+# confirmed this reads as tree-zone hatching visibly touching the road's
+# own excluded footprint at those corners. raster_grid.binary_dilate()
+# (8-connected, the SAME dilation canopy_height_data.tree_root_zone_mask()
+# already uses for TREE_ZONE_CANOPY_BUFFER_METERS above) grows the path-
+# cell mask outward by this many cells in EVERY direction before its
+# footprint is built -- a real, cell-accurate buffer, not a rounded
+# continuous-geometry buffer(), consistent with this pipeline's own
+# preference for grid-aligned exclusion geometry over smoothed
+# approximations (see raster_grid.cell_union_footprint()'s own docstring).
+# 1 cell in every direction reads as "+1 cell on both sides" of the
+# corridor's own width (the isotropic dilation also extends a little past
+# each end of the route -- a harmless, unavoidable side effect of the
+# same whole-cell operation, not a separate concern). CONFIGURABLE.
+TREE_ZONE_ROAD_BUFFER_CELLS = 1
 
 # Neutral factor value used when a given factor's own data source couldn't
 # be reached at all (fetch failure) -- same "missing/inapplicable data
@@ -259,8 +397,11 @@ TREE_ZONE_CONFIDENCE_NOTES_TEMPLATE = (
     "This identifies GENERAL tree-suitable land -- ground within the property's leftover, "
     "non-claimed area (the full boundary minus every current OPTIMIZED (ceiling-trimmed) "
     "production-zone candidate plus the single SELECTED water-system zone and single SELECTED "
-    "road corridor's own geometry) that scores above a minimum suitability threshold on "
-    "marginality relative to production use. It is NOT a windbreak, riparian buffer, habitat "
+    "road corridor's own geometry, MINUS real, existing tree canopy (production_area.py's own "
+    "TREE_ROOT_ZONE_BUFFER_METERS buffer around real USGS 3DEP lidar canopy coverage -- this "
+    "layer identifies NEW tree-suitable ground, not ground that's already wooded) that scores "
+    "above a minimum suitability threshold on marginality relative to production use. It is NOT "
+    "a windbreak, riparian buffer, habitat "
     "corridor, or any other specific planting plan -- assigning that kind of function/purpose to "
     "this ground is deliberately left to report narrative, a separate later pass, and is NOT "
     "decided here. It is also NOT a species recommendation. tree_suitability_score (0-100) is a "
@@ -336,19 +477,59 @@ def _polygonal_parts(geom):
     return None
 
 
+def _road_corridor_exclusion_polygon(dem: dict, selected_road_corridor: dict):
+    """
+    This module's own BUFFERED cell-footprint polygon for the selected
+    road corridor -- see TREE_ZONE_ROAD_BUFFER_CELLS's own reasoning for
+    why a plain, unbuffered cell-square union (road_corridors.py's own
+    'cell_footprint_polygon_utm' field) isn't enough on its own: two
+    grid-aligned squares that only share a CORNER, not an edge, leave
+    zero real gap between them, confirmed live as tree-zone hatching
+    visibly touching the road corridor at those corners.
+
+    Builds a fresh boolean cell mask from selected_road_corridor['cells']
+    (road_corridors.find_road_routes()'s own real path cells, in walk
+    order), dilates it by TREE_ZONE_ROAD_BUFFER_CELLS cells in every
+    direction (raster_grid.binary_dilate(), 8-connected -- the SAME
+    dilation canopy_height_data.tree_root_zone_mask() already uses for
+    this module's own TREE_ZONE_CANOPY_BUFFER_METERS gate), then turns
+    the dilated mask into a real polygon via raster_grid.
+    cell_union_footprint() (the SAME real per-cell-square union
+    production_area.py's/water_candidate_zones.py's own footprints
+    already use). Pure grid/geometry logic, no network I/O -- reusable
+    and independently testable against a synthetic dem/cells list, same
+    "pure core, independently testable" standard as every other
+    *_search_space/*_factor helper in this module.
+    """
+    road_cell_mask = np.zeros(dem["array"].shape, dtype=bool)
+    for cell_r, cell_c in selected_road_corridor["cells"]:
+        road_cell_mask[cell_r, cell_c] = True
+    road_cell_mask = binary_dilate(road_cell_mask, TREE_ZONE_ROAD_BUFFER_CELLS)
+    return cell_union_footprint(dem, road_cell_mask)
+
+
 def compute_tree_search_space(
     boundary_polygon_utm: Polygon,
     production_polygons_utm: list,
     water_polygons_utm: list,
-    road_lines_utm: list,
+    road_polygons_utm: list,
 ) -> tuple[object, Optional[object]]:
     """
     Step 1 -- pure geometry difference (see module docstring): the real
     parcel boundary, minus the union of every currently-claimed production/
-    water/road candidate geometry. Road geometry is subtracted as real,
-    zero-width LineStrings, NOT buffered -- see module docstring for why
-    that's expected to have a negligible practical effect on the resulting
-    area this pass.
+    water/road candidate geometry. road_polygons_utm is this module's own
+    BUFFERED variant of the selected road corridor's real cell-footprint
+    polygon (built from road_corridors.find_road_routes()'s own 'cells' --
+    the route's own path cells' real ground squares, dilated by
+    TREE_ZONE_ROAD_BUFFER_CELLS -- see that constant's own reasoning) --
+    NOT road_corridors.py's zero-width 'line_utm', which used to be
+    subtracted here and had a confirmed, deliberately negligible effect
+    on the resulting search-space area (see module docstring's own
+    history of this), and NOT road_corridors.py's own unbuffered
+    'cell_footprint_polygon_utm' field either -- both a real cell-
+    footprint polygon AND a whole-cell buffer around it are needed so
+    this genuinely keeps tree candidates from being proposed on top of,
+    along, or diagonally corner-touching the road's own real footprint.
 
     Returns (search_space, claimed_union):
       - search_space is None if the claimed union completely covers the
@@ -357,17 +538,18 @@ def compute_tree_search_space(
         MultiPolygon otherwise (possibly boundary_polygon_utm itself,
         unmodified, if nothing was claimed at all).
       - claimed_union is None if production_polygons_utm, water_polygons_utm,
-        and road_lines_utm are ALL empty (nothing on this property has been
-        claimed by any upstream layer yet) -- distinct from a real, non-None
-        union that happens to leave a search_space of remaining area.
+        and road_polygons_utm are ALL empty (nothing on this property has
+        been claimed by any upstream layer yet) -- distinct from a real,
+        non-None union that happens to leave a search_space of remaining
+        area.
     """
     pieces = []
     if production_polygons_utm:
         pieces.append(unary_union(production_polygons_utm))
     if water_polygons_utm:
         pieces.append(unary_union(water_polygons_utm))
-    if road_lines_utm:
-        pieces.append(unary_union(road_lines_utm))
+    if road_polygons_utm:
+        pieces.append(unary_union(road_polygons_utm))
 
     claimed_union = unary_union(pieces) if pieces else None
 
@@ -388,6 +570,7 @@ def score_tree_search_space(
     hydric_data_available: bool = True,
     stream_union: Optional[object] = None,
     stream_data_available: bool = True,
+    tree_root_zone_mask_utm: Optional[np.ndarray] = None,
     slope_reference_pct: float = TREE_SLOPE_REFERENCE_PCT,
     stream_proximity_reference_meters: float = STREAM_PROXIMITY_REFERENCE_METERS,
     min_score: float = MIN_TREE_SUITABILITY_SCORE,
@@ -404,12 +587,30 @@ def score_tree_search_space(
     is True, or "couldn't check at all" when that flag is False -- see
     _NEUTRAL_FACTOR_VALUE for how the latter is scored).
 
+    tree_root_zone_mask_utm is a pre-fetched boolean np.ndarray the same
+    shape as dem['array'] (production_area.get_required_tree_root_zone_
+    mask_utm()'s own output -- already on dem's own grid, no further
+    alignment needed), or None. A True cell is HARD-EXCLUDED from
+    candidacy before any factor is scored (see module docstring's
+    "CANOPY EXCLUSION GATE" section) -- unlike the three *_union params
+    above, there is no "gracefully degraded, neutral score" path for
+    canopy here: None means "no gate applied at all" (this pure-logic
+    core's own default, useful for callers/tests that don't care about
+    canopy), not "checked, found none" -- identify_tree_zone_candidates()
+    always supplies a real mask (its own canopy fetch is mandatory,
+    non-degrading, same as production_area.py's).
+
     Returns one entry per resulting tree-zone candidate patch, ranked
     best-first:
         {
             'id': int,
             'rank': int,
             'polygon_utm': shapely Polygon/MultiPolygon,
+            'render_fill_polygon_utm': shapely Polygon/MultiPolygon,  # DISPLAY-ONLY plain convex
+                # hull of polygon_utm, re-intersected with boundary_polygon_utm -- same field/
+                # reasoning production_area.py's/water_candidate_zones.py's own patches/zones
+                # already carry; NEVER used for area_acres/scoring/eligibility, which stay on
+                # polygon_utm -- see this function's own body for why
             'geometry_wgs84': GeoJSON geometry dict,
             'area_acres': float,
             'tree_suitability_score': float,   # 0-100
@@ -450,6 +651,13 @@ def score_tree_search_space(
                 continue
             point = Point(pixel_center_xy(dem, r, c))
             if not search_space_prepared.contains(point):
+                continue
+            if tree_root_zone_mask_utm is not None and tree_root_zone_mask_utm[r, c]:
+                # Already under (or within TREE_ZONE_CANOPY_BUFFER_METERS
+                # of) real, existing tree canopy -- HARD-excluded before
+                # scoring, same as being outside the search space
+                # entirely (see this function's own docstring and the
+                # module docstring's "CANOPY EXCLUSION GATE" section).
                 continue
 
             raw_slope = float(slope_pct_grid[r, c]) if not np.isnan(slope_pct_grid[r, c]) else 0.0
@@ -531,10 +739,26 @@ def score_tree_search_space(
 
         geometry_wgs84 = transform_geom(dem["crs"], "EPSG:4326", mapping(footprint))
 
+        # render_fill_polygon_utm: a DISPLAY-ONLY plain convex hull of
+        # this patch's own real footprint, re-intersected with
+        # boundary_polygon_utm -- the SAME field/reasoning production_
+        # area.py's cluster_and_gate() and water_candidate_zones.
+        # find_candidate_zones() already compute for their own patches/
+        # zones (see either module's own docstring): a hull reads as one
+        # coherent shape at render time, closing over any real interior
+        # notch/pocket a patch's own footprint can have (here, most
+        # directly from the CANOPY EXCLUSION GATE carving an
+        # already-under-canopy pocket out of an otherwise-contiguous
+        # candidate). NEVER used for area_acres/scoring/eligibility
+        # above, which all still reflect the real, un-hulled footprint --
+        # this field exists purely for render_layout_map.py to draw.
+        render_fill_polygon_utm = footprint.convex_hull.intersection(boundary_polygon_utm)
+
         patches.append(
             {
                 "id": component_id,
                 "polygon_utm": footprint,
+                "render_fill_polygon_utm": render_fill_polygon_utm,
                 "geometry_wgs84": geometry_wgs84,
                 "area_acres": round(area_acres, 2),
                 "tree_suitability_score": round(composite_score * SUITABILITY_SCORE_SCALE, 1),
@@ -720,17 +944,19 @@ def identify_tree_zone_candidates(
     Full pipeline entry point: fetches the DEM (unless one is passed in),
     computes the Step 1 search space from EVERY current production
     candidate plus the SINGLE selected water zone and SINGLE selected road
-    corridor on this property, fetches the Step 2 soil/stream geometry
-    (each degrading independently and gracefully -- same pattern as every
-    other network-backed layer in this pipeline), scores and thresholds
-    the result, and returns:
+    corridor on this property, fetches Step 2's MANDATORY canopy
+    exclusion mask (production_area.get_required_tree_root_zone_mask_utm()
+    -- raises, does NOT degrade, on a fetch failure) plus Step 2's
+    soil/stream geometry (each of THOSE three degrading independently and
+    gracefully -- same pattern as every other network-backed layer in
+    this pipeline), scores and thresholds the result, and returns:
 
         {
             'zones_geojson': FeatureCollection,          # layer="tree_zone_candidate" -- the deliverable
             'search_space_geojson': FeatureCollection,    # layer="tree_search_space_diagnostic" -- Step 1 diagnostic
             'search_space_acres': float,
             'claimed_acres': float,                       # production+selected-water+selected-road union's own
-                                                             # area (roads ~0, zero-width)
+                                                             # area (road's own real cell-footprint width, not 0)
             'boundary_acres': float,
             'patches': list[dict],                        # score_tree_search_space()'s own raw output
         }
@@ -769,15 +995,17 @@ def identify_tree_zone_candidates(
     # optimized-selection entry points. Per product decision, this app
     # targets small farms only: one well-suited water zone / road corridor
     # is sufficient, so only that one candidate's own geometry counts as
-    # "claimed" for each. Each optimized patch's own 'polygon_utm' is the
-    # real, accurate cell-union footprint -- see production_area.py's own
-    # cluster_and_gate() docstring. ---
+    # "claimed" for each. Each geometry claimed here is that zone's own
+    # OPTIMIZED/render form, NOT its raw cell/DEM-walk footprint -- see
+    # this module's own "GEOMETRY FORM CLAIMED" docstring section above
+    # for why (production_area.py's own cluster_and_gate() docstring for
+    # render_fill_polygon_utm itself). ---
     production_result = identify_optimized_production_areas(boundary_coordinates, dem=dem)
-    production_polygons_utm = [p["polygon_utm"] for p in production_result["scored_patches"]]
+    production_polygons_utm = [p["render_fill_polygon_utm"] for p in production_result["scored_patches"]]
 
     water_result = identify_water_suitability(boundary_coordinates, dem=dem)
     selected_water_zone = water_result["selected_water_zone"]
-    water_polygons_utm = [selected_water_zone["polygon_utm"]] if selected_water_zone else []
+    water_polygons_utm = [selected_water_zone["render_fill_polygon_utm"]] if selected_water_zone else []
 
     # identify_road_corridor_candidates() now requires a real anchor_lon_lat
     # to generate any routes at all (see road_corridors.py's own module
@@ -796,15 +1024,50 @@ def identify_tree_zone_candidates(
         boundary_coordinates, dem=dem, anchor_lon_lat=_PLACEHOLDER_REFERENCE_PROPERTY_ANCHOR_LON_LAT
     )
     selected_road_corridor = road_result["selected_road_corridor"]
-    road_lines_utm = [selected_road_corridor["line_utm"]] if selected_road_corridor else []
-
-    search_space, claimed_union = compute_tree_search_space(
-        boundary_polygon_utm, production_polygons_utm, water_polygons_utm, road_lines_utm
+    # _road_corridor_exclusion_polygon() builds this module's OWN
+    # buffered variant of the selected route's real footprint -- see that
+    # function's own docstring and TREE_ZONE_ROAD_BUFFER_CELLS's own
+    # reasoning. Deliberately NOT road_corridors.py's own
+    # 'cell_footprint_polygon_utm' field directly -- that field is the
+    # route's real, UNBUFFERED footprint (a different, more general-
+    # purpose thing other callers may want unbuffered); this module needs
+    # its own +TREE_ZONE_ROAD_BUFFER_CELLS variant specifically so
+    # tree-zone candidates get a genuine, corner-clear gap from the road,
+    # not just edge-adjacency. Also NOT render_layout_map.py's own
+    # render-smoothed line -- that smoothing is a purely cosmetic
+    # transform for how the road SYMBOL looks on the final map, unrelated
+    # to what ground this route actually occupies.
+    road_polygons_utm = (
+        [_road_corridor_exclusion_polygon(dem, selected_road_corridor)] if selected_road_corridor else []
     )
 
-    # --- Step 2 inputs: soil/stream geometry, each degrading independently
-    # and gracefully -- same pattern as every other network-backed layer in
-    # this pipeline (e.g. road_corridors.py's several optional fetches). ---
+    search_space, claimed_union = compute_tree_search_space(
+        boundary_polygon_utm, production_polygons_utm, water_polygons_utm, road_polygons_utm
+    )
+
+    # --- Step 2's own CANOPY EXCLUSION GATE (see module docstring):
+    # MANDATORY, non-degrading -- the SAME shared fetch-or-raise helper
+    # production_area.identify_production_areas()/production_area_
+    # ceiling.identify_optimized_production_areas() already call for
+    # their own canopy gates, at this module's own TREE_ZONE_CANOPY_
+    # BUFFER_METERS (== production's own TREE_ROOT_ZONE_BUFFER_METERS,
+    # 10ft, unchanged). A canopy fetch failure here propagates up
+    # UNCAUGHT, same hard-fail behavior as every other mandatory-canopy
+    # entry point in this pipeline -- callers are expected to let this
+    # raise, not catch and degrade it. Fetched fresh here rather than
+    # reused from production_result above (that result's own internal
+    # mask isn't part of its returned dict) -- one more independent
+    # canopy fetch per call, same "each optimize/select call below
+    # re-derives its own upstream dependencies" pattern render_layout_
+    # map.py's own fetch_layout_layers() already documents. ---
+    tree_root_zone_mask_utm = get_required_tree_root_zone_mask_utm(
+        boundary_polygon_utm, dem, buffer_meters=TREE_ZONE_CANOPY_BUFFER_METERS
+    )
+
+    # --- Step 2's remaining inputs: soil/stream geometry, each degrading
+    # independently and gracefully -- same pattern as every other
+    # network-backed layer in this pipeline (e.g. road_corridors.py's
+    # several optional fetches). ---
     prime_farmland_union: Optional[object] = None
     prime_farmland_data_available = True
     try:
@@ -836,6 +1099,7 @@ def identify_tree_zone_candidates(
         hydric_data_available=hydric_data_available,
         stream_union=stream_union,
         stream_data_available=stream_data_available,
+        tree_root_zone_mask_utm=tree_root_zone_mask_utm,
         **score_kwargs,
     )
 
