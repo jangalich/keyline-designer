@@ -806,7 +806,14 @@ def find_road_routes(
             'weighted_score': float,
             'points_xyz': [(x, y, elevation_m), ...],
             'line_utm': LineString,          # zero-width, dem['crs'] -- length_m/avg_grade_pct's own source geometry
-            'cell_footprint_polygon_utm': Polygon/MultiPolygon,  # REAL, non-zero-width footprint --
+            'cells': [(row, col), ...],      # the route's own path cells, in walk order -- connector then
+                                              # ridge fragment, the SAME raw cell list cell_footprint_polygon_utm
+                                              # below is built from (same 'cells' convention production_area.py's
+                                              # own cluster_and_gate() patches already use), so a caller needing
+                                              # its OWN buffered/dilated variant (e.g. raster_grid.binary_dilate()
+                                              # before raster_grid.cell_union_footprint()) doesn't have to
+                                              # re-derive the cell list from geometry first
+            'cell_footprint_polygon_utm': Polygon/MultiPolygon,  # REAL, non-zero-width, UNBUFFERED footprint --
                                               # see this function's own body for why
             'geometry_wgs84': GeoJSON LineString,
         }
@@ -938,7 +945,13 @@ def find_road_routes(
     # tree_zone_candidates.py's own claimed-geometry exclusion) has a
     # real polygon to subtract, instead of line_utm's own zero-width
     # LineString (kept below, unchanged, as length_m/avg_grade_pct's own
-    # source geometry -- this new field is purely additive).
+    # source geometry -- this new field is purely additive). result_cells
+    # itself is ALSO exposed directly below as the route's own 'cells' --
+    # a caller that needs its OWN buffered/dilated variant of this
+    # footprint (rather than this exact, unbuffered one) can dilate
+    # 'cells' itself via raster_grid.binary_dilate() before its own
+    # cell_union_footprint() call, without re-deriving the cell list from
+    # geometry first.
     result_cell_mask = np.zeros(dem["array"].shape, dtype=bool)
     for cell_r, cell_c in result_cells:
         result_cell_mask[cell_r, cell_c] = True
@@ -958,6 +971,7 @@ def find_road_routes(
         "rank": 1,
         "points_xyz": points,
         "line_utm": line,
+        "cells": result_cells,
         "cell_footprint_polygon_utm": cell_footprint_polygon_utm,
         "length_m": length_m,
         "avg_grade_pct": avg_grade_pct,

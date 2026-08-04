@@ -46,6 +46,7 @@ import tree_zone_candidates as tzc
 import production_suitability as ps
 import water_suitability as ws
 from feature_schema import validate_feature_collection
+from raster_grid import cell_union_footprint
 from tree_zone_candidates import (
     HYDRIC_OVERLAP_FACTOR_WEIGHT,
     SLOPE_FACTOR_WEIGHT,
@@ -53,6 +54,8 @@ from tree_zone_candidates import (
     STREAM_PROXIMITY_FACTOR_WEIGHT,
     TREE_SLOPE_REFERENCE_PCT,
     STREAM_PROXIMITY_REFERENCE_METERS,
+    TREE_ZONE_ROAD_BUFFER_CELLS,
+    _road_corridor_exclusion_polygon,
     _slope_factor,
     _stream_proximity_factor,
     compute_tree_search_space,
@@ -173,6 +176,73 @@ fully_claimed_search_space, fully_claimed_union = compute_tree_search_space(boun
 assert fully_claimed_union is not None
 assert fully_claimed_search_space is None, "a boundary fully claimed by production/water/roads must report search_space=None"
 print("compute_tree_search_space() with the ENTIRE boundary claimed returns search_space=None (a real, reportable outcome).")
+
+
+# =====================================================================
+# _road_corridor_exclusion_polygon(): the road's OWN buffered cell-footprint --
+# closes the corner-only gap a plain, unbuffered cell-square union can still leave
+# =====================================================================
+
+ROAD_TEST_RESOLUTION = (5.0, 5.0)
+road_test_dem = {
+    "array": np.full((10, 10), 100.0, dtype=np.float32),
+    "resolution_meters": ROAD_TEST_RESOLUTION,
+    "origin_x": 600000.0,
+    "origin_y": 4600050.0,
+    "crs": CRS,
+}
+
+
+def _road_test_cell_box(row, col):
+    """The real ground square for one (row, col) cell of road_test_dem -- same corner
+    convention raster_grid.cell_union_footprint() itself uses."""
+    px, py = ROAD_TEST_RESOLUTION
+    x0 = road_test_dem["origin_x"] + col * px
+    x1 = road_test_dem["origin_x"] + (col + 1) * px
+    y1 = road_test_dem["origin_y"] - row * py
+    y0 = road_test_dem["origin_y"] - (row + 1) * py
+    return box(x0, y0, x1, y1)
+
+
+# A single road cell at (5, 5). Diagonal-only neighbor cell (4, 6) (NE) shares
+# exactly one CORNER with it, no edge -- exactly the real, live-confirmed gap case.
+single_road_cell = {"cells": [(5, 5)]}
+diagonal_neighbor_box = _road_test_cell_box(4, 6)
+edge_neighbor_box = _road_test_cell_box(5, 6)  # shares a full EDGE with (5, 5), for comparison
+far_box = _road_test_cell_box(0, 0)  # nowhere near (5, 5) at all
+
+unbuffered_mask = np.zeros((10, 10), dtype=bool)
+unbuffered_mask[5, 5] = True
+unbuffered_footprint = cell_union_footprint(road_test_dem, unbuffered_mask)
+assert unbuffered_footprint.intersection(diagonal_neighbor_box).area < 1e-9, (
+    "test sanity check: the UNBUFFERED single-cell footprint must NOT already overlap its diagonal "
+    "neighbor's square (only a shared corner point, zero area) -- otherwise this isn't reproducing the "
+    "real corner-touching gap at all"
+)
+
+buffered_footprint = _road_corridor_exclusion_polygon(road_test_dem, single_road_cell)
+assert buffered_footprint.area > unbuffered_footprint.area, (
+    "the buffered footprint must be strictly larger than the unbuffered one -- TREE_ZONE_ROAD_BUFFER_CELLS "
+    f"({TREE_ZONE_ROAD_BUFFER_CELLS}) must have actually grown the mask"
+)
+assert diagonal_neighbor_box.difference(buffered_footprint).area < 1e-9, (
+    "the diagonal-only neighbor cell (sharing just a corner with the road cell) must be FULLY absorbed into "
+    "the buffered footprint -- this is the exact real, live-confirmed gap this buffer exists to close"
+)
+assert edge_neighbor_box.difference(buffered_footprint).area < 1e-9, (
+    "the direct edge neighbor must also be fully absorbed (a strictly easier case than the diagonal one)"
+)
+assert far_box.intersection(buffered_footprint).area < 1e-9, (
+    "a cell far from the road must NOT be swept into the buffer -- this is a bounded, local dilation, "
+    "not an unbounded growth"
+)
+print(
+    f"_road_corridor_exclusion_polygon(): a single road cell's plain footprint ({unbuffered_footprint.area} sq m) "
+    f"leaves its diagonal neighbor touching at a bare corner (confirmed, zero overlap); after "
+    f"TREE_ZONE_ROAD_BUFFER_CELLS={TREE_ZONE_ROAD_BUFFER_CELLS} dilation, the buffered footprint "
+    f"({buffered_footprint.area} sq m) fully absorbs both the diagonal AND edge neighbor, while a cell "
+    "further away stays completely untouched."
+)
 
 
 # =====================================================================
