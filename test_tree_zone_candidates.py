@@ -439,6 +439,68 @@ assert region1_explicit_none_patches[0]["area_acres"] == region1_ungated_area, (
 print("Canopy exclusion gate: tree_root_zone_mask_utm=None reproduces the ungated result exactly (a true no-op).")
 
 
+# =====================================================================
+# render_fill_polygon_utm: DISPLAY-ONLY plain convex hull, closes over a real interior
+# notch the CANOPY EXCLUSION GATE can carve -- same field/reasoning production_area.py's
+# and water_candidate_zones.py's own patches/zones already carry
+# =====================================================================
+
+# A small canopy pocket sitting STRICTLY INSIDE region 1's own interior (rows 8-11, cols
+# 8-11 -- well clear of region 1's own cols 0-20 edges) -- carves a real hole out of an
+# otherwise-contiguous candidate, same shape of artifact production_area.py's own render_
+# fill_polygon_utm test already exercises for production zones.
+interior_pocket_canopy_mask = np.zeros((ROWS, COLS), dtype=bool)
+interior_pocket_canopy_mask[8:12, 8:12] = True
+pocket_box = box(ORIGIN_X + 8 * 5.0, ORIGIN_Y - 12 * 5.0, ORIGIN_X + 12 * 5.0, ORIGIN_Y - 8 * 5.0)
+
+region1_notched_patches = score_tree_search_space(
+    dem, region1_hydric_flat, boundary_polygon_utm, hydric_union=hydric_union,
+    tree_root_zone_mask_utm=interior_pocket_canopy_mask, min_score=0.0, min_area_acres=0.0,
+)
+assert len(region1_notched_patches) == 1, (
+    "a canopy pocket strictly inside region 1's own interior must still leave ONE single surrounding "
+    "candidate (a real hole, not a split into separate patches)"
+)
+notched_patch = region1_notched_patches[0]
+assert "render_fill_polygon_utm" in notched_patch, "every patch must carry a render_fill_polygon_utm field"
+hull = notched_patch["render_fill_polygon_utm"]
+real_footprint = notched_patch["polygon_utm"]
+
+assert real_footprint.intersection(pocket_box).area < 1e-6, (
+    "the real, un-hulled footprint must genuinely EXCLUDE the canopy pocket -- area_acres/scoring must "
+    "never reflect ground that's actually under canopy"
+)
+assert pocket_box.difference(hull).area < 1e-6, (
+    "render_fill_polygon_utm (the convex hull) must fully CLOSE OVER the interior canopy pocket -- a hull "
+    "necessarily covers any real interior notch, whatever caused it"
+)
+assert hull.area > real_footprint.area, (
+    "the hull must have strictly MORE area than the real footprint once it's closed over a real notch"
+)
+print(
+    f"render_fill_polygon_utm: a canopy pocket carved out of region 1's own interior leaves the real "
+    f"footprint ({real_footprint.area}sqm) genuinely excluding it, while render_fill_polygon_utm "
+    f"({hull.area}sqm) fully closes over it -- confirms the hull, not the real footprint, is what render_"
+    "layout_map.py should draw."
+)
+
+# The ordinary, un-notched case (region 2, no canopy gate at all): the hull must equal the real
+# footprint exactly whenever the real footprint is already convex -- no visible change for the common case.
+region2_plain_patches = score_tree_search_space(
+    dem, region2_steep, boundary_polygon_utm, min_score=0.0, min_area_acres=0.0,
+)
+assert len(region2_plain_patches) == 1
+plain_patch = region2_plain_patches[0]
+assert plain_patch["render_fill_polygon_utm"].equals(plain_patch["polygon_utm"]), (
+    "a solid, already-convex patch's render_fill_polygon_utm (its own convex hull) must be geometrically "
+    "IDENTICAL to its real, un-hulled polygon_utm -- no change in rendering for the ordinary case"
+)
+print(
+    "render_fill_polygon_utm: an ordinary, already-convex candidate's hull is geometrically identical to "
+    "its own real footprint -- no visible change for the common, un-notched case."
+)
+
+
 # --- data-unavailable factors default to a neutral 0.5, not the "checked and clean" 0.0/1.0 ---
 
 tiny_dem = {

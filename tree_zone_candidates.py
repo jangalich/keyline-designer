@@ -606,6 +606,11 @@ def score_tree_search_space(
             'id': int,
             'rank': int,
             'polygon_utm': shapely Polygon/MultiPolygon,
+            'render_fill_polygon_utm': shapely Polygon/MultiPolygon,  # DISPLAY-ONLY plain convex
+                # hull of polygon_utm, re-intersected with boundary_polygon_utm -- same field/
+                # reasoning production_area.py's/water_candidate_zones.py's own patches/zones
+                # already carry; NEVER used for area_acres/scoring/eligibility, which stay on
+                # polygon_utm -- see this function's own body for why
             'geometry_wgs84': GeoJSON geometry dict,
             'area_acres': float,
             'tree_suitability_score': float,   # 0-100
@@ -734,10 +739,26 @@ def score_tree_search_space(
 
         geometry_wgs84 = transform_geom(dem["crs"], "EPSG:4326", mapping(footprint))
 
+        # render_fill_polygon_utm: a DISPLAY-ONLY plain convex hull of
+        # this patch's own real footprint, re-intersected with
+        # boundary_polygon_utm -- the SAME field/reasoning production_
+        # area.py's cluster_and_gate() and water_candidate_zones.
+        # find_candidate_zones() already compute for their own patches/
+        # zones (see either module's own docstring): a hull reads as one
+        # coherent shape at render time, closing over any real interior
+        # notch/pocket a patch's own footprint can have (here, most
+        # directly from the CANOPY EXCLUSION GATE carving an
+        # already-under-canopy pocket out of an otherwise-contiguous
+        # candidate). NEVER used for area_acres/scoring/eligibility
+        # above, which all still reflect the real, un-hulled footprint --
+        # this field exists purely for render_layout_map.py to draw.
+        render_fill_polygon_utm = footprint.convex_hull.intersection(boundary_polygon_utm)
+
         patches.append(
             {
                 "id": component_id,
                 "polygon_utm": footprint,
+                "render_fill_polygon_utm": render_fill_polygon_utm,
                 "geometry_wgs84": geometry_wgs84,
                 "area_acres": round(area_acres, 2),
                 "tree_suitability_score": round(composite_score * SUITABILITY_SCORE_SCALE, 1),

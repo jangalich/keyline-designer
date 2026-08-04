@@ -115,27 +115,31 @@ to the plotting calls is simplified/smoothed.
 TREE ZONE STYLE: each ranked tree-zone candidate patch (there can be
 several, same "possibly-multiple, ranked" shape as production zones, not
 a single selection like water/road/structure) renders as a solid,
-hatched fill (TREE_ZONE_COLOR, TREE_ZONE_FILL_ALPHA, TREE_ZONE_HATCH) --
-its own real geometry_wgs84 directly, not a cosmetic display-only hull
-the way production/water's own render_fill_polygon_utm is (a tree-zone
-patch is already this layer's own leftover, non-claimed search space --
-see tree_zone_candidates.py's own module docstring for why its exclusion
-inputs were switched to production/water's render_fill_polygon_utm and
-the road corridor's own render-smoothed line, precisely so what's claimed
-here lines up with what's actually drawn for those three zones on this
-same map). The hatch (rather than a flat fill like structure_site's own
-solid red) is a deliberate, visible "candidate, not a committed site"
-cue, consistent with this layer's own CONFIDENCE_LOW rating and its
-explicit "not a definite planting plan" framing (see
-tree_zone_candidates.py's own TREE_ZONE_CONFIDENCE_NOTES_TEMPLATE).
-Rendered after the road corridor and before the structure site, matching
-Scale of Permanence step ordering (Trees is step 5, immediately before
-Permanent Buildings' step 6) -- and z-ordered accordingly (below
-structure_site's own solid fill), so a real, expected overlap between a
-tree candidate and the structure site (tree_zone_candidates.py's own
-search space deliberately has no awareness of solar/structure siting,
-see that module's own docstring) still reads as the structure site
-sitting visibly on top, not a confusing double-fill blend.
+hatched fill (TREE_ZONE_COLOR, TREE_ZONE_FILL_ALPHA, TREE_ZONE_HATCH),
+drawn from its own render_fill_polygon_utm -- a DISPLAY-ONLY plain convex
+hull of the patch's real footprint, re-intersected with the parcel
+boundary (score_tree_search_space()'s own output, same field/reasoning
+production_area.py's/water_candidate_zones.py's own patches/zones already
+carry) -- NOT the patch's real, potentially-notched geometry_wgs84 (used
+for area_acres/scoring/the narrative report, completely untouched by
+this). Same "reads as one coherent shape at render time" purpose as
+production/water's own hulls: most directly here, closing over any
+interior pocket the CANOPY EXCLUSION GATE carves out of an otherwise-
+contiguous candidate (see tree_zone_candidates.py's own module
+docstring), rather than rendering as an unexplained blank notch. The
+hatch (rather than a flat fill like structure_site's own solid red) is a
+deliberate, visible "candidate, not a committed site" cue, consistent
+with this layer's own CONFIDENCE_LOW rating and its explicit "not a
+definite planting plan" framing (see tree_zone_candidates.py's own
+TREE_ZONE_CONFIDENCE_NOTES_TEMPLATE). Rendered after the road corridor
+and before the structure site, matching Scale of Permanence step
+ordering (Trees is step 5, immediately before Permanent Buildings' step
+6) -- and z-ordered accordingly (below structure_site's own solid fill),
+so a real, expected overlap between a tree candidate and the structure
+site (tree_zone_candidates.py's own search space deliberately has no
+awareness of solar/structure siting, see that module's own docstring)
+still reads as the structure site sitting visibly on top, not a
+confusing double-fill blend.
 
 Basemap: NAIP aerial imagery via USGS's cached USGSImageryOnly tile
 service, fetched and composited with contextily (a well-established
@@ -897,16 +901,18 @@ def render_layout_map(
     # multiple" shape as production zones above, not a single selection
     # like water_zone/road_corridor/structure_site) -- see this module's
     # own TREE ZONE STYLE docstring section for the hatched-fill styling
-    # rationale. Drawn from each patch's own real geometry_wgs84 directly
-    # (score_tree_search_space()'s own output already IS this layer's
-    # leftover, non-claimed search space -- there's no separate cosmetic
-    # display-only hull for it the way production/water each have their
-    # own render_fill_polygon_utm).
+    # rationale. DISPLAY-ONLY fill geometry: render_fill_polygon_utm is a
+    # plain convex hull of the patch's own real footprint (see
+    # score_tree_search_space()'s own docstring), already in the DEM's
+    # own UTM CRS -- reprojected in one hop
+    # (_reproject_utm_geometry_to_mercator(), same pattern the water
+    # zone's own fill above already uses), never the real geometry_wgs84
+    # used for scoring/eligibility/the narrative report.
     tree_zone_patches = tree_zone_result.get("patches", []) if tree_zone_result else []
     multiple_tree_zones = len(tree_zone_patches) > 1
     for patch in tree_zone_patches:
-        geom = _reproject_geometry_to_mercator(patch["geometry_wgs84"])
-        polygons = geom.geoms if geom.geom_type == "MultiPolygon" else [geom]
+        render_fill_geom = _reproject_utm_geometry_to_mercator(patch["render_fill_polygon_utm"], dem["crs"])
+        polygons = render_fill_geom.geoms if render_fill_geom.geom_type == "MultiPolygon" else [render_fill_geom]
         for polygon in polygons:
             plot_polygon(
                 polygon,
@@ -920,7 +926,11 @@ def render_layout_map(
                 zorder=42.8,
             )
         label = f"Tree Zone Candidate {patch['rank']}" if multiple_tree_zones else "Tree Zone Candidate"
-        _draw_numbered_marker(ax, geom.representative_point(), marker_number)
+        # The marker sits on the geometry actually drawn above (the hull,
+        # not the real footprint) -- same "marker matches the visible
+        # shape" reasoning the water zone's own marker placement already
+        # uses.
+        _draw_numbered_marker(ax, render_fill_geom.representative_point(), marker_number)
         legend_entries.append(
             f"{marker_number} — {label}, score {patch['tree_suitability_score']}/100, {patch['area_acres']} ac"
         )

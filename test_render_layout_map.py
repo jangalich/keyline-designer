@@ -874,12 +874,14 @@ print(
 # TREE ZONE STYLE: each ranked tree-zone candidate patch (possibly
 # several, same "ranked list" shape as production zones -- not a single
 # selection like water_zone/road_corridor/structure_site) renders as a
-# hatched, semi-transparent fill drawn from its own real geometry_wgs84
-# directly (no cosmetic display-only hull the way production/water each
-# have) -- see this module's own "TREE ZONE STYLE" docstring section.
+# hatched, semi-transparent fill drawn from its own render_fill_polygon_utm
+# (a DISPLAY-ONLY plain convex hull -- see score_tree_search_space()'s own
+# docstring), NOT its real, potentially-notched polygon_utm/geometry_wgs84
+# -- see this module's own "TREE ZONE STYLE" docstring section.
 # =====================================================================
 
 from shapely.geometry import mapping as _mapping_check
+from shapely.ops import unary_union as _unary_union_check
 from render_layout_map import TREE_ZONE_COLOR, TREE_ZONE_FILL_ALPHA, TREE_ZONE_HATCH
 
 
@@ -889,18 +891,28 @@ def _tree_patch_fixture(polygon_utm, rank: int, score: float, area_acres: float)
         "id": rank - 1,
         "rank": rank,
         "polygon_utm": polygon_utm,
+        "render_fill_polygon_utm": polygon_utm.convex_hull,
         "geometry_wgs84": geometry_wgs84,
         "area_acres": area_acres,
         "tree_suitability_score": score,
     }
 
 
-# Two disjoint patches (same DEM/CRS as the water zone fixture above, real coordinates near the
-# actual property_boundary used throughout this file) -- exercises the "possibly several, ranked"
-# rendering path, not just a single candidate.
-tree_patch_1 = _tree_patch_fixture(
-    box(500000.0 + 10.0, 4500000.0 - 60.0, 500000.0 + 40.0, 4500000.0 - 30.0), rank=1, score=72.3, area_acres=1.85
+# tree_patch_1: a deliberately NON-CONVEX L-shape (same fixture pattern as the water zone's own
+# render_fill_polygon_utm test above) -- its own convex hull genuinely differs from its real
+# footprint, so this actually exercises the hull being drawn, not a fixture where hull == footprint
+# coincidentally passes either way.
+tree_l_shape_polygon_utm = _unary_union_check([
+    box(500000.0 + 10.0, 4500000.0 - 60.0, 500000.0 + 20.0, 4500000.0 - 30.0),  # vertical arm
+    box(500000.0 + 10.0, 4500000.0 - 40.0, 500000.0 + 40.0, 4500000.0 - 30.0),  # horizontal arm
+])
+tree_patch_1 = _tree_patch_fixture(tree_l_shape_polygon_utm, rank=1, score=72.3, area_acres=1.85)
+assert tree_patch_1["render_fill_polygon_utm"].area > tree_patch_1["polygon_utm"].area, (
+    "test setup should produce a hull with strictly MORE area than the real, non-convex L-shape footprint -- "
+    "otherwise this fixture isn't actually testing hull-vs-footprint behavior"
 )
+
+# tree_patch_2: an ordinary convex box -- hull == footprint, the common "no visible change" case.
 tree_patch_2 = _tree_patch_fixture(
     box(500000.0 + 60.0, 4500000.0 - 90.0, 500000.0 + 90.0, 4500000.0 - 60.0), rank=2, score=55.0, area_acres=0.9
 )
@@ -954,17 +966,28 @@ for kw in tree_fill_calls:
 
 assert len(recorded_tree_markers) == 2, f"expected exactly 2 markers drawn (one per tree-zone candidate), got {len(recorded_tree_markers)}"
 for (marker_point_mercator, _marker_number), patch in zip(recorded_tree_markers, [tree_patch_1, tree_patch_2]):
-    expected_geom_mercator = rlm._reproject_geometry_to_mercator(patch["geometry_wgs84"])
-    expected_point = expected_geom_mercator.representative_point()
-    assert marker_point_mercator.distance(expected_point) < 1e-6, (
-        "each tree-zone candidate's numbered marker must be placed at its own real geometry_wgs84's "
-        "representative_point(), reprojected to Mercator -- not some other geometry's point"
+    expected_hull_mercator = rlm._reproject_utm_geometry_to_mercator(
+        patch["render_fill_polygon_utm"], water_zone_test_dem["crs"]
     )
+    expected_point = expected_hull_mercator.representative_point()
+    assert marker_point_mercator.distance(expected_point) < 1e-6, (
+        "each tree-zone candidate's numbered marker must be placed at render_fill_polygon_utm's own "
+        "representative_point(), reprojected to Mercator -- not geometry_wgs84's"
+    )
+
+# tree_patch_1's own hull-fill polygon must be visibly LARGER than its real, non-convex footprint,
+# confirming the hull (not the real footprint) is what actually got drawn for the notched patch.
+tree_patch_1_fill_call = tree_fill_calls[0]
+assert tree_patch_1["render_fill_polygon_utm"].area > tree_patch_1["polygon_utm"].area, (
+    "sanity re-check: tree_patch_1's own render_fill_polygon_utm must still be strictly larger than its "
+    "real, non-convex polygon_utm"
+)
 
 print(
     f"Full pipeline with 2 synthetic tree-zone candidates: render_layout_map() draws each as a hatched "
     f"(pattern={TREE_ZONE_HATCH!r}) fill (alpha={TREE_ZONE_FILL_ALPHA}) at zorder=42.8 (between the road "
-    f"corridor and structure site), places each numbered marker on that patch's own real geometry, and "
+    f"corridor and structure site) from its own render_fill_polygon_utm (a real, notched patch's hull "
+    f"visibly larger than its real footprint), places each numbered marker on that same hull, and "
     f"completes successfully."
 )
 
