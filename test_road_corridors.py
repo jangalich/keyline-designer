@@ -15,12 +15,16 @@ logic, independent of real data fetches" approach.
 Route generation now identifies genuine ridge lines from the DEM (D8
 flow accumulation against an inverted DEM — see road_corridors.py's own
 module docstring and _identify_ridge_cell_mask()), prunes them against
-the HARD water/boundary exclusions, scores the survivors on a
-slope/length/proximity-to-anchor/production-crossing weighted formula,
-and routes a single least-cost connector from the anchor to the single
-highest-scoring candidate. This replaced an earlier "three fan-direction
-destinations from the anchor" design — there is no more 'fan_direction'
-field, no _select_fan_destination_cells()/_farthest_intersection_point()/
+the HARD water/boundary exclusions (and drops any surviving fragment
+shorter than RIDGE_MIN_FRAGMENT_CELLS outright), scores the survivors on
+a slope/length/production-crossing weighted formula (no separate
+proximity-to-anchor term — see road_corridors.py's own
+_score_ridge_candidates() docstring for why that was redundant with
+road_cost_path.least_cost_path()'s own total_cost), and routes a single
+least-cost connector from the anchor to the single highest-scoring
+candidate. This replaced an earlier "three fan-direction destinations
+from the anchor" design — there is no more 'fan_direction' field, no
+_select_fan_destination_cells()/_farthest_intersection_point()/
 _snap_utm_point_to_eligible_cell(), and find_road_routes() now returns
 AT MOST ONE route, not a ranked list of up to three. k_shortest_paths()
 itself is untouched and still exported by road_cost_path.py, just not
@@ -42,8 +46,8 @@ from raster_grid import D8_OFFSETS, connected_components, pixel_center_xy
 from road_corridors import (
     RIDGE_LENGTH_WEIGHT,
     RIDGE_MIN_AREA_ACRES,
+    RIDGE_MIN_FRAGMENT_CELLS,
     RIDGE_PRODUCTION_WEIGHT,
-    RIDGE_PROXIMITY_WEIGHT,
     RIDGE_SLOPE_WEIGHT,
     STEEP_GRADE_ENGINEERING_NOTE_THRESHOLD_PCT,
     _build_production_cell_mask,
@@ -210,6 +214,38 @@ for cells in two_pruned:
     assert len(cells) == 41, "an unexcluded network should survive completely intact, all 41 cells"
 print("_prune_ridge_networks returns one candidate per original, independent ridge network, each fully intact when unexcluded.")
 
+# --- RIDGE_MIN_FRAGMENT_CELLS floor: a fragment shorter than this is dropped outright, whether it started that short or got cut down to it ---
+
+# A genuinely tiny original network (6 cells, no exclusion involved at
+# all -- the live bug this floor fixes: even absent any pruning, a
+# 6-7 cell ridge could still surface as the winning "road corridor").
+tiny_network_mask = np.zeros((41, 41), dtype=bool)
+tiny_network_mask[10:16, 20] = True  # 6 cells, below RIDGE_MIN_FRAGMENT_CELLS (10)
+assert _prune_ridge_networks(tiny_network_mask, no_exclusion) == [], (
+    "a genuinely tiny original network (6 cells, RIDGE_MIN_FRAGMENT_CELLS is 10) must be dropped outright, "
+    "even with zero exclusion involved -- it's just not a meaningful road-worthy landform"
+)
+
+# A network that starts comfortably above the floor but gets severed by
+# an exclusion down to a largest-surviving-fragment BELOW the floor.
+severed_below_floor_excluded = np.zeros((41, 41), dtype=bool)
+severed_below_floor_excluded[6:41, 20] = True  # leaves only rows 0-5 (6 cells) of the 41-cell single_network_mask
+assert _prune_ridge_networks(single_network_mask, severed_below_floor_excluded) == [], (
+    "a network severed down to a 6-cell largest surviving fragment (below RIDGE_MIN_FRAGMENT_CELLS) must "
+    "be dropped, exactly like a genuinely tiny original network -- the floor applies AFTER pruning, to "
+    "whatever fragment actually survives"
+)
+
+# Exactly at the floor (10 cells, the split_excluded case above) still
+# survives -- RIDGE_MIN_FRAGMENT_CELLS is a "shorter than" cutoff, not
+# "shorter than or equal to."
+assert len(_prune_ridge_networks(single_network_mask, split_excluded)[0]) == 10 == RIDGE_MIN_FRAGMENT_CELLS
+print(
+    f"_prune_ridge_networks drops any surviving fragment shorter than RIDGE_MIN_FRAGMENT_CELLS "
+    f"({RIDGE_MIN_FRAGMENT_CELLS} cells) -- whether it started that short or got cut down to it by "
+    f"exclusion -- while a fragment exactly at the floor still survives."
+)
+
 
 # =====================================================================
 # _order_fragment_from_entry: orders an unordered fragment cell set into
@@ -275,7 +311,7 @@ print(
 
 
 # =====================================================================
-# _score_ridge_candidates: four-term normalized weighted scoring
+# _score_ridge_candidates: three-term normalized weighted scoring
 # =====================================================================
 
 split_row = 20
@@ -317,12 +353,15 @@ scored_cell_sets = [set(c["cells"]) for c in scored]
 assert set(map(tuple, unreachable)) not in scored_cell_sets, "the unreachable candidate must not appear in the output at all"
 
 for candidate in scored:
-    for key in ("slope_score", "length_score", "proximity_score", "production_score", "weighted_score"):
+    assert "proximity_score" not in candidate, (
+        "proximity_score no longer exists -- least_cost_path()'s own total_cost already governs which "
+        "reachable entry point each candidate connects through, scoring it again was redundant"
+    )
+    for key in ("slope_score", "length_score", "production_score", "weighted_score"):
         assert 0.0 <= candidate[key] <= 1.0, f"{key}={candidate[key]} out of [0, 1] range"
     expected_weighted = (
         RIDGE_SLOPE_WEIGHT * candidate["slope_score"]
         + RIDGE_LENGTH_WEIGHT * candidate["length_score"]
-        + RIDGE_PROXIMITY_WEIGHT * candidate["proximity_score"]
         + RIDGE_PRODUCTION_WEIGHT * candidate["production_score"]
     )
     assert abs(candidate["weighted_score"] - expected_weighted) < 1e-9, (
@@ -376,8 +415,9 @@ assert route["rank"] == 1
 assert len(route["points_xyz"]) >= 2
 assert route["line_utm"].length > 0
 assert route["line_utm"].within(ridge_boundary.buffer(1e-6)), "the route must stay entirely within the parcel boundary"
-for key in ("avg_slope_pct", "slope_score", "length_score", "proximity_score", "weighted_score"):
+for key in ("avg_slope_pct", "slope_score", "length_score", "production_score", "weighted_score"):
     assert key in route, f"missing ridge-scoring diagnostic field: {key}"
+assert "proximity_score" not in route, "proximity_score no longer exists as a separate scoring term"
 assert 0.0 <= route["weighted_score"] <= 1.0
 expected_suitability = max(0.0, min(100.0, route["weighted_score"] * 100.0))
 assert abs(route["suitability_score"] - expected_suitability) < 1e-9, (
@@ -520,11 +560,12 @@ validate_feature_collection(geojson)
 required_props = {
     "rank", "suitability_score", "avg_grade_pct", "length_ft", "crosses_floodplain",
     "crosses_production_zone", "ridge_avg_slope_pct", "ridge_production_cells_crossed",
-    "ridge_slope_score", "ridge_length_score", "ridge_proximity_score", "ridge_production_score",
+    "ridge_slope_score", "ridge_length_score", "ridge_production_score",
     "ridge_weighted_score", "constraints_satisfied",
 }
 removed_props = {
     "corridor_type", "anchor_status", "anchor_road_name", "anchor_road_distance_ft", "fan_direction",
+    "ridge_proximity_score",
 }
 assert len(geojson["features"]) <= 1, "the current design produces at most ONE feature, never a ranked alternates list"
 for feature in geojson["features"]:
@@ -535,10 +576,7 @@ for feature in geojson["features"]:
     present_removed = removed_props & feature["properties"].keys()
     assert not present_removed, f"these properties should no longer exist at all: {present_removed}"
     assert 0.0 <= feature["properties"]["suitability_score"] <= 100.0
-    for score_key in (
-        "ridge_slope_score", "ridge_length_score", "ridge_proximity_score", "ridge_production_score",
-        "ridge_weighted_score",
-    ):
+    for score_key in ("ridge_slope_score", "ridge_length_score", "ridge_production_score", "ridge_weighted_score"):
         assert 0.0 <= feature["properties"][score_key] <= 1.0, f"{score_key} out of [0, 1] range"
     assert feature["properties"]["constraints_satisfied"] == ["outside_pond_zone"], (
         "production is a hard exclusion on the connector only now, not the whole route -- it must NOT "
@@ -554,7 +592,7 @@ for feature in geojson["features"]:
     assert "ridge" in notes, "confidence_notes should describe the ridge-line routing model"
 print(
     "corridors_to_geojson output is schema-valid, layer='suggested_road_corridor', with required properties "
-    "(including the ridge_* four-term score breakdown and crosses_production_zone) present, at most one "
+    "(including the ridge_* three-term score breakdown and crosses_production_zone) present, at most one "
     "feature ever returned, and every removed property (fan_direction/corridor_type/anchor_status/"
     "anchor_road_name) correctly absent; constraints_satisfied now lists only pond as hard, omits "
     "production and grade entirely."

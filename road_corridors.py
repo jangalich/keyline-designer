@@ -41,16 +41,21 @@ Pipeline (find_road_routes()):
      ridge into several disconnected pieces; only the biggest piece per
      original ridge stays a candidate (a severed sliver isn't a
      meaningfully separate ridge worth scoring on its own). A ridge may
-     freely walk through a production zone now; that's what the 4th
-     scoring term below is for.
+     freely walk through a production zone now; that's what the 3rd
+     scoring term below is for. A surviving fragment shorter than
+     RIDGE_MIN_FRAGMENT_CELLS is dropped outright here too, whether it
+     started that short (a genuinely tiny original network) or got cut
+     down to it by pruning — see that constant's own comment.
   4. SCORE: _score_ridge_candidates() ranks the surviving fragments on
-     four normalized, equally-weighted-by-default terms — how gentle the
-     fragment's own average slope is, how long it is, how cheap
-     (road_cost_path.least_cost_path()'s own total_cost, from the anchor)
-     it is to actually reach, and how few of its own cells fall inside a
-     production zone — see that function's own docstring for the exact
-     formula and RIDGE_SLOPE_WEIGHT / RIDGE_LENGTH_WEIGHT /
-     RIDGE_PROXIMITY_WEIGHT / RIDGE_PRODUCTION_WEIGHT below.
+     three normalized, equally-weighted-by-default terms — how gentle the
+     fragment's own average slope is, how long it is, and how few of its
+     own cells fall inside a production zone — see that function's own
+     docstring for the exact formula and RIDGE_SLOPE_WEIGHT /
+     RIDGE_LENGTH_WEIGHT / RIDGE_PRODUCTION_WEIGHT below. There is no
+     separate proximity-to-anchor term anymore — road_cost_path.
+     least_cost_path()'s own total_cost already governs which reachable
+     entry point each candidate connects through; scoring the resulting
+     cost again on top of that was redundant.
   5. SELECT: the single highest weighted-score candidate wins. The final
      route is that candidate's own CONNECTOR path (anchor -> whichever
      ridge cell the connector actually reaches) concatenated with the
@@ -82,13 +87,24 @@ itself and the anchor-to-ridge CONNECTOR:
       - production zone(s) (production_area_ceiling.py's own optimized/
         final geometry) — the anchor-to-ridge connector may never cross
         or sit on production land, same as before.
-  - SOFT, cell-based SCORING term on the RIDGE fragment itself (the 4th
-    _score_ridge_candidates() term — see RIDGE_PRODUCTION_WEIGHT below):
+  - SOFT, cell-based SCORING term on the RIDGE fragment itself (one of
+    _score_ridge_candidates()'s three terms — see RIDGE_PRODUCTION_WEIGHT
+    below):
       - production zone(s) — a ridge fragment MAY now walk across
         production land (it's no longer pruned out), but a fragment with
         more of its own cells inside a production zone scores worse,
         exactly the same normalized "more is worse, relative to the
         worst candidate in the set" shape length_score already uses.
+
+A surviving ridge fragment (after the HARD exclusions above are stripped
+out and only the largest remaining piece per original network is kept —
+see _prune_ridge_networks()) that's still shorter than
+RIDGE_MIN_FRAGMENT_CELLS is dropped before scoring ever runs at all — a
+real live bug: even with production no longer able to shrink a ridge,
+6-7 cell fragments (a genuinely tiny original network, or a larger one
+severed down to a remnant by the water-zone/boundary exclusions above)
+could still surface as the winning "road corridor." Not a meaningful
+road-worthy landform on its own.
   - SOFT cost preference (connector only):
       - floodplain/hydric ground, sourced from real NHD stream/water-body
         buffers + SSURGO hydric soil polygons (NOT inferred from DEM
@@ -258,18 +274,33 @@ MIN_CORRIDOR_LENGTH_METERS = 30.0
 # CONFIGURABLE.
 RIDGE_MIN_AREA_ACRES = 0.5
 
-# Weights for _score_ridge_candidates()'s four-term weighted score
-# (slope, length, proximity-to-anchor, production-zone crossing -- see
-# that function's own docstring for the exact normalized formula each
-# term feeds). Equal-weighted (a clean 0.25 each, now that four terms
-# divide 1.0 evenly) -- CONFIGURABLE, deliberately UNVALIDATED starting
-# values, same caveat as every other weight/threshold in this pipeline:
-# pending a real diagnostic sweep against actual scored candidates on a
-# real property, not tuned against anything yet.
-RIDGE_SLOPE_WEIGHT = 0.25
-RIDGE_LENGTH_WEIGHT = 0.25
-RIDGE_PROXIMITY_WEIGHT = 0.25
-RIDGE_PRODUCTION_WEIGHT = 0.25
+# A surviving ridge fragment (post-pruning, see _prune_ridge_networks())
+# shorter than this many cells is dropped outright before scoring ever
+# starts -- REAL BUG, FOUND LIVE: even with production no longer able to
+# prune the ridge at all (see module docstring), a 6- or 7-cell fragment
+# (a handful of meters at typical DEM resolution) could still surface as
+# the winning "road corridor," either because that's genuinely all a tiny
+# original ridge network ever was, or because water-zone/boundary pruning
+# cut a larger one down to a remnant that small. Neither is a meaningful
+# road-worthy landform on its own. 10 cells is a deliberately blunt floor,
+# not derived from any per-property length target -- CONFIGURABLE, same
+# unvalidated-starting-value caveat as every other threshold here.
+RIDGE_MIN_FRAGMENT_CELLS = 10
+
+# Weights for _score_ridge_candidates()'s three-term weighted score
+# (slope, length, production-zone crossing -- see that function's own
+# docstring for the exact normalized formula each term feeds; there is no
+# separate proximity-to-anchor term -- see that function's own docstring
+# for why scoring road_cost_path.least_cost_path()'s own total_cost again
+# on top of the connector it already produces was redundant). Equal-
+# weighted (as close to 1/3 each as three two-decimal numbers summing to
+# 1.0 allow) -- CONFIGURABLE, deliberately UNVALIDATED starting values,
+# same caveat as every other weight/threshold in this pipeline: pending a
+# real diagnostic sweep against actual scored candidates on a real
+# property, not tuned against anything yet.
+RIDGE_SLOPE_WEIGHT = 0.34
+RIDGE_LENGTH_WEIGHT = 0.33
+RIDGE_PRODUCTION_WEIGHT = 0.33
 
 ROAD_CORRIDOR_CONFIDENCE_NOTES_TEMPLATE = (
     "This is a TOPOGRAPHIC SUGGESTION only, not a surveyed road alignment — "
@@ -302,7 +333,7 @@ PRODUCTION_CROSSING_NOTE = (
     "This specific route's ridge fragment DOES cross a production zone — that's intentional/expected "
     "under this model, not a caveat to apologize for; production crossing is a soft scoring preference "
     "on the ridge now, not a hard exclusion, so the highest-scoring ridge can still cross production "
-    "land when its other terms (slope/length/proximity) outweigh the penalty. "
+    "land when its other terms (slope/length) outweigh the penalty. "
 )
 
 # Additive caveat (see STEEP_GRADE_ENGINEERING_NOTE_THRESHOLD_PCT above) —
@@ -493,10 +524,19 @@ def _prune_ridge_networks(
     meaningfully separate ridge candidate worth scoring on its own, just
     a remnant of one that got cut down.
 
+    That largest surviving fragment is then dropped outright if it's
+    still shorter than RIDGE_MIN_FRAGMENT_CELLS -- whether it started
+    that short (a genuinely tiny original ridge network, no exclusion
+    involved at all) or got cut down to it here. Applied AFTER picking
+    the largest fragment, not before, so a network that's plenty long
+    overall but happens to get severed into several small pieces is
+    judged on its own best surviving piece, not on every piece's size.
+
     Returns one candidate (a plain list of (row, col) cells) per
-    surviving original network -- a network entirely inside excluded_mask
-    contributes nothing. Order is not meaningful; _score_ridge_candidates()
-    is what actually ranks these.
+    surviving original network that clears RIDGE_MIN_FRAGMENT_CELLS -- a
+    network entirely inside excluded_mask, or one that's too short even
+    after surviving, contributes nothing. Order is not meaningful;
+    _score_ridge_candidates() is what actually ranks these.
     """
     network_labels, num_networks = connected_components(ridge_mask)
 
@@ -509,6 +549,9 @@ def _prune_ridge_networks(
         fragment_labels, num_fragments = connected_components(remaining_mask)
         fragment_sizes = [int(np.sum(fragment_labels == fid)) for fid in range(num_fragments)]
         largest_fragment_id = int(np.argmax(fragment_sizes))
+
+        if fragment_sizes[largest_fragment_id] < RIDGE_MIN_FRAGMENT_CELLS:
+            continue
 
         candidates.append(
             [(int(r), int(c)) for r, c in np.argwhere(fragment_labels == largest_fragment_id)]
@@ -570,35 +613,38 @@ def _score_ridge_candidates(
 ) -> list[dict]:
     """
     Scores each surviving ridge fragment (_prune_ridge_networks()'s own
-    output) on four normalized terms, then combines them into one
-    RIDGE_SLOPE_WEIGHT/RIDGE_LENGTH_WEIGHT/RIDGE_PROXIMITY_WEIGHT/
-    RIDGE_PRODUCTION_WEIGHT-weighted score:
+    output) on three normalized terms, then combines them into one
+    RIDGE_SLOPE_WEIGHT/RIDGE_LENGTH_WEIGHT/RIDGE_PRODUCTION_WEIGHT-
+    weighted score:
 
       - avg_slope_pct: mean per-cell slope across the fragment's own
         cells (gentler is better).
       - length_m: fragment cell count * the DEM's own average cell size
         (longer is better -- a longer usable ridge is a more valuable
         road corridor).
-      - total_cost: road_cost_path.least_cost_path(dem, cost_raster,
-        [anchor_cell], candidate_cells)'s own Dijkstra cost -- ONE call
-        per candidate gets both a real proximity metric (cheaper is
-        better) AND the actual connector route (anchor -> whichever of
-        the candidate's own cells the search reaches first/cheapest,
-        "cells"/"destination_cell" in its return) in one shot, rather
-        than computing distance separately from the route. cost_raster
-        is expected to already hard-exclude production_mask (see
-        find_road_routes()) -- the connector itself can never cross
-        production land even though the fragment it's reaching for may.
       - production_cells_crossed: count of the fragment's own cells that
         fall inside production_mask (fewer is better) -- production is no
         longer pruned out of a ridge candidate outright (see
         _prune_ridge_networks()), just scored, the same cell-count basis
         length_m already uses.
 
+    road_cost_path.least_cost_path(dem, cost_raster, [anchor_cell],
+    candidate_cells) is still called once per candidate -- it's still
+    what determines the actual connector route (anchor -> whichever of
+    the candidate's own cells the search reaches first/cheapest,
+    "cells"/"destination_cell" in its return) and, just as importantly,
+    whether the candidate is reachable at all -- but its own total_cost
+    is NOT a separate scoring term anymore: least_cost_path() already
+    picks each candidate's cheapest reachable entry point on its own, so
+    scoring that same cost again as a fourth "proximity" term double-
+    counted it without adding real information. cost_raster is expected
+    to already hard-exclude production_mask (see find_road_routes()) --
+    the connector itself can never cross production land even though the
+    fragment it's reaching for may.
+
     Normalized against the candidate SET (not any fixed reference value):
         slope_score       = 1 - avg_slope_pct / max_avg_slope_pct
         length_score       = length_m / max_length_m
-        proximity_score    = 1 - total_cost / max_total_cost
         production_score   = 1 - production_cells_crossed / max_production_cells_crossed
     each clamped to [0, 1] and, where the max itself is 0 (every surviving
     candidate tied at the best possible value for that term -- e.g. every
@@ -617,13 +663,12 @@ def _score_ridge_candidates(
             'cells': [(row, col), ...],            # the ridge fragment itself
             'avg_slope_pct': float,
             'length_m': float,
-            'total_cost': float,                    # anchor -> fragment Dijkstra cost
+            'total_cost': float,                    # anchor -> fragment Dijkstra cost -- diagnostic only, NOT scored (see above)
             'production_cells_crossed': int,         # count of the fragment's own cells inside a production zone
             'connector_cells': [(row, col), ...],    # anchor -> entry_cell, in order
             'entry_cell': (row, col),                # whichever fragment cell the connector reaches
             'slope_score': float,                    # each in [0, 1]
             'length_score': float,
-            'proximity_score': float,
             'production_score': float,
             'weighted_score': float,
         }
@@ -664,13 +709,11 @@ def _score_ridge_candidates(
 
     max_avg_slope_pct = max(c["avg_slope_pct"] for c in scored)
     max_length_m = max(c["length_m"] for c in scored)
-    max_total_cost = max(c["total_cost"] for c in scored)
     max_production_cells_crossed = max(c["production_cells_crossed"] for c in scored)
 
     for candidate in scored:
         slope_score = 1.0 - candidate["avg_slope_pct"] / max_avg_slope_pct if max_avg_slope_pct > 0 else 1.0
         length_score = candidate["length_m"] / max_length_m if max_length_m > 0 else 1.0
-        proximity_score = 1.0 - candidate["total_cost"] / max_total_cost if max_total_cost > 0 else 1.0
         production_score = (
             1.0 - candidate["production_cells_crossed"] / max_production_cells_crossed
             if max_production_cells_crossed > 0
@@ -679,12 +722,10 @@ def _score_ridge_candidates(
 
         candidate["slope_score"] = max(0.0, min(1.0, slope_score))
         candidate["length_score"] = max(0.0, min(1.0, length_score))
-        candidate["proximity_score"] = max(0.0, min(1.0, proximity_score))
         candidate["production_score"] = max(0.0, min(1.0, production_score))
         candidate["weighted_score"] = (
             RIDGE_SLOPE_WEIGHT * candidate["slope_score"]
             + RIDGE_LENGTH_WEIGHT * candidate["length_score"]
-            + RIDGE_PROXIMITY_WEIGHT * candidate["proximity_score"]
             + RIDGE_PRODUCTION_WEIGHT * candidate["production_score"]
         )
 
@@ -761,7 +802,6 @@ def find_road_routes(
             'production_cells_crossed': int, # count of the fragment's own cells inside a production zone
             'slope_score': float,            # each in [0, 1] -- see _score_ridge_candidates()
             'length_score': float,
-            'proximity_score': float,
             'production_score': float,
             'weighted_score': float,
             'points_xyz': [(x, y, elevation_m), ...],
@@ -848,10 +888,10 @@ def find_road_routes(
     for c in scored_candidates:
         print(
             f"  find_road_routes: candidate ({len(c['cells'])} cells) -- avg_slope_pct={c['avg_slope_pct']:.1f} "
-            f"length_m={c['length_m']:.0f} total_cost={c['total_cost']:.1f} "
+            f"length_m={c['length_m']:.0f} total_cost={c['total_cost']:.1f} (diagnostic only, not scored) "
             f"production_cells_crossed={c['production_cells_crossed']} -> slope_score={c['slope_score']:.3f} "
-            f"length_score={c['length_score']:.3f} proximity_score={c['proximity_score']:.3f} "
-            f"production_score={c['production_score']:.3f} weighted_score={c['weighted_score']:.3f}"
+            f"length_score={c['length_score']:.3f} production_score={c['production_score']:.3f} "
+            f"weighted_score={c['weighted_score']:.3f}"
         )
     if not scored_candidates:
         print("  find_road_routes: no candidate is reachable from the anchor at all.")
@@ -902,7 +942,6 @@ def find_road_routes(
         "production_cells_crossed": winner["production_cells_crossed"],
         "slope_score": winner["slope_score"],
         "length_score": winner["length_score"],
-        "proximity_score": winner["proximity_score"],
         "production_score": winner["production_score"],
         "weighted_score": winner["weighted_score"],
         "suitability_score": suitability_score,
@@ -988,18 +1027,19 @@ def corridors_to_geojson(
                     "crosses_floodplain": route["crosses_floodplain"],
                     "crosses_production_zone": route["crosses_production_zone"],
                     # Diagnostic breakdown of _score_ridge_candidates()'s
-                    # own four-term weighted score for the winning ridge
+                    # own three-term weighted score for the winning ridge
                     # candidate -- lets a caller (or a live diagnostic
                     # sweep, see RIDGE_SLOPE_WEIGHT/RIDGE_LENGTH_WEIGHT/
-                    # RIDGE_PROXIMITY_WEIGHT/RIDGE_PRODUCTION_WEIGHT's own
-                    # unvalidated-starting-value caveat) see how each term
-                    # actually contributed, not just the combined
-                    # suitability_score.
+                    # RIDGE_PRODUCTION_WEIGHT's own unvalidated-starting-
+                    # value caveat) see how each term actually contributed,
+                    # not just the combined suitability_score. No
+                    # ridge_proximity_score anymore -- see
+                    # _score_ridge_candidates()'s own docstring for why a
+                    # separate proximity-to-anchor term was redundant.
                     "ridge_avg_slope_pct": round(route["avg_slope_pct"], 1),
                     "ridge_production_cells_crossed": route["production_cells_crossed"],
                     "ridge_slope_score": round(route["slope_score"], 3),
                     "ridge_length_score": round(route["length_score"], 3),
-                    "ridge_proximity_score": round(route["proximity_score"], 3),
                     "ridge_production_score": round(route["production_score"], 3),
                     "ridge_weighted_score": round(route["weighted_score"], 3),
                     # Only the selected water zone is a genuinely HARD
