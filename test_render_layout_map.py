@@ -684,4 +684,186 @@ print(
     "own render_fill_polygon_utm."
 )
 
+
+# =====================================================================
+# Road corridor rendering: DEM-cell stairstepping simplified/smoothed
+# away at render time, drawn as a cased (double-line) dark-gray road
+# symbol -- see this module's own "ROAD CORRIDOR STYLE" docstring
+# section.
+# =====================================================================
+
+import copy
+
+from rasterio.warp import transform as _warp_transform_check
+from shapely.geometry import LineString
+from render_layout_map import (
+    ROAD_RENDER_COLOR,
+    ROAD_RENDER_INNER_ALPHA,
+    ROAD_RENDER_INNER_WIDTH,
+    ROAD_RENDER_OUTER_ALPHA,
+    ROAD_RENDER_OUTER_WIDTH,
+    ROAD_RENDER_SIMPLIFY_TOLERANCE_M,
+    _chaikin_smooth_coords,
+    _smooth_line_for_render,
+)
+
+# --- _chaikin_smooth_coords(): endpoints kept exactly, every original interior corner rounded away, further cutting on repeated iterations, true no-op on a cornerless (2-point) line ---
+
+staircase = [(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (20.0, 10.0), (20.0, 20.0)]
+smoothed_once = _chaikin_smooth_coords(staircase, 1)
+assert smoothed_once[0] == staircase[0], "the first coordinate must be kept EXACTLY, not cut"
+assert smoothed_once[-1] == staircase[-1], "the last coordinate must be kept EXACTLY, not cut"
+assert len(smoothed_once) > len(staircase), "one Chaikin iteration must add interior corner-cut points"
+for corner in staircase[1:-1]:
+    assert corner not in smoothed_once, (
+        f"corner {corner} is a sharp original interior vertex -- Chaikin smoothing must round it away, "
+        f"not keep it exactly"
+    )
+smoothed_twice = _chaikin_smooth_coords(staircase, 2)
+assert len(smoothed_twice) > len(smoothed_once), "a second iteration must cut further (more points, rounder corners)"
+
+two_point_line = [(0.0, 0.0), (10.0, 10.0)]
+assert _chaikin_smooth_coords(two_point_line, 3) == two_point_line, (
+    "a straight 2-point line has no interior corner to cut -- smoothing must be a genuine no-op"
+)
+print(
+    "_chaikin_smooth_coords keeps both endpoints exactly, rounds away every original interior corner, "
+    "cuts further on repeated iterations, and is a true no-op on a 2-point (cornerless) line."
+)
+
+# --- _smooth_line_for_render(): a DEM-cell stairstepped path (many small 1m jogs approximating a real ridge/connector turn) simplifies+smooths into far fewer vertices, keeps its exact start/end anchor points, and stays within a small buffer of the real path ---
+
+# Simulates road_corridors.py's own per-DEM-cell routing output: two
+# straight legs (an L-shaped turn -- a real corner the route makes),
+# each built from small 1m jogs -- exactly the kind of visibly blocky,
+# stairstepped polyline the REAL BUG this module's own docstring
+# describes was found against (road_corridors.py's least_cost_path()/
+# _order_fragment_from_entry() both walk the DEM's grid one cell at a
+# time).
+stairstep_coords = [(0.0, 0.0)]
+x, y = 0.0, 0.0
+for _ in range(30):
+    x += 1.0
+    stairstep_coords.append((x, y))
+for _ in range(30):
+    y += 1.0
+    stairstep_coords.append((x, y))
+stairstep_line = LineString(stairstep_coords)
+
+rendered_line = _smooth_line_for_render(stairstep_line)
+assert len(rendered_line.coords) < len(stairstep_coords), (
+    f"simplify+smooth must genuinely reduce the stairstepped vertex count ({len(stairstep_coords)}), "
+    f"got {len(rendered_line.coords)}"
+)
+assert len(rendered_line.coords) > 3, (
+    "expected more than the bare 3-point simplified corner -- Chaikin smoothing should have run and added "
+    "its own corner-cut points on top of simplify's own reduction"
+)
+assert rendered_line.coords[0] == stairstep_coords[0], (
+    "the smoothed line's own start point must still match the real route's anchor point exactly"
+)
+assert rendered_line.coords[-1] == stairstep_coords[-1], (
+    "the smoothed line's own end point must still match the real route's far end exactly"
+)
+# The smoothed line must stay close to the real path -- a generous
+# buffer (well above ROAD_RENDER_SIMPLIFY_TOLERANCE_M alone, since
+# Chaikin smoothing on top of simplify can pull the curve a little
+# further off each cut corner) confirms this is cosmetic corner-
+# rounding, not a route drawn somewhere visibly different.
+buffered_real_path = stairstep_line.buffer(ROAD_RENDER_SIMPLIFY_TOLERANCE_M * 4)
+assert buffered_real_path.contains(rendered_line), (
+    "the smoothed/simplified line must stay within a small buffer of the real route -- it must round "
+    "corners, not visibly relocate the road"
+)
+print(
+    f"_smooth_line_for_render() reduces a {len(stairstep_coords)}-point DEM-cell stairstep down to "
+    f"{len(rendered_line.coords)} points, keeps the exact start/end anchor points, and stays within a "
+    f"small buffer of the real, unsmoothed path."
+)
+
+# --- Full render_layout_map() pass: a synthetic stairstepped road corridor is drawn as a CASED (double-line) road -- a wider low-alpha outer line and a narrower higher-alpha inner line, both ROAD_RENDER_COLOR, both a visibly smoothed/simplified geometry -- and the real road_corridor input is never mutated ---
+
+ROAD_TEST_ORIGIN_MERCATOR = (-8900000.0, 4900000.0)  # arbitrary but realistic Web Mercator point
+road_stairstep_mercator = [
+    (ROAD_TEST_ORIGIN_MERCATOR[0] + cx, ROAD_TEST_ORIGIN_MERCATOR[1] + cy) for cx, cy in stairstep_coords
+]
+road_lons, road_lats = _warp_transform_check(
+    rlm.WEB_MERCATOR, rlm.WGS84,
+    [c[0] for c in road_stairstep_mercator], [c[1] for c in road_stairstep_mercator],
+)
+road_corridor_fixture = {
+    "type": "Feature",
+    "geometry": {"type": "LineString", "coordinates": list(zip(road_lons, road_lats))},
+    "properties": {"suitability_score": 81.0},
+}
+road_corridor_fixture_before = copy.deepcopy(road_corridor_fixture)
+
+recorded_road_line_calls = []
+_original_plot_line_for_road = rlm.plot_line
+
+
+def _recording_plot_line_for_road(geometry, **kwargs):
+    recorded_road_line_calls.append((geometry, kwargs))
+    return _original_plot_line_for_road(geometry, **kwargs)
+
+
+rlm.plot_line = _recording_plot_line_for_road
+
+road_synthetic_layers = {
+    "dem": water_zone_test_dem,
+    "production_result": None,
+    "water_zone": None,
+    "road_corridor": road_corridor_fixture,
+    "structure_site": None,
+    "water_features": {"streams": []},
+    "contour_lines": [],
+}
+
+try:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        road_output_path = os.path.join(tmpdir, "layout_map.png")
+        road_result_path = rlm.render_layout_map(property_boundary, road_output_path, layers=road_synthetic_layers)
+        assert road_result_path == road_output_path
+        assert os.path.getsize(road_output_path) > 0, "render_layout_map() must produce a real, non-empty PNG"
+finally:
+    rlm.plot_line = _original_plot_line_for_road
+
+road_line_calls = [(geom, kw) for geom, kw in recorded_road_line_calls if kw.get("color") == ROAD_RENDER_COLOR]
+assert len(road_line_calls) == 2, (
+    f"expected exactly 2 plot_line() calls for the cased (double-line) road style, got {len(road_line_calls)}"
+)
+outer_calls = [(geom, kw) for geom, kw in road_line_calls if kw["linewidth"] == ROAD_RENDER_OUTER_WIDTH]
+inner_calls = [(geom, kw) for geom, kw in road_line_calls if kw["linewidth"] == ROAD_RENDER_INNER_WIDTH]
+assert len(outer_calls) == 1 and len(inner_calls) == 1, (
+    "expected exactly one outer-width call and one inner-width call among the two road plot_line() calls"
+)
+outer_geom, outer_kwargs = outer_calls[0]
+inner_geom, inner_kwargs = inner_calls[0]
+assert outer_kwargs["alpha"] == ROAD_RENDER_OUTER_ALPHA and inner_kwargs["alpha"] == ROAD_RENDER_INNER_ALPHA, (
+    "the outer (shoulder) line must use ROAD_RENDER_OUTER_ALPHA and the inner line ROAD_RENDER_INNER_ALPHA"
+)
+assert outer_kwargs["zorder"] < inner_kwargs["zorder"], (
+    "the narrower inner line must render ABOVE the wider outer shoulder (higher zorder), not underneath it"
+)
+assert outer_geom.coords[:] == inner_geom.coords[:], (
+    "both the outer and inner line must be drawn over the exact same (smoothed) geometry"
+)
+raw_mercator_coords_count = len(road_stairstep_mercator)
+assert len(outer_geom.coords) < raw_mercator_coords_count, (
+    f"the geometry actually handed to plot_line() must be the SMOOTHED version (fewer vertices than the "
+    f"raw {raw_mercator_coords_count}-point stairstep), not the raw per-cell geometry straight off "
+    f"road_corridor['geometry']"
+)
+assert road_corridor_fixture == road_corridor_fixture_before, (
+    "rendering must never mutate the real road_corridor input -- its geometry/properties (used for "
+    "length_m/avg_grade_pct/every other scoring and narrative value) must stay byte-for-byte identical"
+)
+print(
+    f"Full pipeline with a synthetic stairstepped road corridor: render_layout_map() draws it as a cased "
+    f"double-line road (outer width={ROAD_RENDER_OUTER_WIDTH}/alpha={ROAD_RENDER_OUTER_ALPHA}, inner "
+    f"width={ROAD_RENDER_INNER_WIDTH}/alpha={ROAD_RENDER_INNER_ALPHA}, inner above outer) over a visibly "
+    f"smoothed geometry ({raw_mercator_coords_count} raw points down to {len(outer_geom.coords)}), and "
+    f"never mutates the real road_corridor input."
+)
+
 print("\nAll render_layout_map checks passed.")

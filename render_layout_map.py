@@ -35,9 +35,9 @@ render_fill_polygon_utm, not a pre-clipped raster), and only the clipped
 segments within that zone are drawn. No fill, no boundary stroke for
 production zones -- zone identity is conveyed by the numbered marker
 alone, same as every other layer. This is a deliberate, scoped styling
-split: road corridors, structure sites, and the property boundary all
-keep their existing solid fill/line rendering exactly as before -- the
-water zone (below) has its OWN render-only treatment.
+split: structure sites and the property boundary keep their existing
+solid fill/line rendering exactly as before -- the water zone and the
+road corridor (both below) have their OWN render-only treatments.
 
 Contours clip against render_fill_polygon_utm rather than polygon_utm
 for two separate reasons layered on top of each other, both from
@@ -87,6 +87,26 @@ render time -- that's a display-only coincidence between two convex
 hulls, not a real siting conflict; the real geometries stay separated by
 water_candidate_zones.py's own production-zone eligibility exclusion gate
 (WATER_ZONE_PRODUCTION_SETBACK_METERS), unaffected by anything here.
+
+ROAD CORRIDOR STYLE: rendered as a CASED (double-line) road symbol, the
+standard cartographic convention for a road -- a wider, low-alpha dark
+gray "shoulder" plotted first, then a narrower, higher-alpha dark gray
+line on top of it, both the same color (see _draw_road_corridor()).
+Before either line is drawn, the route's own Mercator-projected geometry
+is run through _smooth_line_for_render(): a shapely simplify() pass
+(ROAD_RENDER_SIMPLIFY_TOLERANCE_M, Douglas-Peucker, preserve_topology=
+True) removes the DEM's own per-cell stairstepping, then Chaikin corner-
+cutting (ROAD_RENDER_SMOOTHING_ITERATIONS iterations, see
+_chaikin_smooth_coords()) rounds what's left. Both are REAL BUG fixes,
+found live: the raw route geometry is a literal per-DEM-cell polyline
+(road_corridors.py's own _order_fragment_from_entry()/least_cost_path()
+walk the DEM's grid one cell at a time), which reads as a visibly
+blocky, stairstepped line at the map's actual output resolution rather
+than a plausible road alignment. This is DISPLAY-ONLY, same pattern as
+the water zone's own hull fill above: road_corridor's real
+points_xyz/geometry_wgs84 (used for length_m, avg_grade_pct, and every
+other scoring/narrative value) are never touched -- only the copy handed
+to the plotting calls is simplified/smoothed.
 
 Basemap: NAIP aerial imagery via USGS's cached USGSImageryOnly tile
 service, fetched and composited with contextily (a well-established
@@ -288,20 +308,37 @@ PRODUCTION_ZONE_CONTOUR_LINEWIDTH = 0.7
 CONTOUR_LINE_COLOR = "#6B4423"  # muted brown -- traditional topo-map
 # contour color, chosen for contrast against green/tan aerial imagery
 # and to stay visually distinct from every other layer color already
-# in use (production green, water blue, road rust-orange, structure
-# red)
+# in use (production green, water blue, road dark gray, structure red)
 WATER_ZONE_COLOR = "#1F6FB2"
 # A lighter tint of WATER_ZONE_COLOR, for the ripple texture drawn over
 # the opaque fill below -- see _ripple_lines_for_polygon()'s own
 # docstring. Distinct from WATER_ZONE_COLOR so the ripples read as a
 # texture ON the water fill, not a second, competing shape.
 WATER_ZONE_RIPPLE_COLOR = "#7EC1E8"
-ROAD_CORRIDOR_COLOR = "#B5651D"
 STRUCTURE_SITE_COLOR = "#D64545"
 
 MARKER_FACE_COLOR = "#1A1A1A"
 MARKER_TEXT_COLOR = "white"
 MARKER_RADIUS_POINTS = 11
+
+# Rendering-only geometry cleanup for the road corridor's own LineString
+# (see _smooth_line_for_render()) -- never applied to road_corridors.py's
+# real points_xyz/geometry_wgs84 (used for length_m/avg_grade_pct/every
+# other scoring value), only to the copy handed to the plotting calls
+# below. Deliberately small/few: over-simplifying or over-smoothing risks
+# cutting a real turn in the route, not just its per-cell stairsteps.
+# CONFIGURABLE.
+ROAD_RENDER_SIMPLIFY_TOLERANCE_M = 2.5
+ROAD_RENDER_SMOOTHING_ITERATIONS = 2
+
+# Cased (double-line) road style -- a wider, low-alpha "shoulder" drawn
+# first, then a narrower, higher-alpha line on top of it, both this same
+# dark-gray color (see _draw_road_corridor()). CONFIGURABLE.
+ROAD_RENDER_COLOR = "#3A3A3A"
+ROAD_RENDER_OUTER_WIDTH = 3.0
+ROAD_RENDER_INNER_WIDTH = 1.5
+ROAD_RENDER_OUTER_ALPHA = 0.35
+ROAD_RENDER_INNER_ALPHA = 0.7
 
 
 def _reproject_geometry_to_mercator(geometry_wgs84: dict):
@@ -394,6 +431,99 @@ def _ripple_lines_for_polygon(polygon) -> list:
         if not clipped.is_empty:
             clipped_lines.append(clipped)
     return clipped_lines
+
+
+def _chaikin_smooth_coords(coords: list[tuple[float, float]], iterations: int) -> list[tuple[float, float]]:
+    """
+    Chaikin's corner-cutting subdivision, run `iterations` times, over an
+    OPEN polyline (a road corridor, not a closed ring) -- simple enough
+    to not need a new spline/smoothing dependency for what's purely a
+    cosmetic rendering touch-up (see _smooth_line_for_render()).
+
+    The first and last coordinates are always kept EXACTLY as given, so
+    a smoothed route still starts/ends at the same anchor/ridge-end point
+    -- only the interior gets rounded. Each iteration replaces every edge
+    (Pi, Pi+1) with two points at 1/4 and 3/4 along it (the standard
+    Chaikin construction), which is what visually rounds a sharp corner:
+    each cut moves the curve a little further off the original corner and
+    a little closer to a smooth arc through it.
+
+    A no-op below 3 points, or once an iteration's own input drops below
+    3 points -- there's no interior corner left to cut on a 2-point
+    (straight) line.
+    """
+    for _ in range(iterations):
+        if len(coords) < 3:
+            break
+        smoothed = [coords[0]]
+        for (x0, y0), (x1, y1) in zip(coords, coords[1:]):
+            smoothed.append((0.75 * x0 + 0.25 * x1, 0.75 * y0 + 0.25 * y1))
+            smoothed.append((0.25 * x0 + 0.75 * x1, 0.25 * y0 + 0.75 * y1))
+        smoothed.append(coords[-1])
+        coords = smoothed
+    return coords
+
+
+def _smooth_line_for_render(line: LineString) -> LineString:
+    """
+    Rendering-only transform for the road corridor's own LineString --
+    REAL BUG, FOUND LIVE: road_corridors.py's route geometry is a literal
+    per-DEM-cell polyline (_order_fragment_from_entry()/least_cost_path()
+    both walk the DEM's grid one cell at a time), which reads as a
+    visibly blocky, stairstepped line at this map's actual output
+    resolution rather than a plausible road alignment.
+
+    Two passes, both deliberately small/subtle (see
+    ROAD_RENDER_SIMPLIFY_TOLERANCE_M/ROAD_RENDER_SMOOTHING_ITERATIONS'
+    own comments -- over-doing either risks cutting a real turn in the
+    route, not just its per-cell stairsteps):
+      1. shapely simplify() (Douglas-Peucker, preserve_topology=True so
+         it can't collapse the line into something degenerate) removes
+         the redundant near-collinear stairstep vertices first.
+      2. _chaikin_smooth_coords() then rounds what corners are left.
+
+    This is DISPLAY-ONLY -- the caller passes in a geometry ALREADY
+    reprojected to Web Mercator for plotting (see
+    _reproject_geometry_to_mercator()), never road_corridors.py's own
+    points_xyz/geometry_wgs84 (used for length_m/avg_grade_pct/every
+    other scoring/narrative value), and this function's own return value
+    is used for drawing only, never fed back into anything else.
+    """
+    simplified = line.simplify(ROAD_RENDER_SIMPLIFY_TOLERANCE_M, preserve_topology=True)
+    smoothed_coords = _chaikin_smooth_coords(list(simplified.coords), ROAD_RENDER_SMOOTHING_ITERATIONS)
+    return LineString(smoothed_coords)
+
+
+def _draw_road_corridor(ax, line: LineString) -> None:
+    """
+    Draws `line` (already smoothed -- see _smooth_line_for_render()) as a
+    CASED (double-line) road symbol, the standard cartographic convention
+    for a road: a wider, low-alpha dark-gray "shoulder" underneath, then a
+    narrower, higher-alpha dark-gray line on top of it, both the same
+    ROAD_RENDER_COLOR -- two plot calls over the same geometry, not one
+    styled line, so the road reads as a real symbol rather than a flat
+    highlighted path. zorder puts the inner line just above the outer
+    shoulder, same +0.5 pattern the water zone's ripple texture (zorder
+    41 fill / 41.5 ripple) already uses.
+    """
+    plot_line(
+        line,
+        ax=ax,
+        add_points=False,
+        color=ROAD_RENDER_COLOR,
+        linewidth=ROAD_RENDER_OUTER_WIDTH,
+        alpha=ROAD_RENDER_OUTER_ALPHA,
+        zorder=42,
+    )
+    plot_line(
+        line,
+        ax=ax,
+        add_points=False,
+        color=ROAD_RENDER_COLOR,
+        linewidth=ROAD_RENDER_INNER_WIDTH,
+        alpha=ROAD_RENDER_INNER_ALPHA,
+        zorder=42.5,
+    )
 
 
 def _boundary_polygon_mercator(boundary_coordinates: list[tuple[float, float]]) -> Polygon:
@@ -691,10 +821,20 @@ def render_layout_map(
         marker_number += 1
 
     if road_corridor is not None:
+        # DISPLAY-ONLY geometry: _smooth_line_for_render() simplifies away
+        # the DEM's own per-cell stairstepping and rounds what corners are
+        # left (see that function's own docstring and this module's ROAD
+        # CORRIDOR STYLE docstring section) -- road_corridor's real
+        # geometry (properties, length_m, avg_grade_pct, everything the
+        # narrative report uses) is completely untouched by this.
         geom = _reproject_geometry_to_mercator(road_corridor["geometry"])
         props = road_corridor["properties"]
-        plot_line(geom, ax=ax, add_points=False, color=ROAD_CORRIDOR_COLOR, linewidth=3.0, zorder=42)
-        _draw_numbered_marker(ax, geom.interpolate(0.5, normalized=True), marker_number)
+        render_geom = _smooth_line_for_render(geom)
+        _draw_road_corridor(ax, render_geom)
+        # The marker sits on the geometry actually drawn (the smoothed
+        # line, same "marker matches the visible shape" reasoning the
+        # water zone's own marker placement above already uses).
+        _draw_numbered_marker(ax, render_geom.interpolate(0.5, normalized=True), marker_number)
         legend_entries.append(f"{marker_number} — Road Corridor, score {props['suitability_score']}")
         marker_number += 1
 
