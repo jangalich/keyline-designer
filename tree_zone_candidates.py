@@ -48,22 +48,29 @@ tree zones (a later, separate pass), not the reverse.
           - the SINGLE selected road corridor
             (road_corridors.select_optimal_road_corridor()) -- not every
             road candidate, same "one well-suited candidate is enough for
-            a small farm" reasoning. Still subtracted as real, zero-width
-            LineString geometry, not buffered -- unchanged in spirit from
-            before: a zero-width line has a practically negligible effect
-            on the resulting search-space AREA, which is expected, not a
-            bug (an eventual pass modeling actual road construction/
-            right-of-way would be the place to introduce a real cleared
-            buffer, not this one).
+            a small farm" reasoning. Subtracted as a REAL, non-zero-width
+            polygon (road_corridors.find_road_routes()'s own
+            'cell_footprint_polygon_utm' -- see GEOMETRY FORM CLAIMED
+            below), NOT road_corridors.py's zero-width 'line_utm'. An
+            earlier version of this module subtracted line_utm directly,
+            which (correctly, by construction -- a 1-dimensional line has
+            zero area) had a confirmed-live, deliberately negligible
+            effect on the resulting search-space AREA -- confirmed live
+            AGAIN the other way once real tree-zone candidates started
+            rendering directly alongside the road corridor on
+            render_layout_map.py's own output: candidates were being
+            proposed right along, and effectively ON, the road itself,
+            since a zero-area subtraction leaves those cells fully
+            available to Step 2's own scoring. Switching to the route's
+            own real cell footprint (one DEM cell wide along the whole
+            route) fixes this the same way production/water's own real
+            polygons already did -- a real subtraction actually clears
+            real ground.
         The remainder is the search space Step 2 scores.
 
         GEOMETRY FORM CLAIMED: each of the three inputs above is
-        subtracted using that zone's own OPTIMIZED/render form, NOT its
-        raw cell-footprint geometry -- the same shapes render_layout_map.py
-        itself draws, per the reasoning already established there
-        (production_area.py's/water_candidate_zones.py's own module
-        docstrings for the two hulls, this module's own ROAD CORRIDOR
-        STYLE section for the smoothed line):
+        subtracted using that zone's own REAL, non-zero-width form, not a
+        display-only approximation or a zero-area line:
           - production: render_fill_polygon_utm (production_area.py's
             plain convex hull of each patch's own render_polygon_utm,
             re-intersected with the boundary) -- NOT polygon_utm, the
@@ -72,35 +79,35 @@ tree zones (a later, separate pass), not the reverse.
             polygon_utm would otherwise read as "still open" ground here,
             when the property's actual final layout (what render_layout_
             map.py draws, what a reader actually sees) shows it as part of
-            one coherent production zone.
+            one coherent production zone. This is the SAME reasoning
+            render_layout_map.py's own module docstring documents for why
+            it draws this field, not polygon_utm, for production zones --
+            reused here for the same "reads as one coherent shape"
+            purpose, not just for rendering.
           - water: same reasoning, same field --
             water_candidate_zones.find_candidate_zones()'s own
             render_fill_polygon_utm for the single selected zone, not its
             polygon_utm.
-          - road: render_layout_map.py's own _smooth_line_for_render()
-            (Douglas-Peucker simplify, then Chaikin corner-cutting) run
-            directly on the selected route's real line_utm -- the same
-            display transform render_layout_map.py applies before
-            plotting, applied here in the DEM's own real UTM meters
-            (line_utm's native CRS) rather than the approximate,
-            latitude-distorted meters render_layout_map.py's own Web
-            Mercator rendering pass uses. road_corridors.py's raw
-            line_utm is a literal per-DEM-cell stairstepped polyline (see
-            that module's own module docstring) -- smoothing it here
-            before subtraction keeps this module's claimed road geometry
-            visually consistent with the corridor actually shown on the
-            final map, not an artificially blockier one. Still a
-            zero-width LineString either way, so this remains a
-            practically negligible effect on the resulting search-space
-            AREA (see above) -- this only changes the line's SHAPE, not
-            whether it's buffered.
-        In every case this is the SAME "reads as one coherent shape/
-        alignment" reasoning already established for rendering -- applied
-        here to what tree zones treat as already-claimed, not just to
-        what's drawn on the map. None of this touches any zone's own real
-        polygon_utm/geometry_wgs84/line_utm (used for that zone's own
-        scoring, eligibility, and narrative report) -- only the copy of
-        the geometry handed to compute_tree_search_space() here.
+          - road: road_corridors.find_road_routes()'s own
+            'cell_footprint_polygon_utm' -- the selected route's own path
+            cells (least_cost_path()'s connector cells + the winning
+            ridge fragment's own cells, in walk order -- the SAME cells
+            _order_fragment_from_entry()/path_cells_to_points_xyz() use
+            to build the route's own zero-width line_utm), traced back to
+            that cell-based form and turned into a real polygon via
+            raster_grid.cell_union_footprint() (the SAME real per-cell-
+            square union production_area.py's/water_candidate_zones.py's
+            own footprints already use) -- NOT a hull, NOT a buffer,
+            NOT render_layout_map.py's own render-smoothed line (that
+            smoothing is a purely cosmetic transform for how the road
+            SYMBOL looks on the final map; it has nothing to do with what
+            ground the route actually occupies). One DEM cell wide along
+            the entire route -- real, non-negligible area, unlike
+            line_utm.
+        None of this touches any zone's own real polygon_utm/
+        geometry_wgs84/line_utm (used for that zone's own scoring,
+        eligibility, and narrative report) -- only the copy of the
+        geometry handed to compute_tree_search_space() here.
 
     STEP 2 -- CANOPY EXCLUSION GATE, THEN SUITABILITY SCORING
         (score_tree_search_space()):
@@ -441,15 +448,22 @@ def compute_tree_search_space(
     boundary_polygon_utm: Polygon,
     production_polygons_utm: list,
     water_polygons_utm: list,
-    road_lines_utm: list,
+    road_polygons_utm: list,
 ) -> tuple[object, Optional[object]]:
     """
     Step 1 -- pure geometry difference (see module docstring): the real
     parcel boundary, minus the union of every currently-claimed production/
-    water/road candidate geometry. Road geometry is subtracted as real,
-    zero-width LineStrings, NOT buffered -- see module docstring for why
-    that's expected to have a negligible practical effect on the resulting
-    area this pass.
+    water/road candidate geometry. road_polygons_utm is the selected road
+    corridor's own REAL, non-zero-width cell-footprint polygon
+    (road_corridors.find_road_routes()'s own 'cell_footprint_polygon_utm'
+    -- the union of the route's own path cells' real ground squares, one
+    DEM cell wide along the whole route) -- NOT road_corridors.py's
+    zero-width 'line_utm', which used to be subtracted here and had a
+    confirmed, deliberately negligible effect on the resulting search-
+    space area (see module docstring's own history of this). A real cell-
+    footprint polygon has real, non-negligible area, so this now genuinely
+    keeps tree candidates from being proposed on top of/along the road's
+    own real footprint.
 
     Returns (search_space, claimed_union):
       - search_space is None if the claimed union completely covers the
@@ -458,17 +472,18 @@ def compute_tree_search_space(
         MultiPolygon otherwise (possibly boundary_polygon_utm itself,
         unmodified, if nothing was claimed at all).
       - claimed_union is None if production_polygons_utm, water_polygons_utm,
-        and road_lines_utm are ALL empty (nothing on this property has been
-        claimed by any upstream layer yet) -- distinct from a real, non-None
-        union that happens to leave a search_space of remaining area.
+        and road_polygons_utm are ALL empty (nothing on this property has
+        been claimed by any upstream layer yet) -- distinct from a real,
+        non-None union that happens to leave a search_space of remaining
+        area.
     """
     pieces = []
     if production_polygons_utm:
         pieces.append(unary_union(production_polygons_utm))
     if water_polygons_utm:
         pieces.append(unary_union(water_polygons_utm))
-    if road_lines_utm:
-        pieces.append(unary_union(road_lines_utm))
+    if road_polygons_utm:
+        pieces.append(unary_union(road_polygons_utm))
 
     claimed_union = unary_union(pieces) if pieces else None
 
@@ -854,7 +869,7 @@ def identify_tree_zone_candidates(
             'search_space_geojson': FeatureCollection,    # layer="tree_search_space_diagnostic" -- Step 1 diagnostic
             'search_space_acres': float,
             'claimed_acres': float,                       # production+selected-water+selected-road union's own
-                                                             # area (roads ~0, zero-width)
+                                                             # area (road's own real cell-footprint width, not 0)
             'boundary_acres': float,
             'patches': list[dict],                        # score_tree_search_space()'s own raw output
         }
@@ -911,29 +926,31 @@ def identify_tree_zone_candidates(
     # context yet (a genuine product decision, not derivable from the
     # boundary alone), so this borrows render_layout_map.py's TEMPORARY
     # placeholder reference-property anchor purely to unblock testing/live
-    # runs, same as render_layout_map.py's own call. _smooth_line_for_
-    # render() is render_layout_map.py's own display-smoothing transform
-    # for a road corridor's real, per-DEM-cell-stairstepped line_utm (see
-    # this module's "GEOMETRY FORM CLAIMED" section above) -- reused
-    # directly here rather than reimplemented, so there's exactly one
-    # definition of "the road's optimized alignment" for both the map and
-    # this exclusion. Both imported locally rather than at module level
-    # so importing tree_zone_candidates.py doesn't also eagerly pull in
-    # render_layout_map.py's own heavier rendering dependencies
-    # (matplotlib/contextily/xyzservices) for callers that never actually
-    # render a map.
-    from render_layout_map import _PLACEHOLDER_REFERENCE_PROPERTY_ANCHOR_LON_LAT, _smooth_line_for_render
+    # runs, same as render_layout_map.py's own call. Imported locally
+    # rather than at module level so importing tree_zone_candidates.py
+    # doesn't also eagerly pull in render_layout_map.py's own heavier
+    # rendering dependencies (matplotlib/contextily/xyzservices) for
+    # callers that never actually render a map.
+    from render_layout_map import _PLACEHOLDER_REFERENCE_PROPERTY_ANCHOR_LON_LAT
 
     road_result = identify_road_corridor_candidates(
         boundary_coordinates, dem=dem, anchor_lon_lat=_PLACEHOLDER_REFERENCE_PROPERTY_ANCHOR_LON_LAT
     )
     selected_road_corridor = road_result["selected_road_corridor"]
-    road_lines_utm = (
-        [_smooth_line_for_render(selected_road_corridor["line_utm"])] if selected_road_corridor else []
+    # cell_footprint_polygon_utm -- road_corridors.find_road_routes()'s
+    # own REAL, non-zero-width footprint of the selected route's own path
+    # cells (traced back to the cell-based form routing itself computed,
+    # before it's ever reduced to line_utm's zero-width centerline -- see
+    # compute_tree_search_space()'s own docstring). NOT the render-smoothed
+    # line render_layout_map.py draws -- that smoothing is a purely
+    # cosmetic transform for how the road SYMBOL looks on the final map,
+    # unrelated to what ground this route actually occupies.
+    road_polygons_utm = (
+        [selected_road_corridor["cell_footprint_polygon_utm"]] if selected_road_corridor else []
     )
 
     search_space, claimed_union = compute_tree_search_space(
-        boundary_polygon_utm, production_polygons_utm, water_polygons_utm, road_lines_utm
+        boundary_polygon_utm, production_polygons_utm, water_polygons_utm, road_polygons_utm
     )
 
     # --- Step 2's own CANOPY EXCLUSION GATE (see module docstring):

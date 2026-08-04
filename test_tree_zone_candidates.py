@@ -143,18 +143,24 @@ print("_stream_proximity_factor() falls linearly from 1.0 at distance 0 to 0.0 a
 boundary = box(0, 0, 100, 100)  # 10,000 sqm
 production_polys = [box(0, 0, 30, 30)]   # 900 sqm
 water_polys = [box(70, 70, 100, 100)]     # 900 sqm
-road_lines = [LineString([(0, 50), (100, 50)])]  # zero-width
+# A REAL, non-zero-width road polygon (road_corridors.find_road_routes()'s own
+# cell_footprint_polygon_utm shape -- a strip, not a zero-width LineString), disjoint
+# from both production_polys and water_polys so the union area is a simple, exact sum.
+road_polys = [box(0, 45, 100, 55)]  # 1,000 sqm
 
-search_space, claimed = compute_tree_search_space(boundary, production_polys, water_polys, road_lines)
+search_space, claimed = compute_tree_search_space(boundary, production_polys, water_polys, road_polys)
 assert claimed is not None
-assert abs(claimed.area - 1800.0) < 1e-6, "claimed union area should be exactly production+water (roads contribute 0 -- zero width)"
-assert search_space is not None and not search_space.is_empty
-assert abs(search_space.area - (10000.0 - 1800.0)) < 1e-6, (
-    "search space area must equal boundary minus claimed EXACTLY -- the road LineString subtraction has zero "
-    "practical effect on area, as documented (a future pass would introduce a real cleared buffer, not this one)"
+assert abs(claimed.area - 2800.0) < 1e-6, (
+    "claimed union area should be exactly production+water+road -- the road's own REAL cell-footprint polygon "
+    "must contribute its own real area, unlike the old zero-width LineString it replaced"
 )
-print(f"compute_tree_search_space(): claimed={claimed.area} sqm (roads contributed 0, as expected for zero-width "
-      f"line subtraction), search_space={search_space.area} sqm = boundary - claimed exactly.")
+assert search_space is not None and not search_space.is_empty
+assert abs(search_space.area - (10000.0 - 2800.0)) < 1e-6, (
+    "search space area must equal boundary minus claimed EXACTLY, including the road's own real, "
+    "non-negligible contribution"
+)
+print(f"compute_tree_search_space(): claimed={claimed.area} sqm (production+water+road, road contributing its "
+      f"own real, non-zero area), search_space={search_space.area} sqm = boundary - claimed exactly.")
 
 # No claims at all -- search_space is the boundary itself, claimed is None (not just empty).
 empty_search_space, empty_claimed = compute_tree_search_space(boundary, [], [], [])

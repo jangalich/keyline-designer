@@ -161,7 +161,7 @@ from dem_data import get_dem_for_boundary
 from feature_schema import CONFIDENCE_LOW, make_feature, make_feature_collection
 from hydrology_data import get_water_features_for_boundary
 from production_area_ceiling import identify_optimized_production_areas
-from raster_grid import D8_OFFSETS, cell_area_acres, connected_components, pixel_center_xy
+from raster_grid import D8_OFFSETS, cell_area_acres, cell_union_footprint, connected_components, pixel_center_xy
 from road_cost_path import build_cost_raster, least_cost_path, path_cells_to_points_xyz
 from soil_data import (
     coordinates_to_wkt_polygon,
@@ -805,6 +805,9 @@ def find_road_routes(
             'production_score': float,
             'weighted_score': float,
             'points_xyz': [(x, y, elevation_m), ...],
+            'line_utm': LineString,          # zero-width, dem['crs'] -- length_m/avg_grade_pct's own source geometry
+            'cell_footprint_polygon_utm': Polygon/MultiPolygon,  # REAL, non-zero-width footprint --
+                                              # see this function's own body for why
             'geometry_wgs84': GeoJSON LineString,
         }
 
@@ -920,6 +923,27 @@ def find_road_routes(
     if length_m < min_corridor_length_meters:
         return []
 
+    # The REAL, non-zero-width footprint of this route's own path cells --
+    # result_cells is exactly the cell-based form routing itself computed
+    # (least_cost_path()'s connector cells + the winning ridge fragment's
+    # own cells, in walk order), traced back to BEFORE path_cells_to_
+    # points_xyz()/LineString above discard it down to a zero-width
+    # centerline. raster_grid.cell_union_footprint() -- the SAME real
+    # per-cell-square union every other cell-clustering consumer in this
+    # pipeline uses (production_area.py's own _cell_union_footprint(),
+    # water_candidate_zones.py's) -- turns it back into a real polygon:
+    # one DEM cell wide along the whole route, not a hull or a buffer.
+    # This exists specifically so a caller that needs to treat "ground
+    # this route actually occupies" as REAL, non-negligible area (e.g.
+    # tree_zone_candidates.py's own claimed-geometry exclusion) has a
+    # real polygon to subtract, instead of line_utm's own zero-width
+    # LineString (kept below, unchanged, as length_m/avg_grade_pct's own
+    # source geometry -- this new field is purely additive).
+    result_cell_mask = np.zeros(dem["array"].shape, dtype=bool)
+    for cell_r, cell_c in result_cells:
+        result_cell_mask[cell_r, cell_c] = True
+    cell_footprint_polygon_utm = cell_union_footprint(dem, result_cell_mask)
+
     avg_grade_pct, _grade_stddev_pct = _grade_stats(points)
     crosses_floodplain = hydric_floodplain_union is not None and line.intersects(hydric_floodplain_union)
     crosses_production_zone = winner["production_cells_crossed"] > 0
@@ -934,6 +958,7 @@ def find_road_routes(
         "rank": 1,
         "points_xyz": points,
         "line_utm": line,
+        "cell_footprint_polygon_utm": cell_footprint_polygon_utm,
         "length_m": length_m,
         "avg_grade_pct": avg_grade_pct,
         "crosses_floodplain": crosses_floodplain,
