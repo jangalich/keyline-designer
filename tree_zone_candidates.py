@@ -271,14 +271,25 @@ STREAM_PROXIMITY_REFERENCE_METERS = 100.0
 # fairly weak condition -- soil_marginality_factor 1.0, contributing only
 # SOIL_MARGINALITY_FACTOR_WEIGHT*100 = 20 points) with no stream nearby
 # (stream_proximity_factor 0.0) composites to ~20/100 -- well below this
-# threshold, so "just not prime farmland" alone never qualifies. Set at the
-# midpoint of the 0-100 scale so a genuine candidate needs a real, positive
-# signal from at least one of the two stronger factors (hydric overlap or
-# meaningfully steep slope), not just the default/common absence of
-# prime-farmland status. CONFIGURABLE -- same "documented, not just
+# threshold, so "just not prime farmland" alone never qualifies. Lowered
+# from an earlier, stricter 50.0 (the 0-100 midpoint) to 31.0 -- a real
+# product call to admit more marginal, merely-not-prime ground as a tree
+# candidate than the original midpoint allowed. 31.0 (not some lower
+# number, e.g. 25.0) is deliberately chosen to sit one point ABOVE the
+# highest score soil_marginality_factor + stream_proximity_factor can
+# EVER reach together with no hydric or slope signal at all (a non-prime
+# patch sitting directly on a mapped stream: SOIL_MARGINALITY_FACTOR_
+# WEIGHT*100 + STREAM_PROXIMITY_FACTOR_WEIGHT*100 = 20 + 10 = 30) -- so a
+# real, positive hydric_overlap_factor or slope_factor signal is still
+# REQUIRED for any candidate to qualify, exactly as at 50.0; stream
+# proximity alone still can never clear this threshold on its own, even
+# at maximum proximity. CONFIGURABLE -- same "documented, not just
 # asserted" standard as MIN_PRODUCTION_AREA_ACRES/solar_suitability.py's
-# own MIN_SUITABILITY_SCORE.
-MIN_TREE_SUITABILITY_SCORE = 50.0
+# own MIN_SUITABILITY_SCORE. If this ever needs to move again, keep this
+# invariant in mind: it must stay strictly above SOIL_MARGINALITY_FACTOR_
+# WEIGHT*100 + STREAM_PROXIMITY_FACTOR_WEIGHT*100 for that invariant to
+# keep holding.
+MIN_TREE_SUITABILITY_SCORE = 31.0
 
 # Minimum contiguous size for a scored patch to be reported as a real tree
 # zone candidate, not a fragmented sliver -- reuses production_area.py's
