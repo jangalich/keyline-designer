@@ -102,9 +102,29 @@ tree zones (a later, separate pass), not the reverse.
         scoring, eligibility, and narrative report) -- only the copy of
         the geometry handed to compute_tree_search_space() here.
 
-    STEP 2 -- SUITABILITY SCORING (score_tree_search_space()):
-        every DEM cell inside the search space is scored against four
-        independently-stored 0-1 factors, reusing data this pipeline
+    STEP 2 -- CANOPY EXCLUSION GATE, THEN SUITABILITY SCORING
+        (score_tree_search_space()):
+        before any of the four factors below are even computed, a cell
+        already inside real, EXISTING tree canopy (production_area.
+        get_required_tree_root_zone_mask_utm() -- the SAME mandatory,
+        non-degrading "fetch canopy, or fail hard" building block
+        production_area.py/production_area_ceiling.py/water_candidate_
+        zones.py all already use for their own canopy gates, at this
+        module's own TREE_ZONE_CANOPY_BUFFER_METERS, which reuses
+        production's own TREE_ROOT_ZONE_BUFFER_METERS, 10ft, unchanged)
+        is HARD-EXCLUDED from candidacy entirely -- it never enters the
+        composite score at all, the same "excluded before scoring, not
+        merely scored low" treatment as being outside the search space in
+        the first place. This module identifies NEW tree-suitable ground;
+        ground that's already wooded doesn't need a "candidate"
+        designation. A canopy fetch failure is NOT gracefully degraded
+        here (unlike the three Step 2 factors below) -- same "can't
+        verify this is free of/covered by tree cover, refuse rather than
+        guess" hard-failure reasoning production_area.py's own mandatory
+        canopy gate already uses.
+
+        Every DEM cell that survives this gate is then scored against
+        four independently-stored 0-1 factors, reusing data this pipeline
         already fetches elsewhere -- no new data sources:
           - soil_marginality_factor: real SSURGO Farmland Classification
             (soil_data.get_farmland_classification_for_polygon() +
@@ -179,10 +199,11 @@ from shapely.geometry import Point, Polygon, box, mapping, shape
 from shapely.ops import unary_union
 from shapely.prepared import prep
 
+from canopy_height_data import TREE_ROOT_ZONE_BUFFER_METERS
 from dem_data import get_dem_for_boundary
 from feature_schema import CONFIDENCE_LOW, make_feature, make_feature_collection
 from hydrology_data import get_water_features_for_boundary
-from production_area import MIN_PRODUCTION_AREA_ACRES, compute_slope_percent
+from production_area import MIN_PRODUCTION_AREA_ACRES, compute_slope_percent, get_required_tree_root_zone_mask_utm
 from production_area_ceiling import identify_optimized_production_areas
 from raster_grid import SQUARE_METERS_PER_ACRE, connected_components, pixel_center_xy
 from road_corridors import identify_road_corridor_candidates
@@ -301,6 +322,27 @@ MIN_TREE_SUITABILITY_SCORE = 31.0
 # specifically).
 MIN_TREE_ZONE_ACRES = MIN_PRODUCTION_AREA_ACRES
 
+# Buffer (meters) around EXISTING tree canopy (real USGS 3DEP lidar HAG
+# coverage, canopy_height_data.tree_root_zone_mask()) within which a DEM
+# cell is HARD-EXCLUDED from tree-zone candidacy entirely -- a cell
+# already under (or within this buffer of) real, existing tree cover
+# doesn't need a "candidate" designation; this layer identifies NEW
+# tree-suitable ground, not ground that's already wooded. This is a
+# GATE, not one of the four scored factors above: an excluded cell never
+# enters composite_grid at all, same "excluded before scoring, not
+# merely scored low" treatment production_area.py's own tree_root_zone_
+# hit gate gives production zones (see that module's own
+# get_required_tree_root_zone_mask_utm()). Reuses production_area.py's
+# own TREE_ROOT_ZONE_BUFFER_METERS value directly (10ft) rather than an
+# independently-tuned buffer -- there's no evidence this layer needs a
+# different existing-canopy clearance than production zones do, and
+# reusing the same constant means the two can never silently drift apart
+# (same reasoning as MIN_TREE_ZONE_ACRES reusing MIN_PRODUCTION_AREA_ACRES
+# directly, just above). CONFIGURABLE (override get_required_tree_root_
+# zone_mask_utm's own buffer_meters kwarg directly if a real property
+# ever needs a different clearance for this layer specifically).
+TREE_ZONE_CANOPY_BUFFER_METERS = TREE_ROOT_ZONE_BUFFER_METERS
+
 # Neutral factor value used when a given factor's own data source couldn't
 # be reached at all (fetch failure) -- same "missing/inapplicable data
 # should neither reward nor penalize" convention solar_suitability.py's own
@@ -315,8 +357,11 @@ TREE_ZONE_CONFIDENCE_NOTES_TEMPLATE = (
     "This identifies GENERAL tree-suitable land -- ground within the property's leftover, "
     "non-claimed area (the full boundary minus every current OPTIMIZED (ceiling-trimmed) "
     "production-zone candidate plus the single SELECTED water-system zone and single SELECTED "
-    "road corridor's own geometry) that scores above a minimum suitability threshold on "
-    "marginality relative to production use. It is NOT a windbreak, riparian buffer, habitat "
+    "road corridor's own geometry, MINUS real, existing tree canopy (production_area.py's own "
+    "TREE_ROOT_ZONE_BUFFER_METERS buffer around real USGS 3DEP lidar canopy coverage -- this "
+    "layer identifies NEW tree-suitable ground, not ground that's already wooded) that scores "
+    "above a minimum suitability threshold on marginality relative to production use. It is NOT "
+    "a windbreak, riparian buffer, habitat "
     "corridor, or any other specific planting plan -- assigning that kind of function/purpose to "
     "this ground is deliberately left to report narrative, a separate later pass, and is NOT "
     "decided here. It is also NOT a species recommendation. tree_suitability_score (0-100) is a "
@@ -444,6 +489,7 @@ def score_tree_search_space(
     hydric_data_available: bool = True,
     stream_union: Optional[object] = None,
     stream_data_available: bool = True,
+    tree_root_zone_mask_utm: Optional[np.ndarray] = None,
     slope_reference_pct: float = TREE_SLOPE_REFERENCE_PCT,
     stream_proximity_reference_meters: float = STREAM_PROXIMITY_REFERENCE_METERS,
     min_score: float = MIN_TREE_SUITABILITY_SCORE,
@@ -459,6 +505,19 @@ def score_tree_search_space(
     "checked, genuinely nothing found" when its own *_data_available flag
     is True, or "couldn't check at all" when that flag is False -- see
     _NEUTRAL_FACTOR_VALUE for how the latter is scored).
+
+    tree_root_zone_mask_utm is a pre-fetched boolean np.ndarray the same
+    shape as dem['array'] (production_area.get_required_tree_root_zone_
+    mask_utm()'s own output -- already on dem's own grid, no further
+    alignment needed), or None. A True cell is HARD-EXCLUDED from
+    candidacy before any factor is scored (see module docstring's
+    "CANOPY EXCLUSION GATE" section) -- unlike the three *_union params
+    above, there is no "gracefully degraded, neutral score" path for
+    canopy here: None means "no gate applied at all" (this pure-logic
+    core's own default, useful for callers/tests that don't care about
+    canopy), not "checked, found none" -- identify_tree_zone_candidates()
+    always supplies a real mask (its own canopy fetch is mandatory,
+    non-degrading, same as production_area.py's).
 
     Returns one entry per resulting tree-zone candidate patch, ranked
     best-first:
@@ -506,6 +565,13 @@ def score_tree_search_space(
                 continue
             point = Point(pixel_center_xy(dem, r, c))
             if not search_space_prepared.contains(point):
+                continue
+            if tree_root_zone_mask_utm is not None and tree_root_zone_mask_utm[r, c]:
+                # Already under (or within TREE_ZONE_CANOPY_BUFFER_METERS
+                # of) real, existing tree canopy -- HARD-excluded before
+                # scoring, same as being outside the search space
+                # entirely (see this function's own docstring and the
+                # module docstring's "CANOPY EXCLUSION GATE" section).
                 continue
 
             raw_slope = float(slope_pct_grid[r, c]) if not np.isnan(slope_pct_grid[r, c]) else 0.0
@@ -776,10 +842,12 @@ def identify_tree_zone_candidates(
     Full pipeline entry point: fetches the DEM (unless one is passed in),
     computes the Step 1 search space from EVERY current production
     candidate plus the SINGLE selected water zone and SINGLE selected road
-    corridor on this property, fetches the Step 2 soil/stream geometry
-    (each degrading independently and gracefully -- same pattern as every
-    other network-backed layer in this pipeline), scores and thresholds
-    the result, and returns:
+    corridor on this property, fetches Step 2's MANDATORY canopy
+    exclusion mask (production_area.get_required_tree_root_zone_mask_utm()
+    -- raises, does NOT degrade, on a fetch failure) plus Step 2's
+    soil/stream geometry (each of THOSE three degrading independently and
+    gracefully -- same pattern as every other network-backed layer in
+    this pipeline), scores and thresholds the result, and returns:
 
         {
             'zones_geojson': FeatureCollection,          # layer="tree_zone_candidate" -- the deliverable
@@ -868,9 +936,29 @@ def identify_tree_zone_candidates(
         boundary_polygon_utm, production_polygons_utm, water_polygons_utm, road_lines_utm
     )
 
-    # --- Step 2 inputs: soil/stream geometry, each degrading independently
-    # and gracefully -- same pattern as every other network-backed layer in
-    # this pipeline (e.g. road_corridors.py's several optional fetches). ---
+    # --- Step 2's own CANOPY EXCLUSION GATE (see module docstring):
+    # MANDATORY, non-degrading -- the SAME shared fetch-or-raise helper
+    # production_area.identify_production_areas()/production_area_
+    # ceiling.identify_optimized_production_areas() already call for
+    # their own canopy gates, at this module's own TREE_ZONE_CANOPY_
+    # BUFFER_METERS (== production's own TREE_ROOT_ZONE_BUFFER_METERS,
+    # 10ft, unchanged). A canopy fetch failure here propagates up
+    # UNCAUGHT, same hard-fail behavior as every other mandatory-canopy
+    # entry point in this pipeline -- callers are expected to let this
+    # raise, not catch and degrade it. Fetched fresh here rather than
+    # reused from production_result above (that result's own internal
+    # mask isn't part of its returned dict) -- one more independent
+    # canopy fetch per call, same "each optimize/select call below
+    # re-derives its own upstream dependencies" pattern render_layout_
+    # map.py's own fetch_layout_layers() already documents. ---
+    tree_root_zone_mask_utm = get_required_tree_root_zone_mask_utm(
+        boundary_polygon_utm, dem, buffer_meters=TREE_ZONE_CANOPY_BUFFER_METERS
+    )
+
+    # --- Step 2's remaining inputs: soil/stream geometry, each degrading
+    # independently and gracefully -- same pattern as every other
+    # network-backed layer in this pipeline (e.g. road_corridors.py's
+    # several optional fetches). ---
     prime_farmland_union: Optional[object] = None
     prime_farmland_data_available = True
     try:
@@ -902,6 +990,7 @@ def identify_tree_zone_candidates(
         hydric_data_available=hydric_data_available,
         stream_union=stream_union,
         stream_data_available=stream_data_available,
+        tree_root_zone_mask_utm=tree_root_zone_mask_utm,
         **score_kwargs,
     )
 

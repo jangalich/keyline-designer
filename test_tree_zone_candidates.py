@@ -298,6 +298,71 @@ print(f"Region 6 (tiny hydric patch, {region6_only_patches[0]['area_acres']}ac) 
       f"({tzc.MIN_TREE_ZONE_ACRES}ac) -- proves the size/shape filter, not just the score threshold, is doing real work.")
 
 
+# =====================================================================
+# CANOPY EXCLUSION GATE: a cell inside tree_root_zone_mask_utm is HARD-excluded
+# BEFORE scoring, even when every other factor would otherwise clearly qualify it
+# (region 1 -- hydric, flat -- scores well above threshold on hydric overlap alone)
+# =====================================================================
+
+region1_ungated_patches = score_tree_search_space(
+    dem, region1_hydric_flat, boundary_polygon_utm, hydric_union=hydric_union, min_score=0.0, min_area_acres=0.0,
+)
+assert len(region1_ungated_patches) == 1
+region1_ungated_area = region1_ungated_patches[0]["area_acres"]
+
+# Left half of region 1's own column range (0-20) reads as already under existing tree canopy.
+half_canopy_mask_utm = np.zeros((ROWS, COLS), dtype=bool)
+half_canopy_mask_utm[:, 0:10] = True
+
+region1_half_gated_patches = score_tree_search_space(
+    dem, region1_hydric_flat, boundary_polygon_utm, hydric_union=hydric_union,
+    tree_root_zone_mask_utm=half_canopy_mask_utm, min_score=0.0, min_area_acres=0.0,
+)
+assert len(region1_half_gated_patches) == 1, "the non-canopy half of region 1 should still qualify as its own candidate"
+region1_half_gated_area = region1_half_gated_patches[0]["area_acres"]
+assert region1_half_gated_area < region1_ungated_area * 0.6, (
+    f"excluding half of region 1's cells as already under canopy should meaningfully shrink the resulting "
+    f"patch area -- ungated={region1_ungated_area}ac, gated={region1_half_gated_area}ac"
+)
+
+canopy_footprint = _col_box(0, 10)
+gated_polygon = region1_half_gated_patches[0]["polygon_utm"]
+overlap_area = gated_polygon.intersection(canopy_footprint).area
+assert overlap_area < 1e-6, (
+    f"the surviving candidate patch must not include any cell inside the canopy-excluded region -- got "
+    f"{overlap_area} sq m of overlap"
+)
+print(f"Canopy exclusion gate (partial): gating half of region 1 as already under existing canopy shrinks its "
+      f"candidate area from {region1_ungated_area}ac to {region1_half_gated_area}ac, with zero overlap between "
+      "the surviving patch and the canopy-excluded cells -- confirms cells are HARD-excluded before scoring, "
+      "not merely scored down.")
+
+# The ENTIRE region under canopy -- must yield zero candidates, no matter how strong its other factors are.
+full_canopy_mask_utm = np.zeros((ROWS, COLS), dtype=bool)
+full_canopy_mask_utm[:, 0:20] = True
+region1_fully_gated_patches = score_tree_search_space(
+    dem, region1_hydric_flat, boundary_polygon_utm, hydric_union=hydric_union,
+    tree_root_zone_mask_utm=full_canopy_mask_utm, min_score=0.0, min_area_acres=0.0,
+)
+assert region1_fully_gated_patches == [], (
+    "a region entirely under existing canopy must yield zero candidates, even with hydric overlap alone "
+    "otherwise clearing the threshold easily"
+)
+print("Canopy exclusion gate (full): gating the ENTIRE region under existing canopy yields zero candidates, "
+      "even though hydric overlap alone would otherwise clear the threshold easily.")
+
+# tree_root_zone_mask_utm=None (the default) must reproduce the ungated result exactly -- confirms the gate is a
+# genuine opt-in that changes nothing for every OTHER call in this file that never passes it.
+region1_explicit_none_patches = score_tree_search_space(
+    dem, region1_hydric_flat, boundary_polygon_utm, hydric_union=hydric_union,
+    tree_root_zone_mask_utm=None, min_score=0.0, min_area_acres=0.0,
+)
+assert region1_explicit_none_patches[0]["area_acres"] == region1_ungated_area, (
+    "tree_root_zone_mask_utm=None must be a true no-op, identical to the parameter's own default"
+)
+print("Canopy exclusion gate: tree_root_zone_mask_utm=None reproduces the ungated result exactly (a true no-op).")
+
+
 # --- data-unavailable factors default to a neutral 0.5, not the "checked and clean" 0.0/1.0 ---
 
 tiny_dem = {
