@@ -8,10 +8,9 @@ generate_pdf_report.py). This module does not identify, score, or select
 anything itself: every layer it draws is the already-computed output of
 production_area_ceiling.py (optimized production zones),
 water_suitability.py (fetch_and_select_optimal_water_zone -- the top-ranked
-candidate), road_corridors.py (identify_road_corridor_candidates -- EVERY
-fan-direction candidate route, up to three: primary/left/right, not just
-the top-ranked one -- see that module's own module docstring for why a
-route is generated per fan direction rather than a single "best" one),
+candidate), road_corridors.py (fetch_and_select_optimal_road_corridor -- the
+single selected road corridor road_corridors.py's own ridge-line
+identification/scoring picks, see that module's own module docstring),
 solar_suitability.py (fetch_and_select_optimal_structure_site -- the
 top-ranked candidate), hydrology_data.py (real NHD streams, for
 background context only -- no soil/hydrology POLYGON data is drawn here,
@@ -21,7 +20,7 @@ elevation contour lines over the full DEM extent).
     boundary --> dem_data (fetched once, shared across all four layers)
              --> production_area_ceiling.identify_optimized_production_areas
              --> water_suitability.fetch_and_select_optimal_water_zone
-             --> road_corridors.identify_road_corridor_candidates (all fan-direction routes)
+             --> road_corridors.fetch_and_select_optimal_road_corridor
              --> solar_suitability.fetch_and_select_optimal_structure_site
              --> hydrology_data.get_water_features_for_boundary (streams)
              --> contour_lines.compute_contour_lines (global, unclipped)
@@ -124,7 +123,7 @@ from contour_lines import compute_contour_lines
 from dem_data import get_dem_for_boundary
 from hydrology_data import get_water_features_for_boundary
 from production_area_ceiling import identify_optimized_production_areas
-from road_corridors import identify_road_corridor_candidates
+from road_corridors import fetch_and_select_optimal_road_corridor
 from solar_suitability import fetch_and_select_optimal_structure_site
 from water_suitability import fetch_and_select_optimal_water_zone
 
@@ -466,14 +465,13 @@ def fetch_layout_layers(boundary_coordinates: list[tuple[float, float]], dem: Op
     now; worth reconsidering only if a future caller needs the raw UTM
     geometry too.
 
-    road_corridors is EVERY fan-direction candidate route from
-    identify_road_corridor_candidates()'s own zones_geojson (up to three:
-    primary/left/right -- see road_corridors.py's own module docstring),
-    not just the single top-ranked one fetch_and_select_optimal_road_
-    corridor() would return -- each fan direction represents a genuinely
-    distinct routing option worth showing on the map, not alternates to
-    discard in favor of one "best" pick the way water_zone/structure_site
-    still are.
+    road_corridor, like water_zone/structure_site, is read here as a
+    GeoJSON Feature (via fetch_and_select_optimal_road_corridor()) -- the
+    single road corridor road_corridors.py's own ridge-line identification
+    and scoring selects, not a list of alternates: that module's current
+    design produces exactly one candidate per property (see its own
+    module docstring), so there's nothing left to rank/discard here the
+    way an earlier fan-based version of this module needed to.
 
     contour_lines is contour_lines.compute_contour_lines()'s own output --
     GLOBAL elevation contour lines over the DEM's full extent, computed
@@ -488,10 +486,9 @@ def fetch_layout_layers(boundary_coordinates: list[tuple[float, float]], dem: Op
 
     production_result = identify_optimized_production_areas(boundary_coordinates, dem=dem)
     water_zone = fetch_and_select_optimal_water_zone(boundary_coordinates, dem=dem)
-    road_corridor_result = identify_road_corridor_candidates(
+    road_corridor = fetch_and_select_optimal_road_corridor(
         boundary_coordinates, dem=dem, anchor_lon_lat=_PLACEHOLDER_REFERENCE_PROPERTY_ANCHOR_LON_LAT
     )
-    road_corridors = road_corridor_result["zones_geojson"]["features"]
     structure_site = fetch_and_select_optimal_structure_site(boundary_coordinates, dem=dem)
     water_features = get_water_features_for_boundary(boundary_coordinates)
     contour_lines = compute_contour_lines(dem)
@@ -500,7 +497,7 @@ def fetch_layout_layers(boundary_coordinates: list[tuple[float, float]], dem: Op
         "dem": dem,
         "production_result": production_result,
         "water_zone": water_zone,
-        "road_corridors": road_corridors,
+        "road_corridor": road_corridor,
         "structure_site": structure_site,
         "water_features": water_features,
         "contour_lines": contour_lines,
@@ -529,7 +526,7 @@ def render_layout_map(
     dem = layers["dem"]
     production_result = layers["production_result"]
     water_zone = layers["water_zone"]
-    road_corridors = layers["road_corridors"]
+    road_corridor = layers["road_corridor"]
     structure_site = layers["structure_site"]
     water_features = layers["water_features"]
     contour_lines = layers["contour_lines"]
@@ -579,7 +576,7 @@ def render_layout_map(
         basemap_note = f"basemap unavailable ({e})"
 
     # z-order, back to front, per spec: halo mask, streams, perimeter
-    # boundary, production zone(s), water zone, road corridor(s), structure site.
+    # boundary, production zone(s), water zone, road corridor, structure site.
     if not halo_mask.is_empty:
         plot_polygon(halo_mask, ax=ax, add_points=False, facecolor=HALO_COLOR, edgecolor="none", alpha=HALO_ALPHA, zorder=10)
 
@@ -693,20 +690,12 @@ def render_layout_map(
         )
         marker_number += 1
 
-    # Every fan-direction candidate route (up to three: primary/left/right --
-    # see road_corridors.py's own module docstring), not just the single
-    # top-ranked one -- each is a genuinely distinct routing option, drawn
-    # and numbered the same way multiple production zones already are
-    # above (same styling for all of them; differentiated by marker number
-    # and legend text only, not by color).
-    for road_corridor in road_corridors:
+    if road_corridor is not None:
         geom = _reproject_geometry_to_mercator(road_corridor["geometry"])
         props = road_corridor["properties"]
         plot_line(geom, ax=ax, add_points=False, color=ROAD_CORRIDOR_COLOR, linewidth=3.0, zorder=42)
         _draw_numbered_marker(ax, geom.interpolate(0.5, normalized=True), marker_number)
-        legend_entries.append(
-            f"{marker_number} — Road Corridor ({props['fan_direction']}), score {props['suitability_score']}"
-        )
+        legend_entries.append(f"{marker_number} — Road Corridor, score {props['suitability_score']}")
         marker_number += 1
 
     if structure_site is not None:
