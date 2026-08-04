@@ -764,15 +764,35 @@ def find_road_routes(
         return []
 
     ridge_mask = _identify_ridge_cell_mask(dem)
+    _pre_prune_labels, _pre_prune_count = connected_components(ridge_mask)
+    print(
+        f"  find_road_routes: {int(ridge_mask.sum())} ridge cell(s) identified across "
+        f"{_pre_prune_count} original network(s) (sizes: "
+        f"{sorted((int((_pre_prune_labels == nid).sum()) for nid in range(_pre_prune_count)), reverse=True)})."
+    )
+
     ridge_candidates = _prune_ridge_networks(ridge_mask, excluded_mask)
+    print(
+        f"  find_road_routes: {len(ridge_candidates)} candidate(s) survive production/water pruning "
+        f"(sizes: {sorted((len(c) for c in ridge_candidates), reverse=True)})."
+    )
     if not ridge_candidates:
         return []
 
     scored_candidates = _score_ridge_candidates(dem, cost_raster, ridge_candidates, source_cell)
+    for c in scored_candidates:
+        print(
+            f"  find_road_routes: candidate ({len(c['cells'])} cells) -- avg_slope_pct={c['avg_slope_pct']:.1f} "
+            f"length_m={c['length_m']:.0f} total_cost={c['total_cost']:.1f} -> slope_score={c['slope_score']:.3f} "
+            f"length_score={c['length_score']:.3f} proximity_score={c['proximity_score']:.3f} "
+            f"weighted_score={c['weighted_score']:.3f}"
+        )
     if not scored_candidates:
+        print("  find_road_routes: no candidate is reachable from the anchor at all.")
         return []
 
     winner = max(scored_candidates, key=lambda c: c["weighted_score"])
+    print(f"  find_road_routes: winner has {len(winner['cells'])} cells, weighted_score={winner['weighted_score']:.3f}.")
 
     fragment_path = _order_fragment_from_entry(winner["cells"], winner["entry_cell"])
     # winner['connector_cells'] already ends at entry_cell (least_cost_
