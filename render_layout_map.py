@@ -379,17 +379,21 @@ STRUCTURE_SITE_COLOR = "#D64545"
 # Structure site renders as a single fixed-size map-pin icon (see this
 # module's own STRUCTURE SITE STYLE docstring section), not a filled
 # polygon -- source-of-truth vector asset at assets/icons/farm_location_pin.svg,
-# rasterized ONCE to a 256x256 PNG build artifact (assets/icons/
-# farm_location_pin.png, checked into the repo alongside it) rather than
-# re-rasterized on every render call. Loaded via PIL and wrapped in an
-# OffsetImage here, at module level, so repeated render_layout_map() calls
-# in the same process never hit disk for it more than once.
+# rasterized ONCE to a PNG build artifact (assets/icons/farm_location_pin.png,
+# tightly cropped to the drawn shape's own bounds -- not the full 24x24
+# viewBox, which this asset's own tip doesn't reach -- so the bottom edge
+# of the raster lines up with the pin's visual tip; checked into the repo
+# alongside the SVG) rather than re-rasterized on every render call.
+# Loaded via PIL and wrapped in an OffsetImage here, at module level, so
+# repeated render_layout_map() calls in the same process never hit disk
+# for it more than once.
 STRUCTURE_SITE_ICON_PATH = os.path.join(os.path.dirname(__file__), "assets", "icons", "farm_location_pin.png")
 # Empirically tuned against this module's own real output (300 DPI,
-# 8.5in x 11in figure -- see FIGURE_SIZE_INCHES/OUTPUT_DPI above): renders
-# the icon ~37px tall at that resolution, inside the 30-40px target range
-# that reads clearly without dominating nearby zones. CONFIGURABLE.
-STRUCTURE_SITE_ICON_ZOOM = 0.035
+# 8.5in x 11in figure -- see FIGURE_SIZE_INCHES/OUTPUT_DPI above): a zoom
+# of ~0.035 rendered this icon ~36px tall at that resolution (the original
+# 30-40px legibility target); this is that baseline x3, per explicit
+# request, for a more prominent on-map pin. CONFIGURABLE.
+STRUCTURE_SITE_ICON_ZOOM = 0.105
 STRUCTURE_SITE_ICON = OffsetImage(Image.open(STRUCTURE_SITE_ICON_PATH), zoom=STRUCTURE_SITE_ICON_ZOOM)
 
 # A dark forest green -- deliberately distinct from PRODUCTION_ZONE_COLOR's
