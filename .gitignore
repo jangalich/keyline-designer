@@ -3,3 +3,6 @@ __pycache__/
 .venv/
 *.png
 *.pdf
+# Static assets (icons, etc.) are checked-in source, not rendered output --
+# excepted from the blanket *.png rule above.
+!assets/icons/*.png

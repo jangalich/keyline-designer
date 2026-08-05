@@ -39,9 +39,9 @@ render_fill_polygon_utm, not a pre-clipped raster), and only the clipped
 segments within that zone are drawn. No fill, no boundary stroke for
 production zones -- zone identity is conveyed by the numbered marker
 alone, same as every other layer. This is a deliberate, scoped styling
-split: structure sites and the property boundary keep their existing
-solid fill/line rendering exactly as before -- the water zone and the
-road corridor (both below) have their OWN render-only treatments.
+split: the property boundary keeps its existing solid line rendering
+exactly as before -- the water zone, the road corridor, and the
+structure site (all below) have their OWN render-only treatments.
 
 Contours clip against render_fill_polygon_utm rather than polygon_utm
 for two separate reasons layered on top of each other, both from
@@ -127,19 +127,41 @@ production/water's own hulls: most directly here, closing over any
 interior pocket the CANOPY EXCLUSION GATE carves out of an otherwise-
 contiguous candidate (see tree_zone_candidates.py's own module
 docstring), rather than rendering as an unexplained blank notch. The
-hatch (rather than a flat fill like structure_site's own solid red) is a
-deliberate, visible "candidate, not a committed site" cue, consistent
-with this layer's own CONFIDENCE_LOW rating and its explicit "not a
-definite planting plan" framing (see tree_zone_candidates.py's own
+hatch is a deliberate, visible "candidate, not a committed site" cue,
+consistent with this layer's own CONFIDENCE_LOW rating and its explicit
+"not a definite planting plan" framing (see tree_zone_candidates.py's own
 TREE_ZONE_CONFIDENCE_NOTES_TEMPLATE). Rendered after the road corridor
 and before the structure site, matching Scale of Permanence step
 ordering (Trees is step 5, immediately before Permanent Buildings' step
-6) -- and z-ordered accordingly (below structure_site's own solid fill),
-so a real, expected overlap between a tree candidate and the structure
-site (tree_zone_candidates.py's own search space deliberately has no
-awareness of solar/structure siting, see that module's own docstring)
-still reads as the structure site sitting visibly on top, not a
-confusing double-fill blend.
+6) -- and z-ordered accordingly (below the structure site's own pin icon,
+zorder=43), so a real, expected overlap between a tree candidate and the
+structure site (tree_zone_candidates.py's own search space deliberately
+has no awareness of solar/structure siting, see that module's own
+docstring) still reads as the structure site's pin sitting visibly on
+top, not lost beneath the tree-candidate fill.
+
+STRUCTURE SITE STYLE: the selected structure site renders as a single,
+fixed-size MAP-PIN ICON (assets/icons/farm_location_pin.svg, rasterized
+once to assets/icons/farm_location_pin.png -- see STRUCTURE_SITE_ICON_PATH/
+STRUCTURE_SITE_ICON above) placed at its own representative_point(), not
+a filled polygon over its full eligible footprint (up to the module's own
+1-acre cap) and not a numbered circle marker like every other layer --
+there's exactly one structure site per property
+(fetch_and_select_optimal_structure_site()'s own top-ranked candidate,
+same "single selection" shape as water_zone/road_corridor), so a precise
+point read at a glance, the way an icon on a printed map is meant to be
+read, better matches how a real building site actually gets sited and
+referenced than a shaded area does. This is DISPLAY-ONLY, same "real
+geometry drives placement, display is separate" split this module already
+uses for water/tree zones' own render_fill_polygon_utm above:
+structure_site's real geometry (used for area_acres/suitability_score/the
+narrative report) is completely untouched by this -- only what gets drawn
+at its representative_point() changes. Because there's no numbered circle
+for this layer, its legend line carries no leading number either (a
+number with nothing on the map to point to would be confusing) -- every
+other layer keeps its existing numbered-circle treatment unchanged.
+Rendered last (after the tree zone candidates), at zorder=43, the same
+z-order this layer already held before this change.
 
 Basemap: NAIP aerial imagery via USGS's cached USGSImageryOnly tile
 service, fetched and composited with contextily (a well-established
@@ -155,6 +177,7 @@ the rest of that document renders at.
 """
 
 import math
+import os
 from typing import Optional
 
 import contextily as cx
@@ -166,6 +189,8 @@ import xyzservices
 
 matplotlib.use("Agg")  # headless rendering -- no display server in this pipeline's runtime
 import matplotlib.pyplot as plt
+from matplotlib.offsetbox import AnnotationBbox, OffsetImage
+from PIL import Image
 from rasterio.warp import transform as warp_transform
 from rasterio.warp import transform_geom
 from shapely.geometry import LineString, Polygon, box, mapping, shape
@@ -350,6 +375,23 @@ WATER_ZONE_COLOR = "#1F6FB2"
 # texture ON the water fill, not a second, competing shape.
 WATER_ZONE_RIPPLE_COLOR = "#7EC1E8"
 STRUCTURE_SITE_COLOR = "#D64545"
+
+# Structure site renders as a single fixed-size map-pin icon (see this
+# module's own STRUCTURE SITE STYLE docstring section), not a filled
+# polygon -- source-of-truth vector asset at assets/icons/farm_location_pin.svg,
+# rasterized ONCE to a 256x256 PNG build artifact (assets/icons/
+# farm_location_pin.png, checked into the repo alongside it) rather than
+# re-rasterized on every render call. Loaded via PIL and wrapped in an
+# OffsetImage here, at module level, so repeated render_layout_map() calls
+# in the same process never hit disk for it more than once.
+STRUCTURE_SITE_ICON_PATH = os.path.join(os.path.dirname(__file__), "assets", "icons", "farm_location_pin.png")
+# Empirically tuned against this module's own real output (300 DPI,
+# 8.5in x 11in figure -- see FIGURE_SIZE_INCHES/OUTPUT_DPI above): renders
+# the icon ~37px tall at that resolution, inside the 30-40px target range
+# that reads clearly without dominating nearby zones. CONFIGURABLE.
+STRUCTURE_SITE_ICON_ZOOM = 0.035
+STRUCTURE_SITE_ICON = OffsetImage(Image.open(STRUCTURE_SITE_ICON_PATH), zoom=STRUCTURE_SITE_ICON_ZOOM)
+
 # A dark forest green -- deliberately distinct from PRODUCTION_ZONE_COLOR's
 # lighter, more saturated green (production is active farm ground; trees
 # are a candidate, not-yet-decided layer) and from every other layer color
@@ -937,23 +979,24 @@ def render_layout_map(
         marker_number += 1
 
     if structure_site is not None:
+        # Real, scored footprint still drives placement -- only what gets
+        # drawn at its representative_point() changes (see this module's
+        # own STRUCTURE SITE STYLE docstring section): a single fixed-size
+        # map-pin icon, not a filled polygon, and no numbered circle
+        # marker for this zone (there's nothing else on the map for its
+        # legend number to point to).
         geom = _reproject_geometry_to_mercator(structure_site["geometry"])
         props = structure_site["properties"]
-        plot_polygon(
-            geom,
-            ax=ax,
-            add_points=False,
-            facecolor=STRUCTURE_SITE_COLOR,
-            edgecolor=STRUCTURE_SITE_COLOR,
-            alpha=0.55,
-            linewidth=1.5,
+        anchor_point = geom.representative_point()
+        pin = AnnotationBbox(
+            STRUCTURE_SITE_ICON,
+            (anchor_point.x, anchor_point.y),
+            frameon=False,
+            box_alignment=(0.5, 0.0),
             zorder=43,
         )
-        _draw_numbered_marker(ax, geom.representative_point(), marker_number)
-        legend_entries.append(
-            f"{marker_number} — Structure Site, score {props['suitability_score']}"
-        )
-        marker_number += 1
+        ax.add_artist(pin)
+        legend_entries.append(f"Structure Site, score {props['suitability_score']}")
 
     ax.set_title("Proposed Farm Layout", fontsize=16, fontweight="bold", pad=14)
 
