@@ -34,6 +34,7 @@ from rasterio.warp import transform as warp_transform
 from shapely.geometry import Point, Polygon, box, shape
 from unittest.mock import patch as mock_patch
 
+import fencing
 import production_area as pa
 from feature_schema import make_feature, validate_feature_collection
 from fencing import (
@@ -43,16 +44,22 @@ from fencing import (
     ROAD_CORRIDOR_FENCE_DILATION_CELLS,
     ROAD_FENCE_LINE_INSET_METERS,
     STREAM_EXCLUSION_BUFFER_METERS,
+    TREE_ZONE_FENCE_BUFFER_METERS,
+    WATER_ZONE_FENCE_BUFFER_METERS,
     boundary_fencing_to_geojson,
     existing_farm_road_fencing_to_geojson,
     find_boundary_fencing,
     find_existing_farm_road_fencing,
     find_road_corridor_fencing,
     find_stream_exclusion_fencing,
+    find_tree_zone_fencing,
+    find_water_zone_fencing,
     identify_boundary_fencing,
     identify_fencing,
     road_corridor_fencing_to_geojson,
     stream_exclusion_fencing_to_geojson,
+    tree_zone_fencing_to_geojson,
+    water_zone_fencing_to_geojson,
 )
 from raster_grid import binary_dilate, cell_union_footprint
 
@@ -389,19 +396,37 @@ print("boundary_fencing_to_geojson() labels/annotates a multi-segment split (seg
 
 # --- identify_fencing: combines both layers, reusing a pre-fetched water_features_geojson ---
 #
-# farm_road_features=[] is passed explicitly (rather than left to identify_fencing()'s own
-# default fetch) so this stays deterministic and offline regardless of whether a given test
-# environment happens to have network access -- selected_road_corridor_cells is left at its
-# own default (None, with anchor_lon_lat also None) which already resolves to "no corridor"
-# with zero network calls (see identify_fencing()'s own docstring), so no explicit override
-# is needed there.
+# farm_road_features=[] and tree_zone_render_fill_polygons_utm=[] are passed explicitly
+# (rather than left to identify_fencing()'s own default fetch) so this stays deterministic
+# and offline regardless of whether a given test environment happens to have network access --
+# unlike the farm road fetch (which fails fast in this sandbox via a proxy 403), an
+# unmocked water/tree zone fetch can hang for a long time retrying before finally giving up,
+# so leaving either at its own default (None) here would make this test far too slow, not
+# just nondeterministic. selected_water_zone_render_fill_polygon_utm has no such "empty but
+# not None" sentinel available (a single selected zone is naturally Optional[Polygon] --
+# None already means BOTH "not supplied" and "no zone sited"), so fetch_and_select_optimal_
+# water_zone() itself is mocked out instead, same pattern as the existing canopy-height mock
+# just below it. selected_road_corridor_cells is left at its own default (None, with
+# anchor_lon_lat also None) which already resolves to "no corridor" with zero network calls
+# (see identify_fencing()'s own docstring), so no explicit override/mock is needed there.
 
 from feature_schema import make_feature_collection
 
+
+def _fake_no_water_zone(boundary_coordinates, dem=None, **kwargs):
+    return None
+
+
 prefetched_water = make_feature_collection([STREAM_FEATURE])
-with mock_patch.object(pa, "get_canopy_height_for_boundary", _fake_no_canopy):
+with mock_patch.object(pa, "get_canopy_height_for_boundary", _fake_no_canopy), mock_patch.object(
+    fencing, "fetch_and_select_optimal_water_zone", _fake_no_water_zone
+):
     result = identify_fencing(
-        PROPERTY_BOUNDARY, water_features_geojson=prefetched_water, dem=TEST_DEM, farm_road_features=[]
+        PROPERTY_BOUNDARY,
+        water_features_geojson=prefetched_water,
+        dem=TEST_DEM,
+        farm_road_features=[],
+        tree_zone_render_fill_polygons_utm=[],
     )
 validate_feature_collection(result["fencing_geojson"])
 
@@ -414,9 +439,15 @@ print("identify_fencing() combines exclusion_fencing + perimeter_fencing into on
 # --- identify_fencing: a water_features_geojson with no streams still produces boundary fencing ---
 
 no_stream_water = make_feature_collection([])
-with mock_patch.object(pa, "get_canopy_height_for_boundary", _fake_no_canopy):
+with mock_patch.object(pa, "get_canopy_height_for_boundary", _fake_no_canopy), mock_patch.object(
+    fencing, "fetch_and_select_optimal_water_zone", _fake_no_water_zone
+):
     no_stream_result = identify_fencing(
-        PROPERTY_BOUNDARY, water_features_geojson=no_stream_water, dem=TEST_DEM, farm_road_features=[]
+        PROPERTY_BOUNDARY,
+        water_features_geojson=no_stream_water,
+        dem=TEST_DEM,
+        farm_road_features=[],
+        tree_zone_render_fill_polygons_utm=[],
     )
 no_stream_layers = [f["properties"]["layer"] for f in no_stream_result["fencing_geojson"]["features"]]
 assert no_stream_layers == ["perimeter_fencing"], (
@@ -641,6 +672,146 @@ empty_road_corridor_geojson = road_corridor_fencing_to_geojson(None)
 validate_feature_collection(empty_road_corridor_geojson)
 assert empty_road_corridor_geojson["features"] == [], "None fence_line should produce zero features, not an error"
 print("road_corridor_fencing_to_geojson(): None fence_line produces an empty, schema-valid FeatureCollection.")
+
+
+# =====================================================================
+# find_water_zone_fencing(): pure geometric core, purely synthetic geometry, no network
+# involved -- same "pure core is independently testable" pattern as every other pure core
+# in this file. A plain shapely box stands in for a real render_fill_polygon_utm (an
+# already-computed real fill footprint -- water_candidate_zones.py's own convex-hull-and-
+# intersect construction, not raw DEM cells, so no DEM/cell-mask fixture is needed here).
+# =====================================================================
+
+WATER_ZONE_TEST_POLYGON_UTM = box(0, 0, 40, 30)  # a plain 40m x 30m render_fill_polygon_utm stand-in
+
+
+# --- 1. None input -> returns None ---
+
+assert find_water_zone_fencing(None) is None
+print("find_water_zone_fencing(): None input returns None.")
+
+
+# --- 2. a simple synthetic polygon -> a closed LineString, every point OUTSIDE the source
+#        polygon (buffer-direction sanity check -- confirms this buffers OUTWARD, not inward) ---
+
+water_fence_line = find_water_zone_fencing(WATER_ZONE_TEST_POLYGON_UTM)
+assert water_fence_line is not None and water_fence_line.geom_type == "LineString"
+water_fence_coords = list(water_fence_line.coords)
+assert water_fence_coords[0] == water_fence_coords[-1], "water zone fence line must be a closed ring"
+assert all(
+    not WATER_ZONE_TEST_POLYGON_UTM.contains(Point(pt)) for pt in water_fence_coords
+), "every point on the water zone fence line must sit OUTSIDE the source polygon -- an inward buffer would put points inside/on it instead"
+water_fence_distances = [Point(pt).distance(WATER_ZONE_TEST_POLYGON_UTM) for pt in water_fence_coords]
+assert all(abs(d - WATER_ZONE_FENCE_BUFFER_METERS) < 1e-6 for d in water_fence_distances), (
+    f"the fence line should sit exactly {WATER_ZONE_FENCE_BUFFER_METERS}m outside the source polygon, "
+    f"got distances ranging {min(water_fence_distances)}-{max(water_fence_distances)}"
+)
+print(
+    "find_water_zone_fencing(): a synthetic polygon returns a closed LineString sitting "
+    f"~{WATER_ZONE_FENCE_BUFFER_METERS}m outside (never inside) the source polygon."
+)
+
+
+# --- water_zone_fencing_to_geojson: schema-valid, correct layer/fence_type ---
+
+water_zone_geojson = water_zone_fencing_to_geojson(water_fence_line)
+validate_feature_collection(water_zone_geojson)
+water_zone_feature_out = water_zone_geojson["features"][0]
+assert water_zone_feature_out["properties"]["layer"] == "perimeter_fencing"
+assert water_zone_feature_out["properties"]["fence_type"] == "water_zone_exclusion"
+assert water_zone_feature_out["properties"]["confidence"] == "high"
+print("water_zone_fencing_to_geojson() output is schema-valid, layer='perimeter_fencing'.")
+
+
+# --- water_zone_fencing_to_geojson: None fence_line -> empty FeatureCollection ---
+
+empty_water_zone_geojson = water_zone_fencing_to_geojson(None)
+validate_feature_collection(empty_water_zone_geojson)
+assert empty_water_zone_geojson["features"] == [], "None fence_line should produce zero features, not an error"
+print("water_zone_fencing_to_geojson(): None fence_line produces an empty, schema-valid FeatureCollection.")
+
+
+# =====================================================================
+# find_tree_zone_fencing(): pure geometric core, purely synthetic geometry, no network
+# involved -- same buffer-and-outline recipe as find_water_zone_fencing() above, applied
+# independently to a whole LIST of polygons (tree_zone_candidates.py has no selection
+# step, so every candidate gets fenced -- see fencing.py's own module docstring).
+# =====================================================================
+
+TREE_ZONE_TEST_POLYGON_A_UTM = box(0, 0, 20, 20)
+TREE_ZONE_TEST_POLYGON_B_UTM = box(100, 100, 130, 115)  # a second, well-separated candidate
+
+
+# --- 1. empty list -> returns [] ---
+
+assert find_tree_zone_fencing([]) == []
+print("find_tree_zone_fencing(): an empty list returns [].")
+
+
+# --- 2. multiple synthetic polygons -> one LineString per input, same order, each
+#        confirmed outside its own source polygon ---
+
+tree_fence_lines = find_tree_zone_fencing([TREE_ZONE_TEST_POLYGON_A_UTM, TREE_ZONE_TEST_POLYGON_B_UTM])
+assert len(tree_fence_lines) == 2, f"expected 1 fence line per input polygon, got {len(tree_fence_lines)}"
+
+for source_polygon, fence_line in zip(
+    [TREE_ZONE_TEST_POLYGON_A_UTM, TREE_ZONE_TEST_POLYGON_B_UTM], tree_fence_lines
+):
+    assert fence_line.geom_type == "LineString"
+    fence_coords = list(fence_line.coords)
+    assert fence_coords[0] == fence_coords[-1], "each tree zone fence line must be a closed ring"
+    assert all(
+        not source_polygon.contains(Point(pt)) for pt in fence_coords
+    ), "every point on a tree zone fence line must sit OUTSIDE its own source polygon"
+    fence_distances = [Point(pt).distance(source_polygon) for pt in fence_coords]
+    assert all(abs(d - TREE_ZONE_FENCE_BUFFER_METERS) < 1e-6 for d in fence_distances), (
+        f"the fence line should sit exactly {TREE_ZONE_FENCE_BUFFER_METERS}m outside its own source "
+        f"polygon, got distances ranging {min(fence_distances)}-{max(fence_distances)}"
+    )
+
+# Confirm the two returned fence lines actually correspond to their own separate source
+# polygons in the SAME order given -- the first fence line should sit near polygon A's own
+# location, not polygon B's (they're far apart, at (0-20,0-20) vs (100-130,100-115)).
+assert Point(tree_fence_lines[0].coords[0]).distance(TREE_ZONE_TEST_POLYGON_A_UTM) < 5.0
+assert Point(tree_fence_lines[1].coords[0]).distance(TREE_ZONE_TEST_POLYGON_B_UTM) < 5.0
+print(
+    "find_tree_zone_fencing(): multiple synthetic polygons return one LineString per input, "
+    "in the same order, each confirmed outside its own source polygon."
+)
+
+
+# --- 3. None entries mixed into the input list -> skipped, not erroring ---
+
+mixed_tree_fence_lines = find_tree_zone_fencing([TREE_ZONE_TEST_POLYGON_A_UTM, None, TREE_ZONE_TEST_POLYGON_B_UTM])
+assert len(mixed_tree_fence_lines) == 2, (
+    f"a None entry in the input list should be skipped, not raise or produce a spurious entry -- "
+    f"expected 2 fence lines, got {len(mixed_tree_fence_lines)}"
+)
+print("find_tree_zone_fencing(): None entries mixed into the input list are skipped, not erroring.")
+
+
+# --- tree_zone_fencing_to_geojson: schema-valid, correct layer/fence_type, 1-based candidate_rank ---
+
+tree_zone_geojson = tree_zone_fencing_to_geojson(tree_fence_lines)
+validate_feature_collection(tree_zone_geojson)
+assert len(tree_zone_geojson["features"]) == 2
+for i, feature in enumerate(tree_zone_geojson["features"], start=1):
+    assert feature["properties"]["layer"] == "perimeter_fencing"
+    assert feature["properties"]["fence_type"] == "tree_zone_exclusion"
+    assert feature["properties"]["confidence"] == "high"
+    assert feature["properties"]["candidate_rank"] == i
+print(
+    "tree_zone_fencing_to_geojson() output is schema-valid, layer='perimeter_fencing', "
+    "each feature carrying its own 1-based candidate_rank."
+)
+
+
+# --- tree_zone_fencing_to_geojson: empty list -> empty FeatureCollection ---
+
+empty_tree_zone_geojson = tree_zone_fencing_to_geojson([])
+validate_feature_collection(empty_tree_zone_geojson)
+assert empty_tree_zone_geojson["features"] == [], "an empty fence_lines list should produce zero features, not an error"
+print("tree_zone_fencing_to_geojson(): an empty list produces an empty, schema-valid FeatureCollection.")
 
 
 print("\nAll fencing checks passed.")
