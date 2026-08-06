@@ -17,7 +17,9 @@ claimed geometry is subtracted out, see that module's own module
 docstring), solar_suitability.py (fetch_and_select_optimal_structure_site
 -- the top-ranked candidate), hydrology_data.py (real NHD streams, for
 background context only -- no soil/hydrology POLYGON data is drawn here,
-that's covered in the narrative text), and contour_lines.py (global
+that's covered in the narrative text), fencing.py
+(identify_boundary_fencing -- the canopy-aware boundary fence line(s),
+see that module's own module docstring), and contour_lines.py (global
 elevation contour lines over the full DEM extent).
 
     boundary --> dem_data (fetched once, shared across every layer below)
@@ -27,8 +29,9 @@ elevation contour lines over the full DEM extent).
              --> tree_zone_candidates.identify_tree_zone_candidates
              --> solar_suitability.fetch_and_select_optimal_structure_site
              --> hydrology_data.get_water_features_for_boundary (streams)
+             --> fencing.identify_boundary_fencing (boundary fence line(s))
              --> contour_lines.compute_contour_lines (global, unclipped)
-             --> rendered PNG (basemap + halo + streams + boundary +
+             --> rendered PNG (basemap + halo + streams + boundary fence +
                  layout layers + numbered legend box, all one image)
 
 PRODUCTION ZONE STYLE: production zones render as CONTOUR-LINE TEXTURE,
@@ -39,9 +42,30 @@ render_fill_polygon_utm, not a pre-clipped raster), and only the clipped
 segments within that zone are drawn. No fill, no boundary stroke for
 production zones -- zone identity is conveyed by the numbered marker
 alone, same as every other layer. This is a deliberate, scoped styling
-split: the property boundary keeps its existing solid line rendering
-exactly as before -- the water zone, the road corridor, and the
-structure site (all below) have their OWN render-only treatments.
+split: the boundary fence (below) has its OWN render-only treatment --
+the water zone, the road corridor, and the structure site (all below)
+have their OWN render-only treatments too.
+
+BOUNDARY FENCE STYLE: the property boundary itself no longer renders as
+a plain solid stroke -- it renders as fencing.identify_boundary_fencing()'s
+own canopy-aware fence line(s) (see that module's own module docstring),
+a dashed line (FENCE_COLOR/FENCE_LINEWIDTH/FENCE_DASH_PATTERN) at the
+same zorder=30 this layer's old plain stroke previously occupied. There is
+always at least one segment -- fencing.find_boundary_fencing()'s own
+plain-wrap case when there's no canopy touching the boundary at all -- so
+there's no fallback path to the old stroke. Before drawing, each segment's
+geometry is run through _smooth_closed_ring_for_render() (simplify, then
+CYCLIC Chaikin corner-cutting via _chaikin_smooth_closed_ring() -- see
+that function's own docstring for why the road corridor's open-line
+Chaikin helper can't just be reused on a closed ring), same DISPLAY-ONLY
+"never touches the real geometry used elsewhere" discipline as the road
+corridor's own _smooth_line_for_render(). When canopy running end-to-end
+splits the parcel into more than one fence loop, each loop gets its own
+numbered legend line ("Boundary Fencing 1" / "Boundary Fencing 2") --
+otherwise a single unnumbered "Boundary Fencing" line, same "no numbered
+circle marker" treatment structure_site's own legend line already uses
+(there's no single point on a loop-shaped feature for a circle number to
+point to).
 
 Contours clip against render_fill_polygon_utm rather than polygon_utm
 for two separate reasons layered on top of each other, both from
@@ -199,6 +223,7 @@ from shapely.plotting import plot_line, plot_points, plot_polygon
 
 from contour_lines import compute_contour_lines
 from dem_data import get_dem_for_boundary
+from fencing import identify_boundary_fencing
 from hydrology_data import get_water_features_for_boundary
 from production_area_ceiling import identify_optimized_production_areas
 from road_corridors import fetch_and_select_optimal_road_corridor
@@ -428,6 +453,27 @@ ROAD_RENDER_INNER_WIDTH = 1.5
 ROAD_RENDER_OUTER_ALPHA = 0.35
 ROAD_RENDER_INNER_ALPHA = 0.7
 
+# Boundary fencing (fencing.identify_boundary_fencing()'s own "perimeter_fencing"
+# layer) renders as a dashed line -- a fence line, not the heavy solid cartographic
+# boundary stroke this layer replaces (see render_layout_map()'s own docstring for
+# why that stroke was removed outright, not kept as a fallback). An earthy yellow,
+# chosen to read clearly against both green production-zone contours and tan/green
+# aerial imagery, and distinct from every other layer color already in use
+# (production green #4C9A2A, water blue #1F6FB2, road dark gray #3A3A3A, structure
+# red #D64545, contour brown #6B4423, tree dark green #2D5A27). CONFIGURABLE.
+FENCE_COLOR = "#B8912F"
+FENCE_LINEWIDTH = 1.8  # a bit lighter than the old boundary stroke's 2.2 -- a fence line, not a heavy boundary stroke
+FENCE_DASH_PATTERN = (0, (6, 4))  # matplotlib dash tuple
+
+# Same DISPLAY-ONLY simplify-then-Chaikin-smooth treatment as the road corridor's
+# own _smooth_line_for_render() (see that function's own docstring) -- here applied
+# to a CLOSED ring instead of an open route (see _chaikin_smooth_closed_ring()).
+# Tolerance matches the road corridor's own ROAD_RENDER_SIMPLIFY_TOLERANCE_M; one
+# extra smoothing iteration beyond the road's own 2, per explicit request for a
+# touch smoother finish on a fence loop. CONFIGURABLE.
+FENCE_RENDER_SIMPLIFY_TOLERANCE_M = ROAD_RENDER_SIMPLIFY_TOLERANCE_M
+FENCE_RENDER_SMOOTHING_ITERATIONS = 3
+
 
 def _reproject_geometry_to_mercator(geometry_wgs84: dict):
     """geometry_wgs84 is a GeoJSON geometry dict in WGS84 (the shape every
@@ -614,6 +660,80 @@ def _draw_road_corridor(ax, line: LineString) -> None:
     )
 
 
+def _chaikin_smooth_closed_ring(coords: list[tuple[float, float]], iterations: int) -> list[tuple[float, float]]:
+    """
+    Same Chaikin corner-cutting construction as _chaikin_smooth_coords()
+    above, but CYCLIC -- for a closed fence loop, not an open route. A
+    closed ring has no meaningful start/end point to pin the way the open-
+    line version pins its first/last coordinate, so pinning one here would
+    leave a real, visible unsmoothed sharp seam at whatever index the
+    coordinate array happens to start at -- a correctness issue, not just
+    cosmetic, since that seam's location is an arbitrary artifact of how
+    the ring's coordinates happen to be ordered, not a real corner of the
+    property.
+
+    Concretely: the duplicated closing coordinate (coords[0] == coords[-1],
+    every ring this module receives is already closed) is dropped before
+    smoothing, every edge is cut INCLUDING the wraparound edge from the
+    last point back to the first (`zip(coords, coords[1:] + coords[:1])`,
+    not `zip(coords, coords[1:])`), and the result is re-closed by
+    appending its own first point back onto the end.
+
+    A no-op below 3 points -- there's no real ring geometry to smooth
+    below a triangle.
+    """
+    if coords[0] == coords[-1]:
+        coords = coords[:-1]
+
+    for _ in range(iterations):
+        if len(coords) < 3:
+            break
+        smoothed = []
+        for (x0, y0), (x1, y1) in zip(coords, coords[1:] + coords[:1]):
+            smoothed.append((0.75 * x0 + 0.25 * x1, 0.75 * y0 + 0.25 * y1))
+            smoothed.append((0.25 * x0 + 0.75 * x1, 0.25 * y0 + 0.75 * y1))
+        coords = smoothed
+
+    return coords + [coords[0]]
+
+
+def _smooth_closed_ring_for_render(ring: LineString) -> LineString:
+    """
+    DISPLAY-ONLY transform for a boundary fence loop's own LineString --
+    same two-pass "simplify, then Chaikin-smooth" pattern as
+    _smooth_line_for_render() (see that function's own docstring), but
+    calling _chaikin_smooth_closed_ring() (cyclic, no pinned start/end
+    point -- see that function's own docstring for why the open-line
+    version can't just be reused here) at FENCE_RENDER_SIMPLIFY_
+    TOLERANCE_M / FENCE_RENDER_SMOOTHING_ITERATIONS. Never touches the
+    real geometry used elsewhere (fencing.py's own fencing_geojson, used
+    for the narrative report) -- the caller passes in a copy already
+    reprojected to Web Mercator for plotting, and this function's return
+    value is used for drawing only.
+    """
+    simplified = ring.simplify(FENCE_RENDER_SIMPLIFY_TOLERANCE_M, preserve_topology=True)
+    smoothed_coords = _chaikin_smooth_closed_ring(list(simplified.coords), FENCE_RENDER_SMOOTHING_ITERATIONS)
+    return LineString(smoothed_coords)
+
+
+def _draw_boundary_fence(ax, ring: LineString) -> None:
+    """Draws `ring` (already smoothed -- see _smooth_closed_ring_for_render())
+    as a single dashed fence line, FENCE_COLOR/FENCE_LINEWIDTH/FENCE_DASH_PATTERN.
+    plot_line() draws via a matplotlib PathPatch (a Patch, not a Line2D), so the
+    dash pattern is applied via the `linestyle` kwarg -- PathPatch has no `dashes`
+    property of its own -- accepting the exact same (offset, (on_off_seq)) tuple
+    format FENCE_DASH_PATTERN is already defined in."""
+    plot_line(
+        ring,
+        ax=ax,
+        add_points=False,
+        color=FENCE_COLOR,
+        linewidth=FENCE_LINEWIDTH,
+        linestyle=FENCE_DASH_PATTERN,
+        zorder=30,
+    )
+
+
 def _boundary_polygon_mercator(boundary_coordinates: list[tuple[float, float]]) -> Polygon:
     lons = [pt[0] for pt in boundary_coordinates]
     lats = [pt[1] for pt in boundary_coordinates]
@@ -712,6 +832,15 @@ def fetch_layout_layers(boundary_coordinates: list[tuple[float, float]], dem: Op
     shapely intersection against its own render_fill_polygon_utm -- see
     render_layout_map()'s own docstring), rather than recomputing contour
     lines per zone.
+
+    fencing_result is fencing.identify_boundary_fencing()'s own output --
+    the canopy-aware boundary fence line(s) that replace this module's
+    former plain boundary stroke (see render_layout_map()'s own
+    docstring). NOT wrapped in try/except: identify_boundary_fencing()
+    carries its own MANDATORY canopy fetch (same hard-fail-on-missing-
+    coverage design as production_result/tree_zone_result's own canopy
+    gates above), and a failure there should propagate up and fail this
+    whole render rather than silently omitting the fence layer.
     """
     if dem is None:
         dem = get_dem_for_boundary(boundary_coordinates)
@@ -725,6 +854,7 @@ def fetch_layout_layers(boundary_coordinates: list[tuple[float, float]], dem: Op
     structure_site = fetch_and_select_optimal_structure_site(boundary_coordinates, dem=dem)
     water_features = get_water_features_for_boundary(boundary_coordinates)
     contour_lines = compute_contour_lines(dem)
+    fencing_result = identify_boundary_fencing(boundary_coordinates, dem=dem)
 
     return {
         "dem": dem,
@@ -735,6 +865,7 @@ def fetch_layout_layers(boundary_coordinates: list[tuple[float, float]], dem: Op
         "structure_site": structure_site,
         "water_features": water_features,
         "contour_lines": contour_lines,
+        "fencing_result": fencing_result,
     }
 
 
@@ -765,6 +896,7 @@ def render_layout_map(
     structure_site = layers["structure_site"]
     water_features = layers["water_features"]
     contour_lines = layers["contour_lines"]
+    fencing_result = layers["fencing_result"]
 
     boundary_polygon = _boundary_polygon_mercator(boundary_coordinates)
     minx, miny, maxx, maxy = boundary_polygon.bounds
@@ -810,8 +942,8 @@ def render_layout_map(
         plot_polygon(context_box, ax=ax, add_points=False, facecolor="#DCD8CE", edgecolor="none", zorder=1)
         basemap_note = f"basemap unavailable ({e})"
 
-    # z-order, back to front, per spec: halo mask, streams, perimeter
-    # boundary, production zone(s), water zone, road corridor, structure site.
+    # z-order, back to front, per spec: halo mask, streams, boundary fence,
+    # production zone(s), water zone, road corridor, structure site.
     if not halo_mask.is_empty:
         plot_polygon(halo_mask, ax=ax, add_points=False, facecolor=HALO_COLOR, edgecolor="none", alpha=HALO_ALPHA, zorder=10)
 
@@ -825,12 +957,26 @@ def render_layout_map(
             for line in stream_geom.geoms:
                 plot_line(line, ax=ax, add_points=False, color=STREAM_COLOR, linewidth=1.0, alpha=0.8, zorder=20)
 
-    plot_polygon(
-        boundary_polygon, ax=ax, add_points=False, facecolor="none", edgecolor=BOUNDARY_COLOR, linewidth=2.2, zorder=30
-    )
-
     legend_entries: list[str] = []
     marker_number = 1
+
+    # Boundary fencing (fencing.identify_boundary_fencing()'s own "perimeter_fencing"
+    # layer) replaces this module's former plain boundary stroke outright -- no
+    # fallback to the old solid line, since this layer always returns at least the
+    # plain-boundary-equivalent loop (see fencing.find_boundary_fencing()'s own
+    # docstring for the no-canopy case). DISPLAY-ONLY smoothing (_smooth_closed_
+    # ring_for_render(), same "never touches the real geometry used elsewhere"
+    # discipline as the road corridor's own _smooth_line_for_render()) -- fencing_
+    # result['fencing_geojson'] (used for the narrative report) is untouched.
+    fencing_features = fencing_result["fencing_geojson"]["features"]
+    segment_count = fencing_result["segment_count"]
+    multiple_fence_segments = segment_count > 1
+    for i, feature in enumerate(fencing_features, start=1):
+        fence_geom = _reproject_geometry_to_mercator(feature["geometry"])
+        render_ring = _smooth_closed_ring_for_render(fence_geom)
+        _draw_boundary_fence(ax, render_ring)
+        label = f"Boundary Fencing {i}" if multiple_fence_segments else "Boundary Fencing"
+        legend_entries.append(label)
 
     scored_patches = production_result.get("scored_patches", []) if production_result else []
     zone_stats = _production_zone_legend_stats(production_result) if production_result else []

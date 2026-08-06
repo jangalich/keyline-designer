@@ -33,16 +33,42 @@ import os
 import tempfile
 
 import numpy as np
-from shapely.geometry import box
+from rasterio.warp import transform as warp_transform
+from rasterio.warp import transform_geom
+from shapely.geometry import Polygon, box, mapping, shape
 
 import production_area as pa
 import render_layout_map as rlm
 from contour_lines import compute_contour_lines
+from fencing import boundary_fencing_to_geojson, find_boundary_fencing
 from production_area import cluster_and_gate, compute_step1_eligible_cells
 from production_suitability import score_production_areas
 
 RESOLUTION = (5.0, 5.0)
 RISE_PER_ROW = 0.4  # meters -- a real, modest gradient so contour lines actually exist
+
+
+def _plain_fencing_result(boundary_coordinates: list, dem: dict) -> dict:
+    """
+    A network-free stand-in for fencing.identify_boundary_fencing(), used only to
+    populate the synthetic `layers` dicts below -- render_layout_map() now always
+    expects a 'fencing_result' key (see fetch_layout_layers()'s own docstring), and
+    these fixtures aren't about exercising fencing.py's own canopy-routing logic
+    (that has its own dedicated coverage in test_fencing.py). Builds the plain,
+    no-canopy case directly via find_boundary_fencing(..., canopy_union_utm=None) +
+    boundary_fencing_to_geojson() -- both pure, no network -- reprojecting UTM back
+    to WGS84 the same way identify_boundary_fencing() itself does.
+    """
+    xs, ys = warp_transform(
+        "EPSG:4326", dem["crs"], [pt[0] for pt in boundary_coordinates], [pt[1] for pt in boundary_coordinates]
+    )
+    boundary_polygon_utm = Polygon(zip(xs, ys))
+    rings_utm = find_boundary_fencing(boundary_polygon_utm, None)
+    rings_wgs84 = [shape(transform_geom(dem["crs"], "EPSG:4326", mapping(ring))) for ring in rings_utm]
+    return {
+        "fencing_geojson": boundary_fencing_to_geojson(rings_wgs84),
+        "segment_count": len(rings_utm),
+    }
 
 
 def _sloped_dem(rows: int, cols: int) -> dict:
@@ -289,6 +315,7 @@ synthetic_layers = {
     "structure_site": None,
     "water_features": {"streams": []},
     "contour_lines": dumbbell_global_contours,
+    "fencing_result": _plain_fencing_result(property_boundary, dumbbell_dem),
 }
 
 with tempfile.TemporaryDirectory() as tmpdir:
@@ -630,6 +657,7 @@ wz_synthetic_layers = {
     "structure_site": None,
     "water_features": {"streams": []},
     "contour_lines": [],
+    "fencing_result": _plain_fencing_result(property_boundary, water_zone_test_dem),
 }
 
 try:
@@ -820,6 +848,7 @@ road_synthetic_layers = {
     "structure_site": None,
     "water_features": {"streams": []},
     "contour_lines": [],
+    "fencing_result": _plain_fencing_result(property_boundary, water_zone_test_dem),
 }
 
 try:
@@ -945,6 +974,7 @@ tree_synthetic_layers = {
     "structure_site": None,
     "water_features": {"streams": []},
     "contour_lines": [],
+    "fencing_result": _plain_fencing_result(property_boundary, water_zone_test_dem),
 }
 
 try:

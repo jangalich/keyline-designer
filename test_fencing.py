@@ -1,8 +1,8 @@
 """
 test_fencing.py
 
-Offline (no-network) checks for fencing.py's Step 1 (stream exclusion)
-and Step 2 (perimeter) geometry -- the two fencing types that get real
+Offline (no-network) checks for fencing.py's stream exclusion and
+boundary fencing geometry -- the two fencing types that get real
 computed geometry (see fencing.py's module docstring for why everything
 else in Subdivision Fences is narrative-only and deliberately NOT
 generated here).
@@ -14,18 +14,37 @@ at all -- this tests find_stream_exclusion_fencing()'s buffer/geometry
 logic directly, independent of whether the live NHD service is reachable
 (it isn't from every environment -- see other test_*.py files' notes
 on the same limitation for their own network-backed layers).
+
+find_boundary_fencing() (the pure geometric core behind boundary
+fencing) gets its own dedicated, purely-synthetic section below, same
+"pure core is independently testable" pattern this file already uses for
+find_stream_exclusion_fencing() -- plain shapely boxes in an arbitrary
+UTM-like coordinate space, no boundary_coordinates/DEM/CRS involved at
+all. identify_boundary_fencing()/identify_fencing() (the fetch-and-wrap
+entry points) additionally need production_area.get_canopy_height_for_
+boundary() mocked (same pattern test_production_area_ceiling.py already
+uses for its own full-pipeline canopy-gate scenarios) to stay offline,
+since both now carry a MANDATORY canopy fetch.
 """
 
 import math
 
-from shapely.geometry import Point, shape
+import numpy as np
+from rasterio.warp import transform as warp_transform
+from shapely.geometry import Point, Polygon, box, shape
+from unittest.mock import patch as mock_patch
 
+import production_area as pa
 from feature_schema import make_feature, validate_feature_collection
 from fencing import (
+    BOUNDARY_FENCE_CANOPY_BUFFER_METERS,
+    BOUNDARY_FENCE_MIN_SEGMENT_ACRES,
     STREAM_EXCLUSION_BUFFER_METERS,
+    boundary_fencing_to_geojson,
+    find_boundary_fencing,
     find_stream_exclusion_fencing,
+    identify_boundary_fencing,
     identify_fencing,
-    perimeter_fencing_to_geojson,
     stream_exclusion_fencing_to_geojson,
 )
 
@@ -138,27 +157,176 @@ assert "suggested" in notes and "not a surveyed fence line" in notes, (
 print("stream_exclusion_fencing_to_geojson output is schema-valid, layer='exclusion_fencing'.")
 
 
-# --- perimeter_fencing_to_geojson: wraps the boundary unmodified, as a line ---
+# =====================================================================
+# find_boundary_fencing(): pure geometric core, purely synthetic geometry,
+# no boundary_coordinates/DEM/CRS/network involved at all -- same "pure
+# core is independently testable" pattern as find_stream_exclusion_
+# fencing() above. A plain 100m x 100m square standing in for
+# boundary_polygon_utm; canopy_union_utm fixtures are hand-built shapely
+# geometry standing in for an already-buffered canopy footprint (the
+# buffering itself is identify_boundary_fencing()'s job, not this
+# function's -- see its own docstring).
+# =====================================================================
 
-perimeter_geojson = perimeter_fencing_to_geojson(PROPERTY_BOUNDARY)
-validate_feature_collection(perimeter_geojson)
-assert len(perimeter_geojson["features"]) == 1
-perimeter_feature = perimeter_geojson["features"][0]
-assert perimeter_feature["properties"]["layer"] == "perimeter_fencing"
-assert perimeter_feature["geometry"]["type"] == "LineString", (
-    "perimeter fencing must be a LineString (a fence line), not a Polygon (a filled zone)"
+TEST_BOUNDARY_UTM = box(0, 0, 100, 100)  # 10,000 sq m, ~2.47 acres
+
+
+# --- 1. no canopy at all -> the plain-wrap case, unchanged: the boundary's own exterior ring ---
+
+no_canopy_rings = find_boundary_fencing(TEST_BOUNDARY_UTM, None)
+assert len(no_canopy_rings) == 1, f"no canopy should return exactly 1 ring, got {len(no_canopy_rings)}"
+assert no_canopy_rings[0].equals(Polygon(TEST_BOUNDARY_UTM.exterior).exterior), (
+    "with no canopy at all, the returned ring must match the boundary's own exterior ring exactly"
+)
+print("find_boundary_fencing(): no canopy returns the boundary's own unmodified exterior ring.")
+
+
+# --- 2. canopy touching the boundary at one location, not splitting it -> 1 ring, genuinely notched ---
+
+touching_canopy = box(40, 90, 60, 110)  # straddles the top edge (y=100) from x=40-60, doesn't reach either side edge
+touching_rings = find_boundary_fencing(TEST_BOUNDARY_UTM, touching_canopy)
+assert len(touching_rings) == 1, f"a single non-splitting notch should return exactly 1 ring, got {len(touching_rings)}"
+assert not touching_rings[0].equals(Polygon(TEST_BOUNDARY_UTM.exterior).exterior), (
+    "a real notch must NOT match the plain boundary ring -- confirms the notch actually happened"
+)
+print("find_boundary_fencing(): canopy touching one edge location returns 1 ring, genuinely notched inward.")
+
+
+# --- 3. canopy entirely interior, never touching the boundary edge -> ignored: unmodified boundary ring ---
+
+interior_canopy = box(30, 30, 50, 50)  # well inside TEST_BOUNDARY_UTM, doesn't touch any edge
+interior_rings = find_boundary_fencing(TEST_BOUNDARY_UTM, interior_canopy)
+assert len(interior_rings) == 1, f"interior-only canopy should return exactly 1 ring, got {len(interior_rings)}"
+assert interior_rings[0].equals(Polygon(TEST_BOUNDARY_UTM.exterior).exterior), (
+    "canopy that never touches the boundary edge carves a HOLE, not a change to the fence line -- the "
+    "returned ring must be the unmodified boundary ring, not just 'some single ring'"
+)
+print("find_boundary_fencing(): interior-only canopy (a hole, discarded) leaves the boundary ring unmodified.")
+
+
+# --- 4. canopy spanning end-to-end, splitting the parcel -> exactly 2 closed loops ---
+
+spanning_canopy = box(-10, 45, 110, 55)  # crosses both the left (x=0) and right (x=100) edges
+split_rings = find_boundary_fencing(TEST_BOUNDARY_UTM, spanning_canopy)
+assert len(split_rings) == 2, f"canopy spanning end-to-end should split the parcel into 2 loops, got {len(split_rings)}"
+for ring in split_rings:
+    assert list(ring.coords)[0] == list(ring.coords)[-1], "each split loop must be a closed LineString"
+print(f"find_boundary_fencing(): canopy spanning end-to-end splits the parcel into {len(split_rings)} closed loops.")
+
+
+# --- 5. a tiny sliver-touch case (canopy just grazing a corner) -> dropped by the min-segment-acres floor ---
+
+# A diagonal band (a buffered line, real width -- not a single-point touch) that crosses both the top
+# and right edges near the (100,100) corner without covering the corner itself, cleanly severing a tiny
+# triangular sliver (~0.025 acres, well under BOUNDARY_FENCE_MIN_SEGMENT_ACRES) from the main body.
+from shapely.geometry import LineString as _LineString
+
+sliver_canopy = _LineString([(75, 105), (105, 75)]).buffer(4.0)
+sliver_pieces_raw = TEST_BOUNDARY_UTM.difference(sliver_canopy)
+assert sliver_pieces_raw.geom_type == "MultiPolygon" and len(sliver_pieces_raw.geoms) == 2, (
+    "test setup should genuinely produce a main body + a separate tiny corner sliver"
+)
+sliver_piece_acres = min(g.area for g in sliver_pieces_raw.geoms) / 4046.8564224
+assert sliver_piece_acres < BOUNDARY_FENCE_MIN_SEGMENT_ACRES, (
+    f"test setup's sliver ({sliver_piece_acres} ac) must genuinely sit below the "
+    f"{BOUNDARY_FENCE_MIN_SEGMENT_ACRES} ac floor for this to be a real test of the filter"
 )
 
-out_coords = perimeter_feature["geometry"]["coordinates"]
-in_coords = [tuple(pt) for pt in PROPERTY_BOUNDARY]
-assert out_coords[:len(in_coords)] == in_coords, "perimeter geometry must be the boundary itself, unmodified"
-assert out_coords[0] == out_coords[-1], "perimeter fence line should be a closed ring"
-print("perimeter_fencing_to_geojson wraps the property boundary unmodified as a closed LineString.")
-
-assert "no fence type, height, or material" in perimeter_feature["properties"]["confidence_notes"].lower(), (
-    "perimeter fencing confidence_notes must explicitly state fence type/height/material is out of scope"
+sliver_rings = find_boundary_fencing(TEST_BOUNDARY_UTM, sliver_canopy)
+assert len(sliver_rings) == 1, (
+    f"the tiny corner sliver must be dropped by BOUNDARY_FENCE_MIN_SEGMENT_ACRES, not returned as a "
+    f"spurious extra segment -- expected 1 ring (main body only), got {len(sliver_rings)}"
 )
-print("Perimeter fencing confidence_notes explicitly excludes fence type/height/material guidance.")
+print(
+    f"find_boundary_fencing(): a tiny corner sliver ({sliver_piece_acres:.4f} ac) grazing a boundary "
+    f"corner is dropped by BOUNDARY_FENCE_MIN_SEGMENT_ACRES ({BOUNDARY_FENCE_MIN_SEGMENT_ACRES} ac), "
+    "leaving just the main body ring."
+)
+
+
+# =====================================================================
+# identify_boundary_fencing()/identify_fencing(): fetch-and-wrap entry points. Both now carry a
+# MANDATORY canopy fetch (production_area.get_required_tree_root_zone_mask_utm()) -- mocked here
+# via production_area.get_canopy_height_for_boundary (same pattern test_production_area_ceiling.py
+# already uses for its own full-pipeline canopy-gate scenarios) so this stays fully offline. A
+# synthetic DEM sized to PROPERTY_BOUNDARY's own UTM extent stands in for a real fetch.
+# =====================================================================
+
+
+def _fake_no_canopy(boundary_coordinates, dem):
+    return {
+        "array": np.full(dem["array"].shape, 1.0, dtype=np.float32),  # below threshold everywhere -- no trees
+        "resolution_meters": dem["resolution_meters"],
+        "origin_x": dem["origin_x"],
+        "origin_y": dem["origin_y"],
+        "crs": dem["crs"],
+        "source_item_id": "offline-test-stub-no-canopy",
+    }
+
+
+_boundary_xs, _boundary_ys = warp_transform(
+    "EPSG:4326", UTM_CRS, [pt[0] for pt in PROPERTY_BOUNDARY], [pt[1] for pt in PROPERTY_BOUNDARY]
+)
+_PAD_M = 50.0
+_RES = (5.0, 5.0)
+_minx, _maxx = min(_boundary_xs) - _PAD_M, max(_boundary_xs) + _PAD_M
+_miny, _maxy = min(_boundary_ys) - _PAD_M, max(_boundary_ys) + _PAD_M
+_cols = int((_maxx - _minx) / _RES[0]) + 1
+_rows = int((_maxy - _miny) / _RES[1]) + 1
+TEST_DEM = {
+    "array": np.full((_rows, _cols), 300.0, dtype=np.float32),
+    "resolution_meters": _RES,
+    "origin_x": _minx,
+    "origin_y": _maxy,
+    "crs": UTM_CRS,
+}
+
+
+# --- identify_boundary_fencing: no canopy -> 1 schema-valid "perimeter_fencing" feature, fence_type=boundary ---
+
+with mock_patch.object(pa, "get_canopy_height_for_boundary", _fake_no_canopy):
+    boundary_result = identify_boundary_fencing(PROPERTY_BOUNDARY, dem=TEST_DEM)
+validate_feature_collection(boundary_result["fencing_geojson"])
+assert boundary_result["segment_count"] == 1
+boundary_features = boundary_result["fencing_geojson"]["features"]
+assert len(boundary_features) == 1
+boundary_feature = boundary_features[0]
+assert boundary_feature["properties"]["layer"] == "perimeter_fencing"
+assert boundary_feature["properties"]["fence_type"] == "boundary"
+assert boundary_feature["properties"]["canopy_buffer_meters"] == BOUNDARY_FENCE_CANOPY_BUFFER_METERS
+assert boundary_feature["properties"]["confidence"] == "high"
+assert boundary_feature["geometry"]["type"] == "LineString", (
+    "boundary fencing must be a LineString (a fence line), not a Polygon (a filled zone)"
+)
+boundary_out_coords = boundary_feature["geometry"]["coordinates"]
+assert tuple(boundary_out_coords[0]) == tuple(boundary_out_coords[-1]), "boundary fence line should be a closed ring"
+print("identify_boundary_fencing() with no real canopy produces 1 schema-valid 'perimeter_fencing' feature.")
+
+assert "no fence type, height, or material" in boundary_feature["properties"]["confidence_notes"].lower(), (
+    "boundary fencing confidence_notes must explicitly state fence type/height/material is out of scope"
+)
+assert "inset inward" in boundary_feature["properties"]["confidence_notes"].lower(), (
+    "boundary fencing confidence_notes must explicitly describe the canopy-inset behavior"
+)
+print("Boundary fencing confidence_notes explicitly excludes fence type/height/material guidance.")
+
+
+# --- boundary_fencing_to_geojson: a multi-segment split labels/annotates each segment ---
+
+split_geojson = boundary_fencing_to_geojson(
+    [_LineString(box(0, 0, 10, 10).exterior.coords), _LineString(box(20, 20, 30, 30).exterior.coords)]
+)
+validate_feature_collection(split_geojson)
+split_features = split_geojson["features"]
+assert len(split_features) == 2
+assert [f["properties"]["segment_index"] for f in split_features] == [1, 2]
+assert [f["properties"]["label"] for f in split_features] == ["Boundary fencing 1", "Boundary fencing 2"]
+for f in split_features:
+    assert f"{2} separate fence loops" in f["properties"]["confidence_notes"], (
+        "a multi-segment result's confidence_notes must explicitly call out the split and how many "
+        "separate physical fence runs it requires"
+    )
+print("boundary_fencing_to_geojson() labels/annotates a multi-segment split (segment_index, split note) correctly.")
 
 
 # --- identify_fencing: combines both layers, reusing a pre-fetched water_features_geojson ---
@@ -166,23 +334,26 @@ print("Perimeter fencing confidence_notes explicitly excludes fence type/height/
 from feature_schema import make_feature_collection
 
 prefetched_water = make_feature_collection([STREAM_FEATURE])
-result = identify_fencing(PROPERTY_BOUNDARY, water_features_geojson=prefetched_water)
+with mock_patch.object(pa, "get_canopy_height_for_boundary", _fake_no_canopy):
+    result = identify_fencing(PROPERTY_BOUNDARY, water_features_geojson=prefetched_water, dem=TEST_DEM)
 validate_feature_collection(result["fencing_geojson"])
 
 layers = sorted(f["properties"]["layer"] for f in result["fencing_geojson"]["features"])
 assert layers == ["exclusion_fencing", "perimeter_fencing"], f"expected both fencing layers, got {layers}"
+assert result["segment_count"] == 1
 print("identify_fencing() combines exclusion_fencing + perimeter_fencing into one schema-valid FeatureCollection.")
 
 
-# --- identify_fencing: a water_features_geojson with no streams still produces perimeter fencing ---
+# --- identify_fencing: a water_features_geojson with no streams still produces boundary fencing ---
 
 no_stream_water = make_feature_collection([])
-no_stream_result = identify_fencing(PROPERTY_BOUNDARY, water_features_geojson=no_stream_water)
+with mock_patch.object(pa, "get_canopy_height_for_boundary", _fake_no_canopy):
+    no_stream_result = identify_fencing(PROPERTY_BOUNDARY, water_features_geojson=no_stream_water, dem=TEST_DEM)
 no_stream_layers = [f["properties"]["layer"] for f in no_stream_result["fencing_geojson"]["features"]]
 assert no_stream_layers == ["perimeter_fencing"], (
     f"with no streams, only perimeter_fencing should be produced, got {no_stream_layers}"
 )
-print("identify_fencing() still produces perimeter fencing when no streams are present.")
+print("identify_fencing() still produces boundary fencing when no streams are present.")
 
 
 print("\nAll fencing checks passed.")
