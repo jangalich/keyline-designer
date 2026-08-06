@@ -116,11 +116,10 @@ METERS_PER_FOOT = 0.3048
 # METERS comment for the fullest statement of this), so a future retune
 # of one buffer doesn't silently couple to another that happens to serve
 # a different purpose (production eligibility vs water-zone eligibility
-# vs, here, fence routing). A narrower buffer than the 10ft production/
-# water gates -- 5ft is enough working clearance for a fence builder to
-# walk the line without brushing branches, not a full root-zone
-# protection radius. CONFIGURABLE.
-BOUNDARY_FENCE_CANOPY_BUFFER_METERS = 5 * METERS_PER_FOOT  # ~1.524m
+# vs, here, fence routing). 0ft: the fence line hugs the real canopy
+# footprint directly, no extra working-clearance margin beyond it.
+# CONFIGURABLE.
+BOUNDARY_FENCE_CANOPY_BUFFER_METERS = 0 * METERS_PER_FOOT  # 0m
 
 # Area floor below which a fence-loop fragment produced by find_boundary_
 # fencing() (e.g. a sliver where canopy just grazes a boundary corner) is

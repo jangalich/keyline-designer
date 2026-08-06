@@ -456,13 +456,13 @@ ROAD_RENDER_INNER_ALPHA = 0.7
 # Boundary fencing (fencing.identify_boundary_fencing()'s own "perimeter_fencing"
 # layer) renders as a dashed line -- a fence line, not the heavy solid cartographic
 # boundary stroke this layer replaces (see render_layout_map()'s own docstring for
-# why that stroke was removed outright, not kept as a fallback). An earthy yellow,
+# why that stroke was removed outright, not kept as a fallback). A mustard yellow,
 # chosen to read clearly against both green production-zone contours and tan/green
 # aerial imagery, and distinct from every other layer color already in use
 # (production green #4C9A2A, water blue #1F6FB2, road dark gray #3A3A3A, structure
 # red #D64545, contour brown #6B4423, tree dark green #2D5A27). CONFIGURABLE.
-FENCE_COLOR = "#B8912F"
-FENCE_LINEWIDTH = 1.8  # a bit lighter than the old boundary stroke's 2.2 -- a fence line, not a heavy boundary stroke
+FENCE_COLOR = "#D4A017"
+FENCE_LINEWIDTH = 1.2  # thin -- a fence line, not a heavy boundary stroke
 FENCE_DASH_PATTERN = (0, (6, 4))  # matplotlib dash tuple
 
 # Same DISPLAY-ONLY simplify-then-Chaikin-smooth treatment as the road corridor's
