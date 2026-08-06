@@ -1,7 +1,7 @@
 """
 fencing.py
 
-Subdivision Fences data layer (Scale of Permanence step 7). Two fencing
+Subdivision Fences data layer (Scale of Permanence step 7). Four fencing
 types get real computed geometry here:
 
   STREAM EXCLUSION FENCING -- streams (USGS NHD, hydrology_data.py) are
@@ -23,6 +23,45 @@ types get real computed geometry here:
   property), the boundary line is unaffected. No fence type/height/
   material guidance, which is explicitly out of scope (see report_
   generator.py's step 7 framing).
+
+  ROAD CORRIDOR EXCLUSION FENCING -- road_corridors.py's own single
+  generated/selected road corridor (find_road_routes()'s real, walk-
+  ordered path cells, not a rounded continuous-geometry route) is real,
+  already-computed geometry, the same "real, already-sited feature"
+  standing STREAM EXCLUSION FENCING's own buffering above relies on -- so
+  it's safe to fence it in directly. Mirrors tree_zone_candidates.py's
+  own _road_corridor_exclusion_polygon() construction exactly (see
+  ROAD_CORRIDOR_FENCE_DILATION_CELLS below): the corridor's own path
+  cells are dilated by a whole DEM cell in every direction (raster_grid.
+  binary_dilate(), 8-connected) into a real per-cell-square union
+  footprint (raster_grid.cell_union_footprint()), then inset a short,
+  fixed distance (ROAD_FENCE_LINE_INSET_METERS) so the drawn fence line
+  reads tight to the road rather than sitting a full clearance-cell out.
+  Fully INDEPENDENT of the boundary fence -- deliberately NOT spliced or
+  gated into it; the two loops are allowed to overlap where the corridor
+  meets the boundary edge (e.g. near the corridor's own anchor point),
+  which is expected, not a bug -- a gate/access point is implied there
+  but not computed by this layer. No corridor at all (no anchor point
+  given to road_corridors.py yet, the common not-yet-wired-up case)
+  produces zero features here, not an error.
+
+  EXISTING FARM ROAD EXCLUSION FENCING -- real, already-mapped public
+  road geometry that falls on-parcel (farm_roads_data.
+  get_farm_roads_for_boundary(), USGS National Map Transportation data --
+  the SAME real, already-clean vector-line data get_road_exclusion_
+  union_utm() in that module already buffers directly rather than
+  rasterizing, for the same reason) is a second real, already-sited
+  feature, buffered by a fixed distance (EXISTING_FARM_ROAD_FENCE_BUFFER_
+  METERS) with the BOUNDARY of that buffer output as the fence line --
+  same "buffer a real line feature, output the outline" recipe STREAM
+  EXCLUSION FENCING's own buffering above already uses, not the cell-
+  dilation approach ROAD CORRIDOR EXCLUSION FENCING above uses, since
+  this is already-clean vector data, not DEM-derived. Only the on-parcel
+  portion of each mapped road matters here -- each road's geometry is
+  clipped to the boundary first, so a road that merely fronts the
+  property without crossing into it produces nothing. Also fully
+  INDEPENDENT of the boundary fence, same overlap-is-expected reasoning
+  as above.
 
 Everything else this step covers -- pond/water zone exclusion fencing,
 tree crop/windbreak exclusion fencing, and subdivision/rotational
@@ -46,33 +85,48 @@ zones, production zones) even where those cross the boundary -- canopy
 is the one exception, not a precedent for routing the boundary fence
 around everything else too.
 
-find_stream_exclusion_fencing() and find_boundary_fencing() are both pure
+find_stream_exclusion_fencing(), find_boundary_fencing(), find_road_
+corridor_fencing(), and find_existing_farm_road_fencing() are all pure
 geometric cores: no network I/O, taking already-fetched geometry (stream
 features + a target UTM CRS; a boundary polygon + an already-fetched/
-already-buffered canopy footprint, respectively) -- same "logic separable
-from fetching" split as water_candidate_zones.find_candidate_zones() and
-every other *_candidates.py/*_corridors.py module in this codebase.
-identify_boundary_fencing() is the fetch-and-wrap entry point that feeds
-find_boundary_fencing() real canopy data (production_area.
-get_required_tree_root_zone_mask_utm(), the SAME mandatory canopy gate
-production_area.py/tree_zone_candidates.py already use) and wraps the
-result in schema, both on the "perimeter_fencing" layer -- kept as one
-layer (not split per fence type) since road/water/tree-crop/stream-
-exclusion fencing will all land here too in later passes, distinguished
-by each feature's own "fence_type" property, not by separate layers.
+already-buffered canopy footprint; a DEM + the selected road corridor's
+own path cells; farm road features + a boundary polygon, respectively)
+-- same "logic separable from fetching" split as water_candidate_zones.
+find_candidate_zones() and every other *_candidates.py/*_corridors.py
+module in this codebase. identify_boundary_fencing() is the fetch-and-
+wrap entry point that feeds find_boundary_fencing() real canopy data
+(production_area.get_required_tree_root_zone_mask_utm(), the SAME
+mandatory canopy gate production_area.py/tree_zone_candidates.py already
+use) and wraps the result in schema. identify_fencing() is the full
+pipeline entry point that additionally feeds find_road_corridor_fencing()
+the selected road corridor's own path cells (deriving them itself via
+road_corridors.identify_road_corridor_candidates() if not supplied -- a
+no-anchor-point-given corridor cleanly produces zero features, not an
+error) and find_existing_farm_road_fencing() real on-parcel farm road
+geometry (farm_roads_data.get_farm_roads_for_boundary(), degrading
+gracefully on fetch failure -- this is NOT canopy, same independent-
+degrade pattern every other non-canopy network fetch in this codebase
+uses). All four fence types land on the "perimeter_fencing" layer (aside
+from stream exclusion's own separate "exclusion_fencing" layer) -- kept
+as one shared layer rather than split per fence type (water/tree-crop
+exclusion fencing will land here too in later passes), distinguished by
+each feature's own "fence_type" property, not by separate layers.
 """
 
 from typing import Optional
 
+import numpy as np
 from rasterio.warp import transform as warp_transform
 from rasterio.warp import transform_geom
 from shapely.geometry import LineString, Polygon, mapping, shape
 
 from dem_data import get_dem_for_boundary
+from farm_roads_data import get_farm_roads_for_boundary
 from feature_schema import CONFIDENCE_HIGH, CONFIDENCE_MEDIUM, make_feature, make_feature_collection
 from hydrology_data import get_water_features_geojson
 from production_area import get_required_tree_root_zone_mask_utm
-from raster_grid import SQUARE_METERS_PER_ACRE, cell_union_footprint
+from raster_grid import SQUARE_METERS_PER_ACRE, binary_dilate, cell_union_footprint
+from road_corridors import identify_road_corridor_candidates
 
 # Buffer distance (meters) used to turn a stream's real NHD centerline
 # into a livestock-exclusion fence-line recommendation: the fence runs
@@ -147,6 +201,53 @@ BOUNDARY_FENCE_SPLIT_NOTE_TEMPLATE = (
     "separate fence loops requiring {segment_count} separate physical fence runs, not one "
     "continuous loop."
 )
+
+# Whole-cell dilation radius applied to the selected road corridor's own
+# path cells (road_corridors.find_road_routes()'s own 'cells') before
+# building the real cell-footprint polygon this fence line encloses --
+# the SAME whole-cell dilation radius as tree_zone_candidates.
+# TREE_ZONE_ROAD_BUFFER_CELLS, reused here for the SAME underlying reason
+# (see that constant's own comment): without it, two grid-aligned squares
+# that only share a CORNER, not an edge, leave zero real gap between
+# them -- a real, cell-accurate clearance envelope around the route's own
+# path cells, not a rounded continuous-geometry buffer. Deliberately its
+# OWN constant here, NOT imported from tree_zone_candidates.py -- the two
+# modules use this same starting value for DIFFERENT downstream purposes
+# (an exclusion-zone search space there, a fence line's own clearance
+# envelope here) and should stay independently tunable even though they
+# start at the same number, same "constants stay separate even when
+# numerically identical" convention BOUNDARY_FENCE_CANOPY_BUFFER_METERS's
+# own comment already states for this module. CONFIGURABLE.
+ROAD_CORRIDOR_FENCE_DILATION_CELLS = 1
+
+# Pulls the actual fence LINE inward from the dilated footprint's outer
+# edge (see ROAD_CORRIDOR_FENCE_DILATION_CELLS above), so the fence reads
+# tight to the road rather than sitting a full clearance-cell out.
+# Deliberately SEPARATE from the dilation above: the dilation establishes
+# the real clearance envelope (how much ground is actually kept clear
+# around the road), this inset only affects where the drawn line sits
+# WITHIN that already-established envelope -- two different concerns,
+# not one number doing double duty. 1ft. CONFIGURABLE -- tune by eye
+# against the reference property.
+ROAD_FENCE_LINE_INSET_METERS = 0.3048  # 1ft
+
+# Buffer (meters) around real, already-clean vector road geometry
+# (farm_roads_data.get_farm_roads_for_boundary(), USGS National Map
+# Transportation data) that falls on-parcel -- a real distance, not a
+# whole-cell dilation, same "don't rasterize already-clean vector data"
+# reasoning farm_roads_data.get_road_exclusion_union_utm()'s own
+# docstring already gives for why IT buffers this same data directly
+# rather than going through a raster-dilation step. Deliberately its OWN
+# constant, NOT reused from STREAM_EXCLUSION_BUFFER_METERS (a livestock-
+# exclusion setback, not a fence-line buffer around a road) or
+# farm_roads_data.ROAD_EXCLUSION_BUFFER_METERS (a hard production-zone
+# cell exclusion, not a fence line) -- a similar number might work for
+# all three, but each serves a genuinely different purpose, same
+# "constants stay separate even when numerically identical" convention
+# this module already applies elsewhere (see BOUNDARY_FENCE_CANOPY_
+# BUFFER_METERS's own comment). Placeholder value -- CONFIGURABLE, tune
+# against the reference property.
+EXISTING_FARM_ROAD_FENCE_BUFFER_METERS = 3.0
 
 
 def _utm_epsg_for_lonlat(longitude: float, latitude: float) -> int:
@@ -372,6 +473,226 @@ def boundary_fencing_to_geojson(
     return make_feature_collection(features)
 
 
+ROAD_CORRIDOR_FENCE_CONFIDENCE_NOTES_TEMPLATE = (
+    "This fence line encloses road_corridors.py's own single generated/selected road corridor, "
+    "buffered {dilation_cells} DEM cell(s) in every direction for a real clearance envelope around "
+    "the route's own path cells, then inset {line_inset_meters}m ({line_inset_feet}ft) inward for "
+    "the drawn line itself. It is INDEPENDENT of the boundary fence -- the two loops are not "
+    "spliced or gated together, and may visually overlap it near the corridor's own anchor point "
+    "(a gate/access point is implied there but not computed by this layer); that overlap is "
+    "expected, not a bug. It inherits road_corridors.py's own limitations: the route itself is a "
+    "planning suggestion, not a surveyed or built road -- confirm the actual alignment on the "
+    "ground before building fence on it."
+)
+
+EXISTING_FARM_ROAD_FENCE_CONFIDENCE_NOTES_TEMPLATE = (
+    "This fence line encloses the on-parcel portion of a real, already-existing mapped road (USGS "
+    "National Map Transportation data -- see farm_roads_data.py's own confidence_notes: private "
+    "farm tracks, driveways, or internal access lanes not captured in that public dataset will not "
+    "appear here either), buffered {buffer_meters}m ({buffer_feet}ft). It is INDEPENDENT of the "
+    "boundary fence -- the two loops are not spliced or gated together, and may visually overlap "
+    "it where the road crosses the boundary (a gate/access point is implied there but not "
+    "computed by this layer); that overlap is expected, not a bug."
+)
+
+
+def find_road_corridor_fencing(
+    dem: dict,
+    selected_road_corridor_cells: Optional[list],
+    dilation_cells: int = ROAD_CORRIDOR_FENCE_DILATION_CELLS,
+    line_inset_meters: float = ROAD_FENCE_LINE_INSET_METERS,
+) -> Optional[LineString]:
+    """
+    Pure geometric core -- no network I/O. Mirrors tree_zone_candidates.
+    _road_corridor_exclusion_polygon() construction exactly (see
+    ROAD_CORRIDOR_FENCE_DILATION_CELLS's own comment): builds a fresh
+    boolean cell mask from selected_road_corridor_cells (road_corridors.
+    find_road_routes()'s own real path cells, in walk order), dilates it
+    by dilation_cells in every direction (raster_grid.binary_dilate(),
+    8-connected), and turns the dilated mask into a real per-cell-square
+    union polygon (raster_grid.cell_union_footprint()) -- the SAME real
+    footprint every other cell-clustering consumer in this pipeline
+    builds from a boolean mask, not a hull or a smoothed buffer.
+
+    selected_road_corridor_cells is None or empty whenever no corridor
+    was generated/selected at all -- the common "no anchor point given"
+    case road_corridors.fetch_and_select_optimal_road_corridor() (and
+    identify_road_corridor_candidates()) already return None for. Returns
+    None immediately in that case -- not an error, and not an empty
+    LineString.
+
+    The fence LINE itself is then inset line_inset_meters inward from
+    that dilated footprint's own outer edge (fence_polygon =
+    dilated_footprint.buffer(-line_inset_meters)) so it reads tight to
+    the road rather than sitting a full clearance-cell out. On a narrow/
+    pinched stretch of a snaking corridor, that negative buffer can come
+    back empty or invalid -- a real risk, not a hypothetical -- in which
+    case this falls back to the dilated footprint's own outer edge
+    unbuffered (fence_polygon = dilated_footprint) rather than silently
+    dropping the segment or returning broken geometry. That fallback is
+    printed so it's visible if it ever actually triggers on a real
+    property.
+
+    Returns fence_polygon's exterior ring as a closed LineString (first
+    coord == last coord).
+    """
+    if not selected_road_corridor_cells:
+        return None
+
+    road_cell_mask = np.zeros(dem["array"].shape, dtype=bool)
+    for cell_r, cell_c in selected_road_corridor_cells:
+        road_cell_mask[cell_r, cell_c] = True
+    dilated_mask = binary_dilate(road_cell_mask, dilation_cells)
+    dilated_footprint = cell_union_footprint(dem, dilated_mask)
+
+    fence_polygon = dilated_footprint.buffer(-line_inset_meters)
+    if fence_polygon.is_empty or not fence_polygon.is_valid or fence_polygon.geom_type != "Polygon":
+        print(
+            f"  find_road_corridor_fencing: {line_inset_meters}m inset produced an empty/invalid "
+            "result on a narrow/pinched stretch of the corridor -- falling back to the dilated "
+            "footprint's own outer edge (unbuffered) for the fence line."
+        )
+        fence_polygon = dilated_footprint
+
+    return LineString(fence_polygon.exterior.coords)
+
+
+def road_corridor_fencing_to_geojson(
+    fence_line: Optional[LineString],
+    dilation_cells: int = ROAD_CORRIDOR_FENCE_DILATION_CELLS,
+    line_inset_meters: float = ROAD_FENCE_LINE_INSET_METERS,
+) -> dict:
+    """
+    Wraps find_road_corridor_fencing()'s output (already reprojected to
+    WGS84 by the caller -- see identify_fencing()) as a schema-conformant
+    Feature on the "perimeter_fencing" layer (fence_type=
+    "road_corridor_exclusion") -- the same shared layer boundary fencing
+    uses, distinguished by fence_type rather than a separate layer.
+
+    fence_line may be a shapely LineString or an already-mapped GeoJSON
+    geometry dict. None (no corridor at all -- see find_road_corridor_
+    fencing()'s own docstring) returns an empty FeatureCollection, not an
+    error.
+    """
+    if fence_line is None:
+        return make_feature_collection([])
+
+    geometry_wgs84 = fence_line if isinstance(fence_line, dict) else mapping(fence_line)
+    confidence_notes = ROAD_CORRIDOR_FENCE_CONFIDENCE_NOTES_TEMPLATE.format(
+        dilation_cells=dilation_cells,
+        line_inset_meters=round(line_inset_meters, 3),
+        line_inset_feet=round(line_inset_meters / METERS_PER_FOOT, 1),
+    )
+    feature = make_feature(
+        feature_id="perimeter-fencing-road-corridor",
+        geometry=geometry_wgs84,
+        layer="perimeter_fencing",
+        label="Road corridor fencing",
+        confidence=CONFIDENCE_HIGH,
+        confidence_notes=confidence_notes,
+        extra_properties={
+            "fence_type": "road_corridor_exclusion",
+            "dilation_cells": dilation_cells,
+            "line_inset_meters": line_inset_meters,
+        },
+    )
+    return make_feature_collection([feature])
+
+
+def find_existing_farm_road_fencing(
+    farm_road_features: list[dict],
+    boundary_polygon_utm: Polygon,
+    utm_crs: str,
+    buffer_meters: float = EXISTING_FARM_ROAD_FENCE_BUFFER_METERS,
+) -> list[dict]:
+    """
+    Pure geometric core (mirrors find_stream_exclusion_fencing()'s own
+    shape -- see that function's docstring) -- no network I/O. Takes
+    already-fetched farm road features (farm_roads_data.
+    get_farm_roads_for_boundary()'s own {'name', 'geometry'} shape, real
+    WGS84 LineString/MultiLineString geometry) and the property boundary
+    (already in utm_crs), and returns a fence line around the ON-PARCEL
+    portion of each road.
+
+    Each road's geometry is reprojected into utm_crs, then CLIPPED to
+    boundary_polygon_utm.intersection(...) FIRST -- only the on-parcel
+    portion matters; a road that merely fronts the boundary without ever
+    crossing into it clips to empty (or a zero-length touch) and
+    correctly produces nothing. The clipped on-parcel portion is then
+    buffered by buffer_meters, and the BOUNDARY of that buffer (the
+    outline, not the filled area) is returned as fence-line geometry --
+    same "buffer a real line feature, output the outline" recipe find_
+    stream_exclusion_fencing() already uses, not the dilation/inset
+    approach find_road_corridor_fencing() above uses, since this is
+    already-clean vector data, not DEM-derived.
+
+    Returns one entry per usable on-parcel road segment:
+        {
+            'source_feature_id': str,
+            'source_label': str,
+            'geometry_wgs84': GeoJSON LineString/MultiLineString,
+        }
+    """
+    results = []
+    for i, feature in enumerate(farm_road_features):
+        geometry = feature.get("geometry")
+        if not geometry or not geometry.get("coordinates"):
+            continue
+
+        geometry_utm = shape(transform_geom("EPSG:4326", utm_crs, geometry))
+        on_parcel_geometry_utm = boundary_polygon_utm.intersection(geometry_utm)
+        if on_parcel_geometry_utm.is_empty or on_parcel_geometry_utm.length == 0:
+            continue
+
+        buffered_polygon_utm = on_parcel_geometry_utm.buffer(buffer_meters)
+        if buffered_polygon_utm.is_empty:
+            continue
+
+        fence_line_utm = buffered_polygon_utm.boundary
+        geometry_wgs84 = transform_geom(utm_crs, "EPSG:4326", mapping(fence_line_utm))
+
+        results.append(
+            {
+                "source_feature_id": f"farm-road-{i}",
+                "source_label": feature.get("name") or "Unnamed road",
+                "geometry_wgs84": geometry_wgs84,
+            }
+        )
+
+    return results
+
+
+def existing_farm_road_fencing_to_geojson(
+    fencing_entries: list[dict], buffer_meters: float = EXISTING_FARM_ROAD_FENCE_BUFFER_METERS
+) -> dict:
+    """Wraps find_existing_farm_road_fencing() output as schema-conformant
+    Features on the "perimeter_fencing" layer (fence_type=
+    "existing_farm_road_exclusion") -- same shared layer/distinguish-by-
+    fence_type convention as road_corridor_fencing_to_geojson()/
+    boundary_fencing_to_geojson()."""
+    confidence_notes = EXISTING_FARM_ROAD_FENCE_CONFIDENCE_NOTES_TEMPLATE.format(
+        buffer_meters=round(buffer_meters, 3), buffer_feet=round(buffer_meters / METERS_PER_FOOT, 1)
+    )
+
+    features = [
+        make_feature(
+            feature_id=f"perimeter-fencing-existing-farm-road-{i}",
+            geometry=entry["geometry_wgs84"],
+            layer="perimeter_fencing",
+            label=f"Existing farm road fencing ({entry['source_label']})",
+            confidence=CONFIDENCE_MEDIUM,
+            confidence_notes=confidence_notes,
+            extra_properties={
+                "fence_type": "existing_farm_road_exclusion",
+                "source_feature_id": entry["source_feature_id"],
+                "buffer_meters": buffer_meters,
+            },
+        )
+        for i, entry in enumerate(fencing_entries, start=1)
+    ]
+    return make_feature_collection(features)
+
+
 def identify_boundary_fencing(
     boundary_coordinates: list[tuple[float, float]],
     dem: Optional[dict] = None,
@@ -443,12 +764,23 @@ def identify_fencing(
     water_features_geojson: Optional[dict] = None,
     dem: Optional[dict] = None,
     stream_exclusion_buffer_meters: float = STREAM_EXCLUSION_BUFFER_METERS,
+    selected_road_corridor_cells: Optional[list] = None,
+    anchor_lon_lat: Optional[tuple[float, float]] = None,
+    farm_road_features: Optional[list[dict]] = None,
+    road_corridor_dilation_cells: int = ROAD_CORRIDOR_FENCE_DILATION_CELLS,
+    road_fence_line_inset_meters: float = ROAD_FENCE_LINE_INSET_METERS,
+    existing_farm_road_buffer_meters: float = EXISTING_FARM_ROAD_FENCE_BUFFER_METERS,
 ) -> dict:
     """
     Full pipeline entry point for Subdivision Fences' computed geometry
-    (stream exclusion + boundary fencing only -- see module docstring for
-    why everything else in that report step is narrative-only, not
-    generated here).
+    (stream exclusion, boundary, road corridor exclusion, and existing
+    farm road exclusion fencing -- see module docstring for why
+    everything else in that report step is narrative-only, not generated
+    here). The two road fence types are each fully independent, closed
+    loops -- deliberately NOT spliced or gated into the boundary fence
+    (see module docstring) -- so an overlap between either of them and
+    the boundary fence, or between the two of them, is expected, not a
+    bug.
 
     water_features_geojson is hydrology_data.get_water_features_geojson()'s
     output; fetched here if not already supplied (e.g. reused from a
@@ -462,9 +794,31 @@ def identify_fencing(
     function's own docstring), same optional-dem pattern every other
     entry point in this codebase already uses.
 
+    selected_road_corridor_cells is road_corridors.find_road_routes()'s
+    own real path cells for the single selected corridor. If not
+    supplied, this derives them itself via road_corridors.
+    identify_road_corridor_candidates(dem=dem, anchor_lon_lat=
+    anchor_lon_lat) -- the SAME optional-derive-if-not-supplied pattern
+    dem itself already uses above. anchor_lon_lat defaults to None, the
+    common "not yet wired up to a real anchor point" case -- that alone
+    is NOT an error: identify_road_corridor_candidates() already returns
+    a clean selected_road_corridor=None for it (no network fetch even
+    attempted), and find_road_corridor_fencing() already returns None
+    cleanly for that, producing zero road-corridor-exclusion features,
+    same as today's "no road routes" handling elsewhere in this
+    pipeline.
+
+    farm_road_features is farm_roads_data.get_farm_roads_for_boundary()'s
+    own output. If not supplied, fetched here -- but unlike the
+    boundary fence's own MANDATORY canopy gate, this is NOT canopy, so a
+    fetch failure degrades gracefully (same independent-degrade pattern
+    every other non-canopy network fetch in this codebase already uses):
+    road-corridor-exclusion fencing still computes normally, and only
+    the existing-farm-road fencing is omitted.
+
     Returns:
         {
-            'fencing_geojson': FeatureCollection,   # "exclusion_fencing" (stream) + "perimeter_fencing" (boundary) features -- the deliverable
+            'fencing_geojson': FeatureCollection,   # "exclusion_fencing" (stream) + "perimeter_fencing" (boundary + road corridor + existing farm road) features
             'segment_count': int,                   # identify_boundary_fencing()'s own segment_count, passed through
         }
     """
@@ -482,9 +836,65 @@ def identify_fencing(
 
     boundary_result = identify_boundary_fencing(boundary_coordinates, dem=dem)
 
+    if selected_road_corridor_cells is None:
+        road_corridor_candidates = identify_road_corridor_candidates(
+            boundary_coordinates, dem=dem, anchor_lon_lat=anchor_lon_lat
+        )
+        selected_road_corridor = road_corridor_candidates["selected_road_corridor"]
+        selected_road_corridor_cells = selected_road_corridor["cells"] if selected_road_corridor else None
+
+    road_fence_line_utm = find_road_corridor_fencing(
+        dem,
+        selected_road_corridor_cells,
+        dilation_cells=road_corridor_dilation_cells,
+        line_inset_meters=road_fence_line_inset_meters,
+    )
+    road_fence_line_wgs84 = (
+        shape(transform_geom(dem["crs"], "EPSG:4326", mapping(road_fence_line_utm)))
+        if road_fence_line_utm is not None
+        else None
+    )
+    road_corridor_geojson = road_corridor_fencing_to_geojson(
+        road_fence_line_wgs84,
+        dilation_cells=road_corridor_dilation_cells,
+        line_inset_meters=road_fence_line_inset_meters,
+    )
+
+    if farm_road_features is None:
+        try:
+            farm_road_features = get_farm_roads_for_boundary(boundary_coordinates)
+        except Exception as e:
+            # Same fetch-degrades-independently reasoning every other
+            # non-canopy network-backed layer in this pipeline already
+            # uses -- an outage here shouldn't take down road-corridor-
+            # exclusion fencing (already computed above) or the rest of
+            # this pipeline's fencing output.
+            print(
+                f"  identify_fencing: farm road fetch failed ({e}), continuing without "
+                "existing-farm-road fencing."
+            )
+            farm_road_features = []
+
+    boundary_xs, boundary_ys = warp_transform(
+        "EPSG:4326",
+        dem["crs"],
+        [pt[0] for pt in boundary_coordinates],
+        [pt[1] for pt in boundary_coordinates],
+    )
+    boundary_polygon_utm = Polygon(zip(boundary_xs, boundary_ys))
+
+    farm_road_entries = find_existing_farm_road_fencing(
+        farm_road_features, boundary_polygon_utm, dem["crs"], buffer_meters=existing_farm_road_buffer_meters
+    )
+    farm_road_geojson = existing_farm_road_fencing_to_geojson(
+        farm_road_entries, buffer_meters=existing_farm_road_buffer_meters
+    )
+
     features = (
         stream_exclusion_fencing_to_geojson(stream_entries, stream_exclusion_buffer_meters)["features"]
         + boundary_result["fencing_geojson"]["features"]
+        + road_corridor_geojson["features"]
+        + farm_road_geojson["features"]
     )
 
     return {"fencing_geojson": make_feature_collection(features), "segment_count": boundary_result["segment_count"]}
@@ -493,12 +903,15 @@ def identify_fencing(
 def summarize_fencing(result: dict) -> str:
     features = result["fencing_geojson"]["features"]
     stream_count = sum(1 for f in features if f["properties"]["layer"] == "exclusion_fencing")
-    boundary_features = [f for f in features if f["properties"]["layer"] == "perimeter_fencing"]
+    boundary_features = [f for f in features if f["properties"].get("fence_type") == "boundary"]
+    road_corridor_count = sum(1 for f in features if f["properties"].get("fence_type") == "road_corridor_exclusion")
+    farm_road_count = sum(1 for f in features if f["properties"].get("fence_type") == "existing_farm_road_exclusion")
     segment_count = result.get("segment_count", len(boundary_features))
 
     lines = [
         f"Computed fencing features: {stream_count} stream exclusion, "
-        f"{segment_count} boundary fencing segment(s)"
+        f"{segment_count} boundary fencing segment(s), {road_corridor_count} road corridor exclusion, "
+        f"{farm_road_count} existing farm road exclusion"
     ]
     for feature in features:
         props = feature["properties"]
@@ -519,8 +932,17 @@ if __name__ == "__main__":
         (-79.9827466, 40.6458894),
         (-79.9838258, 40.6458343),
     ]
+    # Same real anchor point road_corridors.py's own __main__ block uses for
+    # this reference property -- needed to actually exercise a real, selected
+    # road corridor (and therefore find_road_corridor_fencing()) below; with
+    # no anchor at all, road-corridor-exclusion fencing cleanly produces zero
+    # features (see identify_fencing()'s own docstring).
+    anchor_lon_lat = (-79.98356157031265, 40.64303511679458)
 
-    print("Identifying computed fencing (stream exclusion + canopy-aware boundary fencing) for property boundary...\n")
+    print(
+        "Identifying computed fencing (stream exclusion + canopy-aware boundary + road corridor "
+        "exclusion + existing farm road exclusion) for property boundary...\n"
+    )
 
     try:
         from feature_schema import validate_feature_collection
@@ -531,9 +953,18 @@ if __name__ == "__main__":
         validate_feature_collection(boundary_only["fencing_geojson"])
         print(f"identify_boundary_fencing(): {boundary_only['segment_count']} segment(s), schema-valid.\n")
 
-        result = identify_fencing(property_boundary, dem=dem)
+        result = identify_fencing(property_boundary, dem=dem, anchor_lon_lat=anchor_lon_lat)
         validate_feature_collection(result["fencing_geojson"])
         print(summarize_fencing(result))
+
+        road_corridor_fenced = any(
+            f["properties"].get("fence_type") == "road_corridor_exclusion" for f in result["fencing_geojson"]["features"]
+        )
+        farm_road_fenced = any(
+            f["properties"].get("fence_type") == "existing_farm_road_exclusion" for f in result["fencing_geojson"]["features"]
+        )
+        print(f"\nRoad corridor fence produced: {road_corridor_fenced}")
+        print(f"Existing farm road fence produced: {farm_road_fenced}")
         print("\nfencing_geojson is schema-valid.")
     except Exception as e:
         print(f"Request failed: {e}")

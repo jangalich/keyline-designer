@@ -39,14 +39,22 @@ from feature_schema import make_feature, validate_feature_collection
 from fencing import (
     BOUNDARY_FENCE_CANOPY_BUFFER_METERS,
     BOUNDARY_FENCE_MIN_SEGMENT_ACRES,
+    EXISTING_FARM_ROAD_FENCE_BUFFER_METERS,
+    ROAD_CORRIDOR_FENCE_DILATION_CELLS,
+    ROAD_FENCE_LINE_INSET_METERS,
     STREAM_EXCLUSION_BUFFER_METERS,
     boundary_fencing_to_geojson,
+    existing_farm_road_fencing_to_geojson,
     find_boundary_fencing,
+    find_existing_farm_road_fencing,
+    find_road_corridor_fencing,
     find_stream_exclusion_fencing,
     identify_boundary_fencing,
     identify_fencing,
+    road_corridor_fencing_to_geojson,
     stream_exclusion_fencing_to_geojson,
 )
+from raster_grid import binary_dilate, cell_union_footprint
 
 UTM_CRS = "EPSG:32617"
 
@@ -330,12 +338,21 @@ print("boundary_fencing_to_geojson() labels/annotates a multi-segment split (seg
 
 
 # --- identify_fencing: combines both layers, reusing a pre-fetched water_features_geojson ---
+#
+# farm_road_features=[] is passed explicitly (rather than left to identify_fencing()'s own
+# default fetch) so this stays deterministic and offline regardless of whether a given test
+# environment happens to have network access -- selected_road_corridor_cells is left at its
+# own default (None, with anchor_lon_lat also None) which already resolves to "no corridor"
+# with zero network calls (see identify_fencing()'s own docstring), so no explicit override
+# is needed there.
 
 from feature_schema import make_feature_collection
 
 prefetched_water = make_feature_collection([STREAM_FEATURE])
 with mock_patch.object(pa, "get_canopy_height_for_boundary", _fake_no_canopy):
-    result = identify_fencing(PROPERTY_BOUNDARY, water_features_geojson=prefetched_water, dem=TEST_DEM)
+    result = identify_fencing(
+        PROPERTY_BOUNDARY, water_features_geojson=prefetched_water, dem=TEST_DEM, farm_road_features=[]
+    )
 validate_feature_collection(result["fencing_geojson"])
 
 layers = sorted(f["properties"]["layer"] for f in result["fencing_geojson"]["features"])
@@ -348,12 +365,220 @@ print("identify_fencing() combines exclusion_fencing + perimeter_fencing into on
 
 no_stream_water = make_feature_collection([])
 with mock_patch.object(pa, "get_canopy_height_for_boundary", _fake_no_canopy):
-    no_stream_result = identify_fencing(PROPERTY_BOUNDARY, water_features_geojson=no_stream_water, dem=TEST_DEM)
+    no_stream_result = identify_fencing(
+        PROPERTY_BOUNDARY, water_features_geojson=no_stream_water, dem=TEST_DEM, farm_road_features=[]
+    )
 no_stream_layers = [f["properties"]["layer"] for f in no_stream_result["fencing_geojson"]["features"]]
 assert no_stream_layers == ["perimeter_fencing"], (
     f"with no streams, only perimeter_fencing should be produced, got {no_stream_layers}"
 )
 print("identify_fencing() still produces boundary fencing when no streams are present.")
+
+
+# =====================================================================
+# find_road_corridor_fencing(): pure geometric core, purely synthetic DEM/cells,
+# no network/boundary_coordinates involved -- same "pure core is independently
+# testable" pattern as find_boundary_fencing() above. A small synthetic DEM
+# (its own 'array'/'resolution_meters'/'origin_x'/'origin_y'/'crs', same shape
+# raster_grid.py's own functions expect) stands in for a real fetched DEM.
+# =====================================================================
+
+ROAD_FENCE_DEM = {
+    "array": np.zeros((20, 20), dtype=np.float32),
+    "resolution_meters": (2.0, 2.0),
+    "origin_x": 500000.0,
+    "origin_y": 4500000.0,
+    "crs": UTM_CRS,
+}
+
+
+# --- 1. None/empty cells -> returns None, not an error or an empty LineString ---
+
+assert find_road_corridor_fencing(ROAD_FENCE_DEM, None) is None
+assert find_road_corridor_fencing(ROAD_FENCE_DEM, []) is None
+print("find_road_corridor_fencing(): None/empty selected_road_corridor_cells returns None.")
+
+
+# --- 2. a simple straight-line synthetic path -> a single closed LineString, genuinely
+#        inset INSIDE the dilated footprint's own outer edge (not just the footprint itself) ---
+
+straight_path_cells = [(10, c) for c in range(3, 17)]
+
+straight_fence_line = find_road_corridor_fencing(ROAD_FENCE_DEM, straight_path_cells)
+assert straight_fence_line is not None and straight_fence_line.geom_type == "LineString"
+straight_coords = list(straight_fence_line.coords)
+assert straight_coords[0] == straight_coords[-1], "road corridor fence line must be a closed ring"
+
+straight_mask = np.zeros(ROAD_FENCE_DEM["array"].shape, dtype=bool)
+for r, c in straight_path_cells:
+    straight_mask[r, c] = True
+straight_dilated_mask = binary_dilate(straight_mask, ROAD_CORRIDOR_FENCE_DILATION_CELLS)
+straight_dilated_footprint = cell_union_footprint(ROAD_FENCE_DEM, straight_dilated_mask)
+
+straight_fence_polygon = Polygon(straight_coords)
+assert straight_fence_polygon.area < straight_dilated_footprint.area, (
+    "the inset fence line must enclose strictly less area than the dilated footprint -- "
+    "confirms the inset actually moved the line inward, not just returning the dilated "
+    "footprint's own boundary unchanged"
+)
+assert straight_dilated_footprint.buffer(1e-9).contains(straight_fence_polygon), (
+    "the inset fence polygon must sit inside the dilated footprint's own outer edge"
+)
+print(
+    "find_road_corridor_fencing(): a straight path returns a single closed LineString, "
+    "genuinely inset inside the dilated footprint's own outer edge."
+)
+
+
+# --- 3. a deliberately narrow/pinched synthetic path where the negative buffer empties out
+#        entirely -> falls back to the dilated footprint's own outer edge, not an error/drop ---
+
+# A very fine DEM resolution (0.1m) makes ROAD_CORRIDOR_FENCE_DILATION_CELLS's own single-cell
+# dilation produce a genuinely thin strip (3 cells wide perpendicular to the path, 0.3m total)
+# -- thinner than ROAD_FENCE_LINE_INSET_METERS's own default 0.3048m inset, so the negative
+# buffer has nowhere to go and empties out completely.
+NARROW_ROAD_FENCE_DEM = {
+    "array": np.zeros((20, 20), dtype=np.float32),
+    "resolution_meters": (0.1, 0.1),
+    "origin_x": 500000.0,
+    "origin_y": 4500000.0,
+    "crs": UTM_CRS,
+}
+narrow_path_cells = [(10, c) for c in range(3, 17)]
+
+narrow_mask = np.zeros(NARROW_ROAD_FENCE_DEM["array"].shape, dtype=bool)
+for r, c in narrow_path_cells:
+    narrow_mask[r, c] = True
+narrow_dilated_mask = binary_dilate(narrow_mask, ROAD_CORRIDOR_FENCE_DILATION_CELLS)
+narrow_dilated_footprint = cell_union_footprint(NARROW_ROAD_FENCE_DEM, narrow_dilated_mask)
+narrow_would_be_inset = narrow_dilated_footprint.buffer(-ROAD_FENCE_LINE_INSET_METERS)
+assert narrow_would_be_inset.is_empty, (
+    "test setup must genuinely produce an empty negative-buffer result for this to be a real "
+    "test of the fallback path"
+)
+
+narrow_fence_line = find_road_corridor_fencing(NARROW_ROAD_FENCE_DEM, narrow_path_cells)
+assert narrow_fence_line is not None, "the fallback must still return a real fence line, not None"
+narrow_fence_polygon = Polygon(narrow_fence_line.coords)
+assert narrow_fence_polygon.equals(narrow_dilated_footprint), (
+    "on a narrow/pinched stretch where the inset empties out, the fallback must return the "
+    "dilated footprint's own outer edge unchanged, not a broken/empty result"
+)
+print(
+    "find_road_corridor_fencing(): a narrow/pinched path where the inset would empty out "
+    "falls back to the dilated footprint's own outer edge."
+)
+
+
+# =====================================================================
+# find_existing_farm_road_fencing(): pure geometric core, no network I/O -- same "pure core is
+# independently testable" pattern as find_stream_exclusion_fencing() above. Real WGS84
+# coordinates (this module's own PROPERTY_BOUNDARY) are reused so the reprojection this function
+# does internally (EPSG:4326 -> UTM_CRS) behaves like it would against a real property, rather
+# than arbitrary "UTM-like" numbers standing in for lon/lat (which find_boundary_fencing() above
+# can get away with since IT never reprojects anything itself).
+# =====================================================================
+
+_property_boundary_polygon_wgs84 = Polygon(PROPERTY_BOUNDARY)
+_inside_point = _property_boundary_polygon_wgs84.representative_point()  # guaranteed inside
+
+FARM_ROAD_BOUNDARY_XS, FARM_ROAD_BOUNDARY_YS = warp_transform(
+    "EPSG:4326", UTM_CRS, [pt[0] for pt in PROPERTY_BOUNDARY], [pt[1] for pt in PROPERTY_BOUNDARY]
+)
+FARM_ROAD_BOUNDARY_POLYGON_UTM = Polygon(zip(FARM_ROAD_BOUNDARY_XS, FARM_ROAD_BOUNDARY_YS))
+
+
+def _farm_road_feature(name: str, coordinates: list[tuple[float, float]]) -> dict:
+    return {"name": name, "geometry": {"type": "LineString", "coordinates": coordinates}}
+
+
+# --- 1. a road entirely outside the boundary -> [] (clips to empty, correctly produces nothing) ---
+
+OUTSIDE_ROAD = _farm_road_feature("Far Away Road", [(-79.5, 41.0), (-79.4, 41.1)])
+outside_boundary_wgs84 = shape(transform_geom(UTM_CRS, "EPSG:4326", mapping(FARM_ROAD_BOUNDARY_POLYGON_UTM)))
+assert not outside_boundary_wgs84.intersects(shape(OUTSIDE_ROAD["geometry"])), (
+    "test setup must genuinely place this road outside the boundary for this to be a real test"
+)
+
+outside_entries = find_existing_farm_road_fencing([OUTSIDE_ROAD], FARM_ROAD_BOUNDARY_POLYGON_UTM, UTM_CRS)
+assert outside_entries == [], f"a road entirely outside the boundary should produce no entries, got {outside_entries}"
+print("find_existing_farm_road_fencing(): a road entirely outside the boundary returns [].")
+
+
+# --- 2. a road partially crossing the boundary -> one entry, derived only from the on-parcel
+#        clipped portion (not the full original line) ---
+
+_outside_point = (_inside_point.x - 0.03, _inside_point.y)
+CROSSING_ROAD = _farm_road_feature("Crossing Road", [_outside_point, (_inside_point.x, _inside_point.y)])
+crossing_line_wgs84 = shape(CROSSING_ROAD["geometry"])
+assert crossing_line_wgs84.intersects(outside_boundary_wgs84) and not outside_boundary_wgs84.contains(
+    crossing_line_wgs84
+), "test setup must genuinely have this road cross the boundary (partly in, partly out) for a real test"
+
+crossing_entries = find_existing_farm_road_fencing([CROSSING_ROAD], FARM_ROAD_BOUNDARY_POLYGON_UTM, UTM_CRS)
+assert len(crossing_entries) == 1, f"a road partially crossing the boundary should produce exactly 1 entry, got {len(crossing_entries)}"
+crossing_fence_line_utm = shape(transform_geom("EPSG:4326", UTM_CRS, crossing_entries[0]["geometry_wgs84"]))
+full_road_line_utm = shape(transform_geom("EPSG:4326", UTM_CRS, CROSSING_ROAD["geometry"]))
+on_parcel_portion_utm = FARM_ROAD_BOUNDARY_POLYGON_UTM.intersection(full_road_line_utm)
+assert on_parcel_portion_utm.length < full_road_line_utm.length, (
+    "test setup must genuinely clip to a shorter on-parcel sub-segment for this to be a real test"
+)
+
+# The output fence line is the buffer OUTLINE of just the on-parcel portion -- it should match
+# a buffer built directly from that clipped sub-segment, and must NOT match a buffer built from
+# the FULL original (mostly off-parcel) line, confirming only the clipped portion fed the buffer.
+crossing_fence_polygon_utm = Polygon(crossing_fence_line_utm.coords)
+expected_on_parcel_buffer = on_parcel_portion_utm.buffer(EXISTING_FARM_ROAD_FENCE_BUFFER_METERS)
+full_line_buffer = full_road_line_utm.buffer(EXISTING_FARM_ROAD_FENCE_BUFFER_METERS)
+assert full_line_buffer.area > expected_on_parcel_buffer.area, (
+    "test setup must genuinely make the full line's own buffer larger than the clipped portion's "
+    "own buffer for this to be a real test"
+)
+assert crossing_fence_polygon_utm.equals_exact(expected_on_parcel_buffer, 1e-6) or crossing_fence_polygon_utm.symmetric_difference(
+    expected_on_parcel_buffer
+).area < 1e-3, "the fence polygon must match a buffer built from the clipped on-parcel portion alone"
+assert crossing_fence_polygon_utm.area < full_line_buffer.area, (
+    "the fence polygon must NOT match (and must enclose less area than) a buffer built from the "
+    "full original line -- confirms only the on-parcel clipped portion fed the buffer, not the "
+    "full (mostly off-parcel) line"
+)
+print(
+    "find_existing_farm_road_fencing(): a road partially crossing the boundary returns 1 entry "
+    "derived only from the on-parcel clipped portion."
+)
+
+
+# --- 3. multiple on-parcel road segments -> one entry per segment ---
+
+_second_outside_point = (_inside_point.x, _inside_point.y + 0.03)
+SECOND_CROSSING_ROAD = _farm_road_feature(
+    "Second Crossing Road", [_second_outside_point, (_inside_point.x, _inside_point.y)]
+)
+multi_entries = find_existing_farm_road_fencing(
+    [CROSSING_ROAD, SECOND_CROSSING_ROAD], FARM_ROAD_BOUNDARY_POLYGON_UTM, UTM_CRS
+)
+assert len(multi_entries) == 2, f"two separate on-parcel road segments should produce 2 entries, got {len(multi_entries)}"
+assert {e["source_label"] for e in multi_entries} == {"Crossing Road", "Second Crossing Road"}
+print("find_existing_farm_road_fencing(): multiple on-parcel road segments return one entry per segment.")
+
+
+# --- existing_farm_road_fencing_to_geojson: schema-valid, correct layer/fence_type ---
+
+farm_road_geojson = existing_farm_road_fencing_to_geojson(crossing_entries)
+validate_feature_collection(farm_road_geojson)
+farm_road_feature_out = farm_road_geojson["features"][0]
+assert farm_road_feature_out["properties"]["layer"] == "perimeter_fencing"
+assert farm_road_feature_out["properties"]["fence_type"] == "existing_farm_road_exclusion"
+assert farm_road_feature_out["properties"]["confidence"] == "medium"
+print("existing_farm_road_fencing_to_geojson() output is schema-valid, layer='perimeter_fencing'.")
+
+
+# --- road_corridor_fencing_to_geojson: None fence_line -> empty FeatureCollection ---
+
+empty_road_corridor_geojson = road_corridor_fencing_to_geojson(None)
+validate_feature_collection(empty_road_corridor_geojson)
+assert empty_road_corridor_geojson["features"] == [], "None fence_line should produce zero features, not an error"
+print("road_corridor_fencing_to_geojson(): None fence_line produces an empty, schema-valid FeatureCollection.")
 
 
 print("\nAll fencing checks passed.")

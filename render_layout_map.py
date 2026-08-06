@@ -8,7 +8,7 @@ generate_pdf_report.py). This module does not identify, score, or select
 anything itself: every layer it draws is the already-computed output of
 production_area_ceiling.py (optimized production zones),
 water_suitability.py (fetch_and_select_optimal_water_zone -- the top-ranked
-candidate), road_corridors.py (fetch_and_select_optimal_road_corridor -- the
+candidate), road_corridors.py (identify_road_corridor_candidates -- the
 single selected road corridor road_corridors.py's own ridge-line
 identification/scoring picks, see that module's own module docstring),
 tree_zone_candidates.py (identify_tree_zone_candidates -- every ranked
@@ -18,21 +18,24 @@ docstring), solar_suitability.py (fetch_and_select_optimal_structure_site
 -- the top-ranked candidate), hydrology_data.py (real NHD streams, for
 background context only -- no soil/hydrology POLYGON data is drawn here,
 that's covered in the narrative text), fencing.py
-(identify_boundary_fencing -- the canopy-aware boundary fence line(s),
-see that module's own module docstring), and contour_lines.py (global
-elevation contour lines over the full DEM extent).
+(identify_fencing -- the canopy-aware boundary fence line(s) plus the
+road-exclusion fence loops added below, see that module's own module
+docstring), and contour_lines.py (global elevation contour lines over
+the full DEM extent).
 
     boundary --> dem_data (fetched once, shared across every layer below)
              --> production_area_ceiling.identify_optimized_production_areas
              --> water_suitability.fetch_and_select_optimal_water_zone
-             --> road_corridors.fetch_and_select_optimal_road_corridor
+             --> road_corridors.identify_road_corridor_candidates
              --> tree_zone_candidates.identify_tree_zone_candidates
              --> solar_suitability.fetch_and_select_optimal_structure_site
              --> hydrology_data.get_water_features_for_boundary (streams)
-             --> fencing.identify_boundary_fencing (boundary fence line(s))
+             --> farm_roads_data.get_farm_roads_for_boundary (existing farm roads)
+             --> fencing.identify_fencing (boundary + road-exclusion fence loops)
              --> contour_lines.compute_contour_lines (global, unclipped)
              --> rendered PNG (basemap + halo + streams + boundary fence +
-                 layout layers + numbered legend box, all one image)
+                 road-exclusion fence loops + layout layers + numbered
+                 legend box, all one image)
 
 PRODUCTION ZONE STYLE: production zones render as CONTOUR-LINE TEXTURE,
 not a filled/outlined shape -- contour_lines.py's global contour lines
@@ -47,13 +50,13 @@ the water zone, the road corridor, and the structure site (all below)
 have their OWN render-only treatments too.
 
 BOUNDARY FENCE STYLE: the property boundary itself no longer renders as
-a plain solid stroke -- it renders as fencing.identify_boundary_fencing()'s
-own canopy-aware fence line(s) (see that module's own module docstring),
-a dashed line (FENCE_COLOR/FENCE_LINEWIDTH/FENCE_DASH_PATTERN) at the
-same zorder=30 this layer's old plain stroke previously occupied. There is
-always at least one segment -- fencing.find_boundary_fencing()'s own
-plain-wrap case when there's no canopy touching the boundary at all -- so
-there's no fallback path to the old stroke. Before drawing, each segment's
+a plain solid stroke -- it renders as fencing.identify_fencing()'s own
+canopy-aware boundary fence line(s) (see that module's own module
+docstring), a dashed line (FENCE_COLOR/FENCE_LINEWIDTH/FENCE_DASH_PATTERN)
+at the same zorder=30 this layer's old plain stroke previously occupied.
+There is always at least one segment -- fencing.find_boundary_fencing()'s
+own plain-wrap case when there's no canopy touching the boundary at all --
+so there's no fallback path to the old stroke. Before drawing, each segment's
 geometry is run through _smooth_closed_ring_for_render() (simplify, then
 CYCLIC Chaikin corner-cutting via _chaikin_smooth_closed_ring() -- see
 that function's own docstring for why the road corridor's open-line
@@ -66,6 +69,26 @@ otherwise a single unnumbered "Boundary Fencing" line, same "no numbered
 circle marker" treatment structure_site's own legend line already uses
 (there's no single point on a loop-shaped feature for a circle number to
 point to).
+
+ROAD EXCLUSION FENCE STYLE: fencing.identify_fencing()'s two new road-
+exclusion fence loops (fence_type "road_corridor_exclusion" -- one closed
+loop around the single selected road corridor -- and "existing_farm_road_
+exclusion" -- one closed loop per on-parcel mapped-road segment, see that
+module's own module docstring) reuse these SAME boundary-fence styling
+constants (FENCE_COLOR/FENCE_LINEWIDTH/FENCE_DASH_PATTERN) and the same
+_smooth_closed_ring_for_render() + drawing helper, at the same zorder=30 --
+both are fully enclosed closed loops too, so no new styling or smoothing
+logic is needed. They are INDEPENDENT of the boundary fence (deliberately
+not spliced/gated into it -- see fencing.py's own module docstring): a
+visible overlap between a road-exclusion loop and the boundary fence, or
+between the two road-exclusion loops themselves, is expected wherever the
+underlying real-world geometry meets, not a rendering bug. "Road Corridor
+Fencing" gets a single unnumbered legend line (there's only ever one
+generated corridor); "Existing Farm Road Fencing" gets one legend line per
+on-parcel segment when more than one, mirroring boundary fencing's own
+1-vs-2 segment-labeling convention. Neither gets a numbered circle marker,
+same "no single point to point to" reasoning as boundary fencing's own
+legend lines above.
 
 Contours clip against render_fill_polygon_utm rather than polygon_utm
 for two separate reasons layered on top of each other, both from
@@ -223,10 +246,11 @@ from shapely.plotting import plot_line, plot_points, plot_polygon
 
 from contour_lines import compute_contour_lines
 from dem_data import get_dem_for_boundary
-from fencing import identify_boundary_fencing
+from farm_roads_data import get_farm_roads_for_boundary
+from fencing import identify_fencing
 from hydrology_data import get_water_features_for_boundary
 from production_area_ceiling import identify_optimized_production_areas
-from road_corridors import fetch_and_select_optimal_road_corridor
+from road_corridors import identify_road_corridor_candidates
 from solar_suitability import fetch_and_select_optimal_structure_site
 from tree_zone_candidates import identify_tree_zone_candidates
 from water_suitability import fetch_and_select_optimal_water_zone
@@ -453,14 +477,18 @@ ROAD_RENDER_INNER_WIDTH = 1.5
 ROAD_RENDER_OUTER_ALPHA = 0.35
 ROAD_RENDER_INNER_ALPHA = 0.7
 
-# Boundary fencing (fencing.identify_boundary_fencing()'s own "perimeter_fencing"
-# layer) renders as a dashed line -- a fence line, not the heavy solid cartographic
-# boundary stroke this layer replaces (see render_layout_map()'s own docstring for
-# why that stroke was removed outright, not kept as a fallback). A mustard yellow,
-# chosen to read clearly against both green production-zone contours and tan/green
-# aerial imagery, and distinct from every other layer color already in use
-# (production green #4C9A2A, water blue #1F6FB2, road dark gray #3A3A3A, structure
-# red #D64545, contour brown #6B4423, tree dark green #2D5A27). CONFIGURABLE.
+# Boundary fencing (fencing.identify_fencing()'s own "perimeter_fencing" layer,
+# fence_type="boundary") renders as a dashed line -- a fence line, not the heavy
+# solid cartographic boundary stroke this layer replaces (see render_layout_map()'s
+# own docstring for why that stroke was removed outright, not kept as a fallback).
+# A mustard yellow, chosen to read clearly against both green production-zone
+# contours and tan/green aerial imagery, and distinct from every other layer color
+# already in use (production green #4C9A2A, water blue #1F6FB2, road dark gray
+# #3A3A3A, structure red #D64545, contour brown #6B4423, tree dark green #2D5A27).
+# The two road-exclusion fence loops (fence_type "road_corridor_exclusion" /
+# "existing_farm_road_exclusion") reuse this SAME color/linewidth/dash pattern --
+# no new styling constants needed, see this module's own ROAD EXCLUSION FENCE
+# STYLE docstring section. CONFIGURABLE.
 FENCE_COLOR = "#D4A017"
 FENCE_LINEWIDTH = 1.2  # thin -- a fence line, not a heavy boundary stroke
 FENCE_DASH_PATTERN = (0, (6, 4))  # matplotlib dash tuple
@@ -804,12 +832,21 @@ def fetch_layout_layers(boundary_coordinates: list[tuple[float, float]], dem: Op
     geometry too.
 
     road_corridor, like water_zone/structure_site, is read here as a
-    GeoJSON Feature (via fetch_and_select_optimal_road_corridor()) -- the
-    single road corridor road_corridors.py's own ridge-line identification
-    and scoring selects, not a list of alternates: that module's current
-    design produces exactly one candidate per property (see its own
-    module docstring), so there's nothing left to rank/discard here the
-    way an earlier fan-based version of this module needed to.
+    GeoJSON Feature (via road_corridors.identify_road_corridor_candidates()'s
+    own zones_geojson features[0]) -- the single road corridor road_
+    corridors.py's own ridge-line identification and scoring selects, not
+    a list of alternates: that module's current design produces exactly
+    one candidate per property (see its own module docstring), so there's
+    nothing left to rank/discard here the way an earlier fan-based version
+    of this module needed to. Called directly (identify_road_corridor_
+    candidates(), not the fetch_and_select_optimal_road_corridor()
+    convenience wrapper this function used before) so this same call can
+    also pull the winning candidate's own RAW 'cells' field (road_
+    corridors.find_road_routes()'s own real, walk-ordered path cells) for
+    fencing.identify_fencing()'s road-corridor-exclusion fence below --
+    that convenience wrapper only ever returns the schema-wrapped GeoJSON
+    Feature, which doesn't carry 'cells'. No new fetch: this is the exact
+    same underlying computation the old wrapper call already made.
 
     tree_zone_result reuses identify_tree_zone_candidates()'s own full
     return dict directly (like production_result above, not narrowed down
@@ -833,28 +870,56 @@ def fetch_layout_layers(boundary_coordinates: list[tuple[float, float]], dem: Op
     render_layout_map()'s own docstring), rather than recomputing contour
     lines per zone.
 
-    fencing_result is fencing.identify_boundary_fencing()'s own output --
-    the canopy-aware boundary fence line(s) that replace this module's
-    former plain boundary stroke (see render_layout_map()'s own
-    docstring). NOT wrapped in try/except: identify_boundary_fencing()
-    carries its own MANDATORY canopy fetch (same hard-fail-on-missing-
-    coverage design as production_result/tree_zone_result's own canopy
-    gates above), and a failure there should propagate up and fail this
-    whole render rather than silently omitting the fence layer.
+    fencing_result is fencing.identify_fencing()'s own output -- the
+    canopy-aware boundary fence line(s) that replace this module's former
+    plain boundary stroke, PLUS the two new road-exclusion fence loops
+    (see render_layout_map()'s own docstring). NOT wrapped in try/except
+    itself: identify_fencing()'s own boundary-fence path still carries its
+    MANDATORY canopy fetch (same hard-fail-on-missing-coverage design as
+    production_result/tree_zone_result's own canopy gates above), and a
+    failure there should propagate up and fail this whole render rather
+    than silently omitting the fence layer. Fed both selected_road_
+    corridor_cells (the winning road corridor's own real path cells,
+    already pulled above -- no second fetch) and farm_road_features
+    (farm_roads_data.get_farm_roads_for_boundary(), fetched just below);
+    identify_fencing() degrades gracefully on its own if the farm-road
+    fetch failed, so this function only needs to protect that ONE fetch,
+    not the whole identify_fencing() call.
     """
     if dem is None:
         dem = get_dem_for_boundary(boundary_coordinates)
 
     production_result = identify_optimized_production_areas(boundary_coordinates, dem=dem)
     water_zone = fetch_and_select_optimal_water_zone(boundary_coordinates, dem=dem)
-    road_corridor = fetch_and_select_optimal_road_corridor(
+    road_corridor_candidates = identify_road_corridor_candidates(
         boundary_coordinates, dem=dem, anchor_lon_lat=_PLACEHOLDER_REFERENCE_PROPERTY_ANCHOR_LON_LAT
     )
+    road_corridor_features = road_corridor_candidates["zones_geojson"]["features"]
+    road_corridor = road_corridor_features[0] if road_corridor_features else None
+    selected_road_corridor = road_corridor_candidates["selected_road_corridor"]
+    selected_road_corridor_cells = selected_road_corridor["cells"] if selected_road_corridor else None
     tree_zone_result = identify_tree_zone_candidates(boundary_coordinates, dem=dem)
     structure_site = fetch_and_select_optimal_structure_site(boundary_coordinates, dem=dem)
     water_features = get_water_features_for_boundary(boundary_coordinates)
     contour_lines = compute_contour_lines(dem)
-    fencing_result = identify_boundary_fencing(boundary_coordinates, dem=dem)
+
+    try:
+        # Same graceful-degrade pattern every other non-canopy network fetch
+        # in this file already uses -- an existing-farm-road outage shouldn't
+        # take down the whole render; identify_fencing() below still produces
+        # road-corridor-exclusion fencing normally, just omitting the
+        # existing-farm-road loops.
+        farm_road_features = get_farm_roads_for_boundary(boundary_coordinates)
+    except Exception as e:
+        print(f"  fetch_layout_layers: farm road fetch failed ({e}), continuing without existing-farm-road fencing.")
+        farm_road_features = []
+
+    fencing_result = identify_fencing(
+        boundary_coordinates,
+        dem=dem,
+        selected_road_corridor_cells=selected_road_corridor_cells,
+        farm_road_features=farm_road_features,
+    )
 
     return {
         "dem": dem,
@@ -960,23 +1025,56 @@ def render_layout_map(
     legend_entries: list[str] = []
     marker_number = 1
 
-    # Boundary fencing (fencing.identify_boundary_fencing()'s own "perimeter_fencing"
-    # layer) replaces this module's former plain boundary stroke outright -- no
-    # fallback to the old solid line, since this layer always returns at least the
-    # plain-boundary-equivalent loop (see fencing.find_boundary_fencing()'s own
-    # docstring for the no-canopy case). DISPLAY-ONLY smoothing (_smooth_closed_
+    # Boundary fencing (fencing.identify_fencing()'s own "perimeter_fencing" layer,
+    # fence_type="boundary") replaces this module's former plain boundary stroke
+    # outright -- no fallback to the old solid line, since this layer always returns
+    # at least the plain-boundary-equivalent loop (see fencing.find_boundary_fencing()'s
+    # own docstring for the no-canopy case). DISPLAY-ONLY smoothing (_smooth_closed_
     # ring_for_render(), same "never touches the real geometry used elsewhere"
     # discipline as the road corridor's own _smooth_line_for_render()) -- fencing_
     # result['fencing_geojson'] (used for the narrative report) is untouched.
     fencing_features = fencing_result["fencing_geojson"]["features"]
+    boundary_fence_features = [f for f in fencing_features if f["properties"].get("fence_type") == "boundary"]
     segment_count = fencing_result["segment_count"]
     multiple_fence_segments = segment_count > 1
-    for i, feature in enumerate(fencing_features, start=1):
+    for i, feature in enumerate(boundary_fence_features, start=1):
         fence_geom = _reproject_geometry_to_mercator(feature["geometry"])
         render_ring = _smooth_closed_ring_for_render(fence_geom)
         _draw_boundary_fence(ax, render_ring)
         label = f"Boundary Fencing {i}" if multiple_fence_segments else "Boundary Fencing"
         legend_entries.append(label)
+
+    # Road-exclusion fencing (fencing.identify_fencing()'s own "road_corridor_exclusion"
+    # / "existing_farm_road_exclusion" fence_types, same "perimeter_fencing" layer) --
+    # both are fully enclosed closed loops (per their own spec), so the exact same
+    # closed-ring smoothing + drawing helper as boundary fencing applies unchanged (see
+    # this module's own ROAD EXCLUSION FENCE STYLE docstring section). Looped over
+    # generically rather than as two near-duplicate blocks; only the legend label
+    # differs per fence_type. INDEPENDENT of the boundary fence -- an overlap with it,
+    # or between the two road-fence types themselves, is expected, not a bug.
+    road_fence_features = [
+        f
+        for f in fencing_features
+        if f["properties"].get("fence_type") in ("road_corridor_exclusion", "existing_farm_road_exclusion")
+    ]
+    multiple_farm_road_segments = (
+        sum(1 for f in road_fence_features if f["properties"]["fence_type"] == "existing_farm_road_exclusion") > 1
+    )
+    farm_road_segment_index = 0
+    for feature in road_fence_features:
+        fence_geom = _reproject_geometry_to_mercator(feature["geometry"])
+        render_ring = _smooth_closed_ring_for_render(fence_geom)
+        _draw_boundary_fence(ax, render_ring)
+        if feature["properties"]["fence_type"] == "road_corridor_exclusion":
+            legend_entries.append("Road Corridor Fencing")
+        else:
+            farm_road_segment_index += 1
+            label = (
+                f"Existing Farm Road Fencing {farm_road_segment_index}"
+                if multiple_farm_road_segments
+                else "Existing Farm Road Fencing"
+            )
+            legend_entries.append(label)
 
     scored_patches = production_result.get("scored_patches", []) if production_result else []
     zone_stats = _production_zone_legend_stats(production_result) if production_result else []
