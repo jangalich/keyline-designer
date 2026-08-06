@@ -205,9 +205,25 @@ print("find_boundary_fencing(): canopy touching one edge location returns 1 ring
 interior_canopy = box(30, 30, 50, 50)  # well inside TEST_BOUNDARY_UTM, doesn't touch any edge
 interior_rings = find_boundary_fencing(TEST_BOUNDARY_UTM, interior_canopy)
 assert len(interior_rings) == 1, f"interior-only canopy should return exactly 1 ring, got {len(interior_rings)}"
-assert interior_rings[0].equals(Polygon(TEST_BOUNDARY_UTM.exterior).exterior), (
+# NOT an exact .equals() any more: find_boundary_fencing()'s own morphological opening
+# (buffer(-BOUNDARY_FENCE_MIN_SLIVER_WIDTH_METERS).buffer(+that)) now runs unconditionally
+# whenever there's ANY canopy, including this interior-only case -- and a buffer-based
+# opening inherently rounds convex corners by a small amount (a real, expected side effect
+# of continuous-geometry morphology, not a raster operation), so the returned outer ring is
+# no longer byte-identical to the plain square even though the interior hole itself never
+# reaches the boundary edge. Checked via symmetric-difference AREA instead: the interior
+# hole itself is 400 sq m (20x20m) -- if it were leaking into the outer ring at all, the
+# symmetric difference would be on that order. The opening's own corner-rounding alone
+# accounts for well under 10 sq m (four ~100 sq m corners, each rounded by a sub-meter
+# amount) on this 10,000 sq m square, so a 10 sq m ceiling cleanly distinguishes "hole
+# genuinely ignored, only cosmetic opening rounding visible" from "hole leaked into the ring".
+interior_ring_polygon = Polygon(interior_rings[0])
+plain_boundary_polygon = Polygon(TEST_BOUNDARY_UTM.exterior)
+interior_symmetric_diff_area = interior_ring_polygon.symmetric_difference(plain_boundary_polygon).area
+assert interior_symmetric_diff_area < 10.0, (
     "canopy that never touches the boundary edge carves a HOLE, not a change to the fence line -- the "
-    "returned ring must be the unmodified boundary ring, not just 'some single ring'"
+    "returned ring must closely match the unmodified boundary ring (up to the opening's own tiny "
+    f"corner-rounding), got symmetric difference area {interior_symmetric_diff_area:.4f} sq m"
 )
 print("find_boundary_fencing(): interior-only canopy (a hole, discarded) leaves the boundary ring unmodified.")
 
@@ -249,6 +265,40 @@ print(
     f"find_boundary_fencing(): a tiny corner sliver ({sliver_piece_acres:.4f} ac) grazing a boundary "
     f"corner is dropped by BOUNDARY_FENCE_MIN_SEGMENT_ACRES ({BOUNDARY_FENCE_MIN_SEGMENT_ACRES} ac), "
     "leaving just the main body ring."
+)
+
+
+# --- 6. two canopy patches close together on the boundary, leaving a narrow land "neck"
+#        between them (pic #1's shape) -> the morphological opening collapses the neck; the
+#        returned ring no longer traces up into and back out of it ---
+
+neck_notch_a = box(30, 80, 49.6, 105)  # touches the top edge (y=100), left patch
+neck_notch_b = box(50.4, 80, 70, 105)  # touches the top edge (y=100), right patch -- 0.8m gap from A
+neck_canopy = neck_notch_a.union(neck_notch_b)
+
+# Test setup validity: the RAW (pre-opening) difference must genuinely have kept land reaching
+# all the way up through the neck to the boundary edge -- the neck's own 0.8m width is narrower
+# than 2 * BOUNDARY_FENCE_MIN_SLIVER_WIDTH_METERS (2.0m), so the opening should collapse it
+# entirely (merge it into the excluded/canopy side) rather than leave it as real usable land.
+raw_neck_difference = TEST_BOUNDARY_UTM.difference(neck_canopy)
+neck_probe_point = Point(50.0, 99.0)  # deep in the neck, right at the boundary edge
+assert raw_neck_difference.contains(neck_probe_point), (
+    "test setup must genuinely produce kept land reaching up through the neck to the boundary "
+    "edge (pre-opening) for this to be a real test of the collapse"
+)
+
+neck_rings = find_boundary_fencing(TEST_BOUNDARY_UTM, neck_canopy)
+assert len(neck_rings) == 1, (
+    f"expected 1 ring (main body only, neck collapsed into the canopy side), got {len(neck_rings)}"
+)
+neck_ring_polygon = Polygon(neck_rings[0])
+assert not neck_ring_polygon.intersects(neck_probe_point), (
+    "the opening should have collapsed the narrow neck into the excluded/canopy side -- the "
+    "returned ring's own enclosed area must no longer reach up through the neck to the boundary edge"
+)
+print(
+    "find_boundary_fencing(): a narrow land neck between two close canopy notches (pic #1's shape) "
+    "is collapsed by the morphological opening step, not traced into and back out of by the fence line."
 )
 
 

@@ -185,6 +185,21 @@ BOUNDARY_FENCE_CANOPY_BUFFER_METERS = 0 * METERS_PER_FOOT  # 0m
 # "constants stay separate" convention noted above. CONFIGURABLE.
 BOUNDARY_FENCE_MIN_SEGMENT_ACRES = 0.05
 
+# Minimum width (meters) a strip of kept land between two canopy notches must
+# clear to survive find_boundary_fencing()'s own morphological OPENING step
+# (erode then dilate by this same radius -- see that function's own
+# docstring) -- narrower than this, a "peninsula" of land between two close
+# canopy notches gets snapped off into the excluded/canopy side entirely,
+# rather than surviving as a real usable strip the fence line then traces
+# pointless fine detail around. This is a DIFFERENT kind of sliver from
+# BOUNDARY_FENCE_MIN_SEGMENT_ACRES above (a whole fence-loop FRAGMENT dropped
+# by area) -- this one snaps off a narrow PROTRUSION within a single
+# fence_polygon before ring extraction even happens, same "constants stay
+# separate even when both about slivers" convention this module already
+# applies elsewhere. ~3ft. CONFIGURABLE -- tune by eye against the reference
+# property.
+BOUNDARY_FENCE_MIN_SLIVER_WIDTH_METERS = 1.0
+
 BOUNDARY_FENCE_CONFIDENCE_NOTES_TEMPLATE = (
     "This fence line follows the drawn property boundary, inset inward around real "
     "existing tree canopy (USGS 3DEP lidar HAG, buffered {buffer_meters}m/{buffer_feet}ft) "
@@ -370,14 +385,31 @@ def find_boundary_fencing(
     LineString -- the plain-wrap case, unchanged from this module's
     earlier behavior.
 
-    Otherwise: fence_polygon = boundary_polygon_utm.difference(canopy_union_utm).
-    Only EXTERIOR rings of the result are kept -- a Polygon result
-    contributes its one exterior ring, a MultiPolygon result contributes
-    one exterior ring per piece. Interior rings (holes) are discarded
-    entirely: canopy that sits entirely inside the boundary, never
-    touching the edge, carves a hole out of fence_polygon, not a change
-    to the fence line itself, so it must be silently ignored rather than
-    surfaced as a spurious third fence line.
+    Otherwise: fence_polygon = boundary_polygon_utm.difference(canopy_union_utm),
+    then a standard morphological OPENING (erode by BOUNDARY_FENCE_MIN_
+    SLIVER_WIDTH_METERS, then dilate back by that same radius) is applied
+    to fence_polygon BEFORE ring extraction -- opened = fence_polygon.
+    buffer(-BOUNDARY_FENCE_MIN_SLIVER_WIDTH_METERS).buffer(BOUNDARY_FENCE_
+    MIN_SLIVER_WIDTH_METERS). Two close canopy notches can leave a narrow
+    "peninsula" of kept land between them -- too narrow to be a real
+    usable strip, and it makes the fence line trace pointless fine detail
+    into and back out of it. The opening snaps off any such protrusion
+    narrower than BOUNDARY_FENCE_MIN_SLIVER_WIDTH_METERS (merging it into
+    the excluded/canopy side) while leaving genuinely large land areas
+    untouched. This can itself occasionally merge what would have been
+    two legitimate separate loops back into one, or vice versa, in
+    unusual geometry -- expected, correct behavior of an opening
+    operation, not a bug. Everything downstream (ring extraction, the
+    MultiPolygon-split-into-multiple-loops handling, the min-segment-area
+    filter below) operates on `opened`, not the raw difference result.
+
+    Only EXTERIOR rings of the (opened) result are kept -- a Polygon
+    result contributes its one exterior ring, a MultiPolygon result
+    contributes one exterior ring per piece. Interior rings (holes) are
+    discarded entirely: canopy that sits entirely inside the boundary,
+    never touching the edge, carves a hole out of the polygon, not a
+    change to the fence line itself, so it must be silently ignored
+    rather than surfaced as a spurious third fence line.
 
     Each kept ring is returned as its own closed LineString (first coord
     == last coord), ordered by the ring's own enclosed area, LARGEST
@@ -394,17 +426,26 @@ def find_boundary_fencing(
     if fence_polygon_utm.is_empty:
         return []
 
-    if fence_polygon_utm.geom_type == "Polygon":
-        candidate_polygons = [fence_polygon_utm]
-    elif fence_polygon_utm.geom_type == "MultiPolygon":
-        candidate_polygons = list(fence_polygon_utm.geoms)
+    opened_fence_polygon_utm = fence_polygon_utm.buffer(-BOUNDARY_FENCE_MIN_SLIVER_WIDTH_METERS).buffer(
+        BOUNDARY_FENCE_MIN_SLIVER_WIDTH_METERS
+    )
+    if opened_fence_polygon_utm.is_empty:
+        return []
+
+    if opened_fence_polygon_utm.geom_type == "Polygon":
+        candidate_polygons = [opened_fence_polygon_utm]
+    elif opened_fence_polygon_utm.geom_type == "MultiPolygon":
+        candidate_polygons = list(opened_fence_polygon_utm.geoms)
     else:
-        # Defensive: a Polygon-minus-Polygon difference shouldn't produce
-        # anything else, but guard against a degenerate GeometryCollection
-        # (e.g. a zero-area Point/LineString touch) by keeping only real
-        # Polygon parts, same tolerance-for-topology-noise reasoning
-        # raster_grid.cell_union_footprint()'s own buffer(0) cleanup uses.
-        candidate_polygons = [g for g in getattr(fence_polygon_utm, "geoms", []) if g.geom_type == "Polygon"]
+        # Defensive: a Polygon-minus-Polygon difference (opened by a
+        # symmetric erode-then-dilate) shouldn't produce anything else,
+        # but guard against a degenerate GeometryCollection (e.g. a
+        # zero-area Point/LineString touch) by keeping only real Polygon
+        # parts, same tolerance-for-topology-noise reasoning raster_grid.
+        # cell_union_footprint()'s own buffer(0) cleanup uses.
+        candidate_polygons = [
+            g for g in getattr(opened_fence_polygon_utm, "geoms", []) if g.geom_type == "Polygon"
+        ]
 
     rings_by_area = []
     for polygon in candidate_polygons:

@@ -58,12 +58,15 @@ zorder=30 this layer's old plain stroke previously occupied.
 There is always at least one segment -- fencing.find_boundary_fencing()'s
 own plain-wrap case when there's no canopy touching the boundary at all --
 so there's no fallback path to the old stroke. Before drawing, each segment's
-geometry is run through _smooth_closed_ring_for_render() (simplify, then
-CYCLIC Chaikin corner-cutting via _chaikin_smooth_closed_ring() -- see
-that function's own docstring for why the road corridor's open-line
-Chaikin helper can't just be reused on a closed ring), same DISPLAY-ONLY
-"never touches the real geometry used elsewhere" discipline as the road
-corridor's own _smooth_line_for_render(). When canopy running end-to-end
+geometry is run through _angular_simplify_closed_ring() -- a shapely
+simplify() pass ONLY (FENCE_RENDER_ANGULAR_SIMPLIFY_TOLERANCE_M), no Chaikin
+corner-cutting at all: fence lines render ANGULAR now, not curved (see that
+function's own docstring for why it replaced this module's earlier simplify-
+then-Chaikin-smooth treatment), same DISPLAY-ONLY "never touches the real
+geometry used elsewhere" discipline as the road corridor's own
+_smooth_line_for_render() (which stays curved/unchanged -- a DIFFERENT
+feature, the road corridor line itself, not a fence line). When canopy
+running end-to-end
 splits the parcel into more than one fence loop, each loop gets its own
 numbered legend line ("Boundary Fencing 1" / "Boundary Fencing 2") --
 otherwise a single unnumbered "Boundary Fencing" line, same "no numbered
@@ -76,12 +79,15 @@ exclusion fence loops (fence_type "road_corridor_exclusion" -- one closed
 loop around the single selected road corridor -- and "existing_farm_road_
 exclusion" -- one closed loop per on-parcel mapped-road segment, see that
 module's own module docstring) reuse these SAME boundary-fence styling
-constants (FENCE_COLOR/FENCE_LINEWIDTH) and the same _smooth_closed_ring_
-for_render() + drawing helper, at the same zorder=30 -- both are fully
-enclosed closed loops too, so no new styling or smoothing logic is needed.
+constants (FENCE_COLOR/FENCE_LINEWIDTH) and the same _angular_simplify_
+closed_ring() + drawing helper, at the same zorder=30 -- both are fully
+enclosed closed loops too, so no new styling or simplify logic is needed.
 Unlike the boundary fence, these two ARE clipped to the boundary polygon at
-render time (real shapely .intersection(), AFTER smoothing): find_road_
-corridor_fencing()'s own dilated-and-inset footprint naturally follows the
+render time (real shapely .intersection(), AFTER angular-simplifying the
+WHOLE ring -- simplifying before clipping, not after, since _angular_
+simplify_closed_ring() re-closes a genuinely closed ring, which would
+wrongly force-close an already-clipped, genuinely OPEN arc piece):
+find_road_corridor_fencing()'s own dilated-and-inset footprint naturally follows the
 road corridor's own path, which can reach right up to (and technically
 just past, once buffered) the property edge where a real road crosses it
 -- correct as COMPUTED (see fencing.py), this clip only trims what gets
@@ -515,14 +521,14 @@ FENCE_LINEWIDTH = 0.6  # a hairline -- was 1.2 (a dashed line before that)
 # real segment worth drawing.
 ROAD_FENCE_CLIP_MIN_LENGTH = 0.5
 
-# Same DISPLAY-ONLY simplify-then-Chaikin-smooth treatment as the road corridor's
-# own _smooth_line_for_render() (see that function's own docstring) -- here applied
-# to a CLOSED ring instead of an open route (see _chaikin_smooth_closed_ring()).
-# Tolerance matches the road corridor's own ROAD_RENDER_SIMPLIFY_TOLERANCE_M; one
-# extra smoothing iteration beyond the road's own 2, per explicit request for a
-# touch smoother finish on a fence loop. CONFIGURABLE.
-FENCE_RENDER_SIMPLIFY_TOLERANCE_M = ROAD_RENDER_SIMPLIFY_TOLERANCE_M
-FENCE_RENDER_SMOOTHING_ITERATIONS = 3
+# DISPLAY-ONLY simplify tolerance for fence rings (see _angular_simplify_closed_ring()) --
+# a shapely simplify() pass ONLY, no Chaikin/corner-rounding at all: fence lines render
+# ANGULAR now, not curved, per explicit request. Meaningfully larger than the road
+# corridor's own ROAD_RENDER_SIMPLIFY_TOLERANCE_M (2.5m) so the DEM-resolution stairstep
+# zigzags a fence line inherits from its own underlying cell/canopy geometry collapse into
+# fewer, longer straight segments rather than just having their corners rounded off.
+# CONFIGURABLE -- tune by eye against a real property.
+FENCE_RENDER_ANGULAR_SIMPLIFY_TOLERANCE_M = 4.0
 
 
 def _reproject_geometry_to_mercator(geometry_wgs84: dict):
@@ -710,64 +716,36 @@ def _draw_road_corridor(ax, line: LineString) -> None:
     )
 
 
-def _chaikin_smooth_closed_ring(coords: list[tuple[float, float]], iterations: int) -> list[tuple[float, float]]:
+def _angular_simplify_closed_ring(ring: LineString, tolerance: float) -> LineString:
     """
-    Same Chaikin corner-cutting construction as _chaikin_smooth_coords()
-    above, but CYCLIC -- for a closed fence loop, not an open route. A
-    closed ring has no meaningful start/end point to pin the way the open-
-    line version pins its first/last coordinate, so pinning one here would
-    leave a real, visible unsmoothed sharp seam at whatever index the
-    coordinate array happens to start at -- a correctness issue, not just
-    cosmetic, since that seam's location is an arbitrary artifact of how
-    the ring's coordinates happen to be ordered, not a real corner of the
-    property.
+    DISPLAY-ONLY transform for a fence loop's own LineString (boundary,
+    road-corridor-exclusion, or existing-farm-road-exclusion -- all three
+    fence types share this one helper). Replaces this module's earlier
+    simplify-then-Chaikin-smooth treatment: fence lines now render
+    ANGULAR, not curved, per explicit request -- so this is shapely
+    .simplify(tolerance, preserve_topology=True) on the ring ONLY, no
+    Chaikin call, zero smoothing iterations. Deliberately simpler than
+    the helper it replaces, not a curved-then-de-curved round trip.
 
-    Concretely: the duplicated closing coordinate (coords[0] == coords[-1],
-    every ring this module receives is already closed) is dropped before
-    smoothing, every edge is cut INCLUDING the wraparound edge from the
-    last point back to the first (`zip(coords, coords[1:] + coords[:1])`,
-    not `zip(coords, coords[1:])`), and the result is re-closed by
-    appending its own first point back onto the end.
+    simplify() can drop the duplicate closing coordinate (coords[0] ==
+    coords[-1]) that every ring this module receives arrives with -- the
+    same closure bookkeeping the helper this replaces already had to do,
+    re-applied here: re-close the ring afterward if simplify() dropped it.
 
-    A no-op below 3 points -- there's no real ring geometry to smooth
-    below a triangle.
+    Never touches the real geometry used elsewhere (fencing.py's own
+    fencing_geojson, used for the narrative report) -- the caller passes
+    in a copy already reprojected to Web Mercator for plotting, and this
+    function's return value is used for drawing only.
     """
-    if coords[0] == coords[-1]:
-        coords = coords[:-1]
-
-    for _ in range(iterations):
-        if len(coords) < 3:
-            break
-        smoothed = []
-        for (x0, y0), (x1, y1) in zip(coords, coords[1:] + coords[:1]):
-            smoothed.append((0.75 * x0 + 0.25 * x1, 0.75 * y0 + 0.25 * y1))
-            smoothed.append((0.25 * x0 + 0.75 * x1, 0.25 * y0 + 0.75 * y1))
-        coords = smoothed
-
-    return coords + [coords[0]]
-
-
-def _smooth_closed_ring_for_render(ring: LineString) -> LineString:
-    """
-    DISPLAY-ONLY transform for a boundary fence loop's own LineString --
-    same two-pass "simplify, then Chaikin-smooth" pattern as
-    _smooth_line_for_render() (see that function's own docstring), but
-    calling _chaikin_smooth_closed_ring() (cyclic, no pinned start/end
-    point -- see that function's own docstring for why the open-line
-    version can't just be reused here) at FENCE_RENDER_SIMPLIFY_
-    TOLERANCE_M / FENCE_RENDER_SMOOTHING_ITERATIONS. Never touches the
-    real geometry used elsewhere (fencing.py's own fencing_geojson, used
-    for the narrative report) -- the caller passes in a copy already
-    reprojected to Web Mercator for plotting, and this function's return
-    value is used for drawing only.
-    """
-    simplified = ring.simplify(FENCE_RENDER_SIMPLIFY_TOLERANCE_M, preserve_topology=True)
-    smoothed_coords = _chaikin_smooth_closed_ring(list(simplified.coords), FENCE_RENDER_SMOOTHING_ITERATIONS)
-    return LineString(smoothed_coords)
+    simplified = ring.simplify(tolerance, preserve_topology=True)
+    coords = list(simplified.coords)
+    if coords[0] != coords[-1]:
+        coords.append(coords[0])
+    return LineString(coords)
 
 
 def _draw_boundary_fence(ax, ring: LineString) -> None:
-    """Draws `ring` (already smoothed -- see _smooth_closed_ring_for_render())
+    """Draws `ring` (already simplified -- see _angular_simplify_closed_ring())
     as a single solid hairline fence line, FENCE_COLOR/FENCE_LINEWIDTH -- no
     dash pattern (this used to be dashed; now a fine, subtle solid line)."""
     plot_line(
@@ -1048,17 +1026,17 @@ def render_layout_map(
     # fence_type="boundary") replaces this module's former plain boundary stroke
     # outright -- no fallback to the old solid line, since this layer always returns
     # at least the plain-boundary-equivalent loop (see fencing.find_boundary_fencing()'s
-    # own docstring for the no-canopy case). DISPLAY-ONLY smoothing (_smooth_closed_
-    # ring_for_render(), same "never touches the real geometry used elsewhere"
-    # discipline as the road corridor's own _smooth_line_for_render()) -- fencing_
-    # result['fencing_geojson'] (used for the narrative report) is untouched.
+    # own docstring for the no-canopy case). DISPLAY-ONLY angular simplify
+    # (_angular_simplify_closed_ring(), same "never touches the real geometry used
+    # elsewhere" discipline as the road corridor's own _smooth_line_for_render()) --
+    # fencing_result['fencing_geojson'] (used for the narrative report) is untouched.
     fencing_features = fencing_result["fencing_geojson"]["features"]
     boundary_fence_features = [f for f in fencing_features if f["properties"].get("fence_type") == "boundary"]
     segment_count = fencing_result["segment_count"]
     multiple_fence_segments = segment_count > 1
     for i, feature in enumerate(boundary_fence_features, start=1):
         fence_geom = _reproject_geometry_to_mercator(feature["geometry"])
-        render_ring = _smooth_closed_ring_for_render(fence_geom)
+        render_ring = _angular_simplify_closed_ring(fence_geom, FENCE_RENDER_ANGULAR_SIMPLIFY_TOLERANCE_M)
         _draw_boundary_fence(ax, render_ring)
         label = f"Boundary Fencing {i}" if multiple_fence_segments else "Boundary Fencing"
         legend_entries.append(label)
@@ -1066,15 +1044,21 @@ def render_layout_map(
     # Road-exclusion fencing (fencing.identify_fencing()'s own "road_corridor_exclusion"
     # / "existing_farm_road_exclusion" fence_types, same "perimeter_fencing" layer) --
     # both are fully enclosed closed loops (per their own spec), so the exact same
-    # closed-ring smoothing + drawing helper as boundary fencing applies unchanged (see
-    # this module's own ROAD EXCLUSION FENCE STYLE docstring section). Looped over
+    # angular-simplify + drawing helper as boundary fencing applies unchanged (see this
+    # module's own ROAD EXCLUSION FENCE STYLE docstring section). Looped over
     # generically rather than as two near-duplicate blocks; only the legend label
     # differs per fence_type. INDEPENDENT of the boundary fence -- an overlap with it,
     # or between the two road-fence types themselves, is expected, not a bug. Unlike
-    # the boundary fence, each smoothed ring is clipped to boundary_polygon (render-
+    # the boundary fence, each simplified ring is clipped to boundary_polygon (render-
     # only -- see this module's own ROAD EXCLUSION FENCE STYLE docstring section for
-    # why) before drawing; the clip can split one ring into several line pieces, all
-    # drawn, but the legend still gets exactly one line per FEATURE regardless.
+    # why) AFTER angular-simplifying it, same order as the prior render-polish pass --
+    # _angular_simplify_closed_ring() re-closes a genuinely closed ring, which would be
+    # WRONG if applied to an already-clipped, genuinely OPEN arc piece (it would force-
+    # close a real arc into a bogus loop), so the whole ring is simplified first, while
+    # it's still guaranteed closed, and only THEN clipped into however many open/closed
+    # pieces the boundary crossing produces. The clip can split one ring into several
+    # line pieces, all drawn, but the legend still gets exactly one line per FEATURE
+    # regardless.
     road_fence_features = [
         f
         for f in fencing_features
@@ -1086,7 +1070,7 @@ def render_layout_map(
     farm_road_segment_index = 0
     for feature in road_fence_features:
         fence_geom = _reproject_geometry_to_mercator(feature["geometry"])
-        render_ring = _smooth_closed_ring_for_render(fence_geom)
+        render_ring = _angular_simplify_closed_ring(fence_geom, FENCE_RENDER_ANGULAR_SIMPLIFY_TOLERANCE_M)
         clipped_ring = render_ring.intersection(boundary_polygon)
         for line in _iter_line_parts(clipped_ring):
             if line.length > ROAD_FENCE_CLIP_MIN_LENGTH:
