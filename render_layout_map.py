@@ -52,8 +52,9 @@ have their OWN render-only treatments too.
 BOUNDARY FENCE STYLE: the property boundary itself no longer renders as
 a plain solid stroke -- it renders as fencing.identify_fencing()'s own
 canopy-aware boundary fence line(s) (see that module's own module
-docstring), a dashed line (FENCE_COLOR/FENCE_LINEWIDTH/FENCE_DASH_PATTERN)
-at the same zorder=30 this layer's old plain stroke previously occupied.
+docstring), a thin solid hairline (FENCE_COLOR/FENCE_LINEWIDTH; this used
+to be a dashed line, see FENCE_LINEWIDTH's own comment) at the same
+zorder=30 this layer's old plain stroke previously occupied.
 There is always at least one segment -- fencing.find_boundary_fencing()'s
 own plain-wrap case when there's no canopy touching the boundary at all --
 so there's no fallback path to the old stroke. Before drawing, each segment's
@@ -75,18 +76,34 @@ exclusion fence loops (fence_type "road_corridor_exclusion" -- one closed
 loop around the single selected road corridor -- and "existing_farm_road_
 exclusion" -- one closed loop per on-parcel mapped-road segment, see that
 module's own module docstring) reuse these SAME boundary-fence styling
-constants (FENCE_COLOR/FENCE_LINEWIDTH/FENCE_DASH_PATTERN) and the same
-_smooth_closed_ring_for_render() + drawing helper, at the same zorder=30 --
-both are fully enclosed closed loops too, so no new styling or smoothing
-logic is needed. They are INDEPENDENT of the boundary fence (deliberately
-not spliced/gated into it -- see fencing.py's own module docstring): a
-visible overlap between a road-exclusion loop and the boundary fence, or
-between the two road-exclusion loops themselves, is expected wherever the
-underlying real-world geometry meets, not a rendering bug. "Road Corridor
-Fencing" gets a single unnumbered legend line (there's only ever one
-generated corridor); "Existing Farm Road Fencing" gets one legend line per
-on-parcel segment when more than one, mirroring boundary fencing's own
-1-vs-2 segment-labeling convention. Neither gets a numbered circle marker,
+constants (FENCE_COLOR/FENCE_LINEWIDTH) and the same _smooth_closed_ring_
+for_render() + drawing helper, at the same zorder=30 -- both are fully
+enclosed closed loops too, so no new styling or smoothing logic is needed.
+Unlike the boundary fence, these two ARE clipped to the boundary polygon at
+render time (real shapely .intersection(), AFTER smoothing): find_road_
+corridor_fencing()'s own dilated-and-inset footprint naturally follows the
+road corridor's own path, which can reach right up to (and technically
+just past, once buffered) the property edge where a real road crosses it
+-- correct as COMPUTED (see fencing.py), this clip only trims what gets
+DRAWN. The boundary fence itself is deliberately NOT clipped this way --
+it's already guaranteed to stay inside the boundary by construction (see
+find_boundary_fencing()'s own difference-against-boundary-polygon logic),
+so clipping it here would be a redundant no-op. The intersection can come
+back as a LineString, MultiLineString, or GeometryCollection (a ring
+crossing the boundary at two points splits into pieces) -- _iter_line_
+parts() already handles all three -- with any resulting piece under
+ROAD_FENCE_CLIP_MIN_LENGTH (a degenerate point/sliver from a tangent
+crossing) dropped rather than drawn. They are INDEPENDENT of the boundary
+fence (deliberately not spliced/gated into it -- see fencing.py's own
+module docstring): a visible overlap between a road-exclusion loop and the
+boundary fence, or between the two road-exclusion loops themselves, is
+expected wherever the underlying real-world geometry meets, not a
+rendering bug. "Road Corridor Fencing" gets a single unnumbered legend
+line (there's only ever one generated corridor, regardless of how many
+pieces its own clip produces); "Existing Farm Road Fencing" gets one
+legend line per on-parcel segment when more than one (same, regardless of
+per-segment clip pieces), mirroring boundary fencing's own 1-vs-2
+segment-labeling convention. Neither gets a numbered circle marker,
 same "no single point to point to" reasoning as boundary fencing's own
 legend lines above.
 
@@ -478,20 +495,25 @@ ROAD_RENDER_OUTER_ALPHA = 0.35
 ROAD_RENDER_INNER_ALPHA = 0.7
 
 # Boundary fencing (fencing.identify_fencing()'s own "perimeter_fencing" layer,
-# fence_type="boundary") renders as a dashed line -- a fence line, not the heavy
-# solid cartographic boundary stroke this layer replaces (see render_layout_map()'s
-# own docstring for why that stroke was removed outright, not kept as a fallback).
-# A mustard yellow, chosen to read clearly against both green production-zone
-# contours and tan/green aerial imagery, and distinct from every other layer color
-# already in use (production green #4C9A2A, water blue #1F6FB2, road dark gray
-# #3A3A3A, structure red #D64545, contour brown #6B4423, tree dark green #2D5A27).
-# The two road-exclusion fence loops (fence_type "road_corridor_exclusion" /
-# "existing_farm_road_exclusion") reuse this SAME color/linewidth/dash pattern --
-# no new styling constants needed, see this module's own ROAD EXCLUSION FENCE
-# STYLE docstring section. CONFIGURABLE.
+# fence_type="boundary") renders as a solid hairline -- a fine, subtle fence line,
+# not the heavy solid cartographic boundary stroke this layer replaces (see
+# render_layout_map()'s own docstring for why that stroke was removed outright, not
+# kept as a fallback). A mustard yellow, chosen to read clearly against both green
+# production-zone contours and tan/green aerial imagery, and distinct from every
+# other layer color already in use (production green #4C9A2A, water blue #1F6FB2,
+# road dark gray #3A3A3A, structure red #D64545, contour brown #6B4423, tree dark
+# green #2D5A27). The two road-exclusion fence loops (fence_type
+# "road_corridor_exclusion" / "existing_farm_road_exclusion") reuse this SAME
+# color/linewidth -- no new styling constants needed, see this module's own ROAD
+# EXCLUSION FENCE STYLE docstring section. CONFIGURABLE.
 FENCE_COLOR = "#D4A017"
-FENCE_LINEWIDTH = 1.2  # thin -- a fence line, not a heavy boundary stroke
-FENCE_DASH_PATTERN = (0, (6, 4))  # matplotlib dash tuple
+FENCE_LINEWIDTH = 0.6  # a hairline -- was 1.2 (a dashed line before that)
+
+# Below this length (Web Mercator units, ~meters), a road-exclusion fence piece
+# produced by clipping to the boundary polygon at render time (see ROAD EXCLUSION
+# FENCE STYLE above) is a degenerate point/sliver from a tangent crossing, not a
+# real segment worth drawing.
+ROAD_FENCE_CLIP_MIN_LENGTH = 0.5
 
 # Same DISPLAY-ONLY simplify-then-Chaikin-smooth treatment as the road corridor's
 # own _smooth_line_for_render() (see that function's own docstring) -- here applied
@@ -746,18 +768,15 @@ def _smooth_closed_ring_for_render(ring: LineString) -> LineString:
 
 def _draw_boundary_fence(ax, ring: LineString) -> None:
     """Draws `ring` (already smoothed -- see _smooth_closed_ring_for_render())
-    as a single dashed fence line, FENCE_COLOR/FENCE_LINEWIDTH/FENCE_DASH_PATTERN.
-    plot_line() draws via a matplotlib PathPatch (a Patch, not a Line2D), so the
-    dash pattern is applied via the `linestyle` kwarg -- PathPatch has no `dashes`
-    property of its own -- accepting the exact same (offset, (on_off_seq)) tuple
-    format FENCE_DASH_PATTERN is already defined in."""
+    as a single solid hairline fence line, FENCE_COLOR/FENCE_LINEWIDTH -- no
+    dash pattern (this used to be dashed; now a fine, subtle solid line)."""
     plot_line(
         ring,
         ax=ax,
         add_points=False,
         color=FENCE_COLOR,
         linewidth=FENCE_LINEWIDTH,
-        linestyle=FENCE_DASH_PATTERN,
+        linestyle="solid",
         zorder=30,
     )
 
@@ -1051,7 +1070,11 @@ def render_layout_map(
     # this module's own ROAD EXCLUSION FENCE STYLE docstring section). Looped over
     # generically rather than as two near-duplicate blocks; only the legend label
     # differs per fence_type. INDEPENDENT of the boundary fence -- an overlap with it,
-    # or between the two road-fence types themselves, is expected, not a bug.
+    # or between the two road-fence types themselves, is expected, not a bug. Unlike
+    # the boundary fence, each smoothed ring is clipped to boundary_polygon (render-
+    # only -- see this module's own ROAD EXCLUSION FENCE STYLE docstring section for
+    # why) before drawing; the clip can split one ring into several line pieces, all
+    # drawn, but the legend still gets exactly one line per FEATURE regardless.
     road_fence_features = [
         f
         for f in fencing_features
@@ -1064,7 +1087,10 @@ def render_layout_map(
     for feature in road_fence_features:
         fence_geom = _reproject_geometry_to_mercator(feature["geometry"])
         render_ring = _smooth_closed_ring_for_render(fence_geom)
-        _draw_boundary_fence(ax, render_ring)
+        clipped_ring = render_ring.intersection(boundary_polygon)
+        for line in _iter_line_parts(clipped_ring):
+            if line.length > ROAD_FENCE_CLIP_MIN_LENGTH:
+                _draw_boundary_fence(ax, line)
         if feature["properties"]["fence_type"] == "road_corridor_exclusion":
             legend_entries.append("Road Corridor Fencing")
         else:

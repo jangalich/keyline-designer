@@ -227,9 +227,10 @@ ROAD_CORRIDOR_FENCE_DILATION_CELLS = 1
 # the real clearance envelope (how much ground is actually kept clear
 # around the road), this inset only affects where the drawn line sits
 # WITHIN that already-established envelope -- two different concerns,
-# not one number doing double duty. 1ft. CONFIGURABLE -- tune by eye
-# against the reference property.
-ROAD_FENCE_LINE_INSET_METERS = 0.3048  # 1ft
+# not one number doing double duty. Was 0.3048m (1ft); widened to 2.0m
+# after eyeballing against the reference property. CONFIGURABLE -- tune
+# by eye against the reference property.
+ROAD_FENCE_LINE_INSET_METERS = 2.0
 
 # Buffer (meters) around real, already-clean vector road geometry
 # (farm_roads_data.get_farm_roads_for_boundary(), USGS National Map

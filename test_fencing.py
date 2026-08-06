@@ -385,7 +385,13 @@ print("identify_fencing() still produces boundary fencing when no streams are pr
 
 ROAD_FENCE_DEM = {
     "array": np.zeros((20, 20), dtype=np.float32),
-    "resolution_meters": (2.0, 2.0),
+    # 5.0m resolution (was 2.0m, widened for ROAD_FENCE_LINE_INSET_METERS's 0.3048m -> 2.0m
+    # increase) -- a 1-cell dilation on either side of a single-cell-wide path gives a 15.0m-
+    # wide dilated footprint here, leaving an 11.0m-wide residual after the 2.0m inset on both
+    # sides: a comfortable, unambiguous margin above the "empties out" fallback case below,
+    # not a near-miss that could collapse the two cases (normal inset success vs. genuine
+    # pinch-triggered fallback) into the same outcome.
+    "resolution_meters": (5.0, 5.0),
     "origin_x": 500000.0,
     "origin_y": 4500000.0,
     "crs": UTM_CRS,
@@ -414,6 +420,12 @@ for r, c in straight_path_cells:
     straight_mask[r, c] = True
 straight_dilated_mask = binary_dilate(straight_mask, ROAD_CORRIDOR_FENCE_DILATION_CELLS)
 straight_dilated_footprint = cell_union_footprint(ROAD_FENCE_DEM, straight_dilated_mask)
+straight_would_be_inset = straight_dilated_footprint.buffer(-ROAD_FENCE_LINE_INSET_METERS)
+assert not straight_would_be_inset.is_empty and straight_would_be_inset.is_valid, (
+    "test setup must genuinely produce a real, non-empty negative-buffer result here -- otherwise "
+    "this case and the narrow/pinched case below would both hit the same fallback path, and this "
+    "would no longer be a real test of the normal (non-fallback) inset behavior"
+)
 
 straight_fence_polygon = Polygon(straight_coords)
 assert straight_fence_polygon.area < straight_dilated_footprint.area, (
@@ -435,7 +447,7 @@ print(
 
 # A very fine DEM resolution (0.1m) makes ROAD_CORRIDOR_FENCE_DILATION_CELLS's own single-cell
 # dilation produce a genuinely thin strip (3 cells wide perpendicular to the path, 0.3m total)
-# -- thinner than ROAD_FENCE_LINE_INSET_METERS's own default 0.3048m inset, so the negative
+# -- thinner than ROAD_FENCE_LINE_INSET_METERS's own current 2.0m inset, so the negative
 # buffer has nowhere to go and empties out completely.
 NARROW_ROAD_FENCE_DEM = {
     "array": np.zeros((20, 20), dtype=np.float32),
