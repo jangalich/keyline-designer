@@ -13,12 +13,28 @@ soil/stream data dicts, with no network calls anywhere in this file except
 the final offline wiring check (identify_water_suitability() with
 check_soil=False, check_streams=False and a synthetic dem= passed directly,
 mirroring test_water_system_candidate_pipeline.py's approach).
+
+The "--- boundary_polygon_utm/valleys/production_areas overrides ---"
+section near the end covers identify_water_suitability()'s own
+dem/boundary_polygon_utm/valleys/production_areas override plumbing
+(mirroring water_candidate_zones.identify_water_system_candidate_zones()'s
+own override tests) AND the real behavior change this branch makes: the
+production_areas self-compute fallback now sources production_area_
+ceiling.identify_optimized_production_areas()'s scored_patches, not
+production_area.identify_production_areas()'s raw patches -- see
+water_suitability.py's own module docstring for why. Same mock_patch.object
+usage against the module's own imported bindings (patch where it's looked
+up, not where it's defined) as test_pipeline_context.py already
+establishes.
 """
+
+from unittest.mock import patch as mock_patch
 
 import numpy as np
 from shapely.geometry import box
 
 import production_area as pa
+import water_suitability as ws
 from feature_schema import validate_feature_collection
 from water_candidate_zones import find_candidate_zones
 from water_suitability import (
@@ -38,6 +54,7 @@ from water_suitability import (
     _stream_permanence_factor,
     _topographic_factor,
     _water_holding_factor,
+    fetch_and_select_optimal_water_zone,
     identify_water_suitability,
     score_water_zones,
     water_suitability_to_geojson,
@@ -453,5 +470,165 @@ for zone in pipeline_result["scored_zones"]:
     assert zone["soil_data_available"] is False
     assert zone["stream_data_available"] is False
 print(f"identify_water_suitability() full pipeline wiring works end-to-end offline: {len(pipeline_result['scored_zones'])} scored zone(s), check_soil/check_streams=False correctly yields confidence='low'.")
+
+
+# --- boundary_polygon_utm/valleys/production_areas overrides ------------
+#
+# Real baseline production areas for this same synthetic_dem/boundary_coordinates,
+# via the SAME production_area_ceiling.identify_optimized_production_areas() call
+# identify_water_suitability()'s own self-compute fallback now makes -- computed
+# once here (real, offline via the already-applied pa.get_canopy_height_for_boundary/
+# pa.get_road_exclusion_union_utm stubs above) and reused below as both the
+# "what the default/self-computed path produces" reference and a ready-made,
+# realistic override value.
+baseline_optimized_result = ws.identify_optimized_production_areas(boundary_coordinates, dem=synthetic_dem)
+BASELINE_PRODUCTION_AREAS = baseline_optimized_result["scored_patches"]
+assert BASELINE_PRODUCTION_AREAS, "test setup: expected at least one real production area on this synthetic DEM"
+
+# --- 1. regression: with no overrides, production_areas comes from -----
+# --- identify_optimized_production_areas(), NOT identify_production_areas() ---
+
+with mock_patch.object(
+    ws, "identify_optimized_production_areas", return_value=baseline_optimized_result
+) as mock_optimized, mock_patch.object(ws, "identify_production_areas") as mock_raw:
+    default_result = identify_water_suitability(
+        boundary_coordinates, dem=synthetic_dem, check_soil=False, check_streams=False,
+        zone_kwargs={"min_boundary_setback_meters": 5.0},
+    )
+
+assert mock_optimized.call_count == 1, "identify_optimized_production_areas() must be called exactly once when production_areas isn't supplied"
+optimized_call = mock_optimized.call_args
+assert optimized_call.args[0] == boundary_coordinates
+assert optimized_call.kwargs["dem"] is synthetic_dem
+assert mock_raw.call_count == 0, "identify_production_areas() (the RAW, un-ceiling-trimmed source) must NOT be called for production_areas anymore"
+assert len(default_result["scored_zones"]) >= 1, "expected at least one scored water system candidate zone from the real baseline production areas"
+print(
+    "REGRESSION: with no production_areas override, identify_water_suitability() sources it from "
+    "identify_optimized_production_areas() exactly once, and never calls the raw identify_production_areas()."
+)
+
+
+# --- 2. override behavior: all three new overrides supplied -> the ------
+# --- corresponding self-compute fallbacks are never called --------------
+
+from rasterio.warp import transform as _override_warp_transform  # noqa: E402
+
+override_boundary_xs, override_boundary_ys = _override_warp_transform(
+    "EPSG:4326", synthetic_dem["crs"],
+    [pt[0] for pt in boundary_coordinates], [pt[1] for pt in boundary_coordinates],
+)
+from shapely.geometry import Polygon as _OverridePolygon  # noqa: E402
+OVERRIDE_BOUNDARY_POLYGON_UTM = _OverridePolygon(zip(override_boundary_xs, override_boundary_ys))
+
+with mock_patch.object(ws, "delineate_valleys") as mock_delineate_override, mock_patch.object(
+    ws, "identify_optimized_production_areas"
+) as mock_optimized_override:
+    override_result = identify_water_suitability(
+        boundary_coordinates,
+        dem=synthetic_dem,
+        boundary_polygon_utm=OVERRIDE_BOUNDARY_POLYGON_UTM,
+        valleys=[],
+        production_areas=BASELINE_PRODUCTION_AREAS,
+        check_soil=False,
+        check_streams=False,
+        zone_kwargs={"min_boundary_setback_meters": 5.0},
+    )
+
+assert mock_delineate_override.call_count == 0, "delineate_valleys() must NOT be called when valleys was supplied as an override"
+assert mock_optimized_override.call_count == 0, "identify_optimized_production_areas() must NOT be called when production_areas was supplied as an override"
+assert len(override_result["scored_zones"]) >= 1
+print(
+    "Supplying boundary_polygon_utm=/valleys=/production_areas= all three as overrides correctly skips "
+    "both delineate_valleys() and identify_optimized_production_areas() -- zero self-compute fallback calls."
+)
+
+
+# --- 3. scoring output genuinely reflects the overridden production_areas ---
+# --- (not silently falling back to the self-computed default) -----------
+#
+# Same override_result run above (BASELINE_PRODUCTION_AREAS) vs. a second run using
+# a copy of those same patches with every representative_elevation_m shifted sharply
+# UP (simulating a much higher production area) -- if production_areas were silently
+# ignored, both runs would score identically; they must not.
+
+RAISED_PRODUCTION_AREAS = [
+    {**patch, "representative_elevation_m": patch["representative_elevation_m"] + 500.0}
+    for patch in BASELINE_PRODUCTION_AREAS
+]
+
+with mock_patch.object(ws, "delineate_valleys") as _mock_delineate_raised, mock_patch.object(
+    ws, "identify_optimized_production_areas"
+) as _mock_optimized_raised:
+    raised_result = identify_water_suitability(
+        boundary_coordinates,
+        dem=synthetic_dem,
+        boundary_polygon_utm=OVERRIDE_BOUNDARY_POLYGON_UTM,
+        valleys=[],
+        production_areas=RAISED_PRODUCTION_AREAS,
+        check_soil=False,
+        check_streams=False,
+        zone_kwargs={"min_boundary_setback_meters": 5.0},
+    )
+
+assert _mock_delineate_raised.call_count == 0 and _mock_optimized_raised.call_count == 0
+
+override_by_id = {z["id"]: z for z in override_result["scored_zones"]}
+raised_by_id = {z["id"]: z for z in raised_result["scored_zones"]}
+common_ids = set(override_by_id) & set(raised_by_id)
+assert common_ids, "expected at least one zone id in common between the baseline-elevation and raised-elevation runs to compare"
+
+differed = False
+for zone_id in common_ids:
+    baseline_gravity = override_by_id[zone_id]["gravity_feed_factor"]
+    raised_gravity = raised_by_id[zone_id]["gravity_feed_factor"]
+    if baseline_gravity != raised_gravity:
+        differed = True
+    # a candidate zone sits at a roughly fixed real elevation -- pushing its served
+    # production area's representative_elevation_m up by 500m must never make its
+    # gravity relationship MORE favorable, only equal or worse (it can never make the
+    # candidate more "above" a production area that just got raised further above it).
+    assert raised_gravity <= baseline_gravity, (
+        f"zone {zone_id}: raising the served production area's elevation by 500m must not improve "
+        f"gravity_feed_factor (baseline={baseline_gravity}, raised={raised_gravity})"
+    )
+assert differed, "raising every overridden production area's representative_elevation_m by 500m must change at least one zone's gravity_feed_factor -- production_areas is being silently ignored otherwise"
+print(
+    "Scoring output genuinely reflects the overridden production_areas: raising every overridden patch's "
+    "representative_elevation_m by 500m correctly lowers (never improves) the served zone(s)' "
+    "gravity_feed_factor, proving the override isn't silently falling back to self-computed patches."
+)
+
+
+# --- 4. fetch_and_select_optimal_water_zone() forwards new overrides ----
+# --- through **suitability_kwargs -----------------------------------------
+
+_fake_selected_zone = {"id": 999, "suitability_score": 42.0}
+_fake_identify_result = {
+    "zones_geojson": {"type": "FeatureCollection", "features": []},
+    "scored_zones": [],
+    "all_scored_zones": [],
+    "selected_water_zone": _fake_selected_zone,
+}
+with mock_patch.object(ws, "identify_water_suitability", return_value=_fake_identify_result) as mock_identify:
+    wrapper_result = fetch_and_select_optimal_water_zone(
+        boundary_coordinates,
+        dem=synthetic_dem,
+        production_areas=BASELINE_PRODUCTION_AREAS,
+        valleys=[],
+    )
+
+assert wrapper_result == _fake_selected_zone, "fetch_and_select_optimal_water_zone() must return identify_water_suitability()'s own selected_water_zone"
+assert mock_identify.call_count == 1
+identify_call = mock_identify.call_args
+assert identify_call.args[0] == boundary_coordinates
+assert identify_call.kwargs["dem"] is synthetic_dem
+assert identify_call.kwargs["production_areas"] is BASELINE_PRODUCTION_AREAS, "production_areas= must reach identify_water_suitability() via **suitability_kwargs"
+assert identify_call.kwargs["valleys"] == [], "valleys= must also reach identify_water_suitability() via **suitability_kwargs"
+print(
+    "fetch_and_select_optimal_water_zone() correctly forwards production_areas=/valleys= (and, by the same "
+    "**suitability_kwargs mechanism, boundary_polygon_utm=) straight through to identify_water_suitability(), "
+    "with no signature change needed on the wrapper itself."
+)
+
 
 print("\nAll water_suitability checks passed.")

@@ -114,7 +114,35 @@ pre-fetched stream list, and does no network I/O itself — same
 pure-core-vs-network-fetch split as every other candidate-scoring module
 in this pipeline, so the scoring math is unit-testable against synthetic
 input independent of whether SSURGO/NHD are reachable.
-identify_water_suitability() is the fetch-and-score entry point.
+identify_water_suitability() is the fetch-and-score entry point. Like
+water_candidate_zones.identify_water_system_candidate_zones(), it accepts
+dem/boundary_polygon_utm/valleys/production_areas as independent, optional
+overrides -- each falls back to being self-computed exactly as before if
+not supplied, so an upstream orchestrator that has already computed some
+or all of these (e.g. a shared pipeline-context pass reused across several
+KSOP steps) can pass them straight through instead of this module
+re-deriving or re-fetching its own copies.
+
+production_areas' self-compute fallback specifically sources production_
+area_ceiling.identify_optimized_production_areas()'s own scored_patches
+(the optimized, ceiling-trimmed production geometry), NOT production_
+area.identify_production_areas()'s raw, un-ceiling-trimmed patches --
+this was a real, deliberate fix, not a plumbing-only change.
+road_corridors.py already scores/excludes against production_area_
+ceiling.py's OPTIMIZED production geometry (identify_optimized_
+production_areas(...)["scored_patches"], with a RuntimeError guard on the
+expected shape). Before this fix, this module's OWN production-area
+input -- which feeds gravity-feed scoring (production_area_relationships /
+primary_production_area_relationship, see _gravity_feed_factor() below)
+and therefore which water zone gets selected as rank 1 -- came from the
+RAW, un-trimmed identify_production_areas() instead: two different
+notions of "where's the production land" feeding two decisions
+(water-zone selection, then road routing) that are supposed to be
+looking at the same property. Switching this module's own default source
+to the optimized/ceiling-trimmed patches means selected_water_zone can
+genuinely shift on a real property versus the pre-fix behavior, since
+candidate zones are now scored against smaller, ceiling-trimmed
+production-area geometry -- an intentional correction, not a regression.
 
 This is a self-contained, standalone pass — like production_suitability.py,
 it is NOT wired into generate_full_report.py/report_generator.py in this
@@ -132,6 +160,7 @@ from dem_data import get_dem_for_boundary
 from feature_schema import CONFIDENCE_HIGH, CONFIDENCE_LOW, CONFIDENCE_MEDIUM, make_feature, make_feature_collection
 from hydrology_data import get_water_features_for_boundary
 from production_area import _fetch_road_exclusion_union_utm, get_required_tree_root_zone_mask_utm, identify_production_areas
+from production_area_ceiling import identify_optimized_production_areas
 from soil_data import get_saturated_hydraulic_conductivity_for_polygon, get_soil_geometries_for_polygon
 from valley_delineation import delineate_valleys
 from water_candidate_zones import (
@@ -993,6 +1022,9 @@ def summarize_water_suitability(scored_zones: list[dict]) -> str:
 def identify_water_suitability(
     boundary_coordinates: list[tuple[float, float]],
     dem: Optional[dict] = None,
+    boundary_polygon_utm: Optional[Polygon] = None,
+    valleys: Optional[list[dict]] = None,
+    production_areas: Optional[list[dict]] = None,
     check_soil: bool = True,
     check_streams: bool = True,
     zone_kwargs: Optional[dict] = None,
@@ -1005,6 +1037,33 @@ def identify_water_suitability(
     SSURGO ksat_r geometry per zone and one whole-boundary real NHD stream
     fetch, scores the result, and returns the enriched
     "water_system_candidate" GeoJSON FeatureCollection.
+
+    dem, boundary_polygon_utm, valleys, and production_areas are all
+    optional overrides, independently of one another -- each falls back to
+    being self-computed exactly as before if not supplied, same "reuse
+    what an upstream orchestrator already computed" pattern water_
+    candidate_zones.identify_water_system_candidate_zones() already
+    established for these same four values. See that function's own
+    docstring for the general reasoning; the one thing that's different
+    here is what production_areas defaults to when not supplied (see
+    below).
+
+    production_areas defaults to production_area_ceiling.identify_
+    optimized_production_areas()'s own scored_patches -- the SAME
+    optimized/ceiling-trimmed production geometry road_corridors.py
+    already scores/excludes against -- NOT production_area.identify_
+    production_areas()'s raw, un-ceiling-trimmed patches. This matters
+    here specifically because this module's own gravity-feed scoring
+    (production_area_relationships / primary_production_area_relationship,
+    see _gravity_feed_factor()) measures each candidate zone against
+    whichever production area it could best serve, and that measurement is
+    what decides selected_water_zone -- so this module's own notion of
+    "where's the production land" needs to match road_corridors.py's, not
+    a different, larger, untrimmed one. Supplying production_areas
+    explicitly (e.g. an upstream orchestrator's already-computed optimized
+    patches) still works exactly as before; this only changes this
+    function's own SELF-COMPUTE fallback when production_areas is left
+    unsupplied.
 
     Each zone's own SSURGO fetch degrades independently and gracefully (an
     SDA outage for one zone's footprint shouldn't block scoring for the
@@ -1028,16 +1087,22 @@ def identify_water_suitability(
     if dem is None:
         dem = get_dem_for_boundary(boundary_coordinates)
 
-    boundary_xs, boundary_ys = warp_transform(
-        "EPSG:4326",
-        dem["crs"],
-        [pt[0] for pt in boundary_coordinates],
-        [pt[1] for pt in boundary_coordinates],
-    )
-    boundary_polygon_utm = Polygon(zip(boundary_xs, boundary_ys))
+    if boundary_polygon_utm is None:
+        boundary_xs, boundary_ys = warp_transform(
+            "EPSG:4326",
+            dem["crs"],
+            [pt[0] for pt in boundary_coordinates],
+            [pt[1] for pt in boundary_coordinates],
+        )
+        boundary_polygon_utm = Polygon(zip(boundary_xs, boundary_ys))
 
-    valleys = delineate_valleys(dem)
-    production_areas = identify_production_areas(dem, boundary_polygon_utm)
+    if valleys is None:
+        valleys = delineate_valleys(dem)
+
+    if production_areas is None:
+        production_areas = identify_optimized_production_areas(
+            boundary_coordinates, dem=dem
+        )["scored_patches"]
 
     # Same mandatory-canopy/optional-road wiring identify_water_system_
     # candidate_zones() uses -- this entry point also reaches
@@ -1109,6 +1174,12 @@ def fetch_and_select_optimal_water_zone(
     re-deriving "the best one" independently, so there is exactly one
     definition of "selected" for callers working from a boundary and
     callers working from an already-scored list to agree on.
+
+    boundary_polygon_utm=/valleys=/production_areas= overrides are
+    available here too, despite not appearing in this signature -- they
+    pass straight through **suitability_kwargs into identify_water_
+    suitability(), same as check_soil=/check_streams=/zone_kwargs=/any
+    score_kwargs already do.
     """
     result = identify_water_suitability(boundary_coordinates, dem=dem, **suitability_kwargs)
     return result["selected_water_zone"]
