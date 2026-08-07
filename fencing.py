@@ -278,10 +278,10 @@ ROAD_CORRIDOR_FENCE_DILATION_CELLS = 1
 # the real clearance envelope (how much ground is actually kept clear
 # around the road), this inset only affects where the drawn line sits
 # WITHIN that already-established envelope -- two different concerns,
-# not one number doing double duty. Was 0.3048m (1ft); widened to 2.0m
-# after eyeballing against the reference property. CONFIGURABLE -- tune
-# by eye against the reference property.
-ROAD_FENCE_LINE_INSET_METERS = 2.0
+# not one number doing double duty. Was 0.3048m (1ft), then 2.0m; widened
+# again to 3.0m per this session's tuning pass. CONFIGURABLE -- tune by
+# eye against the reference property.
+ROAD_FENCE_LINE_INSET_METERS = 3.0
 
 # Buffer (meters) around real, already-clean vector road geometry
 # (farm_roads_data.get_farm_roads_for_boundary(), USGS National Map
@@ -311,16 +311,18 @@ EXISTING_FARM_ROAD_FENCE_BUFFER_METERS = 3.0
 # from TREE_ZONE_FENCE_BUFFER_METERS below even though both may start at the
 # same placeholder value -- same "constants stay separate even when
 # numerically identical" convention this module already applies elsewhere
-# (see EXISTING_FARM_ROAD_FENCE_BUFFER_METERS's own comment). Placeholder
-# value -- CONFIGURABLE, tune against the reference property.
-WATER_ZONE_FENCE_BUFFER_METERS = 1.5
+# (see EXISTING_FARM_ROAD_FENCE_BUFFER_METERS's own comment). Was 1.5m;
+# bumped to 2.5m as a starting point per this session's tuning pass --
+# CONFIGURABLE, tune further by eye if still too tight against the zone's
+# own edge.
+WATER_ZONE_FENCE_BUFFER_METERS = 2.5
 
 # Same purpose/reasoning as WATER_ZONE_FENCE_BUFFER_METERS above, applied to
 # each tree zone candidate's own render_fill_polygon_utm instead -- its own
 # SEPARATE constant for the same "distinct constants for distinct purposes"
-# reason. Placeholder value -- CONFIGURABLE, tune against the reference
-# property.
-TREE_ZONE_FENCE_BUFFER_METERS = 1.5
+# reason. Was 1.5m; bumped to 2.5m alongside WATER_ZONE_FENCE_BUFFER_METERS
+# -- CONFIGURABLE, tune further by eye if still too tight.
+TREE_ZONE_FENCE_BUFFER_METERS = 2.5
 
 
 def _utm_epsg_for_lonlat(longitude: float, latitude: float) -> int:
