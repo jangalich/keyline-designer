@@ -15,6 +15,7 @@ Then it's reachable at http://localhost:5000
 """
 
 import os
+import re
 import tempfile
 
 from flask import Flask, after_this_request, request, jsonify, send_file
@@ -60,11 +61,14 @@ def _parse_access_point(data: dict) -> tuple[float, float]:
 # CORS (Cross-Origin Resource Sharing) lets the frontend call this API
 # from a different origin. Browsers block cross-origin requests by
 # default unless the server explicitly allows it. Restricted to the
-# deployed frontend's real origin plus the local Vite dev server --
-# not left wide open, now that a real frontend origin exists.
+# deployed frontend's real origin, the local Vite dev server, and
+# per-branch/commit Vercel preview URLs for this project (Vercel mints a
+# new one on every deploy, so those can only be matched by pattern, not
+# listed individually) -- not left wide open to any *.vercel.app site.
 CORS(app, origins=[
     "https://keyline-designer-frontend.vercel.app",
     "http://localhost:5173",
+    re.compile(r"^https://keyline-designer-frontend-[a-z0-9-]+\.vercel\.app$"),
 ])
 
 
