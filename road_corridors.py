@@ -1299,8 +1299,14 @@ def _fetch_floodplain_hydric_union(
 
 def identify_road_corridor_candidates(
     boundary_coordinates: list[tuple[float, float]],
-    dem: Optional[dict] = None,
     anchor_lon_lat: Optional[tuple[float, float]] = None,
+    dem: Optional[dict] = None,
+    boundary_polygon_utm: Optional[Polygon] = None,
+    production_areas: Optional[list[dict]] = None,
+    valleys: Optional[list[dict]] = None,
+    selected_water_zone: Optional[dict] = None,
+    hydric_floodplain_union=None,
+    floodplain_data_is_fallback: Optional[bool] = None,
     **corridor_kwargs,
 ) -> dict:
     """
@@ -1323,6 +1329,25 @@ def identify_road_corridor_candidates(
     outside world -- not something derivable from the boundary alone), so
     None here simply means no routes can be generated at all yet.
 
+    dem, boundary_polygon_utm, production_areas, valleys, selected_water_
+    zone, and hydric_floodplain_union are all optional overrides,
+    independently of one another -- each falls back to being self-computed
+    exactly as before if not supplied, same "reuse what an upstream
+    orchestrator already computed" pattern water_candidate_zones.
+    identify_water_system_candidate_zones() and water_suitability.
+    identify_water_suitability() already established for these same
+    values. When selected_water_zone isn't itself overridden, its self-
+    compute fallback still passes this function's own already-sourced
+    boundary_polygon_utm/valleys/production_areas through to fetch_and_
+    select_optimal_water_zone() (which forwards them into identify_water_
+    suitability() via **suitability_kwargs), so those three are never
+    re-derived a third, independent time just to pick the water zone.
+    floodplain_data_is_fallback pairs with hydric_floodplain_union (see
+    _fetch_floodplain_hydric_union()'s own return value) -- if a caller
+    supplies hydric_floodplain_union directly without saying whether it's
+    a real fetch or the valley-line fallback, it defaults to False (assume
+    real) rather than silently mislabeling a genuine fallback union.
+
     Returns:
         {
             'zones_geojson': dict,                       # every scored route, ranked
@@ -1342,13 +1367,14 @@ def identify_road_corridor_candidates(
             "selected_road_corridor": None,
         }
 
-    boundary_xs, boundary_ys = warp_transform(
-        "EPSG:4326",
-        dem["crs"],
-        [pt[0] for pt in boundary_coordinates],
-        [pt[1] for pt in boundary_coordinates],
-    )
-    boundary_polygon_utm = Polygon(zip(boundary_xs, boundary_ys))
+    if boundary_polygon_utm is None:
+        boundary_xs, boundary_ys = warp_transform(
+            "EPSG:4326",
+            dem["crs"],
+            [pt[0] for pt in boundary_coordinates],
+            [pt[1] for pt in boundary_coordinates],
+        )
+        boundary_polygon_utm = Polygon(zip(boundary_xs, boundary_ys))
 
     # Optimized/final production geometry (production_area_ceiling.py's
     # own ceiling-trimmed, clustered/gated result) -- NOT production_area.
@@ -1358,7 +1384,8 @@ def identify_road_corridor_candidates(
     # find_road_routes() hard-excludes against below; fail loudly here
     # rather than let a KeyError surface deep inside that masking code if
     # this pipeline's own patch shape ever changes.
-    production_areas = identify_optimized_production_areas(boundary_coordinates, dem=dem)["scored_patches"]
+    if production_areas is None:
+        production_areas = identify_optimized_production_areas(boundary_coordinates, dem=dem)["scored_patches"]
     if production_areas and "render_fill_polygon_utm" not in production_areas[0]:
         raise RuntimeError(
             "identify_optimized_production_areas()'s scored_patches no longer carry "
@@ -1366,16 +1393,27 @@ def identify_road_corridor_candidates(
             "depends on this field; update find_road_routes() to match the new shape."
         )
 
-    valleys = delineate_valleys(dem)  # reused for the floodplain fallback below
+    if valleys is None:
+        valleys = delineate_valleys(dem)  # reused for the floodplain fallback below
 
     # The single water zone this property's OWN water-suitability scoring
     # actually selected (rank 1), not every unscored candidate zone
     # water_candidate_zones.py generates -- see module docstring.
-    selected_water_zone = fetch_and_select_optimal_water_zone(boundary_coordinates, dem=dem)
+    if selected_water_zone is None:
+        selected_water_zone = fetch_and_select_optimal_water_zone(
+            boundary_coordinates,
+            dem=dem,
+            boundary_polygon_utm=boundary_polygon_utm,
+            valleys=valleys,
+            production_areas=production_areas,
+        )
 
-    hydric_floodplain_union, floodplain_data_is_fallback = _fetch_floodplain_hydric_union(
-        boundary_coordinates, dem, valleys, boundary_polygon_utm
-    )
+    if hydric_floodplain_union is None:
+        hydric_floodplain_union, floodplain_data_is_fallback = _fetch_floodplain_hydric_union(
+            boundary_coordinates, dem, valleys, boundary_polygon_utm
+        )
+    elif floodplain_data_is_fallback is None:
+        floodplain_data_is_fallback = False
 
     routes = find_road_routes(
         dem,

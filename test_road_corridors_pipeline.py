@@ -53,6 +53,7 @@ from unittest.mock import patch as mock_patch
 
 import numpy as np
 from rasterio.warp import transform as warp_transform
+from shapely.geometry import Point
 
 import production_area
 import production_area_ceiling
@@ -165,4 +166,190 @@ for feature in features:
 
 print("Routes correctly reflect unreachable NHD/SSURGO data (floodplain fallback flagged in confidence_notes), "
       "with no stale anchor/production-crossing properties.")
+print("REGRESSION (test 2, no overrides supplied): output above is identical to pre-branch behavior against "
+      "this same synthetic fixture.")
+
+
+# --- boundary_polygon_utm/production_areas/valleys/selected_water_zone/ --
+# --- hydric_floodplain_union overrides ------------------------------------
+#
+# Real baseline override values for this same synthetic_dem/boundary_coordinates,
+# via the SAME underlying calls identify_road_corridor_candidates()'s own
+# self-compute fallbacks make (mocks already applied above for the mandatory
+# canopy gate / disqualifying-soil fetch) -- computed once here and reused
+# below both as realistic override values and as identity-checkable proof
+# that the self-compute fallbacks are genuinely skipped when overridden.
+import road_corridors  # noqa: E402
+import valley_delineation  # noqa: E402
+import water_suitability  # noqa: E402
+from rasterio.warp import transform as _override_warp_transform  # noqa: E402
+from shapely.geometry import Polygon as _OverridePolygon  # noqa: E402
+
+override_boundary_xs, override_boundary_ys = _override_warp_transform(
+    "EPSG:4326", synthetic_dem["crs"],
+    [pt[0] for pt in boundary_coordinates], [pt[1] for pt in boundary_coordinates],
+)
+OVERRIDE_BOUNDARY_POLYGON_UTM = _OverridePolygon(zip(override_boundary_xs, override_boundary_ys))
+
+with mock_patch.object(production_area, "_fetch_disqualifying_soil_union", return_value=None), \
+     mock_patch.object(production_area_ceiling, "_fetch_disqualifying_soil_union", return_value=None), \
+     mock_patch.object(production_area, "get_canopy_height_for_boundary", _fake_clean_canopy):
+    OVERRIDE_PRODUCTION_AREAS = production_area_ceiling.identify_optimized_production_areas(
+        boundary_coordinates, dem=synthetic_dem
+    )["scored_patches"]
+    OVERRIDE_VALLEYS = valley_delineation.delineate_valleys(synthetic_dem)
+    _real_selected_water_zone = water_suitability.fetch_and_select_optimal_water_zone(
+        boundary_coordinates,
+        dem=synthetic_dem,
+        boundary_polygon_utm=OVERRIDE_BOUNDARY_POLYGON_UTM,
+        valleys=OVERRIDE_VALLEYS,
+        production_areas=OVERRIDE_PRODUCTION_AREAS,
+    )
+    OVERRIDE_HYDRIC_FLOODPLAIN_UNION, _override_is_fallback = road_corridors._fetch_floodplain_hydric_union(
+        boundary_coordinates, synthetic_dem, OVERRIDE_VALLEYS, OVERRIDE_BOUNDARY_POLYGON_UTM
+    )
+
+assert isinstance(OVERRIDE_PRODUCTION_AREAS, list), "test setup: expected a real (list, even if empty) production_areas value"
+# This fixture's ridge crest is deliberately narrow enough to never itself qualify as
+# production land (see this file's own docstring) -- an empty list here is the correct,
+# expected real value, not a test-setup failure; it's still a genuine, non-None override.
+assert OVERRIDE_HYDRIC_FLOODPLAIN_UNION is not None, (
+    "test setup: expected a real (fallback-derived, since NHD/SSURGO are unreachable here) floodplain union "
+    "to reuse as a direct override below"
+)
+# The real, honestly-computed selected water zone on THIS narrow-ridge fixture is None (no
+# candidate water-system zone survives here either) -- and None is exactly the sentinel this
+# branch's own None-falls-back-to-self-compute pattern treats as "not overridden", so it can't
+# be used to prove a call was skipped. Test 1 below needs a genuinely non-None override to prove
+# fetch_and_select_optimal_water_zone() is skipped, so it uses a small synthetic zone instead,
+# positioned well outside this fixture's own DEM extent so it has zero effect on routing.
+assert _real_selected_water_zone is None, (
+    "test setup: this narrow-ridge fixture is expected to produce no real candidate water zone -- "
+    "if this now finds one, OVERRIDE_SELECTED_WATER_ZONE below should probably use it directly instead"
+)
+OVERRIDE_SELECTED_WATER_ZONE = {
+    "id": "synthetic-test-water-zone",
+    "render_fill_polygon_utm": Point(origin_x - 1000.0, origin_y - 1000.0).buffer(5.0),
+}
+
+
+# --- 1. override behavior: all five new overrides supplied -> the -------
+# --- corresponding self-compute fallbacks are never called ---------------
+
+with mock_patch.object(road_corridors, "get_dem_for_boundary") as mock_dem, \
+     mock_patch.object(road_corridors, "identify_optimized_production_areas") as mock_prod, \
+     mock_patch.object(road_corridors, "delineate_valleys") as mock_valleys, \
+     mock_patch.object(road_corridors, "fetch_and_select_optimal_water_zone") as mock_water, \
+     mock_patch.object(road_corridors, "_fetch_floodplain_hydric_union") as mock_flood:
+    override_result = road_corridors.identify_road_corridor_candidates(
+        boundary_coordinates,
+        anchor_lon_lat=anchor_lon_lat,
+        dem=synthetic_dem,
+        boundary_polygon_utm=OVERRIDE_BOUNDARY_POLYGON_UTM,
+        production_areas=OVERRIDE_PRODUCTION_AREAS,
+        valleys=OVERRIDE_VALLEYS,
+        selected_water_zone=OVERRIDE_SELECTED_WATER_ZONE,
+        hydric_floodplain_union=OVERRIDE_HYDRIC_FLOODPLAIN_UNION,
+    )
+
+assert mock_dem.call_count == 0, "get_dem_for_boundary() must NOT be called when dem was supplied"
+assert mock_prod.call_count == 0, (
+    "identify_optimized_production_areas() must NOT be called when production_areas was supplied as an override"
+)
+assert mock_valleys.call_count == 0, "delineate_valleys() must NOT be called when valleys was supplied as an override"
+assert mock_water.call_count == 0, (
+    "fetch_and_select_optimal_water_zone() must NOT be called when selected_water_zone was supplied as an override"
+)
+assert mock_flood.call_count == 0, (
+    "_fetch_floodplain_hydric_union() must NOT be called when hydric_floodplain_union was supplied as an override"
+)
+validate_feature_collection(override_result["zones_geojson"])
+print(
+    "Supplying boundary_polygon_utm=/production_areas=/valleys=/selected_water_zone=/hydric_floodplain_union= "
+    "all five as overrides (test 1) correctly skips get_dem_for_boundary()/identify_optimized_production_areas()/"
+    "delineate_valleys()/fetch_and_select_optimal_water_zone()/_fetch_floodplain_hydric_union() -- zero "
+    "self-compute fallback calls."
+)
+
+
+# --- 3. selected_water_zone NOT overridden, but boundary_polygon_utm/ ---
+# --- valleys/production_areas ARE -> fetch_and_select_optimal_water_ -----
+# --- zone() is called WITH those three passed through as kwargs, not -----
+# --- self-deriving its own copies a third, independent time (mirrors -----
+# --- test_water_suitability.py's own section 4 for this exact function) --
+
+with mock_patch.object(road_corridors, "fetch_and_select_optimal_water_zone", return_value=None) as mock_water_passthrough:
+    passthrough_result = road_corridors.identify_road_corridor_candidates(
+        boundary_coordinates,
+        anchor_lon_lat=anchor_lon_lat,
+        dem=synthetic_dem,
+        boundary_polygon_utm=OVERRIDE_BOUNDARY_POLYGON_UTM,
+        valleys=OVERRIDE_VALLEYS,
+        production_areas=OVERRIDE_PRODUCTION_AREAS,
+    )
+
+assert mock_water_passthrough.call_count == 1
+water_call = mock_water_passthrough.call_args
+assert water_call.args[0] == boundary_coordinates
+assert water_call.kwargs["dem"] is synthetic_dem
+assert water_call.kwargs["boundary_polygon_utm"] is OVERRIDE_BOUNDARY_POLYGON_UTM, (
+    "fetch_and_select_optimal_water_zone() must receive this function's own already-sourced "
+    "boundary_polygon_utm, not re-derive its own copy"
+)
+assert water_call.kwargs["valleys"] is OVERRIDE_VALLEYS, (
+    "fetch_and_select_optimal_water_zone() must receive this function's own already-sourced valleys, "
+    "not re-derive its own copy via delineate_valleys()"
+)
+assert water_call.kwargs["production_areas"] is OVERRIDE_PRODUCTION_AREAS, (
+    "fetch_and_select_optimal_water_zone() must receive this function's own already-sourced "
+    "production_areas, not re-derive its own copy via identify_optimized_production_areas()"
+)
+validate_feature_collection(passthrough_result["zones_geojson"])
+print(
+    "With selected_water_zone left unsupplied but boundary_polygon_utm=/valleys=/production_areas= all "
+    "overridden (test 3), fetch_and_select_optimal_water_zone() correctly receives this function's own "
+    "already-sourced values as kwargs instead of re-deriving a third, independent copy of any of them."
+)
+
+
+# --- 4. hydric_floodplain_union overridden directly, floodplain_data_is_ --
+# --- fallback NOT specified -> defaults to False (assume real) rather ----
+# --- than crashing or silently mislabeling a genuine fallback union -------
+#
+# Deliberately reuses OVERRIDE_HYDRIC_FLOODPLAIN_UNION -- a union that IS
+# actually fallback-derived (NHD/SSURGO are unreachable in this sandbox) --
+# to prove the function applies the False default purely because the caller
+# supplied the union directly and stayed silent on floodplain_data_is_
+# fallback, not because it re-derives or otherwise knows the union's real
+# provenance.
+
+with mock_patch.object(production_area, "_fetch_disqualifying_soil_union", return_value=None), \
+     mock_patch.object(production_area_ceiling, "_fetch_disqualifying_soil_union", return_value=None), \
+     mock_patch.object(production_area, "get_canopy_height_for_boundary", _fake_clean_canopy), \
+     mock_patch.object(road_corridors, "_fetch_floodplain_hydric_union") as mock_flood_direct:
+    direct_result = road_corridors.identify_road_corridor_candidates(
+        boundary_coordinates,
+        anchor_lon_lat=anchor_lon_lat,
+        dem=synthetic_dem,
+        hydric_floodplain_union=OVERRIDE_HYDRIC_FLOODPLAIN_UNION,
+    )
+
+assert mock_flood_direct.call_count == 0, (
+    "_fetch_floodplain_hydric_union() must NOT be called when hydric_floodplain_union was supplied directly"
+)
+assert direct_result["zones_geojson"]["features"], "expected at least one route in this direct-override run"
+for feature in direct_result["zones_geojson"]["features"]:
+    notes = feature["properties"]["confidence_notes"].lower()
+    assert "dem-only fallback" not in notes, (
+        "floodplain_data_is_fallback must default to False when hydric_floodplain_union is supplied directly "
+        "without an explicit floodplain_data_is_fallback= -- a caller-supplied union must not be silently "
+        "mislabeled as the degraded valley-line fallback"
+    )
+print(
+    "Supplying hydric_floodplain_union= directly without floodplain_data_is_fallback= (test 4) correctly "
+    "defaults floodplain_data_is_fallback to False (assume real data) rather than crashing or mislabeling it "
+    "as the DEM-only fallback."
+)
+
+
 print("\nAll road corridor pipeline checks passed.")
