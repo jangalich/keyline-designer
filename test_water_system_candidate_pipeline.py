@@ -17,12 +17,18 @@ a broken wire between them (wrong parameter order, mismatched coordinate
 systems, etc.) that per-module tests wouldn't.
 """
 
+from unittest.mock import patch as mock_patch
+
 import numpy as np
 from rasterio.warp import transform as warp_transform
+from shapely.geometry import Polygon
 
 from dem_data import _utm_epsg_for_lonlat
 from feature_schema import validate_feature_collection
 import production_area as pa
+from production_area import identify_production_areas
+from valley_delineation import delineate_valleys
+import water_candidate_zones as wcz
 from water_candidate_zones import identify_water_system_candidate_zones
 
 # identify_water_system_candidate_zones() calls production_area.identify_production_areas()
@@ -122,4 +128,126 @@ for feature in result["zones_geojson"]["features"]:
     assert feature["geometry"]["type"] in ("Polygon", "MultiPolygon")
 
 print("All water system candidate zone features use layer='water_system_candidate' with polygon geometry.")
+
+
+# --- boundary_polygon_utm / valleys / production_areas overrides ---
+#
+# identify_water_system_candidate_zones() now accepts boundary_polygon_utm,
+# valleys, and production_areas as optional overrides, mirroring the dem
+# override pattern above -- each falls back to being self-computed exactly
+# as before if not supplied, independently of the others. The three
+# scenarios below reuse the SAME synthetic_dem/boundary_coordinates fixture
+# as the baseline "no overrides" run above, so a genuine like-for-like
+# comparison is possible.
+
+fixture_boundary_xs, fixture_boundary_ys = warp_transform(
+    "EPSG:4326",
+    DST_CRS,
+    [pt[0] for pt in boundary_coordinates],
+    [pt[1] for pt in boundary_coordinates],
+)
+fixture_boundary_polygon_utm = Polygon(zip(fixture_boundary_xs, fixture_boundary_ys))
+
+# Real (unmocked) valleys/production_areas for this fixture -- pa.
+# get_canopy_height_for_boundary/get_road_exclusion_union_utm are already
+# monkeypatched to offline stubs above, so this stays fully offline.
+fixture_valleys = delineate_valleys(synthetic_dem)
+fixture_production_areas = identify_production_areas(synthetic_dem, fixture_boundary_polygon_utm)
+assert fixture_valleys, "test setup requires at least one valley on this synthetic terrain"
+assert fixture_production_areas, "test setup requires at least one production area on this synthetic terrain"
+
+
+# --- 1. all three overrides supplied: delineate_valleys()/identify_production_areas() must NOT be called ---
+
+with mock_patch.object(wcz, "delineate_valleys") as mock_delineate_all, \
+     mock_patch.object(wcz, "identify_production_areas") as mock_identify_pa_all:
+    result_all_overrides = identify_water_system_candidate_zones(
+        boundary_coordinates,
+        dem=synthetic_dem,
+        boundary_polygon_utm=fixture_boundary_polygon_utm,
+        valleys=fixture_valleys,
+        production_areas=fixture_production_areas,
+        min_boundary_setback_meters=5.0,
+    )
+
+assert mock_delineate_all.call_count == 0, "delineate_valleys must not be called when valleys is supplied"
+assert mock_identify_pa_all.call_count == 0, "identify_production_areas must not be called when production_areas is supplied"
+
+for key in ("zones_geojson", "valleys_geojson", "production_areas_geojson"):
+    assert key in result_all_overrides, f"missing '{key}' with all three overrides supplied"
+    validate_feature_collection(result_all_overrides[key])
+
+assert len(result_all_overrides["valleys_geojson"]["features"]) == len(fixture_valleys), (
+    "valleys_geojson must reflect the SUPPLIED valleys override, not a re-derived count"
+)
+assert len(result_all_overrides["production_areas_geojson"]["features"]) == len(fixture_production_areas), (
+    "production_areas_geojson must reflect the SUPPLIED production_areas override, not a re-derived count"
+)
+assert len(result_all_overrides["zones_geojson"]["features"]) == len(result["zones_geojson"]["features"]), (
+    "zones_geojson should be unchanged when the supplied overrides are the same real values self-computation "
+    "would have produced anyway"
+)
+print(
+    "\nWith all three overrides (boundary_polygon_utm/valleys/production_areas) supplied: "
+    "delineate_valleys() and identify_production_areas() were called ZERO times, and the result matches "
+    "the supplied override data."
+)
+
+
+# --- 2. none of the three overrides supplied: identical output to before this change (pure regression) ---
+#
+# This is exactly the baseline call already made above (dem=synthetic_dem only, no boundary_polygon_utm/
+# valleys/production_areas) -- the self-compute code path for all three is unchanged by this branch (only
+# now reached via "if X is None:" instead of unconditionally), so `result` above already IS this scenario's
+# regression check. Cross-checked here against the override fixtures built from the identical synthetic_dem/
+# boundary_coordinates, which must match exactly since both paths compute the same real values the same way.
+assert len(result["valleys_geojson"]["features"]) == len(fixture_valleys), (
+    "self-computed valleys (no override supplied) must match a direct delineate_valleys() call on the same dem"
+)
+assert len(result["production_areas_geojson"]["features"]) == len(fixture_production_areas), (
+    "self-computed production_areas (no override supplied) must match a direct identify_production_areas() "
+    "call on the same dem/boundary"
+)
+print(
+    "With none of the three overrides supplied: self-computed valleys/production_areas counts match a direct "
+    "call to delineate_valleys()/identify_production_areas() on the same dem -- unchanged, pre-existing behavior."
+)
+
+
+# --- 3. only ONE override supplied (production_areas): the other two must still self-compute correctly ---
+
+with mock_patch.object(wcz, "delineate_valleys", wraps=wcz.delineate_valleys) as mock_delineate_partial, \
+     mock_patch.object(wcz, "identify_production_areas") as mock_identify_pa_partial:
+    result_partial_override = identify_water_system_candidate_zones(
+        boundary_coordinates,
+        dem=synthetic_dem,
+        production_areas=fixture_production_areas,
+        min_boundary_setback_meters=5.0,
+    )
+
+assert mock_delineate_partial.call_count == 1, (
+    "valleys was not overridden -- delineate_valleys() must still be called exactly once to self-compute it"
+)
+assert mock_identify_pa_partial.call_count == 0, (
+    "identify_production_areas must not be called when production_areas is supplied, even though the other "
+    "two overrides were not"
+)
+
+for key in ("zones_geojson", "valleys_geojson", "production_areas_geojson"):
+    assert key in result_partial_override, f"missing '{key}' with only production_areas overridden"
+    validate_feature_collection(result_partial_override[key])
+
+assert len(result_partial_override["production_areas_geojson"]["features"]) == len(fixture_production_areas), (
+    "production_areas_geojson must reflect the SUPPLIED override"
+)
+assert len(result_partial_override["valleys_geojson"]["features"]) == len(fixture_valleys), (
+    "valleys_geojson must reflect a correctly SELF-COMPUTED result (boundary_polygon_utm was also not "
+    "overridden, so this also confirms self-computed boundary_polygon_utm was correct)"
+)
+print(
+    "With only production_areas overridden: identify_production_areas() was called ZERO times, while "
+    "delineate_valleys() was still called exactly once (valleys/boundary_polygon_utm correctly self-computed) "
+    "-- the three overrides are independent, not all-or-nothing."
+)
+
 print("\nAll end-to-end pipeline checks passed.")

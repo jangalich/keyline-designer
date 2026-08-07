@@ -1081,6 +1081,9 @@ def zones_to_geojson(zones: list[dict]) -> dict:
 def identify_water_system_candidate_zones(
     boundary_coordinates: list[tuple[float, float]],
     dem: Optional[dict] = None,
+    boundary_polygon_utm: Optional[Polygon] = None,
+    valleys: Optional[list[dict]] = None,
+    production_areas: Optional[list[dict]] = None,
     **zone_kwargs,
 ) -> dict:
     """
@@ -1094,6 +1097,34 @@ def identify_water_system_candidate_zones(
             'valleys_geojson': FeatureCollection,            # layer="valley" — diagnostic (Stage 1)
             'production_areas_geojson': FeatureCollection,   # layer="production_area_candidate" — diagnostic
         }
+
+    dem, boundary_polygon_utm, valleys, and production_areas are all
+    optional overrides, independently of one another (supplying one does
+    not require supplying the rest) — each falls back to being self-
+    computed exactly as before if not supplied. This lets a caller that
+    has already computed some or all of these upstream (e.g. a shared
+    pipeline-context orchestrator reusing one DEM/boundary/valleys/
+    production-areas pass across several KSOP steps) pass them straight
+    through instead of this function re-deriving or re-fetching its own
+    copies:
+      - boundary_polygon_utm: the same warp_transform-then-Polygon(...)
+        reprojection this function has always done inline, computed only
+        if not supplied.
+      - valleys: valley_delineation.delineate_valleys(dem)'s own output
+        by default. Only ever consumed by this function's own diagnostic
+        valleys_geojson output below — find_candidate_zones() itself
+        never reads valleys at all (it derives its own flow-accumulation
+        grid directly from `dem`, see that function's own docstring), so
+        supplying/omitting this override changes valleys_geojson only,
+        never zones_geojson.
+      - production_areas: production_area.identify_production_areas(dem,
+        boundary_polygon_utm)'s own raw (un-ceiling-trimmed) patches by
+        default, but an override doesn't have to match that exact shape —
+        find_candidate_zones() only ever reads a patch's 'polygon_utm',
+        'render_fill_polygon_utm', 'id', and 'representative_elevation_m'
+        fields, so production_area_ceiling.
+        identify_optimized_production_areas()'s scored_patches (a strict
+        superset of those same fields) is a valid drop-in override too.
 
     valleys_geojson is still produced via valley_delineation.
     delineate_valleys() purely as diagnostic output (unchanged, own
@@ -1121,16 +1152,20 @@ def identify_water_system_candidate_zones(
     if dem is None:
         dem = get_dem_for_boundary(boundary_coordinates)
 
-    boundary_xs, boundary_ys = warp_transform(
-        "EPSG:4326",
-        dem["crs"],
-        [pt[0] for pt in boundary_coordinates],
-        [pt[1] for pt in boundary_coordinates],
-    )
-    boundary_polygon_utm = Polygon(zip(boundary_xs, boundary_ys))
+    if boundary_polygon_utm is None:
+        boundary_xs, boundary_ys = warp_transform(
+            "EPSG:4326",
+            dem["crs"],
+            [pt[0] for pt in boundary_coordinates],
+            [pt[1] for pt in boundary_coordinates],
+        )
+        boundary_polygon_utm = Polygon(zip(boundary_xs, boundary_ys))
 
-    valleys = delineate_valleys(dem)
-    production_areas = identify_production_areas(dem, boundary_polygon_utm)
+    if valleys is None:
+        valleys = delineate_valleys(dem)
+
+    if production_areas is None:
+        production_areas = identify_production_areas(dem, boundary_polygon_utm)
 
     canopy_root_zone_mask_utm = get_required_tree_root_zone_mask_utm(
         boundary_polygon_utm, dem, buffer_meters=WATER_ZONE_CANOPY_BUFFER_METERS
