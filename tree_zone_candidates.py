@@ -938,6 +938,7 @@ def _search_space_to_geojson(search_space_utm, crs: str) -> dict:
 def identify_tree_zone_candidates(
     boundary_coordinates: list[tuple[float, float]],
     dem: Optional[dict] = None,
+    anchor_lon_lat: Optional[tuple[float, float]] = None,
     **score_kwargs,
 ) -> dict:
     """
@@ -1007,22 +1008,14 @@ def identify_tree_zone_candidates(
     selected_water_zone = water_result["selected_water_zone"]
     water_polygons_utm = [selected_water_zone["render_fill_polygon_utm"]] if selected_water_zone else []
 
-    # identify_road_corridor_candidates() now requires a real anchor_lon_lat
-    # to generate any routes at all (see road_corridors.py's own module
-    # docstring) -- there's no real one available in this module's own
-    # context yet (a genuine product decision, not derivable from the
-    # boundary alone), so this borrows render_layout_map.py's TEMPORARY
-    # placeholder reference-property anchor purely to unblock testing/live
-    # runs, same as render_layout_map.py's own call. Imported locally
-    # rather than at module level so importing tree_zone_candidates.py
-    # doesn't also eagerly pull in render_layout_map.py's own heavier
-    # rendering dependencies (matplotlib/contextily/xyzservices) for
-    # callers that never actually render a map.
-    from render_layout_map import _PLACEHOLDER_REFERENCE_PROPERTY_ANCHOR_LON_LAT
-
-    road_result = identify_road_corridor_candidates(
-        boundary_coordinates, dem=dem, anchor_lon_lat=_PLACEHOLDER_REFERENCE_PROPERTY_ANCHOR_LON_LAT
-    )
+    # identify_road_corridor_candidates() needs a real anchor_lon_lat to
+    # generate any routes at all (see road_corridors.py's own module
+    # docstring) -- passed through from this function's own anchor_lon_lat
+    # parameter (the real, user-picked access point, threaded down from
+    # generate_full_report.py). None here degrades the same clean way
+    # identify_road_corridor_candidates() itself already handles a missing
+    # anchor: no road routes, not an error.
+    road_result = identify_road_corridor_candidates(boundary_coordinates, dem=dem, anchor_lon_lat=anchor_lon_lat)
     selected_road_corridor = road_result["selected_road_corridor"]
     # _road_corridor_exclusion_polygon() builds this module's OWN
     # buffered variant of the selected route's real footprint -- see that
@@ -1156,10 +1149,18 @@ if __name__ == "__main__":
         (-79.9838258, 40.6458343),
     ]
 
+    # Manual-testing-only reference anchor -- imported here, not at module
+    # level, so this stays a __main__-only test fixture rather than a
+    # production dependency (see render_layout_map.py's own module
+    # docstring for this constant).
+    from render_layout_map import _PLACEHOLDER_REFERENCE_PROPERTY_ANCHOR_LON_LAT
+
     print("Identifying tree zone candidates for property boundary...\n")
 
     try:
-        result = identify_tree_zone_candidates(property_boundary)
+        result = identify_tree_zone_candidates(
+            property_boundary, anchor_lon_lat=_PLACEHOLDER_REFERENCE_PROPERTY_ANCHOR_LON_LAT
+        )
         print(summarize_tree_zone_candidates(result))
     except Exception as e:
         print(f"Request failed: {e}")

@@ -286,9 +286,16 @@ from solar_suitability import fetch_and_select_optimal_structure_site
 from tree_zone_candidates import identify_tree_zone_candidates
 from water_suitability import fetch_and_select_optimal_water_zone
 
-# TEMPORARY: hardcoded to Jordan's reference property until frontend
-# anchor-point selection ships. NOT a real default — do not reuse for
-# any other property. Remove once callers supply a real user-picked point.
+# Reference-property fixture for manual/__main__ testing ONLY -- now that
+# the frontend supplies a real access point (api.py's /api/generate-report
+# and /api/generate-report-pdf both require it), no production code path
+# imports this anymore. Every production entry point (fetch_layout_layers(),
+# identify_solar_candidate_zones(), identify_tree_zone_candidates(),
+# generate_full_report()) takes a real anchor_lon_lat parameter instead.
+# Kept here, at module level, only so the several __main__ blocks across
+# this codebase that still import it for manual testing keep working — do
+# not reuse this for any other property, and do not reintroduce it into
+# any production call path.
 _PLACEHOLDER_REFERENCE_PROPERTY_ANCHOR_LON_LAT = (-79.98356157031265, 40.64303511679458)
 
 WGS84 = "EPSG:4326"
@@ -898,7 +905,11 @@ def _production_zone_legend_stats(production_result: dict) -> list[tuple[float, 
     return stats
 
 
-def fetch_layout_layers(boundary_coordinates: list[tuple[float, float]], dem: Optional[dict] = None) -> dict:
+def fetch_layout_layers(
+    boundary_coordinates: list[tuple[float, float]],
+    dem: Optional[dict] = None,
+    anchor_lon_lat: Optional[tuple[float, float]] = None,
+) -> dict:
     """
     Fetches/derives every layer render_layout_map() draws. Fetches the DEM
     once (unless one is passed in) and shares it across all four
@@ -988,14 +999,14 @@ def fetch_layout_layers(boundary_coordinates: list[tuple[float, float]], dem: Op
     production_result = identify_optimized_production_areas(boundary_coordinates, dem=dem)
     water_zone = fetch_and_select_optimal_water_zone(boundary_coordinates, dem=dem)
     road_corridor_candidates = identify_road_corridor_candidates(
-        boundary_coordinates, dem=dem, anchor_lon_lat=_PLACEHOLDER_REFERENCE_PROPERTY_ANCHOR_LON_LAT
+        boundary_coordinates, dem=dem, anchor_lon_lat=anchor_lon_lat
     )
     road_corridor_features = road_corridor_candidates["zones_geojson"]["features"]
     road_corridor = road_corridor_features[0] if road_corridor_features else None
     selected_road_corridor = road_corridor_candidates["selected_road_corridor"]
     selected_road_corridor_cells = selected_road_corridor["cells"] if selected_road_corridor else None
-    tree_zone_result = identify_tree_zone_candidates(boundary_coordinates, dem=dem)
-    structure_site = fetch_and_select_optimal_structure_site(boundary_coordinates, dem=dem)
+    tree_zone_result = identify_tree_zone_candidates(boundary_coordinates, dem=dem, anchor_lon_lat=anchor_lon_lat)
+    structure_site = fetch_and_select_optimal_structure_site(boundary_coordinates, dem=dem, anchor_lon_lat=anchor_lon_lat)
     water_features = get_water_features_for_boundary(boundary_coordinates)
     contour_lines = compute_contour_lines(dem)
 
@@ -1019,6 +1030,7 @@ def fetch_layout_layers(boundary_coordinates: list[tuple[float, float]], dem: Op
         boundary_coordinates,
         dem=dem,
         selected_road_corridor_cells=selected_road_corridor_cells,
+        anchor_lon_lat=anchor_lon_lat,
         farm_road_features=farm_road_features,
         selected_water_zone_render_fill_polygon_utm=selected_water_zone_render_fill_polygon_utm,
         tree_zone_render_fill_polygons_utm=tree_zone_render_fill_polygons_utm,
@@ -1042,6 +1054,7 @@ def render_layout_map(
     output_path: str,
     dem: Optional[dict] = None,
     layers: Optional[dict] = None,
+    anchor_lon_lat: Optional[tuple[float, float]] = None,
 ) -> str:
     """
     Renders the final proposed layout as a single high-resolution PNG at
@@ -1052,9 +1065,15 @@ def render_layout_map(
     generate_pdf_report.py, which also needs them alongside the narrative
     report's own data fetches) doesn't pay for a second, redundant fetch.
     Omit it (default) to have this function fetch everything itself.
+
+    anchor_lon_lat: the real, user-picked access point -- only used when
+    layers isn't already supplied (this function's own internal
+    fetch_layout_layers() call needs it for road-corridor routing);
+    ignored otherwise, since a pre-fetched layers dict already baked in
+    whatever anchor its own caller used.
     """
     if layers is None:
-        layers = fetch_layout_layers(boundary_coordinates, dem=dem)
+        layers = fetch_layout_layers(boundary_coordinates, dem=dem, anchor_lon_lat=anchor_lon_lat)
 
     dem = layers["dem"]
     production_result = layers["production_result"]
@@ -1442,7 +1461,9 @@ if __name__ == "__main__":
     print("Rendering static layout map for property boundary...\n")
 
     try:
-        path = render_layout_map(property_boundary, "layout_map.png")
+        path = render_layout_map(
+            property_boundary, "layout_map.png", anchor_lon_lat=_PLACEHOLDER_REFERENCE_PROPERTY_ANCHOR_LON_LAT
+        )
         print(f"Wrote {path}")
     except Exception as e:
         print(f"Request failed: {e}")

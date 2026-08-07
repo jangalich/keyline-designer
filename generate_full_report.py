@@ -33,7 +33,11 @@ from water_candidate_zones import (
     identify_water_system_candidate_zones,
     summarize_water_system_candidate_zones,
 )
-from road_corridors import identify_road_corridor_candidates, summarize_road_corridor_candidates
+from road_corridors import (
+    identify_road_corridor_candidates,
+    summarize_road_corridor_candidates,
+    validate_access_point_on_boundary,
+)
 from solar_suitability import identify_solar_candidate_zones, summarize_solar_candidate_zones
 from fencing import identify_fencing, summarize_fencing
 from report_generator import generate_scale_of_permanence_report
@@ -48,11 +52,24 @@ def _boundary_center(boundary_coordinates: list) -> tuple:
     return sum(lats) / len(lats), sum(lons) / len(lons)
 
 
-def generate_full_report(boundary_coordinates: list) -> str:
+def generate_full_report(boundary_coordinates: list, anchor_lon_lat: tuple[float, float]) -> str:
     """
     Runs the full pipeline for a given property boundary (list of
     (longitude, latitude) tuples) and returns the final narrative report.
+
+    anchor_lon_lat is the real, user-picked access point (a single
+    (lon, lat) pair, same convention as boundary_coordinates) -- required,
+    not optional: it's the point road-corridor routing starts from (see
+    road_corridors.py's own module docstring), and there's no reasonable
+    default to invent for it (a real anchor is a product decision -- where
+    does this property actually connect to the outside world -- not
+    something derivable from the boundary alone). Validated up front via
+    validate_access_point_on_boundary() -- fails loud with a ValueError
+    rather than silently accepting a point that isn't actually on this
+    property's own boundary.
     """
+    validate_access_point_on_boundary(boundary_coordinates, anchor_lon_lat)
+
     print("Step 1/10: Fetching climate data (prevailing wind, rainfall)...")
     center_lat, center_lon = _boundary_center(boundary_coordinates)
     climate_summary = get_climate_summary_for_point(center_lat, center_lon)
@@ -110,21 +127,8 @@ def generate_full_report(boundary_coordinates: list) -> str:
 
     print("Step 7/10: Identifying suggested road corridor candidates (DEM least-cost-path routing)...")
     try:
-        # identify_road_corridor_candidates() now requires a real
-        # anchor_lon_lat to generate any routes at all (see
-        # road_corridors.py's own module docstring) -- there's no real one
-        # available in this pipeline's own context yet (a genuine product
-        # decision, not derivable from the boundary alone), so this
-        # borrows render_layout_map.py's TEMPORARY placeholder reference-
-        # property anchor purely to unblock testing/live runs, same as
-        # render_layout_map.py's own call. Imported locally rather than at
-        # module level so this script doesn't also eagerly pull in
-        # render_layout_map.py's own heavier rendering dependencies
-        # (matplotlib/contextily/xyzservices) just to fetch this constant.
-        from render_layout_map import _PLACEHOLDER_REFERENCE_PROPERTY_ANCHOR_LON_LAT
-
         road_corridor_result = identify_road_corridor_candidates(
-            boundary_coordinates, anchor_lon_lat=_PLACEHOLDER_REFERENCE_PROPERTY_ANCHOR_LON_LAT
+            boundary_coordinates, anchor_lon_lat=anchor_lon_lat
         )
         road_corridor_candidates_geojson = road_corridor_result["zones_geojson"]
     except Exception as e:
@@ -139,7 +143,7 @@ def generate_full_report(boundary_coordinates: list) -> str:
 
     print("Step 8/10: Identifying solar infrastructure candidate zones (DEM slope/aspect/shading)...")
     try:
-        solar_zone_result = identify_solar_candidate_zones(boundary_coordinates)
+        solar_zone_result = identify_solar_candidate_zones(boundary_coordinates, anchor_lon_lat=anchor_lon_lat)
         solar_candidate_zones_geojson = solar_zone_result["zones_geojson"]
     except Exception as e:
         # Same reasoning as imagery/water candidate zones above: a USGS/
@@ -154,7 +158,7 @@ def generate_full_report(boundary_coordinates: list) -> str:
 
     print("Step 9/10: Identifying fencing geometry (stream exclusion + perimeter)...")
     try:
-        fencing_result = identify_fencing(boundary_coordinates)
+        fencing_result = identify_fencing(boundary_coordinates, anchor_lon_lat=anchor_lon_lat)
         fencing_geojson = fencing_result["fencing_geojson"]
     except Exception as e:
         # Same reasoning as the other DEM/network-backed layers above — an
@@ -194,7 +198,14 @@ if __name__ == "__main__":
         (-79.9838258, 40.6458343),
     ]
 
-    report = generate_full_report(property_boundary)
+    # A real point ON this boundary's own edge (the midpoint of its first
+    # segment) -- NOT render_layout_map.py's shared reference-property
+    # placeholder, which sits ~10m off this exact boundary and would fail
+    # validate_access_point_on_boundary()'s own tolerance check now that
+    # this entry point enforces it.
+    access_point = (-79.98374275, 40.6443462)
+
+    report = generate_full_report(property_boundary, access_point)
 
     print("=" * 60)
     print(report)

@@ -26,6 +26,37 @@ from geocode import geocode_address
 
 app = Flask(__name__)
 
+
+def _parse_access_point(data: dict) -> tuple[float, float]:
+    """
+    Pulls the required 'access_point' field out of a request body and
+    validates its shape -- a single [lon, lat] pair, same convention as
+    'boundary' coordinates. Raises ValueError with a caller-facing message
+    on anything missing/malformed; callers turn that into a 400, same
+    "fail loud, don't fake a good result" pattern the rest of this
+    pipeline uses for a bad/missing anchor point (see road_corridors.
+    validate_access_point_on_boundary(), which handles the separate
+    geometric check -- is it actually on the boundary -- once the pipeline
+    itself runs).
+    """
+    if "access_point" not in data:
+        raise ValueError(
+            "Request must include an 'access_point' field: a single [lon, lat] point "
+            "where the property meets a road along its boundary."
+        )
+
+    access_point = data["access_point"]
+
+    if (
+        not isinstance(access_point, (list, tuple))
+        or len(access_point) != 2
+        or not all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in access_point)
+    ):
+        raise ValueError("'access_point' must be a [longitude, latitude] pair of numbers.")
+
+    return (float(access_point[0]), float(access_point[1]))
+
+
 # CORS (Cross-Origin Resource Sharing) lets the frontend call this API
 # from a different origin. Browsers block cross-origin requests by
 # default unless the server explicitly allows it. Restricted to the
@@ -73,7 +104,12 @@ def geocode_endpoint():
 def generate_report_endpoint():
     """
     Expects a JSON body like:
-        { "boundary": [[lon, lat], [lon, lat], ...] }
+        {
+            "boundary": [[lon, lat], [lon, lat], ...],
+            "access_point": [lon, lat]
+        }
+    ("access_point" is required -- the real point where the property meets
+    a road along its boundary; road-corridor routing starts from it.)
 
     Returns:
         { "report": "..." }  on success
@@ -90,11 +126,21 @@ def generate_report_endpoint():
         return jsonify({"error": "Boundary must be a list of at least 3 [lon, lat] points."}), 400
 
     try:
+        access_point = _parse_access_point(data)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+    try:
         # generate_full_report expects a list of (lon, lat) tuples; JSON
         # gives us lists, but Python's tuple-unpacking in the downstream
         # functions works the same either way, so no conversion needed.
-        report = generate_full_report(boundary)
+        report = generate_full_report(boundary, access_point)
         return jsonify({"report": report})
+
+    except ValueError as e:
+        # Covers validate_access_point_on_boundary()'s own rejection of an
+        # access_point that isn't actually on this boundary.
+        return jsonify({"error": str(e)}), 400
 
     except RuntimeError as e:
         # Covers the missing ANTHROPIC_API_KEY case specifically
@@ -108,9 +154,16 @@ def generate_report_endpoint():
 def generate_report_pdf_endpoint():
     """
     Expects a JSON body like:
-        { "boundary": [[lon, lat], ...], "property_label": "..." }
-    ("property_label" is optional -- a display label for the report's
-    cover page, e.g. the geocoded address; defaults to a generic label.)
+        {
+            "boundary": [[lon, lat], ...],
+            "access_point": [lon, lat],
+            "property_label": "..."
+        }
+    ("access_point" is required -- the real point where the property meets
+    a road along its boundary; road-corridor routing starts from it, same
+    convention as "boundary" coordinates. "property_label" is optional --
+    a display label for the report's cover page, e.g. the geocoded
+    address; defaults to a generic label.)
 
     Returns the assembled PDF (the existing narrative Scale of Permanence
     report, unchanged, plus the new final-page static layout map) as a
@@ -138,13 +191,18 @@ def generate_report_pdf_endpoint():
     if not isinstance(boundary, list) or len(boundary) < 3:
         return jsonify({"error": "Boundary must be a list of at least 3 [lon, lat] points."}), 400
 
+    try:
+        access_point = _parse_access_point(data)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
     property_label = data.get("property_label") or "Property Design Report"
 
     try:
         tmp_dir = tempfile.mkdtemp(prefix="keyline-report-")
         pdf_path = os.path.join(tmp_dir, "scale_of_permanence_report.pdf")
 
-        generate_full_report_pdf(boundary, pdf_path, property_label=property_label)
+        generate_full_report_pdf(boundary, pdf_path, access_point, property_label=property_label)
 
         @after_this_request
         def _cleanup_temp_pdf(response):
@@ -161,6 +219,11 @@ def generate_report_pdf_endpoint():
             as_attachment=True,
             download_name="scale_of_permanence_report.pdf",
         )
+
+    except ValueError as e:
+        # Covers validate_access_point_on_boundary()'s own rejection of an
+        # access_point that isn't actually on this boundary.
+        return jsonify({"error": str(e)}), 400
 
     except RuntimeError as e:
         # Covers the missing ANTHROPIC_API_KEY case specifically

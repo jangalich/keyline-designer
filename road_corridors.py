@@ -348,6 +348,79 @@ STEEP_GRADE_ENGINEERING_NOTE = (
     "freeze-thaw conditions. "
 )
 
+# A real access point is where the property meets a road along its own
+# perimeter, not an arbitrary interior or exterior point — see
+# validate_access_point_on_boundary() below. A couple of meters covers
+# GPS/digitizing slop for a point genuinely picked on the boundary line
+# without also accepting a point that's actually well inside or outside
+# the parcel.
+ACCESS_POINT_BOUNDARY_TOLERANCE_METERS = 3.0
+
+
+def _utm_epsg_for_lonlat(longitude: float, latitude: float) -> int:
+    """
+    Same formula as dem_data.py's/fencing.py's own private helpers of the
+    same name, duplicated here rather than imported: this validation
+    needs a projected meters-based CRS the same way DEM analysis does,
+    but doesn't need (and shouldn't require) fetching an entire DEM
+    raster just to get one EPSG code.
+    """
+    zone = int((longitude + 180) // 6) + 1
+    return (32600 if latitude >= 0 else 32700) + zone
+
+
+def _utm_crs_for_boundary(boundary_coordinates: list[tuple[float, float]]) -> str:
+    lons = [pt[0] for pt in boundary_coordinates]
+    lats = [pt[1] for pt in boundary_coordinates]
+    center_lon = (min(lons) + max(lons)) / 2
+    center_lat = (min(lats) + max(lats)) / 2
+    return f"EPSG:{_utm_epsg_for_lonlat(center_lon, center_lat)}"
+
+
+def validate_access_point_on_boundary(
+    boundary_coordinates: list[tuple[float, float]],
+    anchor_lon_lat: tuple[float, float],
+    tolerance_meters: float = ACCESS_POINT_BOUNDARY_TOLERANCE_METERS,
+) -> None:
+    """
+    Raises ValueError unless anchor_lon_lat sits on (or within
+    tolerance_meters of) boundary_coordinates' own edge, measured in UTM
+    meters — a genuine access point is the spot where the property meets
+    a road along its perimeter, not an interior or far-exterior point.
+    Fails loud rather than silently accepting (or worse, quietly
+    snapping) a routing start point that doesn't correspond to anything
+    real on the ground, same "fail loud, don't fake a good result"
+    pattern this pipeline's other mandatory gates already use (e.g. the
+    canopy-coverage checks).
+
+    Deliberately does NOT require a DEM: this is meant to run as an
+    early, fast rejection of malformed input before any of this
+    pipeline's real network fetches start, so it derives its own
+    lightweight UTM CRS from the boundary's centroid longitude
+    (_utm_crs_for_boundary()) rather than requiring a caller to have
+    already fetched one.
+    """
+    utm_crs = _utm_crs_for_boundary(boundary_coordinates)
+
+    boundary_xs, boundary_ys = warp_transform(
+        "EPSG:4326",
+        utm_crs,
+        [pt[0] for pt in boundary_coordinates],
+        [pt[1] for pt in boundary_coordinates],
+    )
+    boundary_polygon_utm = Polygon(zip(boundary_xs, boundary_ys))
+
+    anchor_xs, anchor_ys = warp_transform("EPSG:4326", utm_crs, [anchor_lon_lat[0]], [anchor_lon_lat[1]])
+    anchor_point_utm = Point(anchor_xs[0], anchor_ys[0])
+
+    distance_meters = boundary_polygon_utm.exterior.distance(anchor_point_utm)
+    if distance_meters > tolerance_meters:
+        raise ValueError(
+            f"access_point {tuple(anchor_lon_lat)} is {distance_meters:.1f}m from the property "
+            f"boundary edge (tolerance is {tolerance_meters}m) -- it must be the point where the "
+            "property meets a road along its perimeter, not an interior or far-exterior point."
+        )
+
 
 def _build_exclusion_cell_mask(dem: dict, excluded_prepared, boundary_prepared) -> np.ndarray:
     """Per-cell boolean mask (True = excluded), built once by testing

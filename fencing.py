@@ -1226,7 +1226,7 @@ def identify_fencing(
     )
 
     if tree_zone_render_fill_polygons_utm is None:
-        tree_zone_result = identify_tree_zone_candidates(boundary_coordinates, dem=dem)
+        tree_zone_result = identify_tree_zone_candidates(boundary_coordinates, dem=dem, anchor_lon_lat=anchor_lon_lat)
         tree_zone_render_fill_polygons_utm = [
             patch["render_fill_polygon_utm"] for patch in tree_zone_result.get("patches", [])
         ]

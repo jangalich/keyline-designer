@@ -146,6 +146,7 @@ def _build_html_document(report_markdown: str, map_image_path: str, property_lab
 def generate_full_report_pdf(
     boundary_coordinates: list[tuple[float, float]],
     output_path: str,
+    anchor_lon_lat: tuple[float, float],
     property_label: str = "Property Design Report",
     map_image_path: Optional[str] = None,
 ) -> str:
@@ -153,6 +154,11 @@ def generate_full_report_pdf(
     Runs the full pipeline for a given property boundary and writes the
     assembled PDF (narrative report + final full-page layout map) to
     output_path. Returns output_path.
+
+    anchor_lon_lat is the real, user-picked access point (a single
+    (lon, lat) pair, same convention as boundary_coordinates) -- required,
+    and validated (see generate_full_report()'s own docstring) before any
+    pipeline work starts.
 
     map_image_path (optional): where to write the intermediate map PNG.
     Defaults to a temp file next to output_path's directory; pass a real
@@ -164,12 +170,12 @@ def generate_full_report_pdf(
         )
 
     print("Generating narrative Scale of Permanence report...")
-    report_markdown = generate_full_report(boundary_coordinates)
+    report_markdown = generate_full_report(boundary_coordinates, anchor_lon_lat)
     print("  Narrative report generated.\n")
 
     print("Fetching layout layers and rendering the final static map page...")
     dem = get_dem_for_boundary(boundary_coordinates)
-    layers = fetch_layout_layers(boundary_coordinates, dem=dem)
+    layers = fetch_layout_layers(boundary_coordinates, dem=dem, anchor_lon_lat=anchor_lon_lat)
     render_layout_map(boundary_coordinates, map_image_path, layers=layers)
     print(f"  Map image written to {map_image_path}\n")
 
@@ -193,10 +199,18 @@ if __name__ == "__main__":
         (-79.9838258, 40.6458343),
     ]
 
+    # A real point ON this boundary's own edge (the midpoint of its first
+    # segment) -- required and validated by generate_full_report() now
+    # (see its own docstring); render_layout_map.py's shared reference-
+    # property placeholder sits ~10m off this exact boundary and would
+    # fail that check.
+    access_point = (-79.98374275, 40.6443462)
+
     try:
         output = generate_full_report_pdf(
             property_boundary,
             "scale_of_permanence_report.pdf",
+            access_point,
             property_label="5614 N Montour Rd, Gibsonia, PA 15044",
         )
         print(f"Done: {output}")

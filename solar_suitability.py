@@ -71,12 +71,12 @@ selected road corridor):
   - Road proximity is now TWO-TIER instead of "real road, else a
     DEM-only suggested corridor treated as a road stand-in":
       Tier 1 (primary): the property's own single SELECTED road corridor
-        (road_corridors.identify_road_corridor_candidates(), internally
-        using the same "borrow render_layout_map.py's TEMPORARY
-        placeholder anchor via a local import" pattern tree_zone_
-        candidates.py already uses) — its 'cell_footprint_polygon_utm',
-        within ROAD_CORRIDOR_PROXIMITY_METERS (15m). This corridor is the
-        real primary source now, not a stand-in for missing data.
+        (road_corridors.identify_road_corridor_candidates(), given this
+        module's own anchor_lon_lat parameter — the real, user-picked
+        access point, threaded down from generate_full_report.py) — its
+        'cell_footprint_polygon_utm', within ROAD_CORRIDOR_PROXIMITY_METERS
+        (15m). This corridor is the real primary source now, not a
+        stand-in for missing data.
       Tier 2 (fallback): only if Tier 1 produces ZERO candidates (no
         selected corridor exists at all, OR one exists but nothing
         survives every other constraint near it) — real mapped roads
@@ -944,6 +944,7 @@ def candidates_to_geojson(
 def identify_solar_candidate_zones(
     boundary_coordinates: list[tuple[float, float]],
     dem: Optional[dict] = None,
+    anchor_lon_lat: Optional[tuple[float, float]] = None,
     check_prime_farmland: bool = True,
     **zone_kwargs,
 ) -> dict:
@@ -1006,10 +1007,12 @@ def identify_solar_candidate_zones(
     ROAD PROXIMITY is two-tier (see module docstring for the full
     rationale):
       Tier 1 (primary): road_corridors.identify_road_corridor_candidates()
-        is called directly here (borrowing render_layout_map.py's
-        TEMPORARY placeholder anchor via a local import — see below — the
-        same pattern tree_zone_candidates.py already uses), and its own
-        'selected_road_corridor' (None if no corridor exists) is used as
+        is called directly here, given this function's own anchor_lon_lat
+        parameter (the real, user-picked access point, threaded down from
+        generate_full_report.py — None degrades to no corridor, same as
+        identify_road_corridor_candidates() itself already handles), and
+        its own 'selected_road_corridor' (None if no corridor exists) is
+        used as
         the road source at ROAD_CORRIDOR_PROXIMITY_METERS. Not wrapped in
         try/except: this call's own internal production-zone fetch is
         ALSO a mandatory canopy gate (a THIRD independent one), same
@@ -1064,7 +1067,7 @@ def identify_solar_candidate_zones(
     tree_zone_exclusion_polygon_utm = None
     tree_zone_exclusion_available = True
     try:
-        tree_zone_result = identify_tree_zone_candidates(boundary_coordinates, dem=dem)
+        tree_zone_result = identify_tree_zone_candidates(boundary_coordinates, dem=dem, anchor_lon_lat=anchor_lon_lat)
         tree_zone_patches = tree_zone_result["patches"]
         if tree_zone_patches:
             tree_zone_union = unary_union([p["render_fill_polygon_utm"] for p in tree_zone_patches])
@@ -1073,18 +1076,6 @@ def identify_solar_candidate_zones(
         raise
     except Exception:
         tree_zone_exclusion_available = False
-
-    # identify_road_corridor_candidates() now requires a real anchor_lon_lat
-    # to generate any routes at all (see road_corridors.py's own module
-    # docstring) -- there's no real one available in this module's own
-    # context yet (a genuine product decision, not derivable from the
-    # boundary alone), so this borrows render_layout_map.py's TEMPORARY
-    # placeholder reference-property anchor, same as tree_zone_candidates.py's
-    # own call. Imported locally (not at module level) because
-    # render_layout_map.py itself imports FROM solar_suitability.py
-    # (fetch_and_select_optimal_structure_site) -- a top-level import
-    # here would be circular.
-    from render_layout_map import _PLACEHOLDER_REFERENCE_PROPERTY_ANCHOR_LON_LAT
 
     common_zone_kwargs = dict(
         canopy_mask_utm=canopy_mask_utm,
@@ -1098,9 +1089,7 @@ def identify_solar_candidate_zones(
     candidates = []
     road_proximity_source = "unavailable"
 
-    corridor_result = identify_road_corridor_candidates(
-        boundary_coordinates, dem=dem, anchor_lon_lat=_PLACEHOLDER_REFERENCE_PROPERTY_ANCHOR_LON_LAT
-    )
+    corridor_result = identify_road_corridor_candidates(boundary_coordinates, dem=dem, anchor_lon_lat=anchor_lon_lat)
     selected_road_corridor = corridor_result["selected_road_corridor"]
     if selected_road_corridor is not None:
         candidates = find_candidate_solar_zones(
@@ -1180,6 +1169,7 @@ def identify_solar_candidate_zones(
 def fetch_and_select_optimal_structure_site(
     boundary_coordinates: list[tuple[float, float]],
     dem: Optional[dict] = None,
+    anchor_lon_lat: Optional[tuple[float, float]] = None,
     **zone_kwargs,
 ) -> Optional[dict]:
     """
@@ -1191,7 +1181,7 @@ def fetch_and_select_optimal_structure_site(
     cleared the constraint stack). Selects nothing new -- it picks the #1
     entry an existing, unchanged ranking already produced.
     """
-    result = identify_solar_candidate_zones(boundary_coordinates, dem=dem, **zone_kwargs)
+    result = identify_solar_candidate_zones(boundary_coordinates, dem=dem, anchor_lon_lat=anchor_lon_lat, **zone_kwargs)
     features = result["zones_geojson"]["features"]
     return features[0] if features else None
 
@@ -1224,10 +1214,18 @@ if __name__ == "__main__":
         (-79.9838258, 40.6458343),
     ]
 
+    # Manual-testing-only reference anchor -- imported here, not at module
+    # level, so this stays a __main__-only test fixture rather than a
+    # production dependency (see render_layout_map.py's own module
+    # docstring for this constant).
+    from render_layout_map import _PLACEHOLDER_REFERENCE_PROPERTY_ANCHOR_LON_LAT
+
     print("Identifying solar structure candidates for property boundary...\n")
 
     try:
-        result = identify_solar_candidate_zones(property_boundary)
+        result = identify_solar_candidate_zones(
+            property_boundary, anchor_lon_lat=_PLACEHOLDER_REFERENCE_PROPERTY_ANCHOR_LON_LAT
+        )
         print(summarize_solar_candidate_zones(result))
     except Exception as e:
         print(f"Request failed: {e}")
