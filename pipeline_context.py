@@ -15,7 +15,7 @@ of their logic. It does NOT call report_generator.py, generate_full_
 report.py, or any of the identify_*_candidate*() consumer functions in
 road_corridors.py, solar_suitability.py, or fencing.py -- this module is
 not wired into any of those in this pass; that wiring is later, separate
-work. See KNOWN LIMITATIONS below for the one real gap this surfaced.
+work. See KNOWN LIMITATIONS below for the remaining gaps this surfaced.
 
 FIELD NOTES
 
@@ -62,44 +62,68 @@ FIELD NOTES
   this field, and it only ever returns GeoJSON-wrapped output (WGS84
   geometry_wgs84, not the raw shapely-UTM zone dicts find_candidate_
   zones() itself builds internally and discards before returning); this
-  is the closest real list[dict] that entry point can produce. A future
-  consumer that needs each zone's real UTM polygon_utm/render_fill_
-  polygon_utm (the way road_corridors.find_road_routes() needs its own
-  selected_water_zone's shapely geometry) won't get it from this field as
-  currently wired -- see KNOWN LIMITATIONS below for why this call can
-  only reuse this context's own already-computed `dem`, not its
-  `valleys`/`production_areas`/`boundary_polygon_utm`, which is the same
-  underlying gap.
+  is the closest real list[dict] that entry point can produce. This call
+  passes this context's own already-computed dem/boundary_polygon_utm/
+  valleys/production_areas straight through via that function's own
+  override params, so delineate_valleys()/identify_production_areas()
+  (or identify_optimized_production_areas(), whichever `production_areas`
+  above actually came from) genuinely run only ONCE each across the whole
+  of build_pipeline_context() -- see test_pipeline_context.py's own
+  call-count assertions. A future consumer that needs each zone's real
+  UTM polygon_utm/render_fill_polygon_utm (the way road_corridors.
+  find_road_routes() needs its own selected_water_zone's shapely
+  geometry) still won't get it from this field, though -- that's a
+  return-SHAPE limitation of identify_water_system_candidate_zones()
+  itself (GeoJSON-only output), independent of and not addressed by the
+  override params this branch wired through. See KNOWN LIMITATIONS #1
+  for the one piece of this call that still isn't de-duplicated: canopy/
+  road exclusion inputs.
 
 KNOWN LIMITATIONS (found while building this, deliberately NOT worked
 around here -- flagging per this branch's own instructions rather than
 silently patching another module or reimplementing its logic)
 
-  1. water_candidate_zones.identify_water_system_candidate_zones() only
-     accepts `dem` as an already-computed override (`dem: Optional[dict]
-     = None`); it has no equivalent override for valleys, production_areas,
-     or boundary_polygon_utm -- its own body always recomputes
-     `valleys = delineate_valleys(dem)` and
-     `production_areas = identify_production_areas(dem, boundary_polygon_utm)`
-     internally (production_area.identify_production_areas() -- the RAW,
-     un-ceiling-trimmed shape, not production_area_ceiling.
-     identify_optimized_production_areas()'s scored_patches this context's
-     own `production_areas` field holds). Passing dem=dem below at least
-     avoids a second DEM fetch, but the water-zone call still: (a) retraces
-     valleys a second time from scratch (redundant, if cheap, computation),
-     and (b) runs an entirely separate, un-ceiling-trimmed production-area
-     pass complete with its OWN canopy/road network fetches -- real,
-     duplicate network I/O this module cannot eliminate without either
-     reimplementing identify_water_system_candidate_zones()'s own logic
-     here (out of scope -- this module is a thin orchestrator, not a new
-     data source) or adding valleys/production_areas/boundary_polygon_utm
-     override parameters to water_candidate_zones.py itself (a small,
-     separate, required addition for its own future branch, not this one).
-     `water_zones` above is therefore NOT built from the same
-     dem/valleys/production_areas instances this context otherwise
-     de-duplicates -- it is the one field in this module where the
-     "computed exactly once" goal is not actually met, by construction of
-     the function being called.
+  1. water_candidate_zones.identify_water_system_candidate_zones() now
+     accepts dem/boundary_polygon_utm/valleys/production_areas as
+     overrides (a prior branch added these, mirroring the dem override it
+     already had), and the water_zones call above passes this context's
+     own already-computed values for all four -- delineate_valleys()/
+     identify_production_areas() (or identify_optimized_production_areas(),
+     whichever `production_areas` above came from) are NOT called a
+     second time for this field anymore. What's still NOT de-duplicated,
+     evaluated and deliberately left alone rather than wired through:
+       - road_exclusion_union_utm: identify_water_system_candidate_zones()
+         does not expose this as a parameter at all -- it always computes
+         its own internally (_fetch_road_exclusion_union_utm()) and passes
+         it to find_candidate_zones() as an explicit keyword argument; a
+         caller-supplied value threaded through **zone_kwargs would
+         collide with that explicit kwarg and raise TypeError. Even if the
+         parameter existed, this context's own `existing_roads` field
+         (farm_roads_data.get_road_exclusion_union_utm(boundary_coordinates,
+         dem), the default ROAD_EXCLUSION_BUFFER_METERS = 0.0m buffer)
+         isn't the right value to pass anyway -- water_candidate_zones.py's
+         own water-zone road exclusion needs a DIFFERENT, deliberately
+         separate, independently-tunable buffer
+         (WATER_ZONE_ROAD_BUFFER_METERS = 3.048m/10ft; see that module's
+         own docstring for why the two buffers are kept as separate
+         constants rather than one shared value). Two independent reasons
+         this isn't a clean pass-through, not one.
+       - canopy_root_zone_mask_utm: same story on the missing-parameter
+         side (the canopy gate is unconditionally fetched-or-raised
+         inside identify_water_system_candidate_zones(), no override path
+         at all) -- and PipelineContext itself has no tree-root-zone-mask
+         field to offer in the first place; this context's own field list
+         (dem, boundary_polygon_utm, valleys, ridge_lines,
+         production_areas, existing_roads, soil_exclusion_unions,
+         water_zones) never included one. Adding one would be real new
+         scope (a new PipelineContext field, plus deciding whether/how a
+         single shared canopy fetch can be reused across future steps
+         that may each want it at a different buffer distance the way
+         roads already do) -- flagged here, not added.
+     Both would require modifying water_candidate_zones.py itself (adding
+     the two missing override params, and resolving the buffer-mismatch/
+     new-field questions above) -- out of scope for this branch, which was
+     told not to touch that module further.
 
   2. production_area_ceiling.identify_optimized_production_areas() takes
      `boundary_coordinates` + `dem`, not an already-computed
@@ -216,7 +240,11 @@ def build_pipeline_context(
     }
 
     water_system_result = water_candidate_zones.identify_water_system_candidate_zones(
-        boundary_coordinates, dem=dem
+        boundary_coordinates,
+        dem=dem,
+        boundary_polygon_utm=boundary_polygon_utm,
+        valleys=valleys,
+        production_areas=production_areas,
     )
     water_zones = water_system_result["zones_geojson"]["features"]
 

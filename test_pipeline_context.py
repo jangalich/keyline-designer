@@ -17,21 +17,31 @@ contract:
   3. production_areas matches identify_optimized_production_areas()'s
      real scored_patches shape (STEP 4 fields present), not identify_
      production_areas()'s raw, unscored shape.
-  4. soil_exclusion_unions['hydric_floodplain_union'] and water_zones
-     reuse the already-computed dem/valleys/boundary_polygon_utm
-     instances where the underlying entry point actually supports doing
-     so -- and this file also demonstrates, rather than hides, the one
-     real gap pipeline_context.py's own KNOWN LIMITATIONS section flags:
-     identify_water_system_candidate_zones() has no override for valleys/
-     production_areas/boundary_polygon_utm, so those three specifically
-     are NOT (and, given that function's real signature, cannot be) reused
-     for water_zones.
+  4. soil_exclusion_unions['hydric_floodplain_union'] and water_zones both
+     reuse the already-computed dem/boundary_polygon_utm/valleys/
+     production_areas instances -- identify_water_system_candidate_zones()
+     now accepts all three as overrides (a prior branch), and this branch
+     wires them through, so this is the test that actually proves the
+     water-zone step's OWN internal delineate_valleys()/
+     identify_production_areas() self-compute fallbacks are never
+     triggered a second time: identify_water_system_candidate_zones() is
+     run for REAL here (not fully mocked away), with its own internal
+     fallback functions separately mocked and asserted at zero calls --
+     see the "water_zones" section below.
 
 Every real network-touching entry point pipeline_context.py calls
 directly is mocked, so this file never touches the network. valley_
 delineation.delineate_valleys is left real/spied-on (wraps=), not
 replaced -- it's pure numpy with no network dependency, and check #2
-above needs its genuine output to mean anything.
+above needs its genuine output to mean anything. identify_water_system_
+candidate_zones() itself is also left real/spied-on (wraps=) rather than
+replaced outright, specifically so check #4 can prove its own internal
+self-compute fallbacks (a SEPARATE set of module-level bindings inside
+water_candidate_zones.py -- see that section's own comments for why
+patching valley_delineation.delineate_valleys doesn't also intercept
+water_candidate_zones.py's own internal reference to the same original
+function) are never called; its own mandatory canopy fetch and optional
+road fetch are separately stubbed so this stays fully offline.
 
 Synthetic terrain: a 60x60 DEM built from two independent, non-
 overlapping landforms so valleys and ridge_lines land on predictably
@@ -167,17 +177,16 @@ fake_optimized_result = {
 fake_existing_roads_union = box(100, 100, 200, 200)
 fake_hydric_union = box(50, 50, 60, 60)
 
-fake_water_zone_feature = {
-    "type": "Feature",
-    "id": "water-system-candidate-0",
-    "geometry": {"type": "Polygon", "coordinates": [[[0.0, 0.0]]]},
-    "properties": {"layer": "water_system_candidate"},
-}
-fake_water_system_result = {
-    "zones_geojson": {"type": "FeatureCollection", "features": [fake_water_zone_feature]},
-    "valleys_geojson": {"type": "FeatureCollection", "features": []},
-    "production_areas_geojson": {"type": "FeatureCollection", "features": []},
-}
+
+def _fake_clean_canopy_mask(boundary_polygon_utm, dem, buffer_meters=None):
+    """Offline stand-in for production_area.get_required_tree_root_zone_mask_utm() --
+    identify_water_system_candidate_zones()'s canopy fetch is MANDATORY (no
+    try/except around it), so it must be stubbed for this file to run real/
+    unmocked through that function without touching the network. All-False
+    (no tree cover anywhere) is a pure no-op against compute_water_eligible_
+    cells()'s canopy gate -- this file isn't testing that gate."""
+    return np.zeros(dem["array"].shape, dtype=bool)
+
 
 # --- run build_pipeline_context with every real fetch entry point mocked ---
 
@@ -197,8 +206,29 @@ with mock_patch.object(pc.dem_data, "get_dem_for_boundary", return_value=synthet
      mock_patch.object(
          pc.water_candidate_zones,
          "identify_water_system_candidate_zones",
-         return_value=fake_water_system_result,
-     ) as mock_water:
+         wraps=pc.water_candidate_zones.identify_water_system_candidate_zones,
+     ) as mock_water, \
+     mock_patch.object(
+         pc.water_candidate_zones, "get_required_tree_root_zone_mask_utm", side_effect=_fake_clean_canopy_mask
+     ) as mock_water_zone_canopy, \
+     mock_patch.object(
+         pc.water_candidate_zones, "_fetch_road_exclusion_union_utm", return_value=None
+     ) as mock_water_zone_roads, \
+     mock_patch.object(pc.water_candidate_zones, "delineate_valleys") as mock_water_zone_delineate, \
+     mock_patch.object(pc.water_candidate_zones, "identify_production_areas") as mock_water_zone_identify_pa:
+    # mock_water_zone_delineate/mock_water_zone_identify_pa patch water_candidate_
+    # zones.py's OWN module-level `delineate_valleys`/`identify_production_areas`
+    # names (bound via `from valley_delineation import delineate_valleys` / `from
+    # production_area import (..., identify_production_areas, ...)` at import
+    # time) -- a SEPARATE binding from pc.valley_delineation.delineate_valleys/
+    # pc.production_area_ceiling.identify_optimized_production_areas above.
+    # Patching the latter does NOT intercept the former (classic "patch where
+    # it's looked up, not where it's defined" -- water_candidate_zones.py's own
+    # `if valleys is None: valleys = delineate_valleys(dem)` self-compute
+    # fallback resolves `delineate_valleys` in ITS OWN module namespace, not
+    # valley_delineation's). Both must be patched separately to actually prove
+    # neither fallback fires when valleys/production_areas are supplied as
+    # overrides -- that's the whole point of section 4 below.
     ctx = pc.build_pipeline_context(boundary_coordinates, anchor_lon_lat)
 
 assert isinstance(ctx, pc.PipelineContext)
@@ -283,18 +313,66 @@ print(
     "builder currently exists anywhere in this codebase to call)."
 )
 
-# --- 5. water_zones reuses the already-fetched dem -- the one override that entry point supports ---
+# --- 5. water_zones reuses dem/boundary_polygon_utm/valleys/production_areas -- ALL four, not just dem ---
+#
+# identify_water_system_candidate_zones() is run for REAL above (wraps=, not fully mocked away),
+# so this is the test that actually proves the redundancy is gone: its own internal self-compute
+# fallbacks for valleys/production_areas must NOT fire when both are supplied as overrides.
 
 water_call = mock_water.call_args
 assert water_call.args[0] == boundary_coordinates
 assert water_call.kwargs["dem"] is synthetic_dem, "water_zones must reuse the already-fetched dem, not fetch a second one"
-assert ctx.water_zones == [fake_water_zone_feature]
+assert water_call.kwargs["boundary_polygon_utm"] is ctx.boundary_polygon_utm, (
+    "water_zones must reuse the already-computed boundary_polygon_utm, not a second self-computed copy"
+)
+assert water_call.kwargs["valleys"] is ctx.valleys, "water_zones must reuse the already-computed valleys instance"
+assert water_call.kwargs["production_areas"] is ctx.production_areas, (
+    "water_zones must reuse the already-computed production_areas instance"
+)
+
+# The actual proof: water_candidate_zones.py's OWN internal self-compute fallbacks for valleys/
+# production_areas (a SEPARATE pair of mocks from mock_delineate/mock_optimize above -- see the
+# comment on the `with` block) were never triggered at all.
+assert mock_water_zone_delineate.call_count == 0, (
+    "delineate_valleys() must NOT be called a second time inside the water-zone step when valleys "
+    "was supplied as an override -- this is the redundancy this branch closes"
+)
+assert mock_water_zone_identify_pa.call_count == 0, (
+    "identify_production_areas() must NOT be called inside the water-zone step when production_areas "
+    "was supplied as an override -- this is the redundancy this branch closes"
+)
+# ...and the TOTAL count across the whole build_pipeline_context() call for each: delineate_valleys()
+# ran exactly twice (valleys + ridge_lines, both via pc.valley_delineation.delineate_valleys, asserted
+# in section 1 above) plus zero more from inside the water-zone step; identify_optimized_production_
+# areas() ran exactly once (section 3 above) plus zero calls to the raw identify_production_areas()
+# fallback from inside the water-zone step. Neither is "once for context's own fields plus a second
+# hidden call inside the water-zone step."
+assert mock_delineate.call_count == 2, "delineate_valleys should still total exactly 2 calls overall (valleys + ridge_lines)"
+assert mock_optimize.call_count == 1, "identify_optimized_production_areas should still total exactly 1 call overall"
+
+# mock_water_zone_canopy/mock_water_zone_roads confirm the (offline-stubbed) mandatory canopy fetch
+# and optional road fetch each ran exactly once too -- real behavior of the real, unmocked function.
+assert mock_water_zone_canopy.call_count == 1
+assert mock_water_zone_roads.call_count == 1
+
+# fake_patch's polygon_utm (box(0, 0, 10, 10)) is nowhere near this synthetic DEM's real UTM
+# coordinates, so no cell clears find_candidate_zones()'s service-distance gate -- water_zones is
+# genuinely, correctly empty here. This section isn't testing zone geometry/eligibility correctness
+# (test_water_candidate_zones.py and test_water_system_candidate_pipeline.py already cover that with
+# real, spatially-coherent fixtures) -- only that the real function runs end-to-end, offline, without
+# re-deriving what this context already computed.
+assert ctx.water_zones == [], (
+    "expected zero water zones: fake_patch's production-area geometry doesn't overlap this DEM's real "
+    "coordinates, so nothing clears the service-distance gate -- confirms the real function ran (not a "
+    "canned mock reply) without crashing"
+)
 print(
-    "water_zones reuses the already-fetched dem (the only override identify_water_system_"
-    "candidate_zones() currently accepts) rather than triggering a second DEM fetch. It does NOT "
-    "(and, given that function's real signature, currently cannot) reuse this context's own "
-    "valleys/production_areas/boundary_polygon_utm -- see pipeline_context.py's own KNOWN "
-    "LIMITATIONS #1 for the flagged gap this demonstrates rather than hides."
+    "water_zones reuses the already-computed dem/boundary_polygon_utm/valleys/production_areas -- ALL "
+    "FOUR, not just dem -- and identify_water_system_candidate_zones()'s own internal delineate_valleys()/"
+    "identify_production_areas() self-compute fallbacks were called ZERO times. Total calls across the "
+    "whole build_pipeline_context() run: delineate_valleys() x2 (valleys + ridge_lines), "
+    "identify_optimized_production_areas() x1 -- not once for this context's own fields plus a second "
+    "hidden call inside the water-zone step."
 )
 
 # --- boundary_polygon_utm sanity check ---
