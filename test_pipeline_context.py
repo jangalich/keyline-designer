@@ -28,6 +28,25 @@ contract:
      run for REAL here (not fully mocked away), with its own internal
      fallback functions separately mocked and asserted at zero calls --
      see the "water_zones" section below.
+  5. selected_water_zone reuses this context's own boundary_polygon_utm/
+     valleys/production_areas instances via fetch_and_select_optimal_
+     water_zone()'s own override params (mock+inspect call kwargs, same
+     pattern as the water_zones section).
+  6. selected_road_corridor reuses those same instances, PLUS this
+     context's own selected_water_zone and soil_exclusion_unions
+     ['hydric_floodplain_union'], via identify_road_corridor_candidates()'s
+     own override params (mock+inspect call kwargs). floodplain_data_
+     is_fallback is separately proven to carry the REAL flag -- not a
+     hardcoded/defaulted value -- by forcing _fetch_floodplain_hydric_
+     union() into its fallback path (return value's second element True)
+     in a second, dedicated build_pipeline_context() run and asserting
+     that True (not the default-False every other case here would show)
+     reaches identify_road_corridor_candidates() and soil_exclusion_
+     unions['hydric_floodplain_is_fallback'] alike.
+  7. soil_exclusion_unions now carries 3 keys -- 'hydric_floodplain_union',
+     'hydric_floodplain_is_fallback', and 'erosion_prone_union' --
+     confirming the prior 2-key shape (which silently dropped is_fallback)
+     is gone.
 
 Every real network-touching entry point pipeline_context.py calls
 directly is mocked, so this file never touches the network. valley_
@@ -176,6 +195,13 @@ fake_optimized_result = {
 
 fake_existing_roads_union = box(100, 100, 200, 200)
 fake_hydric_union = box(50, 50, 60, 60)
+fake_selected_water_zone = {"type": "Feature", "id": "water-zone-selected"}
+fake_selected_road_corridor = {"type": "Feature", "id": "road-corridor-selected"}
+fake_road_corridor_result = {
+    "zones_geojson": {"type": "FeatureCollection", "features": []},
+    "all_scored_candidates": [],
+    "selected_road_corridor": fake_selected_road_corridor,
+}
 
 
 def _fake_clean_canopy_mask(boundary_polygon_utm, dem, buffer_meters=None):
@@ -215,7 +241,13 @@ with mock_patch.object(pc.dem_data, "get_dem_for_boundary", return_value=synthet
          pc.water_candidate_zones, "_fetch_road_exclusion_union_utm", return_value=None
      ) as mock_water_zone_roads, \
      mock_patch.object(pc.water_candidate_zones, "delineate_valleys") as mock_water_zone_delineate, \
-     mock_patch.object(pc.water_candidate_zones, "identify_production_areas") as mock_water_zone_identify_pa:
+     mock_patch.object(pc.water_candidate_zones, "identify_production_areas") as mock_water_zone_identify_pa, \
+     mock_patch.object(
+         pc, "fetch_and_select_optimal_water_zone", return_value=fake_selected_water_zone
+     ) as mock_select_water_zone, \
+     mock_patch.object(
+         pc.road_corridors, "identify_road_corridor_candidates", return_value=fake_road_corridor_result
+     ) as mock_road_corridor:
     # mock_water_zone_delineate/mock_water_zone_identify_pa patch water_candidate_
     # zones.py's OWN module-level `delineate_valleys`/`identify_production_areas`
     # names (bound via `from valley_delineation import delineate_valleys` / `from
@@ -240,9 +272,12 @@ assert mock_optimize.call_count == 1, "identify_optimized_production_areas must 
 assert mock_roads.call_count == 1, "farm_roads_data.get_road_exclusion_union_utm must be called exactly once"
 assert mock_floodplain.call_count == 1, "_fetch_floodplain_hydric_union must be called exactly once"
 assert mock_water.call_count == 1, "identify_water_system_candidate_zones must be called exactly once"
+assert mock_select_water_zone.call_count == 1, "fetch_and_select_optimal_water_zone must be called exactly once"
+assert mock_road_corridor.call_count == 1, "identify_road_corridor_candidates must be called exactly once"
 print(
     "Every underlying fetch entry point (DEM, optimized production areas, road exclusion, "
-    "floodplain/hydric union, water-system candidate zones) was called exactly once."
+    "floodplain/hydric union, water-system candidate zones, selected water zone, selected road "
+    "corridor) was called exactly once."
 )
 
 # valley_delineation.delineate_valleys is called exactly twice -- once for valleys, once for
@@ -296,8 +331,13 @@ print(
 assert ctx.existing_roads is fake_existing_roads_union
 assert ctx.soil_exclusion_unions == {
     "hydric_floodplain_union": fake_hydric_union,
+    "hydric_floodplain_is_fallback": False,
     "erosion_prone_union": None,
-}
+}, (
+    "soil_exclusion_unions must carry all 3 keys, with hydric_floodplain_is_fallback holding the "
+    "REAL second element _fetch_floodplain_hydric_union() returned (False here, matching the mock's "
+    "own return value) -- not silently dropped the way the prior 2-key shape did"
+)
 roads_call = mock_roads.call_args
 assert roads_call.args[0] == boundary_coordinates and roads_call.args[1] is synthetic_dem
 floodplain_call = mock_floodplain.call_args
@@ -308,9 +348,10 @@ assert floodplain_call.args[3] is ctx.boundary_polygon_utm, "must reuse the alre
 print(
     "existing_roads and soil_exclusion_unions['hydric_floodplain_union'] carry the real fetched "
     "geometry; the floodplain/hydric fetch reused the same dem/valleys/boundary_polygon_utm "
-    "instances already computed above, not re-derived copies. erosion_prone_union is None -- see "
-    "pipeline_context.py's own KNOWN LIMITATIONS #3 for why (no shared erosion-prone-soil union "
-    "builder currently exists anywhere in this codebase to call)."
+    "instances already computed above, not re-derived copies. soil_exclusion_unions carries all 3 "
+    "keys, with hydric_floodplain_is_fallback holding the real (not dropped) flag. erosion_prone_union "
+    "is None -- see pipeline_context.py's own KNOWN LIMITATIONS #3 for why (no shared erosion-prone-"
+    "soil union builder currently exists anywhere in this codebase to call)."
 )
 
 # --- 5. water_zones reuses dem/boundary_polygon_utm/valleys/production_areas -- ALL four, not just dem ---
@@ -375,11 +416,139 @@ print(
     "hidden call inside the water-zone step."
 )
 
+# --- 6. selected_water_zone reuses this context's own boundary_polygon_utm/valleys/production_areas ---
+
+assert ctx.selected_water_zone is fake_selected_water_zone
+select_water_zone_call = mock_select_water_zone.call_args
+assert select_water_zone_call.args[0] == boundary_coordinates
+assert select_water_zone_call.kwargs["dem"] is synthetic_dem, (
+    "selected_water_zone must reuse the already-fetched dem, not fetch its own"
+)
+assert select_water_zone_call.kwargs["boundary_polygon_utm"] is ctx.boundary_polygon_utm, (
+    "selected_water_zone must reuse the already-computed boundary_polygon_utm, not a second self-computed copy"
+)
+assert select_water_zone_call.kwargs["valleys"] is ctx.valleys, (
+    "selected_water_zone must reuse the already-computed valleys instance"
+)
+assert select_water_zone_call.kwargs["production_areas"] is ctx.production_areas, (
+    "selected_water_zone must reuse the already-computed production_areas instance"
+)
+print(
+    "selected_water_zone reuses this context's own dem/boundary_polygon_utm/valleys/production_areas "
+    "instances via fetch_and_select_optimal_water_zone()'s own override params, not self-derived copies."
+)
+
+# --- 7. selected_road_corridor reuses dem/boundary_polygon_utm/valleys/production_areas/selected_water_zone, ---
+# --- AND this context's own soil_exclusion_unions['hydric_floodplain_union'] rather than a second fetch ---
+
+assert ctx.selected_road_corridor is fake_selected_road_corridor
+road_corridor_call = mock_road_corridor.call_args
+assert road_corridor_call.args[0] == boundary_coordinates
+assert road_corridor_call.kwargs["anchor_lon_lat"] == anchor_lon_lat
+assert road_corridor_call.kwargs["dem"] is synthetic_dem, (
+    "selected_road_corridor must reuse the already-fetched dem, not fetch its own"
+)
+assert road_corridor_call.kwargs["boundary_polygon_utm"] is ctx.boundary_polygon_utm, (
+    "selected_road_corridor must reuse the already-computed boundary_polygon_utm, not a second self-computed copy"
+)
+assert road_corridor_call.kwargs["valleys"] is ctx.valleys, (
+    "selected_road_corridor must reuse the already-computed valleys instance"
+)
+assert road_corridor_call.kwargs["production_areas"] is ctx.production_areas, (
+    "selected_road_corridor must reuse the already-computed production_areas instance"
+)
+assert road_corridor_call.kwargs["selected_water_zone"] is ctx.selected_water_zone, (
+    "selected_road_corridor must reuse this context's own already-selected water zone, not re-select one"
+)
+assert road_corridor_call.kwargs["hydric_floodplain_union"] is ctx.soil_exclusion_unions["hydric_floodplain_union"], (
+    "identify_road_corridor_candidates() must reuse this context's own already-fetched "
+    "hydric_floodplain_union rather than letting road_corridors.py fetch a second one"
+)
+assert road_corridor_call.kwargs["floodplain_data_is_fallback"] is ctx.soil_exclusion_unions["hydric_floodplain_is_fallback"], (
+    "floodplain_data_is_fallback passed to identify_road_corridor_candidates() must match this context's "
+    "own real hydric_floodplain_is_fallback flag, not a hardcoded/defaulted value"
+)
+assert road_corridor_call.kwargs["floodplain_data_is_fallback"] is False, (
+    "sanity check for this run's own synthetic scenario: the mocked _fetch_floodplain_hydric_union() "
+    "returned (fake_hydric_union, False) above, so False is what should have propagated through here"
+)
+print(
+    "selected_road_corridor reuses this context's own dem/boundary_polygon_utm/valleys/production_areas/"
+    "selected_water_zone instances, AND this context's own soil_exclusion_unions['hydric_floodplain_union']"
+    " (paired with its real hydric_floodplain_is_fallback flag) rather than letting "
+    "identify_road_corridor_candidates() fetch a second, independent floodplain/hydric union."
+)
+
 # --- boundary_polygon_utm sanity check ---
 
 assert ctx.dem is synthetic_dem
 assert isinstance(ctx.boundary_polygon_utm, Polygon)
 expected_area = (COLS * RESOLUTION) * (ROWS * RESOLUTION)
 assert abs(ctx.boundary_polygon_utm.area - expected_area) < 1.0, "boundary_polygon_utm should match the DEM's own footprint"
+
+# --- 8. floodplain_data_is_fallback threads the REAL flag through, not a hardcoded/defaulted one ---
+#
+# Every assertion above ran against a synthetic scenario where _fetch_floodplain_hydric_union() happens
+# to return is_fallback=False -- on its own, that would never catch a regression that hardcoded/defaulted
+# floodplain_data_is_fallback to False regardless of the real flag. This dedicated second
+# build_pipeline_context() run forces the floodplain fetch into its fallback path (is_fallback=True) and
+# re-proves the same threading with the OPPOSITE value, so a hardcoded-False regression would fail here.
+
+fake_fallback_hydric_union = box(20, 20, 30, 30)
+fake_selected_water_zone_fallback_case = {"type": "Feature", "id": "water-zone-fallback-case"}
+fake_selected_road_corridor_fallback_case = {"type": "Feature", "id": "road-corridor-fallback-case"}
+fake_water_zones_result_fallback_case = {"zones_geojson": {"type": "FeatureCollection", "features": []}}
+fake_road_corridor_result_fallback_case = {
+    "zones_geojson": {"type": "FeatureCollection", "features": []},
+    "all_scored_candidates": [],
+    "selected_road_corridor": fake_selected_road_corridor_fallback_case,
+}
+
+with mock_patch.object(pc.dem_data, "get_dem_for_boundary", return_value=synthetic_dem), \
+     mock_patch.object(pc.valley_delineation, "delineate_valleys", wraps=pc.valley_delineation.delineate_valleys), \
+     mock_patch.object(
+         pc.production_area_ceiling, "identify_optimized_production_areas", return_value=fake_optimized_result
+     ), \
+     mock_patch.object(pc.farm_roads_data, "get_road_exclusion_union_utm", return_value=fake_existing_roads_union), \
+     mock_patch.object(
+         pc.road_corridors, "_fetch_floodplain_hydric_union", return_value=(fake_fallback_hydric_union, True)
+     ) as mock_floodplain_fallback_case, \
+     mock_patch.object(
+         pc.water_candidate_zones,
+         "identify_water_system_candidate_zones",
+         return_value=fake_water_zones_result_fallback_case,
+     ), \
+     mock_patch.object(
+         pc, "fetch_and_select_optimal_water_zone", return_value=fake_selected_water_zone_fallback_case
+     ), \
+     mock_patch.object(
+         pc.road_corridors,
+         "identify_road_corridor_candidates",
+         return_value=fake_road_corridor_result_fallback_case,
+     ) as mock_road_corridor_fallback_case:
+    ctx_fallback_case = pc.build_pipeline_context(boundary_coordinates, anchor_lon_lat)
+
+assert mock_floodplain_fallback_case.call_count == 1
+
+assert ctx_fallback_case.soil_exclusion_unions == {
+    "hydric_floodplain_union": fake_fallback_hydric_union,
+    "hydric_floodplain_is_fallback": True,
+    "erosion_prone_union": None,
+}, "soil_exclusion_unions['hydric_floodplain_is_fallback'] must be True when the floodplain fetch itself fell back"
+
+road_corridor_fallback_call = mock_road_corridor_fallback_case.call_args
+assert road_corridor_fallback_call.kwargs["hydric_floodplain_union"] is fake_fallback_hydric_union
+assert road_corridor_fallback_call.kwargs["floodplain_data_is_fallback"] is True, (
+    "identify_road_corridor_candidates() must receive the REAL is_fallback flag (True, forced here) from "
+    "this context's own floodplain fetch -- a hardcoded/defaulted False would fail this assertion even "
+    "though every other assertion in this file (built against the is_fallback=False synthetic case) would "
+    "still pass, which is exactly the regression this dedicated second run exists to catch"
+)
+assert ctx_fallback_case.selected_road_corridor is fake_selected_road_corridor_fallback_case
+print(
+    "floodplain_data_is_fallback threads the REAL flag (forced True here, the opposite of every assertion "
+    "above) through to identify_road_corridor_candidates() and soil_exclusion_unions alike -- not a "
+    "hardcoded/defaulted value."
+)
 
 print("\nAll pipeline_context checks passed.")
