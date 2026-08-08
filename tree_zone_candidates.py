@@ -939,6 +939,13 @@ def identify_tree_zone_candidates(
     boundary_coordinates: list[tuple[float, float]],
     dem: Optional[dict] = None,
     anchor_lon_lat: Optional[tuple[float, float]] = None,
+    boundary_polygon_utm: Optional[Polygon] = None,
+    production_areas: Optional[list[dict]] = None,
+    valleys: Optional[list[dict]] = None,
+    selected_water_zone: Optional[dict] = None,
+    selected_road_corridor: Optional[dict] = None,
+    hydric_floodplain_union=None,
+    floodplain_data_is_fallback: Optional[bool] = None,
     **score_kwargs,
 ) -> dict:
     """
@@ -976,17 +983,42 @@ def identify_tree_zone_candidates(
     water_suitability.select_optimal_water_zone()/
     road_corridors.select_optimal_road_corridor()), not a re-derived
     approximation of it.
+
+    dem, boundary_polygon_utm, production_areas, selected_water_zone, and
+    selected_road_corridor are all optional overrides, independently of
+    one another -- each falls back to being self-computed exactly as
+    before if not supplied, same "reuse what an upstream orchestrator
+    already computed" pattern water_suitability.identify_water_
+    suitability()/road_corridors.identify_road_corridor_candidates()/
+    solar_suitability.identify_solar_candidate_zones() already established
+    for these same values. valleys is a pure pass-through convenience: it
+    is forwarded as-is (including None) to the identify_water_suitability()/
+    identify_road_corridor_candidates() calls below, which already have
+    their own correct None-falls-back-to-self-compute handling for it --
+    there is no third copy of that fallback logic here, and no
+    delineate_valleys() self-compute added in this module either.
+    hydric_floodplain_union/floodplain_data_is_fallback are forwarded the
+    same way to identify_road_corridor_candidates() alone (see that
+    function's own docstring for what they mean); they only take effect
+    when selected_road_corridor is not itself supplied, same as
+    production_areas/valleys/boundary_polygon_utm below.
+
+    tree_root_zone_mask_utm (Step 2's own mandatory canopy fetch) is NOT
+    among these overrides -- it is always self-computed here (see module
+    docstring); that's a deliberate, separate scope decision, not an
+    oversight.
     """
     if dem is None:
         dem = get_dem_for_boundary(boundary_coordinates)
 
-    boundary_xs, boundary_ys = warp_transform(
-        "EPSG:4326",
-        dem["crs"],
-        [pt[0] for pt in boundary_coordinates],
-        [pt[1] for pt in boundary_coordinates],
-    )
-    boundary_polygon_utm = Polygon(zip(boundary_xs, boundary_ys))
+    if boundary_polygon_utm is None:
+        boundary_xs, boundary_ys = warp_transform(
+            "EPSG:4326",
+            dem["crs"],
+            [pt[0] for pt in boundary_coordinates],
+            [pt[1] for pt in boundary_coordinates],
+        )
+        boundary_polygon_utm = Polygon(zip(boundary_xs, boundary_ys))
 
     # --- Step 1 inputs: the OPTIMIZED (ceiling-trimmed) production-zone
     # output (production_area_ceiling.identify_optimized_production_areas(),
@@ -1001,11 +1033,20 @@ def identify_tree_zone_candidates(
     # this module's own "GEOMETRY FORM CLAIMED" docstring section above
     # for why (production_area.py's own cluster_and_gate() docstring for
     # render_fill_polygon_utm itself). ---
-    production_result = identify_optimized_production_areas(boundary_coordinates, dem=dem)
-    production_polygons_utm = [p["render_fill_polygon_utm"] for p in production_result["scored_patches"]]
+    if production_areas is None:
+        production_result = identify_optimized_production_areas(boundary_coordinates, dem=dem)
+        production_areas = production_result["scored_patches"]
+    production_polygons_utm = [p["render_fill_polygon_utm"] for p in production_areas]
 
-    water_result = identify_water_suitability(boundary_coordinates, dem=dem)
-    selected_water_zone = water_result["selected_water_zone"]
+    if selected_water_zone is None:
+        water_result = identify_water_suitability(
+            boundary_coordinates,
+            dem=dem,
+            boundary_polygon_utm=boundary_polygon_utm,
+            valleys=valleys,
+            production_areas=production_areas,
+        )
+        selected_water_zone = water_result["selected_water_zone"]
     water_polygons_utm = [selected_water_zone["render_fill_polygon_utm"]] if selected_water_zone else []
 
     # identify_road_corridor_candidates() needs a real anchor_lon_lat to
@@ -1015,8 +1056,19 @@ def identify_tree_zone_candidates(
     # generate_full_report.py). None here degrades the same clean way
     # identify_road_corridor_candidates() itself already handles a missing
     # anchor: no road routes, not an error.
-    road_result = identify_road_corridor_candidates(boundary_coordinates, dem=dem, anchor_lon_lat=anchor_lon_lat)
-    selected_road_corridor = road_result["selected_road_corridor"]
+    if selected_road_corridor is None:
+        road_result = identify_road_corridor_candidates(
+            boundary_coordinates,
+            anchor_lon_lat=anchor_lon_lat,
+            dem=dem,
+            boundary_polygon_utm=boundary_polygon_utm,
+            production_areas=production_areas,
+            valleys=valleys,
+            selected_water_zone=selected_water_zone,
+            hydric_floodplain_union=hydric_floodplain_union,
+            floodplain_data_is_fallback=floodplain_data_is_fallback,
+        )
+        selected_road_corridor = road_result["selected_road_corridor"]
     # _road_corridor_exclusion_polygon() builds this module's OWN
     # buffered variant of the selected route's real footprint -- see that
     # function's own docstring and TREE_ZONE_ROAD_BUFFER_CELLS's own

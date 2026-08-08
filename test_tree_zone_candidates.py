@@ -37,10 +37,11 @@ from unittest.mock import patch as mock_patch
 
 import numpy as np
 from rasterio.warp import transform as warp_transform
-from shapely.geometry import LineString, Point, box, mapping
+from shapely.geometry import LineString, Point, Polygon, box, mapping
 from shapely.ops import unary_union
 
 import production_area as pa
+import production_area_ceiling as pac
 import road_corridors as rc
 import tree_zone_candidates as tzc
 import production_suitability as ps
@@ -654,5 +655,217 @@ print(f"\nidentify_tree_zone_candidates() full orchestrator wiring: boundary={re
       f"search_space={result['search_space_acres']}ac, claimed={result['claimed_acres']}ac, "
       f"{len(result['zones_geojson']['features'])} tree zone candidate(s), best score driven by real steep slope "
       f"(slope_factor={best['properties']['slope_factor']}) -- OFFLINE/SYNTHETIC ONLY, network mocked throughout.")
+print("REGRESSION (test 2, no overrides supplied): output above is identical to pre-branch behavior against "
+      "this same synthetic fixture -- confirms the new boundary_polygon_utm/production_areas/valleys/"
+      "selected_water_zone/selected_road_corridor/hydric_floodplain_union/floodplain_data_is_fallback overrides "
+      "don't change anything when left unsupplied.")
+
+
+# =====================================================================
+# identify_tree_zone_candidates(): boundary_polygon_utm/production_areas/
+# valleys/selected_water_zone/selected_road_corridor/hydric_floodplain_union/
+# floodplain_data_is_fallback overrides -- same override set/pattern as
+# solar_suitability.identify_solar_candidate_zones()'s own overrides,
+# reusing this file's own bench-and-rise orchestrator fixture above.
+# =====================================================================
+
+# Real baseline override values for this same orchestrator_dem/
+# orchestrator_boundary_coordinates fixture, via the SAME underlying call
+# identify_tree_zone_candidates()'s own production_areas self-compute
+# fallback makes (check_soil/check_roads disabled here purely so this
+# setup step doesn't attempt any real network fetch of its own -- the
+# canopy gate stays real, offline, via this file's own module-level
+# pa.get_canopy_height_for_boundary patch) -- computed once here and
+# reused below both as a realistic override value and as identity-
+# checkable proof that the self-compute fallback is genuinely skipped
+# when overridden.
+override_boundary_xs, override_boundary_ys = warp_transform(
+    "EPSG:4326", CRS,
+    [pt[0] for pt in orchestrator_boundary_coordinates],
+    [pt[1] for pt in orchestrator_boundary_coordinates],
+)
+OVERRIDE_BOUNDARY_POLYGON_UTM = Polygon(zip(override_boundary_xs, override_boundary_ys))
+
+OVERRIDE_PRODUCTION_AREAS = pac.identify_optimized_production_areas(
+    orchestrator_boundary_coordinates, dem=orchestrator_dem, check_soil=False, check_roads=False
+)["scored_patches"]
+assert isinstance(OVERRIDE_PRODUCTION_AREAS, list) and OVERRIDE_PRODUCTION_AREAS, (
+    "test setup: expected at least one real production patch on this bench-and-rise fixture (the flat, "
+    "workable bench, rows < 15) to reuse as a direct override below"
+)
+
+# valleys is a pure pass-through in this module (no delineate_valleys() self-compute -- see this module's
+# own docstring) -- any object works as an override here; what matters below is identity, not content.
+OVERRIDE_VALLEYS = []
+
+# This fixture's bench-and-rise terrain isn't shaped to produce a real selected water zone or road corridor
+# of its own; both are fabricated as small synthetic values instead, positioned/sized so they have a real,
+# checkable effect (a real render_fill_polygon_utm / a real 'cells' list within this DEM's own shape)
+# without depending on this terrain accidentally producing one.
+OVERRIDE_SELECTED_WATER_ZONE = {
+    "id": "synthetic-test-water-zone",
+    "render_fill_polygon_utm": Point(orchestrator_dem["origin_x"] - 1000.0, orchestrator_dem["origin_y"] - 1000.0).buffer(5.0),
+}
+OVERRIDE_SELECTED_ROAD_CORRIDOR = {
+    "id": "synthetic-test-road-corridor",
+    "cells": [(0, 0), (0, 1), (1, 0)],
+}
+OVERRIDE_HYDRIC_FLOODPLAIN_UNION = Point(
+    orchestrator_dem["origin_x"] - 2000.0, orchestrator_dem["origin_y"] - 2000.0
+).buffer(5.0)
+OVERRIDE_FLOODPLAIN_DATA_IS_FALLBACK = False
+
+
+# --- 1. override behavior: all 7 overrides supplied -> the corresponding --
+# --- self-compute fallbacks are never called -------------------------------
+
+with mock_patch.object(tzc, "get_dem_for_boundary") as mock_dem, \
+     mock_patch.object(tzc, "identify_optimized_production_areas") as mock_prod, \
+     mock_patch.object(tzc, "identify_water_suitability") as mock_water, \
+     mock_patch.object(tzc, "identify_road_corridor_candidates") as mock_corridor, \
+     mock_patch.object(tzc, "get_farmland_classification_for_polygon", _fake_farmland_empty), \
+     mock_patch.object(tzc, "get_soil_data_for_polygon", _fake_soil_rows_empty), \
+     mock_patch.object(tzc, "get_soil_geometries_for_polygon", _fake_soil_geometries_empty), \
+     mock_patch.object(tzc, "get_water_features_for_boundary", _fake_water_features_empty):
+    override_result = identify_tree_zone_candidates(
+        orchestrator_boundary_coordinates,
+        dem=orchestrator_dem,
+        boundary_polygon_utm=OVERRIDE_BOUNDARY_POLYGON_UTM,
+        production_areas=OVERRIDE_PRODUCTION_AREAS,
+        valleys=OVERRIDE_VALLEYS,
+        selected_water_zone=OVERRIDE_SELECTED_WATER_ZONE,
+        selected_road_corridor=OVERRIDE_SELECTED_ROAD_CORRIDOR,
+        hydric_floodplain_union=OVERRIDE_HYDRIC_FLOODPLAIN_UNION,
+        floodplain_data_is_fallback=OVERRIDE_FLOODPLAIN_DATA_IS_FALLBACK,
+    )
+
+assert mock_dem.call_count == 0, "get_dem_for_boundary() must NOT be called when dem was supplied"
+assert mock_prod.call_count == 0, (
+    "identify_optimized_production_areas() must NOT be called when production_areas was supplied as an override"
+)
+assert mock_water.call_count == 0, (
+    "identify_water_suitability() must NOT be called when selected_water_zone was supplied as an override"
+)
+assert mock_corridor.call_count == 0, (
+    "identify_road_corridor_candidates() must NOT be called when selected_road_corridor was supplied as an override"
+)
+validate_feature_collection(override_result["zones_geojson"])
+validate_feature_collection(override_result["search_space_geojson"])
+print(
+    "Supplying all 7 overrides (boundary_polygon_utm=/production_areas=/valleys=/selected_water_zone=/"
+    "selected_road_corridor=/hydric_floodplain_union=/floodplain_data_is_fallback=, test 1) correctly skips "
+    "get_dem_for_boundary()/identify_optimized_production_areas()/identify_water_suitability()/"
+    "identify_road_corridor_candidates() -- zero self-compute fallback calls."
+)
+
+
+# --- 3. selected_water_zone and selected_road_corridor NOT overridden, ----
+# --- but boundary_polygon_utm/production_areas/valleys ARE -> both --------
+# --- identify_water_suitability() and identify_road_corridor_candidates() -
+# --- are called WITH those three passed through as kwargs, not -----------
+# --- self-deriving their own independent copies ---------------------------
+
+with mock_patch.object(
+        tzc, "identify_water_suitability", return_value={"selected_water_zone": None},
+     ) as mock_water_passthrough, \
+     mock_patch.object(
+        tzc, "identify_road_corridor_candidates",
+        return_value={"selected_road_corridor": OVERRIDE_SELECTED_ROAD_CORRIDOR},
+     ) as mock_corridor_passthrough, \
+     mock_patch.object(tzc, "get_farmland_classification_for_polygon", _fake_farmland_empty), \
+     mock_patch.object(tzc, "get_soil_data_for_polygon", _fake_soil_rows_empty), \
+     mock_patch.object(tzc, "get_soil_geometries_for_polygon", _fake_soil_geometries_empty), \
+     mock_patch.object(tzc, "get_water_features_for_boundary", _fake_water_features_empty):
+    passthrough_result = identify_tree_zone_candidates(
+        orchestrator_boundary_coordinates,
+        dem=orchestrator_dem,
+        boundary_polygon_utm=OVERRIDE_BOUNDARY_POLYGON_UTM,
+        production_areas=OVERRIDE_PRODUCTION_AREAS,
+        valleys=OVERRIDE_VALLEYS,
+    )
+
+assert mock_water_passthrough.call_count == 1
+water_call = mock_water_passthrough.call_args
+assert water_call.args[0] == orchestrator_boundary_coordinates
+assert water_call.kwargs["dem"] is orchestrator_dem
+assert water_call.kwargs["boundary_polygon_utm"] is OVERRIDE_BOUNDARY_POLYGON_UTM, (
+    "identify_water_suitability() must receive this function's own already-sourced boundary_polygon_utm, "
+    "not re-derive its own copy"
+)
+assert water_call.kwargs["valleys"] is OVERRIDE_VALLEYS, (
+    "identify_water_suitability() must receive this function's own already-sourced valleys, not "
+    "re-derive its own copy"
+)
+assert water_call.kwargs["production_areas"] is OVERRIDE_PRODUCTION_AREAS, (
+    "identify_water_suitability() must receive this function's own already-sourced production_areas, "
+    "not re-derive its own copy via identify_optimized_production_areas()"
+)
+
+assert mock_corridor_passthrough.call_count == 1
+corridor_call = mock_corridor_passthrough.call_args
+assert corridor_call.args[0] == orchestrator_boundary_coordinates
+assert corridor_call.kwargs["dem"] is orchestrator_dem
+assert corridor_call.kwargs["boundary_polygon_utm"] is OVERRIDE_BOUNDARY_POLYGON_UTM, (
+    "identify_road_corridor_candidates() must receive this function's own already-sourced "
+    "boundary_polygon_utm, not re-derive its own copy"
+)
+assert corridor_call.kwargs["valleys"] is OVERRIDE_VALLEYS, (
+    "identify_road_corridor_candidates() must receive this function's own already-sourced valleys, "
+    "not re-derive its own copy"
+)
+assert corridor_call.kwargs["production_areas"] is OVERRIDE_PRODUCTION_AREAS, (
+    "identify_road_corridor_candidates() must receive this function's own already-sourced "
+    "production_areas, not re-derive its own copy"
+)
+assert corridor_call.kwargs["selected_water_zone"] is None, (
+    "identify_road_corridor_candidates() must receive the SAME selected_water_zone this function's own "
+    "(mocked) identify_water_suitability() call just produced, not re-derive it independently"
+)
+validate_feature_collection(passthrough_result["zones_geojson"])
+print(
+    "With selected_water_zone/selected_road_corridor left unsupplied but boundary_polygon_utm=/"
+    "production_areas=/valleys= all overridden (test 3), identify_water_suitability() and "
+    "identify_road_corridor_candidates() correctly receive this function's own already-sourced values "
+    "as kwargs instead of re-deriving independent copies of any of them."
+)
+
+
+# --- 4. selected_road_corridor overridden as None explicitly -------------
+# --- (simulating "no corridor exists") -> still treated as "not ----------
+# --- supplied" and triggers the self-compute path correctly --------------
+#
+# A caller-supplied None is indistinguishable from "not supplied" (same None-as-
+# sentinel convention every other override in this function uses -- see its own
+# docstring), so this still triggers the identify_road_corridor_candidates()
+# self-compute below.
+
+with mock_patch.object(
+        tzc, "identify_road_corridor_candidates", return_value={"selected_road_corridor": None},
+     ) as mock_corridor_none, \
+     mock_patch.object(tzc, "get_farmland_classification_for_polygon", _fake_farmland_empty), \
+     mock_patch.object(tzc, "get_soil_data_for_polygon", _fake_soil_rows_empty), \
+     mock_patch.object(tzc, "get_soil_geometries_for_polygon", _fake_soil_geometries_empty), \
+     mock_patch.object(tzc, "get_water_features_for_boundary", _fake_water_features_empty):
+    none_override_result = identify_tree_zone_candidates(
+        orchestrator_boundary_coordinates,
+        dem=orchestrator_dem,
+        boundary_polygon_utm=OVERRIDE_BOUNDARY_POLYGON_UTM,
+        production_areas=OVERRIDE_PRODUCTION_AREAS,
+        valleys=OVERRIDE_VALLEYS,
+        selected_water_zone=OVERRIDE_SELECTED_WATER_ZONE,
+        selected_road_corridor=None,
+    )
+
+assert mock_corridor_none.call_count == 1, (
+    "an explicit selected_road_corridor=None must still be treated as unsupplied and trigger the "
+    "identify_road_corridor_candidates() self-compute, same as leaving it out entirely"
+)
+validate_feature_collection(none_override_result["zones_geojson"])
+print(
+    "Supplying selected_road_corridor=None explicitly (test 4) is correctly treated the same as leaving "
+    "it unsupplied -- identify_road_corridor_candidates() self-computes (finding no corridor), and the "
+    "rest of the pipeline still runs correctly on top of it."
+)
+
 
 print("\nAll tree_zone_candidates checks passed.")
