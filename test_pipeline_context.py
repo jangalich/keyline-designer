@@ -75,6 +75,12 @@ contract:
      call's own self-compute checks now fire ZERO times too, same as this
      module's own two direct calls always did.
 
+  9. dem is optional -- a caller-supplied dem= skips dem_data.
+     get_dem_for_boundary() entirely (call_count == 0, identity-checked on
+     both the returned context.dem and one representative downstream
+     call), and the pre-existing no-override path (dem= omitted) still
+     self-fetches exactly once, unchanged -- see section 12/13 below.
+
 Every real network-touching entry point pipeline_context.py calls
 directly is mocked, so this file never touches the network. valley_
 delineation.delineate_valleys is left real/spied-on (wraps=), not
@@ -850,5 +856,89 @@ print(
     f"MAX_SOLAR_SLOPE_PCT's 20% ceiling -- a real DEM-driven exclusion, not an error). tree_zone_patches "
     f"holds {len(ctx.tree_zone_patches)} real, correctly-shaped patch(es)."
 )
+
+# --- 12. dem= override: a caller-supplied dem skips the self-fetch entirely ---
+#
+# build_pipeline_context() previously had no dem parameter at all -- always called dem_data.
+# get_dem_for_boundary() itself, even for a caller (render_layout_map.fetch_layout_layers()) that
+# already had one. This dedicated third run supplies dem= directly and proves two things: (a)
+# dem_data.get_dem_for_boundary is never called (call_count == 0, not just "still 1"), and (b) the
+# EXACT object passed in is what ends up on the returned context AND gets threaded down to a
+# downstream call (identify_road_corridor_candidates(), picked arbitrarily -- every call in build_
+# pipeline_context() shares the same local `dem` variable, so one representative identity check is
+# sufficient). dem_override is a fresh dict (not the same object as the module's own `synthetic_dem`
+# used everywhere else in this file, though it carries the identical real array/crs/etc.) specifically
+# so an `is` check here cannot pass by accident.
+dem_override = dict(synthetic_dem)
+fake_selected_road_corridor_dem_case = {
+    "type": "Feature",
+    "id": "road-corridor-dem-override-case",
+    "cell_footprint_polygon_utm": box(0, 0, 10, 10),
+    "cells": [(0, 0)],
+}
+fake_road_corridor_result_dem_case = {
+    "zones_geojson": {"type": "FeatureCollection", "features": []},
+    "all_scored_candidates": [],
+    "selected_road_corridor": fake_selected_road_corridor_dem_case,
+}
+fake_solar_result_dem_case = {
+    "zones_geojson": {"type": "FeatureCollection", "features": []},
+    "all_scored_candidates": [],
+    "selected_structure_site": None,
+}
+fake_tree_zone_result_dem_case = {
+    "zones_geojson": {"type": "FeatureCollection", "features": []},
+    "search_space_geojson": {"type": "FeatureCollection", "features": []},
+    "search_space_acres": 0.0,
+    "claimed_acres": 0.0,
+    "boundary_acres": 0.0,
+    "patches": [],
+}
+
+with mock_patch.object(
+    pc.dem_data, "get_dem_for_boundary", side_effect=AssertionError("must not be called when dem= is supplied")
+) as mock_get_dem_dem_case, \
+     mock_patch.object(pc.valley_delineation, "delineate_valleys", return_value=[]), \
+     mock_patch.object(pc.production_area_ceiling, "identify_optimized_production_areas", return_value=fake_optimized_result), \
+     mock_patch.object(pc.farm_roads_data, "get_road_exclusion_union_utm", return_value=fake_existing_roads_union), \
+     mock_patch.object(pc.road_corridors, "_fetch_floodplain_hydric_union", return_value=(fake_hydric_union, False)), \
+     mock_patch.object(
+         pc.water_candidate_zones,
+         "identify_water_system_candidate_zones",
+         return_value={"zones_geojson": {"type": "FeatureCollection", "features": []}},
+     ), \
+     mock_patch.object(pc, "fetch_and_select_optimal_water_zone", return_value=fake_selected_water_zone), \
+     mock_patch.object(
+         pc.road_corridors, "identify_road_corridor_candidates", return_value=fake_road_corridor_result_dem_case
+     ) as mock_road_corridor_dem_case, \
+     mock_patch.object(pc, "identify_solar_candidate_zones", return_value=fake_solar_result_dem_case), \
+     mock_patch.object(pc, "identify_tree_zone_candidates", return_value=fake_tree_zone_result_dem_case):
+    ctx_dem_case = pc.build_pipeline_context(boundary_coordinates, anchor_lon_lat, dem=dem_override)
+
+assert mock_get_dem_dem_case.call_count == 0, (
+    "dem_data.get_dem_for_boundary must NOT be called at all when a caller supplies dem= -- if this fires, "
+    "the side_effect above raises AssertionError instead of returning a fake DEM, so a regression here "
+    "fails loudly rather than silently passing with a self-fetched DEM"
+)
+assert ctx_dem_case.dem is dem_override, (
+    "build_pipeline_context()'s returned context.dem must be the EXACT object the caller passed in, not a "
+    "copy or a re-fetched one"
+)
+assert mock_road_corridor_dem_case.call_args.kwargs["dem"] is dem_override, (
+    "the caller-supplied dem must thread down to every downstream call the same way a self-fetched one "
+    "always did -- checked here via identify_road_corridor_candidates() as one representative call"
+)
+print("dem= override: get_dem_for_boundary is never called, and the exact caller-supplied object reaches "
+      "both context.dem and every downstream call.")
+
+# --- 13. existing no-override behavior is unchanged ---
+#
+# Section 1's own original run (no dem= argument at all) already re-proves this implicitly -- it still
+# calls build_pipeline_context(boundary_coordinates, anchor_lon_lat) with no third argument, and section
+# 1's mock_get_dem.call_count == 1 assertion already confirms the default (dem=None) path still self-fetches
+# exactly once, unchanged by this addendum. No new run needed here -- flagged explicitly so this file's own
+# module docstring accounting stays honest about what section 1 already covers.
+print("existing no-override callers (dem= omitted entirely) are unaffected -- see section 1's own "
+      "mock_get_dem.call_count == 1 assertion, re-run unchanged by this addendum.")
 
 print("\nAll pipeline_context checks passed.")

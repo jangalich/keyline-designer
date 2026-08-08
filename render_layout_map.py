@@ -31,7 +31,6 @@ lines over the full DEM extent).
                  exclusion unions -- every shared upstream input below,
                  computed exactly once; see fetch_layout_layers()'s own
                  docstring for what's still one additional call past this)
-             --> production_area_ceiling.identify_optimized_production_areas
              --> road_corridors.identify_road_corridor_candidates
              --> solar_suitability.identify_solar_candidate_zones
              --> hydrology_data.get_water_features_for_boundary (streams)
@@ -285,7 +284,7 @@ from farm_roads_data import get_farm_roads_for_boundary
 from fencing import identify_fencing
 from hydrology_data import get_water_features_for_boundary
 from pipeline_context import build_pipeline_context
-from production_area_ceiling import identify_optimized_production_areas
+from raster_grid import SQUARE_METERS_PER_ACRE
 from road_corridors import identify_road_corridor_candidates
 from solar_suitability import identify_solar_candidate_zones
 from tree_zone_candidates import identify_tree_zone_candidates
@@ -886,18 +885,13 @@ def _draw_numbered_marker(ax, point, number: int) -> None:
     )
 
 
-def _production_zone_legend_stats(production_result: dict) -> list[tuple[float, str]]:
+def _production_zone_legend_stats(scored_patches: list[dict], parcel_acres: float) -> list[tuple[float, str]]:
     """Returns [(area_acres, stat_line), ...] -- one per surviving
-    production patch, in the same order production_result['scored_patches']
-    already ranks them. parcel_acres is back-derived from the pipeline's
-    own reported total_selected_acreage / percent_of_parcel (both already
-    computed by production_area_ceiling.py) rather than recomputed here,
-    so this stays purely a display-formatting step."""
-    scored_patches = production_result["scored_patches"]
-    percent_of_parcel = production_result.get("percent_of_parcel") or 0.0
-    total_selected_acreage = production_result.get("total_selected_acreage") or 0.0
-    parcel_acres = (total_selected_acreage / (percent_of_parcel / 100.0)) if percent_of_parcel else None
-
+    production patch, in the same order scored_patches already ranks
+    them. parcel_acres is the property boundary's own real area, passed
+    directly by the caller rather than back-derived from a second
+    production-zone computation -- this function is purely a
+    display-formatting step, same as before."""
     stats = []
     for patch in scored_patches:
         pct_note = (
@@ -927,32 +921,25 @@ def fetch_layout_layers(
     redundant_fetches.py, targeting this function directly) for the real,
     measured before/after call counts.
 
-    dem (the parameter): NO LONGER threaded through to build_pipeline_
-    context() -- that function has no dem override of its own (always
-    calls dem_data.get_dem_for_boundary() internally), and adding one
-    would mean modifying pipeline_context.py, out of this function's own
-    scope. This parameter is kept only so existing callers (e.g.
-    generate_pdf_report.py, which passes its own pre-fetched dem) don't
-    break on an unexpected-keyword TypeError -- it is otherwise IGNORED;
-    every layer below is computed from context.dem, a fresh fetch this
-    function's caller-supplied dem no longer avoids. Concretely: generate_
-    pdf_report.py's own call path now costs 2 DEM fetches (its own +
-    build_pipeline_context()'s) where it used to cost 1. Every other
-    caller (no pre-fetched dem) is unaffected -- still exactly 1 fetch,
-    same as before. Flagged as a known, deliberately-not-fixed-here
-    limitation; closing it requires a future branch adding a dem override
-    to pipeline_context.build_pipeline_context() itself.
+    dem (the parameter): now threaded straight through to build_pipeline_
+    context()'s own dem= override (a prior branch's follow-up added it) --
+    a caller that already has a DEM for this exact boundary (e.g.
+    generate_pdf_report.py, which fetches one for its own narrative-report
+    needs alongside this map) no longer pays for a second, redundant
+    fetch. Omit it (default None) and build_pipeline_context() self-
+    fetches exactly once, same as every other caller.
 
-    production_result: full return dict still needed (scored_patches/
-    percent_of_parcel/total_selected_acreage for _production_zone_legend_
-    stats() above) -- context only carries production_areas (the same
-    scored_patches list, but not the wrapping dict), so this is one
-    additional identify_optimized_production_areas() call, passing
-    context.dem so the DEM fetch itself isn't repeated. production_area_
-    ceiling.identify_optimized_production_areas() has no boundary_polygon_
-    utm override (see pipeline_context.py's own KNOWN LIMITATIONS #2) --
-    it still re-derives that internally, a cheap pure-geometry op with no
-    network cost, same as build_pipeline_context() itself accepts.
+    production zone legend stats: context.production_areas already IS
+    identify_optimized_production_areas()'s own scored_patches list (see
+    pipeline_context.py's own field notes) -- no additional call needed
+    at all now. percent_of_parcel is no longer read off a second
+    identify_optimized_production_areas() call's own return dict; it's
+    computed directly from context.boundary_polygon_utm.area (the
+    property boundary's own real, already-computed footprint) instead --
+    the exact same value that second call's own percent_of_parcel field
+    was itself computed FROM, just reached without re-running production-
+    zone identification a second time. See _production_zone_legend_
+    stats()'s own docstring.
 
     water_zone is context.selected_water_zone directly -- water_
     suitability.fetch_and_select_optimal_water_zone()'s own return value
@@ -1009,8 +996,8 @@ def fetch_layout_layers(
     and tree-zone-exclusion fence loops (see render_layout_map()'s own
     docstring). NOT wrapped in try/except itself: identify_fencing()'s own
     boundary-fence path still carries its MANDATORY canopy fetch (same
-    hard-fail-on-missing-coverage design as production_result/tree_zone_
-    result's own canopy gates above), and a failure there should
+    hard-fail-on-missing-coverage design as build_pipeline_context()'s own
+    production/tree-zone canopy gates), and a failure there should
     propagate up and fail this whole render rather than silently omitting
     the fence layer. Fed the HIGH-LEVEL selected_road_corridor/selected_
     water_zone/tree_zone_patches context fields directly (fencing.
@@ -1025,9 +1012,11 @@ def fetch_layout_layers(
     function still needs to protect: identify_fencing() degrades
     gracefully on its own if that fetch failed.
     """
-    context = build_pipeline_context(boundary_coordinates, anchor_lon_lat)
+    context = build_pipeline_context(boundary_coordinates, anchor_lon_lat, dem=dem)
 
-    production_result = identify_optimized_production_areas(boundary_coordinates, dem=context.dem)
+    production_zone_legend_stats = _production_zone_legend_stats(
+        context.production_areas, context.boundary_polygon_utm.area / SQUARE_METERS_PER_ACRE
+    )
 
     water_zone = context.selected_water_zone
 
@@ -1094,7 +1083,8 @@ def fetch_layout_layers(
 
     return {
         "dem": context.dem,
-        "production_result": production_result,
+        "production_areas": context.production_areas,
+        "production_zone_legend_stats": production_zone_legend_stats,
         "water_zone": water_zone,
         "road_corridor": road_corridor,
         "tree_zone_result": tree_zone_result,
@@ -1132,7 +1122,8 @@ def render_layout_map(
         layers = fetch_layout_layers(boundary_coordinates, dem=dem, anchor_lon_lat=anchor_lon_lat)
 
     dem = layers["dem"]
-    production_result = layers["production_result"]
+    scored_patches = layers["production_areas"]
+    zone_stats = layers["production_zone_legend_stats"]
     water_zone = layers["water_zone"]
     road_corridor = layers["road_corridor"]
     tree_zone_result = layers["tree_zone_result"]
@@ -1295,8 +1286,6 @@ def render_layout_map(
             label = f"Tree Zone Fencing {rank}" if multiple_tree_zone_fences else "Tree Zone Fencing"
             legend_entries.append(label)
 
-    scored_patches = production_result.get("scored_patches", []) if production_result else []
-    zone_stats = _production_zone_legend_stats(production_result) if production_result else []
     multiple_zones = len(scored_patches) > 1
     for patch, (_, stat_line) in zip(scored_patches, zone_stats):
         # geometry_wgs84 -- the real, grid-bug-fixed cell-union footprint

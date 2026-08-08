@@ -245,6 +245,7 @@ silently patching another module or reimplementing its logic)
 """
 
 from dataclasses import dataclass
+from typing import Optional
 
 from rasterio.warp import transform as warp_transform
 from shapely.geometry import Polygon
@@ -301,6 +302,7 @@ def _boundary_polygon_utm(boundary_coordinates: list[tuple[float, float]], dem: 
 def build_pipeline_context(
     boundary_coordinates: list[tuple[float, float]],
     anchor_lon_lat: tuple[float, float],
+    dem: Optional[dict] = None,
 ) -> PipelineContext:
     """
     Computes every shared upstream input multiple KSOP pipeline steps
@@ -314,8 +316,17 @@ def build_pipeline_context(
     candidates(), identify_solar_candidate_zones(), and identify_tree_
     zone_candidates() below (see selected_road_corridor, selected_
     structure_site, tree_zone_patches).
+
+    dem is optional -- same None-falls-back-to-self-fetch convention every
+    other override in this pipeline uses (see e.g. production_area_
+    ceiling.identify_optimized_production_areas()). A caller that already
+    fetched a DEM for this exact boundary (e.g. render_layout_map.
+    fetch_layout_layers(), which accepts its own dem= for the same reason)
+    passes it through here instead of paying for a second, redundant
+    fetch.
     """
-    dem = dem_data.get_dem_for_boundary(boundary_coordinates)
+    if dem is None:
+        dem = dem_data.get_dem_for_boundary(boundary_coordinates)
     boundary_polygon_utm = _boundary_polygon_utm(boundary_coordinates, dem)
 
     valleys = valley_delineation.delineate_valleys(dem)

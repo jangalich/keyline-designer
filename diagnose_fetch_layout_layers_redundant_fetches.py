@@ -216,7 +216,7 @@ WRAPS_SITES = {
         (water_suitability, "get_dem_for_boundary"),
     ],
     "identify_optimized_production_areas": [
-        (render_layout_map, "identify_optimized_production_areas"),
+        (render_layout_map, "identify_optimized_production_areas"),  # BEFORE only, and briefly AFTER Fix 1; absent once Fix 2 removes fetch_layout_layers()'s own 2nd call and its import
         (production_area_ceiling, "identify_optimized_production_areas"),  # pipeline_context.py's own attribute-style call
         (road_corridors, "identify_optimized_production_areas"),
         (solar_suitability, "identify_optimized_production_areas"),
@@ -390,13 +390,13 @@ def run() -> tuple[dict[str, int], dict[str, Counter]]:
             SYNTHETIC_BOUNDARY_COORDINATES, anchor_lon_lat=SYNTHETIC_ANCHOR_LON_LAT
         )
 
-    assert isinstance(layers, dict) and "production_result" in layers
+    assert isinstance(layers, dict) and "production_areas" in layers
 
     counts = {"get_dem_for_boundary": sum(m.call_count for m in dem_mocks)}
     for logical_name, mocks in wraps_mocks.items():
         counts[logical_name] = sum(m.call_count for m in mocks)
 
-    counts["_production_areas_found"] = len(layers["production_result"].get("scored_patches", []))
+    counts["_production_areas_found"] = len(layers["production_areas"])
     counts["_selected_water_zone_is_none"] = layers["water_zone"] is None
     counts["_selected_road_corridor_is_none"] = layers["fencing_result"] is not None  # always true; sanity check fencing ran
     return counts, call_site_logs

@@ -104,7 +104,7 @@ def _mask_from_cells(shape, cells):
 
 def _scored_patches_for(cell_mask, dem):
     """Real end-to-end patch dicts (cluster_and_gate + score_production_areas),
-    exactly the shape render_layout_map.py's own production_result['scored_patches']
+    exactly the shape render_layout_map.py's own layers['production_areas']
     already carries."""
     boundary = _full_extent_boundary(dem)
     step1 = compute_step1_eligible_cells(dem, boundary, disqualifying_soil_union_utm=None)
@@ -288,7 +288,7 @@ print(
 
 # --- Full render_layout_map() pass, offline: confirms the whole contour-clipping pipeline
 #     (fetch_layout_layers' own contour_lines computation, per-zone clipping, reprojection,
-#     drawing, legend, PNG assembly) runs without crashing for a production_result with a split ---
+#     drawing, legend, PNG assembly) runs without crashing for production_areas with a split ---
 
 property_boundary = [
     (-79.9838154, 40.6458343),
@@ -302,13 +302,20 @@ property_boundary = [
 for rank, patch in enumerate(sorted(dumbbell_scored, key=lambda p: -p["suitability_score"]), start=1):
     patch["rank"] = rank
 
+# parcel_acres derived to match the old hardcoded percent_of_parcel=42.0
+# fixture value exactly (total_selected_acreage / (42.0 / 100.0)) -- same
+# relationship the old production_result-shaped fixture encoded, just
+# reached via the new (scored_patches, parcel_acres) signature _production_
+# zone_legend_stats() now takes directly (see render_layout_map.py's own
+# fetch_layout_layers() docstring for why this stopped needing a second
+# identify_optimized_production_areas() call in production).
+_dumbbell_total_selected_acreage = round(sum(p["area_acres"] for p in dumbbell_scored), 2)
+_dumbbell_parcel_acres = _dumbbell_total_selected_acreage / (42.0 / 100.0)
+
 synthetic_layers = {
     "dem": dumbbell_dem,
-    "production_result": {
-        "scored_patches": dumbbell_scored,
-        "total_selected_acreage": round(sum(p["area_acres"] for p in dumbbell_scored), 2),
-        "percent_of_parcel": 42.0,
-    },
+    "production_areas": dumbbell_scored,
+    "production_zone_legend_stats": rlm._production_zone_legend_stats(dumbbell_scored, _dumbbell_parcel_acres),
     "water_zone": None,
     "road_corridor": None,
     "tree_zone_result": None,
@@ -327,7 +334,7 @@ with tempfile.TemporaryDirectory() as tmpdir:
 
 print(
     "Full pipeline: render_layout_map() runs offline end-to-end (basemap fetch degrades gracefully) with a "
-    "split production_result, drawing clipped contour-line texture for each zone and producing a real, "
+    "split production_areas, drawing clipped contour-line texture for each zone and producing a real, "
     "non-empty PNG."
 )
 
@@ -650,7 +657,8 @@ rlm.plot_line = _recording_plot_line
 
 wz_synthetic_layers = {
     "dem": water_zone_test_dem,
-    "production_result": None,
+    "production_areas": [],
+    "production_zone_legend_stats": [],
     "water_zone": water_zone_fixture,
     "road_corridor": None,
     "tree_zone_result": None,
@@ -841,7 +849,8 @@ rlm.plot_line = _recording_plot_line_for_road
 
 road_synthetic_layers = {
     "dem": water_zone_test_dem,
-    "production_result": None,
+    "production_areas": [],
+    "production_zone_legend_stats": [],
     "water_zone": None,
     "road_corridor": road_corridor_fixture,
     "tree_zone_result": None,
@@ -967,7 +976,8 @@ rlm.plot_polygon = _recording_plot_polygon_for_trees
 
 tree_synthetic_layers = {
     "dem": water_zone_test_dem,
-    "production_result": None,
+    "production_areas": [],
+    "production_zone_legend_stats": [],
     "water_zone": None,
     "road_corridor": None,
     "tree_zone_result": tree_zone_result_fixture,
