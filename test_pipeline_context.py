@@ -47,7 +47,7 @@ contract:
      'hydric_floodplain_is_fallback', and 'erosion_prone_union' --
      confirming the prior 2-key shape (which silently dropped is_fallback)
      is gone.
-  8. selected_structure_site and tree_zone_candidates reuse this context's
+  8. selected_structure_site and tree_zone_patches reuse this context's
      own boundary_polygon_utm/valleys/production_areas/selected_water_zone/
      selected_road_corridor/hydric_floodplain_union/floodplain_data_is_
      fallback instances via identify_solar_candidate_zones()'s and
@@ -58,23 +58,22 @@ contract:
      -- not assume -- the actual total call counts identify_optimized_
      production_areas()/identify_water_suitability()/identify_road_
      corridor_candidates() reach across the WHOLE build_pipeline_context()
-     run. That measurement is THE POINT of this section: it does NOT come
-     out to "still exactly 1" the way water_zones/selected_water_zone/
-     selected_road_corridor's own dedup did in sections 4-7 above --
+     run. That measurement is THE POINT of this section: it now DOES stay
+     at "still exactly 1", same as water_zones/selected_water_zone/
+     selected_road_corridor's own dedup in sections 4-7 above --
      identify_solar_candidate_zones() has its own internal, one-level-
      deeper call to identify_tree_zone_candidates() (its own "TREE-ZONE-
-     CANDIDATE exclusion" step) that forwards NONE of the overrides
-     identify_solar_candidate_zones() itself just received, so that inner
-     call falls back to self-computing production_areas/selected_water_
-     zone/selected_road_corridor all over again via its own separate
-     module-level bindings. See pipeline_context.py's own KNOWN
-     LIMITATIONS #4 for the full account -- this is a real, pre-existing
-     redundancy inside solar_suitability.py itself, not something this
-     branch's own two new build_pipeline_context() calls introduce (both
-     of THOSE correctly receive and reuse every override at their own top
-     level, proven separately below), and not something fixable here
-     without modifying solar_suitability.py, which this branch was told
-     not to do.
+     CANDIDATE exclusion" step) which USED TO forward none of the
+     overrides identify_solar_candidate_zones() itself received, causing
+     that inner call to self-compute production_areas/selected_water_zone/
+     selected_road_corridor all over again via its own separate module-
+     level bindings -- a real, MEASURED redundancy this branch's own prior
+     testing found (see pipeline_context.py's own KNOWN LIMITATIONS #4,
+     now marked RESOLVED) and a follow-up branch fixed directly inside
+     solar_suitability.py by forwarding those same overrides into that
+     nested call. This section's own assertions prove the fix: the nested
+     call's own self-compute checks now fire ZERO times too, same as this
+     module's own two direct calls always did.
 
 Every real network-touching entry point pipeline_context.py calls
 directly is mocked, so this file never touches the network. valley_
@@ -361,16 +360,17 @@ with ExitStack() as _stack:
 
     # --- tree_zone_candidates.py's OWN mandatory canopy fetch + module-level
     # bindings of the same three functions -- a FOURTH independent set of
-    # bindings. These are reached TWICE over the whole run: once (with zero
-    # self-compute calls expected) from THIS module's own direct identify_
-    # tree_zone_candidates() call above, which correctly receives every
-    # override; and once more (WITH self-compute calls expected -- see
-    # section 8 below and pipeline_context.py's own KNOWN LIMITATIONS #4)
-    # from INSIDE identify_solar_candidate_zones()'s own internal, separate,
-    # nested identify_tree_zone_candidates() call, which receives none of
-    # them. mock_tz_optimize/mock_tz_water/mock_tz_road's own call counts
-    # below are the sum of both call sites -- section 8 attributes the
-    # total correctly. ---
+    # bindings. These are reached TWICE over the whole run: once from THIS
+    # module's own direct identify_tree_zone_candidates() call above, and
+    # once more from INSIDE identify_solar_candidate_zones()'s own internal,
+    # separate, nested identify_tree_zone_candidates() call (its own
+    # "TREE-ZONE-CANDIDATE exclusion" step) -- BOTH now forward every
+    # override correctly (a follow-up branch fixed the nested call, which
+    # used to forward none of them -- see pipeline_context.py's own KNOWN
+    # LIMITATIONS #4, now RESOLVED), so mock_tz_optimize/mock_tz_water/
+    # mock_tz_road are expected to see ZERO calls, same as mock_solar_
+    # optimize/mock_solar_water/mock_solar_road above -- section 8 proves
+    # this. ---
     _enter(mock_patch.object(tree_zone_candidates, "get_required_tree_root_zone_mask_utm", side_effect=_fake_clean_canopy_mask))
     mock_tz_optimize = _enter(
         mock_patch.object(tree_zone_candidates, "identify_optimized_production_areas", return_value=fake_optimized_result)
@@ -602,7 +602,7 @@ print(
     "identify_road_corridor_candidates() fetch a second, independent floodplain/hydric union."
 )
 
-# --- 8. selected_structure_site/tree_zone_candidates reuse dem/boundary_polygon_utm/valleys/ ---
+# --- 8. selected_structure_site/tree_zone_patches reuse dem/boundary_polygon_utm/valleys/ ---
 # --- production_areas/selected_water_zone/selected_road_corridor/hydric_floodplain_union/ ---
 # --- floodplain_data_is_fallback -- THIS module's own two new direct calls, not the nested one ---
 
@@ -646,7 +646,7 @@ assert mock_solar_road.call_count == 0, (
     "level when selected_road_corridor was supplied as an override"
 )
 print(
-    "selected_structure_site and tree_zone_candidates: both of THIS module's own new direct calls "
+    "selected_structure_site and tree_zone_patches: both of THIS module's own new direct calls "
     "(identify_solar_candidate_zones(), identify_tree_zone_candidates()) reuse this context's own dem/"
     "boundary_polygon_utm/valleys/production_areas/selected_water_zone/selected_road_corridor/"
     "hydric_floodplain_union/floodplain_data_is_fallback instances -- proven both by kwargs identity and by "
@@ -662,54 +662,51 @@ print(
 # own, and tree_zone_candidates.py's own) -- so summing every mock's call_count for a given function is a
 # genuine, complete total, not a partial one.
 #
-# For identify_optimized_production_areas() and identify_road_corridor_candidates(), EVERY call site is
-# covered by a real, counting mock above, so this total is exact and complete.
+# This USED TO measure a real, MEASURED redundancy: identify_solar_candidate_zones()'s own internal, nested
+# identify_tree_zone_candidates() call (its own "TREE-ZONE-CANDIDATE exclusion" step) forwarded none of the
+# overrides identify_solar_candidate_zones() itself received, so mock_tz_optimize/mock_tz_water/mock_tz_road
+# each fired once more than they should have, doubling identify_optimized_production_areas()/identify_road_
+# corridor_candidates()'s own total call counts across a single build_pipeline_context() run (see
+# pipeline_context.py's own KNOWN LIMITATIONS #4, now marked RESOLVED). A follow-up branch fixed this
+# directly inside solar_suitability.py, forwarding boundary_polygon_utm/production_areas/valleys/selected_
+# water_zone/selected_road_corridor/hydric_floodplain_union/floodplain_data_is_fallback into that nested
+# call -- the assertions below now prove the fix: every one of mock_tz_optimize/mock_tz_water/mock_tz_road
+# stays at ZERO, same as mock_solar_optimize/mock_solar_water/mock_solar_road in section 8 above, so the
+# totals below are genuinely back to "still exactly 1", same as sections 4-7's own dedup.
 total_optimize_calls = mock_optimize.call_count + mock_solar_optimize.call_count + mock_tz_optimize.call_count
 total_road_corridor_calls = mock_road_corridor.call_count + mock_solar_road.call_count + mock_tz_road.call_count
-assert total_optimize_calls == 2, (
+assert total_optimize_calls == 1, (
     f"MEASURED total identify_optimized_production_areas() calls across the whole build_pipeline_context() "
-    f"run: {total_optimize_calls} (expected 2, not 1 -- see below). This is NOT this module's own two new "
-    f"calls double-counting themselves (mock_solar_optimize is separately proven 0 in section 8 above): it is "
-    f"identify_solar_candidate_zones()'s own internal, nested identify_tree_zone_candidates() call (its own "
-    f"'TREE-ZONE-CANDIDATE exclusion' step) forwarding NONE of the overrides identify_solar_candidate_zones() "
-    f"itself just received, so that inner call falls back to self-computing production_areas all over again "
-    f"via tree_zone_candidates.py's OWN separate identify_optimized_production_areas() binding "
-    f"(mock_tz_optimize == {mock_tz_optimize.call_count}, attributable entirely to that nested call, since "
-    f"THIS module's own direct identify_tree_zone_candidates() call is separately proven to supply production_"
-    f"areas in section 8 above and therefore contributes 0 self-compute calls of its own). See pipeline_"
-    f"context.py's own KNOWN LIMITATIONS #4 -- a real, pre-existing redundancy inside solar_suitability.py "
-    f"itself that this branch cannot close without modifying that module, which it was told not to do."
+    f"run: {total_optimize_calls} (expected 1). mock_tz_optimize == {mock_tz_optimize.call_count} proves "
+    f"identify_solar_candidate_zones()'s own internal nested identify_tree_zone_candidates() call no longer "
+    f"self-computes production_areas -- if this regresses back to 2, the nested-call override forwarding "
+    f"fixed in solar_suitability.py (see pipeline_context.py's own KNOWN LIMITATIONS #4) broke again."
 )
-assert total_road_corridor_calls == 2, (
+assert total_road_corridor_calls == 1, (
     f"MEASURED total identify_road_corridor_candidates() calls across the whole build_pipeline_context() run: "
-    f"{total_road_corridor_calls} (expected 2, same nested-call redundancy as identify_optimized_production_"
-    f"areas() above -- mock_tz_road == {mock_tz_road.call_count}, attributable entirely to identify_solar_"
-    f"candidate_zones()'s own internal nested identify_tree_zone_candidates() call, not to this module's own "
-    f"direct call, which mock_solar_road == {mock_solar_road.call_count} in section 8 above proves contributes "
-    f"nothing extra)."
+    f"{total_road_corridor_calls} (expected 1). mock_tz_road == {mock_tz_road.call_count} proves the same "
+    f"fix holds for selected_road_corridor -- see the identify_optimized_production_areas() assertion above."
 )
 # identify_water_suitability(): fetch_and_select_optimal_water_zone (pc's own direct call, section 6 above) is
 # a fully canned return_value mock, same as every prior section in this file -- its own internal call to
-# identify_water_suitability() is not exercised here, unchanged by this branch. mock_solar_water/mock_tz_water
-# measure only the NEW calls this branch's own solar/tree_zone wiring reaches: 0 + 1, the same single nested-
-# call redundancy as above, attributable entirely to identify_solar_candidate_zones()'s own internal call.
-assert mock_solar_water.call_count + mock_tz_water.call_count == 1, (
+# identify_water_suitability() is not exercised here, unchanged by this branch, so it contributes 0 to this
+# specific count (not because the fix doesn't apply to it, but because this mock never lets the real function
+# run at all). mock_solar_water/mock_tz_water measure whether solar/tree_zone's own wiring introduces any
+# NEW calls beyond that -- both should now be 0.
+assert mock_solar_water.call_count + mock_tz_water.call_count == 0, (
     f"MEASURED new identify_water_suitability() calls introduced by wiring in selected_structure_site/"
-    f"tree_zone_candidates: {mock_solar_water.call_count + mock_tz_water.call_count} (expected 1 -- the same "
-    f"nested-call redundancy as identify_optimized_production_areas()/identify_road_corridor_candidates() "
-    f"above, not 0). A genuine end-to-end run (fetch_and_select_optimal_water_zone left real rather than "
-    f"mocked, as it already is via the fully-covered mock in section 6) would total 2 identify_water_"
-    f"suitability() calls overall, matching the same 1-extra-from-the-nested-call pattern."
+    f"tree_zone_patches: {mock_solar_water.call_count + mock_tz_water.call_count} (expected 0, not 1 -- if "
+    f"nonzero, the nested-call override-forwarding fix in solar_suitability.py regressed for selected_water_"
+    f"zone specifically)."
 )
 print(
     "MEASURED (not assumed) total call counts across the WHOLE build_pipeline_context() run: "
     f"identify_optimized_production_areas() x{total_optimize_calls}, identify_road_corridor_candidates() "
-    f"x{total_road_corridor_calls}, identify_water_suitability() with 1 new call introduced beyond the "
-    "pre-existing, unchanged fetch_and_select_optimal_water_zone() call. Adding selected_structure_site/"
-    "tree_zone_candidates does NOT stay at 'still exactly 1' the way sections 4-7's own dedup did -- "
-    "identify_solar_candidate_zones()'s own internal nested identify_tree_zone_candidates() call causes one "
-    "real, measured extra call to each of the three shared entry points, entirely independent of and not "
-    "fixable from this module. See pipeline_context.py's own KNOWN LIMITATIONS #4 for the full account."
+    f"x{total_road_corridor_calls}, and ZERO new identify_water_suitability() calls introduced by wiring in "
+    "selected_structure_site/tree_zone_patches. Adding these two fields stays at 'still exactly 1', same as "
+    "sections 4-7's own dedup -- identify_solar_candidate_zones()'s own internal nested identify_tree_zone_"
+    "candidates() call now correctly forwards every override it itself received, closing the redundancy "
+    "documented (and now marked RESOLVED) in pipeline_context.py's own KNOWN LIMITATIONS #4."
 )
 
 # --- boundary_polygon_utm sanity check ---
@@ -816,17 +813,17 @@ assert tree_zone_fallback_call.kwargs["floodplain_data_is_fallback"] is True, (
     "corridor_candidates() above"
 )
 assert ctx_fallback_case.selected_structure_site == fake_solar_result_fallback_case["selected_structure_site"]
-assert ctx_fallback_case.tree_zone_candidates == fake_tree_zone_result_fallback_case["patches"]
+assert ctx_fallback_case.tree_zone_patches == fake_tree_zone_result_fallback_case["patches"]
 print(
     "floodplain_data_is_fallback threads the REAL flag (forced True here, the opposite of every assertion "
     "above) through to identify_road_corridor_candidates(), identify_solar_candidate_zones(), identify_tree_"
     "zone_candidates(), and soil_exclusion_unions alike -- not a hardcoded/defaulted value."
 )
 
-# --- 11. selected_structure_site/tree_zone_candidates hold real, correctly-shaped values ---
+# --- 11. selected_structure_site/tree_zone_patches hold real, correctly-shaped values ---
 #
 # Against section 8/9's own synthetic run (the real, non-mocked identify_solar_candidate_zones()/
-# identify_tree_zone_candidates() calls): tree_zone_candidates comes back non-empty and correctly shaped.
+# identify_tree_zone_candidates() calls): tree_zone_patches comes back non-empty and correctly shaped.
 # selected_structure_site genuinely comes back None on this fixture -- NOT a bug or a swallowed exception
 # (traced separately: identify_solar_candidate_zones()'s own all_scored_candidates list is genuinely empty,
 # not just its selected_structure_site) -- this synthetic terrain's own column-wise gradient (4.0m per
@@ -841,17 +838,17 @@ assert ctx.selected_structure_site is None, (
     "delineate_valleys()/ridge_lines tracing is far too steep (~80%) everywhere to clear solar_suitability."
     "MAX_SOLAR_SLOPE_PCT (20%), a genuine, DEM-driven exclusion, not a swallowed error"
 )
-assert ctx.tree_zone_candidates, "expected at least one tree-zone candidate patch on the synthetic fixture"
-assert isinstance(ctx.tree_zone_candidates, list)
-for _patch in ctx.tree_zone_candidates:
+assert ctx.tree_zone_patches, "expected at least one tree-zone candidate patch on the synthetic fixture"
+assert isinstance(ctx.tree_zone_patches, list)
+for _patch in ctx.tree_zone_patches:
     assert isinstance(_patch, dict)
     assert "id" in _patch and "polygon_utm" in _patch, (
-        "tree_zone_candidates entries must carry score_tree_search_space()'s own real per-patch shape"
+        "tree_zone_patches entries must carry score_tree_search_space()'s own real per-patch shape"
     )
 print(
     f"selected_structure_site is genuinely None on this synthetic fixture (terrain slope ~80%, far past "
-    f"MAX_SOLAR_SLOPE_PCT's 20% ceiling -- a real DEM-driven exclusion, not an error). tree_zone_candidates "
-    f"holds {len(ctx.tree_zone_candidates)} real, correctly-shaped patch(es)."
+    f"MAX_SOLAR_SLOPE_PCT's 20% ceiling -- a real DEM-driven exclusion, not an error). tree_zone_patches "
+    f"holds {len(ctx.tree_zone_patches)} real, correctly-shaped patch(es)."
 )
 
 print("\nAll pipeline_context checks passed.")

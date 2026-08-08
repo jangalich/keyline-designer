@@ -23,10 +23,10 @@ points override-capable; it does NOT call report_generator.py, generate_
 full_report.py, or fencing.py's own identify_*_candidate*() consumer
 function -- that module doesn't have overrides yet, so wiring it in is
 later, separate work. See KNOWN LIMITATIONS below for the remaining gaps
-this surfaced -- in particular #4, a genuine, MEASURED duplicate-call
-redundancy this branch's own testing surfaced inside solar_suitability.
-identify_solar_candidate_zones() itself, not introduced by or fixable
-from this module.
+this surfaced -- in particular #4, now RESOLVED, a genuine, MEASURED
+duplicate-call redundancy this branch's own testing surfaced inside
+solar_suitability.identify_solar_candidate_zones() itself, since fixed
+directly in that module.
 
 FIELD NOTES
 
@@ -100,27 +100,28 @@ FIELD NOTES
   boundary_polygon_utm/valleys/production_areas/selected_water_zone/
   selected_road_corridor/soil_exclusion_unions['hydric_floodplain_union']/
   ['hydric_floodplain_is_fallback'] through via override params, same
-  reuse pattern as selected_road_corridor above -- AT THIS CALL'S OWN TOP
-  LEVEL, nothing it depends on is re-derived a second time (test_pipeline_
-  context.py's own call-kwargs assertions prove this). See KNOWN
-  LIMITATIONS #4 below, though, for a real, separately measured
-  redundancy this call still causes ONE level deeper, inside its own
-  internal tree-zone-exclusion step -- not fixable from this module.
+  reuse pattern as selected_road_corridor above -- nothing it depends on
+  is re-derived a second time, at this call's own top level OR one level
+  deeper, inside its own internal tree-zone-exclusion step, which now
+  forwards this same context's own values into its own nested identify_
+  tree_zone_candidates() call rather than self-computing independent
+  copies (see KNOWN LIMITATIONS #4 for the redundancy this fixed, and
+  test_pipeline_context.py's own call-count assertions for proof).
 
-  tree_zone_candidates is tree_zone_candidates.identify_tree_zone_
+  tree_zone_patches is tree_zone_candidates.identify_tree_zone_
   candidates()'s own 'patches' -- score_tree_search_space()'s full ranked
   list. Unlike water/road/solar, there is no single "selected" tree zone
   on a property (a farm can have several legitimate tree zones at once),
   so this field holds the complete ranked list, same shape/reuse pattern
   as this context's own production_areas field. This call passes the same
   overrides selected_structure_site above does, so nothing it depends on
-  is re-derived a second time by THIS call specifically. NOTE ON NAMING:
-  this field's name doubles as the base name of the module (tree_zone_
-  candidates.py) and function (identify_tree_zone_candidates()) that
-  produce it -- flagged here as a real ambiguity risk rather than silently
-  accepted; tree_zone_patches was considered as a collision-free
-  alternative but not adopted without product input (see the branch notes
-  that introduced this field).
+  is re-derived a second time by THIS call specifically. Named
+  tree_zone_patches (matching the 'patches' key it's sourced from), NOT
+  tree_zone_candidates -- an earlier version of this field used that name
+  and flagged it as a real ambiguity risk, since it doubled as the base
+  name of the module (tree_zone_candidates.py) and function (identify_
+  tree_zone_candidates()) that produce it; renamed here to resolve that
+  collision rather than leave it flagged.
 
   water_zones is water_candidate_zones.identify_water_system_candidate_
   zones()'s own 'zones_geojson' FeatureCollection's 'features' list --
@@ -215,50 +216,32 @@ silently patching another module or reimplementing its logic)
      here -- so this key is populated with None and flagged, not silently
      reimplemented.
 
-  4. THE HEADLINE FINDING OF THIS BRANCH'S OWN TESTING: selected_
-     structure_site and tree_zone_candidates are each wired correctly at
-     THIS module's own call sites -- both identify_solar_candidate_zones()
-     and identify_tree_zone_candidates() genuinely receive and reuse this
-     context's own production_areas/selected_water_zone/selected_road_
-     corridor/valleys/boundary_polygon_utm/hydric_floodplain_union/
-     floodplain_data_is_fallback, proven by call-kwargs identity checks in
-     test_pipeline_context.py. But identify_solar_candidate_zones() itself
-     has its own internal "TREE-ZONE-CANDIDATE exclusion" step (see that
-     function's own docstring) that calls identify_tree_zone_candidates()
-     a SECOND time, ONE LEVEL DEEPER than either call this module makes --
-     and that inner call is invoked as
-     `identify_tree_zone_candidates(boundary_coordinates, dem=dem,
-     anchor_lon_lat=anchor_lon_lat)`, forwarding NONE of the overrides
-     identify_solar_candidate_zones() itself just received, regardless of
-     what this module (or any other caller) passed in. That inner call
-     therefore falls back to self-computing production_areas, selected_
-     water_zone, and selected_road_corridor all over again via ITS OWN
-     separate module-level bindings (tree_zone_candidates.identify_
-     optimized_production_areas / .identify_water_suitability / .identify_
-     road_corridor_candidates -- each a distinct `from X import Y` name,
-     not the same bound name production_area_ceiling.py/water_suitability.
-     py/road_corridors.py's own callers use, so patching THOSE doesn't
-     intercept this one; see test_pipeline_context.py's own comments on
-     this).
-
-     MEASURED, not assumed: test_pipeline_context.py's own call-count
-     assertions confirm this actually happens against the synthetic
-     fixture -- identify_optimized_production_areas() and identify_road_
-     corridor_candidates() each run TWICE total across a single build_
-     pipeline_context() call (once from this module's own direct calls,
-     once more from inside identify_solar_candidate_zones()'s own nested
-     identify_tree_zone_candidates() call), and identify_water_suitability()
-     runs at least once more the same way. This module's OWN two new calls
-     are not the redundancy -- solar_suitability.py's own internal wiring
-     is -- and fixing it would mean modifying solar_suitability.py's
-     identify_solar_candidate_zones() to forward its own received
-     overrides into its internal identify_tree_zone_candidates() call,
-     which this branch was explicitly told not to do. Flagged here, in the
-     PR description, and in test_pipeline_context.py itself, rather than
-     silently asserting the smaller, incorrect number a naive reading of
-     "does not increase the total call count" would expect -- this is
-     exactly the kind of dedup gap this whole context module exists to
-     surface, just one this branch cannot close by itself.
+  4. [RESOLVED -- see below] This slot documented a real, MEASURED
+     duplicate-call redundancy: identify_solar_candidate_zones()'s own
+     internal "TREE-ZONE-CANDIDATE exclusion" step called identify_tree_
+     zone_candidates() a second, nested time, forwarding NONE of the
+     overrides identify_solar_candidate_zones() itself had just received
+     (only boundary_coordinates/dem/anchor_lon_lat) -- so that inner call
+     fell back to self-computing production_areas/selected_water_zone/
+     selected_road_corridor all over again via its own separate module-
+     level bindings, causing identify_optimized_production_areas() and
+     identify_road_corridor_candidates() to each run TWICE total (not
+     once) across a single build_pipeline_context() call, and identify_
+     water_suitability() at least once more the same way. Originally left
+     unfixed here because fixing it meant modifying solar_suitability.py,
+     out of that branch's own stated scope. A follow-up branch fixed it
+     directly in solar_suitability.py's identify_solar_candidate_zones():
+     its internal identify_tree_zone_candidates() call now forwards
+     boundary_polygon_utm/production_areas/valleys/selected_water_zone/
+     selected_road_corridor/hydric_floodplain_union/floodplain_data_is_
+     fallback, same as this module's own two calls always did -- which
+     also required moving that function's own Tier-1 selected_road_
+     corridor self-compute earlier (before the tree-zone-exclusion step,
+     which needs it resolved to forward), see that function's own
+     docstring/comments for the reordering and why it's safe. See test_
+     pipeline_context.py's own call-count assertions (updated alongside
+     this fix) for the now-restored "still exactly 1" total across the
+     whole build_pipeline_context() run.
 """
 
 from dataclasses import dataclass
@@ -291,7 +274,7 @@ class PipelineContext:
     selected_water_zone: dict | None
     selected_road_corridor: dict | None
     selected_structure_site: dict | None
-    tree_zone_candidates: list[dict]
+    tree_zone_patches: list[dict]
 
 
 def _boundary_polygon_utm(boundary_coordinates: list[tuple[float, float]], dem: dict) -> Polygon:
@@ -330,7 +313,7 @@ def build_pipeline_context(
     from -- it's passed straight through to identify_road_corridor_
     candidates(), identify_solar_candidate_zones(), and identify_tree_
     zone_candidates() below (see selected_road_corridor, selected_
-    structure_site, tree_zone_candidates).
+    structure_site, tree_zone_patches).
     """
     dem = dem_data.get_dem_for_boundary(boundary_coordinates)
     boundary_polygon_utm = _boundary_polygon_utm(boundary_coordinates, dem)
@@ -412,7 +395,7 @@ def build_pipeline_context(
         hydric_floodplain_union=soil_exclusion_unions["hydric_floodplain_union"],
         floodplain_data_is_fallback=soil_exclusion_unions["hydric_floodplain_is_fallback"],
     )
-    tree_zone_candidates = tree_zone_result["patches"]
+    tree_zone_patches = tree_zone_result["patches"]
 
     return PipelineContext(
         dem=dem,
@@ -426,5 +409,5 @@ def build_pipeline_context(
         selected_water_zone=selected_water_zone,
         selected_road_corridor=selected_road_corridor,
         selected_structure_site=selected_structure_site,
-        tree_zone_candidates=tree_zone_candidates,
+        tree_zone_patches=tree_zone_patches,
     )

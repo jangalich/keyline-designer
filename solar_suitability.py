@@ -1030,43 +1030,39 @@ def identify_solar_candidate_zones(
     are passed through as kwargs so identify_water_suitability() doesn't
     re-derive its own independent copies.
 
-    TREE-ZONE-CANDIDATE exclusion (identify_tree_zone_candidates(), the
-    full ranked 'patches' list) degrades GRACEFULLY on an ordinary fetch
-    failure — noted in confidence_notes via candidates_to_geojson()'s own
-    tree_zone_exclusion_available flag — UNLESS the failure is
-    specifically canopy_height_data.CanopyCoverageIncompleteError
-    bubbling up from that call's own internal mandatory canopy gate, in
-    which case it propagates uncaught here too, same reasoning as the
-    module's own primary canopy gate above.
-
     ROAD PROXIMITY is two-tier (see module docstring for the full
-    rationale):
-      Tier 1 (primary): road_corridors.identify_road_corridor_candidates()
-        is called directly here, given this function's own anchor_lon_lat
-        parameter (the real, user-picked access point, threaded down from
-        generate_full_report.py — None degrades to no corridor, same as
-        identify_road_corridor_candidates() itself already handles), and
-        its own 'selected_road_corridor' (None if no corridor exists) is
-        used as
-        the road source at ROAD_CORRIDOR_PROXIMITY_METERS. Not wrapped in
-        try/except: this call's own internal production-zone fetch is
-        ALSO a mandatory canopy gate (a THIRD independent one), same
-        "expected to hard-fail independently" reasoning as above. Skipped
-        entirely when this function's own selected_road_corridor override
-        is supplied as a real (non-None) value; a caller-supplied None is
-        indistinguishable from "not supplied" (same None-as-sentinel
-        convention every other override in this function uses) and still
-        self-computes -- the Tier 1/Tier 2 branching immediately below is
-        unaffected either way, since it already treats a self-computed
-        None (no corridor exists) and any other None identically. When
-        selected_road_corridor is NOT overridden but boundary_polygon_utm/
-        production_areas/valleys ARE, those three (plus hydric_floodplain_
-        union/floodplain_data_is_fallback, forwarded as-is) are passed
-        through as kwargs so identify_road_corridor_candidates() doesn't
-        re-derive its own independent copies.
-      Tier 2 (fallback, only if Tier 1 produced zero candidates — whether
-        because no corridor exists at all, or one exists but nothing
-        survives near it): real mapped roads
+    rationale). Tier 1's own selected_road_corridor is resolved BEFORE
+    TREE-ZONE-CANDIDATE exclusion below (not after, despite Tier 1's own
+    SCORING step running after it) specifically so that step can forward
+    this function's own real selected_road_corridor into its own nested
+    identify_tree_zone_candidates() call -- see that section's own
+    docstring paragraph below for why.
+      Tier 1 (primary) resolution: road_corridors.identify_road_corridor_
+        candidates() is called directly here, given this function's own
+        anchor_lon_lat parameter (the real, user-picked access point,
+        threaded down from generate_full_report.py — None degrades to no
+        corridor, same as identify_road_corridor_candidates() itself
+        already handles), and its own 'selected_road_corridor' (None if no
+        corridor exists) is used as the road source at ROAD_CORRIDOR_
+        PROXIMITY_METERS. Not wrapped in try/except: this call's own
+        internal production-zone fetch is ALSO a mandatory canopy gate (a
+        THIRD independent one), same "expected to hard-fail independently"
+        reasoning as above. Skipped entirely when this function's own
+        selected_road_corridor override is supplied as a real (non-None)
+        value; a caller-supplied None is indistinguishable from "not
+        supplied" (same None-as-sentinel convention every other override
+        in this function uses) and still self-computes -- the Tier 1/
+        Tier 2 scoring branching further below is unaffected either way,
+        since it already treats a self-computed None (no corridor exists)
+        and any other None identically. When selected_road_corridor is NOT
+        overridden but boundary_polygon_utm/production_areas/valleys ARE,
+        those three (plus hydric_floodplain_union/floodplain_data_is_
+        fallback, forwarded as-is) are passed through as kwargs so
+        identify_road_corridor_candidates() doesn't re-derive its own
+        independent copies.
+      Tier 1 (primary) scoring / Tier 2 (fallback, only if Tier 1 produced
+        zero candidates — whether because no corridor exists at all, or
+        one exists but nothing survives near it): real mapped roads
         (farm_roads_data.get_farm_roads_for_boundary(), unchanged fetch
         logic) at ROAD_PROXIMITY_BUFFER_METERS — this IS today's
         pre-this-pass road-proximity logic, demoted from primary to
@@ -1079,6 +1075,24 @@ def identify_solar_candidate_zones(
     "unavailable") records which tier actually produced the result and is
     threaded into candidates_to_geojson()'s confidence_notes/per-feature
     properties.
+
+    TREE-ZONE-CANDIDATE exclusion (identify_tree_zone_candidates(), the
+    full ranked 'patches' list) degrades GRACEFULLY on an ordinary fetch
+    failure — noted in confidence_notes via candidates_to_geojson()'s own
+    tree_zone_exclusion_available flag — UNLESS the failure is
+    specifically canopy_height_data.CanopyCoverageIncompleteError
+    bubbling up from that call's own internal mandatory canopy gate, in
+    which case it propagates uncaught here too, same reasoning as the
+    module's own primary canopy gate above. This call forwards this
+    function's own already-resolved boundary_polygon_utm/production_
+    areas/valleys/selected_water_zone/selected_road_corridor/hydric_
+    floodplain_union/floodplain_data_is_fallback, so it reuses them rather
+    than self-computing independent copies of production_areas/selected_
+    water_zone/selected_road_corridor all over again — previously this
+    call forwarded none of those (only boundary_coordinates/dem/
+    anchor_lon_lat), a real, measured redundancy found once pipeline_
+    context.py's own build_pipeline_context() started supplying overrides
+    to THIS function and fixed here.
     """
     if dem is None:
         dem = get_dem_for_boundary(boundary_coordinates)
@@ -1116,14 +1130,68 @@ def identify_solar_candidate_zones(
         selected_water_zone = water_result["selected_water_zone"]
     water_zones = [selected_water_zone] if selected_water_zone else []
 
+    # --- Tier 1 (primary) road source: the property's own single selected
+    # road corridor, within ROAD_CORRIDOR_PROXIMITY_METERS. Resolved HERE
+    # (moved up from directly above the Tier 1 scoring call below) SPECIFICALLY
+    # so the tree-zone-candidate exclusion block right after this can forward
+    # this function's own real selected_road_corridor into its own nested
+    # identify_tree_zone_candidates() call, instead of leaving that call to
+    # self-compute an independent, redundant copy -- the same reasoning
+    # already applies to production_areas/selected_water_zone above, both
+    # resolved before this point for the same purpose. Not wrapped in
+    # try/except: this call's own internal production-zone fetch is ALSO a
+    # mandatory canopy gate (a THIRD independent one), same "expected to
+    # hard-fail independently" reasoning as the primary canopy gate above.
+    # Skipped entirely when this function's own selected_road_corridor
+    # override is supplied as a real (non-None) value; a caller-supplied
+    # None is indistinguishable from "not supplied" (same None-as-sentinel
+    # convention every other override in this function uses) and still
+    # self-computes -- the Tier 1/Tier 2 scoring branching below is
+    # unaffected either way, since it already treats a self-computed None
+    # (no corridor exists) and any other None identically. ---
+    if selected_road_corridor is None:
+        corridor_result = identify_road_corridor_candidates(
+            boundary_coordinates,
+            anchor_lon_lat=anchor_lon_lat,
+            dem=dem,
+            boundary_polygon_utm=boundary_polygon_utm,
+            production_areas=production_areas,
+            valleys=valleys,
+            selected_water_zone=selected_water_zone,
+            hydric_floodplain_union=hydric_floodplain_union,
+            floodplain_data_is_fallback=floodplain_data_is_fallback,
+        )
+        selected_road_corridor = corridor_result["selected_road_corridor"]
+
     # Tree-zone-candidate exclusion: graceful degradation on an ordinary
     # fetch failure, EXCEPT for CanopyCoverageIncompleteError bubbling up
     # from this call's own internal mandatory canopy gate -- see this
-    # function's own docstring.
+    # function's own docstring. Forwards this function's own already-
+    # resolved boundary_polygon_utm/production_areas/valleys/selected_
+    # water_zone/selected_road_corridor/hydric_floodplain_union/
+    # floodplain_data_is_fallback so this nested call reuses them instead
+    # of self-computing independent copies of production_areas/selected_
+    # water_zone/selected_road_corridor all over again -- previously this
+    # call forwarded none of them (only boundary_coordinates/dem/
+    # anchor_lon_lat), a real, measured redundancy found and fixed after
+    # pipeline_context.py's own build_pipeline_context() started supplying
+    # these overrides (see that module's own KNOWN LIMITATIONS #4, prior
+    # to this fix).
     tree_zone_exclusion_polygon_utm = None
     tree_zone_exclusion_available = True
     try:
-        tree_zone_result = identify_tree_zone_candidates(boundary_coordinates, dem=dem, anchor_lon_lat=anchor_lon_lat)
+        tree_zone_result = identify_tree_zone_candidates(
+            boundary_coordinates,
+            dem=dem,
+            anchor_lon_lat=anchor_lon_lat,
+            boundary_polygon_utm=boundary_polygon_utm,
+            production_areas=production_areas,
+            valleys=valleys,
+            selected_water_zone=selected_water_zone,
+            selected_road_corridor=selected_road_corridor,
+            hydric_floodplain_union=hydric_floodplain_union,
+            floodplain_data_is_fallback=floodplain_data_is_fallback,
+        )
         tree_zone_patches = tree_zone_result["patches"]
         if tree_zone_patches:
             tree_zone_union = unary_union([p["render_fill_polygon_utm"] for p in tree_zone_patches])
@@ -1139,25 +1207,12 @@ def identify_solar_candidate_zones(
     )
     common_zone_kwargs.update(zone_kwargs)
 
-    # --- Tier 1 (primary): the property's own single selected road
-    # corridor, within ROAD_CORRIDOR_PROXIMITY_METERS. Not wrapped in
-    # try/except -- see this function's own docstring. ---
+    # --- Tier 1 (primary) scoring: within ROAD_CORRIDOR_PROXIMITY_METERS
+    # of the selected_road_corridor resolved above (self-compute moved
+    # earlier -- see that block's own comment). ---
     candidates = []
     road_proximity_source = "unavailable"
 
-    if selected_road_corridor is None:
-        corridor_result = identify_road_corridor_candidates(
-            boundary_coordinates,
-            anchor_lon_lat=anchor_lon_lat,
-            dem=dem,
-            boundary_polygon_utm=boundary_polygon_utm,
-            production_areas=production_areas,
-            valleys=valleys,
-            selected_water_zone=selected_water_zone,
-            hydric_floodplain_union=hydric_floodplain_union,
-            floodplain_data_is_fallback=floodplain_data_is_fallback,
-        )
-        selected_road_corridor = corridor_result["selected_road_corridor"]
     if selected_road_corridor is not None:
         candidates = find_candidate_solar_zones(
             dem,
