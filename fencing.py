@@ -1060,6 +1060,14 @@ def identify_fencing(
     tree_zone_render_fill_polygons_utm: Optional[list] = None,
     water_zone_fence_buffer_meters: float = WATER_ZONE_FENCE_BUFFER_METERS,
     tree_zone_fence_buffer_meters: float = TREE_ZONE_FENCE_BUFFER_METERS,
+    boundary_polygon_utm: Optional[Polygon] = None,
+    production_areas: Optional[list[dict]] = None,
+    valleys: Optional[list[dict]] = None,
+    selected_road_corridor: Optional[dict] = None,
+    selected_water_zone: Optional[dict] = None,
+    tree_zone_patches: Optional[list[dict]] = None,
+    hydric_floodplain_union=None,
+    floodplain_data_is_fallback: Optional[bool] = None,
 ) -> dict:
     """
     Full pipeline entry point for Subdivision Fences' computed geometry
@@ -1133,6 +1141,36 @@ def identify_fencing(
     candidates on this property (empty list) cleanly produces zero
     tree-zone-exclusion features, not an error.
 
+    selected_road_corridor/selected_water_zone/tree_zone_patches are
+    pipeline_context.PipelineContext's own HIGH-LEVEL fields (matching
+    its field names/shapes exactly) -- an alternative to supplying the
+    LOW-LEVEL selected_road_corridor_cells/selected_water_zone_render_
+    fill_polygon_utm/tree_zone_render_fill_polygons_utm values directly.
+    For each pair, the low-level value wins if both are supplied
+    (unchanged behavior); otherwise, if the high-level value is
+    supplied, the low-level value is derived from it directly (its own
+    'cells'/'render_fill_polygon_utm'/list-of-'render_fill_polygon_utm'
+    fields) and identify_road_corridor_candidates()/fetch_and_select_
+    optimal_water_zone()/identify_tree_zone_candidates() are not called
+    at all; otherwise this self-computes via those same calls, same as
+    before.
+
+    boundary_polygon_utm/production_areas/valleys are PASS-THROUGH-ONLY
+    overrides (same "require it, no self-compute fallback" decision as
+    solar_suitability.py/tree_zone_candidates.py make for these same
+    fields) forwarded into all three self-compute fallback calls above
+    so a caller that already has these (e.g. pipeline_context.py) never
+    causes those calls to re-derive them independently -- closing the
+    same nested, un-deduped-chain gap solar_suitability.py's own
+    identify_solar_candidate_zones() was fixed for. boundary_polygon_utm
+    is also computed here (once, from boundary_coordinates) if not
+    supplied, same warp_transform pattern this function always used
+    inline just for the existing-farm-road step, now shared by all three
+    self-compute calls. hydric_floodplain_union/floodplain_data_is_
+    fallback are forwarded the same way, straight through to identify_
+    road_corridor_candidates()/identify_tree_zone_candidates() (fetch_
+    and_select_optimal_water_zone() doesn't take them).
+
     Returns:
         {
             'fencing_geojson': FeatureCollection,   # "exclusion_fencing" (stream) + "perimeter_fencing" (boundary + road corridor + existing farm road + water zone + tree zone) features
@@ -1144,6 +1182,15 @@ def identify_fencing(
     if dem is None:
         dem = get_dem_for_boundary(boundary_coordinates)
 
+    if boundary_polygon_utm is None:
+        boundary_xs, boundary_ys = warp_transform(
+            "EPSG:4326",
+            dem["crs"],
+            [pt[0] for pt in boundary_coordinates],
+            [pt[1] for pt in boundary_coordinates],
+        )
+        boundary_polygon_utm = Polygon(zip(boundary_xs, boundary_ys))
+
     stream_features = [
         f for f in water_features_geojson["features"] if f["properties"]["layer"] == "hydrology-streams"
     ]
@@ -1154,10 +1201,18 @@ def identify_fencing(
     boundary_result = identify_boundary_fencing(boundary_coordinates, dem=dem)
 
     if selected_road_corridor_cells is None:
-        road_corridor_candidates = identify_road_corridor_candidates(
-            boundary_coordinates, dem=dem, anchor_lon_lat=anchor_lon_lat
-        )
-        selected_road_corridor = road_corridor_candidates["selected_road_corridor"]
+        if selected_road_corridor is None:
+            road_corridor_candidates = identify_road_corridor_candidates(
+                boundary_coordinates,
+                dem=dem,
+                anchor_lon_lat=anchor_lon_lat,
+                boundary_polygon_utm=boundary_polygon_utm,
+                production_areas=production_areas,
+                valleys=valleys,
+                hydric_floodplain_union=hydric_floodplain_union,
+                floodplain_data_is_fallback=floodplain_data_is_fallback,
+            )
+            selected_road_corridor = road_corridor_candidates["selected_road_corridor"]
         selected_road_corridor_cells = selected_road_corridor["cells"] if selected_road_corridor else None
 
     road_fence_line_utm = find_road_corridor_fencing(
@@ -1192,14 +1247,6 @@ def identify_fencing(
             )
             farm_road_features = []
 
-    boundary_xs, boundary_ys = warp_transform(
-        "EPSG:4326",
-        dem["crs"],
-        [pt[0] for pt in boundary_coordinates],
-        [pt[1] for pt in boundary_coordinates],
-    )
-    boundary_polygon_utm = Polygon(zip(boundary_xs, boundary_ys))
-
     farm_road_entries = find_existing_farm_road_fencing(
         farm_road_features, boundary_polygon_utm, dem["crs"], buffer_meters=existing_farm_road_buffer_meters
     )
@@ -1208,7 +1255,14 @@ def identify_fencing(
     )
 
     if selected_water_zone_render_fill_polygon_utm is None:
-        selected_water_zone = fetch_and_select_optimal_water_zone(boundary_coordinates, dem=dem)
+        if selected_water_zone is None:
+            selected_water_zone = fetch_and_select_optimal_water_zone(
+                boundary_coordinates,
+                dem=dem,
+                boundary_polygon_utm=boundary_polygon_utm,
+                valleys=valleys,
+                production_areas=production_areas,
+            )
         selected_water_zone_render_fill_polygon_utm = (
             selected_water_zone["render_fill_polygon_utm"] if selected_water_zone else None
         )
@@ -1226,9 +1280,22 @@ def identify_fencing(
     )
 
     if tree_zone_render_fill_polygons_utm is None:
-        tree_zone_result = identify_tree_zone_candidates(boundary_coordinates, dem=dem, anchor_lon_lat=anchor_lon_lat)
+        if tree_zone_patches is None:
+            tree_zone_result = identify_tree_zone_candidates(
+                boundary_coordinates,
+                dem=dem,
+                anchor_lon_lat=anchor_lon_lat,
+                boundary_polygon_utm=boundary_polygon_utm,
+                production_areas=production_areas,
+                valleys=valleys,
+                selected_water_zone=selected_water_zone,
+                selected_road_corridor=selected_road_corridor,
+                hydric_floodplain_union=hydric_floodplain_union,
+                floodplain_data_is_fallback=floodplain_data_is_fallback,
+            )
+            tree_zone_patches = tree_zone_result.get("patches", [])
         tree_zone_render_fill_polygons_utm = [
-            patch["render_fill_polygon_utm"] for patch in tree_zone_result.get("patches", [])
+            patch["render_fill_polygon_utm"] for patch in tree_zone_patches
         ]
 
     tree_fence_lines_utm = find_tree_zone_fencing(

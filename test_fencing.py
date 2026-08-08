@@ -814,4 +814,246 @@ assert empty_tree_zone_geojson["features"] == [], "an empty fence_lines list sho
 print("tree_zone_fencing_to_geojson(): an empty list produces an empty, schema-valid FeatureCollection.")
 
 
+# =====================================================================
+# identify_fencing(): HIGH-LEVEL overrides (selected_road_corridor/selected_water_zone/
+# tree_zone_patches, matching pipeline_context.py's own field names/shapes) and PASS-THROUGH-ONLY
+# overrides (boundary_polygon_utm/production_areas/valleys). All scenarios below reuse no_stream_water/
+# TEST_DEM/_fake_no_canopy from the identify_fencing() section above, and pass
+# farm_road_features=[] to stay deterministic/offline (same reasoning as that section's own comment).
+# =====================================================================
+
+
+def _must_not_be_called(name):
+    def _raise(*args, **kwargs):
+        raise AssertionError(f"{name} must not be called when the matching high-level/low-level override "
+                              "already supplies what it would have computed")
+
+    return _raise
+
+
+# --- Scenario 1: high-level overrides supplied -> identify_road_corridor_candidates()/
+# fetch_and_select_optimal_water_zone()/identify_tree_zone_candidates() are each called ZERO times,
+# and the low-level values used are derived directly from the high-level dicts, not self-computed ---
+
+HIGH_LEVEL_ROAD_CORRIDOR = {"cells": [(5, 5), (5, 6), (5, 7)]}
+HIGH_LEVEL_WATER_POLYGON = box(100, 100, 110, 110)
+HIGH_LEVEL_WATER_ZONE = {"render_fill_polygon_utm": HIGH_LEVEL_WATER_POLYGON}
+HIGH_LEVEL_TREE_POLYGON_A = box(200, 200, 210, 210)
+HIGH_LEVEL_TREE_POLYGON_B = box(220, 220, 230, 230)
+HIGH_LEVEL_TREE_ZONE_PATCHES = [
+    {"render_fill_polygon_utm": HIGH_LEVEL_TREE_POLYGON_A},
+    {"render_fill_polygon_utm": HIGH_LEVEL_TREE_POLYGON_B},
+]
+
+_captured_low_level = {}
+
+
+def _capture_road_fencing(dem_arg, cells_arg, **kwargs):
+    _captured_low_level["road_cells"] = cells_arg
+    return None
+
+
+def _capture_water_fencing(polygon_arg, **kwargs):
+    _captured_low_level["water_polygon"] = polygon_arg
+    return None
+
+
+def _capture_tree_fencing(polygons_arg, **kwargs):
+    _captured_low_level["tree_polygons"] = polygons_arg
+    return []
+
+
+with (
+    mock_patch.object(pa, "get_canopy_height_for_boundary", _fake_no_canopy),
+    mock_patch.object(fencing, "identify_road_corridor_candidates", _must_not_be_called("identify_road_corridor_candidates")),
+    mock_patch.object(fencing, "fetch_and_select_optimal_water_zone", _must_not_be_called("fetch_and_select_optimal_water_zone")),
+    mock_patch.object(fencing, "identify_tree_zone_candidates", _must_not_be_called("identify_tree_zone_candidates")),
+    mock_patch.object(fencing, "find_road_corridor_fencing", _capture_road_fencing),
+    mock_patch.object(fencing, "find_water_zone_fencing", _capture_water_fencing),
+    mock_patch.object(fencing, "find_tree_zone_fencing", _capture_tree_fencing),
+):
+    high_level_result = identify_fencing(
+        PROPERTY_BOUNDARY,
+        water_features_geojson=no_stream_water,
+        dem=TEST_DEM,
+        farm_road_features=[],
+        selected_road_corridor=HIGH_LEVEL_ROAD_CORRIDOR,
+        selected_water_zone=HIGH_LEVEL_WATER_ZONE,
+        tree_zone_patches=HIGH_LEVEL_TREE_ZONE_PATCHES,
+    )
+validate_feature_collection(high_level_result["fencing_geojson"])
+assert _captured_low_level["road_cells"] is HIGH_LEVEL_ROAD_CORRIDOR["cells"], (
+    "selected_road_corridor_cells must be derived directly from selected_road_corridor['cells']"
+)
+assert _captured_low_level["water_polygon"] is HIGH_LEVEL_WATER_POLYGON, (
+    "selected_water_zone_render_fill_polygon_utm must be derived directly from "
+    "selected_water_zone['render_fill_polygon_utm']"
+)
+assert _captured_low_level["tree_polygons"] == [HIGH_LEVEL_TREE_POLYGON_A, HIGH_LEVEL_TREE_POLYGON_B]
+assert _captured_low_level["tree_polygons"][0] is HIGH_LEVEL_TREE_POLYGON_A
+assert _captured_low_level["tree_polygons"][1] is HIGH_LEVEL_TREE_POLYGON_B
+print(
+    "identify_fencing(): high-level selected_road_corridor/selected_water_zone/tree_zone_patches overrides "
+    "derive the low-level values directly (identity-checked) -- identify_road_corridor_candidates()/"
+    "fetch_and_select_optimal_water_zone()/identify_tree_zone_candidates() are called zero times."
+)
+
+
+# --- Scenario 2 (regression): none of the six new overrides supplied -> all three self-compute
+# calls still run exactly once each, same as pre-branch behavior, producing identical output on the
+# existing fixture (no_stream_water/TEST_DEM/farm_road_features=[]) ---
+
+import road_corridors as _road_corridors_module
+
+_self_compute_call_counts = {"road": 0, "water": 0, "tree": 0}
+
+
+def _counting_road_corridor(*args, **kwargs):
+    _self_compute_call_counts["road"] += 1
+    return _road_corridors_module.identify_road_corridor_candidates(*args, **kwargs)
+
+
+def _counting_water_zone(*args, **kwargs):
+    _self_compute_call_counts["water"] += 1
+    return _fake_no_water_zone(*args, **kwargs)
+
+
+def _counting_tree_zone(*args, **kwargs):
+    _self_compute_call_counts["tree"] += 1
+    return {"patches": []}
+
+
+with (
+    mock_patch.object(pa, "get_canopy_height_for_boundary", _fake_no_canopy),
+    mock_patch.object(fencing, "identify_road_corridor_candidates", _counting_road_corridor),
+    mock_patch.object(fencing, "fetch_and_select_optimal_water_zone", _counting_water_zone),
+    mock_patch.object(fencing, "identify_tree_zone_candidates", _counting_tree_zone),
+):
+    regression_result = identify_fencing(
+        PROPERTY_BOUNDARY,
+        water_features_geojson=no_stream_water,
+        dem=TEST_DEM,
+        farm_road_features=[],
+    )
+validate_feature_collection(regression_result["fencing_geojson"])
+assert _self_compute_call_counts == {"road": 1, "water": 1, "tree": 1}, (
+    f"with none of the six new overrides supplied, each self-compute call must still run exactly once "
+    f"(unchanged pre-branch behavior), got {_self_compute_call_counts}"
+)
+regression_layers = sorted(f["properties"]["layer"] for f in regression_result["fencing_geojson"]["features"])
+assert regression_layers == no_stream_layers, (
+    f"identical (boundary_coordinates, dem, no new overrides) input must produce the same fencing layers "
+    f"pre- and post-branch, got {regression_layers} vs {no_stream_layers}"
+)
+assert regression_result["segment_count"] == no_stream_result["segment_count"]
+print(
+    "identify_fencing(): with none of the six new overrides supplied, all three self-compute calls still "
+    "run exactly once each and produce identical output to pre-branch behavior on the existing fixture."
+)
+
+
+# --- Scenario 3: boundary_polygon_utm/production_areas/valleys supplied WITHOUT the three
+# high-level dicts -> all three self-compute calls receive those three as kwargs (identity checks) ---
+
+SENTINEL_BOUNDARY_POLYGON_UTM = box(-1000, -1000, 1000, 1000)
+SENTINEL_PRODUCTION_AREAS = [{"id": "prod-1"}]
+SENTINEL_VALLEYS = [{"id": "valley-1"}]
+
+_captured_passthrough_kwargs = {}
+
+
+def _capture_road_corridor_kwargs(*args, **kwargs):
+    _captured_passthrough_kwargs["road"] = kwargs
+    return {"selected_road_corridor": None}
+
+
+def _capture_water_zone_kwargs(*args, **kwargs):
+    _captured_passthrough_kwargs["water"] = kwargs
+    return None
+
+
+def _capture_tree_zone_kwargs(*args, **kwargs):
+    _captured_passthrough_kwargs["tree"] = kwargs
+    return {"patches": []}
+
+
+with (
+    mock_patch.object(pa, "get_canopy_height_for_boundary", _fake_no_canopy),
+    mock_patch.object(fencing, "identify_road_corridor_candidates", _capture_road_corridor_kwargs),
+    mock_patch.object(fencing, "fetch_and_select_optimal_water_zone", _capture_water_zone_kwargs),
+    mock_patch.object(fencing, "identify_tree_zone_candidates", _capture_tree_zone_kwargs),
+):
+    passthrough_result = identify_fencing(
+        PROPERTY_BOUNDARY,
+        water_features_geojson=no_stream_water,
+        dem=TEST_DEM,
+        farm_road_features=[],
+        boundary_polygon_utm=SENTINEL_BOUNDARY_POLYGON_UTM,
+        production_areas=SENTINEL_PRODUCTION_AREAS,
+        valleys=SENTINEL_VALLEYS,
+    )
+validate_feature_collection(passthrough_result["fencing_geojson"])
+
+for call_name in ("road", "water", "tree"):
+    call_kwargs = _captured_passthrough_kwargs[call_name]
+    assert call_kwargs["boundary_polygon_utm"] is SENTINEL_BOUNDARY_POLYGON_UTM, (
+        f"{call_name} self-compute fallback call must receive the caller's own boundary_polygon_utm, not "
+        "re-derive it"
+    )
+    assert call_kwargs["production_areas"] is SENTINEL_PRODUCTION_AREAS, (
+        f"{call_name} self-compute fallback call must receive the caller's own production_areas, not "
+        "re-derive it"
+    )
+    assert call_kwargs["valleys"] is SENTINEL_VALLEYS, (
+        f"{call_name} self-compute fallback call must receive the caller's own valleys, not re-derive it"
+    )
+print(
+    "identify_fencing(): boundary_polygon_utm/production_areas/valleys supplied without the three "
+    "high-level dicts are forwarded (identity-checked) into all three self-compute fallback calls -- "
+    "closing the nested, un-deduped-chain gap for standalone/non-context callers too."
+)
+
+
+# --- Scenario 4: low-level override still wins when BOTH a low-level and high-level override are
+# supplied for the same thing (selected_water_zone_render_fill_polygon_utm AND selected_water_zone) --
+# no self-compute AND no extraction from the high-level dict (which is deliberately missing the key
+# extraction would need, so any accidental extraction attempt would raise KeyError, not silently pass) ---
+
+LOW_LEVEL_WATER_POLYGON = box(300, 300, 310, 310)
+HIGH_LEVEL_WATER_ZONE_MISSING_KEY = {}  # deliberately no 'render_fill_polygon_utm' key
+
+_captured_precedence = {}
+
+
+def _capture_water_fencing_precedence(polygon_arg, **kwargs):
+    _captured_precedence["water_polygon"] = polygon_arg
+    return None
+
+
+with (
+    mock_patch.object(pa, "get_canopy_height_for_boundary", _fake_no_canopy),
+    mock_patch.object(fencing, "fetch_and_select_optimal_water_zone", _must_not_be_called("fetch_and_select_optimal_water_zone")),
+    mock_patch.object(fencing, "find_water_zone_fencing", _capture_water_fencing_precedence),
+):
+    precedence_result = identify_fencing(
+        PROPERTY_BOUNDARY,
+        water_features_geojson=no_stream_water,
+        dem=TEST_DEM,
+        farm_road_features=[],
+        tree_zone_render_fill_polygons_utm=[],
+        selected_water_zone_render_fill_polygon_utm=LOW_LEVEL_WATER_POLYGON,
+        selected_water_zone=HIGH_LEVEL_WATER_ZONE_MISSING_KEY,
+    )
+validate_feature_collection(precedence_result["fencing_geojson"])
+assert _captured_precedence["water_polygon"] is LOW_LEVEL_WATER_POLYGON, (
+    "the low-level selected_water_zone_render_fill_polygon_utm override must win over the high-level "
+    "selected_water_zone override when both are supplied"
+)
+print(
+    "identify_fencing(): when both a low-level and high-level override are supplied for the same value "
+    "(water zone), the low-level override wins as-is -- no self-compute, no extraction from the "
+    "high-level dict (proven by a deliberately key-less high-level dict not raising)."
+)
+
+
 print("\nAll fencing checks passed.")
