@@ -5,21 +5,28 @@ Computes the shared upstream data several KSOP (Keyline Scale of
 Permanence) pipeline steps each already fetch or derive independently --
 DEM, boundary polygon, valleys, ridge lines, production areas, existing
 roads, soil exclusion unions, water-system candidate zones, the selected
-water zone, and the selected road corridor -- exactly ONCE, and hands the
+water zone, the selected road corridor, the selected structure (solar)
+site, and every ranked tree-zone candidate -- exactly ONCE, and hands the
 result back as a single PipelineContext object.
 
 This is a pure orchestrator: it calls the REAL, already-existing entry
 points in dem_data.py, valley_delineation.py, production_area_ceiling.py,
-farm_roads_data.py, road_corridors.py, water_candidate_zones.py, and
-water_suitability.py, in the dependency order those modules already
-require. It reimplements none of their logic. It calls road_corridors.
-identify_road_corridor_candidates() (one of the identify_*_candidate*()
-consumer functions) directly now that a prior branch made that entry
-point override-capable; it does NOT call report_generator.py, generate_
-full_report.py, or the identify_*_candidate*() consumer functions in
-solar_suitability.py or fencing.py -- those modules don't have overrides
-yet, so wiring them in is later, separate work. See KNOWN LIMITATIONS
-below for the remaining gaps this surfaced.
+farm_roads_data.py, road_corridors.py, water_candidate_zones.py,
+water_suitability.py, solar_suitability.py, and tree_zone_candidates.py,
+in the dependency order those modules already require. It reimplements
+none of their logic. It calls road_corridors.
+identify_road_corridor_candidates(), solar_suitability.
+identify_solar_candidate_zones(), and tree_zone_candidates.
+identify_tree_zone_candidates() (three of the identify_*_candidate*()
+consumer functions) directly now that prior branches made those entry
+points override-capable; it does NOT call report_generator.py, generate_
+full_report.py, or fencing.py's own identify_*_candidate*() consumer
+function -- that module doesn't have overrides yet, so wiring it in is
+later, separate work. See KNOWN LIMITATIONS below for the remaining gaps
+this surfaced -- in particular #4, a genuine, MEASURED duplicate-call
+redundancy this branch's own testing surfaced inside solar_suitability.
+identify_solar_candidate_zones() itself, not introduced by or fixable
+from this module.
 
 FIELD NOTES
 
@@ -85,6 +92,35 @@ FIELD NOTES
   identify_road_corridor_candidates() fetch a second, independent
   floodplain/hydric union -- so _fetch_floodplain_hydric_union() also
   runs only ONCE across the whole of build_pipeline_context().
+
+  selected_structure_site is solar_suitability.identify_solar_candidate_
+  zones()'s own 'selected_structure_site' -- select_optimal_structure_
+  site()'s rank-1 answer, or None if no candidate cleared the constraint
+  stack. This call passes this context's own already-computed dem/
+  boundary_polygon_utm/valleys/production_areas/selected_water_zone/
+  selected_road_corridor/soil_exclusion_unions['hydric_floodplain_union']/
+  ['hydric_floodplain_is_fallback'] through via override params, same
+  reuse pattern as selected_road_corridor above -- AT THIS CALL'S OWN TOP
+  LEVEL, nothing it depends on is re-derived a second time (test_pipeline_
+  context.py's own call-kwargs assertions prove this). See KNOWN
+  LIMITATIONS #4 below, though, for a real, separately measured
+  redundancy this call still causes ONE level deeper, inside its own
+  internal tree-zone-exclusion step -- not fixable from this module.
+
+  tree_zone_candidates is tree_zone_candidates.identify_tree_zone_
+  candidates()'s own 'patches' -- score_tree_search_space()'s full ranked
+  list. Unlike water/road/solar, there is no single "selected" tree zone
+  on a property (a farm can have several legitimate tree zones at once),
+  so this field holds the complete ranked list, same shape/reuse pattern
+  as this context's own production_areas field. This call passes the same
+  overrides selected_structure_site above does, so nothing it depends on
+  is re-derived a second time by THIS call specifically. NOTE ON NAMING:
+  this field's name doubles as the base name of the module (tree_zone_
+  candidates.py) and function (identify_tree_zone_candidates()) that
+  produce it -- flagged here as a real ambiguity risk rather than silently
+  accepted; tree_zone_patches was considered as a collision-free
+  alternative but not adopted without product input (see the branch notes
+  that introduced this field).
 
   water_zones is water_candidate_zones.identify_water_system_candidate_
   zones()'s own 'zones_geojson' FeatureCollection's 'features' list --
@@ -178,6 +214,51 @@ silently patching another module or reimplementing its logic)
      be new logic, which this branch's own instructions say not to write
      here -- so this key is populated with None and flagged, not silently
      reimplemented.
+
+  4. THE HEADLINE FINDING OF THIS BRANCH'S OWN TESTING: selected_
+     structure_site and tree_zone_candidates are each wired correctly at
+     THIS module's own call sites -- both identify_solar_candidate_zones()
+     and identify_tree_zone_candidates() genuinely receive and reuse this
+     context's own production_areas/selected_water_zone/selected_road_
+     corridor/valleys/boundary_polygon_utm/hydric_floodplain_union/
+     floodplain_data_is_fallback, proven by call-kwargs identity checks in
+     test_pipeline_context.py. But identify_solar_candidate_zones() itself
+     has its own internal "TREE-ZONE-CANDIDATE exclusion" step (see that
+     function's own docstring) that calls identify_tree_zone_candidates()
+     a SECOND time, ONE LEVEL DEEPER than either call this module makes --
+     and that inner call is invoked as
+     `identify_tree_zone_candidates(boundary_coordinates, dem=dem,
+     anchor_lon_lat=anchor_lon_lat)`, forwarding NONE of the overrides
+     identify_solar_candidate_zones() itself just received, regardless of
+     what this module (or any other caller) passed in. That inner call
+     therefore falls back to self-computing production_areas, selected_
+     water_zone, and selected_road_corridor all over again via ITS OWN
+     separate module-level bindings (tree_zone_candidates.identify_
+     optimized_production_areas / .identify_water_suitability / .identify_
+     road_corridor_candidates -- each a distinct `from X import Y` name,
+     not the same bound name production_area_ceiling.py/water_suitability.
+     py/road_corridors.py's own callers use, so patching THOSE doesn't
+     intercept this one; see test_pipeline_context.py's own comments on
+     this).
+
+     MEASURED, not assumed: test_pipeline_context.py's own call-count
+     assertions confirm this actually happens against the synthetic
+     fixture -- identify_optimized_production_areas() and identify_road_
+     corridor_candidates() each run TWICE total across a single build_
+     pipeline_context() call (once from this module's own direct calls,
+     once more from inside identify_solar_candidate_zones()'s own nested
+     identify_tree_zone_candidates() call), and identify_water_suitability()
+     runs at least once more the same way. This module's OWN two new calls
+     are not the redundancy -- solar_suitability.py's own internal wiring
+     is -- and fixing it would mean modifying solar_suitability.py's
+     identify_solar_candidate_zones() to forward its own received
+     overrides into its internal identify_tree_zone_candidates() call,
+     which this branch was explicitly told not to do. Flagged here, in the
+     PR description, and in test_pipeline_context.py itself, rather than
+     silently asserting the smaller, incorrect number a naive reading of
+     "does not increase the total call count" would expect -- this is
+     exactly the kind of dedup gap this whole context module exists to
+     surface, just one this branch cannot close by itself.
 """
 
 from dataclasses import dataclass
@@ -192,6 +273,8 @@ import production_area_ceiling
 import road_corridors
 import valley_delineation
 import water_candidate_zones
+from solar_suitability import identify_solar_candidate_zones
+from tree_zone_candidates import identify_tree_zone_candidates
 from water_suitability import fetch_and_select_optimal_water_zone
 
 
@@ -207,6 +290,8 @@ class PipelineContext:
     water_zones: list[dict]
     selected_water_zone: dict | None
     selected_road_corridor: dict | None
+    selected_structure_site: dict | None
+    tree_zone_candidates: list[dict]
 
 
 def _boundary_polygon_utm(boundary_coordinates: list[tuple[float, float]], dem: dict) -> Polygon:
@@ -236,14 +321,16 @@ def build_pipeline_context(
 ) -> PipelineContext:
     """
     Computes every shared upstream input multiple KSOP pipeline steps
-    need, exactly once. Does not call report_generator.py or the
-    identify_*_candidate*() consumer functions in solar_suitability.py or
-    fencing.py -- those modules don't have overrides yet, so wiring them
-    in is later, separate work.
+    need, exactly once. Does not call report_generator.py, generate_full_
+    report.py, or fencing.py's own identify_*_candidate*() consumer
+    function -- that module doesn't have overrides yet, so wiring it in is
+    later, separate work.
 
     anchor_lon_lat is the real, chosen access point road routing starts
     from -- it's passed straight through to identify_road_corridor_
-    candidates() below (see selected_road_corridor).
+    candidates(), identify_solar_candidate_zones(), and identify_tree_
+    zone_candidates() below (see selected_road_corridor, selected_
+    structure_site, tree_zone_candidates).
     """
     dem = dem_data.get_dem_for_boundary(boundary_coordinates)
     boundary_polygon_utm = _boundary_polygon_utm(boundary_coordinates, dem)
@@ -299,6 +386,34 @@ def build_pipeline_context(
     )
     selected_road_corridor = road_corridor_result["selected_road_corridor"]
 
+    solar_result = identify_solar_candidate_zones(
+        boundary_coordinates,
+        dem=dem,
+        anchor_lon_lat=anchor_lon_lat,
+        boundary_polygon_utm=boundary_polygon_utm,
+        production_areas=production_areas,
+        valleys=valleys,
+        selected_water_zone=selected_water_zone,
+        selected_road_corridor=selected_road_corridor,
+        hydric_floodplain_union=soil_exclusion_unions["hydric_floodplain_union"],
+        floodplain_data_is_fallback=soil_exclusion_unions["hydric_floodplain_is_fallback"],
+    )
+    selected_structure_site = solar_result["selected_structure_site"]
+
+    tree_zone_result = identify_tree_zone_candidates(
+        boundary_coordinates,
+        dem=dem,
+        anchor_lon_lat=anchor_lon_lat,
+        boundary_polygon_utm=boundary_polygon_utm,
+        production_areas=production_areas,
+        valleys=valleys,
+        selected_water_zone=selected_water_zone,
+        selected_road_corridor=selected_road_corridor,
+        hydric_floodplain_union=soil_exclusion_unions["hydric_floodplain_union"],
+        floodplain_data_is_fallback=soil_exclusion_unions["hydric_floodplain_is_fallback"],
+    )
+    tree_zone_candidates = tree_zone_result["patches"]
+
     return PipelineContext(
         dem=dem,
         boundary_polygon_utm=boundary_polygon_utm,
@@ -310,4 +425,6 @@ def build_pipeline_context(
         water_zones=water_zones,
         selected_water_zone=selected_water_zone,
         selected_road_corridor=selected_road_corridor,
+        selected_structure_site=selected_structure_site,
+        tree_zone_candidates=tree_zone_candidates,
     )
