@@ -106,7 +106,10 @@ between the BEFORE and AFTER checkouts by design, so there is no single
 "expected" table a gate could check against both).
 """
 
+import os
 import sys
+import traceback
+from collections import Counter
 from contextlib import ExitStack
 from unittest.mock import patch as mock_patch
 
@@ -300,7 +303,58 @@ STUB_SITES = [
 ]
 
 
-def run() -> dict[str, int]:
+# --- Addendum: per-call-site tracing for the two blown-up counts ---
+#
+# fetch_and_select_optimal_water_zone and identify_road_corridor_candidates
+# are the two logical functions whose AFTER count is HIGHER than BEFORE
+# (10 vs 7, 8 vs 5 on the last measured run) -- surprising, since this
+# branch's whole point is eliminating redundant recomputation. Plain
+# wraps=original (used for every other target) only proves HOW MANY times
+# a function ran, not WHO called it or why -- not enough to tell "a real
+# wiring bug in this branch's own implementation" apart from "the
+# documented ambiguous-None-sentinel behavior (a selected_water_zone=None/
+# selected_road_corridor=None override is indistinguishable from 'not
+# supplied' to every receiving function, and correctly self-computes in
+# that case -- see pipeline_context.py's own KNOWN LIMITATIONS #4) firing
+# MORE often because this branch added an extra outer layer (build_
+# pipeline_context()) that ALSO hits the same ambiguity on this flat,
+# no-real-water-or-road fixture." This section replaces wraps= with a
+# side_effect that ALSO records the real caller (module:line in function)
+# before invoking the real function -- so each of the two breakdown tables
+# printed at the end directly answers "which function's own body issued
+# this call," not just "how many."
+TRACED_LOGICAL_NAMES = {"fetch_and_select_optimal_water_zone", "identify_road_corridor_candidates"}
+
+_REPO_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def _find_real_caller() -> str:
+    """Walks the current stack from the top down, skipping unittest.mock's
+    own internal frames and this diagnostic script's own wrapper frame, and
+    returns the first frame that belongs to actual pipeline code -- module
+    basename:lineno in the enclosing function, e.g.
+    'solar_suitability.py:1153 in identify_solar_candidate_zones'. This is
+    the real answer to "which function's own body issued this call,"
+    regardless of exactly how many internal mock.py frames sit between the
+    traced side_effect and the genuine caller."""
+    for frame in reversed(traceback.extract_stack()[:-1]):  # [:-1] drops _find_real_caller's own frame
+        if "unittest" in frame.filename and "mock" in frame.filename:
+            continue
+        if os.path.abspath(frame.filename) == os.path.abspath(__file__):
+            continue
+        return f"{os.path.basename(frame.filename)}:{frame.lineno} in {frame.name}"
+    return "unknown (stack exhausted)"
+
+
+def _make_traced_side_effect(original, log: Counter):
+    def _traced(*args, **kwargs):
+        log[_find_real_caller()] += 1
+        return original(*args, **kwargs)
+
+    return _traced
+
+
+def run() -> tuple[dict[str, int], dict[str, Counter]]:
     with ExitStack() as stack:
         enter = stack.enter_context
 
@@ -316,6 +370,8 @@ def run() -> dict[str, int]:
             if hasattr(module, attr):
                 dem_mocks.append(enter(mock_patch.object(module, attr, return_value=SYNTHETIC_DEM)))
 
+        call_site_logs: dict[str, Counter] = {name: Counter() for name in TRACED_LOGICAL_NAMES}
+
         wraps_mocks: dict[str, list] = {}
         for logical_name, sites in WRAPS_SITES.items():
             if logical_name == "get_dem_for_boundary":
@@ -324,7 +380,11 @@ def run() -> dict[str, int]:
             for module, attr in sites:
                 if module is not None and hasattr(module, attr):
                     original = getattr(module, attr)
-                    wraps_mocks[logical_name].append(enter(mock_patch.object(module, attr, wraps=original)))
+                    if logical_name in TRACED_LOGICAL_NAMES:
+                        mock_kwargs = {"side_effect": _make_traced_side_effect(original, call_site_logs[logical_name])}
+                    else:
+                        mock_kwargs = {"wraps": original}
+                    wraps_mocks[logical_name].append(enter(mock_patch.object(module, attr, **mock_kwargs)))
 
         layers = render_layout_map.fetch_layout_layers(
             SYNTHETIC_BOUNDARY_COORDINATES, anchor_lon_lat=SYNTHETIC_ANCHOR_LON_LAT
@@ -339,13 +399,13 @@ def run() -> dict[str, int]:
     counts["_production_areas_found"] = len(layers["production_result"].get("scored_patches", []))
     counts["_selected_water_zone_is_none"] = layers["water_zone"] is None
     counts["_selected_road_corridor_is_none"] = layers["fencing_result"] is not None  # always true; sanity check fencing ran
-    return counts
+    return counts, call_site_logs
 
 
 def main() -> None:
     print("diagnose_fetch_layout_layers_redundant_fetches.py -- real call-count measurement for fetch_layout_layers()\n")
     print(f"Checkout under test: render_layout_map.py as currently on disk (git status shows which).")
-    counts = run()
+    counts, call_site_logs = run()
 
     print(f"\n{'function (summed across every real call site)':<70} {'calls':>6}")
     print("-" * 78)
@@ -363,6 +423,19 @@ def main() -> None:
         )
     print(f"selected_water_zone is None: {counts['_selected_water_zone_is_none']} (expected True on this flat, "
           f"non-ridge-shaped fixture -- see module docstring)")
+
+    print(
+        "\n--- Addendum: per-call-site breakdown for the two traced functions "
+        "(diagnostic only, no fix applied) ---"
+    )
+    for logical_name in sorted(TRACED_LOGICAL_NAMES):
+        log = call_site_logs[logical_name]
+        total = sum(log.values())
+        print(f"\n{logical_name}  (total: {total})")
+        print(f"  {'call site (module:line in function)':<70} {'count':>6}")
+        print("  " + "-" * 78)
+        for site, count in log.most_common():
+            print(f"  {site:<70} {count:>6}")
 
 
 if __name__ == "__main__":
