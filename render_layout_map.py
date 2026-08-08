@@ -7,15 +7,17 @@ Permanence report, meant to be the last page of the assembled PDF (see
 generate_pdf_report.py). This module does not identify, score, or select
 anything itself: every layer it draws is the already-computed output of
 production_area_ceiling.py (optimized production zones),
-water_suitability.py (fetch_and_select_optimal_water_zone -- the top-ranked
-candidate), road_corridors.py (identify_road_corridor_candidates -- the
+water_suitability.py (fetch_and_select_optimal_water_zone's own selected_
+water_zone -- the top-ranked candidate, reused directly off pipeline_
+context.PipelineContext rather than re-fetched, see fetch_layout_layers()'s
+own docstring), road_corridors.py (identify_road_corridor_candidates -- the
 single selected road corridor road_corridors.py's own ridge-line
 identification/scoring picks, see that module's own module docstring),
 tree_zone_candidates.py (identify_tree_zone_candidates -- every ranked
 tree-suitable candidate patch left over once production/water/road's own
 claimed geometry is subtracted out, see that module's own module
-docstring), solar_suitability.py (fetch_and_select_optimal_structure_site
--- the top-ranked candidate), hydrology_data.py (real NHD streams, for
+docstring), solar_suitability.py (identify_solar_candidate_zones -- the
+top-ranked candidate), hydrology_data.py (real NHD streams, for
 background context only -- no soil/hydrology POLYGON data is drawn here,
 that's covered in the narrative text), fencing.py
 (identify_fencing -- the canopy-aware boundary fence line(s) plus the
@@ -23,12 +25,15 @@ road/water/tree-zone-exclusion fence loops added below, see that module's
 own module docstring), and contour_lines.py (global elevation contour
 lines over the full DEM extent).
 
-    boundary --> dem_data (fetched once, shared across every layer below)
+    boundary --> pipeline_context.build_pipeline_context (dem, boundary_
+                 polygon_utm, valleys, production_areas, selected_water_
+                 zone, selected_road_corridor, tree_zone_patches, soil
+                 exclusion unions -- every shared upstream input below,
+                 computed exactly once; see fetch_layout_layers()'s own
+                 docstring for what's still one additional call past this)
              --> production_area_ceiling.identify_optimized_production_areas
-             --> water_suitability.fetch_and_select_optimal_water_zone
              --> road_corridors.identify_road_corridor_candidates
-             --> tree_zone_candidates.identify_tree_zone_candidates
-             --> solar_suitability.fetch_and_select_optimal_structure_site
+             --> solar_suitability.identify_solar_candidate_zones
              --> hydrology_data.get_water_features_for_boundary (streams)
              --> farm_roads_data.get_farm_roads_for_boundary (existing farm roads)
              --> fencing.identify_fencing (boundary + road/water/tree-zone-exclusion fence loops)
@@ -276,15 +281,14 @@ from shapely.ops import unary_union
 from shapely.plotting import plot_line, plot_points, plot_polygon
 
 from contour_lines import compute_contour_lines
-from dem_data import get_dem_for_boundary
 from farm_roads_data import get_farm_roads_for_boundary
 from fencing import identify_fencing
 from hydrology_data import get_water_features_for_boundary
+from pipeline_context import build_pipeline_context
 from production_area_ceiling import identify_optimized_production_areas
 from road_corridors import identify_road_corridor_candidates
-from solar_suitability import fetch_and_select_optimal_structure_site
+from solar_suitability import identify_solar_candidate_zones
 from tree_zone_candidates import identify_tree_zone_candidates
-from water_suitability import fetch_and_select_optimal_water_zone
 
 # Reference-property fixture for manual/__main__ testing ONLY -- now that
 # the frontend supplies a real access point (api.py's /api/generate-report
@@ -911,66 +915,93 @@ def fetch_layout_layers(
     anchor_lon_lat: Optional[tuple[float, float]] = None,
 ) -> dict:
     """
-    Fetches/derives every layer render_layout_map() draws. Fetches the DEM
-    once (unless one is passed in) and shares it across all four
-    optimize/select calls below, rather than letting each independently
-    re-fetch the same DEM -- a pure efficiency choice, doesn't change any
-    of their identification/scoring/selection logic.
+    Fetches/derives every layer render_layout_map() draws.
 
-    water_zone reuses identify_water_suitability()'s own selected_water_zone
-    field directly (see fetch_and_select_optimal_water_zone()) -- that field
-    and this function's return value are the exact same scored-zone dict
-    shape, so there was real duplicate "pick the best" logic to remove.
-    structure_site, by contrast, is read here as a GeoJSON Feature (via
-    identify_solar_candidate_zones()'s own zones_geojson, same as every
-    other GeoJSON-shaped input this module reprojects with
-    _reproject_geometry_to_mercator()) rather than its identify_*()'s
-    newer selected_structure_site field -- that's a DIFFERENT shape (a raw
-    scored dict carrying UTM shapely geometry: polygon_utm, un-reprojected,
-    0-1 score), so using it here would mean adding one-off reprojection/
-    property-translation code for zero fetch-count benefit (both paths
-    still call the same identify_*() exactly once). Left as GeoJSON for
-    now; worth reconsidering only if a future caller needs the raw UTM
-    geometry too.
+    Builds a single pipeline_context.PipelineContext ONCE (build_pipeline_
+    context()) and reuses its fields across every call below, instead of
+    each of production/water/road/tree/solar/fencing independently
+    recomputing the same DEM fetch, boundary_polygon_utm reprojection,
+    production areas, valleys, and selected water zone the way this
+    function used to let them -- see diagnose_fetch_layout_layers_
+    redundant_fetches.py (a parallel diagnostic to diagnose_pipeline_
+    redundant_fetches.py, targeting this function directly) for the real,
+    measured before/after call counts.
 
-    road_corridor, like water_zone/structure_site, is read here as a
-    GeoJSON Feature (via road_corridors.identify_road_corridor_candidates()'s
-    own zones_geojson features[0]) -- the single road corridor road_
-    corridors.py's own ridge-line identification and scoring selects, not
-    a list of alternates: that module's current design produces exactly
-    one candidate per property (see its own module docstring), so there's
-    nothing left to rank/discard here the way an earlier fan-based version
-    of this module needed to. Called directly (identify_road_corridor_
-    candidates(), not the fetch_and_select_optimal_road_corridor()
-    convenience wrapper this function used before) so this same call can
-    also pull the winning candidate's own RAW 'cells' field (road_
-    corridors.find_road_routes()'s own real, walk-ordered path cells) for
-    fencing.identify_fencing()'s road-corridor-exclusion fence below --
-    that convenience wrapper only ever returns the schema-wrapped GeoJSON
-    Feature, which doesn't carry 'cells'. No new fetch: this is the exact
-    same underlying computation the old wrapper call already made.
+    dem (the parameter): NO LONGER threaded through to build_pipeline_
+    context() -- that function has no dem override of its own (always
+    calls dem_data.get_dem_for_boundary() internally), and adding one
+    would mean modifying pipeline_context.py, out of this function's own
+    scope. This parameter is kept only so existing callers (e.g.
+    generate_pdf_report.py, which passes its own pre-fetched dem) don't
+    break on an unexpected-keyword TypeError -- it is otherwise IGNORED;
+    every layer below is computed from context.dem, a fresh fetch this
+    function's caller-supplied dem no longer avoids. Concretely: generate_
+    pdf_report.py's own call path now costs 2 DEM fetches (its own +
+    build_pipeline_context()'s) where it used to cost 1. Every other
+    caller (no pre-fetched dem) is unaffected -- still exactly 1 fetch,
+    same as before. Flagged as a known, deliberately-not-fixed-here
+    limitation; closing it requires a future branch adding a dem override
+    to pipeline_context.build_pipeline_context() itself.
 
-    tree_zone_result reuses identify_tree_zone_candidates()'s own full
-    return dict directly (like production_result above, not narrowed down
-    to a single selection -- there can be several ranked tree-zone
-    candidates, same shape as production). This call independently
-    recomputes production/water/road's own candidate geometry a second
-    time internally (identify_tree_zone_candidates()'s own Step 1 needs
-    it to build its search space) -- the same "each optimize/select call
-    below re-derives its own upstream dependencies, only the DEM fetch
-    itself is shared" pattern every other call in this function already
-    follows (e.g. fetch_and_select_optimal_road_corridor() already
-    re-runs identify_optimized_production_areas() and
-    fetch_and_select_optimal_water_zone() internally); not a new
-    inefficiency this call introduces.
+    production_result: full return dict still needed (scored_patches/
+    percent_of_parcel/total_selected_acreage for _production_zone_legend_
+    stats() above) -- context only carries production_areas (the same
+    scored_patches list, but not the wrapping dict), so this is one
+    additional identify_optimized_production_areas() call, passing
+    context.dem so the DEM fetch itself isn't repeated. production_area_
+    ceiling.identify_optimized_production_areas() has no boundary_polygon_
+    utm override (see pipeline_context.py's own KNOWN LIMITATIONS #2) --
+    it still re-derives that internally, a cheap pure-geometry op with no
+    network cost, same as build_pipeline_context() itself accepts.
+
+    water_zone is context.selected_water_zone directly -- water_
+    suitability.fetch_and_select_optimal_water_zone()'s own return value
+    and this field are the exact same scored-zone dict shape (see
+    pipeline_context.py's own field notes), so this is fully free: no
+    additional call at all.
+
+    road_corridor_candidates: full return dict still needed for its
+    zones_geojson (the GeoJSON Feature this function renders, unlike
+    context.selected_road_corridor's raw-UTM-with-cells shape) -- one
+    additional identify_road_corridor_candidates() call, but now passing
+    every override that entry point supports (dem/boundary_polygon_utm/
+    production_areas/valleys/selected_water_zone/hydric_floodplain_union/
+    floodplain_data_is_fallback, all straight from context) so this call's
+    own internal production/water/floodplain-union derivation is fully
+    eliminated, not just its DEM fetch. selected_road_corridor is read
+    from context directly rather than re-extracted from this call's own
+    result -- same overrides in, so the same deterministic selection
+    comes out; reusing avoids a needless "trust this matches" moment.
+
+    tree_zone_result: identify_tree_zone_candidates()'s own return dict is
+    used ONLY for its 'patches' key everywhere downstream (confirmed: the
+    one other read site, inside render_layout_map() itself, is also
+    tree_zone_result.get("patches", [])) -- so wrapping context.tree_zone_
+    patches (the exact same list, already fully computed) in a matching
+    {"patches": [...]} dict is a drop-in replacement with zero additional
+    calls.
+
+    structure_site is read here as a GeoJSON Feature (identify_solar_
+    candidate_zones()'s own zones_geojson features[0], the same top-ranked
+    candidate select_optimal_structure_site() picks) rather than context.
+    selected_structure_site -- that field is a DIFFERENT shape (a raw
+    scored dict carrying UTM shapely geometry, un-reprojected), so reusing
+    it here would need one-off reprojection/property-translation code for
+    zero fetch-count benefit; this module's own prior docstring already
+    flagged this shape mismatch before this branch existed. One
+    additional identify_solar_candidate_zones() call (replacing the old
+    fetch_and_select_optimal_structure_site() wrapper, which only accepted
+    dem/anchor_lon_lat), now passing every override it supports so this
+    call's own internal production/water/road/tree-zone re-derivation is
+    fully eliminated too, not just its DEM fetch.
 
     contour_lines is contour_lines.compute_contour_lines()'s own output --
     GLOBAL elevation contour lines over the DEM's full extent, computed
-    ONCE here and shared across every production zone at render time
-    (each zone clips its own segments out of this same list via real
-    shapely intersection against its own render_fill_polygon_utm -- see
-    render_layout_map()'s own docstring), rather than recomputing contour
-    lines per zone.
+    ONCE here (off context.dem) and shared across every production zone
+    at render time (each zone clips its own segments out of this same
+    list via real shapely intersection against its own render_fill_
+    polygon_utm -- see render_layout_map()'s own docstring), rather than
+    recomputing contour lines per zone.
 
     fencing_result is fencing.identify_fencing()'s own output -- the
     canopy-aware boundary fence line(s) that replace this module's former
@@ -981,34 +1012,59 @@ def fetch_layout_layers(
     hard-fail-on-missing-coverage design as production_result/tree_zone_
     result's own canopy gates above), and a failure there should
     propagate up and fail this whole render rather than silently omitting
-    the fence layer. Fed selected_road_corridor_cells (the winning road
-    corridor's own real path cells, already pulled above -- no second
-    fetch), farm_road_features (farm_roads_data.get_farm_roads_for_
-    boundary(), fetched just below), and the water_zone's/tree_zone_
-    result's own already-fetched render_fill_polygon_utm value(s) (both
-    already sitting in memory from this function's own water/tree zone
-    fetches above -- again no second fetch, and NOT a re-run of either
-    layer's own siting/scoring logic). identify_fencing() degrades
-    gracefully on its own if the farm-road fetch failed, so this function
-    only needs to protect that ONE fetch, not the whole identify_fencing()
-    call.
+    the fence layer. Fed the HIGH-LEVEL selected_road_corridor/selected_
+    water_zone/tree_zone_patches context fields directly (fencing.
+    identify_fencing() derives their low-level cells/render_fill_polygon_
+    utm equivalents itself when only the high-level value is supplied --
+    see that function's own docstring), plus boundary_polygon_utm/
+    production_areas/valleys/hydric_floodplain_union/floodplain_data_is_
+    fallback, so this call's own three internal self-compute fallbacks
+    (road corridor, water zone, tree zone) never run at all -- fully free
+    past farm_road_features. farm_road_features (farm_roads_data.get_
+    farm_roads_for_boundary(), fetched just below) is the ONE fetch this
+    function still needs to protect: identify_fencing() degrades
+    gracefully on its own if that fetch failed.
     """
-    if dem is None:
-        dem = get_dem_for_boundary(boundary_coordinates)
+    context = build_pipeline_context(boundary_coordinates, anchor_lon_lat)
 
-    production_result = identify_optimized_production_areas(boundary_coordinates, dem=dem)
-    water_zone = fetch_and_select_optimal_water_zone(boundary_coordinates, dem=dem)
+    production_result = identify_optimized_production_areas(boundary_coordinates, dem=context.dem)
+
+    water_zone = context.selected_water_zone
+
     road_corridor_candidates = identify_road_corridor_candidates(
-        boundary_coordinates, dem=dem, anchor_lon_lat=anchor_lon_lat
+        boundary_coordinates,
+        dem=context.dem,
+        anchor_lon_lat=anchor_lon_lat,
+        boundary_polygon_utm=context.boundary_polygon_utm,
+        production_areas=context.production_areas,
+        valleys=context.valleys,
+        selected_water_zone=context.selected_water_zone,
+        hydric_floodplain_union=context.soil_exclusion_unions["hydric_floodplain_union"],
+        floodplain_data_is_fallback=context.soil_exclusion_unions["hydric_floodplain_is_fallback"],
     )
     road_corridor_features = road_corridor_candidates["zones_geojson"]["features"]
     road_corridor = road_corridor_features[0] if road_corridor_features else None
-    selected_road_corridor = road_corridor_candidates["selected_road_corridor"]
-    selected_road_corridor_cells = selected_road_corridor["cells"] if selected_road_corridor else None
-    tree_zone_result = identify_tree_zone_candidates(boundary_coordinates, dem=dem, anchor_lon_lat=anchor_lon_lat)
-    structure_site = fetch_and_select_optimal_structure_site(boundary_coordinates, dem=dem, anchor_lon_lat=anchor_lon_lat)
+    selected_road_corridor = context.selected_road_corridor
+
+    tree_zone_result = {"patches": context.tree_zone_patches}
+
+    solar_result = identify_solar_candidate_zones(
+        boundary_coordinates,
+        dem=context.dem,
+        anchor_lon_lat=anchor_lon_lat,
+        boundary_polygon_utm=context.boundary_polygon_utm,
+        production_areas=context.production_areas,
+        valleys=context.valleys,
+        selected_water_zone=context.selected_water_zone,
+        selected_road_corridor=selected_road_corridor,
+        hydric_floodplain_union=context.soil_exclusion_unions["hydric_floodplain_union"],
+        floodplain_data_is_fallback=context.soil_exclusion_unions["hydric_floodplain_is_fallback"],
+    )
+    solar_features = solar_result["zones_geojson"]["features"]
+    structure_site = solar_features[0] if solar_features else None
+
     water_features = get_water_features_for_boundary(boundary_coordinates)
-    contour_lines = compute_contour_lines(dem)
+    contour_lines = compute_contour_lines(context.dem)
 
     try:
         # Same graceful-degrade pattern every other non-canopy network fetch
@@ -1021,23 +1077,23 @@ def fetch_layout_layers(
         print(f"  fetch_layout_layers: farm road fetch failed ({e}), continuing without existing-farm-road fencing.")
         farm_road_features = []
 
-    selected_water_zone_render_fill_polygon_utm = water_zone["render_fill_polygon_utm"] if water_zone else None
-    tree_zone_render_fill_polygons_utm = [
-        patch["render_fill_polygon_utm"] for patch in tree_zone_result.get("patches", [])
-    ]
-
     fencing_result = identify_fencing(
         boundary_coordinates,
-        dem=dem,
-        selected_road_corridor_cells=selected_road_corridor_cells,
+        dem=context.dem,
         anchor_lon_lat=anchor_lon_lat,
         farm_road_features=farm_road_features,
-        selected_water_zone_render_fill_polygon_utm=selected_water_zone_render_fill_polygon_utm,
-        tree_zone_render_fill_polygons_utm=tree_zone_render_fill_polygons_utm,
+        boundary_polygon_utm=context.boundary_polygon_utm,
+        production_areas=context.production_areas,
+        valleys=context.valleys,
+        selected_road_corridor=selected_road_corridor,
+        selected_water_zone=context.selected_water_zone,
+        tree_zone_patches=context.tree_zone_patches,
+        hydric_floodplain_union=context.soil_exclusion_unions["hydric_floodplain_union"],
+        floodplain_data_is_fallback=context.soil_exclusion_unions["hydric_floodplain_is_fallback"],
     )
 
     return {
-        "dem": dem,
+        "dem": context.dem,
         "production_result": production_result,
         "water_zone": water_zone,
         "road_corridor": road_corridor,
