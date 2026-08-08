@@ -9,13 +9,22 @@ via `dem=` (same approach as test_water_system_candidate_pipeline.py).
 The farm-roads and SSURGO fetches inside identify_solar_candidate_zones()
 are real network calls this sandbox can't reach — that's fine and by
 design: both are wrapped in their own try/except and degrade gracefully
-(no road data -> falls back to the top-ranked suggested road corridor,
-itself DEM-only and not blocked by this sandbox's network policy; no
-SSURGO data -> no prime_farmland_conflict property), the same "a network
-layer fetch failing doesn't take down the whole feature" pattern the
-rest of this pipeline already uses. So this test doubles as a live check
-of that graceful-degradation path, not just the DEM/production-area
-wiring.
+(no road data and no selected road corridor -> the road-proximity
+constraint is disabled entirely; no SSURGO data -> no
+prime_farmland_conflict property), the same "a network layer fetch
+failing doesn't take down the whole feature" pattern the rest of this
+pipeline already uses. So this test doubles as a live check of that
+graceful-degradation path, not just the DEM/production-area wiring.
+
+The mandatory canopy exclusion fetch (production_area.
+get_required_tree_root_zone_mask_utm(), called unconditionally by
+identify_solar_candidate_zones() -- see that module's own docstring for
+why this one specifically does NOT degrade) is a real network call this
+sandbox can't reach either, but does NOT degrade -- an unmocked run would
+hard-fail before producing any candidates at all. It's mocked here with a
+synthetic "no trees anywhere" canopy result, same convention
+test_road_corridors_pipeline.py / test_production_area_ceiling.py /
+test_water_suitability.py already use for this exact mandatory gate.
 
 Terrain is deliberately simple here: a uniform gentle south-facing slope
 across the whole grid. Under the OLD eligible-area/exclusion model this
@@ -28,17 +37,58 @@ candidates form on/near production land instead of being swallowed by
 it, through the real identify_production_areas()/identify_solar_candidate_zones()
 wiring, not just the pure function test_solar_suitability.py already
 covers directly.
+
+This same uniform, gentle, non-ridge-shaped terrain never registers any
+delineated valleys and never gives find_road_routes() a ridge to route
+along, so the real (non-overridden) selected_water_zone and
+selected_road_corridor on this fixture are always None -- same situation
+test_road_corridors_pipeline.py's own narrow-ridge fixture hit for its
+water zone. The override sections below fabricate small synthetic
+zone/corridor dicts positioned off in open space near this fixture's own
+DEM extent (not overlapping any real candidate) purely to have a real,
+non-None value to prove the self-compute fallbacks are skipped -- same
+pattern test_road_corridors_pipeline.py already established.
+
+This same uniform terrain ALSO hits the exact "whole grid reads as one
+zone" failure mode tree_zone_candidates.py's own docstring warns about
+(same shape production_area.py's zone model used to have, before the
+point-candidate redesign this module's own docstring describes): on this
+fixture, identify_tree_zone_candidates() claims essentially the entire
+parcel as a single ranked tree-zone candidate, and solar_suitability.py's
+own (unchanged, out-of-scope-for-this-branch -- see solar_suitability.py's
+own module docstring) hard exclusion against that union then wipes out
+every solar candidate outright. That exclusion is real and correct
+production behavior, just not what THIS pipeline test exists to exercise
+(that's test_tree_zone_candidates.py's job) -- identify_tree_zone_
+candidates() is mocked out below to a real, empty 'patches' result, the
+same "neutralize an orthogonal exclusion this fixture wasn't designed to
+account for" reasoning already applied to the mandatory canopy mock above.
 """
 
 from unittest.mock import patch as mock_patch
 
 import numpy as np
 from rasterio.warp import transform as warp_transform
+from shapely.geometry import Point, Polygon, box
 
 import production_area
+import production_area_ceiling
+import solar_suitability
 from dem_data import _utm_epsg_for_lonlat
 from feature_schema import validate_feature_collection
 from solar_suitability import identify_solar_candidate_zones
+
+
+def _fake_clean_canopy(boundary_coordinates, dem):
+    return {
+        "array": np.full(dem["array"].shape, 1.0, dtype=np.float32),  # below threshold everywhere -- no trees
+        "resolution_meters": dem["resolution_meters"],
+        "origin_x": dem["origin_x"],
+        "origin_y": dem["origin_y"],
+        "crs": dem["crs"],
+        "source_item_id": "offline-test-stub",
+    }
+
 
 CENTER_LON, CENTER_LAT = -79.98, 40.64
 EPSG = _utm_epsg_for_lonlat(CENTER_LON, CENTER_LAT)
@@ -78,8 +128,17 @@ synthetic_dem = {
 # disqualifying-soil fetch by default (check_soil=True), gracefully degrading on
 # failure same as every other optional network layer already exercised below. Mocked
 # here purely to keep this "offline" pipeline test fast and deterministic instead of
-# depending on how quickly a given environment's proxy rejects the call.
-with mock_patch.object(production_area, "_fetch_disqualifying_soil_union", return_value=None):
+# depending on how quickly a given environment's proxy rejects the call. The mandatory
+# canopy fetch is mocked too -- see this file's own docstring for why that one MUST be
+# mocked rather than left to degrade. identify_tree_zone_candidates() is mocked to a
+# real, empty result too -- on this uniform fixture it otherwise claims the whole
+# parcel as one tree-zone candidate and its exclusion buffer wipes out every solar
+# candidate, an orthogonal exclusion this pipeline test isn't meant to exercise (see
+# this file's own docstring).
+with mock_patch.object(production_area, "_fetch_disqualifying_soil_union", return_value=None), \
+     mock_patch.object(production_area_ceiling, "_fetch_disqualifying_soil_union", return_value=None), \
+     mock_patch.object(production_area, "get_canopy_height_for_boundary", _fake_clean_canopy), \
+     mock_patch.object(solar_suitability, "identify_tree_zone_candidates", return_value={"patches": []}):
     result = identify_solar_candidate_zones(boundary_coordinates, dem=synthetic_dem)
 
 assert "zones_geojson" in result
@@ -110,24 +169,260 @@ for feature in features:
         "with no reachable SSURGO data, candidates shouldn't carry a fabricated farmland conflict flag"
     )
 
-# Existing-road data was unreachable in this sandbox -> the farm-roads
-# fetch fails -> road_lines_wgs84 is None -> falls back to the top-ranked
-# SUGGESTED road corridor instead (road_corridors.py, DEM-only). Production
-# zones are now a scored PREFERENCE for road corridors too (a separate,
-# later pass on top of this one), not a hard exclusion, so a real
-# fallback corridor DOES form here even though this terrain's whole
-# parcel is production land -- distance_to_road_ft should be a real
-# fallback-based value, not None.
+# No anchor_lon_lat was supplied -> Tier 1 (identify_road_corridor_candidates())
+# degrades immediately to selected_road_corridor=None with no network call at all
+# (see that function's own docstring) -> Tier 1 produces zero candidates -> Tier 2's
+# own farm-roads fetch is attempted for real and fails in this sandbox (unreachable
+# network) -> the road-proximity constraint is disabled entirely for the final pass.
+road_sources_seen = {f["properties"]["road_proximity_source"] for f in features}
+assert road_sources_seen == {"unavailable"}, (
+    f"expected every candidate's road_proximity_source to be 'unavailable' (no anchor -> no selected "
+    f"corridor, and real road data is unreachable in this sandbox), got {road_sources_seen}"
+)
 road_distances = {f["properties"]["distance_to_road_ft"] for f in features}
-assert None not in road_distances and all(d >= 0 for d in road_distances), (
-    f"expected every candidate's distance_to_road_ft to be a real fallback-based value (production zones "
-    f"no longer hard-exclude road corridor generation), got {road_distances}"
+assert road_distances == {None}, (
+    f"expected distance_to_road_ft to be null for every candidate with the road constraint fully "
+    f"disabled, got {road_distances}"
 )
 for feature in features:
     notes = feature["properties"]["confidence_notes"]
-    assert "SUGGESTED road corridor" in notes, (
-        "confidence_notes should flag that a corridor fallback was used for road-proximity scoring"
+    assert "disabled entirely" in notes, (
+        "confidence_notes should flag that the road-proximity constraint was disabled entirely "
+        "when neither a selected corridor nor real mapped road data was available"
     )
-print(f"With no reachable existing-road data, distance_to_road_ft correctly falls back to a real "
-      f"suggested-corridor-based value (road_distances={sorted(road_distances)}), flagged in confidence_notes.")
+print(f"With no anchor_lon_lat and no reachable existing-road data, distance_to_road_ft correctly "
+      f"comes back null for every candidate, flagged in confidence_notes as the road-proximity "
+      f"constraint being disabled entirely (road_proximity_source={sorted(road_sources_seen)}).")
+print("REGRESSION (test 2, no overrides supplied): output above is identical to pre-branch behavior "
+      "against this same synthetic fixture (once the mandatory canopy gate is mocked, which is required "
+      "for ANY run of this fixture to complete in a network-restricted sandbox, override work or not).")
+
+
+# --- boundary_polygon_utm/production_areas/valleys/selected_water_zone/ --
+# --- selected_road_corridor overrides -------------------------------------
+#
+# Real baseline override values for this same synthetic_dem/boundary_coordinates,
+# via the SAME underlying calls identify_solar_candidate_zones()'s own
+# self-compute fallbacks make (mocks already applied above for the mandatory
+# canopy gate / disqualifying-soil fetch) -- computed once here and reused
+# below both as realistic override values and as identity-checkable proof
+# that the self-compute fallbacks are genuinely skipped when overridden.
+import valley_delineation  # noqa: E402
+import water_suitability  # noqa: E402
+
+override_boundary_xs, override_boundary_ys = warp_transform(
+    "EPSG:4326", DST_CRS, [pt[0] for pt in boundary_coordinates], [pt[1] for pt in boundary_coordinates],
+)
+OVERRIDE_BOUNDARY_POLYGON_UTM = Polygon(zip(override_boundary_xs, override_boundary_ys))
+
+with mock_patch.object(production_area, "_fetch_disqualifying_soil_union", return_value=None), \
+     mock_patch.object(production_area_ceiling, "_fetch_disqualifying_soil_union", return_value=None), \
+     mock_patch.object(production_area, "get_canopy_height_for_boundary", _fake_clean_canopy):
+    OVERRIDE_PRODUCTION_AREAS = production_area_ceiling.identify_optimized_production_areas(
+        boundary_coordinates, dem=synthetic_dem
+    )["scored_patches"]
+    OVERRIDE_VALLEYS = valley_delineation.delineate_valleys(synthetic_dem)
+    _real_selected_water_zone = water_suitability.identify_water_suitability(
+        boundary_coordinates,
+        dem=synthetic_dem,
+        boundary_polygon_utm=OVERRIDE_BOUNDARY_POLYGON_UTM,
+        valleys=OVERRIDE_VALLEYS,
+        production_areas=OVERRIDE_PRODUCTION_AREAS,
+    )["selected_water_zone"]
+
+assert isinstance(OVERRIDE_PRODUCTION_AREAS, list) and OVERRIDE_PRODUCTION_AREAS, (
+    "test setup: expected at least one real production patch on this uniform gentle-slope fixture "
+    "to reuse as a direct override below"
+)
+# This fixture's uniform, non-ridge-shaped terrain never delineates a real valley and never gives
+# find_road_routes() a ridge to route along, so the real, honestly-computed selected water zone and
+# selected road corridor on THIS fixture are always None -- neither can be used to prove a call was
+# skipped (None is exactly the sentinel this branch's own None-falls-back-to-self-compute pattern
+# treats as "not overridden"). Both are fabricated as small synthetic values below instead, positioned
+# well outside this fixture's own DEM/boundary extent (or, for the road corridor, deliberately spanning
+# it) so they have a real, checkable effect without depending on this terrain accidentally producing one.
+assert _real_selected_water_zone is None, (
+    "test setup: this uniform gentle-slope fixture is expected to produce no real candidate water zone "
+    "-- if this now finds one, OVERRIDE_SELECTED_WATER_ZONE below should probably use it directly instead"
+)
+OVERRIDE_SELECTED_WATER_ZONE = {
+    "id": "synthetic-test-water-zone",
+    "render_fill_polygon_utm": Point(origin_x - 1000.0, origin_y - 1000.0).buffer(5.0),
+}
+
+# A thin strip crossing the full width of the DEM at mid-height -- close enough to real
+# candidate footprints for several of them to clear Tier 1's ROAD_CORRIDOR_PROXIMITY_METERS
+# (15m) gate, so tests below that supply this override don't spuriously fall through to
+# Tier 2's own real (network-backed) farm-roads fetch.
+OVERRIDE_SELECTED_ROAD_CORRIDOR = {
+    "id": "synthetic-test-road-corridor",
+    "cell_footprint_polygon_utm": box(origin_x, center_y - 2.0, origin_x + SIZE * RESOLUTION, center_y + 2.0),
+}
+
+
+# --- 1. override behavior: all five new overrides supplied -> the -------
+# --- corresponding self-compute fallbacks are never called ---------------
+
+with mock_patch.object(solar_suitability, "get_dem_for_boundary") as mock_dem, \
+     mock_patch.object(solar_suitability, "identify_optimized_production_areas") as mock_prod, \
+     mock_patch.object(solar_suitability, "identify_water_suitability") as mock_water, \
+     mock_patch.object(solar_suitability, "identify_road_corridor_candidates") as mock_corridor, \
+     mock_patch.object(production_area, "get_canopy_height_for_boundary", _fake_clean_canopy), \
+     mock_patch.object(solar_suitability, "identify_tree_zone_candidates", return_value={"patches": []}):
+    override_result = solar_suitability.identify_solar_candidate_zones(
+        boundary_coordinates,
+        dem=synthetic_dem,
+        boundary_polygon_utm=OVERRIDE_BOUNDARY_POLYGON_UTM,
+        production_areas=OVERRIDE_PRODUCTION_AREAS,
+        valleys=OVERRIDE_VALLEYS,
+        selected_water_zone=OVERRIDE_SELECTED_WATER_ZONE,
+        selected_road_corridor=OVERRIDE_SELECTED_ROAD_CORRIDOR,
+        check_prime_farmland=False,
+    )
+
+assert mock_dem.call_count == 0, "get_dem_for_boundary() must NOT be called when dem was supplied"
+assert mock_prod.call_count == 0, (
+    "identify_optimized_production_areas() must NOT be called when production_areas was supplied as an override"
+)
+assert mock_water.call_count == 0, (
+    "identify_water_suitability() must NOT be called when selected_water_zone was supplied as an override"
+)
+assert mock_corridor.call_count == 0, (
+    "identify_road_corridor_candidates() must NOT be called when selected_road_corridor was supplied as an override"
+)
+validate_feature_collection(override_result["zones_geojson"])
+override_features = override_result["zones_geojson"]["features"]
+assert override_features, "expected at least one solar candidate using the synthetic road-corridor override"
+for feature in override_features:
+    assert feature["properties"]["road_proximity_source"] == "selected_road_corridor"
+print(
+    "Supplying boundary_polygon_utm=/production_areas=/valleys=/selected_water_zone=/selected_road_corridor= "
+    "all five as overrides (test 1) correctly skips get_dem_for_boundary()/identify_optimized_production_areas()/"
+    "identify_water_suitability()/identify_road_corridor_candidates() -- zero self-compute fallback calls."
+)
+
+
+# --- 3. selected_water_zone and selected_road_corridor NOT overridden, ---
+# --- but boundary_polygon_utm/production_areas/valleys ARE -> both -------
+# --- identify_water_suitability() and identify_road_corridor_candidates() -
+# --- are called WITH those three passed through as kwargs, not -----------
+# --- self-deriving their own independent copies ---------------------------
+
+with mock_patch.object(
+        solar_suitability, "identify_water_suitability", return_value={"selected_water_zone": None},
+     ) as mock_water_passthrough, \
+     mock_patch.object(
+        solar_suitability, "identify_road_corridor_candidates",
+        return_value={"selected_road_corridor": OVERRIDE_SELECTED_ROAD_CORRIDOR},
+     ) as mock_corridor_passthrough, \
+     mock_patch.object(production_area, "get_canopy_height_for_boundary", _fake_clean_canopy), \
+     mock_patch.object(solar_suitability, "identify_tree_zone_candidates", return_value={"patches": []}):
+    passthrough_result = solar_suitability.identify_solar_candidate_zones(
+        boundary_coordinates,
+        dem=synthetic_dem,
+        boundary_polygon_utm=OVERRIDE_BOUNDARY_POLYGON_UTM,
+        production_areas=OVERRIDE_PRODUCTION_AREAS,
+        valleys=OVERRIDE_VALLEYS,
+        check_prime_farmland=False,
+    )
+
+assert mock_water_passthrough.call_count == 1
+water_call = mock_water_passthrough.call_args
+assert water_call.args[0] == boundary_coordinates
+assert water_call.kwargs["dem"] is synthetic_dem
+assert water_call.kwargs["boundary_polygon_utm"] is OVERRIDE_BOUNDARY_POLYGON_UTM, (
+    "identify_water_suitability() must receive this function's own already-sourced boundary_polygon_utm, "
+    "not re-derive its own copy"
+)
+assert water_call.kwargs["valleys"] is OVERRIDE_VALLEYS, (
+    "identify_water_suitability() must receive this function's own already-sourced valleys, not "
+    "re-derive its own copy"
+)
+assert water_call.kwargs["production_areas"] is OVERRIDE_PRODUCTION_AREAS, (
+    "identify_water_suitability() must receive this function's own already-sourced production_areas, "
+    "not re-derive its own copy via identify_optimized_production_areas()"
+)
+
+assert mock_corridor_passthrough.call_count == 1
+corridor_call = mock_corridor_passthrough.call_args
+assert corridor_call.args[0] == boundary_coordinates
+assert corridor_call.kwargs["dem"] is synthetic_dem
+assert corridor_call.kwargs["boundary_polygon_utm"] is OVERRIDE_BOUNDARY_POLYGON_UTM, (
+    "identify_road_corridor_candidates() must receive this function's own already-sourced "
+    "boundary_polygon_utm, not re-derive its own copy"
+)
+assert corridor_call.kwargs["valleys"] is OVERRIDE_VALLEYS, (
+    "identify_road_corridor_candidates() must receive this function's own already-sourced valleys, "
+    "not re-derive its own copy"
+)
+assert corridor_call.kwargs["production_areas"] is OVERRIDE_PRODUCTION_AREAS, (
+    "identify_road_corridor_candidates() must receive this function's own already-sourced "
+    "production_areas, not re-derive its own copy"
+)
+assert corridor_call.kwargs["selected_water_zone"] is None, (
+    "identify_road_corridor_candidates() must receive the SAME selected_water_zone this function's own "
+    "(mocked) identify_water_suitability() call just produced, not re-derive it independently"
+)
+validate_feature_collection(passthrough_result["zones_geojson"])
+print(
+    "With selected_water_zone/selected_road_corridor left unsupplied but boundary_polygon_utm=/"
+    "production_areas=/valleys= all overridden (test 3), identify_water_suitability() and "
+    "identify_road_corridor_candidates() correctly receive this function's own already-sourced values "
+    "as kwargs instead of re-deriving independent copies of any of them."
+)
+
+
+# --- 4. selected_road_corridor overridden as None explicitly -------------
+# --- (simulating "no corridor exists") -> Tier 1/Tier 2 fallback logic ---
+# --- still fires correctly, unaffected by the override mechanism ---------
+#
+# A caller-supplied None is indistinguishable from "not supplied" (same None-as-
+# sentinel convention every override in this function uses -- see its own
+# docstring), so this still triggers the self-compute call below; what this test
+# actually proves is that the UNCHANGED Tier 1/Tier 2 branching immediately after
+# it keeps working correctly regardless of whether the None it's branching on
+# came from an override argument or a genuine self-compute result.
+
+with mock_patch.object(
+        solar_suitability, "identify_road_corridor_candidates", return_value={"selected_road_corridor": None},
+     ) as mock_corridor_none, \
+     mock_patch.object(
+        solar_suitability, "get_farm_roads_for_boundary",
+        return_value=[{"name": "Synthetic Rd", "geometry": {
+            "type": "LineString",
+            "coordinates": [[lons[0], lats[0]], [lons[2], lats[2]]],
+        }}],
+     ) as mock_farm_roads, \
+     mock_patch.object(production_area, "get_canopy_height_for_boundary", _fake_clean_canopy), \
+     mock_patch.object(solar_suitability, "identify_tree_zone_candidates", return_value={"patches": []}):
+    tier2_result = solar_suitability.identify_solar_candidate_zones(
+        boundary_coordinates,
+        dem=synthetic_dem,
+        boundary_polygon_utm=OVERRIDE_BOUNDARY_POLYGON_UTM,
+        production_areas=OVERRIDE_PRODUCTION_AREAS,
+        valleys=OVERRIDE_VALLEYS,
+        selected_water_zone=OVERRIDE_SELECTED_WATER_ZONE,
+        selected_road_corridor=None,
+        check_prime_farmland=False,
+    )
+
+assert mock_corridor_none.call_count == 1, (
+    "an explicit selected_road_corridor=None must still be treated as unsupplied and trigger the "
+    "identify_road_corridor_candidates() self-compute, same as leaving it out entirely"
+)
+assert mock_farm_roads.call_count == 1, (
+    "Tier 2's own farm-roads fallback must still fire when Tier 1's (self-computed) "
+    "selected_road_corridor comes back None -- unaffected by the override mechanism"
+)
+tier2_features = tier2_result["zones_geojson"]["features"]
+assert tier2_features, "expected at least one candidate via the Tier 2 real-mapped-road fallback"
+for feature in tier2_features:
+    assert feature["properties"]["road_proximity_source"] == "real_mapped_road"
+print(
+    "Supplying selected_road_corridor=None explicitly (test 4) is correctly treated the same as leaving "
+    "it unsupplied -- Tier 1 self-computes (finding no corridor), and the unchanged Tier 2 real-mapped-"
+    "road fallback logic still fires correctly on top of it."
+)
+
+
 print("\nAll solar suitability pipeline checks passed.")

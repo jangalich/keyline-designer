@@ -945,6 +945,13 @@ def identify_solar_candidate_zones(
     boundary_coordinates: list[tuple[float, float]],
     dem: Optional[dict] = None,
     anchor_lon_lat: Optional[tuple[float, float]] = None,
+    boundary_polygon_utm: Optional[Polygon] = None,
+    production_areas: Optional[list[dict]] = None,
+    valleys: Optional[list[dict]] = None,
+    selected_water_zone: Optional[dict] = None,
+    selected_road_corridor: Optional[dict] = None,
+    hydric_floodplain_union=None,
+    floodplain_data_is_fallback: Optional[bool] = None,
     check_prime_farmland: bool = True,
     **zone_kwargs,
 ) -> dict:
@@ -957,6 +964,29 @@ def identify_solar_candidate_zones(
     SSURGO prime-farmland conflict; and returns the "solar_infrastructure"
     GeoJSON FeatureCollection. See module docstring for the full
     constraint-stack rationale; this docstring covers wiring/ordering.
+
+    dem, boundary_polygon_utm, production_areas, selected_water_zone, and
+    selected_road_corridor are all optional overrides, independently of
+    one another -- each falls back to being self-computed exactly as
+    before if not supplied, same "reuse what an upstream orchestrator
+    already computed" pattern water_suitability.identify_water_
+    suitability() and road_corridors.identify_road_corridor_candidates()
+    already established for these same values. valleys is a pure
+    pass-through convenience: it is forwarded as-is (including None) to
+    the identify_water_suitability()/identify_road_corridor_candidates()
+    calls below, which already have their own correct None-falls-back-
+    to-self-compute handling for it -- there is no third copy of that
+    fallback logic here. hydric_floodplain_union/floodplain_data_is_
+    fallback are forwarded the same way to identify_road_corridor_
+    candidates() alone (see that function's own docstring for what they
+    mean); they only take effect when selected_road_corridor is not
+    itself supplied, same as production_areas/valleys/boundary_polygon_
+    utm below.
+
+    canopy_mask_utm and tree_zone_exclusion_polygon_utm are NOT among
+    these overrides -- both are always self-computed here (see module
+    docstring); that's a deliberate, separate scope decision, not an
+    oversight.
 
     Returns:
         {
@@ -982,7 +1012,8 @@ def identify_solar_candidate_zones(
     areas()'s own OPTIMIZED, ceiling-trimmed 'scored_patches' (not
     production_area.identify_production_areas()'s raw candidates), passed
     through to find_candidate_solar_zones() for its scoring-only (not
-    exclusion) role — see that function's docstring.
+    exclusion) role — see that function's docstring. Skipped entirely when
+    this function's own production_areas override is supplied.
 
     WATER exclusion is scoped to only the SINGLE selected water zone
     (water_suitability.select_optimal_water_zone(), same selection
@@ -993,7 +1024,11 @@ def identify_solar_candidate_zones(
     parcel to zero out every solar candidate, even though each zone's own
     geometry is individually normal. water_suitability.
     identify_water_suitability()'s own real per-zone SSURGO/NHD fetches
-    degrade independently and gracefully.
+    degrade independently and gracefully. Skipped entirely when this
+    function's own selected_water_zone override is supplied; when it is
+    NOT but boundary_polygon_utm/production_areas/valleys ARE, those three
+    are passed through as kwargs so identify_water_suitability() doesn't
+    re-derive its own independent copies.
 
     TREE-ZONE-CANDIDATE exclusion (identify_tree_zone_candidates(), the
     full ranked 'patches' list) degrades GRACEFULLY on an ordinary fetch
@@ -1016,7 +1051,19 @@ def identify_solar_candidate_zones(
         the road source at ROAD_CORRIDOR_PROXIMITY_METERS. Not wrapped in
         try/except: this call's own internal production-zone fetch is
         ALSO a mandatory canopy gate (a THIRD independent one), same
-        "expected to hard-fail independently" reasoning as above.
+        "expected to hard-fail independently" reasoning as above. Skipped
+        entirely when this function's own selected_road_corridor override
+        is supplied as a real (non-None) value; a caller-supplied None is
+        indistinguishable from "not supplied" (same None-as-sentinel
+        convention every other override in this function uses) and still
+        self-computes -- the Tier 1/Tier 2 branching immediately below is
+        unaffected either way, since it already treats a self-computed
+        None (no corridor exists) and any other None identically. When
+        selected_road_corridor is NOT overridden but boundary_polygon_utm/
+        production_areas/valleys ARE, those three (plus hydric_floodplain_
+        union/floodplain_data_is_fallback, forwarded as-is) are passed
+        through as kwargs so identify_road_corridor_candidates() doesn't
+        re-derive its own independent copies.
       Tier 2 (fallback, only if Tier 1 produced zero candidates — whether
         because no corridor exists at all, or one exists but nothing
         survives near it): real mapped roads
@@ -1036,13 +1083,14 @@ def identify_solar_candidate_zones(
     if dem is None:
         dem = get_dem_for_boundary(boundary_coordinates)
 
-    boundary_xs, boundary_ys = warp_transform(
-        "EPSG:4326",
-        dem["crs"],
-        [pt[0] for pt in boundary_coordinates],
-        [pt[1] for pt in boundary_coordinates],
-    )
-    boundary_polygon_utm = Polygon(zip(boundary_xs, boundary_ys))
+    if boundary_polygon_utm is None:
+        boundary_xs, boundary_ys = warp_transform(
+            "EPSG:4326",
+            dem["crs"],
+            [pt[0] for pt in boundary_coordinates],
+            [pt[1] for pt in boundary_coordinates],
+        )
+        boundary_polygon_utm = Polygon(zip(boundary_xs, boundary_ys))
 
     # MANDATORY, non-degrading -- see module docstring and this
     # function's own docstring. Deliberately NOT wrapped in try/except.
@@ -1050,14 +1098,22 @@ def identify_solar_candidate_zones(
         boundary_polygon_utm, dem, buffer_meters=TREE_ROOT_ZONE_BUFFER_METERS
     )
 
-    # Optimized/ceiling-trimmed production geometry -- pulls in its own
-    # SECOND, independent mandatory canopy gate internally; also not
-    # caught here (see this function's own docstring).
-    production_result = identify_optimized_production_areas(boundary_coordinates, dem=dem)
-    production_areas = production_result["scored_patches"]
+    if production_areas is None:
+        # Optimized/ceiling-trimmed production geometry -- pulls in its
+        # own SECOND, independent mandatory canopy gate internally; also
+        # not caught here (see this function's own docstring).
+        production_result = identify_optimized_production_areas(boundary_coordinates, dem=dem)
+        production_areas = production_result["scored_patches"]
 
-    water_result = identify_water_suitability(boundary_coordinates, dem=dem)
-    selected_water_zone = water_result["selected_water_zone"]
+    if selected_water_zone is None:
+        water_result = identify_water_suitability(
+            boundary_coordinates,
+            dem=dem,
+            boundary_polygon_utm=boundary_polygon_utm,
+            valleys=valleys,
+            production_areas=production_areas,
+        )
+        selected_water_zone = water_result["selected_water_zone"]
     water_zones = [selected_water_zone] if selected_water_zone else []
 
     # Tree-zone-candidate exclusion: graceful degradation on an ordinary
@@ -1089,8 +1145,19 @@ def identify_solar_candidate_zones(
     candidates = []
     road_proximity_source = "unavailable"
 
-    corridor_result = identify_road_corridor_candidates(boundary_coordinates, dem=dem, anchor_lon_lat=anchor_lon_lat)
-    selected_road_corridor = corridor_result["selected_road_corridor"]
+    if selected_road_corridor is None:
+        corridor_result = identify_road_corridor_candidates(
+            boundary_coordinates,
+            anchor_lon_lat=anchor_lon_lat,
+            dem=dem,
+            boundary_polygon_utm=boundary_polygon_utm,
+            production_areas=production_areas,
+            valleys=valleys,
+            selected_water_zone=selected_water_zone,
+            hydric_floodplain_union=hydric_floodplain_union,
+            floodplain_data_is_fallback=floodplain_data_is_fallback,
+        )
+        selected_road_corridor = corridor_result["selected_road_corridor"]
     if selected_road_corridor is not None:
         candidates = find_candidate_solar_zones(
             dem,
