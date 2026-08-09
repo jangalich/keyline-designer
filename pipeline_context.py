@@ -243,11 +243,11 @@ silently patching another module or reimplementing its logic)
      this fix) for the now-restored "still exactly 1" total across the
      whole build_pipeline_context() run.
 
-  5. [NARROWED -- see below] This branch first added a boundary_polygon_
-     utm override (mirroring the dem override an earlier branch added), so
-     a caller that already computed one (e.g. parcel_data.fetch_parcel_
-     data()) can pass it straight through instead of paying for a second
-     warp_transform. It originally could NOT add equivalent overrides for
+  5. [RESOLVED] This branch first added a boundary_polygon_utm override
+     (mirroring the dem override an earlier branch added), so a caller
+     that already computed one (e.g. parcel_data.fetch_parcel_data()) can
+     pass it straight through instead of paying for a second warp_
+     transform. It originally could NOT add equivalent overrides for
      existing_roads/soil_exclusion_unions['hydric_floodplain_union'],
      because -- unlike dem/boundary_polygon_utm -- this file never fetches
      that raw data itself; it calls two wrapper functions that do the
@@ -264,35 +264,33 @@ silently patching another module or reimplementing its logic)
      through to them (a pure passthrough, not a self-compute-here-if-
      missing gate the way dem/boundary_polygon_utm are -- this file still
      never fetches this data itself, it just no longer FORCES the two
-     wrapper functions to). existing_roads is now fully closeable: get_
-     road_exclusion_union_utm() had exactly one internal fetch (get_farm_
-     roads_for_boundary()), and farm_roads= now covers it completely.
+     wrapper functions to). existing_roads was fully closeable at that
+     point: get_road_exclusion_union_utm() had exactly one internal fetch
+     (get_farm_roads_for_boundary()), and farm_roads= covered it
+     completely.
 
-     soil_exclusion_unions['hydric_floodplain_union'] is only PARTIALLY
-     closed. _fetch_floodplain_hydric_union() actually self-fetches THREE
-     things, not one -- confirmed directly against its body, not assumed
-     from this note's own prior wording:
-       - get_soil_data_for_polygon() (SSURGO composition data) -- NOW
-         closeable via soil_components=, wired through from this function.
+     soil_exclusion_unions['hydric_floodplain_union'] was only PARTIALLY
+     closed at that point. _fetch_floodplain_hydric_union() actually self-
+     fetches THREE things, not one:
+       - get_soil_data_for_polygon() (SSURGO composition data) -- closed
+         via soil_components=, wired through from this function.
        - get_soil_geometries_for_polygon() (SSURGO per-mukey GEOMETRY,
          fetched only when hydric_mukeys is non-empty) -- a SEPARATE call
-         from the one soil_components= replaces, still unconditionally
-         self-fetched. No override parameter for it exists on either
-         function, and this function's own signature has nowhere to
-         source one from (it wasn't asked for as an override here).
-       - get_water_features_for_boundary() (NHD streams/water bodies) --
-         also still unconditionally self-fetched, also no override
-         parameter on either function, also nothing in this function's own
-         signature to source one from.
-     Both remaining gaps are real, closeable redundancies once a caller
-     has already fetched soil geometries and water features via parcel_
-     data.fetch_parcel_data() (both are already ParcelData fields) -- but
-     closing them needs the same two-step treatment this note's own
-     history just went through: an override parameter added directly to
-     _fetch_floodplain_hydric_union() (in road_corridors.py, this
-     function's own instructions still put further changes to that module
-     out of scope beyond soil_components=), then a matching parameter
-     added here and threaded through. Flagged, not force-fixed.
+         from the one soil_components= replaces.
+       - get_water_features_for_boundary() (NHD streams/water bodies).
+     This branch closed the remaining two: _fetch_floodplain_hydric_
+     union() now also accepts water_features=/soil_geometries= override
+     parameters (road_corridors.py), and this function's own water_
+     features=/soil_geometries= parameters pass straight through to it,
+     same pure-passthrough convention as soil_components=/farm_roads=
+     above. A caller that already fetched soil geometries and water
+     features via parcel_data.fetch_parcel_data() (both are ParcelData
+     fields, in the exact shape these two functions expect) now passes
+     them through instead of paying for two more redundant fetches.
+     soil_exclusion_unions['hydric_floodplain_union'] is now fully
+     closeable: all three of _fetch_floodplain_hydric_union()'s internal
+     fetches have override parameters, all three are threaded through
+     here.
 """
 
 from dataclasses import dataclass
@@ -357,6 +355,8 @@ def build_pipeline_context(
     boundary_polygon_utm: Optional[Polygon] = None,
     soil_components: Optional[list[dict]] = None,
     farm_roads: Optional[list[dict]] = None,
+    water_features: Optional[dict] = None,
+    soil_geometries: Optional[dict] = None,
 ) -> PipelineContext:
     """
     Computes every shared upstream input multiple KSOP pipeline steps
@@ -385,20 +385,19 @@ def build_pipeline_context(
     _boundary_polygon_utm() below performs) passes it through here instead
     of paying for a second, redundant reprojection.
 
-    soil_components and farm_roads are optional too, but unlike dem/
-    boundary_polygon_utm above, this function never self-fetches either --
-    it passes them straight through, unconditionally, to the two wrapper
-    functions that actually own the corresponding self-fetch (road_
-    corridors._fetch_floodplain_hydric_union() for soil_components, farm_
+    soil_components, farm_roads, water_features, and soil_geometries are
+    optional too, but unlike dem/boundary_polygon_utm above, this function
+    never self-fetches any of them -- it passes them straight through,
+    unconditionally, to the wrapper functions that actually own the
+    corresponding self-fetch (road_corridors._fetch_floodplain_hydric_
+    union() for soil_components/water_features/soil_geometries, farm_
     roads_data.get_road_exclusion_union_utm() for farm_roads); each of
     those now has its own None-falls-back-to-self-fetch override param, so
-    leaving either argument here as None reproduces the exact pre-existing
-    self-fetch behavior. A caller that already fetched both for this exact
-    boundary (e.g. a future ParcelData-backed caller) passes them through
-    here instead of paying for two second, redundant fetches. See KNOWN
-    LIMITATIONS #5 for what this still does NOT close (the NHD water-
-    feature fetch and the SSURGO hydric geometry fetch, both still
-    self-fetched unconditionally inside _fetch_floodplain_hydric_union()).
+    leaving any argument here as None reproduces the exact pre-existing
+    self-fetch behavior. A caller that already fetched all four for this
+    exact boundary (e.g. parcel_data.fetch_parcel_data()) passes them
+    through here instead of paying for four second, redundant fetches. See
+    KNOWN LIMITATIONS #5 (now RESOLVED) for the history of closing this.
     """
     if dem is None:
         dem = dem_data.get_dem_for_boundary(boundary_coordinates)
@@ -416,7 +415,13 @@ def build_pipeline_context(
     existing_roads = farm_roads_data.get_road_exclusion_union_utm(boundary_coordinates, dem, farm_roads=farm_roads)
 
     hydric_floodplain_union, hydric_floodplain_is_fallback = road_corridors._fetch_floodplain_hydric_union(
-        boundary_coordinates, dem, valleys, boundary_polygon_utm, soil_components=soil_components
+        boundary_coordinates,
+        dem,
+        valleys,
+        boundary_polygon_utm,
+        soil_components=soil_components,
+        water_features=water_features,
+        soil_geometries=soil_geometries,
     )
     soil_exclusion_unions = {
         "hydric_floodplain_union": hydric_floodplain_union,

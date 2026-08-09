@@ -1202,7 +1202,13 @@ def _log_fetch_failure(label: str, exc: Exception) -> None:
 
 
 def _fetch_floodplain_hydric_union(
-    boundary_coordinates, dem, valleys, boundary_polygon_utm, soil_components: Optional[list[dict]] = None
+    boundary_coordinates,
+    dem,
+    valleys,
+    boundary_polygon_utm,
+    soil_components: Optional[list[dict]] = None,
+    water_features: Optional[dict] = None,
+    soil_geometries: Optional[dict] = None,
 ) -> tuple[Optional[object], bool]:
     """NHD stream/water-body buffers + SSURGO hydric soil polygons,
     unioned; falls back to buffering the already-computed delineated
@@ -1212,20 +1218,22 @@ def _fetch_floodplain_hydric_union(
     exclusion -- the fetch/clip/buffer logic that builds it is otherwise
     unchanged.
 
-    soil_components is optional -- same None-falls-back-to-self-fetch
-    convention every override in this pipeline uses. A caller that already
-    fetched soil composition data for this exact boundary (e.g. a future
-    ParcelData-backed caller) passes it through here instead of paying for
-    a second, redundant get_soil_data_for_polygon() fetch. This does NOT
-    close every redundancy this function has: the NHD water-feature fetch
-    (get_water_features_for_boundary()) and the SSURGO hydric GEOMETRY
-    fetch (get_soil_geometries_for_polygon(), a separate call from the one
-    soil_components replaces -- it only runs when hydric_mukeys is
-    non-empty, fetching each hydric mukey's mapped polygon, not its
-    composition percentages) still self-fetch unconditionally; neither has
-    an override parameter here. See pipeline_context.py's own KNOWN
-    LIMITATIONS #5 for why this branch closes soil_components specifically
-    and flags the other two rather than also covering them.
+    soil_components, water_features, and soil_geometries are all optional --
+    same None-falls-back-to-self-fetch convention every override in this
+    pipeline uses. A caller that already fetched soil composition data,
+    NHD water features, and/or SSURGO map-unit geometry for this exact
+    boundary (e.g. parcel_data.fetch_parcel_data()) passes any/all of them
+    through here instead of paying for a second, redundant get_soil_data_
+    for_polygon()/get_water_features_for_boundary()/get_soil_geometries_
+    for_polygon() fetch. water_features must be the same {'streams': [...],
+    'water_bodies': [...]} shape get_water_features_for_boundary() itself
+    returns; soil_geometries must be the same {mukey: geojson_geometry}
+    shape get_soil_geometries_for_polygon() itself returns -- both are
+    exactly what ParcelData's own water_features/soil_geometries fields
+    already hold, so a ParcelData-backed caller can pass those fields
+    straight through unchanged. soil_geometries is only ever consulted when
+    hydric_mukeys comes back non-empty (see below); if it's supplied but
+    hydric_mukeys is empty, it's simply never looked at -- not an error.
 
     Each fetched NHD feature is clipped to a generous context region
     around boundary_polygon_utm (FLOODPLAIN_FETCH_CONTEXT_BUFFER_METERS)
@@ -1267,7 +1275,8 @@ def _fetch_floodplain_hydric_union(
     pieces = []
 
     try:
-        water_features = get_water_features_for_boundary(boundary_coordinates)
+        if water_features is None:
+            water_features = get_water_features_for_boundary(boundary_coordinates)
         for feature in water_features["streams"] + water_features["water_bodies"]:
             geometry = feature.get("geometry")
             if geometry is None:
@@ -1290,9 +1299,10 @@ def _fetch_floodplain_hydric_union(
             soil_components = get_soil_data_for_polygon(wkt_polygon)
         hydric_mukeys = hydric_disqualifying_mukeys(soil_components)
         if hydric_mukeys:
-            geometries_by_mukey = get_soil_geometries_for_polygon(wkt_polygon)
+            if soil_geometries is None:
+                soil_geometries = get_soil_geometries_for_polygon(wkt_polygon)
             for mukey in hydric_mukeys:
-                geometry = geometries_by_mukey.get(mukey)
+                geometry = soil_geometries.get(mukey)
                 if geometry is not None:
                     pieces.append(shape(transform_geom("EPSG:4326", dem["crs"], geometry)))
     except Exception as e:

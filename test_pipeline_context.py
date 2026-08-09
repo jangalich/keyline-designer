@@ -1117,4 +1117,54 @@ print(
     "test_floodplain_union_scope.py."
 )
 
+# --- 17. water_features=/soil_geometries= overrides: caller-supplied values reach ---
+# --- _fetch_floodplain_hydric_union() correctly, closing the last two pieces of ---
+# --- KNOWN LIMITATIONS #5 (now RESOLVED) -- same pure-passthrough identity-check ---
+# --- pattern as section 16 above. The actual self-compute-skip these two overrides ---
+# --- cause (get_water_features_for_boundary()/get_soil_geometries_for_polygon() never ---
+# --- firing) is proven directly against _fetch_floodplain_hydric_union() itself in ---
+# --- test_floodplain_union_scope.py -- this section only proves build_pipeline_context() ---
+# --- itself threads the caller-supplied values through correctly.
+fake_water_features_override = {"streams": [], "water_bodies": []}
+fake_soil_geometries_override = {"999999": {"type": "Polygon", "coordinates": [[[0, 0], [1, 0], [1, 1], [0, 0]]]}}
+
+with mock_patch.object(pc.dem_data, "get_dem_for_boundary", return_value=synthetic_dem), \
+     mock_patch.object(pc.valley_delineation, "delineate_valleys", return_value=[]), \
+     mock_patch.object(pc.production_area_ceiling, "identify_optimized_production_areas", return_value=fake_optimized_result), \
+     mock_patch.object(pc.farm_roads_data, "get_road_exclusion_union_utm", return_value=fake_existing_roads_union), \
+     mock_patch.object(
+         pc.road_corridors, "_fetch_floodplain_hydric_union", return_value=(fake_hydric_union, False)
+     ) as mock_floodplain_water_soil_geom_case, \
+     mock_patch.object(
+         pc.water_candidate_zones,
+         "identify_water_system_candidate_zones",
+         return_value={"zones_geojson": {"type": "FeatureCollection", "features": []}},
+     ), \
+     mock_patch.object(pc, "fetch_and_select_optimal_water_zone", return_value=fake_selected_water_zone), \
+     mock_patch.object(pc.road_corridors, "identify_road_corridor_candidates", return_value=fake_road_corridor_result), \
+     mock_patch.object(pc, "identify_solar_candidate_zones", return_value=fake_solar_result_dem_case), \
+     mock_patch.object(pc, "identify_tree_zone_candidates", return_value=fake_tree_zone_result_dem_case):
+    ctx_water_soil_geom_case = pc.build_pipeline_context(
+        boundary_coordinates,
+        anchor_lon_lat,
+        water_features=fake_water_features_override,
+        soil_geometries=fake_soil_geometries_override,
+    )
+
+assert mock_floodplain_water_soil_geom_case.call_args.kwargs["water_features"] is fake_water_features_override, (
+    "_fetch_floodplain_hydric_union() must receive the exact caller-supplied water_features= object, not a "
+    "copy or a re-derived one"
+)
+assert mock_floodplain_water_soil_geom_case.call_args.kwargs["soil_geometries"] is fake_soil_geometries_override, (
+    "_fetch_floodplain_hydric_union() must receive the exact caller-supplied soil_geometries= object, not a "
+    "copy or a re-derived one"
+)
+print(
+    "water_features=/soil_geometries= overrides: the exact caller-supplied objects reach "
+    "_fetch_floodplain_hydric_union() as kwargs, not re-derived copies -- build_pipeline_context() itself "
+    "never self-fetches either (see KNOWN LIMITATIONS #5, now RESOLVED); the actual self-compute-skip these "
+    "overrides cause is proven directly against _fetch_floodplain_hydric_union() itself in "
+    "test_floodplain_union_scope.py."
+)
+
 print("\nAll pipeline_context checks passed.")
