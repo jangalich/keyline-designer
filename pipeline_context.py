@@ -242,6 +242,38 @@ silently patching another module or reimplementing its logic)
      pipeline_context.py's own call-count assertions (updated alongside
      this fix) for the now-restored "still exactly 1" total across the
      whole build_pipeline_context() run.
+
+  5. This branch added a boundary_polygon_utm override (mirroring the dem
+     override an earlier branch added) so a caller that already computed
+     one (e.g. parcel_data.fetch_parcel_data()) can pass it straight
+     through instead of paying for a second warp_transform. It could NOT
+     add equivalent overrides for the raw data behind existing_roads or
+     soil_exclusion_unions['hydric_floodplain_union'], because -- unlike
+     dem/boundary_polygon_utm -- this file never fetches that raw data
+     itself. It calls two wrapper functions that do the fetching one level
+     down, and NEITHER exposes a way to skip its own internal fetch:
+       - existing_roads: farm_roads_data.get_road_exclusion_union_utm()
+         (farm_roads_data.py) unconditionally calls get_farm_roads_for_
+         boundary(boundary_coordinates) itself, with no roads= parameter.
+       - soil_exclusion_unions['hydric_floodplain_union']: road_corridors.
+         _fetch_floodplain_hydric_union() unconditionally calls BOTH
+         get_water_features_for_boundary() (NHD) and get_soil_data_for_
+         polygon()/get_soil_geometries_for_polygon() (SSURGO) itself, with
+         no override parameters for either.
+     Adding soil_components=/farm_roads= (or water_features=) params to
+     THIS function's own signature would do nothing without also adding
+     matching override parameters to get_road_exclusion_union_utm() (in
+     farm_roads_data.py) and _fetch_floodplain_hydric_union() (in road_
+     corridors.py) and threading the values through -- modifying those two
+     modules, which this branch's own instructions put out of scope (road_
+     corridors.py explicitly; farm_roads_data.py under the same "pure
+     pipeline_context.py signature/wiring change only" restriction). Both
+     are real, closeable redundancies once a caller has already fetched
+     farm roads and soil data via parcel_data.fetch_parcel_data() -- but
+     closing them needs two separate, dedicated follow-up branches (one
+     per module), each adding the override parameter in the module that
+     actually owns the self-fetch, the same way the water_candidate_
+     zones.py override branch referenced in limitation #1 did.
 """
 
 from dataclasses import dataclass
@@ -303,6 +335,7 @@ def build_pipeline_context(
     boundary_coordinates: list[tuple[float, float]],
     anchor_lon_lat: tuple[float, float],
     dem: Optional[dict] = None,
+    boundary_polygon_utm: Optional[Polygon] = None,
 ) -> PipelineContext:
     """
     Computes every shared upstream input multiple KSOP pipeline steps
@@ -324,10 +357,22 @@ def build_pipeline_context(
     fetch_layout_layers(), which accepts its own dem= for the same reason)
     passes it through here instead of paying for a second, redundant
     fetch.
+
+    boundary_polygon_utm is optional the same way -- a caller that already
+    computed it (e.g. parcel_data.fetch_parcel_data(), which derives it
+    identically via the same warp_transform-then-Polygon pattern
+    _boundary_polygon_utm() below performs) passes it through here instead
+    of paying for a second, redundant reprojection. See KNOWN LIMITATIONS
+    #5 for why this is the ONLY additional override this branch could add
+    -- existing_roads and soil_exclusion_unions['hydric_floodplain_union']
+    are NOT self-fetched by this file directly (unlike dem/
+    boundary_polygon_utm above), so there is no raw-fetch call site here
+    to gate the same way.
     """
     if dem is None:
         dem = dem_data.get_dem_for_boundary(boundary_coordinates)
-    boundary_polygon_utm = _boundary_polygon_utm(boundary_coordinates, dem)
+    if boundary_polygon_utm is None:
+        boundary_polygon_utm = _boundary_polygon_utm(boundary_coordinates, dem)
 
     valleys = valley_delineation.delineate_valleys(dem)
     ridge_lines = valley_delineation.delineate_valleys(road_corridors._invert_dem(dem))

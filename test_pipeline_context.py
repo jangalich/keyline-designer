@@ -941,4 +941,118 @@ print("dem= override: get_dem_for_boundary is never called, and the exact caller
 print("existing no-override callers (dem= omitted entirely) are unaffected -- see section 1's own "
       "mock_get_dem.call_count == 1 assertion, re-run unchanged by this addendum.")
 
+# --- 14. boundary_polygon_utm= override: a caller-supplied polygon skips the self-compute entirely, ---
+# --- AND reaches every internal use site, not just one ---
+#
+# _boundary_polygon_utm() (this module's own warp_transform+Polygon helper) is stubbed to raise if
+# called at all, same "side_effect=AssertionError" trick section 12 uses for dem_data.get_dem_for_
+# boundary -- a regression that ignores the override and recomputes anyway fails loudly here rather
+# than silently passing. Every direct call build_pipeline_context() makes that takes a
+# boundary_polygon_utm kwarg/positional arg is captured and identity-checked below: the floodplain
+# fetch (positional), water_zones, selected_water_zone, selected_road_corridor, selected_structure_
+# site, and tree_zone_patches -- covering every internal use site listed in pipeline_context.py's own
+# field notes, not just the returned context.boundary_polygon_utm.
+boundary_polygon_utm_override = box(1000, 1000, 2000, 2000)
+fake_selected_road_corridor_bpu_case = {
+    "type": "Feature",
+    "id": "road-corridor-bpu-override-case",
+    "cell_footprint_polygon_utm": box(0, 0, 10, 10),
+    "cells": [(0, 0)],
+}
+fake_road_corridor_result_bpu_case = {
+    "zones_geojson": {"type": "FeatureCollection", "features": []},
+    "all_scored_candidates": [],
+    "selected_road_corridor": fake_selected_road_corridor_bpu_case,
+}
+fake_solar_result_bpu_case = {
+    "zones_geojson": {"type": "FeatureCollection", "features": []},
+    "all_scored_candidates": [],
+    "selected_structure_site": None,
+}
+fake_tree_zone_result_bpu_case = {
+    "zones_geojson": {"type": "FeatureCollection", "features": []},
+    "search_space_geojson": {"type": "FeatureCollection", "features": []},
+    "search_space_acres": 0.0,
+    "claimed_acres": 0.0,
+    "boundary_acres": 0.0,
+    "patches": [],
+}
+
+with mock_patch.object(pc.dem_data, "get_dem_for_boundary", return_value=synthetic_dem), \
+     mock_patch.object(
+         pc, "_boundary_polygon_utm", side_effect=AssertionError("must not be called when boundary_polygon_utm= is supplied")
+     ) as mock_bpu_helper, \
+     mock_patch.object(pc.valley_delineation, "delineate_valleys", return_value=[]), \
+     mock_patch.object(pc.production_area_ceiling, "identify_optimized_production_areas", return_value=fake_optimized_result), \
+     mock_patch.object(pc.farm_roads_data, "get_road_exclusion_union_utm", return_value=fake_existing_roads_union), \
+     mock_patch.object(
+         pc.road_corridors, "_fetch_floodplain_hydric_union", return_value=(fake_hydric_union, False)
+     ) as mock_floodplain_bpu_case, \
+     mock_patch.object(
+         pc.water_candidate_zones,
+         "identify_water_system_candidate_zones",
+         return_value={"zones_geojson": {"type": "FeatureCollection", "features": []}},
+     ) as mock_water_bpu_case, \
+     mock_patch.object(
+         pc, "fetch_and_select_optimal_water_zone", return_value=fake_selected_water_zone
+     ) as mock_select_water_zone_bpu_case, \
+     mock_patch.object(
+         pc.road_corridors, "identify_road_corridor_candidates", return_value=fake_road_corridor_result_bpu_case
+     ) as mock_road_corridor_bpu_case, \
+     mock_patch.object(
+         pc, "identify_solar_candidate_zones", return_value=fake_solar_result_bpu_case
+     ) as mock_solar_bpu_case, \
+     mock_patch.object(
+         pc, "identify_tree_zone_candidates", return_value=fake_tree_zone_result_bpu_case
+     ) as mock_tree_zone_bpu_case:
+    ctx_bpu_case = pc.build_pipeline_context(
+        boundary_coordinates, anchor_lon_lat, boundary_polygon_utm=boundary_polygon_utm_override
+    )
+
+assert mock_bpu_helper.call_count == 0, (
+    "_boundary_polygon_utm() must NOT be called at all when a caller supplies boundary_polygon_utm= -- if "
+    "this fires, the side_effect above raises AssertionError instead of returning a polygon, so a "
+    "regression here fails loudly rather than silently passing with a self-computed one"
+)
+assert ctx_bpu_case.boundary_polygon_utm is boundary_polygon_utm_override, (
+    "build_pipeline_context()'s returned context.boundary_polygon_utm must be the EXACT object the caller "
+    "passed in, not a copy or a re-derived one"
+)
+
+floodplain_bpu_call = mock_floodplain_bpu_case.call_args
+assert floodplain_bpu_call.args[3] is boundary_polygon_utm_override, (
+    "_fetch_floodplain_hydric_union() must receive the caller-supplied boundary_polygon_utm, not a "
+    "self-computed one"
+)
+assert mock_water_bpu_case.call_args.kwargs["boundary_polygon_utm"] is boundary_polygon_utm_override, (
+    "identify_water_system_candidate_zones() must receive the caller-supplied boundary_polygon_utm"
+)
+assert mock_select_water_zone_bpu_case.call_args.kwargs["boundary_polygon_utm"] is boundary_polygon_utm_override, (
+    "fetch_and_select_optimal_water_zone() must receive the caller-supplied boundary_polygon_utm"
+)
+assert mock_road_corridor_bpu_case.call_args.kwargs["boundary_polygon_utm"] is boundary_polygon_utm_override, (
+    "identify_road_corridor_candidates() must receive the caller-supplied boundary_polygon_utm"
+)
+assert mock_solar_bpu_case.call_args.kwargs["boundary_polygon_utm"] is boundary_polygon_utm_override, (
+    "identify_solar_candidate_zones() must receive the caller-supplied boundary_polygon_utm"
+)
+assert mock_tree_zone_bpu_case.call_args.kwargs["boundary_polygon_utm"] is boundary_polygon_utm_override, (
+    "identify_tree_zone_candidates() must receive the caller-supplied boundary_polygon_utm"
+)
+print(
+    "boundary_polygon_utm= override: _boundary_polygon_utm() is never called, and the exact caller-supplied "
+    "polygon reaches context.boundary_polygon_utm AND every internal use site (floodplain/hydric fetch, "
+    "water_zones, selected_water_zone, selected_road_corridor, selected_structure_site, tree_zone_patches) -- "
+    "not just one of them."
+)
+
+# --- 15. existing no-override behavior for boundary_polygon_utm is unchanged ---
+#
+# Section 1's own original run (no boundary_polygon_utm= argument at all) already re-proves this: it still
+# calls build_pipeline_context(boundary_coordinates, anchor_lon_lat) with no boundary_polygon_utm argument,
+# and ctx.boundary_polygon_utm there is the real, self-computed Polygon checked against the DEM's own
+# footprint area (see the "boundary_polygon_utm sanity check" section above) -- unaffected by this addendum.
+print("existing no-override callers (boundary_polygon_utm= omitted entirely) are unaffected -- see the "
+      "'boundary_polygon_utm sanity check' section above, re-run unchanged by this addendum.")
+
 print("\nAll pipeline_context checks passed.")
