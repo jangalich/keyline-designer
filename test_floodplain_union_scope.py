@@ -319,4 +319,61 @@ print(f"Post-buffer relevance clip: final union is {bug3_union_acres:.2f} acres,
       f"distant stream (>{rc.FLOODPLAIN_FINAL_RELEVANCE_BUFFER_METERS:.0f}m away, mirroring the real Montour "
       f"Run/N Montour Rd spillover) while keeping the near stream's genuine on-parcel-adjacent floodplain risk.")
 
+# --- soil_components= override: a caller-supplied soil_components list skips ---
+# --- get_soil_data_for_polygon() entirely, while get_soil_geometries_for_polygon() ---
+# --- (a separate, still self-fetched call) still runs and produces the same ---
+# --- real hydric-exclusion result as the fully self-fetched path above ---
+#
+# get_soil_data_for_polygon is stubbed to raise if called at all -- a regression that
+# ignores the override and fetches anyway fails loudly here rather than silently
+# passing with a self-fetched list. Reuses the same trace-hydric scenario (bug 2
+# above) so the override path is proven to produce the IDENTICAL real result the
+# self-fetch path already does, not just "doesn't crash."
+
+
+def _raise_if_soil_data_fetched(wkt_polygon):
+    raise AssertionError("get_soil_data_for_polygon must not be called when soil_components= is supplied")
+
+
+with patch.object(rc, "get_water_features_for_boundary", fake_no_water_features), \
+     patch.object(rc, "get_soil_data_for_polygon", _raise_if_soil_data_fetched), \
+     patch.object(rc, "get_soil_geometries_for_polygon", side_effect=fake_trace_hydric_geometries) as mock_soil_geometries, \
+     patch.object(rc, "transform_geom", fake_transform_geom):
+    override_union, override_is_fallback = rc._fetch_floodplain_hydric_union(
+        BOUNDARY, DEM, valleys=[], boundary_polygon_utm=boundary_polygon_utm, soil_components=TRACE_HYDRIC_SOIL_ROWS
+    )
+
+assert override_union is not None and not override_is_fallback
+assert override_union.equals(trace_union), (
+    "soil_components= override must produce the exact same union bug 2's self-fetched run above did -- "
+    "same input data, just sourced differently (skipping get_soil_data_for_polygon(), NOT get_soil_"
+    "geometries_for_polygon(), which is a separate, still self-fetched call -- confirmed it still ran below)"
+)
+assert mock_soil_geometries.call_count == 1, (
+    "get_soil_geometries_for_polygon() is a SEPARATE fetch from the one soil_components= replaces (mukey "
+    "GEOMETRY, not composition data) -- it must still run exactly once even with soil_components= supplied, "
+    "confirming this override only closes get_soil_data_for_polygon(), not the whole function's self-fetch "
+    "surface (see pipeline_context.py's own KNOWN LIMITATIONS #5 for why the geometry fetch remains open)"
+)
+print(
+    "_fetch_floodplain_hydric_union(): a caller-supplied soil_components= skips get_soil_data_for_polygon() "
+    "entirely (call would raise if it fired) and produces the exact same real hydric-exclusion union as the "
+    "self-fetched path, while get_soil_geometries_for_polygon() (a separate fetch) still runs unchanged."
+)
+
+# --- regression: soil_components= omitted (None default) still self-fetches, unchanged ---
+with patch.object(rc, "get_water_features_for_boundary", fake_no_water_features), \
+     patch.object(rc, "get_soil_data_for_polygon", fake_trace_hydric_soil_rows), \
+     patch.object(rc, "get_soil_geometries_for_polygon", fake_trace_hydric_geometries), \
+     patch.object(rc, "transform_geom", fake_transform_geom):
+    no_override_union, no_override_is_fallback = rc._fetch_floodplain_hydric_union(
+        BOUNDARY, DEM, valleys=[], boundary_polygon_utm=boundary_polygon_utm
+    )
+assert no_override_union is not None and not no_override_is_fallback
+assert no_override_union.equals(trace_union), (
+    "omitting soil_components= entirely must still self-fetch via get_soil_data_for_polygon(), unchanged "
+    "from before this override was added"
+)
+print("_fetch_floodplain_hydric_union(): omitting soil_components= entirely still self-fetches, unchanged.")
+
 print("\nAll floodplain union scope checks passed.")

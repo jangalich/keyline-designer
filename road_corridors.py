@@ -1202,7 +1202,7 @@ def _log_fetch_failure(label: str, exc: Exception) -> None:
 
 
 def _fetch_floodplain_hydric_union(
-    boundary_coordinates, dem, valleys, boundary_polygon_utm
+    boundary_coordinates, dem, valleys, boundary_polygon_utm, soil_components: Optional[list[dict]] = None
 ) -> tuple[Optional[object], bool]:
     """NHD stream/water-body buffers + SSURGO hydric soil polygons,
     unioned; falls back to buffering the already-computed delineated
@@ -1211,6 +1211,21 @@ def _fetch_floodplain_hydric_union(
     feeds a SOFT cost penalty (see module docstring), not a hard
     exclusion -- the fetch/clip/buffer logic that builds it is otherwise
     unchanged.
+
+    soil_components is optional -- same None-falls-back-to-self-fetch
+    convention every override in this pipeline uses. A caller that already
+    fetched soil composition data for this exact boundary (e.g. a future
+    ParcelData-backed caller) passes it through here instead of paying for
+    a second, redundant get_soil_data_for_polygon() fetch. This does NOT
+    close every redundancy this function has: the NHD water-feature fetch
+    (get_water_features_for_boundary()) and the SSURGO hydric GEOMETRY
+    fetch (get_soil_geometries_for_polygon(), a separate call from the one
+    soil_components replaces -- it only runs when hydric_mukeys is
+    non-empty, fetching each hydric mukey's mapped polygon, not its
+    composition percentages) still self-fetch unconditionally; neither has
+    an override parameter here. See pipeline_context.py's own KNOWN
+    LIMITATIONS #5 for why this branch closes soil_components specifically
+    and flags the other two rather than also covering them.
 
     Each fetched NHD feature is clipped to a generous context region
     around boundary_polygon_utm (FLOODPLAIN_FETCH_CONTEXT_BUFFER_METERS)
@@ -1271,7 +1286,8 @@ def _fetch_floodplain_hydric_union(
 
     try:
         wkt_polygon = coordinates_to_wkt_polygon(boundary_coordinates)
-        soil_components = get_soil_data_for_polygon(wkt_polygon)
+        if soil_components is None:
+            soil_components = get_soil_data_for_polygon(wkt_polygon)
         hydric_mukeys = hydric_disqualifying_mukeys(soil_components)
         if hydric_mukeys:
             geometries_by_mukey = get_soil_geometries_for_polygon(wkt_polygon)
