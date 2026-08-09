@@ -1051,6 +1051,8 @@ def fetch_layout_layers(
         boundary_polygon_utm=parcel_data.boundary_polygon_utm,
         soil_components=parcel_data.soil_components,
         farm_roads=parcel_data.farm_roads,
+        water_features=parcel_data.water_features,
+        soil_geometries=parcel_data.soil_geometries,
     )
 
     production_zone_legend_stats = _production_zone_legend_stats(

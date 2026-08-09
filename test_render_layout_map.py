@@ -1031,4 +1031,106 @@ print(
     f"completes successfully."
 )
 
+# =====================================================================
+# build_pipeline_context() wiring: fetch_layout_layers() must forward
+# ParcelData's OWN water_features/soil_geometries straight through to
+# build_pipeline_context() as kwargs -- the same already-fetched objects,
+# by identity (`is`, not `==`), NOT re-derived copies. This is what lets
+# build_pipeline_context() (and the _fetch_floodplain_hydric_union() call
+# nested inside it) reuse ParcelData's single NHD/SSURGO-geometry fetch
+# instead of issuing its own redundant ones -- see fetch_layout_layers()'s
+# own docstring and pipeline_context.build_pipeline_context()'s water_
+# features=/soil_geometries= override parameters. dem/boundary_polygon_utm/
+# soil_components/farm_roads (wired through in the two prior branches) are
+# identity-checked here too, so this one spy covers every ParcelData field
+# fetch_layout_layers() hands to build_pipeline_context().
+# =====================================================================
+
+from parcel_data import ParcelData
+
+
+class _HaltAfterContextCall(Exception):
+    """Raised by the build_pipeline_context() spy purely to stop fetch_
+    layout_layers() right after the call under test -- everything past it
+    (production/water/road/tree/solar/fencing) is real KSOP code this
+    identity check has no reason to drive with sentinel objects."""
+
+
+# Distinct sentinel objects, one per ParcelData field fetch_layout_layers()
+# forwards -- distinct so an accidental cross-wire (e.g. passing water_
+# features where soil_geometries was meant) can't slip through an identity
+# check against the wrong field. Every other ParcelData field is irrelevant
+# to this call and gets a plain placeholder.
+_sentinel_dem = {"sentinel": "dem"}
+_sentinel_boundary_polygon_utm = box(0.0, 0.0, 1.0, 1.0)
+_sentinel_soil_components = [{"sentinel": "soil_components"}]
+_sentinel_soil_geometries = {"sentinel": "soil_geometries"}
+_sentinel_water_features = {"sentinel": "water_features"}
+_sentinel_farm_roads = [{"sentinel": "farm_roads"}]
+
+_spy_parcel_data = ParcelData(
+    dem=_sentinel_dem,
+    boundary_polygon_utm=_sentinel_boundary_polygon_utm,
+    soil_components=_sentinel_soil_components,
+    farmland_classification=[],
+    erosion_factor=[],
+    saturated_hydraulic_conductivity=[],
+    soil_geometries=_sentinel_soil_geometries,
+    water_features=_sentinel_water_features,
+    farm_roads=_sentinel_farm_roads,
+    climate_summary={},
+    elevation_grid=[],
+    canopy_height={},
+    imagery_summary={},
+)
+
+_captured_context_kwargs = {}
+_original_build_pipeline_context = rlm.build_pipeline_context
+
+
+def _spy_build_pipeline_context(*args, **kwargs):
+    _captured_context_kwargs.update(kwargs)
+    raise _HaltAfterContextCall()
+
+
+rlm.build_pipeline_context = _spy_build_pipeline_context
+try:
+    rlm.fetch_layout_layers(property_boundary, parcel_data=_spy_parcel_data)
+    raise AssertionError(
+        "the build_pipeline_context() spy should have halted fetch_layout_layers() before it returned"
+    )
+except _HaltAfterContextCall:
+    pass
+finally:
+    rlm.build_pipeline_context = _original_build_pipeline_context
+
+# The two this branch adds -- identity, not equality.
+assert _captured_context_kwargs["water_features"] is _spy_parcel_data.water_features, (
+    "fetch_layout_layers() must forward parcel_data.water_features to build_pipeline_context() by identity, "
+    "not a re-derived copy"
+)
+assert _captured_context_kwargs["soil_geometries"] is _spy_parcel_data.soil_geometries, (
+    "fetch_layout_layers() must forward parcel_data.soil_geometries to build_pipeline_context() by identity, "
+    "not a re-derived copy"
+)
+# The four wired through in the two prior branches -- same identity contract, guarded here so a future
+# refactor can't silently swap any of them back to a self-fetch/re-derivation.
+assert _captured_context_kwargs["dem"] is _spy_parcel_data.dem, "dem must be forwarded by identity"
+assert _captured_context_kwargs["boundary_polygon_utm"] is _spy_parcel_data.boundary_polygon_utm, (
+    "boundary_polygon_utm must be forwarded by identity"
+)
+assert _captured_context_kwargs["soil_components"] is _spy_parcel_data.soil_components, (
+    "soil_components must be forwarded by identity"
+)
+assert _captured_context_kwargs["farm_roads"] is _spy_parcel_data.farm_roads, (
+    "farm_roads must be forwarded by identity"
+)
+print(
+    "build_pipeline_context() wiring: fetch_layout_layers() forwards ParcelData's own water_features and "
+    "soil_geometries (plus dem/boundary_polygon_utm/soil_components/farm_roads) to build_pipeline_context() "
+    "as kwargs, every one by identity (is, not ==) -- confirming the single ParcelData fetch is reused, not "
+    "re-derived."
+)
+
+
 print("\nAll render_layout_map checks passed.")
