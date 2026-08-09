@@ -208,5 +208,36 @@ assert two_road_union is not None and two_road_union.area > buffered_union.area,
 )
 print("get_road_exclusion_union_utm(): multiple fetched road lines union into a single combined exclusion polygon.")
 
+# --- farm_roads= override: a caller-supplied roads list skips get_farm_roads_for_boundary() entirely ---
+#
+# get_farm_roads_for_boundary is stubbed to raise if called at all -- a regression that ignores the
+# override and fetches anyway fails loudly here rather than silently passing with a self-fetched list.
+def _raise_if_called(boundary_coordinates):
+    raise AssertionError("get_farm_roads_for_boundary must not be called when farm_roads= is supplied")
+
+
+with patch.object(farm_roads_data, "get_farm_roads_for_boundary", _raise_if_called):
+    override_union = get_road_exclusion_union_utm(
+        boundary, ROAD_EXCLUSION_DEM, buffer_meters=10.0, farm_roads=[{"name": "N Montour Rd", "geometry": LINE_A}]
+    )
+assert override_union is not None and not override_union.is_empty
+assert override_union.geom_type in ("Polygon", "MultiPolygon")
+assert override_union.area == buffered_union.area, (
+    "the farm_roads= override must produce the exact same union as the equivalent self-fetched result "
+    "above -- same input data, just sourced differently"
+)
+print(
+    "get_road_exclusion_union_utm(): a caller-supplied farm_roads= skips get_farm_roads_for_boundary() "
+    "entirely (call would raise if it fired) and produces the same union a self-fetch of the same data would."
+)
+
+# --- regression: farm_roads= omitted (None default) still self-fetches, unchanged ---
+with patch.object(farm_roads_data, "get_farm_roads_for_boundary", lambda boundary_coordinates: [{"name": "N Montour Rd", "geometry": LINE_A}]):
+    no_override_union = get_road_exclusion_union_utm(boundary, ROAD_EXCLUSION_DEM, buffer_meters=10.0)
+assert no_override_union is not None and no_override_union.area == buffered_union.area, (
+    "omitting farm_roads= entirely must still self-fetch via get_farm_roads_for_boundary(), unchanged "
+    "from before this override was added"
+)
+print("get_road_exclusion_union_utm(): omitting farm_roads= entirely still self-fetches, unchanged.")
 
 print("\nAll farm_roads_data checks passed.")

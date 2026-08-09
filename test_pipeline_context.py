@@ -469,11 +469,19 @@ assert ctx.soil_exclusion_unions == {
 )
 roads_call = mock_roads.call_args
 assert roads_call.args[0] == boundary_coordinates and roads_call.args[1] is synthetic_dem
+assert roads_call.kwargs.get("farm_roads") is None, (
+    "farm_roads= was not supplied to build_pipeline_context() in this run -- get_road_exclusion_union_utm() "
+    "must receive farm_roads=None (its own self-fetch fallback), not silently defaulted to some other value"
+)
 floodplain_call = mock_floodplain.call_args
 assert floodplain_call.args[0] == boundary_coordinates
 assert floodplain_call.args[1] is synthetic_dem
 assert floodplain_call.args[2] is ctx.valleys, "must reuse the already-computed valleys, not re-derive them"
 assert floodplain_call.args[3] is ctx.boundary_polygon_utm, "must reuse the already-computed boundary polygon"
+assert floodplain_call.kwargs.get("soil_components") is None, (
+    "soil_components= was not supplied to build_pipeline_context() in this run -- _fetch_floodplain_hydric_"
+    "union() must receive soil_components=None (its own self-fetch fallback), not silently defaulted"
+)
 print(
     "existing_roads and soil_exclusion_unions['hydric_floodplain_union'] carry the real fetched "
     "geometry; the floodplain/hydric fetch reused the same dem/valleys/boundary_polygon_utm "
@@ -1054,5 +1062,59 @@ print(
 # footprint area (see the "boundary_polygon_utm sanity check" section above) -- unaffected by this addendum.
 print("existing no-override callers (boundary_polygon_utm= omitted entirely) are unaffected -- see the "
       "'boundary_polygon_utm sanity check' section above, re-run unchanged by this addendum.")
+
+# --- 16. soil_components=/farm_roads= overrides: caller-supplied values reach ---
+# --- get_road_exclusion_union_utm()/_fetch_floodplain_hydric_union() correctly, ---
+# --- NOT re-derived -- this function is a pure passthrough for both (it never ---
+# --- self-fetches this data itself, see KNOWN LIMITATIONS #5), so this section ---
+# --- proves identity through the wiring, not a self-compute-skip on THIS function ---
+#
+# The real self-compute skip these two overrides ultimately cause (get_farm_roads_for_boundary()/
+# get_soil_data_for_polygon() never firing) is proven directly against the two functions that own
+# those fetches in test_farm_roads_data.py and test_floodplain_union_scope.py -- this section only
+# proves build_pipeline_context() itself threads the caller-supplied values through correctly.
+fake_soil_components_override = [{"mukey": "999999", "comppct_r": 90, "hydricrating": "Yes"}]
+fake_farm_roads_override = [{"name": "Override Test Rd", "geometry": {"type": "LineString", "coordinates": [[0, 0], [1, 1]]}}]
+
+with mock_patch.object(pc.dem_data, "get_dem_for_boundary", return_value=synthetic_dem), \
+     mock_patch.object(pc.valley_delineation, "delineate_valleys", return_value=[]), \
+     mock_patch.object(pc.production_area_ceiling, "identify_optimized_production_areas", return_value=fake_optimized_result), \
+     mock_patch.object(
+         pc.farm_roads_data, "get_road_exclusion_union_utm", return_value=fake_existing_roads_union
+     ) as mock_roads_override_case, \
+     mock_patch.object(
+         pc.road_corridors, "_fetch_floodplain_hydric_union", return_value=(fake_hydric_union, False)
+     ) as mock_floodplain_override_case, \
+     mock_patch.object(
+         pc.water_candidate_zones,
+         "identify_water_system_candidate_zones",
+         return_value={"zones_geojson": {"type": "FeatureCollection", "features": []}},
+     ), \
+     mock_patch.object(pc, "fetch_and_select_optimal_water_zone", return_value=fake_selected_water_zone), \
+     mock_patch.object(pc.road_corridors, "identify_road_corridor_candidates", return_value=fake_road_corridor_result), \
+     mock_patch.object(pc, "identify_solar_candidate_zones", return_value=fake_solar_result_dem_case), \
+     mock_patch.object(pc, "identify_tree_zone_candidates", return_value=fake_tree_zone_result_dem_case):
+    ctx_override_case = pc.build_pipeline_context(
+        boundary_coordinates,
+        anchor_lon_lat,
+        soil_components=fake_soil_components_override,
+        farm_roads=fake_farm_roads_override,
+    )
+
+assert mock_roads_override_case.call_args.kwargs["farm_roads"] is fake_farm_roads_override, (
+    "get_road_exclusion_union_utm() must receive the exact caller-supplied farm_roads= object, not a copy "
+    "or a re-derived one"
+)
+assert mock_floodplain_override_case.call_args.kwargs["soil_components"] is fake_soil_components_override, (
+    "_fetch_floodplain_hydric_union() must receive the exact caller-supplied soil_components= object, not a "
+    "copy or a re-derived one"
+)
+print(
+    "soil_components=/farm_roads= overrides: the exact caller-supplied objects reach get_road_exclusion_"
+    "union_utm()/_fetch_floodplain_hydric_union() as kwargs, not re-derived copies -- build_pipeline_"
+    "context() itself never self-fetches either (see KNOWN LIMITATIONS #5); the actual self-compute-skip "
+    "these overrides cause is proven directly against those two functions in test_farm_roads_data.py and "
+    "test_floodplain_union_scope.py."
+)
 
 print("\nAll pipeline_context checks passed.")

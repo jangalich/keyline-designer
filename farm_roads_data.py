@@ -65,6 +65,7 @@ was just asking the wrong layer for it. Fixed two ways, not one:
 import json
 import math
 import time
+from typing import Optional
 
 import requests
 from rasterio.warp import transform_geom
@@ -275,6 +276,7 @@ def get_road_exclusion_union_utm(
     boundary_coordinates: list[tuple[float, float]],
     dem: dict,
     buffer_meters: float = ROAD_EXCLUSION_BUFFER_METERS,
+    farm_roads: Optional[list[dict]] = None,
 ):
     """
     Real road geometry (get_farm_roads_for_boundary()'s own fetch, WGS84
@@ -282,6 +284,12 @@ def get_road_exclusion_union_utm(
     buffered by buffer_meters, unioned into a single polygon -- the hard
     production-zone exclusion input production_area.compute_step1_
     eligible_cells() tests each eligible cell's own CENTER POINT against.
+
+    farm_roads is optional -- same None-falls-back-to-self-fetch
+    convention every override in this pipeline uses. A caller that already
+    fetched farm-roads data for this exact boundary (e.g. a future
+    ParcelData-backed caller) passes it through here instead of paying for
+    a second, redundant get_farm_roads_for_boundary() fetch.
 
     Same shapely-polygon-union-plus-per-cell-.contains() pattern
     production_area._fetch_disqualifying_soil_union() already uses for
@@ -301,12 +309,13 @@ def get_road_exclusion_union_utm(
     of its own; callers degrade gracefully the same way they already do
     for the hydric-soil fetch (see production_area._ROAD_CHECK_UNCHECKED).
     """
-    roads = get_farm_roads_for_boundary(boundary_coordinates)
-    if not roads:
+    if farm_roads is None:
+        farm_roads = get_farm_roads_for_boundary(boundary_coordinates)
+    if not farm_roads:
         return None
 
     buffered_pieces = [
-        shape(transform_geom("EPSG:4326", dem["crs"], road["geometry"])).buffer(buffer_meters) for road in roads
+        shape(transform_geom("EPSG:4326", dem["crs"], road["geometry"])).buffer(buffer_meters) for road in farm_roads
     ]
     union = unary_union(buffered_pieces)
     return union if not union.is_empty else None
