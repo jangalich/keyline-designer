@@ -19,22 +19,25 @@ claimed geometry is subtracted out, see that module's own module
 docstring), solar_suitability.py (identify_solar_candidate_zones -- the
 top-ranked candidate), hydrology_data.py (real NHD streams, for
 background context only -- no soil/hydrology POLYGON data is drawn here,
-that's covered in the narrative text), fencing.py
+that's covered in the narrative text -- sourced via parcel_data.ParcelData
+now, see below, not fetched directly by this module anymore), fencing.py
 (identify_fencing -- the canopy-aware boundary fence line(s) plus the
 road/water/tree-zone-exclusion fence loops added below, see that module's
 own module docstring), and contour_lines.py (global elevation contour
 lines over the full DEM extent).
 
-    boundary --> pipeline_context.build_pipeline_context (dem, boundary_
-                 polygon_utm, valleys, production_areas, selected_water_
-                 zone, selected_road_corridor, tree_zone_patches, soil
+    boundary --> parcel_data.fetch_parcel_data (every raw KSOP data layer,
+                 fetched once, hard-fail gate -- see fetch_layout_layers()'s
+                 own docstring)
+             --> pipeline_context.build_pipeline_context (dem, boundary_
+                 polygon_utm, soil_components, farm_roads all sourced off
+                 ParcelData above; valleys, production_areas, selected_
+                 water_zone, selected_road_corridor, tree_zone_patches, soil
                  exclusion unions -- every shared upstream input below,
                  computed exactly once; see fetch_layout_layers()'s own
                  docstring for what's still one additional call past this)
              --> road_corridors.identify_road_corridor_candidates
              --> solar_suitability.identify_solar_candidate_zones
-             --> hydrology_data.get_water_features_for_boundary (streams)
-             --> farm_roads_data.get_farm_roads_for_boundary (existing farm roads)
              --> fencing.identify_fencing (boundary + road/water/tree-zone-exclusion fence loops)
              --> contour_lines.compute_contour_lines (global, unclipped)
              --> rendered PNG (basemap + halo + streams + boundary fence +
@@ -280,9 +283,8 @@ from shapely.ops import unary_union
 from shapely.plotting import plot_line, plot_points, plot_polygon
 
 from contour_lines import compute_contour_lines
-from farm_roads_data import get_farm_roads_for_boundary
 from fencing import identify_fencing
-from hydrology_data import get_water_features_for_boundary
+from parcel_data import ParcelData, fetch_parcel_data
 from pipeline_context import build_pipeline_context
 from raster_grid import SQUARE_METERS_PER_ACRE
 from road_corridors import identify_road_corridor_candidates
@@ -907,9 +909,33 @@ def fetch_layout_layers(
     boundary_coordinates: list[tuple[float, float]],
     dem: Optional[dict] = None,
     anchor_lon_lat: Optional[tuple[float, float]] = None,
+    parcel_data: Optional[ParcelData] = None,
 ) -> dict:
     """
     Fetches/derives every layer render_layout_map() draws.
+
+    parcel_data (the parameter): a pre-fetched parcel_data.ParcelData, so a
+    caller that already fetched one for other purposes (e.g. the narrative
+    report's own data needs) doesn't pay for a second, redundant raw-layer
+    fetch. Omit it (default None) and this function calls parcel_data.
+    fetch_parcel_data() itself, ONCE, right here -- which HARD-FAILS,
+    uncached, on any gap among ANY of its 12 mandatory raw layers
+    (including farm_roads: a render with incomplete data is worse than no
+    render at all, confirmed intentional). That hard fail happens before
+    any KSOP computation below runs at all -- production/water/road/tree/
+    solar/fencing never even start on a boundary whose raw data is
+    incomplete.
+
+    dem (the parameter): kept in the signature so an existing caller that
+    passes dem= (generate_pdf_report.py's own pre-fetched-DEM call) doesn't
+    break, but it is NO LONGER USED in this function's body -- every dem
+    value used below now comes from parcel_data.dem instead, since that's
+    the one ParcelData is guaranteed to carry regardless of whether the
+    caller passed anything in. A caller passing dem= without also passing
+    parcel_data= gets a real, working render, just without the redundant-
+    fetch avoidance dem= used to buy it (parcel_data.fetch_parcel_data()
+    always re-fetches its own DEM) -- migrating that caller to build and
+    pass its own parcel_data= instead is flagged as separate, future work.
 
     Builds a single pipeline_context.PipelineContext ONCE (build_pipeline_
     context()) and reuses its fields across every call below, instead of
@@ -919,15 +945,12 @@ def fetch_layout_layers(
     function used to let them -- see diagnose_fetch_layout_layers_
     redundant_fetches.py (a parallel diagnostic to diagnose_pipeline_
     redundant_fetches.py, targeting this function directly) for the real,
-    measured before/after call counts.
-
-    dem (the parameter): now threaded straight through to build_pipeline_
-    context()'s own dem= override (a prior branch's follow-up added it) --
-    a caller that already has a DEM for this exact boundary (e.g.
-    generate_pdf_report.py, which fetches one for its own narrative-report
-    needs alongside this map) no longer pays for a second, redundant
-    fetch. Omit it (default None) and build_pipeline_context() self-
-    fetches exactly once, same as every other caller.
+    measured before/after call counts. build_pipeline_context() itself now
+    receives dem/boundary_polygon_utm/soil_components/farm_roads straight
+    off parcel_data, so its own internal DEM fetch and boundary_polygon_utm
+    reprojection never run either -- the raw-network-fetch layer for this
+    whole function now runs exactly once, inside parcel_data.
+    fetch_parcel_data() above, not once per consuming layer.
 
     production zone legend stats: context.production_areas already IS
     identify_optimized_production_areas()'s own scored_patches list (see
@@ -1007,12 +1030,28 @@ def fetch_layout_layers(
     production_areas/valleys/hydric_floodplain_union/floodplain_data_is_
     fallback, so this call's own three internal self-compute fallbacks
     (road corridor, water zone, tree zone) never run at all -- fully free
-    past farm_road_features. farm_road_features (farm_roads_data.get_
-    farm_roads_for_boundary(), fetched just below) is the ONE fetch this
-    function still needs to protect: identify_fencing() degrades
-    gracefully on its own if that fetch failed.
+    past farm_road_features. farm_road_features is now parcel_data.
+    farm_roads directly -- a guaranteed, already-hard-failed-upfront value
+    by the time this line runs (see parcel_data (the parameter) above), not
+    a fetch this function protects with its own try/except anymore: any
+    farm-road fetch failure already stopped this whole function before
+    build_pipeline_context() was even called.
+
+    water_features is parcel_data.water_features directly, same reasoning
+    -- no longer this function's own hydrology_data.get_water_features_
+    for_boundary() call.
     """
-    context = build_pipeline_context(boundary_coordinates, anchor_lon_lat, dem=dem)
+    if parcel_data is None:
+        parcel_data = fetch_parcel_data(boundary_coordinates)
+
+    context = build_pipeline_context(
+        boundary_coordinates,
+        anchor_lon_lat,
+        dem=parcel_data.dem,
+        boundary_polygon_utm=parcel_data.boundary_polygon_utm,
+        soil_components=parcel_data.soil_components,
+        farm_roads=parcel_data.farm_roads,
+    )
 
     production_zone_legend_stats = _production_zone_legend_stats(
         context.production_areas, context.boundary_polygon_utm.area / SQUARE_METERS_PER_ACRE
@@ -1052,19 +1091,14 @@ def fetch_layout_layers(
     solar_features = solar_result["zones_geojson"]["features"]
     structure_site = solar_features[0] if solar_features else None
 
-    water_features = get_water_features_for_boundary(boundary_coordinates)
+    water_features = parcel_data.water_features
     contour_lines = compute_contour_lines(context.dem)
 
-    try:
-        # Same graceful-degrade pattern every other non-canopy network fetch
-        # in this file already uses -- an existing-farm-road outage shouldn't
-        # take down the whole render; identify_fencing() below still produces
-        # road-corridor-exclusion fencing normally, just omitting the
-        # existing-farm-road loops.
-        farm_road_features = get_farm_roads_for_boundary(boundary_coordinates)
-    except Exception as e:
-        print(f"  fetch_layout_layers: farm road fetch failed ({e}), continuing without existing-farm-road fencing.")
-        farm_road_features = []
+    # farm_road_features is now a guaranteed value -- parcel_data.
+    # fetch_parcel_data() already hard-failed this whole function above if
+    # farm_roads couldn't be fetched, so there's no remaining failure case
+    # here left to catch.
+    farm_road_features = parcel_data.farm_roads
 
     fencing_result = identify_fencing(
         boundary_coordinates,

@@ -120,6 +120,7 @@ from shapely.geometry import box
 import dem_data
 import farm_roads_data
 import fencing
+import parcel_data as pd_module
 import pipeline_context as pc
 import production_area
 import production_area_ceiling
@@ -214,6 +215,10 @@ WRAPS_SITES = {
         (tree_zone_candidates, "get_dem_for_boundary"),
         (water_candidate_zones, "get_dem_for_boundary"),
         (water_suitability, "get_dem_for_boundary"),
+        (pd_module, "get_dem_for_boundary"),  # AFTER only -- parcel_data.fetch_parcel_data()'s own DEM fetch
+    ],
+    "fetch_parcel_data": [
+        (render_layout_map, "fetch_parcel_data"),  # AFTER only -- the fetch-layer entry point this branch adds
     ],
     "identify_optimized_production_areas": [
         (render_layout_map, "identify_optimized_production_areas"),  # BEFORE only, and briefly AFTER Fix 1; absent once Fix 2 removes fetch_layout_layers()'s own 2nd call and its import
@@ -273,10 +278,25 @@ STUB_SITES = [
     (production_area, "_fetch_disqualifying_soil_union", {"return_value": None}),
     (production_area_ceiling, "_fetch_disqualifying_soil_union", {"return_value": None}),
     (production_area, "get_canopy_height_for_boundary", {"side_effect": _fake_clean_canopy}),
-    (farm_roads_data, "get_road_exclusion_union_utm", {"return_value": _FAKE_EXISTING_ROADS_UNION}),
+    # NOT (farm_roads_data, "get_road_exclusion_union_utm", ...) -- every real
+    # caller (production_area._fetch_road_exclusion_union_utm(), whether
+    # invoked from production_area.py itself, production_area_ceiling.py,
+    # water_candidate_zones.py, or water_suitability.py) calls the bare name
+    # `get_road_exclusion_union_utm`, which resolves via production_area.py's
+    # OWN module globals at call time (see that wrapper's own docstring:
+    # "a single test mock of get_road_exclusion_union_utm here covers every
+    # entry point") -- patching farm_roads_data's own attribute instead left
+    # this unstubbed in practice, causing a real, slow live-network attempt
+    # against the proxy on every run (confirmed live: hangs past this
+    # script's 2-minute harness timeout rather than failing fast).
+    (production_area, "get_road_exclusion_union_utm", {"return_value": _FAKE_EXISTING_ROADS_UNION}),
     (road_corridors, "_fetch_floodplain_hydric_union", {"return_value": (_FAKE_HYDRIC_UNION, False)}),
-    (render_layout_map, "get_water_features_for_boundary", {"side_effect": _fake_water_features}),
-    (farm_roads_data, "get_farm_roads_for_boundary", {"return_value": []}),
+    # get_water_features_for_boundary and get_farm_roads_for_boundary are
+    # BOTH counted (not just stubbed) -- see COUNTED_STUB_SITES below, not
+    # here. This is the real before/after proof this branch's own testing
+    # section asks for: how many times the raw NHD-streams/USGS-roads fetch
+    # actually runs, collapsing from "once per self-computing consumer" to
+    # "exactly once, inside parcel_data.fetch_parcel_data()."
     # fencing.identify_fencing()'s own unprotected get_water_features_geojson()
     # fetch (no try/except at that call site -- see fencing.py's own docstring:
     # "fetched here if not already supplied", and fetch_layout_layers() never
@@ -300,7 +320,72 @@ STUB_SITES = [
     # solar_candidate_zones()'s own "except Exception: pass"); stubbed to
     # fail fast for the same reason as the three above.
     (solar_suitability, "get_farmland_classification_for_polygon", {"side_effect": RuntimeError("offline stub: no network")}),
+    # --- parcel_data.py's own 12 raw-layer fetches -- ONLY reached once
+    # fetch_layout_layers() is wired to call parcel_data.fetch_parcel_data()
+    # itself (the "AFTER" checkout this branch produces; hasattr() guards
+    # below make these no-ops, never even entered, against the "BEFORE"
+    # checkout, where parcel_data isn't imported by render_layout_map.py at
+    # all yet). Every one of these is parcel_data.py's OWN `from X import Y`
+    # binding, not the defining module's attribute -- same "patch where it's
+    # looked up" requirement as get_road_exclusion_union_utm/get_water_
+    # features_for_boundary above. get_dem_for_boundary is handled separately
+    # below (added to the shared get_dem_for_boundary WRAPS_SITES list, same
+    # SYNTHETIC_DEM return_value every other binding gets); this module's own
+    # get_farm_roads_for_boundary/get_water_features_for_boundary bindings
+    # are handled in COUNTED_STUB_SITES below instead, not here.
+    (pd_module, "get_soil_data_for_polygon", {"return_value": []}),
+    (pd_module, "get_farmland_classification_for_polygon", {"return_value": []}),
+    (pd_module, "get_erosion_factor_for_polygon", {"return_value": []}),
+    (pd_module, "get_saturated_hydraulic_conductivity_for_polygon", {"return_value": []}),
+    (pd_module, "get_soil_geometries_for_polygon", {"return_value": {}}),
+    (pd_module, "get_canopy_height_for_boundary", {"side_effect": _fake_clean_canopy}),
+    (pd_module, "get_climate_summary_for_point", {"return_value": {"source": "offline-test-stub"}}),
+    (pd_module, "get_elevation_grid", {"return_value": []}),
+    (pd_module, "get_imagery_summary_for_boundary", {"return_value": {"source": "offline-test-stub"}}),
 ]
+
+# Same (module, attr) shape as WRAPS_SITES, grouped by logical name and
+# TRACED (per-call-site, like TRACED_LOGICAL_NAMES below) rather than just
+# stubbed-and-summed -- these two are genuinely-external raw fetches
+# (return_value/side_effect only, real network never touched), but a PLAIN
+# total count is misleading here: both are ALSO called deep inside the
+# COMPUTE-layer's own redundant self-recomputation (e.g. water_suitability.
+# identify_water_suitability()'s own unconditional internal self-fetch,
+# with no override param to short-circuit it -- see that module's own code,
+# untouched by this branch, backlog item 5, deferred). Per-call-site tracing
+# is what actually proves the FETCH-layer claim this branch makes: fetch_
+# layout_layers()'s own former TOP-LEVEL call (render_layout_map.py, BEFORE
+# only) and get_road_exclusion_union_utm's own farm_roads_data-internal
+# self-fetch call collapse to a single parcel_data.py call site in AFTER,
+# while every OTHER call site (inside the untouched compute-layer
+# self-recompute paths) fires exactly as often as it did before -- a flat
+# aggregate total conflates "this branch's own fetch, now gone" with "a
+# pre-existing, deferred, unrelated redundancy," which is exactly the
+# distinction this script's own testing requirements ask to prove.
+# hasattr()-guarded so the SAME registry works on both the BEFORE and AFTER
+# checkouts.
+COUNTED_STUB_SITES = {
+    "get_farm_roads_for_boundary": {
+        "stub": lambda *a, **k: [],
+        "sites": [
+            (farm_roads_data, "get_farm_roads_for_boundary"),
+            (render_layout_map, "get_farm_roads_for_boundary"),  # BEFORE only
+            (pd_module, "get_farm_roads_for_boundary"),  # AFTER only
+            (fencing, "get_farm_roads_for_boundary"),
+            (solar_suitability, "get_farm_roads_for_boundary"),
+        ],
+    },
+    "get_water_features_for_boundary": {
+        "stub": _fake_water_features,
+        "sites": [
+            (render_layout_map, "get_water_features_for_boundary"),  # BEFORE only
+            (water_suitability, "get_water_features_for_boundary"),
+            (tree_zone_candidates, "get_water_features_for_boundary"),
+            (road_corridors, "get_water_features_for_boundary"),
+            (pd_module, "get_water_features_for_boundary"),  # AFTER only
+        ],
+    },
+}
 
 
 # --- Addendum: per-call-site tracing for the two blown-up counts ---
@@ -354,6 +439,19 @@ def _make_traced_side_effect(original, log: Counter):
     return _traced
 
 
+def _make_traced_stub(stub, log: Counter):
+    """Same call-site tracing as _make_traced_side_effect(), but for a
+    COUNTED_STUB_SITES entry -- `stub` is a fixed offline replacement
+    (never the real, network-touching function), so there is no `original`
+    to delegate to afterward."""
+
+    def _traced(*args, **kwargs):
+        log[_find_real_caller()] += 1
+        return stub(*args, **kwargs)
+
+    return _traced
+
+
 def run() -> tuple[dict[str, int], dict[str, Counter]]:
     with ExitStack() as stack:
         enter = stack.enter_context
@@ -362,6 +460,18 @@ def run() -> tuple[dict[str, int], dict[str, Counter]]:
             if hasattr(module, attr):
                 enter(mock_patch.object(module, attr, **kwargs))
 
+        call_site_logs: dict[str, Counter] = {
+            name: Counter() for name in TRACED_LOGICAL_NAMES | set(COUNTED_STUB_SITES)
+        }
+
+        counted_stub_mocks: dict[str, list] = {}
+        for logical_name, spec in COUNTED_STUB_SITES.items():
+            counted_stub_mocks[logical_name] = []
+            traced_stub = _make_traced_stub(spec["stub"], call_site_logs[logical_name])
+            for module, attr in spec["sites"]:
+                if hasattr(module, attr):
+                    counted_stub_mocks[logical_name].append(enter(mock_patch.object(module, attr, side_effect=traced_stub)))
+
         # get_dem_for_boundary: return_value=SYNTHETIC_DEM at every site
         # (never wraps= -- the real function needs network this
         # environment doesn't have). call_count is still tracked.
@@ -369,8 +479,6 @@ def run() -> tuple[dict[str, int], dict[str, Counter]]:
         for module, attr in WRAPS_SITES["get_dem_for_boundary"]:
             if hasattr(module, attr):
                 dem_mocks.append(enter(mock_patch.object(module, attr, return_value=SYNTHETIC_DEM)))
-
-        call_site_logs: dict[str, Counter] = {name: Counter() for name in TRACED_LOGICAL_NAMES}
 
         wraps_mocks: dict[str, list] = {}
         for logical_name, sites in WRAPS_SITES.items():
@@ -393,6 +501,8 @@ def run() -> tuple[dict[str, int], dict[str, Counter]]:
     assert isinstance(layers, dict) and "production_areas" in layers
 
     counts = {"get_dem_for_boundary": sum(m.call_count for m in dem_mocks)}
+    for logical_name, mocks in counted_stub_mocks.items():
+        counts[logical_name] = sum(m.call_count for m in mocks)
     for logical_name, mocks in wraps_mocks.items():
         counts[logical_name] = sum(m.call_count for m in mocks)
 
@@ -425,10 +535,25 @@ def main() -> None:
           f"non-ridge-shaped fixture -- see module docstring)")
 
     print(
-        "\n--- Addendum: per-call-site breakdown for the two traced functions "
+        "\n--- Addendum: per-call-site breakdown for the traced functions "
         "(diagnostic only, no fix applied) ---"
     )
     for logical_name in sorted(TRACED_LOGICAL_NAMES):
+        log = call_site_logs[logical_name]
+        total = sum(log.values())
+        print(f"\n{logical_name}  (total: {total})")
+        print(f"  {'call site (module:line in function)':<70} {'count':>6}")
+        print("  " + "-" * 78)
+        for site, count in log.most_common():
+            print(f"  {site:<70} {count:>6}")
+
+    print(
+        "\n--- Addendum: per-call-site breakdown for the two raw fetches this "
+        "branch's own testing requirements ask to isolate (fetch-layer, this "
+        "branch's target, vs. compute-layer, deferred -- see COUNTED_STUB_SITES' "
+        "own comment above) ---"
+    )
+    for logical_name in sorted(COUNTED_STUB_SITES):
         log = call_site_logs[logical_name]
         total = sum(log.values())
         print(f"\n{logical_name}  (total: {total})")
