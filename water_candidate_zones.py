@@ -161,10 +161,10 @@ MIN_SERVICE_DISTANCE_METERS = 10.0
 # Since the role changed from gate to floor, the real-property-tuned
 # 3.0-acre value from the old single-threshold gate no longer applies --
 # a floor should be LOW (cast a wide net for the population), not itself
-# a selective threshold. 0.25 acres is a low, deliberately unvalidated
+# a selective threshold. 0.3 acres is a low, deliberately unvalidated
 # STARTING value for this new role. CONFIGURABLE — re-tune with
 # diagnose_water_zone_mask.py against your own property.
-MIN_VALLEY_CONTRIBUTING_AREA_ACRES = 0.25
+MIN_VALLEY_CONTRIBUTING_AREA_ACRES = 0.3
 
 # The percentile band (numpy percentile, 0-100 scale) applied to the
 # drainage-qualifying population's own flow_accumulation_cells values --
