@@ -352,4 +352,150 @@ print(
 )
 
 
+# --- 5. REGRESSION GUARD -- floodplain_data_is_fallback=True paired with -
+# --- an EXPLICIT hydric_floodplain_union= override --------------------
+#
+# This item was opened as "confidence_notes never gets the DEM-only-
+# fallback caveat appended when the floodplain fetch degrades." Re-
+# investigation (this branch's own Step 0.2) found the mechanism already
+# correctly wired end-to-end -- _confidence_notes_for_route() unconditionally
+# appends the caveat whenever floodplain_data_is_fallback is True,
+# identify_road_corridor_candidates() already threads it through on both
+# the self-compute path (test 2 above, genuinely exercised against
+# unreachable NHD/SSURGO in this sandbox) and the "override supplied,
+# floodplain_data_is_fallback left unset -> defaults to False" path (test 4
+# above). The one combination neither of those covered -- an EXPLICIT
+# hydric_floodplain_union= override paired with an EXPLICIT
+# floodplain_data_is_fallback=True -- is covered here.
+#
+# THIS ITEM IS CLOSED, NOT OPEN: there is no production-code fix for it in
+# this branch. This test exists purely as a regression guard so that if
+# this specific combination ever DOES regress, it fails loudly here rather
+# than silently passing by accident -- do not read the presence of this
+# test as evidence the bug is still live; read a FAILURE here as evidence
+# it came back.
+
+with mock_patch.object(production_area, "_fetch_disqualifying_soil_union", return_value=None), \
+     mock_patch.object(production_area_ceiling, "_fetch_disqualifying_soil_union", return_value=None), \
+     mock_patch.object(production_area, "get_canopy_height_for_boundary", _fake_clean_canopy), \
+     mock_patch.object(road_corridors, "_fetch_floodplain_hydric_union") as mock_flood_explicit_true:
+    explicit_true_result = road_corridors.identify_road_corridor_candidates(
+        boundary_coordinates,
+        anchor_lon_lat=anchor_lon_lat,
+        dem=synthetic_dem,
+        hydric_floodplain_union=OVERRIDE_HYDRIC_FLOODPLAIN_UNION,
+        floodplain_data_is_fallback=True,
+    )
+
+assert mock_flood_explicit_true.call_count == 0, (
+    "_fetch_floodplain_hydric_union() must NOT be called when hydric_floodplain_union was supplied directly"
+)
+assert explicit_true_result["zones_geojson"]["features"], "expected at least one route in this direct-override run"
+for feature in explicit_true_result["zones_geojson"]["features"]:
+    notes = feature["properties"]["confidence_notes"].lower()
+    assert "dem-only fallback" in notes, (
+        "REGRESSION: confidence_notes must carry the DEM-only fallback caveat whenever "
+        "floodplain_data_is_fallback=True, including when it arrives via an EXPLICIT override (not just the "
+        "self-compute path covered by test 2) -- if this fails, the previously-suspected bug is back"
+    )
+print(
+    "REGRESSION GUARD (test 5): confidence_notes correctly carries the DEM-only fallback caveat when "
+    "floodplain_data_is_fallback=True arrives via an explicit override paired with an explicit "
+    "hydric_floodplain_union= -- closing out a bug suspected earlier this session that reinvestigation found "
+    "was already handled correctly."
+)
+
+
+# =====================================================================
+# 6. canopy_height= override forwarding: identify_road_corridor_candidates()
+# has no direct canopy gate of its own (confirmed in this branch's own
+# Step 0.1) -- only its production_areas/selected_water_zone self-compute
+# calls (identify_optimized_production_areas()/fetch_and_select_optimal_
+# water_zone()) do. Real, wraps=-based proof (both nested calls run for
+# real, not stubbed away) that a supplied canopy_height reaches both and
+# causes production_area.get_canopy_height_for_boundary() to be called
+# ZERO times end-to-end, using the SAME CanopyOverrideProbe every other
+# canopy-override test in this codebase uses. Disqualifying-soil fetches
+# stay mocked purely for speed/determinism, same as every other section
+# in this file; NHD/SSURGO stay real/unmocked, same as test 2 above.
+# =====================================================================
+
+from _canopy_override_probe import CanopyOverrideProbe, clean_canopy_for  # noqa: E402
+
+CANOPY_HEIGHT_OVERRIDE = clean_canopy_for(synthetic_dem)
+
+with mock_patch.object(production_area, "_fetch_disqualifying_soil_union", return_value=None), \
+     mock_patch.object(production_area_ceiling, "_fetch_disqualifying_soil_union", return_value=None), \
+     mock_patch.object(
+         road_corridors, "identify_optimized_production_areas",
+         wraps=road_corridors.identify_optimized_production_areas,
+     ) as mock_prod_canopy, \
+     mock_patch.object(
+         road_corridors, "fetch_and_select_optimal_water_zone",
+         wraps=road_corridors.fetch_and_select_optimal_water_zone,
+     ) as mock_water_canopy:
+    with CanopyOverrideProbe() as canopy_probe:
+        canopy_result = road_corridors.identify_road_corridor_candidates(
+            boundary_coordinates,
+            anchor_lon_lat=anchor_lon_lat,
+            dem=synthetic_dem,
+            canopy_height=CANOPY_HEIGHT_OVERRIDE,
+        )
+
+canopy_probe.assert_override_used(CANOPY_HEIGHT_OVERRIDE, "identify_road_corridor_candidates()")
+assert mock_prod_canopy.call_args.kwargs["canopy_height"] is CANOPY_HEIGHT_OVERRIDE, (
+    "identify_road_corridor_candidates() must forward canopy_height to its own "
+    "identify_optimized_production_areas() self-compute call by identity"
+)
+assert mock_water_canopy.call_args.kwargs["canopy_height"] is CANOPY_HEIGHT_OVERRIDE, (
+    "identify_road_corridor_candidates() must forward canopy_height to its own "
+    "fetch_and_select_optimal_water_zone() self-compute call by identity"
+)
+validate_feature_collection(canopy_result["zones_geojson"])
+print(
+    f"canopy_height= override: identify_road_corridor_candidates()'s own production_areas/selected_water_zone "
+    f"self-compute calls -- run for REAL here, not stubbed away -- receive the exact caller-supplied override "
+    f"and cause production_area.get_canopy_height_for_boundary() to be called ZERO times "
+    f"({len(canopy_probe.mask_arrays)} real canopy gate(s) reached, every one computed on the exact supplied "
+    "override array)."
+)
+
+
+# --- 7. REGRESSION: no canopy_height supplied -> identify_optimized_ -----
+# --- production_areas()/fetch_and_select_optimal_water_zone() still ------
+# --- receive canopy_height=None (the same as never having the kwarg at ---
+# --- all pre-branch) -- adding the parameter must be a pure no-op when ---
+# --- the caller doesn't use it. Test 2 above (identical fixture, no ------
+# --- canopy_height=) already proves the actual OUTPUT is unaffected; -----
+# --- this proves the WIRING itself defaults correctly too. ---------------
+
+with mock_patch.object(production_area, "_fetch_disqualifying_soil_union", return_value=None), \
+     mock_patch.object(production_area_ceiling, "_fetch_disqualifying_soil_union", return_value=None), \
+     mock_patch.object(production_area, "get_canopy_height_for_boundary", _fake_clean_canopy), \
+     mock_patch.object(
+         road_corridors, "identify_optimized_production_areas",
+         wraps=road_corridors.identify_optimized_production_areas,
+     ) as mock_prod_default, \
+     mock_patch.object(
+         road_corridors, "fetch_and_select_optimal_water_zone",
+         wraps=road_corridors.fetch_and_select_optimal_water_zone,
+     ) as mock_water_default:
+    road_corridors.identify_road_corridor_candidates(
+        boundary_coordinates, dem=synthetic_dem, anchor_lon_lat=anchor_lon_lat,
+    )
+
+assert mock_prod_default.call_args.kwargs.get("canopy_height") is None, (
+    "identify_road_corridor_candidates() with no canopy_height= supplied must still pass canopy_height=None "
+    "through to identify_optimized_production_areas() -- a pure no-op default, not a behavior change"
+)
+assert mock_water_default.call_args.kwargs.get("canopy_height") is None, (
+    "identify_road_corridor_candidates() with no canopy_height= supplied must still pass canopy_height=None "
+    "through to fetch_and_select_optimal_water_zone() -- a pure no-op default, not a behavior change"
+)
+print(
+    "REGRESSION (test 7): with no canopy_height= supplied, both self-compute calls still receive "
+    "canopy_height=None -- adding the parameter is a pure no-op for existing callers."
+)
+
+
 print("\nAll road corridor pipeline checks passed.")

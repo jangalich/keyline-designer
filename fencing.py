@@ -1077,6 +1077,7 @@ def identify_fencing(
     tree_zone_patches: Optional[list[dict]] = None,
     hydric_floodplain_union=None,
     floodplain_data_is_fallback: Optional[bool] = None,
+    canopy_height: Optional[dict] = None,
 ) -> dict:
     """
     Full pipeline entry point for Subdivision Fences' computed geometry
@@ -1180,6 +1181,19 @@ def identify_fencing(
     road_corridor_candidates()/identify_tree_zone_candidates() (fetch_
     and_select_optimal_water_zone() doesn't take them).
 
+    canopy_height is an optional pre-fetched override (the same dict
+    canopy_height_data.get_canopy_height_for_boundary() returns, e.g.
+    parcel_data.ParcelData.canopy_height) forwarded into identify_
+    boundary_fencing() -- this function's OWN direct mandatory canopy
+    gate -- and into every self-compute fallback call above that itself
+    accepts it (identify_road_corridor_candidates()/fetch_and_select_
+    optimal_water_zone()/identify_tree_zone_candidates()), when the
+    corresponding override isn't itself already supplied. Same forwarding
+    pattern as boundary_polygon_utm/production_areas/valleys above --
+    closes the same nested-fetch gap, this time for canopy, so a caller
+    supplying canopy_height here never causes any of these four calls to
+    issue its own redundant canopy fetch.
+
     Returns:
         {
             'fencing_geojson': FeatureCollection,   # "exclusion_fencing" (stream) + "perimeter_fencing" (boundary + road corridor + existing farm road + water zone + tree zone) features
@@ -1207,7 +1221,7 @@ def identify_fencing(
     utm_crs = _utm_crs_for_boundary(boundary_coordinates)
     stream_entries = find_stream_exclusion_fencing(stream_features, utm_crs, stream_exclusion_buffer_meters)
 
-    boundary_result = identify_boundary_fencing(boundary_coordinates, dem=dem)
+    boundary_result = identify_boundary_fencing(boundary_coordinates, dem=dem, canopy_height=canopy_height)
 
     if selected_road_corridor_cells is None:
         if selected_road_corridor is None:
@@ -1220,6 +1234,7 @@ def identify_fencing(
                 valleys=valleys,
                 hydric_floodplain_union=hydric_floodplain_union,
                 floodplain_data_is_fallback=floodplain_data_is_fallback,
+                canopy_height=canopy_height,
             )
             selected_road_corridor = road_corridor_candidates["selected_road_corridor"]
         selected_road_corridor_cells = selected_road_corridor["cells"] if selected_road_corridor else None
@@ -1271,6 +1286,7 @@ def identify_fencing(
                 boundary_polygon_utm=boundary_polygon_utm,
                 valleys=valleys,
                 production_areas=production_areas,
+                canopy_height=canopy_height,
             )
         selected_water_zone_render_fill_polygon_utm = (
             selected_water_zone["render_fill_polygon_utm"] if selected_water_zone else None
@@ -1301,6 +1317,7 @@ def identify_fencing(
                 selected_road_corridor=selected_road_corridor,
                 hydric_floodplain_union=hydric_floodplain_union,
                 floodplain_data_is_fallback=floodplain_data_is_fallback,
+                canopy_height=canopy_height,
             )
             tree_zone_patches = tree_zone_result.get("patches", [])
         tree_zone_render_fill_polygons_utm = [

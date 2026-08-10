@@ -1078,4 +1078,110 @@ print(
 )
 
 
+# =====================================================================
+# identify_fencing(): canopy_height= override forwarding (this branch's own addition, per Step
+# 0.3). Must reach (1) identify_boundary_fencing() -- its own DIRECT mandatory canopy gate -- and
+# (2) its three self-compute fallback calls (identify_road_corridor_candidates()/fetch_and_select_
+# optimal_water_zone()/identify_tree_zone_candidates()), each of which independently accepts
+# canopy_height and has its own canopy gate one level further down. identify_boundary_fencing() is
+# left REAL here (not mocked) so the CanopyOverrideProbe below is a genuine zero-fetch proof for
+# the one canopy gate directly reachable inside fencing.py itself; the other three self-computes
+# are mocked (same reasoning as Scenario 2/3 above -- a fully real run would also hit real, slow
+# NHD/SSURGO/soil network fetches that have nothing to do with canopy forwarding), with their
+# canopy_height kwarg captured for an identity check instead.
+# =====================================================================
+
+CANOPY_FENCING_OVERRIDE = clean_canopy_for(TEST_DEM)
+_captured_fencing_canopy_kwargs = {}
+
+
+def _capture_road_corridor_canopy(*args, **kwargs):
+    _captured_fencing_canopy_kwargs["road"] = kwargs.get("canopy_height")
+    return {"selected_road_corridor": None}
+
+
+def _capture_water_zone_canopy(*args, **kwargs):
+    _captured_fencing_canopy_kwargs["water"] = kwargs.get("canopy_height")
+    return None
+
+
+def _capture_tree_zone_canopy(*args, **kwargs):
+    _captured_fencing_canopy_kwargs["tree"] = kwargs.get("canopy_height")
+    return {"patches": []}
+
+
+with (
+    mock_patch.object(fencing, "identify_road_corridor_candidates", _capture_road_corridor_canopy),
+    mock_patch.object(fencing, "fetch_and_select_optimal_water_zone", _capture_water_zone_canopy),
+    mock_patch.object(fencing, "identify_tree_zone_candidates", _capture_tree_zone_canopy),
+):
+    with CanopyOverrideProbe() as fencing_canopy_probe:
+        canopy_fencing_result = identify_fencing(
+            PROPERTY_BOUNDARY,
+            water_features_geojson=no_stream_water,
+            dem=TEST_DEM,
+            farm_road_features=[],
+            canopy_height=CANOPY_FENCING_OVERRIDE,
+        )
+
+fencing_canopy_probe.assert_override_used(CANOPY_FENCING_OVERRIDE, "identify_fencing() -> identify_boundary_fencing()")
+validate_feature_collection(canopy_fencing_result["fencing_geojson"])
+for call_name in ("road", "water", "tree"):
+    assert _captured_fencing_canopy_kwargs[call_name] is CANOPY_FENCING_OVERRIDE, (
+        f"identify_fencing() must forward canopy_height to its own {call_name} self-compute call by identity"
+    )
+print(
+    "identify_fencing(): a supplied canopy_height override reaches identify_boundary_fencing() for real "
+    f"(0 canopy fetches, {len(fencing_canopy_probe.mask_arrays)} real gate(s) reached on the exact supplied "
+    "array) AND is forwarded by identity into all three self-compute fallback calls "
+    "(identify_road_corridor_candidates()/fetch_and_select_optimal_water_zone()/identify_tree_zone_candidates())."
+)
+
+
+# --- REGRESSION: no canopy_height supplied -> identify_boundary_fencing() still runs with
+# canopy_height=None (same as the plain identify_fencing() scenario earlier in this file), and all
+# three self-compute calls receive canopy_height=None too -- a pure no-op default, not a behavior change ---
+
+_captured_fencing_canopy_kwargs_regression = {}
+
+
+def _capture_road_corridor_canopy_regression(*args, **kwargs):
+    _captured_fencing_canopy_kwargs_regression["road"] = kwargs.get("canopy_height")
+    return {"selected_road_corridor": None}
+
+
+def _capture_water_zone_canopy_regression(*args, **kwargs):
+    _captured_fencing_canopy_kwargs_regression["water"] = kwargs.get("canopy_height")
+    return None
+
+
+def _capture_tree_zone_canopy_regression(*args, **kwargs):
+    _captured_fencing_canopy_kwargs_regression["tree"] = kwargs.get("canopy_height")
+    return {"patches": []}
+
+
+with (
+    mock_patch.object(pa, "get_canopy_height_for_boundary", _fake_no_canopy),
+    mock_patch.object(fencing, "identify_road_corridor_candidates", _capture_road_corridor_canopy_regression),
+    mock_patch.object(fencing, "fetch_and_select_optimal_water_zone", _capture_water_zone_canopy_regression),
+    mock_patch.object(fencing, "identify_tree_zone_candidates", _capture_tree_zone_canopy_regression),
+):
+    canopy_regression_result = identify_fencing(
+        PROPERTY_BOUNDARY,
+        water_features_geojson=no_stream_water,
+        dem=TEST_DEM,
+        farm_road_features=[],
+    )
+validate_feature_collection(canopy_regression_result["fencing_geojson"])
+for call_name in ("road", "water", "tree"):
+    assert _captured_fencing_canopy_kwargs_regression[call_name] is None, (
+        f"identify_fencing() with no canopy_height= supplied must still pass canopy_height=None through to "
+        f"its {call_name} self-compute call -- a pure no-op default, not a behavior change"
+    )
+print(
+    "REGRESSION: identify_fencing() with no canopy_height= supplied still passes canopy_height=None through "
+    "to all three self-compute calls -- adding the parameter is a pure no-op for existing callers."
+)
+
+
 print("\nAll fencing checks passed.")

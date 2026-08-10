@@ -1333,6 +1333,7 @@ def identify_road_corridor_candidates(
     selected_water_zone: Optional[dict] = None,
     hydric_floodplain_union=None,
     floodplain_data_is_fallback: Optional[bool] = None,
+    canopy_height: Optional[dict] = None,
     **corridor_kwargs,
 ) -> dict:
     """
@@ -1342,6 +1343,19 @@ def identify_road_corridor_candidates(
     "suggested_road_corridor" GeoJSON FeatureCollection. Every real-data
     fetch degrades independently and gracefully, same pattern as
     water_candidate_zones.py and solar_suitability.py.
+
+    canopy_height is an optional pre-fetched override (the same dict
+    canopy_height_data.get_canopy_height_for_boundary() returns, e.g.
+    parcel_data.ParcelData.canopy_height) forwarded into this function's
+    own production_areas/selected_water_zone self-compute calls
+    (identify_optimized_production_areas()/fetch_and_select_optimal_
+    water_zone(), both of which already accept it) when those aren't
+    themselves already overridden -- same nested-forwarding pattern
+    solar_suitability.py's identify_solar_candidate_zones() and tree_
+    zone_candidates.py's identify_tree_zone_candidates() already use, so
+    a caller supplying canopy_height here never causes either nested call
+    to issue its own redundant canopy fetch. This function has no direct
+    canopy gate of its own -- only forwarding.
 
     anchor_lon_lat (lon, lat) is the real, chosen access point routing
     starts from (see find_road_routes()) -- kept Optional here (default
@@ -1411,7 +1425,9 @@ def identify_road_corridor_candidates(
     # rather than let a KeyError surface deep inside that masking code if
     # this pipeline's own patch shape ever changes.
     if production_areas is None:
-        production_areas = identify_optimized_production_areas(boundary_coordinates, dem=dem)["scored_patches"]
+        production_areas = identify_optimized_production_areas(
+            boundary_coordinates, dem=dem, canopy_height=canopy_height
+        )["scored_patches"]
     if production_areas and "render_fill_polygon_utm" not in production_areas[0]:
         raise RuntimeError(
             "identify_optimized_production_areas()'s scored_patches no longer carry "
@@ -1432,6 +1448,7 @@ def identify_road_corridor_candidates(
             boundary_polygon_utm=boundary_polygon_utm,
             valleys=valleys,
             production_areas=production_areas,
+            canopy_height=canopy_height,
         )
 
     if hydric_floodplain_union is None:
