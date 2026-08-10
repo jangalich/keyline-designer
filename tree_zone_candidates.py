@@ -946,6 +946,7 @@ def identify_tree_zone_candidates(
     selected_road_corridor: Optional[dict] = None,
     hydric_floodplain_union=None,
     floodplain_data_is_fallback: Optional[bool] = None,
+    canopy_height: Optional[dict] = None,
     **score_kwargs,
 ) -> dict:
     """
@@ -1003,10 +1004,18 @@ def identify_tree_zone_candidates(
     when selected_road_corridor is not itself supplied, same as
     production_areas/valleys/boundary_polygon_utm below.
 
-    tree_root_zone_mask_utm (Step 2's own mandatory canopy fetch) is NOT
-    among these overrides -- it is always self-computed here (see module
-    docstring); that's a deliberate, separate scope decision, not an
-    oversight.
+    canopy_height is an optional pre-fetched override: the SAME dict
+    canopy_height_data.get_canopy_height_for_boundary() returns (e.g.
+    parcel_data.ParcelData.canopy_height). When supplied it is forwarded to
+    EVERY canopy consumer this function reaches -- Step 2's own get_required_
+    tree_root_zone_mask_utm() call plus the nested identify_optimized_
+    production_areas() and identify_water_suitability() self-compute calls
+    below (each of which otherwise re-fetches canopy independently) -- so
+    none of them hit the network; when None (the default) each fetches as
+    before. Note this overrides the canopy SOURCE only -- the derived
+    tree_root_zone_mask_utm itself is still always computed here (at this
+    module's own TREE_ZONE_CANOPY_BUFFER_METERS), never passed in, a
+    deliberate separate scope decision.
     """
     if dem is None:
         dem = get_dem_for_boundary(boundary_coordinates)
@@ -1034,7 +1043,9 @@ def identify_tree_zone_candidates(
     # for why (production_area.py's own cluster_and_gate() docstring for
     # render_fill_polygon_utm itself). ---
     if production_areas is None:
-        production_result = identify_optimized_production_areas(boundary_coordinates, dem=dem)
+        production_result = identify_optimized_production_areas(
+            boundary_coordinates, dem=dem, canopy_height=canopy_height
+        )
         production_areas = production_result["scored_patches"]
     production_polygons_utm = [p["render_fill_polygon_utm"] for p in production_areas]
 
@@ -1045,6 +1056,7 @@ def identify_tree_zone_candidates(
             boundary_polygon_utm=boundary_polygon_utm,
             valleys=valleys,
             production_areas=production_areas,
+            canopy_height=canopy_height,
         )
         selected_water_zone = water_result["selected_water_zone"]
     water_polygons_utm = [selected_water_zone["render_fill_polygon_utm"]] if selected_water_zone else []
@@ -1106,7 +1118,7 @@ def identify_tree_zone_candidates(
     # re-derives its own upstream dependencies" pattern render_layout_
     # map.py's own fetch_layout_layers() already documents. ---
     tree_root_zone_mask_utm = get_required_tree_root_zone_mask_utm(
-        boundary_polygon_utm, dem, buffer_meters=TREE_ZONE_CANOPY_BUFFER_METERS
+        boundary_polygon_utm, dem, buffer_meters=TREE_ZONE_CANOPY_BUFFER_METERS, canopy_height=canopy_height
     )
 
     # --- Step 2's remaining inputs: soil/stream geometry, each degrading

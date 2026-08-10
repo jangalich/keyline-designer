@@ -631,4 +631,33 @@ print(
 )
 
 
+# --- canopy_height override forwarding ---
+#
+# identify_water_suitability() reaches canopy on TWO independent paths when
+# production_areas is left to self-compute: its default identify_optimized_
+# production_areas() fetch AND its own mandatory get_required_tree_root_
+# zone_mask_utm() gate. A supplied canopy_height override must reach BOTH,
+# so neither re-fetches from the network. Shared-core behavior is proven in
+# test_canopy_mask_override.py; this proves this entry point forwards the
+# override down every canopy path. Reuses the fully-offline synthetic_dem/
+# boundary fixture the end-to-end wiring check above already uses.
+from _canopy_override_probe import CanopyOverrideProbe, clean_canopy_for  # noqa: E402
+
+_ov_override = clean_canopy_for(synthetic_dem)
+with CanopyOverrideProbe() as _ov_probe:
+    identify_water_suitability(
+        boundary_coordinates, dem=synthetic_dem, check_soil=False, check_streams=False,
+        zone_kwargs={"min_boundary_setback_meters": 5.0}, canopy_height=_ov_override,
+    )
+_ov_probe.assert_override_used(_ov_override, "identify_water_suitability()")
+assert len(_ov_probe.mask_arrays) >= 2, (
+    "identify_water_suitability(): with production_areas self-computed, the override must reach BOTH "
+    f"canopy paths (internal identify_optimized_production_areas + own gate), saw {len(_ov_probe.mask_arrays)}"
+)
+print(
+    "identify_water_suitability(): a supplied canopy_height override reaches BOTH internal canopy paths "
+    f"({len(_ov_probe.mask_arrays)} gates) -- 0 canopy fetches, exact override array used throughout."
+)
+
+
 print("\nAll water_suitability checks passed.")

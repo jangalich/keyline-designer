@@ -1028,6 +1028,7 @@ def identify_water_suitability(
     check_soil: bool = True,
     check_streams: bool = True,
     zone_kwargs: Optional[dict] = None,
+    canopy_height: Optional[dict] = None,
     **score_kwargs,
 ) -> dict:
     """
@@ -1047,6 +1048,15 @@ def identify_water_suitability(
     docstring for the general reasoning; the one thing that's different
     here is what production_areas defaults to when not supplied (see
     below).
+
+    canopy_height is an optional pre-fetched override in the same family:
+    the SAME dict canopy_height_data.get_canopy_height_for_boundary()
+    returns (e.g. parcel_data.ParcelData.canopy_height). When supplied it
+    is forwarded to BOTH canopy consumers this function reaches -- the
+    default production_areas fetch (identify_optimized_production_areas()
+    above) and this module's own mandatory get_required_tree_root_zone_
+    mask_utm() call -- so neither re-fetches canopy from the network; when
+    None (the default) both fetch as before.
 
     production_areas defaults to production_area_ceiling.identify_
     optimized_production_areas()'s own scored_patches -- the SAME
@@ -1101,7 +1111,7 @@ def identify_water_suitability(
 
     if production_areas is None:
         production_areas = identify_optimized_production_areas(
-            boundary_coordinates, dem=dem
+            boundary_coordinates, dem=dem, canopy_height=canopy_height
         )["scored_patches"]
 
     # Same mandatory-canopy/optional-road wiring identify_water_system_
@@ -1110,7 +1120,7 @@ def identify_water_suitability(
     # needs its own copy of the same fetch-or-raise/fetch-or-degrade calls
     # rather than silently leaving these new gates unchecked on this path.
     canopy_root_zone_mask_utm = get_required_tree_root_zone_mask_utm(
-        boundary_polygon_utm, dem, buffer_meters=WATER_ZONE_CANOPY_BUFFER_METERS
+        boundary_polygon_utm, dem, buffer_meters=WATER_ZONE_CANOPY_BUFFER_METERS, canopy_height=canopy_height
     )
 
     try:

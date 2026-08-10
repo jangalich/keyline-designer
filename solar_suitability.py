@@ -953,6 +953,7 @@ def identify_solar_candidate_zones(
     hydric_floodplain_union=None,
     floodplain_data_is_fallback: Optional[bool] = None,
     check_prime_farmland: bool = True,
+    canopy_height: Optional[dict] = None,
     **zone_kwargs,
 ) -> dict:
     """
@@ -1007,6 +1008,16 @@ def identify_solar_candidate_zones(
     SECOND, fully independent copy of this same mandatory gate internally
     — both are expected to hard-fail independently on a canopy outage;
     neither is caught here.
+      canopy_height is an optional pre-fetched override in the same family
+      as the dem/boundary/production/water/valleys overrides: the SAME dict
+      canopy_height_data.get_canopy_height_for_boundary() returns (e.g.
+      parcel_data.ParcelData.canopy_height). When supplied it is forwarded
+      to EVERY canopy consumer this function reaches -- its own direct gate
+      above plus the nested identify_optimized_production_areas(),
+      identify_water_suitability(), and identify_tree_zone_candidates()
+      calls below -- so none of those redundant, independent canopy fetches
+      hit the network; when None (the default) each fetches as before,
+      leaving every gate's hard-fail semantics unchanged.
 
     PRODUCTION is production_area_ceiling.identify_optimized_production_
     areas()'s own OPTIMIZED, ceiling-trimmed 'scored_patches' (not
@@ -1109,14 +1120,16 @@ def identify_solar_candidate_zones(
     # MANDATORY, non-degrading -- see module docstring and this
     # function's own docstring. Deliberately NOT wrapped in try/except.
     canopy_mask_utm = get_required_tree_root_zone_mask_utm(
-        boundary_polygon_utm, dem, buffer_meters=TREE_ROOT_ZONE_BUFFER_METERS
+        boundary_polygon_utm, dem, buffer_meters=TREE_ROOT_ZONE_BUFFER_METERS, canopy_height=canopy_height
     )
 
     if production_areas is None:
         # Optimized/ceiling-trimmed production geometry -- pulls in its
         # own SECOND, independent mandatory canopy gate internally; also
         # not caught here (see this function's own docstring).
-        production_result = identify_optimized_production_areas(boundary_coordinates, dem=dem)
+        production_result = identify_optimized_production_areas(
+            boundary_coordinates, dem=dem, canopy_height=canopy_height
+        )
         production_areas = production_result["scored_patches"]
 
     if selected_water_zone is None:
@@ -1126,6 +1139,7 @@ def identify_solar_candidate_zones(
             boundary_polygon_utm=boundary_polygon_utm,
             valleys=valleys,
             production_areas=production_areas,
+            canopy_height=canopy_height,
         )
         selected_water_zone = water_result["selected_water_zone"]
     water_zones = [selected_water_zone] if selected_water_zone else []
@@ -1191,6 +1205,7 @@ def identify_solar_candidate_zones(
             selected_road_corridor=selected_road_corridor,
             hydric_floodplain_union=hydric_floodplain_union,
             floodplain_data_is_fallback=floodplain_data_is_fallback,
+            canopy_height=canopy_height,
         )
         tree_zone_patches = tree_zone_result["patches"]
         if tree_zone_patches:

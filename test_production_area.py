@@ -1151,4 +1151,35 @@ print(
 )
 
 
+# --- canopy_height override forwarding ---
+#
+# identify_production_areas()'s mandatory woody-vegetation gate now accepts
+# a pre-fetched canopy_height override (the SAME dict get_canopy_height_for_
+# boundary()/parcel_data.ParcelData.canopy_height carry). When supplied it
+# must be forwarded to get_required_tree_root_zone_mask_utm() so NO network
+# canopy fetch happens and the exact supplied array is what the gate runs on.
+# The shared-core behavior (fetch-or-use, no-override regression, hard-fail
+# unchanged) is proven in test_canopy_mask_override.py; this proves THIS
+# entry point actually forwards it. Reuses the flat-bench fixture above.
+from _canopy_override_probe import CanopyOverrideProbe, clean_canopy_for  # noqa: E402
+
+_ov_dem = _dem(array)
+_ov_override = clean_canopy_for(_ov_dem)
+with CanopyOverrideProbe() as _ov_probe:
+    _ov_patches = identify_production_areas(
+        _ov_dem, FULL_EXTENT_BOUNDARY, check_soil=False, check_roads=False, canopy_height=_ov_override
+    )
+_ov_probe.assert_override_used(_ov_override, "identify_production_areas()")
+# Regression: the override path yields the same candidate geometry the
+# self-fetched clean-canopy path above did (canopy sourcing is all that changed).
+assert len(_ov_patches) == 1 and _ov_patches[0]["area_acres"] == patch["area_acres"], (
+    "identify_production_areas(): supplying a clean canopy_height override must yield the SAME "
+    "flat-bench candidate the self-fetched clean-canopy path produced"
+)
+print(
+    "identify_production_areas(): a supplied canopy_height override is forwarded to the mandatory "
+    "woody-vegetation gate -- 0 canopy fetches, exact override array used, identical candidate output."
+)
+
+
 print("\nAll production_area checks passed.")

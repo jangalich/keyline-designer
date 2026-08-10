@@ -240,6 +240,7 @@ def identify_optimized_production_areas(
     max_slope_pct: float = MAX_PRODUCTION_SLOPE_PCT,
     min_area_acres: float = MIN_PRODUCTION_AREA_ACRES,
     reference_max_area_acres: float = REFERENCE_MAX_AREA_ACRES,
+    canopy_height: Optional[dict] = None,
 ) -> dict:
     """
     Full pipeline entry point: fetches the DEM (unless one is passed in),
@@ -277,6 +278,14 @@ def identify_optimized_production_areas(
     (render_layout_map.py, tree_zone_candidates.py) are expected to let
     this raise, not catch and degrade it.
 
+    canopy_height is an optional pre-fetched override forwarded straight to
+    get_required_tree_root_zone_mask_utm(): the SAME dict canopy_height_
+    data.get_canopy_height_for_boundary() returns (e.g. parcel_data.
+    ParcelData.canopy_height). When supplied, the mandatory canopy gate
+    uses it rather than issuing its own Planetary Computer fetch; when None
+    (the default) canopy is fetched here as before, leaving this gate's
+    hard-fail semantics unchanged.
+
     Returns the same "production_area_candidate" GeoJSON FeatureCollection
     / scored_patches shape this pipeline has always returned, plus
     top-level summary fields describing the global trim:
@@ -308,7 +317,9 @@ def identify_optimized_production_areas(
         except Exception:
             disqualifying_soil_union_utm = _SOIL_CHECK_UNCHECKED
 
-    tree_root_zone_mask_utm = get_required_tree_root_zone_mask_utm(boundary_polygon_utm, dem)
+    tree_root_zone_mask_utm = get_required_tree_root_zone_mask_utm(
+        boundary_polygon_utm, dem, canopy_height=canopy_height
+    )
 
     road_exclusion_union_utm = _ROAD_CHECK_UNCHECKED
     if check_roads:

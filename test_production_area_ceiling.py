@@ -543,4 +543,27 @@ print(
 )
 
 
+# --- canopy_height override forwarding ---
+#
+# identify_optimized_production_areas()'s mandatory canopy gate (production_
+# area.get_required_tree_root_zone_mask_utm(), the SAME shared helper) now
+# accepts a pre-fetched canopy_height override. When supplied it must be
+# forwarded so no network canopy fetch happens and the exact supplied array
+# reaches the gate. Shared-core behavior is proven in test_canopy_mask_
+# override.py; this proves THIS entry point forwards it. Reuses the offline
+# dem_band/boundary_coords fixture the check_soil=False path above already uses.
+from _canopy_override_probe import CanopyOverrideProbe, clean_canopy_for  # noqa: E402
+
+_ov_override = clean_canopy_for(dem_band)
+with CanopyOverrideProbe() as _ov_probe:
+    pac.identify_optimized_production_areas(
+        boundary_coords, dem=dem_band, check_soil=False, check_roads=False, canopy_height=_ov_override
+    )
+_ov_probe.assert_override_used(_ov_override, "identify_optimized_production_areas()")
+print(
+    "identify_optimized_production_areas(): a supplied canopy_height override is forwarded to its "
+    "mandatory canopy gate -- 0 canopy fetches, exact override array used."
+)
+
+
 print("\nAll production_area_ceiling checks passed.")

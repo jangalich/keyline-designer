@@ -982,6 +982,7 @@ def tree_zone_fencing_to_geojson(
 def identify_boundary_fencing(
     boundary_coordinates: list[tuple[float, float]],
     dem: Optional[dict] = None,
+    canopy_height: Optional[dict] = None,
 ) -> dict:
     """
     Fetch-and-wrap entry point for canopy-aware boundary fencing. Fetches
@@ -998,6 +999,14 @@ def identify_boundary_fencing(
     fail behavior as those callers -- "can't verify what canopy actually
     overlaps the boundary" is treated as a hard failure, not a lower-
     confidence result to hand back with a caveat.
+
+    canopy_height is an optional pre-fetched override forwarded straight to
+    get_required_tree_root_zone_mask_utm(): the SAME dict canopy_height_
+    data.get_canopy_height_for_boundary() returns (e.g. parcel_data.
+    ParcelData.canopy_height). When supplied, the mandatory canopy gate
+    uses it instead of issuing its own Planetary Computer fetch; when None
+    (the default) canopy is fetched here as before, leaving this gate's
+    hard-fail behavior unchanged.
 
     The mask is converted to a real cell-union footprint polygon via
     raster_grid.cell_union_footprint() -- the SAME real per-cell-square
@@ -1028,7 +1037,7 @@ def identify_boundary_fencing(
     boundary_polygon_utm = Polygon(zip(boundary_xs, boundary_ys))
 
     tree_root_zone_mask_utm = get_required_tree_root_zone_mask_utm(
-        boundary_polygon_utm, dem, buffer_meters=BOUNDARY_FENCE_CANOPY_BUFFER_METERS
+        boundary_polygon_utm, dem, buffer_meters=BOUNDARY_FENCE_CANOPY_BUFFER_METERS, canopy_height=canopy_height
     )
     canopy_union_utm = cell_union_footprint(dem, tree_root_zone_mask_utm)
 

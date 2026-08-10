@@ -1084,6 +1084,7 @@ def identify_water_system_candidate_zones(
     boundary_polygon_utm: Optional[Polygon] = None,
     valleys: Optional[list[dict]] = None,
     production_areas: Optional[list[dict]] = None,
+    canopy_height: Optional[dict] = None,
     **zone_kwargs,
 ) -> dict:
     """
@@ -1148,6 +1149,16 @@ def identify_water_system_candidate_zones(
     contrast, is fetched too but degrades GRACEFULLY on failure (falls
     back to "not checked," same as production's own check_roads default)
     -- see compute_water_eligible_cells()'s own docstring (gates 4/5).
+
+    canopy_height is an optional pre-fetched override in the same family as
+    the dem/boundary/valleys/production_areas overrides above: the SAME
+    dict canopy_height_data.get_canopy_height_for_boundary() returns (e.g.
+    parcel_data.ParcelData.canopy_height). When supplied it is forwarded to
+    BOTH canopy consumers on this path -- the default production_areas
+    fetch (identify_production_areas() above) and this module's own
+    mandatory get_required_tree_root_zone_mask_utm() call -- so neither
+    re-fetches canopy from the network; when None (the default) both fetch
+    as before, leaving the mandatory-gate semantics unchanged.
     """
     if dem is None:
         dem = get_dem_for_boundary(boundary_coordinates)
@@ -1165,10 +1176,10 @@ def identify_water_system_candidate_zones(
         valleys = delineate_valleys(dem)
 
     if production_areas is None:
-        production_areas = identify_production_areas(dem, boundary_polygon_utm)
+        production_areas = identify_production_areas(dem, boundary_polygon_utm, canopy_height=canopy_height)
 
     canopy_root_zone_mask_utm = get_required_tree_root_zone_mask_utm(
-        boundary_polygon_utm, dem, buffer_meters=WATER_ZONE_CANOPY_BUFFER_METERS
+        boundary_polygon_utm, dem, buffer_meters=WATER_ZONE_CANOPY_BUFFER_METERS, canopy_height=canopy_height
     )
 
     try:

@@ -868,4 +868,46 @@ print(
 )
 
 
+# --- canopy_height override forwarding ---
+#
+# identify_tree_zone_candidates() reaches canopy on SEVERAL independent
+# paths when production_areas/selected_water_zone self-compute: its own
+# Step-2 get_required_tree_root_zone_mask_utm() gate, its nested identify_
+# optimized_production_areas() fetch, and identify_water_suitability()'s own
+# gate. A supplied canopy_height override must reach ALL of them so none
+# re-fetches from the network. Shared-core behavior is proven in test_
+# canopy_mask_override.py; this proves this orchestrator forwards the
+# override down every canopy path. Reuses the exact offline fetch-mock block
+# and fixtures the full-orchestrator wiring check above already uses.
+from _canopy_override_probe import CanopyOverrideProbe, clean_canopy_for  # noqa: E402
+
+_ov_override = clean_canopy_for(orchestrator_dem)
+with mock_patch.object(pa, "get_soil_data_for_polygon", _fake_soil_rows_empty), \
+     mock_patch.object(pa, "get_soil_geometries_for_polygon", _fake_soil_geometries_empty), \
+     mock_patch.object(rc, "get_soil_data_for_polygon", _fake_soil_rows_empty), \
+     mock_patch.object(rc, "get_soil_geometries_for_polygon", _fake_soil_geometries_empty), \
+     mock_patch.object(rc, "get_water_features_for_boundary", _fake_water_features_empty), \
+     mock_patch.object(ws, "get_saturated_hydraulic_conductivity_for_polygon", _fake_soil_rows_empty), \
+     mock_patch.object(ws, "get_soil_geometries_for_polygon", _fake_soil_geometries_empty), \
+     mock_patch.object(ws, "get_water_features_for_boundary", _fake_water_features_empty), \
+     mock_patch.object(tzc, "get_farmland_classification_for_polygon", _fake_farmland_empty), \
+     mock_patch.object(tzc, "get_soil_data_for_polygon", _fake_soil_rows_empty), \
+     mock_patch.object(tzc, "get_soil_geometries_for_polygon", _fake_soil_geometries_empty), \
+     mock_patch.object(tzc, "get_water_features_for_boundary", _fake_water_features_empty), \
+     CanopyOverrideProbe() as _ov_probe:
+    identify_tree_zone_candidates(
+        orchestrator_boundary_coordinates, dem=orchestrator_dem, canopy_height=_ov_override
+    )
+_ov_probe.assert_override_used(_ov_override, "identify_tree_zone_candidates()")
+assert len(_ov_probe.mask_arrays) >= 3, (
+    "identify_tree_zone_candidates(): with production_areas/selected_water_zone self-computed, the "
+    "override must reach ALL canopy paths (Step-2 gate + identify_optimized_production_areas + "
+    f"identify_water_suitability's gate), saw {len(_ov_probe.mask_arrays)}"
+)
+print(
+    "identify_tree_zone_candidates(): a supplied canopy_height override reaches ALL internal canopy "
+    f"paths ({len(_ov_probe.mask_arrays)} gates) -- 0 canopy fetches, exact override array used throughout."
+)
+
+
 print("\nAll tree_zone_candidates checks passed.")

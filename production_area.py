@@ -121,6 +121,7 @@ construction.
 
 import math
 from collections import deque
+from typing import Optional
 
 import numpy as np
 from rasterio.warp import transform as warp_transform
@@ -403,7 +404,10 @@ def _fetch_road_exclusion_union_utm(
 
 
 def _fetch_tree_root_zone_mask_utm(
-    boundary_coordinates: list, dem: dict, buffer_meters: float = TREE_ROOT_ZONE_BUFFER_METERS
+    boundary_coordinates: list,
+    dem: dict,
+    buffer_meters: float = TREE_ROOT_ZONE_BUFFER_METERS,
+    canopy_height: Optional[dict] = None,
 ):
     """
     Fetches USGS 3DEP lidar HAG coverage for this boundary and returns the
@@ -419,6 +423,16 @@ def _fetch_tree_root_zone_mask_utm(
     WATER_ZONE_CANOPY_BUFFER_METERS) passes it explicitly rather than
     this module's value silently applying instead.
 
+    canopy_height is an optional pre-fetched override: the SAME dict
+    canopy_height_data.get_canopy_height_for_boundary() returns (already
+    reprojected onto dem's own grid -- e.g. parcel_data.ParcelData.
+    canopy_height). When supplied, it is used verbatim and NO network
+    fetch happens; when None (the default), this fetches canopy for
+    boundary_coordinates itself, so every existing caller keeps its
+    current fetch-it-myself behavior unchanged. Either way the downstream
+    None-vs-mask logic below is identical -- this parameter only changes
+    where the canopy dict comes from, never what is done with it.
+
     Returns None if no HAG coverage exists for this boundary at all -- a
     genuine no-data outcome (see canopy_height_data.py's own docstring),
     passed straight through unchanged; the caller (identify_production_
@@ -429,14 +443,19 @@ def _fetch_tree_root_zone_mask_utm(
     propagate up uncaught -- this function does no exception handling of
     its own beyond the None pass-through.
     """
-    canopy = get_canopy_height_for_boundary(boundary_coordinates, dem)
+    canopy = canopy_height
+    if canopy is None:
+        canopy = get_canopy_height_for_boundary(boundary_coordinates, dem)
     if canopy is None:
         return None
     return tree_root_zone_mask(canopy["array"], canopy["resolution_meters"], buffer_meters=buffer_meters)
 
 
 def get_required_tree_root_zone_mask_utm(
-    boundary_polygon_utm: Polygon, dem: dict, buffer_meters: float = TREE_ROOT_ZONE_BUFFER_METERS
+    boundary_polygon_utm: Polygon,
+    dem: dict,
+    buffer_meters: float = TREE_ROOT_ZONE_BUFFER_METERS,
+    canopy_height: Optional[dict] = None,
 ):
     """
     Fetches a REQUIRED (non-optional) tree-root-zone mask for
@@ -455,6 +474,16 @@ def get_required_tree_root_zone_mask_utm(
     zone_mask_utm() -- see that function's own docstring for why this
     stays a real, independent parameter rather than a shared constant.
 
+    canopy_height is an optional pre-fetched override, forwarded verbatim
+    to _fetch_tree_root_zone_mask_utm(): the SAME dict canopy_height_data.
+    get_canopy_height_for_boundary() returns (e.g. parcel_data.ParcelData.
+    canopy_height). When supplied it is used as-is and no canopy network
+    fetch happens; when None (the default) canopy is fetched for this
+    boundary as before, so every existing caller is unchanged. Note the
+    boundary reprojection below still runs regardless -- it is only used
+    as get_canopy_height_for_boundary()'s input when a fetch actually
+    happens, and is harmlessly ignored when the override short-circuits it.
+
     Reprojects boundary_polygon_utm to WGS84 (the lon/lat convention
     canopy_height_data.get_canopy_height_for_boundary() takes) and calls
     _fetch_tree_root_zone_mask_utm().
@@ -472,7 +501,9 @@ def get_required_tree_root_zone_mask_utm(
     xs, ys = boundary_polygon_utm.exterior.coords.xy
     lons, lats = warp_transform(dem["crs"], "EPSG:4326", list(xs), list(ys))
     boundary_coordinates = list(zip(lons, lats))
-    tree_root_zone_mask_utm = _fetch_tree_root_zone_mask_utm(boundary_coordinates, dem, buffer_meters=buffer_meters)
+    tree_root_zone_mask_utm = _fetch_tree_root_zone_mask_utm(
+        boundary_coordinates, dem, buffer_meters=buffer_meters, canopy_height=canopy_height
+    )
     if tree_root_zone_mask_utm is None:
         raise RuntimeError(
             "Canopy height data unavailable for this property -- cannot verify "
@@ -1057,6 +1088,7 @@ def identify_production_areas(
     min_area_acres: float = MIN_PRODUCTION_AREA_ACRES,
     check_soil: bool = True,
     check_roads: bool = True,
+    canopy_height: Optional[dict] = None,
 ) -> list[dict]:
     """
     Returns one entry per candidate production-area patch, clipped to the
@@ -1112,6 +1144,15 @@ def identify_production_areas(
     too -- it's plain polygon geometry on the known parcel boundary, not a
     network-backed layer, so there's nothing to fail on.
 
+    canopy_height is an optional pre-fetched override forwarded straight to
+    get_required_tree_root_zone_mask_utm(): the SAME dict canopy_height_
+    data.get_canopy_height_for_boundary() returns (e.g. parcel_data.
+    ParcelData.canopy_height). When supplied, the mandatory gate above uses
+    it instead of fetching canopy itself -- letting a context-aware caller
+    that already holds the parcel's canopy avoid a redundant Planetary
+    Computer round-trip; when None (the default) canopy is fetched here as
+    before, so this gate's hard-fail semantics are entirely unchanged.
+
     check_roads works the same way check_soil does (graceful degrade, NOT
     the canopy gate's hard-fail behavior): when True (the default), this
     fetches real existing-road geometry for the real parcel boundary ONCE
@@ -1135,7 +1176,9 @@ def identify_production_areas(
         except Exception:
             disqualifying_soil_union_utm = _SOIL_CHECK_UNCHECKED
 
-    tree_root_zone_mask_utm = get_required_tree_root_zone_mask_utm(boundary_polygon_utm, dem)
+    tree_root_zone_mask_utm = get_required_tree_root_zone_mask_utm(
+        boundary_polygon_utm, dem, canopy_height=canopy_height
+    )
 
     road_exclusion_union_utm = _ROAD_CHECK_UNCHECKED
     if check_roads:

@@ -1056,4 +1056,26 @@ print(
 )
 
 
+# --- canopy_height override forwarding ---
+#
+# identify_boundary_fencing()'s mandatory canopy gate (production_area.
+# get_required_tree_root_zone_mask_utm(), at this module's own BOUNDARY_
+# FENCE_CANOPY_BUFFER_METERS) now accepts a pre-fetched canopy_height
+# override. When supplied it must be forwarded so no network canopy fetch
+# happens and the exact supplied array reaches the gate. Shared-core
+# behavior is proven in test_canopy_mask_override.py; this proves THIS
+# fetch-and-wrap entry point forwards it. Reuses the TEST_DEM/PROPERTY_
+# BOUNDARY fixture above.
+from _canopy_override_probe import CanopyOverrideProbe, clean_canopy_for  # noqa: E402
+
+_ov_override = clean_canopy_for(TEST_DEM)
+with CanopyOverrideProbe() as _ov_probe:
+    identify_boundary_fencing(PROPERTY_BOUNDARY, dem=TEST_DEM, canopy_height=_ov_override)
+_ov_probe.assert_override_used(_ov_override, "identify_boundary_fencing()")
+print(
+    "identify_boundary_fencing(): a supplied canopy_height override is forwarded to its mandatory "
+    "canopy gate -- 0 canopy fetches, exact override array used."
+)
+
+
 print("\nAll fencing checks passed.")

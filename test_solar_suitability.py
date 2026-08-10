@@ -409,4 +409,78 @@ assert all(
 ), "confidence_notes must flag when tree-zone-candidate exclusion couldn't be checked this run"
 print("candidates_to_geojson correctly flags when tree-zone-candidate exclusion data was unavailable.")
 
+# --- canopy_height override forwarding (entry point, fully offline) ---
+#
+# identify_solar_candidate_zones() reaches canopy on FOUR independent paths:
+# its own direct get_required_tree_root_zone_mask_utm() gate, plus the
+# nested identify_optimized_production_areas(), identify_water_suitability(),
+# and identify_tree_zone_candidates() calls it self-computes (each with its
+# OWN independent mandatory canopy gate). A supplied canopy_height override
+# must reach ALL four. This runs fully offline by mocking the three nested
+# entry points (their internal canopy paths stubbed away) and asserting each
+# received the EXACT override object, while a CanopyOverrideProbe proves
+# solar's OWN direct gate used the override with zero network fetches. Shared-
+# core behavior is proven in test_canopy_mask_override.py. (The end-to-end,
+# nothing-mocked version of this lives in test_solar_suitability_pipeline.py,
+# which needs live network for its road-corridor fetch.)
+from unittest.mock import patch as _ov_mock_patch  # noqa: E402
+from rasterio.warp import transform as _ov_warp_transform  # noqa: E402
+
+import solar_suitability as _ov_ss  # noqa: E402
+from solar_suitability import identify_solar_candidate_zones as _ov_identify_solar  # noqa: E402
+from _canopy_override_probe import CanopyOverrideProbe, clean_canopy_for  # noqa: E402
+
+_ov_lons, _ov_lats = _ov_warp_transform(
+    CRS, "EPSG:4326",
+    [500000.0, 500300.0, 500300.0, 500000.0, 500000.0],
+    [4500000.0, 4500000.0, 4500300.0, 4500300.0, 4500000.0],
+)
+_ov_boundary_coordinates = list(zip(_ov_lons, _ov_lats))
+_ov_override = clean_canopy_for(DEM)
+# A supplied selected_road_corridor keeps Tier-1 road resolution off the
+# network (identify_road_corridor_candidates() is skipped) -- road corridors
+# don't fetch canopy, so this is orthogonal to what's under test here.
+_ov_road_corridor = {
+    "id": "synthetic-solar-road-corridor",
+    "cell_footprint_polygon_utm": box(500000, 4500148, 500300, 4500152),
+}
+
+with _ov_mock_patch.object(_ov_ss, "identify_optimized_production_areas",
+                           return_value={"scored_patches": PRODUCTION_AREAS}) as _ov_mock_prod, \
+     _ov_mock_patch.object(_ov_ss, "identify_water_suitability",
+                           return_value={"selected_water_zone": WATER_ZONES[0]}) as _ov_mock_water, \
+     _ov_mock_patch.object(_ov_ss, "identify_tree_zone_candidates",
+                           return_value={"patches": []}) as _ov_mock_tree, \
+     CanopyOverrideProbe() as _ov_probe:
+    _ov_identify_solar(
+        _ov_boundary_coordinates,
+        dem=DEM,
+        boundary_polygon_utm=BOUNDARY,
+        selected_road_corridor=_ov_road_corridor,
+        check_prime_farmland=False,
+        canopy_height=_ov_override,
+    )
+
+# Solar's OWN direct canopy gate used the exact override, zero network fetches:
+_ov_probe.assert_override_used(_ov_override, "identify_solar_candidate_zones() [own gate]")
+# ...and it forwarded the SAME override object into every nested entry point
+# that carries its own independent canopy gate:
+for _ov_name, _ov_mock in (
+    ("identify_optimized_production_areas", _ov_mock_prod),
+    ("identify_water_suitability", _ov_mock_water),
+    ("identify_tree_zone_candidates", _ov_mock_tree),
+):
+    assert _ov_mock.call_count == 1, (
+        f"identify_solar_candidate_zones(): expected {_ov_name}() called exactly once, got {_ov_mock.call_count}"
+    )
+    assert _ov_mock.call_args.kwargs.get("canopy_height") is _ov_override, (
+        f"identify_solar_candidate_zones(): must forward the EXACT canopy_height override object into {_ov_name}(), "
+        "not a copy, None, or a re-fetched value"
+    )
+print(
+    "identify_solar_candidate_zones(): a supplied canopy_height override is used by its own canopy gate "
+    "(0 fetches, exact array) AND forwarded verbatim into all three nested canopy-fetching entry points."
+)
+
+
 print("\nAll solar_suitability checks passed.")

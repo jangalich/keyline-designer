@@ -259,13 +259,17 @@ fake_road_corridor_result = {
 }
 
 
-def _fake_clean_canopy_mask(boundary_polygon_utm, dem, buffer_meters=None):
+def _fake_clean_canopy_mask(boundary_polygon_utm, dem, buffer_meters=None, canopy_height=None):
     """Offline stand-in for production_area.get_required_tree_root_zone_mask_utm() --
     identify_water_system_candidate_zones()'s canopy fetch is MANDATORY (no
     try/except around it), so it must be stubbed for this file to run real/
     unmocked through that function without touching the network. All-False
     (no tree cover anywhere) is a pure no-op against compute_water_eligible_
-    cells()'s canopy gate -- this file isn't testing that gate."""
+    cells()'s canopy gate -- this file isn't testing that gate. canopy_height
+    mirrors the real function's new optional pre-fetched-canopy override
+    parameter (the callers now always forward canopy_height= through, so this
+    stand-in must accept it too); it is ignored here -- this stub returns its
+    fixed clean mask regardless of where canopy would have come from."""
     return np.zeros(dem["array"].shape, dtype=bool)
 
 
