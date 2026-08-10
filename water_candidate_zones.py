@@ -261,12 +261,11 @@ WATER_ZONE_ROAD_BUFFER_METERS = 3.048  # 10ft
 # every production area's render_fill_polygon_utm, not just whichever one
 # a zone might eventually be scored against (find_candidate_zones()'s own
 # whole-zone scoring picks that afterward — this gate runs before any
-# zone even exists). 0.0 is a hard edge-to-edge boundary with no
-# additional margin beyond the polygon itself -- this constant exists so
-# a future buffer can be added if that proves too tight in practice once
-# ground-truthed. NOT YET VALIDATED against a real property, same caveat
-# every other threshold in this pipeline carries. CONFIGURABLE.
-WATER_ZONE_PRODUCTION_SETBACK_METERS = 0.0
+# zone even exists). 3.048 (10ft) is the required setback margin beyond
+# the production polygon itself. NOT YET VALIDATED against a real
+# property, same caveat every other threshold in this pipeline carries.
+# CONFIGURABLE.
+WATER_ZONE_PRODUCTION_SETBACK_METERS = 3.048  # 10ft
 
 # Sentinel distinguishing "the canopy/road check genuinely ran" from
 # "never checked at all" -- same convention production_area.py's own

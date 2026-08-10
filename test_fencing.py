@@ -40,16 +40,13 @@ from feature_schema import make_feature, validate_feature_collection
 from fencing import (
     BOUNDARY_FENCE_CANOPY_BUFFER_METERS,
     BOUNDARY_FENCE_MIN_SEGMENT_ACRES,
-    EXISTING_FARM_ROAD_FENCE_BUFFER_METERS,
     ROAD_CORRIDOR_FENCE_DILATION_CELLS,
     ROAD_FENCE_LINE_INSET_METERS,
     STREAM_EXCLUSION_BUFFER_METERS,
     TREE_ZONE_FENCE_BUFFER_METERS,
     WATER_ZONE_FENCE_BUFFER_METERS,
     boundary_fencing_to_geojson,
-    existing_farm_road_fencing_to_geojson,
     find_boundary_fencing,
-    find_existing_farm_road_fencing,
     find_road_corridor_fencing,
     find_stream_exclusion_fencing,
     find_tree_zone_fencing,
@@ -396,13 +393,12 @@ print("boundary_fencing_to_geojson() labels/annotates a multi-segment split (seg
 
 # --- identify_fencing: combines both layers, reusing a pre-fetched water_features_geojson ---
 #
-# farm_road_features=[] and tree_zone_render_fill_polygons_utm=[] are passed explicitly
-# (rather than left to identify_fencing()'s own default fetch) so this stays deterministic
-# and offline regardless of whether a given test environment happens to have network access --
-# unlike the farm road fetch (which fails fast in this sandbox via a proxy 403), an
-# unmocked water/tree zone fetch can hang for a long time retrying before finally giving up,
-# so leaving either at its own default (None) here would make this test far too slow, not
-# just nondeterministic. selected_water_zone_render_fill_polygon_utm has no such "empty but
+# tree_zone_render_fill_polygons_utm=[] is passed explicitly (rather than left to
+# identify_fencing()'s own default fetch) so this stays deterministic and offline regardless
+# of whether a given test environment happens to have network access -- an unmocked tree
+# zone fetch can hang for a long time retrying before finally giving up, so leaving it at its
+# own default (None) here would make this test far too slow, not just nondeterministic.
+# selected_water_zone_render_fill_polygon_utm has no such "empty but
 # not None" sentinel available (a single selected zone is naturally Optional[Polygon] --
 # None already means BOTH "not supplied" and "no zone sited"), so fetch_and_select_optimal_
 # water_zone() itself is mocked out instead, same pattern as the existing canopy-height mock
@@ -425,7 +421,6 @@ with mock_patch.object(pa, "get_canopy_height_for_boundary", _fake_no_canopy), m
         PROPERTY_BOUNDARY,
         water_features_geojson=prefetched_water,
         dem=TEST_DEM,
-        farm_road_features=[],
         tree_zone_render_fill_polygons_utm=[],
     )
 validate_feature_collection(result["fencing_geojson"])
@@ -446,7 +441,6 @@ with mock_patch.object(pa, "get_canopy_height_for_boundary", _fake_no_canopy), m
         PROPERTY_BOUNDARY,
         water_features_geojson=no_stream_water,
         dem=TEST_DEM,
-        farm_road_features=[],
         tree_zone_render_fill_polygons_utm=[],
     )
 no_stream_layers = [f["properties"]["layer"] for f in no_stream_result["fencing_geojson"]["features"]]
@@ -561,109 +555,6 @@ print(
     "find_road_corridor_fencing(): a narrow/pinched path where the inset would empty out "
     "falls back to the dilated footprint's own outer edge."
 )
-
-
-# =====================================================================
-# find_existing_farm_road_fencing(): pure geometric core, no network I/O -- same "pure core is
-# independently testable" pattern as find_stream_exclusion_fencing() above. Real WGS84
-# coordinates (this module's own PROPERTY_BOUNDARY) are reused so the reprojection this function
-# does internally (EPSG:4326 -> UTM_CRS) behaves like it would against a real property, rather
-# than arbitrary "UTM-like" numbers standing in for lon/lat (which find_boundary_fencing() above
-# can get away with since IT never reprojects anything itself).
-# =====================================================================
-
-_property_boundary_polygon_wgs84 = Polygon(PROPERTY_BOUNDARY)
-_inside_point = _property_boundary_polygon_wgs84.representative_point()  # guaranteed inside
-
-FARM_ROAD_BOUNDARY_XS, FARM_ROAD_BOUNDARY_YS = warp_transform(
-    "EPSG:4326", UTM_CRS, [pt[0] for pt in PROPERTY_BOUNDARY], [pt[1] for pt in PROPERTY_BOUNDARY]
-)
-FARM_ROAD_BOUNDARY_POLYGON_UTM = Polygon(zip(FARM_ROAD_BOUNDARY_XS, FARM_ROAD_BOUNDARY_YS))
-
-
-def _farm_road_feature(name: str, coordinates: list[tuple[float, float]]) -> dict:
-    return {"name": name, "geometry": {"type": "LineString", "coordinates": coordinates}}
-
-
-# --- 1. a road entirely outside the boundary -> [] (clips to empty, correctly produces nothing) ---
-
-OUTSIDE_ROAD = _farm_road_feature("Far Away Road", [(-79.5, 41.0), (-79.4, 41.1)])
-outside_boundary_wgs84 = shape(transform_geom(UTM_CRS, "EPSG:4326", mapping(FARM_ROAD_BOUNDARY_POLYGON_UTM)))
-assert not outside_boundary_wgs84.intersects(shape(OUTSIDE_ROAD["geometry"])), (
-    "test setup must genuinely place this road outside the boundary for this to be a real test"
-)
-
-outside_entries = find_existing_farm_road_fencing([OUTSIDE_ROAD], FARM_ROAD_BOUNDARY_POLYGON_UTM, UTM_CRS)
-assert outside_entries == [], f"a road entirely outside the boundary should produce no entries, got {outside_entries}"
-print("find_existing_farm_road_fencing(): a road entirely outside the boundary returns [].")
-
-
-# --- 2. a road partially crossing the boundary -> one entry, derived only from the on-parcel
-#        clipped portion (not the full original line) ---
-
-_outside_point = (_inside_point.x - 0.03, _inside_point.y)
-CROSSING_ROAD = _farm_road_feature("Crossing Road", [_outside_point, (_inside_point.x, _inside_point.y)])
-crossing_line_wgs84 = shape(CROSSING_ROAD["geometry"])
-assert crossing_line_wgs84.intersects(outside_boundary_wgs84) and not outside_boundary_wgs84.contains(
-    crossing_line_wgs84
-), "test setup must genuinely have this road cross the boundary (partly in, partly out) for a real test"
-
-crossing_entries = find_existing_farm_road_fencing([CROSSING_ROAD], FARM_ROAD_BOUNDARY_POLYGON_UTM, UTM_CRS)
-assert len(crossing_entries) == 1, f"a road partially crossing the boundary should produce exactly 1 entry, got {len(crossing_entries)}"
-crossing_fence_line_utm = shape(transform_geom("EPSG:4326", UTM_CRS, crossing_entries[0]["geometry_wgs84"]))
-full_road_line_utm = shape(transform_geom("EPSG:4326", UTM_CRS, CROSSING_ROAD["geometry"]))
-on_parcel_portion_utm = FARM_ROAD_BOUNDARY_POLYGON_UTM.intersection(full_road_line_utm)
-assert on_parcel_portion_utm.length < full_road_line_utm.length, (
-    "test setup must genuinely clip to a shorter on-parcel sub-segment for this to be a real test"
-)
-
-# The output fence line is the buffer OUTLINE of just the on-parcel portion -- it should match
-# a buffer built directly from that clipped sub-segment, and must NOT match a buffer built from
-# the FULL original (mostly off-parcel) line, confirming only the clipped portion fed the buffer.
-crossing_fence_polygon_utm = Polygon(crossing_fence_line_utm.coords)
-expected_on_parcel_buffer = on_parcel_portion_utm.buffer(EXISTING_FARM_ROAD_FENCE_BUFFER_METERS)
-full_line_buffer = full_road_line_utm.buffer(EXISTING_FARM_ROAD_FENCE_BUFFER_METERS)
-assert full_line_buffer.area > expected_on_parcel_buffer.area, (
-    "test setup must genuinely make the full line's own buffer larger than the clipped portion's "
-    "own buffer for this to be a real test"
-)
-assert crossing_fence_polygon_utm.equals_exact(expected_on_parcel_buffer, 1e-6) or crossing_fence_polygon_utm.symmetric_difference(
-    expected_on_parcel_buffer
-).area < 1e-3, "the fence polygon must match a buffer built from the clipped on-parcel portion alone"
-assert crossing_fence_polygon_utm.area < full_line_buffer.area, (
-    "the fence polygon must NOT match (and must enclose less area than) a buffer built from the "
-    "full original line -- confirms only the on-parcel clipped portion fed the buffer, not the "
-    "full (mostly off-parcel) line"
-)
-print(
-    "find_existing_farm_road_fencing(): a road partially crossing the boundary returns 1 entry "
-    "derived only from the on-parcel clipped portion."
-)
-
-
-# --- 3. multiple on-parcel road segments -> one entry per segment ---
-
-_second_outside_point = (_inside_point.x, _inside_point.y + 0.03)
-SECOND_CROSSING_ROAD = _farm_road_feature(
-    "Second Crossing Road", [_second_outside_point, (_inside_point.x, _inside_point.y)]
-)
-multi_entries = find_existing_farm_road_fencing(
-    [CROSSING_ROAD, SECOND_CROSSING_ROAD], FARM_ROAD_BOUNDARY_POLYGON_UTM, UTM_CRS
-)
-assert len(multi_entries) == 2, f"two separate on-parcel road segments should produce 2 entries, got {len(multi_entries)}"
-assert {e["source_label"] for e in multi_entries} == {"Crossing Road", "Second Crossing Road"}
-print("find_existing_farm_road_fencing(): multiple on-parcel road segments return one entry per segment.")
-
-
-# --- existing_farm_road_fencing_to_geojson: schema-valid, correct layer/fence_type ---
-
-farm_road_geojson = existing_farm_road_fencing_to_geojson(crossing_entries)
-validate_feature_collection(farm_road_geojson)
-farm_road_feature_out = farm_road_geojson["features"][0]
-assert farm_road_feature_out["properties"]["layer"] == "perimeter_fencing"
-assert farm_road_feature_out["properties"]["fence_type"] == "existing_farm_road_exclusion"
-assert farm_road_feature_out["properties"]["confidence"] == "medium"
-print("existing_farm_road_fencing_to_geojson() output is schema-valid, layer='perimeter_fencing'.")
 
 
 # --- road_corridor_fencing_to_geojson: None fence_line -> empty FeatureCollection ---
@@ -818,8 +709,7 @@ print("tree_zone_fencing_to_geojson(): an empty list produces an empty, schema-v
 # identify_fencing(): HIGH-LEVEL overrides (selected_road_corridor/selected_water_zone/
 # tree_zone_patches, matching pipeline_context.py's own field names/shapes) and PASS-THROUGH-ONLY
 # overrides (boundary_polygon_utm/production_areas/valleys). All scenarios below reuse no_stream_water/
-# TEST_DEM/_fake_no_canopy from the identify_fencing() section above, and pass
-# farm_road_features=[] to stay deterministic/offline (same reasoning as that section's own comment).
+# TEST_DEM/_fake_no_canopy from the identify_fencing() section above.
 # =====================================================================
 
 
@@ -876,7 +766,6 @@ with (
         PROPERTY_BOUNDARY,
         water_features_geojson=no_stream_water,
         dem=TEST_DEM,
-        farm_road_features=[],
         selected_road_corridor=HIGH_LEVEL_ROAD_CORRIDOR,
         selected_water_zone=HIGH_LEVEL_WATER_ZONE,
         tree_zone_patches=HIGH_LEVEL_TREE_ZONE_PATCHES,
@@ -901,7 +790,7 @@ print(
 
 # --- Scenario 2 (regression): none of the six new overrides supplied -> all three self-compute
 # calls still run exactly once each, same as pre-branch behavior, producing identical output on the
-# existing fixture (no_stream_water/TEST_DEM/farm_road_features=[]) ---
+# existing fixture (no_stream_water/TEST_DEM) ---
 
 import road_corridors as _road_corridors_module
 
@@ -933,7 +822,6 @@ with (
         PROPERTY_BOUNDARY,
         water_features_geojson=no_stream_water,
         dem=TEST_DEM,
-        farm_road_features=[],
     )
 validate_feature_collection(regression_result["fencing_geojson"])
 assert _self_compute_call_counts == {"road": 1, "water": 1, "tree": 1}, (
@@ -987,7 +875,6 @@ with (
         PROPERTY_BOUNDARY,
         water_features_geojson=no_stream_water,
         dem=TEST_DEM,
-        farm_road_features=[],
         boundary_polygon_utm=SENTINEL_BOUNDARY_POLYGON_UTM,
         production_areas=SENTINEL_PRODUCTION_AREAS,
         valleys=SENTINEL_VALLEYS,
@@ -1039,7 +926,6 @@ with (
         PROPERTY_BOUNDARY,
         water_features_geojson=no_stream_water,
         dem=TEST_DEM,
-        farm_road_features=[],
         tree_zone_render_fill_polygons_utm=[],
         selected_water_zone_render_fill_polygon_utm=LOW_LEVEL_WATER_POLYGON,
         selected_water_zone=HIGH_LEVEL_WATER_ZONE_MISSING_KEY,
@@ -1120,7 +1006,6 @@ with (
             PROPERTY_BOUNDARY,
             water_features_geojson=no_stream_water,
             dem=TEST_DEM,
-            farm_road_features=[],
             canopy_height=CANOPY_FENCING_OVERRIDE,
         )
 
@@ -1170,7 +1055,6 @@ with (
         PROPERTY_BOUNDARY,
         water_features_geojson=no_stream_water,
         dem=TEST_DEM,
-        farm_road_features=[],
     )
 validate_feature_collection(canopy_regression_result["fencing_geojson"])
 for call_name in ("road", "water", "tree"):

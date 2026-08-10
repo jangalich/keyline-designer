@@ -81,52 +81,55 @@ circle marker" treatment structure_site's own legend line already uses
 (there's no single point on a loop-shaped feature for a circle number to
 point to).
 
-ROAD/WATER/TREE EXCLUSION FENCE STYLE: fencing.identify_fencing()'s four
+ROAD/WATER/TREE EXCLUSION FENCE STYLE: fencing.identify_fencing()'s three
 non-boundary fence loops (fence_type "road_corridor_exclusion" -- one
-closed loop around the single selected road corridor; "existing_farm_
-road_exclusion" -- one closed loop per on-parcel mapped-road segment;
-"water_zone_exclusion" -- one closed loop around the single selected
-water zone; "tree_zone_exclusion" -- one closed loop per tree zone
-candidate, since that layer has no selection step, see fencing.py's own
-module docstring) all reuse these SAME boundary-fence styling constants
-(FENCE_COLOR/FENCE_LINEWIDTH) and the same _angular_simplify_closed_
-ring() + drawing helper, at the same zorder=30 -- all four are fully
-enclosed closed loops too, so no new styling or simplify logic is needed.
-Unlike the boundary fence, all four ARE clipped to the boundary polygon at
-render time (real shapely .intersection(), AFTER angular-simplifying the
-WHOLE ring -- simplifying before clipping, not after, since _angular_
-simplify_closed_ring() re-closes a genuinely closed ring, which would
-wrongly force-close an already-clipped, genuinely OPEN arc piece):
-find_road_corridor_fencing()'s own dilated-and-inset footprint naturally
-follows the road corridor's own path, which can reach right up to (and
-technically just past, once buffered) the property edge where a real road
-crosses it, and a water/tree zone's own buffered render_fill_polygon_utm
-can likewise sit close enough to the boundary for its own buffer to reach
-past the edge -- correct as COMPUTED in every case (see fencing.py), this
-clip only trims what gets DRAWN. The boundary fence itself is deliberately
-NOT clipped this way -- it's already guaranteed to stay inside the
-boundary by construction (see find_boundary_fencing()'s own difference-
-against-boundary-polygon logic), so clipping it here would be a redundant
-no-op. The intersection can come back as a LineString, MultiLineString, or
+closed loop around the single selected road corridor; "water_zone_
+exclusion" -- one closed loop around the single selected water zone;
+"tree_zone_exclusion" -- one closed loop per tree zone candidate, since
+that layer has no selection step, see fencing.py's own module docstring)
+all reuse these SAME boundary-fence styling constants (FENCE_COLOR/
+FENCE_LINEWIDTH) and the same _angular_simplify_closed_ring() + drawing
+helper -- all three are fully enclosed closed loops too, so no new
+styling or simplify logic is needed. Unlike the boundary fence (drawn at
+FENCE_ZORDER, see that constant's own comment), these three render at
+EXCLUSION_FENCE_ZORDER instead -- its own separate, unchanged constant,
+deliberately NOT bumped alongside the boundary fence's own zorder (see
+EXCLUSION_FENCE_ZORDER's own comment). Unlike the boundary fence, all
+three ARE clipped to the boundary polygon at render time (real shapely
+.intersection(), AFTER angular-simplifying the WHOLE ring -- simplifying
+before clipping, not after, since _angular_simplify_closed_ring()
+re-closes a genuinely closed ring, which would wrongly force-close an
+already-clipped, genuinely OPEN arc piece): find_road_corridor_fencing()'s
+own dilated-and-inset footprint naturally follows the road corridor's own
+path, which can reach right up to (and technically just past, once
+buffered) the property edge where a real road crosses it, and a water/
+tree zone's own buffered render_fill_polygon_utm can likewise sit close
+enough to the boundary for its own buffer to reach past the edge --
+correct as COMPUTED in every case (see fencing.py), this clip only trims
+what gets DRAWN. The boundary fence itself is deliberately NOT clipped
+this way -- it's already guaranteed to stay inside the boundary by
+construction (see find_boundary_fencing()'s own difference-against-
+boundary-polygon logic), so clipping it here would be a redundant no-op.
+The intersection can come back as a LineString, MultiLineString, or
 GeometryCollection (a ring crossing the boundary at two points splits into
 pieces) -- _iter_line_parts() already handles all three -- with any
 resulting piece under ROAD_FENCE_CLIP_MIN_LENGTH (a degenerate point/
-sliver from a tangent crossing) dropped rather than drawn. All four are
+sliver from a tangent crossing) dropped rather than drawn. All three are
 INDEPENDENT of the boundary fence and of each other (deliberately not
 spliced/gated into anything -- see fencing.py's own module docstring): a
 visible overlap between any of them is expected wherever the underlying
 real-world geometry meets, not a rendering bug. "Road Corridor Fencing"
 and "Water Zone Fencing" each get a single unnumbered legend line (only
 ever one of each, regardless of how many pieces their own clip produces);
-"Existing Farm Road Fencing" and "Tree Zone Fencing" each get one legend
-line per segment/candidate when more than one exists (same, regardless of
-per-segment clip pieces) -- "Tree Zone Fencing {rank}" reuses fencing.
-tree_zone_fencing_to_geojson()'s own candidate_rank property directly
-rather than re-deriving a new index here, so it lines up with the same-
-numbered "Tree Zone Candidate {rank}" this file already draws elsewhere.
-All four mirror boundary fencing's own 1-vs-2 segment-labeling convention,
-and none gets a numbered circle marker, same "no single point to point
-to" reasoning as boundary fencing's own legend lines above.
+"Tree Zone Fencing" gets one legend line per candidate when more than one
+exists (same, regardless of per-segment clip pieces) -- "Tree Zone
+Fencing {rank}" reuses fencing.tree_zone_fencing_to_geojson()'s own
+candidate_rank property directly rather than re-deriving a new index
+here, so it lines up with the same-numbered "Tree Zone Candidate {rank}"
+this file already draws elsewhere. All three mirror boundary fencing's
+own 1-vs-2 segment-labeling convention, and none gets a numbered circle
+marker, same "no single point to point to" reasoning as boundary
+fencing's own legend lines above.
 
 Contours clip against render_fill_polygon_utm rather than polygon_utm
 for two separate reasons layered on top of each other, both from
@@ -167,12 +170,9 @@ purpose. This is DISPLAY-ONLY: the zone's real polygon_utm/geometry_wgs84
 (used for scoring, eligibility, and the narrative report) are completely
 untouched by this. The fill is drawn fully OPAQUE (alpha=1.0, not the
 0.35 an earlier version used) specifically so it occludes any production-
-zone contour lines beneath it, then a subtle sine-wave ripple texture is
-drawn directly over the opaque fill (matplotlib has no built-in wavy
-`hatch` character, so this is hand-drawn as clipped Line2D paths -- see
-_ripple_lines_for_polygon()) so the shape reads as water at a glance. The
-water zone's hull is allowed to overlap a production zone's own hull at
-render time -- that's a display-only coincidence between two convex
+zone contour lines beneath it. The water zone's hull is allowed to
+overlap a production zone's own hull at render time -- that's a
+display-only coincidence between two convex
 hulls, not a real siting conflict; the real geometries stay separated by
 water_candidate_zones.py's own production-zone eligibility exclusion gate
 (WATER_ZONE_PRODUCTION_SETBACK_METERS), unaffected by anything here.
@@ -268,7 +268,6 @@ from typing import Optional
 import contextily as cx
 import matplotlib
 import mercantile
-import numpy as np
 import requests
 import xyzservices
 
@@ -461,11 +460,6 @@ CONTOUR_LINE_COLOR = "#6B4423"  # muted brown -- traditional topo-map
 # and to stay visually distinct from every other layer color already
 # in use (production green, water blue, road dark gray, structure red)
 WATER_ZONE_COLOR = "#1F6FB2"
-# A lighter tint of WATER_ZONE_COLOR, for the ripple texture drawn over
-# the opaque fill below -- see _ripple_lines_for_polygon()'s own
-# docstring. Distinct from WATER_ZONE_COLOR so the ripples read as a
-# texture ON the water fill, not a second, competing shape.
-WATER_ZONE_RIPPLE_COLOR = "#7EC1E8"
 STRUCTURE_SITE_COLOR = "#D64545"
 
 # Structure site renders as a single fixed-size map-pin icon (see this
@@ -528,27 +522,33 @@ ROAD_RENDER_INNER_ALPHA = 0.7
 # production-zone contours and tan/green aerial imagery, and distinct from every
 # other layer color already in use (production green #4C9A2A, water blue #1F6FB2,
 # road dark gray #3A3A3A, structure red #D64545, contour brown #6B4423, tree dark
-# green #2D5A27). The two road-exclusion fence loops (fence_type
-# "road_corridor_exclusion" / "existing_farm_road_exclusion") reuse this SAME
-# color/linewidth -- no new styling constants needed, see this module's own ROAD
-# EXCLUSION FENCE STYLE docstring section. CONFIGURABLE.
+# green #2D5A27). The road-exclusion fence loop (fence_type
+# "road_corridor_exclusion") reuses this SAME color/linewidth -- no new styling
+# constants needed, see this module's own ROAD EXCLUSION FENCE STYLE docstring
+# section. CONFIGURABLE.
 FENCE_COLOR = "#D4A017"
 FENCE_LINEWIDTH = 0.6  # a hairline -- was 1.2 (a dashed line before that)
 
-# Fence lines render above every zone-fill-style layer (production contour
-# zorder=40, water zone fill/ripple zorder=41/41.5, road corridor cased line
-# zorder=42/42.5, tree zone candidate fill zorder=42.8 -- the true current
-# ceiling, not 40) so an overlap between a fence line and any of those doesn't
-# bury the fence line underneath -- the whole reason fences moved off their
-# old zorder=30. Strictly BELOW the structure site pin (zorder=43), the
-# numbered circle markers (zorder=50), and the legend/basemap-note text
-# (zorder=60) -- those should legitimately stay on top of a fence line, same
-# "specific point/UI overlay wins" reasoning _draw_numbered_marker()'s own
-# zorder=50 already establishes over the water zone ripple texture beneath
-# it. Applies uniformly to every fence type via the shared _draw_boundary_
-# fence() helper below -- there's no reason boundary/road fencing should
-# render underneath a zone fill any more than water/tree zone fencing should.
-FENCE_ZORDER = 42.9
+# The BOUNDARY fence only renders at this zorder -- explicitly bumped to sit
+# above the numbered circle markers/structure site pin (zorder=43/50) as well
+# as every zone-fill-style layer beneath it, per explicit request. Deliberately
+# NOT applied to the road-corridor/water-zone/tree-zone exclusion fence loops,
+# nor to roads, tree zone, water zones, or streams -- those keep rendering at
+# EXCLUSION_FENCE_ZORDER (road/water/tree exclusion fencing) or their own
+# existing zorder (road corridor line, tree zone fill, water zone fill, stream
+# lines) below, unchanged. CONFIGURABLE.
+FENCE_ZORDER = 50
+
+# Zorder for the three non-boundary exclusion fence loops (road_corridor_
+# exclusion, water_zone_exclusion, tree_zone_exclusion) -- this is the value
+# FENCE_ZORDER itself used to hold before being bumped to 50 for the boundary
+# fence alone (see that constant's own comment). Kept here, unchanged, so
+# these three fence loops still render above every zone-fill-style layer
+# (production contour zorder=40, water zone fill zorder=41, road corridor
+# cased line zorder=42/42.5, tree zone candidate fill zorder=42.8 -- the true
+# current ceiling, not 40) without being bumped above the numbered circle
+# markers/structure site pin the way the boundary fence now is.
+EXCLUSION_FENCE_ZORDER = 42.9
 
 # Below this length (Web Mercator units, ~meters), a road-exclusion fence piece
 # produced by clipping to the boundary polygon at render time (see ROAD EXCLUSION
@@ -566,9 +566,9 @@ ROAD_FENCE_CLIP_MIN_LENGTH = 0.5
 FENCE_RENDER_ANGULAR_SIMPLIFY_TOLERANCE_M = 6.0  # was 4.0
 
 # Road-specific post-angular Chaikin pass (see _angular_then_smooth_closed_ring()) --
-# applies ONLY to fence_type in ('road_corridor_exclusion', 'existing_farm_road_
-# exclusion'), not to boundary/water_zone_exclusion/tree_zone_exclusion (those stay
-# pure angular, unchanged). 1 pass: meant to soften the angular corners
+# applies ONLY to fence_type 'road_corridor_exclusion', not to
+# boundary/water_zone_exclusion/tree_zone_exclusion (those stay pure angular,
+# unchanged). 1 pass: meant to soften the angular corners
 # _angular_simplify_closed_ring() leaves behind slightly, not fully re-curve the line
 # back to how it looked before the angular-only change. CONFIGURABLE -- start light.
 FENCE_RENDER_ROAD_CHAIKIN_ITERATIONS = 1
@@ -611,59 +611,6 @@ def _iter_line_parts(geometry):
             yield from _iter_line_parts(part)
 
 
-# Ripple-texture tuning for the water zone's opaque fill -- deliberately
-# subtle (few waves, low amplitude) so this reads as "this is water" at a
-# glance rather than a decorative pattern competing with the numbered
-# marker drawn on top of it (zorder=50, well above the ripples).
-WATER_ZONE_RIPPLE_COUNT = 4
-WATER_ZONE_RIPPLE_AMPLITUDE_FRACTION = 0.06  # fraction of the polygon's own bounding-box height
-WATER_ZONE_RIPPLE_WAVELENGTH_FRACTION = 0.5  # fraction of the polygon's own bounding-box width, per full sine cycle
-WATER_ZONE_RIPPLE_LINEWIDTH = 1.0
-WATER_ZONE_RIPPLE_ALPHA = 0.6
-WATER_ZONE_RIPPLE_SAMPLES = 200  # points sampled along each wave before clipping to the polygon
-
-
-def _ripple_lines_for_polygon(polygon) -> list:
-    """
-    Generates WATER_ZONE_RIPPLE_COUNT evenly-spaced horizontal sine-wave
-    lines across `polygon`'s own bounding box, each clipped to the real
-    polygon shape (shapely intersection, not a rectangular crop) -- a
-    lightweight water-texture hatch drawn over the solid opaque fill,
-    not a real second geometry. Matplotlib has no built-in wavy `hatch`
-    character, so this draws the waves directly as clipped LineStrings
-    instead.
-
-    Returns a list of clipped (Multi)LineString/GeometryCollection
-    geometries (possibly empty if the polygon is degenerate) -- callers
-    should iterate real line parts out of each via _iter_line_parts()
-    before drawing, same as every other clipped-line consumer in this
-    module (e.g. the production-zone contour clipping above).
-    """
-    minx, miny, maxx, maxy = polygon.bounds
-    height = maxy - miny
-    width = maxx - minx
-    if height <= 0 or width <= 0:
-        return []
-
-    amplitude = height * WATER_ZONE_RIPPLE_AMPLITUDE_FRACTION
-    wavelength = width * WATER_ZONE_RIPPLE_WAVELENGTH_FRACTION
-    if wavelength <= 0:
-        return []
-
-    xs = np.linspace(minx, maxx, WATER_ZONE_RIPPLE_SAMPLES)
-    clipped_lines = []
-    for i in range(WATER_ZONE_RIPPLE_COUNT):
-        # Evenly spaced across the polygon's own vertical extent (not
-        # hugging the top/bottom edge) -- (i + 1) / (count + 1) puts
-        # WATER_ZONE_RIPPLE_COUNT waves at fractions 1/(n+1) .. n/(n+1)
-        # of the bounding-box height.
-        y_center = miny + height * (i + 1) / (WATER_ZONE_RIPPLE_COUNT + 1)
-        ys = y_center + amplitude * np.sin(2 * np.pi * (xs - minx) / wavelength)
-        wave_line = LineString(zip(xs, ys))
-        clipped = wave_line.intersection(polygon)
-        if not clipped.is_empty:
-            clipped_lines.append(clipped)
-    return clipped_lines
 
 
 def _chaikin_smooth_coords(coords: list[tuple[float, float]], iterations: int) -> list[tuple[float, float]]:
@@ -736,8 +683,7 @@ def _draw_road_corridor(ax, line: LineString) -> None:
     ROAD_RENDER_COLOR -- two plot calls over the same geometry, not one
     styled line, so the road reads as a real symbol rather than a flat
     highlighted path. zorder puts the inner line just above the outer
-    shoulder, same +0.5 pattern the water zone's ripple texture (zorder
-    41 fill / 41.5 ripple) already uses.
+    shoulder (42.5 vs 42).
     """
     plot_line(
         line,
@@ -763,10 +709,10 @@ def _angular_simplify_closed_ring(ring: LineString, tolerance: float) -> LineStr
     """
     DISPLAY-ONLY transform for a fence loop's own LineString -- boundary,
     water-zone-exclusion, and tree-zone-exclusion fencing all use this one
-    helper directly and stay purely angular; road-corridor-exclusion and
-    existing-farm-road-exclusion fencing route through
-    _angular_then_smooth_closed_ring() below instead, which calls this same
-    function first before adding its own road-specific Chaikin pass on top.
+    helper directly and stay purely angular; road-corridor-exclusion
+    fencing routes through _angular_then_smooth_closed_ring() below
+    instead, which calls this same function first before adding its own
+    road-specific Chaikin pass on top.
     Replaces this module's earlier simplify-then-Chaikin-smooth treatment:
     fence lines now render ANGULAR by default, not curved, per explicit
     request -- so this is shapely .simplify(tolerance, preserve_topology=
@@ -830,8 +776,8 @@ def _chaikin_smooth_closed_ring(coords: list[tuple[float, float]], iterations: i
 
 def _angular_then_smooth_closed_ring(ring: LineString, simplify_tolerance: float, chaikin_iterations: int) -> LineString:
     """
-    Road-specific fence render treatment -- fence_type in
-    ('road_corridor_exclusion', 'existing_farm_road_exclusion') ONLY, not
+    Road-specific fence render treatment -- fence_type
+    'road_corridor_exclusion' ONLY, not
     boundary/water_zone_exclusion/tree_zone_exclusion (those stay purely
     angular via _angular_simplify_closed_ring() alone). New plumbing
     chaining two existing helpers, not new smoothing math: runs the ring
@@ -848,12 +794,15 @@ def _angular_then_smooth_closed_ring(ring: LineString, simplify_tolerance: float
     return LineString(smoothed_coords)
 
 
-def _draw_boundary_fence(ax, ring: LineString) -> None:
+def _draw_boundary_fence(ax, ring: LineString, zorder: float = FENCE_ZORDER) -> None:
     """Draws `ring` (already simplified -- see _angular_simplify_closed_ring())
     as a single solid hairline fence line, FENCE_COLOR/FENCE_LINEWIDTH -- no
-    dash pattern (this used to be dashed; now a fine, subtle solid line), at
-    FENCE_ZORDER (see that constant's own comment for why fences sit above
-    every zone fill layer but below the structure site pin/markers/legend)."""
+    dash pattern (this used to be dashed; now a fine, subtle solid line).
+    Defaults to FENCE_ZORDER (see that constant's own comment) -- the boundary
+    fence's own caller relies on this default; the road/water/tree exclusion
+    fence loops' caller passes zorder=EXCLUSION_FENCE_ZORDER explicitly
+    instead (see that constant's own comment for why they don't share
+    FENCE_ZORDER)."""
     plot_line(
         ring,
         ax=ax,
@@ -861,7 +810,7 @@ def _draw_boundary_fence(ax, ring: LineString) -> None:
         color=FENCE_COLOR,
         linewidth=FENCE_LINEWIDTH,
         linestyle="solid",
-        zorder=FENCE_ZORDER,
+        zorder=zorder,
     )
 
 
@@ -1047,13 +996,7 @@ def fetch_layout_layers(
     see that function's own docstring), plus boundary_polygon_utm/
     production_areas/valleys/hydric_floodplain_union/floodplain_data_is_
     fallback, so this call's own three internal self-compute fallbacks
-    (road corridor, water zone, tree zone) never run at all -- fully free
-    past farm_road_features. farm_road_features is now parcel_data.
-    farm_roads directly -- a guaranteed, already-hard-failed-upfront value
-    by the time this line runs (see parcel_data (the parameter) above), not
-    a fetch this function protects with its own try/except anymore: any
-    farm-road fetch failure already stopped this whole function before
-    build_pipeline_context() was even called.
+    (road corridor, water zone, tree zone) never run at all.
 
     water_features is parcel_data.water_features directly, same reasoning
     -- no longer this function's own hydrology_data.get_water_features_
@@ -1117,17 +1060,10 @@ def fetch_layout_layers(
     water_features = parcel_data.water_features
     contour_lines = compute_contour_lines(context.dem)
 
-    # farm_road_features is now a guaranteed value -- parcel_data.
-    # fetch_parcel_data() already hard-failed this whole function above if
-    # farm_roads couldn't be fetched, so there's no remaining failure case
-    # here left to catch.
-    farm_road_features = parcel_data.farm_roads
-
     fencing_result = identify_fencing(
         boundary_coordinates,
         dem=context.dem,
         anchor_lon_lat=anchor_lon_lat,
-        farm_road_features=farm_road_features,
         boundary_polygon_utm=context.boundary_polygon_utm,
         production_areas=context.production_areas,
         valleys=context.valleys,
@@ -1235,9 +1171,11 @@ def render_layout_map(
         basemap_note = f"basemap unavailable ({e})"
 
     # z-order, back to front: halo mask, streams, production zone contours,
-    # water zone fill/ripple, road corridor line, tree zone fill, ALL fencing
-    # (FENCE_ZORDER, above every zone fill -- see that constant's own
-    # comment), structure site pin, numbered markers, legend/basemap note.
+    # water zone fill, road corridor line, tree zone fill, the road/water/
+    # tree exclusion fence loops (EXCLUSION_FENCE_ZORDER, above every zone
+    # fill -- see that constant's own comment), structure site pin, numbered
+    # markers, the boundary fence (FENCE_ZORDER, above the numbered markers --
+    # see that constant's own comment), legend/basemap note.
     if not halo_mask.is_empty:
         plot_polygon(halo_mask, ax=ax, add_points=False, facecolor=HALO_COLOR, edgecolor="none", alpha=HALO_ALPHA, zorder=10)
 
@@ -1274,47 +1212,43 @@ def render_layout_map(
         legend_entries.append(label)
 
     # Everything-else fencing (fencing.identify_fencing()'s own "road_corridor_exclusion" /
-    # "existing_farm_road_exclusion" / "water_zone_exclusion" / "tree_zone_exclusion"
-    # fence_types, same "perimeter_fencing" layer) -- all four are fully enclosed closed
-    # loops (per their own spec), so the exact same drawing helper as boundary fencing
-    # applies unchanged (see this module's own ROAD EXCLUSION FENCE STYLE docstring
+    # "water_zone_exclusion" / "tree_zone_exclusion" fence_types, same "perimeter_fencing"
+    # layer) -- all three are fully enclosed closed loops (per their own spec), so the same
+    # drawing helper as boundary fencing applies, at EXCLUSION_FENCE_ZORDER rather than
+    # boundary fencing's own FENCE_ZORDER (see that constant's own comment for why they
+    # don't share a zorder) -- see this module's own ROAD EXCLUSION FENCE STYLE docstring
     # section -- water/tree zone fencing reuses that same treatment: water/tree zones can
     # sit close enough to the boundary that a clip may matter, same reasoning as roads, so
     # it's applied uniformly here rather than special-cased out). The SIMPLIFY step is the
-    # one place these four aren't all identical: road_corridor_exclusion/existing_farm_
-    # road_exclusion route through _angular_then_smooth_closed_ring() (angular simplify
-    # PLUS a road-specific Chaikin softening pass -- see that function's own docstring),
-    # while water_zone_exclusion/tree_zone_exclusion use plain _angular_simplify_closed_
-    # ring(), same as boundary fencing above. Looped over generically rather than as four
-    # near-duplicate blocks; only the simplify call and the legend label differ per
-    # fence_type. INDEPENDENT of the boundary fence and of each other -- an overlap
-    # between any of them is expected, not a bug. Unlike the boundary fence, each
-    # simplified ring is clipped to boundary_polygon (render-only -- see this module's own
-    # ROAD EXCLUSION FENCE STYLE docstring section for why) AFTER simplifying it, same
-    # order as the prior render-polish pass -- both simplify helpers re-close a genuinely
-    # closed ring, which would be WRONG if applied to an already-clipped, genuinely OPEN
-    # arc piece (it would force-close a real arc into a bogus loop), so the whole ring is
-    # simplified first, while it's still guaranteed closed, and only THEN clipped into
-    # however many open/closed pieces the boundary crossing produces. The clip can split
-    # one ring into several line pieces, all drawn, but the legend still gets exactly one
-    # line per FEATURE regardless.
+    # one place these three aren't all identical: road_corridor_exclusion routes through
+    # _angular_then_smooth_closed_ring() (angular simplify PLUS a road-specific Chaikin
+    # softening pass -- see that function's own docstring), while water_zone_exclusion/
+    # tree_zone_exclusion use plain _angular_simplify_closed_ring(), same as boundary
+    # fencing above. Looped over generically rather than as three near-duplicate blocks;
+    # only the simplify call and the legend label differ per fence_type. INDEPENDENT of
+    # the boundary fence and of each other -- an overlap between any of them is expected,
+    # not a bug. Unlike the boundary fence, each simplified ring is clipped to
+    # boundary_polygon (render-only -- see this module's own ROAD EXCLUSION FENCE STYLE
+    # docstring section for why) AFTER simplifying it, same order as the prior
+    # render-polish pass -- both simplify helpers re-close a genuinely closed ring, which
+    # would be WRONG if applied to an already-clipped, genuinely OPEN arc piece (it would
+    # force-close a real arc into a bogus loop), so the whole ring is simplified first,
+    # while it's still guaranteed closed, and only THEN clipped into however many
+    # open/closed pieces the boundary crossing produces. The clip can split one ring into
+    # several line pieces, all drawn, but the legend still gets exactly one line per
+    # FEATURE regardless.
     extra_fence_features = [
         f
         for f in fencing_features
-        if f["properties"].get("fence_type")
-        in ("road_corridor_exclusion", "existing_farm_road_exclusion", "water_zone_exclusion", "tree_zone_exclusion")
+        if f["properties"].get("fence_type") in ("road_corridor_exclusion", "water_zone_exclusion", "tree_zone_exclusion")
     ]
-    multiple_farm_road_segments = (
-        sum(1 for f in extra_fence_features if f["properties"]["fence_type"] == "existing_farm_road_exclusion") > 1
-    )
     multiple_tree_zone_fences = (
         sum(1 for f in extra_fence_features if f["properties"]["fence_type"] == "tree_zone_exclusion") > 1
     )
-    farm_road_segment_index = 0
     for feature in extra_fence_features:
         fence_geom = _reproject_geometry_to_mercator(feature["geometry"])
         fence_type = feature["properties"]["fence_type"]
-        if fence_type in ("road_corridor_exclusion", "existing_farm_road_exclusion"):
+        if fence_type == "road_corridor_exclusion":
             render_ring = _angular_then_smooth_closed_ring(
                 fence_geom, FENCE_RENDER_ANGULAR_SIMPLIFY_TOLERANCE_M, FENCE_RENDER_ROAD_CHAIKIN_ITERATIONS
             )
@@ -1323,17 +1257,9 @@ def render_layout_map(
         clipped_ring = render_ring.intersection(boundary_polygon)
         for line in _iter_line_parts(clipped_ring):
             if line.length > ROAD_FENCE_CLIP_MIN_LENGTH:
-                _draw_boundary_fence(ax, line)
+                _draw_boundary_fence(ax, line, zorder=EXCLUSION_FENCE_ZORDER)
         if fence_type == "road_corridor_exclusion":
             legend_entries.append("Road Corridor Fencing")
-        elif fence_type == "existing_farm_road_exclusion":
-            farm_road_segment_index += 1
-            label = (
-                f"Existing Farm Road Fencing {farm_road_segment_index}"
-                if multiple_farm_road_segments
-                else "Existing Farm Road Fencing"
-            )
-            legend_entries.append(label)
         elif fence_type == "water_zone_exclusion":
             legend_entries.append("Water Zone Fencing")
         else:  # tree_zone_exclusion -- fencing.tree_zone_fencing_to_geojson()'s own
@@ -1396,8 +1322,7 @@ def render_layout_map(
         for polygon in polygons:
             # Opaque fill (alpha=1.0) so it fully occludes any production-
             # zone contour lines beneath it (zorder=41 > those zones'
-            # zorder=40) -- then a subtle sine-wave ripple texture drawn
-            # directly over it, so this reads as water at a glance.
+            # zorder=40).
             plot_polygon(
                 polygon,
                 ax=ax,
@@ -1408,17 +1333,6 @@ def render_layout_map(
                 linewidth=1.5,
                 zorder=41,
             )
-            for ripple in _ripple_lines_for_polygon(polygon):
-                for line in _iter_line_parts(ripple):
-                    plot_line(
-                        line,
-                        ax=ax,
-                        add_points=False,
-                        color=WATER_ZONE_RIPPLE_COLOR,
-                        linewidth=WATER_ZONE_RIPPLE_LINEWIDTH,
-                        alpha=WATER_ZONE_RIPPLE_ALPHA,
-                        zorder=41.5,
-                    )
         # The marker sits on the geometry actually drawn above (the hull,
         # not the real blocky footprint) -- representative_point() is
         # guaranteed by shapely to fall within its own geometry, so this

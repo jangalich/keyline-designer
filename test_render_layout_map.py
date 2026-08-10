@@ -530,47 +530,18 @@ print(
 
 
 # =====================================================================
-# WATER ZONE STYLE: the water zone's FILL is now drawn from its own
+# WATER ZONE STYLE: the water zone's FILL is drawn from its own
 # render_fill_polygon_utm (a DISPLAY-ONLY convex hull -- see water_
-# candidate_zones.find_candidate_zones()'s own docstring), fully opaque,
-# with a subtle sine-wave ripple texture drawn over it -- see this
-# module's own "WATER ZONE STYLE" docstring section.
+# candidate_zones.find_candidate_zones()'s own docstring), fully opaque --
+# see this module's own "WATER ZONE STYLE" docstring section.
 # =====================================================================
 
 import water_candidate_zones as wcz
 from water_candidate_zones import find_candidate_zones
 from render_layout_map import (
     WATER_ZONE_COLOR,
-    WATER_ZONE_RIPPLE_COLOR,
-    _ripple_lines_for_polygon,
     _iter_line_parts,
 )
-
-# --- _ripple_lines_for_polygon(): a real polygon gets real, clipped ripple lines ---
-
-RIPPLE_TEST_POLYGON = box(0.0, 0.0, 100.0, 40.0)
-ripple_lines = _ripple_lines_for_polygon(RIPPLE_TEST_POLYGON)
-assert 0 < len(ripple_lines) <= rlm.WATER_ZONE_RIPPLE_COUNT, (
-    f"expected between 1 and {rlm.WATER_ZONE_RIPPLE_COUNT} ripple line(s) for a normal rectangular polygon, "
-    f"got {len(ripple_lines)}"
-)
-buffered_polygon = RIPPLE_TEST_POLYGON.buffer(1e-9)
-total_ripple_length = 0.0
-for ripple in ripple_lines:
-    for line in _iter_line_parts(ripple):
-        assert buffered_polygon.contains(line), "every ripple line segment must stay within the polygon it's clipped to"
-        total_ripple_length += line.length
-assert total_ripple_length > 0, "test setup should produce real, nonzero-length ripple line segments"
-print(
-    f"_ripple_lines_for_polygon() produces {len(ripple_lines)} real sine-wave line(s) on a rectangular test "
-    f"polygon, every segment clipped entirely within the polygon's own bounds ({total_ripple_length:.1f}m total)."
-)
-
-# --- _ripple_lines_for_polygon(): a degenerate (zero-area) polygon returns no ripples, doesn't crash ---
-
-degenerate_polygon = box(0.0, 0.0, 0.0, 10.0)  # zero width
-assert _ripple_lines_for_polygon(degenerate_polygon) == [], "a degenerate zero-area polygon must return no ripple lines, without raising"
-print("_ripple_lines_for_polygon() returns no ripples for a degenerate (zero-area) polygon, without raising.")
 
 
 # --- Full render_layout_map() pass: a synthetic water zone whose render_fill_polygon_utm is a genuine
@@ -634,8 +605,8 @@ _original_draw_numbered_marker = rlm._draw_numbered_marker
 rlm._draw_numbered_marker = lambda ax, point, number: recorded_markers.append((point, number)) or _original_draw_numbered_marker(ax, point, number)
 
 # Also record every plot_polygon()/plot_line() call render_layout_map() makes, so the fill's own
-# alpha/zorder and the ripple lines' own color can be confirmed directly against what's actually
-# drawn, not just inferred from the module's constants.
+# alpha/zorder can be confirmed directly against what's actually drawn, not just inferred from
+# the module's constants.
 recorded_polygon_calls = []
 _original_plot_polygon = rlm.plot_polygon
 
@@ -690,15 +661,9 @@ assert water_fill_kwargs["alpha"] == 1.0, (
 )
 assert water_fill_kwargs["zorder"] == 41, f"the water zone fill's zorder must stay above production zones' zorder=40, got {water_fill_kwargs['zorder']}"
 
-ripple_calls = [kw for kw in recorded_line_calls if kw.get("color") == WATER_ZONE_RIPPLE_COLOR]
-assert ripple_calls, "expected at least one plot_line() call drawing the ripple texture in WATER_ZONE_RIPPLE_COLOR"
-assert all(kw["zorder"] > water_fill_kwargs["zorder"] for kw in ripple_calls), (
-    "every ripple line must render ABOVE the opaque fill it textures (higher zorder), not underneath it"
-)
 print(
     f"Water zone fill draws fully opaque (alpha=1.0) at zorder={water_fill_kwargs['zorder']} (above production "
-    f"zones' zorder=40), with {len(ripple_calls)} ripple line segment(s) drawn above the fill in "
-    f"WATER_ZONE_RIPPLE_COLOR."
+    "zones' zorder=40)."
 )
 
 assert len(recorded_markers) == 1, f"expected exactly 1 marker drawn (the water zone), got {len(recorded_markers)}"
