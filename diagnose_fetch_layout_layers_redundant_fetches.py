@@ -405,17 +405,29 @@ COUNTED_STUB_SITES = {
     # each imports get_required_tree_root_zone_mask_utm -- all resolve
     # this same name via production_area.py's own module globals at call
     # time, same "one shared stub covers every mandatory-canopy gate"
-    # property _fake_clean_canopy already relies on above). Expected AFTER
-    # this branch: pd_module's own site reads exactly 1 (ParcelData's
-    # single upstream fetch, unrelated to and unchanged by this branch);
-    # production_area's own site should now read 0 from every canopy_
-    # height-accepting call this branch wired (build_pipeline_context()'s
-    # five internal calls, plus fetch_layout_layers()'s own direct
-    # identify_solar_candidate_zones() call) -- EXCEPT fencing.identify_
-    # fencing() still contributes its own independent fetch here, since it
-    # has no canopy_height override on its own signature at all (see this
-    # branch's own scoping notes) -- so a real, honest total here reads 1,
-    # not 0, until a future branch closes that specific remaining gap.
+    # property _fake_clean_canopy already relies on above). Measured on the
+    # canopy-mask-wiring-road-fencing branch: pd_module's own site reads
+    # exactly 1 (ParcelData's single upstream fetch, unrelated to and
+    # unchanged by this branch). production_area's own site dropped from
+    # 10 to 5 on this fixture -- render_layout_map.py's own direct
+    # identify_road_corridor_candidates()/identify_fencing() calls and
+    # pipeline_context.py's own identify_road_corridor_candidates() call
+    # now forward canopy_height=parcel_data.canopy_height (this branch's
+    # own change), which fencing.identify_fencing()'s mandatory boundary-
+    # fencing canopy gate and both functions' selected_water_zone self-
+    # compute fallbacks now honor (road_corridors.py/fencing.py themselves
+    # gained the canopy_height parameter and forwarding on the prior
+    # branch, canopy-height-road-corridors). The remaining 5 are
+    # STRUCTURAL, not a gap in this branch's own scope: on this flat,
+    # no-water fixture, selected_water_zone comes back None, so tree_zone_
+    # candidates.py's (3 calls) and solar_suitability.py's (2 calls) own
+    # DIRECT identify_road_corridor_candidates() calls -- both files
+    # explicitly out of scope here, unwired to canopy_height on their own
+    # call sites -- each re-trigger identify_road_corridor_candidates()'s
+    # own selected_water_zone self-compute fallback with no override to
+    # forward, hitting the real gate. Closing those needs canopy_height
+    # wiring inside tree_zone_candidates.py/solar_suitability.py
+    # themselves, a separate, later branch.
     "get_canopy_height_for_boundary": {
         "stub": _fake_clean_canopy,
         "sites": [
@@ -581,11 +593,15 @@ def main() -> None:
         print(
             f"\nget_canopy_height_for_boundary(): {canopy_total} total ({canopy_from_parcel_data} from parcel_data."
             f"fetch_parcel_data()'s own single upstream fetch, {canopy_from_compute_layer} from the compute-layer "
-            "gate production_area.py's own _fetch_tree_root_zone_mask_utm() reaches -- this branch's own target "
-            "was BEFORE-branch measured at 23 on this fixture; see the per-call-site breakdown below for the "
-            "current number and why any nonzero remainder there is a pre-existing, separately-scoped gap (road_"
-            "corridors.py has no canopy_height override at all, and fencing.identify_fencing() doesn't expose one "
-            "on its own signature either -- both out of scope for this branch, see its own module docstring)."
+            "gate production_area.py's own _fetch_tree_root_zone_mask_utm() reaches -- measured at 23 before any "
+            "canopy wiring existed, 11 after road_corridors.py/fencing.py gained the canopy_height parameter "
+            "(canopy-height-road-corridors) but before render_layout_map.py/pipeline_context.py forwarded their "
+            "own already-fetched parcel_data.canopy_height into their own identify_road_corridor_candidates()/ "
+            "identify_fencing() calls, and now this (canopy-mask-wiring-road-fencing); see the per-call-site "
+            "breakdown below for the current number and why any nonzero remainder there is a pre-existing, "
+            "separately-scoped gap (tree_zone_candidates.py's and solar_suitability.py's own DIRECT identify_"
+            "road_corridor_candidates() calls are not wired to canopy_height on their own call sites -- both "
+            "files out of scope for this branch, see COUNTED_STUB_SITES' own comment above)."
         )
 
     print(

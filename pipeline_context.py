@@ -479,6 +479,7 @@ def build_pipeline_context(
         selected_water_zone=selected_water_zone,
         hydric_floodplain_union=soil_exclusion_unions["hydric_floodplain_union"],
         floodplain_data_is_fallback=soil_exclusion_unions["hydric_floodplain_is_fallback"],
+        canopy_height=canopy_height,
     )
     selected_road_corridor = road_corridor_result["selected_road_corridor"]
 

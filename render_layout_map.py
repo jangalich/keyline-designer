@@ -1090,6 +1090,7 @@ def fetch_layout_layers(
         selected_water_zone=context.selected_water_zone,
         hydric_floodplain_union=context.soil_exclusion_unions["hydric_floodplain_union"],
         floodplain_data_is_fallback=context.soil_exclusion_unions["hydric_floodplain_is_fallback"],
+        canopy_height=parcel_data.canopy_height,
     )
     road_corridor_features = road_corridor_candidates["zones_geojson"]["features"]
     road_corridor = road_corridor_features[0] if road_corridor_features else None
@@ -1135,6 +1136,7 @@ def fetch_layout_layers(
         tree_zone_patches=context.tree_zone_patches,
         hydric_floodplain_union=context.soil_exclusion_unions["hydric_floodplain_union"],
         floodplain_data_is_fallback=context.soil_exclusion_unions["hydric_floodplain_is_fallback"],
+        canopy_height=parcel_data.canopy_height,
     )
 
     return {

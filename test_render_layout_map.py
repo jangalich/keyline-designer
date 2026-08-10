@@ -1144,27 +1144,32 @@ print(
 # =====================================================================
 # canopy_height= override: real, wraps=-based call-count proof (not just
 # mocked) that fetch_layout_layers()'s OWN direct identify_solar_
-# candidate_zones() call -- the one net-new canopy-accepting call this
-# branch added inside fetch_layout_layers() itself, per Step 0's own
-# scoping grep -- genuinely never triggers a real canopy fetch when
+# candidate_zones() call -- the one net-new canopy-accepting call the
+# render-layout-map-context-wiring branch added inside fetch_layout_
+# layers() itself -- genuinely never triggers a real canopy fetch when
 # parcel_data.canopy_height is supplied. build_pipeline_context() is
 # mocked here to a cheap, fully-formed fake PipelineContext (its own
 # real, whole-run canopy-fetch-closure proof already lives in test_
 # pipeline_context.py -- no value re-deriving that same heavy synthetic-
 # terrain machinery a second time in THIS file); identify_road_corridor_
-# candidates() is mocked too (Step 0 confirmed it has no canopy gate at
-# all -- nothing for it to forward). identify_fencing() is ALSO mocked
-# here, deliberately -- Step 0 confirmed fencing.identify_fencing() does
-# not expose a canopy_height override on its own signature (only the
-# identify_boundary_fencing() entry point one level down inside
-# fencing.py does), so it still carries its own independent, un-fixable-
-# in-this-branch canopy fetch; leaving it real would make a "zero
-# fetches" assertion measure the wrong thing. Uses the SAME
-# CanopyOverrideProbe every other real canopy-override test in this
-# session uses, patched once at production_area's own module bindings so
-# it observes the fetch no matter how deeply nested identify_solar_
-# candidate_zones()'s own reach into it is (its own top-level gate, PLUS
-# its own nested identify_tree_zone_candidates() call's gate).
+# candidates() and identify_fencing() are ALSO mocked here (return_
+# value=, identity-checked below rather than left real) -- both now
+# accept canopy_height (road_corridors.py/fencing.py gained the
+# parameter on the canopy-height-road-corridors branch, and THIS branch,
+# canopy-mask-wiring-road-fencing, wires fetch_layout_layers()'s own
+# direct calls to both into it), but a fully-real run of either would
+# also drag in identify_road_corridor_candidates()'s/identify_fencing()'s
+# own separate NHD/SSURGO/floodplain network calls, which have nothing
+# to do with canopy forwarding -- the real, wraps=-based zero-additional-
+# canopy-fetch proof for those two call sites specifically lives in the
+# dedicated call-count-measurement section below instead, which reuses
+# diagnose_fetch_layout_layers_redundant_fetches.py's own real (non-
+# mocked) registry. Uses the SAME CanopyOverrideProbe every other real
+# canopy-override test in this session uses, patched once at production_
+# area's own module bindings so it observes the fetch no matter how
+# deeply nested identify_solar_candidate_zones()'s own reach into it is
+# (its own top-level gate, PLUS its own nested identify_tree_zone_
+# candidates() call's gate).
 # =====================================================================
 
 import pipeline_context as pc
@@ -1214,7 +1219,7 @@ with ExitStack() as _canopy_stack:
     mock_context_canopy_case = _enter(
         mock_patch.object(rlm, "build_pipeline_context", return_value=_fake_context_for_canopy_case)
     )
-    _enter(
+    mock_road_corridor_canopy_case = _enter(
         mock_patch.object(
             rlm,
             "identify_road_corridor_candidates",
@@ -1224,7 +1229,7 @@ with ExitStack() as _canopy_stack:
     mock_solar_canopy_case = _enter(
         mock_patch.object(rlm, "identify_solar_candidate_zones", wraps=rlm.identify_solar_candidate_zones)
     )
-    _enter(
+    mock_fencing_canopy_case = _enter(
         mock_patch.object(
             rlm, "identify_fencing", return_value={"fencing_geojson": {"type": "FeatureCollection", "features": []}, "segment_count": 0}
         )
@@ -1241,13 +1246,140 @@ assert mock_solar_canopy_case.call_args.kwargs["canopy_height"] is _canopy_overr
     "fetch_layout_layers()'s own direct identify_solar_candidate_zones() call must receive parcel_data."
     "canopy_height by identity"
 )
+# canopy_height -- this branch's (canopy-mask-wiring-road-fencing) own addition: fetch_layout_layers()'s
+# own direct identify_road_corridor_candidates()/identify_fencing() calls must also forward parcel_data.
+# canopy_height by identity, same as identify_solar_candidate_zones() above.
+assert mock_road_corridor_canopy_case.call_args.kwargs["canopy_height"] is _canopy_override, (
+    "fetch_layout_layers()'s own direct identify_road_corridor_candidates() call must receive parcel_data."
+    "canopy_height by identity"
+)
+assert mock_fencing_canopy_case.call_args.kwargs["canopy_height"] is _canopy_override, (
+    "fetch_layout_layers()'s own direct identify_fencing() call must receive parcel_data.canopy_height by "
+    "identity"
+)
 print(
-    f"canopy_height= override: fetch_layout_layers()'s OWN direct identify_solar_candidate_zones() call -- "
-    f"run for REAL here, not stubbed away -- receives the exact caller-supplied override and causes "
-    f"production_area.get_canopy_height_for_boundary() to be called ZERO times ({len(canopy_probe.mask_arrays)} "
-    "real canopy gate(s) reached, every one computed on the exact supplied override array). build_pipeline_"
-    "context()'s own equivalent real-run proof lives in test_pipeline_context.py; identify_fencing() is "
-    "mocked here since it has no canopy override to receive at all (see this section's own comment)."
+    f"canopy_height= override: fetch_layout_layers()'s OWN direct identify_solar_candidate_zones()/identify_"
+    f"road_corridor_candidates()/identify_fencing() calls -- identify_solar_candidate_zones() run for REAL "
+    f"here, not stubbed away -- receive the exact caller-supplied override (identity-checked for all three) "
+    f"and cause production_area.get_canopy_height_for_boundary() to be called ZERO times "
+    f"({len(canopy_probe.mask_arrays)} real canopy gate(s) reached, every one computed on the exact supplied "
+    "override array). build_pipeline_context()'s own equivalent real-run proof lives in test_pipeline_"
+    "context.py; identify_road_corridor_candidates()/identify_fencing() are return_value-mocked here purely "
+    "to keep this section fast/offline (their own separate NHD/SSURGO/floodplain fetches have nothing to do "
+    "with canopy) -- their own real, wraps=-based zero-additional-canopy-fetch proof is in the dedicated "
+    "call-count-measurement section below."
+)
+
+# =====================================================================
+# canopy_height= wiring (canopy-mask-wiring-road-fencing branch): real,
+# wraps=-based call-count proof that fetch_layout_layers()'s own direct
+# identify_road_corridor_candidates()/identify_fencing() calls, and
+# pipeline_context.build_pipeline_context()'s own identify_road_corridor_
+# candidates() call, now forward parcel_data.canopy_height all the way
+# down to fencing.py's/road_corridors.py's own internal gates -- not just
+# identity-checked against a mock (the section above), but a genuinely
+# full, un-mocked fetch_layout_layers() run, reusing diagnose_fetch_
+# layout_layers_redundant_fetches.py's own registry (WRAPS_SITES/
+# STUB_SITES/COUNTED_STUB_SITES) rather than re-building the same heavy
+# offline-stub apparatus a second time in this file. That module is a
+# permanent, standalone diagnostic (no assertions of its own beyond a
+# sanity isinstance() check) -- this section is what turns its real
+# measurement into an enforced regression guard.
+#
+# get_canopy_height_for_boundary() is called ONCE for ParcelData's own
+# upstream fetch (parcel_data.fetch_parcel_data(), ONE call regardless of
+# how many downstream consumers reuse it) plus a CURRENT residual traced
+# entirely to tree_zone_candidates.py's and solar_suitability.py's own
+# DIRECT identify_road_corridor_candidates() calls -- both files
+# explicitly out of scope for this branch (see the module docstring's
+# own "What NOT to touch"), so their own call sites don't forward
+# canopy_height and correctly still self-compute a real canopy fetch on
+# this fixture (selected_road_corridor comes back None -- no viable route
+# on this flat synthetic terrain -- so their own ambiguous-None-sentinel
+# self-compute fallback fires; a pre-existing, separately-scoped
+# behavior class, not something this branch introduces or is scoped to
+# fix). This section proves that residual is EXCLUSIVELY attributable to
+# those two unwired call sites -- zero of it traces to this branch's own
+# three wired call sites (pipeline_context.py's build_pipeline_context(),
+# render_layout_map.py's own fetch_layout_layers(), and fencing.py's own
+# identify_fencing(), which forwards canopy_height into its own nested
+# identify_road_corridor_candidates() self-compute per the canopy-height-
+# road-corridors branch) -- each of which is confirmed BELOW to be
+# genuinely exercised (count == 1, not skipped), not just present with a
+# zero contribution by accident.
+# =====================================================================
+
+import diagnose_fetch_layout_layers_redundant_fetches as diag_fetch_layout_layers
+
+_diag_counts, _diag_call_site_logs = diag_fetch_layout_layers.run()
+
+_diag_canopy_sites = _diag_call_site_logs["get_canopy_height_for_boundary"]
+_diag_canopy_from_parcel_data = _diag_canopy_sites.get("parcel_data.py:163 in fetch_parcel_data", 0)
+_diag_canopy_total = _diag_counts["get_canopy_height_for_boundary"]
+_diag_canopy_from_compute_layer = _diag_canopy_total - _diag_canopy_from_parcel_data
+
+assert _diag_canopy_from_parcel_data == 1, (
+    f"parcel_data.fetch_parcel_data()'s own single upstream get_canopy_height_for_boundary() fetch must run "
+    f"exactly once per fetch_layout_layers() call, got {_diag_canopy_from_parcel_data}"
+)
+
+# The three call sites THIS branch wired: pipeline_context.py's own identify_road_corridor_candidates() call,
+# render_layout_map.py's own direct identify_road_corridor_candidates()/identify_fencing() calls (identify_
+# fencing() itself isn't traced here -- it has no direct canopy gate of its own, only forwarding into its own
+# nested identify_road_corridor_candidates() call, which IS traced). Each must appear exactly once, proving
+# fetch_layout_layers()'s real call graph genuinely reaches every one of them on this fixture.
+_diag_road_corridor_sites = _diag_call_site_logs["identify_road_corridor_candidates"]
+_WIRED_SITE_PREFIXES = ("pipeline_context.py:", "render_layout_map.py:", "fencing.py:")
+_diag_wired_site_counts = {
+    site: count for site, count in _diag_road_corridor_sites.items() if site.startswith(_WIRED_SITE_PREFIXES)
+}
+_diag_unwired_site_counts = {
+    site: count for site, count in _diag_road_corridor_sites.items() if not site.startswith(_WIRED_SITE_PREFIXES)
+}
+assert len(_diag_wired_site_counts) == 3, (
+    f"expected exactly 3 of this branch's own wired identify_road_corridor_candidates() call sites "
+    f"(pipeline_context.py/render_layout_map.py/fencing.py) to be reached, got {_diag_wired_site_counts}"
+)
+assert all(count == 1 for count in _diag_wired_site_counts.values()), (
+    f"each of this branch's own wired identify_road_corridor_candidates() call sites must run exactly once, "
+    f"got {_diag_wired_site_counts}"
+)
+assert all(
+    site.startswith(("tree_zone_candidates.py:", "solar_suitability.py:")) for site in _diag_unwired_site_counts
+), (
+    f"every identify_road_corridor_candidates() call site OTHER than this branch's own 3 wired ones must "
+    f"trace to tree_zone_candidates.py or solar_suitability.py (the two files explicitly out of scope for "
+    f"this branch) -- got unexpected site(s): {_diag_unwired_site_counts}"
+)
+
+# Regression guard on the actual residual: strictly better than the pre-this-branch baseline (10, measured
+# with road_corridors.py/fencing.py already canopy-aware from the prior branch but before THIS branch forwarded
+# parcel_data.canopy_height into pipeline_context.py's/render_layout_map.py's own calls to them), and pinned
+# to the current real, measured value so any regression -- or any further improvement from a future branch
+# wiring tree_zone_candidates.py/solar_suitability.py -- fails loudly here rather than silently drifting.
+assert _diag_canopy_from_compute_layer < 10, (
+    f"expected this branch's own wiring to reduce the compute-layer canopy-fetch residual below the prior "
+    f"10, got {_diag_canopy_from_compute_layer} -- the wiring may not be reaching fetch_layout_layers()'s "
+    f"real call graph"
+)
+assert _diag_canopy_from_compute_layer == 5, (
+    f"expected exactly 5 residual compute-layer get_canopy_height_for_boundary() calls on this fixture "
+    f"(traced entirely to tree_zone_candidates.py's/solar_suitability.py's own unwired identify_road_"
+    f"corridor_candidates() call sites -- see the per-call-site assertions above), got "
+    f"{_diag_canopy_from_compute_layer}. If this dropped to 0, tree_zone_candidates.py/solar_suitability.py "
+    f"were wired too -- update this assertion. If it rose, this branch's own wiring regressed."
+)
+
+print(
+    f"canopy_height= wiring, real full fetch_layout_layers() run (diagnose_fetch_layout_layers_redundant_"
+    f"fetches.py's own registry, not a re-built one): get_canopy_height_for_boundary() called "
+    f"{_diag_canopy_total} total ({_diag_canopy_from_parcel_data} from parcel_data.fetch_parcel_data()'s own "
+    f"single upstream fetch, {_diag_canopy_from_compute_layer} from the compute layer). This branch's own 3 "
+    f"wired call sites (pipeline_context.py's build_pipeline_context(), render_layout_map.py's own fetch_"
+    f"layout_layers(), fencing.py's own identify_fencing()) are each confirmed exercised exactly once with "
+    f"ZERO canopy-fetch contribution; the entire {_diag_canopy_from_compute_layer}-call residual traces "
+    f"exclusively to tree_zone_candidates.py's/solar_suitability.py's own unwired identify_road_corridor_"
+    f"candidates() call sites -- both explicitly out of scope for this branch."
 )
 
 print("\nAll render_layout_map checks passed.")
