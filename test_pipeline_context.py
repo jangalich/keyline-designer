@@ -1171,4 +1171,139 @@ print(
     "test_floodplain_union_scope.py."
 )
 
+# --- Regression: canopy_height omitted (the pre-existing call signature) -- every accepting call ---
+# --- still receives an explicit None (its own self-fetch default), same as before canopy_height= ---
+# --- existed on build_pipeline_context() at all. Reuses the very first (fully offline-mocked) run ---
+# --- from section 1 above -- optimize_call/mock_water/mock_select_water_zone/mock_solar/mock_tree_zone ---
+# --- were all captured from that SAME run, before this branch added the canopy_height parameter.
+assert optimize_call.kwargs.get("canopy_height") is None
+assert mock_water.call_args.kwargs.get("canopy_height") is None
+assert mock_select_water_zone.call_args.kwargs.get("canopy_height") is None
+assert mock_solar.call_args.kwargs.get("canopy_height") is None
+assert mock_tree_zone.call_args.kwargs.get("canopy_height") is None
+print(
+    "Regression: canopy_height omitted reaches identify_optimized_production_areas()/identify_water_system_"
+    "candidate_zones()/fetch_and_select_optimal_water_zone()/identify_solar_candidate_zones()/identify_tree_"
+    "zone_candidates() as an explicit None -- each one's own pre-existing self-fetch-canopy default -- so a "
+    "caller that doesn't supply an override sees zero behavior change."
+)
+
+# --- 18. canopy_height= override: reaches every accepting internal call as the exact caller-supplied ---
+# --- object (identity-checked, same as section 17's pattern), AND -- run for REAL here, NOT the ---
+# --- _fake_clean_canopy_mask stand-in sections 1-16 use elsewhere in this file -- causes production_area. ---
+# --- get_canopy_height_for_boundary() to be called ZERO times across the WHOLE build_pipeline_context() ---
+# --- run. identify_water_system_candidate_zones()/identify_solar_candidate_zones()/identify_tree_zone_ ---
+# --- candidates() are left real/wraps= below specifically so their own internal canopy gates (each ---
+# --- resolving to production_area's shared get_required_tree_root_zone_mask_utm()/_fetch_tree_root_zone_ ---
+# --- mask_utm(), per that function's own docstring) genuinely run and genuinely honor the override -- a ---
+# --- fully-mocked identify_*() call would never reach that gate at all, making a "zero fetches" assertion ---
+# --- vacuous. Uses the SAME CanopyOverrideProbe every other canopy-override caller test in this session ---
+# --- uses (test_production_area_ceiling.py, test_water_suitability.py, test_solar_suitability.py, etc.) ---
+# --- patched once, at production_area's own module bindings, so it observes every path into the shared ---
+# --- fetch no matter how deeply nested the reaching caller is. identify_optimized_production_areas()/ ---
+# --- fetch_and_select_optimal_water_zone() stay fully mocked here (their own real-run canopy proof ---
+# --- already lives in test_production_area_ceiling.py/test_water_suitability.py) -- only identity-checked. ---
+# --- road_corridors.identify_road_corridor_candidates() has no canopy gate at all (see Step 0 of this ---
+# --- branch's own scoping), so it is excluded from this section entirely -- nothing to forward there.
+from _canopy_override_probe import CanopyOverrideProbe, clean_canopy_for  # noqa: E402
+
+canopy_override = clean_canopy_for(synthetic_dem)
+
+with ExitStack() as _stack:
+    _enter = _stack.enter_context
+    _enter(mock_patch.object(pc.dem_data, "get_dem_for_boundary", return_value=synthetic_dem))
+    _enter(mock_patch.object(pc.valley_delineation, "delineate_valleys", return_value=[]))
+    mock_optimize_canopy = _enter(
+        mock_patch.object(
+            pc.production_area_ceiling, "identify_optimized_production_areas", return_value=fake_optimized_result
+        )
+    )
+    _enter(mock_patch.object(pc.farm_roads_data, "get_road_exclusion_union_utm", return_value=fake_existing_roads_union))
+    _enter(mock_patch.object(pc.road_corridors, "_fetch_floodplain_hydric_union", return_value=(fake_hydric_union, False)))
+
+    # identify_water_system_candidate_zones: left real/wraps= -- UNLIKE the main run above, its own
+    # internal get_required_tree_root_zone_mask_utm binding is NOT stubbed with _fake_clean_canopy_mask,
+    # so it genuinely reaches production_area's real gate with the supplied override.
+    mock_water_canopy_case = _enter(
+        mock_patch.object(
+            pc.water_candidate_zones,
+            "identify_water_system_candidate_zones",
+            wraps=pc.water_candidate_zones.identify_water_system_candidate_zones,
+        )
+    )
+    _enter(mock_patch.object(pc.water_candidate_zones, "_fetch_road_exclusion_union_utm", return_value=None))
+    _enter(mock_patch.object(pc.water_candidate_zones, "delineate_valleys"))
+    _enter(mock_patch.object(pc.water_candidate_zones, "identify_production_areas"))
+
+    mock_select_water_zone_canopy = _enter(
+        mock_patch.object(pc, "fetch_and_select_optimal_water_zone", return_value=fake_selected_water_zone)
+    )
+    _enter(mock_patch.object(pc.road_corridors, "identify_road_corridor_candidates", return_value=fake_road_corridor_result))
+
+    # solar/tree_zone: left real/wraps= below, same as the main run -- their own canopy gates are NOT
+    # stubbed here either, for the same reason as water_candidate_zones above.
+    mock_solar_canopy_case = _enter(
+        mock_patch.object(pc, "identify_solar_candidate_zones", wraps=pc.identify_solar_candidate_zones)
+    )
+    mock_tree_zone_canopy_case = _enter(
+        mock_patch.object(pc, "identify_tree_zone_candidates", wraps=pc.identify_tree_zone_candidates)
+    )
+
+    # solar_suitability.py's/tree_zone_candidates.py's OWN self-compute-fallback bindings for
+    # production/water/road -- mocked so they never fire a SEPARATE, un-overridden path (already proven
+    # zero calls in section 8 above); their own canopy gate bindings are deliberately left untouched.
+    _enter(
+        mock_patch.object(solar_suitability, "identify_optimized_production_areas", return_value=fake_optimized_result)
+    )
+    _enter(
+        mock_patch.object(
+            solar_suitability, "identify_water_suitability", return_value={"selected_water_zone": fake_selected_water_zone}
+        )
+    )
+    _enter(mock_patch.object(solar_suitability, "identify_road_corridor_candidates", return_value=fake_road_corridor_result))
+    _enter(
+        mock_patch.object(tree_zone_candidates, "identify_optimized_production_areas", return_value=fake_optimized_result)
+    )
+    _enter(
+        mock_patch.object(
+            tree_zone_candidates, "identify_water_suitability", return_value={"selected_water_zone": fake_selected_water_zone}
+        )
+    )
+    _enter(
+        mock_patch.object(tree_zone_candidates, "identify_road_corridor_candidates", return_value=fake_road_corridor_result)
+    )
+
+    with CanopyOverrideProbe() as probe:
+        ctx_canopy_case = pc.build_pipeline_context(
+            boundary_coordinates,
+            anchor_lon_lat,
+            canopy_height=canopy_override,
+        )
+
+probe.assert_override_used(canopy_override, "build_pipeline_context()")
+
+assert mock_optimize_canopy.call_args.kwargs["canopy_height"] is canopy_override, (
+    "identify_optimized_production_areas() must receive the exact caller-supplied canopy_height= object"
+)
+assert mock_select_water_zone_canopy.call_args.kwargs["canopy_height"] is canopy_override, (
+    "fetch_and_select_optimal_water_zone() must receive the exact caller-supplied canopy_height= object"
+)
+assert mock_water_canopy_case.call_args.kwargs["canopy_height"] is canopy_override, (
+    "identify_water_system_candidate_zones() must receive the exact caller-supplied canopy_height= object"
+)
+assert mock_solar_canopy_case.call_args.kwargs["canopy_height"] is canopy_override, (
+    "identify_solar_candidate_zones() must receive the exact caller-supplied canopy_height= object"
+)
+assert mock_tree_zone_canopy_case.call_args.kwargs["canopy_height"] is canopy_override, (
+    "identify_tree_zone_candidates() must receive the exact caller-supplied canopy_height= object"
+)
+print(
+    f"canopy_height= override: reaches every accepting internal call as the exact caller-supplied object, and "
+    f"-- run for REAL (not stubbed away) on the water-system/solar/tree-zone paths -- causes production_area."
+    f"get_canopy_height_for_boundary() to be called ZERO times across the whole build_pipeline_context() run "
+    f"({len(probe.mask_arrays)} real canopy gate(s) reached, every one computed on the exact supplied override "
+    "array, not a re-fetched or copied one). road_corridors.identify_road_corridor_candidates() has no canopy "
+    "gate to forward to at all."
+)
+
 print("\nAll pipeline_context checks passed.")

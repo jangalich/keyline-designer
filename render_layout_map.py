@@ -952,6 +952,24 @@ def fetch_layout_layers(
     whole function now runs exactly once, inside parcel_data.
     fetch_parcel_data() above, not once per consuming layer.
 
+    canopy_height is now parcel_data.canopy_height passed straight into
+    build_pipeline_context()'s own canopy_height= override, closing the
+    canopy fetch the same way dem/boundary_polygon_utm/soil_components/
+    farm_roads/water_features/soil_geometries already were -- every
+    canopy-gated call build_pipeline_context() makes internally (optimized
+    production areas, water system candidate zones, the selected water
+    zone, solar candidate zones, tree zone candidates) now reuses this
+    SAME already-fetched canopy instead of independently re-fetching it.
+    road_corridors.identify_road_corridor_candidates() has no canopy gate
+    at all, so it's unaffected either way. The identify_solar_candidate_
+    zones() call below (a second, necessary call -- see structure_site
+    below) also receives parcel_data.canopy_height directly, for the same
+    reason. fencing.identify_fencing() does NOT yet expose a canopy_
+    height override on its own signature (only the identify_boundary_
+    fencing() entry point one level down inside fencing.py does) -- out of
+    scope here, unchanged, still its own independent canopy fetch; see
+    that module's own backlog.
+
     production zone legend stats: context.production_areas already IS
     identify_optimized_production_areas()'s own scored_patches list (see
     pipeline_context.py's own field notes) -- no additional call needed
@@ -1053,6 +1071,7 @@ def fetch_layout_layers(
         farm_roads=parcel_data.farm_roads,
         water_features=parcel_data.water_features,
         soil_geometries=parcel_data.soil_geometries,
+        canopy_height=parcel_data.canopy_height,
     )
 
     production_zone_legend_stats = _production_zone_legend_stats(
@@ -1089,6 +1108,7 @@ def fetch_layout_layers(
         selected_road_corridor=selected_road_corridor,
         hydric_floodplain_union=context.soil_exclusion_unions["hydric_floodplain_union"],
         floodplain_data_is_fallback=context.soil_exclusion_unions["hydric_floodplain_is_fallback"],
+        canopy_height=parcel_data.canopy_height,
     )
     solar_features = solar_result["zones_geojson"]["features"]
     structure_site = solar_features[0] if solar_features else None

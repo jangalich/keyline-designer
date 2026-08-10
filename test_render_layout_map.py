@@ -31,6 +31,8 @@ bottom.
 
 import os
 import tempfile
+from contextlib import ExitStack
+from unittest.mock import patch as mock_patch
 
 import numpy as np
 from rasterio.warp import transform as warp_transform
@@ -1067,6 +1069,7 @@ _sentinel_soil_components = [{"sentinel": "soil_components"}]
 _sentinel_soil_geometries = {"sentinel": "soil_geometries"}
 _sentinel_water_features = {"sentinel": "water_features"}
 _sentinel_farm_roads = [{"sentinel": "farm_roads"}]
+_sentinel_canopy_height = {"sentinel": "canopy_height"}
 
 _spy_parcel_data = ParcelData(
     dem=_sentinel_dem,
@@ -1080,7 +1083,7 @@ _spy_parcel_data = ParcelData(
     farm_roads=_sentinel_farm_roads,
     climate_summary={},
     elevation_grid=[],
-    canopy_height={},
+    canopy_height=_sentinel_canopy_height,
     imagery_summary={},
 )
 
@@ -1125,12 +1128,126 @@ assert _captured_context_kwargs["soil_components"] is _spy_parcel_data.soil_comp
 assert _captured_context_kwargs["farm_roads"] is _spy_parcel_data.farm_roads, (
     "farm_roads must be forwarded by identity"
 )
+# canopy_height -- this branch's own addition, same identity contract as every field above.
+assert _captured_context_kwargs["canopy_height"] is _spy_parcel_data.canopy_height, (
+    "fetch_layout_layers() must forward parcel_data.canopy_height to build_pipeline_context() by identity, "
+    "not a re-derived copy"
+)
 print(
-    "build_pipeline_context() wiring: fetch_layout_layers() forwards ParcelData's own water_features and "
-    "soil_geometries (plus dem/boundary_polygon_utm/soil_components/farm_roads) to build_pipeline_context() "
-    "as kwargs, every one by identity (is, not ==) -- confirming the single ParcelData fetch is reused, not "
-    "re-derived."
+    "build_pipeline_context() wiring: fetch_layout_layers() forwards ParcelData's own water_features, "
+    "soil_geometries, and canopy_height (plus dem/boundary_polygon_utm/soil_components/farm_roads) to "
+    "build_pipeline_context() as kwargs, every one by identity (is, not ==) -- confirming the single "
+    "ParcelData fetch is reused, not re-derived."
 )
 
+
+# =====================================================================
+# canopy_height= override: real, wraps=-based call-count proof (not just
+# mocked) that fetch_layout_layers()'s OWN direct identify_solar_
+# candidate_zones() call -- the one net-new canopy-accepting call this
+# branch added inside fetch_layout_layers() itself, per Step 0's own
+# scoping grep -- genuinely never triggers a real canopy fetch when
+# parcel_data.canopy_height is supplied. build_pipeline_context() is
+# mocked here to a cheap, fully-formed fake PipelineContext (its own
+# real, whole-run canopy-fetch-closure proof already lives in test_
+# pipeline_context.py -- no value re-deriving that same heavy synthetic-
+# terrain machinery a second time in THIS file); identify_road_corridor_
+# candidates() is mocked too (Step 0 confirmed it has no canopy gate at
+# all -- nothing for it to forward). identify_fencing() is ALSO mocked
+# here, deliberately -- Step 0 confirmed fencing.identify_fencing() does
+# not expose a canopy_height override on its own signature (only the
+# identify_boundary_fencing() entry point one level down inside
+# fencing.py does), so it still carries its own independent, un-fixable-
+# in-this-branch canopy fetch; leaving it real would make a "zero
+# fetches" assertion measure the wrong thing. Uses the SAME
+# CanopyOverrideProbe every other real canopy-override test in this
+# session uses, patched once at production_area's own module bindings so
+# it observes the fetch no matter how deeply nested identify_solar_
+# candidate_zones()'s own reach into it is (its own top-level gate, PLUS
+# its own nested identify_tree_zone_candidates() call's gate).
+# =====================================================================
+
+import pipeline_context as pc
+from _canopy_override_probe import CanopyOverrideProbe, clean_canopy_for
+
+_canopy_dem = _sloped_dem(24, 24)
+_canopy_boundary_utm = _full_extent_boundary(_canopy_dem)
+_canopy_lons, _canopy_lats = warp_transform(
+    _canopy_dem["crs"], "EPSG:4326", *_canopy_boundary_utm.exterior.coords.xy
+)
+_canopy_boundary_coordinates = list(zip(_canopy_lons, _canopy_lats))
+_canopy_override = clean_canopy_for(_canopy_dem)
+
+_fake_context_for_canopy_case = pc.PipelineContext(
+    dem=_canopy_dem,
+    boundary_polygon_utm=_canopy_boundary_utm,
+    valleys=[],
+    ridge_lines=[],
+    production_areas=[],
+    existing_roads=None,
+    soil_exclusion_unions={"hydric_floodplain_union": None, "hydric_floodplain_is_fallback": False, "erosion_prone_union": None},
+    water_zones=[],
+    selected_water_zone=None,
+    selected_road_corridor=None,
+    selected_structure_site=None,
+    tree_zone_patches=[],
+)
+
+_canopy_case_parcel_data = ParcelData(
+    dem=_canopy_dem,
+    boundary_polygon_utm=_canopy_boundary_utm,
+    soil_components=[],
+    farmland_classification=[],
+    erosion_factor=[],
+    saturated_hydraulic_conductivity=[],
+    soil_geometries={},
+    water_features={"streams": [], "water_bodies": []},
+    farm_roads=[],
+    climate_summary={},
+    elevation_grid=[],
+    canopy_height=_canopy_override,
+    imagery_summary={},
+)
+
+with ExitStack() as _canopy_stack:
+    _enter = _canopy_stack.enter_context
+    mock_context_canopy_case = _enter(
+        mock_patch.object(rlm, "build_pipeline_context", return_value=_fake_context_for_canopy_case)
+    )
+    _enter(
+        mock_patch.object(
+            rlm,
+            "identify_road_corridor_candidates",
+            return_value={"zones_geojson": {"type": "FeatureCollection", "features": []}, "selected_road_corridor": None},
+        )
+    )
+    mock_solar_canopy_case = _enter(
+        mock_patch.object(rlm, "identify_solar_candidate_zones", wraps=rlm.identify_solar_candidate_zones)
+    )
+    _enter(
+        mock_patch.object(
+            rlm, "identify_fencing", return_value={"fencing_geojson": {"type": "FeatureCollection", "features": []}, "segment_count": 0}
+        )
+    )
+
+    with CanopyOverrideProbe() as canopy_probe:
+        _canopy_case_result = rlm.fetch_layout_layers(_canopy_boundary_coordinates, parcel_data=_canopy_case_parcel_data)
+
+canopy_probe.assert_override_used(_canopy_override, "fetch_layout_layers()")
+assert mock_context_canopy_case.call_args.kwargs["canopy_height"] is _canopy_override, (
+    "fetch_layout_layers() must pass parcel_data.canopy_height to build_pipeline_context() by identity"
+)
+assert mock_solar_canopy_case.call_args.kwargs["canopy_height"] is _canopy_override, (
+    "fetch_layout_layers()'s own direct identify_solar_candidate_zones() call must receive parcel_data."
+    "canopy_height by identity"
+)
+print(
+    f"canopy_height= override: fetch_layout_layers()'s OWN direct identify_solar_candidate_zones() call -- "
+    f"run for REAL here, not stubbed away -- receives the exact caller-supplied override and causes "
+    f"production_area.get_canopy_height_for_boundary() to be called ZERO times ({len(canopy_probe.mask_arrays)} "
+    "real canopy gate(s) reached, every one computed on the exact supplied override array). build_pipeline_"
+    "context()'s own equivalent real-run proof lives in test_pipeline_context.py; identify_fencing() is "
+    "mocked here since it has no canopy override to receive at all (see this section's own comment)."
+)
 
 print("\nAll render_layout_map checks passed.")

@@ -277,7 +277,14 @@ STUB_SITES = [
     # primitive fetches. return_value/side_effect, never wraps=, for these.
     (production_area, "_fetch_disqualifying_soil_union", {"return_value": None}),
     (production_area_ceiling, "_fetch_disqualifying_soil_union", {"return_value": None}),
-    (production_area, "get_canopy_height_for_boundary", {"side_effect": _fake_clean_canopy}),
+    # get_canopy_height_for_boundary is NOT here -- see COUNTED_STUB_SITES
+    # below. This branch (canopy-mask-wiring) wires parcel_data.canopy_
+    # height into build_pipeline_context()/the direct identify_solar_
+    # candidate_zones() call, so a plain stubbed-and-ignored count would
+    # hide the exact before/after proof this branch's own testing
+    # requirements ask for -- same reasoning COUNTED_STUB_SITES' own
+    # leading comment already gives for get_farm_roads_for_boundary/
+    # get_water_features_for_boundary.
     # NOT (farm_roads_data, "get_road_exclusion_union_utm", ...) -- every real
     # caller (production_area._fetch_road_exclusion_union_utm(), whether
     # invoked from production_area.py itself, production_area_ceiling.py,
@@ -383,6 +390,37 @@ COUNTED_STUB_SITES = {
             (tree_zone_candidates, "get_water_features_for_boundary"),
             (road_corridors, "get_water_features_for_boundary"),
             (pd_module, "get_water_features_for_boundary"),  # AFTER only
+        ],
+    },
+    # get_canopy_height_for_boundary: this branch's own real, final proof.
+    # Only TWO real `from canopy_height_data import get_canopy_height_for_
+    # boundary` bindings exist anywhere in this codebase (confirmed via
+    # `grep -rn "^from canopy_height_data import" *.py`): parcel_data.py's
+    # own single fetch (pd_module -- the fetch-layer call this whole
+    # session's canopy effort was building TOWARD reusing) and production_
+    # area.py's own module global (the ONE shared leaf get_required_tree_
+    # root_zone_mask_utm()/_fetch_tree_root_zone_mask_utm() call from
+    # EVERY consumer -- production/optimized-production, water-system-
+    # candidate, water-suitability, solar, tree-zone, AND fencing, however
+    # each imports get_required_tree_root_zone_mask_utm -- all resolve
+    # this same name via production_area.py's own module globals at call
+    # time, same "one shared stub covers every mandatory-canopy gate"
+    # property _fake_clean_canopy already relies on above). Expected AFTER
+    # this branch: pd_module's own site reads exactly 1 (ParcelData's
+    # single upstream fetch, unrelated to and unchanged by this branch);
+    # production_area's own site should now read 0 from every canopy_
+    # height-accepting call this branch wired (build_pipeline_context()'s
+    # five internal calls, plus fetch_layout_layers()'s own direct
+    # identify_solar_candidate_zones() call) -- EXCEPT fencing.identify_
+    # fencing() still contributes its own independent fetch here, since it
+    # has no canopy_height override on its own signature at all (see this
+    # branch's own scoping notes) -- so a real, honest total here reads 1,
+    # not 0, until a future branch closes that specific remaining gap.
+    "get_canopy_height_for_boundary": {
+        "stub": _fake_clean_canopy,
+        "sites": [
+            (production_area, "get_canopy_height_for_boundary"),
+            (pd_module, "get_canopy_height_for_boundary"),
         ],
     },
 }
@@ -533,6 +571,22 @@ def main() -> None:
         )
     print(f"selected_water_zone is None: {counts['_selected_water_zone_is_none']} (expected True on this flat, "
           f"non-ridge-shaped fixture -- see module docstring)")
+
+    canopy_total = counts.get("get_canopy_height_for_boundary")
+    if canopy_total is not None:
+        canopy_from_parcel_data = call_site_logs["get_canopy_height_for_boundary"].get(
+            "parcel_data.py:163 in fetch_parcel_data", 0
+        )
+        canopy_from_compute_layer = canopy_total - canopy_from_parcel_data
+        print(
+            f"\nget_canopy_height_for_boundary(): {canopy_total} total ({canopy_from_parcel_data} from parcel_data."
+            f"fetch_parcel_data()'s own single upstream fetch, {canopy_from_compute_layer} from the compute-layer "
+            "gate production_area.py's own _fetch_tree_root_zone_mask_utm() reaches -- this branch's own target "
+            "was BEFORE-branch measured at 23 on this fixture; see the per-call-site breakdown below for the "
+            "current number and why any nonzero remainder there is a pre-existing, separately-scoped gap (road_"
+            "corridors.py has no canopy_height override at all, and fencing.identify_fencing() doesn't expose one "
+            "on its own signature either -- both out of scope for this branch, see its own module docstring)."
+        )
 
     print(
         "\n--- Addendum: per-call-site breakdown for the traced functions "

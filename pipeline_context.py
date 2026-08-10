@@ -357,6 +357,7 @@ def build_pipeline_context(
     farm_roads: Optional[list[dict]] = None,
     water_features: Optional[dict] = None,
     soil_geometries: Optional[dict] = None,
+    canopy_height: Optional[dict] = None,
 ) -> PipelineContext:
     """
     Computes every shared upstream input multiple KSOP pipeline steps
@@ -364,6 +365,24 @@ def build_pipeline_context(
     report.py, or fencing.py's own identify_*_candidate*() consumer
     function -- that module doesn't have overrides yet, so wiring it in is
     later, separate work.
+
+    canopy_height is an optional pre-fetched override in the same pure-
+    passthrough family as water_features=/soil_geometries= above (NOT a
+    self-compute-here-if-missing gate like dem/boundary_polygon_utm --
+    this file never fetches canopy itself): the SAME dict canopy_height_
+    data.get_canopy_height_for_boundary() returns (e.g. parcel_data.
+    ParcelData.canopy_height). Forwarded unconditionally to every internal
+    call below whose own entry point already accepts a canopy_height
+    override -- production_area_ceiling.identify_optimized_production_
+    areas(), water_candidate_zones.identify_water_system_candidate_
+    zones(), water_suitability.fetch_and_select_optimal_water_zone() (via
+    its **suitability_kwargs passthrough into identify_water_
+    suitability()), identify_solar_candidate_zones(), and identify_tree_
+    zone_candidates(). road_corridors.identify_road_corridor_candidates()
+    has no canopy gate at all, so there is nothing to forward it to there.
+    When left None, every one of those calls keeps its own existing
+    independent canopy fetch, so this is a pure additive override with no
+    behavior change for callers that don't supply one.
 
     anchor_lon_lat is the real, chosen access point road routing starts
     from -- it's passed straight through to identify_road_corridor_
@@ -408,7 +427,7 @@ def build_pipeline_context(
     ridge_lines = valley_delineation.delineate_valleys(road_corridors._invert_dem(dem))
 
     optimized_production = production_area_ceiling.identify_optimized_production_areas(
-        boundary_coordinates, dem=dem
+        boundary_coordinates, dem=dem, canopy_height=canopy_height
     )
     production_areas = optimized_production["scored_patches"]
 
@@ -437,6 +456,7 @@ def build_pipeline_context(
         boundary_polygon_utm=boundary_polygon_utm,
         valleys=valleys,
         production_areas=production_areas,
+        canopy_height=canopy_height,
     )
     water_zones = water_system_result["zones_geojson"]["features"]
 
@@ -446,6 +466,7 @@ def build_pipeline_context(
         boundary_polygon_utm=boundary_polygon_utm,
         valleys=valleys,
         production_areas=production_areas,
+        canopy_height=canopy_height,
     )
 
     road_corridor_result = road_corridors.identify_road_corridor_candidates(
@@ -472,6 +493,7 @@ def build_pipeline_context(
         selected_road_corridor=selected_road_corridor,
         hydric_floodplain_union=soil_exclusion_unions["hydric_floodplain_union"],
         floodplain_data_is_fallback=soil_exclusion_unions["hydric_floodplain_is_fallback"],
+        canopy_height=canopy_height,
     )
     selected_structure_site = solar_result["selected_structure_site"]
 
@@ -486,6 +508,7 @@ def build_pipeline_context(
         selected_road_corridor=selected_road_corridor,
         hydric_floodplain_union=soil_exclusion_unions["hydric_floodplain_union"],
         floodplain_data_is_fallback=soil_exclusion_unions["hydric_floodplain_is_fallback"],
+        canopy_height=canopy_height,
     )
     tree_zone_patches = tree_zone_result["patches"]
 

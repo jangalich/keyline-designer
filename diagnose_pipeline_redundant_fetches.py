@@ -170,6 +170,7 @@ import pipeline_context as pc
 import solar_suitability
 import tree_zone_candidates
 import water_suitability
+from _canopy_override_probe import CanopyOverrideProbe, clean_canopy_for
 from dem_data import DEM_EXPORT_ENDPOINT, _utm_epsg_for_lonlat
 
 # --- real reference property (network mode only) -- same boundary/anchor
@@ -282,14 +283,18 @@ _FAKE_ROAD_CORRIDOR_RESULT = {
 }
 
 
-def _fake_clean_canopy_mask(boundary_polygon_utm, dem, buffer_meters=None):
+def _fake_clean_canopy_mask(boundary_polygon_utm, dem, buffer_meters=None, canopy_height=None):
     """Offline stand-in for get_required_tree_root_zone_mask_utm() at every
     one of its several independent module-level bindings -- each of those
     fetches is MANDATORY (fetch-or-raise, no try/except around it) in the
     real function it backs, so it must be stubbed for a real, offline run
     to complete at all. All-False (no tree cover anywhere) is a pure no-op
     against every canopy-exclusion gate downstream -- this script isn't
-    testing canopy gate correctness, only real call counts."""
+    testing canopy gate correctness, only real call counts. canopy_height
+    mirrors the real function's own pre-fetched-canopy override parameter
+    (this branch's callers now always forward canopy_height= through, so
+    this stand-in must accept it too); ignored here -- this stub returns
+    its fixed clean mask regardless of where canopy would have come from."""
     return np.zeros(dem["array"].shape, dtype=bool)
 
 
@@ -544,6 +549,77 @@ def run_synthetic_mode() -> tuple[dict, dict, dict]:
     return primary_counts, nested_counts, notes
 
 
+def _run_pipeline_context_for_canopy_measurement(canopy_height) -> int:
+    """
+    A SEPARATE synthetic-mode run, dedicated to measuring real production_
+    area.get_canopy_height_for_boundary() call counts -- the shared leaf
+    every one of this session's canopy gates ultimately calls (see
+    _canopy_override_probe.py's own docstring for why patching there alone
+    observes every path in, no matter how deeply nested the reaching
+    caller is). run_synthetic_mode() above stubs get_required_tree_root_
+    zone_mask_utm() itself (a level ABOVE this leaf) with _fake_clean_
+    canopy_mask for speed, which would make a leaf-level call count always
+    read 0 trivially -- vacuous for what THIS branch needs to prove. This
+    function instead leaves every get_required_tree_root_zone_mask_utm()
+    binding genuinely real, and patches ONLY the true leaf, via the same
+    CanopyOverrideProbe every other real canopy-override test in this
+    session uses. Every non-canopy fetch is stubbed exactly the same way
+    run_synthetic_mode() already does.
+    """
+    with ExitStack() as stack:
+        enter = stack.enter_context
+        enter(mock_patch.object(pc.dem_data, "get_dem_for_boundary", return_value=SYNTHETIC_DEM))
+        enter(mock_patch.object(pc.valley_delineation, "delineate_valleys", return_value=[]))
+        enter(
+            mock_patch.object(
+                pc.production_area_ceiling, "identify_optimized_production_areas", return_value=_FAKE_OPTIMIZED_RESULT
+            )
+        )
+        enter(mock_patch.object(pc.farm_roads_data, "get_road_exclusion_union_utm", return_value=_FAKE_EXISTING_ROADS_UNION))
+        enter(mock_patch.object(pc.road_corridors, "_fetch_floodplain_hydric_union", return_value=(_FAKE_HYDRIC_UNION, False)))
+
+        # identify_water_system_candidate_zones/identify_solar_candidate_zones/
+        # identify_tree_zone_candidates left real below -- same three this
+        # session's other real canopy-override runs always leave real, since
+        # each owns its own genuine (unstubbed-at-the-leaf) canopy gate.
+        enter(
+            mock_patch.object(
+                pc.water_candidate_zones,
+                "identify_water_system_candidate_zones",
+                wraps=pc.water_candidate_zones.identify_water_system_candidate_zones,
+            )
+        )
+        enter(mock_patch.object(pc.water_candidate_zones, "_fetch_road_exclusion_union_utm", return_value=None))
+        enter(mock_patch.object(pc.water_candidate_zones, "delineate_valleys"))
+        enter(mock_patch.object(pc.water_candidate_zones, "identify_production_areas"))
+
+        enter(mock_patch.object(pc, "fetch_and_select_optimal_water_zone", return_value=_FAKE_SELECTED_WATER_ZONE))
+        enter(mock_patch.object(pc.road_corridors, "identify_road_corridor_candidates", return_value=_FAKE_ROAD_CORRIDOR_RESULT))
+
+        enter(mock_patch.object(pc, "identify_solar_candidate_zones", wraps=pc.identify_solar_candidate_zones))
+        enter(mock_patch.object(pc, "identify_tree_zone_candidates", wraps=pc.identify_tree_zone_candidates))
+
+        enter(mock_patch.object(solar_suitability, "identify_optimized_production_areas", return_value=_FAKE_OPTIMIZED_RESULT))
+        enter(
+            mock_patch.object(
+                solar_suitability, "identify_water_suitability", return_value={"selected_water_zone": _FAKE_SELECTED_WATER_ZONE}
+            )
+        )
+        enter(mock_patch.object(solar_suitability, "identify_road_corridor_candidates", return_value=_FAKE_ROAD_CORRIDOR_RESULT))
+        enter(mock_patch.object(tree_zone_candidates, "identify_optimized_production_areas", return_value=_FAKE_OPTIMIZED_RESULT))
+        enter(
+            mock_patch.object(
+                tree_zone_candidates, "identify_water_suitability", return_value={"selected_water_zone": _FAKE_SELECTED_WATER_ZONE}
+            )
+        )
+        enter(mock_patch.object(tree_zone_candidates, "identify_road_corridor_candidates", return_value=_FAKE_ROAD_CORRIDOR_RESULT))
+
+        with CanopyOverrideProbe() as probe:
+            pc.build_pipeline_context(SYNTHETIC_BOUNDARY_COORDINATES, SYNTHETIC_ANCHOR_LON_LAT, canopy_height=canopy_height)
+
+    return probe.fetch_calls
+
+
 # --- expected counts, with reasoning for anything not simply 1 ---
 
 EXPECTED_PRIMARY = {
@@ -630,6 +706,43 @@ def main() -> None:
 
     for name, actual in primary_counts.items():
         assert actual <= EXPECTED_PRIMARY[name], f"{name}: {actual} calls exceeds expected {EXPECTED_PRIMARY[name]}"
+
+    # --- canopy_height: dedicated leaf-level measurement (always offline/synthetic, independent of the
+    # --- network-vs-synthetic mode picked above -- see _run_pipeline_context_for_canopy_measurement()'s
+    # --- own docstring for why this needs its OWN run rather than reusing run_synthetic_mode()'s counts.
+    print(
+        "\nCanopy fetch count (production_area.get_canopy_height_for_boundary(), the single shared leaf "
+        "EVERY canopy gate this session touched -- production/optimized-production, water-system-candidate, "
+        "water-suitability, solar, tree-zone, all ultimately call -- resolves to):"
+    )
+    canopy_calls_no_override = _run_pipeline_context_for_canopy_measurement(None)
+    print(
+        f"  canopy_height omitted (pre-existing self-fetch behavior, unchanged by this branch): "
+        f"{canopy_calls_no_override} independent fetch(es)"
+    )
+    _simulated_parcel_data_canopy = clean_canopy_for(SYNTHETIC_DEM)
+    canopy_calls_with_override = _run_pipeline_context_for_canopy_measurement(_simulated_parcel_data_canopy)
+    print(
+        f"  canopy_height=<parcel_data's own single upstream fetch> supplied: {canopy_calls_with_override} "
+        "additional fetch(es) from inside build_pipeline_context() (expected 0)"
+    )
+    if canopy_calls_with_override == 0:
+        print(
+            "CANOPY: PASS -- with the override supplied, build_pipeline_context() contributes ZERO additional "
+            "canopy fetches; the ONE real fetch a full run performs is parcel_data.fetch_parcel_data()'s own "
+            "single upstream call, reused everywhere downstream instead of the 3+ independent re-fetches "
+            "confirmed earlier this session."
+        )
+    else:
+        print(
+            f"CANOPY: FAILURE -- {canopy_calls_with_override} canopy fetch(es) still happened inside "
+            "build_pipeline_context() even with canopy_height supplied -- at least one accepting entry point "
+            "lost the override somewhere along its call chain."
+        )
+    assert canopy_calls_with_override == 0, (
+        f"canopy_height override supplied but get_canopy_height_for_boundary() was still called "
+        f"{canopy_calls_with_override} time(s) inside build_pipeline_context() -- the redundancy is NOT closed"
+    )
 
 
 if __name__ == "__main__":
