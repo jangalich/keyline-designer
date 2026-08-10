@@ -1,7 +1,7 @@
 """
 fencing.py
 
-Subdivision Fences data layer (Scale of Permanence step 7). Six fencing
+Subdivision Fences data layer (Scale of Permanence step 7). Four fencing
 types get real computed geometry here:
 
   STREAM EXCLUSION FENCING -- streams (USGS NHD, hydrology_data.py) are
@@ -24,27 +24,6 @@ types get real computed geometry here:
   material guidance, which is explicitly out of scope (see report_
   generator.py's step 7 framing).
 
-  ROAD CORRIDOR EXCLUSION FENCING -- road_corridors.py's own single
-  generated/selected road corridor (find_road_routes()'s real, walk-
-  ordered path cells, not a rounded continuous-geometry route) is real,
-  already-computed geometry, the same "real, already-sited feature"
-  standing STREAM EXCLUSION FENCING's own buffering above relies on -- so
-  it's safe to fence it in directly. Mirrors tree_zone_candidates.py's
-  own _road_corridor_exclusion_polygon() construction exactly (see
-  ROAD_CORRIDOR_FENCE_DILATION_CELLS below): the corridor's own path
-  cells are dilated by a whole DEM cell in every direction (raster_grid.
-  binary_dilate(), 8-connected) into a real per-cell-square union
-  footprint (raster_grid.cell_union_footprint()), then inset a short,
-  fixed distance (ROAD_FENCE_LINE_INSET_METERS) so the drawn fence line
-  reads tight to the road rather than sitting a full clearance-cell out.
-  Fully INDEPENDENT of the boundary fence -- deliberately NOT spliced or
-  gated into it; the two loops are allowed to overlap where the corridor
-  meets the boundary edge (e.g. near the corridor's own anchor point),
-  which is expected, not a bug -- a gate/access point is implied there
-  but not computed by this layer. No corridor at all (no anchor point
-  given to road_corridors.py yet, the common not-yet-wired-up case)
-  produces zero features here, not an error.
-
   WATER ZONE EXCLUSION FENCING -- water_candidate_zones.py's own SINGLE
   selected water system candidate (water_suitability.select_optimal_
   water_zone()'s rank-1 answer) already carries a real, already-computed
@@ -52,11 +31,7 @@ types get real computed geometry here:
   polygon render_layout_map.py already draws that zone's own fill from),
   not raw DEM cells -- so this fences it in with the SAME "buffer a real
   feature, output its outline" recipe STREAM EXCLUSION FENCING above
-  already uses, NOT the dilate+inset recipe ROAD CORRIDOR EXCLUSION
-  FENCING uses (that one specifically
-  exists to turn raw DEM path cells into a real footprint first; a water
-  zone's render_fill_polygon_utm is already a real footprint, nothing to
-  derive). Buffered outward by a fixed distance (WATER_ZONE_FENCE_
+  already uses. Buffered outward by a fixed distance (WATER_ZONE_FENCE_
   BUFFER_METERS) so the fence line sits clear of the zone's own edge, not
   flush against or clipping through it. Only ever one selected zone (or
   none) -- no ranking/multiple-loop handling needed here, unlike the
@@ -90,44 +65,46 @@ Boundary fencing also does NOT walk around any OTHER real, already-sited
 feature (streams, roads, water zones, tree zones, production zones) even
 where those cross the boundary -- canopy is the one exception for THAT
 fence type specifically, not a precedent for routing the boundary fence
-around everything else too (each of those other features gets its own
-independent fence loop instead, per the sections above).
+around everything else too (streams/water zones/tree zones each get
+their own independent fence loop instead, per the sections above; roads
+-- existing or generated -- get none, also per the sections above).
 
-find_stream_exclusion_fencing(), find_boundary_fencing(), find_road_
-corridor_fencing(), find_water_zone_fencing(), and find_tree_zone_
-fencing() are all pure geometric cores: no network I/O, taking
-already-fetched geometry (stream features + a target UTM CRS; a
-boundary polygon + an already-fetched/already-buffered canopy
-footprint; a DEM + the selected road corridor's own path cells; the
-selected water zone's own render_fill_polygon_utm; the full list of
-tree zone candidates' own render_fill_polygon_utm values, respectively)
--- same "logic separable from fetching" split as water_candidate_zones.
-find_candidate_zones() and every other *_candidates.py/*_corridors.py
-module in this codebase. identify_boundary_fencing() is the
-fetch-and-wrap entry point that feeds find_boundary_fencing() real
-canopy data (production_area.get_required_tree_root_zone_mask_utm(),
-the SAME mandatory canopy gate production_area.py/tree_zone_
-candidates.py already use) and wraps the result in schema.
-identify_fencing() is the full pipeline entry point that additionally
-feeds find_road_corridor_fencing() the selected road corridor's own
-path cells (deriving them itself via road_corridors.
-identify_road_corridor_candidates() if not supplied -- a no-anchor-point-
-given corridor cleanly produces zero features, not an error),
-find_water_zone_fencing() the selected water zone's own render_fill_
-polygon_utm (water_suitability.fetch_and_select_optimal_water_zone() if
-not supplied -- no zone sited cleanly produces zero features), and
-find_tree_zone_fencing() every tree zone candidate's own render_fill_
-polygon_utm (tree_zone_candidates.identify_tree_zone_candidates() if not
-supplied -- no candidates cleanly produces zero features). All five fence
-types land on the "perimeter_fencing" layer (aside from stream
-exclusion's own separate "exclusion_fencing" layer) -- kept as one
-shared layer rather than split per fence type, distinguished by each
-feature's own "fence_type" property, not by separate layers.
+find_stream_exclusion_fencing(), find_boundary_fencing(), find_water_
+zone_fencing(), and find_tree_zone_fencing() are all pure geometric
+cores: no network I/O, taking already-fetched geometry (stream features
++ a target UTM CRS; a boundary polygon + an already-fetched/already-
+buffered canopy footprint; the selected water zone's own render_fill_
+polygon_utm; the full list of tree zone candidates' own render_fill_
+polygon_utm values, respectively) -- same "logic separable from
+fetching" split as water_candidate_zones.find_candidate_zones() and
+every other *_candidates.py/*_corridors.py module in this codebase.
+identify_boundary_fencing() is the fetch-and-wrap entry point that
+feeds find_boundary_fencing() real canopy data (production_area.
+get_required_tree_root_zone_mask_utm(), the SAME mandatory canopy gate
+production_area.py/tree_zone_candidates.py already use) and wraps the
+result in schema. identify_fencing() is the full pipeline entry point
+that additionally feeds find_water_zone_fencing() the selected water
+zone's own render_fill_polygon_utm (water_suitability.fetch_and_
+select_optimal_water_zone() if not supplied -- no zone sited cleanly
+produces zero features), and find_tree_zone_fencing() every tree zone
+candidate's own render_fill_polygon_utm (tree_zone_candidates.
+identify_tree_zone_candidates() if not supplied -- no candidates
+cleanly produces zero features). All four fence types land on the
+"perimeter_fencing" layer (aside from stream exclusion's own separate
+"exclusion_fencing" layer) -- kept as one shared layer rather than split
+per fence type, distinguished by each feature's own "fence_type"
+property, not by separate layers. identify_fencing() also still derives
+the selected road corridor itself (road_corridors.identify_road_
+corridor_candidates(), same no-anchor-point-given-produces-None
+handling as before) -- NOT for a fence loop of its own anymore, but
+because find_tree_zone_fencing()'s own upstream self-compute fallback
+(identify_tree_zone_candidates()) needs it as a real siting exclusion:
+tree zone candidates must not overlap the road corridor's own footprint,
+independent of whether the corridor gets fenced at all.
 """
 
 from typing import Optional
 
-import numpy as np
 from rasterio.warp import transform as warp_transform
 from rasterio.warp import transform_geom
 from shapely.geometry import LineString, Polygon, mapping, shape
@@ -136,7 +113,7 @@ from dem_data import get_dem_for_boundary
 from feature_schema import CONFIDENCE_HIGH, CONFIDENCE_MEDIUM, make_feature, make_feature_collection
 from hydrology_data import get_water_features_geojson
 from production_area import get_required_tree_root_zone_mask_utm
-from raster_grid import SQUARE_METERS_PER_ACRE, binary_dilate, cell_union_footprint
+from raster_grid import SQUARE_METERS_PER_ACRE, cell_union_footprint
 from road_corridors import identify_road_corridor_candidates
 from tree_zone_candidates import identify_tree_zone_candidates
 from water_suitability import fetch_and_select_optimal_water_zone
@@ -229,36 +206,6 @@ BOUNDARY_FENCE_SPLIT_NOTE_TEMPLATE = (
     "separate fence loops requiring {segment_count} separate physical fence runs, not one "
     "continuous loop."
 )
-
-# Whole-cell dilation radius applied to the selected road corridor's own
-# path cells (road_corridors.find_road_routes()'s own 'cells') before
-# building the real cell-footprint polygon this fence line encloses --
-# the SAME whole-cell dilation radius as tree_zone_candidates.
-# TREE_ZONE_ROAD_BUFFER_CELLS, reused here for the SAME underlying reason
-# (see that constant's own comment): without it, two grid-aligned squares
-# that only share a CORNER, not an edge, leave zero real gap between
-# them -- a real, cell-accurate clearance envelope around the route's own
-# path cells, not a rounded continuous-geometry buffer. Deliberately its
-# OWN constant here, NOT imported from tree_zone_candidates.py -- the two
-# modules use this same starting value for DIFFERENT downstream purposes
-# (an exclusion-zone search space there, a fence line's own clearance
-# envelope here) and should stay independently tunable even though they
-# start at the same number, same "constants stay separate even when
-# numerically identical" convention BOUNDARY_FENCE_CANOPY_BUFFER_METERS's
-# own comment already states for this module. CONFIGURABLE.
-ROAD_CORRIDOR_FENCE_DILATION_CELLS = 1
-
-# Pulls the actual fence LINE inward from the dilated footprint's outer
-# edge (see ROAD_CORRIDOR_FENCE_DILATION_CELLS above), so the fence reads
-# tight to the road rather than sitting a full clearance-cell out.
-# Deliberately SEPARATE from the dilation above: the dilation establishes
-# the real clearance envelope (how much ground is actually kept clear
-# around the road), this inset only affects where the drawn line sits
-# WITHIN that already-established envelope -- two different concerns,
-# not one number doing double duty. Was 0.3048m (1ft), then 2.0m; widened
-# again to 3.0m per this session's tuning pass. CONFIGURABLE -- tune by
-# eye against the reference property.
-ROAD_FENCE_LINE_INSET_METERS = 3.0
 
 # Buffer (meters) around the selected water zone's own render_fill_polygon_utm
 # (an already-computed real fill footprint, not raw DEM cells -- see this
@@ -533,121 +480,6 @@ def boundary_fencing_to_geojson(
     return make_feature_collection(features)
 
 
-ROAD_CORRIDOR_FENCE_CONFIDENCE_NOTES_TEMPLATE = (
-    "This fence line encloses road_corridors.py's own single generated/selected road corridor, "
-    "buffered {dilation_cells} DEM cell(s) in every direction for a real clearance envelope around "
-    "the route's own path cells, then inset {line_inset_meters}m ({line_inset_feet}ft) inward for "
-    "the drawn line itself. It is INDEPENDENT of the boundary fence -- the two loops are not "
-    "spliced or gated together, and may visually overlap it near the corridor's own anchor point "
-    "(a gate/access point is implied there but not computed by this layer); that overlap is "
-    "expected, not a bug. It inherits road_corridors.py's own limitations: the route itself is a "
-    "planning suggestion, not a surveyed or built road -- confirm the actual alignment on the "
-    "ground before building fence on it."
-)
-
-def find_road_corridor_fencing(
-    dem: dict,
-    selected_road_corridor_cells: Optional[list],
-    dilation_cells: int = ROAD_CORRIDOR_FENCE_DILATION_CELLS,
-    line_inset_meters: float = ROAD_FENCE_LINE_INSET_METERS,
-) -> Optional[LineString]:
-    """
-    Pure geometric core -- no network I/O. Mirrors tree_zone_candidates.
-    _road_corridor_exclusion_polygon() construction exactly (see
-    ROAD_CORRIDOR_FENCE_DILATION_CELLS's own comment): builds a fresh
-    boolean cell mask from selected_road_corridor_cells (road_corridors.
-    find_road_routes()'s own real path cells, in walk order), dilates it
-    by dilation_cells in every direction (raster_grid.binary_dilate(),
-    8-connected), and turns the dilated mask into a real per-cell-square
-    union polygon (raster_grid.cell_union_footprint()) -- the SAME real
-    footprint every other cell-clustering consumer in this pipeline
-    builds from a boolean mask, not a hull or a smoothed buffer.
-
-    selected_road_corridor_cells is None or empty whenever no corridor
-    was generated/selected at all -- the common "no anchor point given"
-    case road_corridors.fetch_and_select_optimal_road_corridor() (and
-    identify_road_corridor_candidates()) already return None for. Returns
-    None immediately in that case -- not an error, and not an empty
-    LineString.
-
-    The fence LINE itself is then inset line_inset_meters inward from
-    that dilated footprint's own outer edge (fence_polygon =
-    dilated_footprint.buffer(-line_inset_meters)) so it reads tight to
-    the road rather than sitting a full clearance-cell out. On a narrow/
-    pinched stretch of a snaking corridor, that negative buffer can come
-    back empty or invalid -- a real risk, not a hypothetical -- in which
-    case this falls back to the dilated footprint's own outer edge
-    unbuffered (fence_polygon = dilated_footprint) rather than silently
-    dropping the segment or returning broken geometry. That fallback is
-    printed so it's visible if it ever actually triggers on a real
-    property.
-
-    Returns fence_polygon's exterior ring as a closed LineString (first
-    coord == last coord).
-    """
-    if not selected_road_corridor_cells:
-        return None
-
-    road_cell_mask = np.zeros(dem["array"].shape, dtype=bool)
-    for cell_r, cell_c in selected_road_corridor_cells:
-        road_cell_mask[cell_r, cell_c] = True
-    dilated_mask = binary_dilate(road_cell_mask, dilation_cells)
-    dilated_footprint = cell_union_footprint(dem, dilated_mask)
-
-    fence_polygon = dilated_footprint.buffer(-line_inset_meters)
-    if fence_polygon.is_empty or not fence_polygon.is_valid or fence_polygon.geom_type != "Polygon":
-        print(
-            f"  find_road_corridor_fencing: {line_inset_meters}m inset produced an empty/invalid "
-            "result on a narrow/pinched stretch of the corridor -- falling back to the dilated "
-            "footprint's own outer edge (unbuffered) for the fence line."
-        )
-        fence_polygon = dilated_footprint
-
-    return LineString(fence_polygon.exterior.coords)
-
-
-def road_corridor_fencing_to_geojson(
-    fence_line: Optional[LineString],
-    dilation_cells: int = ROAD_CORRIDOR_FENCE_DILATION_CELLS,
-    line_inset_meters: float = ROAD_FENCE_LINE_INSET_METERS,
-) -> dict:
-    """
-    Wraps find_road_corridor_fencing()'s output (already reprojected to
-    WGS84 by the caller -- see identify_fencing()) as a schema-conformant
-    Feature on the "perimeter_fencing" layer (fence_type=
-    "road_corridor_exclusion") -- the same shared layer boundary fencing
-    uses, distinguished by fence_type rather than a separate layer.
-
-    fence_line may be a shapely LineString or an already-mapped GeoJSON
-    geometry dict. None (no corridor at all -- see find_road_corridor_
-    fencing()'s own docstring) returns an empty FeatureCollection, not an
-    error.
-    """
-    if fence_line is None:
-        return make_feature_collection([])
-
-    geometry_wgs84 = fence_line if isinstance(fence_line, dict) else mapping(fence_line)
-    confidence_notes = ROAD_CORRIDOR_FENCE_CONFIDENCE_NOTES_TEMPLATE.format(
-        dilation_cells=dilation_cells,
-        line_inset_meters=round(line_inset_meters, 3),
-        line_inset_feet=round(line_inset_meters / METERS_PER_FOOT, 1),
-    )
-    feature = make_feature(
-        feature_id="perimeter-fencing-road-corridor",
-        geometry=geometry_wgs84,
-        layer="perimeter_fencing",
-        label="Road corridor fencing",
-        confidence=CONFIDENCE_HIGH,
-        confidence_notes=confidence_notes,
-        extra_properties={
-            "fence_type": "road_corridor_exclusion",
-            "dilation_cells": dilation_cells,
-            "line_inset_meters": line_inset_meters,
-        },
-    )
-    return make_feature_collection([feature])
-
-
 WATER_ZONE_FENCE_CONFIDENCE_NOTES_TEMPLATE = (
     "This fence line fully encloses the selected water system candidate zone's own real, "
     "already-computed render footprint, buffered {buffer_meters}m ({buffer_feet}ft) outward so "
@@ -681,16 +513,11 @@ def _buffer_fill_polygon_to_fence_line(polygon_utm: Polygon, buffer_meters: floa
     (water_candidate_zones.py's/tree_zone_candidates.py's own render_fill_
     polygon_utm, NOT raw DEM path cells) by buffering it outward and
     returning the outline, the SAME "buffer a real feature, output its
-    outline" recipe find_stream_exclusion_fencing() already uses -- NOT
-    the dilate+inset recipe find_road_corridor_fencing() uses, which
-    exists specifically to turn raw DEM path cells
-    into a real footprint first; a render_fill_polygon_utm is already a real
-    footprint, nothing left to derive.
+    outline" recipe find_stream_exclusion_fencing() already uses.
 
     A positive buffer of a real, already-computed polygon should never come
-    back empty, invalid, or anything other than a single Polygon -- unlike
-    find_road_corridor_fencing()'s own negative-buffer pinch case, there is
-    no sensible fallback shape here, so this raises rather than silently
+    back empty, invalid, or anything other than a single Polygon, so there
+    is no sensible fallback shape here -- this raises rather than silently
     dropping the fence or falling back to something else.
     """
     buffered = polygon_utm.buffer(buffer_meters)
@@ -913,10 +740,7 @@ def identify_fencing(
     water_features_geojson: Optional[dict] = None,
     dem: Optional[dict] = None,
     stream_exclusion_buffer_meters: float = STREAM_EXCLUSION_BUFFER_METERS,
-    selected_road_corridor_cells: Optional[list] = None,
     anchor_lon_lat: Optional[tuple[float, float]] = None,
-    road_corridor_dilation_cells: int = ROAD_CORRIDOR_FENCE_DILATION_CELLS,
-    road_fence_line_inset_meters: float = ROAD_FENCE_LINE_INSET_METERS,
     selected_water_zone_render_fill_polygon_utm: Optional[Polygon] = None,
     tree_zone_render_fill_polygons_utm: Optional[list] = None,
     water_zone_fence_buffer_meters: float = WATER_ZONE_FENCE_BUFFER_METERS,
@@ -933,14 +757,14 @@ def identify_fencing(
 ) -> dict:
     """
     Full pipeline entry point for Subdivision Fences' computed geometry
-    (stream exclusion, boundary, road corridor exclusion, water zone
-    exclusion, and tree zone exclusion fencing -- see module docstring
-    for why everything else in that report step
-    is narrative-only, not generated here). Every fence type past
-    boundary/stream is a fully independent, closed loop -- deliberately
-    NOT spliced or gated into the boundary fence or each other (see
-    module docstring) -- so an overlap between any two of them is
-    expected, not a bug.
+    (stream exclusion, boundary, water zone exclusion, and tree zone
+    exclusion fencing -- see module docstring for why everything else in
+    that report step is narrative-only, not generated here, and why no
+    road -- existing or generated -- gets a fence loop of its own). Every
+    fence type past boundary/stream is a fully independent, closed loop
+    -- deliberately NOT spliced or gated into the boundary fence or each
+    other (see module docstring) -- so an overlap between any two of
+    them is expected, not a bug.
 
     water_features_geojson is hydrology_data.get_water_features_geojson()'s
     output; fetched here if not already supplied (e.g. reused from a
@@ -953,26 +777,17 @@ def identify_fencing(
     fencing() now needs one for its own mandatory canopy fetch (see that
     function's own docstring), same optional-dem pattern every other
     entry point in this codebase already uses. Every UTM geometry this
-    function derives itself when a caller doesn't supply one (road
-    corridor cells, the water zone's render_fill_polygon_utm, tree zone
-    candidates' own render_fill_polygon_utm values) is derived from this
-    SAME shared dem, so it's always in dem["crs"] -- a caller supplying
-    one of those directly instead is responsible for it already being in
-    that same CRS.
+    function derives itself when a caller doesn't supply one (the water
+    zone's render_fill_polygon_utm, tree zone candidates' own render_
+    fill_polygon_utm values) is derived from this SAME shared dem, so
+    it's always in dem["crs"] -- a caller supplying one of those directly
+    instead is responsible for it already being in that same CRS.
 
-    selected_road_corridor_cells is road_corridors.find_road_routes()'s
-    own real path cells for the single selected corridor. If not
-    supplied, this derives them itself via road_corridors.
-    identify_road_corridor_candidates(dem=dem, anchor_lon_lat=
-    anchor_lon_lat) -- the SAME optional-derive-if-not-supplied pattern
-    dem itself already uses above. anchor_lon_lat defaults to None, the
-    common "not yet wired up to a real anchor point" case -- that alone
-    is NOT an error: identify_road_corridor_candidates() already returns
-    a clean selected_road_corridor=None for it (no network fetch even
-    attempted), and find_road_corridor_fencing() already returns None
-    cleanly for that, producing zero road-corridor-exclusion features,
-    same as today's "no road routes" handling elsewhere in this
-    pipeline.
+    anchor_lon_lat defaults to None, the common "not yet wired up to a
+    real anchor point" case -- identify_road_corridor_candidates() (see
+    selected_road_corridor below) already returns a clean selected_road_
+    corridor=None for it (no network fetch even attempted), which is NOT
+    an error.
 
     selected_water_zone_render_fill_polygon_utm is water_candidate_
     zones.find_candidate_zones()'s own already-computed render_fill_
@@ -997,17 +812,27 @@ def identify_fencing(
 
     selected_road_corridor/selected_water_zone/tree_zone_patches are
     pipeline_context.PipelineContext's own HIGH-LEVEL fields (matching
-    its field names/shapes exactly) -- an alternative to supplying the
-    LOW-LEVEL selected_road_corridor_cells/selected_water_zone_render_
-    fill_polygon_utm/tree_zone_render_fill_polygons_utm values directly.
-    For each pair, the low-level value wins if both are supplied
-    (unchanged behavior); otherwise, if the high-level value is
-    supplied, the low-level value is derived from it directly (its own
-    'cells'/'render_fill_polygon_utm'/list-of-'render_fill_polygon_utm'
-    fields) and identify_road_corridor_candidates()/fetch_and_select_
-    optimal_water_zone()/identify_tree_zone_candidates() are not called
-    at all; otherwise this self-computes via those same calls, same as
-    before.
+    its field names/shapes exactly). selected_water_zone/tree_zone_
+    patches are each an alternative to supplying the LOW-LEVEL selected_
+    water_zone_render_fill_polygon_utm/tree_zone_render_fill_polygons_utm
+    values directly -- for each pair, the low-level value wins if both
+    are supplied (unchanged behavior); otherwise, if the high-level value
+    is supplied, the low-level value is derived from it directly (its own
+    'render_fill_polygon_utm'/list-of-'render_fill_polygon_utm' fields)
+    and fetch_and_select_optimal_water_zone()/identify_tree_zone_
+    candidates() are not called at all; otherwise this self-computes via
+    those same calls, same as before. selected_road_corridor has no
+    low-level counterpart on this function's own signature anymore (see
+    module docstring for why) -- when supplied, it's forwarded straight
+    into identify_tree_zone_candidates()'s own self-compute fallback (its
+    real siting-exclusion input) and identify_road_corridor_candidates()
+    is not called at all; otherwise, if identify_tree_zone_candidates()
+    itself is about to be self-computed (tree_zone_render_fill_polygons_
+    utm/tree_zone_patches BOTH still None at that point), this derives it
+    itself via that same call, purely for that same exclusion purpose --
+    a caller that already supplies tree_zone_render_fill_polygons_utm/
+    tree_zone_patches directly never triggers this derivation at all,
+    since nothing downstream would consume it.
 
     boundary_polygon_utm/production_areas/valleys are PASS-THROUGH-ONLY
     overrides (same "require it, no self-compute fallback" decision as
@@ -1040,7 +865,7 @@ def identify_fencing(
 
     Returns:
         {
-            'fencing_geojson': FeatureCollection,   # "exclusion_fencing" (stream) + "perimeter_fencing" (boundary + road corridor + water zone + tree zone) features
+            'fencing_geojson': FeatureCollection,   # "exclusion_fencing" (stream) + "perimeter_fencing" (boundary + water zone + tree zone) features
             'segment_count': int,                   # identify_boundary_fencing()'s own segment_count, passed through
         }
     """
@@ -1066,39 +891,6 @@ def identify_fencing(
     stream_entries = find_stream_exclusion_fencing(stream_features, utm_crs, stream_exclusion_buffer_meters)
 
     boundary_result = identify_boundary_fencing(boundary_coordinates, dem=dem, canopy_height=canopy_height)
-
-    if selected_road_corridor_cells is None:
-        if selected_road_corridor is None:
-            road_corridor_candidates = identify_road_corridor_candidates(
-                boundary_coordinates,
-                dem=dem,
-                anchor_lon_lat=anchor_lon_lat,
-                boundary_polygon_utm=boundary_polygon_utm,
-                production_areas=production_areas,
-                valleys=valleys,
-                hydric_floodplain_union=hydric_floodplain_union,
-                floodplain_data_is_fallback=floodplain_data_is_fallback,
-                canopy_height=canopy_height,
-            )
-            selected_road_corridor = road_corridor_candidates["selected_road_corridor"]
-        selected_road_corridor_cells = selected_road_corridor["cells"] if selected_road_corridor else None
-
-    road_fence_line_utm = find_road_corridor_fencing(
-        dem,
-        selected_road_corridor_cells,
-        dilation_cells=road_corridor_dilation_cells,
-        line_inset_meters=road_fence_line_inset_meters,
-    )
-    road_fence_line_wgs84 = (
-        shape(transform_geom(dem["crs"], "EPSG:4326", mapping(road_fence_line_utm)))
-        if road_fence_line_utm is not None
-        else None
-    )
-    road_corridor_geojson = road_corridor_fencing_to_geojson(
-        road_fence_line_wgs84,
-        dilation_cells=road_corridor_dilation_cells,
-        line_inset_meters=road_fence_line_inset_meters,
-    )
 
     if selected_water_zone_render_fill_polygon_utm is None:
         if selected_water_zone is None:
@@ -1128,6 +920,29 @@ def identify_fencing(
 
     if tree_zone_render_fill_polygons_utm is None:
         if tree_zone_patches is None:
+            if selected_road_corridor is None:
+                # Derived purely as a real siting-exclusion input for tree zone
+                # candidates below (tree zones must not overlap the road
+                # corridor's own footprint) -- no fence loop of its own is
+                # built from this anymore (see module docstring for why
+                # roads, existing or generated, don't get one). Derived here,
+                # not unconditionally at the top of this function, so a
+                # caller that already supplies tree_zone_render_fill_
+                # polygons_utm/tree_zone_patches directly never pays for this
+                # self-compute -- same "don't self-compute what won't be
+                # used" discipline the rest of this function already applies.
+                road_corridor_candidates = identify_road_corridor_candidates(
+                    boundary_coordinates,
+                    dem=dem,
+                    anchor_lon_lat=anchor_lon_lat,
+                    boundary_polygon_utm=boundary_polygon_utm,
+                    production_areas=production_areas,
+                    valleys=valleys,
+                    hydric_floodplain_union=hydric_floodplain_union,
+                    floodplain_data_is_fallback=floodplain_data_is_fallback,
+                    canopy_height=canopy_height,
+                )
+                selected_road_corridor = road_corridor_candidates["selected_road_corridor"]
             tree_zone_result = identify_tree_zone_candidates(
                 boundary_coordinates,
                 dem=dem,
@@ -1159,7 +974,6 @@ def identify_fencing(
     features = (
         stream_exclusion_fencing_to_geojson(stream_entries, stream_exclusion_buffer_meters)["features"]
         + boundary_result["fencing_geojson"]["features"]
-        + road_corridor_geojson["features"]
         + water_zone_geojson["features"]
         + tree_zone_geojson["features"]
     )
@@ -1171,14 +985,13 @@ def summarize_fencing(result: dict) -> str:
     features = result["fencing_geojson"]["features"]
     stream_count = sum(1 for f in features if f["properties"]["layer"] == "exclusion_fencing")
     boundary_features = [f for f in features if f["properties"].get("fence_type") == "boundary"]
-    road_corridor_count = sum(1 for f in features if f["properties"].get("fence_type") == "road_corridor_exclusion")
     water_zone_count = sum(1 for f in features if f["properties"].get("fence_type") == "water_zone_exclusion")
     tree_zone_count = sum(1 for f in features if f["properties"].get("fence_type") == "tree_zone_exclusion")
     segment_count = result.get("segment_count", len(boundary_features))
 
     lines = [
         f"Computed fencing features: {stream_count} stream exclusion, "
-        f"{segment_count} boundary fencing segment(s), {road_corridor_count} road corridor exclusion, "
+        f"{segment_count} boundary fencing segment(s), "
         f"{water_zone_count} water zone exclusion, {tree_zone_count} tree zone exclusion"
     ]
     for feature in features:
@@ -1202,14 +1015,13 @@ if __name__ == "__main__":
     ]
     # Same real anchor point road_corridors.py's own __main__ block uses for
     # this reference property -- needed to actually exercise a real, selected
-    # road corridor (and therefore find_road_corridor_fencing()) below; with
-    # no anchor at all, road-corridor-exclusion fencing cleanly produces zero
-    # features (see identify_fencing()'s own docstring).
+    # road corridor (feeding tree zone candidates' own siting exclusion below,
+    # not a fence loop -- see module docstring for why roads don't get one).
     anchor_lon_lat = (-79.98356157031265, 40.64303511679458)
 
     print(
-        "Identifying computed fencing (stream exclusion + canopy-aware boundary + road corridor "
-        "exclusion + water zone exclusion + tree zone exclusion) "
+        "Identifying computed fencing (stream exclusion + canopy-aware boundary + "
+        "water zone exclusion + tree zone exclusion) "
         "for property boundary...\n"
     )
 
@@ -1227,8 +1039,7 @@ if __name__ == "__main__":
         print(summarize_fencing(result))
 
         fence_types_present = {f["properties"].get("fence_type") for f in result["fencing_geojson"]["features"]}
-        print(f"\nRoad corridor fence produced: {'road_corridor_exclusion' in fence_types_present}")
-        print(f"Water zone fence produced: {'water_zone_exclusion' in fence_types_present}")
+        print(f"\nWater zone fence produced: {'water_zone_exclusion' in fence_types_present}")
         print(f"Tree zone fence produced: {'tree_zone_exclusion' in fence_types_present}")
         print("\nfencing_geojson is schema-valid.")
     except Exception as e:

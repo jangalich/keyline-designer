@@ -40,25 +40,20 @@ from feature_schema import make_feature, validate_feature_collection
 from fencing import (
     BOUNDARY_FENCE_CANOPY_BUFFER_METERS,
     BOUNDARY_FENCE_MIN_SEGMENT_ACRES,
-    ROAD_CORRIDOR_FENCE_DILATION_CELLS,
-    ROAD_FENCE_LINE_INSET_METERS,
     STREAM_EXCLUSION_BUFFER_METERS,
     TREE_ZONE_FENCE_BUFFER_METERS,
     WATER_ZONE_FENCE_BUFFER_METERS,
     boundary_fencing_to_geojson,
     find_boundary_fencing,
-    find_road_corridor_fencing,
     find_stream_exclusion_fencing,
     find_tree_zone_fencing,
     find_water_zone_fencing,
     identify_boundary_fencing,
     identify_fencing,
-    road_corridor_fencing_to_geojson,
     stream_exclusion_fencing_to_geojson,
     tree_zone_fencing_to_geojson,
     water_zone_fencing_to_geojson,
 )
-from raster_grid import binary_dilate, cell_union_footprint
 
 UTM_CRS = "EPSG:32617"
 
@@ -402,9 +397,10 @@ print("boundary_fencing_to_geojson() labels/annotates a multi-segment split (seg
 # not None" sentinel available (a single selected zone is naturally Optional[Polygon] --
 # None already means BOTH "not supplied" and "no zone sited"), so fetch_and_select_optimal_
 # water_zone() itself is mocked out instead, same pattern as the existing canopy-height mock
-# just below it. selected_road_corridor_cells is left at its own default (None, with
-# anchor_lon_lat also None) which already resolves to "no corridor" with zero network calls
-# (see identify_fencing()'s own docstring), so no explicit override/mock is needed there.
+# just below it. selected_road_corridor is never derived at all here -- with
+# tree_zone_render_fill_polygons_utm=[] already supplied, identify_fencing()'s own tree-zone
+# self-compute fallback (the only consumer of a derived selected_road_corridor) never runs,
+# so no explicit override/mock is needed there either (see identify_fencing()'s own docstring).
 
 from feature_schema import make_feature_collection
 
@@ -448,121 +444,6 @@ assert no_stream_layers == ["perimeter_fencing"], (
     f"with no streams, only perimeter_fencing should be produced, got {no_stream_layers}"
 )
 print("identify_fencing() still produces boundary fencing when no streams are present.")
-
-
-# =====================================================================
-# find_road_corridor_fencing(): pure geometric core, purely synthetic DEM/cells,
-# no network/boundary_coordinates involved -- same "pure core is independently
-# testable" pattern as find_boundary_fencing() above. A small synthetic DEM
-# (its own 'array'/'resolution_meters'/'origin_x'/'origin_y'/'crs', same shape
-# raster_grid.py's own functions expect) stands in for a real fetched DEM.
-# =====================================================================
-
-ROAD_FENCE_DEM = {
-    "array": np.zeros((20, 20), dtype=np.float32),
-    # 5.0m resolution (was 2.0m, widened for ROAD_FENCE_LINE_INSET_METERS's 0.3048m -> 2.0m
-    # increase) -- a 1-cell dilation on either side of a single-cell-wide path gives a 15.0m-
-    # wide dilated footprint here, leaving an 11.0m-wide residual after the 2.0m inset on both
-    # sides: a comfortable, unambiguous margin above the "empties out" fallback case below,
-    # not a near-miss that could collapse the two cases (normal inset success vs. genuine
-    # pinch-triggered fallback) into the same outcome.
-    "resolution_meters": (5.0, 5.0),
-    "origin_x": 500000.0,
-    "origin_y": 4500000.0,
-    "crs": UTM_CRS,
-}
-
-
-# --- 1. None/empty cells -> returns None, not an error or an empty LineString ---
-
-assert find_road_corridor_fencing(ROAD_FENCE_DEM, None) is None
-assert find_road_corridor_fencing(ROAD_FENCE_DEM, []) is None
-print("find_road_corridor_fencing(): None/empty selected_road_corridor_cells returns None.")
-
-
-# --- 2. a simple straight-line synthetic path -> a single closed LineString, genuinely
-#        inset INSIDE the dilated footprint's own outer edge (not just the footprint itself) ---
-
-straight_path_cells = [(10, c) for c in range(3, 17)]
-
-straight_fence_line = find_road_corridor_fencing(ROAD_FENCE_DEM, straight_path_cells)
-assert straight_fence_line is not None and straight_fence_line.geom_type == "LineString"
-straight_coords = list(straight_fence_line.coords)
-assert straight_coords[0] == straight_coords[-1], "road corridor fence line must be a closed ring"
-
-straight_mask = np.zeros(ROAD_FENCE_DEM["array"].shape, dtype=bool)
-for r, c in straight_path_cells:
-    straight_mask[r, c] = True
-straight_dilated_mask = binary_dilate(straight_mask, ROAD_CORRIDOR_FENCE_DILATION_CELLS)
-straight_dilated_footprint = cell_union_footprint(ROAD_FENCE_DEM, straight_dilated_mask)
-straight_would_be_inset = straight_dilated_footprint.buffer(-ROAD_FENCE_LINE_INSET_METERS)
-assert not straight_would_be_inset.is_empty and straight_would_be_inset.is_valid, (
-    "test setup must genuinely produce a real, non-empty negative-buffer result here -- otherwise "
-    "this case and the narrow/pinched case below would both hit the same fallback path, and this "
-    "would no longer be a real test of the normal (non-fallback) inset behavior"
-)
-
-straight_fence_polygon = Polygon(straight_coords)
-assert straight_fence_polygon.area < straight_dilated_footprint.area, (
-    "the inset fence line must enclose strictly less area than the dilated footprint -- "
-    "confirms the inset actually moved the line inward, not just returning the dilated "
-    "footprint's own boundary unchanged"
-)
-assert straight_dilated_footprint.buffer(1e-9).contains(straight_fence_polygon), (
-    "the inset fence polygon must sit inside the dilated footprint's own outer edge"
-)
-print(
-    "find_road_corridor_fencing(): a straight path returns a single closed LineString, "
-    "genuinely inset inside the dilated footprint's own outer edge."
-)
-
-
-# --- 3. a deliberately narrow/pinched synthetic path where the negative buffer empties out
-#        entirely -> falls back to the dilated footprint's own outer edge, not an error/drop ---
-
-# A very fine DEM resolution (0.1m) makes ROAD_CORRIDOR_FENCE_DILATION_CELLS's own single-cell
-# dilation produce a genuinely thin strip (3 cells wide perpendicular to the path, 0.3m total)
-# -- thinner than ROAD_FENCE_LINE_INSET_METERS's own current 2.0m inset, so the negative
-# buffer has nowhere to go and empties out completely.
-NARROW_ROAD_FENCE_DEM = {
-    "array": np.zeros((20, 20), dtype=np.float32),
-    "resolution_meters": (0.1, 0.1),
-    "origin_x": 500000.0,
-    "origin_y": 4500000.0,
-    "crs": UTM_CRS,
-}
-narrow_path_cells = [(10, c) for c in range(3, 17)]
-
-narrow_mask = np.zeros(NARROW_ROAD_FENCE_DEM["array"].shape, dtype=bool)
-for r, c in narrow_path_cells:
-    narrow_mask[r, c] = True
-narrow_dilated_mask = binary_dilate(narrow_mask, ROAD_CORRIDOR_FENCE_DILATION_CELLS)
-narrow_dilated_footprint = cell_union_footprint(NARROW_ROAD_FENCE_DEM, narrow_dilated_mask)
-narrow_would_be_inset = narrow_dilated_footprint.buffer(-ROAD_FENCE_LINE_INSET_METERS)
-assert narrow_would_be_inset.is_empty, (
-    "test setup must genuinely produce an empty negative-buffer result for this to be a real "
-    "test of the fallback path"
-)
-
-narrow_fence_line = find_road_corridor_fencing(NARROW_ROAD_FENCE_DEM, narrow_path_cells)
-assert narrow_fence_line is not None, "the fallback must still return a real fence line, not None"
-narrow_fence_polygon = Polygon(narrow_fence_line.coords)
-assert narrow_fence_polygon.equals(narrow_dilated_footprint), (
-    "on a narrow/pinched stretch where the inset empties out, the fallback must return the "
-    "dilated footprint's own outer edge unchanged, not a broken/empty result"
-)
-print(
-    "find_road_corridor_fencing(): a narrow/pinched path where the inset would empty out "
-    "falls back to the dilated footprint's own outer edge."
-)
-
-
-# --- road_corridor_fencing_to_geojson: None fence_line -> empty FeatureCollection ---
-
-empty_road_corridor_geojson = road_corridor_fencing_to_geojson(None)
-validate_feature_collection(empty_road_corridor_geojson)
-assert empty_road_corridor_geojson["features"] == [], "None fence_line should produce zero features, not an error"
-print("road_corridor_fencing_to_geojson(): None fence_line produces an empty, schema-valid FeatureCollection.")
 
 
 # =====================================================================
@@ -738,11 +619,6 @@ HIGH_LEVEL_TREE_ZONE_PATCHES = [
 _captured_low_level = {}
 
 
-def _capture_road_fencing(dem_arg, cells_arg, **kwargs):
-    _captured_low_level["road_cells"] = cells_arg
-    return None
-
-
 def _capture_water_fencing(polygon_arg, **kwargs):
     _captured_low_level["water_polygon"] = polygon_arg
     return None
@@ -758,7 +634,6 @@ with (
     mock_patch.object(fencing, "identify_road_corridor_candidates", _must_not_be_called("identify_road_corridor_candidates")),
     mock_patch.object(fencing, "fetch_and_select_optimal_water_zone", _must_not_be_called("fetch_and_select_optimal_water_zone")),
     mock_patch.object(fencing, "identify_tree_zone_candidates", _must_not_be_called("identify_tree_zone_candidates")),
-    mock_patch.object(fencing, "find_road_corridor_fencing", _capture_road_fencing),
     mock_patch.object(fencing, "find_water_zone_fencing", _capture_water_fencing),
     mock_patch.object(fencing, "find_tree_zone_fencing", _capture_tree_fencing),
 ):
@@ -771,9 +646,6 @@ with (
         tree_zone_patches=HIGH_LEVEL_TREE_ZONE_PATCHES,
     )
 validate_feature_collection(high_level_result["fencing_geojson"])
-assert _captured_low_level["road_cells"] is HIGH_LEVEL_ROAD_CORRIDOR["cells"], (
-    "selected_road_corridor_cells must be derived directly from selected_road_corridor['cells']"
-)
 assert _captured_low_level["water_polygon"] is HIGH_LEVEL_WATER_POLYGON, (
     "selected_water_zone_render_fill_polygon_utm must be derived directly from "
     "selected_water_zone['render_fill_polygon_utm']"
@@ -782,9 +654,10 @@ assert _captured_low_level["tree_polygons"] == [HIGH_LEVEL_TREE_POLYGON_A, HIGH_
 assert _captured_low_level["tree_polygons"][0] is HIGH_LEVEL_TREE_POLYGON_A
 assert _captured_low_level["tree_polygons"][1] is HIGH_LEVEL_TREE_POLYGON_B
 print(
-    "identify_fencing(): high-level selected_road_corridor/selected_water_zone/tree_zone_patches overrides "
-    "derive the low-level values directly (identity-checked) -- identify_road_corridor_candidates()/"
-    "fetch_and_select_optimal_water_zone()/identify_tree_zone_candidates() are called zero times."
+    "identify_fencing(): high-level selected_water_zone/tree_zone_patches overrides derive the "
+    "low-level values directly (identity-checked), and a supplied selected_road_corridor skips its "
+    "own self-compute too -- identify_road_corridor_candidates()/fetch_and_select_optimal_water_"
+    "zone()/identify_tree_zone_candidates() are each called zero times."
 )
 
 

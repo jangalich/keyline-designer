@@ -1265,13 +1265,16 @@ print(
 # behavior class, not something this branch introduces or is scoped to
 # fix). This section proves that residual is EXCLUSIVELY attributable to
 # those two unwired call sites -- zero of it traces to this branch's own
-# three wired call sites (pipeline_context.py's build_pipeline_context(),
-# render_layout_map.py's own fetch_layout_layers(), and fencing.py's own
-# identify_fencing(), which forwards canopy_height into its own nested
-# identify_road_corridor_candidates() self-compute per the canopy-height-
-# road-corridors branch) -- each of which is confirmed BELOW to be
-# genuinely exercised (count == 1, not skipped), not just present with a
-# zero contribution by accident.
+# wired call sites, pipeline_context.py's build_pipeline_context() and
+# render_layout_map.py's own fetch_layout_layers() (fencing.py's own
+# identify_fencing() no longer contributes a third wired call site here --
+# it only derives a road corridor when its own tree-zone self-compute
+# fallback is about to run, and fetch_layout_layers() already supplies
+# tree_zone_patches directly, so that fallback never fires on this real
+# call graph -- see the per-call-site assertions below) -- each of the
+# two remaining wired sites is confirmed BELOW to be genuinely exercised
+# (count == 1, not skipped), not just present with a zero contribution by
+# accident.
 # =====================================================================
 
 import diagnose_fetch_layout_layers_redundant_fetches as diag_fetch_layout_layers
@@ -1288,22 +1291,25 @@ assert _diag_canopy_from_parcel_data == 1, (
     f"exactly once per fetch_layout_layers() call, got {_diag_canopy_from_parcel_data}"
 )
 
-# The three call sites THIS branch wired: pipeline_context.py's own identify_road_corridor_candidates() call,
-# render_layout_map.py's own direct identify_road_corridor_candidates()/identify_fencing() calls (identify_
-# fencing() itself isn't traced here -- it has no direct canopy gate of its own, only forwarding into its own
-# nested identify_road_corridor_candidates() call, which IS traced). Each must appear exactly once, proving
-# fetch_layout_layers()'s real call graph genuinely reaches every one of them on this fixture.
+# The two call sites THIS branch wired that are genuinely reached on this fixture:
+# pipeline_context.py's own identify_road_corridor_candidates() call, and render_layout_map.py's own direct
+# identify_road_corridor_candidates() call. fencing.py's own identify_fencing() no longer contributes a third
+# call site here: it only derives a road corridor at all when its own tree-zone self-compute fallback is
+# about to run (a real siting-exclusion input, not a fence loop of its own anymore -- see fencing.py's own
+# module docstring for why no road gets a fence line), and fetch_layout_layers() already supplies
+# tree_zone_patches=context.tree_zone_patches directly, so that fallback -- and therefore fencing.py's own
+# nested identify_road_corridor_candidates() call -- correctly never fires on this real call graph.
 _diag_road_corridor_sites = _diag_call_site_logs["identify_road_corridor_candidates"]
-_WIRED_SITE_PREFIXES = ("pipeline_context.py:", "render_layout_map.py:", "fencing.py:")
+_WIRED_SITE_PREFIXES = ("pipeline_context.py:", "render_layout_map.py:")
 _diag_wired_site_counts = {
     site: count for site, count in _diag_road_corridor_sites.items() if site.startswith(_WIRED_SITE_PREFIXES)
 }
 _diag_unwired_site_counts = {
     site: count for site, count in _diag_road_corridor_sites.items() if not site.startswith(_WIRED_SITE_PREFIXES)
 }
-assert len(_diag_wired_site_counts) == 3, (
-    f"expected exactly 3 of this branch's own wired identify_road_corridor_candidates() call sites "
-    f"(pipeline_context.py/render_layout_map.py/fencing.py) to be reached, got {_diag_wired_site_counts}"
+assert len(_diag_wired_site_counts) == 2, (
+    f"expected exactly 2 of this branch's own wired identify_road_corridor_candidates() call sites "
+    f"(pipeline_context.py/render_layout_map.py) to be reached, got {_diag_wired_site_counts}"
 )
 assert all(count == 1 for count in _diag_wired_site_counts.values()), (
     f"each of this branch's own wired identify_road_corridor_candidates() call sites must run exactly once, "
