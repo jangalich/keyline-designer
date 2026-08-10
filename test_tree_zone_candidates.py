@@ -910,4 +910,78 @@ print(
 )
 
 
+# --- canopy_height forwarding into the nested identify_road_corridor_ ----
+# --- candidates() self-compute call specifically --------------------------
+#
+# The probe test above proves canopy_height reaches every canopy GATE, but
+# identify_road_corridor_candidates() itself has no canopy gate of its own
+# (see road_corridors.py's own docstring) -- it only forwards canopy_height
+# into ITS OWN nested production_areas/selected_water_zone self-computes,
+# both of which are already resolved (non-None) by the time tree_zone_
+# candidates.py calls it, so those nested self-computes never fire here and
+# the probe's mask-array count can't observe whether the kwarg itself was
+# actually forwarded. Directly mocking identify_road_corridor_candidates()
+# and checking its call kwargs by identity is the only way to prove this
+# specific nested-forwarding call site, not just its downstream effect.
+
+with mock_patch.object(
+        tzc, "identify_road_corridor_candidates",
+        return_value={"selected_road_corridor": None},
+     ) as mock_corridor_canopy, \
+     mock_patch.object(tzc, "get_farmland_classification_for_polygon", _fake_farmland_empty), \
+     mock_patch.object(tzc, "get_soil_data_for_polygon", _fake_soil_rows_empty), \
+     mock_patch.object(tzc, "get_soil_geometries_for_polygon", _fake_soil_geometries_empty), \
+     mock_patch.object(tzc, "get_water_features_for_boundary", _fake_water_features_empty):
+    identify_tree_zone_candidates(
+        orchestrator_boundary_coordinates,
+        dem=orchestrator_dem,
+        boundary_polygon_utm=OVERRIDE_BOUNDARY_POLYGON_UTM,
+        production_areas=OVERRIDE_PRODUCTION_AREAS,
+        valleys=OVERRIDE_VALLEYS,
+        selected_water_zone=OVERRIDE_SELECTED_WATER_ZONE,
+        canopy_height=_ov_override,
+    )
+
+assert mock_corridor_canopy.call_count == 1
+canopy_corridor_call = mock_corridor_canopy.call_args
+assert canopy_corridor_call.kwargs["canopy_height"] is _ov_override, (
+    "identify_road_corridor_candidates() must receive this function's own canopy_height override as a "
+    "kwarg (identity-checked), not omit it and leave the nested call to self-fetch its own copy"
+)
+print(
+    "identify_tree_zone_candidates(): a supplied canopy_height override correctly reaches the nested "
+    "identify_road_corridor_candidates() self-compute call as a kwarg, identity-checked."
+)
+
+# REGRESSION: canopy_height left unsupplied -> identify_road_corridor_candidates() still receives it
+# explicitly as None (its own default), same as every other forwarded-but-unsupplied override.
+with mock_patch.object(
+        tzc, "identify_road_corridor_candidates",
+        return_value={"selected_road_corridor": None},
+     ) as mock_corridor_no_canopy, \
+     mock_patch.object(tzc, "get_farmland_classification_for_polygon", _fake_farmland_empty), \
+     mock_patch.object(tzc, "get_soil_data_for_polygon", _fake_soil_rows_empty), \
+     mock_patch.object(tzc, "get_soil_geometries_for_polygon", _fake_soil_geometries_empty), \
+     mock_patch.object(tzc, "get_water_features_for_boundary", _fake_water_features_empty):
+    identify_tree_zone_candidates(
+        orchestrator_boundary_coordinates,
+        dem=orchestrator_dem,
+        boundary_polygon_utm=OVERRIDE_BOUNDARY_POLYGON_UTM,
+        production_areas=OVERRIDE_PRODUCTION_AREAS,
+        valleys=OVERRIDE_VALLEYS,
+        selected_water_zone=OVERRIDE_SELECTED_WATER_ZONE,
+    )
+
+assert mock_corridor_no_canopy.call_count == 1
+no_canopy_call = mock_corridor_no_canopy.call_args
+assert no_canopy_call.kwargs.get("canopy_height") is None, (
+    "with canopy_height left unsupplied, identify_road_corridor_candidates() must still receive it "
+    "explicitly as None (its own default) -- unchanged from behavior before this kwarg was forwarded"
+)
+print(
+    "REGRESSION: with canopy_height left unsupplied, identify_road_corridor_candidates() correctly "
+    "receives canopy_height=None -- unchanged from prior behavior."
+)
+
+
 print("\nAll tree_zone_candidates checks passed.")

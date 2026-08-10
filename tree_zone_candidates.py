@@ -1079,6 +1079,7 @@ def identify_tree_zone_candidates(
             selected_water_zone=selected_water_zone,
             hydric_floodplain_union=hydric_floodplain_union,
             floodplain_data_is_fallback=floodplain_data_is_fallback,
+            canopy_height=canopy_height,
         )
         selected_road_corridor = road_result["selected_road_corridor"]
     # _road_corridor_exclusion_polygon() builds this module's OWN

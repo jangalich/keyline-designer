@@ -425,4 +425,86 @@ print(
 )
 
 
+# --- canopy_height forwarding into the nested identify_road_corridor_ ----
+# --- candidates() self-compute call specifically --------------------------
+#
+# identify_solar_candidate_zones() already forwards its own canopy_height
+# override into its own mandatory Step gate / identify_optimized_production_
+# areas()/identify_water_suitability() (unchanged, out of scope here); this
+# proves the one remaining nested call -- identify_road_corridor_candidates(),
+# fired here (Tier 1) when selected_road_corridor isn't itself supplied --
+# also receives it as a kwarg, not silently omitting it. Mocking the nested
+# call directly and checking its call kwargs by identity is required here:
+# identify_road_corridor_candidates() has no canopy gate of its own (see
+# road_corridors.py's own docstring), it only forwards canopy_height into ITS
+# OWN nested production_areas/selected_water_zone self-computes -- both
+# already resolved (non-None, via the OVERRIDE_* fixtures below) by the time
+# this call fires, so those nested self-computes never run and no downstream
+# effect could otherwise reveal whether the kwarg itself was forwarded.
+
+OVERRIDE_CANOPY_HEIGHT = {
+    "array": np.full(synthetic_dem["array"].shape, 1.0, dtype=np.float32),
+    "resolution_meters": synthetic_dem["resolution_meters"],
+    "origin_x": synthetic_dem["origin_x"],
+    "origin_y": synthetic_dem["origin_y"],
+    "crs": synthetic_dem["crs"],
+    "source_item_id": "offline-canopy-forwarding-probe",
+}
+
+with mock_patch.object(
+        solar_suitability, "identify_road_corridor_candidates", return_value={"selected_road_corridor": None},
+     ) as mock_corridor_canopy, \
+     mock_patch.object(production_area, "get_canopy_height_for_boundary", _fake_clean_canopy), \
+     mock_patch.object(solar_suitability, "identify_tree_zone_candidates", return_value={"patches": []}):
+    solar_suitability.identify_solar_candidate_zones(
+        boundary_coordinates,
+        dem=synthetic_dem,
+        boundary_polygon_utm=OVERRIDE_BOUNDARY_POLYGON_UTM,
+        production_areas=OVERRIDE_PRODUCTION_AREAS,
+        valleys=OVERRIDE_VALLEYS,
+        selected_water_zone=OVERRIDE_SELECTED_WATER_ZONE,
+        canopy_height=OVERRIDE_CANOPY_HEIGHT,
+        check_prime_farmland=False,
+    )
+
+assert mock_corridor_canopy.call_count == 1
+canopy_corridor_call = mock_corridor_canopy.call_args
+assert canopy_corridor_call.kwargs["canopy_height"] is OVERRIDE_CANOPY_HEIGHT, (
+    "identify_road_corridor_candidates() must receive this function's own canopy_height override as a "
+    "kwarg (identity-checked), not omit it and leave the nested call to self-fetch its own copy"
+)
+print(
+    "identify_solar_candidate_zones(): a supplied canopy_height override correctly reaches the nested "
+    "identify_road_corridor_candidates() self-compute call as a kwarg, identity-checked."
+)
+
+# REGRESSION: canopy_height left unsupplied -> identify_road_corridor_candidates() still receives it
+# explicitly as None (its own default), same as every other forwarded-but-unsupplied override.
+with mock_patch.object(
+        solar_suitability, "identify_road_corridor_candidates", return_value={"selected_road_corridor": None},
+     ) as mock_corridor_no_canopy, \
+     mock_patch.object(production_area, "get_canopy_height_for_boundary", _fake_clean_canopy), \
+     mock_patch.object(solar_suitability, "identify_tree_zone_candidates", return_value={"patches": []}):
+    solar_suitability.identify_solar_candidate_zones(
+        boundary_coordinates,
+        dem=synthetic_dem,
+        boundary_polygon_utm=OVERRIDE_BOUNDARY_POLYGON_UTM,
+        production_areas=OVERRIDE_PRODUCTION_AREAS,
+        valleys=OVERRIDE_VALLEYS,
+        selected_water_zone=OVERRIDE_SELECTED_WATER_ZONE,
+        check_prime_farmland=False,
+    )
+
+assert mock_corridor_no_canopy.call_count == 1
+no_canopy_call = mock_corridor_no_canopy.call_args
+assert no_canopy_call.kwargs.get("canopy_height") is None, (
+    "with canopy_height left unsupplied, identify_road_corridor_candidates() must still receive it "
+    "explicitly as None (its own default) -- unchanged from behavior before this kwarg was forwarded"
+)
+print(
+    "REGRESSION: with canopy_height left unsupplied, identify_road_corridor_candidates() correctly "
+    "receives canopy_height=None -- unchanged from prior behavior."
+)
+
+
 print("\nAll solar suitability pipeline checks passed.")

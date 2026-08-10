@@ -1174,6 +1174,7 @@ def identify_solar_candidate_zones(
             selected_water_zone=selected_water_zone,
             hydric_floodplain_union=hydric_floodplain_union,
             floodplain_data_is_fallback=floodplain_data_is_fallback,
+            canopy_height=canopy_height,
         )
         selected_road_corridor = corridor_result["selected_road_corridor"]
 
