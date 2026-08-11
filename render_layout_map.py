@@ -201,11 +201,17 @@ to the plotting calls is simplified/smoothed.
 
 TREE ZONE STYLE: each ranked tree-zone candidate patch (there can be
 several, same "possibly-multiple, ranked" shape as production zones, not
-a single selection like water/road/structure) renders as a solid,
-hatched fill (TREE_ZONE_COLOR, TREE_ZONE_FILL_ALPHA, TREE_ZONE_HATCH),
-drawn from its own render_fill_polygon_utm -- a DISPLAY-ONLY plain convex
-hull of the patch's real footprint, re-intersected with the parcel
-boundary (score_tree_search_space()'s own output, same field/reasoning
+a single selection like water/road/structure) renders as HATCH-ONLY --
+diagonal hatch strokes (TREE_ZONE_COLOR, TREE_ZONE_HATCH_ALPHA,
+TREE_ZONE_HATCH) with NO fill and NO perimeter stroke (facecolor="none",
+linewidth=0 -- see this module's own tree-zone plot_polygon() call for
+why that specific combination, not a cleared edgecolor, is what achieves
+this: a patch's hatch color follows its edgecolor, and a patch's hatch
+stroke width comes from matplotlib's own rcParams["hatch.linewidth"],
+independent of the patch's own linewidth). The geometry drawn is still
+its own render_fill_polygon_utm -- a DISPLAY-ONLY plain convex hull of
+the patch's real footprint, re-intersected with the parcel boundary
+(score_tree_search_space()'s own output, same field/reasoning
 production_area.py's/water_candidate_zones.py's own patches/zones already
 carry) -- NOT the patch's real, potentially-notched geometry_wgs84 (used
 for area_acres/scoring/the narrative report, completely untouched by
@@ -213,7 +219,10 @@ this). Same "reads as one coherent shape at render time" purpose as
 production/water's own hulls: most directly here, closing over any
 interior pocket the CANOPY EXCLUSION GATE carves out of an otherwise-
 contiguous candidate (see tree_zone_candidates.py's own module
-docstring), rather than rendering as an unexplained blank notch. The
+docstring), rather than rendering as an unexplained blank notch. Zone
+identity is still carried by the numbered marker placed on that same
+hull and by the corresponding legend line -- the hatch by itself doesn't
+need to enclose a filled area to read as a distinct zone on the map. The
 hatch is a deliberate, visible "candidate, not a committed site" cue,
 consistent with this layer's own CONFIDENCE_LOW rating and its explicit
 "not a definite planting plan" framing (see tree_zone_candidates.py's own
@@ -225,7 +234,7 @@ zorder=43), so a real, expected overlap between a tree candidate and the
 structure site (tree_zone_candidates.py's own search space deliberately
 has no awareness of solar/structure siting, see that module's own
 docstring) still reads as the structure site's pin sitting visibly on
-top, not lost beneath the tree-candidate fill.
+top, not lost beneath the tree-candidate hatch.
 
 STRUCTURE SITE STYLE: the selected structure site renders as a single,
 fixed-size MAP-PIN ICON (assets/icons/farm_location_pin.svg, rasterized
@@ -487,10 +496,14 @@ STRUCTURE_SITE_ICON = OffsetImage(Image.open(STRUCTURE_SITE_ICON_PATH), zoom=STR
 # A dark forest green -- deliberately distinct from PRODUCTION_ZONE_COLOR's
 # lighter, more saturated green (production is active farm ground; trees
 # are a candidate, not-yet-decided layer) and from every other layer color
-# already in use. See this module's own TREE ZONE STYLE docstring section
-# for why this fill is hatched rather than flat, unlike structure_site's own.
+# already in use. A patch's hatch color follows its edgecolor, not a
+# separate hatch-color setting -- this is why TREE_ZONE_COLOR stays set as
+# BOTH edgecolor and the hatch's own visible color, even though there's no
+# fill and no perimeter stroke drawn from it anymore. See this module's own
+# TREE ZONE STYLE docstring section for why this renders as hatch-only
+# rather than a flat/solid fill, unlike structure_site's own.
 TREE_ZONE_COLOR = "#2D5A27"
-TREE_ZONE_FILL_ALPHA = 0.45
+TREE_ZONE_HATCH_ALPHA = 0.45
 TREE_ZONE_HATCH = "///"
 
 MARKER_FACE_COLOR = "#1A1A1A"
@@ -536,7 +549,7 @@ FENCE_LINEWIDTH = 0.6  # a hairline -- was 1.2 (a dashed line before that)
 # bumped again to 60 per a later explicit request). Deliberately NOT applied
 # to the water-zone/tree-zone exclusion fence loops, nor to roads, tree zone,
 # water zones, or streams -- those keep rendering at EXCLUSION_FENCE_ZORDER
-# (water/tree exclusion fencing) or their own existing zorder (tree zone fill,
+# (water/tree exclusion fencing) or their own existing zorder (tree zone hatch,
 # water zone fill, stream lines) below, unchanged. CONFIGURABLE.
 FENCE_ZORDER = 60
 
@@ -545,7 +558,7 @@ FENCE_ZORDER = 60
 # before being bumped up for the boundary fence alone (see that constant's own
 # comment). Kept here, unchanged, so these two fence loops still render above
 # every zone-fill-style layer (production contour zorder=40, water zone fill
-# zorder=41, road corridor cased line zorder=42/42.5, tree zone candidate fill
+# zorder=41, road corridor cased line zorder=42/42.5, tree zone candidate hatch
 # zorder=42.8 -- the true current ceiling, not 40) without being bumped above
 # the numbered circle markers/structure site pin the way the boundary fence
 # now is.
@@ -1182,7 +1195,7 @@ def render_layout_map(
         basemap_note = f"basemap unavailable ({e})"
 
     # z-order, back to front: halo mask, streams, production zone contours,
-    # water zone fill, road corridor line, tree zone fill, the water/tree
+    # water zone fill, road corridor line, tree zone hatch, the water/tree
     # exclusion fence loops (EXCLUSION_FENCE_ZORDER, above every zone
     # fill -- see that constant's own comment), structure site pin, numbered
     # markers, the boundary fence (FENCE_ZORDER, above the numbered markers --
@@ -1370,7 +1383,7 @@ def render_layout_map(
     # Tree zone candidates: possibly several, ranked (same "possibly-
     # multiple" shape as production zones above, not a single selection
     # like water_zone/road_corridor/structure_site) -- see this module's
-    # own TREE ZONE STYLE docstring section for the hatched-fill styling
+    # own TREE ZONE STYLE docstring section for the hatch-only styling
     # rationale. DISPLAY-ONLY fill geometry: render_fill_polygon_utm is a
     # plain convex hull of the patch's own real footprint (see
     # score_tree_search_space()'s own docstring), already in the DEM's
@@ -1388,10 +1401,10 @@ def render_layout_map(
                 polygon,
                 ax=ax,
                 add_points=False,
-                facecolor=TREE_ZONE_COLOR,
+                facecolor="none",
                 edgecolor=TREE_ZONE_COLOR,
-                alpha=TREE_ZONE_FILL_ALPHA,
-                linewidth=1.0,
+                alpha=TREE_ZONE_HATCH_ALPHA,
+                linewidth=0,
                 hatch=TREE_ZONE_HATCH,
                 zorder=42.8,
             )

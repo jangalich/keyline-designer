@@ -152,7 +152,13 @@ water_polys = [box(70, 70, 100, 100)]     # 900 sqm
 # from both production_polys and water_polys so the union area is a simple, exact sum.
 road_polys = [box(0, 45, 100, 55)]  # 1,000 sqm
 
-search_space, claimed = compute_tree_search_space(boundary, production_polys, water_polys, road_polys)
+# production_buffer_meters=0.0/water_buffer_meters=0.0 explicitly here -- this section tests the
+# PURE geometry-difference behavior (no clearance applied), independently of the production/water
+# buffer defaults (TREE_ZONE_PRODUCTION_BUFFER_METERS/TREE_ZONE_WATER_BUFFER_METERS); the buffered
+# default path has its own dedicated coverage in test_tree_zone_search_space_buffers.py.
+search_space, claimed = compute_tree_search_space(
+    boundary, production_polys, water_polys, road_polys, production_buffer_meters=0.0, water_buffer_meters=0.0
+)
 assert claimed is not None
 assert abs(claimed.area - 2800.0) < 1e-6, (
     "claimed union area should be exactly production+water+road -- the road's own REAL cell-footprint polygon "
@@ -167,13 +173,17 @@ print(f"compute_tree_search_space(): claimed={claimed.area} sqm (production+wate
       f"own real, non-zero area), search_space={search_space.area} sqm = boundary - claimed exactly.")
 
 # No claims at all -- search_space is the boundary itself, claimed is None (not just empty).
-empty_search_space, empty_claimed = compute_tree_search_space(boundary, [], [], [])
+empty_search_space, empty_claimed = compute_tree_search_space(
+    boundary, [], [], [], production_buffer_meters=0.0, water_buffer_meters=0.0
+)
 assert empty_claimed is None
 assert empty_search_space is boundary, "with nothing claimed, the search space should be the boundary object itself"
 print("compute_tree_search_space() with nothing claimed returns the boundary unmodified, claimed_union=None.")
 
 # Fully claimed -- search_space is None (not merely empty), a real, reportable "nothing left" outcome.
-fully_claimed_search_space, fully_claimed_union = compute_tree_search_space(boundary, [boundary], [], [])
+fully_claimed_search_space, fully_claimed_union = compute_tree_search_space(
+    boundary, [boundary], [], [], production_buffer_meters=0.0, water_buffer_meters=0.0
+)
 assert fully_claimed_union is not None
 assert fully_claimed_search_space is None, "a boundary fully claimed by production/water/roads must report search_space=None"
 print("compute_tree_search_space() with the ENTIRE boundary claimed returns search_space=None (a real, reportable outcome).")

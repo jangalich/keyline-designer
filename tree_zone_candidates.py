@@ -25,7 +25,12 @@ tree zones (a later, separate pass), not the reverse.
             (production_area_ceiling.identify_optimized_production_areas()'s
             scored/soil-carved/ceiling-trimmed output -- ALL of them; no
             zone-SELECTION mechanism exists for production, so "every
-            currently-optimized candidate" is the correct input here).
+            currently-optimized candidate" is the correct input here),
+            each BUFFERED by TREE_ZONE_PRODUCTION_BUFFER_METERS (a plain
+            shapely.buffer() around the union of their own render_fill_
+            polygon_utm -- see that constant's own comment) before being
+            subtracted, so a tree candidate can't be proposed right up
+            against a production zone's own edge with zero clearance.
             This is the ceiling-trimmed result, NOT
             production_area.identify_production_areas()'s full, un-trimmed
             candidates -- production_area.py's slope+hydric eligibility
@@ -44,7 +49,11 @@ tree zones (a later, separate pass), not the reverse.
             (water_suitability.select_optimal_water_zone()) -- not every
             water candidate. Per product decision, this app targets small
             farms only: one well-suited water zone is sufficient, so only
-            that one zone's own geometry counts as "claimed."
+            that one zone's own geometry counts as "claimed." BUFFERED by
+            TREE_ZONE_WATER_BUFFER_METERS (same plain shapely.buffer()
+            mechanism as production's own buffer just above, around its
+            render_fill_polygon_utm) before being subtracted, same
+            zero-clearance reasoning.
           - the SINGLE selected road corridor
             (road_corridors.select_optimal_road_corridor()) -- not every
             road candidate, same "one well-suited candidate is enough for
@@ -86,11 +95,17 @@ tree zones (a later, separate pass), not the reverse.
             render_layout_map.py's own module docstring documents for why
             it draws this field, not polygon_utm, for production zones --
             reused here for the same "reads as one coherent shape"
-            purpose, not just for rendering.
+            purpose, not just for rendering. BUFFERED by TREE_ZONE_
+            PRODUCTION_BUFFER_METERS (a plain shapely.buffer() around the
+            union of every patch's own render_fill_polygon_utm -- see that
+            constant's own comment for why a continuous-geometry buffer,
+            not a cell dilation, is the right tool here) before being
+            subtracted.
           - water: same reasoning, same field --
             water_candidate_zones.find_candidate_zones()'s own
             render_fill_polygon_utm for the single selected zone, not its
-            polygon_utm.
+            polygon_utm. BUFFERED by TREE_ZONE_WATER_BUFFER_METERS, same
+            mechanism as production's own buffer just above.
           - road: built from road_corridors.find_road_routes()'s own
             'cells' -- the selected route's own path cells
             (least_cost_path()'s connector cells + the winning ridge
@@ -383,6 +398,45 @@ TREE_ZONE_CANOPY_BUFFER_METERS = TREE_ROOT_ZONE_BUFFER_METERS
 # same whole-cell operation, not a separate concern). CONFIGURABLE.
 TREE_ZONE_ROAD_BUFFER_CELLS = 1
 
+# Buffer (meters) subtracted around EVERY optimized production-zone
+# candidate's own render_fill_polygon_utm before it counts as "claimed"
+# ground for Step 1's search space -- a plain, continuous-geometry
+# shapely.buffer(), NOT a whole-cell raster_grid.binary_dilate() like the
+# road corridor's own TREE_ZONE_ROAD_BUFFER_CELLS above. The two exclusions
+# use different mechanisms because their inputs are different kinds of
+# geometry to begin with: production is subtracted as render_fill_polygon_
+# utm, which is ALREADY a real, continuous polygon (a convex hull -- see
+# GEOMETRY FORM CLAIMED above), so buffering a polygon that's already a
+# polygon is the simple, standard operation and the right tool here. The
+# road, by contrast, is built from road_corridors.find_road_routes()'s own
+# 'cells' (see _road_corridor_exclusion_polygon()), so ITS buffer is a
+# cell dilation applied to the mask before the footprint polygon is even
+# built -- that stays exactly as it is, unchanged by this constant. This
+# does NOT violate this pipeline's own never-polygonize-a-raster-mask
+# rule: that rule prohibits vectorizing a raster-derived MASK and then
+# doing polygon-buffer-and-difference on the result. Nothing here touches
+# a raster mask at all -- render_fill_polygon_utm is already vector
+# geometry produced upstream, well before this module ever sees it.
+# Deliberately its OWN constant, NOT aliased to TREE_ZONE_WATER_BUFFER_
+# METERS below (numerically identical today, but production and water
+# clearance are separate product decisions -- retuning one must never
+# silently drag the other along) and NOT aliased to TREE_ZONE_CANOPY_
+# BUFFER_METERS either, for the same reason -- same "documented, not
+# coincidental" standard as every other duplicated-value constant in this
+# codebase. CONFIGURABLE.
+TREE_ZONE_PRODUCTION_BUFFER_METERS = 5.0
+
+# Buffer (meters) subtracted around the single SELECTED water-system
+# zone's own render_fill_polygon_utm -- same mechanism and same reasoning
+# as TREE_ZONE_PRODUCTION_BUFFER_METERS immediately above (a plain shapely.
+# buffer() on an already-real polygon, not a cell dilation, and not a
+# never-polygonize-a-raster-mask-rule violation for the same reason).
+# Deliberately its OWN constant, NOT aliased to TREE_ZONE_PRODUCTION_
+# BUFFER_METERS or TREE_ZONE_CANOPY_BUFFER_METERS even though the value is
+# numerically identical today -- same "retuning one must never silently
+# drag the others along" reasoning. CONFIGURABLE.
+TREE_ZONE_WATER_BUFFER_METERS = 5.0
+
 # Neutral factor value used when a given factor's own data source couldn't
 # be reached at all (fetch failure) -- same "missing/inapplicable data
 # should neither reward nor penalize" convention solar_suitability.py's own
@@ -396,8 +450,9 @@ _NEUTRAL_FACTOR_VALUE = 0.5
 TREE_ZONE_CONFIDENCE_NOTES_TEMPLATE = (
     "This identifies GENERAL tree-suitable land -- ground within the property's leftover, "
     "non-claimed area (the full boundary minus every current OPTIMIZED (ceiling-trimmed) "
-    "production-zone candidate plus the single SELECTED water-system zone and single SELECTED "
-    "road corridor's own geometry, MINUS real, existing tree canopy (production_area.py's own "
+    "production-zone candidate, each buffered by a {production_buffer_meters}m clearance, plus "
+    "the single SELECTED water-system zone, buffered by a {water_buffer_meters}m clearance, and "
+    "single SELECTED road corridor's own geometry, MINUS real, existing tree canopy (production_area.py's own "
     "TREE_ROOT_ZONE_BUFFER_METERS buffer around real USGS 3DEP lidar canopy coverage -- this "
     "layer identifies NEW tree-suitable ground, not ground that's already wooded) that scores "
     "above a minimum suitability threshold on marginality relative to production use. It is NOT "
@@ -428,10 +483,11 @@ TREE_ZONE_CONFIDENCE_NOTES_TEMPLATE = (
 
 TREE_SEARCH_SPACE_CONFIDENCE_NOTES = (
     "Diagnostic layer only, not a deliverable candidate zone: the full property boundary minus "
-    "every current OPTIMIZED (ceiling-trimmed) production-zone candidate plus the single SELECTED "
-    "water-system zone and single SELECTED road corridor's own geometry (see "
-    "tree_zone_candidates.py's module docstring, Step 1). Useful for checking the search space "
-    "independently of the suitability scoring/thresholding built on top of it (Steps 2-3)."
+    f"every current OPTIMIZED (ceiling-trimmed) production-zone candidate, each buffered by a "
+    f"{TREE_ZONE_PRODUCTION_BUFFER_METERS}m clearance, plus the single SELECTED water-system zone, "
+    f"buffered by a {TREE_ZONE_WATER_BUFFER_METERS}m clearance, and single SELECTED road corridor's "
+    "own geometry (see tree_zone_candidates.py's module docstring, Step 1). Useful for checking the "
+    "search space independently of the suitability scoring/thresholding built on top of it (Steps 2-3)."
 )
 
 
@@ -513,41 +569,80 @@ def compute_tree_search_space(
     production_polygons_utm: list,
     water_polygons_utm: list,
     road_polygons_utm: list,
+    production_buffer_meters: float = TREE_ZONE_PRODUCTION_BUFFER_METERS,
+    water_buffer_meters: float = TREE_ZONE_WATER_BUFFER_METERS,
 ) -> tuple[object, Optional[object]]:
     """
     Step 1 -- pure geometry difference (see module docstring): the real
     parcel boundary, minus the union of every currently-claimed production/
-    water/road candidate geometry. road_polygons_utm is this module's own
-    BUFFERED variant of the selected road corridor's real cell-footprint
-    polygon (built from road_corridors.find_road_routes()'s own 'cells' --
-    the route's own path cells' real ground squares, dilated by
-    TREE_ZONE_ROAD_BUFFER_CELLS -- see that constant's own reasoning) --
-    NOT road_corridors.py's zero-width 'line_utm', which used to be
-    subtracted here and had a confirmed, deliberately negligible effect
-    on the resulting search-space area (see module docstring's own
-    history of this), and NOT road_corridors.py's own unbuffered
-    'cell_footprint_polygon_utm' field either -- both a real cell-
-    footprint polygon AND a whole-cell buffer around it are needed so
+    water/road candidate geometry.
+
+    production_polygons_utm and water_polygons_utm are each unioned FIRST,
+    then buffered ONCE (by production_buffer_meters/water_buffer_meters,
+    respectively -- defaulting to TREE_ZONE_PRODUCTION_BUFFER_METERS/
+    TREE_ZONE_WATER_BUFFER_METERS, see those constants' own reasoning for
+    why a plain shapely.buffer() is the right tool here, unlike the road's
+    own cell dilation) -- NOT buffered individually before being unioned.
+    A single buffer() call on the already-merged shape is the simpler,
+    cheaper operation (one buffer() instead of len(polygons_utm) of them
+    plus a second union pass to reassemble them) and sidesteps any
+    per-piece discretization drift between separately-buffered neighbors
+    that a single unioned-then-buffered shape doesn't have to reconcile.
+    .buffer() is only ever called when its
+    own meters value is > 0, so passing 0.0 is a real, usable "no buffer"
+    path (e.g. for tests reproducing this function's pre-buffer behavior
+    exactly) rather than a wasted no-op call. Both use shapely's own
+    default buffer() parameters -- no custom join_style/cap_style/
+    resolution. This buffering lives INSIDE this function, not at the call
+    site (unlike the road's own buffer, which lives in
+    _road_corridor_exclusion_polygon() before this function is ever
+    called) specifically because it needs nothing but shapely -- no DEM,
+    no grid -- so no future caller can build a search space and forget the
+    clearance.
+
+    road_polygons_utm is this module's own BUFFERED variant of the selected
+    road corridor's real cell-footprint polygon (built from road_corridors.
+    find_road_routes()'s own 'cells' -- the route's own path cells' real
+    ground squares, dilated by TREE_ZONE_ROAD_BUFFER_CELLS -- see that
+    constant's own reasoning) -- NOT road_corridors.py's zero-width
+    'line_utm', which used to be subtracted here and had a confirmed,
+    deliberately negligible effect on the resulting search-space area (see
+    module docstring's own history of this), and NOT road_corridors.py's
+    own unbuffered 'cell_footprint_polygon_utm' field either -- both a real
+    cell-footprint polygon AND a whole-cell buffer around it are needed so
     this genuinely keeps tree candidates from being proposed on top of,
     along, or diagonally corner-touching the road's own real footprint.
+    road_polygons_utm arrives ALREADY buffered and is never buffered again
+    here -- doing so would double-buffer it.
 
     Returns (search_space, claimed_union):
-      - search_space is None if the claimed union completely covers the
-        boundary (leftover land is None, not merely empty, distinguishing
-        "nothing to search" as a real, reportable outcome); a Polygon/
-        MultiPolygon otherwise (possibly boundary_polygon_utm itself,
-        unmodified, if nothing was claimed at all).
-      - claimed_union is None if production_polygons_utm, water_polygons_utm,
-        and road_polygons_utm are ALL empty (nothing on this property has
-        been claimed by any upstream layer yet) -- distinct from a real,
-        non-None union that happens to leave a search_space of remaining
-        area.
+      - search_space is None if the claimed (and now-buffered) union
+        completely covers the boundary (leftover land is None, not merely
+        empty, distinguishing "nothing to search" as a real, reportable
+        outcome, now reachable on more properties than before this
+        buffering existed -- that's correct and expected, not a bug); a
+        Polygon/MultiPolygon otherwise (possibly boundary_polygon_utm
+        itself, unmodified, if nothing was claimed at all).
+      - claimed_union is None if and only if production_polygons_utm,
+        water_polygons_utm, and road_polygons_utm are ALL empty (nothing on
+        this property has been claimed by any upstream layer yet) --
+        distinct from a real, non-None union that happens to leave a
+        search_space of remaining area. Buffering changes the union's own
+        EXTENT, not whether it exists in the first place -- this None-iff-
+        all-empty rule is unchanged by production_buffer_meters/water_
+        buffer_meters.
     """
     pieces = []
     if production_polygons_utm:
-        pieces.append(unary_union(production_polygons_utm))
+        production_union = unary_union(production_polygons_utm)
+        if production_buffer_meters > 0:
+            production_union = production_union.buffer(production_buffer_meters)
+        pieces.append(production_union)
     if water_polygons_utm:
-        pieces.append(unary_union(water_polygons_utm))
+        water_union = unary_union(water_polygons_utm)
+        if water_buffer_meters > 0:
+            water_union = water_union.buffer(water_buffer_meters)
+        pieces.append(water_union)
     if road_polygons_utm:
         pieces.append(unary_union(road_polygons_utm))
 
@@ -880,6 +975,8 @@ def tree_zones_to_geojson(patches: list[dict]) -> dict:
             slope_weight=SLOPE_FACTOR_WEIGHT,
             soil_weight=SOIL_MARGINALITY_FACTOR_WEIGHT,
             stream_weight=STREAM_PROXIMITY_FACTOR_WEIGHT,
+            production_buffer_meters=TREE_ZONE_PRODUCTION_BUFFER_METERS,
+            water_buffer_meters=TREE_ZONE_WATER_BUFFER_METERS,
             data_availability_note=_data_availability_note(
                 patch["soil_marginality_data_available"], patch["hydric_data_available"], patch["stream_data_available"]
             ),

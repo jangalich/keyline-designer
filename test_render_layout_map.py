@@ -878,16 +878,17 @@ print(
 # =====================================================================
 # TREE ZONE STYLE: each ranked tree-zone candidate patch (possibly
 # several, same "ranked list" shape as production zones -- not a single
-# selection like water_zone/road_corridor/structure_site) renders as a
-# hatched, semi-transparent fill drawn from its own render_fill_polygon_utm
-# (a DISPLAY-ONLY plain convex hull -- see score_tree_search_space()'s own
-# docstring), NOT its real, potentially-notched polygon_utm/geometry_wgs84
-# -- see this module's own "TREE ZONE STYLE" docstring section.
+# selection like water_zone/road_corridor/structure_site) renders as
+# HATCH-ONLY -- diagonal hatch strokes, no fill, no perimeter stroke --
+# drawn from its own render_fill_polygon_utm (a DISPLAY-ONLY plain convex
+# hull -- see score_tree_search_space()'s own docstring), NOT its real,
+# potentially-notched polygon_utm/geometry_wgs84 -- see this module's own
+# "TREE ZONE STYLE" docstring section.
 # =====================================================================
 
 from shapely.geometry import mapping as _mapping_check
 from shapely.ops import unary_union as _unary_union_check
-from render_layout_map import TREE_ZONE_COLOR, TREE_ZONE_FILL_ALPHA, TREE_ZONE_HATCH
+from render_layout_map import TREE_ZONE_COLOR, TREE_ZONE_HATCH_ALPHA, TREE_ZONE_HATCH
 
 
 def _tree_patch_fixture(polygon_utm, rank: int, score: float, area_acres: float) -> dict:
@@ -964,12 +965,14 @@ finally:
     rlm._draw_numbered_marker = _original_draw_numbered_marker_for_trees
     rlm.plot_polygon = _original_plot_polygon_for_trees
 
-tree_fill_calls = [kw for kw in recorded_tree_polygon_calls if kw.get("facecolor") == TREE_ZONE_COLOR]
-assert len(tree_fill_calls) == 2, f"expected exactly 2 tree-zone fill plot_polygon() calls (one per patch), got {len(tree_fill_calls)}"
+tree_fill_calls = [kw for kw in recorded_tree_polygon_calls if kw.get("edgecolor") == TREE_ZONE_COLOR]
+assert len(tree_fill_calls) == 2, f"expected exactly 2 tree-zone hatch plot_polygon() calls (one per patch), got {len(tree_fill_calls)}"
 for kw in tree_fill_calls:
-    assert kw["alpha"] == TREE_ZONE_FILL_ALPHA, f"every tree-zone fill must use TREE_ZONE_FILL_ALPHA, got {kw['alpha']}"
-    assert kw["hatch"] == TREE_ZONE_HATCH, f"every tree-zone fill must use the TREE_ZONE_HATCH pattern, got {kw['hatch']}"
-    assert kw["zorder"] == 42.8, f"tree-zone fill must render between the road corridor (42.5) and structure site (43), got {kw['zorder']}"
+    assert kw["facecolor"] == "none", f"tree-zone patches must render with NO fill, got facecolor={kw['facecolor']!r}"
+    assert kw["linewidth"] == 0, f"tree-zone patches must render with NO perimeter stroke, got linewidth={kw['linewidth']}"
+    assert kw["alpha"] == TREE_ZONE_HATCH_ALPHA, f"every tree-zone hatch must use TREE_ZONE_HATCH_ALPHA, got {kw['alpha']}"
+    assert kw["hatch"] == TREE_ZONE_HATCH, f"every tree-zone hatch must use the TREE_ZONE_HATCH pattern, got {kw['hatch']}"
+    assert kw["zorder"] == 42.8, f"tree-zone hatch must render between the road corridor (42.5) and structure site (43), got {kw['zorder']}"
 
 assert len(recorded_tree_markers) == 2, f"expected exactly 2 markers drawn (one per tree-zone candidate), got {len(recorded_tree_markers)}"
 for (marker_point_mercator, _marker_number), patch in zip(recorded_tree_markers, [tree_patch_1, tree_patch_2]):
@@ -991,9 +994,9 @@ assert tree_patch_1["render_fill_polygon_utm"].area > tree_patch_1["polygon_utm"
 )
 
 print(
-    f"Full pipeline with 2 synthetic tree-zone candidates: render_layout_map() draws each as a hatched "
-    f"(pattern={TREE_ZONE_HATCH!r}) fill (alpha={TREE_ZONE_FILL_ALPHA}) at zorder=42.8 (between the road "
-    f"corridor and structure site) from its own render_fill_polygon_utm (a real, notched patch's hull "
+    f"Full pipeline with 2 synthetic tree-zone candidates: render_layout_map() draws each as hatch-only "
+    f"(pattern={TREE_ZONE_HATCH!r}, alpha={TREE_ZONE_HATCH_ALPHA}, no fill, no perimeter stroke) at zorder=42.8 "
+    f"(between the road corridor and structure site) from its own render_fill_polygon_utm (a real, notched patch's hull "
     f"visibly larger than its real footprint), places each numbered marker on that same hull, and "
     f"completes successfully."
 )
