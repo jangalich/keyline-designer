@@ -118,51 +118,62 @@ EXISTING_ROAD_TRAVERSAL_COST = 0.01
 _UNSERVED_ACRES_EPSILON = 1e-9
 
 
-def _kernel_targets(
-    r: int, c: int, kernel_dr: np.ndarray, kernel_dc: np.ndarray, rows: int, cols: int
-) -> tuple[np.ndarray, np.ndarray]:
-    """Every (row, col) the service-radius kernel reaches from (r, c), clipped to the grid."""
-    nr = kernel_dr + r
-    nc = kernel_dc + c
-    valid = (nr >= 0) & (nr < rows) & (nc >= 0) & (nc < cols)
-    return nr[valid], nc[valid]
+def _kernel_padding(kernel_dr: np.ndarray, kernel_dc: np.ndarray) -> tuple[int, int]:
+    """
+    How far the service-radius kernel reaches from its own center, per
+    axis -- (0, 0) is always in the kernel (build_disc_kernel_offsets()'s
+    own guarantee) and the kernel is point-symmetric about it (the
+    disc-radius test is symmetric under negating both dr and dc), so
+    padding cover_count/demand_acres by exactly this much on every side
+    guarantees every kernel_dr/kernel_dc offset from any real grid cell
+    lands in bounds -- no per-call clipping needed inside the DFS walk.
+    """
+    pad_r = int(np.max(np.abs(kernel_dr))) if kernel_dr.size else 0
+    pad_c = int(np.max(np.abs(kernel_dc))) if kernel_dc.size else 0
+    return pad_r, pad_c
 
 
 def _enter_coverage(
     r: int,
     c: int,
     cover_count: np.ndarray,
-    demand_mask: np.ndarray,
+    demand_acres: np.ndarray,
     kernel_dr: np.ndarray,
     kernel_dc: np.ndarray,
-    rows: int,
-    cols: int,
-    cell_area: float,
+    pad_r: int,
+    pad_c: int,
 ) -> float:
     """
-    Counts cell (r, c)'s own service disc IN to cover_count. Returns the
+    Counts cell (r, c)'s own service disc IN to cover_count (both already
+    padded by pad_r/pad_c -- see _kernel_padding()). Returns the
     newly_served_acres delta -- the real acreage of every demand cell
     whose cover_count transitioned 0 -> 1 as a direct result, i.e. cells
     (r, c) is the FIRST currently-active path cell to reach. Mutates
     cover_count in place; paired 1:1 with _leave_coverage() below (same
     kernel, opposite direction) so a caller can undo this exactly.
+
+    Plain fancy-index `+= 1` is correct (not np.add.at): a disc kernel
+    never contains a duplicate (dr, dc) offset, so every target cell in a
+    single call is written to exactly once -- there is no aliasing for
+    np.add.at's scatter-add to guard against, and it would only add
+    overhead here.
     """
-    nr, nc = _kernel_targets(r, c, kernel_dr, kernel_dc, rows, cols)
-    cover_count[nr, nc] += 1
-    newly_covered = demand_mask[nr, nc] & (cover_count[nr, nc] == 1)
-    return float(np.count_nonzero(newly_covered)) * cell_area
+    rr = kernel_dr + (r + pad_r)
+    cc = kernel_dc + (c + pad_c)
+    newly = cover_count[rr, cc] == 0
+    cover_count[rr, cc] += 1
+    return float(demand_acres[rr, cc][newly].sum())
 
 
 def _leave_coverage(
     r: int,
     c: int,
     cover_count: np.ndarray,
-    demand_mask: np.ndarray,
+    demand_acres: np.ndarray,
     kernel_dr: np.ndarray,
     kernel_dc: np.ndarray,
-    rows: int,
-    cols: int,
-    cell_area: float,
+    pad_r: int,
+    pad_c: int,
 ) -> float:
     """
     Exact inverse of _enter_coverage(): counts (r, c)'s own service disc
@@ -172,12 +183,15 @@ def _leave_coverage(
     cell still covering it. Relies on strict LIFO enter/leave nesting (a
     node's own subtree is always fully entered-and-left before this
     runs) to guarantee this exactly mirrors that node's own
-    _enter_coverage() call.
+    _enter_coverage() call. Decrements first, then checks which cells
+    just landed on 0 -- the exact mirror of _enter_coverage()'s
+    check-then-increment order.
     """
-    nr, nc = _kernel_targets(r, c, kernel_dr, kernel_dc, rows, cols)
-    cover_count[nr, nc] -= 1
-    newly_uncovered = demand_mask[nr, nc] & (cover_count[nr, nc] == 0)
-    return float(np.count_nonzero(newly_uncovered)) * cell_area
+    rr = kernel_dr + (r + pad_r)
+    cc = kernel_dc + (c + pad_c)
+    cover_count[rr, cc] -= 1
+    newly_zero = cover_count[rr, cc] == 0
+    return float(demand_acres[rr, cc][newly_zero].sum())
 
 
 def _build_children_map(
@@ -212,12 +226,13 @@ def _compute_served_tree(
     anchor_cell: tuple[int, int],
     children: dict[tuple[int, int], list[tuple[int, int]]],
     cover_count: np.ndarray,
-    demand_mask: np.ndarray,
+    demand_acres: np.ndarray,
     kernel_dr: np.ndarray,
     kernel_dc: np.ndarray,
+    pad_r: int,
+    pad_c: int,
     rows: int,
     cols: int,
-    cell_area: float,
 ) -> np.ndarray:
     """
     DFS over the tree via an explicit stack (never recursion -- path
@@ -229,7 +244,9 @@ def _compute_served_tree(
     persistent baseline it started this call at, from every previously
     accepted branch plus the anchor's own initial coverage) is back to
     exactly where it started once this returns -- this walk only ever
-    EVALUATES candidates, it never itself commits anything.
+    EVALUATES candidates, it never itself commits anything. cover_count
+    and demand_acres are both padded (see _kernel_padding()); served
+    itself stays unpadded -- it's indexed by real (r, c) tree nodes only.
     """
     served = np.zeros((rows, cols), dtype=np.float64)
     running = 0.0
@@ -239,10 +256,10 @@ def _compute_served_tree(
         node, leaving = stack.pop()
         r, c = node
         if leaving:
-            running -= _leave_coverage(r, c, cover_count, demand_mask, kernel_dr, kernel_dc, rows, cols, cell_area)
+            running -= _leave_coverage(r, c, cover_count, demand_acres, kernel_dr, kernel_dc, pad_r, pad_c)
             continue
 
-        running += _enter_coverage(r, c, cover_count, demand_mask, kernel_dr, kernel_dc, rows, cols, cell_area)
+        running += _enter_coverage(r, c, cover_count, demand_acres, kernel_dr, kernel_dc, pad_r, pad_c)
         served[r, c] = running
         stack.append((node, True))
         for child in children.get(node, []):
@@ -379,13 +396,16 @@ def route_road_network(
           "total_length_meters": float,
           "total_served_acres": float,
           "unserved_acres": float,
-          "stop_reason": "all_demand_served" | "no_reachable_demand" | "cost_per_acre_exceeded",
+          "stop_reason": "no_demand" | "all_demand_served" | "no_reachable_demand" | "cost_per_acre_exceeded",
         }
 
     branches is a real, reportable [] (never None, never an error) when
-    anchor_cell's own baseline coverage already serves every acre of real
-    demand, or when no demand is reachable from it at all, or when even
-    the very first candidate's meters-per-acre is already too expensive.
+    demand_mask has no True cells at all ("no_demand"), when anchor_cell's
+    own baseline coverage already serves every acre of real demand
+    ("all_demand_served"), when no remaining demand is reachable from it
+    at all ("no_reachable_demand"), or when even the very first
+    candidate's meters-per-acre is already too expensive
+    ("cost_per_acre_exceeded").
 
     water_target_cells, if non-empty, is tried exactly once after the
     main loop ends, regardless of why it ended: the cheapest reachable
@@ -407,12 +427,21 @@ def route_road_network(
     kernel_offsets = build_disc_kernel_offsets(dem["resolution_meters"], service_radius_meters)
     kernel_dr = np.array([offset[0] for offset in kernel_offsets], dtype=np.int64)
     kernel_dc = np.array([offset[1] for offset in kernel_offsets], dtype=np.int64)
+    pad_r, pad_c = _kernel_padding(kernel_dr, kernel_dc)
 
     total_demand_acres = float(np.sum(demand_mask)) * cell_area
 
-    cover_count = np.zeros((rows, cols), dtype=np.int64)
+    # cover_count and demand_acres are both padded by (pad_r, pad_c) on
+    # every side so every kernel_dr/kernel_dc offset from any real (r, c)
+    # lands in bounds -- no per-call clipping inside the DFS walk. The pad
+    # itself must read as zero demand acreage everywhere (np.zeros already
+    # gives that), so a padded cell can never contribute served area.
+    cover_count = np.zeros((rows + 2 * pad_r, cols + 2 * pad_c), dtype=np.int64)
+    demand_acres = np.zeros((rows + 2 * pad_r, cols + 2 * pad_c), dtype=np.float64)
+    demand_acres[pad_r : pad_r + rows, pad_c : pad_c + cols] = demand_mask.astype(np.float64) * cell_area
+
     total_served_acres = _enter_coverage(
-        anchor_cell[0], anchor_cell[1], cover_count, demand_mask, kernel_dr, kernel_dc, rows, cols, cell_area
+        anchor_cell[0], anchor_cell[1], cover_count, demand_acres, kernel_dr, kernel_dc, pad_r, pad_c
     )
 
     working_cost_raster = cost_raster
@@ -425,13 +454,16 @@ def route_road_network(
         field = cost_distance_field(dem, working_cost_raster, [anchor_cell])
         children = _build_children_map(field, anchor_cell)
         served = _compute_served_tree(
-            anchor_cell, children, cover_count, demand_mask, kernel_dr, kernel_dc, rows, cols, cell_area
+            anchor_cell, children, cover_count, demand_acres, kernel_dr, kernel_dc, pad_r, pad_c, rows, cols
         )
 
         best_cell = _select_best_candidate(served, field["accumulated_cost"])
         if best_cell is None:
-            unserved_acres = max(0.0, total_demand_acres - total_served_acres)
-            stop_reason = "all_demand_served" if unserved_acres <= _UNSERVED_ACRES_EPSILON else "no_reachable_demand"
+            if total_demand_acres <= _UNSERVED_ACRES_EPSILON:
+                stop_reason = "no_demand"
+            else:
+                unserved_acres = max(0.0, total_demand_acres - total_served_acres)
+                stop_reason = "all_demand_served" if unserved_acres <= _UNSERVED_ACRES_EPSILON else "no_reachable_demand"
             break
 
         raw_cells = backtrace_route(field["came_from_row"], field["came_from_col"], best_cell)
@@ -447,7 +479,7 @@ def route_road_network(
         branch_index = len(branches)
 
         for cell in raw_cells:
-            _enter_coverage(cell[0], cell[1], cover_count, demand_mask, kernel_dr, kernel_dc, rows, cols, cell_area)
+            _enter_coverage(cell[0], cell[1], cover_count, demand_acres, kernel_dr, kernel_dc, pad_r, pad_c)
         total_served_acres += served_acres
 
         for cell in trimmed_cells:

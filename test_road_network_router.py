@@ -24,7 +24,7 @@ import time
 
 import numpy as np
 
-from raster_grid import cell_area_acres
+from raster_grid import SQUARE_METERS_PER_ACRE, cell_area_acres
 from road_cost_path import least_cost_path
 from road_network_router import route_road_network
 
@@ -106,7 +106,9 @@ print(
 )
 
 
-# --- 3. No demand at all: branches == [], no exception. ---
+# --- 3. No demand at all: branches == [], no exception, and stop_reason
+# --- is the distinct "no_demand" -- NOT "all_demand_served", which would
+# --- be a false claim that there was real demand and it got served. ---
 
 shape3 = (30, 30)
 dem3 = _dem(shape3)
@@ -117,6 +119,7 @@ demand3 = np.zeros(shape3, dtype=bool)
 result3 = route_road_network(dem3, cost_raster3, anchor3, demand3)
 
 assert result3["branches"] == [], f"expected no branches with zero demand, got {result3['branches']}"
+assert result3["stop_reason"] == "no_demand", f"expected stop_reason 'no_demand', got {result3['stop_reason']}"
 print(f"3. No demand at all: branches=[], no exception raised, stop_reason='{result3['stop_reason']}'.")
 
 
@@ -281,38 +284,80 @@ for i, run in enumerate(runs9[1:], start=2):
 print(f"9. Determinism: 5 runs of the same fixture produced byte-identical branch cell lists ({len(first_cells9)} branches each).")
 
 
-# --- 10. TIMING, report-only, must not assert: a 400x400 cost raster with
-# --- a realistic ~40% demand fraction. Resolution is chosen so the grid's
-# --- real-world extent, combined with the default 100m service radius,
-# --- needs on the order of a few dozen branches rather than hundreds --
-# --- still a genuine full-grid stress run, just not an astronomically
-# --- long one. Prints wall-clock seconds and iteration count so the real
-# --- number is known (this runs inside a Render request under a
-# --- gunicorn timeout). ---
+# --- 10. TIMING, report-only, must not assert. Two measurements:
+# ---
+# --- (a) PARCEL-SCALE, matching what this tool actually targets ("a few
+# --- acres up to roughly 20-30" -- see road_network_router.py's own
+# --- module docstring). Grid sized to a 30-acre parcel plus
+# --- dem_data.DEFAULT_BUFFER_METERS (100.0m) of fetch buffer on every
+# --- side, at dem_data's own real output resolution
+# --- (DEFAULT_RESOLUTION_METERS = 5.0m, confirmed by inspection of
+# --- dem_data.py -- hardcoded below rather than imported, so this
+# --- otherwise network-free test file doesn't pull rasterio/requests in
+# --- for two float constants). Demand is a single CONTIGUOUS ~15-acre
+# --- blob, not scattered cells -- a real production zone is a blob, and
+# --- scattering demand inflates iteration count in a way that will never
+# --- happen in practice.
+# ---
+# --- (b) OUT-OF-ENVELOPE: the previous prompt's 400x400 grid size, kept
+# --- ONLY so the scaling behavior stays visible in the output -- at this
+# --- same real 5m resolution that's a ~2000m square, ~988-acre parcel,
+# --- more than 30x this tool's own stated upper bound. Still a single
+# --- contiguous demand blob (~40% of the grid), not scattered. This size
+# --- is explicitly not one this tool is meant to handle; if it's slow,
+# --- that is the finding this measurement exists to report, not a bug to
+# --- fix here.
 
-shape10 = (400, 400)
-resolution10 = (3.13, 3.13)
-dem10 = {
-    "array": np.zeros(shape10, dtype=np.float32),
-    "resolution_meters": resolution10,
-    "origin_x": 500000.0,
-    "origin_y": 4500000.0,
-    "crs": "EPSG:32617",
-}
-cost_raster10 = np.ones(shape10, dtype=np.float64)
-anchor10 = (0, 0)
-demand10 = _block_mask(shape10, (74, 327), (74, 327))  # 253x253 of 400x400 == ~40.0% demand fraction
-demand_fraction10 = float(np.sum(demand10)) / (shape10[0] * shape10[1])
+_TEST_RESOLUTION_METERS = 5.0  # dem_data.DEFAULT_RESOLUTION_METERS, confirmed by inspection
+_TEST_BUFFER_METERS = 100.0    # dem_data.DEFAULT_BUFFER_METERS, confirmed by inspection
 
-start10 = time.perf_counter()
-result10 = route_road_network(dem10, cost_raster10, anchor10, demand10)
-elapsed10 = time.perf_counter() - start10
 
+def _run_timing(label, grid_side_meters, demand_acres_target, resolution_meters):
+    n = max(2, round(grid_side_meters / resolution_meters))
+    shape = (n, n)
+    dem = {
+        "array": np.zeros(shape, dtype=np.float32),
+        "resolution_meters": (resolution_meters, resolution_meters),
+        "origin_x": 500000.0,
+        "origin_y": 4500000.0,
+        "crs": "EPSG:32617",
+    }
+    cost_raster = np.ones(shape, dtype=np.float64)
+    area_per_cell = cell_area_acres(dem)
+    blob_side_cells = max(1, round(math.sqrt(demand_acres_target / area_per_cell)))
+    inset = max(0, (n - blob_side_cells) // 2)
+    demand_mask = _block_mask(shape, (inset, inset + blob_side_cells), (inset, inset + blob_side_cells))
+    demand_acres_actual = float(np.sum(demand_mask)) * area_per_cell
+    anchor = (0, n // 2)
+
+    start = time.perf_counter()
+    result = route_road_network(dem, cost_raster, anchor, demand_mask)
+    elapsed = time.perf_counter() - start
+
+    print(
+        f"{label}: grid={n}x{n} cells, resolution={resolution_meters}m, demand_acres={demand_acres_actual:.2f}, "
+        f"elapsed={elapsed:.2f}s, iterations(branches)={len(result['branches'])}, stop_reason='{result['stop_reason']}', "
+        f"total_served_acres={result['total_served_acres']:.2f}, unserved_acres={result['unserved_acres']:.2f}."
+    )
+    return result
+
+
+parcel_side_m = math.sqrt(30.0 * SQUARE_METERS_PER_ACRE)
+grid_side_m_a = parcel_side_m + 2 * _TEST_BUFFER_METERS
 print(
-    f"10. TIMING (report-only): 400x400 grid, {resolution10[0]}m resolution, demand_fraction={demand_fraction10:.3f}, "
-    f"elapsed={elapsed10:.2f}s, iterations(branches)={len(result10['branches'])}, stop_reason='{result10['stop_reason']}', "
-    f"total_served_acres={result10['total_served_acres']:.2f}, unserved_acres={result10['unserved_acres']:.2f}."
+    f"10a. fixture: 30-acre parcel ({parcel_side_m:.1f}m square) + {_TEST_BUFFER_METERS:.0f}m buffer "
+    f"-> {grid_side_m_a:.1f}m grid square at {_TEST_RESOLUTION_METERS}m resolution."
 )
+_run_timing("10a. TIMING (report-only, parcel-scale)", grid_side_m_a, 15.0, _TEST_RESOLUTION_METERS)
+
+grid_side_m_b = 400 * _TEST_RESOLUTION_METERS
+demand_acres_target_b = 0.4 * (grid_side_m_b**2) / SQUARE_METERS_PER_ACRE
+print(
+    f"10b. fixture: 400x400 grid at {_TEST_RESOLUTION_METERS}m -> {grid_side_m_b:.1f}m square "
+    f"(~{(grid_side_m_b**2)/SQUARE_METERS_PER_ACRE:.0f} acres) -- OUT OF ENVELOPE, far beyond this tool's "
+    "stated 'a few to ~20-30 acre' design range."
+)
+_run_timing("10b. TIMING (report-only, OUT-OF-ENVELOPE 400x400)", grid_side_m_b, demand_acres_target_b, _TEST_RESOLUTION_METERS)
 
 
 print("\nAll test_road_network_router.py checks passed.")
