@@ -20,6 +20,7 @@ clear that bar with real margin, not to sit exactly on the edge of it.
 """
 
 import math
+import os
 import time
 
 import numpy as np
@@ -284,7 +285,14 @@ for i, run in enumerate(runs9[1:], start=2):
 print(f"9. Determinism: 5 runs of the same fixture produced byte-identical branch cell lists ({len(first_cells9)} branches each).")
 
 
-# --- 10. TIMING, report-only, must not assert. Two measurements:
+# --- 10. TIMING, report-only, must not assert. Two measurements, BOTH
+# --- gated behind ROUTER_TIMING=1 (see the bottom of this section) --
+# --- skipped by default because 10b alone takes on the order of 20
+# --- minutes of real wall-clock, on every run of this suite, on every
+# --- branch that so much as touches code near the router -- a cost with
+# --- no corresponding signal for most of those runs, since this section
+# --- asserts nothing. Set ROUTER_TIMING=1 to actually collect the
+# --- numbers when they're the thing you're checking.
 # ---
 # --- (a) PARCEL-SCALE, matching what this tool actually targets ("a few
 # --- acres up to roughly 20-30" -- see road_network_router.py's own
@@ -299,10 +307,17 @@ print(f"9. Determinism: 5 runs of the same fixture produced byte-identical branc
 # --- scattering demand inflates iteration count in a way that will never
 # --- happen in practice.
 # ---
-# --- (b) OUT-OF-ENVELOPE: the previous prompt's 400x400 grid size, kept
-# --- ONLY so the scaling behavior stays visible in the output -- at this
-# --- same real 5m resolution that's a ~2000m square, ~988-acre parcel,
-# --- more than 30x this tool's own stated upper bound. Still a single
+# --- (b) TRUE PRODUCTION WORST CASE: dem_data.get_dem_for_boundary()
+# --- caps every fetched grid at dem_data.MAX_GRID_DIMENSION (300 cells
+# --- per side, confirmed by inspection of dem_data.py -- hardcoded below
+# --- for the same "stay network-free" reason as the two constants above,
+# --- not imported) -- beyond that span the fetch coarsens resolution
+# --- instead of growing the grid, so 300x300 at this same real 5m
+# --- resolution is the largest grid this router can ever actually be
+# --- handed in production, not an arbitrary oversized figure (a stale
+# --- 400x400 fixture here used to measure an input that cannot occur).
+# --- At 5m resolution that's a 1500m square, ~556-acre parcel, still far
+# --- beyond this tool's own stated upper bound. Still a single
 # --- contiguous demand blob (~40% of the grid), not scattered. This size
 # --- is explicitly not one this tool is meant to handle; if it's slow,
 # --- that is the finding this measurement exists to report, not a bug to
@@ -310,6 +325,7 @@ print(f"9. Determinism: 5 runs of the same fixture produced byte-identical branc
 
 _TEST_RESOLUTION_METERS = 5.0  # dem_data.DEFAULT_RESOLUTION_METERS, confirmed by inspection
 _TEST_BUFFER_METERS = 100.0    # dem_data.DEFAULT_BUFFER_METERS, confirmed by inspection
+_TEST_MAX_GRID_DIMENSION = 300  # dem_data.MAX_GRID_DIMENSION, confirmed by inspection
 
 
 def _run_timing(label, grid_side_meters, demand_acres_target, resolution_meters):
@@ -342,22 +358,32 @@ def _run_timing(label, grid_side_meters, demand_acres_target, resolution_meters)
     return result
 
 
-parcel_side_m = math.sqrt(30.0 * SQUARE_METERS_PER_ACRE)
-grid_side_m_a = parcel_side_m + 2 * _TEST_BUFFER_METERS
-print(
-    f"10a. fixture: 30-acre parcel ({parcel_side_m:.1f}m square) + {_TEST_BUFFER_METERS:.0f}m buffer "
-    f"-> {grid_side_m_a:.1f}m grid square at {_TEST_RESOLUTION_METERS}m resolution."
-)
-_run_timing("10a. TIMING (report-only, parcel-scale)", grid_side_m_a, 15.0, _TEST_RESOLUTION_METERS)
+if os.environ.get("ROUTER_TIMING") == "1":
+    parcel_side_m = math.sqrt(30.0 * SQUARE_METERS_PER_ACRE)
+    grid_side_m_a = parcel_side_m + 2 * _TEST_BUFFER_METERS
+    print(
+        f"10a. fixture: 30-acre parcel ({parcel_side_m:.1f}m square) + {_TEST_BUFFER_METERS:.0f}m buffer "
+        f"-> {grid_side_m_a:.1f}m grid square at {_TEST_RESOLUTION_METERS}m resolution."
+    )
+    _run_timing("10a. TIMING (report-only, parcel-scale)", grid_side_m_a, 15.0, _TEST_RESOLUTION_METERS)
 
-grid_side_m_b = 400 * _TEST_RESOLUTION_METERS
-demand_acres_target_b = 0.4 * (grid_side_m_b**2) / SQUARE_METERS_PER_ACRE
-print(
-    f"10b. fixture: 400x400 grid at {_TEST_RESOLUTION_METERS}m -> {grid_side_m_b:.1f}m square "
-    f"(~{(grid_side_m_b**2)/SQUARE_METERS_PER_ACRE:.0f} acres) -- OUT OF ENVELOPE, far beyond this tool's "
-    "stated 'a few to ~20-30 acre' design range."
-)
-_run_timing("10b. TIMING (report-only, OUT-OF-ENVELOPE 400x400)", grid_side_m_b, demand_acres_target_b, _TEST_RESOLUTION_METERS)
+    grid_side_m_b = _TEST_MAX_GRID_DIMENSION * _TEST_RESOLUTION_METERS
+    demand_acres_target_b = 0.4 * (grid_side_m_b**2) / SQUARE_METERS_PER_ACRE
+    print(
+        f"10b. fixture: {_TEST_MAX_GRID_DIMENSION}x{_TEST_MAX_GRID_DIMENSION} grid (dem_data.MAX_GRID_DIMENSION, "
+        f"the largest grid get_dem_for_boundary() can ever actually return) at {_TEST_RESOLUTION_METERS}m -> "
+        f"{grid_side_m_b:.1f}m square (~{(grid_side_m_b**2)/SQUARE_METERS_PER_ACRE:.0f} acres) -- the true "
+        "production worst case, still far beyond this tool's stated 'a few to ~20-30 acre' design range."
+    )
+    _run_timing(
+        f"10b. TIMING (report-only, worst-case {_TEST_MAX_GRID_DIMENSION}x{_TEST_MAX_GRID_DIMENSION})",
+        grid_side_m_b, demand_acres_target_b, _TEST_RESOLUTION_METERS,
+    )
+else:
+    print(
+        "10. TIMING (10a parcel-scale, 10b worst-case) SKIPPED -- report-only, asserts nothing, and 10b alone "
+        "takes on the order of 20 minutes. Set ROUTER_TIMING=1 to run both and see the numbers."
+    )
 
 
 print("\nAll test_road_network_router.py checks passed.")
