@@ -19,8 +19,12 @@ candidates at all -- it's solar siting that should eventually account for
 tree zones (a later, separate pass), not the reverse.
 
     STEP 1 -- SEARCH SPACE (compute_tree_search_space()):
-        the full property boundary, minus real geometry (via .difference(),
-        not a heuristic mask) for:
+        the full property boundary, first shrunk inward by
+        TREE_ZONE_BOUNDARY_SETBACK_METERS (a plain shapely negative buffer,
+        same mechanism and reasoning as production_area.py's own
+        PRODUCTION_BOUNDARY_SETBACK_METERS -- see that constant's own
+        comment), then minus real geometry (via .difference(), not a
+        heuristic mask) for:
           - EVERY OPTIMIZED production-zone candidate
             (production_area_ceiling.identify_optimized_production_areas()'s
             scored/soil-carved/ceiling-trimmed output -- ALL of them; no
@@ -437,6 +441,27 @@ TREE_ZONE_PRODUCTION_BUFFER_METERS = 5.0
 # drag the others along" reasoning. CONFIGURABLE.
 TREE_ZONE_WATER_BUFFER_METERS = 5.0
 
+# Boundary setback (meters) the parcel boundary itself is shrunk inward by,
+# via a plain negative shapely.buffer(), before Step 1's search space is
+# built -- same mechanism and reasoning as production_area.py's own
+# PRODUCTION_BOUNDARY_SETBACK_METERS/compute_step1_eligible_cells() (a
+# candidate shouldn't be proposed right up against the property line with
+# zero clearance, same as it shouldn't be proposed right up against
+# production/water's own edges -- see TREE_ZONE_PRODUCTION_BUFFER_METERS/
+# TREE_ZONE_WATER_BUFFER_METERS just above). Unlike production's version
+# (a per-cell-center on-parcel test against a raster grid), this module
+# works in continuous polygon geometry throughout Step 1, so the setback
+# is applied the same way as the production/water exclusions themselves:
+# a single boundary_polygon_utm.buffer(-boundary_setback_meters) call, not
+# a second raster-grid gate layered on afterward. Deliberately its OWN
+# constant, NOT aliased to TREE_ZONE_PRODUCTION_BUFFER_METERS/TREE_ZONE_
+# WATER_BUFFER_METERS even though the value is numerically identical
+# today -- same "retuning one must never silently drag the others along"
+# reasoning those two constants' own comments already establish, and NOT
+# aliased to production_area.PRODUCTION_BOUNDARY_SETBACK_METERS either
+# (that one is ~3.048m/10ft, a different value entirely). CONFIGURABLE.
+TREE_ZONE_BOUNDARY_SETBACK_METERS = 5.0
+
 # Neutral factor value used when a given factor's own data source couldn't
 # be reached at all (fetch failure) -- same "missing/inapplicable data
 # should neither reward nor penalize" convention solar_suitability.py's own
@@ -449,7 +474,8 @@ _NEUTRAL_FACTOR_VALUE = 0.5
 
 TREE_ZONE_CONFIDENCE_NOTES_TEMPLATE = (
     "This identifies GENERAL tree-suitable land -- ground within the property's leftover, "
-    "non-claimed area (the full boundary minus every current OPTIMIZED (ceiling-trimmed) "
+    "non-claimed area (the full boundary, first shrunk inward by a {boundary_setback_meters}m "
+    "boundary setback, minus every current OPTIMIZED (ceiling-trimmed) "
     "production-zone candidate, each buffered by a {production_buffer_meters}m clearance, plus "
     "the single SELECTED water-system zone, buffered by a {water_buffer_meters}m clearance, and "
     "single SELECTED road corridor's own geometry, MINUS real, existing tree canopy (production_area.py's own "
@@ -482,7 +508,8 @@ TREE_ZONE_CONFIDENCE_NOTES_TEMPLATE = (
 )
 
 TREE_SEARCH_SPACE_CONFIDENCE_NOTES = (
-    "Diagnostic layer only, not a deliverable candidate zone: the full property boundary minus "
+    "Diagnostic layer only, not a deliverable candidate zone: the full property boundary, first "
+    f"shrunk inward by a {TREE_ZONE_BOUNDARY_SETBACK_METERS}m boundary setback, minus "
     f"every current OPTIMIZED (ceiling-trimmed) production-zone candidate, each buffered by a "
     f"{TREE_ZONE_PRODUCTION_BUFFER_METERS}m clearance, plus the single SELECTED water-system zone, "
     f"buffered by a {TREE_ZONE_WATER_BUFFER_METERS}m clearance, and single SELECTED road corridor's "
@@ -571,11 +598,25 @@ def compute_tree_search_space(
     road_polygons_utm: list,
     production_buffer_meters: float = TREE_ZONE_PRODUCTION_BUFFER_METERS,
     water_buffer_meters: float = TREE_ZONE_WATER_BUFFER_METERS,
+    boundary_setback_meters: float = TREE_ZONE_BOUNDARY_SETBACK_METERS,
 ) -> tuple[object, Optional[object]]:
     """
     Step 1 -- pure geometry difference (see module docstring): the real
-    parcel boundary, minus the union of every currently-claimed production/
-    water/road candidate geometry.
+    parcel boundary, first shrunk inward by boundary_setback_meters, minus
+    the union of every currently-claimed production/water/road candidate
+    geometry.
+
+    boundary_setback_meters shrinks boundary_polygon_utm itself via a
+    plain negative shapely.buffer() -- same mechanism/reasoning as
+    production_area.py's own PRODUCTION_BOUNDARY_SETBACK_METERS/
+    compute_step1_eligible_cells(), see TREE_ZONE_BOUNDARY_SETBACK_METERS's
+    own comment -- before anything else in this function runs. Defaults to
+    TREE_ZONE_BOUNDARY_SETBACK_METERS. Like production_buffer_meters/
+    water_buffer_meters, .buffer() is only ever called when its own meters
+    value is > 0, so passing 0.0 is a real, usable "no setback" path (e.g.
+    reproducing this function's pre-setback behavior exactly) rather than
+    a wasted no-op call; boundary_polygon_utm itself (the caller's own
+    object) is never mutated, only the local shrunk copy used here.
 
     production_polygons_utm and water_polygons_utm are each unioned FIRST,
     then buffered ONCE (by production_buffer_meters/water_buffer_meters,
@@ -617,12 +658,14 @@ def compute_tree_search_space(
 
     Returns (search_space, claimed_union):
       - search_space is None if the claimed (and now-buffered) union
-        completely covers the boundary (leftover land is None, not merely
-        empty, distinguishing "nothing to search" as a real, reportable
-        outcome, now reachable on more properties than before this
-        buffering existed -- that's correct and expected, not a bug); a
-        Polygon/MultiPolygon otherwise (possibly boundary_polygon_utm
-        itself, unmodified, if nothing was claimed at all).
+        completely covers the setback-shrunk boundary (leftover land is
+        None, not merely empty, distinguishing "nothing to search" as a
+        real, reportable outcome, now reachable on more properties than
+        before this buffering existed -- that's correct and expected, not
+        a bug); a Polygon/MultiPolygon otherwise (possibly the
+        setback-shrunk boundary itself, unmodified by any further
+        difference, if nothing was claimed at all -- or boundary_polygon_
+        utm itself, unmodified, when boundary_setback_meters is 0).
       - claimed_union is None if and only if production_polygons_utm,
         water_polygons_utm, and road_polygons_utm are ALL empty (nothing on
         this property has been claimed by any upstream layer yet) --
@@ -630,8 +673,12 @@ def compute_tree_search_space(
         search_space of remaining area. Buffering changes the union's own
         EXTENT, not whether it exists in the first place -- this None-iff-
         all-empty rule is unchanged by production_buffer_meters/water_
-        buffer_meters.
+        buffer_meters/boundary_setback_meters.
     """
+    eligible_boundary_utm = (
+        boundary_polygon_utm.buffer(-boundary_setback_meters) if boundary_setback_meters > 0 else boundary_polygon_utm
+    )
+
     pieces = []
     if production_polygons_utm:
         production_union = unary_union(production_polygons_utm)
@@ -649,9 +696,9 @@ def compute_tree_search_space(
     claimed_union = unary_union(pieces) if pieces else None
 
     if claimed_union is None:
-        return boundary_polygon_utm, None
+        return eligible_boundary_utm, None
 
-    search_space = _polygonal_parts(boundary_polygon_utm.difference(claimed_union))
+    search_space = _polygonal_parts(eligible_boundary_utm.difference(claimed_union))
     return search_space, claimed_union
 
 
@@ -1008,6 +1055,7 @@ def tree_zones_to_geojson(patches: list[dict]) -> dict:
             stream_weight=STREAM_PROXIMITY_FACTOR_WEIGHT,
             production_buffer_meters=TREE_ZONE_PRODUCTION_BUFFER_METERS,
             water_buffer_meters=TREE_ZONE_WATER_BUFFER_METERS,
+            boundary_setback_meters=TREE_ZONE_BOUNDARY_SETBACK_METERS,
             data_availability_note=_data_availability_note(
                 patch["soil_marginality_data_available"], patch["hydric_data_available"], patch["stream_data_available"]
             ),

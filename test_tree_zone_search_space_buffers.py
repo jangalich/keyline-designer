@@ -12,6 +12,17 @@ human can check by hand" standard as test_tree_zone_candidates.py's own
 compute_tree_search_space() coverage, kept in this dedicated file rather than
 added to that already-large file since this is new, narrowly-scoped coverage
 for a single function's new keyword arguments.
+
+Every call below passes boundary_setback_meters=0.0 explicitly -- this file is
+about the production/water exclusion buffers specifically, and the boundary
+setback (TREE_ZONE_BOUNDARY_SETBACK_METERS, its own separate default) has its
+own dedicated coverage in test_tree_zone_boundary_setback.py; isolating it
+here keeps this file's own hand-computed areas (some of which use fixtures,
+e.g. water_square, sitting right at the boundary's own corner) exact and
+unaffected by that unrelated default, same "isolate tests that aren't about a
+given gate from that gate" convention test_production_area_ceiling.py's own
+boundary_setback_meters=0.0 partial already establishes for production_area.py's
+analogous PRODUCTION_BOUNDARY_SETBACK_METERS.
 """
 
 from shapely.geometry import box
@@ -38,7 +49,13 @@ production_square = box(40, 40, 60, 60)  # 20x20, 400 sqm
 # =====================================================================
 
 search_space_unbuffered, claimed_unbuffered = compute_tree_search_space(
-    boundary, [production_square], [], [], production_buffer_meters=0.0, water_buffer_meters=0.0
+    boundary,
+    [production_square],
+    [],
+    [],
+    production_buffer_meters=0.0,
+    water_buffer_meters=0.0,
+    boundary_setback_meters=0.0,
 )
 assert abs(claimed_unbuffered.area - 400.0) < 1e-9, (
     f"production_buffer_meters=0.0 must claim EXACTLY the raw 20x20 square (400 sqm), got {claimed_unbuffered.area}"
@@ -65,7 +82,9 @@ print(
 # (400 + 80*5 + pi*25 ~= 878.5), same number from the other direction.
 # =====================================================================
 
-search_space_default, claimed_default = compute_tree_search_space(boundary, [production_square], [], [])
+search_space_default, claimed_default = compute_tree_search_space(
+    boundary, [production_square], [], [], boundary_setback_meters=0.0
+)
 
 expected_buffered_area = 400.0 + (4 * 20) * TREE_ZONE_PRODUCTION_BUFFER_METERS + 3.14159265 * TREE_ZONE_PRODUCTION_BUFFER_METERS**2
 naive_30x30_area = 900.0
@@ -102,11 +121,19 @@ print(
 water_square = box(0, 0, 20, 20)  # 20x20, 400 sqm, far corner from production_square
 
 search_space_water_unbuffered, claimed_water_unbuffered = compute_tree_search_space(
-    boundary, [], [water_square], [], production_buffer_meters=0.0, water_buffer_meters=0.0
+    boundary,
+    [],
+    [water_square],
+    [],
+    production_buffer_meters=0.0,
+    water_buffer_meters=0.0,
+    boundary_setback_meters=0.0,
 )
 assert abs(claimed_water_unbuffered.area - 400.0) < 1e-9, "water_buffer_meters=0.0 must claim exactly the raw square"
 
-search_space_water_default, claimed_water_default = compute_tree_search_space(boundary, [], [water_square], [])
+search_space_water_default, claimed_water_default = compute_tree_search_space(
+    boundary, [], [water_square], [], boundary_setback_meters=0.0
+)
 expected_water_buffered_area = 400.0 + (4 * 20) * TREE_ZONE_WATER_BUFFER_METERS + 3.14159265 * TREE_ZONE_WATER_BUFFER_METERS**2
 assert abs(claimed_water_default.area - expected_water_buffered_area) < 5.0, (
     f"default water buffer should match the same hand-computed round-cornered exclusion math as production, "
@@ -128,7 +155,7 @@ print(
 # =====================================================================
 
 road_strip = box(0, 45, 100, 46)  # 100m x 1m, 100 sqm, disjoint from both squares above
-_, claimed_with_road = compute_tree_search_space(boundary, [], [], [road_strip])
+_, claimed_with_road = compute_tree_search_space(boundary, [], [], [road_strip], boundary_setback_meters=0.0)
 assert abs(claimed_with_road.area - 100.0) < 1e-9, (
     f"road_polygons_utm must be claimed at EXACTLY its own real area (100 sqm) -- never buffered by this "
     f"function, got {claimed_with_road.area}"
@@ -141,7 +168,7 @@ print("road_polygons_utm is never buffered by compute_tree_search_space() -- cla
 # new buffer kwargs (buffering changes extent, not whether a union exists).
 # =====================================================================
 
-empty_search_space, empty_claimed = compute_tree_search_space(boundary, [], [], [])
+empty_search_space, empty_claimed = compute_tree_search_space(boundary, [], [], [], boundary_setback_meters=0.0)
 assert empty_claimed is None and empty_search_space is boundary, (
     "with nothing claimed at all, claimed_union must still be None and search_space must still be the "
     "boundary object itself, unaffected by the new default buffer kwargs"
