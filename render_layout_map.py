@@ -209,17 +209,24 @@ why that specific combination, not a cleared edgecolor, is what achieves
 this: a patch's hatch color follows its edgecolor, and a patch's hatch
 stroke width comes from matplotlib's own rcParams["hatch.linewidth"],
 independent of the patch's own linewidth). The geometry drawn is still
-its own render_fill_polygon_utm -- a DISPLAY-ONLY plain convex hull of
-the patch's real footprint, re-intersected with the parcel boundary
-(score_tree_search_space()'s own output, same field/reasoning
-production_area.py's/water_candidate_zones.py's own patches/zones already
-carry) -- NOT the patch's real, potentially-notched geometry_wgs84 (used
-for area_acres/scoring/the narrative report, completely untouched by
-this). Same "reads as one coherent shape at render time" purpose as
-production/water's own hulls: most directly here, closing over any
-interior pocket the CANOPY EXCLUSION GATE carves out of an otherwise-
-contiguous candidate (see tree_zone_candidates.py's own module
-docstring), rather than rendering as an unexplained blank notch. Zone
+its own render_fill_polygon_utm -- a plain convex hull of the patch's
+real footprint, re-intersected with search_space_utm (score_tree_search_
+space()'s own Step 1 search-space input, NOT the raw parcel boundary --
+see tree_zone_candidates.py's own score_tree_search_space() for why: tree
+zones wrap AROUND production/water/road by construction, so clipping the
+hull against the raw boundary let it re-claim ground already ruled out
+as claimed, confirmed live as hatching drawn directly over production
+zones despite a real, buffered-clear footprint underneath) -- same
+field/reasoning production_area.py's/water_candidate_zones.py's own
+patches/zones already carry -- NOT the patch's real, potentially-notched
+geometry_wgs84 (used for area_acres/scoring/the narrative report,
+completely untouched by this). Same "reads as one coherent shape at
+render time" purpose as production/water's own hulls: most directly
+here, closing over any interior pocket the CANOPY EXCLUSION GATE carves
+out of an otherwise-contiguous candidate (see tree_zone_candidates.py's
+own module docstring) -- that pocket is still inside search_space_utm,
+so clipping against the search space rather than the boundary doesn't
+reopen it -- rather than rendering as an unexplained blank notch. Zone
 identity is still carried by the numbered marker placed on that same
 hull and by the corresponding legend line -- the hatch by itself doesn't
 need to enclose a filled area to read as a distinct zone on the map. The

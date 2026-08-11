@@ -701,11 +701,16 @@ def score_tree_search_space(
             'id': int,
             'rank': int,
             'polygon_utm': shapely Polygon/MultiPolygon,
-            'render_fill_polygon_utm': shapely Polygon/MultiPolygon,  # DISPLAY-ONLY plain convex
-                # hull of polygon_utm, re-intersected with boundary_polygon_utm -- same field/
-                # reasoning production_area.py's/water_candidate_zones.py's own patches/zones
-                # already carry; NEVER used for area_acres/scoring/eligibility, which stay on
-                # polygon_utm -- see this function's own body for why
+            'render_fill_polygon_utm': shapely Polygon/MultiPolygon,  # DISPLAY-oriented plain
+                # convex hull of polygon_utm, re-intersected with search_space_utm (NOT
+                # boundary_polygon_utm -- see this function's own body for why: clipping against
+                # the raw boundary let the hull re-claim genuinely claimed production/water/road
+                # ground) -- same field/reasoning production_area.py's/water_candidate_zones.py's
+                # own patches/zones already carry; NEVER used for area_acres/scoring/eligibility,
+                # which stay on polygon_utm. Despite the "display-only" framing, this field is
+                # also consumed by fencing.py (via render_layout_map.py's fetch_layout_layers()
+                # -> identify_fencing() call) to build the tree_zone_exclusion fence loops, so
+                # it isn't purely cosmetic -- see this function's own body for why
             'geometry_wgs84': GeoJSON geometry dict,
             'area_acres': float,
             'tree_suitability_score': float,   # 0-100
@@ -836,18 +841,44 @@ def score_tree_search_space(
 
         # render_fill_polygon_utm: a DISPLAY-ONLY plain convex hull of
         # this patch's own real footprint, re-intersected with
-        # boundary_polygon_utm -- the SAME field/reasoning production_
-        # area.py's cluster_and_gate() and water_candidate_zones.
-        # find_candidate_zones() already compute for their own patches/
-        # zones (see either module's own docstring): a hull reads as one
-        # coherent shape at render time, closing over any real interior
-        # notch/pocket a patch's own footprint can have (here, most
-        # directly from the CANOPY EXCLUSION GATE carving an
-        # already-under-canopy pocket out of an otherwise-contiguous
-        # candidate). NEVER used for area_acres/scoring/eligibility
-        # above, which all still reflect the real, un-hulled footprint --
-        # this field exists purely for render_layout_map.py to draw.
-        render_fill_polygon_utm = footprint.convex_hull.intersection(boundary_polygon_utm)
+        # search_space_utm -- NOT boundary_polygon_utm. This must clip
+        # against the search space, not the raw parcel boundary: tree
+        # zones are the leftover ground wrapped AROUND production/water/
+        # road, so their real footprints are production-shaped by
+        # construction, and a convex hull of a shape that wraps around
+        # production ground will swallow that production ground almost
+        # by definition. Clipping against boundary_polygon_utm alone (the
+        # old behavior) let the hull re-claim ground Step 1 already ruled
+        # out -- confirmed live as tree-zone hatching drawing directly on
+        # top of production zones on the reference property, despite the
+        # 5m production/water exclusion buffer genuinely keeping the real
+        # footprint clear. search_space_utm already IS "boundary minus
+        # the buffered claimed union" (see compute_tree_search_space()),
+        # so clipping against it enforces both constraints in one step --
+        # chaining an additional boundary_polygon_utm intersection after
+        # it would be strictly redundant, since anything inside the
+        # search space is already inside the boundary. This does NOT
+        # defeat the hull's own purpose: the CANOPY EXCLUSION GATE is a
+        # raster mask applied during scoring above, never subtracted from
+        # search_space_utm itself, so an already-under-canopy interior
+        # pocket -- and any sub-threshold/unscored interior pocket -- is
+        # still inside search_space_utm and still gets closed over here;
+        # only gaps corresponding to genuinely CLAIMED ground (production/
+        # water/road) reopen, which is the correct, honest read -- the
+        # tree zone wraps around production because it does. Same field/
+        # reasoning production_area.py's cluster_and_gate() and water_
+        # candidate_zones.find_candidate_zones() already compute for their
+        # own patches/zones (see either module's own docstring) for the
+        # "reads as one coherent shape at render time" purpose. NEVER used
+        # for area_acres/scoring/eligibility above, which all still
+        # reflect the real, un-hulled footprint -- this field is consumed
+        # by render_layout_map.py to draw AND, via fetch_layout_layers()'s
+        # own identify_fencing() call, by fencing.py's tree_zone_exclusion
+        # fence loops (see this function's own docstring, 'render_fill_
+        # polygon_utm' key) -- "DISPLAY-ONLY" understates its real reach,
+        # the same known asymmetry render_fill_polygon_utm already has
+        # elsewhere in this pipeline.
+        render_fill_polygon_utm = footprint.convex_hull.intersection(search_space_utm)
 
         patches.append(
             {
