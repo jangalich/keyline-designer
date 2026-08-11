@@ -11,13 +11,10 @@ contract:
      _fetch_floodplain_hydric_union, water_candidate_zones.
      identify_water_system_candidate_zones) is called exactly ONCE -- that
      de-duplication is the entire point of this module.
-  2. ridge_lines and valleys are genuinely different results, computed
-     from two different DEM arrays (the real one, and a real, non-
-     mutating elevation inversion of it), not the same computation twice.
-  3. production_areas matches identify_optimized_production_areas()'s
+  2. production_areas matches identify_optimized_production_areas()'s
      real scored_patches shape (STEP 4 fields present), not identify_
      production_areas()'s raw, unscored shape.
-  4. soil_exclusion_unions['hydric_floodplain_union'] and water_zones both
+  3. soil_exclusion_unions['hydric_floodplain_union'] and water_zones both
      reuse the already-computed dem/boundary_polygon_utm/valleys/
      production_areas instances -- identify_water_system_candidate_zones()
      now accepts all three as overrides (a prior branch), and this branch
@@ -28,31 +25,36 @@ contract:
      run for REAL here (not fully mocked away), with its own internal
      fallback functions separately mocked and asserted at zero calls --
      see the "water_zones" section below.
-  5. selected_water_zone reuses this context's own boundary_polygon_utm/
+  4. selected_water_zone reuses this context's own boundary_polygon_utm/
      valleys/production_areas instances via fetch_and_select_optimal_
      water_zone()'s own override params (mock+inspect call kwargs, same
      pattern as the water_zones section).
-  6. selected_road_corridor reuses those same instances, PLUS this
+  5. selected_road_corridor reuses those same instances, PLUS this
      context's own selected_water_zone and soil_exclusion_unions
      ['hydric_floodplain_union'], via identify_road_corridor_candidates()'s
-     own override params (mock+inspect call kwargs). floodplain_data_
-     is_fallback is separately proven to carry the REAL flag -- not a
-     hardcoded/defaulted value -- by forcing _fetch_floodplain_hydric_
-     union() into its fallback path (return value's second element True)
-     in a second, dedicated build_pipeline_context() run and asserting
-     that True (not the default-False every other case here would show)
-     reaches identify_road_corridor_candidates() and soil_exclusion_
-     unions['hydric_floodplain_is_fallback'] alike.
-  7. soil_exclusion_unions now carries 3 keys -- 'hydric_floodplain_union',
+     own override params (mock+inspect call kwargs). It holds road_
+     corridors.build_road_network()'s own full multi-branch network dict
+     (road_corridor_result['road_network'], NEVER road_corridor_result
+     ['selected_road_corridor'], which collapses an empty network to None
+     -- see pipeline_context.py's own field notes for why that distinction
+     matters). floodplain_data_is_fallback is separately proven to carry
+     the REAL flag -- not a hardcoded/defaulted value -- by forcing
+     _fetch_floodplain_hydric_union() into its fallback path (return
+     value's second element True) in a second, dedicated build_pipeline_
+     context() run and asserting that True (not the default-False every
+     other case here would show) reaches identify_road_corridor_
+     candidates() and soil_exclusion_unions['hydric_floodplain_is_
+     fallback'] alike.
+  6. soil_exclusion_unions now carries 3 keys -- 'hydric_floodplain_union',
      'hydric_floodplain_is_fallback', and 'erosion_prone_union' --
      confirming the prior 2-key shape (which silently dropped is_fallback)
      is gone.
-  8. selected_structure_site and tree_zone_patches reuse this context's
+  7. selected_structure_site and tree_zone_patches reuse this context's
      own boundary_polygon_utm/valleys/production_areas/selected_water_zone/
      selected_road_corridor/hydric_floodplain_union/floodplain_data_is_
      fallback instances via identify_solar_candidate_zones()'s and
      identify_tree_zone_candidates()'s own override params (mock+inspect
-     call kwargs, identity checks, same pattern as sections 5-7 above) --
+     call kwargs, identity checks, same pattern as sections 4-6 above) --
      AND, unlike every prior section, both are left real/wraps= (not
      canned return_value mocks) specifically so this file can also measure
      -- not assume -- the actual total call counts identify_optimized_
@@ -60,7 +62,7 @@ contract:
      corridor_candidates() reach across the WHOLE build_pipeline_context()
      run. That measurement is THE POINT of this section: it now DOES stay
      at "still exactly 1", same as water_zones/selected_water_zone/
-     selected_road_corridor's own dedup in sections 4-7 above --
+     selected_road_corridor's own dedup in sections 3-6 above --
      identify_solar_candidate_zones() has its own internal, one-level-
      deeper call to identify_tree_zone_candidates() (its own "TREE-ZONE-
      CANDIDATE exclusion" step) which USED TO forward none of the
@@ -75,7 +77,7 @@ contract:
      call's own self-compute checks now fire ZERO times too, same as this
      module's own two direct calls always did.
 
-  9. dem is optional -- a caller-supplied dem= skips dem_data.
+  8. dem is optional -- a caller-supplied dem= skips dem_data.
      get_dem_for_boundary() entirely (call_count == 0, identity-checked on
      both the returned context.dem and one representative downstream
      call), and the pre-existing no-override path (dem= omitted) still
@@ -96,16 +98,17 @@ function) are never called; its own mandatory canopy fetch and optional
 road fetch are separately stubbed so this stays fully offline.
 
 Synthetic terrain: a 60x60 DEM built from two independent, non-
-overlapping landforms so valleys and ridge_lines land on predictably
-disjoint halves of the grid:
+overlapping landforms on predictably disjoint halves of the grid:
   - Left half (cols 0-29): a real V-shaped valley trough at col 12,
     exiting the grid at row 0 -- delineate_valleys() against the REAL
-    dem should trace it.
+    dem should trace it; this is what ctx.valleys is asserted against.
   - Right half (cols 30-59): a real ridge crest at col 45, exiting the
-    grid at row 59 -- a local elevation MAXIMUM, so delineate_valleys()
-    against the real dem finds nothing there, but against an elevation-
-    inverted copy (a ridge in real terrain is a valley in its negation)
-    it traces cleanly.
+    grid at row 59 -- a local elevation MAXIMUM. This half predates
+    ridge_lines' outright deletion (it used to also exercise delineate_
+    valleys() against an elevation-inverted copy); left in place as
+    ordinary higher terrain rather than reshaping the whole synthetic DEM
+    for no behavioral gain -- nothing in this file asserts against it
+    directly anymore.
 The right half is built uniformly higher than the left half (no
 elevation overlap between them) specifically so neither landform's flow
 can cross into the other's half in either the real or inverted DEM --
@@ -255,6 +258,16 @@ fake_selected_road_corridor = {
 fake_road_corridor_result = {
     "zones_geojson": {"type": "FeatureCollection", "features": []},
     "all_scored_candidates": [],
+    # "road_network" is what pipeline_context.py's own build_pipeline_
+    # context() reads now (never None, even with no branches -- see
+    # ctx.selected_road_corridor's own field notes); "selected_road_
+    # corridor" is what solar_suitability.py's/tree_zone_candidates.py's
+    # own internal self-compute fallbacks read off this same return shape
+    # when THEY call identify_road_corridor_candidates() directly. Both
+    # point at the same fake object here -- this file's own identity
+    # assertions (ctx.selected_road_corridor is fake_selected_road_
+    # corridor) depend on that.
+    "road_network": fake_selected_road_corridor,
     "selected_road_corridor": fake_selected_road_corridor,
 }
 
@@ -413,36 +426,25 @@ print(
     "corridor) was called exactly once."
 )
 
-# valley_delineation.delineate_valleys is called exactly twice -- once for valleys, once for
-# ridge_lines -- against two genuinely different DEM arrays (real, then inverted), not the same
-# dem/computation applied twice. The original dem's own array must be untouched afterward.
-assert mock_delineate.call_count == 2, "delineate_valleys should run exactly twice: once for valleys, once for ridge_lines"
+# valley_delineation.delineate_valleys is called exactly once -- against the real dem, for
+# valleys -- now that ridge_lines (a second pass against an elevation-inverted copy, feeding
+# output nothing read) has been deleted outright. The original dem's own array must be untouched.
+assert mock_delineate.call_count == 1, "delineate_valleys should run exactly once, for valleys"
 first_call_dem = mock_delineate.call_args_list[0].args[0]
-second_call_dem = mock_delineate.call_args_list[1].args[0]
 assert first_call_dem is synthetic_dem, "the valleys pass must run against the real, unmodified dem"
-assert second_call_dem is not synthetic_dem, "the ridge_lines pass must run against a SEPARATE (inverted) dem dict"
-np.testing.assert_array_equal(second_call_dem["array"], -synthetic_dem["array"])
 np.testing.assert_array_equal(
     synthetic_dem["array"], original_array_snapshot
-), "inverting the DEM for ridge_lines must not mutate the original dem['array']"
-print("delineate_valleys ran exactly twice, against the real dem and a separate, non-mutating inverted copy.")
+), "delineate_valleys must not mutate the original dem['array']"
+print("delineate_valleys ran exactly once, against the real, unmutated dem.")
 
-# --- 2. ridge_lines and valleys are genuinely different results ---
+# --- 2. valleys carries the real delineated result ---
 
 assert ctx.valleys, "expected at least one delineated valley on the synthetic left-half trough"
-assert ctx.ridge_lines, "expected at least one delineated ridge line on the synthetic right-half crest"
 
 valley_cells = {cell for v in ctx.valleys for branch in v["branches_rowcol"] for cell in branch}
-ridge_cells = {cell for v in ctx.ridge_lines for branch in v["branches_rowcol"] for cell in branch}
 assert valley_cells, "valleys carries no member cells"
-assert ridge_cells, "ridge_lines carries no member cells"
-assert valley_cells.isdisjoint(ridge_cells), "valleys and ridge_lines must not share any cell on this synthetic terrain"
 assert all(col < 30 for _row, col in valley_cells), "every valley cell should fall on the synthetic left-half trough"
-assert all(col >= 30 for _row, col in ridge_cells), "every ridge cell should fall on the synthetic right-half crest"
-print(
-    f"valleys ({len(valley_cells)} cell(s), left half) and ridge_lines ({len(ridge_cells)} cell(s), "
-    "right half) are genuinely distinct, non-overlapping results, not the same computation twice."
-)
+print(f"valleys ({len(valley_cells)} cell(s), left half) is the real delineated result.")
 
 # --- 3. production_areas matches identify_optimized_production_areas()'s real per-patch shape ---
 
@@ -524,12 +526,12 @@ assert mock_water_zone_identify_pa.call_count == 0, (
     "was supplied as an override -- this is the redundancy this branch closes"
 )
 # ...and the TOTAL count across the whole build_pipeline_context() call for each: delineate_valleys()
-# ran exactly twice (valleys + ridge_lines, both via pc.valley_delineation.delineate_valleys, asserted
-# in section 1 above) plus zero more from inside the water-zone step; identify_optimized_production_
-# areas() ran exactly once (section 3 above) plus zero calls to the raw identify_production_areas()
-# fallback from inside the water-zone step. Neither is "once for context's own fields plus a second
-# hidden call inside the water-zone step."
-assert mock_delineate.call_count == 2, "delineate_valleys should still total exactly 2 calls overall (valleys + ridge_lines)"
+# ran exactly once (valleys, via pc.valley_delineation.delineate_valleys, asserted in section 1
+# above) plus zero more from inside the water-zone step; identify_optimized_production_areas() ran
+# exactly once (section 3 above) plus zero calls to the raw identify_production_areas() fallback
+# from inside the water-zone step. Neither is "once for context's own fields plus a second hidden
+# call inside the water-zone step."
+assert mock_delineate.call_count == 1, "delineate_valleys should still total exactly 1 call overall (valleys)"
 assert mock_optimize.call_count == 1, "identify_optimized_production_areas should still total exactly 1 call overall"
 
 # mock_water_zone_canopy/mock_water_zone_roads confirm the (offline-stubbed) mandatory canopy fetch
@@ -552,7 +554,7 @@ print(
     "water_zones reuses the already-computed dem/boundary_polygon_utm/valleys/production_areas -- ALL "
     "FOUR, not just dem -- and identify_water_system_candidate_zones()'s own internal delineate_valleys()/"
     "identify_production_areas() self-compute fallbacks were called ZERO times. Total calls across the "
-    "whole build_pipeline_context() run: delineate_valleys() x2 (valleys + ridge_lines), "
+    "whole build_pipeline_context() run: delineate_valleys() x1 (valleys), "
     "identify_optimized_production_areas() x1 -- not once for this context's own fields plus a second "
     "hidden call inside the water-zone step."
 )
@@ -749,6 +751,7 @@ fake_water_zones_result_fallback_case = {"zones_geojson": {"type": "FeatureColle
 fake_road_corridor_result_fallback_case = {
     "zones_geojson": {"type": "FeatureCollection", "features": []},
     "all_scored_candidates": [],
+    "road_network": fake_selected_road_corridor_fallback_case,
     "selected_road_corridor": fake_selected_road_corridor_fallback_case,
 }
 fake_solar_result_fallback_case = {
@@ -845,15 +848,15 @@ print(
 # selected_structure_site genuinely comes back None on this fixture -- NOT a bug or a swallowed exception
 # (traced separately: identify_solar_candidate_zones()'s own all_scored_candidates list is genuinely empty,
 # not just its selected_structure_site) -- this synthetic terrain's own column-wise gradient (4.0m per
-# 5m RESOLUTION column, engineered steep specifically so delineate_valleys()/its inversion trace real valley/
-# ridge geometry -- see this file's own module docstring) is roughly 80% slope almost everywhere, an order of
+# 5m RESOLUTION column, engineered steep specifically so delineate_valleys() traces real valley/ridge
+# geometry -- see this file's own module docstring) is roughly 80% slope almost everywhere, an order of
 # magnitude past solar_suitability.MAX_SOLAR_SLOPE_PCT (20%) -- so every DEM cell genuinely fails the slope
 # gate, the same "uniform terrain -> no water zone/road corridor" kind of finding sections 5/6/7 above already
 # hit for the same underlying reason (this fixture optimizes for valley/ridge tracing, not for producing solar
 # or tree-zone candidates everywhere).
 assert ctx.selected_structure_site is None, (
     "expected no solar candidate on this synthetic fixture -- see comment above: the terrain built for "
-    "delineate_valleys()/ridge_lines tracing is far too steep (~80%) everywhere to clear solar_suitability."
+    "delineate_valleys() tracing is far too steep (~80%) everywhere to clear solar_suitability."
     "MAX_SOLAR_SLOPE_PCT (20%), a genuine, DEM-driven exclusion, not a swallowed error"
 )
 assert ctx.tree_zone_patches, "expected at least one tree-zone candidate patch on the synthetic fixture"
@@ -891,6 +894,7 @@ fake_selected_road_corridor_dem_case = {
 fake_road_corridor_result_dem_case = {
     "zones_geojson": {"type": "FeatureCollection", "features": []},
     "all_scored_candidates": [],
+    "road_network": fake_selected_road_corridor_dem_case,
     "selected_road_corridor": fake_selected_road_corridor_dem_case,
 }
 fake_solar_result_dem_case = {
@@ -974,6 +978,7 @@ fake_selected_road_corridor_bpu_case = {
 fake_road_corridor_result_bpu_case = {
     "zones_geojson": {"type": "FeatureCollection", "features": []},
     "all_scored_candidates": [],
+    "road_network": fake_selected_road_corridor_bpu_case,
     "selected_road_corridor": fake_selected_road_corridor_bpu_case,
 }
 fake_solar_result_bpu_case = {

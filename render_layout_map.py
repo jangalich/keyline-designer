@@ -11,8 +11,10 @@ water_suitability.py (fetch_and_select_optimal_water_zone's own selected_
 water_zone -- the top-ranked candidate, reused directly off pipeline_
 context.PipelineContext rather than re-fetched, see fetch_layout_layers()'s
 own docstring), road_corridors.py (identify_road_corridor_candidates -- the
-single selected road corridor road_corridors.py's own ridge-line
-identification/scoring picks, see that module's own module docstring),
+full road NETWORK road_corridors.py's own coverage-greedy router grows
+outward from the property's real, chosen access point -- one Feature per
+branch, trunk and spur(s) alike, every branch drawn here, see that
+module's own module docstring),
 tree_zone_candidates.py (identify_tree_zone_candidates -- every ranked
 tree-suitable candidate patch left over once production/water/road's own
 claimed geometry is subtracted out, see that module's own module
@@ -179,29 +181,46 @@ hulls, not a real siting conflict; the real geometries stay separated by
 water_candidate_zones.py's own production-zone eligibility exclusion gate
 (WATER_ZONE_PRODUCTION_SETBACK_METERS), unaffected by anything here.
 
-ROAD CORRIDOR STYLE: rendered as a CASED (double-line) road symbol, the
-standard cartographic convention for a road -- a wider, low-alpha dark
-gray "shoulder" plotted first, then a narrower, higher-alpha dark gray
-line on top of it, both the same color (see _draw_road_corridor()).
-Before either line is drawn, the route's own Mercator-projected geometry
-is run through _smooth_line_for_render(): a shapely simplify() pass
-(ROAD_RENDER_SIMPLIFY_TOLERANCE_M, Douglas-Peucker, preserve_topology=
-True) removes the DEM's own per-cell stairstepping, then Chaikin corner-
-cutting (ROAD_RENDER_SMOOTHING_ITERATIONS iterations, see
-_chaikin_smooth_coords()) rounds what's left. Both are REAL BUG fixes,
-found live: the raw route geometry is a literal per-DEM-cell polyline
-(road_corridors.py's own _order_fragment_from_entry()/least_cost_path()
-walk the DEM's grid one cell at a time), which reads as a visibly
-blocky, stairstepped line at the map's actual output resolution rather
-than a plausible road alignment. This is DISPLAY-ONLY, same pattern as
-the water zone's own hull fill above: road_corridor's real
-points_xyz/geometry_wgs84 (used for length_m, avg_grade_pct, and every
-other scoring/narrative value) are never touched -- only the copy handed
-to the plotting calls is simplified/smoothed.
+ROAD CORRIDOR STYLE: the road network can have several branches (a trunk
+plus spur(s) growing off it or off each other, see road_corridors.py's own
+module docstring) -- EVERY branch is drawn, each one independently as a
+CASED (double-line) road symbol, the standard cartographic convention for
+a road -- a wider, low-alpha dark gray "shoulder" plotted first, then a
+narrower, higher-alpha dark gray line on top of it, both the same color
+(see _draw_road_corridor()). All branches share the exact same styling --
+nothing here visually distinguishes a trunk from a spur, and no branch
+gets its own numbered marker on the map (branch_role/branch_index are for
+the narrative report to read, not a map label -- see the legend text
+built below, one line per branch, for where they do appear). Before
+either line of a branch is drawn, THAT branch's own Mercator-projected
+geometry is run through _smooth_line_for_render(), independently of every
+other branch: a shapely simplify() pass (ROAD_RENDER_SIMPLIFY_TOLERANCE_M,
+Douglas-Peucker, preserve_topology=True) removes the DEM's own per-cell
+stairstepping, then Chaikin corner-cutting (ROAD_RENDER_SMOOTHING_
+ITERATIONS iterations, see _chaikin_smooth_coords()) rounds what's left.
+Both are REAL BUG fixes, found live: the raw route geometry is a literal
+per-DEM-cell polyline (road_cost_path.cost_distance_field()/
+backtrace_route(), which road_network_router.route_road_network() walks
+one cell at a time), which reads as a visibly blocky, stairstepped line at
+the map's actual output resolution rather than a plausible road alignment.
+Smoothing per branch, not on some pre-merged whole-network line, matters
+for a spur specifically: _chaikin_smooth_coords() keeps a line's own first
+and last coordinates exactly (see that function's own docstring), and a
+spur's own first cell IS its join point on its parent branch (build_road_
+network()'s own "cells" ordering, joint-cell first) -- smoothing each
+branch independently keeps that join point exact, so the rendered network
+still reads as connected rather than a spur floating just off the trunk.
+This is DISPLAY-ONLY, same pattern as the water zone's own hull fill
+above: each branch's real points_xyz/geometry_wgs84 (used for length_m,
+avg_grade_pct, and every other scoring/narrative value) are never
+touched -- only the copy handed to the plotting calls is
+simplified/smoothed.
 
 TREE ZONE STYLE: each ranked tree-zone candidate patch (there can be
-several, same "possibly-multiple, ranked" shape as production zones, not
-a single selection like water/road/structure) renders as HATCH-ONLY --
+several, same "possibly-multiple, ranked" shape as production zones -- and
+now the road corridor's own branches, though unlike this ranked-candidate
+list, branches aren't ranked, just drawn -- not a single selection like
+water/structure) renders as HATCH-ONLY --
 diagonal hatch strokes (TREE_ZONE_COLOR, TREE_ZONE_HATCH_ALPHA,
 TREE_ZONE_HATCH) with NO fill and NO perimeter stroke (facecolor="none",
 linewidth=0 -- see this module's own tree-zone plot_polygon() call for
@@ -251,7 +270,9 @@ a filled polygon over its full eligible footprint (up to the module's own
 1-acre cap) and not a numbered circle marker like every other layer --
 there's exactly one structure site per property
 (fetch_and_select_optimal_structure_site()'s own top-ranked candidate,
-same "single selection" shape as water_zone/road_corridor), so a precise
+same "single selection" shape water_zone has -- road_corridor is now a
+possibly-multi-branch NETWORK instead, see this module's own ROAD
+CORRIDOR STYLE section), so a precise
 point read at a glance, the way an icon on a printed map is meant to be
 read, better matches how a real building site actually gets sited and
 referenced than a shaded area does. This is DISPLAY-ONLY, same "real
@@ -645,9 +666,16 @@ def _chaikin_smooth_coords(coords: list[tuple[float, float]], iterations: int) -
     to not need a new spline/smoothing dependency for what's purely a
     cosmetic rendering touch-up (see _smooth_line_for_render()).
 
-    The first and last coordinates are always kept EXACTLY as given, so
-    a smoothed route still starts/ends at the same anchor/ridge-end point
-    -- only the interior gets rounded. Each iteration replaces every edge
+    The first and last coordinates are always kept EXACTLY as given, so a
+    smoothed branch still starts/ends at the same real endpoint -- the
+    anchor for a trunk, or the join-on-the-parent-branch cell for a spur
+    (build_road_network()'s own "cells" ordering puts a spur's join point
+    first) -- only the interior gets rounded. This is exactly why
+    _smooth_line_for_render() must be called once PER BRANCH rather than
+    on some pre-merged whole-network line: smoothing each branch
+    independently is what keeps a spur's own join point exact, so the
+    rendered network still reads as connected. Each iteration replaces
+    every edge
     (Pi, Pi+1) with two points at 1/4 and 3/4 along it (the standard
     Chaikin construction), which is what visually rounds a sharp corner:
     each cut moves the curve a little further off the original corner and
@@ -671,12 +699,16 @@ def _chaikin_smooth_coords(coords: list[tuple[float, float]], iterations: int) -
 
 def _smooth_line_for_render(line: LineString) -> LineString:
     """
-    Rendering-only transform for the road corridor's own LineString --
-    REAL BUG, FOUND LIVE: road_corridors.py's route geometry is a literal
-    per-DEM-cell polyline (_order_fragment_from_entry()/least_cost_path()
-    both walk the DEM's grid one cell at a time), which reads as a
-    visibly blocky, stairstepped line at this map's actual output
-    resolution rather than a plausible road alignment.
+    Rendering-only transform for a SINGLE road branch's own LineString --
+    the caller (render_layout_map()) calls this once PER BRANCH, never on
+    a pre-merged whole-network line (see this module's own ROAD CORRIDOR
+    STYLE docstring section for why: a spur's own first coordinate is its
+    real join point on the parent branch, and only per-branch smoothing
+    keeps that exact). REAL BUG, FOUND LIVE: road_network_router.py's own
+    route geometry is a literal per-DEM-cell polyline (road_cost_path.
+    cost_distance_field()/backtrace_route() walk the DEM's grid one cell
+    at a time), which reads as a visibly blocky, stairstepped line at this
+    map's actual output resolution rather than a plausible road alignment.
 
     Two passes, both deliberately small/subtle (see
     ROAD_RENDER_SIMPLIFY_TOLERANCE_M/ROAD_RENDER_SMOOTHING_ITERATIONS'
@@ -965,17 +997,18 @@ def fetch_layout_layers(
     additional call at all.
 
     road_corridor_candidates: full return dict still needed for its
-    zones_geojson (the GeoJSON Feature this function renders, unlike
-    context.selected_road_corridor's raw-UTM-with-cells shape) -- one
-    additional identify_road_corridor_candidates() call, but now passing
-    every override that entry point supports (dem/boundary_polygon_utm/
+    zones_geojson (one GeoJSON Feature PER BRANCH this function renders --
+    every branch, not just the trunk -- unlike context.selected_road_
+    corridor's raw-UTM-with-cells network shape) -- one additional
+    identify_road_corridor_candidates() call, but now passing every
+    override that entry point supports (dem/boundary_polygon_utm/
     production_areas/valleys/selected_water_zone/hydric_floodplain_union/
     floodplain_data_is_fallback, all straight from context) so this call's
     own internal production/water/floodplain-union derivation is fully
     eliminated, not just its DEM fetch. selected_road_corridor is read
     from context directly rather than re-extracted from this call's own
-    result -- same overrides in, so the same deterministic selection
-    comes out; reusing avoids a needless "trust this matches" moment.
+    result -- same overrides in, so the same deterministic network comes
+    out; reusing avoids a needless "trust this matches" moment.
 
     tree_zone_result: identify_tree_zone_candidates()'s own return dict is
     used ONLY for its 'patches' key everywhere downstream (confirmed: the
@@ -1066,8 +1099,11 @@ def fetch_layout_layers(
         floodplain_data_is_fallback=context.soil_exclusion_unions["hydric_floodplain_is_fallback"],
         canopy_height=parcel_data.canopy_height,
     )
+    # Every branch's own Feature, trunk and spur(s) alike -- NOT just
+    # branch_index 0 -- see this module's own ROAD CORRIDOR STYLE
+    # docstring section for why taking only the trunk would silently omit
+    # real, built geometry.
     road_corridor_features = road_corridor_candidates["zones_geojson"]["features"]
-    road_corridor = road_corridor_features[0] if road_corridor_features else None
     selected_road_corridor = context.selected_road_corridor
 
     tree_zone_result = {"patches": context.tree_zone_patches}
@@ -1111,7 +1147,7 @@ def fetch_layout_layers(
         "production_areas": context.production_areas,
         "production_zone_legend_stats": production_zone_legend_stats,
         "water_zone": water_zone,
-        "road_corridor": road_corridor,
+        "road_corridor": road_corridor_features,
         "tree_zone_result": tree_zone_result,
         "structure_site": structure_site,
         "water_features": water_features,
@@ -1150,7 +1186,7 @@ def render_layout_map(
     scored_patches = layers["production_areas"]
     zone_stats = layers["production_zone_legend_stats"]
     water_zone = layers["water_zone"]
-    road_corridor = layers["road_corridor"]
+    road_corridor_features = layers["road_corridor"]
     tree_zone_result = layers["tree_zone_result"]
     structure_site = layers["structure_site"]
     water_features = layers["water_features"]
@@ -1369,29 +1405,34 @@ def render_layout_map(
         )
         marker_number += 1
 
-    if road_corridor is not None:
-        # DISPLAY-ONLY geometry: _smooth_line_for_render() simplifies away
-        # the DEM's own per-cell stairstepping and rounds what corners are
-        # left (see that function's own docstring and this module's ROAD
-        # CORRIDOR STYLE docstring section) -- road_corridor's real
-        # geometry (properties, length_m, avg_grade_pct, everything the
-        # narrative report uses) is completely untouched by this.
+    # Every branch, trunk and spur(s) alike -- NOT just road_corridor_
+    # features[0] -- drawn with IDENTICAL styling (see this module's own
+    # ROAD CORRIDOR STYLE docstring section for why no branch is visually
+    # distinguished or gets its own numbered marker on the map). Each
+    # branch's own geometry is smoothed INDEPENDENTLY (_smooth_line_for_
+    # render() preserves a line's own first/last coordinate exactly, which
+    # for a spur is its real join point on the parent branch) -- road_
+    # corridor_features' real geometry/properties (length_m, avg_grade_pct,
+    # everything the narrative report uses) are completely untouched by
+    # this, only the copy handed to the plotting calls is
+    # simplified/smoothed.
+    for road_corridor in road_corridor_features:
         geom = _reproject_geometry_to_mercator(road_corridor["geometry"])
         props = road_corridor["properties"]
         render_geom = _smooth_line_for_render(geom)
         _draw_road_corridor(ax, render_geom)
-        # The marker sits on the geometry actually drawn (the smoothed
-        # line, same "marker matches the visible shape" reasoning the
-        # water zone's own marker placement above already uses).
-        _draw_numbered_marker(ax, render_geom.interpolate(0.5, normalized=True), marker_number)
-        legend_entries.append(f"{marker_number} — Road Corridor, score {props['suitability_score']}")
-        marker_number += 1
+        role = props["branch_role"].replace("_", " ")
+        legend_entries.append(
+            f"Road Corridor ({role}) — {props['length_ft']} ft, {props['avg_grade_pct']}% grade, "
+            f"{props['newly_served_acres']} ac newly served"
+        )
 
     # Tree zone candidates: possibly several, ranked (same "possibly-
-    # multiple" shape as production zones above, not a single selection
-    # like water_zone/road_corridor/structure_site) -- see this module's
-    # own TREE ZONE STYLE docstring section for the hatch-only styling
-    # rationale. DISPLAY-ONLY fill geometry: render_fill_polygon_utm is a
+    # multiple" shape as production zones and the road network's own
+    # branches above, not a single selection like water_zone/structure_
+    # site) -- see this module's own TREE ZONE STYLE docstring section
+    # for the hatch-only styling rationale. DISPLAY-ONLY fill geometry:
+    # render_fill_polygon_utm is a
     # plain convex hull of the patch's own real footprint (see
     # score_tree_search_space()'s own docstring), already in the DEM's
     # own UTM CRS -- reprojected in one hop

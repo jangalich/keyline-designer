@@ -3,7 +3,7 @@ pipeline_context.py
 
 Computes the shared upstream data several KSOP (Keyline Scale of
 Permanence) pipeline steps each already fetch or derive independently --
-DEM, boundary polygon, valleys, ridge lines, production areas, existing
+DEM, boundary polygon, valleys, production areas, existing
 roads, soil exclusion unions, water-system candidate zones, the selected
 water zone, the selected road corridor, the selected structure (solar)
 site, and every ranked tree-zone candidate -- exactly ONCE, and hands the
@@ -29,19 +29,6 @@ solar_suitability.identify_solar_candidate_zones() itself, since fixed
 directly in that module.
 
 FIELD NOTES
-
-  ridge_lines vs valleys: both fields are built by running the exact same
-  valley_delineation.delineate_valleys() pipeline (fill -> flow direction
-  -> flow accumulation -> threshold -> trace) -- valleys against the real
-  DEM, ridge_lines against an elevation-INVERTED copy of it (a ridge in
-  real terrain is a valley in its negation -- the same standard-GIS
-  technique road_corridors.py's own _identify_ridge_cell_mask() already
-  uses). ridge_lines is real ridge-crest geometry, not valley geometry,
-  even though the function that produced it is literally
-  delineate_valleys() -- do not read ridge_lines as "the valleys of the
-  inverted DEM" in any downstream naming, docstring, or future GeoJSON
-  layer property; it must read as ridge lines, full stop, everywhere it
-  appears.
 
   production_areas holds production_area_ceiling.
   identify_optimized_production_areas()'s own 'scored_patches' -- the
@@ -81,17 +68,33 @@ FIELD NOTES
   above, so nothing it depends on is re-derived a second time.
 
   selected_road_corridor is road_corridors.identify_road_corridor_
-  candidates()'s own 'selected_road_corridor' -- select_optimal_road_
-  corridor()'s rank-1 answer, or None if no route cleared the constraint
-  stack (including the case where anchor_lon_lat itself is unavailable).
-  This call passes this context's own already-computed dem/boundary_
-  polygon_utm/valleys/production_areas/selected_water_zone through via
-  override params, AND reuses this context's own soil_exclusion_unions
-  ['hydric_floodplain_union'] (paired with the real soil_exclusion_
-  unions['hydric_floodplain_is_fallback'] flag above) rather than letting
-  identify_road_corridor_candidates() fetch a second, independent
-  floodplain/hydric union -- so _fetch_floodplain_hydric_union() also
-  runs only ONCE across the whole of build_pipeline_context().
+  candidates()'s own 'road_network' -- build_road_network()'s full
+  multi-branch network dict (branches, each carrying its own cells/
+  points_xyz/line_utm/geometry_wgs84/cell_footprint_polygon_utm/
+  branch_role/branch_index/length_meters/avg_grade_pct/newly_served_
+  acres/..., plus network-level total_length_meters/total_served_acres/
+  unserved_acres/stop_reason/cells/cell_footprint_polygon_utm), NEVER
+  None -- even a network with no branches at all (anchor unreachable,
+  no demand, constraint stack cleared nothing) is this SAME shape with
+  branches=[], not None (see build_road_network()'s own
+  _empty_road_network()). This is deliberately the road_network dict,
+  not identify_road_corridor_candidates()'s own 'selected_road_corridor'
+  return key (which collapses branches=[] to None) -- every downstream
+  consumer below treats None as "not supplied" and reacts by running its
+  own full self-compute fallback (several whole-DEM Dijkstra runs, not a
+  cheap mask), so an empty network has to be forwarded as a real, explicit
+  answer to be reused at all. This call passes this context's own already-
+  computed dem/boundary_polygon_utm/valleys/production_areas/selected_
+  water_zone through via override params, AND reuses this context's own
+  soil_exclusion_unions['hydric_floodplain_union'] (paired with the real
+  soil_exclusion_unions['hydric_floodplain_is_fallback'] flag above)
+  rather than letting identify_road_corridor_candidates() fetch a second,
+  independent floodplain/hydric union -- so _fetch_floodplain_hydric_
+  union() also runs only ONCE across the whole of build_pipeline_context().
+  PipelineContext does NOT carry any per-branch fields of its own --
+  branches live inside this one dict; a consumer that needs one branch's
+  geometry reads selected_road_corridor["branches"][i] directly rather
+  than this context growing a new field per branch.
 
   selected_structure_site is solar_suitability.identify_solar_candidate_
   zones()'s own 'selected_structure_site' -- select_optimal_structure_
@@ -180,7 +183,7 @@ silently patching another module or reimplementing its logic)
          inside identify_water_system_candidate_zones(), no override path
          at all) -- and PipelineContext itself has no tree-root-zone-mask
          field to offer in the first place; this context's own field list
-         (dem, boundary_polygon_utm, valleys, ridge_lines,
+         (dem, boundary_polygon_utm, valleys,
          production_areas, existing_roads, soil_exclusion_unions,
          water_zones, selected_water_zone, selected_road_corridor) never
          included one. Adding one would be real new
@@ -316,13 +319,12 @@ class PipelineContext:
     dem: dict
     boundary_polygon_utm: Polygon
     valleys: list[dict]
-    ridge_lines: list[dict]
     production_areas: list[dict]
     existing_roads: BaseGeometry | None
     soil_exclusion_unions: dict[str, BaseGeometry | None]
     water_zones: list[dict]
     selected_water_zone: dict | None
-    selected_road_corridor: dict | None
+    selected_road_corridor: dict
     selected_structure_site: dict | None
     tree_zone_patches: list[dict]
 
@@ -424,7 +426,6 @@ def build_pipeline_context(
         boundary_polygon_utm = _boundary_polygon_utm(boundary_coordinates, dem)
 
     valleys = valley_delineation.delineate_valleys(dem)
-    ridge_lines = valley_delineation.delineate_valleys(road_corridors._invert_dem(dem))
 
     optimized_production = production_area_ceiling.identify_optimized_production_areas(
         boundary_coordinates, dem=dem, canopy_height=canopy_height
@@ -481,7 +482,15 @@ def build_pipeline_context(
         floodplain_data_is_fallback=soil_exclusion_unions["hydric_floodplain_is_fallback"],
         canopy_height=canopy_height,
     )
-    selected_road_corridor = road_corridor_result["selected_road_corridor"]
+    # road_corridor_result["selected_road_corridor"] collapses to None when
+    # the network has no branches -- passing that None straight through
+    # would make every downstream consumer below (each of which treats
+    # None as "not supplied") trigger its own full self-compute fallback
+    # (several whole-DEM Dijkstra runs now, not a cheap ridge mask). This
+    # context's own field always holds road_network's full shape instead
+    # (branches=[] and all, never None) so an empty network is still a
+    # real, explicit answer downstream, not a missing one.
+    selected_road_corridor = road_corridor_result["road_network"]
 
     solar_result = identify_solar_candidate_zones(
         boundary_coordinates,
@@ -517,7 +526,6 @@ def build_pipeline_context(
         dem=dem,
         boundary_polygon_utm=boundary_polygon_utm,
         valleys=valleys,
-        ridge_lines=ridge_lines,
         production_areas=production_areas,
         existing_roads=existing_roads,
         soil_exclusion_unions=soil_exclusion_unions,

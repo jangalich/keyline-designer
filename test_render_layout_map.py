@@ -319,7 +319,7 @@ synthetic_layers = {
     "production_areas": dumbbell_scored,
     "production_zone_legend_stats": rlm._production_zone_legend_stats(dumbbell_scored, _dumbbell_parcel_acres),
     "water_zone": None,
-    "road_corridor": None,
+    "road_corridor": [],
     "tree_zone_result": None,
     "structure_site": None,
     "water_features": {"streams": []},
@@ -633,7 +633,7 @@ wz_synthetic_layers = {
     "production_areas": [],
     "production_zone_legend_stats": [],
     "water_zone": water_zone_fixture,
-    "road_corridor": None,
+    "road_corridor": [],
     "tree_zone_result": None,
     "structure_site": None,
     "water_features": {"streams": []},
@@ -786,7 +786,13 @@ print(
     f"small buffer of the real, unsmoothed path."
 )
 
-# --- Full render_layout_map() pass: a synthetic stairstepped road corridor is drawn as a CASED (double-line) road -- a wider low-alpha outer line and a narrower higher-alpha inner line, both ROAD_RENDER_COLOR, both a visibly smoothed/simplified geometry -- and the real road_corridor input is never mutated ---
+# --- Full render_layout_map() pass: a synthetic MULTI-BRANCH road network (trunk + spur) is drawn ---
+# --- as a CASED (double-line) road per branch -- a wider low-alpha outer line and a narrower ---
+# --- higher-alpha inner line, both ROAD_RENDER_COLOR, both a visibly smoothed/simplified geometry, ---
+# --- IDENTICAL styling on every branch -- and the real road_corridor input is never mutated. Also ---
+# --- proves the branch_role/length_ft/avg_grade_pct/newly_served_acres shape (not suitability_score, ---
+# --- which no longer exists on this Feature -- see this module's own module docstring for why) is ---
+# --- what render_layout_map() actually reads, and that no branch gets its own numbered map marker. ---
 
 ROAD_TEST_ORIGIN_MERCATOR = (-8900000.0, 4900000.0)  # arbitrary but realistic Web Mercator point
 road_stairstep_mercator = [
@@ -796,11 +802,37 @@ road_lons, road_lats = _warp_transform_check(
     rlm.WEB_MERCATOR, rlm.WGS84,
     [c[0] for c in road_stairstep_mercator], [c[1] for c in road_stairstep_mercator],
 )
-road_corridor_fixture = {
+trunk_branch_fixture = {
     "type": "Feature",
     "geometry": {"type": "LineString", "coordinates": list(zip(road_lons, road_lats))},
-    "properties": {"suitability_score": 81.0},
+    "properties": {
+        "branch_index": 0,
+        "branch_role": "trunk",
+        "length_ft": 810.5,
+        "avg_grade_pct": 4.2,
+        "newly_served_acres": 0.85,
+    },
 }
+# A short spur off the trunk -- a straight 2-point line is enough to prove every branch (not just
+# branch_index 0) gets drawn; it deliberately has its OWN distinct geometry so a "only drew the
+# trunk" regression is unambiguous (a spur silently omitted would leave this geometry never plotted).
+spur_lons, spur_lats = _warp_transform_check(
+    rlm.WEB_MERCATOR, rlm.WGS84,
+    [ROAD_TEST_ORIGIN_MERCATOR[0] + 5.0, ROAD_TEST_ORIGIN_MERCATOR[0] + 5.0],
+    [ROAD_TEST_ORIGIN_MERCATOR[1] + 5.0, ROAD_TEST_ORIGIN_MERCATOR[1] + 25.0],
+)
+spur_branch_fixture = {
+    "type": "Feature",
+    "geometry": {"type": "LineString", "coordinates": list(zip(spur_lons, spur_lats))},
+    "properties": {
+        "branch_index": 1,
+        "branch_role": "spur",
+        "length_ft": 16.4,
+        "avg_grade_pct": 6.1,
+        "newly_served_acres": 0.10,
+    },
+}
+road_corridor_fixture = [trunk_branch_fixture, spur_branch_fixture]
 road_corridor_fixture_before = copy.deepcopy(road_corridor_fixture)
 
 recorded_road_line_calls = []
@@ -813,6 +845,7 @@ def _recording_plot_line_for_road(geometry, **kwargs):
 
 
 rlm.plot_line = _recording_plot_line_for_road
+_markers_before_road_section = len(recorded_markers)
 
 road_synthetic_layers = {
     "dem": water_zone_test_dem,
@@ -837,41 +870,76 @@ finally:
     rlm.plot_line = _original_plot_line_for_road
 
 road_line_calls = [(geom, kw) for geom, kw in recorded_road_line_calls if kw.get("color") == ROAD_RENDER_COLOR]
-assert len(road_line_calls) == 2, (
-    f"expected exactly 2 plot_line() calls for the cased (double-line) road style, got {len(road_line_calls)}"
+assert len(road_line_calls) == 4, (
+    f"expected exactly 4 plot_line() calls (2 per branch -- cased double-line -- across 2 branches), "
+    f"got {len(road_line_calls)}. EVERY branch must be drawn, not just road_corridor_features[0]"
 )
 outer_calls = [(geom, kw) for geom, kw in road_line_calls if kw["linewidth"] == ROAD_RENDER_OUTER_WIDTH]
 inner_calls = [(geom, kw) for geom, kw in road_line_calls if kw["linewidth"] == ROAD_RENDER_INNER_WIDTH]
-assert len(outer_calls) == 1 and len(inner_calls) == 1, (
-    "expected exactly one outer-width call and one inner-width call among the two road plot_line() calls"
+assert len(outer_calls) == 2 and len(inner_calls) == 2, (
+    "expected exactly one outer-width and one inner-width call PER branch (2 branches here)"
 )
-outer_geom, outer_kwargs = outer_calls[0]
-inner_geom, inner_kwargs = inner_calls[0]
-assert outer_kwargs["alpha"] == ROAD_RENDER_OUTER_ALPHA and inner_kwargs["alpha"] == ROAD_RENDER_INNER_ALPHA, (
-    "the outer (shoulder) line must use ROAD_RENDER_OUTER_ALPHA and the inner line ROAD_RENDER_INNER_ALPHA"
+# All 4 calls share the exact same styling regardless of branch_role -- nothing here distinguishes
+# the trunk from the spur.
+assert {kw["alpha"] for _geom, kw in outer_calls} == {ROAD_RENDER_OUTER_ALPHA}, (
+    "every outer-shoulder call (trunk and spur alike) must use the SAME ROAD_RENDER_OUTER_ALPHA -- "
+    "branches must not be visually distinguished"
 )
-assert outer_kwargs["zorder"] < inner_kwargs["zorder"], (
-    "the narrower inner line must render ABOVE the wider outer shoulder (higher zorder), not underneath it"
+assert {kw["alpha"] for _geom, kw in inner_calls} == {ROAD_RENDER_INNER_ALPHA}, (
+    "every inner call (trunk and spur alike) must use the SAME ROAD_RENDER_INNER_ALPHA -- branches "
+    "must not be visually distinguished"
 )
-assert outer_geom.coords[:] == inner_geom.coords[:], (
-    "both the outer and inner line must be drawn over the exact same (smoothed) geometry"
+for _geom, kw in road_line_calls:
+    assert kw["zorder"] in (42, 42.5), "every branch must share the same two zorders (42/42.5), not per-branch values"
+assert all(kw["zorder"] == 42 for _geom, kw in outer_calls), "every outer (shoulder) call must use zorder=42"
+assert all(kw["zorder"] == 42.5 for _geom, kw in inner_calls), (
+    "every inner call must use zorder=42.5, ABOVE the outer shoulder's 42 -- same for every branch"
+)
+
+# Two genuinely distinct geometries were plotted -- proof the spur is real, separately-drawn geometry,
+# not the trunk's line plotted twice.
+outer_geoms = [geom for geom, kw in outer_calls]
+assert outer_geoms[0].coords[:] != outer_geoms[1].coords[:], (
+    "the trunk and spur must be drawn as two DIFFERENT geometries -- got identical coordinates, as if "
+    "only one branch (or the same branch twice) were actually plotted"
+)
+
+# The trunk's own outer/inner pair share its exact smoothed geometry (same "cased" pairing test the
+# single-branch version of this check used), matched by vertex count against the DEM-cell-stairstepped
+# fixture (the trunk is the one built from stairstep_coords; the spur is a plain 2-point line with
+# nothing to smooth away).
+trunk_calls = [(geom, kw) for geom, kw in road_line_calls if len(geom.coords) > 2]
+assert len(trunk_calls) == 2, "expected the trunk's own outer+inner pair to be identifiable by vertex count"
+trunk_outer_geom = [geom for geom, kw in trunk_calls if kw["linewidth"] == ROAD_RENDER_OUTER_WIDTH][0]
+trunk_inner_geom = [geom for geom, kw in trunk_calls if kw["linewidth"] == ROAD_RENDER_INNER_WIDTH][0]
+assert trunk_outer_geom.coords[:] == trunk_inner_geom.coords[:], (
+    "the trunk's own outer and inner line must be drawn over the exact same (smoothed) geometry"
 )
 raw_mercator_coords_count = len(road_stairstep_mercator)
-assert len(outer_geom.coords) < raw_mercator_coords_count, (
-    f"the geometry actually handed to plot_line() must be the SMOOTHED version (fewer vertices than the "
-    f"raw {raw_mercator_coords_count}-point stairstep), not the raw per-cell geometry straight off "
-    f"road_corridor['geometry']"
+assert len(trunk_outer_geom.coords) < raw_mercator_coords_count, (
+    f"the trunk geometry actually handed to plot_line() must be the SMOOTHED version (fewer vertices "
+    f"than the raw {raw_mercator_coords_count}-point stairstep), not the raw per-cell geometry straight "
+    f"off road_corridor['geometry']"
 )
+
+# No branch gets its own numbered map marker (branch_role/branch_index are for the narrative report,
+# not a map label -- see this module's own ROAD CORRIDOR STYLE docstring section).
+assert len(recorded_markers) == _markers_before_road_section, (
+    "road corridor branches must NOT get numbered markers on the map -- expected zero new "
+    "_draw_numbered_marker() calls from this section"
+)
+
 assert road_corridor_fixture == road_corridor_fixture_before, (
     "rendering must never mutate the real road_corridor input -- its geometry/properties (used for "
     "length_m/avg_grade_pct/every other scoring and narrative value) must stay byte-for-byte identical"
 )
 print(
-    f"Full pipeline with a synthetic stairstepped road corridor: render_layout_map() draws it as a cased "
-    f"double-line road (outer width={ROAD_RENDER_OUTER_WIDTH}/alpha={ROAD_RENDER_OUTER_ALPHA}, inner "
-    f"width={ROAD_RENDER_INNER_WIDTH}/alpha={ROAD_RENDER_INNER_ALPHA}, inner above outer) over a visibly "
-    f"smoothed geometry ({raw_mercator_coords_count} raw points down to {len(outer_geom.coords)}), and "
-    f"never mutates the real road_corridor input."
+    f"Full pipeline with a synthetic 2-branch (trunk + spur) road network: render_layout_map() draws "
+    f"EVERY branch, each as a cased double-line road (outer width={ROAD_RENDER_OUTER_WIDTH}/"
+    f"alpha={ROAD_RENDER_OUTER_ALPHA}, inner width={ROAD_RENDER_INNER_WIDTH}/alpha={ROAD_RENDER_INNER_ALPHA}, "
+    f"inner above outer), with IDENTICAL styling regardless of branch_role and NO numbered map marker per "
+    f"branch, over a visibly smoothed trunk geometry ({raw_mercator_coords_count} raw points down to "
+    f"{len(trunk_outer_geom.coords)}), and never mutates the real road_corridor input."
 )
 
 
@@ -947,7 +1015,7 @@ tree_synthetic_layers = {
     "production_areas": [],
     "production_zone_legend_stats": [],
     "water_zone": None,
-    "road_corridor": None,
+    "road_corridor": [],
     "tree_zone_result": tree_zone_result_fixture,
     "structure_site": None,
     "water_features": {"streams": []},
@@ -1151,17 +1219,31 @@ _canopy_lons, _canopy_lats = warp_transform(
 _canopy_boundary_coordinates = list(zip(_canopy_lons, _canopy_lats))
 _canopy_override = clean_canopy_for(_canopy_dem)
 
+# The real "no road network" shape (road_corridors._empty_road_network()) -- PipelineContext.
+# selected_road_corridor is never None (see pipeline_context.py's own field notes), even when no
+# branches exist, so a fixture standing in for it must be this same shape, not None. identify_
+# solar_candidate_zones() is run for REAL (wraps=) below and genuinely dereferences cell_footprint_
+# polygon_utm, so this needs a real (if empty) Polygon, not a placeholder.
+_EMPTY_ROAD_NETWORK = {
+    "branches": [],
+    "total_length_meters": 0.0,
+    "total_served_acres": 0.0,
+    "unserved_acres": 0.0,
+    "stop_reason": "no_anchor_given",
+    "cells": [],
+    "cell_footprint_polygon_utm": Polygon(),
+}
+
 _fake_context_for_canopy_case = pc.PipelineContext(
     dem=_canopy_dem,
     boundary_polygon_utm=_canopy_boundary_utm,
     valleys=[],
-    ridge_lines=[],
     production_areas=[],
     existing_roads=None,
     soil_exclusion_unions={"hydric_floodplain_union": None, "hydric_floodplain_is_fallback": False, "erosion_prone_union": None},
     water_zones=[],
     selected_water_zone=None,
-    selected_road_corridor=None,
+    selected_road_corridor=_EMPTY_ROAD_NETWORK,
     selected_structure_site=None,
     tree_zone_patches=[],
 )
@@ -1256,28 +1338,27 @@ print(
 #
 # get_canopy_height_for_boundary() is called ONCE for ParcelData's own
 # upstream fetch (parcel_data.fetch_parcel_data(), ONE call regardless of
-# how many downstream consumers reuse it) plus a CURRENT residual traced
-# entirely to tree_zone_candidates.py's and solar_suitability.py's own
-# DIRECT identify_road_corridor_candidates() calls -- both files
-# explicitly out of scope for this branch (see the module docstring's
-# own "What NOT to touch"), so their own call sites don't forward
-# canopy_height and correctly still self-compute a real canopy fetch on
-# this fixture (selected_road_corridor comes back None -- no viable route
-# on this flat synthetic terrain -- so their own ambiguous-None-sentinel
-# self-compute fallback fires; a pre-existing, separately-scoped
-# behavior class, not something this branch introduces or is scoped to
-# fix). This section proves that residual is EXCLUSIVELY attributable to
-# those two unwired call sites -- zero of it traces to this branch's own
-# wired call sites, pipeline_context.py's build_pipeline_context() and
-# render_layout_map.py's own fetch_layout_layers() (fencing.py's own
-# identify_fencing() no longer contributes a third wired call site here --
-# it only derives a road corridor when its own tree-zone self-compute
-# fallback is about to run, and fetch_layout_layers() already supplies
-# tree_zone_patches directly, so that fallback never fires on this real
-# call graph -- see the per-call-site assertions below) -- each of the
-# two remaining wired sites is confirmed BELOW to be genuinely exercised
-# (count == 1, not skipped), not just present with a zero contribution by
-# accident.
+# how many downstream consumers reuse it), and now ZERO more from the
+# compute layer. tree_zone_candidates.py's and solar_suitability.py's own
+# DIRECT identify_road_corridor_candidates() call sites USED TO contribute
+# a residual here: on this flat synthetic terrain, road_corridors.py's own
+# network router finds no branches at all, and the canopy-mask-wiring-
+# road-fencing branch's own pipeline_context.py still let that collapse to
+# None (identify_road_corridor_candidates()'s own 'selected_road_corridor'
+# key, which folds branches=[] to None) -- an ambiguous None every
+# downstream consumer reads as "not supplied" and reacts to by running its
+# own full self-compute (a real canopy fetch included). This branch closes
+# that: pipeline_context.py's own selected_road_corridor field now always
+# holds road_corridors.build_road_network()'s full network dict, branches
+# =[] and all, NEVER None (see pipeline_context.py's own field notes) --
+# so tree_zone_candidates.py's/solar_suitability.py's own self-compute
+# checks (`if selected_road_corridor is None:`) no longer fire on THIS
+# call graph, and their own identify_road_corridor_candidates() call sites
+# are never reached at all anymore. Both of this branch's own wired call
+# sites, pipeline_context.py's build_pipeline_context() and render_layout_
+# map.py's own fetch_layout_layers(), are confirmed BELOW to still be
+# genuinely exercised (count == 1, not skipped), not just present with a
+# zero contribution by accident.
 # =====================================================================
 
 import diagnose_fetch_layout_layers_redundant_fetches as diag_fetch_layout_layers
@@ -1318,30 +1399,38 @@ assert all(count == 1 for count in _diag_wired_site_counts.values()), (
     f"each of this branch's own wired identify_road_corridor_candidates() call sites must run exactly once, "
     f"got {_diag_wired_site_counts}"
 )
+# road_corridors.geometry-migration branch: pipeline_context.py's own selected_road_corridor field
+# now always holds the full network dict (branches=[] and all), never None, so tree_zone_candidates.py's/
+# solar_suitability.py's own `if selected_road_corridor is None:` self-compute checks no longer fire on
+# this real call graph -- their own identify_road_corridor_candidates() call sites are unreached, not
+# just present-with-zero-contribution. len(...) == 0 is the direct proof; the (still correct, now
+# vacuous) startswith check is kept as a tripwire in case either file's own self-compute regresses back.
+assert len(_diag_unwired_site_counts) == 0, (
+    f"expected ZERO identify_road_corridor_candidates() call sites beyond this branch's own 2 wired ones -- "
+    f"tree_zone_candidates.py's/solar_suitability.py's own self-compute fallbacks must not fire now that "
+    f"pipeline_context.py's selected_road_corridor is never None (see that field's own notes) -- got "
+    f"unexpected site(s): {_diag_unwired_site_counts}"
+)
 assert all(
     site.startswith(("tree_zone_candidates.py:", "solar_suitability.py:")) for site in _diag_unwired_site_counts
 ), (
-    f"every identify_road_corridor_candidates() call site OTHER than this branch's own 3 wired ones must "
+    f"every identify_road_corridor_candidates() call site OTHER than this branch's own 2 wired ones must "
     f"trace to tree_zone_candidates.py or solar_suitability.py (the two files explicitly out of scope for "
     f"this branch) -- got unexpected site(s): {_diag_unwired_site_counts}"
 )
 
-# Regression guard on the actual residual: strictly better than the pre-this-branch baseline (10, measured
-# with road_corridors.py/fencing.py already canopy-aware from the prior branch but before THIS branch forwarded
-# parcel_data.canopy_height into pipeline_context.py's/render_layout_map.py's own calls to them), and pinned
-# to the current real, measured value so any regression -- or any further improvement from a future branch
-# wiring tree_zone_candidates.py/solar_suitability.py -- fails loudly here rather than silently drifting.
-assert _diag_canopy_from_compute_layer < 10, (
-    f"expected this branch's own wiring to reduce the compute-layer canopy-fetch residual below the prior "
-    f"10, got {_diag_canopy_from_compute_layer} -- the wiring may not be reaching fetch_layout_layers()'s "
-    f"real call graph"
-)
-assert _diag_canopy_from_compute_layer == 5, (
-    f"expected exactly 5 residual compute-layer get_canopy_height_for_boundary() calls on this fixture "
-    f"(traced entirely to tree_zone_candidates.py's/solar_suitability.py's own unwired identify_road_"
-    f"corridor_candidates() call sites -- see the per-call-site assertions above), got "
-    f"{_diag_canopy_from_compute_layer}. If this dropped to 0, tree_zone_candidates.py/solar_suitability.py "
-    f"were wired too -- update this assertion. If it rose, this branch's own wiring regressed."
+# Regression guard on the actual residual: the road-corridors-geometry-migration branch closed this
+# outright (pipeline_context.py's own selected_road_corridor is never None anymore -- see the comment
+# above) -- the compute-layer residual is now genuinely ZERO, down from the canopy-mask-wiring-road-
+# fencing branch's own pinned 5 (itself already an improvement over the earlier baseline of 10). Pinned
+# to the current real, measured value so any regression fails loudly here rather than silently drifting.
+assert _diag_canopy_from_compute_layer == 0, (
+    f"expected ZERO residual compute-layer get_canopy_height_for_boundary() calls on this fixture -- "
+    f"pipeline_context.py's selected_road_corridor is never None now, so tree_zone_candidates.py's/"
+    f"solar_suitability.py's own unwired identify_road_corridor_candidates() self-compute (and its own real "
+    f"canopy fetch) should never fire -- got {_diag_canopy_from_compute_layer}. If this rose above 0, "
+    f"either this branch's own road_network passthrough regressed back to None on empty networks, or a new "
+    f"canopy-fetch call site was introduced."
 )
 
 print(
@@ -1351,9 +1440,10 @@ print(
     f"single upstream fetch, {_diag_canopy_from_compute_layer} from the compute layer). This branch's own 3 "
     f"wired call sites (pipeline_context.py's build_pipeline_context(), render_layout_map.py's own fetch_"
     f"layout_layers(), fencing.py's own identify_fencing()) are each confirmed exercised exactly once with "
-    f"ZERO canopy-fetch contribution; the entire {_diag_canopy_from_compute_layer}-call residual traces "
-    f"exclusively to tree_zone_candidates.py's/solar_suitability.py's own unwired identify_road_corridor_"
-    f"candidates() call sites -- both explicitly out of scope for this branch."
+    f"ZERO canopy-fetch contribution; the compute-layer residual is now ZERO too -- the road-corridors-"
+    f"geometry-migration branch's own selected_road_corridor-is-never-None fix means tree_zone_candidates.py's/"
+    f"solar_suitability.py's own identify_road_corridor_candidates() call sites are unreached on this real "
+    f"call graph, not just present with zero canopy contribution."
 )
 
 print("\nAll render_layout_map checks passed.")

@@ -477,27 +477,6 @@ def _snap_anchor_to_eligible_cell(
     return (int(nearest[0]), int(nearest[1]))
 
 
-def _invert_dem(dem: dict) -> dict:
-    """A ridge in real terrain is a valley in its negation -- standard GIS
-    technique. Every other field (resolution, origin, crs) is shared
-    as-is with the original dem dict; only the elevation array itself is
-    negated, so downstream code that reads resolution_meters/origin_x/
-    origin_y/crs off the result still sees the real, un-inverted values.
-
-    KEPT DESPITE THIS BRANCH'S OWN ROUTER REWRITE (see module docstring):
-    this module's own road-generation pipeline no longer identifies ridge
-    lines at all (see build_road_network()), so nothing in
-    road_corridors.py itself calls this anymore. pipeline_context.py's own
-    build_pipeline_context() still has a REAL, load-bearing call site
-    (road_corridors._invert_dem(dem), feeding its own ridge_lines field via
-    valley_delineation.delineate_valleys()) -- pipeline_context.py is out
-    of scope for this branch (consumers are the next branch), so this
-    function stays exactly as it was rather than being deleted out from
-    under a live caller. See this branch's own verification notes for the
-    grep confirming that call site."""
-    return {**dem, "array": -dem["array"]}
-
-
 def _grade_stats(points_xyz: list[tuple[float, float, float]]) -> tuple[float, float]:
     grades = []
     for (x1, y1, z1), (x2, y2, z2) in zip(points_xyz, points_xyz[1:]):

@@ -129,18 +129,25 @@ pipeline_context.py itself) canned identify_optimized_production_areas()/
 fetch_and_select_optimal_water_zone() with fixed return values, so this
 never surfaced; this script is the first to run them for REAL against it.
 Real production_areas comes back empty here, so the real selected_water_
-zone/selected_road_corridor legitimately resolve to None -- and solar_
-suitability.py's/tree_zone_candidates.py's own docstrings are explicit
-that a None override is "indistinguishable from not supplied" (the same
-ambiguous-sentinel convention every override in this pipeline uses) and
-correctly self-computes in that case. So on THIS fixture, a nonzero count
-here means "this run's real production_areas/selected_water_zone came
+zone legitimately resolves to None -- and solar_suitability.py's/tree_
+zone_candidates.py's own docstrings are explicit that a None override is
+"indistinguishable from not supplied" (the same ambiguous-sentinel
+convention every override in this pipeline uses) and correctly self-
+computes in that case. selected_road_corridor does NOT share this caveat:
+pipeline_context.py's own field always holds build_road_network()'s full
+network dict, branches=[] and all, never None (see that field's own
+notes in pipeline_context.py) -- an empty network on this steep fixture
+is still a real, explicit answer forwarded to every nested call, so the
+road-corridor nested bindings below are expected to gate at zero even
+here. So on THIS fixture, a nonzero count on the water-zone nested
+bindings means "this run's real production_areas/selected_water_zone came
 back empty" (confirmed true every time against this terrain), not
 necessarily a reintroduced redundancy -- verify ctx.production_areas/
-ctx.selected_water_zone before treating a nonzero count here as a real
-regression. Against a real property (NETWORK MODE, where production
-areas and a selected water zone are the normal, non-empty case), this
-section's zero-count reasoning holds without that caveat.
+ctx.selected_water_zone before treating a nonzero water-zone count here as
+a real regression; a nonzero road-corridor nested count has no such
+excuse. Against a real property (NETWORK MODE, where production areas and
+a selected water zone are the normal, non-empty case), this section's
+zero-count reasoning holds without that caveat.
 
 --- What this does NOT do ---
 
@@ -279,6 +286,16 @@ _FAKE_SELECTED_ROAD_CORRIDOR = {
 _FAKE_ROAD_CORRIDOR_RESULT = {
     "zones_geojson": {"type": "FeatureCollection", "features": []},
     "all_scored_candidates": [],
+    # "road_network" is what pipeline_context.py's own build_pipeline_
+    # context() reads (never None, even with no branches) -- "selected_
+    # road_corridor" is what solar_suitability.py's/tree_zone_candidates.
+    # py's own internal self-compute fallbacks read off this same return
+    # shape when THEY call identify_road_corridor_candidates() directly.
+    # Both keys point at the same fake dict here since neither consumer in
+    # this script cares about the full real road_network shape (branches/
+    # total_length_meters/stop_reason/...), only cell_footprint_polygon_utm/
+    # cells.
+    "road_network": _FAKE_SELECTED_ROAD_CORRIDOR,
     "selected_road_corridor": _FAKE_SELECTED_ROAD_CORRIDOR,
 }
 
@@ -624,12 +641,10 @@ def _run_pipeline_context_for_canopy_measurement(canopy_height) -> int:
 
 EXPECTED_PRIMARY = {
     "get_dem_for_boundary": 1,
-    # valleys + ridge_lines -- pipeline_context.py calls delineate_valleys()
-    # TWICE on purpose, once against the real dem and once against a
-    # separately-inverted copy (a ridge in real terrain is a valley in its
-    # negation) -- see pipeline_context.py's own module docstring. NOT a
-    # redundant-fetch bug.
-    "delineate_valleys": 2,
+    # valleys only -- ridge_lines (a second delineate_valleys() pass against
+    # an elevation-inverted DEM, feeding output nothing read) was deleted
+    # outright; see pipeline_context.py's own module docstring.
+    "delineate_valleys": 1,
     "identify_optimized_production_areas": 1,
     "fetch_and_select_optimal_water_zone": 1,
     "identify_road_corridor_candidates": 1,
