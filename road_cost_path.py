@@ -35,14 +35,23 @@ constant/param's own docstring below for exactly what moved where):
     moved here from being a hard exclusion in earlier prompts).
 
 build_cost_raster() turns that split into one per-cell cost grid.
-least_cost_path() is Dijkstra, structurally modeled on
-valley_delineation.fill_depressions()'s own heap loop: same "a min-heap of
-(priority, tie-break counter, row, col) tuples, popped in ascending
-priority order, each cell finalized (closed) exactly once" shape. The two
-differences are what fill_depressions() seeds the heap from and what it
-compares (multi-source at cost 0 here vs. the grid's own valid border at
-its own elevation there; a real edge weight — real ground distance times
-the target cell's traversal cost — instead of an elevation comparison).
+
+_dijkstra() is the shared heap loop underneath everything else in this
+module, structurally modeled on valley_delineation.fill_depressions()'s
+own heap loop: same "a min-heap of (priority, tie-break counter, row,
+col) tuples, popped in ascending priority order, each cell finalized
+(closed) exactly once" shape. The two differences are what
+fill_depressions() seeds the heap from and what it compares (multi-source
+at cost 0 here vs. the grid's own valid border at its own elevation
+there; a real edge weight — real ground distance times the target cell's
+traversal cost — instead of an elevation comparison). It can run either
+point-to-point (stopping the instant any destination cell is popped —
+Dijkstra's own ascending-priority pop order guarantees that's the
+cheapest reachable destination across every source/destination pairing at
+once) or one-to-all (run to exhaustion, no destination_cells given at
+all) over the same accumulated-cost field. least_cost_path() is the
+point-to-point caller; cost_distance_field() is the one-to-all caller —
+see each function's own docstring.
 """
 
 import heapq
@@ -90,6 +99,7 @@ FLOODPLAIN_CROSSING_COST_PENALTY = 5.0
 # the other two are expressed in (cost-units per cell of pure travel
 # distance), so changing it would just rescale every cost uniformly.
 _BASE_TRAVEL_COST = 1.0
+
 
 def build_cost_raster(
     dem: dict,
@@ -148,6 +158,172 @@ def build_cost_raster(
     return cost
 
 
+def _dijkstra(
+    dem: dict,
+    cost_raster: np.ndarray,
+    source_cells: list[tuple[int, int]],
+    destination_cells: Optional[list[tuple[int, int]]] = None,
+) -> dict:
+    """
+    Multi-source Dijkstra over D8_OFFSETS adjacency, weighted by
+    cost_raster -- the shared heap loop underneath both least_cost_path()
+    (point-to-point) and cost_distance_field() (one-to-all). See this
+    module's own docstring for the overall shape.
+
+    destination_cells=None runs to exhaustion: every cell reachable from
+    any source_cells entry gets its own finalized accumulated_cost/
+    came_from before the heap empties. destination_cells given (as in
+    least_cost_path()'s own use) terminates the instant any ONE of those
+    cells is popped off the heap -- Dijkstra's own ascending-priority pop
+    order guarantees that's the cheapest reachable destination across
+    every source/destination pairing at once, so there's no need to run
+    this once per candidate pair separately, and no need to keep going
+    past that point.
+
+    Returns:
+
+        {
+            "accumulated_cost": np.ndarray[float64] (rows, cols),
+            "came_from_row": np.ndarray[int32] (rows, cols),
+            "came_from_col": np.ndarray[int32] (rows, cols),
+            "origin_row": np.ndarray[int32] (rows, cols),
+            "origin_col": np.ndarray[int32] (rows, cols),
+            "reached_cell": (row, col) or None,
+        }
+
+    accumulated_cost is np.inf at any cell never reached at all (either
+    because destination_cells cut the search short before that cell was
+    finalized, or because it's genuinely unreachable -- every path to it
+    is blocked by a hard exclusion) and 0.0 at every seeded source cell.
+
+    came_from_row/came_from_col hold the ABSOLUTE (row, col) of the
+    upstream neighbor each cell was reached from, same convention as
+    valley_delineation.compute_flow_direction()'s own flow_to_row/
+    flow_to_col: separate same-shape int32 arrays (not stacked on a third
+    axis), filled with -1. origin_row/origin_col hold the ABSOLUTE
+    (row, col) of whichever source cell that cell's own cheapest path
+    traces back to, same -1 fill.
+
+    AMBIGUOUS SENTINEL, read this before touching either array directly:
+    -1 in came_from_row/came_from_col does NOT by itself mean "this is a
+    source cell" -- it equally means "this cell was never reached at
+    all," since a source cell's own came_from is never set (there is no
+    upstream neighbor to record) and an unreached cell's came_from is
+    likewise never set (relaxation never touched it). The two cases are
+    only distinguishable via accumulated_cost at that same cell:
+    np.isfinite(accumulated_cost[r, c]) means (r, c) is a source cell (or
+    was otherwise reached -- see below); accumulated_cost[r, c] == np.inf
+    means (r, c) was never reached. This is exactly the kind of sentinel
+    ambiguity this codebase has been bitten by before -- never read
+    came_from_row/came_from_col == -1 alone as "source."
+
+    reached_cell is the (row, col) that triggered early termination when
+    destination_cells was given and one of its cells was popped off the
+    heap, or None if destination_cells was None (ran to exhaustion) or if
+    none of destination_cells was ever reachable at all.
+
+    CRITICAL: the heap tuple shape (cost, counter, r, c) with a
+    monotonically increasing tie-break counter, the neighbor visit order
+    (D8_OFFSETS, unchanged), the strict `new_cost < best_cost[nr, nc]`
+    relaxation comparison, the `closed` check placement (both on pop and
+    in the neighbor loop), the edge weight formula (math.hypot(dc * px,
+    dr * py) * neighbor cost), and the source-seeding guard below all
+    determine WHICH of several equal-cost routes wins when there's a tie
+    -- do not restructure any of them.
+    """
+    rows, cols = cost_raster.shape
+    px, py = dem["resolution_meters"]
+    destinations = set(destination_cells) if destination_cells is not None else None
+
+    best_cost = np.full((rows, cols), np.inf, dtype=np.float64)
+    came_from_row = np.full((rows, cols), -1, dtype=np.int32)
+    came_from_col = np.full((rows, cols), -1, dtype=np.int32)
+    origin_row = np.full((rows, cols), -1, dtype=np.int32)
+    origin_col = np.full((rows, cols), -1, dtype=np.int32)
+    closed = np.zeros((rows, cols), dtype=bool)
+
+    heap: list[tuple[float, int, int, int]] = []
+    counter = 0
+
+    for r, c in source_cells:
+        if not np.isfinite(cost_raster[r, c]) or best_cost[r, c] <= 0.0:
+            continue
+        best_cost[r, c] = 0.0
+        origin_row[r, c] = r
+        origin_col[r, c] = c
+        heapq.heappush(heap, (0.0, counter, r, c))
+        counter += 1
+
+    reached_cell: Optional[tuple[int, int]] = None
+
+    while heap:
+        cost, _, r, c = heapq.heappop(heap)
+        if closed[r, c]:
+            continue
+        closed[r, c] = True
+
+        if destinations is not None and (r, c) in destinations:
+            reached_cell = (r, c)
+            break
+
+        for dr, dc in D8_OFFSETS:
+            nr, nc = r + dr, c + dc
+            if not (0 <= nr < rows and 0 <= nc < cols) or closed[nr, nc]:
+                continue
+            neighbor_cost = cost_raster[nr, nc]
+            if not np.isfinite(neighbor_cost):
+                continue
+            new_cost = cost + math.hypot(dc * px, dr * py) * neighbor_cost
+            if new_cost < best_cost[nr, nc]:
+                best_cost[nr, nc] = new_cost
+                came_from_row[nr, nc] = r
+                came_from_col[nr, nc] = c
+                origin_row[nr, nc] = origin_row[r, c]
+                origin_col[nr, nc] = origin_col[r, c]
+                heapq.heappush(heap, (new_cost, counter, nr, nc))
+                counter += 1
+
+    return {
+        "accumulated_cost": best_cost,
+        "came_from_row": came_from_row,
+        "came_from_col": came_from_col,
+        "origin_row": origin_row,
+        "origin_col": origin_col,
+        "reached_cell": reached_cell,
+    }
+
+
+def backtrace_route(
+    came_from_row: np.ndarray,
+    came_from_col: np.ndarray,
+    cell: tuple[int, int],
+) -> list[tuple[int, int]]:
+    """
+    Walks came_from_row/came_from_col (in the exact shape _dijkstra()
+    returns them -- ABSOLUTE row/col, -1 at a source/unreached cell, see
+    _dijkstra()'s own docstring for the disambiguation rule) backward from
+    `cell` to the source cell its own path traces back to, then reverses
+    the walk into source-to-cell order -- the same ordering
+    least_cost_path() has always returned in its own "cells" field.
+
+    `cell` is expected to have actually been reached (i.e. its own
+    accumulated_cost is finite) -- this walks until it hits a cell whose
+    came_from is (-1, -1), which for a reached cell only ever means "this
+    is the source it was traced from," never "unreached" (an unreached
+    cell has no path to walk in the first place).
+    """
+    cells = [cell]
+    r, c = cell
+    while True:
+        pr, pc = int(came_from_row[r, c]), int(came_from_col[r, c])
+        if pr == -1 and pc == -1:
+            break
+        cells.append((pr, pc))
+        r, c = pr, pc
+    cells.reverse()
+    return cells
+
+
 def least_cost_path(
     dem: dict,
     cost_raster: np.ndarray,
@@ -170,75 +346,72 @@ def least_cost_path(
     blocked by hard exclusions) -- a real, reportable routing outcome, not
     an error condition.
 
-    Same heap-loop shape as valley_delineation.fill_depressions(): a
-    min-heap of (cost, tie-break counter, row, col), each cell closed
-    (finalized) exactly once. Seeded from every source cell at cost 0
-    instead of fill_depressions()'s grid border; edge weight is real
-    ground distance to a neighbor (math.hypot(dc * px, dr * py)) times
-    that neighbor's own cost_raster value, instead of an elevation
-    comparison. Terminates the instant any destination cell is popped off
-    the heap -- Dijkstra's own ascending-priority pop order guarantees
-    that's the cheapest reachable destination across every source/
-    destination pairing at once, so there's no need to run this once per
-    candidate pair separately.
+    Thin wrapper over _dijkstra() (point-to-point: terminates the instant
+    any destination cell is popped) + backtrace_route() -- see both of
+    those functions' own docstrings for the heap-loop shape and the
+    backtrace walk. This function's own observable behavior (signature,
+    return shape, which path wins among equal-cost alternatives) is
+    unchanged from before that split.
     """
-    rows, cols = cost_raster.shape
-    px, py = dem["resolution_meters"]
-    destinations = set(destination_cells)
+    result = _dijkstra(dem, cost_raster, source_cells, destination_cells)
+    reached_cell = result["reached_cell"]
+    if reached_cell is None:
+        return None
 
-    best_cost = np.full((rows, cols), np.inf, dtype=np.float64)
-    came_from: dict[tuple[int, int], Optional[tuple[int, int]]] = {}
-    origin_source: dict[tuple[int, int], tuple[int, int]] = {}
-    closed = np.zeros((rows, cols), dtype=bool)
+    r, c = reached_cell
+    cells = backtrace_route(result["came_from_row"], result["came_from_col"], reached_cell)
+    source_cell = (int(result["origin_row"][r, c]), int(result["origin_col"][r, c]))
 
-    heap: list[tuple[float, int, int, int]] = []
-    counter = 0
+    return {
+        "cells": cells,
+        "total_cost": float(result["accumulated_cost"][r, c]),
+        "source_cell": source_cell,
+        "destination_cell": reached_cell,
+    }
 
-    for r, c in source_cells:
-        if not np.isfinite(cost_raster[r, c]) or best_cost[r, c] <= 0.0:
-            continue
-        best_cost[r, c] = 0.0
-        came_from[(r, c)] = None
-        origin_source[(r, c)] = (r, c)
-        heapq.heappush(heap, (0.0, counter, r, c))
-        counter += 1
 
-    while heap:
-        cost, _, r, c = heapq.heappop(heap)
-        if closed[r, c]:
-            continue
-        closed[r, c] = True
+def cost_distance_field(
+    dem: dict,
+    cost_raster: np.ndarray,
+    source_cells: list[tuple[int, int]],
+) -> dict:
+    """
+    One-to-all (well, multi-source-to-all) accumulated-cost field: runs
+    _dijkstra() to exhaustion (no destination_cells at all) from
+    source_cells, over the whole cost_raster grid, and returns the full
+    field:
 
-        if (r, c) in destinations:
-            cells = [(r, c)]
-            cur = (r, c)
-            while came_from[cur] is not None:
-                cur = came_from[cur]
-                cells.append(cur)
-            cells.reverse()
-            return {
-                "cells": cells,
-                "total_cost": float(cost),
-                "source_cell": origin_source[(r, c)],
-                "destination_cell": (r, c),
-            }
+        {
+            "accumulated_cost": np.ndarray[float64] (rows, cols),
+            "came_from_row": np.ndarray[int32] (rows, cols),
+            "came_from_col": np.ndarray[int32] (rows, cols),
+            "origin_row": np.ndarray[int32] (rows, cols),
+            "origin_col": np.ndarray[int32] (rows, cols),
+        }
 
-        for dr, dc in D8_OFFSETS:
-            nr, nc = r + dr, c + dc
-            if not (0 <= nr < rows and 0 <= nc < cols) or closed[nr, nc]:
-                continue
-            neighbor_cost = cost_raster[nr, nc]
-            if not np.isfinite(neighbor_cost):
-                continue
-            new_cost = cost + math.hypot(dc * px, dr * py) * neighbor_cost
-            if new_cost < best_cost[nr, nc]:
-                best_cost[nr, nc] = new_cost
-                came_from[(nr, nc)] = (r, c)
-                origin_source[(nr, nc)] = origin_source[(r, c)]
-                heapq.heappush(heap, (new_cost, counter, nr, nc))
-                counter += 1
+    accumulated_cost is np.inf at any cell unreachable from every one of
+    source_cells (blocked by hard exclusions in every direction) and 0.0
+    at each seeded source cell itself. came_from_row/came_from_col/
+    origin_row/origin_col follow _dijkstra()'s own -1-filled, ABSOLUTE-
+    row/col convention -- see _dijkstra()'s own docstring for the full
+    "-1 is ambiguous between source and unreached, disambiguate via
+    np.isfinite(accumulated_cost)" rule, which applies here identically.
 
-    return None
+    Intended for a caller that wants to evaluate many candidate cells
+    against a single accumulated-cost field (e.g. a coverage-greedy
+    router scoring every cell in the DEM as a potential route endpoint)
+    without running a separate least_cost_path() search per candidate.
+    Use backtrace_route() to recover the actual path to any specific
+    reached cell from the came_from_row/came_from_col this returns.
+    """
+    result = _dijkstra(dem, cost_raster, source_cells, destination_cells=None)
+    return {
+        "accumulated_cost": result["accumulated_cost"],
+        "came_from_row": result["came_from_row"],
+        "came_from_col": result["came_from_col"],
+        "origin_row": result["origin_row"],
+        "origin_col": result["origin_col"],
+    }
 
 
 def path_cells_to_points_xyz(dem: dict, cells: list[tuple[int, int]]) -> list[tuple[float, float, float]]:
@@ -256,9 +429,9 @@ def path_cells_to_points_xyz(dem: dict, cells: list[tuple[int, int]]) -> list[tu
 
 
 if __name__ == "__main__":
-    # Offline smoke test of least_cost_path(), against DEMs sharing the same
-    # source/destination row and the same central column obstacle band,
-    # differing only in which gaps (if any) that band leaves open:
+    # Offline smoke test. First, least_cost_path() against DEMs sharing the
+    # same source/destination row and the same central column obstacle
+    # band, differing only in which gaps (if any) that band leaves open:
     #
     #   - TWO-GAP DEM: a gap near the top AND a gap near the bottom -- a
     #     path is found, and it must actually pass through one of those two
@@ -268,6 +441,14 @@ if __name__ == "__main__":
     #     specific cell.
     #   - NO-GAP DEM: the obstacle band is fully closed -- no destination
     #     cell is reachable at all, so least_cost_path() must return None.
+    #
+    # Then, cost_distance_field()/backtrace_route() -- the one-to-all
+    # exposure this module's _dijkstra() now supports underneath
+    # least_cost_path() -- against: (a) a hand-derived octile-distance
+    # check on open ground, (b) the same fully-closed obstacle band,
+    # proving the -1 came_from sentinel's source-vs-unreached
+    # disambiguation rule holds, and (c) a cross-validation against
+    # least_cost_path()'s own point-to-point answer on the two-gap DEM.
     size = 21
     center_row = size // 2
     obstacle_col = size // 2
@@ -342,5 +523,79 @@ if __name__ == "__main__":
         f"expected least_cost_path() to return None when no destination cell is reachable, got {closed_path}"
     )
     print("Correctly returned None -- no destination reachable.\n")
+
+    print("--- cost_distance_field(): uniform open ground, hand-derived octile distance ---")
+    octile_source = (10, 0)
+    field = cost_distance_field(dem, open_ground_cost_raster, [octile_source])
+    accumulated_cost = field["accumulated_cost"]
+
+    _diagonal_unit_cost = math.hypot(5.0, 5.0)  # 7.0710678..., full precision so 1e-9 checks hold at any distance
+
+    def _expected_octile_cost(source, target):
+        dr = abs(target[0] - source[0])
+        dc = abs(target[1] - source[1])
+        diag = min(dr, dc)
+        straight = max(dr, dc) - diag
+        return _diagonal_unit_cost * diag + 5.0 * straight
+
+    octile_check_cells = [(10, 0), (10, 10), (10, 20), (0, 0), (20, 20), (0, 20), (15, 5)]
+    for cell in octile_check_cells:
+        actual = float(accumulated_cost[cell])
+        expected = _expected_octile_cost(octile_source, cell)
+        print(f"cell={cell}: actual={actual:.7f}, expected={expected:.7f}")
+        assert abs(actual - expected) < 1e-9, (
+            f"cell {cell}: expected octile-distance accumulated_cost {expected}, got {actual}"
+        )
+    print("Every checked cell's accumulated_cost matches the hand-derived octile distance to within 1e-9.\n")
+
+    print("--- cost_distance_field(): fully-closed obstacle band, -1 came_from disambiguation ---")
+    closed_field = cost_distance_field(dem, closed_cost_raster, [source_cell])
+    closed_accumulated_cost = closed_field["accumulated_cost"]
+    closed_came_from_row = closed_field["came_from_row"]
+
+    beyond_band = [(r, c) for r in range(size) for c in range(obstacle_col + 1, size)]
+    for r, c in beyond_band:
+        assert closed_accumulated_cost[r, c] == np.inf, (
+            f"cell ({r}, {c}) is beyond the fully-closed obstacle band -- expected accumulated_cost == inf, "
+            f"got {closed_accumulated_cost[r, c]}"
+        )
+        assert closed_came_from_row[r, c] == -1, (
+            f"cell ({r}, {c}) is beyond the fully-closed obstacle band -- expected came_from_row == -1, "
+            f"got {closed_came_from_row[r, c]}"
+        )
+
+    source_side = [(r, c) for r in range(size) for c in range(0, obstacle_col) if np.isfinite(closed_cost_raster[r, c])]
+    for r, c in source_side:
+        assert np.isfinite(closed_accumulated_cost[r, c]), (
+            f"cell ({r}, {c}) is on the source side of the fully-closed obstacle band -- expected a finite "
+            f"accumulated_cost, got {closed_accumulated_cost[r, c]}"
+        )
+    print(
+        f"All {len(beyond_band)} cells beyond the fully-closed band are unreachable (accumulated_cost == inf, "
+        f"came_from_row == -1); all {len(source_side)} finite-cost source-side cells are reachable (finite "
+        f"accumulated_cost) -- the -1 disambiguation rule holds.\n"
+    )
+
+    print("--- Cross-validation: cost_distance_field() + backtrace_route() vs. least_cost_path() ---")
+    cross_field = cost_distance_field(dem, two_gap_cost_raster, [source_cell])
+    cross_cells = backtrace_route(cross_field["came_from_row"], cross_field["came_from_col"], destination_cell)
+    cross_cost = float(cross_field["accumulated_cost"][destination_cell])
+
+    assert cross_cells == two_gap_path["cells"], (
+        f"cost_distance_field()+backtrace_route() cell list must exactly match least_cost_path()'s own "
+        f"'cells' for the same source/destination pair -- early termination must not change the answer. "
+        f"got {cross_cells} vs {two_gap_path['cells']}"
+    )
+    assert abs(cross_cost - two_gap_path["total_cost"]) < 1e-9, (
+        f"cost_distance_field()'s accumulated_cost at the destination ({cross_cost}) must equal "
+        f"least_cost_path()'s own total_cost ({two_gap_path['total_cost']}) to within 1e-9"
+    )
+    print(
+        f"cost_distance_field()+backtrace_route() reproduces least_cost_path()'s own {len(cross_cells)}-cell "
+        f"path and total_cost ({cross_cost:.2f}) exactly on the two-gap DEM.\n"
+    )
+
+    print(f"accumulated_cost.dtype={accumulated_cost.dtype}, came_from_row.dtype={field['came_from_row'].dtype}, "
+          f"came_from_row.shape={field['came_from_row'].shape}")
 
     print("Smoke test passed.")
