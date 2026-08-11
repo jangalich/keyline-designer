@@ -29,16 +29,20 @@ fetch (dem_data.py) is working.
 METHOD: a full disc neighborhood (every valid cell whose center falls
 within radius_meters of the cell being scored, weighted equally), not an
 annulus (excluding a smaller inner disc) -- the simpler of the two
-standard TPI variants. Implemented as a set of (row, col) kernel offsets
-built once from the DEM's own resolution_meters (which is NOT assumed
-square: an offset (dr, dc) is inside the kernel iff
-hypot(dc * pixel_size_x, dr * pixel_size_y) <= radius_meters, so a
-non-square-pixel DEM gets a genuinely elliptical kernel in cell terms,
-not a circular one squashed into a rectangle of cells). Each kernel
-offset is applied to the whole grid at once via an array shift (same
-shift-and-accumulate approach raster_grid.py's binary_erode()/
-binary_dilate() use to stay scipy-free) rather than convolution, so this
-has no scipy dependency either.
+standard TPI variants. The (row, col) kernel offset list itself --
+built from the DEM's own resolution_meters, which is NOT assumed square
+-- is raster_grid.build_disc_kernel_offsets(), not something this module
+computes itself: a disc-shaped set of grid offsets is raster geometry,
+not a TPI-specific concept, and raster_grid.py is already where this
+codebase keeps that kind of shared building block (see D8_OFFSETS
+there). It moved there once a second consumer needed the exact same
+offset list for a different purpose (a disc-radius coverage/dilation
+test, "is this cell within radius_meters of any cell in a given mask"),
+which made it clearly not TPI-specific. Each kernel offset is applied to
+the whole grid at once via an array shift (same shift-and-accumulate
+approach raster_grid.py's binary_erode()/binary_dilate() use to stay
+scipy-free) rather than convolution, so this has no scipy dependency
+either.
 
 nodata is np.nan, matching valley_delineation.py's own _valid_mask()
 convention. NaN cells are excluded from every neighborhood mean they'd
@@ -80,9 +84,9 @@ Known limitations, stated plainly rather than glossed over:
     change independently.
 """
 
-import math
-
 import numpy as np
+
+from raster_grid import build_disc_kernel_offsets
 
 # Real-world radius (meters) of the disc neighborhood each cell's TPI is
 # computed against. Sets the scale of landform this detects: roughly
@@ -136,34 +140,6 @@ def _shift(array: np.ndarray, dr: int, dc: int, fill):
 
     out[r_dst_start:r_dst_end, c_dst_start:c_dst_end] = array[r_src_start:r_src_end, c_src_start:c_src_end]
     return out
-
-
-def build_disc_kernel_offsets(
-    resolution_meters: tuple[float, float], radius_meters: float
-) -> list[tuple[int, int]]:
-    """
-    Every (dr, dc) cell offset whose ground-distance from the center cell
-    -- hypot(dc * pixel_size_x, dr * pixel_size_y), using the DEM's own,
-    not-necessarily-square resolution_meters -- falls within
-    radius_meters. Includes (0, 0) (the center cell is always part of its
-    own neighborhood mean). A non-square resolution_meters produces a
-    genuinely elliptical set of offsets in cell terms, wider along the
-    finer-resolution axis, not a circle.
-
-    The search bounds (ceil(radius_meters / pixel_size)) are a safe outer
-    bound, not a tight one -- correctness comes entirely from the hypot
-    check on every candidate offset, not from the loop bounds themselves.
-    """
-    px, py = resolution_meters
-    max_dr = math.ceil(radius_meters / py)
-    max_dc = math.ceil(radius_meters / px)
-
-    offsets = []
-    for dr in range(-max_dr, max_dr + 1):
-        for dc in range(-max_dc, max_dc + 1):
-            if math.hypot(dc * px, dr * py) <= radius_meters:
-                offsets.append((dr, dc))
-    return offsets
 
 
 def compute_tpi(dem: dict, radius_meters: float = DEFAULT_TPI_RADIUS_METERS) -> np.ndarray:

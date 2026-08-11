@@ -132,34 +132,11 @@ print(
 )
 
 
-# --- 4. Non-square resolution: kernel is elliptical in cell terms ---
-
-non_square_resolution = (5.0, 10.0)  # finer in x than y
-offsets = build_disc_kernel_offsets(non_square_resolution, radius_meters=20.0)
-
-# Hand-derived: condition is hypot(dc*5, dr*10) <= 20.
-#   dr=0:  |dc*5| <= 20            -> dc in -4..4  -> 9 offsets
-#   dr=+-1: (dc*5)^2 <= 400-100=300 -> |dc| <= 3.46 -> dc in -3..3 -> 7 offsets each
-#   dr=+-2: (dc*5)^2 <= 400-400=0   -> dc == 0 only  -> 1 offset each
-#   total = 9 + 2*7 + 2*1 = 25
-count_dr0 = sum(1 for dr, dc in offsets if dr == 0)
-count_dr_extreme = sum(1 for dr, dc in offsets if dr == 2)
-total_count = len(offsets)
-
-assert count_dr0 == 9, f"dr=0 row should include 9 cells (dc in -4..4), got {count_dr0}"
-assert count_dr_extreme == 1, f"dr=2 row should include exactly 1 cell (dc == 0 only), got {count_dr_extreme}"
-assert total_count == 25, f"expected 25 total kernel cells at radius=20.0, resolution=(5.0, 10.0), got {total_count}"
-assert count_dr0 > count_dr_extreme, (
-    "kernel should be wider along the finer-resolution (x) axis than tall along the coarser (y) axis -- "
-    f"an ellipse in cell terms, not a circle (dr=0 count {count_dr0} vs dr=2 count {count_dr_extreme})"
-)
-print(
-    f"Non-square resolution (5.0, 10.0) kernel at radius=20.0: {total_count} total cells, "
-    f"{count_dr0} at dr=0 vs {count_dr_extreme} at dr=+-2 -- confirmed elliptical, not circular."
-)
-
-
 # --- 5. NaN handling: a block of nodata doesn't skew neighboring valid means ---
+# (test 4, the non-square-resolution kernel-shape check, moved to
+# test_raster_grid.py -- it exercises build_disc_kernel_offsets() directly,
+# which now lives in raster_grid.py as shared grid geometry, not a
+# TPI-specific behavior of this module.)
 
 nan_size = 15
 nan_array = np.full((nan_size, nan_size), 50.0, dtype=np.float64)

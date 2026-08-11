@@ -49,6 +49,42 @@ def cell_area_acres(dem: dict) -> float:
 D8_OFFSETS = [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)]
 
 
+def build_disc_kernel_offsets(
+    resolution_meters: tuple[float, float], radius_meters: float
+) -> list[tuple[int, int]]:
+    """
+    Every (dr, dc) cell offset whose real-ground displacement from a
+    center cell -- hypot(dc * px, dr * py), using a (px, py) resolution
+    tuple that is NOT assumed square -- falls within radius_meters.
+    Always includes (0, 0) (the center cell is always within
+    radius_meters of itself). Whenever px != py, the result is a
+    genuinely elliptical set of offsets in cell terms (wider along
+    whichever axis has the finer resolution), not a circle.
+
+    Shared raster/grid geometry, not tied to any one caller's use of it --
+    the same offset list works as a disc-neighborhood kernel for a
+    neighborhood-average computation, or as the structuring element for a
+    disc-radius coverage/dilation test ("is this cell within
+    radius_meters of any cell in a given mask"). Lives here alongside
+    D8_OFFSETS for that reason: it's shared grid geometry, not specific
+    to any one terrain-analysis module.
+
+    The search bounds (ceil(radius_meters / pixel_size)) are a safe outer
+    bound, not a tight one -- correctness comes entirely from the hypot
+    check on every candidate offset, not from the loop bounds themselves.
+    """
+    px, py = resolution_meters
+    max_dr = math.ceil(radius_meters / py)
+    max_dc = math.ceil(radius_meters / px)
+
+    offsets = []
+    for dr in range(-max_dr, max_dr + 1):
+        for dc in range(-max_dc, max_dc + 1):
+            if math.hypot(dc * px, dr * py) <= radius_meters:
+                offsets.append((dr, dc))
+    return offsets
+
+
 def _shift(arr: np.ndarray, dr: int, dc: int) -> np.ndarray:
     """Returns a same-shape array where out[r, c] == arr[r + dr, c + dc],
     treating anything outside arr's own bounds as False -- i.e. "shift the
