@@ -67,28 +67,39 @@ REASONING SEQUENCE — follow this exact order, do not skip ahead or reorder it:
    within a zone as a definitive pond/dam site; that requires separate, more detailed
    analysis (storage volume, dam wall geometry) this pipeline doesn't perform.
 
-4. FARM ROADS (contour or ridge placement). When SUGGESTED ROAD CORRIDOR data is
-   provided below (DEM-derived contour-band and/or ridge-top candidates, hard-screened
-   against the single selected water-system zone and floodplain/hydric ground only,
-   ranked by grade consistency, a production-zone-avoidance PREFERENCE (scored against
-   step 2's optimized/final production geometry), and length), narrate FROM those
-   ranked candidates — name/rank them, compare grade and length where more than one is
-   offered, and say plainly if a candidate has no connector reaching the boundary (no
-   real named road was nearby to anchor to) or is anchored to a real, named mapped road,
-   rather than treating either as unremarkable. Do not invent a corridor of your own
-   where real candidates are provided. If no candidate data is available for this
-   property (or none cleared the constraint stack), fall back to describing routing that
-   would follow the ridge or contour lines from step 2 and avoid the water
-   infrastructure/catchments from step 3, and say plainly that this is an unverified
-   topographic suggestion, not a placement backed by computed candidate geometry.
-   A candidate MAY cross a production zone from step 2 — properties.crosses_production_zone
-   reports this, and it's a real, valid routing option (a road is a thin linear feature,
-   not a large permanent land claim), not something to flag as a problem; only note it as
-   a genuine tradeoff (interrupted field access/operations) where it's actually material,
-   not as a blanket caveat on every crossing candidate. Note that no surveyed parcel or
-   easement data feeds this step regardless of which path was used. Soil (including
-   erosion-prone SSURGO K-factor ground) is deliberately NOT considered here at all — it
-   belongs to step 8, below this one in the Scale of Permanence ordering.
+4. FARM ROADS. When ROAD NETWORK data is provided below (a single road NETWORK grown
+   outward from the property's real, chosen access point by a coverage-greedy router,
+   hard-screened against the single selected water-system zone and grade, with
+   floodplain/hydric ground and production land as soft cost penalties — see that data's
+   own notes for exactly how it stopped), narrate FROM that network. This is ONE network,
+   not a set of ranked candidate routes to compare or name/rank — describe the trunk
+   branch as the recommended road (its own length/grade/newly-served acreage), and state
+   the network's total length and total served acreage plainly. A short spur off the
+   trunk is real geometry, not a separate corridor — mention it in proportion to its own
+   numbers (a few-foot stub genuinely is a minor detail, not "additional access"); do not
+   inflate it into language implying it opens up new access on its own. When a spur
+   serves the water-system zone sited in step 3 rather than production ground, say so
+   plainly — that is what it is for. State the router's own stopping reason honestly,
+   using the specific sentence supplied with the data (further road not justified by
+   remaining acreage, all identified ground reached, no production area to serve, or
+   ground identified but unreachable given terrain/exclusions) — do not soften or omit
+   it. If no network data is available for this property (or the router found nothing at
+   all to build), fall back to describing routing that would follow the ridge or contour
+   lines from step 2 and avoid the water infrastructure/catchments from step 3, and say
+   plainly that this is an unverified topographic suggestion, not a placement backed by
+   computed network geometry. A branch MAY cross a production zone from step 2 —
+   properties.crosses_production_zone reports this, and it's a real, valid routing option
+   (a road is a thin linear feature, not a large permanent land claim), not something to
+   flag as a problem; only note it as a genuine tradeoff (interrupted field
+   access/operations) where it's actually material, not as a blanket caveat on every
+   crossing branch. Note that no surveyed parcel or easement data feeds this step
+   regardless of which path was used. Soil (including erosion-prone SSURGO K-factor
+   ground) is deliberately NOT considered here at all — it belongs to step 8, below this
+   one in the Scale of Permanence ordering. Trees, structures, and subdivision fencing
+   (steps 5-7) are decided AFTER this step and must not be described as having
+   constrained this network's routing — if a genuine spatial relationship between the
+   road and a later-step feature is worth naming, save it for that later step's own
+   section, which already carries the constraint forward from here.
 
 5. TREES (windbreaks, riparian buffers). Use Climate's prevailing wind (step 1) for
    windbreak orientation and Water Supply's stream/pond locations (step 3) for riparian
@@ -189,8 +200,8 @@ presence of woody/forest cover specifically, note explicitly that this dataset c
 establish that, and that ground-truthing (a site visit) or higher-resolution/multi-
 season imagery would be needed to distinguish vigorous open pasture from tree canopy.
 
-DATA HONESTY: Farm Roads has real candidate-corridor geometry (step 4) when the
-constraint stack produced any; Permanent Buildings has real candidate-zone geometry for
+DATA HONESTY: Farm Roads has a real, routed road NETWORK (step 4) when the router
+produced one; Permanent Buildings has real candidate-zone geometry for
 solar siting specifically (step 6), but nothing else about building placement;
 Subdivision Fences has real computed geometry for STREAM EXCLUSION and PERIMETER
 fencing specifically (step 7), but nothing else in that section — pond/water exclusion,
@@ -198,7 +209,7 @@ tree crop/windbreak exclusion, and subdivision/rotational fencing are all narrat
 there, reasoned from structured context established in earlier steps rather than their
 own computed geometry (see step 7's guidance above for exactly how to frame each). When
 reasoning about parts of these sections that AREN'T backed by real candidate geometry
-(non-solar building siting, Farm Roads when no corridor candidates were available, or
+(non-solar building siting, Farm Roads when no network data was available, or
 any Subdivision Fences content besides stream exclusion/perimeter), say plainly that no
 dedicated infrastructure/parcel/zoning data exists there, rather than inventing a
 specific-sounding recommendation the data can't support (an exact building footprint, a
@@ -313,45 +324,120 @@ def _format_water_candidate_zones_summary(zones_geojson: Optional[dict]) -> str:
     return "\n".join(lines)
 
 
-def _format_road_corridor_summary(zones_geojson: Optional[dict]) -> str:
-    """Formats road_corridors.py's "suggested_road_corridor" layer (see
-    that module for the least-cost-path routing and constraint stack
-    behind it) for the report prompt. Optional, same reasoning as
-    the other DEM/network-backed layers — a fetch failure shouldn't take
-    down the whole report; step 4 of the system prompt falls back to its
-    old prose-inference behavior when this is empty/unavailable."""
-    if not zones_geojson or not zones_geojson.get("features"):
+# Mirrors road_corridors.METERS_PER_FOOT exactly (a fixed physical constant, not
+# something that drifts) -- kept local rather than imported so this module stays
+# decoupled from road_corridors.py the same way every other _format_*_summary()
+# function here is decoupled from its own source module, consuming only an
+# already-computed dict.
+_METERS_PER_FOOT = 0.3048
+
+# One real sentence per road_corridors.py/road_network_router.py stop_reason value
+# (see route_road_network()'s own docstring for what each means) -- deliberately a
+# closed set: an unrecognized value fails loudly in _format_road_corridor_summary()
+# below rather than falling through to a generic, potentially misleading sentence.
+_ROAD_NETWORK_STOP_REASON_SENTENCES = {
+    "cost_per_acre_exceeded": (
+        "Routing stopped because further road would not be justified by the "
+        "additional land it would serve — {unserved_acres} acre(s) of identified "
+        "production ground remain unserved."
+    ),
+    "all_demand_served": "The network reaches all identified production ground.",
+    "no_demand": (
+        "No production area was identified on this property, so no farm road is "
+        "recommended."
+    ),
+    "no_reachable_demand": (
+        "Production ground exists on this property but cannot be reached from the "
+        "access point given the terrain and exclusions in play."
+    ),
+}
+
+
+def _format_road_corridor_summary(road_network: Optional[dict]) -> str:
+    """Formats road_corridors.py's build_road_network() output -- the full,
+    possibly-multi-branch road NETWORK (see that module's own module
+    docstring for the coverage-greedy routing and constraint stack behind
+    it), NOT the "suggested_road_corridor" GeoJSON layer -- for the report
+    prompt. The raw network dict is used rather than the GeoJSON layer
+    specifically because stop_reason (see below) is only ever present on
+    the network dict; corridors_to_geojson() collapses an empty network
+    (zero branches) to an empty FeatureCollection with nowhere to carry
+    that value, and stop_reason is exactly what distinguishes "no
+    production land exists" from "production land exists but is
+    unreachable" from "the network already reached everything worth
+    reaching" -- three very different messages a farmer needs told apart.
+    Optional, same reasoning as the other DEM/network-backed layers — a
+    fetch failure (or an unrecognized/outdated shape from a caller not yet
+    updated to this network dict) shouldn't take down the whole report;
+    step 4 of the system prompt falls back to its old prose-inference
+    behavior when this is empty/unavailable."""
+    if not road_network or "branches" not in road_network or "stop_reason" not in road_network:
         return (
-            "No suggested road corridor candidates identified (either "
-            "nothing cleared the constraint stack, or DEM/NHD/SSURGO data "
-            "wasn't available for this property) — fall back to "
-            "topographic reasoning from Land Shape (step 2) for this "
-            "section, and say plainly that it isn't backed by computed "
-            "candidate geometry."
+            "No road network data available (either the DEM/NHD/SSURGO data "
+            "wasn't available for this property, or this run's caller hasn't "
+            "supplied the current network shape) — fall back to topographic "
+            "reasoning from Land Shape (step 2) for this section, and say "
+            "plainly that it isn't backed by computed network geometry."
         )
 
-    lines = [f"{len(zones_geojson['features'])} ranked candidate corridor(s) identified:"]
-    for feature in zones_geojson["features"]:
-        props = feature["properties"]
-        if props.get("anchor_status") == "no_named_road_available":
-            anchor_note = "does NOT reach the property boundary (no real named road was nearby to anchor to)"
-        elif props.get("anchor_road_name"):
-            anchor_note = f"anchored to {props['anchor_road_name']} ({props.get('anchor_road_distance_ft')}ft)"
-        else:
-            anchor_note = "anchored near a real mapped road"
-        crossing_note = " [crosses a production zone]" if props.get("crosses_production_zone") else ""
-        lines.append(
-            f"  - Rank {props['rank']} (score {props['suitability_score']}/100): "
-            f"{props['avg_grade_pct']}% avg grade, {props['length_ft']}ft long, {anchor_note}{crossing_note}"
+    stop_reason = road_network["stop_reason"]
+    if stop_reason not in _ROAD_NETWORK_STOP_REASON_SENTENCES:
+        raise ValueError(
+            f"_format_road_corridor_summary() doesn't recognize road network "
+            f"stop_reason {stop_reason!r} -- road_network_router.route_road_network() "
+            f"must have added a new stop_reason value; add its sentence to "
+            f"_ROAD_NETWORK_STOP_REASON_SENTENCES rather than let this fall through "
+            f"to a generic, potentially misleading message."
         )
+    stop_reason_sentence = _ROAD_NETWORK_STOP_REASON_SENTENCES[stop_reason].format(
+        unserved_acres=round(road_network.get("unserved_acres", 0.0), 2)
+    )
+
+    branches = road_network["branches"]
+    if not branches:
+        return stop_reason_sentence
+
+    def _length_ft(branch: dict) -> float:
+        return round(branch["length_meters"] / _METERS_PER_FOOT, 1)
+
+    trunk = next((b for b in branches if b["branch_role"] == "trunk"), branches[0])
+    lines = [
+        f"Recommended road: a single route ({trunk['branch_role']}) {_length_ft(trunk)}ft long, "
+        f"averaging {round(trunk['avg_grade_pct'], 1)}% grade, newly serving "
+        f"{round(trunk['newly_served_acres'], 3)} acre(s) of identified production ground."
+        + (" [crosses a production zone]" if trunk.get("crosses_production_zone") else "")
+    ]
+
+    branch_by_index = {b["branch_index"]: b for b in branches}
+    for branch in branches:
+        if branch is trunk:
+            continue
+        parent = branch_by_index.get(branch["joins_branch_index"])
+        parent_note = (
+            f"off the {parent['branch_role']}" if parent is not None else "off the network"
+        )
+        purpose_note = ", reaching the water zone sited in step 3" if branch["branch_role"] == "water_spur" else ""
+        crossing_note = " [crosses a production zone]" if branch.get("crosses_production_zone") else ""
+        lines.append(
+            f"  - {_length_ft(branch)}ft spur {parent_note}{purpose_note}, "
+            f"{round(branch['avg_grade_pct'], 1)}% avg grade, "
+            f"{round(branch['newly_served_acres'], 3)} acre(s) newly served{crossing_note}"
+        )
+
+    total_length_ft = round(road_network["total_length_meters"] / _METERS_PER_FOOT, 1)
     lines.append(
-        "\nThese are ranked CANDIDATE CORRIDORS from a cost-driven least-cost-path routing model "
-        "(up to one per quadrant of the property), not a single forced routing — narrate from this "
-        "geometry rather than inventing a corridor, compare candidates where more than one is "
-        "offered, say plainly wherever a candidate has no connector reaching the boundary (vs. "
-        "anchored to a named real road — this feature never anchors to an arbitrary boundary "
-        "point), and treat a production-zone crossing as a real, valid routing option (not a "
-        "caveat) unless it's a genuine material tradeoff worth naming."
+        f"\nTotal network length: {total_length_ft}ft, serving "
+        f"{round(road_network['total_served_acres'], 3)} acre(s) of production ground total. "
+        f"{stop_reason_sentence}"
+    )
+    lines.append(
+        "\nThis is ONE road NETWORK grown from the property's real access point, not a set of "
+        "ranked candidate routes — describe the trunk above as the recommended road; mention any "
+        "spur only in proportion to its own length/acreage above (a few-foot stub is a minor "
+        "detail, not a second corridor — do not call it 'additional access'), and state the total "
+        "network length/served acreage and the stop-reason sentence above plainly rather than "
+        "omitting or softening them. Treat a production-zone crossing as a real, valid routing "
+        "option (not a caveat) unless it's a genuine material tradeoff worth naming."
     )
     return "\n".join(lines)
 
@@ -476,7 +562,7 @@ def generate_scale_of_permanence_report(
     imagery_summary: Optional[dict] = None,
     water_candidate_zones_geojson: Optional[dict] = None,
     solar_candidate_zones_geojson: Optional[dict] = None,
-    road_corridor_candidates_geojson: Optional[dict] = None,
+    road_network: Optional[dict] = None,
     fencing_geojson: Optional[dict] = None,
 ) -> str:
     """
@@ -485,18 +571,20 @@ def generate_scale_of_permanence_report(
     climate_data.py), imagery_summary (from imagery_data.py),
     water_candidate_zones_geojson (the "water_system_candidate" layer from
     water_candidate_zones.py), solar_candidate_zones_geojson (the
-    "solar_infrastructure" layer from solar_suitability.py),
-    road_corridor_candidates_geojson (the "suggested_road_corridor" layer
-    from road_corridors.py), and fencing_geojson (the combined
-    "exclusion_fencing" + "perimeter_fencing" layers from fencing.py) are
-    all optional so existing callers built before those layers existed
-    don't break — but including them produces a meaningfully better
-    report: climate is literally the first item in the Scale of
-    Permanence framework, imagery gives Claude a current land-cover
-    cross-check against the soil data, the water candidate zones give the
-    WATER SUPPLY section a DEM-grounded answer to "where" instead of
-    reasoning from the coarse elevation grid alone, the road corridor
-    candidates do the same for FARM ROADS, the solar candidate zones do
+    "solar_infrastructure" layer from solar_suitability.py), road_network
+    (road_corridors.build_road_network()'s own full network dict --
+    road_corridor_result["road_network"], NOT road_corridor_result
+    ["zones_geojson"] -- see _format_road_corridor_summary()'s own
+    docstring for why the raw network dict is what this needs), and
+    fencing_geojson (the combined "exclusion_fencing" + "perimeter_fencing"
+    layers from fencing.py) are all optional so existing callers built
+    before those layers existed don't break — but including them produces
+    a meaningfully better report: climate is literally the first item in
+    the Scale of Permanence framework, imagery gives Claude a current
+    land-cover cross-check against the soil data, the water candidate
+    zones give the WATER SUPPLY section a DEM-grounded answer to "where"
+    instead of reasoning from the coarse elevation grid alone, the road
+    network does the same for FARM ROADS, the solar candidate zones do
     the same for PERMANENT BUILDINGS' solar siting discussion, and the
     fencing geometry does the same for SUBDIVISION FENCES' stream-
     exclusion/perimeter content specifically (everything else in that
@@ -529,8 +617,8 @@ SATELLITE IMAGERY / LAND COVER (NDVI-derived):
 WATER SYSTEM CANDIDATE ZONES (valley-based, DEM/LiDAR-derived):
 {_format_water_candidate_zones_summary(water_candidate_zones_geojson)}
 
-SUGGESTED ROAD CORRIDOR CANDIDATES (contour-band/ridge-top, DEM-derived):
-{_format_road_corridor_summary(road_corridor_candidates_geojson)}
+ROAD NETWORK (coverage-greedy cost routing from the real access point, DEM-derived):
+{_format_road_corridor_summary(road_network)}
 
 SOLAR INFRASTRUCTURE CANDIDATE ZONES (ranked, DEM-derived):
 {_format_solar_candidate_zones_summary(solar_candidate_zones_geojson)}
