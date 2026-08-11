@@ -19,20 +19,34 @@ Pipeline:
     ordered path cells --> (x, y, elevation) points
 
 Hard exclusion vs. soft cost penalty, current design (this module's own
-responsibility only covers the SLOPE half of that split -- see each
-constant/param's own docstring below for exactly what moved where):
+responsibility now covers the SLOPE, RIDGE-PREFERENCE, and PRODUCTION
+terms too -- see each constant/param's own docstring below for exactly
+what moved where):
   - HARD (np.inf in cost_raster, a route genuinely cannot cross it at
-    all): excluded_mask -- which is now the CALLER's responsibility to
-    build correctly, expected to already fold in off-boundary ground, the
-    selected water-system zone (buffered), AND production zone(s) (see
-    road_corridors.py once a later prompt wires this in) -- plus any cell
-    where slope_pct itself is NaN (undefined terrain, see build_cost_
-    raster()'s own docstring).
+    all): excluded_mask -- which remains the CALLER's responsibility to
+    build correctly, expected to fold in off-boundary ground and the
+    selected water-system zone (buffered) -- plus any cell where
+    slope_pct itself is NaN (undefined terrain, see build_cost_raster()'s
+    own docstring), plus, when the caller opts in via
+    impassable_grade_pct, any cell whose slope_pct exceeds that ceiling
+    (a grade no farm road would ever be built on, distinct from
+    excluded_mask itself -- see build_cost_raster()'s own docstring).
+    Production ground is deliberately NOT part of this hard bucket
+    anymore (see below) -- a caller building excluded_mask should not
+    fold production zones into it under the current design.
   - SOFT (a finite cost penalty, a route CAN still choose to pay it):
-    grade (an unbounded quadratic penalty -- there is no grade ceiling in
-    this design anymore, unlike the hard MAX_ROAD_GRADE_PCT cutoff earlier
-    prompts used) and floodplain/riparian ground (a flat additive penalty,
-    moved here from being a hard exclusion in earlier prompts).
+    grade (an unbounded quadratic penalty by default -- see
+    impassable_grade_pct above for the opt-in hard ceiling instead),
+    floodplain/riparian ground (a flat additive penalty), a TPI
+    ridge-preference discount/premium (scales only the base travel term,
+    cheaper on crests/spurs and costlier in hollows/draws -- see the tpi
+    parameter's own docstring), and production-land traversal (a
+    proportional multiplier on the total cost so far -- see the
+    production_mask parameter's own docstring for why this moved back to
+    SOFT after an earlier design made it HARD: a parcel that's mostly
+    production ground can have no non-production route that serves
+    anything at all, and a hard exclusion there makes the router come
+    back with nothing rather than an honest, if costly, answer).
 
 build_cost_raster() turns that split into one per-cell cost grid.
 
@@ -100,6 +114,34 @@ FLOODPLAIN_CROSSING_COST_PENALTY = 5.0
 # distance), so changing it would just rescale every cost uniformly.
 _BASE_TRAVEL_COST = 1.0
 
+# Fraction of _BASE_TRAVEL_COST that TPI ridge preference can swing the
+# base travel term by, in either direction: a strongly positive-TPI cell
+# (crest/spur) costs as little as (1 - TPI_PREFERENCE_STRENGTH) times base
+# travel cost, a strongly negative-TPI cell (hollow/draw) as much as
+# (1 + TPI_PREFERENCE_STRENGTH) times base travel cost, with tanh()
+# smoothly bounding every value in between (see build_cost_raster()'s own
+# docstring for the exact formula). Values at or above 1.0 would drive the
+# scaled base cost to zero or negative for a strongly-positive-TPI cell --
+# rejected by this function's own mandatory positivity assertion, not
+# silently clamped. CONFIGURABLE, same deliberately-unvalidated-starting-
+# value caveat every other threshold in this module already carries.
+TPI_PREFERENCE_STRENGTH = 0.5
+
+# TPI magnitude (meters) at which the tanh() ridge-preference response is
+# roughly two-thirds saturated (tanh(1) ≈ 0.762) -- i.e. the relief scale
+# this module treats as "clearly a ridge or clearly a hollow" on a small
+# farm parcel, not a borderline/near-flat reading. CONFIGURABLE, same
+# unvalidated-starting-value caveat as TPI_PREFERENCE_STRENGTH above.
+TPI_REFERENCE_METERS = 3.0
+
+# Multiplier applied to a production-land cell's total cost (grade +
+# floodplain + TPI-scaled travel, all of it) -- crossing cultivated ground
+# is proportionally more costly whatever the terrain underneath happens to
+# be, not a flat add-on the way FLOODPLAIN_CROSSING_COST_PENALTY is.
+# CONFIGURABLE, same unvalidated-starting-value caveat as every other
+# threshold in this module.
+PRODUCTION_TRAVERSAL_COST_MULTIPLIER = 3.0
+
 
 def build_cost_raster(
     dem: dict,
@@ -108,53 +150,166 @@ def build_cost_raster(
     floodplain_mask: Optional[np.ndarray] = None,
     grade_penalty_weight: float = GRADE_PENALTY_WEIGHT,
     floodplain_penalty: float = FLOODPLAIN_CROSSING_COST_PENALTY,
+    tpi: Optional[np.ndarray] = None,
+    production_mask: Optional[np.ndarray] = None,
+    impassable_grade_pct: Optional[float] = None,
+    tpi_preference_strength: float = TPI_PREFERENCE_STRENGTH,
+    tpi_reference_meters: float = TPI_REFERENCE_METERS,
+    production_multiplier: float = PRODUCTION_TRAVERSAL_COST_MULTIPLIER,
 ) -> np.ndarray:
     """
     Per-cell traversal-cost grid, same shape as dem['array'].
 
-    np.inf wherever excluded_mask is True or slope_pct is NaN (an edge/
-    nodata-adjacent cell terrain_metrics.compute_slope_and_aspect() can't
-    compute a real slope for at all -- folded into the same "not real,
-    traversable ground" bucket excluded_mask represents, rather than left
-    to produce a NaN cost that would silently corrupt the Dijkstra heap
-    comparisons in least_cost_path()).
+    Every new parameter below (tpi, production_mask, impassable_grade_pct,
+    and the three tuning knobs that go with them) is OPTIONAL and defaults
+    to behavior IDENTICAL to this function's own earlier signature --
+    an existing caller that never passes any of them gets exactly the
+    same cost raster as before this extension.
 
-    excluded_mask is entirely the CALLER's own responsibility to build
-    correctly -- under the current design it's expected to already
-    include off-boundary cells, the selected water-system zone (buffered),
-    AND production zone(s), all HARD exclusions (see road_corridors.py
-    once a later prompt wires this in). This module has no
-    max_grade_pct or production_mask parameter anymore: grade has no hard
-    ceiling here at all (an arbitrarily steep, non-excluded cell is always
-    traversable, just increasingly expensive -- see grade_penalty_weight
-    below), and production is no longer this module's own soft term --
-    it's now the caller's job to fold into excluded_mask before calling
-    this at all, since the current design treats it as hard, not soft.
+    excluded_mask remains entirely the CALLER's own responsibility to
+    build correctly -- expected to already include off-boundary cells and
+    the selected water-system zone (buffered), a HARD exclusion in both
+    directions (np.inf, never traversable at any cost). It is NOT expected
+    to fold production ground in anymore -- see production_mask below for
+    why that moved back to a soft term here.
 
-    Every other cell gets a finite cost: _BASE_TRAVEL_COST (raw travel
-    distance) plus grade_penalty_weight * slope_pct ** 2 -- an UNBOUNDED
-    quadratic grade penalty (see that constant's own comment for why it's
-    no longer normalized against any ceiling) -- plus floodplain_penalty
-    for any cell where floodplain_mask is True (floodplain_mask omitted or
-    None means no floodplain penalty at all, e.g. a caller that hasn't
-    computed one yet).
+    Exact order of operations:
+
+      1. hard_excluded = excluded_mask | np.isnan(slope_pct) -- np.inf
+         wherever excluded_mask is True or slope_pct is NaN (an edge/
+         nodata-adjacent cell terrain_metrics.compute_slope_and_aspect()
+         can't compute a real slope for at all -- folded into the same
+         "not real, traversable ground" bucket excluded_mask represents,
+         rather than left to produce a NaN cost that would silently
+         corrupt the Dijkstra heap comparisons in least_cost_path()).
+      2. If impassable_grade_pct is given, any cell whose slope_pct
+         exceeds it (strictly greater-than) is ADDITIONALLY marked
+         hard_excluded -- an explicit hard grade ceiling, opt-in only:
+         None (the default) leaves grade fully unbounded, same as before
+         this parameter existed (an arbitrarily steep, non-excluded cell
+         is always traversable, just increasingly expensive -- see
+         grade_penalty_weight below). A cell exactly AT the ceiling is
+         still finite (the comparison is strictly greater-than, not
+         greater-or-equal).
+      3. tpi_factor is 1.0 everywhere by default. Wherever tpi is
+         supplied AND finite at that cell:
+             tpi_factor = 1.0 - tpi_preference_strength * tanh(tpi / tpi_reference_meters)
+         Positive TPI (crest/spur, locally high ground) yields a factor
+         below 1.0 -- cheaper to cross. Negative TPI (hollow/draw) yields
+         a factor above 1.0 -- costlier. tanh() bounds the factor to the
+         open interval (1 - tpi_preference_strength, 1 + tpi_preference_
+         strength) no matter how extreme a single cell's TPI reads, so one
+         outlier cell can never dominate the surface.
+         NaN in tpi is NEUTRAL, not excluded: it gets tpi_factor 1.0,
+         exactly as if tpi had not been supplied for that cell at all.
+         This is a DIFFERENT meaning of NaN from slope_pct's own (step 1
+         above) -- topographic_position.compute_tpi() legitimately returns
+         NaN at grid edges and in small-neighborhood cells by design (see
+         that module's own docstring), and that ground is ordinary,
+         traversable ground, not undefined terrain. A NaN tpi value must
+         never propagate into the cost raster or make a cell impassable.
+      4. cost = _BASE_TRAVEL_COST * tpi_factor
+               + grade_penalty_weight * slope_pct ** 2
+               + floodplain_penalty wherever floodplain_mask is True
+         tpi_factor scales ONLY the base travel term -- it must NOT scale
+         the grade or floodplain penalties, so a ridge cell that also
+         happens to be steep still pays the full grade cost, not a
+         ridge-discounted one. grade_penalty_weight * slope_pct ** 2 is
+         itself still an UNBOUNDED quadratic penalty by default (see that
+         constant's own comment) unless impassable_grade_pct (step 2) caps
+         it off entirely. floodplain_penalty is added for any cell where
+         floodplain_mask is True (floodplain_mask omitted or None means no
+         floodplain penalty at all, e.g. a caller that hasn't computed one
+         yet).
+      5. cost[production_mask] *= production_multiplier, applied to the
+         FULL total from step 4 (grade + floodplain + TPI-scaled travel
+         together), not just the base travel term. production_mask is a
+         SOFT term again under the current design -- reversed from an
+         earlier design that made production land the caller's job to
+         fold into excluded_mask as a HARD exclusion. That reversal is
+         deliberate: on a parcel that's mostly production ground, there
+         may be no non-production route that serves anything at all, and
+         a hard exclusion there makes the router come back with nothing
+         rather than an honest, if costly, answer. Crossing cultivated
+         ground is instead made proportionally expensive, whatever the
+         terrain underneath -- a route can still choose to pay it when
+         every alternative costs more. production_mask omitted or None
+         means no production penalty at all, same as any other optional
+         mask in this function.
+      6. cost[hard_excluded] = np.inf -- applied LAST, so nothing in steps
+         3-5 can ever pull a hard-excluded cell back to a finite cost.
+
+    MANDATORY POSITIVITY ASSERTION: after step 6, every finite cell in the
+    returned raster must be strictly greater than zero. This is a
+    permanent tripwire, not a debug check (same reasoning as fencing.py's
+    own containment assertion) -- a zero or negative edge weight would
+    silently break Dijkstra's optimality guarantee: least_cost_path()
+    would still return *a* path, just not necessarily the cheapest one,
+    with nothing to indicate the failure. Raises ValueError naming the
+    offending cell count and the minimum offending value if this ever
+    fires -- in practice this can only happen with a misconfigured
+    tpi_preference_strength >= 1.0 (see that constant's own comment).
+
+    tpi is an already-computed TPI grid (topographic_position.
+    compute_tpi()'s own output), same shape as dem['array'], or None (no
+    ridge preference at all, tpi_factor stays 1.0 everywhere -- identical
+    to this function's behavior before this parameter existed). IMPORTANT
+    caller-side constraint, spanning this module and dem_data.py, that has
+    no other documentation: the radius_meters compute_tpi() was called
+    with must not exceed dem_data.DEFAULT_BUFFER_METERS (currently
+    100.0m), the buffer dem_data.get_dem_for_boundary() fetches past the
+    drawn property boundary. TPI carries a kernel-truncation bias reaching
+    exactly one radius inward from the DEM grid's own edge (a cell whose
+    disc neighborhood gets clipped by the grid boundary reads a biased
+    mean). At a 50m TPI radius against the DEM's own 100m fetch buffer,
+    that bias dies out entirely within the buffer, 50m outside the
+    property boundary itself. At a TPI radius above 100m, the bias would
+    reach onto real property ground -- worst right at the boundary, which
+    is exactly where a road corridor's own anchor point tends to sit.
     """
     array = dem["array"]
     rows, cols = array.shape
 
     hard_excluded = excluded_mask | np.isnan(slope_pct)
+    if impassable_grade_pct is not None:
+        hard_excluded = hard_excluded | (slope_pct > impassable_grade_pct)
     traversable = ~hard_excluded
 
     grade_pct_squared = np.zeros((rows, cols), dtype=np.float64)
     grade_pct_squared[traversable] = slope_pct[traversable].astype(np.float64) ** 2
 
-    cost = np.full((rows, cols), _BASE_TRAVEL_COST, dtype=np.float64)
+    tpi_factor = np.ones((rows, cols), dtype=np.float64)
+    if tpi is not None:
+        tpi_valid = np.isfinite(tpi)
+        tpi_factor[tpi_valid] = 1.0 - tpi_preference_strength * np.tanh(
+            tpi[tpi_valid].astype(np.float64) / tpi_reference_meters
+        )
+
+    cost = _BASE_TRAVEL_COST * tpi_factor
     cost += grade_penalty_weight * grade_pct_squared
 
     if floodplain_mask is not None:
         cost[floodplain_mask] += floodplain_penalty
 
+    if production_mask is not None:
+        cost[production_mask] *= production_multiplier
+
     cost[hard_excluded] = np.inf
+
+    finite_mask = np.isfinite(cost)
+    non_positive = finite_mask & (cost <= 0.0)
+    if np.any(non_positive):
+        bad_count = int(np.sum(non_positive))
+        min_value = float(cost[finite_mask].min())
+        raise ValueError(
+            f"build_cost_raster() produced {bad_count} finite cell(s) with cost <= 0 "
+            f"(minimum finite value {min_value}) -- every finite cell must be strictly "
+            "positive or Dijkstra's optimality guarantee in least_cost_path()/"
+            "cost_distance_field() silently breaks. This is most likely caused by "
+            "tpi_preference_strength >= 1.0 driving a strongly ridge-preferred cell's "
+            "base travel cost to zero or negative."
+        )
+
     return cost
 
 
