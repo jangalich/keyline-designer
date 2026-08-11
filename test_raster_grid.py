@@ -5,9 +5,70 @@ Offline (no-network) checks for raster_grid.py's shared, dependency-free
 grid helpers.
 """
 
+import math
+
 import numpy as np
 
-from raster_grid import attempt_waist_split, cell_area_acres, cell_union_footprint, connected_components
+from raster_grid import (
+    attempt_waist_split,
+    build_disc_kernel_offsets,
+    cell_area_acres,
+    cell_union_footprint,
+    connected_components,
+)
+
+# --- build_disc_kernel_offsets(): non-square resolution produces a  ---
+# --- genuinely elliptical kernel in cell terms, not a circle        ---
+#
+# Moved here from test_topographic_position.py along with the function
+# itself (build_disc_kernel_offsets() is shared raster/grid geometry, not
+# a TPI-specific concept -- see raster_grid.py's own docstring for it).
+
+non_square_resolution = (5.0, 10.0)  # finer in x than y
+offsets = build_disc_kernel_offsets(non_square_resolution, radius_meters=20.0)
+
+# Hand-derived: condition is hypot(dc*5, dr*10) <= 20.
+#   dr=0:  |dc*5| <= 20            -> dc in -4..4  -> 9 offsets
+#   dr=+-1: (dc*5)^2 <= 400-100=300 -> |dc| <= 3.46 -> dc in -3..3 -> 7 offsets each
+#   dr=+-2: (dc*5)^2 <= 400-400=0   -> dc == 0 only  -> 1 offset each
+#   total = 9 + 2*7 + 2*1 = 25
+count_dr0 = sum(1 for dr, dc in offsets if dr == 0)
+count_dr_extreme = sum(1 for dr, dc in offsets if dr == 2)
+total_count = len(offsets)
+
+assert count_dr0 == 9, f"dr=0 row should include 9 cells (dc in -4..4), got {count_dr0}"
+assert count_dr_extreme == 1, f"dr=2 row should include exactly 1 cell (dc == 0 only), got {count_dr_extreme}"
+assert total_count == 25, f"expected 25 total kernel cells at radius=20.0, resolution=(5.0, 10.0), got {total_count}"
+assert count_dr0 > count_dr_extreme, (
+    "kernel should be wider along the finer-resolution (x) axis than tall along the coarser (y) axis -- "
+    f"an ellipse in cell terms, not a circle (dr=0 count {count_dr0} vs dr=2 count {count_dr_extreme})"
+)
+print(
+    f"Non-square resolution (5.0, 10.0) kernel at radius=20.0: {total_count} total cells, "
+    f"{count_dr0} at dr=0 vs {count_dr_extreme} at dr=+-2 -- confirmed elliptical, not circular."
+)
+
+
+# --- build_disc_kernel_offsets(): radius=50.0 at square (5.0, 5.0)  ---
+# --- resolution matches an independently-derived lattice-point count ---
+#
+# At square resolution, hypot(dc*px, dr*py) <= radius reduces to
+# dc**2 + dr**2 <= (radius / px)**2 -- the standard discrete
+# lattice-point-in-a-circle count (Gauss circle problem), computed here
+# via a completely separate per-row sqrt method, not by re-running
+# build_disc_kernel_offsets()'s own loop.
+
+square_offsets = build_disc_kernel_offsets((5.0, 5.0), radius_meters=50.0)
+R = 10  # radius_meters / px = 50.0 / 5.0
+expected_lattice_count = sum(2 * math.isqrt(R * R - dr * dr) + 1 for dr in range(-R, R + 1) if R * R - dr * dr >= 0)
+assert len(square_offsets) == expected_lattice_count, (
+    f"radius=50.0 at (5.0, 5.0) resolution should match the independent lattice-point count "
+    f"{expected_lattice_count}, got {len(square_offsets)}"
+)
+print(
+    f"build_disc_kernel_offsets() at radius=50.0, resolution=(5.0, 5.0): {len(square_offsets)} cells, "
+    f"matching the independently-derived lattice-point count {expected_lattice_count}."
+)
 
 # --- cell_union_footprint(): a solid NxN block of True cells dissolves ---
 # --- into ONE clean polygon, not a fragmented/sliver-gapped shape       ---
