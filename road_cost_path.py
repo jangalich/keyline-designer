@@ -15,8 +15,7 @@ existing road_corridors.py pipeline it will eventually feed.
 Pipeline:
 
     DEM + slope + exclusions --> per-cell traversal cost raster -->
-    multi-source/multi-destination Dijkstra over that raster (or Yen's
-    algorithm, layered on top, for several distinct alternatives) -->
+    multi-source/multi-destination Dijkstra over that raster -->
     ordered path cells --> (x, y, elevation) points
 
 Hard exclusion vs. soft cost penalty, current design (this module's own
@@ -44,10 +43,6 @@ differences are what fill_depressions() seeds the heap from and what it
 compares (multi-source at cost 0 here vs. the grid's own valid border at
 its own elevation there; a real edge weight — real ground distance times
 the target cell's traversal cost — instead of an elevation comparison).
-k_shortest_paths() layers Yen's algorithm on top of least_cost_path()
-itself (calls it repeatedly against small, per-spur raster copies) to
-surface several genuinely distinct alternative routes, not just the one
-cheapest path.
 """
 
 import heapq
@@ -95,27 +90,6 @@ FLOODPLAIN_CROSSING_COST_PENALTY = 5.0
 # the other two are expressed in (cost-units per cell of pure travel
 # distance), so changing it would just rescale every cost uniformly.
 _BASE_TRAVEL_COST = 1.0
-
-# Safety ceiling on how many alternative routes k_shortest_paths() will
-# ever generate -- NOT a design target every call is expected to reach.
-# Real terrain rarely offers this many genuinely distinct (post-dedup)
-# alternatives between one source and one destination; this just bounds
-# the worst-case work (each additional route costs up to one full
-# least_cost_path() call per cell already on the previous route).
-# CONFIGURABLE.
-MAX_ROUTES_TO_GENERATE = 8
-
-# A candidate route is rejected as a near-duplicate of an already-accepted
-# one if the fraction of its own cells also present in that accepted
-# route's cells is at or above this threshold (see _cell_overlap_fraction()
-# -- the fraction is computed against the SMALLER of the two routes' own
-# cell counts, so a short near-duplicate spur off a much longer accepted
-# route is still caught correctly, not diluted by the longer route's
-# extra unique cells the way a plain Jaccard/union-based fraction would
-# be). 0.7 is a deliberately unvalidated starting value, same CONFIGURABLE
-# caveat as every other threshold in this module.
-ROUTE_DEDUP_OVERLAP_THRESHOLD = 0.7
-
 
 def build_cost_raster(
     dem: dict,
@@ -267,160 +241,6 @@ def least_cost_path(
     return None
 
 
-def _path_cumulative_costs(dem: dict, cost_raster: np.ndarray, cells: list[tuple[int, int]]) -> list[float]:
-    """Running cost total at each index of an already-found path's own
-    `cells` list (index 0 is always 0.0, the source itself), using the
-    exact same edge-weight formula least_cost_path() itself accumulates
-    with (real ground distance to the next cell times that next cell's own
-    cost_raster value) -- lets k_shortest_paths() know the true cost of
-    the ROOT portion of a previous route up to any given spur node,
-    without re-running Dijkstra just to ask that question."""
-    px, py = dem["resolution_meters"]
-    cumulative = [0.0]
-    for (r1, c1), (r2, c2) in zip(cells, cells[1:]):
-        step_cost = math.hypot((c2 - c1) * px, (r2 - r1) * py) * cost_raster[r2, c2]
-        cumulative.append(cumulative[-1] + step_cost)
-    return cumulative
-
-
-def _cell_overlap_fraction(cells_a: list[tuple[int, int]], cells_b: list[tuple[int, int]]) -> float:
-    """
-    Fraction of the SMALLER route's own cells that also appear in the
-    other route -- deliberately divided by min(len(a), len(b)), not
-    len(union) (Jaccard): a short near-duplicate deviation off a much
-    longer accepted route should still register as heavily overlapping,
-    and a plain union-based fraction would understate that (diluted by
-    the longer route's many extra unique cells). 0.0 if either route is
-    empty.
-    """
-    set_a, set_b = set(cells_a), set(cells_b)
-    if not set_a or not set_b:
-        return 0.0
-    return len(set_a & set_b) / min(len(set_a), len(set_b))
-
-
-def k_shortest_paths(
-    dem: dict,
-    cost_raster: np.ndarray,
-    source_cell: tuple[int, int],
-    destination_cell: tuple[int, int],
-    max_routes: int = MAX_ROUTES_TO_GENERATE,
-    dedup_overlap_threshold: float = ROUTE_DEDUP_OVERLAP_THRESHOLD,
-) -> list[dict]:
-    """
-    Yen's algorithm, layered on top of least_cost_path() (calls it
-    repeatedly, never reimplements Dijkstra itself): generates the single
-    shortest source->destination route first, then repeatedly finds the
-    next-cheapest genuine DEVIATION from an already-accepted route --
-    a "spur" path from each node along that route, searched against a
-    per-spur COPY of cost_raster with already-used ground temporarily
-    blocked (np.inf) so the spur is forced to actually diverge rather than
-    immediately rediscovering the same route:
-
-      - every node on the route's own root path UP TO (not including) the
-        spur node is blocked outright, so the spur can't loop back through
-        ground this route already used to get there;
-      - whichever specific next cell any already-accepted OR already-
-        queued candidate route sharing this exact same root took from the
-        spur node is ALSO blocked -- a node-level stand-in for excluding
-        that one directed edge (this raster-based Dijkstra has no separate
-        per-edge cost to exclude), forcing the spur into a genuinely
-        different next step. Checking already-queued candidates too (not
-        just accepted routes, which is all classic Yen's algorithm
-        requires) isn't necessary for correctness -- an exact-duplicate
-        candidate is already caught by the cells-based dedup below -- but
-        it steers the search toward discovering a genuinely NEW deviation
-        at that spur point instead of just re-deriving one already sitting
-        in the candidate pool, which serves this function's actual goal
-        (real diversity, not just distinctness) better.
-
-    A candidate deviation is only ACCEPTED if its cell-overlap fraction
-    (_cell_overlap_fraction()) against EVERY already-accepted route is
-    below dedup_overlap_threshold -- once a candidate fails that check
-    against some accepted route, it can never pass later (the accepted
-    set only grows), so a rejected candidate is dropped for good, not
-    reconsidered. Stops as soon as max_routes routes are accepted OR the
-    candidate pool is exhausted (no undiscovered deviation exists, or
-    every remaining one is too similar to something already accepted) --
-    returns whatever was actually found either way, never padded to
-    max_routes with a manufactured near-duplicate.
-
-    Returns a list of dicts, each the exact same shape least_cost_path()
-    itself returns ({"cells", "total_cost", "source_cell",
-    "destination_cell"}), so path_cells_to_points_xyz() works unchanged on
-    any of them. Returns [] if even the first (cheapest) route isn't
-    reachable at all -- same "no path found" outcome least_cost_path()
-    itself reports as None, just list-shaped here since every OTHER
-    return path from this function is a list.
-    """
-    first_path = least_cost_path(dem, cost_raster, [source_cell], [destination_cell])
-    if first_path is None:
-        return []
-
-    accepted = [first_path]
-
-    candidates: list[dict] = []
-    seen_candidate_cells: set[tuple[tuple[int, int], ...]] = set()
-
-    while len(accepted) < max_routes:
-        previous_cells = accepted[-1]["cells"]
-        cumulative_costs = _path_cumulative_costs(dem, cost_raster, previous_cells)
-
-        for i in range(len(previous_cells) - 1):
-            spur_node = previous_cells[i]
-            root_path = previous_cells[: i + 1]
-
-            spur_cost_raster = cost_raster.copy()
-            for node in root_path[:-1]:
-                spur_cost_raster[node] = np.inf
-            for other in accepted + candidates:
-                other_cells = other["cells"]
-                if len(other_cells) > i and other_cells[: i + 1] == root_path:
-                    spur_cost_raster[other_cells[i + 1]] = np.inf
-
-            spur_result = least_cost_path(dem, spur_cost_raster, [spur_node], [destination_cell])
-            if spur_result is None:
-                continue
-
-            full_cells = root_path[:-1] + spur_result["cells"]
-            full_cells_key = tuple(full_cells)
-            if full_cells_key in seen_candidate_cells:
-                continue
-            seen_candidate_cells.add(full_cells_key)
-
-            candidates.append(
-                {
-                    "cells": full_cells,
-                    "total_cost": cumulative_costs[i] + spur_result["total_cost"],
-                    "source_cell": source_cell,
-                    "destination_cell": destination_cell,
-                }
-            )
-
-        if not candidates:
-            break  # candidate pool exhausted -- no undiscovered deviation exists at all
-
-        candidates.sort(key=lambda c: c["total_cost"])
-        next_route = None
-        remaining = []
-        for candidate in candidates:
-            if next_route is None and all(
-                _cell_overlap_fraction(candidate["cells"], a["cells"]) < dedup_overlap_threshold
-                for a in accepted
-            ):
-                next_route = candidate
-            else:
-                remaining.append(candidate)
-        candidates = remaining
-
-        if next_route is None:
-            break  # every remaining candidate is too similar to something already accepted
-
-        accepted.append(next_route)
-
-    return accepted
-
-
 def path_cells_to_points_xyz(dem: dict, cells: list[tuple[int, int]]) -> list[tuple[float, float, float]]:
     """
     Thin wrapper over raster_grid.pixel_center_xy() + dem['array']: turns
@@ -436,20 +256,18 @@ def path_cells_to_points_xyz(dem: dict, cells: list[tuple[int, int]]) -> list[tu
 
 
 if __name__ == "__main__":
-    # Offline smoke test, two DEMs sharing the same source/destination row
-    # and the same central column obstacle band, differing only in which
-    # gaps that band leaves open:
+    # Offline smoke test of least_cost_path(), against DEMs sharing the same
+    # source/destination row and the same central column obstacle band,
+    # differing only in which gaps (if any) that band leaves open:
     #
-    #   - TWO-ROUTE DEM: the obstacle leaves a gap near the top AND a gap
-    #     near the bottom -- two genuinely distinct, roughly comparable-
-    #     cost ways around it. k_shortest_paths() should return both,
-    #     as two DIFFERENT routes (one through each gap), not two
-    #     near-identical variants of the same detour.
-    #   - ONE-ROUTE DEM: the same obstacle, but the top gap is closed too
-    #     -- only the bottom gap offers a legal way across at all.
-    #     k_shortest_paths() should return exactly one route (dedup
-    #     correctly refuses to manufacture a near-duplicate second one
-    #     just to pad the list).
+    #   - TWO-GAP DEM: a gap near the top AND a gap near the bottom -- a
+    #     path is found, and it must actually pass through one of those two
+    #     gap cells (Dijkstra picks whichever is cheaper; both are legal).
+    #   - ONE-GAP DEM: the top gap is also closed -- only the bottom gap
+    #     offers a legal way across, so the returned path must use that
+    #     specific cell.
+    #   - NO-GAP DEM: the obstacle band is fully closed -- no destination
+    #     cell is reachable at all, so least_cost_path() must return None.
     size = 21
     center_row = size // 2
     obstacle_col = size // 2
@@ -475,53 +293,54 @@ if __name__ == "__main__":
     source_cell = (center_row, 0)
     destination_cell = (center_row, size - 1)
 
-    print("--- Two legal routes (gaps at both ends of the obstacle) ---")
-    two_route_excluded = _obstacle_mask(top_gap=True, bottom_gap=True)
-    two_route_cost_raster = build_cost_raster(dem, slope_pct, two_route_excluded)
-    two_routes = k_shortest_paths(dem, two_route_cost_raster, source_cell, destination_cell, max_routes=4)
+    print("--- Two-gap obstacle (gaps at both ends of the band) ---")
+    no_obstacle = np.zeros((size, size), dtype=bool)
+    open_ground_cost_raster = build_cost_raster(dem, slope_pct, no_obstacle)
+    open_ground_path = least_cost_path(dem, open_ground_cost_raster, [source_cell], [destination_cell])
+    print(f"Obstacle-free total_cost: {open_ground_path['total_cost']:.2f}")
 
-    print(f"Routes found: {len(two_routes)}")
-    for i, route in enumerate(two_routes):
-        uses_top_gap = (1, obstacle_col) in route["cells"]
-        uses_bottom_gap = (size - 2, obstacle_col) in route["cells"]
-        print(
-            f"  Route {i}: {len(route['cells'])} cells, total_cost={route['total_cost']:.2f}, "
-            f"via top gap={uses_top_gap}, via bottom gap={uses_bottom_gap}"
-        )
+    two_gap_excluded = _obstacle_mask(top_gap=True, bottom_gap=True)
+    two_gap_cost_raster = build_cost_raster(dem, slope_pct, two_gap_excluded)
+    two_gap_path = least_cost_path(dem, two_gap_cost_raster, [source_cell], [destination_cell])
 
-    assert len(two_routes) >= 2, f"expected at least 2 distinct routes around a two-sided obstacle, got {len(two_routes)}"
-    gap_sides = set()
-    for route in two_routes[:2]:
-        if (1, obstacle_col) in route["cells"]:
-            gap_sides.add("top")
-        if (size - 2, obstacle_col) in route["cells"]:
-            gap_sides.add("bottom")
-    assert gap_sides == {"top", "bottom"}, (
-        f"expected the top-2 routes to use DIFFERENT gaps (one each), got sides used: {gap_sides}"
+    assert two_gap_path is not None, "expected a path to be found through a two-gap obstacle"
+    uses_top_gap = (1, obstacle_col) in two_gap_path["cells"]
+    uses_bottom_gap = (size - 2, obstacle_col) in two_gap_path["cells"]
+    print(
+        f"Path found: {len(two_gap_path['cells'])} cells, total_cost={two_gap_path['total_cost']:.2f}, "
+        f"via top gap={uses_top_gap}, via bottom gap={uses_bottom_gap}"
     )
-    overlap = _cell_overlap_fraction(two_routes[0]["cells"], two_routes[1]["cells"])
-    assert overlap < ROUTE_DEDUP_OVERLAP_THRESHOLD, (
-        f"the two accepted routes overlap {overlap:.2f}, at or above the dedup threshold -- they should be "
-        f"genuinely distinct, not near-identical variants of the same detour"
+    assert uses_top_gap or uses_bottom_gap, (
+        "expected the path to pass through one of the two open gap cells"
     )
-    print(f"First two routes use different gaps and overlap only {overlap:.2f} (below the dedup threshold).\n")
-
-    print("--- One legal route (the top gap is also blocked) ---")
-    one_route_excluded = _obstacle_mask(top_gap=False, bottom_gap=True)
-    one_route_cost_raster = build_cost_raster(dem, slope_pct, one_route_excluded)
-    one_routes = k_shortest_paths(dem, one_route_cost_raster, source_cell, destination_cell, max_routes=4)
-
-    print(f"Routes found: {len(one_routes)}")
-    for i, route in enumerate(one_routes):
-        print(f"  Route {i}: {len(route['cells'])} cells, total_cost={route['total_cost']:.2f}")
-
-    assert len(one_routes) == 1, (
-        f"expected exactly one route when only one side of the obstacle is legal, got {len(one_routes)} -- "
-        f"dedup should have refused to pad the list with a near-duplicate"
+    assert math.isfinite(two_gap_path["total_cost"]), "expected a finite total_cost"
+    assert two_gap_path["total_cost"] > open_ground_path["total_cost"], (
+        f"expected routing around the obstacle ({two_gap_path['total_cost']:.2f}) to cost strictly more than "
+        f"the same source/destination pair on obstacle-free ground ({open_ground_path['total_cost']:.2f})"
     )
-    assert all((size - 2, obstacle_col) in one_routes[0]["cells"] for _ in [None]), (
-        "the one route found must actually use the only open gap"
+    print("Path passes through an open gap and costs strictly more than the obstacle-free route.\n")
+
+    print("--- One-gap obstacle (top gap closed) ---")
+    one_gap_excluded = _obstacle_mask(top_gap=False, bottom_gap=True)
+    one_gap_cost_raster = build_cost_raster(dem, slope_pct, one_gap_excluded)
+    one_gap_path = least_cost_path(dem, one_gap_cost_raster, [source_cell], [destination_cell])
+
+    assert one_gap_path is not None, "expected a path to be found through the one remaining open gap"
+    print(f"Path found: {len(one_gap_path['cells'])} cells, total_cost={one_gap_path['total_cost']:.2f}")
+    assert (size - 2, obstacle_col) in one_gap_path["cells"], (
+        "the path found must use the one open gap cell specifically"
     )
-    print("Exactly one route found, correctly not padded with a manufactured near-duplicate.\n")
+    print("Path correctly uses the one open gap cell.\n")
+
+    print("--- Fully closed obstacle (no gaps at all) ---")
+    closed_excluded = _obstacle_mask(top_gap=False, bottom_gap=False)
+    closed_cost_raster = build_cost_raster(dem, slope_pct, closed_excluded)
+    closed_path = least_cost_path(dem, closed_cost_raster, [source_cell], [destination_cell])
+
+    print(f"Path found: {closed_path}")
+    assert closed_path is None, (
+        f"expected least_cost_path() to return None when no destination cell is reachable, got {closed_path}"
+    )
+    print("Correctly returned None -- no destination reachable.\n")
 
     print("Smoke test passed.")

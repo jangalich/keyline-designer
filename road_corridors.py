@@ -135,10 +135,6 @@ boundary" step to connect afterward. Severing a route at a structure site
 (once one has been sited) is out of scope here too — a future follow-up
 once real routes exist to sever.
 
-road_cost_path.k_shortest_paths() stays defined and exported (used
-nowhere in this module) for a later prompt to layer route ALTERNATES on
-top of this design.
-
 find_road_routes() is the pure geometric/scoring core — see
 water_candidate_zones.py's and solar_suitability.py's docstrings for why
 this split matters (independently testable against a synthetic DEM,
