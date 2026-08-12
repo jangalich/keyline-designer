@@ -265,7 +265,7 @@ top, not lost beneath the tree-candidate hatch.
 STRUCTURE SITE STYLE: the selected structure site renders as a single,
 fixed-size MAP-PIN ICON (assets/icons/farm_location_pin.svg, rasterized
 once to assets/icons/farm_location_pin.png -- see STRUCTURE_SITE_ICON_PATH/
-STRUCTURE_SITE_ICON above) placed at its own representative_point(), not
+structure_site_icon() below) placed at its own representative_point(), not
 a filled polygon over its full eligible footprint (up to the module's own
 1-acre cap) and not a numbered circle marker like every other layer --
 there's exactly one structure site per property
@@ -307,6 +307,7 @@ from typing import Optional
 import contextily as cx
 import matplotlib
 import mercantile
+import numpy as np
 import requests
 import xyzservices
 
@@ -509,9 +510,14 @@ STRUCTURE_SITE_COLOR = "#D64545"
 # viewBox, which this asset's own tip doesn't reach -- so the bottom edge
 # of the raster lines up with the pin's visual tip; checked into the repo
 # alongside the SVG) rather than re-rasterized on every render call.
-# Loaded via PIL and wrapped in an OffsetImage here, at module level, so
-# repeated render_layout_map() calls in the same process never hit disk
-# for it more than once.
+# Loaded via PIL into a decoded RGBA pixel array here, at module level, so
+# repeated render_layout_map() calls in the same process never hit disk for
+# it more than once. The array is inert data and is safe to share; the
+# OffsetImage that wraps it is NOT -- an OffsetImage is a matplotlib Artist,
+# which binds to the first figure it is added to and raises RuntimeError
+# ("Can not put single artist in more than one figure") on the second. So the
+# artist must never live at module scope; it is built fresh per render by the
+# structure_site_icon() factory below.
 STRUCTURE_SITE_ICON_PATH = os.path.join(os.path.dirname(__file__), "assets", "icons", "farm_location_pin.png")
 # Empirically tuned against this module's own real output (300 DPI,
 # 8.5in x 11in figure -- see FIGURE_SIZE_INCHES/OUTPUT_DPI above): a zoom
@@ -519,7 +525,16 @@ STRUCTURE_SITE_ICON_PATH = os.path.join(os.path.dirname(__file__), "assets", "ic
 # 30-40px legibility target); this is that baseline x3, per explicit
 # request, for a more prominent on-map pin. CONFIGURABLE.
 STRUCTURE_SITE_ICON_ZOOM = 0.105
-STRUCTURE_SITE_ICON = OffsetImage(Image.open(STRUCTURE_SITE_ICON_PATH), zoom=STRUCTURE_SITE_ICON_ZOOM)
+_STRUCTURE_SITE_ICON_ARRAY = np.asarray(
+    Image.open(STRUCTURE_SITE_ICON_PATH).convert("RGBA")
+)
+
+
+def structure_site_icon():
+    """Fresh OffsetImage per figure. An OffsetImage binds to the first figure
+    it is added to and raises RuntimeError on the second -- it must never be
+    module-level state."""
+    return OffsetImage(_STRUCTURE_SITE_ICON_ARRAY, zoom=STRUCTURE_SITE_ICON_ZOOM)
 
 # A dark forest green -- deliberately distinct from PRODUCTION_ZONE_COLOR's
 # lighter, more saturated green (production is active farm ground; trees
@@ -1478,7 +1493,7 @@ def render_layout_map(
         props = structure_site["properties"]
         anchor_point = geom.representative_point()
         pin = AnnotationBbox(
-            STRUCTURE_SITE_ICON,
+            structure_site_icon(),
             (anchor_point.x, anchor_point.y),
             frameon=False,
             box_alignment=(0.5, 0.0),

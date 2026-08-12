@@ -1446,4 +1446,49 @@ print(
     f"call graph, not just present with zero canopy contribution."
 )
 
+# =====================================================================
+# Reentrancy: render_layout_map() must survive being called more than
+# once in a single process. render_layout_map.py used to build the
+# structure-site map-pin OffsetImage at module scope; a matplotlib Artist
+# binds to the first figure it is added to, so the SECOND render in the
+# same process raised RuntimeError ("Can not put single artist in more
+# than one figure"). This only surfaces when a structure_site is present
+# (that is the only code path that adds the pin artist to the axes), which
+# every other fixture in this file leaves as None -- so this reuses the
+# existing offline synthetic_layers/property_boundary fixture and just
+# supplies the minimal structure_site input that exercises the pin path.
+# =====================================================================
+
+_reentrancy_structure_site = {
+    # A small WGS84 footprint inside property_boundary above; render_layout_
+    # map() only reads its representative_point() + suitability_score.
+    "geometry": mapping(box(-79.9825, 40.6445, -79.9820, 40.6450)),
+    "properties": {"suitability_score": 88.0},
+}
+_reentrancy_layers = dict(synthetic_layers)
+_reentrancy_layers["structure_site"] = _reentrancy_structure_site
+
+
+def test_render_is_reentrant():
+    """Module-level matplotlib artists bind to the first figure and raise
+    'Can not put single artist in more than one figure' on the second render.
+    A single-call test passes against the broken code -- this must run twice."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        first_path = os.path.join(tmpdir, "layout_map_reentrant_1.png")
+        second_path = os.path.join(tmpdir, "layout_map_reentrant_2.png")
+        rlm.render_layout_map(property_boundary, first_path, layers=_reentrancy_layers)
+        # The second call is the whole point: on the broken code it raises
+        # RuntimeError before it can write anything.
+        rlm.render_layout_map(property_boundary, second_path, layers=_reentrancy_layers)
+        assert os.path.getsize(first_path) > 0, "first render must produce a real, non-empty PNG"
+        assert os.path.getsize(second_path) > 0, "second render must produce a real, non-empty PNG"
+
+
+test_render_is_reentrant()
+print(
+    "Reentrancy: render_layout_map() with a structure_site renders twice in one process (fresh pin artist "
+    "per figure) -- no 'Can not put single artist in more than one figure' RuntimeError."
+)
+
+
 print("\nAll render_layout_map checks passed.")
