@@ -47,6 +47,7 @@ def cell_area_acres(dem: dict) -> float:
 
 
 D8_OFFSETS = [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)]
+D4_OFFSETS = [(-1, 0), (0, -1), (0, 1), (1, 0)]
 
 
 def build_disc_kernel_offsets(
@@ -400,11 +401,24 @@ def attempt_waist_split(
     ]
 
 
-def connected_components(mask: np.ndarray) -> tuple[np.ndarray, int]:
+def connected_components(mask: np.ndarray, connectivity: int = 8) -> tuple[np.ndarray, int]:
     """
-    8-connected component labeling of a 2D boolean grid, via iterative
-    BFS. Returns (labels, num_components): labels is a same-shape int
-    array of component indices (-1 where mask is False).
+    Connected-component labeling of a 2D boolean grid, via iterative BFS.
+    Returns (labels, num_components): labels is a same-shape int array of
+    component indices (-1 where mask is False).
+
+    `connectivity` selects the neighbor adjacency: 8 (the default --
+    diagonal neighbors count, D8_OFFSETS) or 4 (edge-only neighbors,
+    D4_OFFSETS). The default is 8 and is DELIBERATELY unchanged: every
+    existing caller — valley_delineation.py, water_candidate_zones.py,
+    tree_zone_candidates.py, this module's own attempt_waist_split(), and
+    two of production_area.py's three call sites (its STEP 1 source-region
+    labeling and its hole-component labeling) — relies on 8-connectivity.
+    The only caller that passes connectivity=4 is
+    production_area.cluster_and_gate()'s own cluster labeling, so a
+    cluster's cells are edge-connected and its real ground footprint is a
+    single Polygon rather than a corner-touch MultiPolygon (see that
+    function's docstring for the full rationale).
 
     Shared by valley_delineation.py (grouping thresholded flow-
     accumulation cells into drainage networks) and production_area.py
@@ -412,6 +426,15 @@ def connected_components(mask: np.ndarray) -> tuple[np.ndarray, int]:
     same generic grouping operation, just applied to a different boolean
     mask in each case.
     """
+    if connectivity == 8:
+        offsets = D8_OFFSETS
+    elif connectivity == 4:
+        offsets = D4_OFFSETS
+    else:
+        raise ValueError(
+            f"connected_components(): connectivity must be 4 or 8, got {connectivity!r}"
+        )
+
     rows, cols = mask.shape
     labels = np.full((rows, cols), -1, dtype=np.int32)
     next_label = 0
@@ -423,7 +446,7 @@ def connected_components(mask: np.ndarray) -> tuple[np.ndarray, int]:
                 stack = [(r, c)]
                 while stack:
                     cr, cc = stack.pop()
-                    for dr, dc in D8_OFFSETS:
+                    for dr, dc in offsets:
                         nr, nc = cr + dr, cc + dc
                         if (
                             0 <= nr < rows

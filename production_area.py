@@ -39,9 +39,9 @@ point in the other two files reuses rather than recomputing:
         avoid reintroducing that same sliver-fragmentation failure mode via
         a vectorize-then-buffer/difference shortcut.
 
-    STEP 3 -- cluster_and_gate(): 8-connected-component labeling
-        (raster_grid.connected_components()) of WHATEVER cell mask a caller
-        passes in (STEP 1's raw eligible mask here, or
+    STEP 3 -- cluster_and_gate(): 4-connected-component labeling
+        (raster_grid.connected_components(connectivity=4)) of WHATEVER cell
+        mask a caller passes in (STEP 1's raw eligible mask here, or
         production_area_ceiling.py's post-STEP-2-trim survivor mask), each
         cluster's REAL cell-union footprint (_cell_union_footprint(), not a
         convex hull), and a pure area survival gate
@@ -167,7 +167,7 @@ MAX_PRODUCTION_SLOPE_PCT = 20.0
 # Drop tiny, likely-noisy contiguous patches below this size. CONFIGURABLE.
 MIN_PRODUCTION_AREA_ACRES = 0.5
 
-# A single 8-connected cluster can legitimately contain a narrow "waist" --
+# A single 4-connected cluster can legitimately contain a narrow "waist" --
 # real, physically connected eligible ground that pinches down to
 # something too narrow to sensibly treat as one zone (e.g. two decent-
 # sized fields joined by a thin strip). Narrower than this, and it reads
@@ -712,6 +712,14 @@ def compute_step1_eligible_cells(
         per_cell_aspect_factor[r, c] = af
         per_cell_composite[r, c] = PER_CELL_SLOPE_WEIGHT * sf + PER_CELL_ASPECT_WEIGHT * af
 
+    # DELIBERATELY 8-connected (connected_components()'s default), NOT the
+    # 4-connected labeling cluster_and_gate() now uses for production-cluster
+    # identity. This labels STEP 1 SOURCE REGIONS for source_patch_id
+    # bookkeeping (STEP 4's soil carved-acres lookup) -- a different question
+    # from which cells form one production zone. Switching it to 4-connected
+    # would change which source region a cluster's cells trace back to, and
+    # thus its soil_carved_acres attribution. The two connectivities differing
+    # within this file is intentional, not an oversight.
     slope_source_labels, num_slope_sources = connected_components(slope_only_mask)
 
     area_per_cell = cell_area_acres(dem)
@@ -795,11 +803,16 @@ def _detect_hole_footprints(cells: list[tuple[int, int]], dem: dict) -> list[Pol
     covering just this cluster's own bounding box, then floods the
     BACKGROUND (non-cluster cells) starting from the sub-grid's own outer
     edges. Any background cell the flood never reaches has no path to the
-    outside -- a real, enclosed hole. Uses 4-connected flood-fill for the
-    background against this cluster's 8-connected foreground (the
-    standard foreground/background connectivity pairing that keeps "is
-    this enclosed" well-defined instead of ambiguous at diagonal
-    touches).
+    outside -- a real, enclosed hole. Uses 8-connected flood-fill for the
+    background against cluster_and_gate()'s now-4-connected foreground --
+    the standard COMPLEMENTARY foreground/background connectivity pairing
+    that keeps "is this enclosed" well-defined instead of ambiguous at
+    diagonal touches. The background connectivity always tracks the
+    OPPOSITE of the foreground's: because cluster_and_gate() now labels
+    clusters 4-connected, the background must flood 8-connected. Leaving it
+    4-connected against a 4-connected foreground would let a diagonal gap
+    read as sealed in BOTH directions -- a topological paradox that
+    manufactures false enclosed holes.
 
     Returns one Polygon per enclosed hole component (its own real
     cell-union footprint via _cell_union_footprint()) -- [] if the
@@ -834,10 +847,12 @@ def _detect_hole_footprints(cells: list[tuple[int, int]], dem: dict) -> list[Pol
         _seed(0, c)
         _seed(height - 1, c)
 
-    four_offsets = [(-1, 0), (1, 0), (0, -1), (0, 1)]
+    # 8-connected background flood (D8_OFFSETS), complementary to
+    # cluster_and_gate()'s 4-connected foreground labeling -- see this
+    # function's docstring for why the pairing must stay opposite.
     while queue:
         r, c = queue.popleft()
-        for dr, dc in four_offsets:
+        for dr, dc in D8_OFFSETS:
             nr, nc = r + dr, c + dc
             if 0 <= nr < height and 0 <= nc < width and background[nr, nc] and not reached[nr, nc]:
                 reached[nr, nc] = True
@@ -847,6 +862,12 @@ def _detect_hole_footprints(cells: list[tuple[int, int]], dem: dict) -> list[Pol
     if not enclosed_mask.any():
         return []
 
+    # Enclosed holes are BACKGROUND regions, so they are grouped with the
+    # same 8-connectivity the background flood above uses (the default) --
+    # NOT the 4-connectivity cluster_and_gate() labels its FOREGROUND
+    # clusters with. Keeping this on 8 is what makes two corner-touching
+    # enclosed background cells read as one hole, consistent with the flood
+    # that found them; this is deliberate, not an oversight.
     hole_labels, num_holes = connected_components(enclosed_mask)
     footprints = []
     for label in range(num_holes):
@@ -863,7 +884,7 @@ def cluster_and_gate(
     min_area_acres: float = MIN_PRODUCTION_AREA_ACRES,
 ) -> list[dict]:
     """
-    STEP 3 of the consolidated production-zone pipeline: 8-connected-
+    STEP 3 of the consolidated production-zone pipeline: 4-connected-
     component labeling of `cell_mask` (STEP 1's raw eligible_mask here with
     no trim, or production_area_ceiling.py's post-STEP-2-trim survivor
     mask), each cluster's REAL cell-union footprint
@@ -876,7 +897,7 @@ def cluster_and_gate(
     each cluster at a time:
 
       PART 1 -- waist detection/splitting (_attempt_waist_split()): a
-        single 8-connected cluster can contain a narrow "waist" -- real,
+        single 4-connected cluster can contain a narrow "waist" -- real,
         physically connected eligible ground that pinches down to
         something narrower than MIN_ZONE_WAIST_METERS (e.g. two decent-
         sized fields joined by a thin strip) and reads as two zones, not
@@ -1005,15 +1026,19 @@ def cluster_and_gate(
     not the pre-split connected-component label, so a waist split's two
     resulting sub-clusters each get their own distinct id.
 
-    polygon_utm/geometry_wgs84 CAN legitimately come back as a
-    MultiPolygon: connected_components() is 8-connected (diagonal
-    neighbors count as one component), but two cells whose real ground
-    squares only touch at a shared corner do not merge into one solid
-    Polygon under unary_union -- their true combined footprint really is
-    disconnected. feature_schema.py's GeoJSON schema already accepts
-    MultiPolygon.
+    polygon_utm/geometry_wgs84 is normally a single Polygon: labeling here
+    is 4-connected (connected_components(cell_mask, connectivity=4)), so
+    every cluster is edge-connected and two cells that touch only at a
+    shared corner fall into SEPARATE clusters rather than one. Their real
+    ground squares meet at a single point and never merge under
+    unary_union, so a cluster's footprint is no longer asked to bridge a
+    corner touch and comes back as one solid Polygon. A MultiPolygon
+    remains schema-valid (feature_schema.py's GeoJSON schema accepts it,
+    and boundary clipping against a concave parcel edge can still split a
+    footprint into pieces), but it should no longer arise from corner-touch
+    labeling the way it did under the old 8-connected labeling.
     """
-    labels, num_components = connected_components(cell_mask)
+    labels, num_components = connected_components(cell_mask, connectivity=4)
     slope_source_labels = step1["slope_source_labels"]
 
     patches = []
