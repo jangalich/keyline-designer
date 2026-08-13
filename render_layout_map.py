@@ -50,8 +50,9 @@ PRODUCTION ZONE STYLE: production zones render as CONTOUR-LINE TEXTURE,
 not a filled/outlined shape -- contour_lines.py's global contour lines
 (computed once, over the DEM's full extent) are clipped per zone at
 render time (real shapely intersection against that zone's own
-render_fill_polygon_utm, not a pre-clipped raster), and only the clipped
-segments within that zone are drawn. No fill, no boundary stroke for
+render_fill_polygon_utm -- a bounded opening, display-smoothed at render
+time, see the DISPLAY SMOOTHING note below -- not a pre-clipped raster),
+and only the clipped segments within that zone are drawn. No fill, no boundary stroke for
 production zones -- zone identity is conveyed by the numbered marker
 alone, same as every other layer. This is a deliberate, scoped styling
 split: the boundary fence (below) has its OWN render-only treatment --
@@ -136,33 +137,39 @@ above. No road -- existing or generated -- gets a fence loop of its own
 at all anymore (see fencing.py's own module docstring for why).
 
 Contours clip against render_fill_polygon_utm rather than polygon_utm
-for two separate reasons layered on top of each other, both from
-production_area.py's own module docstring:
+because render_fill_polygon_utm is a bounded morphological OPENING of the
+zone's cell-union footprint (production_area.py's own module docstring):
+erode by RENDER_OPENING_RADIUS_METERS + RENDER_LEAD_ERODE_CELLS, dilate
+back by the opening radius, then clip to polygon_utm. Two consequences
+matter for the contour clip:
 
   1. A waist split (production_area.py's Part 1) can leave two zones
      directly adjacent with ZERO real distance between their reported
      polygon_utm footprints -- erosion's reclaim step reassigns every
      stripped cell back onto whichever resulting piece is nearest, so
-     there's nothing left between them in the real geometry.
-     render_polygon_utm (built from each piece's PRE-reclaim cells only)
-     fixes this by excluding the whole reclaimed strip from BOTH pieces,
-     showing a real, visible gap at the pinch.
+     there's nothing left between them in the real geometry. The opening's
+     own erosion severs any neck narrower than its radius before the
+     dilation regrows only the survivors, so a narrow pinch renders as a
+     real, visible gap between the two pieces rather than a seamless join.
 
-  2. Genuinely excluded ground (steep slope or hydric soil) can also sit
-     as a small, scattered pocket entirely INSIDE an otherwise-solid
-     zone, rendering as an unexplained blank gap in the middle of a
-     field. render_fill_polygon_utm is render_polygon_utm's own PLAIN
-     CONVEX HULL (see production_area.py's own module docstring for why
-     two earlier smoothing attempts -- a raster dilate/erode
-     implementation, then a vector buffer round-trip -- were both
-     replaced with this) -- a hull necessarily covers any real interior
-     pocket/notch, whatever its size, since a pocket is by definition a
-     concavity the hull fills in.
+  2. The opening is ANTI-EXTENSIVE (contained within polygon_utm) and
+     insets every edge by the lead erode, so it is a clean, bounded shape
+     that never claims ground the cell gate excluded -- unlike the convex
+     hull this replaced, which had no upper bound and covered interior
+     pockets/notches whatever their size. Interior excluded ground (steep/
+     hydric pockets) is therefore NOT closed over; those pockets read as
+     the real gaps they are.
 
-render_fill_polygon_utm equals render_polygon_utm (which itself equals
-polygon_utm) exactly whenever render_polygon_utm is already convex --
-e.g. an ordinary, roughly-rectangular zone with no notches or holes --
-so this changes nothing for the common case.
+DISPLAY SMOOTHING: the fill is a true cell-union boundary, a 5m right-angle
+staircase, so clipping contours straight against it lets each 5m step run
+one contour slightly longer than its neighbour -- the contour ends read as
+a frayed comb rather than a field edge. At render time the clip mask is
+therefore angular-simplified + Chaikin-softened (PRODUCTION_FILL_SIMPLIFY_
+TOLERANCE_CELLS / PRODUCTION_FILL_CHAIKIN_ITERATIONS, then re-clipped to
+polygon_utm) via _smooth_production_fill_for_render(), so contours
+terminate along a clean curve. This is a Layer-3 display transform only:
+the stored render_fill_polygon_utm the four consumer modules read as
+production exclusion geometry is NOT smoothed.
 
 WATER ZONE STYLE: the water zone's FILL is drawn from its own
 render_fill_polygon_utm too (water_candidate_zones.find_candidate_zones()'s
@@ -317,7 +324,7 @@ from matplotlib.offsetbox import AnnotationBbox, OffsetImage
 from PIL import Image
 from rasterio.warp import transform as warp_transform
 from rasterio.warp import transform_geom
-from shapely.geometry import LineString, Polygon, box, mapping, shape
+from shapely.geometry import LineString, MultiPolygon, Polygon, box, mapping, shape
 from shapely.ops import unary_union
 from shapely.plotting import plot_line, plot_points, plot_polygon
 
@@ -634,6 +641,26 @@ FENCE_RENDER_ANGULAR_SIMPLIFY_TOLERANCE_M = 6.0  # was 4.0
 # CONFIGURABLE -- start light.
 FENCE_RENDER_CHAIKIN_ITERATIONS = 1
 
+# DISPLAY-ONLY simplify tolerance for the production zone fill used as the
+# contour clip mask -- expressed in DEM CELLS, multiplied by the DEM's own cell
+# size at the point of use (dem["resolution_meters"] is in scope in
+# render_layout_map()), so it stays "one cell" at any resolution instead of
+# hardcoding ~5m. The production fill is a true cell-union boundary (a 5m
+# right-angle staircase after the bounded opening); simplifying collapses that
+# staircase's collinear runs down to the shape's real turns, so the Chaikin pass
+# below has actual corners to round rather than hundreds of individual cell
+# steps. Separate constant from the fence/road render tolerances even though it
+# starts near them -- three different geometries with three different retuning
+# pressures, per the standing convention. CONFIGURABLE.
+PRODUCTION_FILL_SIMPLIFY_TOLERANCE_CELLS = 1.0
+
+# Post-simplify Chaikin softening for the production fill clip mask. Kept small
+# deliberately: this geometry is a clip mask for contour lines, so over-
+# smoothing moves where every contour terminates. Separate from the fence/road
+# Chaikin iteration counts by the same standing convention. CONFIGURABLE --
+# start light.
+PRODUCTION_FILL_CHAIKIN_ITERATIONS = 1
+
 
 def _reproject_geometry_to_mercator(geometry_wgs84: dict):
     """geometry_wgs84 is a GeoJSON geometry dict in WGS84 (the shape every
@@ -866,6 +893,59 @@ def _angular_then_smooth_closed_ring(ring: LineString, simplify_tolerance: float
     angular_ring = _angular_simplify_closed_ring(ring, simplify_tolerance)
     smoothed_coords = _chaikin_smooth_closed_ring(list(angular_ring.coords), chaikin_iterations)
     return LineString(smoothed_coords)
+
+
+def _smooth_production_fill_for_render(fill, simplify_tolerance: float, chaikin_iterations: int):
+    """
+    DISPLAY-ONLY smoothing of a production zone's render_fill_polygon_utm for
+    use as the contour-clip mask -- softens the 5m cell-union staircase into a
+    clean curve so contour lines terminate along a field edge rather than a
+    frayed comb of 5m steps. This does NOT touch the stored
+    render_fill_polygon_utm the four consumer modules (water_candidate_zones.py,
+    road_corridors.py, tree_zone_candidates.py, solar_suitability.py) read as
+    production EXCLUSION geometry -- the caller passes the field in and clips the
+    smoothed result to polygon_utm before use; the stored field is unchanged.
+
+    The existing ring smoothers (_angular_then_smooth_closed_ring() and the
+    simplify/Chaikin pair it chains) operate on a SINGLE closed ring (a fence
+    loop). A production fill is routinely a MultiPolygon after the opening and
+    may carry interior rings, so this wraps that same helper at the POLYGON
+    level: it smooths the exterior ring AND every interior ring of every part
+    and reassembles into a Polygon/MultiPolygon.
+
+    Display-only degradation: if smoothing yields empty or invalid geometry
+    (e.g. a Chaikin pass self-intersecting a very thin sliver), this returns the
+    INPUT geometry unchanged rather than raising -- a bad smooth must fall back
+    to the unsmoothed shape, never fail the render.
+    """
+    def _smooth_ring_coords(ring):
+        return list(
+            _angular_then_smooth_closed_ring(
+                LineString(ring.coords), simplify_tolerance, chaikin_iterations
+            ).coords
+        )
+
+    def _smooth_polygon(poly):
+        exterior = _smooth_ring_coords(poly.exterior)
+        interiors = [_smooth_ring_coords(interior) for interior in poly.interiors]
+        return Polygon(exterior, interiors)
+
+    try:
+        if fill.geom_type == "MultiPolygon":
+            smoothed = MultiPolygon([_smooth_polygon(part) for part in fill.geoms])
+        elif fill.geom_type == "Polygon":
+            smoothed = _smooth_polygon(fill)
+        else:
+            return fill
+        if not smoothed.is_valid:
+            smoothed = smoothed.buffer(0)  # heal minor ring self-touch from corner-cutting
+        if smoothed.is_empty or not smoothed.is_valid:
+            return fill
+        return smoothed
+    except (ValueError, TypeError):
+        # A degenerate ring (too few coordinates after simplify, etc.) can make
+        # Polygon()/MultiPolygon() raise -- degrade to the unsmoothed fill.
+        return fill
 
 
 def _draw_boundary_fence(ax, ring: LineString, zorder: float = FENCE_ZORDER) -> None:
@@ -1355,8 +1435,22 @@ def render_layout_map(
         # handled by clipping against a single geometry.
         geom = _reproject_geometry_to_mercator(patch["geometry_wgs84"])
 
+        # DISPLAY-ONLY: smooth the production fill's 5m cell-union staircase into
+        # a clean curve for contour clipping, then re-clip to the stored
+        # polygon_utm so the smoothed mask can never cover ground the cell gate
+        # excluded (Chaikin can push outward at reflex vertices; the lead erode
+        # leaves the fill a full cell inside polygon_utm, so a light smooth stays
+        # within that slack -- but clip anyway to keep the invariant hard).
+        # Computed ONCE per patch, not per contour line. The stored
+        # render_fill_polygon_utm is untouched.
+        production_fill_clip = _smooth_production_fill_for_render(
+            patch["render_fill_polygon_utm"],
+            PRODUCTION_FILL_SIMPLIFY_TOLERANCE_CELLS * max(dem["resolution_meters"]),
+            PRODUCTION_FILL_CHAIKIN_ITERATIONS,
+        ).intersection(patch["polygon_utm"])
+
         for contour in contour_lines:
-            clipped = contour["lines_utm"].intersection(patch["render_fill_polygon_utm"])
+            clipped = contour["lines_utm"].intersection(production_fill_clip)
             if clipped.is_empty:
                 continue
             for line in _iter_line_parts(_reproject_utm_geometry_to_mercator(clipped, dem["crs"])):
