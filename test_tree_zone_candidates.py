@@ -655,9 +655,24 @@ validate_feature_collection(result["zones_geojson"])
 validate_feature_collection(result["search_space_geojson"])
 
 assert result["boundary_acres"] > 0
-assert abs(result["search_space_acres"] + result["claimed_acres"] - result["boundary_acres"]) < 0.5, (
-    "search_space_acres + claimed_acres should reconstruct boundary_acres almost exactly -- roads contribute "
-    "~0 claimed area (zero-width), and production/water polygons are already clipped to the boundary"
+# production_area.py's render_fill_polygon_utm is now a bounded, inset opening
+# (erode r+lead, dilate r, disc element) rather than a convex hull, so the DRAWN
+# production geometry intentionally claims LESS than its full eligible footprint
+# (~0.6-0.8x, an accepted display gap -- see that module's render opening). The
+# reconstruction therefore UNDER-claims by a small fringe (the trimmed production
+# edge plus the boundary setback ring) instead of matching boundary_acres almost
+# exactly as it did under the old over-claiming hull. Assert the two directions
+# separately: NO over-claim (claimed+search never exceeds the boundary -- catches
+# unclipped/double-counted geometry, tighter than the old +/-0.5), and an
+# under-claim no larger than the accepted inset fringe.
+_recon_acres = result["search_space_acres"] + result["claimed_acres"]
+assert _recon_acres <= result["boundary_acres"] + 0.01, (
+    "claimed + search space must never EXCEED the boundary (no over-claim / unclipped geometry) -- got "
+    f"{_recon_acres} vs boundary {result['boundary_acres']}"
+)
+assert result["boundary_acres"] - _recon_acres < 1.0, (
+    "claimed + search space should reconstruct boundary_acres except for the render opening's accepted inset "
+    f"fringe (< ~1 acre on this fixture) -- got a gap of {result['boundary_acres'] - _recon_acres}"
 )
 assert len(result["zones_geojson"]["features"]) >= 1, (
     "the steep, non-production rise (rows >= 15, ~100% grade, non-hydric/non-prime/no-stream with every fetch "

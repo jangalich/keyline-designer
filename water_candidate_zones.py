@@ -83,7 +83,6 @@ from shapely.prepared import prep
 from dem_data import get_dem_for_boundary
 from feature_schema import CONFIDENCE_LOW, make_feature, make_feature_collection
 from production_area import (
-    MIN_ZONE_WAIST_METERS,
     _fetch_road_exclusion_union_utm,
     compute_slope_percent,
     get_required_tree_root_zone_mask_utm,
@@ -217,11 +216,14 @@ WATER_ZONE_SURVEY_BUFFER_METERS = 10.0
 # before clustering, so a dilation-induced merge is split back into two
 # independent zones.
 #
-# Starting value reuses production_area.MIN_ZONE_WAIST_METERS's own answer
-# to "how narrow before this reads as two things, not one" as the anchor --
-# NOT independently derived, and NOT YET VALIDATED against a real
-# property. CONFIGURABLE.
-WATER_ZONE_MIN_WAIST_METERS = MIN_ZONE_WAIST_METERS
+# Was anchored to production_area.MIN_ZONE_WAIST_METERS, but that constant was
+# retuned (12 -> 24m) for PRODUCTION-zone splitting against a specific reference
+# property's boundaries. Water zones were NOT part of that tuning, so this keeps
+# its OWN independent value here: a production-side retune must not silently move
+# the water waist threshold. Same starting rationale ("how narrow before this
+# reads as two things, not one"), NOT independently derived, NOT YET VALIDATED
+# against a real property. CONFIGURABLE.
+WATER_ZONE_MIN_WAIST_METERS = 12.0
 
 # How far past a tree-cell's own footprint the woody-vegetation hard
 # exclusion extends for water zones specifically -- reuses canopy_height_

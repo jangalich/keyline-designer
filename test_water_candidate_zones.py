@@ -62,9 +62,9 @@ from shapely.geometry import box
 
 from feature_schema import validate_feature_collection
 from raster_grid import SQUARE_METERS_PER_ACRE, cell_area_acres, cell_union_footprint, connected_components
+from production_area import MIN_ZONE_WAIST_METERS as PRODUCTION_MIN_ZONE_WAIST_METERS
 from water_candidate_zones import (
     MIN_WATER_ZONE_AREA_ACRES,
-    MIN_ZONE_WAIST_METERS,
     VALLEY_ACCUMULATION_PERCENTILE_HIGH,
     VALLEY_ACCUMULATION_PERCENTILE_LOW,
     WATER_ZONE_MIN_WAIST_METERS,
@@ -81,9 +81,18 @@ import water_candidate_zones as wcz
 CRS = "EPSG:32617"
 RESOLUTION = (5.0, 5.0)
 
-assert WATER_ZONE_MIN_WAIST_METERS == MIN_ZONE_WAIST_METERS, (
-    "WATER_ZONE_MIN_WAIST_METERS should still be anchored to production_area.MIN_ZONE_WAIST_METERS "
-    "(see that constant's own docstring) -- if this fails, the anchor was broken without updating this test"
+# WATER_ZONE_MIN_WAIST_METERS was decoupled from production_area.MIN_ZONE_WAIST_
+# METERS when the latter was retuned to 24m for production-zone splitting (water
+# zones were not part of that tuning). It is now an independent water-zone
+# constant pinned at 12.0m; this asserts the decoupling holds (catches an
+# accidental re-anchoring, the inverse of what this check used to guard).
+assert WATER_ZONE_MIN_WAIST_METERS == 12.0, (
+    "WATER_ZONE_MIN_WAIST_METERS is now an INDEPENDENT water-zone constant (12.0m), no longer anchored "
+    "to production_area.MIN_ZONE_WAIST_METERS -- if this fails, it was re-anchored without updating this test"
+)
+assert WATER_ZONE_MIN_WAIST_METERS != PRODUCTION_MIN_ZONE_WAIST_METERS, (
+    "the water and production waist thresholds are intentionally decoupled now (production retuned to 24m) -- "
+    "a production-side retune must not silently move the water threshold"
 )
 
 # A single straight drainage column at col=20 running the full height of a

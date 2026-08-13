@@ -289,7 +289,8 @@ print(
 # veto, and its clearing under 4-connectivity.                          #
 #                                                                        #
 # Fixture: two 14x14 lobes joined by a genuine EDGE-connected waist two  #
-# cells (10 m) wide -- narrower than MIN_ZONE_WAIST_METERS (12 m), so a  #
+# cells (10 m) wide -- narrower than the 12 m waist this test passes    #
+# explicitly to attempt_waist_split(), so a                             #
 # radius-2 erosion pinches it apart -- PLUS a stray region that touches  #
 # the mass at a single CORNER only.                                      #
 #                                                                        #

@@ -106,29 +106,61 @@ def _shift(arr: np.ndarray, dr: int, dc: int) -> np.ndarray:
     return out
 
 
-def binary_erode(mask: np.ndarray, radius_cells: int) -> np.ndarray:
-    """
-    8-connected (Chebyshev/square) binary erosion by radius_cells, treating
-    everything outside `mask`'s own bounds as background -- same D8
-    adjacency connected_components() already uses, so a shape that eroded
-    down to 2+ separate components is genuinely pinched by this grid's own
-    connectivity rule, not by an inconsistent one.
+def _disc_offsets(radius_cells: int) -> list[tuple[int, int]]:
+    """Every (dr, dc) whose Euclidean distance from the center is within
+    radius_cells (dr*dr + dc*dc <= radius_cells*radius_cells), including
+    (0, 0) -- the DISC structuring element, symmetric, for a single direct
+    radius-r pass. Contrast the SQUARE element binary_erode()/binary_dilate()
+    build by repeating a 3x3 (D8) ring r times: repeating a 3x3 ring is
+    equivalent to a (2r+1)-square element ONLY, so it can never produce a
+    disc -- a disc needs the radius-r offsets enumerated directly, as here."""
+    r2 = radius_cells * radius_cells
+    return [
+        (dr, dc)
+        for dr in range(-radius_cells, radius_cells + 1)
+        for dc in range(-radius_cells, radius_cells + 1)
+        if dr * dr + dc * dc <= r2
+    ]
 
-    Implemented as radius_cells repeated single-ring (3x3) erosions rather
-    than one direct radius-N structuring element -- applying the 3x3
-    erosion r times is mathematically equivalent to eroding once with a
-    single (2r+1)-square structuring element, and this keeps the whole
-    operation plain numpy (shift-and-AND over the 8 neighbor offsets), no
-    scipy dependency. Deliberately implemented here rather than adding
-    scipy: this module's own docstring commits to staying dependency-free
-    (numpy only) so every terrain-analysis module downstream can unit-test
-    against a synthetic DEM without a heavier, unvetted new requirement for
-    what is otherwise a single, simple, self-contained operation.
+
+def binary_erode(mask: np.ndarray, radius_cells: int, element: str = "square") -> np.ndarray:
+    """
+    Binary erosion by radius_cells, treating everything outside `mask`'s own
+    bounds as background. `element` selects the structuring element:
+
+      "square" (the DEFAULT, unchanged): 8-connected (Chebyshev) erosion --
+        radius_cells repeated single-ring (3x3, D8_OFFSETS) erosions, which
+        is mathematically equivalent to one (2r+1)-square structuring
+        element. The default is deliberately square: it matches
+        connected_components()'s own D8 adjacency, so "eroded into 2+
+        components" means pinched under the same connectivity rule the rest
+        of the module uses. attempt_waist_split() (and, through it,
+        water_candidate_zones.py) depends on that -- do NOT change the
+        default.
+
+      "disc": Euclidean erosion by a single radius-r disc pass (include a
+        neighbour offset only when dr*dr + dc*dc <= r*r). Corners round
+        instead of developing the flat 45-degree facets a square element
+        leaves at larger radii. Used only by production_area.py's render
+        opening.
+
+    Either way this stays plain numpy (shift-and-AND over the element's
+    offsets), no scipy dependency -- this module commits to numpy-only so
+    every downstream terrain module can unit-test against a synthetic DEM.
 
     radius_cells <= 0 returns a copy of `mask` unchanged (no erosion).
+    Raises ValueError for any element other than "square" or "disc".
     """
+    if element not in ("square", "disc"):
+        raise ValueError(f"binary_erode(): element must be 'square' or 'disc', got {element!r}")
     if radius_cells <= 0:
         return mask.copy()
+
+    if element == "disc":
+        eroded = mask.copy()
+        for dr, dc in _disc_offsets(radius_cells):
+            eroded &= _shift(mask, dr, dc)
+        return eroded
 
     eroded = mask.copy()
     for _ in range(radius_cells):
@@ -139,22 +171,38 @@ def binary_erode(mask: np.ndarray, radius_cells: int) -> np.ndarray:
     return eroded
 
 
-def binary_dilate(mask: np.ndarray, radius_cells: int) -> np.ndarray:
+def binary_dilate(mask: np.ndarray, radius_cells: int, element: str = "square") -> np.ndarray:
     """
-    8-connected (Chebyshev/square) binary dilation by radius_cells -- the
-    exact dual of binary_erode() above (shift-and-OR over the 8 neighbor
-    offsets instead of shift-and-AND), grown outward radius_cells times
-    rather than dilated once with a single (2r+1)-square structuring
-    element, for the same reason binary_erode() repeats a 3x3 ring instead
-    of building one large kernel: it stays plain numpy, no scipy
-    dependency. _shift() treats anything outside `mask`'s own bounds as
-    background (False), so dilation never grows in from beyond the grid's
-    own edges -- consistent with binary_erode()'s own edge convention.
+    Binary dilation by radius_cells -- the exact dual of binary_erode()
+    (shift-and-OR instead of shift-and-AND). `element` selects the
+    structuring element, mirroring binary_erode():
+
+      "square" (the DEFAULT, unchanged): 8-connected (Chebyshev) dilation,
+        radius_cells repeated 3x3 (D8_OFFSETS) rings. Every existing caller
+        keeps this with no edit.
+
+      "disc": Euclidean dilation by a single radius-r disc pass (offset
+        included only when dr*dr + dc*dc <= r*r), so grown corners round
+        rather than square off. Used only by production_area.py's render
+        opening, paired with a disc erosion to form a disc opening.
+
+    _shift() treats anything outside `mask`'s own bounds as background, so
+    dilation never grows in from beyond the grid's edges -- consistent with
+    binary_erode()'s edge convention. Stays plain numpy, no scipy.
 
     radius_cells <= 0 returns a copy of `mask` unchanged (no dilation).
+    Raises ValueError for any element other than "square" or "disc".
     """
+    if element not in ("square", "disc"):
+        raise ValueError(f"binary_dilate(): element must be 'square' or 'disc', got {element!r}")
     if radius_cells <= 0:
         return mask.copy()
+
+    if element == "disc":
+        dilated = mask.copy()
+        for dr, dc in _disc_offsets(radius_cells):
+            dilated |= _shift(mask, dr, dc)
+        return dilated
 
     dilated = mask.copy()
     for _ in range(radius_cells):
@@ -272,31 +320,44 @@ def eroded_cell_mask(
     cells: list[tuple[int, int]],
     grid_shape: tuple[int, int],
     dem: dict,
-    min_waist_meters: float,
+    radius_meters: float,
+    element: str = "square",
+    extra_erode_cells: int = 0,
 ) -> np.ndarray:
     """
     The boolean survivor mask left after eroding the cell set `cells` by
-    min_waist_meters: build the cluster's own cell mask on `grid_shape`,
-    convert the waist width to a cell radius via waist_erosion_radius_cells(),
-    and binary_erode() by it. The True cells of the returned mask are exactly
-    the PRE-reclaim erosion survivors -- np.argwhere() them to recover the
-    survivor cell list. May be all-False if the cluster is thinner than the
-    erosion radius throughout.
+    radius_meters: build the cluster's own cell mask on `grid_shape`, convert
+    radius_meters to a cell radius via waist_erosion_radius_cells(), and
+    binary_erode() by it. The True cells of the returned mask are exactly the
+    PRE-reclaim erosion survivors -- np.argwhere() them to recover the survivor
+    cell list. May be all-False if the cluster is thinner than the erosion
+    radius throughout.
 
-    Extracted verbatim from attempt_waist_split()'s own body (zero behavior
-    change -- attempt_waist_split() now calls this for its own erosion) so a
+    `radius_meters` (renamed from min_waist_meters -- one caller now passes a
+    RENDER_OPENING_RADIUS_METERS, another a MIN_ZONE_WAIST_METERS, so the old
+    "waist" name no longer describes both) is the base radius. `element`
+    ("square" default, or "disc") is passed straight through to binary_erode().
+    `extra_erode_cells` is ADDED to the computed cell radius before eroding --
+    folding it in here is what makes it COMPOSE into a single erosion of
+    (radius + extra) rather than a separate second pass (consecutive erosions
+    compose; erode(a) then erode(b) == erode(a+b) for the same element). This
+    is the "lead erode" the render opening uses to sever more aggressively.
+
+    Defaults ("square", 0) reproduce the original behavior exactly, so
+    attempt_waist_split()'s own call is unchanged.
+
+    Originally extracted verbatim from attempt_waist_split()'s own body so a
     caller that wants the SAME erosion for render-only geometry
-    (production_area.cluster_and_gate()'s unconditional-render-erosion path)
-    reuses this identical computation rather than a second, independently-
-    maintained copy of it.
+    (production_area.cluster_and_gate()'s render opening) reuses this identical
+    computation rather than a second, independently-maintained copy of it.
     """
     rows, cols = grid_shape
     cell_mask = np.zeros((rows, cols), dtype=bool)
     for r, c in cells:
         cell_mask[r, c] = True
 
-    radius_cells = waist_erosion_radius_cells(dem, min_waist_meters)
-    return binary_erode(cell_mask, radius_cells)
+    radius_cells = waist_erosion_radius_cells(dem, radius_meters) + extra_erode_cells
+    return binary_erode(cell_mask, radius_cells, element=element)
 
 
 def attempt_waist_split(

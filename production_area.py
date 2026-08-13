@@ -177,21 +177,38 @@ MIN_PRODUCTION_AREA_ACRES = 0.5
 # something too narrow to sensibly treat as one zone (e.g. two decent-
 # sized fields joined by a thin strip). Narrower than this, and it reads
 # as two separate zones rather than one -- see cluster_and_gate()'s own
-# docstring for the erosion-based detection this feeds. 40 ft (~12m) is a
-# documented STARTING value only -- like every other threshold in this
-# pipeline (MAX_PRODUCTION_SLOPE_PCT, MIN_PRODUCTION_AREA_ACRES), it is
-# UNVALIDATED against real ground-truth and needs tuning against real
-# properties, not a derived or measured figure. CONFIGURABLE.
-MIN_ZONE_WAIST_METERS = 12.0  # ~40 ft
+# docstring for the erosion-based detection this feeds. CONFIGURABLE.
+#
+# RADII TUNING CAVEAT (applies to this constant, RENDER_OPENING_RADIUS_METERS,
+# and RENDER_LEAD_ERODE_CELLS below): these radii were tuned against two
+# boundaries of a single ~16-acre reference property. The working window is
+# narrow -- 24 m was the only swept value at which BOTH boundaries produced two
+# zones, with 18 m under-detecting and 30 m over-splitting on both. A fixed
+# metre value may not hold across parcel sizes: a 3-acre parcel and a 30-acre
+# parcel plausibly want different thresholds, since both the neck width that
+# reads as "unfarmable through" and the fringe width worth trimming scale with
+# the size of the fields involved. If these turn out not to generalise, the fix
+# is to DERIVE them from parcel extent rather than to keep re-tuning a fixed
+# constant.
+MIN_ZONE_WAIST_METERS = 24.0  # split threshold; see RADII TUNING CAVEAT above
 
-# Radius of the morphological OPENING (erode by r, dilate the survivors back
-# by r) used to build render_fill_polygon_utm -- see cluster_and_gate()'s
-# docstring. Deliberately a SEPARATE constant from MIN_ZONE_WAIST_METERS even
-# where numerically equal: MIN_ZONE_WAIST_METERS defines when a neck is narrow
-# enough to count as two disconnected zones (the SPLIT decision); this one
-# defines how thin a protrusion or neck the DRAWN shape trims/severs (a
-# render-geometry decision). Retuning either must not silently move the other.
+# Radius of the morphological OPENING (erode by r + RENDER_LEAD_ERODE_CELLS,
+# dilate back by r) used to build render_fill_polygon_utm -- see cluster_and_
+# gate()'s docstring. Deliberately a SEPARATE constant from MIN_ZONE_WAIST_
+# METERS: that one defines when a neck is narrow enough to count as two
+# disconnected zones (the SPLIT decision); this one defines how thin a
+# protrusion or neck the DRAWN shape trims/severs (a render-geometry decision).
+# Retuning either must not silently move the other. See the RADII TUNING CAVEAT
+# on MIN_ZONE_WAIST_METERS above -- it applies here too.
 RENDER_OPENING_RADIUS_METERS = 12.0  # ~40 ft
+
+# Extra erosion applied ahead of the render opening, in CELLS (not metres) --
+# this is a fringe-trim, and one cell is one cell regardless of grid
+# resolution. Folded into eroded_cell_mask()'s radius so it composes into a
+# single erosion: erode(r + LEAD) -> dilate(r), an asymmetric opening that
+# severs features narrower than 2*(r + LEAD) while restoring only r. Separate,
+# independently retunable constant (see the RADII TUNING CAVEAT above).
+RENDER_LEAD_ERODE_CELLS = 1
 
 METERS_PER_FOOT = 0.3048
 
@@ -945,23 +962,33 @@ def cluster_and_gate(
         to reflect the full, POST-reclaim footprint, completely unaffected
         by render_polygon_utm.
 
-        'render_fill_polygon_utm' is a SECOND, separate field: a bounded
-        morphological OPENING of this cluster's own cell mask, clipped to
-        polygon_utm --
+        'render_fill_polygon_utm' is a SECOND, separate field: a bounded,
+        ASYMMETRIC, DISC morphological OPENING of this cluster's own cell mask,
+        clipped to polygon_utm --
 
-            opened = binary_dilate(eroded_cell_mask(cluster_cells, r), r)
+            opened = binary_dilate(
+                eroded_cell_mask(cluster_cells, r, element="disc",
+                                 extra_erode_cells=RENDER_LEAD_ERODE_CELLS),
+                r, element="disc",
+            )
             render_fill_polygon_utm =
                 cell_union_footprint(dem, opened).intersection(polygon_utm)
 
-        where r = RENDER_OPENING_RADIUS_METERS in cells. An opening erodes
-        the cluster by r and then dilates the survivors back by r. It is
-        anti-extensive (opened <= original): outer edges return to roughly
-        their original position, thin protrusions are trimmed, and a neck
-        severed by the erosion CANNOT be re-joined (dilation only regrows the
-        survivors that remained). It does NOT fill notches, pockets, or other
-        concavities -- that is a CLOSING (dilate-then-erode), the opposite
-        operation, tried and rejected (see below). Clipping to polygon_utm
-        makes the result BOUNDED BY CONSTRUCTION:
+        where r = RENDER_OPENING_RADIUS_METERS in cells. The opening erodes the
+        cluster by r + RENDER_LEAD_ERODE_CELLS (the "lead erode", folded into a
+        single erosion) and then dilates the survivors back by only r -- an
+        ASYMMETRIC opening that severs features narrower than 2*(r + lead) while
+        restoring only r, so narrow features are annihilated rather than shrunk
+        to slivers and every edge is inset by the lead. The DISC structuring
+        element (vs binary_erode()'s square default) gives Euclidean reach, so
+        corners round instead of developing flat 45-degree facets at larger
+        radii. An opening is anti-extensive (opened <= original): outer edges
+        return close to their original position, thin protrusions are trimmed,
+        and a neck severed by the erosion CANNOT be re-joined (dilation only
+        regrows the survivors that remained). It does NOT fill notches, pockets,
+        or other concavities -- that is a CLOSING (dilate-then-erode), the
+        opposite operation, tried and rejected (see below). Clipping to
+        polygon_utm makes the result BOUNDED BY CONSTRUCTION:
         render_fill_polygon_utm.area <= polygon_utm.area always (asserted;
         raises on violation). Despite the "render_" name, this is NOT purely
         a cosmetic display-only field -- water_candidate_zones.py's own
@@ -1088,25 +1115,41 @@ def cluster_and_gate(
                 render_polygon_utm = render_footprint.intersection(boundary_polygon_utm)
 
             # render_fill_polygon_utm: a bounded morphological OPENING of this
-            # cluster's own cell mask -- erode by RENDER_OPENING_RADIUS_METERS,
-            # dilate the survivors back by the same radius -- then CLIP to
-            # polygon_utm. An opening is anti-extensive (opened <= original), so
+            # cluster's own cell mask, then CLIP to polygon_utm. This is an
+            # ASYMMETRIC, DISC opening: erode by RENDER_OPENING_RADIUS_METERS +
+            # RENDER_LEAD_ERODE_CELLS, then dilate back by only
+            # RENDER_OPENING_RADIUS_METERS. The lead erode composes into the
+            # single erosion (see eroded_cell_mask()), so it severs features
+            # narrower than 2*(r + lead) while restoring only r -- annihilating
+            # narrow features rather than shrinking them to slivers, and leaving
+            # every edge inset by the lead. The DISC element (vs the square
+            # default) gives Euclidean reach, so corners round instead of
+            # developing the flat 45-degree facets a square element leaves at
+            # larger radii. An opening is anti-extensive (opened <= original), so
             # it TRIMS thin protrusions and SEVERS narrow necks (a neck severed
-            # by the erosion cannot be re-joined, because dilation only regrows
-            # the survivors that remained) while returning wide outer edges to
-            # roughly their original position. It does NOT fill notches, pockets,
-            # or concavities -- that would require a closing (dilate-then-erode),
-            # which is the opposite operation and was tried and rejected. Clipping
-            # to polygon_utm makes the result BOUNDED BY CONSTRUCTION -- it can
-            # never claim ground the cell gate excluded, a strictly stronger
-            # guarantee than the old convex hull (which had no upper bound on how
-            # far it could bulge past the real footprint, and which several
-            # downstream modules consume as production EXCLUSION geometry). See
-            # cluster_and_gate()'s docstring.
+            # by the erosion cannot be re-joined -- dilation only regrows the
+            # survivors that remained) while returning wide outer edges close to
+            # their original position. It does NOT fill notches, pockets, or
+            # concavities -- that would require a closing (dilate-then-erode), the
+            # opposite operation, tried and rejected. Clipping to polygon_utm
+            # makes the result BOUNDED BY CONSTRUCTION -- it can never claim
+            # ground the cell gate excluded, a strictly stronger guarantee than
+            # the old convex hull (which had no upper bound on how far it could
+            # bulge past the real footprint, and which several downstream modules
+            # consume as production EXCLUSION geometry). See cluster_and_gate()'s
+            # docstring.
             opening_radius_cells = waist_erosion_radius_cells(dem, RENDER_OPENING_RADIUS_METERS)
             opened_mask = binary_dilate(
-                eroded_cell_mask(cluster_cells, cell_mask.shape, dem, RENDER_OPENING_RADIUS_METERS),
+                eroded_cell_mask(
+                    cluster_cells,
+                    cell_mask.shape,
+                    dem,
+                    RENDER_OPENING_RADIUS_METERS,
+                    element="disc",
+                    extra_erode_cells=RENDER_LEAD_ERODE_CELLS,
+                ),
                 opening_radius_cells,
+                element="disc",
             )
             if opened_mask.any():
                 render_fill_polygon_utm = cell_union_footprint(dem, opened_mask).intersection(polygon_utm)

@@ -966,9 +966,10 @@ print(
 # --- Dumbbell where erosion produces 2 components, but one sub-cluster would fall below
 #     MIN_PRODUCTION_AREA_ACRES after reclaiming -- must NOT split (step 2c) ---
 
-small_lobe = _rect_cells(0, 6, 0, 6)     # 6x6 -- small, but its eroded interior still survives on its own
-big_lobe = _rect_cells(0, 10, 10, 20)    # 10x10
-tiny_strip = _rect_cells(2, 4, 6, 10)    # 2 rows tall -- narrow, same as the real-split case above
+small_lobe = _rect_cells(0, 7, 0, 7)     # 7x7 = 49 cells (~0.30 ac, sub-floor) -- big enough that its
+                                         # center still survives the now-3-cell (24m) erosion on its own
+big_lobe = _rect_cells(0, 10, 12, 22)    # 10x10 = 100 cells
+tiny_strip = _rect_cells(3, 6, 7, 12)    # 3 rows tall -- narrow, erodes away at the 3-cell radius
 undersized_split_cells = small_lobe + big_lobe + tiny_strip
 undersized_split_mask = _mask_from_cells(WAIST_DEM_SHAPE, undersized_split_cells)
 undersized_dem = _waist_dem(*WAIST_DEM_SHAPE)
@@ -1069,43 +1070,51 @@ assert square_patch["render_polygon_utm"] is square_patch["polygon_utm"], (
     "an ordinary, non-split cluster's render_polygon_utm must simply BE polygon_utm -- no change in "
     "rendering behavior for the ordinary case"
 )
-# render_fill_polygon_utm is a bounded opening clipped to polygon_utm -- a solid, roughly-square block has
-# no feature narrower than the opening radius, so the opening recovers its outer edge exactly: the fill is
-# geometrically IDENTICAL to polygon_utm (ratio 1.0), the closest an opening comes to being a no-op.
-assert square_patch["render_fill_polygon_utm"].equals(square_patch["polygon_utm"]), (
-    "a solid, already-convex mask's render_fill_polygon_utm (its own opening) must be geometrically "
-    "IDENTICAL to polygon_utm -- an opening of a shape with no sub-radius feature recovers it exactly"
-)
-assert abs(square_patch["render_fill_polygon_utm"].area - square_patch["polygon_utm"].area) < 1e-9, (
-    "a solid, already-convex mask's opening must have the EXACT same real area as polygon_utm"
-)
+# render_fill_polygon_utm is a bounded, ASYMMETRIC, DISC opening (erode r+lead, dilate r) clipped to
+# polygon_utm. The lead erode insets every straight edge by exactly one cell, and the disc rounds the
+# corners, so a solid square is drawn strictly INSIDE its own footprint (no longer identical to polygon_utm,
+# as it was before the lead erode was folded in).
 assert square_patch["render_fill_polygon_utm"].area <= square_patch["polygon_utm"].area + 1e-6, (
-    "the opening is bounded above by the footprint even in this recovers-exactly case"
+    "the opening is bounded above by the footprint"
+)
+assert square_patch["render_fill_polygon_utm"].area < square_patch["polygon_utm"].area, (
+    "the asymmetric opening's lead erode insets every edge, so a solid square's fill is strictly smaller "
+    "than its footprint"
+)
+assert not square_patch["render_fill_polygon_utm"].is_empty
+_poly_b = square_patch["polygon_utm"].bounds
+_fill_b = square_patch["render_fill_polygon_utm"].bounds
+_inset_x = ((_fill_b[0] - _poly_b[0]) + (_poly_b[2] - _fill_b[2])) / 2
+_inset_y = ((_fill_b[1] - _poly_b[1]) + (_poly_b[3] - _fill_b[3])) / 2
+assert abs(_inset_x - WAIST_RESOLUTION[0]) < 1e-6 and abs(_inset_y - WAIST_RESOLUTION[1]) < 1e-6, (
+    f"the lead erode must inset each straight edge by exactly one cell ({WAIST_RESOLUTION[0]}m); "
+    f"measured inset ({_inset_x}, {_inset_y})"
 )
 print(
-    "Idempotence: a solid, roughly-square mask with neither a waist nor a hole passes through completely "
-    "unchanged -- 1 cluster, hole_footprints=[], render_polygon_utm is polygon_utm, and render_fill_"
-    "polygon_utm (its own bounded opening) is geometrically IDENTICAL to polygon_utm (ratio 1.0)."
+    "Idempotence: a solid, roughly-square mask passes through unchanged for REPORTING (1 cluster, "
+    "hole_footprints=[], render_polygon_utm is polygon_utm) while render_fill_polygon_utm is its bounded "
+    f"asymmetric opening -- straight edges inset by exactly one cell ({WAIST_RESOLUTION[0]}m), corners rounded "
+    "by the disc element."
 )
 
 
 # --- Combined: a waist split AND a separate, unrelated true hole in one of the two resulting lobes ---
 
-COMBINED_SHAPE = (16, 30)
+COMBINED_SHAPE = (24, 44)
 combined_dem = _waist_dem(*COMBINED_SHAPE)
 combined_step1 = _step1_for(combined_dem)
 
 combined_lobe_a = set(_rect_cells(0, 10, 0, 10))     # 10x10, no hole
-combined_lobe_b = set(_rect_cells(0, 16, 14, 30))    # 16x16, WITH a hole below
-# 6x6 hole, walled by a 5-cell margin on every side of lobe B -- same
-# thickness the standalone ring/donut test above uses, so it survives
-# Part 1's erosion as its own thin ring rather than eroding away to
-# nothing (a hole positioned too close to its own cluster's edge would
-# vanish under erosion along with the outer boundary, which would just
-# make lobe B smaller, not preserve a real hole to detect).
-combined_hole = set(_rect_cells(5, 11, 19, 25))
+combined_lobe_b = set(_rect_cells(0, 22, 16, 38))    # 22x22, WITH a hole
+# 6x6 hole, walled by an 8-cell margin on every side of lobe B -- thick
+# enough that the wall survives the now-3-cell (24m) Part 1 erosion from
+# BOTH the outer boundary and the hole edge (8 - 3 - 3 > 0), so lobe B
+# keeps a surviving eroded ring rather than eroding away to nothing (a
+# too-thin wall would vanish under the wider erosion, leaving only lobe A
+# and thus no split to test).
+combined_hole = set(_rect_cells(8, 14, 24, 30))
 combined_lobe_b -= combined_hole
-combined_strip = set(_rect_cells(4, 6, 10, 14))      # 2 rows tall -- narrow, same as the split case above
+combined_strip = set(_rect_cells(4, 7, 10, 16))      # 3 rows tall -- narrow, erodes away at the 3-cell radius
 
 combined_cells = list(combined_lobe_a | combined_lobe_b | combined_strip)
 combined_mask = _mask_from_cells(COMBINED_SHAPE, combined_cells)
@@ -1115,8 +1124,9 @@ assert len(combined_patches) == 2, (
     f"the waist must still split into 2 clusters even with an unrelated hole present, got {len(combined_patches)}"
 )
 
-# Identify which resulting sub-cluster is the "lobe B" side (its cells sit at column >= 14).
-lobe_b_patch = next(p for p in combined_patches if any(c >= 14 for _, c in p["cells"]))
+# Identify which resulting sub-cluster is the "lobe B" side (its cells sit at column >= 16;
+# lobe A's cells never reach past the neck, so this uniquely picks lobe B).
+lobe_b_patch = next(p for p in combined_patches if any(c >= 16 for _, c in p["cells"]))
 lobe_a_patch = next(p for p in combined_patches if p is not lobe_b_patch)
 
 assert lobe_a_patch["hole_footprints"] == [], "lobe A (no hole) must report hole_footprints=[]"

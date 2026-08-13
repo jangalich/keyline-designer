@@ -218,22 +218,29 @@ print(
 
 
 # ===================================================================== #
-# Verification 4 -- the outer edge is PRESERVED on an ordinary zone.    #
-# This is the number that decides whether the opening is viable: it must #
-# return a plain rectangle close to its own footprint (~1.0), unlike the #
-# erosion-only experiment which shrank it to 0.64.                      #
+# Verification 4/5 -- the outer edge insets by EXACTLY the lead erode.  #
+# The opening is now ASYMMETRIC (erode r + RENDER_LEAD_ERODE_CELLS,      #
+# dilate r) with a DISC element, so an ordinary rectangle's straight     #
+# edges pull in by exactly the lead (one cell) and its corners round.    #
+# This is the cost of the lead erode on ordinary zones -- report it.     #
 # ===================================================================== #
 
 plain_patch = _gate(PLAIN_MASK, _dem(*PLAIN_SHAPE))[0][0]
-plain_ratio = plain_patch["render_fill_polygon_utm"].area / plain_patch["polygon_utm"].area
-assert plain_patch["render_fill_polygon_utm"].area <= plain_patch["polygon_utm"].area + 1e-6
-assert plain_ratio >= 0.95, (
-    f"the opening must preserve an ordinary rectangle's outer edge (ratio >= 0.95); got {plain_ratio:.4f} -- "
-    "materially below 0.95 would mean the opening insets ordinary zones too much"
+plain_poly = plain_patch["polygon_utm"]
+plain_fill = plain_patch["render_fill_polygon_utm"]
+plain_ratio = plain_fill.area / plain_poly.area
+assert plain_fill.area <= plain_poly.area + 1e-6, "the opening stays bounded by the footprint"
+_pb, _fb = plain_poly.bounds, plain_fill.bounds
+_inset_x = ((_fb[0] - _pb[0]) + (_pb[2] - _fb[2])) / 2
+_inset_y = ((_fb[1] - _pb[1]) + (_pb[3] - _fb[3])) / 2
+_one_cell = 5.0  # RENDER_LEAD_ERODE_CELLS (1) * cell size (5m)
+assert abs(_inset_x - _one_cell) < 1e-6 and abs(_inset_y - _one_cell) < 1e-6, (
+    f"the lead erode (RENDER_LEAD_ERODE_CELLS={pa.RENDER_LEAD_ERODE_CELLS}) must inset each straight edge by "
+    f"exactly one cell ({_one_cell}m); measured inset ({_inset_x}, {_inset_y})"
 )
 print(
-    f"V4 outer edge preserved: a plain 100m x 100m zone's render_fill/polygon_utm area ratio is "
-    f"{plain_ratio:.4f} (opening recovers the outer edge; the erosion-only experiment was 0.64)."
+    f"V4/V5 asymmetric inset: a plain 100m x 100m zone's straight edges inset by exactly one cell ({_one_cell}m, "
+    f"the lead erode) with disc-rounded corners -- render_fill/polygon_utm area ratio {plain_ratio:.4f}."
 )
 
 
