@@ -119,6 +119,7 @@ the real cell-union footprint already excludes hole cells by
 construction.
 """
 
+import logging
 import math
 from collections import deque
 from typing import Optional
@@ -142,6 +143,7 @@ from raster_grid import (
     cell_area_acres,
     cell_union_footprint,
     connected_components,
+    eroded_cell_mask,
     pixel_center_xy,
     waist_erosion_radius_cells,
 )
@@ -152,6 +154,8 @@ from soil_data import (
     hydric_disqualifying_mukeys,
 )
 from terrain_metrics import aspect_score, compute_slope_and_aspect
+
+_LOGGER = logging.getLogger(__name__)
 
 # Cells at or below this slope are considered plausibly workable
 # production/cultivation ground for this heuristic. 15% is a common
@@ -178,6 +182,27 @@ MIN_PRODUCTION_AREA_ACRES = 0.5
 # UNVALIDATED against real ground-truth and needs tuning against real
 # properties, not a derived or measured figure. CONFIGURABLE.
 MIN_ZONE_WAIST_METERS = 12.0  # ~40 ft
+
+# EXPERIMENTAL (branch: render-geometry-variants). Both default to False =
+# current behavior; a run with both False is byte-identical to main. They
+# only affect render_polygon_utm / render_fill_polygon_utm -- never the
+# reported geometry (polygon_utm, area_acres, geometry_wgs84, cells, id,
+# source_patch_id, hole_footprints, scoring). Separate, independently
+# toggleable constants per this codebase's standing convention, even though
+# a human evaluates them together. See this branch's prompt for what is
+# being evaluated and why.
+#
+#   A -- UNCONDITIONAL_RENDER_EROSION: build every cluster's
+#        render_polygon_utm from its pre-reclaim erosion survivors (the same
+#        erosion the committed-split path already uses), so a narrow neck
+#        opens geometrically whether or not a waist split was committed.
+#   B -- PER_PART_RENDER_HULL: hull each geometric part of render_polygon_utm
+#        separately and union, so a convex hull can never bridge across the
+#        gap between disjoint parts. Inert while render_polygon_utm is a
+#        single Polygon (the 4-connected default) -- only meaningful once A
+#        makes it multi-part.
+UNCONDITIONAL_RENDER_EROSION = False
+PER_PART_RENDER_HULL = False
 
 METERS_PER_FOOT = 0.3048
 
@@ -1063,22 +1088,68 @@ def cluster_and_gate(
                 continue
 
             if render_cells is cluster_cells:
-                # No waist split for this cluster -- render_polygon_utm
-                # must simply equal polygon_utm, same object, no change
-                # in rendering behavior for the ordinary, non-split case.
-                render_polygon_utm = polygon_utm
+                # No waist split committed for this cluster (or a vetoed
+                # split): _attempt_waist_split() returned render_cells ==
+                # cluster_cells.
+                if UNCONDITIONAL_RENDER_EROSION:
+                    # EXPERIMENTAL flag A: build render_polygon_utm from this
+                    # cluster's OWN pre-reclaim erosion survivors, using the
+                    # exact same erosion the committed-split path already uses
+                    # (same MIN_ZONE_WAIST_METERS radius, same binary_erode via
+                    # raster_grid.eroded_cell_mask()). A narrow neck then opens
+                    # geometrically with no split decision that can fail.
+                    survivor_mask = eroded_cell_mask(
+                        cluster_cells, cell_mask.shape, dem, MIN_ZONE_WAIST_METERS
+                    )
+                    survivor_cells = [(int(r), int(c)) for r, c in np.argwhere(survivor_mask)]
+                    if survivor_cells:
+                        render_footprint = _cell_union_footprint(survivor_cells, dem)
+                        render_polygon_utm = render_footprint.intersection(boundary_polygon_utm)
+                    else:
+                        # Erosion wiped the whole cluster out (thinner than the
+                        # erosion radius throughout): fall back to polygon_utm
+                        # rather than emitting empty render geometry.
+                        render_polygon_utm = polygon_utm
+                        _LOGGER.warning(
+                            "cluster_and_gate: UNCONDITIONAL_RENDER_EROSION eroded a %d-cell "
+                            "(%.4f ac) cluster to nothing; render_polygon_utm falling back to "
+                            "polygon_utm for this cluster.",
+                            len(cluster_cells),
+                            area_acres,
+                        )
+                else:
+                    # Current behavior: render_polygon_utm equals polygon_utm,
+                    # same object, no change in rendering for the ordinary,
+                    # non-split case.
+                    render_polygon_utm = polygon_utm
             else:
+                # Committed waist split: render from this sub-piece's own
+                # pre-reclaim survivor cells (already erosion-based, so flag A
+                # leaves this path unchanged).
                 render_footprint = _cell_union_footprint(render_cells, dem)
                 render_polygon_utm = render_footprint.intersection(boundary_polygon_utm)
 
-            # render_fill_polygon_utm: the plain convex hull of
-            # render_polygon_utm, re-intersected with boundary_polygon_utm
-            # (same safety convention every other footprint in this
-            # function already follows -- a hull can extend past the real
-            # parcel boundary near an edge cell). No radius, no per-pocket
-            # logic at all -- see cluster_and_gate()'s own docstring for
-            # why this replaced the earlier buffer-round-trip smoothing.
-            render_fill_polygon_utm = render_polygon_utm.convex_hull.intersection(boundary_polygon_utm)
+            # render_fill_polygon_utm: the convex hull of render_polygon_utm,
+            # re-intersected with boundary_polygon_utm (same safety convention
+            # every other footprint in this function already follows -- a hull
+            # can extend past the real parcel boundary near an edge cell).
+            if PER_PART_RENDER_HULL:
+                # EXPERIMENTAL flag B: hull each geometric PART of
+                # render_polygon_utm separately and union, so a single convex
+                # hull can never bridge across the gap between disjoint parts.
+                # Inert while render_polygon_utm is a single Polygon (the
+                # 4-connected default) -- only meaningful once flag A makes it
+                # multi-part.
+                parts = getattr(render_polygon_utm, "geoms", [render_polygon_utm])
+                render_fill_polygon_utm = unary_union(
+                    [p.convex_hull for p in parts]
+                ).intersection(boundary_polygon_utm)
+            else:
+                # Current behavior: a single hull of the whole render_polygon_utm.
+                # No radius, no per-pocket logic at all -- see cluster_and_gate()'s
+                # own docstring for why this replaced the earlier buffer-round-trip
+                # smoothing.
+                render_fill_polygon_utm = render_polygon_utm.convex_hull.intersection(boundary_polygon_utm)
 
             hole_footprints = _detect_hole_footprints(cluster_cells, dem)
 
