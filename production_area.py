@@ -139,6 +139,7 @@ from raster_grid import (
     D8_OFFSETS,
     SQUARE_METERS_PER_ACRE,
     attempt_waist_split,
+    binary_dilate,
     binary_erode,
     cell_area_acres,
     cell_union_footprint,
@@ -183,26 +184,14 @@ MIN_PRODUCTION_AREA_ACRES = 0.5
 # properties, not a derived or measured figure. CONFIGURABLE.
 MIN_ZONE_WAIST_METERS = 12.0  # ~40 ft
 
-# EXPERIMENTAL (branch: render-geometry-variants). Both default to False =
-# current behavior; a run with both False is byte-identical to main. They
-# only affect render_polygon_utm / render_fill_polygon_utm -- never the
-# reported geometry (polygon_utm, area_acres, geometry_wgs84, cells, id,
-# source_patch_id, hole_footprints, scoring). Separate, independently
-# toggleable constants per this codebase's standing convention, even though
-# a human evaluates them together. See this branch's prompt for what is
-# being evaluated and why.
-#
-#   A -- UNCONDITIONAL_RENDER_EROSION: build every cluster's
-#        render_polygon_utm from its pre-reclaim erosion survivors (the same
-#        erosion the committed-split path already uses), so a narrow neck
-#        opens geometrically whether or not a waist split was committed.
-#   B -- PER_PART_RENDER_HULL: hull each geometric part of render_polygon_utm
-#        separately and union, so a convex hull can never bridge across the
-#        gap between disjoint parts. Inert while render_polygon_utm is a
-#        single Polygon (the 4-connected default) -- only meaningful once A
-#        makes it multi-part.
-UNCONDITIONAL_RENDER_EROSION = False
-PER_PART_RENDER_HULL = False
+# Radius of the morphological OPENING (erode by r, dilate the survivors back
+# by r) used to build render_fill_polygon_utm -- see cluster_and_gate()'s
+# docstring. Deliberately a SEPARATE constant from MIN_ZONE_WAIST_METERS even
+# where numerically equal: MIN_ZONE_WAIST_METERS defines when a neck is narrow
+# enough to count as two disconnected zones (the SPLIT decision); this one
+# defines how thin a protrusion or neck the DRAWN shape trims/severs (a
+# render-geometry decision). Retuning either must not silently move the other.
+RENDER_OPENING_RADIUS_METERS = 12.0  # ~40 ft
 
 METERS_PER_FOOT = 0.3048
 
@@ -956,68 +945,70 @@ def cluster_and_gate(
         to reflect the full, POST-reclaim footprint, completely unaffected
         by render_polygon_utm.
 
-        'render_fill_polygon_utm' is a SECOND, separate field: the PLAIN
-        CONVEX HULL of render_polygon_utm, re-intersected with
-        boundary_polygon_utm --
+        'render_fill_polygon_utm' is a SECOND, separate field: a bounded
+        morphological OPENING of this cluster's own cell mask, clipped to
+        polygon_utm --
 
-            render_polygon_utm.convex_hull.intersection(boundary_polygon_utm)
+            opened = binary_dilate(eroded_cell_mask(cluster_cells, r), r)
+            render_fill_polygon_utm =
+                cell_union_footprint(dem, opened).intersection(polygon_utm)
 
-        -- nothing else. Despite the "render_" name, this is NOT purely a
-        cosmetic display-only field anymore -- water_candidate_zones.py's
-        own eligibility gate and road_corridors.py's own production hard-
-        exclusion mask both already reuse this exact field (not
-        polygon_utm) so a water/road candidate can't sit inside what a
-        reader would actually see as one coherent production zone on the
-        rendered map, and tree_zone_candidates.py reuses it the same way
-        for its own claimed-geometry exclusion (see that module's own
-        "GEOMETRY FORM CLAIMED" docstring section) -- all three treat
-        "the coherent, hole-free shape render_layout_map.py draws" as the
-        correct thing to avoid overlapping, not just the correct thing to
-        look at. This replaced two earlier smoothing attempts (a
-        raster dilate/erode implementation, then a vector buffer(+r).
-        buffer(-r) round-trip) -- both were confirmed, in a live in-
-        process diagnostic, to compute genuinely correct/different
-        geometry that render_layout_map.py was ALSO confirmed to read
-        correctly (same object, same .area, at the actual clip line) --
-        yet the specific real-world gaps this was meant to close turned
-        out to be far wider than any tunable radius could safely reach
-        without also risking a real waist-split gap (see PART 1 above).
-        A hull has no radius or per-pocket logic to tune at all, so
-        there's no equivalent conflict to hit.
+        where r = RENDER_OPENING_RADIUS_METERS in cells. An opening erodes
+        the cluster by r and then dilates the survivors back by r. It is
+        anti-extensive (opened <= original): outer edges return to roughly
+        their original position, thin protrusions are trimmed, and a neck
+        severed by the erosion CANNOT be re-joined (dilation only regrows the
+        survivors that remained). It does NOT fill notches, pockets, or other
+        concavities -- that is a CLOSING (dilate-then-erode), the opposite
+        operation, tried and rejected (see below). Clipping to polygon_utm
+        makes the result BOUNDED BY CONSTRUCTION:
+        render_fill_polygon_utm.area <= polygon_utm.area always (asserted;
+        raises on violation). Despite the "render_" name, this is NOT purely
+        a cosmetic display-only field -- water_candidate_zones.py's own
+        eligibility gate, road_corridors.py's own production hard-exclusion
+        mask, tree_zone_candidates.py's claimed-geometry exclusion, and
+        solar_suitability.py's production exclusion all reuse this exact
+        field (not polygon_utm) so a downstream candidate can't sit inside
+        what a reader sees as one coherent production zone on the rendered
+        map. Because those modules consume it as EXCLUSION geometry, the
+        bounded-above guarantee matters: the fill can never over-claim
+        ground the cell gate excluded, which the old convex hull could do
+        without limit.
 
-        HULL/WAIST-SPLIT INTERACTION: a convex hull can only extend as
-        far as render_polygon_utm's own most-extreme cells already reach
-        in any direction -- it can never bulge past whichever of its own
-        points was already farthest out (a convex hull is always
-        contained in the convex hull of its own defining points, which
-        is itself contained in any halfspace all those points already
-        lie within). For two split pieces whose cells are linearly
-        separable near the pinch (the case _reclaim_stripped_cells()'s
-        own nearest-BFS-distance assignment naturally tends to produce),
-        each hull therefore stays on its own side of that separator and
-        cannot cross into the other's territory. Empirically confirmed
-        (not assumed) against both a simple convex-lobe dumbbell and a
-        deliberately non-convex one (a lobe with a real notch carved out
-        of the side facing the other piece, its hull area nearly
-        doubling to fill it in) -- in both cases the two hulls' distance
-        and non-overlap matched render_polygon_utm's own exactly. This
-        was NOT verified against a real, live waist-split pair (no
-        network access to real property data in this environment) --
-        an arbitrarily irregular real field boundary that is NOT linearly
-        separable near its own pinch remains a theoretical, unverified
-        edge case where two independently-computed hulls could overlap;
-        if that's ever observed live, it needs a real decision (e.g. hull
-        per FINAL cluster before the split, not per split piece), not a
-        silent workaround here.
+        WHY AN OPENING, NOT THE OLD DILATE/ERODE ROUND-TRIP: an earlier
+        attempt at a raster dilate-then-erode (and the equivalent vector
+        buffer(+r).buffer(-r)) was tried and rejected. That is a CLOSING --
+        the inverse operation with the inverse purpose: it fills wide gaps,
+        and was rejected because no radius could close real-world gaps
+        without also closing genuine waist-split gaps. This is an OPENING
+        (erode THEN dilate), whose purpose is the opposite -- it trims
+        narrow protrusions and keeps necks open rather than filling them --
+        so that objection does not transfer. The convex hull that replaced
+        those closings is itself now removed: a hull has no upper bound on
+        how far it can bulge past the shape it wraps, which is unacceptable
+        for a field three-plus modules treat as authoritative exclusion
+        geometry.
+
+        OPENING/WAIST-SPLIT INTERACTION: the opening operates on the
+        survivors of its OWN erosion, so a neck narrower than 2r is severed
+        before the dilation and the two lobes' fills stay on their own sides
+        of the pinch -- an opening cannot bridge a gap it just cut. A
+        waisted cluster therefore yields a MultiPolygon fill routinely (more
+        often than the old hull did); every consumer above already tolerates
+        MultiPolygon (audited).
+
+        If the cluster is thinner than r throughout, the opening is empty;
+        render_fill_polygon_utm then falls back to polygon_utm (a zone with
+        no interior is honestly drawn as its own footprint) and the fallback
+        is logged once.
 
         render_layout_map.py clips contour lines against render_fill_
         polygon_utm, NOT render_polygon_utm -- see that module's own
-        docstring. Computed for EVERY cluster, split or not (this simply
-        rounds off whatever real jagged edges a cell-union footprint
-        naturally has, split or not) -- geometrically equal to
-        render_polygon_utm exactly whenever render_polygon_utm is already
-        convex (e.g. a clean rectangular field), strictly larger
-        otherwise.
+        docstring. Computed for EVERY cluster, split or not -- geometrically
+        equal to polygon_utm when the cluster has no notch or protrusion
+        narrower than r (e.g. a clean rectangular field, whose edges the
+        opening returns almost exactly), and strictly smaller wherever the
+        opening trims a narrow feature.
 
       PART 2 -- true-hole detection (_detect_hole_footprints()): runs
         independently of Part 1, once per FINAL cluster (i.e. after any
@@ -1088,68 +1079,65 @@ def cluster_and_gate(
                 continue
 
             if render_cells is cluster_cells:
-                # No waist split committed for this cluster (or a vetoed
-                # split): _attempt_waist_split() returned render_cells ==
-                # cluster_cells.
-                if UNCONDITIONAL_RENDER_EROSION:
-                    # EXPERIMENTAL flag A: build render_polygon_utm from this
-                    # cluster's OWN pre-reclaim erosion survivors, using the
-                    # exact same erosion the committed-split path already uses
-                    # (same MIN_ZONE_WAIST_METERS radius, same binary_erode via
-                    # raster_grid.eroded_cell_mask()). A narrow neck then opens
-                    # geometrically with no split decision that can fail.
-                    survivor_mask = eroded_cell_mask(
-                        cluster_cells, cell_mask.shape, dem, MIN_ZONE_WAIST_METERS
-                    )
-                    survivor_cells = [(int(r), int(c)) for r, c in np.argwhere(survivor_mask)]
-                    if survivor_cells:
-                        render_footprint = _cell_union_footprint(survivor_cells, dem)
-                        render_polygon_utm = render_footprint.intersection(boundary_polygon_utm)
-                    else:
-                        # Erosion wiped the whole cluster out (thinner than the
-                        # erosion radius throughout): fall back to polygon_utm
-                        # rather than emitting empty render geometry.
-                        render_polygon_utm = polygon_utm
-                        _LOGGER.warning(
-                            "cluster_and_gate: UNCONDITIONAL_RENDER_EROSION eroded a %d-cell "
-                            "(%.4f ac) cluster to nothing; render_polygon_utm falling back to "
-                            "polygon_utm for this cluster.",
-                            len(cluster_cells),
-                            area_acres,
-                        )
-                else:
-                    # Current behavior: render_polygon_utm equals polygon_utm,
-                    # same object, no change in rendering for the ordinary,
-                    # non-split case.
-                    render_polygon_utm = polygon_utm
+                # No waist split for this cluster -- render_polygon_utm
+                # must simply equal polygon_utm, same object, no change
+                # in rendering behavior for the ordinary, non-split case.
+                render_polygon_utm = polygon_utm
             else:
-                # Committed waist split: render from this sub-piece's own
-                # pre-reclaim survivor cells (already erosion-based, so flag A
-                # leaves this path unchanged).
                 render_footprint = _cell_union_footprint(render_cells, dem)
                 render_polygon_utm = render_footprint.intersection(boundary_polygon_utm)
 
-            # render_fill_polygon_utm: the convex hull of render_polygon_utm,
-            # re-intersected with boundary_polygon_utm (same safety convention
-            # every other footprint in this function already follows -- a hull
-            # can extend past the real parcel boundary near an edge cell).
-            if PER_PART_RENDER_HULL:
-                # EXPERIMENTAL flag B: hull each geometric PART of
-                # render_polygon_utm separately and union, so a single convex
-                # hull can never bridge across the gap between disjoint parts.
-                # Inert while render_polygon_utm is a single Polygon (the
-                # 4-connected default) -- only meaningful once flag A makes it
-                # multi-part.
-                parts = getattr(render_polygon_utm, "geoms", [render_polygon_utm])
-                render_fill_polygon_utm = unary_union(
-                    [p.convex_hull for p in parts]
-                ).intersection(boundary_polygon_utm)
+            # render_fill_polygon_utm: a bounded morphological OPENING of this
+            # cluster's own cell mask -- erode by RENDER_OPENING_RADIUS_METERS,
+            # dilate the survivors back by the same radius -- then CLIP to
+            # polygon_utm. An opening is anti-extensive (opened <= original), so
+            # it TRIMS thin protrusions and SEVERS narrow necks (a neck severed
+            # by the erosion cannot be re-joined, because dilation only regrows
+            # the survivors that remained) while returning wide outer edges to
+            # roughly their original position. It does NOT fill notches, pockets,
+            # or concavities -- that would require a closing (dilate-then-erode),
+            # which is the opposite operation and was tried and rejected. Clipping
+            # to polygon_utm makes the result BOUNDED BY CONSTRUCTION -- it can
+            # never claim ground the cell gate excluded, a strictly stronger
+            # guarantee than the old convex hull (which had no upper bound on how
+            # far it could bulge past the real footprint, and which several
+            # downstream modules consume as production EXCLUSION geometry). See
+            # cluster_and_gate()'s docstring.
+            opening_radius_cells = waist_erosion_radius_cells(dem, RENDER_OPENING_RADIUS_METERS)
+            opened_mask = binary_dilate(
+                eroded_cell_mask(cluster_cells, cell_mask.shape, dem, RENDER_OPENING_RADIUS_METERS),
+                opening_radius_cells,
+            )
+            if opened_mask.any():
+                render_fill_polygon_utm = cell_union_footprint(dem, opened_mask).intersection(polygon_utm)
             else:
-                # Current behavior: a single hull of the whole render_polygon_utm.
-                # No radius, no per-pocket logic at all -- see cluster_and_gate()'s
-                # own docstring for why this replaced the earlier buffer-round-trip
-                # smoothing.
-                render_fill_polygon_utm = render_polygon_utm.convex_hull.intersection(boundary_polygon_utm)
+                # The cluster is thinner than the opening radius throughout, so
+                # the opening is empty. The honest fill for a zone with no
+                # interior is its own footprint -- fall back to polygon_utm
+                # rather than emit empty render geometry.
+                render_fill_polygon_utm = polygon_utm
+                _LOGGER.warning(
+                    "cluster_and_gate: the RENDER_OPENING_RADIUS_METERS=%.1fm opening eroded a "
+                    "%d-cell (%.4f ac) cluster to nothing; render_fill_polygon_utm falling back to "
+                    "polygon_utm for this cluster.",
+                    RENDER_OPENING_RADIUS_METERS,
+                    len(cluster_cells),
+                    area_acres,
+                )
+
+            # Bounded above by the footprint, always -- the branch's core
+            # guarantee and the whole reason the unbounded hull was removed.
+            # Clipping to polygon_utm makes this hold by construction; assert it
+            # and raise on violation (matching fencing.py's hard-containment
+            # discipline) so any future regression is caught loudly rather than
+            # silently over-claiming exclusion ground.
+            if render_fill_polygon_utm.area > polygon_utm.area * (1 + 1e-9) + 1e-6:
+                raise ValueError(
+                    "cluster_and_gate: render_fill_polygon_utm.area "
+                    f"({render_fill_polygon_utm.area:.6f} m^2) exceeds polygon_utm.area "
+                    f"({polygon_utm.area:.6f} m^2) -- the opening's clip to polygon_utm must keep "
+                    "the drawn fill within the real cell-gated footprint, never claiming excluded ground."
+                )
 
             hole_footprints = _detect_hole_footprints(cluster_cells, dem)
 
@@ -1197,8 +1185,8 @@ def identify_production_areas(
             'polygon_utm': shapely Polygon/MultiPolygon,
             'render_polygon_utm': shapely Polygon/MultiPolygon,  # == polygon_utm unless this cluster went
                                                                    # through a waist split -- see cluster_and_gate()
-            'render_fill_polygon_utm': shapely Polygon/MultiPolygon,  # render_polygon_utm's own convex
-                                                                   # hull -- see cluster_and_gate()
+            'render_fill_polygon_utm': shapely Polygon/MultiPolygon,  # bounded opening of the cluster
+                                                                   # mask, clipped to polygon_utm -- see cluster_and_gate()
             'geometry_wgs84': GeoJSON geometry dict,
             'cells': list[(row, col)],
             'hole_footprints': list[shapely Polygon],  # [] if none -- see module docstring's TRUE HOLES vs WAISTS

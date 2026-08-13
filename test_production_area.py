@@ -836,11 +836,11 @@ print(
 )
 
 
-# --- render_fill_polygon_utm: a plain convex hull -- no radius, no per-pocket logic. Confirm it's a
-#     genuine convex hull (equals its own convex_hull, no concave notches survive) on a deliberately
-#     non-convex cluster (an "L" shape), and that it fully covers a real excluded pocket regardless of
-#     the pocket's SIZE (unlike the earlier radius-limited buffer approach, a hull has no size ceiling
-#     on what it can close over). ---
+# --- render_fill_polygon_utm: a BOUNDED morphological opening (erode by r, dilate survivors back by r),
+#     clipped to polygon_utm. Confirm (a) it never exceeds the real footprint, (b) it does NOT fill a WIDE
+#     concavity the way the old convex hull did (an "L"'s re-entrant corner), and (c) it does NOT close a
+#     pocket wider than r -- the two unbounded behaviors the convex hull got wrong and the reason it was
+#     removed (three-plus modules consume this field as production EXCLUSION geometry). ---
 
 hull_dem = _waist_dem(40, 40)
 hull_step1 = _step1_for(hull_dem)
@@ -852,29 +852,33 @@ l_patch = l_shape_patches[0]
 
 assert not l_patch["render_polygon_utm"].equals(l_patch["render_polygon_utm"].convex_hull), (
     "test sanity check: this L-shaped fixture's own render_polygon_utm must genuinely be non-convex, "
-    "otherwise the hull check below isn't exercising real hull behavior"
+    "otherwise the concavity check below isn't exercising real behavior"
 )
-assert l_patch["render_fill_polygon_utm"].equals(l_patch["render_polygon_utm"].convex_hull.intersection(_full_extent_boundary(hull_dem))), (
-    "render_fill_polygon_utm must be EXACTLY render_polygon_utm.convex_hull.intersection(boundary_polygon_utm) "
-    "-- no radius, no buffer, nothing else"
+# BOUNDED: the clipped opening never exceeds the real footprint -- the whole point of replacing the hull.
+assert l_patch["render_fill_polygon_utm"].area <= l_patch["polygon_utm"].area + 1e-6, (
+    "render_fill_polygon_utm (a clipped opening) must never exceed polygon_utm's area"
 )
-assert l_patch["render_fill_polygon_utm"].area > l_patch["render_polygon_utm"].area, (
-    "the hull of a genuinely non-convex shape must have strictly more area than the shape itself"
+# The L's inner corner is a WIDE re-entrant, far wider than the opening radius, so the opening leaves it
+# OPEN -- unlike the convex hull, which filled it in. The opening's area is therefore strictly BELOW the
+# hull's on this fixture.
+l_hull_area = l_patch["render_polygon_utm"].convex_hull.intersection(_full_extent_boundary(hull_dem)).area
+assert l_patch["render_fill_polygon_utm"].area < l_hull_area, (
+    "the opening must NOT fill the L's wide concave corner the way the convex hull did -- its area must be "
+    f"strictly below the hull's ({l_patch['render_fill_polygon_utm'].area} vs {l_hull_area} sq m)"
 )
 print(
-    f"Convex hull: render_fill_polygon_utm for a deliberately non-convex ('L'-shaped) cluster is exactly "
-    f"render_polygon_utm.convex_hull.intersection(boundary_polygon_utm) -- area grew from "
-    f"{l_patch['render_polygon_utm'].area} to {l_patch['render_fill_polygon_utm'].area} sq m closing the L's "
-    "own concave inner corner."
+    f"Opening (bounded): render_fill_polygon_utm for a non-convex ('L') cluster is "
+    f"{round(l_patch['render_fill_polygon_utm'].area)} sq m -- within polygon_utm "
+    f"({round(l_patch['polygon_utm'].area)}) and strictly below the old hull ({round(l_hull_area)}), leaving "
+    "the wide inner corner open instead of over-claiming it."
 )
 
-# A hull has no size ceiling on what it closes over -- confirm with a pocket far larger than the old
-# buffer approach's effective 2x-radius reach (FILL_SMOOTHING_RADIUS_METERS was 10m, reaching ~20m pockets;
-# this pocket is 60x60m, deliberately much bigger).
+# A pocket WIDER than the opening radius stays OPEN -- the convex hull closed pockets of any size, exactly
+# the unbounded over-claim being removed. 60x60m pocket, opening radius ~10m: must NOT be recovered.
 big_pocket_dem = _waist_dem(60, 60)
 big_pocket_step1 = _step1_for(big_pocket_dem)
 big_pocket_solid = set(_rect_cells(2, 58, 2, 58))
-big_pocket_hole = set(_rect_cells(20, 32, 20, 32))  # 12x12 cells = 60x60m
+big_pocket_hole = set(_rect_cells(20, 32, 20, 32))  # 12x12 cells = 60x60m, far wider than the opening radius
 big_pocket_cells = list(big_pocket_solid - big_pocket_hole)
 big_pocket_mask = _mask_from_cells((60, 60), big_pocket_cells)
 big_pocket_patches = _gate(big_pocket_mask, big_pocket_dem, big_pocket_step1)
@@ -885,31 +889,32 @@ assert big_pocket_patch["polygon_utm"].intersection(big_pocket_footprint).area <
     "test sanity check: the pocket must genuinely be excluded ground"
 )
 big_recovered = big_pocket_patch["render_fill_polygon_utm"].intersection(big_pocket_footprint).area
-assert abs(big_recovered - big_pocket_footprint.area) < 1e-6, (
-    f"a convex hull must fully close over a pocket regardless of its size (60x60m here, far bigger than "
-    f"the old buffer approach's ~20m reach) -- recovered {big_recovered} of {big_pocket_footprint.area} sq m"
+assert big_recovered < 1e-6, (
+    f"a bounded opening must NOT close a pocket wider than its radius (60x60m here) -- the convex hull did, "
+    f"and that unbounded over-claim is the reason it was removed; recovered {big_recovered} of "
+    f"{big_pocket_footprint.area} sq m (expected ~0)"
 )
-print("Convex hull: fully closes over a large (60x60m) excluded pocket -- no radius ceiling on pocket size.")
+print("Opening: a 60x60m excluded pocket (far wider than the opening radius) stays OPEN -- not closed over, "
+      "unlike the old unbounded convex hull.")
 
 
-# --- render_fill_polygon_utm: EMPIRICAL waist-split hull-overlap check -- a convex hull, in principle,
-#     can only extend as far as render_polygon_utm's own most-extreme cells already reach (it can never
-#     bulge past its own defining points), so two split pieces whose cells are linearly separable near
-#     the pinch should keep their hulls on separate sides too. Checked here, not assumed, against BOTH the
-#     dumbbell above (convex lobes -- hull changes nothing) AND a deliberately non-convex pair (each lobe
-#     has a real notch carved into the side FACING the other lobe, so its hull genuinely bulges toward the
-#     other piece) -- reporting the real result either way. ---
+# --- render_fill_polygon_utm: two committed-split pieces' fills cannot overlap -- each is a bounded opening
+#     clipped to its OWN polygon_utm, and the two footprints are disjoint, so overlap is impossible by
+#     construction (the convex hull could, in principle, bulge one piece's fill across the pinch into the
+#     other's). Checked on both the convex-lobe dumbbell above and a deliberately non-convex, notch-facing
+#     pair. ---
 
-assert p1["render_fill_polygon_utm"].distance(p2["render_fill_polygon_utm"]) > 0, (
-    "render_fill_polygon_utm for the dumbbell's two split zones must not touch or overlap"
-)
 assert p1["render_fill_polygon_utm"].intersection(p2["render_fill_polygon_utm"]).area < 1e-9, (
-    "render_fill_polygon_utm for the dumbbell's two split zones must not overlap"
+    "render_fill_polygon_utm for the dumbbell's two split zones must not overlap (each bounded by its own footprint)"
 )
+for _p in (p1, p2):
+    assert _p["render_fill_polygon_utm"].area <= _p["polygon_utm"].area + 1e-6, (
+        "each split piece's opening must stay within its own footprint"
+    )
 print(
-    f"Waist-split hull check (convex lobes): render_fill_polygon_utm stays exactly as far apart as "
-    f"render_polygon_utm did ({p1['render_fill_polygon_utm'].distance(p2['render_fill_polygon_utm'])}m) -- "
-    "no change, since each lobe was already convex."
+    f"Opening (convex-lobe split): the dumbbell's two zones' fills stay "
+    f"{p1['render_fill_polygon_utm'].distance(p2['render_fill_polygon_utm'])}m apart with zero overlap, each "
+    "bounded by its own footprint."
 )
 
 NOTCH_SHAPE = (44, 100)
@@ -923,32 +928,18 @@ notch_mask = _mask_from_cells(NOTCH_SHAPE, notch_cells)
 notch_patches = _gate(notch_mask, notch_dem, notch_step1)
 assert len(notch_patches) == 2, f"expected the notched dumbbell to split into 2 clusters, got {len(notch_patches)}"
 n1, n2 = notch_patches
-assert not n1["render_polygon_utm"].equals(n1["render_polygon_utm"].convex_hull), (
-    "test sanity check: lobe 1 must genuinely be non-convex (its own notch must survive erosion) -- "
-    "otherwise this isn't exercising real hull-bulge risk"
-)
-assert not n2["render_polygon_utm"].equals(n2["render_polygon_utm"].convex_hull), (
-    "test sanity check: lobe 2 must genuinely be non-convex too"
-)
-notch_render_distance = n1["render_polygon_utm"].distance(n2["render_polygon_utm"])
-notch_hull_distance = n1["render_fill_polygon_utm"].distance(n2["render_fill_polygon_utm"])
-notch_hull_overlap = n1["render_fill_polygon_utm"].intersection(n2["render_fill_polygon_utm"]).area
-print(
-    f"Waist-split hull check (non-convex lobes, real notches facing each other -- hull area grew from "
-    f"{n1['render_polygon_utm'].area} to {n1['render_fill_polygon_utm'].area} sq m for lobe 1 alone): "
-    f"render_polygon_utm distance={notch_render_distance}m, render_fill_polygon_utm (hull) distance="
-    f"{notch_hull_distance}m, hull overlap area={notch_hull_overlap} sq m."
-)
-assert notch_hull_distance > 0 and notch_hull_overlap < 1e-9, (
-    f"EMPIRICAL FINDING: convex hulls for this non-convex waist-split pair DO overlap or touch "
-    f"(distance={notch_hull_distance}m, overlap={notch_hull_overlap} sq m) -- reporting this plainly rather "
-    f"than papering over it. This fixture was NOT verified against a real, live waist-split pair (no network "
-    f"access to real property data here) -- see production_area.py's own module docstring for the caveat."
+for _n in (n1, n2):
+    assert _n["render_fill_polygon_utm"].area <= _n["polygon_utm"].area + 1e-6, (
+        "each notch-facing split piece's opening must stay within its own footprint"
+    )
+notch_overlap = n1["render_fill_polygon_utm"].intersection(n2["render_fill_polygon_utm"]).area
+assert notch_overlap < 1e-9, (
+    f"two bounded openings cannot overlap even for notch-facing non-convex lobes -- overlap {notch_overlap} sq m "
+    "(the convex hull's theoretical bulge-overlap risk is removed by the bounded-by-footprint construction)"
 )
 print(
-    "Waist-split hull check: confirmed EMPIRICALLY (not assumed) that both a convex-lobe pair and a "
-    "deliberately non-convex, notch-facing pair keep their independently-computed hulls separate, matching "
-    "render_polygon_utm's own non-overlap exactly in both cases."
+    f"Opening (non-convex split): notch-facing lobes' fills each stay within their own footprint and do not "
+    f"overlap (overlap={notch_overlap} sq m) -- the hull's bulge-overlap risk is removed by construction."
 )
 
 
@@ -1078,24 +1069,23 @@ assert square_patch["render_polygon_utm"] is square_patch["polygon_utm"], (
     "an ordinary, non-split cluster's render_polygon_utm must simply BE polygon_utm -- no change in "
     "rendering behavior for the ordinary case"
 )
-# render_fill_polygon_utm is a plain convex hull -- a solid, already-convex rectangle's hull is EXACTLY
-# itself (no radius, no buffer-curve approximation noise to tolerate), just with its cell-union footprint's
-# own seam-driven collinear vertices simplified away.
+# render_fill_polygon_utm is a bounded opening clipped to polygon_utm -- a solid, roughly-square block has
+# no feature narrower than the opening radius, so the opening recovers its outer edge exactly: the fill is
+# geometrically IDENTICAL to polygon_utm (ratio 1.0), the closest an opening comes to being a no-op.
 assert square_patch["render_fill_polygon_utm"].equals(square_patch["polygon_utm"]), (
-    "a solid, already-convex mask's render_fill_polygon_utm (its own convex hull) must be geometrically "
-    "IDENTICAL to polygon_utm -- a hull of an already-convex shape changes nothing"
+    "a solid, already-convex mask's render_fill_polygon_utm (its own opening) must be geometrically "
+    "IDENTICAL to polygon_utm -- an opening of a shape with no sub-radius feature recovers it exactly"
 )
 assert abs(square_patch["render_fill_polygon_utm"].area - square_patch["polygon_utm"].area) < 1e-9, (
-    "a solid, already-convex mask's hull must have the EXACT same real area as polygon_utm"
+    "a solid, already-convex mask's opening must have the EXACT same real area as polygon_utm"
 )
-assert len(square_patch["render_fill_polygon_utm"].exterior.coords) < len(square_patch["polygon_utm"].exterior.coords), (
-    "render_fill_polygon_utm should come out as a visibly simpler (fewer-vertex) outline than the real "
-    "cell-union footprint's own seam-driven, vertex-dense edges, even though the SHAPE is identical"
+assert square_patch["render_fill_polygon_utm"].area <= square_patch["polygon_utm"].area + 1e-6, (
+    "the opening is bounded above by the footprint even in this recovers-exactly case"
 )
 print(
     "Idempotence: a solid, roughly-square mask with neither a waist nor a hole passes through completely "
     "unchanged -- 1 cluster, hole_footprints=[], render_polygon_utm is polygon_utm, and render_fill_"
-    "polygon_utm (its own convex hull) is geometrically IDENTICAL, just with fewer vertices."
+    "polygon_utm (its own bounded opening) is geometrically IDENTICAL to polygon_utm (ratio 1.0)."
 )
 
 
