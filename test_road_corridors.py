@@ -152,8 +152,17 @@ network_production_areas = [
 ]  # a large block spanning the full height of the DEM -- large enough (and far enough beyond the
 # anchor's own PRODUCTION_SERVICE_RADIUS_METERS baseline coverage) that a real branch is worth building
 
+# min_corridor_length_meters is pinned low here on purpose: THIS test
+# exercises real multi-branch network GROWTH, not the total-length floor
+# (that's test 4 below, which passes its own explicit huge floor). This
+# synthetic fixture's network totals ~104m, so leaving the floor at its
+# MIN_CORRIDOR_LENGTH_METERS default (100.0) would couple a network-growth
+# assertion to a ~4m margin against that floor -- a future router-tuning
+# change could then flip this into a confusing 'corridor_too_short' failure
+# that has nothing to do with what this test is actually checking.
 network = build_road_network(
-    network_dem, network_production_areas, None, network_boundary, network_anchor
+    network_dem, network_production_areas, None, network_boundary, network_anchor,
+    min_corridor_length_meters=1.0,
 )
 assert network["branches"], (
     "expected at least one branch: there is real, nearby, reachable production demand for the "

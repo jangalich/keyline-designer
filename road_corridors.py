@@ -257,7 +257,7 @@ FLOODPLAIN_FINAL_RELEVANCE_BUFFER_METERS = 75.0
 
 # Drop the whole network if its TOTAL length (every branch summed) is
 # shorter than this -- not a meaningful road. CONFIGURABLE.
-MIN_CORRIDOR_LENGTH_METERS = 30.0
+MIN_CORRIDOR_LENGTH_METERS = 100.0
 
 ROAD_CORRIDOR_CONFIDENCE_NOTES_TEMPLATE = (
     "This is a TOPOGRAPHIC SUGGESTION only, not a surveyed road alignment — "
