@@ -268,6 +268,37 @@ def reclaim_stripped_cells(
     return assignment
 
 
+def eroded_cell_mask(
+    cells: list[tuple[int, int]],
+    grid_shape: tuple[int, int],
+    dem: dict,
+    min_waist_meters: float,
+) -> np.ndarray:
+    """
+    The boolean survivor mask left after eroding the cell set `cells` by
+    min_waist_meters: build the cluster's own cell mask on `grid_shape`,
+    convert the waist width to a cell radius via waist_erosion_radius_cells(),
+    and binary_erode() by it. The True cells of the returned mask are exactly
+    the PRE-reclaim erosion survivors -- np.argwhere() them to recover the
+    survivor cell list. May be all-False if the cluster is thinner than the
+    erosion radius throughout.
+
+    Extracted verbatim from attempt_waist_split()'s own body (zero behavior
+    change -- attempt_waist_split() now calls this for its own erosion) so a
+    caller that wants the SAME erosion for render-only geometry
+    (production_area.cluster_and_gate()'s unconditional-render-erosion path)
+    reuses this identical computation rather than a second, independently-
+    maintained copy of it.
+    """
+    rows, cols = grid_shape
+    cell_mask = np.zeros((rows, cols), dtype=bool)
+    for r, c in cells:
+        cell_mask[r, c] = True
+
+    radius_cells = waist_erosion_radius_cells(dem, min_waist_meters)
+    return binary_erode(cell_mask, radius_cells)
+
+
 def attempt_waist_split(
     cells: list[tuple[int, int]],
     grid_shape: tuple[int, int],
@@ -328,12 +359,7 @@ def attempt_waist_split(
         return [{"cells": cells, "render_cells": cells}]
 
     rows, cols = grid_shape
-    cell_mask = np.zeros((rows, cols), dtype=bool)
-    for r, c in cells:
-        cell_mask[r, c] = True
-
-    radius_cells = waist_erosion_radius_cells(dem, min_waist_meters)
-    eroded_mask = binary_erode(cell_mask, radius_cells)
+    eroded_mask = eroded_cell_mask(cells, grid_shape, dem, min_waist_meters)
 
     eroded_labels, num_eroded = connected_components(eroded_mask)
     if num_eroded < 2:
