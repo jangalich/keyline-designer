@@ -54,8 +54,11 @@ Pipeline (build_road_network()):
      SOFT flat cost penalty, unchanged in spirit from before this
      rewrite.
   6. cost_raster = road_cost_path.build_cost_raster(), now passing tpi,
-     production_mask, and impassable_grade_pct=MAX_ROAD_GRADE_PCT — grade
-     is a genuine HARD ceiling again under this design (see that
+     production_mask, impassable_grade_pct=MAX_ROAD_GRADE_PCT, and the
+     caller-supplied canopy_mask (a SOFT woody-vegetation crossing penalty
+     — built and gracefully degraded upstream in identify_road_corridor_
+     candidates(), passed straight through here like slope_pct/tpi) —
+     grade is a genuine HARD ceiling again under this design (see that
      constant's own comment), not merely an unbounded soft penalty.
   7. anchor_cell via the existing _snap_anchor_to_eligible_cell() — the
      empty-network shape (see below) is returned if the anchor snaps to
@@ -103,9 +106,18 @@ Constraint stack, current design:
         valley lines only if neither NHD nor SSURGO data is reachable,
         and flags that fallback explicitly in confidence_notes. A flat
         additive penalty (road_cost_path.FLOODPLAIN_CROSSING_COST_PENALTY).
+      - canopy/woody vegetation, sourced from USGS 3DEP lidar HAG
+        coverage (production_area.get_required_tree_root_zone_mask_utm() at
+        a 0.0m buffer — RAW canopy cells, not the +TREE_ROOT_ZONE_BUFFER_
+        METERS root-protection dilation production/solar apply). A flat
+        additive penalty (road_cost_path.CANOPY_CROSSING_COST_PENALTY).
+        Unlike production/solar, where a canopy outage is a HARD failure,
+        this term DEGRADES GRACEFULLY — a canopy outage simply drops the
+        term (see identify_road_corridor_candidates()), same as every other
+        real-data fetch in this module.
       - TPI ridge preference — a discount/premium on the base travel cost
-        only (road_cost_path.TPI_PREFERENCE_STRENGTH), never the grade or
-        floodplain terms.
+        only (road_cost_path.TPI_PREFERENCE_STRENGTH), never the grade,
+        floodplain, or canopy terms.
 
 Erosion-prone soil (SSURGO K-factor) is deliberately NOT part of this
 module's constraint stack at all, hard or soft — this pipeline's own
@@ -134,6 +146,7 @@ import requests
 from dem_data import get_dem_for_boundary
 from feature_schema import CONFIDENCE_LOW, make_feature, make_feature_collection
 from hydrology_data import get_water_features_for_boundary
+from production_area import get_required_tree_root_zone_mask_utm
 from production_area_ceiling import identify_optimized_production_areas
 from raster_grid import binary_dilate, cell_area_acres, cell_union_footprint, pixel_center_xy
 from road_cost_path import build_cost_raster, path_cells_to_points_xyz
@@ -519,6 +532,7 @@ def build_road_network(
     boundary_polygon_utm: Polygon,
     anchor_lon_lat: tuple[float, float],
     hydric_floodplain_union=None,
+    canopy_mask: Optional[np.ndarray] = None,
     min_corridor_length_meters: float = MIN_CORRIDOR_LENGTH_METERS,
     slope_pct: Optional[np.ndarray] = None,
     tpi: Optional[np.ndarray] = None,
@@ -547,6 +561,17 @@ def build_road_network(
     within service_radius_meters. hydric_floodplain_union is a shapely
     geometry (or None to skip that penalty entirely) already in
     dem['crs'] -- a SOFT cost penalty.
+
+    canopy_mask is an already-computed boolean woody-vegetation grid (same
+    shape as dem['array'], True where a cell should pay the SOFT canopy
+    crossing penalty road_cost_path.build_cost_raster() applies), or None
+    to skip that penalty entirely. Like slope_pct/tpi it is NOT fetched
+    here -- this function stays network-free (see module docstring); the
+    canopy fetch (and its graceful degradation to None on a canopy outage)
+    lives in identify_road_corridor_candidates(), which builds this mask
+    with production_area.get_required_tree_root_zone_mask_utm() at a 0.0m
+    buffer (raw canopy cells, not the root-protection dilation production/
+    solar use) and passes the result straight through.
 
     anchor_lon_lat is the single (lon, lat) point the network is grown
     outward FROM (snapped to the nearest eligible cell -- see
@@ -663,6 +688,7 @@ def build_road_network(
         tpi=tpi,
         production_mask=production_mask,
         impassable_grade_pct=MAX_ROAD_GRADE_PCT,
+        canopy_mask=canopy_mask,
     )
 
     anchor_cell = _snap_anchor_to_eligible_cell(dem, cost_raster, anchor_lon_lat)
@@ -878,6 +904,50 @@ def _log_fetch_failure(label: str, exc: Exception) -> None:
         print(f"  {label}: unexpected failure, not a network error ({type(exc).__name__}: {exc}).")
 
 
+def _fetch_canopy_soft_cost_mask(
+    boundary_polygon_utm: Polygon,
+    dem: dict,
+    canopy_height: Optional[dict] = None,
+) -> Optional[np.ndarray]:
+    """
+    Raw-canopy (woody-vegetation) cell mask for the SOFT road-cost term
+    build_cost_raster() applies (road_cost_path.CANOPY_CROSSING_COST_
+    PENALTY), on dem's own grid -- or None when canopy data is unavailable,
+    because this module DEGRADES GRACEFULLY on a canopy outage rather than
+    aborting.
+
+    buffer_meters=0.0 deliberately: roads see the RAW canopy cells, not the
+    +TREE_ROOT_ZONE_BUFFER_METERS root-protection dilation production/solar
+    apply -- a road only pays for the trees it actually crosses, not a
+    protective standoff around them. The canopy_height override is
+    forwarded verbatim, so a caller that already fetched canopy for this
+    boundary (e.g. pipeline_context.build_pipeline_context()) never
+    triggers a second, redundant fetch here.
+
+    production_area.get_required_tree_root_zone_mask_utm() is production/
+    solar's own "fetch canopy or fail hard" building block -- it RAISES
+    (RuntimeError) when HAG coverage is missing, and lets other fetch
+    failures (retries exhausted, CanopyCoverageIncompleteError) propagate.
+    Roads deliberately catch ALL of those and DEGRADE GRACEFULLY: canopy is
+    only a soft preference here, so any canopy outage drops the term
+    (returns None) rather than aborting the whole network. That's
+    consistent with every other real-data fetch in this module (floodplain,
+    water, soil) and with the floodplain soft term right beside it, which
+    likewise contributes nothing when its data is unavailable -- a road
+    network is still a useful, honest answer without the canopy-avoidance
+    preference folded in, unlike a production/water zone that can't be
+    certified free of tree cover at all.
+    """
+    try:
+        return get_required_tree_root_zone_mask_utm(
+            boundary_polygon_utm, dem, buffer_meters=0.0, canopy_height=canopy_height
+        )
+    except Exception as e:
+        _log_fetch_failure("canopy height fetch", e)
+        print("  Continuing without the soft canopy road-cost term (canopy is a soft preference here, not a hard gate).")
+        return None
+
+
 def _fetch_floodplain_hydric_union(
     boundary_coordinates,
     dem,
@@ -1030,8 +1100,14 @@ def identify_road_corridor_candidates(
     solar_suitability.py's identify_solar_candidate_zones() and tree_
     zone_candidates.py's identify_tree_zone_candidates() already use, so
     a caller supplying canopy_height here never causes either nested call
-    to issue its own redundant canopy fetch. This function has no direct
-    canopy gate of its own -- only forwarding.
+    to issue its own redundant canopy fetch. It is ALSO used directly here,
+    for the SOFT canopy road-cost term: this function builds a raw-canopy
+    cell mask (production_area.get_required_tree_root_zone_mask_utm() at a
+    0.0m buffer) and passes it into build_road_network() as canopy_mask,
+    forwarding the same canopy_height override so this direct use shares the
+    one fetch too. Unlike production/solar, this canopy use DEGRADES
+    GRACEFULLY rather than gating: a canopy outage drops the soft term (the
+    network is still generated), it does not abort the whole feature.
 
     anchor_lon_lat (lon, lat) is the real, chosen access point routing
     starts from (see build_road_network()) -- kept Optional here (default
@@ -1135,6 +1211,8 @@ def identify_road_corridor_candidates(
     elif floodplain_data_is_fallback is None:
         floodplain_data_is_fallback = False
 
+    canopy_mask = _fetch_canopy_soft_cost_mask(boundary_polygon_utm, dem, canopy_height=canopy_height)
+
     road_network = build_road_network(
         dem,
         production_areas,
@@ -1142,6 +1220,7 @@ def identify_road_corridor_candidates(
         boundary_polygon_utm,
         anchor_lon_lat,
         hydric_floodplain_union=hydric_floodplain_union,
+        canopy_mask=canopy_mask,
         **corridor_kwargs,
     )
 

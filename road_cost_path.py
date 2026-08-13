@@ -37,7 +37,9 @@ what moved where):
   - SOFT (a finite cost penalty, a route CAN still choose to pay it):
     grade (an unbounded quadratic penalty by default -- see
     impassable_grade_pct above for the opt-in hard ceiling instead),
-    floodplain/riparian ground (a flat additive penalty), a TPI
+    floodplain/riparian ground (a flat additive penalty), canopy/woody
+    vegetation (a flat additive penalty, structurally identical to the
+    floodplain one -- see the canopy_mask parameter's own docstring), a TPI
     ridge-preference discount/premium (scales only the base travel term,
     cheaper on crests/spurs and costlier in hollows/draws -- see the tpi
     parameter's own docstring), and production-land traversal (a
@@ -107,6 +109,23 @@ GRADE_PENALTY_WEIGHT = 0.0133
 # "meters of floodplain crossed" and "extra route distance."
 FLOODPLAIN_CROSSING_COST_PENALTY = 5.0
 
+# Flat additive cost-units added to any cell inside the canopy (woody
+# vegetation) mask, on top of its grade-based cost -- structurally the
+# SAME "flat additive SOFT penalty a route can still choose to pay"
+# pattern as FLOODPLAIN_CROSSING_COST_PENALTY above, applied at the same
+# stage (before the production multiplier, see build_cost_raster()), just
+# against a different mask. Crossing standing timber is a real cost to a
+# farm road (clearing, stumping, root systems), but it is deliberately
+# SOFT here, not a hard exclusion -- a route can still cut through a stand
+# of trees when detouring around it costs more. CONFIGURABLE, same
+# deliberately-unvalidated-starting-value caveat as every other threshold
+# in this module: this happens to START at the same order of magnitude as
+# FLOODPLAIN_CROSSING_COST_PENALTY (a few cells' worth of flat-ground
+# travel), but it is its own independent knob, not coupled to it, and is
+# expected to be re-tuned once there's a real property to check routed
+# candidates against.
+CANOPY_CROSSING_COST_PENALTY = 5.0
+
 # Baseline cost-per-cell for perfectly flat, unpenalized ground — the
 # reference GRADE_PENALTY_WEIGHT and FLOODPLAIN_CROSSING_COST_PENALTY are
 # additions on top of. Not itself CONFIGURABLE: it only sets the unit scale
@@ -156,14 +175,16 @@ def build_cost_raster(
     tpi_preference_strength: float = TPI_PREFERENCE_STRENGTH,
     tpi_reference_meters: float = TPI_REFERENCE_METERS,
     production_multiplier: float = PRODUCTION_TRAVERSAL_COST_MULTIPLIER,
+    canopy_mask: Optional[np.ndarray] = None,
+    canopy_penalty: float = CANOPY_CROSSING_COST_PENALTY,
 ) -> np.ndarray:
     """
     Per-cell traversal-cost grid, same shape as dem['array'].
 
     Every new parameter below (tpi, production_mask, impassable_grade_pct,
-    and the three tuning knobs that go with them) is OPTIONAL and defaults
-    to behavior IDENTICAL to this function's own earlier signature --
-    an existing caller that never passes any of them gets exactly the
+    canopy_mask, and the tuning knobs that go with them) is OPTIONAL and
+    defaults to behavior IDENTICAL to this function's own earlier signature
+    -- an existing caller that never passes any of them gets exactly the
     same cost raster as before this extension.
 
     excluded_mask remains entirely the CALLER's own responsibility to
@@ -211,19 +232,27 @@ def build_cost_raster(
       4. cost = _BASE_TRAVEL_COST * tpi_factor
                + grade_penalty_weight * slope_pct ** 2
                + floodplain_penalty wherever floodplain_mask is True
+               + canopy_penalty wherever canopy_mask is True
          tpi_factor scales ONLY the base travel term -- it must NOT scale
-         the grade or floodplain penalties, so a ridge cell that also
-         happens to be steep still pays the full grade cost, not a
+         the grade, floodplain, or canopy penalties, so a ridge cell that
+         also happens to be steep still pays the full grade cost, not a
          ridge-discounted one. grade_penalty_weight * slope_pct ** 2 is
          itself still an UNBOUNDED quadratic penalty by default (see that
          constant's own comment) unless impassable_grade_pct (step 2) caps
          it off entirely. floodplain_penalty is added for any cell where
          floodplain_mask is True (floodplain_mask omitted or None means no
          floodplain penalty at all, e.g. a caller that hasn't computed one
-         yet).
+         yet). canopy_penalty is added for any cell where canopy_mask is
+         True, the exact same flat-additive way -- a SOFT woody-vegetation
+         crossing term (canopy_mask omitted or None means no canopy
+         penalty at all, e.g. a caller whose canopy fetch failed and chose
+         to degrade gracefully rather than abort; see the canopy_mask
+         parameter's own docstring). Both flat penalties are added here,
+         BEFORE the production multiplier in step 5, so on production land
+         they are scaled by it exactly as the grade/travel terms are.
       5. cost[production_mask] *= production_multiplier, applied to the
-         FULL total from step 4 (grade + floodplain + TPI-scaled travel
-         together), not just the base travel term. production_mask is a
+         FULL total from step 4 (grade + floodplain + canopy + TPI-scaled
+         travel together), not just the base travel term. production_mask is a
          SOFT term again under the current design -- reversed from an
          earlier design that made production land the caller's job to
          fold into excluded_mask as a HARD exclusion. That reversal is
@@ -249,6 +278,18 @@ def build_cost_raster(
     offending cell count and the minimum offending value if this ever
     fires -- in practice this can only happen with a misconfigured
     tpi_preference_strength >= 1.0 (see that constant's own comment).
+
+    canopy_mask is an already-computed boolean woody-vegetation grid, same
+    shape as dem['array'], True wherever a cell should pay the flat
+    canopy_penalty, or None (no canopy penalty at all -- identical to this
+    function's behavior before this parameter existed). It is the SAME kind
+    of caller-supplied SOFT mask as floodplain_mask and carries no special
+    boundary handling here: an off-parcel True cell is harmless because
+    every off-parcel cell is already in excluded_mask and gets np.inf in
+    step 6 regardless (step 6 runs LAST, after this penalty is added), so
+    the caller is free to pass a raw whole-grid canopy mask without first
+    intersecting it against the parcel. NaN has no meaning here -- this is
+    a plain boolean mask, not a float field like tpi.
 
     tpi is an already-computed TPI grid (topographic_position.
     compute_tpi()'s own output), same shape as dem['array'], or None (no
@@ -290,6 +331,9 @@ def build_cost_raster(
 
     if floodplain_mask is not None:
         cost[floodplain_mask] += floodplain_penalty
+
+    if canopy_mask is not None:
+        cost[canopy_mask] += canopy_penalty
 
     if production_mask is not None:
         cost[production_mask] *= production_multiplier

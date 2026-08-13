@@ -281,10 +281,18 @@ OVERRIDE_SELECTED_WATER_ZONE = {
 # --- 1. override behavior: all five new overrides supplied -> the -------
 # --- corresponding self-compute fallbacks are never called ---------------
 
+# The canopy mask for the SOFT road-cost term is a NEW self-fetch this
+# function makes (production_area.get_required_tree_root_zone_mask_utm(),
+# which internally calls production_area.get_canopy_height_for_boundary())
+# that no override supplied here short-circuits -- it degrades gracefully on
+# failure, but a real network attempt would make this "offline" test slow
+# and nondeterministic, so it's mocked clean here purely for offline-ness
+# (its own dedicated override-forwarding proof is test 6 below).
 with mock_patch.object(road_corridors, "get_dem_for_boundary") as mock_dem, \
      mock_patch.object(road_corridors, "identify_optimized_production_areas") as mock_prod, \
      mock_patch.object(road_corridors, "delineate_valleys") as mock_valleys, \
      mock_patch.object(road_corridors, "fetch_and_select_optimal_water_zone") as mock_water, \
+     mock_patch.object(production_area, "get_canopy_height_for_boundary", _fake_clean_canopy), \
      mock_patch.object(road_corridors, "_fetch_floodplain_hydric_union") as mock_flood:
     override_result = road_corridors.identify_road_corridor_candidates(
         boundary_coordinates,
@@ -323,7 +331,8 @@ print(
 # --- self-deriving its own copies a third, independent time (mirrors -----
 # --- test_water_suitability.py's own section 4 for this exact function) --
 
-with mock_patch.object(road_corridors, "fetch_and_select_optimal_water_zone", return_value=None) as mock_water_passthrough:
+with mock_patch.object(road_corridors, "fetch_and_select_optimal_water_zone", return_value=None) as mock_water_passthrough, \
+     mock_patch.object(production_area, "get_canopy_height_for_boundary", _fake_clean_canopy):  # new soft-canopy self-fetch, mocked clean for offline-ness (see test 1)
     passthrough_result = road_corridors.identify_road_corridor_candidates(
         boundary_coordinates,
         anchor_lon_lat=anchor_lon_lat,
@@ -453,16 +462,20 @@ print(
 
 # =====================================================================
 # 6. canopy_height= override forwarding: identify_road_corridor_candidates()
-# has no direct canopy gate of its own (confirmed in this branch's own
-# Step 0.1) -- only its production_areas/selected_water_zone self-compute
-# calls (identify_optimized_production_areas()/fetch_and_select_optimal_
-# water_zone()) do. Real, wraps=-based proof (both nested calls run for
-# real, not stubbed away) that a supplied canopy_height reaches both and
-# causes production_area.get_canopy_height_for_boundary() to be called
+# forwards a supplied canopy_height to THREE canopy consumers -- its
+# production_areas/selected_water_zone self-compute calls (identify_
+# optimized_production_areas()/fetch_and_select_optimal_water_zone()) AND
+# its own direct soft-canopy road-cost consumer (_fetch_canopy_soft_cost_
+# mask() -> production_area.get_required_tree_root_zone_mask_utm(), added
+# this branch). Real, wraps=-based proof (the nested calls run for real,
+# not stubbed away) that a supplied canopy_height reaches every one of them
+# and causes production_area.get_canopy_height_for_boundary() to be called
 # ZERO times end-to-end, using the SAME CanopyOverrideProbe every other
-# canopy-override test in this codebase uses. Disqualifying-soil fetches
-# stay mocked purely for speed/determinism, same as every other section
-# in this file; NHD/SSURGO stay real/unmocked, same as test 2 above.
+# canopy-override test in this codebase uses -- the probe sees the direct
+# soft-canopy gate too and confirms it also computes on the exact supplied
+# override array, not a re-fetch. Disqualifying-soil fetches stay mocked
+# purely for speed/determinism, same as every other section in this file;
+# NHD/SSURGO stay real/unmocked, same as test 2 above.
 # =====================================================================
 
 from _canopy_override_probe import CanopyOverrideProbe, clean_canopy_for  # noqa: E402

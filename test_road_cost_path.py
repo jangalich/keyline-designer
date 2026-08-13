@@ -1,11 +1,12 @@
 """
 test_road_cost_path.py
 
-Offline (no-network) checks for road_cost_path.build_cost_raster()'s three
-new optional terms -- TPI ridge-preference, production-land traversal
-penalty, and the opt-in hard grade ceiling -- plus the mandatory
-positivity assertion that guards Dijkstra's optimality guarantee. Hand-
-derived values throughout, same script-style convention as
+Offline (no-network) checks for road_cost_path.build_cost_raster()'s
+optional terms -- TPI ridge-preference, production-land traversal
+penalty, the opt-in hard grade ceiling, and the flat additive canopy
+(woody-vegetation) crossing penalty -- plus the mandatory positivity
+assertion that guards Dijkstra's optimality guarantee. Hand-derived
+values throughout, same script-style convention as
 test_topographic_position.py. See road_cost_path.py's own __main__ block
 for the pre-existing least_cost_path()/cost_distance_field() smoke test,
 unchanged and re-run separately to confirm this extension didn't touch
@@ -17,6 +18,7 @@ import math
 import numpy as np
 
 from road_cost_path import (
+    CANOPY_CROSSING_COST_PENALTY,
     FLOODPLAIN_CROSSING_COST_PENALTY,
     GRADE_PENALTY_WEIGHT,
     PRODUCTION_TRAVERSAL_COST_MULTIPLIER,
@@ -239,5 +241,73 @@ assert math.isinf(cost10[0, 0]), (
     f"a cell in excluded_mask AND production_mask with strongly positive tpi must be inf, got {cost10[0, 0]}"
 )
 print("10. Hard exclusion wins: excluded_mask + production_mask + strongly positive tpi cell is inf, not a scaled finite value.")
+
+
+# --- 11. Canopy term: flat additive, exactly like the floodplain term ---
+
+dem11 = _dem((1, 3))
+flat_slope11 = np.zeros((1, 3), dtype=np.float64)
+no_exclusion11 = np.zeros((1, 3), dtype=bool)
+canopy11 = np.array([[True, False, True]])
+cost11 = build_cost_raster(dem11, flat_slope11, no_exclusion11, canopy_mask=canopy11)
+
+assert cost11[0, 0] == 1.0 + CANOPY_CROSSING_COST_PENALTY, f"canopy cell should be 1.0 + penalty, got {cost11[0, 0]}"
+assert cost11[0, 1] == 1.0, f"non-canopy cell should be exactly 1.0, got {cost11[0, 1]}"
+assert cost11[0, 2] == 1.0 + CANOPY_CROSSING_COST_PENALTY, f"canopy cell should be 1.0 + penalty, got {cost11[0, 2]}"
+
+# canopy_mask=None (the default) must be a pure no-op -- backward compat.
+cost11_none = build_cost_raster(dem11, flat_slope11, no_exclusion11, canopy_mask=None)
+assert cost11_none[0, 0] == 1.0 and cost11_none[0, 2] == 1.0, (
+    f"canopy_mask=None must leave every cell at its un-penalized cost, got {cost11_none.tolist()}"
+)
+print(
+    f"11. Canopy term (flat ground): canopy cell={cost11[0, 0]} (1.0 + {CANOPY_CROSSING_COST_PENALTY}), "
+    f"non-canopy cell={cost11[0, 1]}; canopy_mask=None is a pure no-op."
+)
+
+
+# --- 12. Canopy is a flat add applied BEFORE the production multiplier
+# --- (so production scales it, exactly like floodplain), and -- also like
+# --- floodplain -- is NOT scaled by the tpi factor. ---
+
+dem12 = _dem((1, 1))
+slope12 = np.array([[10.0]])
+no_exclusion12 = np.array([[False]])
+canopy12 = np.array([[True]])
+floodplain12 = np.array([[True]])
+production12 = np.array([[True]])
+tpi12 = np.array([[3.0]])
+
+cost12 = build_cost_raster(
+    dem12,
+    slope12,
+    no_exclusion12,
+    floodplain_mask=floodplain12,
+    canopy_mask=canopy12,
+    production_mask=production12,
+    tpi=tpi12,
+)
+# tpi scales ONLY the base travel term; grade/floodplain/canopy are all
+# full; then the WHOLE sum is multiplied by the production multiplier.
+expected12 = 1.0 * (1.0 - 0.5 * TANH_1) + GRADE_PENALTY_WEIGHT * 100.0
+expected12 += FLOODPLAIN_CROSSING_COST_PENALTY
+expected12 += CANOPY_CROSSING_COST_PENALTY
+expected12 *= PRODUCTION_TRAVERSAL_COST_MULTIPLIER
+
+# The wrong formula that would result if canopy were (incorrectly) scaled
+# by the tpi factor along with the base travel term.
+wrong12 = (1.0 * (1.0 - 0.5 * TANH_1) + GRADE_PENALTY_WEIGHT * 100.0 + FLOODPLAIN_CROSSING_COST_PENALTY)
+wrong12 += CANOPY_CROSSING_COST_PENALTY * (1.0 - 0.5 * TANH_1)
+wrong12 *= PRODUCTION_TRAVERSAL_COST_MULTIPLIER
+
+assert math.isclose(cost12[0, 0], expected12, abs_tol=1e-9), f"expected {expected12}, got {cost12[0, 0]}"
+assert not math.isclose(cost12[0, 0], wrong12, abs_tol=1e-6), (
+    f"canopy penalty must be a flat add (not tpi-scaled) -- got a value ({cost12[0, 0]}) matching the "
+    f"wrong tpi-scaled-canopy formula ({wrong12})"
+)
+print(
+    f"12. Canopy + floodplain + production + tpi (slope=10%%): {cost12[0, 0]:.9f} == "
+    "(base*(1-0.5*tanh(1)) + 0.0133*100 + 5.0 floodplain + 5.0 canopy) * 3.0 -- canopy flat, then production-scaled."
+)
 
 print("\nAll test_road_cost_path.py checks passed.")

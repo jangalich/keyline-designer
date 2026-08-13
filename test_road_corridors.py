@@ -396,6 +396,96 @@ print("Floodplain/hydric ground is a SOFT cost penalty: the network still crosse
 
 
 # =====================================================================
+# canopy_mask is a SOFT cost penalty threaded through build_cost_raster:
+# a canopy band across the only path is still traversable, but raises the
+# routed network's total cost vs. the same fixture with no canopy mask
+# =====================================================================
+
+canopy_dem = _flat_dem()
+canopy_boundary = box(500000, 4500000, 500205, 4500205)
+canopy_anchor = _lon_lat_for_cell(canopy_dem, 38, 2)
+canopy_production_areas = [
+    {"id": 0, "render_fill_polygon_utm": _cell_box_utm(canopy_dem, 0, 19, 0, 41)}
+]  # north side, far from the (southern) anchor
+
+# A canopy band directly between the anchor and the production zone,
+# spanning the full parcel width -- every path to the demand must cross it.
+canopy_band = np.zeros(canopy_dem["array"].shape, dtype=bool)
+canopy_band[20:26, :] = True
+
+# Same fixture routed with and without the canopy mask. max_meters_per_
+# served_acre is raised (same reasoning as the floodplain test above) so
+# the router reaches the north-side demand rather than stopping short.
+canopy_network = build_road_network(
+    canopy_dem, canopy_production_areas, None, canopy_boundary, canopy_anchor,
+    canopy_mask=canopy_band, max_meters_per_served_acre=100_000.0,
+)
+canopy_free_network = build_road_network(
+    canopy_dem, canopy_production_areas, None, canopy_boundary, canopy_anchor,
+    canopy_mask=None, max_meters_per_served_acre=100_000.0,
+)
+
+assert canopy_network["branches"], (
+    "a canopy band blocking the only path to the production zone must NOT prevent routing entirely "
+    "-- it's a SOFT cost penalty, not a hard exclusion"
+)
+assert any(canopy_band[r, c] for r, c in canopy_network["cells"]), (
+    "expected the routed network to actually pass through the canopy band, proving it's traversable"
+)
+canopy_total_cost = sum(b["total_cost"] for b in canopy_network["branches"])
+canopy_free_total_cost = sum(b["total_cost"] for b in canopy_free_network["branches"])
+assert canopy_total_cost > canopy_free_total_cost, (
+    f"crossing the canopy band must cost strictly more than the same route with no canopy penalty "
+    f"({canopy_total_cost} vs {canopy_free_total_cost}) -- proving canopy_mask actually feeds "
+    "build_cost_raster()"
+)
+print("Canopy is a SOFT cost penalty wired through build_cost_raster(): the network still crosses a "
+      "blocking canopy band, but at a strictly higher total cost than the same fixture with no canopy "
+      "mask.")
+
+
+# =====================================================================
+# _fetch_canopy_soft_cost_mask(): DEGRADES GRACEFULLY on a canopy outage
+# (returns None, does not raise), and otherwise passes a raw-canopy
+# (buffer_meters=0.0) mask straight through
+# =====================================================================
+
+import road_corridors as _rc
+
+_dummy_boundary = box(500000, 4500000, 500205, 4500205)
+_dummy_dem = _flat_dem()
+_orig_canopy_fn = _rc.get_required_tree_root_zone_mask_utm
+try:
+    def _raising_canopy_fetch(*args, **kwargs):
+        # Same RuntimeError get_required_tree_root_zone_mask_utm() itself
+        # raises when HAG coverage is missing -- production/solar treat this
+        # as a hard failure; roads must NOT.
+        raise RuntimeError("Canopy height data unavailable for this property")
+
+    _rc.get_required_tree_root_zone_mask_utm = _raising_canopy_fetch
+    degraded = _rc._fetch_canopy_soft_cost_mask(_dummy_boundary, _dummy_dem, canopy_height=None)
+    assert degraded is None, f"a canopy outage must degrade to None (not raise, not a mask), got {degraded!r}"
+
+    sentinel_mask = np.ones(_dummy_dem["array"].shape, dtype=bool)
+    captured = {}
+
+    def _ok_canopy_fetch(boundary, dem, buffer_meters=None, canopy_height=None):
+        captured["buffer_meters"] = buffer_meters
+        return sentinel_mask
+
+    _rc.get_required_tree_root_zone_mask_utm = _ok_canopy_fetch
+    passed_through = _rc._fetch_canopy_soft_cost_mask(_dummy_boundary, _dummy_dem, canopy_height=None)
+    assert passed_through is sentinel_mask, "a successful canopy fetch must be passed straight through unchanged"
+    assert captured["buffer_meters"] == 0.0, (
+        f"roads must request RAW canopy (buffer_meters=0.0), not the root-zone buffer, got {captured['buffer_meters']}"
+    )
+finally:
+    _rc.get_required_tree_root_zone_mask_utm = _orig_canopy_fn
+print("_fetch_canopy_soft_cost_mask degrades gracefully to None on a canopy outage (does not raise), and "
+      "passes a successful raw-canopy (buffer_meters=0.0) mask straight through.")
+
+
+# =====================================================================
 # selected water zone is still a HARD exclusion, and water_target_cells
 # sit just outside its own buffer (a water_spur branch can be built)
 # =====================================================================
