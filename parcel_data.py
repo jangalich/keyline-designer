@@ -10,15 +10,24 @@ layers and returns them bundled in one dataclass. See pipeline_context.py
 for the derived-computation layer built on top of raw data like this.
 
 HARD-FAIL CONTRACT: fetch_parcel_data() raises (uncached, uncaught) on
-ANY failure among ANY of the layers it fetches -- dem, soil_components,
-farmland_classification, erosion_factor, saturated_hydraulic_
-conductivity, soil_geometries, water_features, farm_roads,
+ANY failure among ANY of the HARD-FAIL layers it fetches -- dem,
+soil_components, farmland_classification, erosion_factor, saturated_
+hydraulic_conductivity, soil_geometries, water_features, farm_roads,
 climate_summary, elevation_grid, canopy_height, and imagery_summary. Data
 completeness is a precondition for a trustworthy report, not an optional
 enhancement -- a missing/broken layer means nothing downstream should run
-against incomplete data. There is NO soft-fail exception anywhere in this
-module, including imagery: the map is essential to the report, so an
-imagery outage stops the pipeline the same as a DEM outage does.
+against incomplete data. Imagery is included in that list even though the
+map might seem optional: the map is essential to the report, so an imagery
+outage stops the pipeline the same as a DEM outage does.
+
+There is exactly ONE deliberate exception to the hard-fail contract, and
+NO others: the irradiance field. It is optional regional context worth a
+single narrative sentence, not a constraint any downstream KSOP step
+consumes, so a missing/failed baseline must NOT gate a run. See the
+comment on the ParcelData.irradiance field for the full rationale. This
+exemption is documented in three places (here, the field comment, and the
+fetch site) precisely so nobody "fixes" the apparent inconsistency by
+folding irradiance back into the hard-fail behavior.
 
 This is a deliberately STRICTER standard than the individual fetch
 functions this module calls. Two of them -- imagery_data.
@@ -39,9 +48,15 @@ ever reached. Flagging here so it isn't mistaken for still-active
 graceful degradation once that wiring happens. generate_full_report.py's
 own broader redesign is out of scope for this branch.
 
-irradiance is DELIBERATELY NOT included -- not yet wired up (API
-integration pending), so it isn't fetched, isn't a field, and doesn't
-gate this function at all. Revisit once that integration exists.
+irradiance IS included, as the single deliberately non-hard-failing field
+(see the HARD-FAIL CONTRACT carve-out above and the comment on the
+dataclass field). It is fetched here exactly once, at Layer 1, from one
+representative point (the parcel centroid in WGS84), so no downstream
+consumer needs to re-fetch it. Unlike every other field, a missing or
+failed irradiance baseline does NOT gate this function:
+get_regional_irradiance_baseline() never raises and always returns a
+populated dict, so the field is always present and always a dict -- its
+'status' key carries whether the numbers are real.
 
 Standalone module only in this branch -- no wiring into
 pipeline_context.py, generate_full_report.py, render_layout_map.py, or
@@ -60,6 +75,7 @@ from elevation_data import get_elevation_grid
 from farm_roads_data import get_farm_roads_for_boundary
 from hydrology_data import get_water_features_for_boundary
 from imagery_data import get_imagery_summary_for_boundary
+from irradiance_data import get_regional_irradiance_baseline
 from soil_data import (
     coordinates_to_wkt_polygon,
     get_erosion_factor_for_polygon,
@@ -97,6 +113,19 @@ class ParcelData:
     elevation_grid: list[dict]
     canopy_height: dict
     imagery_summary: dict
+    # THE ONE DELIBERATELY NON-HARD-FAILING LAYER 1 FIELD. Every field above
+    # is mandatory: a missing/broken value raises and stops the pipeline
+    # (see the module docstring's HARD-FAIL CONTRACT). irradiance is the
+    # single exception -- it is optional regional context worth one
+    # narrative sentence, NOT a constraint any downstream KSOP step
+    # consumes, so a missing baseline must not fail a run. It is ALWAYS
+    # present and ALWAYS a dict (never None, never Optional):
+    # get_regional_irradiance_baseline() guarantees a populated dict whose
+    # 'status' key ("ok"/"no_api_key"/"fetch_failed"/"validation_failed")
+    # says whether the numbers are real. Do NOT "fix" this inconsistency by
+    # adding it to a hard-fail gate, a completeness check, or an
+    # Optional/None default -- the non-hard-failing behavior is the point.
+    irradiance: dict
 
 
 def _boundary_center(boundary_coordinates: list) -> tuple:
@@ -178,6 +207,24 @@ def fetch_parcel_data(boundary_coordinates: list[tuple[float, float]]) -> Parcel
             "here, not a value to degrade gracefully on."
         )
 
+    # irradiance: the ONE non-hard-failing field (see the dataclass comment
+    # and the module docstring's HARD-FAIL CONTRACT carve-out). Fetched here
+    # once, at Layer 1, so nothing downstream re-fetches it. The
+    # representative point is the parcel centroid in WGS84: take the shapely
+    # centroid of the already-built UTM boundary polygon and warp it back to
+    # EPSG:4326 with the same warp_transform helper that built that polygon
+    # -- preferred over averaging raw lon/lat, which skews toward wherever
+    # the boundary has denser vertices. get_regional_irradiance_baseline()
+    # never raises and always returns a populated dict, so there is
+    # deliberately NO try/except and NO None check here (unlike
+    # canopy_height/imagery above), and this field is intentionally NOT part
+    # of any hard-fail gate.
+    centroid_utm = boundary_polygon_utm.centroid
+    centroid_lons, centroid_lats = warp_transform(
+        dem["crs"], "EPSG:4326", [centroid_utm.x], [centroid_utm.y]
+    )
+    irradiance = get_regional_irradiance_baseline(centroid_lats[0], centroid_lons[0])
+
     return ParcelData(
         dem=dem,
         boundary_polygon_utm=boundary_polygon_utm,
@@ -192,4 +239,5 @@ def fetch_parcel_data(boundary_coordinates: list[tuple[float, float]]) -> Parcel
         elevation_grid=elevation_grid,
         canopy_height=canopy_height,
         imagery_summary=imagery_summary,
+        irradiance=irradiance,
     )
