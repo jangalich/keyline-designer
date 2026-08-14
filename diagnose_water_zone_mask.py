@@ -69,9 +69,10 @@ this run only (default: the current module constant) -- for experimentation
 while tuning the ceiling; the actual module constant itself is never
 changed. The service-distance/boundary-setback thresholds used in the gate
 breakdown are always the module's real current defaults
-(MAX_SERVICE_DISTANCE_METERS/MIN_SERVICE_DISTANCE_METERS/
-MIN_BOUNDARY_SETBACK_METERS -- the last now 0.0), not separately
-overridable here.
+(MAX_SERVICE_DISTANCE_METERS/MIN_BOUNDARY_SETBACK_METERS -- the last now
+0.0), not separately overridable here. There is no minimum-service-distance
+gate any more (the former 10 m "too close to production" rule was removed),
+so the gate breakdown reports "too far" but no "too close".
 """
 
 import argparse
@@ -98,7 +99,6 @@ from water_candidate_zones import (
     MAX_SERVICE_DISTANCE_METERS,
     MAX_VALLEY_CONTRIBUTING_AREA_ACRES,
     MIN_BOUNDARY_SETBACK_METERS,
-    MIN_SERVICE_DISTANCE_METERS,
     MIN_WATER_ZONE_AREA_ACRES,
     WATER_ZONE_CANOPY_BUFFER_METERS,
     WATER_ZONE_PRODUCTION_SETBACK_METERS,
@@ -322,7 +322,6 @@ def main(
         dem, production_areas, boundary_polygon_utm,
         max_valley_contributing_area_acres=max_contributing_acres,
         max_service_distance_meters=float("inf"),
-        min_service_distance_meters=0.0,
         min_boundary_setback_meters=MIN_BOUNDARY_SETBACK_METERS,
         canopy_root_zone_mask_utm=canopy_root_zone_mask_utm,
         road_exclusion_union_utm=road_exclusion_union_utm,
@@ -333,33 +332,35 @@ def main(
         parcel_setback_mask, dem,
     )
 
-    # 2. Service-distance gate (boundary-SETBACK disabled via
+    # 2. Max-service-distance gate (boundary-SETBACK disabled via
     #    min_boundary_setback_meters=0, using the REAL boundary_polygon_utm
     #    -- on-parcel containment still required, using the REAL
-    #    MAX/MIN_SERVICE_DISTANCE_METERS). Canopy/road held REAL.
+    #    MAX_SERVICE_DISTANCE_METERS). There is no minimum-service-distance
+    #    gate any more, so this is a single max-distance test. Canopy/road
+    #    held REAL.
     service_distance_mask = compute_water_eligible_cells(
         dem, production_areas, boundary_polygon_utm,
         max_valley_contributing_area_acres=max_contributing_acres,
         max_service_distance_meters=MAX_SERVICE_DISTANCE_METERS,
-        min_service_distance_meters=MIN_SERVICE_DISTANCE_METERS,
         min_boundary_setback_meters=0.0,
         canopy_root_zone_mask_utm=canopy_root_zone_mask_utm,
         road_exclusion_union_utm=road_exclusion_union_utm,
     )
     _report_cell_count(
-        f"Service-distance gate (MAX={MAX_SERVICE_DISTANCE_METERS}m, "
-        f"MIN={MIN_SERVICE_DISTANCE_METERS}m, setback disabled, on-parcel still required)",
+        f"Max-service-distance gate (MAX={MAX_SERVICE_DISTANCE_METERS}m, "
+        "setback disabled, on-parcel still required)",
         service_distance_mask, dem,
     )
 
-    # 2a. "Too far" only: max-distance real, min-distance disabled (0) --
-    #     a cell excluded here failed to find ANY production area within
-    #     MAX_SERVICE_DISTANCE_METERS. Canopy/road held REAL.
+    # 2a. "Too far": max-distance real -- a cell excluded here failed to
+    #     find ANY production area within MAX_SERVICE_DISTANCE_METERS. With
+    #     the minimum-service-distance gate removed, this is the whole
+    #     service-distance gate (item 2 above computes the same thing);
+    #     kept as the "excluded" breakdown of it. Canopy/road held REAL.
     too_far_mask = compute_water_eligible_cells(
         dem, production_areas, boundary_polygon_utm,
         max_valley_contributing_area_acres=max_contributing_acres,
         max_service_distance_meters=MAX_SERVICE_DISTANCE_METERS,
-        min_service_distance_meters=0.0,
         min_boundary_setback_meters=0.0,
         canopy_root_zone_mask_utm=canopy_root_zone_mask_utm,
         road_exclusion_union_utm=road_exclusion_union_utm,
@@ -377,28 +378,6 @@ def main(
         "from every production area)",
         too_far_excluded_mask, dem,
     )
-
-    # 2b. "Too close" only: min-distance real, max-distance disabled (inf) --
-    #     a cell excluded here sits within (0, MIN_SERVICE_DISTANCE_METERS)
-    #     of EVERY production area (genuinely near but not touching any of
-    #     them) -- the opposite problem from "too far," needing the
-    #     opposite fix (a smaller MIN_SERVICE_DISTANCE_METERS, not a
-    #     larger MAX_SERVICE_DISTANCE_METERS). Canopy/road held REAL.
-    too_close_mask = compute_water_eligible_cells(
-        dem, production_areas, boundary_polygon_utm,
-        max_valley_contributing_area_acres=max_contributing_acres,
-        max_service_distance_meters=float("inf"),
-        min_service_distance_meters=MIN_SERVICE_DISTANCE_METERS,
-        min_boundary_setback_meters=0.0,
-        canopy_root_zone_mask_utm=canopy_root_zone_mask_utm,
-        road_exclusion_union_utm=road_exclusion_union_utm,
-    )
-    too_close_excluded_mask = on_parcel_mask & ~too_close_mask
-    _report_cell_count(
-        f"  -> excluded as TOO CLOSE (within MIN_SERVICE_DISTANCE_METERS={MIN_SERVICE_DISTANCE_METERS}m "
-        "of every production area, but not touching any of them)",
-        too_close_excluded_mask, dem,
-    )
     print()
 
     # 2c. Canopy gate ALONE: service-distance/setback disabled (max=inf/
@@ -407,7 +386,6 @@ def main(
         dem, production_areas, boundary_polygon_utm,
         max_valley_contributing_area_acres=max_contributing_acres,
         max_service_distance_meters=float("inf"),
-        min_service_distance_meters=0.0,
         min_boundary_setback_meters=0.0,
         canopy_root_zone_mask_utm=canopy_root_zone_mask_utm,
         road_exclusion_union_utm=_ROAD_CHECK_UNCHECKED,
@@ -426,7 +404,6 @@ def main(
         dem, production_areas, boundary_polygon_utm,
         max_valley_contributing_area_acres=max_contributing_acres,
         max_service_distance_meters=float("inf"),
-        min_service_distance_meters=0.0,
         min_boundary_setback_meters=0.0,
         canopy_root_zone_mask_utm=_CANOPY_CHECK_UNCHECKED,
         road_exclusion_union_utm=road_exclusion_union_utm,
@@ -449,7 +426,6 @@ def main(
         dem, production_areas, boundary_polygon_utm,
         max_valley_contributing_area_acres=max_contributing_acres,
         max_service_distance_meters=float("inf"),
-        min_service_distance_meters=0.0,
         min_boundary_setback_meters=0.0,
         canopy_root_zone_mask_utm=_CANOPY_CHECK_UNCHECKED,
         road_exclusion_union_utm=_ROAD_CHECK_UNCHECKED,
@@ -463,38 +439,30 @@ def main(
     print()
 
     # --- Internal consistency check -----------------------------------
-    # By construction, too_far_mask = {on-parcel cells passing the
-    # max-distance test} and too_close_mask = {on-parcel cells passing the
-    # min-distance test}, both restricted to on_parcel_mask and sharing
-    # the same gate-1 (percentile band) conditions as service_distance_mask
-    # (which requires BOTH distance tests). So (on_parcel_mask \
-    # too_far_mask) union (on_parcel_mask \ too_close_mask) ==
-    # on_parcel_mask \ service_distance_mask exactly, and by
-    # inclusion-exclusion:
-    #   too_far_excluded_count + too_close_excluded_count - overlap_count
-    #   == on_parcel_count - service_distance_pass_count
-    # A mismatch here means the isolation calls above no longer share the
-    # same universe/gate conditions as service_distance_mask -- exactly
-    # the class of regression this check exists to catch automatically.
+    # With the minimum-service-distance gate removed, the service-distance
+    # gate is a single max-distance test, so too_far_mask (item 2a) and
+    # service_distance_mask (item 2) are the same isolation call. The
+    # "too far" excluded set is therefore exactly on_parcel_mask \
+    # service_distance_mask:
+    #   too_far_excluded_count == on_parcel_count - service_distance_pass_count
+    # A mismatch means the two calls no longer share the same universe/gate
+    # conditions -- exactly the class of regression this check catches.
     on_parcel_count = int(on_parcel_mask.sum())
     service_distance_pass_count = int(service_distance_mask.sum())
     too_far_excluded_count = int(too_far_excluded_mask.sum())
-    too_close_excluded_count = int(too_close_excluded_mask.sum())
-    overlap_count = int((too_far_excluded_mask & too_close_excluded_mask).sum())
 
-    lhs = too_far_excluded_count + too_close_excluded_count - overlap_count
+    lhs = too_far_excluded_count
     rhs = on_parcel_count - service_distance_pass_count
-    print("Internal consistency check: (too_far_excluded + too_close_excluded - overlap) "
+    print("Internal consistency check: too_far_excluded "
           "== (on_parcel_count - service_distance_pass_count)")
-    print(f"  too_far_excluded_count={too_far_excluded_count}, too_close_excluded_count={too_close_excluded_count}, "
-          f"overlap_count={overlap_count} -> lhs={lhs}")
+    print(f"  too_far_excluded_count={too_far_excluded_count} -> lhs={lhs}")
     print(f"  on_parcel_count={on_parcel_count}, service_distance_pass_count={service_distance_pass_count} -> rhs={rhs}")
     if lhs == rhs:
         print(f"  PASS: {lhs} == {rhs}\n")
     else:
         print(f"  WARNING: consistency check FAILED ({lhs} != {rhs}) -- the gate-breakdown "
               "isolation calls above may no longer share the same universe/gate conditions as "
-              "service_distance_mask. Treat the TOO FAR/TOO CLOSE numbers above as unreliable "
+              "service_distance_mask. Treat the TOO FAR numbers above as unreliable "
               "until this is investigated.\n")
 
     # 3. ALL SIX gates combined -- this is compute_water_eligible_cells()'s

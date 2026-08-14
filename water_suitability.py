@@ -214,10 +214,10 @@ GRAVITY_MAX_DEFICIT_GRADIENT_PCT = -5.0
 # out a candidate's composite score. CONFIGURABLE.
 GRAVITY_MIN_FACTOR = 0.2
 
-# water_candidate_zones.py's MIN_SERVICE_DISTANCE_METERS fix means a real
-# zone can legitimately sit AT distance_m == 0 from the production area it
-# serves (inside/touching a patch that covers most of the parcel — see
-# that module's own comment). At distance 0, gradient (rise/run) is
+# water_candidate_zones.py applies no minimum-service-distance gate, so a
+# real zone can legitimately sit AT distance_m == 0 from the production
+# area it serves (inside/touching a patch that covers most of the parcel —
+# see that module's own comment). At distance 0, gradient (rise/run) is
 # mathematically undefined -- there's no run to divide the real elevation
 # differential by. Silently defaulting the resulting gradient_pct to 0.0
 # (water_candidate_zones._zone_production_area_relationships()'s

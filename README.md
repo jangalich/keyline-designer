@@ -502,7 +502,7 @@ tool (built with Leaflet).
   `MIN_STREAM_CONTRIBUTING_AREA_ACRES` / `MIN_PRIMARY_VALLEY_CONTRIBUTING_AREA_ACRES`
   (`valley_delineation.py`), `MAX_PRODUCTION_SLOPE_PCT`
   (`production_area.py`), `MIN_BOUNDARY_SETBACK_METERS` /
-  `MAX_SERVICE_DISTANCE_METERS` / `MIN_SERVICE_DISTANCE_METERS`
+  `MAX_SERVICE_DISTANCE_METERS`
   (`water_candidate_zones.py`), and `water_suitability.py`'s own composite
   factor weights accordingly — all deliberately exposed as module-level
   constants for exactly this.

@@ -91,8 +91,9 @@ print("_gravity_feed_factor() is continuous/monotonic and never zero (distance_m
 # --- _gravity_feed_factor(): distance_m == 0 case -- real bug, fixed ----
 #
 # Live-confirmed bug: with distance_m == 0 (a zone sitting inside/touching
-# a production area — a real, common case since MIN_SERVICE_DISTANCE_METERS
-# no longer rejects it), water_candidate_zones.py reports gradient_pct as a
+# a production area — a real, common case that water-zone eligibility does
+# not reject, applying no minimum-service-distance gate), water_candidate_
+# zones.py reports gradient_pct as a
 # 0.0 div-by-zero placeholder, NOT a real 0% grade. Scoring directly off
 # that placeholder collapsed every distance-0 zone to the same
 # GRAVITY_LEVEL_GROUND_FACTOR (0.6), regardless of real elevation_differential_m

@@ -40,6 +40,7 @@ from feature_schema import validate_feature_collection
 from raster_grid import (
     SQUARE_METERS_PER_ACRE,
     cell_area_acres,
+    cell_union_footprint,
     connected_components,
     pixel_center_xy,
 )
@@ -598,6 +599,200 @@ assert _feat["id"] == "water-system-candidate-0"
 assert _feat["geometry"]["type"] in ("Polygon", "MultiPolygon")
 assert "render_fill_geometry_wgs84" in _feat["properties"]
 print("Gate -- zones_to_geojson is schema-valid, layer='water_system_candidate'.")
+
+
+# =====================================================================
+# Test E -- SERVICE-DISTANCE GATE REMOVAL: cells adjacent to production
+# (2-8 m) are now eligible. Under the removed 10 m min-service-distance
+# gate they would have been rejected as "too close." The contrast is
+# computed inline so the change is demonstrated, not just asserted.
+# (compute_water_eligible_cells only.)
+# =====================================================================
+_adj_nr, _adj_nc = 6, 12
+_adj_dem = _dem(np.full((_adj_nr, _adj_nc), 100.0, dtype=np.float32))
+_adj_boundary = box(500000.0, 4500000.0 - _adj_nr * 5.0, 500000.0 + _adj_nc * 5.0, 4500000.0)
+# Production polygon_utm's west edge at x=500030.5: cells in col 5 sit 3 m
+# west of it and col 4 sit 8 m west -- both inside the removed 10 m gate.
+# render_fill is off-grid so the production-exclusion gate excludes nothing
+# (this fixture isolates the service-distance change).
+_adj_pa = [
+    {
+        "id": 0,
+        "representative_elevation_m": 50.0,
+        "polygon_utm": box(500030.5, 4499960.0, 500200.0, 4500010.0),
+        "render_fill_polygon_utm": box(0.0, 0.0, 1.0, 1.0),
+    }
+]
+_orig_flow_e = wcz.get_flow_accumulation_for_dem
+wcz.get_flow_accumulation_for_dem = lambda d: np.ones((_adj_nr, _adj_nc), dtype=np.float64)
+try:
+    _adj_mask = compute_water_eligible_cells(_adj_dem, _adj_pa, _adj_boundary)
+finally:
+    wcz.get_flow_accumulation_for_dem = _orig_flow_e
+# The adjacent columns (3 m and 8 m from production) are eligible now.
+assert all(_adj_mask[r, 4] for r in range(_adj_nr)), "col 4 (8 m from production) must be eligible now"
+assert all(_adj_mask[r, 5] for r in range(_adj_nr)), "col 5 (3 m from production) must be eligible now"
+# Inline contrast: re-apply the REMOVED gate (reject a cell whose only
+# in-range production area sits 0 < distance < 10 m away). This is exactly
+# what compute_water_eligible_cells() used to do and no longer does.
+_REMOVED_MIN_SERVICE = 10.0
+_adj_patch_poly = _adj_pa[0]["polygon_utm"]
+_adj_old_excluded = [
+    (int(r), int(c))
+    for r, c in np.argwhere(_adj_mask)
+    if 0 < Point(*pixel_center_xy(_adj_dem, int(r), int(c))).distance(_adj_patch_poly) < _REMOVED_MIN_SERVICE
+]
+_adj_new_count = int(_adj_mask.sum())
+_adj_old_count = _adj_new_count - len(_adj_old_excluded)
+assert len(_adj_old_excluded) == _adj_nr * 2, (
+    f"the 2 adjacent columns ({_adj_nr * 2} cells) are the ones the removed gate rejected, got {len(_adj_old_excluded)}"
+)
+assert all(_adj_mask[r, c] for r, c in _adj_old_excluded), "cells the old gate would drop are all eligible under the new mask"
+print(
+    f"Test E -- service-distance gate removed: {_adj_new_count} cells eligible now vs {_adj_old_count} under the "
+    f"removed 10 m min-service gate (delta {len(_adj_old_excluded)} cells at 3 m and 8 m from production, "
+    "previously rejected as too close)."
+)
+
+
+# =====================================================================
+# Test F -- 5 m PRODUCTION SETBACK is the surviving margin. Removing the
+# service-distance gate must NOT weaken the production-exclusion gate: a
+# cell 3 m from production's drawn edge (render_fill_polygon_utm) is still
+# excluded (inside the 5 m buffer), a cell 7 m away is not, and a cell deep
+# inside the drawn fill stays excluded. 1 m resolution so 3 m and 7 m land
+# on exact cell centers. (compute_water_eligible_cells only.)
+# =====================================================================
+_set_nr, _set_nc = 6, 20
+_set_dem = {
+    "array": np.full((_set_nr, _set_nc), 100.0, dtype=np.float32),
+    "resolution_meters": (1.0, 1.0),
+    "origin_x": 500000.0,
+    "origin_y": 4500000.0,
+    "crs": CRS,
+}
+_set_boundary = box(500000.0, 4500000.0 - _set_nr * 1.0, 500000.0 + _set_nc * 1.0, 4500000.0)
+# render_fill west edge at x=500010.5: col 7 center is 3 m west (inside the
+# 5 m buffer), col 3 center is 7 m west (outside it), col 15 is deep inside.
+_set_rf = box(500010.5, 4499990.0, 500020.0, 4500001.0)
+_set_pa = [
+    {
+        "id": 0,
+        "representative_elevation_m": 50.0,
+        "polygon_utm": _set_rf,
+        "render_fill_polygon_utm": _set_rf,
+    }
+]
+_orig_flow_f = wcz.get_flow_accumulation_for_dem
+wcz.get_flow_accumulation_for_dem = lambda d: np.ones((_set_nr, _set_nc), dtype=np.float64)
+try:
+    _set_mask = compute_water_eligible_cells(_set_dem, _set_pa, _set_boundary)
+finally:
+    wcz.get_flow_accumulation_for_dem = _orig_flow_f
+_d3 = Point(*pixel_center_xy(_set_dem, 0, 7)).distance(_set_rf)
+_d7 = Point(*pixel_center_xy(_set_dem, 0, 3)).distance(_set_rf)
+assert abs(_d3 - 3.0) < 1e-9 and abs(_d7 - 7.0) < 1e-9, f"fixture geometry: expected 3 m and 7 m, got {_d3}, {_d7}"
+assert not any(_set_mask[r, 7] for r in range(_set_nr)), "TEST F: a cell 3 m from the drawn edge must be excluded (inside the 5 m setback)"
+assert all(_set_mask[r, 3] for r in range(_set_nr)), "TEST F: a cell 7 m from the drawn edge must be eligible (beyond the 5 m setback)"
+assert not any(_set_mask[r, 15] for r in range(_set_nr)), "TEST F: a cell deep inside the drawn fill must stay excluded (overlap gate intact)"
+print(
+    f"Test F -- 5 m production setback pinned: a cell {_d3:.0f} m from the drawn edge is excluded, one {_d7:.0f} m "
+    "away is eligible (and a cell inside the fill stays excluded); the surviving margin sits between them at 5 m."
+)
+
+
+# =====================================================================
+# Test G -- MAX SERVICE DISTANCE unaffected: a cell beyond 800 m from every
+# production area is still excluded (default max_service_distance_meters);
+# an in-range production area leaves cells eligible (contrast).
+# (compute_water_eligible_cells only.)
+# =====================================================================
+_far_dem = _dem(np.full((6, 6), 100.0, dtype=np.float32))
+_far_boundary = box(500000.0, 4500000.0 - 6 * 5.0, 500000.0 + 6 * 5.0, 4500000.0)
+_far_pa = [
+    {
+        "id": 0,
+        "representative_elevation_m": 50.0,
+        "polygon_utm": box(500900.0, 4499960.0, 500930.0, 4500010.0),  # ~872 m east of the nearest cell
+        "render_fill_polygon_utm": box(0.0, 0.0, 1.0, 1.0),
+    }
+]
+_near_pa = [
+    {
+        "id": 0,
+        "representative_elevation_m": 50.0,
+        "polygon_utm": box(500100.0, 4499960.0, 500130.0, 4500010.0),  # comfortably within 800 m
+        "render_fill_polygon_utm": box(0.0, 0.0, 1.0, 1.0),
+    }
+]
+_orig_flow_g = wcz.get_flow_accumulation_for_dem
+wcz.get_flow_accumulation_for_dem = lambda d: np.ones((6, 6), dtype=np.float64)
+try:
+    _far_mask = compute_water_eligible_cells(_far_dem, _far_pa, _far_boundary)
+    _near_mask = compute_water_eligible_cells(_far_dem, _near_pa, _far_boundary)
+finally:
+    wcz.get_flow_accumulation_for_dem = _orig_flow_g
+assert int(_far_mask.sum()) == 0, "TEST G: a production area ~872 m away (beyond 800 m) must leave no eligible cell"
+assert int(_near_mask.sum()) > 0, "an in-range production area must leave eligible cells (contrast)"
+print(f"Test G -- max service distance enforced: 0 eligible at ~872 m vs {int(_near_mask.sum())} within range.")
+
+
+# =====================================================================
+# Test H -- CLUSTER-FLOOR REJECTION (restored fixture). A cluster whose
+# clipped cell-union footprint is below MIN_WATER_ZONE_AREA_ACRES (0.1) is
+# discarded before ranking -- not grown, not padded, not selected. 10 m
+# resolution so the acreage is hand-verifiable: 3 cells x 100 m^2 = 300 m^2
+# = 0.0741 acres < 0.1. The existing coverage (test 4) only asserts the
+# survive side (a between-floor-and-target cluster kept untrimmed); this
+# asserts the reject side, so moving/dropping the floor check is caught.
+# =====================================================================
+_floor_nr, _floor_nc = 10, 10
+_floor_dem = {
+    "array": np.full((_floor_nr, _floor_nc), 100.0, dtype=np.float32),
+    "resolution_meters": (10.0, 10.0),
+    "origin_x": 500000.0,
+    "origin_y": 4500000.0,
+    "crs": CRS,
+}
+_floor_boundary = box(500000.0, 4500000.0 - _floor_nr * 10.0, 500000.0 + _floor_nc * 10.0, 4500000.0)
+_floor_cluster = [(4, 4), (4, 5), (4, 6)]  # 3 adjacent cells, one 4-connected cluster
+_floor_mask = _mask_from_cells((_floor_nr, _floor_nc), _floor_cluster)
+_floor_accum = np.ones((_floor_nr, _floor_nc), dtype=np.float64)
+_floor_pa = [
+    {
+        "id": 0,
+        "representative_elevation_m": 50.0,
+        "polygon_utm": box(500040.0, 4499940.0, 500060.0, 4499960.0),  # within service distance
+        "render_fill_polygon_utm": box(0.0, 0.0, 1.0, 1.0),
+    }
+]
+# Hand-verifiable footprint: exactly 3 cells x 100 m^2 = 300 m^2, below the 0.1-acre floor.
+_floor_footprint = cell_union_footprint(_floor_dem, _floor_mask).intersection(_floor_boundary)
+_floor_acres = _floor_footprint.area / SQUARE_METERS_PER_ACRE
+assert abs(_floor_footprint.area - 300.0) < 1e-6, f"expected a 300 m^2 footprint, got {_floor_footprint.area}"
+assert 0.0 < _floor_acres < MIN_WATER_ZONE_AREA_ACRES, f"the fixture must be sub-floor, got {_floor_acres:.4f} ac"
+# Rejected: no zone survives the floor (dropped before growth/ranking).
+_floor_reject_zones, _floor_reject_wiped = _run_with_injected(
+    _floor_dem, _floor_mask, _floor_accum, _floor_pa, _floor_boundary
+)
+assert _floor_reject_zones == [], "TEST H: a sub-floor cluster must be discarded before ranking (not grown/padded/selected)"
+assert not _floor_reject_wiped, "the sub-floor cluster is dropped at the floor check, before the render opening runs"
+# Prove the floor is the specific cause: lower it and the SAME cluster is
+# selected. Its tiny footprint erodes under the render opening (an expected
+# wipeout for a 3-cell shape); trim that message so the file-level wipeout
+# report below is unaffected by this contrast run.
+_floor_wipe_before = len(_wipeout_messages)
+_floor_keep_zones, _ = _run_with_injected(
+    _floor_dem, _floor_mask, _floor_accum, _floor_pa, _floor_boundary, min_water_zone_area_acres=0.0
+)
+del _wipeout_messages[_floor_wipe_before:]
+assert len(_floor_keep_zones) == 1, "with the floor lowered, the same cluster IS selected -- the floor is the cause"
+assert set(_floor_keep_zones[0]["cells"]) == set(_floor_cluster), "the kept cluster grows to its whole (unpadded) self"
+print(
+    f"Test H -- cluster-floor rejection: a {len(_floor_cluster)}-cell cluster ({_floor_acres:.4f} ac < "
+    f"{MIN_WATER_ZONE_AREA_ACRES} floor) is discarded before ranking; lowering the floor to 0.0 selects the same "
+    "cluster, confirming the floor is what rejects it."
+)
 
 
 print(f"\nWipeout report: {len(_wipeout_messages)} find_candidate_zones run(s) triggered the opening wipeout "

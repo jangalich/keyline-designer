@@ -13,7 +13,7 @@ convex hull) -- see compute_water_eligible_cells()'s docstring.
             delineate_valleys() thresholds/traces internally)
         --> production areas (production_area.py)
         --> [this module] per-DEM-cell eligibility mask (ABSOLUTE
-            contributing-area ceiling + on-parcel + service distance +
+            contributing-area ceiling + on-parcel + max service distance +
             boundary setback (now 0.0, inert) + canopy root-zone
             exclusion + existing-road exclusion + production-area
             exclusion)
@@ -158,25 +158,6 @@ MIN_BOUNDARY_SETBACK_METERS = 0.0
 # run. CONFIGURABLE.
 MAX_SERVICE_DISTANCE_METERS = 800.0
 
-# Guards against a candidate cell sitting immediately adjacent to (but
-# genuinely OUTSIDE) a production-area patch, where "above by X% grade
-# over Y meters" no longer means anything (Y too small to be meaningful).
-# Deliberately NOT applied to a cell already INSIDE/touching a patch
-# (distance == 0 — see compute_water_eligible_cells()): that guard is
-# about rejecting a near-but-separate siting as too close for the
-# distance math to mean anything, not about rejecting siting inside the
-# production area at all. That distinction is real, not academic — a
-# single production-area patch can legitimately cover most of a parcel
-# (production_area.py's own slope threshold, confirmed live: ~95% of one
-# real reference property), and a strict "distance < 10m is always too
-# close" reading would then reject nearly every candidate cell on that
-# property outright, since almost everywhere on it genuinely IS inside
-# that one patch. Same "gate becomes a genuinely-inapplicable rule at this
-# property's real scale, fix it, don't just re-tune the number" pattern as
-# road_corridors.py's/production_suitability.py's own earlier softened-
-# exclusion fixes documented in README.md. CONFIGURABLE.
-MIN_SERVICE_DISTANCE_METERS = 10.0
-
 # Absolute ceiling on a cell's own contributing area. Above roughly this,
 # a pond site silts in, runs turbid, and needs engineered spillway capacity
 # regardless of pond size (NRCS CPS 378 changes freeboard requirements above
@@ -265,7 +246,19 @@ WATER_ZONE_ROAD_BUFFER_METERS = 3.048  # 10ft
 # zone even exists). 5.0 meters is the required setback margin beyond
 # the production polygon itself. NOT YET VALIDATED against a real
 # property, same caveat every other threshold in this pipeline carries.
-# CONFIGURABLE.
+#
+# KEPT while the former 10 m minimum-service-distance siting gate was
+# removed -- the two are different kinds of rule and must not be confused.
+# This 5 m is a physical BUILD MARGIN: the minimum ground between a pond
+# wall and worked production ground, a construction constraint that holds
+# regardless of siting. The removed 10 m gate was a SITING heuristic that
+# tried to hold a pond off a field edge on the premise that "adjacent is
+# too close" -- a premise that was wrong (water zones may butt right up to
+# production) and that never worked cleanly at real scale: a single
+# production patch can cover most of a parcel, so a strict "distance < 10 m
+# is too close" reading rejected nearly every candidate cell and needed a
+# distance == 0 carve-out just to function. A build margin has neither
+# problem, so it stays. CONFIGURABLE.
 WATER_ZONE_PRODUCTION_SETBACK_METERS = 5.0
 
 # Sentinel distinguishing "the canopy/road check genuinely ran" from
@@ -314,7 +307,6 @@ def compute_water_eligible_cells(
     boundary_polygon_utm: Polygon,
     max_valley_contributing_area_acres: float = MAX_VALLEY_CONTRIBUTING_AREA_ACRES,
     max_service_distance_meters: float = MAX_SERVICE_DISTANCE_METERS,
-    min_service_distance_meters: float = MIN_SERVICE_DISTANCE_METERS,
     min_boundary_setback_meters: float = MIN_BOUNDARY_SETBACK_METERS,
     canopy_root_zone_mask_utm=_CANOPY_CHECK_UNCHECKED,
     road_exclusion_union_utm=_ROAD_CHECK_UNCHECKED,
@@ -352,24 +344,20 @@ def compute_water_eligible_cells(
          additional, and now inert, test on top of this one, NOT a
          replacement for it.
 
-      3. It FAILS the service-distance gate: it is NOT within
-         max_service_distance_meters of any production area's polygon_utm,
-         OR it is within min_service_distance_meters of the nearest one
-         while NOT already inside/touching that patch (distance == 0).
-         Real bug, found live and fixed for the old
-         per-branch-point version of this same check: with a single
-         production-area patch covering ~95% of a real reference
-         property, "distance < min_service_distance is too close" rejected
-         every point on that property outright, since a point genuinely
-         inside a patch that large has nowhere else to be relative to it.
-         min_service_distance_meters exists to reject a near-but-SEPARATE
-         siting (where "above by X% grade over Y meters" stops meaning
-         anything for Y too small) — it was never meant to reject siting
-         INSIDE the production area entirely, and shouldn't, per this
-         whole feature's "elevation/proximity is a preference, not a
-         gate" direction (see module docstring). This gate only tests
-         whether ANY production area is within range -- it does NOT pick
-         a "best" one; that's find_candidate_zones()'s own whole-zone
+      3. It FAILS the max-service-distance gate: it is NOT within
+         max_service_distance_meters of any production area's polygon_utm.
+         A pond too far from the ground it serves is useless regardless of
+         how good the drainage is, so this remains a real generation-time
+         filter. There is deliberately NO minimum-service-distance gate:
+         an earlier 10 m "too close to a production edge" rule was removed
+         (water zones may butt right up to production -- there is no siting
+         reason to hold a pond off a field edge), so a cell at ANY distance
+         at or below max_service_distance_meters (distance == 0 included,
+         i.e. inside/touching a patch) passes here. Production overlap is
+         still excluded -- by the separate production-exclusion gate (6),
+         not by this one. This gate only tests whether ANY production area
+         is within range -- it does NOT pick a "best" one; that's
+         find_candidate_zones()'s own whole-zone
          scoring now, computed once per surviving cluster from a single
          representative point, not per cell (see that function's own
          docstring for why per-cell tagging + per-cluster aggregation was
@@ -417,12 +405,12 @@ def compute_water_eligible_cells(
          METERS's own docstring -- 0.0 by default, a hard edge-to-edge
          boundary). Tested against the UNION of every production area's
          render_fill_polygon_utm, not just whichever one a zone might
-         eventually be scored against -- gate 3 above (service distance)
-         explicitly ALLOWS a cell to sit inside a production area's
-         polygon_utm (distance == 0 is not "too close"), but that's a
-         distance-math carve-out, not a statement that production ground
-         and water-system ground are the same ground; this gate is what
-         actually keeps them mutually exclusive. Unlike canopy/road, this
+         eventually be scored against -- gate 3 above (max service
+         distance) allows a cell to sit inside a production area's
+         polygon_utm (distance == 0 passes), but sitting close to (or
+         inside) a production patch is not a statement that production
+         ground and water-system ground are the same ground; this gate is
+         what actually keeps them mutually exclusive. Unlike canopy/road, this
          has no "unchecked" sentinel -- production_areas is always a
          required, already-computed argument here (never optionally
          fetched by this function), so the exclusion union is always built
@@ -512,8 +500,6 @@ def compute_water_eligible_cells(
             distance = point.distance(patch["polygon_utm"])
             if distance > max_service_distance_meters:
                 continue
-            if 0 < distance < min_service_distance_meters:
-                continue
             within_service_distance = True
             break
 
@@ -530,7 +516,6 @@ def _zone_production_area_relationships(
     representative_elevation_m: float,
     production_areas: list[dict],
     max_service_distance_meters: float,
-    min_service_distance_meters: float,
 ) -> list[dict]:
     """
     Whole-zone version of the old per-cell "best production-area
@@ -558,9 +543,9 @@ def _zone_production_area_relationships(
     sorted by elevation_differential_m descending (most gravity-favorable
     first), same convention as before.
 
-    Only production areas within max_service_distance_meters (and outside
-    min_service_distance_meters, unless distance == 0 -- same carve-out as
-    compute_water_eligible_cells()'s own gate) are included -- a zone
+    Only production areas within max_service_distance_meters are included
+    (the same max-service-distance gate compute_water_eligible_cells()
+    applies; there is no minimum-service-distance gate) -- a zone
     whose representative point falls outside every production area's
     service-distance window returns [] (see find_candidate_zones()'s own
     handling of this case: such a zone is dropped, since there's no single
@@ -570,8 +555,6 @@ def _zone_production_area_relationships(
     for patch in production_areas:
         distance = representative_point.distance(patch["polygon_utm"])
         if distance > max_service_distance_meters:
-            continue
-        if 0 < distance < min_service_distance_meters:
             continue
 
         elevation_differential_m = representative_elevation_m - patch["representative_elevation_m"]
@@ -647,7 +630,6 @@ def find_candidate_zones(
     max_valley_contributing_area_acres: float = MAX_VALLEY_CONTRIBUTING_AREA_ACRES,
     min_boundary_setback_meters: float = MIN_BOUNDARY_SETBACK_METERS,
     max_service_distance_meters: float = MAX_SERVICE_DISTANCE_METERS,
-    min_service_distance_meters: float = MIN_SERVICE_DISTANCE_METERS,
     min_water_zone_area_acres: float = MIN_WATER_ZONE_AREA_ACRES,
     water_zone_target_acres: float = WATER_ZONE_TARGET_ACRES,
     canopy_root_zone_mask_utm=_CANOPY_CHECK_UNCHECKED,
@@ -803,7 +785,6 @@ def find_candidate_zones(
         boundary_polygon_utm,
         max_valley_contributing_area_acres,
         max_service_distance_meters,
-        min_service_distance_meters,
         min_boundary_setback_meters,
         canopy_root_zone_mask_utm,
         road_exclusion_union_utm,
@@ -871,7 +852,6 @@ def find_candidate_zones(
             representative_elevation_m,
             production_areas,
             max_service_distance_meters,
-            min_service_distance_meters,
         )
         if not production_area_relationships:
             continue
