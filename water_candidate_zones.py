@@ -80,19 +80,25 @@ production_area.py for the same reasoning applied to the layers underneath
 this one.
 
 Each zone also carries render_fill_polygon_utm/render_fill_geometry_wgs84.
-For water zones this is now the PLAIN bounded cell-union footprint
-(cell_union_footprint(...).intersection(boundary_polygon_utm)) -- the same
-geometry as polygon_utm, NOT a convex hull and NOT a morphological
-opening. Production zones use an opening because they are large fields
-with a ragged fringe worth trimming; a water zone is at most
-WATER_ZONE_TARGET_ACRES, so an opening at any useful radius could erase it
-entirely, and the honest, untrimmed footprint is what a reviewer needs to
-see before deciding whether it needs generalising at all. The invariant
-render_fill_polygon_utm is a subset of polygon_utm is asserted anyway
-(trivially true by construction here), so it stays enforced if the
-geometry ever changes.
+For water zones this is a bounded morphological OPENING of the zone's own
+cell mask, clipped to polygon_utm -- the same disc opening production zones
+use (raster_grid.eroded_cell_mask()/binary_dilate() with element="disc"),
+but at a DELIBERATELY tiny radius (WATER_ZONE_RENDER_OPENING_RADIUS_METERS)
+and with NO lead erode, because a ~0.5-acre zone (~81 cells, ~9x9 on a 5m
+grid) cannot afford to lose a cell off every edge. The opening softens the
+blocky cell-union edge and trims single-cell protrusions; it can also sever
+a genuinely too-narrow pinch, so render_fill_polygon_utm may be a
+MultiPolygon (acceptable -- the pinch is too narrow to be one coherent
+survey area). A zone thinner than the opening radius throughout erodes to
+nothing; render_fill_polygon_utm then falls back to polygon_utm (non-empty,
+logged once). The invariant render_fill_polygon_utm is a subset of
+polygon_utm is asserted, raising on violation. polygon_utm stays the real,
+unsmoothed cell-union footprint at the WATER_ZONE_TARGET_ACRES target;
+render_fill_polygon_utm is smaller, the same way production's drawn fill
+runs a fraction of the eligible footprint.
 """
 
+import logging
 import math
 from typing import Optional
 
@@ -113,18 +119,23 @@ from production_area import (
     production_areas_to_geojson,
 )
 from raster_grid import (
-    D8_OFFSETS,
+    D4_OFFSETS,
     SQUARE_METERS_PER_ACRE,
+    binary_dilate,
     cell_area_acres,
     cell_union_footprint,
     connected_components,
+    eroded_cell_mask,
     pixel_center_xy,
+    waist_erosion_radius_cells,
 )
 from valley_delineation import (
     delineate_valleys,
     get_flow_accumulation_for_dem,
     valleys_to_geojson,
 )
+
+_LOGGER = logging.getLogger(__name__)
 
 # Setback from the property boundary applied to candidate water-zone
 # cells. ZEROED (was 15.0). Flow accumulation is maximal where water
@@ -198,10 +209,20 @@ MIN_WATER_ZONE_AREA_ACRES = 0.1
 # Target survey-area size. The deliverable is a survey pointer -- "this area
 # has the best potential based on flow accumulation" -- not a pond footprint,
 # so this generalises the area the way production zones' contour fill does.
-# Every surviving cluster is greedily trimmed (lowest flow accumulation
-# first) down to at or below this size before one candidate is selected.
-# CONFIGURABLE.
+# Every surviving cluster is grown from its highest-accumulation seed (4-
+# connected) up to at or below this size before one candidate is selected.
+# CONFIGURABLE. (Deriving this from a site's supportable pond size is a
+# separate, later decision -- kept at 0.5 here.)
 WATER_ZONE_TARGET_ACRES = 0.5
+
+# Opening radius for the water zone render fill. DELIBERATELY tiny compared
+# with production's 24m: a 0.5-acre zone is roughly 81 cells (~9x9 on a 5m
+# grid), and an opening removes features narrower than 2r. At r = 1 cell this
+# trims single-cell protrusions and softens the blocky cell-union edge; at
+# r = 2 cells it would remove anything under 20m, which on a 9-cell-wide shape
+# is most of the zone. No lead erode -- a 0.5-acre zone cannot afford an extra
+# cell off every edge. CONFIGURABLE.
+WATER_ZONE_RENDER_OPENING_RADIUS_METERS = 5.0
 
 # How far past a tree-cell's own footprint the woody-vegetation hard
 # exclusion extends for water zones specifically -- reuses canopy_height_
@@ -263,22 +284,6 @@ WATER_ZONE_PRODUCTION_SETBACK_METERS = 5.0
 # check_roads handling.
 _CANOPY_CHECK_UNCHECKED = object()
 _ROAD_CHECK_UNCHECKED = object()
-
-# Zones at or under this size already read as a reasonable survey pointer
-# on their own -- select_optimal_survey_subarea() (see that function's own
-# docstring) skips sub-area selection entirely for them, returning None,
-# rather than carving an even-smaller sub-region out of ground that's
-# already a modest, walkable size. CONFIGURABLE, unvalidated against a
-# real property yet, same caveat every other threshold in this pipeline
-# carries.
-WATER_ZONE_SUBAREA_TRIGGER_ACRES = 1.0
-
-# The optimal sub-area's own size cap -- greedy region-growing (see
-# select_optimal_survey_subarea()) stops once this acreage is reached (or
-# no adjacent candidate cells remain, if the zone itself is smaller than
-# this after excluding cells inside the production area it serves). A
-# starting value, not yet validated against a real property. CONFIGURABLE.
-WATER_ZONE_SUBAREA_TARGET_ACRES = 0.5
 
 WATER_SYSTEM_CANDIDATE_CONFIDENCE_NOTES = (
     "This identifies a general candidate zone for water-system "
@@ -585,156 +590,54 @@ def _zone_production_area_relationships(
     return relationships
 
 
-def select_optimal_survey_subarea(
-    zone: dict,
-    production_areas: list[dict],
-    dem: dict,
-) -> Optional[dict]:
+def _grow_zone_cells(
+    cluster_cells: list[tuple[int, int]],
+    flow_accumulation_cells: np.ndarray,
+    target_cell_count: int,
+) -> list[tuple[int, int]]:
     """
-    For a zone whose full footprint is large enough that pointing someone
-    at the WHOLE thing isn't a very actionable survey instruction, picks a
-    smaller, higher-confidence sub-region within it -- favoring elevation
-    advantage and proximity to the production area the zone actually
-    serves. This is a SUGGESTION layered alongside the zone's own real,
-    full geometry (see module docstring's "REPLACES the earlier
-    per-traced-valley-branch line-walk" framing for why the full zone
-    footprint itself stays the authoritative candidate area) -- it never
-    replaces or shrinks polygon_utm/area_acres, which remain the source
-    of truth for narrative use.
+    Connected greedy growth of ONE cluster to target_cell_count cells:
+    seed with the cluster's single highest-accumulation cell, then
+    repeatedly add the highest-accumulation cell that is 4-CONNECTED-
+    adjacent to the current set, until the set reaches target_cell_count or
+    no adjacent cell remains. The result is connected by construction.
 
-    zone must be one of find_candidate_zones()'s own zone dicts (needs
-    'cells' -- the zone's own post-trim member (row, col) cells, not
-    refetched or reclassified from the raw DEM here -- and
-    'primary_production_area_relationship', to identify which production
-    area to measure against without re-deriving it).
+    4-connectivity (D4_OFFSETS), NOT 8: diagonal-only adjacency means two
+    cells sharing a single corner point, which cell_union_footprint()
+    renders as a disjoint MultiPolygon -- 4-connected growth keeps the
+    footprint a single Polygon.
 
-    NOTE: as of the water-zone-selection rebuild this function is dead on
-    the real pipeline path -- find_candidate_zones() now trims every zone
-    to at most WATER_ZONE_TARGET_ACRES (0.5), which is below
-    WATER_ZONE_SUBAREA_TRIGGER_ACRES (1.0), so the trigger check below
-    always returns None. It is retained (investigate-only in this branch,
-    not removed) and still callable directly for tests.
-
-    Returns None if the zone's own real area (zone['polygon_utm'].area)
-    is at or under WATER_ZONE_SUBAREA_TRIGGER_ACRES -- the full zone
-    already reads as a reasonable, walkable survey pointer at that size,
-    so there's nothing smaller worth carving out. Also returns None if,
-    after excluding every zone cell that falls INSIDE the primary
-    production area's own polygon_utm (a survey sub-area must sit outside
-    land already claimed for production), no candidate cell remains.
-
-    SCORING (per remaining candidate cell):
-      - Elevation advantage: this cell's own elevation minus the primary
-        production area's representative_elevation_m -- higher is more
-        gravity-favorable. Normalized 0-1 across the candidate
-        population's own min/max (NOT the whole zone's, since excluded
-        cells shouldn't skew the scale) -- a flat range (every candidate
-        tied) normalizes to a neutral 0.5 for every cell, not an arbitrary
-        1.0, since there's no real differentiation to reward.
-      - Proximity: planar distance from this cell's center to the
-        production area's own polygon_utm boundary -- closer is better,
-        so this is 1 - the same min/max normalization applied to
-        elevation advantage.
-      Composite score is a simple, UNWEIGHTED average of the two --
-      deliberately a starting point (like every other equal-weighting
-      choice in this pipeline), not a tuned composite.
-
-    GROWING: seeds the sub-area at the single highest-scoring candidate
-    cell, then greedily adds whichever remaining candidate cell is
-    8-connected-adjacent (raster_grid.D8_OFFSETS) to the CURRENT sub-area
-    and has the highest score, repeating until WATER_ZONE_SUBAREA_TARGET_
-    ACRES is reached or no adjacent candidate remains (e.g. the zone
-    itself, after exclusions, is smaller than the target). This keeps the
-    result one real, contiguous patch -- not just the top-N cells by
-    score scattered across the zone, which wouldn't be a walkable
-    sub-area at all.
-
-    Builds the sub-area's real geometry via raster_grid.
-    cell_union_footprint() -- the same shared utility every other cell-
-    cluster footprint in this pipeline uses, never a hull or a buffer.
-
-    Returns:
-        {
-            'polygon_utm': shapely Polygon/MultiPolygon,
-            'geometry_wgs84': GeoJSON geometry dict,
-            'area_acres': float,
-        }
+    Ties (equal accumulation) are broken deterministically by (row, col).
+    No lookahead, no jump rule, no fragment-reconnect: a lower-accumulation
+    adjacent cell is deliberately taken over a higher-accumulation
+    non-adjacent one.
     """
-    area_acres = zone["polygon_utm"].area / SQUARE_METERS_PER_ACRE
-    if area_acres <= WATER_ZONE_SUBAREA_TRIGGER_ACRES:
-        return None
+    cluster_set = set(cluster_cells)
 
-    primary_production_area_id = zone["primary_production_area_relationship"]["production_area_id"]
-    primary_patch = next((p for p in production_areas if p["id"] == primary_production_area_id), None)
-    if primary_patch is None:
-        return None
+    def _key(cell):
+        # Highest accumulation first; deterministic (smallest row, then col)
+        # on ties via negated coordinates under max().
+        return (float(flow_accumulation_cells[cell[0], cell[1]]), -cell[0], -cell[1])
 
-    production_polygon = primary_patch["polygon_utm"]
-    production_elevation = primary_patch["representative_elevation_m"]
-    array = dem["array"]
+    seed = max(cluster_cells, key=_key)
+    grown = {seed}
+    frontier: set[tuple[int, int]] = set()
 
-    candidates = []
-    for r, c in zone["cells"]:
-        x, y = pixel_center_xy(dem, r, c)
-        point = Point(x, y)
-        if production_polygon.contains(point):
-            continue
-        elevation = float(array[r, c])
-        if np.isnan(elevation):
-            continue
-        candidates.append((r, c, elevation - production_elevation, point.distance(production_polygon)))
+    def _push_neighbors(cell):
+        r, c = cell
+        for dr, dc in D4_OFFSETS:
+            neighbor = (r + dr, c + dc)
+            if neighbor in cluster_set and neighbor not in grown:
+                frontier.add(neighbor)
 
-    if not candidates:
-        return None
+    _push_neighbors(seed)
+    while len(grown) < target_cell_count and frontier:
+        best = max(frontier, key=_key)
+        frontier.discard(best)
+        grown.add(best)
+        _push_neighbors(best)
 
-    def _normalize(value: float, lo: float, hi: float) -> float:
-        if hi - lo <= 0:
-            return 0.5
-        return (value - lo) / (hi - lo)
-
-    advantages = [adv for _r, _c, adv, _dist in candidates]
-    distances = [dist for _r, _c, _adv, dist in candidates]
-    adv_lo, adv_hi = min(advantages), max(advantages)
-    dist_lo, dist_hi = min(distances), max(distances)
-
-    scores: dict[tuple[int, int], float] = {}
-    for r, c, adv, dist in candidates:
-        elevation_score = _normalize(adv, adv_lo, adv_hi)
-        proximity_score = 1.0 - _normalize(dist, dist_lo, dist_hi)
-        scores[(r, c)] = (elevation_score + proximity_score) / 2.0
-
-    remaining = set(scores.keys())
-    seed = max(remaining, key=lambda cell: (scores[cell], -cell[0], -cell[1]))
-    subarea_cells = {seed}
-    remaining.discard(seed)
-
-    area_per_cell = cell_area_acres(dem)
-    target_cell_count = max(1, round(WATER_ZONE_SUBAREA_TARGET_ACRES / area_per_cell))
-
-    while len(subarea_cells) < target_cell_count and remaining:
-        frontier = [
-            cell for cell in remaining
-            if any((cell[0] + dr, cell[1] + dc) in subarea_cells for dr, dc in D8_OFFSETS)
-        ]
-        if not frontier:
-            break
-        best = max(frontier, key=lambda cell: (scores[cell], -cell[0], -cell[1]))
-        subarea_cells.add(best)
-        remaining.discard(best)
-
-    subarea_mask = np.zeros(array.shape, dtype=bool)
-    for r, c in subarea_cells:
-        subarea_mask[r, c] = True
-
-    polygon_utm = cell_union_footprint(dem, subarea_mask)
-    subarea_area_acres = polygon_utm.area / SQUARE_METERS_PER_ACRE
-    geometry_wgs84 = transform_geom(dem["crs"], "EPSG:4326", mapping(polygon_utm))
-
-    return {
-        "polygon_utm": polygon_utm,
-        "geometry_wgs84": geometry_wgs84,
-        "area_acres": round(subarea_area_acres, 3),
-    }
+    return list(grown)
 
 
 def find_candidate_zones(
@@ -773,8 +676,8 @@ def find_candidate_zones(
     Builds the per-cell eligibility mask (compute_water_eligible_cells() --
     the absolute-ceiling hard-exclusion gate, no percentile band and no
     survey-buffer dilation), then follows the same pattern production zones
-    now use: CLUSTER -> greedy TRIM every cluster to target -> select ONE
-    candidate -> plain bounded footprint. Concretely:
+    now use: CLUSTER -> connected greedy GROWTH of every cluster to target ->
+    select ONE candidate -> bounded morphological opening. Concretely:
 
       1. Cluster the eligible mask 4-connected
          (raster_grid.connected_components(connectivity=4)), matching
@@ -790,37 +693,46 @@ def find_candidate_zones(
          applied to the FULL cluster before trimming -- NOT a quality
          judgement.
 
-      3. Greedily TRIM every surviving cluster down to
-         water_zone_target_acres by keeping only its highest-flow-
-         accumulation cells (equivalently: remove cells lowest-accumulation
-         first until at or below target). Implemented as "sort by
-         accumulation and take the top N cells" where N is the number of
-         whole cells that fit in the target area -- equivalent to and
-         cheaper than iterative removal. A cluster already at or below the
-         target passes through untrimmed; a cluster between the floor and
-         the target is legitimate and is NOT padded. Connectivity is NOT
-         enforced during the trim: if the retained cells form two disjoint
-         pieces within the target area, that is an accepted, honest
-         outcome.
+      3. Grow each surviving cluster to water_zone_target_acres by CONNECTED
+         GREEDY GROWTH from a seed (see _grow_zone_cells()): seed with the
+         cluster's single highest-accumulation cell, then repeatedly add the
+         highest-accumulation cell that is 4-CONNECTED-adjacent to the
+         current set, until the set reaches the target cell count or no
+         adjacent cell remains. The result is connected by construction --
+         no post-hoc connectivity check, no largest-component retention --
+         and 4-connectivity (not 8) guarantees the cell-union footprint is a
+         single Polygon rather than a corner-touch MultiPolygon. This
+         replaces an earlier top-N-by-accumulation trim, which had no
+         adjacency constraint and could return several disconnected
+         fragments (a survey area a farmer walks should be one place). The
+         trade-off is deliberate: growth will sometimes take a lower-
+         accumulation adjacent cell over a higher-accumulation one elsewhere
+         in the cluster -- that is the point; there is no lookahead, jump
+         rule, or fragment-reconnect heuristic. A cluster exhausted before
+         reaching target (no adjacent cells left) is simply smaller than
+         target -- legitimate, NOT padded, and NOT dropped on that ground
+         alone. (Since the cluster is itself 4-connected from step 1, growth
+         reaches every cell, so a cluster at or below target grows to its
+         whole self.)
 
       4. Select ONE candidate -- the cluster with the highest TOTAL (sum)
-         flow accumulation across its own POST-TRIM cells. The ordering is
-         deliberate: ranking before the trim would let a sprawling,
-         low-accumulation cluster win on size alone (sum scales with cell
-         count), so every cluster is trimmed to its own best target-sized
-         area first, making the sums comparable -- the sum then answers
-         "whose best target-acre area carries the most drainage?" A known,
-         accepted consequence: a cluster between the floor and the target
-         has fewer cells, so its sum is lower and it generally loses to a
-         cluster that can fill the full target -- intended, since a
-         full-target survey area is a better deliverable than an undersized
-         one even when the small one's individual cells score well. This
-         branch returns that single zone (or [] if nothing qualifies); a
-         second-pass candidate is deliberately deferred.
+         flow accumulation across its own POST-GROWTH cells. The ordering is
+         deliberate: ranking before growth would let a sprawling, low-
+         accumulation cluster win on size alone (sum scales with cell
+         count), so every cluster is grown to its own best target-sized area
+         first, making the sums comparable -- the sum then answers "whose
+         best target-acre area carries the most drainage?" A known, accepted
+         consequence: a cluster between the floor and the target has fewer
+         cells, so its sum is lower and it generally loses to a cluster that
+         can fill the full target -- intended, since a full-target survey
+         area is a better deliverable than an undersized one even when the
+         small one's individual cells score well. This branch returns that
+         single zone (or [] if nothing qualifies); a second-pass candidate
+         is deliberately deferred.
 
     Scoring is WHOLE-ZONE, computed once for the selected cluster, not per
     cell and not aggregated from per-cell tags: a representative elevation
-    (median of the cluster's own post-trim member cells' elevations -- same
+    (median of the cluster's own post-growth member cells' elevations -- same
     pattern production_area.py's own representative_elevation_m uses) and a
     representative point (the cluster's own real footprint centroid) are
     computed once, and _zone_production_area_relationships() measures
@@ -854,14 +766,13 @@ def find_candidate_zones(
             'polygon_utm': shapely Polygon/MultiPolygon,
             'geometry_wgs84': GeoJSON geometry dict,
             'render_fill_polygon_utm': shapely Polygon/MultiPolygon,
-                # The PLAIN bounded cell-union footprint
-                # (cell_union_footprint(...).intersection(boundary)) -- the
-                # SAME geometry as polygon_utm, NOT a convex hull and NOT a
-                # morphological opening (see module docstring for why water
-                # zones keep the honest, untrimmed footprint). Asserted to
-                # be a subset of polygon_utm. Still carried as a separate
-                # field so render_layout_map.py's polygon_utm/render_fill
-                # pairing is unchanged.
+                # A bounded morphological OPENING of the zone's own cell
+                # mask (disc erode-then-dilate at WATER_ZONE_RENDER_OPENING_
+                # RADIUS_METERS, no lead erode), clipped to polygon_utm.
+                # Smaller than polygon_utm, may be a MultiPolygon if the
+                # opening severs a too-narrow pinch, and falls back to
+                # polygon_utm (logged) if the zone erodes to nothing. Always
+                # asserted a subset of polygon_utm. See module docstring.
             'render_fill_geometry_wgs84': GeoJSON geometry dict,
                 # render_fill_polygon_utm's WGS84 reprojection, same
                 # polygon_utm/geometry_wgs84 pairing convention.
@@ -875,23 +786,11 @@ def find_candidate_zones(
                 headline number
             'contributing_area_cells': float,  # median, see above
             'slope_pct': float,                # median, see above
-            'cells': [(row, col), ...],  # the zone's own member DEM cells --
-                same "expose raw cluster membership on the dict" precedent
-                production_area.py's own patches already establish, so a
-                consumer (select_optimal_survey_subarea() below, or a
-                future one) never has to recover cluster membership from
-                a mask a second time
-            'optimal_subarea_polygon_utm': None,
-            'optimal_subarea_geometry_wgs84': None,
-            'optimal_subarea_acres': None,
-                # select_optimal_survey_subarea()'s own output, attached to
-                # every zone (always present, never a missing key). Since
-                # every zone is now trimmed to at most WATER_ZONE_TARGET_
-                # ACRES (0.5), which is below WATER_ZONE_SUBAREA_TRIGGER_
-                # ACRES (1.0), select_optimal_survey_subarea() always
-                # returns None on this path -- these fields are effectively
-                # always None now. The function and constants are retained
-                # (investigate-only in this branch), not removed.
+            'cells': [(row, col), ...],  # the zone's own post-growth member
+                DEM cells -- same "expose raw cluster membership on the dict"
+                precedent production_area.py's own patches already establish,
+                so a consumer never has to recover membership from a mask a
+                second time
         }
     'id' is always 0 -- exactly one zone is produced.
     """
@@ -921,25 +820,28 @@ def find_candidate_zones(
     array = dem["array"]
 
     area_per_cell = cell_area_acres(dem)
-    # Whole-cell target: keep the N highest-accumulation cells that fit at
-    # or below the target area. floor() guarantees N * area_per_cell <=
-    # target; max(1, ...) keeps at least one cell for a tiny target.
+    grid_shape = eligible_mask.shape
+    # Whole-cell target: grow to at most the N cells that fit at or below
+    # the target area. floor() guarantees N * area_per_cell <= target;
+    # max(1, ...) keeps at least one cell for a tiny target.
     target_cell_count = max(1, int(math.floor(water_zone_target_acres / area_per_cell + 1e-9)))
 
-    # Build every surviving-and-trimmed cluster's zone dict, then select
-    # the single one with the highest POST-TRIM summed flow accumulation.
-    candidates = []  # (post_trim_sum, tiebreak, zone_dict)
+    # Grow every surviving cluster, then select the single one with the
+    # highest POST-GROWTH summed flow accumulation. render_fill (the
+    # bounded opening) is computed only for the selected winner, so a
+    # wipeout fallback is logged at most once.
+    candidates = []  # (post_growth_sum, tiebreak, grown_cells, polygon_utm, rels, metadata...)
     for component_id in range(num_components):
         cluster_mask = labels == component_id
         cluster_cells = [(int(r), int(c)) for r, c in np.argwhere(cluster_mask)]
         if not cluster_cells:
             continue
 
-        # Cluster-size noise filter on the FULL clipped cluster, BEFORE any
-        # trim (the direct analogue of production's MIN_PRODUCTION_AREA_
+        # Cluster-size noise filter on the FULL clipped cluster, BEFORE
+        # growth (the direct analogue of production's MIN_PRODUCTION_AREA_
         # ACRES). A cluster between this floor and the target survives and
         # is not padded.
-        full_mask = np.zeros(eligible_mask.shape, dtype=bool)
+        full_mask = np.zeros(grid_shape, dtype=bool)
         for r, c in cluster_cells:
             full_mask[r, c] = True
         full_polygon = cell_union_footprint(dem, full_mask).intersection(boundary_polygon_utm)
@@ -948,29 +850,20 @@ def find_candidate_zones(
         if full_polygon.area / SQUARE_METERS_PER_ACRE < min_water_zone_area_acres:
             continue
 
-        # Greedy trim to target: keep the top-N cells by flow accumulation.
-        # Equivalent to iterative "remove lowest-accumulation first until at
-        # or below target." Connectivity is intentionally NOT enforced. Ties
-        # broken by (row, col) for determinism.
-        if len(cluster_cells) > target_cell_count:
-            ordered = sorted(
-                cluster_cells,
-                key=lambda rc: (float(flow_accumulation_cells[rc[0], rc[1]]), rc[0], rc[1]),
-            )
-            trimmed_cells = ordered[-target_cell_count:]
-        else:
-            trimmed_cells = cluster_cells
+        # Connected greedy growth to target (see _grow_zone_cells()). The
+        # result is a single 4-connected component; a cluster at or below
+        # target grows to its whole self (it is itself 4-connected).
+        grown_cells = _grow_zone_cells(cluster_cells, flow_accumulation_cells, target_cell_count)
 
-        sub_mask = np.zeros(eligible_mask.shape, dtype=bool)
-        for r, c in trimmed_cells:
+        sub_mask = np.zeros(grid_shape, dtype=bool)
+        for r, c in grown_cells:
             sub_mask[r, c] = True
 
-        footprint = cell_union_footprint(dem, sub_mask)
-        polygon_utm = footprint.intersection(boundary_polygon_utm)
+        polygon_utm = cell_union_footprint(dem, sub_mask).intersection(boundary_polygon_utm)
         if polygon_utm.is_empty:
             continue
 
-        representative_elevation_m = float(np.median([array[r, c] for r, c in trimmed_cells]))
+        representative_elevation_m = float(np.median([array[r, c] for r, c in grown_cells]))
         representative_point = polygon_utm.centroid
 
         production_area_relationships = _zone_production_area_relationships(
@@ -983,73 +876,102 @@ def find_candidate_zones(
         if not production_area_relationships:
             continue
 
-        post_trim_sum = float(sum(flow_accumulation_cells[r, c] for r, c in trimmed_cells))
+        post_growth_sum = float(sum(flow_accumulation_cells[r, c] for r, c in grown_cells))
 
-        contributing_area_cells = float(np.median([flow_accumulation_cells[r, c] for r, c in trimmed_cells]))
+        contributing_area_cells = float(np.median([flow_accumulation_cells[r, c] for r, c in grown_cells]))
         cluster_slopes = [
-            float(slope_pct_grid[r, c]) for r, c in trimmed_cells if not np.isnan(slope_pct_grid[r, c])
+            float(slope_pct_grid[r, c]) for r, c in grown_cells if not np.isnan(slope_pct_grid[r, c])
         ]
         slope_pct = float(np.median(cluster_slopes)) if cluster_slopes else 0.0
 
-        geometry_wgs84 = transform_geom(dem["crs"], "EPSG:4326", mapping(polygon_utm))
-
-        # render_fill_polygon_utm: the PLAIN bounded cell-union footprint,
-        # clipped to boundary_polygon_utm -- the same geometry as
-        # polygon_utm, NOT a convex hull and NOT a morphological opening.
-        # Water zones are at most WATER_ZONE_TARGET_ACRES, so an opening at
-        # any useful radius could erase them; the honest, untrimmed
-        # footprint is what a reviewer needs to see first. See module
-        # docstring.
-        render_fill_polygon_utm = cell_union_footprint(dem, sub_mask).intersection(boundary_polygon_utm)
-        # Invariant: render_fill_polygon_utm is a subset of polygon_utm.
-        # Trivially true by construction here (identical geometry), but
-        # asserted anyway so it is enforced if the geometry ever changes --
-        # matching production_area.cluster_and_gate()'s hard-containment
-        # discipline.
-        if render_fill_polygon_utm.area > polygon_utm.area * (1 + 1e-9) + 1e-6:
-            raise ValueError(
-                "find_candidate_zones: render_fill_polygon_utm.area "
-                f"({render_fill_polygon_utm.area:.6f} m^2) exceeds polygon_utm.area "
-                f"({polygon_utm.area:.6f} m^2) -- the bounded footprint must never claim "
-                "ground outside the real cell-gated, boundary-clipped footprint."
-            )
-        render_fill_geometry_wgs84 = transform_geom(dem["crs"], "EPSG:4326", mapping(render_fill_polygon_utm))
-
-        zone = {
-            "id": 0,
-            "served_production_area_ids": sorted(
-                r["production_area_id"] for r in production_area_relationships
-            ),
-            "polygon_utm": polygon_utm,
-            "geometry_wgs84": geometry_wgs84,
-            "render_fill_polygon_utm": render_fill_polygon_utm,
-            "render_fill_geometry_wgs84": render_fill_geometry_wgs84,
-            "cells": trimmed_cells,
-            "production_area_relationships": production_area_relationships,
-            "primary_production_area_relationship": production_area_relationships[0],
-            "contributing_area_cells": round(contributing_area_cells, 2),
-            "slope_pct": round(slope_pct, 2),
-            # select_optimal_survey_subarea() always returns None now (every
-            # zone is at most WATER_ZONE_TARGET_ACRES, below the subarea
-            # trigger), so these are always None. The function/constants are
-            # retained (investigate-only) rather than removed.
-            "optimal_subarea_polygon_utm": None,
-            "optimal_subarea_geometry_wgs84": None,
-            "optimal_subarea_acres": None,
-        }
-
-        # Tiebreak on the representative point so selection is deterministic
-        # if two clusters ever tie on post-trim sum.
-        candidates.append((post_trim_sum, (representative_point.x, representative_point.y), zone))
+        candidates.append(
+            {
+                "post_growth_sum": post_growth_sum,
+                "tiebreak": (representative_point.x, representative_point.y),
+                "cells": grown_cells,
+                "sub_mask": sub_mask,
+                "polygon_utm": polygon_utm,
+                "representative_elevation_m": representative_elevation_m,
+                "production_area_relationships": production_area_relationships,
+                "contributing_area_cells": contributing_area_cells,
+                "slope_pct": slope_pct,
+            }
+        )
 
     if not candidates:
         return []
 
-    # Select ONE candidate: the cluster with the highest post-trim summed
-    # flow accumulation (see this function's docstring for why this happens
-    # AFTER the trim, not before).
-    candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
-    return [candidates[0][2]]
+    # Select ONE candidate: the highest post-growth summed flow accumulation
+    # (see this function's docstring for why this happens AFTER growth).
+    winner = max(candidates, key=lambda cand: (cand["post_growth_sum"], cand["tiebreak"]))
+
+    polygon_utm = winner["polygon_utm"]
+    render_fill_polygon_utm = _render_opening(
+        winner["sub_mask"], winner["cells"], grid_shape, dem, polygon_utm
+    )
+    # Invariant: render_fill_polygon_utm is a subset of polygon_utm (the
+    # opening is clipped to it, so this holds by construction) -- assert and
+    # raise on violation, matching production_area.cluster_and_gate()'s
+    # hard-containment discipline.
+    if render_fill_polygon_utm.area > polygon_utm.area * (1 + 1e-9) + 1e-6:
+        raise ValueError(
+            "find_candidate_zones: render_fill_polygon_utm.area "
+            f"({render_fill_polygon_utm.area:.6f} m^2) exceeds polygon_utm.area "
+            f"({polygon_utm.area:.6f} m^2) -- the opening's clip to polygon_utm must keep the "
+            "drawn fill within the real cell-gated, boundary-clipped footprint."
+        )
+
+    geometry_wgs84 = transform_geom(dem["crs"], "EPSG:4326", mapping(polygon_utm))
+    render_fill_geometry_wgs84 = transform_geom(dem["crs"], "EPSG:4326", mapping(render_fill_polygon_utm))
+    relationships = winner["production_area_relationships"]
+
+    zone = {
+        "id": 0,
+        "served_production_area_ids": sorted(r["production_area_id"] for r in relationships),
+        "polygon_utm": polygon_utm,
+        "geometry_wgs84": geometry_wgs84,
+        "render_fill_polygon_utm": render_fill_polygon_utm,
+        "render_fill_geometry_wgs84": render_fill_geometry_wgs84,
+        "cells": winner["cells"],
+        "production_area_relationships": relationships,
+        "primary_production_area_relationship": relationships[0],
+        "contributing_area_cells": round(winner["contributing_area_cells"], 2),
+        "slope_pct": round(winner["slope_pct"], 2),
+    }
+    return [zone]
+
+
+def _render_opening(sub_mask, cells, grid_shape, dem, polygon_utm):
+    """
+    Bounded morphological OPENING of the zone's own cell mask, clipped to
+    polygon_utm -- the display fill. Disc erode-then-dilate at
+    WATER_ZONE_RENDER_OPENING_RADIUS_METERS with NO lead erode (a ~0.5-acre
+    zone cannot afford an extra cell off every edge). Same construction
+    production_area.cluster_and_gate() uses for its own render fill, minus
+    the lead erode and at a much smaller radius.
+
+    The opening softens the blocky cell-union edge and trims single-cell
+    protrusions; it can also sever a genuinely too-narrow pinch, so the
+    result may be a MultiPolygon (acceptable). A zone thinner than the
+    opening radius throughout erodes to nothing -- in that case fall back to
+    polygon_utm (non-empty) and log once.
+    """
+    radius_cells = waist_erosion_radius_cells(dem, WATER_ZONE_RENDER_OPENING_RADIUS_METERS)
+    opened = binary_dilate(
+        eroded_cell_mask(cells, grid_shape, dem, WATER_ZONE_RENDER_OPENING_RADIUS_METERS, element="disc"),
+        radius_cells,
+        element="disc",
+    )
+    if opened.any():
+        return cell_union_footprint(dem, opened).intersection(polygon_utm)
+
+    _LOGGER.warning(
+        "find_candidate_zones: the WATER_ZONE_RENDER_OPENING_RADIUS_METERS=%.1fm opening eroded a "
+        "%d-cell zone to nothing; render_fill_polygon_utm falling back to polygon_utm.",
+        WATER_ZONE_RENDER_OPENING_RADIUS_METERS,
+        len(cells),
+    )
+    return polygon_utm
 
 
 def zones_to_geojson(zones: list[dict]) -> dict:
@@ -1076,8 +998,6 @@ def zones_to_geojson(zones: list[dict]) -> dict:
                 "contributing_area_cells": z["contributing_area_cells"],
                 "slope_pct": z["slope_pct"],
                 "render_fill_geometry_wgs84": z["render_fill_geometry_wgs84"],
-                "optimal_subarea_geometry_wgs84": z["optimal_subarea_geometry_wgs84"],
-                "optimal_subarea_acres": z["optimal_subarea_acres"],
             },
         )
         for z in zones

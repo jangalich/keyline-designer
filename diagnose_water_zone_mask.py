@@ -44,14 +44,12 @@ distance can be disabled (min_boundary_setback_meters=0.0), so the
 service-distance isolation below is "on-parcel required, setback
 waived," not a pure isolation from every other gate.
 
-The zone section below (elevation ranges, optimal survey sub-area,
-confluence check) calls water_candidate_zones.find_candidate_zones()
-directly -- the real, full pipeline entry point, including its cluster ->
-greedy-trim -> select-one wiring -- rather than reimplementing clustering/
-scoring independently a second time. Note find_candidate_zones() now
-returns at most ONE zone, and select_optimal_survey_subarea() is dead on
-this path (every zone is at most WATER_ZONE_TARGET_ACRES, below the subarea
-trigger), so the optimal-subarea section always reports None.
+The zone section below (elevation ranges, confluence check) calls
+water_candidate_zones.find_candidate_zones() directly -- the real, full
+pipeline entry point, including its cluster -> connected-growth ->
+select-one -> bounded-opening wiring -- rather than reimplementing
+clustering/scoring independently a second time. find_candidate_zones()
+returns at most ONE zone.
 
 Requires real network access (a real USGS DEM fetch via dem_data.py, plus
 production_area.py's own SSURGO/canopy/road fetches, plus this script's
@@ -105,8 +103,6 @@ from water_candidate_zones import (
     WATER_ZONE_CANOPY_BUFFER_METERS,
     WATER_ZONE_PRODUCTION_SETBACK_METERS,
     WATER_ZONE_ROAD_BUFFER_METERS,
-    WATER_ZONE_SUBAREA_TARGET_ACRES,
-    WATER_ZONE_SUBAREA_TRIGGER_ACRES,
     WATER_ZONE_TARGET_ACRES,
     _CANOPY_CHECK_UNCHECKED,
     _ROAD_CHECK_UNCHECKED,
@@ -522,13 +518,12 @@ def main(
     )
 
     # The real, full pipeline entry point itself -- not a re-implementation
-    # of clustering/greedy-trim/whole-zone scoring. zones carries every
+    # of clustering/connected-growth/whole-zone scoring. zones carries every
     # field find_candidate_zones() itself produces (cells, polygon_utm,
-    # primary_production_area_relationship, optimal_subarea_* -- now always
-    # None, ...) so the sections below report on the REAL thing, not a
-    # diagnostic-only approximation of it. find_candidate_zones() now
-    # returns at most ONE zone (the highest post-trim summed-accumulation
-    # cluster).
+    # primary_production_area_relationship, ...) so the sections below report
+    # on the REAL thing, not a diagnostic-only approximation of it.
+    # find_candidate_zones() now returns at most ONE zone (the highest
+    # post-growth summed-accumulation cluster).
     zones = find_candidate_zones(
         dem, production_areas, boundary_polygon_utm,
         max_valley_contributing_area_acres=max_contributing_acres,
@@ -543,11 +538,10 @@ def main(
     ranked_zones = _report_zone_elevation_ranges(dem, boundary_polygon_utm, zones)
 
     if not ranked_zones:
-        print("No surviving zone to run the sub-area/confluence checks against -- skipping.\n")
+        print("No surviving zone to run the confluence check against -- skipping.\n")
         return
 
     top_zone = ranked_zones[0]
-    _report_optimal_subarea(dem, production_areas, top_zone)
     _report_confluence_check(dem, boundary_polygon_utm, top_zone["cells"])
 
 
@@ -636,105 +630,6 @@ def _report_zone_elevation_ranges(
         print()
 
     return ranked
-
-
-def _report_optimal_subarea(dem: dict, production_areas: list[dict], zone: dict) -> None:
-    """
-    Reports water_candidate_zones.select_optimal_survey_subarea()'s own
-    real output for the top-ranked zone -- already computed and attached
-    by find_candidate_zones() itself (zone['optimal_subarea_polygon_utm']/
-    'optimal_subarea_geometry_wgs84'/'optimal_subarea_acres'), not
-    recomputed here. Reports the sub-area's own acreage, centroid (UTM and
-    lon/lat, same style as the production-area centroid line printed near
-    the top of this script) and real bounding extent, plus its member
-    cells' elevation range and distance-to-primary-production-area range/
-    average, directly against the full zone's own equivalents, so a
-    "smaller, higher-confidence pointer" claim can actually be checked
-    (higher elevation, closer to the production area it serves) rather
-    than taken on faith.
-    """
-    print("=== Optimal survey sub-area (top-ranked zone) ===\n")
-
-    zone_area_acres = zone["polygon_utm"].area / SQUARE_METERS_PER_ACRE
-    print(f"Zone's own full footprint: {zone_area_acres:.3f} acres ({len(zone['cells'])} cells)")
-
-    if zone_area_acres <= WATER_ZONE_SUBAREA_TRIGGER_ACRES:
-        print(
-            f"At/under WATER_ZONE_SUBAREA_TRIGGER_ACRES ({WATER_ZONE_SUBAREA_TRIGGER_ACRES} acres) -- "
-            "select_optimal_survey_subarea() correctly returns None here: the full zone footprint is "
-            "already a reasonable survey pointer at this size.\n"
-        )
-        return
-
-    subarea_acres = zone["optimal_subarea_acres"]
-    if subarea_acres is None or zone["optimal_subarea_polygon_utm"] is None:
-        print(
-            "No valid sub-area could be selected -- every zone cell fell inside the production area it "
-            "serves, or its primary production area couldn't be resolved (see select_optimal_survey_"
-            "subarea()'s own docstring).\n"
-        )
-        return
-
-    primary_production_area_id = zone["primary_production_area_relationship"]["production_area_id"]
-    primary_patch = next((p for p in production_areas if p["id"] == primary_production_area_id), None)
-    if primary_patch is None:
-        print(
-            f"Sub-area reports {subarea_acres:.3f} acres, but the primary production area id="
-            f"{primary_production_area_id} is no longer in this run's production_areas list -- can't report "
-            "elevation/distance comparisons.\n"
-        )
-        return
-
-    production_polygon = primary_patch["polygon_utm"]
-    subarea_polygon = zone["optimal_subarea_polygon_utm"]
-    subarea_cells = [
-        (r, c) for r, c in zone["cells"]
-        if subarea_polygon.intersects(Point(*pixel_center_xy(dem, r, c)))
-    ]
-
-    array = dem["array"]
-    zone_elevations = [float(array[r, c]) for r, c in zone["cells"] if not np.isnan(array[r, c])]
-    subarea_elevations = [float(array[r, c]) for r, c in subarea_cells if not np.isnan(array[r, c])]
-    zone_distances = [
-        Point(*pixel_center_xy(dem, r, c)).distance(production_polygon) for r, c in zone["cells"]
-    ]
-    subarea_distances = [
-        Point(*pixel_center_xy(dem, r, c)).distance(production_polygon) for r, c in subarea_cells
-    ]
-
-    print(
-        f"Optimal sub-area: {subarea_acres:.3f} acres ({len(subarea_cells)} of {len(zone['cells'])} zone "
-        f"cells), capped near WATER_ZONE_SUBAREA_TARGET_ACRES ({WATER_ZONE_SUBAREA_TARGET_ACRES} acres)"
-    )
-
-    # Centroid/extent -- same style as the production-area centroid line
-    # printed near the top of this script (centroid=(x, y)), plus the
-    # lon/lat reprojection (same warp_transform() call every other
-    # UTM->WGS84 conversion in this file already uses) and the polygon's
-    # own real bounding box (same style boundary_polygon_utm.bounds is
-    # already printed in).
-    subarea_centroid = subarea_polygon.centroid
-    subarea_lons, subarea_lats = warp_transform(
-        dem["crs"], "EPSG:4326", [subarea_centroid.x], [subarea_centroid.y]
-    )
-    print(
-        f"  Centroid: UTM=({subarea_centroid.x:.1f}, {subarea_centroid.y:.1f}), "
-        f"lon/lat=({subarea_lons[0]:.6f}, {subarea_lats[0]:.6f})"
-    )
-    print(f"  Bounding extent (UTM, {dem['crs']}): {subarea_polygon.bounds}")
-
-    if zone_elevations and subarea_elevations:
-        print(
-            f"  Elevation:  sub-area avg={np.mean(subarea_elevations):.2f}m "
-            f"(range {min(subarea_elevations):.2f}-{max(subarea_elevations):.2f}m) vs. full zone avg="
-            f"{np.mean(zone_elevations):.2f}m (range {min(zone_elevations):.2f}-{max(zone_elevations):.2f}m)"
-        )
-    print(
-        f"  Distance to primary production area (id={primary_production_area_id}): "
-        f"sub-area avg={np.mean(subarea_distances):.1f}m vs. full zone avg={np.mean(zone_distances):.1f}m"
-    )
-    print()
-
 
 
 def _trace_flow_path_cells(
