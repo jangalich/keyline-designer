@@ -28,10 +28,13 @@ for their own optional layers.
 Docs: https://developer.nlr.gov/docs/solar/pvwatts/v8/
 """
 
+import logging
 import os
 from typing import Optional
 
 import requests
+
+logger = logging.getLogger(__name__)
 
 NLR_PVWATTS_ENDPOINT = "https://developer.nlr.gov/api/pvwatts/v8.json"
 
@@ -55,6 +58,27 @@ REFERENCE_AZIMUTH_DEG = 180.0  # true south
 # a fixed-tilt basis rather than a latitude-tilt basis.
 REFERENCE_TILT_DEG = 25.0
 
+# Max allowed disagreement between our normalized annual_ac_kwh_per_kw
+# (expressed as an implied capacity factor) and PVWatts' own returned
+# capacity_factor, in PERCENTAGE POINTS (not a relative fraction). 0.5 pp
+# is far tighter than any real modeling drift but far looser than a units
+# regression: the shipped bug read 54.6% implied vs the API's ~13.6% — a
+# ~41 pp gap this catches instantly.
+CAPACITY_FACTOR_VALIDATION_TOLERANCE_PCT = 0.5
+
+
+def _degraded_baseline(status: str) -> dict:
+    """The standard degraded container: the given status with all four data
+    values None. Every non-'ok' outcome returns this exact shape so callers
+    can branch on status alone."""
+    return {
+        "status": status,
+        "annual_ac_kwh_per_kw": None,
+        "avg_solar_radiation_kwh_per_m2_per_day": None,
+        "capacity_factor_pct": None,
+        "station_distance_miles": None,
+    }
+
 
 def get_regional_irradiance_baseline(
     latitude: float, longitude: float, api_key: Optional[str] = None
@@ -65,7 +89,7 @@ def get_regional_irradiance_baseline(
     key always present:
 
         {
-            'status': "ok" | "no_api_key" | "fetch_failed",
+            'status': "ok" | "no_api_key" | "fetch_failed" | "validation_failed",
             'annual_ac_kwh_per_kw': float | None,        # AC energy per kW of DC capacity, per year
             'avg_solar_radiation_kwh_per_m2_per_day': float | None,
             'capacity_factor_pct': float | None,
@@ -78,9 +102,18 @@ def get_regional_irradiance_baseline(
         explicitly). Same "optional layer, don't crash the pipeline"
         pattern as imagery_data.py and water_candidate_zones.py.
       - "fetch_failed": the PVWatts request raised (RequestException), came
-        back non-2xx, OR returned a 200 whose "outputs" key is missing or
-        empty. A failed request never raises — this is regional context,
-        not a required input to the constraint stack.
+        back non-2xx, returned a 200 whose "outputs" key is missing or
+        empty, OR returned outputs with no usable "ac_annual". A failed
+        request never raises — this is regional context, not a required
+        input to the constraint stack.
+      - "validation_failed": the fetch succeeded but the normalized
+        annual_ac_kwh_per_kw failed an internal consistency cross-check
+        against PVWatts' own returned capacity_factor (a units regression).
+        Kept DISTINCT from fetch_failed on purpose: the request worked, so
+        collapsing them would make a units bug indistinguishable from a
+        network outage in logs. The baseline is withheld rather than
+        reported — a wrong figure in a client deliverable is worse than a
+        missing one.
       - "ok": real values populated.
 
     On any non-"ok" status the four data values are all None, so callers can
@@ -89,13 +122,7 @@ def get_regional_irradiance_baseline(
     """
     api_key = api_key or os.environ.get("NREL_API_KEY")
     if not api_key:
-        return {
-            "status": "no_api_key",
-            "annual_ac_kwh_per_kw": None,
-            "avg_solar_radiation_kwh_per_m2_per_day": None,
-            "capacity_factor_pct": None,
-            "station_distance_miles": None,
-        }
+        return _degraded_baseline("no_api_key")
 
     params = {
         "api_key": api_key,
@@ -119,21 +146,57 @@ def get_regional_irradiance_baseline(
         outputs = None
 
     if not outputs:
-        return {
-            "status": "fetch_failed",
-            "annual_ac_kwh_per_kw": None,
-            "avg_solar_radiation_kwh_per_m2_per_day": None,
-            "capacity_factor_pct": None,
-            "station_distance_miles": None,
-        }
+        return _degraded_baseline("fetch_failed")
+
+    # PVWatts returns ac_annual as the SYSTEM TOTAL for the requested
+    # system_capacity, NOT a per-kW figure. This field is contractually
+    # per-kW, so dividing by REFERENCE_SYSTEM_CAPACITY_KW is required — this
+    # is the exact units bug that shipped (a 4kW system total, ~4780 kWh,
+    # read as if it were already per-kW). Keep this division if the
+    # reference capacity is ever retuned.
+    ac_annual = outputs.get("ac_annual")
+    if ac_annual is None:
+        # No usable production figure — same missing-outputs degradation.
+        return _degraded_baseline("fetch_failed")
+
+    annual_ac_kwh_per_kw = ac_annual / REFERENCE_SYSTEM_CAPACITY_KW
+
+    # Self-validating tripwire: PVWatts' own capacity_factor is
+    # mathematically redundant with the normalized value, so it catches a
+    # units regression immediately. Against the shipped bug it would have
+    # read ~54.6% implied vs the API's ~13.6% returned.
+    api_capacity_factor = outputs.get("capacity_factor")
+    if api_capacity_factor is None:
+        # Cross-check unavailable — don't fail a run over an absent check,
+        # but make the gap visible to a developer.
+        logger.warning(
+            "Irradiance baseline: PVWatts response has no capacity_factor; "
+            "normalization cross-check skipped "
+            "(annual_ac_kwh_per_kw=%.1f).",
+            annual_ac_kwh_per_kw,
+        )
+    else:
+        implied_cf_pct = (annual_ac_kwh_per_kw / 8760.0) * 100.0
+        if abs(implied_cf_pct - api_capacity_factor) > CAPACITY_FACTOR_VALIDATION_TOLERANCE_PCT:
+            logger.warning(
+                "Irradiance baseline normalization tripwire FAILED: implied "
+                "capacity factor %.2f%% (from annual_ac_kwh_per_kw=%.1f) "
+                "disagrees with PVWatts' returned capacity_factor %.2f%% "
+                "beyond the %.2f pp tolerance — withholding the baseline.",
+                implied_cf_pct,
+                annual_ac_kwh_per_kw,
+                api_capacity_factor,
+                CAPACITY_FACTOR_VALIDATION_TOLERANCE_PCT,
+            )
+            return _degraded_baseline("validation_failed")
 
     station_info = data.get("station_info", {})
 
     return {
         "status": "ok",
-        "annual_ac_kwh_per_kw": outputs.get("ac_annual"),
+        "annual_ac_kwh_per_kw": annual_ac_kwh_per_kw,
         "avg_solar_radiation_kwh_per_m2_per_day": outputs.get("solrad_annual"),
-        "capacity_factor_pct": outputs.get("capacity_factor"),
+        "capacity_factor_pct": api_capacity_factor,
         "station_distance_miles": station_info.get("distance"),
     }
 
@@ -152,6 +215,14 @@ def summarize_irradiance_baseline(baseline: dict) -> str:
             "No regional irradiance baseline available: the PVWatts request "
             "did not return usable data — this is optional regional context, "
             "not a required input."
+        )
+
+    if status == "validation_failed":
+        return (
+            "No regional irradiance baseline available: the PVWatts response "
+            "failed an internal consistency check, so the figure is being "
+            "withheld — this is optional regional context, not a required "
+            "input."
         )
 
     return (
