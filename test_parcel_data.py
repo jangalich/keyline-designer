@@ -4,8 +4,14 @@ test_parcel_data.py
 Offline (no-network, mocked) checks for parcel_data.py's own hard-fail
 contract: fetch_parcel_data() fetches every raw layer exactly once,
 upfront, and raises -- uncaught, uncached -- on ANY failure among ANY of
-them, with no soft-fail exception anywhere, imagery and canopy height
-included.
+the hard-fail layers, with imagery and canopy height included and no
+soft-fail exception among them. The ONE deliberately exempt field --
+irradiance (optional regional context; see parcel_data.py's HARD-FAIL
+CONTRACT carve-out) -- is covered separately in section 7: a degraded
+baseline must NOT gate the run. get_regional_irradiance_baseline() is
+mocked on every path here too, so this file never touches the NREL/PVWatts
+network regardless of whether NREL_API_KEY happens to be set in the
+environment.
 
 Every real fetch function fetch_parcel_data() calls is mocked here, so
 this file never touches the network. Patches target parcel_data's OWN
@@ -33,6 +39,9 @@ Covers:
      second, independent DEM.
   4. All five soil functions receive the SAME wkt_polygon string object
      (identity check, `is`) -- computed once, not recomputed per call.
+  5. irradiance -- the one non-hard-failing field -- is fetched exactly
+     once, at the parcel centroid (WGS84), and a degraded (non-"ok")
+     baseline is carried through as a plain dict WITHOUT gating the run.
 
 Bonus (beyond the required twelve hard-fail cases above): imagery_data.
 get_imagery_summary_for_boundary() and canopy_height_data.get_canopy_
@@ -113,6 +122,18 @@ FAKE_IMAGERY_SUMMARY = {
     "ndvi_max": 0.82,
     "valid_pixel_count": 10234,
 }
+# A realistic "ok" baseline. irradiance is NOT a hard-fail layer, so it is
+# deliberately kept OUT of DEFAULTS (and the per-layer hard-fail loop that
+# iterates DEFAULTS) -- but _mocked() patches get_regional_irradiance_
+# baseline on every path so this offline test never reaches the NREL/PVWatts
+# network, even if NREL_API_KEY is set in the environment.
+FAKE_IRRADIANCE = {
+    "status": "ok",
+    "annual_ac_kwh_per_kw": 1195.0,
+    "avg_solar_radiation_kwh_per_m2_per_day": 4.1,
+    "capacity_factor_pct": 13.6,
+    "station_distance_miles": 12.3,
+}
 
 # name (as bound in parcel_data's own namespace) -> success return value
 DEFAULTS = {
@@ -155,6 +176,19 @@ def _mocked(overrides=None):
         mock = overrides.get(name, Mock(return_value=default_value))
         stack.enter_context(mock_patch.object(parcel_data, name, mock))
         mocks[name] = mock
+    # irradiance is the ONE non-hard-failing field (see parcel_data.py's
+    # HARD-FAIL CONTRACT carve-out), so it is intentionally NOT in DEFAULTS
+    # and takes no part in the per-layer hard-fail loop below. It IS patched
+    # here on every run so this file never touches the NREL/PVWatts network
+    # regardless of NREL_API_KEY. Override it via
+    # overrides={'get_regional_irradiance_baseline': ...} (section 7).
+    irr_mock = overrides.get(
+        "get_regional_irradiance_baseline", Mock(return_value=FAKE_IRRADIANCE)
+    )
+    stack.enter_context(
+        mock_patch.object(parcel_data, "get_regional_irradiance_baseline", irr_mock)
+    )
+    mocks["get_regional_irradiance_baseline"] = irr_mock
     return stack, mocks
 
 
@@ -196,8 +230,23 @@ for (ax, ay), (ex, ey) in zip(actual_coords, expected_coords):
         f"boundary_polygon_utm coordinate mismatch: got ({ax}, {ay}), expected ({ex}, {ey})"
     )
 assert result.boundary_polygon_utm.is_valid
+
+# irradiance: carried through as-is, and fetched exactly ONCE at Layer 1
+# (proving no downstream consumer needs to re-fetch it) from the parcel
+# centroid in WGS84 (lat/lon inside this boundary's own bbox).
+assert result.irradiance is FAKE_IRRADIANCE
+assert mocks["get_regional_irradiance_baseline"].call_count == 1, (
+    "irradiance must be fetched exactly once, at Layer 1"
+)
+_irr_lat, _irr_lon = mocks["get_regional_irradiance_baseline"].call_args.args[:2]
+_lons = [pt[0] for pt in BOUNDARY_COORDINATES]
+_lats = [pt[1] for pt in BOUNDARY_COORDINATES]
+assert min(_lons) <= _irr_lon <= max(_lons) and min(_lats) <= _irr_lat <= max(_lats), (
+    f"irradiance must be fetched at the parcel centroid (WGS84), inside the boundary bbox; "
+    f"got lat={_irr_lat}, lon={_irr_lon}"
+)
 print("Happy path: fetch_parcel_data() returns a fully populated ParcelData with a correctly "
-      "reprojected boundary_polygon_utm.")
+      "reprojected boundary_polygon_utm, and irradiance fetched exactly once at the parcel centroid.")
 
 
 # --- 2. hard fail, every layer, individually ---
@@ -301,5 +350,43 @@ assert raised is not None, (
 )
 print("Bonus: imagery_summary fetch returning None (its own non-exceptional 'no scene' outcome) "
       "is converted into a raised ParcelDataIncompleteError, not passed through as None.")
+
+
+# --- 7. irradiance exemption: the ONE non-hard-failing field. A degraded
+# (non-"ok") baseline must NOT gate the run -- unlike every layer in section
+# 2, fetch_parcel_data() still returns a fully populated ParcelData and
+# carries the degraded dict straight through, never raising. This is the
+# opposite of the canopy/imagery None-sentinel behavior in sections 5-6 ---
+
+for degraded_status in ("no_api_key", "fetch_failed", "validation_failed"):
+    degraded_baseline = {
+        "status": degraded_status,
+        "annual_ac_kwh_per_kw": None,
+        "avg_solar_radiation_kwh_per_m2_per_day": None,
+        "capacity_factor_pct": None,
+        "station_distance_miles": None,
+    }
+    stack, mocks = _mocked(
+        {"get_regional_irradiance_baseline": Mock(return_value=degraded_baseline)}
+    )
+    with stack:
+        result = fetch_parcel_data(BOUNDARY_COORDINATES)
+
+    assert isinstance(result, ParcelData), (
+        f"a degraded irradiance baseline (status={degraded_status!r}) must NOT hard-fail "
+        f"fetch_parcel_data() -- irradiance is the one exempt, optional-context field"
+    )
+    assert result.irradiance is degraded_baseline, (
+        "the degraded baseline dict must be carried through unchanged, not dropped or converted"
+    )
+    # every OTHER (hard-fail) layer must still be fully populated -- the
+    # exemption must not disturb the rest of the Layer 1 contract.
+    assert result.dem is FAKE_DEM and result.imagery_summary is FAKE_IMAGERY_SUMMARY, (
+        "a degraded irradiance baseline must leave every hard-fail layer populated as normal"
+    )
+
+print("irradiance exemption: a degraded baseline (no_api_key/fetch_failed/validation_failed) does NOT "
+      "gate fetch_parcel_data(); it is carried through as a plain dict while every hard-fail layer "
+      "stays populated -- the deliberate opposite of the canopy/imagery None-sentinel hard fail.")
 
 print("\nAll parcel_data.py checks passed.")
