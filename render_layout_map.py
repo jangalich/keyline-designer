@@ -171,22 +171,30 @@ terminate along a clean curve. This is a Layer-3 display transform only:
 the stored render_fill_polygon_utm the four consumer modules read as
 production exclusion geometry is NOT smoothed.
 
-WATER ZONE STYLE: the water zone's FILL is drawn from its own
-render_fill_polygon_utm too (water_candidate_zones.find_candidate_zones()'s
-own convex hull of the zone's real cell-union footprint, re-intersected
-with the parcel boundary) rather than its real, often long/winding/concave
-geometry_wgs84 -- same reasoning as production's own hull, applied here
-for the same "reads as one coherent shape, not a blocky, notched outline"
-purpose. This is DISPLAY-ONLY: the zone's real polygon_utm/geometry_wgs84
-(used for scoring, eligibility, and the narrative report) are completely
-untouched by this. The fill is drawn fully OPAQUE (alpha=1.0, not the
-0.35 an earlier version used) specifically so it occludes any production-
-zone contour lines beneath it. The water zone's hull is allowed to
-overlap a production zone's own hull at render time -- that's a
-display-only coincidence between two convex
-hulls, not a real siting conflict; the real geometries stay separated by
-water_candidate_zones.py's own production-zone eligibility exclusion gate
-(WATER_ZONE_PRODUCTION_SETBACK_METERS), unaffected by anything here.
+WATER ZONE STYLE: the water zone renders as RIPPLE-LINE TEXTURE, not a
+filled/outlined shape. A family of horizontal sine waves
+(_ripple_lines_for_polygon(), see WATER_RIPPLE_* constants) is clipped per
+zone at render time (a real shapely intersection against that zone's own
+render_fill_polygon_utm, the bounded render opening -- generated in the
+same Web Mercator space the geometry is drawn in so the clip lands
+correctly), and only the surviving wave segments within that zone are
+drawn. The water zone NO LONGER renders a fill or a perimeter stroke: no
+facecolor, no edge stroke -- exactly the same styling discipline as
+production zones' contour-line texture and tree zones' hatch, and zone
+identity is carried by the numbered marker alone, same as every other
+layer. The ripple stroke reuses WATER_ZONE_COLOR (the water blue) at the
+water zone's existing zorder (41, above production contours' zorder=40).
+This is DISPLAY-ONLY: the zone's real polygon_utm/geometry_wgs84 (used for
+scoring, eligibility, and the narrative report) are completely untouched
+by this, and render_fill_polygon_utm is read but not modified. If the
+render opening is too small for even one wave row to intersect, nothing is
+drawn (the marker alone conveys a zone that small) -- there is no fallback
+to the old fill. The ripple texture is allowed to cross a production
+zone's own rendered texture at render time -- that's a display-only
+coincidence, not a real siting conflict; the real geometries stay
+separated by water_candidate_zones.py's own production-zone eligibility
+exclusion gate (WATER_ZONE_PRODUCTION_SETBACK_METERS), unaffected by
+anything here.
 
 ROAD CORRIDOR STYLE: the road network can have several branches (a trunk
 plus spur(s) growing off it or off each other, see road_corridors.py's own
@@ -217,7 +225,7 @@ spur's own first cell IS its join point on its parent branch (build_road_
 network()'s own "cells" ordering, joint-cell first) -- smoothing each
 branch independently keeps that join point exact, so the rendered network
 still reads as connected rather than a spur floating just off the trunk.
-This is DISPLAY-ONLY, same pattern as the water zone's own hull fill
+This is DISPLAY-ONLY, same pattern as the water zone's own ripple texture
 above: each branch's real points_xyz/geometry_wgs84 (used for length_m,
 avg_grade_pct, and every other scoring/narrative value) are never
 touched -- only the copy handed to the plotting calls is
@@ -507,6 +515,29 @@ CONTOUR_LINE_COLOR = "#6B4423"  # muted brown -- traditional topo-map
 # and to stay visually distinct from every other layer color already
 # in use (production green, water blue, road dark gray, structure red)
 WATER_ZONE_COLOR = "#1F6FB2"
+
+# Water zones render as RIPPLE-LINE TEXTURE -- a family of horizontal sine
+# waves clipped to the zone's own render_fill_polygon_utm -- rather than a
+# filled/outlined polygon. Same styling discipline as production zones'
+# contour-line texture and tree zones' hatch: no fill, no perimeter stroke,
+# zone identity carried by the numbered marker alone. The ripple stroke
+# reuses WATER_ZONE_COLOR above (the water blue #1F6FB2, see FENCE_COLOR's
+# own comment) rather than introducing a second blue.
+#
+# Spacing/amplitude/wavelength are in the SAME units as the drawing space
+# (Mercator metres, see _reproject_utm_geometry_to_mercator()) -- not raw
+# UTM metres, and not points. Tuned so a ~0.5-acre zone (roughly 45m across)
+# reads as several distinct waves rather than one or two.
+WATER_RIPPLE_SPACING = 6.0        # vertical gap between successive wave rows
+WATER_RIPPLE_WAVELENGTH = 14.0    # horizontal period of each wave
+WATER_RIPPLE_AMPLITUDE = 1.6      # peak deviation from the row's own baseline
+WATER_RIPPLE_PHASE_STEP = 0.9     # radians of phase offset per successive row,
+                                  # so waves stagger instead of stacking into
+                                  # vertical columns
+WATER_RIPPLE_SAMPLES_PER_WAVELENGTH = 16   # polyline resolution per period
+WATER_RIPPLE_LINEWIDTH = 0.7
+WATER_RIPPLE_ALPHA = 0.85
+
 STRUCTURE_SITE_COLOR = "#D64545"
 
 # Structure site renders as a single fixed-size map-pin icon (see this
@@ -600,14 +631,14 @@ FENCE_LINEWIDTH = 0.6  # a hairline -- was 1.2 (a dashed line before that)
 # to the water-zone/tree-zone exclusion fence loops, nor to roads, tree zone,
 # water zones, or streams -- those keep rendering at EXCLUSION_FENCE_ZORDER
 # (water/tree exclusion fencing) or their own existing zorder (tree zone hatch,
-# water zone fill, stream lines) below, unchanged. CONFIGURABLE.
+# water zone ripples, stream lines) below, unchanged. CONFIGURABLE.
 FENCE_ZORDER = 60
 
 # Zorder for the two non-boundary exclusion fence loops (water_zone_exclusion,
 # tree_zone_exclusion) -- this is the value FENCE_ZORDER itself used to hold
 # before being bumped up for the boundary fence alone (see that constant's own
 # comment). Kept here, unchanged, so these two fence loops still render above
-# every zone-fill-style layer (production contour zorder=40, water zone fill
+# every zone-fill-style layer (production contour zorder=40, water zone ripples
 # zorder=41, road corridor cased line zorder=42/42.5, tree zone candidate hatch
 # zorder=42.8 -- the true current ceiling, not 40) without being bumped above
 # the numbered circle markers/structure site pin the way the boundary fence
@@ -697,6 +728,75 @@ def _iter_line_parts(geometry):
     elif geometry.geom_type == "GeometryCollection":
         for part in geometry.geoms:
             yield from _iter_line_parts(part)
+
+
+def _ripple_lines_for_polygon(geom, spacing, wavelength, amplitude,
+                              phase_step, samples_per_wavelength):
+    """
+    Horizontal sine-wave polylines clipped to `geom`, for water zone ripple
+    texture. Returns a list of drawable LineStrings.
+
+    Mirrors how production zones are drawn: generate a family of lines over
+    the shape's own bounds, clip each with a real shapely intersection, and
+    draw only the surviving segments. No fill, no perimeter stroke.
+
+    Successive rows are phase-offset by `phase_step` so the wave crests
+    stagger rather than aligning into vertical columns.
+
+    `geom` may be a MultiPolygon -- the water zone's render fill is a bounded
+    opening and can be severed at a narrow pinch. shapely's intersection
+    handles that directly; do not iterate .geoms and do not assume a single
+    exterior ring.
+    """
+    # Display-only, must never fail a render: bail to an empty list on any
+    # empty/invalid input rather than raising.
+    if geom is None or geom.is_empty or not geom.is_valid:
+        return []
+    if spacing <= 0 or wavelength <= 0:
+        return []
+    minx, miny, maxx, maxy = geom.bounds
+    if not all(math.isfinite(v) for v in (minx, miny, maxx, maxy)):
+        return []
+
+    # Pad the x-range by one full wavelength on each side and the y-range by
+    # `amplitude` on each side, so each wave enters and leaves the shape from
+    # outside (clipped at the shape edge) rather than starting or ending on a
+    # polyline vertex mid-shape.
+    x_start = minx - wavelength
+    x_end = maxx + wavelength
+    y_start = miny - amplitude
+    y_end = maxy + amplitude
+
+    # Polyline resolution: `samples_per_wavelength` points per period, so the
+    # sampled sine reads as a smooth curve rather than a coarse zigzag.
+    step = wavelength / max(1, int(samples_per_wavelength))
+    n_x = int(math.ceil((x_end - x_start) / step))
+    xs = [x_start + i * step for i in range(n_x + 1)]
+    if xs[-1] < x_end:
+        xs.append(x_end)
+
+    angular_freq = 2.0 * math.pi / wavelength
+    lines = []
+    row = 0
+    while True:
+        y = y_start + row * spacing
+        if y > y_end + 1e-9:
+            break
+        phase = row * phase_step
+        coords = [(x, y + amplitude * math.sin(angular_freq * x + phase)) for x in xs]
+        wave = LineString(coords)
+        try:
+            clipped = wave.intersection(geom)
+        except Exception:
+            # A malformed row must not sink the whole render -- skip it.
+            row += 1
+            continue
+        # intersection() can return LineString / MultiLineString /
+        # GeometryCollection / empty (and stray Point touches); keep only the
+        # line-like pieces, same as the production-zone contour clip above.
+        lines.extend(_iter_line_parts(clipped))
+        row += 1
+    return lines
 
 
 
@@ -1333,7 +1433,7 @@ def render_layout_map(
         basemap_note = f"basemap unavailable ({e})"
 
     # z-order, back to front: halo mask, streams, production zone contours,
-    # water zone fill, road corridor line, tree zone hatch, the water/tree
+    # water zone ripples, road corridor line, tree zone hatch, the water/tree
     # exclusion fence loops (EXCLUSION_FENCE_ZORDER, above every zone
     # fill -- see that constant's own comment), structure site pin, numbered
     # markers, the boundary fence (FENCE_ZORDER, above the numbered markers --
@@ -1470,39 +1570,57 @@ def render_layout_map(
         marker_number += 1
 
     if water_zone is not None:
-        # DISPLAY-ONLY fill geometry: render_fill_polygon_utm is a plain
-        # convex hull of the zone's real cell-union footprint (see
-        # water_candidate_zones.find_candidate_zones()'s own docstring),
-        # already in the DEM's own UTM CRS -- reprojected in one hop
-        # (_reproject_utm_geometry_to_mercator(), same pattern the
-        # production-zone contour clipping above already uses), never the
-        # real geometry_wgs84 used for scoring/eligibility/the narrative
-        # report. Crossing over a production zone's own rendered fill is
+        # DISPLAY-ONLY ripple geometry: render_fill_polygon_utm is the zone's
+        # bounded render opening (see water_candidate_zones.find_candidate_
+        # zones()'s own docstring), already in the DEM's own UTM CRS --
+        # reprojected in one hop (_reproject_utm_geometry_to_mercator(), same
+        # pattern the production-zone contour clipping above already uses),
+        # never the real geometry_wgs84 used for scoring/eligibility/the
+        # narrative report. The water zone renders as RIPPLE-LINE TEXTURE (a
+        # family of horizontal sine waves clipped to this geometry) with NO
+        # fill and NO perimeter stroke -- see this module's own WATER ZONE
+        # STYLE docstring section. The ripples are generated in the SAME
+        # Mercator space the geometry is drawn in, so they clip correctly.
+        # Crossing over a production zone's own rendered contour texture is
         # expected and fine here -- that overlap is a display-only
-        # coincidence between two convex hulls, not a real siting
-        # conflict (the real, unsmoothed geometries stay clear of each
-        # other via the production-zone eligibility exclusion gate).
+        # coincidence, not a real siting conflict (the real, unsmoothed
+        # geometries stay clear of each other via the production-zone
+        # eligibility exclusion gate).
         render_fill_geom = _reproject_utm_geometry_to_mercator(water_zone["render_fill_polygon_utm"], dem["crs"])
-        polygons = render_fill_geom.geoms if render_fill_geom.geom_type == "MultiPolygon" else [render_fill_geom]
-        for polygon in polygons:
-            # Opaque fill (alpha=1.0) so it fully occludes any production-
-            # zone contour lines beneath it (zorder=41 > those zones'
-            # zorder=40).
-            plot_polygon(
-                polygon,
+        ripple_lines = _ripple_lines_for_polygon(
+            render_fill_geom,
+            WATER_RIPPLE_SPACING,
+            WATER_RIPPLE_WAVELENGTH,
+            WATER_RIPPLE_AMPLITUDE,
+            WATER_RIPPLE_PHASE_STEP,
+            WATER_RIPPLE_SAMPLES_PER_WAVELENGTH,
+        )
+        if not ripple_lines:
+            # A zone too small for even one wave row to intersect: draw
+            # nothing rather than falling back to the old fill. The numbered
+            # marker below already conveys a zone this small. Logged once.
+            print(
+                f"  Water zone {water_zone['id']}: render opening too small for any ripple "
+                "line row to intersect -- drawing the numbered marker only, no ripple texture."
+            )
+        for line in ripple_lines:
+            # No fill, no face colour, no boundary stroke -- ripple lines only,
+            # at the water zone's existing zorder (41, above production
+            # contours' zorder=40).
+            plot_line(
+                line,
                 ax=ax,
                 add_points=False,
-                facecolor=WATER_ZONE_COLOR,
-                edgecolor=WATER_ZONE_COLOR,
-                alpha=1.0,
-                linewidth=1.5,
+                color=WATER_ZONE_COLOR,
+                linewidth=WATER_RIPPLE_LINEWIDTH,
+                alpha=WATER_RIPPLE_ALPHA,
                 zorder=41,
             )
-        # The marker sits on the geometry actually drawn above (the hull,
-        # not the real blocky footprint) -- representative_point() is
-        # guaranteed by shapely to fall within its own geometry, so this
-        # can never land outside the visible fill even though the hull's
-        # own representative point can differ from geometry_wgs84's.
+        # The marker sits on the geometry the ripples were clipped to (the
+        # render opening, not the real blocky footprint) -- representative_
+        # point() is guaranteed by shapely to fall within its own geometry, so
+        # this can never land outside the rippled area even though the
+        # opening's own representative point can differ from geometry_wgs84's.
         marker_point = render_fill_geom.representative_point()
         assert render_fill_geom.contains(marker_point) or render_fill_geom.intersects(marker_point), (
             "water zone marker point must fall on the geometry actually drawn"
