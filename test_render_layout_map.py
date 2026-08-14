@@ -160,11 +160,14 @@ assert some_contour_exceeds_zone, (
 
 clipped_pieces = _clip_contours_to_zone(global_contours, single_patch)
 assert clipped_pieces, "expected at least one contour segment to survive clipping into this zone"
-# render_fill_polygon_utm is render_polygon_utm's own plain convex hull -- a solid, already-convex zone's
-# hull is geometrically IDENTICAL to polygon_utm (no radius, no buffer-curve approximation to tolerate).
-assert single_patch["render_fill_polygon_utm"].equals(single_patch["polygon_utm"]), (
-    "a solid, already-convex zone's render_fill_polygon_utm (its own convex hull) must be geometrically "
-    "identical to polygon_utm"
+# render_fill_polygon_utm is now a bounded morphological OPENING clipped to polygon_utm (production's
+# disc opening replaced the old convex hull), so it is CONTAINED WITHIN polygon_utm rather than equal to
+# any hull -- it may be smaller (the opening trims/rounds) but never claims ground outside polygon_utm.
+assert single_patch["polygon_utm"].buffer(1e-6).contains(single_patch["render_fill_polygon_utm"]), (
+    "render_fill_polygon_utm (a bounded opening clipped to polygon_utm) must be contained within polygon_utm"
+)
+assert single_patch["render_fill_polygon_utm"].area <= single_patch["polygon_utm"].area * (1 + 1e-9) + 1e-6, (
+    "the opening can never exceed polygon_utm's area"
 )
 zone_polygon_buffered = single_patch["render_fill_polygon_utm"].buffer(1e-6)
 for piece in clipped_pieces:
