@@ -193,26 +193,41 @@ print("_topographic_factor() correctly scores a moderate valley gradient highest
 # --- rearchitecture: no more valley_id to hand-build a matching zone     ---
 # --- fixture around -- see test_water_candidate_zones.py)                ---
 #
-# Two parallel drainage columns (col=8 and col=32 of a 40x40 grid, 5m
-# resolution) far enough apart that their eligible cells never touch --
-# same fixture shape test_water_candidate_zones.py's own fragmentation
-# test uses -- served by one production area sitting between them, so
-# find_candidate_zones() returns exactly 2 real zones (ids 0 and 1).
-#
+# find_candidate_zones() now selects and returns exactly ONE zone per call
+# (the single best-available survey area). To get the two distinct real
+# zone dicts these scoring tests need, we run it on two SEPARATE single-
+# drainage-column DEMs (channel at col=8 and at col=32 of a 40x40 grid,
+# 5m), sharing one UTM frame, and relabel their ids 0/1. Each zone is a
+# real, trimmed, cell-cluster footprint -- the scoring logic under test is
+# unchanged; only how we obtain two zones is (the old fixture relied on
+# find_candidate_zones() returning a zone per disconnected column, which the
+# rewrite's single-candidate selection no longer does).
+from raster_grid import pixel_center_xy as _pxy  # noqa: E402
+from shapely.geometry import Point as _ValleyPoint  # noqa: E402
+
 BOUNDARY = box(500000.0, 4499800.0, 500200.0, 4500000.0)
 _size = 40
+_FRAME = {"resolution_meters": (5.0, 5.0), "origin_x": 500000.0, "origin_y": 4500000.0, "crs": CRS}
+
+
+def _single_column_dem(mid_col):
+    arr = np.zeros((_size, _size), dtype=np.float32)
+    for r in range(_size):
+        for c in range(_size):
+            arr[r, c] = abs(c - mid_col) * 2.0 + r * 0.5
+    return {"array": arr, **_FRAME}
+
+
+# A two-column DEM retained as the `dem` argument for the scoring calls
+# below (score_water_zones() reads geometry from the zone dicts, not per-
+# cell from this dem, so its exact content is immaterial there) and for the
+# below-elevation find_candidate_zones() run further down.
 _array = np.zeros((_size, _size), dtype=np.float32)
 for _row in range(_size):
     for _col in range(_size):
         _array[_row, _col] = min(abs(_col - 8), abs(_col - 32)) * 2.0 + _row * 0.5
+WATER_SUITABILITY_DEM = {"array": _array, **_FRAME}
 
-WATER_SUITABILITY_DEM = {
-    "array": _array,
-    "resolution_meters": (5.0, 5.0),
-    "origin_x": 500000.0,
-    "origin_y": 4500000.0,
-    "crs": CRS,
-}
 PRODUCTION_AREAS = [
     {
         "id": 0,
@@ -222,39 +237,51 @@ PRODUCTION_AREAS = [
     }
 ]
 
-zones = find_candidate_zones(WATER_SUITABILITY_DEM, PRODUCTION_AREAS, BOUNDARY)
-zone_ids = {z["id"] for z in zones}
-assert zone_ids == {0, 1}, f"expected exactly 2 zones (one per disconnected drainage column), got {zone_ids}"
-
-# Which real id ends up on which column is an implementation detail of
-# connected_components()'s own labeling order (not hardcoded -- looked up
-# here by real footprint bounds instead), so this identifies the "column
-# at col=8" zone/the "column at col=32" zone directly by geometry rather
-# than assuming a fixed id per column.
-zone_col8 = next(z for z in zones if z["polygon_utm"].bounds[0] < 500100.0)   # column at x~[500030, 500055]
-zone_col32 = next(z for z in zones if z["polygon_utm"].bounds[0] >= 500100.0)  # column at x~[500150, 500175]
-VALLEY_ZONE_ID = zone_col8["id"]
-NO_VALLEY_ZONE_ID = zone_col32["id"]
+_DEM_COL8 = _single_column_dem(8)
+_DEM_COL32 = _single_column_dem(32)
+_zones8 = find_candidate_zones(_DEM_COL8, PRODUCTION_AREAS, BOUNDARY)
+_zones32 = find_candidate_zones(_DEM_COL32, PRODUCTION_AREAS, BOUNDARY)
+assert len(_zones8) == 1 and len(_zones32) == 1, (
+    f"each single-column DEM must yield exactly one selected zone, got {len(_zones8)}/{len(_zones32)}"
+)
+zone_col8 = {**_zones8[0], "id": 0}
+zone_col32 = {**_zones32[0], "id": 1}
+assert zone_col8["polygon_utm"].bounds[0] < 500100.0 <= zone_col32["polygon_utm"].bounds[0], (
+    "test setup: zone_col8 (channel at col=8) should sit west of zone_col32 (channel at col=32)"
+)
+VALLEY_ZONE_ID = zone_col8["id"]      # 0
+NO_VALLEY_ZONE_ID = zone_col32["id"]  # 1
 
 # A real valley (valley_delineation.delineate_valleys()'s own output shape)
-# whose branch points sit spatially inside zone_col8's own real footprint
-# (confirmed directly via .contains(), not just a bounding-box guess) --
-# the NEW spatial-overlap matching _valley_topographic_inputs_for_zone()
-# uses instead of a zone['valley_id'] == valley['id'] join. zone_col32
-# deliberately has NO overlapping valley at all, to exercise the "no
-# traced valley overlaps this real drainage-cell zone" degradation path
-# (a real, expected outcome now -- valley_delineation.py's own
-# traced-valley threshold is separate from, and higher than,
-# water_candidate_zones.py's own per-cell drainage threshold).
-_valley_point_a = (500042.5, 4499945.0, 120.0)
-_valley_point_b = (500042.5, 4499850.0, 100.0)
-from shapely.geometry import Point as _ValleyPoint  # noqa: E402
-assert zone_col8["polygon_utm"].contains(_ValleyPoint(_valley_point_a[0], _valley_point_a[1])), (
+# whose branch points sit spatially inside zone_col8's own real (trimmed)
+# footprint -- derived directly from two of the zone's OWN member cell
+# centers, so containment is guaranteed by construction (the NEW spatial-
+# overlap matching _valley_topographic_inputs_for_zone() uses instead of a
+# zone['valley_id'] == valley['id'] join). The two points' z-values are set
+# so the branch's grade over its own planar length is a moderate ~8% (in
+# _topographic_factor()'s sweet spot), matching the old fixture's intent.
+# zone_col32 deliberately has NO overlapping valley at all, exercising the
+# "no traced valley overlaps this real drainage-cell zone" degradation path.
+_zone8_cells = zone_col8["cells"]
+assert len(_zone8_cells) >= 2, "zone_col8 must have at least two cells to seed two valley branch points"
+_p_a_r, _p_a_c = _zone8_cells[0]
+_p_b_r, _p_b_c = _zone8_cells[-1]
+_ax, _ay = _pxy(_DEM_COL8, _p_a_r, _p_a_c)
+_bx, _by = _pxy(_DEM_COL8, _p_b_r, _p_b_c)
+assert (_ax, _ay) != (_bx, _by), "test setup: the two seed cells must have distinct centers for a nonzero grade"
+_branch_len_m = _ValleyPoint(_ax, _ay).distance(_ValleyPoint(_bx, _by))
+_TARGET_GRADIENT_PCT = 8.0
+_valley_point_a = (_ax, _ay, 120.0)
+_valley_point_b = (_bx, _by, 120.0 - _TARGET_GRADIENT_PCT * _branch_len_m / 100.0)
+assert zone_col8["polygon_utm"].contains(_ValleyPoint(_ax, _ay)), (
     "test setup: valley branch point A must fall inside zone_col8's real footprint"
 )
-assert zone_col8["polygon_utm"].contains(_ValleyPoint(_valley_point_b[0], _valley_point_b[1])), (
+assert zone_col8["polygon_utm"].contains(_ValleyPoint(_bx, _by)), (
     "test setup: valley branch point B must fall inside zone_col8's real footprint"
 )
+assert not zone_col32["polygon_utm"].contains(_ValleyPoint(_ax, _ay)) and not zone_col32[
+    "polygon_utm"
+].contains(_ValleyPoint(_bx, _by)), "test setup: zone_col32 must NOT overlap the valley branch"
 VALLEY_OVERLAPPING_ZONE = {
     "id": 0,
     "max_contributing_area_acres": 5.0,
