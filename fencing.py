@@ -125,11 +125,11 @@ tree zone candidates must not overlap the road corridor's own footprint,
 independent of whether the corridor gets fenced at all.
 """
 
-from typing import Optional
+from typing import Optional, Union
 
 from rasterio.warp import transform as warp_transform
 from rasterio.warp import transform_geom
-from shapely.geometry import LineString, Polygon, mapping, shape
+from shapely.geometry import LineString, MultiLineString, Polygon, mapping, shape
 from shapely.ops import unary_union
 
 from dem_data import get_dem_for_boundary
@@ -570,7 +570,7 @@ TREE_ZONE_FENCE_CONFIDENCE_NOTES_TEMPLATE = (
 
 def _buffered_zone_polygon(
     polygon_utm: Polygon, buffer_meters: float, caller_label: str = "_buffered_zone_polygon"
-) -> Polygon:
+):
     """
     Shared buffered-zone-POLYGON core -- the single place a water/tree zone's
     own already-computed real fill polygon (water_candidate_zones.py's/tree_
@@ -591,39 +591,52 @@ def _buffered_zone_polygon(
     not by two independent buffer calls that merely happen to share a
     constant and could drift apart under a future retune.
 
-    A positive buffer of a real, already-computed polygon should never come
-    back empty, invalid, or anything other than a single Polygon, so there
-    is no sensible fallback shape here -- this raises rather than silently
-    dropping the fence or falling back to something else.
+    render_fill_polygon_utm is a bounded render opening (water_candidate_
+    zones.py/tree_zone_candidates.py) that can itself be a MultiPolygon when
+    the opening severs a narrow pinch into pieces, so a positive buffer can
+    legitimately come back as EITHER a single Polygon or a MultiPolygon (two
+    pieces too far apart to merge under the buffer). Both are accepted:
+    _buffer_fill_polygon_to_fence_line() below outlines each part, and find_
+    boundary_fencing()'s step 3 unary_union() folds either shape in unchanged.
+    An empty or invalid result still has no sensible fallback, so this raises
+    rather than silently dropping the fence.
     """
     buffered = polygon_utm.buffer(buffer_meters)
-    if buffered.is_empty or not buffered.is_valid or buffered.geom_type != "Polygon":
+    if buffered.is_empty or not buffered.is_valid or buffered.geom_type not in ("Polygon", "MultiPolygon"):
         raise RuntimeError(
             f"{caller_label}: buffering a render_fill_polygon_utm by {buffer_meters}m produced an "
             f"unexpected result (geom_type={buffered.geom_type!r}, empty={buffered.is_empty}, "
             f"valid={buffered.is_valid}) -- a positive buffer of a real, already-computed polygon "
-            "should never do this, and there is no sensible fallback shape here."
+            "should never be empty or invalid, and there is no sensible fallback shape here."
         )
     return buffered
 
 
-def _buffer_fill_polygon_to_fence_line(polygon_utm: Polygon, buffer_meters: float, caller_label: str) -> LineString:
+def _buffer_fill_polygon_to_fence_line(polygon_utm: Polygon, buffer_meters: float, caller_label: str):
     """
     Shared buffer-and-outline core for find_water_zone_fencing()/find_tree_
     zone_fencing() below -- both fence an already-computed real fill polygon
     by taking the OUTLINE of _buffered_zone_polygon()'s own buffered polygon
     (see that helper's docstring for the recipe, the shared-buffered-polygon
     exactness guarantee, and the "no sensible fallback" reasoning on an
-    unexpected buffer result). This is the SAME "buffer a real feature,
+    empty/invalid buffer result). This is the SAME "buffer a real feature,
     output its outline" recipe find_stream_exclusion_fencing() already uses.
+
+    Returns a LineString for a single-piece buffered polygon, or a
+    MultiLineString (one closed exterior ring per piece) when render_fill_
+    polygon_utm's bounded opening severed the fill into a MultiPolygon -- so a
+    multi-piece water/tree zone still draws one fence loop around each piece.
     """
-    return LineString(_buffered_zone_polygon(polygon_utm, buffer_meters, caller_label).exterior.coords)
+    buffered = _buffered_zone_polygon(polygon_utm, buffer_meters, caller_label)
+    if buffered.geom_type == "Polygon":
+        return LineString(buffered.exterior.coords)
+    return MultiLineString([LineString(part.exterior.coords) for part in buffered.geoms])
 
 
 def find_water_zone_fencing(
     selected_water_zone_render_fill_polygon_utm: Optional[Polygon],
     buffer_meters: float = WATER_ZONE_FENCE_BUFFER_METERS,
-) -> Optional[LineString]:
+) -> Optional[Union[LineString, MultiLineString]]:
     """
     Pure geometric core -- no network I/O. Takes the selected water zone's
     own already-computed render_fill_polygon_utm (water_candidate_zones.
@@ -632,6 +645,9 @@ def find_water_zone_fencing(
     closed fence line buffer_meters outside its edge (see
     _buffer_fill_polygon_to_fence_line()'s own docstring for the recipe and
     the "no sensible fallback" reasoning on an unexpected buffer result).
+    The fill can be a MultiPolygon (the bounded render opening severs a narrow
+    pinch), in which case the fence comes back as a MultiLineString -- one
+    closed loop per piece.
 
     None or empty input (no water zone was sited on this property at all)
     returns None -- the existing "honest no-result" case this pipeline
@@ -681,7 +697,7 @@ def water_zone_fencing_to_geojson(
 def find_tree_zone_fencing(
     tree_zone_render_fill_polygons_utm: list[Polygon],
     buffer_meters: float = TREE_ZONE_FENCE_BUFFER_METERS,
-) -> list[LineString]:
+) -> list[Union[LineString, MultiLineString]]:
     """
     Pure geometric core -- no network I/O. Takes EVERY tree zone
     candidate's own already-computed render_fill_polygon_utm (tree_zone_
