@@ -49,7 +49,7 @@ from road_corridors import (
     corridors_to_geojson,
     identify_road_corridor_candidates,
 )
-from road_cost_path import build_cost_raster
+from road_cost_path import build_cost_raster, cost_distance_field
 
 CRS = "EPSG:32617"
 RESOLUTION = (5.0, 5.0)
@@ -533,5 +533,135 @@ print(
     f"Gentle-grade branches (<= {STEEP_GRADE_ENGINEERING_NOTE_THRESHOLD_PCT}%) correctly omit the "
     f"additive steep-grade engineering-consideration note, while the blanket disclaimer stays present."
 )
+
+# =====================================================================
+# SYNTHETIC STEEP-BAND reproduction of the real-parcel failure: a narrow
+# ~22% band separating a gentle plateau (with the anchor) from the far
+# plateau (with all the production demand). This is the exact shape that,
+# with the old hard 15% grade ceiling, made every production cell
+# unreachable and produced ZERO road branches; with MAX_ROAD_GRADE_PCT
+# raised to a cliff-only 35% ceiling the band is costly but crossable.
+# Runs entirely offline forever -- no DEM/NHD/SSURGO fetch of any kind.
+# =====================================================================
+
+_STEEP_RES = (10.0, 10.0)
+_STEEP_ROWS, _STEEP_COLS = 5, 15
+_STEEP_BAND_COL = 7            # a single-column band => a one-cell-thick wall
+_STEEP_BAND_SLOPE = 22.0       # ~22% pitch: above the OLD 15% wall, below the new 35% cliff cutoff
+_STEEP_ORIGIN_X, _STEEP_ORIGIN_Y = 500000.0, 4500000.0
+
+# DEM: near plateau flat at 100m (cols < band), far plateau flat at 102.2m
+# (cols >= band) -- the 2.2m rise falls entirely on the single 10m-wide
+# band cell, so ONLY the segment entering that cell reads ~22% grade along
+# the centerline; every other segment is dead flat.
+_steep_array = np.full((_STEEP_ROWS, _STEEP_COLS), 100.0, dtype=np.float32)
+_steep_array[:, _STEEP_BAND_COL:] = 102.2
+_steep_dem = {
+    "array": _steep_array, "resolution_meters": _STEEP_RES,
+    "origin_x": _STEEP_ORIGIN_X, "origin_y": _STEEP_ORIGIN_Y, "crs": CRS,
+}
+# Per-cell slope raster supplied directly (so the band is EXACTLY the
+# single column at 22% and nothing else) -- this is the same slope raster
+# build_cost_raster()'s impassable_grade_pct is tested against below and
+# the same one build_road_network()'s new cell-level metrics read from.
+_steep_slope = np.zeros((_STEEP_ROWS, _STEEP_COLS), dtype=np.float32)
+_steep_slope[:, _STEEP_BAND_COL] = _STEEP_BAND_SLOPE
+# Uniform (zero) TPI so base travel cost is uniform and the least-cost
+# route across the flat plateaus is a straight horizontal line -- makes the
+# band cell the route crosses, and thus steep_meters, hand-computable.
+_steep_tpi = np.zeros((_STEEP_ROWS, _STEEP_COLS), dtype=np.float64)
+_steep_boundary = box(
+    _STEEP_ORIGIN_X, _STEEP_ORIGIN_Y - _STEEP_ROWS * 10,
+    _STEEP_ORIGIN_X + _STEEP_COLS * 10, _STEEP_ORIGIN_Y,
+)
+
+# --- reachability: the OLD 15% ceiling walls the far plateau off entirely;
+#     the NEW 35% ceiling lets the route through (via cost_distance_field) ---
+_steep_source = (2, 0)          # near plateau, centre row
+_steep_far_cell = (2, 13)       # far plateau, same row
+_steep_no_exclusion = np.zeros((_STEEP_ROWS, _STEEP_COLS), dtype=bool)
+
+_cost_at_15 = build_cost_raster(_steep_dem, _steep_slope, _steep_no_exclusion, impassable_grade_pct=15.0)
+_field_at_15 = cost_distance_field(_steep_dem, _cost_at_15, [_steep_source])
+assert not np.isfinite(_field_at_15["accumulated_cost"][_steep_far_cell]), (
+    "with impassable_grade_pct=15.0 the 22% band must HARD-exclude the only crossing, leaving the far "
+    "plateau unreachable (accumulated_cost == inf) -- this is the exact real-parcel 0/993 failure"
+)
+
+_cost_at_35 = build_cost_raster(_steep_dem, _steep_slope, _steep_no_exclusion, impassable_grade_pct=MAX_ROAD_GRADE_PCT)
+_field_at_35 = cost_distance_field(_steep_dem, _cost_at_35, [_steep_source])
+assert np.isfinite(_field_at_35["accumulated_cost"][_steep_far_cell]), (
+    f"with MAX_ROAD_GRADE_PCT={MAX_ROAD_GRADE_PCT} the 22% band is costly but PERMITTED, so the far "
+    "plateau must be reachable (finite accumulated_cost)"
+)
+assert MAX_ROAD_GRADE_PCT > _STEEP_BAND_SLOPE > 15.0, (
+    "the band must sit above the old 15% wall and below the new cliff cutoff for this test to mean anything"
+)
+print(
+    f"Steep-band reachability: the 22% band is UNREACHABLE at a 15% ceiling (accumulated_cost == inf) "
+    f"but REACHABLE at MAX_ROAD_GRADE_PCT={MAX_ROAD_GRADE_PCT} -- the real-parcel failure, reproduced offline."
+)
+
+# --- the resulting branch's cell-level metrics surface the pitch that its
+#     gentle average hides ---
+_steep_production = [
+    {"id": 0, "render_fill_polygon_utm": box(
+        _STEEP_ORIGIN_X + 10 * 10, _STEEP_ORIGIN_Y - _STEEP_ROWS * 10,
+        _STEEP_ORIGIN_X + _STEEP_COLS * 10, _STEEP_ORIGIN_Y,
+    )}
+]  # far plateau (cols >= 10), reachable only by crossing the band
+
+_steep_anchor = _lon_lat_for_cell(_steep_dem, 2, 0)  # near plateau, centre row
+_steep_network = build_road_network(
+    _steep_dem, _steep_production, None, _steep_boundary, _steep_anchor,
+    slope_pct=_steep_slope, tpi=_steep_tpi,
+    # small service radius so the anchor's own baseline coverage doesn't
+    # already reach the far plateau (which would need no road at all); a
+    # huge per-acre ceiling and a zero length floor so the router is free
+    # to build the crossing rather than stopping short in this tiny fixture.
+    service_radius_meters=15.0, max_meters_per_served_acre=1e9,
+    min_corridor_length_meters=0.0,
+)
+assert _steep_network["branches"], (
+    "with the 35% cliff ceiling a road network MUST be produced across the band -- the old 15% wall "
+    "produced zero branches here, which is the whole bug"
+)
+_steep_trunk = next(b for b in _steep_network["branches"] if b["branch_role"] == "trunk")
+# The trunk runs straight along row 2, crossing the single band cell (2, 7)
+# horizontally exactly once.
+assert (2, _STEEP_BAND_COL) in _steep_trunk["cells"], "the trunk must cross the band cell"
+assert _steep_trunk["max_grade_pct"] > 15.0, (
+    f"the trunk's steepest CELL ({_steep_trunk['max_grade_pct']}%) must exceed 15% -- it crosses the 22% band"
+)
+assert _steep_trunk["avg_grade_pct"] < 15.0, (
+    f"the trunk's centerline AVERAGE grade ({_steep_trunk['avg_grade_pct']:.3f}%) must be below 15% -- a "
+    "gentle overall route with one steep cell is exactly the case max_grade_pct/steep_meters exist to surface"
+)
+# Hand-computed steep_meters: the route crosses exactly ONE band cell, and
+# it enters that cell on a straight horizontal step, so the steep length is
+# one cell width == 10.0m (px). Nothing else along the route is steep.
+_expected_steep_meters = 10.0
+assert abs(_steep_trunk["steep_meters"] - _expected_steep_meters) < 1e-9, (
+    f"steep_meters must equal the hand-computed length of the band cells crossed "
+    f"({_expected_steep_meters}m: one 10m-wide band cell entered horizontally), got {_steep_trunk['steep_meters']}"
+)
+# Network-level rollup: steepest single cell across the whole network, and
+# total steep length summed over every branch (only the trunk is steep).
+assert _steep_network["max_grade_pct"] == _steep_trunk["max_grade_pct"]
+assert abs(_steep_network["steep_meters"] - _expected_steep_meters) < 1e-9
+
+# The same metrics reach the GeoJSON per feature (max_grade_pct, steep_ft).
+_steep_geojson = corridors_to_geojson(_steep_network)
+_trunk_feature = next(
+    f for f in _steep_geojson["features"] if f["properties"]["branch_role"] == "trunk"
+)
+assert _trunk_feature["properties"]["max_grade_pct"] == round(_steep_trunk["max_grade_pct"], 1)
+assert _trunk_feature["properties"]["steep_ft"] == round(_expected_steep_meters / 0.3048, 1)
+print(
+    f"Steep-band branch metrics: trunk avg_grade_pct={_steep_trunk['avg_grade_pct']:.2f}% (gentle) but "
+    f"max_grade_pct={_steep_trunk['max_grade_pct']}% (steep), steep_meters={_steep_trunk['steep_meters']}m "
+    f"(one band cell), exposed as GeoJSON max_grade_pct/steep_ft -- the low average does not hide the pitch."
+)
+
 
 print("\nAll road_corridors checks passed.")
