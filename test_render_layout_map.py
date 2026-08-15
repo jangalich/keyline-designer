@@ -30,6 +30,7 @@ rendering-only change -- see the dedicated regression check near the
 bottom.
 """
 
+import json
 import os
 import tempfile
 from contextlib import ExitStack
@@ -38,12 +39,18 @@ from unittest.mock import patch as mock_patch
 import numpy as np
 from rasterio.warp import transform as warp_transform
 from rasterio.warp import transform_geom
-from shapely.geometry import Polygon, box, mapping, shape
+from shapely.geometry import LineString, Polygon, box, mapping, shape
+from shapely.ops import unary_union
 
 import production_area as pa
 import render_layout_map as rlm
 from contour_lines import compute_contour_lines
-from fencing import boundary_fencing_to_geojson, find_boundary_fencing
+from fencing import (
+    boundary_fencing_to_geojson,
+    find_boundary_fencing,
+    tree_zone_fencing_to_geojson,
+    water_zone_fencing_to_geojson,
+)
 from production_area import cluster_and_gate, compute_step1_eligible_cells
 from production_suitability import score_production_areas
 
@@ -1559,6 +1566,229 @@ test_render_is_reentrant()
 print(
     "Reentrancy: render_layout_map() with a structure_site renders twice in one process (fresh pin artist "
     "per figure) -- no 'Can not put single artist in more than one figure' RuntimeError."
+)
+
+
+# --- Symmetric zone-fence mutual trim: every water/tree zone fence ring is trimmed
+#     against the boundary fence ring(s) AND every OTHER zone ring, so adjacent zones
+#     render with a real visible gap between them rather than two near-parallel doubled
+#     lines -- see render_layout_map.py's own WATER/TREE EXCLUSION FENCE STYLE docstring
+#     section and ZONE_FENCE_BOUNDARY_COINCIDENCE_TOLERANCE_M's own comment. Purely
+#     render-time: fencing_geojson keeps every zone's full, untrimmed ring. ---
+
+_TRIM_CRS = "EPSG:32617"
+_TRIM_ORIGIN_X, _TRIM_ORIGIN_Y = 500000.0, 4500000.0
+_TRIM_SIZE = 600.0  # property square side, meters
+
+
+def _trim_square(x0: float, y0: float, x1: float, y1: float) -> LineString:
+    """A closed square ring, positioned by meters-from-the-property's-SW-corner so the
+    fixture below reads in plain local coordinates rather than raw UTM eastings."""
+    ax, ay = _TRIM_ORIGIN_X + x0, _TRIM_ORIGIN_Y - _TRIM_SIZE + y0
+    bx, by = _TRIM_ORIGIN_X + x1, _TRIM_ORIGIN_Y - _TRIM_SIZE + y1
+    return LineString([(ax, ay), (bx, ay), (bx, by), (ax, by), (ax, ay)])
+
+
+def _trim_to_wgs84(geometry_utm):
+    return shape(transform_geom(_TRIM_CRS, "EPSG:4326", mapping(geometry_utm)))
+
+
+# Gaps of 3m between neighbours: inside ZONE_FENCE_BOUNDARY_COINCIDENCE_TOLERANCE_M, so
+# every one of these pairings is a genuine "these two run close" case for the trim.
+_trim_boundary_ring_utm = _trim_square(2, 2, _TRIM_SIZE - 2, _TRIM_SIZE - 2)
+_trim_tree1_utm = _trim_square(100, 100, 200, 200)  # adjacent to tree 2
+_trim_tree2_utm = _trim_square(203, 100, 303, 200)  # adjacent to tree 1 AND to the water zone
+_trim_water_utm = _trim_square(203, 203, 303, 303)  # adjacent to tree 2's top edge
+_trim_tree3_utm = _trim_square(420, 420, 520, 520)  # LONE -- near nothing at all
+_trim_tree4_utm = _trim_square(5, 400, 105, 500)  # near the BOUNDARY ring only
+
+_trim_boundary_coordinates = list(_trim_to_wgs84(Polygon(_trim_boundary_ring_utm.coords)).exterior.coords)
+_trim_fencing_geojson = {
+    "type": "FeatureCollection",
+    "features": (
+        boundary_fencing_to_geojson([_trim_to_wgs84(_trim_boundary_ring_utm)])["features"]
+        + water_zone_fencing_to_geojson(_trim_to_wgs84(_trim_water_utm))["features"]
+        + tree_zone_fencing_to_geojson(
+            [
+                _trim_to_wgs84(_trim_tree1_utm),
+                _trim_to_wgs84(_trim_tree2_utm),
+                _trim_to_wgs84(_trim_tree3_utm),
+                _trim_to_wgs84(_trim_tree4_utm),
+            ]
+        )["features"]
+    ),
+}
+_trim_fencing_geojson_before = json.dumps(_trim_fencing_geojson, sort_keys=True)
+
+_trim_dem = {
+    "array": np.zeros((10, 10), dtype=np.float32),
+    "resolution_meters": RESOLUTION,
+    "origin_x": _TRIM_ORIGIN_X,
+    "origin_y": _TRIM_ORIGIN_Y,
+    "crs": _TRIM_CRS,
+}
+_trim_layers = {
+    "dem": _trim_dem,
+    "production_areas": [],
+    "production_zone_legend_stats": [],
+    "water_zone": None,
+    "road_corridor": [],
+    "tree_zone_result": None,
+    "structure_site": None,
+    "water_features": {"streams": []},
+    "contour_lines": [],
+    "fencing_result": {"fencing_geojson": _trim_fencing_geojson, "segment_count": 1},
+}
+
+
+def _render_capturing_fences(layers: dict, legend_sink: list) -> list:
+    """Runs a full render_layout_map() pass, returning every (geometry, zorder) pair
+    _draw_boundary_fence() was actually handed -- i.e. exactly what got DRAWN, after the
+    trim/clip -- and appending the legend text block to legend_sink."""
+    captured: list = []
+    real_draw = rlm._draw_boundary_fence
+
+    def recording_draw(ax, ring, zorder=rlm.FENCE_ZORDER):
+        captured.append((ring, zorder))
+        return real_draw(ax, ring, zorder=zorder)
+
+    with mock_patch.object(rlm, "_draw_boundary_fence", recording_draw):
+        with mock_patch.object(
+            rlm.plt.Axes, "text", autospec=True, side_effect=lambda self, x, y, s, **kw: legend_sink.append(s)
+        ):
+            with tempfile.TemporaryDirectory() as tmpdir:
+                rlm.render_layout_map(
+                    _trim_boundary_coordinates, os.path.join(tmpdir, "layout_map.png"), layers=layers
+                )
+    return captured
+
+
+def _trim_render_ring(geometry_utm):
+    """The same simplified Mercator ring the renderer itself builds for a fence feature --
+    the untrimmed reference each drawn piece is measured against below."""
+    return rlm._angular_simplify_closed_ring(
+        rlm._reproject_geometry_to_mercator(mapping(_trim_to_wgs84(geometry_utm))),
+        rlm.FENCE_RENDER_ANGULAR_SIMPLIFY_TOLERANCE_M,
+    )
+
+
+_trim_legend_texts: list = []
+_trim_drawn = _render_capturing_fences(_trim_layers, _trim_legend_texts)
+
+_trim_rings = {
+    "boundary": _trim_render_ring(_trim_boundary_ring_utm),
+    "water": _trim_render_ring(_trim_water_utm),
+    "tree1": _trim_render_ring(_trim_tree1_utm),
+    "tree2": _trim_render_ring(_trim_tree2_utm),
+    "tree3": _trim_render_ring(_trim_tree3_utm),
+    "tree4": _trim_render_ring(_trim_tree4_utm),
+}
+_trim_boundary_drawn = [g for g, z in _trim_drawn if z == rlm.FENCE_ZORDER]
+_trim_zone_drawn = [g for g, z in _trim_drawn if z == rlm.EXCLUSION_FENCE_ZORDER]
+
+# Every drawn zone piece must trace exactly ONE zone's own ring: a merged/unioned outline
+# would produce a piece no single ring covers (or one that straddles two).
+_trim_by_zone: dict = {name: [] for name in ("water", "tree1", "tree2", "tree3", "tree4")}
+for _piece in _trim_zone_drawn:
+    _owners = [name for name in _trim_by_zone if _piece.distance(_trim_rings[name]) < 1e-6]
+    assert len(_owners) == 1, (
+        f"each drawn fence piece must trace exactly one zone's own ring (no merged outline) -- got {_owners}"
+    )
+    _trim_by_zone[_owners[0]].append(_piece)
+
+
+def _trim_kept_fraction(name: str) -> float:
+    return sum(p.length for p in _trim_by_zone[name]) / _trim_rings[name].length
+
+
+# 1. Each zone with a near neighbour loses its near-shared stretch -- and only that.
+#    tree2 neighbours BOTH tree1 and the water zone, so it loses two edges, not one.
+for _name in ("tree1", "tree2", "water"):
+    _kept = _trim_kept_fraction(_name)
+    assert _kept < 0.95, f"{_name} borders a neighbour but kept {_kept:.3f} of its ring -- no bite was taken"
+    assert _kept > 0.3, f"{_name} lost far more of its ring than its shared stretch ({_kept:.3f} kept)"
+assert _trim_kept_fraction("tree2") < _trim_kept_fraction("tree1"), (
+    "tree2 borders two neighbours and must lose more of its ring than tree1, which borders one"
+)
+
+# 2. SYMMETRY: both rings of an adjacent pair lose their shared stretch, leaving a REAL
+#    visible gap between the two drawn lines -- not touching, not overlapping. The gap is
+#    the intended result of the trim, not a defect.
+for _a, _b in (("tree1", "tree2"), ("tree2", "water")):
+    _a_drawn, _b_drawn = unary_union(_trim_by_zone[_a]), unary_union(_trim_by_zone[_b])
+    assert not _a_drawn.intersects(_b_drawn), f"{_a}/{_b} drawn fence lines must not touch"
+    assert _a_drawn.distance(_b_drawn) > rlm.ZONE_FENCE_BOUNDARY_COINCIDENCE_TOLERANCE_M, (
+        f"{_a}/{_b} drawn fence lines must be separated by a real, visible gap"
+    )
+
+# 3. A lone zone bordering nothing still renders its FULL, closed, untrimmed loop.
+assert abs(_trim_kept_fraction("tree3") - 1.0) < 1e-9, "a zone with no near neighbour must keep its whole ring"
+assert len(_trim_by_zone["tree3"]) == 1 and _trim_by_zone["tree3"][0].is_closed, (
+    "a zone with no near neighbour must still render as one unbroken closed loop"
+)
+
+# 4. The pre-existing zone-vs-boundary trim is unchanged: tree4 borders only the boundary
+#    fence and loses exactly that stretch, clearing the boundary line by the tolerance.
+assert _trim_kept_fraction("tree4") < 0.95, "a zone running alongside the boundary fence must still be trimmed"
+assert unary_union(_trim_by_zone["tree4"]).distance(_trim_rings["boundary"]) >= (
+    rlm.ZONE_FENCE_BOUNDARY_COINCIDENCE_TOLERANCE_M - 1e-6
+), "the trimmed zone ring must clear the boundary fence line by the coincidence tolerance"
+
+# 5. The boundary fence itself is never trimmed against anything -- drawn exactly as
+#    simplified, still one closed loop.
+assert len(_trim_boundary_drawn) == 1, "the single boundary fence ring must be drawn as exactly one piece"
+assert abs(_trim_boundary_drawn[0].length - _trim_rings["boundary"].length) < 1e-9, (
+    "the boundary fence must be drawn untrimmed, at its full simplified length"
+)
+assert _trim_boundary_drawn[0].is_closed, "the boundary fence must stay a closed loop"
+
+# 6. Legend: one individual entry per zone, exactly as before -- each zone is still its own
+#    rendered feature, just with a bite taken out of it, so nothing gets merged or relabeled.
+_trim_legend_lines = [
+    line for text in _trim_legend_texts for line in text.splitlines() if "Fencing" in line
+]
+assert _trim_legend_lines == [
+    "Boundary Fencing",
+    "Water Zone Fencing",
+    "Tree Zone Fencing 1",
+    "Tree Zone Fencing 2",
+    "Tree Zone Fencing 3",
+    "Tree Zone Fencing 4",
+], _trim_legend_lines
+
+# 7. No ordering dependency: the trim is symmetric and every zone is compared against the
+#    OTHER zones' ORIGINAL (pre-trim) rings, never against an already-trimmed result -- so
+#    feeding the same zones in reverse order must draw byte-identical geometry.
+_trim_reversed_features = [f for f in _trim_fencing_geojson["features"] if f["properties"]["fence_type"] == "boundary"]
+_trim_reversed_features += list(
+    reversed([f for f in _trim_fencing_geojson["features"] if f["properties"]["fence_type"] != "boundary"])
+)
+_trim_reversed_layers = dict(_trim_layers)
+_trim_reversed_layers["fencing_result"] = {
+    "fencing_geojson": {"type": "FeatureCollection", "features": _trim_reversed_features},
+    "segment_count": 1,
+}
+_trim_reversed_drawn = _render_capturing_fences(_trim_reversed_layers, [])
+_trim_forward_union = unary_union(_trim_zone_drawn)
+_trim_reversed_union = unary_union([g for g, z in _trim_reversed_drawn if z == rlm.EXCLUSION_FENCE_ZORDER])
+assert _trim_forward_union.symmetric_difference(_trim_reversed_union).length < 1e-9, (
+    "the mutual trim must be symmetric -- reversing the zone order must not change what gets drawn"
+)
+
+# 8. fencing_geojson (the narrative report's own data) is completely unaffected: every
+#    zone's full, untrimmed ring survives the render byte-for-byte.
+assert json.dumps(_trim_fencing_geojson, sort_keys=True) == _trim_fencing_geojson_before, (
+    "fencing_geojson must be completely unaffected by this render-only trim"
+)
+
+print(
+    "Symmetric zone-fence mutual trim: each of two adjacent tree zones, and a water zone adjacent to a tree "
+    f"zone, loses its near-shared stretch (tree1 keeps {_trim_kept_fraction('tree1'):.0%}, tree2 -- which "
+    f"borders two neighbours -- keeps {_trim_kept_fraction('tree2'):.0%}, water keeps "
+    f"{_trim_kept_fraction('water'):.0%}), leaving a real gap between each pair's separately-drawn lines "
+    "(no touching, no overlap, no merged outline); a lone non-adjacent zone still renders its full closed "
+    "loop, the boundary fence is drawn untrimmed, reversing the zone order changes nothing (symmetric, no "
+    "rank), the legend keeps one individual entry per zone, and fencing_geojson is byte-for-byte unchanged."
 )
 
 
