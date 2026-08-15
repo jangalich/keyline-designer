@@ -243,27 +243,26 @@ why that specific combination, not a cleared edgecolor, is what achieves
 this: a patch's hatch color follows its edgecolor, and a patch's hatch
 stroke width comes from matplotlib's own rcParams["hatch.linewidth"],
 independent of the patch's own linewidth). The geometry drawn is still
-its own render_fill_polygon_utm -- a plain convex hull of the patch's
-real footprint, re-intersected with search_space_utm (score_tree_search_
-space()'s own Step 1 search-space input, NOT the raw parcel boundary --
-see tree_zone_candidates.py's own score_tree_search_space() for why: tree
-zones wrap AROUND production/water/road by construction, so clipping the
-hull against the raw boundary let it re-claim ground already ruled out
-as claimed, confirmed live as hatching drawn directly over production
-zones despite a real, buffered-clear footprint underneath) -- same
-field/reasoning production_area.py's/water_candidate_zones.py's own
-patches/zones already carry -- NOT the patch's real, potentially-notched
-geometry_wgs84 (used for area_acres/scoring/the narrative report,
-completely untouched by this). Same "reads as one coherent shape at
-render time" purpose as production/water's own hulls: most directly
-here, closing over any interior pocket the CANOPY EXCLUSION GATE carves
-out of an otherwise-contiguous candidate (see tree_zone_candidates.py's
-own module docstring) -- that pocket is still inside search_space_utm,
-so clipping against the search space rather than the boundary doesn't
-reopen it -- rather than rendering as an unexplained blank notch. Zone
-identity is still carried by the numbered marker placed on that same
-hull and by the corresponding legend line -- the hatch by itself doesn't
-need to enclose a filled area to read as a distinct zone on the map. The
+its own render_fill_polygon_utm -- now a bounded morphological OPENING of
+the patch's own cell mask (disc erode-then-dilate at TREE_ZONE_RENDER_
+OPENING_RADIUS_METERS, no lead erode), clipped to the patch's real
+footprint, NOT a convex hull -- the same construction water_candidate_
+zones._render_opening() uses (see tree_zone_candidates.py's own
+score_tree_search_space() for the full rationale). Same field production_
+area.py's/water_candidate_zones.py's own patches/zones already carry --
+NOT the patch's real geometry_wgs84 (used for area_acres/scoring/the
+narrative report, completely untouched by this). Unlike the old hull, an
+opening is anti-extensive: it trims single-cell protrusions and can sever
+a narrow pinch (so render_fill_polygon_utm may be a MultiPolygon), and it
+does NOT close over interior pockets -- a hole the CANOPY EXCLUSION GATE
+(or a sub-threshold score) carves out of an otherwise-contiguous candidate
+stays OPEN, so the hatch now follows the real cell-union shape, interior
+canopy pockets and all, rather than a smoothed outer envelope. A candidate
+whose mask fully erodes to nothing is DROPPED upstream (the survival gate),
+so every drawn patch has a real, non-empty opening. Zone identity is still
+carried by the numbered marker placed on that same opened geometry and by
+the corresponding legend line -- the hatch by itself doesn't need to
+enclose a filled area to read as a distinct zone on the map. The
 hatch is a deliberate, visible "candidate, not a committed site" cue,
 consistent with this layer's own CONFIDENCE_LOW rating and its explicit
 "not a definite planting plan" framing (see tree_zone_candidates.py's own
@@ -1705,8 +1704,10 @@ def render_layout_map(
     # site) -- see this module's own TREE ZONE STYLE docstring section
     # for the hatch-only styling rationale. DISPLAY-ONLY fill geometry:
     # render_fill_polygon_utm is a
-    # plain convex hull of the patch's own real footprint (see
-    # score_tree_search_space()'s own docstring), already in the DEM's
+    # bounded morphological opening of the patch's own cell mask, clipped
+    # to its real footprint (see score_tree_search_space()'s own
+    # docstring) -- may be a MultiPolygon, which the loop below handles the
+    # same way the water zone's own fill does -- already in the DEM's
     # own UTM CRS -- reprojected in one hop
     # (_reproject_utm_geometry_to_mercator(), same pattern the water
     # zone's own fill above already uses), never the real geometry_wgs84
