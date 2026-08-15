@@ -669,9 +669,11 @@ FENCE_RENDER_ANGULAR_SIMPLIFY_TOLERANCE_M = 6.0  # was 4.0
 # own different overall shape) can keep different vertices, rendering as two visibly
 # separate near-parallel lines. AFTER both rings are simplified, each zone ring is
 # trimmed by the boundary fence ring buffered by this tolerance, so the redundant
-# (doubled) portion of the RENDERED line is suppressed. Render-only -- the full,
-# untrimmed zone ring is still written to fencing_geojson by fencing.py. CONFIGURABLE.
-ZONE_FENCE_BOUNDARY_COINCIDENCE_TOLERANCE_M = 1.0
+# (doubled) portion of the RENDERED line is suppressed. Wide enough to catch
+# NEAR-coincident stretches (where independent simplification left the two rings a
+# few meters apart), not just pixel-exact overlap. Render-only -- the full, untrimmed
+# zone ring is still written to fencing_geojson by fencing.py. CONFIGURABLE.
+ZONE_FENCE_BOUNDARY_COINCIDENCE_TOLERANCE_M = 5.0  # was 1.0
 
 # DISPLAY-ONLY simplify tolerance for the production zone fill used as the
 # contour clip mask -- expressed in DEM CELLS, multiplied by the DEM's own cell
