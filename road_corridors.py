@@ -169,20 +169,39 @@ from water_suitability import fetch_and_select_optimal_water_zone
 
 METERS_PER_FOOT = 0.3048
 
-# ENFORCED as of this branch: any cell whose slope_pct exceeds this is
-# HARD-excluded (road_cost_path.build_cost_raster()'s own
-# impassable_grade_pct argument, see build_road_network()) -- a road
-# network branch can never be routed across a grade steeper than this, not
-# merely penalized for it. This REVERSES an earlier design (see git
-# history) where this constant was a historical reference figure only, with
-# grade left as an unbounded soft cost penalty instead. 10% is a
-# widely-cited practical ceiling for sustained grade on a low-volume
-# gravel farm/ranch road in USDA NRCS and US Forest Service low-standard-
-# road design guidance; 15% reflects that short pitches up to ~12-15% are
-# tolerated in the wild on low-volume farm/ranch roads. Not a single pinned
-# regulatory document -- stated plainly since this environment has no live
-# network access to verify a specific citation. CONFIGURABLE.
-MAX_ROAD_GRADE_PCT = 15.0
+# CLIFF cutoff, NOT a buildable-grade limit. Any cell whose slope_pct
+# exceeds this is HARD-excluded (road_cost_path.build_cost_raster()'s own
+# impassable_grade_pct argument, see build_road_network()) -- but the bar
+# is deliberately set at genuine cliff terrain, not at the highest grade a
+# road should be built on. Grades between ~10% and 35% are COSTLY but
+# PERMITTED: they are handled by build_cost_raster()'s quadratic grade
+# penalty (road_cost_path.GRADE_PENALTY_WEIGHT), which already makes a 22%
+# pitch cost roughly 7x base, so the router avoids steep ground unless it
+# is the only way through -- exactly the behavior a hard wall at a lower
+# value overrode. STEEP_GRADE_ENGINEERING_NOTE_THRESHOLD_PCT (10.0), NOT
+# this constant, remains the figure the narrative flags a route against as
+# needing real engineering consideration.
+#
+# WHY THIS IS 35 AND NOT 15 -- read before re-tightening it. This was
+# 15.0 for exactly one branch, wired straight into impassable_grade_pct as
+# a hard exclusion. On a real 17.4-acre western Pennsylvania parcel that
+# made ALL 993 production cells unreachable from the access point, so the
+# router produced ZERO road branches. The cause was NOT broadly steep
+# terrain: a NARROW steep band separates the anchor from the production
+# ground. Sweeping the ceiling proved it -- reachability was 0/993 at 15%
+# AND at 20%, then jumped to 917/993 at 25%, and 25% reaches EXACTLY as
+# much as no ceiling at all. The barrier is a thin stripe, not a broadly
+# steep parcel; a farm road crossing a short 22% pitch to reach otherwise-
+# unreachable fields is a real road (farms cut benches and switchbacks
+# across exactly that). A future reader who re-tightens this toward a
+# "buildable grade" number will silently reintroduce that 0/993 failure --
+# leave the cliff cutoff high and let the quadratic penalty do the
+# grade-avoidance work. CONFIGURABLE -- and a deliberately UNVALIDATED
+# starting point, not a validated threshold (same caveat every other
+# threshold in this pipeline carries): 35.0 is chosen to sit clearly above
+# the ~25% the real-parcel sweep showed was needed and clearly below true
+# cliff/talus terrain, not tuned against a broad diagnostic sweep.
+MAX_ROAD_GRADE_PCT = 35.0
 
 # Above this average grade, a branch is steep enough that confidence_notes
 # flags it as needing real engineering consideration (surface material,
@@ -501,6 +520,44 @@ def _grade_stats(points_xyz: list[tuple[float, float, float]]) -> tuple[float, f
     return float(np.mean(grades)), float(np.std(grades))
 
 
+def _cell_steep_stats(
+    dem: dict, cells: list[tuple[int, int]], slope_pct: np.ndarray
+) -> tuple[float, float]:
+    """Cell-level steep-section metrics for one branch, computed from the
+    per-cell slope raster this same network was routed over -- DELIBERATELY
+    different from _grade_stats() above, which averages the centerline's own
+    elevation profile. A route can average a gentle 6% overall and still
+    contain a single 24% cell where it crosses a narrow pitch; avg_grade_pct
+    would hide that, and these two metrics exist precisely to surface it.
+
+    Returns (max_grade_pct, steep_meters):
+      - max_grade_pct: the steepest single cell along the branch (the raw
+        per-cell slope_pct value, not a segment average).
+      - steep_meters: total path length attributable to cells steeper than
+        STEEP_GRADE_ENGINEERING_NOTE_THRESHOLD_PCT. A segment (the step from
+        one ordered cell to the next) contributes its own real ground length
+        when the cell it ENTERS exceeds that threshold -- the same
+        "cost/length accrues on entering a cell" convention road_cost_path's
+        own Dijkstra edge weight uses, so N contiguous steep cells crossed
+        straight-through contribute exactly N cells' worth of length.
+
+    Routed cells are always finite-slope (the cost raster hard-excludes
+    NaN-slope cells before routing ever reaches them), but NaN is guarded
+    anyway rather than allowed to poison the max."""
+    px, py = dem["resolution_meters"]
+    max_grade_pct = 0.0
+    steep_meters = 0.0
+    for index, (r, c) in enumerate(cells):
+        slope = float(slope_pct[r, c])
+        if not math.isnan(slope):
+            if slope > max_grade_pct:
+                max_grade_pct = slope
+            if index > 0 and slope > STEEP_GRADE_ENGINEERING_NOTE_THRESHOLD_PCT:
+                r0, c0 = cells[index - 1]
+                steep_meters += math.hypot((c - c0) * px, (r - r0) * py)
+    return max_grade_pct, steep_meters
+
+
 def _empty_road_network(stop_reason: str, unserved_acres: float = 0.0) -> dict:
     """
     The canonical "no road network at all" shape -- returned (never None,
@@ -520,6 +577,8 @@ def _empty_road_network(stop_reason: str, unserved_acres: float = 0.0) -> dict:
         "total_served_acres": 0.0,
         "unserved_acres": unserved_acres,
         "stop_reason": stop_reason,
+        "max_grade_pct": 0.0,
+        "steep_meters": 0.0,
         "cells": [],
         "cell_footprint_polygon_utm": Polygon(),
     }
@@ -609,7 +668,9 @@ def build_road_network(
               "line_utm": LineString,             # zero-width, dem['crs']
               "geometry_wgs84": GeoJSON LineString,
               "cell_footprint_polygon_utm": Polygon/MultiPolygon,  # THIS branch's own cells only
-              "avg_grade_pct": float,
+              "avg_grade_pct": float,            # centerline-elevation average (see _grade_stats())
+              "max_grade_pct": float,            # steepest single CELL (see _cell_steep_stats())
+              "steep_meters": float,             # length of this branch's cells above the steep threshold
               "crosses_floodplain": bool,
               "crosses_production_zone": bool,
               "production_cells_crossed": int,
@@ -619,9 +680,18 @@ def build_road_network(
           "total_served_acres": float,
           "unserved_acres": float,
           "stop_reason": str,
+          "max_grade_pct": float,                 # steepest single cell across the WHOLE network (max of branches)
+          "steep_meters": float,                  # steep-cell length summed across the WHOLE network
           "cells": [(r, c), ...],                 # every branch cell, deduped, across the WHOLE network
           "cell_footprint_polygon_utm": Polygon/MultiPolygon,  # union of every branch's own footprint
         }
+
+    avg_grade_pct and max_grade_pct/steep_meters are deliberately different
+    quantities: avg_grade_pct averages the centerline's own elevation
+    profile (a route can average a gentle 6% overall), while max_grade_pct
+    and steep_meters come from the per-CELL slope raster and surface the
+    single 24% cell that gentle average would otherwise hide -- see
+    _cell_steep_stats().
 
     "cells"/"cell_footprint_polygon_utm" at the top level exist so
     exclusion consumers (e.g. tree_zone_candidates.py) get the WHOLE
@@ -752,6 +822,7 @@ def build_road_network(
         branch_footprint = cell_union_footprint(dem, branch_cell_mask)
 
         avg_grade_pct, _grade_stddev_pct = _grade_stats(points)
+        max_grade_pct, steep_meters = _cell_steep_stats(dem, cells, slope_pct)
         crosses_floodplain = hydric_floodplain_union is not None and line.intersects(hydric_floodplain_union)
         production_cells_crossed = sum(1 for r, c in cells if production_mask[r, c])
         crosses_production_zone = production_cells_crossed > 0
@@ -774,6 +845,8 @@ def build_road_network(
                 "geometry_wgs84": {"type": "LineString", "coordinates": list(zip(lons, lats))},
                 "cell_footprint_polygon_utm": branch_footprint,
                 "avg_grade_pct": avg_grade_pct,
+                "max_grade_pct": max_grade_pct,
+                "steep_meters": steep_meters,
                 "crosses_floodplain": crosses_floodplain,
                 "crosses_production_zone": crosses_production_zone,
                 "production_cells_crossed": production_cells_crossed,
@@ -786,6 +859,14 @@ def build_road_network(
         "total_served_acres": network_result["total_served_acres"],
         "unserved_acres": network_result["unserved_acres"],
         "stop_reason": network_result["stop_reason"],
+        # Network-level steep-section rollup across every branch: the
+        # steepest single cell anywhere in the network, and the total
+        # steep-cell length summed over all branches (see _cell_steep_stats()
+        # for both). Computed over the branches actually emitted above, so a
+        # sub-2-cell branch dropped before geometry (no segment, no reportable
+        # grade) never contributes.
+        "max_grade_pct": max((b["max_grade_pct"] for b in branches_out), default=0.0),
+        "steep_meters": float(sum(b["steep_meters"] for b in branches_out)),
         "cells": all_cells,
         "cell_footprint_polygon_utm": cell_union_footprint(dem, network_cell_mask),
     }
@@ -849,6 +930,12 @@ def corridors_to_geojson(
                     "joins_branch_index": branch["joins_branch_index"],
                     "length_ft": round(branch["length_meters"] / METERS_PER_FOOT, 1),
                     "avg_grade_pct": round(branch["avg_grade_pct"], 1),
+                    # Cell-level steep-section metrics (see _cell_steep_stats()),
+                    # deliberately distinct from the centerline avg_grade_pct
+                    # above: max_grade_pct is the steepest single cell, steep_ft
+                    # the length of cells above the steep threshold.
+                    "max_grade_pct": round(branch["max_grade_pct"], 1),
+                    "steep_ft": round(branch["steep_meters"] / METERS_PER_FOOT, 1),
                     "newly_served_acres": round(branch["newly_served_acres"], 3),
                     "crosses_floodplain": branch["crosses_floodplain"],
                     "crosses_production_zone": branch["crosses_production_zone"],

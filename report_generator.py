@@ -331,6 +331,13 @@ def _format_water_candidate_zones_summary(zones_geojson: Optional[dict]) -> str:
 # already-computed dict.
 _METERS_PER_FOOT = 0.3048
 
+# Mirrors road_corridors.STEEP_GRADE_ENGINEERING_NOTE_THRESHOLD_PCT (10.0)
+# exactly -- the per-CELL grade above which a route's steep section is
+# called out in this narrative. Kept local rather than imported for the
+# same decoupling reason _METERS_PER_FOOT above is (this module consumes
+# only an already-computed network dict, never road_corridors.py itself).
+_STEEP_GRADE_NOTE_THRESHOLD_PCT = 10.0
+
 # One real sentence per road_corridors.py/road_network_router.py stop_reason value
 # (see route_road_network()'s own docstring for what each means) -- deliberately a
 # closed set: an unrecognized value fails loudly in _format_road_corridor_summary()
@@ -400,12 +407,31 @@ def _format_road_corridor_summary(road_network: Optional[dict]) -> str:
     def _length_ft(branch: dict) -> float:
         return round(branch["length_meters"] / _METERS_PER_FOOT, 1)
 
+    def _steep_section_clause(branch: dict) -> str:
+        """A steep-section clause for any branch whose steepest single CELL
+        (max_grade_pct) exceeds _STEEP_GRADE_NOTE_THRESHOLD_PCT, stating the
+        steep length and peak grade plainly. Gated on max_grade_pct, NOT
+        avg_grade_pct -- a route can average a gentle grade and still cross a
+        short steep pitch, and that pitch is exactly what this surfaces, so a
+        low average must never suppress it. Returns '' for a branch with no
+        steep cell (nothing is added when no branch is steep)."""
+        max_grade_pct = branch.get("max_grade_pct", 0.0)
+        if max_grade_pct <= _STEEP_GRADE_NOTE_THRESHOLD_PCT:
+            return ""
+        steep_ft = round(branch.get("steep_meters", 0.0) / _METERS_PER_FOOT, 1)
+        return (
+            f" This route includes {steep_ft}ft above {round(_STEEP_GRADE_NOTE_THRESHOLD_PCT)}% grade, "
+            f"reaching {round(max_grade_pct, 1)}%; that section will need cut-and-fill or a switchback, "
+            f"not just routine grading."
+        )
+
     trunk = next((b for b in branches if b["branch_role"] == "trunk"), branches[0])
     lines = [
         f"Recommended road: a single route ({trunk['branch_role']}) {_length_ft(trunk)}ft long, "
         f"averaging {round(trunk['avg_grade_pct'], 1)}% grade, newly serving "
         f"{round(trunk['newly_served_acres'], 3)} acre(s) of identified production ground."
         + (" [crosses a production zone]" if trunk.get("crosses_production_zone") else "")
+        + _steep_section_clause(trunk)
     ]
 
     branch_by_index = {b["branch_index"]: b for b in branches}
@@ -422,6 +448,7 @@ def _format_road_corridor_summary(road_network: Optional[dict]) -> str:
             f"  - {_length_ft(branch)}ft spur {parent_note}{purpose_note}, "
             f"{round(branch['avg_grade_pct'], 1)}% avg grade, "
             f"{round(branch['newly_served_acres'], 3)} acre(s) newly served{crossing_note}"
+            + _steep_section_clause(branch)
         )
 
     total_length_ft = round(road_network["total_length_meters"] / _METERS_PER_FOOT, 1)
