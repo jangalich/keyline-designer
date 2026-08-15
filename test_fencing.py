@@ -39,6 +39,7 @@ import production_area as pa
 from feature_schema import make_feature, validate_feature_collection
 from fencing import (
     BOUNDARY_FENCE_CANOPY_BUFFER_METERS,
+    BOUNDARY_FENCE_MARGIN_METERS,
     BOUNDARY_FENCE_MIN_SEGMENT_ACRES,
     STREAM_EXCLUSION_BUFFER_METERS,
     TREE_ZONE_FENCE_BUFFER_METERS,
@@ -173,14 +174,34 @@ print("stream_exclusion_fencing_to_geojson output is schema-valid, layer='exclus
 # geometry standing in for an already-buffered canopy footprint (the
 # buffering itself is identify_boundary_fencing()'s job, not this
 # function's -- see its own docstring).
+#
+# The existing cases below (1-6) exercise the SAME behavior as before this
+# branch's developed-footprint rewrite, now supplying the new required
+# developed-footprint/zone inputs (production_zone_polygons_utm/structure_
+# site_polygon_utm/road_corridor_cell_footprint_polygon_utm/water_zone_
+# polygon_utm/tree_zone_polygons_utm) as EMPTY/None -- per step 2's
+# degenerate fallback, an empty developed footprint collapses margined_core
+# back to boundary_polygon_utm itself, so these must all still pass
+# unchanged (section 6, case 5 of this branch's task). The genuinely-new
+# developed-footprint behavior is exercised by cases 7-10 further below.
 # =====================================================================
 
 TEST_BOUNDARY_UTM = box(0, 0, 100, 100)  # 10,000 sq m, ~2.47 acres
 
+# Shorthand for "no developed footprint, no zones" -- the empty/None values that
+# collapse find_boundary_fencing() back to its original boundary-only behavior.
+NO_DEVELOPED_FOOTPRINT = dict(
+    production_zone_polygons_utm=[],
+    structure_site_polygon_utm=None,
+    road_corridor_cell_footprint_polygon_utm=None,
+    water_zone_polygon_utm=None,
+    tree_zone_polygons_utm=[],
+)
+
 
 # --- 1. no canopy at all -> the plain-wrap case, unchanged: the boundary's own exterior ring ---
 
-no_canopy_rings = find_boundary_fencing(TEST_BOUNDARY_UTM, None)
+no_canopy_rings = find_boundary_fencing(TEST_BOUNDARY_UTM, None, **NO_DEVELOPED_FOOTPRINT)
 assert len(no_canopy_rings) == 1, f"no canopy should return exactly 1 ring, got {len(no_canopy_rings)}"
 assert no_canopy_rings[0].equals(Polygon(TEST_BOUNDARY_UTM.exterior).exterior), (
     "with no canopy at all, the returned ring must match the boundary's own exterior ring exactly"
@@ -191,7 +212,7 @@ print("find_boundary_fencing(): no canopy returns the boundary's own unmodified 
 # --- 2. canopy touching the boundary at one location, not splitting it -> 1 ring, genuinely notched ---
 
 touching_canopy = box(40, 90, 60, 110)  # straddles the top edge (y=100) from x=40-60, doesn't reach either side edge
-touching_rings = find_boundary_fencing(TEST_BOUNDARY_UTM, touching_canopy)
+touching_rings = find_boundary_fencing(TEST_BOUNDARY_UTM, touching_canopy, **NO_DEVELOPED_FOOTPRINT)
 assert len(touching_rings) == 1, f"a single non-splitting notch should return exactly 1 ring, got {len(touching_rings)}"
 assert not touching_rings[0].equals(Polygon(TEST_BOUNDARY_UTM.exterior).exterior), (
     "a real notch must NOT match the plain boundary ring -- confirms the notch actually happened"
@@ -202,7 +223,7 @@ print("find_boundary_fencing(): canopy touching one edge location returns 1 ring
 # --- 3. canopy entirely interior, never touching the boundary edge -> ignored: unmodified boundary ring ---
 
 interior_canopy = box(30, 30, 50, 50)  # well inside TEST_BOUNDARY_UTM, doesn't touch any edge
-interior_rings = find_boundary_fencing(TEST_BOUNDARY_UTM, interior_canopy)
+interior_rings = find_boundary_fencing(TEST_BOUNDARY_UTM, interior_canopy, **NO_DEVELOPED_FOOTPRINT)
 assert len(interior_rings) == 1, f"interior-only canopy should return exactly 1 ring, got {len(interior_rings)}"
 # NOT an exact .equals() any more: find_boundary_fencing()'s own morphological opening
 # (buffer(-BOUNDARY_FENCE_MIN_SLIVER_WIDTH_METERS).buffer(+that)) now runs unconditionally
@@ -230,7 +251,7 @@ print("find_boundary_fencing(): interior-only canopy (a hole, discarded) leaves 
 # --- 4. canopy spanning end-to-end, splitting the parcel -> exactly 2 closed loops ---
 
 spanning_canopy = box(-10, 45, 110, 55)  # crosses both the left (x=0) and right (x=100) edges
-split_rings = find_boundary_fencing(TEST_BOUNDARY_UTM, spanning_canopy)
+split_rings = find_boundary_fencing(TEST_BOUNDARY_UTM, spanning_canopy, **NO_DEVELOPED_FOOTPRINT)
 assert len(split_rings) == 2, f"canopy spanning end-to-end should split the parcel into 2 loops, got {len(split_rings)}"
 for ring in split_rings:
     assert list(ring.coords)[0] == list(ring.coords)[-1], "each split loop must be a closed LineString"
@@ -255,7 +276,7 @@ assert sliver_piece_acres < BOUNDARY_FENCE_MIN_SEGMENT_ACRES, (
     f"{BOUNDARY_FENCE_MIN_SEGMENT_ACRES} ac floor for this to be a real test of the filter"
 )
 
-sliver_rings = find_boundary_fencing(TEST_BOUNDARY_UTM, sliver_canopy)
+sliver_rings = find_boundary_fencing(TEST_BOUNDARY_UTM, sliver_canopy, **NO_DEVELOPED_FOOTPRINT)
 assert len(sliver_rings) == 1, (
     f"the tiny corner sliver must be dropped by BOUNDARY_FENCE_MIN_SEGMENT_ACRES, not returned as a "
     f"spurious extra segment -- expected 1 ring (main body only), got {len(sliver_rings)}"
@@ -286,7 +307,7 @@ assert raw_neck_difference.contains(neck_probe_point), (
     "edge (pre-opening) for this to be a real test of the collapse"
 )
 
-neck_rings = find_boundary_fencing(TEST_BOUNDARY_UTM, neck_canopy)
+neck_rings = find_boundary_fencing(TEST_BOUNDARY_UTM, neck_canopy, **NO_DEVELOPED_FOOTPRINT)
 assert len(neck_rings) == 1, (
     f"expected 1 ring (main body only, neck collapsed into the canopy side), got {len(neck_rings)}"
 )
@@ -298,6 +319,191 @@ assert not neck_ring_polygon.intersects(neck_probe_point), (
 print(
     "find_boundary_fencing(): a narrow land neck between two close canopy notches (pic #1's shape) "
     "is collapsed by the morphological opening step, not traced into and back out of by the fence line."
+)
+
+
+# =====================================================================
+# find_boundary_fencing(): this branch's developed-footprint rewrite (cases 7-10). The boundary
+# fence now protects the DEVELOPED FOOTPRINT (production + structure + road corridor path),
+# buffered by BOUNDARY_FENCE_MARGIN_METERS and clipped to the drawn boundary, with water/tree
+# zones unioned in at their OWN fence buffer. All still purely synthetic geometry on the same
+# TEST_BOUNDARY_UTM square -- no DEM/CRS/network.
+# =====================================================================
+
+BOUNDARY_POLYGON = Polygon(TEST_BOUNDARY_UTM.exterior)
+
+
+# --- 7. developed footprint smaller than the drawn boundary, no zones nearby -> the fence ring is
+#        MEANINGFULLY smaller than the boundary's own ring (not just clipped/identical): the core
+#        "don't waste fencing on unused land" case this whole change exists for ---
+
+developed_zone = box(30, 30, 70, 70)  # a 40x40m developed core well inside the 100x100 boundary
+smaller_rings = find_boundary_fencing(
+    TEST_BOUNDARY_UTM,
+    None,
+    production_zone_polygons_utm=[developed_zone],
+    structure_site_polygon_utm=None,
+    road_corridor_cell_footprint_polygon_utm=None,
+    water_zone_polygon_utm=None,
+    tree_zone_polygons_utm=[],
+)
+assert len(smaller_rings) == 1, f"a single developed core should return exactly 1 ring, got {len(smaller_rings)}"
+smaller_ring_polygon = Polygon(smaller_rings[0])
+# The developed core (1,600 sq m) buffered by BOUNDARY_FENCE_MARGIN_METERS (5m) is roughly a
+# 50x50m rounded square (~2,500 sq m) -- far smaller than the 10,000 sq m boundary. Assert the ring
+# genuinely shrank to the developed footprint, not merely got clipped to (or left equal to) the boundary.
+assert smaller_ring_polygon.area < BOUNDARY_POLYGON.area * 0.5, (
+    "the boundary fence must enclose only the margined DEVELOPED footprint, not the full drawn boundary -- "
+    f"expected the ring's area ({smaller_ring_polygon.area:.1f} sq m) to be well under half the boundary's "
+    f"({BOUNDARY_POLYGON.area:.1f} sq m)"
+)
+assert not smaller_ring_polygon.equals(BOUNDARY_POLYGON), "the developed-footprint ring must not equal the boundary ring"
+# It should also sit comfortably inside the boundary (margined core never reaches the boundary edge here).
+assert BOUNDARY_POLYGON.contains(smaller_ring_polygon), "the developed-footprint ring must sit inside the drawn boundary"
+print(
+    "find_boundary_fencing(): a developed footprint smaller than the drawn boundary yields a fence ring "
+    f"meaningfully smaller than the boundary ({smaller_ring_polygon.area:.0f} vs {BOUNDARY_POLYGON.area:.0f} "
+    "sq m) -- fencing follows the developed land, not the full parcel."
+)
+
+
+# --- 8. a water zone well INSIDE margined_core with real clearance -> the boundary fence ring is
+#        UNCHANGED by that zone (it stays its own independent loop), and the zone's own fence ring
+#        is a genuinely separate loop nested inside it: the "stays two independent loops" case ---
+
+developed_zone_8 = box(20, 20, 80, 80)  # margined by 5m -> ~ (15,15)-(85,85)
+interior_water_zone = box(40, 40, 50, 50)  # buffered by 2.5m -> (37.5,37.5)-(52.5,52.5), well inside margined_core
+
+ring_without_zone = find_boundary_fencing(
+    TEST_BOUNDARY_UTM, None,
+    production_zone_polygons_utm=[developed_zone_8],
+    structure_site_polygon_utm=None,
+    road_corridor_cell_footprint_polygon_utm=None,
+    water_zone_polygon_utm=None,
+    tree_zone_polygons_utm=[],
+)
+ring_with_interior_zone = find_boundary_fencing(
+    TEST_BOUNDARY_UTM, None,
+    production_zone_polygons_utm=[developed_zone_8],
+    structure_site_polygon_utm=None,
+    road_corridor_cell_footprint_polygon_utm=None,
+    water_zone_polygon_utm=interior_water_zone,
+    tree_zone_polygons_utm=[],
+)
+assert len(ring_without_zone) == 1 and len(ring_with_interior_zone) == 1
+# A zone fully inside margined_core with real clearance changes the union's outer boundary by NOTHING --
+# so the boundary fence ring is byte-for-byte identical with and without that interior zone supplied.
+assert Polygon(ring_with_interior_zone[0]).equals(Polygon(ring_without_zone[0])), (
+    "a water zone sitting well inside the margined developed core (with real clearance) must NOT merge into "
+    "or alter the boundary fence ring -- the boundary fence stays its own independent loop"
+)
+# And the zone's own individually-drawn fence loop is present and genuinely separate: a distinct ring,
+# strictly nested inside the boundary fence ring, sharing none of its boundary.
+interior_water_fence = find_water_zone_fencing(interior_water_zone)
+assert interior_water_fence is not None
+assert Polygon(ring_with_interior_zone[0]).contains(Polygon(interior_water_fence)), (
+    "the interior water zone's own fence loop must sit strictly inside the (separate) boundary fence loop"
+)
+assert not Polygon(ring_with_interior_zone[0]).exterior.intersects(Polygon(interior_water_fence).exterior), (
+    "the two loops must be genuinely separate -- the boundary fence ring and the zone's own fence ring share "
+    "no boundary (no merge)"
+)
+print(
+    "find_boundary_fencing(): a water zone well inside the margined developed core leaves the boundary fence "
+    "ring unchanged AND stays its own separate, nested fence loop -- two genuinely independent loops."
+)
+
+
+# --- 9. a water zone at the true OUTER edge of the developed footprint, extending past margined_core ->
+#        the boundary fence ring's coordinates along that stretch are IDENTICAL to the zone's own
+#        buffered fence edge (a real geometric equality, not just "a ring was returned"): the
+#        "meets up, uses it, continues" case ---
+
+developed_zone_9 = box(20, 20, 80, 50)  # margined by 5m -> tops out around y=55
+# A water zone straddling the developed top edge, whose 2.5m buffer (-> y up to 77.5) reaches WELL past
+# margined_core's own top (~y=55) while still connecting to it (buffer overlaps y 52.5-55).
+edge_water_zone = box(40, 55, 60, 75)
+margined_core_9 = developed_zone_9.buffer(BOUNDARY_FENCE_MARGIN_METERS)
+
+edge_rings = find_boundary_fencing(
+    TEST_BOUNDARY_UTM, None,
+    production_zone_polygons_utm=[developed_zone_9],
+    structure_site_polygon_utm=None,
+    road_corridor_cell_footprint_polygon_utm=None,
+    water_zone_polygon_utm=edge_water_zone,
+    tree_zone_polygons_utm=[],
+)
+assert len(edge_rings) == 1, f"expected a single merged loop, got {len(edge_rings)}"
+edge_boundary_ring = edge_rings[0]
+edge_water_fence = find_water_zone_fencing(edge_water_zone)  # the zone's OWN buffered fence edge
+
+# The stretch of the zone's own fence that lies past margined_core (its true outer edge, away from the
+# junction where it meets the developed core) must coincide with the boundary fence ring -- same buffered
+# polygon fed both, so this is exact by construction, up to the opening step's sub-cm arc re-approximation.
+# Sample the outer stretch generously ABOVE the junction (y > 60, clear of margined_core's y~55 top and
+# the opening's own <=1m rounding of the concave junction corners).
+outer_stretch_pts = [pt for pt in edge_water_fence.coords if pt[1] > 60]
+assert len(outer_stretch_pts) >= 3, "test setup must expose a real outer stretch of the zone edge past the margin"
+outer_stretch_distances = [Point(pt).distance(edge_boundary_ring) for pt in outer_stretch_pts]
+max_outer_deviation = max(outer_stretch_distances)
+# Near-zero Hausdorff along the shared stretch. This is not exact floating equality -- step 6's opening
+# (buffer(-w).buffer(w)) re-approximates the buffered arcs, so vertices shift by sub-centimetre amounts --
+# but it is unambiguously COINCIDENT, not a nearby parallel line: a genuine parallel offset would sit a
+# whole WATER_ZONE_FENCE_BUFFER_METERS (2.5m) or BOUNDARY_FENCE_MARGIN_METERS (5m) away, three orders of
+# magnitude larger than the deviation asserted here.
+assert max_outer_deviation < 0.01, (
+    "along the stretch where the water zone sits at the developed footprint's true outer edge, the boundary "
+    "fence ring must coincide with the zone's own buffered fence edge (same line, not a nearby parallel one) "
+    f"-- max point-to-ring distance {max_outer_deviation:.6f}m exceeds the near-zero tolerance"
+)
+assert max_outer_deviation < WATER_ZONE_FENCE_BUFFER_METERS / 100.0, (
+    "the coincidence must be genuine, not a parallel offset -- the deviation must be far below the zone-fence "
+    f"buffer distance itself ({WATER_ZONE_FENCE_BUFFER_METERS}m), got {max_outer_deviation:.6f}m"
+)
+# And the midpoint of the zone edge's own flat outermost segment lies on the boundary ring to ~floating
+# exactness (that straight y=77.5 segment is preserved by the opening; only the rounded corners re-approximate).
+flat_top_midpoint = Point(50.0, max(c[1] for c in edge_water_fence.coords))
+assert flat_top_midpoint.distance(edge_boundary_ring) < 1e-6, (
+    "the middle of the zone's own outermost (flat) fence edge must lie exactly on the boundary fence ring"
+)
+print(
+    "find_boundary_fencing(): where a water zone sits at the developed footprint's true outer edge, the "
+    "boundary fence ring's coordinates coincide with that zone's own buffered fence edge along that stretch "
+    f"(max deviation {max_outer_deviation:.2e}m, vs a {WATER_ZONE_FENCE_BUFFER_METERS}m parallel-offset scale) "
+    "-- it meets the zone's fence, uses it, continues."
+)
+
+
+# --- 10. a road corridor footprint reaching a real anchor point ON the drawn boundary -> the hard-ceiling
+#         clip still holds: the fence never extends past boundary_polygon_utm even though the corridor's own
+#         margined shape would otherwise cross it ---
+
+# A corridor running from the interior straight to the top boundary edge (y=100). Its own 5m margin would
+# push a fence out to y=105 (past the parcel) -- the clip must pull it back to the boundary.
+road_to_boundary = box(45, 80, 55, 100)
+road_rings = find_boundary_fencing(
+    TEST_BOUNDARY_UTM, None,
+    production_zone_polygons_utm=[],
+    structure_site_polygon_utm=None,
+    road_corridor_cell_footprint_polygon_utm=road_to_boundary,
+    water_zone_polygon_utm=None,
+    tree_zone_polygons_utm=[],
+)
+assert len(road_rings) == 1, f"the road corridor footprint should produce a single fence ring, got {len(road_rings)}"
+road_ring_polygon = Polygon(road_rings[0])
+# Confirm the margin genuinely WANTED to cross the boundary (the un-clipped margined corridor reaches y=105)...
+assert road_to_boundary.buffer(BOUNDARY_FENCE_MARGIN_METERS).bounds[3] > 100.0, (
+    "test setup: the corridor's own margined shape must extend past the boundary for the clip to be under test"
+)
+# ...yet the returned fence ring never escapes the drawn boundary (the hard-ceiling clip, step 4).
+assert BOUNDARY_POLYGON.buffer(1e-6).covers(road_ring_polygon), (
+    "the drawn boundary is a hard ceiling -- the fence ring must never extend past boundary_polygon_utm, even "
+    "though the road corridor's own margined footprint would otherwise cross it"
+)
+assert road_ring_polygon.bounds[3] <= 100.0 + 1e-6, "the fence ring must not cross the top boundary edge (y=100)"
+print(
+    "find_boundary_fencing(): a road corridor reaching an anchor ON the drawn boundary still gets clipped back "
+    "to the parcel -- the hard-ceiling boundary clip holds even against the corridor's own margined footprint."
 )
 
 

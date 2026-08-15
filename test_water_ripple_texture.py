@@ -234,7 +234,17 @@ def _plain_fencing_result(boundary_coordinates, dem):
         "EPSG:4326", dem["crs"], [pt[0] for pt in boundary_coordinates], [pt[1] for pt in boundary_coordinates]
     )
     boundary_polygon_utm = Polygon(zip(xs, ys))
-    rings_utm = find_boundary_fencing(boundary_polygon_utm, None)
+    # Plain no-canopy, no-developed-footprint case: every developed-footprint/zone input empty/None,
+    # so find_boundary_fencing() collapses to the boundary's own ring (see step 2's degenerate fallback).
+    rings_utm = find_boundary_fencing(
+        boundary_polygon_utm,
+        None,
+        production_zone_polygons_utm=[],
+        structure_site_polygon_utm=None,
+        road_corridor_cell_footprint_polygon_utm=None,
+        water_zone_polygon_utm=None,
+        tree_zone_polygons_utm=[],
+    )
     rings_wgs84 = [shape(transform_geom(dem["crs"], "EPSG:4326", mapping(ring))) for ring in rings_utm]
     return {
         "fencing_geojson": boundary_fencing_to_geojson(rings_wgs84),

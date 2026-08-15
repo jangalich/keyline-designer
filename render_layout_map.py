@@ -1322,6 +1322,29 @@ def fetch_layout_layers(
     water_features = parcel_data.water_features
     contour_lines = compute_contour_lines(context.dem)
 
+    # Developed-footprint inputs for the rewritten boundary fence (fencing.find_boundary_
+    # fencing()): the boundary fence now protects production + structure + road corridor
+    # path, not the full drawn boundary. All of these are ALREADY in memory here from this
+    # function's own upstream fetches -- no new network call, just extract each layer's own
+    # already-computed UTM geometry and thread it through. production_zone_polygons_utm =
+    # each ceiling-trimmed production zone's own render_fill_polygon_utm (production_area_
+    # ceiling.py's scored_patches, carried on context.production_areas); structure_site_
+    # feature = solar_suitability.py's own final rank-1 GeoJSON Feature (structure_site,
+    # reprojected inside identify_fencing()); road_corridor_cell_footprint_polygon_utm =
+    # the corridor's own undilated path footprint (road_corridors.py's top-level cell_
+    # footprint_polygon_utm), None when no corridor was selected. Water/tree developed-edge
+    # inputs are NOT threaded here -- identify_fencing() reuses the same render_fill_polygon_
+    # utm values it already derives from selected_water_zone/tree_zone_patches (already
+    # passed below), which is what makes the boundary fence meet those zones' fences exactly.
+    production_zone_polygons_utm = [
+        patch["render_fill_polygon_utm"]
+        for patch in (context.production_areas or [])
+        if patch.get("render_fill_polygon_utm") is not None
+    ]
+    road_corridor_cell_footprint_polygon_utm = (
+        selected_road_corridor["cell_footprint_polygon_utm"] if selected_road_corridor else None
+    )
+
     fencing_result = identify_fencing(
         boundary_coordinates,
         dem=context.dem,
@@ -1335,6 +1358,9 @@ def fetch_layout_layers(
         hydric_floodplain_union=context.soil_exclusion_unions["hydric_floodplain_union"],
         floodplain_data_is_fallback=context.soil_exclusion_unions["hydric_floodplain_is_fallback"],
         canopy_height=parcel_data.canopy_height,
+        production_zone_polygons_utm=production_zone_polygons_utm,
+        structure_site_feature=structure_site,
+        road_corridor_cell_footprint_polygon_utm=road_corridor_cell_footprint_polygon_utm,
     )
 
     return {

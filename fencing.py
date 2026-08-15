@@ -12,17 +12,30 @@ types get real computed geometry here:
   geometry -- a fence is a line, not an area, so this deliberately
   outputs a LineString/MultiLineString, not the buffered polygon itself.
 
-  BOUNDARY FENCING -- the property boundary is already known (the user
-  drew it), but real existing tree canopy (USGS 3DEP lidar HAG, same
-  source production_area.py's own woody-vegetation gate uses) that
-  overlaps the boundary edge itself is a real, already-sited feature --
-  not a candidate/planning zone -- so it's safe to route the fence
-  INWARD around it, the same "real, already-sited feature" reasoning
-  that justifies STREAM EXCLUSION FENCING's own buffering above. Where
-  canopy never touches the boundary edge (it sits elsewhere on the
-  property), the boundary line is unaffected. No fence type/height/
-  material guidance, which is explicitly out of scope (see report_
-  generator.py's step 7 framing).
+  BOUNDARY FENCING -- the "boundary" fence protects the property's
+  DEVELOPED FOOTPRINT (production zones + structure site + road corridor
+  path), buffered by a working margin (BOUNDARY_FENCE_MARGIN_METERS) and
+  clipped to the drawn property boundary, rather than following the full
+  drawn boundary unconditionally -- so fencing is spent on the land the
+  farm actually develops, not on unused ground out to the parcel edge.
+  Each of those developed features is a real, already-sited/scored
+  footprint (production_area_ceiling.py's ceiling-trimmed zones, solar_
+  suitability.py's selected structure site, road_corridors.py's own
+  undilated path footprint), the same "real, already-computed feature"
+  reasoning that justifies STREAM EXCLUSION FENCING's own buffering above.
+  Where a water/tree exclusion zone sits at the true outer edge of that
+  developed footprint, the boundary fence's own path coincides EXACTLY
+  with that zone's own already-buffered fence edge along that stretch --
+  a union operation (see find_boundary_fencing()), not a separate merge/
+  detection step, guaranteed by feeding BOTH computations the SAME
+  buffered polygon (_buffered_zone_polygon()). Real existing tree canopy
+  (USGS 3DEP lidar HAG, same source production_area.py's own woody-
+  vegetation gate uses) is still excluded from the fenced area where it
+  overlaps it; canopy elsewhere is unaffected. On a genuinely bare
+  property (no production, structure, or road corridor sited) this
+  collapses cleanly back to the drawn-boundary-only behavior. No fence
+  type/height/material guidance, which is explicitly out of scope (see
+  report_generator.py's step 7 framing).
 
   WATER ZONE EXCLUSION FENCING -- water_candidate_zones.py's own SINGLE
   selected water system candidate (water_suitability.select_optimal_
@@ -61,13 +74,19 @@ zones, tree zone candidates, valley/ridge delineation, road corridors,
 building placement) -- same pattern report_generator.py already uses for
 tradeoff narration elsewhere in the report. See report_generator.py's
 step 7 system-prompt guidance for exactly how that narrative is framed.
-Boundary fencing also does NOT walk around any OTHER real, already-sited
-feature (streams, roads, water zones, tree zones, production zones) even
-where those cross the boundary -- canopy is the one exception for THAT
-fence type specifically, not a precedent for routing the boundary fence
-around everything else too (streams/water zones/tree zones each get
-their own independent fence loop instead, per the sections above; roads
--- existing or generated -- get none, also per the sections above).
+The water and tree zone EXCLUSION fences above stay fully independent
+closed loops of their own regardless: where a zone sits inside the
+developed footprint with real clearance, its fence is a separate nested
+loop the boundary fence never touches; where a zone sits at the true
+outer edge, the boundary fence's own path simply coincides with (uses)
+that zone's already-buffered fence edge along that stretch and continues
+-- a byproduct of the developed-footprint union, not a merge of the two
+fence layers (the zone still renders its own full independent loop).
+Streams get their own independent exclusion loop as before. The road
+corridor's own path footprint is now PROTECTED by the boundary fence
+(margined and clipped like every other developed feature) but still gets
+no separate rendered fence line of its own (dropped/narrative-only, per
+this session's earlier decision).
 
 find_stream_exclusion_fencing(), find_boundary_fencing(), find_water_
 zone_fencing(), and find_tree_zone_fencing() are all pure geometric
@@ -108,6 +127,7 @@ from typing import Optional
 from rasterio.warp import transform as warp_transform
 from rasterio.warp import transform_geom
 from shapely.geometry import LineString, Polygon, mapping, shape
+from shapely.ops import unary_union
 
 from dem_data import get_dem_for_boundary
 from feature_schema import CONFIDENCE_HIGH, CONFIDENCE_MEDIUM, make_feature, make_feature_collection
@@ -164,6 +184,21 @@ METERS_PER_FOOT = 0.3048
 # footprint directly, no extra working-clearance margin beyond it.
 # CONFIGURABLE.
 BOUNDARY_FENCE_CANOPY_BUFFER_METERS = 0 * METERS_PER_FOOT  # 0m
+
+# Extra working clearance (meters) the boundary fence line is pushed OUTWARD past the
+# developed footprint's own real edge (production zones + structure site + road corridor
+# path), so a farmer has room to actually walk and build a fence line rather than tracing
+# flush against the last developed cell. The ONLY job of this constant is that walk/build
+# clearance -- it is NOT responsible for canopy avoidance (find_boundary_fencing()'s step 5
+# difference against real canopy handles that), root-zone buffering (already baked into WHERE
+# production/etc. were sited upstream, never a fencing-level exclusion), or water/tree
+# zone-fence buffering (each zone's own WATER_ZONE_FENCE_BUFFER_METERS/TREE_ZONE_FENCE_BUFFER_
+# METERS handles that in step 3's zone-fence union) -- each of those is handled by an earlier
+# or later step in find_boundary_fencing()'s own sequence, so this margin should not be
+# reasoned about as needing to account for them. Its own SEPARATE constant from every other
+# buffer in this module, same "constants stay separate even when they might share a value"
+# convention noted above. CONFIGURABLE -- tune by eye against the reference property.
+BOUNDARY_FENCE_MARGIN_METERS = 5.0
 
 # Area floor below which a fence-loop fragment produced by find_boundary_
 # fencing() (e.g. a sliver where canopy just grazes a boundary corner) is
@@ -330,69 +365,155 @@ def stream_exclusion_fencing_to_geojson(
 def find_boundary_fencing(
     boundary_polygon_utm: Polygon,
     canopy_union_utm: Optional[object],
-    buffer_meters: float = BOUNDARY_FENCE_CANOPY_BUFFER_METERS,
+    production_zone_polygons_utm: list[Polygon],
+    structure_site_polygon_utm: Optional[Polygon],
+    road_corridor_cell_footprint_polygon_utm: Optional[Polygon],
+    water_zone_polygon_utm: Optional[Polygon],
+    tree_zone_polygons_utm: list[Polygon],
+    margin_meters: float = BOUNDARY_FENCE_MARGIN_METERS,
+    canopy_buffer_meters: float = BOUNDARY_FENCE_CANOPY_BUFFER_METERS,
+    min_sliver_width_meters: float = BOUNDARY_FENCE_MIN_SLIVER_WIDTH_METERS,
 ) -> list[LineString]:
     """
-    Pure geometric core -- no network I/O, no DEM access. Takes the
-    property boundary and an already-fetched, already-buffered canopy
-    footprint (canopy_union_utm -- a shapely (Multi)Polygon, or None/
-    empty if there's no canopy on the property at all), both already in
-    the same UTM CRS, and returns the boundary fence line(s) routed
-    inward around any canopy that overlaps the boundary edge itself.
-    buffer_meters is carried through only for documentation/parity with
-    identify_boundary_fencing()'s own default -- the buffering itself
-    already happened in canopy_union_utm before this function ever sees
-    it (see identify_boundary_fencing()), so this function does no
-    buffering of its own.
+    Pure geometric core -- no network I/O, no DEM access. Returns the
+    boundary fence line(s) enclosing the property's DEVELOPED FOOTPRINT
+    (production zones + structure site + road corridor path), buffered by
+    a working margin and clipped to the drawn boundary, rather than
+    unconditionally following the full drawn boundary. Every input polygon
+    is already in the same UTM CRS.
 
-    No canopy at all (canopy_union_utm is None or empty): returns the
-    boundary's own exterior ring, unmodified, as a single closed
-    LineString -- the plain-wrap case, unchanged from this module's
-    earlier behavior.
+    canopy_buffer_meters is carried through only for documentation/parity
+    with identify_boundary_fencing()'s own default -- the canopy buffering
+    itself already happened in canopy_union_utm before this function ever
+    sees it (see identify_boundary_fencing()), so this function does no
+    canopy buffering of its own. margin_meters is the ONE extra working
+    clearance this function adds itself (step 2); min_sliver_width_meters
+    drives the morphological opening (step 6).
 
-    Otherwise: fence_polygon = boundary_polygon_utm.difference(canopy_union_utm),
-    then a standard morphological OPENING (erode by BOUNDARY_FENCE_MIN_
-    SLIVER_WIDTH_METERS, then dilate back by that same radius) is applied
-    to fence_polygon BEFORE ring extraction -- opened = fence_polygon.
-    buffer(-BOUNDARY_FENCE_MIN_SLIVER_WIDTH_METERS).buffer(BOUNDARY_FENCE_
-    MIN_SLIVER_WIDTH_METERS). Two close canopy notches can leave a narrow
-    "peninsula" of kept land between them -- too narrow to be a real
-    usable strip, and it makes the fence line trace pointless fine detail
-    into and back out of it. The opening snaps off any such protrusion
-    narrower than BOUNDARY_FENCE_MIN_SLIVER_WIDTH_METERS (merging it into
-    the excluded/canopy side) while leaving genuinely large land areas
-    untouched. This can itself occasionally merge what would have been
-    two legitimate separate loops back into one, or vice versa, in
-    unusual geometry -- expected, correct behavior of an opening
-    operation, not a bug. Everything downstream (ring extraction, the
-    MultiPolygon-split-into-multiple-loops handling, the min-segment-area
-    filter below) operates on `opened`, not the raw difference result.
+    Algorithm, IN THIS EXACT ORDER -- each step's output feeds the next,
+    so the separate constraints (margin, zone buffer, drawn boundary,
+    canopy) each resolve independently without jointly reasoning about
+    each other:
 
-    Only EXTERIOR rings of the (opened) result are kept -- a Polygon
-    result contributes its one exterior ring, a MultiPolygon result
-    contributes one exterior ring per piece. Interior rings (holes) are
-    discarded entirely: canopy that sits entirely inside the boundary,
-    never touching the edge, carves a hole out of the polygon, not a
-    change to the fence line itself, so it must be silently ignored
-    rather than surfaced as a spurious third fence line.
+      1. developed_footprint_union = unary_union of all production zone
+         polygons + the structure site (if any) + the road corridor's own
+         undilated path footprint (if any). Water/tree zones are
+         DELIBERATELY excluded here -- they enter separately in step 3 at
+         their OWN buffer distance, not this function's margin.
 
-    Each kept ring is returned as its own closed LineString (first coord
-    == last coord), ordered by the ring's own enclosed area, LARGEST
-    FIRST -- deterministic run to run given the same input, and this
-    becomes the ordering identify_boundary_fencing() labels "Boundary
-    Fencing 1 / 2" from. Ring fragments below BOUNDARY_FENCE_MIN_SEGMENT_
-    ACRES (e.g. a sliver where canopy just grazes a boundary corner) are
-    dropped rather than returned as a spurious extra segment.
+      2. margined_core = developed_footprint_union.buffer(margin_meters).
+         If the developed footprint is empty (a genuinely bare property --
+         no production zones, no structure, no road corridor), margined_
+         core falls back to boundary_polygon_utm itself, same as this
+         module's original boundary-only behavior -- the honest degenerate
+         case, not an error.
+
+      3. zone_fences_union = unary_union of the water zone's own buffered
+         polygon (at WATER_ZONE_FENCE_BUFFER_METERS) + each tree zone's
+         own buffered polygon (at TREE_ZONE_FENCE_BUFFER_METERS), each via
+         the SHARED _buffered_zone_polygon() the zones' own fences use.
+         protective_core = margined_core.union(zone_fences_union). Because
+         the SAME buffered polygon object feeds both this union and the
+         zone's own independently-drawn fence, wherever a zone extends past
+         margined_core's edge the union's boundary there literally BECOMES
+         that zone's own buffered edge (identical coordinates, not a nearby
+         parallel line); wherever a zone sits inside margined_core with
+         real clearance, the union changes nothing and the zone's own fence
+         stays genuinely independent.
+
+      4. clipped = protective_core.intersection(boundary_polygon_utm) --
+         the drawn boundary is a hard ceiling that always wins, so e.g. the
+         road corridor's own path (which can extend to a real anchor ON the
+         boundary) never produces fence geometry outside the property.
+
+      5. fence_polygon = clipped.difference(canopy_union_utm) when there is
+         real canopy, else clipped. This is real-canopy-only exclusion, NOT
+         any root-zone buffer -- root-buffered land was already baked into
+         WHERE production/etc. were sited upstream, was never a fencing-
+         level exclusion, and doesn't become one here, so the fence is free
+         to route through root-buffer land with no new logic.
+
+    Steps 6-7 below (the morphological OPENING and ring extraction) are
+    UNCHANGED from this module's prior boundary-fencing behavior:
+
+      6. opened = fence_polygon.buffer(-min_sliver_width_meters).buffer(
+         min_sliver_width_meters). Two close notches can leave a narrow
+         "peninsula" of kept land between them -- too narrow to be a real
+         usable strip, and it makes the fence line trace pointless fine
+         detail into and back out of it. The opening snaps off any such
+         protrusion narrower than min_sliver_width_meters while leaving
+         genuinely large areas untouched. This can itself occasionally
+         merge two would-be-separate loops into one or vice versa in
+         unusual geometry -- expected, correct behavior of an opening, not
+         a bug.
+
+      7. Only EXTERIOR rings of the (opened) result are kept -- a Polygon
+         contributes its one exterior ring, a MultiPolygon one per piece.
+         Interior rings (holes) are discarded entirely (canopy fully inside
+         the developed core carves a hole, not a change to the fence line).
+         Each kept ring is returned as its own closed LineString (first
+         coord == last coord), ordered by enclosed area LARGEST FIRST
+         (deterministic; the ordering identify_boundary_fencing() labels
+         "Boundary Fencing 1 / 2" from). Fragments below BOUNDARY_FENCE_
+         MIN_SEGMENT_ACRES are dropped rather than returned as a spurious
+         extra segment.
     """
-    if canopy_union_utm is None or canopy_union_utm.is_empty:
+    # Step 1: developed footprint (production + structure + road corridor path).
+    # Water/tree zones are deliberately NOT included here -- they enter in step 3.
+    developed_parts = [p for p in production_zone_polygons_utm if p is not None and not p.is_empty]
+    if structure_site_polygon_utm is not None and not structure_site_polygon_utm.is_empty:
+        developed_parts.append(structure_site_polygon_utm)
+    if (
+        road_corridor_cell_footprint_polygon_utm is not None
+        and not road_corridor_cell_footprint_polygon_utm.is_empty
+    ):
+        developed_parts.append(road_corridor_cell_footprint_polygon_utm)
+    developed_footprint_union = unary_union(developed_parts) if developed_parts else Polygon()
+
+    # Step 2: working margin past the developed edge -- or, on a genuinely bare
+    # property (no developed footprint at all), fall back to the drawn boundary,
+    # the honest degenerate case that reproduces this module's original behavior.
+    if developed_footprint_union.is_empty:
+        margined_core = boundary_polygon_utm
+    else:
+        margined_core = developed_footprint_union.buffer(margin_meters)
+
+    # Step 3: union in each water/tree zone's OWN buffered polygon (the SAME
+    # buffered object its own fence is drawn from -- see _buffered_zone_polygon()),
+    # so the boundary fence's path coincides EXACTLY with a zone's own fence edge
+    # wherever that zone sits at the true outer edge of the developed footprint.
+    zone_parts = []
+    if water_zone_polygon_utm is not None and not water_zone_polygon_utm.is_empty:
+        zone_parts.append(
+            _buffered_zone_polygon(water_zone_polygon_utm, WATER_ZONE_FENCE_BUFFER_METERS, "find_boundary_fencing")
+        )
+    for tree_polygon_utm in tree_zone_polygons_utm:
+        if tree_polygon_utm is None or tree_polygon_utm.is_empty:
+            continue
+        zone_parts.append(
+            _buffered_zone_polygon(tree_polygon_utm, TREE_ZONE_FENCE_BUFFER_METERS, "find_boundary_fencing")
+        )
+    zone_fences_union = unary_union(zone_parts) if zone_parts else Polygon()
+    protective_core = margined_core.union(zone_fences_union)
+
+    # Step 4: the drawn boundary is a hard ceiling -- always wins.
+    clipped = protective_core.intersection(boundary_polygon_utm)
+
+    # Degenerate boundary-only case (no developed footprint, no zone fences, no
+    # real canopy): reproduce this module's original plain-wrap behavior EXACTLY
+    # -- the boundary's own exterior ring, with no opening-step corner rounding.
+    no_canopy = canopy_union_utm is None or canopy_union_utm.is_empty
+    if developed_footprint_union.is_empty and zone_fences_union.is_empty and no_canopy:
         return [LineString(boundary_polygon_utm.exterior.coords)]
 
-    fence_polygon_utm = boundary_polygon_utm.difference(canopy_union_utm)
+    # Step 5: real-canopy-only exclusion (never a root-zone buffer -- see docstring).
+    fence_polygon_utm = clipped if no_canopy else clipped.difference(canopy_union_utm)
     if fence_polygon_utm.is_empty:
         return []
 
-    opened_fence_polygon_utm = fence_polygon_utm.buffer(-BOUNDARY_FENCE_MIN_SLIVER_WIDTH_METERS).buffer(
-        BOUNDARY_FENCE_MIN_SLIVER_WIDTH_METERS
+    # Step 6: morphological opening (UNCHANGED existing sliver-cleanup step).
+    opened_fence_polygon_utm = fence_polygon_utm.buffer(-min_sliver_width_meters).buffer(
+        min_sliver_width_meters
     )
     if opened_fence_polygon_utm.is_empty:
         return []
@@ -506,14 +627,28 @@ TREE_ZONE_FENCE_CONFIDENCE_NOTES_TEMPLATE = (
 )
 
 
-def _buffer_fill_polygon_to_fence_line(polygon_utm: Polygon, buffer_meters: float, caller_label: str) -> LineString:
+def _buffered_zone_polygon(
+    polygon_utm: Polygon, buffer_meters: float, caller_label: str = "_buffered_zone_polygon"
+) -> Polygon:
     """
-    Shared buffer-and-outline core for find_water_zone_fencing()/find_tree_
-    zone_fencing() below -- both fence an already-computed real fill polygon
-    (water_candidate_zones.py's/tree_zone_candidates.py's own render_fill_
-    polygon_utm, NOT raw DEM path cells) by buffering it outward and
-    returning the outline, the SAME "buffer a real feature, output its
-    outline" recipe find_stream_exclusion_fencing() already uses.
+    Shared buffered-zone-POLYGON core -- the single place a water/tree zone's
+    own already-computed real fill polygon (water_candidate_zones.py's/tree_
+    zone_candidates.py's own render_fill_polygon_utm, NOT raw DEM path cells)
+    is buffered outward by its own zone-fence distance. Extracted here so it
+    is called from THREE places off ONE definition:
+
+      - find_water_zone_fencing()/find_tree_zone_fencing() (via
+        _buffer_fill_polygon_to_fence_line() below), which take this buffered
+        polygon's OUTLINE as the zone's own independently-drawn fence line;
+      - find_boundary_fencing()'s step 3 zone-fence union, which unions this
+        SAME buffered polygon into the boundary fence's protective core.
+
+    Because both computations start from the identical buffered polygon
+    (same input polygon + same buffer distance -> same coordinates), the
+    boundary fence's "where a zone sits at the developed edge, my path
+    BECOMES that zone's own fence edge" behavior is exact BY CONSTRUCTION,
+    not by two independent buffer calls that merely happen to share a
+    constant and could drift apart under a future retune.
 
     A positive buffer of a real, already-computed polygon should never come
     back empty, invalid, or anything other than a single Polygon, so there
@@ -528,7 +663,20 @@ def _buffer_fill_polygon_to_fence_line(polygon_utm: Polygon, buffer_meters: floa
             f"valid={buffered.is_valid}) -- a positive buffer of a real, already-computed polygon "
             "should never do this, and there is no sensible fallback shape here."
         )
-    return LineString(buffered.exterior.coords)
+    return buffered
+
+
+def _buffer_fill_polygon_to_fence_line(polygon_utm: Polygon, buffer_meters: float, caller_label: str) -> LineString:
+    """
+    Shared buffer-and-outline core for find_water_zone_fencing()/find_tree_
+    zone_fencing() below -- both fence an already-computed real fill polygon
+    by taking the OUTLINE of _buffered_zone_polygon()'s own buffered polygon
+    (see that helper's docstring for the recipe, the shared-buffered-polygon
+    exactness guarantee, and the "no sensible fallback" reasoning on an
+    unexpected buffer result). This is the SAME "buffer a real feature,
+    output its outline" recipe find_stream_exclusion_fencing() already uses.
+    """
+    return LineString(_buffered_zone_polygon(polygon_utm, buffer_meters, caller_label).exterior.coords)
 
 
 def find_water_zone_fencing(
@@ -664,9 +812,14 @@ def identify_boundary_fencing(
     boundary_coordinates: list[tuple[float, float]],
     dem: Optional[dict] = None,
     canopy_height: Optional[dict] = None,
+    production_zone_polygons_utm: Optional[list] = None,
+    structure_site_polygon_utm: Optional[Polygon] = None,
+    road_corridor_cell_footprint_polygon_utm: Optional[Polygon] = None,
+    water_zone_polygon_utm: Optional[Polygon] = None,
+    tree_zone_polygons_utm: Optional[list] = None,
 ) -> dict:
     """
-    Fetch-and-wrap entry point for canopy-aware boundary fencing. Fetches
+    Fetch-and-wrap entry point for the developed-footprint boundary fence. Fetches
     dem if not supplied (get_dem_for_boundary(), same pattern every other
     module in this codebase uses), builds boundary_polygon_utm from
     boundary_coordinates via dem["crs"] (same warp_transform pattern
@@ -694,6 +847,18 @@ def identify_boundary_fencing(
     union production_area_ceiling.py/tree_zone_candidates.py already use,
     NOT a convex hull, so the fence line notches around canopy's real,
     possibly-jagged shape rather than a smoothed approximation.
+
+    production_zone_polygons_utm/structure_site_polygon_utm/road_corridor_
+    cell_footprint_polygon_utm/water_zone_polygon_utm/tree_zone_polygons_utm
+    are the developed-footprint + zone inputs find_boundary_fencing() now
+    protects (see its own docstring for the full algorithm). They are pure
+    PASS-THROUGH here -- this entry point does no siting of its own and
+    never self-computes them; a caller (identify_fencing()) supplies
+    whatever it already has, each already in dem["crs"]. All default to
+    None/empty, in which case find_boundary_fencing() collapses to this
+    module's original boundary-only behavior (see step 2's degenerate
+    fallback), so identify_boundary_fencing()'s own existing callers that
+    pass only boundary_coordinates/dem/canopy_height are unaffected.
 
     find_boundary_fencing() then does the actual routing (pure geometry,
     see that function's own docstring), and each returned UTM ring is
@@ -723,7 +888,14 @@ def identify_boundary_fencing(
     canopy_union_utm = cell_union_footprint(dem, tree_root_zone_mask_utm)
 
     fence_rings_utm = find_boundary_fencing(
-        boundary_polygon_utm, canopy_union_utm, buffer_meters=BOUNDARY_FENCE_CANOPY_BUFFER_METERS
+        boundary_polygon_utm,
+        canopy_union_utm,
+        production_zone_polygons_utm or [],
+        structure_site_polygon_utm,
+        road_corridor_cell_footprint_polygon_utm,
+        water_zone_polygon_utm,
+        tree_zone_polygons_utm or [],
+        canopy_buffer_meters=BOUNDARY_FENCE_CANOPY_BUFFER_METERS,
     )
     segment_count = len(fence_rings_utm)
 
@@ -754,6 +926,9 @@ def identify_fencing(
     hydric_floodplain_union=None,
     floodplain_data_is_fallback: Optional[bool] = None,
     canopy_height: Optional[dict] = None,
+    production_zone_polygons_utm: Optional[list[Polygon]] = None,
+    structure_site_feature: Optional[dict] = None,
+    road_corridor_cell_footprint_polygon_utm: Optional[Polygon] = None,
 ) -> dict:
     """
     Full pipeline entry point for Subdivision Fences' computed geometry
@@ -863,6 +1038,29 @@ def identify_fencing(
     supplying canopy_height here never causes any of these four calls to
     issue its own redundant canopy fetch.
 
+    production_zone_polygons_utm/structure_site_feature/road_corridor_cell_
+    footprint_polygon_utm are this branch's addition -- the developed-
+    footprint inputs the rewritten boundary fence now protects (see find_
+    boundary_fencing()). They are received as ALREADY-COMPUTED results
+    (same pattern as dem above), NOT re-sited here: a caller (render_layout_
+    map.fetch_layout_layers()) passes production_area_ceiling.py's ceiling-
+    trimmed zone polygons (each zone's render_fill_polygon_utm, in
+    dem["crs"]), solar_suitability.py's OWN final structure-site GeoJSON
+    Feature (whose geometry is WGS84 and is reprojected into dem["crs"]
+    here before use), and road_corridors.py's own undilated cell_footprint_
+    polygon_utm (the raw path shape, NOT any dilated/inset fence geometry --
+    the road corridor's own fence line stays dropped/narrative-only; only
+    its bare path footprint is protected here). The water/tree developed-
+    edge inputs are NOT new parameters -- find_boundary_fencing() reuses the
+    SAME selected_water_zone_render_fill_polygon_utm/tree_zone_render_fill_
+    polygons_utm this function already derives for the water/tree zone
+    fences, so the boundary fence meets those zones' own fence edges exactly
+    by construction. Any of these left None/empty (no production sited, no
+    structure, no road corridor, no water/tree zone) is handled gracefully
+    by find_boundary_fencing()'s own degenerate fallbacks -- this function
+    just passes through whatever it has, substituting no defaults and
+    skipping no call.
+
     Returns:
         {
             'fencing_geojson': FeatureCollection,   # "exclusion_fencing" (stream) + "perimeter_fencing" (boundary + water zone + tree zone) features
@@ -889,8 +1087,6 @@ def identify_fencing(
 
     utm_crs = _utm_crs_for_boundary(boundary_coordinates)
     stream_entries = find_stream_exclusion_fencing(stream_features, utm_crs, stream_exclusion_buffer_meters)
-
-    boundary_result = identify_boundary_fencing(boundary_coordinates, dem=dem, canopy_height=canopy_height)
 
     if selected_water_zone_render_fill_polygon_utm is None:
         if selected_water_zone is None:
@@ -969,6 +1165,37 @@ def identify_fencing(
     ]
     tree_zone_geojson = tree_zone_fencing_to_geojson(
         tree_fence_lines_wgs84, buffer_meters=tree_zone_fence_buffer_meters
+    )
+
+    # Boundary fencing now protects the DEVELOPED FOOTPRINT (production + structure +
+    # road corridor path), buffered by a margin and clipped to the drawn boundary, with
+    # water/tree zones unioned in at their own fence distance (see find_boundary_fencing()).
+    # The water/tree polygons handed in here are the SAME already-derived render_fill_
+    # polygon_utm values the water/tree zone fences above were built from -- reusing them
+    # (rather than re-buffering independently) is what makes the boundary fence's path
+    # coincide EXACTLY with a zone's own fence edge where that zone sits at the developed
+    # edge. structure_site_feature is solar_suitability.py's final GeoJSON Feature, whose
+    # geometry is WGS84 (confirmed against that module); it is reprojected into dem["crs"]
+    # here so it lands in the same UTM space as every other developed-footprint input.
+    # production_zone_polygons_utm/road_corridor_cell_footprint_polygon_utm are pure
+    # pass-throughs (already-computed results a caller supplies, per this function's docstring
+    # pattern), each already in dem["crs"]; any that a caller leaves None/empty collapses that
+    # part of find_boundary_fencing()'s footprint union cleanly, no substitute/default.
+    structure_site_polygon_utm = None
+    if structure_site_feature is not None and structure_site_feature.get("geometry") is not None:
+        structure_site_polygon_utm = shape(
+            transform_geom("EPSG:4326", dem["crs"], structure_site_feature["geometry"])
+        )
+
+    boundary_result = identify_boundary_fencing(
+        boundary_coordinates,
+        dem=dem,
+        canopy_height=canopy_height,
+        production_zone_polygons_utm=production_zone_polygons_utm or [],
+        structure_site_polygon_utm=structure_site_polygon_utm,
+        road_corridor_cell_footprint_polygon_utm=road_corridor_cell_footprint_polygon_utm,
+        water_zone_polygon_utm=selected_water_zone_render_fill_polygon_utm,
+        tree_zone_polygons_utm=tree_zone_render_fill_polygons_utm,
     )
 
     features = (
