@@ -243,26 +243,24 @@ why that specific combination, not a cleared edgecolor, is what achieves
 this: a patch's hatch color follows its edgecolor, and a patch's hatch
 stroke width comes from matplotlib's own rcParams["hatch.linewidth"],
 independent of the patch's own linewidth). The geometry drawn is still
-its own render_fill_polygon_utm -- now a bounded morphological OPENING of
-the patch's own cell mask (disc erode-then-dilate at TREE_ZONE_RENDER_
-OPENING_RADIUS_METERS, no lead erode), clipped to the patch's real
-footprint, NOT a convex hull -- the same construction water_candidate_
-zones._render_opening() uses (see tree_zone_candidates.py's own
-score_tree_search_space() for the full rationale). Same field production_
-area.py's/water_candidate_zones.py's own patches/zones already carry --
-NOT the patch's real geometry_wgs84 (used for area_acres/scoring/the
-narrative report, completely untouched by this). Unlike the old hull, an
-opening is anti-extensive: it trims single-cell protrusions and can sever
-a narrow pinch (so render_fill_polygon_utm may be a MultiPolygon), and it
-does NOT close over interior pockets -- a hole the CANOPY EXCLUSION GATE
-(or a sub-threshold score) carves out of an otherwise-contiguous candidate
-stays OPEN, so the hatch now follows the real cell-union shape, interior
-canopy pockets and all, rather than a smoothed outer envelope. A candidate
-whose mask fully erodes to nothing is DROPPED upstream (the survival gate),
-so every drawn patch has a real, non-empty opening. Zone identity is still
-carried by the numbered marker placed on that same opened geometry and by
-the corresponding legend line -- the hatch by itself doesn't need to
-enclose a filled area to read as a distinct zone on the map. The
+its own render_fill_polygon_utm -- which for tree zones is the patch's real
+cell-union footprint, UNMODIFIED (identical to polygon_utm): no hull, no
+opening, no smoothing of any kind. This DIVERGES from production_area.py's
+and water_candidate_zones.py's own render fills, which DO open/hull their
+geometry -- deliberately, because tree candidates are the thin, branching
+leftover ground threading between production/water/road, and those narrow
+arms and interior pockets are exactly the geometry this layer exists to
+find (a windbreak row, a riparian strip, a narrow edge planting). An
+opening would delete them; a thin arm is unworkable as a cultivation block
+or a pond but is a genuinely useful tree feature. So the hatch follows the
+real cell-union shape verbatim -- thin arms and all -- and interior canopy
+pockets stay OPEN as real holes, which is correct: the zone genuinely wraps
+around existing canopy. render_fill_polygon_utm may still be a MultiPolygon
+whenever the real footprint is (a candidate split across search-space gaps).
+It is NOT the patch's real geometry_wgs84 field, but geometrically equal to
+polygon_utm. Zone identity is still carried by the numbered marker placed on
+that geometry and by the corresponding legend line -- the hatch by itself
+doesn't need to enclose a filled area to read as a distinct zone on the map. The
 hatch is a deliberate, visible "candidate, not a committed site" cue,
 consistent with this layer's own CONFIDENCE_LOW rating and its explicit
 "not a definite planting plan" framing (see tree_zone_candidates.py's own
@@ -1702,12 +1700,13 @@ def render_layout_map(
     # multiple" shape as production zones and the road network's own
     # branches above, not a single selection like water_zone/structure_
     # site) -- see this module's own TREE ZONE STYLE docstring section
-    # for the hatch-only styling rationale. DISPLAY-ONLY fill geometry:
-    # render_fill_polygon_utm is a
-    # bounded morphological opening of the patch's own cell mask, clipped
-    # to its real footprint (see score_tree_search_space()'s own
-    # docstring) -- may be a MultiPolygon, which the loop below handles the
-    # same way the water zone's own fill does -- already in the DEM's
+    # for the hatch-only styling rationale. Fill geometry:
+    # render_fill_polygon_utm is the patch's real cell-union footprint,
+    # UNMODIFIED -- no hull, no opening, no smoothing (unlike production/water,
+    # this layer draws thin arms and interior pockets verbatim; see
+    # score_tree_search_space()'s own docstring) -- may be a MultiPolygon,
+    # which the loop below handles the same way the water zone's own fill
+    # does -- already in the DEM's
     # own UTM CRS -- reprojected in one hop
     # (_reproject_utm_geometry_to_mercator(), same pattern the water
     # zone's own fill above already uses), never the real geometry_wgs84

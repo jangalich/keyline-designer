@@ -290,13 +290,7 @@ region2_steep = _col_box(30, 50)
 region3_flat_marginal = _col_box(60, 80)
 region4_prime_farmland = _col_box(90, 110)
 region5_stream_adjacent = _col_box(120, 130)
-# 3x3 cells (9 cells, 225 sqm = 0.0556 ac): deliberately sized to SURVIVE the
-# render-opening survival gate (a 3x3 block keeps a 1-cell plantable core after
-# the r=1 disc opening) while staying well BELOW the MIN_TREE_ZONE_ACRES floor,
-# so this fixture still isolates the SIZE filter. A 2x2 block (the earlier
-# fixture) would instead erode to nothing and be dropped by the survival gate --
-# that path is covered separately in test_tree_zone_render_opening.py.
-region6_tiny_hydric = box(ORIGIN_X + 140 * 5.0, ORIGIN_Y - 3 * 5.0, ORIGIN_X + 143 * 5.0, ORIGIN_Y)  # 3x3 cells
+region6_tiny_hydric = box(ORIGIN_X + 140 * 5.0, ORIGIN_Y - 2 * 5.0, ORIGIN_X + 142 * 5.0, ORIGIN_Y)  # 2x2 cells only
 
 search_space_utm = unary_union(
     [region1_hydric_flat, region2_steep, region3_flat_marginal, region4_prime_farmland, region5_stream_adjacent, region6_tiny_hydric]
@@ -385,25 +379,18 @@ print(f"Region 5 (near stream only) scores {region5_only_patches[0]['tree_suitab
       f"stream_proximity_factor={region5_only_patches[0]['stream_proximity_factor']} -- confirms stream proximity "
       "alone is correctly too minor to qualify land on its own.")
 
-# region 6 (small 3x3 hydric patch) -- explicitly re-score in isolation:
-# qualifies on SCORE and survives the render-opening survival gate (a 3x3 block
-# keeps a plantable core), but is dropped by the SIZE filter. With the size
-# floor disabled it comes back as one scored candidate, proving the drop below
-# is the size filter doing real work, not the score threshold or the survival
-# gate. (A patch too thin to survive the opening -- e.g. a 1-cell-wide chain --
-# is dropped by the survival gate instead; see test_tree_zone_render_opening.py.)
+# region 6 (tiny 2x2 hydric patch) -- explicitly re-score in isolation: qualifies on SCORE, dropped by the SIZE filter
 region6_only_patches = score_tree_search_space(
     dem, region6_tiny_hydric, boundary_polygon_utm, hydric_union=hydric_union, min_area_acres=0.0,
 )
-assert len(region6_only_patches) == 1, "with the size filter disabled, region 6 should score high enough AND survive the opening to qualify"
+assert len(region6_only_patches) == 1, "with the size filter disabled, region 6 should score high enough to qualify"
 assert region6_only_patches[0]["tree_suitability_score"] >= tzc.MIN_TREE_SUITABILITY_SCORE
 assert region6_only_patches[0]["area_acres"] < tzc.MIN_TREE_ZONE_ACRES
 region6_filtered = score_tree_search_space(dem, region6_tiny_hydric, boundary_polygon_utm, hydric_union=hydric_union)
-assert region6_filtered == [], "with the real default size filter applied, the small hydric patch must be dropped"
-print(f"Region 6 (small 3x3 hydric patch, {region6_only_patches[0]['area_acres']}ac) scores high enough to qualify "
-      f"({region6_only_patches[0]['tree_suitability_score']}/100) and survives the opening, but is correctly dropped by "
-      f"MIN_TREE_ZONE_ACRES ({tzc.MIN_TREE_ZONE_ACRES}ac) -- proves the size filter, not just the score threshold or the "
-      f"survival gate, is doing real work.")
+assert region6_filtered == [], "with the real default size filter applied, the tiny hydric patch must be dropped"
+print(f"Region 6 (tiny hydric patch, {region6_only_patches[0]['area_acres']}ac) scores high enough to qualify "
+      f"({region6_only_patches[0]['tree_suitability_score']}/100) but is correctly dropped by MIN_TREE_ZONE_ACRES "
+      f"({tzc.MIN_TREE_ZONE_ACRES}ac) -- proves the size/shape filter, not just the score threshold, is doing real work.")
 
 
 # =====================================================================
@@ -472,11 +459,12 @@ print("Canopy exclusion gate: tree_root_zone_mask_utm=None reproduces the ungate
 
 
 # =====================================================================
-# render_fill_polygon_utm: a bounded morphological OPENING (NOT a convex hull).
-# An opening is anti-extensive and clipped to the real footprint, so it leaves a
-# real interior notch (e.g. one the CANOPY EXCLUSION GATE carves) OPEN rather
-# than closing over it, and never exceeds the footprint's area -- the same field
-# production_area.py's and water_candidate_zones.py's own patches/zones carry.
+# render_fill_polygon_utm: the patch's real cell-union footprint, UNMODIFIED
+# (identical to polygon_utm). No hull, no opening, no smoothing: a real interior
+# notch (e.g. one the CANOPY EXCLUSION GATE carves) stays OPEN as a real hole,
+# and the drawn area equals the footprint area exactly. This DIVERGES from
+# production_area.py's and water_candidate_zones.py's own render fills (which do
+# open/hull) -- see this module's own render_fill_polygon_utm comment for why.
 # =====================================================================
 
 # A small canopy pocket sitting STRICTLY INSIDE region 1's own interior (rows 8-11, cols
@@ -503,37 +491,32 @@ assert real_footprint.intersection(pocket_box).area < 1e-6, (
     "the real footprint must genuinely EXCLUDE the canopy pocket -- area_acres/scoring must "
     "never reflect ground that's actually under canopy"
 )
-# The opening (unlike the old hull) leaves the interior pocket OPEN: an opening is a
-# subset of the mask, and the pocket cells were never in the mask, so it can never
-# reappear in render_fill.
+# render_fill_polygon_utm is the real footprint UNMODIFIED, so the interior pocket
+# stays OPEN and the drawn geometry equals the footprint exactly.
+assert render_fill.equals(real_footprint), (
+    "render_fill_polygon_utm must be geometrically IDENTICAL to the real footprint -- no hull, no opening, "
+    "no smoothing of any kind"
+)
 assert render_fill.intersection(pocket_box).area < 1e-6, (
-    "render_fill_polygon_utm (a bounded opening) must leave the interior canopy pocket OPEN -- an opening is "
-    "anti-extensive and clipped to the footprint, so it never closes over a real interior notch the way the "
-    "old convex hull did"
+    "render_fill_polygon_utm must leave the interior canopy pocket OPEN as a real hole -- the zone genuinely "
+    "wraps around existing canopy, and nothing closes that hole"
 )
-assert render_fill.difference(real_footprint).area < 1e-6, (
-    "render_fill_polygon_utm must be a subset of the real footprint (clipped to it by construction)"
-)
-assert render_fill.area <= real_footprint.area + 1e-6, (
-    "an opening never has MORE area than the real footprint -- the opposite of the old hull, which closed "
-    "over notches and GAINED area"
-)
-# non-vacuous: the OLD convex hull WOULD have closed this pocket -- assert it, so this
-# fixture provably exercises a real behavior change.
+# non-vacuous: a convex hull (the geometry this layer deliberately does NOT use)
+# WOULD have closed this pocket -- assert it, so this fixture provably guards against
+# ever reintroducing a hull/opening here.
 assert pocket_box.difference(real_footprint.convex_hull).area < 1e-6, (
-    "sanity check: the old convex-hull behavior would have closed over this interior pocket -- if it "
-    "wouldn't have, this fixture isn't testing a real change"
+    "sanity check: a convex hull would have closed over this interior pocket -- the point of drawing the raw "
+    "footprint is precisely that it does NOT"
 )
 print(
     f"render_fill_polygon_utm: a canopy pocket carved out of region 1's own interior leaves the real "
-    f"footprint ({real_footprint.area}sqm) genuinely excluding it, and render_fill_polygon_utm "
-    f"({render_fill.area}sqm, a bounded opening) leaves it OPEN too -- whereas the old convex hull would "
-    "have closed over it. Confirms the opening, clipped to the footprint, is what render_layout_map.py draws."
+    f"footprint ({real_footprint.area}sqm) genuinely excluding it, and render_fill_polygon_utm is that same "
+    f"footprint UNMODIFIED -- the pocket stays OPEN, whereas a convex hull would have closed over it. "
+    "Confirms the raw footprint, not a hull or opening, is what render_layout_map.py draws."
 )
 
-# The ordinary, un-notched case (region 2, a solid rectangle, no canopy gate): the disc
-# opening trims ONLY the four single-cell corners (each a corner protrusion narrower than
-# 2r), leaving a non-empty subset of the real footprint with no interior change.
+# The ordinary, un-notched case (region 2, a solid rectangle, no canopy gate): render_fill_
+# polygon_utm equals the real footprint exactly -- no hull, no opening, no corner trimming.
 region2_plain_patches = score_tree_search_space(
     dem, region2_steep, boundary_polygon_utm, min_score=0.0, min_area_acres=0.0,
 )
@@ -541,19 +524,16 @@ assert len(region2_plain_patches) == 1
 plain_patch = region2_plain_patches[0]
 plain_render = plain_patch["render_fill_polygon_utm"]
 plain_footprint = plain_patch["polygon_utm"]
-assert not plain_render.is_empty and plain_render.area > 0, "a solid block's opening must be non-empty"
-assert plain_render.difference(plain_footprint).area < 1e-6, "the opening must stay within the real footprint"
-# region 2 is a solid 20x20-cell rectangle; the disc opening of a solid rectangle removes
-# exactly its four corner cells (4 * one-cell area), nothing else.
-_CELL_SQM = RESOLUTION[0] * RESOLUTION[1]
-assert abs(plain_render.area - (plain_footprint.area - 4 * _CELL_SQM)) < 1e-6, (
-    f"the opening of a solid rectangle trims exactly its four single-cell corners "
-    f"({4 * _CELL_SQM} sqm); got footprint {plain_footprint.area} sqm, render {plain_render.area} sqm"
+assert not plain_render.is_empty and plain_render.area > 0, "a solid block's render fill must be non-empty"
+assert plain_render.equals(plain_footprint), (
+    "a solid patch's render_fill_polygon_utm must be geometrically IDENTICAL to its real, un-modified "
+    "polygon_utm -- the raw footprint is drawn verbatim, no corners trimmed"
 )
+assert abs(plain_render.area - plain_footprint.area) < 1e-6, "drawn area must equal footprint area exactly"
 print(
-    f"render_fill_polygon_utm: an ordinary solid-rectangle candidate's opening ({plain_render.area}sqm) is its "
-    f"real footprint ({plain_footprint.area}sqm) minus exactly its four single-cell corners -- the only visible "
-    "change for the common, un-notched case."
+    f"render_fill_polygon_utm: an ordinary solid-rectangle candidate's render fill ({plain_render.area}sqm) is "
+    f"geometrically identical to its real footprint ({plain_footprint.area}sqm) -- the raw footprint is drawn "
+    "verbatim for every candidate."
 )
 
 

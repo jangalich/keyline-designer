@@ -232,7 +232,6 @@ testable against a synthetic DEM). identify_tree_zone_candidates() is the
 full fetch-and-score entry point.
 """
 
-import logging
 import math
 from typing import Optional
 
@@ -249,15 +248,7 @@ from feature_schema import CONFIDENCE_LOW, make_feature, make_feature_collection
 from hydrology_data import get_water_features_for_boundary
 from production_area import compute_slope_percent, get_required_tree_root_zone_mask_utm
 from production_area_ceiling import identify_optimized_production_areas
-from raster_grid import (
-    SQUARE_METERS_PER_ACRE,
-    binary_dilate,
-    cell_union_footprint,
-    connected_components,
-    eroded_cell_mask,
-    pixel_center_xy,
-    waist_erosion_radius_cells,
-)
+from raster_grid import SQUARE_METERS_PER_ACRE, binary_dilate, cell_union_footprint, connected_components, pixel_center_xy
 from road_corridors import identify_road_corridor_candidates
 from soil_data import (
     coordinates_to_wkt_polygon,
@@ -268,8 +259,6 @@ from soil_data import (
     is_prime_farmland,
 )
 from water_suitability import identify_water_suitability
-
-_LOGGER = logging.getLogger(__name__)
 
 # --- composite weights (must sum to 1.0). CONFIGURABLE -- tune against a
 # real property once ground-truthed, same "documented but adjustable"
@@ -390,22 +379,6 @@ MIN_TREE_SUITABILITY_SCORE = 31.0
 # tuned constant is documented as deliberately NOT aliased so the two floors
 # can be retuned without one silently dragging the other along.
 MIN_TREE_ZONE_ACRES = 0.1
-
-# Radius (meters) of the bounded morphological OPENING applied to each tree
-# patch's own cell mask to build its render_fill_polygon_utm -- a disc
-# erode-then-dilate that softens the blocky cell-union edge and trims
-# single-cell protrusions (see score_tree_search_space()'s own body). At the
-# reference property's 5m grid this is r = 1 cell; an opening removes features
-# narrower than 2r, so a 1-cell-wide arm is removed while a 2-cell-wide arm
-# survives. NO lead erode: a ~16-cell zone (the MIN_TREE_ZONE_ACRES floor)
-# cannot afford to lose a cell off every edge (water_candidate_zones.py's own
-# WATER_ZONE_RENDER_OPENING_RADIUS_METERS comment makes the same argument for
-# an ~81-cell zone; a tree zone at this floor is a fifth that size, so the
-# argument is only stronger here). Deliberately its OWN constant, NOT aliased
-# to water_candidate_zones.WATER_ZONE_RENDER_OPENING_RADIUS_METERS even though
-# the value is numerically identical today -- the sizing reasoning differs and
-# the two must stay independently tunable. CONFIGURABLE.
-TREE_ZONE_RENDER_OPENING_RADIUS_METERS = 5.0
 
 # Buffer (meters) around EXISTING tree canopy (real USGS 3DEP lidar HAG
 # coverage, canopy_height_data.tree_root_zone_mask()) within which a DEM
@@ -804,19 +777,19 @@ def score_tree_search_space(
             'id': int,
             'rank': int,
             'polygon_utm': shapely Polygon/MultiPolygon,
-            'render_fill_polygon_utm': shapely Polygon/MultiPolygon,  # DISPLAY-oriented bounded
-                # morphological OPENING of this patch's own cell mask (disc erode-then-dilate at
-                # TREE_ZONE_RENDER_OPENING_RADIUS_METERS, no lead erode), clipped to polygon_utm --
-                # the same construction water_candidate_zones._render_opening() uses; NOT a convex
-                # hull. May be a MultiPolygon when the opening severs a narrow pinch, and (unlike
-                # the old hull) it leaves real interior pockets open rather than closing them.
-                # Same field/reasoning production_area.py's/water_candidate_zones.py's own
-                # patches/zones already carry; NEVER used for area_acres/scoring/eligibility, which
-                # stay on polygon_utm. Despite the "display-only" framing, this field is also
-                # consumed by fencing.py (via render_layout_map.py's fetch_layout_layers()
-                # -> identify_fencing() call) to build the tree_zone_exclusion fence loops, so it
-                # isn't purely cosmetic. A candidate whose mask fully erodes is DROPPED (survival
-                # gate), so every returned entry has a non-empty opening -- see this function's body.
+            'render_fill_polygon_utm': shapely Polygon/MultiPolygon,  # the patch's real
+                # cell-union footprint, UNMODIFIED -- identical to polygon_utm. No hull, no
+                # opening, no smoothing or simplification of any kind: this layer's candidates
+                # are the thin, branching leftover ground threading between production/water/
+                # road, and those narrow arms and interior pockets are exactly the geometry it
+                # exists to find, so the drawn shape is the real footprint (thin arms preserved,
+                # interior canopy pockets preserved as real holes). This is a DELIBERATE
+                # divergence from production_area.py's/water_candidate_zones.py's own render
+                # fills, which DO open/hull their geometry -- a thin arm is unworkable as a
+                # cultivation block or a pond but a genuinely useful tree feature. Carried as a
+                # separate field only for interface parity with those layers; also consumed by
+                # fencing.py (via render_layout_map.py's fetch_layout_layers() ->
+                # identify_fencing() call) to build the tree_zone_exclusion fence loops.
             'geometry_wgs84': GeoJSON geometry dict,
             'area_acres': float,
             'tree_suitability_score': float,   # 0-100
@@ -904,7 +877,6 @@ def score_tree_search_space(
 
     candidate_mask = (~np.isnan(composite_grid)) & (composite_grid >= min_score / SUITABILITY_SCORE_SCALE)
     labels, num_components = connected_components(candidate_mask)
-    grid_shape = labels.shape
 
     px, py = dem["resolution_meters"]
     patches = []
@@ -924,72 +896,6 @@ def score_tree_search_space(
         area_acres = footprint.area / SQUARE_METERS_PER_ACRE
         if area_acres < min_area_acres:
             continue
-
-        # render_fill_polygon_utm: a bounded morphological OPENING of THIS
-        # patch's own cell mask, clipped to its real footprint -- the display
-        # fill, and (via render_layout_map.py's identify_fencing() call) the
-        # source of the tree_zone_exclusion fence loops. Disc erode-then-
-        # dilate at TREE_ZONE_RENDER_OPENING_RADIUS_METERS with NO lead erode,
-        # the SAME construction water_candidate_zones._render_opening() uses.
-        # The opening softens the blocky cell-union edge and trims features
-        # narrower than 2r (a 1-cell-wide arm at r=1 cell); it may sever a
-        # genuinely too-narrow pinch, so the result can be a MultiPolygon
-        # (acceptable and expected, same as water). Unlike the old convex
-        # hull, an opening is anti-extensive -- it never fills a real interior
-        # pocket (an excluded-canopy or sub-threshold hole in the mask stays
-        # open), which is the honest read of the ground the patch actually
-        # occupies.
-        #
-        # SURVIVAL GATE: a patch whose mask fully erodes has NO plantable
-        # block -- 8-connected labeling (this module's behavior) lets a
-        # candidate thread diagonally into narrow cavities between claimed
-        # zones, and a chain of corner-touching cells is one component but not
-        # a plantable block: it erodes to nothing at r = 1 cell. Water falls
-        # back to polygon_utm because its single selected zone must always
-        # render something; the tree layer has no such requirement -- it is a
-        # ranked candidate list, and DROPPING a non-viable candidate is the
-        # honest outcome, so this `continue`s rather than falling back. Placed
-        # here (after the area gate, before per-factor scoring) so a discarded
-        # patch never costs five factor averages, and so it runs before
-        # patches.append() -- the post-loop sort/rank must produce contiguous
-        # ranks with no gaps. The `opened` mask and its geometry computed here
-        # are reused verbatim for render_fill_polygon_utm below (not recomputed).
-        radius_cells = waist_erosion_radius_cells(dem, TREE_ZONE_RENDER_OPENING_RADIUS_METERS)
-        opened = binary_dilate(
-            eroded_cell_mask(cells, grid_shape, dem, TREE_ZONE_RENDER_OPENING_RADIUS_METERS, element="disc"),
-            radius_cells,
-            element="disc",
-        )
-        if not opened.any():
-            _LOGGER.warning(
-                "score_tree_search_space: the TREE_ZONE_RENDER_OPENING_RADIUS_METERS=%.1fm opening eroded a "
-                "%d-cell candidate (%.4f acres) to nothing; dropping it -- a fully-eroded component is a "
-                "corner-touching thread, not a plantable block.",
-                TREE_ZONE_RENDER_OPENING_RADIUS_METERS,
-                len(cells),
-                area_acres,
-            )
-            continue
-
-        # Build the drawn geometry from the opened cell mask, clipped to the
-        # real footprint. footprint is ALREADY the cell union intersected with
-        # search_space_utm and boundary_polygon_utm, so the drawn fill inherits
-        # both constraints by construction -- an additional .intersection(
-        # search_space_utm) here would be strictly redundant (the containment
-        # assertion just below is the guardrail, not a belt-and-braces clip).
-        render_fill_polygon_utm = cell_union_footprint(dem, opened).intersection(footprint)
-        # Containment invariant: the drawn fill is a subset of the footprint
-        # (the opening is anti-extensive and clipped to it, so this holds by
-        # construction) -- assert and raise on violation, matching water_
-        # candidate_zones.find_candidate_zones()'s own hard-containment
-        # discipline. Permanent guardrail, not a debug check.
-        if render_fill_polygon_utm.area > footprint.area * (1 + 1e-9) + 1e-6:
-            raise ValueError(
-                "score_tree_search_space: render_fill_polygon_utm.area "
-                f"({render_fill_polygon_utm.area:.6f} m^2) exceeds footprint.area "
-                f"({footprint.area:.6f} m^2) -- the opening's clip to the footprint must keep the "
-                "drawn fill within the real cell-gated, search-space- and boundary-clipped footprint."
-            )
 
         avg_slope_pct = float(np.mean([float(slope_pct_grid[r, c]) if not np.isnan(slope_pct_grid[r, c]) else 0.0 for r, c in cells]))
         slope_factor = float(np.mean([slope_factor_grid[r, c] for r, c in cells]))
@@ -1012,12 +918,32 @@ def score_tree_search_space(
 
         geometry_wgs84 = transform_geom(dem["crs"], "EPSG:4326", mapping(footprint))
 
-        # render_fill_polygon_utm was built at the opening survival gate above
-        # (a bounded morphological opening of this patch's own cell mask,
-        # clipped to footprint) and is reused here unchanged -- see that gate
-        # for the full construction and rationale. NEVER used for area_acres/
-        # scoring/eligibility above, which all still reflect the real,
-        # un-opened footprint.
+        # render_fill_polygon_utm is the patch's real cell-union footprint,
+        # UNMODIFIED -- no hull, no opening, no smoothing, buffering, closing,
+        # or simplification of any kind. footprint is already
+        # unary_union(squares).intersection(search_space_utm).intersection(
+        # boundary_polygon_utm), so it is already constrained to the search
+        # space and the boundary; do NOT re-intersect with either.
+        #
+        # This layer deliberately DIVERGES from production_area.cluster_and_
+        # gate() and water_candidate_zones.find_candidate_zones(), which both
+        # transform their own render geometry (an opening/hull). Tree
+        # candidates are the thin, branching leftover ground threading between
+        # production/water/road; 8-connected labeling lets them reach
+        # diagonally into narrow cavities, and those thin arms and slivers --
+        # a windbreak row, a riparian strip, a narrow planting block along a
+        # field edge -- are exactly the geometry this layer exists to find. An
+        # opening at any radius removes features narrower than 2r and would
+        # delete precisely that branching, so none is applied. Interior
+        # pockets are preserved too: an excluded-canopy hole renders as a real
+        # hole, which is correct -- the zone genuinely wraps around existing
+        # canopy. A thin arm is unworkable as a cultivation block or a pond
+        # (hence production/water open theirs) but is a genuinely useful tree
+        # feature. render_fill_polygon_utm therefore equals polygon_utm here;
+        # it stays a separate field for interface parity with those layers and
+        # because fencing.py consumes it (via render_layout_map.py's
+        # identify_fencing() call) for the tree_zone_exclusion fence loops.
+        render_fill_polygon_utm = footprint
         patches.append(
             {
                 "id": component_id,
