@@ -215,7 +215,7 @@ report using the Claude API.
   model — candidate SITES for a small, fixed-footprint structure (a barn
   or shed with rooftop panels, not a ground-mounted array), sampled on a
   `CANDIDATE_POINT_SPACING_METERS` grid across the property, each capped
-  at `MAX_STRUCTURE_FOOTPRINT_ACRES` (1 acre by default) and scored by
+  at `MAX_STRUCTURE_FOOTPRINT_ACRES` (0.1 acre by default) and scored by
   DEM slope + aspect + shading (`terrain_metrics.py`, averaged over a
   local window matching the candidate's own footprint) plus a scored
   PREFERENCE (not exclusion) for proximity to a production zone's own

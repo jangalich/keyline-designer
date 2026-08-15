@@ -229,17 +229,19 @@ MAX_SOLAR_SLOPE_PCT = 20.0
 
 # Grid spacing (meters) between sampled candidate points (Step 1 of the
 # point-candidate model). Deliberately LARGER than MAX_STRUCTURE_FOOTPRINT_ACRES's
-# own footprint side length (~63.6m at the 1-acre default — see
+# own footprint side length (~20.1m at the 0.1-acre default — see
 # _footprint_side_meters()) so neighboring candidates' footprints never
 # overlap by construction: each sampled point becomes its own genuinely
 # distinct siting option for Claude/the user to compare, not a cloud of
 # near-duplicate, heavily-overlapping candidates the way a tighter grid
-# would produce. 75m leaves a real (~11.4m) gap between adjacent
+# would produce. 25m leaves a real (~4.9m) gap between adjacent
 # candidate footprints — plausible real spacing between structures on a
 # working farm, not just the mathematical minimum. CONFIGURABLE — must
 # stay above the footprint side length or neighboring candidates will
-# start overlapping.
-CANDIDATE_POINT_SPACING_METERS = 75.0
+# start overlapping. Kept as a flat literal in manual sync with
+# MAX_STRUCTURE_FOOTPRINT_ACRES rather than derived from it, since
+# _footprint_side_meters() is defined further down the module.
+CANDIDATE_POINT_SPACING_METERS = 25.0
 
 # Maximum footprint for one candidate structure (Step 3): this models a
 # small building (a barn/shed with rooftop panels), not a ground-mounted
@@ -248,7 +250,7 @@ CANDIDATE_POINT_SPACING_METERS = 75.0
 # documented constant rather than a literal so the "how big is a
 # candidate structure" assumption is visible and tunable in one place.
 # CONFIGURABLE.
-MAX_STRUCTURE_FOOTPRINT_ACRES = 1.0
+MAX_STRUCTURE_FOOTPRINT_ACRES = 0.1
 
 # A candidate point near the property boundary can have its nominal
 # footprint clipped down by boundary_polygon_utm (see
@@ -499,7 +501,7 @@ def _cells_within_polygon(dem: dict, polygon, rows: int, cols: int) -> list[tupl
     """DEM cell (row, col) indices whose pixel-center point falls within
     polygon — the local scoring window for one candidate's footprint
     (Step 2). Scans only polygon's own bounding box (padded by one cell),
-    not the whole grid: a ~1-acre footprint only ever touches a handful
+    not the whole grid: a ~0.1-acre footprint only ever touches a handful
     of cells, so this stays cheap even for a dense sample grid."""
     minx, miny, maxx, maxy = polygon.bounds
     px, py = dem["resolution_meters"]

@@ -98,7 +98,7 @@ center_x, center_y = warp_transform("EPSG:4326", DST_CRS, [CENTER_LON], [CENTER_
 center_x, center_y = center_x[0], center_y[0]
 
 RESOLUTION = 5.0
-SIZE = 60  # 300m x 300m, big enough for CANDIDATE_POINT_SPACING_METERS (75m) to sample several points
+SIZE = 60  # 300m x 300m, big enough for CANDIDATE_POINT_SPACING_METERS (25m) to sample several points
 HALF_EXTENT = SIZE * RESOLUTION / 2
 origin_x = center_x - HALF_EXTENT
 origin_y = center_y + HALF_EXTENT

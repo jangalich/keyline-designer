@@ -27,10 +27,10 @@ math):
     proximity buffer keeps the northernmost row of sample points (y~225)
     out of range
 
-CANDIDATE_POINT_SPACING_METERS=75 on this 300m x 300m boundary produces
-a 3x3 interior grid of 9 candidate points (edge-exact points are outside
-the boundary's own interior, same "no candidate drawn from the exact
-boundary line" reasoning every other layer in this pipeline already
+CANDIDATE_POINT_SPACING_METERS=25 on this 300m x 300m boundary produces
+an 11x11 interior grid of 121 candidate points (edge-exact points are
+outside the boundary's own interior, same "no candidate drawn from the
+exact boundary line" reasoning every other layer in this pipeline already
 uses) -- confirmed empirically, not assumed, and asserted below.
 """
 
@@ -90,7 +90,7 @@ assert CANDIDATE_POINT_SPACING_METERS > FOOTPRINT_SIDE_M, (
 )
 
 sample_points = _generate_candidate_points(BOUNDARY)
-assert len(sample_points) == 9, f"expected a 3x3 interior grid on this 300m x 300m boundary, got {len(sample_points)}"
+assert len(sample_points) == 121, f"expected an 11x11 interior grid on this 300m x 300m boundary, got {len(sample_points)}"
 for x, y in sample_points:
     assert BOUNDARY.buffer(1e-6).contains(Point(x, y)), "every sampled point must be on-parcel"
 print(f"Grid sampling produces the expected {len(sample_points)} on-parcel candidate point(s).")
@@ -98,8 +98,8 @@ print(f"Grid sampling produces the expected {len(sample_points)} on-parcel candi
 
 # --- geometric soundness: candidates now form INSIDE the production zone (the actual fix) ---
 
-candidates = find_candidate_solar_zones(DEM, PRODUCTION_AREAS, WATER_ZONES, ROAD, BOUNDARY, max_candidates=50)
-assert len(candidates) == 5, f"expected 5 candidates (9 grid points minus 3 too-far-from-road minus 1 water-excluded), got {len(candidates)}"
+candidates = find_candidate_solar_zones(DEM, PRODUCTION_AREAS, WATER_ZONES, ROAD, BOUNDARY, max_candidates=200)
+assert len(candidates) == 62, f"expected 62 candidates (121 grid points minus 53 too-far-from-road minus 6 water-excluded), got {len(candidates)}"
 
 inside_count = sum(1 for c in candidates if c["production_zone_relationship"] == "inside")
 assert inside_count >= 1, (
@@ -138,9 +138,9 @@ assert closest["suitability_score"] >= farthest["suitability_score"], (
     "all else being equal (identical slope/aspect/shading on this uniform terrain), the candidate "
     "closer to the production zone's edge should score at least as high as the one farther away"
 )
-# Two candidates equidistant-in-x from the production edge (both x=150, at y=75 and y=150) should
-# score identically on this uniform terrain -- confirms the proximity term is driven by real
-# geometry, not sample order.
+# Every candidate in the x=150 column sits exactly on the production edge (distance 0); on this
+# uniform terrain they should all score identically -- confirms the proximity term is driven by
+# real geometry, not sample order.
 same_distance = [c for c in candidates if c["distance_to_production_zone_m"] == 0.0]
 assert len(same_distance) >= 2 and len({c["suitability_score"] for c in same_distance}) == 1, (
     "candidates at the same distance from the production edge should score identically on uniform terrain"
@@ -184,7 +184,7 @@ for candidate in candidates:
     )
 print("Road-proximity reporting/constraint behaves unchanged: every candidate is within the buffer, with a real reported distance.")
 
-candidates_no_road_data = find_candidate_solar_zones(DEM, PRODUCTION_AREAS, WATER_ZONES, None, BOUNDARY, max_candidates=50)
+candidates_no_road_data = find_candidate_solar_zones(DEM, PRODUCTION_AREAS, WATER_ZONES, None, BOUNDARY, max_candidates=200)
 assert len(candidates_no_road_data) > len(candidates), (
     "with road data unavailable (None), the proximity constraint should be disabled, surfacing "
     "more candidates (the northern row) than when a real road buffer is applied"
@@ -202,7 +202,7 @@ print("Road data present but empty is treated as a real, binding constraint (zer
 
 # --- outside/adjacent/inside classification ---
 
-no_production_candidates = find_candidate_solar_zones(DEM, [], WATER_ZONES, ROAD, BOUNDARY, max_candidates=50)
+no_production_candidates = find_candidate_solar_zones(DEM, [], WATER_ZONES, ROAD, BOUNDARY, max_candidates=200)
 assert all(c["production_zone_relationship"] == "outside" for c in no_production_candidates), (
     "with no production zones at all, every candidate must classify as 'outside' (there's nothing to be near)"
 )
@@ -335,7 +335,7 @@ print("Scoring weights are an even 0.25/0.25/0.25/0.25 split across slope/aspect
 
 # --- canopy_mask_utm: hard exclusion, before scoring; None (default) applies no gate at all ---
 
-no_gate_candidates = find_candidate_solar_zones(DEM, PRODUCTION_AREAS, WATER_ZONES, ROAD, BOUNDARY, max_candidates=50)
+no_gate_candidates = find_candidate_solar_zones(DEM, PRODUCTION_AREAS, WATER_ZONES, ROAD, BOUNDARY, max_candidates=200)
 assert len(no_gate_candidates) == len(candidates), "canopy_mask_utm=None (the default) must apply no gate at all"
 
 # Build a canopy mask that covers exactly one known-surviving candidate's own footprint (interior,
@@ -355,10 +355,11 @@ for r, c in target_cells:
     canopy_mask[r, c] = True
 
 canopy_gated_candidates = find_candidate_solar_zones(
-    DEM, PRODUCTION_AREAS, WATER_ZONES, ROAD, BOUNDARY, canopy_mask_utm=canopy_mask, max_candidates=50
+    DEM, PRODUCTION_AREAS, WATER_ZONES, ROAD, BOUNDARY, canopy_mask_utm=canopy_mask, max_candidates=200
 )
 assert len(canopy_gated_candidates) == len(candidates) - 1, (
-    "a canopy mask covering exactly one surviving candidate's footprint should hard-exclude only that one"
+    "a canopy mask covering exactly one surviving candidate's footprint should hard-exclude only that one "
+    "(the mask is cell-based and unbuffered, so it cannot reach a neighboring candidate's own footprint)"
 )
 assert not any(
     c["polygon_utm"].intersects(target_footprint) for c in canopy_gated_candidates
@@ -371,20 +372,28 @@ print(
 
 # --- tree_zone_exclusion_polygon_utm: hard exclusion, buffered, same pattern as water ---
 
-tree_zone_exclusion = target_footprint.buffer(5.0)  # comfortably covers the same target footprint
+# The exclusion buffers the target footprint by 5.0m. At the 25m candidate spacing that buffer
+# exceeds the ~4.88m gap between neighboring candidate footprints, so it reaches the target's
+# immediate grid neighbors too -- a tree-zone exclusion correctly removes EVERY candidate it
+# intersects, not only the one at its center. Assert that real contract (the covered candidate
+# gone, no survivor still intersecting the polygon) rather than a spacing-fragile exact count.
+tree_zone_exclusion = target_footprint.buffer(5.0)  # comfortably covers the target footprint (and, at 25m spacing, its neighbors)
 tree_gated_candidates = find_candidate_solar_zones(
     DEM, PRODUCTION_AREAS, WATER_ZONES, ROAD, BOUNDARY,
-    tree_zone_exclusion_polygon_utm=tree_zone_exclusion, max_candidates=50,
+    tree_zone_exclusion_polygon_utm=tree_zone_exclusion, max_candidates=200,
 )
-assert len(tree_gated_candidates) == len(candidates) - 1, (
-    "a tree-zone exclusion polygon covering exactly one surviving candidate's footprint should "
-    "hard-exclude only that one"
+assert 0 < len(tree_gated_candidates) < len(candidates), (
+    "a tree-zone exclusion polygon must hard-exclude at least the candidate(s) it covers, without "
+    "wiping out every candidate on the parcel"
 )
+assert not any(
+    c["polygon_utm"].intersects(tree_zone_exclusion) for c in tree_gated_candidates
+), "no surviving candidate may intersect the tree-zone exclusion polygon"
 assert not any(
     c["polygon_utm"].intersects(target_footprint) for c in tree_gated_candidates
 ), "the tree-zone-excluded candidate must not survive"
 print(
-    f"tree_zone_exclusion_polygon_utm hard-excludes an intersecting candidate "
+    f"tree_zone_exclusion_polygon_utm hard-excludes every intersecting candidate "
     f"({len(candidates)} -> {len(tree_gated_candidates)} candidates), same pattern as the water exclusion."
 )
 
