@@ -453,10 +453,17 @@ print(
 
 
 # =====================================================================
-# Convex hull: a small excluded (steep/hydric) pocket entirely inside an otherwise-solid zone must be
-# fully closed over in render_fill_polygon_utm (so contour lines drawn against it continue right through
-# the pocket, matching the confirmed-live screenshot problem this feature fixes) -- no radius, no size
-# ceiling on the pocket at all (a hull always fully encloses any real interior concavity/hole).
+# Bounded opening -- an interior pocket stays OPEN: a small excluded (steep/hydric)
+# pocket entirely inside an otherwise-solid zone must NOT be covered by render_fill_
+# polygon_utm. render_fill_polygon_utm is a bounded morphological OPENING of the
+# cluster's own cell mask clipped to polygon_utm (production's disc opening replaced
+# the old convex hull). An opening is anti-extensive (opening(A) is a subset of A) and
+# CANNOT fill a hole -- filling a notch/pocket is a CLOSING (dilate-then-erode), the
+# opposite operation, deliberately NOT used here. So the pocket the cell gate excluded
+# from polygon_utm stays excluded from render_fill_polygon_utm too, and contour lines
+# clipped against render_fill_polygon_utm leave the pocket as a real blank gap rather
+# than drawing through it. This is exactly the property the opening work exists to
+# guarantee: the drawn fill can never claim ground the cell gate excluded.
 # =====================================================================
 
 POCKET_SHAPE = (40, 40)
@@ -477,36 +484,40 @@ pocket_footprint = pa._cell_union_footprint(list(small_pocket), pocket_dem)
 assert pocket_patch["polygon_utm"].intersection(pocket_footprint).area < 1e-6, (
     "test sanity check: the pocket must genuinely be excluded ground -- polygon_utm must not cover it"
 )
-fill_recovered_area = pocket_patch["render_fill_polygon_utm"].intersection(pocket_footprint).area
-assert abs(fill_recovered_area - pocket_footprint.area) < 1e-6, (
-    f"render_fill_polygon_utm (the convex hull) must fully close over a small (20x20m) excluded pocket -- "
-    f"recovered {fill_recovered_area} of {pocket_footprint.area} sq m"
+# render_fill_polygon_utm is a bounded opening clipped to polygon_utm: contained within
+# polygon_utm, never larger, and -- being anti-extensive -- it does NOT close over the pocket.
+assert pocket_patch["polygon_utm"].buffer(1e-6).contains(pocket_patch["render_fill_polygon_utm"]), (
+    "render_fill_polygon_utm (a bounded opening clipped to polygon_utm) must be contained within polygon_utm"
+)
+assert pocket_patch["render_fill_polygon_utm"].area <= pocket_patch["polygon_utm"].area * (1 + 1e-9) + 1e-6, (
+    "the opening can never exceed polygon_utm's area"
+)
+fill_pocket_area = pocket_patch["render_fill_polygon_utm"].intersection(pocket_footprint).area
+assert fill_pocket_area < 1e-6, (
+    f"the excluded interior pocket must stay OPEN -- an opening cannot fill a hole, so render_fill_polygon_utm "
+    f"must not cover the small (20x20m) excluded pocket (covered {fill_pocket_area} of {pocket_footprint.area} sq m)"
 )
 
 pocket_global_contours = compute_contour_lines(pocket_dem)
-pocket_clipped_old = _clip_contours_to_zone(pocket_global_contours, pocket_patch, geometry_key="render_polygon_utm")
-pocket_clipped_new = _clip_contours_to_zone(pocket_global_contours, pocket_patch)  # render_fill_polygon_utm
-old_pocket_overlap = sum(p.intersection(pocket_footprint).length for p in pocket_clipped_old)
-new_pocket_overlap = sum(p.intersection(pocket_footprint).length for p in pocket_clipped_new)
-assert old_pocket_overlap < 1e-9, (
-    "test sanity check: clipping against render_polygon_utm (pre-hull) should leave the pocket "
-    "as a real blank gap -- otherwise this isn't reproducing the live screenshot problem"
-)
-assert new_pocket_overlap > 0, (
-    f"clipping against render_fill_polygon_utm must draw real contour line THROUGH the small excluded "
-    f"pocket (closed over), got {new_pocket_overlap}m of overlap"
+pocket_clipped = _clip_contours_to_zone(pocket_global_contours, pocket_patch)  # render_fill_polygon_utm
+pocket_overlap = sum(p.intersection(pocket_footprint).length for p in pocket_clipped)
+assert pocket_overlap < 1e-9, (
+    f"clipping against render_fill_polygon_utm must leave the excluded interior pocket as a real blank gap -- "
+    f"an opening does not close over it, so no contour line may run through it (got {pocket_overlap}m of overlap)"
 )
 print(
-    f"Convex hull: a small (20x20m) excluded pocket entirely inside a zone is fully closed over in "
-    f"render_fill_polygon_utm -- contour lines now draw {round(new_pocket_overlap, 1)}m through it instead "
-    "of leaving a blank gap."
+    "Bounded opening: a small (20x20m) excluded pocket entirely inside a zone stays OPEN in "
+    "render_fill_polygon_utm (an opening is anti-extensive and cannot fill a hole) -- contour lines clip "
+    "around it, leaving a real blank gap rather than drawing through it."
 )
 
 
-# --- Waist-split hull check, worst case: the tightest real waist-split gap this pipeline's own erosion
-#     math can produce (a single-pixel-wide, single-row-long throat, right at the MIN_ZONE_WAIST_METERS
-#     threshold, at dem_data.py's fixed 5m production DEM resolution) -- confirmed empirically, not
-#     assumed, that render_fill_polygon_utm (each piece's own convex hull) stays separate here too. ---
+# --- Severed waist stays severed, worst case: the tightest real waist-split gap this pipeline's own
+#     erosion math can produce (a single-pixel-wide, single-row-long throat, at dem_data.py's fixed 5m
+#     production DEM resolution) -- confirmed empirically, not assumed, that render_fill_polygon_utm (each
+#     piece's own bounded opening) stays SEVERED here too. An opening operates on the survivors of its OWN
+#     erosion, so a neck this narrow is cut before the dilation and cannot be re-joined -- the two lobes'
+#     fills stay on their own sides of the pinch and never bridge the gap the waist split created. ---
 
 TIGHT_SHAPE = (30, 20)
 tight_dem = _sloped_dem(*TIGHT_SHAPE)
@@ -524,42 +535,48 @@ assert len(tight_patches) == 2, (
     f"{len(tight_patches)} cluster(s)"
 )
 tight_1, tight_2 = tight_patches
-tight_render_gap = tight_1["render_polygon_utm"].distance(tight_2["render_polygon_utm"])
 tight_fill_gap = tight_1["render_fill_polygon_utm"].distance(tight_2["render_fill_polygon_utm"])
 assert tight_fill_gap > 0, (
-    f"render_fill_polygon_utm (each piece's own convex hull) bridges the tightest real waist-split gap "
-    f"this pipeline's own erosion math can produce ({tight_render_gap}m) -- the two zones now touch or "
-    "overlap, silently defeating the waist split"
+    "render_fill_polygon_utm (each piece's own bounded opening) must stay SEVERED at the tightest real "
+    "waist-split gap this pipeline's own erosion math can produce -- an opening cannot bridge a neck it "
+    "just cut, so the two zones must not touch or overlap and silently defeat the waist split"
 )
 assert tight_1["render_fill_polygon_utm"].intersection(tight_2["render_fill_polygon_utm"]).area < 1e-9, (
-    "render_fill_polygon_utm for the two split zones overlaps at the tightest possible real waist"
+    "render_fill_polygon_utm for the two split zones must not overlap at the tightest possible real waist"
 )
 print(
-    f"Waist-split hull check: even the tightest real waist-split gap this pipeline's erosion math can "
-    f"produce ({tight_render_gap}m) survives as render_fill_polygon_utm's own hull "
-    f"(gap {tight_fill_gap}m) -- no touch, no overlap."
+    f"Severed waist stays severed: even the tightest real waist-split gap this pipeline's erosion math can "
+    f"produce survives as a real gap between the two pieces' render_fill_polygon_utm openings "
+    f"(gap {tight_fill_gap}m) -- no touch, no overlap; an opening cannot bridge a neck it severed."
 )
 
 
 # =====================================================================
-# WATER ZONE STYLE: the water zone's FILL is drawn from its own
-# render_fill_polygon_utm (a DISPLAY-ONLY convex hull -- see water_
-# candidate_zones.find_candidate_zones()'s own docstring), fully opaque --
-# see this module's own "WATER ZONE STYLE" docstring section.
+# WATER ZONE STYLE: the water zone renders as RIPPLE-LINE TEXTURE -- a family
+# of horizontal sine waves clipped to its own render_fill_polygon_utm, drawn
+# with NO fill and NO perimeter stroke (see render_layout_map.py's own WATER
+# ZONE STYLE docstring section, and the ripple-texture branch that replaced the
+# earlier filled/outlined polygon). render_fill_polygon_utm is the water zone's
+# bounded render opening (a disc opening of its own cell mask clipped to
+# polygon_utm -- see water_candidate_zones.find_candidate_zones()'s own
+# docstring), NOT a convex hull: it is contained within polygon_utm and never
+# exceeds it, and may be a MultiPolygon where the opening severs a narrow pinch.
 # =====================================================================
 
 import water_candidate_zones as wcz
 from water_candidate_zones import find_candidate_zones
 from render_layout_map import (
     WATER_ZONE_COLOR,
-    _iter_line_parts,
+    WATER_RIPPLE_ALPHA,
+    WATER_RIPPLE_LINEWIDTH,
 )
 
 
-# --- Full render_layout_map() pass: a synthetic water zone whose render_fill_polygon_utm is a genuine
-#     convex hull (differing from its real, blocky geometry_wgs84) and DELIBERATELY overlaps a production
-#     zone's own render_fill_polygon_utm -- confirms the whole pipeline still renders correctly, the water
-#     zone's numbered marker lands on the HULL (not the blocky footprint), and the overlap is allowed. ---
+# --- Full render_layout_map() pass: a synthetic water zone whose render_fill_polygon_utm is a bounded
+#     render opening (contained within its real polygon_utm footprint, smaller than the blocky shape) and
+#     DELIBERATELY overlaps a production zone's own render_fill_polygon_utm -- confirms the whole pipeline
+#     still renders correctly, the water zone draws as ripple-line texture (no fill) clipped to render_fill_
+#     polygon_utm, its numbered marker lands on that render opening, and the display overlap is allowed. ---
 
 WATER_ZONE_TEST_SIZE = (20, 20)
 water_zone_test_dem = {
@@ -571,7 +588,8 @@ water_zone_test_dem = {
 }
 
 # Same L-shaped (non-convex) fixture pattern as test_water_candidate_zones.py's own render_fill_polygon_utm
-# tests -- a real drainage band winding around a corner, so the hull genuinely differs from the blocky shape.
+# tests -- a real drainage band winding around a corner, so the bounded opening genuinely differs from
+# (is smaller than) the blocky footprint.
 wz_vertical_arm = _rect_cells(0, 15, 0, 5)
 wz_horizontal_arm = _rect_cells(10, 15, 0, 15)
 wz_l_shape_mask = _mask_from_cells(WATER_ZONE_TEST_SIZE, list(set(wz_vertical_arm + wz_horizontal_arm)))
@@ -581,8 +599,9 @@ wz_production_area = {
     "id": 0,
     "representative_elevation_m": 50.0,
     "polygon_utm": box(500000.0, 4500000.0 - 130.0, 500000.0 + 20.0, 4500000.0 - 100.0),
-    # Deliberately overlaps the water zone's own hull bulge -- see the corresponding
-    # test_water_candidate_zones.py check for why this is the expected, allowed outcome.
+    # Deliberately overlaps the water zone's own render opening -- see the corresponding
+    # test_water_candidate_zones.py check for why this is the expected, allowed outcome
+    # (the ripple texture is allowed to cross a production zone's rendered contour texture).
     "render_fill_polygon_utm": box(500025.0, 4499950.0, 500075.0, 4500000.0),
     "area_acres": 0.5,
     "rank": 1,
@@ -600,25 +619,35 @@ assert len(wz_zones) == 1, f"expected exactly 1 water zone on this fixture, got 
 water_zone_fixture = dict(wz_zones[0])
 water_zone_fixture["suitability_score"] = 72.5  # render_layout_map() only reads this + 'id', never re-scores
 
-# Sanity check: the hull's own representative point genuinely differs from the real, blocky
-# geometry_wgs84's representative point -- otherwise this fixture wouldn't actually be testing anything
-# different from the pre-existing (blocky-footprint) marker placement.
-blocky_point = _shape_check(
-    _transform_geom_check("EPSG:4326", water_zone_test_dem["crs"], water_zone_fixture["geometry_wgs84"])
-).representative_point()
-hull_point = water_zone_fixture["render_fill_polygon_utm"].representative_point()
-assert blocky_point.distance(hull_point) > 0, (
-    "test setup should produce a hull whose representative_point() genuinely differs from the real, blocky "
-    "geometry_wgs84's own representative_point() -- otherwise the marker-placement check below is trivial"
+# Current semantics: render_fill_polygon_utm is a BOUNDED render opening, not a convex hull -- it is
+# contained within the zone's own polygon_utm and never exceeds it (the water rebuild replaced the old
+# hull, which had no upper bound, with a disc opening clipped to polygon_utm). It may be a Polygon or a
+# MultiPolygon (a narrow pinch severs into pieces); every assertion here tolerates both. It is genuinely
+# smaller than the real, blocky footprint on this L-shaped fixture, so the marker-placement check below --
+# marker on the render opening, computed the same way render_layout_map() does -- stays non-trivial.
+_wz_render_fill = water_zone_fixture["render_fill_polygon_utm"]
+_wz_polygon = water_zone_fixture["polygon_utm"]
+assert _wz_render_fill.geom_type in ("Polygon", "MultiPolygon"), (
+    f"render_fill_polygon_utm must be a (Multi)Polygon, got {_wz_render_fill.geom_type}"
+)
+assert _wz_polygon.buffer(1e-6).contains(_wz_render_fill), (
+    "render_fill_polygon_utm (a bounded render opening) must be contained within the zone's own polygon_utm"
+)
+assert _wz_render_fill.area <= _wz_polygon.area * (1 + 1e-9) + 1e-6, (
+    "render_fill_polygon_utm must never exceed polygon_utm's area -- bounded by construction, not a hull"
+)
+assert _wz_render_fill.area < _wz_polygon.area, (
+    "test setup: on this L-shaped fixture the render opening must be strictly smaller than the blocky "
+    "footprint, so the render geometry genuinely differs from the real footprint"
 )
 
 recorded_markers = []
 _original_draw_numbered_marker = rlm._draw_numbered_marker
 rlm._draw_numbered_marker = lambda ax, point, number: recorded_markers.append((point, number)) or _original_draw_numbered_marker(ax, point, number)
 
-# Also record every plot_polygon()/plot_line() call render_layout_map() makes, so the fill's own
-# alpha/zorder can be confirmed directly against what's actually drawn, not just inferred from
-# the module's constants.
+# Also record every plot_polygon()/plot_line() call render_layout_map() makes, so the ripple lines' own
+# color/alpha/zorder/linewidth (and the ABSENCE of any water-zone fill polygon) can be confirmed directly
+# against what's actually drawn, not just inferred from the module's constants.
 recorded_polygon_calls = []
 _original_plot_polygon = rlm.plot_polygon
 
@@ -664,41 +693,62 @@ finally:
     rlm.plot_polygon = _original_plot_polygon
     rlm.plot_line = _original_plot_line
 
+# The water zone renders as ripple-line TEXTURE, not a filled polygon: there must be ZERO water-zone fill
+# plot_polygon() calls (no facecolor == WATER_ZONE_COLOR), and one or more ripple LINE calls, every one
+# using WATER_ZONE_COLOR, the ripple alpha/linewidth, and the water zone's zorder=41 (above production
+# zones' zorder=40).
 water_fill_calls = [kw for kw in recorded_polygon_calls if kw.get("facecolor") == WATER_ZONE_COLOR]
-assert len(water_fill_calls) == 1, f"expected exactly 1 water zone fill plot_polygon() call, got {len(water_fill_calls)}"
-water_fill_kwargs = water_fill_calls[0]
-assert water_fill_kwargs["alpha"] == 1.0, (
-    f"the water zone fill must be drawn fully OPAQUE (alpha=1.0), not the earlier 0.35, got "
-    f"{water_fill_kwargs['alpha']}"
+assert len(water_fill_calls) == 0, (
+    f"the water zone must NOT be drawn as a filled polygon anymore (ripple-line texture replaced the fill) "
+    f"-- got {len(water_fill_calls)} plot_polygon() call(s) with facecolor == WATER_ZONE_COLOR"
 )
-assert water_fill_kwargs["zorder"] == 41, f"the water zone fill's zorder must stay above production zones' zorder=40, got {water_fill_kwargs['zorder']}"
+water_ripple_calls = [kw for kw in recorded_line_calls if kw.get("color") == WATER_ZONE_COLOR]
+assert len(water_ripple_calls) >= 1, (
+    f"expected at least one water-zone ripple plot_line() call (color == WATER_ZONE_COLOR), got "
+    f"{len(water_ripple_calls)}"
+)
+assert {kw["zorder"] for kw in water_ripple_calls} == {41}, (
+    f"every water-zone ripple line must use zorder=41 (above production zones' zorder=40), got "
+    f"{sorted({kw['zorder'] for kw in water_ripple_calls})}"
+)
+assert {kw["alpha"] for kw in water_ripple_calls} == {WATER_RIPPLE_ALPHA}, (
+    f"every water-zone ripple line must use WATER_RIPPLE_ALPHA, got "
+    f"{sorted({kw['alpha'] for kw in water_ripple_calls})}"
+)
+assert {kw["linewidth"] for kw in water_ripple_calls} == {WATER_RIPPLE_LINEWIDTH}, (
+    f"every water-zone ripple line must use WATER_RIPPLE_LINEWIDTH, got "
+    f"{sorted({kw['linewidth'] for kw in water_ripple_calls})}"
+)
 
 print(
-    f"Water zone fill draws fully opaque (alpha=1.0) at zorder={water_fill_kwargs['zorder']} (above production "
-    "zones' zorder=40)."
+    f"Water zone draws as ripple-line texture: {len(water_ripple_calls)} ripple line(s) in WATER_ZONE_COLOR "
+    f"at zorder=41 (alpha={WATER_RIPPLE_ALPHA}, linewidth={WATER_RIPPLE_LINEWIDTH}), and ZERO filled-polygon "
+    "calls for the water zone."
 )
 
 assert len(recorded_markers) == 1, f"expected exactly 1 marker drawn (the water zone), got {len(recorded_markers)}"
 marker_point_mercator, marker_number = recorded_markers[0]
 
-# The marker must land on the HULL geometry actually drawn (reprojected to Mercator), not the real,
-# blocky geometry_wgs84 -- confirmed by reprojecting the whole hull POLYGON the same way render_layout_map()
-# does and taking ITS OWN representative_point() in Mercator (representative_point() is not guaranteed to
-# correspond to the same point across a reprojection of a single point vs. the whole polygon, so this
-# reproduces render_layout_map()'s own exact computation rather than a point-then-reproject shortcut).
+# The marker must land on the RENDER OPENING geometry actually drawn (reprojected to Mercator), not the
+# real, blocky geometry_wgs84 -- confirmed by reprojecting the whole render_fill_polygon_utm the same way
+# render_layout_map() does and taking ITS OWN representative_point() in Mercator (representative_point() is
+# not guaranteed to correspond to the same point across a reprojection of a single point vs. the whole
+# polygon, so this reproduces render_layout_map()'s own exact computation rather than a point-then-reproject
+# shortcut).
 expected_render_fill_mercator = rlm._reproject_utm_geometry_to_mercator(
     water_zone_fixture["render_fill_polygon_utm"], water_zone_test_dem["crs"]
 )
 expected_marker_point = expected_render_fill_mercator.representative_point()
 assert marker_point_mercator.distance(expected_marker_point) < 1e-6, (
     "the water zone's numbered marker must be placed at render_fill_polygon_utm's own representative_point(), "
-    "not geometry_wgs84's -- got a marker point that doesn't match the hull's reprojected representative point"
+    "not geometry_wgs84's -- got a marker point that doesn't match the render opening's reprojected "
+    "representative point"
 )
 print(
     "Full pipeline with a synthetic water zone: render_layout_map() runs offline end-to-end, draws the water "
-    "zone's numbered marker on the HULL geometry (render_fill_polygon_utm) rather than the real, blocky "
-    "footprint, and completes successfully even though the hull deliberately overlaps a production area's "
-    "own render_fill_polygon_utm."
+    "zone as ripple-line texture clipped to render_fill_polygon_utm (the bounded render opening, not the real "
+    "blocky footprint), places the numbered marker on that same render opening, and completes successfully "
+    "even though the render opening deliberately overlaps a production area's own render_fill_polygon_utm."
 )
 
 
@@ -1133,6 +1183,11 @@ _spy_parcel_data = ParcelData(
     elevation_grid=[],
     canopy_height=_sentinel_canopy_height,
     imagery_summary={},
+    # irradiance -- irrelevant to this build_pipeline_context() forwarding check (not one of the
+    # fields fetch_layout_layers() forwards), so it gets a plain placeholder like every other
+    # irrelevant ParcelData field above. It became a required ParcelData field on the irradiance-
+    # integration branch (see parcel_data.py's own irradiance field notes).
+    irradiance={},
 )
 
 _captured_context_kwargs = {}
@@ -1274,6 +1329,10 @@ _canopy_case_parcel_data = ParcelData(
     elevation_grid=[],
     canopy_height=_canopy_override,
     imagery_summary={},
+    # irradiance -- not consumed anywhere on this canopy-override path (build_pipeline_context() is
+    # mocked below; nothing in fetch_layout_layers()'s own reach reads it), so a plain placeholder is
+    # enough. Required ParcelData field since the irradiance-integration branch (see parcel_data.py).
+    irradiance={},
 )
 
 with ExitStack() as _canopy_stack:
@@ -1378,7 +1437,11 @@ import diagnose_fetch_layout_layers_redundant_fetches as diag_fetch_layout_layer
 _diag_counts, _diag_call_site_logs = diag_fetch_layout_layers.run()
 
 _diag_canopy_sites = _diag_call_site_logs["get_canopy_height_for_boundary"]
-_diag_canopy_from_parcel_data = _diag_canopy_sites.get("parcel_data.py:163 in fetch_parcel_data", 0)
+# The call-site key is basename:lineno of the get_canopy_height_for_boundary() call inside
+# parcel_data.fetch_parcel_data() (see diagnose_fetch_layout_layers_redundant_fetches.py's own
+# _call_site_label()). That line moved to 192 when the irradiance-baseline branch added its own
+# fetch above it, so this pinned lineno is updated to match the current source.
+_diag_canopy_from_parcel_data = _diag_canopy_sites.get("parcel_data.py:192 in fetch_parcel_data", 0)
 _diag_canopy_total = _diag_counts["get_canopy_height_for_boundary"]
 _diag_canopy_from_compute_layer = _diag_canopy_total - _diag_canopy_from_parcel_data
 
