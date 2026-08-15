@@ -55,9 +55,9 @@ def _plain_fencing_result(boundary_coordinates: list, dem: dict) -> dict:
     A network-free stand-in for fencing.identify_boundary_fencing(), used only to
     populate the synthetic `layers` dicts below -- render_layout_map() now always
     expects a 'fencing_result' key (see fetch_layout_layers()'s own docstring), and
-    these fixtures aren't about exercising fencing.py's own canopy-routing logic
+    these fixtures aren't about exercising fencing.py's own developed-footprint logic
     (that has its own dedicated coverage in test_fencing.py). Builds the plain,
-    no-canopy case directly via find_boundary_fencing(..., canopy_union_utm=None) +
+    bare-property case directly via find_boundary_fencing() with empty inputs +
     boundary_fencing_to_geojson() -- both pure, no network -- reprojecting UTM back
     to WGS84 the same way identify_boundary_fencing() itself does.
     """
@@ -65,11 +65,10 @@ def _plain_fencing_result(boundary_coordinates: list, dem: dict) -> dict:
         "EPSG:4326", dem["crs"], [pt[0] for pt in boundary_coordinates], [pt[1] for pt in boundary_coordinates]
     )
     boundary_polygon_utm = Polygon(zip(xs, ys))
-    # Plain no-canopy, no-developed-footprint case: every developed-footprint/zone input empty/None,
-    # so find_boundary_fencing() collapses to the boundary's own ring (step 2's degenerate fallback).
+    # Bare-property case: every developed-footprint/zone input empty/None, so find_boundary_fencing()
+    # collapses to the boundary's own ring (its degenerate fallback).
     rings_utm = find_boundary_fencing(
         boundary_polygon_utm,
-        None,
         production_zone_polygons_utm=[],
         structure_site_polygon_utm=None,
         road_corridor_cell_footprint_polygon_utm=None,

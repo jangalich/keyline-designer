@@ -20,11 +20,13 @@ fencing) gets its own dedicated, purely-synthetic section below, same
 "pure core is independently testable" pattern this file already uses for
 find_stream_exclusion_fencing() -- plain shapely boxes in an arbitrary
 UTM-like coordinate space, no boundary_coordinates/DEM/CRS involved at
-all. identify_boundary_fencing()/identify_fencing() (the fetch-and-wrap
-entry points) additionally need production_area.get_canopy_height_for_
-boundary() mocked (same pattern test_production_area_ceiling.py already
-uses for its own full-pipeline canopy-gate scenarios) to stay offline,
-since both now carry a MANDATORY canopy fetch.
+all. identify_fencing() (the full-pipeline fetch-and-wrap entry point)
+additionally needs production_area.get_canopy_height_for_boundary()
+mocked (same pattern test_production_area_ceiling.py already uses for its
+own full-pipeline canopy-gate scenarios) to stay offline, because its
+OWN self-compute fallbacks (road/water/tree candidates) still carry a
+canopy fetch -- identify_boundary_fencing() itself no longer fetches
+canopy at all (the boundary fence no longer routes around canopy).
 """
 
 import math
@@ -38,7 +40,6 @@ import fencing
 import production_area as pa
 from feature_schema import make_feature, validate_feature_collection
 from fencing import (
-    BOUNDARY_FENCE_CANOPY_BUFFER_METERS,
     BOUNDARY_FENCE_MARGIN_METERS,
     BOUNDARY_FENCE_MIN_SEGMENT_ACRES,
     STREAM_EXCLUSION_BUFFER_METERS,
@@ -170,26 +171,25 @@ print("stream_exclusion_fencing_to_geojson output is schema-valid, layer='exclus
 # no boundary_coordinates/DEM/CRS/network involved at all -- same "pure
 # core is independently testable" pattern as find_stream_exclusion_
 # fencing() above. A plain 100m x 100m square standing in for
-# boundary_polygon_utm; canopy_union_utm fixtures are hand-built shapely
-# geometry standing in for an already-buffered canopy footprint (the
-# buffering itself is identify_boundary_fencing()'s job, not this
-# function's -- see its own docstring).
+# boundary_polygon_utm; developed-footprint/zone inputs are hand-built
+# shapely geometry.
 #
-# The existing cases below (1-6) exercise the SAME behavior as before this
-# branch's developed-footprint rewrite, now supplying the new required
-# developed-footprint/zone inputs (production_zone_polygons_utm/structure_
-# site_polygon_utm/road_corridor_cell_footprint_polygon_utm/water_zone_
-# polygon_utm/tree_zone_polygons_utm) as EMPTY/None -- per step 2's
-# degenerate fallback, an empty developed footprint collapses margined_core
-# back to boundary_polygon_utm itself, so these must all still pass
-# unchanged (section 6, case 5 of this branch's task). The genuinely-new
-# developed-footprint behavior is exercised by cases 7-10 further below.
+# Canopy is no longer an input to find_boundary_fencing() at all (a fence
+# through wooded ground is fine in practice, so the boundary fence no
+# longer routes around it) -- the earlier canopy-difference tests
+# (single-notch, interior-hole-ignored, end-to-end-split, tiny-sliver-
+# dropped, close-canopy-neck) tested behavior that no longer exists and
+# have been removed. The bare-property degenerate case (case 1 below) and
+# the developed-footprint behavior (cases 7-11 further below, including the
+# convex-hull regression) are what this function is tested on now.
 # =====================================================================
+
+from shapely.geometry import LineString as _LineString
 
 TEST_BOUNDARY_UTM = box(0, 0, 100, 100)  # 10,000 sq m, ~2.47 acres
 
 # Shorthand for "no developed footprint, no zones" -- the empty/None values that
-# collapse find_boundary_fencing() back to its original boundary-only behavior.
+# collapse find_boundary_fencing() back to the plain drawn-boundary loop.
 NO_DEVELOPED_FOOTPRINT = dict(
     production_zone_polygons_utm=[],
     structure_site_polygon_utm=None,
@@ -199,127 +199,15 @@ NO_DEVELOPED_FOOTPRINT = dict(
 )
 
 
-# --- 1. no canopy at all -> the plain-wrap case, unchanged: the boundary's own exterior ring ---
+# --- 1. bare property (no developed footprint, no zones) -> the plain-wrap case: the boundary's own ring ---
 
-no_canopy_rings = find_boundary_fencing(TEST_BOUNDARY_UTM, None, **NO_DEVELOPED_FOOTPRINT)
-assert len(no_canopy_rings) == 1, f"no canopy should return exactly 1 ring, got {len(no_canopy_rings)}"
-assert no_canopy_rings[0].equals(Polygon(TEST_BOUNDARY_UTM.exterior).exterior), (
-    "with no canopy at all, the returned ring must match the boundary's own exterior ring exactly"
+bare_rings = find_boundary_fencing(TEST_BOUNDARY_UTM, **NO_DEVELOPED_FOOTPRINT)
+assert len(bare_rings) == 1, f"a bare property should return exactly 1 ring, got {len(bare_rings)}"
+assert bare_rings[0].equals(Polygon(TEST_BOUNDARY_UTM.exterior).exterior), (
+    "with no developed footprint and no zones, the returned ring must match the boundary's own exterior "
+    "ring exactly (the degenerate plain-wrap fallback -- no convex-hull/clip re-noding of its coordinates)"
 )
-print("find_boundary_fencing(): no canopy returns the boundary's own unmodified exterior ring.")
-
-
-# --- 2. canopy touching the boundary at one location, not splitting it -> 1 ring, genuinely notched ---
-
-touching_canopy = box(40, 90, 60, 110)  # straddles the top edge (y=100) from x=40-60, doesn't reach either side edge
-touching_rings = find_boundary_fencing(TEST_BOUNDARY_UTM, touching_canopy, **NO_DEVELOPED_FOOTPRINT)
-assert len(touching_rings) == 1, f"a single non-splitting notch should return exactly 1 ring, got {len(touching_rings)}"
-assert not touching_rings[0].equals(Polygon(TEST_BOUNDARY_UTM.exterior).exterior), (
-    "a real notch must NOT match the plain boundary ring -- confirms the notch actually happened"
-)
-print("find_boundary_fencing(): canopy touching one edge location returns 1 ring, genuinely notched inward.")
-
-
-# --- 3. canopy entirely interior, never touching the boundary edge -> ignored: unmodified boundary ring ---
-
-interior_canopy = box(30, 30, 50, 50)  # well inside TEST_BOUNDARY_UTM, doesn't touch any edge
-interior_rings = find_boundary_fencing(TEST_BOUNDARY_UTM, interior_canopy, **NO_DEVELOPED_FOOTPRINT)
-assert len(interior_rings) == 1, f"interior-only canopy should return exactly 1 ring, got {len(interior_rings)}"
-# NOT an exact .equals() any more: find_boundary_fencing()'s own morphological opening
-# (buffer(-BOUNDARY_FENCE_MIN_SLIVER_WIDTH_METERS).buffer(+that)) now runs unconditionally
-# whenever there's ANY canopy, including this interior-only case -- and a buffer-based
-# opening inherently rounds convex corners by a small amount (a real, expected side effect
-# of continuous-geometry morphology, not a raster operation), so the returned outer ring is
-# no longer byte-identical to the plain square even though the interior hole itself never
-# reaches the boundary edge. Checked via symmetric-difference AREA instead: the interior
-# hole itself is 400 sq m (20x20m) -- if it were leaking into the outer ring at all, the
-# symmetric difference would be on that order. The opening's own corner-rounding alone
-# accounts for well under 10 sq m (four ~100 sq m corners, each rounded by a sub-meter
-# amount) on this 10,000 sq m square, so a 10 sq m ceiling cleanly distinguishes "hole
-# genuinely ignored, only cosmetic opening rounding visible" from "hole leaked into the ring".
-interior_ring_polygon = Polygon(interior_rings[0])
-plain_boundary_polygon = Polygon(TEST_BOUNDARY_UTM.exterior)
-interior_symmetric_diff_area = interior_ring_polygon.symmetric_difference(plain_boundary_polygon).area
-assert interior_symmetric_diff_area < 10.0, (
-    "canopy that never touches the boundary edge carves a HOLE, not a change to the fence line -- the "
-    "returned ring must closely match the unmodified boundary ring (up to the opening's own tiny "
-    f"corner-rounding), got symmetric difference area {interior_symmetric_diff_area:.4f} sq m"
-)
-print("find_boundary_fencing(): interior-only canopy (a hole, discarded) leaves the boundary ring unmodified.")
-
-
-# --- 4. canopy spanning end-to-end, splitting the parcel -> exactly 2 closed loops ---
-
-spanning_canopy = box(-10, 45, 110, 55)  # crosses both the left (x=0) and right (x=100) edges
-split_rings = find_boundary_fencing(TEST_BOUNDARY_UTM, spanning_canopy, **NO_DEVELOPED_FOOTPRINT)
-assert len(split_rings) == 2, f"canopy spanning end-to-end should split the parcel into 2 loops, got {len(split_rings)}"
-for ring in split_rings:
-    assert list(ring.coords)[0] == list(ring.coords)[-1], "each split loop must be a closed LineString"
-print(f"find_boundary_fencing(): canopy spanning end-to-end splits the parcel into {len(split_rings)} closed loops.")
-
-
-# --- 5. a tiny sliver-touch case (canopy just grazing a corner) -> dropped by the min-segment-acres floor ---
-
-# A diagonal band (a buffered line, real width -- not a single-point touch) that crosses both the top
-# and right edges near the (100,100) corner without covering the corner itself, cleanly severing a tiny
-# triangular sliver (~0.025 acres, well under BOUNDARY_FENCE_MIN_SEGMENT_ACRES) from the main body.
-from shapely.geometry import LineString as _LineString
-
-sliver_canopy = _LineString([(75, 105), (105, 75)]).buffer(4.0)
-sliver_pieces_raw = TEST_BOUNDARY_UTM.difference(sliver_canopy)
-assert sliver_pieces_raw.geom_type == "MultiPolygon" and len(sliver_pieces_raw.geoms) == 2, (
-    "test setup should genuinely produce a main body + a separate tiny corner sliver"
-)
-sliver_piece_acres = min(g.area for g in sliver_pieces_raw.geoms) / 4046.8564224
-assert sliver_piece_acres < BOUNDARY_FENCE_MIN_SEGMENT_ACRES, (
-    f"test setup's sliver ({sliver_piece_acres} ac) must genuinely sit below the "
-    f"{BOUNDARY_FENCE_MIN_SEGMENT_ACRES} ac floor for this to be a real test of the filter"
-)
-
-sliver_rings = find_boundary_fencing(TEST_BOUNDARY_UTM, sliver_canopy, **NO_DEVELOPED_FOOTPRINT)
-assert len(sliver_rings) == 1, (
-    f"the tiny corner sliver must be dropped by BOUNDARY_FENCE_MIN_SEGMENT_ACRES, not returned as a "
-    f"spurious extra segment -- expected 1 ring (main body only), got {len(sliver_rings)}"
-)
-print(
-    f"find_boundary_fencing(): a tiny corner sliver ({sliver_piece_acres:.4f} ac) grazing a boundary "
-    f"corner is dropped by BOUNDARY_FENCE_MIN_SEGMENT_ACRES ({BOUNDARY_FENCE_MIN_SEGMENT_ACRES} ac), "
-    "leaving just the main body ring."
-)
-
-
-# --- 6. two canopy patches close together on the boundary, leaving a narrow land "neck"
-#        between them (pic #1's shape) -> the morphological opening collapses the neck; the
-#        returned ring no longer traces up into and back out of it ---
-
-neck_notch_a = box(30, 80, 49.6, 105)  # touches the top edge (y=100), left patch
-neck_notch_b = box(50.4, 80, 70, 105)  # touches the top edge (y=100), right patch -- 0.8m gap from A
-neck_canopy = neck_notch_a.union(neck_notch_b)
-
-# Test setup validity: the RAW (pre-opening) difference must genuinely have kept land reaching
-# all the way up through the neck to the boundary edge -- the neck's own 0.8m width is narrower
-# than 2 * BOUNDARY_FENCE_MIN_SLIVER_WIDTH_METERS (2.0m), so the opening should collapse it
-# entirely (merge it into the excluded/canopy side) rather than leave it as real usable land.
-raw_neck_difference = TEST_BOUNDARY_UTM.difference(neck_canopy)
-neck_probe_point = Point(50.0, 99.0)  # deep in the neck, right at the boundary edge
-assert raw_neck_difference.contains(neck_probe_point), (
-    "test setup must genuinely produce kept land reaching up through the neck to the boundary "
-    "edge (pre-opening) for this to be a real test of the collapse"
-)
-
-neck_rings = find_boundary_fencing(TEST_BOUNDARY_UTM, neck_canopy, **NO_DEVELOPED_FOOTPRINT)
-assert len(neck_rings) == 1, (
-    f"expected 1 ring (main body only, neck collapsed into the canopy side), got {len(neck_rings)}"
-)
-neck_ring_polygon = Polygon(neck_rings[0])
-assert not neck_ring_polygon.intersects(neck_probe_point), (
-    "the opening should have collapsed the narrow neck into the excluded/canopy side -- the "
-    "returned ring's own enclosed area must no longer reach up through the neck to the boundary edge"
-)
-print(
-    "find_boundary_fencing(): a narrow land neck between two close canopy notches (pic #1's shape) "
-    "is collapsed by the morphological opening step, not traced into and back out of by the fence line."
-)
+print("find_boundary_fencing(): a bare property returns the boundary's own unmodified exterior ring.")
 
 
 # =====================================================================
@@ -340,7 +228,6 @@ BOUNDARY_POLYGON = Polygon(TEST_BOUNDARY_UTM.exterior)
 developed_zone = box(30, 30, 70, 70)  # a 40x40m developed core well inside the 100x100 boundary
 smaller_rings = find_boundary_fencing(
     TEST_BOUNDARY_UTM,
-    None,
     production_zone_polygons_utm=[developed_zone],
     structure_site_polygon_utm=None,
     road_corridor_cell_footprint_polygon_utm=None,
@@ -375,7 +262,7 @@ developed_zone_8 = box(20, 20, 80, 80)  # margined by 5m -> ~ (15,15)-(85,85)
 interior_water_zone = box(40, 40, 50, 50)  # buffered by 2.5m -> (37.5,37.5)-(52.5,52.5), well inside margined_core
 
 ring_without_zone = find_boundary_fencing(
-    TEST_BOUNDARY_UTM, None,
+    TEST_BOUNDARY_UTM,
     production_zone_polygons_utm=[developed_zone_8],
     structure_site_polygon_utm=None,
     road_corridor_cell_footprint_polygon_utm=None,
@@ -383,7 +270,7 @@ ring_without_zone = find_boundary_fencing(
     tree_zone_polygons_utm=[],
 )
 ring_with_interior_zone = find_boundary_fencing(
-    TEST_BOUNDARY_UTM, None,
+    TEST_BOUNDARY_UTM,
     production_zone_polygons_utm=[developed_zone_8],
     structure_site_polygon_utm=None,
     road_corridor_cell_footprint_polygon_utm=None,
@@ -414,19 +301,28 @@ print(
 )
 
 
-# --- 9. a water zone at the true OUTER edge of the developed footprint, extending past margined_core ->
-#        the boundary fence ring's coordinates along that stretch are IDENTICAL to the zone's own
-#        buffered fence edge (a real geometric equality, not just "a ring was returned"): the
-#        "meets up, uses it, continues" case ---
+# --- 9. a water zone at the true OUTER edge of the developed footprint, forming part of the convex hull ->
+#        the boundary fence ring's coordinates along that stretch are IDENTICAL to the zone's own buffered
+#        fence edge (a real geometric equality, not just "a ring was returned"): the "meets up, uses it,
+#        continues" case, re-verified against hulled geometry ---
+#
+# NOTE (post-hull redesign): the pre-hull version put a NARROW water zone protruding above a WIDE developed
+# core, so the zone's vertical sides were the outer edge and coincided with the raw union. Under the convex
+# hull (step 4) those vertical sides are no longer on the outer boundary -- the hull cuts a diagonal chord
+# from the zone's top corners to the wider core below them -- so that setup would no longer exercise a
+# shared stretch. Reworked so the water zone is the DOMINANT OUTER feature (wider than the developed core
+# and sitting on top of it): its top and upper side edges ARE hull edges, so the boundary fence runs on the
+# zone's own buffered outline there. And because the hull reuses the zone buffer's OWN vertices verbatim
+# along that stretch (no morphological-opening re-approximation anymore -- that step is gone), the
+# coincidence is now EXACT, not merely near-zero.
 
-developed_zone_9 = box(20, 20, 80, 50)  # margined by 5m -> tops out around y=55
-# A water zone straddling the developed top edge, whose 2.5m buffer (-> y up to 77.5) reaches WELL past
-# margined_core's own top (~y=55) while still connecting to it (buffer overlaps y 52.5-55).
-edge_water_zone = box(40, 55, 60, 75)
-margined_core_9 = developed_zone_9.buffer(BOUNDARY_FENCE_MARGIN_METERS)
+developed_zone_9 = box(30, 25, 70, 50)  # the narrower developed core, margined by 5m -> ~ (25,20)-(75,55)
+# A water zone WIDER than the developed core, sitting on top of it -- its 2.5m buffer (-> x 12.5..87.5,
+# y 47.5..72.5) is the dominant outer feature, so its top and upper sides become hull edges.
+edge_water_zone = box(15, 50, 85, 70)
 
 edge_rings = find_boundary_fencing(
-    TEST_BOUNDARY_UTM, None,
+    TEST_BOUNDARY_UTM,
     production_zone_polygons_utm=[developed_zone_9],
     structure_site_polygon_utm=None,
     road_corridor_cell_footprint_polygon_utm=None,
@@ -437,39 +333,26 @@ assert len(edge_rings) == 1, f"expected a single merged loop, got {len(edge_ring
 edge_boundary_ring = edge_rings[0]
 edge_water_fence = find_water_zone_fencing(edge_water_zone)  # the zone's OWN buffered fence edge
 
-# The stretch of the zone's own fence that lies past margined_core (its true outer edge, away from the
-# junction where it meets the developed core) must coincide with the boundary fence ring -- same buffered
-# polygon fed both, so this is exact by construction, up to the opening step's sub-cm arc re-approximation.
-# Sample the outer stretch generously ABOVE the junction (y > 60, clear of margined_core's y~55 top and
-# the opening's own <=1m rounding of the concave junction corners).
-outer_stretch_pts = [pt for pt in edge_water_fence.coords if pt[1] > 60]
-assert len(outer_stretch_pts) >= 3, "test setup must expose a real outer stretch of the zone edge past the margin"
+# The zone's outer stretch (its top + upper sides, y > 55 -- clear of the developed core's own top at y~55,
+# where the two shapes join and the hull cuts diagonally): every such vertex must lie ON the boundary fence
+# ring. Because the same buffered polygon feeds both the zone's own fence AND find_boundary_fencing()'s
+# union, and the convex hull reuses those exact vertices along this outer stretch, the coincidence is exact.
+outer_stretch_pts = [pt for pt in edge_water_fence.coords if pt[1] > 55]
+assert len(outer_stretch_pts) >= 3, "test setup must expose a real outer stretch of the zone edge forming the hull"
 outer_stretch_distances = [Point(pt).distance(edge_boundary_ring) for pt in outer_stretch_pts]
 max_outer_deviation = max(outer_stretch_distances)
-# Near-zero Hausdorff along the shared stretch. This is not exact floating equality -- step 6's opening
-# (buffer(-w).buffer(w)) re-approximates the buffered arcs, so vertices shift by sub-centimetre amounts --
-# but it is unambiguously COINCIDENT, not a nearby parallel line: a genuine parallel offset would sit a
-# whole WATER_ZONE_FENCE_BUFFER_METERS (2.5m) or BOUNDARY_FENCE_MARGIN_METERS (5m) away, three orders of
-# magnitude larger than the deviation asserted here.
-assert max_outer_deviation < 0.01, (
-    "along the stretch where the water zone sits at the developed footprint's true outer edge, the boundary "
-    "fence ring must coincide with the zone's own buffered fence edge (same line, not a nearby parallel one) "
-    f"-- max point-to-ring distance {max_outer_deviation:.6f}m exceeds the near-zero tolerance"
-)
-assert max_outer_deviation < WATER_ZONE_FENCE_BUFFER_METERS / 100.0, (
-    "the coincidence must be genuine, not a parallel offset -- the deviation must be far below the zone-fence "
-    f"buffer distance itself ({WATER_ZONE_FENCE_BUFFER_METERS}m), got {max_outer_deviation:.6f}m"
-)
-# And the midpoint of the zone edge's own flat outermost segment lies on the boundary ring to ~floating
-# exactness (that straight y=77.5 segment is preserved by the opening; only the rounded corners re-approximate).
-flat_top_midpoint = Point(50.0, max(c[1] for c in edge_water_fence.coords))
-assert flat_top_midpoint.distance(edge_boundary_ring) < 1e-6, (
-    "the middle of the zone's own outermost (flat) fence edge must lie exactly on the boundary fence ring"
+# EXACT coincidence (same coordinates, not a nearby parallel line -- a genuine parallel offset would sit a
+# whole WATER_ZONE_FENCE_BUFFER_METERS/BOUNDARY_FENCE_MARGIN_METERS away). A hair of floating-point slack for
+# the union/hull re-noding, far below any parallel-offset scale.
+assert max_outer_deviation < 1e-6, (
+    "along the stretch where the water zone forms the developed footprint's convex-hull edge, the boundary "
+    "fence ring must coincide EXACTLY with the zone's own buffered fence edge (same coordinates, not a nearby "
+    f"parallel line) -- max point-to-ring distance {max_outer_deviation:.2e}m exceeds the exact-coincidence tolerance"
 )
 print(
-    "find_boundary_fencing(): where a water zone sits at the developed footprint's true outer edge, the "
-    "boundary fence ring's coordinates coincide with that zone's own buffered fence edge along that stretch "
-    f"(max deviation {max_outer_deviation:.2e}m, vs a {WATER_ZONE_FENCE_BUFFER_METERS}m parallel-offset scale) "
+    "find_boundary_fencing(): where a water zone forms the developed footprint's true outer (convex-hull) "
+    f"edge, the boundary fence ring's coordinates coincide EXACTLY with that zone's own buffered fence edge "
+    f"along that stretch (max deviation {max_outer_deviation:.2e}m over {len(outer_stretch_pts)} vertices) "
     "-- it meets the zone's fence, uses it, continues."
 )
 
@@ -482,7 +365,7 @@ print(
 # push a fence out to y=105 (past the parcel) -- the clip must pull it back to the boundary.
 road_to_boundary = box(45, 80, 55, 100)
 road_rings = find_boundary_fencing(
-    TEST_BOUNDARY_UTM, None,
+    TEST_BOUNDARY_UTM,
     production_zone_polygons_utm=[],
     structure_site_polygon_utm=None,
     road_corridor_cell_footprint_polygon_utm=road_to_boundary,
@@ -507,12 +390,58 @@ print(
 )
 
 
+# --- 11. CONVEX-HULL regression (the photo that motivated this pass): a developed footprint with a
+#         genuine concavity -- two separated feature clusters with a gap between them -> the resulting
+#         fence ring is CONVEX and bridges the gap, rather than dipping inward through it the way the
+#         pre-hull margined union did ---
+
+cluster_a = box(15, 40, 35, 60)  # left developed cluster
+cluster_b = box(65, 40, 85, 60)  # right developed cluster -- a wide gap (x 35..65) between them
+hull_rings = find_boundary_fencing(
+    TEST_BOUNDARY_UTM,
+    production_zone_polygons_utm=[cluster_a, cluster_b],
+    structure_site_polygon_utm=None,
+    road_corridor_cell_footprint_polygon_utm=None,
+    water_zone_polygon_utm=None,
+    tree_zone_polygons_utm=[],
+)
+assert len(hull_rings) == 1, f"two clusters bridged by the convex hull should be a single ring, got {len(hull_rings)}"
+hull_ring_polygon = Polygon(hull_rings[0])
+
+# The pre-hull margined union would have left a concave gap between the two clusters -- the fence would dip
+# inward through it. Confirm the OLD behavior genuinely dips (the raw margined union does NOT bridge the gap)
+# so this is a real regression test, then confirm the NEW ring bridges it.
+from shapely.ops import unary_union as _unary_union
+
+raw_margined_union = _unary_union([cluster_a.buffer(BOUNDARY_FENCE_MARGIN_METERS), cluster_b.buffer(BOUNDARY_FENCE_MARGIN_METERS)])
+gap_midpoint = Point(50.0, 50.0)  # dead center of the gap between the two clusters
+assert not raw_margined_union.contains(gap_midpoint), (
+    "test setup: the pre-hull margined union must genuinely leave the gap open (dip inward) for the hull fix "
+    "to be under test"
+)
+# NEW behavior: the fence ring is convex (equals its own convex hull) and encloses the gap midpoint.
+assert hull_ring_polygon.symmetric_difference(hull_ring_polygon.convex_hull).area < 1e-6, (
+    "the developed-footprint fence ring must be CONVEX (equal to its own convex hull) -- it must not dip "
+    "inward through the gap between the two separated clusters the way the pre-hull union did"
+)
+assert hull_ring_polygon.contains(gap_midpoint), (
+    "the convex-hull fence ring must BRIDGE the gap between the two clusters (enclose its midpoint), not "
+    "route inward around each cluster separately"
+)
+print(
+    "find_boundary_fencing(): two separated developed clusters produce a single CONVEX fence ring that "
+    "bridges the gap between them (the pre-hull union would have dipped inward through it) -- the direct "
+    "regression test for the two-cluster-with-a-gap photo."
+)
+
+
 # =====================================================================
-# identify_boundary_fencing()/identify_fencing(): fetch-and-wrap entry points. Both now carry a
-# MANDATORY canopy fetch (production_area.get_required_tree_root_zone_mask_utm()) -- mocked here
-# via production_area.get_canopy_height_for_boundary (same pattern test_production_area_ceiling.py
-# already uses for its own full-pipeline canopy-gate scenarios) so this stays fully offline. A
-# synthetic DEM sized to PROPERTY_BOUNDARY's own UTM extent stands in for a real fetch.
+# identify_boundary_fencing()/identify_fencing(): fetch-and-wrap entry points. identify_boundary_
+# fencing() no longer fetches canopy at all (the boundary fence does not route around canopy anymore),
+# so it needs no canopy mock. identify_fencing()'s OWN self-compute fallbacks (road/water/tree
+# candidates) still carry a canopy fetch, so production_area.get_canopy_height_for_boundary is mocked
+# here (same pattern test_production_area_ceiling.py already uses) to keep those offline. A synthetic
+# DEM sized to PROPERTY_BOUNDARY's own UTM extent stands in for a real fetch.
 # =====================================================================
 
 
@@ -545,10 +474,13 @@ TEST_DEM = {
 }
 
 
-# --- identify_boundary_fencing: no canopy -> 1 schema-valid "perimeter_fencing" feature, fence_type=boundary ---
+# --- identify_boundary_fencing: bare property (no developed footprint) -> 1 schema-valid
+#     "perimeter_fencing" feature, fence_type=boundary, and NO canopy fetch is needed at all ---
 
-with mock_patch.object(pa, "get_canopy_height_for_boundary", _fake_no_canopy):
-    boundary_result = identify_boundary_fencing(PROPERTY_BOUNDARY, dem=TEST_DEM)
+# No canopy mock here: identify_boundary_fencing() no longer fetches canopy. If it still tried to,
+# this call (with pa.get_canopy_height_for_boundary left REAL) would attempt a network fetch and
+# fail offline -- so a clean pass is itself proof the canopy fetch is gone.
+boundary_result = identify_boundary_fencing(PROPERTY_BOUNDARY, dem=TEST_DEM)
 validate_feature_collection(boundary_result["fencing_geojson"])
 assert boundary_result["segment_count"] == 1
 boundary_features = boundary_result["fencing_geojson"]["features"]
@@ -556,22 +488,28 @@ assert len(boundary_features) == 1
 boundary_feature = boundary_features[0]
 assert boundary_feature["properties"]["layer"] == "perimeter_fencing"
 assert boundary_feature["properties"]["fence_type"] == "boundary"
-assert boundary_feature["properties"]["canopy_buffer_meters"] == BOUNDARY_FENCE_CANOPY_BUFFER_METERS
+assert "canopy_buffer_meters" not in boundary_feature["properties"], (
+    "the boundary fence no longer carries a canopy_buffer_meters property -- canopy is not a factor anymore"
+)
 assert boundary_feature["properties"]["confidence"] == "high"
 assert boundary_feature["geometry"]["type"] == "LineString", (
     "boundary fencing must be a LineString (a fence line), not a Polygon (a filled zone)"
 )
 boundary_out_coords = boundary_feature["geometry"]["coordinates"]
 assert tuple(boundary_out_coords[0]) == tuple(boundary_out_coords[-1]), "boundary fence line should be a closed ring"
-print("identify_boundary_fencing() with no real canopy produces 1 schema-valid 'perimeter_fencing' feature.")
+print("identify_boundary_fencing() on a bare property produces 1 schema-valid 'perimeter_fencing' feature (0 canopy fetches).")
 
-assert "no fence type, height, or material" in boundary_feature["properties"]["confidence_notes"].lower(), (
+boundary_notes = boundary_feature["properties"]["confidence_notes"].lower()
+assert "no fence type, height, or material" in boundary_notes, (
     "boundary fencing confidence_notes must explicitly state fence type/height/material is out of scope"
 )
-assert "inset inward" in boundary_feature["properties"]["confidence_notes"].lower(), (
-    "boundary fencing confidence_notes must explicitly describe the canopy-inset behavior"
+assert "developed footprint" in boundary_notes, (
+    "boundary fencing confidence_notes must describe the developed-footprint behavior"
 )
-print("Boundary fencing confidence_notes explicitly excludes fence type/height/material guidance.")
+assert "does not route around tree canopy" in boundary_notes, (
+    "boundary fencing confidence_notes must state the fence no longer routes around canopy"
+)
+print("Boundary fencing confidence_notes describes the developed-footprint (canopy-agnostic) behavior.")
 
 
 # --- boundary_fencing_to_geojson: a multi-segment split labels/annotates each segment ---
@@ -1023,37 +961,25 @@ print(
 
 # --- canopy_height override forwarding ---
 #
-# identify_boundary_fencing()'s mandatory canopy gate (production_area.
-# get_required_tree_root_zone_mask_utm(), at this module's own BOUNDARY_
-# FENCE_CANOPY_BUFFER_METERS) now accepts a pre-fetched canopy_height
-# override. When supplied it must be forwarded so no network canopy fetch
-# happens and the exact supplied array reaches the gate. Shared-core
-# behavior is proven in test_canopy_mask_override.py; this proves THIS
-# fetch-and-wrap entry point forwards it. Reuses the TEST_DEM/PROPERTY_
-# BOUNDARY fixture above.
+# The boundary fence no longer uses canopy at all, so identify_boundary_fencing() has NO
+# canopy_height parameter and issues NO canopy fetch anymore -- the earlier probe test that
+# asserted it forwarded canopy_height to a mandatory gate is gone with that behavior. What
+# remains to prove is that identify_fencing() still forwards canopy_height to its three OWN
+# self-compute fallback calls (road/water/tree candidates), each of which still has its own
+# downstream canopy gate, AND that the boundary-fence path itself triggers ZERO canopy fetches.
+# Reuses the TEST_DEM/PROPERTY_BOUNDARY fixture above.
 from _canopy_override_probe import CanopyOverrideProbe, clean_canopy_for  # noqa: E402
-
-_ov_override = clean_canopy_for(TEST_DEM)
-with CanopyOverrideProbe() as _ov_probe:
-    identify_boundary_fencing(PROPERTY_BOUNDARY, dem=TEST_DEM, canopy_height=_ov_override)
-_ov_probe.assert_override_used(_ov_override, "identify_boundary_fencing()")
-print(
-    "identify_boundary_fencing(): a supplied canopy_height override is forwarded to its mandatory "
-    "canopy gate -- 0 canopy fetches, exact override array used."
-)
 
 
 # =====================================================================
-# identify_fencing(): canopy_height= override forwarding (this branch's own addition, per Step
-# 0.3). Must reach (1) identify_boundary_fencing() -- its own DIRECT mandatory canopy gate -- and
-# (2) its three self-compute fallback calls (identify_road_corridor_candidates()/fetch_and_select_
-# optimal_water_zone()/identify_tree_zone_candidates()), each of which independently accepts
-# canopy_height and has its own canopy gate one level further down. identify_boundary_fencing() is
-# left REAL here (not mocked) so the CanopyOverrideProbe below is a genuine zero-fetch proof for
-# the one canopy gate directly reachable inside fencing.py itself; the other three self-computes
-# are mocked (same reasoning as Scenario 2/3 above -- a fully real run would also hit real, slow
-# NHD/SSURGO/soil network fetches that have nothing to do with canopy forwarding), with their
-# canopy_height kwarg captured for an identity check instead.
+# identify_fencing(): canopy_height= override forwarding. It must reach identify_fencing()'s three
+# self-compute fallback calls (identify_road_corridor_candidates()/fetch_and_select_optimal_water_
+# zone()/identify_tree_zone_candidates()), each of which independently accepts canopy_height and has
+# its own canopy gate one level further down. Those three are mocked (a fully real run would also hit
+# real, slow NHD/SSURGO/soil network fetches unrelated to canopy forwarding), with their canopy_height
+# kwarg captured for an identity check. identify_boundary_fencing() is left REAL -- and the
+# CanopyOverrideProbe proves it triggers ZERO canopy fetches now (the boundary fence no longer routes
+# around canopy), so no canopy gate is reached inside fencing.py's own direct call path at all.
 # =====================================================================
 
 CANOPY_FENCING_OVERRIDE = clean_canopy_for(TEST_DEM)
@@ -1088,17 +1014,25 @@ with (
             canopy_height=CANOPY_FENCING_OVERRIDE,
         )
 
-fencing_canopy_probe.assert_override_used(CANOPY_FENCING_OVERRIDE, "identify_fencing() -> identify_boundary_fencing()")
 validate_feature_collection(canopy_fencing_result["fencing_geojson"])
+# The boundary-fence path (identify_boundary_fencing() -> find_boundary_fencing()) reaches NO canopy
+# gate now -- 0 fetches AND 0 real gates -- since canopy is no longer a factor there.
+assert fencing_canopy_probe.fetch_calls == 0, (
+    "identify_fencing() must trigger ZERO canopy fetches from its own boundary-fence path (the boundary "
+    f"fence no longer uses canopy), got {fencing_canopy_probe.fetch_calls}"
+)
+assert len(fencing_canopy_probe.mask_arrays) == 0, (
+    "identify_boundary_fencing() must reach NO canopy gate now (canopy removed from the boundary fence), "
+    f"but {len(fencing_canopy_probe.mask_arrays)} gate(s) ran"
+)
 for call_name in ("road", "water", "tree"):
     assert _captured_fencing_canopy_kwargs[call_name] is CANOPY_FENCING_OVERRIDE, (
         f"identify_fencing() must forward canopy_height to its own {call_name} self-compute call by identity"
     )
 print(
-    "identify_fencing(): a supplied canopy_height override reaches identify_boundary_fencing() for real "
-    f"(0 canopy fetches, {len(fencing_canopy_probe.mask_arrays)} real gate(s) reached on the exact supplied "
-    "array) AND is forwarded by identity into all three self-compute fallback calls "
-    "(identify_road_corridor_candidates()/fetch_and_select_optimal_water_zone()/identify_tree_zone_candidates())."
+    "identify_fencing(): a supplied canopy_height override is forwarded by identity into all three "
+    "self-compute fallback calls (road/water/tree candidates), while the boundary-fence path itself "
+    "triggers ZERO canopy fetches (canopy is no longer a factor in boundary fencing)."
 )
 
 
