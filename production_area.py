@@ -945,24 +945,14 @@ def cluster_and_gate(
         stripped cell back onto whichever resulting piece is nearest, so
         no real acreage is lost -- but it also means two split zones can
         end up directly adjacent, sharing cells at the pinch with ZERO
-        real gap between their polygon_utm footprints. 'render_polygon_utm'
-        exists to make the split visually legible without touching the
-        reported geometry at all: for each committed split, it's built
-        from that sub-cluster's PRE-reclaim cells only (exactly what
-        survived erosion, before any stripped cell was reassigned), via
-        the same real cell-union approach (_cell_union_footprint()) used
-        everywhere else in this pipeline -- not a hull, not a buffer. Every
-        reclaimed cell (from BOTH resulting pieces) is excluded from BOTH
-        pieces' render_polygon_utm, so render_layout_map.py's contour
-        clipping (see that module) shows a real blank strip at the waist.
-        For a cluster with no waist split at all, render_polygon_utm is
-        simply polygon_utm -- no change in rendering for the ordinary
-        case. polygon_utm/geometry_wgs84/area_acres and every other
-        downstream consumer (zones_geojson, suitability scoring) continue
-        to reflect the full, POST-reclaim footprint, completely unaffected
-        by render_polygon_utm.
+        real gap between their polygon_utm footprints. The visual gap at a
+        waist is drawn instead from 'render_fill_polygon_utm' (see below),
+        whose opening keeps the two pieces on their own sides of the pinch;
+        polygon_utm/geometry_wgs84/area_acres and every other downstream
+        consumer (zones_geojson, suitability scoring) continue to reflect
+        the full, POST-reclaim footprint.
 
-        'render_fill_polygon_utm' is a SECOND, separate field: a bounded,
+        'render_fill_polygon_utm' is a bounded,
         ASYMMETRIC, DISC morphological OPENING of this cluster's own cell mask,
         clipped to polygon_utm --
 
@@ -1030,8 +1020,8 @@ def cluster_and_gate(
         is logged once.
 
         render_layout_map.py clips contour lines against render_fill_
-        polygon_utm, NOT render_polygon_utm -- see that module's own
-        docstring. Computed for EVERY cluster, split or not -- geometrically
+        polygon_utm -- see that module's own docstring. Computed for EVERY
+        cluster, split or not -- geometrically
         equal to polygon_utm when the cluster has no notch or protrusion
         narrower than r (e.g. a clean rectangular field, whose edges the
         opening returns almost exactly), and strictly smaller wherever the
@@ -1059,8 +1049,8 @@ def cluster_and_gate(
     one built with disqualifying_soil_union_utm=None.
 
     Returns the same shape identify_production_areas() itself returns,
-    PLUS 'render_polygon_utm'/'render_fill_polygon_utm' (see PART 1
-    above), 'cells' (this cluster's own constituent DEM cells),
+    PLUS 'render_fill_polygon_utm' (see PART 1 above), 'cells' (this
+    cluster's own constituent DEM cells),
     'hole_footprints' (list[Polygon], [] if none), and 'source_patch_id' --
     consumed directly by production_suitability.py's
     score_production_areas(), so STEP 4 never has to recompute/recover
@@ -1093,7 +1083,6 @@ def cluster_and_gate(
 
         for split_result in _attempt_waist_split(component_cells, cell_mask.shape, dem, min_area_acres):
             cluster_cells = split_result["cells"]
-            render_cells = split_result["render_cells"]
             elevations = [float(dem["array"][r, c]) for r, c in cluster_cells]
 
             footprint = _cell_union_footprint(cluster_cells, dem)
@@ -1104,15 +1093,6 @@ def cluster_and_gate(
             area_acres = polygon_utm.area / SQUARE_METERS_PER_ACRE
             if area_acres < min_area_acres:
                 continue
-
-            if render_cells is cluster_cells:
-                # No waist split for this cluster -- render_polygon_utm
-                # must simply equal polygon_utm, same object, no change
-                # in rendering behavior for the ordinary, non-split case.
-                render_polygon_utm = polygon_utm
-            else:
-                render_footprint = _cell_union_footprint(render_cells, dem)
-                render_polygon_utm = render_footprint.intersection(boundary_polygon_utm)
 
             # render_fill_polygon_utm: a bounded morphological OPENING of this
             # cluster's own cell mask, then CLIP to polygon_utm. This is an
@@ -1195,7 +1175,6 @@ def cluster_and_gate(
                     "area_acres": round(float(area_acres), 2),
                     "representative_elevation_m": float(np.median(elevations)),
                     "polygon_utm": polygon_utm,
-                    "render_polygon_utm": render_polygon_utm,
                     "render_fill_polygon_utm": render_fill_polygon_utm,
                     "geometry_wgs84": geometry_wgs84,
                     "cells": cluster_cells,
@@ -1226,8 +1205,6 @@ def identify_production_areas(
             'area_acres': float,
             'representative_elevation_m': float,
             'polygon_utm': shapely Polygon/MultiPolygon,
-            'render_polygon_utm': shapely Polygon/MultiPolygon,  # == polygon_utm unless this cluster went
-                                                                   # through a waist split -- see cluster_and_gate()
             'render_fill_polygon_utm': shapely Polygon/MultiPolygon,  # bounded opening of the cluster
                                                                    # mask, clipped to polygon_utm -- see cluster_and_gate()
             'geometry_wgs84': GeoJSON geometry dict,

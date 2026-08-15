@@ -91,8 +91,8 @@ tree zones (a later, separate pass), not the reverse.
         subtracted using that zone's own REAL, non-zero-width form, not a
         display-only approximation or a zero-area line:
           - production: render_fill_polygon_utm (production_area.py's
-            plain convex hull of each patch's own render_polygon_utm,
-            re-intersected with the boundary) -- NOT polygon_utm, the
+            bounded morphological opening of each patch's own cell mask,
+            clipped to polygon_utm) -- NOT polygon_utm, the
             blocky, notched raw cell-union footprint. A real interior
             pocket (excluded steep/hydric cells) or waist-split pinch in
             polygon_utm would otherwise read as "still open" ground here,

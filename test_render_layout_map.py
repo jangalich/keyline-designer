@@ -7,10 +7,11 @@ clipped per zone at render time against that zone's own render_fill_
 polygon_utm), not a filled/outlined shape -- see production_area.py's and
 render_layout_map.py's own module docstrings for why the earlier
 display_polygon_utm/display_geometry_wgs84 fields were removed entirely
-in favor of this, and for render_polygon_utm (waist-split visual
-separation) / render_fill_polygon_utm (render_polygon_utm's own plain
-convex hull, closing over any real excluded pocket or notch regardless
-of size)'s own separate roles.
+in favor of this, and for render_fill_polygon_utm's own role: a bounded
+morphological OPENING of the cluster's cell mask clipped to polygon_utm,
+which severs a waist-split pinch (drawing the visual gap) and, being
+anti-extensive, leaves any excluded interior pocket open rather than
+closing over it.
 
 Builds real patch dicts via production_area.cluster_and_gate() +
 production_suitability.score_production_areas() against small synthetic,
@@ -129,8 +130,8 @@ def _clip_contours_to_zone(contour_lines: list[dict], patch: dict, geometry_key:
     lines against that zone's own render_fill_polygon_utm (same CRS, no
     reprojection needed) -- returns the list of non-empty clipped
     geometries. geometry_key defaults to render_fill_polygon_utm (the
-    real production behavior); pass "polygon_utm" or "render_polygon_utm"
-    to reproduce an earlier clipping behavior for comparison."""
+    real production behavior); pass "polygon_utm" to reproduce an earlier
+    clipping behavior for comparison."""
     clipped = []
     for contour in contour_lines:
         piece = contour["lines_utm"].intersection(patch[geometry_key])
@@ -259,22 +260,18 @@ print(
 #     nothing between them in the real, reported geometry. Clipping against render_fill_polygon_utm (the
 #     current production behavior) instead of polygon_utm (the pre-fix behavior) is what actually produces
 #     a visible blank strip at the waist itself -- not just in the pre-existing gap_cells corridor checked
-#     above. render_polygon_utm (the intermediate, unsmoothed waist-split fix) must ALSO still show the
-#     same real gap -- render_fill_polygon_utm (each piece's own convex hull) must not bridge it either;
-#     this fixture's own lobes are convex rectangles, so their hulls change nothing (see
-#     test_production_area.py's own deliberately non-convex, notch-facing fixture for the empirical check
-#     against a genuinely non-convex pair). ---
+#     above. render_fill_polygon_utm (each piece's own bounded opening) must NOT bridge the waist either;
+#     the opening operates on the survivors of its own erosion, so a neck severed by the erosion stays
+#     severed (see test_production_area.py's own deliberately non-convex, notch-facing fixture for the
+#     empirical check against a genuinely non-convex pair). ---
 
 assert zone_1["polygon_utm"].distance(zone_2["polygon_utm"]) < 1e-9, (
     "test setup should reproduce the confirmed-live bug: polygon_utm for the two split zones must be "
     "directly adjacent with ZERO distance -- reclaim leaves nothing between them"
 )
-assert zone_1["render_polygon_utm"].distance(zone_2["render_polygon_utm"]) > 0, (
-    "render_polygon_utm for the two split zones must have a real gap, unlike polygon_utm"
-)
 assert zone_1["render_fill_polygon_utm"].distance(zone_2["render_fill_polygon_utm"]) > 0, (
-    "render_fill_polygon_utm (each piece's own convex hull) for the two split zones must ALSO still have "
-    "a real gap"
+    "render_fill_polygon_utm (each piece's own bounded opening) for the two split zones must have a real "
+    "gap -- an opening cannot bridge the severed waist"
 )
 assert zone_1["render_fill_polygon_utm"].intersection(zone_2["render_fill_polygon_utm"]).area < 1e-9, (
     "render_fill_polygon_utm for the two split zones must not overlap"
@@ -393,40 +390,39 @@ print(
 # =====================================================================
 # Invariant: area_acres, zones_geojson (geometry_wgs84), and suitability
 # scoring for a SPLIT cluster all continue to reflect the FULL,
-# POST-reclaim polygon_utm -- render_polygon_utm/render_fill_polygon_utm
-# both exist purely for display and must play no role in any reported
-# number or geometry. Same invariant every prior rendering-only pass in
-# this pipeline has needed (see the zones_geojson invariant directly
-# above).
+# POST-reclaim polygon_utm -- render_fill_polygon_utm plays no role in any
+# reported number or geometry (it feeds only rendering and downstream
+# candidate exclusion, never this patch's own reported area/geometry/score).
+# Same invariant every prior rendering-only pass in this pipeline has needed
+# (see the zones_geojson invariant directly above).
 # =====================================================================
 
 from rasterio.warp import transform_geom as _transform_geom_check
 from shapely.geometry import shape as _shape_check
 
 for zone in (zone_1, zone_2):
-    assert zone["render_polygon_utm"].area < zone["polygon_utm"].area, (
-        "test sanity check: this is a real split fixture, render_polygon_utm must genuinely be smaller"
+    assert zone["render_fill_polygon_utm"].area < zone["polygon_utm"].area, (
+        "test sanity check: this is a real split fixture, the opening's render_fill_polygon_utm must "
+        "genuinely be smaller than the full polygon_utm"
     )
     assert zone["area_acres"] == round(zone["polygon_utm"].area / pa.SQUARE_METERS_PER_ACRE, 2), (
-        "area_acres must be computed from the full, POST-reclaim polygon_utm, not render_polygon_utm/"
-        "render_fill_polygon_utm"
+        "area_acres must be computed from the full, POST-reclaim polygon_utm, not render_fill_polygon_utm"
     )
     geometry_utm_reprojected = _shape_check(
         _transform_geom_check("EPSG:4326", dumbbell_dem["crs"], zone["geometry_wgs84"])
     )
     reprojection_diff = geometry_utm_reprojected.symmetric_difference(zone["polygon_utm"]).area
     assert reprojection_diff < 1e-6, (
-        f"geometry_wgs84 must reproject back to the full polygon_utm, not the narrower render_polygon_utm/"
+        f"geometry_wgs84 must reproject back to the full polygon_utm, not the narrower "
         f"render_fill_polygon_utm (symmetric difference area {reprojection_diff})"
     )
 
-# Direct proof that render_polygon_utm/render_fill_polygon_utm play no role in suitability scoring:
-# rebuild the same split from scratch, strip BOTH render-only fields off each raw patch entirely before
-# scoring, and confirm score_production_areas() produces byte-identical numeric results either way.
+# Direct proof that render_fill_polygon_utm plays no role in suitability scoring: rebuild the same split
+# from scratch, strip the render-only fill field off each raw patch entirely before scoring, and confirm
+# score_production_areas() produces byte-identical numeric results either way.
 fresh_step1 = compute_step1_eligible_cells(dumbbell_dem, _full_extent_boundary(dumbbell_dem), disqualifying_soil_union_utm=None)
 fresh_patches = cluster_and_gate(dumbbell_mask, dumbbell_dem, _full_extent_boundary(dumbbell_dem), fresh_step1)
 for p in fresh_patches:
-    del p["render_polygon_utm"]
     del p["render_fill_polygon_utm"]
 stripped_scored = {p["id"]: p for p in score_production_areas(fresh_patches, dumbbell_dem, fresh_step1)}
 
@@ -438,17 +434,17 @@ def _same_score(a: float, b: float) -> bool:
 for zone in (zone_1, zone_2):
     stripped = stripped_scored[zone["id"]]
     assert _same_score(stripped["suitability_score"], zone["suitability_score"]), (
-        "suitability_score must be identical whether or not render_polygon_utm/render_fill_polygon_utm are "
-        "present on the patch dict"
+        "suitability_score must be identical whether or not render_fill_polygon_utm is present on the "
+        "patch dict"
     )
     assert _same_score(stripped["area_score"], zone["area_score"]) and _same_score(
         stripped["compactness_score"], zone["compactness_score"]
-    ), "size_factor's sub-scores must be identical whether or not the render-only fields are present"
+    ), "size_factor's sub-scores must be identical whether or not the render-only fill field is present"
 
 print(
-    "render_polygon_utm/render_fill_polygon_utm invariant: area_acres, geometry_wgs84 (zones_geojson), and "
-    "suitability scoring for both split zones all continue to reflect the full, post-reclaim polygon_utm -- "
-    "byte-identical whether or not either render-only field is even present on the patch dict."
+    "render_fill_polygon_utm invariant: area_acres, geometry_wgs84 (zones_geojson), and suitability "
+    "scoring for both split zones all continue to reflect the full, post-reclaim polygon_utm -- "
+    "byte-identical whether or not the render-only fill field is even present on the patch dict."
 )
 
 

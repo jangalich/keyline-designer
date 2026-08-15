@@ -1573,10 +1573,11 @@ def render_layout_map(
         # production zones (see this module's own docstring). The contour
         # lines below clip against render_fill_polygon_utm instead (same
         # CRS as contour_lines' lines_utm -- no reprojection needed before
-        # intersecting) -- excludes the reclaimed cells at a waist-split
-        # pinch (like render_polygon_utm) AND closes over small excluded
-        # (steep/hydric) pockets inside the zone, so both kinds of gap are
-        # handled by clipping against a single geometry.
+        # intersecting). render_fill_polygon_utm is a bounded morphological
+        # opening of the cluster's cell mask: it severs a waist-split pinch
+        # (so a reclaimed waist renders as a blank strip) and, being anti-
+        # extensive, leaves an excluded interior (steep/hydric) pocket OPEN
+        # rather than closing over it.
         geom = _reproject_geometry_to_mercator(patch["geometry_wgs84"])
 
         # DISPLAY-ONLY: smooth the production fill's 5m cell-union staircase into

@@ -170,31 +170,27 @@ _p = inv_patches[0]
 assert _p["area_acres"] == round(_p["polygon_utm"].area / SQUARE_METERS_PER_ACRE, 2), (
     "area_acres must reflect polygon_utm, independent of the render fill"
 )
-assert _p["render_polygon_utm"] is _p["polygon_utm"], (
-    "an un-split cluster's render_polygon_utm is unchanged by this branch (still IS polygon_utm)"
-)
 
-# STEP 4 scoring must not depend on the render fields at all: score once as-is,
-# once with BOTH render fields stripped off, and require byte-identical results.
+# STEP 4 scoring must not depend on the render fill at all: score once as-is,
+# once with the render fill stripped off, and require byte-identical results.
 scored_full = score_production_areas(copy.deepcopy(inv_patches), inv_dem, inv_step1)
 stripped = copy.deepcopy(inv_patches)
 for patch in stripped:
     patch.pop("render_fill_polygon_utm")
-    patch.pop("render_polygon_utm")
 scored_stripped = score_production_areas(stripped, inv_dem, inv_step1)
 
-_cmp_fields = [k for k in scored_full[0] if k not in ("render_fill_polygon_utm", "render_polygon_utm")]
+_cmp_fields = [k for k in scored_full[0] if k != "render_fill_polygon_utm"]
 for i in range(len(scored_full)):
     for k in _cmp_fields:
         if k not in scored_stripped[i]:
             continue
         a, b = scored_full[i][k], scored_stripped[i][k]
         same = a.equals(b) if hasattr(a, "geom_type") else a == b
-        assert same, f"STEP 4 field {k!r} changed when the render fields were stripped -- scoring must not read them"
+        assert same, f"STEP 4 field {k!r} changed when the render fill was stripped -- scoring must not read it"
 print(
-    f"V2 reported-field invariance: area_acres derives from polygon_utm, render_polygon_utm is unchanged, and "
-    f"all {len(_cmp_fields)} STEP 4 scoring fields are byte-identical with and without the render fields -- "
-    "scoring does not read render_fill_polygon_utm."
+    f"V2 reported-field invariance: area_acres derives from polygon_utm, and all {len(_cmp_fields)} STEP 4 "
+    f"scoring fields are byte-identical with and without the render fill -- scoring does not read "
+    "render_fill_polygon_utm."
 )
 
 

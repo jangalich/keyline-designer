@@ -394,10 +394,9 @@ def attempt_waist_split(
     caller reports: area_acres, polygon_utm, geometry_wgs84, scoring) and
     "render_cells" (the narrower PRE-reclaim cell set -- exactly the cells
     that survived erosion and landed on this sub-component, before any
-    stripped cell was reassigned anywhere; used ONLY to build a render-only
-    footprint for display, e.g. production_area.cluster_and_gate()'s own
-    render_polygon_utm, so a dilation/reclaim step doesn't silently erase
-    the real visual gap between two newly-split pieces) -- only if EVERY
+    stripped cell was reassigned anywhere; a render-only pre-reclaim cell
+    partition kept so a dilation/reclaim step doesn't silently erase the
+    real visual gap between two newly-split pieces) -- only if EVERY
     sub-cluster clears min_area_acres on its own POST-reclaim footprint;
     otherwise this returns [{"cells": cells, "render_cells": cells}]
     unchanged (a technically-2+-component erosion result that can't

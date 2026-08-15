@@ -783,56 +783,27 @@ print(
 )
 
 
-# --- render_polygon_utm: a confirmed-live production bug -- two split zones on a real boundary have
-#     ZERO distance between their real geometries (polygon_utm.distance() == 0.0), a direct consequence
-#     of the reclaim step reassigning every eroded-away cell to whichever resulting piece is nearest.
-#     render_polygon_utm (built from the PRE-reclaim, erosion-survived cells only) must show a REAL gap
-#     at the pinch, while polygon_utm/area_acres continue to reflect the full, post-reclaim footprint. ---
-
-from raster_grid import binary_erode as _binary_erode_check, connected_components as _connected_components_check
-
-dumbbell_radius_cells = pa._waist_erosion_radius_cells(dumbbell_dem, pa.MIN_ZONE_WAIST_METERS)
-dumbbell_eroded_mask = _binary_erode_check(dumbbell_mask, dumbbell_radius_cells)
-survived_cell_count = int(dumbbell_eroded_mask.sum())
-reclaimed_cell_count = len(dumbbell_cells) - survived_cell_count
-cell_area_sqm = WAIST_RESOLUTION[0] * WAIST_RESOLUTION[1]
-
-render_total_area = sum(p["render_polygon_utm"].area for p in dumbbell_patches)
-polygon_total_area = sum(p["polygon_utm"].area for p in dumbbell_patches)
-assert abs((polygon_total_area - render_total_area) - reclaimed_cell_count * cell_area_sqm) < 1e-6, (
-    f"render_polygon_utm must be smaller than polygon_utm by exactly the reclaimed cell count "
-    f"({reclaimed_cell_count} cells), got a {(polygon_total_area - render_total_area) / cell_area_sqm} "
-    "cell shortfall"
-)
+# --- Reclaim adjacency + reported-geometry invariant: the reclaim step reassigns every eroded-away cell
+#     to whichever resulting piece is nearest, so two split zones on a real boundary end up directly
+#     adjacent -- polygon_utm.distance() == 0.0 between them -- while polygon_utm/area_acres continue to
+#     reflect the full, post-reclaim footprint. The visual gap at the pinch is drawn from each piece's own
+#     render_fill_polygon_utm opening instead (see test_render_layout_map.py), not from the reported
+#     geometry. ---
 
 p1, p2 = dumbbell_patches
 polygon_distance = p1["polygon_utm"].distance(p2["polygon_utm"])
-render_distance = p1["render_polygon_utm"].distance(p2["render_polygon_utm"])
 assert polygon_distance < 1e-9, (
-    f"test setup should reproduce the confirmed-live bug: the two split zones' real, reported footprints "
-    f"(polygon_utm) must be directly adjacent with ZERO distance, got {polygon_distance}"
-)
-assert render_distance > 0, (
-    "render_polygon_utm for the two split zones must have a REAL gap between them (unlike polygon_utm), "
-    f"got distance {render_distance}"
-)
-assert p1["render_polygon_utm"].intersection(p2["render_polygon_utm"]).area < 1e-9, (
-    "render_polygon_utm for the two split zones must not overlap"
-)
-print(
-    f"render_polygon_utm: reproduces the confirmed-live zero-distance bug in polygon_utm (distance "
-    f"{polygon_distance}) while render_polygon_utm shows a real {round(render_distance, 2)}m gap between "
-    f"the two split zones -- excluding exactly the {reclaimed_cell_count} reclaimed cells from both pieces."
+    f"the two split zones' real, reported footprints (polygon_utm) must be directly adjacent with ZERO "
+    f"distance after reclaim, got {polygon_distance}"
 )
 
 for p in dumbbell_patches:
     assert p["area_acres"] == round(p["polygon_utm"].area / pa.SQUARE_METERS_PER_ACRE, 2), (
-        "area_acres must continue to reflect the full, POST-reclaim polygon_utm -- completely unaffected "
-        "by render_polygon_utm"
+        "area_acres must continue to reflect the full, POST-reclaim polygon_utm"
     )
 print(
-    "render_polygon_utm invariant: area_acres for both split zones still reflects the full, post-reclaim "
-    "polygon_utm, completely unaffected by the new render-only field."
+    "Reclaim adjacency: the two split zones' polygon_utm are directly adjacent (distance "
+    f"{round(polygon_distance, 6)}m) and area_acres for both reflects the full, post-reclaim polygon_utm."
 )
 
 
@@ -850,8 +821,8 @@ l_shape_patches = _gate(l_shape_mask, hull_dem, hull_step1)
 assert len(l_shape_patches) == 1, f"a single L-shaped mask must stay one cluster, got {len(l_shape_patches)} cluster(s)"
 l_patch = l_shape_patches[0]
 
-assert not l_patch["render_polygon_utm"].equals(l_patch["render_polygon_utm"].convex_hull), (
-    "test sanity check: this L-shaped fixture's own render_polygon_utm must genuinely be non-convex, "
+assert not l_patch["polygon_utm"].equals(l_patch["polygon_utm"].convex_hull), (
+    "test sanity check: this L-shaped fixture's own polygon_utm must genuinely be non-convex, "
     "otherwise the concavity check below isn't exercising real behavior"
 )
 # BOUNDED: the clipped opening never exceeds the real footprint -- the whole point of replacing the hull.
@@ -861,7 +832,7 @@ assert l_patch["render_fill_polygon_utm"].area <= l_patch["polygon_utm"].area + 
 # The L's inner corner is a WIDE re-entrant, far wider than the opening radius, so the opening leaves it
 # OPEN -- unlike the convex hull, which filled it in. The opening's area is therefore strictly BELOW the
 # hull's on this fixture.
-l_hull_area = l_patch["render_polygon_utm"].convex_hull.intersection(_full_extent_boundary(hull_dem)).area
+l_hull_area = l_patch["polygon_utm"].convex_hull.intersection(_full_extent_boundary(hull_dem)).area
 assert l_patch["render_fill_polygon_utm"].area < l_hull_area, (
     "the opening must NOT fill the L's wide concave corner the way the convex hull did -- its area must be "
     f"strictly below the hull's ({l_patch['render_fill_polygon_utm'].area} vs {l_hull_area} sq m)"
@@ -1066,10 +1037,6 @@ square_patch = square_patches[0]
 assert len(square_patch["cells"]) == len(square_cells), "a normal field must pass through with every cell intact"
 assert square_patch["hole_footprints"] == [], "a solid mask with no enclosed gap must report hole_footprints=[]"
 assert len(square_patch["polygon_utm"].interiors) == 0, "a clean solid mask's real footprint must carry no interior rings"
-assert square_patch["render_polygon_utm"] is square_patch["polygon_utm"], (
-    "an ordinary, non-split cluster's render_polygon_utm must simply BE polygon_utm -- no change in "
-    "rendering behavior for the ordinary case"
-)
 # render_fill_polygon_utm is a bounded, ASYMMETRIC, DISC opening (erode r+lead, dilate r) clipped to
 # polygon_utm. The lead erode insets every straight edge by exactly one cell, and the disc rounds the
 # corners, so a solid square is drawn strictly INSIDE its own footprint (no longer identical to polygon_utm,
@@ -1092,9 +1059,8 @@ assert abs(_inset_x - WAIST_RESOLUTION[0]) < 1e-6 and abs(_inset_y - WAIST_RESOL
 )
 print(
     "Idempotence: a solid, roughly-square mask passes through unchanged for REPORTING (1 cluster, "
-    "hole_footprints=[], render_polygon_utm is polygon_utm) while render_fill_polygon_utm is its bounded "
-    f"asymmetric opening -- straight edges inset by exactly one cell ({WAIST_RESOLUTION[0]}m), corners rounded "
-    "by the disc element."
+    "hole_footprints=[]) while render_fill_polygon_utm is its bounded asymmetric opening -- straight edges "
+    f"inset by exactly one cell ({WAIST_RESOLUTION[0]}m), corners rounded by the disc element."
 )
 
 

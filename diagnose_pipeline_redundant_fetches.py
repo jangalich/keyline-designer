@@ -250,7 +250,6 @@ _FAKE_PATCH = {
     "area_acres": 1.23,
     "representative_elevation_m": 1000.0,
     "polygon_utm": box(0, 0, 10, 10),
-    "render_polygon_utm": box(0, 0, 10, 10),
     "render_fill_polygon_utm": box(0, 0, 10, 10),
     "geometry_wgs84": {"type": "Polygon", "coordinates": [[[0.0, 0.0]]]},
     "cells": [(0, 0)],
