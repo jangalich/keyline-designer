@@ -130,10 +130,14 @@ from raster_grid import (
     waist_erosion_radius_cells,
 )
 from valley_delineation import (
+    compute_flow_accumulation,
+    compute_flow_direction,
     delineate_valleys,
+    fill_depressions,
     get_flow_accumulation_for_dem,
     valleys_to_geojson,
 )
+import keypoint_detection
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -299,6 +303,49 @@ WATER_SYSTEM_CANDIDATE_CONFIDENCE_NOTES = (
     "slope-only production-area heuristic — so treat this as a starting "
     "area to walk and ground-truth, not a final answer."
 )
+
+
+# =====================================================================
+# EXPERIMENTAL (branch: keypoint-sited-water-zones). Everything below in
+# this block defaults to the CURRENT accumulation-seeded behaviour being
+# unchanged. With KEYPOINT_SITED_ZONES False (the default), find_candidate_
+# zones() runs exactly as before -- byte-identical output -- and none of
+# these constants are read on that path. The reviewer will judge this
+# against real renders; do NOT tune any value here to make a test pass.
+# =====================================================================
+
+# The master flag. False = current accumulation-seeded growth, unchanged.
+# True = seed each candidate at a detected keypoint and grow the impoundment
+# a 2 m wall would flood (see _find_keypoint_sited_zones()).
+KEYPOINT_SITED_ZONES = False
+
+# Nominal dam-wall height used to bound the impoundment footprint: the growth
+# space is capped at keypoint_elevation + this. A first-guess wall height for
+# a keypoint dam, NOT validated against any real spillway/storage design.
+# CONFIGURABLE.
+KEYPOINT_NOMINAL_DAM_HEIGHT_M = 2.0
+
+# Weights for ranking keypoint-sited candidates. A keypoint dam wants water AND
+# head AND a sharp valley break; ranking on any one alone selects against the
+# other two. Normalise each term across the candidate set before weighting.
+#
+# DECISION FLAGGED FOR THE REVIEWER: these weights are a first guess made
+# without seeing a render. They are NOT tuned to make any test pass, and the
+# scoring shape (weighted sum of three min-max-normalised terms) is fixed here
+# only so real output can be produced for the reviewer to judge -- each
+# candidate reports its three normalised components alongside its total.
+KEYPOINT_RANK_WEIGHT_CATCHMENT = 0.4
+KEYPOINT_RANK_WEIGHT_ELEVATION = 0.4
+KEYPOINT_RANK_WEIGHT_SLOPE_DROP = 0.2
+
+# Head classification threshold (NOT a filter): a candidate whose most
+# gravity-favorable elevation differential over the production it could serve
+# is at or above this is "gravity_fed"; below it (including below production)
+# is "pump_required". A keypoint below production is still a valid dam site --
+# it just needs a pump, which the narrative states -- and is useful for
+# cultivation layout regardless of head, so head is REPORTED, never filtered
+# on. CONFIGURABLE.
+KEYPOINT_MIN_GRAVITY_HEAD_M = 2.0
 
 
 def compute_water_eligible_cells(
@@ -635,6 +682,13 @@ def find_candidate_zones(
     canopy_root_zone_mask_utm=_CANOPY_CHECK_UNCHECKED,
     road_exclusion_union_utm=_ROAD_CHECK_UNCHECKED,
     production_setback_meters: float = WATER_ZONE_PRODUCTION_SETBACK_METERS,
+    keypoint_sited_zones: bool = KEYPOINT_SITED_ZONES,
+    keypoints: Optional[list[dict]] = None,
+    keypoint_nominal_dam_height_m: float = KEYPOINT_NOMINAL_DAM_HEIGHT_M,
+    keypoint_rank_weight_catchment: float = KEYPOINT_RANK_WEIGHT_CATCHMENT,
+    keypoint_rank_weight_elevation: float = KEYPOINT_RANK_WEIGHT_ELEVATION,
+    keypoint_rank_weight_slope_drop: float = KEYPOINT_RANK_WEIGHT_SLOPE_DROP,
+    keypoint_min_gravity_head_m: float = KEYPOINT_MIN_GRAVITY_HEAD_M,
 ) -> list[dict]:
     """
     Cell-based zone-filtering logic (Step 3) — see module docstring for
@@ -775,9 +829,39 @@ def find_candidate_zones(
                 second time
         }
     'id' is always 0 -- exactly one zone is produced.
+
+    EXPERIMENTAL keypoint siting: when keypoint_sited_zones is True (default
+    False, from KEYPOINT_SITED_ZONES), NONE of the accumulation-seeded logic
+    below runs -- the call is delegated to _find_keypoint_sited_zones(), which
+    seeds at detected keypoints and grows the impoundment a nominal dam wall
+    would flood instead (see that function). With the flag False the entire
+    body below is byte-identical to before this branch; the keypoint_* keyword
+    arguments are inert. This early return is the ONLY change to the flag-off
+    path.
     """
     if not production_areas:
         return []
+
+    if keypoint_sited_zones:
+        return _find_keypoint_sited_zones(
+            dem,
+            production_areas,
+            boundary_polygon_utm,
+            max_valley_contributing_area_acres=max_valley_contributing_area_acres,
+            min_boundary_setback_meters=min_boundary_setback_meters,
+            max_service_distance_meters=max_service_distance_meters,
+            min_water_zone_area_acres=min_water_zone_area_acres,
+            water_zone_target_acres=water_zone_target_acres,
+            canopy_root_zone_mask_utm=canopy_root_zone_mask_utm,
+            road_exclusion_union_utm=road_exclusion_union_utm,
+            production_setback_meters=production_setback_meters,
+            keypoints=keypoints,
+            keypoint_nominal_dam_height_m=keypoint_nominal_dam_height_m,
+            keypoint_rank_weight_catchment=keypoint_rank_weight_catchment,
+            keypoint_rank_weight_elevation=keypoint_rank_weight_elevation,
+            keypoint_rank_weight_slope_drop=keypoint_rank_weight_slope_drop,
+            keypoint_min_gravity_head_m=keypoint_min_gravity_head_m,
+        )
 
     eligible_mask = compute_water_eligible_cells(
         dem,
@@ -921,6 +1005,337 @@ def find_candidate_zones(
     return [zone]
 
 
+def _grow_impoundment_cells(seed, growth_space_set, array, target_cell_count):
+    """
+    Connected greedy growth of the impoundment from the keypoint seed within
+    growth_space_set, always adding the LOWEST-elevation 4-connected-adjacent
+    cell, until target_cell_count or the space is exhausted. Lowest-first (not
+    highest-accumulation, as the accumulation-seeded path uses) because a dam
+    floods low ground first; 4-connected (D4_OFFSETS), not 8, for the same
+    reason the accumulation-seeded growth is -- a corner-touching cell renders
+    as a disjoint MultiPolygon.
+
+    The result is a single 4-connected component by construction. Normally the
+    seed (the keypoint) is itself in growth_space and is the start; in the rare
+    case the keypoint cell is itself excluded (e.g. it sits under canopy or on
+    a road), growth starts from its lowest-elevation eligible neighbor so the
+    impoundment is still grown and stays connected. Returns [] only if neither
+    the seed nor any of its 4-neighbors is in growth_space (the wall floods
+    nothing here).
+    """
+    if not growth_space_set:
+        return []
+
+    if seed in growth_space_set:
+        start = seed
+    else:
+        neighbors = [(seed[0] + dr, seed[1] + dc) for dr, dc in D4_OFFSETS]
+        candidates = [n for n in neighbors if n in growth_space_set]
+        if not candidates:
+            return []
+        start = min(candidates, key=lambda cell: (float(array[cell[0], cell[1]]), cell[0], cell[1]))
+
+    grown = {start}
+    frontier: set = set()
+
+    def _push(cell):
+        r, c = cell
+        for dr, dc in D4_OFFSETS:
+            neighbor = (r + dr, c + dc)
+            if neighbor in growth_space_set and neighbor not in grown:
+                frontier.add(neighbor)
+
+    _push(start)
+    while len(grown) < target_cell_count and frontier:
+        best = min(frontier, key=lambda cell: (float(array[cell[0], cell[1]]), cell[0], cell[1]))
+        frontier.discard(best)
+        grown.add(best)
+        _push(best)
+
+    return list(grown)
+
+
+def _normalize_across(values):
+    """Min-max normalise a list to [0, 1] for the keypoint ranking. A
+    zero-spread set (a single candidate, or all candidates tied on this term)
+    has nothing to discriminate, so every entry is reported as 1.0 (all tied
+    at the top of that term) -- a constant that shifts every candidate's total
+    equally and so never changes the ranking. Documented rather than hidden so
+    the reviewer reads a single candidate's 1.0 components correctly."""
+    lo, hi = min(values), max(values)
+    if hi - lo < 1e-12:
+        return [1.0 for _ in values]
+    return [(v - lo) / (hi - lo) for v in values]
+
+
+def _find_keypoint_sited_zones(
+    dem,
+    production_areas,
+    boundary_polygon_utm,
+    *,
+    max_valley_contributing_area_acres,
+    min_boundary_setback_meters,
+    max_service_distance_meters,
+    min_water_zone_area_acres,
+    water_zone_target_acres,
+    canopy_root_zone_mask_utm,
+    road_exclusion_union_utm,
+    production_setback_meters,
+    keypoints,
+    keypoint_nominal_dam_height_m,
+    keypoint_rank_weight_catchment,
+    keypoint_rank_weight_elevation,
+    keypoint_rank_weight_slope_drop,
+    keypoint_min_gravity_head_m,
+):
+    """
+    EXPERIMENTAL keypoint-sited water zones (KEYPOINT_SITED_ZONES path). This
+    REPLACES both the seed and the growth surface of the accumulation-seeded
+    path: the seed is a detected keypoint, and the growth space is the
+    footprint a wall of keypoint_nominal_dam_height_m at that keypoint would
+    flood -- the intersection of
+
+      1. cells that drain THROUGH the keypoint (its upstream contributing set,
+         keypoint_detection.upstream_contributing_cells() over the inverted
+         flow field) -- growing toward lower ground unconstrained would run
+         DOWNSTREAM, but a dam floods what is UPSTREAM of it, so the
+         impoundment is constrained to the upstream set;
+      2. cells at or below keypoint_elevation + keypoint_nominal_dam_height_m
+         (the wall crest); and
+      3. cells passing compute_water_eligible_cells()'s existing exclusion
+         gates (canopy, production, roads, off-parcel, service distance -- the
+         contributing-area ceiling is also applied there but is moot here,
+         since every upstream cell has strictly lower accumulation than the
+         keypoint, which itself passed the [5, 20] ac detection window).
+
+    Within that space growth is 4-connected from the keypoint, always adding
+    the lowest-elevation adjacent cell, up to water_zone_target_acres or the
+    space is exhausted (_grow_impoundment_cells()). The FULL impoundment area
+    (the whole intersection footprint, the measured quantity the reviewer
+    wants) is reported separately from the grown zone; if the flooded footprint
+    is under target, the zone comes back smaller -- it is NOT padded.
+
+    Candidates are ranked by a weighted sum of three min-max-normalised terms
+    (catchment, keypoint elevation, slope drop -- see the KEYPOINT_RANK_WEIGHT_*
+    constants), each candidate reporting its three normalised components and
+    total. Head over production is CLASSIFIED (gravity_fed vs pump_required,
+    keypoint_min_gravity_head_m) and reported, never filtered on -- a keypoint
+    below production is still a valid pump-fed dam site and a valid cultivation
+    reference.
+
+    Returns the keypoint-sited candidates as full zone dicts (a superset of the
+    accumulation-seeded zone shape, so zones_to_geojson() and downstream
+    consumers still work), ranked best-first with id = rank index, or [] if no
+    keypoint floods anything eligible. This intentionally differs from the
+    flag-off path's exactly-one-zone contract: the flag is off by default and
+    experimental, and the reviewer needs every candidate's ranking components
+    from real output to judge the weights.
+    """
+    array = dem["array"]
+    grid_shape = array.shape
+    area_per_cell = cell_area_acres(dem)
+
+    # Shared hydrology, computed once and forwarded into detection so the
+    # upstream map the impoundment walks is the SAME field the keypoints were
+    # detected on (self-computing override pattern).
+    filled = fill_depressions(array)
+    flow_to_row, flow_to_col = compute_flow_direction(filled, dem["resolution_meters"])
+    flow_accumulation = compute_flow_accumulation(filled, flow_to_row, flow_to_col)
+    upstream_map = keypoint_detection.build_upstream_map(flow_to_row, flow_to_col)
+
+    if keypoints is None:
+        keypoints = keypoint_detection.detect_keypoints(
+            dem,
+            boundary_polygon_utm,
+            production_areas,
+            flow_to_row=flow_to_row,
+            flow_to_col=flow_to_col,
+            flow_accumulation=flow_accumulation,
+            filled=filled,
+        )
+    if not keypoints:
+        return []
+
+    eligible_mask = compute_water_eligible_cells(
+        dem,
+        production_areas,
+        boundary_polygon_utm,
+        max_valley_contributing_area_acres,
+        max_service_distance_meters,
+        min_boundary_setback_meters,
+        canopy_root_zone_mask_utm,
+        road_exclusion_union_utm,
+        production_setback_meters,
+    )
+
+    slope_pct_grid = compute_slope_percent(array, dem["resolution_meters"])
+    target_cell_count = max(1, int(math.floor(water_zone_target_acres / area_per_cell + 1e-9)))
+    crest_offset = keypoint_nominal_dam_height_m
+
+    raw_candidates = []
+    for keypoint in keypoints:
+        seed = tuple(keypoint["rowcol"])
+        seed_elevation = float(array[seed[0], seed[1]])
+        crest = seed_elevation + crest_offset
+
+        upstream_set = keypoint_detection.upstream_contributing_cells(seed, upstream_map)
+        growth_space = {
+            cell
+            for cell in upstream_set
+            if eligible_mask[cell[0], cell[1]] and float(array[cell[0], cell[1]]) <= crest
+        }
+
+        # Full impoundment footprint: the whole intersection, clipped to the
+        # parcel -- the measured quantity, reported whether or not the grown
+        # zone reaches target.
+        impoundment_mask = np.zeros(grid_shape, dtype=bool)
+        for r, c in growth_space:
+            impoundment_mask[r, c] = True
+        impoundment_polygon = cell_union_footprint(dem, impoundment_mask).intersection(boundary_polygon_utm)
+        impoundment_area_acres = impoundment_polygon.area / SQUARE_METERS_PER_ACRE
+
+        grown_cells = _grow_impoundment_cells(seed, growth_space, array, target_cell_count)
+        if not grown_cells:
+            continue
+
+        sub_mask = np.zeros(grid_shape, dtype=bool)
+        for r, c in grown_cells:
+            sub_mask[r, c] = True
+        polygon_utm = cell_union_footprint(dem, sub_mask).intersection(boundary_polygon_utm)
+        if polygon_utm.is_empty:
+            continue
+        # NB: min_water_zone_area_acres (the accumulation path's cluster noise
+        # floor) is DELIBERATELY not applied here. An undersized impoundment --
+        # a 2 m wall that floods well under target -- is the interesting result
+        # the reviewer wants measured and reported, not filtered away as noise.
+
+        representative_elevation_m = float(np.median([array[r, c] for r, c in grown_cells]))
+        representative_point = polygon_utm.centroid
+
+        # Relationships within service distance -> the served ids / headline
+        # relationships (same shape the accumulation path reports).
+        service_relationships = _zone_production_area_relationships(
+            representative_point,
+            representative_elevation_m,
+            production_areas,
+            max_service_distance_meters,
+        )
+
+        # Head CLASSIFICATION (not a filter): the most gravity-favorable
+        # differential over ALL production areas, distance-agnostic, so a class
+        # is always reportable even if the centroid sits just outside every
+        # service window.
+        best_differential = max(
+            representative_elevation_m - patch["representative_elevation_m"]
+            for patch in production_areas
+        )
+        head_class = (
+            "gravity_fed" if best_differential >= keypoint_min_gravity_head_m else "pump_required"
+        )
+
+        contributing_area_cells = float(
+            np.median([flow_accumulation[r, c] for r, c in grown_cells])
+        )
+        cell_slopes = [
+            float(slope_pct_grid[r, c])
+            for r, c in grown_cells
+            if not np.isnan(slope_pct_grid[r, c])
+        ]
+        slope_pct = float(np.median(cell_slopes)) if cell_slopes else 0.0
+
+        raw_candidates.append(
+            {
+                "keypoint": keypoint,
+                "grown_cells": grown_cells,
+                "sub_mask": sub_mask,
+                "polygon_utm": polygon_utm,
+                "impoundment_polygon_utm": impoundment_polygon,
+                "impoundment_area_acres": impoundment_area_acres,
+                "impoundment_cell_count": len(growth_space),
+                "representative_elevation_m": representative_elevation_m,
+                "service_relationships": service_relationships,
+                "best_differential_m": best_differential,
+                "head_class": head_class,
+                "contributing_area_cells": contributing_area_cells,
+                "slope_pct": slope_pct,
+            }
+        )
+
+    if not raw_candidates:
+        return []
+
+    # Weighted ranking over the candidate set: normalise each term, then weight.
+    catchment_norm = _normalize_across([c["keypoint"]["contributing_acres"] for c in raw_candidates])
+    elevation_norm = _normalize_across([c["keypoint"]["elevation_m"] for c in raw_candidates])
+    slope_drop_norm = _normalize_across([c["keypoint"]["slope_drop_pct"] for c in raw_candidates])
+
+    for cand, cn, en, sn in zip(raw_candidates, catchment_norm, elevation_norm, slope_drop_norm):
+        score = (
+            keypoint_rank_weight_catchment * cn
+            + keypoint_rank_weight_elevation * en
+            + keypoint_rank_weight_slope_drop * sn
+        )
+        cand["rank_components"] = {
+            "catchment_norm": round(cn, 4),
+            "elevation_norm": round(en, 4),
+            "slope_drop_norm": round(sn, 4),
+        }
+        cand["rank_score"] = round(score, 4)
+
+    raw_candidates.sort(key=lambda c: (-c["rank_score"], -c["keypoint"]["slope_drop_pct"]))
+
+    zones = []
+    for rank, cand in enumerate(raw_candidates):
+        polygon_utm = cand["polygon_utm"]
+        render_fill_polygon_utm = _render_opening(
+            cand["sub_mask"], cand["grown_cells"], grid_shape, dem, polygon_utm
+        )
+        if render_fill_polygon_utm.area > polygon_utm.area * (1 + 1e-9) + 1e-6:
+            raise ValueError(
+                "_find_keypoint_sited_zones: render_fill_polygon_utm.area "
+                f"({render_fill_polygon_utm.area:.6f} m^2) exceeds polygon_utm.area "
+                f"({polygon_utm.area:.6f} m^2)."
+            )
+
+        geometry_wgs84 = transform_geom(dem["crs"], "EPSG:4326", mapping(polygon_utm))
+        render_fill_geometry_wgs84 = transform_geom(
+            dem["crs"], "EPSG:4326", mapping(render_fill_polygon_utm)
+        )
+        relationships = cand["service_relationships"]
+        keypoint = cand["keypoint"]
+
+        zones.append(
+            {
+                "id": rank,
+                "served_production_area_ids": sorted(r["production_area_id"] for r in relationships),
+                "polygon_utm": polygon_utm,
+                "geometry_wgs84": geometry_wgs84,
+                "render_fill_polygon_utm": render_fill_polygon_utm,
+                "render_fill_geometry_wgs84": render_fill_geometry_wgs84,
+                "cells": cand["grown_cells"],
+                "production_area_relationships": relationships,
+                "primary_production_area_relationship": relationships[0] if relationships else None,
+                "contributing_area_cells": round(cand["contributing_area_cells"], 2),
+                "slope_pct": round(cand["slope_pct"], 2),
+                # --- EXPERIMENTAL keypoint-siting fields ---
+                "keypoint_rowcol": tuple(keypoint["rowcol"]),
+                "keypoint_elevation_m": keypoint["elevation_m"],
+                "keypoint_contributing_acres": keypoint["contributing_acres"],
+                "keypoint_slope_drop_pct": keypoint["slope_drop_pct"],
+                "keypoint_geometry_wgs84": keypoint["geometry_wgs84"],
+                "impoundment_area_acres": round(cand["impoundment_area_acres"], 4),
+                "impoundment_cell_count": cand["impoundment_cell_count"],
+                "grown_area_acres": round(polygon_utm.area / SQUARE_METERS_PER_ACRE, 4),
+                "rank_score": cand["rank_score"],
+                "rank_components": cand["rank_components"],
+                "head_class": cand["head_class"],
+                "head_differential_m": round(cand["best_differential_m"], 2),
+            }
+        )
+
+    return zones
+
+
 def _render_opening(sub_mask, cells, grid_shape, dem, polygon_utm):
     """
     Bounded morphological OPENING of the zone's own cell mask, clipped to
@@ -962,26 +1377,48 @@ def zones_to_geojson(zones: list[dict]) -> dict:
     production_area.py's own production_areas_to_geojson() before
     production_suitability.py enriches it; water_suitability.py is where
     real, differentiated confidence/suitability_score get added, on this
-    same layer, following that exact precedent."""
-    features = [
-        make_feature(
-            feature_id=f"water-system-candidate-{z['id']}",
-            geometry=z["geometry_wgs84"],
-            layer="water_system_candidate",
-            label=f"Water system candidate zone {z['id']}",
-            confidence=CONFIDENCE_LOW,
-            confidence_notes=WATER_SYSTEM_CANDIDATE_CONFIDENCE_NOTES,
-            extra_properties={
-                "served_production_area_ids": z["served_production_area_ids"],
-                "production_area_relationships": z["production_area_relationships"],
-                "primary_production_area_relationship": z["primary_production_area_relationship"],
-                "contributing_area_cells": z["contributing_area_cells"],
-                "slope_pct": z["slope_pct"],
-                "render_fill_geometry_wgs84": z["render_fill_geometry_wgs84"],
-            },
+    same layer, following that exact precedent.
+
+    EXPERIMENTAL: a keypoint-sited zone (KEYPOINT_SITED_ZONES path) carries
+    extra keypoint fields; they are surfaced here ONLY when present (via
+    .get()), so a flag-off zone -- which never has them -- produces a
+    byte-identical FeatureCollection to before this branch."""
+    features = []
+    for z in zones:
+        extra_properties = {
+            "served_production_area_ids": z["served_production_area_ids"],
+            "production_area_relationships": z["production_area_relationships"],
+            "primary_production_area_relationship": z["primary_production_area_relationship"],
+            "contributing_area_cells": z["contributing_area_cells"],
+            "slope_pct": z["slope_pct"],
+            "render_fill_geometry_wgs84": z["render_fill_geometry_wgs84"],
+        }
+        if "keypoint_rowcol" in z:
+            extra_properties.update(
+                {
+                    "keypoint_geometry_wgs84": z["keypoint_geometry_wgs84"],
+                    "keypoint_elevation_m": z["keypoint_elevation_m"],
+                    "keypoint_contributing_acres": z["keypoint_contributing_acres"],
+                    "keypoint_slope_drop_pct": z["keypoint_slope_drop_pct"],
+                    "impoundment_area_acres": z["impoundment_area_acres"],
+                    "grown_area_acres": z["grown_area_acres"],
+                    "rank_score": z["rank_score"],
+                    "rank_components": z["rank_components"],
+                    "head_class": z["head_class"],
+                    "head_differential_m": z["head_differential_m"],
+                }
+            )
+        features.append(
+            make_feature(
+                feature_id=f"water-system-candidate-{z['id']}",
+                geometry=z["geometry_wgs84"],
+                layer="water_system_candidate",
+                label=f"Water system candidate zone {z['id']}",
+                confidence=CONFIDENCE_LOW,
+                confidence_notes=WATER_SYSTEM_CANDIDATE_CONFIDENCE_NOTES,
+                extra_properties=extra_properties,
+            )
         )
-        for z in zones
-    ]
     return make_feature_collection(features)
 
 

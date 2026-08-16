@@ -800,4 +800,311 @@ print(f"\nWipeout report: {len(_wipeout_messages)} find_candidate_zones run(s) t
       "single-column-channel runs (production area above/below). Every 2D-band fixture representative of a real, "
       "multi-cell-wide drainage band (tests 1/4/5/6/7/9) survives the opening. The wipeouts are confined to "
       "1-2-cell-wide shapes, so the radius is not too aggressive for realistic widths -- NOT reduced to pass tests.")
+
+
+# =====================================================================
+# EXPERIMENTAL keypoint-sited water zones (KEYPOINT_SITED_ZONES path).
+# These run AFTER the wipeout report above so they don't perturb its count.
+# Task verification tests 1 (flag-off byte-identical), 8 (impoundment is
+# upstream-constrained), 9 (undersized impoundment reported, not padded).
+# =====================================================================
+import importlib.util as _importlib_util
+import os as _os
+import subprocess as _subprocess
+
+import keypoint_detection as _kd
+from valley_delineation import compute_flow_direction as _cfd
+from valley_delineation import fill_depressions as _fill
+
+
+def _valley_dem(size, thal_fn, cross, mid):
+    arr = np.zeros((size, size), dtype=np.float32)
+    for r in range(size):
+        base = thal_fn(r)
+        for c in range(size):
+            arr[r, c] = base + abs(c - mid) * cross
+    return _dem(arr)
+
+
+def _keypoint_dict(rowcol, elevation_m, contributing_acres, slope_drop_pct):
+    return {
+        "id": 0,
+        "rowcol": rowcol,
+        "point_utm": Point(*pixel_center_xy(SINGLE_COLUMN_DEM, *rowcol)),
+        "geometry_wgs84": {"type": "Point", "coordinates": (-80.0, 40.0)},
+        "elevation_m": elevation_m,
+        "contributing_acres": contributing_acres,
+        "slope_above_pct": slope_drop_pct + 5.0,
+        "slope_below_pct": 5.0,
+        "slope_drop_pct": slope_drop_pct,
+        "valley_id": 0,
+        "confidence": "low",
+        "confidence_notes": "experimental",
+    }
+
+
+# --- Task test 1: FLAG OFF IS BYTE-IDENTICAL to the pre-keypoint baseline ---
+# (the headline test). Load the pristine water_candidate_zones.py as it stood
+# BEFORE this experimental change -- the newest ancestor commit whose source
+# predates the KEYPOINT_SITED_ZONES flag (robust whether or not the keypoint
+# work has been committed yet) -- and run it side-by-side with this branch's
+# flag-off path on real synthetic DEMs. The zones must match exactly:
+# geometry, cells, and every scalar field. This is the most important test.
+def _load_baseline_module():
+    repo = _os.path.dirname(_os.path.abspath(__file__))
+    revs = _subprocess.check_output(
+        ["git", "rev-list", "HEAD"], cwd=repo
+    ).decode().split()
+    baseline_src = None
+    for rev in revs:  # newest-first
+        src = _subprocess.check_output(
+            ["git", "show", f"{rev}:water_candidate_zones.py"], cwd=repo
+        ).decode()
+        if "KEYPOINT_SITED_ZONES" not in src:
+            baseline_src = src
+            break
+    assert baseline_src is not None, "could not find a pre-keypoint baseline of water_candidate_zones.py"
+    path = _os.path.join(repo, "_wcz_baseline_snapshot.py")
+    with open(path, "w") as fh:
+        fh.write(baseline_src)
+    try:
+        spec = _importlib_util.spec_from_file_location("_wcz_baseline_snapshot", path)
+        module = _importlib_util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+    finally:
+        _os.remove(path)
+    return module
+
+
+def _zones_equal(a, b):
+    if len(a) != len(b):
+        return False, f"zone count {len(a)} != {len(b)}"
+    for za, zb in zip(a, b):
+        if not za["polygon_utm"].equals(zb["polygon_utm"]):
+            return False, "polygon_utm differs"
+        if not za["render_fill_polygon_utm"].equals(zb["render_fill_polygon_utm"]):
+            return False, "render_fill_polygon_utm differs"
+        for key in (
+            "id",
+            "served_production_area_ids",
+            "contributing_area_cells",
+            "slope_pct",
+            "production_area_relationships",
+            "primary_production_area_relationship",
+            "geometry_wgs84",
+        ):
+            if za[key] != zb[key]:
+                return False, f"field {key!r} differs: {za[key]!r} != {zb[key]!r}"
+        if sorted(map(tuple, za["cells"])) != sorted(map(tuple, zb["cells"])):
+            return False, "cells differ"
+    return True, "match"
+
+
+assert wcz.KEYPOINT_SITED_ZONES is False, "the flag must ship defaulting to False"
+
+_baseline_wcz = _load_baseline_module()
+_byte_scenarios = [
+    ("single-column + production above", SINGLE_COLUMN_DEM, PRODUCTION_AREA_ABOVE, BOUNDARY),
+    ("single-column + no production (-> [])", SINGLE_COLUMN_DEM, [], BOUNDARY),
+]
+for _label, _d, _p, _b in _byte_scenarios:
+    _baseline_zones = _baseline_wcz.find_candidate_zones(_d, _p, _b)
+    _branch_default = wcz.find_candidate_zones(_d, _p, _b)  # flag defaults to False
+    _branch_explicit = wcz.find_candidate_zones(_d, _p, _b, keypoint_sited_zones=False)
+    _ok1, _why1 = _zones_equal(_baseline_zones, _branch_default)
+    _ok2, _why2 = _zones_equal(_baseline_zones, _branch_explicit)
+    assert _ok1, f"FLAG-OFF NOT BYTE-IDENTICAL ({_label}, default): {_why1}"
+    assert _ok2, f"FLAG-OFF NOT BYTE-IDENTICAL ({_label}, explicit False): {_why2}"
+# Flag-off geojson is also unchanged (no keypoint fields leak in).
+_off_zone = wcz.find_candidate_zones(SINGLE_COLUMN_DEM, PRODUCTION_AREA_ABOVE, BOUNDARY)
+_off_gj = wcz.zones_to_geojson(_off_zone)
+_baseline_gj = _baseline_wcz.zones_to_geojson(_baseline_wcz.find_candidate_zones(SINGLE_COLUMN_DEM, PRODUCTION_AREA_ABOVE, BOUNDARY))
+assert _off_gj == _baseline_gj, "flag-off zones_to_geojson must match the baseline byte-for-byte"
+assert all("keypoint" not in k for f in _off_gj["features"] for k in f["properties"]), (
+    "flag-off geojson must carry no keypoint fields"
+)
+print(
+    f"Task test 1 -- FLAG OFF IS BYTE-IDENTICAL: {len(_byte_scenarios)} scenario(s) match the pre-keypoint baseline exactly "
+    "(zones + geojson), for both the default and explicit KEYPOINT_SITED_ZONES=False."
+)
+
+
+# --- Shared siting fixture: a basin upstream of the keypoint, lower ground
+# downstream (tempting for lowest-elevation growth), full eligible mask. ---
+_KS_SIZE = 50
+_KS_MID = 25
+_KS_KP = (20, _KS_MID)
+
+
+def _run_keypoint_sited(dem, keypoints, eligible_mask, **kwargs):
+    orig = wcz.compute_water_eligible_cells
+    wcz.compute_water_eligible_cells = lambda *a, **k: eligible_mask
+    before = len(_wipeout_messages)
+    try:
+        zones = wcz.find_candidate_zones(
+            dem,
+            _KS_PA,
+            _full_ks_boundary,
+            keypoint_sited_zones=True,
+            keypoints=keypoints,
+            **kwargs,
+        )
+    finally:
+        wcz.compute_water_eligible_cells = orig
+    del _wipeout_messages[before:]  # keep the file's wipeout report about the pre-existing tests
+    return zones
+
+
+_full_ks_boundary = box(500000.0, 4500000.0 - _KS_SIZE * 5.0, 500000.0 + _KS_SIZE * 5.0, 4500000.0)
+_KS_PA = [
+    {
+        "id": 0,
+        "representative_elevation_m": 40.0,
+        "polygon_utm": box(500100.0, 4499790.0, 500150.0, 4499810.0),
+        "render_fill_polygon_utm": box(0.0, 0.0, 1.0, 1.0),
+    }
+]
+
+
+# --- Task test 8: IMPOUNDMENT IS UPSTREAM-CONSTRAINED. ---
+# Basin upstream of the keypoint (rows 10-20, within 2 m of the keypoint), a
+# flat floor DROPPING downstream (rows 21+, lower and tempting). Every grown
+# cell must drain through the keypoint and sit at/below crest; NO downstream
+# cell may be included -- the failure the upstream constraint prevents.
+def _t8_thal(r):
+    if r < 10:
+        return 100.0 - 4.0 * r           # steep headwater above the basin
+    if r <= 20:
+        return 60.0 - 0.15 * (r - 10)    # gentle basin (impoundment) ~60 .. 58.5
+    return 58.5 - 1.5 * (r - 20)         # floor drops downstream: lower, tempting ground
+
+
+_T8_DEM = _valley_dem(_KS_SIZE, _t8_thal, 0.8, _KS_MID)
+_t8_kp_elev = float(_T8_DEM["array"][_KS_KP])
+_t8_crest = _t8_kp_elev + wcz.KEYPOINT_NOMINAL_DAM_HEIGHT_M
+_t8_kp = _keypoint_dict(_KS_KP, _t8_kp_elev, 8.0, 25.0)
+_t8_zones = _run_keypoint_sited(_T8_DEM, [_t8_kp], np.ones((_KS_SIZE, _KS_SIZE), dtype=bool))
+assert len(_t8_zones) == 1
+_t8_cells = [tuple(c) for c in _t8_zones[0]["cells"]]
+
+_t8_filled = _fill(_T8_DEM["array"])
+_t8_ftr, _t8_ftc = _cfd(_t8_filled, (5.0, 5.0))
+_t8_upmap = _kd.build_upstream_map(_t8_ftr, _t8_ftc)
+_t8_upstream = _kd.upstream_contributing_cells(_KS_KP, _t8_upmap)
+
+assert all(c in _t8_upstream for c in _t8_cells), "every grown cell must drain through the keypoint"
+assert all(float(_T8_DEM["array"][c]) <= _t8_crest + 1e-9 for c in _t8_cells), "every grown cell must sit at/below crest"
+_t8_downstream = [c for c in _t8_cells if c[0] > _KS_KP[0]]
+assert not _t8_downstream, f"NO cell downstream of the keypoint may be included, got {_t8_downstream}"
+# Guard is real: downstream cells ARE lower and eligible, so an unconstrained
+# lowest-elevation growth WOULD have grabbed them.
+assert float(_T8_DEM["array"][(25, _KS_MID)]) < _t8_kp_elev, "downstream floor is genuinely lower (tempting)"
+print(
+    f"Task test 8 -- impoundment upstream-constrained: {len(_t8_cells)} grown cells, rows "
+    f"{min(c[0] for c in _t8_cells)}-{max(c[0] for c in _t8_cells)} (keypoint row {_KS_KP[0]}); every cell "
+    "drains through the keypoint and sits at/below crest; NO downstream cell included despite lower, "
+    "eligible ground below."
+)
+
+
+# --- Task test 9: UNDERSIZED IMPOUNDMENT IS REPORTED, NOT PADDED. ---
+# A keypoint whose upstream-below-crest basin is far under the 0.5 ac target.
+# The zone must come back smaller than target, with the full impoundment area
+# reported and equal to the grown area (nothing padded).
+def _t9_thal(r):
+    if r < 17:
+        return 100.0 - 4.0 * r           # steep headwall above the small basin
+    if r <= 20:
+        return 48.0 - 0.2 * (r - 17)     # short gentle basin (rows 17-20): a handful of cells within crest
+    return 47.4 - 1.5 * (r - 20)         # floor drops downstream (excluded by the upstream constraint)
+
+
+_T9_DEM = _valley_dem(_KS_SIZE, _t9_thal, 0.8, _KS_MID)
+_t9_kp_elev = float(_T9_DEM["array"][_KS_KP])
+_t9_kp = _keypoint_dict(_KS_KP, _t9_kp_elev, 8.0, 25.0)
+_t9_zones = _run_keypoint_sited(_T9_DEM, [_t9_kp], np.ones((_KS_SIZE, _KS_SIZE), dtype=bool))
+assert len(_t9_zones) == 1
+_t9 = _t9_zones[0]
+assert _t9["grown_area_acres"] < WATER_ZONE_TARGET_ACRES, "an undersized impoundment must come back below target"
+assert "impoundment_area_acres" in _t9, "the full impoundment area must be reported"
+assert abs(_t9["impoundment_area_acres"] - _t9["grown_area_acres"]) < 1e-6, (
+    "when the whole flooded footprint is under target, grown == impoundment (nothing padded to target)"
+)
+assert len(_t9["cells"]) == _t9["impoundment_cell_count"], "grown cell count equals the full impoundment cell count"
+print(
+    f"Task test 9 -- undersized impoundment reported, not padded: grown {_t9['grown_area_acres']:.4f} ac "
+    f"< target {WATER_ZONE_TARGET_ACRES} ac; full impoundment {_t9['impoundment_area_acres']:.4f} ac "
+    f"({_t9['impoundment_cell_count']} cells) reported, equal to the grown zone -- not padded."
+)
+
+
+# --- Supporting: impoundment ABOVE target is capped, and reported separately;
+# ranking components + head classification are surfaced for the reviewer. ---
+def _big_basin_thal(r):
+    if r < 10:
+        return 100.0 - 4.0 * r
+    if r <= 20:
+        return 60.0 - 0.05 * (r - 10)    # broad, nearly flat basin -> impoundment >> target
+    return 59.5 - 1.5 * (r - 20)
+
+
+_BIG_BASIN_DEM = _valley_dem(_KS_SIZE, _big_basin_thal, 0.3, _KS_MID)
+_bb_elev = float(_BIG_BASIN_DEM["array"][_KS_KP])
+# Two keypoints so ranking has a set to normalise across.
+_bb_kp_high = _keypoint_dict(_KS_KP, _bb_elev, 12.0, 30.0)
+_bb_kp_low = _keypoint_dict((19, _KS_MID), float(_BIG_BASIN_DEM["array"][(19, _KS_MID)]), 6.0, 10.0)
+_bb_zones = _run_keypoint_sited(
+    _BIG_BASIN_DEM, [_bb_kp_high, _bb_kp_low], np.ones((_KS_SIZE, _KS_SIZE), dtype=bool)
+)
+assert _bb_zones, "the broad basin must site at least one keypoint zone"
+_bb_top = _bb_zones[0]
+assert _bb_top["impoundment_area_acres"] > _bb_top["grown_area_acres"] - 1e-9, (
+    "the full impoundment is at least the grown zone"
+)
+assert _bb_top["grown_area_acres"] <= WATER_ZONE_TARGET_ACRES + 1e-6, "the grown zone is capped at target"
+# Ranking: components normalised, reported, weights combine to the total.
+for _z in _bb_zones:
+    _rc = _z["rank_components"]
+    assert set(_rc) == {"catchment_norm", "elevation_norm", "slope_drop_norm"}
+    assert all(0.0 <= _rc[k] <= 1.0 for k in _rc), "normalised components must be in [0, 1]"
+    _expect = round(
+        wcz.KEYPOINT_RANK_WEIGHT_CATCHMENT * _rc["catchment_norm"]
+        + wcz.KEYPOINT_RANK_WEIGHT_ELEVATION * _rc["elevation_norm"]
+        + wcz.KEYPOINT_RANK_WEIGHT_SLOPE_DROP * _rc["slope_drop_norm"],
+        4,
+    )
+    assert abs(_z["rank_score"] - _expect) < 1e-9, "rank_score must be the weighted sum of the reported components"
+    assert _z["head_class"] in ("gravity_fed", "pump_required")
+assert _bb_zones[0]["rank_score"] >= _bb_zones[-1]["rank_score"], "zones must be ranked best-first"
+# Head classification, not filtering: a keypoint far BELOW production is still returned (pump-required).
+_below_pa = [
+    {
+        "id": 0,
+        "representative_elevation_m": 999.0,  # production far above -> negative head
+        "polygon_utm": box(500100.0, 4499790.0, 500150.0, 4499810.0),
+        "render_fill_polygon_utm": box(0.0, 0.0, 1.0, 1.0),
+    }
+]
+_orig_pa = _KS_PA
+_KS_PA = _below_pa
+try:
+    _pump_zones = _run_keypoint_sited(_T8_DEM, [_t8_kp], np.ones((_KS_SIZE, _KS_SIZE), dtype=bool))
+finally:
+    _KS_PA = _orig_pa
+assert _pump_zones and _pump_zones[0]["head_class"] == "pump_required", (
+    "a keypoint below production is CLASSIFIED pump_required, NOT filtered out"
+)
+print(
+    f"Task test 8/9 support -- oversized impoundment capped: grown {_bb_top['grown_area_acres']:.4f} ac "
+    f"(<= target) vs full impoundment {_bb_top['impoundment_area_acres']:.4f} ac reported separately. "
+    f"Ranking components normalised + weighted ({len(_bb_zones)} candidates, best-first); a below-production "
+    "keypoint is classified pump_required, not filtered."
+)
+# Flag-on geojson surfaces the keypoint fields (flag-off, tested above, does not).
+_on_gj = wcz.zones_to_geojson(_bb_zones)
+validate_feature_collection(_on_gj)
+assert "keypoint_elevation_m" in _on_gj["features"][0]["properties"], "flag-on geojson surfaces keypoint fields"
+print("Task test -- flag-on geojson: schema-valid and surfaces keypoint/impoundment/ranking/head fields.")
+
+
 print("\nAll water_candidate_zones checks passed.")
