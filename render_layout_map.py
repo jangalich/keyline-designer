@@ -627,9 +627,10 @@ KEYPOINT_COLOR = "#000000"
 # numbered marker's fontsize is retuned. The literals 10 and 0.35 mirror
 # _draw_numbered_marker() exactly (kept in sync there).
 NUMBERED_MARKER_DIAMETER_POINTS = 10 * (1 + 2 * 0.35)  # 17.0
-# Keypoint asterisk marker size (matplotlib markersize, points), slightly below
-# the numbered-circle diameter above so the asterisk reads a touch smaller.
-KEYPOINT_MARKER_SIZE_POINTS = round(NUMBERED_MARKER_DIAMETER_POINTS * 0.82, 1)  # 13.9
+# Keypoint asterisk marker size (matplotlib markersize, points) -- a fixed size
+# comfortably below the numbered-circle diameter above, so the asterisk reads
+# clearly smaller than a numbered marker.
+KEYPOINT_MARKER_SIZE_POINTS = 10.0
 # The asterisk's spoke line width -- a hairline heavy enough to read at the size
 # above without turning into a blob.
 KEYPOINT_MARKER_LINEWIDTH = 1.4
