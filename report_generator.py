@@ -324,6 +324,50 @@ def _format_water_candidate_zones_summary(zones_geojson: Optional[dict]) -> str:
     return "\n".join(lines)
 
 
+def _format_keypoints_summary(keypoints: Optional[list[dict]]) -> str:
+    """Formats keypoint_detection.detect_keypoints()'s per-valley keypoint
+    list (the inflection in each primary valley's long profile -- see that
+    module) into a plain, factual data block, the same register as every
+    other _format_*_summary() here: measured values only, no narrative.
+
+    READY-TO-WIRE, NOT YET WIRED. generate_scale_of_permanence_report()
+    accepts and carries the keypoint list, and this helper turns it into
+    report-prompt text, but that text is deliberately NOT yet injected into
+    the LLM prompt: the reviewer has not decided the narrative wording (or
+    which Scale-of-Permanence section keypoints belong in) yet, and this
+    module must not invent it. This helper is the staged seam -- once the
+    reviewer decides, wiring it in is a one-line addition to the
+    generate_scale_of_permanence_report() data_summary. Kept a pure,
+    independently-testable dict-to-string function meanwhile (see
+    test_report_generator.py)."""
+    if not keypoints:
+        return (
+            "No keypoints detected on this property (no primary valley's long "
+            "profile held a qualifying steep-to-gentle inflection within the "
+            "boundary margin)."
+        )
+    lines = [f"{len(keypoints)} keypoint(s) detected:"]
+    for k in keypoints:
+        location = (
+            "on parcel"
+            if k["on_parcel"]
+            else f"~{round(k['distance_outside_boundary_m'])} m outside the boundary"
+        )
+        lines.append(
+            f"  - Keypoint {k['id']} (valley {k['valley_id']}): {k['elevation_m']} m elevation, "
+            f"{k['contributing_acres']} ac contributing catchment, slope drop "
+            f"{k['slope_drop_pct']}% ({k['slope_above_pct']}% above -> {k['slope_below_pct']}% below), "
+            f"{location}."
+        )
+    lines.append(
+        "\nA keypoint is the inflection in a primary valley's long profile -- the break from the "
+        "steep upper reach to the gentler lower reach (Yeomans), the classic reference point for "
+        "keyline cultivation layout and for a keypoint dam. These are DEM-derived and NOT surveyed; "
+        "treat each as a starting point to walk and ground-truth, not a final siting."
+    )
+    return "\n".join(lines)
+
+
 # Mirrors road_corridors.METERS_PER_FOOT exactly (a fixed physical constant, not
 # something that drifts) -- kept local rather than imported so this module stays
 # decoupled from road_corridors.py the same way every other _format_*_summary()
@@ -591,6 +635,7 @@ def generate_scale_of_permanence_report(
     solar_candidate_zones_geojson: Optional[dict] = None,
     road_network: Optional[dict] = None,
     fencing_geojson: Optional[dict] = None,
+    keypoints: Optional[list[dict]] = None,
 ) -> str:
     """
     Given the outputs of the data-fetching modules, generates a narrative
@@ -616,6 +661,19 @@ def generate_scale_of_permanence_report(
     fencing geometry does the same for SUBDIVISION FENCES' stream-
     exclusion/perimeter content specifically (everything else in that
     section stays narrative-only — see fencing.py's module docstring).
+
+    keypoints (keypoint_detection.detect_keypoints()'s per-valley list) is
+    carried through and STORED here, ready for the report, but deliberately
+    NOT yet injected into the LLM prompt: keypoint detection is a new,
+    KSOP-independent layer, and the reviewer has not decided the narrative
+    wording (or which Scale-of-Permanence section keypoints belong in) yet,
+    so writing that narration now would be inventing it. The factual data
+    block is available via _format_keypoints_summary(keypoints) (unit-tested
+    in test_report_generator.py); wiring it into data_summary below is a
+    one-line change the reviewer makes once the wording is decided. Passing
+    keypoints here changes nothing about the generated report today — it is
+    a forward-compatible seam, the same additive-override discipline every
+    other optional argument above follows.
     """
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:

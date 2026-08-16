@@ -40,6 +40,7 @@ from road_corridors import (
 )
 from solar_suitability import identify_solar_candidate_zones, summarize_solar_candidate_zones
 from fencing import identify_fencing, summarize_fencing
+from keypoint_detection import identify_keypoints, summarize_keypoints
 from report_generator import generate_scale_of_permanence_report
 
 
@@ -125,6 +126,20 @@ def generate_full_report(boundary_coordinates: list, anchor_lon_lat: tuple[float
     if water_candidate_zones_geojson is not None:
         print(f"  {summarize_water_system_candidate_zones(water_zone_result)}\n")
 
+    print("Detecting keypoints (valley long-profile inflections, DEM-derived)...")
+    try:
+        # Independent of KSOP -- pure terrain analysis, needs only the DEM +
+        # boundary (identify_keypoints() fetches its own DEM). Carried into the
+        # report generator below; the reviewer wires the narrative wording
+        # later (see generate_scale_of_permanence_report()'s own docstring).
+        keypoints = identify_keypoints(boundary_coordinates)["keypoints"]
+    except Exception as e:
+        # Same graceful-degradation reasoning as every DEM-backed layer above.
+        print(f"  Keypoint detection failed ({e}), continuing without it.\n")
+        keypoints = None
+    if keypoints is not None:
+        print(f"  {summarize_keypoints(keypoints)}\n")
+
     print("Step 7/10: Identifying suggested road corridor candidates (DEM least-cost-path routing)...")
     try:
         road_corridor_result = identify_road_corridor_candidates(
@@ -182,6 +197,7 @@ def generate_full_report(boundary_coordinates: list, anchor_lon_lat: tuple[float
         solar_candidate_zones_geojson,
         road_corridor_candidates_geojson,
         fencing_geojson,
+        keypoints=keypoints,
     )
 
     return report

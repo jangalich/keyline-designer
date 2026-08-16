@@ -609,6 +609,20 @@ MARKER_FACE_COLOR = "#1A1A1A"
 MARKER_TEXT_COLOR = "white"
 MARKER_RADIUS_POINTS = 11
 
+# Keypoint markers. A vivid VIOLET, deliberately distinct from every other
+# layer color already in use (production green #4C9A2A, water blue #1F6FB2,
+# road dark gray #3A3A3A, structure red #D64545, contour brown #6B4423, tree
+# dark green #2D5A27, fence mustard #D4A017) -- no green/blue/brown/red/yellow
+# family collision. Keypoints get the same numbered-circle marker convention
+# as every other point layer, at MARKER color = this violet instead of the
+# default dark face, so a keypoint reads at a glance as its own layer. ON-
+# parcel keypoints render FILLED (solid violet face, white number); OFF-parcel
+# keypoints (kept only within KEYPOINT_BOUNDARY_MARGIN_METERS of the boundary,
+# see keypoint_detection.py) render HOLLOW (white face, violet ring + violet
+# number) so a keypoint sitting just off the drawn line is visually
+# distinguishable from one on it without needing a second color. CONFIGURABLE.
+KEYPOINT_COLOR = "#8E44AD"
+
 # Rendering-only geometry cleanup for the road corridor's own LineString
 # (see _smooth_line_for_render()) -- never applied to road_corridors.py's
 # real points_xyz/geometry_wgs84 (used for length_m/avg_grade_pct/every
@@ -1119,6 +1133,32 @@ def _draw_numbered_marker(ax, point, number: int) -> None:
     )
 
 
+def _draw_keypoint_marker(ax, point, number: int, on_parcel: bool) -> None:
+    """A numbered keypoint marker in KEYPOINT_COLOR (violet). ON-parcel
+    keypoints render FILLED (violet face, white number); OFF-parcel keypoints
+    render HOLLOW (white face, violet ring + violet number) so a keypoint that
+    sits just outside the drawn boundary reads differently from one on it. Same
+    numbered-circle convention/zorder as _draw_numbered_marker() -- only the
+    face/edge/text coloring encodes the keypoint layer and the on/off-parcel
+    distinction."""
+    if on_parcel:
+        face, text, edge = KEYPOINT_COLOR, MARKER_TEXT_COLOR, "white"
+    else:
+        face, text, edge = "white", KEYPOINT_COLOR, KEYPOINT_COLOR
+    ax.annotate(
+        str(number),
+        xy=(point.x, point.y),
+        xycoords="data",
+        ha="center",
+        va="center",
+        fontsize=10,
+        fontweight="bold",
+        color=text,
+        zorder=50,
+        bbox=dict(boxstyle="circle,pad=0.35", facecolor=face, edgecolor=edge, linewidth=1.4),
+    )
+
+
 def _production_zone_legend_stats(scored_patches: list[dict], parcel_acres: float) -> list[tuple[float, str]]:
     """Returns [(area_acres, stat_line), ...] -- one per surviving
     production patch, in the same order scored_patches already ranks
@@ -1400,6 +1440,11 @@ def fetch_layout_layers(
         "road_corridor": road_corridor_features,
         "tree_zone_result": tree_zone_result,
         "structure_site": structure_site,
+        # context.keypoints IS keypoint_detection.detect_keypoints()'s own
+        # per-valley list (see pipeline_context.py's field notes) -- carried
+        # through to render_layout_map() for a marker per keypoint, and to the
+        # report generator for narration. No second computation here.
+        "keypoints": context.keypoints,
         "water_features": water_features,
         "contour_lines": contour_lines,
         "fencing_result": fencing_result,
@@ -1439,6 +1484,10 @@ def render_layout_map(
     road_corridor_features = layers["road_corridor"]
     tree_zone_result = layers["tree_zone_result"]
     structure_site = layers["structure_site"]
+    # .get() so a pre-fetched layers dict built before keypoints existed (e.g.
+    # the synthetic fixtures in test_render_layout_map.py) still renders --
+    # missing key means simply "no keypoint layer to draw", not an error.
+    keypoints = layers.get("keypoints", [])
     water_features = layers["water_features"]
     contour_lines = layers["contour_lines"]
     fencing_result = layers["fencing_result"]
@@ -1792,6 +1841,31 @@ def render_layout_map(
         _draw_numbered_marker(ax, render_fill_geom.representative_point(), marker_number)
         legend_entries.append(
             f"{marker_number} — {label}, score {patch['tree_suitability_score']}/100, {patch['area_acres']} ac"
+        )
+        marker_number += 1
+
+    # Keypoints: the inflection in each primary valley's long profile
+    # (keypoint_detection.py). MARKER ONLY -- the keyline contour is
+    # deliberately out of scope here, not drawn. Same numbered-circle
+    # convention as production/water/tree zones, in KEYPOINT_COLOR (violet),
+    # with ON-parcel keypoints filled and OFF-parcel ones (kept within the
+    # boundary margin) hollow -- see _draw_keypoint_marker(). Each geometry is
+    # a GeoJSON Point (geometry_wgs84) reprojected to Mercator in one hop, the
+    # same reprojection path every other point layer uses. Placed after the
+    # tree-zone hatch so the markers sit on top of the zone fills.
+    multiple_keypoints = len(keypoints) > 1
+    for keypoint in keypoints:
+        point = _reproject_geometry_to_mercator(keypoint["geometry_wgs84"])
+        _draw_keypoint_marker(ax, point, marker_number, keypoint["on_parcel"])
+        label = f"Keypoint {keypoint['id']}" if multiple_keypoints else "Keypoint"
+        location_note = (
+            "on parcel"
+            if keypoint["on_parcel"]
+            else f"~{round(keypoint['distance_outside_boundary_m'])} m off parcel"
+        )
+        legend_entries.append(
+            f"{marker_number} — {label} (valley {keypoint['valley_id']}), "
+            f"{keypoint['elevation_m']} m, {keypoint['contributing_acres']} ac catchment, {location_note}"
         )
         marker_number += 1
 

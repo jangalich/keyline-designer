@@ -15,7 +15,7 @@ mild grade and still cross a short steep pitch, and that pitch is exactly
 what must NOT be smoothed away by the low average.
 """
 
-from report_generator import _format_road_corridor_summary
+from report_generator import _format_keypoints_summary, _format_road_corridor_summary
 
 _FT_PER_M = 1.0 / 0.3048
 
@@ -108,6 +108,58 @@ assert "ONE road NETWORK grown from the property's real access point" in gentle_
     "the existing closing guidance (short-spur proportionality rule) must be unchanged"
 )
 print("A network with no steep branch adds no steep-section clause and leaves every existing sentence intact.")
+
+
+# =====================================================================
+# _format_keypoints_summary(): the staged, ready-to-wire keypoint data
+# block (carried through generate_scale_of_permanence_report() but NOT yet
+# injected into the LLM prompt -- see that function's docstring). Pure
+# dict-to-string formatting, so it is exercised here directly.
+# =====================================================================
+
+_empty_keypoints_prose = _format_keypoints_summary([])
+assert "No keypoints detected" in _empty_keypoints_prose, (
+    "an empty keypoint list must format as an honest 'none detected' line, not a placeholder"
+)
+assert _format_keypoints_summary(None) == _empty_keypoints_prose, (
+    "None (detection unavailable) must format the same as an empty list"
+)
+
+_kp_fixture = [
+    {
+        "id": 0,
+        "valley_id": 3,
+        "elevation_m": 346.5,
+        "contributing_acres": 6.36,
+        "slope_above_pct": 18.4,
+        "slope_below_pct": 6.1,
+        "slope_drop_pct": 12.3,
+        "on_parcel": True,
+        "distance_outside_boundary_m": 0.0,
+    },
+    {
+        "id": 1,
+        "valley_id": 7,
+        "elevation_m": 347.0,
+        "contributing_acres": 6.69,
+        "slope_above_pct": 15.0,
+        "slope_below_pct": 5.5,
+        "slope_drop_pct": 9.5,
+        "on_parcel": False,
+        "distance_outside_boundary_m": 14.0,
+    },
+]
+_kp_prose = _format_keypoints_summary(_kp_fixture)
+assert "2 keypoint(s) detected" in _kp_prose
+assert "Keypoint 0 (valley 3)" in _kp_prose and "346.5 m" in _kp_prose and "6.36 ac" in _kp_prose
+assert "on parcel" in _kp_prose, "an on-parcel keypoint must be stated as such"
+assert "~14 m outside the boundary" in _kp_prose, "an off-parcel keypoint must state its distance"
+assert "12.3%" in _kp_prose, "the slope drop must be stated plainly"
+print(
+    "_format_keypoints_summary() renders the keypoint list as a factual data block (elevation, "
+    "catchment, slope drop, on/off-parcel) and an honest empty line for [] / None -- ready to wire, "
+    "no narration."
+)
 
 
 print("\nAll report_generator checks passed.")

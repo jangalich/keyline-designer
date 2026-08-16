@@ -30,6 +30,21 @@ directly in that module.
 
 FIELD NOTES
 
+  keypoints is keypoint_detection.detect_keypoints()'s own list of per-
+  valley keypoint dicts (the inflection in each primary valley's long
+  profile -- see that module's docstring). It is computed right after
+  valleys, in dependency order: keypoint detection is pure terrain analysis
+  that needs only dem/boundary_polygon_utm/valleys (NO soil, canopy, road,
+  or climate -- it is independent of KSOP), and this call forwards this
+  context's own already-computed dem/boundary_polygon_utm/valleys straight
+  through so delineate_valleys() is NOT run a second time for it. It earns a
+  context field under the sizing principle now that it has two real
+  consumers -- the layout map (a marker per keypoint) and the report (the
+  keypoint list carried through for narration). detect_keypoints() self-
+  computes its own flow direction/accumulation/filled arrays from dem
+  (valley_delineation.py does not expose those, so there is nothing shared
+  to forward for them); that is a handful of pure-numpy passes, no network.
+
   production_areas holds production_area_ceiling.
   identify_optimized_production_areas()'s own 'scored_patches' -- the
   ceiling-trimmed, STEP-4-scored per-patch list -- NOT production_area.
@@ -305,6 +320,7 @@ from shapely.geometry.base import BaseGeometry
 
 import dem_data
 import farm_roads_data
+import keypoint_detection
 import production_area_ceiling
 import road_corridors
 import valley_delineation
@@ -319,6 +335,7 @@ class PipelineContext:
     dem: dict
     boundary_polygon_utm: Polygon
     valleys: list[dict]
+    keypoints: list[dict]
     production_areas: list[dict]
     existing_roads: BaseGeometry | None
     soil_exclusion_unions: dict[str, BaseGeometry | None]
@@ -427,6 +444,14 @@ def build_pipeline_context(
 
     valleys = valley_delineation.delineate_valleys(dem)
 
+    # Keypoints: pure terrain analysis, dependent only on dem/boundary/valleys
+    # (all already computed above), forwarded so delineate_valleys() is not
+    # rerun. Independent of every KSOP layer below -- computed here, in
+    # dependency order, right after the valleys it profiles.
+    keypoints = keypoint_detection.detect_keypoints(
+        dem, boundary_polygon_utm, valleys=valleys
+    )
+
     optimized_production = production_area_ceiling.identify_optimized_production_areas(
         boundary_coordinates, dem=dem, canopy_height=canopy_height
     )
@@ -526,6 +551,7 @@ def build_pipeline_context(
         dem=dem,
         boundary_polygon_utm=boundary_polygon_utm,
         valleys=valleys,
+        keypoints=keypoints,
         production_areas=production_areas,
         existing_roads=existing_roads,
         soil_exclusion_unions=soil_exclusion_unions,
