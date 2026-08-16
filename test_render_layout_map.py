@@ -1793,4 +1793,182 @@ print(
 )
 
 
+# =====================================================================
+# KEYPOINT MARKERS: a plain black asterisk per keypoint, no number,
+# identical on/off parcel, one legend line total, fully decoupled from
+# the shared numbered-marker counter.
+# =====================================================================
+
+_kp_dem = {
+    "array": np.full((10, 10), 100.0, dtype=np.float32),
+    "resolution_meters": (5.0, 5.0),
+    "origin_x": 500000.0,
+    "origin_y": 4500000.0,
+    "crs": "EPSG:32617",
+}
+_kp_cx = sum(p[0] for p in property_boundary) / len(property_boundary)
+_kp_cy = sum(p[1] for p in property_boundary) / len(property_boundary)
+
+
+def _make_keypoints(n: int) -> list:
+    """n keypoints alternating on-parcel / off-parcel, each at a distinct
+    point near the boundary centroid."""
+    kps = []
+    for i in range(n):
+        on = i % 2 == 0
+        kps.append(
+            {
+                "id": i,
+                "valley_id": i,
+                "geometry_wgs84": {"type": "Point", "coordinates": (_kp_cx + i * 1.0e-4, _kp_cy + i * 1.0e-4)},
+                "elevation_m": 346.0 + i,
+                "contributing_acres": 6.0 + i,
+                "on_parcel": on,
+                "distance_outside_boundary_m": 0.0 if on else 10.0 + i,
+            }
+        )
+    return kps
+
+
+def _kp_layers(keypoints: list, water_zone=None) -> dict:
+    return {
+        "dem": _kp_dem,
+        "production_areas": [],
+        "production_zone_legend_stats": [],
+        "water_zone": water_zone,
+        "road_corridor": [],
+        "tree_zone_result": {"patches": []},
+        "structure_site": None,
+        "keypoints": keypoints,
+        "water_features": {"streams": []},
+        "contour_lines": [],
+        "fencing_result": {"fencing_geojson": {"type": "FeatureCollection", "features": []}, "segment_count": 0},
+    }
+
+
+_orig_axes_plot_kp = rlm.plt.Axes.plot
+_orig_draw_numbered_kp = rlm._draw_numbered_marker
+
+
+def _capture_kp_render(layers: dict):
+    """Renders `layers` and returns (numbered_markers, asterisk_plot_calls,
+    legend_lines): numbered_markers is [(point, number), ...] from
+    _draw_numbered_marker(); asterisk_plot_calls is the kwargs of every
+    ax.plot() call drawing the (6,2,0) asterisk marker; legend_lines is the
+    single legend text block split into lines."""
+    numbered: list = []
+    plot_calls: list = []
+    text_calls: list = []  # (y, s) -- the legend box sits at y=0.02, the basemap note at y=0.98
+
+    def _rec_numbered(ax, point, number):
+        numbered.append((point, number))
+        return _orig_draw_numbered_kp(ax, point, number)
+
+    def _rec_plot(self, *args, **kwargs):
+        if kwargs.get("marker") == (6, 2, 0):
+            plot_calls.append(kwargs)
+        return _orig_axes_plot_kp(self, *args, **kwargs)
+
+    with mock_patch.object(rlm, "_draw_numbered_marker", _rec_numbered):
+        with mock_patch.object(rlm.plt.Axes, "plot", autospec=True, side_effect=_rec_plot):
+            with mock_patch.object(
+                rlm.plt.Axes, "text", autospec=True, side_effect=lambda self, x, y, s, **kw: text_calls.append((y, s))
+            ):
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    rlm.render_layout_map(property_boundary, os.path.join(tmpdir, "m.png"), layers=layers)
+    # The legend box is drawn at y=0.02 (bottom); the basemap note at y=0.98 (top).
+    # Pick the legend by position, robust to it being one line or many.
+    legend_block = next((s for y, s in text_calls if y < 0.5), "")
+    legend_lines = legend_block.split("\n") if legend_block else []
+    return numbered, plot_calls, legend_lines
+
+
+def _kp_legend_lines(legend_lines: list) -> list:
+    return [ln for ln in legend_lines if "Candidate Keypoints" in ln]
+
+
+# 1. Exactly one keypoint legend line for 1, 3, and 8 keypoints, identical text each time.
+_kp_legend_variants = {}
+for _n in (1, 3, 8):
+    _numbered_n, _plots_n, _legend_n = _capture_kp_render(_kp_layers(_make_keypoints(_n)))
+    _kp_lines_n = _kp_legend_lines(_legend_n)
+    assert len(_kp_lines_n) == 1, f"expected exactly one keypoint legend line for {_n} keypoints, got {_kp_lines_n}"
+    assert len(_plots_n) == _n, f"expected {_n} asterisk markers drawn, got {len(_plots_n)}"
+    _kp_legend_variants[_n] = _kp_lines_n[0]
+assert _kp_legend_variants[1] == _kp_legend_variants[3] == _kp_legend_variants[8] == "✳ Candidate Keypoints", (
+    f"the single keypoint legend line must be identical regardless of count/on-off mix: {_kp_legend_variants}"
+)
+print(
+    f"Keypoint legend: exactly one line ('{_kp_legend_variants[8]}') for 1, 3, and 8 keypoints "
+    "(mixed on/off parcel) -- identical text, one asterisk marker drawn per keypoint."
+)
+
+# 2. Empty keypoint list: no keypoint legend line, no asterisk, no exception.
+_numbered_0, _plots_0, _legend_0 = _capture_kp_render(_kp_layers([]))
+assert _kp_legend_lines(_legend_0) == [], "an empty keypoint list must emit no keypoint legend line"
+assert _plots_0 == [], "an empty keypoint list must draw no asterisk"
+print("Empty keypoint list: no legend line, no asterisk drawn, no exception.")
+
+# 3. Full decoupling from the numbered-marker counter: a water zone (numbered marker 1)
+#    plus 8 keypoints vs the same water zone plus 0 keypoints must produce IDENTICAL
+#    numbered markers (point + number) and identical non-keypoint legend lines.
+_wz_for_kp = dict(water_zone_fixture)
+_num_8, _plots_8, _legend_8 = _capture_kp_render(_kp_layers(_make_keypoints(8), water_zone=_wz_for_kp))
+_num_0, _plots_0b, _legend_0b = _capture_kp_render(_kp_layers([], water_zone=_wz_for_kp))
+
+_num_8_key = [(round(p.x, 6), round(p.y, 6), n) for p, n in _num_8]
+_num_0_key = [(round(p.x, 6), round(p.y, 6), n) for p, n in _num_0]
+assert _num_8_key == _num_0_key, (
+    f"numbered markers must be identical with 8 vs 0 keypoints -- keypoints must not touch the counter. "
+    f"8-kp: {_num_8_key}  0-kp: {_num_0_key}"
+)
+# The water zone is the only numbered layer, so it must be marker 1 in both cases (contiguous,
+# and matching its pre-change value -- keypoints were the LAST numbered layer, so removing their
+# numbering renumbers nothing before them).
+assert [n for _p, n in _num_8] == [1], f"water zone must be numbered marker 1 regardless of keypoints, got {[n for _p, n in _num_8]}"
+_non_kp_legend_8 = [ln for ln in _legend_8 if "Candidate Keypoints" not in ln]
+_non_kp_legend_0 = [ln for ln in _legend_0b if "Candidate Keypoints" not in ln]
+assert _non_kp_legend_8 == _non_kp_legend_0, (
+    f"non-keypoint legend lines must be identical with 8 vs 0 keypoints:\n8-kp: {_non_kp_legend_8}\n0-kp: {_non_kp_legend_0}"
+)
+assert any(ln.startswith("1 — Water System") for ln in _non_kp_legend_8), (
+    f"the water zone's own numbered legend line must be unchanged (marker 1), got {_non_kp_legend_8}"
+)
+print(
+    "Decoupling: with a water zone present, 8-keypoint and 0-keypoint renders produce identical numbered "
+    f"markers ({_num_8_key}) and identical non-keypoint legend lines -- keypoints never touch the counter."
+)
+
+# 4. On-parcel and off-parcel keypoints draw with an IDENTICAL marker specification (no
+#    variation), and NO number is drawn for any keypoint (_draw_numbered_marker never fires
+#    for them -- proven by test 3's counter being untouched).
+_mixed = [_make_keypoints(2)[0], _make_keypoints(2)[1]]  # [0]=on-parcel, [1]=off-parcel
+assert _mixed[0]["on_parcel"] is True and _mixed[1]["on_parcel"] is False
+_num_mixed, _plots_mixed, _legend_mixed = _capture_kp_render(_kp_layers(_mixed))
+assert len(_plots_mixed) == 2
+_spec_keys = ("marker", "markersize", "markeredgecolor", "markerfacecolor", "markeredgewidth", "linestyle", "zorder")
+_spec_on = {k: _plots_mixed[0].get(k) for k in _spec_keys}
+_spec_off = {k: _plots_mixed[1].get(k) for k in _spec_keys}
+assert _spec_on == _spec_off, f"on-parcel and off-parcel keypoints must draw identically: {_spec_on} vs {_spec_off}"
+assert _spec_on["marker"] == (6, 2, 0), "keypoints must use the true asterisk polygon marker (6, 2, 0)"
+assert _spec_on["markeredgecolor"] == rlm.KEYPOINT_COLOR == "#000000", "keypoint asterisk must be black"
+assert _num_mixed == [], "no numbered marker may be drawn for keypoints (no number)"
+print(
+    "On-parcel and off-parcel keypoints draw with an identical marker spec "
+    f"(marker={_spec_on['marker']}, size={_spec_on['markersize']}, colour={_spec_on['markeredgecolor']}); "
+    "no number is drawn for any keypoint."
+)
+
+# 5. The asterisk is sized BELOW the numbered-circle marker size -- assert the relationship,
+#    not a literal, so it survives retuning either constant.
+assert rlm.KEYPOINT_MARKER_SIZE_POINTS < rlm.NUMBERED_MARKER_DIAMETER_POINTS, (
+    f"keypoint asterisk ({rlm.KEYPOINT_MARKER_SIZE_POINTS}pt) must be smaller than the numbered-circle "
+    f"diameter ({rlm.NUMBERED_MARKER_DIAMETER_POINTS}pt)"
+)
+print(
+    f"Asterisk size {rlm.KEYPOINT_MARKER_SIZE_POINTS}pt is below the numbered-circle diameter "
+    f"{rlm.NUMBERED_MARKER_DIAMETER_POINTS}pt (relationship asserted, not a literal)."
+)
+
+
 print("\nAll render_layout_map checks passed.")

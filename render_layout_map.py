@@ -609,19 +609,30 @@ MARKER_FACE_COLOR = "#1A1A1A"
 MARKER_TEXT_COLOR = "white"
 MARKER_RADIUS_POINTS = 11
 
-# Keypoint markers. A vivid VIOLET, deliberately distinct from every other
-# layer color already in use (production green #4C9A2A, water blue #1F6FB2,
-# road dark gray #3A3A3A, structure red #D64545, contour brown #6B4423, tree
-# dark green #2D5A27, fence mustard #D4A017) -- no green/blue/brown/red/yellow
-# family collision. Keypoints get the same numbered-circle marker convention
-# as every other point layer, at MARKER color = this violet instead of the
-# default dark face, so a keypoint reads at a glance as its own layer. ON-
-# parcel keypoints render FILLED (solid violet face, white number); OFF-parcel
-# keypoints (kept only within KEYPOINT_BOUNDARY_MARGIN_METERS of the boundary,
-# see keypoint_detection.py) render HOLLOW (white face, violet ring + violet
-# number) so a keypoint sitting just off the drawn line is visually
-# distinguishable from one on it without needing a second color. CONFIGURABLE.
-KEYPOINT_COLOR = "#8E44AD"
+# Keypoints render as a plain black asterisk -- no number, no fill variation
+# by index, and identical for on-parcel and off-parcel. They are a set of like
+# features (one per primary valley), not individually narrated elements, so the
+# numbered-circle convention used by production/water/tree/structure does not
+# apply (numbering them would add map clutter and legend lines carrying no
+# information -- same reasoning the road network uses for its one legend entry
+# regardless of branch count). The single legend line is "Candidate Keypoints".
+KEYPOINT_COLOR = "#000000"
+
+# The numbered-circle markers (_draw_numbered_marker()) are a bold fontsize-10
+# annotation inside a "circle,pad=0.35" bbox, so their rendered diameter is
+# ~fontsize*(1 + 2*0.35) points. That DERIVED diameter -- not MARKER_RADIUS_POINTS
+# above, which is declared but unused; the real size driver is the annotation
+# fontsize -- is the size a numbered marker actually renders at, and the keypoint
+# asterisk is sized as a fraction of it so the two stay proportionate if the
+# numbered marker's fontsize is retuned. The literals 10 and 0.35 mirror
+# _draw_numbered_marker() exactly (kept in sync there).
+NUMBERED_MARKER_DIAMETER_POINTS = 10 * (1 + 2 * 0.35)  # 17.0
+# Keypoint asterisk marker size (matplotlib markersize, points), slightly below
+# the numbered-circle diameter above so the asterisk reads a touch smaller.
+KEYPOINT_MARKER_SIZE_POINTS = round(NUMBERED_MARKER_DIAMETER_POINTS * 0.82, 1)  # 13.9
+# The asterisk's spoke line width -- a hairline heavy enough to read at the size
+# above without turning into a blob.
+KEYPOINT_MARKER_LINEWIDTH = 1.4
 
 # Rendering-only geometry cleanup for the road corridor's own LineString
 # (see _smooth_line_for_render()) -- never applied to road_corridors.py's
@@ -1133,29 +1144,28 @@ def _draw_numbered_marker(ax, point, number: int) -> None:
     )
 
 
-def _draw_keypoint_marker(ax, point, number: int, on_parcel: bool) -> None:
-    """A numbered keypoint marker in KEYPOINT_COLOR (violet). ON-parcel
-    keypoints render FILLED (violet face, white number); OFF-parcel keypoints
-    render HOLLOW (white face, violet ring + violet number) so a keypoint that
-    sits just outside the drawn boundary reads differently from one on it. Same
-    numbered-circle convention/zorder as _draw_numbered_marker() -- only the
-    face/edge/text coloring encodes the keypoint layer and the on/off-parcel
-    distinction."""
-    if on_parcel:
-        face, text, edge = KEYPOINT_COLOR, MARKER_TEXT_COLOR, "white"
-    else:
-        face, text, edge = "white", KEYPOINT_COLOR, KEYPOINT_COLOR
-    ax.annotate(
-        str(number),
-        xy=(point.x, point.y),
-        xycoords="data",
-        ha="center",
-        va="center",
-        fontsize=10,
-        fontweight="bold",
-        color=text,
+def _draw_keypoint_marker(ax, point) -> None:
+    """A plain black asterisk at a keypoint -- no number, and IDENTICAL for
+    on-parcel and off-parcel keypoints (no fill, size, or colour variation).
+    Deliberately independent of _draw_numbered_marker() and the shared marker
+    counter: keypoints are a set of like features, not individually narrated
+    elements (see KEYPOINT_COLOR's own comment).
+
+    The marker is matplotlib's true asterisk -- the polygon marker (6, 2, 0):
+    six spokes, style 2 (the asterisk style), angle 0 -- NOT "*" (a
+    five-pointed star in matplotlib) and not a mathtext "$*$" (which renders
+    small and sits high off-centre at this size). Drawn at the keypoint layer's
+    existing zorder (50)."""
+    ax.plot(
+        point.x,
+        point.y,
+        marker=(6, 2, 0),
+        markersize=KEYPOINT_MARKER_SIZE_POINTS,
+        markeredgecolor=KEYPOINT_COLOR,
+        markerfacecolor=KEYPOINT_COLOR,
+        markeredgewidth=KEYPOINT_MARKER_LINEWIDTH,
+        linestyle="None",
         zorder=50,
-        bbox=dict(boxstyle="circle,pad=0.35", facecolor=face, edgecolor=edge, linewidth=1.4),
     )
 
 
@@ -1846,28 +1856,30 @@ def render_layout_map(
 
     # Keypoints: the inflection in each primary valley's long profile
     # (keypoint_detection.py). MARKER ONLY -- the keyline contour is
-    # deliberately out of scope here, not drawn. Same numbered-circle
-    # convention as production/water/tree zones, in KEYPOINT_COLOR (violet),
-    # with ON-parcel keypoints filled and OFF-parcel ones (kept within the
-    # boundary margin) hollow -- see _draw_keypoint_marker(). Each geometry is
-    # a GeoJSON Point (geometry_wgs84) reprojected to Mercator in one hop, the
-    # same reprojection path every other point layer uses. Placed after the
-    # tree-zone hatch so the markers sit on top of the zone fills.
-    multiple_keypoints = len(keypoints) > 1
+    # deliberately out of scope here, not drawn. A plain black asterisk per
+    # keypoint (_draw_keypoint_marker()), IDENTICAL for on-parcel and off-parcel
+    # (on_parcel/distance_outside_boundary_m stay on the dicts for the report,
+    # but the map draws no distinction). Each geometry is a GeoJSON Point
+    # (geometry_wgs84) reprojected to Mercator in one hop, the same reprojection
+    # path every other point layer uses. Drawn after the tree-zone hatch so the
+    # markers sit on top of the zone fills.
+    #
+    # Fully DECOUPLED from the numbered-marker machinery: keypoints never read or
+    # increment marker_number, never go through _draw_numbered_marker(), and
+    # contribute exactly ONE index-independent legend line ("Candidate
+    # Keypoints", asterisk-prefixed) regardless of how many keypoints exist --
+    # and none at all when there are none. Adding or removing keypoints therefore
+    # changes nothing else on the map (numbering, positions, legend of every
+    # other layer are untouched). This mirrors the road network's own
+    # one-entry-regardless-of-count treatment.
     for keypoint in keypoints:
         point = _reproject_geometry_to_mercator(keypoint["geometry_wgs84"])
-        _draw_keypoint_marker(ax, point, marker_number, keypoint["on_parcel"])
-        label = f"Keypoint {keypoint['id']}" if multiple_keypoints else "Keypoint"
-        location_note = (
-            "on parcel"
-            if keypoint["on_parcel"]
-            else f"~{round(keypoint['distance_outside_boundary_m'])} m off parcel"
-        )
-        legend_entries.append(
-            f"{marker_number} — {label} (valley {keypoint['valley_id']}), "
-            f"{keypoint['elevation_m']} m, {keypoint['contributing_acres']} ac catchment, {location_note}"
-        )
-        marker_number += 1
+        _draw_keypoint_marker(ax, point)
+    if keypoints:
+        # The legend is a single plain-text box (see below), so a leading Unicode
+        # asterisk (U+2733, present in matplotlib's default DejaVu Sans) renders
+        # as text -- no drawn glyph needed. One line, symbol before the text.
+        legend_entries.append("✳ Candidate Keypoints")
 
     if structure_site is not None:
         # Real, scored footprint still drives placement -- only what gets
