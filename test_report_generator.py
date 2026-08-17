@@ -15,7 +15,15 @@ mild grade and still cross a short steep pitch, and that pitch is exactly
 what must NOT be smoothed away by the low average.
 """
 
-from report_generator import _format_keypoints_summary, _format_road_corridor_summary
+import os
+from unittest.mock import Mock, patch as mock_patch
+
+import report_generator
+from report_generator import (
+    _format_keypoints_summary,
+    _format_road_corridor_summary,
+    generate_scale_of_permanence_report,
+)
 
 _FT_PER_M = 1.0 / 0.3048
 
@@ -159,6 +167,98 @@ print(
     "_format_keypoints_summary() renders the keypoint list as a factual data block (elevation, "
     "catchment, slope drop, on/off-parcel) and an honest empty line for [] / None -- ready to wire, "
     "no narration."
+)
+
+
+# =====================================================================
+# irradiance inertness: irradiance= is accepted and STORED by generate_
+# scale_of_permanence_report() but deliberately NOT injected into the LLM
+# prompt yet (the reviewer decides the narrative wording later -- see that
+# function's docstring). This mirrors keypoints' own already-established
+# "forward-compatible seam, changes nothing about the report today"
+# discipline: supplying irradiance= must leave the generated data_summary
+# byte-for-byte identical to omitting it, and the word "irradiance" must
+# not appear anywhere in it. Unlike keypoints there is deliberately NO
+# _format_irradiance_summary() to exercise (that formatting + wiring is the
+# out-of-scope deferred narrative work), so inertness is proved directly on
+# the prompt the function actually builds -- with the Anthropic client fully
+# mocked so no network/LLM call is made.
+# =====================================================================
+
+
+def _capture_prompt(**call_kwargs) -> str:
+    """Calls generate_scale_of_permanence_report() with the Anthropic client
+    mocked out and returns the single user-message string the function built
+    (which embeds its internal data_summary). No network, no LLM call."""
+    captured = {}
+
+    def _fake_create(**kwargs):
+        captured["messages"] = kwargs["messages"]
+        block = Mock()
+        block.type = "text"
+        block.text = "MOCKED REPORT"
+        message = Mock()
+        message.content = [block]
+        return message
+
+    fake_client = Mock()
+    fake_client.messages.create.side_effect = _fake_create
+
+    with mock_patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-ant-test-not-real"}):
+        with mock_patch.object(report_generator, "Anthropic", return_value=fake_client):
+            result = generate_scale_of_permanence_report(**call_kwargs)
+
+    assert result == "MOCKED REPORT", "the mocked client's text block should be returned verbatim"
+    fake_client.messages.create.assert_called_once()
+    return captured["messages"][0]["content"]
+
+
+_irr_soil = [
+    {"muname": "Gilpin-Upshur complex", "comppct_r": 50, "drainagecl": "Well drained", "slope_r": 20},
+]
+_irr_elevation = [
+    {"latitude": 40.64286, "longitude": -79.98383, "elevation": 326.7},
+    {"latitude": 40.64528, "longitude": -79.98383, "elevation": 344.2},
+]
+_irr_water = {"streams": [{"name": "Montour Run", "feature_code": None, "geometry": None}], "water_bodies": []}
+
+# A realistic ParcelData.irradiance dict (get_regional_irradiance_baseline()'s
+# own shape) -- deliberately full of numbers and the literal word so that IF
+# it were ever injected, the assertions below would catch it.
+_irr_fixture = {
+    "status": "ok",
+    "annual_ghi_kwh_m2_day": 4.21,
+    "annual_dni_kwh_m2_day": 4.98,
+    "source": "NREL PVWatts v8",
+    "note": "regional irradiance baseline",
+}
+
+_base_content = _capture_prompt(
+    soil_components=_irr_soil,
+    elevation_grid=_irr_elevation,
+    water_features=_irr_water,
+)
+_with_irr_content = _capture_prompt(
+    soil_components=_irr_soil,
+    elevation_grid=_irr_elevation,
+    water_features=_irr_water,
+    irradiance=_irr_fixture,
+)
+
+assert "irradiance" not in _with_irr_content.lower(), (
+    "supplying irradiance= must NOT inject the word 'irradiance' (or any irradiance data block) "
+    "into the prompt -- it is a stored, forward-compatible seam, not yet-wired narrative content"
+)
+assert "4.21" not in _with_irr_content and "PVWatts" not in _with_irr_content, (
+    "no irradiance value/source string may leak into the prompt while the parameter is inert"
+)
+assert _with_irr_content == _base_content, (
+    "the generated prompt must be byte-for-byte identical whether or not irradiance= is supplied -- "
+    "irradiance changes nothing about the report today (same inertness discipline keypoints follows)"
+)
+print(
+    "irradiance inertness: irradiance= is accepted and stored but leaves the generated prompt "
+    "byte-for-byte identical to omitting it -- the word 'irradiance' and every value never appear."
 )
 
 

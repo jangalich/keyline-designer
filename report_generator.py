@@ -636,6 +636,7 @@ def generate_scale_of_permanence_report(
     road_network: Optional[dict] = None,
     fencing_geojson: Optional[dict] = None,
     keypoints: Optional[list[dict]] = None,
+    irradiance: Optional[dict] = None,
 ) -> str:
     """
     Given the outputs of the data-fetching modules, generates a narrative
@@ -674,6 +675,19 @@ def generate_scale_of_permanence_report(
     keypoints here changes nothing about the generated report today — it is
     a forward-compatible seam, the same additive-override discipline every
     other optional argument above follows.
+
+    irradiance (parcel_data.ParcelData.irradiance -- get_regional_
+    irradiance_baseline()'s own dict, always present, 'status' key says
+    whether the numbers are real) is carried through and STORED here,
+    ready for the report, but deliberately NOT yet injected into the LLM
+    prompt: the reviewer has not decided the narrative wording (or which
+    Scale-of-Permanence section irradiance belongs in -- almost certainly
+    PERMANENT BUILDINGS, alongside the existing solar siting discussion,
+    but that's a content decision for later) yet, so writing that
+    narration now would be inventing it. Passing irradiance here changes
+    nothing about the generated report today -- it is a forward-compatible
+    seam, the same additive-override discipline keypoints already
+    established.
     """
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:

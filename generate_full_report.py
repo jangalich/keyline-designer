@@ -2,55 +2,46 @@
 generate_full_report.py
 
 The real end-to-end pipeline: give it a property boundary once, and it
-runs soil, elevation, hydrology, climate, and imagery data fetching, then
-generates a full Scale of Permanence report — no manual copy-pasting
-between scripts.
+fetches every raw data layer, computes the full KSOP context, and
+generates a Scale of Permanence report — no manual copy-pasting between
+scripts, and no layer fetched or computed more than once.
 
-    boundary --> soil_data (polygon)
-             --> elevation_data (grid)
-             --> hydrology_data
-             --> climate_data
-             --> imagery_data (polygon)
-             --> water_candidate_zones (DEM/LiDAR valley + gradient/setback zones)
-             --> road_corridors (DEM least-cost-path corridors + NHD/SSURGO constraints)
-             --> solar_suitability (DEM slope/aspect/shading + road/production constraints,
-                                     falling back to road_corridors for proximity if needed)
-             --> fencing (real geometry: buffered NHD stream exclusion + property-boundary
-                          perimeter; everything else in Subdivision Fences stays narrative-only)
-             --> report_generator
+    boundary --> parcel_data.fetch_parcel_data (every raw KSOP data layer
+                     -- soil, elevation, hydrology, climate, imagery, DEM,
+                     farm roads, canopy, irradiance -- fetched EXACTLY ONCE,
+                     HARD-FAILING on any missing/broken layer)
+             --> pipeline_context.build_pipeline_context (every shared
+                     derived KSOP input -- valleys, production areas,
+                     water/road/solar/tree candidate zones, keypoints --
+                     computed EXACTLY ONCE, HARD-FAILING on any failure)
+             --> a handful of report-only wrappers over already-computed
+                     context values (water candidate FeatureCollection,
+                     the full ranked solar list, fencing geometry)
+             --> report_generator (Scale of Permanence narrative via Claude)
              --> printed report
+
+Architecture note -- this file no longer self-fetches or self-computes
+anything per section. Raw data comes from the single fetch_parcel_data()
+call; every derived KSOP layer comes from the single build_pipeline_
+context() call. Both HARD-FAIL, uncaught: a report built on incomplete
+raw data or a failed KSOP computation should never be generated, the same
+standard parcel_data.py already enforces for raw data. There is
+deliberately NO per-section try/except graceful degradation here anymore
+-- see parcel_data.py's own module docstring for the full contract this
+mirrors. This matches the pipeline architecture documented in pipeline-
+architecture-guide.md.
 
 Requires ANTHROPIC_API_KEY to be set in your environment (see
 report_generator.py for details).
 """
 
-from soil_data import get_soil_data_for_polygon, coordinates_to_wkt_polygon
-from elevation_data import get_elevation_grid
-from hydrology_data import get_water_features_for_boundary
-from climate_data import get_climate_summary_for_point
-from imagery_data import get_imagery_summary_for_boundary
-from water_candidate_zones import (
-    identify_water_system_candidate_zones,
-    summarize_water_system_candidate_zones,
-)
-from road_corridors import (
-    identify_road_corridor_candidates,
-    summarize_road_corridor_candidates,
-    validate_access_point_on_boundary,
-)
-from solar_suitability import identify_solar_candidate_zones, summarize_solar_candidate_zones
-from fencing import identify_fencing, summarize_fencing
-from keypoint_detection import identify_keypoints, summarize_keypoints
+from feature_schema import make_feature_collection
+from parcel_data import fetch_parcel_data
+from pipeline_context import build_pipeline_context
+from road_corridors import validate_access_point_on_boundary
+from solar_suitability import identify_solar_candidate_zones
+from fencing import identify_fencing
 from report_generator import generate_scale_of_permanence_report
-
-
-def _boundary_center(boundary_coordinates: list) -> tuple:
-    """Rough center point of the boundary, used for the climate lookup
-    (climate is regional, not parcel-precise, so one representative point
-    is the right level of precision here)."""
-    lons = [pt[0] for pt in boundary_coordinates]
-    lats = [pt[1] for pt in boundary_coordinates]
-    return sum(lats) / len(lats), sum(lons) / len(lons)
 
 
 def generate_full_report(boundary_coordinates: list, anchor_lon_lat: tuple[float, float]) -> str:
@@ -71,133 +62,132 @@ def generate_full_report(boundary_coordinates: list, anchor_lon_lat: tuple[float
     """
     validate_access_point_on_boundary(boundary_coordinates, anchor_lon_lat)
 
-    print("Step 1/10: Fetching climate data (prevailing wind, rainfall)...")
-    center_lat, center_lon = _boundary_center(boundary_coordinates)
-    climate_summary = get_climate_summary_for_point(center_lat, center_lon)
+    print("Fetching all raw parcel data (soil, elevation, hydrology, climate, imagery, DEM, roads, canopy)...")
+    # HARD FAILS here, uncaught -- same contract as parcel_data.py's own
+    # module docstring. A raw-data failure stops the report before any KSOP
+    # computation begins; there is no per-layer try/except here anymore.
+    parcel_data = fetch_parcel_data(boundary_coordinates)
+    stream_count = len(parcel_data.water_features["streams"])
+    waterbody_count = len(parcel_data.water_features["water_bodies"])
     print(
-        f"  Prevailing wind: {climate_summary['prevailing_wind_direction']}, "
-        f"avg annual precip: {climate_summary['avg_annual_precipitation_mm']}mm\n"
+        f"  {len(parcel_data.soil_components)} soil component(s), "
+        f"{len(parcel_data.elevation_grid)} elevation point(s), "
+        f"{stream_count} stream(s)/{waterbody_count} water body/bodies, "
+        f"imagery scene {parcel_data.imagery_summary['scene_date']}.\n"
     )
 
-    print("Step 2/10: Fetching soil data for the full boundary...")
-    wkt_polygon = coordinates_to_wkt_polygon(boundary_coordinates)
-    soil_components = get_soil_data_for_polygon(wkt_polygon)
-    print(f"  Found {len(soil_components)} soil component(s).\n")
+    print("Building KSOP pipeline context (valleys, production, water/road/solar/tree zones, keypoints)...")
+    # ALSO HARD FAILS here, uncaught (Option A): a derived-computation
+    # failure anywhere in the KSOP chain (water/road/solar/tree zones and
+    # keypoints are ALL computed inside this one call) stops the whole
+    # report. This single upstream hard-fail replaces the old per-section
+    # graceful degradation entirely -- that behavior is gone by design, not
+    # an oversight.
+    context = build_pipeline_context(
+        boundary_coordinates,
+        anchor_lon_lat,
+        dem=parcel_data.dem,
+        boundary_polygon_utm=parcel_data.boundary_polygon_utm,
+        soil_components=parcel_data.soil_components,
+        farm_roads=parcel_data.farm_roads,
+        water_features=parcel_data.water_features,
+        soil_geometries=parcel_data.soil_geometries,
+        canopy_height=parcel_data.canopy_height,
+    )
+    print("  KSOP context built.\n")
 
-    print("Step 3/10: Fetching elevation grid...")
-    elevation_grid = get_elevation_grid(boundary_coordinates, grid_size=6)
-    print(f"  Sampled {len(elevation_grid)} elevation points.\n")
+    # water_candidate_zones_geojson: context.water_zones is already the full
+    # ranked feature list (water_candidate_zones.identify_water_system_
+    # candidate_zones()'s own zones_geojson["features"]); re-wrap it into the
+    # FeatureCollection shape _format_water_candidate_zones_summary() expects.
+    # No second identify_water_system_candidate_zones() call -- this is free.
+    water_candidate_zones_geojson = make_feature_collection(context.water_zones)
 
-    print("Step 4/10: Fetching nearby water features...")
-    water_features = get_water_features_for_boundary(boundary_coordinates)
-    stream_count = len(water_features["streams"])
-    waterbody_count = len(water_features["water_bodies"])
-    print(f"  Found {stream_count} stream(s), {waterbody_count} water body/bodies.\n")
+    # road_network: context.selected_road_corridor already IS build_road_
+    # network()'s full network dict (NEVER None -- an empty network is
+    # branches=[], not None; see pipeline_context.py's own comment). This is
+    # exactly what generate_scale_of_permanence_report() wants as road_network.
+    # No second identify_road_corridor_candidates() call.
+    road_network = context.selected_road_corridor
 
-    print("Step 5/10: Fetching satellite imagery (NDVI land cover)...")
-    try:
-        imagery_summary = get_imagery_summary_for_boundary(boundary_coordinates)
-    except Exception as e:
-        # Imagery is a nice-to-have layer on top of soil/elevation/water/
-        # climate, not a hard dependency — a Planetary Computer outage or
-        # network hiccup shouldn't take down the whole report.
-        print(f"  Imagery fetch failed ({e}), continuing without it.\n")
-        imagery_summary = None
-    if imagery_summary:
-        print(
-            f"  Scene date: {imagery_summary['scene_date']} "
-            f"({imagery_summary['days_since_scene']} days ago), "
-            f"cloud cover: {imagery_summary['cloud_cover_pct']}%\n"
-        )
-    else:
-        print("  No recent low-cloud imagery available for this boundary.\n")
+    # keypoints: already computed inside build_pipeline_context() and carried
+    # on the context (keypoint_detection.detect_keypoints()'s own list). No
+    # separate identify_keypoints() call here anymore -- that redundant call
+    # is deleted.
+    keypoints = context.keypoints
 
-    print("Step 6/10: Identifying valley-based water system candidate zones (DEM/LiDAR)...")
-    try:
-        water_zone_result = identify_water_system_candidate_zones(boundary_coordinates)
-        water_candidate_zones_geojson = water_zone_result["zones_geojson"]
-    except Exception as e:
-        # Same reasoning as imagery above: a USGS 3DEP outage or network
-        # hiccup shouldn't take down the whole report — the WATER SUPPLY
-        # section just falls back to reasoning from the coarse elevation
-        # grid alone, same as it did before this layer existed.
-        print(f"  Water system candidate zone identification failed ({e}), continuing without it.\n")
-        water_candidate_zones_geojson = None
-    if water_candidate_zones_geojson is not None:
-        print(f"  {summarize_water_system_candidate_zones(water_zone_result)}\n")
+    # solar_candidate_zones_geojson: the ONE genuinely necessary extra KSOP
+    # call this file makes. The context only kept the winner (selected_
+    # structure_site), but the report's narrative wants the full ranked
+    # candidate list for comparison (see report_generator.py's own docstring).
+    # Every value below is forwarded straight from the context/parcel_data
+    # already computed, so this call re-derives nothing upstream -- the same
+    # accepted, bounded 2x tradeoff established for exactly this shape of need.
+    solar_result = identify_solar_candidate_zones(
+        boundary_coordinates,
+        dem=context.dem,
+        anchor_lon_lat=anchor_lon_lat,
+        boundary_polygon_utm=context.boundary_polygon_utm,
+        production_areas=context.production_areas,
+        valleys=context.valleys,
+        selected_water_zone=context.selected_water_zone,
+        selected_road_corridor=context.selected_road_corridor,
+        hydric_floodplain_union=context.soil_exclusion_unions["hydric_floodplain_union"],
+        floodplain_data_is_fallback=context.soil_exclusion_unions["hydric_floodplain_is_fallback"],
+        canopy_height=parcel_data.canopy_height,
+    )
+    solar_candidate_zones_geojson = solar_result["zones_geojson"]
 
-    print("Detecting keypoints (valley long-profile inflections, DEM-derived)...")
-    try:
-        # Independent of KSOP -- pure terrain analysis, needs only the DEM +
-        # boundary (identify_keypoints() fetches its own DEM). Carried into the
-        # report generator below; the reviewer wires the narrative wording
-        # later (see generate_scale_of_permanence_report()'s own docstring).
-        keypoints = identify_keypoints(boundary_coordinates)["keypoints"]
-    except Exception as e:
-        # Same graceful-degradation reasoning as every DEM-backed layer above.
-        print(f"  Keypoint detection failed ({e}), continuing without it.\n")
-        keypoints = None
-    if keypoints is not None:
-        print(f"  {summarize_keypoints(keypoints)}\n")
+    # fencing_geojson: replicate render_layout_map.py's own confirmed call
+    # shape exactly -- the corridor's undilated path footprint, the developed-
+    # footprint production polygons, and the rank-1 structure site, all
+    # threaded through from values already in memory here (no new fetch).
+    # structure_site is the same rank-1 GeoJSON Feature from the solar call
+    # above (solar_result["zones_geojson"]["features"][0]).
+    solar_features = solar_candidate_zones_geojson["features"]
+    structure_site = solar_features[0] if solar_features else None
+    production_zone_polygons_utm = [
+        patch["render_fill_polygon_utm"]
+        for patch in (context.production_areas or [])
+        if patch.get("render_fill_polygon_utm") is not None
+    ]
+    road_corridor_cell_footprint_polygon_utm = (
+        context.selected_road_corridor["cell_footprint_polygon_utm"]
+        if context.selected_road_corridor
+        else None
+    )
+    fencing_result = identify_fencing(
+        boundary_coordinates,
+        dem=context.dem,
+        anchor_lon_lat=anchor_lon_lat,
+        boundary_polygon_utm=context.boundary_polygon_utm,
+        production_areas=context.production_areas,
+        valleys=context.valleys,
+        selected_road_corridor=context.selected_road_corridor,
+        selected_water_zone=context.selected_water_zone,
+        tree_zone_patches=context.tree_zone_patches,
+        hydric_floodplain_union=context.soil_exclusion_unions["hydric_floodplain_union"],
+        floodplain_data_is_fallback=context.soil_exclusion_unions["hydric_floodplain_is_fallback"],
+        canopy_height=parcel_data.canopy_height,
+        production_zone_polygons_utm=production_zone_polygons_utm,
+        structure_site_feature=structure_site,
+        road_corridor_cell_footprint_polygon_utm=road_corridor_cell_footprint_polygon_utm,
+    )
+    fencing_geojson = fencing_result["fencing_geojson"]
 
-    print("Step 7/10: Identifying suggested road corridor candidates (DEM least-cost-path routing)...")
-    try:
-        road_corridor_result = identify_road_corridor_candidates(
-            boundary_coordinates, anchor_lon_lat=anchor_lon_lat
-        )
-        road_corridor_candidates_geojson = road_corridor_result["zones_geojson"]
-    except Exception as e:
-        # Same reasoning as the other DEM/network-backed layers above — an
-        # outage here shouldn't take down the whole report; the FARM
-        # ROADS section just falls back to its old prose-inference
-        # behavior, same as it did before this layer existed.
-        print(f"  Road corridor candidate identification failed ({e}), continuing without it.\n")
-        road_corridor_candidates_geojson = None
-    if road_corridor_candidates_geojson is not None:
-        print(f"  {summarize_road_corridor_candidates(road_corridor_result)}\n")
-
-    print("Step 8/10: Identifying solar infrastructure candidate zones (DEM slope/aspect/shading)...")
-    try:
-        solar_zone_result = identify_solar_candidate_zones(boundary_coordinates, anchor_lon_lat=anchor_lon_lat)
-        solar_candidate_zones_geojson = solar_zone_result["zones_geojson"]
-    except Exception as e:
-        # Same reasoning as imagery/water candidate zones above: a USGS/
-        # SSURGO outage or network hiccup shouldn't take down the whole
-        # report — the PERMANENT BUILDINGS section's solar siting
-        # discussion just falls back to reasoning without ranked
-        # candidates, same as it did before this layer existed.
-        print(f"  Solar candidate zone identification failed ({e}), continuing without it.\n")
-        solar_candidate_zones_geojson = None
-    if solar_candidate_zones_geojson is not None:
-        print(f"  {summarize_solar_candidate_zones(solar_zone_result)}\n")
-
-    print("Step 9/10: Identifying fencing geometry (stream exclusion + perimeter)...")
-    try:
-        fencing_result = identify_fencing(boundary_coordinates, anchor_lon_lat=anchor_lon_lat)
-        fencing_geojson = fencing_result["fencing_geojson"]
-    except Exception as e:
-        # Same reasoning as the other DEM/network-backed layers above — an
-        # NHD outage here shouldn't take down the whole report; the
-        # SUBDIVISION FENCES section just falls back to narrative-only
-        # reasoning for stream exclusion/perimeter too, same as it always
-        # has for the rest of that section.
-        print(f"  Fencing geometry identification failed ({e}), continuing without it.\n")
-        fencing_geojson = None
-    if fencing_geojson is not None:
-        print(f"  {summarize_fencing(fencing_result)}\n")
-
-    print("Step 10/10: Generating Scale of Permanence report via Claude...\n")
+    print("Generating Scale of Permanence report via Claude...\n")
     report = generate_scale_of_permanence_report(
-        soil_components,
-        elevation_grid,
-        water_features,
-        climate_summary,
-        imagery_summary,
+        parcel_data.soil_components,
+        parcel_data.elevation_grid,
+        parcel_data.water_features,
+        parcel_data.climate_summary,
+        parcel_data.imagery_summary,
         water_candidate_zones_geojson,
         solar_candidate_zones_geojson,
-        road_corridor_candidates_geojson,
+        road_network,
         fencing_geojson,
         keypoints=keypoints,
+        irradiance=parcel_data.irradiance,
     )
 
     return report
