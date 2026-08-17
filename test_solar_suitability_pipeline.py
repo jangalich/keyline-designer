@@ -38,16 +38,22 @@ it, through the real identify_production_areas()/identify_solar_candidate_zones(
 wiring, not just the pure function test_solar_suitability.py already
 covers directly.
 
-This same uniform, gentle, non-ridge-shaped terrain never registers any
-delineated valleys and never gives find_road_routes() a ridge to route
-along, so the real (non-overridden) selected_water_zone and
-selected_road_corridor on this fixture are always None -- same situation
-test_road_corridors_pipeline.py's own narrow-ridge fixture hit for its
-water zone. The override sections below fabricate small synthetic
-zone/corridor dicts positioned off in open space near this fixture's own
-DEM extent (not overlapping any real candidate) purely to have a real,
-non-None value to prove the self-compute fallbacks are skipped -- same
-pattern test_road_corridors_pipeline.py already established.
+This same uniform terrain registers no delineated valleys, but that no
+longer means the real (non-overridden) selected_water_zone is None:
+water_candidate_zones.py's generation was rebuilt on the production-zone
+pattern (keyed to the production areas, with no valley gate and no minimum
+contributing area -- see that module's own docstring), so this fixture's
+single production patch now yields one real, rank-1 selected water zone.
+The real selected_road_corridor IS still None here -- but because no
+anchor_lon_lat is supplied (Tier 1 degrades straight to None with no
+network call, the no-anchor path test 2 below exercises), not because of
+the terrain shape. The override sections below still fabricate small
+synthetic zone/corridor dicts rather than reusing either real value: a
+non-None water zone off in open space near this fixture's DEM extent (the
+real one sits inside the extent, on the production ground) and a road
+corridor spanning the extent, purely to have real, checkable override
+values to prove the self-compute fallbacks are skipped -- same pattern
+test_road_corridors_pipeline.py already established.
 
 This same uniform terrain ALSO hits the exact "whole grid reads as one
 zone" failure mode tree_zone_candidates.py's own docstring warns about
@@ -234,16 +240,34 @@ assert isinstance(OVERRIDE_PRODUCTION_AREAS, list) and OVERRIDE_PRODUCTION_AREAS
     "test setup: expected at least one real production patch on this uniform gentle-slope fixture "
     "to reuse as a direct override below"
 )
-# This fixture's uniform, non-ridge-shaped terrain never delineates a real valley and never gives
-# find_road_routes() a ridge to route along, so the real, honestly-computed selected water zone and
-# selected road corridor on THIS fixture are always None -- neither can be used to prove a call was
-# skipped (None is exactly the sentinel this branch's own None-falls-back-to-self-compute pattern
-# treats as "not overridden"). Both are fabricated as small synthetic values below instead, positioned
-# well outside this fixture's own DEM/boundary extent (or, for the road corridor, deliberately spanning
-# it) so they have a real, checkable effect without depending on this terrain accidentally producing one.
-assert _real_selected_water_zone is None, (
-    "test setup: this uniform gentle-slope fixture is expected to produce no real candidate water zone "
-    "-- if this now finds one, OVERRIDE_SELECTED_WATER_ZONE below should probably use it directly instead"
+# This fixture's uniform terrain delineates no real valley (valleys stays []), but the selected
+# water zone is NO LONGER None: water_candidate_zones.py's generation was rebuilt on the
+# production-zone pattern (a cell-based eligibility mask keyed to the production areas, with NO
+# minimum contributing area and NO valley gate -- see that module's own docstring), so this
+# fixture's single real production patch now yields exactly one real, rank-1 selected water zone
+# even with no delineated valley. The real (non-overridden) selected road corridor, by contrast,
+# genuinely IS None here -- but because no anchor_lon_lat is supplied, so Tier 1's
+# identify_road_corridor_candidates() degrades straight to None with no network call (see the
+# no-anchor path exercised by test 2 above), not because of the terrain shape.
+#
+# Neither real value is reused directly as its override: the real water zone sits inside this
+# fixture's DEM/boundary extent (on the production ground) and the real road corridor is None, so
+# both overrides are fabricated below instead -- the water zone off in open space near the extent
+# (non-None, proves the self-compute is skipped, without perturbing candidate geometry) and the
+# road corridor deliberately spanning the extent (so several candidates clear Tier 1's proximity
+# gate). Both give a real, checkable effect without depending on this terrain accidentally
+# producing one.
+assert (
+    isinstance(_real_selected_water_zone, dict)
+    and _real_selected_water_zone.get("rank") == 1
+    and _real_selected_water_zone.get("served_production_area_ids")
+    and "render_fill_polygon_utm" in _real_selected_water_zone
+), (
+    "test setup: this uniform gentle-slope fixture's single production patch is now expected to "
+    "yield exactly one real, rank-1 selected water zone (water_candidate_zones.py's "
+    "production-zone-based generation no longer requires a delineated valley or a minimum "
+    "contributing area) -- if this regresses to None, the water-zone generation/selection wiring "
+    "has broken"
 )
 OVERRIDE_SELECTED_WATER_ZONE = {
     "id": "synthetic-test-water-zone",

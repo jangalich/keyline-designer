@@ -261,16 +261,28 @@ assert OVERRIDE_VALLEYS == [] and OVERRIDE_HYDRIC_FLOODPLAIN_UNION is None, (
     "OVERRIDE_HYDRIC_FLOODPLAIN_UNION below should probably use the real one directly instead"
 )
 OVERRIDE_HYDRIC_FLOODPLAIN_UNION = Point(origin_x - 1000.0, origin_y - 2000.0).buffer(5.0)
-# The real, honestly-computed selected water zone on THIS uniform-slope fixture is None (no
-# candidate water-system zone survives here either, same non-ridge-shaped-terrain reasoning as
-# above) -- and None is exactly the sentinel this branch's own None-falls-back-to-self-compute
-# pattern treats as "not overridden", so it can't be used to prove a call was skipped. Test 1
-# below needs a genuinely non-None override to prove fetch_and_select_optimal_water_zone() is
-# skipped, so it uses a small synthetic zone instead, positioned well outside this fixture's own
-# DEM extent so it has zero effect on routing.
-assert _real_selected_water_zone is None, (
-    "test setup: this uniform-slope fixture is expected to produce no real candidate water zone -- "
-    "if this now finds one, OVERRIDE_SELECTED_WATER_ZONE below should probably use it directly instead"
+# Unlike the delineated valleys above, the selected water zone on THIS uniform-slope fixture is
+# NOT None: water_candidate_zones.py's zone generation was rebuilt on the production-zone pattern
+# (a cell-based eligibility mask keyed to the production areas -- absolute contributing-area
+# ceiling + on-parcel + service distance + production/canopy/road exclusions -- with NO minimum
+# contributing area and NO valley gate; see that module's own docstring). So this fixture's single
+# real production patch now yields exactly one real, rank-1 selected water zone even though it has
+# no delineated valley at all. That real zone sits INSIDE this fixture's DEM extent (right on the
+# production ground it serves), so feeding it in as OVERRIDE_SELECTED_WATER_ZONE would make it a
+# real hard water-exclusion that perturbs the routed network test 1 validates. A small synthetic
+# zone positioned well OUTSIDE the DEM extent is used as the override instead -- non-None (so it
+# still proves fetch_and_select_optimal_water_zone() is skipped) but with zero effect on routing,
+# independent of the real zone's shape.
+assert (
+    isinstance(_real_selected_water_zone, dict)
+    and _real_selected_water_zone.get("rank") == 1
+    and _real_selected_water_zone.get("served_production_area_ids")
+    and "render_fill_polygon_utm" in _real_selected_water_zone
+), (
+    "test setup: this uniform-slope fixture's single production patch is now expected to yield "
+    "exactly one real, rank-1 selected water zone (water_candidate_zones.py's production-zone-based "
+    "generation no longer requires a delineated valley or a minimum contributing area) -- if this "
+    "regresses to None, the water-zone generation/selection wiring has broken"
 )
 OVERRIDE_SELECTED_WATER_ZONE = {
     "id": "synthetic-test-water-zone",
