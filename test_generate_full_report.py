@@ -4,8 +4,15 @@ test_generate_full_report.py
 Offline (no-network, no-LLM) checks for generate_full_report.py's rewired
 architecture: it builds ParcelData ONCE and PipelineContext ONCE, sources
 every report input from those two objects, HARD-FAILS upstream (Option A --
-no per-section try/except), and makes exactly ONE extra KSOP call beyond
-build_pipeline_context() (the full ranked solar list the narrative needs).
+no per-section try/except), and makes NO extra KSOP call beyond
+build_pipeline_context(). The report now narrates only the SELECTED winners
+(context.selected_water_zone, context.selected_structure_site -- both raw
+candidate dicts, stored and unused by report_generator.py this branch) plus
+the production-area FeatureCollection and parcel acreage, all forwarded
+straight from the one context. The prior extra identify_solar_candidate_
+zones() call (for the full ranked list) and the identify_fencing() call are
+both gone -- fencing still renders on the map via render_layout_map.py, not
+here.
 
 Every real fetch/compute function is mocked here, patched in generate_full_
 report's OWN namespace (it imports each with `from X import Y`, so patching
@@ -20,15 +27,16 @@ Covers:
   3. build_pipeline_context() raising -> generate_full_report() raises the
      SAME exception, uncaught, before generate_scale_of_permanence_report()
      is EVER called.
-  4. Happy path with a full synthetic ParcelData + PipelineContext:
-     identify_solar_candidate_zones() is called EXACTLY once (the one
-     accepted extra call), and NO other KSOP entry point (water/road/tree/
-     keypoints) is called a second time by generate_full_report.py itself.
+  4. Happy path with a full synthetic ParcelData + PipelineContext: NO KSOP
+     entry point (solar/water/road/tree/keypoints) is called by generate_
+     full_report.py itself -- every report input comes from the single
+     build_pipeline_context() call.
   5. road_network handed to generate_scale_of_permanence_report() is the
      SAME object (`is`) as context.selected_road_corridor -- not rebuilt.
-  6. water_candidate_zones_geojson is correctly wrapped from context.water_
-     zones: same feature count, and schema-valid via validate_feature_
-     collection().
+  6. The report call forwards the selected winners and new params by identity:
+     selected_water_zone / selected_structure_site / parcel_acres straight
+     from the context, and production_areas_geojson is production_suitability_
+     to_geojson(context.production_areas).
 """
 
 from contextlib import ExitStack
@@ -38,7 +46,7 @@ from shapely.geometry import Polygon
 
 import generate_full_report
 from generate_full_report import generate_full_report as run_report
-from feature_schema import make_feature, validate_feature_collection
+from feature_schema import make_feature
 from parcel_data import ParcelData
 from pipeline_context import PipelineContext
 
@@ -113,19 +121,18 @@ def _synthetic_parcel_data() -> ParcelData:
 
 
 def _synthetic_context(water_zones: list[dict]) -> PipelineContext:
-    """A fully-populated PipelineContext. selected_road_corridor is a truthy
-    network dict carrying cell_footprint_polygon_utm (generate_full_report.py
-    reads that key when the corridor is truthy). production_areas exercises
-    the render_fill_polygon_utm filter (one patch has it, one doesn't)."""
+    """A fully-populated PipelineContext. selected_water_zone/selected_
+    structure_site are recognizable sentinel dicts (identity-asserted below
+    as the report's water/solar args). production_areas is an opaque sentinel
+    list -- generate_full_report.py hands it straight to production_suitability
+    _to_geojson(), which is mocked here, so its contents are never dereferenced
+    by this test."""
     return PipelineContext(
         dem={"crs": "EPSG:32617", "synthetic": True},
         boundary_polygon_utm=Polygon([(0, 0), (100, 0), (100, 100), (0, 100)]),
         valleys=[{"valley_id": 3}],
         keypoints=[{"id": 0, "valley_id": 3, "elevation_m": 346.5}],
-        production_areas=[
-            {"render_fill_polygon_utm": Polygon([(1, 1), (2, 1), (2, 2), (1, 2)])},
-            {"render_fill_polygon_utm": None},
-        ],
+        production_areas=[{"patch_id": "p0"}, {"patch_id": "p1"}],
         parcel_acres=2.47,
         existing_roads=None,
         soil_exclusion_unions={
@@ -195,8 +202,6 @@ with ExitStack() as stack:
     ctx_mock = stack.enter_context(
         mock_patch.object(generate_full_report, "build_pipeline_context", Mock(side_effect=boom))
     )
-    solar_mock = stack.enter_context(mock_patch.object(generate_full_report, "identify_solar_candidate_zones", Mock()))
-    fencing_mock = stack.enter_context(mock_patch.object(generate_full_report, "identify_fencing", Mock()))
     report_mock = stack.enter_context(
         mock_patch.object(generate_full_report, "generate_scale_of_permanence_report", Mock())
     )
@@ -226,37 +231,20 @@ print(
 # 4/5/6. Happy path with a full synthetic ParcelData + PipelineContext.
 #    build_pipeline_context() is mocked to RETURN the synthetic context (so
 #    it performs ZERO internal KSOP calls); generate_full_report.py's own
-#    body is what runs on top. Assert the one accepted extra solar call, no
-#    second call to any other KSOP entry point, road_network identity, and
-#    correct water-zone wrapping.
+#    body is what runs on top. Assert NO KSOP entry point is re-called,
+#    road_network identity, and that the selected winners + new params are
+#    forwarded to the report generator by identity.
 # =====================================================================
 _water_zones = _synthetic_water_features()
 _parcel = _synthetic_parcel_data()
 _context = _synthetic_context(_water_zones)
 
-# wraps= a synthetic stub: the mock both records call_count AND returns a
-# real-shaped ranked solar result (with a non-empty features list so the
-# structure_site derivation downstream is exercised).
-_SOLAR_RESULT = {
-    "zones_geojson": {
-        "type": "FeatureCollection",
-        "features": [
-            make_feature(
-                feature_id="solar_0",
-                geometry={"type": "Point", "coordinates": [-79.9825, 40.6448]},
-                layer="solar_infrastructure",
-                label="Rank-1 structure site",
-                confidence="high",
-                confidence_notes="DEM slope/aspect/shading-derived; ranked candidate.",
-            ),
-        ],
-    }
-}
-
-
-def _solar_stub(*args, **kwargs):
-    return _SOLAR_RESULT
-
+# generate_full_report.py wraps context.production_areas into a FeatureCollection
+# via production_suitability_to_geojson(). That emitter has its own test
+# (test_production_suitability.py), so it is mocked to a sentinel here and only
+# its wiring is checked (called once with context.production_areas; its return
+# forwarded verbatim as production_areas_geojson).
+_PRODUCTION_FC = {"type": "FeatureCollection", "features": [], "_sentinel": "production"}
 
 with ExitStack() as stack:
     stack.enter_context(mock_patch.object(generate_full_report, "validate_access_point_on_boundary", Mock()))
@@ -266,14 +254,9 @@ with ExitStack() as stack:
     stack.enter_context(
         mock_patch.object(generate_full_report, "build_pipeline_context", Mock(return_value=_context))
     )
-    solar_mock = stack.enter_context(
-        mock_patch.object(generate_full_report, "identify_solar_candidate_zones", Mock(wraps=_solar_stub))
-    )
-    fencing_mock = stack.enter_context(
+    production_geojson_mock = stack.enter_context(
         mock_patch.object(
-            generate_full_report,
-            "identify_fencing",
-            Mock(return_value={"fencing_geojson": {"type": "FeatureCollection", "features": []}}),
+            generate_full_report, "production_suitability_to_geojson", Mock(return_value=_PRODUCTION_FC)
         )
     )
     report_mock = stack.enter_context(
@@ -284,14 +267,17 @@ with ExitStack() as stack:
         )
     )
 
-    # Patch the OTHER KSOP entry points at their SOURCE modules and assert
-    # they are never called: generate_full_report.py does not import them,
-    # and build_pipeline_context() is mocked, so any call would be a
-    # regression (a re-introduced redundant self-fetch/self-compute).
+    # Patch every KSOP entry point at its SOURCE module and assert none is
+    # called. generate_full_report.py no longer imports identify_solar_
+    # candidate_zones()/identify_fencing() at all (the extra solar call and the
+    # fencing call are gone), and build_pipeline_context() is mocked, so ANY
+    # call here would be a regression (a re-introduced redundant self-compute).
     import water_candidate_zones
     import road_corridors
     import tree_zone_candidates
     import keypoint_detection
+    import solar_suitability
+    import fencing
 
     water_entry = stack.enter_context(
         mock_patch.object(water_candidate_zones, "identify_water_system_candidate_zones", Mock())
@@ -305,36 +291,40 @@ with ExitStack() as stack:
     keypoint_entry = stack.enter_context(
         mock_patch.object(keypoint_detection, "identify_keypoints", Mock())
     )
+    solar_entry = stack.enter_context(
+        mock_patch.object(solar_suitability, "identify_solar_candidate_zones", Mock())
+    )
+    fencing_entry = stack.enter_context(
+        mock_patch.object(fencing, "identify_fencing", Mock())
+    )
 
     result = run_report(BOUNDARY, ANCHOR)
 
     assert result == "SYNTHETIC REPORT", "generate_full_report() must return the report generator's output verbatim"
 
-    # ---- 4: exactly ONE extra solar call, no other KSOP entry re-called ----
-    assert solar_mock.call_count == 1, (
-        f"identify_solar_candidate_zones() must be called EXACTLY once by generate_full_report.py "
-        f"(the one accepted extra call for the full ranked list), got {solar_mock.call_count}"
-    )
+    # ---- 4: NO KSOP entry point re-called by generate_full_report.py itself ----
     for name, entry in (
         ("identify_water_system_candidate_zones", water_entry),
         ("identify_road_corridor_candidates", road_entry),
         ("identify_tree_zone_candidates", tree_entry),
         ("identify_keypoints", keypoint_entry),
+        ("identify_solar_candidate_zones", solar_entry),
+        ("identify_fencing", fencing_entry),
     ):
         assert entry.call_count == 0, (
-            f"{name}() must NOT be called by generate_full_report.py itself -- that value comes from "
-            f"the single build_pipeline_context() call (got {entry.call_count} call(s))"
+            f"{name}() must NOT be called by generate_full_report.py itself -- every report input comes "
+            f"from the single build_pipeline_context() call (got {entry.call_count} call(s))"
         )
     print(
-        "4. identify_solar_candidate_zones() is called exactly once (the accepted extra); no other KSOP "
-        "entry point (water/road/tree/keypoints) is called a second time by generate_full_report.py."
+        "4. no KSOP entry point (water/road/tree/keypoints/solar/fencing) is called by generate_full_"
+        "report.py itself -- the extra solar call and the fencing call are both gone."
     )
 
     # ---- report generator call args (shared by checks 5 and 6) ----
     report_mock.assert_called_once()
     call_args, call_kwargs = report_mock.call_args
-    passed_water_fc = call_args[5]
-    passed_solar_fc = call_args[6]
+    passed_water = call_args[5]
+    passed_solar = call_args[6]
     passed_road_network = call_args[7]
 
     # ---- 5: road_network is context.selected_road_corridor by identity ----
@@ -347,26 +337,29 @@ with ExitStack() as stack:
         "(`is`) -- not rebuilt."
     )
 
-    # ---- 6: water_candidate_zones_geojson correctly wrapped ----
-    assert passed_water_fc["type"] == "FeatureCollection"
-    assert len(passed_water_fc["features"]) == len(_context.water_zones), (
-        "the wrapped water FeatureCollection must carry exactly the features from context.water_zones"
+    # ---- 6: selected winners + new params forwarded by identity ----
+    assert passed_water is _context.selected_water_zone, (
+        "the water arg must be context.selected_water_zone (the raw selected winner), forwarded by "
+        "identity -- not the full ranked list, and not re-wrapped into a FeatureCollection"
     )
-    assert passed_water_fc["features"] == _context.water_zones, (
-        "the wrapped features must be context.water_zones verbatim (make_feature_collection wraps, "
-        "it does not copy or transform)"
+    assert passed_solar is _context.selected_structure_site, (
+        "the solar arg must be context.selected_structure_site (the raw selected winner), forwarded by "
+        "identity -- not a fresh identify_solar_candidate_zones() call's ranked list"
     )
-    validate_feature_collection(passed_water_fc)  # raises if not schema-valid
+    assert call_kwargs["parcel_acres"] == _context.parcel_acres, (
+        "parcel_acres must be forwarded straight from context.parcel_acres"
+    )
+    production_geojson_mock.assert_called_once_with(_context.production_areas)
+    assert call_kwargs["production_areas_geojson"] is _PRODUCTION_FC, (
+        "production_areas_geojson must be production_suitability_to_geojson(context.production_areas)'s "
+        "own return, forwarded verbatim"
+    )
     print(
-        f"6. water_candidate_zones_geojson wraps context.water_zones exactly "
-        f"({len(passed_water_fc['features'])} feature(s)) and is schema-valid via "
-        "validate_feature_collection()."
+        "6. selected_water_zone/selected_structure_site/parcel_acres are forwarded from the context by "
+        "identity; production_areas_geojson is production_suitability_to_geojson(context.production_areas)."
     )
 
-    # ---- bonus: solar candidate list and irradiance seam are forwarded ----
-    assert passed_solar_fc is _SOLAR_RESULT["zones_geojson"], (
-        "solar_candidate_zones_geojson must be the extra solar call's own zones_geojson"
-    )
+    # ---- bonus: keypoints + irradiance seams still forwarded ----
     assert call_kwargs["keypoints"] is _context.keypoints, (
         "keypoints handed to the report generator must be context.keypoints (no separate detection call)"
     )
@@ -374,8 +367,7 @@ with ExitStack() as stack:
         "irradiance must be forwarded straight from parcel_data.irradiance (the stored, inert seam)"
     )
     print(
-        "   bonus: solar_candidate_zones_geojson is the extra call's ranked list; keypoints come from "
-        "the context; irradiance is forwarded from parcel_data.irradiance."
+        "   bonus: keypoints come from the context; irradiance is forwarded from parcel_data.irradiance."
     )
 
 

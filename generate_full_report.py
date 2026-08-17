@@ -14,9 +14,11 @@ scripts, and no layer fetched or computed more than once.
                      derived KSOP input -- valleys, production areas,
                      water/road/solar/tree candidate zones, keypoints --
                      computed EXACTLY ONCE, HARD-FAILING on any failure)
-             --> a handful of report-only wrappers over already-computed
-                     context values (water candidate FeatureCollection,
-                     the full ranked solar list, fencing geometry)
+             --> the selected winners + already-computed context values
+                     forwarded straight to the report (selected water zone,
+                     selected structure site, road network, production-area
+                     FeatureCollection, parcel acreage) -- no extra KSOP
+                     recompute, no fencing pass
              --> report_generator (Scale of Permanence narrative via Claude)
              --> printed report
 
@@ -35,12 +37,10 @@ Requires ANTHROPIC_API_KEY to be set in your environment (see
 report_generator.py for details).
 """
 
-from feature_schema import make_feature_collection
 from parcel_data import fetch_parcel_data
 from pipeline_context import build_pipeline_context
+from production_suitability import production_suitability_to_geojson
 from road_corridors import validate_access_point_on_boundary
-from solar_suitability import identify_solar_candidate_zones
-from fencing import identify_fencing
 from report_generator import generate_scale_of_permanence_report
 
 
@@ -96,12 +96,13 @@ def generate_full_report(boundary_coordinates: list, anchor_lon_lat: tuple[float
     )
     print("  KSOP context built.\n")
 
-    # water_candidate_zones_geojson: context.water_zones is already the full
-    # ranked feature list (water_candidate_zones.identify_water_system_
-    # candidate_zones()'s own zones_geojson["features"]); re-wrap it into the
-    # FeatureCollection shape _format_water_candidate_zones_summary() expects.
-    # No second identify_water_system_candidate_zones() call -- this is free.
-    water_candidate_zones_geojson = make_feature_collection(context.water_zones)
+    # water: the report now narrates only the SELECTED water zone (the winner
+    # already chosen inside build_pipeline_context()), not the full ranked
+    # candidate list -- alternatives are out of scope for the narrative.
+    # context.selected_water_zone is a raw candidate dict carrying Shapely
+    # geometry (not a GeoJSON feature); it is stored and unused by
+    # report_generator.py this branch.
+    selected_water_zone = context.selected_water_zone
 
     # road_network: context.selected_road_corridor already IS build_road_
     # network()'s full network dict (NEVER None -- an empty network is
@@ -116,64 +117,22 @@ def generate_full_report(boundary_coordinates: list, anchor_lon_lat: tuple[float
     # is deleted.
     keypoints = context.keypoints
 
-    # solar_candidate_zones_geojson: the ONE genuinely necessary extra KSOP
-    # call this file makes. The context only kept the winner (selected_
-    # structure_site), but the report's narrative wants the full ranked
-    # candidate list for comparison (see report_generator.py's own docstring).
-    # Every value below is forwarded straight from the context/parcel_data
-    # already computed, so this call re-derives nothing upstream -- the same
-    # accepted, bounded 2x tradeoff established for exactly this shape of need.
-    solar_result = identify_solar_candidate_zones(
-        boundary_coordinates,
-        dem=context.dem,
-        anchor_lon_lat=anchor_lon_lat,
-        boundary_polygon_utm=context.boundary_polygon_utm,
-        production_areas=context.production_areas,
-        valleys=context.valleys,
-        selected_water_zone=context.selected_water_zone,
-        selected_road_corridor=context.selected_road_corridor,
-        hydric_floodplain_union=context.soil_exclusion_unions["hydric_floodplain_union"],
-        floodplain_data_is_fallback=context.soil_exclusion_unions["hydric_floodplain_is_fallback"],
-        canopy_height=parcel_data.canopy_height,
-    )
-    solar_candidate_zones_geojson = solar_result["zones_geojson"]
+    # solar: the report narrates only the SELECTED structure site (the winner
+    # already chosen inside build_pipeline_context()), not the full ranked
+    # list -- alternatives are out of scope for the narrative. The second
+    # identify_solar_candidate_zones() call this file used to make (for the
+    # full ranked list, an accepted bounded-2x recompute) is therefore gone.
+    # context.selected_structure_site is a raw candidate dict carrying Shapely
+    # geometry (not a GeoJSON feature); stored and unused this branch.
+    selected_structure_site = context.selected_structure_site
 
-    # fencing_geojson: replicate render_layout_map.py's own confirmed call
-    # shape exactly -- the corridor's undilated path footprint, the developed-
-    # footprint production polygons, and the rank-1 structure site, all
-    # threaded through from values already in memory here (no new fetch).
-    # structure_site is the same rank-1 GeoJSON Feature from the solar call
-    # above (solar_result["zones_geojson"]["features"][0]).
-    solar_features = solar_candidate_zones_geojson["features"]
-    structure_site = solar_features[0] if solar_features else None
-    production_zone_polygons_utm = [
-        patch["render_fill_polygon_utm"]
-        for patch in (context.production_areas or [])
-        if patch.get("render_fill_polygon_utm") is not None
-    ]
-    road_corridor_cell_footprint_polygon_utm = (
-        context.selected_road_corridor["cell_footprint_polygon_utm"]
-        if context.selected_road_corridor
-        else None
-    )
-    fencing_result = identify_fencing(
-        boundary_coordinates,
-        dem=context.dem,
-        anchor_lon_lat=anchor_lon_lat,
-        boundary_polygon_utm=context.boundary_polygon_utm,
-        production_areas=context.production_areas,
-        valleys=context.valleys,
-        selected_road_corridor=context.selected_road_corridor,
-        selected_water_zone=context.selected_water_zone,
-        tree_zone_patches=context.tree_zone_patches,
-        hydric_floodplain_union=context.soil_exclusion_unions["hydric_floodplain_union"],
-        floodplain_data_is_fallback=context.soil_exclusion_unions["hydric_floodplain_is_fallback"],
-        canopy_height=parcel_data.canopy_height,
-        production_zone_polygons_utm=production_zone_polygons_utm,
-        structure_site_feature=structure_site,
-        road_corridor_cell_footprint_polygon_utm=road_corridor_cell_footprint_polygon_utm,
-    )
-    fencing_geojson = fencing_result["fencing_geojson"]
+    # production_areas_geojson: the "production_area_candidate" FeatureCollection
+    # for the ceiling-trimmed scored patches already on the context -- the same
+    # production areas the map draws -- wrapped from values already in memory
+    # (no new fetch/compute). Stored and unused by report_generator.py this
+    # branch. (Fencing is no longer computed here at all; it still renders on
+    # the map via render_layout_map.py's own identify_fencing() call.)
+    production_areas_geojson = production_suitability_to_geojson(context.production_areas)
 
     print("Generating Scale of Permanence report via Claude...\n")
     report = generate_scale_of_permanence_report(
@@ -182,12 +141,13 @@ def generate_full_report(boundary_coordinates: list, anchor_lon_lat: tuple[float
         parcel_data.water_features,
         parcel_data.climate_summary,
         parcel_data.imagery_summary,
-        water_candidate_zones_geojson,
-        solar_candidate_zones_geojson,
+        selected_water_zone,
+        selected_structure_site,
         road_network,
-        fencing_geojson,
         keypoints=keypoints,
         irradiance=parcel_data.irradiance,
+        parcel_acres=context.parcel_acres,
+        production_areas_geojson=production_areas_geojson,
     )
 
     return report

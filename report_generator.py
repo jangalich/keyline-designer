@@ -564,47 +564,6 @@ def _format_solar_candidate_zones_summary(zones_geojson: Optional[dict]) -> str:
     return "\n".join(lines)
 
 
-def _format_fencing_summary(fencing_geojson: Optional[dict]) -> str:
-    """Formats fencing.py's "exclusion_fencing" (stream) and
-    "perimeter_fencing" (property boundary) layers for the report prompt
-    — see that module for the geometry behind them, and its docstring
-    for why pond/water, tree crop/windbreak, and subdivision/rotational
-    fencing deliberately have NO computed geometry backing them. Optional,
-    same reasoning as the other DEM/network-backed layers — a fetch
-    failure shouldn't take down the whole report; step 7 of the system
-    prompt still gets its narrative-only guidance regardless."""
-    if not fencing_geojson or not fencing_geojson.get("features"):
-        return (
-            "No computed fencing geometry available for this property "
-            "(either no streams were found nearby and boundary data wasn't "
-            "available, or the data wasn't available for this run) — "
-            "reason about all of Subdivision Fences narratively, per the "
-            "system prompt's step 7 guidance, and say plainly that no "
-            "computed geometry backs any of it for this run."
-        )
-
-    lines = [f"{len(fencing_geojson['features'])} computed fencing feature(s):"]
-    for feature in fencing_geojson["features"]:
-        props = feature["properties"]
-        if props["layer"] == "exclusion_fencing":
-            lines.append(
-                f"  - {props['label']}: {props['exclusion_buffer_meters']}m livestock-exclusion "
-                f"buffer around stream (source: {props['source_feature_id']})"
-            )
-        elif props["layer"] == "perimeter_fencing":
-            lines.append(f"  - {props['label']}: the full property boundary, unmodified")
-    lines.append(
-        "\nThese are REAL COMPUTED GEOMETRY (a buffered stream boundary and the property "
-        "boundary itself) — narrate from them directly rather than inventing fence lines, "
-        "and don't recommend fence type/height/material for the perimeter line (out of "
-        "scope). Everything else in Subdivision Fences (pond/water exclusion, tree crop/ "
-        "windbreak exclusion, subdivision/rotational fencing) has NO computed geometry "
-        "backing it — reason about those narratively only, per the system prompt's step 7 "
-        "guidance."
-    )
-    return "\n".join(lines)
-
-
 def _format_imagery_summary(imagery: Optional[dict]) -> str:
     if not imagery:
         return (
@@ -634,9 +593,10 @@ def generate_scale_of_permanence_report(
     water_candidate_zones_geojson: Optional[dict] = None,
     solar_candidate_zones_geojson: Optional[dict] = None,
     road_network: Optional[dict] = None,
-    fencing_geojson: Optional[dict] = None,
     keypoints: Optional[list[dict]] = None,
     irradiance: Optional[dict] = None,
+    parcel_acres: Optional[float] = None,
+    production_areas_geojson: Optional[dict] = None,
 ) -> str:
     """
     Given the outputs of the data-fetching modules, generates a narrative
@@ -648,20 +608,16 @@ def generate_scale_of_permanence_report(
     (road_corridors.build_road_network()'s own full network dict --
     road_corridor_result["road_network"], NOT road_corridor_result
     ["zones_geojson"] -- see _format_road_corridor_summary()'s own
-    docstring for why the raw network dict is what this needs), and
-    fencing_geojson (the combined "exclusion_fencing" + "perimeter_fencing"
-    layers from fencing.py) are all optional so existing callers built
-    before those layers existed don't break — but including them produces
+    docstring for why the raw network dict is what this needs) are all
+    optional so existing callers built before those layers existed don't
+    break — but including them produces
     a meaningfully better report: climate is literally the first item in
     the Scale of Permanence framework, imagery gives Claude a current
     land-cover cross-check against the soil data, the water candidate
     zones give the WATER SUPPLY section a DEM-grounded answer to "where"
     instead of reasoning from the coarse elevation grid alone, the road
-    network does the same for FARM ROADS, the solar candidate zones do
-    the same for PERMANENT BUILDINGS' solar siting discussion, and the
-    fencing geometry does the same for SUBDIVISION FENCES' stream-
-    exclusion/perimeter content specifically (everything else in that
-    section stays narrative-only — see fencing.py's module docstring).
+    network does the same for FARM ROADS, and the solar candidate zones do
+    the same for PERMANENT BUILDINGS' solar siting discussion.
 
     keypoints (keypoint_detection.detect_keypoints()'s per-valley list) is
     carried through and STORED here, ready for the report, but deliberately
@@ -687,6 +643,19 @@ def generate_scale_of_permanence_report(
     narration now would be inventing it. Passing irradiance here changes
     nothing about the generated report today -- it is a forward-compatible
     seam, the same additive-override discipline keypoints already
+    established.
+
+    parcel_acres (pipeline_context.PipelineContext.parcel_acres --
+    production_area_ceiling.py's own boundary_polygon_utm.area /
+    SQUARE_METERS_PER_ACRE) and production_areas_geojson (the
+    "production_area_candidate" FeatureCollection for the ceiling-trimmed
+    scored patches the map actually draws) are carried through and STORED
+    here, ready for the report, but deliberately NOT yet injected into the
+    LLM prompt: the Scale of Permanence narrative rewrite that will reason
+    from them is a separate branch, so wiring them into data_summary now
+    would be inventing narration the reviewer hasn't decided. Passing them
+    here changes nothing about the generated report today -- the same
+    forward-compatible seam discipline keypoints and irradiance already
     established.
     """
     api_key = os.environ.get("ANTHROPIC_API_KEY")
@@ -720,11 +689,7 @@ ROAD NETWORK (coverage-greedy cost routing from the real access point, DEM-deriv
 {_format_road_corridor_summary(road_network)}
 
 SOLAR INFRASTRUCTURE CANDIDATE ZONES (ranked, DEM-derived):
-{_format_solar_candidate_zones_summary(solar_candidate_zones_geojson)}
-
-FENCING (stream exclusion + perimeter — real computed geometry; everything else in
-Subdivision Fences is narrative-only, see step 7 guidance above):
-{_format_fencing_summary(fencing_geojson)}"""
+{_format_solar_candidate_zones_summary(solar_candidate_zones_geojson)}"""
 
     message = client.messages.create(
         model=MODEL,
