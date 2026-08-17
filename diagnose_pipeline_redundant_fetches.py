@@ -266,6 +266,10 @@ _FAKE_OPTIMIZED_RESULT = {
     "scored_patches": [_FAKE_PATCH],
     "total_selected_acreage": 1.23,
     "percent_of_parcel": 5.0,
+    # Surfaced by identify_optimized_production_areas() and now read by
+    # build_pipeline_context() (PipelineContext.parcel_acres); 24.6 keeps this
+    # fixture internally consistent (1.23 / 24.6 * 100 == 5.0).
+    "parcel_acres": 24.6,
     "production_ceiling_target_met": True,
     "total_cells_removed": 0,
 }
@@ -275,6 +279,10 @@ _FAKE_SELECTED_WATER_ZONE = {
     "type": "Feature",
     "id": "water-zone-selected",
     "render_fill_polygon_utm": box(0, 0, 10, 10),
+    # Read by build_pipeline_context()'s _attach_keypoint_feature_relationships()
+    # (keypoint<->water-zone elevation differential); the real selected_water_zone
+    # carries it now.
+    "representative_elevation_m": 995.0,
 }
 _FAKE_SELECTED_ROAD_CORRIDOR = {
     "type": "Feature",

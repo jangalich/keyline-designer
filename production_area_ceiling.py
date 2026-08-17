@@ -294,6 +294,7 @@ def identify_optimized_production_areas(
             'scored_patches': list[dict],
             'total_selected_acreage': float,
             'percent_of_parcel': float,        # of the FULL parcel
+            'parcel_acres': float,             # total parcel area (from STEP 2's optimizer)
             'production_ceiling_target_met': bool,
             'total_cells_removed': int,        # STEP 2's global trim only
         }
@@ -352,6 +353,7 @@ def identify_optimized_production_areas(
         "scored_patches": scored,
         "total_selected_acreage": total_selected_acreage,
         "percent_of_parcel": percent_of_parcel,
+        "parcel_acres": parcel_acres,
         "production_ceiling_target_met": optimized["production_ceiling_target_met"],
         "total_cells_removed": optimized["cells_removed"],
     }

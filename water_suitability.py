@@ -994,6 +994,7 @@ def water_suitability_to_geojson(scored_zones: list[dict]) -> dict:
                     "stream_data_available": zone["stream_data_available"],
                     "gradient_steepness_pct": zone["gradient_steepness_pct"],
                     "valley_contributing_area_acres": zone["valley_contributing_area_acres"],
+                    "representative_elevation_m": zone["representative_elevation_m"],
                 },
             )
         )

@@ -227,6 +227,10 @@ fake_optimized_result = {
     "scored_patches": [fake_patch],
     "total_selected_acreage": 1.23,
     "percent_of_parcel": 5.0,
+    # parcel_acres is now surfaced by identify_optimized_production_areas()
+    # and consumed by build_pipeline_context() (PipelineContext.parcel_acres);
+    # 24.6 keeps this fixture internally consistent (1.23 / 24.6 * 100 == 5.0).
+    "parcel_acres": 24.6,
     "production_ceiling_target_met": True,
     "total_cells_removed": 0,
 }
@@ -243,6 +247,11 @@ fake_selected_water_zone = {
     # canned mock) -- a bare placeholder Feature dict without this key would
     # KeyError there.
     "render_fill_polygon_utm": box(0, 0, 10, 10),
+    # representative_elevation_m is now dereferenced by build_pipeline_context()'s
+    # own _attach_keypoint_feature_relationships() (the keypoint<->water-zone
+    # elevation differential) -- the real selected_water_zone carries it now
+    # (water_candidate_zones.py / water_suitability.py), so this fixture must too.
+    "representative_elevation_m": 995.0,
 }
 fake_selected_road_corridor = {
     "type": "Feature",
@@ -744,7 +753,16 @@ assert abs(ctx.boundary_polygon_utm.area - expected_area) < 1.0, "boundary_polyg
 # re-proves the same threading with the OPPOSITE value, so a hardcoded-False regression would fail here.
 
 fake_fallback_hydric_union = box(20, 20, 30, 30)
-fake_selected_water_zone_fallback_case = {"type": "Feature", "id": "water-zone-fallback-case"}
+fake_selected_water_zone_fallback_case = {
+    "type": "Feature",
+    "id": "water-zone-fallback-case",
+    # build_pipeline_context()'s own _attach_keypoint_feature_relationships()
+    # dereferences these on any non-None selected_water_zone (keypoint<->water
+    # distance + elevation differential); the real selected_water_zone carries
+    # both now.
+    "render_fill_polygon_utm": box(0, 0, 10, 10),
+    "representative_elevation_m": 995.0,
+}
 fake_selected_road_corridor_fallback_case = {"type": "Feature", "id": "road-corridor-fallback-case"}
 fake_water_zones_result_fallback_case = {"zones_geojson": {"type": "FeatureCollection", "features": []}}
 fake_road_corridor_result_fallback_case = {

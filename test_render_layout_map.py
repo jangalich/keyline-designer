@@ -1361,6 +1361,7 @@ _fake_context_for_canopy_case = pc.PipelineContext(
     valleys=[],
     keypoints=[],
     production_areas=[],
+    parcel_acres=0.0,
     existing_roads=None,
     soil_exclusion_unions={"hydric_floodplain_union": None, "hydric_floodplain_is_fallback": False, "erosion_prone_union": None},
     water_zones=[],

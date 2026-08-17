@@ -337,6 +337,7 @@ class PipelineContext:
     valleys: list[dict]
     keypoints: list[dict]
     production_areas: list[dict]
+    parcel_acres: float
     existing_roads: BaseGeometry | None
     soil_exclusion_unions: dict[str, BaseGeometry | None]
     water_zones: list[dict]
@@ -365,6 +366,77 @@ def _boundary_polygon_utm(boundary_coordinates: list[tuple[float, float]], dem: 
         [pt[1] for pt in boundary_coordinates],
     )
     return Polygon(zip(boundary_xs, boundary_ys))
+
+
+def _attach_keypoint_feature_relationships(
+    keypoints: list[dict],
+    production_areas: list[dict],
+    selected_water_zone: dict | None,
+) -> None:
+    """Layer-2 relationship computation, in place on each keypoint dict.
+
+    keypoints, production_areas, and selected_water_zone are all already in
+    memory in build_pipeline_context() (all computed above from the same
+    DEM/boundary/valleys pass), so this needs NO new fetch and NO DEM
+    re-derivation. Each keypoint gains a 'feature_relationships' key --
+    always present, never None -- with two sub-dicts:
+
+      'nearest_production_area' and 'water_zone', each carrying a 'status':
+        - "computed": also carries 'distance_m' (keypoint point to that
+          feature's DRAWN geometry) and 'elevation_differential_m' (the
+          keypoint's elevation_m minus the feature's representative
+          elevation, SIGNED so positive = keypoint sits ABOVE the feature).
+        - "no_feature": no production areas / no selected water zone exists
+          on this property -- no distance or differential keys.
+
+    Distances use render_fill_polygon_utm for BOTH features -- the same
+    geometry render_layout_map.py actually draws (production contour texture
+    is clipped to it; the water ripple texture is drawn from it), NOT the
+    scoring/eligibility geometry_wgs84 -- matching the render_fill_area_acres
+    discipline production_areas_to_geojson() now uses. All geometry here is
+    UTM meters (keypoint 'point_utm' and each feature's
+    render_fill_polygon_utm share the DEM's own CRS), so shapely .distance()
+    returns meters directly.
+    """
+    for kp in keypoints:
+        kp_point = kp["point_utm"]
+        kp_elev = kp["elevation_m"]
+
+        if not production_areas:
+            production_rel = {"status": "no_feature"}
+        else:
+            distance, nearest = min(
+                (
+                    (kp_point.distance(patch["render_fill_polygon_utm"]), patch)
+                    for patch in production_areas
+                ),
+                key=lambda pair: pair[0],
+            )
+            production_rel = {
+                "status": "computed",
+                "distance_m": round(distance, 2),
+                "elevation_differential_m": round(
+                    kp_elev - nearest["representative_elevation_m"], 2
+                ),
+            }
+
+        if selected_water_zone is None:
+            water_rel = {"status": "no_feature"}
+        else:
+            water_rel = {
+                "status": "computed",
+                "distance_m": round(
+                    kp_point.distance(selected_water_zone["render_fill_polygon_utm"]), 2
+                ),
+                "elevation_differential_m": round(
+                    kp_elev - selected_water_zone["representative_elevation_m"], 2
+                ),
+            }
+
+        kp["feature_relationships"] = {
+            "nearest_production_area": production_rel,
+            "water_zone": water_rel,
+        }
 
 
 def build_pipeline_context(
@@ -456,6 +528,12 @@ def build_pipeline_context(
         boundary_coordinates, dem=dem, canopy_height=canopy_height
     )
     production_areas = optimized_production["scored_patches"]
+    # Total parcel acreage the ceiling optimizer already computed
+    # (boundary_polygon_utm.area / SQUARE_METERS_PER_ACRE, production_area_
+    # ceiling.py) -- surfaced here so downstream consumers (the report)
+    # get it without recomputing. Previously discarded with the rest of
+    # the ceiling optimizer's return.
+    parcel_acres = optimized_production["parcel_acres"]
 
     existing_roads = farm_roads_data.get_road_exclusion_union_utm(boundary_coordinates, dem, farm_roads=farm_roads)
 
@@ -494,6 +572,13 @@ def build_pipeline_context(
         production_areas=production_areas,
         canopy_height=canopy_height,
     )
+
+    # Layer 2: keypoints, production_areas, and selected_water_zone are now
+    # all co-resident in memory (computed above from one DEM/boundary/valleys
+    # pass). Relate each keypoint to the nearest production area and to the
+    # selected water zone here, in place, with no new fetch. See the helper's
+    # own docstring for the geometry/sign conventions.
+    _attach_keypoint_feature_relationships(keypoints, production_areas, selected_water_zone)
 
     road_corridor_result = road_corridors.identify_road_corridor_candidates(
         boundary_coordinates,
@@ -553,6 +638,7 @@ def build_pipeline_context(
         valleys=valleys,
         keypoints=keypoints,
         production_areas=production_areas,
+        parcel_acres=parcel_acres,
         existing_roads=existing_roads,
         soil_exclusion_unions=soil_exclusion_unions,
         water_zones=water_zones,

@@ -99,11 +99,16 @@ razor-thin sliver gaps in the unary_union'd footprint instead of a fully
 dissolved polygon. polygon_utm/geometry_wgs84 CAN legitimately come back
 as a MultiPolygon: two cells whose real ground squares only touch at a
 shared corner don't merge into one solid Polygon under unary_union.
-render_layout_map.py draws production zones directly from geometry_wgs84
-(clipped contour-line texture, via contour_lines.py) -- there is no
-separate display/smoothed geometry field; see that module's own docstring
-for why filled-shape rendering (and the cosmetic hull-smoothing it used
-to need) was replaced.
+render_layout_map.py draws production zones as clipped contour-line
+texture (via contour_lines.py), clipped NOT to geometry_wgs84 but to a
+separate display geometry, render_fill_polygon_utm (cluster_and_gate()'s
+bounded morphological opening of the cell mask; see PART 1 there). That
+field is genuinely consumed downstream, not display-inert: render_layout_
+map.py clips against it, fencing.py derives the developed-footprint fence
+loops from it, and production_areas_to_geojson() reports its acreage as
+render_fill_area_acres. See render_layout_map.py's own docstring for why
+filled-shape rendering (and the cosmetic hull-smoothing it used to need)
+was replaced by contour texture.
 
 TRUE HOLES vs WAISTS: cluster_and_gate() also carries each cluster's own
 'hole_footprints' (list[Polygon], [] if none) -- real, excluded ground
@@ -1322,6 +1327,15 @@ def production_areas_to_geojson(patches: list[dict]) -> dict:
             extra_properties={
                 "area_acres": p["area_acres"],
                 "representative_elevation_m": round(p["representative_elevation_m"], 1),
+                # Acreage of the geometry the MAP actually draws (the bounded
+                # morphological opening render_layout_map.py clips production
+                # contour texture to), NOT the full cell-union footprint
+                # area_acres reports. render_fill_polygon_utm is always a
+                # subset of polygon_utm, so this is <= area_acres for every
+                # patch (see cluster_and_gate()'s containment assertion).
+                "render_fill_area_acres": round(
+                    p["render_fill_polygon_utm"].area / SQUARE_METERS_PER_ACRE, 2
+                ),
             },
         )
         for p in patches

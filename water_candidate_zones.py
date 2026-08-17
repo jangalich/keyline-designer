@@ -917,6 +917,7 @@ def find_candidate_zones(
         "primary_production_area_relationship": relationships[0],
         "contributing_area_cells": round(winner["contributing_area_cells"], 2),
         "slope_pct": round(winner["slope_pct"], 2),
+        "representative_elevation_m": winner["representative_elevation_m"],
     }
     return [zone]
 

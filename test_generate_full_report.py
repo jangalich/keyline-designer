@@ -126,6 +126,7 @@ def _synthetic_context(water_zones: list[dict]) -> PipelineContext:
             {"render_fill_polygon_utm": Polygon([(1, 1), (2, 1), (2, 2), (1, 2)])},
             {"render_fill_polygon_utm": None},
         ],
+        parcel_acres=2.47,
         existing_roads=None,
         soil_exclusion_unions={
             "hydric_floodplain_union": None,
