@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="200" height="200">
+  <!-- barn/silo glyph only: the inner farm icon of farm_location_pin.svg,
+       lifted out of the teardrop pin head so it can stand alone as the
+       "Permanent Building Site" legend symbol. Same path geometry as the
+       pin's own g transform="translate(8.5,4.7) scale(0.4667)" group, but
+       filled in the structure-site red (#D64545) rather than the pin's
+       white-on-red, so it reads on a transparent legend handle box. -->
+  <g transform="translate(8.5,4.7) scale(0.4667)" fill="#D64545">
+    <path d="m8 6-3-2-3 2-1 2v4h2v-2h4v2h2v-4zm-2 2h-2v-2h2zm8 4h-3v-9.5c0-.39782.158-.77936.4393-1.06066s.6629-.43934 1.0607-.43934.7794.15804 1.0607.43934.4393.66284.4393 1.06066z"/>
+  </g>
+</svg>

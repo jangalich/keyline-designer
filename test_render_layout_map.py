@@ -58,6 +58,27 @@ RESOLUTION = (5.0, 5.0)
 RISE_PER_ROW = 0.4  # meters -- a real, modest gradient so contour lines actually exist
 
 
+def _capture_legend_labels(layers: dict, boundary_coordinates: list) -> list:
+    """Runs a full render_layout_map() pass and returns the ordered list of
+    legend labels the icon legend was actually built with -- read off the real
+    matplotlib Legend the render creates, not inferred. Empty list when the map
+    drew nothing (no legend, no frame). Replaces the old ax.text-capture helpers:
+    the legend is now a real ax.legend(), so we intercept Axes.legend(), delegate
+    to the real implementation, and read the resulting Legend's own text labels."""
+    captured: list = []
+    _orig_legend = rlm.plt.Axes.legend
+
+    def _recording_legend(self, *args, **kwargs):
+        legend = _orig_legend(self, *args, **kwargs)
+        captured[:] = [text.get_text() for text in legend.get_texts()]
+        return legend
+
+    with mock_patch.object(rlm.plt.Axes, "legend", _recording_legend):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            rlm.render_layout_map(boundary_coordinates, os.path.join(tmpdir, "layout_map.png"), layers=layers)
+    return captured
+
+
 def _plain_fencing_result(boundary_coordinates: list, dem: dict) -> dict:
     """
     A network-free stand-in for fencing.identify_boundary_fencing(), used only to
@@ -320,20 +341,13 @@ property_boundary = [
 for rank, patch in enumerate(sorted(dumbbell_scored, key=lambda p: -p["suitability_score"]), start=1):
     patch["rank"] = rank
 
-# parcel_acres derived to match the old hardcoded percent_of_parcel=42.0
-# fixture value exactly (total_selected_acreage / (42.0 / 100.0)) -- same
-# relationship the old production_result-shaped fixture encoded, just
-# reached via the new (scored_patches, parcel_acres) signature _production_
-# zone_legend_stats() now takes directly (see render_layout_map.py's own
-# fetch_layout_layers() docstring for why this stopped needing a second
-# identify_optimized_production_areas() call in production).
-_dumbbell_total_selected_acreage = round(sum(p["area_acres"] for p in dumbbell_scored), 2)
-_dumbbell_parcel_acres = _dumbbell_total_selected_acreage / (42.0 / 100.0)
-
+# No per-feature legend-stats key anymore: the icon legend carries no
+# per-feature data, so render_layout_map() neither reads nor is passed any
+# display-stat derivation (see render_layout_map.py's own LEGEND docstring
+# section and fetch_layout_layers()'s docstring).
 synthetic_layers = {
     "dem": dumbbell_dem,
     "production_areas": dumbbell_scored,
-    "production_zone_legend_stats": rlm._production_zone_legend_stats(dumbbell_scored, _dumbbell_parcel_acres),
     "water_zone": None,
     "road_corridor": [],
     "tree_zone_result": None,
@@ -350,10 +364,19 @@ with tempfile.TemporaryDirectory() as tmpdir:
     assert os.path.exists(output_path)
     assert os.path.getsize(output_path) > 0, "render_layout_map() must produce a real, non-empty PNG"
 
+# The two split production zones collapse into ONE "Production Areas" legend
+# entry (no per-zone identity, no numbering); the plain boundary fence adds the
+# single "Fencing" entry. KSOP order puts production before fencing.
+_split_legend_labels = _capture_legend_labels(synthetic_layers, property_boundary)
+assert _split_legend_labels == [rlm.LEGEND_LABEL_PRODUCTION, rlm.LEGEND_LABEL_FENCING], (
+    f"two production zones + a boundary fence must yield exactly one Production Areas entry and one "
+    f"Fencing entry, in KSOP order -- got {_split_legend_labels}"
+)
+
 print(
     "Full pipeline: render_layout_map() runs offline end-to-end (basemap fetch degrades gracefully) with a "
-    "split production_areas, drawing clipped contour-line texture for each zone and producing a real, "
-    "non-empty PNG."
+    "split production_areas, drawing clipped contour-line texture for each zone, collapsing both zones into a "
+    "single 'Production Areas' legend entry, and producing a real, non-empty PNG."
 )
 
 
@@ -644,19 +667,17 @@ assert _wz_render_fill.area < _wz_polygon.area, (
     "footprint, so the render geometry genuinely differs from the real footprint"
 )
 
-recorded_markers = []
-_original_draw_numbered_marker = rlm._draw_numbered_marker
-rlm._draw_numbered_marker = lambda ax, point, number: recorded_markers.append((point, number)) or _original_draw_numbered_marker(ax, point, number)
-
-# Also record every plot_polygon()/plot_line() call render_layout_map() makes, so the ripple lines' own
-# color/alpha/zorder/linewidth (and the ABSENCE of any water-zone fill polygon) can be confirmed directly
-# against what's actually drawn, not just inferred from the module's constants.
+# Record every plot_polygon()/plot_line() call (GEOMETRY + kwargs) render_layout_map() makes, so the ripple
+# lines' own color/alpha/zorder/linewidth (and the ABSENCE of any water-zone fill polygon) can be confirmed
+# directly against what's drawn -- and, with no numbered marker to carry it anymore, so the "drawn geometry
+# is the render opening, not geometry_wgs84" invariant can be ported onto the ripple LINE geometry itself
+# (the marker used to be that invariant's vehicle).
 recorded_polygon_calls = []
 _original_plot_polygon = rlm.plot_polygon
 
 
 def _recording_plot_polygon(geometry, **kwargs):
-    recorded_polygon_calls.append(kwargs)
+    recorded_polygon_calls.append((geometry, kwargs))
     return _original_plot_polygon(geometry, **kwargs)
 
 
@@ -665,7 +686,7 @@ _original_plot_line = rlm.plot_line
 
 
 def _recording_plot_line(geometry, **kwargs):
-    recorded_line_calls.append(kwargs)
+    recorded_line_calls.append((geometry, kwargs))
     return _original_plot_line(geometry, **kwargs)
 
 
@@ -675,7 +696,6 @@ rlm.plot_line = _recording_plot_line
 wz_synthetic_layers = {
     "dem": water_zone_test_dem,
     "production_areas": [],
-    "production_zone_legend_stats": [],
     "water_zone": water_zone_fixture,
     "road_corridor": [],
     "tree_zone_result": None,
@@ -692,7 +712,6 @@ try:
         assert wz_result_path == wz_output_path
         assert os.path.getsize(wz_output_path) > 0, "render_layout_map() must produce a real, non-empty PNG"
 finally:
-    rlm._draw_numbered_marker = _original_draw_numbered_marker
     rlm.plot_polygon = _original_plot_polygon
     rlm.plot_line = _original_plot_line
 
@@ -700,27 +719,27 @@ finally:
 # plot_polygon() calls (no facecolor == WATER_ZONE_COLOR), and one or more ripple LINE calls, every one
 # using WATER_ZONE_COLOR, the ripple alpha/linewidth, and the water zone's zorder=41 (above production
 # zones' zorder=40).
-water_fill_calls = [kw for kw in recorded_polygon_calls if kw.get("facecolor") == WATER_ZONE_COLOR]
+water_fill_calls = [kw for _geom, kw in recorded_polygon_calls if kw.get("facecolor") == WATER_ZONE_COLOR]
 assert len(water_fill_calls) == 0, (
     f"the water zone must NOT be drawn as a filled polygon anymore (ripple-line texture replaced the fill) "
     f"-- got {len(water_fill_calls)} plot_polygon() call(s) with facecolor == WATER_ZONE_COLOR"
 )
-water_ripple_calls = [kw for kw in recorded_line_calls if kw.get("color") == WATER_ZONE_COLOR]
+water_ripple_calls = [(geom, kw) for geom, kw in recorded_line_calls if kw.get("color") == WATER_ZONE_COLOR]
 assert len(water_ripple_calls) >= 1, (
     f"expected at least one water-zone ripple plot_line() call (color == WATER_ZONE_COLOR), got "
     f"{len(water_ripple_calls)}"
 )
-assert {kw["zorder"] for kw in water_ripple_calls} == {41}, (
+assert {kw["zorder"] for _geom, kw in water_ripple_calls} == {41}, (
     f"every water-zone ripple line must use zorder=41 (above production zones' zorder=40), got "
-    f"{sorted({kw['zorder'] for kw in water_ripple_calls})}"
+    f"{sorted({kw['zorder'] for _geom, kw in water_ripple_calls})}"
 )
-assert {kw["alpha"] for kw in water_ripple_calls} == {WATER_RIPPLE_ALPHA}, (
+assert {kw["alpha"] for _geom, kw in water_ripple_calls} == {WATER_RIPPLE_ALPHA}, (
     f"every water-zone ripple line must use WATER_RIPPLE_ALPHA, got "
-    f"{sorted({kw['alpha'] for kw in water_ripple_calls})}"
+    f"{sorted({kw['alpha'] for _geom, kw in water_ripple_calls})}"
 )
-assert {kw["linewidth"] for kw in water_ripple_calls} == {WATER_RIPPLE_LINEWIDTH}, (
+assert {kw["linewidth"] for _geom, kw in water_ripple_calls} == {WATER_RIPPLE_LINEWIDTH}, (
     f"every water-zone ripple line must use WATER_RIPPLE_LINEWIDTH, got "
-    f"{sorted({kw['linewidth'] for kw in water_ripple_calls})}"
+    f"{sorted({kw['linewidth'] for _geom, kw in water_ripple_calls})}"
 )
 
 print(
@@ -729,29 +748,44 @@ print(
     "calls for the water zone."
 )
 
-assert len(recorded_markers) == 1, f"expected exactly 1 marker drawn (the water zone), got {len(recorded_markers)}"
-marker_point_mercator, marker_number = recorded_markers[0]
-
-# The marker must land on the RENDER OPENING geometry actually drawn (reprojected to Mercator), not the
-# real, blocky geometry_wgs84 -- confirmed by reprojecting the whole render_fill_polygon_utm the same way
-# render_layout_map() does and taking ITS OWN representative_point() in Mercator (representative_point() is
-# not guaranteed to correspond to the same point across a reprojection of a single point vs. the whole
-# polygon, so this reproduces render_layout_map()'s own exact computation rather than a point-then-reproject
-# shortcut).
+# Ported invariant (previously carried by the numbered marker's placement): the geometry actually DRAWN for
+# the water zone is clipped to render_fill_polygon_utm (the render opening), NOT to the real, blocky
+# geometry_wgs84. The old assertion proved the marker sat on the render opening's own representative_point();
+# with no marker anymore, we prove the SAME thing directly on the drawn ripple LINES -- every ripple line
+# must lie within the reprojected render_fill_polygon_utm.
 expected_render_fill_mercator = rlm._reproject_utm_geometry_to_mercator(
     water_zone_fixture["render_fill_polygon_utm"], water_zone_test_dem["crs"]
 )
-expected_marker_point = expected_render_fill_mercator.representative_point()
-assert marker_point_mercator.distance(expected_marker_point) < 1e-6, (
-    "the water zone's numbered marker must be placed at render_fill_polygon_utm's own representative_point(), "
-    "not geometry_wgs84's -- got a marker point that doesn't match the render opening's reprojected "
-    "representative point"
+expected_footprint_mercator = rlm._reproject_geometry_to_mercator(water_zone_fixture["geometry_wgs84"])
+# The render opening is strictly smaller than the reprojected geometry_wgs84 footprint on this L-shaped
+# fixture, so ripples clipped to geometry_wgs84 instead would escape render_fill -- this makes the
+# containment check below a real discriminator, not a tautology.
+assert expected_render_fill_mercator.area < expected_footprint_mercator.area, (
+    "test setup: the reprojected render opening must be strictly smaller than the reprojected geometry_wgs84 "
+    "footprint, otherwise the containment check below wouldn't distinguish render_fill from geometry_wgs84"
 )
+_render_fill_padded = expected_render_fill_mercator.buffer(1e-6)
+for geom, _kw in water_ripple_calls:
+    assert _render_fill_padded.contains(geom), (
+        "every water-zone ripple line must lie within render_fill_polygon_utm (the render opening actually "
+        "drawn), not geometry_wgs84 -- a ripple escaping the opening would mean the clip used the wrong "
+        "geometry"
+    )
+
+# The water zone contributes exactly one "Water System Survey Area" legend entry (before the boundary
+# fence's single "Fencing" entry, KSOP order); no numbering, no data.
+_wz_legend_labels = _capture_legend_labels(wz_synthetic_layers, property_boundary)
+assert _wz_legend_labels == [rlm.LEGEND_LABEL_WATER, rlm.LEGEND_LABEL_FENCING], (
+    f"a water zone + boundary fence must yield exactly [Water System Survey Area, Fencing] in KSOP order, "
+    f"got {_wz_legend_labels}"
+)
+
 print(
     "Full pipeline with a synthetic water zone: render_layout_map() runs offline end-to-end, draws the water "
     "zone as ripple-line texture clipped to render_fill_polygon_utm (the bounded render opening, not the real "
-    "blocky footprint), places the numbered marker on that same render opening, and completes successfully "
-    "even though the render opening deliberately overlaps a production area's own render_fill_polygon_utm."
+    "blocky geometry_wgs84 -- proven directly on the drawn ripple lines now that no marker carries it), emits "
+    "a single 'Water System Survey Area' legend entry, and completes successfully even though the render "
+    "opening deliberately overlaps a production area's own render_fill_polygon_utm."
 )
 
 
@@ -910,12 +944,10 @@ def _recording_plot_line_for_road(geometry, **kwargs):
 
 
 rlm.plot_line = _recording_plot_line_for_road
-_markers_before_road_section = len(recorded_markers)
 
 road_synthetic_layers = {
     "dem": water_zone_test_dem,
     "production_areas": [],
-    "production_zone_legend_stats": [],
     "water_zone": None,
     "road_corridor": road_corridor_fixture,
     "tree_zone_result": None,
@@ -987,11 +1019,14 @@ assert len(trunk_outer_geom.coords) < raw_mercator_coords_count, (
     f"off road_corridor['geometry']"
 )
 
-# No branch gets its own numbered map marker (branch_role/branch_index are for the narrative report,
-# not a map label -- see this module's own ROAD CORRIDOR STYLE docstring section).
-assert len(recorded_markers) == _markers_before_road_section, (
-    "road corridor branches must NOT get numbered markers on the map -- expected zero new "
-    "_draw_numbered_marker() calls from this section"
+# Every branch, trunk and spur alike, collapses into ONE "Suggested Road Corridor" legend entry -- no
+# per-branch label and no numbered map marker (branch_role/branch_index are for the narrative report, not
+# a map label -- see this module's own ROAD CORRIDOR STYLE docstring section). The plain boundary fence
+# adds the single "Fencing" entry; KSOP order puts road before fencing.
+_road_legend_labels = _capture_legend_labels(road_synthetic_layers, property_boundary)
+assert _road_legend_labels == [rlm.LEGEND_LABEL_ROAD, rlm.LEGEND_LABEL_FENCING], (
+    f"two road branches + a boundary fence must yield exactly one Suggested Road Corridor entry and one "
+    f"Fencing entry (branches collapse to one), got {_road_legend_labels}"
 )
 
 assert road_corridor_fixture == road_corridor_fixture_before, (
@@ -1057,19 +1092,15 @@ tree_patch_2 = _tree_patch_fixture(
 )
 tree_zone_result_fixture = {"patches": [tree_patch_1, tree_patch_2]}
 
-recorded_tree_markers = []
-_original_draw_numbered_marker_for_trees = rlm._draw_numbered_marker
-rlm._draw_numbered_marker = (
-    lambda ax, point, number: recorded_tree_markers.append((point, number))
-    or _original_draw_numbered_marker_for_trees(ax, point, number)
-)
-
+# Record the GEOMETRY (plus kwargs) of every plot_polygon() call, so the "drawn geometry is render_fill_
+# polygon_utm, not geometry_wgs84" invariant can be ported directly onto the hatch polygons -- with no
+# numbered marker anymore, the drawn polygon itself is the vehicle for that invariant.
 recorded_tree_polygon_calls = []
 _original_plot_polygon_for_trees = rlm.plot_polygon
 
 
 def _recording_plot_polygon_for_trees(geometry, **kwargs):
-    recorded_tree_polygon_calls.append(kwargs)
+    recorded_tree_polygon_calls.append((geometry, kwargs))
     return _original_plot_polygon_for_trees(geometry, **kwargs)
 
 
@@ -1078,7 +1109,6 @@ rlm.plot_polygon = _recording_plot_polygon_for_trees
 tree_synthetic_layers = {
     "dem": water_zone_test_dem,
     "production_areas": [],
-    "production_zone_legend_stats": [],
     "water_zone": None,
     "road_corridor": [],
     "tree_zone_result": tree_zone_result_fixture,
@@ -1095,43 +1125,64 @@ try:
         assert tree_result_path == tree_output_path
         assert os.path.getsize(tree_output_path) > 0, "render_layout_map() must produce a real, non-empty PNG"
 finally:
-    rlm._draw_numbered_marker = _original_draw_numbered_marker_for_trees
     rlm.plot_polygon = _original_plot_polygon_for_trees
 
-tree_fill_calls = [kw for kw in recorded_tree_polygon_calls if kw.get("edgecolor") == TREE_ZONE_COLOR]
+tree_fill_calls = [(geom, kw) for geom, kw in recorded_tree_polygon_calls if kw.get("edgecolor") == TREE_ZONE_COLOR]
 assert len(tree_fill_calls) == 2, f"expected exactly 2 tree-zone hatch plot_polygon() calls (one per patch), got {len(tree_fill_calls)}"
-for kw in tree_fill_calls:
+for _geom, kw in tree_fill_calls:
     assert kw["facecolor"] == "none", f"tree-zone patches must render with NO fill, got facecolor={kw['facecolor']!r}"
     assert kw["linewidth"] == 0, f"tree-zone patches must render with NO perimeter stroke, got linewidth={kw['linewidth']}"
     assert kw["alpha"] == TREE_ZONE_HATCH_ALPHA, f"every tree-zone hatch must use TREE_ZONE_HATCH_ALPHA, got {kw['alpha']}"
     assert kw["hatch"] == TREE_ZONE_HATCH, f"every tree-zone hatch must use the TREE_ZONE_HATCH pattern, got {kw['hatch']}"
     assert kw["zorder"] == 42.8, f"tree-zone hatch must render between the road corridor (42.5) and structure site (43), got {kw['zorder']}"
 
-assert len(recorded_tree_markers) == 2, f"expected exactly 2 markers drawn (one per tree-zone candidate), got {len(recorded_tree_markers)}"
-for (marker_point_mercator, _marker_number), patch in zip(recorded_tree_markers, [tree_patch_1, tree_patch_2]):
+# Ported invariant (previously carried by each tree candidate's numbered marker placement): each hatch
+# polygon actually DRAWN is the reprojected render_fill_polygon_utm (the display hull), NOT the real,
+# potentially-notched geometry_wgs84. Both fixtures here have single-Polygon hulls, so there's exactly one
+# drawn polygon per patch, in patch order. For the notched patch its hull is strictly larger than its real
+# footprint, so a drawn geometry matching geometry_wgs84 instead would be visibly smaller -- a real
+# discriminator, not a tautology.
+tree_drawn_geoms = [geom for geom, _kw in tree_fill_calls]
+for drawn_geom, patch in zip(tree_drawn_geoms, [tree_patch_1, tree_patch_2]):
     expected_hull_mercator = rlm._reproject_utm_geometry_to_mercator(
         patch["render_fill_polygon_utm"], water_zone_test_dem["crs"]
     )
-    expected_point = expected_hull_mercator.representative_point()
-    assert marker_point_mercator.distance(expected_point) < 1e-6, (
-        "each tree-zone candidate's numbered marker must be placed at render_fill_polygon_utm's own "
-        "representative_point(), reprojected to Mercator -- not geometry_wgs84's"
+    assert drawn_geom.symmetric_difference(expected_hull_mercator).area < 1e-6, (
+        "each tree-zone candidate's drawn hatch polygon must be its reprojected render_fill_polygon_utm "
+        "(the display hull), not geometry_wgs84 -- the drawn geometry did not match the render fill"
     )
 
-# tree_patch_1's own hull-fill polygon must be visibly LARGER than its real, non-convex footprint,
-# confirming the hull (not the real footprint) is what actually got drawn for the notched patch.
-tree_patch_1_fill_call = tree_fill_calls[0]
+# Discriminator: for the NOTCHED patch (tree_patch_1) the drawn geometry must NOT match the reprojected
+# geometry_wgs84 -- the hull genuinely differs from (is larger than) the real, non-convex footprint, so a
+# drawn geometry_wgs84 would be a visibly different, smaller shape. This is what makes the
+# "drawn == render_fill" checks above discriminating rather than tautological.
 assert tree_patch_1["render_fill_polygon_utm"].area > tree_patch_1["polygon_utm"].area, (
     "sanity re-check: tree_patch_1's own render_fill_polygon_utm must still be strictly larger than its "
     "real, non-convex polygon_utm"
+)
+_tree1_drawn = tree_drawn_geoms[0]
+_tree1_footprint_mercator = rlm._reproject_geometry_to_mercator(tree_patch_1["geometry_wgs84"])
+assert _tree1_drawn.symmetric_difference(_tree1_footprint_mercator).area > 1e-3, (
+    "the notched tree candidate's drawn hatch polygon must be the render_fill hull, NOT the reprojected "
+    "geometry_wgs84 footprint -- the two must be visibly different shapes (they were not)"
+)
+assert _tree1_drawn.area > _tree1_footprint_mercator.area, (
+    "the drawn hull must be strictly larger than the reprojected geometry_wgs84 footprint for the notched patch"
+)
+
+# Two tree candidates collapse into ONE "Tree Crop Areas" legend entry; the boundary fence adds the single
+# "Fencing" entry. KSOP order puts tree before fencing.
+_tree_legend_labels = _capture_legend_labels(tree_synthetic_layers, property_boundary)
+assert _tree_legend_labels == [rlm.LEGEND_LABEL_TREE, rlm.LEGEND_LABEL_FENCING], (
+    f"two tree candidates + a boundary fence must yield exactly [Tree Crop Areas, Fencing], got {_tree_legend_labels}"
 )
 
 print(
     f"Full pipeline with 2 synthetic tree-zone candidates: render_layout_map() draws each as hatch-only "
     f"(pattern={TREE_ZONE_HATCH!r}, alpha={TREE_ZONE_HATCH_ALPHA}, no fill, no perimeter stroke) at zorder=42.8 "
     f"(between the road corridor and structure site) from its own render_fill_polygon_utm (a real, notched patch's hull "
-    f"visibly larger than its real footprint), places each numbered marker on that same hull, and "
-    f"completes successfully."
+    f"visibly larger than its real footprint -- proven directly on the drawn polygon now), collapses both into a "
+    f"single 'Tree Crop Areas' legend entry, and completes successfully."
 )
 
 # =====================================================================
@@ -1631,7 +1682,6 @@ _trim_dem = {
 _trim_layers = {
     "dem": _trim_dem,
     "production_areas": [],
-    "production_zone_legend_stats": [],
     "water_zone": None,
     "road_corridor": [],
     "tree_zone_result": None,
@@ -1645,7 +1695,9 @@ _trim_layers = {
 def _render_capturing_fences(layers: dict, legend_sink: list) -> list:
     """Runs a full render_layout_map() pass, returning every (geometry, zorder) pair
     _draw_boundary_fence() was actually handed -- i.e. exactly what got DRAWN, after the
-    trim/clip -- and appending the legend text block to legend_sink."""
+    trim/clip -- and extending legend_sink with the icon legend's own label list (read
+    off the real Legend the render builds, since the legend is now ax.legend(), not
+    ax.text)."""
     captured: list = []
     real_draw = rlm._draw_boundary_fence
 
@@ -1653,10 +1705,15 @@ def _render_capturing_fences(layers: dict, legend_sink: list) -> list:
         captured.append((ring, zorder))
         return real_draw(ax, ring, zorder=zorder)
 
+    _orig_legend = rlm.plt.Axes.legend
+
+    def recording_legend(self, *args, **kwargs):
+        legend = _orig_legend(self, *args, **kwargs)
+        legend_sink.extend(text.get_text() for text in legend.get_texts())
+        return legend
+
     with mock_patch.object(rlm, "_draw_boundary_fence", recording_draw):
-        with mock_patch.object(
-            rlm.plt.Axes, "text", autospec=True, side_effect=lambda self, x, y, s, **kw: legend_sink.append(s)
-        ):
+        with mock_patch.object(rlm.plt.Axes, "legend", recording_legend):
             with tempfile.TemporaryDirectory() as tmpdir:
                 rlm.render_layout_map(
                     _trim_boundary_coordinates, os.path.join(tmpdir, "layout_map.png"), layers=layers
@@ -1743,19 +1800,15 @@ assert abs(_trim_boundary_drawn[0].length - _trim_rings["boundary"].length) < 1e
 )
 assert _trim_boundary_drawn[0].is_closed, "the boundary fence must stay a closed loop"
 
-# 6. Legend: one individual entry per zone, exactly as before -- each zone is still its own
-#    rendered feature, just with a bite taken out of it, so nothing gets merged or relabeled.
-_trim_legend_lines = [
-    line for text in _trim_legend_texts for line in text.splitlines() if "Fencing" in line
-]
-assert _trim_legend_lines == [
-    "Boundary Fencing",
-    "Water Zone Fencing",
-    "Tree Zone Fencing 1",
-    "Tree Zone Fencing 2",
-    "Tree Zone Fencing 3",
-    "Tree Zone Fencing 4",
-], _trim_legend_lines
+# 6. Legend: every fence type/zone now collapses into ONE shared "Fencing" entry -- the
+#    six per-zone labels ("Boundary Fencing"/"Water Zone Fencing"/"Tree Zone Fencing N")
+#    are gone; the mutual trim still draws each zone as its own separate rendered pieces
+#    (asserted above), but the legend no longer distinguishes them at all. This layers dict
+#    has ONLY fencing present, so the whole legend is exactly one entry.
+assert _trim_legend_texts == [rlm.LEGEND_LABEL_FENCING], (
+    f"boundary + water + four tree fences must collapse into a single 'Fencing' legend entry, "
+    f"got {_trim_legend_texts}"
+)
 
 # 7. No ordering dependency: the trim is symmetric and every zone is compared against the
 #    OTHER zones' ORIGINAL (pre-trim) rings, never against an already-trimmed result -- so
@@ -1789,14 +1842,16 @@ print(
     f"{_trim_kept_fraction('water'):.0%}), leaving a real gap between each pair's separately-drawn lines "
     "(no touching, no overlap, no merged outline); a lone non-adjacent zone still renders its full closed "
     "loop, the boundary fence is drawn untrimmed, reversing the zone order changes nothing (symmetric, no "
-    "rank), the legend keeps one individual entry per zone, and fencing_geojson is byte-for-byte unchanged."
+    "rank), every fence collapses into a single 'Fencing' legend entry, and fencing_geojson is byte-for-byte "
+    "unchanged."
 )
 
 
 # =====================================================================
-# KEYPOINT MARKERS: a plain black asterisk per keypoint, no number,
-# identical on/off parcel, one legend line total, fully decoupled from
-# the shared numbered-marker counter.
+# KEYPOINT ASTERISKS: a plain black asterisk per keypoint, identical
+# on/off parcel, exactly one collapsed "Keypoint Candidates" legend entry
+# regardless of count, and adding/removing keypoints never changes any
+# other layer's legend entry (keypoints lead the KSOP order).
 # =====================================================================
 
 _kp_dem = {
@@ -1834,7 +1889,6 @@ def _kp_layers(keypoints: list, water_zone=None) -> dict:
     return {
         "dem": _kp_dem,
         "production_areas": [],
-        "production_zone_legend_stats": [],
         "water_zone": water_zone,
         "road_corridor": [],
         "tree_zone_result": {"patches": []},
@@ -1847,104 +1901,101 @@ def _kp_layers(keypoints: list, water_zone=None) -> dict:
 
 
 _orig_axes_plot_kp = rlm.plt.Axes.plot
-_orig_draw_numbered_kp = rlm._draw_numbered_marker
+_orig_legend_kp = rlm.plt.Axes.legend
 
 
 def _capture_kp_render(layers: dict):
-    """Renders `layers` and returns (numbered_markers, asterisk_plot_calls,
-    legend_lines): numbered_markers is [(point, number), ...] from
-    _draw_numbered_marker(); asterisk_plot_calls is the kwargs of every
-    ax.plot() call drawing the (6,2,0) asterisk marker; legend_lines is the
-    single legend text block split into lines."""
-    numbered: list = []
+    """Renders `layers` and returns (asterisk_plot_calls, legend_labels):
+    asterisk_plot_calls is the kwargs of every ax.plot() call drawing the
+    (6, 2, 0) asterisk marker -- the ON-MAP keypoint symbol; legend_labels is
+    the ordered list of icon-legend labels the render actually built (read off
+    the real Legend, empty when nothing drew). The legend's own keypoint HANDLE
+    is a Line2D built via its constructor and drawn through the stock handler,
+    not via ax.plot(), so it never inflates the asterisk_plot_calls count."""
     plot_calls: list = []
-    text_calls: list = []  # (y, s) -- the legend box sits at y=0.02, the basemap note at y=0.98
-
-    def _rec_numbered(ax, point, number):
-        numbered.append((point, number))
-        return _orig_draw_numbered_kp(ax, point, number)
+    legend_labels: list = []
 
     def _rec_plot(self, *args, **kwargs):
         if kwargs.get("marker") == (6, 2, 0):
             plot_calls.append(kwargs)
         return _orig_axes_plot_kp(self, *args, **kwargs)
 
-    with mock_patch.object(rlm, "_draw_numbered_marker", _rec_numbered):
-        with mock_patch.object(rlm.plt.Axes, "plot", autospec=True, side_effect=_rec_plot):
-            with mock_patch.object(
-                rlm.plt.Axes, "text", autospec=True, side_effect=lambda self, x, y, s, **kw: text_calls.append((y, s))
-            ):
-                with tempfile.TemporaryDirectory() as tmpdir:
-                    rlm.render_layout_map(property_boundary, os.path.join(tmpdir, "m.png"), layers=layers)
-    # The legend box is drawn at y=0.02 (bottom); the basemap note at y=0.98 (top).
-    # Pick the legend by position, robust to it being one line or many.
-    legend_block = next((s for y, s in text_calls if y < 0.5), "")
-    legend_lines = legend_block.split("\n") if legend_block else []
-    return numbered, plot_calls, legend_lines
+    def _rec_legend(self, *args, **kwargs):
+        legend = _orig_legend_kp(self, *args, **kwargs)
+        legend_labels[:] = [text.get_text() for text in legend.get_texts()]
+        return legend
+
+    with mock_patch.object(rlm.plt.Axes, "plot", autospec=True, side_effect=_rec_plot):
+        with mock_patch.object(rlm.plt.Axes, "legend", _rec_legend):
+            with tempfile.TemporaryDirectory() as tmpdir:
+                rlm.render_layout_map(property_boundary, os.path.join(tmpdir, "m.png"), layers=layers)
+    return plot_calls, legend_labels
 
 
-def _kp_legend_lines(legend_lines: list) -> list:
-    return [ln for ln in legend_lines if "Candidate Keypoints" in ln]
+def _kp_legend_lines(legend_labels: list) -> list:
+    return [ln for ln in legend_labels if ln == rlm.LEGEND_LABEL_KEYPOINTS]
 
 
-# 1. Exactly one keypoint legend line for 1, 3, and 8 keypoints, identical text each time.
+# 1. Exactly one keypoint legend entry for 1, 3, and 8 keypoints, identical text each time,
+#    and one asterisk drawn per keypoint.
 _kp_legend_variants = {}
 for _n in (1, 3, 8):
-    _numbered_n, _plots_n, _legend_n = _capture_kp_render(_kp_layers(_make_keypoints(_n)))
+    _plots_n, _legend_n = _capture_kp_render(_kp_layers(_make_keypoints(_n)))
     _kp_lines_n = _kp_legend_lines(_legend_n)
-    assert len(_kp_lines_n) == 1, f"expected exactly one keypoint legend line for {_n} keypoints, got {_kp_lines_n}"
+    assert len(_kp_lines_n) == 1, f"expected exactly one keypoint legend entry for {_n} keypoints, got {_kp_lines_n}"
     assert len(_plots_n) == _n, f"expected {_n} asterisk markers drawn, got {len(_plots_n)}"
     _kp_legend_variants[_n] = _kp_lines_n[0]
-assert _kp_legend_variants[1] == _kp_legend_variants[3] == _kp_legend_variants[8] == "✳ Candidate Keypoints", (
-    f"the single keypoint legend line must be identical regardless of count/on-off mix: {_kp_legend_variants}"
+assert _kp_legend_variants[1] == _kp_legend_variants[3] == _kp_legend_variants[8] == rlm.LEGEND_LABEL_KEYPOINTS, (
+    f"the single keypoint legend entry must be identical regardless of count/on-off mix: {_kp_legend_variants}"
 )
 print(
-    f"Keypoint legend: exactly one line ('{_kp_legend_variants[8]}') for 1, 3, and 8 keypoints "
+    f"Keypoint legend: exactly one entry ('{_kp_legend_variants[8]}') for 1, 3, and 8 keypoints "
     "(mixed on/off parcel) -- identical text, one asterisk marker drawn per keypoint."
 )
 
-# 2. Empty keypoint list: no keypoint legend line, no asterisk, no exception.
-_numbered_0, _plots_0, _legend_0 = _capture_kp_render(_kp_layers([]))
-assert _kp_legend_lines(_legend_0) == [], "an empty keypoint list must emit no keypoint legend line"
+# 2. Empty keypoint list: no keypoint legend entry, no asterisk, no exception (and since this
+#    fixture has nothing else present either, an empty legend overall).
+_plots_0, _legend_0 = _capture_kp_render(_kp_layers([]))
+assert _kp_legend_lines(_legend_0) == [], "an empty keypoint list must emit no keypoint legend entry"
+assert _legend_0 == [], "a fixture with nothing drawn at all must produce an empty legend (no frame)"
 assert _plots_0 == [], "an empty keypoint list must draw no asterisk"
-print("Empty keypoint list: no legend line, no asterisk drawn, no exception.")
+print("Empty keypoint list: no legend entry, no asterisk drawn, empty overall legend, no exception.")
 
-# 3. Full decoupling from the numbered-marker counter: a water zone (numbered marker 1)
-#    plus 8 keypoints vs the same water zone plus 0 keypoints must produce IDENTICAL
-#    numbered markers (point + number) and identical non-keypoint legend lines.
+# 3. One entry per feature, and keypoints don't perturb other layers: a water zone plus 8
+#    keypoints vs the same water zone plus 0 keypoints must produce IDENTICAL non-keypoint
+#    legend entries. Keypoints lead the KSOP order, so with both present the legend is exactly
+#    [Keypoint Candidates, Water System Survey Area]; with 0 keypoints it drops to just
+#    [Water System Survey Area] -- nothing else moves.
 _wz_for_kp = dict(water_zone_fixture)
-_num_8, _plots_8, _legend_8 = _capture_kp_render(_kp_layers(_make_keypoints(8), water_zone=_wz_for_kp))
-_num_0, _plots_0b, _legend_0b = _capture_kp_render(_kp_layers([], water_zone=_wz_for_kp))
+_plots_8, _legend_8 = _capture_kp_render(_kp_layers(_make_keypoints(8), water_zone=_wz_for_kp))
+_plots_0b, _legend_0b = _capture_kp_render(_kp_layers([], water_zone=_wz_for_kp))
 
-_num_8_key = [(round(p.x, 6), round(p.y, 6), n) for p, n in _num_8]
-_num_0_key = [(round(p.x, 6), round(p.y, 6), n) for p, n in _num_0]
-assert _num_8_key == _num_0_key, (
-    f"numbered markers must be identical with 8 vs 0 keypoints -- keypoints must not touch the counter. "
-    f"8-kp: {_num_8_key}  0-kp: {_num_0_key}"
+assert _legend_8 == [rlm.LEGEND_LABEL_KEYPOINTS, rlm.LEGEND_LABEL_WATER], (
+    f"with 8 keypoints + a water zone, the legend must be [Keypoint Candidates, Water System Survey Area] "
+    f"in KSOP order, got {_legend_8}"
 )
-# The water zone is the only numbered layer, so it must be marker 1 in both cases (contiguous,
-# and matching its pre-change value -- keypoints were the LAST numbered layer, so removing their
-# numbering renumbers nothing before them).
-assert [n for _p, n in _num_8] == [1], f"water zone must be numbered marker 1 regardless of keypoints, got {[n for _p, n in _num_8]}"
-_non_kp_legend_8 = [ln for ln in _legend_8 if "Candidate Keypoints" not in ln]
-_non_kp_legend_0 = [ln for ln in _legend_0b if "Candidate Keypoints" not in ln]
-assert _non_kp_legend_8 == _non_kp_legend_0, (
-    f"non-keypoint legend lines must be identical with 8 vs 0 keypoints:\n8-kp: {_non_kp_legend_8}\n0-kp: {_non_kp_legend_0}"
+assert _legend_0b == [rlm.LEGEND_LABEL_WATER], (
+    f"with 0 keypoints + a water zone, the legend must be just [Water System Survey Area], got {_legend_0b}"
 )
-assert any(ln.startswith("1 — Water System") for ln in _non_kp_legend_8), (
-    f"the water zone's own numbered legend line must be unchanged (marker 1), got {_non_kp_legend_8}"
+_non_kp_legend_8 = [ln for ln in _legend_8 if ln != rlm.LEGEND_LABEL_KEYPOINTS]
+_non_kp_legend_0 = [ln for ln in _legend_0b if ln != rlm.LEGEND_LABEL_KEYPOINTS]
+assert _non_kp_legend_8 == _non_kp_legend_0 == [rlm.LEGEND_LABEL_WATER], (
+    f"non-keypoint legend entries must be identical with 8 vs 0 keypoints:\n8-kp: {_non_kp_legend_8}\n"
+    f"0-kp: {_non_kp_legend_0}"
 )
+assert len(_plots_8) == 8 and _plots_0b == [], "8 keypoints must draw 8 asterisks, 0 keypoints draws none"
 print(
-    "Decoupling: with a water zone present, 8-keypoint and 0-keypoint renders produce identical numbered "
-    f"markers ({_num_8_key}) and identical non-keypoint legend lines -- keypoints never touch the counter."
+    "One-entry-per-feature + no perturbation: with a water zone present, 8-keypoint and 0-keypoint renders "
+    "produce identical non-keypoint legend entries, and the keypoint entry simply appears/disappears at the "
+    "head of the KSOP order without moving anything else."
 )
 
 # 4. On-parcel and off-parcel keypoints draw with an IDENTICAL marker specification (no
-#    variation), and NO number is drawn for any keypoint (_draw_numbered_marker never fires
-#    for them -- proven by test 3's counter being untouched).
+#    variation), and the layer still contributes exactly the single collapsed keypoint entry
+#    (no per-keypoint entry, no number).
 _mixed = [_make_keypoints(2)[0], _make_keypoints(2)[1]]  # [0]=on-parcel, [1]=off-parcel
 assert _mixed[0]["on_parcel"] is True and _mixed[1]["on_parcel"] is False
-_num_mixed, _plots_mixed, _legend_mixed = _capture_kp_render(_kp_layers(_mixed))
+_plots_mixed, _legend_mixed = _capture_kp_render(_kp_layers(_mixed))
 assert len(_plots_mixed) == 2
 _spec_keys = ("marker", "markersize", "markeredgecolor", "markerfacecolor", "markeredgewidth", "linestyle", "zorder")
 _spec_on = {k: _plots_mixed[0].get(k) for k in _spec_keys}
@@ -1952,22 +2003,28 @@ _spec_off = {k: _plots_mixed[1].get(k) for k in _spec_keys}
 assert _spec_on == _spec_off, f"on-parcel and off-parcel keypoints must draw identically: {_spec_on} vs {_spec_off}"
 assert _spec_on["marker"] == (6, 2, 0), "keypoints must use the true asterisk polygon marker (6, 2, 0)"
 assert _spec_on["markeredgecolor"] == rlm.KEYPOINT_COLOR == "#000000", "keypoint asterisk must be black"
-assert _num_mixed == [], "no numbered marker may be drawn for keypoints (no number)"
+assert _kp_legend_lines(_legend_mixed) == [rlm.LEGEND_LABEL_KEYPOINTS], (
+    f"a mixed on/off keypoint set must still collapse to one 'Keypoint Candidates' entry, got {_legend_mixed}"
+)
 print(
     "On-parcel and off-parcel keypoints draw with an identical marker spec "
     f"(marker={_spec_on['marker']}, size={_spec_on['markersize']}, colour={_spec_on['markeredgecolor']}); "
-    "no number is drawn for any keypoint."
+    "one collapsed keypoint legend entry, no number."
 )
 
-# 5. The asterisk is sized BELOW the numbered-circle marker size -- assert the relationship,
-#    not a literal, so it survives retuning either constant.
-assert rlm.KEYPOINT_MARKER_SIZE_POINTS < rlm.NUMBERED_MARKER_DIAMETER_POINTS, (
-    f"keypoint asterisk ({rlm.KEYPOINT_MARKER_SIZE_POINTS}pt) must be smaller than the numbered-circle "
-    f"diameter ({rlm.NUMBERED_MARKER_DIAMETER_POINTS}pt)"
+# 5. The legend's own keypoint handle reuses the SAME (6, 2, 0) asterisk marker tuple as the
+#    on-map symbol, so legend and map read as the same thing (relationship asserted against the
+#    module's real handle-builder, not a literal).
+_kp_handle, _kp_label = rlm._legend_handle_for("keypoints")
+assert _kp_label == rlm.LEGEND_LABEL_KEYPOINTS
+assert _kp_handle.get_marker() == (6, 2, 0), (
+    f"the keypoint legend handle must use the same (6, 2, 0) asterisk marker the map draws, got "
+    f"{_kp_handle.get_marker()}"
 )
+assert _kp_handle.get_markeredgecolor() == rlm.KEYPOINT_COLOR, "the keypoint legend handle must be KEYPOINT_COLOR"
 print(
-    f"Asterisk size {rlm.KEYPOINT_MARKER_SIZE_POINTS}pt is below the numbered-circle diameter "
-    f"{rlm.NUMBERED_MARKER_DIAMETER_POINTS}pt (relationship asserted, not a literal)."
+    "Keypoint legend handle reuses the map's own (6, 2, 0) asterisk marker in KEYPOINT_COLOR -- legend and "
+    "map symbol match."
 )
 
 

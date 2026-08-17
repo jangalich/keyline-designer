@@ -6,14 +6,14 @@ The water zone no longer renders a filled/outlined polygon -- it renders a famil
 of horizontal sine waves (_ripple_lines_for_polygon()) clipped to the zone's own
 render_fill_polygon_utm, with no fill and no perimeter stroke. These tests exercise
 the ripple generator directly (geometry only, no matplotlib) plus one offline
-end-to-end render pass confirming the water zone's numbered marker and legend text
-are unchanged from before this branch.
+end-to-end render pass confirming the water zone still draws as ripple-line
+texture with NO fill polygon (the numbered marker and per-zone legend f-string
+that this test used to check were removed when the map moved to a numberless
+icon legend -- see render_layout_map.py's own LEGEND docstring section; that
+legend behaviour is covered end to end in test_render_layout_map.py).
 
-This file is intentionally SEPARATE from test_render_layout_map.py: that file is a
-script-style module with top-level assertions that already fail to collect on main
-(a stale production convex-hull assertion at ~line 472, plus a water-zone section
-invalidated by the water rebuild) -- putting these tests there would let that
-pre-existing collection error mask them.
+This file is intentionally SEPARATE from test_render_layout_map.py so the ripple
+GENERATOR tests (tests 1-5, pure geometry) have their own focused home.
 """
 
 import math
@@ -264,16 +264,17 @@ def _water_zone_fixture():
 
 
 # =====================================================================
-# Test 6: nothing else moved -- the water zone's marker position and
-#         legend text are unchanged from before this branch (the ripple
-#         change only swaps the fill/outline for ripple lines).
+# Test 6: end-to-end render draws the water zone as ripple-line TEXTURE with
+#         NO fill polygon. (The numbered-marker placement and per-zone legend
+#         f-string this test used to also check were removed with the move to
+#         a numberless icon legend -- that legend behaviour now lives in
+#         test_render_layout_map.py.)
 # =====================================================================
-def test_water_marker_and_legend_unchanged():
+def test_water_draws_as_ripple_texture_no_fill():
     water_zone = _water_zone_fixture()
     layers = {
         "dem": _DEM,
         "production_areas": [],
-        "production_zone_legend_stats": [],
         "water_zone": water_zone,
         "road_corridor": [],
         "tree_zone_result": None,
@@ -283,26 +284,7 @@ def test_water_marker_and_legend_unchanged():
         "fencing_result": _plain_fencing_result(_BOUNDARY, _DEM),
     }
 
-    # Spy on the numbered-marker placement.
-    recorded_markers = []
-    original_marker = rlm._draw_numbered_marker
-    rlm._draw_numbered_marker = (
-        lambda ax, point, number: recorded_markers.append((point, number)) or original_marker(ax, point, number)
-    )
-
-    # Spy on legend text (ax.text renders the joined legend block).
-    import matplotlib.axes as maxes
-
-    recorded_text = []
-    original_text = maxes.Axes.text
-
-    def _recording_text(self, x, y, s, *a, **kw):
-        recorded_text.append(s)
-        return original_text(self, x, y, s, *a, **kw)
-
-    maxes.Axes.text = _recording_text
-
-    # Spy on plot_polygon: the water zone must draw NO fill polygon anymore.
+    # Spy on plot_polygon: the water zone must draw NO fill polygon.
     recorded_polygon_kwargs = []
     original_plot_polygon = rlm.plot_polygon
 
@@ -310,7 +292,16 @@ def test_water_marker_and_legend_unchanged():
         recorded_polygon_kwargs.append(kwargs)
         return original_plot_polygon(geometry, **kwargs)
 
+    # Spy on plot_line: the water zone must draw one or more ripple lines in the water blue.
+    recorded_line_kwargs = []
+    original_plot_line = rlm.plot_line
+
+    def _recording_plot_line(geometry, **kwargs):
+        recorded_line_kwargs.append(kwargs)
+        return original_plot_line(geometry, **kwargs)
+
     rlm.plot_polygon = _recording_plot_polygon
+    rlm.plot_line = _recording_plot_line
 
     try:
         with tempfile.TemporaryDirectory() as tmp:
@@ -319,35 +310,16 @@ def test_water_marker_and_legend_unchanged():
             assert result == out
             assert os.path.getsize(out) > 0, "render_layout_map() must produce a real, non-empty PNG"
     finally:
-        rlm._draw_numbered_marker = original_marker
-        maxes.Axes.text = original_text
         rlm.plot_polygon = original_plot_polygon
+        rlm.plot_line = original_plot_line
 
-    # Marker: exactly one (the water zone), placed at the reprojected render
-    # opening's own representative_point() -- unchanged placement.
-    assert len(recorded_markers) == 1, f"expected exactly 1 numbered marker, got {len(recorded_markers)}"
-    marker_point, marker_number = recorded_markers[0]
-    expected_geom = rlm._reproject_utm_geometry_to_mercator(water_zone["render_fill_polygon_utm"], _DEM["crs"])
-    expected_point = expected_geom.representative_point()
-    assert marker_point.distance(expected_point) < 1e-6, (
-        "the water zone marker must still sit at render_fill_polygon_utm's own representative_point()"
-    )
-
-    # Legend text: unchanged f-string, exactly as before this branch.
-    legend_blocks = [s for s in recorded_text if "Water System" in s]
-    assert len(legend_blocks) == 1, "expected exactly one legend block mentioning the water zone"
-    expected_line = (
-        f"{marker_number} — Water System, Zone {water_zone['id']}, "
-        f"score {water_zone['suitability_score']}"
-    )
-    assert expected_line in legend_blocks[0], (
-        f"the water zone legend text changed. expected to find:\n  {expected_line!r}\n"
-        f"in:\n  {legend_blocks[0]!r}"
-    )
-
-    # No fill polygon is drawn for the water zone anymore (no plot_polygon call
-    # carrying the water blue as its facecolor).
+    # No fill polygon is drawn for the water zone (no plot_polygon call carrying the water blue
+    # as its facecolor).
     water_fill_calls = [kw for kw in recorded_polygon_kwargs if kw.get("facecolor") == WATER_ZONE_COLOR]
     assert not water_fill_calls, (
-        f"the water zone must no longer draw a filled polygon, found {len(water_fill_calls)} fill call(s)"
+        f"the water zone must not draw a filled polygon, found {len(water_fill_calls)} fill call(s)"
     )
+
+    # Ripple lines ARE drawn, in the water blue.
+    water_ripple_calls = [kw for kw in recorded_line_kwargs if kw.get("color") == WATER_ZONE_COLOR]
+    assert water_ripple_calls, "the water zone must draw at least one ripple line in WATER_ZONE_COLOR"

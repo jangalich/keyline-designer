@@ -44,7 +44,39 @@ lines over the full DEM extent).
              --> contour_lines.compute_contour_lines (global, unclipped)
              --> rendered PNG (basemap + halo + streams + boundary fence +
                  water/tree-zone-exclusion fence loops + layout layers +
-                 numbered legend box, all one image)
+                 icon legend box, all one image)
+
+LEGEND: the map carries a single icon legend (a real matplotlib ax.legend(),
+not a plain-text box) in the lower-left corner. Its handles are DRAWN symbols
+that match what each layer draws on the map -- an asterisk for keypoints,
+nested brown contour arcs for production, a blue wave train for the water
+survey area, a grey cased road line, a green hatch for tree crops, the
+barn/silo glyph for the building site, and a yellow octagon outline for
+fencing -- so a reader can match legend to map without a caption. The order is
+FIXED and KSOP-shaped (Keypoints, Production, Water, Road, Tree, Structure,
+Fencing -- Scale of Permanence order, roughly), assembled ONCE after all
+drawing rather than inline in draw order. There is exactly ONE entry per
+feature regardless of how many zones/branches/segments it drew: three
+production zones, four tree candidates, every fence type, and every road
+branch each collapse to a single entry. A feature that drew nothing
+contributes no entry (an empty map produces an empty legend and no frame).
+NO legend label carries any per-feature data (acreage, score, rank, id) --
+that reporting data lives on each feature's own upstream source, read by the
+report generator, never derived or stored in this module. See the LEGEND
+sections of the individual layer notes below, and the icon/handler constants
+grouped under "ICON LEGEND" further down.
+
+There are NO numbered circle markers on the map anymore. Every layer used to
+carry a numbered black circle (1, 2, 3, ...) tying its on-map position to a
+numbered legend line; that convention is gone entirely -- no layer gets one.
+LOSING PER-ZONE IDENTITY ON THE MAP IS INTENTIONAL AND CONFIRMED: with the
+numbers removed, a property with three production zones (or several tree
+candidates) has NO on-map way to tell rank 1 from rank 3 apart -- they share
+one "Production Areas"/"Tree Crop Areas" entry and one texture. This is a
+deliberate simplification, not an oversight; do not reintroduce any
+substitute per-zone labelling scheme. Two on-map symbols survive as the
+genuine symbol for their layer and are NOT numbered markers: the keypoint
+asterisks and the structure site's map-pin icon.
 
 PRODUCTION ZONE STYLE: production zones render as CONTOUR-LINE TEXTURE,
 not a filled/outlined shape -- contour_lines.py's global contour lines
@@ -52,11 +84,13 @@ not a filled/outlined shape -- contour_lines.py's global contour lines
 render time (real shapely intersection against that zone's own
 render_fill_polygon_utm -- a bounded opening, display-smoothed at render
 time, see the DISPLAY SMOOTHING note below -- not a pre-clipped raster),
-and only the clipped segments within that zone are drawn. No fill, no boundary stroke for
-production zones -- zone identity is conveyed by the numbered marker
-alone, same as every other layer. This is a deliberate, scoped styling
-split: the boundary fence (below) has its OWN render-only treatment --
-the water zone, the road corridor, and the structure site (all below)
+and only the clipped segments within that zone are drawn. No fill, no
+boundary stroke, and no on-map label for production zones -- every
+production zone shares one "Production Areas" legend entry (the contour
+texture, echoed by the legend's nested-arc icon), with no per-zone identity
+on the map (intentional, see LEGEND above). This is a deliberate, scoped
+styling split: the boundary fence (below) has its OWN render-only treatment
+-- the water zone, the road corridor, and the structure site (all below)
 have their OWN render-only treatments too.
 
 BOUNDARY FENCE STYLE: the property boundary itself no longer renders as
@@ -65,7 +99,7 @@ developed-footprint boundary fence line(s) (see that module's own module
 docstring), a thin solid hairline (FENCE_COLOR/FENCE_LINEWIDTH; this used
 to be a dashed line, see FENCE_LINEWIDTH's own comment) at FENCE_ZORDER
 (see that constant's own comment for why this is now 60, above the
-numbered circle markers). There is always at least one segment --
+structure site pin). There is always at least one segment --
 fencing.find_boundary_fencing()'s own plain-wrap case on a bare property
 (no developed footprint) -- so there's no fallback path to the old stroke.
 Before drawing, each segment's geometry is run through
@@ -76,13 +110,11 @@ fence renders pure-angular, the same treatment as every other fence type
 pass has been removed). Same DISPLAY-ONLY "never touches the real geometry
 used elsewhere" discipline as the road corridor's own _smooth_line_for_
 render() (which stays curved/unchanged -- a DIFFERENT feature, the road
-corridor line itself, not a fence line). When the drawn boundary clips the
-developed footprint's convex hull into more than one fence loop, each loop
-gets its own numbered legend line ("Boundary Fencing 1" / "Boundary
-Fencing 2") -- otherwise a single unnumbered "Boundary Fencing" line, same
-"no numbered circle marker" treatment structure_site's own legend line
-already uses (there's no single point on a loop-shaped feature for a circle
-number to point to).
+corridor line itself, not a fence line). However many fence loops the drawn
+boundary clips into, they carry NO per-segment legend line: boundary fencing,
+the water-zone-exclusion loop, and the tree-zone-exclusion loops all collapse
+into a SINGLE "Fencing" legend entry (drawn in yellow, echoed by the legend's
+octagon-outline icon), regardless of segment count or fence_type.
 
 WATER/TREE EXCLUSION FENCE STYLE: fencing.identify_fencing()'s two
 non-boundary fence loops ("water_zone_exclusion" -- one closed loop
@@ -140,22 +172,15 @@ where two drawn rings run on top of each other, but a genuine crossing
 overlap elsewhere is still expected wherever the underlying geometry
 meets, not a bug. The boundary fence ring(s) themselves are drawn as-is
 and are never trimmed against anything -- they only ever act as a trim
-mask for the zone rings, never the other way round. Legend: one entry per
-ZONE either way, with its own individual label -- the mutual trim never
-merges two zones into one rendered feature, it just takes a bite out of
-each, so nothing about the labelling changes. "Water Zone
-Fencing" gets a single unnumbered legend line (only ever one, regardless
-of how many pieces its own clip produces); "Tree Zone Fencing" gets one
-legend line per candidate when more than one exists (same, regardless of
-per-segment clip pieces) -- "Tree Zone Fencing {rank}" reuses fencing.
-tree_zone_fencing_to_geojson()'s own candidate_rank property directly
-rather than re-deriving a new index here, so it lines up with the
-same-numbered "Tree Zone Candidate {rank}" this file already draws
-elsewhere. Both mirror boundary fencing's own 1-vs-2 segment-labeling
-convention, and neither gets a numbered circle marker, same "no single
-point to point to" reasoning as boundary fencing's own legend lines
-above. No road -- existing or generated -- gets a fence loop of its own
-at all anymore (see fencing.py's own module docstring for why).
+mask for the zone rings, never the other way round. Legend: every fence
+type -- boundary, water_zone_exclusion, and tree_zone_exclusion alike --
+collapses into ONE shared "Fencing" entry regardless of zone count or clip
+pieces (the mutual trim never merges two zones into one rendered feature, it
+just takes a bite out of each; but the legend no longer distinguishes them
+at all). There are no more per-zone "Water Zone Fencing"/"Tree Zone Fencing
+{rank}" lines and no numbered circle markers on any fence. No road --
+existing or generated -- gets a fence loop of its own at all anymore (see
+fencing.py's own module docstring for why).
 
 Contours clip against render_fill_polygon_utm rather than polygon_utm
 because render_fill_polygon_utm is a bounded morphological OPENING of the
@@ -201,16 +226,18 @@ same Web Mercator space the geometry is drawn in so the clip lands
 correctly), and only the surviving wave segments within that zone are
 drawn. The water zone NO LONGER renders a fill or a perimeter stroke: no
 facecolor, no edge stroke -- exactly the same styling discipline as
-production zones' contour-line texture and tree zones' hatch, and zone
-identity is carried by the numbered marker alone, same as every other
-layer. The ripple stroke reuses WATER_ZONE_COLOR (the water blue) at the
+production zones' contour-line texture and tree zones' hatch. There is no
+on-map label; the single "Water System Survey Area" legend entry (echoed by
+the legend's blue wave-train icon) carries the water layer, with no numbered
+marker. The ripple stroke reuses WATER_ZONE_COLOR (the water blue) at the
 water zone's existing zorder (41, above production contours' zorder=40).
 This is DISPLAY-ONLY: the zone's real polygon_utm/geometry_wgs84 (used for
 scoring, eligibility, and the narrative report) are completely untouched
 by this, and render_fill_polygon_utm is read but not modified. If the
 render opening is too small for even one wave row to intersect, nothing is
-drawn (the marker alone conveys a zone that small) -- there is no fallback
-to the old fill. The ripple texture is allowed to cross a production
+drawn -- there is no marker to convey a zone that small anymore, and no
+fallback to the old fill (the legend entry still lists, since the layer is
+present in the data). The ripple texture is allowed to cross a production
 zone's own rendered texture at render time -- that's a display-only
 coincidence, not a real siting conflict; the real geometries stay
 separated by water_candidate_zones.py's own production-zone eligibility
@@ -225,9 +252,11 @@ a road -- a wider, low-alpha dark gray "shoulder" plotted first, then a
 narrower, higher-alpha dark gray line on top of it, both the same color
 (see _draw_road_corridor()). All branches share the exact same styling --
 nothing here visually distinguishes a trunk from a spur, and no branch
-gets its own numbered marker on the map (branch_role/branch_index are for
-the narrative report to read, not a map label -- see the legend text
-built below, one line per branch, for where they do appear). Before
+gets its own label on the map. Every branch, trunk and spur alike, collapses
+into ONE "Suggested Road Corridor" legend entry (echoed by the legend's grey
+cased-line icon); branch_role/branch_index/length/grade are for the narrative
+report to read off each branch's own Feature, never a map or legend label
+here. Before
 either line of a branch is drawn, THAT branch's own Mercator-projected
 geometry is run through _smooth_line_for_render(), independently of every
 other branch: a shapely simplify() pass (ROAD_RENDER_SIMPLIFY_TOLERANCE_M,
@@ -279,10 +308,13 @@ pockets stay OPEN as real holes, which is correct: the zone genuinely wraps
 around existing canopy. render_fill_polygon_utm may still be a MultiPolygon
 whenever the real footprint is (a candidate split across search-space gaps).
 It is NOT the patch's real geometry_wgs84 field, but geometrically equal to
-polygon_utm. Zone identity is still carried by the numbered marker placed on
-that geometry and by the corresponding legend line -- the hatch by itself
-doesn't need to enclose a filled area to read as a distinct zone on the map. The
-hatch is a deliberate, visible "candidate, not a committed site" cue,
+polygon_utm. There is no on-map label and no per-zone identity: however many
+tree candidates there are, they share ONE "Tree Crop Areas" legend entry
+(echoed by the legend's green hatch icon), and the hatch texture alone reads
+them as candidate ground (intentional, see LEGEND above). The hatch by
+itself doesn't need to enclose a filled area to read as a distinct zone on
+the map. The hatch is a deliberate, visible "candidate, not a committed
+site" cue,
 consistent with this layer's own CONFIDENCE_LOW rating and its explicit
 "not a definite planting plan" framing (see tree_zone_candidates.py's own
 TREE_ZONE_CONFIDENCE_NOTES_TEMPLATE). Rendered after the road corridor
@@ -300,8 +332,7 @@ fixed-size MAP-PIN ICON (assets/icons/farm_location_pin.svg, rasterized
 once to assets/icons/farm_location_pin.png -- see STRUCTURE_SITE_ICON_PATH/
 structure_site_icon() below) placed at its own representative_point(), not
 a filled polygon over its full eligible footprint (up to the module's own
-1-acre cap) and not a numbered circle marker like every other layer --
-there's exactly one structure site per property
+1-acre cap) -- there's exactly one structure site per property
 (fetch_and_select_optimal_structure_site()'s own top-ranked candidate,
 same "single selection" shape water_zone has -- road_corridor is now a
 possibly-multi-branch NETWORK instead, see this module's own ROAD
@@ -313,12 +344,13 @@ geometry drives placement, display is separate" split this module already
 uses for water/tree zones' own render_fill_polygon_utm above:
 structure_site's real geometry (used for area_acres/suitability_score/the
 narrative report) is completely untouched by this -- only what gets drawn
-at its representative_point() changes. Because there's no numbered circle
-for this layer, its legend line carries no leading number either (a
-number with nothing on the map to point to would be confusing) -- every
-other layer keeps its existing numbered-circle treatment unchanged.
-Rendered last (after the tree zone candidates), at zorder=43, the same
-z-order this layer already held before this change.
+at its representative_point() changes. Its single "Permanent Building Site"
+legend entry uses the barn/silo glyph lifted out of this same pin (the
+legend's own building icon), carrying no data. The map-pin icon is NOT a
+numbered marker (it never was one) -- it and the keypoint asterisks are the
+only on-map point symbols that survive now that the numbered circle markers
+are gone (see LEGEND above). Rendered last (after the tree zone candidates),
+at zorder=43, the same z-order this layer already held before this change.
 
 Basemap: NAIP aerial imagery via USGS's cached USGSImageryOnly tile
 service, fetched and composited with contextily (a well-established
@@ -346,7 +378,12 @@ import xyzservices
 
 matplotlib.use("Agg")  # headless rendering -- no display server in this pipeline's runtime
 import matplotlib.pyplot as plt
+from matplotlib.legend_handler import HandlerBase
+from matplotlib.lines import Line2D
 from matplotlib.offsetbox import AnnotationBbox, OffsetImage
+from matplotlib.patches import Patch, Polygon as MplPolygon
+from matplotlib.image import BboxImage
+from matplotlib.transforms import Bbox, TransformedBbox
 from PIL import Image
 from rasterio.warp import transform as warp_transform
 from rasterio.warp import transform_geom
@@ -358,7 +395,6 @@ from contour_lines import compute_contour_lines
 from fencing import identify_fencing
 from parcel_data import ParcelData, fetch_parcel_data
 from pipeline_context import build_pipeline_context
-from raster_grid import SQUARE_METERS_PER_ACRE
 from road_corridors import identify_road_corridor_candidates
 from solar_suitability import identify_solar_candidate_zones
 from tree_zone_candidates import identify_tree_zone_candidates
@@ -538,9 +574,10 @@ WATER_ZONE_COLOR = "#1F6FB2"
 # waves clipped to the zone's own render_fill_polygon_utm -- rather than a
 # filled/outlined polygon. Same styling discipline as production zones'
 # contour-line texture and tree zones' hatch: no fill, no perimeter stroke,
-# zone identity carried by the numbered marker alone. The ripple stroke
-# reuses WATER_ZONE_COLOR above (the water blue #1F6FB2, see FENCE_COLOR's
-# own comment) rather than introducing a second blue.
+# no on-map label -- the single "Water System Survey Area" legend entry (and
+# its wave-train icon) carries the layer. The ripple stroke reuses
+# WATER_ZONE_COLOR above (the water blue #1F6FB2, see FENCE_COLOR's own
+# comment) rather than introducing a second blue.
 #
 # Spacing/amplitude/wavelength are in the SAME units as the drawing space
 # (Mercator metres, see _reproject_utm_geometry_to_mercator()) -- not raw
@@ -605,31 +642,18 @@ TREE_ZONE_COLOR = "#2D5A27"
 TREE_ZONE_HATCH_ALPHA = 0.45
 TREE_ZONE_HATCH = "///"
 
-MARKER_FACE_COLOR = "#1A1A1A"
-MARKER_TEXT_COLOR = "white"
-MARKER_RADIUS_POINTS = 11
-
-# Keypoints render as a plain black asterisk -- no number, no fill variation
-# by index, and identical for on-parcel and off-parcel. They are a set of like
-# features (one per primary valley), not individually narrated elements, so the
-# numbered-circle convention used by production/water/tree/structure does not
-# apply (numbering them would add map clutter and legend lines carrying no
-# information -- same reasoning the road network uses for its one legend entry
-# regardless of branch count). The single legend line is "Candidate Keypoints".
+# Keypoints render as a plain black asterisk -- no fill variation by index, and
+# identical for on-parcel and off-parcel. They are a set of like features (one
+# per primary valley), not individually narrated elements, so they get a single
+# collapsed legend entry ("Keypoint Candidates") regardless of count -- the same
+# one-entry-per-feature treatment every other layer now gets in the icon legend
+# (see this module's own LEGEND docstring section). The asterisk IS the on-map
+# symbol for this layer, drawn directly; the legend just mirrors it (a stock
+# Line2D handle with the same (6, 2, 0) marker tuple, see LEGEND_HANDLES below).
 KEYPOINT_COLOR = "#000000"
 
-# The numbered-circle markers (_draw_numbered_marker()) are a bold fontsize-10
-# annotation inside a "circle,pad=0.35" bbox, so their rendered diameter is
-# ~fontsize*(1 + 2*0.35) points. That DERIVED diameter -- not MARKER_RADIUS_POINTS
-# above, which is declared but unused; the real size driver is the annotation
-# fontsize -- is the size a numbered marker actually renders at, and the keypoint
-# asterisk is sized as a fraction of it so the two stay proportionate if the
-# numbered marker's fontsize is retuned. The literals 10 and 0.35 mirror
-# _draw_numbered_marker() exactly (kept in sync there).
-NUMBERED_MARKER_DIAMETER_POINTS = 10 * (1 + 2 * 0.35)  # 17.0
-# Keypoint asterisk marker size (matplotlib markersize, points) -- a fixed size
-# comfortably below the numbered-circle diameter above, so the asterisk reads
-# clearly smaller than a numbered marker.
+# Keypoint asterisk marker size (matplotlib markersize, points) -- a fixed size,
+# tuned by eye against this module's own 300 DPI output.
 KEYPOINT_MARKER_SIZE_POINTS = 10.0
 # The asterisk's spoke line width -- a hairline heavy enough to read at the size
 # above without turning into a blob.
@@ -669,13 +693,17 @@ FENCE_COLOR = "#D4A017"
 FENCE_LINEWIDTH = 0.6  # a hairline -- was 1.2 (a dashed line before that)
 
 # The BOUNDARY fence only renders at this zorder -- explicitly bumped to sit
-# above the numbered circle markers/structure site pin (zorder=43/50) as well
-# as every zone-fill-style layer beneath it, per explicit request (was 50,
-# bumped again to 60 per a later explicit request). Deliberately NOT applied
-# to the water-zone/tree-zone exclusion fence loops, nor to roads, tree zone,
-# water zones, or streams -- those keep rendering at EXCLUSION_FENCE_ZORDER
-# (water/tree exclusion fencing) or their own existing zorder (tree zone hatch,
-# water zone ripples, stream lines) below, unchanged. CONFIGURABLE.
+# above the structure site pin (zorder=43) as well as every zone-fill-style
+# layer beneath it, per explicit request (was 50, bumped again to 60 per a
+# later explicit request; it once had to clear the numbered circle markers at
+# zorder=50 too, but those markers no longer exist -- see this module's own
+# LEGEND docstring section). Deliberately NOT applied to the water-zone/tree-
+# zone exclusion fence loops, nor to roads, tree zone, water zones, or streams
+# -- those keep rendering at EXCLUSION_FENCE_ZORDER (water/tree exclusion
+# fencing) or their own existing zorder (tree zone hatch, water zone ripples,
+# stream lines) below, unchanged. The icon legend sits at this same zorder and,
+# being drawn last, stays on top of the boundary fence (see LEGEND FRAME below).
+# CONFIGURABLE.
 FENCE_ZORDER = 60
 
 # Zorder for the two non-boundary exclusion fence loops (water_zone_exclusion,
@@ -685,8 +713,8 @@ FENCE_ZORDER = 60
 # every zone-fill-style layer (production contour zorder=40, water zone ripples
 # zorder=41, road corridor cased line zorder=42/42.5, tree zone candidate hatch
 # zorder=42.8 -- the true current ceiling, not 40) without being bumped above
-# the numbered circle markers/structure site pin the way the boundary fence
-# now is.
+# the structure site pin the way the boundary fence now is (there are no longer
+# any numbered circle markers to clear -- see this module's own LEGEND section).
 EXCLUSION_FENCE_ZORDER = 42.9
 
 # Below this length (Web Mercator units, ~meters), a water/tree-zone-exclusion
@@ -746,6 +774,278 @@ PRODUCTION_FILL_SIMPLIFY_TOLERANCE_CELLS = 1.0
 # Chaikin iteration counts by the same standing convention. CONFIGURABLE --
 # start light.
 PRODUCTION_FILL_CHAIKIN_ITERATIONS = 1
+
+
+# ===========================================================================
+# ICON LEGEND
+#
+# The legend is a real ax.legend() whose handles are DRAWN symbols matching
+# what each layer draws on the map (see this module's own LEGEND docstring
+# section) -- not the old plain-text ax.text box. Every icon reuses its
+# layer's own COLOUR constant (a legend symbol in a different colour from its
+# map symbol would defeat the point of the legend), but its SIZE/LINEWIDTH/
+# geometry are the legend's OWN independent constants below: a legend handle
+# is drawn in handle-box space at a fixed small size, while a map stroke is
+# tuned against the 300 DPI 8.5x11 output, and the two retune under different
+# pressures. Each constant is defined independently even where it starts out
+# numerically identical to a map constant. FENCE_LINEWIDTH in particular is a
+# 0.6 hairline that would be invisible at legend scale, so the legend octagon
+# gets LEGEND_FENCE_LINEWIDTH instead. Every value here is CONFIGURABLE.
+# ===========================================================================
+
+# Keypoint Candidates -- a stock Line2D handle with the SAME (6, 2, 0) asterisk
+# marker tuple _draw_keypoint_marker() uses, sized for the handle box.
+LEGEND_KEYPOINT_MARKERSIZE = 9.0          # CONFIGURABLE
+LEGEND_KEYPOINT_MARKEREDGEWIDTH = 1.3     # CONFIGURABLE
+
+# Production Areas -- several stacked, near-parallel curved arcs (concentric,
+# increasing radius) in CONTOUR_LINE_COLOR: reads as CONTOUR LINES, not ripples.
+LEGEND_PRODUCTION_ARC_COUNT = 3           # CONFIGURABLE
+LEGEND_PRODUCTION_LINEWIDTH = 1.0         # CONFIGURABLE
+LEGEND_PRODUCTION_ARC_SAMPLES = 48        # polyline resolution per arc; CONFIGURABLE
+
+# Water System Survey Area -- parallel sine waves in WATER_ZONE_COLOR, mirroring
+# _ripple_lines_for_polygon()'s staggered wave train (distinguishable from the
+# production arcs at legend scale: production is irregular nested arcs, water is
+# a regular staggered wave train).
+LEGEND_WATER_WAVE_ROWS = 3                # CONFIGURABLE
+LEGEND_WATER_LINEWIDTH = 0.9              # CONFIGURABLE
+LEGEND_WATER_WAVE_CYCLES = 2.0            # full sine periods across the handle width; CONFIGURABLE
+LEGEND_WATER_WAVE_AMPLITUDE_FRAC = 0.14   # amplitude as a fraction of box height; CONFIGURABLE
+LEGEND_WATER_WAVE_PHASE_STEP = 0.9        # radians of phase stagger per row (mirrors WATER_RIPPLE_PHASE_STEP); CONFIGURABLE
+LEGEND_WATER_WAVE_SAMPLES = 40            # polyline resolution per wave row; CONFIGURABLE
+
+# Suggested Road Corridor -- the cased (double-line) road symbol: outer shoulder
+# then inner line, reusing ROAD_RENDER_COLOR / ROAD_RENDER_*_ALPHA, but its own
+# wider handle-scale widths (the map's 3.0/1.5 read as hairlines in the box).
+LEGEND_ROAD_OUTER_WIDTH = 5.0             # CONFIGURABLE
+LEGEND_ROAD_INNER_WIDTH = 2.2             # CONFIGURABLE
+
+# Permanent Building Site -- the barn/silo glyph alone (not the full teardrop
+# pin), drawn via a BboxImage sized to the handle box. The glyph is a checked-in
+# build artifact (assets/icons/farm_building_glyph.png), rasterized ONCE from
+# its own source SVG (assets/icons/farm_building_glyph.svg -- the inner farm
+# icon lifted out of farm_location_pin.svg's teardrop, recoloured to the
+# structure red) the same way farm_location_pin.png is produced from its SVG.
+# LEGEND_BUILDING_GLYPH_ZOOM is the glyph height as a fraction of the handle-box
+# height (aspect ratio preserved); the pixel array loads at module level (inert,
+# shareable) and the BboxImage artist is built fresh per render inside the
+# handler, the same discipline structure_site_icon()'s docstring explains for
+# OffsetImage (a matplotlib Artist binds to its first figure).
+LEGEND_BUILDING_GLYPH_ZOOM = 1.15         # CONFIGURABLE
+LEGEND_BUILDING_GLYPH_PATH = os.path.join(os.path.dirname(__file__), "assets", "icons", "farm_building_glyph.png")
+_LEGEND_BUILDING_GLYPH_ARRAY = np.asarray(Image.open(LEGEND_BUILDING_GLYPH_PATH).convert("RGBA"))
+
+# Fencing -- a regular octagon outline in FENCE_COLOR, no fill.
+LEGEND_FENCE_LINEWIDTH = 1.4              # NOT FENCE_LINEWIDTH (0.6 -- invisible here); CONFIGURABLE
+LEGEND_FENCE_OCTAGON_RADIUS_FRAC = 0.46   # octagon radius as a fraction of min(box w, box h); CONFIGURABLE
+
+# Fixed KSOP legend labels -- exactly these strings, in exactly this order (see
+# this module's own LEGEND docstring section). No numbering, no per-feature data.
+LEGEND_LABEL_KEYPOINTS = "Keypoint Candidates"
+LEGEND_LABEL_PRODUCTION = "Production Areas"
+LEGEND_LABEL_WATER = "Water System Survey Area"
+LEGEND_LABEL_ROAD = "Suggested Road Corridor"
+LEGEND_LABEL_TREE = "Tree Crop Areas"
+LEGEND_LABEL_STRUCTURE = "Permanent Building Site"
+LEGEND_LABEL_FENCING = "Fencing"
+
+
+class _ProductionLegendHandle:
+    """Proxy handle for the Production Areas legend entry -- drawn by
+    _HandlerContourArcs (mapped in _LEGEND_HANDLER_MAP)."""
+
+
+class _WaterLegendHandle:
+    """Proxy handle for the Water System Survey Area entry -- drawn by
+    _HandlerWaterWaves."""
+
+
+class _RoadLegendHandle:
+    """Proxy handle for the Suggested Road Corridor entry -- drawn by
+    _HandlerCasedRoad."""
+
+
+class _BuildingLegendHandle:
+    """Proxy handle for the Permanent Building Site entry -- drawn by
+    _HandlerBuildingGlyph."""
+
+
+class _FenceLegendHandle:
+    """Proxy handle for the Fencing entry -- drawn by _HandlerOctagon."""
+
+
+class _HandlerContourArcs(HandlerBase):
+    """Draws several stacked, near-parallel curved arcs (concentric, increasing
+    radius) in CONTOUR_LINE_COLOR -- the legend symbol for production zones'
+    contour-line texture. Nested arcs, NOT a uniform sine train: this must read
+    as contour lines, visually distinct from the water icon's regular wave
+    train."""
+
+    def create_artists(self, legend, orig_handle, xdescent, ydescent, width, height, fontsize, trans):
+        x0 = -xdescent
+        cx = x0 + width / 2.0
+        samples = LEGEND_PRODUCTION_ARC_SAMPLES
+        xs = [x0 + width * k / samples for k in range(samples + 1)]
+        # A circle centre below the box gives gentle upward-bowing arcs; stepping
+        # the radius up per arc nests them, so they read as offset contour lines.
+        base_radius = 1.3 * height
+        center_y = -ydescent - base_radius
+        artists = []
+        for i in range(LEGEND_PRODUCTION_ARC_COUNT):
+            radius = base_radius + height * (i + 0.5) / LEGEND_PRODUCTION_ARC_COUNT
+            ys = []
+            for x in xs:
+                dx = x - cx
+                inside = radius * radius - dx * dx
+                ys.append(center_y + math.sqrt(inside) if inside > 0 else center_y)
+            line = Line2D(
+                xs, ys, color=CONTOUR_LINE_COLOR, linewidth=LEGEND_PRODUCTION_LINEWIDTH,
+                solid_capstyle="round",
+            )
+            line.set_transform(trans)
+            artists.append(line)
+        return artists
+
+
+class _HandlerWaterWaves(HandlerBase):
+    """Draws parallel, phase-staggered sine waves in WATER_ZONE_COLOR, mirroring
+    _ripple_lines_for_polygon()'s output -- the legend symbol for the water
+    zone's ripple texture. A regular staggered wave train, distinguishable from
+    the production icon's irregular nested arcs."""
+
+    def create_artists(self, legend, orig_handle, xdescent, ydescent, width, height, fontsize, trans):
+        x0 = -xdescent
+        samples = LEGEND_WATER_WAVE_SAMPLES
+        xs = [x0 + width * k / samples for k in range(samples + 1)]
+        amplitude = LEGEND_WATER_WAVE_AMPLITUDE_FRAC * height
+        rows = LEGEND_WATER_WAVE_ROWS
+        angular = 2.0 * math.pi * LEGEND_WATER_WAVE_CYCLES / width
+        artists = []
+        for i in range(rows):
+            baseline = -ydescent + height * (i + 1) / (rows + 1)
+            phase = i * LEGEND_WATER_WAVE_PHASE_STEP
+            ys = [baseline + amplitude * math.sin(angular * (x - x0) + phase) for x in xs]
+            line = Line2D(
+                xs, ys, color=WATER_ZONE_COLOR, linewidth=LEGEND_WATER_LINEWIDTH,
+                solid_capstyle="round",
+            )
+            line.set_transform(trans)
+            artists.append(line)
+        return artists
+
+
+class _HandlerCasedRoad(HandlerBase):
+    """Draws the cased (double-line) road symbol: a wider low-alpha outer
+    shoulder, then a narrower higher-alpha inner line on top -- same outer-then-
+    inner order and same ROAD_RENDER_COLOR/alpha constants as
+    _draw_road_corridor(), at the legend's own handle-scale widths."""
+
+    def create_artists(self, legend, orig_handle, xdescent, ydescent, width, height, fontsize, trans):
+        y = -ydescent + height / 2.0
+        xs = [-xdescent, -xdescent + width]
+        outer = Line2D(
+            xs, [y, y], color=ROAD_RENDER_COLOR, linewidth=LEGEND_ROAD_OUTER_WIDTH,
+            alpha=ROAD_RENDER_OUTER_ALPHA, solid_capstyle="butt",
+        )
+        inner = Line2D(
+            xs, [y, y], color=ROAD_RENDER_COLOR, linewidth=LEGEND_ROAD_INNER_WIDTH,
+            alpha=ROAD_RENDER_INNER_ALPHA, solid_capstyle="butt",
+        )
+        outer.set_transform(trans)
+        inner.set_transform(trans)
+        return [outer, inner]  # outer first, inner on top -- same order as the map
+
+
+class _HandlerBuildingGlyph(HandlerBase):
+    """Draws the barn/silo glyph (assets/icons/farm_building_glyph.png) via a
+    BboxImage sized to a centred sub-rectangle of the handle box. The pixel
+    array is module-level (inert, shareable); the BboxImage Artist is built
+    fresh here per render (a matplotlib Artist binds to its first figure -- same
+    reason structure_site_icon() rebuilds its OffsetImage per figure)."""
+
+    def create_artists(self, legend, orig_handle, xdescent, ydescent, width, height, fontsize, trans):
+        img = _LEGEND_BUILDING_GLYPH_ARRAY
+        img_h, img_w = img.shape[0], img.shape[1]
+        aspect = img_w / img_h
+        target_h = LEGEND_BUILDING_GLYPH_ZOOM * height
+        target_w = target_h * aspect
+        cx = -xdescent + width / 2.0
+        cy = -ydescent + height / 2.0
+        bbox = Bbox.from_bounds(cx - target_w / 2.0, cy - target_h / 2.0, target_w, target_h)
+        image = BboxImage(TransformedBbox(bbox, trans), interpolation="antialiased")
+        image.set_data(img)
+        return [image]
+
+
+class _HandlerOctagon(HandlerBase):
+    """Draws a regular octagon outline in FENCE_COLOR, no fill -- the legend
+    symbol for the fence layers."""
+
+    def create_artists(self, legend, orig_handle, xdescent, ydescent, width, height, fontsize, trans):
+        cx = -xdescent + width / 2.0
+        cy = -ydescent + height / 2.0
+        radius = LEGEND_FENCE_OCTAGON_RADIUS_FRAC * min(width, height)
+        # pi/8 offset -> a flat-topped octagon (stop-sign orientation).
+        verts = [
+            (cx + radius * math.cos(math.pi / 8 + k * math.pi / 4),
+             cy + radius * math.sin(math.pi / 8 + k * math.pi / 4))
+            for k in range(8)
+        ]
+        octagon = MplPolygon(
+            verts, closed=True, facecolor="none", edgecolor=FENCE_COLOR,
+            linewidth=LEGEND_FENCE_LINEWIDTH,
+        )
+        octagon.set_transform(trans)
+        return [octagon]
+
+
+# Maps each proxy handle CLASS to its handler instance. Handles for the two
+# stock icons (Keypoint Candidates -> Line2D, Tree Crop Areas -> Patch) are not
+# here: matplotlib's own default handlers draw them.
+_LEGEND_HANDLER_MAP = {
+    _ProductionLegendHandle: _HandlerContourArcs(),
+    _WaterLegendHandle: _HandlerWaterWaves(),
+    _RoadLegendHandle: _HandlerCasedRoad(),
+    _BuildingLegendHandle: _HandlerBuildingGlyph(),
+    _FenceLegendHandle: _HandlerOctagon(),
+}
+
+
+def _legend_handle_for(feature: str):
+    """Builds a fresh (handle, label) pair for one present feature. Stock
+    handles (keypoints, tree) are real Line2D/Patch proxies carrying their own
+    style; the five custom icons return a lightweight proxy handle whose drawing
+    is delegated through _LEGEND_HANDLER_MAP. Handles are built per render rather
+    than cached at module scope, the same Artist-per-figure discipline
+    structure_site_icon() follows."""
+    if feature == "keypoints":
+        return (
+            Line2D(
+                [], [], marker=(6, 2, 0), linestyle="None", color=KEYPOINT_COLOR,
+                markersize=LEGEND_KEYPOINT_MARKERSIZE, markeredgewidth=LEGEND_KEYPOINT_MARKEREDGEWIDTH,
+            ),
+            LEGEND_LABEL_KEYPOINTS,
+        )
+    if feature == "production":
+        return (_ProductionLegendHandle(), LEGEND_LABEL_PRODUCTION)
+    if feature == "water":
+        return (_WaterLegendHandle(), LEGEND_LABEL_WATER)
+    if feature == "road":
+        return (_RoadLegendHandle(), LEGEND_LABEL_ROAD)
+    if feature == "tree":
+        return (
+            Patch(
+                facecolor="none", edgecolor=TREE_ZONE_COLOR, hatch=TREE_ZONE_HATCH,
+                linewidth=0, alpha=TREE_ZONE_HATCH_ALPHA,
+            ),
+            LEGEND_LABEL_TREE,
+        )
+    if feature == "structure":
+        return (_BuildingLegendHandle(), LEGEND_LABEL_STRUCTURE)
+    if feature == "fencing":
+        return (_FenceLegendHandle(), LEGEND_LABEL_FENCING)
+    raise ValueError(f"unknown legend feature {feature!r}")
 
 
 def _reproject_geometry_to_mercator(geometry_wgs84: dict):
@@ -1130,32 +1430,18 @@ def _boundary_polygon_mercator(boundary_coordinates: list[tuple[float, float]]) 
     return Polygon(zip(xs, ys))
 
 
-def _draw_numbered_marker(ax, point, number: int) -> None:
-    ax.annotate(
-        str(number),
-        xy=(point.x, point.y),
-        xycoords="data",
-        ha="center",
-        va="center",
-        fontsize=10,
-        fontweight="bold",
-        color=MARKER_TEXT_COLOR,
-        zorder=50,
-        bbox=dict(boxstyle="circle,pad=0.35", facecolor=MARKER_FACE_COLOR, edgecolor="white", linewidth=1.2),
-    )
-
-
 def _draw_keypoint_marker(ax, point) -> None:
-    """A plain black asterisk at a keypoint -- no number, and IDENTICAL for
-    on-parcel and off-parcel keypoints (no fill, size, or colour variation).
-    Deliberately independent of _draw_numbered_marker() and the shared marker
-    counter: keypoints are a set of like features, not individually narrated
-    elements (see KEYPOINT_COLOR's own comment).
+    """A plain black asterisk at a keypoint -- IDENTICAL for on-parcel and
+    off-parcel keypoints (no fill, size, or colour variation). Keypoints are a
+    set of like features, not individually narrated elements (see KEYPOINT_
+    COLOR's own comment); they collapse to a single "Keypoint Candidates" legend
+    entry regardless of count.
 
     The marker is matplotlib's true asterisk -- the polygon marker (6, 2, 0):
     six spokes, style 2 (the asterisk style), angle 0 -- NOT "*" (a
     five-pointed star in matplotlib) and not a mathtext "$*$" (which renders
-    small and sits high off-centre at this size). Drawn at the keypoint layer's
+    small and sits high off-centre at this size). The legend's own keypoint
+    handle reuses this exact (6, 2, 0) tuple. Drawn at the keypoint layer's
     existing zorder (50)."""
     ax.plot(
         point.x,
@@ -1168,24 +1454,6 @@ def _draw_keypoint_marker(ax, point) -> None:
         linestyle="None",
         zorder=50,
     )
-
-
-def _production_zone_legend_stats(scored_patches: list[dict], parcel_acres: float) -> list[tuple[float, str]]:
-    """Returns [(area_acres, stat_line), ...] -- one per surviving
-    production patch, in the same order scored_patches already ranks
-    them. parcel_acres is the property boundary's own real area, passed
-    directly by the caller rather than back-derived from a second
-    production-zone computation -- this function is purely a
-    display-formatting step, same as before."""
-    stats = []
-    for patch in scored_patches:
-        pct_note = (
-            f" ({round(patch['area_acres'] / parcel_acres * 100)}% of parcel)"
-            if parcel_acres
-            else ""
-        )
-        stats.append((patch["area_acres"], f"{patch['area_acres']} ac{pct_note}"))
-    return stats
 
 
 def fetch_layout_layers(
@@ -1253,17 +1521,18 @@ def fetch_layout_layers(
     scope here, unchanged, still its own independent canopy fetch; see
     that module's own backlog.
 
-    production zone legend stats: context.production_areas already IS
-    identify_optimized_production_areas()'s own scored_patches list (see
-    pipeline_context.py's own field notes) -- no additional call needed
-    at all now. percent_of_parcel is no longer read off a second
-    identify_optimized_production_areas() call's own return dict; it's
-    computed directly from context.boundary_polygon_utm.area (the
-    property boundary's own real, already-computed footprint) instead --
-    the exact same value that second call's own percent_of_parcel field
-    was itself computed FROM, just reached without re-running production-
-    zone identification a second time. See _production_zone_legend_
-    stats()'s own docstring.
+    No per-feature legend/reporting data is derived here anymore. The icon
+    legend render_layout_map() now draws carries NO data in any label (see
+    that function's own LEGEND docstring section), so this function no longer
+    computes production acreage/percent-of-parcel display strings, and the
+    return dict below carries no per-feature legend-stats key (or any
+    replacement). Everything the report generator needs stays on its own
+    upstream source -- production acreage/rank on context.production_areas,
+    water id/score on context.selected_water_zone, tree rank/score/acres on
+    context.tree_zone_patches, keypoints on context.keypoints, road branch
+    figures on the road_corridor Features below, structure score on the
+    structure_site Feature -- and wiring the report generator to those sources
+    is separate, out-of-scope work.
 
     water_zone is context.selected_water_zone directly -- water_
     suitability.fetch_and_select_optimal_water_zone()'s own return value
@@ -1356,10 +1625,6 @@ def fetch_layout_layers(
         canopy_height=parcel_data.canopy_height,
     )
 
-    production_zone_legend_stats = _production_zone_legend_stats(
-        context.production_areas, context.boundary_polygon_utm.area / SQUARE_METERS_PER_ACRE
-    )
-
     water_zone = context.selected_water_zone
 
     road_corridor_candidates = identify_road_corridor_candidates(
@@ -1446,14 +1711,13 @@ def fetch_layout_layers(
     return {
         "dem": context.dem,
         "production_areas": context.production_areas,
-        "production_zone_legend_stats": production_zone_legend_stats,
         "water_zone": water_zone,
         "road_corridor": road_corridor_features,
         "tree_zone_result": tree_zone_result,
         "structure_site": structure_site,
         # context.keypoints IS keypoint_detection.detect_keypoints()'s own
         # per-valley list (see pipeline_context.py's field notes) -- carried
-        # through to render_layout_map() for a marker per keypoint, and to the
+        # through to render_layout_map() for an asterisk per keypoint, and to the
         # report generator for narration. No second computation here.
         "keypoints": context.keypoints,
         "water_features": water_features,
@@ -1490,7 +1754,6 @@ def render_layout_map(
 
     dem = layers["dem"]
     scored_patches = layers["production_areas"]
-    zone_stats = layers["production_zone_legend_stats"]
     water_zone = layers["water_zone"]
     road_corridor_features = layers["road_corridor"]
     tree_zone_result = layers["tree_zone_result"]
@@ -1549,10 +1812,24 @@ def render_layout_map(
 
     # z-order, back to front: halo mask, streams, production zone contours,
     # water zone ripples, road corridor line, tree zone hatch, the water/tree
-    # exclusion fence loops (EXCLUSION_FENCE_ZORDER, above every zone
-    # fill -- see that constant's own comment), structure site pin, numbered
-    # markers, the boundary fence (FENCE_ZORDER, above the numbered markers --
-    # see that constant's own comment), legend/basemap note.
+    # exclusion fence loops (EXCLUSION_FENCE_ZORDER, above every zone fill --
+    # see that constant's own comment), keypoint asterisks, structure site pin,
+    # the boundary fence (FENCE_ZORDER, above the structure pin -- see that
+    # constant's own comment), then the icon legend and basemap note on top.
+    #
+    # Each layer sets a presence flag as it draws; the legend is assembled ONCE
+    # after all drawing completes, in a fixed KSOP order that is deliberately
+    # NOT the draw order (see this module's own LEGEND docstring section). One
+    # entry per feature regardless of how many zones/branches it drew; a feature
+    # that drew nothing contributes none.
+    drew_keypoints = False
+    drew_production = False
+    drew_water = False
+    drew_road = False
+    drew_tree = False
+    drew_structure = False
+    drew_fencing = False
+
     if not halo_mask.is_empty:
         plot_polygon(halo_mask, ax=ax, add_points=False, facecolor=HALO_COLOR, edgecolor="none", alpha=HALO_ALPHA, zorder=10)
 
@@ -1566,9 +1843,6 @@ def render_layout_map(
             for line in stream_geom.geoms:
                 plot_line(line, ax=ax, add_points=False, color=STREAM_COLOR, linewidth=1.0, alpha=0.8, zorder=20)
 
-    legend_entries: list[str] = []
-    marker_number = 1
-
     # Boundary fencing (fencing.identify_fencing()'s own "perimeter_fencing" layer,
     # fence_type="boundary") replaces this module's former plain boundary stroke
     # outright -- no fallback to the old solid line, since this layer always returns
@@ -1581,19 +1855,19 @@ def render_layout_map(
     # water/tree zone fences below can be trimmed where they coincide with it. The
     # boundary ring itself is drawn AS-IS and is never trimmed against anything -- not
     # against a zone ring, not against another boundary ring: it is only ever an input to
-    # the zone rings' trim mask below, never a target of one.
+    # the zone rings' trim mask below, never a target of one. Every fence type (boundary,
+    # water_zone_exclusion, tree_zone_exclusion) collapses into ONE "Fencing" legend
+    # entry -- drew_fencing flips true as soon as any fence line is drawn, regardless of
+    # segment count.
     fencing_features = fencing_result["fencing_geojson"]["features"]
     boundary_fence_features = [f for f in fencing_features if f["properties"].get("fence_type") == "boundary"]
-    segment_count = fencing_result["segment_count"]
-    multiple_fence_segments = segment_count > 1
     boundary_fence_render_rings = []
-    for i, feature in enumerate(boundary_fence_features, start=1):
+    for feature in boundary_fence_features:
         fence_geom = _reproject_geometry_to_mercator(feature["geometry"])
         render_ring = _angular_simplify_closed_ring(fence_geom, FENCE_RENDER_ANGULAR_SIMPLIFY_TOLERANCE_M)
         boundary_fence_render_rings.append(render_ring)
         _draw_boundary_fence(ax, render_ring)
-        label = f"Boundary Fencing {i}" if multiple_fence_segments else "Boundary Fencing"
-        legend_entries.append(label)
+        drew_fencing = True
 
     # Everything-else fencing (fencing.identify_fencing()'s own "water_zone_exclusion" /
     # "tree_zone_exclusion" fence_types, same "perimeter_fencing" layer -- no road fence
@@ -1615,14 +1889,12 @@ def render_layout_map(
     # would be WRONG on an already-open arc piece (it would force-close a real arc into a
     # bogus loop), so the whole ring is simplified first, while still guaranteed closed,
     # and only THEN differenced/clipped into however many open/closed pieces result. Either
-    # op can split one ring into several line pieces, all drawn, but the legend still gets
-    # exactly one line per FEATURE regardless.
+    # op can split one ring into several line pieces, all drawn -- but they contribute to
+    # the SAME single collapsed "Fencing" legend entry as the boundary fence above,
+    # regardless of fence_type or piece count.
     extra_fence_features = [
         f for f in fencing_features if f["properties"].get("fence_type") in ("water_zone_exclusion", "tree_zone_exclusion")
     ]
-    multiple_tree_zone_fences = (
-        sum(1 for f in extra_fence_features if f["properties"]["fence_type"] == "tree_zone_exclusion") > 1
-    )
 
     # PASS 1 -- simplify every zone ring FIRST, before any of them is trimmed, so pass 2
     # can compare each ring against the others' ORIGINAL (pre-trim) geometry. Deliberately
@@ -1651,7 +1923,6 @@ def render_layout_map(
     # throughout: fencing_geojson keeps every zone's full, untrimmed ring exactly as
     # find_water_zone_fencing()/find_tree_zone_fencing() computed it.
     for index, (feature, render_ring) in enumerate(zip(extra_fence_features, zone_fence_render_rings)):
-        fence_type = feature["properties"]["fence_type"]
         other_rings = boundary_fence_render_rings + [
             ring for other_index, ring in enumerate(zone_fence_render_rings) if other_index != index
         ]
@@ -1668,30 +1939,22 @@ def render_layout_map(
         for line in _iter_line_parts(clipped_ring):
             if line.length > EXCLUSION_FENCE_CLIP_MIN_LENGTH:
                 _draw_boundary_fence(ax, line, zorder=EXCLUSION_FENCE_ZORDER)
-        if fence_type == "water_zone_exclusion":
-            legend_entries.append("Water Zone Fencing")
-        else:  # tree_zone_exclusion -- fencing.tree_zone_fencing_to_geojson()'s own
-            # 1-based candidate_rank property, reused directly rather than re-deriving
-            # a new index here, so "Tree Zone Fencing N" lines up with the same-numbered
-            # "Tree Zone Candidate N" this file already draws elsewhere.
-            rank = feature["properties"]["candidate_rank"]
-            label = f"Tree Zone Fencing {rank}" if multiple_tree_zone_fences else "Tree Zone Fencing"
-            legend_entries.append(label)
+                drew_fencing = True
 
-    multiple_zones = len(scored_patches) > 1
-    for patch, (_, stat_line) in zip(scored_patches, zone_stats):
-        # geometry_wgs84 -- the real, grid-bug-fixed cell-union footprint
-        # (see production_area.py's own module docstring) -- used here
-        # only for label placement; no fill, no boundary stroke drawn for
-        # production zones (see this module's own docstring). The contour
-        # lines below clip against render_fill_polygon_utm instead (same
-        # CRS as contour_lines' lines_utm -- no reprojection needed before
+    # Production zones render as CONTOUR-LINE TEXTURE only -- no fill, no boundary
+    # stroke, no on-map label (there is no numbered marker anymore; several
+    # production zones collapse into one "Production Areas" legend entry with no
+    # per-zone identity on the map, intentionally -- see this module's own
+    # docstring). Every production patch that draws contributes to the single
+    # drew_production flag regardless of rank or count.
+    for patch in scored_patches:
+        # The contour lines below clip against render_fill_polygon_utm (same CRS
+        # as contour_lines' lines_utm -- no reprojection needed before
         # intersecting). render_fill_polygon_utm is a bounded morphological
-        # opening of the cluster's cell mask: it severs a waist-split pinch
-        # (so a reclaimed waist renders as a blank strip) and, being anti-
-        # extensive, leaves an excluded interior (steep/hydric) pocket OPEN
-        # rather than closing over it.
-        geom = _reproject_geometry_to_mercator(patch["geometry_wgs84"])
+        # opening of the cluster's cell mask: it severs a waist-split pinch (so a
+        # reclaimed waist renders as a blank strip) and, being anti-extensive,
+        # leaves an excluded interior (steep/hydric) pocket OPEN rather than
+        # closing over it.
 
         # DISPLAY-ONLY: smooth the production fill's 5m cell-union staircase into
         # a clean curve for contour clipping, then re-clip to the stored
@@ -1722,10 +1985,7 @@ def render_layout_map(
                     zorder=40,
                 )
 
-        label = f"Production Zone {patch['rank']}" if multiple_zones else "Production Zone"
-        _draw_numbered_marker(ax, geom.representative_point(), marker_number)
-        legend_entries.append(f"{marker_number} — {label}, {stat_line}")
-        marker_number += 1
+        drew_production = True
 
     if water_zone is not None:
         # DISPLAY-ONLY ripple geometry: render_fill_polygon_utm is the zone's
@@ -1754,12 +2014,15 @@ def render_layout_map(
             WATER_RIPPLE_SAMPLES_PER_WAVELENGTH,
         )
         if not ripple_lines:
-            # A zone too small for even one wave row to intersect: draw
-            # nothing rather than falling back to the old fill. The numbered
-            # marker below already conveys a zone this small. Logged once.
+            # A zone too small for even one wave row to intersect: draw nothing
+            # rather than falling back to the old fill. There is no marker to
+            # convey a zone this small anymore -- a zone that draws no ripple at
+            # all simply doesn't appear on the map (the "Water System Survey
+            # Area" legend entry still lists, since the layer is present in the
+            # data). Logged once.
             print(
                 f"  Water zone {water_zone['id']}: render opening too small for any ripple "
-                "line row to intersect -- drawing the numbered marker only, no ripple texture."
+                "line row to intersect -- no ripple texture drawn."
             )
         for line in ripple_lines:
             # No fill, no face colour, no boundary stroke -- ripple lines only,
@@ -1774,43 +2037,24 @@ def render_layout_map(
                 alpha=WATER_RIPPLE_ALPHA,
                 zorder=41,
             )
-        # The marker sits on the geometry the ripples were clipped to (the
-        # render opening, not the real blocky footprint) -- representative_
-        # point() is guaranteed by shapely to fall within its own geometry, so
-        # this can never land outside the rippled area even though the
-        # opening's own representative point can differ from geometry_wgs84's.
-        marker_point = render_fill_geom.representative_point()
-        assert render_fill_geom.contains(marker_point) or render_fill_geom.intersects(marker_point), (
-            "water zone marker point must fall on the geometry actually drawn"
-        )
-        _draw_numbered_marker(ax, marker_point, marker_number)
-        legend_entries.append(
-            f"{marker_number} — Water System, Zone {water_zone['id']}, "
-            f"score {water_zone['suitability_score']}"
-        )
-        marker_number += 1
+        drew_water = True
 
     # Every branch, trunk and spur(s) alike -- NOT just road_corridor_
     # features[0] -- drawn with IDENTICAL styling (see this module's own
     # ROAD CORRIDOR STYLE docstring section for why no branch is visually
-    # distinguished or gets its own numbered marker on the map). Each
-    # branch's own geometry is smoothed INDEPENDENTLY (_smooth_line_for_
-    # render() preserves a line's own first/last coordinate exactly, which
-    # for a spur is its real join point on the parent branch) -- road_
-    # corridor_features' real geometry/properties (length_m, avg_grade_pct,
-    # everything the narrative report uses) are completely untouched by
-    # this, only the copy handed to the plotting calls is
-    # simplified/smoothed.
+    # distinguished on the map). Every branch collapses into ONE "Suggested
+    # Road Corridor" legend entry, trunk and spur alike. Each branch's own
+    # geometry is smoothed INDEPENDENTLY (_smooth_line_for_render() preserves a
+    # line's own first/last coordinate exactly, which for a spur is its real
+    # join point on the parent branch) -- road_corridor_features' real
+    # geometry/properties (length_m, avg_grade_pct, everything the narrative
+    # report uses) are completely untouched by this, only the copy handed to
+    # the plotting calls is simplified/smoothed.
     for road_corridor in road_corridor_features:
         geom = _reproject_geometry_to_mercator(road_corridor["geometry"])
-        props = road_corridor["properties"]
         render_geom = _smooth_line_for_render(geom)
         _draw_road_corridor(ax, render_geom)
-        role = props["branch_role"].replace("_", " ")
-        legend_entries.append(
-            f"Road Corridor ({role}) — {props['length_ft']} ft, {props['avg_grade_pct']}% grade, "
-            f"{props['newly_served_acres']} ac newly served"
-        )
+        drew_road = True
 
     # Tree zone candidates: possibly several, ranked (same "possibly-
     # multiple" shape as production zones and the road network's own
@@ -1827,8 +2071,10 @@ def render_layout_map(
     # (_reproject_utm_geometry_to_mercator(), same pattern the water
     # zone's own fill above already uses), never the real geometry_wgs84
     # used for scoring/eligibility/the narrative report.
+    # Every tree candidate collapses into ONE "Tree Crop Areas" legend entry
+    # regardless of count -- no numbered marker, no per-zone identity on the map
+    # (intentional -- see this module's own docstring).
     tree_zone_patches = tree_zone_result.get("patches", []) if tree_zone_result else []
-    multiple_tree_zones = len(tree_zone_patches) > 1
     for patch in tree_zone_patches:
         render_fill_geom = _reproject_utm_geometry_to_mercator(patch["render_fill_polygon_utm"], dem["crs"])
         polygons = render_fill_geom.geoms if render_fill_geom.geom_type == "MultiPolygon" else [render_fill_geom]
@@ -1844,53 +2090,36 @@ def render_layout_map(
                 hatch=TREE_ZONE_HATCH,
                 zorder=42.8,
             )
-        label = f"Tree Zone Candidate {patch['rank']}" if multiple_tree_zones else "Tree Zone Candidate"
-        # The marker sits on the geometry actually drawn above (the hull,
-        # not the real footprint) -- same "marker matches the visible
-        # shape" reasoning the water zone's own marker placement already
-        # uses.
-        _draw_numbered_marker(ax, render_fill_geom.representative_point(), marker_number)
-        legend_entries.append(
-            f"{marker_number} — {label}, score {patch['tree_suitability_score']}/100, {patch['area_acres']} ac"
-        )
-        marker_number += 1
+        drew_tree = True
 
     # Keypoints: the inflection in each primary valley's long profile
-    # (keypoint_detection.py). MARKER ONLY -- the keyline contour is
+    # (keypoint_detection.py). ASTERISK ONLY -- the keyline contour is
     # deliberately out of scope here, not drawn. A plain black asterisk per
     # keypoint (_draw_keypoint_marker()), IDENTICAL for on-parcel and off-parcel
     # (on_parcel/distance_outside_boundary_m stay on the dicts for the report,
     # but the map draws no distinction). Each geometry is a GeoJSON Point
     # (geometry_wgs84) reprojected to Mercator in one hop, the same reprojection
     # path every other point layer uses. Drawn after the tree-zone hatch so the
-    # markers sit on top of the zone fills.
+    # asterisks sit on top of the zone fills.
     #
-    # Fully DECOUPLED from the numbered-marker machinery: keypoints never read or
-    # increment marker_number, never go through _draw_numbered_marker(), and
-    # contribute exactly ONE index-independent legend line ("Candidate
-    # Keypoints", asterisk-prefixed) regardless of how many keypoints exist --
-    # and none at all when there are none. Adding or removing keypoints therefore
-    # changes nothing else on the map (numbering, positions, legend of every
-    # other layer are untouched). This mirrors the road network's own
-    # one-entry-regardless-of-count treatment.
+    # Keypoints contribute exactly ONE "Keypoint Candidates" legend entry
+    # regardless of how many exist -- and none when there are none. The asterisk
+    # IS the on-map symbol; the legend's own keypoint handle mirrors it (the same
+    # (6, 2, 0) marker tuple). This mirrors every other layer's one-entry-per-
+    # feature treatment.
     for keypoint in keypoints:
         point = _reproject_geometry_to_mercator(keypoint["geometry_wgs84"])
         _draw_keypoint_marker(ax, point)
-    if keypoints:
-        # The legend is a single plain-text box (see below), so a leading Unicode
-        # asterisk (U+2733, present in matplotlib's default DejaVu Sans) renders
-        # as text -- no drawn glyph needed. One line, symbol before the text.
-        legend_entries.append("✳ Candidate Keypoints")
+        drew_keypoints = True
 
     if structure_site is not None:
         # Real, scored footprint still drives placement -- only what gets
         # drawn at its representative_point() changes (see this module's
         # own STRUCTURE SITE STYLE docstring section): a single fixed-size
-        # map-pin icon, not a filled polygon, and no numbered circle
-        # marker for this zone (there's nothing else on the map for its
-        # legend number to point to).
+        # map-pin icon, not a filled polygon. This is NOT a numbered marker (it
+        # never was); the barn/silo glyph inside the pin is also the legend's
+        # own "Permanent Building Site" icon.
         geom = _reproject_geometry_to_mercator(structure_site["geometry"])
-        props = structure_site["properties"]
         anchor_point = geom.representative_point()
         pin = AnnotationBbox(
             structure_site_icon(),
@@ -1900,23 +2129,48 @@ def render_layout_map(
             zorder=43,
         )
         ax.add_artist(pin)
-        legend_entries.append(f"Structure Site, score {props['suitability_score']}")
+        drew_structure = True
 
     ax.set_title("Proposed Farm Layout", fontsize=16, fontweight="bold", pad=14)
 
-    if legend_entries:
-        legend_text = "\n".join(legend_entries)
-        ax.text(
-            0.02,
-            0.02,
-            legend_text,
-            transform=ax.transAxes,
+    # Icon legend: assembled ONCE, here, after all drawing -- in the fixed KSOP
+    # order below, which is deliberately NOT the draw order (fences -> production
+    # -> water -> road -> tree -> keypoints -> structure). One entry per feature
+    # that drew anything; a feature that drew nothing contributes none, so an
+    # empty map produces an empty legend and no frame (the same guard the old
+    # plain-text box used). Each handle is a DRAWN symbol matching the map (see
+    # _legend_handle_for()); no label carries any per-feature data.
+    legend_features = [
+        ("keypoints", drew_keypoints),
+        ("production", drew_production),
+        ("water", drew_water),
+        ("road", drew_road),
+        ("tree", drew_tree),
+        ("structure", drew_structure),
+        ("fencing", drew_fencing),
+    ]
+    legend_pairs = [_legend_handle_for(name) for name, present in legend_features if present]
+    if legend_pairs:
+        handles = [handle for handle, _label in legend_pairs]
+        labels = [label for _handle, label in legend_pairs]
+        # Map the old ax.text box's appearance onto ax.legend(): lower-left at
+        # axes (0.02, 0.02), fontsize 8.5, white facecolor, #333333 edge,
+        # framealpha 0.9, borderpad 0.6. Same zorder as before (60) so it stays
+        # above the boundary fence at FENCE_ZORDER (drawn last, it wins the tie).
+        legend = ax.legend(
+            handles,
+            labels,
+            handler_map=_LEGEND_HANDLER_MAP,
+            loc="lower left",
+            bbox_to_anchor=(0.02, 0.02),
             fontsize=8.5,
-            va="bottom",
-            ha="left",
-            zorder=60,
-            bbox=dict(boxstyle="round,pad=0.6", facecolor="white", edgecolor="#333333", alpha=0.9),
+            facecolor="white",
+            edgecolor="#333333",
+            framealpha=0.9,
+            borderpad=0.6,
         )
+        legend.set_zorder(60)
+        legend.get_frame().set_boxstyle("round,pad=0.6")  # rounded corners, matching the old box
 
     if basemap_note:
         ax.text(
