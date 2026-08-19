@@ -722,7 +722,9 @@ def _nd_run(
 
 def _assert_one_decimal(value, path: str) -> None:
     """Every acreage and percentage this block emits is rounded to 1
-    decimal place -- the precision emitted is the precision narrated."""
+    decimal place -- the precision emitted is the precision narrated.
+    (The 'scales' block's own band edges are declarations, not
+    measurements, and are whole numbers regardless.)"""
     if isinstance(value, bool) or value is None or isinstance(value, str):
         return
     if isinstance(value, (int, float)):
@@ -769,7 +771,7 @@ assert json.loads(nd_flat_json) == nd_flat_result["narrative_data"], (
     "narrative_data must survive a plain json.dumps()/json.loads() round trip unchanged -- no numpy "
     "scalars, no arrays, no geometry"
 )
-assert set(nd_flat_result["narrative_data"]) == {"parcel", "ceiling", "gates", "patches"}
+assert set(nd_flat_result["narrative_data"]) == {"scales", "parcel", "ceiling", "gates", "patches"}
 _assert_one_decimal(nd_flat_result["narrative_data"], "narrative_data")
 print(
     "narrative_data: purely additive (every pre-existing top-level key and every scored-patch field "
@@ -908,7 +910,7 @@ for _field in ("farm_roads_excluded_acres", "farm_roads_only_excluded_acres"):
     assert nd_u["gates"][_field] is None, f"{_field} must be None when the road check never ran, not 0.0"
 assert nd_u["patches"], "expected the unavailable-data fixture to still produce patches"
 for _p in nd_u["patches"]:
-    for _field in ("hydric_pct", "soil_components", "drainage_class"):
+    for _field in ("source_region_hydric_pct", "soil_components", "drainage_class"):
         assert _p[_field] is None, (
             f"patch {_p['id']}'s {_field} must be None when no SSURGO data reached this pipeline -- "
             f"got {_p[_field]!r}, which a narrative would read as a measurement"
@@ -1124,6 +1126,15 @@ nd_setback_off = nd_flat_result["narrative_data"]["gates"]
 
 assert nd_setback_on["boundary_setback_excluded_acres"] > 0.0
 assert nd_setback_off["boundary_setback_excluded_acres"] == 0.0
+# The constraint names itself in feet regardless of what it cost -- and
+# PRODUCTION_BOUNDARY_SETBACK_METERS is defined AS 10 * METERS_PER_FOOT, so
+# this is the constant's native unit rather than a lossy conversion. (Under
+# this file's global setback=0 patch the cost reads 0.0 while the constant
+# still reports 10.0 ft -- that patch swaps the FUNCTION, not the constant,
+# and identify_optimized_production_areas() never overrides the setback on
+# the real path.)
+assert nd_setback_on["boundary_setback_feet"] == 10.0
+assert nd_setback_off["boundary_setback_feet"] == 10.0
 assert nd_setback_on["boundary_setback_only_excluded_acres"] is None, (
     "what the setback costs NET of the canopy/hydric/road gates is genuinely unknown -- those gates are "
     "never evaluated inside the setback ring -- so this must be None, not 0.0"
@@ -1181,7 +1192,10 @@ assert [p["rank"] for p in nd_show["patches"]] == [1, 2, 3], "patches must be em
 # applying. Both facts have to be readable, and they are.
 assert nd_show["gates"]["hydric_excluded_acres"] > 0.0
 assert nd_show["gates"]["hydric_only_excluded_acres"] == 0.0
-assert all(p["hydric_pct"] is not None and p["hydric_pct"] > 0.0 for p in nd_show["patches"])
+assert all(
+    p["source_region_hydric_pct"] is not None and p["source_region_hydric_pct"] > 0.0
+    for p in nd_show["patches"]
+)
 # The road check ran against a genuinely clean parcel: available, measured zero.
 assert nd_show["gates"]["road_data_available"] is True
 assert nd_show["gates"]["farm_roads_excluded_acres"] == 0.0
@@ -1190,6 +1204,149 @@ json.dumps(nd_show)
 
 print("\nnarrative_data, in full, on a synthetic three-patch fixture:")
 print(json.dumps(nd_show, indent=2))
+
+# --- N11. area_score / compactness_score resolve the size ambiguity ---
+# size_factor blends acreage and shape, so a single number cannot say
+# WHICH one is holding a patch back. The N5 fixture already carries the
+# exact pair that makes the point: a 20x20 block and a 20x5 sliver on
+# identical ground. Splitting size_factor into its two halves is what lets
+# a narrative say "small" or "awkwardly shaped" instead of guessing.
+
+for _p in nd_fac_patches:
+    for _name in ("area_score", "compactness_score"):
+        assert 0.0 <= _p[_name] <= 100.0, f"patch {_p['id']} {_name} = {_p[_name]} is outside 0-100"
+
+# The 20x20 block and the 20x20 steep block are the same size and shape --
+# their size halves must match exactly, isolating the comparison below.
+assert _nd_A["area_score"] == _nd_B["area_score"]
+assert _nd_A["compactness_score"] == _nd_B["compactness_score"]
+# Against the sliver: both halves are worse, and compactness is what
+# collapses -- the sliver is not merely smaller, it is a bad shape.
+assert _nd_A["area_score"] > _nd_C["area_score"]
+assert _nd_A["compactness_score"] > _nd_C["compactness_score"]
+assert (_nd_A["compactness_score"] - _nd_C["compactness_score"]) >= 20.0, (
+    "a same-ground sliver must read as substantially less compact than a solid block -- that is the "
+    f"ambiguity these two fields exist to resolve: {_nd_A['compactness_score']} vs "
+    f"{_nd_C['compactness_score']}"
+)
+print(
+    f"narrative_data size decomposition: the 20x20 block reads area {_nd_A['area_score']} / compactness "
+    f"{_nd_A['compactness_score']} and the same-ground sliver area {_nd_C['area_score']} / compactness "
+    f"{_nd_C['compactness_score']} -- both fold into size_factor {_nd_A['factors']['size_factor']} vs "
+    f"{_nd_C['factors']['size_factor']}, which alone could not tell 'small' from 'a sliver'."
+)
+
+
+# --- N12. aspect_available pins the flat-ground default ---------------
+# STEP 4 defaults aspect_factor to a neutral 1.0 on ground too flat for a
+# downhill direction. On a 0-100 scale that arrives as a perfect 100.0 --
+# indistinguishable from a genuinely ideal southern aspect unless this
+# flag says otherwise.
+
+nd_availability = nd_flat_result["narrative_data"]["patches"]
+assert nd_availability, "expected the dead-flat fixture to produce a patch"
+for _p in nd_availability:
+    assert _p["aspect_available"] is False, (
+        "dead-flat ground has no measurable aspect -- aspect_available must say so"
+    )
+    assert _p["factors"]["aspect_factor"] == 100.0, (
+        "STEP 4's neutral flat-ground default must still surface as 100.0 -- the point is that the flag, "
+        "not the value, is what tells a reader it was defaulted"
+    )
+    assert _p["dominant_aspect"] is None and _p["aspect_consistency_pct"] is None
+# ...and the check has teeth: the sloped fixtures report it True.
+assert all(p["aspect_available"] is True for p in nd_fac_patches)
+print(
+    "narrative_data aspect_available: dead-flat ground reports False alongside the neutral "
+    "aspect_factor 100.0 it was defaulted to (and dominant_aspect None), while every sloped patch "
+    "reports True -- the two cases are no longer indistinguishable."
+)
+
+
+# --- N13. narrative_data is self-sufficient ---------------------------
+# The wiring session reads this block and nothing else. Strip every other
+# key off the result and confirm the block still answers "what makes the
+# selected area(s) suitable for production?" on its own -- parcel totals,
+# gate contrast, ceiling outcome, and per-patch acreage/score/factors all
+# reachable without touching scored_patches or any top-level summary field.
+
+nd_isolated = nd_show_result["narrative_data"]  # the ONLY thing carried forward
+_stripped = {"narrative_data": nd_isolated}
+assert set(_stripped) == {"narrative_data"}
+
+# Everything the six pre-existing top-level keys would have supplied, and
+# what answers it from inside the block alone.
+assert _stripped["narrative_data"]["parcel"]["total_acres"] > 0                    # parcel_acres
+assert _stripped["narrative_data"]["parcel"]["selected_acres"] > 0                 # total_selected_acreage
+assert _stripped["narrative_data"]["parcel"]["selected_pct_of_parcel"] > 0         # percent_of_parcel
+assert isinstance(_stripped["narrative_data"]["ceiling"]["bound"], bool)           # ceiling outcome
+assert _stripped["narrative_data"]["ceiling"]["acres_trimmed"] >= 0.0              # total_cells_removed, in acres
+assert len(_stripped["narrative_data"]["patches"]) == 3                            # scored_patches, count
+for _p in _stripped["narrative_data"]["patches"]:
+    for _needed in (
+        "area_acres", "percent_of_parcel", "score", "factors", "rank",
+        "area_score", "compactness_score", "avg_slope_pct", "aspect_available",
+        "dominant_aspect", "aspect_consistency_pct", "source_region_hydric_pct",
+        "elevation_percentile_of_parcel", "hole_count", "hole_acres",
+        "from_waist_split", "source_patch_id",
+    ):
+        assert _needed in _p, f"patch entry cannot answer for {_needed} without reaching outside the block"
+# The comparative half -- "suitable compared to what was rejected".
+for _needed in (
+    "canopy_excluded_acres", "canopy_only_excluded_acres",
+    "hydric_excluded_acres", "hydric_only_excluded_acres",
+    "farm_roads_excluded_acres", "farm_roads_only_excluded_acres",
+    "boundary_setback_excluded_acres", "boundary_setback_feet",
+    "universe", "soil_data_available", "canopy_data_available", "road_data_available",
+):
+    assert _needed in _stripped["narrative_data"]["gates"], _needed
+# And the scale every one of those scores is on.
+assert _stripped["narrative_data"]["scales"]["direction"] == "higher_is_better"
+print(
+    "narrative_data self-sufficiency: with every other result key deleted, the block still supplies "
+    "parcel totals, the ceiling outcome, the full gate contrast, and per-patch acreage/score/factors -- "
+    "nothing reaches back into scored_patches or the top-level summary fields."
+)
+
+
+# --- N14. the declared bands cover the range, and every score lands ---
+# The bands surface close to verbatim in the narrative ("good slope
+# suitability"), so a score falling between two bands would leave the
+# sentence with no adjective at all. Bounds are lower-inclusive /
+# upper-exclusive with the top band closing at 100, which is what makes
+# them gapless over the continuous, 1-decimal-place values this block
+# actually emits -- closed integer bands would strand 39.5.
+
+_bands = nd_show["scales"]["bands"]
+_ordered_bands = sorted(_bands.items(), key=lambda kv: kv[1][0])
+assert nd_show["scales"]["range"] == [0.0, 100.0]
+assert nd_show["scales"]["band_bounds"] == "lower_inclusive_upper_exclusive_last_band_inclusive"
+assert _ordered_bands[0][1][0] == 0.0 and _ordered_bands[-1][1][1] == 100.0, "bands must span the whole range"
+for _left, _right in zip(_ordered_bands, _ordered_bands[1:]):
+    assert _left[1][1] == _right[1][0], (
+        f"bands must be gapless and non-overlapping: {_left[0]} ends at {_left[1][1]}, "
+        f"{_right[0]} starts at {_right[1][0]}"
+    )
+
+
+def _band_of(value: float) -> str:
+    for _name, (_low, _high) in _ordered_bands:
+        if _low <= value < _high or (_high == 100.0 and value == 100.0):
+            return _name
+    raise AssertionError(f"{value} falls in no declared band")
+
+
+_banded = []
+for _p in nd_fac_patches:
+    for _label, _value in [("score", _p["score"])] + sorted(_p["factors"].items()) + [
+        ("area_score", _p["area_score"]),
+        ("compactness_score", _p["compactness_score"]),
+    ]:
+        _banded.append((_p["id"], _label, _value, _band_of(_value)))
+assert len(_banded) == len(nd_fac_patches) * 6
+print("narrative_data score bands -- every emitted score and factor on the good/steep/sliver fixture:")
+for _pid, _label, _value, _band in _banded:
+    print(f"    patch {_pid}  {_label:<18} {_value:>6} -> {_band}")
 
 
 print("\nAll production_area_ceiling checks passed.")

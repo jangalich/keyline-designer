@@ -73,7 +73,9 @@ from shapely import contains_xy
 from dem_data import get_dem_for_boundary
 from production_area import (
     MAX_PRODUCTION_SLOPE_PCT,
+    METERS_PER_FOOT,
     MIN_PRODUCTION_AREA_ACRES,
+    PRODUCTION_BOUNDARY_SETBACK_METERS,
     _CANOPY_CHECK_UNCHECKED,
     _ROAD_CHECK_UNCHECKED,
     _SOIL_CHECK_UNCHECKED,
@@ -293,6 +295,41 @@ _COMPASS_WORDS = (
 # the dominant aspect names.
 _ASPECT_CONSISTENCY_WINDOW_DEG = 45.0
 
+# How every score and factor in this block is to be read -- declared ONCE,
+# here, rather than repeated per field or explained in prose next to each
+# number. A declared scale plus "higher is better" is everything a
+# narrative needs to interpret a value; the better form of "why" is the
+# decomposition itself (size_factor into area_score and compactness_score),
+# which is data the narrative reasons FROM rather than a sentence this
+# module writes FOR it.
+#
+# BAND BOUNDS: lower-inclusive, upper-EXCLUSIVE, with the top band closing
+# at 100. Every score here is a float rounded to 1 decimal place, so closed
+# integer bands ([0, 39], [40, 59], ...) would leave 39.5 belonging to no
+# band at all. The cut points -- 40, 60, 80 -- are unchanged; only the
+# interval convention is stated explicitly so the bands are gapless and
+# non-overlapping across the whole continuous range.
+#
+# The cuts are deliberately NOT even quartiles: 25/50/75 would call a 62.4
+# merely "fair", which understates genuinely workable ground. Putting the
+# "good" floor at 60 matches how these composites actually distribute.
+# CONFIGURABLE -- tune against a real property, same as every other
+# threshold in this pipeline.
+_SCORE_BANDS = {
+    "poor": [0.0, 40.0],
+    "fair": [40.0, 60.0],
+    "good": [60.0, 80.0],
+    "excellent": [80.0, 100.0],
+}
+
+_SCALES = {
+    "range": [0.0, 100.0],
+    "direction": "higher_is_better",
+    "bands": _SCORE_BANDS,
+    "band_bounds": "lower_inclusive_upper_exclusive_last_band_inclusive",
+    "applies_to": ["score", "factors.*", "area_score", "compactness_score"],
+}
+
 
 def _round1(value):
     """1 decimal place, or None passed straight through -- the single
@@ -421,20 +458,33 @@ def _patch_narrative_data(
         )
         aspect_consistency_pct = int(round(within / len(defined_aspects) * 100.0))
 
-    # hydric_pct: what share of the STEP 1 source region this patch traces
-    # back to was hydric soil and excluded before the patch could ever
-    # form. The patch's OWN cells are hydric-free by construction (the gate
-    # ran cell-by-cell at STEP 1), so a hydric figure over the patch itself
-    # would be a tautological 0.0; the meaningful number is how much wet
-    # ground the patch is sitting next to. None -- never 0.0 -- when the
-    # SSURGO fetch never ran.
+    # source_region_hydric_pct: what share of the STEP 1 source region this
+    # patch traces back to was hydric soil and excluded before the patch
+    # could ever form. NAMED for what it measures, deliberately: the
+    # patch's OWN cells are hydric-free by construction (the gate ran
+    # cell-by-cell at STEP 1), so a hydric figure over the patch itself
+    # would be a tautological 0.0. The meaningful number is how much wet
+    # ground the patch is sitting NEXT TO -- and the field name has to
+    # carry that, because a docstring will not survive contact with
+    # whoever wires the narration. None -- never 0.0 -- when the SSURGO
+    # fetch never ran.
     if not step1["soil_data_available"]:
-        hydric_pct = None
+        source_region_hydric_pct = None
     else:
         source_region = step1["slope_source_labels"] == patch["source_patch_id"]
         source_cells = int(source_region.sum())
         hydric_cells = int((source_region & step1["hydric_hit"]).sum())
-        hydric_pct = _round1(hydric_cells / source_cells * 100.0) if source_cells else None
+        source_region_hydric_pct = _round1(hydric_cells / source_cells * 100.0) if source_cells else None
+
+    # hole_count / hole_acres: real ground fully enclosed by this patch's
+    # own eligible cells and excluded from it -- STEP 3's Part-2 true-hole
+    # detection, already computed and attached as 'hole_footprints'. It
+    # alters no geometry and feeds nothing downstream; it exists precisely
+    # to answer "what is wrong with this otherwise-suitable ground" (a wet
+    # spot mid-field, a rock outcrop), which is exactly the narrative's
+    # question. Read off the footprints, not re-detected.
+    hole_footprints = patch["hole_footprints"]
+    hole_acres = _round1(sum(f.area for f in hole_footprints) / SQUARE_METERS_PER_ACRE)
 
     # elevation_percentile_of_parcel: where this patch's mean elevation
     # sits within the parcel's own low-to-high range, as a linear position
@@ -458,8 +508,19 @@ def _patch_narrative_data(
         "slope_min_pct": _round1(min(patch_slopes)),
         "slope_max_pct": _round1(max(patch_slopes)),
         "slope_median_pct": _round1(float(np.median(patch_slopes))),
+        # The mean is what slope_factor was actually computed from, so it
+        # belongs beside it -- min/max/median describe the spread, this one
+        # explains the score. STEP 4 already computed and rounded it.
+        "avg_slope_pct": _round1(patch["avg_slope_pct"]),
         "dominant_aspect": dominant_aspect,
         "aspect_consistency_pct": aspect_consistency_pct,
+        # aspect_available distinguishes a measured aspect_factor from the
+        # neutral 1.0 STEP 4 defaults to on ground too flat for a
+        # well-defined downhill direction. Without it an aspect_factor of
+        # 100.0 cannot be told from "not measured" -- the same class of
+        # silent falsehood the null-not-zero rule exists to prevent, and
+        # equally undetectable by the reader.
+        "aspect_available": bool(patch["aspect_available"]),
         "score": _round1(patch["suitability_score"]),
         # Every component of STEP 4's composite, all three of them, each
         # rescaled from its native 0-1 to 0-100 so they are directly
@@ -472,6 +533,14 @@ def _patch_narrative_data(
             "size_factor": _round1(patch["size_factor"] * 100.0),
             "aspect_factor": _round1(patch["aspect_factor"] * 100.0),
         },
+        # size_factor's own two halves, on the same 0-100 higher-is-better
+        # scale. Without them a size_factor of 35 is ambiguous between
+        # "this patch is small" and "this patch is a sliver" -- different
+        # sentences with different management implications. Both were
+        # already computed inside score_production_areas(); this reads
+        # them, it does not recompute the geometry.
+        "area_score": _round1(patch["area_score"] * 100.0),
+        "compactness_score": _round1(patch["compactness_score"] * 100.0),
         # SSURGO component names and drainage class are NOT available on
         # this path: _fetch_disqualifying_soil_union() fetches the
         # component rows, reduces them to a set of disqualifying mukeys,
@@ -483,8 +552,10 @@ def _patch_narrative_data(
         # empty list) so a consumer cannot read absence as a measurement.
         "soil_components": None,
         "drainage_class": None,
-        "hydric_pct": hydric_pct,
+        "source_region_hydric_pct": source_region_hydric_pct,
         "elevation_percentile_of_parcel": elevation_percentile,
+        "hole_count": len(hole_footprints),
+        "hole_acres": hole_acres,
         "from_waist_split": bool(from_waist_split),
         "source_patch_id": int(patch["source_patch_id"]),
     }
@@ -508,9 +579,23 @@ def build_narrative_data(
     suggests" strings. See this section's own header comment for the two
     rules (FINAL; DERIVED, NEVER RECOMPUTED) every field obeys.
 
+    SELF-SUFFICIENT BY DESIGN. A caller wiring the report reads this block
+    and nothing else -- it never has to reach into 'scored_patches',
+    'parcel_acres', 'percent_of_parcel', 'total_selected_acreage',
+    'production_ceiling_target_met', or 'total_cells_removed' to finish a
+    sentence. The overlap with those top-level keys is INTENDED, not
+    redundancy to collapse: they serve existing KSOP consumers and must
+    keep their own shape, this block serves the report and must keep its
+    own, and neither may come to depend on the other. The one deliberate
+    non-equivalence is 'ceiling.bound' -- see that field.
+
     Shape:
 
         {
+          'scales': {                 # how to read every score/factor below,
+                                      #   declared once instead of per field
+            'range', 'direction', 'bands', 'band_bounds', 'applies_to',
+          },
           'parcel': {
             'total_acres',            # the real, full parcel boundary
             'slope_passing_acres',    # STEP 1's slope_only_mask: cleared
@@ -523,7 +608,13 @@ def build_narrative_data(
           },
           'ceiling': {
             'cap_pct_of_parcel',      # the configured cap
-            'bound',                  # did the cap actually remove ground
+            'bound',                  # did the cap actually remove ground.
+                                      #   DELIBERATELY not the existing
+                                      #   'production_ceiling_target_met'
+                                      #   flag: the two differ at exact
+                                      #   equality, and "did it take ground
+                                      #   away" is the question a narrative
+                                      #   needs answered
             'acres_trimmed',          # 0.0 when it did not
           },
           'gates': { ... see the OVERLAP contract below ... },
@@ -575,6 +666,13 @@ def build_narrative_data(
     road_data_available is False, that gate's acreages and every
     soil-derived per-patch field are explicitly None. 0.0 would read as a
     measured absence.
+
+    NO REASON STRINGS. Nothing here explains itself in prose. A declared
+    scale plus higher-is-better tells a narrative how to read any number,
+    and decomposing a composite into its parts (size_factor into
+    area_score and compactness_score) is the better form of "why" --
+    data the narrative reasons FROM, not a sentence this module writes FOR
+    it. This module emits values; the report writes prose.
     """
     step1 = optimized["step1"]
     area_per_cell = cell_area_acres(dem)
@@ -625,6 +723,9 @@ def build_narrative_data(
     acres_trimmed = round(int(optimized["cells_removed"]) * area_per_cell, 1)
 
     return {
+        # How to read every score and factor below -- declared once, so no
+        # value needs a scale explanation attached to it.
+        "scales": _SCALES,
         "parcel": {
             "total_acres": _round1(parcel_acres),
             "slope_passing_acres": _mask_acres(slope_only_mask),
@@ -638,6 +739,14 @@ def build_narrative_data(
             "acres_trimmed": acres_trimmed,
         },
         "gates": {
+            # Every acreage in this block is a share of ON-PARCEL GROUND
+            # THAT CLEARS THE SLOPE GATE -- not of the whole parcel. That
+            # is parcel.slope_passing_acres PLUS
+            # boundary_setback_excluded_acres; it is NOT parcel.total_acres.
+            # Named here rather than folded into each field name because
+            # the suffix would be factually wrong on the setback figure,
+            # whose own exclusions sit OUTSIDE slope_passing by definition.
+            "universe": "slope_passing_on_parcel",
             "canopy_excluded_acres": _mask_acres(canopy_hit) if canopy_available else None,
             "canopy_only_excluded_acres": _mask_acres(only_canopy) if canopy_available else None,
             "hydric_excluded_acres": _mask_acres(hydric_hit) if soil_available else None,
@@ -646,6 +755,14 @@ def build_narrative_data(
             "farm_roads_only_excluded_acres": _mask_acres(only_road) if road_available else None,
             "boundary_setback_excluded_acres": _mask_acres(setback_excluded),
             "boundary_setback_only_excluded_acres": None,
+            # The constraint's own size, so a narrative can name it rather
+            # than only report what it cost. Imperial, per this block's
+            # units rule -- and PRODUCTION_BOUNDARY_SETBACK_METERS is
+            # itself defined as 10 * METERS_PER_FOOT, so feet is the
+            # constant's native unit, not a conversion of it.
+            # identify_optimized_production_areas() never overrides the
+            # setback, so this is the distance actually applied on this path.
+            "boundary_setback_feet": _round1(PRODUCTION_BOUNDARY_SETBACK_METERS / METERS_PER_FOOT),
             "soil_data_available": soil_available,
             "canopy_data_available": canopy_available,
             "road_data_available": road_available,
