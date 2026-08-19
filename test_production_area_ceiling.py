@@ -565,5 +565,631 @@ print(
     "mandatory canopy gate -- 0 canopy fetches, exact override array used."
 )
 
+# =====================================================================
+# narrative_data: the report-facing, FINAL, JSON-serialisable block
+# identify_optimized_production_areas() now attaches. Everything below
+# checks the block's own contract -- that it is purely additive, that its
+# numbers are internally consistent, that overlapping gate exclusions are
+# represented in a way a narrative cannot misread, and that unavailable
+# data reads as None rather than as a measured zero.
+#
+# Every fixture here is synthetic. Nothing in this section reaches the
+# network, and no figure below is taken from (or tuned against) a real
+# property.
+# =====================================================================
+
+import json  # noqa: E402
+import math  # noqa: E402
+
+from production_suitability import score_production_areas  # noqa: E402
+
+# The exact top-level key set identify_optimized_production_areas()
+# returned BEFORE narrative_data existed. Hard-coded, not derived, so a
+# future change that drops or renames one of them fails here loudly --
+# this branch's core guarantee is that it added a key and touched nothing
+# else.
+_PRE_NARRATIVE_RESULT_KEYS = {
+    "zones_geojson",
+    "scored_patches",
+    "total_selected_acreage",
+    "percent_of_parcel",
+    "parcel_acres",
+    "production_ceiling_target_met",
+    "total_cells_removed",
+}
+
+# Same idea for one scored patch: the fields STEP 3/STEP 4 attached before
+# this branch. narrative_data must not have added, removed, or renamed any
+# of them -- it reads them, it does not write them.
+_PRE_NARRATIVE_PATCH_KEYS = {
+    "id",
+    "area_acres",
+    "representative_elevation_m",
+    "polygon_utm",
+    "render_fill_polygon_utm",
+    "geometry_wgs84",
+    "cells",
+    "hole_footprints",
+    "source_patch_id",
+    "suitability_score",
+    "slope_factor",
+    "size_factor",
+    "aspect_factor",
+    "avg_slope_pct",
+    "aspect_deg",
+    "area_score",
+    "compactness_score",
+    "aspect_available",
+    "soil_carved_acres",
+    "soil_carved_pct",
+    "soil_data_available",
+    "confidence_notes",
+    "rank",
+}
+
+
+def _nd_dem(array: np.ndarray, origin_y: float = 4500600.0) -> dict:
+    return {
+        "array": array,
+        "resolution_meters": RESOLUTION,
+        "origin_x": 500000.0,
+        "origin_y": origin_y,
+        "crs": CRS,
+    }
+
+
+def _nd_boundary(dem: dict):
+    """Full-grid-extent parcel boundary, in UTM and in WGS84 -- every cell
+    center in the grid sits inside it."""
+    rows, cols = dem["array"].shape
+    px, py = dem["resolution_meters"]
+    boundary_utm = box(
+        dem["origin_x"], dem["origin_y"] - rows * py, dem["origin_x"] + cols * px, dem["origin_y"]
+    )
+    lons, lats = warp_transform(CRS, "EPSG:4326", *boundary_utm.exterior.coords.xy)
+    return boundary_utm, list(zip(lons, lats))
+
+
+def _nd_row_band_union(dem: dict, first_row: int, last_row: int):
+    """UTM box covering the CENTERS of every cell in rows first_row..last_row
+    (inclusive), full grid width -- the shape a mocked hydric-soil or
+    road-exclusion union takes in these fixtures. Inset half a cell on each
+    side so the cell-center containment test compute_step1_eligible_cells()
+    runs is unambiguous at the band's own edges."""
+    _, cols = dem["array"].shape
+    px, py = dem["resolution_meters"]
+    top = dem["origin_y"] - (first_row + 0.25) * py
+    bottom = dem["origin_y"] - (last_row + 0.75) * py
+    return box(dem["origin_x"] - px, bottom, dem["origin_x"] + (cols + 1) * px, top)
+
+
+def _nd_run(
+    dem,
+    boundary_coords,
+    canopy_mask=None,
+    hydric_union=None,
+    road_union=None,
+    roads_checked=None,
+    ceiling_pct=100.0,
+):
+    """Runs the real entry point offline, with each of its three optional
+    network layers replaced by an exact synthetic input (or left at its own
+    'not checked' path). Patches the names production_area_ceiling.py
+    itself calls, so the fixture controls precisely which cells each gate
+    rejects.
+
+    roads_checked separates the two road states the pipeline genuinely
+    distinguishes: left None it follows road_union (a union means the
+    check ran), but passing True with road_union=None models "the road
+    check RAN and found nothing" -- a measured zero, not the unchecked
+    case."""
+    roads_checked = (road_union is not None) if roads_checked is None else roads_checked
+    patches = []
+    if canopy_mask is not None:
+        patches.append(
+            mock_patch.object(
+                pac,
+                "get_required_tree_root_zone_mask_utm",
+                lambda boundary_polygon_utm, dem_arg, canopy_height=None: canopy_mask,
+            )
+        )
+    if hydric_union is not None:
+        patches.append(
+            mock_patch.object(pac, "_fetch_disqualifying_soil_union", lambda wkt_polygon, dem_arg: hydric_union)
+        )
+    if roads_checked:
+        patches.append(
+            mock_patch.object(
+                pac, "_fetch_road_exclusion_union_utm", lambda coords, dem_arg: road_union
+            )
+        )
+    stack = []
+    try:
+        for p in patches:
+            p.start()
+            stack.append(p)
+        return pac.identify_optimized_production_areas(
+            boundary_coords,
+            dem=dem,
+            check_soil=hydric_union is not None,
+            check_roads=roads_checked,
+            ceiling_pct=ceiling_pct,
+        )
+    finally:
+        for p in reversed(stack):
+            p.stop()
+
+
+def _assert_one_decimal(value, path: str) -> None:
+    """Every acreage and percentage this block emits is rounded to 1
+    decimal place -- the precision emitted is the precision narrated."""
+    if isinstance(value, bool) or value is None or isinstance(value, str):
+        return
+    if isinstance(value, (int, float)):
+        assert round(float(value), 1) == float(value), f"{path} = {value!r} is not rounded to 1 decimal place"
+        return
+    if isinstance(value, dict):
+        for k, v in value.items():
+            _assert_one_decimal(v, f"{path}.{k}")
+        return
+    if isinstance(value, list):
+        for i, v in enumerate(value):
+            _assert_one_decimal(v, f"{path}[{i}]")
+        return
+    raise AssertionError(f"{path} holds a non-JSON type: {type(value)!r}")
+
+
+# --- N1. purely additive, JSON-serialisable, and rounded --------------
+# A single flat block of eligible ground, no gates firing at all -- the
+# simplest fixture that produces a real patch, used to check the shape of
+# the addition rather than any particular number.
+
+nd_flat = np.full((40, 40), 300.0, dtype=np.float32)
+nd_flat_dem = _nd_dem(nd_flat)
+nd_flat_boundary_utm, nd_flat_coords = _nd_boundary(nd_flat_dem)
+nd_flat_result = _nd_run(nd_flat_dem, nd_flat_coords)
+
+assert _PRE_NARRATIVE_RESULT_KEYS <= set(nd_flat_result), (
+    "narrative_data must be PURELY ADDITIVE: every key identify_optimized_production_areas() "
+    f"returned before it must still be there. Missing: {_PRE_NARRATIVE_RESULT_KEYS - set(nd_flat_result)}"
+)
+assert set(nd_flat_result) - _PRE_NARRATIVE_RESULT_KEYS == {"narrative_data"}, (
+    "narrative_data must be the ONLY new top-level key -- got "
+    f"{set(nd_flat_result) - _PRE_NARRATIVE_RESULT_KEYS}"
+)
+assert nd_flat_result["scored_patches"], "expected the flat fixture to produce at least one patch"
+for _p in nd_flat_result["scored_patches"]:
+    assert set(_p) == _PRE_NARRATIVE_PATCH_KEYS, (
+        "narrative_data must not add, drop, or rename any field on a scored patch -- diff: "
+        f"{set(_p) ^ _PRE_NARRATIVE_PATCH_KEYS}"
+    )
+
+nd_flat_json = json.dumps(nd_flat_result["narrative_data"])
+assert json.loads(nd_flat_json) == nd_flat_result["narrative_data"], (
+    "narrative_data must survive a plain json.dumps()/json.loads() round trip unchanged -- no numpy "
+    "scalars, no arrays, no geometry"
+)
+assert set(nd_flat_result["narrative_data"]) == {"parcel", "ceiling", "gates", "patches"}
+_assert_one_decimal(nd_flat_result["narrative_data"], "narrative_data")
+print(
+    "narrative_data: purely additive (every pre-existing top-level key and every scored-patch field "
+    f"unchanged), json.dumps()-clean with no custom encoder ({len(nd_flat_json)} chars), and every "
+    "numeric value rounded to 1 decimal place."
+)
+
+
+# --- N2. gate acreages are internally consistent (no overlap) ---------
+# 40x40 flat cells, all of them slope-passing. Three gates each reject
+# their own disjoint 5-row band (200 cells apiece), so every excluded cell
+# is rejected by exactly one gate and the '*_only_excluded' figures must
+# close the books exactly: slope_passing - sum(only) == eligible.
+
+nd_gate_dem = _nd_dem(np.full((40, 40), 300.0, dtype=np.float32))
+nd_gate_boundary_utm, nd_gate_coords = _nd_boundary(nd_gate_dem)
+
+nd_canopy_mask = np.zeros((40, 40), dtype=bool)
+nd_canopy_mask[0:5, :] = True                                   # rows 0-4
+nd_hydric_union = _nd_row_band_union(nd_gate_dem, 10, 14)       # rows 10-14
+nd_road_union = _nd_row_band_union(nd_gate_dem, 20, 24)         # rows 20-24
+
+nd_gate_result = _nd_run(
+    nd_gate_dem,
+    nd_gate_coords,
+    canopy_mask=nd_canopy_mask,
+    hydric_union=nd_hydric_union,
+    road_union=nd_road_union,
+)
+nd_gates = nd_gate_result["narrative_data"]["gates"]
+nd_parcel = nd_gate_result["narrative_data"]["parcel"]
+
+_cell_acres = cell_area_acres(nd_gate_dem)
+_band_acres = round(200 * _cell_acres, 1)
+assert nd_parcel["slope_passing_acres"] == round(1600 * _cell_acres, 1)
+assert nd_parcel["eligible_acres"] == round(1000 * _cell_acres, 1)
+for _gate in ("canopy", "hydric", "farm_roads"):
+    assert nd_gates[f"{_gate}_excluded_acres"] == _band_acres, _gate
+    assert nd_gates[f"{_gate}_only_excluded_acres"] == _band_acres, _gate
+    assert nd_gates[f"{_gate}_excluded_acres"] >= nd_gates[f"{_gate}_only_excluded_acres"], _gate
+
+_only_sum = round(
+    sum(nd_gates[f"{g}_only_excluded_acres"] for g in ("canopy", "hydric", "farm_roads")), 1
+)
+# Every emitted acreage is independently rounded to 1 decimal place, on
+# purpose: the precision emitted is the precision narrated. That caps how
+# exactly figures can reconcile against each other -- five independently
+# rounded terms here, so up to 0.05 ac of slack apiece. The identity is
+# asserted to the precision the block actually publishes, not to a
+# precision it deliberately does not.
+_ROUNDING_SLACK_ACRES = 0.05 * 5
+assert abs((nd_parcel["slope_passing_acres"] - _only_sum) - nd_parcel["eligible_acres"]) <= _ROUNDING_SLACK_ACRES, (
+    "with no cell rejected by two gates at once, the '*_only_excluded_acres' figures must account for "
+    f"the whole gap between slope-passing and eligible ground: {nd_parcel['slope_passing_acres']} - "
+    f"{_only_sum} != {nd_parcel['eligible_acres']}"
+)
+print(
+    f"narrative_data gates (no overlap): {nd_parcel['slope_passing_acres']} ac slope-passing - "
+    f"{_only_sum} ac summed '_only' exclusions == {nd_parcel['eligible_acres']} ac eligible; each gate "
+    f"excludes {_band_acres} ac, all of it its own."
+)
+
+
+# --- N3. overlapping exclusions are represented correctly -------------
+# The failure mode this guards: a cell that is BOTH hydric and under
+# canopy. It must be counted by both gates' '*_excluded_acres' (each
+# answers "how much of this ground carries canopy / is hydric") and by
+# NEITHER gate's '*_only_excluded_acres' (which answers "how much would
+# come back if this gate did not apply" -- and that ground would not come
+# back, the other gate still rejects it). Canopy takes rows 0-9, hydric
+# rows 5-14: rows 5-9 are hit by both.
+
+nd_overlap_dem = _nd_dem(np.full((40, 40), 300.0, dtype=np.float32))
+nd_overlap_boundary_utm, nd_overlap_coords = _nd_boundary(nd_overlap_dem)
+
+nd_overlap_canopy = np.zeros((40, 40), dtype=bool)
+nd_overlap_canopy[0:10, :] = True                                  # rows 0-9
+nd_overlap_hydric = _nd_row_band_union(nd_overlap_dem, 5, 14)      # rows 5-14
+
+nd_overlap_result = _nd_run(
+    nd_overlap_dem, nd_overlap_coords, canopy_mask=nd_overlap_canopy, hydric_union=nd_overlap_hydric
+)
+nd_o_gates = nd_overlap_result["narrative_data"]["gates"]
+nd_o_parcel = nd_overlap_result["narrative_data"]["parcel"]
+
+_overlap_acres = round(200 * _cell_acres, 1)      # rows 5-9, rejected twice
+_both_bands_acres = round(400 * _cell_acres, 1)   # each gate's own full 10-row band
+_own_only_acres = round(200 * _cell_acres, 1)     # rows 0-4 (canopy alone) / 10-14 (hydric alone)
+
+assert nd_o_gates["canopy_excluded_acres"] == _both_bands_acres
+assert nd_o_gates["hydric_excluded_acres"] == _both_bands_acres
+assert nd_o_gates["canopy_only_excluded_acres"] == _own_only_acres
+assert nd_o_gates["hydric_only_excluded_acres"] == _own_only_acres
+assert nd_o_parcel["eligible_acres"] == round(1000 * _cell_acres, 1)
+
+# The doubly-rejected ground is counted by both '_excluded' figures...
+assert abs(
+    (nd_o_gates["canopy_excluded_acres"] + nd_o_gates["hydric_excluded_acres"])
+    - (nd_o_parcel["slope_passing_acres"] - nd_o_parcel["eligible_acres"] + _overlap_acres)
+) <= _ROUNDING_SLACK_ACRES, (
+    "summing '*_excluded_acres' must over-state the real loss by exactly the doubly-rejected acreage -- "
+    "which is why the docstring forbids summing them"
+)
+# ...and by neither '_only' figure, so those still never double-count.
+_o_only_sum = round(nd_o_gates["canopy_only_excluded_acres"] + nd_o_gates["hydric_only_excluded_acres"], 1)
+_o_gap = round(nd_o_parcel["slope_passing_acres"] - nd_o_parcel["eligible_acres"], 1)
+assert _o_only_sum <= _o_gap
+assert abs((_o_only_sum + _overlap_acres) - _o_gap) <= _ROUNDING_SLACK_ACRES, (
+    "the '*_only' figures plus the doubly-rejected acreage must account for the whole "
+    f"slope-passing-to-eligible gap: {_o_only_sum} + {_overlap_acres} != {_o_gap}"
+)
+print(
+    f"narrative_data gates (overlapping): rows rejected by BOTH canopy and hydric ({_overlap_acres} ac) "
+    f"are counted in each gate's '_excluded_acres' ({_both_bands_acres} ac each, summing to "
+    f"{round(nd_o_gates['canopy_excluded_acres'] + nd_o_gates['hydric_excluded_acres'], 1)} ac against a "
+    f"real {_o_gap} ac loss) and in NEITHER gate's '_only_excluded_acres' ({_own_only_acres} ac each); "
+    f"the '_only' figures sum to {_o_only_sum} ac and never over-state."
+)
+
+
+# --- N4. unavailable data is None, never 0.0 --------------------------
+# hydric_pct: 0.0 would tell a narrative "no hydric soils here". When the
+# soil check never ran, the truth is "unknown" -- every soil-derived field
+# must be None. Same for the road layer, which this fixture also leaves
+# unchecked.
+
+nd_unavailable_result = _nd_run(nd_flat_dem, nd_flat_coords, canopy_mask=np.zeros((40, 40), dtype=bool))
+nd_u = nd_unavailable_result["narrative_data"]
+
+assert nd_u["gates"]["soil_data_available"] is False
+assert nd_u["gates"]["road_data_available"] is False
+assert nd_u["gates"]["canopy_data_available"] is True
+for _field in ("hydric_excluded_acres", "hydric_only_excluded_acres"):
+    assert nd_u["gates"][_field] is None, f"{_field} must be None when the soil check never ran, not 0.0"
+for _field in ("farm_roads_excluded_acres", "farm_roads_only_excluded_acres"):
+    assert nd_u["gates"][_field] is None, f"{_field} must be None when the road check never ran, not 0.0"
+assert nd_u["patches"], "expected the unavailable-data fixture to still produce patches"
+for _p in nd_u["patches"]:
+    for _field in ("hydric_pct", "soil_components", "drainage_class"):
+        assert _p[_field] is None, (
+            f"patch {_p['id']}'s {_field} must be None when no SSURGO data reached this pipeline -- "
+            f"got {_p[_field]!r}, which a narrative would read as a measurement"
+        )
+# ...and the canopy gate, which DID run and genuinely found nothing, still
+# reports a real measured 0.0 rather than collapsing to None.
+assert nd_u["gates"]["canopy_excluded_acres"] == 0.0
+assert nd_u["gates"]["canopy_only_excluded_acres"] == 0.0
+print(
+    "narrative_data: with soil and road unchecked, every soil- and road-derived field is None (not 0.0) "
+    "-- while the canopy gate, which ran and found nothing, still reports a measured 0.0."
+)
+
+
+# --- N5. factors are directly comparable, higher is better ------------
+# Three patches on one parcel, each isolated by canopy-excluded ground so
+# the elevation surface itself stays smooth:
+#   A -- 20x20 block, 3% grade falling SOUTH   (good slope, good aspect, good size)
+#   B -- 20x20 block, 18% grade falling NORTH  (bad slope, bad aspect, same size)
+#   C -- 20x5 sliver, same ground as A         (same slope/aspect, worse size)
+# Every factor is emitted on a 0-100 scale where higher is better, so the
+# narrative can compare them to each other and to `score` with no
+# conversion.
+
+nd_fac_rows, nd_fac_cols = 52, 40
+nd_fac_array = np.zeros((nd_fac_rows, nd_fac_cols), dtype=np.float32)
+_elev = 400.0
+for _r in range(nd_fac_rows):
+    if 2 <= _r <= 21:
+        _step = -0.15   # 3% grade at 5m cells, falling southward (increasing row)
+    elif 30 <= _r <= 49:
+        _step = 0.90    # 18% grade, rising southward -- i.e. falling NORTH
+    else:
+        _step = 0.0
+    _elev += _step
+    nd_fac_array[_r, :] = _elev
+
+nd_fac_dem = _nd_dem(nd_fac_array, origin_y=4500900.0)
+nd_fac_boundary_utm, nd_fac_coords = _nd_boundary(nd_fac_dem)
+
+nd_fac_canopy = np.ones((nd_fac_rows, nd_fac_cols), dtype=bool)
+nd_fac_canopy[2:22, 2:22] = False    # A
+nd_fac_canopy[2:22, 30:35] = False   # C
+nd_fac_canopy[30:50, 2:22] = False   # B
+
+nd_fac_result = _nd_run(nd_fac_dem, nd_fac_coords, canopy_mask=nd_fac_canopy)
+nd_fac_patches = nd_fac_result["narrative_data"]["patches"]
+assert len(nd_fac_patches) == 3, f"expected exactly 3 patches from this fixture, got {len(nd_fac_patches)}"
+
+for _p in nd_fac_patches:
+    for _name, _value in _p["factors"].items():
+        assert 0.0 <= _value <= 100.0, f"patch {_p['id']} factor {_name} = {_value} is outside 0-100"
+
+_by_area = sorted(nd_fac_patches, key=lambda p: -p["area_acres"])
+_nd_A = min((p for p in nd_fac_patches if p["slope_median_pct"] < 10.0), key=lambda p: -p["area_acres"])
+_nd_C = min((p for p in nd_fac_patches if p["slope_median_pct"] < 10.0), key=lambda p: p["area_acres"])
+_nd_B = max(nd_fac_patches, key=lambda p: p["slope_median_pct"])
+assert _nd_A["id"] != _nd_C["id"] != _nd_B["id"] != _nd_A["id"]
+
+assert _nd_A["factors"]["slope_factor"] > _nd_B["factors"]["slope_factor"], "gentler ground must score higher"
+assert _nd_A["factors"]["aspect_factor"] > _nd_B["factors"]["aspect_factor"], "south-facing must score higher"
+assert _nd_A["factors"]["size_factor"] > _nd_C["factors"]["size_factor"], "the bigger, blockier patch must score higher"
+assert _nd_A["score"] > _nd_B["score"] and _nd_A["score"] > _nd_C["score"]
+assert _nd_A["rank"] == 1
+assert _nd_A["dominant_aspect"] == "south" and _nd_B["dominant_aspect"] == "north"
+print(
+    "narrative_data factors (all 0-100, higher = better): "
+    f"good ground {_nd_A['factors']} score {_nd_A['score']} rank {_nd_A['rank']}; "
+    f"steep north-facing {_nd_B['factors']} score {_nd_B['score']} rank {_nd_B['rank']}; "
+    f"same ground as a sliver {_nd_C['factors']} score {_nd_C['score']} rank {_nd_C['rank']}."
+)
+
+
+# --- N6. aspect_consistency_pct separates a bench from a spur ---------
+# The whole reason this field exists: two patches can report the SAME
+# dominant aspect and mean completely different things on the ground. Here
+# both come back "southeast" --
+#   * a uniform plane, every cell falling southeast; and
+#   * an annular sector of a cone (a spur nose), whose cells fan across a
+#     270-degree arc and merely AVERAGE to southeast.
+# Without this field they are indistinguishable, and a narrative would
+# describe the spur as if it were the bench.
+
+nd_asp_rows, nd_asp_cols = 60, 60
+nd_asp_array = np.full((nd_asp_rows, nd_asp_cols), 500.0, dtype=np.float32)
+for _r in range(0, 26):
+    for _c in range(0, 26):
+        nd_asp_array[_r, _c] = 600.0 - 0.25 * _r - 0.25 * _c  # plane falling south AND east
+_spur_r0, _spur_c0 = 42.0, 30.0
+for _r in range(28, nd_asp_rows):
+    for _c in range(nd_asp_cols):
+        _d = math.hypot((_r - _spur_r0) * RESOLUTION[1], (_c - _spur_c0) * RESOLUTION[0])
+        nd_asp_array[_r, _c] = 400.0 - 0.05 * _d  # cone: every flank falls away from the apex
+
+nd_asp_dem = _nd_dem(nd_asp_array, origin_y=4501200.0)
+nd_asp_boundary_utm, nd_asp_coords = _nd_boundary(nd_asp_dem)
+
+nd_asp_canopy = np.ones((nd_asp_rows, nd_asp_cols), dtype=bool)
+nd_asp_canopy[2:24, 2:24] = False  # the uniform bench
+for _r in range(28, nd_asp_rows):
+    for _c in range(nd_asp_cols):
+        _d = math.hypot((_r - _spur_r0) * RESOLUTION[1], (_c - _spur_c0) * RESOLUTION[0])
+        _bearing = math.degrees(math.atan2(_c - _spur_c0, -(_r - _spur_r0))) % 360.0
+        if 25.0 <= _d <= 80.0 and _bearing <= 270.0:
+            nd_asp_canopy[_r, _c] = False  # the spur: a 270-degree arc of the cone's flanks
+
+nd_asp_result = _nd_run(nd_asp_dem, nd_asp_coords, canopy_mask=nd_asp_canopy)
+nd_asp_patches = nd_asp_result["narrative_data"]["patches"]
+assert len(nd_asp_patches) == 2, f"expected exactly 2 patches from this fixture, got {len(nd_asp_patches)}"
+
+_bench = max(nd_asp_patches, key=lambda p: p["aspect_consistency_pct"])
+_spur = min(nd_asp_patches, key=lambda p: p["aspect_consistency_pct"])
+assert _bench["dominant_aspect"] == "southeast" and _spur["dominant_aspect"] == "southeast", (
+    "both fixtures are built to report the same dominant aspect -- that is the point of the check: "
+    f"{_bench['dominant_aspect']} / {_spur['dominant_aspect']}"
+)
+assert _bench["aspect_consistency_pct"] == 100
+assert _spur["aspect_consistency_pct"] < 50, (
+    "a patch wrapping a spur must NOT read as consistently oriented -- got "
+    f"{_spur['aspect_consistency_pct']}%"
+)
+assert _bench["aspect_consistency_pct"] - _spur["aspect_consistency_pct"] >= 50
+print(
+    f"narrative_data aspect_consistency_pct: the uniform bench and the spur BOTH report dominant_aspect "
+    f"'southeast', but read {_bench['aspect_consistency_pct']}% and {_spur['aspect_consistency_pct']}% "
+    "consistent respectively -- the one figure that tells them apart."
+)
+
+
+# --- N7. the ceiling reports whether it actually bound ----------------
+# "Production is limited by terrain" and "production is limited by design"
+# are materially different sentences. The ceiling block has to say which.
+
+nd_ceiling_bound = _nd_run(nd_flat_dem, nd_flat_coords, ceiling_pct=40.0)["narrative_data"]["ceiling"]
+nd_ceiling_slack = _nd_run(nd_flat_dem, nd_flat_coords, ceiling_pct=100.0)["narrative_data"]["ceiling"]
+assert nd_ceiling_bound["cap_pct_of_parcel"] == 40.0 and nd_ceiling_slack["cap_pct_of_parcel"] == 100.0
+assert nd_ceiling_bound["bound"] is True and nd_ceiling_bound["acres_trimmed"] > 0.0
+assert nd_ceiling_slack["bound"] is False and nd_ceiling_slack["acres_trimmed"] == 0.0
+print(
+    f"narrative_data ceiling: a 40% cap on this fixture bound and trimmed "
+    f"{nd_ceiling_bound['acres_trimmed']} ac; a 100% cap did not bind and reports 0.0 ac trimmed."
+)
+
+
+# --- N8. no recomputation ---------------------------------------------
+# The architecture this block sits in exists to compute each step ONCE.
+# Reporting on a gate by re-running it would reintroduce exactly the
+# redundant work the consolidation removed. Counted here per pipeline run:
+# one slope pass, one aspect pass, one STEP 1, one STEP 2, one STEP 3, one
+# STEP 4 -- the same counts this entry point had before narrative_data
+# existed.
+
+_nd_call_counts: dict[str, int] = {}
+
+
+def _nd_counting(module, name):
+    original = getattr(module, name)
+
+    def wrapper(*args, **kwargs):
+        _nd_call_counts[name] = _nd_call_counts.get(name, 0) + 1
+        return original(*args, **kwargs)
+
+    return mock_patch.object(module, name, wrapper)
+
+
+import terrain_metrics as _tm  # noqa: E402
+
+_nd_counters = [
+    _nd_counting(pa, "compute_slope_percent"),
+    _nd_counting(pa, "compute_slope_and_aspect"),
+    _nd_counting(pac, "compute_step1_eligible_cells"),
+    _nd_counting(pac, "trim_to_ceiling"),
+    _nd_counting(pac, "cluster_and_gate"),
+    _nd_counting(pac, "score_production_areas"),
+]
+for _counter in _nd_counters:
+    _counter.start()
+try:
+    _nd_run(nd_gate_dem, nd_gate_coords, canopy_mask=nd_canopy_mask, hydric_union=nd_hydric_union, road_union=nd_road_union)
+finally:
+    for _counter in reversed(_nd_counters):
+        _counter.stop()
+
+_NO_RECOMPUTE_EXPECTED = {
+    "compute_slope_percent": 1,
+    "compute_slope_and_aspect": 1,
+    "compute_step1_eligible_cells": 1,
+    "trim_to_ceiling": 1,
+    "cluster_and_gate": 1,
+    "score_production_areas": 1,
+}
+assert _nd_call_counts == _NO_RECOMPUTE_EXPECTED, (
+    "narrative_data must be DERIVED from what STEP 1-4 already computed, never recomputed: expected "
+    f"{_NO_RECOMPUTE_EXPECTED}, got {_nd_call_counts}"
+)
+print(f"narrative_data: one full pipeline run still makes exactly these calls -- {_nd_call_counts}.")
+
+
+# --- N9. the boundary setback's own cost is reported ------------------
+# Every other scenario in this file runs with boundary_setback_meters=0
+# (see the file-header note). This one restores the real gate so the
+# setback figure has something to report, and confirms it reads 0.0 when
+# the setback is off -- proving the figure tracks the setback actually
+# applied rather than assuming the module constant.
+
+_nd_patched_step1 = pac.compute_step1_eligible_cells
+try:
+    pac.compute_step1_eligible_cells = pa.compute_step1_eligible_cells  # real setback, this scenario only
+    nd_setback_on = _nd_run(nd_flat_dem, nd_flat_coords)["narrative_data"]["gates"]
+finally:
+    pac.compute_step1_eligible_cells = _nd_patched_step1
+nd_setback_off = nd_flat_result["narrative_data"]["gates"]
+
+assert nd_setback_on["boundary_setback_excluded_acres"] > 0.0
+assert nd_setback_off["boundary_setback_excluded_acres"] == 0.0
+assert nd_setback_on["boundary_setback_only_excluded_acres"] is None, (
+    "what the setback costs NET of the canopy/hydric/road gates is genuinely unknown -- those gates are "
+    "never evaluated inside the setback ring -- so this must be None, not 0.0"
+)
+print(
+    f"narrative_data: the real {pa.PRODUCTION_BOUNDARY_SETBACK_METERS:.1f}m boundary setback costs "
+    f"{nd_setback_on['boundary_setback_excluded_acres']} ac of otherwise slope-passing ground on this "
+    f"fixture, and reads {nd_setback_off['boundary_setback_excluded_acres']} ac with the setback disabled."
+)
+
+
+# --- N10. the whole block, on one fixture that exercises every field ---
+# A parcel with real relief, three surviving patches (two of them the two
+# halves of a waist split), a hydric band that sits entirely under canopy
+# -- so it demonstrates a gate whose exclusions are ALL shared with
+# another gate -- and a road layer that ran and found nothing. Printed in
+# full: this is the exact JSON a narrative layer would be handed.
+
+nd_show_rows, nd_show_cols = 70, 60
+nd_show_array = np.zeros((nd_show_rows, nd_show_cols), dtype=np.float32)
+for _r in range(nd_show_rows):
+    for _c in range(nd_show_cols):
+        nd_show_array[_r, _c] = 500.0 - 0.2 * _r - 0.1 * _c  # falls south (4%) and east (2%)
+
+nd_show_dem = _nd_dem(nd_show_array, origin_y=4501500.0)
+nd_show_boundary_utm, nd_show_coords = _nd_boundary(nd_show_dem)
+
+nd_show_canopy = np.ones((nd_show_rows, nd_show_cols), dtype=bool)
+nd_show_canopy[5:25, 5:25] = False    # north lobe    \  joined by a 20m neck, narrower than
+nd_show_canopy[25:28, 13:17] = False  # the neck      /  MIN_ZONE_WAIST_METERS -- STEP 3 splits it
+nd_show_canopy[28:48, 5:25] = False   # south lobe
+nd_show_canopy[5:25, 35:55] = False   # a separate, unsplit block to the east
+nd_show_hydric = _nd_row_band_union(nd_show_dem, 60, 69)  # wet ground along the bottom, all of it wooded
+
+nd_show_result = _nd_run(
+    nd_show_dem,
+    nd_show_coords,
+    canopy_mask=nd_show_canopy,
+    hydric_union=nd_show_hydric,
+    road_union=None,
+    roads_checked=True,  # the road check RAN and genuinely found nothing
+    ceiling_pct=pac.PRODUCTION_CEILING_PCT_OF_PARCEL,
+)
+nd_show = nd_show_result["narrative_data"]
+
+assert len(nd_show["patches"]) == 3
+assert sum(1 for p in nd_show["patches"] if p["from_waist_split"]) == 2, (
+    "the two lobes either side of the neck must both be flagged as coming out of a waist split -- got "
+    f"{[(p['id'], p['from_waist_split']) for p in nd_show['patches']]}"
+)
+assert sum(1 for p in nd_show["patches"] if not p["from_waist_split"]) == 1
+assert [p["rank"] for p in nd_show["patches"]] == [1, 2, 3], "patches must be emitted in rank order"
+# Every hydric cell here is also under canopy, so the hydric gate rejects
+# real ground and yet nothing at all would come back if it stopped
+# applying. Both facts have to be readable, and they are.
+assert nd_show["gates"]["hydric_excluded_acres"] > 0.0
+assert nd_show["gates"]["hydric_only_excluded_acres"] == 0.0
+assert all(p["hydric_pct"] is not None and p["hydric_pct"] > 0.0 for p in nd_show["patches"])
+# The road check ran against a genuinely clean parcel: available, measured zero.
+assert nd_show["gates"]["road_data_available"] is True
+assert nd_show["gates"]["farm_roads_excluded_acres"] == 0.0
+_assert_one_decimal(nd_show, "narrative_data")
+json.dumps(nd_show)
+
+print("\nnarrative_data, in full, on a synthetic three-patch fixture:")
+print(json.dumps(nd_show, indent=2))
+
 
 print("\nAll production_area_ceiling checks passed.")

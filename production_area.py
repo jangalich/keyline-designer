@@ -681,6 +681,18 @@ def compute_step1_eligible_cells(
                                                                # bookkeeping only, not per-cell
             'soil_carved_pct_by_cell': np.ndarray[float],
             'soil_data_available': bool,     # whether the hydric check actually ran
+            'hydric_hit': np.ndarray[bool],  # cells excluded by the hydric-soil gate
+                                               # specifically -- always all-False when
+                                               # soil_data_available is False. Reported
+                                               # for the same reason tree_root_zone_hit/
+                                               # road_hit are: it is the ONLY per-gate
+                                               # exclusion that cannot be recovered from
+                                               # the other returned masks once two gates
+                                               # overlap (slope_only_mask & ~tree_root_
+                                               # zone_hit & ~road_hit & ~eligible_mask
+                                               # recovers only the hydric cells NO other
+                                               # gate also rejected). Already computed
+                                               # below -- exposing it adds no work.
             'canopy_data_available': bool,   # whether the woody-vegetation check actually ran
             'tree_root_zone_hit': np.ndarray[bool],  # cells excluded by the canopy gate specifically
             'road_data_available': bool,     # whether the existing-road check actually ran
@@ -786,6 +798,7 @@ def compute_step1_eligible_cells(
         "soil_carved_acres_by_cell": soil_carved_acres_by_cell,
         "soil_carved_pct_by_cell": soil_carved_pct_by_cell,
         "soil_data_available": soil_data_available,
+        "hydric_hit": hydric_hit,
         "canopy_data_available": canopy_data_available,
         "tree_root_zone_hit": tree_root_zone_hit,
         "road_data_available": road_data_available,
