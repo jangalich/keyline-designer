@@ -105,6 +105,7 @@ from typing import Optional
 import numpy as np
 from rasterio.warp import transform as warp_transform
 from rasterio.warp import transform_geom
+from shapely import contains_xy
 from shapely.geometry import Point, Polygon, mapping
 from shapely.ops import unary_union
 from shapely.prepared import prep
@@ -112,6 +113,7 @@ from shapely.prepared import prep
 from dem_data import get_dem_for_boundary
 from feature_schema import CONFIDENCE_LOW, make_feature, make_feature_collection
 from production_area import (
+    METERS_PER_FOOT,
     _fetch_road_exclusion_union_utm,
     compute_slope_percent,
     get_required_tree_root_zone_mask_utm,
@@ -986,6 +988,292 @@ def zones_to_geojson(zones: list[dict]) -> dict:
     return make_feature_collection(features)
 
 
+# =====================================================================
+# NARRATIVE DATA -- report-facing, FINAL values only
+# =====================================================================
+# Everything below exists to answer THREE report questions about this
+# module's deliverable, and nothing else:
+#
+#   1. WHERE is the water-system survey area on the map?
+#   2. WHY is this area conducive to a water system?
+#   3. HOW does it serve the farm?
+#
+# The same two hard rules production_area_ceiling.py's narrative block
+# established govern every value here:
+#
+#   1. FINAL. The consumer must never convert, calculate, or relate two
+#      values to get a third. Imperial at this boundary (acres, feet --
+#      never metres or cell counts); slope/gradient in percent; position
+#      as a compass word, not coordinates; everything rounded to 1
+#      decimal place, because the precision emitted is the precision
+#      narrated.
+#   2. DERIVED, NEVER RECOMPUTED. Every figure is read off the zone dict
+#      find_candidate_zones() already returns -- no gate, growth pass, or
+#      selection is re-run to report on itself. Two narrow, documented
+#      exceptions, same class as production_area_ceiling.py's own
+#      _on_parcel_cell_mask() carve-out: the parcel-wide elevation range
+#      (one vectorised containment test no pipeline step computes, needed
+#      to place the zone as upper/lower ground) and the centroid bearing
+#      (trivial arithmetic on footprints already in hand).
+#
+# The output is plain JSON: numbers, booleans, strings, dicts, lists.
+# json.dumps() must work on it with no custom encoder.
+#
+# UNAVAILABLE IS None, NEVER 0.0. A gradient of 0.0 at distance 0 is a
+# div-by-zero placeholder, not a measured level grade (the same live bug
+# water_suitability._gravity_feed_factor() exists to sidestep) -- it is
+# emitted as None here so a narrative cannot read it as a measurement.
+#
+# NO REASON STRINGS. This block emits values; the report writes prose --
+# same division of labor as production_area_ceiling.build_narrative_data().
+
+# 8-point compass words for position_in_parcel -- whole words, because this
+# feeds narrative prose directly. Deliberately a separate tuple from
+# production_area_ceiling.py's own private _COMPASS_WORDS (same "constants
+# stay separate even when identical" convention this module already applies
+# to its buffer distances).
+_COMPASS_WORDS = (
+    "north",
+    "northeast",
+    "east",
+    "southeast",
+    "south",
+    "southwest",
+    "west",
+    "northwest",
+)
+
+# A zone whose centroid sits within this fraction of the parcel's
+# equivalent-circle radius of the parcel's own centroid reads as "center"
+# rather than a compass direction -- naming a bearing for a near-central
+# offset would narrate precision the position doesn't have. The
+# equivalent-circle radius (sqrt(area/pi)) makes the test scale with the
+# parcel rather than with any fixed distance. CONFIGURABLE.
+_CENTER_POSITION_MAX_OFFSET_FRACTION = 0.2
+
+
+def _round1(value):
+    """1 decimal place, or None passed straight through -- the single
+    rounding boundary for this whole block. None means 'not known', and
+    must never be silently rounded into a 0.0 that reads as a
+    measurement."""
+    return None if value is None else round(float(value), 1)
+
+
+def _feet(meters):
+    """Metres to feet at this block's own rounding boundary, None passed
+    straight through -- the metric-to-imperial conversion happens HERE, in
+    the module, never downstream in the report."""
+    return None if meters is None else round(float(meters) / METERS_PER_FOOT, 1)
+
+
+def _parcel_elevation_range(dem: dict, boundary_polygon_utm: Polygon):
+    """
+    (low, high) elevation across DEM cells whose CENTER falls inside the
+    real parcel boundary, or None on a parcel with no relief at all (where
+    "upper" and "lower" ground mean nothing). This is one of the two
+    values in this block no pipeline step already computes -- one
+    vectorised shapely.contains_xy() call over the whole grid, the same
+    cell-center convention and same documented exception
+    production_area_ceiling.py's narrative block already makes.
+    """
+    rows, cols = dem["array"].shape
+    px, py = dem["resolution_meters"]
+    col_centers = dem["origin_x"] + (np.arange(cols) + 0.5) * px
+    row_centers = dem["origin_y"] - (np.arange(rows) + 0.5) * py
+    xs, ys = np.meshgrid(col_centers, row_centers)
+    on_parcel = np.asarray(contains_xy(boundary_polygon_utm, xs, ys), dtype=bool)
+    elevations = dem["array"][on_parcel]
+    elevations = elevations[~np.isnan(elevations)]
+    if elevations.size and float(elevations.max()) > float(elevations.min()):
+        return float(elevations.min()), float(elevations.max())
+    return None
+
+
+def _position_in_parcel(zone_polygon_utm, boundary_polygon_utm: Polygon) -> str:
+    """
+    Where the zone sits within the parcel, as an 8-point compass word (or
+    "center") -- the bearing from the parcel's own centroid to the zone's
+    footprint centroid, the same centroid find_candidate_zones() already
+    used as the zone's representative point. UTM axes are +x east / +y
+    north, so atan2(dx, dy) IS a compass bearing (0 = north, clockwise).
+    """
+    parcel_centroid = boundary_polygon_utm.centroid
+    zone_centroid = zone_polygon_utm.centroid
+    dx = zone_centroid.x - parcel_centroid.x
+    dy = zone_centroid.y - parcel_centroid.y
+    equivalent_radius = math.sqrt(boundary_polygon_utm.area / math.pi)
+    if equivalent_radius <= 0 or math.hypot(dx, dy) <= equivalent_radius * _CENTER_POSITION_MAX_OFFSET_FRACTION:
+        return "center"
+    bearing_deg = math.degrees(math.atan2(dx, dy)) % 360.0
+    return _COMPASS_WORDS[int(round(bearing_deg / 45.0)) % 8]
+
+
+def _relationship_narrative(relationship: dict) -> dict:
+    """
+    One production-area relationship, restated in this block's own FINAL
+    units -- read off the already-computed (and already-rounded)
+    production_area_relationships entry, never re-measured.
+
+    can_gravity_feed is the narrative reading of above_production_area: a
+    zone sitting above the ground it serves can deliver water downhill by
+    gravity; one sitting below would need a pump -- a real cost/maintenance
+    tradeoff, not a defect (see module docstring's "gravity is a
+    preference, not a gate" framing).
+
+    gradient_pct is None -- not 0.0 -- when distance is 0: rise-over-run is
+    mathematically undefined with no run, and the raw relationship's 0.0
+    there is a div-by-zero placeholder a narrative would misread as
+    measured level ground (the exact bug water_suitability.
+    _gravity_feed_factor() documents). The real elevation differential
+    still carries the signal in that case.
+    """
+    distance_m = float(relationship["distance_m"])
+    return {
+        "production_area_id": int(relationship["production_area_id"]),
+        "can_gravity_feed": bool(relationship["above_production_area"]),
+        "elevation_differential_ft": _feet(relationship["elevation_differential_m"]),
+        "distance_ft": _feet(distance_m),
+        "gradient_pct": None if distance_m == 0 else _round1(relationship["gradient_pct"]),
+    }
+
+
+def build_narrative_data(
+    zones: list[dict],
+    dem: dict,
+    boundary_polygon_utm: Polygon,
+    production_area_count: int,
+    canopy_data_available: bool,
+    road_data_available: bool,
+    contributing_area_ceiling_acres: float = MAX_VALLEY_CONTRIBUTING_AREA_ACRES,
+    target_acres: float = WATER_ZONE_TARGET_ACRES,
+) -> dict:
+    """
+    The 'narrative_data' block identify_water_system_candidate_zones()
+    attaches to its result -- pre-computed, FINAL, JSON-serialisable
+    values answering the three report questions in this section's header
+    comment. Data only: no prose, no interpretation. zones is
+    find_candidate_zones()'s own return value, unread beyond its fields --
+    at most one zone by design, so this block describes the single winner
+    (comparison-level content against unreturned runner-up clusters is
+    deliberately absent: only the winner's own package leaves this
+    module, per the narrative_data convention's winner-only nuance).
+
+    canopy_data_available / road_data_available say whether each optional
+    exclusion gate genuinely ran on the path that produced `zones` --
+    identify_water_system_candidate_zones() passes True for canopy always
+    (its canopy gate is fetch-or-raise, so any result it returns at all
+    was canopy-checked) and True for road only when the road fetch
+    actually succeeded. Without these a narrative could claim "verified
+    clear of mapped roads" off a run where the road service was down.
+
+    contributing_area_ceiling_acres / target_acres are the values the run
+    ACTUALLY used (a zone_kwargs override, or this module's defaults) --
+    the caller passes them so this block never guesses at configuration.
+
+    Shape:
+
+        {
+          'zone_found': bool,
+          'production_area_count': int,   # candidate production areas that
+                                          #   existed to serve -- 0 explains
+                                          #   a no-zone outcome by itself
+          'gates': {
+            'canopy_data_available', 'road_data_available',
+          },
+          'zone': None when zone_found is False, else {
+            'area_acres',               # the real, boundary-clipped footprint
+            'target_acres',             # the survey-area target it was grown
+                                        #   toward; smaller area_acres means
+                                        #   the cluster exhausted first --
+                                        #   legitimate, not padded
+            'location': {               # question 1 -- WHERE on the map
+              'position_in_parcel',     #   "center" or an 8-point compass word
+              'elevation_percentile_of_parcel',
+                                        #   0 = the parcel's lowest ground,
+                                        #   100 = its highest; None on a
+                                        #   parcel with no relief. Uses the
+                                        #   zone's own representative
+                                        #   elevation -- the SAME value its
+                                        #   gravity relationships were
+                                        #   measured from, not a parallel
+                                        #   estimate
+            },
+            'drainage': {               # question 2 -- WHY conducive
+              'contributing_area_acres',
+                                        #   median contributing area across
+                                        #   the zone's own cells, converted
+                                        #   from the cell-count figure the
+                                        #   zone already carries -- how much
+                                        #   watershed drains through this
+                                        #   ground
+              'contributing_area_ceiling_acres',
+                                        #   the absolute eligibility ceiling
+                                        #   every member cell cleared (NRCS
+                                        #   CPS 378 siltation/peak-flow
+                                        #   reasoning -- see MAX_VALLEY_
+                                        #   CONTRIBUTING_AREA_ACRES)
+              'slope_median_pct',       #   median local slope across the
+                                        #   zone's own cells
+            },
+            'service': {                # question 3 -- HOW it serves the farm
+              'served_production_area_count',
+              'served_production_area_ids',
+              'relationships',          #   one entry per served production
+                                        #   area, most gravity-favorable
+                                        #   first (same order the zone's own
+                                        #   relationships already carry) --
+                                        #   see _relationship_narrative()
+            },
+          },
+        }
+    """
+    data = {
+        "zone_found": bool(zones),
+        "production_area_count": int(production_area_count),
+        "gates": {
+            "canopy_data_available": bool(canopy_data_available),
+            "road_data_available": bool(road_data_available),
+        },
+        "zone": None,
+    }
+    if not zones:
+        return data
+
+    zone = zones[0]
+    area_per_cell = cell_area_acres(dem)
+    relationships = zone["production_area_relationships"]
+
+    elevation_range = _parcel_elevation_range(dem, boundary_polygon_utm)
+    if elevation_range is None:
+        elevation_percentile = None
+    else:
+        low, high = elevation_range
+        elevation_percentile = _round1(
+            max(0.0, min(100.0, (float(zone["representative_elevation_m"]) - low) / (high - low) * 100.0))
+        )
+
+    data["zone"] = {
+        "area_acres": _round1(zone["polygon_utm"].area / SQUARE_METERS_PER_ACRE),
+        "target_acres": _round1(target_acres),
+        "location": {
+            "position_in_parcel": _position_in_parcel(zone["polygon_utm"], boundary_polygon_utm),
+            "elevation_percentile_of_parcel": elevation_percentile,
+        },
+        "drainage": {
+            "contributing_area_acres": _round1(float(zone["contributing_area_cells"]) * area_per_cell),
+            "contributing_area_ceiling_acres": _round1(contributing_area_ceiling_acres),
+            "slope_median_pct": _round1(zone["slope_pct"]),
+        },
+        "service": {
+            "served_production_area_count": len(relationships),
+            "served_production_area_ids": [int(i) for i in zone["served_production_area_ids"]],
+            "relationships": [_relationship_narrative(r) for r in relationships],
+        },
+    }
+    return data
+
+
 def identify_water_system_candidate_zones(
     boundary_coordinates: list[tuple[float, float]],
     dem: Optional[dict] = None,
@@ -1005,7 +1293,19 @@ def identify_water_system_candidate_zones(
             'zones_geojson': FeatureCollection,             # layer="water_system_candidate" — the deliverable
             'valleys_geojson': FeatureCollection,            # layer="valley" — diagnostic (Stage 1)
             'production_areas_geojson': FeatureCollection,   # layer="production_area_candidate" — diagnostic
+            'narrative_data': dict,                          # report-facing, FINAL, JSON-serialisable
+                                                             #   values — see build_narrative_data()
         }
+
+    'narrative_data' is PURELY ADDITIVE: every other key above, and every
+    field on every zone/feature, is byte-identical to what this function
+    returned before it existed. It answers three report questions (where
+    is the survey area on the map / why is this area conducive to a water
+    system / how does it serve the farm) with pre-computed, imperial,
+    rounded values a narrative can quote directly -- derived entirely from
+    the zone dict find_candidate_zones() already returned, so adding it
+    re-runs no gate, no growth pass, and no selection. See
+    build_narrative_data()'s own docstring for the field contract.
 
     dem, boundary_polygon_utm, valleys, and production_areas are all
     optional overrides, independently of one another (supplying one does
@@ -1110,6 +1410,25 @@ def identify_water_system_candidate_zones(
         "zones_geojson": zones_to_geojson(zones),
         "valleys_geojson": valleys_to_geojson(valleys),
         "production_areas_geojson": production_areas_to_geojson(production_areas),
+        "narrative_data": build_narrative_data(
+            zones,
+            dem,
+            boundary_polygon_utm,
+            production_area_count=len(production_areas),
+            # Canopy is fetch-or-raise on this path (get_required_tree_root_
+            # zone_mask_utm() above), so any result returned at all was
+            # canopy-checked; the road fetch degrades gracefully, so its
+            # flag reports whether the check genuinely ran.
+            canopy_data_available=True,
+            road_data_available=road_exclusion_union_utm is not _ROAD_CHECK_UNCHECKED,
+            # The values this RUN actually used -- a zone_kwargs override,
+            # or this module's defaults -- so the narrative never reports a
+            # configured constant a caller overrode away.
+            contributing_area_ceiling_acres=zone_kwargs.get(
+                "max_valley_contributing_area_acres", MAX_VALLEY_CONTRIBUTING_AREA_ACRES
+            ),
+            target_acres=zone_kwargs.get("water_zone_target_acres", WATER_ZONE_TARGET_ACRES),
+        ),
     }
 
 

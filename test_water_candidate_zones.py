@@ -795,6 +795,192 @@ print(
 )
 
 
+# =====================================================================
+# narrative_data -- the report-facing, FINAL, JSON-serialisable block
+# build_narrative_data() produces (and identify_water_system_candidate_
+# zones() attaches; that wiring is checked end-to-end in
+# test_water_system_candidate_pipeline.py). Everything below checks the
+# block's own contract against a hand-verifiable fixture: that it reads
+# the zone dict without touching it, that every value is final (imperial,
+# 1 decimal place) and json.dumps()-clean, and that an undefined gradient
+# reads as None rather than as a measured 0.0.
+# =====================================================================
+
+import json  # noqa: E402
+
+# The exact field set find_candidate_zones() put on a zone dict BEFORE
+# narrative_data existed -- build_narrative_data() reads a zone, it must
+# never add, drop, or rename anything on it.
+_PRE_NARRATIVE_ZONE_KEYS = {
+    "id",
+    "served_production_area_ids",
+    "polygon_utm",
+    "geometry_wgs84",
+    "render_fill_polygon_utm",
+    "render_fill_geometry_wgs84",
+    "cells",
+    "production_area_relationships",
+    "primary_production_area_relationship",
+    "contributing_area_cells",
+    "slope_pct",
+    "representative_elevation_m",
+}
+
+
+def _assert_one_decimal(value, path):
+    """Every number narrative_data emits is rounded to 1 decimal place --
+    the precision emitted is the precision narrated (integer counts/ids
+    pass trivially)."""
+    if isinstance(value, bool) or value is None or isinstance(value, str):
+        return
+    if isinstance(value, (int, float)):
+        assert round(float(value), 1) == float(value), f"{path} = {value!r} is not rounded to 1 decimal place"
+        return
+    if isinstance(value, dict):
+        for k, v in value.items():
+            _assert_one_decimal(v, f"{path}.{k}")
+        return
+    if isinstance(value, list):
+        for i, v in enumerate(value):
+            _assert_one_decimal(v, f"{path}[{i}]")
+        return
+    raise AssertionError(f"{path} holds a non-JSON type: {type(value)!r}")
+
+
+# Fixture: 12x12 grid at 5 m, tilted north-high/south-low (120 m at row 0
+# down to 98 m at row 11 -- a uniform 40% steepest-neighbor slope), full-
+# grid parcel boundary. The injected cluster is a 4x5-cell block (rows
+# 7-10, cols 1-5: 500 m^2 = 0.1236 ac, above the 0.1 floor and far below
+# the 0.5 target, so it grows to its whole unpadded self) in the parcel's
+# SOUTHWEST, with a flat 300-cell accumulation across it. Two production
+# areas: one 22.5 m due east of the zone centroid and 8 m below it (a
+# clean gravity-feed relationship with hand-checkable numbers), one
+# CONTAINING the zone centroid (distance 0 -- the undefined-gradient
+# case).
+_nd_nr, _nd_nc = 12, 12
+_nd_array = np.zeros((_nd_nr, _nd_nc), dtype=np.float32)
+for _r in range(_nd_nr):
+    _nd_array[_r, :] = 120.0 - 2.0 * _r
+_nd_dem = _dem(_nd_array)
+_nd_boundary = box(500000.0, 4500000.0 - _nd_nr * 5.0, 500000.0 + _nd_nc * 5.0, 4500000.0)
+_nd_cluster = _rect_cells(7, 11, 1, 6)
+_nd_mask = _mask_from_cells((_nd_nr, _nd_nc), _nd_cluster)
+_nd_accum = np.ones((_nd_nr, _nd_nc), dtype=np.float64)
+for _r, _c in _nd_cluster:
+    _nd_accum[_r, _c] = 300.0
+_nd_pa = [
+    {
+        "id": 0,
+        "representative_elevation_m": 95.0,
+        "polygon_utm": box(500040.0, 4499945.0, 500055.0, 4499960.0),
+        "render_fill_polygon_utm": box(0.0, 0.0, 1.0, 1.0),
+    },
+    {
+        "id": 1,
+        "representative_elevation_m": 100.0,
+        "polygon_utm": box(500000.0, 4499940.0, 500035.0, 4499970.0),  # contains the zone centroid -> distance 0
+        "render_fill_polygon_utm": box(2.0, 0.0, 3.0, 1.0),
+    },
+]
+_nd_zones, _nd_wiped = _run_with_injected(_nd_dem, _nd_mask, _nd_accum, _nd_pa, _nd_boundary)
+assert len(_nd_zones) == 1, "narrative fixture must produce exactly one zone"
+assert not _nd_wiped, "the 4x5 narrative fixture must survive the render opening (keeps the wipeout report exact)"
+assert set(_nd_zones[0]) == _PRE_NARRATIVE_ZONE_KEYS, (
+    f"zone dict fields changed -- diff: {set(_nd_zones[0]) ^ _PRE_NARRATIVE_ZONE_KEYS}"
+)
+
+_nd = wcz.build_narrative_data(
+    _nd_zones, _nd_dem, _nd_boundary,
+    production_area_count=len(_nd_pa),
+    canopy_data_available=False,
+    road_data_available=False,
+)
+assert set(_nd_zones[0]) == _PRE_NARRATIVE_ZONE_KEYS, "build_narrative_data() must READ the zone dict, not mutate it"
+
+# JSON-clean and rounded throughout.
+assert json.loads(json.dumps(_nd)) == _nd, (
+    "narrative_data must survive a plain json.dumps()/json.loads() round trip unchanged -- no numpy "
+    "scalars, no arrays, no geometry"
+)
+_assert_one_decimal(_nd, "narrative_data")
+assert set(_nd) == {"zone_found", "production_area_count", "gates", "zone"}
+assert set(_nd["zone"]) == {"area_acres", "target_acres", "location", "drainage", "service"}
+
+# Top level + gates: pure pass-through of what the caller measured.
+assert _nd["zone_found"] is True
+assert _nd["production_area_count"] == 2
+assert _nd["gates"] == {"canopy_data_available": False, "road_data_available": False}
+
+# Question 1 -- WHERE. The block sits in the parcel's southwest (centroid
+# offset 19.5 m against a 6.8 m "center" threshold), on lower ground:
+# representative elevation 103 m in a 98-120 m parcel range -> (103-98)/22
+# = 22.7th percentile. area: 500 m^2 -> 0.1 ac; target: the 0.5 default.
+assert _nd["zone"]["area_acres"] == round(500.0 / SQUARE_METERS_PER_ACRE, 1)
+assert _nd["zone"]["target_acres"] == WATER_ZONE_TARGET_ACRES
+assert _nd["zone"]["location"]["position_in_parcel"] == "southwest"
+assert _nd["zone"]["location"]["elevation_percentile_of_parcel"] == 22.7
+
+# Question 2 -- WHY. Median contributing area 300 cells, converted to
+# acres INSIDE the module; the ceiling every member cell cleared; the
+# uniform 40% slope.
+assert _nd["zone"]["drainage"]["contributing_area_acres"] == round(300.0 * cell_area_acres(_nd_dem), 1)
+assert _nd["zone"]["drainage"]["contributing_area_ceiling_acres"] == MAX_VALLEY_CONTRIBUTING_AREA_ACRES
+assert _nd["zone"]["drainage"]["slope_median_pct"] == 40.0
+
+# Question 3 -- HOW. Most gravity-favorable first (same order the zone's
+# own relationships carry): production area 0 sits 8 m (26.2 ft) below the
+# zone over 22.5 m (73.8 ft) -- a 35.6% gravity run. Production area 1 is
+# at distance 0: its gradient is UNDEFINED, so the narrative must carry
+# None, never the raw relationship's 0.0 div-by-zero placeholder (which a
+# narrative would read as measured level ground).
+_nd_service = _nd["zone"]["service"]
+assert _nd_service["served_production_area_count"] == 2
+assert _nd_service["served_production_area_ids"] == [0, 1]
+assert _nd_service["relationships"][0] == {
+    "production_area_id": 0,
+    "can_gravity_feed": True,
+    "elevation_differential_ft": 26.2,
+    "distance_ft": 73.8,
+    "gradient_pct": 35.6,
+}
+assert _nd_service["relationships"][1]["production_area_id"] == 1
+assert _nd_service["relationships"][1]["distance_ft"] == 0.0
+assert _nd_service["relationships"][1]["gradient_pct"] is None, (
+    "gradient at distance 0 is undefined -- narrative_data must emit None, not the 0.0 placeholder"
+)
+assert _nd_zones[0]["production_area_relationships"][1]["gradient_pct"] == 0.0, (
+    "contrast: the RAW relationship still carries the pre-existing 0.0 placeholder, unchanged"
+)
+assert _nd_service["relationships"][1]["can_gravity_feed"] is True  # +3 m of real head, no run to divide by
+
+# position_in_parcel directly: a centered footprint reads "center" (offset
+# 2.5 m, under the 20%-of-equivalent-radius threshold), a corner one reads
+# its compass word.
+assert wcz._position_in_parcel(box(500015.0, 4499960.0, 500040.0, 4499980.0), _nd_boundary) == "center"
+assert wcz._position_in_parcel(box(500045.0, 4499990.0, 500055.0, 4500000.0), _nd_boundary) == "northeast"
+
+# No-zone outcome: zone_found False, zone None (never a zeroed-out zone
+# block), the caller's context still reported so a narrative can explain
+# WHY nothing was found (here: no production areas existed to serve).
+_nd_empty = wcz.build_narrative_data(
+    [], _nd_dem, _nd_boundary, production_area_count=0, canopy_data_available=True, road_data_available=True
+)
+assert _nd_empty["zone_found"] is False
+assert _nd_empty["zone"] is None
+assert _nd_empty["production_area_count"] == 0
+assert _nd_empty["gates"] == {"canopy_data_available": True, "road_data_available": True}
+assert json.loads(json.dumps(_nd_empty)) == _nd_empty
+
+print(
+    "narrative_data: json-clean and 1-decimal throughout; reads the zone dict without mutating it; "
+    "WHERE (southwest, 22.7th elevation percentile, 0.1 of a 0.5-acre target), WHY "
+    f"({_nd['zone']['drainage']['contributing_area_acres']} ac median contributing area under the "
+    f"{MAX_VALLEY_CONTRIBUTING_AREA_ACRES}-ac ceiling, 40.0% slope), HOW (gravity-feeds production area 0: "
+    "26.2 ft over 73.8 ft = 35.6%; distance-0 gradient reads None, not 0.0); no-zone case reports "
+    "zone_found=False with zone=None."
+)
+
+
 print(f"\nWipeout report: {len(_wipeout_messages)} find_candidate_zones run(s) triggered the opening wipeout "
       "fallback across the whole file: the deliberate 2-cell-wide fixture (test 8) and the two degenerate real "
       "single-column-channel runs (production area above/below). Every 2D-band fixture representative of a real, "
