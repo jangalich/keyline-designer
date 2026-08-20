@@ -209,6 +209,7 @@ from road_corridors import POND_ZONE_EXCLUSION_BUFFER_METERS, identify_road_corr
 from soil_data import coordinates_to_wkt_polygon, get_farmland_classification_for_polygon, is_prime_farmland
 from terrain_metrics import aspect_score, aspect_to_compass_label, compute_shading_score, compute_slope_and_aspect
 from tree_zone_candidates import identify_tree_zone_candidates
+from water_candidate_zones import _position_in_parcel
 from water_suitability import identify_water_suitability
 
 METERS_PER_FOOT = 0.3048
@@ -619,6 +620,10 @@ def find_candidate_solar_zones(
         {
             'rank': int,
             'suitability_score': float,        # 0-100
+            'slope_score': float,               # 0-1 -- the composite's own four
+            'aspect_score': float,              #   components, stored rather than
+            'shading_score': float,             #   discarded (additive; see the
+            'production_proximity_score': float,  # inline comment where they're set)
             'avg_slope_pct': float,
             'aspect_deg': Optional[float],      # None if the candidate is essentially flat
             'aspect_label': str,
@@ -744,6 +749,16 @@ def find_candidate_solar_zones(
         candidates.append(
             {
                 "suitability_score": round(combined * 100, 1),
+                # The composite's own four components, stored (0-1, same
+                # native scale as every other *_factor field in this
+                # pipeline) rather than discarded -- purely additive to
+                # the candidate shape, so "why did this site score what
+                # it did" can be answered downstream (narrative_data,
+                # tests) without re-running any scoring.
+                "slope_score": round(s_score, 3),
+                "aspect_score": round(a_score, 3),
+                "shading_score": round(sh_score, 3),
+                "production_proximity_score": round(p_score, 3),
                 "avg_slope_pct": round(avg_slope_pct, 1),
                 "aspect_deg": round(mean_aspect, 1) if mean_aspect is not None else None,
                 "aspect_label": aspect_to_compass_label(mean_aspect) if mean_aspect is not None else "flat",
@@ -837,6 +852,203 @@ def select_optimal_structure_site(scored_candidates: list[dict]) -> Optional[dic
     if not scored_candidates:
         return None
     return max(scored_candidates, key=lambda c: c["suitability_score"])
+
+
+# =====================================================================
+# NARRATIVE DATA -- report-facing, FINAL values only
+# =====================================================================
+# Everything below exists to answer TWO report questions about this
+# module's deliverable, and nothing else:
+#
+#   1. WHERE is it on the map?
+#   2. WHAT ARE THE BENEFITS of placing a permanent building here?
+#
+# "It" is the SELECTED structure site (select_optimal_structure_site()'s
+# single rank-1 answer) -- per the narrative_data convention's
+# winner-only nuance, this block describes the winner's own package;
+# candidate_count is the one light comparison-level value, and it is
+# available here precisely because this module's own entry point returns
+# the full ranked list alongside the winner.
+#
+# The same two hard rules production_area_ceiling.py's narrative block
+# established govern every value here:
+#
+#   1. FINAL. Imperial at this boundary (acres, feet); factors rescaled
+#      from their native 0-1 to a 0-100 higher-is-better scale so they
+#      are directly comparable to the composite score; position as a
+#      compass word; everything rounded to 1 decimal place.
+#   2. DERIVED, NEVER RECOMPUTED. Every figure is read off the candidate
+#      dict find_candidate_solar_zones() already returns (including the
+#      four stored factor scores) -- no scoring, distance, or exclusion
+#      test is re-run to report on itself. The centroid bearing behind
+#      position_in_parcel is trivial arithmetic on the footprint already
+#      in hand (water_candidate_zones._position_in_parcel(), reused
+#      rather than reimplemented).
+#
+# The output is plain JSON -- json.dumps() must work with no custom
+# encoder.
+#
+# UNAVAILABLE IS None, NEVER 0.0. A distance whose reference geometry
+# doesn't exist (no production zones, no road source, no water zone) is
+# None; prime_farmland_conflict is None -- not False -- when the SSURGO
+# check never ran, so "no conflict" is never claimed off an outage.
+#
+# NO REASON STRINGS. This block emits values; the report writes prose --
+# the "benefits" are the site's own measured qualities (gentle slope,
+# orientation, low terrain shading, road access, production-edge
+# position), which are the data that prose is written FROM.
+
+# 8-point compass words for the selected site's facing direction --
+# whole words, not aspect_to_compass_label()'s abbreviations ("SE"),
+# because this feeds narrative prose directly. Deliberately a separate
+# tuple from water_candidate_zones.py's/production_area_ceiling.py's own
+# private equivalents (same "constants stay separate even when
+# identical" convention this pipeline already applies).
+_COMPASS_WORDS = (
+    "north",
+    "northeast",
+    "east",
+    "southeast",
+    "south",
+    "southwest",
+    "west",
+    "northwest",
+)
+
+
+def _round1(value):
+    """1 decimal place, or None passed straight through -- the single
+    rounding boundary for this whole block. None means 'not known', and
+    must never be silently rounded into a 0.0 that reads as a
+    measurement."""
+    return None if value is None else round(float(value), 1)
+
+
+def _feet(meters):
+    """Metres to feet at this block's own rounding boundary, None passed
+    straight through -- the metric-to-imperial conversion happens HERE,
+    in the module, never downstream in the report."""
+    return None if meters is None else round(float(meters) / METERS_PER_FOOT, 1)
+
+
+def _compass_word(aspect_deg) -> Optional[str]:
+    """8-point compass word for a bearing in degrees, or None for an
+    undefined aspect (an essentially-flat site faces no direction --
+    None, never a fabricated word)."""
+    if aspect_deg is None or math.isnan(float(aspect_deg)):
+        return None
+    return _COMPASS_WORDS[int(round((float(aspect_deg) % 360.0) / 45.0)) % 8]
+
+
+def build_narrative_data(
+    candidates: list[dict],
+    boundary_polygon_utm: Polygon,
+    road_proximity_source: str,
+    tree_zone_exclusion_available: bool,
+    water_zone_excluded: bool,
+    existing_canopy_excluded: bool,
+) -> dict:
+    """
+    The 'narrative_data' block identify_solar_candidate_zones() attaches
+    to its result -- pre-computed, FINAL, JSON-serialisable values
+    answering the two report questions in this section's header comment.
+    Data only: no prose, no interpretation. candidates is the same
+    ranked list the result dict already carries (read, never modified);
+    the selected site is select_optimal_structure_site()'s own answer --
+    the ONE definition of "selected", reused rather than re-derived.
+
+    road_proximity_source / tree_zone_exclusion_available /
+    water_zone_excluded / existing_canopy_excluded say what the run that
+    produced candidates ACTUALLY applied -- which access source
+    proximity was measured against ('selected_road_corridor' |
+    'real_mapped_road' | 'unavailable'), whether the tree-zone exclusion
+    could be checked at all, whether a selected water zone existed to
+    exclude, and whether the mandatory canopy gate ran (True always on
+    the identify path, whose canopy fetch is fetch-or-raise -- any
+    result returned at all was canopy-gated). The identify entry point
+    passes its own real outcomes; without these a narrative could claim
+    clearances off a run whose checks never ran.
+
+    Shape:
+
+        {
+          'site_found': bool,
+          'candidate_count': int,       # how many ranked candidates the winner
+                                        #   was selected from (capped at
+                                        #   MAX_CANDIDATES)
+          'gates': {
+            'existing_canopy_excluded', # mandatory on the identify path -- any
+                                        #   result at all was canopy-gated
+            'water_zone_excluded',
+            'tree_zone_exclusion_checked',
+            'road_proximity_source',
+            'prime_farmland_checked',
+          },
+          'selected_site': None when site_found is False, else {
+            'score',                    # 0-100
+            'footprint_acres',
+            'location': {               # question 1 -- WHERE on the map
+              'position_in_parcel',     #   "center" or an 8-point compass word
+              'production_zone_relationship',   # 'inside' | 'adjacent' | 'outside'
+              'distance_to_production_edge_ft', # None if no production zones exist
+              'distance_to_road_ft',            # None if no road source was available
+              'distance_to_water_zone_ft',      # None if no water zone exists
+            },
+            'benefits': {               # question 2 -- the measured qualities
+              'avg_slope_pct',          #   prose reasons FROM
+              'facing',                 #   compass word; None = essentially flat
+              'factors': {              #   each rescaled 0-100, higher is better,
+                                        #   directly comparable to 'score'
+                'slope', 'aspect', 'shading', 'production_proximity',
+              },
+              'prime_farmland_conflict',  # None -- not False -- when never checked
+            },
+          },
+        }
+    """
+    selected = select_optimal_structure_site(candidates)
+    prime_farmland_checked = selected is not None and "prime_farmland_conflict" in selected
+
+    data = {
+        "site_found": selected is not None,
+        "candidate_count": len(candidates),
+        "gates": {
+            "existing_canopy_excluded": bool(existing_canopy_excluded),
+            "water_zone_excluded": bool(water_zone_excluded),
+            "tree_zone_exclusion_checked": bool(tree_zone_exclusion_available),
+            "road_proximity_source": str(road_proximity_source),
+            "prime_farmland_checked": prime_farmland_checked,
+        },
+        "selected_site": None,
+    }
+    if selected is None:
+        return data
+
+    data["selected_site"] = {
+        "score": _round1(selected["suitability_score"]),
+        "footprint_acres": _round1(selected["footprint_area_acres"]),
+        "location": {
+            "position_in_parcel": _position_in_parcel(selected["polygon_utm"], boundary_polygon_utm),
+            "production_zone_relationship": str(selected["production_zone_relationship"]),
+            "distance_to_production_edge_ft": _feet(selected["distance_to_production_zone_m"]),
+            "distance_to_road_ft": _feet(selected["distance_to_road_m"]),
+            "distance_to_water_zone_ft": _feet(selected["distance_to_water_zone_m"]),
+        },
+        "benefits": {
+            "avg_slope_pct": _round1(selected["avg_slope_pct"]),
+            "facing": _compass_word(selected["aspect_deg"]),
+            "factors": {
+                "slope": _round1(selected["slope_score"] * 100.0),
+                "aspect": _round1(selected["aspect_score"] * 100.0),
+                "shading": _round1(selected["shading_score"] * 100.0),
+                "production_proximity": _round1(selected["production_proximity_score"] * 100.0),
+            },
+            "prime_farmland_conflict": (
+                bool(selected["prime_farmland_conflict"]) if prime_farmland_checked else None
+            ),
+        },
+    }
+    return data
 
 
 def candidates_to_geojson(
@@ -999,7 +1211,21 @@ def identify_solar_candidate_zones(
             'selected_structure_site': Optional[dict],  # select_optimal_structure_site()'s
                                                            # single rank-1 answer, or None if no
                                                            # candidates exist
+            'narrative_data': dict,                  # report-facing, FINAL, JSON-serialisable
+                                                        # values -- see build_narrative_data()
         }
+
+    'narrative_data' is PURELY ADDITIVE at this level: every other key
+    above is byte-identical to what this function returned before it
+    existed (each candidate dict additionally carries the four stored
+    factor scores -- see find_candidate_solar_zones()). It answers two
+    report questions (where is the selected site on the map / what are
+    the benefits of placing a permanent building here) with
+    pre-computed, imperial, rounded values a narrative can quote
+    directly -- derived entirely from the candidate dict this function
+    already computed, so adding it re-runs no scoring, distance, or
+    exclusion test. See build_narrative_data()'s own docstring for the
+    field contract.
 
     CANOPY (mandatory, non-degrading — see module docstring): fetched
     directly via production_area.get_required_tree_root_zone_mask_utm(),
@@ -1303,6 +1529,16 @@ def identify_solar_candidate_zones(
         ),
         "all_scored_candidates": candidates,
         "selected_structure_site": select_optimal_structure_site(candidates),
+        "narrative_data": build_narrative_data(
+            candidates,
+            boundary_polygon_utm,
+            road_proximity_source=road_proximity_source,
+            tree_zone_exclusion_available=tree_zone_exclusion_available,
+            water_zone_excluded=bool(water_zones),
+            # The canopy gate above is fetch-or-raise, so any result this
+            # function returns at all was canopy-gated.
+            existing_canopy_excluded=True,
+        ),
     }
 
 

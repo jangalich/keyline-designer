@@ -531,4 +531,34 @@ print(
 )
 
 
+# =====================================================================
+# narrative_data: attached by the entry point, purely additive, and
+# consistent with the same result's own selection. Value-level contract
+# checks (units, factor decomposition, None-vs-False prime farmland)
+# live in test_solar_suitability.py against the controlled fixture.
+# =====================================================================
+import json  # noqa: E402
+
+assert set(result) == {"zones_geojson", "all_scored_candidates", "selected_structure_site", "narrative_data"}, (
+    "narrative_data must be the ONLY new top-level key on identify_solar_candidate_zones() -- got "
+    f"{set(result)}"
+)
+_nd = result["narrative_data"]
+assert json.loads(json.dumps(_nd)) == _nd, "narrative_data must be json.dumps()-clean with no custom encoder"
+assert _nd["site_found"] == (result["selected_structure_site"] is not None)
+assert _nd["candidate_count"] == len(result["all_scored_candidates"])
+# The entry point's canopy gate is fetch-or-raise, so any returned result
+# was canopy-gated -- the narrative must say so.
+assert _nd["gates"]["existing_canopy_excluded"] is True
+if result["selected_structure_site"] is not None:
+    assert _nd["selected_site"]["score"] == round(result["selected_structure_site"]["suitability_score"], 1), (
+        "narrative_data must describe the SAME site selected_structure_site reports"
+    )
+print(
+    "narrative_data attached end-to-end: purely additive, json-clean, describing the same selected "
+    f"site the result reports (site_found={_nd['site_found']}, {_nd['candidate_count']} candidate(s), "
+    f"road_proximity_source={_nd['gates']['road_proximity_source']!r})."
+)
+
+
 print("\nAll solar suitability pipeline checks passed.")

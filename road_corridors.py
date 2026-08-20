@@ -964,6 +964,181 @@ def corridors_to_geojson(
     return make_feature_collection(features)
 
 
+# =====================================================================
+# NARRATIVE DATA -- report-facing, FINAL values only
+# =====================================================================
+# Everything below exists to answer TWO report questions about this
+# module's deliverable, and nothing else:
+#
+#   1. HOW was the suggested route determined?
+#   2. HOW MUCH ACCESS does it provide to the farm?
+#
+# The same two hard rules production_area_ceiling.py's narrative block
+# established govern every value here:
+#
+#   1. FINAL. The consumer must never convert, calculate, or relate two
+#      values to get a third. Imperial at this boundary (feet, acres --
+#      never metres); grade in percent; everything rounded to 1 decimal
+#      place, because the precision emitted is the precision narrated.
+#   2. DERIVED, NEVER RECOMPUTED. Every figure is read off the network
+#      dict build_road_network() already returns -- no routing pass, cost
+#      raster, or grade statistic is re-run to report on itself. The one
+#      derived figure (served share of production demand) is one division
+#      over two numbers the router already produced.
+#
+# The output is plain JSON: numbers, booleans, strings, dicts, lists.
+# json.dumps() must work on it with no custom encoder.
+#
+# UNAVAILABLE IS None, NEVER 0.0 -- and a constraint that never ran is
+# reported as not-applied (its *_available flag False), never as
+# silently satisfied. Without those flags a narrative could claim
+# "routed around floodplain ground" off a run where the NHD/SSURGO
+# fetches were down.
+#
+# NO REASON STRINGS. This block emits values; the report writes prose --
+# the determination story (grown outward from the real access point, one
+# branch at a time, by new acreage served per unit routing cost) is
+# carried by stop_reason, the constraint flags, and each branch's own
+# newly_served_acres, which are the data that story is written FROM.
+
+
+def _round1(value):
+    """1 decimal place, or None passed straight through -- the single
+    rounding boundary for this whole block. None means 'not known', and
+    must never be silently rounded into a 0.0 that reads as a
+    measurement."""
+    return None if value is None else round(float(value), 1)
+
+
+def _feet(meters):
+    """Metres to feet at this block's own rounding boundary, None passed
+    straight through -- the metric-to-imperial conversion happens HERE,
+    in the module, never downstream in the report."""
+    return None if meters is None else round(float(meters) / METERS_PER_FOOT, 1)
+
+
+def build_narrative_data(
+    road_network: dict,
+    service_radius_meters: float,
+    water_zone_excluded: bool,
+    floodplain_data_available: bool,
+    floodplain_data_is_fallback: bool,
+    canopy_data_available: bool,
+) -> dict:
+    """
+    The 'narrative_data' block identify_road_corridor_candidates()
+    attaches to its result -- pre-computed, FINAL, JSON-serialisable
+    values answering the two report questions in this section's header
+    comment. Data only: no prose, no interpretation. road_network is
+    build_road_network()'s own return dict (or _empty_road_network()'s),
+    read but never modified.
+
+    The flag parameters say what the run that produced road_network
+    ACTUALLY applied -- water_zone_excluded (a selected water zone
+    existed and was hard-excluded, buffered), floodplain_data_available
+    (a floodplain/hydric cost-penalty union existed at all) with
+    floodplain_data_is_fallback (that union came from the DEM-only
+    valley-line fallback, not real NHD/SSURGO data), and
+    canopy_data_available (the soft canopy crossing penalty was active).
+    identify_road_corridor_candidates() passes what it genuinely
+    fetched/derived; the caller passes them so this block never guesses
+    at configuration. service_radius_meters is likewise the value the
+    router ACTUALLY used (an override, or road_network_router.py's
+    default).
+
+    Shape:
+
+        {
+          'network_found': bool,
+          'stop_reason': str,         # the router's own reason growth ended --
+                                      #   'diminishing_returns', 'no_anchor_given',
+                                      #   'all_demand_served', ... -- the single
+                                      #   most load-bearing determination value
+          'determination': {          # question 1 -- HOW the route was determined
+            'grade_ceiling_pct',      #   hard exclusion: no branch cell exceeds this
+            'steep_grade_threshold_pct',
+                                      #   above this, a grade needs real engineering
+            'max_grade_pct',          #   steepest single cell across the network
+            'steep_ft',               #   total length of cells above the threshold
+            'water_zone_excluded',    #   pond/dam ground was hard-excluded (buffered)
+            'floodplain_data_available',
+            'floodplain_data_is_fallback',
+            'canopy_data_available',
+          },
+          'access': {                 # question 2 -- HOW MUCH ACCESS it provides
+            'branch_count',
+            'total_length_ft',
+            'served_acres',           #   production acreage within the service
+                                      #   radius of the network
+            'unserved_acres',         #   production acreage left out of range
+            'served_pct_of_production',
+                                      #   served / (served + unserved); None when
+                                      #   there is no production demand at all
+            'service_radius_ft',      #   how far off the road 'served' reaches
+            'reaches_water_zone',     #   a water spur runs to the pond site's edge
+          },
+          'branches': [               # in branch order (trunk first), one entry per
+                                      #   drawn branch
+            {
+              'branch_index', 'role',   # 'trunk' | 'spur' | 'water_spur'
+              'length_ft',
+              'newly_served_acres',     # the acreage THIS branch alone brought into
+                                        #   range -- why the router chose to build it
+              'avg_grade_pct',          # centerline average
+              'max_grade_pct',          # steepest single cell on this branch
+              'steep_ft',
+              'crosses_floodplain',
+              'crosses_production_zone',
+            }, ...
+          ],
+        }
+    """
+    branches = road_network["branches"]
+    served_acres = float(road_network["total_served_acres"])
+    unserved_acres = float(road_network["unserved_acres"])
+    total_demand_acres = served_acres + unserved_acres
+
+    return {
+        "network_found": bool(branches),
+        "stop_reason": str(road_network["stop_reason"]),
+        "determination": {
+            "grade_ceiling_pct": _round1(MAX_ROAD_GRADE_PCT),
+            "steep_grade_threshold_pct": _round1(STEEP_GRADE_ENGINEERING_NOTE_THRESHOLD_PCT),
+            "max_grade_pct": _round1(road_network["max_grade_pct"]),
+            "steep_ft": _feet(road_network["steep_meters"]),
+            "water_zone_excluded": bool(water_zone_excluded),
+            "floodplain_data_available": bool(floodplain_data_available),
+            "floodplain_data_is_fallback": bool(floodplain_data_is_fallback),
+            "canopy_data_available": bool(canopy_data_available),
+        },
+        "access": {
+            "branch_count": len(branches),
+            "total_length_ft": _feet(road_network["total_length_meters"]),
+            "served_acres": _round1(served_acres),
+            "unserved_acres": _round1(unserved_acres),
+            "served_pct_of_production": (
+                _round1(served_acres / total_demand_acres * 100.0) if total_demand_acres > 0 else None
+            ),
+            "service_radius_ft": _feet(service_radius_meters),
+            "reaches_water_zone": any(b["branch_role"] == "water_spur" for b in branches),
+        },
+        "branches": [
+            {
+                "branch_index": int(b["branch_index"]),
+                "role": str(b["branch_role"]),
+                "length_ft": _feet(b["length_meters"]),
+                "newly_served_acres": _round1(b["newly_served_acres"]),
+                "avg_grade_pct": _round1(b["avg_grade_pct"]),
+                "max_grade_pct": _round1(b["max_grade_pct"]),
+                "steep_ft": _feet(b["steep_meters"]),
+                "crosses_floodplain": bool(b["crosses_floodplain"]),
+                "crosses_production_zone": bool(b["crosses_production_zone"]),
+            }
+            for b in branches
+        ],
+    }
+
+
 def _log_fetch_failure(label: str, exc: Exception) -> None:
     """
     Every real-data fetch in this module degrades gracefully on failure
@@ -1234,7 +1409,22 @@ def identify_road_corridor_candidates(
             'road_network': dict,                 # build_road_network()'s own full return
             'selected_road_corridor': Optional[dict],  # the SAME road_network dict, or None
                                                          # when road_network['branches'] is empty
+            'narrative_data': dict,               # report-facing, FINAL, JSON-serialisable
+                                                    # values -- see build_narrative_data()
         }
+
+    'narrative_data' is PURELY ADDITIVE: every other key above, and every
+    field on the network/branches, is byte-identical to what this
+    function returned before it existed. It answers two report questions
+    (how was the suggested route determined / how much access does it
+    provide to the farm) with pre-computed, imperial, rounded values a
+    narrative can quote directly -- derived entirely from the network
+    dict build_road_network() already returned, so adding it re-runs no
+    routing pass, cost raster, or grade statistic. See
+    build_narrative_data()'s own docstring for the field contract. It is
+    attached on the no-anchor early return too, so a narrative can
+    explain THAT outcome (network_found False, stop_reason
+    'no_anchor_given') rather than finding the key missing.
     """
     if dem is None:
         dem = get_dem_for_boundary(boundary_coordinates)
@@ -1245,6 +1435,16 @@ def identify_road_corridor_candidates(
             "zones_geojson": corridors_to_geojson(empty_network),
             "road_network": empty_network,
             "selected_road_corridor": None,
+            # No fetch ran on this early path -- every constraint flag is
+            # honestly False ("never applied"), not a claimed exclusion.
+            "narrative_data": build_narrative_data(
+                empty_network,
+                service_radius_meters=corridor_kwargs.get("service_radius_meters", PRODUCTION_SERVICE_RADIUS_METERS),
+                water_zone_excluded=False,
+                floodplain_data_available=False,
+                floodplain_data_is_fallback=False,
+                canopy_data_available=False,
+            ),
         }
 
     if boundary_polygon_utm is None:
@@ -1318,6 +1518,16 @@ def identify_road_corridor_candidates(
         ),
         "road_network": road_network,
         "selected_road_corridor": road_network if road_network["branches"] else None,
+        "narrative_data": build_narrative_data(
+            road_network,
+            # The value the router ACTUALLY used -- a corridor_kwargs
+            # override, or road_network_router.py's own default.
+            service_radius_meters=corridor_kwargs.get("service_radius_meters", PRODUCTION_SERVICE_RADIUS_METERS),
+            water_zone_excluded=selected_water_zone is not None,
+            floodplain_data_available=hydric_floodplain_union is not None,
+            floodplain_data_is_fallback=bool(floodplain_data_is_fallback),
+            canopy_data_available=canopy_mask is not None,
+        ),
     }
 
 
