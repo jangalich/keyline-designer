@@ -419,6 +419,35 @@ with ExitStack() as _stack:
 
 assert isinstance(ctx, pc.PipelineContext)
 
+# --- 0. narrative_data: one key per producing module, captured with .get()
+# off the same calls above -- a canned/mocked result WITHOUT the key
+# captures None (never raises, never invents a block), while the entry
+# points run for real here (wraps=) capture their own genuine block. ---
+assert set(ctx.narrative_data) == {
+    "production_area_ceiling",
+    "water_candidate_zones",
+    "road_corridors",
+    "solar_suitability",
+    "tree_zone_candidates",
+}, f"narrative_data must carry exactly one key per producing module -- got {set(ctx.narrative_data)}"
+assert ctx.narrative_data["production_area_ceiling"] is None, (
+    "the mocked identify_optimized_production_areas() result carries no narrative_data key -- .get() "
+    "must capture None for it, not raise or invent a block"
+)
+assert ctx.narrative_data["road_corridors"] is None, (
+    "same for the fully-mocked identify_road_corridor_candidates() result"
+)
+for _nd_key in ("water_candidate_zones", "solar_suitability", "tree_zone_candidates"):
+    _nd_block = ctx.narrative_data[_nd_key]
+    assert isinstance(_nd_block, dict) and _nd_block, (
+        f"{_nd_key} ran for real (wraps=) in this fixture, so its own narrative_data block must be "
+        f"captured on the context -- got {_nd_block!r}"
+    )
+print(
+    "narrative_data captured per module off the calls already made: None for the two canned mocks "
+    "(no key to read), real blocks for the three entry points that ran for real."
+)
+
 # --- 1. every real fetch entry point is called exactly once ---
 
 assert mock_get_dem.call_count == 1, "dem_data.get_dem_for_boundary must be called exactly once"

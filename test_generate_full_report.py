@@ -148,6 +148,9 @@ def _synthetic_context(water_zones: list[dict]) -> PipelineContext:
         },
         selected_structure_site={"site_id": "s0"},
         tree_zone_patches=[{"patch_id": "t0"}],
+        # Recognizable sentinel -- identity-asserted below as the report's
+        # narrative_data kwarg (the formatters' own input now).
+        narrative_data={"road_corridors": {"sentinel": "nd0"}},
     )
 
 
@@ -358,6 +361,13 @@ with ExitStack() as stack:
         "6. selected_water_zone/selected_structure_site/parcel_acres are forwarded from the context by "
         "identity; production_areas_geojson is production_suitability_to_geojson(context.production_areas)."
     )
+
+    # ---- narrative_data forwarded from the context by identity ----
+    assert call_kwargs["narrative_data"] is _context.narrative_data, (
+        "narrative_data handed to the report generator must be context.narrative_data by identity -- "
+        "the per-module narrative blocks are what the report's data-block formatters read now"
+    )
+    print("   narrative_data is forwarded from context.narrative_data by identity.")
 
     # ---- bonus: keypoints + irradiance seams still forwarded ----
     assert call_kwargs["keypoints"] is _context.keypoints, (

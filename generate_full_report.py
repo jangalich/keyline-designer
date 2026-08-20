@@ -101,14 +101,18 @@ def generate_full_report(boundary_coordinates: list, anchor_lon_lat: tuple[float
     # candidate list -- alternatives are out of scope for the narrative.
     # context.selected_water_zone is a raw candidate dict carrying Shapely
     # geometry (not a GeoJSON feature); it is stored and unused by
-    # report_generator.py this branch.
+    # report_generator.py -- the WATER SUPPLY data block is formatted from
+    # context.narrative_data["water_candidate_zones"] instead.
     selected_water_zone = context.selected_water_zone
 
     # road_network: context.selected_road_corridor already IS build_road_
     # network()'s full network dict (NEVER None -- an empty network is
-    # branches=[], not None; see pipeline_context.py's own comment). This is
-    # exactly what generate_scale_of_permanence_report() wants as road_network.
-    # No second identify_road_corridor_candidates() call.
+    # branches=[], not None; see pipeline_context.py's own comment). Stored
+    # through to the report generator for compatibility, but the FARM ROADS
+    # data block is formatted from context.narrative_data["road_corridors"]
+    # now (the pre-digested narrative block built off this same network),
+    # not from this raw dict. No second identify_road_corridor_candidates()
+    # call.
     road_network = context.selected_road_corridor
 
     # keypoints: already computed inside build_pipeline_context() and carried
@@ -148,6 +152,12 @@ def generate_full_report(boundary_coordinates: list, anchor_lon_lat: tuple[float
         irradiance=parcel_data.irradiance,
         parcel_acres=context.parcel_acres,
         production_areas_geojson=production_areas_geojson,
+        # The per-module narrative blocks captured on the context -- what the
+        # production/water/road/tree/solar data blocks in the report prompt
+        # are actually formatted from now (see report_generator.py's own
+        # docstring); the raw winner dicts above stay forwarded for
+        # compatibility but no longer feed any formatter.
+        narrative_data=context.narrative_data,
     )
 
     return report

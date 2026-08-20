@@ -164,6 +164,22 @@ FIELD NOTES
   for the one piece of this call that still isn't de-duplicated: canopy/
   road exclusion inputs.
 
+  narrative_data is the report-facing narrative block each producing
+  module attaches to its own identify_*() result (the narrative_data
+  convention -- pre-digested, FINAL, JSON-serialisable values a
+  narrative can quote directly), captured here keyed by module, one
+  line per module, off calls this function already makes. It
+  deliberately does NOT meet this context's own sizing principle
+  (nothing downstream COMPUTES off it -- only report_generator.py's
+  formatting functions read it), which is exactly why it is its own
+  clearly separate field rather than folded into the KSOP fields above:
+  a future reader can tell at a glance which fields are load-bearing
+  for computation and which exist purely to feed the narrative. Note
+  the water key comes from water_candidate_zones.identify_water_system_
+  candidate_zones() (the module that owns that narrative block); the
+  fetch_and_select_optimal_water_zone() call above returns only the
+  bare winning zone dict and carries no narrative_data of its own.
+
 KNOWN LIMITATIONS (found while building this, deliberately NOT worked
 around here -- flagging per this branch's own instructions rather than
 silently patching another module or reimplementing its logic)
@@ -345,6 +361,18 @@ class PipelineContext:
     selected_road_corridor: dict
     selected_structure_site: dict | None
     tree_zone_patches: list[dict]
+    # Report-facing narrative blocks, keyed by producing module ("production_
+    # area_ceiling", "water_candidate_zones", "road_corridors",
+    # "solar_suitability", "tree_zone_candidates") -- each value is that
+    # module's own 'narrative_data' return key (pre-digested, FINAL,
+    # JSON-serialisable values; see each module's build_narrative_data()),
+    # or None if the producing call didn't attach one. DELIBERATELY its own,
+    # clearly separate field rather than folded into the fields above: every
+    # other field here is load-bearing for downstream KSOP computation
+    # (this context's own sizing principle), while nothing computes off this
+    # one -- only report_generator.py reads it. See the narrative_data
+    # convention doc for this distinction.
+    narrative_data: dict[str, dict | None]
 
 
 def _boundary_polygon_utm(boundary_coordinates: list[tuple[float, float]], dem: dict) -> Polygon:
@@ -646,4 +674,15 @@ def build_pipeline_context(
         selected_road_corridor=selected_road_corridor,
         selected_structure_site=selected_structure_site,
         tree_zone_patches=tree_zone_patches,
+        # One line per module, read off calls this function already makes --
+        # narrative support for the report only, never a KSOP dependency
+        # (see the field's own comment on PipelineContext). .get(): a result
+        # from before a module's narrative_data existed simply carries None.
+        narrative_data={
+            "production_area_ceiling": optimized_production.get("narrative_data"),
+            "water_candidate_zones": water_system_result.get("narrative_data"),
+            "road_corridors": road_corridor_result.get("narrative_data"),
+            "solar_suitability": solar_result.get("narrative_data"),
+            "tree_zone_candidates": tree_zone_result.get("narrative_data"),
+        },
     )

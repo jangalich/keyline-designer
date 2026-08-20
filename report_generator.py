@@ -50,22 +50,29 @@ REASONING SEQUENCE — follow this exact order, do not skip ahead or reorder it:
    Identify, even loosely, which parts of the property look like strong, workable
    production land versus which are steep, awkward, or otherwise marginal — name these
    zones (e.g. "the western slope," "the low ground near the stream") so later steps can
-   refer back to them. Every factor from step 3 onward must be checked against the
-   zones you identify here, and none of them should casually consume land this step
-   flags as strong production land.
+   refer back to them. When PRODUCTION AREA CANDIDATE data is provided below (computed,
+   ceiling-trimmed candidate patches with per-patch slope/aspect/score figures), treat it
+   as the strongest available signal for which ground is strong production land: name the
+   patches by their own id/rank and quote their own figures rather than re-deriving zones
+   from the coarse elevation grid alone. Every factor from step 3 onward must be checked
+   against the zones you identify here, and none of them should casually consume land
+   this step flags as strong production land.
 
 3. WATER SUPPLY (ponds, dams, ram pumps). Combine the water-features data with Land
    Shape's slope/relief findings and Climate's rainfall-intensity finding to reason
    about where water could realistically be captured, stored, or moved (pond/dam
    siting, ram pump feasibility where elevation drop exists). State whether any
    candidate site would sit inside a zone step 2 flagged as strong production land, and
-   if so, say so as a tradeoff rather than silently recommending it. When valley-based
-   WATER SYSTEM CANDIDATE ZONE data is provided below (DEM/LiDAR-derived valley segments
-   sitting above a candidate production area by a minimum gravity gradient), treat it as
-   the strongest available signal for WHERE gravity-fed infrastructure could go, and
-   describe the general zone(s) it identifies — but do not present any single point
-   within a zone as a definitive pond/dam site; that requires separate, more detailed
-   analysis (storage volume, dam wall geometry) this pipeline doesn't perform.
+   if so, say so as a tradeoff rather than silently recommending it. When WATER SYSTEM
+   CANDIDATE SURVEY AREA data is provided below (a DEM/LiDAR-derived drainage survey
+   area within service distance of candidate production areas, with its real elevation/
+   gravity relationship to each — gravity-feed OR pump-required — reported as data),
+   treat it as the strongest available signal for WHERE water-system infrastructure
+   could go, describe the general area it identifies, and state its gravity/pump
+   relationships plainly (can_gravity_feed reports this; a pump-required relationship is
+   a cost tradeoff, not a defect) — but do not present any single point within the area
+   as a definitive pond/dam site; that requires separate, more detailed analysis
+   (storage volume, dam wall geometry) this pipeline doesn't perform.
 
 4. FARM ROADS. When ROAD NETWORK data is provided below (a single road NETWORK grown
    outward from the property's real, chosen access point by a coverage-greedy router,
@@ -87,8 +94,8 @@ REASONING SEQUENCE — follow this exact order, do not skip ahead or reorder it:
    all to build), fall back to describing routing that would follow the ridge or contour
    lines from step 2 and avoid the water infrastructure/catchments from step 3, and say
    plainly that this is an unverified topographic suggestion, not a placement backed by
-   computed network geometry. A branch MAY cross a production zone from step 2 —
-   properties.crosses_production_zone reports this, and it's a real, valid routing option
+   computed network geometry. A branch MAY cross a production zone from step 2 — the
+   data marks this per branch, and it's a real, valid routing option
    (a road is a thin linear feature, not a large permanent land claim), not something to
    flag as a problem; only note it as a genuine tradeoff (interrupted field
    access/operations) where it's actually material, not as a blanket caveat on every
@@ -103,31 +110,36 @@ REASONING SEQUENCE — follow this exact order, do not skip ahead or reorder it:
 
 5. TREES (windbreaks, riparian buffers). Use Climate's prevailing wind (step 1) for
    windbreak orientation and Water Supply's stream/pond locations (step 3) for riparian
-   buffer needs. Check placement against the production zones (step 2) and road
-   corridors (step 4) so tree lines reinforce rather than block them. Be explicit that
-   the NDVI "high vigor vegetation" reading cannot confirm existing tree canopy (see the
-   imagery note below) — treat any tree-placement recommendation here as a new proposal,
-   not a validation of vegetation already on site.
+   buffer needs. When TREE ZONE CANDIDATE data is provided below (computed, ranked
+   patches of leftover, non-claimed ground scored for tree suitability, with each
+   patch's own factor figures), use it as the concrete basis for where new tree
+   plantings could go — refer to the ranked zones and their own figures, and assign each
+   a plausible function (windbreak, riparian buffer) from the wind/water context, since
+   the data deliberately doesn't. Check placement against the production zones (step 2)
+   and road corridors (step 4) so tree lines reinforce rather than block them. Be
+   explicit that the NDVI "high vigor vegetation" reading cannot confirm existing tree
+   canopy (see the imagery note below) — treat any tree-placement recommendation here as
+   a new proposal, not a validation of vegetation already on site.
 
 6. PERMANENT BUILDINGS. Recommend where structures could plausibly go, and just as
    important, rule out any zone already claimed by earlier steps: production land from
    step 2, water-storage or drainage areas from step 3, and road or tree corridors from
    steps 4-5. State clearly that no building-code, setback, or utility-access data feeds
    this step — it is a land-suitability read only, not a permitting-ready siting. When
-   SOLAR STRUCTURE CANDIDATE data is provided below (DEM-derived, ranked candidate SITES
+   SOLAR STRUCTURE CANDIDATE data is provided below (the SELECTED, rank-1 candidate site
    for a small, fixed-footprint structure — a barn or shed with rooftop panels, not a
-   ground-mounted array — already screened for slope, aspect, shading, and proximity to a
-   mapped road), use it as the concrete basis for any solar siting discussion: compare the
-   ranked candidates against each other by name/rank rather than inventing an unranked
-   one. A candidate MAY sit inside or right at the edge of a production zone —
-   properties.production_zone_relationship reports this, and proximity to a production
-   zone's edge is scored as a real preference (a small structure can coexist with
-   production land), not something to apologize for or treat as a conflict; only flag it
-   as a tradeoff if the candidate ALSO carries a prime-farmland conflict (solar value vs.
-   agricultural value of that specific land) — present that explicitly rather than
-   silently picking a side. Do not present any single candidate as a forced final answer
-   when multiple are close in score — say so, and let the ranked list stand as real
-   options.
+   ground-mounted array — already screened for slope, aspect, shading, and road
+   proximity), use it as the concrete basis for the solar siting discussion: describe
+   that site from its own measured figures (position, slope, facing, factor scores)
+   rather than inventing a different one. The site MAY sit inside or right at the edge
+   of a production zone — production_zone_relationship reports this, and proximity to a
+   production zone's edge is scored as a real preference (a small structure can coexist
+   with production land), not something to apologize for or treat as a conflict; only
+   flag it as a tradeoff if the site ALSO carries a prime-farmland conflict (solar value
+   vs. agricultural value of that specific land) — present that explicitly rather than
+   silently picking a side. Present the site as the computed best of the ranked
+   candidates considered, and as a starting point to ground-truth, not a forced final
+   placement.
 
 7. SUBDIVISION FENCES. When STREAM EXCLUSION / PERIMETER FENCING data is provided below
    (fencing.py: buffered NHD stream geometry for livestock-exclusion fencing, and the
@@ -293,33 +305,67 @@ def _format_climate_summary(climate: Optional[dict]) -> str:
     )
 
 
-def _format_water_candidate_zones_summary(zones_geojson: Optional[dict]) -> str:
-    """Formats water_candidate_zones.py's "water_system_candidate" layer
-    (see that module for the Step 1-3 valley/gradient/setback logic behind
-    it) for the report prompt. Optional, same reasoning as climate/imagery
-    above — a DEM fetch failure shouldn't take down the whole report."""
-    if not zones_geojson or not zones_geojson.get("features"):
+def _format_water_candidate_zones_summary(water_narrative: Optional[dict]) -> str:
+    """Formats water_candidate_zones.py's own 'narrative_data' block (see
+    build_narrative_data() there for the field contract -- pre-digested,
+    FINAL, imperial values) for the report prompt. This reads ONLY that
+    block -- never the raw zone geometry or GeoJSON layer it replaced
+    here; every number below was already converted and rounded at the
+    source module. Optional, same reasoning as climate/imagery above -- a
+    DEM fetch failure shouldn't take down the whole report."""
+    if not water_narrative or not water_narrative.get("zone_found"):
         return (
-            "No valley-based water system candidate zones identified "
-            "(either no primary valley cleared the minimum gradient above "
-            "a candidate production area, or DEM data wasn't available "
-            "for this property)."
+            "No water system candidate survey area identified (no "
+            "production area existed to serve, no drainage cell cleared "
+            "the eligibility gates, or DEM data wasn't available for "
+            "this property)."
         )
 
-    lines = [f"{len(zones_geojson['features'])} candidate zone(s) identified:"]
-    for feature in zones_geojson["features"]:
-        props = feature["properties"]
+    zone = water_narrative["zone"]
+    location = zone["location"]
+    drainage = zone["drainage"]
+    service = zone["service"]
+
+    percentile = location["elevation_percentile_of_parcel"]
+    percentile_clause = (
+        f", at the {percentile} elevation percentile of the parcel (0 = the parcel's lowest ground, "
+        "100 = its highest)"
+        if percentile is not None
+        else ""
+    )
+    lines = [
+        f"One survey area identified: {zone['area_acres']} acre(s), grown toward a "
+        f"{zone['target_acres']}-acre survey target, in the parcel's "
+        f"{location['position_in_parcel']}{percentile_clause}.",
+        f"Drainage: median contributing area {drainage['contributing_area_acres']} acre(s) across the "
+        f"zone's own cells -- every member cell sits under the "
+        f"{drainage['contributing_area_ceiling_acres']}-acre siltation/peak-flow eligibility ceiling -- "
+        f"with a median local slope of {drainage['slope_median_pct']}%.",
+        f"Serves {service['served_production_area_count']} production area candidate(s) "
+        f"{service['served_production_area_ids']}, most gravity-favorable first:",
+    ]
+    for rel in service["relationships"]:
+        gradient_clause = (
+            f"{rel['gradient_pct']}% grade"
+            if rel["gradient_pct"] is not None
+            else "gradient undefined -- the zone adjoins/overlaps this area, no horizontal run"
+        )
         lines.append(
-            f"  - {props['label']}: serves production area candidate(s) "
-            f"{props.get('served_production_area_ids', [])}"
+            f"  - production area {rel['production_area_id']}: elevation differential "
+            f"{rel['elevation_differential_ft']} ft (positive = the zone sits ABOVE this area) over "
+            f"{rel['distance_ft']} ft ({gradient_clause}); can_gravity_feed: {rel['can_gravity_feed']}. "
+            + (
+                "A gravity-feed relationship."
+                if rel["can_gravity_feed"]
+                else "Delivering water to this area would need a pump -- a real cost/maintenance "
+                "tradeoff, not a disqualification."
+            )
         )
     lines.append(
-        "\nThese are general zones (valley segments above a candidate production "
-        "area's elevation by a minimum gravity gradient, outside the property "
-        "boundary setback) suitable for keyline plowing patterns, pond/dam "
-        "potential, or ram pump routing — NOT specific pond/dam sites, which "
-        "require separate, more detailed analysis (storage volume, dam wall "
-        "geometry) not performed here."
+        "\nThis is a general survey area (a connected cluster of drainage cells within service "
+        "distance of candidate production areas) suitable for keyline plowing patterns, pond/dam "
+        "potential, or ram pump routing — NOT a specific pond/dam site, which requires separate, "
+        "more detailed analysis (storage volume, dam wall geometry) not performed here."
     )
     return "\n".join(lines)
 
@@ -368,24 +414,13 @@ def _format_keypoints_summary(keypoints: Optional[list[dict]]) -> str:
     return "\n".join(lines)
 
 
-# Mirrors road_corridors.METERS_PER_FOOT exactly (a fixed physical constant, not
-# something that drifts) -- kept local rather than imported so this module stays
-# decoupled from road_corridors.py the same way every other _format_*_summary()
-# function here is decoupled from its own source module, consuming only an
-# already-computed dict.
-_METERS_PER_FOOT = 0.3048
-
-# Mirrors road_corridors.STEEP_GRADE_ENGINEERING_NOTE_THRESHOLD_PCT (10.0)
-# exactly -- the per-CELL grade above which a route's steep section is
-# called out in this narrative. Kept local rather than imported for the
-# same decoupling reason _METERS_PER_FOOT above is (this module consumes
-# only an already-computed network dict, never road_corridors.py itself).
-_STEEP_GRADE_NOTE_THRESHOLD_PCT = 10.0
-
-# One real sentence per road_corridors.py/road_network_router.py stop_reason value
-# (see route_road_network()'s own docstring for what each means) -- deliberately a
-# closed set: an unrecognized value fails loudly in _format_road_corridor_summary()
-# below rather than falling through to a generic, potentially misleading sentence.
+# One real sentence per stop_reason value a road narrative block can carry --
+# road_network_router.route_road_network()'s own four values plus the three
+# road_corridors.py adds for outcomes before/after the router runs (see
+# _empty_road_network() and the no-anchor early return there). Deliberately a
+# closed set: an unrecognized value fails loudly in _format_road_corridor_
+# summary() below rather than falling through to a generic, potentially
+# misleading sentence.
 _ROAD_NETWORK_STOP_REASON_SENTENCES = {
     "cost_per_acre_exceeded": (
         "Routing stopped because further road would not be justified by the "
@@ -401,80 +436,91 @@ _ROAD_NETWORK_STOP_REASON_SENTENCES = {
         "Production ground exists on this property but cannot be reached from the "
         "access point given the terrain and exclusions in play."
     ),
+    "no_anchor_given": (
+        "No access point was provided for this property, so no road network could "
+        "be generated."
+    ),
+    "no_eligible_anchor": (
+        "The provided access point could not be connected to any routable ground "
+        "(every nearby cell is excluded or impassable), so no road network was "
+        "generated."
+    ),
+    "corridor_too_short": (
+        "The only network worth building came out shorter than the minimum "
+        "meaningful road length, so none is recommended."
+    ),
 }
 
 
-def _format_road_corridor_summary(road_network: Optional[dict]) -> str:
-    """Formats road_corridors.py's build_road_network() output -- the full,
-    possibly-multi-branch road NETWORK (see that module's own module
-    docstring for the coverage-greedy routing and constraint stack behind
-    it), NOT the "suggested_road_corridor" GeoJSON layer -- for the report
-    prompt. The raw network dict is used rather than the GeoJSON layer
-    specifically because stop_reason (see below) is only ever present on
-    the network dict; corridors_to_geojson() collapses an empty network
-    (zero branches) to an empty FeatureCollection with nowhere to carry
-    that value, and stop_reason is exactly what distinguishes "no
-    production land exists" from "production land exists but is
-    unreachable" from "the network already reached everything worth
-    reaching" -- three very different messages a farmer needs told apart.
-    Optional, same reasoning as the other DEM/network-backed layers — a
-    fetch failure (or an unrecognized/outdated shape from a caller not yet
-    updated to this network dict) shouldn't take down the whole report;
-    step 4 of the system prompt falls back to its old prose-inference
-    behavior when this is empty/unavailable."""
-    if not road_network or "branches" not in road_network or "stop_reason" not in road_network:
+def _format_road_corridor_summary(road_narrative: Optional[dict]) -> str:
+    """Formats road_corridors.py's own 'narrative_data' block (see
+    build_narrative_data() there for the field contract) for the report
+    prompt. This reads ONLY that block -- never the raw network dict it
+    replaced here: every length is already in feet, every acreage/grade
+    already rounded, at the source module. stop_reason is carried on the
+    block for every outcome (including the empty-network ones), and is
+    exactly what distinguishes "no production land exists" from
+    "production land exists but is unreachable" from "the network already
+    reached everything worth reaching" -- very different messages a
+    farmer needs told apart. Optional, same reasoning as the other
+    DEM/network-backed layers -- a fetch failure (or a caller not yet
+    supplying narrative data) shouldn't take down the whole report; step
+    4 of the system prompt falls back to its old prose-inference behavior
+    when this is empty/unavailable."""
+    if not road_narrative or "stop_reason" not in road_narrative:
         return (
             "No road network data available (either the DEM/NHD/SSURGO data "
             "wasn't available for this property, or this run's caller hasn't "
-            "supplied the current network shape) — fall back to topographic "
+            "supplied the road narrative data) — fall back to topographic "
             "reasoning from Land Shape (step 2) for this section, and say "
             "plainly that it isn't backed by computed network geometry."
         )
 
-    stop_reason = road_network["stop_reason"]
+    determination = road_narrative["determination"]
+    access = road_narrative["access"]
+
+    stop_reason = road_narrative["stop_reason"]
     if stop_reason not in _ROAD_NETWORK_STOP_REASON_SENTENCES:
         raise ValueError(
             f"_format_road_corridor_summary() doesn't recognize road network "
-            f"stop_reason {stop_reason!r} -- road_network_router.route_road_network() "
-            f"must have added a new stop_reason value; add its sentence to "
-            f"_ROAD_NETWORK_STOP_REASON_SENTENCES rather than let this fall through "
-            f"to a generic, potentially misleading message."
+            f"stop_reason {stop_reason!r} -- a new stop_reason value must have been "
+            f"added upstream; add its sentence to _ROAD_NETWORK_STOP_REASON_SENTENCES "
+            f"rather than let this fall through to a generic, potentially misleading "
+            f"message."
         )
     stop_reason_sentence = _ROAD_NETWORK_STOP_REASON_SENTENCES[stop_reason].format(
-        unserved_acres=round(road_network.get("unserved_acres", 0.0), 2)
+        unserved_acres=access["unserved_acres"]
     )
 
-    branches = road_network["branches"]
+    branches = road_narrative["branches"]
     if not branches:
         return stop_reason_sentence
 
-    def _length_ft(branch: dict) -> float:
-        return round(branch["length_meters"] / _METERS_PER_FOOT, 1)
+    steep_threshold_pct = determination["steep_grade_threshold_pct"]
 
     def _steep_section_clause(branch: dict) -> str:
         """A steep-section clause for any branch whose steepest single CELL
-        (max_grade_pct) exceeds _STEEP_GRADE_NOTE_THRESHOLD_PCT, stating the
-        steep length and peak grade plainly. Gated on max_grade_pct, NOT
-        avg_grade_pct -- a route can average a gentle grade and still cross a
-        short steep pitch, and that pitch is exactly what this surfaces, so a
-        low average must never suppress it. Returns '' for a branch with no
-        steep cell (nothing is added when no branch is steep)."""
-        max_grade_pct = branch.get("max_grade_pct", 0.0)
-        if max_grade_pct <= _STEEP_GRADE_NOTE_THRESHOLD_PCT:
+        (max_grade_pct) exceeds the block's own steep-grade threshold,
+        stating the steep length and peak grade plainly. Gated on
+        max_grade_pct, NOT avg_grade_pct -- a route can average a gentle
+        grade and still cross a short steep pitch, and that pitch is
+        exactly what this surfaces, so a low average must never suppress
+        it. Returns '' for a branch with no steep cell (nothing is added
+        when no branch is steep)."""
+        if branch["max_grade_pct"] <= steep_threshold_pct:
             return ""
-        steep_ft = round(branch.get("steep_meters", 0.0) / _METERS_PER_FOOT, 1)
         return (
-            f" This route includes {steep_ft}ft above {round(_STEEP_GRADE_NOTE_THRESHOLD_PCT)}% grade, "
-            f"reaching {round(max_grade_pct, 1)}%; that section will need cut-and-fill or a switchback, "
+            f" This route includes {branch['steep_ft']}ft above {round(steep_threshold_pct)}% grade, "
+            f"reaching {branch['max_grade_pct']}%; that section will need cut-and-fill or a switchback, "
             f"not just routine grading."
         )
 
-    trunk = next((b for b in branches if b["branch_role"] == "trunk"), branches[0])
+    trunk = next((b for b in branches if b["role"] == "trunk"), branches[0])
     lines = [
-        f"Recommended road: a single route ({trunk['branch_role']}) {_length_ft(trunk)}ft long, "
-        f"averaging {round(trunk['avg_grade_pct'], 1)}% grade, newly serving "
-        f"{round(trunk['newly_served_acres'], 3)} acre(s) of identified production ground."
-        + (" [crosses a production zone]" if trunk.get("crosses_production_zone") else "")
+        f"Recommended road: a single route ({trunk['role']}) {trunk['length_ft']}ft long, "
+        f"averaging {trunk['avg_grade_pct']}% grade, newly serving "
+        f"{trunk['newly_served_acres']} acre(s) of identified production ground."
+        + (" [crosses a production zone]" if trunk["crosses_production_zone"] else "")
         + _steep_section_clause(trunk)
     ]
 
@@ -483,24 +529,33 @@ def _format_road_corridor_summary(road_network: Optional[dict]) -> str:
         if branch is trunk:
             continue
         parent = branch_by_index.get(branch["joins_branch_index"])
-        parent_note = (
-            f"off the {parent['branch_role']}" if parent is not None else "off the network"
-        )
-        purpose_note = ", reaching the water zone sited in step 3" if branch["branch_role"] == "water_spur" else ""
-        crossing_note = " [crosses a production zone]" if branch.get("crosses_production_zone") else ""
+        parent_note = f"off the {parent['role']}" if parent is not None else "off the network"
+        purpose_note = ", reaching the water zone sited in step 3" if branch["role"] == "water_spur" else ""
+        crossing_note = " [crosses a production zone]" if branch["crosses_production_zone"] else ""
         lines.append(
-            f"  - {_length_ft(branch)}ft spur {parent_note}{purpose_note}, "
-            f"{round(branch['avg_grade_pct'], 1)}% avg grade, "
-            f"{round(branch['newly_served_acres'], 3)} acre(s) newly served{crossing_note}"
+            f"  - {branch['length_ft']}ft spur {parent_note}{purpose_note}, "
+            f"{branch['avg_grade_pct']}% avg grade, "
+            f"{branch['newly_served_acres']} acre(s) newly served{crossing_note}"
             + _steep_section_clause(branch)
         )
 
-    total_length_ft = round(road_network["total_length_meters"] / _METERS_PER_FOOT, 1)
+    served_pct_clause = (
+        f" ({access['served_pct_of_production']}% of the identified production ground)"
+        if access["served_pct_of_production"] is not None
+        else ""
+    )
     lines.append(
-        f"\nTotal network length: {total_length_ft}ft, serving "
-        f"{round(road_network['total_served_acres'], 3)} acre(s) of production ground total. "
+        f"\nTotal network length: {access['total_length_ft']}ft, serving "
+        f"{access['served_acres']} acre(s) of production ground total{served_pct_clause} -- "
+        f"'served' means within {access['service_radius_ft']} ft of the network. "
         f"{stop_reason_sentence}"
     )
+    if determination["floodplain_data_is_fallback"]:
+        lines.append(
+            "\nFloodplain/wet-ground cost scoring used a DEM-only fallback (buffered delineated "
+            "valley lines), not real NHD/SSURGO data, because that data wasn't available for this "
+            "run."
+        )
     lines.append(
         "\nThis is ONE road NETWORK grown from the property's real access point, not a set of "
         "ranked candidate routes — describe the trunk above as the recommended road; mention any "
@@ -513,53 +568,285 @@ def _format_road_corridor_summary(road_network: Optional[dict]) -> str:
     return "\n".join(lines)
 
 
-def _format_solar_candidate_zones_summary(zones_geojson: Optional[dict]) -> str:
-    """Formats solar_suitability.py's "solar_infrastructure" layer (see
-    that module for the exclusion/proximity/scoring constraint stack
-    behind it) for the report prompt. Optional, same reasoning as the
-    other DEM/network-backed layers above — a fetch failure shouldn't
+# How the solar narrative block's road_proximity_source values read in
+# prose -- which access source the selected site's road distance was
+# measured against. Closed set on purpose, same reasoning as
+# _ROAD_NETWORK_STOP_REASON_SENTENCES above.
+_SOLAR_ROAD_SOURCE_DESCRIPTIONS = {
+    "selected_road_corridor": "the property's own selected road corridor",
+    "real_mapped_road": "the nearest real mapped road (public road/right-of-way data)",
+}
+
+
+def _format_solar_candidate_zones_summary(solar_narrative: Optional[dict]) -> str:
+    """Formats solar_suitability.py's own 'narrative_data' block (see
+    build_narrative_data() there for the field contract) for the report
+    prompt -- the SELECTED structure site's location and measured
+    qualities, read ONLY off that block, never the raw candidate
+    geometry/scoring dicts it replaced here. Optional, same reasoning as
+    the other DEM/network-backed layers above — a fetch failure shouldn't
     take down the whole report."""
-    if not zones_geojson or not zones_geojson.get("features"):
+    if not solar_narrative or not solar_narrative.get("site_found"):
         return (
-            "No solar infrastructure candidate zones identified (either "
+            "No solar structure candidate site identified (either "
             "nothing cleared the exclusion/proximity/suitability "
             "constraint stack, or DEM/road data wasn't available for "
             "this property)."
         )
 
-    lines = [f"{len(zones_geojson['features'])} ranked candidate zone(s) identified:"]
-    for feature in zones_geojson["features"]:
-        props = feature["properties"]
-        conflict = ""
-        if props.get("prime_farmland_conflict"):
-            conflict = f" — PRIME FARMLAND CONFLICT: {props.get('prime_farmland_note', '')}"
-        distance_to_road = (
-            f"{props['distance_to_road_ft']}ft to nearest mapped road"
-            if props.get("distance_to_road_ft") is not None
-            else "distance to road unknown (no road data available)"
+    site = solar_narrative["selected_site"]
+    location = site["location"]
+    benefits = site["benefits"]
+    gates = solar_narrative["gates"]
+    factors = benefits["factors"]
+
+    if location["production_zone_relationship"] == "inside":
+        production_note = (
+            "production_zone_relationship: inside -- the footprint sits INSIDE a production zone "
+            "(intentional — a small structure can coexist with production land)"
         )
-        relationship = props.get("production_zone_relationship")
-        if relationship == "inside":
-            production_note = "sits INSIDE a production zone (intentional — a small structure can coexist with production land)"
-        elif relationship == "adjacent":
-            production_note = f"{props['distance_to_production_zone_ft']}ft from the nearest production zone's edge"
-        else:
-            production_note = (
-                f"{props['distance_to_production_zone_ft']}ft from the nearest production zone's edge"
-                if props.get("distance_to_production_zone_ft") is not None
-                else "no production zones identified on this property"
-            )
+    elif location["distance_to_production_edge_ft"] is not None:
+        production_note = (
+            f"production_zone_relationship: {location['production_zone_relationship']}, "
+            f"{location['distance_to_production_edge_ft']}ft from the nearest production zone's edge"
+        )
+    else:
+        production_note = "no production zones identified on this property"
+
+    road_source_description = _SOLAR_ROAD_SOURCE_DESCRIPTIONS.get(gates["road_proximity_source"])
+    if location["distance_to_road_ft"] is not None and road_source_description is not None:
+        road_note = f"{location['distance_to_road_ft']}ft to {road_source_description}"
+    else:
+        road_note = "distance to road unknown (no road source was available; the road-proximity constraint was disabled)"
+
+    water_note = (
+        f"; {location['distance_to_water_zone_ft']}ft from the selected water-system zone"
+        if location["distance_to_water_zone_ft"] is not None
+        else ""
+    )
+
+    if benefits["prime_farmland_conflict"] is True:
+        farmland_note = (
+            "PRIME FARMLAND CONFLICT: prime (or conditionally prime) farmland soil was found in "
+            "this area per SSURGO — solar value vs. agricultural value is a real tradeoff to "
+            "present explicitly, not an exclusion."
+        )
+    elif benefits["prime_farmland_conflict"] is False:
+        farmland_note = "No prime farmland classification was found in this area per SSURGO."
+    else:
+        farmland_note = (
+            "Prime-farmland overlap was NOT checked this run (SSURGO unavailable) — do not claim "
+            "the site is clear of it."
+        )
+
+    tree_zone_note = (
+        ""
+        if gates["tree_zone_exclusion_checked"]
+        else " Tree-zone candidate data was NOT available this run, so the site is NOT confirmed "
+        "clear of planned tree-zone ground."
+    )
+
+    lines = [
+        f"Selected site (rank 1 of {solar_narrative['candidate_count']} ranked candidate(s)): "
+        f"score {site['score']}/100, {site['footprint_acres']} acre footprint, in the parcel's "
+        f"{location['position_in_parcel']}.",
+        f"Location: {production_note}; {road_note}{water_note}.",
+        f"Measured qualities: {benefits['avg_slope_pct']}% average slope, "
+        + (
+            f"facing {benefits['facing']}"
+            if benefits["facing"] is not None
+            else "essentially flat (no facing direction)"
+        )
+        + f"; factor scores (0-100, higher is better): slope {factors['slope']}, "
+        f"aspect {factors['aspect']}, shading {factors['shading']}, "
+        f"production-edge proximity {factors['production_proximity']}.",
+        farmland_note,
+        "\nThis is the SELECTED candidate site for a small, fixed-footprint solar-generating "
+        "structure (a barn or shed with rooftop panels — not a large ground-mounted array, and not "
+        "a permitting-ready placement). It already cleared hard exclusions for existing tree "
+        "canopy and the selected water-system zone." + tree_zone_note + " A site sitting inside or "
+        "near a production zone is a genuine, intentional option here, not a caveat; treat the "
+        "site as a starting point to walk and ground-truth, not a final site plan.",
+    ]
+    return "\n".join(lines)
+
+
+def _format_production_areas_summary(production_narrative: Optional[dict]) -> str:
+    """Formats production_area_ceiling.py's own 'narrative_data' block (see
+    build_narrative_data() there for the field contract) for the report
+    prompt -- what ground was selected as production-area candidates and
+    what makes each selected patch suitable, read ONLY off that block,
+    never the raw scored-patch geometry/scoring dicts. Feeds the LAND
+    SHAPE section's production-zone identification (step 2). Optional,
+    same reasoning as every other derived layer here."""
+    if not production_narrative:
+        return (
+            "No production-area candidate data available (DEM/soil/canopy data wasn't available "
+            "for this property) — identify production land from the elevation grid alone, and say "
+            "plainly that it isn't backed by computed candidate geometry."
+        )
+
+    parcel = production_narrative["parcel"]
+    ceiling = production_narrative["ceiling"]
+    gates = production_narrative["gates"]
+    patches = production_narrative["patches"]
+
+    lines = [
+        f"Parcel: {parcel['total_acres']} acres total; {parcel['slope_passing_acres']} acres clear "
+        f"the slope gate; {parcel['eligible_acres']} acres clear every gate; "
+        f"{parcel['selected_acres']} acres selected as production candidates "
+        f"({parcel['selected_pct_of_parcel']}% of the parcel)."
+    ]
+    if ceiling["bound"]:
         lines.append(
-            f"  - Rank {props['rank']} (score {props['suitability_score']}/100): "
-            f"{props.get('footprint_area_acres', '?')}ac footprint, {props['avg_slope_pct']}% slope, "
-            f"{props['aspect']}-facing, {distance_to_road}, {production_note}{conflict}"
+            f"A {ceiling['cap_pct_of_parcel']}%-of-parcel ceiling trimmed {ceiling['acres_trimmed']} "
+            "acres of otherwise-eligible ground (worst-scoring ground first) so room remains for "
+            "water systems, trees, roads, and structures."
+        )
+
+    def _gate_clause(label: str, acres, available: bool) -> str:
+        if not available:
+            return f"{label}: not checked this run"
+        return f"{label}: {acres} acres excluded"
+
+    lines.append(
+        "Exclusions among slope-passing ground — "
+        + "; ".join(
+            [
+                _gate_clause("existing tree canopy", gates["canopy_excluded_acres"], gates["canopy_data_available"]),
+                _gate_clause("hydric soil", gates["hydric_excluded_acres"], gates["soil_data_available"]),
+                _gate_clause("existing roads", gates["farm_roads_excluded_acres"], gates["road_data_available"]),
+                (
+                    f"a {gates['boundary_setback_feet']} ft boundary setback: "
+                    f"{gates['boundary_setback_excluded_acres']} acres excluded"
+                ),
+            ]
+        )
+        + "."
+    )
+
+    if not patches:
+        lines.append("No candidate patch survived clustering and the minimum-size gate.")
+        return "\n".join(lines)
+
+    lines.append(f"{len(patches)} candidate patch(es), best first (scores/factors 0-100, higher is better):")
+    for patch in patches:
+        aspect_note = (
+            f"faces {patch['dominant_aspect']}"
+            + (
+                f" ({patch['aspect_consistency_pct']}% of its cells within that sector)"
+                if patch["aspect_consistency_pct"] is not None
+                else ""
+            )
+            if patch["dominant_aspect"] is not None
+            else "no dominant aspect (essentially flat)"
+        )
+        percentile_note = (
+            f", at the {patch['elevation_percentile_of_parcel']} elevation percentile of the parcel "
+            "(0 = lowest ground)"
+            if patch["elevation_percentile_of_parcel"] is not None
+            else ""
+        )
+        hydric_note = (
+            f"; {patch['source_region_hydric_pct']}% of its source region was hydric ground excluded "
+            "before it formed"
+            if patch["source_region_hydric_pct"] is not None and patch["source_region_hydric_pct"] > 0
+            else ""
+        )
+        hole_note = (
+            f"; {patch['hole_count']} interior exclusion hole(s) totalling {patch['hole_acres']} acres"
+            if patch["hole_count"]
+            else ""
+        )
+        lines.append(
+            f"  - Patch {patch['id']} (rank {patch['rank']}): {patch['area_acres']} acres "
+            f"({patch['percent_of_parcel']}% of parcel), score {patch['score']}/100 "
+            f"(slope {patch['factors']['slope_factor']}, size {patch['factors']['size_factor']}, "
+            f"aspect {patch['factors']['aspect_factor']}); median slope {patch['slope_median_pct']}% "
+            f"(range {patch['slope_min_pct']}-{patch['slope_max_pct']}%); {aspect_note}"
+            f"{percentile_note}{hydric_note}{hole_note}."
         )
     lines.append(
-        "\nThese are ranked CANDIDATE SITES for a small, fixed-footprint structure (not a single "
-        "forced placement, and not a large ground-mounted array) — compare them against each other "
-        "in the narrative rather than picking one unprompted, note prime-farmland conflicts as a "
-        "real tradeoff where flagged, and note that a candidate sitting inside or near a production "
-        "zone is a genuine, intentional option here, not a caveat."
+        "\nName and refer to these patches by id/rank in the narrative — they are the computed "
+        "answer to which ground is strong, workable production land, and later steps must be "
+        "checked against them."
+    )
+    return "\n".join(lines)
+
+
+def _format_tree_zones_summary(tree_narrative: Optional[dict]) -> str:
+    """Formats tree_zone_candidates.py's own 'narrative_data' block (see
+    build_narrative_data() there for the field contract) for the report
+    prompt -- how the tree-suitable ground was determined (search space ->
+    selection rules -> qualifying zones), read ONLY off that block. Feeds
+    the TREES section (step 5). Optional, same reasoning as every other
+    derived layer here."""
+    if not tree_narrative:
+        return (
+            "No tree zone candidate data available (DEM/soil data wasn't available for this "
+            "property) — reason about tree placement from climate/water/production context alone, "
+            "and say plainly that it isn't backed by computed candidate geometry."
+        )
+
+    search_space = tree_narrative["search_space"]
+    selection = tree_narrative["selection"]
+    gates = tree_narrative["gates"]
+    zones = tree_narrative["zones"]
+    weights = selection["factor_weights_pct"]
+
+    lines = [
+        f"Search space: {search_space['search_space_acres']} of the parcel's "
+        f"{search_space['parcel_acres']} acres ({search_space['search_space_pct_of_parcel']}%) "
+        f"remained unclaimed by production/water/road candidates and was scored for tree "
+        f"suitability; {search_space['claimed_acres']} acres were already claimed (after a "
+        f"{search_space['boundary_setback_ft']} ft boundary setback and "
+        f"{search_space['production_clearance_ft']} ft / {search_space['water_clearance_ft']} ft "
+        "production/water clearances).",
+        "Ground already under existing tree canopy was excluded before scoring — these candidates "
+        "are NEW tree-suitable ground, not ground that's already wooded. Qualifying ground had to "
+        f"score at least {selection['min_suitability_score']}/100 on a weighted composite "
+        f"(hydric-soil overlap {weights['hydric_overlap']}%, slope steepness {weights['slope']}%, "
+        f"soil marginality {weights['soil_marginality']}%, stream proximity "
+        f"{weights['stream_proximity']}%) and cover at least {selection['min_zone_acres']} acres — "
+        "merely being unclaimed leftover land is deliberately NOT enough to qualify.",
+    ]
+
+    unavailable = [
+        note
+        for available, note in (
+            (gates["hydric_data_available"], "hydric-soil"),
+            (gates["soil_marginality_data_available"], "farmland-classification"),
+            (gates["stream_data_available"], "stream"),
+        )
+        if not available
+    ]
+    if unavailable:
+        lines.append(
+            f"NOTE: {', '.join(unavailable)} data was unavailable this run, so those factor(s) "
+            "defaulted to a neutral value rather than a real measurement."
+        )
+
+    if not zones:
+        lines.append("No leftover ground cleared the suitability threshold — no tree zone candidates.")
+    else:
+        lines.append(
+            f"{len(zones)} tree zone candidate(s), best first (score and factors 0-100, higher is "
+            "better):"
+        )
+        for zone in zones:
+            factors = zone["factors"]
+            lines.append(
+                f"  - Rank {zone['rank']}: {zone['area_acres']} acres, score {zone['score']}/100 "
+                f"(hydric overlap {factors['hydric_overlap']}, slope {factors['slope']}, "
+                f"soil marginality {factors['soil_marginality']}, stream proximity "
+                f"{factors['stream_proximity']}), average slope {zone['avg_slope_pct']}%."
+            )
+
+    lines.append(
+        "\nThese identify GENERAL tree-suitable ground only — assigning each zone a function "
+        "(windbreak, riparian buffer, habitat corridor) is the narrative's job, reasoning from "
+        "wind direction (step 1) and water features (step 3); this is not a species "
+        "recommendation, and every zone should be ground-truthed before planting."
     )
     return "\n".join(lines)
 
@@ -597,6 +884,7 @@ def generate_scale_of_permanence_report(
     irradiance: Optional[dict] = None,
     parcel_acres: Optional[float] = None,
     production_areas_geojson: Optional[dict] = None,
+    narrative_data: Optional[dict] = None,
 ) -> str:
     """
     Given the outputs of the data-fetching modules, generates a narrative
@@ -657,6 +945,24 @@ def generate_scale_of_permanence_report(
     here changes nothing about the generated report today -- the same
     forward-compatible seam discipline keypoints and irradiance already
     established.
+
+    narrative_data is pipeline_context.PipelineContext.narrative_data --
+    the per-module narrative blocks each KSOP module attaches to its own
+    identify_*() result under the narrative_data convention, keyed by
+    producing module ("production_area_ceiling", "water_candidate_zones",
+    "road_corridors", "solar_suitability", "tree_zone_candidates"). THIS
+    is what the water/road/solar/production/tree formatting functions
+    below read now, instead of raw geometry/scoring dicts: every value in
+    a block is pre-digested at its source module (FINAL, imperial,
+    rounded), so the formatters write data lines from it with no unit
+    conversion or computation of their own. When None (or a module's key
+    is absent/None), each formatter falls back to its own honest
+    "no data available" text -- so a caller not yet supplying it degrades
+    exactly like a data outage, never to stale or invented content. The
+    older water_candidate_zones_geojson/solar_candidate_zones_geojson/
+    road_network parameters are still accepted and STORED for
+    compatibility, but no longer feed any formatter -- narrative_data
+    replaced them at that boundary.
     """
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
@@ -667,6 +973,12 @@ def generate_scale_of_permanence_report(
 
     client = Anthropic(api_key=api_key)
 
+    # Every KSOP-derived block below is formatted from narrative_data (the
+    # per-module blocks captured on PipelineContext) -- see this function's
+    # own docstring. An absent module key formats as that block's honest
+    # "no data available" text.
+    narrative_data = narrative_data or {}
+
     data_summary = f"""CLIMATE DATA:
 {_format_climate_summary(climate_summary)}
 
@@ -676,20 +988,26 @@ SOIL DATA:
 ELEVATION DATA:
 {_format_elevation_summary(elevation_grid)}
 
+PRODUCTION AREA CANDIDATES (DEM/soil/canopy-derived, ceiling-trimmed):
+{_format_production_areas_summary(narrative_data.get("production_area_ceiling"))}
+
 WATER FEATURES:
 {_format_water_summary(water_features)}
 
 SATELLITE IMAGERY / LAND COVER (NDVI-derived):
 {_format_imagery_summary(imagery_summary)}
 
-WATER SYSTEM CANDIDATE ZONES (valley-based, DEM/LiDAR-derived):
-{_format_water_candidate_zones_summary(water_candidate_zones_geojson)}
+WATER SYSTEM CANDIDATE SURVEY AREA (drainage-based, DEM/LiDAR-derived):
+{_format_water_candidate_zones_summary(narrative_data.get("water_candidate_zones"))}
 
 ROAD NETWORK (coverage-greedy cost routing from the real access point, DEM-derived):
-{_format_road_corridor_summary(road_network)}
+{_format_road_corridor_summary(narrative_data.get("road_corridors"))}
 
-SOLAR INFRASTRUCTURE CANDIDATE ZONES (ranked, DEM-derived):
-{_format_solar_candidate_zones_summary(solar_candidate_zones_geojson)}"""
+TREE ZONE CANDIDATES (leftover-land suitability, DEM/SSURGO/NHD-derived):
+{_format_tree_zones_summary(narrative_data.get("tree_zone_candidates"))}
+
+SOLAR STRUCTURE CANDIDATE (selected site, DEM-derived):
+{_format_solar_candidate_zones_summary(narrative_data.get("solar_suitability"))}"""
 
     message = client.messages.create(
         model=MODEL,
