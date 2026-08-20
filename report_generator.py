@@ -177,12 +177,13 @@ Answer every question in each.
    How do they integrate with the earlier KSOP elements?
    What should the reader do next with this?
 
-   Recommend categories of tree crop — orchard, timber block, windbreak,
-   riparian buffer, and so on — suited to these areas' slope, soil, and
-   this climate. Do not name particular species or cultivars.
-
-   The scoring factors describe why each area was selected as tree
-   ground; they are not a judgment on cultivation.
+   Recommending categories of tree crop is your judgment, drawn from
+   these areas' slope, soil, and this climate — orchard, timber block,
+   windbreak, silvopasture, and so on. The data explains why this ground
+   was selected as tree ground rather than production ground; it says
+   nothing about which category suits it. Don't reason from one to the
+   other, and don't explain what any scoring factor does or doesn't
+   imply.
 
 7. Permanent Building Site
    What does this area indicate?
@@ -237,6 +238,16 @@ Answer every question in each.
     those pieces feed each other — what one enterprise produces that
     another can use, and where they compete for the same ground or the
     same hours.
+
+    The Production Areas exist because that ground is suited to
+    production, so any enterprise answer has to say what gets grown or
+    raised there. Cultivation — market gardening, field crops, forage —
+    connects to the rest of the system as directly as anything else:
+    compost and manure from livestock, irrigation from a developed water
+    source, wind protection from the tree areas, and it's where the
+    soil-building practices in the Soil section actually get applied. An
+    answer covering livestock, trees, and infrastructure but skipping
+    what's cultivated has missed the property's primary land use.
 
     For the closing question, sequence the work by dependency rather than
     listing tasks. What has to be confirmed on the ground before anything
@@ -941,7 +952,7 @@ def _format_tree_zones_summary(tree_narrative: Optional[dict]) -> str:
 
     lines.append(
         "\nThese identify GENERAL tree-suitable ground only — assigning each zone a function "
-        "(windbreak, riparian buffer, habitat corridor) is the narrative's job, reasoning from "
+        "(windbreak, habitat corridor) is the narrative's job, reasoning from "
         "wind direction (step 1) and water features (step 3); this is not a species "
         "recommendation, and every zone should be ground-truthed before planting."
     )

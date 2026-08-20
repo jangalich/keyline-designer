@@ -694,6 +694,25 @@ assert "diversified farm" not in _sp, "the old diversified-farm enterprise quest
 assert "riparian-buffer benefit" not in _sp, (
     "the stream-proximity explanation must be deleted along with the factor it explained"
 )
+# Round-four refinements: tree categories are approach-only judgment
+# (no reasoning from a scoring factor to a category, no riparian buffer
+# suggested anywhere), and the Summary must demand a cultivation answer.
+assert "riparian" not in _sp, "riparian buffer must not be suggested anywhere in the prompt"
+assert "riparian" not in _tree_prose, (
+    "riparian buffer must not be suggested in the tree data block either"
+)
+assert "Recommending categories of tree crop is your judgment" in _sp and "silvopasture" in _sp, (
+    "the tree category guidance must be the approach-only judgment version"
+)
+assert "don't explain what any scoring factor does or doesn't" in _sp, (
+    "the prompt must forbid explaining what a scoring factor implies"
+)
+assert "not a judgment on cultivation" not in _sp, (
+    "the old scoring-factors-vs-cultivation instruction must be deleted"
+)
+assert "has to say what gets grown or" in _sp and "missed the property's primary land use" in _sp, (
+    "the Summary note must require an answer covering what is cultivated on the Production Areas"
+)
 print(
     "SYSTEM_PROMPT: all ten sections present in order; imperial-units, legend-name, and "
     "no-numeric-scores rules intact; reworked framework paragraph in place; redundant tree "
