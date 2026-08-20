@@ -367,7 +367,11 @@ with ExitStack() as stack:
         "narrative_data handed to the report generator must be context.narrative_data by identity -- "
         "the per-module narrative blocks are what the report's data-block formatters read now"
     )
-    print("   narrative_data is forwarded from context.narrative_data by identity.")
+    assert call_kwargs["boundary_polygon_utm"] is _context.boundary_polygon_utm, (
+        "boundary_polygon_utm must be forwarded from the context -- it enables each keypoint's "
+        "cardinal position in the KEYPOINT CANDIDATES data block"
+    )
+    print("   narrative_data and boundary_polygon_utm are forwarded from the context by identity.")
 
     # ---- bonus: keypoints + irradiance seams still forwarded ----
     assert call_kwargs["keypoints"] is _context.keypoints, (

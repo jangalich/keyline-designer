@@ -258,6 +258,12 @@ from soil_data import (
     hydric_disqualifying_mukeys,
     is_prime_farmland,
 )
+# _position_in_parcel: the shared "where does this feature sit within the
+# parcel" compass-word helper water_candidate_zones.py owns and
+# solar_suitability.py already reuses -- imported, not reimplemented
+# (water_candidate_zones is already in this module's import closure via
+# water_suitability, so this adds no new dependency edge).
+from water_candidate_zones import _position_in_parcel
 from water_suitability import identify_water_suitability
 
 # --- composite weights (must sum to 1.0). CONFIGURABLE -- tune against a
@@ -1185,6 +1191,7 @@ def _feet(meters):
 
 def build_narrative_data(
     patches: list[dict],
+    boundary_polygon_utm: Polygon,
     boundary_acres: float,
     claimed_acres: float,
     search_space_acres: float,
@@ -1246,7 +1253,13 @@ def build_narrative_data(
           },
           'zones': [                # stage 3 -- what qualified, in rank order
             {
-              'rank', 'area_acres', 'score',    # score 0-100, higher is better
+              'rank',
+              'position_in_parcel',             # "center" or an 8-point compass
+                                                #   word -- what tells several
+                                                #   Tree Crop Areas apart on a
+                                                #   map whose legend labels only
+                                                #   the class
+              'area_acres', 'score',            # score 0-100, higher is better
               'avg_slope_pct',
               'factors': {          # each factor rescaled 0-100, higher is
                                     #   better -- the decomposition "why did
@@ -1289,6 +1302,13 @@ def build_narrative_data(
         "zones": [
             {
                 "rank": int(patch["rank"]),
+                # WHERE this zone sits on the map -- the map legend labels
+                # feature CLASSES ("Tree Crop Areas"), not individual
+                # features, so a cardinal position is what lets a
+                # narrative tell several zones apart. Measured on the
+                # zone's DRAWN geometry (render_fill_polygon_utm -- for
+                # tree zones identical to polygon_utm by design).
+                "position_in_parcel": _position_in_parcel(patch["render_fill_polygon_utm"], boundary_polygon_utm),
                 "area_acres": _round1(patch["area_acres"]),
                 "score": _round1(patch["tree_suitability_score"]),
                 "avg_slope_pct": _round1(patch["avg_slope_pct"]),
@@ -1560,6 +1580,7 @@ def identify_tree_zone_candidates(
         "patches": patches,
         "narrative_data": build_narrative_data(
             patches,
+            boundary_polygon_utm,
             boundary_acres,
             claimed_acres,
             search_space_acres,

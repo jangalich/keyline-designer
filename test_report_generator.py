@@ -171,11 +171,14 @@ print("Every empty-network stop_reason maps to its own sentence; a missing block
 
 
 # =====================================================================
-# _format_keypoints_summary(): the staged, ready-to-wire keypoint data
-# block (carried through generate_scale_of_permanence_report() but NOT yet
-# injected into the LLM prompt -- see that function's docstring). Pure
-# dict-to-string formatting, so it is exercised here directly.
+# _format_keypoints_summary(): now WIRED into the report prompt (the
+# Landform section names Keypoint Candidates). Imperial (feet) at this
+# boundary, with a per-keypoint cardinal position when the parcel
+# boundary is supplied. Pure dict-to-string formatting, exercised
+# directly.
 # =====================================================================
+
+from shapely.geometry import Point, box  # noqa: E402
 
 _empty_keypoints_prose = _format_keypoints_summary([])
 assert "No keypoints detected" in _empty_keypoints_prose, (
@@ -185,11 +188,13 @@ assert _format_keypoints_summary(None) == _empty_keypoints_prose, (
     "None (detection unavailable) must format the same as an empty list"
 )
 
+_kp_boundary = box(0.0, 0.0, 90.0, 90.0)
 _kp_fixture = [
     {
         "id": 0,
         "valley_id": 3,
-        "elevation_m": 346.5,
+        "point_utm": Point(10.0, 80.0),  # west third, north third -> "northwest"
+        "elevation_m": 346.5,            # -> 1136.8 ft
         "contributing_acres": 6.36,
         "slope_above_pct": 18.4,
         "slope_below_pct": 6.1,
@@ -200,41 +205,106 @@ _kp_fixture = [
     {
         "id": 1,
         "valley_id": 7,
-        "elevation_m": 347.0,
+        "point_utm": Point(80.0, 45.0),  # east third, middle third -> "east-central"
+        "elevation_m": 347.0,            # -> 1138.5 ft
         "contributing_acres": 6.69,
         "slope_above_pct": 15.0,
         "slope_below_pct": 5.5,
         "slope_drop_pct": 9.5,
         "on_parcel": False,
-        "distance_outside_boundary_m": 14.0,
+        "distance_outside_boundary_m": 14.0,  # -> ~46 ft
     },
 ]
-_kp_prose = _format_keypoints_summary(_kp_fixture)
+_kp_prose = _format_keypoints_summary(_kp_fixture, _kp_boundary)
 assert "2 keypoint(s) detected" in _kp_prose
-assert "Keypoint 0 (valley 3)" in _kp_prose and "346.5 m" in _kp_prose and "6.36 ac" in _kp_prose
+assert "Keypoint 1 (valley 3)" in _kp_prose and "1136.8 ft elevation" in _kp_prose and "6.36 ac" in _kp_prose, (
+    "keypoint numbers must display 1-based (id 0 -> 'Keypoint 1') -- ids stay zero-indexed upstream"
+)
+assert "Keypoint 2 (valley 7)" in _kp_prose and "Keypoint 0" not in _kp_prose
+assert "in the parcel's northwest" in _kp_prose, "keypoint 0's cardinal position must be stated"
+assert "in the parcel's east-central" in _kp_prose, (
+    "keypoint 1's mid-band position must use the '-central' compound form"
+)
 assert "on parcel" in _kp_prose, "an on-parcel keypoint must be stated as such"
-assert "~14 m outside the boundary" in _kp_prose, "an off-parcel keypoint must state its distance"
+assert "~46 ft outside the boundary" in _kp_prose, "an off-parcel keypoint must state its distance in feet"
 assert "12.3%" in _kp_prose, "the slope drop must be stated plainly"
+assert " m elevation" not in _kp_prose and " m outside" not in _kp_prose, "no metric units may remain"
+
+_kp_prose_no_boundary = _format_keypoints_summary(_kp_fixture)
+assert "in the parcel's" not in _kp_prose_no_boundary, (
+    "with no boundary supplied, the position clause is omitted -- never invented"
+)
 print(
-    "_format_keypoints_summary() renders the keypoint list as a factual data block (elevation, "
-    "catchment, slope drop, on/off-parcel) and an honest empty line for [] / None -- ready to wire, "
-    "no narration."
+    "_format_keypoints_summary() renders the keypoint list in feet with per-keypoint cardinal "
+    "positions (northwest / east-central) when the boundary is supplied, omits positions when it "
+    "isn't, and keeps the honest empty line for [] / None."
 )
 
 
 # =====================================================================
-# irradiance inertness: irradiance= is accepted and STORED by generate_
-# scale_of_permanence_report() but deliberately NOT injected into the LLM
-# prompt yet (the reviewer decides the narrative wording later -- see that
-# function's docstring). This mirrors keypoints' own already-established
-# "forward-compatible seam, changes nothing about the report today"
-# discipline: supplying irradiance= must leave the generated data_summary
-# byte-for-byte identical to omitting it, and the word "irradiance" must
-# not appear anywhere in it. Unlike keypoints there is deliberately NO
-# _format_irradiance_summary() to exercise (that formatting + wiring is the
-# out-of-scope deferred narrative work), so inertness is proved directly on
-# the prompt the function actually builds -- with the Anthropic client fully
-# mocked so no network/LLM call is made.
+# _locative_descriptor(): thirds-of-bounding-box cardinal naming, with
+# off-bbox centroids clamped (an off-parcel keypoint within the margin).
+# =====================================================================
+
+for _pt, _expected in (
+    (Point(10, 80), "northwest"),
+    (Point(45, 80), "north-central"),
+    (Point(80, 45), "east-central"),
+    (Point(45, 45), "central"),
+    (Point(80, 10), "southeast"),
+    (Point(10, 45), "west-central"),
+    (Point(45, 10), "south-central"),
+    (Point(-5, 95), "northwest"),  # clamped, not rejected
+):
+    _got = report_generator._locative_descriptor(_pt, _kp_boundary)
+    assert _got == _expected, f"_locative_descriptor({_pt.x}, {_pt.y}) -> {_got!r}, expected {_expected!r}"
+print("_locative_descriptor(): all nine cells named correctly; off-bbox centroids clamp to the edge cell.")
+
+
+# =====================================================================
+# Imperial units at the raw-layer formatter boundary: climate (inches,
+# degF) and elevation (feet, trimmed to range/relief only -- the raw
+# per-point coordinate dump is gone).
+# =====================================================================
+
+_climate_fixture = {
+    "prevailing_wind_direction": "WSW",
+    "prevailing_wind_direction_degrees": 245.0,
+    "avg_annual_precipitation_mm": 1020.0,   # -> 40.2 in
+    "max_daily_precipitation_mm": 95.0,      # -> 3.7 in
+    "avg_high_temp_c": 16.5,                 # -> 61.7 F
+    "avg_low_temp_c": 6.0,                   # -> 42.8 F
+    "record_high_temp_c": 37.0,              # -> 98.6 F
+    "record_low_temp_c": -22.0,              # -> -7.6 F
+    "years_analyzed": 10,
+}
+_climate_prose = report_generator._format_climate_summary(_climate_fixture)
+assert "40.2 in" in _climate_prose and "3.7 in" in _climate_prose
+assert "61.7°F" in _climate_prose and "42.8°F" in _climate_prose
+assert "98.6°F" in _climate_prose and "-7.6°F" in _climate_prose
+assert " mm" not in _climate_prose and "°C" not in _climate_prose, "no metric units may remain"
+
+_elev_fixture = [
+    {"latitude": 40.64286, "longitude": -79.98383, "elevation": 326.7},  # -> 1072 ft
+    {"latitude": 40.64528, "longitude": -79.98383, "elevation": 344.2},  # -> 1129 ft
+]
+_elev_prose = report_generator._format_elevation_summary(_elev_fixture)
+assert "Elevation range: 1072ft to 1129ft (total relief: 57ft)" in _elev_prose
+assert "40.64286" not in _elev_prose and "-79.98383" not in _elev_prose, (
+    "the raw per-point coordinate dump must be gone -- range and relief only"
+)
+assert "m\n" not in _elev_prose and " m " not in _elev_prose
+print("Climate reads in inches/degF and elevation in feet, range/relief only -- no metric units, no point dump.")
+
+
+# =====================================================================
+# irradiance injection: irradiance= is now WIRED into the prompt as the
+# SOLAR IRRADIANCE data block (the Permanent Building Site section's
+# rooftop solar viability read) -- the stored-seam inertness earlier
+# branches enforced here is deliberately closed by the SoP prompt
+# rewrite. A real 'ok' baseline renders its figures; a missing or
+# non-'ok' baseline reads as honest no-data. The Anthropic client is
+# fully mocked, so no network/LLM call is made.
 # =====================================================================
 
 
@@ -274,43 +344,43 @@ _irr_elevation = [
 ]
 _irr_water = {"streams": [{"name": "Montour Run", "feature_code": None, "geometry": None}], "water_bodies": []}
 
-# A realistic ParcelData.irradiance dict (get_regional_irradiance_baseline()'s
-# own shape) -- deliberately full of numbers and the literal word so that IF
-# it were ever injected, the assertions below would catch it.
+# A realistic ParcelData.irradiance dict in get_regional_irradiance_
+# baseline()'s own real shape ('ok' status with real figures).
 _irr_fixture = {
     "status": "ok",
-    "annual_ghi_kwh_m2_day": 4.21,
-    "annual_dni_kwh_m2_day": 4.98,
-    "source": "NREL PVWatts v8",
-    "note": "regional irradiance baseline",
+    "annual_ac_kwh_per_kw": 1240.5,
+    "avg_solar_radiation_kwh_per_m2_per_day": 4.21,
+    "capacity_factor_pct": 14.2,
+    "station_distance_miles": 9.6,
 }
 
-_base_content = _capture_prompt(
-    soil_components=_irr_soil,
-    elevation_grid=_irr_elevation,
-    water_features=_irr_water,
-)
 _with_irr_content = _capture_prompt(
     soil_components=_irr_soil,
     elevation_grid=_irr_elevation,
     water_features=_irr_water,
     irradiance=_irr_fixture,
 )
+assert "SOLAR IRRADIANCE (regional baseline):" in _with_irr_content, (
+    "the SOLAR IRRADIANCE data block must be injected into the prompt"
+)
+assert "~1240 AC kWh per kW" in _with_irr_content and "4.21 kWh/m2/day" in _with_irr_content
+assert "capacity factor 14.2%" in _with_irr_content and "9.6 miles" in _with_irr_content
+assert "informs rooftop solar viability, not site choice" in _with_irr_content
 
-assert "irradiance" not in _with_irr_content.lower(), (
-    "supplying irradiance= must NOT inject the word 'irradiance' (or any irradiance data block) "
-    "into the prompt -- it is a stored, forward-compatible seam, not yet-wired narrative content"
+_without_irr_content = _capture_prompt(
+    soil_components=_irr_soil,
+    elevation_grid=_irr_elevation,
+    water_features=_irr_water,
 )
-assert "4.21" not in _with_irr_content and "PVWatts" not in _with_irr_content, (
-    "no irradiance value/source string may leak into the prompt while the parameter is inert"
+assert "No regional irradiance baseline available" in _without_irr_content, (
+    "with no irradiance supplied, the block must read as honest no-data"
 )
-assert _with_irr_content == _base_content, (
-    "the generated prompt must be byte-for-byte identical whether or not irradiance= is supplied -- "
-    "irradiance changes nothing about the report today (same inertness discipline keypoints follows)"
-)
+assert "No regional irradiance baseline available" in report_generator._format_irradiance_summary(
+    {"status": "fetch_failed", "annual_ac_kwh_per_kw": None}
+), "a non-'ok' status must read as no-data, never quote a figure"
 print(
-    "irradiance inertness: irradiance= is accepted and stored but leaves the generated prompt "
-    "byte-for-byte identical to omitting it -- the word 'irradiance' and every value never appear."
+    "irradiance injection: an 'ok' baseline renders its figures in the SOLAR IRRADIANCE block; "
+    "missing or failed baselines read as honest no-data."
 )
 
 
@@ -404,6 +474,11 @@ assert "INSIDE a production zone" in _solar_prose
 assert "18.0ft to the property's own selected road corridor" in _solar_prose
 assert "facing south" in _solar_prose and "slope 84.0" in _solar_prose
 assert "PRIME FARMLAND CONFLICT" in _solar_prose
+assert "ft from the selected water-system zone" not in _solar_prose and "210.0" not in _solar_prose, (
+    "distance_to_water_zone_ft stays on the narrative block but must NOT be reported -- "
+    "building-to-future-water distance isn't actionable and reads as filler (the water-zone HARD "
+    "EXCLUSION mention in the closing guidance is fine; the distance figure is what must be gone)"
+)
 
 import copy  # noqa: E402
 
@@ -434,6 +509,7 @@ _prod_nd = {
     "patches": [
         {
             "id": 0, "rank": 1, "area_acres": 9.1, "percent_of_parcel": 52.3,
+            "position_in_parcel": "southeast",
             "slope_min_pct": 1.2, "slope_max_pct": 18.9, "slope_median_pct": 8.4, "avg_slope_pct": 8.9,
             "dominant_aspect": "southeast", "aspect_consistency_pct": 84, "aspect_available": True,
             "score": 78.2,
@@ -452,7 +528,10 @@ assert "hydric soil: not checked this run" in _prod_prose, (
     "an unavailable soil check must read as not-checked, never as 0 acres excluded"
 )
 assert "existing tree canopy: 1.2 acres excluded" in _prod_prose
-assert "Patch 0 (rank 1): 9.1 acres (52.3% of parcel), score 78.2/100" in _prod_prose
+assert "Patch 1 (rank 1): 9.1 acres (52.3% of parcel), in the parcel's southeast, score 78.2/100" in _prod_prose, (
+    "patch numbers must display 1-based (id 0 -> 'Patch 1') -- ids stay zero-indexed upstream"
+)
+assert "Patch 0" not in _prod_prose, "no zero-indexed patch number may reach the narrative"
 assert "faces southeast (84% of its cells" in _prod_prose
 assert "62.0 elevation percentile" in _prod_prose
 assert "1 interior exclusion hole(s) totalling 0.2 acres" in _prod_prose
@@ -471,10 +550,12 @@ _tree_nd = {
     "gates": {"soil_marginality_data_available": True, "hydric_data_available": True,
               "stream_data_available": False},
     "zones": [
-        {"rank": 1, "area_acres": 0.4, "score": 62.6, "avg_slope_pct": 18.3,
+        {"rank": 1, "position_in_parcel": "northwest", "area_acres": 0.4, "score": 62.6,
+         "avg_slope_pct": 18.3,
          "factors": {"hydric_overlap": 100.0, "slope": 36.6, "soil_marginality": 100.0,
                      "stream_proximity": 25.0}},
-        {"rank": 2, "area_acres": 0.2, "score": 34.0, "avg_slope_pct": 8.0,
+        {"rank": 2, "position_in_parcel": "center", "area_acres": 0.2, "score": 34.0,
+         "avg_slope_pct": 8.0,
          "factors": {"hydric_overlap": 0.0, "slope": 20.0, "soil_marginality": 100.0,
                      "stream_proximity": 80.0}},
     ],
@@ -485,7 +566,15 @@ assert "at least 31.0/100" in _tree_prose and "at least 0.1 acres" in _tree_pros
 assert "stream data was unavailable" in _tree_prose, (
     "an unavailable stream fetch must be flagged so its factor isn't quoted as a measurement"
 )
-assert "Rank 1: 0.4 acres, score 62.6/100" in _tree_prose
+assert "Rank 1: 0.4 acres, in the parcel's northwest, score 62.6/100" in _tree_prose
+assert "hydric overlap 100.0" in _tree_prose and "slope 36.6" in _tree_prose
+assert "soil marginality" not in _tree_prose and "stream proximity" not in _tree_prose, (
+    "the soil marginality and stream proximity factors (and the factor weights) stay on the "
+    "narrative block but must NOT be reported -- internal scoring inputs a farmer can't read"
+)
+assert "40.0%" not in _tree_prose and "10.0%" not in _tree_prose, (
+    "the four factor weights are internal scoring configuration and must not reach the prompt"
+)
 assert "assigning each zone a function" in _tree_prose
 assert "No tree zone candidate data available" in _format_tree_zones_summary(None)
 print("_format_tree_zones_summary(): search space/selection rules/zones rendered from the block; "
@@ -514,16 +603,18 @@ _wired_prompt = _capture_prompt(
     narrative_data=_full_narrative,
 )
 for _header in (
-    "PRODUCTION AREA CANDIDATES",
-    "WATER SYSTEM CANDIDATE SURVEY AREA",
-    "ROAD NETWORK",
-    "TREE ZONE CANDIDATES",
-    "SOLAR STRUCTURE CANDIDATE",
+    "PRODUCTION AREAS",
+    "KEYPOINT CANDIDATES",
+    "WATER SYSTEM SURVEY AREA",
+    "SUGGESTED ROAD CORRIDOR",
+    "TREE CROP AREAS",
+    "PERMANENT BUILDING SITE",
+    "SOLAR IRRADIANCE",
 ):
     assert _header in _wired_prompt, f"data_summary must carry the {_header} section"
 assert "score 87.5/100" in _wired_prompt and "in the parcel's southwest" in _wired_prompt
 assert "The network reaches all identified production ground." in _wired_prompt
-assert "Patch 0 (rank 1)" in _wired_prompt and "Rank 1: 0.4 acres" in _wired_prompt
+assert "Patch 1 (rank 1)" in _wired_prompt and "Rank 1: 0.4 acres" in _wired_prompt
 
 _unwired_prompt = _capture_prompt(
     soil_components=_irr_soil,
@@ -543,6 +634,89 @@ for _no_data in (
 print(
     "End-to-end prompt wiring: all five KSOP data blocks are formatted from narrative_data and land in "
     "the generated prompt; with no narrative_data every block reads as honest no-data text."
+)
+
+
+# =====================================================================
+# SYSTEM_PROMPT sanity: the rewritten Scale of Permanence prompt carries
+# all ten sections in order and the legend-name discipline.
+# =====================================================================
+
+_sp = report_generator.SYSTEM_PROMPT
+assert "write all ten" in _sp, "the section header line must ask for all TEN sections"
+_sp_sections = (
+    "1. Introduction", "2. Climate", "3. Landform", "4. Water System Survey Area",
+    "5. Suggested Road Corridor", "6. Tree Crop Areas", "7. Permanent Building Site",
+    "8. Fencing", "9. Soil", "10. Summary",
+)
+_last = -1
+for _sec in _sp_sections:
+    _idx = _sp.find(_sec)
+    assert _idx != -1, f"SYSTEM_PROMPT must contain section {_sec!r}"
+    assert _idx > _last, f"section {_sec!r} out of order"
+    _last = _idx
+assert "feet, acres, inches, and °F" in _sp, "the imperial-units instruction must be present"
+assert "Keypoint Candidates" in _sp and "Water System Survey Area" in _sp, (
+    "the legend-name list must be present"
+)
+# Round-two refinements: the no-numeric-scores rule, the reworked
+# framework paragraph (read-not-decided, influence-not-constraint), and
+# the deleted redundant tree question.
+assert "Never state a numeric score" in _sp, "the no-numeric-scores rule must be present"
+assert "read and understood first" in _sp and "informs the ones that follow" in _sp, (
+    "the framework paragraph must frame climate/landform as read and factors as informing, not constraining"
+)
+assert "fight the landscape" not in _sp and "is decided within the constraints" not in _sp, (
+    "the old decided-in-order/fight-the-landscape framing must be gone"
+)
+assert "How were the Tree Crop Areas determined?" not in _sp, (
+    "the redundant tree-determination question must be deleted"
+)
+# Round-three refinements: internal thresholds banned alongside scores;
+# roads report access without unserved acreage or stop framing; fencing
+# doesn't default to production perimeters; the Summary asks for an
+# enterprise combination and dependency-sequenced next steps.
+assert "thresholds and ceilings" in _sp and "not how a farmer thinks about their" in _sp, (
+    "the internal-thresholds rule must sit alongside the no-scores rule"
+)
+assert "don't report unserved acreage" in _sp, "the road note must ban unserved-acreage reporting"
+assert "frame it as extension available if the reader wants it later" not in _sp, (
+    "the old extension-available road framing must be replaced"
+)
+assert "Production Areas do not automatically need permanent perimeter" in _sp, (
+    "the fencing note must say production perimeters aren't a given"
+)
+assert "one's output become another's input" in _sp and "synthesis question, not an inventory" in _sp, (
+    "the Summary must carry the enterprise-combination question and its synthesis note"
+)
+assert "sequence the work by dependency" in _sp, "the Summary note must ask for dependency-ordered next steps"
+assert "diversified farm" not in _sp, "the old diversified-farm enterprise question must be replaced"
+assert "riparian-buffer benefit" not in _sp, (
+    "the stream-proximity explanation must be deleted along with the factor it explained"
+)
+# Round-four refinements: tree categories are approach-only judgment
+# (no reasoning from a scoring factor to a category, no riparian buffer
+# suggested anywhere), and the Summary must demand a cultivation answer.
+assert "riparian" not in _sp, "riparian buffer must not be suggested anywhere in the prompt"
+assert "riparian" not in _tree_prose, (
+    "riparian buffer must not be suggested in the tree data block either"
+)
+assert "Recommending categories of tree crop is your judgment" in _sp and "silvopasture" in _sp, (
+    "the tree category guidance must be the approach-only judgment version"
+)
+assert "don't explain what any scoring factor does or doesn't" in _sp, (
+    "the prompt must forbid explaining what a scoring factor implies"
+)
+assert "not a judgment on cultivation" not in _sp, (
+    "the old scoring-factors-vs-cultivation instruction must be deleted"
+)
+assert "has to say what gets grown or" in _sp and "missed the property's primary land use" in _sp, (
+    "the Summary note must require an answer covering what is cultivated on the Production Areas"
+)
+print(
+    "SYSTEM_PROMPT: all ten sections present in order; imperial-units, legend-name, and "
+    "no-numeric-scores rules intact; reworked framework paragraph in place; redundant tree "
+    "question gone."
 )
 
 
