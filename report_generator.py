@@ -1084,7 +1084,7 @@ SOLAR IRRADIANCE (regional baseline):
 
     message = client.messages.create(
         model=MODEL,
-        max_tokens=8000,
+        max_tokens=20000,
         system=SYSTEM_PROMPT,
         messages=[
             {
