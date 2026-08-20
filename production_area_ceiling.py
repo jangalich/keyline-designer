@@ -295,6 +295,16 @@ _COMPASS_WORDS = (
 # the dominant aspect names.
 _ASPECT_CONSISTENCY_WINDOW_DEG = 45.0
 
+# A patch whose drawn-footprint centroid sits within this fraction of the
+# parcel's equivalent-circle radius of the parcel's own centroid reads as
+# "center" rather than a compass direction (position_in_parcel below) --
+# naming a bearing for a near-central offset would narrate precision the
+# position doesn't have. Deliberately its OWN constant, NOT aliased to
+# water_candidate_zones.py's numerically-identical
+# _CENTER_POSITION_MAX_OFFSET_FRACTION (same "constants stay separate even
+# when identical" convention this pipeline already applies). CONFIGURABLE.
+_CENTER_POSITION_MAX_OFFSET_FRACTION = 0.2
+
 # How every score and factor in this block is to be read -- declared ONCE,
 # here, rather than repeated per field or explained in prose next to each
 # number. A declared scale plus "higher is better" is everything a
@@ -350,6 +360,33 @@ def _compass_word(aspect_deg) -> Optional[str]:
 def _angular_difference_deg(a: float, b: float) -> float:
     """Smallest absolute angle between two compass bearings (0-180)."""
     return abs((a - b + 180.0) % 360.0 - 180.0)
+
+
+def _position_in_parcel(patch_polygon_utm, boundary_polygon_utm: Polygon) -> str:
+    """
+    Where a patch sits within the parcel, as an 8-point compass word (or
+    "center") -- the bearing from the parcel's own centroid to the patch
+    footprint's centroid. UTM axes are +x east / +y north, so
+    atan2(dx, dy) IS a compass bearing (0 = north, clockwise). The map
+    legend labels feature CLASSES, not individual features, so this is
+    what lets a narrative tell two Production Areas apart on the map.
+
+    Deliberately this module's OWN copy of water_candidate_zones.py's
+    private helper of the same name rather than an import: that module is
+    a DOWNSTREAM KSOP step (water builds on production), so importing it
+    here would invert the pipeline's layering -- same duplicated-with-
+    documented-reason convention as dem_data.py's/fencing.py's/
+    road_corridors.py's own _utm_epsg_for_lonlat() copies.
+    """
+    parcel_centroid = boundary_polygon_utm.centroid
+    patch_centroid = patch_polygon_utm.centroid
+    dx = patch_centroid.x - parcel_centroid.x
+    dy = patch_centroid.y - parcel_centroid.y
+    equivalent_radius = math.sqrt(boundary_polygon_utm.area / math.pi)
+    if equivalent_radius <= 0 or math.hypot(dx, dy) <= equivalent_radius * _CENTER_POSITION_MAX_OFFSET_FRACTION:
+        return "center"
+    bearing_deg = math.degrees(math.atan2(dx, dy)) % 360.0
+    return _COMPASS_WORDS[int(round(bearing_deg / 45.0)) % 8]
 
 
 def _on_parcel_cell_mask(dem: dict, boundary_polygon_utm: Polygon) -> np.ndarray:
@@ -412,6 +449,7 @@ def _patch_narrative_data(
     patch: dict,
     dem: dict,
     step1: dict,
+    boundary_polygon_utm: Polygon,
     parcel_acres: float,
     parcel_elevation_range: Optional[tuple[float, float]],
     from_waist_split: bool,
@@ -514,6 +552,14 @@ def _patch_narrative_data(
         "avg_slope_pct": _round1(patch["avg_slope_pct"]),
         "dominant_aspect": dominant_aspect,
         "aspect_consistency_pct": aspect_consistency_pct,
+        # WHERE this patch sits on the map -- the map legend labels
+        # feature CLASSES ("Production Areas"), not individual features,
+        # so a cardinal position is what lets a narrative tell two
+        # patches apart. Measured on the patch's DRAWN geometry
+        # (render_fill_polygon_utm -- what the map actually shows and
+        # what keypoint relationships/tree-zone claims already measure
+        # against), not the raw cell-union footprint.
+        "position_in_parcel": _position_in_parcel(patch["render_fill_polygon_utm"], boundary_polygon_utm),
         # aspect_available distinguishes a measured aspect_factor from the
         # neutral 1.0 STEP 4 defaults to on ground too flat for a
         # well-defined downhill direction. Without it an aspect_factor of
@@ -772,6 +818,7 @@ def build_narrative_data(
                 patch,
                 dem,
                 step1,
+                boundary_polygon_utm,
                 parcel_acres,
                 parcel_elevation_range,
                 waist_flags.get(int(patch["id"]), False),

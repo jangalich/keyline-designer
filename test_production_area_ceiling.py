@@ -773,6 +773,16 @@ assert json.loads(nd_flat_json) == nd_flat_result["narrative_data"], (
 )
 assert set(nd_flat_result["narrative_data"]) == {"scales", "parcel", "ceiling", "gates", "patches"}
 _assert_one_decimal(nd_flat_result["narrative_data"], "narrative_data")
+# Every patch entry carries a locative position_in_parcel ("center" or an
+# 8-point compass word) -- the map legend labels feature classes, not
+# individual features, so this is what lets a narrative tell two
+# Production Areas apart on the map.
+_ALLOWED_POSITIONS = {"center", "north", "northeast", "east", "southeast", "south", "southwest", "west", "northwest"}
+for _nd_patch_entry in nd_flat_result["narrative_data"]["patches"]:
+    assert _nd_patch_entry["position_in_parcel"] in _ALLOWED_POSITIONS, (
+        f"patch narrative entry must carry a valid position_in_parcel, got "
+        f"{_nd_patch_entry.get('position_in_parcel')!r}"
+    )
 print(
     "narrative_data: purely additive (every pre-existing top-level key and every scored-patch field "
     f"unchanged), json.dumps()-clean with no custom encoder ({len(nd_flat_json)} chars), and every "

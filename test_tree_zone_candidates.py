@@ -1044,20 +1044,28 @@ import json  # noqa: E402
 
 from tree_zone_candidates import build_narrative_data  # noqa: E402
 
+# A ~12-acre square parcel (side ~220.4 m) whose centroid sits at
+# (500110.2, 4499889.8): the rank-1 patch's drawn footprint is placed in
+# the parcel's northwest, the rank-2 patch's directly on the centroid --
+# hand-checkable position_in_parcel values.
+_nd_boundary_polygon = box(500000.0, 4499779.6, 500220.4, 4500000.0)
 _nd_patches = [
     {
         "rank": 1, "area_acres": 0.42, "tree_suitability_score": 62.6, "avg_slope_pct": 18.3,
         "hydric_overlap_factor": 1.0, "slope_factor": 0.366,
         "soil_marginality_factor": 1.0, "stream_proximity_factor": 0.25,
+        "render_fill_polygon_utm": box(500010.0, 4499975.0, 500030.0, 4499995.0),  # northwest
     },
     {
         "rank": 2, "area_acres": 0.15, "tree_suitability_score": 34.0, "avg_slope_pct": 8.0,
         "hydric_overlap_factor": 0.0, "slope_factor": 0.2,
         "soil_marginality_factor": 1.0, "stream_proximity_factor": 0.8,
+        "render_fill_polygon_utm": box(500100.0, 4499880.0, 500120.0, 4499900.0),  # on the centroid
     },
 ]
 _nd = build_narrative_data(
     list(reversed(_nd_patches)),  # deliberately out of order -- the builder emits zones in rank order
+    boundary_polygon_utm=_nd_boundary_polygon,
     boundary_acres=12.0,
     claimed_acres=9.0,
     search_space_acres=3.0,
@@ -1090,10 +1098,13 @@ assert _nd["gates"] == {
     "stream_data_available": False,
 }
 assert _nd["zones"][0] == {
-    "rank": 1, "area_acres": 0.4, "score": 62.6, "avg_slope_pct": 18.3,
+    "rank": 1, "position_in_parcel": "northwest", "area_acres": 0.4, "score": 62.6, "avg_slope_pct": 18.3,
     "factors": {"hydric_overlap": 100.0, "slope": 36.6, "soil_marginality": 100.0, "stream_proximity": 25.0},
 }, f"rank-1 zone entry mismatch: {_nd['zones'][0]}"
 assert _nd["zones"][1]["rank"] == 2, "zones must come out in rank order regardless of input order"
+assert _nd["zones"][1]["position_in_parcel"] == "center", (
+    "a zone whose drawn footprint sits on the parcel centroid must read as 'center'"
+)
 
 # Entry-point wiring: the orchestrator run above attached the block,
 # additively, and its figures agree with the result's own top-level keys
@@ -1110,6 +1121,9 @@ assert _nd_orch["selection"]["existing_canopy_excluded"] is True
 for _nd_zone, _nd_patch in zip(_nd_orch["zones"], sorted(result["patches"], key=lambda p: p["rank"])):
     assert _nd_zone["score"] == round(_nd_patch["tree_suitability_score"], 1)
     assert _nd_zone["rank"] == _nd_patch["rank"]
+    assert _nd_zone["position_in_parcel"] in {
+        "center", "north", "northeast", "east", "southeast", "south", "southwest", "west", "northwest",
+    }, "every real zone must carry a locative position_in_parcel"
 print(
     "narrative_data: json-clean; search space (3.0 of 12.0 acres = 25.0%, 16.4 ft clearances), "
     "selection rules (31.0 floor, 0.1 ac floor, 40/30/20/10 weights), gates, and rank-ordered zone "

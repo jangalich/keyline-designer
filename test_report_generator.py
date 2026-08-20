@@ -434,6 +434,7 @@ _prod_nd = {
     "patches": [
         {
             "id": 0, "rank": 1, "area_acres": 9.1, "percent_of_parcel": 52.3,
+            "position_in_parcel": "southeast",
             "slope_min_pct": 1.2, "slope_max_pct": 18.9, "slope_median_pct": 8.4, "avg_slope_pct": 8.9,
             "dominant_aspect": "southeast", "aspect_consistency_pct": 84, "aspect_available": True,
             "score": 78.2,
@@ -452,7 +453,7 @@ assert "hydric soil: not checked this run" in _prod_prose, (
     "an unavailable soil check must read as not-checked, never as 0 acres excluded"
 )
 assert "existing tree canopy: 1.2 acres excluded" in _prod_prose
-assert "Patch 0 (rank 1): 9.1 acres (52.3% of parcel), score 78.2/100" in _prod_prose
+assert "Patch 0 (rank 1): 9.1 acres (52.3% of parcel), in the parcel's southeast, score 78.2/100" in _prod_prose
 assert "faces southeast (84% of its cells" in _prod_prose
 assert "62.0 elevation percentile" in _prod_prose
 assert "1 interior exclusion hole(s) totalling 0.2 acres" in _prod_prose
@@ -471,10 +472,12 @@ _tree_nd = {
     "gates": {"soil_marginality_data_available": True, "hydric_data_available": True,
               "stream_data_available": False},
     "zones": [
-        {"rank": 1, "area_acres": 0.4, "score": 62.6, "avg_slope_pct": 18.3,
+        {"rank": 1, "position_in_parcel": "northwest", "area_acres": 0.4, "score": 62.6,
+         "avg_slope_pct": 18.3,
          "factors": {"hydric_overlap": 100.0, "slope": 36.6, "soil_marginality": 100.0,
                      "stream_proximity": 25.0}},
-        {"rank": 2, "area_acres": 0.2, "score": 34.0, "avg_slope_pct": 8.0,
+        {"rank": 2, "position_in_parcel": "center", "area_acres": 0.2, "score": 34.0,
+         "avg_slope_pct": 8.0,
          "factors": {"hydric_overlap": 0.0, "slope": 20.0, "soil_marginality": 100.0,
                      "stream_proximity": 80.0}},
     ],
@@ -485,7 +488,7 @@ assert "at least 31.0/100" in _tree_prose and "at least 0.1 acres" in _tree_pros
 assert "stream data was unavailable" in _tree_prose, (
     "an unavailable stream fetch must be flagged so its factor isn't quoted as a measurement"
 )
-assert "Rank 1: 0.4 acres, score 62.6/100" in _tree_prose
+assert "Rank 1: 0.4 acres, in the parcel's northwest, score 62.6/100" in _tree_prose
 assert "assigning each zone a function" in _tree_prose
 assert "No tree zone candidate data available" in _format_tree_zones_summary(None)
 print("_format_tree_zones_summary(): search space/selection rules/zones rendered from the block; "

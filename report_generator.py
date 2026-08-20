@@ -760,7 +760,8 @@ def _format_production_areas_summary(production_narrative: Optional[dict]) -> st
         )
         lines.append(
             f"  - Patch {patch['id']} (rank {patch['rank']}): {patch['area_acres']} acres "
-            f"({patch['percent_of_parcel']}% of parcel), score {patch['score']}/100 "
+            f"({patch['percent_of_parcel']}% of parcel), in the parcel's "
+            f"{patch['position_in_parcel']}, score {patch['score']}/100 "
             f"(slope {patch['factors']['slope_factor']}, size {patch['factors']['size_factor']}, "
             f"aspect {patch['factors']['aspect_factor']}); median slope {patch['slope_median_pct']}% "
             f"(range {patch['slope_min_pct']}-{patch['slope_max_pct']}%); {aspect_note}"
@@ -836,7 +837,8 @@ def _format_tree_zones_summary(tree_narrative: Optional[dict]) -> str:
         for zone in zones:
             factors = zone["factors"]
             lines.append(
-                f"  - Rank {zone['rank']}: {zone['area_acres']} acres, score {zone['score']}/100 "
+                f"  - Rank {zone['rank']}: {zone['area_acres']} acres, in the parcel's "
+                f"{zone['position_in_parcel']}, score {zone['score']}/100 "
                 f"(hydric overlap {factors['hydric_overlap']}, slope {factors['slope']}, "
                 f"soil marginality {factors['soil_marginality']}, stream proximity "
                 f"{factors['stream_proximity']}), average slope {zone['avg_slope_pct']}%."
