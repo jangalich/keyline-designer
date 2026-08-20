@@ -1081,6 +1081,10 @@ def build_narrative_data(
                                       #   drawn branch
             {
               'branch_index', 'role',   # 'trunk' | 'spur' | 'water_spur'
+              'joins_branch_index',     # which branch this one grows off
+                                        #   (None for the trunk) -- lets a
+                                        #   narrative say "a spur off the
+                                        #   trunk" without the geometry
               'length_ft',
               'newly_served_acres',     # the acreage THIS branch alone brought into
                                         #   range -- why the router chose to build it
@@ -1126,6 +1130,9 @@ def build_narrative_data(
             {
                 "branch_index": int(b["branch_index"]),
                 "role": str(b["branch_role"]),
+                "joins_branch_index": (
+                    int(b["joins_branch_index"]) if b["joins_branch_index"] is not None else None
+                ),
                 "length_ft": _feet(b["length_meters"]),
                 "newly_served_acres": _round1(b["newly_served_acres"]),
                 "avg_grade_pct": _round1(b["avg_grade_pct"]),

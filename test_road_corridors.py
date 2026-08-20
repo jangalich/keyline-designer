@@ -728,11 +728,12 @@ assert _nd["access"] == {
     "reaches_water_zone": True,  # the water_spur branch
 }
 assert _nd["branches"][0] == {
-    "branch_index": 0, "role": "trunk", "length_ft": 500.0, "newly_served_acres": 9.0,
-    "avg_grade_pct": 6.5, "max_grade_pct": 21.3, "steep_ft": 100.0,
+    "branch_index": 0, "role": "trunk", "joins_branch_index": None, "length_ft": 500.0,
+    "newly_served_acres": 9.0, "avg_grade_pct": 6.5, "max_grade_pct": 21.3, "steep_ft": 100.0,
     "crosses_floodplain": True, "crosses_production_zone": False,
 }
 assert _nd["branches"][1]["role"] == "water_spur" and _nd["branches"][1]["length_ft"] == 100.0
+assert _nd["branches"][1]["joins_branch_index"] == 0
 
 # No-network shapes: with NO production demand at all, served_pct is None
 # (nothing to serve is not a measured 0% coverage); with real unserved

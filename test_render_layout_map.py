@@ -1369,6 +1369,7 @@ _fake_context_for_canopy_case = pc.PipelineContext(
     selected_road_corridor=_EMPTY_ROAD_NETWORK,
     selected_structure_site=None,
     tree_zone_patches=[],
+    narrative_data={},
 )
 
 _canopy_case_parcel_data = ParcelData(
