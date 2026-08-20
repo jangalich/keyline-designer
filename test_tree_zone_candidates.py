@@ -1034,4 +1034,88 @@ print(
 )
 
 
+# =====================================================================
+# narrative_data -- build_narrative_data()'s own contract against
+# hand-built patches with clean, hand-checkable numbers, plus the
+# entry-point wiring check against the orchestrator run's own `result`
+# from the section above.
+# =====================================================================
+import json  # noqa: E402
+
+from tree_zone_candidates import build_narrative_data  # noqa: E402
+
+_nd_patches = [
+    {
+        "rank": 1, "area_acres": 0.42, "tree_suitability_score": 62.6, "avg_slope_pct": 18.3,
+        "hydric_overlap_factor": 1.0, "slope_factor": 0.366,
+        "soil_marginality_factor": 1.0, "stream_proximity_factor": 0.25,
+    },
+    {
+        "rank": 2, "area_acres": 0.15, "tree_suitability_score": 34.0, "avg_slope_pct": 8.0,
+        "hydric_overlap_factor": 0.0, "slope_factor": 0.2,
+        "soil_marginality_factor": 1.0, "stream_proximity_factor": 0.8,
+    },
+]
+_nd = build_narrative_data(
+    list(reversed(_nd_patches)),  # deliberately out of order -- the builder emits zones in rank order
+    boundary_acres=12.0,
+    claimed_acres=9.0,
+    search_space_acres=3.0,
+    soil_marginality_data_available=True,
+    hydric_data_available=True,
+    stream_data_available=False,
+    existing_canopy_excluded=True,
+)
+assert json.loads(json.dumps(_nd)) == _nd, "narrative_data must be json.dumps()-clean with no custom encoder"
+assert set(_nd) == {"candidate_count", "search_space", "selection", "gates", "zones"}
+assert _nd["candidate_count"] == 2
+assert _nd["search_space"] == {
+    "parcel_acres": 12.0,
+    "claimed_acres": 9.0,
+    "search_space_acres": 3.0,
+    "search_space_pct_of_parcel": 25.0,
+    "boundary_setback_ft": 16.4,  # 5 m
+    "production_clearance_ft": 16.4,
+    "water_clearance_ft": 16.4,
+}
+assert _nd["selection"]["min_suitability_score"] == 31.0
+assert _nd["selection"]["min_zone_acres"] == 0.1
+assert _nd["selection"]["existing_canopy_excluded"] is True
+assert _nd["selection"]["factor_weights_pct"] == {
+    "hydric_overlap": 40.0, "slope": 30.0, "soil_marginality": 20.0, "stream_proximity": 10.0,
+}
+assert _nd["gates"] == {
+    "soil_marginality_data_available": True,
+    "hydric_data_available": True,
+    "stream_data_available": False,
+}
+assert _nd["zones"][0] == {
+    "rank": 1, "area_acres": 0.4, "score": 62.6, "avg_slope_pct": 18.3,
+    "factors": {"hydric_overlap": 100.0, "slope": 36.6, "soil_marginality": 100.0, "stream_proximity": 25.0},
+}, f"rank-1 zone entry mismatch: {_nd['zones'][0]}"
+assert _nd["zones"][1]["rank"] == 2, "zones must come out in rank order regardless of input order"
+
+# Entry-point wiring: the orchestrator run above attached the block,
+# additively, and its figures agree with the result's own top-level keys
+# (top-level acres stay 2-decimal for existing consumers; the narrative
+# restates them at its own 1-decimal boundary).
+assert "narrative_data" in result, "identify_tree_zone_candidates() must attach narrative_data"
+_nd_orch = result["narrative_data"]
+assert json.loads(json.dumps(_nd_orch)) == _nd_orch
+assert _nd_orch["candidate_count"] == len(result["patches"])
+assert abs(_nd_orch["search_space"]["parcel_acres"] - result["boundary_acres"]) <= 0.05
+assert abs(_nd_orch["search_space"]["claimed_acres"] - result["claimed_acres"]) <= 0.05
+assert abs(_nd_orch["search_space"]["search_space_acres"] - result["search_space_acres"]) <= 0.05
+assert _nd_orch["selection"]["existing_canopy_excluded"] is True
+for _nd_zone, _nd_patch in zip(_nd_orch["zones"], sorted(result["patches"], key=lambda p: p["rank"])):
+    assert _nd_zone["score"] == round(_nd_patch["tree_suitability_score"], 1)
+    assert _nd_zone["rank"] == _nd_patch["rank"]
+print(
+    "narrative_data: json-clean; search space (3.0 of 12.0 acres = 25.0%, 16.4 ft clearances), "
+    "selection rules (31.0 floor, 0.1 ac floor, 40/30/20/10 weights), gates, and rank-ordered zone "
+    "factor decompositions all match hand-checked values; the orchestrator run attaches it "
+    "additively and consistently with its own top-level figures."
+)
+
+
 print("\nAll tree_zone_candidates checks passed.")

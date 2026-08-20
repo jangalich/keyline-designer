@@ -1128,6 +1128,182 @@ def _search_space_to_geojson(search_space_utm, crs: str) -> dict:
     return make_feature_collection([feature])
 
 
+# =====================================================================
+# NARRATIVE DATA -- report-facing, FINAL values only
+# =====================================================================
+# Everything below exists to answer ONE report question about this
+# module's deliverable, and nothing else:
+#
+#   HOW were the tree crop areas determined?
+#
+# The determination story has three stages, and the block mirrors them:
+# the SEARCH SPACE (what ground was even considered -- the parcel minus
+# claimed production/water/road ground and the boundary setback), the
+# SELECTION rules it was scored against (the four weighted factors, the
+# minimum score, the size floor, existing canopy excluded up front), and
+# the resulting ZONES with each one's own factor decomposition -- the
+# data "why did this patch qualify" is answered FROM.
+#
+# The same two hard rules production_area_ceiling.py's narrative block
+# established govern every value here:
+#
+#   1. FINAL. Imperial at this boundary (acres, feet); factors rescaled
+#      from their native 0-1 to a 0-100 higher-is-better scale so they
+#      are directly comparable to the composite score with no scale
+#      explanation needed; everything rounded to 1 decimal place.
+#   2. DERIVED, NEVER RECOMPUTED. Every figure is read off values
+#      identify_tree_zone_candidates()/score_tree_search_space() already
+#      produced -- no search-space difference, gate, or scoring pass is
+#      re-run to report on itself.
+#
+# The output is plain JSON -- json.dumps() must work with no custom
+# encoder. A factor whose data source never ran is carried by its own
+# *_data_available flag (its neutral-scored value still appears, since
+# that IS what the composite was computed from -- the flag is what keeps
+# a narrative from quoting it as a measurement).
+#
+# NO REASON STRINGS. This block emits values; the report writes prose.
+
+
+def _round1(value):
+    """1 decimal place, or None passed straight through -- the single
+    rounding boundary for this whole block. None means 'not known', and
+    must never be silently rounded into a 0.0 that reads as a
+    measurement."""
+    return None if value is None else round(float(value), 1)
+
+
+_METERS_PER_FOOT = 0.3048
+
+
+def _feet(meters):
+    """Metres to feet at this block's own rounding boundary -- the
+    metric-to-imperial conversion happens HERE, in the module, never
+    downstream in the report."""
+    return None if meters is None else round(float(meters) / _METERS_PER_FOOT, 1)
+
+
+def build_narrative_data(
+    patches: list[dict],
+    boundary_acres: float,
+    claimed_acres: float,
+    search_space_acres: float,
+    soil_marginality_data_available: bool,
+    hydric_data_available: bool,
+    stream_data_available: bool,
+    existing_canopy_excluded: bool,
+    min_score: float = MIN_TREE_SUITABILITY_SCORE,
+    min_area_acres: float = MIN_TREE_ZONE_ACRES,
+) -> dict:
+    """
+    The 'narrative_data' block identify_tree_zone_candidates() attaches
+    to its result -- pre-computed, FINAL, JSON-serialisable values
+    answering the one report question in this section's header comment.
+    Data only: no prose, no interpretation. patches is
+    score_tree_search_space()'s own output, read but never modified; the
+    acreage figures are the same ones the result dict already reports at
+    top level (kept there for existing consumers, restated here so the
+    block stays self-sufficient); min_score/min_area_acres are the
+    values the run ACTUALLY used (a score_kwargs override, or this
+    module's defaults).
+
+    The three *_data_available flags and existing_canopy_excluded say
+    what the run genuinely checked -- identify_tree_zone_candidates()
+    passes its own fetch outcomes (canopy True always, since its canopy
+    gate is fetch-or-raise: any result returned at all was
+    canopy-gated). Without them a narrative could claim "sited on hydric
+    ground" off a run where the SSURGO fetch was down and the factor was
+    a neutral default, not a measurement.
+
+    Shape:
+
+        {
+          'candidate_count': int,
+          'search_space': {         # stage 1 -- what ground was considered
+            'parcel_acres',
+            'claimed_acres',        #   production + selected water + road
+                                    #   network union (buffered)
+            'search_space_acres',   #   what remained to score
+            'search_space_pct_of_parcel',   # None on a zero-area parcel
+            'boundary_setback_ft',
+            'production_clearance_ft',
+            'water_clearance_ft',
+          },
+          'selection': {            # stage 2 -- the rules it was scored against
+            'min_suitability_score',        # 0-100 floor a patch must clear
+            'min_zone_acres',               # size floor below which a patch is
+                                            #   dropped as a sliver
+            'existing_canopy_excluded',     # already-wooded ground never scored
+            'factor_weights_pct': {         # share of the composite each factor
+                                            #   carries (sums to 100)
+              'hydric_overlap', 'slope', 'soil_marginality', 'stream_proximity',
+            },
+          },
+          'gates': {
+            'soil_marginality_data_available',
+            'hydric_data_available',
+            'stream_data_available',
+          },
+          'zones': [                # stage 3 -- what qualified, in rank order
+            {
+              'rank', 'area_acres', 'score',    # score 0-100, higher is better
+              'avg_slope_pct',
+              'factors': {          # each factor rescaled 0-100, higher is
+                                    #   better -- the decomposition "why did
+                                    #   this patch qualify" is answered from
+                'hydric_overlap', 'slope', 'soil_marginality', 'stream_proximity',
+              },
+            }, ...
+          ],
+        }
+    """
+    return {
+        "candidate_count": len(patches),
+        "search_space": {
+            "parcel_acres": _round1(boundary_acres),
+            "claimed_acres": _round1(claimed_acres),
+            "search_space_acres": _round1(search_space_acres),
+            "search_space_pct_of_parcel": (
+                _round1(search_space_acres / boundary_acres * 100.0) if boundary_acres > 0 else None
+            ),
+            "boundary_setback_ft": _feet(TREE_ZONE_BOUNDARY_SETBACK_METERS),
+            "production_clearance_ft": _feet(TREE_ZONE_PRODUCTION_BUFFER_METERS),
+            "water_clearance_ft": _feet(TREE_ZONE_WATER_BUFFER_METERS),
+        },
+        "selection": {
+            "min_suitability_score": _round1(min_score),
+            "min_zone_acres": _round1(min_area_acres),
+            "existing_canopy_excluded": bool(existing_canopy_excluded),
+            "factor_weights_pct": {
+                "hydric_overlap": _round1(HYDRIC_OVERLAP_FACTOR_WEIGHT * 100.0),
+                "slope": _round1(SLOPE_FACTOR_WEIGHT * 100.0),
+                "soil_marginality": _round1(SOIL_MARGINALITY_FACTOR_WEIGHT * 100.0),
+                "stream_proximity": _round1(STREAM_PROXIMITY_FACTOR_WEIGHT * 100.0),
+            },
+        },
+        "gates": {
+            "soil_marginality_data_available": bool(soil_marginality_data_available),
+            "hydric_data_available": bool(hydric_data_available),
+            "stream_data_available": bool(stream_data_available),
+        },
+        "zones": [
+            {
+                "rank": int(patch["rank"]),
+                "area_acres": _round1(patch["area_acres"]),
+                "score": _round1(patch["tree_suitability_score"]),
+                "avg_slope_pct": _round1(patch["avg_slope_pct"]),
+                "factors": {
+                    "hydric_overlap": _round1(patch["hydric_overlap_factor"] * 100.0),
+                    "slope": _round1(patch["slope_factor"] * 100.0),
+                    "soil_marginality": _round1(patch["soil_marginality_factor"] * 100.0),
+                    "stream_proximity": _round1(patch["stream_proximity_factor"] * 100.0),
+                },
+            }
+            for patch in sorted(patches, key=lambda p: p["rank"])
+        ],
+    }
+
+
 def identify_tree_zone_candidates(
     boundary_coordinates: list[tuple[float, float]],
     dem: Optional[dict] = None,
@@ -1161,7 +1337,18 @@ def identify_tree_zone_candidates(
                                                              # area (road's own real cell-footprint width, not 0)
             'boundary_acres': float,
             'patches': list[dict],                        # score_tree_search_space()'s own raw output
+            'narrative_data': dict,                       # report-facing, FINAL, JSON-serialisable
+                                                             # values -- see build_narrative_data()
         }
+
+    'narrative_data' is PURELY ADDITIVE: every other key above, and every
+    field on every patch, is byte-identical to what this function
+    returned before it existed. It answers one report question (how were
+    the tree crop areas determined) with pre-computed, imperial, rounded
+    values a narrative can quote directly -- derived entirely from
+    values this function already computed, so adding it re-runs no
+    search-space difference, gate, or scoring pass. See
+    build_narrative_data()'s own docstring for the field contract.
 
     production_area_ceiling.py's own SSURGO fetch (soil carving, reused
     unchanged from production_suitability.py via its cells_by_patch_id
@@ -1362,13 +1549,31 @@ def identify_tree_zone_candidates(
         claimed_union.area / SQUARE_METERS_PER_ACRE if claimed_union is not None and not claimed_union.is_empty else 0.0
     )
 
+    boundary_acres = boundary_polygon_utm.area / SQUARE_METERS_PER_ACRE
+
     return {
         "zones_geojson": tree_zones_to_geojson(patches),
         "search_space_geojson": _search_space_to_geojson(search_space, dem["crs"]),
         "search_space_acres": round(search_space_acres, 2),
         "claimed_acres": round(claimed_acres, 2),
-        "boundary_acres": round(boundary_polygon_utm.area / SQUARE_METERS_PER_ACRE, 2),
+        "boundary_acres": round(boundary_acres, 2),
         "patches": patches,
+        "narrative_data": build_narrative_data(
+            patches,
+            boundary_acres,
+            claimed_acres,
+            search_space_acres,
+            soil_marginality_data_available=prime_farmland_data_available,
+            hydric_data_available=hydric_data_available,
+            stream_data_available=stream_data_available,
+            # The canopy gate above is fetch-or-raise, so any result this
+            # function returns at all was canopy-gated.
+            existing_canopy_excluded=True,
+            # The values the run ACTUALLY used -- a score_kwargs override,
+            # or this module's defaults.
+            min_score=score_kwargs.get("min_score", MIN_TREE_SUITABILITY_SCORE),
+            min_area_acres=score_kwargs.get("min_area_acres", MIN_TREE_ZONE_ACRES),
+        ),
     }
 
 

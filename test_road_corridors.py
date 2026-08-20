@@ -664,4 +664,101 @@ print(
 )
 
 
+# =====================================================================
+# narrative_data -- build_narrative_data()'s own contract, against a
+# hand-built network dict with clean, hand-checkable numbers (the
+# builder reads only plain fields off build_road_network()'s shape, so a
+# literal dict is the fully-controlled fixture). Entry-point wiring is
+# checked in test_road_corridors_pipeline.py.
+# =====================================================================
+import json  # noqa: E402
+
+from road_corridors import _empty_road_network, build_narrative_data  # noqa: E402
+
+_nd_network = {
+    "branches": [
+        {
+            "branch_index": 0, "branch_role": "trunk", "joins_branch_index": None,
+            "length_meters": 152.4, "newly_served_acres": 9.0, "avg_grade_pct": 6.5,
+            "max_grade_pct": 21.3, "steep_meters": 30.48,
+            "crosses_floodplain": True, "crosses_production_zone": False,
+        },
+        {
+            "branch_index": 1, "branch_role": "water_spur", "joins_branch_index": 0,
+            "length_meters": 30.48, "newly_served_acres": 0.0, "avg_grade_pct": 4.0,
+            "max_grade_pct": 9.0, "steep_meters": 0.0,
+            "crosses_floodplain": False, "crosses_production_zone": True,
+        },
+    ],
+    "total_length_meters": 182.88,  # 600 ft exactly
+    "total_served_acres": 9.0,
+    "unserved_acres": 3.0,
+    "stop_reason": "diminishing_returns",
+    "max_grade_pct": 21.3,
+    "steep_meters": 30.48,  # 100 ft exactly
+}
+_nd = build_narrative_data(
+    _nd_network,
+    service_radius_meters=60.96,  # 200 ft exactly
+    water_zone_excluded=True,
+    floodplain_data_available=True,
+    floodplain_data_is_fallback=False,
+    canopy_data_available=True,
+)
+assert json.loads(json.dumps(_nd)) == _nd, "narrative_data must be json.dumps()-clean with no custom encoder"
+assert set(_nd) == {"network_found", "stop_reason", "determination", "access", "branches"}
+assert _nd["network_found"] is True and _nd["stop_reason"] == "diminishing_returns"
+assert _nd["determination"] == {
+    "grade_ceiling_pct": 35.0,
+    "steep_grade_threshold_pct": 10.0,
+    "max_grade_pct": 21.3,
+    "steep_ft": 100.0,
+    "water_zone_excluded": True,
+    "floodplain_data_available": True,
+    "floodplain_data_is_fallback": False,
+    "canopy_data_available": True,
+}
+assert _nd["access"] == {
+    "branch_count": 2,
+    "total_length_ft": 600.0,
+    "served_acres": 9.0,
+    "unserved_acres": 3.0,
+    "served_pct_of_production": 75.0,  # 9 of 12 demand acres in range
+    "service_radius_ft": 200.0,
+    "reaches_water_zone": True,  # the water_spur branch
+}
+assert _nd["branches"][0] == {
+    "branch_index": 0, "role": "trunk", "length_ft": 500.0, "newly_served_acres": 9.0,
+    "avg_grade_pct": 6.5, "max_grade_pct": 21.3, "steep_ft": 100.0,
+    "crosses_floodplain": True, "crosses_production_zone": False,
+}
+assert _nd["branches"][1]["role"] == "water_spur" and _nd["branches"][1]["length_ft"] == 100.0
+
+# No-network shapes: with NO production demand at all, served_pct is None
+# (nothing to serve is not a measured 0% coverage); with real unserved
+# demand it is a real 0.0.
+_nd_empty = build_narrative_data(
+    _empty_road_network("no_eligible_anchor"),
+    service_radius_meters=60.96, water_zone_excluded=False,
+    floodplain_data_available=False, floodplain_data_is_fallback=False,
+    canopy_data_available=False,
+)
+assert _nd_empty["network_found"] is False and _nd_empty["branches"] == []
+assert _nd_empty["access"]["served_pct_of_production"] is None
+assert _nd_empty["access"]["reaches_water_zone"] is False
+_nd_unserved = build_narrative_data(
+    _empty_road_network("no_eligible_anchor", unserved_acres=3.0),
+    service_radius_meters=60.96, water_zone_excluded=False,
+    floodplain_data_available=False, floodplain_data_is_fallback=False,
+    canopy_data_available=False,
+)
+assert _nd_unserved["access"]["served_pct_of_production"] == 0.0
+print(
+    "narrative_data: json-clean; determination (35% ceiling, 21.3% steepest cell, 100 steep ft, all "
+    "constraint flags passed through) and access (600 ft network serving 9.0 of 12.0 demand acres = "
+    "75.0%, water spur reaches the pond) all match hand-checked values; no-demand empty network "
+    "reports served_pct None, real unserved demand reports 0.0."
+)
+
+
 print("\nAll road_corridors checks passed.")

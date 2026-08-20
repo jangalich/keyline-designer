@@ -614,4 +614,53 @@ print(
 )
 
 
+# =====================================================================
+# narrative_data: attached by the entry point, purely additive, and
+# consistent with the same result's own road_network dict. Value-level
+# contract checks (units, rounding, the None-vs-0.0 served_pct rule)
+# live in test_road_corridors.py against a hand-built network.
+# =====================================================================
+import json  # noqa: E402
+
+assert set(result) == {"zones_geojson", "road_network", "selected_road_corridor", "narrative_data"}, (
+    "narrative_data must be the ONLY new top-level key on identify_road_corridor_candidates() -- got "
+    f"{set(result)}"
+)
+_nd_net = result["road_network"]
+_nd = result["narrative_data"]
+assert json.loads(json.dumps(_nd)) == _nd, "narrative_data must be json.dumps()-clean with no custom encoder"
+assert _nd["network_found"] == bool(_nd_net["branches"])
+assert _nd["stop_reason"] == _nd_net["stop_reason"]
+assert _nd["access"]["branch_count"] == len(_nd_net["branches"])
+assert _nd["access"]["total_length_ft"] == round(_nd_net["total_length_meters"] / 0.3048, 1)
+assert _nd["access"]["served_acres"] == round(_nd_net["total_served_acres"], 1)
+assert _nd["access"]["unserved_acres"] == round(_nd_net["unserved_acres"], 1)
+assert len(_nd["branches"]) == len(_nd_net["branches"])
+for _nd_branch, _net_branch in zip(_nd["branches"], _nd_net["branches"]):
+    assert _nd_branch["role"] == _net_branch["branch_role"]
+    assert _nd_branch["length_ft"] == round(_net_branch["length_meters"] / 0.3048, 1)
+    assert _nd_branch["newly_served_acres"] == round(_net_branch["newly_served_acres"], 1)
+
+# The no-anchor early return carries narrative_data too -- a narrative
+# can explain THAT outcome (network_found False, stop_reason
+# 'no_anchor_given') -- with every constraint flag honestly False, since
+# no fetch ever ran on that path.
+_nd_no_anchor_result = identify_road_corridor_candidates(boundary_coordinates, dem=synthetic_dem)
+_nd0 = _nd_no_anchor_result["narrative_data"]
+assert _nd0["network_found"] is False and _nd0["stop_reason"] == "no_anchor_given"
+assert _nd0["access"]["branch_count"] == 0 and _nd0["access"]["served_pct_of_production"] is None
+assert _nd0["determination"] == {
+    "grade_ceiling_pct": 35.0, "steep_grade_threshold_pct": 10.0,
+    "max_grade_pct": 0.0, "steep_ft": 0.0,
+    "water_zone_excluded": False, "floodplain_data_available": False,
+    "floodplain_data_is_fallback": False, "canopy_data_available": False,
+}
+print(
+    "narrative_data attached end-to-end: purely additive, json-clean, consistent with the same "
+    f"result's road_network ({_nd['access']['branch_count']} branch(es), "
+    f"{_nd['access']['total_length_ft']} ft, stop_reason={_nd['stop_reason']!r}); the no-anchor "
+    "early return carries it too, with every constraint flag honestly False."
+)
+
+
 print("\nAll road corridor pipeline checks passed.")

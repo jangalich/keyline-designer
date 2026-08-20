@@ -492,4 +492,100 @@ print(
 )
 
 
+# =====================================================================
+# narrative_data -- the stored factor scores and build_narrative_data()'s
+# own contract, on this file's baseline fixture (uniform ~4% south-facing
+# grade, production zone in the west half, road along the south edge).
+# Entry-point wiring is checked in test_solar_suitability_pipeline.py.
+# =====================================================================
+import json  # noqa: E402
+
+from solar_suitability import build_narrative_data  # noqa: E402
+
+_nd_candidates = find_candidate_solar_zones(DEM, PRODUCTION_AREAS, WATER_ZONES, ROAD, BOUNDARY, max_candidates=5)
+assert _nd_candidates, "the baseline fixture must produce candidates for the narrative checks"
+
+# The four factor scores are stored on every candidate (additively) and
+# recompose the composite exactly (linear combination, so any mismatch
+# beyond rounding means the stored values aren't what was scored).
+for _nd_c in _nd_candidates:
+    _recomposed = 100.0 * (
+        SLOPE_SCORE_WEIGHT * _nd_c["slope_score"]
+        + ASPECT_SCORE_WEIGHT * _nd_c["aspect_score"]
+        + SHADING_SCORE_WEIGHT * _nd_c["shading_score"]
+        + PRODUCTION_PROXIMITY_SCORE_WEIGHT * _nd_c["production_proximity_score"]
+    )
+    assert abs(_recomposed - _nd_c["suitability_score"]) < 0.3, (
+        f"stored factor scores must recompose suitability_score: {_recomposed} vs {_nd_c['suitability_score']}"
+    )
+
+_nd = build_narrative_data(
+    _nd_candidates,
+    BOUNDARY,
+    road_proximity_source="real_mapped_road",
+    tree_zone_exclusion_available=True,
+    water_zone_excluded=True,
+    existing_canopy_excluded=False,
+)
+assert json.loads(json.dumps(_nd)) == _nd, "narrative_data must be json.dumps()-clean with no custom encoder"
+assert set(_nd) == {"site_found", "candidate_count", "gates", "selected_site"}
+assert _nd["site_found"] is True and _nd["candidate_count"] == len(_nd_candidates)
+assert _nd["gates"] == {
+    "existing_canopy_excluded": False,
+    "water_zone_excluded": True,
+    "tree_zone_exclusion_checked": True,
+    "road_proximity_source": "real_mapped_road",
+    "prime_farmland_checked": False,  # flag_prime_farmland_conflicts() never ran on these
+}
+_nd_selected = max(_nd_candidates, key=lambda c: c["suitability_score"])
+_nd_site = _nd["selected_site"]
+assert _nd_site["score"] == round(_nd_selected["suitability_score"], 1)
+assert _nd_site["footprint_acres"] == round(_nd_selected["footprint_area_acres"], 1)
+assert _nd_site["location"]["production_zone_relationship"] == _nd_selected["production_zone_relationship"]
+assert _nd_site["location"]["distance_to_road_ft"] == round(_nd_selected["distance_to_road_m"] / 0.3048, 1)
+assert _nd_site["location"]["distance_to_production_edge_ft"] == round(
+    _nd_selected["distance_to_production_zone_m"] / 0.3048, 1
+)
+assert _nd_site["location"]["distance_to_water_zone_ft"] == round(
+    _nd_selected["distance_to_water_zone_m"] / 0.3048, 1
+)
+assert _nd_site["location"]["position_in_parcel"] in {
+    "center", "north", "northeast", "east", "southeast", "south", "southwest", "west", "northwest",
+}
+assert _nd_site["benefits"]["facing"] == "south", (
+    "the uniform south-facing fixture's selected site must narrate as south-facing, got "
+    f"{_nd_site['benefits']['facing']!r}"
+)
+assert _nd_site["benefits"]["avg_slope_pct"] == round(_nd_selected["avg_slope_pct"], 1)
+assert _nd_site["benefits"]["factors"] == {
+    "slope": round(_nd_selected["slope_score"] * 100.0, 1),
+    "aspect": round(_nd_selected["aspect_score"] * 100.0, 1),
+    "shading": round(_nd_selected["shading_score"] * 100.0, 1),
+    "production_proximity": round(_nd_selected["production_proximity_score"] * 100.0, 1),
+}
+assert _nd_site["benefits"]["prime_farmland_conflict"] is None, (
+    "prime farmland was never checked on these candidates -- must read None, never False"
+)
+
+# No-candidate outcome: site_found False, selected_site None (never a
+# zeroed-out site block), gates still reported so a narrative can explain
+# the empty result.
+_nd_none = build_narrative_data(
+    [], BOUNDARY, road_proximity_source="unavailable",
+    tree_zone_exclusion_available=False, water_zone_excluded=False, existing_canopy_excluded=True,
+)
+assert _nd_none["site_found"] is False and _nd_none["selected_site"] is None
+assert _nd_none["candidate_count"] == 0
+assert _nd_none["gates"]["road_proximity_source"] == "unavailable"
+assert json.loads(json.dumps(_nd_none)) == _nd_none
+print(
+    "narrative_data: stored factor scores recompose the composite on every candidate; the selected "
+    f"site narrates its location (position {_nd_site['location']['position_in_parcel']!r}, "
+    f"{_nd_site['location']['production_zone_relationship']} production zone) and benefits "
+    f"(south-facing, factors {_nd_site['benefits']['factors']}) consistently with its own stored "
+    "values; unchecked prime farmland reads None; the no-candidate case reports site_found=False "
+    "with selected_site=None."
+)
+
+
 print("\nAll solar_suitability checks passed.")
