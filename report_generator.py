@@ -77,6 +77,12 @@ the data established it.
   anything. Translate each into a plain descriptor — higher is always
   better. Say the site has strong solar exposure and only fair shading,
   not that it scored 98.3 and 90.4.
+- The same goes for the analysis's own thresholds and ceilings. Named
+  cutoffs, acreage limits, and cost-per-acre rules are how the pipeline
+  makes its decisions; they are not how a farmer thinks about their
+  land. Give the reader the meaning instead — an oversized watershed
+  prone to siltation and heavy peak flows, not a 20-acre siltation and
+  peak-flow ceiling.
 - Report all measurements in feet, acres, inches, and °F.
 - Where an analysis found nothing, say so and explain why to the extent
   the data gives a reason. You may then recommend approaches — kinds of
@@ -156,11 +162,11 @@ Answer every question in each.
 
    This is one network grown from the property's real access point, not
    a set of options. Report network-level figures; do not enumerate
-   every branch or list every grade. Report the network's reach in
-   terms of what it opens up. Where some production ground is left
-   unserved, frame it as extension available if the reader wants it
-   later, not as a routing failure or a cost threshold that was
-   exceeded.
+   every branch or list every grade. Report what the network opens up.
+   Serving every last corner of production ground was never the goal,
+   so don't report unserved acreage, and don't characterize where
+   routing stopped — neither as a failure nor as extension available
+   later. State the access the network provides and move on.
 
 6. Tree Crop Areas
    Generally, how can trees benefit the farm?
@@ -176,10 +182,7 @@ Answer every question in each.
    this climate. Do not name particular species or cultivars.
 
    The scoring factors describe why each area was selected as tree
-   ground; they are not a judgment on cultivation. Stream proximity in
-   particular is a riparian-buffer benefit, so a low value on it says
-   only that these zones aren't near a stream. It says nothing about
-   soil quality or whether the ground could be farmed.
+   ground; they are not a judgment on cultivation.
 
 7. Permanent Building Site
    What does this area indicate?
@@ -200,6 +203,12 @@ Answer every question in each.
    No computed geometry backs this section and none is supplied. Reason
    from what the earlier sections established. Make no geometric claims.
 
+   Production Areas do not automatically need permanent perimeter
+   fencing. Whether and how to divide production ground belongs in the
+   subdivision fencing discussion, where flexible and temporary
+   approaches are usually the better answer. Permanent fencing is worth
+   recommending where there's a real reason for it.
+
 9. Soil
    What are this property's soil characteristics?
    How can the upstream KSOP elements improve the soil?
@@ -215,11 +224,25 @@ Answer every question in each.
 
 10. Summary
     What are the key findings from this report?
-    Given the results of this report, what farm enterprises should be
-    considered to create a diversified farm?
+    What combination of enterprises would work together here — where does
+    one's output become another's input?
     Where should the reader start?
 
-    Ground any enterprise ideas in what the sections above established."""
+    Ground any enterprise ideas in what the sections above established.
+
+    This is a synthesis question, not an inventory. Don't walk back
+    through the features and attach a revenue idea to each; infrastructure
+    like a solar array or a road is not an enterprise. Think about what
+    this ground, this water, and this climate can actually carry, and how
+    those pieces feed each other — what one enterprise produces that
+    another can use, and where they compete for the same ground or the
+    same hours.
+
+    For the closing question, sequence the work by dependency rather than
+    listing tasks. What has to be confirmed on the ground before anything
+    is built, what can begin immediately with what's already there, and
+    what waits on the answers to the first group. The reader should
+    finish knowing the order and why it's that order."""
 
 
 # Unit conversions applied at the formatter boundary only -- the report
@@ -862,7 +885,6 @@ def _format_tree_zones_summary(tree_narrative: Optional[dict]) -> str:
     selection = tree_narrative["selection"]
     gates = tree_narrative["gates"]
     zones = tree_narrative["zones"]
-    weights = selection["factor_weights_pct"]
 
     lines = [
         f"Search space: {search_space['search_space_acres']} of the parcel's "
@@ -872,13 +894,18 @@ def _format_tree_zones_summary(tree_narrative: Optional[dict]) -> str:
         f"{search_space['boundary_setback_ft']} ft boundary setback and "
         f"{search_space['production_clearance_ft']} ft / {search_space['water_clearance_ft']} ft "
         "production/water clearances).",
+        # The soil marginality and stream proximity factors (and the four
+        # factor weights) are deliberately NOT reported here -- internal
+        # scoring inputs a farmer has no way to read; the useful facts
+        # about why this ground was selected (slope, the soil survey)
+        # already reach the prompt. Both fields stay on the narrative
+        # block untouched.
         "Ground already under existing tree canopy was excluded before scoring — these candidates "
         "are NEW tree-suitable ground, not ground that's already wooded. Qualifying ground had to "
         f"score at least {selection['min_suitability_score']}/100 on a weighted composite "
-        f"(hydric-soil overlap {weights['hydric_overlap']}%, slope steepness {weights['slope']}%, "
-        f"soil marginality {weights['soil_marginality']}%, stream proximity "
-        f"{weights['stream_proximity']}%) and cover at least {selection['min_zone_acres']} acres — "
-        "merely being unclaimed leftover land is deliberately NOT enough to qualify.",
+        "(weighted most heavily toward hydric-soil overlap, then slope steepness) and cover at "
+        f"least {selection['min_zone_acres']} acres — merely being unclaimed leftover land is "
+        "deliberately NOT enough to qualify.",
     ]
 
     unavailable = [
@@ -908,9 +935,8 @@ def _format_tree_zones_summary(tree_narrative: Optional[dict]) -> str:
             lines.append(
                 f"  - Rank {zone['rank']}: {zone['area_acres']} acres, in the parcel's "
                 f"{zone['position_in_parcel']}, score {zone['score']}/100 "
-                f"(hydric overlap {factors['hydric_overlap']}, slope {factors['slope']}, "
-                f"soil marginality {factors['soil_marginality']}, stream proximity "
-                f"{factors['stream_proximity']}), average slope {zone['avg_slope_pct']}%."
+                f"(hydric overlap {factors['hydric_overlap']}, slope {factors['slope']}), "
+                f"average slope {zone['avg_slope_pct']}%."
             )
 
     lines.append(

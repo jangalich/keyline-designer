@@ -567,6 +567,14 @@ assert "stream data was unavailable" in _tree_prose, (
     "an unavailable stream fetch must be flagged so its factor isn't quoted as a measurement"
 )
 assert "Rank 1: 0.4 acres, in the parcel's northwest, score 62.6/100" in _tree_prose
+assert "hydric overlap 100.0" in _tree_prose and "slope 36.6" in _tree_prose
+assert "soil marginality" not in _tree_prose and "stream proximity" not in _tree_prose, (
+    "the soil marginality and stream proximity factors (and the factor weights) stay on the "
+    "narrative block but must NOT be reported -- internal scoring inputs a farmer can't read"
+)
+assert "40.0%" not in _tree_prose and "10.0%" not in _tree_prose, (
+    "the four factor weights are internal scoring configuration and must not reach the prompt"
+)
 assert "assigning each zone a function" in _tree_prose
 assert "No tree zone candidate data available" in _format_tree_zones_summary(None)
 print("_format_tree_zones_summary(): search space/selection rules/zones rendered from the block; "
@@ -663,6 +671,28 @@ assert "fight the landscape" not in _sp and "is decided within the constraints" 
 )
 assert "How were the Tree Crop Areas determined?" not in _sp, (
     "the redundant tree-determination question must be deleted"
+)
+# Round-three refinements: internal thresholds banned alongside scores;
+# roads report access without unserved acreage or stop framing; fencing
+# doesn't default to production perimeters; the Summary asks for an
+# enterprise combination and dependency-sequenced next steps.
+assert "thresholds and ceilings" in _sp and "not how a farmer thinks about their" in _sp, (
+    "the internal-thresholds rule must sit alongside the no-scores rule"
+)
+assert "don't report unserved acreage" in _sp, "the road note must ban unserved-acreage reporting"
+assert "frame it as extension available if the reader wants it later" not in _sp, (
+    "the old extension-available road framing must be replaced"
+)
+assert "Production Areas do not automatically need permanent perimeter" in _sp, (
+    "the fencing note must say production perimeters aren't a given"
+)
+assert "one's output become another's input" in _sp and "synthesis question, not an inventory" in _sp, (
+    "the Summary must carry the enterprise-combination question and its synthesis note"
+)
+assert "sequence the work by dependency" in _sp, "the Summary note must ask for dependency-ordered next steps"
+assert "diversified farm" not in _sp, "the old diversified-farm enterprise question must be replaced"
+assert "riparian-buffer benefit" not in _sp, (
+    "the stream-proximity explanation must be deleted along with the factor it explained"
 )
 print(
     "SYSTEM_PROMPT: all ten sections present in order; imperial-units, legend-name, and "
