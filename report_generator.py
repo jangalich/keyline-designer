@@ -31,12 +31,13 @@ expanding a farm and interested in regenerative, soil-building practice.
 The analysis follows the Scale of Permanence, the land-design framework
 developed by P.A. Yeomans and central to keyline design. Its organizing
 insight is that the factors shaping a property differ enormously in how
-changeable they are, and that design decisions should be made in order of
-decreasing permanence — climate before land shape, land shape before
-water, water before access, on down to soil, the most improvable factor
-of all. Each factor is decided within the constraints the ones before it
-establish. Working out of order produces designs that fight the
-landscape.
+changeable they are, and that a sound design works through them in order
+of decreasing permanence. Climate and landform are not decided by anyone
+— they are read and understood first, because everything sited afterward
+depends on them. From there, water, access, trees, buildings, fencing,
+and soil follow, each more adjustable than the last. Each decision
+informs the ones that follow it, and the elements are designed to work
+together as one system.
 
 Your recommendations are grounded in computed geospatial analysis of this
 specific property, supplied below as structured data. Report from that
@@ -71,6 +72,11 @@ the data established it.
 - Never revisit or second-guess a decision an earlier section made.
 - Do not restate the data blocks. Use the figures that carry your
   reasoning and leave the rest.
+- Never state a numeric score. The data blocks carry scores because
+  that's how the analysis ranks things; the reader isn't ranking
+  anything. Translate each into a plain descriptor — higher is always
+  better. Say the site has strong solar exposure and only fair shading,
+  not that it scored 98.3 and 90.4.
 - Report all measurements in feet, acres, inches, and °F.
 - Where an analysis found nothing, say so and explain why to the extent
   the data gives a reason. You may then recommend approaches — kinds of
@@ -94,24 +100,30 @@ Answer every question in each.
 
 2. Climate
    What key climate elements define this property and its local area?
+   What are the major climate threats to be aware of?
    What should the reader carry forward while reading the rest of this
    report?
-   What are the major climate threats to be aware of?
 
 3. Landform
    Generally, how does landform influence the design of a farm?
-   Generally, how can keypoints be used to serve a farm?
    What is this property's elevation range and relief, and what does
    that mean for working it?
+   Generally, how can keypoints be used to serve a farm?
    Which Keypoint Candidates are relevant to this report, and where are
    they on the map?
    What makes the selected Production Areas suitable for production?
    What should the reader do next with this?
 
    Keypoints are flags, not conclusions — nothing else on this property
-   was sited with reference to one. A keypoint sitting below a water
-   opportunity is where a keyline dam wall would go, and warrants that
-   reading rather than dismissal as a downstream point.
+   was sited with reference to one. Discuss only the keypoints that
+   deserve a second look; a keypoint with a small catchment and a modest
+   slope break needs no more than a passing mention, or none. A keypoint
+   sitting below a water opportunity is where a keyline dam wall would
+   go, and warrants that reading rather than dismissal as a downstream
+   point. Where a keypoint sits above ground committed to production,
+   say what it means for cultivation pattern on that ground —
+   keyline-pattern tillage run off the break rather than square to the
+   property line — rather than leaving that for a later section.
 
 4. Water System Survey Area
    What is a water system in the context of this report?
@@ -126,6 +138,16 @@ Answer every question in each.
    This is a survey area, not a pond footprint. The area drawn is where
    opportunity is best, not the size of any structure.
 
+   Where the Landform section flagged a keypoint sitting below this
+   survey area, carry that forward here and say what it means for
+   siting a dam wall. A flag raised earlier and dropped is worse than
+   one never raised.
+
+   The supplemental-supply question is judgment, not data. Answer it
+   with categories of approach — roof catchment, contour swales,
+   mechanical lift that needs no grid power, and whatever else suits
+   this property — not with named products.
+
 5. Suggested Road Corridor
    Generally, what purpose does this element serve?
    How was the suggested route determined?
@@ -134,7 +156,11 @@ Answer every question in each.
 
    This is one network grown from the property's real access point, not
    a set of options. Report network-level figures; do not enumerate
-   every branch or list every grade.
+   every branch or list every grade. Report the network's reach in
+   terms of what it opens up. Where some production ground is left
+   unserved, frame it as extension available if the reader wants it
+   later, not as a routing failure or a cost threshold that was
+   exceeded.
 
 6. Tree Crop Areas
    Generally, how can trees benefit the farm?
@@ -142,9 +168,18 @@ Answer every question in each.
    location and these areas' characteristics? (Judgment — species and
    enterprise types are yours to recommend. Placing anything beyond the
    drawn areas is not.)
-   How were the Tree Crop Areas determined?
    How do they integrate with the earlier KSOP elements?
    What should the reader do next with this?
+
+   Recommend categories of tree crop — orchard, timber block, windbreak,
+   riparian buffer, and so on — suited to these areas' slope, soil, and
+   this climate. Do not name particular species or cultivars.
+
+   The scoring factors describe why each area was selected as tree
+   ground; they are not a judgment on cultivation. Stream proximity in
+   particular is a riparian-buffer benefit, so a low value on it says
+   only that these zones aren't near a stream. It says nothing about
+   soil quality or whether the ground could be farmed.
 
 7. Permanent Building Site
    What does this area indicate?
@@ -174,9 +209,14 @@ Answer every question in each.
    Cross-reference the soil survey against the land cover reading. Do
    not use soil to revisit where anything above was placed.
 
+   Cultivation pattern on the Production Areas is covered in the
+   Landform section. Don't repeat it here; focus on fertility,
+   structure, biology, and cover.
+
 10. Summary
     What are the key findings from this report?
-    What farming enterprises might suit this property?
+    Given the results of this report, what farm enterprises should be
+    considered to create a diversified farm?
     Where should the reader start?
 
     Ground any enterprise ideas in what the sections above established."""
@@ -394,7 +434,10 @@ def _format_keypoints_summary(
         if boundary_polygon_utm is not None and k.get("point_utm") is not None:
             position_clause = f"in the parcel's {_locative_descriptor(k['point_utm'], boundary_polygon_utm)}, "
         lines.append(
-            f"  - Keypoint {k['id']} (valley {k['valley_id']}): {position_clause}"
+            # Keypoint numbers are 1-based FOR DISPLAY ONLY (k['id'] + 1):
+            # ids stay zero-indexed everywhere upstream, same presentation
+            # rule as the production patch numbers.
+            f"  - Keypoint {k['id'] + 1} (valley {k['valley_id']}): {position_clause}"
             f"{round(k['elevation_m'] * _FEET_PER_METER, 1)} ft elevation, "
             f"{k['contributing_acres']} ac contributing catchment, slope drop "
             f"{k['slope_drop_pct']}% ({k['slope_above_pct']}% above -> {k['slope_below_pct']}% below), "
@@ -644,11 +687,9 @@ def _format_solar_candidate_zones_summary(solar_narrative: Optional[dict]) -> st
     else:
         road_note = "distance to road unknown (no road source was available; the road-proximity constraint was disabled)"
 
-    water_note = (
-        f"; {location['distance_to_water_zone_ft']}ft from the selected water-system zone"
-        if location["distance_to_water_zone_ft"] is not None
-        else ""
-    )
+    # distance_to_water_zone_ft stays on the narrative block but is
+    # deliberately NOT reported here: distance from a building to a
+    # possible future water source isn't actionable and reads as filler.
 
     if benefits["prime_farmland_conflict"] is True:
         farmland_note = (
@@ -675,7 +716,7 @@ def _format_solar_candidate_zones_summary(solar_narrative: Optional[dict]) -> st
         f"Selected site (rank 1 of {solar_narrative['candidate_count']} ranked candidate(s)): "
         f"score {site['score']}/100, {site['footprint_acres']} acre footprint, in the parcel's "
         f"{location['position_in_parcel']}.",
-        f"Location: {production_note}; {road_note}{water_note}.",
+        f"Location: {production_note}; {road_note}.",
         f"Measured qualities: {benefits['avg_slope_pct']}% average slope, "
         + (
             f"facing {benefits['facing']}"
@@ -784,7 +825,10 @@ def _format_production_areas_summary(production_narrative: Optional[dict]) -> st
             else ""
         )
         lines.append(
-            f"  - Patch {patch['id']} (rank {patch['rank']}): {patch['area_acres']} acres "
+            # Patch numbers are 1-based FOR DISPLAY ONLY (patch['id'] + 1):
+            # ids stay zero-indexed everywhere upstream; "Patch 0" just
+            # reads wrong to the person the narrative addresses.
+            f"  - Patch {patch['id'] + 1} (rank {patch['rank']}): {patch['area_acres']} acres "
             f"({patch['percent_of_parcel']}% of parcel), in the parcel's "
             f"{patch['position_in_parcel']}, score {patch['score']}/100 "
             f"(slope {patch['factors']['slope_factor']}, size {patch['factors']['size_factor']}, "
@@ -793,9 +837,9 @@ def _format_production_areas_summary(production_narrative: Optional[dict]) -> st
             f"{percentile_note}{hydric_note}{hole_note}."
         )
     lines.append(
-        "\nName and refer to these patches by id/rank in the narrative — they are the computed "
-        "answer to which ground is strong, workable production land, and later steps must be "
-        "checked against them."
+        "\nName and refer to these patches by the patch numbers and ranks above — they are the "
+        "computed answer to which ground is strong, workable production land, and later steps must "
+        "be checked against them."
     )
     return "\n".join(lines)
 

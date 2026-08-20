@@ -217,7 +217,10 @@ _kp_fixture = [
 ]
 _kp_prose = _format_keypoints_summary(_kp_fixture, _kp_boundary)
 assert "2 keypoint(s) detected" in _kp_prose
-assert "Keypoint 0 (valley 3)" in _kp_prose and "1136.8 ft elevation" in _kp_prose and "6.36 ac" in _kp_prose
+assert "Keypoint 1 (valley 3)" in _kp_prose and "1136.8 ft elevation" in _kp_prose and "6.36 ac" in _kp_prose, (
+    "keypoint numbers must display 1-based (id 0 -> 'Keypoint 1') -- ids stay zero-indexed upstream"
+)
+assert "Keypoint 2 (valley 7)" in _kp_prose and "Keypoint 0" not in _kp_prose
 assert "in the parcel's northwest" in _kp_prose, "keypoint 0's cardinal position must be stated"
 assert "in the parcel's east-central" in _kp_prose, (
     "keypoint 1's mid-band position must use the '-central' compound form"
@@ -471,6 +474,11 @@ assert "INSIDE a production zone" in _solar_prose
 assert "18.0ft to the property's own selected road corridor" in _solar_prose
 assert "facing south" in _solar_prose and "slope 84.0" in _solar_prose
 assert "PRIME FARMLAND CONFLICT" in _solar_prose
+assert "ft from the selected water-system zone" not in _solar_prose and "210.0" not in _solar_prose, (
+    "distance_to_water_zone_ft stays on the narrative block but must NOT be reported -- "
+    "building-to-future-water distance isn't actionable and reads as filler (the water-zone HARD "
+    "EXCLUSION mention in the closing guidance is fine; the distance figure is what must be gone)"
+)
 
 import copy  # noqa: E402
 
@@ -520,7 +528,10 @@ assert "hydric soil: not checked this run" in _prod_prose, (
     "an unavailable soil check must read as not-checked, never as 0 acres excluded"
 )
 assert "existing tree canopy: 1.2 acres excluded" in _prod_prose
-assert "Patch 0 (rank 1): 9.1 acres (52.3% of parcel), in the parcel's southeast, score 78.2/100" in _prod_prose
+assert "Patch 1 (rank 1): 9.1 acres (52.3% of parcel), in the parcel's southeast, score 78.2/100" in _prod_prose, (
+    "patch numbers must display 1-based (id 0 -> 'Patch 1') -- ids stay zero-indexed upstream"
+)
+assert "Patch 0" not in _prod_prose, "no zero-indexed patch number may reach the narrative"
 assert "faces southeast (84% of its cells" in _prod_prose
 assert "62.0 elevation percentile" in _prod_prose
 assert "1 interior exclusion hole(s) totalling 0.2 acres" in _prod_prose
@@ -595,7 +606,7 @@ for _header in (
     assert _header in _wired_prompt, f"data_summary must carry the {_header} section"
 assert "score 87.5/100" in _wired_prompt and "in the parcel's southwest" in _wired_prompt
 assert "The network reaches all identified production ground." in _wired_prompt
-assert "Patch 0 (rank 1)" in _wired_prompt and "Rank 1: 0.4 acres" in _wired_prompt
+assert "Patch 1 (rank 1)" in _wired_prompt and "Rank 1: 0.4 acres" in _wired_prompt
 
 _unwired_prompt = _capture_prompt(
     soil_components=_irr_soil,
@@ -640,7 +651,24 @@ assert "feet, acres, inches, and °F" in _sp, "the imperial-units instruction mu
 assert "Keypoint Candidates" in _sp and "Water System Survey Area" in _sp, (
     "the legend-name list must be present"
 )
-print("SYSTEM_PROMPT: all ten sections present in order, imperial-units and legend-name rules intact.")
+# Round-two refinements: the no-numeric-scores rule, the reworked
+# framework paragraph (read-not-decided, influence-not-constraint), and
+# the deleted redundant tree question.
+assert "Never state a numeric score" in _sp, "the no-numeric-scores rule must be present"
+assert "read and understood first" in _sp and "informs the ones that follow" in _sp, (
+    "the framework paragraph must frame climate/landform as read and factors as informing, not constraining"
+)
+assert "fight the landscape" not in _sp and "is decided within the constraints" not in _sp, (
+    "the old decided-in-order/fight-the-landscape framing must be gone"
+)
+assert "How were the Tree Crop Areas determined?" not in _sp, (
+    "the redundant tree-determination question must be deleted"
+)
+print(
+    "SYSTEM_PROMPT: all ten sections present in order; imperial-units, legend-name, and "
+    "no-numeric-scores rules intact; reworked framework paragraph in place; redundant tree "
+    "question gone."
+)
 
 
 print("\nAll report_generator checks passed.")
