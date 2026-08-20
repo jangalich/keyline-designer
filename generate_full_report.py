@@ -158,6 +158,10 @@ def generate_full_report(boundary_coordinates: list, anchor_lon_lat: tuple[float
         # docstring); the raw winner dicts above stay forwarded for
         # compatibility but no longer feed any formatter.
         narrative_data=context.narrative_data,
+        # Enables each keypoint's cardinal position on the map
+        # (report_generator._locative_descriptor()) -- the same boundary
+        # polygon every keypoint's own point_utm shares a CRS with.
+        boundary_polygon_utm=context.boundary_polygon_utm,
     )
 
     return report

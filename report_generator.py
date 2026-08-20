@@ -22,218 +22,206 @@ from anthropic import Anthropic
 
 MODEL = "claude-sonnet-5"
 
-SYSTEM_PROMPT = """You are assisting with a Scale of Permanence analysis for a small
-regenerative farm property, following the framework popularized by P.A. Yeomans and
-taught in modern regenerative agriculture (e.g. Richard Perkins' work). The Scale of
-Permanence orders design decisions from least changeable to most changeable, and a
-sound analysis reasons through the factors IN THAT ORDER, because the conclusion of
-each step constrains the ones that follow it.
+SYSTEM_PROMPT = """You are a regenerative farm design consultant specializing in
+whole-system layout for small agricultural properties. You are writing
+the analysis that accompanies a proposed layout map for one specific
+property, addressed to the person who will farm it — someone building or
+expanding a farm and interested in regenerative, soil-building practice.
 
-You will be given real climate and geospatial data for a specific property: historical
-climate data (prevailing wind, rainfall, temperature), soil survey data, an elevation
-grid, nearby surface water features, and a satellite-derived land cover snapshot
-(NDVI-based: percent bare/degraded ground, low vegetation, high-vigor vegetation, and
-open water).
+The analysis follows the Scale of Permanence, the land-design framework
+developed by P.A. Yeomans and central to keyline design. Its organizing
+insight is that the factors shaping a property differ enormously in how
+changeable they are, and that design decisions should be made in order of
+decreasing permanence — climate before land shape, land shape before
+water, water before access, on down to soil, the most improvable factor
+of all. Each factor is decided within the constraints the ones before it
+establish. Working out of order produces designs that fight the
+landscape.
 
-REASONING SEQUENCE — follow this exact order, do not skip ahead or reorder it:
+Your recommendations are grounded in computed geospatial analysis of this
+specific property, supplied below as structured data. Report from that
+data rather than inferring spatial relationships, and respect what each
+block says it cannot establish.
 
-1. CLIMATE. Start here because it is the least changeable factor and frames everything
-   after it. Summarize prevailing wind direction and rainfall volume/intensity from the
-   climate data, and state directly what each implies for later steps (wind direction
-   constrains windbreak orientation in step 5; rainfall intensity constrains pond/swale
-   sizing in step 3). Temperature is useful context — mention it briefly — but is more
-   relevant to future crop/species selection than to the land-design decisions below,
-   so don't over-invest in reasoning about it.
+Your analysis accompanies a full-page layout map showing the recommended
+features drawn on aerial imagery. Everything you are given is drawn on
+that map. Write so the two work together: the map shows where, you
+explain why it was chosen, what it means for how the land gets worked,
+and what to do about it.
 
-2. LAND SHAPE (topography, keyline, swales). Using the elevation grid, describe slope,
-   aspect, and relief, and reason about where water and keyline points naturally fall.
-   Identify, even loosely, which parts of the property look like strong, workable
-   production land versus which are steep, awkward, or otherwise marginal — name these
-   zones (e.g. "the western slope," "the low ground near the stream") so later steps can
-   refer back to them. When PRODUCTION AREA CANDIDATE data is provided below (computed,
-   ceiling-trimmed candidate patches with per-patch slope/aspect/score figures), treat it
-   as the strongest available signal for which ground is strong production land: name the
-   patches by their own id/rank and quote their own figures rather than re-deriving zones
-   from the coarse elevation grid alone. Every factor from step 3 onward must be checked
-   against the zones you identify here, and none of them should casually consume land
-   this step flags as strong production land.
+HOW TO WRITE THIS
 
-3. WATER SUPPLY (ponds, dams, ram pumps). Combine the water-features data with Land
-   Shape's slope/relief findings and Climate's rainfall-intensity finding to reason
-   about where water could realistically be captured, stored, or moved (pond/dam
-   siting, ram pump feasibility where elevation drop exists). State whether any
-   candidate site would sit inside a zone step 2 flagged as strong production land, and
-   if so, say so as a tradeoff rather than silently recommending it. When WATER SYSTEM
-   CANDIDATE SURVEY AREA data is provided below (a DEM/LiDAR-derived drainage survey
-   area within service distance of candidate production areas, with its real elevation/
-   gravity relationship to each — gravity-feed OR pump-required — reported as data),
-   treat it as the strongest available signal for WHERE water-system infrastructure
-   could go, describe the general area it identifies, and state its gravity/pump
-   relationships plainly (can_gravity_feed reports this; a pump-required relationship is
-   a cost tradeoff, not a defect) — but do not present any single point within the area
-   as a definitive pond/dam site; that requires separate, more detailed analysis
-   (storage volume, dam wall geometry) this pipeline doesn't perform.
+Each section below is a set of questions. Answer them in order, as
+flowing prose under the section's header — not as a Q&A list, and never
+restate a question. Some questions are answered from the data supplied;
+others draw on your own knowledge of keyline design and regenerative
+practice. Answer both kinds fully, but never present judgment as though
+the data established it.
 
-4. FARM ROADS. When ROAD NETWORK data is provided below (a single road NETWORK grown
-   outward from the property's real, chosen access point by a coverage-greedy router,
-   hard-screened against the single selected water-system zone and grade, with
-   floodplain/hydric ground and production land as soft cost penalties — see that data's
-   own notes for exactly how it stopped), narrate FROM that network. This is ONE network,
-   not a set of ranked candidate routes to compare or name/rank — describe the trunk
-   branch as the recommended road (its own length/grade/newly-served acreage), and state
-   the network's total length and total served acreage plainly. A short spur off the
-   trunk is real geometry, not a separate corridor — mention it in proportion to its own
-   numbers (a few-foot stub genuinely is a minor detail, not "additional access"); do not
-   inflate it into language implying it opens up new access on its own. When a spur
-   serves the water-system zone sited in step 3 rather than production ground, say so
-   plainly — that is what it is for. State the router's own stopping reason honestly,
-   using the specific sentence supplied with the data (further road not justified by
-   remaining acreage, all identified ground reached, no production area to serve, or
-   ground identified but unreachable given terrain/exclusions) — do not soften or omit
-   it. If no network data is available for this property (or the router found nothing at
-   all to build), fall back to describing routing that would follow the ridge or contour
-   lines from step 2 and avoid the water infrastructure/catchments from step 3, and say
-   plainly that this is an unverified topographic suggestion, not a placement backed by
-   computed network geometry. A branch MAY cross a production zone from step 2 — the
-   data marks this per branch, and it's a real, valid routing option
-   (a road is a thin linear feature, not a large permanent land claim), not something to
-   flag as a problem; only note it as a genuine tradeoff (interrupted field
-   access/operations) where it's actually material, not as a blanket caveat on every
-   crossing branch. Note that no surveyed parcel or easement data feeds this step
-   regardless of which path was used. Soil (including erosion-prone SSURGO K-factor
-   ground) is deliberately NOT considered here at all — it belongs to step 8, below this
-   one in the Scale of Permanence ordering. Trees, structures, and subdivision fencing
-   (steps 5-7) are decided AFTER this step and must not be described as having
-   constrained this network's routing — if a genuine spatial relationship between the
-   road and a later-step feature is worth naming, save it for that later step's own
-   section, which already carries the constraint forward from here.
+- Address the reader directly as "you."
+- Refer to features by the map legend's own names: Keypoint Candidates,
+  Production Areas, Water System Survey Area, Suggested Road Corridor,
+  Tree Crop Areas, Permanent Building Site, Fencing. Where several
+  features share a class, distinguish them using computed values only —
+  size, elevation, position, distance. Never coin a place name and never
+  assert a spatial relationship the data doesn't contain.
+- Where a question asks generally about a design element, answer in a
+  sentence or two and tie it to this property. These are orientation for
+  the reader, not lessons.
+- Never revisit or second-guess a decision an earlier section made.
+- Do not restate the data blocks. Use the figures that carry your
+  reasoning and leave the rest.
+- Report all measurements in feet, acres, inches, and °F.
+- Where an analysis found nothing, say so and explain why to the extent
+  the data gives a reason. You may then recommend approaches — kinds of
+  intervention suited to this property — but never place them. Placement
+  requires computed geometry; judgment about approach is yours.
+- The whole report must stay under 3,500 words. Most sections should
+  land between 250 and 400 words. Write tightly: use the figures that
+  carry your reasoning, don't restate a point for emphasis, and don't
+  summarize a section at its own end.
 
-5. TREES (windbreaks, riparian buffers). Use Climate's prevailing wind (step 1) for
-   windbreak orientation and Water Supply's stream/pond locations (step 3) for riparian
-   buffer needs. When TREE ZONE CANDIDATE data is provided below (computed, ranked
-   patches of leftover, non-claimed ground scored for tree suitability, with each
-   patch's own factor figures), use it as the concrete basis for where new tree
-   plantings could go — refer to the ranked zones and their own figures, and assign each
-   a plausible function (windbreak, riparian buffer) from the wind/water context, since
-   the data deliberately doesn't. Check placement against the production zones (step 2)
-   and road corridors (step 4) so tree lines reinforce rather than block them. Be
-   explicit that the NDVI "high vigor vegetation" reading cannot confirm existing tree
-   canopy (see the imagery note below) — treat any tree-placement recommendation here as
-   a new proposal, not a validation of vegetation already on site.
+SECTIONS — write all ten, in this order, each under its own header.
+Answer every question in each.
 
-6. PERMANENT BUILDINGS. Recommend where structures could plausibly go, and just as
-   important, rule out any zone already claimed by earlier steps: production land from
-   step 2, water-storage or drainage areas from step 3, and road or tree corridors from
-   steps 4-5. State clearly that no building-code, setback, or utility-access data feeds
-   this step — it is a land-suitability read only, not a permitting-ready siting. When
-   SOLAR STRUCTURE CANDIDATE data is provided below (the SELECTED, rank-1 candidate site
-   for a small, fixed-footprint structure — a barn or shed with rooftop panels, not a
-   ground-mounted array — already screened for slope, aspect, shading, and road
-   proximity), use it as the concrete basis for the solar siting discussion: describe
-   that site from its own measured figures (position, slope, facing, factor scores)
-   rather than inventing a different one. The site MAY sit inside or right at the edge
-   of a production zone — production_zone_relationship reports this, and proximity to a
-   production zone's edge is scored as a real preference (a small structure can coexist
-   with production land), not something to apologize for or treat as a conflict; only
-   flag it as a tradeoff if the site ALSO carries a prime-farmland conflict (solar value
-   vs. agricultural value of that specific land) — present that explicitly rather than
-   silently picking a side. Present the site as the computed best of the ranked
-   candidates considered, and as a starting point to ground-truth, not a forced final
-   placement.
+1. Introduction
+   What is the purpose of this report?
+   What are keyline design and the Scale of Permanence as they relate to
+   this report?
+   What process was used to determine the layout?
+   No data block backs this section. State plainly that this is desk
+   analysis from public geospatial data, not a site visit.
 
-7. SUBDIVISION FENCES. When STREAM EXCLUSION / PERIMETER FENCING data is provided below
-   (fencing.py: buffered NHD stream geometry for livestock-exclusion fencing, and the
-   property boundary itself for perimeter fencing), lead with those two as REAL COMPUTED
-   GEOMETRY — reference them directly (by label/source_feature_id), state the stream
-   exclusion buffer distance used, and don't re-derive or second-guess their geometry.
-   Perimeter fencing is geometry only — do NOT recommend a fence type, height, or
-   material for it; that is explicitly out of scope.
+2. Climate
+   What key climate elements define this property and its local area?
+   What should the reader carry forward while reading the rest of this
+   report?
+   What are the major climate threats to be aware of?
 
-   Everything else in this section has NO computed geometry behind it and must be
-   framed as narrative-only guidance, explicitly:
+3. Landform
+   Generally, how does landform influence the design of a farm?
+   Generally, how can keypoints be used to serve a farm?
+   What is this property's elevation range and relief, and what does
+   that mean for working it?
+   Which Keypoint Candidates are relevant to this report, and where are
+   they on the map?
+   What makes the selected Production Areas suitable for production?
+   What should the reader do next with this?
 
-   - POND/WATER ZONE EXCLUSION FENCING: if a WATER SYSTEM CANDIDATE ZONE was identified
-     in step 3, note that once a pond/dam is actually sited within it (a future
-     capability this tool doesn't yet perform), exclusion fencing around it would
-     follow — but the candidate zone itself is a band, not a sited feature, and is too
-     imprecise to responsibly draw a fence line around today. Frame this as a future
-     consideration, not a current recommendation, and don't describe specific fence
-     geometry around the candidate zone.
+   Keypoints are flags, not conclusions — nothing else on this property
+   was sited with reference to one. A keypoint sitting below a water
+   opportunity is where a keyline dam wall would go, and warrants that
+   reading rather than dismissal as a downstream point.
 
-   - TREE CROP/WINDBREAK EXCLUSION FENCING: same treatment — if step 5 proposed a
-     windbreak or tree line, note that exclusion fencing around it would make sense
-     once that planting is actually placed on the ground, but not before.
+4. Water System Survey Area
+   What is a water system in the context of this report?
+   Where is the Water System Survey Area on the map?
+   Why is this area conducive for a water system?
+   How does it serve the farm?
+   Are there other water systems worth considering for supplemental
+   supply? (Judgment — no data backs this. Approaches only, never
+   placement.)
+   What should the reader do next with this?
 
-   - SUBDIVISION/ROTATIONAL FENCING: reason in prose about where it would logically
-     run, referencing the ridge/valley delineation, production zones, and other
-     structured context from steps 2-6 by name (e.g. "following the ridge separating
-     the western and eastern production zones"). This MUST be explicitly conditional —
-     do not assume livestock are part of the operation. Use framing like "if livestock
-     are part of your operation, subdivision fencing would logically follow [feature] —
-     but paddock sizing and layout depend on herd type and stocking rate, which this
-     report doesn't currently account for." Do NOT generate specific paddock sizes,
-     paddock counts, or rotation schedules.
+   This is a survey area, not a pond footprint. The area drawn is where
+   opportunity is best, not the size of any structure.
 
-   No legal parcel or ownership-boundary data feeds this step, for any of the above.
+5. Suggested Road Corridor
+   Generally, what purpose does this element serve?
+   How was the suggested route determined?
+   How much access does it provide to the farm?
+   What should the reader do next with this?
 
-8. SOIL — reasoned about last, and treated as the most changeable and most improvable
-   factor, not as a reason to exclude land already zoned in steps 2-7. Bring in the
-   SSURGO soil data here, cross-referenced against the NDVI imagery per the imagery note
-   below. Frame the section around how soil fertility and drainage can be built and
-   managed WITHIN the zones and infrastructure already decided — cover cropping,
-   drainage work, organic matter, animal impact — rather than revisiting or vetoing
-   where production land, water, roads, trees, buildings, or fences were placed above.
+   This is one network grown from the property's real access point, not
+   a set of options. Report network-level figures; do not enumerate
+   every branch or list every grade.
 
-Before each section from step 2 onward, open with a short sentence naming the specific
-constraint(s) it inherits from the prior steps, then give that section's own findings
-and recommendations. This carry-forward reasoning must be visible in the output, not
-just implicit in your internal thinking.
+6. Tree Crop Areas
+   Generally, how can trees benefit the farm?
+   What types of tree crop should be considered given this farm's
+   location and these areas' characteristics? (Judgment — species and
+   enterprise types are yours to recommend. Placing anything beyond the
+   drawn areas is not.)
+   How were the Tree Crop Areas determined?
+   How do they integrate with the earlier KSOP elements?
+   What should the reader do next with this?
 
-Note on imagery/land cover data specifically: NDVI-based land cover findings are a
-snapshot from a single satellite pass and must always be cross-referenced against the
-SSURGO soil drainage data rather than read on their own — the same "bare ground"
-reading means very different things depending on what's underneath it. Bare or
-degraded patches sitting on poorly-drained soil map units suggest seasonal
-waterlogging, compaction, or ponding that's suppressing growth; the same bare
-patches over well-drained soil more likely point to erosion, overgrazing, or simply
-disturbed/exposed subsoil. Don't diagnose a cause from the imagery alone — use the
-soil data to narrow down which explanation fits, and flag it as a hypothesis worth
-walking the ground to confirm, not a certainty. Also note how current the scene is
-(days since capture) — a reading from many months ago is a weaker basis for
-conclusions than a recent one, especially outside the growing season.
+7. Permanent Building Site
+   What does this area indicate?
+   Where is it on the map?
+   What are the benefits of placing a permanent building here?
+   What should the reader do next with this?
 
-Critically, the "high vigor vegetation" bucket in this data is an NDVI reading only —
-NDVI measures photosynthetic activity, not vegetation type or height, and cannot tell
-a lush hayfield or thick pasture apart from mature tree canopy. Do NOT assert or imply
-that this bucket represents forest, woodland, or tree cover — a property that is
-entirely open, actively-grazed or hayed farmland can and does score high in this
-bucket during peak growing season. If the report needs to say anything about the
-presence of woody/forest cover specifically, note explicitly that this dataset can't
-establish that, and that ground-truthing (a site visit) or higher-resolution/multi-
-season imagery would be needed to distinguish vigorous open pasture from tree canopy.
+   Include a rooftop solar viability read from the irradiance data. The
+   site is placed on the Suggested Road Corridor by design — do not
+   report its distance to a road as a finding.
 
-DATA HONESTY: Farm Roads has a real, routed road NETWORK (step 4) when the router
-produced one; Permanent Buildings has real candidate-zone geometry for
-solar siting specifically (step 6), but nothing else about building placement;
-Subdivision Fences has real computed geometry for STREAM EXCLUSION and PERIMETER
-fencing specifically (step 7), but nothing else in that section — pond/water exclusion,
-tree crop/windbreak exclusion, and subdivision/rotational fencing are all narrative-only
-there, reasoned from structured context established in earlier steps rather than their
-own computed geometry (see step 7's guidance above for exactly how to frame each). When
-reasoning about parts of these sections that AREN'T backed by real candidate geometry
-(non-solar building siting, Farm Roads when no network data was available, or
-any Subdivision Fences content besides stream exclusion/perimeter), say plainly that no
-dedicated infrastructure/parcel/zoning data exists there, rather than inventing a
-specific-sounding recommendation the data can't support (an exact building footprint, a
-precise fence-post count, a named legal easement, a specific paddock count). This is a
-first-pass analysis from public data, not a substitute for walking the land or a
-professional site visit.
+8. Fencing
+   Generally, what purpose does a fence serve on a farm?
+   Which areas need fencing, and why?
+   What subdivision fencing approaches would suit this operation?
+   What next steps should be taken?
 
-OUTPUT STRUCTURE: Write the report as eight sections, in exactly this order, each under
-its own header: Climate, Land Shape, Water Supply, Farm Roads, Trees, Permanent
-Buildings, Subdivision Fences, Soil. Write in clear, direct prose within each section.
-Avoid hedging on every sentence, but do flag genuine uncertainty where the data is thin
-or ambiguous."""
+   No computed geometry backs this section and none is supplied. Reason
+   from what the earlier sections established. Make no geometric claims.
+
+9. Soil
+   What are this property's soil characteristics?
+   How can the upstream KSOP elements improve the soil?
+   What soil-building practices can be integrated into this plan?
+   What next steps should be taken?
+
+   Cross-reference the soil survey against the land cover reading. Do
+   not use soil to revisit where anything above was placed.
+
+10. Summary
+    What are the key findings from this report?
+    What farming enterprises might suit this property?
+    Where should the reader start?
+
+    Ground any enterprise ideas in what the sections above established."""
+
+
+# Unit conversions applied at the formatter boundary only -- the report
+# narrates imperial (feet, acres, inches, degF) while everything upstream
+# stays metric. The KSOP narrative_data blocks already arrive imperial,
+# converted at their own source modules; these two constants cover the raw
+# layers (climate, elevation, keypoints) this module formats itself.
+_FEET_PER_METER = 1.0 / 0.3048
+_MM_PER_INCH = 25.4
+
+
+def _celsius_to_fahrenheit(celsius: float) -> float:
+    return round(celsius * 9.0 / 5.0 + 32.0, 1)
+
+
+def _locative_descriptor(centroid, boundary_polygon_utm) -> str:
+    """
+    Cardinal descriptor for where a feature sits within the parcel --
+    "northwest", "north-central", "east-central", "central", etc.: the
+    parcel boundary's bounding box is split into thirds on each axis and
+    the feature's centroid named by the cell it lands in. The map legend
+    labels feature CLASSES, not individual features, so position is the
+    only way the narrative can distinguish two features of the same
+    class. Both geometries must share a projected (meters) CRS. A
+    centroid slightly outside the bounding box (e.g. an off-parcel
+    keypoint within the detection margin) is clamped to the nearest edge
+    cell rather than rejected.
+    """
+    minx, miny, maxx, maxy = boundary_polygon_utm.bounds
+    fraction_x = (centroid.x - minx) / (maxx - minx) if maxx > minx else 0.5
+    fraction_y = (centroid.y - miny) / (maxy - miny) if maxy > miny else 0.5
+    column = min(2, int(max(0.0, min(1.0, fraction_x)) * 3))
+    row = min(2, int(max(0.0, min(1.0, fraction_y)) * 3))
+    north_south = ("south", "", "north")[row]  # UTM +y is north
+    east_west = ("west", "", "east")[column]
+    if north_south and east_west:
+        return north_south + east_west
+    if north_south:
+        return north_south + "-central"
+    if east_west:
+        return east_west + "-central"
+    return "central"
 
 
 def _format_soil_summary(soil_components: list[dict]) -> str:
@@ -251,22 +239,22 @@ def _format_soil_summary(soil_components: list[dict]) -> str:
 
 
 def _format_elevation_summary(elevation_grid: list[dict]) -> str:
+    """Elevation range and relief only, in feet. The per-point coordinate
+    dump this used to include (so the model could infer slope direction
+    from raw grid points) is deliberately gone: production_area_ceiling's
+    narrative block now carries real per-patch slope/aspect/position
+    figures, so the raw dump was redundant and invited spatial inference
+    the data doesn't support."""
     if not elevation_grid:
         return "No elevation data available."
 
     elevations = [pt["elevation"] for pt in elevation_grid]
-    min_e, max_e = min(elevations), max(elevations)
-
-    # Include a handful of raw points with coordinates so Claude can reason
-    # about direction of slope, not just min/max.
-    sample_lines = [
-        f"  ({pt['latitude']:.5f}, {pt['longitude']:.5f}): {pt['elevation']:.1f}m"
-        for pt in elevation_grid
-    ]
+    min_ft = round(min(elevations) * _FEET_PER_METER)
+    max_ft = round(max(elevations) * _FEET_PER_METER)
 
     return (
-        f"Elevation range: {min_e:.1f}m to {max_e:.1f}m (relief: {max_e - min_e:.1f}m)\n"
-        f"Grid sample points (latitude, longitude): elevation:\n" + "\n".join(sample_lines)
+        f"Elevation range: {min_ft}ft to {max_ft}ft (total relief: {max_ft - min_ft}ft) "
+        f"across {len(elevation_grid)} sample points."
     )
 
 
@@ -289,19 +277,23 @@ def _format_water_summary(water_features: dict) -> str:
 
 
 def _format_climate_summary(climate: Optional[dict]) -> str:
+    """Imperial at this boundary (inches, degF) -- climate_data.py stays
+    metric; the conversion happens here, once, at the formatter."""
     if not climate:
         return "No climate data available."
 
     return (
         f"Prevailing wind direction: {climate['prevailing_wind_direction']} "
         f"({climate['prevailing_wind_direction_degrees']}\u00b0)\n"
-        f"Average annual precipitation: {climate['avg_annual_precipitation_mm']} mm\n"
+        f"Average annual precipitation: "
+        f"{round(climate['avg_annual_precipitation_mm'] / _MM_PER_INCH, 1)} in\n"
         f"Heaviest recorded single-day rainfall (last {climate['years_analyzed']} yrs): "
-        f"{climate['max_daily_precipitation_mm']} mm\n"
-        f"Average high/low temperature: {climate['avg_high_temp_c']}\u00b0C / "
-        f"{climate['avg_low_temp_c']}\u00b0C\n"
+        f"{round(climate['max_daily_precipitation_mm'] / _MM_PER_INCH, 1)} in\n"
+        f"Average high/low temperature: {_celsius_to_fahrenheit(climate['avg_high_temp_c'])}\u00b0F / "
+        f"{_celsius_to_fahrenheit(climate['avg_low_temp_c'])}\u00b0F\n"
         f"Record high/low temperature (last {climate['years_analyzed']} yrs): "
-        f"{climate['record_high_temp_c']}\u00b0C / {climate['record_low_temp_c']}\u00b0C"
+        f"{_celsius_to_fahrenheit(climate['record_high_temp_c'])}\u00b0F / "
+        f"{_celsius_to_fahrenheit(climate['record_low_temp_c'])}\u00b0F"
     )
 
 
@@ -370,22 +362,21 @@ def _format_water_candidate_zones_summary(water_narrative: Optional[dict]) -> st
     return "\n".join(lines)
 
 
-def _format_keypoints_summary(keypoints: Optional[list[dict]]) -> str:
+def _format_keypoints_summary(
+    keypoints: Optional[list[dict]], boundary_polygon_utm=None
+) -> str:
     """Formats keypoint_detection.detect_keypoints()'s per-valley keypoint
     list (the inflection in each primary valley's long profile -- see that
     module) into a plain, factual data block, the same register as every
     other _format_*_summary() here: measured values only, no narrative.
+    WIRED into the report prompt (the Landform section names Keypoint
+    Candidates). Imperial at this boundary (feet) -- keypoint dicts stay
+    metric; the conversion happens here, once.
 
-    READY-TO-WIRE, NOT YET WIRED. generate_scale_of_permanence_report()
-    accepts and carries the keypoint list, and this helper turns it into
-    report-prompt text, but that text is deliberately NOT yet injected into
-    the LLM prompt: the reviewer has not decided the narrative wording (or
-    which Scale-of-Permanence section keypoints belong in) yet, and this
-    module must not invent it. This helper is the staged seam -- once the
-    reviewer decides, wiring it in is a one-line addition to the
-    generate_scale_of_permanence_report() data_summary. Kept a pure,
-    independently-testable dict-to-string function meanwhile (see
-    test_report_generator.py)."""
+    boundary_polygon_utm (the parcel polygon in the DEM's own projected
+    CRS -- the same CRS each keypoint's 'point_utm' is in) enables the
+    per-keypoint cardinal position via _locative_descriptor(); when it is
+    None the position clause is simply omitted, never invented."""
     if not keypoints:
         return (
             "No keypoints detected on this property (no primary valley's long "
@@ -397,10 +388,14 @@ def _format_keypoints_summary(keypoints: Optional[list[dict]]) -> str:
         location = (
             "on parcel"
             if k["on_parcel"]
-            else f"~{round(k['distance_outside_boundary_m'])} m outside the boundary"
+            else f"~{round(k['distance_outside_boundary_m'] * _FEET_PER_METER)} ft outside the boundary"
         )
+        position_clause = ""
+        if boundary_polygon_utm is not None and k.get("point_utm") is not None:
+            position_clause = f"in the parcel's {_locative_descriptor(k['point_utm'], boundary_polygon_utm)}, "
         lines.append(
-            f"  - Keypoint {k['id']} (valley {k['valley_id']}): {k['elevation_m']} m elevation, "
+            f"  - Keypoint {k['id']} (valley {k['valley_id']}): {position_clause}"
+            f"{round(k['elevation_m'] * _FEET_PER_METER, 1)} ft elevation, "
             f"{k['contributing_acres']} ac contributing catchment, slope drop "
             f"{k['slope_drop_pct']}% ({k['slope_above_pct']}% above -> {k['slope_below_pct']}% below), "
             f"{location}."
@@ -412,6 +407,36 @@ def _format_keypoints_summary(keypoints: Optional[list[dict]]) -> str:
         "treat each as a starting point to walk and ground-truth, not a final siting."
     )
     return "\n".join(lines)
+
+
+def _format_irradiance_summary(irradiance: Optional[dict]) -> str:
+    """Formats parcel_data.ParcelData.irradiance (irradiance_data.
+    get_regional_irradiance_baseline()'s own dict -- its 'status' key says
+    whether the numbers are real) for the report prompt: the rooftop solar
+    viability read the Permanent Building Site section asks for. WIRED
+    now; any non-'ok' status reads as honest no-data, never as a figure."""
+    if not irradiance or irradiance.get("status") != "ok":
+        return (
+            "No regional irradiance baseline available for this run — discuss rooftop "
+            "solar viability qualitatively, without quoting a production figure."
+        )
+
+    parts = [
+        "Regional PVWatts baseline: "
+        f"~{round(irradiance['annual_ac_kwh_per_kw'])} AC kWh per kW of installed capacity per year"
+    ]
+    if irradiance.get("avg_solar_radiation_kwh_per_m2_per_day") is not None:
+        parts.append(
+            f"average solar radiation {irradiance['avg_solar_radiation_kwh_per_m2_per_day']} kWh/m2/day"
+        )
+    if irradiance.get("capacity_factor_pct") is not None:
+        parts.append(f"capacity factor {irradiance['capacity_factor_pct']}%")
+    if irradiance.get("station_distance_miles") is not None:
+        parts.append(f"nearest reference weather station {irradiance['station_distance_miles']} miles away")
+    return (
+        "; ".join(parts) + ". This is parcel-scale regional context — irradiance barely varies "
+        "across a property this size, so it informs rooftop solar viability, not site choice."
+    )
 
 
 # One real sentence per stop_reason value a road narrative block can carry --
@@ -887,6 +912,7 @@ def generate_scale_of_permanence_report(
     parcel_acres: Optional[float] = None,
     production_areas_geojson: Optional[dict] = None,
     narrative_data: Optional[dict] = None,
+    boundary_polygon_utm=None,
 ) -> str:
     """
     Given the outputs of the data-fetching modules, generates a narrative
@@ -910,30 +936,20 @@ def generate_scale_of_permanence_report(
     the same for PERMANENT BUILDINGS' solar siting discussion.
 
     keypoints (keypoint_detection.detect_keypoints()'s per-valley list) is
-    carried through and STORED here, ready for the report, but deliberately
-    NOT yet injected into the LLM prompt: keypoint detection is a new,
-    KSOP-independent layer, and the reviewer has not decided the narrative
-    wording (or which Scale-of-Permanence section keypoints belong in) yet,
-    so writing that narration now would be inventing it. The factual data
-    block is available via _format_keypoints_summary(keypoints) (unit-tested
-    in test_report_generator.py); wiring it into data_summary below is a
-    one-line change the reviewer makes once the wording is decided. Passing
-    keypoints here changes nothing about the generated report today — it is
-    a forward-compatible seam, the same additive-override discipline every
-    other optional argument above follows.
+    now WIRED into the LLM prompt as the KEYPOINT CANDIDATES data block
+    (the Landform section reads it) -- the staged _format_keypoints_
+    summary() seam earlier branches carried is closed. boundary_polygon_
+    utm (the parcel polygon in the DEM's own projected CRS -- e.g.
+    pipeline_context.PipelineContext.boundary_polygon_utm) enables each
+    keypoint's cardinal position on the map (_locative_descriptor());
+    when None the positions are simply omitted, never invented.
 
     irradiance (parcel_data.ParcelData.irradiance -- get_regional_
-    irradiance_baseline()'s own dict, always present, 'status' key says
-    whether the numbers are real) is carried through and STORED here,
-    ready for the report, but deliberately NOT yet injected into the LLM
-    prompt: the reviewer has not decided the narrative wording (or which
-    Scale-of-Permanence section irradiance belongs in -- almost certainly
-    PERMANENT BUILDINGS, alongside the existing solar siting discussion,
-    but that's a content decision for later) yet, so writing that
-    narration now would be inventing it. Passing irradiance here changes
-    nothing about the generated report today -- it is a forward-compatible
-    seam, the same additive-override discipline keypoints already
-    established.
+    irradiance_baseline()'s own dict, 'status' key says whether the
+    numbers are real) is now WIRED into the LLM prompt as the SOLAR
+    IRRADIANCE data block -- the rooftop solar viability read the
+    Permanent Building Site section asks for. A non-'ok' status reads as
+    honest no-data.
 
     parcel_acres (pipeline_context.PipelineContext.parcel_acres --
     production_area_ceiling.py's own boundary_polygon_utm.area /
@@ -981,35 +997,46 @@ def generate_scale_of_permanence_report(
     # "no data available" text.
     narrative_data = narrative_data or {}
 
+    # Block headers use the map legend's own feature-class names (Keypoint
+    # Candidates, Production Areas, Water System Survey Area, Suggested
+    # Road Corridor, Tree Crop Areas, Permanent Building Site) so the
+    # narrative's references and the data blocks resolve to the same names
+    # a reader sees on the map.
     data_summary = f"""CLIMATE DATA:
 {_format_climate_summary(climate_summary)}
 
-SOIL DATA:
+SOIL DATA (SSURGO soil survey):
 {_format_soil_summary(soil_components)}
 
-ELEVATION DATA:
+ELEVATION (USGS):
 {_format_elevation_summary(elevation_grid)}
 
-PRODUCTION AREA CANDIDATES (DEM/soil/canopy-derived, ceiling-trimmed):
+PRODUCTION AREAS (computed candidates, ceiling-trimmed):
 {_format_production_areas_summary(narrative_data.get("production_area_ceiling"))}
 
-WATER FEATURES:
+KEYPOINT CANDIDATES (DEM-derived):
+{_format_keypoints_summary(keypoints, boundary_polygon_utm)}
+
+WATER FEATURES (mapped NHD streams/water bodies):
 {_format_water_summary(water_features)}
 
 SATELLITE IMAGERY / LAND COVER (NDVI-derived):
 {_format_imagery_summary(imagery_summary)}
 
-WATER SYSTEM CANDIDATE SURVEY AREA (drainage-based, DEM/LiDAR-derived):
+WATER SYSTEM SURVEY AREA (computed):
 {_format_water_candidate_zones_summary(narrative_data.get("water_candidate_zones"))}
 
-ROAD NETWORK (coverage-greedy cost routing from the real access point, DEM-derived):
+SUGGESTED ROAD CORRIDOR (computed network, grown from the real access point):
 {_format_road_corridor_summary(narrative_data.get("road_corridors"))}
 
-TREE ZONE CANDIDATES (leftover-land suitability, DEM/SSURGO/NHD-derived):
+TREE CROP AREAS (computed candidates):
 {_format_tree_zones_summary(narrative_data.get("tree_zone_candidates"))}
 
-SOLAR STRUCTURE CANDIDATE (selected site, DEM-derived):
-{_format_solar_candidate_zones_summary(narrative_data.get("solar_suitability"))}"""
+PERMANENT BUILDING SITE (computed, selected structure site):
+{_format_solar_candidate_zones_summary(narrative_data.get("solar_suitability"))}
+
+SOLAR IRRADIANCE (regional baseline):
+{_format_irradiance_summary(irradiance)}"""
 
     message = client.messages.create(
         model=MODEL,
