@@ -130,6 +130,44 @@ for feature in result["zones_geojson"]["features"]:
 print("All water system candidate zone features use layer='water_system_candidate' with polygon geometry.")
 
 
+# --- narrative_data: attached by the entry point, purely additive ---
+#
+# Detailed value-level checks (units, rounding, the distance-0 gradient
+# None, position/percentile math) live in test_water_candidate_zones.py
+# against hand-built fixtures; this end-to-end check covers the WIRING:
+# the entry point attaches the block, adds no other key, and reports
+# figures consistent with the same result's own GeoJSON.
+import json  # noqa: E402
+
+_PRE_NARRATIVE_RESULT_KEYS = {"zones_geojson", "valleys_geojson", "production_areas_geojson"}
+assert _PRE_NARRATIVE_RESULT_KEYS <= set(result), (
+    "narrative_data must be PURELY ADDITIVE -- missing pre-existing key(s): "
+    f"{_PRE_NARRATIVE_RESULT_KEYS - set(result)}"
+)
+assert set(result) - _PRE_NARRATIVE_RESULT_KEYS == {"narrative_data"}, (
+    f"narrative_data must be the ONLY new top-level key -- got {set(result) - _PRE_NARRATIVE_RESULT_KEYS}"
+)
+_nd = result["narrative_data"]
+assert json.loads(json.dumps(_nd)) == _nd, "narrative_data must be json.dumps()-clean with no custom encoder"
+assert _nd["zone_found"] == (len(result["zones_geojson"]["features"]) == 1)
+assert _nd["production_area_count"] == len(result["production_areas_geojson"]["features"])
+# Canopy is fetch-or-raise on this path (stubbed to a clean fetch above),
+# and the road stub returned a real None ("checked, no roads found") --
+# both gates genuinely ran on this run.
+assert _nd["gates"] == {"canopy_data_available": True, "road_data_available": True}
+_zone_props = result["zones_geojson"]["features"][0]["properties"]
+assert _nd["zone"]["service"]["served_production_area_ids"] == _zone_props["served_production_area_ids"], (
+    "narrative_data must describe the SAME zone the GeoJSON reports"
+)
+assert _nd["zone"]["service"]["served_production_area_count"] == len(_zone_props["production_area_relationships"])
+print(
+    "narrative_data attached end-to-end: purely additive, json-clean, consistent with the same result's "
+    f"GeoJSON (zone in the parcel's {_nd['zone']['location']['position_in_parcel']}, "
+    f"{_nd['zone']['area_acres']} ac toward a {_nd['zone']['target_acres']} ac target, serving "
+    f"{_nd['zone']['service']['served_production_area_count']} production area(s))."
+)
+
+
 # --- boundary_polygon_utm / valleys / production_areas overrides ---
 #
 # identify_water_system_candidate_zones() now accepts boundary_polygon_utm,
