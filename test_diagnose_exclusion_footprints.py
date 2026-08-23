@@ -16,9 +16,10 @@ The fixtures use a 1 m x 1 m DEM so one cell is exactly one square metre
 and every acreage is exactly `cells / SQUARE_METERS_PER_ACRE` -- no
 rounding to reason about.
 
-The load-bearing check is the LAST one: that the acres-gained
-DISTRIBUTION actually separates the two cases the diagnostic exists to
-tell apart --
+Two checks carry most of the weight.
+
+The first is that the acres-gained DISTRIBUTION actually separates the two
+cases the diagnostic exists to tell apart --
 
     many pinholes absorbed  -> many tiny gained regions
     two regions merged      -> ONE large gained region
@@ -26,16 +27,30 @@ tell apart --
 -- because the gained TOTAL alone cannot distinguish them, which is
 precisely why the report prints the distribution.
 
+The second is that the SLOPE and SETBACK layers are disjoint BY
+CONSTRUCTION (the setback derivation requires slope_ok; the slope
+derivation requires ~slope_ok), and that together with slope_only_mask
+they exactly partition the on-parcel ground. That disjointness is why the
+setback figure is a lower bound on the real ring rather than a measurement
+of it, and an assertion is the only thing that would catch it if either
+derivation drifted.
+
 Run: python3 test_diagnose_exclusion_footprints.py
 """
 
 import numpy as np
 
 from diagnose_exclusion_footprints import (
+    _empty_layer_note,
+    _geojson_feature,
+    _layer_properties,
     _over_merge_read,
     closing_radius_cells,
     derive_setback_only_mask,
+    derive_slope_fail_mask,
+    derive_slope_ok,
     disc_closing,
+    layer_overlap_matrix,
     effective_radius_meters,
     footprint_metrics,
     gained_region_distribution,
@@ -472,6 +487,312 @@ for _gate_name in ("tree_root_zone_hit", "hydric_hit", "road_hit"):
 print(
     "  ...and no per-gate hit mask (canopy/hydric/road) ever contains a cell outside slope_only_mask, which "
     "is exactly why the ring is reported as UNEVALUATED rather than as 'setback only'."
+)
+
+
+# ---------------------------------------------------------------------------
+# 8. the SLOPE layer: derived from what STEP 1 applied, and disjoint from
+#    the setback layer by construction
+# ---------------------------------------------------------------------------
+
+# A ROLLING synthetic DEM -- a sinusoidal ripple steep enough that a real
+# fraction of the parcel fails a 20% slope gate in scattered bands. The
+# flat DEM used by check 7 above cannot exercise any of this: with nothing
+# failing slope, the slope layer is empty and every overlap is trivially
+# zero.
+_rows = _cols = 40
+_res = 5.0
+_yy, _xx = np.mgrid[0:_rows, 0:_cols]
+ROLLING_DEM = {
+    "array": (100.0 + 5.0 * np.sin(_yy / 5.0) * np.cos(_xx / 4.0)).astype(np.float32),
+    "resolution_meters": (_res, _res),
+    "origin_x": 600000.0,
+    "origin_y": 4500000.0,
+    "crs": "EPSG:32617",
+}
+_rx0 = ROLLING_DEM["origin_x"] + 5 * _res
+_rx1 = ROLLING_DEM["origin_x"] + 35 * _res
+_ry1 = ROLLING_DEM["origin_y"] - 5 * _res
+_ry0 = ROLLING_DEM["origin_y"] - 35 * _res
+ROLLING_PARCEL = Polygon([(_rx0, _ry0), (_rx1, _ry0), (_rx1, _ry1), (_rx0, _ry1)])
+
+rolling_step1 = compute_step1_eligible_cells(
+    ROLLING_DEM, ROLLING_PARCEL, max_slope_pct=20.0, boundary_setback_meters=10.0
+)
+rolling_on_parcel = on_parcel_mask(ROLLING_DEM, ROLLING_PARCEL)
+rolling_slope_fail = derive_slope_fail_mask(rolling_step1, rolling_on_parcel, max_slope_pct=20.0)
+rolling_setback = derive_setback_only_mask(rolling_step1, rolling_on_parcel, max_slope_pct=20.0)
+rolling_slope_ok = derive_slope_ok(rolling_step1, max_slope_pct=20.0)
+
+assert int(rolling_slope_fail.sum()) > 0, (
+    "the rolling fixture must actually produce slope-failing ground, or none of the checks below "
+    "mean anything"
+)
+assert bool((rolling_slope_fail & ~rolling_on_parcel).sum() == 0), (
+    "the slope layer must be confined to on-parcel ground"
+)
+assert bool((rolling_slope_fail & rolling_step1["slope_only_mask"]).sum() == 0), (
+    "slope-failing ground can never be in slope_only_mask -- that mask REQUIRES slope_ok"
+)
+
+# THE OVERLAP CLAIM, TESTED. The slope and setback layers are disjoint by
+# construction: setback requires slope_ok, slope requires ~slope_ok. This
+# is the assertion that would catch it if either derivation ever changed
+# such that they started sharing ground.
+assert bool((rolling_slope_fail & rolling_setback).sum() == 0), (
+    "slope and setback must be DISJOINT: derive_setback_only_mask() requires slope_ok and "
+    "derive_slope_fail_mask() requires ~slope_ok, so ring ground that also fails slope is "
+    "attributed wholly to slope -- which is exactly why the setback figure is a LOWER BOUND "
+    "on the real ring"
+)
+
+# ...and the three groups exactly PARTITION the on-parcel ground: every
+# on-parcel cell is either slope-failing, in the setback ring, or inside
+# slope_only_mask. Nothing is double-counted and nothing is missed.
+_partition = rolling_slope_fail | rolling_setback | (rolling_step1["slope_only_mask"] & rolling_on_parcel)
+assert bool((_partition ^ rolling_on_parcel).sum() == 0), (
+    "slope-fail, setback-ring and slope_only_mask must exactly partition the on-parcel cells"
+)
+
+print(
+    f"derive_slope_fail_mask(): on a rolling synthetic DEM, the slope layer is "
+    f"{int(rolling_slope_fail.sum())} cells vs the setback layer's {int(rolling_setback.sum())}, they "
+    "share ZERO cells (disjoint by construction, not by luck), and together with slope_only_mask they "
+    "exactly partition the on-parcel ground."
+)
+
+# The derivation must follow the max_slope_pct the run was GIVEN, not the
+# module constant -- otherwise --max-slope-pct would silently report a
+# layer that disagrees with the STEP 1 run beside it.
+_relaxed = derive_slope_fail_mask(rolling_step1, rolling_on_parcel, max_slope_pct=60.0)
+_strict = derive_slope_fail_mask(rolling_step1, rolling_on_parcel, max_slope_pct=5.0)
+assert int(_relaxed.sum()) < int(rolling_slope_fail.sum()) < int(_strict.sum()), (
+    "relaxing max_slope_pct must shrink the slope layer and tightening it must grow it; got "
+    f"{int(_relaxed.sum())} / {int(rolling_slope_fail.sum())} / {int(_strict.sum())}"
+)
+print(
+    f"  ...and it tracks the max_slope_pct the run was GIVEN, not the module constant: "
+    f"{int(_strict.sum())} cells at 5%, {int(rolling_slope_fail.sum())} at 20%, {int(_relaxed.sum())} at 60%."
+)
+
+
+# ---------------------------------------------------------------------------
+# 9. the overlap matrix, against layers built to overlap
+# ---------------------------------------------------------------------------
+
+# canopy/hydric/road DO overlap each other -- one cell can be both wooded
+# and hydric. That is the pair a summed "total excluded" figure would
+# double-count, and the matrix has to surface it.
+_a = _blank()
+_a[5:15, 5:15] = True          # 100 cells
+_b = _blank()
+_b[10:20, 10:20] = True        # 100 cells, overlapping _a on rows/cols 10..14
+_c = _blank()
+_c[30:35, 30:35] = True        # 25 cells, disjoint from both
+
+overlaps = layer_overlap_matrix(UNIT_DEM, [("a", _a), ("b", _b), ("c", _c)])
+overlap_by_pair = {(x, y): v for x, y, v in overlaps}
+
+assert len(overlaps) == 3, f"three layers make three pairs, got {len(overlaps)}"
+assert _close(overlap_by_pair[("a", "b")], 25 * ACRE_PER_CELL), (
+    f"a and b share a 5x5 block == 25 cells, got {overlap_by_pair[('a', 'b')]}"
+)
+assert _close(overlap_by_pair[("a", "c")], 0.0)
+assert _close(overlap_by_pair[("b", "c")], 0.0)
+
+# The whole point: the naive sum exceeds the true union by exactly the
+# double-counted overlap.
+_naive_sum = (100 + 100 + 25) * ACRE_PER_CELL
+_union_acres = int((_a | _b | _c).sum()) * ACRE_PER_CELL
+assert _close(_naive_sum - _union_acres, 25 * ACRE_PER_CELL), (
+    "the gap between the naive sum and the real union must equal the overlap -- this is the "
+    f"figure the report prints to make 'do not sum these' checkable; got {_naive_sum - _union_acres}"
+)
+print(
+    f"layer_overlap_matrix(): three layers with one hand-built 25-cell overlap report it exactly, and "
+    f"the naive sum ({_naive_sum:.6f} ac) exceeds the true union ({_union_acres:.6f} ac) by precisely "
+    "that overlap."
+)
+
+
+# ---------------------------------------------------------------------------
+# 10. the three eligible forms differ in the way the report claims
+# ---------------------------------------------------------------------------
+
+# Built directly from the rolling fixture: FORM A omits slope entirely,
+# FORM B subtracts raw (unclosed) slope, FORM C subtracts the CLOSED slope
+# layer along with everything else.
+_closed_setback = disc_closing(rolling_setback, 1)
+_closed_slope = disc_closing(rolling_slope_fail, 1)
+
+form_a = rolling_on_parcel & ~_closed_setback
+form_b = form_a & rolling_slope_ok
+form_c = rolling_on_parcel & ~(_closed_setback | _closed_slope)
+
+assert int(form_a.sum()) > int(form_c.sum()), (
+    "FORM A does not subtract slope at all, so it must be strictly larger than FORM C, which does -- "
+    "that difference IS the steep ground FORM A would hand the user"
+)
+assert bool((form_c & ~form_a).sum() == 0), "FORM C must be a subset of FORM A"
+assert bool((form_c & rolling_slope_fail).sum() == 0), (
+    "FORM C must contain no slope-failing ground at all"
+)
+assert bool((form_b & rolling_slope_fail).sum() == 0), "nor must FORM B"
+
+# B vs C: C subtracts the CLOSED slope layer, so it can only be smaller
+# than or equal to B -- and strictly smaller whenever the closing gained
+# anything, which is the entire reason FORM C exists.
+assert bool((form_c & ~form_b).sum() == 0), (
+    "FORM C subtracts a closed (extensive) slope layer where FORM B subtracts the raw one, so C "
+    "must be a subset of B"
+)
+_slope_closing_gain = int((_closed_slope & ~rolling_slope_fail).sum())
+assert int(form_b.sum()) - int(form_c.sum()) == int(
+    (rolling_on_parcel & _closed_slope & ~rolling_slope_fail & ~_closed_setback).sum()
+), "the B-to-C difference must be exactly the on-parcel ground the slope closing newly excluded"
+
+print(
+    f"the three eligible forms: FORM A {int(form_a.sum())} cells (slope not subtracted) > "
+    f"FORM B {int(form_b.sum())} (raw slope subtracted) >= FORM C {int(form_c.sum())} (closed slope "
+    f"subtracted); A - C == {int(form_a.sum()) - int(form_c.sum())} cells of steep ground FORM A "
+    f"would hand the user, and the slope closing itself gained {_slope_closing_gain} cells."
+)
+
+# The rolling fixture's steep bands are solid, so its slope closing gains
+# nothing and B == C there -- which demonstrates the ordering but not the
+# REASON FORM C exists. A pinholed slope layer, built directly, shows the
+# strict case: the closing absorbs the pinholes, and every absorbed pinhole
+# is a hole FORM B would still be carrying.
+pinholed_slope = _blank()
+pinholed_slope[5:25, 5:25] = True
+for _r, _c in [(10, 10), (10, 18), (18, 10), (18, 18)]:
+    pinholed_slope[_r, _c] = False
+pinholed_parcel = _blank()
+pinholed_parcel[0:40, 0:40] = True
+
+pinholed_closed = disc_closing(pinholed_slope, 1)
+pinholed_form_b = pinholed_parcel & ~pinholed_slope
+pinholed_form_c = pinholed_parcel & ~pinholed_closed
+
+assert int(pinholed_form_b.sum()) - int(pinholed_form_c.sum()) == 4, (
+    "the four absorbed pinholes are exactly the cells FORM C excludes and FORM B does not; got "
+    f"{int(pinholed_form_b.sum()) - int(pinholed_form_c.sum())}"
+)
+b_metrics = footprint_metrics(UNIT_DEM, pinholed_form_b)
+c_metrics = footprint_metrics(UNIT_DEM, pinholed_form_c)
+
+# NOTE THE TOPOLOGY, which is not what "holes" suggests. A pinhole in an
+# EXCLUSION layer does not become a hole in the eligible layer -- it
+# becomes a stranded one-cell ISLAND of selectable ground, marooned inside
+# the excluded region. So the figure it inflates is the POLYGON COUNT, not
+# the hole count: FORM B is the surrounding frame plus 4 one-cell specks
+# (5 polygons); FORM C is the frame alone (1 polygon). Both keep the single
+# real hole where the block sits.
+#
+# For an interactive frontend that is the worse of the two failure modes:
+# a hole is ground the user cannot select, but a one-cell island is ground
+# they CAN select and should not be able to -- a speck of "eligible" land
+# in the middle of a steep region.
+assert b_metrics["polygon_count"] == 5, (
+    "FORM B is the frame plus one stranded island per unclosed pinhole; got "
+    f"{b_metrics['polygon_count']}"
+)
+assert c_metrics["polygon_count"] == 1, (
+    f"FORM C absorbs the pinholes, leaving the frame alone; got {c_metrics['polygon_count']}"
+)
+assert b_metrics["hole_count"] == c_metrics["hole_count"] == 1, (
+    "both forms keep the one real hole where the excluded block sits -- the pinholes were never "
+    "holes in the eligible layer to begin with"
+)
+assert c_metrics["exterior_vertex_count"] < b_metrics["exterior_vertex_count"], (
+    "dropping four stranded islands is a real transport saving, not just a cosmetic one"
+)
+print(
+    f"  ...and with a PINHOLED slope layer the reason FORM C exists is visible, though not in the "
+    f"figure the name suggests: an unclosed pinhole becomes a stranded one-cell ISLAND of selectable "
+    f"ground, not a hole. FORM B is {b_metrics['polygon_count']} polygons "
+    f"({b_metrics['exterior_vertex_count']} exterior vertices) -- a frame plus 4 specks a user could "
+    f"select in the middle of steep ground; FORM C is {c_metrics['polygon_count']} "
+    f"({c_metrics['exterior_vertex_count']} vertices), at a cost of exactly the 4 absorbed cells."
+)
+
+
+# ---------------------------------------------------------------------------
+# 11. GeoJSON: self-describing properties, and empty layers kept not dropped
+# ---------------------------------------------------------------------------
+
+empty_metrics = footprint_metrics(UNIT_DEM, _blank())
+assert empty_metrics["cell_count"] == 0
+
+# An empty layer must still produce a Feature -- with null geometry -- so a
+# reader can tell "this layer is genuinely empty" from "this layer was
+# dropped from the export".
+empty_feature = _geojson_feature(
+    UNIT_DEM,
+    empty_metrics["footprint"],
+    _layer_properties(
+        gate="existing farm roads",
+        boundary="fixture",
+        radius_m=5.0,
+        radius_cells=1,
+        layer_kind="exclusion",
+        metrics=empty_metrics,
+        note=_empty_layer_note(empty_metrics, available=True),
+    ),
+)
+assert empty_feature is not None, "an empty layer must NOT be silently dropped from the export"
+assert empty_feature["geometry"] is None, (
+    "an empty layer's feature carries null geometry (valid GeoJSON), not a fabricated shape"
+)
+assert empty_feature["properties"]["empty"] is True
+assert "checked and matched no cell" in empty_feature["properties"]["note"], (
+    f"a checked-but-empty layer must say so; got {empty_feature['properties'].get('note')!r}"
+)
+
+unchecked_note = _empty_layer_note(empty_metrics, available=False)
+assert "UNAVAILABLE" in unchecked_note and "NOT verified clean" in unchecked_note, (
+    "an empty layer whose input was never fetched must NOT read as an absence of the hazard; "
+    f"got {unchecked_note!r}"
+)
+assert _empty_layer_note(holes_metrics, available=True) == "", (
+    "a non-empty layer needs no note"
+)
+
+# Every property a reader needs to identify a shape on geojson.io without
+# opening this source.
+real_properties = _layer_properties(
+    gate="slope (derived)",
+    boundary="NEW reference boundary",
+    radius_m=10.0,
+    radius_cells=2,
+    layer_kind="exclusion",
+    metrics=holes_metrics,
+)
+for key in (
+    "gate",
+    "layer_kind",
+    "boundary",
+    "closing_radius_m",
+    "closing_radius_cells",
+    "acres",
+    "cell_count",
+    "polygon_count",
+    "hole_count",
+    "exterior_vertex_count",
+    "empty",
+):
+    assert key in real_properties, f"exported features must carry {key!r} to be self-describing"
+assert real_properties["closing_radius_m"] == 10.0 and real_properties["closing_radius_cells"] == 2, (
+    "the radius must travel in BOTH metres and cells -- they differ, and a reader cannot infer one "
+    "from the other without knowing the DEM resolution"
+)
+assert real_properties["empty"] is False
+
+print(
+    "GeoJSON export: empty layers are exported as null-geometry features carrying `empty: true` and a "
+    "note distinguishing 'checked, found nothing' from 'never checked' -- not silently dropped; every "
+    "feature carries gate, layer_kind, radius in both metres and cells, acres and the polygon/hole/"
+    "vertex counts."
 )
 
 

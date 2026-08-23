@@ -10,9 +10,9 @@ MORPHOLOGICAL CLOSING would do to each of them.
 WHY THIS EXISTS
 ---------------
 Production zone selection is being reconsidered as an interactive step:
-the frontend would show the user the parcel's EXCLUSION layers (canopy,
-hydric soil, existing farm roads, boundary setback) and let them pick
-production ground out of what is left. That needs each exclusion to be a
+the frontend would show the user the parcel's EXCLUSION layers (slope,
+canopy, hydric soil, existing farm roads, boundary setback) and let them
+pick production ground out of what is left. That needs each exclusion to be a
 coherent, readable polygon rather than a scatter of cells with pinholes
 in it -- hence the closing proposal (dilate then erode, disc element,
 applied PER GATE, so single-cell gaps inside an excluded region are
@@ -43,6 +43,42 @@ WHAT IT ANSWERS
    apart. Every radius reports the full gained-region size distribution.
 3. Whether the boundary setback is even a candidate for this, or is
    already a clean ring with no interior gaps.
+4. Whether the SLOPE layer -- the largest exclusion on both reference
+   boundaries, larger than canopy, hydric, roads and setback combined --
+   is scattered steep patches (which a closing would consolidate a great
+   deal) or one large steep region along a valley side (which a closing
+   would not touch, meaning the eligible layer's holes are simply real).
+
+--- WHY SLOPE IS A LAYER HERE ---
+
+Structurally slope is PRIOR to the other gates: it is half of what defines
+slope_only_mask, which canopy, hydric and road then operate within. An
+earlier version of this diagnostic reported only those four and treated
+slope as scenery, which made the headline result misleading -- closing the
+four barely moved the eligible layer's holes, and in the slope-intersected
+variant did not move them at all. The holes were slope, and slope was not
+being closed.
+
+From the user's point of view slope is not prior to anything; it is one
+more reason a piece of ground cannot be selected, and it is the dominant
+one. So it is reported as a fifth layer with exactly the same treatment as
+the other four: same footprint stats, same closing sweep, same over-merge
+reading, same GeoJSON export.
+
+    slope_fail = on_parcel & ~slope_ok
+
+derived from what STEP 1 APPLIED -- its returned 'slope_pct' and the
+max_slope_pct the run was actually given -- never from
+MAX_PRODUCTION_SLOPE_PCT, so the layer stays correct under
+--max-slope-pct.
+
+SLOPE AND SETBACK ARE DISJOINT BY CONSTRUCTION. The setback layer requires
+slope_ok; the slope layer requires ~slope_ok. Ring ground that also fails
+slope therefore lands wholly in the slope layer, which is exactly why the
+setback figure is a LOWER BOUND on the real ring. The pairs that DO
+overlap are canopy/hydric/road with each other. The report measures every
+pairwise overlap and prints it next to a naive sum, so the "do not add
+these up" caution is checkable rather than merely stated.
 
 --- STEP 0 FINDINGS (verified against the current source, not assumed) ---
 
@@ -113,7 +149,20 @@ here needs the full parcel fetch.
 
 Each gate fetch degrades gracefully and says so -- a gate whose fetch
 failed is reported as UNCHECKED, never as "clean". A run with a failed
-canopy fetch still produces real hydric/road/setback numbers.
+canopy fetch still produces real hydric/road/setback numbers, and the
+slope and setback layers need no fetch beyond the DEM at all.
+
+--- THE ELIGIBLE LAYER, IN THREE FORMS ---
+
+  FORM A  boundary - (four closed exclusions; slope NOT subtracted)
+  FORM B  FORM A intersected with the RAW, unclosed slope gate
+  FORM C  boundary - (all FIVE closed exclusions, slope included)
+
+FORM C is what a frontend would actually clamp against: every reason
+ground is unselectable, each consolidated by its own closing. A and B are
+each missing something -- A hands the user steep ground; B subtracts slope
+but leaves every scattered steep cell as an unclosed hole -- and are kept
+alongside C so the three can be compared directly.
 
 --- CLOSING RADIUS, IN CELLS ---
 
@@ -221,6 +270,12 @@ SMALL_HOLE_ACRES = 0.1
 # Gained-region size buckets, in acres, for the over-merge distribution.
 # Same status as SMALL_HOLE_ACRES: reporting only.
 GAIN_BUCKET_EDGES_ACRES = [0.05, 0.25, 1.0]
+
+# Layer labels used both as the printed gate heading and as the key the
+# eligible-layer section selects gates by, so the two can never drift apart.
+# Diagnostic-local, like every other constant in this file.
+SETBACK_GATE_LABEL = "boundary setback (derived)"
+SLOPE_GATE_LABEL = "slope (derived)"
 
 # The largest a gained region can be, IN CELLS, and still plausibly be an
 # absorbed pinhole rather than a bridge between two separate regions --
@@ -441,9 +496,76 @@ def derive_setback_only_mask(step1: dict, on_parcel: np.ndarray, max_slope_pct: 
     Recovers only the slope-CLEARING part of the ring; see the module
     docstring's KNOWN LIMIT.
     """
+    return on_parcel & derive_slope_ok(step1, max_slope_pct) & (~step1["slope_only_mask"])
+
+
+def derive_slope_ok(step1: dict, max_slope_pct: float) -> np.ndarray:
+    """
+    STEP 1's own slope gate, rebuilt from the 'slope_pct' array it returns
+    and the max_slope_pct it was actually CALLED with -- exactly the
+    expression compute_step1_eligible_cells() uses internally
+    (production_area.py:709). Not MAX_PRODUCTION_SLOPE_PCT: taking the
+    module constant would silently disagree with the run whenever
+    --max-slope-pct overrides it.
+    """
     slope_pct = step1["slope_pct"]
-    slope_ok = (~np.isnan(slope_pct)) & (slope_pct <= max_slope_pct)
-    return on_parcel & slope_ok & (~step1["slope_only_mask"])
+    return (~np.isnan(slope_pct)) & (slope_pct <= max_slope_pct)
+
+
+def derive_slope_fail_mask(step1: dict, on_parcel: np.ndarray, max_slope_pct: float) -> np.ndarray:
+    """
+    The slope exclusion footprint: on-parcel ground that FAILS the slope
+    gate. Derived the same way the setback layer is -- from what STEP 1
+    APPLIED (its returned 'slope_pct' plus the max_slope_pct passed to it),
+    never from the module constant.
+
+    Slope has no per-gate hit mask of its own for the same reason the
+    setback does not: both are folded into slope_only_mask as one combined
+    test. But unlike the setback, slope IS separable on its own, because
+    'slope_pct' is returned in full and the threshold is known.
+
+    WHY THIS IS A LAYER AT ALL. Structurally slope is PRIOR to the other
+    gates -- it is half of what defines slope_only_mask, which canopy,
+    hydric and road then operate within. That is a fact about the code. It
+    is not a fact about the user: to someone picking production ground out
+    of what is left, slope is simply one more reason a piece of ground is
+    not selectable, and on both reference boundaries it is the LARGEST such
+    reason -- bigger than canopy, hydric, roads and setback combined. A
+    per-gate exclusion view that omits it is not showing the user why most
+    of their unselectable ground is unselectable.
+
+    NOTE the nodata case: a cell whose slope_pct is NaN (no DEM coverage)
+    fails `slope_pct <= max_slope_pct` and so lands in this layer. That
+    matches what STEP 1 does -- such a cell is excluded from
+    slope_only_mask too -- but it means this layer is "fails or cannot be
+    evaluated for slope", not purely "too steep". On-parcel NaN slope is
+    reported separately in the layer-relationship section below so the two
+    are never confused.
+    """
+    return on_parcel & (~derive_slope_ok(step1, max_slope_pct))
+
+
+def layer_overlap_matrix(dem: dict, layers: list[tuple[str, np.ndarray]]) -> list[tuple[str, str, float]]:
+    """
+    Pairwise overlap acreage between every pair of exclusion layers.
+
+    This exists because the layers MUST NOT BE SUMMED, and prose saying so
+    is not checkable. Printing the measured pairwise overlap lets a reader
+    see exactly which pairs share ground and by how much, rather than
+    taking a comment's word for it. Same caution the narrative_data work
+    handles with its paired `*_excluded` / `*_only_excluded` figures.
+
+    Returns (layer_a, layer_b, overlap_acres) for every pair, in the order
+    given.
+    """
+    area_per_cell = cell_area_acres(dem)
+    pairs = []
+    for i in range(len(layers)):
+        for j in range(i + 1, len(layers)):
+            name_a, mask_a = layers[i]
+            name_b, mask_b = layers[j]
+            pairs.append((name_a, name_b, int((mask_a & mask_b).sum()) * area_per_cell))
+    return pairs
 
 
 # ---------------------------------------------------------------------------
@@ -501,6 +623,81 @@ def print_gain(gain: dict, baseline: dict, metrics: dict, indent: str = "    ") 
         )
         print(f"{indent}  gained-region size distribution: {gain['buckets']}")
         print(f"{indent}  {_over_merge_read(gain)}")
+
+
+def _print_layer_relationships(
+    dem: dict, gates: list, on_parcel: np.ndarray, step1: dict, max_slope_pct: float
+) -> None:
+    """
+    How the five exclusion layers relate to each other, MEASURED rather
+    than asserted -- because the one thing a reader must not do with them
+    is add them up, and a comment saying so is not checkable.
+
+    Prints each layer's own acreage, then the pairwise overlap acreage for
+    every pair. The narrative_data work handles the same hazard with paired
+    `*_excluded` / `*_only_excluded` figures; this is the per-gate
+    equivalent, and it is computed live so it stays honest if any
+    derivation ever changes.
+    """
+    area_per_cell = cell_area_acres(dem)
+    layers = [(name, mask) for name, mask, _ in gates]
+
+    print("-" * 78)
+    print("HOW THE FIVE LAYERS RELATE (measured -- DO NOT SUM THESE)")
+    print("-" * 78)
+    total_if_summed = 0.0
+    for name, mask in layers:
+        acres = int(mask.sum()) * area_per_cell
+        total_if_summed += acres
+        print(f"    {name:<28} {acres:>8.3f} ac")
+    union = np.zeros_like(on_parcel)
+    for _, mask in layers:
+        union |= mask
+    union_acres = int(union.sum()) * area_per_cell
+    print(
+        f"    {'--- naive sum':<28} {total_if_summed:>8.3f} ac   vs the real UNION "
+        f"{union_acres:.3f} ac  (difference = double-counted overlap)"
+    )
+    print()
+
+    print("    pairwise overlap:")
+    overlaps = layer_overlap_matrix(dem, layers)
+    for name_a, name_b, overlap_acres in overlaps:
+        marker = "" if overlap_acres > 0 else "   (disjoint)"
+        print(f"      {name_a:<28} & {name_b:<28} {overlap_acres:>7.3f} ac{marker}")
+    print()
+
+    # The two derived layers are disjoint BY CONSTRUCTION, and that fact is
+    # the whole reason the setback figure is a lower bound. Say which way
+    # the shared ground was attributed rather than leaving the reader to
+    # infer it from a zero.
+    print(
+        "    SLOPE AND SETBACK ARE DISJOINT BY CONSTRUCTION, NOT BY LUCK. The setback layer is\n"
+        "    derived as `on_parcel & slope_ok & ~slope_only_mask` -- it REQUIRES slope_ok -- while\n"
+        "    the slope layer is `on_parcel & ~slope_ok`. Ring ground that ALSO fails slope\n"
+        "    therefore lands wholly in the SLOPE layer and not at all in the setback layer, which\n"
+        "    is exactly why the setback figure is a LOWER BOUND on the real ring rather than a\n"
+        "    measurement of it. Neither layer can be corrected for this from STEP 1's returned\n"
+        "    arrays alone: slope_only_mask collapses the slope and shrunk-boundary tests into one\n"
+        "    array, so the ring's steep part is not recoverable."
+    )
+    print(
+        "    THE PAIRS THAT DO OVERLAP are canopy/hydric/road with each other -- one cell can be\n"
+        "    both wooded and hydric, and each gate is evaluated independently over the same\n"
+        "    slope_only_mask. Those are the layers a summed 'total excluded' figure would\n"
+        "    double-count."
+    )
+
+    # Slope's NaN component, kept separate so "too steep" is never confused
+    # with "no DEM coverage" -- both fail `slope_pct <= max_slope_pct`.
+    nan_slope = on_parcel & np.isnan(step1["slope_pct"])
+    nan_acres = int(nan_slope.sum()) * area_per_cell
+    print(
+        f"    of the slope layer, {nan_acres:.3f} ac is on-parcel ground with NO SLOPE VALUE at all\n"
+        f"    (NaN slope_pct -- no DEM coverage), not ground measured as too steep. STEP 1 excludes\n"
+        f"    both the same way; this diagnostic reports them apart so they are not conflated."
+    )
+    print()
 
 
 def _over_merge_read(gain: dict) -> str:
@@ -612,16 +809,28 @@ def synthetic_run_inputs() -> tuple[list, dict, dict]:
     A synthetic DEM and synthetic gate inputs for --dry-run: exercises
     every code path in this file with no network.
 
-    The terrain is a gentle plane (so most of it clears the slope gate),
-    the canopy mask is two blocks with pinholes in them, and the hydric
-    and road gates are left at their "not checked" sentinels -- so a dry
-    run also exercises the unchecked-gate reporting path. NOTHING here is
-    a statement about any real property.
+    The terrain is deliberately ROLLING rather than a plane: a gentle
+    regional grade with a sinusoidal ripple tuned so roughly a fifth of the
+    grid fails a 20% slope gate in scattered bands. A flat synthetic DEM
+    (what this used before slope became a layer) leaves the slope layer
+    empty and every pairwise overlap zero, which means the dry run silently
+    fails to exercise the two sections that exist to report them.
+
+    The canopy mask is two blocks with pinholes in them, and the hydric and
+    road gates are left at their "not checked" sentinels -- so a dry run
+    also exercises the unchecked-gate and empty-layer-export paths.
+
+    NOTHING here is a statement about any real property; the ripple is
+    chosen to exercise code, not to resemble terrain.
     """
     rows = cols = 60
     resolution = 5.0
     yy, xx = np.mgrid[0:rows, 0:cols]
-    array = (100.0 + 0.02 * resolution * yy + 0.01 * resolution * xx).astype(np.float32)
+    array = (
+        100.0
+        + 0.02 * resolution * yy
+        + 5.0 * np.sin(yy / 5.0) * np.cos(xx / 4.0)
+    ).astype(np.float32)
 
     dem = {
         "array": array,
@@ -664,13 +873,82 @@ def synthetic_run_inputs() -> tuple[list, dict, dict]:
 # ---------------------------------------------------------------------------
 
 
-def _geojson_feature(dem: dict, geom, properties: dict) -> dict | None:
-    if geom is None or geom.is_empty:
-        return None
+def _empty_layer_note(metrics: dict, available: bool) -> str:
+    """
+    Why a layer came out empty, so an empty feature in the export is
+    self-explaining. The three cases a reader would otherwise have to guess
+    between: the gate was never checked, the gate was checked and found
+    nothing, or the layer has real geometry and nothing needs saying.
+    """
+    if metrics["cell_count"] > 0:
+        return ""
+    if not available:
+        return (
+            "EMPTY because this gate's input was UNAVAILABLE for the run -- not checked, "
+            "NOT verified clean. Do not read this as an absence of the hazard."
+        )
+    return "EMPTY because the gate was checked and matched no cell on this parcel."
+
+
+def _layer_properties(
+    gate: str,
+    boundary: str,
+    radius_m: float,
+    radius_cells: int,
+    layer_kind: str,
+    metrics: dict,
+    note: str = "",
+) -> dict:
+    """
+    The property bag every exported feature carries.
+
+    Deliberately self-describing: a reader who opens the file on geojson.io
+    and clicks a shape must be able to tell WHICH layer and WHICH closing
+    radius it is, and how big it is, without opening this source file. So
+    the gate name is spelled out rather than abbreviated, the radius is
+    given in both metres and cells (they differ -- see the metres-to-cells
+    note in the module docstring), and the headline figures travel with the
+    geometry.
+    """
+    properties = {
+        "gate": gate,
+        "layer_kind": layer_kind,
+        "boundary": boundary,
+        "closing_radius_m": radius_m,
+        "closing_radius_cells": radius_cells,
+        "acres": round(metrics["acres_from_cells"], 4),
+        "cell_count": metrics["cell_count"],
+        "polygon_count": metrics["polygon_count"],
+        "hole_count": metrics["hole_count"],
+        "exterior_vertex_count": metrics["exterior_vertex_count"],
+        "empty": metrics["cell_count"] == 0,
+    }
+    if note:
+        properties["note"] = note
+    return properties
+
+
+def _geojson_feature(dem: dict, geom, properties: dict) -> dict:
+    """
+    One GeoJSON Feature.
+
+    AN EMPTY LAYER STILL GETS A FEATURE, with `"geometry": null` (valid
+    GeoJSON) and `"empty": true` in its properties. Silently omitting it
+    was the old behavior and it is the wrong one: a reader opening the file
+    and finding no road layer cannot tell whether roads were genuinely zero
+    cells, whether the fetch failed, or whether the export dropped them.
+    A null-geometry feature renders as nothing on a map but is listed in
+    the properties table, which is precisely the distinction wanted -- and
+    its `note` property says which of those three it was.
+    """
     return {
         "type": "Feature",
         "properties": properties,
-        "geometry": transform_geom(dem["crs"], "EPSG:4326", mapping(geom)),
+        "geometry": (
+            None
+            if geom is None or geom.is_empty
+            else transform_geom(dem["crs"], "EPSG:4326", mapping(geom))
+        ),
     }
 
 
@@ -714,13 +992,18 @@ def report_for_boundary(
 
     on_parcel = on_parcel_mask(dem, boundary_polygon_utm)
     setback_only = derive_setback_only_mask(step1, on_parcel, max_slope_pct)
+    slope_fail = derive_slope_fail_mask(step1, on_parcel, max_slope_pct)
+    slope_ok = derive_slope_ok(step1, max_slope_pct)
 
     gates = [
         ("canopy (tree root zone)", step1["tree_root_zone_hit"], step1["canopy_data_available"]),
         ("hydric soil", step1["hydric_hit"], step1["soil_data_available"]),
         ("existing farm roads", step1["road_hit"], step1["road_data_available"]),
-        ("boundary setback (derived)", setback_only, True),
+        (SETBACK_GATE_LABEL, setback_only, True),
+        (SLOPE_GATE_LABEL, slope_fail, True),
     ]
+
+    _print_layer_relationships(dem, gates, on_parcel, step1, max_slope_pct)
 
     # Indexed by POSITION, not keyed by the radius value, so a repeated
     # radius on the command line stays two independent sweep entries
@@ -737,7 +1020,11 @@ def report_for_boundary(
     print()
 
     geojson_features = []
-    closed_by_radius_index: list[list[np.ndarray]] = [[] for _ in radii_cells]
+    # Per radius, the closed mask of EACH gate kept under its own label --
+    # not pooled into one union -- because the eligible layer is now reported
+    # in three forms, two of which need the slope layer separable from the
+    # other four.
+    closed_by_radius_index: list[dict[str, np.ndarray]] = [{} for _ in radii_cells]
 
     for gate_label, raw_mask, available in gates:
         print("-" * 78)
@@ -755,15 +1042,25 @@ def report_for_boundary(
         print()
 
         if geojson_prefix:
-            raw_feature = _geojson_feature(
-                dem, baseline["footprint"], {"gate": gate_label, "boundary": label, "closing_radius_m": 0.0}
+            geojson_features.append(
+                _geojson_feature(
+                    dem,
+                    baseline["footprint"],
+                    _layer_properties(
+                        gate=gate_label,
+                        boundary=label,
+                        radius_m=0.0,
+                        radius_cells=0,
+                        layer_kind="exclusion",
+                        metrics=baseline,
+                        note=_empty_layer_note(baseline, available),
+                    ),
+                )
             )
-            if raw_feature:
-                geojson_features.append(raw_feature)
 
         for index, (radius_m, rc, eff_m) in enumerate(radii_cells):
             closed = disc_closing(raw_mask, rc)
-            closed_by_radius_index[index].append(closed)
+            closed_by_radius_index[index][gate_label] = closed
             if rc == 0:
                 # No closing actually happened -- the figures would repeat the
                 # raw block verbatim, and the geojson would repeat the raw
@@ -776,13 +1073,21 @@ def report_for_boundary(
             print()
 
             if geojson_prefix:
-                feature = _geojson_feature(
-                    dem,
-                    metrics["footprint"],
-                    {"gate": gate_label, "boundary": label, "closing_radius_m": radius_m},
+                geojson_features.append(
+                    _geojson_feature(
+                        dem,
+                        metrics["footprint"],
+                        _layer_properties(
+                            gate=gate_label,
+                            boundary=label,
+                            radius_m=radius_m,
+                            radius_cells=rc,
+                            layer_kind="exclusion",
+                            metrics=metrics,
+                            note=_empty_layer_note(metrics, available),
+                        ),
+                    )
                 )
-                if feature:
-                    geojson_features.append(feature)
 
     # ---- the eligible layer -------------------------------------------
     print("-" * 78)
@@ -793,51 +1098,77 @@ def report_for_boundary(
     print()
 
     on_parcel_acres = int(on_parcel.sum()) * cell_area_acres(dem)
-    slope_pct = step1["slope_pct"]
-    slope_ok = (~np.isnan(slope_pct)) & (slope_pct <= max_slope_pct)
-    slope_fail_on_parcel_acres = int((on_parcel & ~slope_ok).sum()) * cell_area_acres(dem)
+    slope_fail_on_parcel_acres = int(slope_fail.sum()) * cell_area_acres(dem)
 
     print(
         f"    on-parcel cells (unshrunk boundary, cell centers): {int(on_parcel.sum())} "
         f"= {on_parcel_acres:.3f} ac"
     )
     print(
-        f"    of which FAIL the slope gate: {slope_fail_on_parcel_acres:.3f} ac -- the derived "
-        f"layer below is 'boundary - closed exclusions' as specified, so it does NOT subtract "
-        f"this; read its acreage with that in mind."
+        f"    of which FAIL the slope gate: {slope_fail_on_parcel_acres:.3f} ac -- now reported "
+        f"as its own layer above, and subtracted by FORM C below."
+    )
+    print()
+    print(
+        "    THREE FORMS, because each of the first two is missing something:\n"
+        "      FORM A  boundary - (four closed exclusions: canopy, hydric, road, setback)\n"
+        "              Does NOT subtract slope at all, so it hands the user steep ground.\n"
+        "      FORM B  FORM A intersected with the RAW slope gate\n"
+        "              Subtracts slope, but UNCLOSED -- so every scattered steep cell stays a\n"
+        "              hole, which is why this form's hole count never moved with radius.\n"
+        "      FORM C  boundary - (all FIVE closed exclusions, slope included)\n"
+        "              Every reason ground is unselectable, each consolidated by its own\n"
+        "              closing. THIS is what the frontend would actually clamp against, and its\n"
+        "              polygon/hole/vertex counts are the transport and interaction figures\n"
+        "              that matter."
     )
     print()
 
     for index, (radius_m, rc, eff_m) in enumerate(radii_cells):
-        closed_union = np.zeros_like(on_parcel)
-        for closed in closed_by_radius_index[index]:
-            closed_union |= closed
+        closed_by_gate = closed_by_radius_index[index]
 
-        derived = on_parcel & (~closed_union)
-        derived_metrics = footprint_metrics(dem, derived)
-        print_metrics(
-            f"derived: boundary - (closed exclusions) at {radius_m:.1f} m "
-            f"({rc} cell(s), effective {eff_m:.2f} m)  <-- what the frontend would clamp against",
-            derived_metrics,
-        )
-        print()
+        four_gate_union = np.zeros_like(on_parcel)
+        for gate_label, closed in closed_by_gate.items():
+            if gate_label != SLOPE_GATE_LABEL:
+                four_gate_union |= closed
+        all_five_union = four_gate_union | closed_by_gate[SLOPE_GATE_LABEL]
 
-        slope_aware = derived & slope_ok
-        slope_aware_metrics = footprint_metrics(dem, slope_aware)
-        print_metrics(
-            f"  ...and the same intersected with the slope gate (conservative variant) at {radius_m:.1f} m",
-            slope_aware_metrics,
-        )
-        print()
+        form_a = on_parcel & (~four_gate_union)
+        form_b = form_a & slope_ok
+        form_c = on_parcel & (~all_five_union)
 
-        if geojson_prefix:
-            feature = _geojson_feature(
-                dem,
-                derived_metrics["footprint"],
-                {"gate": "eligible (boundary - closed exclusions)", "boundary": label, "closing_radius_m": radius_m},
+        for form_name, form_mask, form_note in (
+            ("FORM A: boundary - (four closed exclusions, slope NOT subtracted)", form_a, ""),
+            ("FORM B: FORM A intersected with the RAW (unclosed) slope gate", form_b, ""),
+            (
+                "FORM C: boundary - (all FIVE closed exclusions, slope included)",
+                form_c,
+                "  <-- what the frontend would clamp against",
+            ),
+        ):
+            form_metrics = footprint_metrics(dem, form_mask)
+            print_metrics(
+                f"{form_name} at {radius_m:.1f} m ({rc} cell(s), effective {eff_m:.2f} m){form_note}",
+                form_metrics,
             )
-            if feature:
-                geojson_features.append(feature)
+            print()
+
+            if geojson_prefix:
+                geojson_features.append(
+                    _geojson_feature(
+                        dem,
+                        form_metrics["footprint"],
+                        _layer_properties(
+                            gate=f"eligible {form_name.split(':')[0]}",
+                            boundary=label,
+                            radius_m=radius_m,
+                            radius_cells=rc,
+                            layer_kind="eligible",
+                            metrics=form_metrics,
+                            note=form_name.split(": ", 1)[1],
+                        ),
+                    )
+                )
 
     # ---- the unevaluated ring -----------------------------------------
     print("-" * 78)
@@ -866,7 +1197,23 @@ def report_for_boundary(
         path = f"{geojson_prefix}_{slug}.geojson"
         with open(path, "w") as f:
             json.dump({"type": "FeatureCollection", "features": geojson_features}, f)
+        empty = [f for f in geojson_features if f["properties"]["empty"]]
+        print("-" * 78)
+        print("GEOJSON EXPORT")
+        print("-" * 78)
         print(f"    wrote {len(geojson_features)} features to {path} (WGS84, drop on geojson.io)")
+        print(
+            "    every feature carries gate, layer_kind, closing radius in BOTH metres and cells, "
+            "acres,\n    cell/polygon/hole/vertex counts and an `empty` flag -- readable on "
+            "geojson.io without\n    opening this source."
+        )
+        if empty:
+            names = sorted({f"{f['properties']['gate']}" for f in empty})
+            print(
+                f"    {len(empty)} of them are EMPTY layers, exported with `\"geometry\": null` "
+                f"and `empty: true`\n    rather than dropped, so a reader can tell an absent layer "
+                f"from an unrendered one: {', '.join(names)}"
+            )
         print()
 
 
@@ -918,7 +1265,7 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Measure the per-gate exclusion footprints STEP 1 of the production pipeline "
-            "produces (canopy, hydric soil, existing farm roads, boundary setback) and what a "
+            "produces (slope, canopy, hydric soil, existing farm roads, boundary setback) and what a "
             "small disc morphological closing does to each of them. Read-only: changes no "
             "pipeline module and adds no constants to one."
         ),
@@ -954,8 +1301,9 @@ def _parse_args() -> argparse.Namespace:
         default=MAX_PRODUCTION_SLOPE_PCT,
         help=(
             "Override the slope gate STEP 1 applies, for this run only (default: the current "
-            f"production_area module constant, {MAX_PRODUCTION_SLOPE_PCT}). The setback "
-            "derivation uses whatever is passed here, so the two stay consistent."
+            f"production_area module constant, {MAX_PRODUCTION_SLOPE_PCT}). Both DERIVED layers "
+            "-- slope and setback -- are rebuilt from whatever is passed here rather than from "
+            "the module constant, so all three stay consistent under an override."
         ),
     )
     parser.add_argument(
@@ -963,7 +1311,8 @@ def _parse_args() -> argparse.Namespace:
         metavar="PREFIX",
         default=None,
         help=(
-            "Write each gate's closed footprint, plus the derived eligible layer, to "
+            "Write each of the five gates' raw AND closed footprints, plus all three forms of the "
+            "derived eligible layer, to "
             "PREFIX_<boundary>.geojson in WGS84 -- for dropping on geojson.io and actually "
             "looking at. The numbers say whether the closing consolidates; only looking says "
             "whether the result reads as a sensible picture of the parcel."
