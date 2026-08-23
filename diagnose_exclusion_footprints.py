@@ -166,12 +166,17 @@ alongside C so the three can be compared directly.
 
 --- CLOSING RADIUS, IN CELLS ---
 
-binary_dilate()/binary_erode() take a radius in CELLS. This script
-converts metres to cells as `round(radius_m / cell_size)`, cell_size =
-(px + py) / 2, and prints both the requested metres and the effective
-radius actually applied. It deliberately does NOT use raster_grid.
-waist_erosion_radius_cells(): that converts a minimum WAIST WIDTH into a
-radius and therefore HALVES it (a waist of w is severed by eroding w/2).
+binary_dilate()/binary_erode() take a radius in CELLS. The conversion
+(raster_grid.closing_radius_cells(): `round(radius_m / cell_size)`,
+cell_size = (px + py) / 2) and the padded dilate-then-erode itself
+(raster_grid.disc_closing()) are SHARED with exclusion_zones.py, the
+module that applies in production the radii this script measures -- they
+were extracted from here when that module was written, verbatim and with
+no output change. This script prints both the requested metres and the
+effective radius actually applied. The conversion deliberately does NOT
+use raster_grid.waist_erosion_radius_cells(): that converts a minimum
+WAIST WIDTH into a radius and therefore HALVES it (a waist of w is
+severed by eroding w/2).
 A closing radius is already a radius. At the pipeline's 5 m DEM
 resolution this quantization is coarse and matters: r=5 m is a ONE-cell
 disc (the 4-neighbourhood) and r=10 m is a two-cell disc, so every
@@ -228,11 +233,12 @@ from production_area import (
 )
 from raster_grid import (
     SQUARE_METERS_PER_ACRE,
-    binary_dilate,
-    binary_erode,
     cell_area_acres,
     cell_union_footprint,
+    closing_radius_cells,
     connected_components,
+    disc_closing,
+    effective_radius_meters,
     pixel_center_xy,
 )
 from soil_data import coordinates_to_wkt_polygon
@@ -290,55 +296,12 @@ PINHOLE_MAX_CELLS = 4
 # ---------------------------------------------------------------------------
 
 
-def closing_radius_cells(dem: dict, radius_meters: float) -> int:
-    """
-    Metres -> cell radius for the disc closing. cell_size is the mean of
-    the DEM's two pixel dimensions (they are usually equal but computed
-    independently upstream, see dem_data.get_dem_for_boundary()).
-
-    Deliberately NOT raster_grid.waist_erosion_radius_cells(): that one
-    converts a minimum waist WIDTH and halves it. A closing radius is
-    already a radius, so this is a plain round() with no halving. A
-    positive radius that rounds to 0 cells is reported by
-    effective_radius_meters() below rather than silently becoming a
-    no-op -- round() is used, not ceil(), so 2 m at a 5 m resolution
-    honestly reports "0 cells, no-op" instead of being inflated to a
-    full 5 m cell.
-    """
-    px, py = dem["resolution_meters"]
-    cell_size = (px + py) / 2.0
-    return max(0, int(round(radius_meters / cell_size)))
-
-
-def effective_radius_meters(dem: dict, radius_cells: int) -> float:
-    """The ground radius the integer cell radius really corresponds to."""
-    px, py = dem["resolution_meters"]
-    return radius_cells * (px + py) / 2.0
-
-
-def disc_closing(mask: np.ndarray, radius_cells: int) -> np.ndarray:
-    """
-    Morphological closing (dilate then erode) with the disc structuring
-    element, at radius_cells.
-
-    The mask is PADDED by radius_cells + 1 cells of background before the
-    dilation and cropped back afterwards. raster_grid._shift() treats
-    everything beyond the array bounds as background, so without the pad
-    the erosion half would chew into any region touching the grid edge and
-    the operation would not be extensive. With the pad, closed >= mask
-    holds for every input (asserted in the fixtures).
-
-    radius_cells <= 0 returns a copy unchanged -- the raw footprint.
-    """
-    if radius_cells <= 0:
-        return mask.copy()
-
-    pad = radius_cells + 1
-    padded = np.pad(mask, pad, mode="constant", constant_values=False)
-    closed = binary_erode(
-        binary_dilate(padded, radius_cells, element="disc"), radius_cells, element="disc"
-    )
-    return closed[pad:-pad, pad:-pad]
+# closing_radius_cells(), effective_radius_meters() and disc_closing() used to
+# live here, inline. They were EXTRACTED to raster_grid.py verbatim when
+# exclusion_zones.py needed the same closing: this script MEASURED the per-gate
+# radii that module now APPLIES in production, and two copies of the conversion
+# and the padded dilate-then-erode could drift apart silently. Imported above,
+# not reimplemented -- this script's output is unchanged by the move.
 
 
 def _polygon_parts(geom) -> list[Polygon]:

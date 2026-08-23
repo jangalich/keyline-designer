@@ -45,6 +45,29 @@ FIELD NOTES
   (valley_delineation.py does not expose those, so there is nothing shared
   to forward for them); that is a handful of pure-numpy passes, no network.
 
+  exclusion_zones is exclusion_zones.identify_exclusion_zones()'s own
+  full result: the parcel's UNSELECTABLE ground as five per-gate cell
+  masks (canopy, slope, hydric, roads, setback), each morphologically
+  closed at its own measured radius, plus the closed union, the derived
+  eligible geometry, and its own narrative_data. It is the FIRST Layer 2
+  computation in this function -- before production areas -- because it
+  derives only from Layer 1 products (dem, the canopy root-zone mask,
+  the disqualifying-soil union, the road-exclusion union) and waits on
+  no other Layer 2 result. It is NOT Layer 1 itself: it fetches no raw
+  layer of its own.
+
+  It earns a context field on the sizing principle through the layout
+  map (which draws the union as the map's ground layer) and the report
+  (narrative_data), NOT through any KSOP computation -- nothing
+  downstream consumes it. In particular it is deliberately NOT passed
+  into the production call below: production_area.py is untouched in
+  this branch and still computes the same five gates itself, so canopy,
+  soil and roads are each fetched twice and the slope grid computed
+  twice across one build_pipeline_context() run. That duplication is
+  known, measured, asserted at exactly 2x in test_exclusion_zones.py,
+  and time-limited -- see exclusion_zones.py's own DELIBERATE
+  REDUNDANCY section for the integration question that ends it.
+
   production_areas holds production_area_ceiling.
   identify_optimized_production_areas()'s own 'scored_patches' -- the
   ceiling-trimmed, STEP-4-scored per-patch list -- NOT production_area.
@@ -335,6 +358,7 @@ from shapely.geometry import Polygon
 from shapely.geometry.base import BaseGeometry
 
 import dem_data
+import exclusion_zones
 import farm_roads_data
 import keypoint_detection
 import production_area_ceiling
@@ -352,6 +376,16 @@ class PipelineContext:
     boundary_polygon_utm: Polygon
     valleys: list[dict]
     keypoints: list[dict]
+    # The parcel's unselectable ground -- exclusion_zones.identify_exclusion_
+    # zones()' whole result (five per-gate closed masks, the closed union,
+    # the derived eligible geometry). The FIRST Layer 2 computation, before
+    # production areas: it depends only on Layer 1 products, so nothing here
+    # waits on it. NOTHING DOWNSTREAM CONSUMES IT YET -- production_area.py
+    # is untouched in this branch and still computes its own five gates (see
+    # exclusion_zones.py's DELIBERATE REDUNDANCY section for why, and for
+    # the integration question that ends it). Carried on the context anyway
+    # because the map draws it and the report narrates it.
+    exclusion_zones: dict
     production_areas: list[dict]
     parcel_acres: float
     existing_roads: BaseGeometry | None
@@ -552,6 +586,29 @@ def build_pipeline_context(
         dem, boundary_polygon_utm, valleys=valleys
     )
 
+    # Layer 2, FIRST STEP -- before production areas, deliberately. This
+    # derives entirely from Layer 1 products (dem, the canopy root-zone mask,
+    # the disqualifying-soil union, the road-exclusion union) and depends on
+    # no other Layer 2 result, so nothing about the ordering below constrains
+    # it. Placing it first is what makes the deferred production integration
+    # a one-line change: the day compute_step1_eligible_cells() takes an
+    # eligible-mask override, the value it needs is already computed here.
+    #
+    # DELIBERATELY NOT PASSED INTO THE PRODUCTION CALL BELOW. production_area.
+    # py is untouched in this branch and keeps computing its own five gates,
+    # so canopy/soil/road are fetched TWICE and the slope grid computed TWICE
+    # across this function -- a known, measured, time-limited cost documented
+    # in exclusion_zones.py's module docstring and asserted at exactly 2x in
+    # test_exclusion_zones.py. Wiring it in would change production's results
+    # (a closing is extensive; production would lose the pinhole cells it
+    # absorbs), which is a separate decision.
+    exclusion_result = exclusion_zones.identify_exclusion_zones(
+        boundary_coordinates,
+        dem=dem,
+        boundary_polygon_utm=boundary_polygon_utm,
+        canopy_height=canopy_height,
+    )
+
     optimized_production = production_area_ceiling.identify_optimized_production_areas(
         boundary_coordinates, dem=dem, canopy_height=canopy_height
     )
@@ -665,6 +722,7 @@ def build_pipeline_context(
         boundary_polygon_utm=boundary_polygon_utm,
         valleys=valleys,
         keypoints=keypoints,
+        exclusion_zones=exclusion_result,
         production_areas=production_areas,
         parcel_acres=parcel_acres,
         existing_roads=existing_roads,
@@ -679,6 +737,7 @@ def build_pipeline_context(
         # (see the field's own comment on PipelineContext). .get(): a result
         # from before a module's narrative_data existed simply carries None.
         narrative_data={
+            "exclusion_zones": exclusion_result.get("narrative_data"),
             "production_area_ceiling": optimized_production.get("narrative_data"),
             "water_candidate_zones": water_system_result.get("narrative_data"),
             "road_corridors": road_corridor_result.get("narrative_data"),

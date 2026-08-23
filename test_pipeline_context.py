@@ -294,6 +294,37 @@ def _fake_clean_canopy_mask(boundary_polygon_utm, dem, buffer_meters=None, canop
     return np.zeros(dem["array"].shape, dtype=bool)
 
 
+# --- exclusion_zones' three gate fetches: stubbed FILE-WIDE, not per fixture ---
+#
+# build_pipeline_context()'s FIRST Layer 2 step is exclusion_zones.identify_
+# exclusion_zones(), which computes the same five gates production does and
+# therefore runs its own canopy, soil and road fetches -- deliberately, see
+# that module's DELIBERATE REDUNDANCY section. Its canopy fetch is MANDATORY
+# (no try/except, RuntimeError on no coverage), so EVERY build_pipeline_
+# context() fixture in this file needs it stubbed to stay offline; soil and
+# roads degrade gracefully but would still reach for the network and stall.
+#
+# Started once here rather than added to each of the seven fixtures below
+# because these are pure offline stand-ins, not assertions: no fixture in
+# this file tests the exclusion gates' own behaviour (test_exclusion_zones.py
+# does), and threading three more context managers through seven `with`
+# blocks would bury the call-count assertions those blocks exist for. The
+# module's own logic still runs for real on every fixture -- only the three
+# network reaches are replaced.
+#
+# Patched at exclusion_zones.py's OWN module-level bindings (bound via `from
+# production_area import (...)` at import time), which are SEPARATE bindings
+# from pc.farm_roads_data.get_road_exclusion_union_utm patched in the
+# fixtures below -- patching that one does NOT intercept these. Classic
+# "patch where it's looked up", the same trap this file's own water_
+# candidate_zones stubs already document.
+mock_patch.object(
+    pc.exclusion_zones, "get_required_tree_root_zone_mask_utm", side_effect=_fake_clean_canopy_mask
+).start()
+mock_patch.object(pc.exclusion_zones, "_fetch_disqualifying_soil_union", return_value=None).start()
+mock_patch.object(pc.exclusion_zones, "_fetch_road_exclusion_union_utm", return_value=None).start()
+
+
 # --- run build_pipeline_context with every real fetch entry point mocked ---
 #
 # identify_solar_candidate_zones()/identify_tree_zone_candidates() (this
@@ -424,6 +455,7 @@ assert isinstance(ctx, pc.PipelineContext)
 # captures None (never raises, never invents a block), while the entry
 # points run for real here (wraps=) capture their own genuine block. ---
 assert set(ctx.narrative_data) == {
+    "exclusion_zones",
     "production_area_ceiling",
     "water_candidate_zones",
     "road_corridors",
@@ -437,7 +469,7 @@ assert ctx.narrative_data["production_area_ceiling"] is None, (
 assert ctx.narrative_data["road_corridors"] is None, (
     "same for the fully-mocked identify_road_corridor_candidates() result"
 )
-for _nd_key in ("water_candidate_zones", "solar_suitability", "tree_zone_candidates"):
+for _nd_key in ("exclusion_zones", "water_candidate_zones", "solar_suitability", "tree_zone_candidates"):
     _nd_block = ctx.narrative_data[_nd_key]
     assert isinstance(_nd_block, dict) and _nd_block, (
         f"{_nd_key} ran for real (wraps=) in this fixture, so its own narrative_data block must be "

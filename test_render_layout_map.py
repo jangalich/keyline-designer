@@ -1360,6 +1360,9 @@ _fake_context_for_canopy_case = pc.PipelineContext(
     boundary_polygon_utm=_canopy_boundary_utm,
     valleys=[],
     keypoints=[],
+    # Empty exclusion result -- this fixture exercises the canopy-override
+    # path only; the map's exclusion layer draws nothing from it.
+    exclusion_zones={},
     production_areas=[],
     parcel_acres=0.0,
     existing_roads=None,

@@ -570,6 +570,31 @@ CONTOUR_LINE_COLOR = "#6B4423"  # muted brown -- traditional topo-map
 # in use (production green, water blue, road dark gray, structure red)
 WATER_ZONE_COLOR = "#1F6FB2"
 
+# EXCLUSION ZONES (exclusion_zones.identify_exclusion_zones()'s closed union
+# of all five per-gate masks -- canopy, slope, hydric, roads, setback).
+#
+# NEUTRAL, DELIBERATELY NOT A HUE. On the two reference boundaries this
+# covers 4.7 and 7.2 acres of a 13-16 acre parcel, which makes it the single
+# largest thing on the map. Every other layer already owns a colour that
+# means something (production green, water blue, road dark gray, structure
+# red, tree green, contour brown), and a sixth hue this size would read as
+# another FEATURE competing with them. A desaturated warm gray reads as
+# ABSENCE instead -- ground the plan is not proposing anything on -- and
+# leaves every real feature's colour uncontested. Flat fill, no edge stroke:
+# a stroke would draw the eye to the cell-union staircase, which is a
+# raster artifact and not a surveyed line.
+EXCLUSION_ZONE_COLOR = "#6E6A63"          # CONFIGURABLE
+EXCLUSION_ZONE_ALPHA = 0.42               # CONFIGURABLE
+# BELOW EVERY OTHER LAYER. Production contours (40), water ripples (41),
+# road corridor (42/42.5), tree hatch (42.8), exclusion fences
+# (EXCLUSION_FENCE_ZORDER), keypoints, the structure pin and the boundary
+# fence all sit on top; so do the streams (20). It sits just ABOVE the halo
+# mask (10) only because the halo covers OFF-parcel ground and this covers
+# ON-parcel ground -- the two never compete for the same pixels, and
+# ordering it below the halo would mean the halo's white wash was painted
+# over ground it is not meant to touch.
+EXCLUSION_ZONE_ZORDER = 15                # CONFIGURABLE
+
 # Water zones render as RIPPLE-LINE TEXTURE -- a family of horizontal sine
 # waves clipped to the zone's own render_fill_polygon_utm -- rather than a
 # filled/outlined polygon. Same styling discipline as production zones'
@@ -842,6 +867,7 @@ LEGEND_FENCE_OCTAGON_RADIUS_FRAC = 0.46   # octagon radius as a fraction of min(
 
 # Fixed KSOP legend labels -- exactly these strings, in exactly this order (see
 # this module's own LEGEND docstring section). No numbering, no per-feature data.
+LEGEND_LABEL_EXCLUSION = "Unsuitable Ground"
 LEGEND_LABEL_KEYPOINTS = "Keypoint Candidates"
 LEGEND_LABEL_PRODUCTION = "Production Areas"
 LEGEND_LABEL_WATER = "Water System Survey Area"
@@ -1026,6 +1052,13 @@ def _legend_handle_for(feature: str):
                 markersize=LEGEND_KEYPOINT_MARKERSIZE, markeredgewidth=LEGEND_KEYPOINT_MARKEREDGEWIDTH,
             ),
             LEGEND_LABEL_KEYPOINTS,
+        )
+    if feature == "exclusion":
+        # A plain filled swatch in the map's own fill colour and alpha --
+        # the layer draws as flat fill with no edge, so the swatch does too.
+        return (
+            Patch(facecolor=EXCLUSION_ZONE_COLOR, edgecolor="none", alpha=EXCLUSION_ZONE_ALPHA),
+            LEGEND_LABEL_EXCLUSION,
         )
     if feature == "production":
         return (_ProductionLegendHandle(), LEGEND_LABEL_PRODUCTION)
@@ -1710,6 +1743,11 @@ def fetch_layout_layers(
 
     return {
         "dem": context.dem,
+        # The parcel's unselectable ground, straight off the context (its
+        # FIRST Layer 2 computation -- see pipeline_context.py). Nothing is
+        # computed here: build_pipeline_context() above already produced it
+        # and no other layer in this dict depends on it.
+        "exclusion_zones": context.exclusion_zones,
         "production_areas": context.production_areas,
         "water_zone": water_zone,
         "road_corridor": road_corridor_features,
@@ -1762,6 +1800,11 @@ def render_layout_map(
     # the synthetic fixtures in test_render_layout_map.py) still renders --
     # missing key means simply "no keypoint layer to draw", not an error.
     keypoints = layers.get("keypoints", [])
+    # .get() for the same reason keypoints uses it -- a layers dict built
+    # before this layer existed (the synthetic fixtures in
+    # test_render_layout_map.py) still renders, with simply no exclusion
+    # layer to draw.
+    exclusion_result = layers.get("exclusion_zones") or {}
     water_features = layers["water_features"]
     contour_lines = layers["contour_lines"]
     fencing_result = layers["fencing_result"]
@@ -1810,7 +1853,7 @@ def render_layout_map(
         plot_polygon(context_box, ax=ax, add_points=False, facecolor="#DCD8CE", edgecolor="none", zorder=1)
         basemap_note = f"basemap unavailable ({e})"
 
-    # z-order, back to front: halo mask, streams, production zone contours,
+    # z-order, back to front: halo mask, exclusion zones, streams, production zone contours,
     # water zone ripples, road corridor line, tree zone hatch, the water/tree
     # exclusion fence loops (EXCLUSION_FENCE_ZORDER, above every zone fill --
     # see that constant's own comment), keypoint asterisks, structure site pin,
@@ -1823,6 +1866,7 @@ def render_layout_map(
     # entry per feature regardless of how many zones/branches it drew; a feature
     # that drew nothing contributes none.
     drew_keypoints = False
+    drew_exclusion = False
     drew_production = False
     drew_water = False
     drew_road = False
@@ -1832,6 +1876,36 @@ def render_layout_map(
 
     if not halo_mask.is_empty:
         plot_polygon(halo_mask, ax=ax, add_points=False, facecolor=HALO_COLOR, edgecolor="none", alpha=HALO_ALPHA, zorder=10)
+
+    # EXCLUSION ZONES -- the map's ground layer, drawn first among the KSOP
+    # layers and beneath all of them (EXCLUSION_ZONE_ZORDER; see that
+    # constant for the full ordering and why it sits just above the halo).
+    #
+    # render_fill_polygon_utm here is the CLOSED union already clipped to the
+    # parcel boundary, and unlike every other layer's render_fill it is the
+    # same geometry as its polygon_utm equivalent -- a closing is extensive
+    # and there is no display-only opening to apply (see exclusion_zones.py).
+    # No smoothing either: the production fill is smoothed because contour
+    # clipping against a 5 m staircase shows, but this draws as flat fill
+    # with no edge stroke, where the staircase is invisible at map scale.
+    exclusion_fill_utm = exclusion_result.get("render_fill_polygon_utm")
+    if exclusion_fill_utm is not None and not exclusion_fill_utm.is_empty:
+        exclusion_fill = _reproject_utm_geometry_to_mercator(exclusion_fill_utm, dem["crs"])
+        for part in (
+            exclusion_fill.geoms if exclusion_fill.geom_type == "MultiPolygon" else [exclusion_fill]
+        ):
+            if part.is_empty:
+                continue
+            plot_polygon(
+                part,
+                ax=ax,
+                add_points=False,
+                facecolor=EXCLUSION_ZONE_COLOR,
+                edgecolor="none",
+                alpha=EXCLUSION_ZONE_ALPHA,
+                zorder=EXCLUSION_ZONE_ZORDER,
+            )
+            drew_exclusion = True
 
     for stream in water_features.get("streams", []):
         if not stream.get("geometry"):
@@ -2135,12 +2209,14 @@ def render_layout_map(
 
     # Icon legend: assembled ONCE, here, after all drawing -- in the fixed KSOP
     # order below, which is deliberately NOT the draw order (fences -> production
-    # -> water -> road -> tree -> keypoints -> structure). One entry per feature
+    # -> water -> road -> tree -> keypoints -> structure; exclusion leads, being
+    # the ground layer everything else sits on). One entry per feature
     # that drew anything; a feature that drew nothing contributes none, so an
     # empty map produces an empty legend and no frame (the same guard the old
     # plain-text box used). Each handle is a DRAWN symbol matching the map (see
     # _legend_handle_for()); no label carries any per-feature data.
     legend_features = [
+        ("exclusion", drew_exclusion),
         ("keypoints", drew_keypoints),
         ("production", drew_production),
         ("water", drew_water),
