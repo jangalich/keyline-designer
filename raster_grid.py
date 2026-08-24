@@ -786,9 +786,12 @@ def angular_smooth_polygon(geometry, simplify_tolerance: float, chaikin_iteratio
     cell-union footprint, which is routinely a MultiPolygon and routinely
     carries interior rings, so the polygon-level wrapper is needed either way.
 
-    Non-polygonal input (an empty geometry, a GeometryCollection) is returned
-    UNCHANGED rather than raising -- same degradation contract as the invalid
-    case below.
+    Non-polygonal input (a GeometryCollection, a LineString) and EMPTY input are
+    both returned UNCHANGED rather than raising -- same degradation contract as
+    the invalid case below. The empty check is explicit and comes first: an
+    empty Polygon still reports geom_type 'Polygon' but has a zero-length
+    exterior coordinate sequence, which indexes out of range rather than raising
+    anything the except clause below would catch.
 
     DEGRADES, NEVER RAISES: if smoothing yields empty or invalid geometry (a
     Chaikin pass self-intersecting a very thin sliver, a ring left with too few
@@ -810,6 +813,9 @@ def angular_smooth_polygon(geometry, simplify_tolerance: float, chaikin_iteratio
         interiors = [_smooth_ring_coords(interior) for interior in poly.interiors]
         return Polygon(exterior, interiors)
 
+    if geometry.is_empty:
+        return geometry
+
     try:
         if geometry.geom_type == "MultiPolygon":
             smoothed = MultiPolygon([_smooth_polygon(part) for part in geometry.geoms])
@@ -822,7 +828,9 @@ def angular_smooth_polygon(geometry, simplify_tolerance: float, chaikin_iteratio
         if smoothed.is_empty or not smoothed.is_valid:
             return geometry
         return smoothed
-    except (ValueError, TypeError):
-        # A degenerate ring (too few coordinates after simplify, etc.) can make
-        # Polygon()/MultiPolygon() raise -- degrade to the unsmoothed input.
+    except (IndexError, ValueError, TypeError):
+        # A degenerate ring (too few coordinates after simplify, an empty ring
+        # inside an otherwise non-empty MultiPolygon) can make Polygon()/
+        # MultiPolygon() raise or index out of range -- degrade to the
+        # unsmoothed input either way, per this function's own contract.
         return geometry

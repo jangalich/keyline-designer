@@ -153,6 +153,68 @@ directions in test_exclusion_zones.py:
 
     raw_excluded_union_utm  ⊆  render_fill_polygon_utm  ⊆  boundary_polygon_utm
 
+--- EXCLUSION SMOOTHING: MEASURED AND REJECTED ---
+
+render_fill_polygon_utm is a 5 m cell-union staircase and reads as one.
+A branch set out to fix that by running the angular-simplify + Chaikin
+pass (raster_grid.angular_smooth_polygon(), the same treatment the
+production fill already gets) over the closed union, and deriving
+eligible_polygon_utm from the smoothed result so the two layers would
+share a boundary by construction.
+
+IT WAS NOT APPLIED, and the reason is measured, not aesthetic. The
+design rested on the direction of error being the safe one: Chaikin
+pushes outward at reflex vertices, and for an exclusion outward means
+MORE excluded -- over-exclude by a metre rather than leave ground with
+trees on it selectable. That premise is wrong here, for two compounding
+reasons (both measured in test_exclusion_smoothing.py):
+
+  A closed-ring Chaikin pass is net area-REDUCING, always. Corner-
+  cutting does push outward at reflex vertices and inward at convex
+  ones, but a simple closed ring turns a net +360 degrees, so the
+  convex cuts always outweigh the reflex ones. There is no shape for
+  which it comes out net-outward. The intuition transfers from the
+  OPEN-polyline case (a road corridor), where it is fine.
+
+  The simplify pass amplifies exactly that term. Chaikin's cut is
+  proportional to the length of the edges meeting at a vertex.
+  Collapsing the staircase's collinear runs is what makes the shape
+  readable, and it is also what turns hundreds of 5 m edges into a few
+  long ones -- so every corner cut afterwards removes a far bigger
+  triangle. Run alone neither pass moves the union more than 1.3%;
+  composed in the only sensible order they move it 4.7%.
+
+On a reference-shaped fixture (7.7 ac across 18 polygons) at the
+GENTLEST supportable settings -- one DEM cell of tolerance, one Chaikin
+pass, with nothing gentler available -- the smoothed union cuts 2652 m²
+= 0.655 acres INSIDE the closed union. That is gate-excluded ground
+republished as selectable. For scale, the largest gain any closing
+radius in this module produces on the reference boundaries is +0.370
+acres, and every one of those radii was measured at cell-level
+precision. Smoothing would give back 1.8x what all five closings
+together were tuned to add, in the one direction this layer cannot
+afford to be wrong in.
+
+The obvious repair does not work either: unioning the smoothed result
+back with the closed union makes containment exact, but it restores the
+original steps everywhere the smooth cut inward and keeps the smoothed
+arcs everywhere else, leaving 122% of the vertex count of the staircase
+it was meant to remove.
+
+What DID survive the branch is the half that was sound independently:
+eligible_polygon_utm is DERIVED as boundary_polygon_utm minus the
+published exclusion rather than computed on its own. Two layers derived
+from one geometry share a boundary by construction -- no sliver
+belonging to neither, no overlap claimed by both -- and that is a
+property of deriving, not of smoothing, so it holds for the exact
+closed union just as it would have for a smoothed one. It is asserted
+for both in test_exclusion_smoothing.py.
+
+If this is revisited, the thing to change is the OPERATION, not the
+constants -- there is no tolerance below one cell to retreat to. An
+outward-biased smoother (one whose error direction can be pinned) is
+the shape of the answer.
+
 --- ACREAGE IS COUNTED IN CELLS ---
 
 Every acreage this module reports -- per layer, the union, the pairwise
