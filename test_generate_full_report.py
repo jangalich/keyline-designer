@@ -132,6 +132,10 @@ def _synthetic_context(water_zones: list[dict]) -> PipelineContext:
         boundary_polygon_utm=Polygon([(0, 0), (100, 0), (100, 100), (0, 100)]),
         valleys=[{"valley_id": 3}],
         keypoints=[{"id": 0, "valley_id": 3, "elevation_m": 346.5}],
+        # Opaque sentinel: generate_full_report.py has no exclusion-zone
+        # consumer (nothing downstream does -- see pipeline_context.py's own
+        # field notes), so its contents are never dereferenced by this test.
+        exclusion_zones={"sentinel": "ez0"},
         production_areas=[{"patch_id": "p0"}, {"patch_id": "p1"}],
         parcel_acres=2.47,
         existing_roads=None,

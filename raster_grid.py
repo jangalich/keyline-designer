@@ -286,6 +286,83 @@ def waist_erosion_radius_cells(dem: dict, min_waist_meters: float) -> int:
     return max(1, math.ceil(min_waist_meters / cell_size / 2.0))
 
 
+def closing_radius_cells(dem: dict, radius_meters: float) -> int:
+    """
+    Metres -> cell radius for a disc closing, using the DEM's own
+    resolution_meters. cell_size is the mean of the DEM's two pixel
+    dimensions (they are usually equal but computed independently
+    upstream, see dem_data.get_dem_for_boundary()).
+
+    Deliberately NOT waist_erosion_radius_cells() directly above: that
+    one converts a minimum waist WIDTH and halves it, and rounds UP so a
+    real waist is reliably eroded away. A closing radius is ALREADY a
+    radius, so this is a plain round() with no halving. round() is used,
+    not ceil(), so a positive radius smaller than half a cell honestly
+    reports "0 cells, no-op" (surfaced by effective_radius_meters()
+    below) instead of being inflated to a full cell -- e.g. 2 m at the
+    pipeline's 5 m DEM resolution is 0 cells, not 1.
+
+    SHARED, one definition: diagnose_exclusion_footprints.py measured the
+    per-gate exclusion footprints with this conversion and
+    exclusion_zones.py applies it in production, so the module that
+    MEASURED the radii and the module that APPLIES them cannot drift
+    apart. Same "shared helper, one definition" reasoning
+    cell_union_footprint()/waist_erosion_radius_cells() above already
+    established.
+    """
+    px, py = dem["resolution_meters"]
+    cell_size = (px + py) / 2.0
+    return max(0, int(round(radius_meters / cell_size)))
+
+
+def effective_radius_meters(dem: dict, radius_cells: int) -> float:
+    """The ground radius an integer cell radius really corresponds to --
+    the honest read-back of closing_radius_cells()' quantization, so a
+    caller can report what was ACTUALLY applied rather than what was
+    asked for."""
+    px, py = dem["resolution_meters"]
+    return radius_cells * (px + py) / 2.0
+
+
+def disc_closing(mask: np.ndarray, radius_cells: int) -> np.ndarray:
+    """
+    Morphological closing (dilate THEN erode) with the disc structuring
+    element, at radius_cells.
+
+    DISC, not square: a square element produces 45-degree facets at
+    radius 2 and above, and on an exclusion layer those facets are edges
+    a user eventually draws production ground against. Same element=
+    "disc" choice production_area.py's own render opening makes.
+
+    The mask is PADDED by radius_cells + 1 cells of background before the
+    dilation and cropped back afterwards. _shift() treats everything
+    beyond the array bounds as background, so without the pad the erosion
+    half would chew into any region touching the grid edge and the
+    operation would NOT be extensive. With the pad, closed >= mask holds
+    for every input (asserted in both callers' fixtures).
+
+    EXTENSIVE, unlike every other morphology in this module: a closing
+    only ever ADDS cells. binary_erode()/eroded_cell_mask()/
+    attempt_waist_split() are all anti-extensive (they remove). A caller
+    that reasons about a closed mask the way it reasons about an opened
+    one has the inequality backwards -- see exclusion_zones.py's own
+    render_fill_polygon_utm notes.
+
+    radius_cells <= 0 returns a copy unchanged -- the raw footprint, no
+    closing at all, which is a real configuration (a gate whose measured
+    closing radius is 0.0 m), not a degenerate one.
+    """
+    if radius_cells <= 0:
+        return mask.copy()
+
+    pad = radius_cells + 1
+    padded = np.pad(mask, pad, mode="constant", constant_values=False)
+    closed = binary_erode(
+        binary_dilate(padded, radius_cells, element="disc"), radius_cells, element="disc"
+    )
+    return closed[pad:-pad, pad:-pad]
+
+
 def reclaim_stripped_cells(
     cluster_cells: set[tuple[int, int]],
     seed_labels: dict[tuple[int, int], int],
