@@ -348,8 +348,16 @@ FIXTURES = (rolling_fixture, ridge_fixture)
 
 
 def fixture_union(builder):
+    """The RAW, unsimplified eligible union -- simplify_tolerance_cells=0.0.
+
+    build_eligible_union() now applies the angular simplify by default (see
+    exclusion_zones.ELIGIBLE_UNION_SIMPLIFY_TOLERANCE_CELLS, which this script's
+    own measurements decided). This script's baseline must stay the exact cell
+    staircase: measuring an operation against an already-simplified union would
+    report each option's effect on top of the shipped one rather than its own.
+    """
     name, dem, boundary, eligible = builder()
-    union = build_eligible_union(dem, eligible, boundary)
+    union = build_eligible_union(dem, eligible, boundary, simplify_tolerance_cells=0.0)
     return name, dem, boundary, union
 
 

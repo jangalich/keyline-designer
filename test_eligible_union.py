@@ -33,6 +33,7 @@ import exclusion_zones as ez
 from exclusion_zones import (
     ELIGIBLE_UNION_CONNECTIVITY,
     ELIGIBLE_UNION_MIN_CLUSTER_ACRES,
+    ELIGIBLE_UNION_SIMPLIFY_TOLERANCE_CELLS,
     LAYER_ORDER,
     build_eligible_union,
 )
@@ -183,26 +184,44 @@ _trimmed_away_acres = int(_trimmed_away.sum()) * _area_per_cell
 
 # The trimmed ground must be INSIDE the eligible union: it passed every
 # physical gate and was dropped by an advisory design judgement.
+#
+# Measured against the EXACT (unsimplified) union, because the property under
+# test is which CELLS go in, not what the display simplify does to the edge.
+# The shipped, simplified union is checked separately below against its own
+# tolerance -- conflating the two would let a simplify regression hide inside
+# a pre-ceiling assertion, or vice versa.
+_flat_union_exact = build_eligible_union(
+    _FLAT_DEM, _flat_step1["eligible_mask"], _FLAT_BOUNDARY, simplify_tolerance_cells=0.0
+)
 _flat_union = _FLAT_RESULT["eligible_union_utm"]
 _trimmed_footprint = ez._mask_polygon(_FLAT_DEM, _trimmed_away, _FLAT_BOUNDARY)
-_uncovered = _trimmed_footprint.difference(_flat_union).area
+_uncovered = _trimmed_footprint.difference(_flat_union_exact).area
 
 assert _uncovered < 1e-6, (
-    f"every cell the ceiling trim removed must still be inside the eligible union -- the ceiling is "
-    f"advisory and must not narrow the highlight; {_uncovered:.6f} m2 was left out"
+    f"every cell the ceiling trim removed must still be inside the EXACT eligible union -- the ceiling "
+    f"is advisory and must not narrow the highlight; {_uncovered:.6f} m2 was left out"
+)
+# And on the shipped geometry the shortfall is the simplify's, bounded by its
+# own tolerance rather than by anything the ceiling did.
+_shipped_uncovered = _trimmed_footprint.difference(_flat_union).area
+_simplify_tolerance_m = ELIGIBLE_UNION_SIMPLIFY_TOLERANCE_CELLS * CELL
+assert _trimmed_footprint.difference(_flat_union.buffer(_simplify_tolerance_m)).area < 1e-6, (
+    f"on the SHIPPED (simplified) union any shortfall must be within the simplify tolerance "
+    f"({_simplify_tolerance_m} m), not a real loss of gate-eligible ground"
 )
 # And the survivors-only union really is smaller, so this is a live difference.
 _survivor_mask = _mask((_FLAT_ROWS, _FLAT_COLS), _trim["survivor_cells"])
-_survivor_union = build_eligible_union(_FLAT_DEM, _survivor_mask, _FLAT_BOUNDARY)
+_survivor_union = build_eligible_union(_FLAT_DEM, _survivor_mask, _FLAT_BOUNDARY, simplify_tolerance_cells=0.0)
 _ceiling_gap_acres = (_flat_union.area - _survivor_union.area) / _ACRE
 assert _ceiling_gap_acres > 0.0, "the pre-ceiling union must be strictly larger than a post-ceiling one"
 
 print(
     f"2. PRE-CEILING: on a ceiling-firing fixture ({_trim['pre_trim_acres']} ac eligible on a "
     f"{_trim['parcel_acres']} ac parcel, ceiling {PRODUCTION_CEILING_PCT_OF_PARCEL}%), the trim removes "
-    f"{_trim['cells_removed']} cells = {_trimmed_away_acres:.3f} ac. ALL of it stays inside the eligible "
-    f"union (0 m2 left out). Building post-ceiling instead would shrink the highlight by "
-    f"{_ceiling_gap_acres:.3f} ac -- ground that passed every physical gate."
+    f"{_trim['cells_removed']} cells = {_trimmed_away_acres:.3f} ac. ALL of it stays inside the exact "
+    f"eligible union ({_uncovered:.6f} m2 left out; {_shipped_uncovered:.6f} m2 on the shipped simplified "
+    f"union, within its {_simplify_tolerance_m} m tolerance). Building post-ceiling instead would shrink "
+    f"the highlight by {_ceiling_gap_acres:.3f} ac -- ground that passed every physical gate."
 )
 
 
@@ -224,7 +243,7 @@ assert _speck_area < ELIGIBLE_UNION_MIN_CLUSTER_ACRES < _pocket_area, (
     f"({_pocket_area:.4f} ac) above the {ELIGIBLE_UNION_MIN_CLUSTER_ACRES} ac floor"
 )
 
-_floored = build_eligible_union(_SPECK_DEM, _speck_mask, _SPECK_BOUNDARY)
+_floored = build_eligible_union(_SPECK_DEM, _speck_mask, _SPECK_BOUNDARY, simplify_tolerance_cells=0.0)
 _speck_footprint = ez._mask_polygon(_SPECK_DEM, _mask(_SPECK_SHAPE, _speck_cells), _SPECK_BOUNDARY)
 _pocket_footprint = ez._mask_polygon(_SPECK_DEM, _mask(_SPECK_SHAPE, _pocket_cells), _SPECK_BOUNDARY)
 
@@ -265,7 +284,8 @@ def _connectivity_table(dem, mask, boundary):
         labels, count = connected_components(mask, connectivity=conn)
         for floor in (0.0, 0.05, 0.1):
             union = build_eligible_union(
-                dem, mask, boundary, min_cluster_acres=floor, connectivity=conn
+                dem, mask, boundary, min_cluster_acres=floor, connectivity=conn,
+                simplify_tolerance_cells=0.0,
             )
             min_cells = 0 if floor <= 0 else int(np.ceil(floor / cell_area_acres(dem)))
             surviving = sum(1 for lab in range(count) if int((labels == lab).sum()) >= min_cells)
@@ -402,6 +422,67 @@ assert _wire["setback_lower_bound_reason"] == _RESULT["narrative_data"]["setback
     "the wire's reason code and narrative_data's must not be allowed to drift apart"
 )
 
+# (1) Per-layer geometry in WGS84 -- what makes the per-layer split usable at
+#     all. Without it a caution naming WHICH gate a drawing crossed cannot be
+#     computed, which defeats the reason for shipping the layers.
+for _layer in _wire["layers"]:
+    _stored = _RESULT["layers"][_layer["type"]]["polygon_utm"]
+    if _stored.is_empty:
+        assert _layer["geometry_wgs84"] is None, (
+            f"{_layer['type']}: an empty layer must ship a null geometry, not an empty GeoJSON body"
+        )
+    else:
+        assert _layer["geometry_wgs84"] is not None, (
+            f"{_layer['type']}: a layer with real geometry must ship it -- got null"
+        )
+        assert _layer["geometry_wgs84"]["type"] in ("Polygon", "MultiPolygon"), (
+            f"{_layer['type']}: per-layer geometry must be GeoJSON Polygon/MultiPolygon, got "
+            f"{_layer['geometry_wgs84']['type']}"
+        )
+_with_geometry = [l["type"] for l in _wire["layers"] if l["geometry_wgs84"] is not None]
+assert _with_geometry, "fixture sanity: at least one layer must carry real geometry here"
+
+# (2) data_available, and it must be DISTINCT from "the geometry is empty".
+#     A layer that was never checked and a layer that excludes nothing both
+#     ship a null geometry and must not produce the same caution.
+_availability = {l["type"]: l["data_available"] for l in _wire["layers"]}
+assert set(_availability) == set(LAYER_ORDER), "every layer needs a data_available flag"
+assert all(isinstance(_v, bool) for _v in _availability.values()), "data_available must be a plain bool"
+for _layer in _wire["layers"]:
+    assert _layer["data_available"] == _RESULT["layers"][_layer["type"]]["data_available"], (
+        f"{_layer['type']}: the wire's data_available must agree with layers[*]'s"
+    )
+# The distinction is only real if the two can actually disagree -- demonstrated
+# by running with the soil and road gates switched off, which leaves them
+# UNAVAILABLE while their geometry is null either way.
+with mock_patch.object(ez, "get_required_tree_root_zone_mask_utm", return_value=_CANOPY):
+    _unchecked = ez.identify_exclusion_zones(
+        None, dem=_DEM, boundary_polygon_utm=_BOUNDARY, check_soil=False, check_roads=False
+    )
+_unchecked_by_type = {l["type"]: l for l in _unchecked["wire"]["layers"]}
+assert _unchecked_by_type["hydric"]["data_available"] is False, "an unchecked gate must report unavailable"
+assert _unchecked_by_type["hydric"]["geometry_wgs84"] is None, "...while its geometry is null"
+assert _availability["hydric"] is True, (
+    "and the SAME gate, checked and genuinely clean, must report available with the same null geometry "
+    "-- that is the whole distinction"
+)
+assert _label_by_type["hydric"] == _unchecked_by_type["hydric"]["label"], (
+    "the two cases are distinguished by data_available, not by a different label"
+)
+
+# (3) The thresholds as NUMBERS, not only baked into label prose.
+assert isinstance(_wire["max_slope_pct"], float), "max_slope_pct must ship as a number"
+assert isinstance(_wire["boundary_setback_meters"], float), "boundary_setback_meters must ship as a number"
+assert _wire["max_slope_pct"] == 20.0, f"got {_wire['max_slope_pct']}"
+assert _retuned["wire"]["max_slope_pct"] == 12.5, (
+    f"the numeric threshold must track the run too, got {_retuned['wire']['max_slope_pct']}"
+)
+
+# (4) The CRS. Every acreage the frontend computes from an intersection is in
+#     this zone's projected metres; cell_size_meters is meaningless without it.
+assert isinstance(_wire["crs"], str) and _wire["crs"], "crs must ship as a non-empty string"
+assert _wire["crs"] == _DEM["crs"], f"crs must be the DEM's own, got {_wire['crs']!r}"
+
 # Off-parcel is NOT shipped: the frontend has the boundary and derives the scrim.
 _wire_text = repr(_wire).lower()
 for _forbidden in ("off_parcel", "offparcel", "scrim", "halo"):
@@ -412,9 +493,13 @@ assert "eligible_union_wgs84" in _RESULT and _RESULT["eligible_union_wgs84"]["ty
 ), "the eligible union must ship as GeoJSON for the wire"
 print(
     f"6. WIRE: 5 distinct stable type identifiers {tuple(_types)}, each with a separate display label "
-    f"stating its test ({_label_by_type['slope']!r}, {_label_by_type['setback']!r}); labels track the run's "
-    f"real thresholds; cell_size_meters ships both dimensions {_cell_size}; the setback caveat flag and "
-    f"reason code are carried and agree with narrative_data; no off-parcel geometry is shipped."
+    f"stating its test ({_label_by_type['slope']!r}, {_label_by_type['setback']!r}); labels and the numeric "
+    f"thresholds both track the run (max_slope_pct={_wire['max_slope_pct']}, "
+    f"boundary_setback_meters={_wire['boundary_setback_meters']}); per-layer WGS84 geometry present for "
+    f"{len(_with_geometry)}/{len(LAYER_ORDER)} layers ({', '.join(_with_geometry)}) and null for the rest; "
+    f"data_available distinguishes checked-and-clean from never-checked on the SAME null geometry; "
+    f"crs={_wire['crs']!r}; cell_size_meters ships both dimensions {_cell_size}; the setback caveat flag "
+    f"and reason code agree with narrative_data; no off-parcel geometry is shipped."
 )
 
 
@@ -485,6 +570,119 @@ print(
     f"   on the finger fixture at r=5 m the true boundary moves {_ridge_r1['max_inward_excursion_m']:.2f} m,\n"
     f"   because an opening deletes any protrusion too thin to hold a radius-r disc, however long it is.\n"
     f"   Option 1's simplify half IS bounded by its tolerance (5.00 m against a 5 m tolerance, both fixtures)."
+)
+
+
+# ===========================================================================
+# 8. THE SIMPLIFY BOUND -- THIS BRANCH'S LOAD-BEARING GUARANTEE
+# ===========================================================================
+#
+# The staircase is removed by an angular simplify and nothing else: no Chaikin
+# pass, no vector opening (see ELIGIBLE_UNION_SIMPLIFY_TOLERANCE_CELLS for the
+# measurements that rejected both). What makes simplify the right pass is that
+# its error is PROVABLY bounded -- Douglas-Peucker never moves a ring further
+# than the tolerance it was given -- so that bound gets the same assertion
+# Option 2's false one got, on both fixtures, rather than being trusted.
+
+_TOL_M = ELIGIBLE_UNION_SIMPLIFY_TOLERANCE_CELLS * CELL
+
+for _fixture_name, _rows in ((_name_a, _rows_a), (_name_b, _rows_b)):
+    _simplify_row = [r for r in _rows if r["label"].startswith("opt1: simplify only")][0]
+    _baseline = _rows[0]
+
+    # THE BOUND. Douglas-Peucker's guarantee, asserted rather than assumed.
+    assert _simplify_row["max_inward_excursion_m"] <= _TOL_M + 1e-6, (
+        f"{_fixture_name}: simplify must not move the ring further than its own tolerance -- got "
+        f"{_simplify_row['max_inward_excursion_m']:.4f} m against {_TOL_M} m"
+    )
+    # AND THE BOUND IS TIGHT. On a cell staircase the worst-case deviation is a
+    # full step, so the measured excursion should reach the tolerance, not sit
+    # well under it. A number far below would mean the tolerance is not the
+    # thing actually constraining the result and the guarantee is incidental.
+    assert abs(_simplify_row["max_inward_excursion_m"] - _TOL_M) < 1e-6, (
+        f"{_fixture_name}: on a cell staircase the bound should be ATTAINED (worst case is a full step) -- "
+        f"got {_simplify_row['max_inward_excursion_m']:.4f} m against {_TOL_M} m"
+    )
+
+    # STRUCTURE SURVIVES. A tolerance change could silently collapse a hole or
+    # dissolve a part; neither may happen without this failing.
+    assert _simplify_row["polygons_after"] == _baseline["polygons_before"], (
+        f"{_fixture_name}: simplify must not change the polygon count -- "
+        f"{_baseline['polygons_before']} -> {_simplify_row['polygons_after']}"
+    )
+    assert _simplify_row["holes_after"] == _baseline["holes_before"], (
+        f"{_fixture_name}: simplify must not collapse an interior ring -- "
+        f"{_baseline['holes_before']} -> {_simplify_row['holes_after']}"
+    )
+    # AND THE STAIRCASE IS ACTUALLY GONE -- the point of the pass.
+    assert _simplify_row["one_cell_segments_after"] < _baseline["one_cell_segments_before"] / 50, (
+        f"{_fixture_name}: the staircase must be removed, not trimmed -- "
+        f"{_baseline['one_cell_segments_before']} -> {_simplify_row['one_cell_segments_after']} "
+        f"one-cell segments"
+    )
+    assert _simplify_row["vertices_after"] < _baseline["vertices_before"], (
+        f"{_fixture_name}: simplify must REDUCE vertex count (a Chaikin pass inflates it)"
+    )
+
+_a_simplify = [r for r in _rows_a if r["label"].startswith("opt1: simplify only")][0]
+_b_simplify = [r for r in _rows_b if r["label"].startswith("opt1: simplify only")][0]
+print(
+    f"8. SIMPLIFY BOUND (the shipped operation, both fixtures):\n"
+    f"   max excursion {_a_simplify['max_inward_excursion_m']:.2f} m and "
+    f"{_b_simplify['max_inward_excursion_m']:.2f} m against a {_TOL_M} m tolerance -- bounded AND attained,\n"
+    f"   so the tolerance is the thing genuinely constraining the result.\n"
+    f"   Staircase: {_rows_a[0]['one_cell_segments_before']} -> {_a_simplify['one_cell_segments_after']} and "
+    f"{_rows_b[0]['one_cell_segments_before']} -> {_b_simplify['one_cell_segments_after']} one-cell segments.\n"
+    f"   Vertices: {_rows_a[0]['vertices_before']} -> {_a_simplify['vertices_after']} and "
+    f"{_rows_b[0]['vertices_before']} -> {_b_simplify['vertices_after']}.\n"
+    f"   Polygons and interior rings unchanged on both "
+    f"({_a_simplify['polygons_after']}/{_a_simplify['holes_after']} and "
+    f"{_b_simplify['polygons_after']}/{_b_simplify['holes_after']})."
+)
+
+
+# ===========================================================================
+# 9. THE SHIPPED UNION IS THE SIMPLIFIED ONE
+# ===========================================================================
+#
+# Sections 2-4 deliberately build with simplify_tolerance_cells=0.0 so they
+# measure the cluster floor rather than the display pass. This checks the
+# thing those sections switch off: what identify_exclusion_zones() actually
+# returns has the simplify applied.
+
+_shipped = _RESULT["eligible_union_utm"]
+_exact = build_eligible_union(_DEM, _step1["eligible_mask"], _BOUNDARY, simplify_tolerance_cells=0.0)
+
+assert not _shipped.equals(_exact), "the shipped eligible union must be the SIMPLIFIED geometry"
+_shipped_verts = sum(len(p.exterior.coords) for p in (
+    [_shipped] if _shipped.geom_type == "Polygon" else list(_shipped.geoms)))
+_exact_verts = sum(len(p.exterior.coords) for p in (
+    [_exact] if _exact.geom_type == "Polygon" else list(_exact.geoms)))
+assert _shipped_verts < _exact_verts, (
+    f"the shipped union must carry fewer vertices than the exact footprint -- {_exact_verts} -> {_shipped_verts}"
+)
+assert _shipped.is_valid, "the shipped eligible union must be valid geometry"
+# The WGS84 field is the SAME geometry, not a separately-built one.
+_shipped_wgs84 = _RESULT["eligible_union_wgs84"]
+assert _shipped_wgs84["type"] == _shipped.geom_type, (
+    f"eligible_union_wgs84 must carry the same geometry as eligible_union_utm -- "
+    f"{_shipped_wgs84['type']} vs {_shipped.geom_type}"
+)
+_wgs84_verts = sum(len(ring) for poly in (
+    _shipped_wgs84["coordinates"] if _shipped_wgs84["type"] == "MultiPolygon"
+    else [_shipped_wgs84["coordinates"]]) for ring in poly)
+_shipped_all_verts = sum(
+    len(p.exterior.coords) + sum(len(i.coords) for i in p.interiors)
+    for p in ([_shipped] if _shipped.geom_type == "Polygon" else list(_shipped.geoms))
+)
+assert _wgs84_verts == _shipped_all_verts, (
+    f"the WGS84 payload must be the simplified geometry too, not a re-derived one -- "
+    f"{_wgs84_verts} vs {_shipped_all_verts} coordinates"
+)
+print(
+    f"9. SHIPPED GEOMETRY: eligible_union_utm carries the simplified union "
+    f"({_exact_verts} -> {_shipped_verts} exterior vertices), it is valid, and eligible_union_wgs84 is the "
+    f"same geometry reprojected ({_wgs84_verts} coordinates, matching)."
 )
 
 

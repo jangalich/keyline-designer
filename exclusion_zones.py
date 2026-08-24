@@ -382,6 +382,48 @@ fragmenting them, so fewer real runs of selectable ground fall under the
 floor and get dropped. See test_eligible_union.py for the measured 4-vs-8
 comparison at three floors. CONFIGURABLE."""
 
+ELIGIBLE_UNION_SIMPLIFY_TOLERANCE_CELLS = 1.0
+"""Angular simplify tolerance for the eligible union, in DEM CELLS --
+multiplied by the DEM's own cell size at the point of use, the same pattern
+render_layout_map.PRODUCTION_FILL_SIMPLIFY_TOLERANCE_CELLS uses, so it stays
+"one cell" at any resolution. A metres constant would hardcode the grid.
+
+WHAT THIS BUYS, MEASURED (diagnose_eligible_union_staircase.py, two
+boundary-shaped fixtures): the 5 m cell staircase goes from 690 and 1743
+one-cell axis-aligned boundary segments down to 3 on both; exterior vertices
+drop 200 -> 41 and 1304 -> 258; area moves by +0.09% and -1.29%; polygon and
+interior-ring counts are untouched. The error is BOUNDED and the bound is the
+tolerance itself: Douglas-Peucker never moves a ring further than the
+tolerance it was given, measured at exactly 5.00 m against a 5 m tolerance on
+both fixtures and asserted in test_eligible_union.py.
+
+NO CHAIKIN PASS HERE, and this is a measured rejection rather than an
+omission -- someone will otherwise add one later on the reasonable-sounding
+grounds that simplify leaves hard corners. Measured on the same two fixtures:
+
+  Chaikin ALONE does not remove the staircase (3 one-cell segments still
+  present on the fingered fixture, the same count simplify alone leaves) and
+  INFLATES vertex count rather than reducing it -- 200 -> 399 and
+  1304 -> 2600, the opposite of what this geometry needs, since it is
+  transported to the frontend and clamped against.
+
+  Chaikin COMPOSED WITH simplify costs more area than either pass alone
+  (ratio 0.9955 and 0.9836, against 1.0009 / 0.9871 for simplify alone) and
+  it forfeits the bound: max excursion 10.50 m and 14.58 m against a 5 m
+  tolerance. This reproduces the interaction test_exclusion_smoothing.py
+  found on the exclusion union -- Chaikin's corner cut scales with edge
+  length, and collapsing the staircase is exactly what turns hundreds of 5 m
+  edges into a few long ones. The two passes are not independent and
+  composing them is worse than either.
+
+A vector opening (buffer(-r).buffer(+r)) was measured and rejected too: it
+raises vertex count 4-6x because round buffers emit arcs, and on ground with
+narrow fingers it is destructive (r = 3 cells removed 51% of the eligible
+area and turned 8 polygons into 15). Its advertised bounded-error guarantee
+also does not hold as stated -- see diagnose_eligible_union_staircase.
+max_inward_excursion(). CONFIGURABLE.
+"""
+
 CLOSING_RADIUS_METERS_BY_LAYER = {
     "canopy": CANOPY_EXCLUSION_CLOSING_RADIUS_METERS,
     "slope": SLOPE_EXCLUSION_CLOSING_RADIUS_METERS,
@@ -451,6 +493,22 @@ def _mask_polygon(dem: dict, mask: np.ndarray, boundary_polygon_utm: Polygon):
     this module. See the module docstring: there is deliberately no clip
     back to a raw footprint, because the closing is extensive and the
     closed geometry is the answer.
+
+    KNOWN FOLLOW-UP -- NOT FIXED HERE, DELIBERATELY. This intersection can
+    return a GeometryCollection carrying zero-area LINE pieces wherever a
+    cell edge runs exactly along the boundary. That alignment is not exotic:
+    the footprint and a grid-aligned boundary come off the same grid, and it
+    crashed the first run of diagnose_eligible_union_staircase.py through the
+    identical code path in build_eligible_union(), which now filters to
+    polygonal parts via _polygonal_only().
+
+    The same filter belongs here. It is not applied on this branch because
+    every pre-existing return key had to stay byte-identical, and this
+    function feeds five of them (layers[*]['polygon_utm'], excluded_union_
+    utm, render_fill_polygon_utm, raw_excluded_union_utm, and through them
+    geometry_wgs84). Changing it is a one-line edit plus a re-baseline of
+    those keys, and it should be its own change so the re-baseline is
+    reviewable on its own.
     """
     if not mask.any():
         return Polygon()
@@ -495,6 +553,7 @@ def build_eligible_union(
     boundary_polygon_utm: Polygon,
     min_cluster_acres: float = ELIGIBLE_UNION_MIN_CLUSTER_ACRES,
     connectivity: int = ELIGIBLE_UNION_CONNECTIVITY,
+    simplify_tolerance_cells: float = ELIGIBLE_UNION_SIMPLIFY_TOLERANCE_CELLS,
 ):
     """
     One geometry covering every piece of ground a user may select: the
@@ -531,6 +590,18 @@ def build_eligible_union(
     is smaller by exactly the pinholes the closing absorbed, and using it
     here would silently apply the closing radii to the highlight.
 
+    SIMPLIFIED, NOT SMOOTHED. The staircase is removed with a single angular
+    simplify pass at ELIGIBLE_UNION_SIMPLIFY_TOLERANCE_CELLS (see that
+    constant for the measurement, and for why a Chaikin pass and a vector
+    opening were both measured and rejected). Pass
+    simplify_tolerance_cells=0.0 for the exact, unsimplified cell footprint --
+    diagnose_eligible_union_staircase.py does, since it measures operations
+    against the raw staircase as its baseline.
+
+    The simplify is applied LAST, after the cluster floor and the boundary
+    clip. Order matters: simplifying first would move the boundary before the
+    clip and let the union bleed a tolerance-width past the parcel edge.
+
     POLYGONAL PARTS ONLY. Clipping a cell footprint to the boundary can emit
     zero-area line pieces in the intersection wherever a cell edge runs exactly
     along the boundary -- which is not a rare alignment, since both are built
@@ -554,8 +625,20 @@ def build_eligible_union(
         if int(cluster.sum()) >= min_cells:
             surviving |= cluster
 
-    clipped = cell_union_footprint(dem, surviving).intersection(boundary_polygon_utm)
-    return _polygonal_only(clipped)
+    clipped = _polygonal_only(cell_union_footprint(dem, surviving).intersection(boundary_polygon_utm))
+    if simplify_tolerance_cells <= 0 or clipped.is_empty:
+        return clipped
+
+    tolerance_m = simplify_tolerance_cells * max(dem["resolution_meters"])
+    simplified = _polygonal_only(clipped.simplify(tolerance_m, preserve_topology=True))
+    # preserve_topology=True already rules out self-intersection and dropped
+    # rings, but this geometry is clamped against, so a degraded result falls
+    # back to the exact footprint rather than shipping something invalid --
+    # the same degrade-never-raise contract raster_grid.angular_smooth_
+    # polygon() carries.
+    if simplified.is_empty or not simplified.is_valid:
+        return clipped
+    return simplified
 
 
 def _polygonal_only(geometry):
@@ -595,32 +678,50 @@ def _display_label(name: str, max_slope_pct: float, boundary_setback_meters: flo
 
 
 def _wire_layers(
+    dem: dict,
+    layers: dict[str, dict],
     layer_availability: dict[str, bool],
     max_slope_pct: float,
     boundary_setback_meters: float,
 ) -> list[dict]:
     """
-    The type/label pair per gate, in LAYER_ORDER. Kept as two SEPARATE fields
-    on purpose: `type` is the stable identifier the frontend branches on and
-    must never change; `label` is display prose that will be reworded. A
-    consumer that keys on the label instead is broken by the first copy edit,
-    which is exactly the failure this split exists to prevent.
+    Everything the frontend needs to intersect a drawn polygon against ONE
+    gate and caption what it crossed, per gate, in LAYER_ORDER.
 
-    DELIBERATELY ONLY THESE TWO FIELDS. `data_available` is a real gap here
-    -- "this layer excludes nothing" and "this layer was never checked"
-    produce the same empty geometry and must not produce the same caution --
-    but it was not on the specified wire list, so it is reported as a gap
-    rather than shipped on a guess. It is already carried per layer on
-    `layers[*]['data_available']`.
+    `type` AND `label` ARE TWO FIELDS ON PURPOSE. `type` is the stable
+    identifier the frontend branches on and must never change; `label` is
+    display prose that will be reworded. A consumer that keys on the label
+    instead is broken by the first copy edit, which is exactly the failure
+    this split exists to prevent.
+
+    `geometry_wgs84` is what makes the per-layer split useful at all: without
+    it only the eligible union ships in WGS84, and a caution naming WHICH gate
+    a drawing crossed is impossible to compute. None when the layer excludes
+    nothing on this parcel.
+
+    `data_available` is NOT decoration and must not be collapsed into "is the
+    geometry empty". A layer that was never checked (an unreachable SSURGO
+    endpoint, no lidar coverage) and a layer that genuinely excludes nothing
+    both produce a null geometry, and they must not produce the same caution:
+    one means "clear", the other means "unknown". Same class of distinction as
+    null-versus-zero in narrative_data.
     """
-    del layer_availability  # see above: reported as a gap, not shipped
-    return [
-        {
-            "type": name,
-            "label": _display_label(name, max_slope_pct, boundary_setback_meters),
-        }
-        for name in LAYER_ORDER
-    ]
+    wire_layers = []
+    for name in LAYER_ORDER:
+        polygon_utm = layers[name]["polygon_utm"]
+        wire_layers.append(
+            {
+                "type": name,
+                "label": _display_label(name, max_slope_pct, boundary_setback_meters),
+                "data_available": bool(layer_availability[name]),
+                "geometry_wgs84": (
+                    transform_geom(dem["crs"], "EPSG:4326", mapping(polygon_utm))
+                    if not polygon_utm.is_empty
+                    else None
+                ),
+            }
+        )
+    return wire_layers
 
 
 def build_narrative_data(
@@ -1091,7 +1192,9 @@ def identify_exclusion_zones(
             else None
         ),
         "wire": {
-            "layers": _wire_layers(layer_availability, max_slope_pct, boundary_setback_meters),
+            "layers": _wire_layers(
+                dem, layers, layer_availability, max_slope_pct, boundary_setback_meters
+            ),
             # BOTH dimensions, in metres. Every acreage the frontend computes
             # from an intersection is cells x cell_area, and DEM resolution is
             # not square -- the two reference DEMs are 4.99 x 5.00 and
@@ -1104,6 +1207,18 @@ def identify_exclusion_zones(
             # the truth is that the other gates never ran there.
             "setback_is_lower_bound": True,
             "setback_lower_bound_reason": "steep_ring_ground_counted_in_slope_layer",
+            # The thresholds as NUMBERS, not only as prose inside the labels
+            # above. The label is for display; these are for logic -- sorting,
+            # re-wording, or recomputing a caution against the value that was
+            # actually tested. A consumer parsing "20.0" back out of a label
+            # string is a consumer broken by the next copy edit.
+            "max_slope_pct": float(max_slope_pct),
+            "boundary_setback_meters": float(boundary_setback_meters),
+            # Every acreage the frontend computes from an intersection is in
+            # the projected metres of THIS UTM zone -- cell_size_meters above
+            # is meaningless without it. Leaving it implicit is how a parcel
+            # near a zone boundary produces quietly wrong numbers.
+            "crs": str(dem["crs"]),
         },
         "eligible_mask": eligible_mask,
         "excluded_union_mask": union_mask,
