@@ -24,6 +24,10 @@ from flask_cors import CORS
 from generate_full_report import generate_full_report
 from generate_pdf_report import generate_full_report_pdf
 from geocode import geocode_address
+from production_zone_payload import (
+    LayerFetchError,
+    build_production_zone_payload,
+)
 
 app = Flask(__name__)
 
@@ -56,6 +60,31 @@ def _parse_access_point(data: dict) -> tuple[float, float]:
         raise ValueError("'access_point' must be a [longitude, latitude] pair of numbers.")
 
     return (float(access_point[0]), float(access_point[1]))
+
+
+def _parse_boundary(data: dict) -> list:
+    """
+    Pulls and validates the required 'boundary' field, raising ValueError
+    with a caller-facing message -- same shape and same convention as
+    _parse_access_point() above, and the caller turns it into a 400.
+
+    /api/generate-report and /api/generate-report-pdf still carry their own
+    inline copies of these two checks. That duplication is REAL and is left
+    in place deliberately: collapsing it would mean editing the request
+    handling of the two endpoints the existing boundary -> access point ->
+    PDF flow runs through, and this branch adds a parallel path rather than
+    disturbing that one. Worth folding together in a branch that is allowed
+    to touch them.
+    """
+    if not data or "boundary" not in data:
+        raise ValueError("Request must include a 'boundary' field.")
+
+    boundary = data["boundary"]
+
+    if not isinstance(boundary, list) or len(boundary) < 3:
+        raise ValueError("Boundary must be a list of at least 3 [lon, lat] points.")
+
+    return boundary
 
 
 # CORS (Cross-Origin Resource Sharing) lets the frontend call this API
@@ -235,6 +264,64 @@ def generate_report_pdf_endpoint():
 
     except Exception as e:
         return jsonify({"error": f"PDF report generation failed: {str(e)}"}), 500
+
+
+@app.route("/api/production-zones", methods=["POST"])
+def production_zones_endpoint():
+    """
+    Expects a JSON body like:
+        { "boundary": [[lon, lat], [lon, lat], ...] }
+
+    NO 'access_point'. Unlike /api/generate-report and
+    /api/generate-report-pdf, nothing on this path routes a road, so
+    requiring the anchor point road routing starts from would be demanding a
+    decision the user has not been asked to make yet. This step runs on a
+    traced boundary alone.
+
+    Returns the production-zone payload -- see production_zone_payload.
+    build_production_zone_payload() for the full shape -- or, on a hard
+    failure of one upstream layer:
+
+        { "error": "...", "failed_layer": { "type": ..., "label": ... } }
+
+    with a 502. `failed_layer.type` is the stable identifier a client
+    branches on; `label` is display prose. NOTE the deliberate departure
+    from the other endpoints in this file: they pass str(e) straight
+    through into "error", and this one does not. A user looking at a panel
+    that says their zones could not be generated is not helped by a
+    rasterio traceback or a STAC status code, and the layer identity is the
+    only part of the failure they can act on (wait and retry, or accept
+    that this parcel has no lidar coverage). The exception is logged
+    server-side instead.
+
+    502 rather than 500: the request was well-formed and this service did
+    nothing wrong -- an upstream data source (USGS 3DEP, Microsoft
+    Planetary Computer) did not answer. These sources are known to be
+    intermittent, so this is a recurring state rather than an edge case,
+    and it is worth telling a client that a retry of the identical request
+    is a reasonable next move.
+    """
+    data = request.get_json(silent=True)
+
+    try:
+        boundary = _parse_boundary(data)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+    try:
+        payload = build_production_zone_payload(boundary)
+        return jsonify(payload)
+
+    except LayerFetchError as e:
+        app.logger.exception("production-zones: %s layer failed", e.layer)
+        return jsonify({
+            "error": f"The {e.label} could not be retrieved.",
+            "failed_layer": {"type": e.layer, "label": e.label},
+        }), 502
+
+    except Exception:
+        app.logger.exception("production-zones: unexpected failure")
+        return jsonify({"error": "Production zones could not be generated."}), 500
 
 
 @app.route("/api/health", methods=["GET"])
