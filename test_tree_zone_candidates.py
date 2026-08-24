@@ -46,6 +46,7 @@ import road_corridors as rc
 import tree_zone_candidates as tzc
 import production_suitability as ps
 import water_suitability as ws
+from water_suitability import NO_WATER_ZONE
 from feature_schema import validate_feature_collection
 from raster_grid import cell_union_footprint
 from tree_zone_candidates import (
@@ -809,6 +810,47 @@ print(
 )
 
 
+# --- 1b. selected_water_zone=NO_WATER_ZONE (the explicit "already ran the ---
+# --- selection, nothing qualified" answer) -> the water self-compute is ---
+# --- SKIPPED (unlike a bare None), and the identify_road_corridor_ --------
+# --- candidates() self-compute receives the same explicit form, never a ---
+# --- bare None -------------------------------------------------------------
+
+with mock_patch.object(tzc, "identify_water_suitability") as mock_water_nwz, \
+     mock_patch.object(
+        tzc, "identify_road_corridor_candidates",
+        return_value={"selected_road_corridor": OVERRIDE_SELECTED_ROAD_CORRIDOR},
+     ) as mock_corridor_nwz, \
+     mock_patch.object(tzc, "get_farmland_classification_for_polygon", _fake_farmland_empty), \
+     mock_patch.object(tzc, "get_soil_data_for_polygon", _fake_soil_rows_empty), \
+     mock_patch.object(tzc, "get_soil_geometries_for_polygon", _fake_soil_geometries_empty), \
+     mock_patch.object(tzc, "get_water_features_for_boundary", _fake_water_features_empty):
+    nwz_result = identify_tree_zone_candidates(
+        orchestrator_boundary_coordinates,
+        dem=orchestrator_dem,
+        boundary_polygon_utm=OVERRIDE_BOUNDARY_POLYGON_UTM,
+        production_areas=OVERRIDE_PRODUCTION_AREAS,
+        valleys=OVERRIDE_VALLEYS,
+        selected_water_zone=NO_WATER_ZONE,
+    )
+
+assert mock_water_nwz.call_count == 0, (
+    "identify_water_suitability() must NOT be called when selected_water_zone=NO_WATER_ZONE -- the "
+    "explicit 'ran the selection, nothing qualified' answer is a SUPPLIED override, not a missing one; "
+    "re-running the water pipeline for it is the measured 5x amplification this guard closes"
+)
+assert mock_corridor_nwz.call_args.kwargs["selected_water_zone"] is NO_WATER_ZONE, (
+    "the identify_road_corridor_candidates() self-compute must receive the resolved 'nothing' re-wrapped "
+    "as NO_WATER_ZONE, never a bare None (which would make that entry point re-run the water pipeline)"
+)
+validate_feature_collection(nwz_result["zones_geojson"])
+print(
+    "Supplying selected_water_zone=NO_WATER_ZONE (test 1b) skips the water self-compute entirely, claims no "
+    "water geometry in Step 1 (same as a genuine self-computed None), and forwards the same explicit form "
+    "into the identify_road_corridor_candidates() self-compute."
+)
+
+
 # --- 3. selected_water_zone and selected_road_corridor NOT overridden, ----
 # --- but boundary_polygon_utm/production_areas/valleys ARE -> both --------
 # --- identify_water_suitability() and identify_road_corridor_candidates() -
@@ -867,9 +909,12 @@ assert corridor_call.kwargs["production_areas"] is OVERRIDE_PRODUCTION_AREAS, (
     "identify_road_corridor_candidates() must receive this function's own already-sourced "
     "production_areas, not re-derive its own copy"
 )
-assert corridor_call.kwargs["selected_water_zone"] is None, (
-    "identify_road_corridor_candidates() must receive the SAME selected_water_zone this function's own "
-    "(mocked) identify_water_suitability() call just produced, not re-derive it independently"
+assert corridor_call.kwargs["selected_water_zone"] is NO_WATER_ZONE, (
+    "identify_road_corridor_candidates() must receive the resolved answer this function's own (mocked) "
+    "identify_water_suitability() call just produced -- and since that answer was None ('ran the "
+    "selection, nothing qualified'), it must arrive as the EXPLICIT water_suitability.NO_WATER_ZONE "
+    "form, never as a bare None (which the receiving entry point treats as 'not supplied' and answers "
+    "by re-running the entire water pipeline -- the measured 5x amplification this guard closes)"
 )
 validate_feature_collection(passthrough_result["zones_geojson"])
 print(

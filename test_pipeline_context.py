@@ -1411,4 +1411,88 @@ print(
     "point, so it's identity-checked rather than run real (see this section's own comment)."
 )
 
+# --- NO-QUALIFYING-WATER-ZONE case: a selection that resolves to None is ---
+# --- forwarded downstream as water_suitability.NO_WATER_ZONE, never as a ---
+# --- bare None ---
+#
+# Every consumer of a selected_water_zone override (identify_road_corridor_
+# candidates(), identify_solar_candidate_zones(), identify_tree_zone_
+# candidates()) treats None as "not supplied" and re-runs the ENTIRE
+# identify_water_suitability() pipeline as its self-compute fallback --
+# measured at FIVE full water-suitability runs across one build_pipeline_
+# context() run on a no-qualifying-zone parcel before the guard. Same trap,
+# same fix, as selected_road_corridor (which forwards the full road_network
+# dict, branches=[] and all, never None): pipeline_context now forwards the
+# resolved "nothing" as the explicit NO_WATER_ZONE answer. The context FIELD
+# itself must still carry plain None -- context readers (the map, the
+# report, fencing) keep their existing None contract.
+
+from water_suitability import NO_WATER_ZONE  # noqa: E402
+
+_empty_fc_nwz = {"type": "FeatureCollection", "features": []}
+
+with ExitStack() as _nwz_stack:
+    _enter = _nwz_stack.enter_context
+    _enter(mock_patch.object(pc.dem_data, "get_dem_for_boundary", return_value=synthetic_dem))
+    _enter(mock_patch.object(pc.valley_delineation, "delineate_valleys", return_value=[]))
+    _enter(mock_patch.object(pc.keypoint_detection, "detect_keypoints", return_value=[]))
+    _enter(mock_patch.object(pc.exclusion_zones, "identify_exclusion_zones", return_value={"narrative_data": None}))
+    _enter(
+        mock_patch.object(
+            pc.production_area_ceiling, "identify_optimized_production_areas", return_value=fake_optimized_result
+        )
+    )
+    _enter(mock_patch.object(pc.farm_roads_data, "get_road_exclusion_union_utm", return_value=fake_existing_roads_union))
+    _enter(mock_patch.object(pc.road_corridors, "_fetch_floodplain_hydric_union", return_value=(fake_hydric_union, False)))
+    _enter(
+        mock_patch.object(
+            pc.water_candidate_zones,
+            "identify_water_system_candidate_zones",
+            return_value={"zones_geojson": _empty_fc_nwz},
+        )
+    )
+    # the selection genuinely finds nothing
+    _enter(mock_patch.object(pc, "fetch_and_select_optimal_water_zone", return_value=None))
+    _nwz_road = _enter(
+        mock_patch.object(pc.road_corridors, "identify_road_corridor_candidates", return_value=fake_road_corridor_result)
+    )
+    _nwz_solar = _enter(
+        mock_patch.object(
+            pc,
+            "identify_solar_candidate_zones",
+            return_value={"zones_geojson": _empty_fc_nwz, "selected_structure_site": None},
+        )
+    )
+    _nwz_tree = _enter(
+        mock_patch.object(
+            pc,
+            "identify_tree_zone_candidates",
+            return_value={"zones_geojson": _empty_fc_nwz, "patches": []},
+        )
+    )
+
+    _nwz_ctx = pc.build_pipeline_context(boundary_coordinates, anchor_lon_lat)
+
+assert _nwz_ctx.selected_water_zone is None, (
+    "the context FIELD must carry plain None for 'no zone' -- context readers (map/report/fencing) keep "
+    "their existing None contract; only the downstream override forwards use the explicit form"
+)
+for _nwz_call, _nwz_name in (
+    (_nwz_road.call_args, "identify_road_corridor_candidates"),
+    (_nwz_solar.call_args, "identify_solar_candidate_zones"),
+    (_nwz_tree.call_args, "identify_tree_zone_candidates"),
+):
+    assert _nwz_call.kwargs["selected_water_zone"] is NO_WATER_ZONE, (
+        f"{_nwz_name}() must receive water_suitability.NO_WATER_ZONE (the explicit 'already ran the "
+        "selection, nothing qualified' answer) when the selection resolved to None -- a bare None override "
+        "is indistinguishable from 'not supplied' and would make that entry point re-run the ENTIRE "
+        "identify_water_suitability() pipeline as its self-compute fallback (five full runs per "
+        "build_pipeline_context() on such a parcel, measured)"
+    )
+print(
+    "NO-QUALIFYING-WATER-ZONE case: the resolved None selection reaches all three downstream consumers as "
+    "the explicit NO_WATER_ZONE answer (never a bare None), while the context field itself stays plain None "
+    "for its own readers."
+)
+
 print("\nAll pipeline_context checks passed.")

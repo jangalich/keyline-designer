@@ -210,7 +210,7 @@ from soil_data import coordinates_to_wkt_polygon, get_farmland_classification_fo
 from terrain_metrics import aspect_score, aspect_to_compass_label, compute_shading_score, compute_slope_and_aspect
 from tree_zone_candidates import identify_tree_zone_candidates
 from water_candidate_zones import _position_in_parcel
-from water_suitability import identify_water_suitability
+from water_suitability import NO_WATER_ZONE, identify_water_suitability
 
 METERS_PER_FOOT = 0.3048
 
@@ -1267,7 +1267,17 @@ def identify_solar_candidate_zones(
     function's own selected_water_zone override is supplied; when it is
     NOT but boundary_polygon_utm/production_areas/valleys ARE, those three
     are passed through as kwargs so identify_water_suitability() doesn't
-    re-derive its own independent copies.
+    re-derive its own independent copies. selected_water_zone ALSO accepts
+    water_suitability.NO_WATER_ZONE -- the explicit "the water pipeline
+    already ran and selected nothing" answer (see that constant's own
+    docstring): it is normalized back to None here and the self-compute is
+    SKIPPED, unlike a bare None (indistinguishable from "not supplied"
+    under this pipeline's standard override convention, still
+    self-computes as before). Once resolved, this function's own nested
+    identify_road_corridor_candidates()/identify_tree_zone_candidates()
+    calls below forward the same explicit form (re-wrapping a resolved
+    None as NO_WATER_ZONE), so neither nested call re-runs the water
+    pipeline either.
 
     ROAD PROXIMITY is two-tier (see module docstring for the full
     rationale). Tier 1's own selected_road_corridor is resolved BEFORE
@@ -1360,7 +1370,15 @@ def identify_solar_candidate_zones(
         )
         production_areas = production_result["scored_patches"]
 
-    if selected_water_zone is None:
+    # water_suitability.NO_WATER_ZONE is the EXPLICIT "already ran the
+    # selection, nothing qualified" answer (see that constant's own
+    # docstring): reuse it (normalized back to None -- everything below
+    # keeps None's existing "no zone" meaning) rather than treating it as
+    # "not supplied" and re-running the whole water pipeline. A bare None
+    # still self-computes exactly as before.
+    if selected_water_zone is NO_WATER_ZONE:
+        selected_water_zone = None
+    elif selected_water_zone is None:
         water_result = identify_water_suitability(
             boundary_coordinates,
             dem=dem,
@@ -1370,6 +1388,13 @@ def identify_solar_candidate_zones(
             canopy_height=canopy_height,
         )
         selected_water_zone = water_result["selected_water_zone"]
+    # From here on selected_water_zone is RESOLVED: None now genuinely means
+    # "no zone on this property," so every nested identify_*() call below
+    # forwards it re-wrapped as NO_WATER_ZONE when None -- forwarding the
+    # bare None would make the nested call's own self-compute fallback
+    # re-run the water pipeline all over again (the exact redundancy the
+    # explicit answer exists to prevent).
+    resolved_water_zone_answer = selected_water_zone if selected_water_zone is not None else NO_WATER_ZONE
     water_zones = [selected_water_zone] if selected_water_zone else []
 
     # --- Tier 1 (primary) road source: the property's own single selected
@@ -1399,7 +1424,7 @@ def identify_solar_candidate_zones(
             boundary_polygon_utm=boundary_polygon_utm,
             production_areas=production_areas,
             valleys=valleys,
-            selected_water_zone=selected_water_zone,
+            selected_water_zone=resolved_water_zone_answer,
             hydric_floodplain_union=hydric_floodplain_union,
             floodplain_data_is_fallback=floodplain_data_is_fallback,
             canopy_height=canopy_height,
@@ -1430,7 +1455,7 @@ def identify_solar_candidate_zones(
             boundary_polygon_utm=boundary_polygon_utm,
             production_areas=production_areas,
             valleys=valleys,
-            selected_water_zone=selected_water_zone,
+            selected_water_zone=resolved_water_zone_answer,
             selected_road_corridor=selected_road_corridor,
             hydric_floodplain_union=hydric_floodplain_union,
             floodplain_data_is_fallback=floodplain_data_is_fallback,

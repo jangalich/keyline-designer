@@ -264,7 +264,7 @@ from soil_data import (
 # (water_candidate_zones is already in this module's import closure via
 # water_suitability, so this adds no new dependency edge).
 from water_candidate_zones import _position_in_parcel
-from water_suitability import identify_water_suitability
+from water_suitability import NO_WATER_ZONE, identify_water_suitability
 
 # --- composite weights (must sum to 1.0). CONFIGURABLE -- tune against a
 # real property once ground-truthed, same "documented but adjustable"
@@ -1392,7 +1392,16 @@ def identify_tree_zone_candidates(
     already computed" pattern water_suitability.identify_water_
     suitability()/road_corridors.identify_road_corridor_candidates()/
     solar_suitability.identify_solar_candidate_zones() already established
-    for these same values. valleys is a pure pass-through convenience: it
+    for these same values. selected_water_zone ALSO accepts water_
+    suitability.NO_WATER_ZONE -- the explicit "the water pipeline already
+    ran and selected nothing" answer (see that constant's own docstring):
+    it is normalized back to None here and the self-compute is SKIPPED,
+    unlike a bare None (indistinguishable from "not supplied" under this
+    pipeline's standard override convention, still self-computes as
+    before); once resolved, the identify_road_corridor_candidates() call
+    below forwards the same explicit form (re-wrapping a resolved None as
+    NO_WATER_ZONE) so that nested call never re-runs the water pipeline
+    either. valleys is a pure pass-through convenience: it
     is forwarded as-is (including None) to the identify_water_suitability()/
     identify_road_corridor_candidates() calls below, which already have
     their own correct None-falls-back-to-self-compute handling for it --
@@ -1449,7 +1458,15 @@ def identify_tree_zone_candidates(
         production_areas = production_result["scored_patches"]
     production_polygons_utm = [p["render_fill_polygon_utm"] for p in production_areas]
 
-    if selected_water_zone is None:
+    # water_suitability.NO_WATER_ZONE is the EXPLICIT "already ran the
+    # selection, nothing qualified" answer (see that constant's own
+    # docstring): reuse it (normalized back to None -- everything below
+    # keeps None's existing "no zone" meaning) rather than treating it as
+    # "not supplied" and re-running the whole water pipeline. A bare None
+    # still self-computes exactly as before.
+    if selected_water_zone is NO_WATER_ZONE:
+        selected_water_zone = None
+    elif selected_water_zone is None:
         water_result = identify_water_suitability(
             boundary_coordinates,
             dem=dem,
@@ -1476,7 +1493,13 @@ def identify_tree_zone_candidates(
             boundary_polygon_utm=boundary_polygon_utm,
             production_areas=production_areas,
             valleys=valleys,
-            selected_water_zone=selected_water_zone,
+            # RESOLVED above: a None here genuinely means "no zone on this
+            # property," so forward the explicit NO_WATER_ZONE form rather
+            # than a bare None (which the receiving entry point would treat
+            # as "not supplied" and answer by re-running the whole water
+            # pipeline -- the exact redundancy the explicit answer
+            # prevents).
+            selected_water_zone=selected_water_zone if selected_water_zone is not None else NO_WATER_ZONE,
             hydric_floodplain_union=hydric_floodplain_union,
             floodplain_data_is_fallback=floodplain_data_is_fallback,
             canopy_height=canopy_height,

@@ -103,7 +103,20 @@ FIELD NOTES
   scoring) -- this call passes this context's own already-computed dem/
   boundary_polygon_utm/valleys/production_areas straight through via that
   function's own override params, same reuse pattern as water_zones
-  above, so nothing it depends on is re-derived a second time.
+  above, so nothing it depends on is re-derived a second time. The FIELD
+  keeps None for "no zone" (context readers -- the map, the report,
+  fencing -- keep their existing None contract), but the three downstream
+  override forwards below (road corridor, solar, tree zones) NEVER pass
+  that None through: each consumer treats a None override as "not
+  supplied" and re-runs the entire identify_water_suitability() pipeline
+  as its self-compute fallback -- the SAME trap selected_road_corridor
+  below documents, measured at FIVE full water-suitability runs per
+  build_pipeline_context() on a no-qualifying-zone parcel before this
+  guard. A resolved "nothing" is forwarded as water_suitability.
+  NO_WATER_ZONE, the explicit already-ran-and-selected-nothing answer
+  those entry points accept (see that constant's own docstring), so even
+  an empty selection is a real, explicit answer downstream, not a missing
+  one.
 
   selected_road_corridor is road_corridors.identify_road_corridor_
   candidates()'s own 'road_network' -- build_road_network()'s full
@@ -367,7 +380,7 @@ import valley_delineation
 import water_candidate_zones
 from solar_suitability import identify_solar_candidate_zones
 from tree_zone_candidates import identify_tree_zone_candidates
-from water_suitability import fetch_and_select_optimal_water_zone
+from water_suitability import NO_WATER_ZONE, fetch_and_select_optimal_water_zone
 
 
 @dataclass
@@ -657,6 +670,24 @@ def build_pipeline_context(
         production_areas=production_areas,
         canopy_height=canopy_height,
     )
+    # SAME GUARD as selected_road_corridor below, applied to the water zone:
+    # every downstream consumer of a selected_water_zone override
+    # (identify_road_corridor_candidates(), identify_solar_candidate_
+    # zones(), identify_tree_zone_candidates()) treats None as "not
+    # supplied" and reacts by re-running the ENTIRE identify_water_
+    # suitability() pipeline as its self-compute fallback -- measured at
+    # FIVE full water-suitability runs (this call plus one per consumer,
+    # plus one more through solar's nested tree-zone-exclusion call) across
+    # a single build_pipeline_context() run whenever no water zone
+    # qualifies. Roads dodge this by forwarding build_road_network()'s full
+    # dict (branches=[] and all, never None); water has no non-None dict
+    # shape for "nothing," so water_suitability.NO_WATER_ZONE (see that
+    # constant's own docstring) IS the real, explicit "already ran the
+    # selection, nothing qualified" answer forwarded instead. The context
+    # FIELD below still carries the plain None -- context readers (the
+    # map, the report, fencing) keep their existing None contract; only
+    # the three override forwards use the explicit form.
+    water_zone_answer = selected_water_zone if selected_water_zone is not None else NO_WATER_ZONE
 
     # Layer 2: keypoints, production_areas, and selected_water_zone are now
     # all co-resident in memory (computed above from one DEM/boundary/valleys
@@ -672,7 +703,7 @@ def build_pipeline_context(
         boundary_polygon_utm=boundary_polygon_utm,
         production_areas=production_areas,
         valleys=valleys,
-        selected_water_zone=selected_water_zone,
+        selected_water_zone=water_zone_answer,
         hydric_floodplain_union=soil_exclusion_unions["hydric_floodplain_union"],
         floodplain_data_is_fallback=soil_exclusion_unions["hydric_floodplain_is_fallback"],
         canopy_height=canopy_height,
@@ -694,7 +725,7 @@ def build_pipeline_context(
         boundary_polygon_utm=boundary_polygon_utm,
         production_areas=production_areas,
         valleys=valleys,
-        selected_water_zone=selected_water_zone,
+        selected_water_zone=water_zone_answer,
         selected_road_corridor=selected_road_corridor,
         hydric_floodplain_union=soil_exclusion_unions["hydric_floodplain_union"],
         floodplain_data_is_fallback=soil_exclusion_unions["hydric_floodplain_is_fallback"],
@@ -709,7 +740,7 @@ def build_pipeline_context(
         boundary_polygon_utm=boundary_polygon_utm,
         production_areas=production_areas,
         valleys=valleys,
-        selected_water_zone=selected_water_zone,
+        selected_water_zone=water_zone_answer,
         selected_road_corridor=selected_road_corridor,
         hydric_floodplain_union=soil_exclusion_unions["hydric_floodplain_union"],
         floodplain_data_is_fallback=soil_exclusion_unions["hydric_floodplain_is_fallback"],

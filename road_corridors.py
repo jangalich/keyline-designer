@@ -165,7 +165,7 @@ from soil_data import (
 from terrain_metrics import compute_slope_and_aspect
 from topographic_position import compute_tpi
 from valley_delineation import delineate_valleys
-from water_suitability import fetch_and_select_optimal_water_zone
+from water_suitability import NO_WATER_ZONE, fetch_and_select_optimal_water_zone
 
 METERS_PER_FOOT = 0.3048
 
@@ -1403,6 +1403,12 @@ def identify_road_corridor_candidates(
     select_optimal_water_zone() (which forwards them into identify_water_
     suitability() via **suitability_kwargs), so those three are never
     re-derived a third, independent time just to pick the water zone.
+    selected_water_zone ALSO accepts water_suitability.NO_WATER_ZONE --
+    the explicit "the water pipeline already ran and selected nothing"
+    answer (see that constant's own docstring): it is normalized back to
+    None here and the self-compute is SKIPPED, unlike a bare None (which
+    is indistinguishable from "not supplied" under this pipeline's
+    standard override convention and still self-computes as before).
     floodplain_data_is_fallback pairs with hydric_floodplain_union (see
     _fetch_floodplain_hydric_union()'s own return value) -- if a caller
     supplies hydric_floodplain_union directly without saying whether it's
@@ -1488,7 +1494,15 @@ def identify_road_corridor_candidates(
     # The single water zone this property's OWN water-suitability scoring
     # actually selected (rank 1), not every unscored candidate zone
     # water_candidate_zones.py generates -- see module docstring.
-    if selected_water_zone is None:
+    # water_suitability.NO_WATER_ZONE is the EXPLICIT "already ran the
+    # selection, nothing qualified" answer (see that constant's own
+    # docstring): reuse it (normalized back to None -- everything below
+    # keeps None's existing "no zone" meaning) rather than treating it as
+    # "not supplied" and re-running the whole water pipeline. A bare None
+    # still self-computes exactly as before.
+    if selected_water_zone is NO_WATER_ZONE:
+        selected_water_zone = None
+    elif selected_water_zone is None:
         selected_water_zone = fetch_and_select_optimal_water_zone(
             boundary_coordinates,
             dem=dem,
