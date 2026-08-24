@@ -6,7 +6,7 @@ SYNTHETIC -- a hand-built DEM dict and a hand-built boundary polygon. No
 real-property figure is computed, asserted or reproduced here; the acreages
 quoted in exclusion_zones.py's own docstring came from a separate
 diagnose_exclusion_footprints.py run against the two reference boundaries
-and are context for the radii, not test data.
+and are context for the decisions, not test data.
 
 What this file proves, in order:
 
@@ -17,18 +17,26 @@ What this file proves, in order:
      every scored patch identify_optimized_production_areas() produces are
      BYTE-IDENTICAL before and after this module runs against the same
      fixture.
-  2. THE DEFERRED INTEGRATION IS MEASURABLE BUT NOT APPLIED. Computes what
-     production's eligible mask WOULD be if it were gated on this module's
-     closed exclusions, and reports the acreage difference -- in the test,
-     not as a code path in the module. Input for the later decision.
-  3. PER-GATE RADII ARE APPLIED INDEPENDENTLY. Canopy and slope close;
-     the setback does not, and its polygon count is unchanged -- while the
-     same ring closed at the canopy/slope radius demonstrably WOULD change,
-     so the difference is the per-gate radius and not a ring that happens
-     to be immune.
-  4. THE EXTENSIVE INVARIANT, BOTH DIRECTIONS. render_fill_polygon_utm
-     CONTAINS the raw union (the direction a production-style assertion
-     gets backwards) and is CONTAINED BY boundary_polygon_utm.
+  2. THE DEFERRED INTEGRATION IS NOW BEHAVIOURALLY A NO-OP. This module's
+     eligible_mask is BYTE-IDENTICAL to compute_step1_eligible_cells()'
+     own, so gating production on these exclusions would remove exactly
+     zero cells -- asserted at zero, not at "small". While the closing
+     existed that figure was real pinhole ground, and deferring the
+     integration was also deferring a decision about production's output.
+     It is not anymore.
+  3. EVERY PER-GATE ACREAGE IS RAW -- NOTHING IS CLOSED. Each published
+     layer mask is compared bit-for-bit against the gate recomputed here
+     from production's own gate definitions (not read back from the
+     module, which would be circular). Reports per gate what the 5 m
+     closing this module used to apply WOULD have added, so the removal is
+     quantified rather than merely asserted. The five closing constants are
+     verified DELETED rather than zeroed, via a dir() scan that also catches
+     a radius reintroduced under a new name.
+  4. THE ONLY GEOMETRIC OPERATION IS THE CLIP TO THE BOUNDARY. The
+     published union is the EXACT cell footprint of its own mask, clipped
+     -- equal to it, not merely inside or outside it -- and the five layer
+     footprints union to exactly that. This replaces the old extensive
+     invariant, which no longer has two sides.
   5. NaN SLOPE IS SPLIT OUT. Nodata cells land in the slope layer and are
      reported separately in narrative_data.
   6. OVERLAP IS MEASURED, NOT ASSUMED. Cells that are both wooded and
@@ -264,14 +272,21 @@ print(
 
 
 # ===========================================================================
-# 2. THE DEFERRED INTEGRATION IS MEASURABLE BUT NOT APPLIED
+# 2. THE DEFERRED INTEGRATION IS NOW BEHAVIOURALLY A NO-OP
 # ===========================================================================
 #
 # Computed HERE, in the test, from two things the module already returns --
 # never as a code path inside exclusion_zones.py, and never by touching
-# production. This is the number the later integration decision needs: how
-# much ground production can currently claim that the closed exclusions
-# would take away from it.
+# production. It used to answer "how much ground would production LOSE if it
+# were gated on this module's closed exclusions?" and the answer was real
+# pinhole ground.
+#
+# With the closing removed the answer is EXACTLY ZERO, and that is now the
+# point of the check rather than a degenerate result: this module's
+# eligible_mask is the same set of cells production already computes, so the
+# deferred wiring can no longer change production's output. The redundancy
+# argument in exclusion_zones.py's module docstring rests on this, so it is
+# asserted rather than asserted-in-prose.
 
 _production_eligible = _after_raw["eligible_mask"]
 _would_be_eligible = _production_eligible & (~_p_result["excluded_union_mask"])
@@ -280,33 +295,44 @@ _lost_cells = int(_production_eligible.sum()) - int(_would_be_eligible.sum())
 _lost_acres = _lost_cells * _area_per_cell
 
 assert (_would_be_eligible & ~_production_eligible).sum() == 0, (
-    "gating production on the CLOSED exclusions can only ever REMOVE cells, never add any -- a closing "
-    "is extensive, so this direction must be empty"
+    "gating production on this module's exclusions must never ADD a cell to production's eligible mask"
 )
-assert _lost_cells >= 0
+assert _lost_cells == 0, (
+    "with no closing, gating production on this module's exclusions must remove NOTHING -- the two are "
+    f"the same set of cells. {_lost_cells} cell(s) = {_lost_acres:.3f} ac went missing, which means "
+    "something extensive is still being applied somewhere in the exclusion path"
+)
+assert _p_result["eligible_mask"].tobytes() == _production_eligible.tobytes(), (
+    "this module's eligible_mask must be BYTE-IDENTICAL to compute_step1_eligible_cells()' own -- the "
+    "claim the DELIBERATE REDUNDANCY docstring section now makes"
+)
 assert _production_eligible.tobytes() == _run_production_step1()["eligible_mask"].tobytes(), (
     "measuring the hypothetical must not have altered production's real answer"
 )
 print(
-    f"DEFERRED INTEGRATION, MEASURED NOT APPLIED: production's eligible mask is "
+    f"DEFERRED INTEGRATION IS NOW A NO-OP: production's eligible mask is "
     f"{int(_production_eligible.sum())} cells ({int(_production_eligible.sum()) * _area_per_cell:.3f} ac) "
-    f"on this fixture. Gated on this module's closed exclusions it would be "
-    f"{int(_would_be_eligible.sum())} cells ({int(_would_be_eligible.sum()) * _area_per_cell:.3f} ac) -- a "
-    f"loss of {_lost_cells} cell(s) = {_lost_acres:.3f} ac of pinhole ground. production_area.py is NOT "
-    "modified; this figure is computed in the test as input to the integration decision."
+    f"on this fixture, this module's eligible_mask is byte-identical to it, and gating production on "
+    f"these exclusions would remove {_lost_cells} cells ({_lost_acres:.3f} ac). Before the closing was "
+    "removed that figure was real pinhole ground; wiring the integration in can no longer change "
+    "production's output at all. production_area.py is still NOT modified."
 )
 
 
 # ===========================================================================
-# 3. PER-GATE RADII ARE APPLIED INDEPENDENTLY
+# 3. EVERY PER-GATE ACREAGE IS RAW -- NOTHING IS CLOSED
 # ===========================================================================
 #
-# One fixture carrying all three shapes at once: canopy with pinholes, a
-# steep region with pinholes, and the setback ring (which the cell grid
-# fragments on its own). The point is not merely that the setback is
-# unchanged -- it is that the SAME ring closed at the canopy/slope radius
-# demonstrably WOULD change. That is what makes this a test of per-gate
-# radii rather than a test of a ring that happens to be closing-proof.
+# The branch's core guarantee, on the fixture that used to demonstrate the
+# opposite. One fixture carrying all three shapes at once: canopy with
+# pinholes, a steep region with pinholes, and the setback ring (which the
+# cell grid fragments on its own).
+#
+# Asserting "the layers are raw" needs something to be raw AGAINST, so this
+# section recomputes each gate's own hit mask independently of the module and
+# compares. It then reports, per gate, what the 5 m closing this module used
+# to apply WOULD have added -- because "we removed an operation" is only
+# meaningful next to the ground that operation was adding.
 
 _r_rows = _r_cols = 36
 _r_array = flat_plane(_r_rows, _r_cols)
@@ -319,8 +345,8 @@ _r_array[13, 13] = flat_plane(_r_rows, _r_cols)[13, 13]   # and another
 # the slope layer -- which is precisely the mechanism that fragments the real
 # ring into 41-43 pieces on the reference boundaries, and precisely the
 # mechanism behind narrative_data's setback_is_lower_bound flag. Reproducing
-# it here makes the "polygon count unchanged" assertion below a real one:
-# without it the ring is a single connected loop and the count is trivially 1.
+# it here keeps the polygon-count assertion below a real one: without it the
+# ring is a single connected loop and the count is trivially 1.
 _r_ring_index = 2  # the outermost on-parcel cell band, given boundary_for()'s inset
 for _spike in range(4, 32, 5):
     _r_array[_r_ring_index, _spike] += 9.0
@@ -343,91 +369,172 @@ _r_result = ez.identify_exclusion_zones(
     check_roads=False,
 )
 _r_layers = _r_result["layers"]
+_r_area_per_cell = cell_area_acres(_r_dem)
 
-for _closing_gate in ("canopy", "slope"):
-    _raw = _r_layers[_closing_gate]["raw_mask"]
-    _closed = _r_layers[_closing_gate]["mask"]
-    assert int(_closed.sum()) > int(_raw.sum()), (
-        f"the {_closing_gate} layer is configured at "
-        f"{ez.CLOSING_RADIUS_METERS_BY_LAYER[_closing_gate]} m and this fixture gives it pinholes to "
-        f"absorb, so its closed mask must be strictly larger -- got {int(_raw.sum())} -> {int(_closed.sum())}"
+# ---- the gates, recomputed here from first principles ---------------------
+#
+# Deliberately NOT taken from the module: a raw mask the module handed back
+# would make this assertion circular. These five lines are the same gate
+# definitions production_area.compute_step1_eligible_cells() uses.
+_r_slope_pct = production_area.compute_slope_percent(_r_dem["array"], _r_dem["resolution_meters"])
+_r_slope_ok = (~np.isnan(_r_slope_pct)) & (_r_slope_pct <= production_area.MAX_PRODUCTION_SLOPE_PCT)
+_r_on_parcel = ez._on_parcel_mask(_r_dem, _r_boundary)
+_r_shrunk = _r_boundary.buffer(-production_area.PRODUCTION_BOUNDARY_SETBACK_METERS)
+_r_slope_only = _r_slope_ok & ez._on_parcel_mask(_r_dem, _r_shrunk)
+_r_expected = {
+    "canopy": _r_slope_only & _r_canopy,
+    "slope": _r_on_parcel & (~_r_slope_ok),
+    "hydric": np.zeros((_r_rows, _r_cols), dtype=bool),
+    "roads": np.zeros((_r_rows, _r_cols), dtype=bool),
+    "setback": _r_on_parcel & _r_slope_ok & (~_r_slope_only),
+}
+
+_r_report = []
+for _gate in ez.LAYER_ORDER:
+    _published = _r_layers[_gate]["mask"]
+    _raw = _r_expected[_gate]
+    assert _published.tobytes() == _raw.tobytes(), (
+        f"the {_gate} layer's published mask must be the gate's OWN hit mask, bit-for-bit -- "
+        f"{int(_raw.sum())} raw cells against {int(_published.sum())} published. Anything else means a "
+        "morphological pass has come back"
+    )
+    # ...and the published acreage is that mask's cell count, not a geometry
+    # area and not a closed count.
+    assert _r_layers[_gate]["acres"] == round(int(_raw.sum()) * _r_area_per_cell, 2), (
+        f"the {_gate} layer's acreage must be its raw mask's cell-count acreage"
+    )
+    _narr = [e for e in _r_result["narrative_data"]["layers"] if e["layer"] == _gate][0]
+    assert _narr["acres"] == round(round(int(_raw.sum()) * _r_area_per_cell, 1), 1), (
+        f"narrative_data's {_gate} acreage must be the same raw figure the layer reports"
+    )
+    # WHAT THE CLOSING WOULD HAVE ADDED, on this fixture, at the radius the
+    # canopy and slope gates used to carry. Computed here so the removal is
+    # quantified rather than merely asserted -- and asserted NOT to have
+    # happened.
+    _if_closed = disc_closing(_raw, 1)
+    _gained = int(_if_closed.sum()) - int(_raw.sum())
+    assert int(_published.sum()) != int(_if_closed.sum()) or _gained == 0, (
+        f"the {_gate} layer must not match what a 5 m closing would produce"
+    )
+    _r_report.append((_gate, int(_raw.sum()), _gained, _gained * _r_area_per_cell))
+
+# The gates that used to close must have something to close on this fixture,
+# or "we did not close" is proved against nothing.
+_r_by_gate = {g: (raw, gained, ac) for g, raw, gained, ac in _r_report}
+for _gate in ("canopy", "slope"):
+    assert _r_by_gate[_gate][1] > 0, (
+        f"fixture sanity: the {_gate} layer must have pinholes a 5 m closing WOULD absorb, otherwise this "
+        "section proves nothing about the closing being gone"
     )
 
-_setback_raw = _r_layers["setback"]["raw_mask"]
-_setback_closed = _r_layers["setback"]["mask"]
-assert _setback_raw.tobytes() == _setback_closed.tobytes(), (
-    "the setback layer is configured at 0.0 m -- a MEASURED decision, not an untuned placeholder (closing "
-    "a ring over-merges across the parcel; see SETBACK_EXCLUSION_CLOSING_RADIUS_METERS) -- so its closed "
-    "mask must be bit-for-bit its raw mask"
-)
-_setback_raw_parts = polygon_part_count(cell_union_footprint(_r_dem, _setback_raw))
-assert _setback_raw_parts > 1, (
+# The setback ring: unchanged, and demonstrably not closing-proof. This was
+# the one gate whose 0.0 m radius was a measured decision rather than an
+# untuned placeholder, and it is now simply the same rule as the other four.
+_setback_raw = _r_expected["setback"]
+_setback_parts = polygon_part_count(cell_union_footprint(_r_dem, _setback_raw))
+assert _setback_parts > 1, (
     "fixture sanity: the setback ring must be genuinely FRAGMENTED here (steep spikes along it move those "
     f"cells into the slope layer), otherwise the polygon-count assertion is trivial -- got "
-    f"{_setback_raw_parts} part(s)"
+    f"{_setback_parts} part(s)"
 )
-_setback_closed_parts = polygon_part_count(_r_layers["setback"]["polygon_utm"])
-assert _setback_raw_parts == _setback_closed_parts, (
-    f"the setback's polygon count must be unchanged by this module -- {_setback_raw_parts} -> "
-    f"{_setback_closed_parts}"
+assert _setback_parts == polygon_part_count(_r_layers["setback"]["polygon_utm"]), (
+    "the setback's polygon count must be unchanged by this module -- nothing merges its pieces now"
+)
+assert _r_by_gate["setback"][1] > 0, (
+    "fixture sanity: this setback ring is not closing-proof -- a 5 m closing WOULD gain cells on it. That "
+    "is what makes its unchanged polygon count evidence about the module rather than about the ring"
 )
 
-# ...and the same ring at the canopy/slope radius WOULD change, which is what
-# makes the assertion above about the RADIUS rather than about the ring.
-_setback_if_closed = disc_closing(_setback_raw, 1)
-assert int(_setback_if_closed.sum()) > int(_setback_raw.sum()), (
-    "fixture sanity: this setback ring is not closing-proof -- at the canopy/slope radius it WOULD gain "
-    "cells. The assertion above therefore proves the per-gate radius is applied, not that the ring is inert"
+# And the module carries no closing configuration at all any more. Scanned
+# out of dir() rather than checked name by name, for two reasons: the five
+# deleted constants must not appear as string literals anywhere in the tree
+# (the branch's `git grep` check), and a scan also catches a closing radius
+# reintroduced under a NEW name, which a name list would not.
+_closing_attrs = sorted(
+    _n for _n in dir(ez) if "CLOSING" in _n.upper() or "DISC_CLOSING" in _n.upper()
 )
-assert ez.CLOSING_RADIUS_METERS_BY_LAYER == {
-    "canopy": 5.0,
-    "slope": 5.0,
-    "hydric": 0.0,
-    "roads": 0.0,
-    "setback": 0.0,
-}, "the five radii are separate, per-gate constants -- not one shared value"
+assert _closing_attrs == [], (
+    "exclusion_zones must expose no closing configuration at all -- a zeroed radius is a tunable "
+    f"someone raises again, a deleted one is a decision. Found: {_closing_attrs}"
+)
+# ...nor any per-layer closing field on the wire or in narrative_data.
+for _entry in _r_result["narrative_data"]["layers"]:
+    assert set(_entry) == {"layer", "acres", "data_available"}, (
+        f"narrative_data's layer entry must carry only the raw figures now -- got {sorted(_entry)}"
+    )
+assert "raw_mask" not in _r_layers["canopy"], (
+    "with nothing closed there is no closed/raw PAIR to publish -- layers[*] carries one mask"
+)
+assert "raw_excluded_union_utm" not in _r_result, (
+    "with nothing closed the raw union IS excluded_union_utm -- publishing both would leave two "
+    "byte-identical keys with no stated difference"
+)
+
+print("EVERY PER-GATE ACREAGE IS RAW (36x36 fixture, canopy + slope pinholes + a fragmented setback ring):")
+for _gate, _raw_cells, _gained, _gained_ac in _r_report:
+    _pub_ac = _raw_cells * _r_area_per_cell
+    print(
+        f"   {_gate:<8s} published {_raw_cells:>4d} cells = {_pub_ac:.4f} ac  "
+        f"(a 5 m closing would have published {_raw_cells + _gained:>4d} = {_pub_ac + _gained_ac:.4f} ac, "
+        f"+{_gained_ac:.4f} ac of ground the gate never hit)"
+    )
 print(
-    f"PER-GATE RADII APPLIED INDEPENDENTLY on one fixture: canopy closed "
-    f"({int(_r_layers['canopy']['raw_mask'].sum())} -> {int(_r_layers['canopy']['mask'].sum())} cells), "
-    f"slope closed ({int(_r_layers['slope']['raw_mask'].sum())} -> {int(_r_layers['slope']['mask'].sum())}), "
-    f"setback UNCHANGED ({int(_setback_raw.sum())} cells, {_setback_raw_parts} polygon(s) before and "
-    f"after) -- while that same ring closed at 5 m would have gained "
-    f"{int(_setback_if_closed.sum()) - int(_setback_raw.sum())} cells."
+    f"   Every published mask is bit-for-bit the gate's own hits, recomputed here from production's own "
+    f"gate definitions rather than read back from the module. The setback ring keeps its "
+    f"{_setback_parts} fragments. All five closing constants are deleted, not zeroed, and no closing "
+    f"field survives in narrative_data or on layers[*]."
 )
 
 
 # ===========================================================================
-# 4. THE EXTENSIVE INVARIANT, BOTH DIRECTIONS
+# 4. THE ONLY GEOMETRIC OPERATION IS THE CLIP TO THE BOUNDARY
 # ===========================================================================
 #
-# The production-style assertion (render_fill.area <= polygon_utm.area) is
-# BACKWARDS here and would fail: a closing is extensive. Both directions are
-# asserted so neither can be dropped later as "obviously true".
+# This replaces an EXTENSIVE invariant (raw ⊆ closed ⊆ boundary) that no
+# longer has two sides to it. What is asserted now is stronger: the published
+# union is the EXACT cell footprint of the union mask, clipped, and nothing
+# else has touched it -- so there is no room for an extensive pass to be
+# reintroduced without this failing.
 
-for _label, _res, _bnd in (("pinhole fixture", _p_result, _p_boundary), ("radii fixture", _r_result, _r_boundary)):
+for _label, _res, _bnd, _dem_ in (
+    ("pinhole fixture", _p_result, _p_boundary, _p_dem),
+    ("raw-acreage fixture", _r_result, _r_boundary, _r_dem),
+):
     _render = _res["render_fill_polygon_utm"]
-    _raw_union = _res["raw_excluded_union_utm"]
+    _union_mask = _res["excluded_union_mask"]
     assert not _render.is_empty, f"{_label}: fixture sanity -- something must be excluded"
-    assert _render.contains(_raw_union) or _raw_union.difference(_render).area < _TOLERANCE_M2, (
-        f"{_label}: render_fill_polygon_utm must CONTAIN the raw union. This is the direction a "
-        "production-style containment assertion gets backwards -- a closing only ever adds ground, so "
-        "there is no smaller footprint to clip back to"
+
+    # THE EXACT-FOOTPRINT IDENTITY. Not "within" the footprint and not
+    # "contains" it: equal to it, to floating-point tolerance.
+    _exact = cell_union_footprint(_dem_, _union_mask).intersection(_bnd)
+    assert _render.symmetric_difference(_exact).area < _TOLERANCE_M2, (
+        f"{_label}: the published union must be the EXACT cell footprint of its mask, clipped to the "
+        f"boundary -- symmetric difference {_render.symmetric_difference(_exact).area:.6f} m2"
     )
     assert _render.difference(_bnd).area < _TOLERANCE_M2, (
-        f"{_label}: render_fill_polygon_utm must be within boundary_polygon_utm -- the clip to the drawn "
-        "boundary is the ONLY clip that applies to this layer"
+        f"{_label}: the union must be within boundary_polygon_utm -- the clip to the drawn boundary is "
+        "the ONLY geometric operation that applies to this layer"
     )
-    assert _render.area >= _raw_union.area - _TOLERANCE_M2, f"{_label}: the closed union cannot be smaller"
     assert _res["render_fill_polygon_utm"] is _res["excluded_union_utm"], (
         f"{_label}: render_fill_polygon_utm IS excluded_union_utm here, deliberately -- there is no "
-        "display-only opening to apply to a closing"
+        "display-only reduction to apply to an exact cell footprint"
     )
-_p_gain = _p_result["render_fill_polygon_utm"].area - _p_result["raw_excluded_union_utm"].area
+    # And the per-layer footprints tile it exactly: no layer extends past the
+    # union, and together they cover it.
+    _layer_union = _res["layers"][ez.LAYER_ORDER[0]]["polygon_utm"]
+    for _name in ez.LAYER_ORDER[1:]:
+        _layer_union = _layer_union.union(_res["layers"][_name]["polygon_utm"])
+    assert _layer_union.symmetric_difference(_render).area < _TOLERANCE_M2, (
+        f"{_label}: the five layer footprints must union to exactly the published union -- a layer that "
+        "had been closed independently would break this"
+    )
+
 print(
-    "EXTENSIVE INVARIANT, BOTH DIRECTIONS: raw_union ⊆ render_fill_polygon_utm ⊆ boundary_polygon_utm on "
-    f"both fixtures. The closing GREW the union by {_p_gain:.1f} m² on the pinhole fixture -- the "
-    "production-style `render_fill.area <= polygon_utm.area` assertion would fail here, which is why it "
-    "is deliberately absent."
+    "THE ONLY GEOMETRIC OPERATION IS THE CLIP: on both fixtures the published union is bit-equal to the "
+    "exact cell footprint of its own mask clipped to the boundary (symmetric difference < 1e-6 m²), the "
+    "five per-layer footprints union to exactly it, and render_fill_polygon_utm IS that same object. "
+    "There is no extensive pass left for a `render_fill.area <= polygon_utm.area` assertion to be "
+    "backwards about."
 )
 
 
@@ -453,7 +560,7 @@ _n_result = ez.identify_exclusion_zones(
     check_soil=False,
     check_roads=False,
 )
-_n_slope_raw = _n_result["layers"]["slope"]["raw_mask"]
+_n_slope_raw = _n_result["layers"]["slope"]["mask"]
 _n_nan_cells = np.isnan(_n_array)
 _n_on_parcel_nan = _n_nan_cells & _n_slope_raw
 
@@ -601,9 +708,14 @@ for _nd_label, _nd in (
         f"{_nd_label}: layers must be in LAYER_ORDER"
     )
     for _entry in _nd["layers"]:
-        assert "closing_radius_ft" in _entry and "effective_closing_radius_ft" in _entry, (
-            f"{_nd_label}: the closing radius applied per gate must be reported, in feet (imperial) and "
-            "with the effective (quantized) value alongside the requested one"
+        # The per-gate entry is now exactly three keys. It used to carry five
+        # more describing the closing that was applied (radius requested,
+        # radius effective after quantization, radius in cells, whether it
+        # closed, and the acreage it gained). Nothing closes, so reporting any
+        # of that would be reporting on an operation that does not run.
+        assert set(_entry) == {"layer", "acres", "data_available"}, (
+            f"{_nd_label}: a narrative_data layer entry carries the raw acreage, the gate name and the "
+            f"availability flag and nothing else -- got {sorted(_entry)}"
         )
     assert set(_nd) == {
         "parcel",
@@ -615,7 +727,8 @@ for _nd_label, _nd in (
     }, f"{_nd_label}: unexpected top-level narrative_data keys {set(_nd)}"
 print(
     "narrative_data on all three fixtures: JSON round-trips unchanged, every leaf a plain str/bool/int/"
-    "float/None, every float rounded to 1 decimal, radii in FEET, no numpy scalars and no geometry."
+    "float/None, every float rounded to 1 decimal, every per-gate entry down to {layer, acres, "
+    "data_available} with no closing field left to describe, no numpy scalars and no geometry."
 )
 
 
@@ -1031,7 +1144,7 @@ assert rlm.LEGEND_LABEL_EXCLUSION not in _legend_labels, (
 )
 
 print(
-    f"RENDERED: the closed union draws as flat {rlm.EXCLUSION_ZONE_COLOR} fill at alpha "
+    f"RENDERED: the exclusion union draws as flat {rlm.EXCLUSION_ZONE_COLOR} fill at alpha "
     f"{rlm.EXCLUSION_ZONE_ALPHA}, no edge stroke, zorder {rlm.EXCLUSION_ZONE_ZORDER} -- below the streams "
     f"(20) and every KSOP layer above them -- contributing exactly one legend entry "
     f"({rlm.LEGEND_LABEL_EXCLUSION!r}). A layers dict without the key renders with no exclusion layer and "

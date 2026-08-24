@@ -169,11 +169,19 @@ alongside C so the three can be compared directly.
 binary_dilate()/binary_erode() take a radius in CELLS. The conversion
 (raster_grid.closing_radius_cells(): `round(radius_m / cell_size)`,
 cell_size = (px + py) / 2) and the padded dilate-then-erode itself
-(raster_grid.disc_closing()) are SHARED with exclusion_zones.py, the
-module that applies in production the radii this script measures -- they
-were extracted from here when that module was written, verbatim and with
-no output change. This script prints both the requested metres and the
-effective radius actually applied. The conversion deliberately does NOT
+(raster_grid.disc_closing()) live in raster_grid.py. They were extracted
+from here, verbatim and with no output change, when exclusion_zones.py
+needed the same closing.
+
+NOTHING IN THE PIPELINE CLOSES ANY MORE. exclusion_zones.py removed its
+per-gate closing entirely: its layers ship as exact cell footprints
+because their acreages are captioned back to the user, and a closing only
+ever adds ground the gate did not hit. THIS SCRIPT IS KEPT WORKING ANYWAY
+-- it is what measured those radii in the first place, and if rendering a
+consolidated exclusion layer ever returns, the question returns with it
+and this is the answer. It shares no constant with that module, so the
+removal did not touch it. This script prints both the requested metres and
+the effective radius actually applied. The conversion deliberately does NOT
 use raster_grid.waist_erosion_radius_cells(): that converts a minimum
 WAIST WIDTH into a radius and therefore HALVES it (a waist of w is
 severed by eroding w/2).
@@ -298,10 +306,11 @@ PINHOLE_MAX_CELLS = 4
 
 # closing_radius_cells(), effective_radius_meters() and disc_closing() used to
 # live here, inline. They were EXTRACTED to raster_grid.py verbatim when
-# exclusion_zones.py needed the same closing: this script MEASURED the per-gate
-# radii that module now APPLIES in production, and two copies of the conversion
-# and the padded dilate-then-erode could drift apart silently. Imported above,
-# not reimplemented -- this script's output is unchanged by the move.
+# exclusion_zones.py needed the same closing, so two copies of the conversion
+# and the padded dilate-then-erode could not drift apart silently. That module
+# no longer closes anything (see the CLOSING RADIUS section above); this script
+# still does, and still imports rather than reimplements -- its output is
+# unchanged by the move and by the removal.
 
 
 def _polygon_parts(geom) -> list[Polygon]:

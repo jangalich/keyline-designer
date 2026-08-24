@@ -10,9 +10,16 @@ asserted here).
 WHAT THE ELIGIBLE UNION IS. One geometry covering every piece of ground a user
 may select in the interactive design flow: STEP 1's gate-eligible cells,
 8-connected clustered, clusters under ELIGIBLE_UNION_MIN_CLUSTER_ACRES
-dropped, footprints unioned, clipped to the boundary. It is a DISPLAY AND
-CLAMPING geometry. The five per-gate exclusion layers are NOT derived from it
-and stay exact, because their acreages become user-facing caution figures.
+dropped, footprints unioned, clipped to the boundary, simplified. It is a
+DISPLAY AND CLAMPING geometry. The five per-gate exclusion layers are NOT
+derived from it and stay exact, because their acreages become user-facing
+caution figures -- and since nothing in that module closes any more, "exact"
+now means the gate's own cell footprint with no morphological pass at all.
+
+THE FLOOR DROPS ISLANDS AND NEVER HOLES, and section 3b is the whole reason
+that sentence is safe to write. A sub-floor component of the ELIGIBLE mask is
+confetti and goes; a sub-floor hole INSIDE the union is ground the gates
+excluded and stays, at its exact size, as a real interior ring.
 
 THE MEASUREMENT PASS ASSERTS NOTHING ABOUT WHICH STAIRCASE-REMOVAL OPTION IS
 BETTER. That is the reviewer's call. What is asserted here is that the
@@ -114,10 +121,17 @@ _RESULT = _run_exclusions(_DEM, _BOUNDARY, _CANOPY)
 # 0. THE UNION IS BUILT FROM STEP 1's OWN GATE OUTPUT
 # ===========================================================================
 #
-# identify_exclusion_zones() feeds build_eligible_union() its own UNCLOSED
-# gate complement rather than calling compute_step1_eligible_cells() a sixth
-# time. That shortcut is only legitimate if the two masks are the same mask,
-# so it is checked against a real call rather than argued from the docstring.
+# identify_exclusion_zones() feeds build_eligible_union() its own gate
+# complement rather than calling compute_step1_eligible_cells() a sixth time.
+# That shortcut is only legitimate if the two masks are the same mask, so it
+# is checked against a real call rather than argued from the docstring.
+#
+# This check used to have a second half: the complement fed in had to be the
+# UNCLOSED one, because the closed complement was smaller by every pinhole the
+# closing absorbed and using it would have applied the closing radii to what
+# the user is allowed to draw on. Nothing closes any more, so there is only
+# one complement and the trap is gone -- which is asserted below rather than
+# assumed, since a reintroduced closing would make the two diverge silently.
 
 _step1 = compute_step1_eligible_cells(
     _DEM,
@@ -126,26 +140,27 @@ _step1 = compute_step1_eligible_cells(
     tree_root_zone_mask_utm=_CANOPY,
     road_exclusion_union_utm=None,
 )
-_raw_union = np.zeros((_ROWS, _COLS), dtype=bool)
+_gate_union = np.zeros((_ROWS, _COLS), dtype=bool)
 for _name in LAYER_ORDER:
-    _raw_union |= _RESULT["layers"][_name]["raw_mask"]
+    _gate_union |= _RESULT["layers"][_name]["mask"]
 _on_parcel = ez._on_parcel_mask(_DEM, _BOUNDARY)
-_derived_step1 = _on_parcel & ~(_raw_union & _on_parcel)
+_derived_step1 = _on_parcel & ~(_gate_union & _on_parcel)
 
 assert np.array_equal(_derived_step1, _step1["eligible_mask"]), (
-    "identify_exclusion_zones()' UNCLOSED gate complement must be byte-identical to "
+    "identify_exclusion_zones()' gate complement must be byte-identical to "
     "compute_step1_eligible_cells()' own eligible_mask -- it is used in place of one"
 )
-# And it must NOT be the CLOSED complement, which is smaller by the pinholes.
-assert int(_RESULT["eligible_mask"].sum()) < int(_step1["eligible_mask"].sum()), (
-    "fixture sanity: the closing must actually absorb pinholes here, otherwise this "
-    "fixture cannot tell the closed and unclosed complements apart"
+# THE SAME ARRAY, not merely an equal one: the module's published
+# eligible_mask is what build_eligible_union() is handed. Any extensive pass
+# between the gates and the union would break this.
+assert _RESULT["eligible_mask"].tobytes() == _step1["eligible_mask"].tobytes(), (
+    "the module's published eligible_mask must be byte-identical to production's own -- if it is "
+    "SMALLER, something extensive (a closing) has come back between the gates and the union"
 )
 print(
-    f"0. STEP 1 SOURCE: the unclosed gate complement is byte-identical to compute_step1_eligible_cells()' "
-    f"own eligible_mask ({int(_step1['eligible_mask'].sum())} cells). The CLOSED complement is "
-    f"{int(_step1['eligible_mask'].sum()) - int(_RESULT['eligible_mask'].sum())} cells smaller and is "
-    f"deliberately NOT what the union is built from."
+    f"0. STEP 1 SOURCE: the gate complement is byte-identical to compute_step1_eligible_cells()' own "
+    f"eligible_mask ({int(_step1['eligible_mask'].sum())} cells), and so is the eligible_mask the module "
+    f"publishes -- with nothing closed there is only one complement and it is production's."
 )
 
 
@@ -197,9 +212,18 @@ _flat_union = _FLAT_RESULT["eligible_union_utm"]
 _trimmed_footprint = ez._mask_polygon(_FLAT_DEM, _trimmed_away, _FLAT_BOUNDARY)
 _uncovered = _trimmed_footprint.difference(_flat_union_exact).area
 
+# The figure itself, pinned. A fixture that stopped removing a meaningful
+# amount would make the containment assertion below pass vacuously.
+_EXPECTED_TRIMMED_ACRES = 1.680
+assert abs(_trimmed_away_acres - _EXPECTED_TRIMMED_ACRES) < 0.001, (
+    f"fixture sanity: this fixture's ceiling trim removes {_EXPECTED_TRIMMED_ACRES} ac, which is the "
+    f"quantity the containment assertion below is about -- got {_trimmed_away_acres:.3f} ac. If the "
+    "fixture legitimately changed, re-measure and update the figure; do not widen the tolerance"
+)
 assert _uncovered < 1e-6, (
-    f"every cell the ceiling trim removed must still be inside the EXACT eligible union -- the ceiling "
-    f"is advisory and must not narrow the highlight; {_uncovered:.6f} m2 was left out"
+    f"all {_trimmed_away_acres:.3f} acres the ceiling trim removed must still be inside the EXACT "
+    f"eligible union -- the ceiling is advisory and must not narrow the highlight; {_uncovered:.6f} m2 "
+    "was left out"
 )
 # And on the shipped geometry the shortfall is the simplify's, bounded by its
 # own tolerance rather than by anything the ceiling did.
@@ -253,6 +277,99 @@ assert abs(_floored.area - _pocket_footprint.area) < 1e-6, "nothing but the pock
 print(
     f"3. CLUSTER FLOOR: a 4-cell speck ({_speck_area:.4f} ac) is dropped and a 20-cell pocket "
     f"({_pocket_area:.4f} ac) survives intact at the {ELIGIBLE_UNION_MIN_CLUSTER_ACRES} ac floor."
+)
+
+
+# ===========================================================================
+# 3b. THE FLOOR DROPS ISLANDS, NOT HOLES
+# ===========================================================================
+#
+# The distinction the whole floor rests on, on one fixture carrying both
+# shapes at the SAME sub-floor size so neither can be dropped for being
+# smaller than the other:
+#
+#   an ISLAND -- a small patch of ELIGIBLE ground surrounded by ineligible
+#   ground. A connected component of the eligible mask, under the floor.
+#   Visual noise a user cannot act on. MUST BE DROPPED.
+#
+#   a HOLE -- a small patch of INELIGIBLE ground surrounded by eligible
+#   ground. An interior ring, not a component. A canopy pocket or a wet spot
+#   mid-field: ground the gates genuinely excluded, and a user who sees it is
+#   being told something true. MUST SURVIVE.
+#
+# Filling small holes would mean highlighting ground the gates excluded --
+# exactly what the exclusion-smoothing branch was measured and rejected for.
+# Nothing in build_eligible_union() reads or rewrites interior rings, and
+# this is what holds that to be true rather than merely intended.
+
+_HOLE_SHAPE = (44, 44)
+_HOLE_DEM = _dem(*_HOLE_SHAPE)
+_HOLE_BOUNDARY = _full_boundary(_HOLE_DEM)
+
+_ISLAND_CELLS = _rect(4, 7, 4, 7)          # 9 cells, isolated -- an ISLAND
+_FIELD_CELLS = _rect(16, 38, 16, 38)       # a big eligible field...
+_HOLE_CELLS = _rect(26, 29, 26, 29)        # ...with a 9-cell bite out of it
+
+_island_acres = len(_ISLAND_CELLS) * cell_area_acres(_HOLE_DEM)
+_hole_acres = len(_HOLE_CELLS) * cell_area_acres(_HOLE_DEM)
+assert _island_acres == _hole_acres, (
+    "fixture sanity: the island and the hole must be the SAME size, so the result cannot be explained "
+    f"by one being smaller -- got {_island_acres:.4f} vs {_hole_acres:.4f} ac"
+)
+assert _island_acres < ELIGIBLE_UNION_MIN_CLUSTER_ACRES, (
+    f"fixture sanity: both must sit UNDER the {ELIGIBLE_UNION_MIN_CLUSTER_ACRES} ac floor -- got "
+    f"{_island_acres:.4f} ac"
+)
+
+_hole_mask = _mask(_HOLE_SHAPE, _ISLAND_CELLS + _FIELD_CELLS)
+for _r, _c in _HOLE_CELLS:
+    _hole_mask[_r, _c] = False
+
+# Built EXACT (no simplify): this section is about the cluster floor, and a
+# tolerance-width edge move would blur what it is measuring. Section 8 checks
+# the simplify preserves ring counts on its own fixtures.
+_hole_union = build_eligible_union(_HOLE_DEM, _hole_mask, _HOLE_BOUNDARY, simplify_tolerance_cells=0.0)
+
+_island_footprint = ez._mask_polygon(_HOLE_DEM, _mask(_HOLE_SHAPE, _ISLAND_CELLS), _HOLE_BOUNDARY)
+_hole_footprint = ez._mask_polygon(_HOLE_DEM, _mask(_HOLE_SHAPE, _HOLE_CELLS), _HOLE_BOUNDARY)
+
+# THE ISLAND IS DROPPED.
+assert _hole_union.intersection(_island_footprint).area < 1e-6, (
+    f"a {_island_acres:.4f} ac ISLAND of eligible ground sits under the "
+    f"{ELIGIBLE_UNION_MIN_CLUSTER_ACRES} ac floor and must be DROPPED -- "
+    f"{_hole_union.intersection(_island_footprint).area:.3f} m2 of it survived"
+)
+
+# THE HOLE SURVIVES -- as a real interior ring, not merely as absent area.
+assert _hole_union.intersection(_hole_footprint).area < 1e-6, (
+    f"a {_hole_acres:.4f} ac HOLE is ground the gates EXCLUDED. Filling it would highlight ground the "
+    f"user may not select, which is the failure mode the exclusion-smoothing branch was rejected for -- "
+    f"{_hole_union.intersection(_hole_footprint).area:.3f} m2 of it was filled in"
+)
+_rings = [
+    _ring
+    for _poly in ([_hole_union] if _hole_union.geom_type == "Polygon" else list(_hole_union.geoms))
+    for _ring in _poly.interiors
+]
+assert len(_rings) == 1, (
+    f"the hole must survive as an INTERIOR RING of the union, not just as area that happens to be "
+    f"missing -- got {len(_rings)} ring(s)"
+)
+assert abs(Polygon(_rings[0]).area - _hole_footprint.area) < 1e-6, (
+    f"the surviving ring must be the hole at its exact size, neither shrunk nor grown -- "
+    f"{Polygon(_rings[0]).area:.2f} vs {_hole_footprint.area:.2f} m2"
+)
+# And the field itself came through whole apart from its hole.
+_field_footprint = ez._mask_polygon(_HOLE_DEM, _mask(_HOLE_SHAPE, _FIELD_CELLS), _HOLE_BOUNDARY)
+assert abs(_hole_union.area - (_field_footprint.area - _hole_footprint.area)) < 1e-6, (
+    "the union must be exactly the field minus its hole -- nothing else dropped, nothing else filled"
+)
+print(
+    f"3b. ISLANDS NOT HOLES: an ISLAND and a HOLE of the SAME sub-floor size ({_island_acres:.4f} ac, "
+    f"9 cells each, against a {ELIGIBLE_UNION_MIN_CLUSTER_ACRES} ac floor). The island is dropped; the "
+    f"hole survives as a genuine interior ring at its exact {_hole_footprint.area:.0f} m2, and the union "
+    f"is exactly the field minus that hole. Dropping a component the user cannot act on and filling one "
+    f"that tells them something true are opposite operations, and only the first one happens."
 )
 
 
@@ -321,19 +438,47 @@ for _rows, _which in ((_designed_rows, "designed"), (_realistic_rows, "realistic
 
 _designed = {(c, f): (cl, sv, ac) for c, f, cl, sv, ac in _designed_rows}
 _realistic = {(c, f): (cl, sv, ac) for c, f, cl, sv, ac in _realistic_rows}
-_designed_delta = _designed[(8, 0.05)][2] - _designed[(4, 0.05)][2]
-_realistic_delta = _realistic[(8, 0.05)][2] - _realistic[(4, 0.05)][2]
+_FLOOR = ELIGIBLE_UNION_MIN_CLUSTER_ACRES
+assert (8, _FLOOR) in _designed, (
+    f"the table must be built at the SHIPPED floor ({_FLOOR} ac) or the figures below describe a floor "
+    f"this module does not use -- rows cover {sorted({f for _, f in _designed})}"
+)
+_designed_delta = _designed[(8, _FLOOR)][2] - _designed[(4, _FLOOR)][2]
+_realistic_delta = _realistic[(8, _FLOOR)][2] - _realistic[(4, _FLOOR)][2]
+
+# THE HONEST READING, ASSERTED SO IT CANNOT DRIFT INTO FOLKLORE. On realistic
+# gate output the two connectivities agree exactly, at every floor in the
+# table. ELIGIBLE_UNION_CONNECTIVITY's docstring says so; this is what makes
+# that claim checkable.
+for _floor in sorted({f for _, f in _realistic}):
+    assert abs(_realistic[(8, _floor)][2] - _realistic[(4, _floor)][2]) < 1e-9, (
+        f"realistic fixture: 4- and 8-connected must agree at the {_floor} ac floor -- they do today, "
+        f"and ELIGIBLE_UNION_CONNECTIVITY's docstring records that the choice is immaterial here. Got "
+        f"{_realistic[(4, _floor)][2]:.4f} vs {_realistic[(8, _floor)][2]:.4f} ac"
+    )
+# The largest separation the choice produces ANYWHERE in this table -- which
+# is on the designed fixture, and not at the floor actually shipped.
+_max_sep, _max_sep_floor = max(
+    ((abs(_designed[(8, f)][2] - _designed[(4, f)][2]), f) for _, f in _designed),
+    key=lambda pair: pair[0],
+)
+assert _max_sep > 0.0, (
+    "fixture sanity: the DESIGNED fixture exists to make the two connectivities disagree somewhere. If "
+    "it no longer does, it is not testing what it was built to test"
+)
 
 print(
     f"   At a 0.0 floor both connectivities give identical acreage on both fixtures -- grouping only\n"
     f"   matters once a floor is applied.\n"
-    f"   At the {ELIGIBLE_UNION_MIN_CLUSTER_ACRES} ac floor: on the DESIGNED fixture 8-connectivity keeps\n"
-    f"   {_designed_delta:+.4f} ac more ({_designed[(4, 0.05)][0]} clusters collapsing to "
-    f"{_designed[(8, 0.05)][0]}, {_designed[(4, 0.05)][1]} vs {_designed[(8, 0.05)][1]} of them surviving\n"
-    f"   the floor). On the REALISTIC fixture the difference is {_realistic_delta:+.4f} ac "
-    f"({_realistic[(4, 0.05)][0]} vs {_realistic[(8, 0.05)][0]} clusters).\n"
-    f"   Read that second number as the honest one: the connectivity choice is worth having reasoned\n"
-    f"   about, but on ground that looks like ground it is close to immaterial at this floor."
+    f"   At the {_FLOOR} ac floor THIS MODULE SHIPS, the difference is {_designed_delta:+.4f} ac on the\n"
+    f"   DESIGNED fixture ({_designed[(4, _FLOOR)][0]} clusters collapsing to {_designed[(8, _FLOOR)][0]}, "
+    f"{_designed[(4, _FLOOR)][1]} vs {_designed[(8, _FLOOR)][1]} surviving the floor) and\n"
+    f"   {_realistic_delta:+.4f} ac on the REALISTIC one.\n"
+    f"   The largest separation anywhere in this table is {_max_sep:.4f} ac, and it appears at the\n"
+    f"   {_max_sep_floor} ac floor on the DESIGNED fixture -- not at the floor that ships, and not on\n"
+    f"   ground that looks like ground. On realistic gate output the two connectivities agree exactly at\n"
+    f"   EVERY floor in the table (asserted). Read that as the honest number: the reasoning behind\n"
+    f"   choosing 8 is sound and worth keeping, and the choice currently changes nothing."
 )
 
 
@@ -355,8 +500,14 @@ _fn_doc = build_eligible_union.__doc__
 _ret_doc = ez.identify_exclusion_zones.__doc__
 for _needle in ("eligible_polygon_utm", "eligible_union_utm", "eligible_mask"):
     assert _needle in _ret_doc, f"identify_exclusion_zones()'s docstring must name {_needle}"
-assert "CLUSTER FLOOR" in _ret_doc and "CLOSING" in _ret_doc, (
-    "the return docstring must state BOTH ways the two eligible geometries differ"
+assert "CLUSTER FLOOR" in _ret_doc and "SIMPLIFY" in _ret_doc, (
+    "the return docstring must state BOTH remaining ways the two eligible geometries differ. It used to "
+    "name three; removing the closing removed one of them, and the docstring has to say which two are "
+    "left rather than quietly keeping a stale list"
+)
+assert "CLOSING" in _ret_doc, (
+    "...and it must still SAY that the closing difference is the one that went away, so a reader who "
+    "remembers three reasons finds out what happened to the third"
 )
 assert "ceiling" in _fn_doc.lower() and "advisory" in _fn_doc.lower(), (
     "build_eligible_union()'s docstring must record the pre-ceiling decision"

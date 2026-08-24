@@ -3,10 +3,8 @@ exclusion_zones.py
 
 The parcel's UNSELECTABLE GROUND, as a first-class KSOP layer: the five
 reasons a piece of this property cannot carry a production zone, each
-computed as its own cell mask, each morphologically CLOSED at its own
-measured radius, and the five unioned into one geometry that renders on
-the layout map alongside every other layer and carries its own
-narrative_data.
+computed as its own cell mask and published as that mask's EXACT ground
+footprint, plus one union of every cell that is still selectable.
 
 The five layers, and the gate each one mirrors:
 
@@ -18,6 +16,71 @@ The five layers, and the gate each one mirrors:
     roads    -- existing road right-of-way, at ROAD_EXCLUSION_BUFFER_METERS
     setback  -- the ring inside PRODUCTION_BOUNDARY_SETBACK_METERS of the
                 drawn boundary
+
+--- WHAT THESE LAYERS ARE FOR, AND WHY IT CHANGED WHAT THEY ARE ---
+
+This module was originally built to render a consolidated exclusion
+layer on the map, and every display-driven decision in it followed from
+that. The interactive design direction changed the requirement:
+
+    NOTHING RENDERS THE EXCLUSIONS AT REST.
+
+They ship so the frontend can intersect a user-drawn polygon against
+ONE named gate and caption what the drawing crossed -- "0.4 acres of
+tree canopy." What gets highlighted instead is all ELIGIBLE ground, as
+one union (`eligible_union_utm`), built separately and floored
+separately.
+
+That inverts the requirements the module was designed against, and it
+is why the module is SMALLER than its history suggests it should be.
+The two consequences, both deliberate:
+
+  THE PER-GATE CLOSING IS GONE. See the next section.
+
+  THE CLUSTER FLOOR MOVED. Stranded single-cell specks were a problem
+  for a rendered EXCLUSION layer; they are now a problem for the
+  ELIGIBLE highlight, which has its own floor
+  (ELIGIBLE_UNION_MIN_CLUSTER_ACRES) and is the only place one is
+  applied.
+
+--- NO CLOSING. THE LAYERS ARE RAW CELL FOOTPRINTS, EXACT ---
+
+Each layer used to be morphologically CLOSED at its own measured radius
+(canopy and slope at 5 m, the other three at 0). That closing has been
+removed entirely: constants, calls, and the separate closed/raw pair of
+every geometry it produced.
+
+WHY IT WAS RIGHT BEFORE. Two DISPLAY arguments justified it. Fragmented
+exclusions read badly as a rendered layer, and a pinhole left inside an
+exclusion becomes a stranded selectable speck. diagnose_exclusion_
+footprints.py measured both effects on two reference boundaries and the
+radii came from that measurement, not from taste.
+
+WHY IT IS WRONG NOW. Neither argument survives the change above. The
+layers render nothing, so there is no rendered fragmentation to tidy;
+and the stranded-speck problem belongs to the eligible union, which is
+built from the gate output separately and gets its own cluster floor.
+
+AND FOR THE LAYERS' ACTUAL PURPOSE, A CLOSING IS ACTIVELY WRONG. It is
+an EXTENSIVE operation -- it only ever ADDS cells -- and what it added
+was measured: +0.117 ac (OLD reference boundary) / +0.228 ac (NEW) on
+canopy, +0.234 / +0.370 ac on slope. Those cells are not canopy and are
+not steep. A caution reading "0.5 acres of tree canopy" when the truth
+is 0.4 is a FALSE STATEMENT TO THE USER about their own land, and it is
+false by an amount large enough to see.
+
+This is the same reasoning that has always kept narrative_data's
+per-gate acreages unclosed and unsmoothed. Those figures are
+user-facing, so they must be exact. The wire figures are now user-facing
+in the same way, and the same rule applies to the geometry itself.
+
+THE DIAGNOSTIC STAYS. diagnose_exclusion_footprints.py still measures
+closings at 5 m and 10 m on both reference boundaries, and is what
+established every number quoted above. Nothing in the pipeline closes
+anymore and it is kept working anyway: if rendering the exclusions ever
+returns, the question returns with it, and that script is the answer.
+It shares no constant with this module -- it takes raster_grid.
+disc_closing() directly -- so removing the radii here did not touch it.
 
 --- LAYER PLACEMENT: THIS IS LAYER 2, AND THE FIRST LAYER 2 STEP ---
 
@@ -46,16 +109,22 @@ run. That is the OPPOSITE of the redundancy this pipeline's
 architecture normally eliminates (see pipeline_context.py's whole
 reason for existing), and it is deliberate, not an oversight.
 
-WHY IT IS DELIBERATE. Feeding these CLOSED exclusions into production
-would change production's results. A closing is EXTENSIVE -- it only
-ever adds excluded cells -- so production would lose the pinhole cells
-the closing absorbs (measured at roughly 0.35 ac on the OLD reference
-boundary and 0.60 ac on the NEW one). Those cells are stranded specks
-of selectable ground sitting inside excluded terrain, and there is a
-real argument that production should never have been able to claim
-them. But that is a decision to make once these radii are validated on
-terrain beyond the two reference boundaries -- not one to bundle into
-the branch that introduces the module.
+WHAT REMOVING THE CLOSING CHANGED ABOUT THIS ARGUMENT -- and it changed
+the substance of it, not just the wording. While the closing existed,
+feeding this module's `eligible_mask` into production would have
+CHANGED PRODUCTION'S RESULTS: the closed exclusions were larger than the
+raw gates by the pinholes they absorbed (measured at roughly 0.35 ac on
+the OLD reference boundary and 0.60 ac on the NEW), so production would
+have lost exactly those cells. Deferring the integration was therefore
+also deferring a decision about production's output.
+
+IT IS NOT ANYMORE. With no closing, this module's `eligible_mask` is
+BYTE-IDENTICAL to compute_step1_eligible_cells()' own eligible_mask --
+asserted directly against a real call in test_eligible_union.py, not
+assumed. Wiring it in would be a pure de-duplication with no behavioural
+change at all. The integration is still not done here, but the reason is
+now only that production is out of scope on this branch; there is no
+longer a hidden decision buried inside it.
 
 THE OPEN QUESTION, NAMED: should compute_step1_eligible_cells() take
 this module's `eligible_mask` as an optional override (the standard
@@ -87,40 +156,6 @@ zones.py asserts these exact counts, not upper bounds: one more of any
 would mean something is re-fetching beyond the known duplication and
 the override pattern is failing somewhere else.
 
---- CLOSING: PER-GATE RADII, MEASURED NOT GUESSED ---
-
-Each gate closes at its OWN radius (the five constants below), because
-diagnose_exclusion_footprints.py measured all five layers on both
-reference boundaries, raw and closed at 5 m and 10 m, and they do not
-behave alike:
-
-    canopy   18 -> 13 polygons, +0.117 ac (OLD) / +0.228 ac (NEW)  -> close
-    slope    19 -> 12 (OLD) and 32 -> 18 (NEW), +0.234 / +0.370 ac -> close
-    hydric   3 -> 3 / 1 -> 1, +0.000 / +0.012 ac                   -> no
-    roads    0 cells on both boundaries                            -> no
-    setback  43 -> 43 / 41 -> 41, +0.000 ac on both                -> NO
-
-Slope is both the largest exclusion (3.165 ac / 19 polygons OLD, 4.062
-ac / 32 NEW, against canopy's 1.030 and 2.416) and the most fragmented,
-and it gains the most from closing -- absorbing 7 and 14 polygons, with
-the largest single gained region only 6 and 8 cells. That is PINHOLE
-ABSORPTION, not region merging, which is exactly what makes it safe.
-
-THE SETBACK MUST NOT BE CLOSED, and its 0.0 is a measured decision, not
-an untuned placeholder. At 10 m the diagnostic raised OVER-MERGE SHAPE
-on both boundaries -- a single region taking 100% and 83% of the whole
-gain. The setback is a RING, fragmented into 41-43 pieces by the cell
-grid alone; closing a ring does not tidy it up, it bridges across the
-middle of the parcel. At 5 m it gains nothing at all. Both radii are
-wrong for it, in opposite ways.
-
-QUANTIZATION. At the pipeline's 5 m DEM resolution these radii quantize
-hard: 5 m is a ONE-cell disc and there is no gentler setting available
-(raster_grid.closing_radius_cells() rounds, so 2 m is 0 cells -- a
-no-op, honestly reported rather than inflated to a full cell). If a 5 m
-closing ever proves too aggressive on other terrain, the answer is NOT
-a smaller radius, because there isn't one. It is a different operation.
-
 --- NODATA: "TOO STEEP" AND "NOT MEASURED" ARE DIFFERENT FACTS ---
 
 A cell with no DEM coverage has slope_pct = NaN, fails
@@ -131,36 +166,49 @@ not purely "too steep". narrative_data reports the NaN share
 SEPARATELY (`nan_slope_acres`) so a narrative can never conflate the
 two. Same split diagnose_exclusion_footprints.py already makes.
 
---- render_fill_polygon_utm IS NOT BOUNDED HERE. THIS INVERTS. ---
+--- ONE EXCLUSION GEOMETRY, NOT A CLOSED/RAW PAIR ---
 
-For a production zone, render_fill_polygon_utm is a morphological
-OPENING clipped to polygon_utm, and production_area.cluster_and_gate()
-asserts `render_fill_polygon_utm.area <= polygon_utm.area` -- the
-render geometry can never exceed the real footprint. DO NOT COPY THAT
-ASSERTION HERE. It is backwards for this module and it will look
-missing to anyone reading the two files side by side.
+While the closing existed there were two of everything: a closed mask
+and a raw_mask per layer, and `excluded_union_utm` alongside
+`raw_excluded_union_utm`. The raw halves existed ONLY so the extensive
+invariant (`raw ⊆ closed`) was checkable against something real.
 
-An opening is ANTI-EXTENSIVE: it removes, so there is always a larger
-true footprint to bound it against. A closing is EXTENSIVE: the closed
-geometry is deliberately LARGER than the raw union, and there is no
-smaller footprint to clip back to, because the closed geometry IS the
-answer -- the pinholes it absorbed are the point of the operation, not
-overreach to be trimmed. The only clip that applies is to
-boundary_polygon_utm: exclusions are a fact about THIS parcel.
+With no closing the two halves are the same array and the same
+geometry, so the pair is collapsed to one of each. Publishing both
+would leave two byte-identical keys with no stated difference, which is
+exactly the trap the three-way "eligible" split below is documented
+against.
 
-The invariant is therefore the INVERSE, and it is asserted in both
-directions in test_exclusion_zones.py:
+The invariant that replaced it is the plain one:
 
-    raw_excluded_union_utm  ⊆  render_fill_polygon_utm  ⊆  boundary_polygon_utm
+    excluded_union_utm  ⊆  boundary_polygon_utm
 
---- EXCLUSION SMOOTHING: MEASURED AND REJECTED ---
+and it holds because the clip to boundary_polygon_utm is now the ONLY
+geometric operation applied to an exclusion layer at all. There is no
+longer anything that can push a layer outward, which is also why
+`render_fill_polygon_utm` is simply the same geometry -- see
+identify_exclusion_zones()'s docstring for why that key still exists.
 
-render_fill_polygon_utm is a 5 m cell-union staircase and reads as one.
-A branch set out to fix that by running the angular-simplify + Chaikin
-pass (raster_grid.angular_smooth_polygon(), the same treatment the
-production fill already gets) over the closed union, and deriving
-eligible_polygon_utm from the smoothed result so the two layers would
-share a boundary by construction.
+DO NOT ADD A `render_fill.area <= polygon_utm.area` ASSERTION HERE on
+the strength of production_area.cluster_and_gate() having one. There it
+guards an OPENING (anti-extensive, so there is a larger true footprint
+to bound against). Here the two geometries are identical by
+construction and the assertion would be vacuous rather than wrong.
+
+--- EXCLUSION SMOOTHING: MEASURED AND REJECTED (AND NOW MOOT) ---
+
+Kept because the measurement is the reason nobody should try it again,
+and because the same interaction it found was re-measured on the
+eligible union from different geometry (see ELIGIBLE_UNION_SIMPLIFY_
+TOLERANCE_CELLS). Note the geometry it was measured on -- the CLOSED
+union -- no longer exists; the rejection is recorded, not active.
+
+A branch set out to remove the 5 m cell staircase from the published
+exclusion union by running the angular-simplify + Chaikin pass
+(raster_grid.angular_smooth_polygon(), the same treatment the
+production fill already gets) over it, and deriving eligible_polygon_utm
+from the smoothed result so the two layers would share a boundary by
+construction.
 
 IT WAS NOT APPLIED, and the reason is measured, not aesthetic. The
 design rested on the direction of error being the safe one: Chaikin
@@ -187,33 +235,31 @@ reasons (both measured in test_exclusion_smoothing.py):
 On a reference-shaped fixture (7.7 ac across 18 polygons) at the
 GENTLEST supportable settings -- one DEM cell of tolerance, one Chaikin
 pass, with nothing gentler available -- the smoothed union cuts 2652 m²
-= 0.655 acres INSIDE the closed union. That is gate-excluded ground
-republished as selectable. For scale, the largest gain any closing
-radius in this module produces on the reference boundaries is +0.370
-acres, and every one of those radii was measured at cell-level
-precision. Smoothing would give back 1.8x what all five closings
-together were tuned to add, in the one direction this layer cannot
-afford to be wrong in.
+= 0.655 acres INSIDE the union it was applied to. That is gate-excluded
+ground republished as selectable, in the one direction an exclusion
+cannot afford to be wrong in.
 
 The obvious repair does not work either: unioning the smoothed result
-back with the closed union makes containment exact, but it restores the
+back with the original makes containment exact, but it restores the
 original steps everywhere the smooth cut inward and keeps the smoothed
 arcs everywhere else, leaving 122% of the vertex count of the staircase
 it was meant to remove.
 
-What DID survive the branch is the half that was sound independently:
+What DID survive that branch is the half that was sound independently:
 eligible_polygon_utm is DERIVED as boundary_polygon_utm minus the
 published exclusion rather than computed on its own. Two layers derived
 from one geometry share a boundary by construction -- no sliver
 belonging to neither, no overlap claimed by both -- and that is a
-property of deriving, not of smoothing, so it holds for the exact
-closed union just as it would have for a smoothed one. It is asserted
-for both in test_exclusion_smoothing.py.
+property of deriving, not of smoothing, so it holds for the exact union
+just as it would have for a smoothed one. It is asserted for both in
+test_exclusion_smoothing.py.
 
-If this is revisited, the thing to change is the OPERATION, not the
-constants -- there is no tolerance below one cell to retreat to. An
-outward-biased smoother (one whose error direction can be pinned) is
-the shape of the answer.
+WHAT THE ELIGIBLE UNION DOES INSTEAD, and why it is not the same
+question: it is not an exclusion, so an inward error is a display
+shortfall rather than a false "you may plant here". It gets a plain
+Douglas-Peucker simplify with no Chaikin pass, whose error is bounded
+by its own tolerance and measured at exactly that bound. See
+ELIGIBLE_UNION_SIMPLIFY_TOLERANCE_CELLS.
 
 --- ACREAGE IS COUNTED IN CELLS ---
 
@@ -231,11 +277,13 @@ module does not mix them.
 
 --- WHAT THIS MODULE DOES NOT DO ---
 
-No interactive/frontend concern lives here: no clamp endpoint, no
-display simplification, no WGS84 transport beyond the standard
-`geometry_wgs84` key. This is an ordinary pipeline step. The
-interactive use and the production integration are both later, separate
-work.
+The `wire` block is frontend-facing METADATA AND GEOMETRY only -- see
+_wire_layers() and identify_exclusion_zones()'s docstring for the four
+things it carries and why each one exists. There is still no clamp
+endpoint, no session state, and no interaction logic here: this remains
+an ordinary pipeline step that publishes what the interactive flow
+needs, not the interactive flow itself. The production integration is
+later, separate work.
 """
 
 import math
@@ -260,10 +308,7 @@ from raster_grid import (
     SQUARE_METERS_PER_ACRE,
     cell_area_acres,
     cell_union_footprint,
-    closing_radius_cells,
     connected_components,
-    disc_closing,
-    effective_radius_meters,
     pixel_center_xy,
 )
 from soil_data import coordinates_to_wkt_polygon
@@ -279,60 +324,9 @@ from soil_data import coordinates_to_wkt_polygon
 # OVERRIDES docstring section.
 _ROAD_UNION_NOT_SUPPLIED = object()
 
-# ---------------------------------------------------------------------------
-# CLOSING RADII -- one constant per gate, defined separately
-#
-# Separate constants even where the value is identical, per this codebase's
-# standing convention: two gates that happen to agree today are not one
-# tunable, and collapsing them would silently retune four layers the day
-# anyone edits the shared value. Every value below is CONFIGURABLE, and
-# every one of them records the measurement it came from -- see the module
-# docstring's CLOSING section for the full per-boundary table.
-# ---------------------------------------------------------------------------
 
-CANOPY_EXCLUSION_CLOSING_RADIUS_METERS = 5.0
-"""Canopy root-zone closing radius. MEASURED: 18 -> 13 polygons on both
-reference boundaries, gaining 0.117 ac (OLD) / 0.228 ac (NEW). Pinhole
-absorption -- the gaps closed are single-cell holes punched through
-continuous woodland by the HAG threshold, not real clearings. One cell
-at the pipeline's 5 m DEM resolution."""
-
-SLOPE_EXCLUSION_CLOSING_RADIUS_METERS = 5.0
-"""Slope closing radius. MEASURED: the largest and most fragmented of the
-five layers (3.165 ac / 19 polygons OLD, 4.062 ac / 32 NEW) and the one
-that gains most from closing -- 19 -> 12 and 32 -> 18 polygons, +0.234 /
-+0.370 ac, with the largest single gained region just 6 and 8 cells. A
-largest-gain that small is what distinguishes pinhole absorption from
-region merging, and it is why 5 m is safe here despite this being the
-biggest layer."""
-
-HYDRIC_EXCLUSION_CLOSING_RADIUS_METERS = 0.0
-"""Hydric soil: NO closing. MEASURED: 3 -> 3 polygons (OLD) and 1 -> 1
-(NEW) at 5 m, gaining 0.000 and 0.012 ac. SSURGO map units arrive as
-already-clean survey polygons, not as a thresholded raster, so there are
-no pinholes to absorb. A closing here would buy nothing and cost real
-ground."""
-
-ROAD_EXCLUSION_CLOSING_RADIUS_METERS = 0.0
-"""Existing road right-of-way: NO closing. MEASURED: 0 cells on BOTH
-reference boundaries -- the layer is empty there, so no radius is
-supportable from measurement at all. 0.0 is the honest configuration:
-this one is genuinely unvalidated rather than measured-and-rejected (the
-distinction the setback below does NOT share), and the first boundary
-with real on-parcel road exclusion is the one that should set it."""
-
-SETBACK_EXCLUSION_CLOSING_RADIUS_METERS = 0.0
-"""Boundary setback: NO closing, and this 0.0 is a MEASURED DECISION, not
-a not-yet-tuned placeholder. At 10 m the diagnostic flagged OVER-MERGE
-SHAPE on BOTH boundaries -- one region took 100% (OLD) and 83% (NEW) of
-the entire gain. The setback is a RING, split into 41-43 pieces by the
-cell grid alone; closing a ring never tidies the ring, it bridges
-straight across the parcel interior. At 5 m it gains exactly 0.000 ac on
-both boundaries, so there is no radius that helps. Do not raise this
-because the other layers close."""
-
-# Fixed layer order for `layers`, narrative_data, and the pairwise overlap
-# matrix -- declared once so the three can never disagree. Ordered by
+# Fixed layer order for `layers`, the wire, narrative_data and the pairwise
+# overlap matrix -- declared once so the four can never disagree. Ordered by
 # measured footprint on the reference boundaries (slope largest), except
 # canopy leads because it is the gate a reader looks for first.
 LAYER_ORDER = ("canopy", "slope", "hydric", "roads", "setback")
@@ -350,15 +344,38 @@ human-readable wording lives in _display_label() and is expected to change."""
 # identify_exclusion_zones()'s docstring for what distinguishes all three.
 # ---------------------------------------------------------------------------
 
-ELIGIBLE_UNION_MIN_CLUSTER_ACRES = 0.05
+ELIGIBLE_UNION_MIN_CLUSTER_ACRES = 0.1
 """Clusters of selectable ground smaller than this are dropped from the
-eligible union. 0.05 ac is 8 cells at the pipeline's 5 m DEM resolution --
-enough to clear stranded single- and double-cell specks that would render as
-unselectable-looking confetti, and small enough not to cut into a real pocket
-a user might legitimately want to plant. CONFIGURABLE.
+eligible union. 0.1 ac is 17 cells at the pipeline's 5 m DEM resolution --
+enough to clear stranded single-, double- and small-run specks that would
+highlight as unselectable-looking confetti, and small enough not to cut into a
+real pocket a user might legitimately want to plant. CONFIGURABLE.
+
+AND IT IS CLOSE TO INERT, WHICH IS WORTH SAYING SO THE NUMBER DOES NOT ACQUIRE
+FALSE IMPORTANCE. Measured on realistic gate output (test_eligible_union.py's
+standard fixture, its own STEP 1 eligible mask): the floor costs 0.0062 acres
+-- 11.2433 ac at no floor against 11.2371 ac at this one, one cluster dropped
+out of three. The decision is defensible and the measurement supports it; it
+is not load-bearing. What IS load-bearing on this geometry is the simplify
+bound below.
+
+IT DROPS ISLANDS, NOT HOLES, AND THAT DISTINCTION IS THE WHOLE POINT.
+Clustering labels connected components of the ELIGIBLE mask, so what falls
+under the floor is a small isolated patch of highlighted ground surrounded by
+unhighlighted ground -- visual noise a user cannot act on.
+
+An unhighlighted island INSIDE a highlighted region is a different thing
+entirely: it is a hole in the union, it is ground the gates excluded -- a
+canopy pocket, a wet spot mid-field -- and a user who sees it is being told
+something true. Filling small holes would mean highlighting ground the gates
+excluded, which is exactly what the exclusion-smoothing branch was measured
+and rejected for (see the module docstring). Nothing in build_eligible_union()
+touches interior rings at any stage, and test_eligible_union.py asserts a
+sub-floor hole survives a floor that drops a sub-floor island of the same
+size.
 
 Applied ONLY to the eligible union. The per-gate layers and every acreage in
-narrative_data are untouched by it: those figures become user-facing caution
+narrative_data are untouched by it: those figures are user-facing caution
 numbers and must stay exact."""
 
 ELIGIBLE_UNION_CONNECTIVITY = 8
@@ -379,8 +396,28 @@ carries no per-cluster record; a point-touching junction is a visual pinch in
 a highlight, not a broken patch. What 8-connectivity buys is the thing that
 matters for a cluster FLOOR: it merges diagonal chains of cells rather than
 fragmenting them, so fewer real runs of selectable ground fall under the
-floor and get dropped. See test_eligible_union.py for the measured 4-vs-8
-comparison at three floors. CONFIGURABLE."""
+floor and get dropped. CONFIGURABLE.
+
+AND IT IS IMMATERIAL IN PRACTICE. KEEP THIS NOTE -- without it the constant
+acquires an importance the measurement does not support. test_eligible_union.
+py runs both connectivities at three floors on two fixtures:
+
+  On REALISTIC gate output the two are IDENTICAL at every floor (11.2433 ac at
+  no floor, 11.2371 ac at 0.05 and at 0.1 -- the same figure for 4 and for 8).
+  Only the cluster COUNT differs, and here not even that.
+
+  Only a DELIBERATELY-DIAGONAL fixture separates them -- corner-touching blocks
+  plus a one-cell diagonal chain, built to make them disagree. There the
+  largest separation the choice produces anywhere in the measurement is
+  0.0741 ac, and it appears at the 0.05 floor (8-connected 0.9637 ac against
+  4-connected 0.8896 ac). At the 0.1 acre floor this module actually ships,
+  even that fixture comes out identical (0.7907 ac both ways) -- the diagonal
+  chain is under the floor whether it is labelled as one cluster or twelve.
+
+So: the reasoning above is sound and worth keeping, and on ground that looks
+like ground the choice does not currently change a single square metre. Both
+of the eligible union's tuning decisions -- this one and the floor above --
+are defensible and close to inert. Neither is where the risk lives."""
 
 ELIGIBLE_UNION_SIMPLIFY_TOLERANCE_CELLS = 1.0
 """Angular simplify tolerance for the eligible union, in DEM CELLS --
@@ -389,48 +426,64 @@ render_layout_map.PRODUCTION_FILL_SIMPLIFY_TOLERANCE_CELLS uses, so it stays
 "one cell" at any resolution. A metres constant would hardcode the grid.
 
 WHAT THIS BUYS, MEASURED (diagnose_eligible_union_staircase.py, two
-boundary-shaped fixtures): the 5 m cell staircase goes from 690 and 1743
-one-cell axis-aligned boundary segments down to 3 on both; exterior vertices
-drop 200 -> 41 and 1304 -> 258; area moves by +0.09% and -1.29%; polygon and
-interior-ring counts are untouched. The error is BOUNDED and the bound is the
-tolerance itself: Douglas-Peucker never moves a ring further than the
-tolerance it was given, measured at exactly 5.00 m against a 5 m tolerance on
-both fixtures and asserted in test_eligible_union.py.
+boundary-shaped fixtures -- A "rolling ground", B "ridge with fingers"): the
+5 m cell staircase goes from 690 and 1729 one-cell axis-aligned boundary
+segments down to 3 and 1; exterior vertices drop 200 -> 41 and 1289 -> 251;
+area moves by +0.09% and -0.89%; polygon and interior-ring counts are
+untouched (1/11 and 7/7). The error is BOUNDED and the bound is the tolerance
+itself: Douglas-Peucker never moves a ring further than the tolerance it was
+given, measured at exactly 5.00 m against a 5 m tolerance on both fixtures and
+asserted in test_eligible_union.py.
+
+(Fixture B's baseline moved when ELIGIBLE_UNION_MIN_CLUSTER_ACRES went from
+0.05 to 0.1 -- the diagnostic builds its baseline through build_eligible_union()
+at the module default, so the higher floor drops one more cluster there and the
+whole row shifts with it: 8 polygons to 7, 1743 one-cell segments to 1729, 1304
+exterior vertices to 1289. Every figure quoted here is from a re-run at the
+floor this module actually ships, not carried over.)
 
 NO CHAIKIN PASS HERE, and this is a measured rejection rather than an
 omission -- someone will otherwise add one later on the reasonable-sounding
 grounds that simplify leaves hard corners. Measured on the same two fixtures:
 
-  Chaikin ALONE does not remove the staircase (3 one-cell segments still
-  present on the fingered fixture, the same count simplify alone leaves) and
-  INFLATES vertex count rather than reducing it -- 200 -> 399 and
-  1304 -> 2600, the opposite of what this geometry needs, since it is
-  transported to the frontend and clamped against.
+  Chaikin ALONE does not remove the staircase -- it leaves 3 one-cell
+  segments on the fingered fixture where simplify alone leaves 1 -- and it
+  INFLATES vertex count rather than reducing it: 200 -> 399 and 1289 -> 2571,
+  the opposite of what this geometry needs, since it is transported to the
+  frontend and clamped against.
 
   Chaikin COMPOSED WITH simplify costs more area than either pass alone
-  (ratio 0.9955 and 0.9836, against 1.0009 / 0.9871 for simplify alone) and
+  (ratio 0.9955 and 0.9870, against 1.0009 / 0.9911 for simplify alone) and
   it forfeits the bound: max excursion 10.50 m and 14.58 m against a 5 m
   tolerance. This reproduces the interaction test_exclusion_smoothing.py
   found on the exclusion union -- Chaikin's corner cut scales with edge
   length, and collapsing the staircase is exactly what turns hundreds of 5 m
   edges into a few long ones. The two passes are not independent and
-  composing them is worse than either.
+  composing them is worse than either. That is the same interaction measured
+  twice now, on different geometry; it is a property of the composition, not
+  of one fixture.
 
-A vector opening (buffer(-r).buffer(+r)) was measured and rejected too: it
+A VECTOR OPENING (buffer(-r).buffer(+r)) WAS MEASURED AND REJECTED TOO. It
 raises vertex count 4-6x because round buffers emit arcs, and on ground with
-narrow fingers it is destructive (r = 3 cells removed 51% of the eligible
-area and turned 8 polygons into 15). Its advertised bounded-error guarantee
-also does not hold as stated -- see diagnose_eligible_union_staircase.
+narrow fingers it is destructive: r = 3 cells removed 51% of the eligible area
+(22.172 -> 10.839 ac) and turned 7 polygons into 15.
+
+Its advertised bounded-error guarantee is also FALSE AS STATED, which is the
+reason it looks like the principled choice and is not. An opening deletes any
+protrusion too thin to hold a radius-r disc -- ENTIRELY, however long the
+protrusion is -- so a one-cell finger's tip ends up its WHOLE LENGTH from the
+result, not r. Measured at 45.50 m on the fingered fixture against r = 5 m.
+(What IS true of an opening, and is asserted separately, is the weaker
+statement that removed ground stays within r of ground that was never
+eligible; that is not a bound on how far the published boundary moves.)
+
+Douglas-Peucker's bound is the real one: it never moves a ring further than
+the tolerance it was given. Measured at exactly 5.00 m against a 5 m tolerance
+on both fixtures, and ASSERTED -- both that it holds and that it is ATTAINED,
+since a bound the result sits well inside is an incidental one. This is the
+branch's load-bearing guarantee. See diagnose_eligible_union_staircase.
 max_inward_excursion(). CONFIGURABLE.
 """
-
-CLOSING_RADIUS_METERS_BY_LAYER = {
-    "canopy": CANOPY_EXCLUSION_CLOSING_RADIUS_METERS,
-    "slope": SLOPE_EXCLUSION_CLOSING_RADIUS_METERS,
-    "hydric": HYDRIC_EXCLUSION_CLOSING_RADIUS_METERS,
-    "roads": ROAD_EXCLUSION_CLOSING_RADIUS_METERS,
-    "setback": SETBACK_EXCLUSION_CLOSING_RADIUS_METERS,
-}
 
 
 def _round1(value: float) -> float:
@@ -489,10 +542,10 @@ def _mask_polygon(dem: dict, mask: np.ndarray, boundary_polygon_utm: Polygon):
     shared edges are bit-for-bit identical and adjacent squares actually
     dissolve) -- NOT a hull of cell centers and NOT a buffer.
 
-    The clip to boundary_polygon_utm is the ONLY clip applied anywhere in
-    this module. See the module docstring: there is deliberately no clip
-    back to a raw footprint, because the closing is extensive and the
-    closed geometry is the answer.
+    The clip to boundary_polygon_utm is the ONLY geometric operation
+    applied to an exclusion layer anywhere in this module. There is nothing
+    to clip back to and nothing that can push a layer outward: the mask IS
+    the answer and this is its exact ground footprint.
 
     KNOWN FOLLOW-UP -- NOT FIXED HERE, DELIBERATELY. This intersection can
     return a GeometryCollection carrying zero-area LINE pieces wherever a
@@ -504,11 +557,11 @@ def _mask_polygon(dem: dict, mask: np.ndarray, boundary_polygon_utm: Polygon):
 
     The same filter belongs here. It is not applied on this branch because
     every pre-existing return key had to stay byte-identical, and this
-    function feeds five of them (layers[*]['polygon_utm'], excluded_union_
-    utm, render_fill_polygon_utm, raw_excluded_union_utm, and through them
-    geometry_wgs84). Changing it is a one-line edit plus a re-baseline of
-    those keys, and it should be its own change so the re-baseline is
-    reviewable on its own.
+    function feeds four of them (layers[*]['polygon_utm'], excluded_union_
+    utm, render_fill_polygon_utm, and through them geometry_wgs84 and every
+    layers[*]['geometry_wgs84'] on the wire). Changing it is a one-line edit
+    plus a re-baseline of those keys, and it should be its own change so the
+    re-baseline is reviewable on its own.
     """
     if not mask.any():
         return Polygon()
@@ -517,8 +570,8 @@ def _mask_polygon(dem: dict, mask: np.ndarray, boundary_polygon_utm: Polygon):
 
 def _pairwise_overlap_acres(dem: dict, masks: dict[str, np.ndarray]) -> list[dict]:
     """
-    Measured overlap acreage for every pair of closed layers, in
-    LAYER_ORDER order.
+    Measured overlap acreage for every pair of layers, in LAYER_ORDER
+    order.
 
     This exists because the five per-layer acreages MUST NOT BE SUMMED
     and a comment saying so is not checkable. One cell can be both wooded
@@ -580,15 +633,20 @@ def build_eligible_union(
     so this makes no observable difference there -- it will on flatter land.
 
     `step1_eligible_mask` is production_area.compute_step1_eligible_cells()'s
-    own eligible_mask. identify_exclusion_zones() passes its own UNCLOSED
-    gate complement, which is byte-identical to it (asserted directly
-    against a real compute_step1_eligible_cells() call in
-    test_eligible_union.py) -- taking it from the masks this module already
-    computed avoids adding a sixth redundant gate computation to a module
-    whose docstring is already an argument about redundancy. Note this is
-    the UNCLOSED complement: the closed one (`eligible_mask` on the return)
-    is smaller by exactly the pinholes the closing absorbed, and using it
-    here would silently apply the closing radii to the highlight.
+    own eligible_mask. identify_exclusion_zones() passes its own gate
+    complement, which is byte-identical to it (asserted directly against a
+    real compute_step1_eligible_cells() call in test_eligible_union.py) --
+    taking it from the masks this module already computed avoids adding a
+    sixth redundant gate computation to a module whose docstring is already
+    an argument about redundancy.
+
+    THE CLUSTER FLOOR DROPS ISLANDS AND NEVER TOUCHES HOLES. The labelling
+    below runs on the ELIGIBLE mask, so a component under the floor is an
+    isolated patch of selectable ground surrounded by unselectable ground.
+    An unhighlighted island INSIDE the union is an interior ring, not a
+    component, and no step here reads or rewrites interior rings -- see
+    ELIGIBLE_UNION_MIN_CLUSTER_ACRES for why filling one would be a false
+    statement about the ground rather than a tidier highlight.
 
     SIMPLIFIED, NOT SMOOTHED. The staircase is removed with a single angular
     simplify pass at ELIGIBLE_UNION_SIMPLIFY_TOLERANCE_CELLS (see that
@@ -609,8 +667,9 @@ def build_eligible_union(
     of this field is a Polygon/MultiPolygon, so those pieces are dropped rather
     than shipped inside a GeometryCollection a consumer would have to unpack.
     (identify_exclusion_zones()'s older _mask_polygon() has the same exposure
-    and is deliberately NOT changed here -- every existing return key must stay
-    byte-identical on this branch. Flagged, not silently fixed.)
+    and is still deliberately NOT changed -- fixing it re-baselines every
+    exclusion geometry key at once and should be its own reviewable change.
+    Flagged, not silently fixed.)
 
     Returns an empty Polygon when nothing survives the floor.
     """
@@ -726,8 +785,7 @@ def _wire_layers(
 
 def build_narrative_data(
     dem: dict,
-    closed_masks: dict[str, np.ndarray],
-    raw_masks: dict[str, np.ndarray],
+    masks: dict[str, np.ndarray],
     union_mask: np.ndarray,
     eligible_mask: np.ndarray,
     on_parcel: np.ndarray,
@@ -755,9 +813,7 @@ def build_narrative_data(
           'parcel': {'total_acres', 'excluded_acres', 'eligible_acres',
                      'excluded_pct_of_parcel'},
           'layers': [ one entry per gate, in LAYER_ORDER:
-                      {'layer', 'acres', 'closing_radius_ft',
-                       'effective_closing_radius_ft', 'closing_radius_cells',
-                       'closed', 'acres_gained_by_closing', 'data_available'} ],
+                      {'layer', 'acres', 'data_available'} ],
           'overlap': {'pairs': [...], 'naive_sum_acres', 'union_acres',
                       'double_counted_acres'},
           'slope_detail': {'max_slope_pct', 'too_steep_acres',
@@ -788,12 +844,18 @@ def build_narrative_data(
     block carries no prose -- the full wording lives in this module's
     docstring and in diagnose_exclusion_footprints.py's own output.
 
-    ACRES GAINED BY CLOSING is per layer and is the honest cost line for
-    the extensive operation: closed cells minus raw cells, so a layer
-    configured at 0.0 m reports exactly 0.0 and a layer that closed
-    reports what the closing actually absorbed on THIS boundary -- not
-    what it absorbed on the reference boundaries the radius was tuned
-    against.
+    EVERY ACREAGE HERE IS RAW, and there is no longer anything that could
+    make it otherwise. The per-layer entry used to carry five closing
+    fields ('closing_radius_ft', 'effective_closing_radius_ft',
+    'closing_radius_cells', 'closed', 'acres_gained_by_closing') reporting
+    what the extensive operation added on THIS boundary. The closing is
+    gone (module docstring, NO CLOSING) and so are they: a layer's 'acres'
+    is now the cell count of the gate's own hit mask and nothing else.
+
+    That is the same rule these figures always followed -- they were the
+    one part of the module the closing never reached, precisely because
+    they are user-facing. The geometry has now been brought into line with
+    the numbers rather than the other way round.
     """
     area_per_cell = cell_area_acres(dem)
     excluded_cells = int(union_mask.sum())
@@ -801,31 +863,17 @@ def build_narrative_data(
 
     layers = []
     for name in LAYER_ORDER:
-        radius_m = CLOSING_RADIUS_METERS_BY_LAYER[name]
-        radius_cells = closing_radius_cells(dem, radius_m)
-        gained = int(closed_masks[name].sum()) - int(raw_masks[name].sum())
         layers.append(
             {
                 "layer": name,
-                "acres": _round1(int(closed_masks[name].sum()) * area_per_cell),
-                "closing_radius_ft": _round1(radius_m / METERS_PER_FOOT),
-                # The radius ASKED FOR and the radius APPLIED differ whenever
-                # the requested metres do not land on a whole cell -- at 5 m
-                # DEM resolution they differ often. Reporting only the request
-                # would misstate what ran.
-                "effective_closing_radius_ft": _round1(
-                    effective_radius_meters(dem, radius_cells) / METERS_PER_FOOT
-                ),
-                "closing_radius_cells": int(radius_cells),
-                "closed": bool(radius_cells > 0),
-                "acres_gained_by_closing": _round1(gained * area_per_cell),
+                "acres": _round1(int(masks[name].sum()) * area_per_cell),
                 "data_available": bool(layer_availability[name]),
             }
         )
 
-    naive_sum_acres = sum(int(closed_masks[name].sum()) for name in LAYER_ORDER) * area_per_cell
+    naive_sum_acres = sum(int(masks[name].sum()) for name in LAYER_ORDER) * area_per_cell
     nan_slope_cells = int((on_parcel & np.isnan(slope_pct)).sum())
-    too_steep_cells = int(raw_masks["slope"].sum()) - nan_slope_cells
+    too_steep_cells = int(masks["slope"].sum()) - nan_slope_cells
 
     return {
         "parcel": {
@@ -838,7 +886,7 @@ def build_narrative_data(
         },
         "layers": layers,
         "overlap": {
-            "pairs": _pairwise_overlap_acres(dem, closed_masks),
+            "pairs": _pairwise_overlap_acres(dem, masks),
             "naive_sum_acres": _round1(naive_sum_acres),
             "union_acres": _round1(excluded_acres),
             "double_counted_acres": _round1(naive_sum_acres - excluded_acres),
@@ -872,9 +920,17 @@ def identify_exclusion_zones(
 ) -> dict:
     """
     Computes this parcel's unselectable ground: five per-gate exclusion
-    masks, each closed at its own measured radius, unioned into one
-    geometry, with the per-layer detail kept alongside so the union can
-    be explained rather than just drawn.
+    masks, each published as its EXACT cell footprint, unioned into one
+    geometry, with the per-layer detail kept alongside so the union can be
+    explained rather than just drawn -- plus `eligible_union_utm`, one
+    geometry covering every piece of ground that is still selectable.
+
+    NOTHING IS CLOSED, SMOOTHED, BUFFERED OR OPENED HERE. The only
+    geometric operation applied to an exclusion layer is the clip to
+    boundary_polygon_utm. See the module docstring's NO CLOSING section:
+    these acreages are captioned back to the user, so a layer that reports
+    more ground than the gate actually hit is a false statement about their
+    land.
 
     OVERRIDES. dem/boundary_polygon_utm/canopy_height/
     tree_root_zone_mask_utm/disqualifying_soil_union_utm follow this
@@ -918,20 +974,18 @@ def identify_exclusion_zones(
         {
             'layers': {                      # per gate, keyed by LAYER_ORDER
                 '<name>': {
-                    'mask': np.ndarray[bool],       # CLOSED at this gate's radius
-                    'raw_mask': np.ndarray[bool],   # before closing
-                    'polygon_utm': Polygon/MultiPolygon,  # closed, clipped to boundary
+                    'mask': np.ndarray[bool],       # the gate's own hit mask
+                    'polygon_utm': Polygon/MultiPolygon,  # its exact cell
+                                                    #   footprint, clipped to
+                                                    #   the boundary
                     'acres': float,                 # cell-count acres of 'mask'
                     'data_available': bool,
                 },
                 ...
             },
-            'excluded_union_utm': ...,       # all five CLOSED masks, unioned,
-                                             #   clipped to the boundary
+            'excluded_union_utm': ...,       # all five masks, unioned, clipped
+                                             #   to the boundary
             'render_fill_polygon_utm': ...,  # what the map draws -- see below
-            'raw_excluded_union_utm': ...,   # the UNCLOSED union; exists so the
-                                             #   extensive invariant is checkable
-                                             #   against something real
             'eligible_polygon_utm': ...,     # boundary - excluded_union -- a
                                              #   COMPLEMENT; see below
             'eligible_union_utm': ...,       # MultiPolygon of selectable ground,
@@ -949,55 +1003,69 @@ def identify_exclusion_zones(
     A future reader will assume two of these are the same and delete one.
     They are not:
 
-      eligible_polygon_utm -- boundary_polygon_utm MINUS the CLOSED
-        exclusion union. A pure complement, computed in geometry space.
-        It covers every square metre the closed exclusions do not,
-        including stranded single-cell specks, and its boundary is by
-        construction the exact inverse of what the map draws as excluded.
+      eligible_polygon_utm -- boundary_polygon_utm MINUS the published
+        exclusion union, in GEOMETRY space. A pure complement: it covers
+        every square metre the exclusions do not, down to stranded
+        single-cell specks, with the exact cell staircase for an edge.
+        Its boundary is by construction the exact inverse of
+        excluded_union_utm's, which is the property it exists for -- no
+        sliver belongs to neither layer and no ground is claimed by both.
 
       eligible_union_utm -- built from the CELL MASK forward: STEP 1's
         gate-eligible cells, 8-connected clustered, clusters under
         ELIGIBLE_UNION_MIN_CLUSTER_ACRES dropped, footprints unioned,
-        clipped to the boundary. This is the DISPLAY AND CLAMPING
-        geometry: what the interactive flow highlights and what a drawn
-        polygon is eventually constrained against.
+        clipped to the boundary, then SIMPLIFIED at
+        ELIGIBLE_UNION_SIMPLIFY_TOLERANCE_CELLS. This is the DISPLAY AND
+        CLAMPING geometry: what the interactive flow highlights and what a
+        drawn polygon is eventually constrained against.
 
-      eligible_mask -- the np.ndarray the other two are reasoned about
-        in, and the closed-gate complement in cell space.
+      eligible_mask -- the np.ndarray the other two are reasoned about in,
+        and the gate complement in cell space. With no closing it is
+        byte-identical to compute_step1_eligible_cells()' own
+        eligible_mask (asserted in test_eligible_union.py).
 
-    They differ in two ways that matter and neither is an accident.
-    FIRST, the CLUSTER FLOOR: eligible_polygon_utm keeps a stranded
-    4-cell speck, eligible_union_utm drops it. Highlighting confetti a
-    user cannot meaningfully plant is a worse answer than not
-    highlighting it. SECOND, the CLOSING: eligible_polygon_utm is the
-    complement of the CLOSED union, so the pinhole cells the closing
-    absorbed are excluded from it; eligible_union_utm is built from the
-    UNCLOSED gate output, so it keeps them. The closing radii exist to
-    make the EXCLUSION read as one shape -- applying them to what a user
-    is allowed to draw on is a different decision and was not made here.
+    REMOVING THE CLOSING TOOK ONE OF THE THREE DIFFERENCES AWAY, AND THE
+    OTHER TWO ARE STILL REAL. eligible_polygon_utm used to be the
+    complement of the CLOSED union, which made it smaller than
+    eligible_union_utm by every pinhole the closing had absorbed. That
+    difference is gone: both are now built from the same raw gate output.
+    What separates them is:
 
-    Consequence: eligible_union_utm is NOT the exact complement of
-    render_fill_polygon_utm, and it is not supposed to be. The overlap
-    is the pinholes; the shortfall is the specks.
+      THE CLUSTER FLOOR. eligible_polygon_utm keeps a stranded 4-cell
+      speck; eligible_union_utm drops anything under
+      ELIGIBLE_UNION_MIN_CLUSTER_ACRES. Highlighting confetti a user
+      cannot meaningfully plant is a worse answer than not highlighting
+      it -- but the exact complement of the drawn exclusion is still a
+      different and legitimate question.
+
+      THE SIMPLIFY. eligible_polygon_utm carries the exact cell staircase.
+      eligible_union_utm has been through one Douglas-Peucker pass at one
+      DEM cell, so its ring can sit up to a tolerance off the true cell
+      edge -- bounded, measured, and asserted at exactly that bound.
+
+    So they are NOT interchangeable and neither is redundant: one is the
+    exact inverse of what is published as excluded, the other is a
+    display- and clamping-ready highlight. eligible_union_utm is NOT the
+    exact complement of render_fill_polygon_utm and is not supposed to be;
+    the shortfall is the specks and the tolerance.
 
     render_fill_polygon_utm IS excluded_union_utm, the same geometry --
-    deliberately, and NOT an oversight to correct by adding an opening.
-    A production zone's render_fill is an OPENING of its polygon_utm, so
-    the two differ and `render_fill.area <= polygon_utm.area` is asserted
-    there. Here there is no display-only reduction to apply: the closing
-    is the whole operation, the closed geometry is what the map should
-    draw, and shrinking it for display would draw a different answer than
-    the one computed. The key exists so this result is KSOP-shaped like
-    every other layer's; it carries the same geometry on purpose. See the
-    module docstring for the inverted invariant that replaces
-    production's containment assertion.
+    deliberately, and NOT an oversight to correct by adding an opening or
+    a smoothing pass. A production zone's render_fill is an OPENING of its
+    polygon_utm, so the two differ there and `render_fill.area <=
+    polygon_utm.area` is asserted. Here there is no display-only reduction
+    to apply: the mask is the whole answer, and shrinking or smoothing it
+    for display would draw a different answer than the one computed (see
+    the module docstring's EXCLUSION SMOOTHING section for the measurement
+    that settled it). The key exists so this result is KSOP-shaped like
+    every other layer's; it carries the same geometry on purpose, and
+    render_layout_map.py reads it under that name.
 
     eligible_mask IS NOT CONSUMED ANYWHERE IN THIS BRANCH. It is emitted
     so the deferred production integration (module docstring, DELIBERATE
-    REDUNDANCY) is a wiring change rather than a rewrite. With all five
-    radii at 0.0 it is byte-identical to compute_step1_eligible_cells()'
-    own eligible_mask; with the measured radii it is smaller by exactly
-    the pinhole cells the closing absorbs.
+    REDUNDANCY) is a wiring change rather than a rewrite -- and with the
+    closing gone that wiring is now a pure de-duplication that cannot
+    change production's output.
     """
     if dem is None:
         dem = dem_data.get_dem_for_boundary(boundary_coordinates)
@@ -1104,7 +1172,7 @@ def identify_exclusion_zones(
         road_exclusion_union_utm = None
     road_fail = _union_hit_mask(dem, slope_only_mask, road_exclusion_union_utm)
 
-    raw_masks = {
+    masks = {
         "canopy": canopy_fail,
         "slope": slope_fail,
         "hydric": hydric_fail,
@@ -1119,57 +1187,37 @@ def identify_exclusion_zones(
         "setback": True,
     }
 
-    # ---- close each gate at ITS OWN radius, independently --------------
+    # ---- the union, and the eligible complement -----------------------
     #
-    # One disc_closing() per layer at that layer's own constant. A layer
-    # configured at 0.0 m gets radius_cells 0 and disc_closing() hands back
-    # an unchanged copy -- the raw footprint, which for the setback is the
-    # measured right answer and not a missed configuration.
-    closed_masks = {}
-    for name in LAYER_ORDER:
-        radius_cells = closing_radius_cells(dem, CLOSING_RADIUS_METERS_BY_LAYER[name])
-        closed_masks[name] = disc_closing(raw_masks[name], radius_cells)
-
-    # A closing can push cells past the drawn boundary; the union is clipped
-    # in cell space here and again in geometry space below, since an
-    # exclusion is a fact about THIS parcel and off-parcel ground was never
-    # selectable to begin with.
+    # No morphological pass runs between the gates above and the geometry
+    # below -- see the module docstring's NO CLOSING section. Each mask is
+    # the gate's own hits and nothing else, so there is exactly ONE union
+    # rather than a closed/raw pair, and one cell-space clip to the parcel
+    # rather than one guarding a closing that could push cells outward.
     union_mask = np.zeros(dem["array"].shape, dtype=bool)
     for name in LAYER_ORDER:
-        union_mask |= closed_masks[name]
+        union_mask |= masks[name]
     union_mask &= on_parcel
 
-    raw_union_mask = np.zeros(dem["array"].shape, dtype=bool)
-    for name in LAYER_ORDER:
-        raw_union_mask |= raw_masks[name]
-    raw_union_mask &= on_parcel
-
-    # Everything on the parcel the five closed gates do not take. NOT
-    # consumed in this branch -- see this function's docstring.
+    # Everything on the parcel the five gates do not take. With no closing
+    # this is byte-identical to compute_step1_eligible_cells()' own
+    # eligible_mask -- asserted against a real call in test_eligible_union.py,
+    # not assumed -- which is why the SAME array feeds both the return key and
+    # build_eligible_union() below. It is not consumed elsewhere in this
+    # branch; see this function's docstring.
     eligible_mask = on_parcel & (~union_mask)
 
     excluded_union_utm = _mask_polygon(dem, union_mask, boundary_polygon_utm)
-    raw_excluded_union_utm = _mask_polygon(dem, raw_union_mask, boundary_polygon_utm)
     eligible_polygon_utm = boundary_polygon_utm.difference(excluded_union_utm)
-
-    # STEP 1's own eligible_mask, reproduced from the masks already computed
-    # here rather than by a sixth gate computation: the UNCLOSED gate
-    # complement is byte-identical to compute_step1_eligible_cells()'s
-    # eligible_mask (asserted against a real call in test_eligible_union.py).
-    # UNCLOSED is the point -- the closed complement below is smaller by the
-    # pinholes the closing absorbed, and highlighting that instead would apply
-    # the closing radii to what the user is allowed to draw on.
-    step1_eligible_mask = on_parcel & (~raw_union_mask)
-    eligible_union_utm = build_eligible_union(dem, step1_eligible_mask, boundary_polygon_utm)
+    eligible_union_utm = build_eligible_union(dem, eligible_mask, boundary_polygon_utm)
 
     layers = {}
     area_per_cell = cell_area_acres(dem)
     for name in LAYER_ORDER:
         layers[name] = {
-            "mask": closed_masks[name],
-            "raw_mask": raw_masks[name],
-            "polygon_utm": _mask_polygon(dem, closed_masks[name], boundary_polygon_utm),
-            "acres": round(int(closed_masks[name].sum()) * area_per_cell, 2),
+            "mask": masks[name],
+            "polygon_utm": _mask_polygon(dem, masks[name], boundary_polygon_utm),
+            "acres": round(int(masks[name].sum()) * area_per_cell, 2),
             "data_available": layer_availability[name],
         }
 
@@ -1179,9 +1227,9 @@ def identify_exclusion_zones(
         "layers": layers,
         "excluded_union_utm": excluded_union_utm,
         # The SAME geometry as excluded_union_utm, on purpose -- see this
-        # function's docstring. There is no opening to apply to a closing.
+        # function's docstring. There is no display-only reduction to apply
+        # to an exact cell footprint. render_layout_map.py reads this key.
         "render_fill_polygon_utm": excluded_union_utm,
-        "raw_excluded_union_utm": raw_excluded_union_utm,
         "eligible_polygon_utm": eligible_polygon_utm,
         # NOT the same thing as eligible_polygon_utm above, and neither is
         # redundant -- see this function's docstring for the three-way split.
@@ -1230,8 +1278,7 @@ def identify_exclusion_zones(
         "parcel_acres": parcel_acres,
         "narrative_data": build_narrative_data(
             dem,
-            closed_masks,
-            raw_masks,
+            masks,
             union_mask,
             eligible_mask,
             on_parcel,
