@@ -2,8 +2,11 @@
 test_production_fill_smoothing.py
 
 Offline (no-network) verification for the DISPLAY-TIME smoothing of the
-production zone fill used as the contour clip mask (render_layout_map.py's
-_smooth_production_fill_for_render). This is a Layer-3 display transform: it
+production zone fill used as the contour clip mask -- render_layout_map.py's
+own call to raster_grid.angular_smooth_polygon(), which is where the four ring
+smoothers and this polygon-level wrapper now live (they were private to the
+renderer until exclusion_zones.py needed them too). This is still a Layer-3
+display transform at the CALL SITE: it
 softens the 5m cell-union staircase of render_fill_polygon_utm into a clean
 curve so contour lines terminate along a field edge rather than a frayed comb.
 The STORED render_fill_polygon_utm the four consumer modules read is never
@@ -33,11 +36,11 @@ from unittest.mock import patch as mock_patch
 
 from production_area import cluster_and_gate, compute_step1_eligible_cells
 from production_suitability import score_production_areas
-import render_layout_map as rlm
+import raster_grid
+from raster_grid import angular_smooth_polygon
 from render_layout_map import (
     PRODUCTION_FILL_CHAIKIN_ITERATIONS,
     PRODUCTION_FILL_SIMPLIFY_TOLERANCE_CELLS,
-    _smooth_production_fill_for_render,
 )
 
 _CELL = 5.0
@@ -84,7 +87,7 @@ for _ in range(20):
     _steps.append((_x, _y)); _y += _CELL
 _staircase = Polygon(_steps + [(_x, 100.0), (0.0, 100.0), (0.0, 0.0)])
 _before = _exterior_vertices(_staircase)
-_smoothed_stair = _smooth_production_fill_for_render(_staircase, _TOL, _ITERS)
+_smoothed_stair = angular_smooth_polygon(_staircase, _TOL, _ITERS)
 _after = _exterior_vertices(_smoothed_stair)
 assert _smoothed_stair.is_valid and _smoothed_stair.geom_type == "Polygon"
 assert _after < _before // 2, (
@@ -104,7 +107,7 @@ print(f"T1 staircase -> curve: a 45-degree 5m cell staircase drops from {_before
 _L_patch = _gate(list(set(_rect(2, 42, 2, 42)) - set(_rect(2, 22, 22, 42))), (46, 46))[0]
 _L_fill = _L_patch["render_fill_polygon_utm"]
 _L_poly = _L_patch["polygon_utm"]
-_L_smoothed = _smooth_production_fill_for_render(_L_fill, _TOL, _ITERS)
+_L_smoothed = angular_smooth_polygon(_L_fill, _TOL, _ITERS)
 _L_clipped = _L_smoothed.intersection(_L_poly)
 
 # The reflex corner is where Chaikin genuinely pushes past the footprint, so the
@@ -148,7 +151,7 @@ _part_with_hole = Polygon(
 )
 _part_two = box(140, 0, 240, 100)
 _mp = MultiPolygon([_part_with_hole, _part_two])
-_mp_smoothed = _smooth_production_fill_for_render(_mp, _TOL, _ITERS)
+_mp_smoothed = angular_smooth_polygon(_mp, _TOL, _ITERS)
 assert _mp_smoothed.geom_type == "MultiPolygon", f"a 2-part fill must stay a MultiPolygon, got {_mp_smoothed.geom_type}"
 assert _mp_smoothed.is_valid and not _mp_smoothed.is_empty
 assert len(list(_mp_smoothed.geoms)) == 2, "both parts must survive smoothing"
@@ -166,14 +169,14 @@ print(f"T4 MultiPolygon: a 2-part fill with an interior ring in one part smooths
 # collapses it to empty/invalid geometry, so the helper must return the input
 # object unchanged rather than raising or emitting a broken shape.
 _sliver = Polygon([(0.0, 0.0), (200.0, 0.0), (400.0, 0.0)])  # collinear, zero-area
-_sliver_result = _smooth_production_fill_for_render(_sliver, _TOL, _ITERS)
+_sliver_result = angular_smooth_polygon(_sliver, _TOL, _ITERS)
 assert _sliver_result is _sliver, (
     "when smoothing collapses to invalid/empty geometry, the helper must return the INPUT object unchanged"
 )
 # And the exception path itself: if the ring smoother raises, still return input.
 _good = box(0, 0, 100, 100)
-with mock_patch.object(rlm, "_angular_then_smooth_closed_ring", side_effect=ValueError("boom")):
-    _raise_result = _smooth_production_fill_for_render(_good, _TOL, _ITERS)
+with mock_patch.object(raster_grid, "angular_then_smooth_closed_ring", side_effect=ValueError("boom")):
+    _raise_result = angular_smooth_polygon(_good, _TOL, _ITERS)
 assert _raise_result is _good, "a raising ring smoother must degrade to the input, not propagate the exception"
 print("T5 fallback: a collapsing degenerate sliver and a forced ring-smoother exception both return the input "
       "geometry unchanged -- a bad smooth degrades to the unsmoothed shape, never a failed render.")
@@ -187,7 +190,7 @@ _patch = _gate(_rect(2, 22, 2, 22), (30, 30))[0]
 _stored_before = _patch["render_fill_polygon_utm"]
 _wkt_before = _stored_before.wkt
 # Run the smoothing exactly as render_layout_map does (result goes to a local).
-_ = _smooth_production_fill_for_render(_stored_before, _TOL, _ITERS).intersection(_patch["polygon_utm"])
+_ = angular_smooth_polygon(_stored_before, _TOL, _ITERS).intersection(_patch["polygon_utm"])
 assert _patch["render_fill_polygon_utm"] is _stored_before, (
     "smoothing must not replace the patch dict's render_fill_polygon_utm object"
 )

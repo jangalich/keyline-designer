@@ -20,13 +20,21 @@ water_candidate_zones.py) can depend on this and stay unit-testable
 against a synthetic DEM dict without hitting the network. dem_data.py is
 the only module in this pipeline that talks to rasterio/the network
 directly.
+
+Not everything here takes a `dem`: the RING SMOOTHING section at the
+bottom is pure shapely, no grid dict involved. It lives here because a
+cell-union footprint's 5 m staircase is the only thing anyone in this
+pipeline ever smooths, so the smoothers belong beside the code that
+builds that staircase -- and because both a Layer 2 computation module
+(exclusion_zones.py) and the Layer 3 renderer need them, which rules out
+either one owning them.
 """
 
 import math
 from collections import deque
 
 import numpy as np
-from shapely.geometry import Polygon, box
+from shapely.geometry import LineString, MultiPolygon, Polygon, box
 from shapely.ops import unary_union
 
 SQUARE_METERS_PER_ACRE = 4046.8564224
@@ -622,3 +630,199 @@ def connected_components(mask: np.ndarray, connectivity: int = 8) -> tuple[np.nd
                 next_label += 1
 
     return labels, next_label
+
+
+# ===========================================================================
+# RING SMOOTHING -- angular simplify + Chaikin corner-cutting
+#
+# These four ring-level helpers and the polygon-level wrapper below lived in
+# render_layout_map.py until this branch, where they were private to the
+# renderer. They are not renderer-specific: they are the same kind of
+# dependency-free geometry building block as binary_erode()/binary_dilate()/
+# cell_union_footprint()/disc_closing() above, and exclusion_zones.py (a
+# Layer 2 computation module) now needs them too. A Layer 2 module importing
+# from Layer 3's renderer would be a wrong-direction dependency, so they live
+# here instead and render_layout_map.py imports them from this module. The
+# move is behaviour-neutral: the bodies are unchanged, only the leading
+# underscore (module-private) is dropped now that they are a shared API.
+#
+# WHY BOTH OPERATIONS, IN THIS ORDER. Every mask this pipeline turns into a
+# polygon (cell_union_footprint()) arrives as a literal per-cell right-angle
+# staircase. simplify() collapses that staircase's collinear runs down to the
+# shape's real turns; the Chaikin pass then has actual corners to round rather
+# than hundreds of individual cell steps. Reversing the order would round each
+# 5 m step individually and leave the staircase intact, just fuzzier.
+#
+# DIRECTION OF ERROR. Chaikin's corner cut pushes the ring OUTWARD at reflex
+# vertices and INWARD at convex ones. Which of those is the dangerous
+# direction depends entirely on which side of the ring the caller's interior
+# sits, so no clipping is applied here -- each caller clips (or asserts) in
+# whichever direction is safe for its own geometry. See render_layout_map.py's
+# production-fill call site (clips back to polygon_utm) and exclusion_zones.py's
+# own EXCLUSION SMOOTHING docstring section (over-exclusion is the safe
+# direction there, so it does not clip back).
+# ===========================================================================
+
+
+def chaikin_smooth_coords(coords: list[tuple[float, float]], iterations: int) -> list[tuple[float, float]]:
+    """
+    Chaikin's corner-cutting subdivision, run `iterations` times, over an
+    OPEN polyline (a road corridor, not a closed ring) -- simple enough
+    to not need a new spline/smoothing dependency for what's purely a
+    cosmetic rendering touch-up (see render_layout_map._smooth_line_for_
+    render(), its only caller).
+
+    The first and last coordinates are always kept EXACTLY as given, so a
+    smoothed branch still starts/ends at the same real endpoint -- the
+    anchor for a trunk, or the join-on-the-parent-branch cell for a spur
+    (build_road_network()'s own "cells" ordering puts a spur's join point
+    first) -- only the interior gets rounded. This is exactly why
+    _smooth_line_for_render() must be called once PER BRANCH rather than
+    on some pre-merged whole-network line: smoothing each branch
+    independently is what keeps a spur's own join point exact, so the
+    rendered network still reads as connected. Each iteration replaces
+    every edge
+    (Pi, Pi+1) with two points at 1/4 and 3/4 along it (the standard
+    Chaikin construction), which is what visually rounds a sharp corner:
+    each cut moves the curve a little further off the original corner and
+    a little closer to a smooth arc through it.
+
+    A no-op below 3 points, or once an iteration's own input drops below
+    3 points -- there's no interior corner left to cut on a 2-point
+    (straight) line.
+    """
+    for _ in range(iterations):
+        if len(coords) < 3:
+            break
+        smoothed = [coords[0]]
+        for (x0, y0), (x1, y1) in zip(coords, coords[1:]):
+            smoothed.append((0.75 * x0 + 0.25 * x1, 0.75 * y0 + 0.25 * y1))
+            smoothed.append((0.25 * x0 + 0.75 * x1, 0.25 * y0 + 0.75 * y1))
+        smoothed.append(coords[-1])
+        coords = smoothed
+    return coords
+
+
+def angular_simplify_closed_ring(ring: LineString, tolerance: float) -> LineString:
+    """
+    shapely .simplify(tolerance, preserve_topology=True) on a CLOSED ring
+    only -- no Chaikin call, zero smoothing iterations. Callers that want
+    corner-rounding on top chain through angular_then_smooth_closed_ring()
+    below instead; callers that want a purely angular result (the water-
+    zone-exclusion and tree-zone-exclusion fence loops, and the boundary
+    fence) use this one directly.
+
+    simplify() can drop the duplicate closing coordinate (coords[0] ==
+    coords[-1]) that every closed ring arrives with, so the closure is
+    re-applied here if it did.
+    """
+    simplified = ring.simplify(tolerance, preserve_topology=True)
+    coords = list(simplified.coords)
+    if coords[0] != coords[-1]:
+        coords.append(coords[0])
+    return LineString(coords)
+
+
+def chaikin_smooth_closed_ring(coords: list[tuple[float, float]], iterations: int) -> list[tuple[float, float]]:
+    """
+    Same Chaikin corner-cutting construction as chaikin_smooth_coords()
+    above, but CYCLIC -- for a closed ring (a fence loop, a polygon's
+    exterior or interior ring), not an open route. A closed ring has no
+    meaningful start/end point to pin the way the open-line version pins
+    its first/last coordinate, so pinning one here would leave a real,
+    visible unsmoothed sharp seam at whatever index the coordinate array
+    happens to start at -- a correctness issue, not just cosmetic, since
+    that seam's location is an arbitrary artifact of how the ring's
+    coordinates happen to be ordered, not a real corner of the geometry.
+
+    Concretely: the duplicated closing coordinate (coords[0] == coords[-1],
+    every ring passed here is already closed) is dropped before
+    smoothing, every edge is cut INCLUDING the wraparound edge from the
+    last point back to the first (`zip(coords, coords[1:] + coords[:1])`,
+    not `zip(coords, coords[1:])`), and the result is re-closed by
+    appending its own first point back onto the end.
+
+    A no-op below 3 points -- there's no real ring geometry to smooth
+    below a triangle.
+    """
+    if coords[0] == coords[-1]:
+        coords = coords[:-1]
+
+    for _ in range(iterations):
+        if len(coords) < 3:
+            break
+        smoothed = []
+        for (x0, y0), (x1, y1) in zip(coords, coords[1:] + coords[:1]):
+            smoothed.append((0.75 * x0 + 0.25 * x1, 0.75 * y0 + 0.25 * y1))
+            smoothed.append((0.25 * x0 + 0.75 * x1, 0.25 * y0 + 0.75 * y1))
+        coords = smoothed
+
+    return coords + [coords[0]]
+
+
+def angular_then_smooth_closed_ring(ring: LineString, simplify_tolerance: float, chaikin_iterations: int) -> LineString:
+    """
+    The full two-step treatment for ONE closed ring: run it through
+    angular_simplify_closed_ring() first, then feed the result through
+    chaikin_smooth_closed_ring() (cyclic, closed-ring-aware -- see that
+    function's own docstring) for chaikin_iterations passes. Plumbing that
+    chains the two helpers above, not smoothing math of its own.
+
+    Meant to soften the angular corners simplify() leaves behind, not to
+    re-curve the line into something that no longer tracks the real shape
+    -- which is why every caller's iteration count starts at 1.
+    """
+    angular_ring = angular_simplify_closed_ring(ring, simplify_tolerance)
+    smoothed_coords = chaikin_smooth_closed_ring(list(angular_ring.coords), chaikin_iterations)
+    return LineString(smoothed_coords)
+
+
+def angular_smooth_polygon(geometry, simplify_tolerance: float, chaikin_iterations: int):
+    """
+    angular_then_smooth_closed_ring() lifted from a single ring to a whole
+    POLYGON: smooths the exterior ring AND every interior ring of every part
+    and reassembles into a Polygon/MultiPolygon. The ring helpers above all
+    take one closed ring (a fence loop); every real caller here hands in a
+    cell-union footprint, which is routinely a MultiPolygon and routinely
+    carries interior rings, so the polygon-level wrapper is needed either way.
+
+    Non-polygonal input (an empty geometry, a GeometryCollection) is returned
+    UNCHANGED rather than raising -- same degradation contract as the invalid
+    case below.
+
+    DEGRADES, NEVER RAISES: if smoothing yields empty or invalid geometry (a
+    Chaikin pass self-intersecting a very thin sliver, a ring left with too few
+    coordinates after simplify) this returns the INPUT geometry unchanged. Both
+    callers use the result as display-and-clamp geometry, where a bad smooth
+    must fall back to the exact unsmoothed shape rather than fail a render or a
+    pipeline run. A minor ring self-touch from corner-cutting is healed with
+    buffer(0) first; only a result still empty/invalid after that falls back.
+    """
+    def _smooth_ring_coords(ring):
+        return list(
+            angular_then_smooth_closed_ring(
+                LineString(ring.coords), simplify_tolerance, chaikin_iterations
+            ).coords
+        )
+
+    def _smooth_polygon(poly):
+        exterior = _smooth_ring_coords(poly.exterior)
+        interiors = [_smooth_ring_coords(interior) for interior in poly.interiors]
+        return Polygon(exterior, interiors)
+
+    try:
+        if geometry.geom_type == "MultiPolygon":
+            smoothed = MultiPolygon([_smooth_polygon(part) for part in geometry.geoms])
+        elif geometry.geom_type == "Polygon":
+            smoothed = _smooth_polygon(geometry)
+        else:
+            return geometry
+        if not smoothed.is_valid:
+            smoothed = smoothed.buffer(0)  # heal minor ring self-touch from corner-cutting
+        if smoothed.is_empty or not smoothed.is_valid:
+            return geometry
+        return smoothed
+    except (ValueError, TypeError):
+        # A degenerate ring (too few coordinates after simplify, etc.) can make
+        # Polygon()/MultiPolygon() raise -- degrade to the unsmoothed input.
+        return geometry
