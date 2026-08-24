@@ -18,6 +18,16 @@ complement of the smoothed result. The design rested on one premise:
 THE PREMISE DOES NOT HOLD, and this file is the measurement that shows it.
 The smoothing pass is NOT net-outward on this geometry; it is decisively net
 INWARD, and the ground it gives back is ground the five gates excluded.
+NOTE ON WHAT THIS FILE NOW MEASURES. The geometry it was written against --
+exclusion_zones.py's CLOSED union -- no longer exists: that module removed its
+per-gate closing entirely and publishes exact cell footprints. Every fixture,
+figure and assertion below is unchanged and self-contained (this file builds
+its own closed union from raster_grid.disc_closing() and imports nothing from
+exclusion_zones.py), and the rejection it records still stands: a Chaikin pass
+over a closed ring is net area-REDUCING, and on an exclusion that means
+republishing gate-excluded ground as selectable. It is recorded history plus a
+live guard, not a description of an active code path.
+
 So the switch was NOT made: identify_exclusion_zones() still publishes the
 exact closed union as render_fill_polygon_utm, and eligible_polygon_utm is
 still its exact complement. See EXCLUSION SMOOTHING: MEASURED AND REJECTED in
@@ -311,7 +321,9 @@ print(
 # neither, none is claimed by both. That is true of the smoothed union and of
 # the unsmoothed one alike -- it is a property of DERIVING rather than of
 # smoothing, which is exactly why it survives the rejection intact and why
-# exclusion_zones.py keeps deriving eligible_polygon_utm this way.
+# exclusion_zones.py keeps deriving eligible_polygon_utm this way -- the half
+# of that branch that was sound independently of the smoothing, and the one
+# thing from it still live in the module.
 
 _COMPLEMENT_TOLERANCE_M2 = 1e-6
 

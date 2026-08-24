@@ -575,8 +575,12 @@ CONTOUR_LINE_COLOR = "#6B4423"  # muted brown -- traditional topo-map
 # in use (production green, water blue, road dark gray, structure red)
 WATER_ZONE_COLOR = "#1F6FB2"
 
-# EXCLUSION ZONES (exclusion_zones.identify_exclusion_zones()'s closed union
-# of all five per-gate masks -- canopy, slope, hydric, roads, setback).
+# EXCLUSION ZONES (exclusion_zones.identify_exclusion_zones()'s union of all
+# five per-gate masks -- canopy, slope, hydric, roads, setback -- as their
+# EXACT cell footprints; that module no longer closes anything, so the union
+# is now marginally smaller and carries the pinhole holes the closing used to
+# absorb. The styling below is UNCHANGED by that and was deliberately not
+# retuned against it).
 #
 # NEUTRAL, DELIBERATELY NOT A HUE. On the two reference boundaries this
 # covers 4.7 and 7.2 acres of a 13-16 acre parcel, which makes it the single
@@ -1702,13 +1706,22 @@ def render_layout_map(
     # layers and beneath all of them (EXCLUSION_ZONE_ZORDER; see that
     # constant for the full ordering and why it sits just above the halo).
     #
-    # render_fill_polygon_utm here is the CLOSED union already clipped to the
-    # parcel boundary, and unlike every other layer's render_fill it is the
-    # same geometry as its polygon_utm equivalent -- a closing is extensive
-    # and there is no display-only opening to apply (see exclusion_zones.py).
-    # No smoothing either: the production fill is smoothed because contour
-    # clipping against a 5 m staircase shows, but this draws as flat fill
-    # with no edge stroke, where the staircase is invisible at map scale.
+    # render_fill_polygon_utm here is the exclusion union already clipped to
+    # the parcel boundary, and unlike every other layer's render_fill it is
+    # the same geometry as its polygon_utm equivalent -- there is no
+    # display-only opening to apply to an exact cell footprint (see
+    # exclusion_zones.py). No smoothing either: the production fill is
+    # smoothed because contour clipping against a 5 m staircase shows, but
+    # this draws as flat fill with no edge stroke, where the staircase is
+    # invisible at map scale.
+    #
+    # WHAT CHANGED WHEN THE CLOSING WENT, and why nothing here was retuned
+    # for it: this now draws the raw gate footprints, so the fill is slightly
+    # smaller and the single-cell pinholes the closing used to absorb show as
+    # interior holes (measured on a synthetic fixture: 250 m² = 0.06 ac less
+    # fill, 2 holes to 12, polygon count unchanged). At map scale, under flat
+    # fill with no edge stroke, a 5 m hole is sub-pixel. The geometry is the
+    # honest one and the styling was left exactly as it was.
     exclusion_fill_utm = exclusion_result.get("render_fill_polygon_utm")
     if exclusion_fill_utm is not None and not exclusion_fill_utm.is_empty:
         exclusion_fill = _reproject_utm_geometry_to_mercator(exclusion_fill_utm, dem["crs"])
