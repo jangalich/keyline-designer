@@ -238,10 +238,12 @@ interactive use and the production integration are both later, separate
 work.
 """
 
+import math
+
 import numpy as np
 from rasterio.warp import transform as warp_transform
 from rasterio.warp import transform_geom
-from shapely.geometry import Point, Polygon, mapping
+from shapely.geometry import MultiPolygon, Point, Polygon, mapping
 from shapely.prepared import prep
 
 import dem_data
@@ -259,6 +261,7 @@ from raster_grid import (
     cell_area_acres,
     cell_union_footprint,
     closing_radius_cells,
+    connected_components,
     disc_closing,
     effective_radius_meters,
     pixel_center_xy,
@@ -333,6 +336,51 @@ because the other layers close."""
 # measured footprint on the reference boundaries (slope largest), except
 # canopy leads because it is the gate a reader looks for first.
 LAYER_ORDER = ("canopy", "slope", "hydric", "roads", "setback")
+"""The five gates, and ALSO the stable TYPE IDENTIFIERS the wire ships (see
+_wire_layers()). These five strings are an API: the frontend keys on them to
+decide which caution to raise for a drawn polygon that crosses a layer. They
+must never be renamed, reordered into a different meaning, or localised. The
+human-readable wording lives in _display_label() and is expected to change."""
+
+
+# ---------------------------------------------------------------------------
+# ELIGIBLE UNION -- one highlight of every selectable cell
+#
+# Separate from the five exclusion layers and from eligible_polygon_utm; see
+# identify_exclusion_zones()'s docstring for what distinguishes all three.
+# ---------------------------------------------------------------------------
+
+ELIGIBLE_UNION_MIN_CLUSTER_ACRES = 0.05
+"""Clusters of selectable ground smaller than this are dropped from the
+eligible union. 0.05 ac is 8 cells at the pipeline's 5 m DEM resolution --
+enough to clear stranded single- and double-cell specks that would render as
+unselectable-looking confetti, and small enough not to cut into a real pocket
+a user might legitimately want to plant. CONFIGURABLE.
+
+Applied ONLY to the eligible union. The per-gate layers and every acreage in
+narrative_data are untouched by it: those figures become user-facing caution
+numbers and must stay exact."""
+
+ELIGIBLE_UNION_CONNECTIVITY = 8
+"""8-connected labelling for the eligible union's cluster floor -- a
+DELIBERATE REVERSAL of the direction production zone labelling went, and not
+an oversight to "fix" back to 4 on the general principle.
+
+production_area.cluster_and_gate() was moved from 8- to 4-connectivity in an
+earlier branch for a specific reason: 8-connectivity treats two corner-
+touching cells as one cluster, while cell_union_footprint() renders that same
+pair as a disjoint MultiPolygon. That labeller-versus-geometry disagreement
+broke waist splitting and hull containment, because a production patch is a
+RECORD -- it carries its own footprint, acreage and score, and a patch whose
+geometry is two disjoint pieces is a broken record.
+
+None of that applies here. The eligible union is drawn as ONE highlight and
+carries no per-cluster record; a point-touching junction is a visual pinch in
+a highlight, not a broken patch. What 8-connectivity buys is the thing that
+matters for a cluster FLOOR: it merges diagonal chains of cells rather than
+fragmenting them, so fewer real runs of selectable ground fall under the
+floor and get dropped. See test_eligible_union.py for the measured 4-vs-8
+comparison at three floors. CONFIGURABLE."""
 
 CLOSING_RADIUS_METERS_BY_LAYER = {
     "canopy": CANOPY_EXCLUSION_CLOSING_RADIUS_METERS,
@@ -439,6 +487,140 @@ def _pairwise_overlap_acres(dem: dict, masks: dict[str, np.ndarray]) -> list[dic
                 }
             )
     return pairs
+
+
+def build_eligible_union(
+    dem: dict,
+    step1_eligible_mask: np.ndarray,
+    boundary_polygon_utm: Polygon,
+    min_cluster_acres: float = ELIGIBLE_UNION_MIN_CLUSTER_ACRES,
+    connectivity: int = ELIGIBLE_UNION_CONNECTIVITY,
+):
+    """
+    One geometry covering every piece of ground a user may select: the
+    physical-gate eligible cells, grouped into clusters, specks below
+    `min_cluster_acres` dropped, each survivor turned into its real cell
+    footprint, unioned, and clipped to the drawn boundary.
+
+    BUILT FROM STEP 1's GATES, BEFORE THE CEILING TRIM -- deliberately, and
+    the alternative was rejected. production_area_ceiling.trim_to_ceiling()
+    removes worst-scoring cells until production claims no more than
+    PRODUCTION_CEILING_PCT_OF_PARCEL of the parcel, leaving room for the
+    other KSOP layers. That ground passed every physical gate; it was
+    dropped by a DESIGN JUDGEMENT, and in the interactive flow that
+    judgement is advisory -- the panel says so. Branching after the trim
+    would make an advisory ceiling binding on what the user is even allowed
+    to draw on. So the union is built from the gate output and the ceiling
+    does not narrow it.
+
+    The consequence is worth stating plainly rather than discovering later:
+    on a parcel where the ceiling fires, the eligible highlight extends
+    beyond the production zones the tool proposed. That is the honest read,
+    and it is what "advisory" is supposed to look like. On the reference
+    boundaries the ceiling never fires (0 cells removed, at 63% of parcel),
+    so this makes no observable difference there -- it will on flatter land.
+
+    `step1_eligible_mask` is production_area.compute_step1_eligible_cells()'s
+    own eligible_mask. identify_exclusion_zones() passes its own UNCLOSED
+    gate complement, which is byte-identical to it (asserted directly
+    against a real compute_step1_eligible_cells() call in
+    test_eligible_union.py) -- taking it from the masks this module already
+    computed avoids adding a sixth redundant gate computation to a module
+    whose docstring is already an argument about redundancy. Note this is
+    the UNCLOSED complement: the closed one (`eligible_mask` on the return)
+    is smaller by exactly the pinholes the closing absorbed, and using it
+    here would silently apply the closing radii to the highlight.
+
+    POLYGONAL PARTS ONLY. Clipping a cell footprint to the boundary can emit
+    zero-area line pieces in the intersection wherever a cell edge runs exactly
+    along the boundary -- which is not a rare alignment, since both are built
+    from the same grid on a synthetic or grid-aligned parcel. The declared type
+    of this field is a Polygon/MultiPolygon, so those pieces are dropped rather
+    than shipped inside a GeometryCollection a consumer would have to unpack.
+    (identify_exclusion_zones()'s older _mask_polygon() has the same exposure
+    and is deliberately NOT changed here -- every existing return key must stay
+    byte-identical on this branch. Flagged, not silently fixed.)
+
+    Returns an empty Polygon when nothing survives the floor.
+    """
+    area_per_cell = cell_area_acres(dem)
+    min_cells = math.ceil(min_cluster_acres / area_per_cell) if min_cluster_acres > 0 else 0
+
+    labels, count = connected_components(step1_eligible_mask, connectivity=connectivity)
+
+    surviving = np.zeros(step1_eligible_mask.shape, dtype=bool)
+    for label in range(count):
+        cluster = labels == label
+        if int(cluster.sum()) >= min_cells:
+            surviving |= cluster
+
+    clipped = cell_union_footprint(dem, surviving).intersection(boundary_polygon_utm)
+    return _polygonal_only(clipped)
+
+
+def _polygonal_only(geometry):
+    """Every Polygon part of `geometry`, reassembled; line/point pieces
+    dropped. A no-op on geometry that is already polygonal."""
+    if geometry.is_empty or geometry.geom_type in ("Polygon", "MultiPolygon"):
+        return geometry
+    polygons = [g for g in getattr(geometry, "geoms", []) if g.geom_type == "Polygon" and not g.is_empty]
+    if not polygons:
+        return Polygon()
+    return polygons[0] if len(polygons) == 1 else MultiPolygon(polygons)
+
+
+def _display_label(name: str, max_slope_pct: float, boundary_setback_meters: float) -> str:
+    """
+    The human-readable half of the wire's per-layer pair: what the user is
+    told they are overriding. Built from the thresholds this run ACTUALLY
+    used, never from hardcoded reference numbers -- a caller that raises
+    max_slope_pct must not be handed a caption still claiming 20%.
+
+    These STATE THE TEST rather than name the layer: "slope above 20%", not
+    "steep slope"; "within 10 ft of the boundary", not "boundary setback".
+    A user overriding an exclusion is entitled to know what it measured.
+
+    This wording is expected to be reworded and is NOT an API. The stable
+    half of the pair is the type identifier (see LAYER_ORDER).
+    """
+    if name == "slope":
+        return f"slope above {_round1(max_slope_pct)}%"
+    if name == "setback":
+        return f"within {_round1(boundary_setback_meters / METERS_PER_FOOT)} ft of the boundary"
+    return {
+        "canopy": "tree canopy root zone",
+        "hydric": "wet (hydric) soil",
+        "roads": "existing farm road right-of-way",
+    }[name]
+
+
+def _wire_layers(
+    layer_availability: dict[str, bool],
+    max_slope_pct: float,
+    boundary_setback_meters: float,
+) -> list[dict]:
+    """
+    The type/label pair per gate, in LAYER_ORDER. Kept as two SEPARATE fields
+    on purpose: `type` is the stable identifier the frontend branches on and
+    must never change; `label` is display prose that will be reworded. A
+    consumer that keys on the label instead is broken by the first copy edit,
+    which is exactly the failure this split exists to prevent.
+
+    DELIBERATELY ONLY THESE TWO FIELDS. `data_available` is a real gap here
+    -- "this layer excludes nothing" and "this layer was never checked"
+    produce the same empty geometry and must not produce the same caution --
+    but it was not on the specified wire list, so it is reported as a gap
+    rather than shipped on a guess. It is already carried per layer on
+    `layers[*]['data_available']`.
+    """
+    del layer_availability  # see above: reported as a gap, not shipped
+    return [
+        {
+            "type": name,
+            "label": _display_label(name, max_slope_pct, boundary_setback_meters),
+        }
+        for name in LAYER_ORDER
+    ]
 
 
 def build_narrative_data(
@@ -649,13 +831,53 @@ def identify_exclusion_zones(
             'raw_excluded_union_utm': ...,   # the UNCLOSED union; exists so the
                                              #   extensive invariant is checkable
                                              #   against something real
-            'eligible_polygon_utm': ...,     # boundary - excluded_union
+            'eligible_polygon_utm': ...,     # boundary - excluded_union -- a
+                                             #   COMPLEMENT; see below
+            'eligible_union_utm': ...,       # MultiPolygon of selectable ground,
+                                             #   built from the CELL MASK; see below
+            'eligible_union_wgs84': ...,     # the same, GeoJSON, for the wire
+            'wire': {...},                   # frontend-facing metadata; see below
             'eligible_mask': np.ndarray[bool],
             'excluded_union_mask': np.ndarray[bool],
             'geometry_wgs84': GeoJSON dict,  # excluded_union_utm in EPSG:4326
             'parcel_acres': float,
             'narrative_data': {...},
         }
+
+    THREE THINGS NAMED "ELIGIBLE", AND WHY NONE OF THEM IS REDUNDANT.
+    A future reader will assume two of these are the same and delete one.
+    They are not:
+
+      eligible_polygon_utm -- boundary_polygon_utm MINUS the CLOSED
+        exclusion union. A pure complement, computed in geometry space.
+        It covers every square metre the closed exclusions do not,
+        including stranded single-cell specks, and its boundary is by
+        construction the exact inverse of what the map draws as excluded.
+
+      eligible_union_utm -- built from the CELL MASK forward: STEP 1's
+        gate-eligible cells, 8-connected clustered, clusters under
+        ELIGIBLE_UNION_MIN_CLUSTER_ACRES dropped, footprints unioned,
+        clipped to the boundary. This is the DISPLAY AND CLAMPING
+        geometry: what the interactive flow highlights and what a drawn
+        polygon is eventually constrained against.
+
+      eligible_mask -- the np.ndarray the other two are reasoned about
+        in, and the closed-gate complement in cell space.
+
+    They differ in two ways that matter and neither is an accident.
+    FIRST, the CLUSTER FLOOR: eligible_polygon_utm keeps a stranded
+    4-cell speck, eligible_union_utm drops it. Highlighting confetti a
+    user cannot meaningfully plant is a worse answer than not
+    highlighting it. SECOND, the CLOSING: eligible_polygon_utm is the
+    complement of the CLOSED union, so the pinhole cells the closing
+    absorbed are excluded from it; eligible_union_utm is built from the
+    UNCLOSED gate output, so it keeps them. The closing radii exist to
+    make the EXCLUSION read as one shape -- applying them to what a user
+    is allowed to draw on is a different decision and was not made here.
+
+    Consequence: eligible_union_utm is NOT the exact complement of
+    render_fill_polygon_utm, and it is not supposed to be. The overlap
+    is the pinholes; the shortfall is the specks.
 
     render_fill_polygon_utm IS excluded_union_utm, the same geometry --
     deliberately, and NOT an oversight to correct by adding an opening.
@@ -829,6 +1051,16 @@ def identify_exclusion_zones(
     raw_excluded_union_utm = _mask_polygon(dem, raw_union_mask, boundary_polygon_utm)
     eligible_polygon_utm = boundary_polygon_utm.difference(excluded_union_utm)
 
+    # STEP 1's own eligible_mask, reproduced from the masks already computed
+    # here rather than by a sixth gate computation: the UNCLOSED gate
+    # complement is byte-identical to compute_step1_eligible_cells()'s
+    # eligible_mask (asserted against a real call in test_eligible_union.py).
+    # UNCLOSED is the point -- the closed complement below is smaller by the
+    # pinholes the closing absorbed, and highlighting that instead would apply
+    # the closing radii to what the user is allowed to draw on.
+    step1_eligible_mask = on_parcel & (~raw_union_mask)
+    eligible_union_utm = build_eligible_union(dem, step1_eligible_mask, boundary_polygon_utm)
+
     layers = {}
     area_per_cell = cell_area_acres(dem)
     for name in LAYER_ORDER:
@@ -850,6 +1082,29 @@ def identify_exclusion_zones(
         "render_fill_polygon_utm": excluded_union_utm,
         "raw_excluded_union_utm": raw_excluded_union_utm,
         "eligible_polygon_utm": eligible_polygon_utm,
+        # NOT the same thing as eligible_polygon_utm above, and neither is
+        # redundant -- see this function's docstring for the three-way split.
+        "eligible_union_utm": eligible_union_utm,
+        "eligible_union_wgs84": (
+            transform_geom(dem["crs"], "EPSG:4326", mapping(eligible_union_utm))
+            if not eligible_union_utm.is_empty
+            else None
+        ),
+        "wire": {
+            "layers": _wire_layers(layer_availability, max_slope_pct, boundary_setback_meters),
+            # BOTH dimensions, in metres. Every acreage the frontend computes
+            # from an intersection is cells x cell_area, and DEM resolution is
+            # not square -- the two reference DEMs are 4.99 x 5.00 and
+            # 5.00 x 4.99. One number would be wrong on both.
+            "cell_size_meters": [float(dem["resolution_meters"][0]), float(dem["resolution_meters"][1])],
+            # Carried out of narrative_data so a wire consumer can branch on it
+            # without parsing the report block. Ground in the setback ring was
+            # never tested for canopy, hydric or roads, so a caution reading
+            # "boundary setback" would imply proximity is the only problem when
+            # the truth is that the other gates never ran there.
+            "setback_is_lower_bound": True,
+            "setback_lower_bound_reason": "steep_ring_ground_counted_in_slope_layer",
+        },
         "eligible_mask": eligible_mask,
         "excluded_union_mask": union_mask,
         "geometry_wgs84": (
