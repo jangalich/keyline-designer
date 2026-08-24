@@ -165,7 +165,6 @@ from soil_data import get_saturated_hydraulic_conductivity_for_polygon, get_soil
 from valley_delineation import delineate_valleys
 from water_candidate_zones import (
     WATER_ZONE_CANOPY_BUFFER_METERS,
-    WATER_ZONE_ROAD_BUFFER_METERS,
     _ROAD_CHECK_UNCHECKED,
     find_candidate_zones,
 )
@@ -1150,9 +1149,11 @@ def identify_water_suitability(
     )
 
     try:
-        road_exclusion_union_utm = _fetch_road_exclusion_union_utm(
-            boundary_coordinates, dem, buffer_meters=WATER_ZONE_ROAD_BUFFER_METERS
-        )
+        # No buffer_meters override: the default IS the intended value --
+        # farm_roads_data.ROAD_EXCLUSION_BUFFER_METERS, the single shared
+        # definition of "how far off an existing road" (see that
+        # constant's docstring), same as every other consumer.
+        road_exclusion_union_utm = _fetch_road_exclusion_union_utm(boundary_coordinates, dem)
     except Exception:
         road_exclusion_union_utm = _ROAD_CHECK_UNCHECKED
 

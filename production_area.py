@@ -415,20 +415,26 @@ def _fetch_road_exclusion_union_utm(
     exists so every entry point that needs a road-exclusion union
     (identify_production_areas() and production_area_ceiling.
     identify_optimized_production_areas() in this pipeline;
-    water_candidate_zones.py's own water-zone road exclusion, at its own
-    WATER_ZONE_ROAD_BUFFER_METERS) calls the SAME function (imported from
-    here, not straight from farm_roads_data.py independently in each
-    caller), the same "shared helper, one definition" reasoning _fetch_
-    disqualifying_soil_union() above already established for the
-    hydric-soil fetch -- among other things, this means a single test
-    mock of get_road_exclusion_union_utm here covers every entry point,
-    rather than needing to patch several independent import bindings.
+    exclusion_zones.py's roads gate; water_candidate_zones.py's/
+    water_suitability.py's water-zone road exclusion) calls the SAME
+    function (imported from here, not straight from farm_roads_data.py
+    independently in each caller), the same "shared helper, one
+    definition" reasoning _fetch_disqualifying_soil_union() above already
+    established for the hydric-soil fetch -- among other things, this
+    means a single test mock of get_road_exclusion_union_utm here covers
+    every entry point, rather than needing to patch several independent
+    import bindings.
 
-    buffer_meters defaults to ROAD_EXCLUSION_BUFFER_METERS (production's
-    own buffer) but is a real, independent parameter -- a caller with its
-    own separately-tunable buffer constant (e.g.
-    water_candidate_zones.WATER_ZONE_ROAD_BUFFER_METERS) passes it
-    explicitly rather than this module's value silently applying instead.
+    buffer_meters defaults to farm_roads_data.ROAD_EXCLUSION_BUFFER_
+    METERS -- and, unlike _fetch_tree_root_zone_mask_utm()'s buffer below,
+    the default is what EVERY current caller uses: that constant is
+    deliberately the single shared definition of "how far a proposed
+    feature stays off an existing road" across production, exclusion
+    zones, AND water zones (whose former separate WATER_ZONE_ROAD_BUFFER_
+    METERS copy was deleted -- see the shared constant's own docstring for
+    the reasoning, and for when a per-consumer split would become
+    legitimate again). The parameter stays a real, overridable one for
+    that future split, but no caller passes it today.
 
     Returns None if no roads were found nearby -- the common, clean case,
     same "checked and genuinely nothing there" convention _fetch_

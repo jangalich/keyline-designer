@@ -221,17 +221,19 @@ WATER_ZONE_RENDER_OPENING_RADIUS_METERS = 5.0
 # CONFIGURABLE.
 WATER_ZONE_CANOPY_BUFFER_METERS = 3.048  # 10ft
 
-# How far past a fetched road/right-of-way line's own mapped geometry the
-# hard water-zone exclusion extends -- reuses farm_roads_data.
-# get_road_exclusion_union_utm() (the SAME real vector road/ROW fetch
-# production_area.py's own existing-road gate uses), but at its OWN
-# buffer distance, not farm_roads_data.ROAD_EXCLUSION_BUFFER_METERS
-# directly (production's own default there is 0.0 -- a no-op buffer) --
-# same separate-constant reasoning as WATER_ZONE_CANOPY_BUFFER_METERS
-# above. This is a genuinely NEW exclusion for this module: water zones
-# haven't excluded roads before. CONFIGURABLE.
-WATER_ZONE_ROAD_BUFFER_METERS = 3.048  # 10ft
-
+# The road exclusion deliberately has NO per-module buffer constant of its
+# own (unlike WATER_ZONE_CANOPY_BUFFER_METERS above): this module's road
+# gate reads farm_roads_data.ROAD_EXCLUSION_BUFFER_METERS -- the single
+# definition every consumer of the existing-road exclusion shares -- via
+# _fetch_road_exclusion_union_utm()'s own default, same as production/
+# ceiling/exclusion_zones. A separate per-module water road-buffer
+# constant (3.048m/10ft) used to live here on the general separate-
+# constants principle; it was DELETED because it answered the same single question
+# ("how far should a proposed feature stay off an existing road?") as the
+# shared constant, not a different one -- see ROAD_EXCLUSION_BUFFER_
+# METERS's own docstring for the full reasoning, and for when a split
+# would become legitimate again.
+#
 # A cell inside ANY production area's own render_fill_polygon_utm
 # (production_area.py's cluster_and_gate()/identify_production_areas() --
 # the waist-split-aware convex hull, reclipped to the real parcel
@@ -385,7 +387,10 @@ def compute_water_eligible_cells(
 
       5. It is INSIDE road_exclusion_union_utm: real road/right-of-way
          vector geometry (farm_roads_data.get_road_exclusion_union_utm()'s
-         own output, at this module's own WATER_ZONE_ROAD_BUFFER_METERS),
+         own output, at the shared farm_roads_data.ROAD_EXCLUSION_BUFFER_
+         METERS -- the single definition of "how far off an existing road"
+         every consumer reads; this module's former separate copy was
+         deleted, see the constants section above),
          tested via cell-center .contains(), same pattern production_
          area.py's own existing-road gate uses -- a genuinely NEW
          exclusion for this module (water zones haven't excluded roads
@@ -1391,9 +1396,11 @@ def identify_water_system_candidate_zones(
     )
 
     try:
-        road_exclusion_union_utm = _fetch_road_exclusion_union_utm(
-            boundary_coordinates, dem, buffer_meters=WATER_ZONE_ROAD_BUFFER_METERS
-        )
+        # No buffer_meters override: the default IS the intended value --
+        # farm_roads_data.ROAD_EXCLUSION_BUFFER_METERS, the single shared
+        # definition of "how far off an existing road" (see that
+        # constant's docstring), same as every other consumer.
+        road_exclusion_union_utm = _fetch_road_exclusion_union_utm(boundary_coordinates, dem)
     except Exception:
         road_exclusion_union_utm = _ROAD_CHECK_UNCHECKED
 

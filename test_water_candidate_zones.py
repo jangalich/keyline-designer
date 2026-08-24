@@ -579,6 +579,75 @@ assert int(compute_water_eligible_cells(SINGLE_COLUMN_DEM, PRODUCTION_AREA_ABOVE
 assert int(compute_water_eligible_cells(SINGLE_COLUMN_DEM, PRODUCTION_AREA_ABOVE, BOUNDARY, road_exclusion_union_utm=None).sum()) == int(_baseline_mask.sum())
 print("Gate -- road: whole-boundary union excludes everything; None is a no-op.")
 
+
+# =====================================================================
+# Road gate at the SHARED buffer: water zones now clear existing roads at
+# farm_roads_data.ROAD_EXCLUSION_BUFFER_METERS (5.0m), not the deleted
+# per-module 3.048m value -- a REAL behaviour change to water-zone
+# eligibility, not just a constant rename, demonstrated inline. A road
+# centerline is placed 3.75m from the channel's eligible cell centers:
+# outside the old 3.048m buffer (those cells stayed eligible), inside the
+# new 5.0m one (they are excluded now). Both unions are built by the real
+# producer (farm_roads_data.get_road_exclusion_union_utm) from the SAME
+# road line -- only the buffer differs.
+# =====================================================================
+
+from rasterio.warp import transform as _rb_warp_transform  # noqa: E402
+
+import farm_roads_data  # noqa: E402
+
+assert farm_roads_data.ROAD_EXCLUSION_BUFFER_METERS == 5.0, (
+    "this section demonstrates the 3.048m -> 5.0m water-zone road-clearance change -- update it if the "
+    f"shared constant is retuned (currently {farm_roads_data.ROAD_EXCLUSION_BUFFER_METERS})"
+)
+_OLD_WATER_ROAD_BUFFER_M = 3.048  # the deleted per-module value, kept here only as the contrast
+
+# Vertical road line 3.75m east of the channel column's cell centers.
+_rb_channel_x = 500000.0 + (MID_COL + 0.5) * RESOLUTION[0]
+_rb_road_x = _rb_channel_x + 3.75
+_rb_lons, _rb_lats = _rb_warp_transform(CRS, "EPSG:4326", [_rb_road_x, _rb_road_x], [4500000.0 + 50.0, 4499800.0 - 50.0])
+_rb_farm_roads = [{
+    "name": "Synthetic Water-Adjacent Rd",
+    "geometry": {"type": "LineString", "coordinates": [list(pt) for pt in zip(_rb_lons, _rb_lats)]},
+}]
+_rb_boundary_lons, _rb_boundary_lats = _rb_warp_transform(CRS, "EPSG:4326", *[list(c) for c in BOUNDARY.exterior.coords.xy])
+_rb_boundary_coords = list(zip(_rb_boundary_lons, _rb_boundary_lats))
+
+_rb_union_shared = farm_roads_data.get_road_exclusion_union_utm(_rb_boundary_coords, SINGLE_COLUMN_DEM, farm_roads=_rb_farm_roads)
+_rb_union_old = farm_roads_data.get_road_exclusion_union_utm(
+    _rb_boundary_coords, SINGLE_COLUMN_DEM, buffer_meters=_OLD_WATER_ROAD_BUFFER_M, farm_roads=_rb_farm_roads
+)
+
+_rb_mask_shared = compute_water_eligible_cells(SINGLE_COLUMN_DEM, PRODUCTION_AREA_ABOVE, BOUNDARY, road_exclusion_union_utm=_rb_union_shared)
+_rb_mask_old = compute_water_eligible_cells(SINGLE_COLUMN_DEM, PRODUCTION_AREA_ABOVE, BOUNDARY, road_exclusion_union_utm=_rb_union_old)
+
+# Under the old 3.048m buffer the 3.75m-away channel cells stayed eligible...
+assert int((_rb_mask_old & _baseline_mask)[:, MID_COL].sum()) == int(_baseline_mask[:, MID_COL].sum()), (
+    "contrast precondition: at the old 3.048m buffer, channel cells 3.75m from the road centerline must "
+    "remain eligible"
+)
+# ...and at the shared 5.0m they are excluded.
+assert int(_rb_mask_shared[:, MID_COL].sum()) == 0, (
+    "channel cells whose centers sit 3.75m from the road centerline -- outside the old 3.048m buffer, "
+    "inside the shared 5.0m one -- must now be road-excluded"
+)
+_rb_newly_excluded = _baseline_mask & _rb_mask_old & ~_rb_mask_shared
+_rb_acres_diff = float(_rb_newly_excluded.sum()) * CELL_AREA_ACRES
+assert _rb_acres_diff > 0.0
+# ...and the change is real at the ZONE level too, not just per-cell: report
+# whether a candidate still forms once the road claims the channel's flank.
+_rb_zones_old = _run_with_injected(SINGLE_COLUMN_DEM, _rb_mask_old, get_flow_accumulation_for_dem(SINGLE_COLUMN_DEM), PRODUCTION_AREA_ABOVE, BOUNDARY)[0]
+_rb_zones_shared = _run_with_injected(SINGLE_COLUMN_DEM, _rb_mask_shared, get_flow_accumulation_for_dem(SINGLE_COLUMN_DEM), PRODUCTION_AREA_ABOVE, BOUNDARY)[0]
+print(
+    f"Road gate at the SHARED 5.0m buffer: {int(_rb_newly_excluded.sum())} cell(s) / {_rb_acres_diff:.3f} "
+    f"acres of water-eligible ground 3.75m from a road centerline are excluded now that were NOT under the "
+    f"deleted 3.048m per-module buffer; candidate zones on this fixture: {len(_rb_zones_old)} (old buffer) "
+    f"-> {len(_rb_zones_shared)} (shared buffer)"
+    + (" -- the winning candidate itself changed." if len(_rb_zones_old) != len(_rb_zones_shared)
+       or (_rb_zones_old and _rb_zones_shared and _rb_zones_old[0]["cells"] != _rb_zones_shared[0]["cells"])
+       else " -- same winner, smaller eligible ground.")
+)
+
 PRODUCTION_FULL_OVERLAP = [
     {
         "id": 0,
