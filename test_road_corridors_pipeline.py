@@ -337,6 +337,43 @@ print(
 )
 
 
+# --- 1b. selected_water_zone=NO_WATER_ZONE (water_suitability's explicit ---
+# --- "already ran the selection, nothing qualified" answer) -> the water ---
+# --- self-compute is SKIPPED (unlike a bare None, which is ----------------
+# --- indistinguishable from "not supplied" and still self-computes), and ---
+# --- routing proceeds exactly as for a genuine self-computed None ----------
+
+from water_suitability import NO_WATER_ZONE  # noqa: E402
+
+with mock_patch.object(road_corridors, "fetch_and_select_optimal_water_zone") as mock_water_nwz, \
+     mock_patch.object(production_area, "get_canopy_height_for_boundary", _fake_clean_canopy):
+    nwz_result = road_corridors.identify_road_corridor_candidates(
+        boundary_coordinates,
+        anchor_lon_lat=anchor_lon_lat,
+        dem=synthetic_dem,
+        boundary_polygon_utm=OVERRIDE_BOUNDARY_POLYGON_UTM,
+        production_areas=OVERRIDE_PRODUCTION_AREAS,
+        valleys=OVERRIDE_VALLEYS,
+        selected_water_zone=NO_WATER_ZONE,
+        hydric_floodplain_union=OVERRIDE_HYDRIC_FLOODPLAIN_UNION,
+    )
+
+assert mock_water_nwz.call_count == 0, (
+    "fetch_and_select_optimal_water_zone() must NOT be called when selected_water_zone=NO_WATER_ZONE -- "
+    "the explicit 'ran the selection, nothing qualified' answer is a SUPPLIED override, not a missing "
+    "one; re-running the water pipeline for it is the measured 5x amplification this guard closes"
+)
+validate_feature_collection(nwz_result["zones_geojson"])
+assert nwz_result["road_network"]["branches"], (
+    "routing must still produce this fixture's real network with no water zone to exclude -- "
+    "NO_WATER_ZONE behaves exactly like a genuine self-computed None downstream"
+)
+print(
+    "Supplying selected_water_zone=NO_WATER_ZONE (test 1b) skips the water self-compute entirely and "
+    "routes exactly as for a genuine 'no zone on this property' answer."
+)
+
+
 # --- 3. selected_water_zone NOT overridden, but boundary_polygon_utm/ ---
 # --- valleys/production_areas ARE -> fetch_and_select_optimal_water_ -----
 # --- zone() is called WITH those three passed through as kwargs, not -----

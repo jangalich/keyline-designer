@@ -95,6 +95,10 @@ from raster_grid import (
     pixel_center_xy,
 )
 from valley_delineation import delineate_valleys, get_flow_accumulation_for_dem, get_flow_direction_for_dem
+# The road gate reads the SINGLE shared buffer definition (water's former
+# separate per-module road-buffer constant was deleted -- see the shared
+# constant's own docstring in farm_roads_data.py).
+from farm_roads_data import ROAD_EXCLUSION_BUFFER_METERS
 from water_candidate_zones import (
     MAX_SERVICE_DISTANCE_METERS,
     MAX_VALLEY_CONTRIBUTING_AREA_ACRES,
@@ -102,7 +106,6 @@ from water_candidate_zones import (
     MIN_WATER_ZONE_AREA_ACRES,
     WATER_ZONE_CANOPY_BUFFER_METERS,
     WATER_ZONE_PRODUCTION_SETBACK_METERS,
-    WATER_ZONE_ROAD_BUFFER_METERS,
     WATER_ZONE_TARGET_ACRES,
     _CANOPY_CHECK_UNCHECKED,
     _ROAD_CHECK_UNCHECKED,
@@ -222,13 +225,13 @@ def main(
     road_exclusion_union_utm = _ROAD_CHECK_UNCHECKED
     try:
         road_exclusion_union_utm = _fetch_road_exclusion_union_utm(
-            PROPERTY_BOUNDARY, dem, buffer_meters=WATER_ZONE_ROAD_BUFFER_METERS
+            PROPERTY_BOUNDARY, dem, buffer_meters=ROAD_EXCLUSION_BUFFER_METERS
         )
         if road_exclusion_union_utm is None:
             print("Road exclusion fetch succeeded: no roads found nearby (checked, genuinely none -- not the "
                   "same as unchecked).\n")
         else:
-            print(f"Road exclusion union fetched (WATER_ZONE_ROAD_BUFFER_METERS={WATER_ZONE_ROAD_BUFFER_METERS}m).\n")
+            print(f"Road exclusion union fetched (shared ROAD_EXCLUSION_BUFFER_METERS={ROAD_EXCLUSION_BUFFER_METERS}m).\n")
     except Exception as e:
         print(
             f"Road exclusion fetch failed ({e}) -- proceeding with the road gate UNCHECKED for this diagnostic "
@@ -410,7 +413,7 @@ def main(
     )
     road_excluded_mask = on_parcel_mask & ~road_alone_mask
     _report_cell_count(
-        f"Road gate alone (existing right-of-way, WATER_ZONE_ROAD_BUFFER_METERS={WATER_ZONE_ROAD_BUFFER_METERS}m)",
+        f"Road gate alone (existing right-of-way, shared ROAD_EXCLUSION_BUFFER_METERS={ROAD_EXCLUSION_BUFFER_METERS}m)",
         road_excluded_mask, dem,
     )
 

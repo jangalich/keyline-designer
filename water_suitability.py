@@ -165,10 +165,34 @@ from soil_data import get_saturated_hydraulic_conductivity_for_polygon, get_soil
 from valley_delineation import delineate_valleys
 from water_candidate_zones import (
     WATER_ZONE_CANOPY_BUFFER_METERS,
-    WATER_ZONE_ROAD_BUFFER_METERS,
     _ROAD_CHECK_UNCHECKED,
     find_candidate_zones,
 )
+
+# The EXPLICIT "the water pipeline already ran and selected NOTHING" answer,
+# for forwarding selected_water_zone between pipeline steps. select_optimal_
+# water_zone()/fetch_and_select_optimal_water_zone() themselves still return
+# plain None for that outcome (their public contract, unchanged) -- but every
+# selected_water_zone override parameter downstream (road_corridors.identify_
+# road_corridor_candidates(), solar_suitability.identify_solar_candidate_
+# zones(), tree_zone_candidates.identify_tree_zone_candidates()) treats None
+# as "not supplied" (this pipeline's standard None-as-sentinel override
+# convention) and reacts by re-running this ENTIRE module's pipeline as its
+# self-compute fallback -- the single most expensive fallback in the
+# pipeline, measured firing FIVE times across one build_pipeline_context()
+# run on a no-qualifying-water-zone parcel. Same trap, and same fix, as
+# pipeline_context.py's selected_road_corridor field (which forwards build_
+# road_network()'s full dict, branches=[] and all, NEVER None): an empty
+# answer has to be forwarded as a real, explicit value to be reused at all.
+# Roads already had a non-None shape for "nothing" (the empty network dict);
+# a water-zone selection of "nothing" has no dict shape of its own, so this
+# constant IS that explicit value. An orchestrator that already ran the
+# selection passes `selected_water_zone if selected_water_zone is not None
+# else NO_WATER_ZONE`; each accepting entry point normalizes it back to None
+# internally (its downstream code keeps None's existing "no zone" meaning)
+# and skips the self-compute. A caller-supplied bare None still self-computes
+# exactly as before -- the existing override convention is untouched.
+NO_WATER_ZONE = object()
 
 # --- composite weights (must sum to 1.0). See module docstring for the
 # full reasoning behind each. CONFIGURABLE.
@@ -1125,9 +1149,11 @@ def identify_water_suitability(
     )
 
     try:
-        road_exclusion_union_utm = _fetch_road_exclusion_union_utm(
-            boundary_coordinates, dem, buffer_meters=WATER_ZONE_ROAD_BUFFER_METERS
-        )
+        # No buffer_meters override: the default IS the intended value --
+        # farm_roads_data.ROAD_EXCLUSION_BUFFER_METERS, the single shared
+        # definition of "how far off an existing road" (see that
+        # constant's docstring), same as every other consumer.
+        road_exclusion_union_utm = _fetch_road_exclusion_union_utm(boundary_coordinates, dem)
     except Exception:
         road_exclusion_union_utm = _ROAD_CHECK_UNCHECKED
 

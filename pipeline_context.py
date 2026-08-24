@@ -60,13 +60,19 @@ FIELD NOTES
   map (which draws the union as the map's ground layer) and the report
   (narrative_data), NOT through any KSOP computation -- nothing
   downstream consumes it. In particular it is deliberately NOT passed
-  into the production call below: production_area.py is untouched in
-  this branch and still computes the same five gates itself, so canopy,
-  soil and roads are each fetched twice and the slope grid computed
-  twice across one build_pipeline_context() run. That duplication is
-  known, measured, asserted at exactly 2x in test_exclusion_zones.py,
-  and time-limited -- see exclusion_zones.py's own DELIBERATE
-  REDUNDANCY section for the integration question that ends it.
+  into the production call below: production_area.py is untouched and
+  still computes the same five gates itself, so canopy and soil are
+  each fetched twice and the slope grid computed twice across one
+  build_pipeline_context() run -- known, measured, asserted at exact
+  counts in test_exclusion_zones.py, and time-limited (see exclusion_
+  zones.py's own DELIBERATE REDUNDANCY section for the integration
+  question that ends it). The ROAD union is the exception: this
+  context's own existing_roads (computed just above the exclusion call,
+  at the same shared farm_roads_data.ROAD_EXCLUSION_BUFFER_METERS the
+  exclusion module's self-compute would use -- asserted, not assumed,
+  in test_exclusion_zones.py) is passed in as road_exclusion_union_
+  utm=, so exclusion_zones fetches no road union of its own; only
+  production's internal road gate still self-fetches.
 
   production_areas holds production_area_ceiling.
   identify_optimized_production_areas()'s own 'scored_patches' -- the
@@ -82,9 +88,15 @@ FIELD NOTES
 
   existing_roads is farm_roads_data.get_road_exclusion_union_utm()'s own
   output directly (a shapely union of ROAD_LAYERS 30/31/32 road/ROW
-  geometry, buffered by its own ROAD_EXCLUSION_BUFFER_METERS default, or
-  None if no mapped roads were found nearby -- the common, clean case,
-  not an error).
+  centerline geometry, buffered by its own ROAD_EXCLUSION_BUFFER_METERS
+  default -- the single shared "how far off an existing road" definition,
+  see that constant's docstring -- or None if no mapped roads were found
+  nearby, the common, clean case, not an error). Computed ABOVE the
+  exclusion-zones call (it is Layer-1-derived, so that is where it
+  belongs) and passed into identify_exclusion_zones() as
+  road_exclusion_union_utm=, sparing that module its own second road
+  fetch -- including the None case, which its OVERRIDES contract reuses
+  as a real "checked, nothing there" answer.
 
   soil_exclusion_unions is a dict with 'hydric_floodplain_union' (road_
   corridors._fetch_floodplain_hydric_union()'s own real NHD-stream +
@@ -103,7 +115,20 @@ FIELD NOTES
   scoring) -- this call passes this context's own already-computed dem/
   boundary_polygon_utm/valleys/production_areas straight through via that
   function's own override params, same reuse pattern as water_zones
-  above, so nothing it depends on is re-derived a second time.
+  above, so nothing it depends on is re-derived a second time. The FIELD
+  keeps None for "no zone" (context readers -- the map, the report,
+  fencing -- keep their existing None contract), but the three downstream
+  override forwards below (road corridor, solar, tree zones) NEVER pass
+  that None through: each consumer treats a None override as "not
+  supplied" and re-runs the entire identify_water_suitability() pipeline
+  as its self-compute fallback -- the SAME trap selected_road_corridor
+  below documents, measured at FIVE full water-suitability runs per
+  build_pipeline_context() on a no-qualifying-zone parcel before this
+  guard. A resolved "nothing" is forwarded as water_suitability.
+  NO_WATER_ZONE, the explicit already-ran-and-selected-nothing answer
+  those entry points accept (see that constant's own docstring), so even
+  an empty selection is a real, explicit answer downstream, not a missing
+  one.
 
   selected_road_corridor is road_corridors.identify_road_corridor_
   candidates()'s own 'road_network' -- build_road_network()'s full
@@ -221,17 +246,21 @@ silently patching another module or reimplementing its logic)
          its own internally (_fetch_road_exclusion_union_utm()) and passes
          it to find_candidate_zones() as an explicit keyword argument; a
          caller-supplied value threaded through **zone_kwargs would
-         collide with that explicit kwarg and raise TypeError. Even if the
-         parameter existed, this context's own `existing_roads` field
-         (farm_roads_data.get_road_exclusion_union_utm(boundary_coordinates,
-         dem), the default ROAD_EXCLUSION_BUFFER_METERS = 0.0m buffer)
-         isn't the right value to pass anyway -- water_candidate_zones.py's
-         own water-zone road exclusion needs a DIFFERENT, deliberately
-         separate, independently-tunable buffer
-         (WATER_ZONE_ROAD_BUFFER_METERS = 3.048m/10ft; see that module's
-         own docstring for why the two buffers are kept as separate
-         constants rather than one shared value). Two independent reasons
-         this isn't a clean pass-through, not one.
+         collide with that explicit kwarg and raise TypeError. This USED
+         to be one of two independent blockers: the water modules also
+         buffered at their own separate per-module road-buffer constant
+         (3.048m), so this context's existing_roads union (built at
+         ROAD_EXCLUSION_BUFFER_METERS) was the wrong geometry to hand
+         them even if the parameter existed. That second blocker is GONE:
+         the per-module constant was deleted and every consumer now
+         reads the one shared farm_roads_data.ROAD_EXCLUSION_BUFFER_
+         METERS (see that constant's docstring), so the union genuinely
+         is interchangeable now and sharing it would follow from a single
+         stated definition rather than a coincidence. Still DEFERRED: the
+         missing parameter (a farm_roads=/union passthrough on _fetch_
+         road_exclusion_union_utm()) is a production_area.py edit and
+         belongs with the production-integration branch -- noted there as
+         now-unblocked, not wired here.
        - canopy_root_zone_mask_utm: same story on the missing-parameter
          side (the canopy gate is unconditionally fetched-or-raised
          inside identify_water_system_candidate_zones(), no override path
@@ -243,8 +272,10 @@ silently patching another module or reimplementing its logic)
          included one. Adding one would be real new
          scope (a new PipelineContext field, plus deciding whether/how a
          single shared canopy fetch can be reused across future steps
-         that may each want it at a different buffer distance the way
-         roads already do) -- flagged here, not added.
+         that may each want it at a different buffer distance -- the
+         per-module canopy buffers, unlike the now-unified road buffer,
+         are still genuinely separate constants) -- flagged here, not
+         added.
      Both would require modifying water_candidate_zones.py itself (adding
      the two missing override params, and resolving the buffer-mismatch/
      new-field questions above) -- out of scope for this branch, which was
@@ -367,7 +398,7 @@ import valley_delineation
 import water_candidate_zones
 from solar_suitability import identify_solar_candidate_zones
 from tree_zone_candidates import identify_tree_zone_candidates
-from water_suitability import fetch_and_select_optimal_water_zone
+from water_suitability import NO_WATER_ZONE, fetch_and_select_optimal_water_zone
 
 
 @dataclass
@@ -594,19 +625,44 @@ def build_pipeline_context(
     # a one-line change: the day compute_step1_eligible_cells() takes an
     # eligible-mask override, the value it needs is already computed here.
     #
+    # existing_roads is computed HERE, above the exclusion-zones call --
+    # it is Layer-1-derived (a reprojected, buffered union of the raw
+    # farm-roads fetch, nothing more), so this is arguably where it always
+    # belonged -- specifically so the call below can reuse it instead of
+    # re-fetching. Legitimately None on any parcel with no mapped road
+    # nearby (the common, clean case).
+    existing_roads = farm_roads_data.get_road_exclusion_union_utm(boundary_coordinates, dem, farm_roads=farm_roads)
+
     # DELIBERATELY NOT PASSED INTO THE PRODUCTION CALL BELOW. production_area.
     # py is untouched in this branch and keeps computing its own five gates,
-    # so canopy/soil/road are fetched TWICE and the slope grid computed TWICE
+    # so canopy/soil are fetched TWICE and the slope grid computed TWICE
     # across this function -- a known, measured, time-limited cost documented
-    # in exclusion_zones.py's module docstring and asserted at exactly 2x in
-    # test_exclusion_zones.py. Wiring it in would change production's results
-    # (a closing is extensive; production would lose the pinhole cells it
-    # absorbs), which is a separate decision.
+    # in exclusion_zones.py's module docstring and asserted at exact counts
+    # in test_exclusion_zones.py. Wiring it in would change production's
+    # results (a closing is extensive; production would lose the pinhole
+    # cells it absorbs), which is a separate decision.
+    #
+    # road_exclusion_union_utm= IS passed, though: this context's own
+    # existing_roads above, built by farm_roads_data.get_road_exclusion_
+    # union_utm() at its default buffer -- which is the SAME farm_roads_
+    # data.ROAD_EXCLUSION_BUFFER_METERS the exclusion module's own
+    # self-compute (production_area._fetch_road_exclusion_union_utm()'s
+    # default) would have used, by shared definition, not coincidence;
+    # test_exclusion_zones.py asserts the two defaults agree so a future
+    # divergence fails loudly instead of silently substituting a
+    # wrong-buffer union here. identify_exclusion_zones() reuses a real
+    # None too ("checked, genuinely no roads nearby" -- see its OVERRIDES
+    # docstring section), so no second road fetch happens either way.
+    # Production's own road gate (fetch #3) and the water modules' (fetch
+    # #4) still self-fetch -- both need production_area.py edits and are
+    # deferred to the production-integration branch, #4 now unblocked by
+    # the single shared buffer constant.
     exclusion_result = exclusion_zones.identify_exclusion_zones(
         boundary_coordinates,
         dem=dem,
         boundary_polygon_utm=boundary_polygon_utm,
         canopy_height=canopy_height,
+        road_exclusion_union_utm=existing_roads,
     )
 
     optimized_production = production_area_ceiling.identify_optimized_production_areas(
@@ -619,8 +675,6 @@ def build_pipeline_context(
     # get it without recomputing. Previously discarded with the rest of
     # the ceiling optimizer's return.
     parcel_acres = optimized_production["parcel_acres"]
-
-    existing_roads = farm_roads_data.get_road_exclusion_union_utm(boundary_coordinates, dem, farm_roads=farm_roads)
 
     hydric_floodplain_union, hydric_floodplain_is_fallback = road_corridors._fetch_floodplain_hydric_union(
         boundary_coordinates,
@@ -657,6 +711,24 @@ def build_pipeline_context(
         production_areas=production_areas,
         canopy_height=canopy_height,
     )
+    # SAME GUARD as selected_road_corridor below, applied to the water zone:
+    # every downstream consumer of a selected_water_zone override
+    # (identify_road_corridor_candidates(), identify_solar_candidate_
+    # zones(), identify_tree_zone_candidates()) treats None as "not
+    # supplied" and reacts by re-running the ENTIRE identify_water_
+    # suitability() pipeline as its self-compute fallback -- measured at
+    # FIVE full water-suitability runs (this call plus one per consumer,
+    # plus one more through solar's nested tree-zone-exclusion call) across
+    # a single build_pipeline_context() run whenever no water zone
+    # qualifies. Roads dodge this by forwarding build_road_network()'s full
+    # dict (branches=[] and all, never None); water has no non-None dict
+    # shape for "nothing," so water_suitability.NO_WATER_ZONE (see that
+    # constant's own docstring) IS the real, explicit "already ran the
+    # selection, nothing qualified" answer forwarded instead. The context
+    # FIELD below still carries the plain None -- context readers (the
+    # map, the report, fencing) keep their existing None contract; only
+    # the three override forwards use the explicit form.
+    water_zone_answer = selected_water_zone if selected_water_zone is not None else NO_WATER_ZONE
 
     # Layer 2: keypoints, production_areas, and selected_water_zone are now
     # all co-resident in memory (computed above from one DEM/boundary/valleys
@@ -672,7 +744,7 @@ def build_pipeline_context(
         boundary_polygon_utm=boundary_polygon_utm,
         production_areas=production_areas,
         valleys=valleys,
-        selected_water_zone=selected_water_zone,
+        selected_water_zone=water_zone_answer,
         hydric_floodplain_union=soil_exclusion_unions["hydric_floodplain_union"],
         floodplain_data_is_fallback=soil_exclusion_unions["hydric_floodplain_is_fallback"],
         canopy_height=canopy_height,
@@ -694,7 +766,7 @@ def build_pipeline_context(
         boundary_polygon_utm=boundary_polygon_utm,
         production_areas=production_areas,
         valleys=valleys,
-        selected_water_zone=selected_water_zone,
+        selected_water_zone=water_zone_answer,
         selected_road_corridor=selected_road_corridor,
         hydric_floodplain_union=soil_exclusion_unions["hydric_floodplain_union"],
         floodplain_data_is_fallback=soil_exclusion_unions["hydric_floodplain_is_fallback"],
@@ -709,7 +781,7 @@ def build_pipeline_context(
         boundary_polygon_utm=boundary_polygon_utm,
         production_areas=production_areas,
         valleys=valleys,
-        selected_water_zone=selected_water_zone,
+        selected_water_zone=water_zone_answer,
         selected_road_corridor=selected_road_corridor,
         hydric_floodplain_union=soil_exclusion_unions["hydric_floodplain_union"],
         floodplain_data_is_fallback=soil_exclusion_unions["hydric_floodplain_is_fallback"],

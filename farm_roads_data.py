@@ -102,17 +102,57 @@ FARM_ROAD_CONFIDENCE_NOTES = (
     "not necessarily 'no access.'"
 )
 
-# How far past each fetched road line's own mapped geometry the hard
-# production-zone exclusion (get_road_exclusion_union_utm() below) extends.
-# Default 0.0 -- we don't yet know whether a buffer beyond the road
-# geometry itself is needed; this is deliberately easy to tune once
-# visually validated against a real property, same as every other buffer
-# constant in this pipeline (canopy_height_data.TREE_ROOT_ZONE_BUFFER_
-# METERS, production_area.PRODUCTION_BOUNDARY_SETBACK_METERS). NOTE: at
-# the 0.0 default, buffering a LineString produces a zero-area geometry,
-# so the exclusion union is effectively empty and this gate is a no-op
-# until a real, nonzero value is set here. CONFIGURABLE.
-ROAD_EXCLUSION_BUFFER_METERS = 0.0
+# How far a proposed feature must stay off an EXISTING, ALREADY-BUILT road
+# fetched by this module -- the single answer to that single question, and
+# the SINGLE definition every consumer reads: production's road gate
+# (production_area.compute_step1_eligible_cells(), via production_area.
+# _fetch_road_exclusion_union_utm()'s default), the ceiling optimizer
+# (production_area_ceiling.py), the exclusion-zones layer (exclusion_
+# zones.py's roads gate), AND water-zone siting (water_candidate_zones.py /
+# water_suitability.py -- which used to carry their own separate 3.048m
+# per-module road-buffer constant, deleted). This pipeline normally keeps
+# per-consumer constants separate even at equal values (e.g. production's
+# MIN_ZONE_WAIST_METERS vs. RENDER_OPENING_RADIUS_METERS, both 24m while
+# answering DIFFERENT questions -- keeping them apart is what let one be
+# tuned without moving the other), and that convention has earned its
+# place. This constant is the deliberate exception, and the test is the
+# question, not the value: "how far should a proposed feature stay off an
+# existing road?" does not depend on whether the feature is a field or a
+# pond, so two names for it were duplication, not independence. If ponds
+# ever genuinely need more clearance than crops, that is a NEW decision --
+# split the constant then, and record the reason, rather than quietly
+# reintroducing a per-module copy on the general separate-constants
+# principle.
+#
+# WHAT IT BUFFERS: the fetched geometry is GeoJSON LineString/
+# MultiLineString road segments (see get_farm_roads_for_boundary()) --
+# USGS National Map transportation CENTERLINES, a road's linear axis, not
+# digitized edges or pavement polygons. 5.0m from a centerline is a
+# half-width plus margin: a typical 3-4m farm track occupies 1.5-2m
+# either side of its axis, so this clears the roadway itself plus roughly
+# 1-2m of shoulder. (If a future source ever returns road EDGES or
+# polygons, this value over-excludes and must be rethought -- the number
+# is meaningless without the centerline basis.)
+#
+# BEHAVIOUR CHANGE, NOT A TUNING TWEAK: this was 0.0 -- and buffering a
+# LineString by zero yields zero-area geometry, so the union was
+# effectively empty and the road gate was a deliberate NO-OP pending
+# tuning. At 5.0 the gate excludes real ground for the first time. It
+# could NOT be validated against the reference property: both reference
+# boundaries measured 0 road cells because no mapped roads were found
+# near either parcel at all, so the first real validation happens on a
+# parcel a mapped road actually crosses (synthetic-fixture behavior is
+# asserted in test_farm_roads_data.py/test_exclusion_zones.py/
+# test_water_candidate_zones.py).
+#
+# THIS IS NOT the generated road corridor: road_corridors.py's routed,
+# PROPOSED road and everything that feeds it (POND_ZONE_EXCLUSION_BUFFER_
+# METERS, tree_zone_candidates.TREE_ZONE_ROAD_BUFFER_CELLS, solar's
+# ROAD_CORRIDOR_PROXIMITY_METERS/ROAD_PROXIMITY_BUFFER_METERS) are about
+# ground a proposal would newly occupy or wants to be NEAR; this constant
+# is about ground that is ALREADY occupied. None of those read this
+# value. CONFIGURABLE.
+ROAD_EXCLUSION_BUFFER_METERS = 5.0
 
 
 def _bounding_box(

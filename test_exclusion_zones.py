@@ -37,11 +37,19 @@ What this file proves, in order:
   7. narrative_data IS JSON-SERIALISABLE, imperial, 1 decimal, no numpy
      scalars and no geometry.
   8. THE REDUNDANCY IS BOUNDED AND EXPECTED. Call counters on the gate
-     fetch helpers and the slope computation across a full
-     build_pipeline_context() run: canopy, soil, road and slope each run
-     EXACTLY twice -- once here, once in production. Two, not three. A
-     higher count would mean something re-fetches beyond the known
-     duplication documented in exclusion_zones.py.
+     fetch HELPERS and the slope computation across a full
+     build_pipeline_context() run (what is actually measured -- not every
+     road/canopy/soil touch in the pipeline): canopy, soil and slope each
+     run EXACTLY twice -- once here, once in production -- while the road
+     helper runs exactly ONCE (production's own self-compute only:
+     build_pipeline_context() passes its already-fetched road union into
+     identify_exclusion_zones(), which reuses it, a real None included,
+     with the producer/consumer buffer defaults asserted equal). A higher
+     count would mean something re-fetches beyond the known duplication
+     documented in exclusion_zones.py. 8c: the road gate now EXCLUDES
+     GROUND -- at the shared 5.0m buffer a road crossing the parcel
+     excludes the cells within 5m of its centerline, where the old 0.0
+     buffer (computed inline as the contrast) excluded nothing.
   9. THE LAYER ACTUALLY RENDERS, and does so under its two constraints:
      beneath every feature layer (above only the basemap/halo backdrop,
      which covers off-parcel ground this layer never touches), and
@@ -612,16 +620,25 @@ print(
 
 
 # ===========================================================================
-# 8. THE REDUNDANCY IS BOUNDED AND EXPECTED -- EXACTLY 2x
+# 8. THE REDUNDANCY IS BOUNDED AND EXPECTED -- EXACT COUNTS PER GATE HELPER
 # ===========================================================================
 #
-# The concrete, measured cost of deferring the production integration.
-# Because production still self-computes its own five gates, one full
-# build_pipeline_context() run does each gate fetch TWICE and the slope grid
-# TWICE -- once for exclusion_zones, once for production. Two is expected.
-# THREE would mean something re-fetches beyond the known duplication, which
-# is exactly the failure the override pattern exists to prevent, so this
-# asserts equality and not an upper bound.
+# The concrete, measured cost of deferring the production integration --
+# counted at the shared GATE-HELPER bindings, which is what these counters
+# actually measure (NOT every road/canopy/soil touch in the pipeline;
+# build_pipeline_context()'s own separate existing_roads fetch, mocked below,
+# is outside these counts). Because production still self-computes its own
+# five gates, one full build_pipeline_context() run reaches the canopy and
+# soil helpers TWICE and the slope grid TWICE -- once for exclusion_zones,
+# once for production. The ROAD helper is the exception: build_pipeline_
+# context() now passes its own already-fetched existing_roads union into
+# identify_exclusion_zones() as road_exclusion_union_utm= (reused even when
+# it is a real None -- "checked, genuinely no roads nearby"), so exclusion_
+# zones' own road self-fetch never fires and the helper runs exactly ONCE
+# (production's untouched self-compute). One more of ANY count would mean
+# something re-fetches beyond the known duplication, which is exactly the
+# failure the override pattern exists to prevent, so this asserts equality
+# and not an upper bound.
 #
 # Each counter is installed at BOTH module-level bindings of the same
 # underlying helper (exclusion_zones.py's own, bound via `from
@@ -729,14 +746,18 @@ with ExitStack() as _stack:
         boundary_polygon_utm=_c_boundary_utm,
     )
 
-for _gate in ("canopy", "soil", "road", "slope"):
-    assert _counts[_gate] == 2, (
-        f"the {_gate} gate must run EXACTLY twice across one build_pipeline_context() run -- once for "
-        f"exclusion_zones, once for production, which is the known and deliberate duplication this branch "
-        f"accepts (see exclusion_zones.py's DELIBERATE REDUNDANCY section). Got {_counts[_gate]}. Three or "
-        "more means something is re-fetching beyond that duplication and the override pattern is failing "
-        "somewhere it should be preventing it; one would mean production is no longer self-computing, "
-        "which this branch does not do."
+_expected_gate_counts = {"canopy": 2, "soil": 2, "slope": 2, "road": 1}
+for _gate, _expected in _expected_gate_counts.items():
+    assert _counts[_gate] == _expected, (
+        f"the {_gate} gate helper must run EXACTLY {_expected}x across one build_pipeline_context() run "
+        f"(canopy/soil/slope: once for exclusion_zones, once for production -- the known and deliberate "
+        f"duplication this module accepts, see exclusion_zones.py's DELIBERATE REDUNDANCY section; road: "
+        f"once, production's own self-compute only, since build_pipeline_context() passes its own "
+        f"existing_roads union into identify_exclusion_zones() and that module reuses it -- a real None "
+        f"included). Got {_counts[_gate]}. One more means something is re-fetching beyond the known "
+        "duplication and the override pattern is failing somewhere it should be preventing it; one fewer "
+        "on canopy/soil/slope would mean production stopped self-computing, which this module does not do, "
+        "and a road count of 0 would mean production's own gate stopped running."
     )
 assert isinstance(_c_ctx.exclusion_zones, dict) and _c_ctx.exclusion_zones, (
     "the context must carry a real exclusion result"
@@ -744,11 +765,135 @@ assert isinstance(_c_ctx.exclusion_zones, dict) and _c_ctx.exclusion_zones, (
 assert _c_ctx.narrative_data["exclusion_zones"] is not None, (
     "the context's narrative_data must carry this module's own block"
 )
+# The union pipeline_context passed above was the mocked existing_roads fetch's
+# None -- identify_exclusion_zones() must have REUSED it as "checked, genuinely
+# no roads nearby" (road_available True), not treated it as unavailable.
+assert _c_ctx.exclusion_zones["layers"]["roads"]["data_available"] is True, (
+    "a caller-supplied real None union means 'checked, genuinely no roads nearby' -- the roads layer must "
+    "report data_available=True without exclusion_zones fetching anything itself"
+)
 print(
-    "REDUNDANCY BOUNDED AND EXPECTED: across one full build_pipeline_context() run the measured call "
-    f"counts are canopy={_counts['canopy']}, soil={_counts['soil']}, road={_counts['road']}, "
-    f"slope={_counts['slope']} -- EXACTLY 2x each (once for exclusion_zones, once for production), not "
-    "3x. That is the concrete, measured cost of deferring the production integration."
+    "REDUNDANCY BOUNDED AND EXPECTED: across one full build_pipeline_context() run the measured gate-helper "
+    f"call counts are canopy={_counts['canopy']}, soil={_counts['soil']}, slope={_counts['slope']} (2x each: "
+    f"once for exclusion_zones, once for production) and road={_counts['road']} (1x: production's own "
+    "self-compute only -- exclusion_zones reuses the union build_pipeline_context() passes in, a real None "
+    "included). That is the concrete, measured cost of deferring the production integration."
+)
+
+# --- the buffers match by shared definition, asserted rather than assumed ---
+#
+# build_pipeline_context()'s existing_roads is built by farm_roads_data.
+# get_road_exclusion_union_utm() at ITS default buffer; had exclusion_zones
+# self-computed instead, it would have used production_area._fetch_road_
+# exclusion_union_utm()'s default. Both defaults must be the same shared
+# farm_roads_data.ROAD_EXCLUSION_BUFFER_METERS -- captured at def time, so
+# compare the SIGNATURE defaults, not the live module attribute alone. If a
+# future change hands either path its own buffer, this fails loudly instead
+# of the pass-through silently substituting a wrong-buffer union.
+
+import inspect  # noqa: E402
+
+import farm_roads_data  # noqa: E402
+
+_producer_default = inspect.signature(farm_roads_data.get_road_exclusion_union_utm).parameters["buffer_meters"].default
+_consumer_default = inspect.signature(production_area._fetch_road_exclusion_union_utm).parameters["buffer_meters"].default
+assert _producer_default == _consumer_default == farm_roads_data.ROAD_EXCLUSION_BUFFER_METERS, (
+    f"the union build_pipeline_context() passes into identify_exclusion_zones() is built at "
+    f"get_road_exclusion_union_utm()'s default buffer ({_producer_default}m), while exclusion_zones' own "
+    f"self-compute would use _fetch_road_exclusion_union_utm()'s default ({_consumer_default}m) -- these "
+    f"must both be the single shared farm_roads_data.ROAD_EXCLUSION_BUFFER_METERS "
+    f"({farm_roads_data.ROAD_EXCLUSION_BUFFER_METERS}m); a divergence means the pass-through would "
+    "silently substitute a union built at the wrong buffer"
+)
+print(
+    f"BUFFERS MATCH BY DEFINITION, ASSERTED: the passed union's producer default and the consumer's "
+    f"self-compute default are both the shared ROAD_EXCLUSION_BUFFER_METERS = {_producer_default}m."
+)
+
+
+# ===========================================================================
+# 8c. THE ROAD GATE NOW EXCLUDES GROUND -- 5.0m EITHER SIDE OF A CENTERLINE
+# ===========================================================================
+#
+# ROAD_EXCLUSION_BUFFER_METERS was 0.0 -- buffering a road LineString by zero
+# yields zero-area geometry, so the union was always empty and the road layer
+# could never exclude a cell (a documented no-op pending tuning). At the new
+# 5.0m default a road crossing the parcel excludes real ground for the first
+# time. Fixture: a flat, all-slope-passing plane with one road centerline
+# crossing it horizontally, deliberately offset a quarter cell from the row
+# centers so cell-center distances to the line are 1.25/3.75/6.25/8.75m --
+# clean separation either side of the 5.0m buffer edge, no boundary-case
+# ambiguity. Both reference boundaries measured 0 road cells (no mapped road
+# near either parcel), so this synthetic fixture is the gate's first real
+# validation -- see the constant's own docstring.
+
+from rasterio.warp import transform as _rg_warp_transform  # noqa: E402
+
+_rg_rows = _rg_cols = 40
+_rg_dem = make_dem(flat_plane(_rg_rows, _rg_cols))
+_rg_boundary = boundary_for(_rg_dem)
+_rg_lons, _rg_lats = _rg_warp_transform(
+    _rg_dem["crs"], "EPSG:4326", *[list(c) for c in _rg_boundary.exterior.coords.xy]
+)
+_rg_boundary_coords = list(zip(_rg_lons, _rg_lats))
+
+# Road centerline: horizontal, 1.25m below row 20's cell centers, so rows
+# 20/21 centers sit 1.25/3.75m from it (inside 5.0m) and rows 19/22 sit
+# 6.25/8.75m (outside).
+_rg_road_y = _rg_dem["origin_y"] - (20 + 0.5) * RESOLUTION_M - 1.25
+_rg_road_lons, _rg_road_lats = _rg_warp_transform(
+    _rg_dem["crs"], "EPSG:4326",
+    [_rg_dem["origin_x"] - 2 * RESOLUTION_M, _rg_dem["origin_x"] + (_rg_cols + 2) * RESOLUTION_M],
+    [_rg_road_y, _rg_road_y],
+)
+_rg_farm_roads = [{
+    "name": "Synthetic Crossing Rd",
+    "geometry": {"type": "LineString", "coordinates": [list(pt) for pt in zip(_rg_road_lons, _rg_road_lats)]},
+}]
+
+# Both unions built by the REAL producer from the same road line: one at the
+# 5.0m default, one at the old 0.0 for the inline contrast.
+_rg_union_now = farm_roads_data.get_road_exclusion_union_utm(_rg_boundary_coords, _rg_dem, farm_roads=_rg_farm_roads)
+_rg_union_old = farm_roads_data.get_road_exclusion_union_utm(
+    _rg_boundary_coords, _rg_dem, buffer_meters=0.0, farm_roads=_rg_farm_roads
+)
+assert _rg_union_old is None, "contrast precondition: the old 0.0 buffer yields an empty union (None) from the same road"
+
+_rg_no_canopy = np.zeros((_rg_rows, _rg_cols), dtype=bool)
+_rg_result_now = ez.identify_exclusion_zones(
+    _rg_boundary_coords,
+    dem=_rg_dem,
+    boundary_polygon_utm=_rg_boundary,
+    tree_root_zone_mask_utm=_rg_no_canopy,
+    check_soil=False,
+    road_exclusion_union_utm=_rg_union_now,
+)
+_rg_result_old = ez.identify_exclusion_zones(
+    _rg_boundary_coords,
+    dem=_rg_dem,
+    boundary_polygon_utm=_rg_boundary,
+    tree_root_zone_mask_utm=_rg_no_canopy,
+    check_soil=False,
+    road_exclusion_union_utm=_rg_union_old,
+)
+
+_rg_road_mask = _rg_result_now["layers"]["roads"]["mask"]
+_rg_hit_rows = sorted(set(np.argwhere(_rg_road_mask)[:, 0].tolist()))
+assert _rg_hit_rows == [20, 21], (
+    f"cells whose centers sit within 5.0m of the road centerline (rows 20/21, at 1.25/3.75m) must be "
+    f"excluded and cells beyond (rows 19/22, at 6.25/8.75m) must not -- excluded rows: {_rg_hit_rows}"
+)
+_rg_acres_now = _rg_result_now["layers"]["roads"]["acres"]
+_rg_acres_old = _rg_result_old["layers"]["roads"]["acres"]
+assert _rg_acres_now > 0.0, "the road layer must exclude real acreage at the 5.0m default"
+assert _rg_acres_old == 0.0, (
+    "inline contrast: under the old 0.0 buffer this same fixture excluded NOTHING -- the difference IS "
+    f"the behaviour change (got {_rg_acres_old} acres)"
+)
+print(
+    f"ROAD GATE ACTIVE: a road crossing the parcel now excludes {_rg_acres_now:.3f} acres "
+    f"({int(_rg_road_mask.sum())} cells, rows within 5.0m of the centerline only); under the old 0.0 "
+    f"buffer the same fixture excluded {_rg_acres_old:.3f} acres (nothing -- the gate was a no-op)."
 )
 
 

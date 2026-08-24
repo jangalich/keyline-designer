@@ -215,6 +215,7 @@ print("REGRESSION (test 2, no overrides supplied): output above is identical to 
 # that the self-compute fallbacks are genuinely skipped when overridden.
 import valley_delineation  # noqa: E402
 import water_suitability  # noqa: E402
+from water_suitability import NO_WATER_ZONE  # noqa: E402
 
 override_boundary_xs, override_boundary_ys = warp_transform(
     "EPSG:4326", DST_CRS, [pt[0] for pt in boundary_coordinates], [pt[1] for pt in boundary_coordinates],
@@ -326,6 +327,47 @@ print(
 )
 
 
+# --- 1b. selected_water_zone=NO_WATER_ZONE (the explicit "already ran the ---
+# --- selection, nothing qualified" answer) -> the water self-compute is ---
+# --- SKIPPED (unlike a bare None), the zone resolves to None internally, ---
+# --- and the nested tree-zone-exclusion call receives the same explicit ---
+# --- form, never a bare None ----------------------------------------------
+
+with mock_patch.object(solar_suitability, "identify_water_suitability") as mock_water_nwz, \
+     mock_patch.object(production_area, "get_canopy_height_for_boundary", _fake_clean_canopy), \
+     mock_patch.object(solar_suitability, "identify_tree_zone_candidates", return_value={"patches": []}) as mock_tree_nwz:
+    nwz_result = solar_suitability.identify_solar_candidate_zones(
+        boundary_coordinates,
+        dem=synthetic_dem,
+        boundary_polygon_utm=OVERRIDE_BOUNDARY_POLYGON_UTM,
+        production_areas=OVERRIDE_PRODUCTION_AREAS,
+        valleys=OVERRIDE_VALLEYS,
+        selected_water_zone=NO_WATER_ZONE,
+        selected_road_corridor=OVERRIDE_SELECTED_ROAD_CORRIDOR,
+        check_prime_farmland=False,
+    )
+
+assert mock_water_nwz.call_count == 0, (
+    "identify_water_suitability() must NOT be called when selected_water_zone=NO_WATER_ZONE -- the "
+    "explicit 'ran the selection, nothing qualified' answer is a SUPPLIED override, not a missing one; "
+    "re-running the water pipeline for it is the measured 5x amplification this guard closes"
+)
+assert mock_tree_nwz.call_args.kwargs["selected_water_zone"] is NO_WATER_ZONE, (
+    "the nested tree-zone-exclusion call must receive the resolved 'nothing' re-wrapped as NO_WATER_ZONE, "
+    "never a bare None (which would make identify_tree_zone_candidates() re-run the water pipeline itself)"
+)
+validate_feature_collection(nwz_result["zones_geojson"])
+assert nwz_result["zones_geojson"]["features"], (
+    "candidates must still generate with no water zone to exclude -- NO_WATER_ZONE behaves exactly like a "
+    "genuine self-computed None downstream"
+)
+print(
+    "Supplying selected_water_zone=NO_WATER_ZONE (test 1b) skips the water self-compute entirely, resolves "
+    "to 'no zone to exclude' internally, and forwards the same explicit form into the nested tree-zone-"
+    "exclusion call."
+)
+
+
 # --- 3. selected_water_zone and selected_road_corridor NOT overridden, ---
 # --- but boundary_polygon_utm/production_areas/valleys ARE -> both -------
 # --- identify_water_suitability() and identify_road_corridor_candidates() -
@@ -383,9 +425,12 @@ assert corridor_call.kwargs["production_areas"] is OVERRIDE_PRODUCTION_AREAS, (
     "identify_road_corridor_candidates() must receive this function's own already-sourced "
     "production_areas, not re-derive its own copy"
 )
-assert corridor_call.kwargs["selected_water_zone"] is None, (
-    "identify_road_corridor_candidates() must receive the SAME selected_water_zone this function's own "
-    "(mocked) identify_water_suitability() call just produced, not re-derive it independently"
+assert corridor_call.kwargs["selected_water_zone"] is NO_WATER_ZONE, (
+    "identify_road_corridor_candidates() must receive the resolved answer this function's own (mocked) "
+    "identify_water_suitability() call just produced -- and since that answer was None ('ran the "
+    "selection, nothing qualified'), it must arrive as the EXPLICIT water_suitability.NO_WATER_ZONE "
+    "form, never as a bare None (which the receiving entry point treats as 'not supplied' and answers "
+    "by re-running the entire water pipeline -- the measured 5x amplification this guard closes)"
 )
 validate_feature_collection(passthrough_result["zones_geojson"])
 print(

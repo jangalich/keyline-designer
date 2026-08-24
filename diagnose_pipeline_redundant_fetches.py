@@ -117,37 +117,37 @@ every one of these SIX bindings (three in solar_suitability.py, three in
 tree_zone_candidates.py) should see exactly ZERO calls -- each one firing
 means a self-compute fallback fired when an override was already known.
 
-CAVEAT, confirmed live while building this script: this section is
-informational only, NOT part of the exit-code gate, specifically because
-test_pipeline_context.py's own synthetic terrain (reused verbatim here,
-per this script's own mandate not to build a new fixture) was built ONLY
-to exercise delineate_valleys()'s ridge/valley tracing -- its slope is
-far too steep everywhere (~80%, vs. production_area_ceiling.py's own
-MAX_PRODUCTION_SLOPE_PCT) to clear identify_optimized_production_areas()'s
-own STEP 1 eligibility gate. Every prior use of this fixture (test_
-pipeline_context.py itself) canned identify_optimized_production_areas()/
-fetch_and_select_optimal_water_zone() with fixed return values, so this
-never surfaced; this script is the first to run them for REAL against it.
-Real production_areas comes back empty here, so the real selected_water_
-zone legitimately resolves to None -- and solar_suitability.py's/tree_
-zone_candidates.py's own docstrings are explicit that a None override is
-"indistinguishable from not supplied" (the same ambiguous-sentinel
-convention every override in this pipeline uses) and correctly self-
-computes in that case. selected_road_corridor does NOT share this caveat:
-pipeline_context.py's own field always holds build_road_network()'s full
-network dict, branches=[] and all, never None (see that field's own
-notes in pipeline_context.py) -- an empty network on this steep fixture
-is still a real, explicit answer forwarded to every nested call, so the
-road-corridor nested bindings below are expected to gate at zero even
-here. So on THIS fixture, a nonzero count on the water-zone nested
-bindings means "this run's real production_areas/selected_water_zone came
-back empty" (confirmed true every time against this terrain), not
-necessarily a reintroduced redundancy -- verify ctx.production_areas/
-ctx.selected_water_zone before treating a nonzero water-zone count here as
-a real regression; a nonzero road-corridor nested count has no such
-excuse. Against a real property (NETWORK MODE, where production areas and
-a selected water zone are the normal, non-empty case), this section's
-zero-count reasoning holds without that caveat.
+CAVEAT, confirmed live while building this script, since RESOLVED for the
+water-zone rows: this section is informational only, NOT part of the
+exit-code gate, originally because test_pipeline_context.py's own
+synthetic terrain (reused verbatim here, per this script's own mandate
+not to build a new fixture) was built ONLY to exercise delineate_
+valleys()'s ridge/valley tracing -- its slope is far too steep everywhere
+(~80%, vs. production_area_ceiling.py's own MAX_PRODUCTION_SLOPE_PCT) to
+clear identify_optimized_production_areas()'s own STEP 1 eligibility
+gate. Every prior use of this fixture (test_pipeline_context.py itself)
+canned identify_optimized_production_areas()/fetch_and_select_optimal_
+water_zone() with fixed return values, so this never surfaced; this
+script is the first to run them for REAL against it. Real production_
+areas comes back empty here, so the real selected_water_zone legitimately
+resolves to None -- and a None selected_water_zone override USED TO be
+"indistinguishable from not supplied" to every receiving entry point (the
+ambiguous-sentinel convention), which made the water-zone nested bindings
+fire their self-compute fallback -- FIVE full identify_water_
+suitability() runs per build_pipeline_context() on such a parcel,
+measured. That ambiguity is now closed the same way selected_road_
+corridor's always was: pipeline_context.py forwards a resolved "nothing"
+as water_suitability.NO_WATER_ZONE (the real, explicit already-ran-and-
+selected-nothing answer, see that constant's own docstring), never a bare
+None, and identify_road_corridor_candidates()/identify_solar_candidate_
+zones()/identify_tree_zone_candidates() each accept it -- so the
+water-zone nested bindings below are now expected to gate at zero even on
+this no-qualifying-zone fixture, exactly like the road-corridor ones
+(whose guard forwards build_road_network()'s full network dict,
+branches=[] and all, never None -- see that field's own notes in
+pipeline_context.py). A nonzero count on ANY nested binding below is now
+a real, reintroduced redundancy signal on this fixture, not an excusable
+ambiguity artifact.
 
 --- What this does NOT do ---
 
@@ -454,6 +454,17 @@ def run_synthetic_mode() -> tuple[dict, dict, dict]:
         mock_delineate = enter(
             mock_patch.object(pc.valley_delineation, "delineate_valleys", wraps=pc.valley_delineation.delineate_valleys)
         )
+        # exclusion_zones.identify_exclusion_zones() -- added to build_
+        # pipeline_context() by a later branch than this script, runs REAL
+        # here (it's not one of the 7 targets, but the run can't complete
+        # without it): its canopy gate is MANDATORY (fetch-or-raise, no
+        # try/except -- an unstubbed run raises straight out of synthetic
+        # mode, found live once that step landed), and its soil/road
+        # fetches, while gracefully degrading, would each burn real retry
+        # time against a proxy that rejects every attempt.
+        enter(mock_patch.object(pc.exclusion_zones, "get_required_tree_root_zone_mask_utm", side_effect=_fake_clean_canopy_mask))
+        enter(mock_patch.object(pc.exclusion_zones, "_fetch_disqualifying_soil_union", return_value=None))
+        enter(mock_patch.object(pc.exclusion_zones, "_fetch_road_exclusion_union_utm", return_value=None))
         mock_optimize = enter(
             mock_patch.object(
                 pc.production_area_ceiling,
@@ -594,6 +605,13 @@ def _run_pipeline_context_for_canopy_measurement(canopy_height) -> int:
         enter = stack.enter_context
         enter(mock_patch.object(pc.dem_data, "get_dem_for_boundary", return_value=SYNTHETIC_DEM))
         enter(mock_patch.object(pc.valley_delineation, "delineate_valleys", return_value=[]))
+        # exclusion_zones.identify_exclusion_zones() runs real here -- its
+        # canopy gate is deliberately left genuine (the probe patches the
+        # true leaf), but its gracefully-degrading soil/road fetches are
+        # stubbed so they don't burn real retry time against the proxy
+        # (same reasoning as run_synthetic_mode()'s own stubs for them).
+        enter(mock_patch.object(pc.exclusion_zones, "_fetch_disqualifying_soil_union", return_value=None))
+        enter(mock_patch.object(pc.exclusion_zones, "_fetch_road_exclusion_union_utm", return_value=None))
         enter(
             mock_patch.object(
                 pc.production_area_ceiling, "identify_optimized_production_areas", return_value=_FAKE_OPTIMIZED_RESULT
@@ -710,11 +728,12 @@ def main() -> None:
     if notes["production_areas_count"] == 0 or notes["selected_water_zone_is_none"]:
         print(
             f"\nNOTE: this run's real production_areas came back empty (count={notes['production_areas_count']}) and "
-            f"selected_water_zone is None ({notes['selected_water_zone_is_none']}) -- any nonzero row in the "
-            "supplementary table above is consistent with the documented ambiguous-None-sentinel self-compute "
-            "path (see module docstring caveat), not necessarily a reintroduced redundancy. This is expected in "
-            "SYNTHETIC MODE (the reused terrain is too steep for any real production area) and would be a more "
-            "meaningful signal in NETWORK MODE against a real property."
+            f"selected_water_zone is None ({notes['selected_water_zone_is_none']}) -- expected in SYNTHETIC MODE "
+            "(the reused terrain is too steep for any real production area). Since build_pipeline_context() now "
+            "forwards a resolved no-qualifying-water-zone answer as water_suitability.NO_WATER_ZONE (never a bare "
+            "None -- see module docstring caveat, RESOLVED), the supplementary table's water-zone rows are "
+            "expected at ZERO even on this fixture; any nonzero row above is a real, reintroduced-redundancy "
+            "signal, no longer an excusable ambiguity artifact."
         )
 
     print()

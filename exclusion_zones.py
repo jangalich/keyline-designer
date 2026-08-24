@@ -68,11 +68,23 @@ masks instead, the way diagnose_exclusion_footprints.py does. Either
 resolution ends the duplication; leaving it as-is indefinitely is not
 one of the options.
 
-THE COST, MEASURED. Because production still self-computes, one
-build_pipeline_context() run fetches canopy, soil and roads TWICE and
-computes the slope grid TWICE -- once here, once in production.
-test_exclusion_zones.py asserts EXACTLY two of each, not three: a third
-would mean something is re-fetching beyond this known duplication and
+THE COST, MEASURED -- and what the measurement actually counts: calls
+to the shared GATE HELPERS (get_required_tree_root_zone_mask_utm(),
+_fetch_disqualifying_soil_union(), _fetch_road_exclusion_union_utm(),
+compute_slope_percent()) at this module's and production's bindings,
+NOT every road/canopy/soil touch in the whole pipeline (e.g. build_
+pipeline_context()'s own separate existing_roads fetch is outside this
+count). Because production still self-computes, one build_pipeline_
+context() run reaches the canopy and soil gate helpers TWICE and
+computes the slope grid TWICE -- once here, once in production. The
+ROAD gate helper is the exception since build_pipeline_context()
+started passing its own already-fetched road union into this module
+(road_exclusion_union_utm= -- see identify_exclusion_zones()'s
+OVERRIDES section): this module's road self-fetch no longer fires on
+that path, so the helper runs exactly ONCE (production's own
+self-compute; production is untouched and keeps it). test_exclusion_
+zones.py asserts these exact counts, not upper bounds: one more of any
+would mean something is re-fetching beyond the known duplication and
 the override pattern is failing somewhere else.
 
 --- CLOSING: PER-GATE RADII, MEASURED NOT GUESSED ---
@@ -190,6 +202,17 @@ from raster_grid import (
     pixel_center_xy,
 )
 from soil_data import coordinates_to_wkt_polygon
+
+# Sentinel default for identify_exclusion_zones()'s road_exclusion_union_utm
+# parameter, distinguishing "not supplied -- self-fetch" from a caller-
+# supplied real None ("checked, and genuinely no roads found nearby" --
+# farm_roads_data.get_road_exclusion_union_utm()'s own clean-result
+# convention). Same distinction production_area.compute_step1_eligible_
+# cells()'s _ROAD_CHECK_UNCHECKED draws, needed here since build_pipeline_
+# context() passes its own already-fetched (and legitimately-None-able)
+# existing_roads union through -- see identify_exclusion_zones()'s
+# OVERRIDES docstring section.
+_ROAD_UNION_NOT_SUPPLIED = object()
 
 # ---------------------------------------------------------------------------
 # CLOSING RADII -- one constant per gate, defined separately
@@ -498,7 +521,7 @@ def identify_exclusion_zones(
     canopy_height: dict | None = None,
     tree_root_zone_mask_utm: np.ndarray | None = None,
     disqualifying_soil_union_utm=None,
-    road_exclusion_union_utm=None,
+    road_exclusion_union_utm=_ROAD_UNION_NOT_SUPPLIED,
     check_soil: bool = True,
     check_roads: bool = True,
 ) -> dict:
@@ -509,16 +532,27 @@ def identify_exclusion_zones(
     be explained rather than just drawn.
 
     OVERRIDES. dem/boundary_polygon_utm/canopy_height/
-    tree_root_zone_mask_utm/disqualifying_soil_union_utm/
-    road_exclusion_union_utm all follow this pipeline's standard
-    None-falls-back-to-self-compute convention: a caller that already has
-    one passes it and no second fetch happens. NOTE this module does not
-    distinguish a caller-supplied real None ("checked, genuinely nothing
-    there") from an omitted argument the way production_area.
-    compute_step1_eligible_cells()'s sentinels do -- there is no caller
-    with that value to pass yet, and inventing the distinction before one
-    exists would be two conventions for one thing. check_soil/check_roads
-    are the explicit way to say "do not check this gate at all".
+    tree_root_zone_mask_utm/disqualifying_soil_union_utm follow this
+    pipeline's standard None-falls-back-to-self-compute convention: a
+    caller that already has one passes it and no second fetch happens.
+    road_exclusion_union_utm is the ONE exception: its default is a
+    private sentinel ("not supplied"), and a caller-supplied real None
+    means what farm_roads_data.get_road_exclusion_union_utm()'s own None
+    means -- "checked, and genuinely no roads found nearby" -- so it is
+    REUSED (road_available=True, no second fetch) rather than treated as
+    missing. Same distinction production_area.compute_step1_eligible_
+    cells()'s _ROAD_CHECK_UNCHECKED sentinel already draws, adopted here
+    the day a real caller existed for it: build_pipeline_context() now
+    passes its own already-fetched existing_roads union straight through,
+    and that union is legitimately None on any parcel with no mapped road
+    nearby -- treating that None as "not supplied" would quietly
+    reintroduce the second fetch on exactly the parcels the pass-through
+    exists to spare. (An earlier version of this note declined to invent
+    the distinction "before a caller with that value to pass exists";
+    that caller now exists.) disqualifying_soil_union_utm keeps the plain
+    None convention -- no caller passes a real None for it yet.
+    check_soil/check_roads are the explicit way to say "do not check this
+    gate at all".
 
     max_slope_pct and boundary_setback_meters default to production's own
     MAX_PRODUCTION_SLOPE_PCT and PRODUCTION_BOUNDARY_SETBACK_METERS. They
@@ -664,7 +698,7 @@ def identify_exclusion_zones(
 
     road_available = False
     if check_roads:
-        if road_exclusion_union_utm is None:
+        if road_exclusion_union_utm is _ROAD_UNION_NOT_SUPPLIED:
             try:
                 xs, ys = boundary_polygon_utm.exterior.coords.xy
                 lons, lats = warp_transform(dem["crs"], "EPSG:4326", list(xs), list(ys))
@@ -675,7 +709,14 @@ def identify_exclusion_zones(
             except Exception:
                 road_exclusion_union_utm = None
         else:
+            # Supplied -- including a real None ("checked, genuinely no
+            # roads found nearby"): reused, never re-fetched. See the
+            # OVERRIDES docstring section for why this parameter alone
+            # draws that distinction.
             road_available = True
+    if road_exclusion_union_utm is _ROAD_UNION_NOT_SUPPLIED:
+        # check_roads=False with nothing supplied -- gate skipped entirely.
+        road_exclusion_union_utm = None
     road_fail = _union_hit_mask(dem, slope_only_mask, road_exclusion_union_utm)
 
     raw_masks = {

@@ -170,20 +170,34 @@ with patch.object(farm_roads_data, "get_farm_roads_for_boundary", lambda boundar
 assert no_roads_union is None, "no roads found nearby must return None, same convention as _fetch_disqualifying_soil_union()"
 print("get_road_exclusion_union_utm(): no roads found nearby correctly returns None.")
 
-# --- ROAD_EXCLUSION_BUFFER_METERS default (0.0): buffering a LineString by 0 yields an
-#     empty geometry, so the exclusion union is empty -> None (a documented, deliberate
-#     consequence of the 0.0 default -- see that constant's own comment). ---
-assert ROAD_EXCLUSION_BUFFER_METERS == 0.0, (
+# --- ROAD_EXCLUSION_BUFFER_METERS default (5.0): the gate is ACTIVE. The old 0.0
+#     default made buffering a LineString yield zero-area geometry, so the union was
+#     always empty (None) and the road gate was a documented no-op pending tuning; at
+#     5.0 (a centerline half-width plus margin -- see the constant's own docstring) a
+#     real road line produces a real, positive-area exclusion polygon at the DEFAULT,
+#     not just at an explicit override. ---
+assert ROAD_EXCLUSION_BUFFER_METERS == 5.0, (
     f"this test documents the CURRENT default's consequence -- update it if "
-    f"ROAD_EXCLUSION_BUFFER_METERS (currently {ROAD_EXCLUSION_BUFFER_METERS}) is ever retuned off exactly 0.0"
+    f"ROAD_EXCLUSION_BUFFER_METERS (currently {ROAD_EXCLUSION_BUFFER_METERS}) is ever retuned off exactly 5.0"
 )
 with patch.object(farm_roads_data, "get_farm_roads_for_boundary", lambda boundary_coordinates: [{"name": "N Montour Rd", "geometry": LINE_A}]):
-    zero_buffer_union = get_road_exclusion_union_utm(boundary, ROAD_EXCLUSION_DEM)
-assert zero_buffer_union is None, (
-    "at the 0.0 default buffer, a real road line still produces an empty (zero-area) buffered union, "
-    "which must read as None -- this gate is a documented no-op until a real buffer value is set"
+    default_buffer_union = get_road_exclusion_union_utm(boundary, ROAD_EXCLUSION_DEM)
+assert default_buffer_union is not None and not default_buffer_union.is_empty and default_buffer_union.area > 0, (
+    "at the 5.0m default buffer, a real road line must produce a real, positive-area exclusion union -- "
+    "the road gate is no longer the documented 0.0 no-op"
 )
-print("get_road_exclusion_union_utm(): the 0.0 default buffer produces an empty union (None) even with a real road present.")
+# contrast, computed inline: the OLD 0.0 default excluded nothing at all
+with patch.object(farm_roads_data, "get_farm_roads_for_boundary", lambda boundary_coordinates: [{"name": "N Montour Rd", "geometry": LINE_A}]):
+    old_zero_buffer_union = get_road_exclusion_union_utm(boundary, ROAD_EXCLUSION_DEM, buffer_meters=0.0)
+assert old_zero_buffer_union is None, (
+    "sanity contrast: at the old 0.0 buffer the same road line yields a zero-area geometry, i.e. None -- "
+    "the difference between these two calls IS the behaviour change the 5.0 default introduces"
+)
+print(
+    f"get_road_exclusion_union_utm(): the 5.0m default buffer produces a real "
+    f"{default_buffer_union.geom_type} ({default_buffer_union.area:.1f} sq m) from one road line; the old "
+    "0.0 buffer produced None (no-op gate) from the same line."
+)
 
 # --- a real, nonzero buffer produces a real polygon, reprojected into dem['crs'] ---
 with patch.object(farm_roads_data, "get_farm_roads_for_boundary", lambda boundary_coordinates: [{"name": "N Montour Rd", "geometry": LINE_A}]):
