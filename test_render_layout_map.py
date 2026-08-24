@@ -800,6 +800,7 @@ import copy
 
 from rasterio.warp import transform as _warp_transform_check
 from shapely.geometry import LineString
+from raster_grid import chaikin_smooth_coords
 from render_layout_map import (
     ROAD_RENDER_COLOR,
     ROAD_RENDER_INNER_ALPHA,
@@ -807,14 +808,13 @@ from render_layout_map import (
     ROAD_RENDER_OUTER_ALPHA,
     ROAD_RENDER_OUTER_WIDTH,
     ROAD_RENDER_SIMPLIFY_TOLERANCE_M,
-    _chaikin_smooth_coords,
     _smooth_line_for_render,
 )
 
-# --- _chaikin_smooth_coords(): endpoints kept exactly, every original interior corner rounded away, further cutting on repeated iterations, true no-op on a cornerless (2-point) line ---
+# --- chaikin_smooth_coords(): endpoints kept exactly, every original interior corner rounded away, further cutting on repeated iterations, true no-op on a cornerless (2-point) line ---
 
 staircase = [(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (20.0, 10.0), (20.0, 20.0)]
-smoothed_once = _chaikin_smooth_coords(staircase, 1)
+smoothed_once = chaikin_smooth_coords(staircase, 1)
 assert smoothed_once[0] == staircase[0], "the first coordinate must be kept EXACTLY, not cut"
 assert smoothed_once[-1] == staircase[-1], "the last coordinate must be kept EXACTLY, not cut"
 assert len(smoothed_once) > len(staircase), "one Chaikin iteration must add interior corner-cut points"
@@ -823,15 +823,15 @@ for corner in staircase[1:-1]:
         f"corner {corner} is a sharp original interior vertex -- Chaikin smoothing must round it away, "
         f"not keep it exactly"
     )
-smoothed_twice = _chaikin_smooth_coords(staircase, 2)
+smoothed_twice = chaikin_smooth_coords(staircase, 2)
 assert len(smoothed_twice) > len(smoothed_once), "a second iteration must cut further (more points, rounder corners)"
 
 two_point_line = [(0.0, 0.0), (10.0, 10.0)]
-assert _chaikin_smooth_coords(two_point_line, 3) == two_point_line, (
+assert chaikin_smooth_coords(two_point_line, 3) == two_point_line, (
     "a straight 2-point line has no interior corner to cut -- smoothing must be a genuine no-op"
 )
 print(
-    "_chaikin_smooth_coords keeps both endpoints exactly, rounds away every original interior corner, "
+    "chaikin_smooth_coords keeps both endpoints exactly, rounds away every original interior corner, "
     "cuts further on repeated iterations, and is a true no-op on a 2-point (cornerless) line."
 )
 
@@ -1729,7 +1729,7 @@ def _render_capturing_fences(layers: dict, legend_sink: list) -> list:
 def _trim_render_ring(geometry_utm):
     """The same simplified Mercator ring the renderer itself builds for a fence feature --
     the untrimmed reference each drawn piece is measured against below."""
-    return rlm._angular_simplify_closed_ring(
+    return rlm.angular_simplify_closed_ring(
         rlm._reproject_geometry_to_mercator(mapping(_trim_to_wgs84(geometry_utm))),
         rlm.FENCE_RENDER_ANGULAR_SIMPLIFY_TOLERANCE_M,
     )
