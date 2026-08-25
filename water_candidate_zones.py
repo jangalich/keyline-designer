@@ -282,6 +282,20 @@ WATER_ZONE_PRODUCTION_SETBACK_METERS = 5.0
 _CANOPY_CHECK_UNCHECKED = object()
 _ROAD_CHECK_UNCHECKED = object()
 
+# A THIRD, separate sentinel -- for identify_water_system_candidate_zones()'s
+# road_exclusion_union_utm PARAMETER, distinguishing "the caller supplied
+# nothing, self-fetch" from "the caller supplied a real None". It is NOT
+# _ROAD_CHECK_UNCHECKED above, and the difference matters: a real None is
+# farm_roads_data.get_road_exclusion_union_utm()'s own clean result --
+# "checked, and genuinely no mapped road nearby", the common case on a rural
+# parcel -- so it must be REUSED (road_data_available True, no second fetch),
+# while _ROAD_CHECK_UNCHECKED means the check never ran at all and the gate
+# is skipped. Collapsing the two would reintroduce the redundant fetch on
+# exactly the parcels the pass-through exists to spare, which is the trap
+# exclusion_zones._ROAD_UNION_NOT_SUPPLIED was introduced to avoid on the
+# other side of the same union.
+_ROAD_UNION_NOT_SUPPLIED = object()
+
 WATER_SYSTEM_CANDIDATE_CONFIDENCE_NOTES = (
     "This identifies a general candidate zone for water-system "
     "infrastructure (keyline plowing patterns, pond/dam potential, ram "
@@ -1286,6 +1300,7 @@ def identify_water_system_candidate_zones(
     valleys: Optional[list[dict]] = None,
     production_areas: Optional[list[dict]] = None,
     canopy_height: Optional[dict] = None,
+    road_exclusion_union_utm=_ROAD_UNION_NOT_SUPPLIED,
     **zone_kwargs,
 ) -> dict:
     """
@@ -1372,6 +1387,27 @@ def identify_water_system_candidate_zones(
     mandatory get_required_tree_root_zone_mask_utm() call -- so neither
     re-fetches canopy from the network; when None (the default) both fetch
     as before, leaving the mandatory-gate semantics unchanged.
+
+    road_exclusion_union_utm is the road gate's own pre-fetched union
+    (farm_roads_data.get_road_exclusion_union_utm()'s output, reprojected
+    into dem['crs'] and buffered at ROAD_EXCLUSION_BUFFER_METERS), so a
+    caller that already built one for this exact boundary -- build_
+    pipeline_context() does, for the exclusion-zones and production gates
+    -- does not pay for a third, identical fetch here. Interchangeable
+    because that buffer is a SINGLE SHARED CONSTANT read by every consumer,
+    not three constants that happen to be equal; test_water_candidate_
+    zones.py asserts the producer's and this module's self-fetch defaults
+    are the same value so a future divergence fails loudly instead of
+    silently substituting a wrong-buffer union.
+
+    UNLIKE dem/boundary_polygon_utm/valleys/production_areas above, its
+    "not supplied" is an explicit sentinel rather than None -- a real None
+    is get_road_exclusion_union_utm()'s own clean answer ("checked, and
+    genuinely no mapped road nearby", the common case) and is REUSED, not
+    treated as missing. Same distinction exclusion_zones.identify_
+    exclusion_zones() draws for the same union, and for the same reason:
+    collapsing the two would reintroduce the redundant fetch on exactly
+    the parcels the pass-through exists to spare.
     """
     if dem is None:
         dem = get_dem_for_boundary(boundary_coordinates)
@@ -1395,14 +1431,20 @@ def identify_water_system_candidate_zones(
         boundary_polygon_utm, dem, buffer_meters=WATER_ZONE_CANOPY_BUFFER_METERS, canopy_height=canopy_height
     )
 
-    try:
-        # No buffer_meters override: the default IS the intended value --
-        # farm_roads_data.ROAD_EXCLUSION_BUFFER_METERS, the single shared
-        # definition of "how far off an existing road" (see that
-        # constant's docstring), same as every other consumer.
-        road_exclusion_union_utm = _fetch_road_exclusion_union_utm(boundary_coordinates, dem)
-    except Exception:
-        road_exclusion_union_utm = _ROAD_CHECK_UNCHECKED
+    if road_exclusion_union_utm is _ROAD_UNION_NOT_SUPPLIED:
+        try:
+            # No buffer_meters override: the default IS the intended value --
+            # farm_roads_data.ROAD_EXCLUSION_BUFFER_METERS, the single shared
+            # definition of "how far off an existing road" (see that
+            # constant's docstring), same as every other consumer. That single
+            # shared definition is also what makes the override above safe: a
+            # caller-supplied union is interchangeable with this one because
+            # both are built at the same buffer BY DEFINITION, which
+            # test_water_candidate_zones.py asserts against the two signature
+            # defaults rather than taking on trust.
+            road_exclusion_union_utm = _fetch_road_exclusion_union_utm(boundary_coordinates, dem)
+        except Exception:
+            road_exclusion_union_utm = _ROAD_CHECK_UNCHECKED
 
     zones = find_candidate_zones(
         dem,

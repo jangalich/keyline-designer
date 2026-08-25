@@ -1055,4 +1055,155 @@ print(f"\nWipeout report: {len(_wipeout_messages)} find_candidate_zones run(s) t
       "single-column-channel runs (production area above/below). Every 2D-band fixture representative of a real, "
       "multi-cell-wide drainage band (tests 1/4/5/6/7/9) survives the opening. The wipeouts are confined to "
       "1-2-cell-wide shapes, so the radius is not too aggressive for realistic widths -- NOT reduced to pass tests.")
+
+# ===========================================================================
+# THE ROAD UNION IS PASSED IN, NOT RE-FETCHED (ROAD FETCH #4, CLOSED)
+# ===========================================================================
+#
+# identify_water_system_candidate_zones() used to fetch its own road-exclusion
+# union unconditionally -- the fourth computation of the same union in one
+# build_pipeline_context() run, after this context's own existing_roads, the
+# exclusion-zones gate and production's. It now takes one, so
+# build_pipeline_context() hands over the union it already built.
+#
+# THAT SUBSTITUTION IS ONLY LEGITIMATE IF THE TWO UNIONS ARE THE SAME UNION,
+# which comes down to one thing: the BUFFER. A union built at a different
+# buffer is a different answer wearing the same name, and would silently move
+# the water-zone road gate. The two paths read the same shared constant
+# today, which is asserted here against the two SIGNATURE DEFAULTS (captured
+# at def time, so this catches a divergence a live-attribute comparison would
+# miss) rather than assumed from a comment -- the same check
+# test_exclusion_zones.py already makes for the same union on its own side.
+
+import inspect as _r_inspect  # noqa: E402
+from unittest.mock import patch as _r_patch  # noqa: E402
+
+import farm_roads_data as _r_farm_roads  # noqa: E402
+import production_area as _r_production_area  # noqa: E402
+
+_r_producer_default = _r_inspect.signature(
+    _r_farm_roads.get_road_exclusion_union_utm
+).parameters["buffer_meters"].default
+_r_consumer_default = _r_inspect.signature(
+    _r_production_area._fetch_road_exclusion_union_utm
+).parameters["buffer_meters"].default
+assert _r_producer_default == _r_consumer_default == _r_farm_roads.ROAD_EXCLUSION_BUFFER_METERS, (
+    f"the union build_pipeline_context() passes into identify_water_system_candidate_zones() is built by "
+    f"get_road_exclusion_union_utm() at its default buffer ({_r_producer_default}m), while this module's "
+    f"own self-fetch would use _fetch_road_exclusion_union_utm()'s default ({_r_consumer_default}m) -- "
+    f"both must be the single shared farm_roads_data.ROAD_EXCLUSION_BUFFER_METERS "
+    f"({_r_farm_roads.ROAD_EXCLUSION_BUFFER_METERS}m); a divergence means the pass-through would silently "
+    "substitute a union built at the wrong buffer and move the water-zone road gate"
+)
+print(
+    f"BUFFERS MATCH BY DEFINITION, ASSERTED: the passed union's producer default and this module's "
+    f"self-fetch default are both the shared ROAD_EXCLUSION_BUFFER_METERS = {_r_producer_default}m, so a "
+    "supplied union is genuinely interchangeable with a self-fetched one rather than coincidentally equal."
+)
+
+# --- "not supplied" is a sentinel, and a real None is REUSED --------------
+#
+# A real None is get_road_exclusion_union_utm()'s own clean answer ("checked,
+# and genuinely no mapped road nearby") -- the COMMON case on a rural parcel.
+# Treating it as "not supplied" would re-fetch on exactly the parcels the
+# pass-through exists to spare, which is the whole trap.
+
+_r_default = _r_inspect.signature(
+    wcz.identify_water_system_candidate_zones
+).parameters["road_exclusion_union_utm"].default
+assert _r_default is wcz._ROAD_UNION_NOT_SUPPLIED and _r_default is not None, (
+    "identify_water_system_candidate_zones()'s road_exclusion_union_utm default must be an explicit "
+    "sentinel, never None -- None is a real, reusable answer here"
+)
+assert wcz._ROAD_UNION_NOT_SUPPLIED is not wcz._ROAD_CHECK_UNCHECKED, (
+    "'the caller supplied nothing' and 'the check never ran' are different states and must not share a "
+    "sentinel -- the first self-fetches, the second skips the gate entirely"
+)
+
+_r_rows = _r_cols = 24
+_r_dem = _dem(np.zeros((_r_rows, _r_cols), dtype=np.float64))
+_r_boundary = box(
+    _r_dem["origin_x"] + 2 * RESOLUTION[0],
+    _r_dem["origin_y"] - (_r_rows - 2) * RESOLUTION[1],
+    _r_dem["origin_x"] + (_r_cols - 2) * RESOLUTION[0],
+    _r_dem["origin_y"] - 2 * RESOLUTION[1],
+)
+_r_union = box(
+    _r_dem["origin_x"] + 4 * RESOLUTION[0],
+    _r_dem["origin_y"] - 13 * RESOLUTION[1],
+    _r_dem["origin_x"] + 20 * RESOLUTION[0],
+    _r_dem["origin_y"] - 11 * RESOLUTION[1],
+)
+
+
+def _r_run(**kwargs):
+    """One identify_water_system_candidate_zones() run with every network leaf
+    stubbed, returning (result, road-fetch count, the union find_candidate_
+    zones() was actually handed)."""
+    seen = {"fetches": 0, "union": "NOT CALLED"}
+
+    def _count_fetch(*_a, **_k):
+        seen["fetches"] += 1
+        return _r_union
+
+    def _capture(*_a, **_k):
+        seen["union"] = _k.get("road_exclusion_union_utm", "NOT PASSED")
+        return []
+
+    with _r_patch.object(wcz, "_fetch_road_exclusion_union_utm", side_effect=_count_fetch), _r_patch.object(
+        wcz, "get_required_tree_root_zone_mask_utm",
+        return_value=np.zeros((_r_rows, _r_cols), dtype=bool),
+    ), _r_patch.object(wcz, "delineate_valleys", return_value=[]), _r_patch.object(
+        wcz, "identify_production_areas", return_value=[]
+    ), _r_patch.object(wcz, "find_candidate_zones", side_effect=_capture):
+        result = wcz.identify_water_system_candidate_zones(
+            [(-80.0, 40.0)], dem=_r_dem, boundary_polygon_utm=_r_boundary, **kwargs
+        )
+    return result, seen["fetches"], seen["union"]
+
+# omitted -> self-fetches, exactly as before this parameter existed
+_r_res_self, _r_n_self, _r_u_self = _r_run()
+assert _r_n_self == 1, f"with nothing supplied the union must still be self-fetched exactly once, got {_r_n_self}"
+assert _r_u_self is _r_union
+
+# a real geometry -> reused, no fetch
+_r_res_sup, _r_n_sup, _r_u_sup = _r_run(road_exclusion_union_utm=_r_union)
+assert _r_n_sup == 0, f"a supplied union must not be re-fetched, got {_r_n_sup} fetch(es)"
+assert _r_u_sup is _r_union, "the supplied union must be the exact object the road gate is run against"
+assert _r_res_sup["narrative_data"]["gates"]["road_data_available"] is True
+
+# a real None -> REUSED as "checked, genuinely no roads nearby", not re-fetched
+_r_res_none, _r_n_none, _r_u_none = _r_run(road_exclusion_union_utm=None)
+assert _r_n_none == 0, (
+    f"a caller-supplied real None means 'checked, genuinely no roads nearby' and must be REUSED, not "
+    f"treated as 'not supplied' -- got {_r_n_none} fetch(es), which is the redundant fetch this "
+    "pass-through exists to remove on exactly the commonest kind of parcel"
+)
+assert _r_u_none is None
+assert _r_res_none["narrative_data"]["gates"]["road_data_available"] is True, (
+    "a reused real None means the check genuinely ran and found nothing -- not that it never ran"
+)
+
+# a fetch failure on the self-fetch path still degrades gracefully, unchanged
+def _r_boom(*_a, **_k):
+    raise RuntimeError("simulated road-service outage")
+
+
+with _r_patch.object(wcz, "_fetch_road_exclusion_union_utm", side_effect=_r_boom), _r_patch.object(
+    wcz, "get_required_tree_root_zone_mask_utm", return_value=np.zeros((_r_rows, _r_cols), dtype=bool)
+), _r_patch.object(wcz, "delineate_valleys", return_value=[]), _r_patch.object(
+    wcz, "identify_production_areas", return_value=[]
+), _r_patch.object(wcz, "find_candidate_zones", return_value=[]):
+    _r_res_fail = wcz.identify_water_system_candidate_zones(
+        [(-80.0, 40.0)], dem=_r_dem, boundary_polygon_utm=_r_boundary
+    )
+assert _r_res_fail["narrative_data"]["gates"]["road_data_available"] is False, (
+    "a road fetch failure on the self-fetch path must still degrade gracefully to road_data_available=False"
+)
+print(
+    "ROAD FETCH #4 CLOSED: a supplied union (a real None included) is reused with ZERO fetches and is the "
+    "exact object the gate runs against; nothing supplied still self-fetches exactly once; a fetch failure "
+    "on that path still degrades to road_data_available=False."
+)
+
 print("\nAll water_candidate_zones checks passed.")

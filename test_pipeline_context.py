@@ -208,6 +208,12 @@ fake_patch = {
     "representative_elevation_m": 1000.0,
     "polygon_utm": box(0, 0, 10, 10),
     "render_fill_polygon_utm": box(0, 0, 10, 10),
+    # production_areas_to_geojson() dereferences this on every patch it is
+    # handed (water_candidate_zones.identify_water_system_candidate_zones()
+    # calls it on this context's own production_areas), so a scored-patch
+    # fixture without it KeyErrors there. render_fill_polygon_utm above IS
+    # polygon_utm in this fixture, so the two acreages match.
+    "render_fill_area_acres": 1.23,
     "geometry_wgs84": {"type": "Polygon", "coordinates": [[[0.0, 0.0]]]},
     "cells": [(0, 0)],
     "hole_footprints": [],
@@ -297,9 +303,10 @@ def _fake_clean_canopy_mask(boundary_polygon_utm, dem, buffer_meters=None, canop
 # --- exclusion_zones' three gate fetches: stubbed FILE-WIDE, not per fixture ---
 #
 # build_pipeline_context()'s FIRST Layer 2 step is exclusion_zones.identify_
-# exclusion_zones(), which computes the same five gates production does and
-# therefore runs its own canopy, soil and road fetches -- deliberately, see
-# that module's DELIBERATE REDUNDANCY section. Its canopy fetch is MANDATORY
+# exclusion_zones(), which computes the five gates ONCE for both itself and
+# production (production consumes its result rather than recomputing them --
+# see that module's own docstring), and therefore runs the canopy, soil and
+# road fetches for both. Its canopy fetch is MANDATORY
 # (no try/except, RuntimeError on no coverage), so EVERY build_pipeline_
 # context() fixture in this file needs it stubbed to stay offline; soil and
 # roads degrade gracefully but would still reach for the network and stall.
@@ -603,10 +610,25 @@ assert mock_water_zone_identify_pa.call_count == 0, (
 assert mock_delineate.call_count == 1, "delineate_valleys should still total exactly 1 call overall (valleys)"
 assert mock_optimize.call_count == 1, "identify_optimized_production_areas should still total exactly 1 call overall"
 
-# mock_water_zone_canopy/mock_water_zone_roads confirm the (offline-stubbed) mandatory canopy fetch
-# and optional road fetch each ran exactly once too -- real behavior of the real, unmocked function.
+# mock_water_zone_canopy confirms the (offline-stubbed) mandatory canopy fetch ran exactly once --
+# real behavior of the real, unmocked function. That gate is water's OWN: it derives a root-zone mask
+# at WATER_ZONE_CANOPY_BUFFER_METERS, a different buffer than production's, so it is a different
+# question and not a duplicate of anything.
 assert mock_water_zone_canopy.call_count == 1
-assert mock_water_zone_roads.call_count == 1
+
+# mock_water_zone_roads is now expected at ZERO, and that is the point of the change, not a
+# regression. This was road-union computation #4: the same union, over the same boundary, at the same
+# farm_roads_data.ROAD_EXCLUSION_BUFFER_METERS, computed a fourth time after this context's own
+# existing_roads, the exclusion-zones gate and production's. build_pipeline_context() now passes its
+# own existing_roads in as road_exclusion_union_utm=, so the self-fetch never fires -- including when
+# that union is a real None ("checked, genuinely no roads nearby"), which is the common case and
+# exactly the parcel a None-means-not-supplied reading would have re-fetched on. The two unions are
+# interchangeable because the buffer is a single shared constant, asserted against both signature
+# defaults in test_water_candidate_zones.py rather than assumed.
+assert mock_water_zone_roads.call_count == 0, (
+    "identify_water_system_candidate_zones() must NOT fetch its own road union when build_pipeline_"
+    "context() passes one in -- this is road fetch #4, and closing it is what this pass-through is for"
+)
 
 # fake_patch's polygon_utm (box(0, 0, 10, 10)) is nowhere near this synthetic DEM's real UTM
 # coordinates, so no cell clears find_candidate_zones()'s service-distance gate -- water_zones is

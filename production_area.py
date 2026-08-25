@@ -285,6 +285,25 @@ _ROAD_CHECK_UNCHECKED = object()
 # utm(), the shared fetch-or-raise helper both entry points call.
 _CANOPY_CHECK_UNCHECKED = object()
 
+# Same "explicit sentinel, never None" convention as the three above, for
+# compute_step1_eligible_cells()'s exclusion_result override -- the whole
+# result dict exclusion_zones.identify_exclusion_zones() returns, supplied
+# by a caller that has already computed this parcel's five gates so STEP 1
+# consumes them instead of computing them a second time.
+#
+# WHY A SENTINEL AND NOT None. None is the documented trap in this
+# codebase: "not supplied" and "supplied, and the answer is nothing" are
+# different states, and collapsing them is what caused the five-fold
+# water-suitability re-run. There is no meaningful real-None value for an
+# exclusion result today -- but a caller that writes
+# `exclusion_result=ctx.exclusion_zones` on a context where that field is
+# not populated yet WILL pass a real None, and the only safe reading of
+# that is "I have nothing for you, compute it yourself". So a real None
+# self-computes, exactly as if the parameter had been omitted, and the
+# sentinel is the ONLY value that means "not supplied". Asserted in
+# test_production_area.py rather than left to the reader.
+_EXCLUSION_RESULT_NOT_SUPPLIED = object()
+
 PRODUCTION_AREA_CONFIDENCE_NOTES = (
     "This is a slope + hydric-soil + woody-vegetation + existing-road "
     f"heuristic (contiguous ground at or below {MAX_PRODUCTION_SLOPE_PCT}% "
@@ -611,6 +630,104 @@ def _cell_union_footprint(cells: list[tuple[int, int]], dem: dict):
     return cell_union_footprint(dem, mask)
 
 
+def _gates_from_exclusion_result(
+    exclusion_result: dict,
+    dem: dict,
+    max_slope_pct: float,
+    boundary_setback_meters: float,
+) -> dict:
+    """
+    STEP 1's five gate outputs, read off an exclusion_zones.identify_
+    exclusion_zones() result instead of computed a second time.
+
+    exclusion_zones.py computes the SAME five gates STEP 1 does -- same
+    helpers (this module's own compute_slope_percent(), get_required_tree_
+    root_zone_mask_utm(), _fetch_disqualifying_soil_union(), _fetch_road_
+    exclusion_union_utm(), all imported from here), same thresholds (this
+    module's own MAX_PRODUCTION_SLOPE_PCT / PRODUCTION_BOUNDARY_SETBACK_
+    METERS, imported from here as its defaults), same cell-center
+    containment test, and the same universe for the canopy/hydric/road
+    gates (the slope-and-setback survivor set, not the whole parcel). With
+    nothing closed, smoothed or buffered anywhere in that module, the
+    masks it publishes ARE the masks this function would compute -- which
+    is asserted bit-for-bit rather than argued (test_production_area.py's
+    "STEP 1 CONSUMES THE EXCLUSION RESULT" section, and test_eligible_
+    union.py section 0 from the other side).
+
+    THE THRESHOLDS ARE CHECKED, NOT ASSUMED. Both modules default to the
+    same two constants, but both also take them as real parameters. A
+    caller that asks STEP 1 for a 15% slope ceiling while handing it an
+    exclusion result computed at 20% is asking for two different
+    questions' answers to be combined, and the result would be wrong in a
+    way no downstream assertion would catch -- the masks would simply be
+    someone else's. So the exclusion result's own recorded thresholds
+    (exclusion_zones publishes both on `wire`, as numbers, for exactly
+    this kind of check) must match what this call was asked for.
+
+    Returns the six masks/grids and three availability flags STEP 1 would
+    otherwise have derived itself. Everything else STEP 1 returns
+    (aspect_deg, the per-cell factors, the source labels, the carved-acres
+    bookkeeping) is a pure derivation of these plus the DEM, is not
+    computed in exclusion_zones.py at all, and is still computed here.
+    """
+    if not isinstance(exclusion_result, dict):
+        raise TypeError(
+            "exclusion_result must be exclusion_zones.identify_exclusion_zones()'s own return dict, "
+            f"got {type(exclusion_result).__name__}"
+        )
+
+    wire = exclusion_result.get("wire") or {}
+    result_slope_pct = wire.get("max_slope_pct")
+    result_setback_m = wire.get("boundary_setback_meters")
+    if result_slope_pct is None or result_setback_m is None:
+        raise ValueError(
+            "exclusion_result must carry wire.max_slope_pct and wire.boundary_setback_meters -- "
+            "without them the thresholds it was computed at cannot be checked against this call's"
+        )
+    if float(result_slope_pct) != float(max_slope_pct):
+        raise ValueError(
+            f"exclusion_result was computed at max_slope_pct={float(result_slope_pct)} but STEP 1 was "
+            f"asked for max_slope_pct={float(max_slope_pct)} -- these are different questions and their "
+            "answers must not be combined"
+        )
+    if float(result_setback_m) != float(boundary_setback_meters):
+        raise ValueError(
+            f"exclusion_result was computed at boundary_setback_meters={float(result_setback_m)} but "
+            f"STEP 1 was asked for boundary_setback_meters={float(boundary_setback_meters)} -- these are "
+            "different questions and their answers must not be combined"
+        )
+
+    try:
+        layers = exclusion_result["layers"]
+        gates = {
+            "slope_pct": exclusion_result["slope_pct"],
+            "slope_only_mask": exclusion_result["slope_only_mask"],
+            "eligible_mask": exclusion_result["eligible_mask"],
+            "tree_root_zone_hit": layers["canopy"]["mask"],
+            "hydric_hit": layers["hydric"]["mask"],
+            "road_hit": layers["roads"]["mask"],
+            "canopy_data_available": bool(layers["canopy"]["data_available"]),
+            "soil_data_available": bool(layers["hydric"]["data_available"]),
+            "road_data_available": bool(layers["roads"]["data_available"]),
+        }
+    except KeyError as exc:
+        raise KeyError(
+            f"exclusion_result is missing {exc} -- it must be exclusion_zones.identify_exclusion_zones()'s "
+            "own return dict, unmodified"
+        ) from None
+
+    # Same grid, or the masks index a different parcel entirely. Cheap, and
+    # the alternative is a silent broadcast failure several frames away.
+    expected_shape = dem["array"].shape
+    for name in ("slope_pct", "slope_only_mask", "eligible_mask", "tree_root_zone_hit", "hydric_hit", "road_hit"):
+        if gates[name].shape != expected_shape:
+            raise ValueError(
+                f"exclusion_result['{name}'] has shape {gates[name].shape}, but this DEM is "
+                f"{expected_shape} -- the exclusion result was computed against a different grid"
+            )
+    return gates
+
+
 def compute_step1_eligible_cells(
     dem: dict,
     boundary_polygon_utm: Polygon,
@@ -619,11 +736,41 @@ def compute_step1_eligible_cells(
     tree_root_zone_mask_utm=_CANOPY_CHECK_UNCHECKED,
     boundary_setback_meters: float = PRODUCTION_BOUNDARY_SETBACK_METERS,
     road_exclusion_union_utm=_ROAD_CHECK_UNCHECKED,
+    exclusion_result=_EXCLUSION_RESULT_NOT_SUPPLIED,
 ) -> dict:
     """
     STEP 1 of the consolidated production-zone pipeline -- computed ONCE
     per pipeline run and reused by every step after it (see module
     docstring).
+
+    exclusion_result: an exclusion_zones.identify_exclusion_zones() result
+    for THIS dem and THIS boundary, at THESE thresholds. When supplied,
+    the five gates below are READ OFF IT rather than computed a second
+    time -- exclusion_zones.py computes the identical five gates from the
+    identical helpers (it imports them from this module) at the identical
+    thresholds (it imports those from this module too), so this is a pure
+    de-duplication: the masks are bit-identical either way, asserted in
+    test_production_area.py rather than assumed. The four fetch/compute
+    parameters above (soil, canopy, road, and this function's own slope
+    grid) then cost nothing on this path, which is the point: one canopy
+    fetch, one soil fetch, one road union and one slope grid per pipeline
+    run instead of two of each.
+
+    Everything this function returns that exclusion_zones.py does NOT
+    compute -- aspect_deg, the per-cell slope/aspect/composite factors,
+    the 8-connected source labels, the carved-acres bookkeeping -- is
+    still computed here, from the supplied gates plus the DEM. The
+    override replaces the GATES, not STEP 1.
+
+    NOT SUPPLIED IS AN EXPLICIT SENTINEL, NOT None. A real None means
+    "I have nothing for you" and self-computes exactly as an omitted
+    parameter does -- see _EXCLUSION_RESULT_NOT_SUPPLIED's own comment for
+    why that distinction is drawn here and everywhere else in this
+    pipeline. When it IS supplied, the soil/canopy/road parameters above
+    are ignored (the exclusion result already carries each gate's own hit
+    mask AND whether its check genuinely ran), and max_slope_pct /
+    boundary_setback_meters are CHECKED against the thresholds the
+    exclusion result records rather than trusted to match.
 
     disqualifying_soil_union_utm: a pre-fetched shapely Polygon/MultiPolygon
     (already reprojected into dem['crs']) of disqualifying (hydric) soil, a
@@ -709,51 +856,84 @@ def compute_step1_eligible_cells(
     resolution = dem["resolution_meters"]
     rows, cols = array.shape
 
-    slope_pct = compute_slope_percent(array, resolution)
-    _, aspect_deg = compute_slope_and_aspect(array, resolution)
-
-    slope_ok = (~np.isnan(slope_pct)) & (slope_pct <= max_slope_pct)
-
-    on_parcel_boundary_utm = (
-        boundary_polygon_utm.buffer(-boundary_setback_meters)
-        if boundary_setback_meters > 0
-        else boundary_polygon_utm
+    # A real None self-computes, same as an omitted parameter -- ONLY the
+    # sentinel means "not supplied". See _EXCLUSION_RESULT_NOT_SUPPLIED.
+    consume_exclusion_result = (
+        exclusion_result is not _EXCLUSION_RESULT_NOT_SUPPLIED and exclusion_result is not None
     )
-    boundary_prepared = prep(on_parcel_boundary_utm)
-    slope_only_mask = np.zeros((rows, cols), dtype=bool)
-    for r, c in np.argwhere(slope_ok):
-        r, c = int(r), int(c)
-        if boundary_prepared.contains(Point(pixel_center_xy(dem, r, c))):
-            slope_only_mask[r, c] = True
 
-    soil_data_available = disqualifying_soil_union_utm is not _SOIL_CHECK_UNCHECKED
-    soil_union = disqualifying_soil_union_utm if soil_data_available else None
+    if consume_exclusion_result:
+        # THE FIVE GATES, READ OFF THE EXCLUSION RESULT rather than computed
+        # a second time. Nothing below this branch changes: aspect, the
+        # per-cell factors, the source labels and the carved-acres
+        # bookkeeping are all derivations of these masks plus the DEM, and
+        # exclusion_zones.py computes none of them.
+        gates = _gates_from_exclusion_result(
+            exclusion_result, dem, max_slope_pct, boundary_setback_meters
+        )
+        slope_pct = gates["slope_pct"]
+        slope_only_mask = gates["slope_only_mask"]
+        hydric_hit = gates["hydric_hit"]
+        tree_root_zone_hit = gates["tree_root_zone_hit"]
+        road_hit = gates["road_hit"]
+        eligible_mask = gates["eligible_mask"]
+        soil_data_available = gates["soil_data_available"]
+        canopy_data_available = gates["canopy_data_available"]
+        road_data_available = gates["road_data_available"]
+    else:
+        slope_pct = compute_slope_percent(array, resolution)
 
-    hydric_hit = np.zeros((rows, cols), dtype=bool)
-    if soil_union is not None:
-        soil_prepared = prep(soil_union)
-        for r, c in np.argwhere(slope_only_mask):
+        slope_ok = (~np.isnan(slope_pct)) & (slope_pct <= max_slope_pct)
+
+        on_parcel_boundary_utm = (
+            boundary_polygon_utm.buffer(-boundary_setback_meters)
+            if boundary_setback_meters > 0
+            else boundary_polygon_utm
+        )
+        boundary_prepared = prep(on_parcel_boundary_utm)
+        slope_only_mask = np.zeros((rows, cols), dtype=bool)
+        for r, c in np.argwhere(slope_ok):
             r, c = int(r), int(c)
-            if soil_prepared.contains(Point(pixel_center_xy(dem, r, c))):
-                hydric_hit[r, c] = True
+            if boundary_prepared.contains(Point(pixel_center_xy(dem, r, c))):
+                slope_only_mask[r, c] = True
 
-    canopy_data_available = tree_root_zone_mask_utm is not _CANOPY_CHECK_UNCHECKED
-    tree_root_zone_hit = np.zeros((rows, cols), dtype=bool)
-    if canopy_data_available:
-        tree_root_zone_hit = slope_only_mask & tree_root_zone_mask_utm
+        soil_data_available = disqualifying_soil_union_utm is not _SOIL_CHECK_UNCHECKED
+        soil_union = disqualifying_soil_union_utm if soil_data_available else None
 
-    road_data_available = road_exclusion_union_utm is not _ROAD_CHECK_UNCHECKED
-    road_union = road_exclusion_union_utm if road_data_available else None
+        hydric_hit = np.zeros((rows, cols), dtype=bool)
+        if soil_union is not None:
+            soil_prepared = prep(soil_union)
+            for r, c in np.argwhere(slope_only_mask):
+                r, c = int(r), int(c)
+                if soil_prepared.contains(Point(pixel_center_xy(dem, r, c))):
+                    hydric_hit[r, c] = True
 
-    road_hit = np.zeros((rows, cols), dtype=bool)
-    if road_union is not None:
-        road_prepared = prep(road_union)
-        for r, c in np.argwhere(slope_only_mask):
-            r, c = int(r), int(c)
-            if road_prepared.contains(Point(pixel_center_xy(dem, r, c))):
-                road_hit[r, c] = True
+        canopy_data_available = tree_root_zone_mask_utm is not _CANOPY_CHECK_UNCHECKED
+        tree_root_zone_hit = np.zeros((rows, cols), dtype=bool)
+        if canopy_data_available:
+            tree_root_zone_hit = slope_only_mask & tree_root_zone_mask_utm
 
-    eligible_mask = slope_only_mask & (~hydric_hit) & (~tree_root_zone_hit) & (~road_hit)
+        road_data_available = road_exclusion_union_utm is not _ROAD_CHECK_UNCHECKED
+        road_union = road_exclusion_union_utm if road_data_available else None
+
+        road_hit = np.zeros((rows, cols), dtype=bool)
+        if road_union is not None:
+            road_prepared = prep(road_union)
+            for r, c in np.argwhere(slope_only_mask):
+                r, c = int(r), int(c)
+                if road_prepared.contains(Point(pixel_center_xy(dem, r, c))):
+                    road_hit[r, c] = True
+
+        eligible_mask = slope_only_mask & (~hydric_hit) & (~tree_root_zone_hit) & (~road_hit)
+
+    # Aspect is NOT part of the exclusion result and never was: no gate uses
+    # it, exclusion_zones.py does not compute it, and it comes off a
+    # DIFFERENT algorithm than the slope gate's grid does (terrain_metrics.
+    # compute_slope_and_aspect() is Horn's method over a complete 3x3
+    # neighborhood; compute_slope_percent() above is steepest-of-8). Its
+    # slope half is discarded here, deliberately -- swapping in Horn's slope
+    # would change which cells clear the gate. Computed on BOTH paths.
+    _, aspect_deg = compute_slope_and_aspect(array, resolution)
 
     per_cell_slope_factor = np.full((rows, cols), np.nan, dtype=np.float32)
     per_cell_aspect_factor = np.full((rows, cols), np.nan, dtype=np.float32)
@@ -1248,6 +1428,7 @@ def identify_production_areas(
     check_soil: bool = True,
     check_roads: bool = True,
     canopy_height: Optional[dict] = None,
+    exclusion_result=_EXCLUSION_RESULT_NOT_SUPPLIED,
 ) -> list[dict]:
     """
     Returns one entry per candidate production-area patch, clipped to the
@@ -1322,30 +1503,53 @@ def identify_production_areas(
     failure here doesn't change what kind of answer this pipeline is
     already giving -- it's noted via road_data_available/confidence_notes,
     same as the soil check.
-    """
-    disqualifying_soil_union_utm = _SOIL_CHECK_UNCHECKED
-    if check_soil:
-        try:
-            xs, ys = boundary_polygon_utm.exterior.coords.xy
-            lons, lats = warp_transform(dem["crs"], "EPSG:4326", list(xs), list(ys))
-            wkt_polygon = coordinates_to_wkt_polygon(list(zip(lons, lats)))
-            disqualifying_soil_union_utm = _fetch_disqualifying_soil_union(wkt_polygon, dem)
-        except Exception:
-            disqualifying_soil_union_utm = _SOIL_CHECK_UNCHECKED
 
-    tree_root_zone_mask_utm = get_required_tree_root_zone_mask_utm(
-        boundary_polygon_utm, dem, canopy_height=canopy_height
+    exclusion_result is forwarded straight to compute_step1_eligible_
+    cells() (see its docstring): an exclusion_zones.identify_exclusion_
+    zones() result for this exact dem/boundary/thresholds, whose five gate
+    masks STEP 1 then consumes instead of computing them again. When it is
+    supplied, NONE of the three fetches above runs -- the exclusion result
+    already carries every gate's hit mask and whether its check genuinely
+    ran, so check_soil/check_roads/canopy_height have nothing left to do
+    on that path and the mandatory-canopy hard-fail has already happened
+    (or not) inside identify_exclusion_zones(). Not supplied (the default
+    sentinel) or a real None leaves this function exactly as it was.
+    """
+    # A supplied exclusion_result already carries all three gates AND
+    # whether each check genuinely ran, so NONE of the three fetches below
+    # runs on that path -- that is the whole point of the override, and
+    # fetching anyway would be paying for data STEP 1 will not look at. A
+    # real None is "not supplied"; see _EXCLUSION_RESULT_NOT_SUPPLIED.
+    have_exclusion_result = (
+        exclusion_result is not _EXCLUSION_RESULT_NOT_SUPPLIED and exclusion_result is not None
     )
 
+    disqualifying_soil_union_utm = _SOIL_CHECK_UNCHECKED
+    tree_root_zone_mask_utm = _CANOPY_CHECK_UNCHECKED
     road_exclusion_union_utm = _ROAD_CHECK_UNCHECKED
-    if check_roads:
-        try:
-            xs, ys = boundary_polygon_utm.exterior.coords.xy
-            lons, lats = warp_transform(dem["crs"], "EPSG:4326", list(xs), list(ys))
-            boundary_coordinates = list(zip(lons, lats))
-            road_exclusion_union_utm = _fetch_road_exclusion_union_utm(boundary_coordinates, dem)
-        except Exception:
-            road_exclusion_union_utm = _ROAD_CHECK_UNCHECKED
+
+    if not have_exclusion_result:
+        if check_soil:
+            try:
+                xs, ys = boundary_polygon_utm.exterior.coords.xy
+                lons, lats = warp_transform(dem["crs"], "EPSG:4326", list(xs), list(ys))
+                wkt_polygon = coordinates_to_wkt_polygon(list(zip(lons, lats)))
+                disqualifying_soil_union_utm = _fetch_disqualifying_soil_union(wkt_polygon, dem)
+            except Exception:
+                disqualifying_soil_union_utm = _SOIL_CHECK_UNCHECKED
+
+        tree_root_zone_mask_utm = get_required_tree_root_zone_mask_utm(
+            boundary_polygon_utm, dem, canopy_height=canopy_height
+        )
+
+        if check_roads:
+            try:
+                xs, ys = boundary_polygon_utm.exterior.coords.xy
+                lons, lats = warp_transform(dem["crs"], "EPSG:4326", list(xs), list(ys))
+                boundary_coordinates = list(zip(lons, lats))
+                road_exclusion_union_utm = _fetch_road_exclusion_union_utm(boundary_coordinates, dem)
+            except Exception:
+                road_exclusion_union_utm = _ROAD_CHECK_UNCHECKED
 
     step1 = compute_step1_eligible_cells(
         dem,
@@ -1354,6 +1558,7 @@ def identify_production_areas(
         max_slope_pct=max_slope_pct,
         tree_root_zone_mask_utm=tree_root_zone_mask_utm,
         road_exclusion_union_utm=road_exclusion_union_utm,
+        exclusion_result=exclusion_result,
     )
     return cluster_and_gate(step1["eligible_mask"], dem, boundary_polygon_utm, step1, min_area_acres)
 

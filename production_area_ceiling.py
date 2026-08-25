@@ -77,6 +77,7 @@ from production_area import (
     MIN_PRODUCTION_AREA_ACRES,
     PRODUCTION_BOUNDARY_SETBACK_METERS,
     _CANOPY_CHECK_UNCHECKED,
+    _EXCLUSION_RESULT_NOT_SUPPLIED,
     _ROAD_CHECK_UNCHECKED,
     _SOIL_CHECK_UNCHECKED,
     _fetch_disqualifying_soil_union,
@@ -177,11 +178,24 @@ def optimize_production_areas(
     min_area_acres: float = MIN_PRODUCTION_AREA_ACRES,
     tree_root_zone_mask_utm=_CANOPY_CHECK_UNCHECKED,
     road_exclusion_union_utm=_ROAD_CHECK_UNCHECKED,
+    exclusion_result=_EXCLUSION_RESULT_NOT_SUPPLIED,
 ) -> dict:
     """
     Pure logic core (no network I/O) chaining STEP 1 (production_area.
     compute_step1_eligible_cells()) -> STEP 2 (trim_to_ceiling()) -> STEP 3
     (production_area.cluster_and_gate(), on the post-trim survivor mask).
+
+    exclusion_result is forwarded verbatim to STEP 1 -- an exclusion_
+    zones.identify_exclusion_zones() result whose five gate masks STEP 1
+    consumes instead of computing them a second time (see compute_step1_
+    eligible_cells()' own docstring for the contract, and for why "not
+    supplied" is an explicit sentinel rather than None). Forwarding it
+    here is what lets build_pipeline_context() reach STEP 1 with it:
+    identify_optimized_production_areas() below is the only caller on that
+    path and this is its only route to STEP 1. Purely a pass-through --
+    this function does not read it, and STEP 2 and STEP 3 are unaffected
+    either way, since a consumed exclusion result produces the identical
+    step1 dict a self-computed one does.
 
     tree_root_zone_mask_utm and road_exclusion_union_utm both follow
     compute_step1_eligible_cells()'s own conventions exactly (a pre-
@@ -219,6 +233,7 @@ def optimize_production_areas(
         max_slope_pct=max_slope_pct,
         tree_root_zone_mask_utm=tree_root_zone_mask_utm,
         road_exclusion_union_utm=road_exclusion_union_utm,
+        exclusion_result=exclusion_result,
     )
     trim_result = trim_to_ceiling(step1, dem, boundary_polygon_utm, ceiling_pct)
 
@@ -838,6 +853,7 @@ def identify_optimized_production_areas(
     min_area_acres: float = MIN_PRODUCTION_AREA_ACRES,
     reference_max_area_acres: float = REFERENCE_MAX_AREA_ACRES,
     canopy_height: Optional[dict] = None,
+    exclusion_result=_EXCLUSION_RESULT_NOT_SUPPLIED,
 ) -> dict:
     """
     Full pipeline entry point: fetches the DEM (unless one is passed in),
@@ -883,6 +899,22 @@ def identify_optimized_production_areas(
     (the default) canopy is fetched here as before, leaving this gate's
     hard-fail semantics unchanged.
 
+    exclusion_result is an exclusion_zones.identify_exclusion_zones()
+    result for this exact boundary/dem/thresholds, forwarded through
+    optimize_production_areas() into STEP 1, whose five gate masks it then
+    consumes instead of computing them a second time. This is the caller-
+    facing half of that de-duplication and the reason build_pipeline_
+    context() can now compute this parcel's canopy mask, hydric union,
+    road union and slope grid ONCE between the two modules rather than
+    twice. When supplied, the three fetches this function makes are
+    SKIPPED entirely and check_soil/check_roads/canopy_height are ignored
+    -- the exclusion result carries each gate's own mask and its own
+    data_available flag, including the mandatory-canopy hard fail, which
+    has already happened (or not) inside identify_exclusion_zones().
+    Omitted (the default sentinel) or a real None leaves this function
+    byte-for-byte what it was; see production_area.compute_step1_eligible_
+    cells() for the contract and for why None is not the sentinel.
+
     Returns the same "production_area_candidate" GeoJSON FeatureCollection
     / scored_patches shape this pipeline has always returned, plus
     top-level summary fields describing the global trim:
@@ -922,24 +954,46 @@ def identify_optimized_production_areas(
     )
     boundary_polygon_utm = Polygon(zip(boundary_xs, boundary_ys))
 
-    disqualifying_soil_union_utm = _SOIL_CHECK_UNCHECKED
-    if check_soil:
-        try:
-            wkt_polygon = coordinates_to_wkt_polygon(list(boundary_coordinates))
-            disqualifying_soil_union_utm = _fetch_disqualifying_soil_union(wkt_polygon, dem)
-        except Exception:
-            disqualifying_soil_union_utm = _SOIL_CHECK_UNCHECKED
-
-    tree_root_zone_mask_utm = get_required_tree_root_zone_mask_utm(
-        boundary_polygon_utm, dem, canopy_height=canopy_height
+    # A supplied exclusion_result already carries all three gates AND
+    # whether each check genuinely ran, so NONE of the three fetches below
+    # runs on that path. This is where the duplication actually goes away:
+    # every one of these three is a SECOND call to a helper exclusion_zones.
+    # py has already made for this same boundary, and skipping them is what
+    # takes the canopy fetch, the soil fetch and the road union from 2x per
+    # build_pipeline_context() run to 1x (the slope grid, the fourth, is
+    # skipped inside STEP 1 itself). A real None is "not supplied"; see
+    # production_area._EXCLUSION_RESULT_NOT_SUPPLIED.
+    #
+    # check_soil/check_roads/canopy_height are IGNORED on that path, not
+    # quietly half-applied: whether each gate ran is a property of the
+    # exclusion result, which records it per layer, and re-asking those
+    # questions here could only produce an answer that disagreed with the
+    # masks actually being consumed.
+    have_exclusion_result = (
+        exclusion_result is not _EXCLUSION_RESULT_NOT_SUPPLIED and exclusion_result is not None
     )
 
+    disqualifying_soil_union_utm = _SOIL_CHECK_UNCHECKED
+    tree_root_zone_mask_utm = _CANOPY_CHECK_UNCHECKED
     road_exclusion_union_utm = _ROAD_CHECK_UNCHECKED
-    if check_roads:
-        try:
-            road_exclusion_union_utm = _fetch_road_exclusion_union_utm(list(boundary_coordinates), dem)
-        except Exception:
-            road_exclusion_union_utm = _ROAD_CHECK_UNCHECKED
+
+    if not have_exclusion_result:
+        if check_soil:
+            try:
+                wkt_polygon = coordinates_to_wkt_polygon(list(boundary_coordinates))
+                disqualifying_soil_union_utm = _fetch_disqualifying_soil_union(wkt_polygon, dem)
+            except Exception:
+                disqualifying_soil_union_utm = _SOIL_CHECK_UNCHECKED
+
+        tree_root_zone_mask_utm = get_required_tree_root_zone_mask_utm(
+            boundary_polygon_utm, dem, canopy_height=canopy_height
+        )
+
+        if check_roads:
+            try:
+                road_exclusion_union_utm = _fetch_road_exclusion_union_utm(list(boundary_coordinates), dem)
+            except Exception:
+                road_exclusion_union_utm = _ROAD_CHECK_UNCHECKED
 
     optimized = optimize_production_areas(
         dem,
@@ -950,6 +1004,7 @@ def identify_optimized_production_areas(
         min_area_acres=min_area_acres,
         tree_root_zone_mask_utm=tree_root_zone_mask_utm,
         road_exclusion_union_utm=road_exclusion_union_utm,
+        exclusion_result=exclusion_result,
     )
 
     scored = score_production_areas(

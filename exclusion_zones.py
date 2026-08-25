@@ -96,65 +96,70 @@ same ones every other consumer of those layers calls, not new sources.
 It runs FIRST among the Layer 2 steps -- before production areas rather
 than after them -- because it depends only on Layer 1 products and on
 nothing any other Layer 2 step computes. Placing it first is also what
-makes the deferred production integration below a one-line wiring
-change rather than a reordering.
+made the production integration below a one-line wiring change rather
+than a reordering, the day it landed.
 
---- DELIBERATE, TIME-LIMITED REDUNDANCY (READ THIS BEFORE "FIXING" IT) ---
+--- THIS MODULE IS PRODUCTION'S GATE COMPUTATION (THE REDUNDANCY IS GONE) ---
 
-This module computes the same five gates production_area.
-compute_step1_eligible_cells() computes, and production_area.py is NOT
-modified: it keeps computing its own gates exactly as it does today.
-Two modules, the same five gates, on the same DEM, in the same pipeline
-run. That is the OPPOSITE of the redundancy this pipeline's
-architecture normally eliminates (see pipeline_context.py's whole
-reason for existing), and it is deliberate, not an oversight.
+This section used to be headed DELIBERATE, TIME-LIMITED REDUNDANCY and
+explain why two modules computed the same five gates on the same DEM in
+the same pipeline run. They no longer do. production_area.compute_step1_
+eligible_cells() takes an exclusion_result= override, production_area_
+ceiling.py forwards it through both hops, and build_pipeline_context()
+passes this module's own result in. STEP 1 reads all five gates off it.
+One canopy fetch, one soil fetch, one road union and one slope grid per
+run, all of them this module's.
 
-WHAT REMOVING THE CLOSING CHANGED ABOUT THIS ARGUMENT -- and it changed
-the substance of it, not just the wording. While the closing existed,
-feeding this module's `eligible_mask` into production would have
-CHANGED PRODUCTION'S RESULTS: the closed exclusions were larger than the
-raw gates by the pinholes they absorbed (measured at roughly 0.35 ac on
-the OLD reference boundary and 0.60 ac on the NEW), so production would
-have lost exactly those cells. Deferring the integration was therefore
-also deferring a decision about production's output.
+WHY IT COULD BE DONE, AND WHY IT COULD NOT BE DONE EARLIER. While the
+per-gate closing existed, feeding this module's masks into production
+would have CHANGED PRODUCTION'S RESULTS: the closed exclusions were
+larger than the raw gates by the pinholes they absorbed (measured at
+roughly 0.35 ac on the OLD reference boundary and 0.60 ac on the NEW),
+so production would have lost exactly those cells. Deferring the
+integration was deferring a decision about production's output, which
+is why it waited.
 
-IT IS NOT ANYMORE. With no closing, this module's `eligible_mask` is
-BYTE-IDENTICAL to compute_step1_eligible_cells()' own eligible_mask --
-asserted directly against a real call in test_eligible_union.py, not
-assumed. Wiring it in would be a pure de-duplication with no behavioural
-change at all. The integration is still not done here, but the reason is
-now only that production is out of scope on this branch; there is no
-longer a hidden decision buried inside it.
+The closing was then removed -- not for production's benefit, but
+because the frontend intersects a drawn polygon against these layers
+and captions the acreage it crossed ("0.4 acres of tree canopy"), and a
+layer that reports more ground than the gate actually hit is a false
+statement about someone's land. Raw and exact is also precisely what
+production's own gates are. So the integration became a pure
+de-duplication with no behavioural change available to it, and that is
+asserted from both sides rather than argued: test_eligible_union.py
+section 0 checks this module's masks against a real compute_step1_
+eligible_cells() call, and test_production_area.py's "STEP 1 CONSUMES
+THE EXCLUSION RESULT" section checks all thirteen arrays and three
+availability flags STEP 1 returns, on a fixture firing all five gates.
 
-THE OPEN QUESTION, NAMED: should compute_step1_eligible_cells() take
-this module's `eligible_mask` as an optional override (the standard
-override pattern every other cross-module input in this pipeline uses),
-falling back to self-compute when it isn't supplied? If yes, this
-module's `eligible_mask` return key is already the thing to wire in and
-the redundancy below collapses to one computation. If no, this module
-should stop computing gates and start reading production's per-gate hit
-masks instead, the way diagnose_exclusion_footprints.py does. Either
-resolution ends the duplication; leaving it as-is indefinitely is not
-one of the options.
+WHAT THIS MAKES THIS MODULE. A producer for TWO consumers with very
+different needs: the frontend reads `layers`, `wire`, `eligible_union_
+utm` and the acreages; production reads the raw cell grids (eligible_
+mask, slope_pct, slope_only_mask, and the three gate layer masks). The
+consequence is that a change to a gate here is now a change to what
+gets planted, not only to what gets drawn. The five thresholds live in
+production_area.py and are imported, never redeclared, so they cannot
+drift; and compute_step1_eligible_cells() CHECKS the two it was handed
+against the ones this module recorded on `wire` rather than trusting
+them to match.
 
 THE COST, MEASURED -- and what the measurement actually counts: calls
 to the shared GATE HELPERS (get_required_tree_root_zone_mask_utm(),
 _fetch_disqualifying_soil_union(), _fetch_road_exclusion_union_utm(),
 compute_slope_percent()) at this module's and production's bindings,
 NOT every road/canopy/soil touch in the whole pipeline (e.g. build_
-pipeline_context()'s own separate existing_roads fetch is outside this
-count). Because production still self-computes, one build_pipeline_
-context() run reaches the canopy and soil gate helpers TWICE and
-computes the slope grid TWICE -- once here, once in production. The
-ROAD gate helper is the exception since build_pipeline_context()
-started passing its own already-fetched road union into this module
-(road_exclusion_union_utm= -- see identify_exclusion_zones()'s
-OVERRIDES section): this module's road self-fetch no longer fires on
-that path, so the helper runs exactly ONCE (production's own
-self-compute; production is untouched and keeps it). test_exclusion_
-zones.py asserts these exact counts, not upper bounds: one more of any
-would mean something is re-fetching beyond the known duplication and
-the override pattern is failing somewhere else.
+pipeline_context()'s own separate existing_roads fetch, and water_
+candidate_zones.py's own canopy gate at a different buffer, are outside
+this count). One build_pipeline_context() run now reaches canopy, soil
+and the slope grid EXACTLY ONCE each -- this module's own -- and the
+road helper ZERO times at both bindings, because build_pipeline_context()
+supplies that union here (road_exclusion_union_utm= -- see identify_
+exclusion_zones()'s OVERRIDES section) and production reads the road
+layer off the result. Previously 2/2/2 and 1. test_exclusion_zones.py
+asserts these exact counts, not upper bounds: one MORE of any would mean
+something is re-fetching; one FEWER on canopy/soil/slope would mean this
+module stopped computing its own gates, which production now depends on
+it doing.
 
 --- NODATA: "TOO STEEP" AND "NOT MEASURED" ARE DIFFERENT FACTS ---
 
@@ -994,6 +999,8 @@ def identify_exclusion_zones(
             'wire': {...},                   # frontend-facing metadata; see below
             'eligible_mask': np.ndarray[bool],
             'excluded_union_mask': np.ndarray[bool],
+            'slope_pct': np.ndarray[float],        # consumed by production; see below
+            'slope_only_mask': np.ndarray[bool],   # consumed by production; see below
             'geometry_wgs84': GeoJSON dict,  # excluded_union_utm in EPSG:4326
             'parcel_acres': float,
             'narrative_data': {...},
@@ -1061,11 +1068,27 @@ def identify_exclusion_zones(
     every other layer's; it carries the same geometry on purpose, and
     render_layout_map.py reads it under that name.
 
-    eligible_mask IS NOT CONSUMED ANYWHERE IN THIS BRANCH. It is emitted
-    so the deferred production integration (module docstring, DELIBERATE
-    REDUNDANCY) is a wiring change rather than a rewrite -- and with the
-    closing gone that wiring is now a pure de-duplication that cannot
-    change production's output.
+    eligible_mask, slope_pct AND slope_only_mask ARE PRODUCTION'S INPUT.
+    They were emitted so the production integration (module docstring,
+    THIS MODULE IS PRODUCTION'S GATE COMPUTATION) would be a wiring change
+    rather than a rewrite; it now is one. production_area.compute_step1_eligible_
+    cells() takes this whole result dict as an optional override and reads
+    those three keys plus the canopy/hydric/roads layer masks and their
+    data_available flags, instead of computing the same five gates a
+    second time. Nothing about how any of them is computed changed to make
+    that possible -- with no closing, the masks were already the ones
+    production computes (test_eligible_union.py section 0 asserts it
+    against a real call, and test_production_area.py asserts the
+    integrated path is bit-identical to the self-computed one).
+
+    THAT MAKES THIS MODULE A PRODUCER FOR TWO CONSUMERS, NOT ONE. The
+    frontend reads `layers`, `wire`, `eligible_union_utm` and the
+    acreages; production reads the raw cell grids. The two must not be
+    allowed to drift apart: the day a gate here stops matching
+    production's, production's own answer changes silently. That is what
+    the bit-identity assertions exist to prevent, and why the five gate
+    thresholds live in production_area.py and are imported rather than
+    redeclared.
     """
     if dem is None:
         dem = dem_data.get_dem_for_boundary(boundary_coordinates)
@@ -1270,6 +1293,32 @@ def identify_exclusion_zones(
         },
         "eligible_mask": eligible_mask,
         "excluded_union_mask": union_mask,
+        # --- the two cell-space intermediates production consumes ---------
+        #
+        # Both are already computed above; publishing them adds no work and
+        # changes nothing this module itself does. They exist for the same
+        # reason eligible_mask does: production_area.compute_step1_eligible_
+        # cells() needs the WHOLE of STEP 1's gate output to stop computing
+        # it a second time, and eligible_mask alone is not the whole of it.
+        #
+        #   slope_pct       -- compute_slope_percent()'s own grid, the single
+        #                      most expensive thing either module computes.
+        #                      Withholding it would leave production calling
+        #                      compute_slope_percent() itself and the "one
+        #                      slope grid per run" half of the deduplication
+        #                      unachievable.
+        #   slope_only_mask -- STEP 1's slope-and-setback survivor set, which
+        #                      is also the UNIVERSE the canopy/hydric/road
+        #                      layers above were evaluated over. It is exactly
+        #                      recoverable as eligible_mask | canopy | hydric
+        #                      | roads, but reconstructing a producer's own
+        #                      value in the consumer is how the two drift.
+        #
+        # NOT used by anything in this module, and deliberately NOT part of
+        # `wire` or narrative_data -- these are raw numpy grids for an
+        # in-process caller, not frontend-facing output.
+        "slope_pct": slope_pct,
+        "slope_only_mask": slope_only_mask,
         "geometry_wgs84": (
             transform_geom(dem["crs"], "EPSG:4326", mapping(excluded_union_utm))
             if not excluded_union_utm.is_empty

@@ -57,22 +57,22 @@ FIELD NOTES
   layer of its own.
 
   It earns a context field on the sizing principle through the layout
-  map (which draws the union as the map's ground layer) and the report
-  (narrative_data), NOT through any KSOP computation -- nothing
-  downstream consumes it. In particular it is deliberately NOT passed
-  into the production call below: production_area.py is untouched and
-  still computes the same five gates itself, so canopy and soil are
-  each fetched twice and the slope grid computed twice across one
-  build_pipeline_context() run -- known, measured, asserted at exact
-  counts in test_exclusion_zones.py, and time-limited (see exclusion_
-  zones.py's own DELIBERATE REDUNDANCY section for the integration
-  question that ends it). The ROAD union is the exception: this
-  context's own existing_roads (computed just above the exclusion call,
-  at the same shared farm_roads_data.ROAD_EXCLUSION_BUFFER_METERS the
-  exclusion module's self-compute would use -- asserted, not assumed,
-  in test_exclusion_zones.py) is passed in as road_exclusion_union_
-  utm=, so exclusion_zones fetches no road union of its own; only
-  production's internal road gate still self-fetches.
+  map (which draws the union as the map's ground layer), the report
+  (narrative_data), the frontend (the wire block), AND -- since the
+  production integration landed -- the production call below, which
+  consumes its five gate masks as exclusion_result= rather than
+  computing the same five gates a second time. That is why canopy,
+  soil and the slope grid are each computed exactly ONCE across one
+  build_pipeline_context() run instead of twice; asserted at exact
+  counts in test_exclusion_zones.py. It is a pure de-duplication --
+  production's masks are bit-identical either way, asserted from both
+  sides (see exclusion_zones.py's own module docstring). The ROAD
+  union is computed once too, here: this context's own existing_roads
+  (built just above the exclusion call, at the shared farm_roads_data.
+  ROAD_EXCLUSION_BUFFER_METERS every consumer reads) is passed into
+  exclusion_zones AND into the water-system step, and production reads
+  the road layer off the exclusion result -- so all three former
+  re-fetches of it are gone.
 
   production_areas holds production_area_ceiling.
   identify_optimized_production_areas()'s own 'scored_patches' -- the
@@ -408,14 +408,15 @@ class PipelineContext:
     valleys: list[dict]
     keypoints: list[dict]
     # The parcel's unselectable ground -- exclusion_zones.identify_exclusion_
-    # zones()' whole result (five per-gate closed masks, the closed union,
-    # the derived eligible geometry). The FIRST Layer 2 computation, before
-    # production areas: it depends only on Layer 1 products, so nothing here
-    # waits on it. NOTHING DOWNSTREAM CONSUMES IT YET -- production_area.py
-    # is untouched in this branch and still computes its own five gates (see
-    # exclusion_zones.py's DELIBERATE REDUNDANCY section for why, and for
-    # the integration question that ends it). Carried on the context anyway
-    # because the map draws it and the report narrates it.
+    # zones()' whole result (five per-gate masks as exact cell footprints,
+    # their union, the derived eligible geometry, and the wire block the
+    # frontend reads). The FIRST Layer 2 computation, before production
+    # areas: it depends only on Layer 1 products, so nothing here waits on
+    # it -- and production areas, the NEXT Layer 2 step, now depends on IT,
+    # which makes that ordering load-bearing rather than incidental. The map
+    # draws it, the report narrates it, the frontend intersects a drawn
+    # polygon against it, and production consumes its five gate masks
+    # instead of computing them again.
     exclusion_zones: dict
     production_areas: list[dict]
     parcel_acres: float
@@ -621,9 +622,10 @@ def build_pipeline_context(
     # derives entirely from Layer 1 products (dem, the canopy root-zone mask,
     # the disqualifying-soil union, the road-exclusion union) and depends on
     # no other Layer 2 result, so nothing about the ordering below constrains
-    # it. Placing it first is what makes the deferred production integration
-    # a one-line change: the day compute_step1_eligible_cells() takes an
-    # eligible-mask override, the value it needs is already computed here.
+    # it. Placing it first is now LOAD-BEARING rather than merely tidy: the
+    # production call below CONSUMES this result, so it has to exist by then.
+    # It was placed here before that was true, which is what made the
+    # integration a one-line change when it landed.
     #
     # existing_roads is computed HERE, above the exclusion-zones call --
     # it is Layer-1-derived (a reprojected, buffered union of the raw
@@ -633,14 +635,24 @@ def build_pipeline_context(
     # nearby (the common, clean case).
     existing_roads = farm_roads_data.get_road_exclusion_union_utm(boundary_coordinates, dem, farm_roads=farm_roads)
 
-    # DELIBERATELY NOT PASSED INTO THE PRODUCTION CALL BELOW. production_area.
-    # py is untouched in this branch and keeps computing its own five gates,
-    # so canopy/soil are fetched TWICE and the slope grid computed TWICE
-    # across this function -- a known, measured, time-limited cost documented
-    # in exclusion_zones.py's module docstring and asserted at exact counts
-    # in test_exclusion_zones.py. Wiring it in would change production's
-    # results (a closing is extensive; production would lose the pinhole
-    # cells it absorbs), which is a separate decision.
+    # PASSED INTO THE PRODUCTION CALL BELOW as exclusion_result=. Production
+    # no longer computes its own five gates: it consumes these. That closes
+    # the duplication this comment used to document -- the canopy fetch, the
+    # soil fetch, the road union and the slope grid each now happen ONCE
+    # across this function instead of twice, asserted at exact counts in
+    # test_exclusion_zones.py.
+    #
+    # It is a PURE de-duplication, not a behaviour change. It was deferred
+    # while this module closed its canopy and slope layers (closing is
+    # extensive, so production consuming them would have gained the pinhole
+    # cells the closing absorbed -- a real difference in what gets planted).
+    # The closing was removed, and these layers are now raw cell footprints,
+    # exact, because the frontend intersects a drawn polygon against them and
+    # captions the acreage it crossed. Raw and exact is also precisely what
+    # production computes, so the masks are bit-identical either way --
+    # asserted, not argued: test_eligible_union.py section 0 from this
+    # module's side, test_production_area.py's "STEP 1 CONSUMES THE
+    # EXCLUSION RESULT" section from production's.
     #
     # road_exclusion_union_utm= IS passed, though: this context's own
     # existing_roads above, built by farm_roads_data.get_road_exclusion_
@@ -653,10 +665,10 @@ def build_pipeline_context(
     # wrong-buffer union here. identify_exclusion_zones() reuses a real
     # None too ("checked, genuinely no roads nearby" -- see its OVERRIDES
     # docstring section), so no second road fetch happens either way.
-    # Production's own road gate (fetch #3) and the water modules' (fetch
-    # #4) still self-fetch -- both need production_area.py edits and are
-    # deferred to the production-integration branch, #4 now unblocked by
-    # the single shared buffer constant.
+    # Fetches #3 (production's own road gate) and #4 (the water module's)
+    # are both closed now: #3 by the exclusion_result= pass-through below,
+    # #4 by passing this same union into identify_water_system_candidate_
+    # zones(). One road union per run, built here, consumed three times.
     exclusion_result = exclusion_zones.identify_exclusion_zones(
         boundary_coordinates,
         dem=dem,
@@ -665,8 +677,17 @@ def build_pipeline_context(
         road_exclusion_union_utm=existing_roads,
     )
 
+    # canopy_height is still forwarded even though the exclusion result makes
+    # production's own canopy fetch unreachable: identify_optimized_
+    # production_areas() keeps its full self-fetch path for every caller that
+    # does NOT supply an exclusion result, and dropping the override here
+    # would silently arm a redundant fetch the day this pass-through is
+    # removed or made conditional.
     optimized_production = production_area_ceiling.identify_optimized_production_areas(
-        boundary_coordinates, dem=dem, canopy_height=canopy_height
+        boundary_coordinates,
+        dem=dem,
+        canopy_height=canopy_height,
+        exclusion_result=exclusion_result,
     )
     production_areas = optimized_production["scored_patches"]
     # Total parcel acreage the ceiling optimizer already computed
@@ -693,6 +714,14 @@ def build_pipeline_context(
         "erosion_prone_union": None,
     }
 
+    # road_exclusion_union_utm= closes fetch #4: this context's own
+    # existing_roads, the same union already handed to identify_exclusion_
+    # zones() (and through it, to production) above. Interchangeable with
+    # what this call would have fetched itself because both are built at the
+    # single shared farm_roads_data.ROAD_EXCLUSION_BUFFER_METERS -- asserted
+    # in test_water_candidate_zones.py against the two signature defaults,
+    # not assumed. A real None is reused as "checked, genuinely no roads
+    # nearby" rather than re-fetched, same convention as the exclusion call.
     water_system_result = water_candidate_zones.identify_water_system_candidate_zones(
         boundary_coordinates,
         dem=dem,
@@ -700,6 +729,7 @@ def build_pipeline_context(
         valleys=valleys,
         production_areas=production_areas,
         canopy_height=canopy_height,
+        road_exclusion_union_utm=existing_roads,
     )
     water_zones = water_system_result["zones_geojson"]["features"]
 

@@ -1148,4 +1148,331 @@ print(
 )
 
 
+# ===========================================================================
+# STEP 1 CONSUMES THE EXCLUSION RESULT -- BIT-IDENTICAL, AND OPTIONAL
+# ===========================================================================
+#
+# compute_step1_eligible_cells() now takes an exclusion_result= override: an
+# exclusion_zones.identify_exclusion_zones() result whose five gate masks it
+# consumes instead of computing the same five gates a second time.
+#
+# THE WHOLE CLAIM OF THAT CHANGE IS THAT IT CHANGES NOTHING. exclusion_zones.
+# py computes the identical gates from the identical helpers (it imports them
+# from production_area.py) at the identical thresholds (imported from here
+# too), over the identical universe, with nothing closed, smoothed or
+# buffered anywhere between the gates and the masks it publishes. So the
+# override must produce a BIT-IDENTICAL step1 dict, not a similar one -- and
+# that is checked array-by-array below rather than by comparing acreages,
+# which would hide a handful of moved cells.
+#
+# The fixture deliberately fires all five gates at once, with real overlap
+# between them (hydric crossing canopy, a road strip crossing both), NaN
+# nodata inside the parcel, and a one-cell canopy pinhole -- the exact
+# feature a closing used to absorb, and therefore the single most sensitive
+# probe for a re-introduced extensive pass on either side.
+
+import exclusion_zones as _ez  # noqa: E402
+
+_X_ROWS = _X_COLS = 56
+_X_RES = (5.0, 4.99)  # deliberately non-square, as both reference DEMs are
+_X_OX, _X_OY = 500000.0, 4500000.0
+
+_x_array = np.zeros((_X_ROWS, _X_COLS), dtype=np.float64)
+for _r in range(_X_ROWS):
+    for _c in range(_X_COLS):
+        # a near-flat bench that clears the slope gate, then a ramp that does not
+        _x_array[_r, _c] = 100.0 + 0.02 * _c + (0.0 if _r < 34 else (_r - 33) * 1.4)
+_x_array[12:16, 22:28] = np.nan  # a real nodata hole inside the parcel
+
+_X_DEM = {
+    "array": _x_array,
+    "resolution_meters": _X_RES,
+    "origin_x": _X_OX,
+    "origin_y": _X_OY,
+    "crs": "EPSG:32617",
+}
+_X_BOUNDARY = box(
+    _X_OX + 3 * _X_RES[0],
+    _X_OY - (_X_ROWS - 3) * _X_RES[1],
+    _X_OX + (_X_COLS - 3) * _X_RES[0],
+    _X_OY - 3 * _X_RES[1],
+)
+
+_X_CANOPY = np.zeros((_X_ROWS, _X_COLS), dtype=bool)
+_X_CANOPY[18:30, 8:26] = True
+_X_CANOPY[24, 16] = False  # the pinhole a closing would absorb
+_X_CANOPY[6:11, 34:48] = True
+_X_HYDRIC = box(
+    _X_OX + 30 * _X_RES[0], _X_OY - 30 * _X_RES[1],
+    _X_OX + 44 * _X_RES[0], _X_OY - 18 * _X_RES[1],
+)
+_X_ROADS = box(
+    _X_OX + 5 * _X_RES[0], _X_OY - 21.4 * _X_RES[1],
+    _X_OX + 50 * _X_RES[0], _X_OY - 19.6 * _X_RES[1],
+)
+
+with mock_patch.object(_ez, "get_required_tree_root_zone_mask_utm", return_value=_X_CANOPY), mock_patch.object(
+    _ez, "_fetch_disqualifying_soil_union", return_value=_X_HYDRIC
+), mock_patch.object(_ez, "_fetch_road_exclusion_union_utm", return_value=_X_ROADS):
+    _X_EXCLUSION = _ez.identify_exclusion_zones(None, dem=_X_DEM, boundary_polygon_utm=_X_BOUNDARY)
+
+_x_self_computed = compute_step1_eligible_cells(
+    _X_DEM,
+    _X_BOUNDARY,
+    disqualifying_soil_union_utm=_X_HYDRIC,
+    tree_root_zone_mask_utm=_X_CANOPY,
+    road_exclusion_union_utm=_X_ROADS,
+)
+_x_consumed = compute_step1_eligible_cells(
+    _X_DEM,
+    _X_BOUNDARY,
+    exclusion_result=_X_EXCLUSION,
+)
+
+# --- the fixture actually exercises every gate ---
+assert int(_X_EXCLUSION["layers"]["canopy"]["mask"].sum()) > 0
+assert int(_X_EXCLUSION["layers"]["hydric"]["mask"].sum()) > 0
+assert int(_X_EXCLUSION["layers"]["roads"]["mask"].sum()) > 0
+assert int(_X_EXCLUSION["layers"]["slope"]["mask"].sum()) > 0
+assert int(_X_EXCLUSION["layers"]["setback"]["mask"].sum()) > 0, (
+    "every one of the five gates must reject real ground on this fixture, or a bit-identity check over it "
+    "proves nothing about the gate that never fired"
+)
+# The pinhole is a real hole in the canopy layer, so an extensive pass on
+# either side would show up as a difference rather than being invisible.
+assert not _X_EXCLUSION["layers"]["canopy"]["mask"][24, 16], (
+    "the deliberate one-cell canopy pinhole must survive into the published canopy layer -- it is the most "
+    "sensitive probe there is for a re-introduced closing"
+)
+assert _x_self_computed["eligible_mask"][24, 16], (
+    "and production's own self-computed gate must find that same pinhole cell eligible"
+)
+
+# --- ARRAY-BY-ARRAY, not acreage-by-acreage ---
+_X_ARRAY_KEYS = (
+    "eligible_mask",
+    "slope_only_mask",
+    "slope_source_labels",
+    "slope_pct",
+    "aspect_deg",
+    "per_cell_slope_factor",
+    "per_cell_aspect_factor",
+    "per_cell_score",
+    "soil_carved_acres_by_cell",
+    "soil_carved_pct_by_cell",
+    "hydric_hit",
+    "tree_root_zone_hit",
+    "road_hit",
+)
+_X_FLAG_KEYS = ("soil_data_available", "canopy_data_available", "road_data_available")
+
+assert set(_x_consumed) == set(_x_self_computed), (
+    "the override path must return the SAME KEYS -- a missing key is a downstream KeyError several frames away"
+)
+assert set(_x_consumed) == set(_X_ARRAY_KEYS) | set(_X_FLAG_KEYS), (
+    "this check enumerates STEP 1's whole return contract on purpose: a new key added to compute_step1_"
+    "eligible_cells() without being compared here would go unverified across the override"
+)
+
+for _key in _X_ARRAY_KEYS:
+    _a, _b = _x_consumed[_key], _x_self_computed[_key]
+    assert _a.dtype == _b.dtype, f"{_key}: dtype {_a.dtype} vs {_b.dtype}"
+    assert _a.shape == _b.shape, f"{_key}: shape {_a.shape} vs {_b.shape}"
+    # NaN-aware, and BIT-level: equal_nan makes NaN==NaN, and the arrays that
+    # carry no NaN (the masks, the labels) are compared exactly either way.
+    assert np.array_equal(_a, _b, equal_nan=not np.issubdtype(_a.dtype, np.bool_)), (
+        f"STEP 1's '{_key}' differs between the exclusion-consumed and self-computed paths -- the two "
+        f"modules disagree about a gate, which is a defect in one of them, not a rounding difference "
+        f"({int((_a != _b).sum())} differing cells)"
+    )
+for _key in _X_FLAG_KEYS:
+    assert _x_consumed[_key] == _x_self_computed[_key], f"{_key}: {_x_consumed[_key]} vs {_x_self_computed[_key]}"
+
+# The three masks whose bytes are what everything downstream is built from,
+# compared as BYTES rather than as values -- an equal-but-recomputed array
+# would pass array_equal; this also catches a silently copied/re-derived one
+# having different memory layout.
+for _key in ("eligible_mask", "slope_only_mask", "hydric_hit", "tree_root_zone_hit", "road_hit"):
+    assert _x_consumed[_key].tobytes() == _x_self_computed[_key].tobytes(), f"{_key} not byte-identical"
+
+print(
+    f"STEP 1 CONSUMES THE EXCLUSION RESULT: on a {_X_ROWS}x{_X_COLS} fixture firing all five gates "
+    f"(canopy {int(_X_EXCLUSION['layers']['canopy']['mask'].sum())} cells, "
+    f"slope {int(_X_EXCLUSION['layers']['slope']['mask'].sum())}, "
+    f"hydric {int(_X_EXCLUSION['layers']['hydric']['mask'].sum())}, "
+    f"roads {int(_X_EXCLUSION['layers']['roads']['mask'].sum())}, "
+    f"setback {int(_X_EXCLUSION['layers']['setback']['mask'].sum())}), all "
+    f"{len(_X_ARRAY_KEYS)} returned arrays and all {len(_X_FLAG_KEYS)} availability flags are identical to "
+    f"the self-computed path; eligible_mask is byte-identical at "
+    f"{int(_x_consumed['eligible_mask'].sum())} cells."
+)
+
+
+# --- the gates are consumed, not merely agreed with -----------------------
+#
+# Bit-identity alone cannot distinguish "read the override" from "ignored the
+# override and computed the same answer". A DELIBERATELY WRONG exclusion
+# result, one whose masks nothing on this DEM would ever produce, must
+# therefore change STEP 1's answer -- if it doesn't, the override is dead
+# wiring and every count assertion built on it is measuring nothing.
+
+_x_tampered = dict(_X_EXCLUSION)
+_x_tampered_eligible = _X_EXCLUSION["eligible_mask"].copy()
+_x_tampered_eligible[:] = False
+_x_tampered["eligible_mask"] = _x_tampered_eligible
+_x_tampered_step1 = compute_step1_eligible_cells(_X_DEM, _X_BOUNDARY, exclusion_result=_x_tampered)
+assert int(_x_tampered_step1["eligible_mask"].sum()) == 0, (
+    "a supplied exclusion result with an all-False eligible_mask must yield an all-False STEP 1 eligible "
+    "mask -- if STEP 1 still finds eligible cells it is not reading the override at all"
+)
+print(
+    "  ... and genuinely READ: a tampered all-False exclusion eligible_mask yields an all-False STEP 1 mask, "
+    "so the agreement above is consumption, not coincidence."
+)
+
+
+# --- the thresholds are checked, not assumed ------------------------------
+#
+# Both modules default to the same MAX_PRODUCTION_SLOPE_PCT / PRODUCTION_
+# BOUNDARY_SETBACK_METERS, but both also take them as real parameters. An
+# exclusion result computed at one threshold and consumed at another would
+# silently answer a different question, and nothing downstream would catch it.
+
+for _bad_kwargs, _needle in (
+    ({"max_slope_pct": pa.MAX_PRODUCTION_SLOPE_PCT + 5.0}, "max_slope_pct"),
+    ({"boundary_setback_meters": pa.PRODUCTION_BOUNDARY_SETBACK_METERS + 5.0}, "boundary_setback_meters"),
+):
+    try:
+        compute_step1_eligible_cells(_X_DEM, _X_BOUNDARY, exclusion_result=_X_EXCLUSION, **_bad_kwargs)
+    except ValueError as _exc:
+        assert _needle in str(_exc), f"the {_needle} mismatch must be named in the error, got: {_exc}"
+    else:
+        raise AssertionError(
+            f"consuming an exclusion result at a different {_needle} than it was computed at must raise, "
+            f"not silently combine two different questions' answers"
+        )
+
+# A different GRID is the other way to supply the wrong masks.
+try:
+    compute_step1_eligible_cells(
+        _dem(np.zeros((10, 10), dtype=np.float64)), _X_BOUNDARY, exclusion_result=_X_EXCLUSION
+    )
+except ValueError as _exc:
+    assert "shape" in str(_exc)
+else:
+    raise AssertionError("an exclusion result computed against a different grid must raise, not broadcast")
+print(
+    "  ... and the thresholds and grid are CHECKED: a slope-ceiling, setback or DEM-shape mismatch between "
+    "the exclusion result and the STEP 1 call raises rather than combining two different questions."
+)
+
+
+# --- the override is genuinely OPTIONAL, and the sentinel is not None ------
+#
+# Every existing caller passes nothing. Those callers must be untouched --
+# and a caller that passes an explicit None (e.g. `exclusion_result=ctx.
+# exclusion_zones` on a context where that field is not populated yet) must
+# self-compute too, exactly as if it had omitted the parameter. None as "not
+# supplied" is the documented trap in this codebase; the sentinel is an
+# object() precisely so a real None can never be mistaken for it.
+
+assert pa._EXCLUSION_RESULT_NOT_SUPPLIED is not None, (
+    "the 'not supplied' sentinel must NOT be None -- that collapse is the repo-wide trap this convention "
+    "exists to avoid (see _CANOPY_CHECK_UNCHECKED / _ROAD_CHECK_UNCHECKED)"
+)
+import inspect as _x_inspect  # noqa: E402
+
+for _fn, _owner in (
+    (compute_step1_eligible_cells, "production_area.compute_step1_eligible_cells"),
+    (identify_production_areas, "production_area.identify_production_areas"),
+):
+    _default = _x_inspect.signature(_fn).parameters["exclusion_result"].default
+    assert _default is pa._EXCLUSION_RESULT_NOT_SUPPLIED, (
+        f"{_owner}'s exclusion_result default must be the shared sentinel, not None and not a fresh object()"
+    )
+
+_x_explicit_none = compute_step1_eligible_cells(
+    _X_DEM,
+    _X_BOUNDARY,
+    disqualifying_soil_union_utm=_X_HYDRIC,
+    tree_root_zone_mask_utm=_X_CANOPY,
+    road_exclusion_union_utm=_X_ROADS,
+    exclusion_result=None,
+)
+for _key in _X_ARRAY_KEYS:
+    _a, _b = _x_explicit_none[_key], _x_self_computed[_key]
+    assert np.array_equal(_a, _b, equal_nan=not np.issubdtype(_a.dtype, np.bool_)), (
+        f"an explicit exclusion_result=None must SELF-COMPUTE exactly as an omitted one does, but '{_key}' "
+        f"differs -- None has been mistaken for the sentinel somewhere"
+    )
+assert _x_explicit_none["eligible_mask"].tobytes() == _x_self_computed["eligible_mask"].tobytes()
+print(
+    "  ... and the override is OPTIONAL: the sentinel is an object() (not None), both entry points default "
+    "to that same shared sentinel, and an explicit exclusion_result=None self-computes bit-identically to "
+    "an omitted one."
+)
+
+
+# --- identify_production_areas() forwards it, and stops fetching ----------
+#
+# The second of compute_step1_eligible_cells()' two production callers (the
+# other is production_area_ceiling.optimize_production_areas(), covered in
+# test_production_area_ceiling.py). It must forward the override AND skip all
+# three of its own fetches when one is supplied -- forwarding it while still
+# fetching would leave the duplication in place while looking like it was
+# fixed.
+
+_x_fetches = {"canopy": 0, "soil": 0, "road": 0}
+
+
+def _x_count_canopy(*_a, **_k):
+    _x_fetches["canopy"] += 1
+    return _X_CANOPY
+
+
+def _x_count_soil(*_a, **_k):
+    _x_fetches["soil"] += 1
+    return _X_HYDRIC
+
+
+def _x_count_road(*_a, **_k):
+    _x_fetches["road"] += 1
+    return _X_ROADS
+
+
+with mock_patch.object(pa, "get_required_tree_root_zone_mask_utm", side_effect=_x_count_canopy), mock_patch.object(
+    pa, "_fetch_disqualifying_soil_union", side_effect=_x_count_soil
+), mock_patch.object(pa, "_fetch_road_exclusion_union_utm", side_effect=_x_count_road):
+    _x_patches_self = identify_production_areas(_X_DEM, _X_BOUNDARY, min_area_acres=0.1)
+    _x_fetches_self = dict(_x_fetches)
+    _x_fetches.update({"canopy": 0, "soil": 0, "road": 0})
+    _x_patches_consumed = identify_production_areas(
+        _X_DEM, _X_BOUNDARY, min_area_acres=0.1, exclusion_result=_X_EXCLUSION
+    )
+    _x_fetches_consumed = dict(_x_fetches)
+
+assert _x_fetches_self == {"canopy": 1, "soil": 1, "road": 1}, (
+    f"the no-override path must still make all three of its own fetches, got {_x_fetches_self}"
+)
+assert _x_fetches_consumed == {"canopy": 0, "soil": 0, "road": 0}, (
+    f"identify_production_areas() must make NO gate fetch at all when an exclusion result is supplied -- "
+    f"it already carries every gate's mask and data_available flag. Got {_x_fetches_consumed}"
+)
+assert len(_x_patches_self) == len(_x_patches_consumed) and len(_x_patches_self) > 0, (
+    "the fixture must produce real patches on both paths, or this comparison is vacuous"
+)
+for _p_self, _p_consumed in zip(_x_patches_self, _x_patches_consumed):
+    for _field in ("id", "area_acres", "representative_elevation_m", "render_fill_area_acres",
+                   "source_patch_id", "cells", "hole_footprints"):
+        assert _p_self[_field] == _p_consumed[_field], f"patch field '{_field}' differs across the override"
+    assert _p_self["polygon_utm"].equals(_p_consumed["polygon_utm"])
+    assert _p_self["render_fill_polygon_utm"].equals(_p_consumed["render_fill_polygon_utm"])
+    assert _p_self["geometry_wgs84"] == _p_consumed["geometry_wgs84"]
+print(
+    f"identify_production_areas(): forwards the override and makes 0 gate fetches on that path (vs "
+    f"{_x_fetches_self['canopy']}/{_x_fetches_self['soil']}/{_x_fetches_self['road']} canopy/soil/road "
+    f"without it), producing the identical {len(_x_patches_self)} patch(es)."
+)
+
+
 print("\nAll production_area checks passed.")
