@@ -607,6 +607,15 @@ _PRE_NARRATIVE_PATCH_KEYS = {
     "representative_elevation_m",
     "polygon_utm",
     "render_fill_polygon_utm",
+    # Added by cluster_and_gate() alongside render_fill_polygon_utm when the
+    # production-zone endpoint needed the drawn shape's own acreage and its
+    # WGS84 form on the wire. Listed here for the same reason every other key
+    # is: this set is STEP 3/STEP 4's field list, and the assertion below is
+    # about narrative_data not WRITING to a patch, not about STEP 3 never
+    # gaining a field. It stays an equality check, so narrative_data adding or
+    # dropping anything still fails it.
+    "render_fill_area_acres",
+    "render_fill_geometry_wgs84",
     "geometry_wgs84",
     "cells",
     "hole_footprints",

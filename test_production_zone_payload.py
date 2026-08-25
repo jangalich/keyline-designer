@@ -107,7 +107,7 @@ PAYLOAD = build_production_zone_payload(REFERENCE_BOUNDARY, dem=DEM, canopy_heig
 
 assert set(PAYLOAD) == {
     "eligible_union", "exclusion_layers", "suggested_zones",
-    "zones", "summary", "scales", "wire",
+    "zones", "summary", "scales", "wire", "zones_without_drawn_shape",
 }, f"unexpected top-level keys: {sorted(PAYLOAD)}"
 
 assert json.dumps(PAYLOAD), "payload must be JSON-serialisable as-is"
@@ -131,15 +131,24 @@ print(f"exclusion layers: {types}")
 
 union = PAYLOAD["eligible_union"]
 assert union is not None, "synthetic fixture must produce a non-empty eligible union"
-assert union["type"] == "MultiPolygon", union["type"]
 
-holes = sum(len(polygon) - 1 for polygon in union["coordinates"])
+# EITHER type is contract-valid. transform_geom emits whatever shapely holds,
+# and build_eligible_union() returns a single Polygon whenever the parcel's
+# eligible ground happens to be one connected region -- which is the ORDINARY
+# case on gentle ground, not an edge case. An earlier version of this test
+# asserted MultiPolygon and passed only because the fixture it was written
+# against had fragmented terrain; a consumer that assumes the multi form
+# breaks on the first flat parcel.
+assert union["type"] in ("Polygon", "MultiPolygon"), union["type"]
+
+polygons = [union["coordinates"]] if union["type"] == "Polygon" else union["coordinates"]
+holes = sum(len(polygon) - 1 for polygon in polygons)
 assert holes > 0, (
     "the fixture's interior canopy pockets must show up as interior rings -- "
     "a union with no holes means hole geometry is being dropped somewhere"
 )
-vertices = sum(len(ring) for polygon in union["coordinates"] for ring in polygon)
-print(f"eligible union: {len(union['coordinates'])} polygons, {vertices} vertices, {holes} holes")
+vertices = sum(len(ring) for polygon in polygons for ring in polygon)
+print(f"eligible union: {len(polygons)} polygon(s), {vertices} vertices, {holes} holes")
 
 
 # --- coordinate precision ----------------------------------------------------
@@ -197,6 +206,55 @@ for zone in PAYLOAD["zones"]:
         assert zone["dominant_aspect"] is None, (
             "aspect_available False must not ship a dominant_aspect"
         )
+
+# --- the wire carries the OPENING, not the footprint -----------------------
+#
+# Asserted structurally rather than against a fixed number: the opening is
+# anti-extensive by construction (production_area.cluster_and_gate() raises if
+# it is not), so every drawn acreage must be at or below its own footprint,
+# and the summary must be the sum of the figures actually listed.
+
+import production_area_ceiling
+
+_scored = {
+    int(p["id"]): p
+    for p in production_area_ceiling.identify_optimized_production_areas(
+        REFERENCE_BOUNDARY, dem=DEM, canopy_height=CANOPY,
+        check_soil=False, check_roads=False,
+    )["scored_patches"]
+}
+
+for zone in PAYLOAD["zones"]:
+    patch = _scored[int(zone["id"])]
+    assert zone["area_acres"] == patch["render_fill_area_acres"], (
+        f"zone {zone['id']} must caption the drawn shape's acreage "
+        f"({patch['render_fill_area_acres']}), got {zone['area_acres']}"
+    )
+    assert zone["area_acres"] <= patch["area_acres"] + 1e-9, (
+        "an opening is anti-extensive -- the drawn acreage can never exceed "
+        f"the footprint's ({zone['area_acres']} > {patch['area_acres']})"
+    )
+
+_listed = round(sum(z["area_acres"] for z in PAYLOAD["zones"]), 1)
+assert PAYLOAD["summary"]["selected_acres"] == _listed, (
+    "the total must be the sum of the zones actually listed, or the readout "
+    f"does not add up: {PAYLOAD['summary']['selected_acres']} vs {_listed}"
+)
+
+# Every feature draws the opening, and no feature is listed without one.
+_feature_ids = {int(str(f["id"]).rsplit("-", 1)[-1]) for f in PAYLOAD["suggested_zones"]["features"]}
+assert _feature_ids == {int(z["id"]) for z in PAYLOAD["zones"]}, (
+    "the map's features and the panel's list must name the same zones"
+)
+for feature in PAYLOAD["suggested_zones"]["features"]:
+    assert feature["geometry"] is not None
+    assert feature["properties"]["area_acres"] == _scored[
+        int(str(feature["id"]).rsplit("-", 1)[-1])]["render_fill_area_acres"]
+
+_footprint = round(sum(_scored[int(z["id"])]["area_acres"] for z in PAYLOAD["zones"]), 1)
+print(f"suggested acreage: footprint {_footprint} -> drawn {_listed} "
+      f"({_listed / _footprint * 100:.0f}% of footprint)")
+print(f"zones with no drawn shape: {PAYLOAD['zones_without_drawn_shape']}")
 
 assert set(PAYLOAD["summary"]) == {
     "total_acres", "slope_passing_acres", "eligible_acres",

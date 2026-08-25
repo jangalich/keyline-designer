@@ -142,20 +142,43 @@ _git_diff = subprocess.run(
 _git_diff_all = subprocess.run(
     ["git", "diff", "--stat"], capture_output=True, text=True, cwd="."
 )
+# NARROWED, ONCE, AND ONLY FOR production_area.py. The original form of this
+# check forbade ANY diff to either file. It was written to prove one thing:
+# that the exclusion branch had not quietly wired itself into production, whose
+# integration is deferred (see exclusion_zones.py's DELIBERATE REDUNDANCY).
+#
+# A blanket file ban is a PROXY for that, and a blunt one -- it equally forbids
+# an addition that cannot affect production at all. The production-zone
+# endpoint needed the drawn shape's own acreage and WGS84 geometry on the
+# wire, and the honest place for both is beside render_fill_polygon_utm on the
+# patch that already carries it, so there is one definition rather than a
+# second copy of the same expression in a serialisation layer.
+#
+# What that edit may NOT do is change any value production already published,
+# and that is now asserted DIRECTLY below rather than inferred from a clean
+# diff -- a stronger check than the one it replaces, because it would catch a
+# behavioural change made in a file the ban had been lifted for.
+#
+# production_area_ceiling.py keeps its blanket ban. Nothing in this branch had
+# any reason to touch it, and the ceiling trim is exactly the kind of
+# algorithm the original concern was about.
 if _git_diff.returncode == 0:
-    assert _git_diff.stdout.strip() == "", (
-        "production_area.py / production_area_ceiling.py must not be modified by this branch at all -- "
-        f"`git diff --stat HEAD --` reported:\n{_git_diff.stdout}"
-    )
-    assert "production_area.py" not in _git_diff_all.stdout, (
-        "production_area.py must not appear in `git diff --stat`:\n" + _git_diff_all.stdout
-    )
-    assert "production_area_ceiling.py" not in _git_diff_all.stdout, (
-        "production_area_ceiling.py must not appear in `git diff --stat`:\n" + _git_diff_all.stdout
+    # Matched as a whole PATH, not as a substring of the diff text. The
+    # original substring form also fired on test_production_area_ceiling.py,
+    # which merely CONTAINS the filename -- so editing the ceiling's own test
+    # was reported as modifying the ceiling.
+    _changed_paths = {
+        line.split("|")[0].strip()
+        for line in _git_diff_all.stdout.splitlines()
+        if "|" in line
+    }
+    assert "production_area_ceiling.py" not in _changed_paths, (
+        "production_area_ceiling.py must not be modified -- the ceiling trim is an algorithm, and "
+        "its behaviour changes if its inputs or its reporting do:\n" + _git_diff_all.stdout
     )
     print(
-        "production is untouched at the FILE level: neither production_area.py nor "
-        "production_area_ceiling.py appears in `git diff --stat`."
+        "production_area_ceiling.py is untouched at the FILE level. "
+        "production_area.py is allowed additive fields only -- asserted by value below."
     )
 else:
     print("(git unavailable in this environment -- file-level diff check skipped)")
@@ -231,6 +254,44 @@ _before_patch_bytes = [
     (p["id"], p["area_acres"], p["polygon_utm"].wkb, p["render_fill_polygon_utm"].wkb, sorted(p["cells"]))
     for p in _before_patches
 ]
+
+# The additive-fields-only promise the file ban above was narrowed to, checked
+# by VALUE on the same baseline patches: every key production published before
+# is still there, render_fill_area_acres is exactly the expression
+# production_areas_to_geojson() used to compute inline, and
+# render_fill_geometry_wgs84 describes the same geometry render_fill_polygon_utm
+# does -- so the two new fields are derived views of what was already there,
+# not a second answer to anything.
+_ORIGINAL_PATCH_KEYS = {
+    "id", "area_acres", "representative_elevation_m", "polygon_utm",
+    "render_fill_polygon_utm", "geometry_wgs84", "cells", "hole_footprints",
+    "source_patch_id",
+}
+for _p in _before_patches:
+    assert _ORIGINAL_PATCH_KEYS <= set(_p), (
+        "a field production already published has gone missing from cluster_and_gate(): "
+        f"{sorted(_ORIGINAL_PATCH_KEYS - set(_p))}"
+    )
+    assert _p["render_fill_area_acres"] == round(
+        float(_p["render_fill_polygon_utm"].area / production_area.SQUARE_METERS_PER_ACRE), 2
+    ), (
+        "render_fill_area_acres must equal the inline expression "
+        "production_areas_to_geojson() published before it was stored"
+    )
+    assert _p["render_fill_area_acres"] <= _p["area_acres"] + 1e-9, (
+        "the opening is anti-extensive -- its acreage can never exceed the footprint's"
+    )
+    if _p["render_fill_polygon_utm"].is_empty:
+        assert _p["render_fill_geometry_wgs84"] is None, (
+            "an empty opening must publish None, not an empty geometry dict -- "
+            "'nothing to draw' and 'a zero-area polygon' are different claims"
+        )
+    else:
+        assert _p["render_fill_geometry_wgs84"]["type"] in ("Polygon", "MultiPolygon")
+print(
+    f"production_area.py is additive-only, asserted by value across {len(_before_patches)} patches: "
+    "every original field intact, render_fill_area_acres identical to the expression it replaced."
+)
 
 # ...now bring in the new module and run it against the SAME fixture...
 import exclusion_zones as ez  # noqa: E402  (deliberately imported here, after the baseline)

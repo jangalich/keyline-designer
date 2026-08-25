@@ -1190,6 +1190,33 @@ def cluster_and_gate(
 
             geometry_wgs84 = transform_geom(dem["crs"], "EPSG:4326", mapping(polygon_utm))
 
+            # The opening's OWN acreage and OWN WGS84 geometry, stored beside
+            # the footprint's rather than left to each consumer to derive.
+            #
+            # production_areas_to_geojson() already published this acreage as
+            # render_fill_area_acres by computing it inline; storing it here
+            # makes that one expression the single definition instead of the
+            # first of several. water_candidate_zones.py already carries
+            # exactly this pair on its own zones (render_fill_polygon_utm plus
+            # render_fill_geometry_wgs84) -- production carried only the UTM
+            # half, so any consumer that needed the drawn shape on the wire had
+            # to reproject it itself.
+            #
+            # EMPTY IS A REAL OUTCOME, not a guard against a bug: a cluster
+            # thinner than RENDER_OPENING_RADIUS_METERS throughout opens to
+            # nothing (see PART 1's own note). Its footprint still cleared
+            # min_area_acres, so the patch is real -- it just has no drawn
+            # shape. None, not an empty geometry dict, so a consumer cannot
+            # mistake "nothing to draw" for a zero-area polygon.
+            render_fill_area_acres = round(
+                float(render_fill_polygon_utm.area / SQUARE_METERS_PER_ACRE), 2
+            )
+            render_fill_geometry_wgs84 = (
+                transform_geom(dem["crs"], "EPSG:4326", mapping(render_fill_polygon_utm))
+                if not render_fill_polygon_utm.is_empty
+                else None
+            )
+
             first_r, first_c = cluster_cells[0]
             source_patch_id = int(slope_source_labels[first_r, first_c])
 
@@ -1200,6 +1227,8 @@ def cluster_and_gate(
                     "representative_elevation_m": float(np.median(elevations)),
                     "polygon_utm": polygon_utm,
                     "render_fill_polygon_utm": render_fill_polygon_utm,
+                    "render_fill_area_acres": render_fill_area_acres,
+                    "render_fill_geometry_wgs84": render_fill_geometry_wgs84,
                     "geometry_wgs84": geometry_wgs84,
                     "cells": cluster_cells,
                     "hole_footprints": hole_footprints,
@@ -1352,9 +1381,7 @@ def production_areas_to_geojson(patches: list[dict]) -> dict:
                 # area_acres reports. render_fill_polygon_utm is always a
                 # subset of polygon_utm, so this is <= area_acres for every
                 # patch (see cluster_and_gate()'s containment assertion).
-                "render_fill_area_acres": round(
-                    p["render_fill_polygon_utm"].area / SQUARE_METERS_PER_ACRE, 2
-                ),
+                "render_fill_area_acres": p["render_fill_area_acres"],
             },
         )
         for p in patches

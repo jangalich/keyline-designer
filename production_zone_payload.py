@@ -58,6 +58,44 @@ hidden here -- every layer ships its own `data_available` flag, and a
 consumer that renders the highlight without reading them is showing a
 measurement where it should be showing an unknown.
 
+WHICH PRODUCTION GEOMETRY THE WIRE CARRIES
+------------------------------------------
+THE OPENING, NOT THE FOOTPRINT. Every production patch carries two shapes
+and they are not interchangeable:
+
+  polygon_utm / area_acres -- the REAL per-cell union footprint. Every
+    5 m cell that cleared every gate, with the cell staircase intact and
+    every one-cell finger still attached. It is the honest answer to "what
+    ground qualified".
+
+  render_fill_polygon_utm / render_fill_area_acres -- a bounded, asymmetric
+    DISC OPENING of that footprint at production_area.
+    RENDER_OPENING_RADIUS_METERS (12 m, so a 24 m disc) with a
+    RENDER_LEAD_ERODE_CELLS lead erode. Anti-extensive by construction and
+    asserted so: it severs features narrower than 2*(r + lead), restores
+    only r, and insets every edge by the lead. It is the answer to "what
+    shape would you actually work".
+
+The footprint is the wrong thing to draw. It reports a suggested acreage
+within a couple of percent of the eligible acreage while its outline is an
+unbroken 5 m staircase hung with one-cell fingers -- ground nobody would
+farm as drawn, presented as a recommendation. render_layout_map.py has
+always clipped the PDF's production texture to the opening for this reason;
+this endpoint shipping the footprint was the interactive map disagreeing
+with the printed one.
+
+EVERY ACREAGE MOVES WITH THE GEOMETRY. Drawing the opening while captioning
+the footprint's acreage would be worse than either alone, so the per-zone
+figure and both summary totals below all come from render_fill_area_acres.
+
+WHAT IS DELIBERATELY NOT CHANGED. The ceiling trim in
+production_area_ceiling.py still measures itself against FOOTPRINT acreage,
+and narrative_data still reports footprint acreage to the report. Both are
+left alone on purpose: the trim is an algorithm whose behaviour would change
+if its input did, and the narrative is the PDF's contract, not this one.
+The consequence is real and is reported rather than hidden -- see this
+module's own note in build_production_zone_payload().
+
 COORDINATE PRECISION
 --------------------
 Geometry arrives from rasterio's transform_geom at full float repr -- 14 to
@@ -141,6 +179,16 @@ def _round_geometry(geometry: Optional[dict]) -> Optional[dict]:
         return node
 
     return {**geometry, "coordinates": walk(geometry["coordinates"])}
+
+
+def _feature_patch_id(feature: dict) -> int:
+    """The patch id behind a suggested-zone feature.
+
+    production_suitability_to_geojson() mints the feature id as
+    "production-area-<patch id>" and does not carry the bare integer in
+    properties, so the id is read back off that string rather than assumed to
+    exist as its own field."""
+    return int(str(feature["id"]).rsplit("-", 1)[-1])
 
 
 def _boundary_polygon_utm(boundary_coordinates, dem: dict) -> Polygon:
@@ -228,6 +276,62 @@ def build_production_zone_payload(
 
     wire = exclusion["wire"]
     narrative = production["narrative_data"]
+    parcel_acres = float(narrative["parcel"]["total_acres"])
+
+    # The drawn shape and its acreage, per patch id. Both were computed by
+    # cluster_and_gate() and are read here, never recomputed -- the opening is
+    # a raster morphological operation and a second implementation of it in a
+    # serialisation layer would be a second answer to the same question.
+    drawn = {
+        int(patch["id"]): {
+            "geometry": patch["render_fill_geometry_wgs84"],
+            "acres": patch["render_fill_area_acres"],
+        }
+        for patch in production["scored_patches"]
+    }
+
+    # A patch whose opening came back empty has no drawn shape at all (a
+    # cluster thinner than the opening radius throughout). It is dropped from
+    # BOTH the map and the list rather than from one of them: a zone in the
+    # readout at 0.0 acres with nothing under it on the map is a contradiction
+    # the reader has no way to resolve. Reported by the endpoint's caller as a
+    # count, not silently absorbed.
+    drawable = {pid for pid, d in drawn.items() if d["geometry"] is not None}
+
+    features = []
+    for feature in production["zones_geojson"]["features"]:
+        patch_id = _feature_patch_id(feature)
+        if patch_id not in drawable:
+            continue
+        features.append(
+            {
+                **feature,
+                "geometry": _round_geometry(drawn[patch_id]["geometry"]),
+                "properties": {
+                    **feature["properties"],
+                    "area_acres": drawn[patch_id]["acres"],
+                },
+            }
+        )
+
+    zones = [
+        {
+            **zone,
+            "area_acres": drawn[int(zone["id"])]["acres"],
+            "percent_of_parcel": (
+                round(drawn[int(zone["id"])]["acres"] / parcel_acres * 100.0, 1)
+                if parcel_acres > 0
+                else None
+            ),
+        }
+        for zone in narrative["patches"]
+        if int(zone["id"]) in drawable
+    ]
+
+    # Both totals are SUMS of the per-zone figures above, not a separate
+    # measurement of a separate geometry -- so the list adds up to the total
+    # the reader is shown, which it would not if one came from the footprint.
+    suggested_acres = round(sum(zone["area_acres"] for zone in zones), 1)
 
     return {
         "eligible_union": _round_geometry(exclusion["eligible_union_wgs84"]),
@@ -235,15 +339,16 @@ def build_production_zone_payload(
             {**layer, "geometry_wgs84": _round_geometry(layer["geometry_wgs84"])}
             for layer in wire["layers"]
         ],
-        "suggested_zones": {
-            **production["zones_geojson"],
-            "features": [
-                {**feature, "geometry": _round_geometry(feature["geometry"])}
-                for feature in production["zones_geojson"]["features"]
-            ],
+        "suggested_zones": {**production["zones_geojson"], "features": features},
+        "zones": zones,
+        "summary": {
+            **narrative["parcel"],
+            "selected_acres": suggested_acres,
+            "selected_pct_of_parcel": (
+                round(suggested_acres / parcel_acres * 100.0, 1) if parcel_acres > 0 else None
+            ),
         },
-        "zones": narrative["patches"],
-        "summary": narrative["parcel"],
         "scales": narrative["scales"],
         "wire": {key: value for key, value in wire.items() if key != "layers"},
+        "zones_without_drawn_shape": len(drawn) - len(drawable),
     }
