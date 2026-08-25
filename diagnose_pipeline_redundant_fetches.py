@@ -251,6 +251,9 @@ _FAKE_PATCH = {
     "representative_elevation_m": 1000.0,
     "polygon_utm": box(0, 0, 10, 10),
     "render_fill_polygon_utm": box(0, 0, 10, 10),
+    # Dereferenced by production_areas_to_geojson() -- same reason
+    # test_pipeline_context.py's own copy of this fixture carries it.
+    "render_fill_area_acres": 1.23,
     "geometry_wgs84": {"type": "Polygon", "coordinates": [[[0.0, 0.0]]]},
     "cells": [(0, 0)],
     "hole_footprints": [],

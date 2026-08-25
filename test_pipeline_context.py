@@ -208,6 +208,12 @@ fake_patch = {
     "representative_elevation_m": 1000.0,
     "polygon_utm": box(0, 0, 10, 10),
     "render_fill_polygon_utm": box(0, 0, 10, 10),
+    # production_areas_to_geojson() dereferences this on every patch it is
+    # handed (water_candidate_zones.identify_water_system_candidate_zones()
+    # calls it on this context's own production_areas), so a scored-patch
+    # fixture without it KeyErrors there. render_fill_polygon_utm above IS
+    # polygon_utm in this fixture, so the two acreages match.
+    "render_fill_area_acres": 1.23,
     "geometry_wgs84": {"type": "Polygon", "coordinates": [[[0.0, 0.0]]]},
     "cells": [(0, 0)],
     "hole_footprints": [],
