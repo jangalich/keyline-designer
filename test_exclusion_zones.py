@@ -125,65 +125,33 @@ def flat_plane(rows: int, cols: int, grade_pct: float = 2.0) -> np.ndarray:
 
 
 # ===========================================================================
-# 1. PRODUCTION IS COMPLETELY UNCHANGED
+# 1. PRODUCTION'S ANSWER IS COMPLETELY UNCHANGED
 # ===========================================================================
 #
-# Three independent checks, because "unchanged" can fail three different
-# ways: the file could be edited (git), the entry point's contract could be
-# widened without editing behaviour (signature), or a shared import could
-# mutate state production reads (byte-comparison across this module's run).
+# THIS SECTION HAS BEEN NARROWED A SECOND TIME, AND FOR A REAL REASON. It
+# used to prove that this branch had not wired itself into production at
+# all -- a file-level git ban plus a frozen parameter list. That integration
+# is now LANDED: compute_step1_eligible_cells() takes an exclusion_result=
+# override, production_area_ceiling.py forwards it, and build_pipeline_
+# context() passes this module's own result in. So "production is unedited"
+# is no longer the property to defend, and asserting it would only forbid
+# the change the pipeline was restructured to make.
+#
+# What has NOT changed, and is what the ban was ever a proxy for, is
+# PRODUCTION'S ANSWER. That is asserted directly below -- by value, on a
+# shared fixture, byte-for-byte -- which is a stronger check than a clean
+# diff was: it catches a behavioural change made in a file no ban covers.
+# The bit-identity of the integrated path itself is asserted from the other
+# side, in test_production_area.py's "STEP 1 CONSUMES THE EXCLUSION RESULT".
 
-_git_diff = subprocess.run(
-    ["git", "diff", "--stat", "HEAD", "--", "production_area.py", "production_area_ceiling.py"],
-    capture_output=True,
-    text=True,
-    cwd=".",
-)
-_git_diff_all = subprocess.run(
-    ["git", "diff", "--stat"], capture_output=True, text=True, cwd="."
-)
-# NARROWED, ONCE, AND ONLY FOR production_area.py. The original form of this
-# check forbade ANY diff to either file. It was written to prove one thing:
-# that the exclusion branch had not quietly wired itself into production, whose
-# integration is deferred (see exclusion_zones.py's DELIBERATE REDUNDANCY).
-#
-# A blanket file ban is a PROXY for that, and a blunt one -- it equally forbids
-# an addition that cannot affect production at all. The production-zone
-# endpoint needed the drawn shape's own acreage and WGS84 geometry on the
-# wire, and the honest place for both is beside render_fill_polygon_utm on the
-# patch that already carries it, so there is one definition rather than a
-# second copy of the same expression in a serialisation layer.
-#
-# What that edit may NOT do is change any value production already published,
-# and that is now asserted DIRECTLY below rather than inferred from a clean
-# diff -- a stronger check than the one it replaces, because it would catch a
-# behavioural change made in a file the ban had been lifted for.
-#
-# production_area_ceiling.py keeps its blanket ban. Nothing in this branch had
-# any reason to touch it, and the ceiling trim is exactly the kind of
-# algorithm the original concern was about.
-if _git_diff.returncode == 0:
-    # Matched as a whole PATH, not as a substring of the diff text. The
-    # original substring form also fired on test_production_area_ceiling.py,
-    # which merely CONTAINS the filename -- so editing the ceiling's own test
-    # was reported as modifying the ceiling.
-    _changed_paths = {
-        line.split("|")[0].strip()
-        for line in _git_diff_all.stdout.splitlines()
-        if "|" in line
-    }
-    assert "production_area_ceiling.py" not in _changed_paths, (
-        "production_area_ceiling.py must not be modified -- the ceiling trim is an algorithm, and "
-        "its behaviour changes if its inputs or its reporting do:\n" + _git_diff_all.stdout
-    )
-    print(
-        "production_area_ceiling.py is untouched at the FILE level. "
-        "production_area.py is allowed additive fields only -- asserted by value below."
-    )
-else:
-    print("(git unavailable in this environment -- file-level diff check skipped)")
-
-assert list(inspect.signature(compute_step1_eligible_cells).parameters) == [
+# THE CONTRACT: the seven original parameters, in their original order, plus
+# exclusion_result and NOTHING else. The frozen-list form of this check
+# forbade the override outright; the list is still frozen, it just now
+# includes it. Order matters as much as membership -- every existing caller
+# passes dem/boundary_polygon_utm positionally, and disqualifying_soil_union_
+# utm is passed positionally by production_area_ceiling.optimize_production_
+# areas(). Appending, rather than inserting, is what keeps them working.
+_STEP1_ORIGINAL_PARAMS = [
     "dem",
     "boundary_polygon_utm",
     "disqualifying_soil_union_utm",
@@ -191,14 +159,24 @@ assert list(inspect.signature(compute_step1_eligible_cells).parameters) == [
     "tree_root_zone_mask_utm",
     "boundary_setback_meters",
     "road_exclusion_union_utm",
-], (
-    "compute_step1_eligible_cells()'s parameter list must be UNCHANGED -- no eligible-mask override, no "
-    "exclusion-result parameter. The integration is deferred; see exclusion_zones.py's DELIBERATE "
-    f"REDUNDANCY section. Got: {list(inspect.signature(compute_step1_eligible_cells).parameters)}"
+]
+_step1_params = list(inspect.signature(compute_step1_eligible_cells).parameters)
+assert _step1_params == _STEP1_ORIGINAL_PARAMS + ["exclusion_result"], (
+    "compute_step1_eligible_cells() must take its seven original parameters, unchanged and in their "
+    "original positions, with exclusion_result APPENDED -- inserting a parameter would silently "
+    f"re-bind every positional caller. Got: {_step1_params}"
 )
+# NOT None. "Not supplied" and "supplied, and the answer is nothing" are
+# different states throughout this pipeline, and this module's own
+# _ROAD_UNION_NOT_SUPPLIED exists for the same reason.
+_step1_override_default = inspect.signature(compute_step1_eligible_cells).parameters["exclusion_result"].default
+assert _step1_override_default is not None, (
+    "compute_step1_eligible_cells()'s exclusion_result default must be an explicit sentinel, never None"
+)
+assert _step1_override_default is production_area._EXCLUSION_RESULT_NOT_SUPPLIED
 print(
-    "production is untouched at the CONTRACT level: compute_step1_eligible_cells() still takes exactly "
-    "its seven original parameters -- no override was added."
+    "production's CONTRACT is the seven original parameters in their original positions, plus an "
+    "appended exclusion_result= defaulting to an explicit sentinel (not None)."
 )
 
 # The shared fixture for checks 1 and 2: gentle plane, one steep block, a
@@ -333,7 +311,7 @@ print(
 
 
 # ===========================================================================
-# 2. THE DEFERRED INTEGRATION IS NOW BEHAVIOURALLY A NO-OP
+# 2. THE INTEGRATION IS BEHAVIOURALLY A NO-OP
 # ===========================================================================
 #
 # Computed HERE, in the test, from two things the module already returns --
@@ -365,18 +343,19 @@ assert _lost_cells == 0, (
 )
 assert _p_result["eligible_mask"].tobytes() == _production_eligible.tobytes(), (
     "this module's eligible_mask must be BYTE-IDENTICAL to compute_step1_eligible_cells()' own -- the "
-    "claim the DELIBERATE REDUNDANCY docstring section now makes"
+    "claim production's exclusion_result= override rests on"
 )
 assert _production_eligible.tobytes() == _run_production_step1()["eligible_mask"].tobytes(), (
     "measuring the hypothetical must not have altered production's real answer"
 )
 print(
-    f"DEFERRED INTEGRATION IS NOW A NO-OP: production's eligible mask is "
+    f"THE INTEGRATION IS A NO-OP: production's eligible mask is "
     f"{int(_production_eligible.sum())} cells ({int(_production_eligible.sum()) * _area_per_cell:.3f} ac) "
     f"on this fixture, this module's eligible_mask is byte-identical to it, and gating production on "
-    f"these exclusions would remove {_lost_cells} cells ({_lost_acres:.3f} ac). Before the closing was "
-    "removed that figure was real pinhole ground; wiring the integration in can no longer change "
-    "production's output at all. production_area.py is still NOT modified."
+    f"these exclusions removes {_lost_cells} cells ({_lost_acres:.3f} ac). Before the closing was removed "
+    "that figure was real pinhole ground; now production consuming these masks cannot change its output "
+    "at all -- which is what the exclusion_result= override does, and what makes it a de-duplication "
+    "rather than a decision."
 )
 
 
@@ -794,25 +773,36 @@ print(
 
 
 # ===========================================================================
-# 8. THE REDUNDANCY IS BOUNDED AND EXPECTED -- EXACT COUNTS PER GATE HELPER
+# 8. THE REDUNDANCY IS GONE -- EXACT COUNTS PER GATE HELPER
 # ===========================================================================
 #
-# The concrete, measured cost of deferring the production integration --
-# counted at the shared GATE-HELPER bindings, which is what these counters
+# This section used to measure the cost of DEFERRING the production
+# integration: canopy TWICE, soil TWICE, the slope grid TWICE across one
+# build_pipeline_context() run, once for exclusion_zones and once for
+# production computing the same five gates itself. That integration has
+# landed -- production_area.compute_step1_eligible_cells() takes an
+# exclusion_result= override and build_pipeline_context() passes this
+# module's own result into it -- so every one of those is now ONE.
+#
+# Counted at the shared GATE-HELPER bindings, which is what these counters
 # actually measure (NOT every road/canopy/soil touch in the pipeline;
 # build_pipeline_context()'s own separate existing_roads fetch, mocked below,
-# is outside these counts). Because production still self-computes its own
-# five gates, one full build_pipeline_context() run reaches the canopy and
-# soil helpers TWICE and the slope grid TWICE -- once for exclusion_zones,
-# once for production. The ROAD helper is the exception: build_pipeline_
-# context() now passes its own already-fetched existing_roads union into
-# identify_exclusion_zones() as road_exclusion_union_utm= (reused even when
-# it is a real None -- "checked, genuinely no roads nearby"), so exclusion_
-# zones' own road self-fetch never fires and the helper runs exactly ONCE
-# (production's untouched self-compute). One more of ANY count would mean
-# something re-fetches beyond the known duplication, which is exactly the
-# failure the override pattern exists to prevent, so this asserts equality
-# and not an upper bound.
+# is outside these counts, and so is water_candidate_zones', mocked away
+# entirely here).
+#
+# EVERY COUNT IS NOW EXACTLY ONE, AND EVERY ONE OF THEM IS THIS MODULE'S.
+# Production makes no gate fetch and computes no slope grid at all on this
+# path: it reads all five gates off the result. The road helper reaches zero
+# because BOTH remaining consumers are supplied -- build_pipeline_context()
+# hands its own already-fetched existing_roads union to identify_exclusion_
+# zones() (reused even when it is a real None, "checked, genuinely no roads
+# nearby"), and production reads the road layer out of the exclusion result.
+#
+# One more of ANY count would mean something re-fetches, which is exactly
+# the failure the override pattern exists to prevent, so this asserts
+# equality and not an upper bound. One FEWER on canopy/soil/slope would mean
+# this module stopped computing its own gates, which is the other direction
+# of the same failure -- production now depends on it doing so.
 #
 # Each counter is installed at BOTH module-level bindings of the same
 # underlying helper (exclusion_zones.py's own, bound via `from
@@ -920,18 +910,18 @@ with ExitStack() as _stack:
         boundary_polygon_utm=_c_boundary_utm,
     )
 
-_expected_gate_counts = {"canopy": 2, "soil": 2, "slope": 2, "road": 1}
+_expected_gate_counts = {"canopy": 1, "soil": 1, "slope": 1, "road": 0}
 for _gate, _expected in _expected_gate_counts.items():
     assert _counts[_gate] == _expected, (
-        f"the {_gate} gate helper must run EXACTLY {_expected}x across one build_pipeline_context() run "
-        f"(canopy/soil/slope: once for exclusion_zones, once for production -- the known and deliberate "
-        f"duplication this module accepts, see exclusion_zones.py's DELIBERATE REDUNDANCY section; road: "
-        f"once, production's own self-compute only, since build_pipeline_context() passes its own "
-        f"existing_roads union into identify_exclusion_zones() and that module reuses it -- a real None "
-        f"included). Got {_counts[_gate]}. One more means something is re-fetching beyond the known "
-        "duplication and the override pattern is failing somewhere it should be preventing it; one fewer "
-        "on canopy/soil/slope would mean production stopped self-computing, which this module does not do, "
-        "and a road count of 0 would mean production's own gate stopped running."
+        f"the {_gate} gate helper must run EXACTLY {_expected}x across one build_pipeline_context() run. "
+        f"canopy/soil/slope: ONCE, this module's own -- production consumes the result rather than "
+        f"computing the same five gates itself (production_area.compute_step1_eligible_cells()' "
+        f"exclusion_result= override). road: ZERO at these two bindings -- build_pipeline_context() passes "
+        f"its own already-fetched existing_roads union in here (a real None included), and production "
+        f"reads the road layer out of the exclusion result. Got {_counts[_gate]}. One MORE means something "
+        "is re-fetching and the override pattern is failing somewhere it should be preventing it; one "
+        "FEWER on canopy/soil/slope would mean this module stopped computing its own gates, which "
+        "production now depends on it doing."
     )
 assert isinstance(_c_ctx.exclusion_zones, dict) and _c_ctx.exclusion_zones, (
     "the context must carry a real exclusion result"
@@ -947,11 +937,11 @@ assert _c_ctx.exclusion_zones["layers"]["roads"]["data_available"] is True, (
     "report data_available=True without exclusion_zones fetching anything itself"
 )
 print(
-    "REDUNDANCY BOUNDED AND EXPECTED: across one full build_pipeline_context() run the measured gate-helper "
-    f"call counts are canopy={_counts['canopy']}, soil={_counts['soil']}, slope={_counts['slope']} (2x each: "
-    f"once for exclusion_zones, once for production) and road={_counts['road']} (1x: production's own "
-    "self-compute only -- exclusion_zones reuses the union build_pipeline_context() passes in, a real None "
-    "included). That is the concrete, measured cost of deferring the production integration."
+    "REDUNDANCY GONE: across one full build_pipeline_context() run the measured gate-helper call counts "
+    f"are canopy={_counts['canopy']}, soil={_counts['soil']}, slope={_counts['slope']} (1x each, all this "
+    f"module's own -- production consumes the result instead of computing the same five gates again) and "
+    f"road={_counts['road']} (0x at these bindings: build_pipeline_context() supplies the union here, and "
+    "production reads the road layer off the result). Previously 2/2/2 and 1."
 )
 
 # --- the buffers match by shared definition, asserted rather than assumed ---

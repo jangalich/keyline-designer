@@ -1368,4 +1368,168 @@ for _pid, _label, _value, _band in _banded:
     print(f"    patch {_pid}  {_label:<18} {_value:>6} -> {_band}")
 
 
+# ===========================================================================
+# THE EXCLUSION-RESULT OVERRIDE IS FORWARDED THROUGH BOTH HOPS
+# ===========================================================================
+#
+# build_pipeline_context() -> identify_optimized_production_areas() ->
+# optimize_production_areas() -> compute_step1_eligible_cells(). The override
+# has to survive BOTH hops: a parameter that exists on the entry point but is
+# dropped one frame down looks wired and is not, and every fetch-count
+# assertion built on it would then be measuring a path nothing takes.
+#
+# Checked three ways, because "forwarded" fails three ways: the parameter can
+# be missing from a hop (signature), it can be accepted and dropped (the value
+# STEP 1 actually receives), and it can be forwarded while the entry point
+# still makes the fetches the override exists to remove (fetch counts).
+
+import inspect as _e_inspect  # noqa: E402
+
+import exclusion_zones as _e_ez  # noqa: E402
+
+for _e_fn, _e_name in (
+    (pac.optimize_production_areas, "optimize_production_areas"),
+    (pac.identify_optimized_production_areas, "identify_optimized_production_areas"),
+):
+    _e_params = _e_inspect.signature(_e_fn).parameters
+    assert "exclusion_result" in _e_params, (
+        f"{_e_name}() must take exclusion_result -- without it the override cannot reach STEP 1 from "
+        "build_pipeline_context(), and the parameter on the entry point above it is dead wiring"
+    )
+    _e_default = _e_params["exclusion_result"].default
+    assert _e_default is pa._EXCLUSION_RESULT_NOT_SUPPLIED, (
+        f"{_e_name}()'s exclusion_result must default to production_area's SHARED sentinel -- a fresh "
+        f"object() per module would make 'not supplied' unrecognisable one frame down. Got {_e_default!r}"
+    )
+    assert _e_default is not None, f"{_e_name}()'s exclusion_result default must not be None"
+print(
+    "both hops take exclusion_result, both defaulting to production_area's own shared "
+    "_EXCLUSION_RESULT_NOT_SUPPLIED sentinel (not None, not a per-module object())."
+)
+
+# --- the value actually ARRIVES at STEP 1, through both hops -------------
+
+_e_rows = _e_cols = 30
+_e_array = np.zeros((_e_rows, _e_cols), dtype=np.float64)
+for _r in range(_e_rows):
+    _e_array[_r, :] = 100.0 + (0.0 if _r < 20 else (_r - 19) * 1.6)
+_e_dem = {
+    "array": _e_array,
+    "resolution_meters": (5.0, 5.0),
+    "origin_x": 500000.0,
+    "origin_y": 4500000.0,
+    "crs": "EPSG:32617",
+}
+_e_boundary = box(500000.0 + 10.0, 4500000.0 - 140.0, 500000.0 + 140.0, 4500000.0 - 10.0)
+_e_canopy = np.zeros((_e_rows, _e_cols), dtype=bool)
+_e_canopy[4:9, 4:12] = True
+
+# boundary_setback_meters=0.0 to match the file-wide STEP 1 partial at the top
+# of this file, NOT to dodge the setback gate: consuming an exclusion result
+# computed at a different setback than STEP 1 was asked for raises (asserted
+# in test_production_area.py), and that guard fires here for real if this
+# argument is dropped. The two thresholds have to be the same threshold.
+with mock_patch.object(_e_ez, "get_required_tree_root_zone_mask_utm", return_value=_e_canopy), mock_patch.object(
+    _e_ez, "_fetch_disqualifying_soil_union", return_value=None
+), mock_patch.object(_e_ez, "_fetch_road_exclusion_union_utm", return_value=None):
+    _e_exclusion = _e_ez.identify_exclusion_zones(
+        None, dem=_e_dem, boundary_polygon_utm=_e_boundary, boundary_setback_meters=0.0
+    )
+
+_e_seen = []
+_e_real_step1 = pac.compute_step1_eligible_cells
+
+
+def _e_spy(*args, **kwargs):
+    _e_seen.append(kwargs.get("exclusion_result", "NOT PASSED"))
+    return _e_real_step1(*args, **kwargs)
+
+
+with mock_patch.object(pac, "compute_step1_eligible_cells", side_effect=_e_spy):
+    pac.optimize_production_areas(_e_dem, _e_boundary, exclusion_result=_e_exclusion)
+assert _e_seen == [_e_exclusion], (
+    f"optimize_production_areas() must forward the EXACT exclusion result object to STEP 1, got {_e_seen!r}"
+)
+
+# --- and the entry point stops fetching entirely on that path ------------
+
+_e_fetches = {"canopy": 0, "soil": 0, "road": 0}
+
+
+def _e_count(name, value):
+    def _fn(*_a, **_k):
+        _e_fetches[name] += 1
+        return value
+
+    return _fn
+
+
+def _e_run(**kwargs):
+    _e_fetches.update({"canopy": 0, "soil": 0, "road": 0})
+    _e_seen.clear()
+    with mock_patch.object(pac, "get_required_tree_root_zone_mask_utm", side_effect=_e_count("canopy", _e_canopy)), \
+         mock_patch.object(pac, "_fetch_disqualifying_soil_union", side_effect=_e_count("soil", None)), \
+         mock_patch.object(pac, "_fetch_road_exclusion_union_utm", side_effect=_e_count("road", None)), \
+         mock_patch.object(pac, "get_dem_for_boundary", return_value=_e_dem), \
+         mock_patch.object(pac, "warp_transform",
+                           side_effect=lambda *a, **k: ([p[0] for p in _e_boundary.exterior.coords],
+                                                        [p[1] for p in _e_boundary.exterior.coords])), \
+         mock_patch.object(pac, "compute_step1_eligible_cells", side_effect=_e_spy):
+        result = pac.identify_optimized_production_areas(
+            [(-80.0, 40.0), (-79.99, 40.0), (-79.99, 40.01)], dem=_e_dem, **kwargs
+        )
+    return result, dict(_e_fetches), list(_e_seen)
+
+
+_e_res_self, _e_n_self, _e_seen_self = _e_run()
+_e_res_ovr, _e_n_ovr, _e_seen_ovr = _e_run(exclusion_result=_e_exclusion)
+
+assert _e_n_self == {"canopy": 1, "soil": 1, "road": 1}, (
+    f"the no-override path must still make all three fetches, got {_e_n_self}"
+)
+assert _e_seen_self == [pa._EXCLUSION_RESULT_NOT_SUPPLIED], (
+    "with nothing supplied, STEP 1 must receive the sentinel -- not None, and not a stray value"
+)
+assert _e_n_ovr == {"canopy": 0, "soil": 0, "road": 0}, (
+    f"identify_optimized_production_areas() must make NO gate fetch when an exclusion result is supplied "
+    f"-- that skip IS the de-duplication. Got {_e_n_ovr}"
+)
+assert _e_seen_ovr == [_e_exclusion], (
+    "the exact exclusion result object must reach STEP 1 through BOTH hops"
+)
+
+# an explicit None self-computes, exactly as omitting it does
+_e_res_none, _e_n_none, _e_seen_none = _e_run(exclusion_result=None)
+assert _e_n_none == {"canopy": 1, "soil": 1, "road": 1}, (
+    f"an explicit exclusion_result=None must SELF-COMPUTE, fetches and all, got {_e_n_none}"
+)
+
+# --- and the answer is the same one, through both paths ------------------
+
+assert len(_e_res_self["scored_patches"]) > 0, "fixture sanity: the comparison must not be vacuous"
+for _e_key in ("total_selected_acreage", "percent_of_parcel", "parcel_acres",
+               "production_ceiling_target_met", "total_cells_removed"):
+    assert _e_res_self[_e_key] == _e_res_ovr[_e_key] == _e_res_none[_e_key], (
+        f"'{_e_key}' differs across the override -- the exclusion result must be a pure de-duplication"
+    )
+assert _e_res_self["narrative_data"] == _e_res_ovr["narrative_data"] == _e_res_none["narrative_data"], (
+    "narrative_data must be identical across the override -- it is report-facing and derived entirely "
+    "from STEP 1 through STEP 4"
+)
+assert len(_e_res_self["scored_patches"]) == len(_e_res_ovr["scored_patches"])
+for _e_a, _e_b in zip(_e_res_self["scored_patches"], _e_res_ovr["scored_patches"]):
+    for _e_field in ("id", "rank", "area_acres", "suitability_score", "slope_factor", "size_factor",
+                     "aspect_factor", "representative_elevation_m", "render_fill_area_acres",
+                     "source_patch_id", "cells", "geometry_wgs84"):
+        assert _e_a[_e_field] == _e_b[_e_field], f"scored patch field '{_e_field}' differs across the override"
+    assert _e_a["polygon_utm"].wkb == _e_b["polygon_utm"].wkb
+    assert _e_a["render_fill_polygon_utm"].wkb == _e_b["render_fill_polygon_utm"].wkb
+print(
+    f"identify_optimized_production_areas(): the override reaches STEP 1 through both hops and takes the "
+    f"entry point's gate fetches from canopy/soil/road 1/1/1 to 0/0/0, while all "
+    f"{len(_e_res_self['scored_patches'])} scored patch(es) -- id, rank, area, geometry, score, every "
+    f"factor -- and every narrative_data field stay identical. An explicit None self-computes (1/1/1)."
+)
+
+
 print("\nAll production_area_ceiling checks passed.")
