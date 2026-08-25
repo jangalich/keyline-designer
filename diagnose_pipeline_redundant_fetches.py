@@ -310,6 +310,24 @@ _FAKE_ROAD_CORRIDOR_RESULT = {
 }
 
 
+def _fake_canopy_leaf(boundary_coordinates, dem, *_a, **_k):
+    """canopy_height_data.get_canopy_height_for_boundary()'s own return shape,
+    clean (no tree cover anywhere). build_pipeline_context() reaches this
+    directly now -- it fetches canopy itself when its caller supplies none,
+    and forwards the result to every consumer -- so synthetic mode has to stub
+    it or the run goes to the Planetary Computer for real."""
+    import numpy as _np
+
+    return {
+        "array": _np.full(dem["array"].shape, 1.0, dtype=_np.float32),
+        "resolution_meters": dem["resolution_meters"],
+        "origin_x": dem["origin_x"],
+        "origin_y": dem["origin_y"],
+        "crs": dem["crs"],
+        "source_item_id": "offline-diagnostic-stub",
+    }
+
+
 def _fake_clean_canopy_mask(boundary_polygon_utm, dem, buffer_meters=None, canopy_height=None):
     """Offline stand-in for get_required_tree_root_zone_mask_utm() at every
     one of its several independent module-level bindings -- each of those
@@ -468,6 +486,11 @@ def run_synthetic_mode() -> tuple[dict, dict, dict]:
         enter(mock_patch.object(pc.exclusion_zones, "get_required_tree_root_zone_mask_utm", side_effect=_fake_clean_canopy_mask))
         enter(mock_patch.object(pc.exclusion_zones, "_fetch_disqualifying_soil_union", return_value=None))
         enter(mock_patch.object(pc.exclusion_zones, "_fetch_road_exclusion_union_utm", return_value=None))
+        # build_pipeline_context()'s OWN canopy fetch -- a NEW network reach at
+        # the top of the run, above every gate stub in this block. Reached as a
+        # module attribute, a different binding from production_area.py's own
+        # imported copy; see _canopy_override_probe.py's docstring.
+        enter(mock_patch.object(pc.canopy_height_data, "get_canopy_height_for_boundary", side_effect=_fake_canopy_leaf))
         mock_optimize = enter(
             mock_patch.object(
                 pc.production_area_ceiling,
@@ -761,8 +784,14 @@ def main() -> None:
     )
     canopy_calls_no_override = _run_pipeline_context_for_canopy_measurement(None)
     print(
-        f"  canopy_height omitted (pre-existing self-fetch behavior, unchanged by this branch): "
-        f"{canopy_calls_no_override} independent fetch(es)"
+        f"  canopy_height omitted (build_pipeline_context() fetches it ONCE itself and forwards it; this "
+        f"read 5 on this fixture while it forwarded a bare None instead, and each consumer self-fetched "
+        f"on that None): {canopy_calls_no_override} independent fetch(es)"
+    )
+    assert canopy_calls_no_override <= 1, (
+        f"with canopy_height omitted, build_pipeline_context() must self-fetch canopy ONCE and forward it "
+        f"-- {canopy_calls_no_override} fetches means a consumer stopped honouring the forwarded dict and "
+        "went back to its own Planetary Computer round-trip"
     )
     _simulated_parcel_data_canopy = clean_canopy_for(SYNTHETIC_DEM)
     canopy_calls_with_override = _run_pipeline_context_for_canopy_measurement(_simulated_parcel_data_canopy)

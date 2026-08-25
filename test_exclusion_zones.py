@@ -820,7 +820,7 @@ import production_area_ceiling  # noqa: E402
 _c_rows = _c_cols = 26
 _c_dem = make_dem(flat_plane(_c_rows, _c_cols))
 _c_boundary_utm = boundary_for(_c_dem)
-_counts = {"canopy": 0, "soil": 0, "road": 0, "slope": 0}
+_counts = {"canopy": 0, "soil": 0, "road": 0, "slope": 0, "canopy_leaf": 0}
 
 
 def _counting(name, fn):
@@ -839,6 +839,24 @@ def _fake_canopy(boundary_polygon_utm, dem, buffer_meters=None, canopy_height=No
     """All-False: no tree cover anywhere. This file is not testing the canopy
     gate here, only how many times it is reached."""
     return np.zeros(dem["array"].shape, dtype=bool)
+
+
+def _fake_canopy_leaf(boundary_coordinates, dem, *_a, **_k):
+    """The NETWORK leaf under the gate above -- canopy_height_data.get_canopy_
+    height_for_boundary()'s own return shape. build_pipeline_context() now
+    reaches this directly (it fetches canopy itself when the caller supplies
+    none, and forwards the result to every consumer), so it needs its own
+    counter: the gate counter above measures how many root-zone MASKS are
+    derived, which is a different question from how many Planetary Computer
+    round-trips are paid for."""
+    return {
+        "array": np.full(dem["array"].shape, 1.0, dtype=np.float32),
+        "resolution_meters": dem["resolution_meters"],
+        "origin_x": dem["origin_x"],
+        "origin_y": dem["origin_y"],
+        "crs": dem["crs"],
+        "source_item_id": "offline-test-stub",
+    }
 
 
 def _fake_soil(*_args, **_kwargs):
@@ -860,7 +878,15 @@ _empty_road_network = {
 
 with ExitStack() as _stack:
     _enter = _stack.enter_context
-    # the two canopy bindings
+    # the canopy NETWORK leaf, at BOTH its bindings -- pipeline_context.py
+    # reaches it as a module attribute (canopy_height_data.get_canopy_height_
+    # for_boundary), production_area.py through its own `from canopy_height_
+    # data import ...` copy. Patching one does not intercept the other.
+    _enter(mock_patch.object(pc.canopy_height_data, "get_canopy_height_for_boundary",
+                             side_effect=_counting("canopy_leaf", _fake_canopy_leaf)))
+    _enter(mock_patch.object(production_area, "get_canopy_height_for_boundary",
+                             side_effect=_counting("canopy_leaf", _fake_canopy_leaf)))
+    # the two canopy GATE bindings
     _enter(mock_patch.object(pc.exclusion_zones, "get_required_tree_root_zone_mask_utm",
                              side_effect=_counting("canopy", _fake_canopy)))
     _enter(mock_patch.object(production_area_ceiling, "get_required_tree_root_zone_mask_utm",
@@ -910,7 +936,7 @@ with ExitStack() as _stack:
         boundary_polygon_utm=_c_boundary_utm,
     )
 
-_expected_gate_counts = {"canopy": 1, "soil": 1, "slope": 1, "road": 0}
+_expected_gate_counts = {"canopy": 1, "soil": 1, "slope": 1, "road": 0, "canopy_leaf": 1}
 for _gate, _expected in _expected_gate_counts.items():
     assert _counts[_gate] == _expected, (
         f"the {_gate} gate helper must run EXACTLY {_expected}x across one build_pipeline_context() run. "
@@ -921,7 +947,9 @@ for _gate, _expected in _expected_gate_counts.items():
         f"reads the road layer out of the exclusion result. Got {_counts[_gate]}. One MORE means something "
         "is re-fetching and the override pattern is failing somewhere it should be preventing it; one "
         "FEWER on canopy/soil/slope would mean this module stopped computing its own gates, which "
-        "production now depends on it doing."
+        "production now depends on it doing. canopy_leaf is the NETWORK fetch under the canopy gate, a "
+        "different question from the gate count: build_pipeline_context() fetches canopy ONCE itself and "
+        "forwards it, so exactly one round-trip is paid for however many gates derive a mask from it."
     )
 assert isinstance(_c_ctx.exclusion_zones, dict) and _c_ctx.exclusion_zones, (
     "the context must carry a real exclusion result"
@@ -941,7 +969,9 @@ print(
     f"are canopy={_counts['canopy']}, soil={_counts['soil']}, slope={_counts['slope']} (1x each, all this "
     f"module's own -- production consumes the result instead of computing the same five gates again) and "
     f"road={_counts['road']} (0x at these bindings: build_pipeline_context() supplies the union here, and "
-    "production reads the road layer off the result). Previously 2/2/2 and 1."
+    f"production reads the road layer off the result). Previously 2/2/2 and 1. The canopy NETWORK leaf "
+    f"under that gate is reached {_counts['canopy_leaf']}x -- build_pipeline_context() fetches the HAG "
+    "coverage once and forwards it, so the gate count and the round-trip count are now independent."
 )
 
 # --- the buffers match by shared definition, asserted rather than assumed ---
