@@ -389,6 +389,7 @@ from shapely.geometry import Polygon
 from shapely.geometry.base import BaseGeometry
 
 import dem_data
+import canopy_height_data
 import exclusion_zones
 import farm_roads_data
 import keypoint_detection
@@ -551,23 +552,32 @@ def build_pipeline_context(
     function -- that module doesn't have overrides yet, so wiring it in is
     later, separate work.
 
-    canopy_height is an optional pre-fetched override in the same pure-
-    passthrough family as water_features=/soil_geometries= above (NOT a
-    self-compute-here-if-missing gate like dem/boundary_polygon_utm --
-    this file never fetches canopy itself): the SAME dict canopy_height_
-    data.get_canopy_height_for_boundary() returns (e.g. parcel_data.
-    ParcelData.canopy_height). Forwarded unconditionally to every internal
-    call below whose own entry point already accepts a canopy_height
-    override -- production_area_ceiling.identify_optimized_production_
-    areas(), water_candidate_zones.identify_water_system_candidate_
-    zones(), water_suitability.fetch_and_select_optimal_water_zone() (via
-    its **suitability_kwargs passthrough into identify_water_
-    suitability()), identify_solar_candidate_zones(), and identify_tree_
-    zone_candidates(). road_corridors.identify_road_corridor_candidates()
-    has no canopy gate at all, so there is nothing to forward it to there.
-    When left None, every one of those calls keeps its own existing
-    independent canopy fetch, so this is a pure additive override with no
-    behavior change for callers that don't supply one.
+    canopy_height is an optional pre-fetched override AND, when it is not
+    supplied, a self-compute-here gate -- the same None-falls-back-to-
+    self-fetch shape dem/boundary_polygon_utm/existing_roads already have,
+    which it did NOT have before: this file used to forward the caller's
+    canopy_height verbatim and never fetch canopy itself. It is the SAME
+    dict canopy_height_data.get_canopy_height_for_boundary() returns (e.g.
+    parcel_data.ParcelData.canopy_height).
+
+    Forwarded to every internal call below whose entry point accepts a
+    canopy_height override -- exclusion_zones.identify_exclusion_zones(),
+    production_area_ceiling.identify_optimized_production_areas(), water_
+    candidate_zones.identify_water_system_candidate_zones(), water_
+    suitability.fetch_and_select_optimal_water_zone() (via its
+    **suitability_kwargs passthrough into identify_water_suitability()),
+    road_corridors.identify_road_corridor_candidates(), identify_solar_
+    candidate_zones(), and identify_tree_zone_candidates().
+
+    WHY IT IS FETCHED HERE NOW. Forwarding None is not neutral: None is
+    every one of those consumers' "fetch it yourself" value, so leaving it
+    None meant SEVEN independent Planetary Computer round-trips for one
+    parcel's HAG coverage on every run -- measured at exactly seven, on a
+    full run with nothing mocked away. Fetching it once here and letting
+    the existing forwards carry it takes that to ONE, and changes no mask:
+    each consumer still derives its own root-zone mask from this dict at
+    its own buffer. See the fetch site itself for the per-buffer detail
+    and for why a real None is left as None.
 
     anchor_lon_lat is the real, chosen access point road routing starts
     from -- it's passed straight through to identify_road_corridor_
@@ -634,6 +644,51 @@ def build_pipeline_context(
     # re-fetching. Legitimately None on any parcel with no mapped road
     # nearby (the common, clean case).
     existing_roads = farm_roads_data.get_road_exclusion_union_utm(boundary_coordinates, dem, farm_roads=farm_roads)
+
+    # canopy_height is fetched HERE when the caller did not supply one --
+    # same None-falls-back-to-self-fetch shape dem and existing_roads above
+    # already use, and the reason this function exists at all.
+    #
+    # WHAT THIS CLOSES. Every canopy consumer below already accepts a
+    # canopy_height= override and this function already forwards it to all
+    # of them -- but with nothing to forward it forwarded None, and None
+    # means "fetch it yourself". SEVEN consumers did, on every run:
+    # exclusion_zones, water_candidate_zones, water_suitability (via
+    # fetch_and_select_optimal_water_zone), road_corridors, solar_
+    # suitability, and identify_tree_zone_candidates TWICE (once nested
+    # inside solar's own tree-zone-exclusion step, once at this function's
+    # own call below). Seven Planetary Computer round-trips for one
+    # parcel's HAG coverage, measured at exactly that on a full run.
+    # Fetching once here takes it to ONE.
+    #
+    # THIS CHANGES NO MASK. Each consumer still derives its OWN root-zone
+    # mask from this dict at its OWN buffer -- production/exclusion/solar
+    # at TREE_ROOT_ZONE_BUFFER_METERS, water at WATER_ZONE_CANOPY_BUFFER_
+    # METERS, tree zones at TREE_ZONE_CANOPY_BUFFER_METERS, road corridors
+    # at 0.0m. Only the SOURCE of the HAG array moves; the seven dilations
+    # still run, and a consumer handed this dict computes byte-identically
+    # to one that fetched it itself (production_area._fetch_tree_root_zone_
+    # mask_utm()'s own contract, asserted in test_canopy_mask_override.py).
+    #
+    # A REAL None IS LEFT AS None, DELIBERATELY. get_canopy_height_for_
+    # boundary() returns None for "no HAG coverage for this boundary at
+    # all", and None is also this parameter's "not supplied" value. They
+    # are not distinguished here ON PURPOSE: forwarding that None makes
+    # each consumer take exactly the path it takes today, which for the
+    # mandatory gates is get_required_tree_root_zone_mask_utm() raising
+    # RuntimeError at the first one reached. Inventing a sentinel to skip
+    # those re-fetches would change nothing about the outcome -- the run
+    # fails either way -- while adding a state no consumer knows how to
+    # read. The one cost is a second fetch on a boundary with no coverage,
+    # in a run that is about to fail.
+    #
+    # Any OTHER fetch failure (retries exhausted, CanopyCoverageIncomplete
+    # Error) propagates UNCAUGHT, unchanged: it propagated out of this
+    # function before too, from whichever consumer reached canopy first.
+    # That consumer is identify_exclusion_zones() immediately below, so
+    # the failure point barely moves.
+    if canopy_height is None:
+        canopy_height = canopy_height_data.get_canopy_height_for_boundary(boundary_coordinates, dem)
 
     # PASSED INTO THE PRODUCTION CALL BELOW as exclusion_result=. Production
     # no longer computes its own five gates: it consumes these. That closes

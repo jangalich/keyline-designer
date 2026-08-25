@@ -23,10 +23,23 @@ look up get_canopy_height_for_boundary() and tree_root_zone_mask() there,
 so a single probe observes every path into the shared fetch no matter how
 deeply nested the caller's own entry point is (e.g. solar_suitability's
 four independent canopy gates, water_candidate_zones' two).
+
+ONE MORE BINDING, ADDED WHEN A SECOND PATH TO THE SAME LEAF APPEARED.
+pipeline_context.build_pipeline_context() now fetches canopy itself when
+its caller supplies none, and it reaches the leaf as a MODULE ATTRIBUTE
+(canopy_height_data.get_canopy_height_for_boundary) rather than through
+production_area's `from canopy_height_data import ...` copy. Those are two
+independent names for one function and patching either alone leaves the
+other invisible. Both are patched here, over one shared counter, so this
+probe keeps the promise its name makes: it observes EVERY path into the
+canopy fetch, and `fetch_calls` stays the number of real Planetary
+Computer round-trips rather than the number that happened to go through
+one module.
 """
 
 import numpy as np
 
+import canopy_height_data as chd
 import production_area as pa
 
 
@@ -61,6 +74,7 @@ class CanopyOverrideProbe:
         self.fetch_calls = 0
         self.mask_arrays = []
         self._orig_fetch = None
+        self._orig_leaf_fetch = None
         self._orig_mask = None
 
     def _counting_fetch(self, boundary_coordinates, dem, *args, **kwargs):
@@ -69,6 +83,7 @@ class CanopyOverrideProbe:
 
     def __enter__(self):
         self._orig_fetch = pa.get_canopy_height_for_boundary
+        self._orig_leaf_fetch = chd.get_canopy_height_for_boundary
         self._orig_mask = pa.tree_root_zone_mask
         real_mask = self._orig_mask
         recorder = self.mask_arrays
@@ -78,11 +93,15 @@ class CanopyOverrideProbe:
             return real_mask(hag_array, resolution_meters, *args, **kwargs)
 
         pa.get_canopy_height_for_boundary = self._counting_fetch
+        # The SAME counter on the module-attribute binding pipeline_context.py
+        # reaches -- see this module's own docstring for why one is not enough.
+        chd.get_canopy_height_for_boundary = self._counting_fetch
         pa.tree_root_zone_mask = _capturing_mask
         return self
 
     def __exit__(self, *exc):
         pa.get_canopy_height_for_boundary = self._orig_fetch
+        chd.get_canopy_height_for_boundary = self._orig_leaf_fetch
         pa.tree_root_zone_mask = self._orig_mask
         return False
 

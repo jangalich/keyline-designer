@@ -331,6 +331,31 @@ mock_patch.object(
 mock_patch.object(pc.exclusion_zones, "_fetch_disqualifying_soil_union", return_value=None).start()
 mock_patch.object(pc.exclusion_zones, "_fetch_road_exclusion_union_utm", return_value=None).start()
 
+# build_pipeline_context()'s OWN canopy fetch -- stubbed file-wide for the same
+# reason and in the same place as the three above. It now fetches canopy itself
+# when the caller supplies none (the None-falls-back-to-self-fetch shape dem and
+# existing_roads already had), which is a NEW network reach at the top of every
+# fixture in this file, and it is MANDATORY -- an unstubbed one goes to the
+# Planetary Computer for real.
+#
+# Reached as a MODULE ATTRIBUTE (canopy_height_data.get_canopy_height_for_
+# boundary), which is a different binding from production_area.py's own
+# `from canopy_height_data import ...` copy -- patching one does not intercept
+# the other. Section 18b below counts BOTH, and deliberately re-patches this
+# one inside its own ExitStack so its count is its own.
+mock_patch.object(
+    pc.canopy_height_data,
+    "get_canopy_height_for_boundary",
+    side_effect=lambda boundary_coordinates, dem, *a, **k: {
+        "array": np.full(dem["array"].shape, 1.0, dtype=np.float32),
+        "resolution_meters": dem["resolution_meters"],
+        "origin_x": dem["origin_x"],
+        "origin_y": dem["origin_y"],
+        "crs": dem["crs"],
+        "source_item_id": "offline-test-stub",
+    },
+).start()
+
 
 # --- run build_pipeline_context with every real fetch entry point mocked ---
 #
@@ -1276,25 +1301,51 @@ print(
     "test_floodplain_union_scope.py."
 )
 
-# --- Regression: canopy_height omitted (the pre-existing call signature) -- every accepting call ---
-# --- still receives an explicit None (its own self-fetch default), same as before canopy_height= ---
-# --- existed on build_pipeline_context() at all. Reuses the very first (fully offline-mocked) run ---
-# --- from section 1 above -- optimize_call/mock_water/mock_select_water_zone/mock_solar/mock_tree_zone ---
-# --- were all captured from that SAME run, before this branch added the canopy_height parameter.
-assert optimize_call.kwargs.get("canopy_height") is None
-assert mock_water.call_args.kwargs.get("canopy_height") is None
-assert mock_select_water_zone.call_args.kwargs.get("canopy_height") is None
-assert mock_solar.call_args.kwargs.get("canopy_height") is None
-assert mock_tree_zone.call_args.kwargs.get("canopy_height") is None
-# identify_road_corridor_candidates -- this branch's (canopy-mask-wiring-road-fencing) own addition to
-# build_pipeline_context(); mock_road_corridor was captured from that same section-1 run, before this branch
-# added the canopy_height= kwarg to this call site.
-assert mock_road_corridor.call_args.kwargs.get("canopy_height") is None
+# --- canopy_height omitted -- every accepting call receives THE SAME self-fetched dict ---
+#
+# THIS ASSERTION USED TO READ `is None`, and that was the whole problem. Every
+# one of these consumers treats None as "fetch it yourself", so forwarding None
+# to six of them (seven counting the tree-zone call nested inside solar) bought
+# seven independent Planetary Computer round-trips for one parcel's coverage.
+# build_pipeline_context() now fetches canopy once when the caller supplies
+# none -- the same None-falls-back-to-self-fetch shape dem and existing_roads
+# already had -- so what reaches these calls is a real dict, and it is the SAME
+# object at every one of them. Identity-checked, not just non-None: a per-call
+# copy would still be one fetch but would mean the value was being rebuilt, and
+# `==` on a dict of numpy arrays does not answer this question at all.
+#
+# Reuses the very first (fully offline-mocked) run from section 1 above --
+# optimize_call/mock_water/mock_select_water_zone/mock_solar/mock_tree_zone/
+# mock_road_corridor were all captured from that SAME run.
+_omitted_canopy = optimize_call.kwargs.get("canopy_height")
+assert _omitted_canopy is not None, (
+    "with canopy_height omitted, build_pipeline_context() must fetch canopy ITSELF and forward the result "
+    "-- forwarding None is what made every consumer self-fetch"
+)
+assert set(_omitted_canopy) >= {"array", "resolution_meters", "origin_x", "origin_y", "crs"}, (
+    f"what is forwarded must be a real canopy_height_data.get_canopy_height_for_boundary() dict, got keys "
+    f"{sorted(_omitted_canopy)}"
+)
+for _mock, _label in (
+    (mock_water, "identify_water_system_candidate_zones"),
+    (mock_select_water_zone, "fetch_and_select_optimal_water_zone"),
+    (mock_solar, "identify_solar_candidate_zones"),
+    (mock_tree_zone, "identify_tree_zone_candidates"),
+    # identify_road_corridor_candidates -- added to build_pipeline_context() by
+    # the canopy-mask-wiring-road-fencing branch; captured from the same run.
+    (mock_road_corridor, "identify_road_corridor_candidates"),
+):
+    assert _mock.call_args.kwargs.get("canopy_height") is _omitted_canopy, (
+        f"{_label}() must receive the EXACT SAME self-fetched canopy dict identify_optimized_production_"
+        f"areas() got -- a different object means it was fetched or rebuilt a second time"
+    )
 print(
-    "Regression: canopy_height omitted reaches identify_optimized_production_areas()/identify_water_system_"
+    "canopy_height omitted: build_pipeline_context() fetches canopy ONCE itself and the exact same dict "
+    "reaches identify_optimized_production_areas()/identify_water_system_"
     "candidate_zones()/fetch_and_select_optimal_water_zone()/identify_solar_candidate_zones()/identify_tree_"
-    "zone_candidates()/identify_road_corridor_candidates() as an explicit None -- each one's own pre-existing "
-    "self-fetch-canopy default -- so a caller that doesn't supply an override sees zero behavior change."
+    "zone_candidates()/identify_road_corridor_candidates() -- identity-checked, so none of them falls back "
+    "to its own fetch. This assertion read `is None` before, which is what seven round-trips per run "
+    "looked like from the inside."
 )
 
 # --- 18. canopy_height= override: reaches every accepting internal call as the exact caller-supplied ---
@@ -1324,6 +1375,8 @@ print(
 # --- additional-canopy-fetch proof for this call site lives in test_road_corridors_pipeline.py instead ---
 # --- (section 6/7, canopy-height-road-corridors branch) and in the dedicated full-run call-count-------- ---
 # --- measurement section of test_render_layout_map.py (this branch's own addition).
+import canopy_height_data  # noqa: E402
+import production_area  # noqa: E402
 from _canopy_override_probe import CanopyOverrideProbe, clean_canopy_for  # noqa: E402
 
 canopy_override = clean_canopy_for(synthetic_dem)
@@ -1431,6 +1484,118 @@ print(
     "array, not a re-fetched or copied one). identify_road_corridor_candidates() itself has no direct canopy "
     "gate -- only forwarding -- and its own production_areas/selected_water_zone are already supplied by this "
     "point, so it's identity-checked rather than run real (see this section's own comment)."
+)
+
+
+# --- 18b. canopy_height NOT supplied: ONE fetch across the whole run, not seven ---
+#
+# Section 18 above proves that a SUPPLIED canopy_height reaches every accepting
+# call and costs zero fetches. This is its complement, and until now it was the
+# untested half: what a run costs when the caller supplies NOTHING, which is
+# what every real caller does.
+#
+# It used to cost SEVEN Planetary Computer round-trips for one parcel's HAG
+# coverage. build_pipeline_context() forwarded canopy_height= to seven
+# consumers, and forwarded None -- which is each of those consumers' own
+# "fetch it yourself" value. Measured, on a full run with nothing mocked away:
+# exclusion_zones, water_candidate_zones, water_suitability (via fetch_and_
+# select_optimal_water_zone), road_corridors, solar_suitability, and identify_
+# tree_zone_candidates TWICE (once nested inside solar's own tree-zone-
+# exclusion step, once at build_pipeline_context()'s own call). It is now ONE:
+# this function fetches canopy itself when the caller supplies none, the same
+# None-falls-back-to-self-fetch shape dem and existing_roads already had, and
+# the seven existing forwards carry it.
+#
+# COUNTED AT BOTH BINDINGS, WHICH IS THE ONLY WAY THIS IS A REAL COUNT.
+# pipeline_context.py reaches the leaf as canopy_height_data.get_canopy_height_
+# for_boundary (a module attribute, resolved at call time); production_area.py
+# reaches the SAME function through `from canopy_height_data import ...`, its
+# own name, captured by value at import. Patching either one alone leaves the
+# other invisible -- exactly the trap that made the road investigation's first
+# count wrong -- so both are wrapped over one shared counter and the assertion
+# is on the total.
+#
+# EXACT, NOT AN UPPER BOUND. One more means a consumer stopped honouring the
+# override; one fewer means this function stopped fetching and some consumer is
+# now running its mandatory canopy gate against nothing.
+
+_cf_counts = {"n": 0}
+_cf_real_clean = clean_canopy_for(synthetic_dem)
+
+
+def _cf_counting_fetch(*_a, **_k):
+    _cf_counts["n"] += 1
+    return _cf_real_clean
+
+
+with ExitStack() as _stack:
+    _enter = _stack.enter_context
+    # BOTH bindings of the one leaf, over one shared counter.
+    _enter(mock_patch.object(canopy_height_data, "get_canopy_height_for_boundary", side_effect=_cf_counting_fetch))
+    _enter(mock_patch.object(production_area, "get_canopy_height_for_boundary", side_effect=_cf_counting_fetch))
+
+    _enter(mock_patch.object(pc.dem_data, "get_dem_for_boundary", return_value=synthetic_dem))
+    _enter(mock_patch.object(pc.valley_delineation, "delineate_valleys", return_value=[]))
+    _enter(
+        mock_patch.object(
+            pc.production_area_ceiling, "identify_optimized_production_areas", return_value=fake_optimized_result
+        )
+    )
+    _enter(mock_patch.object(pc.farm_roads_data, "get_road_exclusion_union_utm", return_value=fake_existing_roads_union))
+    _enter(mock_patch.object(pc.road_corridors, "_fetch_floodplain_hydric_union", return_value=(fake_hydric_union, False)))
+    # water/solar/tree-zone left REAL, canopy gates unstubbed -- a fully-mocked
+    # call would never reach a canopy gate and the count would be vacuous.
+    _enter(
+        mock_patch.object(
+            pc.water_candidate_zones, "identify_water_system_candidate_zones",
+            wraps=pc.water_candidate_zones.identify_water_system_candidate_zones,
+        )
+    )
+    _enter(mock_patch.object(pc.water_candidate_zones, "_fetch_road_exclusion_union_utm", return_value=None))
+    _enter(mock_patch.object(pc.water_candidate_zones, "delineate_valleys"))
+    _enter(mock_patch.object(pc.water_candidate_zones, "identify_production_areas"))
+    _enter(mock_patch.object(pc, "fetch_and_select_optimal_water_zone", return_value=fake_selected_water_zone))
+    _enter(
+        mock_patch.object(pc.road_corridors, "identify_road_corridor_candidates", return_value=fake_road_corridor_result)
+    )
+    _enter(mock_patch.object(pc, "identify_solar_candidate_zones", wraps=pc.identify_solar_candidate_zones))
+    _enter(mock_patch.object(pc, "identify_tree_zone_candidates", wraps=pc.identify_tree_zone_candidates))
+    _enter(
+        mock_patch.object(solar_suitability, "identify_optimized_production_areas", return_value=fake_optimized_result)
+    )
+    _enter(
+        mock_patch.object(
+            solar_suitability, "identify_water_suitability", return_value={"selected_water_zone": fake_selected_water_zone}
+        )
+    )
+    _enter(mock_patch.object(solar_suitability, "identify_road_corridor_candidates", return_value=fake_road_corridor_result))
+    _enter(
+        mock_patch.object(tree_zone_candidates, "identify_optimized_production_areas", return_value=fake_optimized_result)
+    )
+    _enter(
+        mock_patch.object(
+            tree_zone_candidates, "identify_water_suitability", return_value={"selected_water_zone": fake_selected_water_zone}
+        )
+    )
+    _enter(
+        mock_patch.object(tree_zone_candidates, "identify_road_corridor_candidates", return_value=fake_road_corridor_result)
+    )
+
+    _cf_ctx = pc.build_pipeline_context(boundary_coordinates, anchor_lon_lat)
+
+assert _cf_counts["n"] == 1, (
+    f"get_canopy_height_for_boundary() must be reached EXACTLY ONCE across a build_pipeline_context() run "
+    f"with no canopy_height supplied -- build_pipeline_context() fetches it and the seven existing "
+    f"canopy_height= forwards carry it. Got {_cf_counts['n']}. MORE means a consumer stopped honouring the "
+    f"override and went back to its own Planetary Computer round-trip; FEWER means this function stopped "
+    f"fetching, and some consumer's MANDATORY canopy gate is running against nothing."
+)
+assert isinstance(_cf_ctx, pc.PipelineContext)
+print(
+    f"canopy_height NOT supplied: get_canopy_height_for_boundary() is reached EXACTLY "
+    f"{_cf_counts['n']}x across the whole build_pipeline_context() run (previously 7x -- one per consumer, "
+    "each self-fetching on the forwarded None), counted at BOTH the canopy_height_data module-attribute "
+    "binding pipeline_context.py uses and the by-value binding production_area.py imported."
 )
 
 # --- NO-QUALIFYING-WATER-ZONE case: a selection that resolves to None is ---
