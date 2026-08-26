@@ -615,12 +615,46 @@ def main(
     # on the REAL thing, not a diagnostic-only approximation of it.
     ranked_zones = _report_zone_elevation_ranges(dem, boundary_polygon_utm, zones)
 
+    # --- GeoJSON export, for review over aerial imagery ---
+    #
+    # Scored here so the export can carry ranks. score_water_zones() is
+    # PURE -- no network, no DEM re-read -- so this costs nothing but the
+    # arithmetic, and it runs with no soil fetch, which the export's own
+    # confidence_notes state plainly rather than letting a neutral soil
+    # default pass for a measurement.
+    scored_zones = score_water_zones(zones, dem, production_areas=production_areas)
+    print("=== GeoJSON export for visual review ===\n")
+    print(summarize_water_suitability(scored_zones))
+    export = _export_candidate_geojson(
+        dem, scored_zones, nomination_diagnostics, keypoints, flow_to_row, flow_to_col,
+        # Passed EXPLICITLY rather than left to the parameter default:
+        # a module constant used as a default argument is bound once at
+        # import, so it stops being configurable the moment anything
+        # wants to change it (a test redirecting the write, a future
+        # --output flag). Reading it here reads it at call time.
+        path=WATER_CANDIDATES_GEOJSON_PATH,
+    )
+    print(
+        f"\nWrote {export['feature_count']} feature(s) to {export['path']} "
+        "(feature_schema-validated). Layer/status breakdown:"
+    )
+    for (layer, status), count in sorted(export["by_layer_status"].items()):
+        print(f"  {layer} [{status}]: {count}")
+    print()
+
     if not ranked_zones:
         print("No surviving zone to run the confluence check against -- skipping.\n")
         return
 
     top_zone = ranked_zones[0]
-    _report_confluence_check(dem, boundary_polygon_utm, top_zone["cells"])
+    # valleys is THREADED IN, not re-delineated. This function used to call
+    # delineate_valleys() itself; main() now delineates once at the top and
+    # forwards the one list into keypoint detection, generation and here.
+    # It is a required parameter rather than an optional self-computing one
+    # deliberately: this is a private helper with exactly one caller, so a
+    # missing argument should be a loud TypeError at the call site, not a
+    # silent second delineation of a DEM that was already traced.
+    _report_confluence_check(dem, boundary_polygon_utm, top_zone["cells"], valleys)
 
 
 def _report_zone_elevation_ranges(
@@ -770,6 +804,7 @@ def _report_confluence_check(
     dem: dict,
     boundary_polygon_utm: Polygon,
     top_zone_cells: list[tuple[int, int]],
+    valleys: list[dict],
 ) -> None:
     """
     Tests whether the top-ranked zone's own eligible cells -- and the
@@ -842,9 +877,11 @@ def _report_confluence_check(
     print()
 
     # --- PART B: real valley branches (delineate_valleys(), coarser threshold) ---
-    # `valleys` was delineated once at the top of main() and forwarded into
-    # keypoint detection and generation; PART B reads that same list rather
-    # than delineating a second copy of it.
+    # `valleys` arrives as a PARAMETER. main() delineates once at the top
+    # and forwards the one list into keypoint detection, generation and
+    # this check, so there is exactly one delineate_valleys() call site in
+    # this script -- asserted by call count in
+    # test_diagnose_water_zone_mask.py, not assumed.
     all_branches = [
         (valley["id"], branch_index, branch)
         for valley in valleys
@@ -936,27 +973,6 @@ def _report_confluence_check(
             "share a cell before exiting the parcel -- they run roughly parallel without merging, which "
             "points back toward the broad-hillside explanation instead of a true valley confluence."
         )
-    print()
-
-    # --- GeoJSON export, for review over aerial imagery ---
-    #
-    # Scored here so the export can carry ranks. score_water_zones() is
-    # PURE -- no network, no DEM re-read -- so this costs nothing but the
-    # arithmetic, and it runs with no soil fetch, which the export's own
-    # confidence_notes state plainly rather than letting a neutral soil
-    # default pass for a measurement.
-    scored_zones = score_water_zones(zones, dem, production_areas=production_areas)
-    print("=== GeoJSON export for visual review ===\n")
-    print(summarize_water_suitability(scored_zones))
-    export = _export_candidate_geojson(
-        dem, scored_zones, nomination_diagnostics, keypoints, flow_to_row, flow_to_col
-    )
-    print(
-        f"\nWrote {export['feature_count']} feature(s) to {export['path']} "
-        "(feature_schema-validated). Layer/status breakdown:"
-    )
-    for (layer, status), count in sorted(export["by_layer_status"].items()):
-        print(f"  {layer} [{status}]: {count}")
     print()
 
 
