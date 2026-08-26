@@ -662,7 +662,6 @@ with mock_patch.object(pa, "get_soil_data_for_polygon", _fake_soil_rows_empty), 
      mock_patch.object(rc, "get_water_features_for_boundary", _fake_water_features_empty), \
      mock_patch.object(ws, "get_saturated_hydraulic_conductivity_for_polygon", _fake_soil_rows_empty), \
      mock_patch.object(ws, "get_soil_geometries_for_polygon", _fake_soil_geometries_empty), \
-     mock_patch.object(ws, "get_water_features_for_boundary", _fake_water_features_empty), \
      mock_patch.object(tzc, "get_farmland_classification_for_polygon", _fake_farmland_empty), \
      mock_patch.object(tzc, "get_soil_data_for_polygon", _fake_soil_rows_empty), \
      mock_patch.object(tzc, "get_soil_geometries_for_polygon", _fake_soil_geometries_empty), \
@@ -984,7 +983,6 @@ with mock_patch.object(pa, "get_soil_data_for_polygon", _fake_soil_rows_empty), 
      mock_patch.object(rc, "get_water_features_for_boundary", _fake_water_features_empty), \
      mock_patch.object(ws, "get_saturated_hydraulic_conductivity_for_polygon", _fake_soil_rows_empty), \
      mock_patch.object(ws, "get_soil_geometries_for_polygon", _fake_soil_geometries_empty), \
-     mock_patch.object(ws, "get_water_features_for_boundary", _fake_water_features_empty), \
      mock_patch.object(tzc, "get_farmland_classification_for_polygon", _fake_farmland_empty), \
      mock_patch.object(tzc, "get_soil_data_for_polygon", _fake_soil_rows_empty), \
      mock_patch.object(tzc, "get_soil_geometries_for_polygon", _fake_soil_geometries_empty), \

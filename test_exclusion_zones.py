@@ -916,7 +916,11 @@ with ExitStack() as _stack:
     _enter(mock_patch.object(pc.road_corridors, "_fetch_floodplain_hydric_union", return_value=(None, False)))
     _enter(mock_patch.object(pc.water_candidate_zones, "identify_water_system_candidate_zones",
                              return_value={"zones_geojson": _empty_fc}))
-    _enter(mock_patch.object(pc, "fetch_and_select_optimal_water_zone", return_value=None))
+    # pipeline_context calls identify_water_suitability() directly now (the
+    # fetch_and_select wrapper only ever called it and threw the rest away,
+    # so calling it directly keeps the scoring narrative at no extra cost).
+    _enter(mock_patch.object(pc, "identify_water_suitability",
+                             return_value={"selected_water_zone": None, "narrative_data": None}))
     _enter(mock_patch.object(pc.road_corridors, "identify_road_corridor_candidates",
                              return_value={"zones_geojson": _empty_fc, "all_scored_candidates": [],
                                            "road_network": _empty_road_network,

@@ -565,10 +565,13 @@ print(
 
 
 # =====================================================================
-# The SERVICE-DISTANCE rule moved: it is no longer a per-cell mask gate,
-# it is the post-delineation drop on a zone's representative point. That
-# drop is explicitly a TEMPORARY GUARD (see find_candidate_zones()), so it
-# is asserted as behaviour without being asserted as permanent.
+# The SERVICE-DISTANCE rule is no longer a gate ANYWHERE. It left the
+# per-cell mask on the gates-narrow branch, and the post-delineation drop
+# that replaced it -- explicitly marked a TEMPORARY GUARD -- is gone too:
+# the scoring branch decided a candidate with no production area in range
+# is scored on its landform, not discarded. What survives is an
+# informational FLAG plus a None headline relationship, and consumers must
+# handle that None.
 # =====================================================================
 _sd_far = [
     {
@@ -580,24 +583,35 @@ _sd_far = [
 ]
 # The mask is unaffected (it never looked at production)...
 assert int(compute_water_eligible_cells(SINGLE_COLUMN_DEM, BOUNDARY).sum()) == int(_baseline_mask.sum())
-# ...but every delineated candidate is dropped for having no relationship.
+# ...and every delineated candidate now SURVIVES, carrying the flag.
 _sd_diag: dict = {}
-assert find_candidate_zones(SINGLE_COLUMN_DEM, _sd_far, BOUNDARY, diagnostics=_sd_diag) == []
+_sd_zones = find_candidate_zones(SINGLE_COLUMN_DEM, _sd_far, BOUNDARY, diagnostics=_sd_diag)
+assert _sd_zones, "a candidate with no production area in range must no longer be dropped"
+for _z in _sd_zones:
+    assert wcz.FLAG_NO_SERVICE_RELATIONSHIP in _z["flags"], _z["flags"]
+    assert _z["has_service_relationship"] is False
+    assert _z["production_area_relationships"] == []
+    assert _z["primary_production_area_relationship"] is None, (
+        "the headline relationship is an honest None -- never a fabricated relationship to a "
+        "production area that is not in range"
+    )
+    assert _z["served_production_area_ids"] == []
 _sd_outcomes = {o["outcome"] for o in _sd_diag["keypoint_outcomes"]} | {
     s["outcome"] for s in _sd_diag["accumulation_seeds"]
 }
-assert wcz.REASON_NO_SERVICE_RELATIONSHIP in _sd_outcomes, _sd_outcomes
-assert REASON_NOMINATED not in _sd_outcomes, "nothing may survive when no production area is in range"
-# Some seeds on this thin synthetic channel are dropped at the area floor
-# BEFORE the service check is even reached -- an ordering detail, not a
-# contradiction: the floor runs on the clipped footprint and the service
-# check runs after it. What matters is that no candidate survives.
-assert _sd_outcomes <= {wcz.REASON_NO_SERVICE_RELATIONSHIP, REASON_BELOW_MIN_AREA}, _sd_outcomes
+assert REASON_NOMINATED in _sd_outcomes
+# The reason CODE is gone with the drop -- a candidate can no longer die
+# of this, so no outcome may name it.
+assert not hasattr(wcz, "REASON_NO_SERVICE_RELATIONSHIP"), (
+    "the no-service DROP is deleted, so its reason code must be too -- it is a flag now"
+)
+assert not any("no_service_relationship" == o for o in _sd_outcomes), _sd_outcomes
 print(
-    "Service distance -- no longer a mask gate, still a post-delineation drop: a production area ~1000 m "
-    f"away leaves the mask untouched at {int(_baseline_mask.sum())} cells but drops every delineated "
-    f"candidate with '{wcz.REASON_NO_SERVICE_RELATIONSHIP}'. Flagged in the module as a TEMPORARY GUARD "
-    "the scoring branch will re-decide."
+    "Service distance -- no longer a gate anywhere: a production area ~1000 m away leaves the mask "
+    f"untouched at {int(_baseline_mask.sum())} cells AND leaves {len(_sd_zones)} delineated "
+    f"candidate(s) alive, each carrying the informational flag '{wcz.FLAG_NO_SERVICE_RELATIONSHIP}' "
+    "with an empty relationship list and a None headline relationship. The temporary guard the "
+    "gates-narrow branch left behind is gone, and its reason code with it."
 )
 
 
@@ -1524,6 +1538,10 @@ _ADDED_ZONE_KEYS = {
     "overlap_trimmed",
     "canopy_overlap_pct",
     "road_overlap_pct",
+    # False where no production area is in service range. The candidate is
+    # no longer dropped for it, so a consumer needs to be able to see the
+    # condition rather than infer it from an empty relationship list.
+    "has_service_relationship",
 }
 for _z in _nom_zones + _base_zones:
     _missing = _CONSUMER_READ_ZONE_KEYS - set(_z)

@@ -558,6 +558,86 @@ print("_format_water_candidate_zones_summary(): N candidates with provenance, fl
       "measurements (no capacity anywhere), reported overlaps, per-keypoint reason codes, and "
       "gravity-vs-pump all rendered from the block; no-candidate and missing blocks read as no data.")
 
+
+# --- the SCORED path: top-N by rank, with the total stated -------------
+#
+# Supplying water_suitability.build_narrative_data()'s block trims the
+# per-candidate detail to the top N BY RANK and appends the ranked table.
+# Omitting it must leave the previous behavior exactly as it was -- an
+# unscored run has no ranks to trim by.
+def _suit_zone(zone_id, rank, score, production_pct, has_service=True, persistence=0.72):
+    return {
+        "id": zone_id,
+        "rank": rank,
+        "suitability_score": score,
+        "confidence": "medium",
+        "area_acres": 1.9,
+        "provenance": {
+            "nominated_by": "keypoint", "keypoint_id": 1, "valley_id": 0,
+            "wall_offset_downstream_ft": 410.1, "anchor_off_parcel": False,
+        },
+        "factors": {"gravity_feed": 1.0, "soil_water_holding": 0.5, "basin_shape": 0.573},
+        "basin": {
+            "enclosure": 1.0, "persistence": persistence, "persistence_ratio": 0.18,
+            "persistence_available": persistence is not None, "wall_economy": 0.0,
+        },
+        "overlaps": {"canopy_pct": 12.5, "road_pct": None, "production_pct": production_pct},
+        "has_service_relationship": has_service,
+        "measurement_complete": True,
+        "flags": [],
+    }
+
+
+_suit_nd = {
+    "zone_found": True,
+    "candidate_count": 9,
+    "presented_count": 1,
+    "presentation_top_n": 3,
+    "factor_weights": {"gravity_feed": 0.35, "soil_water_holding": 0.30, "basin_shape": 0.35},
+    # Only zone 0 is presented, so the SECOND generation-block candidate
+    # must vanish from the detail -- which is what makes this a test of
+    # the trim rather than of the formatter.
+    "zones": [_suit_zone(0, 1, 70.1, 8.0)],
+}
+_scored_prose = _format_water_candidate_zones_summary(_water_nd, _suit_nd)
+assert "2 candidate survey area(s) identified" in _scored_prose, "the generation headline is unchanged"
+assert "the 1 highest-ranked of 9 scored survivor(s)" in _scored_prose, (
+    "the TOTAL must be stated beside the trimmed count, or the trim is silent"
+)
+assert "Survey area 0:" in _scored_prose
+assert "Survey area 1:" not in _scored_prose, "candidate 1 is outside the top N and must not be described"
+assert "Survey area 1:" in _water_prose, "...but it IS described on the unscored path -- the contrast"
+assert "SUITABILITY RANKING -- top 1 of 9 scored candidate(s)" in _scored_prose
+assert "Rank 1: survey area 0, 70.1/100" in _scored_prose
+assert "basin shape 0.573" in _scored_prose and "valley shoulders 1.0" in _scored_prose
+# THE SCORED/REPORTED SPLIT IS STATED, not left for a reader to infer.
+assert "MEASURED AND REPORTED but NOT scored" in _scored_prose
+assert "Overlaps, reported not scored: canopy 12.5%, roads NOT CHECKED, selected production ground 8.0%" in (
+    _scored_prose
+), "the None sentinel must read as NOT CHECKED, never as 0%"
+
+# A no-service candidate says so in prose rather than showing a bare 0.0.
+_no_service_prose = _format_water_candidate_zones_summary(
+    _water_nd, {**_suit_nd, "zones": [_suit_zone(0, 1, 40.0, 0.0, has_service=False)]}
+)
+assert "NO production area within service range" in _no_service_prose
+assert "still scored on its own landform" in _no_service_prose
+
+# An unmeasurable persistence reading reads as unmeasurable, not as zero.
+_unmeasured_prose = _format_water_candidate_zones_summary(
+    _water_nd, {**_suit_nd, "zones": [_suit_zone(0, 1, 40.0, 0.0, persistence=None)]}
+)
+assert "not measurable (the traced channel ended before enough cross-sections)" in _unmeasured_prose
+
+# An unscored run is byte-identical to before.
+assert _format_water_candidate_zones_summary(_water_nd, None) == _water_prose
+assert _format_water_candidate_zones_summary(_water_nd, {"zone_found": False}) == _water_prose
+print("_format_water_candidate_zones_summary() SCORED path: describes exactly the top-N by rank and "
+      "states the total survivor count; appends the ranked table naming which three properties are "
+      "scored and which three overlaps are reported-not-scored; None overlaps read as NOT CHECKED; a "
+      "no-service candidate and an unmeasurable persistence reading each say so; and omitting the "
+      "scoring block leaves the unscored prose byte-identical.")
+
 _solar_nd = {
     "site_found": True,
     "candidate_count": 5,

@@ -230,10 +230,12 @@ FIELD NOTES
   clearly separate field rather than folded into the KSOP fields above:
   a future reader can tell at a glance which fields are load-bearing
   for computation and which exist purely to feed the narrative. Note
-  the water key comes from water_candidate_zones.identify_water_system_
-  candidate_zones() (the module that owns that narrative block); the
-  fetch_and_select_optimal_water_zone() call above returns only the
-  bare winning zone dict and carries no narrative_data of its own.
+  the water_candidate_zones key comes from water_candidate_zones.
+  identify_water_system_candidate_zones() (the module that owns the
+  GENERATION narrative), and water_suitability comes from the
+  identify_water_suitability() call above, which owns the SCORING one --
+  the ranked, top-N block. Both are needed: one says what ground the
+  candidates cover, the other says which of them ranked where and why.
 
 KNOWN LIMITATIONS (found while building this, deliberately NOT worked
 around here -- flagging per this branch's own instructions rather than
@@ -406,7 +408,7 @@ import valley_delineation
 import water_candidate_zones
 from solar_suitability import identify_solar_candidate_zones
 from tree_zone_candidates import identify_tree_zone_candidates
-from water_suitability import NO_WATER_ZONE, fetch_and_select_optimal_water_zone
+from water_suitability import NO_WATER_ZONE, identify_water_suitability
 
 
 @dataclass
@@ -571,8 +573,7 @@ def build_pipeline_context(
     canopy_height override -- exclusion_zones.identify_exclusion_zones(),
     production_area_ceiling.identify_optimized_production_areas(), water_
     candidate_zones.identify_water_system_candidate_zones(), water_
-    suitability.fetch_and_select_optimal_water_zone() (via its
-    **suitability_kwargs passthrough into identify_water_suitability()),
+    suitability.identify_water_suitability(),
     road_corridors.identify_road_corridor_candidates(), identify_solar_
     candidate_zones(), and identify_tree_zone_candidates().
 
@@ -660,8 +661,8 @@ def build_pipeline_context(
     # canopy_height= override and this function already forwards it to all
     # of them -- but with nothing to forward it forwarded None, and None
     # means "fetch it yourself". SEVEN consumers did, on every run:
-    # exclusion_zones, water_candidate_zones, water_suitability (via
-    # fetch_and_select_optimal_water_zone), road_corridors, solar_
+    # exclusion_zones, water_candidate_zones, water_suitability,
+    # road_corridors, solar_
     # suitability, and identify_tree_zone_candidates TWICE (once nested
     # inside solar's own tree-zone-exclusion step, once at this function's
     # own call below). Seven Planetary Computer round-trips for one
@@ -809,7 +810,14 @@ def build_pipeline_context(
     )
     water_zones = water_system_result["zones_geojson"]["features"]
 
-    selected_water_zone = fetch_and_select_optimal_water_zone(
+    # identify_water_suitability() rather than fetch_and_select_optimal_
+    # water_zone(): that wrapper calls THIS function internally and throws
+    # everything but the selection away, so calling it directly costs
+    # nothing extra and keeps the scoring narrative_data (the ranked,
+    # top-N block the report's water summary renders) instead of
+    # discarding it. The selection itself is unchanged -- still
+    # select_optimal_water_zone()'s rank-1 answer, read off the same result.
+    water_suitability_result = identify_water_suitability(
         boundary_coordinates,
         dem=dem,
         boundary_polygon_utm=boundary_polygon_utm,
@@ -822,6 +830,7 @@ def build_pipeline_context(
         keypoints=keypoints,
         canopy_height=canopy_height,
     )
+    selected_water_zone = water_suitability_result["selected_water_zone"]
     # SAME GUARD as selected_road_corridor below, applied to the water zone:
     # every downstream consumer of a selected_water_zone override
     # (identify_road_corridor_candidates(), identify_solar_candidate_
@@ -923,6 +932,11 @@ def build_pipeline_context(
             "exclusion_zones": exclusion_result.get("narrative_data"),
             "production_area_ceiling": optimized_production.get("narrative_data"),
             "water_candidate_zones": water_system_result.get("narrative_data"),
+            # The scoring block. Supplying it is what trims the report's
+            # water summary to the top WATER_ZONE_PRESENTATION_TOP_N by
+            # rank and appends the ranked table; without it that summary
+            # falls back to describing every candidate.
+            "water_suitability": water_suitability_result.get("narrative_data"),
             "road_corridors": road_corridor_result.get("narrative_data"),
             "solar_suitability": solar_result.get("narrative_data"),
             "tree_zone_candidates": tree_zone_result.get("narrative_data"),

@@ -602,7 +602,10 @@ _ROAD_UNION_NOT_SUPPLIED = object()
 # Outcomes -- exactly one per nomination attempt:
 REASON_NOMINATED = "nominated"
 REASON_BELOW_MIN_AREA = "below_min_area"
-REASON_NO_SERVICE_RELATIONSHIP = "no_service_relationship"
+# NOTE: there is deliberately no no_service_relationship OUTCOME any more.
+# A candidate with no production area in range is no longer dropped; it
+# carries FLAG_NO_SERVICE_RELATIONSHIP and is scored on its landform. See
+# that flag's own comment.
 REASON_EMPTY_AFTER_BOUNDARY_CLIP = "empty_after_boundary_clip"
 REASON_EMPTY_AFTER_OVERLAP_TRIM = "empty_after_overlap_trim"
 # A keypoint whose own cell carries more contributing area than the
@@ -657,6 +660,14 @@ FLAG_ABUTMENT_NOT_FOUND_RIGHT = "abutment_not_found_right"
 FLAG_DAM_BAND_CROSSES_MAJOR_DRAINAGE_LEFT = "dam_band_crosses_major_drainage_left"
 FLAG_DAM_BAND_CROSSES_MAJOR_DRAINAGE_RIGHT = "dam_band_crosses_major_drainage_right"
 FLAG_BACKWATER_DISTANCE_LIMITED = "backwater_distance_limited"
+# No production area within max_service_distance_meters of this
+# candidate's representative point. INFORMATIONAL, never a drop: this was
+# a reason code (a candidate died on it) until the scoring branch decided
+# such a zone should be scored on its landform and ranked with the rest.
+# The zone still carries an empty production_area_relationships list and a
+# None primary relationship, which is what the flag is warning a consumer
+# about.
+FLAG_NO_SERVICE_RELATIONSHIP = "no_service_relationship"
 
 # Parameterised outcome: which specific already-delineated candidate the
 # seed was too close to. A function rather than a bare constant because
@@ -1326,16 +1337,16 @@ def find_candidate_zones(
         delineate overlapping backwaters. Component retention uses
         8-CONNECTIVITY, matching the D8 flow adjacency the pool was built
         from.
-      * TEMPORARY GUARD: a zone whose representative point clears no
-        production area within max_service_distance_meters is dropped with
-        REASON_NO_SERVICE_RELATIONSHIP. This is the LAST REMNANT of the
-        service-distance gate that left the nomination mask this branch,
-        kept unchanged here only because _zone_production_area_
-        relationships() returning [] leaves no headline relationship for
-        the scoring layer to read. THE SCORING BRANCH DECIDES ITS FATE:
-        if a no-relationship candidate can instead survive with a neutral
-        or floored gravity factor, this drop goes away with it. Do not
-        build anything on the assumption that it is permanent.
+      * NO SERVICE RELATIONSHIP IS NOT A DROP. A zone whose
+        representative point clears no production area within
+        max_service_distance_meters used to die here, under a guard
+        explicitly marked temporary. The scoring branch decided its fate:
+        such a zone now carries FLAG_NO_SERVICE_RELATIONSHIP, an empty
+        production_area_relationships list and a None
+        primary_production_area_relationship, and water_suitability.py
+        scores it with gravity_feed_factor 0.0 and ranks it with the rest.
+        CONSUMERS MUST HANDLE A None PRIMARY RELATIONSHIP -- that is the
+        one contract change this carries.
 
     THE CONTRIBUTING-AREA CEILING AND THE DELINEATED ZONE. Delineation is
     gated by the same three gates as nomination, which in practice means:
@@ -1617,12 +1628,22 @@ def find_candidate_zones(
             max_service_distance_meters,
         )
         if not relationships:
-            # TEMPORARY GUARD -- the last remnant of the service-distance
-            # gate that left the nomination mask this branch. See the
-            # docstring: the scoring branch decides whether such a candidate
-            # instead survives with a neutral/floored gravity factor, and
-            # removes this drop if so.
-            return None, REASON_NO_SERVICE_RELATIONSHIP, flags
+            # THE TEMPORARY GUARD IS GONE. A candidate that clears no
+            # production area within max_service_distance_meters used to be
+            # DROPPED here -- the last remnant of the service-distance gate
+            # that left the nomination mask, kept only until the scoring
+            # layer could decide its fate. It has: water_suitability.py
+            # scores such a zone with gravity_feed_factor = 0.0 and ranks
+            # it like any other, so the drop is now a flag.
+            #
+            # "The best available site on this parcel" has to be answerable
+            # on a parcel whose production ground sits nowhere near its
+            # water. Returning nothing there is a failure to survey, not a
+            # conclusion -- and where the water goes is a separate question
+            # with its own answers (a longer line, a different production
+            # layout, or a use other than irrigation) that this layer is
+            # not the place to foreclose.
+            flags.append(FLAG_NO_SERVICE_RELATIONSHIP)
 
         cluster_slopes = [
             float(slope_pct_grid[r, c]) for r, c in kept if not np.isnan(slope_pct_grid[r, c])
@@ -1683,6 +1704,7 @@ def find_candidate_zones(
             "canopy_overlap_pct": _overlap_fraction_pct(kept, dem, canopy_checked, mask_utm=canopy_mask),
             "road_overlap_pct": _overlap_fraction_pct(kept, dem, road_checked, prepared_union=road_prepared),
             "served_production_area_ids": sorted(r["production_area_id"] for r in relationships),
+            "has_service_relationship": bool(relationships),
             "polygon_utm": polygon_utm,
             "geometry_wgs84": geometry_wgs84,
             # IDENTITY, not a copy and not a reduction -- there is no
@@ -1692,7 +1714,11 @@ def find_candidate_zones(
             "render_fill_polygon_utm": polygon_utm,
             "render_fill_geometry_wgs84": geometry_wgs84,
             "production_area_relationships": relationships,
-            "primary_production_area_relationship": relationships[0],
+            # None where nothing is in range -- an honest empty answer, not
+            # a fabricated relationship. Every consumer that reads this
+            # must handle None; water_suitability.py scores it as
+            # gravity_feed_factor 0.0 with a plain note.
+            "primary_production_area_relationship": relationships[0] if relationships else None,
             "contributing_area_cells": round(
                 float(np.median([flow_accumulation[r, c] for r, c in kept])), 2
             ),

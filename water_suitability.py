@@ -9,62 +9,116 @@ stays entirely water_candidate_zones.py's job, untouched here). Same
 solar_suitability.py already use over their own upstream candidate
 layers.
 
-Four independently-computed, positively-weighted 0-1 factors, combined
-into a 0-100 suitability_score:
+WHAT SCORING MEASURES, AND WHAT IT DELIBERATELY DOES NOT. A score here
+answers one question: what IS this site, as landform? Three factors, all
+positively weighted, all describing properties of the ground itself --
+
+    delivery  -> gravity_feed_factor      (weight 0.35)
+    holding   -> soil_water_holding_factor (weight 0.30)
+    geometry  -> basin_shape_factor        (weight 0.35)
+
+Everything else this pipeline knows about a candidate -- refill context,
+clearing cost, land-use tradeoffs -- is REPORTED alongside the score and
+never folded into it. The dividing line is whether the farmer can change
+it. Landform cannot be changed: a valley that does not close, a soil that
+will not hold, a site below the ground it must serve are facts about the
+place, and they belong in the number. Overlaps and context CAN be
+changed, at a price the farmer is the one to weigh: clearing canopy,
+relocating a track, conceding production ground, or trucking in refill
+are decisions, not defects. Folding a decision into the score silently
+makes it on the farmer's behalf and hides its cost; reporting it as a
+measured percentage puts the tradeoff where it can be argued with.
 
     gravity_feed_factor (weight GRAVITY_FEED_SCORE_WEIGHT = 0.35) --
         real elevation differential/gradient vs. the production area a
         zone could serve (water_candidate_zones.py's own
-        production_area_relationships, no longer a generation-time gate —
-        see that module's docstring). This is the SINGLE largest weight:
-        gravity delivery is the main economic reason a keyline pond/dam
-        site is worth siting above production land at all rather than
-        anywhere else convenient, so a real, comfortable gravity-feed
-        relationship is the strongest positive signal this layer can
-        report. A below-elevation (pump-required) candidate scores LOWER
-        on this one factor, not excluded, not zeroed across the whole
-        composite, and not apologized for in confidence_notes — needing a
-        pump is a real cost/maintenance tradeoff against site quality, the
-        same kind of tradeoff production_suitability.py already reports
-        for a soil-carved candidate or solar_suitability.py reports for a
-        prime-farmland overlap.
+        production_area_relationships, no longer a generation-time gate --
+        see that module's docstring). Gravity delivery is the main
+        economic reason a keyline pond/dam site is worth siting above
+        production land at all rather than anywhere else convenient, so a
+        real, comfortable gravity-feed relationship is the strongest
+        positive signal this layer can report. A below-elevation
+        (pump-required) candidate scores LOWER on this one factor, not
+        excluded, not zeroed across the whole composite, and not
+        apologized for in confidence_notes -- needing a pump is a real
+        cost/maintenance tradeoff against site quality. A candidate with
+        NO production area within service range scores 0.0 here and
+        survives: see the no-relationship note below.
 
     soil_water_holding_factor (weight SOIL_WATER_HOLDING_SCORE_WEIGHT =
         0.30) -- real SSURGO saturated hydraulic conductivity
         (chorizon.ksat_r), area-weighted across each candidate's own
-        footprint. Weighted second-highest: a pond built on a soil that
-        won't hold water is a real, physical viability problem
-        regardless of how good every other factor looks, so this needs
-        real weight, not a minor tiebreaker.
+        footprint. A pond built on a soil that will not hold water is a
+        real, physical viability problem regardless of how good every
+        other factor looks, so this needs real weight, not a minor
+        tiebreaker.
 
-    stream_permanence_factor (weight STREAM_PERMANENCE_SCORE_WEIGHT =
-        0.20) -- real NHD FCode-based flow-permanence classification
-        (perennial/intermittent/ephemeral) of the nearest mapped stream,
-        combined with real proximity. Weighted lower than gravity/soil
-        deliberately: a well-designed farm pond is commonly valley/
-        runoff-fed rather than stream-fed, so a nearby perennial stream is
-        a real, genuine bonus (reliable recharge, less dependence on
-        seasonal runoff alone) but not a requirement the way physical
-        water-holding or gravity delivery are — see
-        STREAM_PROXIMITY_REFERENCE_METERS below for why proximity here is
-        an approximation, not a precise spatial match.
+    basin_shape_factor (weight BASIN_SHAPE_SCORE_WEIGHT = 0.35) -- the
+        geometry of the impoundment itself, computed ENTIRELY from the
+        level-pool measurements water_candidate_zones.py already carries
+        on the zone (abutments, cross-section stations, dam-band width).
+        No new geometry is computed here and no DEM is re-read. Three
+        equally-subweighted components -- enclosure, upstream persistence
+        and wall economy -- see _basin_shape_factor() for each. This is
+        the factor that distinguishes a real valley basin from a shallow
+        swale, which is the distinction the whole multi-candidate
+        generation sequence exists to surface.
 
-    topographic_factor (weight TOPOGRAPHIC_SCORE_WEIGHT = 0.15) --
-        gradient steepness of the valley segment itself (a real, computed
-        signal — see _valley_gradient_pct_for_zone(), from the same
-        branches_utm elevation data valley_delineation.py already
-        produces) and the valley's own max_contributing_area_acres
-        (valley_delineation.py, unchanged). Weighted lowest: the valley
-        already had to clear valley_delineation.py's own
-        MIN_PRIMARY_VALLEY_CONTRIBUTING_AREA_ACRES threshold to exist as a
-        candidate at all, so this factor differentiates AMONG already-
-        qualifying valleys rather than gating candidacy a second time.
+WHAT WAS DELETED, AND WHY -- both deletions are design corrections, not
+value retunes, and both are asserted absent by test_water_suitability.py.
 
-These four weights (0.35 / 0.30 / 0.20 / 0.15, summing to 1.0) follow the
-same "document the reasoning, not just the number" standard as
+    stream_permanence_factor (was weight 0.20) is GONE. It was
+    bonus-only by construction (its neutral baseline was 0.5 and a
+    missing stream could never cost a candidate anything), it was coarse
+    (NHD stream centerlines carry a documented 100-300 m planimetric
+    offset from the DEM on the reference property, so "the nearest
+    mapped stream is 180 m away" was not a statement about this site),
+    and what it was reaching for -- refill reliability -- is
+    engineering-verification context rather than site geometry. A farm
+    pond's refill is settled by a yield calculation and a season of
+    observation, not by a weighted proxy. The NHD fetch, the FCode
+    classification and the proximity reference are all deleted with it.
+
+    topographic_factor (was weight 0.15) is GONE, both subcomponents.
+    Its gradient sweet spot was a PROXY for exactly what the level-pool
+    delineation now MEASURES DIRECTLY, and on the reference property the
+    two disagree: the sweet spot awards a full 1.0 at a 10% valley grade,
+    while the measured 2.5 m pool on that same channel dies roughly 25 m
+    upstream. When a proxy and a direct measurement of the same property
+    disagree, the measurement wins and the proxy goes -- keeping both
+    would have double-counted the agreement and hidden the disagreement.
+    Its contributing-area subcomponent was refill context, and leaves for
+    the same reason the stream factor did. NOTE: the zone dict's OWN
+    contributing-area and slope aggregates (contributing_area_cells,
+    slope_pct) are generation-side, remain untouched, and are still
+    reported as informational properties -- what left is this module's
+    scoring use of them, not the measurements.
+
+These three weights (0.35 / 0.30 / 0.35, summing to 1.0) follow the same
+"document the reasoning, not just the number" standard as
 road_corridors.py's PRODUCTION_AVOIDANCE_SCORE_WEIGHT/
-EROSION_AVOIDANCE_SCORE_WEIGHT — CONFIGURABLE, tune against a real
+EROSION_AVOIDANCE_SCORE_WEIGHT -- CONFIGURABLE, tune against a real
 property once ground-truthed.
+
+REPORTED, NOT WEIGHTED. Every scored zone carries three overlap
+measurements with identical sentinel semantics (None = never checked,
+0.0 = checked and genuinely none): canopy_overlap_pct and
+road_overlap_pct (both generation-side, unchanged) and
+production_overlap_pct (this module's own, new -- the share of a
+candidate's footprint sitting on ground the production layer selected).
+Conceding production ground to a pond is a land-use tradeoff of exactly
+the same standing as clearing canopy: a real cost, borne by the farmer,
+which the survey's job is to measure and state rather than to decide.
+
+NO CANDIDATE IS DROPPED FOR HAVING NO PRODUCTION AREA TO SERVE. A zone
+whose representative point clears no production area within service
+distance used to be discarded at generation time; that drop was a
+temporary guard, and it is gone. Such a zone now scores
+gravity_feed_factor = 0.0, carries an informational flag and a plain
+confidence note, and appears in the ranking like any other. "The best
+available site on this parcel" has to be answerable on a parcel with no
+production land near water, and a survey that returns nothing there has
+failed rather than concluded.
 
 Unlike production_suitability.py/solar_suitability.py (which both report
 a flat CONFIDENCE_LOW on every candidate — confidence there reflects the
@@ -73,12 +127,20 @@ candidate on that layer), this module computes REAL, differentiated
 confidence per zone from how much of that SPECIFIC zone's scoring was
 actually backed by live, checked data: whether its own soil footprint had
 a real, checked SSURGO ksat_r reading covering a meaningful share of its
-area, and whether a real, classified NHD stream was found within
-STREAM_PROXIMITY_REFERENCE_METERS of it — see _confidence_for(). This
-genuinely varies zone-to-zone even within one live run (different zones
-sit over different soil map units with different coverage, and different
-distances to the nearest mapped stream), unlike a single flat value that
-can only ever change between runs.
+area, and whether its level-pool MEASUREMENTS came back complete -- every
+cross-section station actually measured, and at least one abutment search
+that ran on a usable stem direction. See _confidence_for(). This genuinely
+varies zone-to-zone even within one live run (zones sit over different
+soil map units with different coverage, and a short or flat-tied stem
+leaves some zones with fewer real measurements than others), unlike a
+single flat value that can only ever change between runs.
+
+An incomplete measurement dents CONFIDENCE and never the score. A station
+the stem walk could not reach is an ABSENT measurement, not a dry one --
+valley_level_pool.py's own station-status contract -- so persistence is
+computed over the measured stations only and its subweight is
+redistributed when too few remain. Fabricating a 0.0 to fill the gap
+would report ground nobody looked at as ground that holds no water.
 
 No MIN_SUITABILITY_SCORE cutoff is applied here — every zone
 water_candidate_zones.py generated is scored and returned, low score or
@@ -100,20 +162,25 @@ one well-suited water zone is sufficient, so no multi-candidate
 coexistence logic sits on top of this selection.
 
     water_candidate_zones.find_candidate_zones() zones
-        + valley_delineation.delineate_valleys() valleys (same DEM run)
-        --> [this module] per-zone soil fetch (SSURGO ksat_r) + one
-            whole-boundary NHD stream fetch
-        --> per-zone scoring (gravity/soil/stream/topographic)
+        --> [this module] per-zone soil fetch (SSURGO ksat_r)
+        --> per-zone scoring (gravity / soil / basin shape), all three
+            factors read off the zone's own carried measurements and its
+            own soil footprint -- no second DEM pass, no hydrology fetch
+        --> per-zone production-overlap measurement (reported, not scored)
         --> enriched "water_system_candidate" features (same layer,
             same zones -- with suitability_score/*_factor/confidence
             properties added)
 
 score_water_zones() is the pure scoring core: it takes already-computed
-zones/valleys/dem plus optionally pre-fetched per-zone soil data and a
-pre-fetched stream list, and does no network I/O itself — same
-pure-core-vs-network-fetch split as every other candidate-scoring module
-in this pipeline, so the scoring math is unit-testable against synthetic
-input independent of whether SSURGO/NHD are reachable.
+zones/dem plus optionally pre-fetched per-zone soil data, and does no
+network I/O itself — same pure-core-vs-network-fetch split as every other
+candidate-scoring module in this pipeline, so the scoring math is
+unit-testable against synthetic input independent of whether SSURGO is
+reachable. It no longer takes `valleys`: nothing in scoring reads a valley
+any more (that was the deleted topographic factor's only use).
+identify_water_suitability() still takes and still needs `valleys` -- it
+forwards them into find_candidate_zones(), whose keypoint self-compute
+path would otherwise re-delineate the same valleys a second time.
 identify_water_suitability() is the fetch-and-score entry point. Like
 water_candidate_zones.identify_water_system_candidate_zones(), it accepts
 dem/boundary_polygon_utm/valleys/production_areas as independent, optional
@@ -144,9 +211,21 @@ genuinely shift on a real property versus the pre-fix behavior, since
 candidate zones are now scored against smaller, ceiling-trimmed
 production-area geometry -- an intentional correction, not a regression.
 
-This is a self-contained, standalone pass — like production_suitability.py,
-it is NOT wired into generate_full_report.py/report_generator.py in this
-pass. Validate the ranking on its own first.
+PRESENTATION IS CAPPED; GENERATION AND RANKING ARE NOT. Every candidate
+is scored, ranked and returned -- see the no-cutoff note above -- but the
+narrative block and the report prose describe only the top
+WATER_ZONE_PRESENTATION_TOP_N by rank, plus one line stating how many
+survivors there are in total. Generation is deliberately uncapped and a
+real parcel can produce a dozen candidates; listing all of them in prose
+buries the ones that matter without adding a decision the reader can act
+on. The full ranked list stays in all_scored_zones and in the GeoJSON,
+which is where a reader who wants candidate nine goes.
+
+build_narrative_data() produces that block, and report_generator.py's
+water candidate-zones summary renders the top-N view when it is supplied,
+falling back to water_candidate_zones.py's own generation-side block when
+it is not (an unscored run has no ranks to trim by, and inventing an
+order there would be worse than listing everything).
 """
 
 import math
@@ -154,15 +233,22 @@ from typing import Optional
 
 from rasterio.warp import transform as warp_transform
 from rasterio.warp import transform_geom
-from shapely.geometry import LineString, MultiLineString, Point, Polygon, shape
+from shapely.geometry import Polygon, shape
+from shapely.ops import unary_union
 
 from dem_data import get_dem_for_boundary
 from feature_schema import CONFIDENCE_HIGH, CONFIDENCE_LOW, CONFIDENCE_MEDIUM, make_feature, make_feature_collection
-from hydrology_data import get_water_features_for_boundary
-from production_area import _fetch_road_exclusion_union_utm, get_required_tree_root_zone_mask_utm, identify_production_areas
+from production_area import (
+    METERS_PER_FOOT,
+    _fetch_road_exclusion_union_utm,
+    get_required_tree_root_zone_mask_utm,
+    identify_production_areas,
+)
+from raster_grid import SQUARE_METERS_PER_ACRE
 from production_area_ceiling import identify_optimized_production_areas
 from soil_data import get_saturated_hydraulic_conductivity_for_polygon, get_soil_geometries_for_polygon
 from valley_delineation import delineate_valleys
+from valley_level_pool import ABUTMENT_SEARCH_HALF_WIDTH_METERS, STATION_MEASURED
 from water_candidate_zones import (
     WATER_ZONE_CANOPY_BUFFER_METERS,
     _ROAD_CHECK_UNCHECKED,
@@ -195,19 +281,28 @@ from water_candidate_zones import (
 NO_WATER_ZONE = object()
 
 # --- composite weights (must sum to 1.0). See module docstring for the
-# full reasoning behind each. CONFIGURABLE.
+# full reasoning behind each: delivery, holding, geometry -- what the site
+# IS, with everything the farmer could change reported beside the score
+# rather than folded into it. CONFIGURABLE.
 GRAVITY_FEED_SCORE_WEIGHT = 0.35
 SOIL_WATER_HOLDING_SCORE_WEIGHT = 0.30
-STREAM_PERMANENCE_SCORE_WEIGHT = 0.20
-TOPOGRAPHIC_SCORE_WEIGHT = 0.15
+BASIN_SHAPE_SCORE_WEIGHT = 0.35
 
 _WEIGHT_SUM = (
-    GRAVITY_FEED_SCORE_WEIGHT + SOIL_WATER_HOLDING_SCORE_WEIGHT
-    + STREAM_PERMANENCE_SCORE_WEIGHT + TOPOGRAPHIC_SCORE_WEIGHT
+    GRAVITY_FEED_SCORE_WEIGHT + SOIL_WATER_HOLDING_SCORE_WEIGHT + BASIN_SHAPE_SCORE_WEIGHT
 )
 assert math.isclose(_WEIGHT_SUM, 1.0, abs_tol=1e-6), f"water suitability factor weights must sum to 1.0, got {_WEIGHT_SUM}"
 
 SUITABILITY_SCORE_SCALE = 100
+
+# How many candidates the NARRATIVE and the report prose describe, by
+# rank. NOT a filter: generation is uncapped, every candidate is scored
+# and ranked, and all_scored_zones / the GeoJSON carry the full list. This
+# bounds PROSE only, because a dozen candidates described in full buries
+# the three that matter. The narrative states the total survivor count
+# beside the top N so the trim is visible rather than silent.
+# CONFIGURABLE.
+WATER_ZONE_PRESENTATION_TOP_N = 3
 
 # --- gravity-feed factor -------------------------------------------------
 
@@ -427,322 +522,329 @@ def _fetch_water_holding_data_for_zone(zone: dict, dem: dict) -> Optional[dict]:
     return _area_weighted_ksat(zone["polygon_utm"], ksat_rows, geometries_by_mukey, dem["crs"])
 
 
-# --- stream-permanence factor (NHD FCode) ---------------------------------
+# --- basin shape factor (level-pool geometry, already measured) ----------
 
-# NHD's own FCode values for StreamRiver (FType 460) flow-permanence
-# ("hydrographic category") -- confirmed against USGS's own NHD FCode
-# attribute value list before use here, the same "verify against real
-# documentation" discipline this project's SSURGO fixes already required:
-#   46006 = Perennial   (flows year-round except infrequent severe drought)
-#   46003 = Intermittent (flows part of the year, more than just after
-#            rain/snowmelt)
-#   46007 = Ephemeral    (flows only during/right after rain or snowmelt)
-#   46000 = StreamRiver, general -- portion of the year it contains water
-#            is UNKNOWN/unspecified, not a fourth real permanence class
-NHD_PERENNIAL_FCODES = {46006}
-NHD_INTERMITTENT_FCODES = {46003}
-NHD_EPHEMERAL_FCODES = {46007}
+# Sub-weights within basin_shape_factor. They sum to 1.0 and are EQUAL by
+# decision, not by default: enclosure, upstream persistence and wall
+# economy each describe a different way a valley either is or is not a
+# basin, and there is no ground-truthed basis yet for ranking one above
+# the others. Equal thirds say that honestly; an unequal split would imply
+# a calibration nobody has done. CONFIGURABLE.
+BASIN_ENCLOSURE_SUBWEIGHT = 1.0 / 3.0
+BASIN_PERSISTENCE_SUBWEIGHT = 1.0 / 3.0
+BASIN_WALL_ECONOMY_SUBWEIGHT = 1.0 / 3.0
 
-# Relative weight of each real permanence class within the stream factor,
-# 1.0 = most reliable. Ephemeral streams carry real water only right after
-# a storm/snowmelt -- a genuinely weaker water-source signal than
-# intermittent, which is deliberately weighted meaningfully below
-# perennial but meaningfully above ephemeral. "unknown" (FCode 46000, or
-# any FCode this module doesn't recognize) sits at a real middle value --
-# neither claiming reliability nor assuming the worst about a stream NHD
-# itself declined to classify. CONFIGURABLE.
-STREAM_PERMANENCE_WEIGHTS = {
-    "perennial": 1.0,
-    "intermittent": 0.55,
-    "ephemeral": 0.25,
-    "unknown": 0.4,
-}
-
-# Neutral baseline stream_permanence_factor -- both when no stream at all
-# exists within STREAM_PROXIMITY_REFERENCE_METERS, and as the floor a real
-# nearby stream's proximity/permanence credit is added on TOP of. Most
-# working farm ponds are valley/runoff-fed rather than stream-fed (see
-# module docstring), so "no reliable natural surface water source nearby"
-# is a real, unremarkable case -- not penalized below neutral.
-STREAM_NEUTRAL_FACTOR = 0.5
-
-# How close a candidate must be to a mapped NHD stream for that stream's
-# permanence classification to meaningfully affect its score, and the
-# reference distance proximity itself scores against (1.0 at 0m, fading to
-# 0 credit at/beyond this). This property's own DEM-derived valley lines
-# have been measured 100-300m offset from mapped NHD streams (established
-# earlier in this pipeline's development, see water_candidate_zones.py's
-# and road_corridors.py's own confidence_notes) -- a threshold much
-# tighter than that offset would essentially never register a real,
-# genuinely-nearby stream at all. 300m (the upper bound of the measured
-# offset) is used here so a stream that's actually close on the ground
-# isn't missed just because the DEM-derived valley line measuring distance
-# to it is itself offset -- but this makes stream proximity here a real
-# APPROXIMATION, not a precise spatial match; see
-# _confidence_notes_for()'s use of NHD_OFFSET_LIMITATION_NOTE.
-# CONFIGURABLE.
-STREAM_PROXIMITY_REFERENCE_METERS = 300.0
-
-NHD_OFFSET_LIMITATION_NOTE = (
-    "This property's DEM-derived valley lines have been measured 100-300m offset from mapped NHD "
-    "streams, so this candidate's stream proximity/permanence reading is an APPROXIMATION, not a "
-    "precise spatial match -- the real nearest stream could be meaningfully closer or farther than "
-    "the measured distance suggests."
+_BASIN_SUBWEIGHT_SUM = (
+    BASIN_ENCLOSURE_SUBWEIGHT + BASIN_PERSISTENCE_SUBWEIGHT + BASIN_WALL_ECONOMY_SUBWEIGHT
+)
+assert math.isclose(_BASIN_SUBWEIGHT_SUM, 1.0, abs_tol=1e-6), (
+    f"basin-shape subweights must sum to 1.0, got {_BASIN_SUBWEIGHT_SUM}"
 )
 
+# The upstream-persistence ratio at and above which that subcomponent
+# scores a full 1.0.
+#
+# WHAT THE RATIO IS. valley_level_pool.py samples three cross-sections
+# walking upstream from the dam line: station 0 at the wall, then two
+# more at CROSS_SECTION_STATION_SPACING_METERS intervals along the traced
+# stem. r is the share of the total flooded cross-sectional area that
+# sits at the two UPSTREAM stations:
+#
+#     r = (area_1 + area_2) / (area_0 + area_1 + area_2)
+#
+# A real valley basin keeps meaningful width and depth as the water backs
+# up, so a real share of its section area sits away from the wall. A
+# swale floods a puddle against the dam line and is dry 25 m upstream:
+# area_1 and area_2 are 0.0, r is 0.0, and the component scores 0.0. This
+# is the DIRECT measurement that replaced the deleted topographic
+# factor's gradient sweet-spot proxy.
+#
+# WHY 0.25. Three stations at equal spacing, so a perfectly prismatic
+# channel of constant section would give r = 2/3. Real valleys taper, and
+# the reference property's only genuine basin -- the confluence candidate
+# -- measured r ~= 0.18, with every swale on the same parcel at 0.0. A
+# reference of 0.25 puts that candidate at ~0.73 (a strong but not
+# saturated score, leaving headroom for a better basin to outrank it) and
+# leaves the swales at 0.0. The component therefore reproduces the by-eye
+# terrain judgment on the one property where the answer is known.
+#
+# CALIBRATION PENDING, and this is the constant most in need of it: it is
+# anchored to a SINGLE candidate on a SINGLE property. It should be
+# re-derived once several real, built or surveyed ponds can be measured.
+# CONFIGURABLE.
+PERSISTENCE_REFERENCE_RATIO = 0.25
 
-def _stream_permanence_label(fcode) -> str:
-    """Maps a raw NHD FCode value (may arrive as int, str, float, or
-    None/missing from the live service) to one of the real permanence
-    classes above, or 'unknown' for anything else (including the general
-    StreamRiver code 46000 -- see NHD_PERENNIAL_FCODES etc.'s own
-    comment)."""
-    try:
-        fcode_int = int(fcode)
-    except (TypeError, ValueError):
-        return "unknown"
-    if fcode_int in NHD_PERENNIAL_FCODES:
-        return "perennial"
-    if fcode_int in NHD_INTERMITTENT_FCODES:
-        return "intermittent"
-    if fcode_int in NHD_EPHEMERAL_FCODES:
-        return "ephemeral"
-    return "unknown"
+# Fewer than this many stations with status == measured and the
+# persistence ratio is not computable at all (a ratio needs a denominator
+# and at least one upstream term to be a ratio of anything). Below it the
+# subcomponent is DROPPED and the remaining subweights are renormalized --
+# never filled with a fabricated 0.0, which would report an unmeasured
+# reach as a dry one. See the module docstring: an absent measurement
+# dents confidence, not the score.
+MIN_MEASURED_STATIONS_FOR_PERSISTENCE = 2
 
 
-def _stream_permanence_factor(
-    nearest_stream: Optional[dict], reference_meters: float = STREAM_PROXIMITY_REFERENCE_METERS
-) -> tuple[float, Optional[str]]:
+def _basin_enclosure_score(zone: dict) -> float:
     """
-    0-1 score (STREAM_NEUTRAL_FACTOR baseline, real credit added for a
-    real, close, permanent stream) plus the permanence label used (None if
-    no stream was in range at all). nearest_stream is
-    {'name', 'fcode', 'distance_m'} (see _nearest_stream_for_zone()) or
-    None.
+    Do the valley walls close on the dam line? 1.0 both sides, 0.5 one,
+    0.0 neither -- read straight off valley_level_pool.py's abutment
+    search, which walked out from the anchor along the dam axis looking
+    for ground back up at the waterline.
+
+    A SIDE THAT CROSSES A MAJOR DRAINAGE COUNTS AS NOT FOUND, even when
+    the abutment search itself reported found. That flag means the dam
+    band ran into a second creek before it found a shoulder, and a second
+    creek is not a shoulder: damming across it is a different, larger
+    structure impounding different water, with its own permitting and its
+    own spillway. Treating it as enclosure would score the one finding
+    that most disqualifies a site as if it were the finding that most
+    qualifies it.
     """
-    if nearest_stream is None:
-        return STREAM_NEUTRAL_FACTOR, None
-
-    label = _stream_permanence_label(nearest_stream["fcode"])
-    proximity = max(0.0, 1.0 - nearest_stream["distance_m"] / reference_meters)
-    if proximity <= 0.0:
-        # beyond the reference distance entirely -- no real proximity
-        # credit, same as "no stream nearby at all"
-        return STREAM_NEUTRAL_FACTOR, None
-
-    weight = STREAM_PERMANENCE_WEIGHTS[label]
-    factor = STREAM_NEUTRAL_FACTOR + (1.0 - STREAM_NEUTRAL_FACTOR) * weight * proximity
-    return factor, label
+    sides = 0
+    for side in ("left", "right"):
+        found = bool(zone.get(f"abutment_found_{side}"))
+        crosses = bool(zone.get(f"dam_band_crosses_major_drainage_{side}"))
+        if found and not crosses:
+            sides += 1
+    return sides / 2.0
 
 
-def _reproject_streams_to_utm(streams: list[dict], dem_crs: str) -> list[dict]:
-    """hydrology_data.get_water_features_for_boundary()'s own 'streams'
-    list (WGS84 GeoJSON LineString/MultiLineString geometry, 'feature_code'
-    = NHD's FCode), reprojected into the DEM's own projected CRS for real
-    meter-distance math -- same reprojection pattern
-    solar_suitability.py's road-geometry handling already uses."""
-    reprojected = []
-    for stream in streams:
-        geometry = stream["geometry"]
-        coords = geometry["coordinates"]
-        line_lists = coords if geometry["type"] == "MultiLineString" else [coords]
-        lines_utm = []
-        for line in line_lists:
-            xs, ys = warp_transform("EPSG:4326", dem_crs, [p[0] for p in line], [p[1] for p in line])
-            lines_utm.append(LineString(zip(xs, ys)))
-        geometry_utm = lines_utm[0] if len(lines_utm) == 1 else MultiLineString(lines_utm)
-        reprojected.append({"name": stream["name"], "fcode": stream["feature_code"], "geometry_utm": geometry_utm})
-    return reprojected
+def _persistence_ratio(stations: list[dict]) -> Optional[float]:
+    """
+    (area_1 + area_2) / (area_0 + area_1 + area_2) over the stations whose
+    status is `measured`, in station-index order -- or None when fewer
+    than MIN_MEASURED_STATIONS_FOR_PERSISTENCE were measured, or when the
+    measured sections carry no area at all (a zero denominator is not a
+    ratio of 0.0, it is an absence of anything to take a ratio of).
 
-
-def _nearest_stream_for_zone(zone_polygon_utm: Polygon, streams_utm: list[dict]) -> Optional[dict]:
-    """Real nearest-geometry distance from the zone's own footprint (not
-    its centroid) to the closest mapped stream, same "measure to the real
-    thing itself" convention solar_suitability.py's distance properties
-    already use. None if streams_utm is empty (fetch succeeded, genuinely
-    nothing found -- the caller distinguishes this from "fetch failed" via
-    dict-key presence, same convention as every other optional-data
-    factor in this pipeline)."""
-    if not streams_utm:
+    UNREACHABLE STATIONS ARE EXCLUDED, NOT ZEROED. valley_level_pool.py
+    marks a station unreachable_stem_end when the traced stem ended before
+    reaching it and carries None for its width and area -- the status
+    contract exists precisely so a consumer cannot read a missing
+    measurement as a dry cross-section. Counting one as 0.0 area would
+    manufacture the very reading the contract forbids.
+    """
+    measured = [
+        st for st in sorted(stations, key=lambda s: s["station_index"])
+        if st.get("status") == STATION_MEASURED and st.get("flooded_cross_section_area_m2") is not None
+    ]
+    if len(measured) < MIN_MEASURED_STATIONS_FOR_PERSISTENCE:
         return None
-    best = min(streams_utm, key=lambda s: zone_polygon_utm.distance(s["geometry_utm"]))
+    areas = [float(st["flooded_cross_section_area_m2"]) for st in measured]
+    total = sum(areas)
+    if total <= 0.0:
+        return None
+    return sum(areas[1:]) / total
+
+
+def _basin_persistence_score(ratio: Optional[float]) -> Optional[float]:
+    """min(1.0, r / PERSISTENCE_REFERENCE_RATIO), or None when r itself is
+    None -- the caller renormalizes rather than substituting a value."""
+    if ratio is None:
+        return None
+    return min(1.0, max(0.0, ratio / PERSISTENCE_REFERENCE_RATIO))
+
+
+def _basin_wall_economy_score(zone: dict, abutment_search_half_width_meters: float) -> float:
+    """
+    1 - (station-0 flooded width / the full sampling window), clamped to
+    [0, 1]: how much dam does this pond cost? Station 0 sits ON the dam
+    line, so its flooded width IS the width of water the wall has to hold
+    back. Narrow water behind a wall means a short wall and a cheap
+    structure; water spanning the whole valley means a long one.
+
+    The denominator is the full sampling window -- 2x
+    valley_level_pool.ABUTMENT_SEARCH_HALF_WIDTH_METERS -- because that is
+    the widest thing the cross-section could have seen. A station-0 width
+    that FILLS the window scores 0.0.
+
+    THAT ZERO IS HONEST, INCLUDING WHERE IT IS INCONVENIENT. On the
+    reference property the confluence candidate -- the one genuine basin
+    on the parcel -- floods the entire window at station 0 and scores 0.0
+    here. That is the correct reading: its wall really would be long,
+    because two valleys meet there and the ground opens. The factor is not
+    apologizing for it and is not being softened to avoid it. Enclosure
+    and persistence still separate that candidate from the swales, which
+    is the whole reason basin shape has three components rather than one.
+    """
+    window = 2.0 * abutment_search_half_width_meters
+    if window <= 0:
+        return 0.0
+    station_zero = next(
+        (st for st in zone["level_pool"]["stations"] if st["station_index"] == 0), None
+    )
+    if station_zero is None or station_zero.get("flooded_width_m") is None:
+        # Station 0 sits at the anchor itself, so an unreachable one means
+        # the stem walk failed at the wall. Report no wall economy rather
+        # than inventing one; confidence already registers the gap.
+        return 0.0
+    return max(0.0, min(1.0, 1.0 - float(station_zero["flooded_width_m"]) / window))
+
+
+def _basin_shape_factor(
+    zone: dict, abutment_search_half_width_meters: float = ABUTMENT_SEARCH_HALF_WIDTH_METERS
+) -> dict:
+    """
+    Blends the three subcomponents into basin_shape_factor, returning the
+    sub-scores alongside it -- same pattern the deleted _topographic_
+    factor() used, so a test or a confidence note can see WHY a zone
+    scored the way it did rather than only the blend.
+
+    Computed entirely from measurements the zone already carries. No DEM
+    is read, no geometry is built, and no network is touched: this is a
+    reading of valley_level_pool.py's output, which is what makes it a
+    direct measurement rather than a proxy.
+
+    When persistence is not computable (see _persistence_ratio()), its
+    subweight is REDISTRIBUTED across the surviving components in
+    proportion to their own weights, so the factor still spans 0-1 and a
+    zone with a short stem is neither rewarded nor punished for the
+    missing reading. It is reported as persistence_score=None, and the
+    incompleteness lands on confidence instead.
+
+    Returns
+        {
+            'basin_shape_factor': float,
+            'enclosure_score': float,
+            'persistence_score': float or None,   # None = not computable
+            'persistence_ratio': float or None,
+            'wall_economy_score': float,
+            'persistence_available': bool,
+        }
+    """
+    enclosure = _basin_enclosure_score(zone)
+    ratio = _persistence_ratio(zone["level_pool"]["stations"])
+    persistence = _basin_persistence_score(ratio)
+    wall_economy = _basin_wall_economy_score(zone, abutment_search_half_width_meters)
+
+    components = [
+        (BASIN_ENCLOSURE_SUBWEIGHT, enclosure),
+        (BASIN_WALL_ECONOMY_SUBWEIGHT, wall_economy),
+    ]
+    if persistence is not None:
+        components.append((BASIN_PERSISTENCE_SUBWEIGHT, persistence))
+
+    weight_total = sum(w for w, _ in components)
+    factor = sum(w * v for w, v in components) / weight_total if weight_total > 0 else 0.0
+
     return {
-        "name": best["name"],
-        "fcode": best["fcode"],
-        "distance_m": float(zone_polygon_utm.distance(best["geometry_utm"])),
+        "basin_shape_factor": factor,
+        "enclosure_score": enclosure,
+        "persistence_score": persistence,
+        "persistence_ratio": ratio,
+        "wall_economy_score": wall_economy,
+        "persistence_available": persistence is not None,
     }
 
 
-# --- topographic factor (valley gradient steepness + contributing area) --
+# --- production overlap (REPORTED, never scored) -------------------------
 
-# Below GRADIENT_FLOOR_PCT, the valley segment is too close to flat to
-# form a real basin behind a dam (a large, shallow pond for a given dam
-# height -- poor storage-to-earthwork ratio, more evaporation/seepage
-# surface per acre-foot stored). Above GRADIENT_CEILING_PCT, it's steep
-# enough that a dam of any real height captures very little storage volume
-# and the valley walls themselves become an erosion/excavation concern.
-# Between GRADIENT_SWEET_SPOT_LOW_PCT and GRADIENT_SWEET_SPOT_HIGH_PCT,
-# real NRCS farm-pond siting guidance's general preference for a
-# moderate valley grade is treated as fully satisfied (score 1.0);
-# tapering linearly to 0 at either outer bound. CONFIGURABLE -- tune
-# against a real property's actual successful pond sites once known.
-GRADIENT_FLOOR_PCT = 0.5
-GRADIENT_SWEET_SPOT_LOW_PCT = 3.0
-GRADIENT_SWEET_SPOT_HIGH_PCT = 15.0
-GRADIENT_CEILING_PCT = 30.0
-
-# Contributing area (valley_delineation.py's own max_contributing_area_
-# acres) at/above which the area component of the topographic factor maxes
-# out at 1.0 -- a larger watershed implies more reliable seasonal
-# refill, with diminishing returns past a real, if approximate, reference
-# scale. The valley already had to clear valley_delineation.py's own
-# MIN_PRIMARY_VALLEY_CONTRIBUTING_AREA_ACRES (2.0) to exist as a candidate
-# at all -- this reference is meant to sit well above that scoring floor,
-# same "the scoring reference isn't the same as the generation-time
-# filter" relationship production_suitability.py's REFERENCE_MAX_AREA_ACRES
-# has to production_area.py's MIN_PRODUCTION_AREA_ACRES. CONFIGURABLE.
-CONTRIBUTING_AREA_SCORE_REFERENCE_ACRES = 10.0
-
-# Sub-weights within topographic_factor (must sum to 1.0). CONFIGURABLE.
-GRADIENT_STEEPNESS_SUBWEIGHT = 0.5
-CONTRIBUTING_AREA_SUBWEIGHT = 0.5
-
-
-def _valley_topographic_inputs_for_zone(
-    zone_polygon_utm: Polygon, valleys: list[dict]
-) -> tuple[Optional[float], Optional[float]]:
+def _production_overlap_pct(
+    zone_polygon_utm: Polygon, production_areas: Optional[list[dict]]
+) -> Optional[float]:
     """
-    Real topographic descent rate + max contributing area of whichever
-    traced valley(s) actually pass through this zone's own footprint --
-    NOT the gravity-to-production-area gradient (that's
-    _gravity_feed_factor()'s job, a completely different relationship).
+    Percent of this candidate's own footprint sitting on ground the
+    production layer selected -- the third overlap measurement, beside
+    canopy_overlap_pct and road_overlap_pct, with the SAME sentinel
+    semantics those two established:
 
-    Since water_candidate_zones.py's cell-based rearchitecture, a zone is
-    a connected cluster of individually-eligible DEM cells, not something
-    traced from a single valley branch -- there's no more zone['valley_id']
-    to join against a matching valley['id'] by. This finds every valley
-    (valley_delineation.delineate_valleys()'s own output, a SEPARATE
-    traced-branch pass with its own, higher
-    MIN_PRIMARY_VALLEY_CONTRIBUTING_AREA_ACRES threshold) whose branches
-    actually pass through the zone's real footprint (spatial containment,
-    checked directly against zone_polygon_utm), rather than looking one up
-    by id. A zone genuinely can overlap more than one traced valley (or
-    none at all, if its own cells never reached the traced-valley
-    threshold) -- both are real, expected outcomes now, not caller error.
+        None -> never checked (no production geometry supplied at all)
+        0.0  -> checked, and the candidate genuinely overlaps none
 
-    Gradient: for each branch of each overlapping valley, the points that
-    fall inside zone_polygon_utm mark the start/end of that branch's own
-    contribution; net elevation drop over planar distance between the
-    first and last such point, in percent grade. Multiple contributing
-    branches (from one valley's tributaries, or several distinct
-    overlapping valleys) are combined weighted by how many points each
-    contributed, so a long, well-sampled segment isn't diluted equally
-    with a short, noisy one -- unchanged combination logic from before
-    this rearchitecture, just applied across however many valleys
-    actually overlap instead of one valley matched by id.
+    Measured against render_fill_polygon_utm, the geometry the map
+    actually draws, so a farmer comparing the number to the picture is
+    comparing the same two things.
 
-    Contributing area: the LARGEST max_contributing_area_acres among the
-    valleys that actually overlap this zone -- not summed, since two
-    overlapping valleys' watersheds aren't independent contributing area
-    to add together.
-
-    Returns (None, None) if no valley's branches pass through this zone at
-    all.
+    REPORTED, NOT SCORED, deliberately: conceding production ground to a
+    pond is a land-use tradeoff of exactly the same standing as clearing
+    canopy for one. Which is worth more -- the acre of water or the acre
+    of crop -- is the farmer's call and depends on the farm, so the survey
+    measures it and states it rather than pricing it into a rank.
     """
-    segment_gradients: list[tuple[float, int]] = []
-    contributing_areas: list[float] = []
-
-    for valley in valleys:
-        valley_overlaps = False
-        for branch in valley["branches_utm"]:
-            points_in_zone = [(x, y, z) for x, y, z in branch if zone_polygon_utm.contains(Point(x, y))]
-            if len(points_in_zone) < 2:
-                continue
-            x0, y0, z0 = points_in_zone[0]
-            x1, y1, z1 = points_in_zone[-1]
-            planar_length = Point(x0, y0).distance(Point(x1, y1))
-            if planar_length <= 0:
-                continue
-            segment_gradients.append((abs(z0 - z1) / planar_length * 100, len(points_in_zone)))
-            valley_overlaps = True
-        if valley_overlaps:
-            contributing_areas.append(valley["max_contributing_area_acres"])
-
-    gradient_pct = None
-    if segment_gradients:
-        total_weight = sum(w for _, w in segment_gradients)
-        gradient_pct = sum(g * w for g, w in segment_gradients) / total_weight
-
-    contributing_area_acres = max(contributing_areas) if contributing_areas else None
-
-    return gradient_pct, contributing_area_acres
-
-
-def _gradient_steepness_score(gradient_pct: Optional[float]) -> float:
-    if gradient_pct is None:
-        return 0.5
-    if gradient_pct < GRADIENT_FLOOR_PCT or gradient_pct > GRADIENT_CEILING_PCT:
+    if production_areas is None:
+        return None
+    if not production_areas:
         return 0.0
-    if GRADIENT_SWEET_SPOT_LOW_PCT <= gradient_pct <= GRADIENT_SWEET_SPOT_HIGH_PCT:
-        return 1.0
-    if gradient_pct < GRADIENT_SWEET_SPOT_LOW_PCT:
-        return (gradient_pct - GRADIENT_FLOOR_PCT) / (GRADIENT_SWEET_SPOT_LOW_PCT - GRADIENT_FLOOR_PCT)
-    return (GRADIENT_CEILING_PCT - gradient_pct) / (GRADIENT_CEILING_PCT - GRADIENT_SWEET_SPOT_HIGH_PCT)
-
-
-def _contributing_area_score(contributing_area_acres: Optional[float]) -> float:
-    if contributing_area_acres is None:
-        return 0.5
-    return max(0.0, min(1.0, contributing_area_acres / CONTRIBUTING_AREA_SCORE_REFERENCE_ACRES))
-
-
-def _topographic_factor(
-    gradient_pct: Optional[float], contributing_area_acres: Optional[float]
-) -> tuple[float, float, float]:
-    """Returns (topographic_factor, gradient_steepness_score,
-    contributing_area_score) -- sub-scores returned too so callers/tests
-    can see why a zone scored the way it did, not just the blended
-    result (same pattern as production_suitability._size_factor())."""
-    gradient_score = _gradient_steepness_score(gradient_pct)
-    area_score = _contributing_area_score(contributing_area_acres)
-    factor = GRADIENT_STEEPNESS_SUBWEIGHT * gradient_score + CONTRIBUTING_AREA_SUBWEIGHT * area_score
-    return factor, gradient_score, area_score
+    geometries = [
+        pa["render_fill_polygon_utm"]
+        for pa in production_areas
+        if pa.get("render_fill_polygon_utm") is not None and not pa["render_fill_polygon_utm"].is_empty
+    ]
+    if not geometries:
+        return 0.0
+    zone_area = zone_polygon_utm.area
+    if zone_area <= 0:
+        return 0.0
+    union = unary_union(geometries)
+    return round(zone_polygon_utm.intersection(union).area / zone_area * 100, 1)
 
 
 # --- confidence -----------------------------------------------------------
 
-# Sentinel distinguishing "this zone's soil/stream fetch genuinely ran and
-# found nothing usable" (a real dict value of None) from "never checked at
-# all" (fetch failed, or the check was skipped) -- same reasoning as
+# Sentinel distinguishing "this zone's soil fetch genuinely ran and found
+# nothing usable" (a real dict value of None) from "never checked at all"
+# (fetch failed, or the check was skipped) -- same reasoning as
 # production_suitability.py's _SOIL_CHECK_UNAVAILABLE.
 _DATA_CHECK_UNAVAILABLE = object()
 
 
-def _confidence_for(soil_data: Optional[dict], stream_data: Optional[dict]) -> str:
+def _measurement_completeness_signal(zone: dict) -> bool:
+    """
+    Did this zone's level-pool measurement come back COMPLETE? Two
+    conditions, both required:
+
+      1. every cross-section station has status == measured. An
+         unreachable_stem_end station means the traced stem ran out before
+         the sampler got there, so part of the pool was never looked at.
+      2. at least one abutment search completed on a usable stem
+         direction. stem_direction_degenerate means the stem was too short
+         to give the dam axis a direction, in which case the abutment walk
+         went out along a fallback bearing and neither side's answer
+         describes this valley's actual shoulders.
+
+    This is the signal that REPLACED the deleted stream check. It is a
+    better one for the same reason the stream factor was worth deleting:
+    it is about THIS candidate's own measurements rather than about how
+    close a coarsely-registered map line happens to fall.
+    """
+    stations = zone["level_pool"]["stations"]
+    if not stations:
+        return False
+    if any(st.get("status") != STATION_MEASURED for st in stations):
+        return False
+    if zone["level_pool"].get("stem_direction_degenerate"):
+        return False
+    return bool(zone.get("abutment_found_left")) or bool(zone.get("abutment_found_right"))
+
+
+def _confidence_for(soil_data: Optional[dict], measurement_complete: bool) -> str:
     """
     Real, per-zone confidence (unlike production_suitability.py/
     solar_suitability.py's flat CONFIDENCE_LOW -- see module docstring for
     why that's the right call here but not there): counts how many of two
-    real, checkable quality signals this SPECIFIC zone actually has —
+    real, checkable quality signals this SPECIFIC zone actually has --
+
       1. a real SSURGO ksat_r reading covering at least
          MIN_SOIL_COVERAGE_FRACTION of this zone's own footprint (not just
          "the fetch didn't error" -- a technically-successful fetch that
          only covers 2% of the zone's area isn't a trustworthy read)
-      2. a real NHD stream, classified, within STREAM_PROXIMITY_
-         REFERENCE_METERS of this zone (not just "the fetch didn't
-         error" -- a successful fetch that found nothing nearby doesn't
-         add confidence in the STREAM factor specifically, though it's
-         still a real, valid check)
+      2. a complete level-pool measurement set -- see
+         _measurement_completeness_signal()
+
     2 signals -> CONFIDENCE_HIGH, 1 -> CONFIDENCE_MEDIUM, 0 -> CONFIDENCE_LOW.
-    This genuinely differs zone-to-zone within a single live run (zones
-    sit over different soil map units with different real coverage, and at
-    different real distances to the nearest mapped stream), not just
-    between runs.
+    This genuinely differs zone-to-zone within a single live run: zones sit
+    over different soil map units with different real coverage, and a zone
+    on a short or flat-tied stem comes back with fewer real measurements
+    than one on a long, well-traced channel.
+
+    AN INCOMPLETE MEASUREMENT LANDS HERE, NOT ON THE SCORE. Where
+    persistence could not be computed the basin factor renormalizes around
+    the gap rather than filling it (see _basin_shape_factor()); the fact
+    that something was missing is reported through this signal instead.
     """
     soil_signal = soil_data is not None and soil_data.get("coverage_fraction", 0.0) >= MIN_SOIL_COVERAGE_FRACTION
-    stream_signal = stream_data is not None
 
-    signal_count = int(soil_signal) + int(stream_signal)
+    signal_count = int(soil_signal) + int(bool(measurement_complete))
     if signal_count >= 2:
         return CONFIDENCE_HIGH
     if signal_count == 1:
@@ -767,7 +869,7 @@ def _gravity_note(primary_relationship: dict) -> str:
         f"Sits {abs(differential)}m BELOW production area {production_area_id} over {distance}m "
         f"({gradient}% grade) -- delivering water to that production area from here would need a "
         "pump. This is a real cost/maintenance tradeoff against this candidate's other real "
-        "qualities (soil water-holding, stream access, topography) reflected in gravity_feed_factor "
+        "qualities (soil water-holding, basin shape) reflected in gravity_feed_factor "
         "below -- it is not a defect in the site itself, and this candidate remains a real, valid, "
         "scoreable option."
     )
@@ -790,35 +892,65 @@ def _soil_note(soil_data: Optional[dict]) -> str:
     )
 
 
-def _stream_note(nearest_stream: Optional[dict], permanence_label: Optional[str], stream_checked: bool) -> str:
-    if not stream_checked:
-        return (
-            "No NHD stream data could be fetched for this property (network fetch failed) -- "
-            "stream_permanence_factor defaulted to a neutral value, NOT measured."
+def _basin_note(basin: dict) -> str:
+    enclosure_text = {1.0: "both", 0.5: "one", 0.0: "neither"}.get(
+        basin["enclosure_score"], f"{basin['enclosure_score']}"
+    )
+    if basin["persistence_score"] is None:
+        persistence_text = (
+            "Upstream persistence: NOT COMPUTABLE -- fewer than "
+            f"{MIN_MEASURED_STATIONS_FOR_PERSISTENCE} cross-sections were actually measured (the "
+            "traced stem ended first), so this component was dropped and the remaining basin "
+            "subweights were renormalized rather than filled with a fabricated zero. That is an "
+            "absent measurement, not a dry one, and it is reported through confidence instead."
         )
-    if nearest_stream is None:
-        return (
-            "No mapped NHD stream was found within the "
-            f"{STREAM_PROXIMITY_REFERENCE_METERS:.0f}m proximity threshold of this candidate -- "
-            "stream_permanence_factor stayed at its neutral baseline (most working farm ponds are "
-            "valley/runoff-fed rather than stream-fed, so this is a real, unremarkable case, not a "
-            "flaw)."
+    else:
+        persistence_text = (
+            f"Upstream persistence: {round(basin['persistence_ratio'], 3)} of the measured flooded "
+            f"cross-section area sits at the two upstream stations rather than against the dam line "
+            f"(scored {round(basin['persistence_score'], 3)} against a "
+            f"{PERSISTENCE_REFERENCE_RATIO} reference) -- a real valley basin keeps section area as "
+            "the water backs up; a swale floods a puddle at the wall and is dry 25m upstream."
         )
     return (
-        f"Nearest mapped stream: {nearest_stream['name']} ({permanence_label}, NHD FCode "
-        f"{nearest_stream['fcode']}), {round(nearest_stream['distance_m'], 1)}m away. {NHD_OFFSET_LIMITATION_NOTE}"
+        f"Basin shape {round(basin['basin_shape_factor'], 3)}, from three measured components. "
+        f"Enclosure: {enclosure_text} valley shoulder(s) were found on the dam line (a side where the "
+        "dam band ran into a SECOND drainage counts as no shoulder -- that is a different, larger "
+        f"structure, not an abutment). {persistence_text} Wall economy: "
+        f"{round(basin['wall_economy_score'], 3)}, from how much of the cross-section sampling window "
+        "the water at the dam line fills -- water spanning the whole window means a long wall, and "
+        "scores zero honestly even on a genuinely good basin where two valleys meet."
     )
 
 
-def _topographic_note(gradient_pct: Optional[float], contributing_area_acres: Optional[float]) -> str:
-    gradient_text = f"{round(gradient_pct, 1)}%" if gradient_pct is not None else "unavailable"
-    area_text = f"{contributing_area_acres} acres" if contributing_area_acres is not None else "unavailable"
+def _no_service_note() -> str:
     return (
-        f"Valley segment gradient within this candidate: {gradient_text} (scored against a "
-        f"{GRADIENT_SWEET_SPOT_LOW_PCT:.0f}-{GRADIENT_SWEET_SPOT_HIGH_PCT:.0f}% sweet spot -- too "
-        "flat means a poor storage-to-earthwork ratio for a dam, too steep means little storage "
-        f"volume behind any real dam height). Valley max contributing area: {area_text} (real "
-        "watershed size from valley_delineation.py, a rough proxy for reliable seasonal refill)."
+        "No production area lies within this survey's service range of this candidate -- delivery "
+        "would require distribution infrastructure this survey does not evaluate, so "
+        "gravity_feed_factor is 0.0 here. The candidate is NOT dropped for it: the site's own "
+        "landform is scored on its merits, and where the water goes is a separate question with its "
+        "own answers (a longer line, a different production layout, or a use other than irrigation)."
+    )
+
+
+def _overlap_note(zone: dict) -> str:
+    def _fmt(value, label):
+        if value is None:
+            return f"{label} NOT CHECKED"
+        return f"{label} {value}%"
+
+    return (
+        "Reported, NOT scored -- siting costs a farmer weighs rather than a defect in the ground: "
+        + ", ".join(
+            (
+                _fmt(zone.get("canopy_overlap_pct"), "existing tree canopy"),
+                _fmt(zone.get("road_overlap_pct"), "mapped road corridor"),
+                _fmt(zone.get("production_overlap_pct"), "selected production ground"),
+            )
+        )
+        + " of this candidate's footprint. Clearing canopy, moving a track and conceding cropland are "
+        "all real prices with real value on the other side; which is worth paying depends on the farm, "
+        "so this survey measures them and leaves the trade to the farmer."
     )
 
 
@@ -826,24 +958,28 @@ WATER_SUITABILITY_INTRO_NOTE = (
     "This ADDS a suitability ranking to water-system candidate zones already identified by "
     "water_candidate_zones.py -- it does not change which ground counts as a candidate or its "
     "boundary (see that layer's own confidence_notes for the underlying zone-generation caveats). "
-    f"suitability_score (0-100) is a weighted composite of FOUR independently-stored 0-1 factors: "
-    f"gravity_feed_factor (weight {GRAVITY_FEED_SCORE_WEIGHT}), soil_water_holding_factor (weight "
-    f"{SOIL_WATER_HOLDING_SCORE_WEIGHT}), stream_permanence_factor (weight "
-    f"{STREAM_PERMANENCE_SCORE_WEIGHT}), and topographic_factor (weight {TOPOGRAPHIC_SCORE_WEIGHT}) -- "
-    "see this module's own docstring for the full reasoning behind each weight. This is a "
-    "topographic + soil + hydrology-based ranking, not a certainty -- ground-truth before "
-    "committing to a specific site within this zone."
+    "suitability_score (0-100) is a weighted composite of THREE independently-stored 0-1 factors "
+    "describing what the site IS as landform: gravity_feed_factor (delivery, weight "
+    f"{GRAVITY_FEED_SCORE_WEIGHT}), soil_water_holding_factor (holding, weight "
+    f"{SOIL_WATER_HOLDING_SCORE_WEIGHT}), and basin_shape_factor (geometry, weight "
+    f"{BASIN_SHAPE_SCORE_WEIGHT}). Refill context, clearing cost and land-use overlap are REPORTED "
+    "beside the score and never folded into it -- landform cannot be changed, while those are "
+    "tradeoffs the farmer is the one to weigh. See this module's own docstring for the full "
+    "reasoning behind each weight and for what was deleted from this composite and why. This is a "
+    "landform + soil ranking, not a certainty -- ground-truth before committing to a specific site "
+    "within this zone."
 )
 
 
 def _confidence_notes_for(scored_zone: dict) -> str:
-    parts = [
-        WATER_SUITABILITY_INTRO_NOTE,
-        _gravity_note(scored_zone["primary_production_area_relationship"]),
-        _soil_note(scored_zone["_soil_data"]),
-        _stream_note(scored_zone["_nearest_stream"], scored_zone["nearest_stream_permanence"], scored_zone["stream_data_available"]),
-        _topographic_note(scored_zone["gradient_steepness_pct"], scored_zone["valley_contributing_area_acres"]),
-    ]
+    parts = [WATER_SUITABILITY_INTRO_NOTE]
+    if scored_zone["primary_production_area_relationship"] is None:
+        parts.append(_no_service_note())
+    else:
+        parts.append(_gravity_note(scored_zone["primary_production_area_relationship"]))
+    parts.append(_soil_note(scored_zone["_soil_data"]))
+    parts.append(_basin_note(scored_zone["_basin"]))
+    parts.append(_overlap_note(scored_zone))
     return " ".join(parts)
 
 
@@ -851,34 +987,40 @@ def _confidence_notes_for(scored_zone: dict) -> str:
 
 def score_water_zones(
     zones: list[dict],
-    valleys: list[dict],
     dem: dict,
     soil_data_by_zone_id: Optional[dict] = None,
-    stream_data_by_zone_id: Optional[dict] = None,
-    stream_proximity_reference_meters: float = STREAM_PROXIMITY_REFERENCE_METERS,
+    production_areas: Optional[list[dict]] = None,
+    abutment_search_half_width_meters: float = ABUTMENT_SEARCH_HALF_WIDTH_METERS,
 ) -> list[dict]:
     """
     Pure scoring logic -- see module docstring for why this takes
-    already-computed zones/valleys/dem plus optionally pre-fetched
-    per-zone data rather than fetching anything itself.
+    already-computed zones/dem plus optionally pre-fetched per-zone soil
+    data rather than fetching anything itself.
 
     zones is water_candidate_zones.find_candidate_zones()'s own output,
     UNCHANGED -- this function does not alter membership or geometry, only
-    scores it. valleys is valley_delineation.delineate_valleys()'s own
-    output from the SAME dem/run zones came from -- matched to each zone
-    by real spatial overlap now, not by id (see
-    _valley_topographic_inputs_for_zone()'s own docstring for why: a zone
-    is a cell cluster since water_candidate_zones.py's cell-based
-    rearchitecture, with no more valley/branch identity of its own to join
-    against by id).
+    scores it.
 
-    soil_data_by_zone_id / stream_data_by_zone_id map zone['id'] to that
-    zone's own pre-fetched data (_area_weighted_ksat()'s dict /
-    _nearest_stream_for_zone()'s dict), or a real None if the fetch ran
-    and genuinely found nothing usable. A zone id simply ABSENT from
-    either dict (or the whole argument omitted) means "never checked" --
-    same None-vs-absent convention as production_suitability.py's
+    `valleys` IS GONE FROM THIS SIGNATURE. It served exactly one consumer,
+    the deleted topographic factor, and nothing in scoring reads a valley
+    any more. identify_water_suitability() still takes valleys and still
+    needs them -- it forwards them into find_candidate_zones() so the
+    keypoint self-compute path does not re-delineate the same valleys a
+    second time -- but carrying a parameter here that nothing reads would
+    imply this layer still consults them.
+
+    soil_data_by_zone_id maps zone['id'] to that zone's own pre-fetched
+    data (_area_weighted_ksat()'s dict), or a real None if the fetch ran
+    and genuinely found nothing usable. A zone id simply ABSENT from the
+    dict (or the whole argument omitted) means "never checked" -- same
+    None-vs-absent convention as production_suitability.py's
     disqualifying_soil_by_patch_id.
+
+    production_areas is the same list find_candidate_zones() was given,
+    used ONLY to measure production_overlap_pct (reported, never scored --
+    see _production_overlap_pct()). Omitting it leaves that measurement at
+    None, "never checked", exactly as an unfetched canopy mask leaves
+    canopy_overlap_pct.
 
     Returns a flat list of scored zone dicts (zones's own dicts, extended
     with every property water_suitability_to_geojson() reports -- see that
@@ -888,18 +1030,25 @@ def score_water_zones(
     MIN_SUITABILITY_SCORE-style cutoff (see module docstring for why).
     """
     soil_data_by_zone_id = soil_data_by_zone_id or {}
-    stream_data_by_zone_id = stream_data_by_zone_id or {}
 
     scored: list[dict] = []
 
     for zone in zones:
+        # A zone with no production area in service range is a real,
+        # scoreable candidate now, not a dropped one (see the module
+        # docstring). Its relationship list is empty, so there is no
+        # headline relationship to read and gravity scores 0.0 -- the
+        # honest answer to "how well does this deliver to production
+        # ground" when there is no production ground to deliver to.
         primary_relationship = zone["primary_production_area_relationship"]
-
-        gravity_factor = _gravity_feed_factor(
-            primary_relationship["elevation_differential_m"],
-            primary_relationship["distance_m"],
-            primary_relationship["gradient_pct"],
-        )
+        if primary_relationship is None:
+            gravity_factor = 0.0
+        else:
+            gravity_factor = _gravity_feed_factor(
+                primary_relationship["elevation_differential_m"],
+                primary_relationship["distance_m"],
+                primary_relationship["gradient_pct"],
+            )
 
         soil_entry = soil_data_by_zone_id.get(zone["id"], _DATA_CHECK_UNAVAILABLE)
         soil_data_available = soil_entry is not _DATA_CHECK_UNAVAILABLE
@@ -907,50 +1056,45 @@ def score_water_zones(
         ksat_r_um_per_s = soil_data["ksat_r_um_per_s"] if soil_data is not None else None
         soil_factor = _water_holding_factor(ksat_r_um_per_s)
 
-        stream_entry = stream_data_by_zone_id.get(zone["id"], _DATA_CHECK_UNAVAILABLE)
-        stream_data_available = stream_entry is not _DATA_CHECK_UNAVAILABLE
-        nearest_stream = stream_entry if stream_data_available else None
-        stream_factor, permanence_label = _stream_permanence_factor(nearest_stream, stream_proximity_reference_meters)
-
-        gradient_steepness_pct, valley_contributing_area_acres = _valley_topographic_inputs_for_zone(
-            zone["polygon_utm"], valleys
-        )
-        topo_factor, gradient_score, contributing_area_score = _topographic_factor(
-            gradient_steepness_pct, valley_contributing_area_acres
-        )
+        basin = _basin_shape_factor(zone, abutment_search_half_width_meters)
+        basin_factor = basin["basin_shape_factor"]
 
         composite = (
             GRAVITY_FEED_SCORE_WEIGHT * gravity_factor
             + SOIL_WATER_HOLDING_SCORE_WEIGHT * soil_factor
-            + STREAM_PERMANENCE_SCORE_WEIGHT * stream_factor
-            + TOPOGRAPHIC_SCORE_WEIGHT * topo_factor
+            + BASIN_SHAPE_SCORE_WEIGHT * basin_factor
         )
+
+        measurement_complete = _measurement_completeness_signal(zone)
 
         scored_zone = {
             **zone,
             "suitability_score": round(composite * SUITABILITY_SCORE_SCALE, 1),
             "gravity_feed_factor": round(gravity_factor, 3),
             "soil_water_holding_factor": round(soil_factor, 3),
-            "stream_permanence_factor": round(stream_factor, 3),
-            "topographic_factor": round(topo_factor, 3),
-            "gradient_steepness_score": round(gradient_score, 3),
-            "contributing_area_score": round(contributing_area_score, 3),
+            "basin_shape_factor": round(basin_factor, 3),
+            "basin_enclosure_score": round(basin["enclosure_score"], 3),
+            "basin_persistence_score": (
+                round(basin["persistence_score"], 3) if basin["persistence_score"] is not None else None
+            ),
+            "basin_persistence_ratio": (
+                round(basin["persistence_ratio"], 4) if basin["persistence_ratio"] is not None else None
+            ),
+            "basin_wall_economy_score": round(basin["wall_economy_score"], 3),
+            "basin_persistence_available": basin["persistence_available"],
             "ksat_r_um_per_s": round(ksat_r_um_per_s, 4) if ksat_r_um_per_s is not None else None,
             "soil_coverage_pct": round(soil_data["coverage_fraction"] * 100, 1) if soil_data is not None else None,
             "soil_data_available": soil_data_available,
-            "nearest_stream_name": nearest_stream["name"] if nearest_stream is not None else None,
-            "nearest_stream_permanence": permanence_label,
-            "nearest_stream_distance_m": (
-                round(nearest_stream["distance_m"], 1) if nearest_stream is not None else None
-            ),
-            "stream_data_available": stream_data_available,
-            "gradient_steepness_pct": round(gradient_steepness_pct, 2) if gradient_steepness_pct is not None else None,
-            "valley_contributing_area_acres": valley_contributing_area_acres,
-            "confidence": _confidence_for(soil_data, nearest_stream),
+            # REPORTED, never scored -- joins the two generation-side
+            # overlaps the zone already carries, with the same sentinels.
+            "production_overlap_pct": _production_overlap_pct(zone["polygon_utm"], production_areas),
+            "has_service_relationship": primary_relationship is not None,
+            "measurement_complete": measurement_complete,
+            "confidence": _confidence_for(soil_data, measurement_complete),
             # underscore-prefixed: intermediate data confidence_notes needs, not part of the
             # reported property set (water_suitability_to_geojson() doesn't emit these directly)
             "_soil_data": soil_data,
-            "_nearest_stream": nearest_stream,
+            "_basin": basin,
         }
         scored_zone["confidence_notes"] = _confidence_notes_for(scored_zone)
         scored.append(scored_zone)
@@ -1003,21 +1147,26 @@ def water_suitability_to_geojson(scored_zones: list[dict]) -> dict:
                     "suitability_score": zone["suitability_score"],
                     "gravity_feed_factor": zone["gravity_feed_factor"],
                     "soil_water_holding_factor": zone["soil_water_holding_factor"],
-                    "stream_permanence_factor": zone["stream_permanence_factor"],
-                    "topographic_factor": zone["topographic_factor"],
-                    "gradient_steepness_score": zone["gradient_steepness_score"],
-                    "contributing_area_score": zone["contributing_area_score"],
+                    "basin_shape_factor": zone["basin_shape_factor"],
+                    "basin_enclosure_score": zone["basin_enclosure_score"],
+                    "basin_persistence_score": zone["basin_persistence_score"],
+                    "basin_persistence_ratio": zone["basin_persistence_ratio"],
+                    "basin_wall_economy_score": zone["basin_wall_economy_score"],
+                    "basin_persistence_available": zone["basin_persistence_available"],
                     "primary_production_area_relationship": zone["primary_production_area_relationship"],
                     "production_area_relationships": zone["production_area_relationships"],
+                    "has_service_relationship": zone["has_service_relationship"],
                     "ksat_r_um_per_s": zone["ksat_r_um_per_s"],
                     "soil_coverage_pct": zone["soil_coverage_pct"],
                     "soil_data_available": zone["soil_data_available"],
-                    "nearest_stream_name": zone["nearest_stream_name"],
-                    "nearest_stream_permanence": zone["nearest_stream_permanence"],
-                    "nearest_stream_distance_m": zone["nearest_stream_distance_m"],
-                    "stream_data_available": zone["stream_data_available"],
-                    "gradient_steepness_pct": zone["gradient_steepness_pct"],
-                    "valley_contributing_area_acres": zone["valley_contributing_area_acres"],
+                    "measurement_complete": zone["measurement_complete"],
+                    # The three overlaps ride together, all three REPORTED
+                    # and none of them scored -- see _overlap_note().
+                    "canopy_overlap_pct": zone["canopy_overlap_pct"],
+                    "road_overlap_pct": zone["road_overlap_pct"],
+                    "production_overlap_pct": zone["production_overlap_pct"],
+                    "wall_offset_downstream_m": zone["wall_offset_downstream_m"],
+                    "flags": zone["flags"],
                     "representative_elevation_m": zone["representative_elevation_m"],
                 },
             )
@@ -1026,20 +1175,116 @@ def water_suitability_to_geojson(scored_zones: list[dict]) -> dict:
 
 
 def summarize_water_suitability(scored_zones: list[dict]) -> str:
+    """Full ranked table for terminal/diagnostic use -- NOT trimmed to
+    WATER_ZONE_PRESENTATION_TOP_N. That cap is a PROSE decision (see
+    build_narrative_data()); a diagnostic reader asking for the ranking
+    wants the ranking."""
     if not scored_zones:
         return "No water system candidate zones to score."
 
     lines = [f"Water system candidate suitability ranking ({len(scored_zones)} candidate(s)):"]
     for zone in sorted(scored_zones, key=lambda z: z["rank"]):
         relationship = zone["primary_production_area_relationship"]
-        gravity_note = "gravity-feeds" if relationship["above_production_area"] else "PUMP-REQUIRED"
+        if relationship is None:
+            gravity_note = "NO PRODUCTION AREA IN RANGE"
+        else:
+            gravity_note = "gravity-feeds" if relationship["above_production_area"] else "PUMP-REQUIRED"
+        persistence = zone["basin_persistence_score"]
+        persistence_text = "n/a" if persistence is None else str(persistence)
         lines.append(
             f"  - Rank {zone['rank']}: zone {zone['id']}, score {zone['suitability_score']}/100 "
             f"(confidence={zone['confidence']}), gravity={zone['gravity_feed_factor']} ({gravity_note}), "
-            f"soil={zone['soil_water_holding_factor']}, stream={zone['stream_permanence_factor']} "
-            f"({zone['nearest_stream_permanence'] or 'none nearby'}), topo={zone['topographic_factor']}"
+            f"soil={zone['soil_water_holding_factor']}, basin={zone['basin_shape_factor']} "
+            f"[enclosure={zone['basin_enclosure_score']}, persistence={persistence_text}, "
+            f"wall={zone['basin_wall_economy_score']}], overlaps canopy={zone['canopy_overlap_pct']}%/"
+            f"road={zone['road_overlap_pct']}%/production={zone['production_overlap_pct']}%"
         )
     return "\n".join(lines)
+
+
+def _round1(value):
+    return round(float(value), 1) if value is not None else None
+
+
+def build_narrative_data(
+    scored_zones: list[dict], top_n: int = WATER_ZONE_PRESENTATION_TOP_N
+) -> dict:
+    """
+    Pre-digested, JSON-clean scoring facts for the report layer -- same
+    contract every other module's build_narrative_data() follows: plain
+    Python scalars only, no Shapely, no numpy, imperial where a farmer
+    reads it, and no prose (report_generator.py writes the sentences).
+
+    TOP-N BY RANK, WITH THE TOTAL STATED. `zones` carries only the top
+    `top_n` candidates and `candidate_count` carries how many survived in
+    total, so the report can say "3 of 9 shown, ranked" rather than
+    silently implying there were three. The trim is presentation only:
+    every candidate is still scored, still ranked, and still present in
+    all_scored_zones and in the GeoJSON. See
+    WATER_ZONE_PRESENTATION_TOP_N.
+
+    Each described candidate carries its provenance (which family
+    nominated it, and from which keypoint), its three factor scores with
+    the basin sub-scores that explain the third, and the three overlap
+    measurements that are reported rather than scored.
+    """
+    ranked = sorted(scored_zones, key=lambda z: z["rank"])
+    presented = ranked[: max(0, int(top_n))]
+
+    return {
+        "zone_found": bool(ranked),
+        "candidate_count": len(ranked),
+        "presented_count": len(presented),
+        "presentation_top_n": int(top_n),
+        "factor_weights": {
+            "gravity_feed": GRAVITY_FEED_SCORE_WEIGHT,
+            "soil_water_holding": SOIL_WATER_HOLDING_SCORE_WEIGHT,
+            "basin_shape": BASIN_SHAPE_SCORE_WEIGHT,
+        },
+        "zones": [
+            {
+                "id": zone["id"],
+                "rank": zone["rank"],
+                "suitability_score": zone["suitability_score"],
+                "confidence": zone["confidence"],
+                "area_acres": _round1(zone["polygon_utm"].area / SQUARE_METERS_PER_ACRE),
+                "provenance": {
+                    "nominated_by": zone["nominated_by"],
+                    "keypoint_id": zone["keypoint_id"],
+                    "valley_id": zone["valley_id"],
+                    "wall_offset_downstream_ft": (
+                        _round1(zone["wall_offset_downstream_m"] / METERS_PER_FOOT)
+                        if zone["wall_offset_downstream_m"] is not None
+                        else None
+                    ),
+                    "anchor_off_parcel": bool(zone["anchor_off_parcel"]),
+                },
+                "factors": {
+                    "gravity_feed": zone["gravity_feed_factor"],
+                    "soil_water_holding": zone["soil_water_holding_factor"],
+                    "basin_shape": zone["basin_shape_factor"],
+                },
+                "basin": {
+                    "enclosure": zone["basin_enclosure_score"],
+                    "persistence": zone["basin_persistence_score"],
+                    "persistence_ratio": zone["basin_persistence_ratio"],
+                    "persistence_available": zone["basin_persistence_available"],
+                    "wall_economy": zone["basin_wall_economy_score"],
+                },
+                # All three REPORTED, none scored. None means never
+                # checked; 0.0 means checked and genuinely none.
+                "overlaps": {
+                    "canopy_pct": zone["canopy_overlap_pct"],
+                    "road_pct": zone["road_overlap_pct"],
+                    "production_pct": zone["production_overlap_pct"],
+                },
+                "has_service_relationship": zone["has_service_relationship"],
+                "measurement_complete": zone["measurement_complete"],
+                "flags": list(zone["flags"]),
+            }
+            for zone in presented
+        ],
+    }
 
 
 # --- fetch-and-score entry point ---------------------------------------
@@ -1052,7 +1297,6 @@ def identify_water_suitability(
     production_areas: Optional[list[dict]] = None,
     keypoints: Optional[list[dict]] = None,
     check_soil: bool = True,
-    check_streams: bool = True,
     zone_kwargs: Optional[dict] = None,
     canopy_height: Optional[dict] = None,
     **score_kwargs,
@@ -1061,9 +1305,14 @@ def identify_water_suitability(
     Full pipeline entry point: fetches the DEM (unless one is passed in),
     delineates valleys and production areas, generates water-system
     candidate zones (water_candidate_zones.py, unchanged), fetches real
-    SSURGO ksat_r geometry per zone and one whole-boundary real NHD stream
-    fetch, scores the result, and returns the enriched
-    "water_system_candidate" GeoJSON FeatureCollection.
+    SSURGO ksat_r geometry per zone, scores the result, and returns the
+    enriched "water_system_candidate" GeoJSON FeatureCollection.
+
+    THERE IS NO NHD FETCH HERE ANY MORE. The stream-permanence factor was
+    deleted (see the module docstring for why), and with it the only
+    reason this entry point ever touched hydrology_data. One fewer
+    network dependency on the water path is a side benefit, not the
+    reason.
 
     dem, boundary_polygon_utm, valleys, and production_areas are all
     optional overrides, independently of one another -- each falls back to
@@ -1074,6 +1323,18 @@ def identify_water_suitability(
     docstring for the general reasoning; the one thing that's different
     here is what production_areas defaults to when not supplied (see
     below).
+
+    valleys IS STILL LOAD-BEARING even though scoring no longer reads a
+    valley (the topographic factor that did is deleted). It is now
+    FORWARDED INTO find_candidate_zones(), which hands it to
+    keypoint_detection.detect_keypoints() on the keypoint self-compute
+    path. Without that forward, a standalone call to this function
+    delineates valleys once here and detect_keypoints() delineates the
+    same valleys a second time inside generation -- the deferred fix the
+    gates-narrow branch flagged, closed here. identify_water_system_
+    candidate_zones() already forwarded its own copy; this path did not.
+    test_water_suitability.py asserts delineate_valleys() runs exactly
+    once on the standalone path by call count, not by inspection.
 
     keypoints is an optional pre-detected override in the same family --
     keypoint_detection.detect_keypoints()'s own list -- passed straight
@@ -1113,12 +1374,12 @@ def identify_water_suitability(
     Each zone's own SSURGO fetch degrades independently and gracefully (an
     SDA outage for one zone's footprint shouldn't block scoring for the
     others) -- same reasoning production_suitability.py's own per-patch
-    soil fetch already uses. The NHD stream fetch is a single whole-
-    boundary call (same as water_candidate_zones.py/road_corridors.py's
-    own hydrology fetches) -- if it fails, every zone's stream_permanence_
-    factor falls back to neutral together (all real per-zone
-    differentiation from the soil signal / real per-zone stream distance
-    still applies otherwise).
+    soil fetch already uses. It is now the ONLY network fetch scoring
+    itself performs.
+
+    The production_areas this function resolved are forwarded into
+    score_water_zones() so every candidate carries a real
+    production_overlap_pct rather than the "never checked" sentinel.
 
     Returns:
         {
@@ -1127,6 +1388,8 @@ def identify_water_suitability(
             'all_scored_zones': list[dict],    # same list -- the full, unfiltered ranking
             'selected_water_zone': Optional[dict],  # select_optimal_water_zone()'s single
                                                        # rank-1 answer, or None if no zones exist
+            'narrative_data': dict,            # build_narrative_data() -- TOP-N by rank, with
+                                               #   the total survivor count beside it
         }
     """
     if dem is None:
@@ -1183,6 +1446,13 @@ def identify_water_suitability(
         canopy_root_zone_mask_utm=canopy_root_zone_mask_utm,
         road_exclusion_union_utm=road_exclusion_union_utm,
         keypoints=keypoints,
+        # THE DEFERRED FIX, CLOSED. Without this forward the keypoint
+        # self-compute path inside find_candidate_zones() re-delineates
+        # the valleys this function already delineated above -- the same
+        # DEM, the same answer, twice. Scoring itself reads nothing off a
+        # valley any more (the topographic factor that did is deleted);
+        # this is the parameter's only remaining job, and it is a real one.
+        valleys=valleys,
         **(zone_kwargs or {}),
     )
 
@@ -1194,23 +1464,16 @@ def identify_water_suitability(
             except Exception:
                 pass  # left absent from the dict -- score_water_zones() treats that as "never checked"
 
-    stream_data_by_zone_id: dict = {}
-    if check_streams:
-        try:
-            water_features = get_water_features_for_boundary(boundary_coordinates)
-            streams_utm = _reproject_streams_to_utm(water_features["streams"], dem["crs"])
-            for zone in zones:
-                stream_data_by_zone_id[zone["id"]] = _nearest_stream_for_zone(zone["polygon_utm"], streams_utm)
-        except Exception:
-            pass  # left absent for every zone -- "never checked", not "checked, none found"
-
-    scored = score_water_zones(zones, valleys, dem, soil_data_by_zone_id, stream_data_by_zone_id, **score_kwargs)
+    scored = score_water_zones(
+        zones, dem, soil_data_by_zone_id, production_areas=production_areas, **score_kwargs
+    )
 
     return {
         "zones_geojson": water_suitability_to_geojson(scored),
         "scored_zones": scored,
         "all_scored_zones": scored,
         "selected_water_zone": select_optimal_water_zone(scored),
+        "narrative_data": build_narrative_data(scored),
     }
 
 
@@ -1235,7 +1498,7 @@ def fetch_and_select_optimal_water_zone(
     boundary_polygon_utm=/valleys=/production_areas= overrides are
     available here too, despite not appearing in this signature -- they
     pass straight through **suitability_kwargs into identify_water_
-    suitability(), same as check_soil=/check_streams=/zone_kwargs=/any
+    suitability(), same as check_soil=/zone_kwargs=/any
     score_kwargs already do.
     """
     result = identify_water_suitability(boundary_coordinates, dem=dem, **suitability_kwargs)

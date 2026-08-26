@@ -243,6 +243,22 @@ fake_optimized_result = {
 
 fake_existing_roads_union = box(100, 100, 200, 200)
 fake_hydric_union = box(50, 50, 60, 60)
+# pipeline_context calls identify_water_suitability() directly now, so the
+# patched return value is the RESULT DICT rather than the bare zone: the
+# wrapper it replaced only ever called this function and discarded
+# everything but the selection, and the context now keeps the scoring
+# narrative_data too. selected_water_zone is still read off the same key.
+def _fake_water_suitability_result(selected):
+    return {
+        "zones_geojson": {"type": "FeatureCollection", "features": []},
+        "scored_zones": [],
+        "all_scored_zones": [],
+        "selected_water_zone": selected,
+        "narrative_data": {"zone_found": False, "candidate_count": 0, "presented_count": 0,
+                           "presentation_top_n": 3, "factor_weights": {}, "zones": []},
+    }
+
+
 fake_selected_water_zone = {
     "type": "Feature",
     "id": "water-zone-selected",
@@ -443,7 +459,8 @@ with ExitStack() as _stack:
         mock_patch.object(pc.water_candidate_zones, "detect_keypoints", side_effect=_counting_detect_keypoints)
     )
     mock_select_water_zone = _enter(
-        mock_patch.object(pc, "fetch_and_select_optimal_water_zone", return_value=fake_selected_water_zone)
+        mock_patch.object(pc, "identify_water_suitability",
+                          return_value=_fake_water_suitability_result(fake_selected_water_zone))
     )
     mock_road_corridor = _enter(
         mock_patch.object(pc.road_corridors, "identify_road_corridor_candidates", return_value=fake_road_corridor_result)
@@ -512,11 +529,20 @@ assert isinstance(ctx, pc.PipelineContext)
 assert set(ctx.narrative_data) == {
     "exclusion_zones",
     "production_area_ceiling",
+    # TWO water keys, deliberately: generation owns what ground the
+    # candidates cover, scoring owns which of them ranked where. The
+    # report's water summary needs both -- the scoring block is what trims
+    # its prose to the top N by rank.
     "water_candidate_zones",
+    "water_suitability",
     "road_corridors",
     "solar_suitability",
     "tree_zone_candidates",
 }, f"narrative_data must carry exactly one key per producing module -- got {set(ctx.narrative_data)}"
+assert ctx.narrative_data["water_suitability"] is not None, (
+    "the scoring narrative must reach the context -- without it the report's water summary silently "
+    "falls back to describing every candidate"
+)
 assert ctx.narrative_data["production_area_ceiling"] is None, (
     "the mocked identify_optimized_production_areas() result carries no narrative_data key -- .get() "
     "must capture None for it, not raise or invent a block"
@@ -542,7 +568,7 @@ assert mock_optimize.call_count == 1, "identify_optimized_production_areas must 
 assert mock_roads.call_count == 1, "farm_roads_data.get_road_exclusion_union_utm must be called exactly once"
 assert mock_floodplain.call_count == 1, "_fetch_floodplain_hydric_union must be called exactly once"
 assert mock_water.call_count == 1, "identify_water_system_candidate_zones must be called exactly once"
-assert mock_select_water_zone.call_count == 1, "fetch_and_select_optimal_water_zone must be called exactly once"
+assert mock_select_water_zone.call_count == 1, "identify_water_suitability must be called exactly once"
 assert mock_road_corridor.call_count == 1, "identify_road_corridor_candidates must be called exactly once"
 print(
     "Every underlying fetch entry point (DEM, optimized production areas, road exclusion, "
@@ -571,7 +597,7 @@ assert mock_water.call_args.kwargs["keypoints"] is ctx.keypoints, (
     "identify_water_system_candidate_zones() must receive the context's own keypoints INSTANCE"
 )
 assert mock_select_water_zone.call_args.kwargs["keypoints"] is ctx.keypoints, (
-    "fetch_and_select_optimal_water_zone() must receive the same instance -- it reaches "
+    "identify_water_suitability() must receive the same instance -- it reaches "
     "find_candidate_zones() independently, through identify_water_suitability()"
 )
 print(
@@ -709,16 +735,27 @@ assert mock_water_zone_roads.call_count == 0, (
 )
 
 # fake_patch's polygon_utm (box(0, 0, 10, 10)) is nowhere near this synthetic DEM's real UTM
-# coordinates, so no cell clears find_candidate_zones()'s service-distance gate -- water_zones is
-# genuinely, correctly empty here. This section isn't testing zone geometry/eligibility correctness
-# (test_water_candidate_zones.py and test_water_system_candidate_pipeline.py already cover that with
-# real, spatially-coherent fixtures) -- only that the real function runs end-to-end, offline, without
-# re-deriving what this context already computed.
-assert ctx.water_zones == [], (
-    "expected zero water zones: fake_patch's production-area geometry doesn't overlap this DEM's real "
-    "coordinates, so nothing clears the service-distance gate -- confirms the real function ran (not a "
-    "canned mock reply) without crashing"
+# coordinates, so no candidate has a production area within service range. That USED to empty
+# water_zones entirely -- the temporary post-delineation drop. It no longer does: such a candidate
+# is scored on its landform and kept, carrying the informational no_service_relationship flag and a
+# None headline relationship. So the assertion becomes the stronger one: real candidates came back,
+# and every one of them says plainly that it has nothing in range to serve. This section isn't
+# testing zone geometry/eligibility correctness (test_water_candidate_zones.py and
+# test_water_system_candidate_pipeline.py already cover that with real, spatially-coherent fixtures)
+# -- only that the real function runs end-to-end, offline, without re-deriving what this context
+# already computed.
+assert ctx.water_zones, (
+    "expected real water zones: a candidate with no production area in range is no longer dropped -- "
+    "confirms the real function ran (not a canned mock reply) without crashing"
 )
+for _wz in ctx.water_zones:
+    _props = _wz["properties"]
+    assert _props["primary_production_area_relationship"] is None, (
+        "fake_patch's geometry is nowhere near this DEM, so the headline relationship must be an "
+        "honest None -- never a fabricated relationship to an out-of-range production area"
+    )
+    assert _props["production_area_relationships"] == []
+    assert "no_service_relationship" in _props["flags"], _props["flags"]
 print(
     "water_zones reuses the already-computed dem/boundary_polygon_utm/valleys/production_areas -- ALL "
     "FOUR, not just dem -- and identify_water_system_candidate_zones()'s own internal delineate_valleys()/"
@@ -747,7 +784,7 @@ assert select_water_zone_call.kwargs["production_areas"] is ctx.production_areas
 )
 print(
     "selected_water_zone reuses this context's own dem/boundary_polygon_utm/valleys/production_areas "
-    "instances via fetch_and_select_optimal_water_zone()'s own override params, not self-derived copies."
+    "instances via identify_water_suitability()'s own override params, not self-derived copies."
 )
 
 # --- 7. selected_road_corridor reuses dem/boundary_polygon_utm/valleys/production_areas/selected_water_zone, ---
@@ -876,7 +913,7 @@ assert total_road_corridor_calls == 1, (
     f"{total_road_corridor_calls} (expected 1). mock_tz_road == {mock_tz_road.call_count} proves the same "
     f"fix holds for selected_road_corridor -- see the identify_optimized_production_areas() assertion above."
 )
-# identify_water_suitability(): fetch_and_select_optimal_water_zone (pc's own direct call, section 6 above) is
+# identify_water_suitability(): identify_water_suitability (pc's own direct call, section 6 above) is
 # a fully canned return_value mock, same as every prior section in this file -- its own internal call to
 # identify_water_suitability() is not exercised here, unchanged by this branch, so it contributes 0 to this
 # specific count (not because the fix doesn't apply to it, but because this mock never lets the real function
@@ -966,7 +1003,8 @@ with mock_patch.object(pc.dem_data, "get_dem_for_boundary", return_value=synthet
          return_value=fake_water_zones_result_fallback_case,
      ), \
      mock_patch.object(
-         pc, "fetch_and_select_optimal_water_zone", return_value=fake_selected_water_zone_fallback_case
+         pc, "identify_water_suitability",
+         return_value=_fake_water_suitability_result(fake_selected_water_zone_fallback_case),
      ), \
      mock_patch.object(
          pc.road_corridors,
@@ -1101,7 +1139,8 @@ with mock_patch.object(
          "identify_water_system_candidate_zones",
          return_value={"zones_geojson": {"type": "FeatureCollection", "features": []}},
      ), \
-     mock_patch.object(pc, "fetch_and_select_optimal_water_zone", return_value=fake_selected_water_zone), \
+     mock_patch.object(pc, "identify_water_suitability",
+                          return_value=_fake_water_suitability_result(fake_selected_water_zone)), \
      mock_patch.object(
          pc.road_corridors, "identify_road_corridor_candidates", return_value=fake_road_corridor_result_dem_case
      ) as mock_road_corridor_dem_case, \
@@ -1189,7 +1228,8 @@ with mock_patch.object(pc.dem_data, "get_dem_for_boundary", return_value=synthet
          return_value={"zones_geojson": {"type": "FeatureCollection", "features": []}},
      ) as mock_water_bpu_case, \
      mock_patch.object(
-         pc, "fetch_and_select_optimal_water_zone", return_value=fake_selected_water_zone
+         pc, "identify_water_suitability",
+         return_value=_fake_water_suitability_result(fake_selected_water_zone),
      ) as mock_select_water_zone_bpu_case, \
      mock_patch.object(
          pc.road_corridors, "identify_road_corridor_candidates", return_value=fake_road_corridor_result_bpu_case
@@ -1223,7 +1263,7 @@ assert mock_water_bpu_case.call_args.kwargs["boundary_polygon_utm"] is boundary_
     "identify_water_system_candidate_zones() must receive the caller-supplied boundary_polygon_utm"
 )
 assert mock_select_water_zone_bpu_case.call_args.kwargs["boundary_polygon_utm"] is boundary_polygon_utm_override, (
-    "fetch_and_select_optimal_water_zone() must receive the caller-supplied boundary_polygon_utm"
+    "identify_water_suitability() must receive the caller-supplied boundary_polygon_utm"
 )
 assert mock_road_corridor_bpu_case.call_args.kwargs["boundary_polygon_utm"] is boundary_polygon_utm_override, (
     "identify_road_corridor_candidates() must receive the caller-supplied boundary_polygon_utm"
@@ -1277,7 +1317,8 @@ with mock_patch.object(pc.dem_data, "get_dem_for_boundary", return_value=synthet
          "identify_water_system_candidate_zones",
          return_value={"zones_geojson": {"type": "FeatureCollection", "features": []}},
      ), \
-     mock_patch.object(pc, "fetch_and_select_optimal_water_zone", return_value=fake_selected_water_zone), \
+     mock_patch.object(pc, "identify_water_suitability",
+                          return_value=_fake_water_suitability_result(fake_selected_water_zone)), \
      mock_patch.object(pc.road_corridors, "identify_road_corridor_candidates", return_value=fake_road_corridor_result), \
      mock_patch.object(pc, "identify_solar_candidate_zones", return_value=fake_solar_result_dem_case), \
      mock_patch.object(pc, "identify_tree_zone_candidates", return_value=fake_tree_zone_result_dem_case):
@@ -1327,7 +1368,8 @@ with mock_patch.object(pc.dem_data, "get_dem_for_boundary", return_value=synthet
          "identify_water_system_candidate_zones",
          return_value={"zones_geojson": {"type": "FeatureCollection", "features": []}},
      ), \
-     mock_patch.object(pc, "fetch_and_select_optimal_water_zone", return_value=fake_selected_water_zone), \
+     mock_patch.object(pc, "identify_water_suitability",
+                          return_value=_fake_water_suitability_result(fake_selected_water_zone)), \
      mock_patch.object(pc.road_corridors, "identify_road_corridor_candidates", return_value=fake_road_corridor_result), \
      mock_patch.object(pc, "identify_solar_candidate_zones", return_value=fake_solar_result_dem_case), \
      mock_patch.object(pc, "identify_tree_zone_candidates", return_value=fake_tree_zone_result_dem_case):
@@ -1381,7 +1423,7 @@ assert set(_omitted_canopy) >= {"array", "resolution_meters", "origin_x", "origi
 )
 for _mock, _label in (
     (mock_water, "identify_water_system_candidate_zones"),
-    (mock_select_water_zone, "fetch_and_select_optimal_water_zone"),
+    (mock_select_water_zone, "identify_water_suitability"),
     (mock_solar, "identify_solar_candidate_zones"),
     (mock_tree_zone, "identify_tree_zone_candidates"),
     # identify_road_corridor_candidates -- added to build_pipeline_context() by
@@ -1395,7 +1437,7 @@ for _mock, _label in (
 print(
     "canopy_height omitted: build_pipeline_context() fetches canopy ONCE itself and the exact same dict "
     "reaches identify_optimized_production_areas()/identify_water_system_"
-    "candidate_zones()/fetch_and_select_optimal_water_zone()/identify_solar_candidate_zones()/identify_tree_"
+    "candidate_zones()/identify_water_suitability()/identify_solar_candidate_zones()/identify_tree_"
     "zone_candidates()/identify_road_corridor_candidates() -- identity-checked, so none of them falls back "
     "to its own fetch. This assertion read `is None` before, which is what seven round-trips per run "
     "looked like from the inside."
@@ -1414,11 +1456,11 @@ print(
 # --- uses (test_production_area_ceiling.py, test_water_suitability.py, test_solar_suitability.py, etc.) ---
 # --- patched once, at production_area's own module bindings, so it observes every path into the shared ---
 # --- fetch no matter how deeply nested the reaching caller is. identify_optimized_production_areas()/ ---
-# --- fetch_and_select_optimal_water_zone() stay fully mocked here (their own real-run canopy proof ---
+# --- identify_water_suitability() stay fully mocked here (their own real-run canopy proof ---
 # --- already lives in test_production_area_ceiling.py/test_water_suitability.py) -- only identity-checked. ---
 # --- road_corridors.identify_road_corridor_candidates() -- this branch's (canopy-mask-wiring-road-fencing) ---
 # --- own addition to build_pipeline_context() -- stays fully mocked here too (return_value=, same as ---
-# --- identify_optimized_production_areas()/fetch_and_select_optimal_water_zone() above, only identity- ---
+# --- identify_optimized_production_areas()/identify_water_suitability() above, only identity- ---
 # --- checked): it has no direct canopy gate of its own (only forwarding into its own production_areas/ ---
 # --- selected_water_zone self-compute calls, per the canopy-height-road-corridors branch), and both of ---
 # --- those are already supplied as overrides by this point in build_pipeline_context(), so neither self- ---
@@ -1461,7 +1503,8 @@ with ExitStack() as _stack:
     _enter(mock_patch.object(pc.water_candidate_zones, "identify_production_areas"))
 
     mock_select_water_zone_canopy = _enter(
-        mock_patch.object(pc, "fetch_and_select_optimal_water_zone", return_value=fake_selected_water_zone)
+        mock_patch.object(pc, "identify_water_suitability",
+                          return_value=_fake_water_suitability_result(fake_selected_water_zone))
     )
     mock_road_corridor_canopy_case = _enter(
         mock_patch.object(pc.road_corridors, "identify_road_corridor_candidates", return_value=fake_road_corridor_result)
@@ -1513,7 +1556,7 @@ assert mock_optimize_canopy.call_args.kwargs["canopy_height"] is canopy_override
     "identify_optimized_production_areas() must receive the exact caller-supplied canopy_height= object"
 )
 assert mock_select_water_zone_canopy.call_args.kwargs["canopy_height"] is canopy_override, (
-    "fetch_and_select_optimal_water_zone() must receive the exact caller-supplied canopy_height= object"
+    "identify_water_suitability() must receive the exact caller-supplied canopy_height= object"
 )
 assert mock_water_canopy_case.call_args.kwargs["canopy_height"] is canopy_override, (
     "identify_water_system_candidate_zones() must receive the exact caller-supplied canopy_height= object"
@@ -1607,7 +1650,8 @@ with ExitStack() as _stack:
     _enter(mock_patch.object(pc.water_candidate_zones, "_fetch_road_exclusion_union_utm", return_value=None))
     _enter(mock_patch.object(pc.water_candidate_zones, "delineate_valleys"))
     _enter(mock_patch.object(pc.water_candidate_zones, "identify_production_areas"))
-    _enter(mock_patch.object(pc, "fetch_and_select_optimal_water_zone", return_value=fake_selected_water_zone))
+    _enter(mock_patch.object(pc, "identify_water_suitability",
+                          return_value=_fake_water_suitability_result(fake_selected_water_zone)))
     _enter(
         mock_patch.object(pc.road_corridors, "identify_road_corridor_candidates", return_value=fake_road_corridor_result)
     )
@@ -1692,7 +1736,8 @@ with ExitStack() as _nwz_stack:
         )
     )
     # the selection genuinely finds nothing
-    _enter(mock_patch.object(pc, "fetch_and_select_optimal_water_zone", return_value=None))
+    _enter(mock_patch.object(pc, "identify_water_suitability",
+                             return_value=_fake_water_suitability_result(None)))
     _nwz_road = _enter(
         mock_patch.object(pc.road_corridors, "identify_road_corridor_candidates", return_value=fake_road_corridor_result)
     )

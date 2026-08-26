@@ -51,6 +51,20 @@ level-pool delineation -> bounded-opening wiring -- rather than
 reimplementing nomination/delineation independently a second time.
 find_candidate_zones() returns EVERY surviving candidate (generation is uncapped).
 
+IT ALSO WRITES water_candidates.geojson, beside its terminal output: every
+candidate, casualty, keypoint marker, wall anchor (failed walks included)
+and traced stem walk in one feature_schema-compliant file, for VISUAL
+REVIEW over aerial imagery. See _export_candidate_geojson() for the layer
+list and for why a dropped candidate is drawn as a point.
+
+THAT EXPORT IS A DIAGNOSTIC CONSUMER AND THE WIRING IS FINISHED.
+render_layout_map.py and every batch consumer are untouched and are meant
+to stay that way: the batch map draws the ONE selected rank-1 zone by
+design, because a printed plan carrying nine overlapping candidate
+polygons is not a plan. Multi-candidate display belongs to the
+interactive wizard, where a user can toggle and compare. Nobody should
+"finish the wiring" by pointing the batch renderer at this file.
+
 Requires real network access (a real USGS DEM fetch via dem_data.py, plus
 production_area.py's own SSURGO/canopy/road fetches, plus this script's
 own canopy/road fetches for the gate-breakdown section) -- this is a live
@@ -76,10 +90,12 @@ so the gate breakdown reports "too far" but no "too close".
 """
 
 import argparse
+import json
 
 import numpy as np
 from rasterio.warp import transform as warp_transform
-from shapely.geometry import Point, Polygon
+from rasterio.warp import transform_geom
+from shapely.geometry import LineString, Point, Polygon, mapping
 from shapely.prepared import prep
 
 from dem_data import get_dem_for_boundary
@@ -95,10 +111,21 @@ from raster_grid import (
     pixel_center_xy,
 )
 from valley_delineation import (
+    compute_flow_accumulation,
+    compute_flow_direction,
     delineate_valleys,
+    fill_depressions,
     get_flow_accumulation_for_dem,
     get_flow_direction_for_dem,
 )
+from keypoint_detection import detect_keypoints
+from feature_schema import (
+    CONFIDENCE_LOW,
+    make_feature,
+    make_feature_collection,
+    validate_feature_collection,
+)
+from water_suitability import score_water_zones, summarize_water_suitability
 from valley_level_pool import POOL_REFERENCE_HEIGHT_METERS, STEM_DIRECTION_WINDOW_CELLS
 # The road gate reads the SINGLE shared buffer definition (water's former
 # separate per-module road-buffer constant was deleted -- see the shared
@@ -434,12 +461,43 @@ def main(
     # distance_outside_boundary_m, which is what makes an off-parcel
     # anchor's outcome legible), one entry per family-2 seed, each with its
     # reason code -- is what explains a short or empty list.
+    #
+    # The D8 field and the keypoint list are derived HERE and handed down,
+    # rather than left to find_candidate_zones() to self-compute: the
+    # GeoJSON export below needs both (it draws every keypoint marker and
+    # walks the flow field to trace each stem), and detecting keypoints a
+    # second time for the export would be a second answer to the same
+    # question. Same forward-what-you-already-have pattern
+    # pipeline_context.py uses, and it keeps detect_keypoints() to exactly
+    # one run in this script.
+    # Delineated once, here, and reused by PART B below -- it used to be
+    # delineated there, which was fine while nothing above needed it.
+    valleys = delineate_valleys(dem)
+    _filled = fill_depressions(dem["array"])
+    flow_to_row, flow_to_col = compute_flow_direction(_filled, dem["resolution_meters"])
+    flow_accumulation_grid = compute_flow_accumulation(_filled, flow_to_row, flow_to_col)
+    keypoints = detect_keypoints(
+        dem,
+        boundary_polygon_utm,
+        flow_to_row=flow_to_row,
+        flow_to_col=flow_to_col,
+        flow_accumulation=flow_accumulation_grid,
+        filled=_filled,
+        valleys=valleys,
+    )
+
     nomination_diagnostics: dict = {}
     zones = find_candidate_zones(
         dem, production_areas, boundary_polygon_utm,
         max_valley_contributing_area_acres=max_contributing_acres,
         canopy_root_zone_mask_utm=canopy_root_zone_mask_utm,
         road_exclusion_union_utm=road_exclusion_union_utm,
+        keypoints=keypoints,
+        valleys=valleys,
+        filled=_filled,
+        flow_to_row=flow_to_row,
+        flow_to_col=flow_to_col,
+        flow_accumulation=flow_accumulation_grid,
         diagnostics=nomination_diagnostics,
     )
     print(f"find_candidate_zones() returned {len(zones)} candidate(s) -- generation is UNCAPPED; family 2 "
@@ -784,7 +842,9 @@ def _report_confluence_check(
     print()
 
     # --- PART B: real valley branches (delineate_valleys(), coarser threshold) ---
-    valleys = delineate_valleys(dem)
+    # `valleys` was delineated once at the top of main() and forwarded into
+    # keypoint detection and generation; PART B reads that same list rather
+    # than delineating a second copy of it.
     all_branches = [
         (valley["id"], branch_index, branch)
         for valley in valleys
@@ -877,6 +937,376 @@ def _report_confluence_check(
             "points back toward the broad-hillside explanation instead of a true valley confluence."
         )
     print()
+
+    # --- GeoJSON export, for review over aerial imagery ---
+    #
+    # Scored here so the export can carry ranks. score_water_zones() is
+    # PURE -- no network, no DEM re-read -- so this costs nothing but the
+    # arithmetic, and it runs with no soil fetch, which the export's own
+    # confidence_notes state plainly rather than letting a neutral soil
+    # default pass for a measurement.
+    scored_zones = score_water_zones(zones, dem, production_areas=production_areas)
+    print("=== GeoJSON export for visual review ===\n")
+    print(summarize_water_suitability(scored_zones))
+    export = _export_candidate_geojson(
+        dem, scored_zones, nomination_diagnostics, keypoints, flow_to_row, flow_to_col
+    )
+    print(
+        f"\nWrote {export['feature_count']} feature(s) to {export['path']} "
+        "(feature_schema-validated). Layer/status breakdown:"
+    )
+    for (layer, status), count in sorted(export["by_layer_status"].items()):
+        print(f"  {layer} [{status}]: {count}")
+    print()
+
+
+# --- GeoJSON export for visual review -----------------------------------
+
+# Where the export lands, beside this script's terminal output.
+WATER_CANDIDATES_GEOJSON_PATH = "water_candidates.geojson"
+
+# Every feature carries one of these, so a viewer can style survivors and
+# casualties differently without parsing reason codes.
+EXPORT_STATUS_NOMINATED = "nominated"
+EXPORT_STATUS_DROPPED = "dropped"
+
+
+def _wgs84(dem: dict, geometry) -> dict:
+    """Shapely geometry in dem['crs'] -> a WGS84 GeoJSON geometry dict,
+    which is the only thing feature_schema.make_feature() accepts."""
+    return transform_geom(dem["crs"], "EPSG:4326", mapping(geometry))
+
+
+def _point_wgs84(dem: dict, rowcol) -> dict:
+    return _wgs84(dem, Point(*pixel_center_xy(dem, int(rowcol[0]), int(rowcol[1]))))
+
+
+def _station_table(zone: dict) -> list[dict]:
+    """A compact per-station row set: what the cross-section sampler
+    measured, at what offset, and -- crucially -- its STATUS, so a viewer
+    can tell an unmeasured station from a dry one. Widths and areas are
+    None on an unreachable station by valley_level_pool.py's own contract,
+    and they are carried through as None rather than zeroed."""
+    return [
+        {
+            "station_index": st["station_index"],
+            "offset_upstream_m": st["offset_upstream_m"],
+            "status": st["status"],
+            "flooded_width_m": st["flooded_width_m"],
+            "flooded_cross_section_area_m2": st["flooded_cross_section_area_m2"],
+        }
+        for st in zone["level_pool"]["stations"]
+    ]
+
+
+def _stem_path_cells(flow_to_row, flow_to_col, start, end, max_steps: int = 200):
+    """The traced flow path from a keypoint down to its wall anchor, as
+    grid cells. Walks the SAME D8 field _find_wall_site() walked, so the
+    line drawn on the map is the line the walk actually took -- not a
+    straight segment between the two endpoints, which would imply a
+    channel that is not there.
+
+    Returns [] when the walk cannot reach `end` (a failed walk has no
+    path to draw; its own dead-end position is exported as a wall-anchor
+    point instead)."""
+    path = [tuple(start)]
+    current = tuple(start)
+    for _ in range(max_steps):
+        if current == tuple(end):
+            return path
+        tr = int(flow_to_row[current[0], current[1]])
+        tc = int(flow_to_col[current[0], current[1]])
+        if tr < 0:
+            return []
+        current = (tr, tc)
+        path.append(current)
+    return []
+
+
+def _export_candidate_geojson(
+    dem: dict,
+    scored_zones: list[dict],
+    nomination_diagnostics: dict,
+    keypoints: list[dict],
+    flow_to_row,
+    flow_to_col,
+    path: str = WATER_CANDIDATES_GEOJSON_PATH,
+) -> dict:
+    """
+    Writes every candidate, every casualty and every piece of the
+    nomination machinery to one feature_schema-compliant GeoJSON file, for
+    VISUAL REVIEW over aerial imagery. This is the merge gate for the
+    multi-candidate work: a reader opens the file on top of the property
+    and sees, in one picture, which valleys became candidates, which
+    keypoints produced nothing and why, and where each wall would stand.
+
+    THIS IS A DIAGNOSTIC CONSUMER, DELIBERATELY, AND THE WIRING IS
+    FINISHED. render_layout_map.py and every batch consumer are untouched
+    and are meant to stay that way: the batch map draws the ONE selected
+    rank-1 zone by design, because a printed plan with nine overlapping
+    candidate polygons on it is not a plan. Multi-candidate display is the
+    interactive wizard's job, where a user can toggle and compare. Nobody
+    should "finish the wiring" by pointing the batch renderer at this
+    file.
+
+    Six layers, every feature carrying `status` (nominated | dropped) and,
+    where dropped, the reason code that stopped it:
+
+      water_candidate_zone      -- surviving zone polygons, with rank,
+                                   score, factors, basin sub-scores,
+                                   confidence, overlaps and a station table
+      water_candidate_dropped   -- casualties (see the geometry note below)
+      water_keypoint            -- every detected keypoint, survivor or not
+      water_wall_anchor         -- wall sites, INCLUDING failed walks at
+                                   the position where the walk died
+      water_stem_walk           -- the traced keypoint -> wall path
+      water_accumulation_seed   -- dropped family-2 seeds
+
+    GEOMETRY IS NOT RETAINED ON A DROP, and this export does not add
+    retention to fix that. find_candidate_zones() builds a candidate's
+    polygon and then returns (None, reason, flags) on every drop path, so
+    by the time the outcome reaches a diagnostic the geometry is gone --
+    including for the boundary-clipped slivers that are the most
+    interesting casualties on the reference property. A dropped candidate
+    is therefore exported as its ANCHOR POINT with its reason code, and
+    the feature says so in its own confidence_notes. Retaining drop-time
+    geometry is a generation-side change with its own consequences for the
+    zone contract, and it belongs in its own branch rather than being
+    smuggled in behind an export.
+    """
+    features: list[dict] = []
+    keypoints_by_id = {int(k["id"]): k for k in keypoints}
+    outcomes = nomination_diagnostics.get("keypoint_outcomes", [])
+    outcome_by_keypoint_id = {o["keypoint_id"]: o for o in outcomes}
+
+    scoring_note = (
+        "Scores here come from water_suitability.score_water_zones() run WITHOUT a soil fetch, so "
+        "soil_water_holding_factor sits at its neutral unavailable default for every candidate and "
+        "confidence is capped accordingly. Gravity and basin shape are real. This is a visual-review "
+        "export from a read-only diagnostic, not the pipeline's own scored output."
+    )
+
+    # --- layer 1: surviving candidates ---
+    for zone in scored_zones:
+        features.append(
+            make_feature(
+                feature_id=f"water-candidate-zone-{zone['id']}",
+                geometry=zone["geometry_wgs84"],
+                layer="water_candidate_zone",
+                label=f"Candidate {zone['id']} (rank {zone['rank']}, {zone['suitability_score']}/100)",
+                confidence=zone["confidence"],
+                confidence_notes=scoring_note + " " + zone["confidence_notes"],
+                extra_properties={
+                    "status": EXPORT_STATUS_NOMINATED,
+                    "zone_id": zone["id"],
+                    "rank": zone["rank"],
+                    "suitability_score": zone["suitability_score"],
+                    "gravity_feed_factor": zone["gravity_feed_factor"],
+                    "soil_water_holding_factor": zone["soil_water_holding_factor"],
+                    "basin_shape_factor": zone["basin_shape_factor"],
+                    "basin_enclosure_score": zone["basin_enclosure_score"],
+                    "basin_persistence_score": zone["basin_persistence_score"],
+                    "basin_persistence_ratio": zone["basin_persistence_ratio"],
+                    "basin_wall_economy_score": zone["basin_wall_economy_score"],
+                    "nominated_by": zone["nominated_by"],
+                    "keypoint_id": zone["keypoint_id"],
+                    "valley_id": zone["valley_id"],
+                    "area_acres": round(zone["polygon_utm"].area / SQUARE_METERS_PER_ACRE, 4),
+                    "flags": list(zone["flags"]),
+                    "abutment_found_left": zone["abutment_found_left"],
+                    "abutment_found_right": zone["abutment_found_right"],
+                    "dam_band_crosses_major_drainage_left": zone["dam_band_crosses_major_drainage_left"],
+                    "dam_band_crosses_major_drainage_right": zone["dam_band_crosses_major_drainage_right"],
+                    "dam_band_width_m": zone["level_pool"]["dam_band_width_m"],
+                    "canopy_overlap_pct": zone["canopy_overlap_pct"],
+                    "road_overlap_pct": zone["road_overlap_pct"],
+                    "production_overlap_pct": zone["production_overlap_pct"],
+                    "has_service_relationship": zone["has_service_relationship"],
+                    "wall_offset_downstream_m": zone["wall_offset_downstream_m"],
+                    "anchor_rowcol": list(zone["anchor_rowcol"]),
+                    "keypoint_rowcol": list(zone["keypoint_rowcol"]) if zone["keypoint_rowcol"] else None,
+                    "stations": _station_table(zone),
+                },
+            )
+        )
+
+    # --- layer 2: dropped candidates (anchor points, see the docstring) ---
+    dropped_note = (
+        "GEOMETRY NOT RETAINED. find_candidate_zones() discards a candidate's polygon on every drop "
+        "path, so this casualty is drawn at its ANCHOR CELL rather than as the footprint it would "
+        "have had -- including where the drop was a boundary clip that left only a sliver. The "
+        "reason code says what stopped it; the shape it would have covered is not recoverable from "
+        "this module's output and this export deliberately does not add retention to make it so."
+    )
+    for outcome in outcomes:
+        if outcome["candidate_id"] is not None or outcome["anchor_rowcol"] is None:
+            continue
+        features.append(
+            make_feature(
+                feature_id=f"water-candidate-dropped-keypoint-{outcome['keypoint_id']}",
+                geometry=_point_wgs84(dem, outcome["anchor_rowcol"]),
+                layer="water_candidate_dropped",
+                label=f"Dropped candidate from keypoint {outcome['keypoint_id']} ({outcome['outcome']})",
+                confidence=CONFIDENCE_LOW,
+                confidence_notes=dropped_note,
+                extra_properties={
+                    "status": EXPORT_STATUS_DROPPED,
+                    "outcome": outcome["outcome"],
+                    "keypoint_id": outcome["keypoint_id"],
+                    "valley_id": outcome["valley_id"],
+                    "flags": list(outcome["flags"]),
+                    "anchor_rowcol": list(outcome["anchor_rowcol"]),
+                    "geometry_is_anchor_point_only": True,
+                },
+            )
+        )
+
+    # --- layer 3: every keypoint marker ---
+    for keypoint in keypoints:
+        outcome = outcome_by_keypoint_id.get(int(keypoint["id"]))
+        features.append(
+            make_feature(
+                feature_id=f"water-keypoint-{int(keypoint['id'])}",
+                geometry=_wgs84(dem, keypoint["point_utm"]),
+                layer="water_keypoint",
+                label=f"Keypoint {int(keypoint['id'])} (valley {keypoint['valley_id']})",
+                confidence=CONFIDENCE_LOW,
+                confidence_notes=(
+                    "A keypoint is the POOL'S TAIL, not its wall -- the wall sits downstream, at the "
+                    "matching water_wall_anchor feature. DEM-derived, not surveyed."
+                ),
+                extra_properties={
+                    "status": (
+                        EXPORT_STATUS_NOMINATED
+                        if outcome is not None and outcome["candidate_id"] is not None
+                        else EXPORT_STATUS_DROPPED
+                    ),
+                    "keypoint_id": int(keypoint["id"]),
+                    "valley_id": keypoint["valley_id"],
+                    "contributing_acres": float(keypoint["contributing_acres"]),
+                    "on_parcel": bool(keypoint.get("on_parcel", True)),
+                    "distance_outside_boundary_m": float(keypoint.get("distance_outside_boundary_m", 0.0)),
+                    "outcome": outcome["outcome"] if outcome is not None else None,
+                    "candidate_id": outcome["candidate_id"] if outcome is not None else None,
+                },
+            )
+        )
+
+    # --- layers 4 and 5: wall anchors (incl. failed walks) + stem walks ---
+    for outcome in outcomes:
+        keypoint = keypoints_by_id.get(outcome["keypoint_id"])
+        if keypoint is None:
+            continue
+        walked = outcome["wall_walk_end_reason"] is not None
+        if not walked:
+            continue
+        found = outcome["anchor_rowcol"] is not None
+        end_cell = outcome["anchor_rowcol"] if found else outcome["wall_walk_end_rowcol"]
+        if end_cell is None:
+            continue
+        # STATUS TRACKS THE CANDIDATE, NOT THE WALK. A wall site can be
+        # found perfectly well on a nomination that is then rejected for
+        # separation or dropped at the area floor; colouring that anchor
+        # as a survivor would put a wall on the map where no candidate
+        # exists. wall_site_found carries the walk's own outcome separately.
+        nomination_status = (
+            EXPORT_STATUS_NOMINATED if outcome["candidate_id"] is not None else EXPORT_STATUS_DROPPED
+        )
+        features.append(
+            make_feature(
+                feature_id=f"water-wall-anchor-{outcome['keypoint_id']}",
+                geometry=_point_wgs84(dem, end_cell),
+                layer="water_wall_anchor",
+                label=(
+                    f"Wall site for keypoint {outcome['keypoint_id']}"
+                    if found
+                    else f"FAILED wall walk from keypoint {outcome['keypoint_id']}"
+                ),
+                confidence=CONFIDENCE_LOW,
+                confidence_notes=(
+                    "Where a dam wall would stand: the first cell downstream of the keypoint a full "
+                    f"{POOL_REFERENCE_HEIGHT_METERS}m below it. A FAILED walk is drawn where it died, "
+                    "with the reason -- there is no partial-height fallback, so a failed walk means "
+                    "the keypoint nominated nothing."
+                ),
+                extra_properties={
+                    "status": nomination_status,
+                    "keypoint_id": outcome["keypoint_id"],
+                    "outcome": outcome["outcome"],
+                    "wall_offset_downstream_m": outcome["wall_offset_downstream_m"],
+                    "wall_drop_m": outcome["wall_drop_m"],
+                    "wall_walk_end_reason": outcome["wall_walk_end_reason"],
+                    "keypoint_elevation_m": outcome["keypoint_elevation_m"],
+                    "anchor_elevation_m": outcome["anchor_elevation_m"],
+                    "wall_site_found": found,
+                },
+            )
+        )
+
+        path_cells = _stem_path_cells(
+            flow_to_row, flow_to_col, tuple(outcome["keypoint_rowcol"]), tuple(end_cell)
+        )
+        if len(path_cells) >= 2:
+            line = LineString([pixel_center_xy(dem, r, c) for r, c in path_cells])
+            features.append(
+                make_feature(
+                    feature_id=f"water-stem-walk-{outcome['keypoint_id']}",
+                    geometry=_wgs84(dem, line),
+                    layer="water_stem_walk",
+                    label=f"Stem walk, keypoint {outcome['keypoint_id']} to its wall site",
+                    confidence=CONFIDENCE_LOW,
+                    confidence_notes=(
+                        "The traced D8 flow path the wall-site walk actually took, cell by cell -- not a "
+                        "straight line between the endpoints, which would imply a channel that is not "
+                        "there."
+                    ),
+                    extra_properties={
+                        "status": nomination_status,
+                        "keypoint_id": outcome["keypoint_id"],
+                        "outcome": outcome["outcome"],
+                        "cell_count": len(path_cells),
+                        "wall_offset_downstream_m": outcome["wall_offset_downstream_m"],
+                    },
+                )
+            )
+
+    # --- layer 6: dropped family-2 seeds ---
+    for index, seed in enumerate(nomination_diagnostics.get("accumulation_seeds", [])):
+        if seed["candidate_id"] is not None:
+            continue
+        features.append(
+            make_feature(
+                feature_id=f"water-accumulation-seed-{index}",
+                geometry=_point_wgs84(dem, seed["anchor_rowcol"]),
+                layer="water_accumulation_seed",
+                label=f"Dropped accumulation seed at {tuple(seed['anchor_rowcol'])} ({seed['outcome']})",
+                confidence=CONFIDENCE_LOW,
+                confidence_notes=(
+                    "A family-2 (highest-remaining-flow-accumulation) seed that delineated but did not "
+                    "survive. Drawn at its anchor cell; see the dropped-candidate note for why no "
+                    "footprint is available."
+                ),
+                extra_properties={
+                    "status": EXPORT_STATUS_DROPPED,
+                    "outcome": seed["outcome"],
+                    "flow_accumulation_cells": seed["flow_accumulation_cells"],
+                    "flags": list(seed["flags"]),
+                    "anchor_rowcol": list(seed["anchor_rowcol"]),
+                    "geometry_is_anchor_point_only": True,
+                },
+            )
+        )
+
+    collection = make_feature_collection(features)
+    validate_feature_collection(collection)
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(collection, handle, indent=2)
+
+    by_layer: dict = {}
+    for feature in features:
+        key = (feature["properties"]["layer"], feature["properties"]["status"])
+        by_layer[key] = by_layer.get(key, 0) + 1
+    return {"path": path, "feature_count": len(features), "by_layer_status": by_layer}
 
 
 def _parse_args() -> argparse.Namespace:

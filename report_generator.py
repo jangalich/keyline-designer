@@ -371,14 +371,77 @@ def _format_climate_summary(climate: Optional[dict]) -> str:
     )
 
 
-def _format_water_candidate_zones_summary(water_narrative: Optional[dict]) -> str:
+def _format_water_suitability_ranking(suitability_narrative: dict) -> str:
+    """Formats water_suitability.build_narrative_data()'s own block -- the
+    ranked, top-N view of candidates the generation block above already
+    described geometrically. Reads ONLY that block; every value in it was
+    already rounded and converted at the source module.
+
+    THREE FACTORS ARE SCORED AND THREE OVERLAPS ARE NOT, and the prose
+    says so explicitly. A reader who cannot tell which numbers moved the
+    rank and which are context will assume all of them did, which is
+    exactly the confusion the scoring split exists to prevent."""
+    weights = suitability_narrative["factor_weights"]
+    lines = [
+        f"\nSUITABILITY RANKING -- top {suitability_narrative['presented_count']} of "
+        f"{suitability_narrative['candidate_count']} scored candidate(s). The score (0-100) weighs "
+        f"THREE properties of the site itself: gravity delivery ({weights['gravity_feed']}), soil "
+        f"water-holding ({weights['soil_water_holding']}), and basin shape ({weights['basin_shape']}) "
+        "-- what the ground IS, which cannot be changed. Canopy, road and production overlap are "
+        "MEASURED AND REPORTED but NOT scored: those are siting costs the farmer weighs, not defects "
+        "in the ground."
+    ]
+    for zone in suitability_narrative["zones"]:
+        factors = zone["factors"]
+        basin = zone["basin"]
+        overlaps = zone["overlaps"]
+        persistence = (
+            "not measurable (the traced channel ended before enough cross-sections)"
+            if basin["persistence"] is None
+            else f"{basin['persistence']}"
+        )
+
+        def _pct(value):
+            return "NOT CHECKED" if value is None else f"{value}%"
+
+        lines.append(
+            f"  - Rank {zone['rank']}: survey area {zone['id']}, {zone['suitability_score']}/100 "
+            f"(confidence {zone['confidence']}), {zone['area_acres']} acres. "
+            f"Gravity delivery {factors['gravity_feed']}"
+            + ("" if zone["has_service_relationship"] else " (NO production area within service range "
+               "-- delivery from here would need distribution infrastructure this survey does not "
+               "evaluate; the site is still scored on its own landform)")
+            + f"; soil water-holding {factors['soil_water_holding']}; basin shape "
+            f"{factors['basin_shape']} (valley shoulders {basin['enclosure']}, water holding its "
+            f"section upstream {persistence}, wall economy {basin['wall_economy']}). "
+            f"Overlaps, reported not scored: canopy {_pct(overlaps['canopy_pct'])}, roads "
+            f"{_pct(overlaps['road_pct'])}, selected production ground "
+            f"{_pct(overlaps['production_pct'])}."
+        )
+    return "\n".join(lines)
+
+
+def _format_water_candidate_zones_summary(
+    water_narrative: Optional[dict], suitability_narrative: Optional[dict] = None
+) -> str:
     """Formats water_candidate_zones.py's own 'narrative_data' block (see
     build_narrative_data() there for the field contract -- pre-digested,
     FINAL, imperial values) for the report prompt. This reads ONLY that
     block -- never the raw zone geometry or GeoJSON layer it replaced
     here; every number below was already converted and rounded at the
     source module. Optional, same reasoning as climate/imagery above -- a
-    DEM fetch failure shouldn't take down the whole report."""
+    DEM fetch failure shouldn't take down the whole report.
+
+    suitability_narrative is water_suitability.build_narrative_data()'s
+    own block, when the run scored its candidates. Supplying it TRIMS the
+    per-candidate detail below to the top
+    water_suitability.WATER_ZONE_PRESENTATION_TOP_N by rank and appends
+    the ranked scoring table; the total survivor count is stated either
+    way, so the trim is visible rather than silent. Omitting it keeps the
+    previous behavior of describing every candidate -- an unscored run has
+    no ranks to trim by, and inventing an order would be worse than a long
+    list.
+    """
     if not water_narrative or not water_narrative.get("zone_found"):
         return (
             "No water system candidate survey area identified (no "
@@ -387,12 +450,18 @@ def _format_water_candidate_zones_summary(water_narrative: Optional[dict]) -> st
             "this property)."
         )
 
-    # EVERY candidate is listed. Generation is uncapped by design (see
-    # water_candidate_zones.WATER_ACCUMULATION_SEED_BUDGET) and this block
-    # is generation-side, so it reports what generation produced. Trimming
-    # to a presentation top-N is a RANKING operation and belongs in the
-    # scoring branch, applied to rank after water_suitability.py has scored
-    # every candidate against every other -- flagged here, not done here.
+    # PRESENTATION IS CAPPED, GENERATION IS NOT. Generation is uncapped by
+    # design (see water_candidate_zones.WATER_ACCUMULATION_SEED_BUDGET) and
+    # a real parcel produces many candidates; describing all of them in
+    # prose buries the ones that matter. When the run was scored, this
+    # describes the top N BY RANK and says how many there are in total.
+    # Without scores there are no ranks, so it falls back to describing
+    # every candidate rather than picking an arbitrary N off generation
+    # order.
+    presented_ids = None
+    if suitability_narrative and suitability_narrative.get("zone_found"):
+        presented_ids = [z["id"] for z in suitability_narrative["zones"]]
+
     lines = [
         f"{water_narrative['candidate_count']} candidate survey area(s) identified "
         f"(from {water_narrative['nomination']['keypoints_considered']} detected keypoint(s)). Each is "
@@ -400,7 +469,15 @@ def _format_water_candidate_zones_summary(water_narrative: Optional[dict]) -> st
         "cell, plus the dam-axis band across the valley there. THE REFERENCE WATERLINE IS A MEASURING "
         "STICK USED TO COMPARE SITES ON EQUAL TERMS, NOT A PROPOSED DAM HEIGHT."
     ]
+    if presented_ids is not None:
+        lines.append(
+            f"Described in detail below: the {len(presented_ids)} highest-ranked of "
+            f"{suitability_narrative['candidate_count']} scored survivor(s). The rest were scored and "
+            "ranked too -- nothing was filtered out -- and are in the candidate layer."
+        )
     for zone in water_narrative["zones"]:
+        if presented_ids is not None and zone["id"] not in presented_ids:
+            continue
         provenance = zone["provenance"]
         if provenance["nominated_by"] == "keypoint":
             # THE KEYPOINT IS THE POOL'S TAIL, NOT ITS WALL. Saying only
@@ -539,6 +616,9 @@ def _format_water_candidate_zones_summary(water_narrative: Optional[dict]) -> st
             )
             + "."
         )
+
+    if suitability_narrative and suitability_narrative.get("zone_found"):
+        lines.append(_format_water_suitability_ranking(suitability_narrative))
 
     lines.append(
         "\nThese are general survey areas suitable for keyline plowing patterns, pond/dam potential, "
@@ -1218,7 +1298,7 @@ SATELLITE IMAGERY / LAND COVER (NDVI-derived):
 {_format_imagery_summary(imagery_summary)}
 
 WATER SYSTEM SURVEY AREA (computed):
-{_format_water_candidate_zones_summary(narrative_data.get("water_candidate_zones"))}
+{_format_water_candidate_zones_summary(narrative_data.get("water_candidate_zones"), narrative_data.get("water_suitability"))}
 
 SUGGESTED ROAD CORRIDOR (computed network, grown from the real access point):
 {_format_road_corridor_summary(narrative_data.get("road_corridors"))}
