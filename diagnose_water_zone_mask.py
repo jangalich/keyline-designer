@@ -49,7 +49,7 @@ water_candidate_zones.find_candidate_zones() directly -- the real, full
 pipeline entry point, including its keypoint/accumulation nomination ->
 level-pool delineation -> bounded-opening wiring -- rather than
 reimplementing nomination/delineation independently a second time.
-find_candidate_zones() returns up to MAX_WATER_ZONE_CANDIDATES zones.
+find_candidate_zones() returns EVERY surviving candidate (generation is uncapped).
 
 Requires real network access (a real USGS DEM fetch via dem_data.py, plus
 production_area.py's own SSURGO/canopy/road fetches, plus this script's
@@ -102,7 +102,7 @@ from farm_roads_data import ROAD_EXCLUSION_BUFFER_METERS
 from water_candidate_zones import (
     MAX_SERVICE_DISTANCE_METERS,
     MAX_VALLEY_CONTRIBUTING_AREA_ACRES,
-    MAX_WATER_ZONE_CANDIDATES,
+    WATER_ACCUMULATION_SEED_BUDGET,
     MIN_BOUNDARY_SETBACK_METERS,
     MIN_WATER_ZONE_AREA_ACRES,
     WATER_ZONE_CANOPY_BUFFER_METERS,
@@ -305,174 +305,129 @@ def main(
         )
         return
 
-    # Gate breakdown: every call below is the REAL compute_water_eligible_cells()
-    # itself, just with individual gate thresholds swapped for "always pass"
-    # values (0 / infinity) to isolate one real gate at a time. No gate logic
-    # is reimplemented here. Items 1/2/2a/2b use the REAL boundary_polygon_utm
-    # (same as the on-parcel-vs-setback section above) with
-    # min_boundary_setback_meters=0.0 for the service-distance isolation --
-    # this disables gate 2's SETBACK distance specifically (its only
-    # overridable knob) while leaving on-parcel containment intact. These
-    # items are therefore "service-distance, on-parcel required, setback
-    # waived" rather than pure service-distance isolation.
-    print("=== Service-distance / boundary-setback gate breakdown (post-dilation mask) ===\n")
+    # =================================================================
+    # THE MASK IS THREE GATES NOW: ceiling, on-parcel, inert setback.
+    # Canopy, existing roads and max-service-distance are no longer gates
+    # at all -- they are MEASUREMENTS on a delineated candidate. Their
+    # figures are still printed below, because "how much of this parcel's
+    # drainage sits under canopy" remains the useful context it always
+    # was, but they are labelled as CONTEXT/OVERLAP rather than as gates,
+    # and they no longer pretend to be exclusions.
+    #
+    # A LABELLING BUG IS FIXED HERE, and it is worth stating because the
+    # numbers it produced looked plausible. The previous version derived
+    # each "excluded by X" figure by calling compute_water_eligible_cells()
+    # with X real and the OTHER gates relaxed, then complementing against
+    # on_parcel_mask. That is correct only if the other gates are actually
+    # relaxed -- and for the TOO FAR line they were not: canopy and road
+    # were held REAL in that call, so
+    #
+    #     too_far_excluded  ==  on_parcel & (canopy | road | too_far)
+    #
+    # i.e. the "excluded as TOO FAR" line printed the UNION of all three
+    # exclusions under a distance label. On the reference property, where
+    # the road union excluded nothing and every on-parcel cell was within
+    # service distance, that union collapses to exactly the canopy set --
+    # which is why the canopy and TOO FAR lines both read 465 cells /
+    # 2.868 acres. THE CANOPY FIGURE WAS THE REAL ONE; the TOO FAR figure
+    # was the canopy set wearing the wrong name. The old "internal
+    # consistency check" could never have caught it, because both of its
+    # sides carried the same contamination -- so it is deleted along with
+    # the calls it validated.
+    #
+    # Every figure below is now computed DIRECTLY from its own layer --
+    # not by complementing a relaxed call -- so no line can silently be
+    # another line's set. The pairwise intersections are printed
+    # underneath to make that provable rather than asserted.
+    # =================================================================
+    print("=== Nomination mask: the THREE gates that decide where an anchor may sit ===\n")
 
-    # 1. On-parcel + boundary-setback gate ALONE (service-distance disabled
-    #    via max=infinity/min=0, using the REAL property boundary/setback).
-    #    Canopy/road held REAL (this isn't what's being isolated here) --
-    #    same as the percentile-band gate already being held real.
-    parcel_setback_mask = compute_water_eligible_cells(
-        dem, production_areas, boundary_polygon_utm,
+    three_gate_mask = compute_water_eligible_cells(
+        dem, boundary_polygon_utm,
         max_valley_contributing_area_acres=max_contributing_acres,
-        max_service_distance_meters=float("inf"),
         min_boundary_setback_meters=MIN_BOUNDARY_SETBACK_METERS,
-        canopy_root_zone_mask_utm=canopy_root_zone_mask_utm,
-        road_exclusion_union_utm=road_exclusion_union_utm,
     )
-    _report_cell_count(
-        f"On-parcel + boundary-setback gate alone (MIN_BOUNDARY_SETBACK_METERS={MIN_BOUNDARY_SETBACK_METERS}m, "
-        "service-distance disabled)",
-        parcel_setback_mask, dem,
+    _report_mask_stats(
+        f"NOMINATION MASK (ceiling <= {max_contributing_acres} ac AND on-parcel AND setback "
+        f"{MIN_BOUNDARY_SETBACK_METERS}m [inert])",
+        three_gate_mask, dem,
     )
 
-    # 2. Max-service-distance gate (boundary-SETBACK disabled via
-    #    min_boundary_setback_meters=0, using the REAL boundary_polygon_utm
-    #    -- on-parcel containment still required, using the REAL
-    #    MAX_SERVICE_DISTANCE_METERS). There is no minimum-service-distance
-    #    gate any more, so this is a single max-distance test. Canopy/road
-    #    held REAL.
-    service_distance_mask = compute_water_eligible_cells(
-        dem, production_areas, boundary_polygon_utm,
-        max_valley_contributing_area_acres=max_contributing_acres,
-        max_service_distance_meters=MAX_SERVICE_DISTANCE_METERS,
-        min_boundary_setback_meters=0.0,
-        canopy_root_zone_mask_utm=canopy_root_zone_mask_utm,
-        road_exclusion_union_utm=road_exclusion_union_utm,
+    canopy_covered_mask = (
+        three_gate_mask & np.asarray(canopy_root_zone_mask_utm, dtype=bool)
+        if canopy_available
+        else np.zeros_like(three_gate_mask)
     )
-    _report_cell_count(
-        f"Max-service-distance gate (MAX={MAX_SERVICE_DISTANCE_METERS}m, "
-        "setback disabled, on-parcel still required)",
-        service_distance_mask, dem,
-    )
+    road_prepared = prep(road_exclusion_union_utm) if road_exclusion_union_utm is not None else None
+    road_covered_mask = np.zeros_like(three_gate_mask)
+    beyond_service_mask = np.zeros_like(three_gate_mask)
+    for r, c in np.argwhere(three_gate_mask):
+        r, c = int(r), int(c)
+        point = Point(*pixel_center_xy(dem, r, c))
+        if road_prepared is not None and road_prepared.contains(point):
+            road_covered_mask[r, c] = True
+        if all(
+            point.distance(patch["polygon_utm"]) > MAX_SERVICE_DISTANCE_METERS
+            for patch in production_areas
+        ):
+            beyond_service_mask[r, c] = True
 
-    # 2a. "Too far": max-distance real -- a cell excluded here failed to
-    #     find ANY production area within MAX_SERVICE_DISTANCE_METERS. With
-    #     the minimum-service-distance gate removed, this is the whole
-    #     service-distance gate (item 2 above computes the same thing);
-    #     kept as the "excluded" breakdown of it. Canopy/road held REAL.
-    too_far_mask = compute_water_eligible_cells(
-        dem, production_areas, boundary_polygon_utm,
-        max_valley_contributing_area_acres=max_contributing_acres,
-        max_service_distance_meters=MAX_SERVICE_DISTANCE_METERS,
-        min_boundary_setback_meters=0.0,
-        canopy_root_zone_mask_utm=canopy_root_zone_mask_utm,
-        road_exclusion_union_utm=road_exclusion_union_utm,
-    )
-    # too_far_mask is on-parcel-required (compute_water_eligible_cells()'s
-    # on-parcel gate has no override), so it can only ever contain a
-    # subset of on_parcel_mask -- the complement below is against
-    # on_parcel_mask (item 1 above), not the larger drainage_mask_after,
-    # so an off-parcel cell never gets spuriously counted as "excluded as
-    # too far" (see the internal consistency check below for why this
-    # matters).
-    too_far_excluded_mask = on_parcel_mask & ~too_far_mask
+    # THE HEADLINE BEFORE/AFTER NUMBER FOR THE MASK SHRINK.
+    old_gate_mask = three_gate_mask & ~canopy_covered_mask & ~road_covered_mask & ~beyond_service_mask
+    _gained = int(three_gate_mask.sum()) - int(old_gate_mask.sum())
+    print("--- BEFORE/AFTER: what the deleted canopy/road/service gates used to remove ---")
+    print(f"  nomination mask BEFORE (6 gates):  {int(old_gate_mask.sum())} cells, "
+          f"{int(old_gate_mask.sum()) * cell_area_acres(dem):.3f} acres")
+    print(f"  nomination mask NOW    (3 gates):  {int(three_gate_mask.sum())} cells, "
+          f"{int(three_gate_mask.sum()) * cell_area_acres(dem):.3f} acres")
+    print(f"  GAINED by the shrink:              {_gained} cells, "
+          f"{_gained * cell_area_acres(dem):.3f} acres -- ground on which an anchor may now be "
+          "nominated and could not before\n")
+
+    print("=== CONTEXT / OVERLAP measurements (NOT gates -- nothing below excludes a cell) ===\n")
     _report_cell_count(
-        f"  -> excluded as TOO FAR (exceeds MAX_SERVICE_DISTANCE_METERS={MAX_SERVICE_DISTANCE_METERS}m "
-        "from every production area)",
-        too_far_excluded_mask, dem,
+        f"Under the woody-vegetation root zone (WATER_ZONE_CANOPY_BUFFER_METERS="
+        f"{WATER_ZONE_CANOPY_BUFFER_METERS}m)"
+        + ("" if canopy_available else " [canopy fetch FAILED above -- reads 0, NOT a real result]"),
+        canopy_covered_mask, dem,
+    )
+    _report_cell_count(
+        f"Inside an existing road right-of-way (shared ROAD_EXCLUSION_BUFFER_METERS="
+        f"{ROAD_EXCLUSION_BUFFER_METERS}m)"
+        + ("" if road_exclusion_union_utm is not None else " [no mapped road nearby -- a real 0]"),
+        road_covered_mask, dem,
+    )
+    _report_cell_count(
+        f"Beyond MAX_SERVICE_DISTANCE_METERS={MAX_SERVICE_DISTANCE_METERS}m from EVERY production area",
+        beyond_service_mask, dem,
     )
     print()
 
-    # 2c. Canopy gate ALONE: service-distance/setback disabled (max=inf/
-    #     min=0/setback=0), road skipped -- isolates canopy specifically.
-    canopy_alone_mask = compute_water_eligible_cells(
-        dem, production_areas, boundary_polygon_utm,
-        max_valley_contributing_area_acres=max_contributing_acres,
-        max_service_distance_meters=float("inf"),
-        min_boundary_setback_meters=0.0,
-        canopy_root_zone_mask_utm=canopy_root_zone_mask_utm,
-        road_exclusion_union_utm=_ROAD_CHECK_UNCHECKED,
-    )
-    canopy_excluded_mask = on_parcel_mask & ~canopy_alone_mask
-    _report_cell_count(
-        f"Canopy gate alone (woody-vegetation root zone, WATER_ZONE_CANOPY_BUFFER_METERS="
-        f"{WATER_ZONE_CANOPY_BUFFER_METERS}m)"
-        + ("" if canopy_available else " [canopy fetch FAILED above -- unchecked, reads 0, not a real result]"),
-        canopy_excluded_mask, dem,
-    )
+    # PROVABLY DISTINCT: three independent layers cannot be validated by
+    # their totals alone -- that is exactly how the old bug hid -- so print
+    # the pairwise intersections. Two lines reporting the same count with a
+    # full-overlap intersection are the same set wearing two names.
+    print("  Pairwise overlaps (so no two lines above can silently be the same set):")
+    for _label_a, _mask_a, _label_b, _mask_b in (
+        ("canopy", canopy_covered_mask, "road", road_covered_mask),
+        ("canopy", canopy_covered_mask, "beyond-service", beyond_service_mask),
+        ("road", road_covered_mask, "beyond-service", beyond_service_mask),
+    ):
+        _both = int((_mask_a & _mask_b).sum())
+        _a, _b = int(_mask_a.sum()), int(_mask_b.sum())
+        _note = ""
+        if _a and _a == _b == _both:
+            _note = "  <-- IDENTICAL SETS: check the labelling before trusting either figure"
+        print(f"    {_label_a} & {_label_b}: {_both} cells (of {_a} / {_b}){_note}")
+    print()
 
-    # 2d. Road gate ALONE: service-distance/setback disabled, canopy
-    #     skipped -- isolates existing-road right-of-way specifically.
-    road_alone_mask = compute_water_eligible_cells(
-        dem, production_areas, boundary_polygon_utm,
-        max_valley_contributing_area_acres=max_contributing_acres,
-        max_service_distance_meters=float("inf"),
-        min_boundary_setback_meters=0.0,
-        canopy_root_zone_mask_utm=_CANOPY_CHECK_UNCHECKED,
-        road_exclusion_union_utm=road_exclusion_union_utm,
-    )
-    road_excluded_mask = on_parcel_mask & ~road_alone_mask
-    _report_cell_count(
-        f"Road gate alone (existing right-of-way, shared ROAD_EXCLUSION_BUFFER_METERS={ROAD_EXCLUSION_BUFFER_METERS}m)",
-        road_excluded_mask, dem,
-    )
-
-    # (There is no 2e. The production-zone exclusion gate that used to be
-    #  isolated here is DELETED -- see the module docstring.)
-
-    # --- Internal consistency check -----------------------------------
-    # With the minimum-service-distance gate removed, the service-distance
-    # gate is a single max-distance test, so too_far_mask (item 2a) and
-    # service_distance_mask (item 2) are the same isolation call. The
-    # "too far" excluded set is therefore exactly on_parcel_mask \
-    # service_distance_mask:
-    #   too_far_excluded_count == on_parcel_count - service_distance_pass_count
-    # A mismatch means the two calls no longer share the same universe/gate
-    # conditions -- exactly the class of regression this check catches.
-    on_parcel_count = int(on_parcel_mask.sum())
-    service_distance_pass_count = int(service_distance_mask.sum())
-    too_far_excluded_count = int(too_far_excluded_mask.sum())
-
-    lhs = too_far_excluded_count
-    rhs = on_parcel_count - service_distance_pass_count
-    print("Internal consistency check: too_far_excluded "
-          "== (on_parcel_count - service_distance_pass_count)")
-    print(f"  too_far_excluded_count={too_far_excluded_count} -> lhs={lhs}")
-    print(f"  on_parcel_count={on_parcel_count}, service_distance_pass_count={service_distance_pass_count} -> rhs={rhs}")
-    if lhs == rhs:
-        print(f"  PASS: {lhs} == {rhs}\n")
-    else:
-        print(f"  WARNING: consistency check FAILED ({lhs} != {rhs}) -- the gate-breakdown "
-              "isolation calls above may no longer share the same universe/gate conditions as "
-              "service_distance_mask. Treat the TOO FAR numbers above as unreliable "
-              "until this is investigated.\n")
-
-    # 3. ALL FIVE remaining gates combined -- this is compute_water_
-    #    eligible_cells()'s own real output at this run's actual
-    #    parameters, i.e. exactly what find_candidate_zones() (the real
-    #    pipeline) nominates anchors on.
-    combined_mask = compute_water_eligible_cells(
-        dem, production_areas, boundary_polygon_utm,
-        max_valley_contributing_area_acres=max_contributing_acres,
-        canopy_root_zone_mask_utm=canopy_root_zone_mask_utm,
-        road_exclusion_union_utm=road_exclusion_union_utm,
-    )
-    _report_mask_stats(
-        "ALL FIVE remaining gates combined (real pipeline output -- matches find_candidate_zones()'s own "
-        "eligible_mask, the ground anchors may be nominated on)",
-        combined_mask, dem,
-    )
-
-    # The real, full pipeline entry point itself -- not a re-implementation
-    # of clustering/connected-growth/whole-zone scoring. zones carries every
-    # field find_candidate_zones() itself produces (cells, polygon_utm,
-    # primary_production_area_relationship, ...) so the sections below report
-    # on the REAL thing, not a diagnostic-only approximation of it.
-    # find_candidate_zones() returns up to MAX_WATER_ZONE_CANDIDATES zones,
-    # nominated from keypoints first (by catchment) then from the highest
-    # remaining flow accumulation. The nomination record -- one outcome per
-    # keypoint, one entry per family-2 seed, each with its reason code -- is
-    # what explains a short or empty list.
+    # find_candidate_zones() returns EVERY surviving candidate now -- there
+    # is no generation cap. Keypoints are attempted in catchment order and
+    # family 2 then adds up to WATER_ACCUMULATION_SEED_BUDGET survivors of
+    # its own. The nomination record -- one outcome per keypoint (with its
+    # distance_outside_boundary_m, which is what makes an off-parcel
+    # anchor's outcome legible), one entry per family-2 seed, each with its
+    # reason code -- is what explains a short or empty list.
     nomination_diagnostics: dict = {}
     zones = find_candidate_zones(
         dem, production_areas, boundary_polygon_utm,
@@ -481,25 +436,54 @@ def main(
         road_exclusion_union_utm=road_exclusion_union_utm,
         diagnostics=nomination_diagnostics,
     )
-    print(f"find_candidate_zones() returned {len(zones)} zone(s) (cap: {MAX_WATER_ZONE_CANDIDATES}).")
+    print(f"find_candidate_zones() returned {len(zones)} candidate(s) -- generation is UNCAPPED; family 2 "
+          f"is bounded at {WATER_ACCUMULATION_SEED_BUDGET} survivor(s).")
     for zone in zones:
-        left = zone["abutments"]["left"]["lateral_distance_m"]
-        right = zone["abutments"]["right"]["lateral_distance_m"]
+        left, right = zone["abutments"]["left"], zone["abutments"]["right"]
+
+        def _side(side_result, crosses):
+            if crosses:
+                return f"TRUNCATED at a major drainage {side_result['major_drainage_distance_m']}m out"
+            if side_result["found"]:
+                return f"{side_result['lateral_distance_m']}m"
+            return "NOT FOUND"
+
         print(
             f"  - zone {zone['id']}: nominated_by={zone['nominated_by']} "
             f"keypoint_id={zone['keypoint_id']} valley_id={zone['valley_id']} "
-            f"anchor={zone['anchor_rowcol']} cells={len(zone['cells'])} "
+            f"anchor={zone['anchor_rowcol']} "
+            f"off_parcel={zone['anchor_off_parcel']}"
+            + (f" ({zone['anchor_distance_outside_boundary_m']}m outside)"
+               if zone["anchor_off_parcel"] else "")
+            + f" cells={len(zone['cells'])} "
             f"acres={zone['polygon_utm'].area / SQUARE_METERS_PER_ACRE:.3f} "
-            f"abutments=(L {left}, R {right}) flags={zone['flags']}"
+            f"abutments=(L {_side(left, zone['dam_band_crosses_major_drainage_left'])}, "
+            f"R {_side(right, zone['dam_band_crosses_major_drainage_right'])}) "
+            f"canopy={zone['canopy_overlap_pct']}% road={zone['road_overlap_pct']}% "
+            f"flags={zone['flags']}"
         )
-    print("\nPer-keypoint nomination outcomes (reason codes):")
+        for station in zone["level_pool"]["stations"]:
+            print(
+                f"      station {station['station_index']} at {station['offset_upstream_m']}m upstream: "
+                f"flooded width {station['flooded_width_m']}m, flooded cross-section "
+                f"{station['flooded_cross_section_area_m2']}m^2"
+            )
+    print("\nPer-keypoint nomination outcomes (reason codes, with off-parcel distance):")
     for outcome in nomination_diagnostics.get("keypoint_outcomes", []):
         print(
             f"  - keypoint {outcome['keypoint_id']} (valley {outcome['valley_id']}, "
-            f"{outcome['contributing_acres']:.2f} ac): {outcome['outcome']} "
+            f"{outcome['contributing_acres']:.2f} ac, on_parcel={outcome['on_parcel']}, "
+            f"{outcome['distance_outside_boundary_m']}m outside): {outcome['outcome']} "
             f"-> candidate {outcome['candidate_id']}"
+            + (f"  flags={outcome['flags']}" if outcome["flags"] else "")
         )
-    print("Family-2 (accumulation) seed log:")
+    print(
+        f"Family-2 (accumulation) seed log -- {nomination_diagnostics.get('accumulation_survivors')} "
+        f"survivor(s) from {len(nomination_diagnostics.get('accumulation_seeds', []))} attempt(s)"
+        + ("  [ATTEMPT LIMIT REACHED]"
+           if nomination_diagnostics.get("accumulation_attempt_limit_reached") else "")
+        + ":"
+    )
     for seed in nomination_diagnostics.get("accumulation_seeds", []):
         print(
             f"  - anchor {seed['anchor_rowcol']} (accum {seed['flow_accumulation_cells']:.0f} cells): "
@@ -507,6 +491,11 @@ def main(
         )
     print()
 
+    # The real, full pipeline entry point itself -- not a re-implementation
+    # of clustering/connected-growth/whole-zone scoring. zones carries every
+    # field find_candidate_zones() itself produces (cells, polygon_utm,
+    # primary_production_area_relationship, ...) so the sections below report
+    # on the REAL thing, not a diagnostic-only approximation of it.
     ranked_zones = _report_zone_elevation_ranges(dem, boundary_polygon_utm, zones)
 
     if not ranked_zones:

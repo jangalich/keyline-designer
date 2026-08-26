@@ -31,6 +31,17 @@ What is covered here:
      than being crossed. That limitation is valley_delineation.py's, is
      pre-existing, and is pinned here rather than worked around.
   5. The valley-axis fit is continuous, not D8-quantized.
+  6. rowcol_for_xy() round-trips pixel_center_xy().
+  7. THE CONTRIBUTING-AREA CEILING ON THE DAM BAND: a parallel channel
+     below the waterline inside the abutment half-width, carrying more
+     contributing area than the ceiling allows, truncates the band on that
+     side with crosses_major_drainage -- and does NOT set found=False's
+     "no abutment here" story on that side, because those are different
+     findings.
+  8. THE CEILING IS A NO-OP ON THE BACKWATER BY CONSTRUCTION: no backwater
+     cell's contributing area can exceed the anchor's. This is the
+     structural guarantee that makes a per-cell runtime check unnecessary,
+     so it is asserted here rather than coded there.
 """
 
 import math
@@ -511,6 +522,129 @@ for _rc in [(0, 0), (7, 3), (39, 39), (30, 20)]:
     assert rowcol_for_xy(V_DEM, *pixel_center_xy(V_DEM, *_rc)) == _rc, _rc
 assert rowcol_for_xy(V_DEM, ORIGIN_X - 1.0, ORIGIN_Y - 1.0) is None, "off-grid must be None, not clamped"
 print("Test 6 -- rowcol_for_xy() is the exact inverse of pixel_center_xy(), and returns None off-grid.")
+
+
+# =====================================================================
+# FIXTURE 7 -- THE CONTRIBUTING-AREA CEILING ON THE DAM BAND.
+#
+# The one place the ceiling can genuinely bind on a delineation. The
+# lateral abutment search runs perpendicular to the valley, and on real
+# terrain it can cross a SECOND channel that happens to sit below the
+# waterline within the 75 m half-width. A dam axis spanning that is not a
+# longer wall, it is a wall damming two creeks.
+#
+# Fixture: the fixture-1 V-valley (channel down column 20, anchor (30, 20)
+# at 97.0 m, waterline 99.5 m) with a PARALLEL TRENCH cut down column 22 --
+# 2 cells (10 m) east of the channel. Two things about that placement are
+# deliberate: it is comfortably BELOW the waterline (0.5 m under the
+# channel floor), so the raw-terrain search would walk straight through it
+# and only the ceiling can stop the walk; and it sits NEARER than the
+# natural abutment at |k| = 3 (15 m), so the ceiling binds FIRST. A trench
+# placed outside 15 m would never be reached and the test would assert
+# nothing. The trench's contributing area is put above the ceiling by
+# handing the delineation a synthetic accumulation grid.
+#
+# EXPECTED:
+#   left  (east): crosses_major_drainage_left  True at 10.0 m,
+#                 abutment_found_left  False (never reached),
+#                 band cells on that side: 1 (the 5 m cell only -- the
+#                 tripping cell at 10 m is NOT included)
+#   right (west): untouched -- abutment_found_right True at 15.0 m,
+#                 crosses_major_drainage_right False
+# =====================================================================
+_t_array = _v_array.copy()
+_t_array[:, 22] = _t_array[:, 20] - 0.5     # a trench 0.5 m below the channel floor
+T_DEM = _dem(_t_array)
+T_FILLED, T_FTR, T_FTC, T_ACC, T_UP = _hydrology(T_DEM)
+
+# The ceiling in cell-count terms, and a synthetic accumulation grid that
+# puts ONLY the trench column above it. Everything else stays at 1 so the
+# check cannot fire anywhere unintended.
+_T_CEILING_CELLS = 100.0
+_t_accum = np.ones((V_SIZE, V_SIZE), dtype=np.float64)
+_t_accum[:, 22] = 250.0
+assert _t_accum[30, 22] > _T_CEILING_CELLS and _t_accum[30, 21] <= _T_CEILING_CELLS
+
+t_pool = delineate_level_pool(
+    T_DEM, T_FILLED, T_FTR, T_FTC, _t_accum, T_UP, V_ANCHOR,
+    max_contributing_cells=_T_CEILING_CELLS,
+)
+assert t_pool["anchor_elevation_m"] == 97.0
+assert t_pool["waterline_elevation_m"] == 99.5
+assert float(_t_array[30, 22]) < t_pool["waterline_elevation_m"], (
+    "precondition: the trench sits BELOW the waterline, so only the ceiling can stop the walk there"
+)
+_t_left = t_pool["abutments"]["left"]
+_t_right = t_pool["abutments"]["right"]
+assert t_pool["dam_band_crosses_major_drainage_left"] is True, _t_left
+assert _t_left["major_drainage_distance_m"] == 10.0, _t_left
+assert _t_left["major_drainage_contributing_cells"] == 250.0
+assert t_pool["abutment_found_left"] is False, (
+    "TEST 7: the search stopped at the drainage, so no abutment was found on that side -- but this "
+    "must be reported as crosses_major_drainage, NOT as the bare 'no shoulder in range' story"
+)
+assert _t_left["lateral_distance_m"] is None
+assert len(_t_left["band_cells"]) == 1, (
+    f"TEST 7: only the 5 m cell joins the band; the tripping cell at 10 m does NOT, got "
+    f"{_t_left['band_cells']}"
+)
+assert (30, 22) not in _t_left["band_cells"]
+# The far side is untouched -- one side truncating must not disturb the other.
+assert t_pool["dam_band_crosses_major_drainage_right"] is False
+assert t_pool["abutment_found_right"] is True
+assert _t_right["lateral_distance_m"] == 15.0, _t_right
+assert _t_right["major_drainage_distance_m"] is None
+
+# And the contrast that proves the ceiling is the cause: the SAME terrain
+# with the check disabled walks straight through the trench to the natural
+# abutment at 15 m.
+t_pool_unchecked = delineate_level_pool(T_DEM, T_FILLED, T_FTR, T_FTC, _t_accum, T_UP, V_ANCHOR)
+assert t_pool_unchecked["dam_band_crosses_major_drainage_left"] is False
+assert t_pool_unchecked["abutment_found_left"] is True
+assert t_pool_unchecked["abutments"]["left"]["lateral_distance_m"] == 15.0
+print(
+    "Test 7 -- ceiling on the dam band: a parallel drainage 10 m east of the anchor, 0.5 m below the "
+    "channel floor and carrying 250 cells against a 100-cell ceiling, truncates the band at 10.0 m with "
+    "crosses_major_drainage_left=True and abutment_found_left=False (a DIFFERENT finding, reported "
+    "distinctly); the tripping cell is excluded from the band; the right side still finds its abutment at "
+    "15.0 m; and with the check disabled the same walk runs through to 15.0 m -- so the ceiling is what "
+    "stopped it."
+)
+
+
+# =====================================================================
+# TEST 8 -- THE CEILING IS A NO-OP ON THE BACKWATER, BY CONSTRUCTION.
+#
+# Every backwater cell is upstream of the anchor, and flow accumulation
+# decreases strictly upstream (a cell's accumulation is its own upstream
+# contributing count, and the anchor collects all of them). So no
+# backwater cell can carry more contributing area than an anchor that
+# already cleared the ceiling -- which is why find_candidate_zones()
+# applies the ceiling to the nomination mask and the dam band, and does
+# NOT re-check it per backwater cell at runtime.
+#
+# Asserted here against the REAL accumulation grid over the fixture-1
+# pool, so the guarantee is verified rather than assumed.
+# =====================================================================
+_anchor_accum = float(V_ACC[V_ANCHOR[0], V_ANCHOR[1]])
+_worst = max(float(V_ACC[r, c]) for r, c in v_pool["pool_cells"])
+assert _worst <= _anchor_accum, (
+    f"TEST 8: a backwater cell carries {_worst} contributing cells against the anchor's "
+    f"{_anchor_accum} -- the structural guarantee is broken and the ceiling WOULD need a runtime "
+    "per-cell check on the backwater"
+)
+for _cell in v_pool["pool_cells"]:
+    assert float(V_ACC[_cell[0], _cell[1]]) <= _anchor_accum, _cell
+# Same guarantee on the flat-plain fixture, where the pool is a long
+# single-file column rather than a fan -- a different shape of walk.
+_f_anchor_accum = float(F_ACC[F_ANCHOR[0], F_ANCHOR[1]])
+assert all(float(F_ACC[r, c]) <= _f_anchor_accum for r, c in f_pool["pool_cells"])
+print(
+    f"Test 8 -- ceiling is a no-op on the backwater: across the {len(v_pool['pool_cells'])}-cell V-valley "
+    f"pool the largest contributing area on any backwater cell is {_worst:.0f} against the anchor's "
+    f"{_anchor_accum:.0f}, and the same holds on the flat-plain fixture -- so an anchor that cleared the "
+    "ceiling guarantees its whole backwater does, with no per-cell runtime check."
+)
 
 
 print("\nAll valley_level_pool checks passed.")

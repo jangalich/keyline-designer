@@ -387,6 +387,12 @@ def _format_water_candidate_zones_summary(water_narrative: Optional[dict]) -> st
             "this property)."
         )
 
+    # EVERY candidate is listed. Generation is uncapped by design (see
+    # water_candidate_zones.WATER_ACCUMULATION_SEED_BUDGET) and this block
+    # is generation-side, so it reports what generation produced. Trimming
+    # to a presentation top-N is a RANKING operation and belongs in the
+    # scoring branch, applied to rank after water_suitability.py has scored
+    # every candidate against every other -- flagged here, not done here.
     lines = [
         f"{water_narrative['candidate_count']} candidate survey area(s) identified "
         f"(from {water_narrative['nomination']['keypoints_considered']} detected keypoint(s)). Each is "
@@ -401,10 +407,11 @@ def _format_water_candidate_zones_summary(water_narrative: Optional[dict]) -> st
                 f"nominated from keypoint {provenance['keypoint_id']} "
                 f"(valley {provenance['valley_id']})"
             )
-            if provenance["seed_snapped"]:
+            if provenance["anchor_off_parcel"]:
                 source += (
-                    f", anchor snapped {provenance['seed_snap_distance_ft']} ft to the nearest "
-                    "eligible cell"
+                    f", whose anchor sits {provenance['anchor_distance_outside_boundary_ft']} ft "
+                    "OUTSIDE the drawn boundary -- the dam would stand at the property edge and the "
+                    "acreage below is the ON-PARCEL portion of the pool it would impound"
                 )
         else:
             source = "nominated from the highest remaining flow accumulation"
@@ -446,6 +453,15 @@ def _format_water_candidate_zones_summary(water_narrative: Optional[dict]) -> st
             )
             + "."
         )
+        for side in ("left", "right"):
+            if pool[f"crosses_major_drainage_{side}"]:
+                lines.append(
+                    f"  - WARNING: the dam axis runs into a SECOND major drainage "
+                    f"{pool[f'major_drainage_distance_{side}_ft']} ft to the {side} (contributing area "
+                    "above the siltation/peak-flow ceiling). A wall spanning that far would dam two "
+                    "creeks -- a siting problem, not simply a longer wall. This is a different finding "
+                    "from an abutment that was not found."
+                )
         for station in pool["stations"]:
             lines.append(
                 f"  - cross-section {station['offset_upstream_ft']} ft upstream: flooded width "
@@ -491,8 +507,13 @@ def _format_water_candidate_zones_summary(water_narrative: Optional[dict]) -> st
         lines.append(
             "\nKeypoints that produced no candidate, with the reason code that stopped each: "
             + "; ".join(
-                f"keypoint {outcome['keypoint_id']} ({outcome['contributing_acres']} ac catchment): "
-                f"{outcome['outcome']}"
+                f"keypoint {outcome['keypoint_id']} ({outcome['contributing_acres']} ac catchment"
+                + (
+                    ""
+                    if outcome["on_parcel"]
+                    else f", {outcome['distance_outside_boundary_ft']} ft off parcel"
+                )
+                + f"): {outcome['outcome']}"
                 for outcome in unproductive
             )
             + "."

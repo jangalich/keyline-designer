@@ -1152,8 +1152,17 @@ def identify_water_suitability(
     # Same mandatory-canopy/optional-road wiring identify_water_system_
     # candidate_zones() uses -- this entry point also reaches
     # find_candidate_zones() directly (not through that function), so it
-    # needs its own copy of the same fetch-or-raise/fetch-or-degrade calls
-    # rather than silently leaving these new gates unchecked on this path.
+    # needs its own copy of the same fetch-or-raise/fetch-or-degrade calls.
+    #
+    # BOTH ARE MEASUREMENT INPUTS NOW, not gates: canopy and roads no
+    # longer gate water-zone nomination (see compute_water_eligible_
+    # cells()); they feed each candidate's canopy_overlap_pct /
+    # road_overlap_pct. The fetch-or-raise posture on canopy is kept
+    # deliberately -- a silently missing measurement is worse than a loud
+    # failure while this pipeline is being validated, and the pipeline path
+    # supplies canopy_height from ParcelData anyway so the fetch is free
+    # there. Road keeps its graceful degrade: an outage yields
+    # road_overlap_pct=None ("not checked"), never a fabricated 0.0.
     canopy_root_zone_mask_utm = get_required_tree_root_zone_mask_utm(
         boundary_polygon_utm, dem, buffer_meters=WATER_ZONE_CANOPY_BUFFER_METERS, canopy_height=canopy_height
     )

@@ -1,31 +1,59 @@
 """
 water_candidate_zones.py
 
-Step 3 of water-system candidate-zone identification: a per-cell
-eligibility mask, TWO-FAMILY NOMINATION of anchor cells on it, and a
-LEVEL-POOL DELINEATION of the zone around each anchor.
+Step 3 of water-system candidate-zone identification: a three-gate
+NOMINATION MASK, TWO-FAMILY NOMINATION of anchor cells, and a LEVEL-POOL
+DELINEATION of the zone around each anchor.
 
     DEM (dem_data.py)
         --> filled DEM + D8 flow direction/accumulation + upstream map
             (valley_delineation.py / keypoint_detection.build_upstream_map)
         --> production areas (production_area.py)
-        --> [this module] per-DEM-cell eligibility mask (ABSOLUTE
-            contributing-area ceiling + on-parcel + max service distance +
-            boundary setback (now 0.0, inert) + canopy root-zone
-            exclusion + existing-road exclusion)
-        --> NOMINATION of up to MAX_WATER_ZONE_CANDIDATES anchor cells:
-              family 1 -- keypoints (keypoint_detection.detect_keypoints()),
-                          ordered by contributing_acres descending, each
-                          snapped to the nearest eligible cell within
-                          WATER_KEYPOINT_SEED_SNAP_METERS
+        --> [this module] per-DEM-cell NOMINATION MASK -- THREE GATES ONLY:
+            absolute contributing-area ceiling + on-parcel + boundary
+            setback (0.0, inert)
+        --> NOMINATION of anchor cells:
+              family 1 -- EVERY keypoint (keypoint_detection.detect_
+                          keypoints()), in contributing_acres-descending
+                          order, each delineating from its OWN cell --
+                          on-parcel or not, with no snap and no relocation
               family 2 -- the highest-flow-accumulation unclaimed eligible
-                          cells, until the candidate cap or the seeds run out
+                          cells, until WATER_ACCUMULATION_SEED_BUDGET
+                          survivors or the seeds run out
         --> per anchor: valley_level_pool.delineate_level_pool() -- the
             backwater region at POOL_REFERENCE_HEIGHT_METERS plus the
             dam-axis band, clipped to the parcel boundary ONLY
         --> area floor/cap, service-distance relationship, whole-zone
             aggregates -> N candidate-zone polygons with provenance,
             measurements, reason codes and flags
+
+THE MASK'S ROLE IS NARROW, AND NAMING IT "ELIGIBILITY" OVERSOLD IT. It
+decides where an ANCHOR MAY SIT. It does not bound, clip, or shape a zone:
+a candidate is terrain-drawn from its anchor to wherever the reference
+waterline actually reaches, and the ONLY geometric clip it ever gets is
+the property boundary. So the mask holds exactly three gates now --
+contributing-area ceiling, on-parcel, and the inert setback -- and CANOPY,
+EXISTING ROADS, and MAX SERVICE DISTANCE have all been removed from it.
+
+The reasoning is one argument applied three times. A delineated zone
+already spreads over canopy and road-buffer ground legitimately: those
+layers are reported as overlap percentages on the candidate and have never
+clipped its geometry. Gating the ANCHOR while permitting the POOL was an
+inconsistent halfway position -- if a zone can GROW into canopy, there is
+no principled reason it cannot START there. And a keypoint under canopy is
+a REAL dam site behind a clearing cost: pre-filtering it made that cost
+invisible, whereas reporting it makes it weighable evidence (the overlap
+percentages now, a possible scoring factor later). This is the same
+gate-to-preference move this pipeline already made for gravity, soil and
+prime farmland, now applied to the last of water's own gates.
+
+Nothing was thrown away, only relocated. The canopy mask and road union
+are still fetched and still passed to find_candidate_zones() -- as
+MEASUREMENT inputs, with their sentinel semantics intact ("never checked"
+-> None; "checked, and genuinely none nearby" -> 0.0). Max service
+distance survives only where the per-zone production-area relationships
+consume it, and the post-delineation "no production area in range -> drop"
+rule is explicitly a TEMPORARY GUARD the scoring branch will re-decide.
 
 WHAT THIS REPLACED, AND WHY. The previous design took the same eligibility
 mask, ran 4-connected CONNECTED COMPONENTS over it, grew each component
@@ -46,10 +74,14 @@ halves of that are gone:
   - ONE ZONE WAS NEVER THE RIGHT ANSWER for a survey deliverable. The
     single-winner rule (and the "second pass deferred" note that used to
     stand here) meant a parcel with three genuinely different reaches
-    reported one of them. Nomination now returns up to
-    MAX_WATER_ZONE_CANDIDATES, each carrying its own provenance
-    (nominated_by, and for family 1 the keypoint/valley it came from), so
-    the report can compare them and the scoring layer can rank them.
+    reported one of them. Nomination now returns EVERY survivor, each
+    carrying its own provenance (nominated_by, and for family 1 the
+    keypoint/valley it came from), so the report can compare them and the
+    scoring layer can rank them. Generation is UNCAPPED: "present the best
+    N" is a ranking operation and belongs in water_suitability.py, applied
+    to rank after everything has been scored against everything else --
+    see WATER_ACCUMULATION_SEED_BUDGET for the one bound that remains and
+    why family 2 alone needs it.
 
 Adjacent family-2 seeds along one drainage may legitimately produce
 upstream/downstream neighbour candidates on the same valley. That is
@@ -108,31 +140,29 @@ per run) never pays for a second detection pass.
 
 REASON CODES. Every candidate that is NOT produced records WHY, as one of
 a module-level enumeration of string constants (nominated,
-seed_snapped, no_eligible_cell_within_snap, too_close_to_candidate_<id>,
-below_min_area, no_service_relationship, ...) rather than an ad-hoc
-literal at each site, and every flag on a candidate that WAS produced
-(truncated_by_boundary, truncated_by_cap, overlap_trimmed) is drawn from
-the same enumeration. An empty or partial result is then explainable
+keypoint_exceeds_ceiling, too_close_to_candidate_<id>, below_min_area,
+no_service_relationship, ...) rather than an ad-hoc literal at each site,
+and every flag on a candidate that WAS produced (anchor_off_parcel,
+truncated_by_boundary, truncated_by_cap, overlap_trimmed,
+dam_band_crosses_major_drainage_left/right, ...) is drawn from the same
+enumeration. An empty or partial result is then explainable
 rather than merely empty. This is the start of a convention other KSOP
 modules can adopt.
 
 Each zone also carries render_fill_polygon_utm/render_fill_geometry_wgs84.
-For water zones this is a bounded morphological OPENING of the zone's own
-cell mask, clipped to polygon_utm -- the same disc opening production zones
-use (raster_grid.eroded_cell_mask()/binary_dilate() with element="disc"),
-but at a DELIBERATELY tiny radius (WATER_ZONE_RENDER_OPENING_RADIUS_METERS)
-and with NO lead erode, because a small zone (a fraction of an acre, ~9x9
-cells on a 5m grid) cannot afford to lose a cell off every edge. The
-opening softens the blocky cell-union edge and trims single-cell
-protrusions; it can also sever a genuinely too-narrow pinch, so
-render_fill_polygon_utm may be a MultiPolygon (acceptable -- the pinch is
-too narrow to be one coherent survey area). A zone thinner than the opening
-radius throughout erodes to nothing; render_fill_polygon_utm then falls
-back to polygon_utm (non-empty, logged once). The invariant
-render_fill_polygon_utm is a subset of polygon_utm is asserted, raising on
-violation. polygon_utm stays the real, unsmoothed cell-union footprint of
-the delineated pool + dam band; render_fill_polygon_utm is smaller, the
-same way production's drawn fill runs a fraction of the eligible footprint.
+For water zones these are now the IDENTITY: render_fill_polygon_utm IS
+polygon_utm, and render_fill_geometry_wgs84 IS geometry_wgs84 -- the same
+objects, not copies. A bounded morphological opening used to produce them;
+it is deleted, because an opening removes anything narrower than 2r and
+the DAM BAND is one to two cells wide by construction, so it either erased
+the whole zone (observed on all three candidates of the reference run) or
+severed the band from the backwater. See the constants section for the
+full reasoning and for why the KEYS stay (a shared downstream contract:
+the map's ripple clip, fencing's zone loop, road_corridors' pond
+exclusion, solar's water exclusion, pipeline_context's keypoint
+distances). One geometry now reaches both the report and the map, which
+forecloses the report-vs-map acreage-discrepancy class for water zones
+outright.
 """
 
 import logging
@@ -159,13 +189,10 @@ from production_area import (
 )
 from raster_grid import (
     SQUARE_METERS_PER_ACRE,
-    binary_dilate,
     cell_area_acres,
     cell_union_footprint,
     connected_components,
-    eroded_cell_mask,
     pixel_center_xy,
-    waist_erosion_radius_cells,
 )
 from valley_delineation import (
     compute_flow_accumulation,
@@ -263,39 +290,90 @@ MIN_WATER_ZONE_AREA_ACRES = 0.1
 # beyond the reference property. CONFIGURABLE.
 MAX_WATER_ZONE_AREA_ACRES = 2.0
 
-# How many candidate zones a single run may return, across BOTH nomination
-# families combined.
+# How many candidate zones FAMILY 2 (accumulation-nominated) may
+# contribute to a run. Counts family 2's own SURVIVORS, not its attempts:
+# a seed delineated and then dropped at the area floor or the
+# service-relationship check does not consume budget, because the budget
+# bounds how much this fallback ADDS to the answer, not how hard it tried.
 #
-# Three is a report-scale decision, not a terrain one: the deliverable is
-# "here are the places worth walking," and a list long enough to need
-# skimming stops being that. It is also the point past which family 2
-# (highest remaining flow accumulation) starts nominating genuinely
-# marginal ground on a small parcel. Raising it returns more, weaker
-# candidates rather than failing; it does not change how any one candidate
-# is delineated. NOT validated beyond the reference property.
-# CONFIGURABLE.
-MAX_WATER_ZONE_CANDIDATES = 3
+# THERE IS NO OVERALL GENERATION CAP. Every detected keypoint delineates
+# and every survivor is returned; a keypoint is the single most meaningful
+# anchor this pipeline can find, and silently dropping the sixth one
+# because five came back first was an arbitrary answer to a question
+# generation should not be asking. "Present the best N" is a RANKING
+# operation, and ranking is water_suitability.py's job -- that module (in
+# the follow-up scoring branch) is where a presentation TOP_N constant
+# belongs, applied to rank, after every candidate has been scored against
+# every other. Generation's job is to return everything that qualifies.
+#
+# Family 2 still needs SOME bound, because its seed pool is "every
+# remaining eligible cell" and would otherwise run until the parcel was
+# tiled. It exists for two reasons -- as the fallback when no keypoint
+# qualifies, and as cross-family competition for the ranking -- and three
+# additions serve both without burying the keypoint-nominated candidates
+# in a ranking. It runs AFTER all keypoints regardless of how many of them
+# survived. NOT validated beyond the reference property. CONFIGURABLE.
+WATER_ACCUMULATION_SEED_BUDGET = 3
 
-# How far a keypoint may be from the nearest ELIGIBLE cell and still seed a
-# candidate there (family 1).
+# RUNAWAY GUARD, and a DIFFERENT question from the budget above. Because
+# the budget counts SURVIVORS, a parcel on which family 2 can produce
+# nothing has no stopping condition from the budget alone: every failed
+# seed leaves the survivor count where it was, so the loop walks every
+# remaining eligible cell, delineating a full level pool at each.
 #
-# A keypoint is detected on pure terrain with no eligibility gates at all
-# (keypoint_detection.py is deliberately independent of KSOP), so a real
-# keypoint routinely lands one or two cells inside a canopy root zone, on a
-# road buffer, or just past the contributing-area ceiling. Refusing to
-# nominate at all in that case would throw away the single most meaningful
-# anchor on the parcel over a few meters of raster edge; snapping to the
-# nearest eligible cell keeps the nomination and records the move
-# (seed_snapped + the snap distance), and the candidate carries BOTH
-# positions so a map can draw the keypoint where it really is and the
-# anchor where the pool was actually delineated.
+# THIS IS A PERFORMANCE BOUND, NOT A QUALITY ONE, and the distinction sets
+# its value. It caps ATTEMPTS, as an ABSOLUTE count. It is deliberately
+# NOT a multiple of the budget, which an earlier version tried: the guard
+# answers "how much wasted work before family 2 has demonstrably nothing
+# to offer on this parcel?", and that question has nothing to do with how
+# many candidates were wanted. Coupling them made a small budget shrink
+# the search AND the tolerance together, which silently deleted real
+# candidates on a parcel where the first survivor simply sat deep in the
+# accumulation ordering.
 #
-# 15 m is three cells on the 5 m DEM -- wide enough to clear a
-# mask edge, narrow enough that the snapped anchor is unarguably the same
-# landform feature as the keypoint. Beyond it, the honest answer is
-# no_eligible_cell_within_snap and no candidate. NOT validated beyond the
-# reference property. CONFIGURABLE.
-WATER_KEYPOINT_SEED_SNAP_METERS = 15.0
+# Three measurements decided the value:
+#
+#   * On realistic terrain (the 39-acre synthetic parcel used for
+#     verification), family 2 found its three survivors in three attempts.
+#   * On a DEGENERATE fixture -- a one-cell-wide channel with 40% side
+#     slopes, where almost every pool falls under the area floor -- the
+#     first survivor did not appear until attempt 85. Those were real
+#     candidates.
+#   * With the area floor raised above anything the terrain could reach,
+#     it ran 3600 attempts for zero survivors.
+#
+# A guard tuned near the legitimate worst case DELETES REAL CANDIDATES,
+# which is strictly worse than the compute it saves -- an early version at
+# budget x 10 lost all three of the degenerate fixture's answers. So this
+# sits well ABOVE any observed legitimate need: 150 covers the 85-attempt
+# case with margin at ANY budget, while still turning the pathological
+# parcel from thousands of delineations into 150. When it binds, the
+# diagnostics say so (accumulation_attempt_limit_reached) rather than
+# leaving a short list looking like a terrain finding. NOT validated
+# beyond the reference property. CONFIGURABLE.
+WATER_ACCUMULATION_SEED_ATTEMPT_LIMIT = 150
+
+# THERE IS NO SEED SNAP, AND NO ANCHOR RELOCATION OF ANY KIND. A previous
+# version of this module snapped a keypoint to the nearest ELIGIBLE cell
+# within a radius when its own cell failed the nomination mask. The
+# constant, the flag, the nearest-cell search and their tests are all
+# DELETED, for two independent reasons:
+#
+#   * The mask it was compensating for is gone. Canopy and roads no longer
+#     gate nomination (see compute_water_eligible_cells()), which is what
+#     made a keypoint "ineligible" in almost every real case. Snapping
+#     existed to route around a filter this module no longer applies.
+#   * Moving an anchor moves the WATERLINE. The pool's extent is measured
+#     from the anchor cell's own raw elevation, so a snapped anchor
+#     delineates a different pool at a different height and then reports it
+#     under the keypoint's name. Delineating from the keypoint's own cell
+#     and letting the boundary clip and MIN_WATER_ZONE_AREA_ACRES judge the
+#     on-parcel remainder answers the same question without that
+#     substitution.
+#
+# An off-parcel keypoint is handled by that clip-and-floor rule rather than
+# by relocation -- see find_candidate_zones() for the
+# dam-at-the-property-edge case.
 
 # Minimum distance between a proposed seed and the footprint of any
 # candidate already delineated in this run.
@@ -318,26 +396,61 @@ WATER_KEYPOINT_SEED_SNAP_METERS = 15.0
 # property. CONFIGURABLE.
 MIN_WATER_SEED_SEPARATION_METERS = 30.0
 
-# Opening radius for the water zone render fill. DELIBERATELY tiny compared
-# with production's 24m: a 0.5-acre zone is roughly 81 cells (~9x9 on a 5m
-# grid), and an opening removes features narrower than 2r. At r = 1 cell this
-# trims single-cell protrusions and softens the blocky cell-union edge; at
-# r = 2 cells it would remove anything under 20m, which on a 9-cell-wide shape
-# is most of the zone. No lead erode -- a 0.5-acre zone cannot afford an extra
-# cell off every edge. CONFIGURABLE.
-WATER_ZONE_RENDER_OPENING_RADIUS_METERS = 5.0
+# THERE IS NO RENDER OPENING FOR WATER ZONES. A bounded morphological
+# opening (disc erode-then-dilate at a small radius, clipped to
+# polygon_utm) used to produce render_fill_polygon_utm here. The constant,
+# the opening call, the wipeout fallback and the subset assertion are all
+# DELETED, and render_fill_polygon_utm IS polygon_utm now -- the same
+# geometry, not a copy of it.
+#
+# WHY: the opening PREDATES level-pool delineation and is structurally
+# wrong for it. An opening deletes anything narrower than 2r, and the DAM
+# BAND -- the perpendicular strip across the valley at the anchor -- is one
+# to two cells wide BY CONSTRUCTION. So the opening either erodes the whole
+# zone to nothing (observed on all three candidates of the reference run:
+# three fallback warnings, one per candidate) or, on a larger pool, severs
+# the band from the backwater. The single shape element that carries the
+# keyline-dam meaning is the first thing it deletes. A display smoothing
+# that reliably removes the subject is not a display smoothing.
+#
+# The KEY STAYS because render_fill_polygon_utm is a shared downstream
+# contract (render_layout_map's ripple clip, fencing's zone loop,
+# road_corridors' pond exclusion, solar's water exclusion, pipeline_
+# context's keypoint distances) and every one of those consumers wants
+# "the water zone's real drawn footprint" -- which the identity gives them
+# more accurately than the opening did. This follows exclusion_zones.py's
+# own documented precedent for the same situation: there is no
+# display-only reduction to apply to an exact cell footprint.
+#
+# A side effect worth stating: this forecloses the report-vs-map acreage
+# discrepancy class for water zones. The report quotes polygon_utm's area
+# and the map draws render_fill_polygon_utm; with one geometry behind both,
+# they cannot disagree.
 
-# How far past a tree-cell's own footprint the woody-vegetation hard
-# exclusion extends for water zones specifically -- reuses canopy_height_
-# data.tree_root_zone_mask() (the SAME threshold-then-dilate raster
-# operation production_area.py's own woody-vegetation gate uses), but at
-# its OWN buffer distance, not canopy_height_data.TREE_ROOT_ZONE_BUFFER_
-# METERS directly: a separate, independently-named constant even though
-# it happens to currently equal the same 10ft value -- same "constants
-# stay separate even when numerically identical" convention this
-# pipeline already applies elsewhere (e.g. this module's own
-# MIN_BOUNDARY_SETBACK_METERS/MIN_DOWNSTREAM_CLEARANCE_METERS history),
-# so a future retune of one doesn't silently couple to the other.
+# How far past a tree-cell's own footprint the woody-vegetation root zone
+# is taken to extend, FOR MEASUREMENT PURPOSES, when computing a
+# candidate's canopy_overlap_pct.
+#
+# THIS NO LONGER DESCRIBES A GATE. It used to set the buffer on a hard
+# canopy exclusion applied to the nomination mask; that exclusion is
+# deleted (see compute_water_eligible_cells()). What survives is the
+# question "how much of this candidate's ground carries woody vegetation
+# whose roots a pond would disturb," and this is the distance at which that
+# is measured. Reuses canopy_height_data.tree_root_zone_mask() -- the SAME
+# threshold-then-dilate raster operation production_area.py's own
+# woody-vegetation gate uses -- at this module's OWN buffer distance rather
+# than canopy_height_data.TREE_ROOT_ZONE_BUFFER_METERS directly: a
+# separate, independently-named constant even though it happens to
+# currently equal the same 10 ft value, the same "constants stay separate
+# even when numerically identical" convention this pipeline already applies
+# elsewhere, so a future retune of one does not silently couple to the
+# other.
+#
+# THE NAME IS DEPRECATED BUT STABLE ON PURPOSE: water_suitability.py
+# imports it by this name for its own copy of the same measurement fetch,
+# so renaming it to WATER_ZONE_CANOPY_MEASUREMENT_BUFFER_METERS would be a
+# cross-module churn with no behavioural payoff. Read "buffer" here as the
+# measurement's dilation radius, not as a setback anything is held off.
 # CONFIGURABLE.
 WATER_ZONE_CANOPY_BUFFER_METERS = 3.048  # 10ft
 
@@ -438,21 +551,45 @@ _ROAD_UNION_NOT_SUPPLIED = object()
 #
 # Outcomes -- exactly one per nomination attempt:
 REASON_NOMINATED = "nominated"
-REASON_NO_ELIGIBLE_CELL_WITHIN_SNAP = "no_eligible_cell_within_snap"
 REASON_BELOW_MIN_AREA = "below_min_area"
 REASON_NO_SERVICE_RELATIONSHIP = "no_service_relationship"
 REASON_EMPTY_AFTER_BOUNDARY_CLIP = "empty_after_boundary_clip"
 REASON_EMPTY_AFTER_OVERLAP_TRIM = "empty_after_overlap_trim"
-REASON_CANDIDATE_CAP_REACHED = "candidate_cap_reached"
+# A keypoint whose own cell carries more contributing area than the
+# ceiling allows. This is the ONE nomination-mask gate a keypoint is
+# still subject to (it is exempt from on-parcel; see find_candidate_
+# zones()), and it is a real siltation/peak-flow finding rather than a
+# bookkeeping outcome -- so it gets its own code rather than sharing one
+# with the geometric drops.
+REASON_KEYPOINT_EXCEEDS_CEILING = "keypoint_exceeds_ceiling"
+# NOTE: there is deliberately no candidate_cap_reached code any more --
+# generation is uncapped (see WATER_ACCUMULATION_SEED_BUDGET), so no
+# keypoint can be turned away for arriving late.
 
 # Flags -- zero or more per nomination, recorded alongside the outcome and
 # carried onto the produced zone dict:
-FLAG_SEED_SNAPPED = "seed_snapped"
+# INFORMATIONAL, not a defect: the anchor sits outside the drawn
+# boundary. Carried with the keypoint's own distance_outside_boundary_m
+# so a narrative can state the dam-at-the-property-edge framing plainly
+# rather than leaving a reader to wonder why an off-parcel point is on
+# the map. It is NOT a reason code: an off-parcel anchor is qualified by
+# the ordinary boundary clip plus MIN_WATER_ZONE_AREA_ACRES, like every
+# other candidate.
+FLAG_ANCHOR_OFF_PARCEL = "anchor_off_parcel"
 FLAG_TRUNCATED_BY_BOUNDARY = "truncated_by_boundary"
 FLAG_TRUNCATED_BY_CAP = "truncated_by_cap"
 FLAG_OVERLAP_TRIMMED = "overlap_trimmed"
 FLAG_ABUTMENT_NOT_FOUND_LEFT = "abutment_not_found_left"
 FLAG_ABUTMENT_NOT_FOUND_RIGHT = "abutment_not_found_right"
+# The dam-axis search ran into a cell carrying more contributing area
+# than the ceiling allows -- a NEIGHBOURING drainage, below the
+# waterline, inside the abutment half-width. The band is truncated
+# there. This is deliberately a DIFFERENT flag from abutment_not_found_*
+# on the same side, and the two must never masquerade as each other:
+# "no shoulder within range" and "the wall would dam a second creek" are
+# different survey findings with different remedies.
+FLAG_DAM_BAND_CROSSES_MAJOR_DRAINAGE_LEFT = "dam_band_crosses_major_drainage_left"
+FLAG_DAM_BAND_CROSSES_MAJOR_DRAINAGE_RIGHT = "dam_band_crosses_major_drainage_right"
 FLAG_BACKWATER_DISTANCE_LIMITED = "backwater_distance_limited"
 
 # Parameterised outcome: which specific already-delineated candidate the
@@ -480,10 +617,18 @@ WATER_SYSTEM_CANDIDATE_CONFIDENCE_NOTES = (
     "waterline would cover upstream of one anchor cell, plus the "
     "dam-axis band across the valley at that cell. The anchor was "
     "nominated either from a detected keypoint or from the highest "
-    "remaining flow accumulation (see properties.nominated_by), and "
-    "cleared the eligibility gates: contributing-area ceiling, "
-    "on-parcel, plausible service distance to a candidate production "
-    "area, clear of the woody-vegetation root zone and mapped roads. "
+    "remaining flow accumulation (see properties.nominated_by). The "
+    "anchor cleared THREE gates and only three -- a contributing-area "
+    "ceiling, on-parcel containment (from which KEYPOINT anchors are "
+    "exempt: a keypoint just off the drawn line whose backwater grows "
+    "into the parcel is a real dam-at-the-property-edge candidate, and "
+    "carries properties.anchor_off_parcel with its measured distance), "
+    "and a boundary setback. Woody vegetation, mapped roads and overlap "
+    "with a candidate production area are NOT gates and never were "
+    "geometry: they are MEASURED and reported "
+    "(properties.canopy_overlap_pct / road_overlap_pct / "
+    "production_area_relationships) so a clearing or relocation cost is "
+    "weighable evidence rather than an invisible pre-filter. "
     "THE REFERENCE WATERLINE IS A MEASURING STICK, NOT A PROPOSED DAM "
     "HEIGHT: every candidate is delineated at the same height so their "
     "terrain can be compared, and no dam of that (or any) height is "
@@ -515,22 +660,23 @@ WATER_SYSTEM_CANDIDATE_CONFIDENCE_NOTES = (
 
 def compute_water_eligible_cells(
     dem: dict,
-    production_areas: list[dict],
     boundary_polygon_utm: Polygon,
     max_valley_contributing_area_acres: float = MAX_VALLEY_CONTRIBUTING_AREA_ACRES,
-    max_service_distance_meters: float = MAX_SERVICE_DISTANCE_METERS,
     min_boundary_setback_meters: float = MIN_BOUNDARY_SETBACK_METERS,
-    canopy_root_zone_mask_utm=_CANOPY_CHECK_UNCHECKED,
-    road_exclusion_union_utm=_ROAD_CHECK_UNCHECKED,
     flow_accumulation: Optional[np.ndarray] = None,
 ) -> np.ndarray:
     """
-    Cell-based STEP 1: takes the raw flow-accumulation grid (self-computed
-    from `dem` via valley_delineation.get_flow_accumulation_for_dem() when
-    `flow_accumulation` is not supplied — the same contributing-cell-count
-    grid delineate_valleys() thresholds/traces internally) and applies a
-    set of HARD EXCLUSION GATES. A cell is eligible unless ANY of these
-    holds:
+    THE NOMINATION MASK: where an anchor may SIT. Not where a zone may go.
+
+    That distinction is the whole point of this function and is easy to
+    lose. A candidate zone is TERRAIN-DRAWN -- valley_level_pool.
+    delineate_level_pool() grows it from the anchor to wherever the
+    reference waterline actually reaches -- so the mask below decides only
+    which cells may be picked as a starting point. It does NOT bound, clip,
+    or shape the result. The ONLY geometric clip applied to a delineated
+    zone is the property boundary.
+
+    THREE GATES, and only three. A cell is eligible unless ANY holds:
 
       1. Its own contributing area exceeds max_valley_contributing_area_
          acres -- an ABSOLUTE ceiling, NOT a boundary-dependent percentile
@@ -538,105 +684,64 @@ def compute_water_eligible_cells(
          physical property of the terrain (flow_accumulation_cells value *
          cell area) and does not depend on where a boundary was drawn, so
          the gate is absolute: it cannot move when the boundary moves,
-         which was the core bug in the old percentile band (a percentile
-         is defined relative to its population -- the on-parcel cells --
-         so moving the boundary moved the selected band even though the
-         terrain was unchanged). There is deliberately NO lower bound: the
-         deliverable is a survey area, not a pass/fail on pond viability,
-         so a cell is never excluded merely for LOW contributing area --
-         the best available site is reported rather than nothing. See
-         MAX_VALLEY_CONTRIBUTING_AREA_ACRES's own docstring for the NRCS
-         CPS 378 / siltation reasoning behind the 20-acre ceiling.
+         which was the core bug in the old percentile band. There is
+         deliberately NO lower bound: the deliverable is a survey area, not
+         a pass/fail on pond viability, so a cell is never excluded merely
+         for LOW contributing area -- the best available site is reported
+         rather than nothing. See MAX_VALLEY_CONTRIBUTING_AREA_ACRES's own
+         docstring for the NRCS CPS 378 / siltation reasoning behind the
+         20-acre ceiling.
 
-      2. It is OFF-PARCEL (not boundary_polygon_utm.contains(cell center))
-         -- a hard exclusion in its own right. This is a SEPARATE,
-         independent test from the boundary setback below: even with
-         min_boundary_setback_meters == 0.0 (the current value), an
-         off-parcel cell is still excluded here. The setback is an
-         additional, and now inert, test on top of this one, NOT a
-         replacement for it.
+      2. It is OFF-PARCEL (not boundary_polygon_utm.contains(cell center)).
+         Jurisdiction note, because it is narrower than it looks: this gate
+         governs FAMILY-2 SEED SELECTION and (separately, downstream) the
+         geometric clip every zone gets. KEYPOINT ANCHORS ARE EXEMPT from
+         it -- find_candidate_zones() delineates from a keypoint's own cell
+         whether or not that cell is on the parcel. See that function's
+         docstring for the dam-at-the-property-edge case and the two bounds
+         that make it safe.
 
-      3. It FAILS the max-service-distance gate: it is NOT within
-         max_service_distance_meters of any production area's polygon_utm.
-         A pond too far from the ground it serves is useless regardless of
-         how good the drainage is, so this remains a real generation-time
-         filter. There is deliberately NO minimum-service-distance gate:
-         an earlier 10 m "too close to a production edge" rule was removed
-         (water zones may butt right up to production -- there is no siting
-         reason to hold a pond off a field edge), so a cell at ANY distance
-         at or below max_service_distance_meters (distance == 0 included,
-         i.e. inside/touching a patch) passes here. Production overlap is
-         still excluded -- by the separate production-exclusion gate (6),
-         not by this one. This gate only tests whether ANY production area
-         is within range -- it does NOT pick a "best" one; that's
-         find_candidate_zones()'s own whole-zone
-         scoring now, computed once per surviving cluster from a single
-         representative point, not per cell (see that function's own
-         docstring for why per-cell tagging + per-cluster aggregation was
-         removed in favor of this).
+      3. It fails the boundary SETBACK -- an additional test on top of gate
+         2, whose value is 0.0 (see MIN_BOUNDARY_SETBACK_METERS), so
+         "distance < 0.0" is never true and the setback is currently inert.
+         Zeroing it does NOT weaken gate 2, which is a separate containment
+         test.
 
-      4. It is INSIDE the woody-vegetation root zone: canopy_root_zone_mask_
-         utm (canopy_height_data.tree_root_zone_mask()'s own output, at
-         this module's own WATER_ZONE_CANOPY_BUFFER_METERS -- see that
-         constant's docstring) must be False at this cell. Reuses
-         production_area.py's already-validated canopy gate directly
-         (same fetch, same threshold-then-dilate raster mask, just a
-         separately-tunable buffer distance) rather than reimplementing
-         it -- pure raster AND, never vectorized into a polygon buffer/
-         difference (see canopy_height_data.py's own module docstring for
-         why that path caused the original hydric-soil sliver-
-         fragmentation bug). If canopy_root_zone_mask_utm is left at its
-         default sentinel (_CANOPY_CHECK_UNCHECKED -- "never checked at
-         all," the same convention production_area.py's own
-         _CANOPY_CHECK_UNCHECKED uses), this gate is skipped entirely --
-         see identify_water_system_candidate_zones() for how the real
-         network entry point makes this gate MANDATORY instead, by always
-         fetching-or-raising before this function is ever called.
+    WHAT IS NO LONGER HERE, AND WHY. Canopy, existing roads, and the
+    max-service-distance test were all gates on this mask and are all
+    removed from it. The reasoning is one argument applied three times:
 
-      5. It is INSIDE road_exclusion_union_utm: real road/right-of-way
-         vector geometry (farm_roads_data.get_road_exclusion_union_utm()'s
-         own output, at the shared farm_roads_data.ROAD_EXCLUSION_BUFFER_
-         METERS -- the single definition of "how far off an existing road"
-         every consumer reads; this module's former separate copy was
-         deleted, see the constants section above),
-         tested via cell-center .contains(), same pattern production_
-         area.py's own existing-road gate uses -- a genuinely NEW
-         exclusion for this module (water zones haven't excluded roads
-         before). A real None (checked, no roads found nearby -- the
-         common, clean case) or the default sentinel (_ROAD_CHECK_
-         UNCHECKED, "never checked at all") both mean this gate is
-         skipped; only a real fetched union polygon excludes anything.
-         Unlike canopy, this stays OPTIONAL even on the real network path
-         (graceful degrade on fetch failure, mirroring production_area.py's
-         own check_roads handling) -- see module docstring.
+      * A delineated zone ALREADY spreads over canopy and road-buffer
+        ground legitimately -- those layers are reported as overlap
+        percentages on the candidate and have never clipped its geometry.
+        Gating the ANCHOR while permitting the POOL was an inconsistent
+        halfway position: if a zone may grow into canopy, there is no
+        principled reason it may not start there.
+      * A keypoint under canopy is a REAL dam site behind a clearing cost.
+        Pre-filtering it made that cost invisible; reporting it makes it
+        weighable evidence -- canopy_overlap_pct / road_overlap_pct now,
+        and a possible scoring factor later.
 
-    THERE IS NO GATE 6. A production-overlap exclusion used to sit here (a
-    cell inside any production area's render_fill_polygon_utm, plus a build
-    margin, was excluded outright). It is DELETED -- gate, constant and
-    parameter -- and a cell is now eligible regardless of what production
-    footprint it sits in. See the constants section above and the module
-    docstring for the full reasoning; the short version is that production
-    overlap is a competing-use question the user answers in the interactive
-    design, and turning it into a scoring factor is the follow-up branch's
-    job. production_areas is still a REQUIRED argument: gate 3 above and
-    find_candidate_zones()'s own production_area_relationships both need
-    it.
+    This is the same gate-to-preference move this pipeline already made for
+    gravity (this module's own production_area_relationships), for soil
+    (production_suitability.py) and for prime farmland -- now applied to
+    the last of water's own gates. The canopy and road inputs did not
+    disappear: they MOVED to find_candidate_zones() as MEASUREMENT inputs,
+    with their sentinel semantics intact ("never checked" -> None; "checked,
+    genuinely none nearby" -> 0.0).
 
-    The boundary setback (min_boundary_setback_meters) is still applied as
-    an additional test on top of gate 2, but its value is 0.0 (see
-    MIN_BOUNDARY_SETBACK_METERS), so "distance < 0.0" is never true and the
-    setback is inert. Zeroing it does NOT weaken the off-parcel exclusion
-    (gate 2), which is a separate containment test.
+    max_service_distance_meters left this signature with them. It survives
+    only where _zone_production_area_relationships() consumes it, and the
+    post-delineation "no production area within service distance" drop is
+    now a TEMPORARY GUARD -- see find_candidate_zones().
 
-    There is NO percentile band, NO minimum contributing area, and NO
-    survey-buffer dilation here anymore -- the eligible mask is a broad
-    per-cell gate result, not a one-cell-wide hairline, so nothing needs
-    widening before clustering. Every eligible cell independently cleared
-    the absolute contributing-area ceiling; there is no dilation step that
-    could admit a cell above the ceiling by adjacency.
+    production_areas left this signature too: none of the three remaining
+    gates reads a production area at all, and the per-zone relationships
+    are computed downstream from a delineated zone's own representative
+    point, never here.
 
-    Elevation/gradient is deliberately NOT a gate here (see module
-    docstring's "gravity is a preference, not a gate" framing) — do not
+    Elevation/gradient is deliberately NOT a gate here (see the module
+    docstring's "gravity is a preference, not a gate" framing) -- do not
     add a min-gradient or elevation-band exclusion; a cell otherwise
     eligible is never excluded for sitting below its best-matching
     production area.
@@ -661,15 +766,6 @@ def compute_water_eligible_cells(
     boundary_prepared = prep(boundary_polygon_utm)
     boundary_line = boundary_polygon_utm.boundary
 
-    canopy_checked = canopy_root_zone_mask_utm is not _CANOPY_CHECK_UNCHECKED
-
-    road_union = (
-        road_exclusion_union_utm
-        if road_exclusion_union_utm is not _ROAD_CHECK_UNCHECKED and road_exclusion_union_utm is not None
-        else None
-    )
-    road_prepared = prep(road_union) if road_union is not None else None
-
     for r, c in np.argwhere(ceiling_mask):
         r, c = int(r), int(c)
         elevation = float(array[r, c])
@@ -682,21 +778,6 @@ def compute_water_eligible_cells(
         if not boundary_prepared.contains(point):
             continue
         if point.distance(boundary_line) < min_boundary_setback_meters:
-            continue
-        if canopy_checked and canopy_root_zone_mask_utm[r, c]:
-            continue
-        if road_prepared is not None and road_prepared.contains(point):
-            continue
-
-        within_service_distance = False
-        for patch in production_areas:
-            distance = point.distance(patch["polygon_utm"])
-            if distance > max_service_distance_meters:
-                continue
-            within_service_distance = True
-            break
-
-        if not within_service_distance:
             continue
 
         eligible_mask[r, c] = True
@@ -798,42 +879,6 @@ def _flow_arrays_for_dem(
     return filled, flow_to_row, flow_to_col, flow_accumulation
 
 
-def _nearest_eligible_cell(
-    dem: dict,
-    eligible_mask: np.ndarray,
-    cell: tuple[int, int],
-    snap_radius_meters: float,
-) -> tuple[Optional[tuple[int, int]], float]:
-    """
-    The eligible cell nearest to `cell` (by real ground distance between
-    cell centers) within snap_radius_meters, as (cell_or_None, distance).
-
-    Searches only the square cell window the radius can reach, so cost is
-    bounded by the radius rather than by grid size. Ties break
-    deterministically on (row, col) so the same DEM always snaps the same
-    way. Returns (None, inf) when nothing eligible is in range -- the
-    honest no_eligible_cell_within_snap answer, never a widened search.
-    """
-    rows, cols = eligible_mask.shape
-    px, py = dem["resolution_meters"]
-    reach_rows = int(math.ceil(snap_radius_meters / float(py)))
-    reach_cols = int(math.ceil(snap_radius_meters / float(px)))
-    r0, c0 = cell
-    best = None
-    best_distance = float("inf")
-    for r in range(max(0, r0 - reach_rows), min(rows, r0 + reach_rows + 1)):
-        for c in range(max(0, c0 - reach_cols), min(cols, c0 + reach_cols + 1)):
-            if not eligible_mask[r, c]:
-                continue
-            distance = math.hypot((c - c0) * float(px), (r - r0) * float(py))
-            if distance > snap_radius_meters:
-                continue
-            if distance < best_distance or (distance == best_distance and best is not None and (r, c) < best):
-                best = (r, c)
-                best_distance = distance
-    return best, best_distance
-
-
 def _zone_footprint(dem: dict, cells, boundary_polygon_utm: Polygon):
     """The real cell-union footprint of `cells`, clipped to the parcel
     boundary -- raster_grid.cell_union_footprint() then .intersection(),
@@ -848,12 +893,18 @@ def _zone_footprint(dem: dict, cells, boundary_polygon_utm: Polygon):
 def _overlap_fraction_pct(cells, dem: dict, checked: bool, mask_utm=None, prepared_union=None) -> Optional[float]:
     """
     Percentage of `cells` whose centers fall inside a raster mask (canopy)
-    or a prepared vector union (roads) -- a REPORTED PROPERTY, never a
-    filter.
+    or a prepared vector union (roads) -- a REPORTED PROPERTY.
+
+    Since this branch narrowed the nomination mask to three gates, these
+    two layers are ONLY this: measurements. Neither gates a cell and
+    neither clips a zone. A candidate reporting 60% canopy overlap is a
+    real dam site behind a clearing cost, stated as a number the scoring
+    branch (and the reader) can weigh -- not something to have been
+    filtered away invisibly.
 
     `checked` is what separates the two things a caller must never
     conflate: None means THE CHECK NEVER RAN, and 0.0 means it ran and
-    found nothing. That distinction is load-bearing for the road gate in
+    found nothing. That distinction is load-bearing for the road layer in
     particular, where a real None union is farm_roads_data.get_road_
     exclusion_union_utm()'s own CLEAN answer ("checked, and genuinely no
     mapped road nearby" -- the common case on a rural parcel), not a
@@ -887,8 +938,8 @@ def find_candidate_zones(
     max_service_distance_meters: float = MAX_SERVICE_DISTANCE_METERS,
     min_water_zone_area_acres: float = MIN_WATER_ZONE_AREA_ACRES,
     max_water_zone_area_acres: float = MAX_WATER_ZONE_AREA_ACRES,
-    max_water_zone_candidates: int = MAX_WATER_ZONE_CANDIDATES,
-    keypoint_seed_snap_meters: float = WATER_KEYPOINT_SEED_SNAP_METERS,
+    accumulation_seed_budget: int = WATER_ACCUMULATION_SEED_BUDGET,
+    accumulation_seed_attempt_limit: int = WATER_ACCUMULATION_SEED_ATTEMPT_LIMIT,
     min_water_seed_separation_meters: float = MIN_WATER_SEED_SEPARATION_METERS,
     pool_reference_height_meters: float = POOL_REFERENCE_HEIGHT_METERS,
     abutment_search_half_width_meters: float = ABUTMENT_SEARCH_HALF_WIDTH_METERS,
@@ -914,53 +965,92 @@ def find_candidate_zones(
 
     THE PIPELINE, in order:
 
-      1. Build the per-cell eligibility mask
-         (compute_water_eligible_cells() — the absolute contributing-area
-         ceiling, on-parcel containment, the inert boundary setback, the
-         canopy root zone, the road exclusion, and max service distance;
-         there is no production-overlap gate any more, see that function's
-         own docstring).
+      1. Build the NOMINATION MASK (compute_water_eligible_cells() — three
+         gates only: the absolute contributing-area ceiling, on-parcel
+         containment, and the inert boundary setback). It decides where an
+         anchor may SIT; it does not bound, clip, or shape a zone.
 
-      2. FAMILY 1 — KEYPOINT-NOMINATED CANDIDATES. Keypoints are ordered by
-         contributing_acres DESCENDING. That is deliberately NOT
-         keypoint_detection.py's own ordering, which ranks by slope_drop_pct
-         (how sharp the inflection is) and is right for what that layer
-         delivers; it is untouched here. For a WATER system the question is
-         how much watershed arrives, so catchment orders the nominations.
-         Per keypoint:
-           a. Seed at the keypoint's own cell if the eligibility mask is
-              True there; otherwise the nearest eligible cell within
-              keypoint_seed_snap_meters (recording FLAG_SEED_SNAPPED and the
-              snap distance); otherwise
-              REASON_NO_ELIGIBLE_CELL_WITHIN_SNAP and no candidate.
-           b. Skip with reason_too_close_to_candidate(id) if the seed lies
-              within min_water_seed_separation_meters of an
-              already-delineated candidate's footprint.
-           c. Delineate the level pool at the seed and finish it (below).
+      2. FAMILY 1 — KEYPOINT-NOMINATED CANDIDATES, ALL OF THEM. Keypoints
+         are ordered by contributing_acres DESCENDING. That is deliberately
+         NOT keypoint_detection.py's own ordering, which ranks by
+         slope_drop_pct (how sharp the inflection is) and is right for what
+         that layer delivers; it is untouched here. For a WATER system the
+         question is how much watershed arrives, so catchment orders the
+         nominations. The order is still load-bearing even though nothing
+         is capped: overlap trimming resolves collisions in favour of
+         whoever was delineated first, so priority must be deterministic
+         and meaningful.
 
-      3. FAMILY 2 — ACCUMULATION-NOMINATED CANDIDATES, until the candidate
-         cap is reached or no seed remains: the anchor is the
-         highest-flow-accumulation eligible cell that is unclaimed and not
-         within the separation distance of any existing candidate's
-         footprint. Delineated identically — the two families differ only
-         in how the anchor was chosen, never in what is done with it.
+         EVERY KEYPOINT DELINEATES FROM ITS OWN CELL. There is no snap, no
+         nearest-eligible-cell search, and no anchor relocation of any
+         kind (see the constants section). Two consequences:
+
+           a. KEYPOINT ANCHORS ARE EXEMPT FROM THE ON-PARCEL GATE. A
+              keypoint just outside the drawn line whose backwater grows
+              INTO the parcel is a real candidate — the dam would sit at
+              the property edge impounding on-parcel water, which is an
+              ordinary keyline outcome, not an anomaly. It is qualified by
+              the SAME clip-and-floor rule every other candidate gets:
+              delineate from the keypoint cell, clip to the boundary, and
+              let min_water_zone_area_acres judge the ON-PARCEL REMAINDER.
+              If only a few cells survive the clip, below_min_area drops it
+              with the clipped acreage recorded. Such a candidate carries
+              FLAG_ANCHOR_OFF_PARCEL and the keypoint's own
+              distance_outside_boundary_m, so the narrative can state the
+              framing plainly rather than leaving a reader to wonder.
+
+              Two bounds make this safe rather than open-ended:
+              keypoint_detection.KEYPOINT_BOUNDARY_MARGIN_METERS (25 m)
+              already caps how far off-parcel a keypoint can be at all —
+              anything further never reaches this module — and the
+              contributing-area ceiling still disqualifies
+              (REASON_KEYPOINT_EXCEEDS_CEILING), which is the one
+              nomination-mask gate a keypoint is still subject to.
+
+              THE WATERLINE STILL REFERENCES THE TRUE ANCHOR'S ELEVATION.
+              The survey area is the ON-PARCEL PORTION of the pool that
+              would form at the real keypoint, not a different pool
+              re-derived from some boundary-adjacent stand-in cell. Those
+              are different answers and only the first one is true.
+
+           b. Nothing is capped. Every keypoint is attempted and every
+              survivor returned — see WATER_ACCUMULATION_SEED_BUDGET for
+              why "present the best N" is the ranking layer's job, not
+              generation's.
+
+      3. FAMILY 2 — ACCUMULATION-NOMINATED CANDIDATES, bounded by
+         accumulation_seed_budget SURVIVORS (not attempts: a seed dropped
+         at the area floor or the service check does not consume budget)
+         and, separately, by a runaway guard on ATTEMPTS — see
+         WATER_ACCUMULATION_SEED_ATTEMPT_LIMIT, which exists because
+         a survivor-counted budget has no stopping condition on a parcel
+         where nothing qualifies.
+         Runs AFTER all keypoints, regardless of how many survived. The
+         anchor is the highest-flow-accumulation eligible cell that is
+         unclaimed and not within min_water_seed_separation_meters of any
+         existing candidate's footprint. Delineated identically — the two
+         families differ only in how the anchor was chosen, never in what
+         is done with it. Unlike family 1, family-2 seeds ARE subject to
+         the on-parcel gate, since they come off the mask by construction.
 
     FINISHING A DELINEATED POOL (identical for both families):
 
       * CLIP TO THE PARCEL BOUNDARY, AND TO NOTHING ELSE. Not canopy, not
-        roads, not production. A pool clipped by a root-zone mask would
-        MISREPRESENT THE PHYSICS: water does not stop at the edge of a tree
-        canopy, and a footprint drawn as if it did would tell a farmer the
-        pool is smaller than it is. Canopy and road overlap are computed
-        and attached as REPORTED PROPERTIES instead (canopy_overlap_pct /
+        roads, not production. Canopy and road overlap are computed and
+        attached as REPORTED PROPERTIES (canopy_overlap_pct /
         road_overlap_pct, unweighted in this branch — the scoring branch
-        reads them). Those masks still gate ELIGIBILITY, i.e. where an
-        anchor may be nominated; they never reshape a pool.
+        reads them). Since those layers no longer gate nomination either,
+        this module now treats them consistently end to end: measurement,
+        never geometry, never eligibility.
       * If the boundary clip removed anything, FLAG_TRUNCATED_BY_BOUNDARY
         is set — loudly, because backwater reaching the property line means
         flooding a neighbour, which is among the most important things this
         survey can find. It is a flag, never a rejection.
       * Area floor: below min_water_zone_area_acres → REASON_BELOW_MIN_AREA.
+        THE FLOOR IS ALWAYS APPLIED AFTER THE BOUNDARY CLIP AND AFTER THE
+        CAP TRIM, for both families and both truncation paths — it judges
+        the acreage the farmer actually gets, not the acreage the pool
+        would have had.
       * Area cap: above max_water_zone_area_acres → drop the
         farthest-upstream backwater cells (by along-path distance from the
         anchor; dam-band cells are never dropped) until under the cap, and
@@ -969,64 +1059,79 @@ def find_candidate_zones(
         removed, then only the connected component containing the anchor is
         kept, and FLAG_OVERLAP_TRIMMED is set. NON-OVERLAP BETWEEN
         CANDIDATES IS AN INVARIANT and is asserted before returning. The
-        trim runs for BOTH families, not just family 2: the separation rule
-        keeps SEEDS apart, but two seeds a legitimate 40 m apart on one
-        drainage can still delineate overlapping backwaters, and the
-        invariant has to hold across every pair.
-        The component retention uses 8-CONNECTIVITY, matching the D8 flow
-        adjacency the pool was built from — a 4-connected test would
-        declare a genuinely water-connected diagonal step to be two
-        separate pools.
-      * A zone whose representative point clears no production area within
-        max_service_distance_meters is dropped, now with
-        REASON_NO_SERVICE_RELATIONSHIP — there is no single headline
-        "served" relationship left to report for it.
+        trim runs for BOTH families: the separation rule keeps SEEDS apart,
+        but two seeds a legitimate 40 m apart on one drainage can still
+        delineate overlapping backwaters. Component retention uses
+        8-CONNECTIVITY, matching the D8 flow adjacency the pool was built
+        from.
+      * TEMPORARY GUARD: a zone whose representative point clears no
+        production area within max_service_distance_meters is dropped with
+        REASON_NO_SERVICE_RELATIONSHIP. This is the LAST REMNANT of the
+        service-distance gate that left the nomination mask this branch,
+        kept unchanged here only because _zone_production_area_
+        relationships() returning [] leaves no headline relationship for
+        the scoring layer to read. THE SCORING BRANCH DECIDES ITS FATE:
+        if a no-relationship candidate can instead survive with a neutral
+        or floored gravity factor, this drop goes away with it. Do not
+        build anything on the assumption that it is permanent.
+
+    THE CONTRIBUTING-AREA CEILING AND THE DELINEATED ZONE. Delineation is
+    gated by the same three gates as nomination, which in practice means:
+    the boundary clip already exists above; the setback is inert; and the
+    ceiling is a NO-OP ON THE BACKWATER BY CONSTRUCTION — every backwater
+    cell is upstream of the anchor and flow accumulation decreases strictly
+    upstream, so no backwater cell can exceed an anchor that already
+    cleared the ceiling. That is a structural guarantee (asserted in
+    test_valley_level_pool.py), which is why no per-cell runtime check
+    exists for it. The one place the ceiling CAN bind is the DAM BAND,
+    whose lateral search can cross a neighbouring major drainage — handled
+    inside valley_level_pool.delineate_level_pool() via
+    max_contributing_cells, and surfaced as
+    FLAG_DAM_BAND_CROSSES_MAJOR_DRAINAGE_LEFT/RIGHT.
+
+    canopy_root_zone_mask_utm / road_exclusion_union_utm are still accepted
+    here, now SOLELY as overlap-measurement inputs. Their sentinel
+    semantics are unchanged and must not regress: the default sentinel
+    means "never checked" and yields None; a real None road union means
+    "checked, and genuinely no mapped road nearby" and yields 0.0 when
+    nothing intersects.
 
     keypoints/valleys/filled/flow_to_row/flow_to_col/flow_accumulation are
     OPTIONAL OVERRIDES in the same self-computing family the rest of this
     pipeline uses, each independent of the others. When `keypoints` is None
     this function calls keypoint_detection.detect_keypoints() itself and
-    FORWARDS every override it holds into that call (dem, the boundary
-    polygon, valleys, the filled array and all three flow arrays), so the
-    self-compute path never re-derives an array that was passed in. A
-    caller that already detected keypoints for this exact DEM (build_
-    pipeline_context() does, once per run) passes them straight through and
-    no detection runs here at all.
+    FORWARDS every override it holds into that call, so the self-compute
+    path never re-derives an array that was passed in.
 
     diagnostics, if a dict is passed, is populated IN PLACE with the
     nomination record — a per-keypoint outcome list and a family-2 seed log,
     each entry carrying its reason code and flags — plus the eligible-cell
-    count and the resulting candidate count. It is a reporting hook only and
-    does not affect the return value, the same convention keypoint_
-    detection.detect_keypoints()'s own diagnostics parameter follows.
+    count and the resulting candidate count.
 
-    Returns a list of AT MOST max_water_zone_candidates zone dicts (or []),
-    ordered by nomination (family 1 by catchment descending, then family 2
-    by accumulation descending) — NOT by suitability, which is
-    water_suitability.py's ranking:
+    Returns every surviving candidate (or []), ordered by NOMINATION
+    (family 1 by catchment descending, then family 2 by accumulation
+    descending) — NOT by suitability, which is water_suitability.py's
+    ranking:
 
         {
             'id': int,                     # 0-based, nomination order
             'nominated_by': str,           # NOMINATED_BY_KEYPOINT / _ACCUMULATION
             'keypoint_id': int or None,    # family 1 only
             'valley_id': int or None,      # family 1 only
-            'keypoint_rowcol': (row, col) or None,   # where the keypoint IS
+            'keypoint_rowcol': (row, col) or None,
             'keypoint_point_utm': shapely Point or None,
-            'seed_snapped': bool,
-            'seed_snap_distance_m': float,
-            'anchor_rowcol': (row, col),   # where the pool was delineated
+            'anchor_off_parcel': bool,
+            'anchor_distance_outside_boundary_m': float,   # 0.0 when inside
+            'anchor_rowcol': (row, col),   # ALWAYS the keypoint's own cell
             'anchor_point_utm': shapely Point,
             'anchor_elevation_m': float,   # RAW elevation at the anchor
-            'level_pool': dict,            # the measurement/geometry block —
-                #   waterline, reference height, per-station flooded width and
-                #   flooded cross-sectional area, dam-band width, pool/band cell
-                #   counts. NO VOLUME, here or anywhere downstream (see
-                #   valley_level_pool.py's module docstring).
-            'abutments': dict,             # per-side {found, lateral_distance_m,
-                #   rowcol, elevation_m, searched_distance_m, left_grid}
+            'level_pool': dict,            # measurements; NO VOLUME, ever
+            'abutments': dict,
             'abutment_found_left': bool,
             'abutment_found_right': bool,
-            'flags': [str, ...],           # the FLAG_* codes that fired
+            'dam_band_crosses_major_drainage_left': bool,
+            'dam_band_crosses_major_drainage_right': bool,
+            'flags': [str, ...],
             'truncated_by_boundary': bool,
             'truncated_by_cap': bool,
             'overlap_trimmed': bool,
@@ -1035,8 +1140,9 @@ def find_candidate_zones(
             'served_production_area_ids': [int, ...],
             'polygon_utm': shapely Polygon/MultiPolygon,
             'geometry_wgs84': GeoJSON geometry dict,
-            'render_fill_polygon_utm': shapely Polygon/MultiPolygon,
-            'render_fill_geometry_wgs84': GeoJSON geometry dict,
+            'render_fill_polygon_utm': IS polygon_utm -- the same object,
+                #   no display-only reduction (see the constants section)
+            'render_fill_geometry_wgs84': IS geometry_wgs84, likewise
             'production_area_relationships': [...],
             'primary_production_area_relationship': dict,
             'contributing_area_cells': float,   # median across member cells
@@ -1064,13 +1170,9 @@ def find_candidate_zones(
 
     eligible_mask = compute_water_eligible_cells(
         dem,
-        production_areas,
         boundary_polygon_utm,
         max_valley_contributing_area_acres,
-        max_service_distance_meters,
         min_boundary_setback_meters,
-        canopy_root_zone_mask_utm,
-        road_exclusion_union_utm,
         flow_accumulation=flow_accumulation,
     )
 
@@ -1092,6 +1194,11 @@ def find_candidate_zones(
     array = dem["array"]
     grid_shape = array.shape
     area_per_cell = cell_area_acres(dem)
+    # The ceiling in CELL-COUNT terms, so the dam-band check inside
+    # valley_level_pool.py compares against the same grid and the same
+    # threshold the nomination mask used -- one ceiling, two applications,
+    # never two independently-derived numbers.
+    max_contributing_cells = max_valley_contributing_area_acres / area_per_cell
 
     canopy_checked = canopy_root_zone_mask_utm is not _CANOPY_CHECK_UNCHECKED
     canopy_mask = canopy_root_zone_mask_utm if canopy_checked else None
@@ -1101,6 +1208,8 @@ def find_candidate_zones(
     road_checked = road_exclusion_union_utm is not _ROAD_CHECK_UNCHECKED
     road_union = road_exclusion_union_utm if road_checked and road_exclusion_union_utm is not None else None
     road_prepared = prep(road_union) if road_union is not None else None
+
+    boundary_prepared = prep(boundary_polygon_utm)
 
     zones: list[dict] = []
     claimed: set[tuple[int, int]] = set()
@@ -1118,7 +1227,7 @@ def find_candidate_zones(
                 return zone["id"]
         return None
 
-    def _build_candidate(anchor, provenance, keypoint=None, seed_snapped=False, snap_distance=0.0):
+    def _build_candidate(anchor, provenance, keypoint=None):
         """Delineates, clips, bounds, trims and packages ONE candidate at
         `anchor`. Returns (zone_or_None, outcome_reason, flags)."""
         flags: list[str] = []
@@ -1133,13 +1242,33 @@ def find_candidate_zones(
             reference_height_meters=pool_reference_height_meters,
             abutment_search_half_width_meters=abutment_search_half_width_meters,
             max_backwater_upstream_meters=max_backwater_upstream_meters,
+            max_contributing_cells=max_contributing_cells,
         )
-        if seed_snapped:
-            flags.append(FLAG_SEED_SNAPPED)
+        anchor_x, anchor_y = pixel_center_xy(dem, anchor[0], anchor[1])
+        anchor_point = Point(anchor_x, anchor_y)
+        anchor_off_parcel = not (
+            boundary_prepared.contains(anchor_point) or boundary_polygon_utm.touches(anchor_point)
+        )
+        # The keypoint's own already-measured distance is preferred over a
+        # second computation of the same thing -- keypoint_detection.py
+        # measured it against the same boundary, and re-deriving it here
+        # would invite the two to drift.
+        if keypoint is not None and "distance_outside_boundary_m" in keypoint:
+            anchor_distance_outside = float(keypoint["distance_outside_boundary_m"])
+        else:
+            anchor_distance_outside = (
+                0.0 if not anchor_off_parcel else round(float(anchor_point.distance(boundary_polygon_utm)), 2)
+            )
+        if anchor_off_parcel:
+            flags.append(FLAG_ANCHOR_OFF_PARCEL)
         if not pool["abutment_found_left"]:
             flags.append(FLAG_ABUTMENT_NOT_FOUND_LEFT)
         if not pool["abutment_found_right"]:
             flags.append(FLAG_ABUTMENT_NOT_FOUND_RIGHT)
+        if pool["dam_band_crosses_major_drainage_left"]:
+            flags.append(FLAG_DAM_BAND_CROSSES_MAJOR_DRAINAGE_LEFT)
+        if pool["dam_band_crosses_major_drainage_right"]:
+            flags.append(FLAG_DAM_BAND_CROSSES_MAJOR_DRAINAGE_RIGHT)
         if pool["backwater_distance_limited"]:
             flags.append(FLAG_BACKWATER_DISTANCE_LIMITED)
 
@@ -1147,29 +1276,42 @@ def find_candidate_zones(
         pool_distance = pool["pool_cell_distance_m"]
 
         # --- boundary clip (and NOTHING else -- see the docstring) -------
-        on_parcel_prepared = prep(boundary_polygon_utm)
         kept = []
         for cell in pool["zone_cells"]:
             x, y = pixel_center_xy(dem, cell[0], cell[1])
-            if on_parcel_prepared.contains(Point(x, y)):
+            if boundary_prepared.contains(Point(x, y)):
                 kept.append(cell)
         if len(kept) != len(pool["zone_cells"]):
             flags.append(FLAG_TRUNCATED_BY_BOUNDARY)
-        if anchor not in kept:
+        if not kept:
             return None, REASON_EMPTY_AFTER_BOUNDARY_CLIP, flags
+        # NOTE the anchor is NOT required to survive the clip: an off-parcel
+        # keypoint anchor never does, and its on-parcel backwater is exactly
+        # the candidate this branch exists to keep. What must survive is
+        # ENOUGH GROUND, which is the area floor's job below.
 
         # --- overlap trim against everything already claimed -------------
         if any(cell in claimed for cell in kept):
             flags.append(FLAG_OVERLAP_TRIMMED)
             kept = [cell for cell in kept if cell not in claimed]
-            if anchor not in kept:
+            if not kept:
                 return None, REASON_EMPTY_AFTER_OVERLAP_TRIM, flags
             trim_mask = np.zeros(grid_shape, dtype=bool)
             for r, c in kept:
                 trim_mask[r, c] = True
             labels, _count = connected_components(trim_mask, connectivity=8)
-            anchor_label = labels[anchor[0], anchor[1]]
-            kept = [cell for cell in kept if labels[cell[0], cell[1]] == anchor_label]
+            # Keep the component containing the anchor when the anchor
+            # survived; otherwise (an off-parcel anchor, or one trimmed
+            # away) keep the LARGEST remaining component -- the biggest
+            # coherent piece of this pool's own on-parcel ground.
+            if anchor in kept:
+                keep_label = labels[anchor[0], anchor[1]]
+            else:
+                counts: dict = {}
+                for r, c in kept:
+                    counts[labels[r, c]] = counts.get(labels[r, c], 0) + 1
+                keep_label = max(counts, key=lambda lbl: (counts[lbl], -lbl))
+            kept = [cell for cell in kept if labels[cell[0], cell[1]] == keep_label]
 
         # --- area cap: drop the farthest-upstream backwater cells --------
         max_cells = max(1, int(math.floor(max_water_zone_area_acres / area_per_cell + 1e-9)))
@@ -1185,10 +1327,13 @@ def find_candidate_zones(
             keep_pool = max(0, max_cells - len(band_kept))
             kept = band_kept + pool_kept[:keep_pool]
 
+        # --- area floor, applied LAST: on the clipped, trimmed, capped
+        # --- footprint, i.e. on the ground the farmer actually gets.
         mask, polygon_utm = _zone_footprint(dem, kept, boundary_polygon_utm)
         if polygon_utm.is_empty:
             return None, REASON_EMPTY_AFTER_BOUNDARY_CLIP, flags
-        if polygon_utm.area / SQUARE_METERS_PER_ACRE < min_water_zone_area_acres:
+        clipped_acres = polygon_utm.area / SQUARE_METERS_PER_ACRE
+        if clipped_acres < min_water_zone_area_acres:
             return None, REASON_BELOW_MIN_AREA, flags
 
         representative_elevation_m = float(np.median([array[r, c] for r, c in kept]))
@@ -1200,42 +1345,34 @@ def find_candidate_zones(
             max_service_distance_meters,
         )
         if not relationships:
+            # TEMPORARY GUARD -- the last remnant of the service-distance
+            # gate that left the nomination mask this branch. See the
+            # docstring: the scoring branch decides whether such a candidate
+            # instead survives with a neutral/floored gravity factor, and
+            # removes this drop if so.
             return None, REASON_NO_SERVICE_RELATIONSHIP, flags
-
-        render_fill_polygon_utm = _render_opening(mask, kept, grid_shape, dem, polygon_utm)
-        # Invariant: render_fill_polygon_utm is a subset of polygon_utm (the
-        # opening is clipped to it, so this holds by construction) -- assert
-        # and raise on violation, matching production_area.cluster_and_gate()'s
-        # hard-containment discipline.
-        if render_fill_polygon_utm.area > polygon_utm.area * (1 + 1e-9) + 1e-6:
-            raise ValueError(
-                "find_candidate_zones: render_fill_polygon_utm.area "
-                f"({render_fill_polygon_utm.area:.6f} m^2) exceeds polygon_utm.area "
-                f"({polygon_utm.area:.6f} m^2) -- the opening's clip to polygon_utm must keep the "
-                "drawn fill within the real cell-gated, boundary-clipped footprint."
-            )
 
         cluster_slopes = [
             float(slope_pct_grid[r, c]) for r, c in kept if not np.isnan(slope_pct_grid[r, c])
         ]
-        anchor_x, anchor_y = pixel_center_xy(dem, anchor[0], anchor[1])
+        geometry_wgs84 = transform_geom(dem["crs"], "EPSG:4326", mapping(polygon_utm))
 
         zone = {
             "id": len(zones),
             "nominated_by": provenance,
             "keypoint_id": int(keypoint["id"]) if keypoint is not None else None,
             "valley_id": int(keypoint["valley_id"]) if keypoint is not None else None,
-            # The keypoint's OWN position and the (possibly snapped) anchor
-            # position are carried SEPARATELY: after a snap they legitimately
-            # differ, and a map that drew only one of them would either hide
-            # where the detected keypoint is or claim the pool was delineated
-            # somewhere it was not.
+            # The keypoint's OWN position and the anchor position are
+            # carried separately even though they are now always the same
+            # cell: the pair is a stable consumer contract (a map draws
+            # both), and keeping both makes it explicit that no relocation
+            # happened rather than leaving it to be inferred.
             "keypoint_rowcol": tuple(keypoint["rowcol"]) if keypoint is not None else None,
             "keypoint_point_utm": keypoint["point_utm"] if keypoint is not None else None,
-            "seed_snapped": bool(seed_snapped),
-            "seed_snap_distance_m": round(float(snap_distance), 2),
+            "anchor_off_parcel": bool(anchor_off_parcel),
+            "anchor_distance_outside_boundary_m": round(float(anchor_distance_outside), 2),
             "anchor_rowcol": anchor,
-            "anchor_point_utm": Point(anchor_x, anchor_y),
+            "anchor_point_utm": anchor_point,
             "anchor_elevation_m": pool["anchor_elevation_m"],
             "level_pool": {
                 "waterline_elevation_m": pool["waterline_elevation_m"],
@@ -1252,6 +1389,8 @@ def find_candidate_zones(
             "abutments": pool["abutments"],
             "abutment_found_left": pool["abutment_found_left"],
             "abutment_found_right": pool["abutment_found_right"],
+            "dam_band_crosses_major_drainage_left": pool["dam_band_crosses_major_drainage_left"],
+            "dam_band_crosses_major_drainage_right": pool["dam_band_crosses_major_drainage_right"],
             "flags": flags,
             "truncated_by_boundary": FLAG_TRUNCATED_BY_BOUNDARY in flags,
             "truncated_by_cap": FLAG_TRUNCATED_BY_CAP in flags,
@@ -1260,11 +1399,13 @@ def find_candidate_zones(
             "road_overlap_pct": _overlap_fraction_pct(kept, dem, road_checked, prepared_union=road_prepared),
             "served_production_area_ids": sorted(r["production_area_id"] for r in relationships),
             "polygon_utm": polygon_utm,
-            "geometry_wgs84": transform_geom(dem["crs"], "EPSG:4326", mapping(polygon_utm)),
-            "render_fill_polygon_utm": render_fill_polygon_utm,
-            "render_fill_geometry_wgs84": transform_geom(
-                dem["crs"], "EPSG:4326", mapping(render_fill_polygon_utm)
-            ),
+            "geometry_wgs84": geometry_wgs84,
+            # IDENTITY, not a copy and not a reduction -- there is no
+            # display-only geometry for a water zone any more (see the
+            # constants section). One geometry reaches the report and the
+            # map, so their acreages cannot disagree.
+            "render_fill_polygon_utm": polygon_utm,
+            "render_fill_geometry_wgs84": geometry_wgs84,
             "production_area_relationships": relationships,
             "primary_production_area_relationship": relationships[0],
             "contributing_area_cells": round(
@@ -1276,58 +1417,48 @@ def find_candidate_zones(
         }
         return zone, REASON_NOMINATED, flags
 
-    # --- FAMILY 1: keypoint-nominated ------------------------------------
+    # --- FAMILY 1: keypoint-nominated, ALL of them ------------------------
     # Catchment ordering, NOT keypoint_detection.py's own slope-drop
     # ordering (see the docstring). Ties break on the keypoint's own id so
     # the same DEM always nominates in the same order.
     ordered_keypoints = sorted(keypoints, key=lambda k: (-float(k["contributing_acres"]), int(k["id"])))
     for keypoint in ordered_keypoints:
+        cell = tuple(int(v) for v in keypoint["rowcol"])
+        rows, cols = grid_shape
+        on_grid = 0 <= cell[0] < rows and 0 <= cell[1] < cols
         outcome = {
             "keypoint_id": int(keypoint["id"]),
             "valley_id": int(keypoint["valley_id"]),
-            "keypoint_rowcol": tuple(keypoint["rowcol"]),
+            "keypoint_rowcol": cell,
             "contributing_acres": float(keypoint["contributing_acres"]),
-            "anchor_rowcol": None,
-            "seed_snapped": False,
-            "seed_snap_distance_m": 0.0,
+            "distance_outside_boundary_m": float(keypoint.get("distance_outside_boundary_m", 0.0)),
+            "on_parcel": bool(keypoint.get("on_parcel", True)),
+            "anchor_rowcol": cell if on_grid else None,
             "candidate_id": None,
             "outcome": None,
             "flags": [],
         }
         keypoint_outcomes.append(outcome)
 
-        if len(zones) >= max_water_zone_candidates:
-            # Recorded, not silently skipped: "there were more keypoints
-            # than the cap allowed" is a real, reportable reason a
-            # keypoint produced nothing.
-            outcome["outcome"] = REASON_CANDIDATE_CAP_REACHED
+        if not on_grid:
+            outcome["outcome"] = REASON_EMPTY_AFTER_BOUNDARY_CLIP
             continue
 
-        cell = tuple(int(v) for v in keypoint["rowcol"])
-        rows, cols = grid_shape
-        if 0 <= cell[0] < rows and 0 <= cell[1] < cols and eligible_mask[cell[0], cell[1]]:
-            anchor, snapped, snap_distance = cell, False, 0.0
-        else:
-            nearest, snap_distance = _nearest_eligible_cell(
-                dem, eligible_mask, cell, keypoint_seed_snap_meters
-            )
-            if nearest is None:
-                outcome["outcome"] = REASON_NO_ELIGIBLE_CELL_WITHIN_SNAP
-                continue
-            anchor, snapped = nearest, True
+        # The ONE nomination-mask gate a keypoint anchor is still subject
+        # to. On-parcel containment is explicitly NOT applied here (see the
+        # docstring); the ceiling is, because a pond on 20+ drainage acres
+        # silts in and needs engineered spillway capacity regardless of
+        # where the keypoint sits.
+        if float(flow_accumulation[cell[0], cell[1]]) > max_contributing_cells:
+            outcome["outcome"] = REASON_KEYPOINT_EXCEEDS_CEILING
+            continue
 
-        outcome["anchor_rowcol"] = anchor
-        outcome["seed_snapped"] = snapped
-        outcome["seed_snap_distance_m"] = round(float(snap_distance), 2)
-
-        too_close = _too_close_candidate_id(anchor)
+        too_close = _too_close_candidate_id(cell)
         if too_close is not None:
             outcome["outcome"] = reason_too_close_to_candidate(too_close)
             continue
 
-        zone, reason, flags = _build_candidate(
-            anchor, NOMINATED_BY_KEYPOINT, keypoint=keypoint, seed_snapped=snapped, snap_distance=snap_distance
-        )
+        zone, reason, flags = _build_candidate(cell, NOMINATED_BY_KEYPOINT, keypoint=keypoint)
         outcome["outcome"] = reason
         outcome["flags"] = flags
         if zone is not None:
@@ -1335,14 +1466,32 @@ def find_candidate_zones(
             claimed.update(zone["cells"])
             outcome["candidate_id"] = zone["id"]
 
-    # --- FAMILY 2: accumulation-nominated --------------------------------
-    # Highest remaining flow accumulation first. Rebuilt each round rather
-    # than precomputed once, because "unclaimed and not too close to an
-    # existing candidate" changes as candidates are added.
+    # --- FAMILY 2: accumulation-nominated, budgeted by SURVIVORS ----------
+    # Highest remaining flow accumulation first. The candidate list is
+    # rebuilt each round rather than precomputed once, because "unclaimed
+    # and not too close to an existing candidate" changes as candidates are
+    # added. The budget counts survivors, so a seed dropped at the floor
+    # simply moves on to the next one.
     eligible_cells = [(int(r), int(c)) for r, c in np.argwhere(eligible_mask)]
     eligible_cells.sort(key=lambda cell: (-float(flow_accumulation[cell[0], cell[1]]), cell))
     exhausted: set[tuple[int, int]] = set()
-    while len(zones) < max_water_zone_candidates:
+    accumulation_survivors = 0
+    # See WATER_ACCUMULATION_SEED_ATTEMPT_LIMIT: the budget counts
+    # survivors, so a parcel where nothing qualifies needs a separate,
+    # ABSOLUTE bound on attempts or it delineates a pool at every eligible
+    # cell.
+    attempt_limit = accumulation_seed_attempt_limit
+    attempt_limit_reached = False
+    while accumulation_survivors < accumulation_seed_budget:
+        if len(accumulation_seeds) >= attempt_limit:
+            attempt_limit_reached = True
+            _LOGGER.info(
+                "water candidate nomination: family 2 stopped at the %d-attempt guard with %d survivor(s) "
+                "-- this parcel's remaining eligible ground is not producing qualifying pools",
+                attempt_limit,
+                accumulation_survivors,
+            )
+            break
         anchor = None
         for cell in eligible_cells:
             if cell in claimed or cell in exhausted:
@@ -1371,6 +1520,7 @@ def find_candidate_zones(
             zones.append(zone)
             claimed.update(zone["cells"])
             seed_log["candidate_id"] = zone["id"]
+            accumulation_survivors += 1
 
     # NON-OVERLAP IS AN INVARIANT, not an expectation: every candidate's
     # cells were removed from every later candidate's, so two candidates
@@ -1393,6 +1543,8 @@ def find_candidate_zones(
                 "keypoints_considered": len(ordered_keypoints),
                 "keypoint_outcomes": keypoint_outcomes,
                 "accumulation_seeds": accumulation_seeds,
+                "accumulation_survivors": accumulation_survivors,
+                "accumulation_attempt_limit_reached": attempt_limit_reached,
                 "candidate_count": len(zones),
             }
         )
@@ -1406,39 +1558,6 @@ def find_candidate_zones(
         sum(1 for z in zones if z["nominated_by"] == NOMINATED_BY_ACCUMULATION),
     )
     return zones
-
-
-def _render_opening(sub_mask, cells, grid_shape, dem, polygon_utm):
-    """
-    Bounded morphological OPENING of the zone's own cell mask, clipped to
-    polygon_utm -- the display fill. Disc erode-then-dilate at
-    WATER_ZONE_RENDER_OPENING_RADIUS_METERS with NO lead erode (a ~0.5-acre
-    zone cannot afford an extra cell off every edge). Same construction
-    production_area.cluster_and_gate() uses for its own render fill, minus
-    the lead erode and at a much smaller radius.
-
-    The opening softens the blocky cell-union edge and trims single-cell
-    protrusions; it can also sever a genuinely too-narrow pinch, so the
-    result may be a MultiPolygon (acceptable). A zone thinner than the
-    opening radius throughout erodes to nothing -- in that case fall back to
-    polygon_utm (non-empty) and log once.
-    """
-    radius_cells = waist_erosion_radius_cells(dem, WATER_ZONE_RENDER_OPENING_RADIUS_METERS)
-    opened = binary_dilate(
-        eroded_cell_mask(cells, grid_shape, dem, WATER_ZONE_RENDER_OPENING_RADIUS_METERS, element="disc"),
-        radius_cells,
-        element="disc",
-    )
-    if opened.any():
-        return cell_union_footprint(dem, opened).intersection(polygon_utm)
-
-    _LOGGER.warning(
-        "find_candidate_zones: the WATER_ZONE_RENDER_OPENING_RADIUS_METERS=%.1fm opening eroded a "
-        "%d-cell zone to nothing; render_fill_polygon_utm falling back to polygon_utm.",
-        WATER_ZONE_RENDER_OPENING_RADIUS_METERS,
-        len(cells),
-    )
-    return polygon_utm
 
 
 def zones_to_geojson(zones: list[dict]) -> dict:
@@ -1477,11 +1596,13 @@ def zones_to_geojson(zones: list[dict]) -> dict:
                 "keypoint_rowcol": list(z["keypoint_rowcol"]) if z["keypoint_rowcol"] else None,
                 "anchor_rowcol": list(z["anchor_rowcol"]),
                 "anchor_elevation_m": z["anchor_elevation_m"],
-                "seed_snapped": z["seed_snapped"],
-                "seed_snap_distance_m": z["seed_snap_distance_m"],
+                "anchor_off_parcel": z["anchor_off_parcel"],
+                "anchor_distance_outside_boundary_m": z["anchor_distance_outside_boundary_m"],
                 "level_pool": z["level_pool"],
                 "abutment_found_left": z["abutment_found_left"],
                 "abutment_found_right": z["abutment_found_right"],
+                "dam_band_crosses_major_drainage_left": z["dam_band_crosses_major_drainage_left"],
+                "dam_band_crosses_major_drainage_right": z["dam_band_crosses_major_drainage_right"],
                 "abutment_distance_left_m": z["abutments"]["left"]["lateral_distance_m"],
                 "abutment_distance_right_m": z["abutments"]["right"]["lateral_distance_m"],
                 "canopy_overlap_pct": z["canopy_overlap_pct"],
@@ -1669,6 +1790,12 @@ def _level_pool_narrative(zone: dict) -> dict:
     "the ground never rose to the waterline within the search width" is a
     real finding, and a 0.0 there would read as "the abutment is right at
     the anchor," the opposite of the truth.
+
+    crosses_major_drainage_<side> is reported ALONGSIDE, never instead of,
+    abutment_found_<side>: a dam axis truncated because it ran into a
+    second creek is a different problem from one that simply found no
+    shoulder, and a narrative that collapsed them would recommend the
+    wrong remedy.
     """
     pool = zone["level_pool"]
     left = zone["abutments"]["left"]
@@ -1680,6 +1807,17 @@ def _level_pool_narrative(zone: dict) -> dict:
         "abutment_found_right": bool(zone["abutment_found_right"]),
         "abutment_distance_left_ft": _feet_from_meters_or_none(left["lateral_distance_m"]),
         "abutment_distance_right_ft": _feet_from_meters_or_none(right["lateral_distance_m"]),
+        # A side truncated at a neighbouring drainage is a DIFFERENT
+        # finding from a side with no shoulder in range, and the narrative
+        # must be able to say which -- see the flag's own docstring.
+        "crosses_major_drainage_left": bool(zone["dam_band_crosses_major_drainage_left"]),
+        "crosses_major_drainage_right": bool(zone["dam_band_crosses_major_drainage_right"]),
+        "major_drainage_distance_left_ft": _feet_from_meters_or_none(
+            left["major_drainage_distance_m"]
+        ),
+        "major_drainage_distance_right_ft": _feet_from_meters_or_none(
+            right["major_drainage_distance_m"]
+        ),
         "backwater_cell_count": int(pool["pool_cell_count"]),
         "stations": [
             {
@@ -1727,8 +1865,15 @@ def _zone_narrative(
             "nominated_by": zone["nominated_by"],
             "keypoint_id": zone["keypoint_id"],
             "valley_id": zone["valley_id"],
-            "seed_snapped": bool(zone["seed_snapped"]),
-            "seed_snap_distance_ft": _feet(zone["seed_snap_distance_m"]),
+            # The anchor is ALWAYS the keypoint's own cell -- nothing is
+            # relocated -- so an off-parcel anchor is reported as the real
+            # thing it is: a dam that would sit at the property edge,
+            # impounding the on-parcel water this candidate's acreage
+            # measures.
+            "anchor_off_parcel": bool(zone["anchor_off_parcel"]),
+            "anchor_distance_outside_boundary_ft": _feet(
+                zone["anchor_distance_outside_boundary_m"]
+            ),
         },
         "flags": list(zone["flags"]),
         "location": {
@@ -1817,8 +1962,8 @@ def build_narrative_data(
           'nomination': {
             'keypoints_considered': int,
             'keypoint_outcomes': [ {keypoint_id, valley_id, contributing_acres,
-                                    outcome, candidate_id, seed_snapped,
-                                    seed_snap_distance_ft, flags}, ... ],
+                                    outcome, candidate_id, on_parcel,
+                                    distance_outside_boundary_ft, flags}, ... ],
             'accumulation_seeds': [ {candidate_id, outcome, flags}, ... ],
           },
           'zones': [ per-candidate block, see _zone_narrative() ],
@@ -1843,8 +1988,12 @@ def build_narrative_data(
                     "contributing_acres": _round1(outcome["contributing_acres"]),
                     "outcome": outcome["outcome"],
                     "candidate_id": outcome["candidate_id"],
-                    "seed_snapped": bool(outcome["seed_snapped"]),
-                    "seed_snap_distance_ft": _feet(outcome["seed_snap_distance_m"]),
+                    # Printed next to the outcome deliberately: an
+                    # off-parcel keypoint's distance is what makes its
+                    # outcome legible (a dam at the edge, or a clipped
+                    # remainder too small to survive the floor).
+                    "on_parcel": bool(outcome["on_parcel"]),
+                    "distance_outside_boundary_ft": _feet(outcome["distance_outside_boundary_m"]),
                     "flags": list(outcome["flags"]),
                 }
                 for outcome in diagnostics.get("keypoint_outcomes", [])
@@ -1957,19 +2106,29 @@ def identify_water_system_candidate_zones(
     traced branches at all; it derives its own flow-accumulation grid
     directly from `dem` (see find_candidate_zones()'s own docstring).
 
-    This is the network entry point that makes find_candidate_zones()'s
-    canopy exclusion genuinely MANDATORY: it always calls production_area.
-    get_required_tree_root_zone_mask_utm() (at this module's own
-    WATER_ZONE_CANOPY_BUFFER_METERS) before find_candidate_zones() ever
-    runs, so a missing/unreliable canopy fetch raises (RuntimeError for no
-    coverage at all, canopy_height_data.CanopyCoverageIncompleteError for
-    coverage too sparse to trust) rather than silently proceeding without
-    the check -- same hard-fail behavior as production_area.identify_
-    production_areas()'s own woody-vegetation gate, reusing that exact
-    function rather than a parallel copy. The road exclusion, by
-    contrast, is fetched too but degrades GRACEFULLY on failure (falls
-    back to "not checked," same as production's own check_roads default)
-    -- see compute_water_eligible_cells()'s own docstring (gates 4/5).
+    CANOPY IS FETCH-OR-RAISE, AND IT IS A MEASUREMENT INPUT. This entry
+    point always calls production_area.get_required_tree_root_zone_mask_
+    utm() (at this module's own WATER_ZONE_CANOPY_BUFFER_METERS) before
+    find_candidate_zones() runs, so a missing/unreliable canopy fetch
+    raises (RuntimeError for no coverage at all, canopy_height_data.
+    CanopyCoverageIncompleteError for coverage too sparse to trust) rather
+    than proceeding without it -- the same hard-fail posture production_
+    area.identify_production_areas()'s own woody-vegetation gate uses,
+    reusing that exact function rather than a parallel copy.
+
+    What the mask is USED for changed: canopy no longer gates nomination
+    (see compute_water_eligible_cells()); it feeds each candidate's
+    canopy_overlap_pct. The fetch-or-raise posture is KEPT anyway, for two
+    reasons: this pipeline is in a validation phase where a silently
+    missing measurement is worse than a loud failure, and on the real
+    pipeline path the mask costs nothing to obtain -- build_pipeline_
+    context() already holds canopy from ParcelData and forwards it here.
+
+    The road union is fetched on the same path but degrades GRACEFULLY on
+    failure (falls back to "not checked"), likewise now as a measurement
+    input rather than a gate: a road-service outage costs the run its
+    road_overlap_pct, which reads None rather than a fabricated 0.0, and
+    costs it nothing else.
 
     canopy_height is an optional pre-fetched override in the same family as
     the dem/boundary/valleys/production_areas overrides above: the SAME

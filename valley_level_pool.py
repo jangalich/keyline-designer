@@ -459,12 +459,16 @@ def _find_abutment(
     direction: tuple[float, float],
     waterline_m: float,
     half_width_meters: float,
+    flow_accumulation: Optional[np.ndarray] = None,
+    max_contributing_cells: Optional[float] = None,
 ) -> dict:
     """
     Walks one side of the dam axis from the anchor outward, at cell
-    resolution, until RAW terrain rises to at least waterline_m (the
-    abutment: where a wall at this waterline would key into the hillside)
-    or half_width_meters runs out.
+    resolution, until one of three things happens: RAW terrain rises to at
+    least waterline_m (the abutment -- where a wall at this waterline would
+    key into the hillside), the walk crosses a cell carrying more
+    contributing area than max_contributing_cells (a NEIGHBOURING major
+    drainage), or half_width_meters runs out.
 
     Returns
         {
@@ -477,6 +481,9 @@ def _find_abutment(
                                                    #   the abutment cell
             'searched_distance_m': float,          # how far the walk got
             'left_grid': bool,                     # the walk ran off the DEM
+            'crosses_major_drainage': bool,        # see below
+            'major_drainage_distance_m': float or None,
+            'major_drainage_contributing_cells': float or None,
         }
 
     found=False IS A REAL FINDING, not a failure: it says the ground stays
@@ -484,9 +491,33 @@ def _find_abutment(
     this side. Nothing is retried at a wider radius (see
     ABUTMENT_SEARCH_HALF_WIDTH_METERS).
 
+    THE CONTRIBUTING-AREA CEILING ON THE BAND is a separate, and separately
+    reported, outcome. The lateral search can cross a second channel that
+    happens to sit below the waterline within the half-width -- and a dam
+    axis crossing a 20+ acre drainage is a real siting problem, not a
+    longer wall. The band is truncated at that cell (it is NOT included)
+    and crosses_major_drainage is set, with the distance and the
+    contributing-cell count that tripped it.
+
+    THAT FLAG IS DELIBERATELY DISTINCT FROM found=False, and the caller
+    must keep them distinct: "no shoulder within range" and "the wall would
+    dam a second creek" are different survey findings with different
+    remedies, and a truncated-at-a-creek side reports crosses_major_
+    drainage WITHOUT reporting an abutment that was never looked for past
+    that point.
+
     The abutment cell IS included in band_cells: a dam wall lands ON its
     abutment, so the cell where terrain reaches the waterline is part of
-    the structure's footprint, not past its end.
+    the structure's footprint, not past its end. A major-drainage cell is
+    NOT included, for the mirror-image reason: the band stops before it.
+
+    flow_accumulation / max_contributing_cells are the ceiling's two
+    inputs, passed IN rather than derived: this module stays pure and
+    network-free, and the caller already holds both (the same accumulation
+    grid its nomination mask was built from, so the band and the mask
+    cannot be gated against two different grids). Omitting either disables
+    the ceiling check entirely -- the honest "not asked" behaviour, used by
+    the synthetic fixtures that only care about geometry.
 
     Walking off the grid, or onto nodata, ends the walk with found=False
     and left_grid=True -- "we could not see far enough here", which must
@@ -497,60 +528,62 @@ def _find_abutment(
     array = dem["array"]
     x0, y0 = anchor_xy
     ux, uy = direction
+    ceiling_checked = flow_accumulation is not None and max_contributing_cells is not None
 
     band_cells: list[tuple[int, int]] = []
     seen: set[tuple[int, int]] = set()
     steps_out = int(math.floor(half_width_meters / step + 1e-9))
     searched = 0.0
 
+    def _result(**overrides) -> dict:
+        base = {
+            "found": False,
+            "lateral_distance_m": None,
+            "rowcol": None,
+            "elevation_m": None,
+            "band_cells": band_cells,
+            "searched_distance_m": round(searched, 3),
+            "left_grid": False,
+            "crosses_major_drainage": False,
+            "major_drainage_distance_m": None,
+            "major_drainage_contributing_cells": None,
+        }
+        base.update(overrides)
+        return base
+
     for i in range(1, steps_out + 1):
         distance = i * step
         cell = rowcol_for_xy(dem, x0 + ux * distance, y0 + uy * distance)
         if cell is None:
-            return {
-                "found": False,
-                "lateral_distance_m": None,
-                "rowcol": None,
-                "elevation_m": None,
-                "band_cells": band_cells,
-                "searched_distance_m": round(searched, 3),
-                "left_grid": True,
-            }
+            return _result(left_grid=True)
         elevation = float(array[cell[0], cell[1]])
         if not math.isfinite(elevation):
-            return {
-                "found": False,
-                "lateral_distance_m": None,
-                "rowcol": None,
-                "elevation_m": None,
-                "band_cells": band_cells,
-                "searched_distance_m": round(searched, 3),
-                "left_grid": True,
-            }
+            return _result(left_grid=True)
+
+        # The ceiling is tested BEFORE the cell joins the band: a cell that
+        # trips it is where the band stops, not its last member.
+        if ceiling_checked:
+            contributing = float(flow_accumulation[cell[0], cell[1]])
+            if contributing > float(max_contributing_cells):
+                return _result(
+                    crosses_major_drainage=True,
+                    major_drainage_distance_m=round(distance, 3),
+                    major_drainage_contributing_cells=contributing,
+                )
+
         searched = distance
         if cell not in seen:
             seen.add(cell)
             band_cells.append(cell)
         if elevation >= waterline_m:
-            return {
-                "found": True,
-                "lateral_distance_m": round(distance, 3),
-                "rowcol": cell,
-                "elevation_m": round(elevation, 3),
-                "band_cells": band_cells,
-                "searched_distance_m": round(searched, 3),
-                "left_grid": False,
-            }
+            return _result(
+                found=True,
+                lateral_distance_m=round(distance, 3),
+                rowcol=cell,
+                elevation_m=round(elevation, 3),
+            )
 
-    return {
-        "found": False,
-        "lateral_distance_m": None,
-        "rowcol": None,
-        "elevation_m": None,
-        "band_cells": band_cells,
-        "searched_distance_m": round(searched, 3),
-        "left_grid": False,
-    }
+    return _result()
 
 
 def delineate_level_pool(
@@ -567,6 +600,7 @@ def delineate_level_pool(
     station_spacing_meters: float = CROSS_SECTION_STATION_SPACING_METERS,
     station_count: int = CROSS_SECTION_STATIONS,
     axis_walk_cells: int = VALLEY_AXIS_WALK_CELLS,
+    max_contributing_cells: Optional[float] = None,
 ) -> dict:
     """
     Delineates the level pool at `anchor` and measures it. The core of this
@@ -609,6 +643,19 @@ def delineate_level_pool(
        downstream axis (counter-clockwise in the +x-east/+y-north UTM
        frame), right is -90.
 
+       THE CONTRIBUTING-AREA CEILING BINDS HERE, AND ONLY HERE. When
+       max_contributing_cells is supplied, a lateral walk that reaches a
+       cell carrying more contributing area than that stops there and
+       reports crosses_major_drainage on its side -- the dam axis would
+       cross a second drainage. This is the one place in the whole
+       delineation where the ceiling can genuinely bind: it is a NO-OP on
+       the backwater by construction, because every backwater cell is
+       upstream of the anchor and flow accumulation decreases strictly
+       upstream, so no backwater cell can exceed an anchor that already
+       cleared the ceiling. That is a structural guarantee, asserted in
+       test_valley_level_pool.py rather than re-checked per cell at
+       runtime.
+
     3. CROSS-SECTION MEASUREMENTS at `station_count` stations spaced
        station_spacing_meters apart along the valley axis, UPSTREAM of the
        anchor (station 0 is the anchor itself). Each records the flooded
@@ -640,6 +687,8 @@ def delineate_level_pool(
           'abutments': {'left': {...}, 'right': {...}},   # _find_abutment() dicts
           'abutment_found_left': bool,
           'abutment_found_right': bool,
+          'dam_band_crosses_major_drainage_left': bool,   # distinct from
+          'dam_band_crosses_major_drainage_right': bool,  #   abutment_found_*
           'dam_band_width_m': float,             # left + right searched extent
                                                  #   plus the anchor's own cell
           'stations': [ {                        # measurements, NOT a design
@@ -697,8 +746,14 @@ def delineate_level_pool(
     dam_axis_right = (axis[1], -axis[0])
     anchor_xy = pixel_center_xy(dem, r0, c0)
 
-    left = _find_abutment(dem, anchor_xy, dam_axis_left, waterline, abutment_search_half_width_meters)
-    right = _find_abutment(dem, anchor_xy, dam_axis_right, waterline, abutment_search_half_width_meters)
+    left = _find_abutment(
+        dem, anchor_xy, dam_axis_left, waterline, abutment_search_half_width_meters,
+        flow_accumulation=flow_accumulation, max_contributing_cells=max_contributing_cells,
+    )
+    right = _find_abutment(
+        dem, anchor_xy, dam_axis_right, waterline, abutment_search_half_width_meters,
+        flow_accumulation=flow_accumulation, max_contributing_cells=max_contributing_cells,
+    )
 
     band_cells: list[tuple[int, int]] = [anchor_cell]
     band_seen = {anchor_cell}
@@ -765,6 +820,8 @@ def delineate_level_pool(
         "abutments": {"left": left, "right": right},
         "abutment_found_left": bool(left["found"]),
         "abutment_found_right": bool(right["found"]),
+        "dam_band_crosses_major_drainage_left": bool(left["crosses_major_drainage"]),
+        "dam_band_crosses_major_drainage_right": bool(right["crosses_major_drainage"]),
         "dam_band_width_m": round(dam_band_width, 3),
         "stations": stations,
         "backwater_distance_limited": bool(distance_limited),

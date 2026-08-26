@@ -404,7 +404,7 @@ from report_generator import (  # noqa: E402
 # accumulation-nominated candidate, plus a keypoint that produced nothing
 # -- so the prose exercises provenance, flags, the level-pool block and the
 # unproductive-keypoint reason-code line in a single fixture.
-def _water_zone_block(zone_id, nominated_by, keypoint_id, valley_id, snapped, flags, abut_left_found):
+def _water_zone_block(zone_id, nominated_by, keypoint_id, valley_id, off_parcel, flags, abut_left_found):
     return {
         "id": zone_id,
         "area_acres": 0.5,
@@ -412,8 +412,8 @@ def _water_zone_block(zone_id, nominated_by, keypoint_id, valley_id, snapped, fl
             "nominated_by": nominated_by,
             "keypoint_id": keypoint_id,
             "valley_id": valley_id,
-            "seed_snapped": snapped,
-            "seed_snap_distance_ft": 16.4 if snapped else 0.0,
+            "anchor_off_parcel": off_parcel,
+            "anchor_distance_outside_boundary_ft": 24.6 if off_parcel else 0.0,
         },
         "flags": flags,
         "location": {"position_in_parcel": "southwest", "elevation_percentile_of_parcel": 22.7},
@@ -429,6 +429,13 @@ def _water_zone_block(zone_id, nominated_by, keypoint_id, valley_id, snapped, fl
             "abutment_found_right": True,
             "abutment_distance_left_ft": 49.2 if abut_left_found else None,
             "abutment_distance_right_ft": 49.2,
+            "crosses_major_drainage_left": False,
+            # The RIGHT side is truncated at a neighbouring drainage -- a
+            # different finding from an abutment that was not found, and
+            # the prose must say so distinctly.
+            "crosses_major_drainage_right": not abut_left_found,
+            "major_drainage_distance_left_ft": None,
+            "major_drainage_distance_right_ft": None if abut_left_found else 82.0,
             "backwater_cell_count": 65,
             "stations": [
                 {"station_index": 0, "offset_upstream_ft": 0.0, "flooded_width_ft": 82.0,
@@ -453,7 +460,9 @@ def _water_zone_block(zone_id, nominated_by, keypoint_id, valley_id, snapped, fl
     }
 
 
-_water_zone_0 = _water_zone_block(0, "keypoint", 1, 0, True, ["seed_snapped", "truncated_by_boundary"], True)
+_water_zone_0 = _water_zone_block(
+    0, "keypoint", 1, 0, True, ["anchor_off_parcel", "truncated_by_boundary"], True
+)
 _water_zone_1 = _water_zone_block(1, "accumulation", None, None, False, [], False)
 _water_nd = {
     "zone_found": True,
@@ -464,14 +473,14 @@ _water_nd = {
         "keypoints_considered": 3,
         "keypoint_outcomes": [
             {"keypoint_id": 1, "valley_id": 0, "contributing_acres": 8.0, "outcome": "nominated",
-             "candidate_id": 0, "seed_snapped": True, "seed_snap_distance_ft": 16.4,
-             "flags": ["seed_snapped"]},
+             "candidate_id": 0, "on_parcel": False, "distance_outside_boundary_ft": 24.6,
+             "flags": ["anchor_off_parcel"]},
             {"keypoint_id": 0, "valley_id": 0, "contributing_acres": 3.0,
-             "outcome": "too_close_to_candidate_0", "candidate_id": None, "seed_snapped": False,
-             "seed_snap_distance_ft": 0.0, "flags": []},
+             "outcome": "too_close_to_candidate_0", "candidate_id": None, "on_parcel": True,
+             "distance_outside_boundary_ft": 0.0, "flags": []},
             {"keypoint_id": 2, "valley_id": 1, "contributing_acres": 4.0,
-             "outcome": "no_eligible_cell_within_snap", "candidate_id": None, "seed_snapped": False,
-             "seed_snap_distance_ft": 0.0, "flags": []},
+             "outcome": "below_min_area", "candidate_id": None, "on_parcel": False,
+             "distance_outside_boundary_ft": 41.0, "flags": ["anchor_off_parcel"]},
         ],
         "accumulation_seeds": [{"outcome": "nominated", "candidate_id": 1, "flags": []}],
     },
@@ -484,7 +493,10 @@ assert "3 detected keypoint(s)" in _water_prose
 assert "in the parcel's southwest" in _water_prose and "22.7 elevation percentile" in _water_prose
 assert "1.9 acre(s)" in _water_prose and "20.0-acre siltation/peak-flow" in _water_prose
 assert "nominated from keypoint 1 (valley 0)" in _water_prose
-assert "anchor snapped 16.4 ft" in _water_prose
+assert "24.6 ft" in _water_prose and "OUTSIDE the drawn boundary" in _water_prose, (
+    "an off-parcel anchor must be stated as a dam at the property edge, with its measured distance"
+)
+assert "ON-PARCEL portion of the pool" in _water_prose
 assert "nominated from the highest remaining flow accumulation" in _water_prose
 assert "NOT A PROPOSED DAM HEIGHT" in _water_prose
 assert "8.2 ft reference waterline" in _water_prose
@@ -495,9 +507,15 @@ assert "NOT FOUND within the search width" in _water_prose, (
 assert "flooded cross-sectional area 349.8 sq ft" in _water_prose
 assert "NOT a storage capacity" in _water_prose and "no volume is computed" in _water_prose
 assert "canopy 12.5%" in _water_prose and "NOT used to shrink the zone" in _water_prose
-assert "Flags: seed_snapped, truncated_by_boundary." in _water_prose
-assert "too_close_to_candidate_0" in _water_prose and "no_eligible_cell_within_snap" in _water_prose, (
+assert "Flags: anchor_off_parcel, truncated_by_boundary." in _water_prose
+assert "too_close_to_candidate_0" in _water_prose and "below_min_area" in _water_prose, (
     "keypoints that produced no candidate must be reported with the reason code that stopped them"
+)
+assert "41.0 ft off parcel" in _water_prose, (
+    "an off-parcel keypoint's distance must sit next to its outcome -- it is what makes the outcome legible"
+)
+assert "SECOND major drainage" in _water_prose and "82.0 ft" in _water_prose, (
+    "a dam axis truncated at a neighbouring drainage is a distinct finding and must be stated as one"
 )
 assert "can_gravity_feed: True" in _water_prose and "A gravity-feed relationship." in _water_prose
 assert "would need a pump" in _water_prose, "a below-elevation relationship must be stated as pump-required"
