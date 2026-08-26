@@ -15,8 +15,14 @@ DELINEATION of the zone around each anchor.
         --> NOMINATION of anchor cells:
               family 1 -- EVERY keypoint (keypoint_detection.detect_
                           keypoints()), in contributing_acres-descending
-                          order, each delineating from its OWN cell --
-                          on-parcel or not, with no snap and no relocation
+                          order, each anchoring at its WALL SITE: the first
+                          cell downstream a full POOL_REFERENCE_HEIGHT_
+                          METERS below the keypoint, which is where a dam
+                          impounding water back UP TO the keypoint would
+                          stand. The keypoint is the pool's TAIL, not its
+                          wall. On-parcel or not, with no snap and no
+                          relocation -- the walk is downstream along the
+                          traced flow path, not a search for better ground
               family 2 -- the highest-flow-accumulation unclaimed eligible
                           cells, until WATER_ACCUMULATION_SEED_BUDGET
                           survivors or the seeds run out
@@ -251,7 +257,16 @@ MAX_SERVICE_DISTANCE_METERS = 800.0
 # drawn, so the gate is now absolute. There is deliberately NO lower
 # bound: the deliverable is a survey area, not a pass/fail on pond
 # viability, so water zones report the best available site rather than
-# returning nothing near the top of a watershed. CONFIGURABLE.
+# returning nothing near the top of a watershed.
+#
+# SUPPORTING (not replacing) the NRCS reasoning above: 20 acres also sits a
+# factor of five under Pennsylvania 25 Pa. Code Ch. 105's 100-acre
+# drainage-area threshold for a dam permit, so a site at this ceiling is
+# comfortably inside the unregulated farm-pond envelope on the reference
+# property. That citation is JURISDICTION-SPECIFIC and is a cross-check,
+# not the justification -- NRCS CPS 378 is the national primary, and a
+# property outside Pennsylvania needs its own state threshold checked.
+# CONFIGURABLE.
 MAX_VALLEY_CONTRIBUTING_AREA_ACRES = 20.0
 
 # Drop tiny, noise-sized eligible-cell clusters below this real cell-union
@@ -366,14 +381,17 @@ WATER_ACCUMULATION_SEED_ATTEMPT_LIMIT = 150
 #   * Moving an anchor moves the WATERLINE. The pool's extent is measured
 #     from the anchor cell's own raw elevation, so a snapped anchor
 #     delineates a different pool at a different height and then reports it
-#     under the keypoint's name. Delineating from the keypoint's own cell
-#     and letting the boundary clip and MIN_WATER_ZONE_AREA_ACRES judge the
-#     on-parcel remainder answers the same question without that
-#     substitution.
+#     under the keypoint's name. The WALL-SITE WALK is not a snap and does
+#     not contradict this: it moves the anchor by a DERIVED, RECORDED
+#     distance along the traced flow path to the one cell where the
+#     waterline lands back on the keypoint (see
+#     MAX_WALL_SEARCH_DOWNSTREAM_METERS), and it reports both positions. A
+#     snap searched nearby ground for a cell that passed a filter; the walk
+#     answers a question the keypoint itself poses.
 #
-# An off-parcel keypoint is handled by that clip-and-floor rule rather than
-# by relocation -- see find_candidate_zones() for the
-# dam-at-the-property-edge case.
+# An off-parcel anchor is handled by the boundary clip and
+# MIN_WATER_ZONE_AREA_ACRES rather than by relocation -- see
+# find_candidate_zones() for the dam-at-the-property-edge case.
 
 # Minimum distance between a proposed seed and the footprint of any
 # candidate already delineated in this run.
@@ -395,6 +413,38 @@ WATER_ACCUMULATION_SEED_ATTEMPT_LIMIT = 150
 # forbidding the second station. NOT validated beyond the reference
 # property. CONFIGURABLE.
 MIN_WATER_SEED_SEPARATION_METERS = 30.0
+
+# How far downstream of a keypoint the WALL-SITE WALK may go looking for a
+# cell that sits POOL_REFERENCE_HEIGHT_METERS below it.
+#
+# THE WALK EXISTS BECAUSE THE KEYPOINT IS THE POOL'S TAIL, NOT ITS WALL.
+# See find_candidate_zones()'s own docstring for the full reasoning; the
+# short version is that a keypoint is BY DEFINITION the point where the
+# steep reach above gives way to the gentle reach below, so a dam built AT
+# it impounds only the steep ground and dies within a few cells. Yeomans'
+# storage logic runs the other way -- the keypoint is the highest
+# ECONOMICAL storage point precisely because the valley flattens and opens
+# BELOW it -- so the wall belongs downstream and the water backs up TO the
+# keypoint.
+#
+# 150 m equals valley_level_pool.MAX_BACKWATER_UPSTREAM_METERS deliberately
+# but is a SEPARATE constant answering a different question: that one
+# bounds how far a pool's water reaches upstream of a wall, this one bounds
+# how far downstream a wall may be sought from a keypoint. They are
+# numerically equal today because both are "how far one keyline feature may
+# reasonably sit from another on a small farm", and keeping them separate
+# means a retune of either does not silently move the other. Past this
+# distance the wall has stopped being the keypoint's dam and become a
+# different site, which family 2 would nominate on its own merits anyway.
+#
+# A walk that runs out -- on distance, on the grid edge, or on the flat-tie
+# sentinel -- does NOT fall back to a partial-height wall. It reports
+# REASON_WALL_SITE_NOT_FOUND_DOWNSTREAM and the keypoint nominates nothing.
+# A shorter wall is a different structure impounding different water, and
+# inventing one to avoid an empty result would be reporting a site the
+# terrain does not offer. NOT validated beyond the reference property.
+# CONFIGURABLE.
+MAX_WALL_SEARCH_DOWNSTREAM_METERS = 150.0
 
 # THERE IS NO RENDER OPENING FOR WATER ZONES. A bounded morphological
 # opening (disc erode-then-dilate at a small radius, clipped to
@@ -562,6 +612,22 @@ REASON_EMPTY_AFTER_OVERLAP_TRIM = "empty_after_overlap_trim"
 # bookkeeping outcome -- so it gets its own code rather than sharing one
 # with the geometric drops.
 REASON_KEYPOINT_EXCEEDS_CEILING = "keypoint_exceeds_ceiling"
+# The two ways the WALL-SITE WALK downstream of a keypoint can fail. Both
+# are honest empty answers, never a partial-height fallback:
+#   * ..._NOT_FOUND_DOWNSTREAM -- the walk hit the flat-tie sentinel, the
+#     grid edge, or MAX_WALL_SEARCH_DOWNSTREAM_METERS before accumulating
+#     the full reference drop. On marsh ground this is
+#     valley_delineation.py's flat-tie limitation surfacing at NOMINATION
+#     rather than later as a short stem; report it, do not fix it here.
+#   * ..._EXCEEDS_CEILING -- contributing area increases strictly
+#     downstream, so a wall site far enough below a keypoint can sit on a
+#     drainage the ceiling disqualifies even when the keypoint itself
+#     cleared it. That is a wall across a major drainage, and it is
+#     reported distinctly from the keypoint's own ceiling failure because
+#     the remedy differs: one says "this keypoint is on too much water,"
+#     the other says "the wall this keypoint implies would be."
+REASON_WALL_SITE_NOT_FOUND_DOWNSTREAM = "wall_site_not_found_downstream"
+REASON_WALL_SITE_EXCEEDS_CEILING = "wall_site_exceeds_ceiling"
 # NOTE: there is deliberately no candidate_cap_reached code any more --
 # generation is uncapped (see WATER_ACCUMULATION_SEED_BUDGET), so no
 # keypoint can be turned away for arriving late.
@@ -620,7 +686,7 @@ WATER_SYSTEM_CANDIDATE_CONFIDENCE_NOTES = (
     "remaining flow accumulation (see properties.nominated_by). The "
     "anchor cleared THREE gates and only three -- a contributing-area "
     "ceiling, on-parcel containment (from which KEYPOINT anchors are "
-    "exempt: a keypoint just off the drawn line whose backwater grows "
+    "exempt: a wall site just off the drawn line whose backwater grows "
     "into the parcel is a real dam-at-the-property-edge candidate, and "
     "carries properties.anchor_off_parcel with its measured distance), "
     "and a boundary setback. Woody vegetation, mapped roads and overlap "
@@ -696,8 +762,9 @@ def compute_water_eligible_cells(
          Jurisdiction note, because it is narrower than it looks: this gate
          governs FAMILY-2 SEED SELECTION and (separately, downstream) the
          geometric clip every zone gets. KEYPOINT ANCHORS ARE EXEMPT from
-         it -- find_candidate_zones() delineates from a keypoint's own cell
-         whether or not that cell is on the parcel. See that function's
+         it -- find_candidate_zones() delineates from the WALL SITE below
+         each keypoint whether or not that cell is on the parcel, and the
+         keypoint above it may be off-parcel too. See that function's
          docstring for the dam-at-the-property-edge case and the two bounds
          that make it safe.
 
@@ -879,6 +946,171 @@ def _flow_arrays_for_dem(
     return filled, flow_to_row, flow_to_col, flow_accumulation
 
 
+def _find_wall_site(
+    dem: dict,
+    keypoint_cell: tuple[int, int],
+    flow_to_row: np.ndarray,
+    flow_to_col: np.ndarray,
+    flow_accumulation: np.ndarray,
+    reference_height_meters: float,
+    max_search_distance_meters: float,
+    max_contributing_cells: float,
+) -> dict:
+    """
+    THE WALL-SITE WALK: given a keypoint cell, find the cell DOWNSTREAM of
+    it where a wall would impound water back up to the keypoint.
+
+    Walks the stem downstream through the D8 flow field -- the same
+    (flow_to_row, flow_to_col) convention valley_level_pool.py and
+    keypoint_detection.py both use -- accumulating real ground distance
+    between cell centers and reading RAW elevation drop from the
+    keypoint's own raw elevation. The wall site is the FIRST cell whose
+    drop reaches reference_height_meters.
+
+    WHY THIS IS THE CORRECT ANCHOR, and why anchoring at the keypoint was
+    wrong. A keypoint is DEFINED by the two-segment fit as the break
+    between a steep reach ABOVE and a gentle reach BELOW. A pool impounded
+    AT it therefore floods only the steep ground, and dies within a few
+    cells: measured on the reference property, the channel above every
+    keypoint climbed at 15-24%, so a 2.5 m waterline reached barely
+    10-15 m upstream and the 25 m cross-section station read a real,
+    correct 0.0 m. Yeomans' storage logic runs the other way round -- the
+    keypoint is the highest ECONOMICAL storage point precisely BECAUSE the
+    valley flattens and opens below it. The wall belongs downstream; the
+    keypoint is the pool's TAIL.
+
+    THE HEIGHT CORRESPONDENCE IS THE POINT. The anchor sits a full
+    reference height below the keypoint, so the waterline it defines --
+    anchor elevation + reference height -- lands exactly AT the keypoint's
+    own elevation, or a little below it where the walk overshoots in a
+    single cell. The pool's tail therefore reaches back to the keypoint and
+    never past it: the keypoint is the water's upstream limit, not
+    submerged ground. That is the Yeomans reading made literal, and it is
+    why no partial-height fallback exists -- a shorter wall would put the
+    tail somewhere the keypoint does not describe.
+
+    Returns
+        {
+            'found': bool,
+            'anchor': (row, col) or None,
+            'offset_downstream_m': float,      # along-stem distance walked
+            'drop_m': float,                   # accumulated at the anchor,
+                                               #   or the most reached
+            'keypoint_elevation_m': float,
+            'anchor_elevation_m': float or None,
+            'contributing_cells_at_anchor': float or None,
+            'exceeds_ceiling': bool,           # the full-drop cell is on too
+                                               #   much drainage to dam
+            'walk_end_rowcol': (row, col),     # where the walk stopped
+            'walk_end_reason': str,            # see below
+        }
+
+    walk_end_reason distinguishes the ways a walk can end, which matter
+    because they are different findings:
+      * 'reached_full_drop'  -- success.
+      * 'distance_bound'     -- MAX_WALL_SEARCH_DOWNSTREAM_METERS ran out
+                                on a reach too gentle to give up the height.
+      * 'grid_edge'          -- the -1 sentinel on a border cell: the DEM
+                                simply does not extend far enough.
+      * 'flat_tie_sentinel'  -- the -1 sentinel on an INTERIOR cell, which
+                                is valley_delineation.py's plain
+                                priority-flood leaving a filled flat with no
+                                strictly-downhill neighbour. This is the
+                                known hydrology limitation, surfacing here
+                                at nomination time.
+      * 'nodata'             -- the walk stepped onto a cell with no
+                                elevation. A hole in the DEM is not the
+                                edge of it and not a flat, so it gets its
+                                own name rather than borrowing one.
+    grid_edge and flat_tie_sentinel share a sentinel in the flow field and
+    are told apart by whether the cell sits on the grid border -- a
+    documented heuristic, not a distinction the flow field itself records.
+    """
+    raw = dem["array"]
+    rows, cols = raw.shape
+    keypoint_elevation = float(raw[keypoint_cell[0], keypoint_cell[1]])
+    result = {
+        "found": False,
+        "anchor": None,
+        "offset_downstream_m": 0.0,
+        "drop_m": 0.0,
+        "keypoint_elevation_m": round(keypoint_elevation, 3),
+        "anchor_elevation_m": None,
+        "contributing_cells_at_anchor": None,
+        "exceeds_ceiling": False,
+        "walk_end_rowcol": keypoint_cell,
+        # Overwritten by every path below; this default covers only the
+        # one case that returns before the walk starts -- a keypoint cell
+        # with no elevation to measure a drop from.
+        "walk_end_reason": "nodata",
+    }
+    if not math.isfinite(keypoint_elevation):
+        return result
+
+    current = keypoint_cell
+    distance = 0.0
+    visited = {keypoint_cell}
+    while True:
+        tr = int(flow_to_row[current[0], current[1]])
+        tc = int(flow_to_col[current[0], current[1]])
+        if tr < 0:
+            on_border = current[0] in (0, rows - 1) or current[1] in (0, cols - 1)
+            result["walk_end_rowcol"] = current
+            result["walk_end_reason"] = "grid_edge" if on_border else "flat_tie_sentinel"
+            return result
+        nxt = (tr, tc)
+        if nxt in visited:  # defensive: the filled flow field is acyclic
+            result["walk_end_rowcol"] = current
+            result["walk_end_reason"] = "flat_tie_sentinel"
+            return result
+        step = _cell_center_distance(dem, current, nxt)
+        if distance + step > max_search_distance_meters:
+            result["walk_end_rowcol"] = current
+            result["walk_end_reason"] = "distance_bound"
+            return result
+        distance += step
+        visited.add(nxt)
+        current = nxt
+
+        elevation = float(raw[current[0], current[1]])
+        if not math.isfinite(elevation):
+            result["walk_end_rowcol"] = current
+            result["walk_end_reason"] = "nodata"
+            return result
+        drop = keypoint_elevation - elevation
+        result["drop_m"] = round(drop, 3)
+        result["walk_end_rowcol"] = current
+        if drop >= reference_height_meters:
+            contributing = float(flow_accumulation[current[0], current[1]])
+            result.update(
+                {
+                    "found": True,
+                    "anchor": current,
+                    "offset_downstream_m": round(distance, 3),
+                    "anchor_elevation_m": round(elevation, 3),
+                    "contributing_cells_at_anchor": contributing,
+                    # Contributing area increases strictly downstream, so a
+                    # wall far enough below a keypoint can sit on drainage
+                    # the ceiling disqualifies even where the keypoint did
+                    # not. Reported, not silently walked past.
+                    "exceeds_ceiling": contributing > max_contributing_cells,
+                    "walk_end_reason": "reached_full_drop",
+                }
+            )
+            return result
+
+
+def _cell_center_distance(dem: dict, a: tuple[int, int], b: tuple[int, int]) -> float:
+    """Real ground distance between two cells' centers, so a diagonal D8
+    step correctly costs sqrt(2)x a cardinal one. Same computation
+    valley_level_pool.py performs on its own walks; duplicated here rather
+    than imported because that module is anchor-agnostic by design and this
+    is anchor-selection logic."""
+    ax, ay = pixel_center_xy(dem, a[0], a[1])
+    bx, by = pixel_center_xy(dem, b[0], b[1])
+    return math.hypot(bx - ax, by - ay)
+
+
 def _zone_footprint(dem: dict, cells, boundary_polygon_utm: Polygon):
     """The real cell-union footprint of `cells`, clipped to the parcel
     boundary -- raster_grid.cell_union_footprint() then .intersection(),
@@ -941,6 +1173,7 @@ def find_candidate_zones(
     accumulation_seed_budget: int = WATER_ACCUMULATION_SEED_BUDGET,
     accumulation_seed_attempt_limit: int = WATER_ACCUMULATION_SEED_ATTEMPT_LIMIT,
     min_water_seed_separation_meters: float = MIN_WATER_SEED_SEPARATION_METERS,
+    max_wall_search_downstream_meters: float = MAX_WALL_SEARCH_DOWNSTREAM_METERS,
     pool_reference_height_meters: float = POOL_REFERENCE_HEIGHT_METERS,
     abutment_search_half_width_meters: float = ABUTMENT_SEARCH_HALF_WIDTH_METERS,
     max_backwater_upstream_meters: float = MAX_BACKWATER_UPSTREAM_METERS,
@@ -981,17 +1214,46 @@ def find_candidate_zones(
          whoever was delineated first, so priority must be deterministic
          and meaningful.
 
-         EVERY KEYPOINT DELINEATES FROM ITS OWN CELL. There is no snap, no
-         nearest-eligible-cell search, and no anchor relocation of any
-         kind (see the constants section). Two consequences:
+         EVERY KEYPOINT ANCHORS AT ITS WALL SITE, NOT AT THE KEYPOINT.
+         The keypoint is the pool's TAIL. A keypoint is defined by the
+         two-segment fit as the break between a steep reach ABOVE and a
+         gentle reach BELOW, so a wall built AT it impounds only the steep
+         ground: measured on the reference property, the channel above
+         every keypoint climbed at 15-24% and a 2.5 m waterline reached
+         barely 10-15 m upstream. Yeomans' storage logic runs the other
+         way -- the keypoint is the highest ECONOMICAL storage point
+         BECAUSE the valley flattens and opens below it. So the anchor is
+         found by walking downstream from the keypoint to the first cell a
+         full reference height below it (_find_wall_site()), which puts the
+         waterline back at the keypoint's own elevation and the pool's tail
+         at the keypoint. A walk that runs out nominates NOTHING --
+         REASON_WALL_SITE_NOT_FOUND_DOWNSTREAM -- rather than falling back
+         to a shorter wall, and a wall site over the contributing-area
+         ceiling is disqualified with its own code
+         (REASON_WALL_SITE_EXCEEDS_CEILING).
 
-           a. KEYPOINT ANCHORS ARE EXEMPT FROM THE ON-PARCEL GATE. A
-              keypoint just outside the drawn line whose backwater grows
-              INTO the parcel is a real candidate — the dam would sit at
-              the property edge impounding on-parcel water, which is an
-              ordinary keyline outcome, not an anomaly. It is qualified by
-              the SAME clip-and-floor rule every other candidate gets:
-              delineate from the keypoint cell, clip to the boundary, and
+         THERE IS STILL NO SNAP, no nearest-eligible-cell search, and no
+         relocation of the keypoint itself: the keypoint stays exactly
+         where detection put it and is reported at that position; what
+         moved is where the STRUCTURE is understood to sit. Both positions
+         are carried, with wall_offset_downstream_m between them.
+
+         Two consequences of the anchor being a stem cell rather than a
+         mask cell:
+
+           a. KEYPOINT ANCHORS ARE EXEMPT FROM THE ON-PARCEL GATE. A wall
+              site just outside the drawn line whose backwater grows INTO
+              the parcel is a real candidate — the dam would sit at the
+              property edge impounding on-parcel water, which is an
+              ordinary keyline outcome, not an anomaly. Both directions
+              occur: an ON-parcel keypoint whose wall walks PAST the line,
+              and an off-parcel keypoint whose wall walks TOWARD the parcel
+              (the reference property's 6.29-acre keypoint is exactly the
+              second case, and the walk moves its candidate's ground onto
+              the parcel rather than off it). No new mechanism handles
+              either; it is qualified by the SAME clip-and-floor rule every
+              other candidate gets:
+              delineate from the wall site, clip to the boundary, and
               let min_water_zone_area_acres judge the ON-PARCEL REMAINDER.
               If only a few cells survive the clip, below_min_area drops it
               with the clipped acreage recorded. Such a candidate carries
@@ -1118,11 +1380,14 @@ def find_candidate_zones(
             'nominated_by': str,           # NOMINATED_BY_KEYPOINT / _ACCUMULATION
             'keypoint_id': int or None,    # family 1 only
             'valley_id': int or None,      # family 1 only
-            'keypoint_rowcol': (row, col) or None,
+            'keypoint_rowcol': (row, col) or None,   # the pool's TAIL
             'keypoint_point_utm': shapely Point or None,
+            'wall_offset_downstream_m': float,       # keypoint -> wall,
+                #   along-stem; 0.0 for family 2, whose anchor IS the wall
             'anchor_off_parcel': bool,
             'anchor_distance_outside_boundary_m': float,   # 0.0 when inside
-            'anchor_rowcol': (row, col),   # ALWAYS the keypoint's own cell
+            'anchor_rowcol': (row, col),   # the WALL SITE (family 1) or
+                #   the accumulation seed (family 2) -- never a snapped cell
             'anchor_point_utm': shapely Point,
             'anchor_elevation_m': float,   # RAW elevation at the anchor
             'level_pool': dict,            # measurements; NO VOLUME, ever
@@ -1227,7 +1492,7 @@ def find_candidate_zones(
                 return zone["id"]
         return None
 
-    def _build_candidate(anchor, provenance, keypoint=None):
+    def _build_candidate(anchor, provenance, keypoint=None, wall_offset_downstream_m=0.0):
         """Delineates, clips, bounds, trims and packages ONE candidate at
         `anchor`. Returns (zone_or_None, outcome_reason, flags)."""
         flags: list[str] = []
@@ -1249,11 +1514,18 @@ def find_candidate_zones(
         anchor_off_parcel = not (
             boundary_prepared.contains(anchor_point) or boundary_polygon_utm.touches(anchor_point)
         )
-        # The keypoint's own already-measured distance is preferred over a
-        # second computation of the same thing -- keypoint_detection.py
-        # measured it against the same boundary, and re-deriving it here
-        # would invite the two to drift.
-        if keypoint is not None and "distance_outside_boundary_m" in keypoint:
+        # MEASURED AT THE ANCHOR, which for a keypoint candidate is the WALL
+        # SITE and not the keypoint's own cell -- those are different places
+        # with different distances to the line, and reporting the keypoint's
+        # here would mislabel where the structure actually sits. The
+        # keypoint's own distance is still recorded, separately, on the
+        # nomination outcome. The one case where the keypoint's
+        # already-measured value is reused is when the anchor IS its cell
+        # (a zero-length walk), where re-deriving it would only invite the
+        # two measurements to drift.
+        if keypoint is not None and tuple(keypoint["rowcol"]) == anchor and (
+            "distance_outside_boundary_m" in keypoint
+        ):
             anchor_distance_outside = float(keypoint["distance_outside_boundary_m"])
         else:
             anchor_distance_outside = (
@@ -1362,15 +1634,22 @@ def find_candidate_zones(
             "nominated_by": provenance,
             "keypoint_id": int(keypoint["id"]) if keypoint is not None else None,
             "valley_id": int(keypoint["valley_id"]) if keypoint is not None else None,
-            # The keypoint's OWN position and the anchor position are
-            # carried separately even though they are now always the same
-            # cell: the pair is a stable consumer contract (a map draws
-            # both), and keeping both makes it explicit that no relocation
-            # happened rather than leaving it to be inferred.
+            # The keypoint's OWN position and the wall anchor are carried
+            # separately BECAUSE THEY ARE NOW GENUINELY DIFFERENT PLACES:
+            # the keypoint is the pool's tail, the anchor is where the wall
+            # stands, and wall_offset_downstream_m is the distance between
+            # them. A map must be able to draw the keypoint marker at the
+            # tail and the zone at the wall without implying they coincide.
             "keypoint_rowcol": tuple(keypoint["rowcol"]) if keypoint is not None else None,
             "keypoint_point_utm": keypoint["point_utm"] if keypoint is not None else None,
             "anchor_off_parcel": bool(anchor_off_parcel),
             "anchor_distance_outside_boundary_m": round(float(anchor_distance_outside), 2),
+            # How far downstream of its keypoint this candidate's wall sits.
+            # 0.0 for family 2, which has no keypoint and whose anchor IS
+            # the wall by definition. Carried so a map can draw the keypoint
+            # marker at the pool's TAIL and the zone at its WALL, honestly,
+            # rather than implying they are the same place.
+            "wall_offset_downstream_m": round(float(wall_offset_downstream_m), 2),
             "anchor_rowcol": anchor,
             "anchor_point_utm": anchor_point,
             "anchor_elevation_m": pool["anchor_elevation_m"],
@@ -1439,7 +1718,15 @@ def find_candidate_zones(
             "contributing_acres": float(keypoint["contributing_acres"]),
             "distance_outside_boundary_m": float(keypoint.get("distance_outside_boundary_m", 0.0)),
             "on_parcel": bool(keypoint.get("on_parcel", True)),
-            "anchor_rowcol": cell if on_grid else None,
+            # The WALL SITE, filled in by the walk below -- no longer the
+            # keypoint's own cell.
+            "anchor_rowcol": None,
+            "wall_offset_downstream_m": None,
+            "wall_drop_m": None,
+            "wall_walk_end_rowcol": None,
+            "wall_walk_end_reason": None,
+            "keypoint_elevation_m": None,
+            "anchor_elevation_m": None,
             "candidate_id": None,
             "outcome": None,
             "flags": [],
@@ -1450,21 +1737,66 @@ def find_candidate_zones(
             outcome["outcome"] = REASON_EMPTY_AFTER_BOUNDARY_CLIP
             continue
 
-        # The ONE nomination-mask gate a keypoint anchor is still subject
-        # to. On-parcel containment is explicitly NOT applied here (see the
-        # docstring); the ceiling is, because a pond on 20+ drainage acres
-        # silts in and needs engineered spillway capacity regardless of
-        # where the keypoint sits.
+        # The keypoint's OWN ceiling check, kept ahead of the walk. It is
+        # strictly redundant -- contributing area only grows downstream, so
+        # a keypoint over the ceiling guarantees a wall site over it too --
+        # but it is cheaper and it diagnoses more precisely: "this keypoint
+        # is on too much water" is a different sentence from "the wall this
+        # keypoint implies would be". On-parcel containment is still NOT
+        # applied to a keypoint anchor (see the docstring); the ceiling is.
         if float(flow_accumulation[cell[0], cell[1]]) > max_contributing_cells:
             outcome["outcome"] = REASON_KEYPOINT_EXCEEDS_CEILING
             continue
 
-        too_close = _too_close_candidate_id(cell)
+        # THE WALL-SITE WALK. The anchor is where a wall would stand, a
+        # full reference height BELOW the keypoint, so the pool it impounds
+        # backs up to the keypoint rather than starting there. See
+        # _find_wall_site() for why, and MAX_WALL_SEARCH_DOWNSTREAM_METERS
+        # for why a failed walk nominates nothing instead of falling back
+        # to a shorter wall.
+        wall = _find_wall_site(
+            dem,
+            cell,
+            flow_to_row,
+            flow_to_col,
+            flow_accumulation,
+            reference_height_meters=pool_reference_height_meters,
+            max_search_distance_meters=max_wall_search_downstream_meters,
+            max_contributing_cells=max_contributing_cells,
+        )
+        outcome["wall_drop_m"] = wall["drop_m"]
+        outcome["wall_walk_end_rowcol"] = wall["walk_end_rowcol"]
+        outcome["wall_walk_end_reason"] = wall["walk_end_reason"]
+        outcome["keypoint_elevation_m"] = wall["keypoint_elevation_m"]
+        if not wall["found"]:
+            outcome["outcome"] = REASON_WALL_SITE_NOT_FOUND_DOWNSTREAM
+            continue
+        if wall["exceeds_ceiling"]:
+            outcome["outcome"] = REASON_WALL_SITE_EXCEEDS_CEILING
+            outcome["anchor_rowcol"] = wall["anchor"]
+            outcome["wall_offset_downstream_m"] = wall["offset_downstream_m"]
+            outcome["anchor_elevation_m"] = wall["anchor_elevation_m"]
+            continue
+
+        anchor_cell = wall["anchor"]
+        outcome["anchor_rowcol"] = anchor_cell
+        outcome["wall_offset_downstream_m"] = wall["offset_downstream_m"]
+        outcome["anchor_elevation_m"] = wall["anchor_elevation_m"]
+
+        # SEPARATION IS ENFORCED AT THE WALL, not at the keypoint: the wall
+        # is where this candidate actually sits, and it is what the next
+        # candidate must keep clear of.
+        too_close = _too_close_candidate_id(anchor_cell)
         if too_close is not None:
             outcome["outcome"] = reason_too_close_to_candidate(too_close)
             continue
 
-        zone, reason, flags = _build_candidate(cell, NOMINATED_BY_KEYPOINT, keypoint=keypoint)
+        zone, reason, flags = _build_candidate(
+            anchor_cell,
+            NOMINATED_BY_KEYPOINT,
+            keypoint=keypoint,
+            wall_offset_downstream_m=wall["offset_downstream_m"],
+        )
         outcome["outcome"] = reason
         outcome["flags"] = flags
         if zone is not None:
@@ -1602,6 +1934,7 @@ def zones_to_geojson(zones: list[dict]) -> dict:
                 "keypoint_rowcol": list(z["keypoint_rowcol"]) if z["keypoint_rowcol"] else None,
                 "anchor_rowcol": list(z["anchor_rowcol"]),
                 "anchor_elevation_m": z["anchor_elevation_m"],
+                "wall_offset_downstream_m": z["wall_offset_downstream_m"],
                 "anchor_off_parcel": z["anchor_off_parcel"],
                 "anchor_distance_outside_boundary_m": z["anchor_distance_outside_boundary_m"],
                 "level_pool": z["level_pool"],
@@ -1888,11 +2221,14 @@ def _zone_narrative(
             "nominated_by": zone["nominated_by"],
             "keypoint_id": zone["keypoint_id"],
             "valley_id": zone["valley_id"],
-            # The anchor is ALWAYS the keypoint's own cell -- nothing is
-            # relocated -- so an off-parcel anchor is reported as the real
-            # thing it is: a dam that would sit at the property edge,
-            # impounding the on-parcel water this candidate's acreage
+            # Nothing is snapped, so an off-parcel anchor is reported as
+            # the real thing it is: a dam that would sit at the property
+            # edge, impounding the on-parcel water this candidate's acreage
             # measures.
+            # The wall sits this far DOWNSTREAM of the keypoint; the
+            # keypoint is where the water backs up to, not where the
+            # structure stands.
+            "wall_offset_downstream_ft": _feet(zone["wall_offset_downstream_m"]),
             "anchor_off_parcel": bool(zone["anchor_off_parcel"]),
             "anchor_distance_outside_boundary_ft": _feet(
                 zone["anchor_distance_outside_boundary_m"]
@@ -2017,6 +2353,12 @@ def build_narrative_data(
                     # remainder too small to survive the floor).
                     "on_parcel": bool(outcome["on_parcel"]),
                     "distance_outside_boundary_ft": _feet(outcome["distance_outside_boundary_m"]),
+                    # The wall-site walk's own evidence, so a failed
+                    # nomination says WHERE the walk died and how much
+                    # height it managed rather than only that it failed.
+                    "wall_offset_downstream_ft": _feet(outcome["wall_offset_downstream_m"]),
+                    "wall_drop_ft": _feet(outcome["wall_drop_m"]),
+                    "wall_walk_end_reason": outcome["wall_walk_end_reason"],
                     "flags": list(outcome["flags"]),
                 }
                 for outcome in diagnostics.get("keypoint_outcomes", [])

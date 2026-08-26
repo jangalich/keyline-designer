@@ -65,6 +65,7 @@ it before the change must still hold after it, unretuned. They do.
 """
 
 import math
+import os
 
 import numpy as np
 
@@ -991,11 +992,26 @@ for _token in ("np.linalg.eigh", "eigenvectors", "eigenvalues", "polyfit", "scat
         f"the total-least-squares machinery must be gone, not merely unreferenced -- found {_token!r}"
     )
 assert "valley_axis_unit" not in _module_source, "the fitted-axis output key is retired too"
+# The TRANSITIONAL reconstruction of that fit is gone too. It existed for
+# exactly one reference-property acceptance run, which reported "agrees" on
+# all six anchors -- the stations were on the channel and the numbers were
+# true. A measuring instrument pointed at a deleted design has no reason to
+# outlive the measurement, and leaving it would re-import a retired
+# algorithm into a live diagnostic.
+assert not hasattr(_vlp, "VALLEY_AXIS_WALK_CELLS_RETIRED"), (
+    "the retired fit's half-window constant existed only for the transitional diagnostic"
+)
+_diag_source = open(os.path.join(os.path.dirname(_vlp.__file__), "diagnose_water_zone_mask.py")).read()
+for _token in ("_report_retired_axis_comparison", "VALLEY_AXIS_WALK_CELLS_RETIRED", "np.linalg.eigh"):
+    assert _token not in _diag_source, (
+        f"the transitional straight-fit comparison must be gone from the diagnostic -- found {_token!r}"
+    )
 print(
     "Test 12 -- contract: every station on every fixture carries a status in "
     f"{{{STATION_MEASURED}, {STATION_UNREACHABLE_STEM_END}}} with along_stem_distance_m and stem_rowcol; "
     "unreachable never reports a width. fit_valley_axis, VALLEY_AXIS_WALK_CELLS, the eigen-decomposition "
-    "and the valley_axis_unit key exist nowhere in the module."
+    "and the valley_axis_unit key exist nowhere in the module -- and the transitional reconstruction of "
+    "the retired fit, having done its one job, is gone from the diagnostic too."
 )
 
 

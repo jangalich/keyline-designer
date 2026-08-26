@@ -146,11 +146,39 @@ _LOGGER = logging.getLogger(__name__)
 # spillway calculation, and a geotechnical look at the abutments -- none
 # of which this pipeline has or claims.
 #
-# 2.5 m is chosen as a plausible small-farm pond/dam wall scale (roughly
-# 8 ft), high enough that the backwater it traces is a real landform
-# signal rather than DEM noise on a 5 m grid, and low enough that it does
-# not flood half a gentle parcel. NOT validated beyond the reference
-# property. CONFIGURABLE.
+# THE VALUE IS BRACKETED BY PUBLISHED THRESHOLDS rather than merely
+# assumed. It has not moved, and every hand-derived test fixture in
+# test_valley_level_pool.py is built on it; what follows is the sourcing
+# that was previously missing.
+#
+#   LOWER BOUND, ~0.9 m. NRCS Conservation Practice Standard 378 (Pond)
+#   defines an embankment pond as one impounding at least 3 ft of water
+#   against the embankment. Below that the survey would not be measuring
+#   an embankment pond at all, so a reference height under ~0.9 m would
+#   rank sites against a structure outside the practice being surveyed.
+#   Independently, ~0.9 m is roughly 25x the vertical RMSE of the USGS
+#   3DEP LiDAR this pipeline's DEM comes from -- below it the waterline
+#   would be competing with the elevation data's own noise.
+#
+#   UPPER BOUND, ~4.6 m. Pennsylvania 25 Pa. Code Ch. 105 requires a dam
+#   permit once depth at the upstream toe exceeds 15 ft (or the drainage
+#   area exceeds 100 acres, or capacity exceeds 50 acre-feet). At 2.5 m
+#   (~8.2 ft) the reference stays well inside the unregulated farm-pond
+#   envelope, which is the scale this survey is about: it simulates a farm
+#   pond, not a regulated dam. THIS CITATION IS JURISDICTION-SPECIFIC to
+#   the reference property -- NRCS above is the national primary, and a
+#   property in another state needs its own threshold checked before this
+#   bound means anything there.
+#
+#   THE MIDDLE. Typical farm-pond design depths run roughly 6-12 ft, and
+#   Yeomans' own built keyline dams generally ran larger than that. So
+#   2.5 m sits inside common practice and is CONSERVATIVE relative to the
+#   tradition this feature is modelled on -- it will under-report, rather
+#   than over-report, what a site could hold.
+#
+# Still NOT validated against a real built pond on this or any property:
+# the bracket says the number is defensible, not that it is calibrated.
+# CONFIGURABLE.
 POOL_REFERENCE_HEIGHT_METERS = 2.5
 
 # How far to either side of the anchor the dam-axis search walks looking
@@ -230,15 +258,6 @@ STATION_UNREACHABLE_STEM_END = "unreachable_stem_end"
 # start being cut corners; narrow it to 1 and the 45 degree quantization
 # comes back. NOT validated beyond the reference property. CONFIGURABLE.
 STEM_DIRECTION_WINDOW_CELLS = 2
-
-# The RETIRED straight-line fit's own half-window, kept as a NAMED NUMBER
-# for one purpose only: diagnose_water_zone_mask.py reconstructs that fit
-# locally, next to the stem's own bearing, so the reference-property
-# acceptance run can confirm or refute the rotated-axis diagnosis that
-# motivated deleting it. Nothing in this module reads it, and the fit
-# itself does not exist here any more. DELETE THIS ALONG WITH THAT
-# TRANSITIONAL DIAGNOSTIC once the acceptance run is done.
-VALLEY_AXIS_WALK_CELLS_RETIRED = 4
 
 
 def rowcol_for_xy(dem: dict, x: float, y: float) -> Optional[tuple[int, int]]:

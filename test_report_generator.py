@@ -400,7 +400,7 @@ from report_generator import (  # noqa: E402
     _format_water_candidate_zones_summary,
 )
 
-# One keypoint-nominated candidate (with a snap) and one
+# One keypoint-nominated candidate and one
 # accumulation-nominated candidate, plus a keypoint that produced nothing
 # -- so the prose exercises provenance, flags, the level-pool block and the
 # unproductive-keypoint reason-code line in a single fixture.
@@ -414,6 +414,9 @@ def _water_zone_block(zone_id, nominated_by, keypoint_id, valley_id, off_parcel,
             "valley_id": valley_id,
             "anchor_off_parcel": off_parcel,
             "anchor_distance_outside_boundary_ft": 24.6 if off_parcel else 0.0,
+            # The wall sits below the keypoint; family 2's anchor IS its
+            # wall, so it carries 0.0.
+            "wall_offset_downstream_ft": 410.1 if nominated_by == "keypoint" else 0.0,
         },
         "flags": flags,
         "location": {"position_in_parcel": "southwest", "elevation_percentile_of_parcel": 22.7},
@@ -501,6 +504,16 @@ assert "3 detected keypoint(s)" in _water_prose
 assert "in the parcel's southwest" in _water_prose and "22.7 elevation percentile" in _water_prose
 assert "1.9 acre(s)" in _water_prose and "20.0-acre siltation/peak-flow" in _water_prose
 assert "nominated from keypoint 1 (valley 0)" in _water_prose
+# THE KEYPOINT IS THE POOL'S TAIL. The prose must place the wall
+# downstream of it, or a reader puts the structure on the keypoint marker.
+assert "anchored 410.1 ft DOWNSTREAM of it" in _water_prose, (
+    "a keypoint candidate must state how far below its keypoint the wall stands"
+)
+assert "the keypoint is the upstream tail of the water it would hold" in _water_prose
+assert "such an anchor is already a wall site" in _water_prose, (
+    "family 2 has no keypoint above it, and the prose must say so rather than reporting a bare 0 ft "
+    "offset that reads like a coincidence"
+)
 assert "24.6 ft" in _water_prose and "OUTSIDE the drawn boundary" in _water_prose, (
     "an off-parcel anchor must be stated as a dam at the property edge, with its measured distance"
 )

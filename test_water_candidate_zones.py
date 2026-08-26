@@ -75,7 +75,8 @@ from valley_delineation import (
     compute_flow_direction,
     fill_depressions,
 )
-from valley_level_pool import POOL_REFERENCE_HEIGHT_METERS
+from keypoint_detection import build_upstream_map
+from valley_level_pool import POOL_REFERENCE_HEIGHT_METERS, delineate_level_pool
 from water_candidate_zones import (
     FLAG_ANCHOR_OFF_PARCEL,
     FLAG_DAM_BAND_CROSSES_MAJOR_DRAINAGE_LEFT,
@@ -84,6 +85,7 @@ from water_candidate_zones import (
     FLAG_TRUNCATED_BY_CAP,
     MAX_SERVICE_DISTANCE_METERS,
     MAX_VALLEY_CONTRIBUTING_AREA_ACRES,
+    MAX_WALL_SEARCH_DOWNSTREAM_METERS,
     MAX_WATER_ZONE_AREA_ACRES,
     MIN_BOUNDARY_SETBACK_METERS,
     MIN_WATER_SEED_SEPARATION_METERS,
@@ -93,6 +95,8 @@ from water_candidate_zones import (
     REASON_BELOW_MIN_AREA,
     REASON_KEYPOINT_EXCEEDS_CEILING,
     REASON_NOMINATED,
+    REASON_WALL_SITE_EXCEEDS_CEILING,
+    REASON_WALL_SITE_NOT_FOUND_DOWNSTREAM,
     WATER_ACCUMULATION_SEED_BUDGET,
     WATER_ZONE_CANOPY_BUFFER_METERS,
     compute_water_eligible_cells,
@@ -199,6 +203,7 @@ assert WATER_ACCUMULATION_SEED_BUDGET == 3
 assert MIN_WATER_SEED_SEPARATION_METERS == 30.0
 assert POOL_REFERENCE_HEIGHT_METERS == 2.5
 assert MAX_SERVICE_DISTANCE_METERS == 800.0
+assert MAX_WALL_SEARCH_DOWNSTREAM_METERS == 150.0
 assert WATER_ZONE_CANOPY_BUFFER_METERS == 3.048
 
 # --- RETIRED NAMES: asserted absent, grep-style, so a reintroduction ---
@@ -664,7 +669,7 @@ print(
 
 
 # =====================================================================
-# NOMINATION FIXTURE -- four parallel V-valleys on one 40x56 grid at 5 m.
+# NOMINATION FIXTURE -- four parallel V-valleys on one 60x56 grid at 5 m.
 #
 #     z(r, c) = 100.0 - 0.1 * r + 1.0 * min(|c-6|, |c-20|, |c-34|, |c-48|)
 #
@@ -673,19 +678,21 @@ print(
 # 7 m above the channel floors -- far higher than the 2.5 m reference
 # waterline, so a pool on one channel can never reach another.
 #
+# THE GRID IS 60 ROWS DEEP because every keypoint now anchors at its WALL
+# SITE, a full 2.5 m below it: at 0.1 m per 5 m cell that is a 25-cell,
+# 125 m walk downstream, and the channel has to be long enough to contain
+# it. A keypoint at row 20 therefore walls at row 45.
+#
 # The FOURTH channel exists solely so the off-parcel keypoint below has a
 # drainage to itself: on a shared channel it would be rejected by the 30 m
-# seed-separation rule (the upstream candidate's own backwater reaches
-# within 17.5 m of it), which would test the separation rule a second time
-# instead of testing off-parcel anchoring.
+# seed-separation rule, which would test the separation rule a second time
+# instead of testing off-parcel nomination.
 #
-# THE BOUNDARY DELIBERATELY EXCLUDES THE BOTTOM FOUR ROWS (it ends at row
-# 36), so an off-parcel keypoint anchor is available without a second
-# fixture. The bottom is the DOWNSTREAM end on this fixture, which is the
-# side that matters: a pool grows UPSTREAM, so an anchor just downstream
-# of the line impounds water that lies INSIDE the parcel. (An anchor just
-# UPSTREAM of the line would flood only off-parcel ground and is correctly
-# dropped -- that is not the design case.)
+# THE BOUNDARY EXCLUDES THE TOP FOUR ROWS (it starts at row 4), which is
+# now the useful side: the wall walk runs DOWNSTREAM, so an off-parcel
+# keypoint above the line has its wall -- and therefore its candidate's
+# ground -- walk INTO the parcel. That is the reference property's
+# 6.29-acre case, and it is why the walk helps there rather than hurting.
 #
 # Five synthetic keypoints, built so that ID ORDER IS NOT CATCHMENT ORDER
 # (keypoint_detection.py assigns ids by slope_drop_pct descending, which
@@ -693,27 +700,30 @@ print(
 #
 #   id  rowcol     catchment   what it is here
 #   --  --------   ---------   ---------------------------------------
-#    0  (34,  6)      3.0 ac   30 m DOWNSTREAM of keypoint 1, on the same
+#    0  (24,  6)      3.0 ac   20 m DOWNSTREAM of keypoint 1, on the same
 #                              channel -- the "too close" half of the pair
-#    1  (30,  6)      8.0 ac   the pair's winner on catchment
-#    2  (30, 34)      6.0 ac   plainly on-parcel; its own cell is the
-#                              anchor, with no snap of any kind
-#    3  (37, 48)      4.0 ac   OFF-PARCEL (row 37, 7.5 m below the boundary's
-#                              own bottom edge) on the FOURTH channel, which
-#                              no other keypoint uses -- the
-#                              dam-at-the-property-edge case
-#    4  (30, 20)      7.0 ac   plainly on-parcel
+#    1  (20,  6)      8.0 ac   the pair's winner on catchment
+#    2  (20, 34)      6.0 ac   plainly on-parcel
+#    3  ( 2, 48)      4.0 ac   OFF-PARCEL (row 2, 7.5 m above the boundary's
+#                              own top edge) on the FOURTH channel, which no
+#                              other keypoint uses -- its WALL walks INTO
+#                              the parcel
+#    4  (20, 20)      7.0 ac   plainly on-parcel
 #
-# EXPECTED OUTCOMES, in catchment order (8.0, 7.0, 6.0, 4.0, 3.0):
-#   keypoint 1 -> nominated, candidate 0, anchored at (30, 6) -- ITS OWN CELL
-#   keypoint 4 -> nominated, candidate 1, anchored at (30, 20)
-#   keypoint 2 -> nominated, candidate 2, anchored at (30, 34)
-#   keypoint 3 -> anchored at its OWN off-parcel cell (37, 48); its pool is
-#                 clipped to the boundary and judged by the area floor. It
-#                 carries anchor_off_parcel with the distance keypoint
-#                 detection itself measured.
-#   keypoint 0 -> too_close_to_candidate_0 (20 m from candidate 0's
-#                 footprint, inside the 30 m separation)
+# EXPECTED OUTCOMES, in catchment order (8.0, 7.0, 6.0, 4.0, 3.0). Every
+# wall sits 25 cells / 125.0 m downstream of its keypoint with exactly
+# 2.5 m of drop:
+#   keypoint 1 -> nominated, candidate 0, WALL at (45,  6)
+#   keypoint 4 -> nominated, candidate 1, WALL at (45, 20)
+#   keypoint 2 -> nominated, candidate 2, WALL at (45, 34)
+#   keypoint 3 -> nominated, candidate 3, WALL at (27, 48) -- an OFF-parcel
+#                 keypoint whose wall is comfortably ON the parcel, so the
+#                 walk moved its ground onto the parcel rather than off it.
+#                 Only the pool's tail (row 3) is clipped away.
+#   keypoint 0 -> too_close_to_candidate_0: its own wall at (49, 6) is 20 m
+#                 from candidate 0's footprint, inside the 30 m separation.
+#                 SEPARATION BINDS AT THE WALLS, which is where the
+#                 structures would stand.
 #
 # IF ORDERING WERE BY ID (or by slope drop) instead of by catchment,
 # keypoint 0 would be delineated FIRST and keypoint 1 would be the one
@@ -723,7 +733,7 @@ print(
 # NOTHING IS CAPPED: all five keypoints are attempted, and family 2 then
 # adds up to WATER_ACCUMULATION_SEED_BUDGET survivors of its own.
 # =====================================================================
-_nom_n = 40
+_nom_n = 60
 _nom_cols = 56
 _nom_array = np.zeros((_nom_n, _nom_cols), dtype=np.float64)
 for _r in range(_nom_n):
@@ -732,9 +742,9 @@ for _r in range(_nom_n):
             abs(_c - 6), abs(_c - 20), abs(_c - 34), abs(_c - 48)
         )
 NOM_DEM = _dem(_nom_array)
-# Boundary ends at row 36 (y = 4500000 - 180), leaving rows 36-39 -- the
-# downstream tail -- off-parcel.
-NOM_BOUNDARY = box(500000.0, 4500000.0 - 36 * 5.0, 500000.0 + _nom_cols * 5.0, 4500000.0)
+# Boundary starts at row 4 (y = 4500000 - 20), leaving rows 0-3 -- the
+# upstream head -- off-parcel.
+NOM_BOUNDARY = box(500000.0, 4500000.0 - _nom_n * 5.0, 500000.0 + _nom_cols * 5.0, 4500000.0 - 20.0)
 NOM_PA = [
     {
         "id": 0,
@@ -767,27 +777,27 @@ def _kp(kp_id, valley_id, rowcol, contributing_acres):
 
 
 NOM_KEYPOINTS = [
-    _kp(0, 0, (34, 6), 3.0),
-    _kp(1, 0, (30, 6), 8.0),
-    _kp(2, 2, (30, 34), 6.0),
-    _kp(3, 3, (37, 48), 4.0),
-    _kp(4, 1, (30, 20), 7.0),
+    _kp(0, 0, (24, 6), 3.0),
+    _kp(1, 0, (20, 6), 8.0),
+    _kp(2, 2, (20, 34), 6.0),
+    _kp(3, 3, (2, 48), 4.0),
+    _kp(4, 1, (20, 20), 7.0),
 ]
 # Preconditions the expectations above depend on.
 assert NOM_KEYPOINTS[3]["on_parcel"] is False, "keypoint 3 must genuinely sit off-parcel"
-# Row 37's center sits at y = origin - 37.5 * 5 = 187.5 m below the grid
-# top; the boundary's own bottom edge is 180 m below it. So the anchor is
-# 7.5 m outside the drawn line -- comfortably inside keypoint_detection's
-# own 25 m KEYPOINT_BOUNDARY_MARGIN_METERS, which is what bounds how far
-# off an anchor can ever be.
+# Row 2's center sits 12.5 m below the grid top; the boundary's own top
+# edge is 20 m below it. So the KEYPOINT is 7.5 m outside the drawn line --
+# comfortably inside keypoint_detection's own 25 m
+# KEYPOINT_BOUNDARY_MARGIN_METERS, which is what bounds how far off a
+# keypoint can ever be.
 assert abs(NOM_KEYPOINTS[3]["distance_outside_boundary_m"] - 7.5) < 1e-6, (
     NOM_KEYPOINTS[3]["distance_outside_boundary_m"]
 )
-assert _nom_mask[37, 48] == False, (  # noqa: E712
+assert _nom_mask[2, 48] == False, (  # noqa: E712
     "precondition: the off-parcel keypoint's own cell is NOT in the nomination mask -- which is exactly "
     "the point: keypoint anchors are EXEMPT from the on-parcel gate"
 )
-assert _nom_mask[30, 20] and _nom_mask[30, 6] and _nom_mask[30, 34]
+assert _nom_mask[20, 20] and _nom_mask[20, 6] and _nom_mask[20, 34]
 
 _nom_diag: dict = {}
 _nom_zones = find_candidate_zones(
@@ -810,15 +820,31 @@ assert len(_nom_diag["keypoint_outcomes"]) == len(NOM_KEYPOINTS), (
 )
 
 assert _outcomes[1]["outcome"] == REASON_NOMINATED and _outcomes[1]["candidate_id"] == 0
-assert _outcomes[1]["anchor_rowcol"] == (30, 6), "the anchor IS the keypoint's own cell"
+assert _outcomes[1]["anchor_rowcol"] == (45, 6), (
+    "the anchor is the WALL SITE a full reference height BELOW the keypoint, not the keypoint's cell"
+)
+assert _outcomes[1]["keypoint_rowcol"] == (20, 6), "the keypoint is retained as the pool's TAIL"
 assert _outcomes[4]["outcome"] == REASON_NOMINATED and _outcomes[4]["candidate_id"] == 1
-assert _outcomes[4]["anchor_rowcol"] == (30, 20)
+assert _outcomes[4]["anchor_rowcol"] == (45, 20)
 assert _outcomes[2]["outcome"] == REASON_NOMINATED and _outcomes[2]["candidate_id"] == 2
-assert _outcomes[2]["anchor_rowcol"] == (30, 34)
+assert _outcomes[2]["anchor_rowcol"] == (45, 34)
+
+# Every one of those walks ran the full 25 cells and found the full drop --
+# there is no partial-height fallback to hide behind.
+for _kid in (1, 4, 2):
+    assert _outcomes[_kid]["wall_offset_downstream_m"] == 125.0, _outcomes[_kid]
+    assert _outcomes[_kid]["wall_drop_m"] == POOL_REFERENCE_HEIGHT_METERS, _outcomes[_kid]
+    assert _outcomes[_kid]["wall_walk_end_reason"] == "reached_full_drop", _outcomes[_kid]
 
 assert _outcomes[0]["outcome"] == reason_too_close_to_candidate(0), _outcomes[0]
 assert _outcomes[0]["candidate_id"] is None
-assert _outcomes[0]["anchor_rowcol"] == (34, 6), "the seed was found; the SEPARATION rule stopped it"
+assert _outcomes[0]["anchor_rowcol"] == (49, 6), (
+    "keypoint 0's OWN wall site was found at (49, 6) -- 20 m from candidate 0's wall at (45, 6). "
+    "The SEPARATION rule stopped it, and it binds at the WALLS, where the structures would stand"
+)
+assert _outcomes[0]["wall_walk_end_reason"] == "reached_full_drop", (
+    "the rejection is a separation rejection, NOT a failed walk -- the two must never be confused"
+)
 
 # NO CAP ANYWHERE, and no snap anywhere.
 _all_outcomes = [o["outcome"] for o in _nom_diag["keypoint_outcomes"]]
@@ -827,68 +853,112 @@ assert not any("candidate_cap_reached" in str(o) for o in _all_outcomes), (
 )
 assert not any("snap" in str(o) for o in _all_outcomes), "no snap outcome exists any more"
 
-# Every keypoint-nominated zone anchors on its own keypoint cell -- the
-# structural statement that no relocation happened.
+# Every keypoint-nominated zone anchors on the WALL SITE below its
+# keypoint, and carries BOTH positions -- the structural statement that the
+# keypoint is the pool's tail and the anchor is where the wall stands.
 for _z in _nom_zones:
     if _z["nominated_by"] == NOMINATED_BY_KEYPOINT:
-        assert _z["anchor_rowcol"] == _z["keypoint_rowcol"], (
-            f"candidate {_z['id']}: the anchor must BE the keypoint's own cell, no relocation"
+        _kr, _kc = _z["keypoint_rowcol"]
+        _ar, _ac = _z["anchor_rowcol"]
+        assert (_ar, _ac) != (_kr, _kc), (
+            f"candidate {_z['id']}: the anchor must be the wall site BELOW the keypoint"
         )
-        assert _z["anchor_point_utm"].equals(_z["keypoint_point_utm"])
+        assert _ac == _kc and _ar == _kr + 25, (
+            f"candidate {_z['id']}: the wall must sit downstream on the SAME channel, got {(_ar, _ac)}"
+        )
+        assert _z["wall_offset_downstream_m"] == 125.0, _z["wall_offset_downstream_m"]
+        assert not _z["anchor_point_utm"].equals(_z["keypoint_point_utm"]), (
+            "the two positions are carried separately BECAUSE they are different places"
+        )
+        # The drop between them is exactly the reference height: the walk
+        # stops at the FIRST cell a full POOL_REFERENCE_HEIGHT_METERS below
+        # the keypoint, so the pool's water surface just reaches its tail.
+        assert abs(
+            float(_nom_array[_kr, _kc]) - float(_nom_array[_ar, _ac]) - POOL_REFERENCE_HEIGHT_METERS
+        ) < 1e-9, _z
+        assert _z["level_pool"]["waterline_elevation_m"] == round(
+            float(_nom_array[_kr, _kc]), 3
+        ), "the waterline lands ON the keypoint -- that is what makes the keypoint the TAIL"
 
 print(
     "Test 1 -- nomination reason codes: keypoints are processed in CATCHMENT order "
-    f"{_order} (not id/slope-drop order); keypoint 1 (8.0 ac) wins the too-close pair and keypoint 0 "
-    f"(3.0 ac, 20 m away) is rejected with '{_outcomes[0]['outcome']}'; every keypoint-nominated "
-    "candidate anchors on the keypoint's OWN cell (no snap, no relocation); all "
+    f"{_order} (not id/slope-drop order); every keypoint-nominated candidate anchors on the WALL SITE "
+    f"{_nom_zones[0]['wall_offset_downstream_m']} m downstream of its keypoint, with the full "
+    f"{POOL_REFERENCE_HEIGHT_METERS} m of drop and the waterline landing back ON the keypoint (the pool's "
+    f"TAIL); keypoint 1 (8.0 ac) wins the too-close pair and keypoint 0 (3.0 ac) is rejected with "
+    f"'{_outcomes[0]['outcome']}' -- measured WALL-to-wall at {_outcomes[0]['anchor_rowcol']} vs "
+    f"{_outcomes[1]['anchor_rowcol']}, not keypoint-to-keypoint; no snap, no relocation; all "
     f"{len(NOM_KEYPOINTS)} keypoints were attempted -- nothing was capped."
 )
 
 
 # =====================================================================
-# Test 6 -- OFF-PARCEL ANCHORING.
+# Test 6 -- AN OFF-PARCEL KEYPOINT, AND WHAT THE WALL WALK DOES TO IT.
 #
 # Three cases, all resolved by the SAME clip-and-floor rule rather than by
 # any relocation:
-#   a. keypoint 3 sits 12.5 m outside the drawn boundary on the middle
-#      channel. It delineates from its OWN cell, its pool is clipped to
-#      the boundary, and enough on-parcel ground survives the floor -- so
-#      it becomes a candidate carrying anchor_off_parcel and the distance
-#      keypoint detection itself measured. The waterline still references
-#      the TRUE anchor's elevation.
-#   b. a second fixture where the same off-parcel keypoint's on-parcel
-#      remainder is tiny: it drops with below_min_area, and the acreage
-#      that was judged is the CLIPPED acreage.
+#   a. keypoint 3 sits 7.5 m ABOVE the drawn boundary's top edge on the
+#      fourth channel. Its wall walks 125 m DOWNSTREAM, landing at (27, 48)
+#      comfortably ON the parcel -- so anchor_off_parcel is FALSE even
+#      though the keypoint is off-parcel. off-parcel status follows the
+#      WALL, because the wall is where the structure would stand. What the
+#      boundary clips is the pool's TAIL (rows 0-3), which is exactly what
+#      truncated_by_boundary now means for this family. The waterline still
+#      references the TRUE anchor's elevation, and lands back on the
+#      keypoint.
+#      (The converse -- an on-parcel keypoint whose wall walks OFF the
+#      parcel, which is where anchor_off_parcel does fire -- is Test 16a;
+#      the on-parcel-gain argument is Test 16b.)
+#   b. the same keypoint with the floor raised above what survives the
+#      clip: it drops with below_min_area, and the acreage that was judged
+#      is the CLIPPED acreage.
 #   c. a keypoint whose own cell exceeds the contributing-area ceiling --
 #      the one nomination-mask gate a keypoint IS subject to -- reports
-#      keypoint_exceeds_ceiling.
+#      keypoint_exceeds_ceiling, and reports it BEFORE any walk happens, so
+#      the diagnosis names the keypoint rather than the wall.
 # =====================================================================
 _off_zone = next((z for z in _nom_zones if z["keypoint_id"] == 3), None)
 assert _outcomes[3]["outcome"] == REASON_NOMINATED, (
     f"TEST 6a: the off-parcel keypoint must nominate, got '{_outcomes[3]['outcome']}'"
 )
 assert _off_zone is not None
-assert _off_zone["anchor_rowcol"] == (37, 48), "TEST 6a: anchored on its OWN off-parcel cell"
-assert _off_zone["anchor_off_parcel"] is True
-assert FLAG_ANCHOR_OFF_PARCEL in _off_zone["flags"]
-assert _off_zone["anchor_distance_outside_boundary_m"] == 7.5, _off_zone
-assert _off_zone["anchor_rowcol"] not in _off_zone["cells"], (
-    "TEST 6a: the off-parcel anchor itself is clipped away -- the candidate IS the on-parcel remainder"
+assert _off_zone["keypoint_rowcol"] == (2, 48), "TEST 6a: the off-parcel keypoint is retained as the tail"
+assert _off_zone["anchor_rowcol"] == (27, 48), (
+    "TEST 6a: the wall walked 25 cells downstream, INTO the parcel"
 )
-assert all(r < 36 for r, _c in _off_zone["cells"]), "every retained cell must be on-parcel"
+assert _off_zone["wall_offset_downstream_m"] == 125.0
+assert _off_zone["anchor_off_parcel"] is False, (
+    "TEST 6a: off-parcel status follows the WALL, not the keypoint -- the structure would stand at "
+    "(27, 48), which is on the parcel"
+)
+assert FLAG_ANCHOR_OFF_PARCEL not in _off_zone["flags"]
+assert _off_zone["anchor_distance_outside_boundary_m"] == 0.0, _off_zone
+assert _off_zone["anchor_rowcol"] in _off_zone["cells"], (
+    "TEST 6a: the anchor is on-parcel, so it survives the clip"
+)
+# What the boundary took is the pool's TAIL -- the off-parcel head rows.
 assert _off_zone["truncated_by_boundary"] is True
+assert FLAG_TRUNCATED_BY_BOUNDARY in _off_zone["flags"]
+assert all(r >= 4 for r, _c in _off_zone["cells"]), "every retained cell must be on-parcel"
+assert min(r for r, _c in _off_zone["cells"]) == 4, (
+    "TEST 6a: the clip bites at the boundary's own first row -- the pool really did reach off-parcel "
+    "ground and really was cut there"
+)
 # The waterline references the TRUE anchor's raw elevation, not some
-# boundary-adjacent stand-in's.
-assert _off_zone["anchor_elevation_m"] == round(float(_nom_array[37, 48]), 3), (
-    "TEST 6a: the waterline must reference the real keypoint cell's elevation"
+# boundary-adjacent stand-in's -- and lands exactly on the keypoint.
+assert _off_zone["anchor_elevation_m"] == round(float(_nom_array[27, 48]), 3), (
+    "TEST 6a: the waterline must reference the real WALL cell's elevation"
 )
 assert _off_zone["level_pool"]["waterline_elevation_m"] == round(
-    float(_nom_array[37, 48]) + POOL_REFERENCE_HEIGHT_METERS, 3
+    float(_nom_array[27, 48]) + POOL_REFERENCE_HEIGHT_METERS, 3
+)
+assert _off_zone["level_pool"]["waterline_elevation_m"] == round(float(_nom_array[2, 48]), 3), (
+    "TEST 6a: and that waterline is the keypoint's own elevation -- the keypoint is the TAIL"
 )
 _off_acres = _off_zone["polygon_utm"].area / SQUARE_METERS_PER_ACRE
 assert _off_acres >= MIN_WATER_ZONE_AREA_ACRES
 
-# (b) the same anchor, with the floor raised above what survives the clip.
+# (b) the same keypoint, with the floor raised above what survives the clip.
 _off_b_diag: dict = {}
 _off_b = find_candidate_zones(
     NOM_DEM, NOM_PA, NOM_BOUNDARY,
@@ -900,32 +970,41 @@ _off_b = find_candidate_zones(
 )
 assert _off_b == [], "TEST 6b: too little on-parcel ground must drop the candidate"
 assert _off_b_diag["keypoint_outcomes"][0]["outcome"] == REASON_BELOW_MIN_AREA, _off_b_diag
-assert FLAG_ANCHOR_OFF_PARCEL in _off_b_diag["keypoint_outcomes"][0]["flags"], (
-    "the off-parcel flag is recorded even on a dropped nomination -- it explains the drop"
+assert FLAG_TRUNCATED_BY_BOUNDARY in _off_b_diag["keypoint_outcomes"][0]["flags"], (
+    "the clip flag is recorded even on a dropped nomination -- it explains the drop"
 )
-assert FLAG_TRUNCATED_BY_BOUNDARY in _off_b_diag["keypoint_outcomes"][0]["flags"]
+assert _off_b_diag["keypoint_outcomes"][0]["wall_offset_downstream_m"] == 125.0, (
+    "TEST 6b: the walk still ran and is still reported -- the drop happened AFTER it, at the floor"
+)
 
 # (c) a keypoint over the contributing-area ceiling.
-_ceil_kp = dict(_kp(7, 0, (30, 20), 5.0))
+_ceil_kp = dict(_kp(7, 0, (20, 20), 5.0))
 _ceil_diag: dict = {}
 _ceil_zones = find_candidate_zones(
     NOM_DEM, NOM_PA, NOM_BOUNDARY,
     keypoints=[_ceil_kp],
     filled=_nom_filled, flow_to_row=_nom_ftr, flow_to_col=_nom_ftc, flow_accumulation=_nom_acc,
-    max_valley_contributing_area_acres=float(_nom_acc[30, 20]) * cell_area_acres(NOM_DEM) / 2.0,
+    max_valley_contributing_area_acres=float(_nom_acc[20, 20]) * cell_area_acres(NOM_DEM) / 2.0,
     accumulation_seed_budget=0,
     diagnostics=_ceil_diag,
 )
 assert _ceil_zones == []
 assert _ceil_diag["keypoint_outcomes"][0]["outcome"] == REASON_KEYPOINT_EXCEEDS_CEILING, _ceil_diag
+assert _ceil_diag["keypoint_outcomes"][0]["wall_offset_downstream_m"] is None, (
+    "TEST 6c: the keypoint's own ceiling is checked BEFORE the walk -- no walk was attempted, and the "
+    "sentinel says so rather than reporting a fabricated 0.0"
+)
 print(
-    f"Test 6 -- off-parcel anchoring: keypoint 3 sits {_off_zone['anchor_distance_outside_boundary_m']} m "
-    f"outside the line, delineates from its OWN cell (waterline referenced to that cell's "
-    f"{_off_zone['anchor_elevation_m']} m), and its clipped on-parcel remainder of {_off_acres:.4f} ac "
-    f"clears the {MIN_WATER_ZONE_AREA_ACRES} ac floor -- a real dam-at-the-property-edge candidate, "
-    f"flagged anchor_off_parcel. Raising the floor above that remainder drops it with "
-    f"'{REASON_BELOW_MIN_AREA}' on the CLIPPED acreage; a keypoint over the contributing-area ceiling "
-    f"reports '{REASON_KEYPOINT_EXCEEDS_CEILING}'."
+    f"Test 6 -- an off-parcel keypoint under the wall walk: keypoint 3 sits "
+    f"{NOM_KEYPOINTS[3]['distance_outside_boundary_m']} m outside the line, but its wall walks "
+    f"{_off_zone['wall_offset_downstream_m']} m downstream to {_off_zone['anchor_rowcol']} -- ON the "
+    f"parcel, so anchor_off_parcel is False and what the boundary clips is the pool's TAIL. The "
+    f"waterline referenced to the wall's {_off_zone['anchor_elevation_m']} m lands back on the "
+    f"keypoint's {_off_zone['level_pool']['waterline_elevation_m']} m, and the clipped remainder of "
+    f"{_off_acres:.4f} ac clears the {MIN_WATER_ZONE_AREA_ACRES} ac floor. Raising the floor above that "
+    f"remainder drops it with '{REASON_BELOW_MIN_AREA}' on the CLIPPED acreage, the walk still reported; "
+    f"a keypoint over the contributing-area ceiling reports '{REASON_KEYPOINT_EXCEEDS_CEILING}' with no "
+    "walk attempted at all."
 )
 
 
@@ -976,7 +1055,12 @@ def _u_kp(kp_id, rowcol, acres):
     }
 
 
-U_KEYPOINTS = [_u_kp(i, (45, ch), 9.0 - i) for i, ch in enumerate(_U_CHANNELS)]
+# Row 20, not row 45: each keypoint's WALL sits 25 cells (125 m) below it
+# at row 45, which is where these five candidates actually land. Put the
+# keypoints at row 45 and every wall walk would run off the bottom of the
+# grid -- an honest wall_site_not_found_downstream, but not what this test
+# is about.
+U_KEYPOINTS = [_u_kp(i, (20, ch), 9.0 - i) for i, ch in enumerate(_U_CHANNELS)]
 _u_diag: dict = {}
 _u_zones = find_candidate_zones(
     U_DEM, U_PA, U_BOUNDARY,
@@ -1080,10 +1164,10 @@ for _z in _nom_zones:
     assert not _seen.intersection(_z["cells"]), f"candidate {_z['id']} overlaps an earlier candidate"
     _seen.update(_z["cells"])
     # An ON-PARCEL anchor is always a member of its own zone. An OFF-PARCEL
-    # keypoint anchor is not -- the boundary clip removes it, and the
-    # candidate IS the on-parcel remainder of the pool it anchors (see the
-    # off-parcel test above). Asserting membership unconditionally would
-    # forbid exactly the case this branch added.
+    # anchor -- a WALL SITE that walked past the line -- is not: the
+    # boundary clip removes it, and the candidate IS the on-parcel
+    # remainder of the pool it anchors (see Test 16a). Asserting membership
+    # unconditionally would forbid exactly the case this branch added.
     if not _z["anchor_off_parcel"]:
         assert _z["anchor_rowcol"] in _z["cells"], "an on-parcel anchor must be a member of its own zone"
     _z_mask = _mask_from_cells((_nom_n, _nom_cols), _z["cells"])
@@ -1101,14 +1185,18 @@ assert _nom_zones[0]["overlap_trimmed"] is False, "the first candidate has nothi
 # straight up over the first one's ground.
 #
 # Fixture: the fixture-1 V-valley (2% grade, 20% side slopes, channel down
-# column 20) with two keypoints on it --
-#   keypoint 0 at (30, 20), 9.0 ac  -> delineated first, pool = rows 6-30
-#   keypoint 1 at (38, 20), 4.0 ac  -> seed is 37.5 m from candidate 0's
-#                                      footprint, so it CLEARS the 30 m
-#                                      separation rule; but its own
-#                                      waterline (96.2 + 2.5 = 98.7 m)
-#                                      floods rows 14-38, i.e. 17 rows of
-#                                      ground candidate 0 already claimed.
+# column 20) with two keypoints on it. Each keypoint's WALL sits 25 cells
+# (125 m) below it -- that is where the candidates are, and the rows below
+# are the same two anchors this test has always been about:
+#   keypoint 0 at ( 5, 20), 9.0 ac  -> WALL (30, 20), delineated first,
+#                                      pool = rows 6-30
+#   keypoint 1 at (13, 20), 4.0 ac  -> WALL (38, 20): 37.5 m from
+#                                      candidate 0's footprint, so it
+#                                      CLEARS the 30 m separation rule;
+#                                      but its own waterline
+#                                      (96.2 + 2.5 = 98.7 m) floods rows
+#                                      14-38, i.e. 17 rows of ground
+#                                      candidate 0 already claimed.
 # EXPECTED: candidate 1 comes back overlap_trimmed=True, holding only the
 # component containing its own anchor (rows 31-38), sharing no cell with
 # candidate 0.
@@ -1136,7 +1224,7 @@ _ot_zones, _ = _run_with_injected(
     _ot_acc,
     NOM_PA,
     OT_BOUNDARY,
-    keypoints=[_ot_kp(0, (30, 20), 9.0), _ot_kp(1, (38, 20), 4.0)],
+    keypoints=[_ot_kp(0, (5, 20), 9.0), _ot_kp(1, (13, 20), 4.0)],
     filled=_ot_filled,
     flow_to_row=_ot_ftr,
     flow_to_col=_ot_ftc,
@@ -1415,6 +1503,10 @@ _ADDED_ZONE_KEYS = {
     "valley_id",
     "keypoint_rowcol",
     "keypoint_point_utm",
+    # The keypoint and the anchor are now genuinely different places, so
+    # the distance between them is part of the contract: a consumer that
+    # draws both markers needs it to avoid implying they coincide.
+    "wall_offset_downstream_m",
     "anchor_off_parcel",
     "anchor_distance_outside_boundary_m",
     "anchor_rowcol",
@@ -1469,6 +1561,476 @@ for _f in _geojson["features"]:
     for _k, _v in _f["properties"].items():
         assert not hasattr(_v, "geom_type"), f"shapely geometry leaked onto feature property {_k!r}"
 print("Gate -- zones_to_geojson is schema-valid, layer='water_system_candidate', and JSON-clean.")
+
+
+# =====================================================================
+# THE WALL-SITE WALK -- the keypoint is the pool's TAIL, not its wall.
+#
+# FIXTURE: a 45x45 grid at 5 m whose channel down column 20 is STEEP ABOVE
+# row 10 and GENTLE BELOW it -- which is what a keypoint IS, so row 10 is
+# the keypoint by construction:
+#
+#     channel z(r) = 95 + 0.5 * (10 - r)   for r <= 10   (10% grade, steep)
+#                  = 95 - 0.1 * (r - 10)   for r >= 10   (2% grade, gentle)
+#     z(r, c)      = channel z(r) + 1.0 * |c - 20|       (20% side slopes)
+#
+# EXPECTED WALL WALK from the keypoint (10, 20) at z = 95.0: the gentle
+# reach gives up 0.1 m per 5 m cell, so a full 2.5 m of drop takes 25 cells
+# = 125.0 m, landing on (35, 20) at z = 92.5. That is inside the 150 m
+# search bound. The waterline is then 92.5 + 2.5 = 95.0 -- EXACTLY the
+# keypoint's own elevation, which is the whole point of the construction.
+#
+# EXPECTED POOL, cells with raw z strictly below 95.0 that drain to the
+# wall: on the channel, rows 11-35 (94.9 down to 92.5). Off-channel at row
+# r, z = 95 - 0.1(r-10) + |k| < 95 requires |k| < 0.1(r - 10):
+#     rows 11-20 -> |k| < 0.1..1.0 -> k = 0        -> 1 cell   x 10 = 10
+#     rows 21-30 -> |k| < 1.1..2.0 -> |k| <= 1     -> 3 cells  x 10 = 30
+#     rows 31-35 -> |k| < 2.1..2.5 -> |k| <= 2     -> 5 cells  x  5 = 25
+#     pool total = 65
+# The dam band at (35, 20) reaches z >= 95.0 at |k| = 3, i.e. 15.0 m each
+# side, 7 cells across columns 17-23; five of those are already pool cells,
+# so the zone is 65 + 2 = 67 cells.
+#
+# THE TAIL REACHES THE KEYPOINT AND STOPS THERE. The pool's uppermost cell
+# is row 11, one cell below the keypoint, because the keypoint sits at
+# exactly the waterline and the inclusion test is a STRICT inequality. That
+# is the correct relationship: the keypoint is the water's upstream LIMIT,
+# never submerged ground.
+#
+# EXPECTED STATIONS, walking the stem upstream from the wall -- the numbers
+# that motivated this whole change:
+#     station 0 at (35, 20), z 92.5: |k| <= 2 -> 25.0 m; depths
+#         2.5,1.5,1.5,0.5,0.5 = 6.5 -> 32.5 m^2
+#     station 1 at (30, 20), z 93.0: |k| <= 1 -> 15.0 m; depths
+#         2.0,1.0,1.0 = 4.0 -> 20.0 m^2      <-- NONZERO
+#     station 2 at (25, 20), z 93.5: |k| <= 1 -> 15.0 m; depths
+#         1.5,0.5,0.5 = 2.5 -> 12.5 m^2      <-- NONZERO
+#
+# THE CONTRAST, computed inline below rather than asserted from memory:
+# anchoring AT the keypoint gives a 13-cell pool on the steep reach with
+# stations 1 and 2 both reading a real 0.0 m -- exactly the reference
+# property's symptom, reproduced in miniature.
+# =====================================================================
+W_SIZE = 45
+W_KEYPOINT = (10, 20)
+_w_array = np.zeros((W_SIZE, W_SIZE), dtype=np.float64)
+for _r in range(W_SIZE):
+    _w_channel = 95.0 + 0.5 * (10 - _r) if _r <= 10 else 95.0 - 0.1 * (_r - 10)
+    for _c in range(W_SIZE):
+        _w_array[_r, _c] = _w_channel + 1.0 * abs(_c - 20)
+W_DEM = _dem(_w_array)
+W_BOUNDARY = box(500000.0, 4500000.0 - W_SIZE * 5.0, 500000.0 + W_SIZE * 5.0, 4500000.0)
+W_PA = [
+    {
+        "id": 0,
+        "representative_elevation_m": 50.0,
+        "polygon_utm": box(500080.0, 4499800.0, 500120.0, 4499840.0),
+        "render_fill_polygon_utm": box(500080.0, 4499800.0, 500120.0, 4499840.0),
+    }
+]
+_w_filled, _w_ftr, _w_ftc, _w_acc = _hydrology(W_DEM)
+
+
+def _w_kp(rowcol, acres=5.0, kp_id=0, on_parcel=True, distance_outside=0.0, dem=None, boundary=None):
+    _d = dem if dem is not None else W_DEM
+    x, y = pixel_center_xy(_d, *rowcol)
+    return {
+        "id": kp_id, "valley_id": 0, "rowcol": rowcol, "point_utm": Point(x, y),
+        "contributing_acres": acres, "on_parcel": on_parcel,
+        "distance_outside_boundary_m": distance_outside,
+    }
+
+
+_w_diag: dict = {}
+_w_zones = find_candidate_zones(
+    W_DEM, W_PA, W_BOUNDARY, keypoints=[_w_kp(W_KEYPOINT)],
+    filled=_w_filled, flow_to_row=_w_ftr, flow_to_col=_w_ftc, flow_accumulation=_w_acc,
+    accumulation_seed_budget=0, diagnostics=_w_diag,
+)
+_w_outcome = _w_diag["keypoint_outcomes"][0]
+assert _w_outcome["outcome"] == REASON_NOMINATED, _w_outcome
+assert _w_outcome["keypoint_rowcol"] == W_KEYPOINT
+assert _w_outcome["anchor_rowcol"] == (35, 20), (
+    f"the wall must land 25 cells downstream where 2.5 m of drop accumulates, got "
+    f"{_w_outcome['anchor_rowcol']}"
+)
+assert _w_outcome["wall_offset_downstream_m"] == 125.0, _w_outcome
+assert _w_outcome["wall_drop_m"] == 2.5, _w_outcome
+assert _w_outcome["keypoint_elevation_m"] == 95.0 and _w_outcome["anchor_elevation_m"] == 92.5
+assert _w_outcome["wall_walk_end_reason"] == "reached_full_drop"
+
+assert len(_w_zones) == 1
+_w_zone = _w_zones[0]
+assert _w_zone["anchor_rowcol"] == (35, 20)
+assert _w_zone["keypoint_rowcol"] == W_KEYPOINT, "the keypoint is reported where detection put it"
+assert _w_zone["wall_offset_downstream_m"] == 125.0
+# THE HEIGHT CORRESPONDENCE: the waterline lands on the keypoint's own
+# elevation, so the pool's tail reaches the keypoint and stops.
+assert _w_zone["level_pool"]["waterline_elevation_m"] == 95.0, (
+    "the waterline must sit at the keypoint's own elevation -- that is what anchoring a full reference "
+    "height below it buys"
+)
+assert _w_zone["level_pool"]["waterline_elevation_m"] == _w_outcome["keypoint_elevation_m"]
+_w_tail_row = min(r for r, _c in _w_zone["cells"])
+assert _w_tail_row == 11, f"the pool's tail must reach the cell just below the keypoint, got row {_w_tail_row}"
+assert W_KEYPOINT not in _w_zone["cells"], (
+    "the keypoint sits AT the waterline, so it is the water's upstream limit and never submerged ground"
+)
+assert _w_zone["level_pool"]["pool_cell_count"] == 65, _w_zone["level_pool"]["pool_cell_count"]
+assert len(_w_zone["cells"]) == 67, len(_w_zone["cells"])
+# The dam band sits at the WALL, not at the keypoint.
+assert _w_zone["abutments"]["left"]["lateral_distance_m"] == 15.0
+assert _w_zone["abutments"]["right"]["lateral_distance_m"] == 15.0
+_w_stations = _w_zone["level_pool"]["stations"]
+assert [(s["flooded_width_m"], s["flooded_cross_section_area_m2"]) for s in _w_stations] == [
+    (25.0, 32.5), (15.0, 20.0), (15.0, 12.5)
+], _w_stations
+assert all(s["flooded_width_m"] > 0.0 for s in _w_stations), (
+    "every station must now measure real water -- the pool occupies the GENTLE reach"
+)
+
+# THE CONTRAST: what anchoring at the keypoint itself would have produced.
+_w_old = delineate_level_pool(
+    W_DEM, _w_filled, _w_ftr, _w_ftc, _w_acc, build_upstream_map(_w_ftr, _w_ftc), W_KEYPOINT
+)
+assert _w_old["waterline_elevation_m"] == 97.5
+assert len(_w_old["pool_cells"]) == 13, len(_w_old["pool_cells"])
+assert [s["flooded_width_m"] for s in _w_old["stations"]] == [30.0, 0.0, 0.0], (
+    "the keypoint-anchored contrast must reproduce the reference property's symptom: a wide station 0 "
+    "and dry stations upstream"
+)
+print(
+    f"Test 13 -- the wall sits below the keypoint: the walk runs "
+    f"{_w_outcome['wall_offset_downstream_m']} m downstream from the keypoint at "
+    f"{_w_outcome['keypoint_elevation_m']} m to the wall at {_w_outcome['anchor_elevation_m']} m, giving "
+    f"exactly {_w_outcome['wall_drop_m']} m of drop and a waterline back at the keypoint's own elevation. "
+    f"The {_w_zone['level_pool']['pool_cell_count']}-cell pool occupies the GENTLE reach with its tail at "
+    f"row {_w_tail_row} (the keypoint itself is the water's limit, not submerged), and all three stations "
+    f"measure real water: {[s['flooded_width_m'] for s in _w_stations]} m. Anchoring AT the keypoint "
+    f"instead gives {len(_w_old['pool_cells'])} cells on the steep reach with stations "
+    f"{[s['flooded_width_m'] for s in _w_old['stations']]} m -- the reference property's symptom exactly."
+)
+
+
+# =====================================================================
+# Test 14 -- WALK FAILURES ARE HONEST, and the two kinds are distinct.
+#
+# (a) FLAT LOWER REACH. The same steep-above fixture with the reach below
+#     the keypoint made dead level (z = 95.0 for every r >= 10). The
+#     priority-flood leaves a filled flat, this repo's strictly-positive-
+#     slope D8 hands every cell the -1 sentinel, and the walk dies AT the
+#     keypoint having accumulated 0.0 m. That is valley_delineation.py's
+#     flat-tie limitation surfacing at NOMINATION -- reported, not fixed
+#     here.
+# (b) DISTANCE BOUND. The reach below the keypoint at 0.01 m per cell
+#     (0.2%): 2.5 m of drop would need 250 cells = 1250 m, far past the
+#     150 m bound. The walk dies at (40, 20) with 0.3 m accumulated.
+#
+# Both yield REASON_WALL_SITE_NOT_FOUND_DOWNSTREAM and no candidate -- no
+# partial-height fallback -- but wall_walk_end_reason tells them apart,
+# which matters: one is a data limitation, the other is real terrain.
+# =====================================================================
+def _w_variant(lower_grade):
+    array = np.zeros((W_SIZE, W_SIZE), dtype=np.float64)
+    for r in range(W_SIZE):
+        channel = 95.0 + 0.5 * (10 - r) if r <= 10 else 95.0 - lower_grade * (r - 10)
+        for c in range(W_SIZE):
+            array[r, c] = channel + 1.0 * abs(c - 20)
+    return _dem(array)
+
+
+for _grade, _expected_end, _expected_cell, _expected_drop, _label in (
+    (0.0, "flat_tie_sentinel", (10, 20), 0.0, "flat lower reach"),
+    (0.01, "distance_bound", (40, 20), 0.3, "gentle-but-long lower reach"),
+):
+    _v_dem = _w_variant(_grade)
+    _v_filled, _v_ftr, _v_ftc, _v_acc = _hydrology(_v_dem)
+    _v_diag: dict = {}
+    _v_zones = find_candidate_zones(
+        _v_dem, W_PA, W_BOUNDARY,
+        keypoints=[_w_kp(W_KEYPOINT, dem=_v_dem)],
+        filled=_v_filled, flow_to_row=_v_ftr, flow_to_col=_v_ftc, flow_accumulation=_v_acc,
+        accumulation_seed_budget=0, diagnostics=_v_diag,
+    )
+    _v_outcome = _v_diag["keypoint_outcomes"][0]
+    assert _v_zones == [], f"{_label}: no partial-height fallback -- the keypoint must nominate nothing"
+    assert _v_outcome["outcome"] == REASON_WALL_SITE_NOT_FOUND_DOWNSTREAM, _v_outcome
+    assert _v_outcome["wall_walk_end_reason"] == _expected_end, _v_outcome
+    assert _v_outcome["wall_walk_end_rowcol"] == _expected_cell, _v_outcome
+    assert _v_outcome["wall_drop_m"] == _expected_drop, _v_outcome
+    assert _v_outcome["anchor_rowcol"] is None
+    print(
+        f"Test 14 -- {_label}: the walk dies at {_v_outcome['wall_walk_end_rowcol']} "
+        f"('{_v_outcome['wall_walk_end_reason']}') with {_v_outcome['wall_drop_m']} m of the "
+        f"{POOL_REFERENCE_HEIGHT_METERS} m needed, so the keypoint reports "
+        f"'{_v_outcome['outcome']}' and nominates nothing."
+    )
+
+
+# =====================================================================
+# Test 15 -- THE CEILING ON THE WALL SITE.
+#
+# Contributing area grows strictly downstream, so a wall far enough below
+# a keypoint can sit on a drainage the ceiling disqualifies even where the
+# keypoint itself cleared it. Injected accumulation grid: the keypoint's
+# own cell carries 10 cells (well under), the wall site at (35, 20) carries
+# 500 (well over a 100-cell ceiling).
+#
+# EXPECTED: REASON_WALL_SITE_EXCEEDS_CEILING -- distinct from
+# REASON_KEYPOINT_EXCEEDS_CEILING, which the second run below still
+# produces when the KEYPOINT is the cell over the limit. The two say
+# different things and must not share a code.
+# =====================================================================
+_ceil_acc = np.full((W_SIZE, W_SIZE), 10.0, dtype=np.float64)
+_ceil_acc[30:, :] = 500.0
+_CEIL_CELLS = 100.0
+_ceil_acres = _CEIL_CELLS * cell_area_acres(W_DEM)
+_ceil_diag: dict = {}
+_ceil_zones = find_candidate_zones(
+    W_DEM, W_PA, W_BOUNDARY, keypoints=[_w_kp(W_KEYPOINT)],
+    filled=_w_filled, flow_to_row=_w_ftr, flow_to_col=_w_ftc, flow_accumulation=_ceil_acc,
+    max_valley_contributing_area_acres=_ceil_acres, accumulation_seed_budget=0, diagnostics=_ceil_diag,
+)
+_ceil_outcome = _ceil_diag["keypoint_outcomes"][0]
+assert _ceil_zones == []
+assert _ceil_outcome["outcome"] == REASON_WALL_SITE_EXCEEDS_CEILING, _ceil_outcome
+assert _ceil_outcome["anchor_rowcol"] == (35, 20), (
+    "the wall site is still REPORTED -- the survey says where the disqualifying wall would have stood"
+)
+assert _ceil_outcome["wall_offset_downstream_m"] == 125.0
+
+# ...and the keypoint's own ceiling failure keeps its own distinct code.
+_kp_ceil_acc = np.full((W_SIZE, W_SIZE), 500.0, dtype=np.float64)
+_kp_ceil_diag: dict = {}
+assert find_candidate_zones(
+    W_DEM, W_PA, W_BOUNDARY, keypoints=[_w_kp(W_KEYPOINT)],
+    filled=_w_filled, flow_to_row=_w_ftr, flow_to_col=_w_ftc, flow_accumulation=_kp_ceil_acc,
+    max_valley_contributing_area_acres=_ceil_acres, accumulation_seed_budget=0,
+    diagnostics=_kp_ceil_diag,
+) == []
+assert _kp_ceil_diag["keypoint_outcomes"][0]["outcome"] == REASON_KEYPOINT_EXCEEDS_CEILING
+print(
+    f"Test 15 -- ceiling on the walk: a keypoint on 10 contributing cells whose wall site lands on 500 "
+    f"(against a {_CEIL_CELLS:.0f}-cell ceiling) reports '{_ceil_outcome['outcome']}' and still names the "
+    f"wall it would have been ({_ceil_outcome['anchor_rowcol']}, "
+    f"{_ceil_outcome['wall_offset_downstream_m']} m down); a keypoint over the ceiling ITSELF keeps the "
+    f"distinct '{REASON_KEYPOINT_EXCEEDS_CEILING}'."
+)
+
+
+# =====================================================================
+# Test 16 -- OFF-PARCEL WALLS, both directions.
+#
+# (a) An ON-parcel keypoint whose wall walks PAST the boundary: the
+#     existing clip-and-floor rule governs, the anchor is flagged
+#     anchor_off_parcel, and the distance reported is measured AT THE WALL
+#     (not the keypoint's own 0.0, which would mislabel where the
+#     structure sits).
+# (b) The inverse -- the reference property's 6.29-acre case in miniature.
+#     An OFF-parcel keypoint whose wall walks TOWARD the parcel. The walk
+#     moves the candidate's ground ONTO the parcel, so the clipped
+#     on-parcel remainder is strictly LARGER than anchoring at the keypoint
+#     would have given. That is the whole argument for the walk on that
+#     keypoint, asserted rather than assumed.
+# =====================================================================
+# (a) boundary ends at row 30; the wall at row 35 is past it.
+W_BOUNDARY_A = box(500000.0, 4500000.0 - 30 * 5.0, 500000.0 + W_SIZE * 5.0, 4500000.0)
+_a_diag: dict = {}
+_a_zones = find_candidate_zones(
+    W_DEM, W_PA, W_BOUNDARY_A, keypoints=[_w_kp(W_KEYPOINT)],
+    filled=_w_filled, flow_to_row=_w_ftr, flow_to_col=_w_ftc, flow_accumulation=_w_acc,
+    accumulation_seed_budget=0, diagnostics=_a_diag,
+)
+assert len(_a_zones) == 1, _a_diag["keypoint_outcomes"]
+_a_zone = _a_zones[0]
+assert _a_zone["anchor_rowcol"] == (35, 20) and _a_zone["anchor_off_parcel"] is True
+assert FLAG_ANCHOR_OFF_PARCEL in _a_zone["flags"]
+assert _a_diag["keypoint_outcomes"][0]["on_parcel"] is True, "the KEYPOINT is on-parcel; the WALL is not"
+assert _a_zone["anchor_distance_outside_boundary_m"] > 0.0, (
+    "the distance must be measured at the WALL -- reporting the keypoint's own 0.0 would say the "
+    "structure sits on the parcel when it does not"
+)
+assert _a_zone["truncated_by_boundary"] is True
+assert all(r < 30 for r, _c in _a_zone["cells"])
+
+# (b) boundary starts at row 20; the keypoint at row 10 is off-parcel and
+#     its wall at row 35 is inside.
+W_BOUNDARY_B = box(500000.0, 4500000.0 - W_SIZE * 5.0, 500000.0 + W_SIZE * 5.0, 4500000.0 - 20 * 5.0)
+_b_kp = _w_kp(W_KEYPOINT)
+_b_point = _b_kp["point_utm"]
+_b_kp["on_parcel"] = False
+_b_kp["distance_outside_boundary_m"] = round(_b_point.distance(W_BOUNDARY_B), 2)
+assert _b_kp["distance_outside_boundary_m"] > 0.0
+_b_zones = find_candidate_zones(
+    W_DEM, W_PA, W_BOUNDARY_B, keypoints=[_b_kp],
+    filled=_w_filled, flow_to_row=_w_ftr, flow_to_col=_w_ftc, flow_accumulation=_w_acc,
+    accumulation_seed_budget=0,
+)
+assert len(_b_zones) == 1
+_b_zone = _b_zones[0]
+assert _b_zone["anchor_rowcol"] == (35, 20)
+assert _b_zone["anchor_off_parcel"] is False, "the WALL is on-parcel even though the keypoint is not"
+assert _b_zone["anchor_distance_outside_boundary_m"] == 0.0
+_b_acres = _b_zone["polygon_utm"].area / SQUARE_METERS_PER_ACRE
+assert _b_acres >= MIN_WATER_ZONE_AREA_ACRES
+# What anchoring at the off-parcel keypoint would have kept, on-parcel.
+_b_old_pool = delineate_level_pool(
+    W_DEM, _w_filled, _w_ftr, _w_ftc, _w_acc, build_upstream_map(_w_ftr, _w_ftc), W_KEYPOINT
+)
+_b_old_on_parcel = [c for c in _b_old_pool["zone_cells"] if c[0] >= 20]
+assert len(_b_old_on_parcel) < len(_b_zone["cells"]), (
+    f"the walk toward the parcel must yield MORE on-parcel ground than anchoring at the keypoint: "
+    f"{len(_b_zone['cells'])} cells vs {len(_b_old_on_parcel)}"
+)
+print(
+    f"Test 16 -- off-parcel walls both ways: (a) an on-parcel keypoint whose wall walks past the line "
+    f"gives anchor_off_parcel=True with the distance measured AT THE WALL "
+    f"({_a_zone['anchor_distance_outside_boundary_m']} m) and the clip flagged; (b) an off-parcel keypoint "
+    f"{_b_kp['distance_outside_boundary_m']} m outside whose wall walks INTO the parcel yields "
+    f"{len(_b_zone['cells'])} on-parcel cells ({_b_acres:.4f} ac) against the "
+    f"{len(_b_old_on_parcel)} that anchoring at the keypoint would have kept -- the reference property's "
+    "6.29-acre case in miniature."
+)
+
+
+# =====================================================================
+# Test 17 -- PROVENANCE, and separation enforced at the WALL.
+#
+# THE FIXTURE IS BUILT TO DISCRIMINATE, which is the only thing that makes
+# this an assertion about WHERE the rule is applied rather than a
+# restatement that the rule exists. Two keypoints on one channel:
+#
+#   keypoint 0 at (10, 20), 9.0 ac -> delineated first; wall (35, 20),
+#                                     footprint rows 11-35
+#   keypoint 1 at ( 3, 20), 4.0 ac -> high on the STEEP reach, which gives
+#                                     up 0.5 m per cell, so its wall is
+#                                     only 5 cells down at (8, 20)
+#
+# Measured on the fixture below rather than asserted from this comment:
+#   keypoint 1's own cell -> candidate 0's footprint  = 37.5 m  (CLEARS 30)
+#   keypoint 1's WALL     -> candidate 0's footprint  = 12.5 m  (VIOLATES)
+#
+# So checking at the keypoint would have ACCEPTED this nomination and put
+# a second wall 12.5 m from the first candidate's water. The rule is a
+# statement about where the structures sit, so it binds at the walls, and
+# the two distances differing across the threshold is what proves it.
+# =====================================================================
+for _z in _w_zones + _a_zones + _b_zones:
+    assert _z["keypoint_rowcol"] is not None and _z["anchor_rowcol"] is not None
+    assert _z["keypoint_rowcol"] != _z["anchor_rowcol"], "the two positions are genuinely different places"
+    assert _z["wall_offset_downstream_m"] > 0.0
+    assert _z["keypoint_point_utm"].equals(Point(*pixel_center_xy(W_DEM, *_z["keypoint_rowcol"])))
+    assert _z["anchor_point_utm"].equals(Point(*pixel_center_xy(W_DEM, *_z["anchor_rowcol"])))
+
+# Family 2 carries the field too, at 0.0 -- its anchor IS the wall.
+_f2_only = find_candidate_zones(
+    W_DEM, W_PA, W_BOUNDARY, keypoints=[], filled=_w_filled, flow_to_row=_w_ftr,
+    flow_to_col=_w_ftc, flow_accumulation=_w_acc, accumulation_seed_budget=1,
+)
+assert _f2_only and all(z["wall_offset_downstream_m"] == 0.0 for z in _f2_only), (
+    "a family-2 anchor IS the wall by definition, so its offset is 0.0 -- not absent"
+)
+
+# Separation at the wall.
+_sep_diag: dict = {}
+_sep_zones = find_candidate_zones(
+    W_DEM, W_PA, W_BOUNDARY,
+    keypoints=[_w_kp((10, 20), acres=9.0, kp_id=0), _w_kp((3, 20), acres=4.0, kp_id=1)],
+    filled=_w_filled, flow_to_row=_w_ftr, flow_to_col=_w_ftc, flow_accumulation=_w_acc,
+    accumulation_seed_budget=0, diagnostics=_sep_diag,
+)
+_sep_by_id = {o["keypoint_id"]: o for o in _sep_diag["keypoint_outcomes"]}
+assert _sep_by_id[0]["outcome"] == REASON_NOMINATED and _sep_by_id[0]["anchor_rowcol"] == (35, 20)
+assert _sep_by_id[1]["anchor_rowcol"] == (8, 20), (
+    "keypoint 1 sits on the STEEP reach, which gives up the reference height in 5 cells"
+)
+_sep_first = _sep_zones[0]["polygon_utm"]
+_sep_kp_gap = Point(*pixel_center_xy(W_DEM, 3, 20)).distance(_sep_first)
+_sep_wall_gap = Point(*pixel_center_xy(W_DEM, 8, 20)).distance(_sep_first)
+# THE DISCRIMINATING PAIR. If either of these fell on the same side of the
+# threshold the outcome below would prove nothing about WHERE the check is
+# applied, so they are asserted before the outcome is.
+assert _sep_kp_gap > MIN_WATER_SEED_SEPARATION_METERS, (
+    f"the fixture is only discriminating if a KEYPOINT-based check would have PASSED this nomination; "
+    f"keypoint 1 is {_sep_kp_gap} m from candidate 0"
+)
+assert _sep_wall_gap < MIN_WATER_SEED_SEPARATION_METERS, (
+    f"...and only if a WALL-based check rejects it; the wall is {_sep_wall_gap} m from candidate 0"
+)
+assert _sep_by_id[1]["outcome"] == reason_too_close_to_candidate(0), (
+    f"separation must bind at the WALL sites, got {_sep_by_id[1]['outcome']} for keypoint 1 whose wall "
+    f"at (8, 20) is {_sep_wall_gap} m from candidate 0 while its keypoint is {_sep_kp_gap} m away"
+)
+assert len(_sep_zones) == 1, "the rejected nomination must produce no candidate at all"
+print(
+    f"Test 17 -- provenance and separation: every keypoint candidate carries both positions and a nonzero "
+    f"wall_offset_downstream_m, family 2 carries 0.0 (its anchor IS the wall), and separation binds at the "
+    f"WALL -- keypoint 1's wall at {_sep_by_id[1]['anchor_rowcol']} sits {_sep_wall_gap:.1f} m from "
+    f"candidate 0 and is rejected, while its keypoint is {_sep_kp_gap:.1f} m away and would have been "
+    f"ACCEPTED by a keypoint-based check. The two distances straddle the "
+    f"{MIN_WATER_SEED_SEPARATION_METERS} m threshold, which is what makes this an assertion about where "
+    "the rule is applied."
+)
+
+
+# =====================================================================
+# Test 18 -- FAMILY 2 IS BYTE-IDENTICAL.
+#
+# The wall-site walk is keypoint-only, so a keypoints=[] run must produce
+# exactly what it produced before this change. These literals were captured
+# from the previous commit and are pasted here verbatim; if the
+# construction change leaked into family 2, they fail.
+# =====================================================================
+def _family2_signature(zones):
+    return [
+        {
+            "id": z["id"], "anchor": list(z["anchor_rowcol"]), "cells": len(z["cells"]),
+            "acres": round(z["polygon_utm"].area / SQUARE_METERS_PER_ACRE, 6), "flags": z["flags"],
+            "abutL": z["abutments"]["left"]["lateral_distance_m"],
+            "abutR": z["abutments"]["right"]["lateral_distance_m"],
+            "stations": [
+                [s["status"], s["flooded_width_m"], s["flooded_cross_section_area_m2"]]
+                for s in z["level_pool"]["stations"]
+            ],
+        }
+        for z in zones
+    ]
+
+
+_F2_SINGLE_COLUMN_BASELINE = [
+    {"id": 0, "anchor": [10, 19], "cells": 17, "acres": 0.10502,
+     "flags": ["abutment_not_found_left"], "abutL": None, "abutR": 25.0,
+     "stations": [["measured", 80.0, 155.0], ["measured", 0.0, 0.0], ["measured", 0.0, 0.0]]},
+    {"id": 1, "anchor": [22, 19], "cells": 18, "acres": 0.111197, "flags": [],
+     "abutL": 60.0, "abutR": 25.0,
+     "stations": [["measured", 80.0, 155.0], ["measured", 0.0, 0.0], ["measured", 0.0, 0.0]]},
+    {"id": 2, "anchor": [34, 19], "cells": 18, "acres": 0.111197, "flags": [],
+     "abutL": 60.0, "abutR": 25.0,
+     "stations": [["measured", 80.0, 155.0], ["measured", 0.0, 0.0], ["measured", 0.0, 0.0]]},
+]
+_F2_U_BASELINE = [
+    {"id": 0, "anchor": [59, 57], "cells": 29, "acres": 0.179151, "flags": [],
+     "abutL": 10.0, "abutR": 10.0,
+     "stations": [["measured", 15.0, 13.5], ["measured", 5.0, 10.0], ["measured", 5.0, 7.5]]},
+    {"id": 1, "anchor": [59, 5], "cells": 107, "acres": 0.661007, "flags": [],
+     "abutL": 25.0, "abutR": 25.0,
+     "stations": [["measured", 45.0, 52.5], ["measured", 35.0, 34.0], ["measured", 25.0, 19.5]]},
+    {"id": 2, "anchor": [59, 18], "cells": 73, "acres": 0.450967, "flags": [],
+     "abutL": 15.0, "abutR": 15.0,
+     "stations": [["measured", 25.0, 35.5], ["measured", 25.0, 23.0], ["measured", 15.0, 13.5]]},
+]
+assert _family2_signature(
+    find_candidate_zones(SINGLE_COLUMN_DEM, PRODUCTION_AREA_ABOVE, BOUNDARY, keypoints=[])
+) == _F2_SINGLE_COLUMN_BASELINE, "family 2 changed on the single-column fixture"
+assert _family2_signature(
+    find_candidate_zones(U_DEM, U_PA, U_BOUNDARY, keypoints=[])
+) == _F2_U_BASELINE, "family 2 changed on the five-channel fixture"
+print(
+    "Test 18 -- family 2 is byte-identical: both fixtures reproduce the anchors, cell counts, acreages, "
+    "flags, abutments and every station measurement captured before the wall-site walk existed. The "
+    "construction change is keypoint-only."
+)
+
 
 # =====================================================================
 # narrative_data -- the report-facing, FINAL, JSON-serialisable block
@@ -1544,15 +2106,40 @@ assert "target_acres" not in _nd_zone, "the retired survey-area target field mus
 assert _nd_zone["provenance"]["nominated_by"] == NOMINATED_BY_KEYPOINT
 assert _nd_zone["provenance"]["keypoint_id"] == 1 and _nd_zone["provenance"]["valley_id"] == 0
 
-# The off-parcel candidate reports its distance in FEET at this boundary.
-_nd_off = next(z for z in _nd["zones"] if z["provenance"]["anchor_off_parcel"])
-assert _nd_off["provenance"]["keypoint_id"] == 3
-assert _nd_off["provenance"]["anchor_distance_outside_boundary_ft"] == round(7.5 / METERS_PER_FOOT, 1)
-assert all(
-    z["provenance"]["anchor_off_parcel"] is False
-    for z in _nd["zones"]
-    if z["provenance"]["keypoint_id"] != 3
+# Both positions reach the narrative, with the distance between them in
+# FEET -- a reader must be able to tell the pool's tail from its wall.
+for _ndz in _nd["zones"]:
+    _ndp = _ndz["provenance"]
+    if _ndp["nominated_by"] == NOMINATED_BY_KEYPOINT:
+        assert _ndp["wall_offset_downstream_ft"] == round(125.0 / METERS_PER_FOOT, 1), _ndp
+        assert _ndp["keypoint_id"] is not None
+    else:
+        assert _ndp["wall_offset_downstream_ft"] == 0.0, "family 2's anchor IS its wall"
+
+# NOTHING in this fixture is off-parcel: every keypoint's wall walked
+# DOWNSTREAM, and on this parcel downstream is inward. That is a real
+# result, not a gap in coverage -- the off-parcel-wall case is exercised
+# on the Test 16a fixture, whose narrative is built here so the FEET
+# conversion is asserted against a genuinely off-parcel anchor.
+assert all(z["provenance"]["anchor_off_parcel"] is False for z in _nd["zones"]), (
+    "every wall on the nomination fixture lands on-parcel"
 )
+_nd_a = wcz.build_narrative_data(
+    _a_zones, W_DEM, W_BOUNDARY_A,
+    production_area_count=len(W_PA),
+    canopy_data_available=False,
+    road_data_available=False,
+    nomination_diagnostics=_a_diag,
+)
+_nd_off = next(z for z in _nd_a["zones"] if z["provenance"]["anchor_off_parcel"])
+assert _nd_off["provenance"]["anchor_distance_outside_boundary_ft"] == round(
+    _a_zone["anchor_distance_outside_boundary_m"] / METERS_PER_FOOT, 1
+), _nd_off["provenance"]
+assert _nd_off["provenance"]["wall_offset_downstream_ft"] == round(125.0 / METERS_PER_FOOT, 1), (
+    "the wall that left the parcel is the SAME wall whose offset is reported -- the two facts sit "
+    "side by side rather than one standing in for the other"
+)
+assert json.loads(json.dumps(_nd_a)) == _nd_a
 
 # Level-pool measurements: imperial, final, and NEVER a volume.
 _nd_pool = _nd_zone["level_pool"]
@@ -1622,14 +2209,15 @@ assert _nd_nom["accumulation_seeds"], "the family-2 seed log must reach the narr
 
 # position_in_parcel directly: a centred footprint reads "center", a
 # corner one reads its compass word.
-# NOM_BOUNDARY spans x 500000-500280, y 4499820-4500000, so its centroid
-# is (500140, 4499910) and the "center" threshold is 20% of the
-# equivalent-circle radius = 25.3 m.
+# NOM_BOUNDARY spans x 500000-500280, y 4499700-4499980, so its centroid
+# is (500140, 4499840) and the "center" threshold is 20% of the
+# equivalent-circle radius = 31.6 m.
+assert NOM_BOUNDARY.bounds == (500000.0, 4499700.0, 500280.0, 4499980.0), NOM_BOUNDARY.bounds
 assert wcz._position_in_parcel(
-    box(500130.0, 4499900.0, 500150.0, 4499920.0), NOM_BOUNDARY
+    box(500130.0, 4499830.0, 500150.0, 4499850.0), NOM_BOUNDARY
 ) == "center"
 assert wcz._position_in_parcel(
-    box(500250.0, 4499990.0, 500280.0, 4500000.0), NOM_BOUNDARY
+    box(500250.0, 4499950.0, 500280.0, 4499980.0), NOM_BOUNDARY
 ) == "northeast"
 
 # The undefined-gradient rule is unchanged: distance 0 reads None, never
@@ -1664,7 +2252,9 @@ assert json.loads(json.dumps(_nd_empty)) == _nd_empty
 print(
     f"narrative_data: json-clean and 1-decimal throughout; reads the zone dicts without mutating them; "
     f"describes {_nd['candidate_count']} candidates with provenance (zone 0 from keypoint "
-    f"{_nd_zone['provenance']['keypoint_id']}; one candidate anchored "
+    f"{_nd_zone['provenance']['keypoint_id']}, its wall "
+    f"{_nd_zone['provenance']['wall_offset_downstream_ft']} ft downstream of that keypoint; the Test 16a "
+    f"fixture's off-parcel wall reports "
     f"{_nd_off['provenance']['anchor_distance_outside_boundary_ft']} ft OFF parcel), the per-keypoint "
     f"outcome list with its "
     f"reason codes {[o['outcome'] for o in _nd_nom['keypoint_outcomes']]}, level-pool measurements at a "

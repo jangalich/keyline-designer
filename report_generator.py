@@ -403,9 +403,16 @@ def _format_water_candidate_zones_summary(water_narrative: Optional[dict]) -> st
     for zone in water_narrative["zones"]:
         provenance = zone["provenance"]
         if provenance["nominated_by"] == "keypoint":
+            # THE KEYPOINT IS THE POOL'S TAIL, NOT ITS WALL. Saying only
+            # "nominated from keypoint N" would leave a reader placing the
+            # structure at the keypoint marker on the map; the offset is
+            # what tells them the two are different places.
             source = (
                 f"nominated from keypoint {provenance['keypoint_id']} "
-                f"(valley {provenance['valley_id']})"
+                f"(valley {provenance['valley_id']}) but anchored "
+                f"{provenance['wall_offset_downstream_ft']} ft DOWNSTREAM of it, at the first ground a "
+                "full reference height below the keypoint -- that anchor is where a wall would stand, "
+                "and the keypoint is the upstream tail of the water it would hold"
             )
             if provenance["anchor_off_parcel"]:
                 source += (
@@ -414,7 +421,10 @@ def _format_water_candidate_zones_summary(water_narrative: Optional[dict]) -> st
                     "acreage below is the ON-PARCEL portion of the pool it would impound"
                 )
         else:
-            source = "nominated from the highest remaining flow accumulation"
+            source = (
+                "nominated from the highest remaining flow accumulation (such an anchor is already a "
+                "wall site, with no keypoint above it to be offset from)"
+            )
 
         location = zone["location"]
         drainage = zone["drainage"]
