@@ -194,15 +194,14 @@ print("_topographic_factor() correctly scores a moderate valley gradient highest
 # --- rearchitecture: no more valley_id to hand-build a matching zone     ---
 # --- fixture around -- see test_water_candidate_zones.py)                ---
 #
-# find_candidate_zones() now selects and returns exactly ONE zone per call
-# (the single best-available survey area). To get the two distinct real
-# zone dicts these scoring tests need, we run it on two SEPARATE single-
-# drainage-column DEMs (channel at col=8 and at col=32 of a 40x40 grid,
-# 5m), sharing one UTM frame, and relabel their ids 0/1. Each zone is a
-# real, trimmed, cell-cluster footprint -- the scoring logic under test is
-# unchanged; only how we obtain two zones is (the old fixture relied on
-# find_candidate_zones() returning a zone per disconnected column, which the
-# rewrite's single-candidate selection no longer does).
+# find_candidate_zones() returns every surviving candidate now -- there is
+# no generation cap at all. To get the two distinct real zone dicts these
+# scoring tests need, we run it on two SEPARATE single-drainage-column DEMs
+# (channel at col=8 and at col=32 of a 40x40 grid, 5m), sharing one UTM
+# frame, with the family-2 seed budget pinned to 1 and no keypoints
+# supplied, so each run yields exactly one zone; their ids are then
+# relabelled 0/1. Each zone is a real level-pool footprint -- the scoring
+# logic under test is unchanged; only how we obtain two zones is.
 from raster_grid import pixel_center_xy as _pxy  # noqa: E402
 from shapely.geometry import Point as _ValleyPoint  # noqa: E402
 
@@ -240,10 +239,15 @@ PRODUCTION_AREAS = [
 
 _DEM_COL8 = _single_column_dem(8)
 _DEM_COL32 = _single_column_dem(32)
-_zones8 = find_candidate_zones(_DEM_COL8, PRODUCTION_AREAS, BOUNDARY)
-_zones32 = find_candidate_zones(_DEM_COL32, PRODUCTION_AREAS, BOUNDARY)
+_zones8 = find_candidate_zones(
+    _DEM_COL8, PRODUCTION_AREAS, BOUNDARY, keypoints=[], accumulation_seed_budget=1
+)
+_zones32 = find_candidate_zones(
+    _DEM_COL32, PRODUCTION_AREAS, BOUNDARY, keypoints=[], accumulation_seed_budget=1
+)
 assert len(_zones8) == 1 and len(_zones32) == 1, (
-    f"each single-column DEM must yield exactly one selected zone, got {len(_zones8)}/{len(_zones32)}"
+    f"each single-column DEM must yield exactly one zone at a family-2 budget of 1 with no keypoints, "
+    f"got {len(_zones8)}/{len(_zones32)}"
 )
 zone_col8 = {**_zones8[0], "id": 0}
 zone_col32 = {**_zones32[0], "id": 1}

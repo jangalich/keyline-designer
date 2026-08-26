@@ -238,11 +238,14 @@ render opening is too small for even one wave row to intersect, nothing is
 drawn -- there is no marker to convey a zone that small anymore, and no
 fallback to the old fill (the legend entry still lists, since the layer is
 present in the data). The ripple texture is allowed to cross a production
-zone's own rendered texture at render time -- that's a display-only
-coincidence, not a real siting conflict; the real geometries stay
-separated by water_candidate_zones.py's own production-zone eligibility
-exclusion gate (WATER_ZONE_PRODUCTION_SETBACK_METERS), unaffected by
-anything here.
+zone's own rendered texture at render time. That overlap can now also be
+REAL rather than display-only: water_candidate_zones.py's production-zone
+eligibility exclusion is deleted (production overlap is a competing-use
+question the designer answers, not a generation-time gate -- see that
+module's own docstring), so a water zone may genuinely sit on ground the
+production layer also claims. Nothing here changes because of it: both
+layers draw their own real geometry, and the report carries the
+per-candidate relationship data needed to reason about the conflict.
 
 ROAD CORRIDOR STYLE: the road network can have several branches (a trunk
 plus spur(s) growing off it or off each other, see road_corridors.py's own

@@ -149,8 +149,16 @@ assert set(result) - _PRE_NARRATIVE_RESULT_KEYS == {"narrative_data"}, (
 )
 _nd = result["narrative_data"]
 assert json.loads(json.dumps(_nd)) == _nd, "narrative_data must be json.dumps()-clean with no custom encoder"
-assert _nd["zone_found"] == (len(result["zones_geojson"]["features"]) == 1)
+assert _nd["zone_found"] == (len(result["zones_geojson"]["features"]) > 0)
+assert _nd["candidate_count"] == len(result["zones_geojson"]["features"])
+assert len(_nd["zones"]) == len(result["zones_geojson"]["features"])
 assert _nd["production_area_count"] == len(result["production_areas_geojson"]["features"])
+# The nomination record travels with the block, so an empty or short
+# candidate list is explainable rather than merely reported.
+assert set(_nd["nomination"]) == {"keypoints_considered", "keypoint_outcomes", "accumulation_seeds"}
+assert all(o["outcome"] for o in _nd["nomination"]["keypoint_outcomes"]), (
+    "every keypoint must carry a reason code for what happened to it"
+)
 # Canopy is fetch-or-raise on this path (stubbed to a clean fetch above),
 # and the road stub returned a real None ("checked, no roads found") --
 # both gates genuinely ran on this run.
@@ -162,9 +170,11 @@ assert _nd["zone"]["service"]["served_production_area_ids"] == _zone_props["serv
 assert _nd["zone"]["service"]["served_production_area_count"] == len(_zone_props["production_area_relationships"])
 print(
     "narrative_data attached end-to-end: purely additive, json-clean, consistent with the same result's "
-    f"GeoJSON (zone in the parcel's {_nd['zone']['location']['position_in_parcel']}, "
-    f"{_nd['zone']['area_acres']} ac toward a {_nd['zone']['target_acres']} ac target, serving "
-    f"{_nd['zone']['service']['served_production_area_count']} production area(s))."
+    f"GeoJSON ({_nd['candidate_count']} candidate(s); headline zone in the parcel's "
+    f"{_nd['zone']['location']['position_in_parcel']}, {_nd['zone']['area_acres']} ac, nominated by "
+    f"{_nd['zone']['provenance']['nominated_by']}, serving "
+    f"{_nd['zone']['service']['served_production_area_count']} production area(s); "
+    f"{_nd['nomination']['keypoints_considered']} keypoint(s) considered)."
 )
 
 

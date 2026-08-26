@@ -419,6 +419,29 @@ with ExitStack() as _stack:
     # overrides -- that's the whole point of section 4 below.
     mock_water_zone_delineate = _enter(mock_patch.object(pc.water_candidate_zones, "delineate_valleys"))
     mock_water_zone_identify_pa = _enter(mock_patch.object(pc.water_candidate_zones, "identify_production_areas"))
+    # KEYPOINT DETECTION MUST RUN EXACTLY ONCE PER build_pipeline_context()
+    # RUN, and counting that needs BOTH bindings patched for the same reason
+    # mock_water_zone_delineate above needs its own: pipeline_context.py
+    # calls keypoint_detection.detect_keypoints() through the MODULE, while
+    # water_candidate_zones.py bound the name into its own namespace at
+    # import time (`from keypoint_detection import ... detect_keypoints`) and
+    # resolves it there. water_suitability.py reaches the same binding,
+    # because its find_candidate_zones IS water_candidate_zones', so the two
+    # patches below cover every path in the run. They share one counter so
+    # the assertion is over the RUN, not per-binding.
+    _keypoint_calls: list = []
+
+    def _counting_detect_keypoints(*args, **kwargs):
+        _keypoint_calls.append((args, kwargs))
+        return _real_detect_keypoints(*args, **kwargs)
+
+    _real_detect_keypoints = pc.keypoint_detection.detect_keypoints
+    mock_context_keypoints = _enter(
+        mock_patch.object(pc.keypoint_detection, "detect_keypoints", side_effect=_counting_detect_keypoints)
+    )
+    mock_water_zone_keypoints = _enter(
+        mock_patch.object(pc.water_candidate_zones, "detect_keypoints", side_effect=_counting_detect_keypoints)
+    )
     mock_select_water_zone = _enter(
         mock_patch.object(pc, "fetch_and_select_optimal_water_zone", return_value=fake_selected_water_zone)
     )
@@ -525,6 +548,36 @@ print(
     "Every underlying fetch entry point (DEM, optimized production areas, road exclusion, "
     "floodplain/hydric union, water-system candidate zones, selected water zone, selected road "
     "corridor) was called exactly once."
+)
+
+# --- 1a. keypoint detection runs EXACTLY ONCE across the whole run ---
+#
+# water_candidate_zones.find_candidate_zones() nominates its family-1
+# candidates from keypoints and SELF-DETECTS them when none are supplied,
+# and both water entry points reach it -- so without the forwards below,
+# one DEM would go through detect_keypoints() three times per run. The
+# count is over both module bindings together (see the patch site's own
+# comment for why one is not enough).
+assert len(_keypoint_calls) == 1, (
+    f"keypoint_detection.detect_keypoints() must run EXACTLY ONCE per build_pipeline_context() run "
+    f"(this context's own call), got {len(_keypoint_calls)} -- a second call means a water path is "
+    "re-detecting instead of using the forwarded keypoints"
+)
+assert mock_context_keypoints.call_count == 1, "the one detection is this context's own"
+assert mock_water_zone_keypoints.call_count == 0, (
+    "water_candidate_zones.py's own self-detect fallback must never fire when keypoints are forwarded"
+)
+assert mock_water.call_args.kwargs["keypoints"] is ctx.keypoints, (
+    "identify_water_system_candidate_zones() must receive the context's own keypoints INSTANCE"
+)
+assert mock_select_water_zone.call_args.kwargs["keypoints"] is ctx.keypoints, (
+    "fetch_and_select_optimal_water_zone() must receive the same instance -- it reaches "
+    "find_candidate_zones() independently, through identify_water_suitability()"
+)
+print(
+    f"keypoint_detection.detect_keypoints() ran EXACTLY ONCE across the run ({len(_keypoint_calls)} call, "
+    f"this context's own, yielding {len(ctx.keypoints)} keypoint(s)); both water entry points received "
+    "that exact list and water_candidate_zones.py's own self-detect fallback never fired."
 )
 
 # valley_delineation.delineate_valleys is called exactly once -- against the real dem, for

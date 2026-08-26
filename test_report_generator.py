@@ -400,19 +400,64 @@ from report_generator import (  # noqa: E402
     _format_water_candidate_zones_summary,
 )
 
-_water_nd = {
-    "zone_found": True,
-    "production_area_count": 2,
-    "gates": {"canopy_data_available": True, "road_data_available": True},
-    "zone": {
+# One keypoint-nominated candidate and one
+# accumulation-nominated candidate, plus a keypoint that produced nothing
+# -- so the prose exercises provenance, flags, the level-pool block and the
+# unproductive-keypoint reason-code line in a single fixture.
+def _water_zone_block(zone_id, nominated_by, keypoint_id, valley_id, off_parcel, flags, abut_left_found):
+    return {
+        "id": zone_id,
         "area_acres": 0.5,
-        "target_acres": 0.5,
+        "provenance": {
+            "nominated_by": nominated_by,
+            "keypoint_id": keypoint_id,
+            "valley_id": valley_id,
+            "anchor_off_parcel": off_parcel,
+            "anchor_distance_outside_boundary_ft": 24.6 if off_parcel else 0.0,
+            # The wall sits below the keypoint; family 2's anchor IS its
+            # wall, so it carries 0.0.
+            "wall_offset_downstream_ft": 410.1 if nominated_by == "keypoint" else 0.0,
+        },
+        "flags": flags,
         "location": {"position_in_parcel": "southwest", "elevation_percentile_of_parcel": 22.7},
         "drainage": {
             "contributing_area_acres": 1.9,
             "contributing_area_ceiling_acres": 20.0,
             "slope_median_pct": 40.0,
         },
+        "level_pool": {
+            "reference_height_ft": 8.2,
+            "dam_band_width_ft": 114.8,
+            "abutment_found_left": abut_left_found,
+            "abutment_found_right": True,
+            "abutment_distance_left_ft": 49.2 if abut_left_found else None,
+            "abutment_distance_right_ft": 49.2,
+            "crosses_major_drainage_left": False,
+            # The RIGHT side is truncated at a neighbouring drainage -- a
+            # different finding from an abutment that was not found, and
+            # the prose must say so distinctly.
+            "crosses_major_drainage_right": not abut_left_found,
+            "major_drainage_distance_left_ft": None,
+            "major_drainage_distance_right_ft": None if abut_left_found else 82.0,
+            "backwater_cell_count": 65,
+            "stem_upstream_length_ft": 246.1,
+            "anchor_bearing_deg": 161.6,
+            "stations": [
+                {"station_index": 0, "offset_upstream_ft": 0.0, "status": "measured",
+                 "along_stem_distance_ft": 0.0, "bearing_deg": 161.6, "flooded_width_ft": 82.0,
+                 "flooded_cross_section_area_sqft": 349.8},
+                {"station_index": 1, "offset_upstream_ft": 82.0, "status": "measured",
+                 "along_stem_distance_ft": 82.0, "bearing_deg": 180.0, "flooded_width_ft": 49.2,
+                 "flooded_cross_section_area_sqft": 215.3},
+                # A station past the end of the traced channel: NOT dry,
+                # unmeasured. The prose must say so rather than printing
+                # a zero width.
+                {"station_index": 2, "offset_upstream_ft": 164.0, "status": "unreachable_stem_end",
+                 "along_stem_distance_ft": 98.4, "bearing_deg": None, "flooded_width_ft": None,
+                 "flooded_cross_section_area_sqft": None},
+            ],
+        },
+        "overlap": {"canopy_overlap_pct": 12.5, "road_overlap_pct": 0.0},
         "service": {
             "served_production_area_count": 2,
             "served_production_area_ids": [0, 1],
@@ -423,21 +468,95 @@ _water_nd = {
                  "distance_ft": 0.0, "gradient_pct": None},
             ],
         },
+    }
+
+
+_water_zone_0 = _water_zone_block(
+    0, "keypoint", 1, 0, True, ["anchor_off_parcel", "truncated_by_boundary"], True
+)
+_water_zone_1 = _water_zone_block(1, "accumulation", None, None, False, [], False)
+_water_nd = {
+    "zone_found": True,
+    "candidate_count": 2,
+    "production_area_count": 2,
+    "gates": {"canopy_data_available": True, "road_data_available": True},
+    "nomination": {
+        "keypoints_considered": 3,
+        "keypoint_outcomes": [
+            {"keypoint_id": 1, "valley_id": 0, "contributing_acres": 8.0, "outcome": "nominated",
+             "candidate_id": 0, "on_parcel": False, "distance_outside_boundary_ft": 24.6,
+             "flags": ["anchor_off_parcel"]},
+            {"keypoint_id": 0, "valley_id": 0, "contributing_acres": 3.0,
+             "outcome": "too_close_to_candidate_0", "candidate_id": None, "on_parcel": True,
+             "distance_outside_boundary_ft": 0.0, "flags": []},
+            {"keypoint_id": 2, "valley_id": 1, "contributing_acres": 4.0,
+             "outcome": "below_min_area", "candidate_id": None, "on_parcel": False,
+             "distance_outside_boundary_ft": 41.0, "flags": ["anchor_off_parcel"]},
+        ],
+        "accumulation_seeds": [{"outcome": "nominated", "candidate_id": 1, "flags": []}],
     },
+    "zones": [_water_zone_0, _water_zone_1],
+    "zone": _water_zone_0,
 }
 _water_prose = _format_water_candidate_zones_summary(_water_nd)
+assert "2 candidate survey area(s) identified" in _water_prose
+assert "3 detected keypoint(s)" in _water_prose
 assert "in the parcel's southwest" in _water_prose and "22.7 elevation percentile" in _water_prose
 assert "1.9 acre(s)" in _water_prose and "20.0-acre siltation/peak-flow" in _water_prose
+assert "nominated from keypoint 1 (valley 0)" in _water_prose
+# THE KEYPOINT IS THE POOL'S TAIL. The prose must place the wall
+# downstream of it, or a reader puts the structure on the keypoint marker.
+assert "anchored 410.1 ft DOWNSTREAM of it" in _water_prose, (
+    "a keypoint candidate must state how far below its keypoint the wall stands"
+)
+assert "the keypoint is the upstream tail of the water it would hold" in _water_prose
+assert "such an anchor is already a wall site" in _water_prose, (
+    "family 2 has no keypoint above it, and the prose must say so rather than reporting a bare 0 ft "
+    "offset that reads like a coincidence"
+)
+assert "24.6 ft" in _water_prose and "OUTSIDE the drawn boundary" in _water_prose, (
+    "an off-parcel anchor must be stated as a dam at the property edge, with its measured distance"
+)
+assert "ON-PARCEL portion of the pool" in _water_prose
+assert "nominated from the highest remaining flow accumulation" in _water_prose
+assert "NOT A PROPOSED DAM HEIGHT" in _water_prose
+assert "8.2 ft reference waterline" in _water_prose
+assert "49.2 ft out" in _water_prose
+assert "NOT FOUND within the search width" in _water_prose, (
+    "an abutment that was not found must be stated as a finding, never omitted or shown as 0 ft"
+)
+assert "flooded cross-sectional area 349.8 sq ft" in _water_prose
+assert "bearing 161.6 deg" in _water_prose, "a measured station states the direction it faces"
+assert "NOT MEASURED" in _water_prose and "98.4 ft upstream of the dam line" in _water_prose, (
+    "a station past the end of the traced channel must be stated as unmeasured, with how far the channel "
+    "actually reached"
+)
+assert "absence of a measurement, not a dry cross-section" in _water_prose
+assert "NOT a storage capacity" in _water_prose and "no volume is computed" in _water_prose
+assert "canopy 12.5%" in _water_prose and "NOT used to shrink the zone" in _water_prose
+assert "Flags: anchor_off_parcel, truncated_by_boundary." in _water_prose
+assert "too_close_to_candidate_0" in _water_prose and "below_min_area" in _water_prose, (
+    "keypoints that produced no candidate must be reported with the reason code that stopped them"
+)
+assert "41.0 ft off parcel" in _water_prose, (
+    "an off-parcel keypoint's distance must sit next to its outcome -- it is what makes the outcome legible"
+)
+assert "SECOND major drainage" in _water_prose and "82.0 ft" in _water_prose, (
+    "a dam axis truncated at a neighbouring drainage is a distinct finding and must be stated as one"
+)
 assert "can_gravity_feed: True" in _water_prose and "A gravity-feed relationship." in _water_prose
 assert "would need a pump" in _water_prose, "a below-elevation relationship must be stated as pump-required"
 assert "gradient undefined" in _water_prose, "a distance-0 relationship must state its gradient is undefined, not 0%"
-assert "NOT a specific pond/dam site" in _water_prose
+assert "NOT specific pond/dam sites" in _water_prose
 assert "No water system candidate survey area identified" in _format_water_candidate_zones_summary(None)
 assert "No water system candidate survey area identified" in _format_water_candidate_zones_summary(
-    {"zone_found": False, "production_area_count": 0, "gates": {}, "zone": None}
+    {"zone_found": False, "candidate_count": 0, "production_area_count": 0, "gates": {},
+     "nomination": {"keypoints_considered": 0, "keypoint_outcomes": [], "accumulation_seeds": []},
+     "zones": [], "zone": None}
 )
-print("_format_water_candidate_zones_summary(): position/drainage/gravity-vs-pump rendered from the block; "
-      "no-zone and missing blocks read as no data.")
+print("_format_water_candidate_zones_summary(): N candidates with provenance, flags, level-pool "
+      "measurements (no capacity anywhere), reported overlaps, per-keypoint reason codes, and "
+      "gravity-vs-pump all rendered from the block; no-candidate and missing blocks read as no data.")
 
 _solar_nd = {
     "site_found": True,

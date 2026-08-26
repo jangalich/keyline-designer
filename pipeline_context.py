@@ -38,9 +38,16 @@ FIELD NOTES
   or climate -- it is independent of KSOP), and this call forwards this
   context's own already-computed dem/boundary_polygon_utm/valleys straight
   through so delineate_valleys() is NOT run a second time for it. It earns a
-  context field under the sizing principle now that it has two real
-  consumers -- the layout map (a marker per keypoint) and the report (the
-  keypoint list carried through for narration). detect_keypoints() self-
+  context field under the sizing principle now that it has THREE real
+  consumers -- the layout map (a marker per keypoint), the report (the
+  keypoint list carried through for narration), and the water-system step
+  (water_candidate_zones.find_candidate_zones() nominates its family-1
+  candidate zones from keypoints, ordered by catchment). The water
+  consumer is also why this list is FORWARDED into both water calls below
+  rather than left to self-detect: find_candidate_zones() detects its own
+  keypoints when not handed any, so without the forward this one DEM would
+  be run through detect_keypoints() three times per build_pipeline_
+  context() run. detect_keypoints() self-
   computes its own flow direction/accumulation/filled arrays from dem
   (valley_delineation.py does not expose those, so there is nothing shared
   to forward for them); that is a handful of pure-numpy passes, no network.
@@ -777,12 +784,26 @@ def build_pipeline_context(
     # in test_water_candidate_zones.py against the two signature defaults,
     # not assumed. A real None is reused as "checked, genuinely no roads
     # nearby" rather than re-fetched, same convention as the exclusion call.
+    #
+    # keypoints= closes the SECOND keypoint detection: water_candidate_
+    # zones.find_candidate_zones() nominates its family-1 candidates from
+    # keypoints, and self-detects them when not supplied. This context
+    # already detected them above (in dependency order, right after the
+    # valleys they profile), so both water calls below are handed that one
+    # list and keypoint_detection.detect_keypoints() runs EXACTLY ONCE per
+    # build_pipeline_context() run -- asserted by call count in
+    # test_pipeline_context.py, not assumed. The same objects are handed to
+    # both calls deliberately: find_candidate_zones() only READS a keypoint
+    # (id, valley_id, rowcol, point_utm, contributing_acres), and the
+    # layer-2 relationship pass below mutates them afterwards, so no
+    # ordering hazard exists in either direction.
     water_system_result = water_candidate_zones.identify_water_system_candidate_zones(
         boundary_coordinates,
         dem=dem,
         boundary_polygon_utm=boundary_polygon_utm,
         valleys=valleys,
         production_areas=production_areas,
+        keypoints=keypoints,
         canopy_height=canopy_height,
         road_exclusion_union_utm=existing_roads,
     )
@@ -794,6 +815,11 @@ def build_pipeline_context(
         boundary_polygon_utm=boundary_polygon_utm,
         valleys=valleys,
         production_areas=production_areas,
+        # Same list, same reason as the call above -- this path reaches
+        # find_candidate_zones() independently (through identify_water_
+        # suitability()), so it needs its own forward or it would detect a
+        # second set of keypoints for the same DEM.
+        keypoints=keypoints,
         canopy_height=canopy_height,
     )
     # SAME GUARD as selected_road_corridor below, applied to the water zone:

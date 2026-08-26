@@ -605,20 +605,31 @@ from render_layout_map import (
 #     polygon_utm, its numbered marker lands on that render opening, and the display overlap is allowed. ---
 
 WATER_ZONE_TEST_SIZE = (20, 20)
+# A real V-valley rather than the flat plate this fixture used to carry:
+# water_candidate_zones.find_candidate_zones() delineates a LEVEL POOL at a
+# nominated anchor now, so the zone's shape comes from the terrain and a
+# flat DEM would produce a degenerate single-file zone with nothing for the
+# render opening to trim. This is a 20% side slope out of a channel down
+# column 7, on an 8% grade north -> south, which floods a solid, multi-cell
+# band around the outlet -- blocky enough that the bounded opening is
+# genuinely smaller than the footprint, which is what keeps every
+# render-geometry assertion below non-trivial.
+_wz_array = np.zeros(WATER_ZONE_TEST_SIZE, dtype=np.float32)
+for _wz_r in range(WATER_ZONE_TEST_SIZE[0]):
+    for _wz_c in range(WATER_ZONE_TEST_SIZE[1]):
+        _wz_array[_wz_r, _wz_c] = 100.0 - 0.4 * _wz_r + 0.5 * abs(_wz_c - 7)
 water_zone_test_dem = {
-    "array": np.full(WATER_ZONE_TEST_SIZE, 100.0, dtype=np.float32),
+    "array": _wz_array,
     "resolution_meters": (5.0, 5.0),
     "origin_x": 500000.0,
     "origin_y": 4500000.0,
     "crs": "EPSG:32617",
 }
 
-# Same L-shaped (non-convex) fixture pattern as test_water_candidate_zones.py's own render_fill_polygon_utm
-# tests -- a real drainage band winding around a corner, so the bounded opening genuinely differs from
-# (is smaller than) the blocky footprint.
-wz_vertical_arm = _rect_cells(0, 15, 0, 5)
-wz_horizontal_arm = _rect_cells(10, 15, 0, 15)
-wz_l_shape_mask = _mask_from_cells(WATER_ZONE_TEST_SIZE, list(set(wz_vertical_arm + wz_horizontal_arm)))
+# Every cell eligible: the fixture's point is the RENDER geometry, so the
+# eligibility gates are stubbed out entirely and the zone's shape is left
+# to the level-pool delineation.
+wz_l_shape_mask = np.ones(WATER_ZONE_TEST_SIZE, dtype=bool)
 
 wz_full_extent = box(500000.0, 4500000.0 - 100.0, 500000.0 + 100.0, 4500000.0)
 wz_production_area = {
@@ -628,7 +639,7 @@ wz_production_area = {
     # Deliberately overlaps the water zone's own render opening -- see the corresponding
     # test_water_candidate_zones.py check for why this is the expected, allowed outcome
     # (the ripple texture is allowed to cross a production zone's rendered contour texture).
-    "render_fill_polygon_utm": box(500025.0, 4499950.0, 500075.0, 4500000.0),
+    "render_fill_polygon_utm": box(500025.0, 4499900.0, 500075.0, 4499930.0),
     "area_acres": 0.5,
     "rank": 1,
     "suitability_score": 50.0,
@@ -637,7 +648,13 @@ wz_production_area = {
 _original_compute_water_eligible_cells = wcz.compute_water_eligible_cells
 wcz.compute_water_eligible_cells = lambda *a, **kw: wz_l_shape_mask
 try:
-    wz_zones = find_candidate_zones(water_zone_test_dem, [wz_production_area], wz_full_extent)
+    # Generation is uncapped now, so the single zone render_layout_map()'s
+    # water_zone layer takes is obtained by supplying no keypoints and
+    # pinning family 2's own seed budget to 1.
+    wz_zones = find_candidate_zones(
+        water_zone_test_dem, [wz_production_area], wz_full_extent,
+        keypoints=[], accumulation_seed_budget=1,
+    )
 finally:
     wcz.compute_water_eligible_cells = _original_compute_water_eligible_cells
 
@@ -645,27 +662,21 @@ assert len(wz_zones) == 1, f"expected exactly 1 water zone on this fixture, got 
 water_zone_fixture = dict(wz_zones[0])
 water_zone_fixture["suitability_score"] = 72.5  # render_layout_map() only reads this + 'id', never re-scores
 
-# Current semantics: render_fill_polygon_utm is a BOUNDED render opening, not a convex hull -- it is
-# contained within the zone's own polygon_utm and never exceeds it (the water rebuild replaced the old
-# hull, which had no upper bound, with a disc opening clipped to polygon_utm). It may be a Polygon or a
-# MultiPolygon (a narrow pinch severs into pieces); every assertion here tolerates both. It is genuinely
-# smaller than the real, blocky footprint on this L-shaped fixture, so the marker-placement check below --
-# marker on the render opening, computed the same way render_layout_map() does -- stays non-trivial.
+# Current semantics: for a WATER zone render_fill_polygon_utm IS polygon_utm -- the identity. The bounded
+# disc opening that used to make them differ is deleted, because it removes anything narrower than 2r and
+# the dam band is one to two cells wide by construction (see water_candidate_zones.py's constants
+# section). So the ripple texture now clips to the zone's real footprint. It may still be a Polygon or a
+# MultiPolygon (the boundary clip can split one), and every assertion here tolerates both.
 _wz_render_fill = water_zone_fixture["render_fill_polygon_utm"]
 _wz_polygon = water_zone_fixture["polygon_utm"]
 assert _wz_render_fill.geom_type in ("Polygon", "MultiPolygon"), (
     f"render_fill_polygon_utm must be a (Multi)Polygon, got {_wz_render_fill.geom_type}"
 )
-assert _wz_polygon.buffer(1e-6).contains(_wz_render_fill), (
-    "render_fill_polygon_utm (a bounded render opening) must be contained within the zone's own polygon_utm"
+assert _wz_render_fill is _wz_polygon, (
+    "for a water zone render_fill_polygon_utm IS polygon_utm -- the same object. The bounded opening that "
+    "used to make them differ is deleted (it erased the one-to-two-cell dam band by construction)."
 )
-assert _wz_render_fill.area <= _wz_polygon.area * (1 + 1e-9) + 1e-6, (
-    "render_fill_polygon_utm must never exceed polygon_utm's area -- bounded by construction, not a hull"
-)
-assert _wz_render_fill.area < _wz_polygon.area, (
-    "test setup: on this L-shaped fixture the render opening must be strictly smaller than the blocky "
-    "footprint, so the render geometry genuinely differs from the real footprint"
-)
+assert water_zone_fixture["render_fill_geometry_wgs84"] is water_zone_fixture["geometry_wgs84"]
 
 # Record every plot_polygon()/plot_line() call (GEOMETRY + kwargs) render_layout_map() makes, so the ripple
 # lines' own color/alpha/zorder/linewidth (and the ABSENCE of any water-zone fill polygon) can be confirmed
@@ -748,28 +759,26 @@ print(
     "calls for the water zone."
 )
 
-# Ported invariant (previously carried by the numbered marker's placement): the geometry actually DRAWN for
-# the water zone is clipped to render_fill_polygon_utm (the render opening), NOT to the real, blocky
-# geometry_wgs84. The old assertion proved the marker sat on the render opening's own representative_point();
-# with no marker anymore, we prove the SAME thing directly on the drawn ripple LINES -- every ripple line
-# must lie within the reprojected render_fill_polygon_utm.
+# The geometry actually DRAWN for the water zone is clipped to
+# render_fill_polygon_utm. Since the bounded opening was deleted that is now the SAME geometry as
+# geometry_wgs84, so this can no longer discriminate between the two the way it did when they differed --
+# and that is the point: with one geometry behind both the report's acreage and the map's fill, the class
+# of bug this check guarded against (map drawing a different shape from the one the report quotes) cannot
+# occur. What is still worth asserting, and is asserted below, is that every drawn ripple lies within the
+# zone's real footprint rather than escaping it -- clipping is still happening, and to the right shape.
 expected_render_fill_mercator = rlm._reproject_utm_geometry_to_mercator(
     water_zone_fixture["render_fill_polygon_utm"], water_zone_test_dem["crs"]
 )
 expected_footprint_mercator = rlm._reproject_geometry_to_mercator(water_zone_fixture["geometry_wgs84"])
-# The render opening is strictly smaller than the reprojected geometry_wgs84 footprint on this L-shaped
-# fixture, so ripples clipped to geometry_wgs84 instead would escape render_fill -- this makes the
-# containment check below a real discriminator, not a tautology.
-assert expected_render_fill_mercator.area < expected_footprint_mercator.area, (
-    "test setup: the reprojected render opening must be strictly smaller than the reprojected geometry_wgs84 "
-    "footprint, otherwise the containment check below wouldn't distinguish render_fill from geometry_wgs84"
-)
+# Same source geometry, so the two reprojections agree to within reprojection noise.
+assert abs(expected_render_fill_mercator.area - expected_footprint_mercator.area) < (
+    expected_footprint_mercator.area * 1e-6
+), "render_fill and geometry_wgs84 are the same geometry now -- their reprojections must agree"
 _render_fill_padded = expected_render_fill_mercator.buffer(1e-6)
 for geom, _kw in water_ripple_calls:
     assert _render_fill_padded.contains(geom), (
-        "every water-zone ripple line must lie within render_fill_polygon_utm (the render opening actually "
-        "drawn), not geometry_wgs84 -- a ripple escaping the opening would mean the clip used the wrong "
-        "geometry"
+        "every water-zone ripple line must lie within render_fill_polygon_utm -- a ripple escaping it would "
+        "mean the texture was clipped to the wrong geometry, or not clipped at all"
     )
 
 # The water zone contributes exactly one "Water System Survey Area" legend entry (before the boundary
@@ -782,10 +791,10 @@ assert _wz_legend_labels == [rlm.LEGEND_LABEL_WATER, rlm.LEGEND_LABEL_FENCING], 
 
 print(
     "Full pipeline with a synthetic water zone: render_layout_map() runs offline end-to-end, draws the water "
-    "zone as ripple-line texture clipped to render_fill_polygon_utm (the bounded render opening, not the real "
-    "blocky geometry_wgs84 -- proven directly on the drawn ripple lines now that no marker carries it), emits "
-    "a single 'Water System Survey Area' legend entry, and completes successfully even though the render "
-    "opening deliberately overlaps a production area's own render_fill_polygon_utm."
+    "zone as ripple-line texture clipped to render_fill_polygon_utm -- which IS polygon_utm now, so the map "
+    "and the report cannot disagree about the zone's extent -- emits a single 'Water System Survey Area' "
+    "legend entry, and completes successfully even though that footprint deliberately overlaps a production "
+    "area's own render_fill_polygon_utm."
 )
 
 

@@ -1050,6 +1050,7 @@ def identify_water_suitability(
     boundary_polygon_utm: Optional[Polygon] = None,
     valleys: Optional[list[dict]] = None,
     production_areas: Optional[list[dict]] = None,
+    keypoints: Optional[list[dict]] = None,
     check_soil: bool = True,
     check_streams: bool = True,
     zone_kwargs: Optional[dict] = None,
@@ -1073,6 +1074,15 @@ def identify_water_suitability(
     docstring for the general reasoning; the one thing that's different
     here is what production_areas defaults to when not supplied (see
     below).
+
+    keypoints is an optional pre-detected override in the same family --
+    keypoint_detection.detect_keypoints()'s own list -- passed straight
+    through to water_candidate_zones.find_candidate_zones(), which uses it
+    as its FAMILY 1 nomination source and otherwise detects keypoints
+    itself. Supplying it is what keeps keypoint detection to exactly ONE
+    run per pipeline pass: build_pipeline_context() detects once and hands
+    the same list to both water paths. This module reads nothing off a
+    keypoint itself; it only forwards.
 
     canopy_height is an optional pre-fetched override in the same family:
     the SAME dict canopy_height_data.get_canopy_height_for_boundary()
@@ -1142,8 +1152,17 @@ def identify_water_suitability(
     # Same mandatory-canopy/optional-road wiring identify_water_system_
     # candidate_zones() uses -- this entry point also reaches
     # find_candidate_zones() directly (not through that function), so it
-    # needs its own copy of the same fetch-or-raise/fetch-or-degrade calls
-    # rather than silently leaving these new gates unchecked on this path.
+    # needs its own copy of the same fetch-or-raise/fetch-or-degrade calls.
+    #
+    # BOTH ARE MEASUREMENT INPUTS NOW, not gates: canopy and roads no
+    # longer gate water-zone nomination (see compute_water_eligible_
+    # cells()); they feed each candidate's canopy_overlap_pct /
+    # road_overlap_pct. The fetch-or-raise posture on canopy is kept
+    # deliberately -- a silently missing measurement is worse than a loud
+    # failure while this pipeline is being validated, and the pipeline path
+    # supplies canopy_height from ParcelData anyway so the fetch is free
+    # there. Road keeps its graceful degrade: an outage yields
+    # road_overlap_pct=None ("not checked"), never a fabricated 0.0.
     canopy_root_zone_mask_utm = get_required_tree_root_zone_mask_utm(
         boundary_polygon_utm, dem, buffer_meters=WATER_ZONE_CANOPY_BUFFER_METERS, canopy_height=canopy_height
     )
@@ -1163,6 +1182,7 @@ def identify_water_suitability(
         boundary_polygon_utm,
         canopy_root_zone_mask_utm=canopy_root_zone_mask_utm,
         road_exclusion_union_utm=road_exclusion_union_utm,
+        keypoints=keypoints,
         **(zone_kwargs or {}),
     )
 
