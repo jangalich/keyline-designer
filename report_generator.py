@@ -463,11 +463,22 @@ def _format_water_candidate_zones_summary(water_narrative: Optional[dict]) -> st
                     "from an abutment that was not found."
                 )
         for station in pool["stations"]:
+            if station["status"] != "measured":
+                # NOT dry -- unmeasured. The traced channel ended before
+                # this station, so there is no cross-section to report. A
+                # 0 ft width here would be terrain this survey never saw.
+                lines.append(
+                    f"  - cross-section {station['offset_upstream_ft']} ft upstream: NOT MEASURED -- the "
+                    f"traced channel ends {station['along_stem_distance_ft']} ft upstream of the dam line, "
+                    "so there is no channel here to cross-section. This is the absence of a measurement, "
+                    "not a dry cross-section."
+                )
+                continue
             lines.append(
-                f"  - cross-section {station['offset_upstream_ft']} ft upstream: flooded width "
-                f"{station['flooded_width_ft']} ft, flooded cross-sectional area "
-                f"{station['flooded_cross_section_area_sqft']} sq ft (a cross-section, NOT a storage "
-                "capacity -- no volume is computed anywhere in this pipeline)"
+                f"  - cross-section {station['offset_upstream_ft']} ft upstream (bearing "
+                f"{station['bearing_deg']} deg): flooded width {station['flooded_width_ft']} ft, flooded "
+                f"cross-sectional area {station['flooded_cross_section_area_sqft']} sq ft (a "
+                "cross-section, NOT a storage capacity -- no volume is computed anywhere in this pipeline)"
             )
         overlap = zone["overlap"]
         lines.append(

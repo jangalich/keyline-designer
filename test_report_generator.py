@@ -437,13 +437,21 @@ def _water_zone_block(zone_id, nominated_by, keypoint_id, valley_id, off_parcel,
             "major_drainage_distance_left_ft": None,
             "major_drainage_distance_right_ft": None if abut_left_found else 82.0,
             "backwater_cell_count": 65,
+            "stem_upstream_length_ft": 246.1,
+            "anchor_bearing_deg": 161.6,
             "stations": [
-                {"station_index": 0, "offset_upstream_ft": 0.0, "flooded_width_ft": 82.0,
+                {"station_index": 0, "offset_upstream_ft": 0.0, "status": "measured",
+                 "along_stem_distance_ft": 0.0, "bearing_deg": 161.6, "flooded_width_ft": 82.0,
                  "flooded_cross_section_area_sqft": 349.8},
-                {"station_index": 1, "offset_upstream_ft": 82.0, "flooded_width_ft": 49.2,
+                {"station_index": 1, "offset_upstream_ft": 82.0, "status": "measured",
+                 "along_stem_distance_ft": 82.0, "bearing_deg": 180.0, "flooded_width_ft": 49.2,
                  "flooded_cross_section_area_sqft": 215.3},
-                {"station_index": 2, "offset_upstream_ft": 164.0, "flooded_width_ft": 49.2,
-                 "flooded_cross_section_area_sqft": 134.6},
+                # A station past the end of the traced channel: NOT dry,
+                # unmeasured. The prose must say so rather than printing
+                # a zero width.
+                {"station_index": 2, "offset_upstream_ft": 164.0, "status": "unreachable_stem_end",
+                 "along_stem_distance_ft": 98.4, "bearing_deg": None, "flooded_width_ft": None,
+                 "flooded_cross_section_area_sqft": None},
             ],
         },
         "overlap": {"canopy_overlap_pct": 12.5, "road_overlap_pct": 0.0},
@@ -505,6 +513,12 @@ assert "NOT FOUND within the search width" in _water_prose, (
     "an abutment that was not found must be stated as a finding, never omitted or shown as 0 ft"
 )
 assert "flooded cross-sectional area 349.8 sq ft" in _water_prose
+assert "bearing 161.6 deg" in _water_prose, "a measured station states the direction it faces"
+assert "NOT MEASURED" in _water_prose and "98.4 ft upstream of the dam line" in _water_prose, (
+    "a station past the end of the traced channel must be stated as unmeasured, with how far the channel "
+    "actually reached"
+)
+assert "absence of a measurement, not a dry cross-section" in _water_prose
 assert "NOT a storage capacity" in _water_prose and "no volume is computed" in _water_prose
 assert "canopy 12.5%" in _water_prose and "NOT used to shrink the zone" in _water_prose
 assert "Flags: anchor_off_parcel, truncated_by_boundary." in _water_prose

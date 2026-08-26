@@ -1560,8 +1560,16 @@ assert _nd_pool["reference_height_ft"] == round(POOL_REFERENCE_HEIGHT_METERS / M
 assert len(_nd_pool["stations"]) == 3
 for _st in _nd_pool["stations"]:
     assert set(_st) == {
-        "station_index", "offset_upstream_ft", "flooded_width_ft", "flooded_cross_section_area_sqft"
+        "station_index", "offset_upstream_ft", "status", "along_stem_distance_ft", "bearing_deg",
+        "flooded_width_ft", "flooded_cross_section_area_sqft",
     }, set(_st)
+    # STATUS TRAVELS WITH THE NUMBERS: an unreachable station carries no
+    # width or area, so a narrative cannot read a missing measurement as
+    # dry ground.
+    assert _st["status"] in ("measured", "unreachable_stem_end"), _st
+    if _st["status"] != "measured":
+        assert _st["flooded_width_ft"] is None and _st["flooded_cross_section_area_sqft"] is None, _st
+assert "stem_upstream_length_ft" in _nd_pool and "anchor_bearing_deg" in _nd_pool
 # The band-crossing findings reach the narrative alongside (never instead
 # of) the abutment findings.
 for _k in ("crosses_major_drainage_left", "crosses_major_drainage_right",

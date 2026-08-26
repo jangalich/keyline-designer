@@ -8,12 +8,29 @@ would the wall have to span?" -- as GEOMETRY AND RELATIVE MEASUREMENTS,
 never as a design.
 
     dem + filled + (flow_to_row, flow_to_col) + upstream map + anchor cell
-        --> valley axis at the anchor (fit_valley_axis)
+        --> the traced STEM through the anchor (_stem_through_anchor)
         --> backwater region   (walk the upstream map, raw-elevation test)
-        --> dam-axis band      (walk the perpendicular, raw-elevation test)
-        --> cross-section measurements at 3 upstream stations
+        --> dam-axis band      (perpendicular to the stem's local direction
+                                at the anchor, raw-elevation test)
+        --> cross-section measurements at 3 stations ALONG THE STEM, each
+            facing the stem's local direction at its own position
         --> one dict: pool cells, band cells, abutment results, station
             measurements, flags
+
+EVERY DIRECTION COMES FROM THE STEM, AT THE PLACE IT IS NEEDED. Nothing is
+fitted. An earlier version derived a single straight valley axis at the
+anchor by total least squares through a short walk and used it for the dam
+band AND for placing every station -- and that straight-line assumption is
+what this module no longer makes. Where a valley is emphatic the fit was
+harmless; where it is subtle -- flat marshy ground, or a reach whose flow
+field is thinned by valley_delineation.py's flat-tie sentinel -- it had
+almost no signal and could settle up to 90 degrees off, putting the
+"perpendicular" ALONG the channel and marching the stations up a side
+slope. On the reference property five of six candidates reported a
+station-0 flooded width of exactly the full sampling window with the next
+station bone dry: not a valley profile, the signature of a rotated axis.
+See local_stem_direction() for the replacement and STEM_DIRECTION_WINDOW_
+CELLS for the one remaining tuning knob.
 
 PURE AND NETWORK-FREE. Every input is an array or a plain dict; nothing
 here fetches, and nothing here imports a network layer. That is what makes
@@ -63,6 +80,17 @@ read metres high and would more than double the reported flooded width.
 test_valley_level_pool.py asserts both halves separately, including the
 pit truncation, so an epsilon fill in the layer below fails these tests
 loudly rather than silently changing what a pool means.
+
+UNREACHABLE IS NOT DRY. A station past the end of the traced stem reports
+status 'unreachable_stem_end' with the along-stem distance actually
+reached, and its width and area are absent (None) -- never 0.0. Zero width
+is a real measurement, "the ground rises above the waterline here";
+unreachable is the absence of one, "there is no channel here to measure."
+Both statuses are part of the measurement contract the scoring branch
+reads. This is also where valley_delineation.py's known flat-tie
+limitation now shows itself honestly -- as short stems and unreachable
+stations rather than as fabricated dry ones. It is FLAGGED here, not fixed
+here; the fix belongs in the hydrology layer.
 
 NO VOLUME, ANYWHERE. This module computes flooded WIDTH (meters) and
 flooded CROSS-SECTIONAL AREA (square meters) at discrete stations. It
@@ -172,22 +200,45 @@ CROSS_SECTION_STATION_SPACING_METERS = 25.0
 # small parcel. NOT validated beyond the reference property. CONFIGURABLE.
 CROSS_SECTION_STATIONS = 3
 
-# Half-length of the walk, in cells, on EACH side of the anchor used to fit
-# the local valley axis (so up to 2 * 4 + 1 = 9 cell centers are fitted).
+# Station status values -- part of the measurement contract the scoring
+# branch reads. 'measured' means the numbers alongside describe real
+# ground; 'unreachable_stem_end' means the traced stem ended before this
+# station and there was no channel here to measure, so width and area are
+# ABSENT (None) rather than zero. Collapsing the two would let a marsh
+# whose flow field died score like a ridge.
+STATION_MEASURED = "measured"
+STATION_UNREACHABLE_STEM_END = "unreachable_stem_end"
+
+# Half-width, in stem cells, of the SECANT WINDOW used to read the stem's
+# local direction at a point (so the secant spans up to 2 * 2 + 1 = 5 cell
+# centers). Used at the anchor for the dam-axis perpendicular, and again at
+# each cross-section station for that station's own perpendicular.
 #
-# The fit exists because RAW D8 DIRECTION IS TOO QUANTIZED TO DEFINE A
-# PERPENDICULAR: D8 only ever names one of 8 directions, so a dam axis
-# built off it would snap to 45 degree increments and could be up to 22.5
-# degrees off the real valley line -- at 75 m of search that is over 28 m
-# of lateral error in where an abutment is looked for. A least-squares
-# line through a short walk through the anchor recovers a continuous
-# direction from the same quantized steps.
+# A window exists at all because RAW D8 DIRECTION IS TOO QUANTIZED TO
+# DEFINE A PERPENDICULAR: D8 only ever names one of 8 directions, so a
+# perpendicular built off a single step snaps to 45 degree increments and
+# could be up to 22.5 degrees off the real channel line -- at
+# ABUTMENT_SEARCH_HALF_WIDTH_METERS that is tens of meters of lateral error
+# in where a section is taken. Averaging over a few cells recovers a
+# continuous direction from the same quantized steps.
 #
-# 4 cells (20 m at 5 m resolution) is short enough that the fitted line
-# stays LOCAL -- it describes the valley at the dam site, not the valley's
-# average course -- and long enough to average out single-step D8
-# quantization. NOT validated beyond the reference property. CONFIGURABLE.
-VALLEY_AXIS_WALK_CELLS = 4
+# 2 cells (a 20 m secant at 5 m resolution) is the smallest window that
+# does that, and deliberately small: the window must stay SHORT enough to
+# follow a bend. It replaced a 4-cell half-window feeding a straight-line
+# fit through the whole neighbourhood, which is exactly the assumption this
+# design removed (see local_stem_direction()). Widen it and curved valleys
+# start being cut corners; narrow it to 1 and the 45 degree quantization
+# comes back. NOT validated beyond the reference property. CONFIGURABLE.
+STEM_DIRECTION_WINDOW_CELLS = 2
+
+# The RETIRED straight-line fit's own half-window, kept as a NAMED NUMBER
+# for one purpose only: diagnose_water_zone_mask.py reconstructs that fit
+# locally, next to the stem's own bearing, so the reference-property
+# acceptance run can confirm or refute the rotated-axis diagnosis that
+# motivated deleting it. Nothing in this module reads it, and the fit
+# itself does not exist here any more. DELETE THIS ALONG WITH THAT
+# TRANSITIONAL DIAGNOSTIC once the acceptance run is done.
+VALLEY_AXIS_WALK_CELLS_RETIRED = 4
 
 
 def rowcol_for_xy(dem: dict, x: float, y: float) -> Optional[tuple[int, int]]:
@@ -280,94 +331,134 @@ def _upstream_stem_walk(
     return walk
 
 
-def fit_valley_axis(
+def _stem_through_anchor(
     dem: dict,
     anchor: tuple[int, int],
     flow_to_row: np.ndarray,
     flow_to_col: np.ndarray,
     upstream_map: dict,
     flow_accumulation: np.ndarray,
-    walk_cells: int = VALLEY_AXIS_WALK_CELLS,
-) -> tuple[float, float]:
+    upstream_steps: int,
+    downstream_steps: int,
+) -> tuple[list[tuple[int, int]], int, list[float]]:
     """
-    The local valley direction at `anchor`, as a UNIT VECTOR POINTING
-    DOWNSTREAM in dem['crs'] meters.
+    The traced stem polyline THROUGH `anchor`, as
+    (stem_cells, anchor_index, along_stem_distance_m).
 
-    Method: walk up to walk_cells cells downstream of the anchor through
-    the D8 flow field, and up to walk_cells cells upstream along the
-    highest-accumulation feeder over `upstream_map` (both walks reuse
-    keypoint_detection.py's own conventions -- see _upstream_stem_walk()),
-    take those cell centers plus the anchor's, and fit a line through them
-    by TOTAL least squares (the principal axis of the centered point
-    cloud's scatter matrix).
+    stem_cells is ordered DOWNSTREAM-FIRST, so the index increases going
+    UPSTREAM and `anchor_index` is the anchor's position in it. Both halves
+    reuse the module's existing walks -- _downstream_walk() through the D8
+    flow field, _upstream_stem_walk() taking the highest-accumulation feeder
+    over the upstream map -- which are themselves keypoint_detection.py's
+    own conventions rather than a second definition of "the stem".
 
-    Total least squares rather than y-on-x: a valley running due north
-    would make an ordinary y = mx + b fit vertical and undefined, and the
-    answer here is a DIRECTION, so the residual that matters is
-    perpendicular distance to the line, not vertical distance. The
-    principal eigenvector of the scatter matrix minimises exactly that.
+    along_stem_distance_m is SIGNED, measured from the anchor along the
+    polyline: negative downstream, 0 at the anchor, positive upstream. It
+    accumulates REAL ground distance between successive cell centers, so a
+    diagonal D8 step correctly costs sqrt(2)x a cardinal one -- the same
+    accumulation keypoint_detection._profile_along_stem() performs.
 
-    WHY FIT AT ALL: raw D8 direction names one of only 8 directions, so a
-    perpendicular built from it snaps to 45 degree increments -- up to 22.5
-    degrees of error, which at ABUTMENT_SEARCH_HALF_WIDTH_METERS is tens of
-    meters of lateral error in where the dam axis is looked for. See
-    VALLEY_AXIS_WALK_CELLS's own docstring.
-
-    Degenerate cases, all honest rather than raised: with fewer than two
-    distinct points (an anchor with no downstream target and no feeder, or
-    a single-cell grid) the fit is undefined, and the D8 step direction is
-    used instead; with no D8 step either, (0.0, -1.0) (due south, the
-    default "downhill" on a north-up grid) is returned so callers always
-    get a usable axis. Both fallbacks are logged at debug level.
+    NO PRECOMPUTED STEM IS ACCEPTED, and that is a decision rather than an
+    omission. The obvious candidate would be keypoint_detection.
+    trace_stem_from_outlet()'s stem, but it traces from a VALLEY'S OUTLET,
+    not through an arbitrary cell: a keypoint sits somewhere along it (so
+    the caller would still have to locate the anchor within it and handle
+    the case where it does not appear at all), and a FAMILY-2 anchor has no
+    such stem in existence. Tracing locally is both families' only common
+    path, costs a bounded handful of array lookups, and keeps this function
+    pure. If a caller ever does hold a real stem through its anchor, an
+    override belongs here and must be forwarded per the nested-forwarding
+    rule; nothing in the pipeline holds one today.
     """
-    downstream = _downstream_walk(anchor, flow_to_row, flow_to_col, walk_cells)
-    upstream = _upstream_stem_walk(anchor, upstream_map, flow_accumulation, walk_cells)
+    downstream = _downstream_walk(anchor, flow_to_row, flow_to_col, downstream_steps)
+    upstream = _upstream_stem_walk(anchor, upstream_map, flow_accumulation, upstream_steps)
 
-    # Ordered upstream -> anchor -> downstream, so the endpoint difference
-    # below is a real downstream-pointing vector.
-    path = list(reversed(upstream)) + [anchor] + downstream
-    points = np.array([pixel_center_xy(dem, r, c) for r, c in path], dtype=float)
+    stem_cells = list(reversed(downstream)) + [anchor] + upstream
+    anchor_index = len(downstream)
 
-    direction = None
-    if len(points) >= 2:
-        centered = points - points.mean(axis=0)
-        scatter = centered.T @ centered
-        eigenvalues, eigenvectors = np.linalg.eigh(scatter)
-        if float(eigenvalues[-1]) > 0.0:
-            direction = np.asarray(eigenvectors[:, -1], dtype=float)
+    along: list[float] = [0.0] * len(stem_cells)
+    for i in range(anchor_index + 1, len(stem_cells)):
+        along[i] = along[i - 1] + _cell_center_distance(dem, stem_cells[i - 1], stem_cells[i])
+    for i in range(anchor_index - 1, -1, -1):
+        along[i] = along[i + 1] - _cell_center_distance(dem, stem_cells[i + 1], stem_cells[i])
+    return stem_cells, anchor_index, along
 
-    if direction is None:
-        # No spread to fit (identical points, or a lone anchor cell): fall
-        # back to the raw D8 step, quantized but real.
-        tr = int(flow_to_row[anchor[0], anchor[1]])
-        tc = int(flow_to_col[anchor[0], anchor[1]])
-        if tr >= 0:
-            ax, ay = pixel_center_xy(dem, anchor[0], anchor[1])
-            bx, by = pixel_center_xy(dem, tr, tc)
-            direction = np.array([bx - ax, by - ay], dtype=float)
-            _LOGGER.debug(
-                "fit_valley_axis: no fittable spread at %s; falling back to the raw D8 step", anchor
-            )
-        else:
-            _LOGGER.debug(
-                "fit_valley_axis: no fittable spread and no D8 step at %s; defaulting to due south", anchor
-            )
-            return (0.0, -1.0)
 
-    norm = float(np.hypot(direction[0], direction[1]))
-    if norm == 0.0:
-        return (0.0, -1.0)
-    unit = direction / norm
+def local_stem_direction(
+    dem: dict,
+    stem_cells: list[tuple[int, int]],
+    index: int,
+    window_cells: int = STEM_DIRECTION_WINDOW_CELLS,
+) -> tuple[tuple[float, float], bool]:
+    """
+    The DOWNSTREAM-pointing unit direction of the stem at `index`, as
+    (unit_vector, degenerate_flag).
 
-    # Orient DOWNSTREAM: the fitted axis is a line, so its eigenvector sign
-    # is arbitrary. Point it along the path's own upstream-end ->
-    # downstream-end vector.
-    head = points[0]
-    tail = points[-1]
-    flow_vector = tail - head
-    if float(np.dot(unit, flow_vector)) < 0.0:
-        unit = -unit
-    return (float(unit[0]), float(unit[1]))
+    Method: the SECANT across a window of +/- window_cells stem cells
+    centered on `index`, clamped at the stem's ends. Because the stem is
+    ordered downstream-first, "downstream" is the direction of DECREASING
+    index, so the vector runs from the upper-index endpoint to the
+    lower-index one.
+
+    WHY A SECANT AND NOT THE RAW STEP: a single D8 step names one of only
+    eight directions, so a perpendicular built from it snaps to 45 degree
+    increments -- up to 22.5 degrees of error, which at
+    ABUTMENT_SEARCH_HALF_WIDTH_METERS is tens of meters of lateral error in
+    where a cross-section is taken. Averaging over a few cells recovers a
+    continuous direction from the same quantized steps.
+
+    WHY LOCAL AND NOT A LINE THROUGH THE WHOLE WALK: this REPLACED a global
+    total-least-squares fit of a straight line through the anchor's
+    neighbourhood, and the replacement is the point of this design. A
+    straight axis is only as good as the assumption that the valley IS
+    straight there. Where the valley is emphatic (a confluence, a sharp V)
+    that assumption is harmless; where it is subtle -- flat, marshy ground,
+    or a reach whose flow field is thinned by the flat-tie sentinel -- the
+    fit has almost no signal to work with and can settle up to 90 degrees
+    off, which puts the "perpendicular" ALONG the channel and marches the
+    stations up a side slope. Observed on the reference property: five of
+    six candidates reported a station-0 flooded width of exactly the full
+    sampling window with the next station bone dry, which is not a valley
+    profile at all. Nothing is fitted now: every direction comes from the
+    stem itself, at the place it is needed, so a curved valley is followed
+    rather than approximated.
+
+    DEGENERATE WINDOWS. If the clamped endpoints coincide (they can only do
+    so on a stem of length 1, or when both clamp to the same cell), the
+    window is WIDENED until they do not. If no width separates them, the
+    second return value is True and the caller is handed a fallback
+    direction rather than a zero vector -- an honest "this stem has no
+    direction" rather than a silent (0, 0).
+    """
+    n = len(stem_cells)
+    if n == 0:
+        return (0.0, -1.0), True
+    for width in range(max(1, int(window_cells)), n + 1):
+        lo = max(0, index - width)
+        hi = min(n - 1, index + width)
+        if lo == hi:
+            continue
+        ax, ay = pixel_center_xy(dem, *stem_cells[hi])   # upstream end
+        bx, by = pixel_center_xy(dem, *stem_cells[lo])   # downstream end
+        dx, dy = bx - ax, by - ay
+        norm = math.hypot(dx, dy)
+        if norm > 0.0:
+            return (dx / norm, dy / norm), False
+    _LOGGER.debug(
+        "local_stem_direction: no non-degenerate window at index %d of a %d-cell stem", index, n
+    )
+    return (0.0, -1.0), True
+
+
+def bearing_degrees(direction: tuple[float, float]) -> float:
+    """
+    A direction vector as a COMPASS BEARING: 0 = north, increasing
+    clockwise, in [0, 360). UTM axes are +x east / +y north, so
+    atan2(dx, dy) is already that bearing. Reported on stations and the dam
+    band so a diagnostic (or a test) can compare directions in the units a
+    person reads a map in, rather than in raw vector components.
+    """
+    return round(math.degrees(math.atan2(direction[0], direction[1])) % 360.0, 2)
 
 
 def _sample_perpendicular(
@@ -599,7 +690,7 @@ def delineate_level_pool(
     max_backwater_upstream_meters: float = MAX_BACKWATER_UPSTREAM_METERS,
     station_spacing_meters: float = CROSS_SECTION_STATION_SPACING_METERS,
     station_count: int = CROSS_SECTION_STATIONS,
-    axis_walk_cells: int = VALLEY_AXIS_WALK_CELLS,
+    stem_direction_window_cells: int = STEM_DIRECTION_WINDOW_CELLS,
     max_contributing_cells: Optional[float] = None,
 ) -> dict:
     """
@@ -630,8 +721,10 @@ def delineate_level_pool(
        band is therefore the zone's downstream edge, with the anchor on it.
        Asserted in test_valley_level_pool.py.
 
-    2. THE DAM-AXIS BAND. fit_valley_axis() gives the local downstream
-       direction; the dam axis is its perpendicular through the anchor.
+    2. THE DAM-AXIS BAND. The stem's LOCAL direction at the anchor (a
+       secant over +/- stem_direction_window_cells stem cells, see
+       local_stem_direction()) gives the downstream direction; the dam axis
+       is its perpendicular through the anchor.
        Both sides are walked at cell resolution until raw terrain reaches
        z_w (abutment found, distance recorded) or
        abutment_search_half_width_meters runs out (abutment_found_<side> =
@@ -657,7 +750,7 @@ def delineate_level_pool(
        runtime.
 
     3. CROSS-SECTION MEASUREMENTS at `station_count` stations spaced
-       station_spacing_meters apart along the valley axis, UPSTREAM of the
+       station_spacing_meters apart ALONG THE TRACED STEM, upstream of the
        anchor (station 0 is the anchor itself). Each records the flooded
        width and flooded cross-sectional area of the contiguous
        below-waterline span around the channel. These are computed HERE,
@@ -665,6 +758,33 @@ def delineate_level_pool(
        the geometry and the numbers describing it cannot drift apart --
        a later scoring branch reading these is reading measurements of the
        exact polygon this run drew.
+
+       STATIONS SIT ON THE STEM, AND EACH FACES ITS OWN WAY. A station is
+       placed by WALKING the stem polyline and accumulating real ground
+       distance, then taking the stem cell nearest the target distance; its
+       perpendicular comes from the stem's LOCAL direction at that cell,
+       not from any single direction shared across the run. That is what
+       makes a curved valley work, and no straight axis can do it: past a
+       bend, a fixed direction walks the stations off the channel and
+       cross-sections them at the wrong angle. (A nearest-CELL placement,
+       rather than interpolating a point along the segment, is deliberate:
+       it guarantees the station is a real channel cell whose elevation is
+       the DEM's own, which is what makes these numbers hand-checkable.)
+
+       UNREACHABLE IS NOT DRY. The stem walk can end before the last
+       station -- a flat-tie -1 sentinel in the flow field, the grid edge,
+       or simply a stem shorter than station_count * spacing. A station
+       past the stem's end reports status "unreachable_stem_end" with the
+       along-stem distance actually reached, and its width/area are None.
+       IT IS NEVER REPORTED AS 0.0 m WIDE. Those are different facts:
+       0.0 m is a MEASUREMENT ("the ground rises above the waterline
+       here"), unreachable is the ABSENCE of one ("there is no channel
+       here to measure"). A scoring layer that averaged them together
+       would score a marsh whose flow field died as though it were a
+       ridge. This is also where valley_delineation.py's known flat-tie
+       limitation now surfaces honestly -- as short stems and unreachable
+       stations rather than as fabricated dry ones. It is FLAGGED here,
+       not fixed here.
 
        NO VOLUME IS COMPUTED, STORED, OR REPORTED, here or downstream. See
        the module docstring for why. No key below names a capacity.
@@ -676,8 +796,16 @@ def delineate_level_pool(
           'anchor_elevation_m': float,       # RAW
           'waterline_elevation_m': float,    # anchor + reference height
           'reference_height_meters': float,
-          'valley_axis_unit': (ux, uy),      # downstream-pointing unit vector
-          'dam_axis_unit': (ux, uy),         # the perpendicular (left-pointing)
+          'anchor_direction_unit': (ux, uy), # the STEM's local downstream
+                                             #   direction at the anchor
+          'anchor_bearing_deg': float,       # the same, as a compass bearing
+          'dam_axis_unit': (ux, uy),         # its perpendicular (left-pointing)
+          'stem_cells': [(row, col), ...],   # the traced polyline through the
+                                             #   anchor, downstream-first
+          'anchor_stem_index': int,          # the anchor's position in it
+          'stem_upstream_length_m': float,   # along-stem reach above the anchor
+          'stem_downstream_length_m': float,
+          'stem_direction_degenerate': bool, # no window separated two cells
           'pool_cells': [(row, col), ...],       # backwater, anchor included
           'pool_cell_distance_m': {(row, col): float},  # along-path distance
                                                  #   from the anchor -- what the
@@ -693,12 +821,21 @@ def delineate_level_pool(
                                                  #   plus the anchor's own cell
           'stations': [ {                        # measurements, NOT a design
               'station_index': int,
-              'offset_upstream_m': float,
+              'offset_upstream_m': float,        # the TARGET along-stem offset
+              'status': 'measured' | 'unreachable_stem_end',
+              'along_stem_distance_m': float,    # what the walk actually reached
+              'stem_rowcol': (row, col) or None,
+              'channel_elevation_m': float or None,
+              'bearing_deg': float or None,      # local downstream bearing here
               'on_grid': bool,
-              'flooded_width_m': float or None,
-              'flooded_cross_section_area_m2': float or None,
+              'flooded_width_m': float or None,  # None when unreachable --
+              'flooded_cross_section_area_m2': float or None,   # NEVER 0.0
               'sample_count': int or None,
             }, ... ],
+            # STATUS IS PART OF THE MEASUREMENT CONTRACT the scoring branch
+            # reads: 'measured' means these numbers describe real ground,
+            # 'unreachable_stem_end' means there was no channel to measure
+            # and the numbers are absent rather than zero.
           'backwater_distance_limited': bool,    # some path hit the reach cap
           'backwater_cell_count': int,
         }
@@ -737,13 +874,27 @@ def delineate_level_pool(
             pool_cells.append(feeder)
             frontier.append(feeder)
 
-    # --- 2. dam-axis band, perpendicular to the fitted valley axis.
-    axis = fit_valley_axis(
-        dem, anchor_cell, flow_to_row, flow_to_col, upstream_map, flow_accumulation, walk_cells=axis_walk_cells
+    # --- 2. the traced stem through the anchor, then the dam-axis band
+    # --- perpendicular to the stem's LOCAL direction there.
+    px, py = dem["resolution_meters"]
+    cell_step = min(float(px), float(py))
+    window = max(1, int(stem_direction_window_cells))
+    # Trace far enough upstream to reach the last station plus the secant
+    # window that station needs, and far enough downstream to give the
+    # ANCHOR a symmetric window. A cardinal step is the shortest a D8 walk
+    # can take, so dividing by cell_step bounds the cells required.
+    max_station_offset = max(0, int(station_count) - 1) * float(station_spacing_meters)
+    upstream_steps = int(math.ceil(max_station_offset / cell_step)) + window + 1
+    stem_cells, anchor_index, stem_along = _stem_through_anchor(
+        dem, anchor_cell, flow_to_row, flow_to_col, upstream_map, flow_accumulation,
+        upstream_steps=upstream_steps, downstream_steps=window,
+    )
+    anchor_direction, direction_degenerate = local_stem_direction(
+        dem, stem_cells, anchor_index, window
     )
     # +90 degrees from downstream = river-left, looking downstream.
-    dam_axis_left = (-axis[1], axis[0])
-    dam_axis_right = (axis[1], -axis[0])
+    dam_axis_left = (-anchor_direction[1], anchor_direction[0])
+    dam_axis_right = (anchor_direction[1], -anchor_direction[0])
     anchor_xy = pixel_center_xy(dem, r0, c0)
 
     left = _find_abutment(
@@ -762,36 +913,62 @@ def delineate_level_pool(
             band_seen.add(cell)
             band_cells.append(cell)
 
-    px, py = dem["resolution_meters"]
-    cell_step = min(float(px), float(py))
     dam_band_width = float(left["searched_distance_m"]) + float(right["searched_distance_m"]) + cell_step
 
-    # --- 3. cross-section measurements at the upstream stations.
+    # --- 3. cross-section measurements at stations ALONG THE STEM.
+    stem_upstream_length = stem_along[-1] if stem_cells else 0.0
+    stem_downstream_length = -stem_along[0] if stem_cells else 0.0
     stations: list[dict] = []
     for index in range(int(station_count)):
         offset = index * float(station_spacing_meters)
-        station_xy = (anchor_xy[0] - axis[0] * offset, anchor_xy[1] - axis[1] * offset)
-        station_cell = rowcol_for_xy(dem, station_xy[0], station_xy[1])
-        if station_cell is None:
+        # The stem cell nearest this along-stem offset, searching only the
+        # UPSTREAM half (index >= anchor_index) so a station can never fall
+        # downstream of the dam line.
+        if offset > stem_upstream_length + 1e-9:
+            # The stem ran out before this station. UNREACHABLE, not dry --
+            # see the docstring: a 0.0 m width here would be a fabricated
+            # measurement of ground the walk never saw.
             stations.append(
                 {
                     "station_index": index,
                     "offset_upstream_m": round(offset, 3),
-                    "on_grid": False,
+                    "status": STATION_UNREACHABLE_STEM_END,
+                    "along_stem_distance_m": round(stem_upstream_length, 3),
+                    "stem_rowcol": stem_cells[-1] if stem_cells else None,
+                    "channel_elevation_m": None,
+                    "bearing_deg": None,
+                    "on_grid": True,
                     "flooded_width_m": None,
                     "flooded_cross_section_area_m2": None,
                     "sample_count": None,
                 }
             )
             continue
+
+        station_index_in_stem = min(
+            range(anchor_index, len(stem_cells)),
+            key=lambda i: (abs(stem_along[i] - offset), i),
+        )
+        station_cell = stem_cells[station_index_in_stem]
+        station_xy = pixel_center_xy(dem, station_cell[0], station_cell[1])
+        # THIS station's own perpendicular, from the stem's direction HERE.
+        station_direction, _station_degenerate = local_stem_direction(
+            dem, stem_cells, station_index_in_stem, window
+        )
+        station_perpendicular = (-station_direction[1], station_direction[0])
         offsets, elevations = _sample_perpendicular(
-            dem, station_xy, dam_axis_left, abutment_search_half_width_meters
+            dem, station_xy, station_perpendicular, abutment_search_half_width_meters
         )
         width, area, count = _flooded_span(offsets, elevations, waterline, cell_step)
         stations.append(
             {
                 "station_index": index,
                 "offset_upstream_m": round(offset, 3),
+                "status": STATION_MEASURED,
+                "along_stem_distance_m": round(stem_along[station_index_in_stem], 3),
+                "stem_rowcol": station_cell,
+                "channel_elevation_m": round(float(raw[station_cell[0], station_cell[1]]), 3),
+                "bearing_deg": bearing_degrees(station_direction),
                 "on_grid": True,
                 "flooded_width_m": round(width, 3),
                 "flooded_cross_section_area_m2": round(area, 3),
@@ -811,8 +988,14 @@ def delineate_level_pool(
         "anchor_elevation_m": round(anchor_elevation, 3),
         "waterline_elevation_m": round(waterline, 3),
         "reference_height_meters": float(reference_height_meters),
-        "valley_axis_unit": axis,
+        "anchor_direction_unit": anchor_direction,
+        "anchor_bearing_deg": bearing_degrees(anchor_direction),
         "dam_axis_unit": dam_axis_left,
+        "stem_cells": stem_cells,
+        "anchor_stem_index": anchor_index,
+        "stem_upstream_length_m": round(stem_upstream_length, 3),
+        "stem_downstream_length_m": round(stem_downstream_length, 3),
+        "stem_direction_degenerate": bool(direction_degenerate),
         "pool_cells": pool_cells,
         "pool_cell_distance_m": pool_distance,
         "band_cells": band_cells,

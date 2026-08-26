@@ -1378,7 +1378,13 @@ def find_candidate_zones(
                 "waterline_elevation_m": pool["waterline_elevation_m"],
                 "reference_height_meters": pool["reference_height_meters"],
                 "dam_band_width_m": pool["dam_band_width_m"],
-                "valley_axis_unit": pool["valley_axis_unit"],
+                # The stem's own local direction at the anchor -- there is
+                # no fitted "valley axis" any more (see valley_level_pool.
+                # local_stem_direction()); every direction comes from the
+                # traced stem at the place it is needed.
+                "anchor_bearing_deg": pool["anchor_bearing_deg"],
+                "stem_upstream_length_m": pool["stem_upstream_length_m"],
+                "stem_direction_degenerate": pool["stem_direction_degenerate"],
                 "stations": pool["stations"],
                 "pool_cell_count": len(pool["pool_cells"]),
                 "band_cell_count": len(pool["band_cells"]),
@@ -1796,6 +1802,13 @@ def _level_pool_narrative(zone: dict) -> dict:
     second creek is a different problem from one that simply found no
     shoulder, and a narrative that collapsed them would recommend the
     wrong remedy.
+
+    Each station carries its own STATUS for the same reason. A station
+    beyond the end of the traced channel reports 'unreachable_stem_end'
+    with width and area absent; it must never be narrated as dry ground,
+    which is a measurement it does not have. stem_upstream_length_ft says
+    how far the channel was traceable at all -- a short one is the visible
+    fingerprint of valley_delineation.py's flat-tie limitation.
     """
     pool = zone["level_pool"]
     left = zone["abutments"]["left"]
@@ -1823,6 +1836,14 @@ def _level_pool_narrative(zone: dict) -> dict:
             {
                 "station_index": int(station["station_index"]),
                 "offset_upstream_ft": _feet(station["offset_upstream_m"]),
+                # STATUS TRAVELS WITH THE NUMBERS. 'unreachable_stem_end'
+                # means the traced channel ended before this station, so
+                # the width and area below are ABSENT rather than zero --
+                # a narrative that read a missing measurement as "dry"
+                # would invent terrain. See valley_level_pool.py.
+                "status": station["status"],
+                "along_stem_distance_ft": _feet(station["along_stem_distance_m"]),
+                "bearing_deg": _round1(station["bearing_deg"]),
                 "flooded_width_ft": _feet_from_meters_or_none(station["flooded_width_m"]),
                 # Square METRES converted to square FEET at this block's own
                 # rounding boundary -- a cross-section, never a capacity.
@@ -1834,6 +1855,8 @@ def _level_pool_narrative(zone: dict) -> dict:
             }
             for station in pool["stations"]
         ],
+        "stem_upstream_length_ft": _feet(pool["stem_upstream_length_m"]),
+        "anchor_bearing_deg": _round1(pool["anchor_bearing_deg"]),
     }
 
 

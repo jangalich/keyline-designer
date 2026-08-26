@@ -94,7 +94,20 @@ from raster_grid import (
     connected_components,
     pixel_center_xy,
 )
-from valley_delineation import delineate_valleys, get_flow_accumulation_for_dem, get_flow_direction_for_dem
+from keypoint_detection import build_upstream_map
+from valley_delineation import (
+    compute_flow_accumulation,
+    compute_flow_direction,
+    delineate_valleys,
+    fill_depressions,
+    get_flow_accumulation_for_dem,
+    get_flow_direction_for_dem,
+)
+from valley_level_pool import (
+    STEM_DIRECTION_WINDOW_CELLS,
+    VALLEY_AXIS_WALK_CELLS_RETIRED,
+    bearing_degrees,
+)
 # The road gate reads the SINGLE shared buffer definition (water's former
 # separate per-module road-buffer constant was deleted -- see the shared
 # constant's own docstring in farm_roads_data.py).
@@ -143,6 +156,84 @@ def _report_cell_count(label: str, mask, dem: dict) -> None:
     cell_count = int(mask.sum())
     acres = cell_count * cell_area_acres(dem)
     print(f"  {label}: {cell_count} cells, {acres:.3f} acres")
+
+
+def _report_retired_axis_comparison(
+    dem, zone, flow_to_row, flow_to_col, upstream_map, flow_accumulation
+) -> None:
+    """
+    TRANSITIONAL -- DELETE AFTER THE REFERENCE-PROPERTY ACCEPTANCE RUN.
+
+    Recomputes the RETIRED straight-line valley axis (total least squares
+    through a +/-4-cell walk through the anchor) purely so the reference
+    run can confirm or refute, in one pass, the hypothesis that motivated
+    replacing it: that on subtle terrain the fit rotated up to ~90 degrees
+    off the channel, putting the "perpendicular" ALONG the valley and
+    marching the cross-section stations up a side slope.
+
+    THE FIT IS REIMPLEMENTED HERE, LOCALLY, AND THAT IS DELIBERATE. It no
+    longer exists in valley_level_pool.py and must not be resurrected
+    there; this copy is a measuring instrument pointed at a deleted design,
+    scoped to this diagnostic and to this one acceptance run.
+
+    EXPECTED READING: near-agreement with the stem's own bearing on
+    emphatic terrain (a confluence, a sharp V), and a large disagreement --
+    approaching 90 degrees -- on exactly the flat/marshy anchors whose
+    stations came back as a full-window station 0 followed by a bone-dry
+    station 1. A large disagreement CONFIRMS the diagnosis; agreement
+    everywhere would refute it and the real cause would still be open.
+    """
+    anchor = tuple(zone["anchor_rowcol"])
+    points = []
+    current = anchor
+    for _ in range(VALLEY_AXIS_WALK_CELLS_RETIRED):
+        tr = int(flow_to_row[current[0], current[1]])
+        tc = int(flow_to_col[current[0], current[1]])
+        if tr < 0:
+            break
+        current = (tr, tc)
+        points.append(current)
+    downstream_end = points[-1] if points else anchor
+    points = list(reversed(points)) + [anchor]
+    current = anchor
+    seen = {anchor}
+    for _ in range(VALLEY_AXIS_WALK_CELLS_RETIRED):
+        feeders = [f for f in upstream_map.get(current, ()) if f not in seen]
+        if not feeders:
+            break
+        current = max(feeders, key=lambda f: (float(flow_accumulation[f[0], f[1]]), -f[0], -f[1]))
+        seen.add(current)
+        points.append(current)
+    upstream_end = points[-1]
+
+    coords = np.array([pixel_center_xy(dem, r, c) for r, c in points], dtype=float)
+    if len(coords) < 2:
+        print("      [transitional] retired straight fit: undefined (fewer than two walk points)")
+        return
+    centered = coords - coords.mean(axis=0)
+    eigenvalues, eigenvectors = np.linalg.eigh(centered.T @ centered)
+    if float(eigenvalues[-1]) <= 0.0:
+        print("      [transitional] retired straight fit: undefined (no spread to fit)")
+        return
+    axis = np.asarray(eigenvectors[:, -1], dtype=float)
+    axis = axis / float(np.hypot(axis[0], axis[1]))
+    head = np.array(pixel_center_xy(dem, *upstream_end), dtype=float)
+    tail = np.array(pixel_center_xy(dem, *downstream_end), dtype=float)
+    if float(np.dot(axis, tail - head)) < 0.0:
+        axis = -axis
+
+    fitted_bearing = bearing_degrees((float(axis[0]), float(axis[1])))
+    stem_bearing = float(zone["level_pool"]["anchor_bearing_deg"])
+    disagreement = abs((fitted_bearing - stem_bearing + 180.0) % 360.0 - 180.0)
+    verdict = (
+        "ROTATED -- the retired fit would have cross-sectioned nearly ALONG this channel"
+        if disagreement > 60.0
+        else ("diverged" if disagreement > 20.0 else "agrees")
+    )
+    print(
+        f"      [transitional] retired straight fit {fitted_bearing} deg vs stem {stem_bearing} deg "
+        f"-> {disagreement:.1f} deg disagreement ({verdict})"
+    )
 
 
 def main(
@@ -428,6 +519,14 @@ def main(
     # distance_outside_boundary_m, which is what makes an off-parcel
     # anchor's outcome legible), one entry per family-2 seed, each with its
     # reason code -- is what explains a short or empty list.
+    # The D8 arrays the TRANSITIONAL axis comparison below needs. Derived
+    # here rather than inside the loop so every candidate is compared
+    # against the same flow field the delineation itself used.
+    _filled = fill_depressions(dem["array"])
+    flow_to_row, flow_to_col = compute_flow_direction(_filled, dem["resolution_meters"])
+    flow_accumulation = compute_flow_accumulation(_filled, flow_to_row, flow_to_col)
+    upstream_map = build_upstream_map(flow_to_row, flow_to_col)
+
     nomination_diagnostics: dict = {}
     zones = find_candidate_zones(
         dem, production_areas, boundary_polygon_utm,
@@ -462,12 +561,31 @@ def main(
             f"canopy={zone['canopy_overlap_pct']}% road={zone['road_overlap_pct']}% "
             f"flags={zone['flags']}"
         )
-        for station in zone["level_pool"]["stations"]:
+        pool = zone["level_pool"]
+        print(
+            f"      stem traced {pool['stem_upstream_length_m']}m upstream of the anchor; local stem "
+            f"bearing at the anchor {pool['anchor_bearing_deg']} deg"
+            + ("  [DEGENERATE -- no window separated two stem cells]"
+               if pool["stem_direction_degenerate"] else "")
+        )
+        for station in pool["stations"]:
+            if station["status"] != "measured":
+                print(
+                    f"      station {station['station_index']} target {station['offset_upstream_m']}m: "
+                    f"{station['status'].upper()} -- the traced stem ends at "
+                    f"{station['along_stem_distance_m']}m. NOT a dry cross-section: there is no channel "
+                    "here to measure. (Short stems are valley_delineation.py's flat-tie limitation "
+                    "surfacing -- flagged, not fixed here.)"
+                )
+                continue
             print(
-                f"      station {station['station_index']} at {station['offset_upstream_m']}m upstream: "
+                f"      station {station['station_index']} target {station['offset_upstream_m']}m -> "
+                f"stem cell {station['stem_rowcol']} at along-stem {station['along_stem_distance_m']}m, "
+                f"channel {station['channel_elevation_m']}m, local bearing {station['bearing_deg']} deg: "
                 f"flooded width {station['flooded_width_m']}m, flooded cross-section "
                 f"{station['flooded_cross_section_area_m2']}m^2"
             )
+        _report_retired_axis_comparison(dem, zone, flow_to_row, flow_to_col, upstream_map, flow_accumulation)
     print("\nPer-keypoint nomination outcomes (reason codes, with off-parcel distance):")
     for outcome in nomination_diagnostics.get("keypoint_outcomes", []):
         print(

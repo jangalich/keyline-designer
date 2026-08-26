@@ -30,7 +30,8 @@ What is covered here:
      filled pit as an unrouted flat that TRUNCATES the backwater rather
      than being crossed. That limitation is valley_delineation.py's, is
      pre-existing, and is pinned here rather than worked around.
-  5. The valley-axis fit is continuous, not D8-quantized.
+  5. The stem's LOCAL SECANT is continuous, not D8-quantized (what the
+     retired straight-line fit was for, without its assumption).
   6. rowcol_for_xy() round-trips pixel_center_xy().
   7. THE CONTRIBUTING-AREA CEILING ON THE DAM BAND: a parallel channel
      below the waterline inside the abutment half-width, carrying more
@@ -42,6 +43,25 @@ What is covered here:
      cell's contributing area can exceed the anchor's. This is the
      structural guarantee that makes a per-cell runtime check unnecessary,
      so it is asserted here rather than coded there.
+  9. CURVED VALLEY: stations sit ON the traced stem past a bend and each
+     faces its own local direction -- with the cell, elevation, bearing,
+     width and area all hand-derived, and the retired straight axis's
+     wrong answer for station 2 computed inline so the difference is a
+     fact rather than a claim.
+ 10. The dam band on that same curved fixture: perpendicular to the stem's
+     local direction at the anchor, abutments where the cone geometry puts
+     them.
+ 11. A stem that dies before the last station: UNREACHABLE, with the
+     distance actually reached -- never a fabricated 0.0 width. Plus the
+     degenerate-window flag.
+ 12. Contract: every station carries a status; the global straight fit
+     (function, constant, eigen-decomposition and output key) exists
+     nowhere.
+
+FIXTURE 1 IS THE REGRESSION ANCHOR for this branch's change. On a straight
+channel a stem-following station and a fitted-axis station coincide
+exactly, so every width, area, abutment and band figure hand-computed for
+it before the change must still hold after it, unretuned. They do.
 """
 
 import math
@@ -60,8 +80,12 @@ from valley_level_pool import (
     CROSS_SECTION_STATIONS,
     MAX_BACKWATER_UPSTREAM_METERS,
     POOL_REFERENCE_HEIGHT_METERS,
+    STATION_MEASURED,
+    STATION_UNREACHABLE_STEM_END,
+    STEM_DIRECTION_WINDOW_CELLS,
+    bearing_degrees,
     delineate_level_pool,
-    fit_valley_axis,
+    local_stem_direction,
     rowcol_for_xy,
 )
 from raster_grid import pixel_center_xy
@@ -162,10 +186,14 @@ v_pool = delineate_level_pool(V_DEM, V_FILLED, V_FTR, V_FTC, V_ACC, V_UP, V_ANCH
 assert v_pool["anchor_elevation_m"] == 97.0, v_pool["anchor_elevation_m"]
 assert v_pool["waterline_elevation_m"] == 99.5, v_pool["waterline_elevation_m"]
 
-# The fitted axis on a due-south valley is due south: (0, -1) in UTM
-# (+x east, +y north). Sign convention: it points DOWNSTREAM.
-assert abs(v_pool["valley_axis_unit"][0]) < 1e-9, v_pool["valley_axis_unit"]
-assert abs(v_pool["valley_axis_unit"][1] + 1.0) < 1e-9, v_pool["valley_axis_unit"]
+# The stem's local direction at the anchor on a due-south valley is due
+# south: (0, -1) in UTM (+x east, +y north), bearing 180. Sign convention:
+# it points DOWNSTREAM.
+assert abs(v_pool["anchor_direction_unit"][0]) < 1e-9, v_pool["anchor_direction_unit"]
+assert abs(v_pool["anchor_direction_unit"][1] + 1.0) < 1e-9, v_pool["anchor_direction_unit"]
+assert v_pool["anchor_bearing_deg"] == 180.0
+assert v_pool["stem_direction_degenerate"] is False
+assert v_pool["stem_cells"][v_pool["anchor_stem_index"]] == V_ANCHOR
 
 assert v_pool["abutment_found_left"] and v_pool["abutment_found_right"]
 assert v_pool["abutments"]["left"]["lateral_distance_m"] == 15.0, v_pool["abutments"]["left"]
@@ -181,13 +209,30 @@ assert max(abs(c - 20) for _r, c in v_pool["pool_cells"]) == 2
 assert v_pool["backwater_distance_limited"] is False
 assert max(v_pool["pool_cell_distance_m"].values()) == 120.0
 
-_v_expected_stations = [(0.0, 25.0, 32.5), (25.0, 15.0, 20.0), (50.0, 15.0, 12.5)]
+# REGRESSION ANCHOR. These are the numbers hand-derived above, and they
+# are UNCHANGED by the move from a fitted straight axis to stem-following
+# stations -- on a straight channel the two coincide exactly, which is what
+# makes this fixture the regression test for that change. Nothing here was
+# retuned.
+_v_expected_stations = [
+    # offset, width, area, along-stem distance, stem cell, channel elevation
+    (0.0, 25.0, 32.5, 0.0, (30, 20), 97.0),
+    (25.0, 15.0, 20.0, 25.0, (25, 20), 97.5),
+    (50.0, 15.0, 12.5, 50.0, (20, 20), 98.0),
+]
 assert len(v_pool["stations"]) == CROSS_SECTION_STATIONS
-for _station, (_offset, _width, _area) in zip(v_pool["stations"], _v_expected_stations):
+for _station, (_offset, _width, _area, _along, _cell, _z) in zip(v_pool["stations"], _v_expected_stations):
     assert _station["on_grid"] is True
+    assert _station["status"] == STATION_MEASURED, _station
     assert _station["offset_upstream_m"] == _offset, _station
     assert _station["flooded_width_m"] == _width, _station
     assert _station["flooded_cross_section_area_m2"] == _area, _station
+    # Stem-following adds these: the station sits ON the channel, at the
+    # along-stem distance asked for, facing due south like the valley.
+    assert _station["along_stem_distance_m"] == _along, _station
+    assert _station["stem_rowcol"] == _cell, _station
+    assert _station["channel_elevation_m"] == _z, _station
+    assert _station["bearing_deg"] == 180.0, _station
 
 print(
     "Test 1 -- synthetic V-valley (2% grade, 20% side slopes), anchor (30, 20) at 97.0 m, waterline "
@@ -390,9 +435,28 @@ assert r_pool["waterline_elevation_m"] == 99.5
 assert r_pool["abutments"]["left"]["lateral_distance_m"] == 15.0
 assert r_pool["abutments"]["right"]["lateral_distance_m"] == 15.0
 assert len(r_pool["band_cells"]) == 7
-assert [(s["flooded_width_m"], s["flooded_cross_section_area_m2"]) for s in r_pool["stations"]] == [
-    (25.0, 32.5), (15.0, 20.0), (15.0, 12.5)
-], r_pool["stations"]
+# Station 0 (the anchor) reads exactly the straight-V numbers, because the
+# raw terrain at the dam line is unchanged. Stations 1 and 2 come back
+# UNREACHABLE, and that is the correct answer rather than a regression:
+# the transverse ridge makes the priority-flood raise the whole reach to a
+# flat 100.0, every cell ties with its neighbour, and this repo's
+# strictly-positive-slope D8 hands them all the -1 sentinel -- so there is
+# no traced stem above the anchor at all (stem_upstream_length_m == 0.0).
+# Under the retired straight-axis design these two stations reported
+# fabricated widths off a fitted direction; they now report the absence of
+# a channel to measure. This is valley_delineation.py's flat-tie
+# limitation surfacing honestly, FLAGGED not fixed.
+assert r_pool["stem_upstream_length_m"] == 0.0, r_pool["stem_upstream_length_m"]
+assert r_pool["stations"][0]["status"] == STATION_MEASURED
+assert (r_pool["stations"][0]["flooded_width_m"], r_pool["stations"][0]["flooded_cross_section_area_m2"]) == (
+    25.0, 32.5
+), r_pool["stations"][0]
+for _s in r_pool["stations"][1:]:
+    assert _s["status"] == STATION_UNREACHABLE_STEM_END, _s
+    assert _s["flooded_width_m"] is None and _s["flooded_cross_section_area_m2"] is None, (
+        "unreachable must be ABSENT, never a fabricated 0.0 -- see the module docstring"
+    )
+    assert _s["along_stem_distance_m"] == 0.0, _s
 
 # The contrast: the SAME call with the filled array standing in as the
 # elevation source, i.e. what a filled-reading elevation test would say.
@@ -404,15 +468,18 @@ assert r_pool_filled["waterline_elevation_m"] == 102.5
 assert r_pool_filled["abutments"]["left"]["lateral_distance_m"] == 30.0
 assert r_pool_filled["abutments"]["right"]["lateral_distance_m"] == 30.0
 assert len(r_pool_filled["band_cells"]) == 13
-assert [(s["flooded_width_m"], s["flooded_cross_section_area_m2"]) for s in r_pool_filled["stations"]] == [
-    (55.0, 107.5), (45.0, 92.5), (45.0, 82.5)
-], r_pool_filled["stations"]
+assert (
+    r_pool_filled["stations"][0]["flooded_width_m"],
+    r_pool_filled["stations"][0]["flooded_cross_section_area_m2"],
+) == (55.0, 107.5), r_pool_filled["stations"][0]
 print(
     "Test 4a -- the elevation tests read RAW: behind a transverse ridge the priority-flood raises the "
     "whole reach to 100.0 m, but the real run still reports the raw anchor (97.0 m), raw abutments "
-    "(15.0 m each side) and raw station widths (25.0 / 15.0 / 15.0 m). Reading the FILLED array instead "
-    "would claim a 100.0 m anchor, 30.0 m abutments and a 55.0 m flooded width at the dam line -- more "
-    "than double the real ground."
+    "(15.0 m each side) and a raw 25.0 m station-0 width. Reading the FILLED array instead would claim a "
+    "100.0 m anchor, 30.0 m abutments and a 55.0 m flooded width at the dam line -- more than double the "
+    "real ground. Stations 1 and 2 correctly report unreachable_stem_end (the flat-filled reach leaves no "
+    "traceable stem above the anchor) rather than the fabricated widths the retired straight-axis design "
+    "produced there."
 )
 
 _p_array = _v_array.copy()
@@ -459,15 +526,20 @@ print(
 
 
 # =====================================================================
-# TEST 5 -- THE VALLEY-AXIS FIT IS CONTINUOUS, NOT D8-QUANTIZED.
+# TEST 5 -- THE LOCAL SECANT IS CONTINUOUS, NOT D8-QUANTIZED.
 #
 # A channel running at a shallow angle -- 1 column east per 3 rows south,
 # i.e. atan2(1, 3) = 18.435 degrees east of due south -- forces D8 to
 # alternate between S and SE steps. The raw D8 direction at any single
 # cell is therefore always a multiple of 45 degrees (here: 0, due south at
-# the anchor), while the fitted axis should recover the real 18.435.
+# the anchor), while the stem's local SECANT should recover the real
+# 18.435.
 #
-# EXPECTED: the fitted bearing lands within 2 degrees of 18.435; the raw
+# This is what the retired straight-line fit was for; the secant keeps its
+# one genuine virtue (de-quantizing D8) while dropping the assumption that
+# cost it -- that the valley is straight over the whole window.
+#
+# EXPECTED: the secant bearing lands within 2 degrees of 18.435; the raw
 # D8 step at the anchor is more than 10 degrees off it. The print below
 # also states what that quantization would cost the abutment search --
 # sin(18.435 deg) * 75 m of lateral error at the far end of the walk.
@@ -485,30 +557,41 @@ D_DEM = _dem(_d_array)
 D_FILLED, D_FTR, D_FTC, D_ACC, D_UP = _hydrology(D_DEM)
 D_ANCHOR = (24, 16)  # 8 + 24/3 = 16 exactly -- on the channel center
 
-_axis = fit_valley_axis(D_DEM, D_ANCHOR, D_FTR, D_FTC, D_UP, D_ACC)
-# Bearing measured clockwise from due south, positive eastward.
-_fitted_deg = math.degrees(math.atan2(_axis[0], -_axis[1]))
-_true_deg = math.degrees(math.atan2(1.0, 3.0))  # 18.435
+d_pool = delineate_level_pool(D_DEM, D_FILLED, D_FTR, D_FTC, D_ACC, D_UP, D_ANCHOR)
+_fitted_deg = d_pool["anchor_bearing_deg"]
+# Downstream here is SOUTH-and-EAST: bearing 180 - 18.435 = 161.565.
+_true_deg = 180.0 - math.degrees(math.atan2(1.0, 3.0))
 _d8_target = (int(D_FTR[D_ANCHOR]), int(D_FTC[D_ANCHOR]))
 _ax, _ay = pixel_center_xy(D_DEM, *D_ANCHOR)
 _bx, _by = pixel_center_xy(D_DEM, *_d8_target)
-_d8_deg = math.degrees(math.atan2(_bx - _ax, -(_by - _ay)))
+_d8_deg = bearing_degrees((_bx - _ax, _by - _ay))
+_d8_error = abs(_d8_deg - _true_deg)
+_secant_error = abs(_fitted_deg - _true_deg)
 assert abs(_d8_deg % 45.0) < 1e-9, f"precondition: a raw D8 step is always a multiple of 45 deg, got {_d8_deg}"
-assert abs(_d8_deg - _true_deg) > 10.0, (
+assert _d8_error > 10.0, (
     f"precondition: the raw D8 step must be badly quantized here, got {_d8_deg:.2f} deg against a real "
     f"{_true_deg:.3f} deg valley"
 )
-assert abs(_fitted_deg - _true_deg) < 2.0, (
-    f"the fit must recover the real bearing ({_true_deg:.3f} deg), got {_fitted_deg:.2f} deg"
+# A +/-2-cell secant cannot resolve a drift whose period is 3 cells
+# exactly -- 4 cells of run carry 1 column of D8 drift where the true
+# figure is 1.33 -- so a few degrees of residual is inherent to the window
+# size, not a defect. What the test pins is that the residual is a small
+# FRACTION of the raw D8 error, which is the whole reason a window exists.
+assert _secant_error < 5.0, (
+    f"the secant must land near the real bearing ({_true_deg:.3f} deg), got {_fitted_deg:.2f} deg"
 )
-assert abs(_fitted_deg - _d8_deg) > 10.0, "the fit must differ materially from the raw D8 step"
+assert _secant_error * 3.0 < _d8_error, (
+    f"the secant ({_secant_error:.2f} deg off) must be at least 3x closer than the raw D8 step "
+    f"({_d8_error:.2f} deg off)"
+)
 # What the quantization costs in practice: how far off the abutment search
 # would look at the far end of its own half-width.
-_lateral_error_m = ABUTMENT_SEARCH_HALF_WIDTH_METERS * math.sin(math.radians(abs(_d8_deg - _true_deg)))
+_lateral_error_m = ABUTMENT_SEARCH_HALF_WIDTH_METERS * math.sin(math.radians(_d8_error))
 print(
-    f"Test 5 -- axis fit is continuous: on a channel running {_true_deg:.3f} deg east of south, the raw D8 "
-    f"step at the anchor reads {_d8_deg:.1f} deg (always a multiple of 45) while the least-squares fit "
-    f"recovers {_fitted_deg:.2f} deg -- the quantization alone would misplace the abutment search by "
+    f"Test 5 -- the local secant is continuous: on a channel running 18.435 deg east of south (bearing "
+    f"{_true_deg:.3f}), the raw D8 step at the anchor reads bearing {_d8_deg:.1f} (always a multiple of 45, "
+    f"{_d8_error:.2f} deg off) while the stem's local secant recovers {_fitted_deg:.2f} "
+    f"({_secant_error:.2f} deg off) -- the raw quantization alone would misplace the abutment search by "
     f"{_lateral_error_m:.1f} m at the far end of its {ABUTMENT_SEARCH_HALF_WIDTH_METERS:.0f} m half-width."
 )
 
@@ -644,6 +727,275 @@ print(
     f"pool the largest contributing area on any backwater cell is {_worst:.0f} against the anchor's "
     f"{_anchor_accum:.0f}, and the same holds on the flat-plain fixture -- so an anchor that cleared the "
     "ceiling guarantees its whole backwater does, with no per-cell runtime check."
+)
+
+
+# =====================================================================
+# FIXTURE 9 -- CURVED VALLEY: stations follow the stem around a bend.
+#
+# This is what no straight axis can do, and the reason the fitted axis was
+# retired. The channel is an L: down column 10 from row 0 to row 20
+# (flowing south), then east along row 20 from column 10 to the grid edge.
+# Terrain is a cone around that polyline --
+#
+#     z(r, c) = min over channel cells p of
+#               [ 100.0 - 0.1 * along(p) + 1.0 * euclid_cells((r,c), p) ]
+#
+# where along(p) counts cells from the channel head. So the channel falls
+# 0.1 m per cell (2% at 5 m) and the valley walls rise 1.0 m per cell (20%)
+# -- the SAME grades as the straight fixture 1, which is what makes the two
+# comparable.
+#
+# ANCHOR (20, 17): 7 cells east of the corner. along = 27, so z = 97.3 and
+# the waterline is 99.8.
+#
+# THE TRACED STEM, upstream from the anchor, runs west along row 20 to
+# (20, 11), then cuts the corner DIAGONALLY to (19, 10) and climbs column
+# 10. Along-stem distance therefore reads 5, 10, ... 30 m to (20, 11), then
+# 37.071 (a sqrt(2) diagonal step), 42.071, 47.071, 52.071 ...
+#
+# EXPECTED STATIONS -- each derived from the cell the walk actually lands
+# on, its own local secant, and the cone formula above:
+#
+#   station 0, target 0 m   -> (20, 17), along 0.0, z = 97.3
+#       bearing 90 (due east: the +/-2 window is entirely on the row-20 leg)
+#       section is N-S; z(20+/-k, 17) = 97.3 + k; below 99.8 for |k| <= 2
+#       -> 5 samples -> 25.0 m; depths 2.5,1.5,1.5,0.5,0.5 = 6.5 -> 32.5 m^2
+#
+#   station 1, target 25 m  -> (20, 12), along 25.0, z = 97.8
+#       bearing 104.04: the +/-2 window spans (20,14) -> (19,10), i.e. it
+#       is ROUNDING THE CORNER, and the secant says so. Vector (+20, -5)
+#       -> atan2(20, -5) = 104.04.
+#       section is 14 deg off N-S; at +/-5 m it still samples (19,12) and
+#       (21,12), at +/-10 m (18,12)/(22,12) which read 99.8 -- NOT below
+#       the waterline -> 3 samples -> 15.0 m; depths 2.0,1.0,1.0 = 4.0
+#       -> 20.0 m^2
+#
+#   station 2, target 50 m  -> (16, 10), along 52.071 (the nearest stem
+#       cell to 50 m: |47.071-50| = 2.93 vs |52.071-50| = 2.07), z = 98.4
+#       bearing 180 (due south: its window is entirely on the column-10 leg)
+#       section is E-W; z(16, 10+/-k) = 98.4 + k; below 99.8 for |k| <= 1
+#       -> 3 samples -> 15.0 m; depths 1.4,0.4,0.4 = 2.2 -> 11.0 m^2
+#
+# WHAT A STRAIGHT AXIS WOULD HAVE DONE, stated so the difference is not a
+# matter of opinion. The retired fit at this anchor reads due east (its
+# whole window sits on the row-20 leg), so it would have placed station 2
+# 50 m due WEST of the anchor -- at cell (20, 7), which is 3 cells PAST
+# the corner on ground that has no channel at all: z = 101.0, ABOVE the
+# 99.8 waterline, so it would have reported a flooded width of 0.0 m and
+# cross-sectioned it N-S instead of E-W. Station 1 happens to coincide
+# (the first 7 cells upstream are still on the straight leg), which is
+# exactly why this failure mode is easy to miss on gentle terrain and
+# catastrophic past a bend.
+# =====================================================================
+L_SIZE = 40
+_L_CHANNEL = [(r, 10) for r in range(0, 21)] + [(20, c) for c in range(11, L_SIZE)]
+_L_ALONG = {cell: i for i, cell in enumerate(_L_CHANNEL)}
+_l_array = np.zeros((L_SIZE, L_SIZE), dtype=np.float64)
+for _r in range(L_SIZE):
+    for _c in range(L_SIZE):
+        _l_array[_r, _c] = min(
+            100.0 - 0.1 * _L_ALONG[_p] + 1.0 * math.hypot(_r - _p[0], _c - _p[1]) for _p in _L_CHANNEL
+        )
+L_DEM = _dem(_l_array)
+L_FILLED, L_FTR, L_FTC, L_ACC, L_UP = _hydrology(L_DEM)
+L_ANCHOR = (20, 17)
+
+l_pool = delineate_level_pool(L_DEM, L_FILLED, L_FTR, L_FTC, L_ACC, L_UP, L_ANCHOR)
+assert l_pool["anchor_elevation_m"] == 97.3, l_pool["anchor_elevation_m"]
+assert l_pool["waterline_elevation_m"] == 99.8
+assert l_pool["stem_direction_degenerate"] is False
+
+_l_expected = [
+    # along, cell, channel z, bearing, width, area
+    (0.0, (20, 17), 97.3, 90.0, 25.0, 32.5),
+    (25.0, (20, 12), 97.8, 104.04, 15.0, 20.0),
+    (52.071, (16, 10), 98.4, 180.0, 15.0, 11.0),
+]
+for _station, (_along, _cell, _z, _bearing, _width, _area) in zip(l_pool["stations"], _l_expected):
+    assert _station["status"] == STATION_MEASURED, _station
+    # ON THE STEM: the station's cell is a real channel cell, and its
+    # elevation is that cell's own channel-profile value.
+    assert _station["stem_rowcol"] == _cell, _station
+    assert _station["along_stem_distance_m"] == _along, _station
+    assert _station["channel_elevation_m"] == _z, _station
+    assert _cell in _L_ALONG, f"station {_station['station_index']} must sit ON the channel: {_cell}"
+    # FACING THE LOCAL CHANNEL DIRECTION, which differs per station here.
+    assert _station["bearing_deg"] == _bearing, _station
+    # And the hand-computed section.
+    assert _station["flooded_width_m"] == _width, _station
+    assert _station["flooded_cross_section_area_m2"] == _area, _station
+
+# The three stations genuinely face three different ways -- a straight
+# axis would have given all three the same bearing.
+assert len({s["bearing_deg"] for s in l_pool["stations"]}) == 3
+
+# THE WRONG-AXIS CONTRAST, computed rather than asserted from memory: the
+# cell a due-east straight axis would have put station 2 on, and what it
+# reads there.
+_wrong_xy = pixel_center_xy(L_DEM, *L_ANCHOR)
+_wrong_cell = rowcol_for_xy(L_DEM, _wrong_xy[0] - 50.0, _wrong_xy[1])
+assert _wrong_cell == (20, 7), _wrong_cell
+assert _wrong_cell not in _L_ALONG, "the straight axis lands OFF the channel -- that is the failure"
+_wrong_z = round(float(_l_array[_wrong_cell]), 3)
+assert _wrong_z == 101.0, _wrong_z
+assert _wrong_z > l_pool["waterline_elevation_m"], (
+    "the straight axis would have cross-sectioned ground ABOVE the waterline and reported 0.0 m flooded"
+)
+print(
+    f"Test 9 -- curved valley: all three stations sit ON the channel at along-stem "
+    f"{[s['along_stem_distance_m'] for s in l_pool['stations']]} m, reading channel elevations "
+    f"{[s['channel_elevation_m'] for s in l_pool['stations']]} m, and each faces its OWN local direction "
+    f"{[s['bearing_deg'] for s in l_pool['stations']]} (three different bearings -- 90 on the straight "
+    "leg, 104.04 rounding the corner, 180 up the other leg). Hand-computed widths "
+    f"{[s['flooded_width_m'] for s in l_pool['stations']]} m and areas "
+    f"{[s['flooded_cross_section_area_m2'] for s in l_pool['stations']]} m^2 all match. The retired "
+    f"straight axis would have put station 2 on cell {_wrong_cell} -- off the channel entirely, at "
+    f"{_wrong_z} m, above the {l_pool['waterline_elevation_m']} m waterline, reporting 0.0 m flooded."
+)
+
+
+# =====================================================================
+# TEST 10 -- THE DAM BAND ON THE CURVED FIXTURE.
+#
+# The band's perpendicular comes from the stem's LOCAL direction at the
+# anchor, by the same window rule the stations use. At (20, 17) that is due
+# east (bearing 90), so the dam axis runs N-S, and the abutment walk reads
+# z(20 +/- k, 17) = 97.3 + k against the 99.8 waterline: the first sample at
+# or above it is |k| = 3, i.e. 15.0 m out on each side.
+#   -> band = anchor + 3 north + 3 south = 7 cells
+#   -> dam_band_width = 15.0 + 15.0 + 5.0 (the anchor's own cell) = 35.0 m
+# =====================================================================
+assert l_pool["anchor_bearing_deg"] == 90.0, l_pool["anchor_bearing_deg"]
+# The dam axis is the +90 rotation of the downstream direction: due north.
+assert bearing_degrees(l_pool["dam_axis_unit"]) == 0.0, l_pool["dam_axis_unit"]
+assert l_pool["abutment_found_left"] and l_pool["abutment_found_right"]
+assert l_pool["abutments"]["left"]["lateral_distance_m"] == 15.0, l_pool["abutments"]["left"]
+assert l_pool["abutments"]["right"]["lateral_distance_m"] == 15.0, l_pool["abutments"]["right"]
+assert len(l_pool["band_cells"]) == 7, l_pool["band_cells"]
+assert l_pool["dam_band_width_m"] == 35.0
+assert {c for _r, c in l_pool["band_cells"]} == {17}, (
+    "a due-east channel puts the whole dam band in one COLUMN -- if the band ran along the channel "
+    "instead, this is the assertion that would catch it"
+)
+print(
+    "Test 10 -- dam band on the curved fixture: the anchor's local stem direction is due east (bearing "
+    "90.0), so the band runs due north-south through column 17 only, 7 cells wide, with both abutments "
+    "at 15.0 m -- exactly where the cone geometry puts them."
+)
+
+
+# =====================================================================
+# FIXTURE 11 -- A STEM THAT DIES EARLY: unreachable is not dry.
+#
+# 60x60 plane at 5 m, z = 100.0 - 0.01 * r: a 0.2% grade due south and NO
+# cross-slope, so D8 routes every cell straight south and each cell has
+# exactly ONE feeder -- the stem is a single-file column. The anchor sits
+# at row 6, so the walk reaches row 0 and STOPS: there is no row above it.
+#
+# EXPECTED:
+#   stem_upstream_length_m = 6 cells * 5 m = 30.0
+#   station 0 (target 0 m)  -> measured at (6, 30)
+#   station 1 (target 25 m) -> measured at (1, 30)
+#   station 2 (target 50 m) -> UNREACHABLE, along_stem_distance_m = 30.0
+#       (the distance actually reached), width and area None -- NOT 0.0
+#
+# The distinction is the point. Every cell on this plane is below the
+# waterline, so a 0.0 m width here would be flatly false; but even where it
+# would have been arguable, "the ground rises above the waterline" and
+# "there is no channel here to measure" are different facts and the scoring
+# branch has to be able to tell them apart.
+#
+# The dam band still gets a valid direction: the anchor has two cells
+# downstream, so its +/-2 window is non-degenerate even though the stem
+# ends four cells later.
+# =====================================================================
+E_SIZE = 60
+_e_array = np.zeros((E_SIZE, E_SIZE), dtype=np.float64)
+for _r in range(E_SIZE):
+    _e_array[_r, :] = 100.0 - 0.01 * _r
+E_DEM = _dem(_e_array)
+E_FILLED, E_FTR, E_FTC, E_ACC, E_UP = _hydrology(E_DEM)
+E_ANCHOR = (6, 30)
+
+e_pool = delineate_level_pool(E_DEM, E_FILLED, E_FTR, E_FTC, E_ACC, E_UP, E_ANCHOR)
+assert e_pool["stem_upstream_length_m"] == 30.0, e_pool["stem_upstream_length_m"]
+assert e_pool["stem_cells"][-1] == (0, 30), e_pool["stem_cells"]
+assert e_pool["stem_direction_degenerate"] is False, (
+    "the dam band must still get a real direction from the two downstream cells"
+)
+assert e_pool["anchor_bearing_deg"] == 180.0
+
+_e_stations = e_pool["stations"]
+assert _e_stations[0]["status"] == STATION_MEASURED and _e_stations[0]["stem_rowcol"] == (6, 30)
+assert _e_stations[1]["status"] == STATION_MEASURED and _e_stations[1]["stem_rowcol"] == (1, 30)
+assert _e_stations[1]["along_stem_distance_m"] == 25.0
+assert _e_stations[2]["status"] == STATION_UNREACHABLE_STEM_END, _e_stations[2]
+assert _e_stations[2]["along_stem_distance_m"] == 30.0, (
+    "an unreachable station must report the distance the walk ACTUALLY reached"
+)
+assert _e_stations[2]["flooded_width_m"] is None, (
+    "TEST 11: unreachable must be ABSENT, never 0.0 -- zero width is a measurement, and this is not one"
+)
+assert _e_stations[2]["flooded_cross_section_area_m2"] is None
+assert _e_stations[2]["sample_count"] is None
+assert _e_stations[2]["channel_elevation_m"] is None and _e_stations[2]["bearing_deg"] is None
+# Contrast, so "None" is not merely the code's default everywhere: on this
+# plane the REACHED stations report the full sampling window, a real 155.0.
+assert _e_stations[0]["flooded_width_m"] == 155.0 and _e_stations[1]["flooded_width_m"] == 155.0
+print(
+    f"Test 11 -- unreachable is not dry: on a plane whose single-file stem hits the grid edge after "
+    f"{e_pool['stem_upstream_length_m']} m, stations 0 and 1 measure a real 155.0 m flooded width while "
+    f"station 2 reports '{_e_stations[2]['status']}' with along_stem_distance_m="
+    f"{_e_stations[2]['along_stem_distance_m']} and width/area ABSENT -- never a fabricated 0.0. The dam "
+    "band still gets a valid direction from the anchor's downstream cells."
+)
+
+# The degenerate-window flag itself, exercised directly rather than by
+# contriving a DEM that produces a one-cell stem: no window can separate
+# two cells of a single-cell stem, so the flag fires and the caller is
+# handed a usable fallback direction rather than a zero vector.
+_deg_dir, _deg_flag = local_stem_direction(E_DEM, [(5, 5)], 0, STEM_DIRECTION_WINDOW_CELLS)
+assert _deg_flag is True and _deg_dir == (0.0, -1.0)
+_ok_dir, _ok_flag = local_stem_direction(E_DEM, [(6, 5), (5, 5), (4, 5)], 1, STEM_DIRECTION_WINDOW_CELLS)
+assert _ok_flag is False and bearing_degrees(_ok_dir) == 180.0
+print(
+    "Test 11b -- degenerate window: a one-cell stem cannot yield a direction, so the flag fires and a "
+    "usable fallback is returned instead of a zero vector; a three-cell stem resolves normally."
+)
+
+
+# =====================================================================
+# TEST 12 -- CONTRACT: the station status field, and the retired fit.
+# =====================================================================
+import valley_level_pool as _vlp  # noqa: E402
+
+for _pool, _label in ((v_pool, "V-valley"), (l_pool, "curved"), (e_pool, "early-death"), (f_pool, "flat")):
+    for _station in _pool["stations"]:
+        assert "status" in _station, f"{_label}: every station entry must carry a status"
+        assert _station["status"] in (STATION_MEASURED, STATION_UNREACHABLE_STEM_END), _station
+        assert "along_stem_distance_m" in _station and "stem_rowcol" in _station, _station
+        if _station["status"] == STATION_UNREACHABLE_STEM_END:
+            assert _station["flooded_width_m"] is None, f"{_label}: unreachable must never report a width"
+        else:
+            assert _station["flooded_width_m"] is not None
+
+# GREP-STYLE: the global straight fit must not survive anywhere.
+for _retired in ("fit_valley_axis", "VALLEY_AXIS_WALK_CELLS"):
+    assert not hasattr(_vlp, _retired), f"{_retired} is DELETED -- no global straight fit may survive"
+_module_source = open(_vlp.__file__).read()
+# Token-precise: "eigh" alone is a substring of "height", which this module
+# says a great deal about.
+for _token in ("np.linalg.eigh", "eigenvectors", "eigenvalues", "polyfit", "scatter matrix"):
+    assert _token not in _module_source, (
+        f"the total-least-squares machinery must be gone, not merely unreferenced -- found {_token!r}"
+    )
+assert "valley_axis_unit" not in _module_source, "the fitted-axis output key is retired too"
+print(
+    "Test 12 -- contract: every station on every fixture carries a status in "
+    f"{{{STATION_MEASURED}, {STATION_UNREACHABLE_STEM_END}}} with along_stem_distance_m and stem_rowcol; "
+    "unreachable never reports a width. fit_valley_axis, VALLEY_AXIS_WALK_CELLS, the eigen-decomposition "
+    "and the valley_axis_unit key exist nowhere in the module."
 )
 
 
