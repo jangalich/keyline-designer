@@ -387,51 +387,122 @@ def _format_water_candidate_zones_summary(water_narrative: Optional[dict]) -> st
             "this property)."
         )
 
-    zone = water_narrative["zone"]
-    location = zone["location"]
-    drainage = zone["drainage"]
-    service = zone["service"]
-
-    percentile = location["elevation_percentile_of_parcel"]
-    percentile_clause = (
-        f", at the {percentile} elevation percentile of the parcel (0 = the parcel's lowest ground, "
-        "100 = its highest)"
-        if percentile is not None
-        else ""
-    )
     lines = [
-        f"One survey area identified: {zone['area_acres']} acre(s), grown toward a "
-        f"{zone['target_acres']}-acre survey target, in the parcel's "
-        f"{location['position_in_parcel']}{percentile_clause}.",
-        f"Drainage: median contributing area {drainage['contributing_area_acres']} acre(s) across the "
-        f"zone's own cells -- every member cell sits under the "
-        f"{drainage['contributing_area_ceiling_acres']}-acre siltation/peak-flow eligibility ceiling -- "
-        f"with a median local slope of {drainage['slope_median_pct']}%.",
-        f"Serves {service['served_production_area_count']} production area candidate(s) "
-        f"{service['served_production_area_ids']}, most gravity-favorable first:",
+        f"{water_narrative['candidate_count']} candidate survey area(s) identified "
+        f"(from {water_narrative['nomination']['keypoints_considered']} detected keypoint(s)). Each is "
+        "the ground a level pool at a fixed reference waterline would cover upstream of one anchor "
+        "cell, plus the dam-axis band across the valley there. THE REFERENCE WATERLINE IS A MEASURING "
+        "STICK USED TO COMPARE SITES ON EQUAL TERMS, NOT A PROPOSED DAM HEIGHT."
     ]
-    for rel in service["relationships"]:
-        gradient_clause = (
-            f"{rel['gradient_pct']}% grade"
-            if rel["gradient_pct"] is not None
-            else "gradient undefined -- the zone adjoins/overlaps this area, no horizontal run"
+    for zone in water_narrative["zones"]:
+        provenance = zone["provenance"]
+        if provenance["nominated_by"] == "keypoint":
+            source = (
+                f"nominated from keypoint {provenance['keypoint_id']} "
+                f"(valley {provenance['valley_id']})"
+            )
+            if provenance["seed_snapped"]:
+                source += (
+                    f", anchor snapped {provenance['seed_snap_distance_ft']} ft to the nearest "
+                    "eligible cell"
+                )
+        else:
+            source = "nominated from the highest remaining flow accumulation"
+
+        location = zone["location"]
+        drainage = zone["drainage"]
+        service = zone["service"]
+        pool = zone["level_pool"]
+        percentile = location["elevation_percentile_of_parcel"]
+        percentile_clause = (
+            f", at the {percentile} elevation percentile of the parcel (0 = the parcel's lowest ground, "
+            "100 = its highest)"
+            if percentile is not None
+            else ""
         )
         lines.append(
-            f"  - production area {rel['production_area_id']}: elevation differential "
-            f"{rel['elevation_differential_ft']} ft (positive = the zone sits ABOVE this area) over "
-            f"{rel['distance_ft']} ft ({gradient_clause}); can_gravity_feed: {rel['can_gravity_feed']}. "
-            + (
-                "A gravity-feed relationship."
-                if rel["can_gravity_feed"]
-                else "Delivering water to this area would need a pump -- a real cost/maintenance "
-                "tradeoff, not a disqualification."
-            )
+            f"\nSurvey area {zone['id']}: {zone['area_acres']} acre(s), {source}, in the parcel's "
+            f"{location['position_in_parcel']}{percentile_clause}."
         )
+        lines.append(
+            f"Drainage: median contributing area {drainage['contributing_area_acres']} acre(s) across the "
+            f"zone's own cells -- every member cell sits under the "
+            f"{drainage['contributing_area_ceiling_acres']}-acre siltation/peak-flow eligibility ceiling -- "
+            f"with a median local slope of {drainage['slope_median_pct']}%."
+        )
+        lines.append(
+            f"Level pool at a {pool['reference_height_ft']} ft reference waterline: dam-axis band "
+            f"{pool['dam_band_width_ft']} ft wide across the valley; left abutment "
+            + (
+                f"{pool['abutment_distance_left_ft']} ft out"
+                if pool["abutment_found_left"]
+                else "NOT FOUND within the search width (the ground never rises to the waterline on that side)"
+            )
+            + ", right abutment "
+            + (
+                f"{pool['abutment_distance_right_ft']} ft out"
+                if pool["abutment_found_right"]
+                else "NOT FOUND within the search width"
+            )
+            + "."
+        )
+        for station in pool["stations"]:
+            lines.append(
+                f"  - cross-section {station['offset_upstream_ft']} ft upstream: flooded width "
+                f"{station['flooded_width_ft']} ft, flooded cross-sectional area "
+                f"{station['flooded_cross_section_area_sqft']} sq ft (a cross-section, NOT a storage "
+                "capacity -- no volume is computed anywhere in this pipeline)"
+            )
+        overlap = zone["overlap"]
+        lines.append(
+            "Reported overlaps (NOT used to shrink the zone -- water does not stop at a canopy edge): "
+            f"canopy {overlap['canopy_overlap_pct']}%, roads {overlap['road_overlap_pct']}% of member cells."
+        )
+        if zone["flags"]:
+            lines.append(f"Flags: {', '.join(zone['flags'])}.")
+        lines.append(
+            f"Serves {service['served_production_area_count']} production area candidate(s) "
+            f"{service['served_production_area_ids']}, most gravity-favorable first:"
+        )
+        for rel in service["relationships"]:
+            gradient_clause = (
+                f"{rel['gradient_pct']}% grade"
+                if rel["gradient_pct"] is not None
+                else "gradient undefined -- the zone adjoins/overlaps this area, no horizontal run"
+            )
+            lines.append(
+                f"  - production area {rel['production_area_id']}: elevation differential "
+                f"{rel['elevation_differential_ft']} ft (positive = the zone sits ABOVE this area) over "
+                f"{rel['distance_ft']} ft ({gradient_clause}); can_gravity_feed: {rel['can_gravity_feed']}. "
+                + (
+                    "A gravity-feed relationship."
+                    if rel["can_gravity_feed"]
+                    else "Delivering water to this area would need a pump -- a real cost/maintenance "
+                    "tradeoff, not a disqualification."
+                )
+            )
+
+    unproductive = [
+        outcome
+        for outcome in water_narrative["nomination"]["keypoint_outcomes"]
+        if outcome["candidate_id"] is None
+    ]
+    if unproductive:
+        lines.append(
+            "\nKeypoints that produced no candidate, with the reason code that stopped each: "
+            + "; ".join(
+                f"keypoint {outcome['keypoint_id']} ({outcome['contributing_acres']} ac catchment): "
+                f"{outcome['outcome']}"
+                for outcome in unproductive
+            )
+            + "."
+        )
+
     lines.append(
-        "\nThis is a general survey area (a connected cluster of drainage cells within service "
-        "distance of candidate production areas) suitable for keyline plowing patterns, pond/dam "
-        "potential, or ram pump routing — NOT a specific pond/dam site, which requires separate, "
-        "more detailed analysis (storage volume, dam wall geometry) not performed here."
+        "\nThese are general survey areas suitable for keyline plowing patterns, pond/dam potential, "
+        "or ram pump routing — NOT specific pond/dam sites, which require separate, more detailed "
+        "analysis (a real survey, dam wall geometry, spillway design, geotechnical work at the "
+        "abutments) not performed here. No storage volume is reported anywhere, deliberately."
     )
     return "\n".join(lines)
 

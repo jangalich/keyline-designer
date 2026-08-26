@@ -1050,6 +1050,7 @@ def identify_water_suitability(
     boundary_polygon_utm: Optional[Polygon] = None,
     valleys: Optional[list[dict]] = None,
     production_areas: Optional[list[dict]] = None,
+    keypoints: Optional[list[dict]] = None,
     check_soil: bool = True,
     check_streams: bool = True,
     zone_kwargs: Optional[dict] = None,
@@ -1073,6 +1074,15 @@ def identify_water_suitability(
     docstring for the general reasoning; the one thing that's different
     here is what production_areas defaults to when not supplied (see
     below).
+
+    keypoints is an optional pre-detected override in the same family --
+    keypoint_detection.detect_keypoints()'s own list -- passed straight
+    through to water_candidate_zones.find_candidate_zones(), which uses it
+    as its FAMILY 1 nomination source and otherwise detects keypoints
+    itself. Supplying it is what keeps keypoint detection to exactly ONE
+    run per pipeline pass: build_pipeline_context() detects once and hands
+    the same list to both water paths. This module reads nothing off a
+    keypoint itself; it only forwards.
 
     canopy_height is an optional pre-fetched override in the same family:
     the SAME dict canopy_height_data.get_canopy_height_for_boundary()
@@ -1163,6 +1173,7 @@ def identify_water_suitability(
         boundary_polygon_utm,
         canopy_root_zone_mask_utm=canopy_root_zone_mask_utm,
         road_exclusion_union_utm=road_exclusion_union_utm,
+        keypoints=keypoints,
         **(zone_kwargs or {}),
     )
 

@@ -19,20 +19,20 @@ the gate math itself is never duplicated, only which of the function's
 own real checks can actually bind is varied per call. This covers all of
 compute_water_eligible_cells()'s real gates: the absolute contributing-
 area ceiling, on-parcel/boundary-setback, service-distance, canopy
-(woody-vegetation root zone), existing-road right-of-way, and the
-production-zone exclusion (any cell inside the UNION of every production
-area's own render_fill_polygon_utm is hard-excluded, buffered by
-WATER_ZONE_PRODUCTION_SETBACK_METERS -- see that constant's own docstring
-in water_candidate_zones.py) -- the real canopy_root_zone_mask_utm/
-road_exclusion_union_utm this run actually fetches (see below) are held
-REAL across every isolation call except the ones specifically isolating
-canopy or road themselves, the same way the contributing-area ceiling is
-already held real throughout. Unlike canopy/road, the production-zone
-exclusion has no "unchecked" sentinel to disable for isolation -- it's
-always built directly from whatever production_areas this run already
-fetched, so its own isolation call below relaxes every OTHER gate
-instead, the same technique the canopy-alone/road-alone isolation calls
-already use.
+(woody-vegetation root zone), and existing-road right-of-way. The real
+canopy_root_zone_mask_utm/road_exclusion_union_utm this run actually
+fetches (see below) are held REAL across every isolation call except the
+ones specifically isolating canopy or road themselves, the same way the
+contributing-area ceiling is already held real throughout.
+
+THE PRODUCTION-ZONE EXCLUSION GATE IS GONE and this script no longer
+isolates it: water-zone cells inside a production area's render fill are
+eligible now, and whether the two uses may share ground is the designer's
+call rather than a generation-time rule (see water_candidate_zones.py's
+own module docstring for the full gate-to-preference reasoning). What
+replaced its diagnostic value is the per-candidate canopy_overlap_pct /
+road_overlap_pct and the production_area_relationships every candidate
+already carries.
 
 Every isolation call uses the REAL boundary_polygon_utm, never a
 synthetic stand-in -- an earlier version of this section used a
@@ -46,10 +46,10 @@ waived," not a pure isolation from every other gate.
 
 The zone section below (elevation ranges, confluence check) calls
 water_candidate_zones.find_candidate_zones() directly -- the real, full
-pipeline entry point, including its cluster -> connected-growth ->
-select-one -> bounded-opening wiring -- rather than reimplementing
-clustering/scoring independently a second time. find_candidate_zones()
-returns at most ONE zone.
+pipeline entry point, including its keypoint/accumulation nomination ->
+level-pool delineation -> bounded-opening wiring -- rather than
+reimplementing nomination/delineation independently a second time.
+find_candidate_zones() returns up to MAX_WATER_ZONE_CANDIDATES zones.
 
 Requires real network access (a real USGS DEM fetch via dem_data.py, plus
 production_area.py's own SSURGO/canopy/road fetches, plus this script's
@@ -102,11 +102,10 @@ from farm_roads_data import ROAD_EXCLUSION_BUFFER_METERS
 from water_candidate_zones import (
     MAX_SERVICE_DISTANCE_METERS,
     MAX_VALLEY_CONTRIBUTING_AREA_ACRES,
+    MAX_WATER_ZONE_CANDIDATES,
     MIN_BOUNDARY_SETBACK_METERS,
     MIN_WATER_ZONE_AREA_ACRES,
     WATER_ZONE_CANOPY_BUFFER_METERS,
-    WATER_ZONE_PRODUCTION_SETBACK_METERS,
-    WATER_ZONE_TARGET_ACRES,
     _CANOPY_CHECK_UNCHECKED,
     _ROAD_CHECK_UNCHECKED,
     compute_water_eligible_cells,
@@ -157,8 +156,9 @@ def main(
           "eligible iff its own contributing area is AT OR BELOW this, with NO lower bound")
     print(f"boundary setback (module default, not overridable this run) = "
           f"{MIN_BOUNDARY_SETBACK_METERS}m (zeroed -- inert)")
-    print(f"production_setback_meters (module default, not overridable this run) = "
-          f"{WATER_ZONE_PRODUCTION_SETBACK_METERS}m\n")
+    print("production-overlap exclusion: DELETED (gate, constant and parameter) -- a water-zone "
+          "cell inside a production area's render fill is eligible now; see water_candidate_zones.py's "
+          "module docstring\n")
 
     dem = get_dem_for_boundary(PROPERTY_BOUNDARY)
     print(f"DEM fetched: {dem['array'].shape[0]}x{dem['array'].shape[1]} cells, "
@@ -417,29 +417,8 @@ def main(
         road_excluded_mask, dem,
     )
 
-    # 2e. Production-zone exclusion gate ALONE: service-distance/setback
-    #     disabled, canopy/road skipped -- isolates the hard exclusion
-    #     against every production area's own render_fill_polygon_utm
-    #     specifically. Unlike canopy/road, this gate has no "unchecked"
-    #     sentinel of its own to disable directly (it's always built from
-    #     whichever production_areas this run already fetched) -- so
-    #     isolating it means relaxing every OTHER gate instead, same
-    #     technique 2c/2d above use.
-    production_alone_mask = compute_water_eligible_cells(
-        dem, production_areas, boundary_polygon_utm,
-        max_valley_contributing_area_acres=max_contributing_acres,
-        max_service_distance_meters=float("inf"),
-        min_boundary_setback_meters=0.0,
-        canopy_root_zone_mask_utm=_CANOPY_CHECK_UNCHECKED,
-        road_exclusion_union_utm=_ROAD_CHECK_UNCHECKED,
-    )
-    production_excluded_mask = on_parcel_mask & ~production_alone_mask
-    _report_cell_count(
-        "Production-zone exclusion gate alone (any cell inside the union of every production area's own "
-        f"render_fill_polygon_utm, WATER_ZONE_PRODUCTION_SETBACK_METERS={WATER_ZONE_PRODUCTION_SETBACK_METERS}m)",
-        production_excluded_mask, dem,
-    )
-    print()
+    # (There is no 2e. The production-zone exclusion gate that used to be
+    #  isolated here is DELETED -- see the module docstring.)
 
     # --- Internal consistency check -----------------------------------
     # With the minimum-service-distance gate removed, the service-distance
@@ -468,14 +447,10 @@ def main(
               "service_distance_mask. Treat the TOO FAR numbers above as unreliable "
               "until this is investigated.\n")
 
-    # 3. ALL SIX gates combined -- this is compute_water_eligible_cells()'s
-    #    own real output at this run's actual parameters, i.e. exactly what
-    #    find_candidate_zones() (the real pipeline) works from (BEFORE
-    #    waist-splitting/clustering -- see the zone section below for the
-    #    post-waist-split numbers). production_setback_meters is left at
-    #    its module default (WATER_ZONE_PRODUCTION_SETBACK_METERS) --
-    #    not overridable by this script, same as the service-distance/
-    #    boundary-setback thresholds (see module docstring).
+    # 3. ALL FIVE remaining gates combined -- this is compute_water_
+    #    eligible_cells()'s own real output at this run's actual
+    #    parameters, i.e. exactly what find_candidate_zones() (the real
+    #    pipeline) nominates anchors on.
     combined_mask = compute_water_eligible_cells(
         dem, production_areas, boundary_polygon_utm,
         max_valley_contributing_area_acres=max_contributing_acres,
@@ -483,8 +458,8 @@ def main(
         road_exclusion_union_utm=road_exclusion_union_utm,
     )
     _report_mask_stats(
-        "ALL SIX gates combined (real pipeline output -- matches find_candidate_zones()'s own eligible_mask, "
-        "pre-waist-split)",
+        "ALL FIVE remaining gates combined (real pipeline output -- matches find_candidate_zones()'s own "
+        "eligible_mask, the ground anchors may be nominated on)",
         combined_mask, dem,
     )
 
@@ -493,18 +468,44 @@ def main(
     # field find_candidate_zones() itself produces (cells, polygon_utm,
     # primary_production_area_relationship, ...) so the sections below report
     # on the REAL thing, not a diagnostic-only approximation of it.
-    # find_candidate_zones() now returns at most ONE zone (the highest
-    # post-growth summed-accumulation cluster).
+    # find_candidate_zones() returns up to MAX_WATER_ZONE_CANDIDATES zones,
+    # nominated from keypoints first (by catchment) then from the highest
+    # remaining flow accumulation. The nomination record -- one outcome per
+    # keypoint, one entry per family-2 seed, each with its reason code -- is
+    # what explains a short or empty list.
+    nomination_diagnostics: dict = {}
     zones = find_candidate_zones(
         dem, production_areas, boundary_polygon_utm,
         max_valley_contributing_area_acres=max_contributing_acres,
         canopy_root_zone_mask_utm=canopy_root_zone_mask_utm,
         road_exclusion_union_utm=road_exclusion_union_utm,
+        diagnostics=nomination_diagnostics,
     )
-    print(
-        f"find_candidate_zones() returned {len(zones)} zone(s) (at most one by design -- the selected "
-        "best-available survey area).\n"
-    )
+    print(f"find_candidate_zones() returned {len(zones)} zone(s) (cap: {MAX_WATER_ZONE_CANDIDATES}).")
+    for zone in zones:
+        left = zone["abutments"]["left"]["lateral_distance_m"]
+        right = zone["abutments"]["right"]["lateral_distance_m"]
+        print(
+            f"  - zone {zone['id']}: nominated_by={zone['nominated_by']} "
+            f"keypoint_id={zone['keypoint_id']} valley_id={zone['valley_id']} "
+            f"anchor={zone['anchor_rowcol']} cells={len(zone['cells'])} "
+            f"acres={zone['polygon_utm'].area / SQUARE_METERS_PER_ACRE:.3f} "
+            f"abutments=(L {left}, R {right}) flags={zone['flags']}"
+        )
+    print("\nPer-keypoint nomination outcomes (reason codes):")
+    for outcome in nomination_diagnostics.get("keypoint_outcomes", []):
+        print(
+            f"  - keypoint {outcome['keypoint_id']} (valley {outcome['valley_id']}, "
+            f"{outcome['contributing_acres']:.2f} ac): {outcome['outcome']} "
+            f"-> candidate {outcome['candidate_id']}"
+        )
+    print("Family-2 (accumulation) seed log:")
+    for seed in nomination_diagnostics.get("accumulation_seeds", []):
+        print(
+            f"  - anchor {seed['anchor_rowcol']} (accum {seed['flow_accumulation_cells']:.0f} cells): "
+            f"{seed['outcome']} -> candidate {seed['candidate_id']}"
+        )
+    print()
 
     ranked_zones = _report_zone_elevation_ranges(dem, boundary_polygon_utm, zones)
 

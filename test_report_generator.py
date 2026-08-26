@@ -400,19 +400,46 @@ from report_generator import (  # noqa: E402
     _format_water_candidate_zones_summary,
 )
 
-_water_nd = {
-    "zone_found": True,
-    "production_area_count": 2,
-    "gates": {"canopy_data_available": True, "road_data_available": True},
-    "zone": {
+# One keypoint-nominated candidate (with a snap) and one
+# accumulation-nominated candidate, plus a keypoint that produced nothing
+# -- so the prose exercises provenance, flags, the level-pool block and the
+# unproductive-keypoint reason-code line in a single fixture.
+def _water_zone_block(zone_id, nominated_by, keypoint_id, valley_id, snapped, flags, abut_left_found):
+    return {
+        "id": zone_id,
         "area_acres": 0.5,
-        "target_acres": 0.5,
+        "provenance": {
+            "nominated_by": nominated_by,
+            "keypoint_id": keypoint_id,
+            "valley_id": valley_id,
+            "seed_snapped": snapped,
+            "seed_snap_distance_ft": 16.4 if snapped else 0.0,
+        },
+        "flags": flags,
         "location": {"position_in_parcel": "southwest", "elevation_percentile_of_parcel": 22.7},
         "drainage": {
             "contributing_area_acres": 1.9,
             "contributing_area_ceiling_acres": 20.0,
             "slope_median_pct": 40.0,
         },
+        "level_pool": {
+            "reference_height_ft": 8.2,
+            "dam_band_width_ft": 114.8,
+            "abutment_found_left": abut_left_found,
+            "abutment_found_right": True,
+            "abutment_distance_left_ft": 49.2 if abut_left_found else None,
+            "abutment_distance_right_ft": 49.2,
+            "backwater_cell_count": 65,
+            "stations": [
+                {"station_index": 0, "offset_upstream_ft": 0.0, "flooded_width_ft": 82.0,
+                 "flooded_cross_section_area_sqft": 349.8},
+                {"station_index": 1, "offset_upstream_ft": 82.0, "flooded_width_ft": 49.2,
+                 "flooded_cross_section_area_sqft": 215.3},
+                {"station_index": 2, "offset_upstream_ft": 164.0, "flooded_width_ft": 49.2,
+                 "flooded_cross_section_area_sqft": 134.6},
+            ],
+        },
+        "overlap": {"canopy_overlap_pct": 12.5, "road_overlap_pct": 0.0},
         "service": {
             "served_production_area_count": 2,
             "served_production_area_ids": [0, 1],
@@ -423,21 +450,68 @@ _water_nd = {
                  "distance_ft": 0.0, "gradient_pct": None},
             ],
         },
+    }
+
+
+_water_zone_0 = _water_zone_block(0, "keypoint", 1, 0, True, ["seed_snapped", "truncated_by_boundary"], True)
+_water_zone_1 = _water_zone_block(1, "accumulation", None, None, False, [], False)
+_water_nd = {
+    "zone_found": True,
+    "candidate_count": 2,
+    "production_area_count": 2,
+    "gates": {"canopy_data_available": True, "road_data_available": True},
+    "nomination": {
+        "keypoints_considered": 3,
+        "keypoint_outcomes": [
+            {"keypoint_id": 1, "valley_id": 0, "contributing_acres": 8.0, "outcome": "nominated",
+             "candidate_id": 0, "seed_snapped": True, "seed_snap_distance_ft": 16.4,
+             "flags": ["seed_snapped"]},
+            {"keypoint_id": 0, "valley_id": 0, "contributing_acres": 3.0,
+             "outcome": "too_close_to_candidate_0", "candidate_id": None, "seed_snapped": False,
+             "seed_snap_distance_ft": 0.0, "flags": []},
+            {"keypoint_id": 2, "valley_id": 1, "contributing_acres": 4.0,
+             "outcome": "no_eligible_cell_within_snap", "candidate_id": None, "seed_snapped": False,
+             "seed_snap_distance_ft": 0.0, "flags": []},
+        ],
+        "accumulation_seeds": [{"outcome": "nominated", "candidate_id": 1, "flags": []}],
     },
+    "zones": [_water_zone_0, _water_zone_1],
+    "zone": _water_zone_0,
 }
 _water_prose = _format_water_candidate_zones_summary(_water_nd)
+assert "2 candidate survey area(s) identified" in _water_prose
+assert "3 detected keypoint(s)" in _water_prose
 assert "in the parcel's southwest" in _water_prose and "22.7 elevation percentile" in _water_prose
 assert "1.9 acre(s)" in _water_prose and "20.0-acre siltation/peak-flow" in _water_prose
+assert "nominated from keypoint 1 (valley 0)" in _water_prose
+assert "anchor snapped 16.4 ft" in _water_prose
+assert "nominated from the highest remaining flow accumulation" in _water_prose
+assert "NOT A PROPOSED DAM HEIGHT" in _water_prose
+assert "8.2 ft reference waterline" in _water_prose
+assert "49.2 ft out" in _water_prose
+assert "NOT FOUND within the search width" in _water_prose, (
+    "an abutment that was not found must be stated as a finding, never omitted or shown as 0 ft"
+)
+assert "flooded cross-sectional area 349.8 sq ft" in _water_prose
+assert "NOT a storage capacity" in _water_prose and "no volume is computed" in _water_prose
+assert "canopy 12.5%" in _water_prose and "NOT used to shrink the zone" in _water_prose
+assert "Flags: seed_snapped, truncated_by_boundary." in _water_prose
+assert "too_close_to_candidate_0" in _water_prose and "no_eligible_cell_within_snap" in _water_prose, (
+    "keypoints that produced no candidate must be reported with the reason code that stopped them"
+)
 assert "can_gravity_feed: True" in _water_prose and "A gravity-feed relationship." in _water_prose
 assert "would need a pump" in _water_prose, "a below-elevation relationship must be stated as pump-required"
 assert "gradient undefined" in _water_prose, "a distance-0 relationship must state its gradient is undefined, not 0%"
-assert "NOT a specific pond/dam site" in _water_prose
+assert "NOT specific pond/dam sites" in _water_prose
 assert "No water system candidate survey area identified" in _format_water_candidate_zones_summary(None)
 assert "No water system candidate survey area identified" in _format_water_candidate_zones_summary(
-    {"zone_found": False, "production_area_count": 0, "gates": {}, "zone": None}
+    {"zone_found": False, "candidate_count": 0, "production_area_count": 0, "gates": {},
+     "nomination": {"keypoints_considered": 0, "keypoint_outcomes": [], "accumulation_seeds": []},
+     "zones": [], "zone": None}
 )
-print("_format_water_candidate_zones_summary(): position/drainage/gravity-vs-pump rendered from the block; "
-      "no-zone and missing blocks read as no data.")
+print("_format_water_candidate_zones_summary(): N candidates with provenance, flags, level-pool "
+      "measurements (no capacity anywhere), reported overlaps, per-keypoint reason codes, and "
+      "gravity-vs-pump all rendered from the block; no-candidate and missing blocks read as no data.")
 
 _solar_nd = {
     "site_found": True,
