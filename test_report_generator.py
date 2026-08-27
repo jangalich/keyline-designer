@@ -569,10 +569,7 @@ print("_format_water_candidate_zones_summary(): N candidates with provenance, fl
 _survey_nd = {
     "zone_found": True,
     "zone_count": 2,
-    "presented_count": 2,
     "dropped_count": 1,
-    "presentation_top_n": 3,
-    "presentation_guarantee_applied": False,
     "member_region_count": 3,
     "embankment_zone_count": 1,
     "excavated_zone_count": 1,
@@ -601,7 +598,9 @@ _survey_nd = {
          "overlaps": {"canopy_pct": 12.5, "road_pct": None, "production_pct": 0.0},
          "gravity": {"has_service_relationship": True, "can_gravity_feed": False,
                      "production_area_id": 3, "elevation_differential_ft": -18.4, "distance_ft": 210.0},
-         "flags": [], "below_min_area": False, "confidence": "high"},
+         "flags": [], "below_min_area": False, "sparse_anchor": False,
+         "cross_type_overlaps": [{"zone_id": 1, "overlap_pct": 62.0}], "either_type_candidate": True,
+         "confidence": "high"},
         {"id": 1, "survey_type": "embankment", "rank": 1, "member_count": 1,
          "member_acres": 0.1, "zone_acres": 0.1,
          "mean_suitability": 0.55, "max_suitability": 0.61,
@@ -613,7 +612,8 @@ _survey_nd = {
          "contributing_area_acres_at_wettest_cell": 5.4, "boundary_adjacency_pct": 0.0,
          "overlaps": {"canopy_pct": 0.0, "road_pct": 0.0, "production_pct": None},
          "gravity": {"has_service_relationship": False, "can_gravity_feed": None},
-         "flags": ["below_min_area", "no_service_relationship"], "below_min_area": True,
+         "flags": ["below_min_area", "no_service_relationship", "sparse_anchor"], "below_min_area": True,
+         "sparse_anchor": True, "cross_type_overlaps": [], "either_type_candidate": False,
          "confidence": "medium"},
     ],
 }
@@ -629,13 +629,23 @@ assert "no pool, wall, volume, or station" in _survey_prose, (
 assert "wettest ground on THIS parcel" in _survey_prose, (
     "the parcel-relative TWI caveat must reach the prompt so the report cannot overclaim wetness"
 )
-assert "Showing the top 2 of 2 surviving zone(s)" in _survey_prose, (
-    "the counts line states what is shown and what survived"
+assert "All 2 surviving zone(s) are listed, ranked per type -- no presentation cap" in _survey_prose, (
+    "the counts line states that everything surviving is shown -- the cap is deleted"
 )
-assert "1 zone(s) whose anchoring ground fell under the 0.1-acre floor were dropped" in _survey_prose, (
-    "the floor's drops are stated, never silent -- listed in the diagnostic export, not planned on"
+assert "you decide which to walk" in _survey_prose
+assert "1 zone(s) whose walkable envelope fell under the 0.1-acre floor were dropped" in _survey_prose, (
+    "the floor's drops are stated on their zone-acre basis, never silent"
 )
-assert "each pond type's best zone appears" in _survey_prose, "the consultant guarantee is stated"
+assert "each pond type's best zone appears" not in _survey_prose, (
+    "the deleted per-type guarantee's phrasing must not resurface"
+)
+assert "EITHER-TYPE CANDIDATE" in _survey_prose and "zone 1 (62.0% of this envelope)" in _survey_prose, (
+    "the cross-type agreement renders as the consultant either-type line with its overlap numbers"
+)
+assert "evaluate both approaches during the survey" in _survey_prose
+assert "SPARSE ANCHOR" in _survey_prose and "scattered good ground within a larger area" in _survey_prose, (
+    "the sparse-anchor honesty line renders when the flag is set"
+)
 assert "dugout or seep-fed excavated pond" in _survey_prose, "the seep-widened excavated framing reaches the prose"
 assert "Selected for downstream planning: zone 0 (excavated-type)" in _survey_prose
 assert "provisional selection rule" in _survey_prose
@@ -657,7 +667,7 @@ assert "roads NOT CHECKED" in _survey_prose, "a never-checked overlap must read 
 assert "production ground NOT CHECKED" in _survey_prose
 assert "canopy 12.5%" in _survey_prose
 assert "42.0% of this area's perimeter" in _survey_prose, "boundary adjacency is site-visit context"
-assert "Flags: below_min_area, no_service_relationship." in _survey_prose, (
+assert "Flags: below_min_area, no_service_relationship, sparse_anchor." in _survey_prose, (
     "flags ride into the prose -- flagged, never filtered"
 )
 assert "TUNE FROM FIRST RUN" in _survey_prose and "isobands" in _survey_prose

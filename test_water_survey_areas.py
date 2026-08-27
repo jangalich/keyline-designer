@@ -46,6 +46,7 @@ from water_survey_areas import (
     EXCAVATED_WEIGHTS,
     FLAG_BELOW_MIN_AREA,
     FLAG_NO_SERVICE_RELATIONSHIP,
+    FLAG_SPARSE_ANCHOR,
     HYDROLOGIC_GROUP_SCORES,
     MIN_SURVEY_REGION_AREA_ACRES,
     SURVEY_TYPE_EMBANKMENT,
@@ -425,8 +426,9 @@ assert set(diag_regions[0]["cells"]) == {(i, i) for i in range(5, 15)}, (
 )
 assert diag_regions[0]["mean_suitability"] == 1.0, "raw scoring stays sharp -- the member mean is the peaks' own 1.0"
 
-# And the aggregation over it: one zone whose envelope closes the
-# corner notches -- the neighborhood claim, applied AFTER extraction.
+# And the aggregation over it: one zone whose HULL envelope spans the
+# diagonal's bounding wedge -- the surveyable claim, drawn AFTER
+# extraction (the closing decides grouping only).
 diag_surfaces = {
     SURVEY_TYPE_EMBANKMENT: diag_raw,
     SURVEY_TYPE_EXCAVATED: diag_zeros,
@@ -443,49 +445,195 @@ diag_gate_context = {
 diag_zones = build_survey_zones(diag_dem, diag_regions, diag_surfaces, diag_gate_context, diag_boundary)
 assert len(diag_zones) == 1 and diag_zones[0]["member_count"] == 1
 assert diag_zones[0]["zone_acres"] > diag_zones[0]["member_acres"], (
-    "the closing envelope fills the diagonal's corner notches -- the ground to walk exceeds the anchor"
+    "the hull envelope spans the diagonal's bounding wedge -- the ground to walk exceeds the anchor"
 )
 assert diag_zones[0]["mean_suitability"] == 1.0, (
     "zone score statistics come from MEMBER cells only -- the envelope never launders the 0.5 background in"
 )
 print("Diagonal ridge: raw peaks extract at 0.9 as one 8-connected member; its zone walks a larger envelope while scoring only the anchor.")
 
-# --- Closing math, hand-derived (the survey-zone geometry core). Two
-# 20x20 m squares. At SURVEY_ZONE_GROUPING_DISTANCE_METERS = 30, a 20 m
-# gap bridges (gaps up to the FULL distance bridge: each side buffers
-# out 15); a 40 m gap does not. Envelope area for the bridged pair:
-# the filled 60x20 rectangle = 1200 m^2 MINUS two menisci where the
-# round buffer joins sag across the gap -- sagitta 15 - sqrt(15^2-10^2)
-# = 3.82 m over the 20 m gap, ~50-60 m^2 per side -- so the assertion
-# uses a STATED tolerance (within 120 m^2 of 1200), not equality. A
-# singleton closes back to itself (dilation then erosion of a convex
-# square is exact up to buffer discretization). ---
+# --- Closing math, hand-derived (the GROUPING core -- pre-merge, the
+# closing decides WHICH members belong together and nothing else; the
+# drawn envelope is the hull, tested next). Two 20x20 m squares. At
+# SURVEY_ZONE_GROUPING_DISTANCE_METERS = 30, a 20 m gap bridges (gaps up
+# to the FULL distance bridge: each side buffers out 15); a 40 m gap
+# does not. Closing-region area for the bridged pair: the filled 60x20
+# rectangle = 1200 m^2 MINUS two menisci where the round buffer joins
+# sag across the gap -- sagitta 15 - sqrt(15^2-10^2) = 3.82 m over the
+# 20 m gap, ~50-60 m^2 per side -- so the assertion uses a STATED
+# tolerance (within 120 m^2 of 1200), not equality. A singleton closes
+# back to itself (dilation then erosion of a convex square is exact up
+# to buffer discretization). ---
 assert SURVEY_ZONE_GROUPING_DISTANCE_METERS == 30.0
 sq_a = box(0.0, 0.0, 20.0, 20.0)
 sq_b_near = box(40.0, 0.0, 60.0, 20.0)   # 20 m gap < 30 -> bridges
 sq_b_far = box(60.0, 0.0, 80.0, 20.0)    # 40 m gap > 30 -> stays apart
 
-near_envelopes = _close_member_footprints([sq_a, sq_b_near], SURVEY_ZONE_GROUPING_DISTANCE_METERS)
-assert len(near_envelopes) == 1, "a 20 m gap at 30 m grouping must fuse into ONE zone envelope"
-near_area = near_envelopes[0].area
+near_regions = _close_member_footprints([sq_a, sq_b_near], SURVEY_ZONE_GROUPING_DISTANCE_METERS)
+assert len(near_regions) == 1, "a 20 m gap at 30 m grouping must fuse into ONE zone"
+near_area = near_regions[0].area
 assert abs(near_area - 1200.0) <= 120.0, (
-    f"the fused envelope is the 60x20 rectangle (1200 m^2) minus the two round-join menisci "
+    f"the fused closing region is the 60x20 rectangle (1200 m^2) minus the two round-join menisci "
     f"(sagitta 3.82 m over the 20 m gap): got {near_area:.1f} m^2, outside the stated tolerance"
 )
-assert near_area > sq_a.area + sq_b_near.area, "the bridge genuinely adds ground beyond the members"
+assert near_area > sq_a.area + sq_b_near.area, "the bridge genuinely groups across the gap"
 
-far_envelopes = _close_member_footprints([sq_a, sq_b_far], SURVEY_ZONE_GROUPING_DISTANCE_METERS)
-assert len(far_envelopes) == 2, "a 40 m gap at 30 m grouping must stay TWO zones"
-for envelope in far_envelopes:
-    assert abs(envelope.area - 400.0) / 400.0 < 0.01, (
-        f"an unbridged square closes back to its own 400 m^2, got {envelope.area:.1f}"
+far_regions = _close_member_footprints([sq_a, sq_b_far], SURVEY_ZONE_GROUPING_DISTANCE_METERS)
+assert len(far_regions) == 2, "a 40 m gap at 30 m grouping must stay TWO zones"
+for region in far_regions:
+    assert abs(region.area - 400.0) / 400.0 < 0.01, (
+        f"an unbridged square closes back to its own 400 m^2, got {region.area:.1f}"
     )
 
-lone_envelopes = _close_member_footprints([sq_a], SURVEY_ZONE_GROUPING_DISTANCE_METERS)
-assert len(lone_envelopes) == 1 and abs(lone_envelopes[0].area - 400.0) / 400.0 < 0.01, (
+lone_regions = _close_member_footprints([sq_a], SURVEY_ZONE_GROUPING_DISTANCE_METERS)
+assert len(lone_regions) == 1 and abs(lone_regions[0].area - 400.0) / 400.0 < 0.01, (
     "a singleton closes back to approximately itself -- the large-single-candidate case needs no special rule"
 )
-print("Closing math: 20 m gap fuses (1200 m^2 minus stated menisci), 40 m gap stays two, singleton returns itself.")
+print("Closing math (grouping): 20 m gap fuses (1200 m^2 minus stated menisci), 40 m gap stays two, singleton returns itself.")
+
+# --- HULL math, hand-derived (the DRAWING core -- pre-merge change 1:
+# the drawn zone is the convex hull of the member union, clipped to the
+# parcel). Driven through build_survey_zones itself on hand-built member
+# regions so the grouping-vs-drawing split is exercised in our code, not
+# restated in shapely. The waisted two-square fixture states BOTH
+# numbers: the closing's grouping region sagged to ~1085-1140 m^2
+# (menisci), while the hull claims the FULL 60x20 = 1200 m^2 rectangle
+# -- the surveyable claim a surveyor would rope off, waist filled. ---
+def _hull_member(cells, x0, y0, x1, y1, survey_type=SURVEY_TYPE_EMBANKMENT):
+    """A minimal member-region dict for build_survey_zones: exact box
+    footprint + the cell list its stats read from."""
+    return {
+        "survey_type": survey_type,
+        "polygon_utm": box(x0, y0, x1, y1),
+        "cells": cells,
+    }
+
+
+hull_dem = _dem(np.full((30, 30), 100.0))
+hull_surface = np.full((30, 30), 1.0)
+hull_zeros = np.zeros((30, 30))
+hull_surfaces = {
+    SURVEY_TYPE_EMBANKMENT: hull_surface,
+    SURVEY_TYPE_EXCAVATED: hull_zeros,
+    "criteria": {
+        SURVEY_TYPE_EMBANKMENT: {name: hull_surface for name in EMBANKMENT_WEIGHTS},
+        SURVEY_TYPE_EXCAVATED: {},
+    },
+}
+hull_gate_context = {
+    "twi_percentile": hull_zeros,
+    "depression_depth": hull_zeros,
+    "flow_accumulation": np.ones((30, 30)),
+    "slope_pct": hull_zeros,
+    "soil_covered_mask": np.zeros((30, 30), dtype=bool),
+    "soil_checked": False,
+}
+hull_wide_boundary = box(ORIGIN_X - 1.0, ORIGIN_Y - 150.0 - 1.0, ORIGIN_X + 150.0 + 1.0, ORIGIN_Y + 1.0)
+
+# Waisted pair: 20x20 m squares (16 cells each), 20 m gap -> the closing
+# groups them (asserted above at ~1085-1140 m^2); the hull of the two
+# squares is EXACTLY the bounding 60x20 rectangle = 1200 m^2, and axis-
+# aligned box hulls carry no discretization, so the area is exact.
+waisted_members = [
+    _hull_member(
+        [(r, c) for r in range(4) for c in range(4)],
+        ORIGIN_X, ORIGIN_Y - 20.0, ORIGIN_X + 20.0, ORIGIN_Y
+    ),
+    _hull_member(
+        [(r, c) for r in range(4) for c in range(8, 12)],
+        ORIGIN_X + 40.0, ORIGIN_Y - 20.0, ORIGIN_X + 60.0, ORIGIN_Y
+    ),
+]
+waisted_zones = build_survey_zones(hull_dem, waisted_members, hull_surfaces, hull_gate_context, hull_wide_boundary)
+assert len(waisted_zones) == 1 and waisted_zones[0]["member_count"] == 2, (
+    "grouping is unchanged: the 20 m gap still fuses the pair into one zone"
+)
+waisted_zone = waisted_zones[0]
+assert math.isclose(waisted_zone["polygon_utm"].area, 1200.0), (
+    f"the hull claims the full 60x20 rectangle EXACTLY (1200 m^2; the closing sagged to "
+    f"{near_area:.1f} m^2) -- got {waisted_zone['polygon_utm'].area:.1f}"
+)
+assert math.isclose(waisted_zone["zone_acres"], round(1200.0 / 4046.8564224, 4)), (
+    "zone_acres is the hull's own 1200 m^2 = 0.2965 ac"
+)
+assert math.isclose(waisted_zone["member_acres"], round(32 * 25.0 / 4046.8564224, 4)), (
+    "32 anchoring cells x 25 m^2 = 0.1977 ac"
+)
+assert waisted_zone["sparse_anchor"] is False, (
+    "member/zone = 0.1977/0.2965 = 0.667 >= the 0.2 sparse-anchor fraction -> the flag stays silent"
+)
+assert waisted_zone["mean_suitability"] == 1.0, (
+    "member-only statistics survive the hull change: the waist's added ground never enters the mean"
+)
+
+# Singleton: a convex member footprint's hull IS itself -- exactly, not
+# approximately (the closing-era 'approximately itself' sliver is gone).
+singleton_zones = build_survey_zones(
+    hull_dem,
+    [_hull_member([(r, c) for r in range(4) for c in range(4)], ORIGIN_X, ORIGIN_Y - 20.0, ORIGIN_X + 20.0, ORIGIN_Y)],
+    hull_surfaces,
+    hull_gate_context,
+    hull_wide_boundary,
+)
+assert len(singleton_zones) == 1
+assert math.isclose(singleton_zones[0]["polygon_utm"].area, 400.0), (
+    "a singleton's hull is EXACTLY its own 400 m^2 -- dual acreage coincides on a convex singleton"
+)
+assert singleton_zones[0]["zone_acres"] == singleton_zones[0]["member_acres"], (
+    "16 cells x 25 m^2 and the 400 m^2 hull round to the same acreage -- the two numbers agree when "
+    "the claim IS the anchor"
+)
+
+# Hugging fixture: a boundary smaller than the hull clips it -- the
+# clipped hull is the boundary box itself, so adjacency is EXACTLY 1.0
+# (concavity introduced by the clip is acceptable; the boundary is real
+# ground truth).
+hug_boundary = box(ORIGIN_X + 10.0, ORIGIN_Y - 20.0, ORIGIN_X + 50.0, ORIGIN_Y)
+hug_zones = build_survey_zones(hull_dem, waisted_members, hull_surfaces, hull_gate_context, hug_boundary)
+assert len(hug_zones) == 1
+assert math.isclose(hug_zones[0]["polygon_utm"].area, 800.0), (
+    "the 1200 m^2 hull clipped to the 40x20 boundary keeps exactly 800 m^2"
+)
+assert hug_zones[0]["boundary_adjacency_fraction"] == 1.0, (
+    "the clipped hull's perimeter lies entirely on the parcel line -- adjacency exactly 1.0 on the hull"
+)
+
+# Sparse anchor FIRES: a single L-shaped member (extraction's connected
+# components are free to be concave) whose two 5 m-wide, 100 m-long
+# arms anchor 39 cells = 975 m^2 -- while its HULL is the near-triangle
+# over the whole 100x100 corner. Hand-shoelaced on the hull's five
+# corners (0,0),(5,0),(100,95),(100,100),(0,100): 5487.5 m^2.
+# member/zone = 975/5487.5 = 0.1777 < 0.2 -> the walkable claim vastly
+# exceeds its anchor and says so, on a zone that also clears the 0.1 ac
+# floor (1.356 ac) -- a SURVIVING sparse anchor, the case the flag
+# exists for.
+sparse_footprint = unary_union([
+    box(ORIGIN_X, ORIGIN_Y - 100.0, ORIGIN_X + 5.0, ORIGIN_Y),
+    box(ORIGIN_X, ORIGIN_Y - 100.0, ORIGIN_X + 100.0, ORIGIN_Y - 95.0),
+])
+sparse_cells = [(r, 0) for r in range(20)] + [(19, c) for c in range(1, 20)]
+sparse_members = [
+    {"survey_type": SURVEY_TYPE_EMBANKMENT, "polygon_utm": sparse_footprint, "cells": sparse_cells},
+]
+sparse_zones = build_survey_zones(hull_dem, sparse_members, hull_surfaces, hull_gate_context, hull_wide_boundary)
+assert len(sparse_zones) == 1, "one L-shaped member -> one zone, no grouping involved"
+sparse_zone = sparse_zones[0]
+assert math.isclose(sparse_zone["polygon_utm"].area, 5487.5), (
+    f"hand-shoelaced hull of the L = 5487.5 m^2, got {sparse_zone['polygon_utm'].area:.1f}"
+)
+assert sparse_zone["sparse_anchor"] is True and FLAG_SPARSE_ANCHOR in sparse_zone["flags"], (
+    "member/zone = 975/5487.5 = 0.1777 < 0.2 -> sparse_anchor fires"
+)
+assert FLAG_BELOW_MIN_AREA not in sparse_zone["flags"], (
+    "1.356 ac of hull clears the floor -- this sparse anchor SURVIVES, which is why the flag matters"
+)
+assert sparse_zone["mean_suitability"] == 1.0, (
+    "the sparse hull's empty middle never enters the score -- member cells only, still"
+)
+print(
+    f"Hull math: waisted pair hulls to exactly 1200 m^2 (closing sagged to {near_area:.1f}), singleton exact, "
+    "clip adjacency exactly 1.0, sparse anchor fires at 975/5487.5 and stays member-scored."
+)
 
 
 # =========================================================================
@@ -506,12 +654,14 @@ print("Closing math: 20 m gap fuses (1200 m^2 minus stated menisci), 40 m gap st
 #   excavated = .35*.25 + .30*1 + .25*1 + .10*0.0030888 = 0.63780888
 # >= the 0.5 default (final tuning: decided against the parcel's
 # attainable ceiling) -> ONE 100-cell member; embankment = 0.35 < 0.5 ->
-# none. The single member closes to one zone whose clipped envelope IS
-# the boundary box -- which makes the DUAL ACREAGE distinction visible
-# on this very fixture: member_acres counts CELLS (100 x 0.0061776 =
-# 0.6178) while zone_acres measures the clipped envelope POLYGON
-# (49.8 x 49.8 m = 2480.04 m^2 = 0.6128) -- two different questions,
-# deliberately not interchangeable.
+# none. The single member's footprint is a convex 50x50 m square, so its
+# HULL is exactly itself (pre-merge: the drawn envelope is the convex
+# hull of the member union, clipped to the parcel); clipped to the
+# boundary the envelope IS the boundary box -- which makes the DUAL
+# ACREAGE distinction visible on this very fixture: member_acres counts
+# CELLS (100 x 0.0061776 = 0.6178) while zone_acres measures the clipped
+# envelope POLYGON (49.8 x 49.8 m = 2480.04 m^2 = 0.6128) -- two
+# different questions, deliberately not interchangeable.
 CA = cell_area_acres(_dem(np.zeros((2, 2))))
 assert math.isclose(CA, 25.0 / 4046.8564224)
 
@@ -570,15 +720,13 @@ assert flat_zone["below_min_area"] is False
 # Member <-> zone linkage, both ways:
 assert flat_zone["member_ids"] == [flat_member["id"]]
 assert flat_member["zone_id"] == flat_zone["id"]
-# Envelope hugs the boundary on every side -> adjacency ~1.0 (test 3).
-# Not exactly 1.0: the vector closing's buffer arcs are polygonal
-# approximations, so eroding the dilated square shaves each corner a few
-# centimeters inside the boundary line -- ~0.6% of the perimeter on this
-# 49.8 m box, a discretization artifact of the closing, not a
-# measurement change.
-assert flat_zone["boundary_adjacency_fraction"] > 0.99, (
-    f"the clipped envelope hugs the boundary (minus closing-discretization corner shavings) -- "
-    f"expected > 0.99, got {flat_zone['boundary_adjacency_fraction']}"
+# Envelope hugs the boundary on every side -> adjacency EXACTLY 1.0
+# now: the clipped hull IS the boundary box (a hull has no buffer-arc
+# discretization to shave corners with -- the closing-era > 0.99
+# tolerance is retired with the closing-drawn envelope).
+assert flat_zone["boundary_adjacency_fraction"] == 1.0, (
+    f"the clipped hull coincides with the boundary box -- adjacency exactly 1.0, "
+    f"got {flat_zone['boundary_adjacency_fraction']}"
 )
 print(
     f"Fixture 1 (uniform wet flat): one member (mean {flat_member['mean_suitability']} hand-derived), one "
@@ -680,26 +828,57 @@ for survey_type, expected_grid in (
     typed_zones = v_result["zones_by_type"][survey_type]
     assert len(typed_zones) == 1 and typed_zones[0]["member_count"] == 1
     assert typed_zones[0]["mean_suitability"] == typed_mean, "zone statistics are the member chain's own"
-    # A straight one-cell-wide ribbon closes back to approximately
-    # itself (dilate-then-erode of a straight band is exact up to
-    # discretization):
-    assert abs(typed_zones[0]["zone_acres"] - typed_zones[0]["member_acres"]) / typed_zones[0]["member_acres"] < 0.02
+    # A straight one-cell-wide ribbon is a convex 5x180 m rectangle, so
+    # its HULL is exactly itself (900 m^2); the boundary clip then
+    # shaves the 0.1 m the fixture's boundary sits inside the end
+    # cells' edges -> 5 x 179.8 = 899 m^2. Hand-stated: 0.2222 ac
+    # envelope vs 0.2224 ac anchor -- hull-exact up to the real clip,
+    # no closing discretization anymore:
+    assert abs(typed_zones[0]["zone_acres"] - typed_zones[0]["member_acres"]) < 0.001
+    assert math.isclose(typed_zones[0]["zone_acres"], round(5.0 * 179.8 / 4046.8564224, 4)), (
+        f"{survey_type}: the clipped hull is exactly the 899 m^2 strip, got {typed_zones[0]['zone_acres']}"
+    )
     assert typed_zones[0]["wettest_cell_rowcol"] == (37, V_CHANNEL)
     assert typed_zones[0]["boundary_adjacency_fraction"] < 0.1
 
-# Both zones survive the floor and both are presented (2 <= TOP_N=3, so
-# the per-type guarantee is trivially satisfied); the pooled selection
-# is the embankment zone (higher member mean) -- and it would be
-# identical with presentation never computed.
+# Both zones survive the floor and BOTH are in the output -- the
+# presentation cap is deleted, so surviving IS shipping (no `presented`
+# key exists on any zone). The pooled selection is the embankment zone
+# (higher member mean).
 v_emb_zone = v_result["zones_by_type"][SURVEY_TYPE_EMBANKMENT][0]
 v_exc_zone = v_result["zones_by_type"][SURVEY_TYPE_EXCAVATED][0]
-assert v_emb_zone["presented"] and v_exc_zone["presented"]
+assert "presented" not in v_emb_zone and "presented" not in v_exc_zone
+assert v_emb_zone["rank"] == 1 and v_exc_zone["rank"] == 1, "each type's lone zone ranks 1 within its type"
 assert v_emb_zone["mean_suitability"] > v_exc_zone["mean_suitability"]
 assert v_result["selected_water_zone"] is v_emb_zone
+
+# CROSS-TYPE OVERLAP (pre-merge change 4), hand-derived: both types'
+# zones are the SAME 5x180 m channel rectangle (identical member cells
+# -> identical hulls), so each envelope is 100% covered by the other --
+# fraction 1.0 both ways, pointing at the other zone's id. 1.0 >= the
+# 0.5 note fraction -> this is exactly the either-type ground the
+# consultant line is for. Sparse anchor is silent (member == zone).
+assert v_emb_zone["cross_type_overlaps"] == [{"zone_id": v_exc_zone["id"], "fraction": 1.0}], (
+    f"the embankment envelope is fully covered by the excavated one, got {v_emb_zone['cross_type_overlaps']}"
+)
+assert v_exc_zone["cross_type_overlaps"] == [{"zone_id": v_emb_zone["id"], "fraction": 1.0}], (
+    "the agreement is symmetric on identical envelopes"
+)
+assert v_emb_zone["sparse_anchor"] is False and v_exc_zone["sparse_anchor"] is False
+
+# The narrative carries the finding: overlap_pct 100.0 and the
+# either_type_candidate line-gate True on both blocks (1.0 >= 0.5).
+v_narrative = build_narrative_data(v_result)
+for block in v_narrative["zones"]:
+    assert block["either_type_candidate"] is True, "1.0 >= CROSS_TYPE_OVERLAP_NOTE_FRACTION -> the line fires"
+    assert block["cross_type_overlaps"][0]["overlap_pct"] == 100.0
+assert v_narrative["zone_count"] == 2 and len(v_narrative["zones"]) == 2, (
+    "ALL survivors are listed with the total count -- no cap"
+)
 print(
     f"Fixture 2 (V-valley, final defaults): BOTH types ribbon the 36 channel cells (emb mean "
     f"{v_emb_zone['mean_suitability']}, exc mean {v_exc_zone['mean_suitability']} -- the seep widening "
-    "at work), both presented, embankment selected."
+    "at work), cross-type overlap 1.0 both ways with the either-type line gated on, embankment selected."
 )
 
 # --- FIXTURE 2b: member-vs-zone split where the envelope ADDS ground.
@@ -738,8 +917,12 @@ assert math.isclose(split_zone["member_acres"], round(70 * CA, 4))
 assert split_zone["zone_acres"] > split_zone["member_acres"], (
     "the bridged envelope adds the gap -- more ground to walk than anchored it"
 )
-assert abs(split_zone["zone_acres"] - expected_zone_acres) / expected_zone_acres < 0.02, (
-    f"the bridged envelope spans ~the full 50 m block ({expected_zone_acres:.4f} ac), got {split_zone['zone_acres']}"
+# The hull of the two same-row-span patches is the full bounding
+# rectangle; clipped to the boundary it IS the boundary box, exactly
+# (the closing-era ~2% tolerance is retired with the closing-drawn
+# envelope):
+assert abs(split_zone["zone_acres"] - expected_zone_acres) < 0.001, (
+    f"the bridging hull clips to exactly the boundary box ({expected_zone_acres:.4f} ac), got {split_zone['zone_acres']}"
 )
 assert split_zone["mean_suitability"] == round(expected_flat_score, 4), (
     "score statistics from MEMBERS ONLY: the zone mean is the member cells' 0.6378 -- laundering the 30 "
@@ -753,13 +936,17 @@ print(
     f"{split_zone['zone_acres']} ac vs anchor {split_zone['member_acres']} ac, member-only mean preserved."
 )
 
-# --- FIXTURE 3: THE FLOOR FILTERS NOW (final tuning -- the exploration
-# posture is over). Boundary covers only a 3x3 block: 9 member cells =
-# 0.0556 ac < the 0.1 ac floor -> the zone is DROPPED from the pipeline
-# output (status: dropped, drop_reason: below_min_area, rank None,
-# never presented, absent from zones_geojson), carried in dropped_zones
-# with its full property set -- visible and attributed, never silent.
-# With no survivor, the selection is honestly None. ---
+# --- FIXTURE 3: THE FLOOR FILTERS ON ZONE ACRES NOW (pre-merge change
+# 2: the basis is the walkable hull envelope -- the object the floor's
+# rationale was always about -- with sparse_anchor covering the honesty
+# cost). Boundary covers only a 3x3 block: the member square's hull
+# clips to the 14.8x14.8 m boundary box = 219.04 m^2 = 0.0541 ac <
+# the 0.1 ac floor -> the zone is DROPPED from the pipeline output
+# (status: dropped, drop_reason: below_min_area, rank None, absent from
+# zones_geojson), carried in dropped_zones with BOTH acreages on the
+# record (zone_acres 0.0541 judged; member_acres 0.0556 anchoring) --
+# visible and attributed, never silent. With no survivor, the selection
+# is honestly None. ---
 TINY_BOUNDARY = box(
     ORIGIN_X + 8 * RESOLUTION + 0.1,
     ORIGIN_Y - 11 * RESOLUTION + 0.1,
@@ -771,25 +958,34 @@ assert tiny_result["zones"] == [] and tiny_result["zones_by_type"][SURVEY_TYPE_E
     "a sub-floor zone is OUT of the pipeline output -- the floor is a filter now"
 )
 assert tiny_result["selected_water_zone"] is None, "no survivor -> the selection is honestly None"
-assert tiny_result["presented_zones"] == []
+assert "presented_zones" not in tiny_result, "the presentation machinery is deleted, key and all"
 assert len(tiny_result["dropped_zones"]) == 1, "the drop is carried, never silent"
 tiny_dropped = tiny_result["dropped_zones"][0]
 assert tiny_dropped["status"] == wsa.ZONE_STATUS_DROPPED
 assert tiny_dropped["drop_reason"] == FLAG_BELOW_MIN_AREA, "the reason code attributes the drop"
-assert tiny_dropped["rank"] is None and tiny_dropped["presented"] is False
-assert tiny_dropped["cell_count"] == 9 and tiny_dropped["member_acres"] < MIN_SURVEY_REGION_AREA_ACRES
+assert tiny_dropped["rank"] is None and "presented" not in tiny_dropped
+# The dual-acreage dropped record: the number the floor JUDGED
+# (zone_acres, the clipped hull) and the anchoring signal, both stated:
+assert tiny_dropped["zone_acres"] < MIN_SURVEY_REGION_AREA_ACRES, "the drop's basis is the ZONE acreage"
+assert math.isclose(tiny_dropped["zone_acres"], round(219.04 / 4046.8564224, 4)), (
+    f"hand-derived clipped hull 14.8 x 14.8 m = 0.0541 ac, got {tiny_dropped['zone_acres']}"
+)
+assert tiny_dropped["cell_count"] == 9 and math.isclose(tiny_dropped["member_acres"], round(9 * CA, 4))
 assert FLAG_BELOW_MIN_AREA in tiny_dropped["flags"], "the flag still rides the dropped zone's properties"
 assert not survey_areas_to_geojson(tiny_result["zones"])["features"], (
     "the pipeline's own zones_geojson omits dropped zones entirely"
 )
 print("Fixture 3 (floor filter): the 9-cell sliver zone is dropped with status/reason, selection None, nothing silent.")
 
-# --- FIXTURE 3b: the MEMBER-ACRES basis of the floor, asserted from
-# both directions. Two 3x3 wet patches (each 0.0556 ac -- individually
-# SUB-floor members) 15 m apart on a 3-row strip: their ZONE sums 18
-# cells = 0.1112 ac >= the floor, so it SURVIVES -- the filter judges
-# the zone's summed anchoring ground, not its members one by one, and
-# the large bridged envelope neither rescues nor condemns anything. ---
+# --- FIXTURE 3b: the ZONE-ACRES basis of the floor, asserted from the
+# direction that DISTINGUISHES the bases. Two 2-col x 3-row wet patches
+# (6 cells each; 12 member cells = 0.0741 ac -- BELOW the floor on the
+# retired member-acres basis) 20 m apart on a 3-row strip: their hull
+# bridges the gap into a 40x15 m rectangle, clipped to the boundary =
+# 39.9 x 14.8 = 590.52 m^2 = 0.1459 ac >= the floor, so the zone
+# SURVIVES -- the filter judges the walkable envelope. The honesty cost
+# is the sparse-anchor guard's job, and here it stays SILENT:
+# member/zone = 0.0741/0.1459 = 0.508 >= 0.2. ---
 STRIP_BOUNDARY = box(
     ORIGIN_X + 5 * RESOLUTION + 0.1,
     ORIGIN_Y - 9 * RESOLUTION + 0.1,
@@ -804,80 +1000,97 @@ strip_soil_inputs = {
     ],
     "geometries_by_mukey": {
         "A": transform_geom(
-            CRS, "EPSG:4326", mapping(box(ORIGIN_X + 25.0, ORIGIN_Y - 45.0, ORIGIN_X + 40.0, ORIGIN_Y - 30.0))
+            CRS, "EPSG:4326", mapping(box(ORIGIN_X + 25.0, ORIGIN_Y - 45.0, ORIGIN_X + 35.0, ORIGIN_Y - 30.0))
         ),
         "B": transform_geom(
-            CRS, "EPSG:4326", mapping(box(ORIGIN_X + 55.0, ORIGIN_Y - 45.0, ORIGIN_X + 70.0, ORIGIN_Y - 30.0))
+            CRS, "EPSG:4326", mapping(box(ORIGIN_X + 55.0, ORIGIN_Y - 45.0, ORIGIN_X + 65.0, ORIGIN_Y - 30.0))
         ),
     },
 }
 strip_result = compute_water_survey_areas(FLAT_DEM, STRIP_BOUNDARY, soil_inputs=strip_soil_inputs)
 strip_members = strip_result["regions_by_type"][SURVEY_TYPE_EXCAVATED]
-assert len(strip_members) == 2 and all(m["cell_count"] == 9 for m in strip_members)
-assert all(m["area_acres"] < MIN_SURVEY_REGION_AREA_ACRES for m in strip_members), (
-    "each member is individually sub-floor -- the fixture's whole point"
-)
+assert len(strip_members) == 2 and all(m["cell_count"] == 6 for m in strip_members)
 assert all(m["below_min_area"] for m in strip_members), "member REGIONS still just carry the flag"
 strip_zones = strip_result["zones_by_type"][SURVEY_TYPE_EXCAVATED]
 assert len(strip_zones) == 1 and strip_result["dropped_zones"] == [], (
-    "two sub-floor members whose ZONE sums 0.1112 ac survive the member-acres floor -- the basis is the "
-    "zone's summed anchoring ground"
+    "12 member cells = 0.0741 ac is under the floor, but the 0.1459 ac hull envelope is not: the zone "
+    "SURVIVES because the basis is ZONE acres -- the member-acres basis would have dropped it"
 )
 strip_zone = strip_zones[0]
-assert math.isclose(strip_zone["member_acres"], round(18 * CA, 4)) and strip_zone["member_acres"] >= 0.1
+assert math.isclose(strip_zone["member_acres"], round(12 * CA, 4))
+assert strip_zone["member_acres"] < MIN_SURVEY_REGION_AREA_ACRES <= strip_zone["zone_acres"], (
+    "the basis proof in one line: anchor below the floor, walkable envelope above it, zone alive"
+)
+assert math.isclose(strip_zone["zone_acres"], round(590.52 / 4046.8564224, 4)), (
+    f"hand-derived clipped hull 39.9 x 14.8 m = 0.1459 ac, got {strip_zone['zone_acres']}"
+)
 assert strip_zone["status"] == wsa.ZONE_STATUS_NOMINATED
-assert strip_zone["zone_acres"] > strip_zone["member_acres"], (
-    "the bridged envelope is larger than the anchor -- and irrelevant to the floor either way"
+assert strip_zone["sparse_anchor"] is False and FLAG_SPARSE_ANCHOR not in strip_zone["flags"], (
+    "member/zone = 0.508 >= 0.2 -> the sparse-anchor guard stays silent here"
 )
-print("Fixture 3b (member-acres basis): two individually sub-floor members sum above the floor -- their zone survives.")
+print(
+    "Fixture 3b (zone-acres basis): 0.0741 ac of anchor under a 0.1459 ac hull survives the floor -- "
+    "the walkable envelope is the judged object, sparse-anchor silent at 0.508."
+)
 
-# --- TOP_N + the per-type guarantee, on hand-built zone dicts. ---
-from water_survey_areas import WATER_ZONE_PRESENTATION_TOP_N, apply_presentation, select_survey_zone  # noqa: E402
+# --- THE PRESENTATION CAP IS DELETED (pre-merge change 3): absence
+# asserted at the module surface, not just unexercised. The constant,
+# the function, and the per-zone property are all gone -- surviving IS
+# shipping -- and no code path in the module even NAMES the deleted
+# machinery (AST-level, so docstring history notes stay legal). ---
+from water_survey_areas import attach_cross_type_overlaps, rank_survey_zones_per_type, select_survey_zone  # noqa: E402
 
-assert WATER_ZONE_PRESENTATION_TOP_N == 3
+assert not hasattr(wsa, "WATER_ZONE_PRESENTATION_TOP_N"), "the cap constant is deleted, not zeroed or bypassed"
+assert not hasattr(wsa, "apply_presentation"), "the presentation function is deleted with its guarantee/swap logic"
+for zone_holder in (flat_result["zones"], v_result["zones"], strip_result["zones"], tiny_result["dropped_zones"]):
+    for z in zone_holder:
+        assert "presented" not in z, "no zone -- surviving or dropped -- carries the deleted property"
+_wsa_module_ast = ast.parse(inspect.getsource(wsa))
+_called_names = {
+    node.func.id for node in ast.walk(_wsa_module_ast)
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+}
+assert "apply_presentation" not in _called_names, "nothing in the module still calls the deleted machinery"
+
+# Rank + selection on hand-built zone dicts: every survivor is ranked
+# within its type, and the pooled rank-1 invariant holds with NO cap in
+# between -- the selection is the pooled member-mean max, full stop.
+def _mini_zone(zid, stype, mean, acres, poly):
+    return {
+        "id": zid, "survey_type": stype, "mean_suitability": mean,
+        "member_acres": acres, "polygon_utm": poly,
+    }
 
 
-def _mini_zone(zid, stype, mean, acres):
-    return {"id": zid, "survey_type": stype, "mean_suitability": mean, "member_acres": acres}
-
-
-# Guarantee swap fires: 3 embankment zones outrank both excavated
-# survivors, so the pooled top 3 is all-embankment -- the lowest
-# presented (emb 0.7) is swapped for the best excavated (0.65), keeping
-# the count at 3: top-2 embankment + best excavated.
-swap_zones = [
-    _mini_zone(0, SURVEY_TYPE_EMBANKMENT, 0.9, 1.0),
-    _mini_zone(1, SURVEY_TYPE_EMBANKMENT, 0.8, 1.0),
-    _mini_zone(2, SURVEY_TYPE_EMBANKMENT, 0.7, 1.0),
-    _mini_zone(3, SURVEY_TYPE_EXCAVATED, 0.65, 1.0),
-    _mini_zone(4, SURVEY_TYPE_EXCAVATED, 0.6, 1.0),
+rank_pool = [
+    _mini_zone(0, SURVEY_TYPE_EMBANKMENT, 0.9, 1.0, box(0, 0, 20, 20)),
+    _mini_zone(1, SURVEY_TYPE_EMBANKMENT, 0.8, 1.0, box(100, 0, 120, 20)),
+    _mini_zone(2, SURVEY_TYPE_EMBANKMENT, 0.7, 1.0, box(200, 0, 220, 20)),
+    _mini_zone(3, SURVEY_TYPE_EXCAVATED, 0.65, 1.0, box(10, 0, 30, 20)),
+    _mini_zone(4, SURVEY_TYPE_EXCAVATED, 0.6, 1.0, box(300, 0, 320, 20)),
 ]
-selected_before = select_survey_zone(swap_zones)
-presented = apply_presentation(swap_zones)
-assert [z["id"] for z in presented] == [0, 1, 3], (
-    "the consultant rule: your best dam area and your best dugout area both appear -- emb 0.9, emb 0.8, "
-    f"exc 0.65 (emb 0.7 swapped out), got {[z['id'] for z in presented]}"
+rank_survey_zones_per_type(rank_pool)
+assert [z["rank"] for z in rank_pool] == [1, 2, 3, 1, 2], (
+    "EVERY survivor is ranked within its type -- rank 3 exists because nothing caps the list at 3 anymore"
 )
-assert len(presented) == WATER_ZONE_PRESENTATION_TOP_N
-assert swap_zones[2]["presented"] is False and swap_zones[3]["presented"] is True
-assert select_survey_zone(swap_zones) is selected_before is swap_zones[0], (
-    "selection is INDEPENDENT of presentation -- the pooled rank-1 zone is identical before and after the "
-    "guarantee swap (the swap never touches the first slot)"
+assert select_survey_zone(rank_pool) is rank_pool[0], (
+    "the rank-1 invariant with no cap in between: the pooled member-mean max selects, directly"
 )
-# No swap when a type has no survivors:
-solo_type = [_mini_zone(i, SURVEY_TYPE_EMBANKMENT, 0.9 - i * 0.1, 1.0) for i in range(4)]
-assert [z["id"] for z in apply_presentation(solo_type)] == [0, 1, 2], (
-    "no excavated survivor exists -> no guarantee to honor -> the pooled top 3 stands"
+
+# attach_cross_type_overlaps on the same pool, hand-derived: emb zone 0
+# (x 0..20) and exc zone 3 (x 10..30) overlap on x 10..20 -> 200 m^2 of
+# each one's 400 m^2 envelope = fraction 0.5 both ways. Same-type
+# overlap is never reported (zones 0/1/2 don't see each other), and a
+# zero intersection stays ABSENT from the list, not a 0.0 entry.
+attach_cross_type_overlaps(rank_pool)
+assert rank_pool[0]["cross_type_overlaps"] == [{"zone_id": 3, "fraction": 0.5}], (
+    f"hand-derived: 10x20 m shared of the 20x20 envelope = 0.5, got {rank_pool[0]['cross_type_overlaps']}"
 )
-# No swap when the pooled top 3 already spans both types:
-mixed = [
-    _mini_zone(0, SURVEY_TYPE_EMBANKMENT, 0.9, 1.0),
-    _mini_zone(1, SURVEY_TYPE_EXCAVATED, 0.85, 1.0),
-    _mini_zone(2, SURVEY_TYPE_EMBANKMENT, 0.8, 1.0),
-    _mini_zone(3, SURVEY_TYPE_EMBANKMENT, 0.7, 1.0),
-]
-assert [z["id"] for z in apply_presentation(mixed)] == [0, 1, 2], "both types already in the top 3 -> untouched"
-print("TOP_N: pooled top-3, guarantee swap fires exactly when a surviving type is missing, selection untouched.")
+assert rank_pool[3]["cross_type_overlaps"] == [{"zone_id": 0, "fraction": 0.5}], "symmetric here (equal areas)"
+assert rank_pool[1]["cross_type_overlaps"] == [] and rank_pool[4]["cross_type_overlaps"] == [], (
+    "no cross-type intersection -> an empty list, never zero-fraction filler entries"
+)
+print("Cap deletion: constant/function/property absent, all survivors ranked (a rank 3 exists), rank-1 selects, cross-type fractions hand-verified at 0.5.")
 
 
 # =========================================================================
@@ -889,8 +1102,8 @@ assert selected is not None and isinstance(selected, dict) and selected, (
     "the contract is 'non-empty dict or None' -- truthiness gates in solar/tree/fencing depend on it"
 )
 assert selected is flat_zone, "the pooled rank-1 ZONE is the selection"
-assert selected["status"] == wsa.ZONE_STATUS_NOMINATED and selected["presented"] is True, (
-    "the selected zone is always a surviving, presented zone (rank 1 is never swapped out)"
+assert selected["status"] == wsa.ZONE_STATUS_NOMINATED and "presented" not in selected, (
+    "the selected zone is a surviving zone, full stop -- the presented distinction no longer exists"
 )
 
 # The three fields production consumers dereference directly:
@@ -973,12 +1186,17 @@ narrative = build_narrative_data(hit_result)
 json.dumps(narrative)
 assert narrative["zone_found"] is True
 assert narrative["twi_is_parcel_relative"] is True and "THIS parcel" in narrative["twi_note"]
-assert narrative["zones"] and len(narrative["zones"]) == narrative["presented_count"], (
-    "narrative lists the PRESENTED zones (top-N with the per-type guarantee)"
+assert narrative["zones"] and len(narrative["zones"]) == narrative["zone_count"] == len(hit_result["zones"]), (
+    "narrative lists ALL surviving zones with the total count -- the cap and its counters are gone"
 )
-assert narrative["zone_count"] == len(hit_result["zones"]) and narrative["dropped_count"] == 0
-assert narrative["presentation_top_n"] == 3 and narrative["presentation_guarantee_applied"] is False
+assert narrative["dropped_count"] == 0
+for gone_key in ("presented_count", "presentation_top_n", "presentation_guarantee_applied"):
+    assert gone_key not in narrative, f"the deleted cap's narrative counter {gone_key} must not resurface"
 zone_block = narrative["zones"][0]
+assert zone_block["sparse_anchor"] is False, "the sparse-anchor finding rides every zone block"
+assert zone_block["cross_type_overlaps"] == [] and zone_block["either_type_candidate"] is False, (
+    "a single-type fixture has no cross-type agreement to report -- empty list, gate off"
+)
 assert zone_block["criteria"].keys() == EXCAVATED_WEIGHTS.keys(), (
     "per-criterion mean scores (member cells only) ride along -- the narrative-honesty mechanism"
 )
@@ -999,7 +1217,6 @@ identify_like = {
     "zones": hit_result["zones"],
     "zones_by_type": hit_result["zones_by_type"],
     "dropped_zones": hit_result["dropped_zones"],
-    "presented_zones": hit_result["presented_zones"],
     "regions": hit_result["regions"],
     "regions_by_type": hit_result["regions_by_type"],
     "gate_mask_stats": hit_result["gate_mask_stats"],
@@ -1059,9 +1276,11 @@ assert member_feature["properties"]["region_id"] in zone_feature["properties"]["
 )
 boundary_feature = next(f for f in collection["features"] if f["properties"]["layer"] == "survey_context_boundary")
 assert boundary_feature["properties"]["gated_cells"] == hit_result["gate_mask_stats"]["gated_cells"]
-# Presentation properties distinguish presented from surviving-but-
-# unpresented zones on the wire (this fixture's lone zone is presented):
-assert zone_feature["properties"]["presented"] is True
+# The deleted `presented` property never reaches the wire; the honesty
+# reports (sparse anchor + cross-type agreement) do:
+assert "presented" not in zone_feature["properties"]
+assert zone_feature["properties"]["sparse_anchor"] is False
+assert zone_feature["properties"]["cross_type_overlaps"] == [], "single-type fixture: an empty agreement list"
 assert zone_feature["properties"]["status"] == "nominated" and zone_feature["properties"]["drop_reason"] is None
 print(f"Export: {export['feature_count']} features; zone + member layers with linkage both ways; all geometries parse.")
 
@@ -1073,7 +1292,11 @@ dropped_features = [f for f in dropped_collection["features"] if f["properties"]
 assert len(dropped_features) == 1, "the floor's casualty appears on the dropped layer, attributed"
 dropped_props = dropped_features[0]["properties"]
 assert dropped_props["status"] == "dropped" and dropped_props["drop_reason"] == "below_min_area"
-assert dropped_props["presented"] is False and dropped_props["rank"] is None
+assert "presented" not in dropped_props and dropped_props["rank"] is None
+assert dropped_props["zone_acres"] < MIN_SURVEY_REGION_AREA_ACRES, (
+    "the dual-acreage dropped record travels to the wire: the judged zone acreage rides the feature"
+)
+assert dropped_props["member_acres"] == tiny_dropped["member_acres"]
 json.dumps(dropped_collection)
 print("Dropped-zone export: survey_zone_dropped layer validates with status: dropped + reason code.")
 
@@ -1122,5 +1345,47 @@ assert "THRESHOLD COMPARISON (raw surfaces" in comparison and "t=0.7" in compari
 )
 assert "t=0.5:" in comparison and "<- default" in comparison, "the final-tuning 0.5 default is marked"
 print("Instrumentation rider: soil sub-signals + map unit in the deepest-fill table; threshold comparison prints on raw surfaces.")
+
+
+# =========================================================================
+# 7. THE FINDING'S CONDITIONAL VERDICT (pre-merge change 5)
+# =========================================================================
+# Same numbers, same table, same ranking -- only the CLAIM matches what
+# was measured. SHORTFALL case first: the hit_result fixture's excavated
+# type PRODUCED (one surviving zone), so the largest shortfall -- which
+# exists by construction on every parcel -- prints as headroom context
+# with the explicit not-a-defect line, never as an indictment.
+shortfall_finding = diag.state_excavated_finding(identify_like)
+assert "LARGEST REMAINING SHORTFALL:" in shortfall_finding, (
+    "excavated survivors exist -> the verdict is the headroom wording"
+)
+assert "not a defect claim" in shortfall_finding, (
+    "the explicit headroom-context line rides the working-class wording"
+)
+assert "EVIDENCE INDICTS" not in shortfall_finding, (
+    "an accusatory verdict on a class that just delivered invites reactive tuning -- it must not print"
+)
+assert "1 surviving zone(s)" in shortfall_finding, "the wording states what the class produced"
+
+# INDICTS case: a 16% plane. Every cell's max-neighbor grade is 16%
+# (0.8 m column step over 5 m), past the excavated taper's 15% ceiling
+# -> slope score 0; with soil never checked (0.5) the excavated blend
+# tops out around .35*wetness + .15 + .10*runon < 0.5 everywhere -> the
+# excavated type produces ZERO zones while gated cells exist -- the
+# failure-to-produce charge the INDICTS wording answers.
+plane_array = np.array([[100.0 + c * 0.8 for c in range(20)] for _ in range(20)])
+PLANE_DEM = _dem(plane_array)
+plane_result = compute_water_survey_areas(PLANE_DEM, FLAT_BOUNDARY)
+assert plane_result["gate_mask_stats"]["gated_cells"] > 0, "the plane's cells gate in -- there IS ground to judge"
+assert plane_result["zones_by_type"][SURVEY_TYPE_EXCAVATED] == [], (
+    "16% grade zeroes the excavated slope score -> no excavated member clears 0.5"
+)
+plane_identify_like = {"zones_by_type": plane_result["zones_by_type"], "result": plane_result}
+indicts_finding = diag.state_excavated_finding(plane_identify_like)
+assert "EVIDENCE INDICTS:" in indicts_finding, (
+    "zero excavated survivors -> the failure-to-produce charge earns the accusatory wording"
+)
+assert "LARGEST REMAINING SHORTFALL" not in indicts_finding and "not a defect claim" not in indicts_finding
+print("Conditional FINDING: survivors -> LARGEST REMAINING SHORTFALL + not-a-defect line; zero survivors (16% plane) -> EVIDENCE INDICTS.")
 
 print("\nAll water_survey_areas checks passed.")

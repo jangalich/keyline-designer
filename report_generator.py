@@ -582,20 +582,20 @@ def _format_water_survey_areas_summary(water_narrative: Optional[dict]) -> str:
         "this step, deliberately. "
         + water_narrative["twi_note"]
     ]
-    # The counts line: what is shown, what survived, what the floor
-    # pruned -- so the reader knows exactly what this section is NOT
+    # The counts line: everything that survived is shown (the
+    # presentation cap was deleted -- the user decides), plus what the
+    # floor pruned, so the reader knows exactly what this section is NOT
     # showing and why.
     lines.append(
-        f"Showing the top {water_narrative['presented_count']} of {water_narrative['zone_count']} "
-        f"surviving zone(s) (pooled by member-mean suitability, with the guarantee that each pond "
-        f"type's best zone appears whenever that type produced one"
+        f"All {water_narrative['zone_count']} surviving zone(s) are listed, ranked per type -- "
+        "no presentation cap; you decide which to walk"
         + (
-            f"; {water_narrative['dropped_count']} zone(s) whose anchoring ground fell under the "
+            f". {water_narrative['dropped_count']} zone(s) whose walkable envelope fell under the "
             "0.1-acre floor were dropped -- listed in the diagnostic export, not planned on"
             if water_narrative["dropped_count"]
             else ""
         )
-        + ")."
+        + "."
     )
     if selection["selected_zone_id"] is not None:
         lines.append(
@@ -621,6 +621,23 @@ def _format_water_survey_areas_summary(water_narrative: Optional[dict]) -> str:
             f"launders sub-threshold ground into a score (prose may claim only these): "
             f"{criteria_clause}."
         )
+        if region.get("either_type_candidate"):
+            overlap_clause = "; ".join(
+                f"zone {entry['zone_id']} ({entry['overlap_pct']}% of this envelope)"
+                for entry in region.get("cross_type_overlaps", [])
+            )
+            lines.append(
+                "EITHER-TYPE CANDIDATE: the two suitability surfaces independently agree about this "
+                f"ground -- its envelope substantially overlaps the other pond type's ({overlap_clause}). "
+                "This area scores as a candidate for either pond type; evaluate both approaches during "
+                "the survey."
+            )
+        if region.get("sparse_anchor"):
+            lines.append(
+                "SPARSE ANCHOR: this zone's walkable envelope greatly exceeds the high-suitability "
+                "ground anchoring it (under 20% of the envelope is anchor) -- expect scattered good "
+                "ground within a larger area, not a solid block."
+            )
         gravity = region["gravity"]
         if not gravity["has_service_relationship"]:
             lines.append(

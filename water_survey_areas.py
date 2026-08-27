@@ -28,13 +28,17 @@ tunable provisional -- and three measured tuning passes then decided
 every open number from evidence: the threshold (0.5, judged against the
 parcel's ATTAINABLE ~0.82 ceiling -- see SUITABILITY_THRESHOLD), the
 excavated slope taper (seep-widened per the FINDING + soil rider
-evidence -- see EXCAVATED_SLOPE_FULL_CREDIT_PCT), the member-acreage
-floor (a FILTER now, drops visible and attributed -- see
-MIN_SURVEY_REGION_AREA_ACRES's history note), and the presented set
-(WATER_ZONE_PRESENTATION_TOP_N = 3 with the per-type consultant
-guarantee). The diagnostic's instruments (threshold comparison,
-isobands, the excavated interrogation) keep printing every run so each
-decision remains evidence-checked rather than trusted forward.
+evidence -- see EXCAVATED_SLOPE_FULL_CREDIT_PCT), the floor (a FILTER
+on the walkable zone acres, drops visible and attributed -- see
+MIN_SURVEY_REGION_AREA_ACRES's history note covering its two prior
+bases), and presentation (a TOP_N cap was tried for one pass and
+DELETED -- every surviving zone is listed; see the history note at the
+old constant's site). The pre-merge pass added the convex-hull
+envelope (the surveyable claim), the sparse_anchor honesty guard, and
+the cross-type agreement report. The diagnostic's instruments
+(threshold comparison, isobands, the excavated interrogation) keep
+printing every run so each decision remains evidence-checked rather
+than trusted forward.
 
 THE TWO SURFACES ARE KEPT SEPARATE END TO END. Each is a per-cell 0-1
 score, a weighted blend of classed criteria (weights sum to 1.0 per type,
@@ -119,29 +123,32 @@ unions, never redrawn; the zone's render_fill_polygon_utm IS its clipped
 envelope, the identity -- no further reduction downstream of the
 aggregation that defines the object (the exclusion_zones precedent).
 
-THE FLOOR AND THE PRESENTED SET (tuned decisions -- the two places the
-output narrows, both visible): a zone whose summed MEMBER acreage sits
-under the MIN_SURVEY_REGION_AREA_ACRES floor is DROPPED from the
-pipeline output -- status: dropped + drop_reason on the zone, carried
-in the diagnostic table and the export's survey_zone_dropped layer,
-never silent (see the constant's history note for the flag-only
-posture it replaced). The narrated set is the top
-WATER_ZONE_PRESENTATION_TOP_N surviving zones with the per-type
-consultant guarantee; unpresented survivors keep full properties and
-ride the export with `presented: false`.
+THE FLOOR (the one place the output narrows, visibly): a zone whose
+walkable envelope -- zone_acres, the clipped hull -- sits under the
+MIN_SURVEY_REGION_AREA_ACRES floor is DROPPED from the pipeline output:
+status: dropped + drop_reason on the zone, both acreages on the record,
+carried in the diagnostic table and the export's survey_zone_dropped
+layer, never silent (see the constant's history note for the two prior
+bases). EVERY SURVIVING ZONE IS PRESENTED: a presentation cap was
+tried for one pass and deleted -- all survivors are listed, ranked per
+type, with the total count, and the user decides what to walk. Two
+honesty reports ride each survivor: sparse_anchor (walkable claim
+vastly exceeding its anchor -- SPARSE_ANCHOR_MEMBER_FRACTION) and
+cross_type_overlaps (the two surfaces agreeing about the same ground
+-- CROSS_TYPE_OVERLAP_NOTE_FRACTION drives the either-type narrative
+line).
 
-SELECTION (the pooled rule, unchanged and INDEPENDENT of
-presentation): the two types are POOLED by member-mean suitability
-(member-acreage tiebreak) and the pooled rank-1 SURVIVING zone becomes
-`selected_water_zone` for downstream consumers (tree search-space
-subtraction, fencing, solar exclusion, road exclusion, the map's ripple
-clip, keypoint relationships). Pooling embankment against excavated
-compares two different instruments on one scale -- kept because
-downstream needs ONE unambiguous answer, and the presentation
-guarantee never touches rank 1 (see apply_presentation()). The
-selected zone carries every field on the established
-selected_water_zone consumer contract (render_fill_polygon_utm,
-representative_elevation_m, id -- plus rank and
+SELECTION (the pooled rule, unchanged): the two types are POOLED by
+member-mean suitability (member-acreage tiebreak) and the pooled
+rank-1 SURVIVING zone becomes `selected_water_zone` for downstream
+consumers (tree search-space subtraction, fencing, solar exclusion,
+road exclusion, the map's ripple clip, keypoint relationships).
+Pooling embankment against excavated compares two different
+instruments on one scale -- kept because downstream needs ONE
+unambiguous answer. The selected zone carries every field on the
+established selected_water_zone consumer contract
+(render_fill_polygon_utm = the clipped hull, identity;
+representative_elevation_m; id -- plus rank and
 served_production_area_ids read by pipeline tests), so rank-1 slots in
 unchanged.
 
@@ -495,7 +502,11 @@ SUITABILITY_THRESHOLD = 0.5
 # buffers are unioned, and the union is buffered back inward by the same
 # amount -- a morphological CLOSING in vector space, so gaps up to the
 # FULL distance bridge. 30 m is the scale at which two high-suitability
-# patches are one site visit, not two -- v1 prior, TUNE FROM RUN.
+# patches are one site visit, not two. THE CLOSING DECIDES GROUPING
+# ONLY (pre-merge change): the drawn zone envelope is the CONVEX HULL
+# of the grouped members, clipped to the parcel -- see
+# build_survey_zones()'s grouping-vs-drawing split for why the hull is
+# the surveyable claim the closing's waisted shape never was.
 # CONFIGURABLE.
 #
 # TWO RULE-RECONCILIATIONS, both principled and both load-bearing:
@@ -518,45 +529,63 @@ SUITABILITY_THRESHOLD = 0.5
 #     happens anywhere in the aggregation.
 SURVEY_ZONE_GROUPING_DISTANCE_METERS = 30.0
 
-# THE FLOOR IS A FILTER NOW: a survey zone whose MEMBER acreage falls
-# below this is DROPPED from the pipeline output (and the presented
-# set) -- member acres are the anchoring signal, and the envelope never
-# rescues a zone whose actual high-suitability ground is a sliver.
-# Dropped zones are never silent: they ride the diagnostic terminal
-# table and the GeoJSON export with the established status/reason
-# pattern (status: dropped, drop_reason: below_min_area) -- visible and
+# THE FLOOR IS A FILTER, judged on ZONE ACRES (the clipped hull): a
+# survey zone whose walkable envelope falls below this is DROPPED from
+# the pipeline output -- "is this a surveyable area" is measured on the
+# ground you'd walk. Noise still dies here: a lone cell's hull IS the
+# cell (0.006 ac), far under the floor. Dropped zones are never silent:
+# they ride the diagnostic terminal table and the GeoJSON export with
+# the established status/reason pattern (status: dropped, drop_reason:
+# below_min_area, BOTH acreages on the record) -- visible and
 # attributed, excluded from downstream planning. The value matches
 # water_candidate_zones.MIN_WATER_ZONE_AREA_ACRES (0.1 ac = 17 cells at
 # the pipeline's 5 m DEM resolution), the "smaller than this is
 # probably raster noise" line.
 #
-# HISTORY, kept on purpose: through the tuning passes this constant was
-# deliberately a FLAG, not a filter (`below_min_area`, first-run
-# posture) -- every sliver stayed visible while the threshold, the
-# smoothing question, and the grouping distance were being decided from
-# runs that needed to show everything. Tuning is done; the exploration
-# posture ends here, and the flag semantics were retired WITH their
-# rationale rather than silently. Individual member REGIONS below the
-# floor still only carry the flag (a sub-floor member can belong to an
-# above-floor zone -- the ZONE's summed member acreage is what the
-# filter judges). CONFIGURABLE.
+# HISTORY, kept on purpose. Two prior bases, each honest in its era:
+# (1) through the tuning passes this was a FLAG, not a filter
+# (first-run posture -- every sliver visible while the open numbers
+# were decided from runs that needed to show everything); (2) when the
+# filter landed, its basis was MEMBER acres, because under the old
+# waisted closing envelope the member cells were the only honest size
+# -- the envelope hugged them and measured nothing extra. The pre-merge
+# hull change made zone acres the walkable claim (a real, drawn survey
+# boundary), so the floor moved to the number the question is actually
+# about. The honesty cost of that move is covered by the
+# sparse_anchor guard below: an envelope can now exceed its anchoring
+# ground, and a zone doing so by more than the guard's ratio says so.
+# Individual member REGIONS below the floor still only carry the
+# below_min_area flag. CONFIGURABLE.
 MIN_SURVEY_REGION_AREA_ACRES = 0.1
 
-# The presented set: the top N SURVIVING zones pooled by member-mean
-# suitability -- with the PER-TYPE GUARANTEE (the consultant rule): if a
-# type produced at least one surviving zone and none lands in the pooled
-# top N, the lowest-ranked presented zone is swapped for that type's
-# best, keeping the presented count at N. "Your best dam area and your
-# best dugout area both appear whenever both exist" -- a farmer weighing
-# the two instruments should always see one of each when the parcel
-# offers one of each. Presentation is INDEPENDENT of selection:
-# select_survey_zone()'s pooled rank-1 answer is unchanged by any swap
-# (the swap only ever replaces the LOWEST presented zone, never rank 1).
-# Every surviving zone still carries full properties and rides the
-# GeoJSON with its `presented` property, so an unpresented survivor is
-# inspectable, just not narrated. Decided in the final tuning pass,
-# ending the no-presentation-cap exploration posture. CONFIGURABLE.
-WATER_ZONE_PRESENTATION_TOP_N = 3
+# The sparse-anchor honesty guard: a surviving zone whose member_acres /
+# zone_acres ratio falls below this fraction carries the sparse_anchor
+# flag -- its walkable claim (the hull) vastly exceeds the
+# high-suitability ground anchoring it, and the zone announces that
+# rather than reading as solid candidate area. Reported, never a gate;
+# dual acreage remains mandatory in every zone sentence regardless.
+# CONFIGURABLE.
+SPARSE_ANCHOR_MEMBER_FRACTION = 0.2
+
+# When a surviving zone's envelope overlaps a surviving zone of the
+# OTHER type by more than this fraction of its own envelope, the
+# narrative adds the consultant line: this ground scores as a candidate
+# for either pond type -- evaluate both approaches during the survey.
+# The two surfaces stay structurally separate (no merged-zone
+# machinery); this is the two instruments independently AGREEING about
+# the same ground -- a finding, reported, never restructured.
+# CONFIGURABLE.
+CROSS_TYPE_OVERLAP_NOTE_FRACTION = 0.5
+
+# PRESENTATION CAP: DELETED (pre-merge decision). A TOP_N of 3 with a
+# per-type guarantee shipped for one pass and was removed entirely --
+# constant, guarantee, swap logic, and the presented/unpresented
+# distinction (its absence is AST-asserted in the tests; this note is
+# the history). With the floor already pruning noise on the walkable
+# claim, every surviving zone IS presentable: all survivors are listed,
+# ranked per type, with the total count -- the user decides what to
+# walk. Selection (the pooled rank-1 -> selected_water_zone) was always
+# independent of presentation and is unchanged by the deletion.
 
 # Zone lifecycle status values (the established status/reason export
 # pattern): every zone is one or the other, and a dropped zone always
@@ -589,14 +618,18 @@ WATER_REGION_CONNECTIVITY = 8
 BOUNDARY_ADJACENCY_TOLERANCE_METERS = 0.01
 
 
-# --- flags (flag, don't filter -- the module's whole posture) -------------
+# --- flags and reason codes -----------------------------------------------
 
 FLAG_BELOW_MIN_AREA = "below_min_area"
 FLAG_NO_SERVICE_RELATIONSHIP = "no_service_relationship"
+FLAG_SPARSE_ANCHOR = "sparse_anchor"
 """Module-level flag constants, same convention as water_candidate_zones'
 reason/flag enumeration: a caller or test that reacts to a flag compares
-against a name, never a re-typed string. Both are FLAGS (informational),
-not outcomes -- no region is dropped for carrying either."""
+against a name, never a re-typed string. no_service_relationship and
+sparse_anchor are pure FLAGS (informational, never an outcome);
+below_min_area doubles as the drop_reason code when a zone's walkable
+envelope falls under the tuned floor (member REGIONS still only ever
+carry it as a flag)."""
 
 PROVENANCE_SUITABILITY_SURFACE = "suitability_surface"
 
@@ -1476,23 +1509,37 @@ def build_survey_zones(
     """
     The aggregation step: per type, member regions whose footprints sit
     within grouping_distance_meters of each other fuse into one SURVEY
-    ZONE -- one code path for clusters and singletons (a lone region's
-    zone is approximately its own footprint). The zone is the
+    ZONE -- one code path for clusters and singletons. The zone is the
     deliverable object downstream consumers receive; members ride along
     intact as sub-features with zone-id linkage both ways.
 
-    Geometry: the closing envelope, CLIPPED TO THE PARCEL BOUNDARY (the
-    survey happens on the user's land); boundary adjacency computes on
-    the clipped envelope. Score statistics come from MEMBER CELLS ONLY
-    via the same _measure_member_cells() the members themselves used --
-    the envelope never launders sub-threshold ground into a score. Dual
-    acreage carries both truths: member_acres (cell-count acreage of
-    ground that actually cleared the threshold -- the anchoring signal)
-    and zone_acres (the clipped envelope's polygon acreage -- the
-    ground to walk; polygon-area acreage is correct here exactly
-    because a zone envelope is a drawn boundary, not a cell population
-    -- the same cell-vs-polygon acreage split exclusion_zones.py
-    documents).
+    GROUPING AND DRAWING ARE TWO DECISIONS (pre-merge change): the 30 m
+    vector closing still decides WHICH members belong together --
+    unchanged -- but the drawn zone is now the CONVEX HULL of the union
+    of its member polygons, CLIPPED TO THE PARCEL BOUNDARY. The
+    envelope is the SURVEYABLE CLAIM -- the ground a surveyor would
+    rope off -- and the closing's waisted, member-hugging shape was
+    never that object; the hull is. Concavity introduced by the
+    boundary clip is acceptable (the boundary is real ground truth); a
+    singleton's hull is approximately itself (exactly itself for a
+    convex member footprint). The rule-reconciliation restates for the
+    stronger shape: the hull is an AGGREGATION OBJECT defined over
+    intact member footprints -- a new boundary drawn AROUND measured
+    geometry, never a redrawing of it; members ride inside untouched.
+    Boundary adjacency computes on the clipped hull.
+
+    Score statistics come from MEMBER CELLS ONLY via the same
+    _measure_member_cells() the members themselves used -- the envelope
+    never launders sub-threshold ground into a score. Dual acreage
+    carries both truths, mandatory in every zone sentence: member_acres
+    (cell-count acreage of ground that actually cleared the threshold
+    -- the anchoring signal) and zone_acres (the clipped HULL's polygon
+    acreage -- the ground to walk; polygon-area acreage is correct here
+    exactly because a zone envelope is a drawn boundary, not a cell
+    population -- the same cell-vs-polygon acreage split
+    exclusion_zones.py documents). A zone whose walkable claim vastly
+    exceeds its anchor announces itself via the sparse_anchor flag
+    (SPARSE_ANCHOR_MEMBER_FRACTION).
 
     gate_context bundles the screen arrays _measure_member_cells()
     needs: twi_percentile / depression_depth / flow_accumulation /
@@ -1528,12 +1575,17 @@ def build_survey_zones(
             claimed.update(zone_member_indices)
             zone_members = [members[index] for index in zone_member_indices]
 
-            clipped_envelope = envelope.intersection(boundary_polygon_utm)
+            # The closing `envelope` decided membership above; the DRAWN
+            # zone is the convex hull of the member union, clipped to
+            # the parcel -- see the docstring's grouping-vs-drawing
+            # split.
+            member_union = unary_union([member["polygon_utm"] for member in zone_members])
+            clipped_envelope = member_union.convex_hull.intersection(boundary_polygon_utm)
             if clipped_envelope.is_empty:
-                # Members are on-parcel by construction, so their
-                # envelope always keeps on-parcel area -- guarded anyway.
-                logger.warning("build_survey_zones: clipped envelope empty -- using member footprints")
-                clipped_envelope = unary_union([member["polygon_utm"] for member in zone_members])
+                # Members are on-parcel by construction, so their hull
+                # always keeps on-parcel area -- guarded anyway.
+                logger.warning("build_survey_zones: clipped hull empty -- using member footprints")
+                clipped_envelope = member_union
 
             member_cells = [cell for member in zone_members for cell in member["cells"]]
             member_acres = len(member_cells) * cell_area_acres(dem)
@@ -1554,11 +1606,18 @@ def build_survey_zones(
             )
 
             flags = []
-            # Flag on MEMBER acreage: the anchoring signal is what the
-            # floor was ever about -- an envelope can be arbitrarily
-            # larger than the ground that earned it.
-            if member_acres < MIN_SURVEY_REGION_AREA_ACRES:
+            # The floor's basis is ZONE acres now (the walkable hull --
+            # see MIN_SURVEY_REGION_AREA_ACRES's history note); the flag
+            # here mirrors the drop decision the compute core makes on
+            # the same number.
+            if zone_acres < MIN_SURVEY_REGION_AREA_ACRES:
                 flags.append(FLAG_BELOW_MIN_AREA)
+            # The honesty guard: a walkable claim vastly exceeding its
+            # anchoring ground announces itself rather than reading as
+            # solid high-suitability area.
+            sparse_anchor = zone_acres > 0 and (member_acres / zone_acres) < SPARSE_ANCHOR_MEMBER_FRACTION
+            if sparse_anchor:
+                flags.append(FLAG_SPARSE_ANCHOR)
 
             geometry_wgs84 = transform_geom(dem["crs"], "EPSG:4326", mapping(clipped_envelope))
 
@@ -1578,6 +1637,7 @@ def build_survey_zones(
                     **measurements,
                     "flags": flags,
                     "below_min_area": FLAG_BELOW_MIN_AREA in flags,
+                    "sparse_anchor": FLAG_SPARSE_ANCHOR in flags,
                     "boundary_adjacency_fraction": round(
                         _boundary_adjacency_fraction(clipped_envelope, boundary_polygon_utm), 3
                     ),
@@ -1743,46 +1803,32 @@ def rank_survey_zones_per_type(zones: list[dict]) -> None:
             zone["rank"] = rank
 
 
-def apply_presentation(zones: list[dict], top_n: int = WATER_ZONE_PRESENTATION_TOP_N) -> list[dict]:
+def attach_cross_type_overlaps(zones: list[dict]) -> None:
     """
-    Marks each SURVIVING zone's `presented` flag IN PLACE and returns
-    the presented list: the top `top_n` zones pooled by member-mean
-    suitability (member-acreage tiebreak), adjusted by the PER-TYPE
-    GUARANTEE -- if a type has at least one surviving zone and none made
-    the pooled top N, the LOWEST-ranked presented zone is swapped out
-    for that type's best, keeping the count at N (the consultant rule:
-    "your best dam area and your best dugout area both appear whenever
-    both exist"). With survivors <= top_n everything is presented and
-    the guarantee is trivially satisfied.
-
-    INDEPENDENT OF SELECTION by construction: the swap only ever
-    replaces the last (lowest) presented zone, so the pooled rank-1 zone
-    -- select_survey_zone()'s answer -- is presented and unchanged
-    under every input (asserted with a swap fixture in
-    test_water_survey_areas.py).
+    THE AGREEMENT REPORT, attached IN PLACE to every surviving zone: for
+    each surviving zone of the OTHER type whose envelope intersects this
+    one's, a {zone_id, fraction} entry (fraction = intersected share of
+    THIS zone's own envelope area), carried whenever nonzero. The two
+    surfaces stay structurally separate -- no merged-zone machinery,
+    ever -- this is the two instruments independently AGREEING about
+    the same ground, a finding to report, not a structure to build.
+    Above CROSS_TYPE_OVERLAP_NOTE_FRACTION the narrative adds the
+    consultant line (this area is a candidate for either pond type --
+    evaluate both approaches during the survey).
     """
-    pooled = sorted(zones, key=lambda zone: (-zone["mean_suitability"], -zone["member_acres"]))
-    presented = pooled[:top_n]
-
-    for survey_type in SURVEY_TYPES:
-        typed_survivors = [zone for zone in pooled if zone["survey_type"] == survey_type]
-        if not typed_survivors:
-            continue
-        if any(zone["survey_type"] == survey_type for zone in presented):
-            continue
-        # The guarantee swap: this type survived but missed the pooled
-        # top N -- its best replaces the lowest presented zone. Never
-        # the first slot: rank 1 is selection's answer and is presented
-        # unconditionally (a degenerate top_n=1 keeps rank 1 rather
-        # than honoring the guarantee -- the invariant outranks it).
-        if len(presented) > 1:
-            presented[-1] = typed_survivors[0]
-
     for zone in zones:
-        zone["presented"] = False
-    for zone in presented:
-        zone["presented"] = True
-    return presented
+        overlaps = []
+        zone_area = zone["polygon_utm"].area
+        if zone_area > 0:
+            for other in zones:
+                if other["survey_type"] == zone["survey_type"]:
+                    continue
+                intersection_area = zone["polygon_utm"].intersection(other["polygon_utm"]).area
+                if intersection_area > 0:
+                    overlaps.append(
+                        {"zone_id": other["id"], "fraction": round(intersection_area / zone_area, 3)}
+                    )
+        zone["cross_type_overlaps"] = overlaps
 
 
 def select_survey_zone(zones: list[dict]) -> Optional[dict]:
@@ -1993,19 +2039,20 @@ def compute_water_survey_areas(
     for region in regions:
         region["confidence"] = _confidence_for_region(region, soil_checked)
 
-    # THE FLOOR FILTERS NOW (see MIN_SURVEY_REGION_AREA_ACRES's history
-    # note): a zone whose summed MEMBER acreage sits under the floor is
+    # THE FLOOR FILTERS on ZONE acres -- the walkable hull (see
+    # MIN_SURVEY_REGION_AREA_ACRES's history note for the two prior
+    # bases): a zone whose clipped envelope sits under the floor is
     # dropped from the pipeline output -- status/reason attached, rank
-    # None, never presented -- and survives only in the diagnostic table
-    # and the export's dropped layer.
+    # None -- and survives only in the diagnostic table and the export's
+    # dropped layer, carrying BOTH acreages.
     surviving_zones: list[dict] = []
     dropped_zones: list[dict] = []
     for zone in zones:
-        if zone["member_acres"] < MIN_SURVEY_REGION_AREA_ACRES:
+        if zone["zone_acres"] < MIN_SURVEY_REGION_AREA_ACRES:
             zone["status"] = ZONE_STATUS_DROPPED
             zone["drop_reason"] = FLAG_BELOW_MIN_AREA
             zone["rank"] = None
-            zone["presented"] = False
+            zone["cross_type_overlaps"] = []
             dropped_zones.append(zone)
         else:
             zone["status"] = ZONE_STATUS_NOMINATED
@@ -2013,7 +2060,7 @@ def compute_water_survey_areas(
             surviving_zones.append(zone)
 
     rank_survey_zones_per_type(surviving_zones)
-    presented_zones = apply_presentation(surviving_zones)
+    attach_cross_type_overlaps(surviving_zones)
     selected = select_survey_zone(surviving_zones)
 
     return {
@@ -2026,7 +2073,6 @@ def compute_water_survey_areas(
             for survey_type in SURVEY_TYPES
         },
         "dropped_zones": dropped_zones,
-        "presented_zones": presented_zones,
         "regions": regions,
         "regions_by_type": {
             survey_type: [region for region in regions if region["survey_type"] == survey_type]
@@ -2064,15 +2110,18 @@ def _zone_feature_properties(zone: dict) -> dict:
         "zone_id": zone["id"],
         "survey_type": zone["survey_type"],
         "nominated_by": zone["nominated_by"],
-        # Lifecycle + presentation: status/drop_reason are the
-        # established dropped-not-silent pattern; `presented`
-        # distinguishes the narrated top-N (per-type guarantee applied)
-        # from surviving-but-unpresented zones, which remain fully
-        # inspectable here.
+        # Lifecycle: status/drop_reason are the established
+        # dropped-not-silent pattern. (A `presented` property existed
+        # for one pass and was deleted with the presentation cap --
+        # every surviving zone is presented.)
         "status": zone["status"],
         "drop_reason": zone["drop_reason"],
-        "presented": zone["presented"],
         "rank": zone["rank"],
+        # The honesty reports: the sparse-anchor guard and the
+        # cross-type agreement (fractions of THIS zone's envelope
+        # overlapped by surviving zones of the other type).
+        "sparse_anchor": zone["sparse_anchor"],
+        "cross_type_overlaps": list(zone["cross_type_overlaps"]),
         "member_ids": list(zone["member_ids"]),
         "member_count": zone["member_count"],
         "member_acres": zone["member_acres"],
@@ -2139,10 +2188,10 @@ _MEMBER_FEATURE_NOTE = (
 
 
 _DROPPED_ZONE_NOTE = (
-    "DROPPED at the member-acreage floor (status: dropped, drop_reason: below_min_area): this zone's "
-    "actual high-suitability ground sums under the 0.1 ac floor, so it is excluded from the pipeline "
-    "output and the presented set -- carried here visible and attributed, never silently. Member "
-    "acres are the anchoring signal; the envelope never rescues a sliver."
+    "DROPPED at the zone-acreage floor (status: dropped, drop_reason: below_min_area): this zone's "
+    "walkable hull envelope measures under the 0.1 ac floor, so it is excluded from the pipeline "
+    "output -- carried here visible and attributed, never silently. Both acreages ride the record: "
+    "zone_acres (the envelope that was judged) and member_acres (the anchoring signal inside it)."
 )
 
 
@@ -2151,7 +2200,7 @@ def survey_areas_to_geojson(zones: list[dict], dropped_zones: Optional[list[dict
     Every SURVIVING survey zone and every member region as one
     schema-conformant FeatureCollection: zone envelopes on
     survey_zone_embankment / survey_zone_excavated (full properties,
-    dual acreage, member linkage, status/presented) and member
+    dual acreage, member linkage, status lifecycle) and member
     footprints on survey_zone_member_<type> (zone linkage both ways).
     When `dropped_zones` is supplied (the diagnostic export path), each
     floor-dropped zone additionally rides the survey_zone_dropped layer
@@ -2222,29 +2271,26 @@ def build_narrative_data(result: dict) -> dict:
     Pre-digested, FINAL, JSON-serializable narrative values -- imperial
     at this boundary (acres, feet, percent), None (never 0.0) for
     unavailable, no reason strings beyond the flag enumeration, per the
-    established narrative_data doctrine. The PRESENTED zones are listed
-    (WATER_ZONE_PRESENTATION_TOP_N pooled, with the per-type guarantee),
-    beside the survivor and dropped counts so the narrative can state
-    what it is not showing; per-criterion mean scores (MEMBER cells
-    only) are the narrative-honesty mechanism -- prose may only claim
-    what a criterion actually scored, and each zone's block carries
-    those scores directly. Dual acreage carries the narrative sentence's
-    two numbers ("zone_acres to survey, anchored by member_acres of
-    high-suitability ground"). twi_is_parcel_relative + twi_note surface
-    the parcel-relative caveat so the report layer cannot overclaim
-    wetness.
+    established narrative_data doctrine. EVERY SURVIVING ZONE is listed
+    with the total count (the presentation cap was deleted -- the user
+    decides what to walk), beside the dropped count so the narrative
+    can state what the floor pruned; per-criterion mean scores (MEMBER
+    cells only) are the narrative-honesty mechanism -- prose may only
+    claim what a criterion actually scored, and each zone's block
+    carries those scores directly. Dual acreage carries the narrative
+    sentence's two numbers ("zone_acres to survey, anchored by
+    member_acres of high-suitability ground"), with sparse_anchor and
+    the cross-type either_type_candidate finding riding each block.
+    twi_is_parcel_relative + twi_note surface the parcel-relative
+    caveat so the report layer cannot overclaim wetness.
     """
     surviving = result["zones"]
-    presented = result["presented_zones"]
     dropped = result["dropped_zones"]
     selected = result["selected_water_zone"]
     stats = result["gate_mask_stats"]
 
-    pooled = sorted(surviving, key=lambda z: (-z["mean_suitability"], -z["member_acres"]))
-    guarantee_applied = [z["id"] for z in presented] != [z["id"] for z in pooled[: len(presented)]]
-
     zone_blocks = []
-    for zone in sorted(presented, key=lambda z: (z["survey_type"], z["rank"])):
+    for zone in sorted(surviving, key=lambda z: (z["survey_type"], z["rank"])):
         primary = zone["primary_production_area_relationship"]
         if primary is None:
             gravity = {"has_service_relationship": False, "can_gravity_feed": None}
@@ -2288,6 +2334,19 @@ def build_narrative_data(result: dict) -> dict:
                 "gravity": gravity,
                 "flags": list(zone["flags"]),
                 "below_min_area": zone["below_min_area"],
+                "sparse_anchor": zone["sparse_anchor"],
+                # The agreement report: percent of THIS zone's envelope
+                # overlapped by each surviving zone of the other type,
+                # plus the constant-driven either-type finding the
+                # report's consultant line keys on.
+                "cross_type_overlaps": [
+                    {"zone_id": entry["zone_id"], "overlap_pct": round(entry["fraction"] * 100, 1)}
+                    for entry in zone["cross_type_overlaps"]
+                ],
+                "either_type_candidate": any(
+                    entry["fraction"] >= CROSS_TYPE_OVERLAP_NOTE_FRACTION
+                    for entry in zone["cross_type_overlaps"]
+                ),
                 "confidence": zone["confidence"],
             }
         )
@@ -2295,10 +2354,7 @@ def build_narrative_data(result: dict) -> dict:
     return {
         "zone_found": bool(surviving),
         "zone_count": len(surviving),
-        "presented_count": len(presented),
         "dropped_count": len(dropped),
-        "presentation_top_n": WATER_ZONE_PRESENTATION_TOP_N,
-        "presentation_guarantee_applied": guarantee_applied,
         "member_region_count": len(result["regions"]),
         "embankment_zone_count": len(result["zones_by_type"][SURVEY_TYPE_EMBANKMENT]),
         "excavated_zone_count": len(result["zones_by_type"][SURVEY_TYPE_EXCAVATED]),
@@ -2331,8 +2387,8 @@ def summarize_water_survey_areas(result: dict) -> str:
     if not zones and not dropped:
         return "No water survey zones: nothing cleared the suitability threshold."
     lines = [
-        f"Water survey zones ({len(zones)} surviving, {len(result['presented_zones'])} presented, "
-        f"{len(dropped)} dropped at the member floor; {len(result['regions'])} member region(s)):"
+        f"Water survey zones ({len(zones)} surviving -- all listed, "
+        f"{len(dropped)} dropped at the zone-acre floor; {len(result['regions'])} member region(s)):"
     ]
     for zone in sorted(zones, key=lambda z: (z["survey_type"], z["rank"])):
         top_two = sorted(
@@ -2341,17 +2397,17 @@ def summarize_water_survey_areas(result: dict) -> str:
         )[:2]
         criteria_text = ", ".join(f"{name}={entry['mean_score']}" for name, entry in top_two)
         flag_text = f" [{', '.join(zone['flags'])}]" if zone["flags"] else ""
-        presented_text = " PRESENTED" if zone["presented"] else ""
         lines.append(
-            f"  - {zone['survey_type']} rank {zone['rank']}{presented_text}: zone {zone['id']}, "
+            f"  - {zone['survey_type']} rank {zone['rank']}: zone {zone['id']}, "
             f"{zone['zone_acres']} ac to survey anchored by {zone['member_acres']} ac "
             f"({zone['member_count']} member(s)), mean {zone['mean_suitability']}, top criteria: "
             f"{criteria_text}{flag_text}"
         )
     for zone in dropped:
         lines.append(
-            f"  - DROPPED ({zone['drop_reason']}): {zone['survey_type']} zone {zone['id']}, member "
-            f"ground {zone['member_acres']} ac under the {MIN_SURVEY_REGION_AREA_ACRES} ac floor"
+            f"  - DROPPED ({zone['drop_reason']}): {zone['survey_type']} zone {zone['id']}, envelope "
+            f"{zone['zone_acres']} ac (anchored by {zone['member_acres']} ac) under the "
+            f"{MIN_SURVEY_REGION_AREA_ACRES} ac floor"
         )
     return "\n".join(lines)
 
@@ -2517,7 +2573,6 @@ def identify_water_survey_areas(
         "zones": result["zones"],
         "zones_by_type": result["zones_by_type"],
         "dropped_zones": result["dropped_zones"],
-        "presented_zones": result["presented_zones"],
         "regions": result["regions"],
         "regions_by_type": result["regions_by_type"],
         "selected_water_zone": result["selected_water_zone"],

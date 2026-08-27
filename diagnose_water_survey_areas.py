@@ -11,10 +11,11 @@ The export is where the provisional constants get tuned from. Its
 suitability ISOBAND layers (contour bands of each type's surface at
 ISOBAND_LEVELS, via contourpy -- the contour_lines.py precedent) are THE
 threshold-tuning layer: the user opens the file over imagery and picks
-SUITABILITY_THRESHOLD, the region floor, and any future presentation
-rules from where regions cohere and dissolve. Region layers are flagged,
-never filtered -- every region however small appears, carrying its
-below_min_area flag rather than being trimmed away.
+SUITABILITY_THRESHOLD and the zone-acre floor from where regions cohere
+and dissolve (a presentation cap was tried for one pass and deleted --
+all survivors ship). Region layers are flagged, never filtered -- every
+region however small appears, carrying its below_min_area flag rather
+than being trimmed away.
 
 Layers written:
     survey_zone_embankment / survey_zone_excavated
@@ -24,7 +25,7 @@ Layers written:
     survey_zone_member_embankment / survey_zone_member_excavated
         -- every member region footprint, intact, with zone_id linkage
     survey_zone_dropped
-        -- zones the member-acreage floor filtered OUT of the pipeline
+        -- zones the ZONE-acreage floor filtered OUT of the pipeline
            output, carried here with status: dropped + drop_reason
            (visible and attributed, never silent)
     suitability_isoband_embankment / suitability_isoband_excavated
@@ -325,13 +326,13 @@ def _overlap_cell(value) -> str:
 
 
 def summarize_survey_zones_table(identify_result: dict) -> str:
-    """One line per SURVIVING survey zone, per type -- rank, PRESENTED
-    marker (the top-N with the per-type guarantee), member count, DUAL
-    acreage (zone acres to survey, anchored by member acres), member-
-    cell mean/max suitability, top two contributing criteria, gravity
-    note, envelope overlaps, boundary adjacency, flags -- followed by
-    the floor's DROPPED zones, each with its reason code (visible and
-    attributed, never silent)."""
+    """One line per SURVIVING survey zone, per type (ALL survivors --
+    the presentation cap is deleted) -- rank, member count, DUAL acreage
+    (zone acres to survey, anchored by member acres), member-cell
+    mean/max suitability, top two contributing criteria, gravity note,
+    envelope overlaps, cross-type agreement, boundary adjacency, flags
+    -- followed by the floor's DROPPED zones, each with its reason code
+    and both acreages (visible and attributed, never silent)."""
     lines = []
     for survey_type in SURVEY_TYPES:
         zones = identify_result["zones_by_type"][survey_type]
@@ -346,9 +347,12 @@ def summarize_survey_zones_table(identify_result: dict) -> str:
             )[:2]
             criteria_text = "+".join(f"{name}({entry['mean_score']})" for name, entry in top_two)
             flags = f" flags={','.join(zone['flags'])}" if zone["flags"] else ""
-            presented_text = " PRESENTED" if zone["presented"] else ""
+            cross = "".join(
+                f", either-type w/ zone {entry['zone_id']} ({entry['fraction']:.0%})"
+                for entry in zone.get("cross_type_overlaps", [])
+            )
             lines.append(
-                f"  #{zone['rank']}{presented_text} zone {zone['id']}: {zone['zone_acres']:.2f} ac to survey "
+                f"  #{zone['rank']} zone {zone['id']}: {zone['zone_acres']:.2f} ac to survey "
                 f"anchored by {zone['member_acres']:.2f} ac ({zone['member_count']} member(s)), "
                 f"mean {zone['mean_suitability']:.3f} / max {zone['max_suitability']:.3f}, "
                 f"top: {criteria_text}, {_gravity_cell(zone)}, "
@@ -356,16 +360,16 @@ def summarize_survey_zones_table(identify_result: dict) -> str:
                 f"{_overlap_cell(zone['road_overlap_pct'])} / prod "
                 f"{_overlap_cell(zone['production_overlap_pct'])}, "
                 f"boundary-adj {zone['boundary_adjacency_fraction']:.0%}, "
-                f"conf {zone['confidence']}{flags}"
+                f"conf {zone['confidence']}{cross}{flags}"
             )
     dropped = identify_result.get("dropped_zones", [])
-    lines.append(f"=== DROPPED AT THE MEMBER FLOOR ({len(dropped)}) ===")
+    lines.append(f"=== DROPPED AT THE ZONE-ACRE FLOOR ({len(dropped)}) ===")
     if not dropped:
         lines.append("  (none)")
     for zone in dropped:
         lines.append(
-            f"  DROPPED ({zone['drop_reason']}): {zone['survey_type']} zone {zone['id']}, member ground "
-            f"{zone['member_acres']:.4f} ac, envelope {zone['zone_acres']:.4f} ac, "
+            f"  DROPPED ({zone['drop_reason']}): {zone['survey_type']} zone {zone['id']}, envelope "
+            f"{zone['zone_acres']:.4f} ac anchored by {zone['member_acres']:.4f} ac, "
             f"mean {zone['mean_suitability']:.3f} -- excluded from the pipeline output"
         )
     return "\n".join(lines)
@@ -513,9 +517,9 @@ def summarize_depression_instrumentation(identify_result: dict, dem: dict) -> st
 
 def state_excavated_finding(identify_result: dict) -> str:
     """
-    The stated finding, not a fix: from the instrumentation's own
-    numbers, which of the four suspects the evidence indicts for the
-    excavated class's failure to produce --
+    The stated finding, with a verdict CONDITIONAL on what was measured.
+    From the instrumentation's own numbers, the largest weighted
+    shortfall among the four suspects --
       1. the 0.1 m noise floor (real basins zeroed before scoring),
       2. depth-to-score scaling (real floored depth scoring too little),
       3. the slope classes (moderate ground scored as too steep),
@@ -524,9 +528,21 @@ def state_excavated_finding(identify_result: dict) -> str:
     score at the 10 deepest-fill cells (the marsh proxy: the ground the
     class exists to find), with the wetness shortfall split into its
     TWI/depression halves and the depression half split floor-vs-scaling
-    by comparing raw and floored depth. Excavated weight/class retuning
-    happens in the NEXT branch, from this statement.
+    by comparing raw and floored depth.
+
+    The verdict wording branches on excavated survivors. There is
+    ALWAYS a largest shortfall by construction -- some criterion tops
+    the sorted table on every parcel, producing zones or not -- so
+    "EVIDENCE INDICTS" is honest only when the excavated type actually
+    failed to produce (zero surviving zones): that failure is the charge
+    the shortfall answers. When survivors exist, the same number is
+    headroom context on a working class, and an accusatory verdict there
+    invites reactive tuning of a system that just delivered; the finding
+    prints as "LARGEST REMAINING SHORTFALL" with an explicit line saying
+    it is not a defect claim. Same numbers, same table, same ranking --
+    only the claim changes to match what was measured.
     """
+    excavated_survivors = identify_result["zones_by_type"][SURVEY_TYPE_EXCAVATED]
     result = identify_result["result"]
     gate_mask = result["gate_mask"]
     screens = result["screens"]
@@ -583,7 +599,19 @@ def state_excavated_finding(identify_result: dict) -> str:
         )
     else:
         verdict = f"the {top_name} criterion (largest weighted shortfall at the marsh cells)"
-    lines.append(f"  EVIDENCE INDICTS: {verdict}.")
+    if not excavated_survivors:
+        # The type failed to produce: the shortfall answers a real
+        # charge, and the accusatory wording is earned.
+        lines.append(f"  EVIDENCE INDICTS: {verdict}.")
+    else:
+        # The type produced. The same largest shortfall exists by
+        # construction (some criterion always tops the table), so it
+        # prints as headroom, not an accusation.
+        lines.append(f"  LARGEST REMAINING SHORTFALL: {verdict}.")
+        lines.append(
+            f"  The excavated type produced {len(excavated_survivors)} surviving zone(s); this shortfall is "
+            "headroom context on a working class, not a defect claim."
+        )
     lines.append("  This statement is the NEXT branch's input; no weight or class was changed here.")
     return "\n".join(lines)
 
