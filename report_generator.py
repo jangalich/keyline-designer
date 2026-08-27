@@ -555,13 +555,15 @@ def _format_water_survey_areas_summary(water_narrative: Optional[dict]) -> str:
     see that module's docstring) for the report prompt. Same rules as
     every _format_*_summary() here: reads ONLY the pre-digested narrative
     block, never geometry; every number was converted and rounded at the
-    source. ALL regions are listed (no presentation cap -- first-run
-    posture), and each region's per-criterion mean scores ride along as
-    the narrative-honesty mechanism: prose may only claim what a
-    criterion actually scored. _format_water_candidate_zones_summary()
-    above remains for the demoted layer's narrative shape and is no
-    longer called on the pipeline path."""
-    if not water_narrative or not water_narrative.get("region_found"):
+    source. ALL survey zones are listed (no presentation cap --
+    first-run posture), each with its DUAL ACREAGE sentence ("X acres to
+    survey, anchored by Y acres of high-suitability ground") and its
+    per-criterion mean scores (member cells only) as the narrative-
+    honesty mechanism: prose may only claim what a criterion actually
+    scored. _format_water_candidate_zones_summary() above remains for
+    the demoted layer's narrative shape and is no longer called on the
+    pipeline path."""
+    if not water_narrative or not water_narrative.get("zone_found"):
         return (
             "No water survey areas cleared the suitability threshold (or DEM "
             "data wasn't available for this property)."
@@ -569,34 +571,41 @@ def _format_water_survey_areas_summary(water_narrative: Optional[dict]) -> str:
 
     selection = water_narrative["selection"]
     lines = [
-        f"{water_narrative['region_count']} water SURVEY AREA(S) identified from weighted-overlay "
-        f"suitability surfaces ({water_narrative['embankment_region_count']} embankment-type -- small "
-        f"dam across a drainageway; {water_narrative['excavated_region_count']} excavated-type -- "
-        "dugout in wet, flat ground; NRCS Agriculture Handbook 590's two pond types). These are "
-        "GENERAL AREAS WORTH SURVEYING, not designed ponds -- no pool, wall, volume, or station is "
-        "computed anywhere in this step, deliberately. Every region is listed, however small; rules "
-        "that would have filtered are reported as flags instead. "
+        f"{water_narrative['zone_count']} water SURVEY ZONE(S) identified from weighted-overlay "
+        f"suitability surfaces ({water_narrative['embankment_zone_count']} embankment-type -- small "
+        f"dam across a drainageway; {water_narrative['excavated_zone_count']} excavated-type -- "
+        "dugout in wet, flat ground; NRCS Agriculture Handbook 590's two pond types). A zone is the "
+        "ground ONE SURVEY VISIT walks: nearby high-suitability regions grouped into a single "
+        f"envelope ({water_narrative['member_region_count']} member region(s) across all zones), "
+        "with the anchoring ground carried intact inside it. These are GENERAL AREAS WORTH "
+        "SURVEYING, not designed ponds -- no pool, wall, volume, or station is computed anywhere in "
+        "this step, deliberately. Every zone is listed, however small; rules that would have "
+        "filtered are reported as flags instead. "
         + water_narrative["twi_note"]
     ]
-    if selection["selected_region_id"] is not None:
+    if selection["selected_zone_id"] is not None:
         lines.append(
-            f"Selected for downstream planning: region {selection['selected_region_id']} "
-            f"({selection['selected_survey_type']}-type) -- the two types pooled by mean suitability "
-            "(a provisional selection rule awaiting tuning against the first real run)."
+            f"Selected for downstream planning: zone {selection['selected_zone_id']} "
+            f"({selection['selected_survey_type']}-type) -- the two types pooled by member-mean "
+            "suitability (a provisional selection rule awaiting tuning against the next real run)."
         )
 
-    for region in water_narrative["regions"]:
+    for region in water_narrative["zones"]:
         criteria_clause = ", ".join(
             f"{name} {entry['mean_score']} (weight {entry['weight']})"
             for name, entry in region["criteria"].items()
         )
         lines.append(
-            f"\nSurvey area {region['id']} ({region['survey_type']}-type, rank {region['rank']} of its "
-            f"type): {region['area_acres']} acre(s), mean suitability {region['mean_suitability']} "
-            f"(max {region['max_suitability']}), confidence {region['confidence']}."
+            f"\nSurvey zone {region['id']} ({region['survey_type']}-type, rank {region['rank']} of its "
+            f"type): {region['zone_acres']} acres to survey, anchored by {region['member_acres']} "
+            f"acres of high-suitability ground ({region['member_count']} member region(s)); member-"
+            f"cell mean suitability {region['mean_suitability']} (max {region['max_suitability']}), "
+            f"confidence {region['confidence']}."
         )
         lines.append(
-            f"Per-criterion mean scores (prose may claim only these): {criteria_clause}."
+            f"Per-criterion mean scores over the ANCHORING ground only -- the envelope never "
+            f"launders sub-threshold ground into a score (prose may claim only these): "
+            f"{criteria_clause}."
         )
         gravity = region["gravity"]
         if not gravity["has_service_relationship"]:

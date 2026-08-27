@@ -78,26 +78,44 @@ Everything else that used to gate is a reported measurement here: canopy
 and road overlap, production overlap, gravity relationship, boundary
 adjacency -- all context for the site visit, none of them drops a region.
 
-REGION EXTRACTION, per type: each blended surface is first smoothed with
-a MASKED FOCAL MEAN at SURVEY_SMOOTHING_RADIUS_METERS (the survey-radius
-neighborhood mean -- a measurement-definition change, cell ->
-neighborhood, NOT morphology; see that constant's docstring for the
-principled distinction and the smoothed-vs-raw reporting split), then
-cells at/above SUITABILITY_THRESHOLD (provisional 0.6, chosen from the
-first run's isobands and re-verified by the diagnostic's threshold
-comparison; a parameter of the extraction function -- the constant only
-supplies the default) form 8-connected components
-(WATER_REGION_CONNECTIVITY -- water's own constant, deliberately NOT
-production's 4: flow-concentrated highs run diagonally along stems, and
-4-connectivity shreds a diagonal chain into beads by definition). NO
-MORPHOLOGY OF ANY KIND on extracted geometry: render_fill_polygon_utm IS
-polygon_utm, the identity, from birth -- see exclusion_zones.
-identify_exclusion_zones()'s docstring for the precedent (there is no
-display-only reduction to apply to an exact cell footprint; shrinking or
-smoothing a FOOTPRINT for display would draw a different answer than the
-one computed). Nothing is dropped: a region below the
+EXTRACTION AND AGGREGATION, per type -- scoring stays sharp, grouping
+makes the survey areas:
+
+  1. MEMBER REGIONS: cells at/above SUITABILITY_THRESHOLD on the RAW
+     blended surface (provisional 0.6, re-verified every run by the
+     diagnostic's threshold comparison; a parameter of the extraction
+     function -- the constant only supplies the default) form
+     8-connected components (WATER_REGION_CONNECTIVITY -- water's own
+     constant, deliberately NOT production's 4: flow-concentrated highs
+     run diagonally along stems, and 4-connectivity shreds a diagonal
+     chain into beads by definition). Extraction runs on the RAW
+     surface: a tuning pass tried pre-threshold smoothing and the
+     networked run measured why it cannot work here (raw max 0.820 ->
+     0.524 -- a one-cell drainageway ribbon never survives a
+     neighborhood average; see masked_focal_mean(), retired).
+  2. SURVEY ZONES: per type, member footprints are closed at
+     SURVEY_ZONE_GROUPING_DISTANCE_METERS (buffer out half, union,
+     buffer back -- a vector closing, gaps up to the full distance
+     bridge) and each connected result, clipped to the parcel, is ONE
+     SURVEY ZONE whose members are the regions it absorbed. A lone
+     region closes back to approximately itself -- one code path for
+     clusters and singletons. The zone is the deliverable and the
+     downstream selected_water_zone; members ride along as
+     sub-features, footprints INTACT. Score statistics come from
+     MEMBER CELLS ONLY (the envelope never launders sub-threshold
+     ground into a score); dual acreage tells the story -- member_acres
+     (the anchoring signal) beside zone_acres (the ground to walk).
+     See SURVEY_ZONE_GROUPING_DISTANCE_METERS's docstring for the two
+     rule-reconciliations (aggregation vs no-morphology; buffer-UNION
+     vs the buffer-difference sliver lesson).
+
+NO MORPHOLOGY ON MEASURED FOOTPRINTS: member polygons are exact cell
+unions, never redrawn; the zone's render_fill_polygon_utm IS its clipped
+envelope, the identity -- no further reduction downstream of the
+aggregation that defines the object (the exclusion_zones precedent).
+Nothing is dropped: a zone whose member acreage sits under the
 MIN_SURVEY_REGION_AREA_ACRES floor carries a `below_min_area` flag and
-its exact acreage; there is no region cap and no presentation cap.
+its exact acreage; there is no zone cap and no presentation cap.
 
 SELECTION (provisional, TUNE FROM FIRST RUN): the two types are POOLED by
 mean suitability (acreage tiebreak) and the pooled rank-1 region becomes
@@ -404,55 +422,70 @@ for _survey_type, _weights in ((SURVEY_TYPE_EMBANKMENT, EMBANKMENT_WEIGHTS), (SU
     )
 
 
-# --- focal smoothing (the survey-radius neighborhood mean) ----------------
+# --- focal smoothing: RETIRED FROM THE EXTRACTION PATH --------------------
 
-# Radius of the masked focal mean applied to each BLENDED suitability
-# surface before thresholding -- ~3 cells at the pipeline's 5 m DEM.
-# Chosen from the first reference run, where the embankment surface's
-# flow-concentrated highs (drainage band + TWI both score channel cells)
-# produced one-cell beads along a diagonal ribbon; a survey area is a
-# NEIGHBORHOOD claim, so the score that gets thresholded should be the
-# neighborhood's. Tune-from-run. CONFIGURABLE.
-#
-# THIS IS NOT A VIOLATION OF THE NO-MORPHOLOGY RULE, and the distinction
-# is principled, not rhetorical: the no-morphology rule protects MEASURED
-# GEOMETRY -- never redraw a footprint after computing it (the
-# exclusion_zones precedent; render_fill stays the identity here, always).
-# Smoothing changes WHAT IS MEASURED, before any geometry exists: from
-# "how suitable is this cell" to "how suitable is this cell's
-# NEIGHBORHOOD" -- and a survey area is by definition a neighborhood
-# claim (nobody walks a survey rod to a single 5 m cell). No morphology
-# is applied to extracted regions, now or ever.
-#
-# The mean is MASKED: taken over IN-PLAY (gated) cells within the window
-# only -- off-parcel and gate-excluded cells are excluded from numerator
-# AND denominator, so boundary-adjacent ground is not dragged down by
-# cells that do not exist for this purpose (see masked_focal_mean()).
-#
-# REPORTING SPLIT (load-bearing, preserved in region properties):
-# extraction and ranking use the SMOOTHED surface, and each region
-# reports smoothed mean/max (mean_suitability / max_suitability, plus
-# raw_mean_suitability for transparency); per-criterion contributions
-# report RAW means over the region's cells -- what the ground actually
-# is. The narrative-honesty mechanism must not launder smoothed values
-# into terrain claims: "your drainage criterion scored 0.8" must always
-# be a statement about these cells, never about their neighbors.
+# Radius the retired masked focal mean ran at (~3 cells at the 5 m DEM),
+# kept as masked_focal_mean()'s default. WHY IT LEFT THE PATH, with the
+# networked tuning run's measured numbers: pre-threshold smoothing
+# DILUTED THE INTRINSICALLY LINEAR EMBANKMENT SIGNAL below every
+# threshold -- the raw embankment surface peaked at 0.820 on the
+# reference property and the smoothed surface at 0.524 under the ~7x7
+# masked mean, because a one-cell drainageway ribbon can NEVER survive a
+# neighborhood average (a diagonal channel contributes ~5 of a 29-cell
+# window; the other 24 cells are its valley sides, and no threshold
+# both keeps the diluted ribbon and rejects ordinary ground). The
+# neighborhood claim was real but mis-placed: it now lives AFTER
+# extraction, as the survey-zone aggregation
+# (SURVEY_ZONE_GROUPING_DISTANCE_METERS below) -- scoring stays sharp,
+# grouping makes the survey areas. Retired, not deleted, per house
+# convention; see masked_focal_mean()'s own docstring.
 SURVEY_SMOOTHING_RADIUS_METERS = 15.0
 
 
 # --- region extraction ----------------------------------------------------
 
-# Cells at/above this SMOOTHED suitability score are extracted into
-# survey regions. PROVISIONAL 0.6, moved from the initial 0.5 prior --
-# chosen from the first reference run's isobands (where regions cohered
-# at 0.6 and dissolved below it). Because smoothing lowers peaks and
-# shifts the distribution, the diagnostic prints a THRESHOLD COMPARISON
-# (region count / total acreage / largest region at 0.5 / 0.6 / 0.7 on
-# the SMOOTHED surfaces) so this choice is re-verified against
-# post-smoothing reality in the same run rather than trusted forward.
-# This constant only supplies the extraction function's DEFAULT; it is
-# not baked into the math anywhere. TUNE FROM RUN. CONFIGURABLE.
+# Cells at/above this RAW blended suitability score are extracted into
+# member regions. PROVISIONAL 0.6, chosen from the first reference run's
+# isobands (where regions cohered at 0.6 and dissolved below it) and
+# meaning the RAW surface again now that pre-threshold smoothing is
+# retired. The diagnostic keeps printing a THRESHOLD COMPARISON (region
+# count / total acreage / largest region at 0.5 / 0.6 / 0.7 on the raw
+# surfaces, 8-connected) every run, so the choice stays tunable from
+# evidence. This constant only supplies the extraction function's
+# DEFAULT; it is not baked into the math anywhere. TUNE FROM RUN.
+# CONFIGURABLE.
 SUITABILITY_THRESHOLD = 0.6
+
+
+# --- survey-zone grouping (the closing over extracted regions) ------------
+
+# Member regions closer than this fuse into one SURVEY ZONE: each
+# member's footprint is buffered outward by HALF this distance, the
+# buffers are unioned, and the union is buffered back inward by the same
+# amount -- a morphological CLOSING in vector space, so gaps up to the
+# FULL distance bridge. 30 m is the scale at which two high-suitability
+# patches are one site visit, not two -- v1 prior, TUNE FROM RUN.
+# CONFIGURABLE.
+#
+# TWO RULE-RECONCILIATIONS, both principled and both load-bearing:
+#
+# (a) THE NO-MORPHOLOGY RULE forbids REDRAWING MEASURED FOOTPRINTS --
+#     a footprint, once computed, is never smoothed, opened, or shrunk
+#     for display (the exclusion_zones precedent). Member footprints
+#     survive INTACT here, carried as sub-features with their exact
+#     cell-union geometry; the zone envelope is a NEW AGGREGATION OBJECT
+#     defined over them ("the ground one survey visit walks"), not a
+#     mutation of any of them. The zone's own render_fill is the
+#     identity of its envelope -- no further morphology downstream of
+#     the aggregation that DEFINES the object.
+#
+# (b) THE NEVER-VECTORIZE-RASTER-MASKS lesson targeted buffer-DIFFERENCE
+#     exclusions, whose subtractions spawn sliver geometry at raster
+#     staircases. This is buffer-UNION grouping: outward buffers union
+#     (union of round-capped shapes is well-conditioned), and the single
+#     inward buffer of that union cannot self-intersect. No differencing
+#     happens anywhere in the aggregation.
+SURVEY_ZONE_GROUPING_DISTANCE_METERS = 30.0
 
 # Regions below this acreage are FLAGGED (`below_min_area`), never
 # dropped -- first-run posture. The value matches water_candidate_zones.
@@ -895,10 +928,14 @@ def build_soil_score_grid(dem: dict, gate_mask: np.ndarray, soil_inputs: Optiona
     convention); there is no separate hydrologic-group fetch anymore.
 
     Returns {'score_grid', 'covered_mask', 'availability',
-    'scores_by_mukey'}: score_grid holds SOIL_UNAVAILABLE_SCORE wherever
-    no scoreable map unit contains the cell center; covered_mask marks
-    the cells that got a REAL score (region soil coverage and the
-    confidence signal count only these).
+    'scores_by_mukey', 'mukey_by_cell'}: score_grid holds
+    SOIL_UNAVAILABLE_SCORE wherever no scoreable map unit contains the
+    cell center; covered_mask marks the cells that got a REAL score
+    (region soil coverage and the confidence signal count only these);
+    mukey_by_cell maps each covered (row, col) to the map unit that
+    scored it -- the excavated instrumentation's soil-oddity rider
+    reads it to put a map unit and its three sub-signals beside every
+    deepest-fill cell.
     """
     shape = dem["array"].shape
     score_grid = np.full(shape, SOIL_UNAVAILABLE_SCORE, dtype=np.float64)
@@ -910,6 +947,7 @@ def build_soil_score_grid(dem: dict, gate_mask: np.ndarray, soil_inputs: Optiona
             "covered_mask": covered_mask,
             "availability": {"checked": False, "ksat": False, "hydrologic_group": False, "hydric": False},
             "scores_by_mukey": {},
+            "mukey_by_cell": {},
         }
 
     ksat_rows = soil_inputs.get("ksat_rows") or []
@@ -944,14 +982,16 @@ def build_soil_score_grid(dem: dict, gate_mask: np.ndarray, soil_inputs: Optiona
         geometry_utm = transform_geom("EPSG:4326", dem["crs"], geometry)
         prepared_by_mukey[mukey] = (prep(shapely_shape(geometry_utm)), scored["score"])
 
+    mukey_by_cell: dict = {}
     if prepared_by_mukey:
         for r, c in np.argwhere(gate_mask):
             x, y = pixel_center_xy(dem, int(r), int(c))
             point = Point(x, y)
-            for prepared, score in prepared_by_mukey.values():
+            for mukey, (prepared, score) in prepared_by_mukey.items():
                 if prepared.contains(point):
                     score_grid[r, c] = score
                     covered_mask[r, c] = True
+                    mukey_by_cell[(int(r), int(c))] = mukey
                     break
 
     return {
@@ -964,6 +1004,7 @@ def build_soil_score_grid(dem: dict, gate_mask: np.ndarray, soil_inputs: Optiona
             "hydric": any(s["hydric_score"] is not None for s in scores_by_mukey.values()),
         },
         "scores_by_mukey": scores_by_mukey,
+        "mukey_by_cell": mukey_by_cell,
     }
 
 
@@ -978,6 +1019,22 @@ def masked_focal_mean(
     radius_meters: float = SURVEY_SMOOTHING_RADIUS_METERS,
 ) -> np.ndarray:
     """
+    RETIRED FROM THE EXTRACTION PATH, kept as a utility (retired, not
+    deleted, per house convention). One tuning pass ran this over each
+    blended surface before thresholding; the networked run then measured
+    the failure that removed it: the embankment surface's raw maximum of
+    0.820 fell to 0.524 under this ~7x7 masked mean, because the
+    embankment signal is INTRINSICALLY LINEAR -- a one-cell drainageway
+    ribbon contributes ~5 cells of a 29-cell window and its valley sides
+    contribute the rest, so a neighborhood average dilutes the ribbon
+    below every workable threshold BY CONSTRUCTION, not by mis-tuning.
+    Extraction and thresholding run on the RAW surfaces again; the
+    neighborhood claim lives after extraction instead, as the
+    survey-zone closing (SURVEY_ZONE_GROUPING_DISTANCE_METERS). Nothing
+    on the extraction path calls this function (grep-asserted in
+    test_water_survey_areas.py); it remains for any future consumer
+    with a genuinely areal signal to smooth.
+
     Disc-window focal mean over IN-MASK cells only: each masked cell's
     output is the mean of `values` across the mask cells within
     radius_meters of it (real-ground disc via raster_grid.build_disc_
@@ -989,11 +1046,6 @@ def masked_focal_mean(
     is 0.0 outside the mask (matching the gated surfaces' own
     convention). Pure numpy shift-and-accumulate, no scipy -- the same
     implementation doctrine as raster_grid's morphology helpers.
-
-    See SURVEY_SMOOTHING_RADIUS_METERS's own docstring for why smoothing
-    the blended surface is a measurement-definition change (cell ->
-    neighborhood), NOT morphology, and for the smoothed-vs-raw reporting
-    split it obligates.
     """
     rows, cols = values.shape
     contribution = np.where(mask, values, 0.0).astype(np.float64)
@@ -1112,6 +1164,95 @@ def _boundary_adjacency_fraction(polygon_utm, boundary_polygon_utm: Polygon) -> 
     return max(0.0, min(1.0, shared.length / total))
 
 
+def _measure_member_cells(
+    dem: dict,
+    cells: list,
+    surface: np.ndarray,
+    criteria: dict,
+    weights: dict,
+    twi_percentile: np.ndarray,
+    depression_depth: np.ndarray,
+    flow_accumulation: np.ndarray,
+    slope_pct: np.ndarray,
+    soil_covered_mask: np.ndarray,
+    soil_checked: bool,
+) -> dict:
+    """
+    The full measurement set over one set of MEMBER cells -- shared
+    verbatim between region extraction and survey-zone aggregation, so a
+    zone's score statistics are byte-identical to what its members'
+    cells measure directly: MEMBER CELLS ONLY, on the RAW surface and
+    RAW criteria grids. The envelope has no cells and never launders
+    sub-threshold ground into any number returned here.
+    """
+    area_per_cell = cell_area_acres(dem)
+    raw_array = dem["array"]
+
+    cell_values = np.array([surface[r, c] for r, c in cells], dtype=np.float64)
+
+    criterion_contributions = {}
+    for name, weight in weights.items():
+        criterion_grid = criteria[name]
+        mean_score = float(np.mean([criterion_grid[r, c] for r, c in cells]))
+        criterion_contributions[name] = {
+            "weight": weight,
+            "mean_score": round(mean_score, 3),
+            "weighted_contribution": round(weight * mean_score, 3),
+        }
+
+    twi_values = [twi_percentile[r, c] for r, c in cells]
+    twi_valid = [v for v in twi_values if not math.isnan(v)]
+    depth_values = [depression_depth[r, c] for r, c in cells]
+    depth_valid = [v for v in depth_values if not math.isnan(v)]
+
+    # "Wettest cell" = the member cell with the highest TWI percentile
+    # (falling back to highest accumulation if no TWI is valid) -- its
+    # contributing area answers "how much catchment does the wet heart
+    # of this ground actually tap".
+    if twi_valid:
+        wettest_index = int(np.nanargmax(np.array(twi_values, dtype=np.float64)))
+    else:
+        wettest_index = int(np.argmax([flow_accumulation[r, c] for r, c in cells]))
+    wettest_cell = cells[wettest_index]
+    wettest_contributing_acres = float(flow_accumulation[wettest_cell[0], wettest_cell[1]]) * area_per_cell
+
+    slope_values = [slope_pct[r, c] for r, c in cells]
+    slope_valid = [v for v in slope_values if not math.isnan(v)]
+
+    soil_covered = sum(1 for r, c in cells if soil_covered_mask[r, c])
+    soil_coverage_fraction = (soil_covered / len(cells)) if soil_checked else None
+
+    # Criteria completeness: every member cell fully measured (valid
+    # slope, hence valid TWI -- soil availability is the OTHER
+    # confidence signal). One unmeasured cell means part of the blend
+    # scored 0.0 for lack of data rather than for lack of merit.
+    complete_cells = sum(
+        1 for r, c in cells if not math.isnan(slope_pct[r, c]) and not math.isnan(twi_percentile[r, c])
+    )
+
+    return {
+        "mean_suitability": round(float(np.mean(cell_values)), 4),
+        "max_suitability": round(float(np.max(cell_values)), 4),
+        "criterion_contributions": criterion_contributions,
+        "twi_percentile_mean": round(float(np.mean(twi_valid)), 3) if twi_valid else None,
+        "twi_percentile_max": round(float(np.max(twi_valid)), 3) if twi_valid else None,
+        "depression_depth_mean_m": round(float(np.mean(depth_valid)), 3) if depth_valid else None,
+        "depression_depth_max_m": round(float(np.max(depth_valid)), 3) if depth_valid else None,
+        "wettest_cell_rowcol": wettest_cell,
+        "contributing_area_acres_at_wettest_cell": round(wettest_contributing_acres, 2),
+        "slope_median_pct": round(float(np.median(slope_valid)), 2) if slope_valid else None,
+        "soil_coverage_fraction": (
+            round(soil_coverage_fraction, 3) if soil_coverage_fraction is not None else None
+        ),
+        "criteria_complete": complete_cells == len(cells),
+        # Median raw elevation over member cells -- the SAME definition
+        # the demoted water zones used, because pipeline_context's
+        # keypoint relationship pass reads this field by direct index
+        # (consumer contract).
+        "representative_elevation_m": float(np.median([raw_array[r, c] for r, c in cells])),
+    }
+
+
 def extract_survey_regions(
     dem: dict,
     surface: np.ndarray,
@@ -1126,39 +1267,28 @@ def extract_survey_regions(
     soil_covered_mask: np.ndarray,
     soil_checked: bool,
     threshold: float = SUITABILITY_THRESHOLD,
-    raw_surface: Optional[np.ndarray] = None,
 ) -> list[dict]:
     """
     Extracts every 8-connected (WATER_REGION_CONNECTIVITY -- see that
     constant for the deliberate contrast with production's 4) component
-    of gated cells at/above `threshold` on one type's surface into a
-    survey-region dict -- geometry, the full measurement set, and flags.
+    of gated cells at/above `threshold` on one type's RAW blended
+    surface into a member-region dict -- geometry, the full measurement
+    set, and flags. Extraction runs on the RAW surface: the retired
+    pre-threshold smoothing diluted the linear embankment signal below
+    every threshold (see masked_focal_mean()); the neighborhood claim
+    is build_survey_zones()'s job now, downstream of this function.
     NOTHING IS DROPPED: a region below MIN_SURVEY_REGION_AREA_ACRES
     carries FLAG_BELOW_MIN_AREA and its exact acreage. `threshold` is a
     parameter deliberately -- SUITABILITY_THRESHOLD only supplies the
     default (it is the first number the isoband export exists to tune).
 
-    `surface` is the SMOOTHED blend on the pipeline path (see
-    SURVEY_SMOOTHING_RADIUS_METERS): extraction, ranking, and the
-    region's mean_suitability/max_suitability all read it. `raw_surface`
-    (the unsmoothed blend; defaults to `surface` when not supplied, for
-    callers testing extraction in isolation) feeds ONLY the
-    raw_mean_suitability transparency property -- while per-criterion
-    contributions always read the RAW criteria grids: the reporting
-    split that keeps the narrative-honesty mechanism honest (smoothed
-    values are neighborhood claims and must never be laundered into
-    statements about what this ground's own criteria scored).
-
     Gravity relationships, overlaps, ranking, confidence, and ids are
-    attached later (they need production areas / canopy / roads / the
-    cross-type pool); this function owns only what one surface plus the
-    screens can say about a component.
+    attached at the ZONE level (build_survey_zones() and the compute
+    core); this function owns only what one surface plus the screens can
+    say about a component.
     """
     weights = EMBANKMENT_WEIGHTS if survey_type == SURVEY_TYPE_EMBANKMENT else EXCAVATED_WEIGHTS
     area_per_cell = cell_area_acres(dem)
-    raw_array = dem["array"]
-    if raw_surface is None:
-        raw_surface = surface
 
     region_mask = gate_mask & (surface >= threshold)
     labels, count = connected_components(region_mask, connectivity=WATER_REGION_CONNECTIVITY)
@@ -1180,58 +1310,26 @@ def extract_survey_regions(
             )
             continue
 
-        cell_values = np.array([surface[r, c] for r, c in cells], dtype=np.float64)
-        raw_cell_values = np.array([raw_surface[r, c] for r, c in cells], dtype=np.float64)
         area_acres = len(cells) * area_per_cell
-
-        criterion_contributions = {}
-        for name, weight in weights.items():
-            criterion_grid = criteria[name]
-            mean_score = float(np.mean([criterion_grid[r, c] for r, c in cells]))
-            criterion_contributions[name] = {
-                "weight": weight,
-                "mean_score": round(mean_score, 3),
-                "weighted_contribution": round(weight * mean_score, 3),
-            }
-
-        twi_values = [twi_percentile[r, c] for r, c in cells]
-        twi_valid = [v for v in twi_values if not math.isnan(v)]
-        depth_values = [depression_depth[r, c] for r, c in cells]
-        depth_valid = [v for v in depth_values if not math.isnan(v)]
-
-        # "Wettest cell" = the member cell with the highest TWI percentile
-        # (falling back to highest accumulation if no TWI is valid) --
-        # its contributing area answers "how much catchment does the wet
-        # heart of this region actually tap".
-        if twi_valid:
-            wettest_index = int(np.nanargmax(np.array(twi_values, dtype=np.float64)))
-        else:
-            wettest_index = int(np.argmax([flow_accumulation[r, c] for r, c in cells]))
-        wettest_cell = cells[wettest_index]
-        wettest_contributing_acres = float(flow_accumulation[wettest_cell[0], wettest_cell[1]]) * area_per_cell
-
-        slope_values = [slope_pct[r, c] for r, c in cells]
-        slope_valid = [v for v in slope_values if not math.isnan(v)]
-
-        soil_covered = sum(1 for r, c in cells if soil_covered_mask[r, c])
-        soil_coverage_fraction = (soil_covered / len(cells)) if soil_checked else None
-
-        # Criteria completeness: every member cell fully measured (valid
-        # slope, hence valid TWI -- soil availability is the OTHER
-        # confidence signal). One unmeasured cell means part of the blend
-        # scored 0.0 for lack of data rather than for lack of merit.
-        complete_cells = sum(
-            1
-            for r, c in cells
-            if not math.isnan(slope_pct[r, c]) and not math.isnan(twi_percentile[r, c])
-        )
-        criteria_complete = complete_cells == len(cells)
-
         flags = []
         if area_acres < MIN_SURVEY_REGION_AREA_ACRES:
             flags.append(FLAG_BELOW_MIN_AREA)
 
         geometry_wgs84 = transform_geom(dem["crs"], "EPSG:4326", mapping(polygon_utm))
+
+        measurements = _measure_member_cells(
+            dem,
+            cells,
+            surface,
+            criteria,
+            weights,
+            twi_percentile,
+            depression_depth,
+            flow_accumulation,
+            slope_pct,
+            soil_covered_mask,
+            soil_checked,
+        )
 
         regions.append(
             {
@@ -1240,55 +1338,202 @@ def extract_survey_regions(
                 "cells": cells,
                 "cell_count": len(cells),
                 "area_acres": round(area_acres, 4),
-                # SMOOTHED -- what extraction and ranking actually read
-                # (the neighborhood claim); raw_mean_suitability is the
-                # unsmoothed blend over the same cells, kept beside it so
-                # the smoothing's effect is visible, never laundered.
-                # criterion_contributions below are RAW means (the
-                # reporting split -- see extract_survey_regions()'s
-                # docstring).
-                "mean_suitability": round(float(np.mean(cell_values)), 4),
-                "max_suitability": round(float(np.max(cell_values)), 4),
-                "raw_mean_suitability": round(float(np.mean(raw_cell_values)), 4),
-                "criterion_contributions": criterion_contributions,
-                "twi_percentile_mean": round(float(np.mean(twi_valid)), 3) if twi_valid else None,
-                "twi_percentile_max": round(float(np.max(twi_valid)), 3) if twi_valid else None,
-                "depression_depth_mean_m": round(float(np.mean(depth_valid)), 3) if depth_valid else None,
-                "depression_depth_max_m": round(float(np.max(depth_valid)), 3) if depth_valid else None,
-                "wettest_cell_rowcol": wettest_cell,
-                "contributing_area_acres_at_wettest_cell": round(wettest_contributing_acres, 2),
-                "slope_median_pct": round(float(np.median(slope_valid)), 2) if slope_valid else None,
-                "soil_coverage_fraction": (
-                    round(soil_coverage_fraction, 3) if soil_coverage_fraction is not None else None
-                ),
-                "criteria_complete": criteria_complete,
+                **measurements,
                 "flags": flags,
                 "below_min_area": FLAG_BELOW_MIN_AREA in flags,
                 "boundary_adjacency_fraction": round(
                     _boundary_adjacency_fraction(polygon_utm, boundary_polygon_utm), 3
                 ),
-                # Median raw elevation over member cells -- the SAME
-                # definition the demoted water zones used, because
-                # pipeline_context's keypoint relationship pass reads
-                # this field by direct index (consumer contract).
-                "representative_elevation_m": float(np.median([raw_array[r, c] for r, c in cells])),
                 "polygon_utm": polygon_utm,
                 "geometry_wgs84": geometry_wgs84,
-                # IDENTITY, not a copy and not a reduction -- no
-                # morphology of any kind exists in this module, so there
-                # is no display-only geometry to differ from the computed
-                # one (the exclusion_zones precedent: shrinking or
-                # smoothing an exact cell footprint for display would
-                # draw a different answer than the one computed). The
-                # keys exist because render_fill_polygon_utm is a shared
-                # downstream contract (map ripple clip, fencing, road/
-                # solar exclusion, keypoint distances).
+                # IDENTITY, not a copy and not a reduction -- member
+                # footprints are exact cell unions, never redrawn (the
+                # exclusion_zones precedent). The keys exist for shape
+                # parity; the DOWNSTREAM render_fill contract lands on
+                # the survey ZONE's envelope now.
                 "render_fill_polygon_utm": polygon_utm,
                 "render_fill_geometry_wgs84": geometry_wgs84,
             }
         )
 
     return regions
+
+
+# ==========================================================================
+# Survey zones: the closing over extracted regions
+# ==========================================================================
+
+def _close_member_footprints(member_polygons: list, grouping_distance_meters: float) -> list:
+    """
+    The vector closing that defines survey zones: buffer every member
+    footprint outward by HALF the grouping distance, unary_union, buffer
+    the union back inward by the same amount. Gaps up to the FULL
+    distance bridge; a lone member closes back to approximately itself
+    (dilation then erosion of a convex shape is exact; a raster
+    staircase rounds by a sliver). Returns the connected result
+    polygons, each of which becomes one zone envelope. Buffer-UNION
+    only -- no differencing anywhere (see SURVEY_ZONE_GROUPING_DISTANCE_
+    METERS's rule-reconciliation (b)).
+    """
+    if not member_polygons:
+        return []
+    half = grouping_distance_meters / 2.0
+    closed = unary_union([polygon.buffer(half) for polygon in member_polygons]).buffer(-half)
+    if closed.is_empty:
+        # Cannot occur (a closing contains its input union) -- guarded so
+        # a geometry-library edge case degrades to per-member envelopes,
+        # never a crash or a dropped member.
+        logger.warning("_close_member_footprints: closing came back empty -- falling back to member footprints")
+        return list(member_polygons)
+    if closed.geom_type == "MultiPolygon":
+        return list(closed.geoms)
+    return [closed]
+
+
+def build_survey_zones(
+    dem: dict,
+    regions: list[dict],
+    surfaces: dict,
+    gate_context: dict,
+    boundary_polygon_utm: Polygon,
+    grouping_distance_meters: float = SURVEY_ZONE_GROUPING_DISTANCE_METERS,
+) -> list[dict]:
+    """
+    The aggregation step: per type, member regions whose footprints sit
+    within grouping_distance_meters of each other fuse into one SURVEY
+    ZONE -- one code path for clusters and singletons (a lone region's
+    zone is approximately its own footprint). The zone is the
+    deliverable object downstream consumers receive; members ride along
+    intact as sub-features with zone-id linkage both ways.
+
+    Geometry: the closing envelope, CLIPPED TO THE PARCEL BOUNDARY (the
+    survey happens on the user's land); boundary adjacency computes on
+    the clipped envelope. Score statistics come from MEMBER CELLS ONLY
+    via the same _measure_member_cells() the members themselves used --
+    the envelope never launders sub-threshold ground into a score. Dual
+    acreage carries both truths: member_acres (cell-count acreage of
+    ground that actually cleared the threshold -- the anchoring signal)
+    and zone_acres (the clipped envelope's polygon acreage -- the
+    ground to walk; polygon-area acreage is correct here exactly
+    because a zone envelope is a drawn boundary, not a cell population
+    -- the same cell-vs-polygon acreage split exclusion_zones.py
+    documents).
+
+    gate_context bundles the screen arrays _measure_member_cells()
+    needs: twi_percentile / depression_depth / flow_accumulation /
+    slope_pct / soil_covered_mask / soil_checked.
+
+    Overlaps, gravity, confidence, ids, and ranking are attached by the
+    compute core (they need production areas / canopy / roads / the
+    cross-type pool).
+    """
+    zones: list[dict] = []
+    for survey_type in SURVEY_TYPES:
+        weights = EMBANKMENT_WEIGHTS if survey_type == SURVEY_TYPE_EMBANKMENT else EXCAVATED_WEIGHTS
+        members = [region for region in regions if region["survey_type"] == survey_type]
+        if not members:
+            continue
+        envelopes = _close_member_footprints(
+            [member["polygon_utm"] for member in members], grouping_distance_meters
+        )
+        claimed: set = set()
+        for envelope in envelopes:
+            # A member lies inside exactly one connected component of the
+            # closing (the closing contains the member union, and its
+            # parts are disjoint); intersects() finds it. The claimed
+            # guard is belt-and-braces against a degenerate
+            # point-touching tie ever double-assigning one.
+            zone_member_indices = [
+                index
+                for index, member in enumerate(members)
+                if index not in claimed and envelope.intersects(member["polygon_utm"])
+            ]
+            if not zone_member_indices:
+                continue
+            claimed.update(zone_member_indices)
+            zone_members = [members[index] for index in zone_member_indices]
+
+            clipped_envelope = envelope.intersection(boundary_polygon_utm)
+            if clipped_envelope.is_empty:
+                # Members are on-parcel by construction, so their
+                # envelope always keeps on-parcel area -- guarded anyway.
+                logger.warning("build_survey_zones: clipped envelope empty -- using member footprints")
+                clipped_envelope = unary_union([member["polygon_utm"] for member in zone_members])
+
+            member_cells = [cell for member in zone_members for cell in member["cells"]]
+            member_acres = len(member_cells) * cell_area_acres(dem)
+            zone_acres = clipped_envelope.area / SQUARE_METERS_PER_ACRE
+
+            measurements = _measure_member_cells(
+                dem,
+                member_cells,
+                surfaces[survey_type],
+                surfaces["criteria"][survey_type],
+                weights,
+                gate_context["twi_percentile"],
+                gate_context["depression_depth"],
+                gate_context["flow_accumulation"],
+                gate_context["slope_pct"],
+                gate_context["soil_covered_mask"],
+                gate_context["soil_checked"],
+            )
+
+            flags = []
+            # Flag on MEMBER acreage: the anchoring signal is what the
+            # floor was ever about -- an envelope can be arbitrarily
+            # larger than the ground that earned it.
+            if member_acres < MIN_SURVEY_REGION_AREA_ACRES:
+                flags.append(FLAG_BELOW_MIN_AREA)
+
+            geometry_wgs84 = transform_geom(dem["crs"], "EPSG:4326", mapping(clipped_envelope))
+
+            zones.append(
+                {
+                    "survey_type": survey_type,
+                    "nominated_by": PROVENANCE_SUITABILITY_SURFACE,
+                    "members": zone_members,
+                    "member_count": len(zone_members),
+                    "cells": member_cells,
+                    "cell_count": len(member_cells),
+                    # DUAL ACREAGE, both labeled -- the narrative
+                    # sentence is "zone_acres to survey, anchored by
+                    # member_acres of high-suitability ground".
+                    "member_acres": round(member_acres, 4),
+                    "zone_acres": round(zone_acres, 4),
+                    **measurements,
+                    "flags": flags,
+                    "below_min_area": FLAG_BELOW_MIN_AREA in flags,
+                    "boundary_adjacency_fraction": round(
+                        _boundary_adjacency_fraction(clipped_envelope, boundary_polygon_utm), 3
+                    ),
+                    "polygon_utm": clipped_envelope,
+                    "geometry_wgs84": geometry_wgs84,
+                    # IDENTITY of the clipped envelope -- the aggregation
+                    # DEFINES this object's geometry; no further
+                    # morphology is applied to it, ever (rule-
+                    # reconciliation (a) at SURVEY_ZONE_GROUPING_
+                    # DISTANCE_METERS). This is the downstream
+                    # render_fill contract (map ripple clip, fencing,
+                    # road/solar exclusion, keypoint distances).
+                    "render_fill_polygon_utm": clipped_envelope,
+                    "render_fill_geometry_wgs84": geometry_wgs84,
+                }
+            )
+    return zones
+
+
+def _cells_in_polygon_utm(dem: dict, polygon_utm) -> list:
+    """Grid cells whose CENTERS fall inside polygon_utm (the pipeline-
+    wide raster<->vector convention) -- the envelope's cell population,
+    used so canopy/road overlap on a zone reuses the established
+    cell-fraction machinery and its sentinel semantics."""
+    rows, cols = dem["array"].shape
+    px, py = dem["resolution_meters"]
+    col_x = dem["origin_x"] + (np.arange(cols) + 0.5) * px
+    row_y = dem["origin_y"] - (np.arange(rows) + 0.5) * py
+    xs, ys = np.meshgrid(col_x, row_y)
+    inside = contains_xy(polygon_utm, xs, ys)
+    return [(int(r), int(c)) for r, c in np.argwhere(inside)]
 
 
 # ==========================================================================
@@ -1407,36 +1652,39 @@ def _confidence_notes_for_region(region: dict, soil_checked: bool) -> str:
     )
 
 
-def rank_regions_per_type(regions: list[dict]) -> None:
+def rank_survey_zones_per_type(zones: list[dict]) -> None:
     """
-    Assigns `rank` per type IN PLACE: 1 = highest mean suitability within
-    that type, acreage as the tiebreak (larger first -- between two
-    equally-scored areas, the one worth more survey time ranks first).
-    Every region is ranked; flags never affect rank (first-run posture).
+    Assigns `rank` per type IN PLACE: 1 = highest MEMBER-mean
+    suitability within that type, member acreage as the tiebreak
+    (larger anchoring signal first -- between two equally-scored zones,
+    the one anchored by more high-suitability ground ranks first; the
+    envelope's own acreage never ranks anything). Every zone is ranked;
+    flags never affect rank (first-run posture).
     """
     for survey_type in SURVEY_TYPES:
-        typed = [region for region in regions if region["survey_type"] == survey_type]
-        typed.sort(key=lambda region: (-region["mean_suitability"], -region["area_acres"]))
-        for rank, region in enumerate(typed, start=1):
-            region["rank"] = rank
+        typed = [zone for zone in zones if zone["survey_type"] == survey_type]
+        typed.sort(key=lambda zone: (-zone["mean_suitability"], -zone["member_acres"]))
+        for rank, zone in enumerate(typed, start=1):
+            zone["rank"] = rank
 
 
-def select_survey_region(regions: list[dict]) -> Optional[dict]:
+def select_survey_zone(zones: list[dict]) -> Optional[dict]:
     """
     The single selected_water_zone answer for downstream consumers:
-    embankment and excavated POOLED by mean suitability (acreage
-    tiebreak), rank-1 of the pool wins. PROVISIONAL, deliberately simple
-    -- pooling compares two different survey instruments on one scale,
-    which is defensible only because downstream needs ONE unambiguous
-    answer; revisit from the first networked run (the winner's type is
-    itself a finding). Flags never affect selection (a below-min-area
-    region CAN win -- first-run posture; the flag rides along for the
-    reader). Returns None when no region exists at all -- the real,
-    reportable "nothing cleared the threshold" outcome, not an error.
+    embankment and excavated POOLED by member-mean suitability (member
+    acreage tiebreak), rank-1 of the pool wins. PROVISIONAL,
+    deliberately simple -- pooling compares two different survey
+    instruments on one scale, which is defensible only because
+    downstream needs ONE unambiguous answer; revisit from the tuned run
+    (the winner's type is itself a finding). Flags never affect
+    selection (a below-min-area zone CAN win -- first-run posture; the
+    flag rides along for the reader). Returns None when no zone exists
+    at all -- the real, reportable "nothing cleared the threshold"
+    outcome, not an error.
     """
-    if not regions:
+    if not zones:
         return None
-    return max(regions, key=lambda region: (region["mean_suitability"], region["area_acres"]))
+    return max(zones, key=lambda zone: (zone["mean_suitability"], zone["member_acres"]))
 
 
 # ==========================================================================
@@ -1470,14 +1718,16 @@ def compute_water_survey_areas(
     an orchestrator (or a test spying on call counts) can guarantee each
     derivation runs EXACTLY ONCE; each self-computes when absent.
 
-    Returns a dict of regions (all of them, flagged not filtered),
-    per-type lists, the pooled selection, the surfaces dict (surfaces
-    [type] = the SMOOTHED blend extraction actually thresholds;
-    surfaces["raw"][type] = the unsmoothed blend; surfaces["criteria"]
-    = the raw criterion grids), the screens (including the unfloored
-    depression_depth_raw for the excavated instrumentation), the gate
-    mask, and its stats (numpy/shapely -- NOT JSON-serializable; the
-    geojson/narrative builders produce the wire forms).
+    Returns a dict of survey ZONES (the deliverable: closing-aggregated,
+    flagged not filtered, per-type lists, pooled selection), their
+    member REGIONS (all of them, footprints intact), the surfaces dict
+    (surfaces[type] = the RAW blend extraction thresholds -- smoothing
+    is retired from this path, see masked_focal_mean(); surfaces
+    ["criteria"] = the raw criterion grids), the screens (including the
+    unfloored depression_depth_raw for the excavated instrumentation),
+    the gate mask, and its stats (numpy/shapely -- NOT
+    JSON-serializable; the geojson/narrative builders produce the wire
+    forms).
     """
     array = dem["array"]
 
@@ -1517,22 +1767,14 @@ def compute_water_survey_areas(
     soil_checked = soil_inputs is not None
     soil = build_soil_score_grid(dem, gate_mask, soil_inputs)
 
-    raw_surfaces = compute_suitability_surfaces(
+    # RAW surfaces all the way through: extraction, thresholding, the
+    # isobands, and the threshold comparison. Pre-threshold smoothing is
+    # RETIRED from this path (the measured dilution failure -- see
+    # masked_focal_mean()); the neighborhood claim happens after
+    # extraction, in build_survey_zones() below.
+    surfaces = compute_suitability_surfaces(
         dem, gate_mask, flow_accumulation, slope_pct, twi_percentile, depression_depth, soil["score_grid"]
     )
-    # The survey-radius neighborhood mean, per type -- extraction,
-    # ranking, isobands, and the threshold comparison all read the
-    # SMOOTHED surface; the raw blends ride beside them under "raw" for
-    # the transparency property and the diagnostic. Masked: gated cells
-    # only, in numerator and denominator both.
-    surfaces = {
-        survey_type: masked_focal_mean(
-            raw_surfaces[survey_type], gate_mask, dem["resolution_meters"], SURVEY_SMOOTHING_RADIUS_METERS
-        )
-        for survey_type in SURVEY_TYPES
-    }
-    surfaces["raw"] = {survey_type: raw_surfaces[survey_type] for survey_type in SURVEY_TYPES}
-    surfaces["criteria"] = raw_surfaces["criteria"]
 
     regions: list[dict] = []
     for survey_type in SURVEY_TYPES:
@@ -1551,65 +1793,103 @@ def compute_water_survey_areas(
                 soil["covered_mask"],
                 soil_checked,
                 threshold=threshold,
-                raw_surface=surfaces["raw"][survey_type],
             )
         )
 
-    # Overlaps + gravity, both pure measurements over inputs in hand.
+    # The aggregation: member regions close into survey zones -- the
+    # deliverable objects everything below attaches to.
+    zones = build_survey_zones(
+        dem,
+        regions,
+        surfaces,
+        {
+            "twi_percentile": twi_percentile,
+            "depression_depth": depression_depth,
+            "flow_accumulation": flow_accumulation,
+            "slope_pct": slope_pct,
+            "soil_covered_mask": soil["covered_mask"],
+            "soil_checked": soil_checked,
+        },
+        boundary_polygon_utm,
+    )
+
+    # Overlaps + gravity on the ZONE, both pure measurements over inputs
+    # in hand. Canopy/road overlap runs on the ENVELOPE's cell
+    # population (the ground being surveyed -- the established
+    # cell-fraction machinery and its None/0.0 sentinel semantics,
+    # unchanged); production overlap on the envelope polygon; gravity
+    # and representative elevation from MEMBER cells via the existing
+    # representative-point machinery.
     canopy_checked = canopy_root_zone_mask_utm is not _CANOPY_CHECK_UNCHECKED
     canopy_mask = canopy_root_zone_mask_utm if canopy_checked else None
     road_checked = road_exclusion_union_utm is not _ROAD_CHECK_UNCHECKED
     road_union = road_exclusion_union_utm if road_checked and road_exclusion_union_utm is not None else None
     road_prepared = prep(road_union) if road_union is not None else None
 
-    for region in regions:
-        region["canopy_overlap_pct"] = _overlap_fraction_pct(region["cells"], dem, canopy_checked, mask_utm=canopy_mask)
-        region["road_overlap_pct"] = _overlap_fraction_pct(
-            region["cells"], dem, road_checked, prepared_union=road_prepared
+    for zone in zones:
+        envelope_cells = _cells_in_polygon_utm(dem, zone["polygon_utm"])
+        zone["canopy_overlap_pct"] = _overlap_fraction_pct(envelope_cells, dem, canopy_checked, mask_utm=canopy_mask)
+        zone["road_overlap_pct"] = _overlap_fraction_pct(
+            envelope_cells, dem, road_checked, prepared_union=road_prepared
         )
-        region["production_overlap_pct"] = _production_overlap_pct(region["polygon_utm"], production_areas)
+        zone["production_overlap_pct"] = _production_overlap_pct(zone["polygon_utm"], production_areas)
 
+        member_union = unary_union([member["polygon_utm"] for member in zone["members"]])
         relationships = (
             _zone_production_area_relationships(
-                region["polygon_utm"].centroid,
-                region["representative_elevation_m"],
+                member_union.centroid,
+                zone["representative_elevation_m"],
                 production_areas,
                 MAX_SERVICE_DISTANCE_METERS,
             )
             if production_areas
             else []
         )
-        region["production_area_relationships"] = relationships
+        zone["production_area_relationships"] = relationships
         # None where nothing is in range -- an honest empty answer, not a
         # fabricated relationship, and a FLAG rather than a drop: gravity
         # is ranking context and narrative, never a gate. PUMP-REQUIRED
         # (below-elevation) relationships survive with their note.
-        region["primary_production_area_relationship"] = relationships[0] if relationships else None
-        region["has_service_relationship"] = bool(relationships)
-        region["served_production_area_ids"] = sorted({r["production_area_id"] for r in relationships})
+        zone["primary_production_area_relationship"] = relationships[0] if relationships else None
+        zone["has_service_relationship"] = bool(relationships)
+        zone["served_production_area_ids"] = sorted({r["production_area_id"] for r in relationships})
         if not relationships:
-            region["flags"].append(FLAG_NO_SERVICE_RELATIONSHIP)
+            zone["flags"].append(FLAG_NO_SERVICE_RELATIONSHIP)
 
-    # Ids, ranks, confidence, selection. Ids are assigned over the full
-    # cross-type list (embankment extraction order, then excavated) so
-    # every region -- and therefore the selected zone downstream
-    # consumers log by id -- has one unambiguous identity.
+    # Ids, ranks, confidence, selection -- zone-level; member linkage
+    # both ways. Zone ids are assigned over the full cross-type list so
+    # the selected zone downstream consumers log by id has one
+    # unambiguous identity; member regions get their own ids and each
+    # carries its parent's zone_id.
+    for zone_id, zone in enumerate(zones):
+        zone["id"] = zone_id
     for region_id, region in enumerate(regions):
         region["id"] = region_id
-    rank_regions_per_type(regions)
+    for zone in zones:
+        zone["member_ids"] = [member["id"] for member in zone["members"]]
+        for member in zone["members"]:
+            member["zone_id"] = zone["id"]
+    rank_survey_zones_per_type(zones)
+    for zone in zones:
+        zone["confidence"] = _confidence_for_region(zone, soil_checked)
+        zone["confidence_notes"] = _confidence_notes_for_region(zone, soil_checked)
     for region in regions:
         region["confidence"] = _confidence_for_region(region, soil_checked)
-        region["confidence_notes"] = _confidence_notes_for_region(region, soil_checked)
 
-    selected = select_survey_region(regions)
+    selected = select_survey_zone(zones)
 
     return {
+        "zones": zones,
+        "zones_by_type": {
+            survey_type: sorted(
+                [zone for zone in zones if zone["survey_type"] == survey_type],
+                key=lambda zone: zone["rank"],
+            )
+            for survey_type in SURVEY_TYPES
+        },
         "regions": regions,
         "regions_by_type": {
-            survey_type: sorted(
-                [region for region in regions if region["survey_type"] == survey_type],
-                key=lambda region: region["rank"],
-            )
+            survey_type: [region for region in regions if region["survey_type"] == survey_type]
             for survey_type in SURVEY_TYPES
         },
         "selected_water_zone": selected,
@@ -1635,33 +1915,65 @@ def compute_water_survey_areas(
 # Wire forms: GeoJSON + narrative_data
 # ==========================================================================
 
-def _region_feature_properties(region: dict) -> dict:
-    """The JSON-serializable property set every region feature carries --
-    the full measurement contract, flagged not filtered."""
+def _zone_feature_properties(zone: dict) -> dict:
+    """The JSON-serializable property set every survey-zone feature
+    carries -- the full measurement contract, flagged not filtered, with
+    DUAL ACREAGE (member_acres = the anchoring signal; zone_acres = the
+    clipped envelope, the ground to walk) and member linkage."""
+    return {
+        "zone_id": zone["id"],
+        "survey_type": zone["survey_type"],
+        "nominated_by": zone["nominated_by"],
+        "rank": zone["rank"],
+        "member_ids": list(zone["member_ids"]),
+        "member_count": zone["member_count"],
+        "member_acres": zone["member_acres"],
+        "zone_acres": zone["zone_acres"],
+        "cell_count": zone["cell_count"],
+        "mean_suitability": zone["mean_suitability"],
+        "max_suitability": zone["max_suitability"],
+        "criterion_contributions": zone["criterion_contributions"],
+        "twi_percentile_mean": zone["twi_percentile_mean"],
+        "twi_percentile_max": zone["twi_percentile_max"],
+        "depression_depth_mean_m": zone["depression_depth_mean_m"],
+        "depression_depth_max_m": zone["depression_depth_max_m"],
+        "contributing_area_acres_at_wettest_cell": zone["contributing_area_acres_at_wettest_cell"],
+        "slope_median_pct": zone["slope_median_pct"],
+        "boundary_adjacency_fraction": zone["boundary_adjacency_fraction"],
+        "canopy_overlap_pct": zone["canopy_overlap_pct"],
+        "road_overlap_pct": zone["road_overlap_pct"],
+        "production_overlap_pct": zone["production_overlap_pct"],
+        "primary_production_area_relationship": zone["primary_production_area_relationship"],
+        "production_area_relationships": zone["production_area_relationships"],
+        "has_service_relationship": zone["has_service_relationship"],
+        "served_production_area_ids": zone["served_production_area_ids"],
+        "soil_coverage_fraction": zone["soil_coverage_fraction"],
+        "criteria_complete": zone["criteria_complete"],
+        "flags": list(zone["flags"]),
+        "below_min_area": zone["below_min_area"],
+        "representative_elevation_m": round(zone["representative_elevation_m"], 2),
+    }
+
+
+def _member_feature_properties(region: dict) -> dict:
+    """The JSON-serializable property set every MEMBER feature carries:
+    its own measurements plus zone linkage (zone-level properties --
+    gravity, overlaps, selection -- live on the parent survey_zone
+    feature, deliberately not duplicated here)."""
     return {
         "region_id": region["id"],
+        "zone_id": region["zone_id"],
         "survey_type": region["survey_type"],
-        "nominated_by": region["nominated_by"],
-        "rank": region["rank"],
         "area_acres": region["area_acres"],
         "cell_count": region["cell_count"],
         "mean_suitability": region["mean_suitability"],
         "max_suitability": region["max_suitability"],
         "criterion_contributions": region["criterion_contributions"],
         "twi_percentile_mean": region["twi_percentile_mean"],
-        "twi_percentile_max": region["twi_percentile_max"],
-        "depression_depth_mean_m": region["depression_depth_mean_m"],
         "depression_depth_max_m": region["depression_depth_max_m"],
         "contributing_area_acres_at_wettest_cell": region["contributing_area_acres_at_wettest_cell"],
         "slope_median_pct": region["slope_median_pct"],
         "boundary_adjacency_fraction": region["boundary_adjacency_fraction"],
-        "canopy_overlap_pct": region["canopy_overlap_pct"],
-        "road_overlap_pct": region["road_overlap_pct"],
-        "production_overlap_pct": region["production_overlap_pct"],
-        "primary_production_area_relationship": region["primary_production_area_relationship"],
-        "production_area_relationships": region["production_area_relationships"],
-        "has_service_relationship": region["has_service_relationship"],
-        "served_production_area_ids": region["served_production_area_ids"],
         "soil_coverage_fraction": region["soil_coverage_fraction"],
         "criteria_complete": region["criteria_complete"],
         "flags": list(region["flags"]),
@@ -1670,30 +1982,56 @@ def _region_feature_properties(region: dict) -> dict:
     }
 
 
-def survey_areas_to_geojson(regions: list[dict]) -> dict:
+_MEMBER_FEATURE_NOTE = (
+    "MEMBER region of a survey zone: the exact cell-union footprint of ground that cleared the "
+    "suitability threshold -- the anchoring signal, intact and unredrawn. Zone-level properties "
+    "(gravity, overlaps, dual acreage, selection) live on the parent survey_zone feature this "
+    "member's zone_id points to."
+)
+
+
+def survey_areas_to_geojson(zones: list[dict]) -> dict:
     """
-    Every region (both types, flagged not filtered) as a schema-
-    conformant FeatureCollection on the two typed layers
-    (survey_region_embankment / survey_region_excavated). STORED WIRE
-    FORMS ONLY: geometry is each region's geometry_wgs84 built at region
+    Every survey zone AND every member region (both types, flagged not
+    filtered) as one schema-conformant FeatureCollection: zone envelopes
+    on survey_zone_embankment / survey_zone_excavated (full properties,
+    dual acreage, member linkage) and member footprints on
+    survey_zone_member_<type> (zone linkage both ways). STORED WIRE
+    FORMS ONLY: geometry is each object's geometry_wgs84 built at its
     birth -- no serialization-time reprojection anywhere in this module.
     """
     features = []
-    for region in regions:
+    for zone in zones:
         features.append(
             make_feature(
-                feature_id=f"water-survey-region-{region['id']}",
-                geometry=region["geometry_wgs84"],
-                layer=f"survey_region_{region['survey_type']}",
+                feature_id=f"water-survey-zone-{zone['id']}",
+                geometry=zone["geometry_wgs84"],
+                layer=f"survey_zone_{zone['survey_type']}",
                 label=(
-                    f"Water survey area {region['id']} ({region['survey_type']}-type, rank "
-                    f"{region['rank']}, {region['area_acres']} ac)"
+                    f"Survey zone {zone['id']} ({zone['survey_type']}-type, rank {zone['rank']}): "
+                    f"{zone['zone_acres']} ac to survey, anchored by {zone['member_acres']} ac of "
+                    f"high-suitability ground ({zone['member_count']} member(s))"
                 ),
-                confidence=region["confidence"],
-                confidence_notes=region["confidence_notes"],
-                extra_properties=_region_feature_properties(region),
+                confidence=zone["confidence"],
+                confidence_notes=zone["confidence_notes"],
+                extra_properties=_zone_feature_properties(zone),
             )
         )
+        for member in zone["members"]:
+            features.append(
+                make_feature(
+                    feature_id=f"water-survey-zone-member-{member['id']}",
+                    geometry=member["geometry_wgs84"],
+                    layer=f"survey_zone_member_{member['survey_type']}",
+                    label=(
+                        f"Member region {member['id']} of survey zone {zone['id']} "
+                        f"({member['area_acres']} ac)"
+                    ),
+                    confidence=member["confidence"],
+                    confidence_notes=_MEMBER_FEATURE_NOTE,
+                    extra_properties=_member_feature_properties(member),
+                )
+            )
     return make_feature_collection(features)
 
 
@@ -1708,20 +2046,23 @@ def build_narrative_data(result: dict) -> dict:
     Pre-digested, FINAL, JSON-serializable narrative values -- imperial
     at this boundary (acres, feet, percent), None (never 0.0) for
     unavailable, no reason strings beyond the flag enumeration, per the
-    established narrative_data doctrine. ALL regions are listed, no cap
-    (first-run posture); per-criterion mean scores are the narrative-
-    honesty mechanism -- prose may only claim what a criterion actually
-    scored, and each region's block carries those scores directly.
-    twi_is_parcel_relative + twi_note surface the parcel-relative
-    caveat so the report layer cannot overclaim wetness.
+    established narrative_data doctrine. ALL zones are listed, no cap
+    (first-run posture); per-criterion mean scores (MEMBER cells only)
+    are the narrative-honesty mechanism -- prose may only claim what a
+    criterion actually scored, and each zone's block carries those
+    scores directly. Dual acreage carries the narrative sentence's two
+    numbers ("zone_acres to survey, anchored by member_acres of
+    high-suitability ground"). twi_is_parcel_relative + twi_note surface
+    the parcel-relative caveat so the report layer cannot overclaim
+    wetness.
     """
-    regions = result["regions"]
+    zones = result["zones"]
     selected = result["selected_water_zone"]
     stats = result["gate_mask_stats"]
 
-    region_blocks = []
-    for region in sorted(regions, key=lambda r: (r["survey_type"], r["rank"])):
-        primary = region["primary_production_area_relationship"]
+    zone_blocks = []
+    for zone in sorted(zones, key=lambda z: (z["survey_type"], z["rank"])):
+        primary = zone["primary_production_area_relationship"]
         if primary is None:
             gravity = {"has_service_relationship": False, "can_gravity_feed": None}
         else:
@@ -1732,42 +2073,50 @@ def build_narrative_data(result: dict) -> dict:
                 "elevation_differential_ft": _feet(primary["elevation_differential_m"]),
                 "distance_ft": _feet(primary["distance_m"]),
             }
-        region_blocks.append(
+        zone_blocks.append(
             {
-                "id": region["id"],
-                "survey_type": region["survey_type"],
-                "rank": region["rank"],
-                "area_acres": round(region["area_acres"], 1),
-                "mean_suitability": region["mean_suitability"],
-                "max_suitability": region["max_suitability"],
+                "id": zone["id"],
+                "survey_type": zone["survey_type"],
+                "rank": zone["rank"],
+                "member_count": zone["member_count"],
+                # DUAL ACREAGE, both labeled -- the report's sentence is
+                # "zone_acres to survey, anchored by member_acres of
+                # high-suitability ground".
+                "member_acres": round(zone["member_acres"], 1),
+                "zone_acres": round(zone["zone_acres"], 1),
+                "mean_suitability": zone["mean_suitability"],
+                "max_suitability": zone["max_suitability"],
                 "criteria": {
                     name: {"weight": entry["weight"], "mean_score": entry["mean_score"]}
-                    for name, entry in region["criterion_contributions"].items()
+                    for name, entry in zone["criterion_contributions"].items()
                 },
-                "twi_percentile_mean": region["twi_percentile_mean"],
-                "depression_depth_max_ft": _feet(region["depression_depth_max_m"]),
-                "contributing_area_acres_at_wettest_cell": region["contributing_area_acres_at_wettest_cell"],
-                "boundary_adjacency_pct": round(region["boundary_adjacency_fraction"] * 100, 1),
+                "twi_percentile_mean": zone["twi_percentile_mean"],
+                "depression_depth_max_ft": _feet(zone["depression_depth_max_m"]),
+                "contributing_area_acres_at_wettest_cell": zone["contributing_area_acres_at_wettest_cell"],
+                "boundary_adjacency_pct": round(zone["boundary_adjacency_fraction"] * 100, 1),
                 "overlaps": {
-                    # All three REPORTED, none scored. None means never
-                    # checked; 0.0 means checked and genuinely none.
-                    "canopy_pct": region["canopy_overlap_pct"],
-                    "road_pct": region["road_overlap_pct"],
-                    "production_pct": region["production_overlap_pct"],
+                    # All three REPORTED, none scored, measured on the
+                    # ENVELOPE (the ground being surveyed). None means
+                    # never checked; 0.0 means checked and genuinely none.
+                    "canopy_pct": zone["canopy_overlap_pct"],
+                    "road_pct": zone["road_overlap_pct"],
+                    "production_pct": zone["production_overlap_pct"],
                 },
                 "gravity": gravity,
-                "flags": list(region["flags"]),
-                "below_min_area": region["below_min_area"],
-                "confidence": region["confidence"],
+                "flags": list(zone["flags"]),
+                "below_min_area": zone["below_min_area"],
+                "confidence": zone["confidence"],
             }
         )
 
     return {
-        "region_found": bool(regions),
-        "region_count": len(regions),
-        "embankment_region_count": len(result["regions_by_type"][SURVEY_TYPE_EMBANKMENT]),
-        "excavated_region_count": len(result["regions_by_type"][SURVEY_TYPE_EXCAVATED]),
+        "zone_found": bool(zones),
+        "zone_count": len(zones),
+        "member_region_count": len(result["regions"]),
+        "embankment_zone_count": len(result["zones_by_type"][SURVEY_TYPE_EMBANKMENT]),
+        "excavated_zone_count": len(result["zones_by_type"][SURVEY_TYPE_EXCAVATED]),
         "suitability_threshold": result["threshold"],
+        "grouping_distance_meters": SURVEY_ZONE_GROUPING_DISTANCE_METERS,
         "twi_is_parcel_relative": True,
         "twi_note": TWI_PARCEL_RELATIVE_NOTE,
         "gates": {
@@ -1779,31 +2128,32 @@ def build_narrative_data(result: dict) -> dict:
         },
         "soil_checked": result["soil_checked"],
         "selection": {
-            "selected_region_id": selected["id"] if selected is not None else None,
+            "selected_zone_id": selected["id"] if selected is not None else None,
             "selected_survey_type": selected["survey_type"] if selected is not None else None,
             # PROVISIONAL pooling rule, restated where the report reads it
-            # -- see select_survey_region().
-            "selection_rule": "pooled_mean_suitability_acreage_tiebreak",
+            # -- see select_survey_zone().
+            "selection_rule": "pooled_member_mean_suitability_member_acreage_tiebreak",
         },
-        "regions": region_blocks,
+        "zones": zone_blocks,
     }
 
 
 def summarize_water_survey_areas(result: dict) -> str:
-    regions = result["regions"]
-    if not regions:
-        return "No water survey areas cleared the suitability threshold."
-    lines = [f"Water survey areas ({len(regions)} region(s), both types, flagged not filtered):"]
-    for region in sorted(regions, key=lambda r: (r["survey_type"], r["rank"])):
+    zones = result["zones"]
+    if not zones:
+        return "No water survey zones: nothing cleared the suitability threshold."
+    lines = [f"Water survey zones ({len(zones)} zone(s), {len(result['regions'])} member region(s), flagged not filtered):"]
+    for zone in sorted(zones, key=lambda z: (z["survey_type"], z["rank"])):
         top_two = sorted(
-            region["criterion_contributions"].items(),
+            zone["criterion_contributions"].items(),
             key=lambda item: -item[1]["weighted_contribution"],
         )[:2]
         criteria_text = ", ".join(f"{name}={entry['mean_score']}" for name, entry in top_two)
-        flag_text = f" [{', '.join(region['flags'])}]" if region["flags"] else ""
+        flag_text = f" [{', '.join(zone['flags'])}]" if zone["flags"] else ""
         lines.append(
-            f"  - {region['survey_type']} rank {region['rank']}: region {region['id']}, "
-            f"{region['area_acres']} ac, mean {region['mean_suitability']}, top criteria: "
+            f"  - {zone['survey_type']} rank {zone['rank']}: zone {zone['id']}, "
+            f"{zone['zone_acres']} ac to survey anchored by {zone['member_acres']} ac "
+            f"({zone['member_count']} member(s)), mean {zone['mean_suitability']}, top criteria: "
             f"{criteria_text}{flag_text}"
         )
     return "\n".join(lines)
@@ -1895,11 +2245,20 @@ def identify_water_survey_areas(
 
     Returns:
         {
-            'zones_geojson': FeatureCollection (both typed layers, every
-                             region, flagged not filtered),
-            'regions': list[dict] (full region dicts, shapely and all),
-            'regions_by_type': {type: ranked list},
-            'selected_water_zone': pooled rank-1 region dict or None,
+            'zones_geojson': FeatureCollection (zone envelopes on the
+                             survey_zone_* layers plus member footprints
+                             on survey_zone_member_*, every one, flagged
+                             not filtered),
+            'zones': list[dict] (the survey zones -- the deliverable),
+            'zones_by_type': {type: ranked zone list},
+            'regions': list[dict] (member regions, footprints intact),
+            'regions_by_type': {type: member list},
+            'selected_water_zone': pooled rank-1 ZONE dict or None (the
+                                   downstream consumer contract lands
+                                   here: id / render_fill_polygon_utm =
+                                   the clipped envelope, identity /
+                                   representative_elevation_m from
+                                   member cells),
             'narrative_data': build_narrative_data() block,
             'gate_mask_stats': the gate accounting,
             'result': the full compute_water_survey_areas() dict
@@ -1954,7 +2313,9 @@ def identify_water_survey_areas(
     )
 
     return {
-        "zones_geojson": survey_areas_to_geojson(result["regions"]),
+        "zones_geojson": survey_areas_to_geojson(result["zones"]),
+        "zones": result["zones"],
+        "zones_by_type": result["zones_by_type"],
         "regions": result["regions"],
         "regions_by_type": result["regions_by_type"],
         "selected_water_zone": result["selected_water_zone"],

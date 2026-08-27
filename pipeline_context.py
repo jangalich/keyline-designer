@@ -118,16 +118,18 @@ FIELD NOTES
   is always None here.
 
   selected_water_zone is water_survey_areas.identify_water_survey_
-  areas()'s own pooled rank-1 survey region (embankment and excavated
-  pooled by mean suitability, acreage tiebreak -- a PROVISIONAL
-  selection rule, documented at select_survey_region()), or None if no
-  region cleared the suitability threshold. The same call produces
-  water_zones above, so the water step runs ONCE per context build. The
-  region dict carries the full established consumer contract (render_
-  fill_polygon_utm as the polygon_utm identity, representative_
-  elevation_m, id, rank, served_production_area_ids, ...) so every
-  downstream reader -- road exclusion, solar exclusion, tree search-
-  space subtraction, fencing, the map's ripple clip, the keypoint
+  areas()'s own pooled rank-1 SURVEY ZONE (embankment and excavated
+  pooled by member-mean suitability, member-acreage tiebreak -- a
+  PROVISIONAL selection rule, documented at select_survey_zone()), or
+  None if no zone exists because nothing cleared the suitability
+  threshold. The same call produces water_zones above, so the water
+  step runs ONCE per context build. The zone dict carries the full
+  established consumer contract (render_fill_polygon_utm = the zone's
+  boundary-clipped closing ENVELOPE, the identity -- the ground one
+  survey visit walks; representative_elevation_m from member cells;
+  id, rank, served_production_area_ids, ...) so every downstream
+  reader -- road exclusion, solar exclusion, tree search-space
+  subtraction, fencing, the map's ripple clip, the keypoint
   relationship pass below -- slots it in unchanged. The FIELD keeps None
   for "no region" (context readers -- the map, the report, fencing --
   keep their existing None contract), but the three downstream override
@@ -204,9 +206,10 @@ FIELD NOTES
 
   water_zones is water_survey_areas.identify_water_survey_areas()'s own
   'zones_geojson' FeatureCollection's 'features' list -- EVERY survey
-  region, both typed layers (survey_region_embankment /
-  survey_region_excavated), flagged not filtered, GeoJSON-wrapped
-  (WGS84 geometry built once at region birth; stored wire forms only).
+  zone envelope (survey_zone_embankment / survey_zone_excavated) plus
+  every member-region footprint (survey_zone_member_*), flagged not
+  filtered, GeoJSON-wrapped (WGS84 geometry built once at each object's
+  birth; stored wire forms only).
   The SAME single call also produces selected_water_zone below. It
   passes this context's own already-computed dem/boundary_polygon_utm/
   production_areas/canopy_height/existing_roads straight through via

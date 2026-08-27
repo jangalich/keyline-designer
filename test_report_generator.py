@@ -567,11 +567,13 @@ print("_format_water_candidate_zones_summary(): N candidates with provenance, fl
 # =====================================================================
 
 _survey_nd = {
-    "region_found": True,
-    "region_count": 2,
-    "embankment_region_count": 1,
-    "excavated_region_count": 1,
-    "suitability_threshold": 0.5,
+    "zone_found": True,
+    "zone_count": 2,
+    "member_region_count": 3,
+    "embankment_zone_count": 1,
+    "excavated_zone_count": 1,
+    "suitability_threshold": 0.6,
+    "grouping_distance_meters": 30.0,
     "twi_is_parcel_relative": True,
     "twi_note": (
         "Topographic wetness scores here are PARCEL-RELATIVE percentile ranks: a score of 0.9 means "
@@ -580,10 +582,11 @@ _survey_nd = {
     "gates": {"on_parcel_cells": 612, "ceiling_removed_cells": 4, "setback_removed_cells": 0,
               "gated_cells": 608, "max_contributing_area_acres": 20.0},
     "soil_checked": True,
-    "selection": {"selected_region_id": 0, "selected_survey_type": "excavated",
-                  "selection_rule": "pooled_mean_suitability_acreage_tiebreak"},
-    "regions": [
-        {"id": 0, "survey_type": "excavated", "rank": 1, "area_acres": 1.4,
+    "selection": {"selected_zone_id": 0, "selected_survey_type": "excavated",
+                  "selection_rule": "pooled_member_mean_suitability_member_acreage_tiebreak"},
+    "zones": [
+        {"id": 0, "survey_type": "excavated", "rank": 1, "member_count": 2,
+         "member_acres": 1.4, "zone_acres": 2.6,
          "mean_suitability": 0.71, "max_suitability": 0.83,
          "criteria": {"wetness": {"weight": 0.35, "mean_score": 0.82},
                       "soil": {"weight": 0.30, "mean_score": 0.9},
@@ -595,7 +598,8 @@ _survey_nd = {
          "gravity": {"has_service_relationship": True, "can_gravity_feed": False,
                      "production_area_id": 3, "elevation_differential_ft": -18.4, "distance_ft": 210.0},
          "flags": [], "below_min_area": False, "confidence": "high"},
-        {"id": 1, "survey_type": "embankment", "rank": 1, "area_acres": 0.1,
+        {"id": 1, "survey_type": "embankment", "rank": 1, "member_count": 1,
+         "member_acres": 0.1, "zone_acres": 0.1,
          "mean_suitability": 0.55, "max_suitability": 0.61,
          "criteria": {"drainage_area": {"weight": 0.30, "mean_score": 0.7},
                       "slope": {"weight": 0.25, "mean_score": 1.0},
@@ -610,8 +614,10 @@ _survey_nd = {
     ],
 }
 _survey_prose = _format_water_survey_areas_summary(_survey_nd)
-assert "2 water SURVEY AREA(S)" in _survey_prose
+assert "2 water SURVEY ZONE(S)" in _survey_prose
 assert "1 embankment-type" in _survey_prose and "1 excavated-type" in _survey_prose
+assert "3 member region(s)" in _survey_prose, "the member count travels with the zone framing"
+assert "ground ONE SURVEY VISIT walks" in _survey_prose
 assert "GENERAL AREAS WORTH SURVEYING" in _survey_prose
 assert "no pool, wall, volume, or station" in _survey_prose, (
     "the redesign's central promise -- no precision theater -- must be stated in the prose"
@@ -619,13 +625,18 @@ assert "no pool, wall, volume, or station" in _survey_prose, (
 assert "wettest ground on THIS parcel" in _survey_prose, (
     "the parcel-relative TWI caveat must reach the prompt so the report cannot overclaim wetness"
 )
-assert "Selected for downstream planning: region 0 (excavated-type)" in _survey_prose
+assert "Selected for downstream planning: zone 0 (excavated-type)" in _survey_prose
 assert "provisional selection rule" in _survey_prose
+assert "2.6 acres to survey, anchored by 1.4 acres of high-suitability ground" in _survey_prose, (
+    "the DUAL-ACREAGE sentence is the zone narrative's spine -- both numbers, both labeled"
+)
 assert "wetness 0.82 (weight 0.35)" in _survey_prose, (
     "per-criterion mean scores are the narrative-honesty mechanism -- prose may only claim what a "
     "criterion actually scored, so the scores themselves must be in the prompt"
 )
-assert "Per-criterion mean scores (prose may claim only these)" in _survey_prose
+assert "over the ANCHORING ground only" in _survey_prose, (
+    "the prose must say the scores describe member cells, never the envelope"
+)
 assert "PUMP-REQUIRED" in _survey_prose and "18.4 ft BELOW production area 3" in _survey_prose
 assert "No production area within service range" in _survey_prose, (
     "the no-service case reads as a flag, never as a dropped region"
@@ -817,8 +828,8 @@ for _header in (
     "SOLAR IRRADIANCE",
 ):
     assert _header in _wired_prompt, f"data_summary must carry the {_header} section"
-assert "2 water SURVEY AREA(S)" in _wired_prompt and "PUMP-REQUIRED" in _wired_prompt, (
-    "the survey-area water block (narrative_data['water_survey_areas']) must land in the prompt"
+assert "2 water SURVEY ZONE(S)" in _wired_prompt and "PUMP-REQUIRED" in _wired_prompt, (
+    "the survey-zone water block (narrative_data['water_survey_areas']) must land in the prompt"
 )
 assert "The network reaches all identified production ground." in _wired_prompt
 assert "Patch 1 (rank 1)" in _wired_prompt and "Rank 1: 0.4 acres" in _wired_prompt

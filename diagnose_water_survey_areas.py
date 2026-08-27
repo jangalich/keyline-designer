@@ -17,12 +17,17 @@ never filtered -- every region however small appears, carrying its
 below_min_area flag rather than being trimmed away.
 
 Layers written:
-    survey_region_embankment / survey_region_excavated
-        -- every region, full properties (water_survey_areas.
+    survey_zone_embankment / survey_zone_excavated
+        -- every SURVEY ZONE envelope, full properties incl. dual
+           acreage and member linkage (water_survey_areas.
            survey_areas_to_geojson()'s own features, verbatim)
+    survey_zone_member_embankment / survey_zone_member_excavated
+        -- every member region footprint, intact, with zone_id linkage
     suitability_isoband_embankment / suitability_isoband_excavated
-        -- filled contour bands of each SMOOTHED surface at
-           ISOBAND_LEVELS (what extraction actually thresholds)
+        -- filled contour bands of each RAW blended surface at
+           ISOBAND_LEVELS (what extraction actually thresholds --
+           pre-threshold smoothing is retired, see
+           water_survey_areas.masked_focal_mean())
     criterion_isoband_<type>_<criterion>
         -- filled contour bands of every RAW criterion grid, both
            types (the excavated-diagnosis layer: which criterion kills
@@ -36,12 +41,17 @@ Layers written:
 
 The terminal output additionally prints the THRESHOLD COMPARISON
 (region count / total acreage / largest region per type at 0.5/0.6/0.7
-on the smoothed surfaces -- the 0.6 default re-verified against
-post-smoothing reality every run), the depression-depth distribution
-before/after the noise floor with the 10 deepest-fill cells' full
-scoring rows, and the EXCAVATED FINDING -- an evidence-based statement
-of which suspect (noise floor / depth scaling / slope classes / soil
-ceiling) the numbers indict, as the next branch's input.
+on the RAW surfaces, 8-connected -- the 0.6 default stays tunable from
+evidence every run), the depression-depth distribution before/after the
+noise floor with the 10 deepest-fill cells' full scoring rows -- now
+including each cell's SSURGO map unit and its three soil sub-signals
+(ksat score / hydrologic-group score / hydric share), the soil-oddity
+rider: the tuning run put the parcel-MINIMUM soil score (0.279) on
+exactly the wettest ground, so the excavated follow-up branch needs to
+see, per marsh cell, WHICH sub-signal produced that number -- and the
+EXCAVATED FINDING, an evidence-based statement of which suspect (noise
+floor / depth scaling / slope classes / soil ceiling) the numbers
+indict, as the next branch's input.
 
 STORED WIRE FORMS ONLY: every geometry this file serializes was built as
 WGS84 at its object's birth -- regions at region birth
@@ -95,16 +105,16 @@ WATER_SURVEY_AREAS_GEOJSON_PATH = "water_survey_areas.geojson"
 # [0.8, top]. These are THE threshold-tuning instrument -- the 0.4/0.6/
 # 0.8 edges bracket the provisional SUITABILITY_THRESHOLD (0.6) so a
 # viewer sees at a glance which ground a nudged threshold would gain or
-# lose. Blended-surface bands are drawn on the SMOOTHED surfaces (the
-# thing extraction actually thresholds); per-criterion bands are drawn
-# on the RAW criterion grids (what the ground is). CONFIGURABLE.
+# lose. Blended-surface bands are drawn on the RAW surfaces (exactly
+# what extraction thresholds -- pre-threshold smoothing is retired);
+# per-criterion bands likewise on the RAW criterion grids.
+# CONFIGURABLE.
 ISOBAND_LEVELS = (0.2, 0.4, 0.6, 0.8)
 
-# The thresholds the comparison table evaluates on the SMOOTHED
-# surfaces: smoothing lowers peaks and shifts the distribution, so the
-# 0.6 default chosen from the first (unsmoothed) run's isobands is
-# RE-VERIFIED against post-smoothing reality in the same run rather than
-# trusted forward. CONFIGURABLE.
+# The thresholds the comparison table evaluates on the RAW surfaces --
+# printed every run so the 0.6 default remains a choice re-decided
+# against evidence (member-region count / acreage / largest region per
+# candidate threshold), never trusted forward. CONFIGURABLE.
 THRESHOLD_COMPARISON_LEVELS = (0.5, 0.6, 0.7)
 
 # Upper edge of the top band: suitability is capped at 1.0 by
@@ -187,10 +197,10 @@ def _isoband_features(survey_type: str, bands: list[dict]) -> list[dict]:
                 confidence=CONFIDENCE_LOW,
                 confidence_notes=(
                     "THE THRESHOLD-TUNING LAYER: a filled contour band of the "
-                    f"{survey_type}-type suitability surface, SMOOTHED at the survey radius -- the "
-                    "surface extraction actually thresholds (raw per-criterion bands ride the "
+                    f"{survey_type}-type RAW blended suitability surface -- exactly what extraction "
+                    "thresholds (pre-threshold smoothing is retired; per-criterion bands ride the "
                     "criterion_isoband_* layers). Overlay these bands on imagery and pick the "
-                    "extraction threshold and region floor from where regions cohere and "
+                    "extraction threshold and member floor from where regions cohere and "
                     "dissolve -- every weight and table behind this surface is a provisional v1 "
                     "prior (TUNE FROM RUN, water_survey_areas.py)."
                 ),
@@ -264,16 +274,16 @@ def export_water_survey_areas_geojson(
 ) -> dict:
     """
     Writes the full tuning export to one feature_schema-compliant
-    GeoJSON file: every survey region (both typed layers, flagged not
-    filtered), the blended (SMOOTHED-surface) isoband layers, the
-    per-criterion (RAW) isoband layers when supplied, and the context
-    layers. Consumes ONLY stored wire forms -- identify_result's own
-    zones_geojson features, prebuilt isoband dicts, the caller's WGS84
-    boundary coordinates, and each production patch's stored
-    geometry_wgs84. Validates before writing; returns {'path',
+    GeoJSON file: every survey zone envelope and member footprint (both
+    typed layer families, flagged not filtered), the blended
+    (RAW-surface) isoband layers, the per-criterion isoband layers when
+    supplied, and the context layers. Consumes ONLY stored wire forms --
+    each zone's and member's own geometry_wgs84, prebuilt isoband dicts,
+    the caller's WGS84 boundary coordinates, and each production patch's
+    stored geometry_wgs84. Validates before writing; returns {'path',
     'feature_count', 'by_layer'}.
     """
-    features = list(survey_areas_to_geojson(identify_result["regions"])["features"])
+    features = list(survey_areas_to_geojson(identify_result["zones"])["features"])
     for survey_type in SURVEY_TYPES:
         features.extend(_isoband_features(survey_type, isobands_by_type[survey_type]))
     if criterion_isobands_by_type:
@@ -306,34 +316,36 @@ def _overlap_cell(value) -> str:
     return "n/c" if value is None else f"{value}%"
 
 
-def summarize_survey_regions_table(identify_result: dict) -> str:
-    """One line per region, per type -- rank, acreage, mean/max
-    suitability, top two contributing criteria, gravity note, overlaps,
-    boundary adjacency, flags. Every region appears (flagged, never
-    filtered)."""
+def summarize_survey_zones_table(identify_result: dict) -> str:
+    """One line per SURVEY ZONE, per type -- rank, member count, DUAL
+    acreage (zone acres to survey, anchored by member acres), member-
+    cell mean/max suitability, top two contributing criteria, gravity
+    note, envelope overlaps, boundary adjacency, flags. Every zone
+    appears (flagged, never filtered)."""
     lines = []
     for survey_type in SURVEY_TYPES:
-        regions = identify_result["regions_by_type"][survey_type]
-        lines.append(f"=== {survey_type.upper()}-TYPE SURVEY REGIONS ({len(regions)}) ===")
-        if not regions:
+        zones = identify_result["zones_by_type"][survey_type]
+        lines.append(f"=== {survey_type.upper()}-TYPE SURVEY ZONES ({len(zones)}) ===")
+        if not zones:
             lines.append("  (none cleared the threshold)")
             continue
-        for region in regions:
+        for zone in zones:
             top_two = sorted(
-                region["criterion_contributions"].items(),
+                zone["criterion_contributions"].items(),
                 key=lambda item: -item[1]["weighted_contribution"],
             )[:2]
             criteria_text = "+".join(f"{name}({entry['mean_score']})" for name, entry in top_two)
-            flags = f" flags={','.join(region['flags'])}" if region["flags"] else ""
+            flags = f" flags={','.join(zone['flags'])}" if zone["flags"] else ""
             lines.append(
-                f"  #{region['rank']} region {region['id']}: {region['area_acres']:.2f} ac, "
-                f"mean {region['mean_suitability']:.3f} / max {region['max_suitability']:.3f}, "
-                f"top: {criteria_text}, {_gravity_cell(region)}, "
-                f"canopy {_overlap_cell(region['canopy_overlap_pct'])} / road "
-                f"{_overlap_cell(region['road_overlap_pct'])} / prod "
-                f"{_overlap_cell(region['production_overlap_pct'])}, "
-                f"boundary-adj {region['boundary_adjacency_fraction']:.0%}, "
-                f"conf {region['confidence']}{flags}"
+                f"  #{zone['rank']} zone {zone['id']}: {zone['zone_acres']:.2f} ac to survey "
+                f"anchored by {zone['member_acres']:.2f} ac ({zone['member_count']} member(s)), "
+                f"mean {zone['mean_suitability']:.3f} / max {zone['max_suitability']:.3f}, "
+                f"top: {criteria_text}, {_gravity_cell(zone)}, "
+                f"canopy {_overlap_cell(zone['canopy_overlap_pct'])} / road "
+                f"{_overlap_cell(zone['road_overlap_pct'])} / prod "
+                f"{_overlap_cell(zone['production_overlap_pct'])}, "
+                f"boundary-adj {zone['boundary_adjacency_fraction']:.0%}, "
+                f"conf {zone['confidence']}{flags}"
             )
     return "\n".join(lines)
 
@@ -378,21 +390,22 @@ def summarize_gate_and_criteria(identify_result: dict) -> str:
 
 def summarize_threshold_comparison(identify_result: dict, dem: dict) -> str:
     """
-    THE THRESHOLD RE-VERIFICATION: region count, total acreage, and
-    largest-region acreage per type at each THRESHOLD_COMPARISON_LEVELS
-    value, on the SMOOTHED surfaces (the ones extraction actually
-    thresholds), 8-connected -- so the 0.6 default is confirmed or moved
-    against post-smoothing reality in the same run.
+    THE THRESHOLD RE-VERIFICATION: member-region count, total acreage,
+    and largest-region acreage per type at each
+    THRESHOLD_COMPARISON_LEVELS value, on the RAW surfaces (the ones
+    extraction actually thresholds -- pre-threshold smoothing is
+    retired), 8-connected -- so the 0.6 default stays a choice made
+    from evidence, re-decided every run.
     """
     result = identify_result["result"]
     gate_mask = result["gate_mask"]
     area_per_cell = cell_area_acres(dem)
-    lines = ["=== THRESHOLD COMPARISON (smoothed surfaces, 8-connected) ==="]
+    lines = ["=== THRESHOLD COMPARISON (raw surfaces, 8-connected) ==="]
     for survey_type in SURVEY_TYPES:
-        smoothed = result["surfaces"][survey_type]
+        surface = result["surfaces"][survey_type]
         lines.append(f"  {survey_type}:")
         for threshold in THRESHOLD_COMPARISON_LEVELS:
-            member_mask = gate_mask & (smoothed >= threshold)
+            member_mask = gate_mask & (surface >= threshold)
             labels, count = connected_components(member_mask, connectivity=WATER_REGION_CONNECTIVITY)
             total_cells = int(np.count_nonzero(member_mask))
             largest_cells = 0
@@ -411,9 +424,12 @@ def summarize_depression_instrumentation(identify_result: dict, dem: dict) -> st
     The excavated-class interrogation, part 1: the depression-depth
     distribution over GATED cells BEFORE and AFTER the noise floor, plus
     the 10 deepest-fill cells' full scoring row (raw depth, floored
-    depth, TWI percentile, wetness criterion, slope score, soil score,
-    raw blended excavated, smoothed excavated) -- the marsh cells,
-    interrogated directly.
+    depth, TWI percentile, wetness criterion, slope score, soil score --
+    AND the soil-oddity rider: the SSURGO map unit plus the three soil
+    sub-signal values (ksat score / hydrologic-group score / hydric
+    share) behind each cell's soil number, so the excavated follow-up
+    branch can tell a data surprise from a scorer defect -- and the raw
+    blended excavated score) -- the marsh cells, interrogated directly.
     """
     result = identify_result["result"]
     gate_mask = result["gate_mask"]
@@ -440,10 +456,17 @@ def summarize_depression_instrumentation(identify_result: dict, dem: dict) -> st
     if all_raw.size:
         lines.append(f"  Parcel's deepest fill: {float(np.max(all_raw)):.3f} m (noise floor {DEPRESSION_NOISE_FLOOR_METERS} m)")
 
-    lines.append("=== 10 DEEPEST-FILL CELLS (the marsh, interrogated) ===")
+    lines.append("=== 10 DEEPEST-FILL CELLS (the marsh, interrogated; soil sub-signals per cell) ===")
     lines.append(
-        "  (row,col)      raw_m  floor_m  twi_pct  wetness  slope_sc  soil_sc  raw_exc  smooth_exc"
+        "  (row,col)      raw_m  floor_m  twi_pct  wetness  slope_sc  soil_sc  ksat_sc  grp_sc  hydric_sh  mukey       exc"
     )
+    soil = result["soil"]
+    mukey_by_cell = soil.get("mukey_by_cell", {})
+    scores_by_mukey = soil.get("scores_by_mukey", {})
+
+    def _sub(value) -> str:
+        return "   n/a " if value is None else f"{value:7.3f}"
+
     gated_cells = np.argwhere(gate_mask)
     if gated_cells.size:
         depths = np.array([raw_depth[r, c] for r, c in gated_cells])
@@ -451,14 +474,18 @@ def summarize_depression_instrumentation(identify_result: dict, dem: dict) -> st
         for index in order:
             r, c = (int(v) for v in gated_cells[index])
             twi = result["screens"]["twi_percentile"][r, c]
+            mukey = mukey_by_cell.get((r, c))
+            subs = scores_by_mukey.get(mukey, {}) if mukey is not None else {}
             lines.append(
                 f"  ({r:>3},{c:>3})  "
                 f"{raw_depth[r, c]:7.3f}  {floored_depth[r, c]:7.3f}  "
                 f"{(twi if not np.isnan(twi) else float('nan')):7.3f}  "
                 f"{criteria['wetness'][r, c]:7.3f}  {criteria['slope'][r, c]:8.3f}  "
                 f"{criteria['soil'][r, c]:7.3f}  "
-                f"{result['surfaces']['raw'][SURVEY_TYPE_EXCAVATED][r, c]:7.3f}  "
-                f"{result['surfaces'][SURVEY_TYPE_EXCAVATED][r, c]:10.3f}"
+                f"{_sub(subs.get('ksat_score'))}  {_sub(subs.get('hydrologic_group_score'))} "
+                f"{_sub(subs.get('hydric_score'))}   "
+                f"{(mukey if mukey is not None else 'uncovered'):<10}  "
+                f"{result['surfaces'][SURVEY_TYPE_EXCAVATED][r, c]:7.3f}"
             )
     return "\n".join(lines)
 
@@ -609,7 +636,7 @@ def main() -> None:
         property_boundary, dem=dem, production_areas=production_areas
     )
 
-    print(summarize_survey_regions_table(identify_result))
+    print(summarize_survey_zones_table(identify_result))
     print()
     print(summarize_gate_and_criteria(identify_result))
     print()
