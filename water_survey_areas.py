@@ -22,16 +22,19 @@ ENEMY OF THIS DELIVERABLE: nothing in this module computes a pool, a
 wall, a volume, or a station. A survey area is "ground worth walking with
 a survey rod", not a design.
 
-FIRST-RUN POSTURE, decided: no presentation cap, no dropped regions --
-every rule that would filter is a FLAG, every tunable ships marked
-provisional (TUNE FROM FIRST RUN), and the export
-(diagnose_water_survey_areas.py) includes the instrument for tuning them
-(suitability isobands over imagery). A TOP_N presentation cap and the
-per-type presentation guarantee are DEFERRED to the tuning phase:
-    TODO(tuning): WATER_SURVEY_PRESENTATION_TOP_N -- decide from the
-    first networked run's isobands/table where presentation trimming
-    belongs, if anywhere. Named here so the decision has an address; no
-    machinery ships ahead of it.
+TUNED POSTURE (the exploration phase is OVER): the module shipped under
+a first-run flags-not-filters posture -- no cap, no drops, every
+tunable provisional -- and three measured tuning passes then decided
+every open number from evidence: the threshold (0.5, judged against the
+parcel's ATTAINABLE ~0.82 ceiling -- see SUITABILITY_THRESHOLD), the
+excavated slope taper (seep-widened per the FINDING + soil rider
+evidence -- see EXCAVATED_SLOPE_FULL_CREDIT_PCT), the member-acreage
+floor (a FILTER now, drops visible and attributed -- see
+MIN_SURVEY_REGION_AREA_ACRES's history note), and the presented set
+(WATER_ZONE_PRESENTATION_TOP_N = 3 with the per-type consultant
+guarantee). The diagnostic's instruments (threshold comparison,
+isobands, the excavated interrogation) keep printing every run so each
+decision remains evidence-checked rather than trusted forward.
 
 THE TWO SURFACES ARE KEPT SEPARATE END TO END. Each is a per-cell 0-1
 score, a weighted blend of classed criteria (weights sum to 1.0 per type,
@@ -82,9 +85,11 @@ EXTRACTION AND AGGREGATION, per type -- scoring stays sharp, grouping
 makes the survey areas:
 
   1. MEMBER REGIONS: cells at/above SUITABILITY_THRESHOLD on the RAW
-     blended surface (provisional 0.6, re-verified every run by the
-     diagnostic's threshold comparison; a parameter of the extraction
-     function -- the constant only supplies the default) form
+     blended surface (0.5, decided from the raw-surface comparison
+     against the parcel's attainable ceiling -- see the constant;
+     re-verified every run by the diagnostic's threshold comparison; a
+     parameter of the extraction function -- the constant only supplies
+     the default) form
      8-connected components (WATER_REGION_CONNECTIVITY -- water's own
      constant, deliberately NOT production's 4: flow-concentrated highs
      run diagonally along stems, and 4-connectivity shreds a diagonal
@@ -113,20 +118,30 @@ NO MORPHOLOGY ON MEASURED FOOTPRINTS: member polygons are exact cell
 unions, never redrawn; the zone's render_fill_polygon_utm IS its clipped
 envelope, the identity -- no further reduction downstream of the
 aggregation that defines the object (the exclusion_zones precedent).
-Nothing is dropped: a zone whose member acreage sits under the
-MIN_SURVEY_REGION_AREA_ACRES floor carries a `below_min_area` flag and
-its exact acreage; there is no zone cap and no presentation cap.
 
-SELECTION (provisional, TUNE FROM FIRST RUN): the two types are POOLED by
-mean suitability (acreage tiebreak) and the pooled rank-1 region becomes
+THE FLOOR AND THE PRESENTED SET (tuned decisions -- the two places the
+output narrows, both visible): a zone whose summed MEMBER acreage sits
+under the MIN_SURVEY_REGION_AREA_ACRES floor is DROPPED from the
+pipeline output -- status: dropped + drop_reason on the zone, carried
+in the diagnostic table and the export's survey_zone_dropped layer,
+never silent (see the constant's history note for the flag-only
+posture it replaced). The narrated set is the top
+WATER_ZONE_PRESENTATION_TOP_N surviving zones with the per-type
+consultant guarantee; unpresented survivors keep full properties and
+ride the export with `presented: false`.
+
+SELECTION (the pooled rule, unchanged and INDEPENDENT of
+presentation): the two types are POOLED by member-mean suitability
+(member-acreage tiebreak) and the pooled rank-1 SURVIVING zone becomes
 `selected_water_zone` for downstream consumers (tree search-space
 subtraction, fencing, solar exclusion, road exclusion, the map's ripple
 clip, keypoint relationships). Pooling embankment against excavated
-compares two different instruments on one scale -- kept deliberately
-simple for the first run because downstream needs ONE unambiguous answer,
-and revisited from the first run's output. The selected region carries
-every field on the established selected_water_zone consumer contract
-(render_fill_polygon_utm, representative_elevation_m, id -- plus rank and
+compares two different instruments on one scale -- kept because
+downstream needs ONE unambiguous answer, and the presentation
+guarantee never touches rank 1 (see apply_presentation()). The
+selected zone carries every field on the established
+selected_water_zone consumer contract (render_fill_polygon_utm,
+representative_elevation_m, id -- plus rank and
 served_production_area_ids read by pipeline tests), so rank-1 slots in
 unchanged.
 
@@ -307,11 +322,22 @@ EMBANKMENT_SLOPE_SWEET_LOW_PCT = 3.0
 EMBANKMENT_SLOPE_SWEET_HIGH_PCT = 8.0
 EMBANKMENT_SLOPE_CEILING_PCT = 15.0
 
-# Excavated slope class (percent grade): 1.0 dead flat, gone by
-# EXCAVATED_SLOPE_CEILING_PCT -- AH590's excavated ponds belong in
-# "relatively level areas"; by ~8% the ground is embankment territory,
-# not dugout territory. v1 prior, TUNE FROM FIRST RUN.
-EXCAVATED_SLOPE_CEILING_PCT = 8.0
+# Excavated slope class (percent grade), WIDENED FOR THE SEEP CASE:
+# 1.0 through EXCAVATED_SLOPE_FULL_CREDIT_PCT, tapering to 0 at
+# EXCAVATED_SLOPE_CEILING_PCT. AH-590's excavated class covers dugout
+# AND seep-fed excavated ponds -- on small dissected parcels, wet ground
+# is typically hillside SEEP at moderate grade, not a flat basin, and a
+# seep-fed excavated pond is dug INTO that grade. The original v1 prior
+# (1.0 flat, gone by 8% -- the flat-dugout reading of "relatively level
+# areas") was indicted by measured evidence: the reference marsh's
+# wettest cells sit at real 5-10% grades with wetness 0.44-0.71 and
+# scored 0.00-0.35 under the flat taper, the excavated FINDING named the
+# slope classes as the failing suspect, and the soil sub-signal rider
+# cleared the soil scorer (that ground's map unit is simply mapped
+# non-hydric -- a data surprise, nothing to fix). Embankment slope
+# classes are UNTOUCHED. CONFIGURABLE.
+EXCAVATED_SLOPE_FULL_CREDIT_PCT = 5.0
+EXCAVATED_SLOPE_CEILING_PCT = 15.0
 
 # Excavated run-on preference (acres of contributing area): a dugout
 # fills from groundwater and local run-on, so contributing area is a MILD
@@ -445,16 +471,21 @@ SURVEY_SMOOTHING_RADIUS_METERS = 15.0
 # --- region extraction ----------------------------------------------------
 
 # Cells at/above this RAW blended suitability score are extracted into
-# member regions. PROVISIONAL 0.6, chosen from the first reference run's
-# isobands (where regions cohered at 0.6 and dissolved below it) and
-# meaning the RAW surface again now that pre-threshold smoothing is
-# retired. The diagnostic keeps printing a THRESHOLD COMPARISON (region
-# count / total acreage / largest region at 0.5 / 0.6 / 0.7 on the raw
-# surfaces, 8-connected) every run, so the choice stays tunable from
-# evidence. This constant only supplies the extraction function's
-# DEFAULT; it is not baked into the math anywhere. TUNE FROM RUN.
-# CONFIGURABLE.
-SUITABILITY_THRESHOLD = 0.6
+# member regions. 0.5, DECIDED FROM MEASURED EVIDENCE (the final tuning
+# pass): 0.6 had been chosen from the first run's PRE-smoothing
+# isobands; with smoothing retired, the raw-surface threshold comparison
+# on the reference property read 16 member regions / 0.51 ac of
+# anchoring ground at 0.5 versus 5 sub-floor slivers / 0.08 ac at 0.6.
+# The deciding insight: the parcel's ACHIEVABLE maximum blend is ~0.82,
+# not 1.0 -- the soil criterion's parcel range caps the arithmetic -- so
+# a threshold judges against attainable scores, and 0.6 was demanding
+# ~3/4 of the attainable ceiling while 0.5 sits at the coherence line
+# the isobands actually show. The diagnostic keeps printing the
+# THRESHOLD COMPARISON (0.5 / 0.6 / 0.7 on the raw surfaces,
+# 8-connected) every run, so the choice remains evidence-checked. This
+# constant only supplies the extraction function's DEFAULT; it is not
+# baked into the math anywhere. CONFIGURABLE.
+SUITABILITY_THRESHOLD = 0.5
 
 
 # --- survey-zone grouping (the closing over extracted regions) ------------
@@ -487,13 +518,52 @@ SUITABILITY_THRESHOLD = 0.6
 #     happens anywhere in the aggregation.
 SURVEY_ZONE_GROUPING_DISTANCE_METERS = 30.0
 
-# Regions below this acreage are FLAGGED (`below_min_area`), never
-# dropped -- first-run posture. The value matches water_candidate_zones.
-# MIN_WATER_ZONE_AREA_ACRES (0.1 ac = 17 cells at the pipeline's 5 m DEM
-# resolution), kept as the same order-of-magnitude "smaller than this is
-# probably raster noise" line, but demoted from a drop rule to a flag.
-# CONFIGURABLE.
+# THE FLOOR IS A FILTER NOW: a survey zone whose MEMBER acreage falls
+# below this is DROPPED from the pipeline output (and the presented
+# set) -- member acres are the anchoring signal, and the envelope never
+# rescues a zone whose actual high-suitability ground is a sliver.
+# Dropped zones are never silent: they ride the diagnostic terminal
+# table and the GeoJSON export with the established status/reason
+# pattern (status: dropped, drop_reason: below_min_area) -- visible and
+# attributed, excluded from downstream planning. The value matches
+# water_candidate_zones.MIN_WATER_ZONE_AREA_ACRES (0.1 ac = 17 cells at
+# the pipeline's 5 m DEM resolution), the "smaller than this is
+# probably raster noise" line.
+#
+# HISTORY, kept on purpose: through the tuning passes this constant was
+# deliberately a FLAG, not a filter (`below_min_area`, first-run
+# posture) -- every sliver stayed visible while the threshold, the
+# smoothing question, and the grouping distance were being decided from
+# runs that needed to show everything. Tuning is done; the exploration
+# posture ends here, and the flag semantics were retired WITH their
+# rationale rather than silently. Individual member REGIONS below the
+# floor still only carry the flag (a sub-floor member can belong to an
+# above-floor zone -- the ZONE's summed member acreage is what the
+# filter judges). CONFIGURABLE.
 MIN_SURVEY_REGION_AREA_ACRES = 0.1
+
+# The presented set: the top N SURVIVING zones pooled by member-mean
+# suitability -- with the PER-TYPE GUARANTEE (the consultant rule): if a
+# type produced at least one surviving zone and none lands in the pooled
+# top N, the lowest-ranked presented zone is swapped for that type's
+# best, keeping the presented count at N. "Your best dam area and your
+# best dugout area both appear whenever both exist" -- a farmer weighing
+# the two instruments should always see one of each when the parcel
+# offers one of each. Presentation is INDEPENDENT of selection:
+# select_survey_zone()'s pooled rank-1 answer is unchanged by any swap
+# (the swap only ever replaces the LOWEST presented zone, never rank 1).
+# Every surviving zone still carries full properties and rides the
+# GeoJSON with its `presented` property, so an unpresented survivor is
+# inspectable, just not narrated. Decided in the final tuning pass,
+# ending the no-presentation-cap exploration posture. CONFIGURABLE.
+WATER_ZONE_PRESENTATION_TOP_N = 3
+
+# Zone lifecycle status values (the established status/reason export
+# pattern): every zone is one or the other, and a dropped zone always
+# carries a drop_reason from the flag enumeration -- visible and
+# attributed, never silent.
+ZONE_STATUS_NOMINATED = "nominated"
+ZONE_STATUS_DROPPED = "dropped"
 
 # 8-connected component labeling for WATER survey regions -- deliberately
 # NOT production's convention, and never to be aliased with it:
@@ -763,13 +833,18 @@ def embankment_slope_score(slope_pct: np.ndarray) -> np.ndarray:
 
 def excavated_slope_score(slope_pct: np.ndarray) -> np.ndarray:
     """
-    Excavated slope class: 1.0 dead flat, linear to 0 at
-    EXCAVATED_SLOPE_CEILING_PCT, 0 above. NaN slope scores 0.0 -- same
-    reasoning as embankment_slope_score().
+    Excavated slope class, seep-widened: 1.0 through
+    EXCAVATED_SLOPE_FULL_CREDIT_PCT (a seep-fed excavated pond is dug
+    into moderate grade -- see the constants' evidence note), linear to
+    0 at EXCAVATED_SLOPE_CEILING_PCT, 0 above. NaN slope scores 0.0 --
+    same reasoning as embankment_slope_score().
     """
     slope = np.asarray(slope_pct, dtype=np.float64)
     with np.errstate(invalid="ignore"):
-        score = np.clip(1.0 - slope / EXCAVATED_SLOPE_CEILING_PCT, 0.0, 1.0)
+        falling = (EXCAVATED_SLOPE_CEILING_PCT - slope) / (
+            EXCAVATED_SLOPE_CEILING_PCT - EXCAVATED_SLOPE_FULL_CREDIT_PCT
+        )
+        score = np.clip(falling, 0.0, 1.0)
     return np.where(np.isnan(slope), 0.0, score)
 
 
@@ -1668,6 +1743,48 @@ def rank_survey_zones_per_type(zones: list[dict]) -> None:
             zone["rank"] = rank
 
 
+def apply_presentation(zones: list[dict], top_n: int = WATER_ZONE_PRESENTATION_TOP_N) -> list[dict]:
+    """
+    Marks each SURVIVING zone's `presented` flag IN PLACE and returns
+    the presented list: the top `top_n` zones pooled by member-mean
+    suitability (member-acreage tiebreak), adjusted by the PER-TYPE
+    GUARANTEE -- if a type has at least one surviving zone and none made
+    the pooled top N, the LOWEST-ranked presented zone is swapped out
+    for that type's best, keeping the count at N (the consultant rule:
+    "your best dam area and your best dugout area both appear whenever
+    both exist"). With survivors <= top_n everything is presented and
+    the guarantee is trivially satisfied.
+
+    INDEPENDENT OF SELECTION by construction: the swap only ever
+    replaces the last (lowest) presented zone, so the pooled rank-1 zone
+    -- select_survey_zone()'s answer -- is presented and unchanged
+    under every input (asserted with a swap fixture in
+    test_water_survey_areas.py).
+    """
+    pooled = sorted(zones, key=lambda zone: (-zone["mean_suitability"], -zone["member_acres"]))
+    presented = pooled[:top_n]
+
+    for survey_type in SURVEY_TYPES:
+        typed_survivors = [zone for zone in pooled if zone["survey_type"] == survey_type]
+        if not typed_survivors:
+            continue
+        if any(zone["survey_type"] == survey_type for zone in presented):
+            continue
+        # The guarantee swap: this type survived but missed the pooled
+        # top N -- its best replaces the lowest presented zone. Never
+        # the first slot: rank 1 is selection's answer and is presented
+        # unconditionally (a degenerate top_n=1 keeps rank 1 rather
+        # than honoring the guarantee -- the invariant outranks it).
+        if len(presented) > 1:
+            presented[-1] = typed_survivors[0]
+
+    for zone in zones:
+        zone["presented"] = False
+    for zone in presented:
+        zone["presented"] = True
+    return presented
+
+
 def select_survey_zone(zones: list[dict]) -> Optional[dict]:
     """
     The single selected_water_zone answer for downstream consumers:
@@ -1856,9 +1973,10 @@ def compute_water_survey_areas(
         if not relationships:
             zone["flags"].append(FLAG_NO_SERVICE_RELATIONSHIP)
 
-    # Ids, ranks, confidence, selection -- zone-level; member linkage
-    # both ways. Zone ids are assigned over the full cross-type list so
-    # the selected zone downstream consumers log by id has one
+    # Ids, member linkage, confidence -- over ALL zones (a dropped zone
+    # keeps its full property set so the diagnostic and export can show
+    # it attributed, never silent). Zone ids are assigned over the full
+    # cross-type list so every zone -- dropped included -- has one
     # unambiguous identity; member regions get their own ids and each
     # carries its parent's zone_id.
     for zone_id, zone in enumerate(zones):
@@ -1869,24 +1987,46 @@ def compute_water_survey_areas(
         zone["member_ids"] = [member["id"] for member in zone["members"]]
         for member in zone["members"]:
             member["zone_id"] = zone["id"]
-    rank_survey_zones_per_type(zones)
     for zone in zones:
         zone["confidence"] = _confidence_for_region(zone, soil_checked)
         zone["confidence_notes"] = _confidence_notes_for_region(zone, soil_checked)
     for region in regions:
         region["confidence"] = _confidence_for_region(region, soil_checked)
 
-    selected = select_survey_zone(zones)
+    # THE FLOOR FILTERS NOW (see MIN_SURVEY_REGION_AREA_ACRES's history
+    # note): a zone whose summed MEMBER acreage sits under the floor is
+    # dropped from the pipeline output -- status/reason attached, rank
+    # None, never presented -- and survives only in the diagnostic table
+    # and the export's dropped layer.
+    surviving_zones: list[dict] = []
+    dropped_zones: list[dict] = []
+    for zone in zones:
+        if zone["member_acres"] < MIN_SURVEY_REGION_AREA_ACRES:
+            zone["status"] = ZONE_STATUS_DROPPED
+            zone["drop_reason"] = FLAG_BELOW_MIN_AREA
+            zone["rank"] = None
+            zone["presented"] = False
+            dropped_zones.append(zone)
+        else:
+            zone["status"] = ZONE_STATUS_NOMINATED
+            zone["drop_reason"] = None
+            surviving_zones.append(zone)
+
+    rank_survey_zones_per_type(surviving_zones)
+    presented_zones = apply_presentation(surviving_zones)
+    selected = select_survey_zone(surviving_zones)
 
     return {
-        "zones": zones,
+        "zones": surviving_zones,
         "zones_by_type": {
             survey_type: sorted(
-                [zone for zone in zones if zone["survey_type"] == survey_type],
+                [zone for zone in surviving_zones if zone["survey_type"] == survey_type],
                 key=lambda zone: zone["rank"],
             )
             for survey_type in SURVEY_TYPES
         },
+        "dropped_zones": dropped_zones,
+        "presented_zones": presented_zones,
         "regions": regions,
         "regions_by_type": {
             survey_type: [region for region in regions if region["survey_type"] == survey_type]
@@ -1924,6 +2064,14 @@ def _zone_feature_properties(zone: dict) -> dict:
         "zone_id": zone["id"],
         "survey_type": zone["survey_type"],
         "nominated_by": zone["nominated_by"],
+        # Lifecycle + presentation: status/drop_reason are the
+        # established dropped-not-silent pattern; `presented`
+        # distinguishes the narrated top-N (per-type guarantee applied)
+        # from surviving-but-unpresented zones, which remain fully
+        # inspectable here.
+        "status": zone["status"],
+        "drop_reason": zone["drop_reason"],
+        "presented": zone["presented"],
         "rank": zone["rank"],
         "member_ids": list(zone["member_ids"]),
         "member_count": zone["member_count"],
@@ -1990,15 +2138,28 @@ _MEMBER_FEATURE_NOTE = (
 )
 
 
-def survey_areas_to_geojson(zones: list[dict]) -> dict:
+_DROPPED_ZONE_NOTE = (
+    "DROPPED at the member-acreage floor (status: dropped, drop_reason: below_min_area): this zone's "
+    "actual high-suitability ground sums under the 0.1 ac floor, so it is excluded from the pipeline "
+    "output and the presented set -- carried here visible and attributed, never silently. Member "
+    "acres are the anchoring signal; the envelope never rescues a sliver."
+)
+
+
+def survey_areas_to_geojson(zones: list[dict], dropped_zones: Optional[list[dict]] = None) -> dict:
     """
-    Every survey zone AND every member region (both types, flagged not
-    filtered) as one schema-conformant FeatureCollection: zone envelopes
-    on survey_zone_embankment / survey_zone_excavated (full properties,
-    dual acreage, member linkage) and member footprints on
-    survey_zone_member_<type> (zone linkage both ways). STORED WIRE
-    FORMS ONLY: geometry is each object's geometry_wgs84 built at its
-    birth -- no serialization-time reprojection anywhere in this module.
+    Every SURVIVING survey zone and every member region as one
+    schema-conformant FeatureCollection: zone envelopes on
+    survey_zone_embankment / survey_zone_excavated (full properties,
+    dual acreage, member linkage, status/presented) and member
+    footprints on survey_zone_member_<type> (zone linkage both ways).
+    When `dropped_zones` is supplied (the diagnostic export path), each
+    floor-dropped zone additionally rides the survey_zone_dropped layer
+    with the established status/reason pattern -- the pipeline's own
+    zones_geojson omits them (they are out of the output), the export
+    shows them attributed. STORED WIRE FORMS ONLY: geometry is each
+    object's geometry_wgs84 built at its birth -- no serialization-time
+    reprojection anywhere in this module.
     """
     features = []
     for zone in zones:
@@ -2032,6 +2193,21 @@ def survey_areas_to_geojson(zones: list[dict]) -> dict:
                     extra_properties=_member_feature_properties(member),
                 )
             )
+    for zone in dropped_zones or []:
+        features.append(
+            make_feature(
+                feature_id=f"water-survey-zone-dropped-{zone['id']}",
+                geometry=zone["geometry_wgs84"],
+                layer="survey_zone_dropped",
+                label=(
+                    f"DROPPED survey zone {zone['id']} ({zone['survey_type']}-type): member ground "
+                    f"{zone['member_acres']} ac under the {MIN_SURVEY_REGION_AREA_ACRES} ac floor"
+                ),
+                confidence=zone["confidence"],
+                confidence_notes=_DROPPED_ZONE_NOTE,
+                extra_properties=_zone_feature_properties(zone),
+            )
+        )
     return make_feature_collection(features)
 
 
@@ -2046,22 +2222,29 @@ def build_narrative_data(result: dict) -> dict:
     Pre-digested, FINAL, JSON-serializable narrative values -- imperial
     at this boundary (acres, feet, percent), None (never 0.0) for
     unavailable, no reason strings beyond the flag enumeration, per the
-    established narrative_data doctrine. ALL zones are listed, no cap
-    (first-run posture); per-criterion mean scores (MEMBER cells only)
-    are the narrative-honesty mechanism -- prose may only claim what a
-    criterion actually scored, and each zone's block carries those
-    scores directly. Dual acreage carries the narrative sentence's two
-    numbers ("zone_acres to survey, anchored by member_acres of
+    established narrative_data doctrine. The PRESENTED zones are listed
+    (WATER_ZONE_PRESENTATION_TOP_N pooled, with the per-type guarantee),
+    beside the survivor and dropped counts so the narrative can state
+    what it is not showing; per-criterion mean scores (MEMBER cells
+    only) are the narrative-honesty mechanism -- prose may only claim
+    what a criterion actually scored, and each zone's block carries
+    those scores directly. Dual acreage carries the narrative sentence's
+    two numbers ("zone_acres to survey, anchored by member_acres of
     high-suitability ground"). twi_is_parcel_relative + twi_note surface
     the parcel-relative caveat so the report layer cannot overclaim
     wetness.
     """
-    zones = result["zones"]
+    surviving = result["zones"]
+    presented = result["presented_zones"]
+    dropped = result["dropped_zones"]
     selected = result["selected_water_zone"]
     stats = result["gate_mask_stats"]
 
+    pooled = sorted(surviving, key=lambda z: (-z["mean_suitability"], -z["member_acres"]))
+    guarantee_applied = [z["id"] for z in presented] != [z["id"] for z in pooled[: len(presented)]]
+
     zone_blocks = []
-    for zone in sorted(zones, key=lambda z: (z["survey_type"], z["rank"])):
+    for zone in sorted(presented, key=lambda z: (z["survey_type"], z["rank"])):
         primary = zone["primary_production_area_relationship"]
         if primary is None:
             gravity = {"has_service_relationship": False, "can_gravity_feed": None}
@@ -2110,8 +2293,12 @@ def build_narrative_data(result: dict) -> dict:
         )
 
     return {
-        "zone_found": bool(zones),
-        "zone_count": len(zones),
+        "zone_found": bool(surviving),
+        "zone_count": len(surviving),
+        "presented_count": len(presented),
+        "dropped_count": len(dropped),
+        "presentation_top_n": WATER_ZONE_PRESENTATION_TOP_N,
+        "presentation_guarantee_applied": guarantee_applied,
         "member_region_count": len(result["regions"]),
         "embankment_zone_count": len(result["zones_by_type"][SURVEY_TYPE_EMBANKMENT]),
         "excavated_zone_count": len(result["zones_by_type"][SURVEY_TYPE_EXCAVATED]),
@@ -2140,9 +2327,13 @@ def build_narrative_data(result: dict) -> dict:
 
 def summarize_water_survey_areas(result: dict) -> str:
     zones = result["zones"]
-    if not zones:
+    dropped = result["dropped_zones"]
+    if not zones and not dropped:
         return "No water survey zones: nothing cleared the suitability threshold."
-    lines = [f"Water survey zones ({len(zones)} zone(s), {len(result['regions'])} member region(s), flagged not filtered):"]
+    lines = [
+        f"Water survey zones ({len(zones)} surviving, {len(result['presented_zones'])} presented, "
+        f"{len(dropped)} dropped at the member floor; {len(result['regions'])} member region(s)):"
+    ]
     for zone in sorted(zones, key=lambda z: (z["survey_type"], z["rank"])):
         top_two = sorted(
             zone["criterion_contributions"].items(),
@@ -2150,11 +2341,17 @@ def summarize_water_survey_areas(result: dict) -> str:
         )[:2]
         criteria_text = ", ".join(f"{name}={entry['mean_score']}" for name, entry in top_two)
         flag_text = f" [{', '.join(zone['flags'])}]" if zone["flags"] else ""
+        presented_text = " PRESENTED" if zone["presented"] else ""
         lines.append(
-            f"  - {zone['survey_type']} rank {zone['rank']}: zone {zone['id']}, "
+            f"  - {zone['survey_type']} rank {zone['rank']}{presented_text}: zone {zone['id']}, "
             f"{zone['zone_acres']} ac to survey anchored by {zone['member_acres']} ac "
             f"({zone['member_count']} member(s)), mean {zone['mean_suitability']}, top criteria: "
             f"{criteria_text}{flag_text}"
+        )
+    for zone in dropped:
+        lines.append(
+            f"  - DROPPED ({zone['drop_reason']}): {zone['survey_type']} zone {zone['id']}, member "
+            f"ground {zone['member_acres']} ac under the {MIN_SURVEY_REGION_AREA_ACRES} ac floor"
         )
     return "\n".join(lines)
 
@@ -2313,9 +2510,14 @@ def identify_water_survey_areas(
     )
 
     return {
+        # SURVIVING zones only: the floor's drops are out of the
+        # pipeline output by decision (they ride the diagnostic export's
+        # dropped layer instead -- visible, attributed, not planned on).
         "zones_geojson": survey_areas_to_geojson(result["zones"]),
         "zones": result["zones"],
         "zones_by_type": result["zones_by_type"],
+        "dropped_zones": result["dropped_zones"],
+        "presented_zones": result["presented_zones"],
         "regions": result["regions"],
         "regions_by_type": result["regions_by_type"],
         "selected_water_zone": result["selected_water_zone"],

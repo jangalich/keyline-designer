@@ -123,13 +123,18 @@ assert float(embankment_slope_score(np.array(16.0))) == 0.0
 assert float(embankment_slope_score(np.array(np.nan))) == 0.0, "unmeasured slope scores 0, never NaN-poisons the blend"
 print("Embankment slope taper: breakpoints at 0.5 / 3 / 8 / 15 percent, NaN scores 0.")
 
-# --- excavated slope: 1.0 dead flat, linear to 0 at 8% ---
+# --- excavated slope, SEEP-WIDENED (final tuning): 1.0 through 5%,
+# linear to 0 at 15% -- AH-590's excavated class covers dugout AND
+# seep-fed excavated ponds, and the reference marsh's wettest cells sit
+# at real 5-10% grades (the FINDING indicted the old flat-dugout taper;
+# the soil rider cleared the soil scorer). Midpoint 10% scores 0.5. ---
 assert float(excavated_slope_score(np.array(0.0))) == 1.0
-assert math.isclose(float(excavated_slope_score(np.array(4.0))), 0.5)
-assert float(excavated_slope_score(np.array(8.0))) == 0.0
-assert float(excavated_slope_score(np.array(9.0))) == 0.0
+assert float(excavated_slope_score(np.array(5.0))) == 1.0, "full credit holds through the 5% seep grade"
+assert math.isclose(float(excavated_slope_score(np.array(10.0))), 0.5)
+assert float(excavated_slope_score(np.array(15.0))) == 0.0
+assert float(excavated_slope_score(np.array(16.0))) == 0.0
 assert float(excavated_slope_score(np.array(np.nan))) == 0.0
-print("Excavated slope: 1.0 flat, gone at 8 percent.")
+print("Excavated slope (seep-widened): 1.0 through 5 percent, 0.5 at 10, gone at 15.")
 
 # --- depression depth + noise floor: filled-minus-raw, sub-floor depths
 #     read 0. Hand case: raw 100, filled 100.05 -> depth 0 (under the
@@ -246,12 +251,13 @@ print("Weights: both types sum to 1.0 at the documented v1 priors.")
 # every criterion lands at a hand-checkable value at 5m cells
 # (cell area = 25/4046.8564224 = 0.0061776 ac):
 #   accumulation 324 cells -> 2.0016 ac -> drainage band 1.0, run-on 1.0
-#   slope 5%               -> embankment 1.0 (in 3-8), excavated 1-5/8 = 0.375
+#   slope 5%               -> embankment 1.0 (in 3-8), excavated 1.0
+#                             (full credit through the seep-widened 5%)
 #   TWI percentile 0.6 (given directly), depression 0.25 m -> 0.5
 #     -> wetness = 0.5*0.6 + 0.5*0.5 = 0.55
 #   soil grid 0.8
 # embankment = .30*1 + .25*1 + .25*.8 + .20*.6              = 0.87
-# excavated  = .35*.55 + .30*.8 + .25*.375 + .10*1          = 0.62625
+# excavated  = .35*.55 + .30*.8 + .25*1.0 + .10*1           = 0.7825
 blend_dem = _dem(np.full((3, 3), 100.0))
 surfaces = compute_suitability_surfaces(
     blend_dem,
@@ -265,8 +271,8 @@ surfaces = compute_suitability_surfaces(
 assert np.allclose(surfaces[SURVEY_TYPE_EMBANKMENT], 0.87), (
     f"hand-computed embankment blend 0.87, got {surfaces[SURVEY_TYPE_EMBANKMENT][1, 1]}"
 )
-assert np.allclose(surfaces[SURVEY_TYPE_EXCAVATED], 0.62625), (
-    f"hand-computed excavated blend 0.62625, got {surfaces[SURVEY_TYPE_EXCAVATED][1, 1]}"
+assert np.allclose(surfaces[SURVEY_TYPE_EXCAVATED], 0.7825), (
+    f"hand-computed excavated blend 0.7825, got {surfaces[SURVEY_TYPE_EXCAVATED][1, 1]}"
 )
 # The gate mask zeroes both surfaces before anything reads them:
 gated = compute_suitability_surfaces(
@@ -279,7 +285,7 @@ gated = compute_suitability_surfaces(
     soil_score_grid=np.full((3, 3), 0.8),
 )
 assert np.all(gated[SURVEY_TYPE_EMBANKMENT] == 0.0) and np.all(gated[SURVEY_TYPE_EXCAVATED] == 0.0)
-print("Surface blend: one cell hand-computed through both full blends (0.87 / 0.62625); mask zeroes both.")
+print("Surface blend: one cell hand-computed through both full blends (0.87 / 0.7825); mask zeroes both.")
 
 
 # =========================================================================
@@ -363,11 +369,12 @@ print("Connectivity: water uses WATER_REGION_CONNECTIVITY=8; production's connec
 # (production_area.compute_slope_percent -- read, not assumed: max
 # |neighbor elevation diff| per unit ground distance, x100, i.e. PERCENT
 # GRADE) is fed planes of hand-known grade, and its output goes straight
-# into the excavated classifier. Column step s over 5 m cells ->
-# horizontal-neighbor grade s/5*100 (the diagonal is s/7.07, smaller, so
-# the horizontal IS the max). Expected classifier scores:
-# 0% -> 1.0, 4% -> 0.5, 8% -> 0.0, 12% -> 0.0.
-for col_step, expected_grade, expected_score in ((0.0, 0.0, 1.0), (0.2, 4.0, 0.5), (0.4, 8.0, 0.0), (0.6, 12.0, 0.0)):
+# into the SEEP-WIDENED excavated classifier. Column step s over 5 m
+# cells -> horizontal-neighbor grade s/5*100 (the diagonal is s/7.07,
+# smaller, so the horizontal IS the max). Expected classifier scores:
+# 0% -> 1.0, 5% -> 1.0 (full credit through the seep grade),
+# 10% -> 0.5, 15% -> 0.0.
+for col_step, expected_grade, expected_score in ((0.0, 0.0, 1.0), (0.25, 5.0, 1.0), (0.5, 10.0, 0.5), (0.75, 15.0, 0.0)):
     plane = np.array([[100.0 + c * col_step for c in range(7)] for _ in range(7)])
     slope_grid = production_area.compute_slope_percent(plane, (5.0, 5.0))
     measured = float(slope_grid[3, 3])
@@ -379,7 +386,7 @@ for col_step, expected_grade, expected_score in ((0.0, 0.0, 1.0), (0.2, 4.0, 0.5
     assert math.isclose(score, expected_score), (
         f"excavated slope score at a real measured {expected_grade}% grade must be {expected_score}, got {score}"
     )
-print("Slope units: percent grade verified on hand-built planes at 0/4/8/12%, classifier scores 1.0/0.5/0.0/0.0.")
+print("Slope units: percent grade verified on hand-built planes at 0/5/10/15%, seep-widened classifier scores 1.0/1.0/0.5/0.0.")
 
 # --- Raw peaks reappear: a one-cell-wide diagonal ridge of raw 1.0 on a
 # 0.5 background. Under the RETIRED smoothing its maximum was 17/29 =
@@ -497,7 +504,8 @@ print("Closing math: 20 m gap fuses (1200 m^2 minus stated menisci), 40 m gap st
 #   TWI all equal -> parcel-relative mean-rank 0.5; depression 0
 #     -> wetness = 0.5*0.5 + 0.5*0 = 0.25
 #   excavated = .35*.25 + .30*1 + .25*1 + .10*0.0030888 = 0.63780888
-# >= the 0.6 default -> ONE 100-cell member; embankment = 0.35 < 0.6 ->
+# >= the 0.5 default (final tuning: decided against the parcel's
+# attainable ceiling) -> ONE 100-cell member; embankment = 0.35 < 0.5 ->
 # none. The single member closes to one zone whose clipped envelope IS
 # the boundary box -- which makes the DUAL ACREAGE distinction visible
 # on this very fixture: member_acres counts CELLS (100 x 0.0061776 =
@@ -532,7 +540,9 @@ flat_member = flat_members[0]
 assert math.isclose(flat_member["mean_suitability"], round(expected_flat_score, 4)), (
     f"hand-derived member mean {round(expected_flat_score, 4)}, got {flat_member['mean_suitability']}"
 )
-assert flat_result["regions_by_type"][SURVEY_TYPE_EMBANKMENT] == [], "0.35 < 0.6 -> no embankment member"
+assert wsa.SUITABILITY_THRESHOLD == 0.5, "the final-tuning threshold default"
+assert flat_result["threshold"] == 0.5
+assert flat_result["regions_by_type"][SURVEY_TYPE_EMBANKMENT] == [], "0.35 < 0.5 -> no embankment member"
 
 flat_zones = flat_result["zones_by_type"][SURVEY_TYPE_EXCAVATED]
 assert len(flat_zones) == 1, "one member -> one zone (singletons take the same code path)"
@@ -576,23 +586,29 @@ print(
     "ac anchor), linkage both ways, adjacency 1.0."
 )
 
-# --- FIXTURE 2: V-valley + hand-built accumulation ribbon -> one
-# embankment member chain, one zone that closes back to (approximately)
-# the ribbon itself. 40x21: elevation = 100 + |c-10|*0.30 - r*0.25;
-# every cell's max-neighbor grade is the downhill diagonal (0.30+0.25)/
-# hypot(5,5) = 7.78% (uniform), inside the 3-8% sweet spot -> embankment
-# slope 1.0. Boundary covers centers rows 2..37 x cols 2..18 (612
-# cells). flow_accumulation is a hand-built OVERRIDE: 1 cell everywhere
-# except the channel column (c=10), which carries 15*(r+1) cells. TWI
-# (uniform tan) orders exactly by accumulation:
+# --- FIXTURE 2: V-valley + hand-built accumulation ribbon. Under the
+# FINAL-TUNING defaults (threshold 0.5, seep-widened excavated taper)
+# BOTH types now ribbon along the channel -- exactly the overlap the
+# widening intends (moderate-grade wet ground is both dam and seep
+# territory). 40x21: elevation = 100 + |c-10|*0.30 - r*0.25; every
+# cell's max-neighbor grade is the downhill diagonal (0.30+0.25)/
+# hypot(5,5) = 7.778% (uniform): embankment slope 1.0 (in 3-8),
+# excavated slope (15-7.778)/10 = 0.7222 (the seep taper). Boundary
+# covers centers rows 2..37 x cols 2..18 (612 cells).
+# flow_accumulation is a hand-built OVERRIDE: 1 cell everywhere except
+# the channel column (c=10), which carries 15*(r+1) cells. TWI (uniform
+# tan) orders exactly by accumulation:
 #   576 side cells all equal -> mean-rank (0.5*575)/611 = 0.4705...
 #   36 on-parcel channel cells distinct, ranks (576+i)/611, i = r-2.
-# Per-cell RAW embankment (soil never checked -> neutral 0.5):
-#   side:    .25 + .125 + .20*0.4705 = 0.4691       < 0.6 -> out
-#   channel: .30*d(r) + .375 + .20*(576+i)/611      -> monotone in r,
-#            crossing the 0.6 default partway down the valley.
-# Expected members = the channel rows where that formula clears 0.6 --
-# a contiguous bottom segment, computed below from the STATED formula.
+# Per-cell RAW blends (soil never checked -> neutral 0.5):
+#   embankment side:    .25 + .125 + .20*0.4705            = 0.4691 < 0.5
+#   embankment channel: .30*d(r) + .375 + .20*twi(r)       = 0.5635..0.863
+#   excavated side:     .35*(.5*.4705) + .15 + .25*.7222
+#                       + .10*runon(1 cell)                = 0.4132 < 0.5
+#   excavated channel:  .35*(.5*twi(r)) + .15 + .25*.7222
+#                       + .10*clip(acres(r)/2)             = 0.5094..0.6055
+# => at the 0.5 default, EVERY on-parcel channel cell is a member of
+# BOTH types' ribbons; every side cell is out of both.
 V_ROWS, V_COLS, V_CHANNEL = 40, 21, 10
 v_array = np.zeros((V_ROWS, V_COLS))
 for r in range(V_ROWS):
@@ -612,62 +628,84 @@ for r in range(V_ROWS):
 v_result = compute_water_survey_areas(V_DEM, V_BOUNDARY, flow_accumulation=v_accumulation)
 
 # The stated per-cell formulas, cross-checked against the module's own
-# raw surface on every gated cell:
+# raw surfaces on every gated cell:
 v_gate = np.zeros((V_ROWS, V_COLS), dtype=bool)
 v_gate[2:38, 2:19] = True
 side_twi = (0.5 * 575) / 611
-v_raw_expected = np.zeros((V_ROWS, V_COLS))
+v_slope_score_exc = (15.0 - 0.55 / math.hypot(5.0, 5.0) * 100.0) / 10.0  # 0.72218...
+v_emb_expected = np.zeros((V_ROWS, V_COLS))
+v_exc_expected = np.zeros((V_ROWS, V_COLS))
 for r in range(V_ROWS):
     for c in range(V_COLS):
         if not v_gate[r, c]:
             continue
         if c == V_CHANNEL:
             acres = 15 * (r + 1) * CA
-            d = min(max((acres - 0.5) / 1.5, 0.0), 1.0)
-            v_raw_expected[r, c] = 0.30 * d + 0.375 + 0.20 * (576 + (r - 2)) / 611
+            twi = (576 + (r - 2)) / 611
         else:
-            v_raw_expected[r, c] = 0.375 + 0.20 * side_twi
+            acres = 1 * CA
+            twi = side_twi
+        d = min(max((acres - 0.5) / 1.5, 0.0), 1.0)
+        runon = min(max(acres / 2.0, 0.0), 1.0)
+        v_emb_expected[r, c] = 0.30 * d + 0.25 * 1.0 + 0.25 * 0.5 + 0.20 * twi
+        v_exc_expected[r, c] = 0.35 * (0.5 * twi) + 0.30 * 0.5 + 0.25 * v_slope_score_exc + 0.10 * runon
 assert np.allclose(
-    np.where(v_gate, v_result["surfaces"][SURVEY_TYPE_EMBANKMENT], 0.0), v_raw_expected
+    np.where(v_gate, v_result["surfaces"][SURVEY_TYPE_EMBANKMENT], 0.0), v_emb_expected
 ), "the RAW embankment blend must match the stated per-cell formulas on every gated cell"
+assert np.allclose(
+    np.where(v_gate, v_result["surfaces"][SURVEY_TYPE_EXCAVATED], 0.0), v_exc_expected
+), "the RAW excavated blend must match the stated per-cell formulas on every gated cell"
 
-expected_members = {
-    (r, V_CHANNEL) for r in range(2, 38) if v_raw_expected[r, V_CHANNEL] >= 0.6
-}
-assert expected_members, "the fixture must clear the 0.6 default partway down the channel"
-v_members = v_result["regions_by_type"][SURVEY_TYPE_EMBANKMENT]
-assert len(v_members) == 1, f"the channel segment is one 8-connected member, got {len(v_members)}"
-v_member = v_members[0]
-assert set(v_member["cells"]) == expected_members, "member cells equal the formula-derived expectation"
-expected_mean = round(float(np.mean([v_raw_expected[r, c] for r, c in expected_members])), 4)
-assert v_member["mean_suitability"] == expected_mean, (
-    f"hand-summed member mean {expected_mean}, got {v_member['mean_suitability']}"
-)
-assert v_result["regions_by_type"][SURVEY_TYPE_EXCAVATED] == []
+expected_channel = {(r, V_CHANNEL) for r in range(2, 38)}
+assert all(v_emb_expected[r, c] >= 0.5 for r, c in expected_channel)
+assert all(v_exc_expected[r, c] >= 0.5 for r, c in expected_channel)
+assert all(
+    v_emb_expected[r, c] < 0.5 and v_exc_expected[r, c] < 0.5
+    for r in range(2, 38)
+    for c in range(2, 19)
+    if c != V_CHANNEL
+), "every side cell stays out of both ribbons at 0.5"
 
-v_zones = v_result["zones_by_type"][SURVEY_TYPE_EMBANKMENT]
-assert len(v_zones) == 1 and v_zones[0]["member_count"] == 1
-v_zone = v_zones[0]
-assert v_zone["mean_suitability"] == expected_mean, "zone statistics are the member chain's own"
-# A straight one-cell-wide ribbon closes back to approximately itself
-# (dilate-then-erode of a straight band is exact up to discretization):
-assert abs(v_zone["zone_acres"] - v_zone["member_acres"]) / v_zone["member_acres"] < 0.02, (
-    f"a lone straight ribbon's envelope is ~its own footprint: {v_zone['zone_acres']} vs {v_zone['member_acres']}"
-)
-bottom_row = max(r for r, c in expected_members)
-assert v_zone["wettest_cell_rowcol"] == (bottom_row, V_CHANNEL)
-assert math.isclose(v_zone["contributing_area_acres_at_wettest_cell"], round(15 * (bottom_row + 1) * CA, 2))
-assert v_zone["boundary_adjacency_fraction"] < 0.1, "an interior ribbon barely touches the boundary"
+for survey_type, expected_grid in (
+    (SURVEY_TYPE_EMBANKMENT, v_emb_expected),
+    (SURVEY_TYPE_EXCAVATED, v_exc_expected),
+):
+    typed_members = v_result["regions_by_type"][survey_type]
+    assert len(typed_members) == 1, f"{survey_type}: one 8-connected channel member, got {len(typed_members)}"
+    assert set(typed_members[0]["cells"]) == expected_channel
+    typed_mean = round(float(np.mean([expected_grid[r, c] for r, c in expected_channel])), 4)
+    assert typed_members[0]["mean_suitability"] == typed_mean, (
+        f"{survey_type}: hand-summed member mean {typed_mean}, got {typed_members[0]['mean_suitability']}"
+    )
+    typed_zones = v_result["zones_by_type"][survey_type]
+    assert len(typed_zones) == 1 and typed_zones[0]["member_count"] == 1
+    assert typed_zones[0]["mean_suitability"] == typed_mean, "zone statistics are the member chain's own"
+    # A straight one-cell-wide ribbon closes back to approximately
+    # itself (dilate-then-erode of a straight band is exact up to
+    # discretization):
+    assert abs(typed_zones[0]["zone_acres"] - typed_zones[0]["member_acres"]) / typed_zones[0]["member_acres"] < 0.02
+    assert typed_zones[0]["wettest_cell_rowcol"] == (37, V_CHANNEL)
+    assert typed_zones[0]["boundary_adjacency_fraction"] < 0.1
+
+# Both zones survive the floor and both are presented (2 <= TOP_N=3, so
+# the per-type guarantee is trivially satisfied); the pooled selection
+# is the embankment zone (higher member mean) -- and it would be
+# identical with presentation never computed.
+v_emb_zone = v_result["zones_by_type"][SURVEY_TYPE_EMBANKMENT][0]
+v_exc_zone = v_result["zones_by_type"][SURVEY_TYPE_EXCAVATED][0]
+assert v_emb_zone["presented"] and v_exc_zone["presented"]
+assert v_emb_zone["mean_suitability"] > v_exc_zone["mean_suitability"]
+assert v_result["selected_water_zone"] is v_emb_zone
 print(
-    f"Fixture 2 (V-valley): {len(expected_members)}-cell channel member at the 0.6 default (formula-"
-    f"derived), one zone closing back to itself (zone {v_zone['zone_acres']} ac vs anchor "
-    f"{v_zone['member_acres']} ac), wettest at the valley bottom."
+    f"Fixture 2 (V-valley, final defaults): BOTH types ribbon the 36 channel cells (emb mean "
+    f"{v_emb_zone['mean_suitability']}, exc mean {v_exc_zone['mean_suitability']} -- the seep widening "
+    "at work), both presented, embankment selected."
 )
 
 # --- FIXTURE 2b: member-vs-zone split where the envelope ADDS ground.
 # Same flat construction as fixture 1, but soil covers TWO patches
 # (cols 5..8 and cols 12..14) with best-wet soil; the 3-column gap
-# (15 m) scores the neutral 0.5 soil -> 0.4878 < 0.6 -> NOT a member.
+# (15 m) scores the neutral 0.5 soil -> 0.4878 < 0.5 -> NOT a member.
 # 15 m < the 30 m grouping -> the two members fuse into ONE zone whose
 # envelope bridges the gap. Score statistics from members ONLY: every
 # member cell scores 0.63780888, so the zone mean must be exactly that
@@ -690,7 +728,7 @@ split_soil_inputs = {
 }
 split_result = compute_water_survey_areas(FLAT_DEM, FLAT_BOUNDARY, soil_inputs=split_soil_inputs)
 split_members = split_result["regions_by_type"][SURVEY_TYPE_EXCAVATED]
-assert len(split_members) == 2, f"two soil patches -> two members (gap cells at 0.4878 < 0.6), got {len(split_members)}"
+assert len(split_members) == 2, f"two soil patches -> two members (gap cells at 0.4878 < 0.5), got {len(split_members)}"
 assert {m["cell_count"] for m in split_members} == {40, 30}, "4x10 and 3x10 cell patches"
 split_zones = split_result["zones_by_type"][SURVEY_TYPE_EXCAVATED]
 assert len(split_zones) == 1, "a 15 m gap at 30 m grouping fuses the two members into ONE zone"
@@ -715,11 +753,13 @@ print(
     f"{split_zone['zone_acres']} ac vs anchor {split_zone['member_acres']} ac, member-only mean preserved."
 )
 
-# --- FIXTURE 3: a sub-floor ZONE is FLAGGED AND PRESENT (and can even
-# be selected -- first-run posture). Boundary covers only a 3x3 block:
-# 9 member cells = 0.0556 ac < the 0.1 ac floor, flagged on MEMBER
-# acreage (the anchoring signal -- an envelope can be arbitrarily
-# larger than the ground that earned it). ---
+# --- FIXTURE 3: THE FLOOR FILTERS NOW (final tuning -- the exploration
+# posture is over). Boundary covers only a 3x3 block: 9 member cells =
+# 0.0556 ac < the 0.1 ac floor -> the zone is DROPPED from the pipeline
+# output (status: dropped, drop_reason: below_min_area, rank None,
+# never presented, absent from zones_geojson), carried in dropped_zones
+# with its full property set -- visible and attributed, never silent.
+# With no survivor, the selection is honestly None. ---
 TINY_BOUNDARY = box(
     ORIGIN_X + 8 * RESOLUTION + 0.1,
     ORIGIN_Y - 11 * RESOLUTION + 0.1,
@@ -727,18 +767,117 @@ TINY_BOUNDARY = box(
     ORIGIN_Y - 8 * RESOLUTION - 0.1,
 )
 tiny_result = compute_water_survey_areas(FLAT_DEM, TINY_BOUNDARY, soil_inputs=GOOD_WET_SOIL_INPUTS)
-tiny_zones = tiny_result["zones_by_type"][SURVEY_TYPE_EXCAVATED]
-assert len(tiny_zones) == 1, "a sub-floor zone must be PRESENT, never dropped"
-tiny_zone = tiny_zones[0]
-assert tiny_zone["cell_count"] == 9
-assert tiny_zone["member_acres"] < MIN_SURVEY_REGION_AREA_ACRES
-assert tiny_zone["below_min_area"] is True and FLAG_BELOW_MIN_AREA in tiny_zone["flags"], (
-    "below the floor is a FLAG on member acreage carrying the exact number, not a filter"
+assert tiny_result["zones"] == [] and tiny_result["zones_by_type"][SURVEY_TYPE_EXCAVATED] == [], (
+    "a sub-floor zone is OUT of the pipeline output -- the floor is a filter now"
 )
-assert tiny_result["selected_water_zone"] is tiny_zone, (
-    "first-run posture: flags never affect selection -- the flagged zone still wins an empty field"
+assert tiny_result["selected_water_zone"] is None, "no survivor -> the selection is honestly None"
+assert tiny_result["presented_zones"] == []
+assert len(tiny_result["dropped_zones"]) == 1, "the drop is carried, never silent"
+tiny_dropped = tiny_result["dropped_zones"][0]
+assert tiny_dropped["status"] == wsa.ZONE_STATUS_DROPPED
+assert tiny_dropped["drop_reason"] == FLAG_BELOW_MIN_AREA, "the reason code attributes the drop"
+assert tiny_dropped["rank"] is None and tiny_dropped["presented"] is False
+assert tiny_dropped["cell_count"] == 9 and tiny_dropped["member_acres"] < MIN_SURVEY_REGION_AREA_ACRES
+assert FLAG_BELOW_MIN_AREA in tiny_dropped["flags"], "the flag still rides the dropped zone's properties"
+assert not survey_areas_to_geojson(tiny_result["zones"])["features"], (
+    "the pipeline's own zones_geojson omits dropped zones entirely"
 )
-print("Fixture 3 (sub-floor): 9-cell zone present with below_min_area flag on member acreage; still selectable.")
+print("Fixture 3 (floor filter): the 9-cell sliver zone is dropped with status/reason, selection None, nothing silent.")
+
+# --- FIXTURE 3b: the MEMBER-ACRES basis of the floor, asserted from
+# both directions. Two 3x3 wet patches (each 0.0556 ac -- individually
+# SUB-floor members) 15 m apart on a 3-row strip: their ZONE sums 18
+# cells = 0.1112 ac >= the floor, so it SURVIVES -- the filter judges
+# the zone's summed anchoring ground, not its members one by one, and
+# the large bridged envelope neither rescues nor condemns anything. ---
+STRIP_BOUNDARY = box(
+    ORIGIN_X + 5 * RESOLUTION + 0.1,
+    ORIGIN_Y - 9 * RESOLUTION + 0.1,
+    ORIGIN_X + 14 * RESOLUTION - 0.1,
+    ORIGIN_Y - 6 * RESOLUTION - 0.1,
+)
+strip_soil_inputs = {
+    "ksat_rows": [{"mukey": "A", "ksat_r": 0.05}, {"mukey": "B", "ksat_r": 0.05}],
+    "components": [
+        {"mukey": "A", "hydricrating": "Yes", "comppct_r": 100, "hydgrp": "D"},
+        {"mukey": "B", "hydricrating": "Yes", "comppct_r": 100, "hydgrp": "D"},
+    ],
+    "geometries_by_mukey": {
+        "A": transform_geom(
+            CRS, "EPSG:4326", mapping(box(ORIGIN_X + 25.0, ORIGIN_Y - 45.0, ORIGIN_X + 40.0, ORIGIN_Y - 30.0))
+        ),
+        "B": transform_geom(
+            CRS, "EPSG:4326", mapping(box(ORIGIN_X + 55.0, ORIGIN_Y - 45.0, ORIGIN_X + 70.0, ORIGIN_Y - 30.0))
+        ),
+    },
+}
+strip_result = compute_water_survey_areas(FLAT_DEM, STRIP_BOUNDARY, soil_inputs=strip_soil_inputs)
+strip_members = strip_result["regions_by_type"][SURVEY_TYPE_EXCAVATED]
+assert len(strip_members) == 2 and all(m["cell_count"] == 9 for m in strip_members)
+assert all(m["area_acres"] < MIN_SURVEY_REGION_AREA_ACRES for m in strip_members), (
+    "each member is individually sub-floor -- the fixture's whole point"
+)
+assert all(m["below_min_area"] for m in strip_members), "member REGIONS still just carry the flag"
+strip_zones = strip_result["zones_by_type"][SURVEY_TYPE_EXCAVATED]
+assert len(strip_zones) == 1 and strip_result["dropped_zones"] == [], (
+    "two sub-floor members whose ZONE sums 0.1112 ac survive the member-acres floor -- the basis is the "
+    "zone's summed anchoring ground"
+)
+strip_zone = strip_zones[0]
+assert math.isclose(strip_zone["member_acres"], round(18 * CA, 4)) and strip_zone["member_acres"] >= 0.1
+assert strip_zone["status"] == wsa.ZONE_STATUS_NOMINATED
+assert strip_zone["zone_acres"] > strip_zone["member_acres"], (
+    "the bridged envelope is larger than the anchor -- and irrelevant to the floor either way"
+)
+print("Fixture 3b (member-acres basis): two individually sub-floor members sum above the floor -- their zone survives.")
+
+# --- TOP_N + the per-type guarantee, on hand-built zone dicts. ---
+from water_survey_areas import WATER_ZONE_PRESENTATION_TOP_N, apply_presentation, select_survey_zone  # noqa: E402
+
+assert WATER_ZONE_PRESENTATION_TOP_N == 3
+
+
+def _mini_zone(zid, stype, mean, acres):
+    return {"id": zid, "survey_type": stype, "mean_suitability": mean, "member_acres": acres}
+
+
+# Guarantee swap fires: 3 embankment zones outrank both excavated
+# survivors, so the pooled top 3 is all-embankment -- the lowest
+# presented (emb 0.7) is swapped for the best excavated (0.65), keeping
+# the count at 3: top-2 embankment + best excavated.
+swap_zones = [
+    _mini_zone(0, SURVEY_TYPE_EMBANKMENT, 0.9, 1.0),
+    _mini_zone(1, SURVEY_TYPE_EMBANKMENT, 0.8, 1.0),
+    _mini_zone(2, SURVEY_TYPE_EMBANKMENT, 0.7, 1.0),
+    _mini_zone(3, SURVEY_TYPE_EXCAVATED, 0.65, 1.0),
+    _mini_zone(4, SURVEY_TYPE_EXCAVATED, 0.6, 1.0),
+]
+selected_before = select_survey_zone(swap_zones)
+presented = apply_presentation(swap_zones)
+assert [z["id"] for z in presented] == [0, 1, 3], (
+    "the consultant rule: your best dam area and your best dugout area both appear -- emb 0.9, emb 0.8, "
+    f"exc 0.65 (emb 0.7 swapped out), got {[z['id'] for z in presented]}"
+)
+assert len(presented) == WATER_ZONE_PRESENTATION_TOP_N
+assert swap_zones[2]["presented"] is False and swap_zones[3]["presented"] is True
+assert select_survey_zone(swap_zones) is selected_before is swap_zones[0], (
+    "selection is INDEPENDENT of presentation -- the pooled rank-1 zone is identical before and after the "
+    "guarantee swap (the swap never touches the first slot)"
+)
+# No swap when a type has no survivors:
+solo_type = [_mini_zone(i, SURVEY_TYPE_EMBANKMENT, 0.9 - i * 0.1, 1.0) for i in range(4)]
+assert [z["id"] for z in apply_presentation(solo_type)] == [0, 1, 2], (
+    "no excavated survivor exists -> no guarantee to honor -> the pooled top 3 stands"
+)
+# No swap when the pooled top 3 already spans both types:
+mixed = [
+    _mini_zone(0, SURVEY_TYPE_EMBANKMENT, 0.9, 1.0),
+    _mini_zone(1, SURVEY_TYPE_EXCAVATED, 0.85, 1.0),
+    _mini_zone(2, SURVEY_TYPE_EMBANKMENT, 0.8, 1.0),
+    _mini_zone(3, SURVEY_TYPE_EMBANKMENT, 0.7, 1.0),
+]
+assert [z["id"] for z in apply_presentation(mixed)] == [0, 1, 2], "both types already in the top 3 -> untouched"
+print("TOP_N: pooled top-3, guarantee swap fires exactly when a surviving type is missing, selection untouched.")
 
 
 # =========================================================================
@@ -750,6 +889,9 @@ assert selected is not None and isinstance(selected, dict) and selected, (
     "the contract is 'non-empty dict or None' -- truthiness gates in solar/tree/fencing depend on it"
 )
 assert selected is flat_zone, "the pooled rank-1 ZONE is the selection"
+assert selected["status"] == wsa.ZONE_STATUS_NOMINATED and selected["presented"] is True, (
+    "the selected zone is always a surviving, presented zone (rank 1 is never swapped out)"
+)
 
 # The three fields production consumers dereference directly:
 assert selected["render_fill_polygon_utm"] is selected["polygon_utm"], (
@@ -831,7 +973,11 @@ narrative = build_narrative_data(hit_result)
 json.dumps(narrative)
 assert narrative["zone_found"] is True
 assert narrative["twi_is_parcel_relative"] is True and "THIS parcel" in narrative["twi_note"]
-assert len(narrative["zones"]) == len(hit_result["zones"]), "narrative lists ALL zones, no cap"
+assert narrative["zones"] and len(narrative["zones"]) == narrative["presented_count"], (
+    "narrative lists the PRESENTED zones (top-N with the per-type guarantee)"
+)
+assert narrative["zone_count"] == len(hit_result["zones"]) and narrative["dropped_count"] == 0
+assert narrative["presentation_top_n"] == 3 and narrative["presentation_guarantee_applied"] is False
 zone_block = narrative["zones"][0]
 assert zone_block["criteria"].keys() == EXCAVATED_WEIGHTS.keys(), (
     "per-criterion mean scores (member cells only) ride along -- the narrative-honesty mechanism"
@@ -852,6 +998,8 @@ print("narrative_data: JSON-clean, all zones, dual acreage, per-criterion scores
 identify_like = {
     "zones": hit_result["zones"],
     "zones_by_type": hit_result["zones_by_type"],
+    "dropped_zones": hit_result["dropped_zones"],
+    "presented_zones": hit_result["presented_zones"],
     "regions": hit_result["regions"],
     "regions_by_type": hit_result["regions_by_type"],
     "gate_mask_stats": hit_result["gate_mask_stats"],
@@ -911,7 +1059,23 @@ assert member_feature["properties"]["region_id"] in zone_feature["properties"]["
 )
 boundary_feature = next(f for f in collection["features"] if f["properties"]["layer"] == "survey_context_boundary")
 assert boundary_feature["properties"]["gated_cells"] == hit_result["gate_mask_stats"]["gated_cells"]
+# Presentation properties distinguish presented from surviving-but-
+# unpresented zones on the wire (this fixture's lone zone is presented):
+assert zone_feature["properties"]["presented"] is True
+assert zone_feature["properties"]["status"] == "nominated" and zone_feature["properties"]["drop_reason"] is None
 print(f"Export: {export['feature_count']} features; zone + member layers with linkage both ways; all geometries parse.")
+
+# Dropped zones ride the export's survey_zone_dropped layer with the
+# status/reason pattern -- the tiny fixture's floor casualty, validated:
+dropped_collection = survey_areas_to_geojson(tiny_result["zones"], dropped_zones=tiny_result["dropped_zones"])
+validate_feature_collection(dropped_collection)
+dropped_features = [f for f in dropped_collection["features"] if f["properties"]["layer"] == "survey_zone_dropped"]
+assert len(dropped_features) == 1, "the floor's casualty appears on the dropped layer, attributed"
+dropped_props = dropped_features[0]["properties"]
+assert dropped_props["status"] == "dropped" and dropped_props["drop_reason"] == "below_min_area"
+assert dropped_props["presented"] is False and dropped_props["rank"] is None
+json.dumps(dropped_collection)
+print("Dropped-zone export: survey_zone_dropped layer validates with status: dropped + reason code.")
 
 # GREP-ASSERT: no serialization-time reprojection in any emitter.
 for emitter in (
@@ -953,7 +1117,10 @@ assert " 1 " in rider_table, "the covered cells' map unit symbol appears in the 
 assert "  1.000" in rider_table, "the D-group/hydric/ksat sub-signals (1.0) appear per cell"
 # And the threshold comparison prints, on RAW surfaces:
 comparison = diag.summarize_threshold_comparison(identify_like, FLAT_DEM)
-assert "THRESHOLD COMPARISON (raw surfaces" in comparison and "t=0.6" in comparison and "<- default" in comparison
+assert "THRESHOLD COMPARISON (raw surfaces" in comparison and "t=0.7" in comparison, (
+    "the comparison instrument keeps printing all three thresholds"
+)
+assert "t=0.5:" in comparison and "<- default" in comparison, "the final-tuning 0.5 default is marked"
 print("Instrumentation rider: soil sub-signals + map unit in the deepest-fill table; threshold comparison prints on raw surfaces.")
 
 print("\nAll water_survey_areas checks passed.")

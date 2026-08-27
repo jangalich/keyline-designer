@@ -574,15 +574,29 @@ def _format_water_survey_areas_summary(water_narrative: Optional[dict]) -> str:
         f"{water_narrative['zone_count']} water SURVEY ZONE(S) identified from weighted-overlay "
         f"suitability surfaces ({water_narrative['embankment_zone_count']} embankment-type -- small "
         f"dam across a drainageway; {water_narrative['excavated_zone_count']} excavated-type -- "
-        "dugout in wet, flat ground; NRCS Agriculture Handbook 590's two pond types). A zone is the "
-        "ground ONE SURVEY VISIT walks: nearby high-suitability regions grouped into a single "
-        f"envelope ({water_narrative['member_region_count']} member region(s) across all zones), "
-        "with the anchoring ground carried intact inside it. These are GENERAL AREAS WORTH "
+        "dugout or seep-fed excavated pond; NRCS Agriculture Handbook 590's two pond types). A zone "
+        "is the ground ONE SURVEY VISIT walks: nearby high-suitability regions grouped into a "
+        f"single envelope ({water_narrative['member_region_count']} member region(s) across all "
+        "zones), with the anchoring ground carried intact inside it. These are GENERAL AREAS WORTH "
         "SURVEYING, not designed ponds -- no pool, wall, volume, or station is computed anywhere in "
-        "this step, deliberately. Every zone is listed, however small; rules that would have "
-        "filtered are reported as flags instead. "
+        "this step, deliberately. "
         + water_narrative["twi_note"]
     ]
+    # The counts line: what is shown, what survived, what the floor
+    # pruned -- so the reader knows exactly what this section is NOT
+    # showing and why.
+    lines.append(
+        f"Showing the top {water_narrative['presented_count']} of {water_narrative['zone_count']} "
+        f"surviving zone(s) (pooled by member-mean suitability, with the guarantee that each pond "
+        f"type's best zone appears whenever that type produced one"
+        + (
+            f"; {water_narrative['dropped_count']} zone(s) whose anchoring ground fell under the "
+            "0.1-acre floor were dropped -- listed in the diagnostic export, not planned on"
+            if water_narrative["dropped_count"]
+            else ""
+        )
+        + ")."
+    )
     if selection["selected_zone_id"] is not None:
         lines.append(
             f"Selected for downstream planning: zone {selection['selected_zone_id']} "

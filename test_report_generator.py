@@ -569,10 +569,14 @@ print("_format_water_candidate_zones_summary(): N candidates with provenance, fl
 _survey_nd = {
     "zone_found": True,
     "zone_count": 2,
+    "presented_count": 2,
+    "dropped_count": 1,
+    "presentation_top_n": 3,
+    "presentation_guarantee_applied": False,
     "member_region_count": 3,
     "embankment_zone_count": 1,
     "excavated_zone_count": 1,
-    "suitability_threshold": 0.6,
+    "suitability_threshold": 0.5,
     "grouping_distance_meters": 30.0,
     "twi_is_parcel_relative": True,
     "twi_note": (
@@ -625,6 +629,14 @@ assert "no pool, wall, volume, or station" in _survey_prose, (
 assert "wettest ground on THIS parcel" in _survey_prose, (
     "the parcel-relative TWI caveat must reach the prompt so the report cannot overclaim wetness"
 )
+assert "Showing the top 2 of 2 surviving zone(s)" in _survey_prose, (
+    "the counts line states what is shown and what survived"
+)
+assert "1 zone(s) whose anchoring ground fell under the 0.1-acre floor were dropped" in _survey_prose, (
+    "the floor's drops are stated, never silent -- listed in the diagnostic export, not planned on"
+)
+assert "each pond type's best zone appears" in _survey_prose, "the consultant guarantee is stated"
+assert "dugout or seep-fed excavated pond" in _survey_prose, "the seep-widened excavated framing reaches the prose"
 assert "Selected for downstream planning: zone 0 (excavated-type)" in _survey_prose
 assert "provisional selection rule" in _survey_prose
 assert "2.6 acres to survey, anchored by 1.4 acres of high-suitability ground" in _survey_prose, (

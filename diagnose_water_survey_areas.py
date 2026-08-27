@@ -23,6 +23,10 @@ Layers written:
            survey_areas_to_geojson()'s own features, verbatim)
     survey_zone_member_embankment / survey_zone_member_excavated
         -- every member region footprint, intact, with zone_id linkage
+    survey_zone_dropped
+        -- zones the member-acreage floor filtered OUT of the pipeline
+           output, carried here with status: dropped + drop_reason
+           (visible and attributed, never silent)
     suitability_isoband_embankment / suitability_isoband_excavated
         -- filled contour bands of each RAW blended surface at
            ISOBAND_LEVELS (what extraction actually thresholds --
@@ -283,7 +287,11 @@ def export_water_survey_areas_geojson(
     stored geometry_wgs84. Validates before writing; returns {'path',
     'feature_count', 'by_layer'}.
     """
-    features = list(survey_areas_to_geojson(identify_result["zones"])["features"])
+    features = list(
+        survey_areas_to_geojson(
+            identify_result["zones"], dropped_zones=identify_result.get("dropped_zones")
+        )["features"]
+    )
     for survey_type in SURVEY_TYPES:
         features.extend(_isoband_features(survey_type, isobands_by_type[survey_type]))
     if criterion_isobands_by_type:
@@ -317,17 +325,19 @@ def _overlap_cell(value) -> str:
 
 
 def summarize_survey_zones_table(identify_result: dict) -> str:
-    """One line per SURVEY ZONE, per type -- rank, member count, DUAL
+    """One line per SURVIVING survey zone, per type -- rank, PRESENTED
+    marker (the top-N with the per-type guarantee), member count, DUAL
     acreage (zone acres to survey, anchored by member acres), member-
     cell mean/max suitability, top two contributing criteria, gravity
-    note, envelope overlaps, boundary adjacency, flags. Every zone
-    appears (flagged, never filtered)."""
+    note, envelope overlaps, boundary adjacency, flags -- followed by
+    the floor's DROPPED zones, each with its reason code (visible and
+    attributed, never silent)."""
     lines = []
     for survey_type in SURVEY_TYPES:
         zones = identify_result["zones_by_type"][survey_type]
-        lines.append(f"=== {survey_type.upper()}-TYPE SURVEY ZONES ({len(zones)}) ===")
+        lines.append(f"=== {survey_type.upper()}-TYPE SURVEY ZONES ({len(zones)} surviving) ===")
         if not zones:
-            lines.append("  (none cleared the threshold)")
+            lines.append("  (none cleared the threshold and floor)")
             continue
         for zone in zones:
             top_two = sorted(
@@ -336,8 +346,9 @@ def summarize_survey_zones_table(identify_result: dict) -> str:
             )[:2]
             criteria_text = "+".join(f"{name}({entry['mean_score']})" for name, entry in top_two)
             flags = f" flags={','.join(zone['flags'])}" if zone["flags"] else ""
+            presented_text = " PRESENTED" if zone["presented"] else ""
             lines.append(
-                f"  #{zone['rank']} zone {zone['id']}: {zone['zone_acres']:.2f} ac to survey "
+                f"  #{zone['rank']}{presented_text} zone {zone['id']}: {zone['zone_acres']:.2f} ac to survey "
                 f"anchored by {zone['member_acres']:.2f} ac ({zone['member_count']} member(s)), "
                 f"mean {zone['mean_suitability']:.3f} / max {zone['max_suitability']:.3f}, "
                 f"top: {criteria_text}, {_gravity_cell(zone)}, "
@@ -347,6 +358,16 @@ def summarize_survey_zones_table(identify_result: dict) -> str:
                 f"boundary-adj {zone['boundary_adjacency_fraction']:.0%}, "
                 f"conf {zone['confidence']}{flags}"
             )
+    dropped = identify_result.get("dropped_zones", [])
+    lines.append(f"=== DROPPED AT THE MEMBER FLOOR ({len(dropped)}) ===")
+    if not dropped:
+        lines.append("  (none)")
+    for zone in dropped:
+        lines.append(
+            f"  DROPPED ({zone['drop_reason']}): {zone['survey_type']} zone {zone['id']}, member ground "
+            f"{zone['member_acres']:.4f} ac, envelope {zone['zone_acres']:.4f} ac, "
+            f"mean {zone['mean_suitability']:.3f} -- excluded from the pipeline output"
+        )
     return "\n".join(lines)
 
 
