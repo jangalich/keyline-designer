@@ -914,9 +914,11 @@ with ExitStack() as _stack:
     _enter(mock_patch.object(pc.keypoint_detection, "detect_keypoints", return_value=[]))
     _enter(mock_patch.object(pc.farm_roads_data, "get_road_exclusion_union_utm", return_value=None))
     _enter(mock_patch.object(pc.road_corridors, "_fetch_floodplain_hydric_union", return_value=(None, False)))
-    _enter(mock_patch.object(pc.water_candidate_zones, "identify_water_system_candidate_zones",
-                             return_value={"zones_geojson": _empty_fc}))
-    _enter(mock_patch.object(pc, "fetch_and_select_optimal_water_zone", return_value=None))
+    _enter(mock_patch.object(pc.water_survey_areas, "identify_water_survey_areas",
+                             return_value={"zones_geojson": _empty_fc, "regions": [],
+                                           "regions_by_type": {"embankment": [], "excavated": []},
+                                           "selected_water_zone": None, "narrative_data": None,
+                                           "gate_mask_stats": {}, "result": {}}))
     _enter(mock_patch.object(pc.road_corridors, "identify_road_corridor_candidates",
                              return_value={"zones_geojson": _empty_fc, "all_scored_candidates": [],
                                            "road_network": _empty_road_network,

@@ -11,9 +11,9 @@ result back as a single PipelineContext object.
 
 This is a pure orchestrator: it calls the REAL, already-existing entry
 points in dem_data.py, valley_delineation.py, production_area_ceiling.py,
-farm_roads_data.py, road_corridors.py, water_candidate_zones.py,
-water_suitability.py, solar_suitability.py, and tree_zone_candidates.py,
-in the dependency order those modules already require. It reimplements
+farm_roads_data.py, road_corridors.py, water_survey_areas.py,
+solar_suitability.py, and tree_zone_candidates.py, in the dependency
+order those modules already require. It reimplements
 none of their logic. It calls road_corridors.
 identify_road_corridor_candidates(), solar_suitability.
 identify_solar_candidate_zones(), and tree_zone_candidates.
@@ -40,14 +40,14 @@ FIELD NOTES
   through so delineate_valleys() is NOT run a second time for it. It earns a
   context field under the sizing principle now that it has THREE real
   consumers -- the layout map (a marker per keypoint), the report (the
-  keypoint list carried through for narration), and the water-system step
-  (water_candidate_zones.find_candidate_zones() nominates its family-1
-  candidate zones from keypoints, ordered by catchment). The water
-  consumer is also why this list is FORWARDED into both water calls below
-  rather than left to self-detect: find_candidate_zones() detects its own
-  keypoints when not handed any, so without the forward this one DEM would
-  be run through detect_keypoints() three times per build_pipeline_
-  context() run. detect_keypoints() self-
+  keypoint list carried through for narration), and the keypoint
+  relationship pass below (each keypoint related to production areas and
+  the selected water region). The survey-area water step does NOT
+  consume keypoints (it nominates from suitability surfaces -- the old
+  level-pool water step's keypoint nomination went with its demotion),
+  so this list is no longer forwarded into the water call; keypoints
+  remain their own KSOP layer, untouched by that redesign.
+  detect_keypoints() self-
   computes its own flow direction/accumulation/filled arrays from dem
   (valley_delineation.py does not expose those, so there is nothing shared
   to forward for them); that is a handful of pure-numpy passes, no network.
@@ -117,19 +117,25 @@ FIELD NOTES
   'erosion_prone_union' -- see KNOWN LIMITATIONS below for why the latter
   is always None here.
 
-  selected_water_zone is water_suitability.fetch_and_select_optimal_
-  water_zone()'s own rank-1 answer (or None if no candidate zones cleared
-  scoring) -- this call passes this context's own already-computed dem/
-  boundary_polygon_utm/valleys/production_areas straight through via that
-  function's own override params, same reuse pattern as water_zones
-  above, so nothing it depends on is re-derived a second time. The FIELD
-  keeps None for "no zone" (context readers -- the map, the report,
-  fencing -- keep their existing None contract), but the three downstream
-  override forwards below (road corridor, solar, tree zones) NEVER pass
-  that None through: each consumer treats a None override as "not
-  supplied" and re-runs the entire identify_water_suitability() pipeline
-  as its self-compute fallback -- the SAME trap selected_road_corridor
-  below documents, measured at FIVE full water-suitability runs per
+  selected_water_zone is water_survey_areas.identify_water_survey_
+  areas()'s own pooled rank-1 survey region (embankment and excavated
+  pooled by mean suitability, acreage tiebreak -- a PROVISIONAL
+  selection rule, documented at select_survey_region()), or None if no
+  region cleared the suitability threshold. The same call produces
+  water_zones above, so the water step runs ONCE per context build. The
+  region dict carries the full established consumer contract (render_
+  fill_polygon_utm as the polygon_utm identity, representative_
+  elevation_m, id, rank, served_production_area_ids, ...) so every
+  downstream reader -- road exclusion, solar exclusion, tree search-
+  space subtraction, fencing, the map's ripple clip, the keypoint
+  relationship pass below -- slots it in unchanged. The FIELD keeps None
+  for "no region" (context readers -- the map, the report, fencing --
+  keep their existing None contract), but the three downstream override
+  forwards below (road corridor, solar, tree zones) NEVER pass that
+  None through: each consumer treats a None override as "not supplied"
+  and re-runs the retired water_suitability pipeline as its self-compute
+  fallback -- the SAME trap selected_road_corridor below documents,
+  measured at FIVE full water-suitability runs per
   build_pipeline_context() on a no-qualifying-zone parcel before this
   guard. A resolved "nothing" is forwarded as water_suitability.
   NO_WATER_ZONE, the explicit already-ran-and-selected-nothing answer
@@ -196,28 +202,20 @@ FIELD NOTES
   tree_zone_candidates()) that produce it; renamed here to resolve that
   collision rather than leave it flagged.
 
-  water_zones is water_candidate_zones.identify_water_system_candidate_
-  zones()'s own 'zones_geojson' FeatureCollection's 'features' list --
-  identify_water_system_candidate_zones() is the entry point named for
-  this field, and it only ever returns GeoJSON-wrapped output (WGS84
-  geometry_wgs84, not the raw shapely-UTM zone dicts find_candidate_
-  zones() itself builds internally and discards before returning); this
-  is the closest real list[dict] that entry point can produce. This call
+  water_zones is water_survey_areas.identify_water_survey_areas()'s own
+  'zones_geojson' FeatureCollection's 'features' list -- EVERY survey
+  region, both typed layers (survey_region_embankment /
+  survey_region_excavated), flagged not filtered, GeoJSON-wrapped
+  (WGS84 geometry built once at region birth; stored wire forms only).
+  The SAME single call also produces selected_water_zone below. It
   passes this context's own already-computed dem/boundary_polygon_utm/
-  valleys/production_areas straight through via that function's own
-  override params, so delineate_valleys()/identify_production_areas()
-  (or identify_optimized_production_areas(), whichever `production_areas`
-  above actually came from) genuinely run only ONCE each across the whole
-  of build_pipeline_context() -- see test_pipeline_context.py's own
-  call-count assertions. A future consumer that needs each zone's real
-  UTM polygon_utm/render_fill_polygon_utm (the way road_corridors.
-  find_road_routes() needs its own selected_water_zone's shapely
-  geometry) still won't get it from this field, though -- that's a
-  return-SHAPE limitation of identify_water_system_candidate_zones()
-  itself (GeoJSON-only output), independent of and not addressed by the
-  override params this branch wired through. See KNOWN LIMITATIONS #1
-  for the one piece of this call that still isn't de-duplicated: canopy/
-  road exclusion inputs.
+  production_areas/canopy_height/existing_roads straight through via
+  that function's own override params, so identify_optimized_
+  production_areas() and the road-union fetch genuinely run only ONCE
+  each across the whole of build_pipeline_context() -- see
+  test_pipeline_context.py's own call-count assertions. valleys are NOT
+  an input to the survey-area water step (it derives its own flow/
+  slope/TWI screens from the DEM directly, exactly once, internally).
 
   narrative_data is the report-facing narrative block each producing
   module attaches to its own identify_*() result (the narrative_data
@@ -229,64 +227,33 @@ FIELD NOTES
   formatting functions read it), which is exactly why it is its own
   clearly separate field rather than folded into the KSOP fields above:
   a future reader can tell at a glance which fields are load-bearing
-  for computation and which exist purely to feed the narrative. Note
-  the water key comes from water_candidate_zones.identify_water_system_
-  candidate_zones() (the module that owns that narrative block); the
-  fetch_and_select_optimal_water_zone() call above returns only the
-  bare winning zone dict and carries no narrative_data of its own.
+  for computation and which exist purely to feed the narrative. The
+  water key is "water_survey_areas" -- water_survey_areas.build_
+  narrative_data()'s block (ALL regions, no cap, per-criterion mean
+  scores as the narrative-honesty mechanism, and the parcel-relative
+  TWI caveat surfaced as twi_is_parcel_relative/twi_note).
 
 KNOWN LIMITATIONS (found while building this, deliberately NOT worked
 around here -- flagging per this branch's own instructions rather than
 silently patching another module or reimplementing its logic)
 
-  1. water_candidate_zones.identify_water_system_candidate_zones() now
-     accepts dem/boundary_polygon_utm/valleys/production_areas as
-     overrides (a prior branch added these, mirroring the dem override it
-     already had), and the water_zones call above passes this context's
-     own already-computed values for all four -- delineate_valleys()/
-     identify_production_areas() (or identify_optimized_production_areas(),
-     whichever `production_areas` above came from) are NOT called a
-     second time for this field anymore. What's still NOT de-duplicated,
-     evaluated and deliberately left alone rather than wired through:
-       - road_exclusion_union_utm: identify_water_system_candidate_zones()
-         does not expose this as a parameter at all -- it always computes
-         its own internally (_fetch_road_exclusion_union_utm()) and passes
-         it to find_candidate_zones() as an explicit keyword argument; a
-         caller-supplied value threaded through **zone_kwargs would
-         collide with that explicit kwarg and raise TypeError. This USED
-         to be one of two independent blockers: the water modules also
-         buffered at their own separate per-module road-buffer constant
-         (3.048m), so this context's existing_roads union (built at
-         ROAD_EXCLUSION_BUFFER_METERS) was the wrong geometry to hand
-         them even if the parameter existed. That second blocker is GONE:
-         the per-module constant was deleted and every consumer now
-         reads the one shared farm_roads_data.ROAD_EXCLUSION_BUFFER_
-         METERS (see that constant's docstring), so the union genuinely
-         is interchangeable now and sharing it would follow from a single
-         stated definition rather than a coincidence. Still DEFERRED: the
-         missing parameter (a farm_roads=/union passthrough on _fetch_
-         road_exclusion_union_utm()) is a production_area.py edit and
-         belongs with the production-integration branch -- noted there as
-         now-unblocked, not wired here.
-       - canopy_root_zone_mask_utm: same story on the missing-parameter
-         side (the canopy gate is unconditionally fetched-or-raised
-         inside identify_water_system_candidate_zones(), no override path
-         at all) -- and PipelineContext itself has no tree-root-zone-mask
-         field to offer in the first place; this context's own field list
-         (dem, boundary_polygon_utm, valleys,
-         production_areas, existing_roads, soil_exclusion_unions,
-         water_zones, selected_water_zone, selected_road_corridor) never
-         included one. Adding one would be real new
-         scope (a new PipelineContext field, plus deciding whether/how a
-         single shared canopy fetch can be reused across future steps
-         that may each want it at a different buffer distance -- the
-         per-module canopy buffers, unlike the now-unified road buffer,
-         are still genuinely separate constants) -- flagged here, not
-         added.
-     Both would require modifying water_candidate_zones.py itself (adding
-     the two missing override params, and resolving the buffer-mismatch/
-     new-field questions above) -- out of scope for this branch, which was
-     told not to touch that module further.
+  1. The survey-area water step (water_survey_areas.identify_water_
+     survey_areas()) accepts road_exclusion_union_utm directly, so this
+     context's existing_roads union is now genuinely shared with the
+     water step (the missing-parameter blocker the old level-pool water
+     call carried is gone with that call). What remains un-deduplicated:
+     canopy_root_zone_mask_utm -- the water step still derives its OWN
+     root-zone mask from the shared canopy_height dict, at its own
+     WATER_ZONE_CANOPY_BUFFER_METERS, because PipelineContext has no
+     tree-root-zone-mask field and the per-module canopy buffers are
+     genuinely separate constants (unlike the unified road buffer).
+     This costs no network fetch (canopy_height is forwarded; only the
+     mask derivation repeats) -- flagged here, not added. The water
+     step's soil fetch (ksat/hydrologic group/components/geometries) is
+     also its own whole-boundary SDA round-trip, separate from
+     ParcelData's soil fetches; wiring those four through ParcelData/
+     this context is a redundancy-audit item, deliberately out of this
+     branch's scope.
 
   2. production_area_ceiling.identify_optimized_production_areas() takes
      `boundary_coordinates` + `dem`, not an already-computed
@@ -403,10 +370,15 @@ import keypoint_detection
 import production_area_ceiling
 import road_corridors
 import valley_delineation
-import water_candidate_zones
+import water_survey_areas
 from solar_suitability import identify_solar_candidate_zones
 from tree_zone_candidates import identify_tree_zone_candidates
-from water_suitability import NO_WATER_ZONE, fetch_and_select_optimal_water_zone
+# NO_WATER_ZONE stays imported from water_suitability even though that
+# module is retired from the pipeline path: the sentinel is the shared
+# identity object every downstream override entry point (road corridors,
+# solar, tree zones) compares against with `is`, so it must keep living
+# in exactly one place -- see its own docstring there.
+from water_suitability import NO_WATER_ZONE
 
 
 @dataclass
@@ -436,7 +408,7 @@ class PipelineContext:
     selected_structure_site: dict | None
     tree_zone_patches: list[dict]
     # Report-facing narrative blocks, keyed by producing module ("production_
-    # area_ceiling", "water_candidate_zones", "road_corridors",
+    # area_ceiling", "water_survey_areas", "road_corridors",
     # "solar_suitability", "tree_zone_candidates") -- each value is that
     # module's own 'narrative_data' return key (pre-digested, FINAL,
     # JSON-serialisable values; see each module's build_narrative_data()),
@@ -569,18 +541,17 @@ def build_pipeline_context(
 
     Forwarded to every internal call below whose entry point accepts a
     canopy_height override -- exclusion_zones.identify_exclusion_zones(),
-    production_area_ceiling.identify_optimized_production_areas(), water_
-    candidate_zones.identify_water_system_candidate_zones(), water_
-    suitability.fetch_and_select_optimal_water_zone() (via its
-    **suitability_kwargs passthrough into identify_water_suitability()),
-    road_corridors.identify_road_corridor_candidates(), identify_solar_
-    candidate_zones(), and identify_tree_zone_candidates().
+    production_area_ceiling.identify_optimized_production_areas(),
+    water_survey_areas.identify_water_survey_areas(), road_corridors.
+    identify_road_corridor_candidates(), identify_solar_candidate_
+    zones(), and identify_tree_zone_candidates().
 
     WHY IT IS FETCHED HERE NOW. Forwarding None is not neutral: None is
     every one of those consumers' "fetch it yourself" value, so leaving it
     None meant SEVEN independent Planetary Computer round-trips for one
-    parcel's HAG coverage on every run -- measured at exactly seven, on a
-    full run with nothing mocked away. Fetching it once here and letting
+    parcel's HAG coverage on every run -- measured at exactly seven (on
+    the pre-redesign pipeline, whose water step reached canopy twice), on
+    a full run with nothing mocked away. Fetching it once here and letting
     the existing forwards carry it takes that to ONE, and changes no mask:
     each consumer still derives its own root-zone mask from this dict at
     its own buffer. See the fetch site itself for the per-buffer detail
@@ -659,14 +630,15 @@ def build_pipeline_context(
     # WHAT THIS CLOSES. Every canopy consumer below already accepts a
     # canopy_height= override and this function already forwards it to all
     # of them -- but with nothing to forward it forwarded None, and None
-    # means "fetch it yourself". SEVEN consumers did, on every run:
-    # exclusion_zones, water_candidate_zones, water_suitability (via
-    # fetch_and_select_optimal_water_zone), road_corridors, solar_
-    # suitability, and identify_tree_zone_candidates TWICE (once nested
-    # inside solar's own tree-zone-exclusion step, once at this function's
-    # own call below). Seven Planetary Computer round-trips for one
-    # parcel's HAG coverage, measured at exactly that on a full run.
-    # Fetching once here takes it to ONE.
+    # means "fetch it yourself". SEVEN consumers did, on every run of the
+    # pre-redesign pipeline: exclusion_zones, the two old water calls
+    # (since replaced by the single water_survey_areas call below),
+    # road_corridors, solar_suitability, and identify_tree_zone_
+    # candidates TWICE (once nested inside solar's own tree-zone-
+    # exclusion step, once at this function's own call below). Seven
+    # Planetary Computer round-trips for one parcel's HAG coverage,
+    # measured at exactly that on a full run. Fetching once here takes
+    # it to ONE.
     #
     # THIS CHANGES NO MASK. Each consumer still derives its OWN root-zone
     # mask from this dict at its OWN buffer -- production/exclusion/solar
@@ -727,10 +699,10 @@ def build_pipeline_context(
     # wrong-buffer union here. identify_exclusion_zones() reuses a real
     # None too ("checked, genuinely no roads nearby" -- see its OVERRIDES
     # docstring section), so no second road fetch happens either way.
-    # Fetches #3 (production's own road gate) and #4 (the water module's)
+    # Fetches #3 (production's own road gate) and #4 (the water step's)
     # are both closed now: #3 by the exclusion_result= pass-through below,
-    # #4 by passing this same union into identify_water_system_candidate_
-    # zones(). One road union per run, built here, consumed three times.
+    # #4 by passing this same union into identify_water_survey_areas().
+    # One road union per run, built here, consumed three times.
     exclusion_result = exclusion_zones.identify_exclusion_zones(
         boundary_coordinates,
         dem=dem,
@@ -776,52 +748,36 @@ def build_pipeline_context(
         "erosion_prone_union": None,
     }
 
-    # road_exclusion_union_utm= closes fetch #4: this context's own
-    # existing_roads, the same union already handed to identify_exclusion_
-    # zones() (and through it, to production) above. Interchangeable with
-    # what this call would have fetched itself because both are built at the
-    # single shared farm_roads_data.ROAD_EXCLUSION_BUFFER_METERS -- asserted
-    # in test_water_candidate_zones.py against the two signature defaults,
-    # not assumed. A real None is reused as "checked, genuinely no roads
-    # nearby" rather than re-fetched, same convention as the exclusion call.
+    # THE WATER STEP: water_survey_areas.identify_water_survey_areas() --
+    # typed survey areas from weighted-overlay suitability surfaces (see
+    # that module's docstring for the deliverable's full definition and
+    # why it replaced the demoted level-pool arc). ONE call now produces
+    # both this context's water fields: the full flagged-not-filtered
+    # region FeatureCollection (water_zones) and the pooled rank-1 region
+    # (selected_water_zone).
     #
-    # keypoints= closes the SECOND keypoint detection: water_candidate_
-    # zones.find_candidate_zones() nominates its family-1 candidates from
-    # keypoints, and self-detects them when not supplied. This context
-    # already detected them above (in dependency order, right after the
-    # valleys they profile), so both water calls below are handed that one
-    # list and keypoint_detection.detect_keypoints() runs EXACTLY ONCE per
-    # build_pipeline_context() run -- asserted by call count in
-    # test_pipeline_context.py, not assumed. The same objects are handed to
-    # both calls deliberately: find_candidate_zones() only READS a keypoint
-    # (id, valley_id, rowcol, point_utm, contributing_acres), and the
-    # layer-2 relationship pass below mutates them afterwards, so no
-    # ordering hazard exists in either direction.
-    water_system_result = water_candidate_zones.identify_water_system_candidate_zones(
+    # road_exclusion_union_utm= closes the road fetch: this context's own
+    # existing_roads, the same union already handed to identify_exclusion_
+    # zones() (and through it, to production) above -- both built at the
+    # single shared farm_roads_data.ROAD_EXCLUSION_BUFFER_METERS. A real
+    # None is reused as "checked, genuinely no roads nearby" rather than
+    # re-fetched, same convention as the exclusion call.
+    #
+    # keypoints are NOT forwarded anymore: the survey-area water step
+    # nominates from suitability surfaces, not keypoints. detect_
+    # keypoints() above still runs exactly once -- keypoints remain their
+    # own KSOP layer (relationship pass below, map, report), untouched by
+    # this water-step redesign.
+    water_system_result = water_survey_areas.identify_water_survey_areas(
         boundary_coordinates,
         dem=dem,
         boundary_polygon_utm=boundary_polygon_utm,
-        valleys=valleys,
         production_areas=production_areas,
-        keypoints=keypoints,
         canopy_height=canopy_height,
         road_exclusion_union_utm=existing_roads,
     )
     water_zones = water_system_result["zones_geojson"]["features"]
-
-    selected_water_zone = fetch_and_select_optimal_water_zone(
-        boundary_coordinates,
-        dem=dem,
-        boundary_polygon_utm=boundary_polygon_utm,
-        valleys=valleys,
-        production_areas=production_areas,
-        # Same list, same reason as the call above -- this path reaches
-        # find_candidate_zones() independently (through identify_water_
-        # suitability()), so it needs its own forward or it would detect a
-        # second set of keypoints for the same DEM.
-        keypoints=keypoints,
-        canopy_height=canopy_height,
-    )
+    selected_water_zone = water_system_result["selected_water_zone"]
     # SAME GUARD as selected_road_corridor below, applied to the water zone:
     # every downstream consumer of a selected_water_zone override
     # (identify_road_corridor_candidates(), identify_solar_candidate_
@@ -922,7 +878,7 @@ def build_pipeline_context(
         narrative_data={
             "exclusion_zones": exclusion_result.get("narrative_data"),
             "production_area_ceiling": optimized_production.get("narrative_data"),
-            "water_candidate_zones": water_system_result.get("narrative_data"),
+            "water_survey_areas": water_system_result.get("narrative_data"),
             "road_corridors": road_corridor_result.get("narrative_data"),
             "solar_suitability": solar_result.get("narrative_data"),
             "tree_zone_candidates": tree_zone_result.get("narrative_data"),

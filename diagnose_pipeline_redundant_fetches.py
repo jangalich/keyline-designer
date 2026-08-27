@@ -1,6 +1,20 @@
 """
 diagnose_pipeline_redundant_fetches.py
 
+KNOWN-STALE SINCE THE WATER-STEP REDESIGN, FLAGGED NOT FIXED: this
+diagnostic instruments the PRE-redesign pipeline, whose water step was
+water_candidate_zones + water_suitability.fetch_and_select_optimal_
+water_zone(). pipeline_context.py's water step is now water_survey_
+areas.identify_water_survey_areas() and no longer binds fetch_and_
+select_optimal_water_zone at all, so this script's
+patch.object(pc, "fetch_and_select_optimal_water_zone", ...) raises
+AttributeError before measuring anything. Re-instrumenting it (new
+water-step wrap points, new expected counts, the water step's own soil
+fetch) is the dead-field/dead-import REDUNDANCY AUDIT's job --
+deliberately out of the replacement branch's scope, per that branch's
+own instructions. The counts and reasoning below remain a correct
+record of what the OLD pipeline did.
+
 Permanent, standalone diagnostic: measures REAL call counts for every
 expensive entry point pipeline_context.py's own build_pipeline_context()
 calls directly, across ONE real run, and fails loudly if any of them

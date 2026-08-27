@@ -1,6 +1,18 @@
 """
 valley_level_pool.py
 
+DEMOTED, NOT DELETED: this module is no longer on the pipeline path.
+water_survey_areas.py is the water step now (typed survey areas from
+suitability surfaces -- see that module's docstring for the redesign);
+the level-pool arc this module powered proved the reference property
+lacks keyline-dam geometry. RETAINED as a diagnostic-consumed module:
+the exploration scripts still import it through water_candidate_zones.py
+(itself demoted alongside), and level-pool delineation remains a future
+"verify this survey area" SECOND stage -- something to run at a specific
+anchor inside a chosen survey area once one is ground-truthed, not the
+thing that nominates areas. Do not re-wire it into the pipeline; do not
+delete it while those consumers stand.
+
 Level-pool delineation at a single anchor cell: given an already-fetched
 DEM plus precomputed D8 flow arrays, this module answers "if a dam wall
 stood on this cell, what ground would sit under the waterline, and what

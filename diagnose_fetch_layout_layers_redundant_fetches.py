@@ -1,6 +1,15 @@
 """
 diagnose_fetch_layout_layers_redundant_fetches.py
 
+KNOWN-STALE SINCE THE WATER-STEP REDESIGN, FLAGGED NOT FIXED: like
+diagnose_pipeline_redundant_fetches.py (see its header note), this
+script instruments pre-redesign water bindings (pc.fetch_and_select_
+optimal_water_zone among them) that pipeline_context.py no longer has
+-- patching them now raises AttributeError. Re-instrumenting belongs to
+the redundancy audit, deliberately out of the replacement branch's
+scope. The measurements below remain a correct record of the OLD
+pipeline.
+
 Permanent, standalone diagnostic -- parallel to diagnose_pipeline_
 redundant_fetches.py, but targets render_layout_map.fetch_layout_layers()
 directly rather than pipeline_context.build_pipeline_context() alone.
