@@ -143,11 +143,29 @@ def get_soil_data_for_polygon(wkt_polygon: str) -> list[dict]:
 
     wkt_polygon should be a WGS84 WKT polygon string, e.g.:
         "polygon((-79.982 40.643, -79.981 40.643, -79.981 40.642, -79.982 40.642, -79.982 40.643))"
+
+    hydgrp (NRCS hydrologic soil group, A/B/C/D plus dual classes like
+    'A/D' -- drained/UNDRAINED per NEH Part 630 Ch. 7) rides this query
+    because it lives on the SAME component table this join already reads
+    -- confirmed against SSURGO's own table documentation, the same
+    "verify against real documentation" discipline the kwfact and ksat_r
+    fixes required. Adding the column here is what keeps hydrologic
+    group a QUERY CHANGE on ParcelData's existing Layer-1 soil fetch
+    rather than a second, separate SDA round-trip inside a pipeline step
+    (the architecture guide's checklist item 1: new raw external data
+    belongs in Layer 1, fetched once, hard-fail governed).
+    water_survey_areas.py's soil scorer reads it off each map unit's
+    DOMINANT component (rows arrive comppct_r DESC, so the first row per
+    mukey is the dominant one -- the standard convention here), an
+    equivalent of SSURGO's own muaggatt.hydgrpdcd "dominant conditions"
+    rollup that needs no extra table join. The value can be None/empty
+    where NRCS assigned no group (miscellaneous areas, water) -- callers
+    treat that as unknown, not as any particular class.
     """
     sql = f"""
         SELECT mu.mukey, mu.muname, c.compname, c.comppct_r,
                c.drainagecl, c.slope_r, c.slopelenusle_r,
-               c.hydricrating, c.taxorder
+               c.hydricrating, c.taxorder, c.hydgrp
         FROM mapunit mu
         INNER JOIN component c ON mu.mukey = c.mukey
         WHERE mu.mukey IN (
@@ -516,57 +534,12 @@ def get_saturated_hydraulic_conductivity_for_polygon(wkt_polygon: str) -> list[d
     return list(dominant_by_mukey.values())
 
 
-def get_hydrologic_group_for_polygon(wkt_polygon: str) -> list[dict]:
-    """
-    Returns SSURGO's hydrologic soil group (component.hydgrp) for the
-    dominant component of every map unit intersecting wkt_polygon -- same
-    dominant-component-per-mukey shape as get_erosion_factor_for_polygon /
-    get_saturated_hydraulic_conductivity_for_polygon.
-
-    hydgrp lives on the COMPONENT table (per-component, not per-horizon --
-    confirmed against SSURGO's own table/column documentation, the same
-    "verify against real documentation, don't trust a plausible column
-    name alone" discipline this module's kwfact and ksat_r fixes both
-    required), so unlike those two there is no representative-horizon
-    subquery to pick: one row per component, dominant one wins.
-
-    Values are NRCS's four infiltration classes A/B/C/D (A = high
-    infiltration when thoroughly wet -- deep sand/gravel; D = very slow --
-    clays, high water tables) plus dual classes like 'A/D' for soils whose
-    group depends on drainage: first letter = artificially DRAINED
-    condition, second = UNDRAINED natural condition (NRCS National
-    Engineering Handbook Part 630 Chapter 7). The value can also be None/
-    empty where NRCS assigned no group (miscellaneous areas, water) --
-    callers must treat that as unknown, not as any particular class.
-
-    Returns a list of {'mukey', 'muname', 'compname', 'comppct_r',
-    'hydgrp'} dicts.
-    """
-    sql = f"""
-        SELECT mu.mukey, mu.muname, c.compname, c.comppct_r, c.hydgrp
-        FROM mapunit mu
-        INNER JOIN component c ON mu.mukey = c.mukey
-        WHERE mu.mukey IN (
-            SELECT mukey FROM SDA_Get_Mukey_from_intersection_with_WktWgs84('{wkt_polygon}')
-        )
-        ORDER BY c.comppct_r DESC
-    """
-
-    result = _run_sda_query(sql)
-
-    if not result["rows"]:
-        return []
-
-    rows = [dict(zip(result["columns"], row)) for row in result["rows"]]
-
-    dominant_by_mukey: dict[str, dict] = {}
-    for row in rows:
-        # rows are ordered comppct_r DESC, so the first row seen per mukey
-        # is already the dominant component -- same convention as
-        # get_soil_data_for_polygon's/get_erosion_factor_for_polygon's ordering.
-        dominant_by_mukey.setdefault(row["mukey"], row)
-
-    return list(dominant_by_mukey.values())
+# NOTE: an earlier revision of the water-survey redesign added a standalone
+# get_hydrologic_group_for_polygon() here -- a SECOND SDA round-trip for a
+# column the component join above already reaches. It was removed in the
+# same branch's tuning pass: hydgrp now rides get_soil_data_for_polygon()
+# (see its docstring), so hydrologic group arrives on ParcelData's existing
+# Layer-1 soil_components fetch instead of inline in a pipeline step.
 
 
 def _polygonal_parts(geom):

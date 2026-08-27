@@ -283,6 +283,151 @@ print("Surface blend: one cell hand-computed through both full blends (0.87 / 0.
 
 
 # =========================================================================
+# 2b. SMOOTHING AND CONNECTIVITY UNITS (tuning pass)
+# =========================================================================
+
+# --- Masked focal mean, hand-derived on a 3x3 with a window straddling
+# the mask edge. Radius 7.1 m at 5 m cells -> disc offsets dr^2+dc^2 <= 2.02,
+# i.e. the full 3x3 window. Mask excludes (0,2)=3 and (2,0)=7:
+#   center (1,1): mean of the 7 in-mask cells = (1+2+4+5+6+8+9)/7 = 5
+#   corner (0,0): window clips to 2x2, all in-mask -> (1+2+4+5)/4 = 3
+#   edge (0,1):   window 2x3 minus the excluded (0,2) -> (1+2+4+5+6)/5 = 3.6
+#   edge (1,2):   window 3x2 minus the excluded (0,2) -> (2+5+6+8+9)/5 = 6
+#   excluded cells output 0.0 and sit in NOBODY's numerator or denominator.
+from raster_grid import connected_components  # noqa: E402
+from water_survey_areas import (  # noqa: E402
+    SURVEY_SMOOTHING_RADIUS_METERS,
+    WATER_REGION_CONNECTIVITY,
+    extract_survey_regions,
+    masked_focal_mean,
+)
+
+fm_values = np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]])
+fm_mask = np.ones((3, 3), dtype=bool)
+fm_mask[0, 2] = False
+fm_mask[2, 0] = False
+fm_out = masked_focal_mean(fm_values, fm_mask, (5.0, 5.0), radius_meters=7.1)
+assert fm_out[1, 1] == 5.0, f"center: mean of the 7 in-mask cells is 35/7 = 5, got {fm_out[1, 1]}"
+assert fm_out[0, 0] == 3.0, f"corner: (1+2+4+5)/4 = 3, got {fm_out[0, 0]}"
+assert math.isclose(fm_out[0, 1], 3.6), f"mask-straddling window: (1+2+4+5+6)/5 = 3.6, got {fm_out[0, 1]}"
+assert fm_out[1, 2] == 6.0, f"mask-straddling window: (2+5+6+8+9)/5 = 6, got {fm_out[1, 2]}"
+assert fm_out[0, 2] == 0.0 and fm_out[2, 0] == 0.0, "off-mask cells output 0.0"
+assert SURVEY_SMOOTHING_RADIUS_METERS == 15.0
+print("Masked focal mean: 3x3 hand-derived, excluded cells absent from numerator AND denominator.")
+
+# --- Connectivity constants: water's own 8, production's 4 untouched,
+# never aliased (grep-style source assertions). ---
+import production_area  # noqa: E402
+
+assert WATER_REGION_CONNECTIVITY == 8
+assert "WATER_REGION_CONNECTIVITY" in inspect.getsource(extract_survey_regions), (
+    "water extraction must read its OWN connectivity constant"
+)
+assert "connectivity=4" in inspect.getsource(production_area.cluster_and_gate), (
+    "production's deliberate 4-connectivity path must be untouched by the water change"
+)
+assert not hasattr(wsa, "SURVEY_REGION_CONNECTIVITY"), (
+    "the old shared-sounding name is gone -- water and production constants must never alias"
+)
+print("Connectivity: water uses WATER_REGION_CONNECTIVITY=8; production's connectivity=4 path untouched.")
+
+# --- Slope-units verification (the excavated 0.017 question): the real
+# slope machinery (production_area.compute_slope_percent -- read, not
+# assumed: max |neighbor elevation diff| per unit ground distance, x100,
+# i.e. PERCENT GRADE) is fed planes of hand-known grade, and its output
+# goes straight into the excavated classifier. Column step s over 5 m
+# cells -> horizontal-neighbor grade s/5*100 (the diagonal is s/7.07,
+# smaller, so the horizontal IS the max). Expected classifier scores:
+# 0% -> 1.0, 4% -> 0.5, 8% -> 0.0, 12% -> 0.0.
+for col_step, expected_grade, expected_score in ((0.0, 0.0, 1.0), (0.2, 4.0, 0.5), (0.4, 8.0, 0.0), (0.6, 12.0, 0.0)):
+    plane = np.array([[100.0 + c * col_step for c in range(7)] for _ in range(7)])
+    slope_grid = production_area.compute_slope_percent(plane, (5.0, 5.0))
+    measured = float(slope_grid[3, 3])
+    assert math.isclose(measured, expected_grade, abs_tol=1e-9), (
+        f"a {col_step} m column step over 5 m cells IS a {expected_grade}% grade in the real machinery's "
+        f"own units, got {measured} -- a mismatch here would mean the excavated slope class reads the "
+        "wrong units"
+    )
+    score = float(excavated_slope_score(np.array(measured)))
+    assert math.isclose(score, expected_score), (
+        f"excavated slope score at a real measured {expected_grade}% grade must be {expected_score}, got {score}"
+    )
+print(
+    "Slope units: compute_slope_percent() measures percent grade (verified on hand-built planes at "
+    "0/4/8/12%), and the excavated classifier scores those real units 1.0/0.5/0.0/0.0 -- the reference "
+    "run's 0.017 mean is honest hilly terrain, not a units mismatch."
+)
+
+# --- Diagonal-chain fixture: a one-cell-wide diagonal ridge of high raw
+# suitability. Under the pre-tuning behavior (no smoothing, 4-connected)
+# this is N one-cell beads BY DEFINITION -- a diagonal step shares no
+# edge. Under the survey-radius mean + 8-connectivity it is ONE region
+# with hand-counted cells. Construction: 20x20, all-true mask, raw =
+# 0.5 background, 1.0 on the diagonal (i,i) for i = 5..14. The 15 m disc
+# at 5 m cells holds 29 offsets; a full window centered ON the diagonal
+# sees 5 diagonal cells (offsets with dr==dc, 2*dr^2 <= 9), a window
+# one cell OFF it sees 4. Hand values, interior:
+#   on-diagonal:  (5*1.0 + 24*0.5)/29 = 17/29   = 0.58620...
+#   adjacent:     (4*1.0 + 25*0.5)/29 = 16.5/29 = 0.56896...
+# Near the chain's ENDS the window holds fewer diagonal cells (i=5,6 see
+# 3,4), so at threshold 0.58 the members are EXACTLY the interior
+# diagonal cells i = 7..12 -- six cells, each 17/29.
+diag_dem = _dem(np.full((20, 20), 100.0))
+diag_boundary = box(ORIGIN_X - 1.0, ORIGIN_Y - 20 * RESOLUTION - 1.0, ORIGIN_X + 20 * RESOLUTION + 1.0, ORIGIN_Y + 1.0)
+diag_raw = np.full((20, 20), 0.5)
+for i in range(5, 15):
+    diag_raw[i, i] = 1.0
+diag_mask = np.ones((20, 20), dtype=bool)
+diag_smoothed = masked_focal_mean(diag_raw, diag_mask, (RESOLUTION, RESOLUTION))
+assert math.isclose(diag_smoothed[9, 9], 17 / 29), f"interior diagonal cell smooths to 17/29, got {diag_smoothed[9, 9]}"
+assert math.isclose(diag_smoothed[9, 10], 16.5 / 29), f"adjacent cell smooths to 16.5/29, got {diag_smoothed[9, 10]}"
+
+# The bead demonstration, directly: the six member cells under 4- vs
+# 8-connectivity.
+diag_member_mask = diag_smoothed >= 0.58
+assert {tuple(map(int, rc)) for rc in np.argwhere(diag_member_mask)} == {(i, i) for i in range(7, 13)}, (
+    "at threshold 0.58 the members are exactly the six interior diagonal cells"
+)
+_, beads_4 = connected_components(diag_member_mask, connectivity=4)
+_, chain_8 = connected_components(diag_member_mask, connectivity=8)
+assert beads_4 == 6, f"4-connectivity shreds the diagonal into 6 one-cell beads by definition, got {beads_4}"
+assert chain_8 == 1, f"8-connectivity reads the same chain as ONE region, got {chain_8}"
+
+# And through the real extraction path (dummy criteria arrays: the
+# contributions they produce are raw means of what we hand it):
+diag_criteria = {name: diag_raw for name in EMBANKMENT_WEIGHTS}
+diag_zeros = np.zeros((20, 20))
+diag_regions = extract_survey_regions(
+    diag_dem,
+    diag_smoothed,
+    diag_criteria,
+    SURVEY_TYPE_EMBANKMENT,
+    diag_mask,
+    diag_boundary,
+    twi_percentile=diag_zeros,
+    depression_depth=diag_zeros,
+    flow_accumulation=np.ones((20, 20)),
+    slope_pct=diag_zeros,
+    soil_covered_mask=diag_mask & False,
+    soil_checked=False,
+    threshold=0.58,
+    raw_surface=diag_raw,
+)
+assert len(diag_regions) == 1, f"smoothing + 8-connectivity must fuse the chain into ONE region, got {len(diag_regions)}"
+diag_region = diag_regions[0]
+assert diag_region["cell_count"] == 6 and set(diag_region["cells"]) == {(i, i) for i in range(7, 13)}
+assert diag_region["mean_suitability"] == round(17 / 29, 4), "smoothed mean reported"
+assert diag_region["raw_mean_suitability"] == 1.0, "raw mean over the same cells reported beside it"
+assert diag_region["mean_suitability"] != diag_region["raw_mean_suitability"], (
+    "the smoothed-vs-raw reporting split, asserted distinct where they differ"
+)
+print(
+    "Diagonal chain: 6 one-cell beads under 4-connectivity, ONE hand-counted 6-cell region under "
+    "smoothing + 8-connectivity; smoothed 17/29 vs raw 1.0 reported side by side."
+)
+
+
+# =========================================================================
 # 3. REGION EXTRACTION (+ shared fixtures for sections 4 and 6)
 # =========================================================================
 
@@ -300,8 +445,13 @@ print("Surface blend: one cell hand-computed through both full blends (0.87 / 0.
 #     -> wetness = 0.5*0.5 + 0.5*0 = 0.25
 #   excavated = .35*.25 + .30*1 + .25*1 + .10*0.0030888 = 0.63780888
 # and the embankment surface: drainage 0 (under 0.5 ac), slope 0 (under
-# the 0.5% floor), soil .25, twi .10 -> 0.35 < 0.5 -> NO embankment
-# region. So: exactly one region, excavated, all 100 gated cells.
+# the 0.5% floor), soil .25, twi .10 -> 0.35 < 0.6 -> NO embankment
+# region. The masked focal mean is a NO-OP on this fixture -- every
+# gated cell holds the same value and off-mask cells are absent from
+# numerator AND denominator, so the smoothed surface equals the raw one
+# exactly (asserted below: the masked-mean boundary property in action).
+# So at the 0.6 default: exactly one region, excavated, all 100 gated
+# cells.
 CA = cell_area_acres(_dem(np.zeros((2, 2))))
 assert math.isclose(CA, 25.0 / 4046.8564224)
 
@@ -313,10 +463,13 @@ FLAT_BOUNDARY = box(
     ORIGIN_X + 15 * RESOLUTION - 0.1,
     ORIGIN_Y - 5 * RESOLUTION - 0.1,
 )
+# The THREE-piece soil_inputs shape: hydgrp rides the component rows
+# (the hydrologic-group query change -- soil_data.get_soil_data_for_
+# polygon() carries c.hydgrp, and the scorer reads each mukey's DOMINANT
+# component's group). There is no separate hydrologic-group fetch.
 GOOD_WET_SOIL_INPUTS = {
     "ksat_rows": [{"mukey": "1", "ksat_r": 0.05}],
-    "hydrologic_group_rows": [{"mukey": "1", "hydgrp": "D"}],
-    "components": [{"mukey": "1", "hydricrating": "Yes", "comppct_r": 100}],
+    "components": [{"mukey": "1", "hydricrating": "Yes", "comppct_r": 100, "hydgrp": "D"}],
     "geometries_by_mukey": {"1": transform_geom(CRS, "EPSG:4326", mapping(FLAT_BOUNDARY.buffer(20.0)))},
 }
 
@@ -326,7 +479,7 @@ assert flat_result["gate_mask_stats"]["gated_cells"] == 100, "the boundary cover
 excavated_regions = flat_result["regions_by_type"][SURVEY_TYPE_EXCAVATED]
 assert len(excavated_regions) == 1, f"uniform wet flat must yield exactly ONE excavated region, got {len(excavated_regions)}"
 assert flat_result["regions_by_type"][SURVEY_TYPE_EMBANKMENT] == [], (
-    "flat ground with no catchment must yield NO embankment region (surface 0.35 < 0.5)"
+    "flat ground with no catchment must yield NO embankment region (surface 0.35 < 0.6)"
 )
 flat_region = excavated_regions[0]
 assert flat_region["cell_count"] == 100, f"the region is ALL 100 gated cells, got {flat_region['cell_count']}"
@@ -335,6 +488,10 @@ assert math.isclose(flat_region["mean_suitability"], round(expected_flat_score, 
     f"hand-derived mean {round(expected_flat_score, 4)}, got {flat_region['mean_suitability']}"
 )
 assert flat_region["max_suitability"] == flat_region["mean_suitability"], "uniform fixture -> uniform score"
+assert flat_region["raw_mean_suitability"] == flat_region["mean_suitability"], (
+    "on uniform ground the masked focal mean is exactly a no-op (off-mask cells sit outside numerator "
+    "AND denominator), so smoothed and raw means coincide"
+)
 assert math.isclose(flat_region["area_acres"], round(100 * CA, 4)), "acreage is cell-count x cell area"
 assert flat_region["below_min_area"] is False and FLAG_BELOW_MIN_AREA not in flat_region["flags"]
 assert flat_region["twi_percentile_mean"] == 0.5, "flat ties read the neutral mean-rank 0.5"
@@ -386,39 +543,106 @@ v_accumulation = np.ones((V_ROWS, V_COLS))
 for r in range(V_ROWS):
     v_accumulation[r, V_CHANNEL] = 15 * (r + 1)
 
-v_result = compute_water_survey_areas(V_DEM, V_BOUNDARY, flow_accumulation=v_accumulation)
+# Extraction runs at an EXPLICIT threshold 0.5 here: the smoothed
+# surface mixes ~0.47 side ground into the channel highs, so the 0.6
+# default (re-verified against post-smoothing reality by the
+# diagnostic's threshold comparison on the real property) would leave
+# this synthetic ribbon empty -- and threshold-as-parameter is itself
+# part of the contract under test.
+V_THRESHOLD = 0.5
+v_result = compute_water_survey_areas(
+    V_DEM, V_BOUNDARY, flow_accumulation=v_accumulation, threshold=V_THRESHOLD
+)
+
+# Derive the expected outcome from the stated per-cell formulas, then
+# apply the survey-radius neighborhood mean via an EXPLICIT naive double
+# loop -- a from-first-principles reimplementation of the masked focal
+# mean (same disc offsets, numerator and denominator over gated cells
+# only), independent of the vectorized shift-and-accumulate under test.
+from raster_grid import build_disc_kernel_offsets, connected_components  # noqa: E402
+
+v_gate = np.zeros((V_ROWS, V_COLS), dtype=bool)
+v_gate[2:38, 2:19] = True
+side_twi = (0 + 0.5 * (576 - 1)) / 611  # 576 equal side cells, mean-rank
+v_raw_expected = np.zeros((V_ROWS, V_COLS))
+for r in range(V_ROWS):
+    for c in range(V_COLS):
+        if not v_gate[r, c]:
+            continue
+        if c == V_CHANNEL:
+            acres = 15 * (r + 1) * CA
+            d = min(max((acres - 0.5) / 1.5, 0.0), 1.0)
+            twi_pct = (576 + (r - 2)) / 611  # channel ranks above every side cell, ordered by row
+            v_raw_expected[r, c] = 0.30 * d + 0.25 * 1.0 + 0.25 * 0.5 + 0.20 * twi_pct
+        else:
+            v_raw_expected[r, c] = 0.25 * 1.0 + 0.25 * 0.5 + 0.20 * side_twi
+
+assert np.allclose(
+    np.where(v_gate, v_result["surfaces"]["raw"][SURVEY_TYPE_EMBANKMENT], 0.0), v_raw_expected
+), "the raw embankment blend must match the stated per-cell formulas on every gated cell"
+
+_offsets = build_disc_kernel_offsets((RESOLUTION, RESOLUTION), 15.0)
+v_smoothed_expected = np.zeros((V_ROWS, V_COLS))
+for r in range(V_ROWS):
+    for c in range(V_COLS):
+        if not v_gate[r, c]:
+            continue
+        numerator = denominator = 0.0
+        for dr, dc in _offsets:
+            rr, cc = r + dr, c + dc
+            if 0 <= rr < V_ROWS and 0 <= cc < V_COLS and v_gate[rr, cc]:
+                numerator += v_raw_expected[rr, cc]
+                denominator += 1
+        v_smoothed_expected[r, c] = numerator / denominator
+
+expected_member_mask = v_gate & (v_smoothed_expected >= V_THRESHOLD)
+expected_members = {(int(r), int(c)) for r, c in np.argwhere(expected_member_mask)}
+assert expected_members, "the fixture must produce members at 0.5 or it tests nothing"
+_, expected_component_count = connected_components(expected_member_mask, connectivity=8)
 
 v_regions = v_result["regions_by_type"][SURVEY_TYPE_EMBANKMENT]
-assert len(v_regions) == 1, f"the drainage band must carve exactly one embankment ribbon, got {len(v_regions)}"
+assert len(v_regions) == expected_component_count == 1, (
+    f"the smoothed drainage ribbon must extract as expected_component_count={expected_component_count} "
+    f"8-connected region(s), got {len(v_regions)}"
+)
 ribbon = v_regions[0]
-assert ribbon["cell_count"] == 36, f"hand-counted ribbon: the 36 on-parcel channel cells, got {ribbon['cell_count']}"
-assert all(c == V_CHANNEL for _, c in ribbon["cells"]), "every ribbon cell hugs the channel column"
-assert sorted(r for r, _ in ribbon["cells"]) == list(range(2, 38)), "the ribbon spans on-parcel rows 2..37"
-
-# Hand-sum the expected mean from the stated per-cell formula:
-expected_cells = []
-for i, r in enumerate(range(2, 38)):
-    acres = 15 * (r + 1) * CA
-    d = min(max((acres - 0.5) / 1.5, 0.0), 1.0)
-    twi_pct = (576 + i) / 611
-    expected_cells.append(0.30 * d + 0.25 * 1.0 + 0.25 * 0.5 + 0.20 * twi_pct)
-assert math.isclose(ribbon["mean_suitability"], round(float(np.mean(expected_cells)), 4)), (
-    f"hand-summed ribbon mean {round(float(np.mean(expected_cells)), 4)}, got {ribbon['mean_suitability']}"
+assert set(ribbon["cells"]) == expected_members, (
+    "region membership must equal the naive-smoothing expectation cell for cell"
+)
+assert all(abs(c - V_CHANNEL) <= 3 for _, c in ribbon["cells"]), (
+    "the smoothed ribbon still hugs the channel (within the 3-cell survey radius of it)"
+)
+expected_smoothed_mean = round(float(np.mean([v_smoothed_expected[r, c] for r, c in expected_members])), 4)
+expected_raw_mean = round(float(np.mean([v_raw_expected[r, c] for r, c in expected_members])), 4)
+assert ribbon["mean_suitability"] == expected_smoothed_mean, (
+    f"mean_suitability reports the SMOOTHED surface: expected {expected_smoothed_mean}, got {ribbon['mean_suitability']}"
+)
+assert ribbon["raw_mean_suitability"] == expected_raw_mean, (
+    f"raw_mean_suitability reports the UNSMOOTHED blend: expected {expected_raw_mean}"
+)
+assert ribbon["mean_suitability"] != ribbon["raw_mean_suitability"], (
+    "the reporting split must be VISIBLE on a non-uniform fixture -- smoothed and raw means differ"
+)
+# ...while per-criterion contributions stay RAW: the slope criterion is
+# 1.0 on every fixture cell, and must report exactly 1.0 however much
+# smoothing moved the blend (the narrative-honesty mechanism).
+assert ribbon["criterion_contributions"]["slope"]["mean_score"] == 1.0, (
+    "criterion contributions report RAW means -- smoothing must never launder into terrain claims"
 )
 assert v_result["regions_by_type"][SURVEY_TYPE_EXCAVATED] == [], (
     "7.78% ground is embankment territory -- no excavated region on this fixture"
 )
-# The ribbon's wettest cell is the bottom channel cell (highest TWI), and
-# its contributing area is the hand-built 15*38 cells:
-assert ribbon["wettest_cell_rowcol"] == (37, V_CHANNEL)
-assert math.isclose(ribbon["contributing_area_acres_at_wettest_cell"], round(15 * 38 * CA, 2))
-# An interior ribbon touches the boundary only at its two 5m ends:
-assert ribbon["boundary_adjacency_fraction"] < 0.1, (
-    f"an interior ribbon barely touches the boundary, got {ribbon['boundary_adjacency_fraction']}"
+# The wettest member is the bottom-most channel member (highest hand-built
+# accumulation => highest TWI rank among members):
+bottom_channel_row = max(r for r, c in expected_members if c == V_CHANNEL)
+assert ribbon["wettest_cell_rowcol"] == (bottom_channel_row, V_CHANNEL)
+assert math.isclose(
+    ribbon["contributing_area_acres_at_wettest_cell"], round(15 * (bottom_channel_row + 1) * CA, 2)
 )
 print(
-    f"Fixture 2 (V-valley + hand-built accumulation): one 36-cell embankment ribbon along the channel, "
-    f"mean {ribbon['mean_suitability']} hand-summed, wettest cell at the valley bottom."
+    f"Fixture 2 (V-valley + hand-built accumulation): {len(expected_members)}-cell smoothed embankment "
+    f"ribbon along the channel, one 8-connected region, smoothed mean {ribbon['mean_suitability']} vs raw "
+    f"{ribbon['raw_mean_suitability']} (split visible), raw criterion means intact."
 )
 
 # --- FIXTURE 3: a sub-floor region is FLAGGED AND PRESENT (and can even
@@ -577,6 +801,18 @@ for survey_type, bands in isobands_by_type.items():
         assert not band["polygons_utm"].is_empty
         assert isinstance(band["geometry_wgs84"], dict), "isobands carry BOTH forms, built at band birth"
 
+# Per-criterion isobands (the excavated-diagnosis layer): from the RAW
+# criterion grids, both types. On this fixture the excavated soil
+# criterion is 1.0 across the parcel, so its top band must exist.
+criterion_isobands = diag.compute_criterion_isobands(
+    FLAT_DEM, {"result": hit_result, "regions": hit_result["regions"]}
+)
+assert set(criterion_isobands.keys()) == {SURVEY_TYPE_EMBANKMENT, SURVEY_TYPE_EXCAVATED}
+assert set(criterion_isobands[SURVEY_TYPE_EXCAVATED].keys()) == set(EXCAVATED_WEIGHTS.keys())
+assert any(b["band_lower"] == 0.8 for b in criterion_isobands[SURVEY_TYPE_EXCAVATED]["soil"]), (
+    "the fixture's soil criterion is 1.0 parcel-wide -- its 0.8 band must be present"
+)
+
 # WGS84 boundary ring for the context layer (the fixture's own wire form):
 boundary_wgs84 = transform_geom(CRS, "EPSG:4326", mapping(FLAT_BOUNDARY))
 boundary_coords_wgs84 = [tuple(point) for point in boundary_wgs84["coordinates"][0]]
@@ -588,6 +824,7 @@ export = diag.export_water_survey_areas_geojson(
     [{**production_patch, "geometry_wgs84": transform_geom(CRS, "EPSG:4326", mapping(production_patch["polygon_utm"])), "area_acres": 1.0}],
     isobands_by_type,
     path=EXPORT_PATH,
+    criterion_isobands_by_type=criterion_isobands,
 )
 
 with open(EXPORT_PATH, encoding="utf-8") as handle:
@@ -600,6 +837,10 @@ by_layer = export["by_layer"]
 assert by_layer.get("survey_region_excavated", 0) == 1, "the fixture's one region rides the excavated layer"
 assert by_layer.get("suitability_isoband_embankment", 0) >= 1
 assert by_layer.get("suitability_isoband_excavated", 0) >= 1
+assert by_layer.get("criterion_isoband_excavated_soil", 0) >= 1, (
+    "the per-criterion tuning layers must land in the export, layer-named per criterion"
+)
+assert by_layer.get("criterion_isoband_embankment_twi", 0) >= 1
 assert by_layer.get("survey_context_boundary", 0) == 1
 assert by_layer.get("survey_context_production_area", 0) == 1
 boundary_feature = next(f for f in collection["features"] if f["properties"]["layer"] == "survey_context_boundary")
@@ -616,6 +857,7 @@ for emitter in (
     survey_areas_to_geojson,
     wsa._region_feature_properties,
     diag._isoband_features,
+    diag._criterion_isoband_features,
     diag._context_features,
     diag.export_water_survey_areas_geojson,
 ):

@@ -249,11 +249,13 @@ silently patching another module or reimplementing its logic)
      genuinely separate constants (unlike the unified road buffer).
      This costs no network fetch (canopy_height is forwarded; only the
      mask derivation repeats) -- flagged here, not added. The water
-     step's soil fetch (ksat/hydrologic group/components/geometries) is
-     also its own whole-boundary SDA round-trip, separate from
-     ParcelData's soil fetches; wiring those four through ParcelData/
-     this context is a redundancy-audit item, deliberately out of this
-     branch's scope.
+     step's soil inputs are RESOLVED (tuning pass): hydrologic group now
+     rides the existing get_soil_data_for_polygon() query (a column, not
+     a second fetch), and the soil trio (ksat rows / component rows /
+     map-unit geometry) is forwarded from ParcelData's Layer-1 fetches
+     through this function's own saturated_hydraulic_conductivity/
+     soil_components/soil_geometries passthroughs -- the water step
+     performs no SDA fetch on the pipeline path.
 
   2. production_area_ceiling.identify_optimized_production_areas() takes
      `boundary_coordinates` + `dem`, not an already-computed
@@ -523,6 +525,7 @@ def build_pipeline_context(
     water_features: Optional[dict] = None,
     soil_geometries: Optional[dict] = None,
     canopy_height: Optional[dict] = None,
+    saturated_hydraulic_conductivity: Optional[list[dict]] = None,
 ) -> PipelineContext:
     """
     Computes every shared upstream input multiple KSOP pipeline steps
@@ -577,19 +580,32 @@ def build_pipeline_context(
     _boundary_polygon_utm() below performs) passes it through here instead
     of paying for a second, redundant reprojection.
 
-    soil_components, farm_roads, water_features, and soil_geometries are
-    optional too, but unlike dem/boundary_polygon_utm above, this function
-    never self-fetches any of them -- it passes them straight through,
-    unconditionally, to the wrapper functions that actually own the
-    corresponding self-fetch (road_corridors._fetch_floodplain_hydric_
-    union() for soil_components/water_features/soil_geometries, farm_
-    roads_data.get_road_exclusion_union_utm() for farm_roads); each of
-    those now has its own None-falls-back-to-self-fetch override param, so
+    soil_components, farm_roads, water_features, soil_geometries, and
+    saturated_hydraulic_conductivity are optional too, but unlike
+    dem/boundary_polygon_utm above, this function never self-fetches any
+    of them -- it passes them straight through, unconditionally, to the
+    functions that actually own the corresponding self-fetch
+    (road_corridors._fetch_floodplain_hydric_union() for soil_components/
+    water_features/soil_geometries, farm_roads_data.get_road_exclusion_
+    union_utm() for farm_roads, and the water step below for the soil
+    trio); each of those has its own fall-back-to-self-fetch path, so
     leaving any argument here as None reproduces the exact pre-existing
-    self-fetch behavior. A caller that already fetched all four for this
-    exact boundary (e.g. parcel_data.fetch_parcel_data()) passes them
-    through here instead of paying for four second, redundant fetches. See
-    KNOWN LIMITATIONS #5 (now RESOLVED) for the history of closing this.
+    behavior. A caller that already fetched them for this exact boundary
+    (e.g. parcel_data.fetch_parcel_data()) passes them through here
+    instead of paying for second, redundant fetches. See KNOWN
+    LIMITATIONS #5 (now RESOLVED) for the history of closing this.
+
+    THE WATER STEP'S SOIL TRIO rides three of these: when soil_components
+    AND soil_geometries AND saturated_hydraulic_conductivity are all
+    supplied (the ParcelData path -- Layer 1, fetched once, hard-fail
+    governed), they are assembled into water_survey_areas'
+    soil_inputs override, so the water step's soil criterion consumes
+    the SAME rows ParcelData already fetched and performs no SDA fetch
+    of its own (hydrologic group rides soil_components since the hydgrp
+    query change -- see soil_data.get_soil_data_for_polygon()). When any
+    of the three is missing, the override is simply not passed and the
+    water step keeps its own documented standalone posture
+    (fetch-or-degrade to never-checked).
     """
     if dem is None:
         dem = dem_data.get_dem_for_boundary(boundary_coordinates)
@@ -768,6 +784,25 @@ def build_pipeline_context(
     # keypoints() above still runs exactly once -- keypoints remain their
     # own KSOP layer (relationship pass below, map, report), untouched by
     # this water-step redesign.
+    # The soil trio: assembled into the water step's soil_inputs override
+    # only when ALL THREE pieces were supplied (the ParcelData path) --
+    # partial data is not forwarded, because the water scorer's
+    # all-or-nothing soil posture must not receive a mix of real and
+    # missing pieces dressed up as one checked answer. When not
+    # assembled, the kwarg is simply omitted and the water step keeps its
+    # own standalone fetch-or-degrade posture.
+    water_step_kwargs = {}
+    if (
+        soil_components is not None
+        and soil_geometries is not None
+        and saturated_hydraulic_conductivity is not None
+    ):
+        water_step_kwargs["soil_inputs"] = {
+            "ksat_rows": saturated_hydraulic_conductivity,
+            "components": soil_components,
+            "geometries_by_mukey": soil_geometries,
+        }
+
     water_system_result = water_survey_areas.identify_water_survey_areas(
         boundary_coordinates,
         dem=dem,
@@ -775,6 +810,7 @@ def build_pipeline_context(
         production_areas=production_areas,
         canopy_height=canopy_height,
         road_exclusion_union_utm=existing_roads,
+        **water_step_kwargs,
     )
     water_zones = water_system_result["zones_geojson"]["features"]
     selected_water_zone = water_system_result["selected_water_zone"]

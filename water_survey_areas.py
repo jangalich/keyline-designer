@@ -78,14 +78,24 @@ Everything else that used to gate is a reported measurement here: canopy
 and road overlap, production overlap, gravity relationship, boundary
 adjacency -- all context for the site visit, none of them drops a region.
 
-REGION EXTRACTION, per type: cells at/above SUITABILITY_THRESHOLD
-(provisional; a parameter of the extraction function -- the constant only
-supplies the default), 4-connected components. NO MORPHOLOGY OF ANY KIND:
-render_fill_polygon_utm IS polygon_utm, the identity, from birth -- see
-exclusion_zones.identify_exclusion_zones()'s docstring for the precedent
-(there is no display-only reduction to apply to an exact cell footprint;
-shrinking or smoothing it for display would draw a different answer than
-the one computed). Nothing is dropped: a region below the
+REGION EXTRACTION, per type: each blended surface is first smoothed with
+a MASKED FOCAL MEAN at SURVEY_SMOOTHING_RADIUS_METERS (the survey-radius
+neighborhood mean -- a measurement-definition change, cell ->
+neighborhood, NOT morphology; see that constant's docstring for the
+principled distinction and the smoothed-vs-raw reporting split), then
+cells at/above SUITABILITY_THRESHOLD (provisional 0.6, chosen from the
+first run's isobands and re-verified by the diagnostic's threshold
+comparison; a parameter of the extraction function -- the constant only
+supplies the default) form 8-connected components
+(WATER_REGION_CONNECTIVITY -- water's own constant, deliberately NOT
+production's 4: flow-concentrated highs run diagonally along stems, and
+4-connectivity shreds a diagonal chain into beads by definition). NO
+MORPHOLOGY OF ANY KIND on extracted geometry: render_fill_polygon_utm IS
+polygon_utm, the identity, from birth -- see exclusion_zones.
+identify_exclusion_zones()'s docstring for the precedent (there is no
+display-only reduction to apply to an exact cell footprint; shrinking or
+smoothing a FOOTPRINT for display would draw a different answer than the
+one computed). Nothing is dropped: a region below the
 MIN_SURVEY_REGION_AREA_ACRES floor carries a `below_min_area` flag and
 its exact acreage; there is no region cap and no presentation cap.
 
@@ -136,6 +146,7 @@ from production_area import METERS_PER_FOOT, compute_slope_percent, get_required
 from production_area_ceiling import identify_optimized_production_areas
 from raster_grid import (
     SQUARE_METERS_PER_ACRE,
+    build_disc_kernel_offsets,
     cell_area_acres,
     cell_union_footprint,
     connected_components,
@@ -143,7 +154,6 @@ from raster_grid import (
 )
 from soil_data import (
     coordinates_to_wkt_polygon,
-    get_hydrologic_group_for_polygon,
     get_saturated_hydraulic_conductivity_for_polygon,
     get_soil_data_for_polygon,
     get_soil_geometries_for_polygon,
@@ -394,15 +404,55 @@ for _survey_type, _weights in ((SURVEY_TYPE_EMBANKMENT, EMBANKMENT_WEIGHTS), (SU
     )
 
 
+# --- focal smoothing (the survey-radius neighborhood mean) ----------------
+
+# Radius of the masked focal mean applied to each BLENDED suitability
+# surface before thresholding -- ~3 cells at the pipeline's 5 m DEM.
+# Chosen from the first reference run, where the embankment surface's
+# flow-concentrated highs (drainage band + TWI both score channel cells)
+# produced one-cell beads along a diagonal ribbon; a survey area is a
+# NEIGHBORHOOD claim, so the score that gets thresholded should be the
+# neighborhood's. Tune-from-run. CONFIGURABLE.
+#
+# THIS IS NOT A VIOLATION OF THE NO-MORPHOLOGY RULE, and the distinction
+# is principled, not rhetorical: the no-morphology rule protects MEASURED
+# GEOMETRY -- never redraw a footprint after computing it (the
+# exclusion_zones precedent; render_fill stays the identity here, always).
+# Smoothing changes WHAT IS MEASURED, before any geometry exists: from
+# "how suitable is this cell" to "how suitable is this cell's
+# NEIGHBORHOOD" -- and a survey area is by definition a neighborhood
+# claim (nobody walks a survey rod to a single 5 m cell). No morphology
+# is applied to extracted regions, now or ever.
+#
+# The mean is MASKED: taken over IN-PLAY (gated) cells within the window
+# only -- off-parcel and gate-excluded cells are excluded from numerator
+# AND denominator, so boundary-adjacent ground is not dragged down by
+# cells that do not exist for this purpose (see masked_focal_mean()).
+#
+# REPORTING SPLIT (load-bearing, preserved in region properties):
+# extraction and ranking use the SMOOTHED surface, and each region
+# reports smoothed mean/max (mean_suitability / max_suitability, plus
+# raw_mean_suitability for transparency); per-criterion contributions
+# report RAW means over the region's cells -- what the ground actually
+# is. The narrative-honesty mechanism must not launder smoothed values
+# into terrain claims: "your drainage criterion scored 0.8" must always
+# be a statement about these cells, never about their neighbors.
+SURVEY_SMOOTHING_RADIUS_METERS = 15.0
+
+
 # --- region extraction ----------------------------------------------------
 
-# Cells at/above this suitability score are extracted into survey
-# regions. PROVISIONAL 0.5 -- the whole point of the first-run isoband
-# export (0.2/0.4/0.6/0.8 bands over imagery) is to pick this value from
-# where regions cohere and dissolve; this constant only supplies the
-# extraction function's DEFAULT, it is not baked into the math anywhere.
-# TUNE FROM FIRST RUN. CONFIGURABLE.
-SUITABILITY_THRESHOLD = 0.5
+# Cells at/above this SMOOTHED suitability score are extracted into
+# survey regions. PROVISIONAL 0.6, moved from the initial 0.5 prior --
+# chosen from the first reference run's isobands (where regions cohered
+# at 0.6 and dissolved below it). Because smoothing lowers peaks and
+# shifts the distribution, the diagnostic prints a THRESHOLD COMPARISON
+# (region count / total acreage / largest region at 0.5 / 0.6 / 0.7 on
+# the SMOOTHED surfaces) so this choice is re-verified against
+# post-smoothing reality in the same run rather than trusted forward.
+# This constant only supplies the extraction function's DEFAULT; it is
+# not baked into the math anywhere. TUNE FROM RUN. CONFIGURABLE.
+SUITABILITY_THRESHOLD = 0.6
 
 # Regions below this acreage are FLAGGED (`below_min_area`), never
 # dropped -- first-run posture. The value matches water_candidate_zones.
@@ -412,16 +462,20 @@ SUITABILITY_THRESHOLD = 0.5
 # CONFIGURABLE.
 MIN_SURVEY_REGION_AREA_ACRES = 0.1
 
-# 4-connected component labeling, per the house convention for footprints
-# that must polygonize into single Polygons: a 4-connected cluster is
-# edge-connected, so its cell-union footprint can never be a corner-touch
-# MultiPolygon (see production_area.cluster_and_gate(), the established
-# 4-connectivity precedent, and raster_grid.connected_components()'s own
-# docstring). Survey regions are handed to fencing/solar/tree subtraction
-# as single coherent shapes, so edge-connectivity is the right adjacency
-# here -- unlike the demoted level-pool retention trim, which used D8 to
-# match the flow field it was built from.
-SURVEY_REGION_CONNECTIVITY = 4
+# 8-connected component labeling for WATER survey regions -- deliberately
+# NOT production's convention, and never to be aliased with it:
+# production_area.cluster_and_gate() uses 4-connectivity ON PURPOSE (its
+# waist-detection/single-Polygon-footprint reasoning, documented there),
+# while water survey regions use 8 because flow-concentrated suitability
+# highs run DIAGONALLY along drainage stems, and 4-connectivity shreds a
+# diagonal chain into one-cell beads BY DEFINITION (a diagonal step
+# shares no edge). The first reference run demonstrated exactly that:
+# regions 2/5/6/7/8/9 were beads along one diagonal ribbon. An
+# 8-connected footprint CAN come back as a corner-touch MultiPolygon --
+# a shape every water-zone consumer has always accepted (the retired
+# scorer documented water geometry as legitimately MultiPolygon).
+# CONFIGURABLE, but see the bead history before changing it back.
+WATER_REGION_CONNECTIVITY = 8
 
 # Tolerance for the boundary-adjacency measurement: the fraction of a
 # region's perimeter within this distance of the parcel boundary line.
@@ -818,19 +872,27 @@ def build_soil_score_grid(dem: dict, gate_mask: np.ndarray, soil_inputs: Optiona
 
     soil_inputs is either None -- soil NEVER CHECKED (fetch failed or
     skipped): every cell reads the neutral SOIL_UNAVAILABLE_SCORE,
-    coverage is None, availability all False -- or a dict of the four
-    pre-fetched pieces:
+    coverage is None, availability all False -- or a dict of the three
+    pre-fetched pieces, ALL of which ParcelData already carries
+    (Layer 1, fetched once, hard-fail governed -- the pipeline path
+    forwards them through build_pipeline_context()):
 
         {
-            'ksat_rows':              soil_data.get_saturated_hydraulic_conductivity_for_polygon(),
-            'hydrologic_group_rows':  soil_data.get_hydrologic_group_for_polygon(),
-            'components':             soil_data.get_soil_data_for_polygon(),
-            'geometries_by_mukey':    soil_data.get_soil_geometries_for_polygon(),
+            'ksat_rows':           soil_data.get_saturated_hydraulic_conductivity_for_polygon()
+                                     (= ParcelData.saturated_hydraulic_conductivity),
+            'components':          soil_data.get_soil_data_for_polygon()
+                                     (= ParcelData.soil_components; carries hydgrp
+                                      since the hydrologic-group query change),
+            'geometries_by_mukey': soil_data.get_soil_geometries_for_polygon()
+                                     (= ParcelData.soil_geometries),
         }
 
     where any piece may itself be an empty list/dict (checked, genuinely
     nothing -- a real answer, distinct from never-checked, per the house
-    None-vs-absent doctrine).
+    None-vs-absent doctrine). Hydrologic group is read off each map
+    unit's DOMINANT component (components arrive comppct_r DESC, so the
+    first row per mukey is the dominant one -- the shared soil_data
+    convention); there is no separate hydrologic-group fetch anymore.
 
     Returns {'score_grid', 'covered_mask', 'availability',
     'scores_by_mukey'}: score_grid holds SOIL_UNAVAILABLE_SCORE wherever
@@ -851,19 +913,22 @@ def build_soil_score_grid(dem: dict, gate_mask: np.ndarray, soil_inputs: Optiona
         }
 
     ksat_rows = soil_inputs.get("ksat_rows") or []
-    group_rows = soil_inputs.get("hydrologic_group_rows") or []
     component_rows = soil_inputs.get("components") or []
     geometries_by_mukey = soil_inputs.get("geometries_by_mukey") or {}
 
     ksat_by_mukey: dict = {}
     for row in ksat_rows:
         ksat_by_mukey.setdefault(row.get("mukey"), row.get("ksat_r"))
-    group_by_mukey: dict = {}
-    for row in group_rows:
-        group_by_mukey.setdefault(row.get("mukey"), row.get("hydgrp"))
     components_by_mukey: dict = {}
     for row in component_rows:
         components_by_mukey.setdefault(row.get("mukey"), []).append(row)
+    # Hydrologic group off the DOMINANT component: component rows arrive
+    # comppct_r DESC, so each mukey's first row is its dominant one --
+    # the same positional convention soil_data's own dominant-per-mukey
+    # fetchers use. No separate hydrologic-group fetch exists.
+    group_by_mukey: dict = {
+        mukey: rows[0].get("hydgrp") for mukey, rows in components_by_mukey.items() if rows
+    }
 
     scores_by_mukey: dict = {}
     prepared_by_mukey: dict = {}
@@ -900,6 +965,53 @@ def build_soil_score_grid(dem: dict, gate_mask: np.ndarray, soil_inputs: Optiona
         },
         "scores_by_mukey": scores_by_mukey,
     }
+
+
+# ==========================================================================
+# Focal smoothing
+# ==========================================================================
+
+def masked_focal_mean(
+    values: np.ndarray,
+    mask: np.ndarray,
+    resolution_meters: tuple[float, float],
+    radius_meters: float = SURVEY_SMOOTHING_RADIUS_METERS,
+) -> np.ndarray:
+    """
+    Disc-window focal mean over IN-MASK cells only: each masked cell's
+    output is the mean of `values` across the mask cells within
+    radius_meters of it (real-ground disc via raster_grid.build_disc_
+    kernel_offsets(), elliptical in cell terms when px != py). Cells
+    outside `mask` -- off-parcel, gate-excluded, off-grid -- are absent
+    from BOTH numerator and denominator, so a boundary-adjacent cell's
+    neighborhood mean is taken over the ground that actually exists for
+    this purpose, never dragged toward zero by cells that don't. Output
+    is 0.0 outside the mask (matching the gated surfaces' own
+    convention). Pure numpy shift-and-accumulate, no scipy -- the same
+    implementation doctrine as raster_grid's morphology helpers.
+
+    See SURVEY_SMOOTHING_RADIUS_METERS's own docstring for why smoothing
+    the blended surface is a measurement-definition change (cell ->
+    neighborhood), NOT morphology, and for the smoothed-vs-raw reporting
+    split it obligates.
+    """
+    rows, cols = values.shape
+    contribution = np.where(mask, values, 0.0).astype(np.float64)
+    mask_float = mask.astype(np.float64)
+    numerator = np.zeros((rows, cols), dtype=np.float64)
+    denominator = np.zeros((rows, cols), dtype=np.float64)
+    for dr, dc in build_disc_kernel_offsets(resolution_meters, radius_meters):
+        dst_r0, dst_r1 = max(0, -dr), rows - max(0, dr)
+        dst_c0, dst_c1 = max(0, -dc), cols - max(0, dc)
+        if dst_r0 >= dst_r1 or dst_c0 >= dst_c1:
+            continue
+        src_r0, src_r1 = dst_r0 + dr, dst_r1 + dr
+        src_c0, src_c1 = dst_c0 + dc, dst_c1 + dc
+        numerator[dst_r0:dst_r1, dst_c0:dst_c1] += contribution[src_r0:src_r1, src_c0:src_c1]
+        denominator[dst_r0:dst_r1, dst_c0:dst_c1] += mask_float[src_r0:src_r1, src_c0:src_c1]
+    with np.errstate(invalid="ignore", divide="ignore"):
+        result = np.where(mask & (denominator > 0), numerator / np.maximum(denominator, 1e-12), 0.0)
+    return result
 
 
 # ==========================================================================
@@ -1014,15 +1126,28 @@ def extract_survey_regions(
     soil_covered_mask: np.ndarray,
     soil_checked: bool,
     threshold: float = SUITABILITY_THRESHOLD,
+    raw_surface: Optional[np.ndarray] = None,
 ) -> list[dict]:
     """
-    Extracts every 4-connected component of gated cells at/above
-    `threshold` on one type's surface into a survey-region dict --
-    geometry, the full measurement set, and flags. NOTHING IS DROPPED: a
-    region below MIN_SURVEY_REGION_AREA_ACRES carries FLAG_BELOW_MIN_AREA
-    and its exact acreage. `threshold` is a parameter deliberately --
-    SUITABILITY_THRESHOLD only supplies the default (it is the first
-    number the isoband export exists to tune).
+    Extracts every 8-connected (WATER_REGION_CONNECTIVITY -- see that
+    constant for the deliberate contrast with production's 4) component
+    of gated cells at/above `threshold` on one type's surface into a
+    survey-region dict -- geometry, the full measurement set, and flags.
+    NOTHING IS DROPPED: a region below MIN_SURVEY_REGION_AREA_ACRES
+    carries FLAG_BELOW_MIN_AREA and its exact acreage. `threshold` is a
+    parameter deliberately -- SUITABILITY_THRESHOLD only supplies the
+    default (it is the first number the isoband export exists to tune).
+
+    `surface` is the SMOOTHED blend on the pipeline path (see
+    SURVEY_SMOOTHING_RADIUS_METERS): extraction, ranking, and the
+    region's mean_suitability/max_suitability all read it. `raw_surface`
+    (the unsmoothed blend; defaults to `surface` when not supplied, for
+    callers testing extraction in isolation) feeds ONLY the
+    raw_mean_suitability transparency property -- while per-criterion
+    contributions always read the RAW criteria grids: the reporting
+    split that keeps the narrative-honesty mechanism honest (smoothed
+    values are neighborhood claims and must never be laundered into
+    statements about what this ground's own criteria scored).
 
     Gravity relationships, overlaps, ranking, confidence, and ids are
     attached later (they need production areas / canopy / roads / the
@@ -1032,9 +1157,11 @@ def extract_survey_regions(
     weights = EMBANKMENT_WEIGHTS if survey_type == SURVEY_TYPE_EMBANKMENT else EXCAVATED_WEIGHTS
     area_per_cell = cell_area_acres(dem)
     raw_array = dem["array"]
+    if raw_surface is None:
+        raw_surface = surface
 
     region_mask = gate_mask & (surface >= threshold)
-    labels, count = connected_components(region_mask, connectivity=SURVEY_REGION_CONNECTIVITY)
+    labels, count = connected_components(region_mask, connectivity=WATER_REGION_CONNECTIVITY)
 
     regions: list[dict] = []
     for label in range(count):
@@ -1054,6 +1181,7 @@ def extract_survey_regions(
             continue
 
         cell_values = np.array([surface[r, c] for r, c in cells], dtype=np.float64)
+        raw_cell_values = np.array([raw_surface[r, c] for r, c in cells], dtype=np.float64)
         area_acres = len(cells) * area_per_cell
 
         criterion_contributions = {}
@@ -1112,8 +1240,16 @@ def extract_survey_regions(
                 "cells": cells,
                 "cell_count": len(cells),
                 "area_acres": round(area_acres, 4),
+                # SMOOTHED -- what extraction and ranking actually read
+                # (the neighborhood claim); raw_mean_suitability is the
+                # unsmoothed blend over the same cells, kept beside it so
+                # the smoothing's effect is visible, never laundered.
+                # criterion_contributions below are RAW means (the
+                # reporting split -- see extract_survey_regions()'s
+                # docstring).
                 "mean_suitability": round(float(np.mean(cell_values)), 4),
                 "max_suitability": round(float(np.max(cell_values)), 4),
+                "raw_mean_suitability": round(float(np.mean(raw_cell_values)), 4),
                 "criterion_contributions": criterion_contributions,
                 "twi_percentile_mean": round(float(np.mean(twi_valid)), 3) if twi_valid else None,
                 "twi_percentile_max": round(float(np.max(twi_valid)), 3) if twi_valid else None,
@@ -1335,10 +1471,13 @@ def compute_water_survey_areas(
     derivation runs EXACTLY ONCE; each self-computes when absent.
 
     Returns a dict of regions (all of them, flagged not filtered),
-    per-type lists, the pooled selection, both surfaces + criteria grids
-    + screens (numpy/shapely -- NOT JSON-serializable; the geojson/
-    narrative builders produce the wire forms), the gate mask, and its
-    stats.
+    per-type lists, the pooled selection, the surfaces dict (surfaces
+    [type] = the SMOOTHED blend extraction actually thresholds;
+    surfaces["raw"][type] = the unsmoothed blend; surfaces["criteria"]
+    = the raw criterion grids), the screens (including the unfloored
+    depression_depth_raw for the excavated instrumentation), the gate
+    mask, and its stats (numpy/shapely -- NOT JSON-serializable; the
+    geojson/narrative builders produce the wire forms).
     """
     array = dem["array"]
 
@@ -1356,6 +1495,12 @@ def compute_water_survey_areas(
     gate_mask, gate_stats = compute_gate_mask(dem, boundary_polygon_utm, flow_accumulation)
 
     depression_depth = compute_depression_depth(array, filled)
+    # The UNFLOORED fill depth rides along for the excavated-class
+    # instrumentation (diagnose_water_survey_areas.py's before/after-
+    # noise-floor distribution and deepest-cell table) -- computed here,
+    # once, so the diagnostic interrogates the same arrays the blend
+    # used rather than re-deriving its own.
+    depression_depth_raw = compute_depression_depth(array, filled, noise_floor_meters=0.0)
     twi_raw = compute_topographic_wetness_index(dem, flow_accumulation, slope_pct)
     # Parcel-relative over the ON-PARCEL population (not just gated
     # cells): the ceiling gate removes high-accumulation cells from PLAY,
@@ -1372,9 +1517,22 @@ def compute_water_survey_areas(
     soil_checked = soil_inputs is not None
     soil = build_soil_score_grid(dem, gate_mask, soil_inputs)
 
-    surfaces = compute_suitability_surfaces(
+    raw_surfaces = compute_suitability_surfaces(
         dem, gate_mask, flow_accumulation, slope_pct, twi_percentile, depression_depth, soil["score_grid"]
     )
+    # The survey-radius neighborhood mean, per type -- extraction,
+    # ranking, isobands, and the threshold comparison all read the
+    # SMOOTHED surface; the raw blends ride beside them under "raw" for
+    # the transparency property and the diagnostic. Masked: gated cells
+    # only, in numerator and denominator both.
+    surfaces = {
+        survey_type: masked_focal_mean(
+            raw_surfaces[survey_type], gate_mask, dem["resolution_meters"], SURVEY_SMOOTHING_RADIUS_METERS
+        )
+        for survey_type in SURVEY_TYPES
+    }
+    surfaces["raw"] = {survey_type: raw_surfaces[survey_type] for survey_type in SURVEY_TYPES}
+    surfaces["criteria"] = raw_surfaces["criteria"]
 
     regions: list[dict] = []
     for survey_type in SURVEY_TYPES:
@@ -1393,6 +1551,7 @@ def compute_water_survey_areas(
                 soil["covered_mask"],
                 soil_checked,
                 threshold=threshold,
+                raw_surface=surfaces["raw"][survey_type],
             )
         )
 
@@ -1459,6 +1618,7 @@ def compute_water_survey_areas(
             "twi_raw": twi_raw,
             "twi_percentile": twi_percentile,
             "depression_depth": depression_depth,
+            "depression_depth_raw": depression_depth_raw,
             "flow_accumulation": flow_accumulation,
             "slope_pct": slope_pct,
             "filled": filled,
@@ -1663,17 +1823,25 @@ _SOIL_INPUTS_NOT_SUPPLIED = object()
 
 def _fetch_soil_inputs(boundary_coordinates: list[tuple[float, float]]) -> dict:
     """
-    One whole-boundary fetch of the four soil pieces the scorer reads --
-    ksat (dominant component, shallowest mineral horizon), hydrologic
-    group (dominant component), full component rows (hydric share), and
-    clipped map-unit geometry. Whole-boundary rather than per-region
+    STANDALONE-CALLER FALLBACK ONLY -- the pipeline path never reaches
+    this. On the pipeline path all three pieces come from ParcelData
+    (Layer 1: fetched once, hard-fail governed) and ride through
+    build_pipeline_context() into the soil_inputs override; this
+    self-fetch exists so identify_water_survey_areas() invoked standalone
+    (a diagnostic, a one-off script) still works, with the documented
+    fetch-or-degrade posture.
+
+    One whole-boundary fetch of the three soil pieces the scorer reads:
+    ksat (dominant component, shallowest mineral horizon), full component
+    rows (hydric share AND hydrologic group -- hydgrp rides
+    get_soil_data_for_polygon() since the hydrologic-group query change),
+    and clipped map-unit geometry. Whole-boundary rather than per-region
     because the surfaces need per-CELL soil before any region exists.
     Raises on failure; the caller degrades to the never-checked posture.
     """
     wkt_polygon = coordinates_to_wkt_polygon(boundary_coordinates)
     return {
         "ksat_rows": get_saturated_hydraulic_conductivity_for_polygon(wkt_polygon),
-        "hydrologic_group_rows": get_hydrologic_group_for_polygon(wkt_polygon),
         "components": get_soil_data_for_polygon(wkt_polygon),
         "geometries_by_mukey": get_soil_geometries_for_polygon(wkt_polygon),
     }
@@ -1709,12 +1877,21 @@ def identify_water_survey_areas(
         ("never checked"), never a fabricated 0.0; a caller-supplied
         real None is the CLEAN "checked, genuinely no mapped road"
         answer and is reused, not re-fetched.
-      soil -- fetch-or-degrade the same way (one whole-boundary fetch of
-        all four pieces; any failure degrades the whole soil criterion
-        to neutral-and-uncounted rather than part-real part-neutral --
-        deliberately all-or-nothing for the first run, so a partial
-        outage can't masquerade as measured soil. PROVISIONAL; per-piece
-        degradation is a tuning-phase refinement).
+      soil -- LAYER 1 ON THE PIPELINE PATH: all three pieces (ksat rows,
+        component rows carrying hydgrp, clipped map-unit geometry) are
+        ParcelData fields, fetched once behind its hard-fail contract
+        and forwarded here through build_pipeline_context()'s
+        soil_inputs override, so the pipeline never fetches soil inside
+        this step. STANDALONE callers get fetch-or-degrade: one
+        whole-boundary fetch of the three pieces (_fetch_soil_inputs());
+        any failure degrades the WHOLE soil criterion to
+        never-checked -- neutral scores, coverage None, the confidence
+        signal lost, and the narrative saying NEVER CHECKED --
+        deliberately all-or-nothing, so a partial outage can't
+        masquerade as measured soil, and NEVER silently swallowed into
+        the renormalization (renormalizing over available sub-signals
+        is for absent data WITHIN a successful fetch; a failed fetch is
+        a different fact and reports as one).
 
     Returns:
         {

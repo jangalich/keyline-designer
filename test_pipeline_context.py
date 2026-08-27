@@ -1875,4 +1875,117 @@ print(
     "for its own readers."
 )
 
+
+# --- SOIL TRIO FORWARDING: the water step's soil inputs are Layer 1's, ---
+# --- fetched once by ParcelData and forwarded -- ZERO SDA calls inside ---
+# --- the step on the pipeline path (MEASURED, not assumed) ---
+#
+# The hydrologic-group question resolved architecturally: hydgrp rides
+# soil_data.get_soil_data_for_polygon() (a column on the component join
+# that query already reads -- a QUERY CHANGE, not a new fetch), so the
+# water step's whole soil trio (ksat rows / component rows / map-unit
+# geometry) comes from ParcelData fields this function passes through.
+# When all three are supplied, build_pipeline_context() assembles them
+# into the water step's soil_inputs override -- the SAME objects,
+# identity-checked below -- and the step's own soil-fetch bindings are
+# never reached. The step's fetch-or-degrade posture remains its
+# STANDALONE story only (the main run above proves it: _fetch_soil_inputs
+# raising degrades to soil_checked=False, never a crash and never a
+# silently-swallowed failure inside the renormalization).
+
+_soil_ring = [list(pt) for pt in boundary_coordinates]
+if _soil_ring[0] != _soil_ring[-1]:
+    _soil_ring.append(list(_soil_ring[0]))
+_fwd_ksat_rows = [{"mukey": "9", "ksat_r": 0.5}]
+_fwd_soil_components = [{"mukey": "9", "hydricrating": "No", "comppct_r": 100, "hydgrp": "C"}]
+_fwd_soil_geometries = {"9": {"type": "Polygon", "coordinates": [_soil_ring]}}
+
+with ExitStack() as _soil_stack:
+    _enter = _soil_stack.enter_context
+    _enter(mock_patch.object(pc.dem_data, "get_dem_for_boundary", return_value=synthetic_dem))
+    _enter(mock_patch.object(pc.valley_delineation, "delineate_valleys", return_value=[]))
+    _enter(mock_patch.object(pc.keypoint_detection, "detect_keypoints", return_value=[]))
+    _enter(mock_patch.object(pc.exclusion_zones, "identify_exclusion_zones", return_value={"narrative_data": None}))
+    _enter(
+        mock_patch.object(
+            pc.production_area_ceiling, "identify_optimized_production_areas", return_value=fake_optimized_result
+        )
+    )
+    _enter(mock_patch.object(pc.farm_roads_data, "get_road_exclusion_union_utm", return_value=fake_existing_roads_union))
+    _enter(mock_patch.object(pc.road_corridors, "_fetch_floodplain_hydric_union", return_value=(fake_hydric_union, False)))
+    # The water step runs REAL (wraps=), with its canopy gate stubbed
+    # offline and every soil-fetch binding replaced by a counting mock --
+    # the point of this section is that NONE of them fires.
+    _soil_water = _enter(
+        mock_patch.object(
+            pc.water_survey_areas,
+            "identify_water_survey_areas",
+            wraps=pc.water_survey_areas.identify_water_survey_areas,
+        )
+    )
+    _enter(
+        mock_patch.object(pc.water_survey_areas, "get_required_tree_root_zone_mask_utm", side_effect=_fake_clean_canopy_mask)
+    )
+    _soil_fetch_spies = {
+        name: _enter(mock_patch.object(pc.water_survey_areas, name))
+        for name in (
+            "_fetch_soil_inputs",
+            "get_saturated_hydraulic_conductivity_for_polygon",
+            "get_soil_data_for_polygon",
+            "get_soil_geometries_for_polygon",
+        )
+    }
+    _enter(
+        mock_patch.object(pc.road_corridors, "identify_road_corridor_candidates", return_value=fake_road_corridor_result)
+    )
+    _enter(
+        mock_patch.object(
+            pc,
+            "identify_solar_candidate_zones",
+            return_value={"zones_geojson": _empty_fc_nwz, "selected_structure_site": None},
+        )
+    )
+    _enter(
+        mock_patch.object(
+            pc,
+            "identify_tree_zone_candidates",
+            return_value={"zones_geojson": _empty_fc_nwz, "patches": []},
+        )
+    )
+
+    _soil_ctx = pc.build_pipeline_context(
+        boundary_coordinates,
+        anchor_lon_lat,
+        soil_components=_fwd_soil_components,
+        soil_geometries=_fwd_soil_geometries,
+        saturated_hydraulic_conductivity=_fwd_ksat_rows,
+    )
+
+_soil_inputs_received = _soil_water.call_args.kwargs.get("soil_inputs")
+assert _soil_inputs_received is not None, (
+    "with all three soil pieces supplied, build_pipeline_context() must assemble and pass the water "
+    "step's soil_inputs override"
+)
+assert _soil_inputs_received["ksat_rows"] is _fwd_ksat_rows, "the ksat rows must be ParcelData's own INSTANCE"
+assert _soil_inputs_received["components"] is _fwd_soil_components, (
+    "the component rows (carrying hydgrp) must be ParcelData's own INSTANCE"
+)
+assert _soil_inputs_received["geometries_by_mukey"] is _fwd_soil_geometries, (
+    "the map-unit geometry must be ParcelData's own INSTANCE"
+)
+for _spy_name, _spy in _soil_fetch_spies.items():
+    assert _spy.call_count == 0, (
+        f"water_survey_areas.{_spy_name}() must run EXACTLY 0x on the pipeline path with the soil trio "
+        f"forwarded -- soil is Layer 1's fetch, made once by ParcelData, MEASURED here at "
+        f"{_spy.call_count} call(s). One more means the step is re-fetching SDA inline again."
+    )
+assert _soil_ctx.narrative_data["water_survey_areas"]["soil_checked"] is True, (
+    "forwarded Layer-1 soil is a CHECKED answer -- the narrative must not claim soil was never checked"
+)
+print(
+    "SOIL TRIO FORWARDING: build_pipeline_context() hands the water step ParcelData's own ksat/component/"
+    "geometry instances as soil_inputs; all four of the step's soil-fetch bindings measured at exactly 0 "
+    "calls, and the narrative reports soil as checked."
+)
+
 print("\nAll pipeline_context checks passed.")
