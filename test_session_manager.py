@@ -16,8 +16,11 @@ boundary: they are wrapped (wraps=) to be counted, never replaced.
 What IS mocked is the network, and only the network: parcel_data.
 fetch_parcel_data() returns a ParcelData built over a DEM fixture for
 this boundary's own UTM extent, and the two SDA queries the exclusion
-module reaches on its own are canned. That is what makes the call-count
-assertions below meaningful -- the same discipline test_pipeline_context.
+module USED to reach on its own are canned -- they are now asserted at
+ZERO on the warm-up path (the fixture ParcelData carries those same rows,
+and the warm-up forwards them), the canned values remaining so section 10
+can still exercise the self-fetch fallback directly. That is what makes
+the call-count assertions below meaningful -- the same discipline test_pipeline_context.
 py applies, asserted at EXACT counts rather than upper bounds, because
 one more of any of them means something is re-fetching.
 
@@ -25,7 +28,8 @@ Sections:
   1. CREATION -- succeeds on real coordinates; document persists; cache
      populated; the three warm-up products are real.
   2. CALL COUNT -- exactly ONE fetch_parcel_data() per creation, and zero
-     second fetches of canopy/roads (the forwarded overrides).
+     second fetches of canopy/roads/SSURGO rows (the forwarded
+     overrides).
   3. WARM-UP -- delineate_valleys() runs exactly ONCE across a creation,
      summed over BOTH import bindings; keypoints carry no
      'feature_relationships'.
@@ -34,11 +38,17 @@ Sections:
      noise hits the same entry.
   6. HARD FAIL -- a failed fetch creates NO session: nothing persisted,
      nothing cached.
-  7. REBUILD -- drop the cache entry, ask again: it rebuilds, with ZERO
-     Layer 1 network calls, into an entry equivalent to the original.
+  7. REBUILD -- drop the cache entry, ask again: it rebuilds with ZERO
+     network calls of ANY kind (Layer 1 served by the fetch cache, and no
+     Layer-2-internal SDA query either), into an entry equivalent to the
+     original.
   8. EVICTION -- LRU cap and idle timeout, each resolved by rebuild.
   9. VALIDATION -- open ring, too few vertices, self-intersecting,
      absurd area.
+ 10. SELF-FETCH FALLBACK -- with the raw-row soil overrides omitted, the
+     hydric gate still fetches for itself and produces a BIT-IDENTICAL
+     result. The zeros in section 2 only mean something if the None path
+     is still a real, working one.
 """
 
 import tempfile
@@ -243,8 +253,13 @@ class Harness:
             )
         )
 
-        # The two SDA queries identify_exclusion_zones() reaches on its
-        # own -- see session_cache.py's KNOWN RESIDUAL FETCH section.
+        # The two SDA queries identify_exclusion_zones()'s hydric gate
+        # used to reach on its own. Both must now stay at ZERO on every
+        # warm-up: the warm-up forwards ParcelData's soil_components/
+        # soil_geometries, so a nonzero count means an override stopped
+        # being passed -- see session_cache.py's THE RESIDUAL SOIL FETCH:
+        # CLOSED section. They still return the fixture rows so the
+        # fall-back path stays exercisable (section 10 calls it directly).
         self.soil_components = patch(
             mock_patch.object(
                 production_area,
@@ -518,18 +533,24 @@ with Harness() as h:
         f"{h.identify_exclusion_zones.call_count}"
     )
 
-    # THE REPORTED GAP, asserted at its real value rather than wished
-    # away. identify_exclusion_zones() takes a pre-derived
-    # disqualifying_soil_union_utm= but has NO soil_components=/
-    # soil_geometries= override, so ParcelData's already-fetched SSURGO
-    # rows cannot reach it -- see session_cache.py's KNOWN RESIDUAL FETCH
-    # section. Two SDA queries per warm-up, exactly as
-    # build_pipeline_context() pays today. If a later branch adds that
-    # override, this number goes to 0 and this assertion should be
-    # updated, deliberately, to 0.
-    assert h.total_soil_queries == 2, (
-        f"expected the 2 SDA queries identify_exclusion_zones() self-serves "
-        f"(components + geometries), got {h.total_soil_queries}"
+    # THE GAP THAT USED TO BE REPORTED HERE, NOW CLOSED. This assertion
+    # read == 2 for as long as identify_exclusion_zones() had only a pre-
+    # derived disqualifying_soil_union_utm= override and no raw-row one,
+    # so ParcelData's already-fetched SSURGO rows could not reach its
+    # hydric gate and it self-served two SDA queries per warm-up. _fetch_
+    # disqualifying_soil_union() now takes soil_components=/soil_
+    # geometries=, identify_exclusion_zones() passes them through, and
+    # run_terrain_warm_up() forwards ParcelData's own two fields -- so
+    # this is 0, deliberately, exactly as the old comment here said it
+    # should become. It is now the same kind of assertion as the canopy
+    # and roads ones above: a nonzero count means an override stopped
+    # being forwarded.
+    assert h.total_soil_queries == 0, (
+        f"soil_components/soil_geometries are forwarded from ParcelData, so "
+        f"the hydric gate must issue NO SDA query: got "
+        f"{h.total_soil_queries} (components "
+        f"{h.soil_components.call_count} + geometries "
+        f"{h.soil_geometries.call_count})"
     )
     soil_queries = h.total_soil_queries
 
@@ -538,8 +559,8 @@ print(
     f"creation). Second fetches of forwarded layers: canopy == "
     f"{h.canopy_refetch.call_count + h.canopy_module_refetch.call_count}, "
     f"farm roads == {h.roads_refetch.call_count}, road union == "
-    f"{h.roads_helper_refetch.call_count}. Reported residual: "
-    f"{soil_queries} SDA queries inside identify_exclusion_zones()."
+    f"{h.roads_helper_refetch.call_count}, SDA soil queries == "
+    f"{soil_queries} (was 2 before the raw-row override existed)."
 )
 
 
@@ -749,6 +770,7 @@ with Harness() as h:
     assert original is not None
     fetches_after_creation = h.fetch_parcel_data.call_count
     assert fetches_after_creation == 1
+    soil_after_creation = h.total_soil_queries
 
     # DROP the entry -- the eviction this whole section exists to make safe.
     assert sessions.discard(session_id) is True
@@ -765,6 +787,27 @@ with Harness() as h:
     assert rebuild_fetches == 0, (
         f"a rebuild must make ZERO fetch_parcel_data() calls while the fetch "
         f"cache holds this boundary, got {rebuild_fetches}"
+    )
+
+    # ...AND zero network calls of any OTHER kind. This half used to be
+    # impossible to assert: the warm-up's hydric gate self-served two SDA
+    # queries every time it ran, and re-running the warm-up is what a
+    # rebuild IS -- so the zero-network claim was split ("zero Layer 1
+    # fetches, but two Layer-2-internal soil queries"). With the raw-row
+    # override forwarded, the claim is UNCONDITIONAL: a rebuild is
+    # compute, full stop, which is the property pipeline_context.py's
+    # architecture states for it.
+    rebuild_soil_queries = h.total_soil_queries - soil_after_creation
+    assert rebuild_soil_queries == 0, (
+        f"a rebuild must reach the network ZERO times, SDA included: got "
+        f"{rebuild_soil_queries} soil queries during the rebuild"
+    )
+    assert h.total_soil_queries == 0, (
+        f"...and neither the creation nor the rebuild may have made one: "
+        f"{h.total_soil_queries} total"
+    )
+    assert h.canopy_refetch.call_count == 0 and h.roads_refetch.call_count == 0, (
+        "no canopy or farm-road fetch during creation or rebuild either"
     )
     assert rebuilt.parcel_data is original.parcel_data, (
         "the rebuild reuses the SAME cached ParcelData object"
@@ -805,7 +848,8 @@ with Harness() as h:
 
 print(
     f"7. REBUILD: cache entry dropped, get_session_context() rebuilt it with "
-    f"{rebuild_fetches} network calls (fetch cache served Layer 1); rebuilt "
+    f"{rebuild_fetches} Layer 1 fetches and {rebuild_soil_queries} SDA queries "
+    f"-- ZERO network calls of any kind (was: zero Layer 1, two SDA); rebuilt "
     f"context equivalent to the original across boundary, valleys, keypoints, "
     f"existing_roads, exclusion_zones and step_proposals; unknown session still "
     f"raises SessionNotFoundError."
@@ -970,5 +1014,89 @@ print(
     "(fetch_parcel_data() == 0 across all 10 rejections); an explicitly closed "
     "ring is accepted, since implicit and explicit closure are the same land."
 )
+
+
+# --- 10. SELF-FETCH FALLBACK: with the overrides omitted, unchanged ----
+#
+# Section 2 asserts the warm-up path at ZERO SDA queries because it
+# forwards ParcelData's soil_components/soil_geometries. That number is
+# only meaningful if the OTHER path -- the parameters omitted -- still
+# works exactly as it did before this branch: None is a real supported
+# value (every caller outside this pipeline still passes nothing), not a
+# deprecated one.
+#
+# Asserted the only way that means anything: identify_exclusion_zones()
+# run twice on the SAME ParcelData -- once the way run_terrain_warm_up()
+# calls it, once with the two parameters omitted -- and the two results
+# compared BIT-IDENTICALLY, masks as ARRAYS. The self-fetch path's canned
+# SDA queries return the very rows ParcelData holds, which is what makes
+# "identical" the correct expectation rather than a coincidence.
+
+_fb_parcel = _build_parcel_data()
+_fb_boundary_polygon_utm = _fb_parcel.boundary_polygon_utm
+_fb_roads = None
+
+with Harness() as h:
+    _fb_existing_roads = farm_roads_data.get_road_exclusion_union_utm(
+        REAL_BOUNDARY, _fb_parcel.dem, farm_roads=_fb_parcel.farm_roads
+    )
+
+    # (a) the parameters OMITTED -- the pre-branch call, self-fetching.
+    _fb_self_fetched = exclusion_zones.identify_exclusion_zones(
+        REAL_BOUNDARY,
+        dem=_fb_parcel.dem,
+        boundary_polygon_utm=_fb_boundary_polygon_utm,
+        canopy_height=_fb_parcel.canopy_height,
+        road_exclusion_union_utm=_fb_existing_roads,
+    )
+    _fb_self_fetch_queries = h.total_soil_queries
+    assert _fb_self_fetch_queries == 2, (
+        f"with soil_components=/soil_geometries= omitted the hydric gate must still self-fetch its two "
+        f"SDA queries, exactly as it did before this branch: got {_fb_self_fetch_queries}"
+    )
+
+    # (b) the parameters SUPPLIED -- what run_terrain_warm_up() does.
+    _fb_before = h.total_soil_queries
+    _fb_overridden = exclusion_zones.identify_exclusion_zones(
+        REAL_BOUNDARY,
+        dem=_fb_parcel.dem,
+        boundary_polygon_utm=_fb_boundary_polygon_utm,
+        canopy_height=_fb_parcel.canopy_height,
+        soil_components=_fb_parcel.soil_components,
+        soil_geometries=_fb_parcel.soil_geometries,
+        road_exclusion_union_utm=_fb_existing_roads,
+    )
+    _fb_override_queries = h.total_soil_queries - _fb_before
+    assert _fb_override_queries == 0, (
+        f"with ParcelData's own rows supplied the hydric gate must issue ZERO SDA queries, got "
+        f"{_fb_override_queries}"
+    )
+
+# BIT-IDENTICAL. equivalent() already compares numpy arrays element-wise
+# and geometries by .equals() -- it is what section 7 uses to prove a
+# rebuilt context matches the original -- so the whole result dict goes
+# through it in one pass rather than being spot-checked key by key.
+_fb_difference = equivalent(_fb_self_fetched, _fb_overridden, "exclusion_result")
+assert _fb_difference is None, (
+    f"supplying rows the gate would otherwise have fetched must change NOTHING about the result: "
+    f"{_fb_difference}"
+)
+for _fb_layer, _fb_layer_result in _fb_self_fetched["layers"].items():
+    assert np.array_equal(_fb_layer_result["mask"], _fb_overridden["layers"][_fb_layer]["mask"]), (
+        f"the {_fb_layer} gate's mask must be bit-identical, compared as an ARRAY -- a mask with the "
+        f"same cell count in different places is a different answer"
+    )
+assert _fb_self_fetched["layers"]["hydric"]["mask"].any(), (
+    "the fixture's hydric map unit must actually hit ground, or this comparison proves nothing"
+)
+
+print(
+    f"10. SELF-FETCH FALLBACK: identify_exclusion_zones() on one ParcelData with the overrides OMITTED "
+    f"({_fb_self_fetch_queries} SDA queries -- the pre-branch path, intact) and SUPPLIED "
+    f"({_fb_override_queries} SDA queries) returns BIT-IDENTICAL results across every layer mask, the "
+    f"closed union, the eligible geometry and narrative_data (hydric layer "
+    f"{_fb_self_fetched['layers']['hydric']['acres']} acres, so the comparison has real content)."
+)
+
 
 print("\nAll session_manager checks passed.")

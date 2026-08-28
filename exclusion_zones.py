@@ -922,6 +922,8 @@ def identify_exclusion_zones(
     road_exclusion_union_utm=_ROAD_UNION_NOT_SUPPLIED,
     check_soil: bool = True,
     check_roads: bool = True,
+    soil_components: list[dict] | None = None,
+    soil_geometries: dict | None = None,
 ) -> dict:
     """
     Computes this parcel's unselectable ground: five per-gate exclusion
@@ -959,6 +961,34 @@ def identify_exclusion_zones(
     None convention -- no caller passes a real None for it yet.
     check_soil/check_roads are the explicit way to say "do not check this
     gate at all".
+
+    soil_components/soil_geometries are the RAW-ROW half of the hydric
+    gate's override surface, one level below disqualifying_soil_union_
+    utm: that parameter skips the derivation entirely, these two let a
+    caller keep the derivation here while skipping its two SDA queries.
+    They are a PURE PASSTHROUGH to production_area._fetch_disqualifying_
+    soil_union() -- this module does not fetch SSURGO rows itself and
+    must not start; it only stops FORCING that helper to. Same None-
+    falls-back-to-self-fetch convention as everything above (not the
+    road union's supplied-None-is-an-answer sentinel: an empty component
+    list is a real, meaningful "no map units here" value, but nothing
+    passes one today and None stays plainly "not supplied"), and the
+    same shapes get_soil_data_for_polygon()/get_soil_geometries_for_
+    polygon() return -- i.e. exactly ParcelData's own soil_components/
+    soil_geometries fields. Both are ignored when disqualifying_soil_
+    union_utm is supplied or check_soil is False, because the helper is
+    never reached on those paths. session_cache.run_terrain_warm_up()
+    and pipeline_context.build_pipeline_context() both forward them from
+    ParcelData, which takes the warm-up and the batch path from two SDA
+    queries per run to zero.
+
+    They are APPENDED, not slotted in beside disqualifying_soil_union_utm
+    where they would read better -- the same discipline compute_step1_
+    eligible_cells()' own exclusion_result= addition followed, because
+    inserting a parameter silently re-binds every positional caller. No
+    caller passes anything past boundary_coordinates positionally today;
+    appending is what keeps that from staying true by luck. test_
+    exclusion_zones.py freezes the order.
 
     max_slope_pct and boundary_setback_meters default to production's own
     MAX_PRODUCTION_SLOPE_PCT and PRODUCTION_BOUNDARY_SETBACK_METERS. They
@@ -1161,7 +1191,12 @@ def identify_exclusion_zones(
                 xs, ys = boundary_polygon_utm.exterior.coords.xy
                 lons, lats = warp_transform(dem["crs"], "EPSG:4326", list(xs), list(ys))
                 wkt_polygon = coordinates_to_wkt_polygon(list(zip(lons, lats)))
-                disqualifying_soil_union_utm = _fetch_disqualifying_soil_union(wkt_polygon, dem)
+                disqualifying_soil_union_utm = _fetch_disqualifying_soil_union(
+                    wkt_polygon,
+                    dem,
+                    soil_components=soil_components,
+                    soil_geometries=soil_geometries,
+                )
                 soil_available = True
             except Exception:
                 # Same degrade-don't-crash contract identify_production_areas()

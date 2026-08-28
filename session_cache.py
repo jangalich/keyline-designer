@@ -78,26 +78,35 @@ post-commit hook in a later branch. Keypoints produced here therefore
 carry NO 'feature_relationships' key, deliberately -- asserted in
 test_session_manager.py so a future warm-up change can't quietly add it.
 
---- KNOWN RESIDUAL FETCH (reported, not patched) --------------------
+--- THE RESIDUAL SOIL FETCH: CLOSED --------------------------------
 
-identify_exclusion_zones() self-computes its hydric-soil gate via
-production_area._fetch_disqualifying_soil_union(), which issues its own
-two SDA queries (component rows, then those mukeys' geometries). It
-accepts a pre-derived `disqualifying_soil_union_utm=` override but has NO
-raw-row override -- there is no soil_components=/soil_geometries=
-parameter -- so ParcelData's ALREADY-FETCHED soil_components and
-soil_geometries cannot be handed to it. Deriving the union out here
-instead would mean reimplementing that helper outside the module that
-owns it, and would let this module's exclusion result drift from
-build_pipeline_context()'s. So the warm-up pays those two SDA queries,
-exactly as build_pipeline_context() does today. This is a gap in
-exclusion_zones.py's override surface, reported rather than patched --
-closing it is that module's own work, on its own branch.
+This section used to report a real, measured residual. identify_
+exclusion_zones() self-computed its hydric-soil gate via production_
+area._fetch_disqualifying_soil_union(), which issues two SDA queries
+(component rows, then those mukeys' geometries). It accepted a pre-
+derived `disqualifying_soil_union_utm=` override but had NO raw-row
+override, so ParcelData's ALREADY-FETCHED soil_components and soil_
+geometries could not be handed to it -- and the warm-up paid those two
+queries on every session creation AND every rebuild.
 
-Consequence to know when reading the rebuild test: a rebuild makes ZERO
-Layer 1 fetches (the fetch cache serves fetch_parcel_data() outright),
-but it does re-run this Layer-2-internal soil fetch, because re-running
-the warm-up is what a rebuild IS.
+A follow-up branch closed it at the source rather than out here. _fetch_
+disqualifying_soil_union() now accepts soil_components=/soil_geometries=
+(same None-falls-back-to-self-fetch convention road_corridors._fetch_
+floodplain_hydric_union() already used for the same two fetches), and
+identify_exclusion_zones() passes both straight through. run_terrain_
+warm_up() forwards ParcelData's two fields, so the derivation still runs
+inside the module that owns it -- no helper is reimplemented here, and
+this module's exclusion result cannot drift from build_pipeline_
+context()'s, which forwards the same two fields into the same parameters.
+
+Consequence to know when reading the rebuild test: a rebuild is now
+network-free OUTRIGHT, not "free of Layer 1 fetches but for one Layer-2-
+internal soil fetch". The fetch cache serves fetch_parcel_data(), and
+nothing inside the warm-up reaches the network at all -- which is the
+property interactive-design-architecture-proposal.md section 2.2 states for
+a rebuild (compute, not network), now true rather than nearly true. test_session_manager.py
+asserts the SDA count at exactly 0 on both the creation and the rebuild
+path.
 
 In-process only. Both tiers are plain in-memory structures guarded by
 locks; nothing here survives a restart, and nothing here needs to.
@@ -372,9 +381,10 @@ class SessionContext:
 def run_terrain_warm_up(boundary_coordinates: list, parcel: object) -> dict:
     """
     The three creation-time terrain products, plus the road exclusion
-    union they are built over. Pure compute against `parcel` (a
-    ParcelData) apart from the one Layer-2-internal soil fetch documented
-    in this module's KNOWN RESIDUAL FETCH section.
+    union they are built over. PURE COMPUTE against `parcel` (a
+    ParcelData) -- no network at all, now that the hydric gate's two SDA
+    queries are served from ParcelData's own rows (see this module's THE
+    RESIDUAL SOIL FETCH: CLOSED section).
 
     Every override forwarded below is the one build_pipeline_context()
     forwards, at the same value, in the same order -- the ordering is a
@@ -410,11 +420,20 @@ def run_terrain_warm_up(boundary_coordinates: list, parcel: object) -> dict:
         boundary_coordinates, dem, farm_roads=parcel.farm_roads
     )
 
+    # soil_components=/soil_geometries= are ParcelData's own already-
+    # fetched SSURGO rows, forwarded so the hydric gate DERIVES its union
+    # here without re-issuing the two SDA queries production_area.
+    # _fetch_disqualifying_soil_union() would otherwise serve itself. The
+    # derivation still happens inside the module that owns it -- these are
+    # raw rows, not a pre-derived union -- so this path cannot drift from
+    # build_pipeline_context()'s, which forwards the same two fields.
     exclusion_result = exclusion_zones.identify_exclusion_zones(
         boundary_coordinates,
         dem=dem,
         boundary_polygon_utm=boundary_polygon_utm,
         canopy_height=parcel.canopy_height,
+        soil_components=parcel.soil_components,
+        soil_geometries=parcel.soil_geometries,
         road_exclusion_union_utm=existing_roads,
     )
 

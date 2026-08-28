@@ -389,13 +389,38 @@ def per_cell_score(slope_pct: float, aspect_deg: float, max_slope_pct: float = M
     return PER_CELL_SLOPE_WEIGHT * slope_factor + PER_CELL_ASPECT_WEIGHT * aspect_factor
 
 
-def _fetch_disqualifying_soil_union(wkt_polygon: str, dem: dict):
+def _fetch_disqualifying_soil_union(
+    wkt_polygon: str,
+    dem: dict,
+    soil_components: Optional[list[dict]] = None,
+    soil_geometries: Optional[dict] = None,
+):
     """
     Real SSURGO polygon geometry (not just component ratings) for every map
     unit whose SUMMED hydric component percentage meets
     soil_data.MIN_HYDRIC_COMPONENT_PCT_TO_EXCLUDE, within wkt_polygon,
     unioned and reprojected into dem['crs']. Returns None if nothing
     disqualifying was found (the common, clean case -- not an error).
+
+    soil_components and soil_geometries are both optional -- same None-
+    falls-back-to-self-fetch convention every override in this pipeline
+    uses, and the same pair road_corridors._fetch_floodplain_hydric_
+    union() already accepts. A caller that already fetched SSURGO
+    composition data and/or map-unit geometry for this same boundary
+    (e.g. parcel_data.fetch_parcel_data()) passes either or both through
+    here instead of paying for a second, redundant get_soil_data_for_
+    polygon()/get_soil_geometries_for_polygon() round-trip. soil_
+    components must be the same list[dict] of component rows get_soil_
+    data_for_polygon() itself returns; soil_geometries must be the same
+    {mukey: geojson_geometry} dict get_soil_geometries_for_polygon()
+    itself returns -- both are exactly what ParcelData's own soil_
+    components/soil_geometries fields already hold (that module stores
+    each fetch's return value unmodified), so a ParcelData-backed caller
+    passes those fields straight through unchanged. soil_geometries is
+    only ever consulted when disqualifying_mukeys comes back non-empty
+    (the early return below fires first otherwise); supplying it on a
+    boundary with no hydric map unit simply means it is never looked at
+    -- not an error.
 
     soil_data.hydric_disqualifying_mukeys() decides which mukeys qualify --
     shared, not reimplemented here, with road_corridors.py's own hydric
@@ -411,12 +436,17 @@ def _fetch_disqualifying_soil_union(wkt_polygon: str, dem: dict):
     consolidation architecture required (patches didn't exist yet when this
     runs).
     """
-    soil_components = get_soil_data_for_polygon(wkt_polygon)
+    if soil_components is None:
+        soil_components = get_soil_data_for_polygon(wkt_polygon)
     disqualifying_mukeys = hydric_disqualifying_mukeys(soil_components)
     if not disqualifying_mukeys:
         return None
 
-    geometries_by_mukey = get_soil_geometries_for_polygon(wkt_polygon)
+    geometries_by_mukey = (
+        get_soil_geometries_for_polygon(wkt_polygon)
+        if soil_geometries is None
+        else soil_geometries
+    )
     pieces = [
         shape(transform_geom("EPSG:4326", dem["crs"], geometries_by_mukey[mukey]))
         for mukey in disqualifying_mukeys

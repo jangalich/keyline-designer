@@ -1235,4 +1235,318 @@ print(
 )
 
 
+
+from rasterio.warp import transform_geom as _rg_transform_geom  # noqa: E402
+from shapely.geometry import mapping as _shapely_mapping  # noqa: E402
+
+# ===========================================================================
+# 10. THE RAW-ROW SOIL OVERRIDE: IDENTICAL RESULT, ZERO QUERIES
+# ===========================================================================
+#
+# identify_exclusion_zones() gained soil_components=/soil_geometries=, a
+# PURE PASSTHROUGH to production_area._fetch_disqualifying_soil_union()'s
+# own new overrides, so a caller holding ParcelData's already-fetched
+# SSURGO rows stops forcing that helper to re-issue the two SDA queries
+# behind them.
+#
+# THE CENTRAL CLAIM OF THAT CHANGE IS THAT NO COMPUTED VALUE MOVES. It is
+# asserted here the only way that means anything: the SAME fixture is run
+# twice -- once with the overrides ABSENT (the self-fetch path, which is
+# what every caller did before) and once with them SUPPLIED -- and the two
+# results are compared BIT-IDENTICALLY. Masks are compared as ARRAYS
+# (np.array_equal), never by acreage or cell count: a mask with the same
+# number of cells in different places is a different answer, and a summary
+# statistic would call it a match.
+#
+# The fixture is built so the hydric gate has REAL CONTENT. Comparing two
+# empty unions would pass no matter what the override did.
+
+# THE PARAMETER CONTRACT: the eleven pre-existing parameters, in their
+# original order, with the two new ones APPENDED. Same frozen-list check
+# section 1 applies to compute_step1_eligible_cells(), and for the same
+# reason -- inserting soil_components/soil_geometries beside disqualifying_
+# soil_union_utm (where they read better) would silently re-bind every
+# positional caller past that point.
+_EZ_ORIGINAL_PARAMS = [
+    "boundary_coordinates",
+    "dem",
+    "boundary_polygon_utm",
+    "max_slope_pct",
+    "boundary_setback_meters",
+    "canopy_height",
+    "tree_root_zone_mask_utm",
+    "disqualifying_soil_union_utm",
+    "road_exclusion_union_utm",
+    "check_soil",
+    "check_roads",
+]
+_ez_params = list(inspect.signature(ez.identify_exclusion_zones).parameters)
+assert _ez_params == _EZ_ORIGINAL_PARAMS + ["soil_components", "soil_geometries"], (
+    "identify_exclusion_zones() must keep its eleven original parameters in their original positions "
+    f"with the two raw-row soil overrides APPENDED. Got: {_ez_params}"
+)
+_ez_sig = inspect.signature(ez.identify_exclusion_zones).parameters
+assert _ez_sig["soil_components"].default is None and _ez_sig["soil_geometries"].default is None, (
+    "both must default to a plain None -- the self-fetch trigger the whole pipeline's override "
+    "convention uses. A sentinel here would mean 'supplied and empty' had to be distinguishable, and "
+    "no caller draws that distinction (only road_exclusion_union_utm does, for its own reason)."
+)
+
+# ...and the helper they pass through to must accept them under the SAME
+# names, appended after its own two original parameters. This is what makes
+# the passthrough a passthrough rather than a translation layer.
+_helper_params = list(inspect.signature(production_area._fetch_disqualifying_soil_union).parameters)
+assert _helper_params == ["wkt_polygon", "dem", "soil_components", "soil_geometries"], (
+    f"_fetch_disqualifying_soil_union() must keep (wkt_polygon, dem) in their original positions -- "
+    f"every caller passes both positionally -- with the two overrides appended. Got: {_helper_params}"
+)
+
+_o_rows, _o_cols = 34, 34
+_o_dem = make_dem(flat_plane(_o_rows, _o_cols))
+_o_boundary_utm = boundary_for(_o_dem)
+
+# A hydric map unit covering the WEST half of the parcel, built by back-
+# projecting a real sub-rectangle of the boundary into WGS84 -- so the
+# geometry genuinely overlaps the DEM grid after _fetch_disqualifying_soil_
+# union() reprojects it forward again, rather than landing off-grid and
+# producing the empty union this section exists to avoid.
+_o_minx, _o_miny, _o_maxx, _o_maxy = _o_boundary_utm.bounds
+_o_hydric_utm = Polygon([
+    (_o_minx, _o_miny),
+    (_o_minx + (_o_maxx - _o_minx) * 0.5, _o_miny),
+    (_o_minx + (_o_maxx - _o_minx) * 0.5, _o_maxy),
+    (_o_minx, _o_maxy),
+])
+_o_hydric_wgs84 = _rg_transform_geom(_o_dem["crs"], "EPSG:4326", _shapely_mapping(_o_hydric_utm))
+
+# The exact shapes soil_data's two functions return: a list of component
+# rows, and a {mukey: geojson_geometry} dict. These are ALSO the exact
+# shapes ParcelData.soil_components/ParcelData.soil_geometries hold --
+# parcel_data.py stores each fetch's return value unmodified -- which is
+# what makes forwarding them a passthrough and not a conversion.
+_o_components = [
+    {"mukey": "424242", "comppct_r": "90", "hydricrating": "Yes", "compname": "Fixture mucky loam"},
+]
+_o_geometries = {"424242": _o_hydric_wgs84}
+
+# The canopy gate is supplied directly (it is a network fetch of its own and
+# not what this section measures), and the road union is supplied as a real
+# None -- "checked, genuinely no roads nearby". That leaves the SOIL path as
+# the only thing that can reach the network here, which is the point.
+_o_canopy_mask = np.zeros((_o_rows, _o_cols), dtype=bool)
+_o_canopy_mask[6:12, 20:28] = True
+
+_o_boundary_coordinates = [
+    tuple(pt) for pt in
+    _rg_transform_geom(_o_dem["crs"], "EPSG:4326", _shapely_mapping(_o_boundary_utm))["coordinates"][0]
+]
+
+_o_query_counts = {"components": 0, "geometries": 0}
+
+
+def _o_counting_components(_wkt):
+    _o_query_counts["components"] += 1
+    return _o_components
+
+
+def _o_counting_geometries(_wkt):
+    _o_query_counts["geometries"] += 1
+    return _o_geometries
+
+
+def _o_run(**overrides):
+    """One identify_exclusion_zones() call on the shared fixture, with the
+    two SDA leaves counted at production_area's bindings -- the bindings
+    _fetch_disqualifying_soil_union() actually looks up."""
+    with ExitStack() as stack:
+        stack.enter_context(mock_patch.object(
+            production_area, "get_soil_data_for_polygon", side_effect=_o_counting_components))
+        stack.enter_context(mock_patch.object(
+            production_area, "get_soil_geometries_for_polygon", side_effect=_o_counting_geometries))
+        return ez.identify_exclusion_zones(
+            _o_boundary_coordinates,
+            dem=_o_dem,
+            boundary_polygon_utm=_o_boundary_utm,
+            tree_root_zone_mask_utm=_o_canopy_mask,
+            road_exclusion_union_utm=None,
+            **overrides,
+        )
+
+
+# --- 10a. the self-fetch path, unchanged: the overrides ABSENT -------------
+
+_o_query_counts.update(components=0, geometries=0)
+_o_self_fetched = _o_run()
+_o_self_fetch_queries = dict(_o_query_counts)
+
+assert _o_self_fetch_queries == {"components": 1, "geometries": 1}, (
+    f"with the overrides OMITTED the hydric gate must still self-fetch, exactly as it did before this "
+    f"parameter existed -- one component query and one geometry query. Got {_o_self_fetch_queries}. The "
+    f"None case is a real supported path, not a deprecated one."
+)
+assert _o_self_fetched["layers"]["hydric"]["data_available"] is True
+assert _o_self_fetched["layers"]["hydric"]["mask"].any(), (
+    "the fixture must give the hydric gate REAL content -- two empty unions would compare equal no "
+    "matter what the override did"
+)
+
+# --- 10b. the override path: the SAME rows, supplied ----------------------
+
+_o_query_counts.update(components=0, geometries=0)
+_o_overridden = _o_run(soil_components=_o_components, soil_geometries=_o_geometries)
+_o_override_queries = dict(_o_query_counts)
+
+assert _o_override_queries == {"components": 0, "geometries": 0}, (
+    f"with soil_components=/soil_geometries= supplied the hydric gate must issue ZERO SDA queries -- the "
+    f"rows are already in hand. Got {_o_override_queries}."
+)
+
+# --- 10c. BIT-IDENTICAL, mask by mask, not by summary statistic -----------
+
+for _o_layer in ez.LAYER_ORDER:
+    _o_left = _o_self_fetched["layers"][_o_layer]
+    _o_right = _o_overridden["layers"][_o_layer]
+    assert np.array_equal(_o_left["mask"], _o_right["mask"]), (
+        f"the {_o_layer} gate's cell mask must be BIT-IDENTICAL with and without the override -- compared "
+        f"as an array, so a mask with the same cell count in different places fails here. "
+        f"{int(np.count_nonzero(_o_left['mask'] != _o_right['mask']))} cell(s) differ."
+    )
+    assert _o_left["polygon_utm"].equals(_o_right["polygon_utm"]), (
+        f"the {_o_layer} layer's published footprint must be the same geometry"
+    )
+    assert _o_left["acres"] == _o_right["acres"], f"{_o_layer} acreage moved"
+    assert _o_left["data_available"] == _o_right["data_available"], (
+        f"{_o_layer} data_available moved -- a supplied row set is as CHECKED an answer as a fetched one"
+    )
+
+for _o_mask_key in ("eligible_mask", "excluded_union_mask", "slope_only_mask"):
+    assert np.array_equal(_o_self_fetched[_o_mask_key], _o_overridden[_o_mask_key]), (
+        f"{_o_mask_key} must be bit-identical, compared as an array"
+    )
+assert np.array_equal(
+    np.isnan(_o_self_fetched["slope_pct"]), np.isnan(_o_overridden["slope_pct"])
+) and np.array_equal(
+    _o_self_fetched["slope_pct"][~np.isnan(_o_self_fetched["slope_pct"])],
+    _o_overridden["slope_pct"][~np.isnan(_o_overridden["slope_pct"])],
+), "the slope grid must be bit-identical, NaN placement included"
+
+for _o_geom_key in ("excluded_union_utm", "render_fill_polygon_utm", "eligible_polygon_utm",
+                    "eligible_union_utm"):
+    assert _o_self_fetched[_o_geom_key].equals(_o_overridden[_o_geom_key]), (
+        f"{_o_geom_key} must be the same geometry with and without the override"
+    )
+assert (
+    json.dumps(_o_self_fetched["eligible_union_wgs84"], sort_keys=True)
+    == json.dumps(_o_overridden["eligible_union_wgs84"], sort_keys=True)
+), "the wire-facing eligible geometry must serialise identically"
+assert (
+    json.dumps(_o_self_fetched["geometry_wgs84"], sort_keys=True)
+    == json.dumps(_o_overridden["geometry_wgs84"], sort_keys=True)
+), "the wire-facing excluded geometry must serialise identically"
+assert (
+    json.dumps(_o_self_fetched["narrative_data"], sort_keys=True)
+    == json.dumps(_o_overridden["narrative_data"], sort_keys=True)
+), "narrative_data must be identical -- it is what the user is told about their own land"
+assert (
+    json.dumps(_o_self_fetched["wire"], sort_keys=True)
+    == json.dumps(_o_overridden["wire"], sort_keys=True)
+), "the frontend-facing wire block must be identical"
+assert _o_self_fetched["parcel_acres"] == _o_overridden["parcel_acres"]
+assert set(_o_self_fetched) == set(_o_overridden), "no key appeared or vanished"
+
+# --- 10d. the passthrough is a PASSTHROUGH: the same objects, not copies ---
+#
+# exclusion_zones.py must not fetch, derive, normalise or reshape these rows
+# -- it hands them to the module that owns the fetch, untouched. Asserted by
+# IDENTITY on what _fetch_disqualifying_soil_union() actually received.
+
+with mock_patch.object(ez, "_fetch_disqualifying_soil_union", return_value=None) as _o_helper_spy:
+    ez.identify_exclusion_zones(
+        _o_boundary_coordinates,
+        dem=_o_dem,
+        boundary_polygon_utm=_o_boundary_utm,
+        tree_root_zone_mask_utm=_o_canopy_mask,
+        road_exclusion_union_utm=None,
+        soil_components=_o_components,
+        soil_geometries=_o_geometries,
+    )
+assert _o_helper_spy.call_args.kwargs["soil_components"] is _o_components, (
+    "the caller's component rows must reach _fetch_disqualifying_soil_union() as the SAME OBJECT -- this "
+    "module is a pure passthrough here and must not copy, convert or re-derive them"
+)
+assert _o_helper_spy.call_args.kwargs["soil_geometries"] is _o_geometries, (
+    "the caller's map-unit geometry must reach the helper as the SAME OBJECT"
+)
+
+# ...and with the overrides omitted the helper receives None for both, which
+# is its own documented "fetch it yourself" value. Forwarding a sentinel or a
+# silently-defaulted empty list instead would break the fallback.
+with mock_patch.object(ez, "_fetch_disqualifying_soil_union", return_value=None) as _o_none_spy:
+    ez.identify_exclusion_zones(
+        _o_boundary_coordinates,
+        dem=_o_dem,
+        boundary_polygon_utm=_o_boundary_utm,
+        tree_root_zone_mask_utm=_o_canopy_mask,
+        road_exclusion_union_utm=None,
+    )
+assert _o_none_spy.call_args.kwargs["soil_components"] is None, (
+    "omitted means None -- the helper's own self-fetch trigger, not an empty list that would read as "
+    "'checked, no map units here'"
+)
+assert _o_none_spy.call_args.kwargs["soil_geometries"] is None
+
+# --- 10e. the helper's own two overrides are independent -------------------
+#
+# soil_geometries= alone still self-fetches the components; soil_components=
+# alone still self-fetches the geometries. Each parameter closes exactly its
+# own query, which is what None-falls-back-to-self-fetch means per-parameter
+# rather than all-or-nothing.
+
+_o_query_counts.update(components=0, geometries=0)
+_o_run(soil_components=_o_components)
+assert dict(_o_query_counts) == {"components": 0, "geometries": 1}, (
+    f"soil_components= alone must close only the component query, got {_o_query_counts}"
+)
+_o_query_counts.update(components=0, geometries=0)
+_o_run(soil_geometries=_o_geometries)
+assert dict(_o_query_counts) == {"components": 1, "geometries": 0}, (
+    f"soil_geometries= alone must close only the geometry query, got {_o_query_counts}"
+)
+
+# ...and soil_geometries= supplied on a boundary whose components qualify
+# NOTHING is simply never looked at -- the early return fires first. Not an
+# error, and not a query either.
+_o_query_counts.update(components=0, geometries=0)
+_o_clean = _o_run(
+    soil_components=[{"mukey": "424242", "comppct_r": "90", "hydricrating": "No"}],
+    soil_geometries=_o_geometries,
+)
+assert dict(_o_query_counts) == {"components": 0, "geometries": 0}
+assert not _o_clean["layers"]["hydric"]["mask"].any(), (
+    "no qualifying mukey means an empty hydric layer, even with geometry supplied"
+)
+assert _o_clean["layers"]["hydric"]["data_available"] is True, (
+    "'checked, genuinely clean' is a CHECKED answer, not an unavailable one"
+)
+
+_o_differing_cells = sum(
+    int(np.count_nonzero(
+        _o_self_fetched["layers"][name]["mask"] != _o_overridden["layers"][name]["mask"]
+    ))
+    for name in ez.LAYER_ORDER
+)
+print(
+    f"RAW-ROW SOIL OVERRIDE: identify_exclusion_zones() run twice on one fixture -- overrides ABSENT "
+    f"(components={_o_self_fetch_queries['components']} + geometries="
+    f"{_o_self_fetch_queries['geometries']} SDA queries) and overrides SUPPLIED "
+    f"(components={_o_override_queries['components']} + geometries={_o_override_queries['geometries']}) "
+    f"-- results BIT-IDENTICAL: {_o_differing_cells} differing cells across all five gate masks "
+    f"(hydric alone covers {_o_self_fetched['layers']['hydric']['acres']} acres, so the comparison has "
+    f"real content), plus identical closed union, eligible geometry, wire block and narrative_data. The "
+    f"rows reach production_area._fetch_disqualifying_soil_union() as the SAME OBJECTS (pure "
+    f"passthrough), each parameter closes only its own query, and omitting them forwards None -- the "
+    f"self-fetch path, intact."
+)
+
+
 print("\nAll exclusion_zones checks passed.")
