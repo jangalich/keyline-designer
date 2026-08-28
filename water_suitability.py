@@ -1,6 +1,30 @@
 """
 water_suitability.py
 
+RETIRED FROM THE PIPELINE, DEPRECATED. water_survey_areas.py is the
+water step now: typed survey areas from weighted-overlay suitability
+surfaces (NRCS AH590's embankment/excavated pond types) replaced the
+candidate-zone scoring this module performed on the demoted level-pool
+arc. This file is deliberately NOT deleted in the same branch that
+replaces it:
+  - NO_WATER_ZONE below is the shared explicit "already ran the
+    selection, nothing qualified" sentinel every downstream override
+    entry point (road_corridors, solar_suitability, tree_zone_
+    candidates) still imports and compares by identity -- it must keep
+    living in exactly one place.
+  - Those same downstream consumers still bind identify_water_
+    suitability() / fetch_and_select_optimal_water_zone() as their
+    self-compute FALLBACKS, which never fire on the pipeline path
+    (build_pipeline_context() forwards a resolved selected_water_zone /
+    NO_WATER_ZONE), only when a consumer is invoked standalone with no
+    water answer supplied.
+  - The salvageable scoring pieces (the log-scale ksat water-holding
+    ramp, the two-signal confidence pattern, the neutral-for-unknown
+    convention) were carried into water_survey_areas.py's soil scorer.
+Removing the fallback bindings and then this file is the dead-import/
+redundancy audit's job, deliberately out of the replacement branch's
+scope. Do not add new consumers.
+
 Adds a suitability RANKING to water-system candidate zones that
 water_candidate_zones.py has already identified — it does not change
 which ground counts as a candidate or how its boundary is drawn (that

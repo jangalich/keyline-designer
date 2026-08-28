@@ -549,6 +549,142 @@ def _format_water_candidate_zones_summary(water_narrative: Optional[dict]) -> st
     return "\n".join(lines)
 
 
+def _format_water_survey_areas_summary(water_narrative: Optional[dict]) -> str:
+    """Formats water_survey_areas.build_narrative_data()'s block (the
+    survey-area water step that replaced the demoted level-pool arc --
+    see that module's docstring) for the report prompt. Same rules as
+    every _format_*_summary() here: reads ONLY the pre-digested narrative
+    block, never geometry; every number was converted and rounded at the
+    source. ALL survey zones are listed (no presentation cap --
+    first-run posture), each with its DUAL ACREAGE sentence ("X acres to
+    survey, anchored by Y acres of high-suitability ground") and its
+    per-criterion mean scores (member cells only) as the narrative-
+    honesty mechanism: prose may only claim what a criterion actually
+    scored. _format_water_candidate_zones_summary() above remains for
+    the demoted layer's narrative shape and is no longer called on the
+    pipeline path."""
+    if not water_narrative or not water_narrative.get("zone_found"):
+        return (
+            "No water survey areas cleared the suitability threshold (or DEM "
+            "data wasn't available for this property)."
+        )
+
+    selection = water_narrative["selection"]
+    lines = [
+        f"{water_narrative['zone_count']} water SURVEY ZONE(S) identified from weighted-overlay "
+        f"suitability surfaces ({water_narrative['embankment_zone_count']} embankment-type -- small "
+        f"dam across a drainageway; {water_narrative['excavated_zone_count']} excavated-type -- "
+        "dugout or seep-fed excavated pond; NRCS Agriculture Handbook 590's two pond types). A zone "
+        "is the ground ONE SURVEY VISIT walks: nearby high-suitability regions grouped into a "
+        f"single envelope ({water_narrative['member_region_count']} member region(s) across all "
+        "zones), with the anchoring ground carried intact inside it. These are GENERAL AREAS WORTH "
+        "SURVEYING, not designed ponds -- no pool, wall, volume, or station is computed anywhere in "
+        "this step, deliberately. "
+        + water_narrative["twi_note"]
+    ]
+    # The counts line: everything that survived is shown (the
+    # presentation cap was deleted -- the user decides), plus what the
+    # floor pruned, so the reader knows exactly what this section is NOT
+    # showing and why.
+    lines.append(
+        f"All {water_narrative['zone_count']} surviving zone(s) are listed, ranked per type -- "
+        "no presentation cap; you decide which to walk"
+        + (
+            f". {water_narrative['dropped_count']} zone(s) whose walkable envelope fell under the "
+            "0.1-acre floor were dropped -- listed in the diagnostic export, not planned on"
+            if water_narrative["dropped_count"]
+            else ""
+        )
+        + "."
+    )
+    if selection["selected_zone_id"] is not None:
+        lines.append(
+            f"Selected for downstream planning: zone {selection['selected_zone_id']} "
+            f"({selection['selected_survey_type']}-type) -- the two types pooled by member-mean "
+            "suitability (a provisional selection rule awaiting tuning against the next real run)."
+        )
+
+    for region in water_narrative["zones"]:
+        criteria_clause = ", ".join(
+            f"{name} {entry['mean_score']} (weight {entry['weight']})"
+            for name, entry in region["criteria"].items()
+        )
+        lines.append(
+            f"\nSurvey zone {region['id']} ({region['survey_type']}-type, rank {region['rank']} of its "
+            f"type): {region['zone_acres']} acres to survey, anchored by {region['member_acres']} "
+            f"acres of high-suitability ground ({region['member_count']} member region(s)); member-"
+            f"cell mean suitability {region['mean_suitability']} (max {region['max_suitability']}), "
+            f"confidence {region['confidence']}."
+        )
+        lines.append(
+            f"Per-criterion mean scores over the ANCHORING ground only -- the envelope never "
+            f"launders sub-threshold ground into a score (prose may claim only these): "
+            f"{criteria_clause}."
+        )
+        if region.get("either_type_candidate"):
+            overlap_clause = "; ".join(
+                f"zone {entry['zone_id']} ({entry['overlap_pct']}% of this envelope)"
+                for entry in region.get("cross_type_overlaps", [])
+            )
+            lines.append(
+                "EITHER-TYPE CANDIDATE: the two suitability surfaces independently agree about this "
+                f"ground -- its envelope substantially overlaps the other pond type's ({overlap_clause}). "
+                "This area scores as a candidate for either pond type; evaluate both approaches during "
+                "the survey."
+            )
+        if region.get("sparse_anchor"):
+            lines.append(
+                "SPARSE ANCHOR: this zone's walkable envelope greatly exceeds the high-suitability "
+                "ground anchoring it (under 20% of the envelope is anchor) -- expect scattered good "
+                "ground within a larger area, not a solid block."
+            )
+        gravity = region["gravity"]
+        if not gravity["has_service_relationship"]:
+            lines.append(
+                "No production area within service range -- reported as a flag, not a drop: a water "
+                "feature here would serve future or off-plan uses."
+            )
+        elif gravity["can_gravity_feed"]:
+            lines.append(
+                f"Sits {gravity['elevation_differential_ft']} ft above production area "
+                f"{gravity['production_area_id']} over {gravity['distance_ft']} ft -- a gravity-feed "
+                "relationship (ranking context, never a gate)."
+            )
+        else:
+            lines.append(
+                f"Sits {abs(gravity['elevation_differential_ft'])} ft BELOW production area "
+                f"{gravity['production_area_id']} over {gravity['distance_ft']} ft -- PUMP-REQUIRED: a "
+                "real cost/maintenance tradeoff, not a disqualification."
+            )
+        overlaps = region["overlaps"]
+
+        def _overlap_clause(value, label):
+            return f"{label} NOT CHECKED" if value is None else f"{label} {value}%"
+
+        lines.append(
+            "Reported overlaps (context for the site visit, never used to shrink the area): "
+            + ", ".join(
+                (
+                    _overlap_clause(overlaps["canopy_pct"], "canopy"),
+                    _overlap_clause(overlaps["road_pct"], "roads"),
+                    _overlap_clause(overlaps["production_pct"], "production ground"),
+                )
+            )
+            + f". Boundary adjacency: {region['boundary_adjacency_pct']}% of this area's perimeter "
+            "runs along the property line."
+        )
+        if region["flags"]:
+            lines.append(f"Flags: {', '.join(region['flags'])}.")
+
+    lines.append(
+        "\nEvery classification table and weight behind these scores is a provisional v1 prior "
+        "(marked TUNE FROM FIRST RUN in water_survey_areas.py); the diagnostic export's suitability "
+        "isobands over imagery are the instrument they get tuned from. Ground-truth before "
+        "committing to any site."
+    )
+    return "\n".join(lines)
+
+
 def _format_keypoints_summary(
     keypoints: Optional[list[dict]], boundary_polygon_utm=None
 ) -> str:
@@ -1217,8 +1353,8 @@ WATER FEATURES (mapped NHD streams/water bodies):
 SATELLITE IMAGERY / LAND COVER (NDVI-derived):
 {_format_imagery_summary(imagery_summary)}
 
-WATER SYSTEM SURVEY AREA (computed):
-{_format_water_candidate_zones_summary(narrative_data.get("water_candidate_zones"))}
+WATER SYSTEM SURVEY AREAS (computed):
+{_format_water_survey_areas_summary(narrative_data.get("water_survey_areas"))}
 
 SUGGESTED ROAD CORRIDOR (computed network, grown from the real access point):
 {_format_road_corridor_summary(narrative_data.get("road_corridors"))}

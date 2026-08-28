@@ -93,6 +93,12 @@ def generate_full_report(boundary_coordinates: list, anchor_lon_lat: tuple[float
         water_features=parcel_data.water_features,
         soil_geometries=parcel_data.soil_geometries,
         canopy_height=parcel_data.canopy_height,
+        # The water step's soil trio completes with this: alongside
+        # soil_components/soil_geometries above, it lets build_pipeline_
+        # context() hand the water step its soil_inputs from ParcelData's
+        # own Layer-1 fetches (fetched once, hard-fail governed) instead
+        # of the step re-fetching SDA inline.
+        saturated_hydraulic_conductivity=parcel_data.saturated_hydraulic_conductivity,
     )
     print("  KSOP context built.\n")
 

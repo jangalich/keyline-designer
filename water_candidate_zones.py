@@ -1,6 +1,21 @@
 """
 water_candidate_zones.py
 
+DEMOTED, NOT DELETED: this module is no longer on the pipeline path.
+water_survey_areas.py is the water step now -- typed survey areas from
+weighted-overlay suitability surfaces (NRCS AH590's embankment/excavated
+pond types) replaced pool/wall simulation entirely, after the level-pool
+arc below proved the reference property lacks keyline-dam geometry. This
+module is RETAINED as a diagnostic-consumed module: the exploration
+scripts (diagnose_water_zone_mask.py and its tests) still import and run
+it, water_survey_areas.py imports its shared gate/measurement machinery
+(the contributing-area ceiling, the service-distance reference, the
+overlap measurement and its sentinels, the representative-point gravity
+relationships), and the level-pool machinery remains a future "verify
+this survey area" second stage -- a delineation to run ON a chosen area,
+not the thing that nominates areas. Do not re-wire it into
+build_pipeline_context(); do not delete it while those consumers stand.
+
 Step 3 of water-system candidate-zone identification: a three-gate
 NOMINATION MASK, TWO-FAMILY NOMINATION of anchor cells, and a LEVEL-POOL
 DELINEATION of the zone around each anchor.

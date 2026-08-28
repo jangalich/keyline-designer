@@ -143,11 +143,29 @@ def get_soil_data_for_polygon(wkt_polygon: str) -> list[dict]:
 
     wkt_polygon should be a WGS84 WKT polygon string, e.g.:
         "polygon((-79.982 40.643, -79.981 40.643, -79.981 40.642, -79.982 40.642, -79.982 40.643))"
+
+    hydgrp (NRCS hydrologic soil group, A/B/C/D plus dual classes like
+    'A/D' -- drained/UNDRAINED per NEH Part 630 Ch. 7) rides this query
+    because it lives on the SAME component table this join already reads
+    -- confirmed against SSURGO's own table documentation, the same
+    "verify against real documentation" discipline the kwfact and ksat_r
+    fixes required. Adding the column here is what keeps hydrologic
+    group a QUERY CHANGE on ParcelData's existing Layer-1 soil fetch
+    rather than a second, separate SDA round-trip inside a pipeline step
+    (the architecture guide's checklist item 1: new raw external data
+    belongs in Layer 1, fetched once, hard-fail governed).
+    water_survey_areas.py's soil scorer reads it off each map unit's
+    DOMINANT component (rows arrive comppct_r DESC, so the first row per
+    mukey is the dominant one -- the standard convention here), an
+    equivalent of SSURGO's own muaggatt.hydgrpdcd "dominant conditions"
+    rollup that needs no extra table join. The value can be None/empty
+    where NRCS assigned no group (miscellaneous areas, water) -- callers
+    treat that as unknown, not as any particular class.
     """
     sql = f"""
         SELECT mu.mukey, mu.muname, c.compname, c.comppct_r,
                c.drainagecl, c.slope_r, c.slopelenusle_r,
-               c.hydricrating, c.taxorder
+               c.hydricrating, c.taxorder, c.hydgrp
         FROM mapunit mu
         INNER JOIN component c ON mu.mukey = c.mukey
         WHERE mu.mukey IN (
@@ -514,6 +532,14 @@ def get_saturated_hydraulic_conductivity_for_polygon(wkt_polygon: str) -> list[d
         dominant_by_mukey.setdefault(row["mukey"], row)
 
     return list(dominant_by_mukey.values())
+
+
+# NOTE: an earlier revision of the water-survey redesign added a standalone
+# get_hydrologic_group_for_polygon() here -- a SECOND SDA round-trip for a
+# column the component join above already reaches. It was removed in the
+# same branch's tuning pass: hydgrp now rides get_soil_data_for_polygon()
+# (see its docstring), so hydrologic group arrives on ParcelData's existing
+# Layer-1 soil_components fetch instead of inline in a pipeline step.
 
 
 def _polygonal_parts(geom):

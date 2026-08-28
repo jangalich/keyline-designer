@@ -398,6 +398,7 @@ from report_generator import (  # noqa: E402
     _format_solar_candidate_zones_summary,
     _format_tree_zones_summary,
     _format_water_candidate_zones_summary,
+    _format_water_survey_areas_summary,
 )
 
 # One keypoint-nominated candidate and one
@@ -556,7 +557,125 @@ assert "No water system candidate survey area identified" in _format_water_candi
 )
 print("_format_water_candidate_zones_summary(): N candidates with provenance, flags, level-pool "
       "measurements (no capacity anywhere), reported overlaps, per-keypoint reason codes, and "
-      "gravity-vs-pump all rendered from the block; no-candidate and missing blocks read as no data.")
+      "gravity-vs-pump all rendered from the block; no-candidate and missing blocks read as no data. "
+      "(The formatter belongs to the DEMOTED level-pool layer and is off the pipeline path.)")
+
+# =====================================================================
+# _format_water_survey_areas_summary(): the survey-area water step's
+# narrative block (water_survey_areas.build_narrative_data()'s shape) --
+# the formatter the pipeline path actually calls now.
+# =====================================================================
+
+_survey_nd = {
+    "zone_found": True,
+    "zone_count": 2,
+    "dropped_count": 1,
+    "member_region_count": 3,
+    "embankment_zone_count": 1,
+    "excavated_zone_count": 1,
+    "suitability_threshold": 0.5,
+    "grouping_distance_meters": 30.0,
+    "twi_is_parcel_relative": True,
+    "twi_note": (
+        "Topographic wetness scores here are PARCEL-RELATIVE percentile ranks: a score of 0.9 means "
+        "'among the wettest ground on THIS parcel', not wet by any universal standard."
+    ),
+    "gates": {"on_parcel_cells": 612, "ceiling_removed_cells": 4, "setback_removed_cells": 0,
+              "gated_cells": 608, "max_contributing_area_acres": 20.0},
+    "soil_checked": True,
+    "selection": {"selected_zone_id": 0, "selected_survey_type": "excavated",
+                  "selection_rule": "pooled_member_mean_suitability_member_acreage_tiebreak"},
+    "zones": [
+        {"id": 0, "survey_type": "excavated", "rank": 1, "member_count": 2,
+         "member_acres": 1.4, "zone_acres": 2.6,
+         "mean_suitability": 0.71, "max_suitability": 0.83,
+         "criteria": {"wetness": {"weight": 0.35, "mean_score": 0.82},
+                      "soil": {"weight": 0.30, "mean_score": 0.9},
+                      "slope": {"weight": 0.25, "mean_score": 0.95},
+                      "drainage_runon": {"weight": 0.10, "mean_score": 0.1}},
+         "twi_percentile_mean": 0.88, "depression_depth_max_ft": 1.3,
+         "contributing_area_acres_at_wettest_cell": 3.2, "boundary_adjacency_pct": 42.0,
+         "overlaps": {"canopy_pct": 12.5, "road_pct": None, "production_pct": 0.0},
+         "gravity": {"has_service_relationship": True, "can_gravity_feed": False,
+                     "production_area_id": 3, "elevation_differential_ft": -18.4, "distance_ft": 210.0},
+         "flags": [], "below_min_area": False, "sparse_anchor": False,
+         "cross_type_overlaps": [{"zone_id": 1, "overlap_pct": 62.0}], "either_type_candidate": True,
+         "confidence": "high"},
+        {"id": 1, "survey_type": "embankment", "rank": 1, "member_count": 1,
+         "member_acres": 0.1, "zone_acres": 0.1,
+         "mean_suitability": 0.55, "max_suitability": 0.61,
+         "criteria": {"drainage_area": {"weight": 0.30, "mean_score": 0.7},
+                      "slope": {"weight": 0.25, "mean_score": 1.0},
+                      "soil": {"weight": 0.25, "mean_score": 0.5},
+                      "twi": {"weight": 0.20, "mean_score": 0.9}},
+         "twi_percentile_mean": 0.9, "depression_depth_max_ft": 0.0,
+         "contributing_area_acres_at_wettest_cell": 5.4, "boundary_adjacency_pct": 0.0,
+         "overlaps": {"canopy_pct": 0.0, "road_pct": 0.0, "production_pct": None},
+         "gravity": {"has_service_relationship": False, "can_gravity_feed": None},
+         "flags": ["below_min_area", "no_service_relationship", "sparse_anchor"], "below_min_area": True,
+         "sparse_anchor": True, "cross_type_overlaps": [], "either_type_candidate": False,
+         "confidence": "medium"},
+    ],
+}
+_survey_prose = _format_water_survey_areas_summary(_survey_nd)
+assert "2 water SURVEY ZONE(S)" in _survey_prose
+assert "1 embankment-type" in _survey_prose and "1 excavated-type" in _survey_prose
+assert "3 member region(s)" in _survey_prose, "the member count travels with the zone framing"
+assert "ground ONE SURVEY VISIT walks" in _survey_prose
+assert "GENERAL AREAS WORTH SURVEYING" in _survey_prose
+assert "no pool, wall, volume, or station" in _survey_prose, (
+    "the redesign's central promise -- no precision theater -- must be stated in the prose"
+)
+assert "wettest ground on THIS parcel" in _survey_prose, (
+    "the parcel-relative TWI caveat must reach the prompt so the report cannot overclaim wetness"
+)
+assert "All 2 surviving zone(s) are listed, ranked per type -- no presentation cap" in _survey_prose, (
+    "the counts line states that everything surviving is shown -- the cap is deleted"
+)
+assert "you decide which to walk" in _survey_prose
+assert "1 zone(s) whose walkable envelope fell under the 0.1-acre floor were dropped" in _survey_prose, (
+    "the floor's drops are stated on their zone-acre basis, never silent"
+)
+assert "each pond type's best zone appears" not in _survey_prose, (
+    "the deleted per-type guarantee's phrasing must not resurface"
+)
+assert "EITHER-TYPE CANDIDATE" in _survey_prose and "zone 1 (62.0% of this envelope)" in _survey_prose, (
+    "the cross-type agreement renders as the consultant either-type line with its overlap numbers"
+)
+assert "evaluate both approaches during the survey" in _survey_prose
+assert "SPARSE ANCHOR" in _survey_prose and "scattered good ground within a larger area" in _survey_prose, (
+    "the sparse-anchor honesty line renders when the flag is set"
+)
+assert "dugout or seep-fed excavated pond" in _survey_prose, "the seep-widened excavated framing reaches the prose"
+assert "Selected for downstream planning: zone 0 (excavated-type)" in _survey_prose
+assert "provisional selection rule" in _survey_prose
+assert "2.6 acres to survey, anchored by 1.4 acres of high-suitability ground" in _survey_prose, (
+    "the DUAL-ACREAGE sentence is the zone narrative's spine -- both numbers, both labeled"
+)
+assert "wetness 0.82 (weight 0.35)" in _survey_prose, (
+    "per-criterion mean scores are the narrative-honesty mechanism -- prose may only claim what a "
+    "criterion actually scored, so the scores themselves must be in the prompt"
+)
+assert "over the ANCHORING ground only" in _survey_prose, (
+    "the prose must say the scores describe member cells, never the envelope"
+)
+assert "PUMP-REQUIRED" in _survey_prose and "18.4 ft BELOW production area 3" in _survey_prose
+assert "No production area within service range" in _survey_prose, (
+    "the no-service case reads as a flag, never as a dropped region"
+)
+assert "roads NOT CHECKED" in _survey_prose, "a never-checked overlap must read NOT CHECKED, not 0%"
+assert "production ground NOT CHECKED" in _survey_prose
+assert "canopy 12.5%" in _survey_prose
+assert "42.0% of this area's perimeter" in _survey_prose, "boundary adjacency is site-visit context"
+assert "Flags: below_min_area, no_service_relationship, sparse_anchor." in _survey_prose, (
+    "flags ride into the prose -- flagged, never filtered"
+)
+assert "TUNE FROM FIRST RUN" in _survey_prose and "isobands" in _survey_prose
+assert "No water survey areas cleared" in _format_water_survey_areas_summary(None)
+assert "No water survey areas cleared" in _format_water_survey_areas_summary({"region_found": False})
+print("_format_water_survey_areas_summary(): both types with per-criterion scores, the TWI caveat, "
+      "pump/no-service gravity cases, overlap sentinels, flags, and the tuning note all rendered; "
+      "no-region and missing blocks read as no data.")
 
 _solar_nd = {
     "site_found": True,
@@ -710,7 +829,7 @@ print("_format_tree_zones_summary(): search space/selection rules/zones rendered
 
 _full_narrative = {
     "production_area_ceiling": _prod_nd,
-    "water_candidate_zones": _water_nd,
+    "water_survey_areas": _survey_nd,
     "road_corridors": gentle_narrative,
     "solar_suitability": _solar_nd,
     "tree_zone_candidates": _tree_nd,
@@ -724,14 +843,16 @@ _wired_prompt = _capture_prompt(
 for _header in (
     "PRODUCTION AREAS",
     "KEYPOINT CANDIDATES",
-    "WATER SYSTEM SURVEY AREA",
+    "WATER SYSTEM SURVEY AREAS",
     "SUGGESTED ROAD CORRIDOR",
     "TREE CROP AREAS",
     "PERMANENT BUILDING SITE",
     "SOLAR IRRADIANCE",
 ):
     assert _header in _wired_prompt, f"data_summary must carry the {_header} section"
-assert "score 87.5/100" in _wired_prompt and "in the parcel's southwest" in _wired_prompt
+assert "2 water SURVEY ZONE(S)" in _wired_prompt and "PUMP-REQUIRED" in _wired_prompt, (
+    "the survey-zone water block (narrative_data['water_survey_areas']) must land in the prompt"
+)
 assert "The network reaches all identified production ground." in _wired_prompt
 assert "Patch 1 (rank 1)" in _wired_prompt and "Rank 1: 0.4 acres" in _wired_prompt
 
@@ -742,7 +863,7 @@ _unwired_prompt = _capture_prompt(
 )
 for _no_data in (
     "No production-area candidate data available",
-    "No water system candidate survey area identified",
+    "No water survey areas cleared",
     "No road network data available",
     "No tree zone candidate data available",
     "No solar structure candidate site identified",
