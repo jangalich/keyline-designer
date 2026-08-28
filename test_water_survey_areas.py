@@ -28,9 +28,13 @@ Sections (matching the redesign branch's own test contract):
      serialization-time reprojection exists in any emitter.
 """
 
+import atexit
 import inspect
 import json
 import math
+import os
+import shutil
+import tempfile
 
 import numpy as np
 from rasterio.warp import transform_geom
@@ -1241,7 +1245,14 @@ assert any(b["band_lower"] == 0.8 for b in criterion_isobands[SURVEY_TYPE_EXCAVA
 boundary_wgs84 = transform_geom(CRS, "EPSG:4326", mapping(FLAT_BOUNDARY))
 boundary_coords_wgs84 = [tuple(point) for point in boundary_wgs84["coordinates"][0]]
 
-EXPORT_PATH = "/tmp/claude-0/-home-user/3daf47c5-7be7-5f2b-ada4-aac56a622357/scratchpad/water_survey_areas_test.geojson"
+# A per-run temporary directory, NOT a hardcoded absolute path. This line
+# used to carry a scratchpad path baked from one container's session id,
+# so the export section failed on every fresh checkout with a
+# FileNotFoundError that had nothing to do with what it tests. The
+# directory is cleaned up at interpreter exit.
+_EXPORT_DIR = tempfile.mkdtemp(prefix="water_survey_areas_test_")
+atexit.register(shutil.rmtree, _EXPORT_DIR, True)
+EXPORT_PATH = os.path.join(_EXPORT_DIR, "water_survey_areas_test.geojson")
 export = diag.export_water_survey_areas_geojson(
     identify_like,
     boundary_coords_wgs84,
