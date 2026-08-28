@@ -45,7 +45,6 @@ from typing import Optional
 import numpy as np
 from rasterio.warp import transform as warp_transform
 
-from feature_schema import CONFIDENCE_MEDIUM, make_feature, make_feature_collection
 from raster_grid import D8_OFFSETS, cell_area_acres, connected_components, pixel_center_xy
 
 # Minimum upstream contributing area for a cell to count as "valley" at
@@ -397,23 +396,17 @@ def valleys_to_geojson(valleys: list[dict]) -> dict:
     Wraps delineate_valleys() output as a schema-conformant GeoJSON
     FeatureCollection (layer="valley") — the discrete-feature output Step 1
     calls for, separate from the raw DEM raster itself.
+
+    CONSOLIDATED: the body now lives in wire_translation.py (the outbound
+    half of the translation boundary), which is where every layer's
+    internal-result-to-feature_schema conversion is kept so the inbound
+    half added later has one place to be checked against. This name stays
+    as the module's own established entry point; it is a thin forward, not
+    a second implementation.
     """
-    features = [
-        make_feature(
-            feature_id=f"valley-{v['id']}",
-            geometry=v["geometry_wgs84"],
-            layer="valley",
-            label=f"Valley {v['id']}",
-            confidence=CONFIDENCE_MEDIUM,
-            confidence_notes=VALLEY_CONFIDENCE_NOTES,
-            extra_properties={
-                "max_contributing_area_acres": v["max_contributing_area_acres"],
-                "branch_count": len(v["branches_rowcol"]),
-            },
-        )
-        for v in valleys
-    ]
-    return make_feature_collection(features)
+    from wire_translation import valleys_to_feature_collection
+
+    return valleys_to_feature_collection(valleys)
 
 
 def summarize_valleys(valleys: list[dict]) -> str:

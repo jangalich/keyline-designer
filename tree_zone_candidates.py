@@ -1068,47 +1068,17 @@ def _data_availability_note(
 
 def tree_zones_to_geojson(patches: list[dict]) -> dict:
     """Wraps score_tree_search_space() output as a schema-conformant
-    GeoJSON FeatureCollection (layer="tree_zone_candidate")."""
-    features = []
-    for patch in patches:
-        confidence_notes = TREE_ZONE_CONFIDENCE_NOTES_TEMPLATE.format(
-            hydric_weight=HYDRIC_OVERLAP_FACTOR_WEIGHT,
-            slope_weight=SLOPE_FACTOR_WEIGHT,
-            soil_weight=SOIL_MARGINALITY_FACTOR_WEIGHT,
-            stream_weight=STREAM_PROXIMITY_FACTOR_WEIGHT,
-            production_buffer_meters=TREE_ZONE_PRODUCTION_BUFFER_METERS,
-            water_buffer_meters=TREE_ZONE_WATER_BUFFER_METERS,
-            boundary_setback_meters=TREE_ZONE_BOUNDARY_SETBACK_METERS,
-            data_availability_note=_data_availability_note(
-                patch["soil_marginality_data_available"], patch["hydric_data_available"], patch["stream_data_available"]
-            ),
-        )
+    GeoJSON FeatureCollection (layer="tree_zone_candidate").
 
-        features.append(
-            make_feature(
-                feature_id=f"tree-zone-candidate-{patch['id']}",
-                geometry=patch["geometry_wgs84"],
-                layer="tree_zone_candidate",
-                label=f"Tree zone candidate {patch['id']} (rank {patch['rank']})",
-                confidence=CONFIDENCE_LOW,
-                confidence_notes=confidence_notes,
-                extra_properties={
-                    "area_acres": patch["area_acres"],
-                    "tree_suitability_score": patch["tree_suitability_score"],
-                    "soil_marginality_factor": patch["soil_marginality_factor"],
-                    "slope_factor": patch["slope_factor"],
-                    "hydric_overlap_factor": patch["hydric_overlap_factor"],
-                    "stream_proximity_factor": patch["stream_proximity_factor"],
-                    "avg_slope_pct": patch["avg_slope_pct"],
-                    "rank": patch["rank"],
-                    "soil_marginality_data_available": patch["soil_marginality_data_available"],
-                    "hydric_data_available": patch["hydric_data_available"],
-                    "stream_data_available": patch["stream_data_available"],
-                },
-            )
-        )
+    CONSOLIDATED into wire_translation.py (as tree_zones_to_feature_
+    collection) -- this name stays as the module's own entry point,
+    forwarding to the single implementation kept there.
+    _search_space_to_geojson() below is NOT consolidated: it is a private
+    Step-1 diagnostic for this module's own intermediate search space, not
+    a PipelineContext layer the frontend displays or edits."""
+    from wire_translation import tree_zones_to_feature_collection
 
-    return make_feature_collection(features)
+    return tree_zones_to_feature_collection(patches)
 
 
 def _search_space_to_geojson(search_space_utm, crs: str) -> dict:

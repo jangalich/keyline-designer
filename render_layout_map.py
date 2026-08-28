@@ -406,6 +406,7 @@ from raster_grid import (
 from road_corridors import identify_road_corridor_candidates
 from solar_suitability import identify_solar_candidate_zones
 from tree_zone_candidates import identify_tree_zone_candidates
+from wire_translation import road_network_to_feature_collection
 
 # Reference-property fixture for manual/__main__ testing ONLY -- now that
 # the frontend supplies a real access point (api.py's /api/generate-report
@@ -1470,6 +1471,43 @@ def fetch_layout_layers(
     water_features is parcel_data.water_features directly, same reasoning
     -- no longer this function's own hydrology_data.get_water_features_
     for_boundary() call.
+
+    THE TRANSLATION BOUNDARY. Two entries in the dict below are wire forms
+    (feature_schema GeoJSON) rather than internal shapes: road_corridor
+    and structure_site. Everything else is an internal shape on purpose --
+    render_layout_map() draws from raw UTM shapely geometry and numpy
+    grids, and converting those to GeoJSON here would force it to convert
+    them back. This function is one of wire_translation.py's TWO
+    consumers (the interactive session's per-layer endpoints are the
+    other), and its contract is unchanged by that module existing.
+
+    road_corridor is now built by wire_translation.road_network_to_
+    feature_collection() over identify_road_corridor_candidates()' own
+    'road_network' key, instead of being read out of that same call's
+    'zones_geojson'. The two are the same bytes -- that call builds
+    zones_geojson by calling the identical adapter function over the
+    identical network with the identical floodplain_data_is_fallback flag
+    this passes from context -- so this is a routing change, not an output
+    change (test_wire_translation.py asserts both halves). What it buys is
+    that the layer this function publishes comes from the boundary layer
+    that will also serve the interactive endpoints, so a shape change
+    lands in both places at once instead of one silently drifting.
+
+    structure_site DELIBERATELY DOES NOT go through the boundary, and
+    should not be "finished" by a later branch without fixing the cause
+    first. Four run-level flags -- shading_is_rough_proxy, road_proximity_
+    source, tree_zone_exclusion_available, and the two footprint/spacing
+    thresholds -- are baked into every solar Feature's confidence_notes,
+    and NONE of them is recorded on a candidate dict, on PipelineContext.
+    selected_structure_site, or anywhere in identify_solar_candidate_
+    zones()' return contract. They exist only in that function's local
+    scope. So this call's own zones_geojson is the only artifact in the
+    process that knows which run produced these notes, and rebuilding the
+    Feature from the context field would emit correct geometry carrying a
+    caveat about a run that did not happen. The fix is for solar to carry
+    those flags forward on its result; that is a change to a KSOP module's
+    return contract, out of this branch's scope, and flagged rather than
+    made.
     """
     if parcel_data is None:
         parcel_data = fetch_parcel_data(boundary_coordinates)
@@ -1504,7 +1542,18 @@ def fetch_layout_layers(
     # branch_index 0 -- see this module's own ROAD CORRIDOR STYLE
     # docstring section for why taking only the trunk would silently omit
     # real, built geometry.
-    road_corridor_features = road_corridor_candidates["zones_geojson"]["features"]
+    #
+    # Built through the TRANSLATION BOUNDARY (wire_translation.py) rather
+    # than read out of identify_road_corridor_candidates()' own
+    # zones_geojson key -- see this function's docstring section
+    # "THE TRANSLATION BOUNDARY". Byte-identical either way (that call
+    # builds its own zones_geojson through the same adapter function, over
+    # the same road_network, with the same fallback flag this passes), and
+    # asserted so in test_wire_translation.py's parity section.
+    road_corridor_features = road_network_to_feature_collection(
+        road_corridor_candidates["road_network"],
+        floodplain_data_is_fallback=context.soil_exclusion_unions["hydric_floodplain_is_fallback"],
+    )["features"]
     selected_road_corridor = context.selected_road_corridor
 
     tree_zone_result = {"patches": context.tree_zone_patches}
@@ -1522,6 +1571,13 @@ def fetch_layout_layers(
         floodplain_data_is_fallback=context.soil_exclusion_unions["hydric_floodplain_is_fallback"],
         canopy_height=parcel_data.canopy_height,
     )
+    # NOT routed through wire_translation, deliberately -- the one layer
+    # here that cannot be. See this function's docstring section
+    # "THE TRANSLATION BOUNDARY": the run-level flags baked into every
+    # solar feature's confidence_notes survive nowhere outside this call's
+    # own zones_geojson, so rebuilding the Feature from context.selected_
+    # structure_site (or from all_scored_candidates) would emit correct
+    # geometry under a confidence_notes describing a DIFFERENT run.
     solar_features = solar_result["zones_geojson"]["features"]
     structure_site = solar_features[0] if solar_features else None
 

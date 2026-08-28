@@ -52,6 +52,7 @@ from fencing import (
     water_zone_fencing_to_geojson,
 )
 from production_area import cluster_and_gate, compute_step1_eligible_cells
+from road_corridors import _empty_road_network
 from production_suitability import score_production_areas
 
 RESOLUTION = (5.0, 5.0)
@@ -1413,7 +1414,18 @@ with ExitStack() as _canopy_stack:
         mock_patch.object(
             rlm,
             "identify_road_corridor_candidates",
-            return_value={"zones_geojson": {"type": "FeatureCollection", "features": []}, "selected_road_corridor": None},
+            # 'road_network' is built from road_corridors._empty_road_network()
+            # rather than hand-written: fetch_layout_layers() reads that key
+            # (it builds its own road_corridor Features off it through
+            # wire_translation.py -- see that function's TRANSLATION BOUNDARY
+            # docstring section), and the real entry point ALWAYS returns it,
+            # including on its own no-anchor early return. A hand-written stub
+            # here would be a second, drifting copy of that shape.
+            return_value={
+                "zones_geojson": {"type": "FeatureCollection", "features": []},
+                "road_network": _empty_road_network("no_anchor_given"),
+                "selected_road_corridor": None,
+            },
         )
     )
     mock_solar_canopy_case = _enter(

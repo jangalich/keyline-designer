@@ -179,8 +179,6 @@ from feature_schema import (
     CONFIDENCE_HIGH,
     CONFIDENCE_LOW,
     CONFIDENCE_MEDIUM,
-    make_feature,
-    make_feature_collection,
 )
 from production_area import METERS_PER_FOOT, compute_slope_percent, get_required_tree_root_zone_mask_utm, _fetch_road_exclusion_union_utm
 from production_area_ceiling import identify_optimized_production_areas
@@ -2209,55 +2207,16 @@ def survey_areas_to_geojson(zones: list[dict], dropped_zones: Optional[list[dict
     shows them attributed. STORED WIRE FORMS ONLY: geometry is each
     object's geometry_wgs84 built at its birth -- no serialization-time
     reprojection anywhere in this module.
+
+    CONSOLIDATED into wire_translation.py (as water_survey_zones_to_
+    feature_collection) -- this name stays as the module's own entry
+    point, forwarding to the single implementation kept there. The
+    property builders and note constants below stay HERE: they are this
+    module's own measurement vocabulary, not wire shape.
     """
-    features = []
-    for zone in zones:
-        features.append(
-            make_feature(
-                feature_id=f"water-survey-zone-{zone['id']}",
-                geometry=zone["geometry_wgs84"],
-                layer=f"survey_zone_{zone['survey_type']}",
-                label=(
-                    f"Survey zone {zone['id']} ({zone['survey_type']}-type, rank {zone['rank']}): "
-                    f"{zone['zone_acres']} ac to survey, anchored by {zone['member_acres']} ac of "
-                    f"high-suitability ground ({zone['member_count']} member(s))"
-                ),
-                confidence=zone["confidence"],
-                confidence_notes=zone["confidence_notes"],
-                extra_properties=_zone_feature_properties(zone),
-            )
-        )
-        for member in zone["members"]:
-            features.append(
-                make_feature(
-                    feature_id=f"water-survey-zone-member-{member['id']}",
-                    geometry=member["geometry_wgs84"],
-                    layer=f"survey_zone_member_{member['survey_type']}",
-                    label=(
-                        f"Member region {member['id']} of survey zone {zone['id']} "
-                        f"({member['area_acres']} ac)"
-                    ),
-                    confidence=member["confidence"],
-                    confidence_notes=_MEMBER_FEATURE_NOTE,
-                    extra_properties=_member_feature_properties(member),
-                )
-            )
-    for zone in dropped_zones or []:
-        features.append(
-            make_feature(
-                feature_id=f"water-survey-zone-dropped-{zone['id']}",
-                geometry=zone["geometry_wgs84"],
-                layer="survey_zone_dropped",
-                label=(
-                    f"DROPPED survey zone {zone['id']} ({zone['survey_type']}-type): member ground "
-                    f"{zone['member_acres']} ac under the {MIN_SURVEY_REGION_AREA_ACRES} ac floor"
-                ),
-                confidence=zone["confidence"],
-                confidence_notes=_DROPPED_ZONE_NOTE,
-                extra_properties=_zone_feature_properties(zone),
-            )
-        )
-    return make_feature_collection(features)
+    from wire_translation import water_survey_zones_to_feature_collection
+
+    return water_survey_zones_to_feature_collection(zones, dropped_zones)
 
 
 def _feet(meters: Optional[float]) -> Optional[float]:

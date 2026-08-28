@@ -201,7 +201,6 @@ from shapely.prepared import prep
 from canopy_height_data import CanopyCoverageIncompleteError, TREE_ROOT_ZONE_BUFFER_METERS
 from dem_data import get_dem_for_boundary
 from farm_roads_data import get_farm_roads_for_boundary
-from feature_schema import CONFIDENCE_LOW, make_feature, make_feature_collection
 from production_area import get_required_tree_root_zone_mask_utm
 from production_area_ceiling import identify_optimized_production_areas
 from raster_grid import SQUARE_METERS_PER_ACRE, pixel_center_xy
@@ -1067,92 +1066,25 @@ def candidates_to_geojson(
     "real_mapped_road" | "unavailable" — see module docstring);
     tree_zone_exclusion_available flags whether the tree-zone-candidate
     exclusion could be checked this run at all (a graceful-degradation
-    outcome, see identify_solar_candidate_zones())."""
-    farmland_note = ""
-    if candidates and "prime_farmland_conflict" in candidates[0]:
-        farmland_note = (
-            "SSURGO prime-farmland overlap was checked and is reported per-candidate "
-            "in properties.prime_farmland_conflict — see properties.prime_farmland_note. "
-        )
+    outcome, see identify_solar_candidate_zones()).
 
-    confidence_notes = SOLAR_CONFIDENCE_NOTES_TEMPLATE.format(
-        spacing_m=spacing_meters,
-        max_footprint_acres=max_structure_footprint_acres,
-        footprint_side_m=_footprint_side_meters(max_structure_footprint_acres),
-        shading_caveat=SHADING_CAVEAT_HORIZON_ONLY if shading_is_rough_proxy else "computed from a real canopy height model (DSM-derived), not a rough proxy.",
-        canopy_buffer_ft=TREE_ROOT_ZONE_BUFFER_METERS / METERS_PER_FOOT,
-        tree_zone_buffer_ft=TREE_ZONE_STRUCTURE_EXCLUSION_BUFFER_METERS / METERS_PER_FOOT,
-        tree_zone_availability_note="" if tree_zone_exclusion_available else TREE_ZONE_EXCLUSION_UNAVAILABLE_NOTE,
-        road_proximity_note=ROAD_PROXIMITY_NOTE_BY_SOURCE[road_proximity_source],
-        farmland_note=farmland_note,
+    CONSOLIDATED into wire_translation.py (as structure_sites_to_feature_
+    collection) -- this name stays as the module's own entry point,
+    forwarding to the single implementation kept there. Note that the four
+    run-level flags in this signature reach the wire ONLY baked into
+    confidence_notes and are NOT recorded on any candidate dict or on this
+    module's return contract, so this call site is the only place they
+    survive -- see the wire_translation function's own docstring."""
+    from wire_translation import structure_sites_to_feature_collection
+
+    return structure_sites_to_feature_collection(
+        candidates,
+        shading_is_rough_proxy=shading_is_rough_proxy,
+        road_proximity_source=road_proximity_source,
+        tree_zone_exclusion_available=tree_zone_exclusion_available,
+        spacing_meters=spacing_meters,
+        max_structure_footprint_acres=max_structure_footprint_acres,
     )
-
-    features = []
-    for candidate in candidates:
-        constraints_satisfied = [
-            "outside_water_candidate_zone",
-            "outside_existing_canopy",
-            f"max_slope<={MAX_SOLAR_SLOPE_PCT:.0f}pct",
-            f"suitability_score>={MIN_SUITABILITY_SCORE * 100:.0f}",
-        ]
-        if tree_zone_exclusion_available:
-            constraints_satisfied.append("outside_tree_zone_candidate_buffer")
-        if candidate.get("distance_to_road_m") is not None:
-            constraints_satisfied.append("within_road_proximity_buffer")
-
-        distance_to_road_ft = (
-            round(candidate["distance_to_road_m"] / METERS_PER_FOOT, 1)
-            if candidate.get("distance_to_road_m") is not None
-            else None
-        )
-        distance_to_production_zone_ft = (
-            round(candidate["distance_to_production_zone_m"] / METERS_PER_FOOT, 1)
-            if candidate.get("distance_to_production_zone_m") is not None
-            else None
-        )
-        distance_to_water_zone_ft = (
-            round(candidate["distance_to_water_zone_m"] / METERS_PER_FOOT, 1)
-            if candidate.get("distance_to_water_zone_m") is not None
-            else None
-        )
-
-        extra_properties = {
-            "rank": candidate["rank"],
-            "suitability_score": candidate["suitability_score"],
-            "avg_slope_pct": candidate["avg_slope_pct"],
-            "aspect": candidate["aspect_label"],
-            "aspect_degrees": candidate["aspect_deg"],
-            "footprint_area_acres": candidate["footprint_area_acres"],
-            "distance_to_road_ft": distance_to_road_ft,
-            "road_proximity_source": road_proximity_source,
-            "distance_to_production_zone_ft": distance_to_production_zone_ft,
-            "production_zone_relationship": candidate["production_zone_relationship"],
-            "distance_to_water_zone_ft": distance_to_water_zone_ft,
-            "constraints_satisfied": constraints_satisfied,
-        }
-        if "prime_farmland_conflict" in candidate:
-            extra_properties["prime_farmland_conflict"] = candidate["prime_farmland_conflict"]
-            extra_properties["prime_farmland_note"] = candidate["prime_farmland_note"]
-
-        # Confidence reflects geometric/data-quality reliability (this
-        # layer stacks a slope-only production heuristic, a DEM-only
-        # shading proxy, and public-only road data), NOT site
-        # desirability — a prime-farmland conflict, or sitting inside a
-        # production zone, doesn't make the geometry itself any less
-        # trustworthy, so neither is folded into confidence.
-        features.append(
-            make_feature(
-                feature_id=f"solar-candidate-{candidate['rank']}",
-                geometry=candidate["geometry_wgs84"],
-                layer="solar_infrastructure",
-                label=f"Solar structure candidate (rank {candidate['rank']})",
-                confidence=CONFIDENCE_LOW,
-                confidence_notes=confidence_notes,
-                extra_properties=extra_properties,
-            )
-        )
-
-    return make_feature_collection(features)
 
 
 def identify_solar_candidate_zones(
