@@ -34,8 +34,9 @@ import math
 from collections import deque
 
 import numpy as np
-from shapely.geometry import LineString, MultiPolygon, Polygon, box
+from shapely.geometry import LineString, MultiPolygon, Point, Polygon, box
 from shapely.ops import unary_union
+from shapely.prepared import prep
 
 SQUARE_METERS_PER_ACRE = 4046.8564224
 
@@ -271,6 +272,71 @@ def cell_union_footprint(dem: dict, cell_mask: np.ndarray):
         return Polygon()
 
     return unary_union(squares).buffer(0)
+
+
+def cells_in_polygon(dem: dict, polygon) -> list[tuple[int, int]]:
+    """
+    THE INVERSE of cell_union_footprint(): every grid cell whose CENTER falls
+    inside `polygon` (in dem['crs'] meters), as a sorted (row, col) list.
+
+    PIXEL-CENTER CONTAINMENT IS THIS PIPELINE'S RASTERIZATION CONVENTION, not
+    a choice made here. It is the test production_area.compute_step1_eligible_
+    cells() applies for the parcel boundary, the hydric union and the road
+    union; the test canopy_height_data.tree_root_zone_mask() applies; and the
+    test exclusion_zones.py applies for its per-gate footprints -- all of them
+    spelled the same way inline:
+
+        prep(polygon).contains(Point(pixel_center_xy(dem, r, c)))
+
+    ...which is why a cell either belongs to a zone whole or not at all, and
+    why cell_union_footprint() can rebuild a footprint from cells exactly.
+    Anything else (area-weighted coverage, corner containment, a rasterio
+    burn) would disagree with STEP 1 about which cells a geometry covers, and
+    a zone whose cells disagree with STEP 1's is a zone whose acreage,
+    representative elevation and render opening are all computed over the
+    wrong ground.
+
+    THIS FUNCTION IS NEW; THE CONVENTION IS NOT. The inline copies above are
+    left exactly as they are -- rewiring STEP 1 to call this would be a change
+    to a KSOP module's own computation, which is not something a helper's
+    introduction gets to do quietly. The agreement between this function and
+    STEP 1 is therefore asserted rather than assumed:
+    test_wire_translation_inbound.py round-trips a real generated patch through
+    the translation boundary and asserts the rehydrated 'cells' are EQUAL to
+    the ones cluster_and_gate() produced. If the convention here ever drifts from STEP 1's, that test is
+    what says so.
+
+    Returns [] for an empty polygon, and for a polygon so small or so placed
+    that no cell center falls inside it -- a real outcome (a sub-cell sliver
+    between four centers), not an error. The caller decides what that means.
+    """
+    if polygon is None or polygon.is_empty:
+        return []
+
+    rows, cols = dem["array"].shape
+
+    # Bounding-box prefilter, so a small zone on a large grid does not pay for
+    # a containment test per cell of the whole DEM. Row/col ranges are derived
+    # from the same origin +/- N * resolution expression cell_union_footprint()
+    # uses, then widened by one cell on each side and clamped -- the widening
+    # is deliberate slack so a cell center exactly on the box edge is tested
+    # rather than filtered out by float comparison before prep() ever sees it.
+    px, py = dem["resolution_meters"]
+    minx, miny, maxx, maxy = polygon.bounds
+    col_lo = max(0, int(math.floor((minx - dem["origin_x"]) / px)) - 1)
+    col_hi = min(cols - 1, int(math.ceil((maxx - dem["origin_x"]) / px)) + 1)
+    row_lo = max(0, int(math.floor((dem["origin_y"] - maxy) / py)) - 1)
+    row_hi = min(rows - 1, int(math.ceil((dem["origin_y"] - miny) / py)) + 1)
+    if col_lo > col_hi or row_lo > row_hi:
+        return []
+
+    prepared = prep(polygon)
+    cells = []
+    for r in range(row_lo, row_hi + 1):
+        for c in range(col_lo, col_hi + 1):
+            if prepared.contains(Point(pixel_center_xy(dem, r, c))):
+                cells.append((r, c))
+    return cells
 
 
 def waist_erosion_radius_cells(dem: dict, min_waist_meters: float) -> int:

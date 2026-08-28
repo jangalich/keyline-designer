@@ -6,13 +6,15 @@ the wire (interactive-design-architecture-proposal.md section 2.4). One
 adapter layer, deliberately OUTSIDE the KSOP modules, sitting at the edge
 between the session orchestrator and the frontend.
 
-OUTBOUND (this branch): internal step result -> feature_schema.py GeoJSON
+OUTBOUND: internal step result -> feature_schema.py GeoJSON
 FeatureCollection, one function per layer the frontend displays or edits.
 
-INBOUND (a later branch, B4): committed GeoJSON -> the internal per-feature
-dict shape the downstream override parameters expect ("rehydration"), so a
-user-authored feature travels down the same override params as a
-computer-authored one.
+INBOUND: committed GeoJSON -> the internal per-feature dict shape the
+downstream override parameters expect ("rehydration"), so a user-authored
+feature travels down the same override params as a computer-authored one.
+PRODUCTION ZONES ONLY so far -- tree zones and structure sites follow once
+this pattern is proven. See the INBOUND section header near the bottom of
+this file for the governing rule and what is derived versus inherited.
 
 BOTH DIRECTIONS LIVE IN THIS ONE MODULE ON PURPOSE, and a later branch must
 not split them. The proposal's reason: the modules stay agnostic of the
@@ -1011,3 +1013,456 @@ def tree_zones_to_feature_collection(patches: Optional[list[dict]]) -> dict:
         )
 
     return make_feature_collection(features)
+
+
+# ======================================================================
+# INBOUND -- committed GeoJSON -> the internal per-feature dict shape
+# ======================================================================
+#
+# "Rehydration" (proposal section 2.4). A user-drawn or user-adjusted
+# feature has to travel down the SAME override parameters a computer-
+# authored one does -- `production_areas=` on water_survey_areas.
+# identify_water_survey_areas(), road_corridors.build_road_network(),
+# solar_suitability.find_candidate_solar_zones(), tree_zone_candidates.
+# identify_tree_zone_candidates(). That is the whole trick, and the only
+# way it works is if what comes back off the wire is turned into a dict
+# indistinguishable, to those consumers, from one cluster_and_gate() built.
+#
+# THE GOVERNING RULE: REHYDRATION RE-DERIVES FORWARD FROM AN EDITED
+# SOURCE. IT NEVER RECONSTRUCTS A SOURCE FROM A DERIVED FORM.
+#
+# Concretely: production `render_fill_polygon_utm` is NOT invertible. It is
+# an ASYMMETRIC disc opening (erode r + lead, dilate r) -- it SEVERS necks
+# narrower than 2*(r + lead) and dilation regrows only the survivors, so the
+# severed neck is gone, not shrunk. No inverse exists; two different
+# footprints open to the same fill. Rehydration therefore never tries to
+# recover `polygon_utm` from `render_fill_polygon_utm`.
+#
+# The wire carries `polygon_utm` (as its stored WGS84 reprojection,
+# `geometry_wgs84` -- see scored_production_areas_to_feature_collection()
+# above, which emits exactly that and NOT the render fill). Rehydration
+# takes the user's version of THAT ONE editable source and re-runs the same
+# forward derivations the pipeline runs on it, producing every other
+# representation. Every derived field below is computed, never read off the
+# wire; every advisory field is read off the wire, never computed.
+#
+# NO NETWORK, EVER. Every derivation here is pure and local against the
+# already-cached DEM: reprojection against dem['crs'], pixel-center
+# rasterization onto dem['array'], elevation sampling out of dem['array'],
+# the render opening over the resulting cell mask. A rehydration that
+# fetches is a bug -- test_wire_translation.py asserts it with a socket
+# counter, not a stopwatch.
+#
+# WHY THE IMPORTS BELOW ARE FUNCTION-LOCAL. Same reason the outbound half's
+# are (see the module docstring's IMPORT DIRECTION note): production_area.py
+# imports THIS module for its own `production_areas_to_geojson` alias, so a
+# module-level import back into it closes a cycle. It also keeps the
+# outbound half's dependency surface exactly where it was -- a caller that
+# imports this module only to emit GeoJSON still pulls in nothing but
+# feature_schema. The inbound half unavoidably deals in shapely geometry
+# (that is the shape the override parameters take), so the module docstring's
+# "the wire stays agnostic of shapely/numpy" holds for outbound only.
+
+
+# The STEP-4 advisory block production_suitability.score_production_areas()
+# ADDS on top of cluster_and_gate()'s own patch shape, restricted to the
+# fields scored_production_areas_to_feature_collection() actually puts on
+# the wire. Read back verbatim, NEVER recomputed -- scoring needs STEP 1's
+# per-cell factor arrays, which are not derivable from an edited polygon.
+#
+# ALL-OR-NOTHING, gated on 'suitability_score'. A feature carrying the block
+# is a suggested zone coming home unchanged; a feature without it is a zone
+# a human authored, and it gets NO advisory field at all -- not a zero, not
+# a None, ABSENT. That distinction is the point: 0.0 is a legible
+# suitability score meaning "worst possible ground", and a drawn zone has
+# not been scored rather than scored badly. The shipped frontend already
+# treats the two as different kinds of object (drawn zones list acres and
+# cautions only -- no rank, score, slope range or band), and no consumer of
+# the `production_areas=` override reads any of these fields.
+#
+# 'confidence_notes' rides in the block rather than beside it deliberately:
+# every feature_schema Feature carries one (the schema requires it), so
+# taking it unconditionally would import a client-authored display string
+# onto a drawn zone's internal dict as though scoring had produced it.
+_ADVISORY_WIRE_FIELDS = (
+    "rank",
+    "suitability_score",
+    "slope_factor",
+    "size_factor",
+    "aspect_factor",
+    "avg_slope_pct",
+    "aspect_deg",
+    "soil_carved_acres",
+    "soil_carved_pct",
+    "soil_data_available",
+    "source_patch_id",
+    "confidence_notes",
+)
+
+# Present on a scored patch INTERNALLY but never emitted by
+# scored_production_areas_to_feature_collection(), so nothing inbound can
+# recover them. Named here rather than left implicit because this is exactly
+# the outbound/inbound asymmetry the proposal puts both directions in one
+# module to make visible -- see the branch report. All three are advisory
+# sub-scores read only by production_area_ceiling._patch_narrative_data()
+# (the report path, which runs inside the GENERATOR and never sees a
+# rehydrated patch); no consumer of the `production_areas=` override touches
+# any of them.
+_ADVISORY_FIELDS_NOT_ON_THE_WIRE = ("area_score", "compactness_score", "aspect_available")
+
+
+# The one place the outbound feature-id spelling is written down, so inbound
+# parses exactly what outbound builds. Both
+# production_areas_to_feature_collection() and
+# scored_production_areas_to_feature_collection() emit
+# f"production-area-{patch['id']}".
+_PRODUCTION_FEATURE_ID_PREFIX = "production-area-"
+
+
+# The dimensionless degeneracy floor _polygonal_shape_from_wire() rejects a
+# ring below: enclosed area over the square of the ring's own extent. See the
+# check itself for why it is a ratio and not a square-metre floor.
+_DEGENERATE_SLIVER_RATIO = 1e-9
+
+
+class InboundGeometryError(ValueError):
+    """
+    A committed geometry that cannot be rehydrated into a valid internal
+    patch: wrong geometry type, a ring with fewer than 3 distinct vertices,
+    a self-intersecting ring, a zero-area sliver, a zone that covers no DEM
+    cell center, or one whose elevations are all nodata.
+
+    FAILS LOUDLY AND SPECIFICALLY, never repairs. buffer(0) would silently
+    turn a bowtie into two lobes of the drawer's ground and hand downstream
+    a patch nobody drew; a zero-area sliver would rehydrate into a patch
+    with no cells, no elevation and no fill. Rejecting these AT COMMIT, with
+    the offending feature identified to the user, is the commit-validation
+    branch's job (proposal section 2.5); failing cleanly and legibly here is
+    this boundary's.
+    """
+
+
+def _polygonal_shape_from_wire(geometry: dict, dem: dict, where: str):
+    """
+    One inbound GeoJSON geometry -> a shapely Polygon/MultiPolygon in
+    dem['crs'] meters, with every structural check applied on the way.
+
+    Checks run in this order on purpose, cheapest and most specific first,
+    so the error names the actual defect rather than a downstream symptom of
+    it: type, then ring vertex counts (a 2-vertex ring cannot even be
+    constructed), then shapely validity (self-intersection), then area.
+    """
+    import math
+
+    from rasterio.warp import transform_geom
+    from shapely.geometry import shape as shapely_shape
+    from shapely.validation import explain_validity
+
+    if not isinstance(geometry, dict):
+        raise InboundGeometryError(f"{where}: geometry must be a GeoJSON geometry dict, got {type(geometry).__name__}")
+
+    geometry_type = geometry.get("type")
+    if geometry_type not in ("Polygon", "MultiPolygon"):
+        raise InboundGeometryError(
+            f"{where}: a production zone must be a Polygon or MultiPolygon, got {geometry_type!r}. "
+            "A production zone is an area of ground; a Point or LineString has no acreage to attribute "
+            "and no cells to sample."
+        )
+
+    coordinates = geometry.get("coordinates")
+    if not coordinates:
+        raise InboundGeometryError(f"{where}: geometry has no coordinates")
+
+    # A GeoJSON linear ring closes, so a triangle is 4 positions. Count
+    # DISTINCT ones instead of raw length: [a, b, a, a] is 4 positions and
+    # still not a ring. Checked before shapely sees it because shapely
+    # raises its own opaque error on a 2-point ring.
+    parts = coordinates if geometry_type == "MultiPolygon" else [coordinates]
+    for part_index, part in enumerate(parts):
+        if not part:
+            raise InboundGeometryError(f"{where}: part {part_index} has no rings")
+        for ring_index, ring in enumerate(part):
+            distinct = {(float(position[0]), float(position[1])) for position in ring}
+            if len(distinct) < 3:
+                kind = "exterior ring" if ring_index == 0 else f"interior ring {ring_index}"
+                raise InboundGeometryError(
+                    f"{where}: part {part_index}'s {kind} has {len(distinct)} distinct vertex/vertices; "
+                    "a ring needs at least 3 to enclose any ground."
+                )
+
+    # ONE reprojection, WGS84 -> the DEM's own CRS. The DEM's CRS is the
+    # frame every internal geometry in this pipeline lives in, and the frame
+    # geometry_wgs84 was originally projected OUT of -- so this is the exact
+    # inverse hop, not a new choice of projection.
+    utm_geometry = shapely_shape(transform_geom("EPSG:4326", dem["crs"], geometry))
+
+    if not utm_geometry.is_valid:
+        raise InboundGeometryError(
+            f"{where}: geometry is not valid -- {explain_validity(utm_geometry)}. "
+            "Rehydration does not repair geometry: buffer(0) on a self-intersecting ring silently "
+            "returns lobes nobody drew, and the acreage attributed to them would be fiction."
+        )
+    if utm_geometry.is_empty:
+        raise InboundGeometryError(f"{where}: geometry is empty after reprojection into {dem['crs']}")
+    if utm_geometry.geom_type not in ("Polygon", "MultiPolygon"):
+        raise InboundGeometryError(
+            f"{where}: reprojection produced {utm_geometry.geom_type}, not a polygonal geometry"
+        )
+    # ZERO AREA, AND EFFECTIVELY-ZERO AREA. The exact test alone is not
+    # enough: a ring of collinear UTM vertices has area exactly 0.0, but it
+    # does not ARRIVE in UTM -- it arrives as the WGS84 form of itself, where
+    # those vertices are no longer exactly collinear, and reprojecting it back
+    # yields a sliver of around 1e-19 m^2 rather than a clean zero. So the
+    # thinness test below is what actually catches a degenerate ring off the
+    # wire; the exact one only catches a locally-constructed geometry.
+    #
+    # Measured as area over the SQUARE OF THE GEOMETRY'S OWN EXTENT, which is
+    # dimensionless and therefore scale-free: it says "how much of the ground
+    # this ring spans does it actually enclose", and it means the same thing
+    # for a 10 m draw as for a 500 m one. An absolute square-metre floor
+    # cannot do that -- one small enough to clear a genuinely thin zone is too
+    # small to catch a sliver spanning hundreds of metres.
+    #
+    # 1e-9 is a degeneracy floor, not a shape preference. A real zone one
+    # MILLIMETRE wide and 100 m long still scores about 1e-5, four orders
+    # above it; reaching 1e-9 over that span takes a width measured in
+    # nanometres. Rejecting weak-but-real shapes is not this function's
+    # business -- that is commit validation's (proposal section 2.5).
+    minx, miny, maxx, maxy = utm_geometry.bounds
+    extent_squared = (maxx - minx) ** 2 + (maxy - miny) ** 2
+    if utm_geometry.area <= 0 or extent_squared <= 0 or (
+        utm_geometry.area / extent_squared < _DEGENERATE_SLIVER_RATIO
+    ):
+        raise InboundGeometryError(
+            f"{where}: geometry encloses effectively zero area ({utm_geometry.area:.6g} m^2 across a "
+            f"{math.sqrt(extent_squared):.2f} m extent) -- a collinear or degenerate ring, not a zone."
+        )
+
+    return utm_geometry
+
+
+def rehydrate_production_zone(feature: dict, dem: dict, zone_id: Optional[int] = None) -> dict:
+    """
+    ONE committed production-zone Feature -> the internal patch dict the
+    `production_areas=` override parameters expect. The INBOUND half of the
+    translation boundary; the exact counterpart of
+    scored_production_areas_to_feature_collection() above.
+
+    `feature` is a feature_schema Feature whose geometry is the zone's
+    editable source in WGS84 -- for a suggested zone coming home unchanged
+    that is the very `geometry_wgs84` the outbound function emitted; for a
+    user-drawn zone it is whatever the drawing tool clamped to the parcel.
+    `dem` is the cached ParcelData's own DEM dict. `zone_id` overrides the
+    integer id; when None it is parsed off the feature's own
+    "production-area-<n>" id.
+
+    ONE FEATURE IS ONE PATCH, EVEN WHEN THE CLAMP SPLIT IT. The shipped
+    frontend clamps a drawn ring to the parcel with a polygon-clipping
+    intersection, which routinely returns SEVERAL pieces, each with its own
+    interior rings -- and it keeps the result as ONE zone with one id, one
+    acreage and one caution list. Rehydration preserves that: a multi-part
+    geometry becomes one patch whose polygon_utm is a MultiPolygon. Splitting
+    it into several patches would invent ids the user never saw, and would
+    scatter one drawn zone's acreage across several rows of a report that is
+    supposed to say what the user drew. It also costs nothing to support:
+    cluster_and_gate()'s own polygon_utm is `footprint.intersection(
+    boundary_polygon_utm)` and its render fill is a cell-union of a possibly
+    disconnected opened mask, so BOTH are routinely MultiPolygons already --
+    every consumer has always handled them.
+
+    WHAT IS DERIVED AND WHAT IS INHERITED. Everything cluster_and_gate()
+    computes is RE-DERIVED here from the geometry plus the cached DEM, in the
+    pipeline's own order and by the pipeline's own code:
+
+        polygon_utm                 the wire geometry, reprojected into
+                                    dem['crs'] -- the editable source
+        cells                       raster_grid.cells_in_polygon(): pixel-
+                                    center containment, STEP 1's own
+                                    rasterization convention
+        representative_elevation_m  median of dem['array'] over those cells,
+                                    exactly as cluster_and_gate() takes it
+        area_acres                  polygon_utm.area / SQUARE_METERS_PER_ACRE
+        render_fill_polygon_utm     production_area.render_fill_polygon_for_
+                                    cluster() -- the pipeline's OWN opening,
+                                    called, not reimplemented
+        render_fill_area_acres      \\
+        render_fill_geometry_wgs84   > straight off the two polygons above,
+        geometry_wgs84              /  by the same expressions
+        hole_footprints             production_area._detect_hole_footprints()
+
+    ...and the STEP-4 advisory block is INHERITED verbatim from the feature's
+    properties when present, or absent entirely when it is not (see
+    _ADVISORY_WIRE_FIELDS). Nothing is both.
+
+    NOT CLIPPED TO THE PARCEL, DELIBERATELY. cluster_and_gate() clips its
+    footprint to boundary_polygon_utm because it is building a zone out of
+    raw cells; rehydration is handed a zone that was already clamped
+    client-side, and re-clipping it here would (a) perturb an unedited
+    suggested zone's polygon by the intersection's own floating-point noise,
+    breaking the round-trip identity this boundary exists to guarantee, and
+    (b) quietly repair an off-parcel commit that the SERVER-AUTHORITATIVE
+    commit validation of proposal section 2.5 is supposed to REJECT and
+    report. Clamping is UX, validation is the commit path's; neither is this
+    function's.
+
+    Raises InboundGeometryError, with the defect named, on anything that
+    cannot become a valid patch. It never returns a half-built one.
+    """
+    import math
+
+    import numpy as np
+    from rasterio.warp import transform_geom
+    from shapely.geometry import mapping
+
+    from production_area import (
+        SQUARE_METERS_PER_ACRE,
+        _detect_hole_footprints,
+        render_fill_polygon_for_cluster,
+    )
+    from raster_grid import cells_in_polygon
+
+    if not isinstance(feature, dict):
+        raise InboundGeometryError(f"a production zone must be a GeoJSON Feature dict, got {type(feature).__name__}")
+
+    feature_id = feature.get("id")
+    where = f"production zone {feature_id!r}" if feature_id is not None else "production zone"
+
+    if zone_id is None:
+        zone_id = _zone_id_from_feature_id(feature_id, where)
+
+    polygon_utm = _polygonal_shape_from_wire(feature.get("geometry"), dem, where)
+
+    # STEP 1's rasterization convention, so this zone's cells are the same
+    # cells STEP 1 would have called it. Empty is a REAL possibility (a zone
+    # thinner than the gap between cell centers) and it is fatal, not
+    # tolerable: representative_elevation_m has nothing to take a median
+    # over, and the render opening has no mask to open.
+    cells = cells_in_polygon(dem, polygon_utm)
+    if not cells:
+        raise InboundGeometryError(
+            f"{where}: covers no DEM cell center ({polygon_utm.area:.2f} m^2 at "
+            f"{dem['resolution_meters'][0]:.1f}x{dem['resolution_meters'][1]:.1f} m resolution), so it has no "
+            "cells to sample an elevation from and no mask to open. A zone has to be at least about one "
+            "cell across to be a zone."
+        )
+
+    # cluster_and_gate()'s own expression, verbatim. A generated cluster can
+    # never carry a nodata cell (STEP 1's slope gate drops them with
+    # ~np.isnan), but a hand-drawn ring can sit over one -- and a NaN
+    # representative elevation would travel silently into every gravity-feed
+    # differential water_candidate_zones.py computes off this patch. Fail
+    # instead.
+    elevations = [float(dem["array"][r, c]) for r, c in cells]
+    representative_elevation_m = float(np.median(elevations))
+    if math.isnan(representative_elevation_m):
+        nodata_count = sum(1 for value in elevations if math.isnan(value))
+        raise InboundGeometryError(
+            f"{where}: {nodata_count} of its {len(cells)} DEM cells are nodata, leaving no median "
+            "elevation. Every downstream gravity-feed differential is computed against this value, and a "
+            "NaN would propagate into all of them without raising anything."
+        )
+
+    # THE PIPELINE'S OWN OPENING, CALLED. Not a second implementation of it
+    # -- see production_area.render_fill_polygon_for_cluster()'s docstring
+    # for why it is a function at all. mask_shape is the full DEM grid, the
+    # same grid cluster_and_gate() passes its cell_mask's shape for.
+    render_fill_polygon_utm = render_fill_polygon_for_cluster(
+        cells, dem["array"].shape, dem, polygon_utm
+    )
+
+    patch = {
+        "id": zone_id,
+        "area_acres": round(float(polygon_utm.area / SQUARE_METERS_PER_ACRE), 2),
+        "representative_elevation_m": representative_elevation_m,
+        "polygon_utm": polygon_utm,
+        "render_fill_polygon_utm": render_fill_polygon_utm,
+        "render_fill_area_acres": round(float(render_fill_polygon_utm.area / SQUARE_METERS_PER_ACRE), 2),
+        "render_fill_geometry_wgs84": (
+            transform_geom(dem["crs"], "EPSG:4326", mapping(render_fill_polygon_utm))
+            if not render_fill_polygon_utm.is_empty
+            else None
+        ),
+        "geometry_wgs84": transform_geom(dem["crs"], "EPSG:4326", mapping(polygon_utm)),
+        "cells": cells,
+        "hole_footprints": _detect_hole_footprints(cells, dem),
+    }
+
+    # The advisory block, all-or-nothing (see _ADVISORY_WIRE_FIELDS). A
+    # suggested zone coming home carries it; a drawn zone gets no key at all.
+    properties = feature.get("properties") or {}
+    if "suitability_score" in properties:
+        for field in _ADVISORY_WIRE_FIELDS:
+            if field in properties:
+                patch[field] = properties[field]
+
+    return patch
+
+
+def _zone_id_from_feature_id(feature_id: Any, where: str) -> int:
+    """
+    The integer patch id behind an outbound feature id.
+
+    scored_production_areas_to_feature_collection() builds
+    f"production-area-{patch['id']}", so an unedited suggested zone comes
+    home carrying its own id and keeps it -- which is what makes a rehydrated
+    patch line up with the water zone that already recorded it in
+    served_production_area_ids.
+
+    A drawn zone has no such id, so its caller passes zone_id= explicitly.
+    Guessing one here (a running counter, a hash) would risk colliding with a
+    suggested zone's id in the same commit, and a collision would silently
+    merge two zones' served-area accounting. Raise instead.
+    """
+    if isinstance(feature_id, int) and not isinstance(feature_id, bool):
+        return feature_id
+    if isinstance(feature_id, str) and feature_id.startswith(_PRODUCTION_FEATURE_ID_PREFIX):
+        tail = feature_id[len(_PRODUCTION_FEATURE_ID_PREFIX):]
+        if tail.isdigit():
+            return int(tail)
+    raise InboundGeometryError(
+        f"{where}: cannot determine an integer zone id from feature id {feature_id!r}. A suggested zone "
+        "carries \"production-area-<n>\"; a user-drawn zone has no pipeline id, so its caller must pass "
+        "zone_id= explicitly rather than have one invented here (an invented id can collide with a "
+        "suggested zone's in the same commit, silently merging their served-area accounting)."
+    )
+
+
+def rehydrate_production_zones(
+    collection: Optional[dict],
+    dem: dict,
+    zone_ids: Optional[list[int]] = None,
+) -> list[dict]:
+    """
+    A whole committed production-zone FeatureCollection -> the list the
+    `production_areas=` override parameters take.
+
+    EMPTY IN, EMPTY OUT -- None, a collection with no features, or a bare
+    empty list all give []. That mirrors the outbound half's own contract
+    (an empty FeatureCollection means "computed, nothing there") and it is a
+    meaningful value downstream, not a degenerate one: every consumer treats
+    an empty production list as "checked, no production ground" and keeps
+    running, while None means "never checked" (see water_survey_areas.
+    _production_overlap_pct()'s sentinel semantics).
+
+    `zone_ids`, when given, must be one id per feature, in order -- for a
+    commit whose drawn zones carry no pipeline id. Ids are NOT deduplicated
+    or renumbered here; a commit that reuses one is a commit-validation
+    failure (proposal section 2.5), not something to paper over.
+
+    A single bad feature fails the WHOLE call. A partial list would hand
+    downstream a commit the user did not make, with the rejected zone's
+    acreage silently missing from every total computed off it.
+    """
+    features = (collection or {}).get("features") if isinstance(collection, dict) else collection
+    features = list(features or [])
+
+    if zone_ids is not None and len(zone_ids) != len(features):
+        raise InboundGeometryError(
+            f"zone_ids has {len(zone_ids)} entries for {len(features)} features -- one id per feature, "
+            "in order, or None to parse each feature's own id."
+        )
+
+    return [
+        rehydrate_production_zone(feature, dem, zone_id=None if zone_ids is None else zone_ids[index])
+        for index, feature in enumerate(features)
+    ]
