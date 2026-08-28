@@ -1110,6 +1110,114 @@ def _detect_hole_footprints(cells: list[tuple[int, int]], dem: dict) -> list[Pol
     return footprints
 
 
+def render_fill_polygon_for_cluster(
+    cluster_cells: list[tuple[int, int]],
+    mask_shape: tuple[int, int],
+    dem: dict,
+    polygon_utm,
+):
+    """
+    ONE cluster's 'render_fill_polygon_utm' -- the bounded, ASYMMETRIC, DISC
+    morphological OPENING of its own cell mask, clipped to polygon_utm.
+
+    EXTRACTED VERBATIM from cluster_and_gate()'s body, which is now this
+    function's only in-pipeline caller. NOTHING about the computation changed:
+    the same erode(r + lead, disc) -> dilate(r, disc) -> cell_union_footprint()
+    -> intersection(polygon_utm) sequence, the same empty-opening fallback to
+    polygon_utm behind the same warning, and the same bounded-above assertion.
+    See cluster_and_gate()'s own docstring for WHY the opening is shaped this
+    way (why an opening and not a closing, why disc and not square, why the
+    lead erode, what the clip guarantees); none of that is repeated here.
+
+    IT IS A FUNCTION BECAUSE A SECOND CALLER NEEDS IT.
+    wire_translation.rehydrate_production_zone() -- the INBOUND half of the
+    translation boundary (proposal section 2.4) -- must re-derive
+    render_fill_polygon_utm for a user-drawn or user-edited zone by running the
+    SAME forward derivation the pipeline runs. It cannot call
+    cluster_and_gate() to get it: that function also does connected-component
+    labeling, waist splitting and the area survival gate, none of which may run
+    on a zone a human already authored. Copying this block into the boundary
+    would create a second implementation free to drift from this one, which is
+    exactly the shape drift proposal section 2.4 puts both wire directions in
+    one module to prevent. One implementation, two callers.
+
+    cluster_cells is the cluster's own (row, col) list. mask_shape is the FULL
+    DEM grid's (rows, cols): cluster_and_gate() passes its cell_mask's shape,
+    rehydration passes dem['array'].shape -- the same grid either way, and the
+    erosion/dilation below are grid operations that need its extent, not the
+    cluster's.
+    """
+    # render_fill_polygon_utm: a bounded morphological OPENING of this
+    # cluster's own cell mask, then CLIP to polygon_utm. This is an
+    # ASYMMETRIC, DISC opening: erode by RENDER_OPENING_RADIUS_METERS +
+    # RENDER_LEAD_ERODE_CELLS, then dilate back by only
+    # RENDER_OPENING_RADIUS_METERS. The lead erode composes into the
+    # single erosion (see eroded_cell_mask()), so it severs features
+    # narrower than 2*(r + lead) while restoring only r -- annihilating
+    # narrow features rather than shrinking them to slivers, and leaving
+    # every edge inset by the lead. The DISC element (vs the square
+    # default) gives Euclidean reach, so corners round instead of
+    # developing the flat 45-degree facets a square element leaves at
+    # larger radii. An opening is anti-extensive (opened <= original), so
+    # it TRIMS thin protrusions and SEVERS narrow necks (a neck severed
+    # by the erosion cannot be re-joined -- dilation only regrows the
+    # survivors that remained) while returning wide outer edges close to
+    # their original position. It does NOT fill notches, pockets, or
+    # concavities -- that would require a closing (dilate-then-erode), the
+    # opposite operation, tried and rejected. Clipping to polygon_utm
+    # makes the result BOUNDED BY CONSTRUCTION -- it can never claim
+    # ground the cell gate excluded, a strictly stronger guarantee than
+    # the old convex hull (which had no upper bound on how far it could
+    # bulge past the real footprint, and which several downstream modules
+    # consume as production EXCLUSION geometry). See cluster_and_gate()'s
+    # docstring.
+    opening_radius_cells = waist_erosion_radius_cells(dem, RENDER_OPENING_RADIUS_METERS)
+    opened_mask = binary_dilate(
+        eroded_cell_mask(
+            cluster_cells,
+            mask_shape,
+            dem,
+            RENDER_OPENING_RADIUS_METERS,
+            element="disc",
+            extra_erode_cells=RENDER_LEAD_ERODE_CELLS,
+        ),
+        opening_radius_cells,
+        element="disc",
+    )
+    if opened_mask.any():
+        render_fill_polygon_utm = cell_union_footprint(dem, opened_mask).intersection(polygon_utm)
+    else:
+        # The cluster is thinner than the opening radius throughout, so
+        # the opening is empty. The honest fill for a zone with no
+        # interior is its own footprint -- fall back to polygon_utm
+        # rather than emit empty render geometry.
+        render_fill_polygon_utm = polygon_utm
+        _LOGGER.warning(
+            "cluster_and_gate: the RENDER_OPENING_RADIUS_METERS=%.1fm opening eroded a "
+            "%d-cell (%.4f ac) cluster to nothing; render_fill_polygon_utm falling back to "
+            "polygon_utm for this cluster.",
+            RENDER_OPENING_RADIUS_METERS,
+            len(cluster_cells),
+            polygon_utm.area / SQUARE_METERS_PER_ACRE,
+        )
+
+    # Bounded above by the footprint, always -- the branch's core
+    # guarantee and the whole reason the unbounded hull was removed.
+    # Clipping to polygon_utm makes this hold by construction; assert it
+    # and raise on violation (matching fencing.py's hard-containment
+    # discipline) so any future regression is caught loudly rather than
+    # silently over-claiming exclusion ground.
+    if render_fill_polygon_utm.area > polygon_utm.area * (1 + 1e-9) + 1e-6:
+        raise ValueError(
+            "render_fill_polygon_for_cluster: render_fill_polygon_utm.area "
+            f"({render_fill_polygon_utm.area:.6f} m^2) exceeds polygon_utm.area "
+            f"({polygon_utm.area:.6f} m^2) -- the opening's clip to polygon_utm must keep "
+            "the drawn fill within the real cell-gated footprint, never claiming excluded ground."
+        )
+
+    return render_fill_polygon_utm
+
+
 def cluster_and_gate(
     cell_mask: np.ndarray,
     dem: dict,
@@ -1297,73 +1405,9 @@ def cluster_and_gate(
             if area_acres < min_area_acres:
                 continue
 
-            # render_fill_polygon_utm: a bounded morphological OPENING of this
-            # cluster's own cell mask, then CLIP to polygon_utm. This is an
-            # ASYMMETRIC, DISC opening: erode by RENDER_OPENING_RADIUS_METERS +
-            # RENDER_LEAD_ERODE_CELLS, then dilate back by only
-            # RENDER_OPENING_RADIUS_METERS. The lead erode composes into the
-            # single erosion (see eroded_cell_mask()), so it severs features
-            # narrower than 2*(r + lead) while restoring only r -- annihilating
-            # narrow features rather than shrinking them to slivers, and leaving
-            # every edge inset by the lead. The DISC element (vs the square
-            # default) gives Euclidean reach, so corners round instead of
-            # developing the flat 45-degree facets a square element leaves at
-            # larger radii. An opening is anti-extensive (opened <= original), so
-            # it TRIMS thin protrusions and SEVERS narrow necks (a neck severed
-            # by the erosion cannot be re-joined -- dilation only regrows the
-            # survivors that remained) while returning wide outer edges close to
-            # their original position. It does NOT fill notches, pockets, or
-            # concavities -- that would require a closing (dilate-then-erode), the
-            # opposite operation, tried and rejected. Clipping to polygon_utm
-            # makes the result BOUNDED BY CONSTRUCTION -- it can never claim
-            # ground the cell gate excluded, a strictly stronger guarantee than
-            # the old convex hull (which had no upper bound on how far it could
-            # bulge past the real footprint, and which several downstream modules
-            # consume as production EXCLUSION geometry). See cluster_and_gate()'s
-            # docstring.
-            opening_radius_cells = waist_erosion_radius_cells(dem, RENDER_OPENING_RADIUS_METERS)
-            opened_mask = binary_dilate(
-                eroded_cell_mask(
-                    cluster_cells,
-                    cell_mask.shape,
-                    dem,
-                    RENDER_OPENING_RADIUS_METERS,
-                    element="disc",
-                    extra_erode_cells=RENDER_LEAD_ERODE_CELLS,
-                ),
-                opening_radius_cells,
-                element="disc",
+            render_fill_polygon_utm = render_fill_polygon_for_cluster(
+                cluster_cells, cell_mask.shape, dem, polygon_utm
             )
-            if opened_mask.any():
-                render_fill_polygon_utm = cell_union_footprint(dem, opened_mask).intersection(polygon_utm)
-            else:
-                # The cluster is thinner than the opening radius throughout, so
-                # the opening is empty. The honest fill for a zone with no
-                # interior is its own footprint -- fall back to polygon_utm
-                # rather than emit empty render geometry.
-                render_fill_polygon_utm = polygon_utm
-                _LOGGER.warning(
-                    "cluster_and_gate: the RENDER_OPENING_RADIUS_METERS=%.1fm opening eroded a "
-                    "%d-cell (%.4f ac) cluster to nothing; render_fill_polygon_utm falling back to "
-                    "polygon_utm for this cluster.",
-                    RENDER_OPENING_RADIUS_METERS,
-                    len(cluster_cells),
-                    area_acres,
-                )
-
-            # Bounded above by the footprint, always -- the branch's core
-            # guarantee and the whole reason the unbounded hull was removed.
-            # Clipping to polygon_utm makes this hold by construction; assert it
-            # and raise on violation (matching fencing.py's hard-containment
-            # discipline) so any future regression is caught loudly rather than
-            # silently over-claiming exclusion ground.
-            if render_fill_polygon_utm.area > polygon_utm.area * (1 + 1e-9) + 1e-6:
-                raise ValueError(
-                    "cluster_and_gate: render_fill_polygon_utm.area "
-                    f"({render_fill_polygon_utm.area:.6f} m^2) exceeds polygon_utm.area "
-                    f"({polygon_utm.area:.6f} m^2) -- the opening's clip to polygon_utm must keep "
-                    "the drawn fill within the real cell-gated footprint, never claiming excluded ground."
-                )
 
             hole_footprints = _detect_hole_footprints(cluster_cells, dem)
 
