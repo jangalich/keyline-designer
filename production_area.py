@@ -138,7 +138,6 @@ from shapely.prepared import prep
 
 from canopy_height_data import TREE_ROOT_ZONE_BUFFER_METERS, get_canopy_height_for_boundary, tree_root_zone_mask
 from farm_roads_data import ROAD_EXCLUSION_BUFFER_METERS, get_road_exclusion_union_utm
-from feature_schema import CONFIDENCE_LOW, make_feature, make_feature_collection
 from production_suitability import ASPECT_FACTOR_WEIGHT, SLOPE_FACTOR_WEIGHT
 from raster_grid import (
     D8_OFFSETS,
@@ -1568,30 +1567,14 @@ def production_areas_to_geojson(patches: list[dict]) -> dict:
     GeoJSON FeatureCollection (layer="production_area_candidate") — a
     diagnostic layer, useful for checking this heuristic's output directly
     against a known property, independent of the valley/zone logic built
-    on top of it."""
-    features = [
-        make_feature(
-            feature_id=f"production-area-{p['id']}",
-            geometry=p["geometry_wgs84"],
-            layer="production_area_candidate",
-            label=f"Production area candidate {p['id']}",
-            confidence=CONFIDENCE_LOW,
-            confidence_notes=PRODUCTION_AREA_CONFIDENCE_NOTES,
-            extra_properties={
-                "area_acres": p["area_acres"],
-                "representative_elevation_m": round(p["representative_elevation_m"], 1),
-                # Acreage of the geometry the MAP actually draws (the bounded
-                # morphological opening render_layout_map.py clips production
-                # contour texture to), NOT the full cell-union footprint
-                # area_acres reports. render_fill_polygon_utm is always a
-                # subset of polygon_utm, so this is <= area_acres for every
-                # patch (see cluster_and_gate()'s containment assertion).
-                "render_fill_area_acres": p["render_fill_area_acres"],
-            },
-        )
-        for p in patches
-    ]
-    return make_feature_collection(features)
+    on top of it.
+
+    CONSOLIDATED into wire_translation.py (the outbound half of the
+    translation boundary) -- this name stays as the module's own entry
+    point, forwarding to the single implementation kept there."""
+    from wire_translation import production_areas_to_feature_collection
+
+    return production_areas_to_feature_collection(patches)
 
 
 def summarize_production_areas(patches: list[dict]) -> str:

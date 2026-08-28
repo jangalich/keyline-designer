@@ -144,7 +144,6 @@ from shapely.prepared import prep
 import requests
 
 from dem_data import get_dem_for_boundary
-from feature_schema import CONFIDENCE_LOW, make_feature, make_feature_collection
 from hydrology_data import get_water_features_for_boundary
 from production_area import get_required_tree_root_zone_mask_utm
 from production_area_ceiling import identify_optimized_production_areas
@@ -908,60 +907,16 @@ def corridors_to_geojson(
 ) -> dict:
     """Wraps build_road_network() output as the schema-conformant GeoJSON
     FeatureCollection this feature delivers (layer="suggested_road_corridor")
-    -- one Feature per branch, not one Feature for the whole network."""
-    features = []
-    for branch in road_network["branches"]:
-        features.append(
-            make_feature(
-                feature_id=f"road-corridor-{branch['branch_index'] + 1}",
-                geometry=branch["geometry_wgs84"],
-                layer="suggested_road_corridor",
-                label="Suggested road corridor",
-                confidence=CONFIDENCE_LOW,
-                confidence_notes=_confidence_notes_for_route(
-                    floodplain_data_is_fallback,
-                    branch["avg_grade_pct"],
-                    branch["crosses_floodplain"],
-                    branch["crosses_production_zone"],
-                ),
-                extra_properties={
-                    "branch_index": branch["branch_index"],
-                    "branch_role": branch["branch_role"],
-                    "joins_branch_index": branch["joins_branch_index"],
-                    "length_ft": round(branch["length_meters"] / METERS_PER_FOOT, 1),
-                    "avg_grade_pct": round(branch["avg_grade_pct"], 1),
-                    # Cell-level steep-section metrics (see _cell_steep_stats()),
-                    # deliberately distinct from the centerline avg_grade_pct
-                    # above: max_grade_pct is the steepest single cell, steep_ft
-                    # the length of cells above the steep threshold.
-                    "max_grade_pct": round(branch["max_grade_pct"], 1),
-                    "steep_ft": round(branch["steep_meters"] / METERS_PER_FOOT, 1),
-                    "newly_served_acres": round(branch["newly_served_acres"], 3),
-                    "crosses_floodplain": branch["crosses_floodplain"],
-                    "crosses_production_zone": branch["crosses_production_zone"],
-                    # Network-level fields, identical across every feature
-                    # in this FeatureCollection -- a caller narrating the
-                    # whole network doesn't have to sum branch lengths
-                    # back up itself.
-                    "total_length_ft": round(road_network["total_length_meters"] / METERS_PER_FOOT, 1),
-                    "total_served_acres": round(road_network["total_served_acres"], 3),
-                    "stop_reason": road_network["stop_reason"],
-                    # Grade is a genuine HARD ceiling now (impassable_
-                    # grade_pct, see MAX_ROAD_GRADE_PCT), so unlike before
-                    # this branch it's a real guarantee every branch
-                    # satisfies, not merely an unbounded soft penalty.
-                    # Production is NOT listed here -- it's a soft,
-                    # proportionally-costlier traversal term a branch may
-                    # or may not have crossed (see crosses_production_zone
-                    # above), so claiming it "satisfied" would be
-                    # misleading. Floodplain stays excluded for the same
-                    # reason.
-                    "constraints_satisfied": ["outside_pond_zone", "grade_within_max"],
-                },
-            )
-        )
+    -- one Feature per branch, not one Feature for the whole network.
 
-    return make_feature_collection(features)
+    CONSOLIDATED into wire_translation.py (as road_network_to_feature_
+    collection) -- this name stays as the module's own entry point,
+    forwarding to the single implementation kept there.
+    _confidence_notes_for_route() above stays HERE: the routing caveats
+    are this module's own domain knowledge, not wire shape."""
+    from wire_translation import road_network_to_feature_collection
+
+    return road_network_to_feature_collection(road_network, floodplain_data_is_fallback)
 
 
 # =====================================================================

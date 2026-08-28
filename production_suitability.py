@@ -54,7 +54,6 @@ import numpy as np
 from shapely.geometry import box
 from shapely.ops import unary_union
 
-from feature_schema import CONFIDENCE_LOW, make_feature, make_feature_collection
 from raster_grid import pixel_center_xy
 
 # --- composite weights (must sum to 1.0). CONFIGURABLE -- tune against a
@@ -303,39 +302,14 @@ def score_production_areas(
 def production_suitability_to_geojson(scored_patches: list[dict]) -> dict:
     """Wraps score_production_areas() output as a schema-conformant
     GeoJSON FeatureCollection on the SAME layer production_area.py's own
-    production_areas_to_geojson() uses ("production_area_candidate")."""
-    features = []
-    for patch in scored_patches:
-        confidence_notes = patch["confidence_notes"]
+    production_areas_to_geojson() uses ("production_area_candidate").
 
-        label = f"Production area candidate {patch['id']} (suitability rank {patch['rank']})"
+    CONSOLIDATED into wire_translation.py (as scored_production_areas_to_
+    feature_collection) -- this name stays as the module's own entry
+    point, forwarding to the single implementation kept there."""
+    from wire_translation import scored_production_areas_to_feature_collection
 
-        features.append(
-            make_feature(
-                feature_id=f"production-area-{patch['id']}",
-                geometry=patch["geometry_wgs84"],
-                layer="production_area_candidate",
-                label=label,
-                confidence=CONFIDENCE_LOW,
-                confidence_notes=confidence_notes,
-                extra_properties={
-                    "area_acres": patch["area_acres"],
-                    "representative_elevation_m": round(patch["representative_elevation_m"], 1),
-                    "rank": patch["rank"],
-                    "suitability_score": patch["suitability_score"],
-                    "slope_factor": patch["slope_factor"],
-                    "size_factor": patch["size_factor"],
-                    "aspect_factor": patch["aspect_factor"],
-                    "avg_slope_pct": patch["avg_slope_pct"],
-                    "aspect_deg": patch["aspect_deg"],
-                    "soil_carved_acres": patch["soil_carved_acres"],
-                    "soil_carved_pct": patch["soil_carved_pct"],
-                    "soil_data_available": patch["soil_data_available"],
-                    "source_patch_id": patch["source_patch_id"],
-                },
-            )
-        )
-    return make_feature_collection(features)
+    return scored_production_areas_to_feature_collection(scored_patches)
 
 
 def summarize_production_area_suitability(scored_patches: list[dict]) -> str:

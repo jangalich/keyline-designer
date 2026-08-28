@@ -115,7 +115,7 @@ import numpy as np
 from rasterio.warp import transform as warp_transform
 from shapely.geometry import Point
 
-from feature_schema import CONFIDENCE_LOW, make_feature, make_feature_collection
+from feature_schema import CONFIDENCE_LOW
 from raster_grid import cell_area_acres, pixel_center_xy
 from valley_delineation import (
     compute_flow_accumulation,
@@ -633,31 +633,12 @@ def keypoints_to_geojson(keypoints: list[dict]) -> dict:
     position, and the on/off-parcel margin flags) as properties --
     geometry-first, no narrative. An empty keypoint list yields an empty
     FeatureCollection, honestly, not a placeholder feature.
+
+    CONSOLIDATED into wire_translation.py -- see valleys_to_geojson().
     """
-    features = [
-        make_feature(
-            feature_id=f"keypoint-{k['id']}",
-            geometry=k["geometry_wgs84"],
-            layer="keypoint",
-            label=f"Keypoint {k['id']}",
-            confidence=k["confidence"],
-            confidence_notes=k["confidence_notes"],
-            extra_properties={
-                "valley_id": k["valley_id"],
-                "elevation_m": k["elevation_m"],
-                "contributing_acres": k["contributing_acres"],
-                "slope_above_pct": k["slope_above_pct"],
-                "slope_below_pct": k["slope_below_pct"],
-                "slope_drop_pct": k["slope_drop_pct"],
-                "stem_length_cells": k["stem_length_cells"],
-                "position_along_stem": k["position_along_stem"],
-                "on_parcel": k["on_parcel"],
-                "distance_outside_boundary_m": k["distance_outside_boundary_m"],
-            },
-        )
-        for k in keypoints
-    ]
-    return make_feature_collection(features)
+    from wire_translation import keypoints_to_feature_collection
+
+    return keypoints_to_feature_collection(keypoints)
 
 
 def identify_keypoints(
