@@ -144,6 +144,46 @@ def create_document(boundary: list) -> dict:
     }
 
 
+def document_body(document: dict) -> dict:
+    """
+    A Design Document ON THE WIRE: the stored document plus `step_order`.
+
+    THE ONE OUTBOUND SHAPE. Every surface that hands a client a document --
+    the session routes in session_api.py and a generate job's `done` result
+    (step_orchestrator.run_generate_job) -- passes it through here, so a
+    document is the same document whichever route produced it. A document
+    served by one path and not another is exactly the drift this function
+    exists to prevent, which is why it lives beside STEP_ORDER rather than
+    in a transport that only some of those callers go through.
+
+    WHY A FIELD AND NOT JUST THE ORDER OF `steps`. create_document() builds
+    its `steps` map in STEP_ORDER and Python preserves that insertion order --
+    but NOTHING BETWEEN HERE AND THE CLIENT DOES. RFC 8259 says a JSON object
+    is an unordered collection of members, and Flask's DefaultJSONProvider
+    takes it at its word: `sort_keys` defaults to True, so jsonify() emits the
+    steps ALPHABETICALLY -- fencing, landform, roads, structures, trees,
+    water. Measured against flask 3.1.3, not assumed.
+
+    That is the worst available failure mode for a client reading the order
+    off the keys, because the wrong answer is PLAUSIBLE: six real step ids in
+    a stable order that simply is not the pipeline's. A reopen confirmation
+    built on it would name the wrong steps as the ones about to be reset, and
+    nothing anywhere would raise.
+
+    So the order travels as DATA. The frontend needs it to show what a reopen
+    will discard before the click, and the only alternative is a second copy
+    of STEP_ORDER hardcoded over there -- a second source of truth for the one
+    constant downstream_steps(), the commit cascade and the step registry all
+    key off. A derived field on the way out is much the cheaper side of that.
+
+    DERIVED HERE, NOT STORED. This module stays the single owner of the
+    constant; a document neither gains this key by being persisted nor keeps
+    it by being read back, and every document any surface serves carries it
+    -- including ones written by a build that predates this function.
+    """
+    return {**document, "step_order": list(STEP_ORDER)}
+
+
 def downstream_steps(step_id: str) -> tuple:
     """
     The steps a reopen (or re-commit) of step_id resets, in order. The

@@ -428,14 +428,19 @@ def _fresh_runner():
 
 def _generate(session_id, store, fetch_cache, cache, runner, step_id="landform", params=None):
     """generate_step() + wait, since these assertions are about the payload
-    rather than about not blocking. The job's own lifecycle is section 8."""
+    rather than about not blocking. The job's own lifecycle is section 8.
+
+    Returns the PAYLOAD half of the job result. A done job now carries
+    {"payload", "document"} (run_generate_job); the document half is section
+    8's, and unwrapping it here would put a key every assertion below has to
+    step over in front of all of them."""
     job = step_orchestrator.generate_step(
         session_id, step_id, store, params=params,
         fetch_cache=fetch_cache, cache=cache, runner=runner,
     ).wait(timeout=600)
     if job.status != job_runner.STATUS_DONE:
         raise AssertionError(f"generate failed: {job.error} ({job.exception!r})")
-    return job.result
+    return job.result["payload"]
 
 
 # The keys the working frontend reads, gathered from App.jsx,
@@ -907,6 +912,24 @@ with Harness() as h:
     )
     assert set(done["result"]) == set(job.result)
 
+    # THE DONE RESULT'S TWO HALVES. The payload is the step's layers; the
+    # document is the one this generate moved to "generated", shaped by
+    # design_document.document_body() exactly as the session routes shape it.
+    # The client polls once and knows both -- the GET that used to be the only
+    # way to learn the new status is what the second key removes.
+    assert set(job.result) == {"payload", "document"}, sorted(job.result)
+    carried = job.result["document"]
+    assert carried["steps"]["landform"]["status"] == (
+        design_document.STATUS_GENERATED
+    ), carried["steps"]["landform"]
+    assert carried["step_order"] == list(design_document.STEP_ORDER), carried.get(
+        "step_order"
+    )
+    assert carried == design_document.document_body(store.get(session_id)), (
+        "the carried document must be the stored document on the wire -- the "
+        "same bytes a GET of this session would return"
+    )
+
     # A FAILING GENERATE. The step's declared canopy failure -- the layer
     # /api/production-zones names for the same failure -- raised from the
     # entry point the registry actually calls.
@@ -938,6 +961,21 @@ with Harness() as h:
         failed["error"]["failed_layer"]["type"],
         failed["error"]["failed_layer"]["label"],
     ) == production_zone_payload.LAYER_CANOPY
+
+    # AND NO DOCUMENT ON THE FAILURE. The done result gained one because a
+    # successful generate MOVED the step's status; this one moved nothing, so
+    # there is no transition to report and the error payload is left exactly
+    # as it was. A document here would be a document sent to say that nothing
+    # happened -- and a client hydrating on it would rewrite its mirror from
+    # a failed generate.
+    assert "document" not in failed["error"], sorted(failed["error"])
+    assert "document" not in failed, sorted(failed)
+    assert store.get(session_id)["steps"]["landform"]["status"] == (
+        design_document.STATUS_GENERATED
+    ), (
+        "the status the EARLIER successful generate set is what stands; the "
+        "failure neither advanced it nor rolled it back"
+    )
     # NOT A TRACEBACK. The exception is kept for server-side logging and
     # never serialised.
     assert "Traceback" not in str(failed["error"])
@@ -1013,12 +1051,17 @@ with Harness() as h:
 
 print(
     f"8. JOB LIFECYCLE: generate returned a job immediately, went "
-    f"running -> done carrying only a result. A canopy failure went "
+    f"running -> done carrying only a result -- {sorted(job.result)}, the "
+    f"payload plus the document this generate moved to "
+    f"'{carried['steps']['landform']['status']}' (step_order "
+    f"{carried['step_order']}), byte-equal to the stored document on the "
+    f"wire. A canopy failure went "
     f"running -> failed carrying failed_layer "
     f"{failed['error']['failed_layer']}; a LayerFetchError named its own "
     f"layer ({elevation_failure.error['failed_layer']['type']}); an "
     f"unclassified failure carried prose and NO failed_layer. No traceback "
-    f"and no exception text crossed the wire, the step stayed not_started, "
+    f"and no exception text crossed the wire, no failure carried a document, "
+    f"a fresh session's step stayed not_started, "
     f"and an unknown job id raises."
 )
 

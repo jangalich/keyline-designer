@@ -407,7 +407,10 @@ class Session:
         ).wait(timeout=600)
         if job.status != job_runner.STATUS_DONE:
             raise AssertionError(f"generate failed: {job.error} ({job.exception!r})")
-        return job.result
+        # The PAYLOAD half; a done job carries {"payload", "document"}
+        # (step_orchestrator.run_generate_job). These are commit tests -- the
+        # document they care about is the one the commit returns.
+        return job.result["payload"]
 
     def commit(self, features, provenance, base_revision, step_id="landform", inputs=None):
         return step_orchestrator.commit_step(

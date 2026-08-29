@@ -36,7 +36,6 @@ from flask_cors import CORS
 
 import session_api
 from generate_full_report import generate_full_report
-from generate_pdf_report import generate_full_report_pdf
 from geocode import geocode_address
 from production_zone_payload import (
     LayerFetchError,
@@ -248,6 +247,23 @@ def generate_report_pdf_endpoint():
     try:
         tmp_dir = tempfile.mkdtemp(prefix="keyline-report-")
         pdf_path = os.path.join(tmp_dir, "scale_of_permanence_report.pdf")
+
+        # WEASYPRINT IS IMPORTED HERE, NOT AT MODULE SCOPE. generate_pdf_report
+        # imports weasyprint, which links libpango at import time; on a machine
+        # without those system libraries the import raises. At module scope
+        # that made the ENTIRE API unimportable -- every session route, the
+        # production-zone spike and /api/health included -- because one
+        # endpoint's rendering toolchain was missing. A test process that
+        # touches no PDF could not so much as `import api`, which is why
+        # test_session_api.py's section 10 could not run locally.
+        #
+        # Deferred to the one route that actually renders a PDF, the failure
+        # lands where the capability is used: a request to this endpoint on a
+        # box without libpango 500s with the ImportError, and nothing else on
+        # the app is affected. The endpoint's behaviour is otherwise unchanged
+        # -- same function, same arguments; the import is simply paid on first
+        # call rather than at startup, and cached in sys.modules after that.
+        from generate_pdf_report import generate_full_report_pdf
 
         generate_full_report_pdf(boundary, pdf_path, access_point, property_label=property_label)
 

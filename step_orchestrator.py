@@ -26,6 +26,10 @@ WHAT IT DOES, in order:
   8. Translate outbound: the step's declared payload builder turns the
      internal result into the wire shape.
   9. Set the step's document status to "generated" and persist.
+ 10. Return BOTH to the job: {"payload": ..., "document": ...}. The status
+     in step 9 is a fact this process now holds and the client does not;
+     making it fetch the document to learn it would be a round trip for
+     something already in hand. See run_generate_job().
 
 NOTHING IN THAT LIST NAMES A STEP. There is no `if step_id == "landform"`
 anywhere in this file, and adding water must not add one -- it is one entry
@@ -394,7 +398,8 @@ def generate_step(
     """
     Generate one step's proposals. Returns the JOB immediately (section 3.1:
     generate is asynchronous, 202 + polling recommended first); the payload
-    arrives as that job's `result`.
+    AND the updated document arrive as that job's `result` -- see
+    run_generate_job() for the shape and for why both.
 
     The two failure classes are deliberately different:
 
@@ -406,9 +411,9 @@ def generate_step(
         `failed` state with the error payload above. The caller already holds
         a job id and finds out by asking.
 
-    A caller that wants the payload synchronously calls
-    `generate_step(...).wait()` and reads `.result`. That is what the tests
-    do; a transport must not (see job_runner.py).
+    A caller that wants the result synchronously calls
+    `generate_step(...).wait()` and reads `.result["payload"]`. That is what
+    the tests do; a transport must not (see job_runner.py).
     """
     definition = step_registry.get_step(step_id)
     validated_params = validate_params(definition, params)
@@ -423,7 +428,7 @@ def generate_step(
         runner = job_runner.DEFAULT_JOB_RUNNER
 
     def work():
-        return run_generate(
+        return run_generate_job(
             session_id,
             definition,
             store,
@@ -444,11 +449,100 @@ def run_generate(
     cache: Optional[session_cache.SessionCache] = None,
 ) -> dict:
     """
-    The generate itself, synchronously -- what generate_step()'s job runs.
+    The generate itself, synchronously -- THE PAYLOAD.
 
     Separate and public so the compute path can be exercised, profiled and
     reasoned about without a thread in the way; generate_step() is the
     supported entry point and this is what it does.
+
+    The payload-only view of _generate(), for the two callers that want
+    exactly that and nothing else: step_payload() on a cache miss, whose
+    whole contract is to return the payload GET .../layers serves, and
+    restore_step_state(), which reads proposal ids out of it. Neither is
+    handing a document to a client, so neither should be made to unwrap one.
+    """
+    return _generate(
+        session_id, definition, store, params,
+        fetch_cache=fetch_cache, cache=cache,
+    )[0]
+
+
+def run_generate_job(
+    session_id: str,
+    definition,
+    store,
+    params: dict,
+    fetch_cache: Optional[session_cache.FetchCache] = None,
+    cache: Optional[session_cache.SessionCache] = None,
+) -> dict:
+    """
+    THE GENERATE JOB'S `done` RESULT: {"payload": ..., "document": ...}.
+
+    WHY THE DOCUMENT RIDES ALONG. A generate does two things -- it produces
+    proposals, and it moves the step's status to "generated". Returning only
+    the first told the client that a transition had happened without telling
+    it what the transition was, so the only honest way to learn the new
+    status was a GET /api/sessions/<id> immediately after: a round trip for a
+    fact this process had in hand a millisecond earlier, and had already
+    persisted.
+
+    That round trip is worse than its cost. The frontend's rule is that its
+    mirror of the document is only ever written by hydrating a server
+    response, and a required-but-uninteresting fetch after every generate is
+    exactly the pressure that makes patching `status: "generated"` in
+    client-side look reasonable. It is not: the client would then be
+    asserting a transition rather than observing one, and a generate the
+    server rejected or coalesced would leave the mirror lying. Sending the
+    document removes the temptation by removing the round trip.
+
+    TWO KEYS, NEITHER NESTED IN THE OTHER. `payload` is the step's wire
+    payload, byte-for-byte what GET .../layers serves; `document` is the
+    Design Document, byte-for-byte what GET /api/sessions/<id> serves. They
+    answer different questions and are consumed by different parts of the
+    client -- the layers and the wizard's state -- so folding one inside the
+    other, or replacing the payload with a document carrying it, would make
+    every reader of either learn the shape of the other.
+
+    THROUGH design_document.document_body(), the same call the session routes
+    make. A document that reached a client without `step_order` because it
+    came out of a job rather than a route would be the drift that function
+    exists to prevent, and the client reading order off `steps` instead would
+    get six real step ids alphabetically -- a plausible wrong answer that
+    raises nowhere.
+
+    A FAILED GENERATE CARRIES NO DOCUMENT and is not touched here: it never
+    reaches this return. The job's error payload is error_payload()'s, and
+    the reason there is no document in it is not economy -- it is that the
+    step's status DID NOT CHANGE. Attaching one would be sending a document
+    to say nothing happened, and a client hydrating on it would rewrite its
+    mirror on the strength of a failure.
+    """
+    payload, document = _generate(
+        session_id, definition, store, params,
+        fetch_cache=fetch_cache, cache=cache,
+    )
+    return {"payload": payload, "document": design_document.document_body(document)}
+
+
+def _generate(
+    session_id: str,
+    definition,
+    store,
+    params: dict,
+    fetch_cache: Optional[session_cache.FetchCache] = None,
+    cache: Optional[session_cache.SessionCache] = None,
+) -> tuple:
+    """
+    The generate, once: (payload, document).
+
+    ONE COMPUTE PATH WITH TWO VIEWS OVER IT, rather than a second function
+    that re-reads the document the first one just wrote. The document
+    returned is the one this call put (or the untouched one it did not need
+    to -- see mark_step_generated), so it is the state at the end of THIS
+    generate by construction. Re-reading the store instead would be a second
+    read that answers a slightly different question -- "what does the store
+    hold now", which another writer can have changed -- to arrive at the same
+    answer more slowly and less certainly.
     """
     # The document FIRST. It is the authority (section 2.1), an unknown
     # session_id raises from the store, and step 5's committed values will
@@ -480,11 +574,17 @@ def run_generate(
     # The ONLY document write a generate makes. mark_step_generated() is a
     # no-op on a step already generated, so a regenerate does not bump
     # document_revision -- see its docstring for why that matters here.
+    #
+    # `updated` is returned either way, and on the no-op branch it IS
+    # `document`: a regenerate legitimately reports the unchanged document,
+    # because the unchanged document is the truth about a step that was
+    # already generated. A client hydrating it sees the same revision and
+    # the same status, which is what happened.
     updated = mark_step_generated(document, definition.step_id)
     if updated is not document:
         store.put(updated)
 
-    return payload
+    return payload, updated
 
 
 # ======================================================================

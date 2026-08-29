@@ -490,11 +490,53 @@ with Harness() as h:
     body = finished.get_json()
     assert body["status"] == job_runner.STATUS_DONE, body
     assert "result" in body and "error" not in body, sorted(body)
-    job_payload = body["result"]
+
+    # BOTH HALVES, SIDE BY SIDE. `payload` is the step's layers; `document` is
+    # the document this generate just moved to "generated". Two sibling keys:
+    # neither nested in the other, and the payload not replaced by a document
+    # carrying it, so a reader of either never has to know the other's shape.
+    assert set(body["result"]) == {"payload", "document"}, (
+        f"a done generate carries its payload AND the updated document: "
+        f"{sorted(body['result'])}"
+    )
+    job_payload = body["result"]["payload"]
+    job_document = body["result"]["document"]
+
+    # THE STATUS THE CLIENT CAME FOR, without asking again. The generate moved
+    # landform to "generated" and the job says so; the round trip that used to
+    # be the only way to learn it is what this key removes.
+    assert job_document["steps"]["landform"]["status"] == (
+        design_document.STATUS_GENERATED
+    ), job_document["steps"]["landform"]
+
+    # AND IT IS A DOCUMENT LIKE EVERY OTHER DOCUMENT. step_order rides along
+    # because the job's document goes out through the same
+    # design_document.document_body() the session routes use -- a document
+    # that lost it by coming from a job would leave the client reading order
+    # off `steps`, which Flask serves alphabetically.
+    assert job_document["step_order"] == list(design_document.STEP_ORDER), (
+        f"the carried document must carry step_order like every other "
+        f"document served here: {job_document.get('step_order')}"
+    )
+    assert job_document["session_id"] == session_id, job_document["session_id"]
 
     # The document says "generated" now, and says it WITHOUT the proposals in
     # it -- the document holds decisions, the payload lives elsewhere.
     after_generate = c.get_session(session_id).get_json()
+
+    # BYTE-IDENTICAL TO GET /api/sessions/<id>. Not "equivalent", not "carries
+    # the same status" -- the same bytes, because they are the same shape from
+    # the same function. This is the assertion that makes the extra GET
+    # genuinely redundant rather than merely usually redundant: a client that
+    # hydrates from the job result is in exactly the state it would have been
+    # in had it fetched.
+    assert json.dumps(job_document, sort_keys=True) == json.dumps(
+        after_generate, sort_keys=True
+    ), (
+        f"the job's document and GET /api/sessions/<id> must be the same "
+        f"document:\n  job: {json.dumps(job_document, sort_keys=True)[:400]}\n"
+        f"  get: {json.dumps(after_generate, sort_keys=True)[:400]}"
+    )
     assert after_generate["steps"]["landform"]["status"] == (
         design_document.STATUS_GENERATED
     ), after_generate["steps"]["landform"]
@@ -540,7 +582,11 @@ print(
     f"1. HAPPY PATH: POST /api/sessions -> 201 (Location: /api/sessions/"
     f"{session_id[:8]}..., document_revision 0, six not_started steps); POST "
     f".../generate -> 202 job {submitted['job_id'][:8]}...; {poll_count} poll(s) "
-    f"of GET /api/jobs -> 200 status 'done'; GET .../layers -> 200 carrying the "
+    f"of GET /api/jobs -> 200 status 'done' whose result carries BOTH "
+    f"{sorted(body['result'])} -- the document at landform "
+    f"'{job_document['steps']['landform']['status']}' with step_order "
+    f"{job_document['step_order']}, byte-identical to GET /api/sessions/<id> "
+    f"immediately after, so no client needs that fetch; GET .../layers -> 200 carrying the "
     f"identical payload ({len(proposals)} proposals); POST .../commit -> 200 "
     f"status 'committed' at step revision {entry['revision']}; GET /api/sessions "
     f"-> 200, byte-identical to the commit's response."
@@ -557,7 +603,9 @@ print(
 with Harness() as h:
     c = Client()
     session_id = c.create().get_json()["session_id"]
-    payload = c.poll(c.generate(session_id).get_json()["job_id"])[0].get_json()["result"]
+    payload = c.poll(c.generate(session_id).get_json()["job_id"])[0].get_json()[
+        "result"
+    ]["payload"]
     proposals = payload["suggested_zones"]["features"]
 
     first = c.commit(
@@ -629,7 +677,9 @@ print(
 with Harness() as h:
     c = Client()
     session_id = c.create().get_json()["session_id"]
-    payload = c.poll(c.generate(session_id).get_json()["job_id"])[0].get_json()["result"]
+    payload = c.poll(c.generate(session_id).get_json()["job_id"])[0].get_json()[
+        "result"
+    ]["payload"]
     proposals = payload["suggested_zones"]["features"]
 
     good = proposals[0]
@@ -735,7 +785,9 @@ print(
 with Harness() as h:
     c = Client()
     session_id = c.create().get_json()["session_id"]
-    payload = c.poll(c.generate(session_id).get_json()["job_id"])[0].get_json()["result"]
+    payload = c.poll(c.generate(session_id).get_json()["job_id"])[0].get_json()[
+        "result"
+    ]["payload"]
     proposals = payload["suggested_zones"]["features"]
 
     clean = proposals[0]
@@ -816,6 +868,17 @@ with Harness() as h:
         f"the body must carry failed_layer {{type, label}} -- the shape the "
         f"panel branches on: {failed_body['error']}"
     )
+    # NO DOCUMENT ON A FAILURE, and not as an oversight. The error body is
+    # error_payload()'s and nothing was added to it, because the step's status
+    # DID NOT CHANGE -- there is no transition to report. A document here
+    # would invite a client to hydrate its mirror on the strength of a
+    # generate that failed.
+    assert "document" not in failed_body["error"], (
+        f"a failed generate reports failed_layer and no document; the step's "
+        f"status did not move: {sorted(failed_body['error'])}"
+    )
+    assert "document" not in failed_body, sorted(failed_body)
+
     assert "Traceback" not in json.dumps(failed_body)
     assert "fixture: HAG coverage too sparse" not in json.dumps(failed_body), (
         "the raw exception text must not cross the wire"
@@ -852,7 +915,9 @@ print(
 with Harness() as h:
     c = Client()
     session_id = c.create().get_json()["session_id"]
-    payload = c.poll(c.generate(session_id).get_json()["job_id"])[0].get_json()["result"]
+    payload = c.poll(c.generate(session_id).get_json()["job_id"])[0].get_json()[
+        "result"
+    ]["payload"]
     proposals = payload["suggested_zones"]["features"]
     c.commit(
         session_id,
@@ -958,7 +1023,7 @@ with Harness() as h:
     session_id = c.create().get_json()["session_id"]
     generated_payload = c.poll(
         c.generate(session_id).get_json()["job_id"]
-    )[0].get_json()["result"]
+    )[0].get_json()["result"]["payload"]
 
     warm = c.layers(session_id)
     assert warm.status_code == 200
