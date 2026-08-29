@@ -14,6 +14,29 @@ carries, and at what coordinate precision). api.py stays what it already is
 for every other endpoint -- request validation, status-code mapping, and
 nothing else.
 
+TWO CALLERS, ONE ASSEMBLER. The two are split:
+
+  build_production_zone_payload()      fetch, then assemble  -- the
+                                       /api/production-zones path
+  assemble_production_zone_payload()   assemble only, pure   -- also the
+                                       interactive session's landform step
+
+The session path (step_orchestrator.build_landform_payload()) already holds
+both upstream results -- the exclusion result came from the terrain warm-up
+at session creation, the production result from the step's own generate --
+so it needs the contract without the fetching. Splitting it out means the
+endpoint and the session return the SAME payload by construction; two
+assemblers would be two contracts that agree until the first edit, with a
+working frontend on the far side of the difference.
+
+THE TWO REPRESENTATIONS OF ONE ZONE SET, AND THE ID THAT JOINS THEM.
+`zones` is tabular (rank, score, slope range, aspect) for the panel's list;
+`suggested_zones.features` is GeoJSON for the map. Deliberately not
+collapsed: neither consumer can use the other's shape. Every tabular row
+therefore carries `feature_id` -- its own feature's wire id -- alongside the
+bare integer `id`, so the panel joins on a value the payload gave it rather
+than on one it rebuilt with a format string.
+
 THE SHARED FETCHES, AND THE TWO THAT ARE STILL DOUBLED
 ------------------------------------------------------
 This payload needs BOTH exclusion_zones.identify_exclusion_zones() (for the
@@ -155,6 +178,20 @@ class LayerFetchError(Exception):
         self.label = label
 
 
+# The two layers allowed to hard-fail this payload, each as the exact
+# (type, label) pair the wire carries -- see WHAT A FAILURE IS ALLOWED TO SAY.
+#
+# NAMED CONSTANTS RATHER THAN LITERALS AT THE RAISE SITES because they are no
+# longer read in one place. step_registry.py declares the same pairs as the
+# landform step's failure layers, so a session-path generate that dies on
+# canopy reports what /api/production-zones reports for the same failure. Two
+# copies of "tree canopy height" would drift on the first copy edit, and the
+# frontend's upstream-failure state branches on `type` -- so the drift would
+# be silent on the side that matters.
+LAYER_ELEVATION = ("elevation", "elevation data")
+LAYER_CANOPY = ("canopy", "tree canopy height")
+
+
 def _round_geometry(geometry: Optional[dict]) -> Optional[dict]:
     """
     A GeoJSON geometry dict with every coordinate rounded to
@@ -217,7 +254,10 @@ def build_production_zone_payload(
                                     geometry_wgs84}, ... ]  -- five, in
                                  exclusion_zones.LAYER_ORDER,
             'suggested_zones':   GeoJSON FeatureCollection,
-            'zones':             [ per-zone readout dicts, rank order ],
+            'zones':             [ per-zone readout dicts, rank order, each
+                                   carrying BOTH `id` (the patch's bare
+                                   integer) and `feature_id` (the matching
+                                   suggested_zones feature's wire id) ],
             'summary':           {total_acres, slope_passing_acres,
                                   eligible_acres, selected_acres,
                                   selected_pct_of_parcel},
@@ -242,12 +282,19 @@ def build_production_zone_payload(
     single rounding boundary and are contractually FINAL, while
     parcel_acres is raw (13.234178531035083 on the reference parcel).
     Rounding it here would be a second rounding boundary for one field.
+
+    THE ASSEMBLY ITSELF is assemble_production_zone_payload() below; this
+    function is the fetch-then-assemble path /api/production-zones takes. The
+    interactive session's landform generate (step_orchestrator.build_landform_
+    payload()) reaches the same assembler with an exclusion result and a
+    production result it already has, so the two paths return one shape by
+    construction rather than by agreement.
     """
     if dem is None:
         try:
             dem = dem_data.get_dem_for_boundary(boundary_coordinates)
         except Exception as exc:
-            raise LayerFetchError("elevation", "elevation data") from exc
+            raise LayerFetchError(*LAYER_ELEVATION) from exc
 
     boundary_polygon_utm = _boundary_polygon_utm(boundary_coordinates, dem)
 
@@ -255,12 +302,12 @@ def build_production_zone_payload(
         try:
             canopy_height = get_canopy_height_for_boundary(boundary_coordinates, dem)
         except Exception as exc:
-            raise LayerFetchError("canopy", "tree canopy height") from exc
+            raise LayerFetchError(*LAYER_CANOPY) from exc
         if canopy_height is None:
             # No HAG coverage at all for this boundary. A genuine no-data
             # outcome, and a hard failure by the same pipeline rule that
             # makes the canopy gate mandatory -- not something to degrade on.
-            raise LayerFetchError("canopy", "tree canopy height")
+            raise LayerFetchError(*LAYER_CANOPY)
 
     exclusion = identify_exclusion_zones(
         boundary_coordinates,
@@ -274,6 +321,29 @@ def build_production_zone_payload(
         canopy_height=canopy_height,
     )
 
+    return assemble_production_zone_payload(exclusion, production)
+
+
+def assemble_production_zone_payload(exclusion: dict, production: dict) -> dict:
+    """
+    THE PAYLOAD CONTRACT ITSELF, with the fetching lifted off it: an
+    exclusion_zones.identify_exclusion_zones() result and a production_area_
+    ceiling.identify_optimized_production_areas() result in, the wire payload
+    out. Pure -- no network, no geospatial derivation, no ordering decisions;
+    every one of those lives in the caller above (or, for the session path, in
+    step_orchestrator.py, which assembles the same two results from a warmed
+    session cache instead of from two fetches).
+
+    SPLIT OUT SO THE TWO PATHS CANNOT DRIFT. /api/production-zones and the
+    interactive session's landform generate must return the SAME shape -- a
+    working frontend consumes it today and the session path is meant to slot
+    in underneath that frontend unchanged. Two assemblers would be two
+    contracts that happen to agree until the first edit; test_step_
+    orchestrator.py asserts the session payload against THIS function's own
+    output rather than against a hand-written expectation, which is only a
+    meaningful assertion because there is one implementation to assert
+    against.
+    """
     wire = exclusion["wire"]
     narrative = production["narrative_data"]
     parcel_acres = float(narrative["parcel"]["total_acres"])
@@ -314,9 +384,29 @@ def build_production_zone_payload(
             }
         )
 
+    # THE WIRE FEATURE ID, CARRIED RATHER THAN REBUILT. `id` is the patch's
+    # bare integer; `feature_id` is the identity the map's own features are
+    # keyed by -- f"production-area-{id}", minted by production_suitability_
+    # to_geojson() and written down once in wire_translation._PRODUCTION_
+    # FEATURE_ID_PREFIX.
+    #
+    # The panel used to reconstruct it with a format string
+    # (`production-area-${zone.id}`) while the map filtered on feature.id
+    # directly: one identity with two sources of truth, joined by a template
+    # literal that nothing checks. Renaming the prefix would have broken
+    # selection silently -- the rows would simply stop matching, with no error
+    # anywhere. Carrying the real value makes the join a lookup instead.
+    #
+    # `id` STAYS. The frontend still keys its list rows on the bare integer,
+    # and this is an addition, not a migration.
+    feature_ids = {
+        _feature_patch_id(feature): feature["id"] for feature in features
+    }
+
     zones = [
         {
             **zone,
+            "feature_id": feature_ids[int(zone["id"])],
             "area_acres": drawn[int(zone["id"])]["acres"],
             "percent_of_parcel": (
                 round(drawn[int(zone["id"])]["acres"] / parcel_acres * 100.0, 1)
