@@ -24,6 +24,7 @@ import copy
 import json
 
 from design_document import (
+    PROVENANCE_VALUES,
     STEP_ORDER,
     DocumentError,
     RevisionConflictError,
@@ -90,7 +91,7 @@ print("CREATE: fresh document shape, status-only steps, 51 unique session_ids.")
 # --- 2. COMMIT landform: status/revision/document_revision all correct ---
 
 landform_fc = _fc("ridge-1", "ridge-2")
-provenance = {"ridge-1": "generated", "ridge-2": "user_modified"}
+provenance = {"ridge-1": "generated", "ridge-2": "user_added"}
 doc1 = commit_step(doc, "landform", landform_fc, provenance, base_revision=0,
                    inputs={"contour_interval_m": 2.0})
 validate_document(doc1)
@@ -122,6 +123,22 @@ except DocumentError:
 try:
     commit_step(doc, "landform", EMPTY_FC, {"f1": "hand_drawn"}, base_revision=0)
     raise AssertionError("unknown provenance classification must hard-fail")
+except DocumentError:
+    pass
+
+# "user_modified" IS NO LONGER ACCEPTED. It described a generated candidate
+# whose vertices the user edited, and nothing in this system can produce one
+# -- generated candidates are select-only at every step. A value nothing can
+# emit reads to the next author as a supported case, so it was removed rather
+# than left accepted-but-unreachable. See PROVENANCE_VALUES.
+assert "user_modified" not in PROVENANCE_VALUES, (
+    "user_modified must not be an accepted provenance: no path in this system "
+    "can produce a modified generated candidate"
+)
+try:
+    commit_step(doc, "landform", _fc("ridge-1"), {"ridge-1": "user_modified"},
+                base_revision=0)
+    raise AssertionError("'user_modified' must hard-fail like any other unknown value")
 except DocumentError:
     pass
 

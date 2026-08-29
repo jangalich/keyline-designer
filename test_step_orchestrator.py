@@ -1070,11 +1070,17 @@ with Harness() as h:
 
     # The committed-source resolver is declared and deliberately unwired.
     assert step_registry.SOURCE_COMMITTED in step_orchestrator._CONSUMES_RESOLVERS, (
-        "the committed source must be a registered resolver slot, so B5b is a "
-        "registration rather than a rewrite of assemble_consumes()"
+        "the committed source must be a registered resolver slot, so adding a "
+        "step that reads a commit is a registration rather than a rewrite of "
+        "assemble_consumes()"
     )
+    # THE COMMITTED RESOLVER REFUSES AN UNCOMMITTED UPSTREAM STEP -- it does
+    # not generate anyway and it does not self-compute. The full behaviour
+    # (rehydration, the empty-commit sentinel, the revision-keyed cache) is
+    # test_step_commit.py's; this asserts the slot is wired and refuses.
     try:
         step_orchestrator._resolve_from_committed(
+            step_registry.get_step("landform"),
             step_registry.Consumed(
                 name="production_areas",
                 source=step_registry.SOURCE_COMMITTED,
@@ -1084,17 +1090,21 @@ with Harness() as h:
             None,
             document,
         )
-    except step_orchestrator.StepOrchestrationError as exc:
-        assert "B5b" in str(exc)
+    except step_orchestrator.UpstreamNotCommittedError as exc:
+        assert exc.upstream_step == "landform"
+        assert exc.upstream_status == design_document.STATUS_NOT_STARTED, exc.upstream_status
     else:
-        raise AssertionError("the committed resolver must fail loudly, not silently")
+        raise AssertionError(
+            "the committed resolver must REFUSE an uncommitted upstream step, "
+            "never fall through to a self-compute"
+        )
 
 print(
     f"9. ORCHESTRATION EDGES: an unregistered step and an unknown step both "
     f"raise before a job exists ({edge_failures}/2); unexpected params are "
     f"rejected by name; an unknown session fails INSIDE the job; the "
-    f"committed-source resolver slot is registered and raises with what it is "
-    f"waiting for."
+    f"committed-source resolver is registered and REFUSES an uncommitted "
+    f"upstream step rather than self-computing it."
 )
 
 

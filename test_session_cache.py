@@ -348,16 +348,37 @@ print(
 # --- 5. SESSION CONTEXT ----------------------------------------------
 
 context = _context("shape-check")
+# THE THREE PER-STEP SLOTS ARE EMPTY AFTER A WARM-UP, all for one reason: a
+# warm-up computes terrain, and every one of these is filled by a per-step
+# VERB (generate, commit, reopen) that has not run yet.
 assert context.step_proposals == {}, (
-    "warm-up creates no proposals -- this slot stays empty until the Step "
-    "Registry branch fills it"
+    "warm-up creates no proposals -- a generate fills this slot"
 )
-# Two contexts must not share the mutable slot (a dataclass default_factory
+assert context.step_committed == {}, (
+    "warm-up commits nothing -- a commit fills this slot, and it holds the "
+    "REHYDRATION of a committed FeatureCollection, never the decision itself"
+)
+assert context.step_restored == {}, (
+    "warm-up reopens nothing -- a reopen fills this slot"
+)
+# Two contexts must not share the mutable slots (a dataclass default_factory
 # thing that would be a real bug if it regressed).
-assert context.step_proposals is not _context("other").step_proposals
+other = _context("other")
+assert context.step_proposals is not other.step_proposals
+assert context.step_committed is not other.step_committed
+assert context.step_restored is not other.step_restored
 
 # Nothing on the context is a user decision: every field is derived from
 # the boundary plus a ParcelData, which is what makes eviction safe.
+#
+# THE THREE PER-STEP SLOTS PASS THAT TEST, and the middle one is the case
+# worth being explicit about. step_committed holds a committed step's
+# REHYDRATED internal shape -- a derivation of the document's own committed
+# FeatureCollection, recomputable from it by re-running the step's declared
+# rehydrator, and keyed by the step revision it was derived at so a stale one
+# is never served. The DECISION stays in the document. step_proposals and
+# step_restored are both regenerable by re-running a step's generate, which
+# is idempotent and network-free by contract.
 assert set(vars(context)) == {
     "session_id",
     "boundary",
@@ -367,6 +388,8 @@ assert set(vars(context)) == {
     "keypoints",
     "exclusion_zones",
     "step_proposals",
+    "step_committed",
+    "step_restored",
 }, (
     "a new SessionContext field needs a decision first: if it cannot be "
     "rebuilt from the document it belongs in the document, not here"
@@ -386,7 +409,8 @@ assert isinstance(session_cache.DEFAULT_FETCH_CACHE, FetchCache)
 assert isinstance(session_cache.DEFAULT_SESSION_CACHE, SessionCache)
 
 print(
-    "SESSION CONTEXT: derived-only fields, empty per-session proposal slot, "
+    "SESSION CONTEXT: derived-only fields, three empty per-step slots "
+    "(proposals, committed rehydrations, restored editable state), "
     "dem/boundary_polygon_utm read through to the shared ParcelData."
 )
 
