@@ -196,6 +196,50 @@ def commit_step(
     return new_document
 
 
+def mark_step_generated(document: dict, step_id: str) -> dict:
+    """
+    Record that a step's proposals now EXIST -- and nothing else. The
+    proposals themselves live in the session cache; this document holds
+    decisions, never derived bulk data, so "generated" is a status and no
+    features are written (see this module's docstring).
+
+    RETURNS THE DOCUMENT UNCHANGED -- the same object, not a copy -- when the
+    step is already generated. Regenerating is idempotent and repeatable by
+    contract (interactive-design-architecture-proposal.md section 3.1): a
+    user who deletes everything and asks for a fresh set of proposals has
+    changed no decision, so bumping document_revision for it would churn the
+    optimistic-concurrency chain every commit is checked against and make a
+    regenerate look, to another tab, like someone else's edit. Callers
+    compare identity to decide whether to persist.
+
+    A COMMITTED step is NOT downgraded here. Moving a committed step back to
+    "generated" is reopen_step()'s job and carries a downstream cascade with
+    it; doing it silently from a generate would discard that cascade and
+    leave later steps built on a decision the user is now re-editing. Raises
+    instead.
+
+    A step already carrying a reopened commit's features keeps them: this
+    sets `status` and touches no other key, so the editable starting point
+    reopen_step() left behind survives a regenerate.
+    """
+    _require_known_step(step_id)
+    current = document["steps"][step_id]
+    if current["status"] == STATUS_COMMITTED:
+        raise DocumentError(
+            f"cannot mark committed step '{step_id}' as generated; reopening "
+            f"a committed step is reopen_step()'s job and resets the steps "
+            f"built on it"
+        )
+    if current["status"] == STATUS_GENERATED:
+        return document
+
+    new_document = copy.deepcopy(document)
+    new_document["steps"][step_id]["status"] = STATUS_GENERATED
+    new_document["document_revision"] += 1
+    new_document["updated_at"] = _utc_now_iso()
+    return new_document
+
+
 def reopen_step(document: dict, step_id: str) -> dict:
     """
     Reopen a committed step for editing: status goes to "generated" with
