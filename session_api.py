@@ -362,34 +362,19 @@ def _handled(function):
 
 def _document_body(document: dict) -> dict:
     """
-    A Design Document ON THE WIRE: the stored document plus `step_order`.
+    A Design Document on the wire -- design_document.document_body().
 
-    WHY A FIELD AND NOT JUST THE ORDER OF `steps`. create_document() builds
-    its `steps` map in STEP_ORDER and Python preserves that insertion order --
-    but NOTHING BETWEEN HERE AND THE CLIENT DOES. RFC 8259 says a JSON object
-    is an unordered collection of members, and Flask's DefaultJSONProvider
-    takes it at its word: `sort_keys` defaults to True, so jsonify() emits the
-    steps ALPHABETICALLY -- fencing, landform, roads, structures, trees,
-    water. Measured against flask 3.1.3, not assumed.
-
-    That is the worst available failure mode for a client reading the order
-    off the keys, because the wrong answer is PLAUSIBLE: six real step ids in
-    a stable order that simply is not the pipeline's. A reopen confirmation
-    built on it would name the wrong steps as the ones about to be reset, and
-    nothing anywhere would raise.
-
-    So the order travels as DATA. The frontend needs it to show what a reopen
-    will discard before the click, and the only alternative is a second copy
-    of STEP_ORDER hardcoded over there -- a second source of truth for the one
-    constant downstream_steps(), the commit cascade and the step registry all
-    key off. A derived field on the way out is much the cheaper side of that.
-
-    DERIVED HERE, NOT STORED. design_document.py stays the single owner of the
-    constant; a document neither gains this key by being persisted nor keeps
-    it by being read back, and every document this surface serves carries it
-    -- including ones written by a build that predates this function.
+    DELEGATED, NOT DUPLICATED. A generate job's `done` result now carries the
+    updated document too (step_orchestrator.run_generate_job), and that result
+    does not pass through a route here on its way out -- GET /api/jobs hands
+    back job_runner.snapshot() whole and reads nothing inside it. Two places
+    shaping a document meant one of them could quietly stop adding
+    `step_order`, and the client reading the order off `steps` would get six
+    real step ids in the wrong order rather than an error. So the shape lives
+    beside STEP_ORDER, where every producer of a document can reach it, and
+    this name stays as the local spelling of it.
     """
-    return {**document, "step_order": list(design_document.STEP_ORDER)}
+    return design_document.document_body(document)
 
 
 def _json_body() -> dict:
@@ -467,8 +452,11 @@ def build_blueprint(deps: Optional[Dependencies] = None, name: str = "sessions")
     @_handled
     def generate_step_endpoint(session_id, step_id):
         """
-        Start a generate. 202 + {"job_id", "status"}; the payload arrives via
-        GET /api/jobs/<job_id>.
+        Start a generate. 202 + {"job_id", "status"}; the result arrives via
+        GET /api/jobs/<job_id> as {"payload", "document"} -- the step's wire
+        payload and the document the generate just moved to "generated", so a
+        client does not have to GET this session back to learn a status this
+        process already knew. See step_orchestrator.run_generate_job().
 
         202 ACCEPTED IS THE HONEST CODE: the work has been accepted and has
         not been done. Section 3.1 calls for 202 + polling, and the reason is
