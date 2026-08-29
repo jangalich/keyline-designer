@@ -1988,4 +1988,220 @@ print(
     "calls, and the narrative reports soil as checked."
 )
 
+
+import json  # noqa: E402
+
+# --- 20. soil_components=/soil_geometries= reach THE EXCLUSION GATE too, and ---
+# --- close its two SDA queries: ZERO on the batch path (MEASURED) -----------
+#
+# Sections 16/17 proved these two parameters reach road_corridors._fetch_
+# floodplain_hydric_union(); section 19 proved they reach the water step.
+# The exclusion gate was the LAST consumer still paying for the same two
+# queries against data this function already held: identify_exclusion_
+# zones() accepted a pre-derived disqualifying_soil_union_utm= but no
+# raw-row override, so it self-served production_area._fetch_disqualifying_
+# soil_union(), whose own get_soil_data_for_polygon()/get_soil_geometries_
+# for_polygon() calls are the very same pair.
+#
+# WHY THIS SECTION HAS TO EXIST AT ALL, rather than trusting the session
+# path's own test: build_pipeline_context() is the ORACLE the step registry
+# will be checked against for parity. If the batch path kept paying two SDA
+# queries while session_cache.run_terrain_warm_up() did not, the two would
+# be computing the same exclusion result by different routes -- which is the
+# drift this whole context object exists to prevent.
+#
+# Unlike every other fixture in this file, the file-wide _fetch_
+# disqualifying_soil_union stub is REPLACED here by a wraps= spy on the real
+# helper, so the helper genuinely runs and its two SDA leaves are reachable.
+# They are patched at PRODUCTION_AREA's bindings -- the ones the helper
+# actually looks up -- and counted.
+
+# A GENTLE DEM over the SAME extent as synthetic_dem -- same origin, shape,
+# resolution and CRS, so boundary_coordinates still describes exactly this
+# grid. The file's main fixture is deliberately steep (its ~80% valley/ridge
+# landform is what makes the water and solar sections meaningful), and every
+# gate downstream of the slope gate is evaluated only over slope-passing
+# ground -- so on that DEM the hydric layer is empty no matter what the soil
+# rows say, and comparing two empty layers would prove nothing. A 2% plane
+# clears MAX_PRODUCTION_SLOPE_PCT everywhere, which is what gives this
+# section's comparison real content.
+_x_flat_array = np.tile(
+    (np.arange(COLS, dtype=np.float32) * RESOLUTION * 0.02), (ROWS, 1)
+) + 1000.0
+_x_flat_dem = {
+    "array": _x_flat_array,
+    "resolution_meters": (RESOLUTION, RESOLUTION),
+    "origin_x": origin_x,
+    "origin_y": origin_y,
+    "crs": DST_CRS,
+}
+
+_x_soil_ring = [list(pt) for pt in boundary_coordinates]
+if _x_soil_ring[0] != _x_soil_ring[-1]:
+    _x_soil_ring.append(list(_x_soil_ring[0]))
+_x_components = [{"mukey": "77", "comppct_r": "95", "hydricrating": "Yes", "compname": "Fixture hydric"}]
+_x_geometries = {"77": {"type": "Polygon", "coordinates": [_x_soil_ring]}}
+
+_x_sda_counts = {"components": 0, "geometries": 0}
+
+
+def _x_count_components(_wkt):
+    _x_sda_counts["components"] += 1
+    return _x_components
+
+
+def _x_count_geometries(_wkt):
+    _x_sda_counts["geometries"] += 1
+    return _x_geometries
+
+
+def _x_run_context(**overrides):
+    """One build_pipeline_context() run with the exclusion gate's hydric
+    path running FOR REAL, its two SDA leaves counted, and everything
+    downstream of it mocked away. Returns (context, sda_counts, spies)."""
+    _x_sda_counts.update(components=0, geometries=0)
+    _x_spies = {}
+    with ExitStack() as _x_stack:
+        _e = _x_stack.enter_context
+        # the real helper, restored over the file-wide stub, wrapped so
+        # this section can also assert it was reached exactly once
+        _x_spies["helper"] = _e(mock_patch.object(
+            pc.exclusion_zones,
+            "_fetch_disqualifying_soil_union",
+            wraps=production_area._fetch_disqualifying_soil_union,
+        ))
+        _e(mock_patch.object(production_area, "get_soil_data_for_polygon", side_effect=_x_count_components))
+        _e(mock_patch.object(production_area, "get_soil_geometries_for_polygon",
+                             side_effect=_x_count_geometries))
+
+        # every OTHER entry point this function calls, spied so "no more
+        # queries anywhere else than before this branch" is measured rather
+        # than asserted about the one path this section changed
+        # dem= is supplied (see _x_flat_dem above), so this must stay at ZERO
+        # on both runs -- it is spied to prove the forwarding did not somehow
+        # arm a DEM fetch, not because one is expected.
+        _x_spies["dem_fetch_must_stay_zero"] = _e(
+            mock_patch.object(pc.dem_data, "get_dem_for_boundary", return_value=_x_flat_dem)
+        )
+        _x_spies["canopy"] = _e(mock_patch.object(pc.canopy_height_data,
+                                                  "get_canopy_height_for_boundary",
+                                                  return_value=canopy_override))
+        _x_spies["roads"] = _e(mock_patch.object(pc.farm_roads_data, "get_road_exclusion_union_utm",
+                                                 return_value=fake_existing_roads_union))
+        _x_spies["floodplain"] = _e(mock_patch.object(pc.road_corridors, "_fetch_floodplain_hydric_union",
+                                                      return_value=(fake_hydric_union, False)))
+        _x_spies["production"] = _e(mock_patch.object(
+            pc.production_area_ceiling, "identify_optimized_production_areas",
+            return_value=fake_optimized_result))
+        _x_spies["water"] = _e(mock_patch.object(pc.water_survey_areas, "identify_water_survey_areas",
+                                                 return_value=_fake_water_survey_result(fake_selected_water_zone)))
+        _x_spies["corridors"] = _e(mock_patch.object(pc.road_corridors,
+                                                     "identify_road_corridor_candidates",
+                                                     return_value=fake_road_corridor_result))
+        _e(mock_patch.object(pc.valley_delineation, "delineate_valleys", return_value=[]))
+        _e(mock_patch.object(pc.keypoint_detection, "detect_keypoints", return_value=[]))
+        _e(mock_patch.object(pc, "identify_solar_candidate_zones",
+                             return_value={"zones_geojson": _empty_fc_nwz, "selected_structure_site": None}))
+        _e(mock_patch.object(pc, "identify_tree_zone_candidates",
+                             return_value={"zones_geojson": _empty_fc_nwz, "patches": []}))
+
+        _x_ctx = pc.build_pipeline_context(
+            boundary_coordinates, anchor_lon_lat, dem=_x_flat_dem, **overrides
+        )
+    return _x_ctx, dict(_x_sda_counts), _x_spies
+
+
+# --- 20a. the pre-branch behaviour, unchanged: overrides OMITTED ----------
+
+_x_baseline_ctx, _x_baseline_sda, _x_baseline_spies = _x_run_context()
+assert _x_baseline_sda == {"components": 1, "geometries": 1}, (
+    f"with soil_components=/soil_geometries= omitted the exclusion gate must self-fetch exactly as it "
+    f"did before this branch -- one component query, one geometry query. Got {_x_baseline_sda}. This is "
+    f"the fallback path, and it is a supported one."
+)
+_x_baseline_other = {name: spy.call_count for name, spy in _x_baseline_spies.items()}
+
+# --- 20b. overrides SUPPLIED: zero SDA queries from the exclusion path ----
+
+_x_ctx, _x_sda, _x_spies_supplied = _x_run_context(
+    soil_components=_x_components, soil_geometries=_x_geometries
+)
+assert _x_sda == {"components": 0, "geometries": 0}, (
+    f"one build_pipeline_context() run with soil_components=/soil_geometries= supplied must issue ZERO "
+    f"SDA queries from the exclusion path -- ParcelData already fetched these rows. Got {_x_sda}. "
+    f"Asserted at an exact count, not an upper bound: one more means the passthrough broke somewhere."
+)
+assert _x_spies_supplied["helper"].call_count == 1, (
+    f"_fetch_disqualifying_soil_union() must still be REACHED exactly once -- the union is still derived, "
+    f"in the module that owns the derivation; only its two fetches are served from the caller's rows. "
+    f"Got {_x_spies_supplied['helper'].call_count} call(s)."
+)
+assert _x_spies_supplied["helper"].call_args.kwargs["soil_components"] is _x_components, (
+    "the exact caller-supplied component rows must reach the helper -- pure passthrough, no copy"
+)
+assert _x_spies_supplied["helper"].call_args.kwargs["soil_geometries"] is _x_geometries, (
+    "the exact caller-supplied map-unit geometry must reach the helper"
+)
+
+# --- 20c. NO MORE QUERIES ANYWHERE ELSE than before this branch -----------
+#
+# The change must not have relocated a fetch rather than removed one. Every
+# other entry point build_pipeline_context() reaches is counted on both runs
+# and must be unchanged, at the same exactly-once counts section 1 asserts.
+
+_x_other = {name: spy.call_count for name, spy in _x_spies_supplied.items() if name != "helper"}
+_x_baseline_other.pop("helper", None)
+assert _x_other == _x_baseline_other, (
+    f"forwarding the soil rows must change NOTHING else about what this run fetches. Before: "
+    f"{_x_baseline_other}. After: {_x_other}."
+)
+assert _x_other.pop("dem_fetch_must_stay_zero") == 0, (
+    "dem= is supplied on both runs, so no DEM fetch may happen on either"
+)
+assert all(count == 1 for count in _x_other.values()), (
+    f"and every one of them stays at exactly ONE call, the de-duplication this module exists for: "
+    f"{_x_other}"
+)
+
+# --- 20d. and the CONTEXT ITSELF is unchanged ----------------------------
+#
+# The batch path's own answer must not move either. Compared on the
+# exclusion result the two runs produced -- masks as ARRAYS, so a mask with
+# the same cell count in different places fails.
+
+for _x_layer, _x_layer_result in _x_ctx.exclusion_zones["layers"].items():
+    _x_before = _x_baseline_ctx.exclusion_zones["layers"][_x_layer]
+    assert np.array_equal(_x_before["mask"], _x_layer_result["mask"]), (
+        f"the {_x_layer} gate's mask must be bit-identical with and without the forwarded rows -- "
+        f"{int(np.count_nonzero(_x_before['mask'] != _x_layer_result['mask']))} cell(s) differ"
+    )
+    assert _x_before["acres"] == _x_layer_result["acres"]
+    assert _x_before["data_available"] == _x_layer_result["data_available"]
+assert _x_ctx.exclusion_zones["excluded_union_utm"].equals(
+    _x_baseline_ctx.exclusion_zones["excluded_union_utm"]
+), "the closed union must be the same geometry"
+assert _x_ctx.exclusion_zones["eligible_union_utm"].equals(
+    _x_baseline_ctx.exclusion_zones["eligible_union_utm"]
+), "the derived eligible geometry must be the same geometry"
+assert json.dumps(_x_ctx.narrative_data["exclusion_zones"], sort_keys=True) == json.dumps(
+    _x_baseline_ctx.narrative_data["exclusion_zones"], sort_keys=True
+), "the exclusion narrative block must be identical"
+assert _x_ctx.exclusion_zones["layers"]["hydric"]["mask"].any(), (
+    "the fixture must give the hydric gate real content -- two empty results would compare equal no "
+    "matter what the forwarding did"
+)
+
+print(
+    f"EXCLUSION GATE SOIL FORWARDING: one build_pipeline_context() run with soil_components=/"
+    f"soil_geometries= supplied issues {_x_sda['components']} + {_x_sda['geometries']} SDA queries from "
+    f"the exclusion path (was {_x_baseline_sda['components']} + {_x_baseline_sda['geometries']} with them "
+    f"omitted, which still holds as the fallback); _fetch_disqualifying_soil_union() is still reached "
+    f"exactly {_x_spies_supplied['helper'].call_count}x and receives the caller's OWN objects; every "
+    f"other entry point unchanged at {_x_other}; and the resulting exclusion result is bit-identical "
+    f"across the two runs (hydric layer "
+    f"{_x_ctx.exclusion_zones['layers']['hydric']['acres']} acres, so the comparison has content). The "
+    f"batch path and session_cache.run_terrain_warm_up() now pay the same zero."
+)
+
+
 print("\nAll pipeline_context checks passed.")

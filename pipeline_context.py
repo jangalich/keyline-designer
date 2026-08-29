@@ -358,6 +358,38 @@ silently patching another module or reimplementing its logic)
      closeable: all three of _fetch_floodplain_hydric_union()'s internal
      fetches have override parameters, all three are threaded through
      here.
+
+  6. [RESOLVED] exclusion_zones.identify_exclusion_zones()'s hydric gate
+     was the LAST place this function still forced a redundant SSURGO
+     fetch. It accepted a pre-derived disqualifying_soil_union_utm= but
+     no raw-row override, so it self-served production_area._fetch_
+     disqualifying_soil_union(), whose own two SDA queries (get_soil_
+     data_for_polygon(), then get_soil_geometries_for_polygon() for the
+     qualifying mukeys) are the SAME two calls limitation 5 above already
+     closed one level over in road_corridors.py -- against data this
+     function was already holding in its own soil_components/soil_
+     geometries parameters.
+
+     A follow-up branch closed it the same way, in the same shape: _fetch_
+     disqualifying_soil_union() gained soil_components=/soil_geometries=
+     overrides (None falls back to self-fetch), identify_exclusion_zones()
+     gained matching PURE PASSTHROUGH parameters, and this function
+     forwards its own two existing parameters into them. No computed value
+     moves: the union is derived from the same rows by the same code, it
+     just no longer re-fetches rows the caller already has. With this
+     closed, every SSURGO fetch on this function's path is served from
+     Layer 1 -- the exclusion gate, the floodplain union and the water
+     step all read one caller-supplied pair of soil layers.
+
+     This one mattered beyond the two queries it saves. session_cache.
+     run_terrain_warm_up() runs the same identify_exclusion_zones() call
+     with the same overrides, so leaving the gap open meant a session
+     rebuild -- which is supposed to be compute, served entirely by the
+     fetch cache -- still went to the network twice. Closing it here and
+     there together is what makes the property interactive-design-
+     architecture-proposal.md section 2.2 states outright -- an external
+     fetch inside a rebuild is served by the fetch cache, so a rebuild is
+     compute, not network -- true unconditionally rather than nearly.
 """
 
 from dataclasses import dataclass
@@ -589,14 +621,22 @@ def build_pipeline_context(
     of them -- it passes them straight through, unconditionally, to the
     functions that actually own the corresponding self-fetch
     (road_corridors._fetch_floodplain_hydric_union() for soil_components/
-    water_features/soil_geometries, farm_roads_data.get_road_exclusion_
-    union_utm() for farm_roads, and the water step below for the soil
-    trio); each of those has its own fall-back-to-self-fetch path, so
-    leaving any argument here as None reproduces the exact pre-existing
-    behavior. A caller that already fetched them for this exact boundary
-    (e.g. parcel_data.fetch_parcel_data()) passes them through here
-    instead of paying for second, redundant fetches. See KNOWN
-    LIMITATIONS #5 (now RESOLVED) for the history of closing this.
+    water_features/soil_geometries, production_area._fetch_disqualifying_
+    soil_union() -- reached via exclusion_zones.identify_exclusion_zones()'s
+    own passthrough -- for soil_components/soil_geometries again, farm_
+    roads_data.get_road_exclusion_union_utm() for farm_roads, and the water
+    step below for the soil trio); each of those has its own fall-back-to-
+    self-fetch path, so leaving any argument here as None reproduces the
+    exact pre-existing behavior. A caller that already fetched them for
+    this exact boundary (e.g. parcel_data.fetch_parcel_data()) passes them
+    through here instead of paying for second, redundant fetches. See
+    KNOWN LIMITATIONS #5 and #6 (both now RESOLVED) for the history of
+    closing this.
+
+    soil_components/soil_geometries therefore reach THREE consumers, not
+    one: the exclusion gate, the floodplain union, and the water step.
+    That is the point -- one Layer 1 pair of SSURGO fetches, read three
+    times, rather than three independent pairs of the same two queries.
 
     THE WATER STEP'S SOIL TRIO rides three of these: when soil_components
     AND soil_geometries AND saturated_hydraulic_conductivity are all
@@ -722,11 +762,26 @@ def build_pipeline_context(
     # are both closed now: #3 by the exclusion_result= pass-through below,
     # #4 by passing this same union into identify_water_survey_areas().
     # One road union per run, built here, consumed three times.
+    # soil_components=/soil_geometries= are this function's own existing
+    # parameters, forwarded here for the SAME reason they are forwarded
+    # into _fetch_floodplain_hydric_union() below: identify_exclusion_
+    # zones()'s hydric gate self-served get_soil_data_for_polygon() and
+    # get_soil_geometries_for_polygon() through production_area._fetch_
+    # disqualifying_soil_union(), which had no raw-row override until a
+    # follow-up branch added one. Both are pure passthroughs (this file
+    # never fetches SSURGO rows itself), so a ParcelData-backed caller now
+    # pays ZERO SDA queries on this path instead of two -- and session_
+    # cache.run_terrain_warm_up() forwards the same two fields into the
+    # same parameters, so the batch path and the session path stay one
+    # computation reached two ways rather than two routes to the same
+    # answer.
     exclusion_result = exclusion_zones.identify_exclusion_zones(
         boundary_coordinates,
         dem=dem,
         boundary_polygon_utm=boundary_polygon_utm,
         canopy_height=canopy_height,
+        soil_components=soil_components,
+        soil_geometries=soil_geometries,
         road_exclusion_union_utm=existing_roads,
     )
 
