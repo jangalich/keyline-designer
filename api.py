@@ -8,6 +8,19 @@ running it manually in a terminal.
 This doesn't replace any of the existing modules — it just exposes the
 same generate_full_report() function as a web endpoint.
 
+THE INTERACTIVE SESSION SURFACE mounts here too, as session_api.py's
+blueprint: /api/sessions, its per-step generate/commit/reopen/layers verbs,
+and /api/jobs. It is a separate module because it is a separate surface with
+its own conventions, and it is registered on THIS app so both live behind
+one origin and one CORS policy. The endpoints below are untouched by it --
+/api/production-zones in particular is what the shipped frontend calls
+today, and it keeps working exactly as it did until the frontend migrates.
+
+The session surface's security posture -- unguessable session ids, no auth,
+no rate limiting, an accepted v1 position rather than an oversight -- and
+the ephemeral-filesystem question its document store raises are both written
+up in session_api.py's module docstring. Read it before deploying.
+
 Run locally with:
     python3 api.py
 
@@ -21,6 +34,7 @@ import tempfile
 from flask import Flask, after_this_request, request, jsonify, send_file
 from flask_cors import CORS
 
+import session_api
 from generate_full_report import generate_full_report
 from generate_pdf_report import generate_full_report_pdf
 from geocode import geocode_address
@@ -322,6 +336,12 @@ def production_zones_endpoint():
     except Exception:
         app.logger.exception("production-zones: unexpected failure")
         return jsonify({"error": "Production zones could not be generated."}), 500
+
+
+# The interactive session surface -- see session_api.py. Registered with no
+# Dependencies argument, so it resolves the process-wide store (the
+# KEYLINE_SESSION_STORE_DIR directory), session caches and job runner.
+app.register_blueprint(session_api.build_blueprint())
 
 
 @app.route("/api/health", methods=["GET"])

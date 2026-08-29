@@ -677,3 +677,43 @@ Once ready, this backend deploys to Render or Railway (connected to this
 GitHub repo), giving it a live URL with real internet access to reach
 USDA/USGS/Open-Meteo APIs. The frontend (separate repo) deploys to
 Vercel.
+
+### Design Documents need a persistent disk
+
+The interactive session surface (`session_api.py`) stores every Design
+Document through `document_store.JSONFileStore`, which is one JSON file per
+session in a directory. That directory is `$KEYLINE_SESSION_STORE_DIR`, or
+`sessions/` relative to the working directory (`/app` in the Dockerfile)
+when the variable is unset — see `session_api.store_directory()`.
+
+**On Render and Railway the container filesystem is ephemeral by default.**
+Nothing warns you about this: the app starts, sessions are created, and
+everything works until the next deploy, restart or instance move, at which
+point every in-flight session is gone. A user mid-wizard gets a 404 on the
+URL they bookmarked and has to redraw their parcel. The Design Document is
+the authority for the whole interactive path — the session cache is
+disposable precisely because the document is not — so losing it is losing
+the user's decisions, not a cache.
+
+One of these is required before this surface is used for real:
+
+- **Render:** attach a persistent disk to the service and set
+  `KEYLINE_SESSION_STORE_DIR` to its mount path. Note that a disk pins the
+  service to a single instance, which this deployment already is
+  (`gunicorn --workers 1`, see the Dockerfile).
+- **Railway:** attach a volume and point `KEYLINE_SESSION_STORE_DIR` at its
+  mount path, same shape.
+- **Or swap the store.** `document_store.DocumentStore` is a three-method
+  interface (`get`, `put`, `list_sessions`) held to three methods for
+  exactly this reason: a Postgres or Redis implementation is a new class and
+  a different object passed to `session_api.Dependencies`, with no caller
+  changed. That is the right answer the moment more than one process serves
+  this app.
+
+Two related single-process assumptions travel with it, both fine today under
+`--workers 1` and both broken by a second worker: `job_runner.py`'s job
+registry is in-memory (a client would poll a worker that never heard of its
+job), and `session_cache.py`'s session cache is per-process (a miss on the
+other worker rebuilds, which is slower but correct). The job registry is the
+one that changes an answer rather than a latency, and `job_runner.py`'s
+docstring names Redis as where it goes.
