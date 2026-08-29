@@ -891,6 +891,27 @@ with Harness() as h:
         "the parcel the user drew comes back with the session -- there is "
         "nowhere else for a resuming client to get it"
     )
+
+    # THE STEP ORDER IS ON THE WIRE, AS AN ARRAY. The frontend computes the
+    # reopen cascade off this to warn what a reopen discards, and the only
+    # alternative is a second hardcoded copy of STEP_ORDER over there.
+    assert resumed_document["step_order"] == list(design_document.STEP_ORDER), (
+        f"the document must carry the canonical step order: got "
+        f"{resumed_document.get('step_order')!r}"
+    )
+    # AND THE KEYS OF `steps` ARE NOT IT, which is the whole reason the field
+    # exists. Flask's DefaultJSONProvider sets sort_keys = True, so the map the
+    # document builds in pipeline order serialises ALPHABETICALLY. A client
+    # reading the order off these keys gets six real step ids in a stable order
+    # that is not the pipeline's, and nothing anywhere raises.
+    assert list(resumed_document["steps"]) == sorted(design_document.STEP_ORDER), (
+        f"if this ever stops being alphabetical the serializer changed, and "
+        f"_document_body()'s reasoning should be re-read: "
+        f"{list(resumed_document['steps'])}"
+    )
+    assert list(resumed_document["steps"]) != list(design_document.STEP_ORDER), (
+        "the two orders must actually differ, or this test proves nothing"
+    )
     # And the next commit's base_revision is readable straight off it.
     assert landform["revision"] == 1
 
