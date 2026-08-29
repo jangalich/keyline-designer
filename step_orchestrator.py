@@ -56,6 +56,14 @@ COMMIT AND REOPEN LIVE HERE TOO, and complete the per-step verb set:
     commit_step(session_id, step_id, features, provenance,
                 base_revision, store, inputs=None)                 -> document
     reopen_step(session_id, step_id, store)                        -> document
+    step_payload(session_id, step_id, store)                       -> payload
+
+step_payload() is the READ verb over what generate produced -- a resume or a
+reload wants the proposals back without paying for them again, and every
+other verb here writes something. It is the newest of the five and the only
+one B6 (the HTTP surface) needed that was not already here; see its
+docstring for why the rebuild-on-eviction path is the tier-2 contract rather
+than a fallback.
 
 They obey the same rule as generate: NOTHING BELOW NAMES A STEP. A commit
 reads its gates off the entry's CommitContract, its post-commit hooks off
@@ -65,7 +73,9 @@ JUDGING half of a commit -- validity, containment, exclusion crossings --
 is commit_validation.py's, so this module stays sequencing.
 
 OUT OF SCOPE, DELIBERATELY: HTTP. This module stops at functions callable
-from Python, the same place session_manager.py stops.
+from Python, the same place session_manager.py stops. session_api.py is the
+transport over these five verbs and adds no behaviour of its own -- if a
+route ever seems to need a rule that is not here, the rule belongs here.
 """
 
 import operator
@@ -475,6 +485,113 @@ def run_generate(
         store.put(updated)
 
     return payload
+
+
+# ======================================================================
+# Reading a generated step back
+# ======================================================================
+
+
+class StepNotGeneratedError(StepOrchestrationError):
+    """
+    A step's payload was asked for while the step has no proposals.
+
+    SAID EXPLICITLY RATHER THAN ANSWERED WITH AN EMPTY PAYLOAD, and the
+    distinction is the whole reason this class exists. A not_started step and
+    a step whose generate produced nothing are different answers -- the first
+    means "ask for a generate", the second means "this parcel has no
+    production ground" -- and a reader handed `{"suggested_zones":
+    {"features": []}}` for both cannot tell them apart. That is the same
+    null-versus-absent line design_document.py draws around an EMPTY COMMIT.
+
+    A COMMITTED step lands here too, carrying status "committed", and that is
+    correct rather than an oversight. Its proposals are no longer the current
+    state of the step: what it holds is a decision, and the document already
+    carries that decision in full. Getting the candidate set back is what
+    reopen_step() is for, and it has a downstream cascade attached -- so
+    handing the proposals over from a read verb would be offering the
+    editable state without the reset that makes editing it safe.
+
+    Carries the step's ACTUAL status so a caller can say which of those two
+    things happened.
+    """
+
+    def __init__(self, step_id: str, status: str):
+        self.step_id = step_id
+        self.status = status
+        super().__init__(
+            f"step '{step_id}' has status '{status}'; its layers exist only "
+            f"while it is '{design_document.STATUS_GENERATED}'. Generate it "
+            f"first"
+            + (
+                ", or reopen it to edit the committed decision"
+                if status == design_document.STATUS_COMMITTED
+                else ""
+            )
+            + "."
+        )
+
+
+def step_payload(
+    session_id: str,
+    step_id: str,
+    store,
+    fetch_cache: Optional[session_cache.FetchCache] = None,
+    cache: Optional[session_cache.SessionCache] = None,
+) -> dict:
+    """
+    The wire payload of an already-generated step -- the READ verb over what
+    generate produced, so a resume or a page reload does not have to
+    regenerate.
+
+    THE SAME PAYLOAD, BY CONSTRUCTION, NOT BY A SECOND COPY OF IT. The heavy
+    half of a generate is the entry point's compute pass, and its result is
+    already on the context (SessionContext.step_proposals, written by
+    run_generate). What is NOT cached is the wire shape, and rebuilding that
+    is the registry's own payload builder over that same result -- microseconds
+    over geometry in hand. So this returns what the job returned because it is
+    assembled from the identical object, not because a copy was filed away
+    somewhere that could drift from it.
+
+    ON A CACHE MISS IT REGENERATES, transparently, and that is the tier-2
+    contract rather than a fallback bolted on here: SessionContext is
+    non-authoritative and evictable by design, and generate is idempotent and
+    network-free, so a rebuilt context re-running the compute pass is slower
+    and otherwise indistinguishable -- the same promise
+    session_manager.get_session_context() makes one level down. It uses the
+    step's OWN committed user inputs, for restore_step_state()'s reason:
+    regenerating from different inputs would return a candidate set the user
+    never saw.
+
+    Raises StepNotGeneratedError when the step has no current proposals --
+    never an empty payload. See that class.
+    """
+    definition = step_registry.get_step(step_id)
+    document = store.get(session_id)
+    entry = document["steps"][step_id]
+    if entry["status"] != design_document.STATUS_GENERATED:
+        raise StepNotGeneratedError(step_id, entry["status"])
+
+    context = session_manager.get_session_context(
+        session_id, store, fetch_cache=fetch_cache, cache=cache
+    )
+    result = context.step_proposals.get(step_id)
+    if result is None:
+        return run_generate(
+            session_id,
+            definition,
+            store,
+            validate_params(definition, entry.get("inputs")),
+            fetch_cache=fetch_cache,
+            cache=cache,
+        )
+
+    # assemble_consumes() again rather than a cached `assembled`: it is
+    # attribute reads off the context plus, for a committed source, a
+    # rehydration the commit already cached. Caching it here would be a
+    # second copy of values the context is already the home of.
+    assembled = assemble_consumes(definition, context, document)
+    return definition.resolve_payload()(result, assembled)
 
 
 # ======================================================================
