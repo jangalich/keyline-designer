@@ -38,7 +38,20 @@ STATUS_GENERATED = "generated"
 STATUS_COMMITTED = "committed"
 VALID_STATUSES = (STATUS_NOT_STARTED, STATUS_GENERATED, STATUS_COMMITTED)
 
-PROVENANCE_VALUES = ("generated", "user_modified", "user_added")
+# WHAT A COMMITTED FEATURE CAN BE, and there are exactly TWO kinds:
+# a generated candidate the user SELECTED, and a shape the user DREW.
+#
+# "user_modified" WAS HERE AND IS GONE. It described a third kind -- a
+# generated candidate whose vertices the user edited -- and nothing in this
+# system can produce one: generated candidates are SELECT-ONLY at every step
+# (the shipped frontend offers a checkbox and a delete, never a vertex
+# handle), and the commit path rejects the value outright. A provenance value
+# nothing can emit is worse than absent: it reads to the next person as a
+# supported case, and the first consumer written to branch on it gets a
+# branch that never runs and never gets tested. If vertex editing is ever
+# built, this is the line to add it back on -- deliberately, with the
+# rehydration and round-trip questions it raises answered at the same time.
+PROVENANCE_VALUES = ("generated", "user_added")
 
 # Keys a step entry may carry, by status. not_started is exactly its
 # status -- no empty features, no null placeholders. A generated step
@@ -72,12 +85,22 @@ class RevisionConflictError(DocumentError):
     """
     A commit was based on a stale step revision -- someone else committed
     in between. Carries both sides so the caller can report or retry.
+
+    AND THE CURRENT DOCUMENT, which is what makes the retry possible rather
+    than merely describable. A client holding a stale base_revision has to
+    refetch before it can rebase, and the thing it needs is in this
+    function's hand at the moment it raises -- so handing it over costs
+    nothing and saves the caller a round trip that could itself lose another
+    race. `document` is the CURRENT persisted state, deep-copied so a caller
+    reading it out of the exception cannot mutate the document the raiser is
+    still holding. None only when a caller constructs this error without one.
     """
 
-    def __init__(self, step_id: str, expected: int, received: int):
+    def __init__(self, step_id: str, expected: int, received: int, document: dict = None):
         self.step_id = step_id
         self.expected = expected
         self.received = received
+        self.document = copy.deepcopy(document) if document is not None else None
         super().__init__(
             f"revision conflict on step '{step_id}': "
             f"expected base_revision {expected}, received {received}"
@@ -176,7 +199,9 @@ def commit_step(
     current = document["steps"][step_id]
     expected = current.get("revision", 0)
     if base_revision != expected:
-        raise RevisionConflictError(step_id, expected=expected, received=base_revision)
+        raise RevisionConflictError(
+            step_id, expected=expected, received=base_revision, document=document
+        )
 
     new_document = copy.deepcopy(document)
     if current["status"] == STATUS_COMMITTED:

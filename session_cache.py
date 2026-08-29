@@ -358,13 +358,42 @@ class SessionContext:
     valleys: list
     keypoints: list
     exclusion_zones: dict
-    # THE SLOT FOR LATER BRANCHES, deliberately empty here. Per-step
-    # generate proposals (step_id -> proposal) live here once the Step
-    # Registry exists: they are heavy, native, and regenerable from the
-    # document, so they belong in this tier and not in the document,
-    # which records only decisions. Warm-up creates none, and rebuild
-    # restores none -- replaying committed steps is the registry's job.
+    # PER-STEP GENERATE PROPOSALS, step_id -> the entry point's own internal
+    # result. Heavy, native, and regenerable from the document, so they
+    # belong in this tier and not in the document, which records only
+    # decisions. Warm-up creates none and rebuild restores none: a proposal
+    # is recreated by re-running the step's generate, which is idempotent and
+    # network-free by contract.
     step_proposals: dict = field(default_factory=dict)
+
+    # PER-STEP COMMITTED VALUES, REHYDRATED. step_id -> {"revision": int,
+    # "value": <the internal shape downstream overrides take>}.
+    #
+    # A CACHE OF A DERIVATION, NOT A SECOND COPY OF THE DECISION. The
+    # decision is the document's committed FeatureCollection and always has
+    # been; this holds what that collection rehydrates INTO, which costs a
+    # rasterization and a morphological opening per feature and would
+    # otherwise be paid again on every downstream generate.
+    #
+    # KEYED BY THE STEP'S OWN REVISION, which is what makes it safe. A reader
+    # compares the stored revision against the document's before believing
+    # the value, so a commit that landed through another path -- or a
+    # document restored from disk under a context that outlived it -- cannot
+    # be served a stale rehydration. The cascade drops these too, but the
+    # revision key is the guarantee; the cascade is the optimisation.
+    step_committed: dict = field(default_factory=dict)
+
+    # THE EDITABLE STATE A REOPEN LEFT BEHIND. step_id -> the restored
+    # payload plus the selection read back off the document
+    # (step_orchestrator.restore_step_state()).
+    #
+    # Cached rather than recomputed on the next read because a reopen has
+    # just paid for it -- it re-runs the step's generate, which is the whole
+    # restore mechanism -- and because the client is about to ask for exactly
+    # this. Disposable like everything else here: dropping it costs one
+    # regenerate, which is why proposals are not stored in the document in
+    # the first place.
+    step_restored: dict = field(default_factory=dict)
 
     @property
     def dem(self) -> dict:

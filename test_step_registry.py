@@ -210,9 +210,44 @@ assert _contract.min_features == 0, (
 )
 assert _contract.max_features is None
 assert _contract.geometry_types == ("Polygon", "MultiPolygon")
-assert _contract.must_lie_within == "eligible_union"
+assert _LANDFORM.proposal_collection == "suggested_zones", (
+    "the reopen restore finds this step's proposals by the key the REGISTRY "
+    "names, not by a payload key compiled into the generic path"
+)
 assert _contract.rehydrate == "wire_translation.rehydrate_production_zones"
+assert _contract.internal_id_parameter == "zone_ids", (
+    "a user-drawn zone carries no pipeline id, so the commit path allocates "
+    "one and hands it to the rehydrator under this name"
+)
 assert _contract.requires_provenance is True
+
+# THE ONE SPATIAL HARD GATE IS A CONSTANT, NOT A PER-STEP FIELD. The
+# contract used to carry must_lie_within="eligible_union", from the
+# architecture proposal's server-authoritative section 2.5; that posture is
+# rejected in favour of the shipped frontend's -- the parcel boundary is the
+# only hard gate and the exclusion gates are advisory, recorded rather than
+# refused. Since the answer is the same for every step, a per-step field
+# holding it would be a false generalisation.
+assert not hasattr(_contract, "must_lie_within"), (
+    "must_lie_within collapsed to step_registry.COMMIT_MUST_LIE_WITHIN -- a "
+    "per-step field that can only ever hold one value invites a second value "
+    "that does not exist"
+)
+assert step_registry.COMMIT_MUST_LIE_WITHIN == "parcel_boundary"
+
+# THE POST-COMMIT HOOK, DECLARED. The keypoint relationship layer depends on
+# committed production areas, so it must re-run after a landform commit --
+# and the commit path must not be the place that knows that.
+assert _LANDFORM.post_commit, (
+    "landform must declare its post-commit hook in the registry, not leave it "
+    "to an if-landform branch in the orchestrator"
+)
+for _hook in _LANDFORM.post_commit:
+    assert isinstance(_hook, step_registry.PostCommitHook)
+    assert _hook.why, "a declared hook states why it must re-run"
+    assert callable(step_registry.resolve(_hook.target)), (
+        f"the declared post-commit hook {_hook.target} must resolve to a callable"
+    )
 
 print(
     f"2. LANDFORM SHAPE: consumes {len(_LANDFORM.consumes)} values "
@@ -220,7 +255,9 @@ print(
     f"{len([c for c in _LANDFORM.consumes if c.forward_as])} of them as "
     f"overrides, produces {_LANDFORM.produces}, declares a commit contract "
     f"({_contract.layer}, >={_contract.min_features} features, within "
-    f"{_contract.must_lie_within}) and {len(_LANDFORM.user_inputs)} user inputs."
+    f"{step_registry.COMMIT_MUST_LIE_WITHIN}), "
+    f"{len(_LANDFORM.post_commit)} post-commit hook(s) and "
+    f"{len(_LANDFORM.user_inputs)} user inputs."
 )
 
 

@@ -50,15 +50,29 @@ they are regenerable. A generate therefore writes exactly one thing to the
 document -- a status -- and writes nothing at all if the status is already
 right.
 
-OUT OF SCOPE, DELIBERATELY: commit, reopen, the cascade, commit validation,
-exclusion-crossing recording, the keypoint relationship post-commit hook,
-and HTTP. This module stops at functions callable from Python, the same
-place session_manager.py stops.
+COMMIT AND REOPEN LIVE HERE TOO, and complete the per-step verb set:
+
+    generate_step(session_id, step_id, store, params=None)         -> Job
+    commit_step(session_id, step_id, features, provenance,
+                base_revision, store, inputs=None)                 -> document
+    reopen_step(session_id, step_id, store)                        -> document
+
+They obey the same rule as generate: NOTHING BELOW NAMES A STEP. A commit
+reads its gates off the entry's CommitContract, its post-commit hooks off
+the entry's `post_commit`, and its cascade off the `consumes` edges; a
+reopen restores editable state by re-running the entry's own generate. The
+JUDGING half of a commit -- validity, containment, exclusion crossings --
+is commit_validation.py's, so this module stays sequencing.
+
+OUT OF SCOPE, DELIBERATELY: HTTP. This module stops at functions callable
+from Python, the same place session_manager.py stops.
 """
 
 import operator
 from typing import Optional
 
+import commit_validation
+import design_document
 import job_runner
 import production_zone_payload
 import session_cache
@@ -82,10 +96,14 @@ class StepOrchestrationError(Exception):
 # puts on this function ("production areas from the committed landform step
 # (rehydrated), not from the optimizer").
 #
-# A resolver takes (consumed, context, document) and returns the value.
+# A resolver takes (definition, consumed, context, document) and returns the
+# value. The consuming step's own definition is passed because a resolver may
+# have to REFUSE and say which step it was refusing for -- see
+# UpstreamNotCommittedError -- and a message naming only the upstream step
+# leaves the reader to work out who was asking.
 
 
-def _resolve_from_cache(consumed, context, document):
+def _resolve_from_cache(definition, consumed, context, document):
     """
     A SessionContext attribute path. `dem` and `boundary_polygon_utm` are
     properties over ParcelData; `parcel_data.canopy_height` walks one level
@@ -102,28 +120,132 @@ def _resolve_from_cache(consumed, context, document):
         ) from None
 
 
-def _resolve_from_committed(consumed, context, document):
+class UpstreamNotCommittedError(StepOrchestrationError):
     """
-    B5b. A committed upstream step's features, read off the document and put
+    A generate that consumes an upstream step's COMMIT, asked for before that
+    step was committed.
+
+    REFUSED, NEVER SELF-COMPUTED, and this is the decision the whole
+    committed-source path turns on. Every KSOP entry point in this pipeline
+    treats a missing override as "compute it yourself" -- that is the trap
+    pipeline_context.py documents at every forward it makes -- so generating
+    the water step without the landform commit would not fail, it would
+    quietly re-run the production optimiser and route water to zones the user
+    never selected. The result would look right and be wrong, which is the
+    worst available outcome.
+
+    Refusing is also the answer the document already gives. A step's status
+    says whether it is reachable; the frontend reads it to decide what is
+    clickable, and a generate that arrives anyway is asking for something the
+    document says does not exist yet. Carries the upstream step and its
+    actual status so the caller can say which step to go back to.
+    """
+
+    def __init__(self, step_id: str, upstream_step: str, upstream_status: str, name: str):
+        self.step_id = step_id
+        self.upstream_step = upstream_step
+        self.upstream_status = upstream_status
+        self.consumed_name = name
+        super().__init__(
+            f"step '{step_id}' consumes '{name}' from the committed "
+            f"'{upstream_step}' step, which has status "
+            f"'{upstream_status}'. Commit '{upstream_step}' first: this step "
+            f"is not computable without that decision, and computing one for "
+            f"the user instead of asking for it is how a generated answer "
+            f"gets mistaken for a chosen one."
+        )
+
+
+def _resolve_from_committed(definition, consumed, context, document):
+    """
+    A committed upstream step's features, read off the document and put
     through the declared inbound rehydrator (proposal section 2.4) so a
     user-authored feature travels down the same override parameter a
     computer-authored one does.
 
-    NOT WRITTEN HERE, and the failure is loud rather than silent, because
-    every piece it needs is a commit-path decision this branch does not get
-    to make: what an uncommitted upstream step means for a generate (block?
-    generate anyway?), and how a commit's `inputs` reach the rehydrator.
-    Guessing at those now would be writing untested code against an
-    unwritten contract. No registry entry reaches this today -- landform is
-    the first step and consumes only derived values -- so the raise is
-    unreachable rather than latent.
+    THREE CASES, AND ALL THREE ARE DIFFERENT:
+
+      NOT COMMITTED -> UpstreamNotCommittedError. See that class.
+
+      COMMITTED WITH FEATURES -> the rehydrated internal shape, served from
+        SessionContext.step_committed when its cached revision matches the
+        document's and rehydrated (and cached) when it does not. The revision
+        key is the correctness guarantee; the cache is the speed.
+
+      COMMITTED WITH ZERO FEATURES -> the declared `empty_commit` sentinel if
+        the consumer has one, and otherwise the rehydrator's own empty answer.
+        NEVER None, under any circumstance. An empty commit is a DECISION
+        ("nothing goes here"), None is every consumer's "not supplied, go
+        compute it", and collapsing the first into the second is what turns
+        one user decision into five water-suitability runs producing a zone
+        that was explicitly rejected. See step_registry.Consumed's EMPTY IS
+        AN ANSWER note for the full argument and for how a step declares its
+        sentinel.
     """
-    raise StepOrchestrationError(
-        f"consumed '{consumed.name}' is sourced from the committed "
-        f"'{consumed.from_step}' step; reading committed steps is B5b's "
-        f"(register a {step_registry.SOURCE_COMMITTED!r} resolver in "
-        f"_CONSUMES_RESOLVERS). No registered step needs one yet."
-    )
+    entry = document["steps"][consumed.from_step]
+    if entry["status"] != design_document.STATUS_COMMITTED:
+        raise UpstreamNotCommittedError(
+            step_id=definition.step_id,
+            upstream_step=consumed.from_step,
+            upstream_status=entry["status"],
+            name=consumed.name,
+        )
+
+    return committed_value(consumed, context, document)
+
+
+def committed_value(consumed, context, document):
+    """
+    The rehydrated value behind one committed consumes edge. Split out of the
+    resolver so the post-commit hooks can ask the same question of the same
+    cache without going through consumes-edge dispatch.
+
+    The caller has already established that `consumed.from_step` is
+    committed.
+    """
+    step_id = consumed.from_step
+    entry = document["steps"][step_id]
+    revision = entry.get("revision", 0)
+
+    cached = context.step_committed.get(step_id)
+    if cached is not None and cached["revision"] == revision:
+        return cached["value"]
+
+    features = entry["features"]
+    provenance = entry.get("provenance", {})
+    contract = step_registry.get_step(step_id).commit_contract
+
+    if not features.get("features"):
+        # THE SENTINEL, or the rehydrator's own explicit empty. Not cached:
+        # it is a constant-time answer, and caching a sentinel object under a
+        # revision key invites someone to mutate it.
+        if consumed.empty_commit:
+            return step_registry.resolve(consumed.empty_commit)
+        return step_registry.resolve(contract.rehydrate)(features, context.dem)
+
+    value = _rehydrate_committed(features, provenance, contract, context.dem)
+    context.step_committed[step_id] = {"revision": revision, "value": value}
+    return value
+
+
+def _rehydrate_committed(features, provenance, contract, dem):
+    """
+    A stored committed FeatureCollection -> the internal shape, through the
+    step's own declared translator.
+
+    THE INTERNAL IDS ARE RECOMPUTED, NOT STORED. commit_validation.
+    internal_ids_for() is deterministic in the committed collection and its
+    provenance, and both are exactly what the document holds -- so this call
+    and the one the commit path made produce the same ids without the
+    document having to carry a derived field it would then have to keep
+    correct.
+    """
+    kwargs = {}
+    if contract.internal_id_parameter:
+        kwargs[contract.internal_id_parameter] = commit_validation.internal_ids_for(
+            features.get("features") or [], provenance
+        )
+    return step_registry.resolve(contract.rehydrate)(features, dem, **kwargs)
 
 
 _CONSUMES_RESOLVERS = {
@@ -150,7 +272,7 @@ def assemble_consumes(definition, context, document) -> dict:
                 f"consumed '{consumed.name}' has source {consumed.source!r}, "
                 f"which no resolver handles"
             )
-        assembled[consumed.name] = resolver(consumed, context, document)
+        assembled[consumed.name] = resolver(definition, consumed, context, document)
     return assembled
 
 
@@ -399,3 +521,435 @@ def build_landform_payload(result: dict, assembled: dict) -> dict:
     return production_zone_payload.assemble_production_zone_payload(
         assembled["exclusion_zones"], result
     )
+
+
+# ======================================================================
+# Post-commit hooks
+# ======================================================================
+
+
+def run_post_commit_hooks(definition, context, document) -> tuple:
+    """
+    Every hook the step DECLARES, in declaration order. Returns the targets
+    that ran, for the caller to report.
+
+    NO BRANCH ON step_id, here or anywhere below it. The registry entry says
+    what must re-run after a commit to its step; this resolves and calls it.
+    Adding the water step's own hook is a line in that entry.
+
+    A HOOK MAY NOT FAIL SILENTLY. Nothing is caught here: a hook that raises
+    takes the commit call down with it, AFTER the document write, which is
+    the honest ordering -- the decision is the user's and it is recorded; a
+    derived context layer that could not be recomputed is a server problem
+    and must be reported as one rather than swallowed into a successful
+    return. The context it failed to update is disposable and will be rebuilt.
+    """
+    ran = []
+    for hook in definition.post_commit:
+        step_registry.resolve(hook.target)(context, document)
+        ran.append(hook.target)
+    return tuple(ran)
+
+
+def attach_keypoint_relationships(context, document) -> None:
+    """
+    THE KEYPOINT RELATIONSHIP LAYER, recomputed against what is committed
+    NOW. Declared by the landform entry's post_commit, and by the water
+    entry's when that exists.
+
+    WHAT IT IS. Every keypoint gains a `feature_relationships` dict: distance
+    and signed elevation differential to the nearest production area and to
+    the selected water zone, each carrying a status of "computed" or
+    "no_feature". pipeline_context._attach_keypoint_feature_relationships()
+    is the implementation and this does not reimplement it -- the batch
+    pipeline and the interactive session must produce the same relationship
+    data or the report says something the panel does not.
+
+    WHY IT IS A HOOK AND NOT A STEP. Keypoints are NOT interactive. They are
+    never generated, never committed, never in the Design Document at all --
+    they are a read-only context layer the terrain warm-up computes and the
+    report reads. But their relationship data is DERIVED FROM COMMITS, so the
+    only moment it can be brought up to date is just after one lands. That is
+    exactly what a post-commit hook is for, and it is why this cannot be a
+    registry `produces` field or a consumes edge: there is no step here to
+    hang either on.
+
+    IDEMPOTENT. The implementation OVERWRITES kp["feature_relationships"]
+    rather than appending to it, so running after the landform commit and
+    again after the water commit and again after a re-commit converges on the
+    same answer each time. That is what makes it safe to declare on two steps.
+
+    THE WATER HALF IS "no_feature" UNTIL THE WATER STEP EXISTS, and that is a
+    truthful answer rather than a placeholder: no water zone has been
+    selected, which is precisely what "no_feature" means -- the same value
+    the batch pipeline produces for a parcel where nothing qualified.
+
+    Resolved late (step_registry.resolve) rather than imported at module
+    scope: pipeline_context.py pulls in the whole batch pipeline, and this
+    module's import surface is deliberately small.
+    """
+    attach = step_registry.resolve(
+        "pipeline_context._attach_keypoint_feature_relationships"
+    )
+    attach(
+        context.keypoints,
+        committed_internal_value(context, document, "landform") or [],
+        # THE ONE SELECTION THIS HOOK STILL CANNOT READ. The water step
+        # commits a set of candidate zones, and the batch pipeline's
+        # `selected_water_zone` is ONE zone chosen from them -- a narrowing
+        # this commit path has no declaration for, because the water registry
+        # entry that would declare it does not exist yet. None here is
+        # therefore honest: no water step has been committed at all, so there
+        # is no selection to read, and the hook writes "no_feature". The
+        # water entry has to say how its commit names the selected zone
+        # before this can be anything else.
+        None,
+    )
+
+
+def committed_internal_value(context, document, step_id):
+    """
+    A committed step's rehydrated internal value, or None when that step is
+    not committed -- the question a post-commit hook asks, as opposed to the
+    question a consumes edge asks.
+
+    THE DIFFERENCE FROM _resolve_from_committed() IS THE ANSWER TO "NOT
+    COMMITTED". A consumes edge REFUSES, because a generate that proceeds
+    without an input it declared would silently self-compute it. A hook
+    recomputing a derived context layer gets None and carries on, because
+    "nothing is committed here yet" is a real state that layer has to be able
+    to represent -- the keypoint layer's own "no_feature".
+
+    Returns None for a step with no registry entry too. That is the same
+    answer for a different reason and the caller cannot tell them apart,
+    which is fine for a hook: either way there is no commit to read.
+    """
+    entry = document["steps"].get(step_id)
+    if entry is None or entry["status"] != design_document.STATUS_COMMITTED:
+        return None
+    try:
+        definition = step_registry.get_step(step_id)
+    except step_registry.RegistryError:
+        return None
+    return committed_value(
+        step_registry.Consumed(
+            name=step_id,
+            source=step_registry.SOURCE_COMMITTED,
+            from_step=step_id,
+            rehydrate=definition.commit_contract.rehydrate,
+        ),
+        context,
+        document,
+    )
+
+
+# ======================================================================
+# commit
+# ======================================================================
+
+
+def commit_step(
+    session_id: str,
+    step_id: str,
+    features: dict,
+    provenance: dict,
+    base_revision: int,
+    store,
+    inputs: Optional[dict] = None,
+    fetch_cache: Optional[session_cache.FetchCache] = None,
+    cache: Optional[session_cache.SessionCache] = None,
+) -> dict:
+    """
+    Commit a feature set to one step. Returns the NEW Design Document.
+
+    SYNCHRONOUS, unlike generate. A commit rehydrates the committed features
+    and runs the step's post-commit hooks -- bounded work over geometry
+    already in memory, with no fetch anywhere in it -- and it is the moment a
+    user's decision is recorded, so a client that gets a document back knows
+    the decision landed. A job id would say only that it might have.
+
+    WHAT IT DOES, in order, and the order is the contract:
+
+      1. VALIDATE against the step's CommitContract
+         (commit_validation.check_commit). Boundary containment and geometric
+         validity are hard gates and reject the commit, naming the offending
+         features; exclusion crossings are not gates at all. Rehydration
+         happens HERE, as part of the gate, because it IS the validity check.
+      2. COMPUTE EXCLUSION CROSSINGS per feature and annotate the collection
+         with them.
+      3. WRITE, through design_document.commit_step -- B1's pure function,
+         which owns the revision check and the downstream cascade. Not
+         reimplemented, not partially repeated: the cascade that resets later
+         steps on a re-commit is that function's and stays there.
+      4. RUN THE POST-COMMIT HOOKS declared by the registry entry.
+      5. UPDATE THE SESSION CACHE so a downstream generate reads the
+         committed value without rehydrating it again.
+
+    NOTHING IS WRITTEN IF STEP 1 REJECTS. The gate runs to completion before
+    the document is touched, so a rejected commit leaves the step exactly as
+    it was and can be retried with the same base_revision.
+
+    VALIDATION BEFORE THE REVISION CHECK, deliberately. A stale base_revision
+    is a retry-after-refetch; a self-intersecting ring is a drawing to fix.
+    Both can be true at once, and the second is the one the user has to act
+    on either way -- it will still be there after the refetch. So the gate
+    reports the geometry first, and RevisionConflictError (carrying the
+    current document, so the caller can rebase without a round trip) comes
+    from the write.
+
+    `inputs` is the step's collected user inputs, stored verbatim on the
+    entry. Landform collects none.
+    """
+    definition = step_registry.get_step(step_id)
+    document = store.get(session_id)
+    context = session_manager.get_session_context(
+        session_id, store, fetch_cache=fetch_cache, cache=cache
+    )
+
+    # 1. THE GATE. Raises CommitRejectedError carrying every problem.
+    check = commit_validation.check_commit(
+        definition,
+        features,
+        provenance,
+        context.dem,
+        context.boundary_polygon_utm,
+    )
+
+    # 2. Crossings, recorded alongside each feature. Measured against the
+    # session's own exclusion result -- the same gates the proposals were
+    # computed against, so a zone's record cannot describe a different
+    # parcel's masks than the ones the user was shown.
+    annotated = commit_validation.annotate_crossings(
+        features["features"], check.rehydrated, context.exclusion_zones
+    )
+
+    # 3. THE WRITE.
+    updated = design_document.commit_step(
+        document,
+        step_id,
+        annotated,
+        provenance,
+        base_revision,
+        inputs=inputs,
+    )
+    store.put(updated)
+
+    # 5, before 4: the cache first, so a hook that reads a committed value
+    # through committed_internal_value() gets the rehydration this commit
+    # already paid for rather than doing it a second time. Keyed by the
+    # revision the write just produced.
+    context.step_committed[step_id] = {
+        "revision": updated["steps"][step_id]["revision"],
+        "value": check.rehydrated,
+    }
+    # A COMMIT INVALIDATES THE SAME THINGS A REOPEN DOES. design_document.
+    # commit_step() resets every later step in the document when it
+    # re-commits an already-committed step; the derived values cached for
+    # those steps are stale in exactly the same way. Run unconditionally --
+    # a first commit has nothing downstream to drop, so this is a no-op
+    # there, and making it conditional would mean tracking the same "was it
+    # already committed" state the document already answers.
+    invalidate_downstream(context, updated, step_id)
+
+    # 4. The hooks.
+    run_post_commit_hooks(definition, context, updated)
+
+    return updated
+
+
+# ======================================================================
+# reopen
+# ======================================================================
+
+
+def invalidate_downstream(context, document, step_id) -> tuple:
+    """
+    Drop the cached DERIVED values that a change to `step_id` made stale, and
+    return what was dropped.
+
+    TWO DIFFERENT INVALIDATIONS, WALKED ALONG TWO DIFFERENT EDGE SETS,
+    because they answer two different questions:
+
+      PROPOSALS AND RESTORED STATE follow the REGISTRY'S consumes edges,
+      transitively (step_registry.transitive_dependents). A step's proposals
+      are stale exactly when they were computed from something that changed
+      -- which is what a consumes edge means and the only reason those edges
+      are written down. A step that comes LATER in KSOP order but consumes
+      nothing from `step_id` keeps its proposals, and that is the precision
+      design_document.downstream_steps() deliberately does not have (it
+      resets everything after a step because the document cannot know what
+      depends on what -- the conservative answer, correct for decisions).
+
+      COMMITTED VALUES follow the DOCUMENT. `step_committed` caches the
+      rehydration of a committed FeatureCollection, so it is stale the moment
+      the document says that step is no longer committed -- which the
+      document has already decided by the time this runs. Reading the
+      document rather than the registry here is not a shortcut: a step the
+      document reset is not committed, full stop, and keeping a rehydrated
+      "committed value" for it would be a cache holding a decision that was
+      withdrawn.
+
+    Cheap and total: nothing here is expensive to rebuild, which is the whole
+    premise of tier 2, so this errs toward dropping.
+    """
+    dropped = []
+    for dependent in step_registry.transitive_dependents(step_id):
+        if context.step_proposals.pop(dependent, None) is not None:
+            dropped.append(f"{dependent}.proposals")
+        if context.step_restored.pop(dependent, None) is not None:
+            dropped.append(f"{dependent}.restored")
+    for other, entry in document["steps"].items():
+        if other == step_id:
+            continue
+        if entry["status"] != design_document.STATUS_COMMITTED:
+            if context.step_committed.pop(other, None) is not None:
+                dropped.append(f"{other}.committed")
+    return tuple(dropped)
+
+
+def restore_step_state(
+    session_id: str,
+    step_id: str,
+    store,
+    fetch_cache: Optional[session_cache.FetchCache] = None,
+    cache: Optional[session_cache.SessionCache] = None,
+) -> dict:
+    """
+    The editable state of a reopened step: its proposals, regenerated, with
+    the user's prior selection re-applied off the document.
+
+        {"payload": <the step's wire payload>,
+         "selected_feature_ids": [...],   # generated proposals they had picked
+         "user_added": <FeatureCollection>,  # the shapes they drew
+         "provenance": {...},             # as committed
+         "missing_feature_ids": [...]}    # selected ids no longer proposed
+
+    BY RE-RUNNING GENERATE, NOT BY CACHING PROPOSALS SEPARATELY. A reopened
+    step needs the candidate set back, and there are two ways to have it:
+    keep a copy from before the commit, or recompute it. Recomputing wins on
+    the only ground that matters -- there is ONE source of truth for what the
+    proposals are. A stored copy is a second one, and the day it disagrees
+    with what a regenerate produces (a fixture changed, a threshold moved,
+    the cache was evicted and rebuilt) the user is editing a candidate set
+    the server would no longer propose. generate is idempotent and
+    network-free by contract, so the recompute is cheap and the answer is
+    current.
+
+    THIS DEPENDS ON PROPOSAL FEATURE IDS BEING STABLE ACROSS REGENERATES,
+    and that is not an assumption -- test_step_commit.py generates twice on
+    one session and asserts the id sets are identical. If they ever stop
+    being stable this function silently restores an empty selection, so the
+    assertion is the thing standing between a user and losing their
+    selections on reopen.
+
+    DRAWN ZONES NEED NO ID MATCHING. They carry their own geometry in the
+    document and come back from it directly -- they were never proposals and
+    a regenerate has nothing to say about them.
+
+    `missing_feature_ids` is REPORTED RATHER THAN SWALLOWED. It should always
+    be empty given stable ids; if it is not, the user selected something the
+    server no longer offers, and that is a thing to surface, not to quietly
+    drop from the restored selection.
+    """
+    definition = step_registry.get_step(step_id)
+    document = store.get(session_id)
+    entry = document["steps"][step_id]
+
+    # THE STEP'S OWN COMMITTED USER INPUTS, not an empty dict. design_document
+    # .reopen_step() retains `inputs` on the reopened entry precisely so the
+    # editable starting point is the one the user was editing -- regenerating
+    # the roads step from a different access point than the one they chose
+    # would restore a candidate set they never saw. Landform collects none,
+    # so this is {} there and the validation is the meaningful part.
+    payload = run_generate(
+        session_id,
+        definition,
+        store,
+        validate_params(definition, entry.get("inputs")),
+        fetch_cache=fetch_cache,
+        cache=cache,
+    )
+
+    features = (entry.get("features") or {}).get("features") or []
+    provenance = entry.get("provenance") or {}
+
+    # THE REGISTRY NAMES THE KEY, this function does not know it. See
+    # StepDefinition.proposal_collection.
+    collection = payload.get(definition.proposal_collection) or {}
+    proposed_ids = {feature["id"] for feature in collection.get("features", [])}
+    selected, user_added, missing = [], [], []
+    for feature in features:
+        feature_id = feature.get("id")
+        if provenance.get(feature_id) == "user_added":
+            user_added.append(feature)
+        elif feature_id in proposed_ids:
+            selected.append(feature_id)
+        else:
+            missing.append(feature_id)
+
+    return {
+        "payload": payload,
+        "selected_feature_ids": selected,
+        "user_added": {"type": "FeatureCollection", "features": user_added},
+        "provenance": provenance,
+        "missing_feature_ids": missing,
+    }
+
+
+def reopen_step(
+    session_id: str,
+    step_id: str,
+    store,
+    fetch_cache: Optional[session_cache.FetchCache] = None,
+    cache: Optional[session_cache.SessionCache] = None,
+) -> dict:
+    """
+    Reopen a committed step for editing. Returns the NEW Design Document.
+
+    WHAT IT DOES, in order:
+
+      1. design_document.reopen_step -- B1's pure function. It moves the step
+         back to "generated" keeping its committed features as the editable
+         starting point, and resets every later step to not_started. That
+         cascade is the DOCUMENT's and is not reimplemented here.
+      2. INVALIDATE the downstream cached values (invalidate_downstream --
+         the registry's consumes edges for proposals, the document for
+         committed values).
+      3. RESTORE this step's editable state by re-running its generate and
+         re-applying the selection off the document (restore_step_state),
+         leaving the result on SessionContext.step_restored.
+
+    THE DOCUMENT IS WRITTEN BEFORE THE RESTORE, and that ordering is
+    load-bearing: the restore RE-READS the document through run_generate(),
+    which needs to see the step as "generated" rather than "committed" --
+    mark_step_generated() refuses to downgrade a committed step, correctly,
+    because doing so silently would discard exactly the cascade step 1 just
+    applied.
+
+    Raises design_document.DocumentError for a step that is not committed;
+    reopening a step nobody committed is not a no-op to absorb, it is a
+    caller that thinks the session is in a state it is not.
+    """
+    # Registered? Fail here, before the document is touched -- an
+    # unregistered step has no generate to restore from, so reopening it
+    # would leave a step in "generated" with nothing able to generate it.
+    step_registry.get_step(step_id)
+    document = store.get(session_id)
+
+    updated = design_document.reopen_step(document, step_id)
+    store.put(updated)
+
+    context = session_manager.get_session_context(
+        session_id, store, fetch_cache=fetch_cache, cache=cache
+    )
+    invalidate_downstream(context, updated, step_id)
+    # The reopened step's OWN cached committed value goes too -- it is no
+    # longer committed, and invalidate_downstream() deliberately skips the
+    # step it is called about (for a commit, that step's value is the one
+    # thing that is fresh).
+    context.step_committed.pop(step_id, None)
+
+    context.step_restored[step_id] = restore_step_state(
+        session_id, step_id, store, fetch_cache=fetch_cache, cache=cache
+    )
+    return updated

@@ -77,10 +77,11 @@ SOURCE_CACHE = "cache"
 
 # Read off a COMMITTED upstream step in the Design Document and rehydrated
 # into its internal shape (proposal section 2.4). No entry below uses it
-# yet: landform is the first step, so it has no upstream commits, and the
-# steps that do are B5b's. The vocabulary carries it now because a consumes
-# edge to a committed step is what the cascade invalidates ON -- see
-# step_orchestrator._CONSUMES_RESOLVERS for the one-line extension point.
+# yet -- landform is the first step, so it has no upstream commits -- but the
+# resolver behind it is IMPLEMENTED (step_orchestrator._resolve_from_
+# committed) rather than pending: a consumes edge to a committed step is what
+# the cascade invalidates on, and the water entry is one row in this table
+# plus one payload builder, not a resolver to write.
 SOURCE_COMMITTED = "committed"
 
 VALID_SOURCES = (SOURCE_CACHE, SOURCE_COMMITTED)
@@ -135,7 +136,37 @@ class Consumed:
     rehydrate   source=committed: the dotted path of the inbound translator
                 (wire_translation.rehydrate_*) that turns that commit's
                 GeoJSON back into the internal shape the override expects.
+    empty_commit  source=committed: the dotted path of the SENTINEL VALUE
+                this consumer must receive when the upstream step was
+                committed with ZERO features, or None when the rehydrator's
+                own empty answer already says it. See EMPTY IS AN ANSWER
+                below -- this field is the whole of how a "committed
+                nothing" decision survives the trip to a consumer.
     forward_as  the entry point's PARAMETER NAME for this value, or None.
+
+    EMPTY IS AN ANSWER, AND MOST OVERRIDES CANNOT SAY IT. Every KSOP entry
+    point in this pipeline treats a None override as "not supplied -- compute
+    it yourself", which is exactly right for an absent value and exactly
+    wrong for a deliberate empty commit. A user who commits the water step
+    with nothing selected has DECIDED there is no water zone; forwarding that
+    as None makes five downstream consumers each re-run the whole water
+    suitability pipeline and hand back a zone the user rejected. That is not
+    hypothetical -- it was measured at five water-suitability runs, and it is
+    the reason water_suitability.NO_WATER_ZONE exists.
+
+    So a consumer whose override parameter has a sentinel for "there is none
+    of this" declares it here:
+
+        empty_commit="water_suitability.NO_WATER_ZONE"
+
+    and the resolver forwards THAT, never None, when the upstream commit is
+    empty. A consumer whose rehydrated shape is a LIST needs no sentinel:
+    [] already means "checked, nothing there" to every consumer of
+    production_areas= (wire_translation.rehydrate_production_zones' own
+    contract says so), and None is the value it must never be. Declaring
+    empty_commit=None is therefore a claim -- "this rehydrator's empty
+    answer is already explicit" -- not a gap, and the resolver enforces it
+    by never substituting None of its own.
 
     forward_as=None IS A REAL CASE, not a placeholder. A value can be a
     genuine input to the computation -- and therefore a genuine invalidation
@@ -155,6 +186,7 @@ class Consumed:
     cache_path: Optional[str] = None
     from_step: Optional[str] = None
     rehydrate: Optional[str] = None
+    empty_commit: Optional[str] = None
     why: str = ""
 
 
@@ -185,17 +217,83 @@ class LayerFailure:
     self_describing: bool = False
 
 
+# ======================================================================
+# THE ONE SPATIAL HARD GATE, AND IT IS NOT A PER-STEP FIELD
+# ======================================================================
+#
+# THE PARCEL BOUNDARY. For every step, now and later. A commit whose
+# geometry leaves the parcel is rejected, naming the features that leave it;
+# nothing else about where a feature sits can reject a commit.
+#
+# THIS REPLACES A PER-STEP `must_lie_within` FIELD, WHICH HELD
+# "eligible_union". That was written from the architecture proposal's
+# section 2.5 -- the server re-validates a commit against the same
+# eligibility masks the client draws against, client advisory, server
+# authoritative -- and that posture is REJECTED here in favour of the
+# shipped frontend's, which is the settled contract:
+#
+#   zoneGeometry.js clampToBoundary(): "THE BOUNDARY IS THE ONLY HARD GATE.
+#   Not the eligible union -- clamping to eligible ground would make the
+#   caution system unreachable, because a user could never draw across
+#   hydric soil to be warned about it. The rule is that gates encoding
+#   physical impossibility apply and gates rejecting weak candidates do not:
+#   off-parcel is not their land, while canopy, hydric, slope, roads and
+#   setback are all conditions of ground they own and may commit to
+#   knowingly."
+#
+# The exclusion gates are ADVISORY BY NATURE. A hydric rating is an
+# inference off a survey polygon at survey scale; the person standing on the
+# ground can see whether it is wet. ProductionZonePanel.jsx makes the same
+# argument about its own 80% ceiling -- "having handed that judgment to the
+# user ... taking it back at the gate would be incoherent". A server that
+# hands the user five advisory gates and then refuses the commit they make
+# in light of them is not being authoritative, it is being incoherent. So
+# the server stays authoritative about what it can KNOW -- containment,
+# geometric validity -- and advisory about what the user knows better, and
+# it RECORDS every advisory crossing rather than rejecting it (see
+# commit_validation.exclusion_crossings()).
+#
+# WHY CONTAINMENT IS LOAD-BEARING and not merely tidy: rehydration does NOT
+# clip. wire_translation.rehydrate_production_zone()'s "NOT CLIPPED TO THE
+# PARCEL, DELIBERATELY" note establishes why -- re-clipping would perturb an
+# unedited zone's round-trip identity, and would silently REPAIR an
+# off-parcel commit instead of reporting it. Which means this gate is the
+# only thing between off-parcel geometry and every downstream consumer. Drop
+# it and nothing catches it at all.
+#
+# A CONSTANT, NOT A FIELD, and that is the honest shape. A per-step field
+# that can only ever hold one value is a false generalisation: it invites
+# the next reader to believe some step somewhere validates against something
+# else, and invites the next author to put a second value in it. If a step
+# ever genuinely needs a different containment geometry, it earns a field
+# then -- with a second real value to justify it.
+COMMIT_MUST_LIE_WITHIN = "parcel_boundary"
+
+
 @dataclass(frozen=True)
 class CommitContract:
     """
-    What a valid commit to this step looks like. DECLARED HERE, ENFORCED IN
-    B5b -- this branch records the contract and enforces none of it, which is
-    why every field is a description rather than a validator. Commit
-    validation is server-authoritative (proposal section 2.5) and belongs
-    with the commit path, but the DECLARATION belongs here beside the
-    consumes edges it constrains, because "what may be committed" and "what
-    the next step then consumes" are one statement made twice if they are
-    written in two places.
+    What a valid commit to this step looks like -- DECLARED HERE, ENFORCED
+    IN commit_validation.py. The declaration belongs beside the consumes
+    edges it constrains, because "what may be committed" and "what the next
+    step then consumes" are one statement made twice if they are written in
+    two places.
+
+    THE HARD GATES, WHICH REJECT A COMMIT AND NAME THE OFFENDING FEATURES:
+
+      * Boundary containment. See COMMIT_MUST_LIE_WITHIN above. The only
+        spatial hard gate there is.
+      * Geometric validity. Self-intersecting rings, degenerate or zero-area
+        geometry, non-polygonal input, a zone covering no DEM cell centre.
+        wire_translation's rehydrator already detects every one of these and
+        raises InboundGeometryError naming the defect; the commit path
+        surfaces that as a per-feature rejection rather than a 500.
+      * The shape declarations below: layer, geometry_types, the feature
+        count bounds, provenance.
+
+    RECORDED, NOT REJECTED: exclusion crossings. A committed zone that
+    overlaps the hydric, canopy, slope, roads or setback mask is VALID, and
+    the crossing is written into the document alongside the feature.
 
     layer            the feature_schema layer name the committed
                      FeatureCollection's features must carry.
@@ -205,12 +303,20 @@ class CommitContract:
                      here"), never a not_started one -- design_document.py's
                      own governing distinction.
     max_features     ceiling, or None for unbounded.
-    must_lie_within  the name of the eligibility geometry a commit is
-                     validated against, as it appears on the generate
-                     result. B5b intersects against this and records the
-                     crossing; nothing here does.
     rehydrate        the inbound translator a commit passes through on its
-                     way to the internal shape (proposal section 2.4).
+                     way to the internal shape (proposal section 2.4). It is
+                     also, and not incidentally, the VALIDITY GATE: a
+                     geometry that cannot be rehydrated cannot be committed.
+    internal_id_parameter
+                     the rehydrator's per-feature INTERNAL id keyword
+                     ("zone_ids" for production zones), or None when the
+                     rehydrator derives every id from the wire id alone.
+                     A USER-DRAWN feature has no pipeline id to parse -- the
+                     rehydrator says so and refuses to invent one, because an
+                     invented id can collide with a generated zone's in the
+                     same commit and silently merge their accounting. So the
+                     COMMIT PATH allocates it, deterministically from the
+                     committed collection, and hands it over under this name.
     requires_provenance  whether every committed feature must carry a
                      design_document.PROVENANCE_VALUES classification.
     """
@@ -219,9 +325,44 @@ class CommitContract:
     geometry_types: tuple
     min_features: int
     max_features: Optional[int]
-    must_lie_within: Optional[str]
     rehydrate: Optional[str]
+    internal_id_parameter: Optional[str] = None
     requires_provenance: bool = True
+
+
+@dataclass(frozen=True)
+class PostCommitHook:
+    """
+    Something that must RE-RUN after a commit to this step lands, declared as
+    data beside the step it belongs to.
+
+    DECLARED, NOT BRANCHED. The keypoint relationship layer depends on
+    committed production areas and on the selected water zone, so it must
+    re-run after the landform commit AND after the water commit -- and the
+    commit path must not be the place that knows that. An
+    `if step_id == "landform"` in step_orchestrator.py would be the same
+    failure the registry exists to prevent, one step's name compiled into the
+    generic path.
+
+    `target` is a dotted path resolved at call time like every other target
+    in this table, called as:
+
+        hook(context, document)
+
+    -- the live SessionContext and the document AS JUST WRITTEN. A hook
+    mutates the CONTEXT (tier 2, derived, disposable); it must not write to
+    the document, which the commit path has already persisted. Anything a
+    hook computes is therefore regenerable, which is what makes it safe to
+    re-run and safe to lose.
+
+    IDEMPOTENT BY REQUIREMENT. A hook may run after every commit to its step
+    and after a re-commit; _attach_keypoint_feature_relationships() overwrites
+    the key it sets rather than appending to it, and any hook added here must
+    do the same.
+    """
+
+    target: str
+    why: str = ""
 
 
 @dataclass(frozen=True)
@@ -234,6 +375,21 @@ class StepDefinition:
     produces: tuple
     commit_contract: CommitContract
     user_inputs: tuple = ()
+    # PostCommitHooks, run in declaration order after a commit to this step
+    # is persisted. See PostCommitHook for why this is data and not a branch.
+    post_commit: tuple = ()
+    # The key on this step's WIRE PAYLOAD holding its proposals as a
+    # FeatureCollection.
+    #
+    # DECLARED BECAUSE THE REOPEN RESTORE READS IT. Restoring a reopened
+    # step's editable state means re-running its generate and matching the
+    # committed feature ids against the proposals that come back
+    # (step_orchestrator.restore_step_state), and "which key holds the
+    # proposals" is the one thing that walk cannot derive. Left undeclared it
+    # would be a `payload["suggested_zones"]` in the generic path -- one
+    # step's vocabulary compiled into code that is supposed to serve six.
+    # The water entry will name its own key here and change nothing else.
+    proposal_collection: str = ""
     # The step's outbound translation: internal generate result -> the wire
     # payload. A dotted path like every other target here, so this table
     # stays import-free and a test can patch the builder.
@@ -356,6 +512,10 @@ LANDFORM = StepDefinition(
     ),
     generate="production_area_ceiling.identify_optimized_production_areas",
     payload="step_orchestrator.build_landform_payload",
+    # production_zone_payload.assemble_production_zone_payload()'s own key --
+    # the GeoJSON half of its two representations, which is the one carrying
+    # feature ids. `zones` is the same zones as tabular rows for the panel.
+    proposal_collection="suggested_zones",
     produces=(
         # PipelineContext's own field names, not new ones: the interactive
         # path accretes the SAME context the batch path does, one step at a
@@ -377,12 +537,12 @@ LANDFORM = StepDefinition(
         # as an absence. See CommitContract.min_features.
         min_features=0,
         max_features=None,
-        # exclusion_zones' eligible geometry -- the mask the frontend already
-        # draws as its ineligible overlay and already intersects drawn
-        # polygons against client-side. B5b re-validates against it
-        # server-side (proposal section 2.5); the client's copy is advisory.
-        must_lie_within="eligible_union",
         rehydrate="wire_translation.rehydrate_production_zones",
+        # rehydrate_production_zones(collection, dem, zone_ids=...). See
+        # CommitContract.internal_id_parameter: a drawn zone carries no
+        # "production-area-<n>" id, so the commit path allocates one above
+        # every id the same commit already uses.
+        internal_id_parameter="zone_ids",
         requires_provenance=True,
     ),
     # NONE. The landform step runs on the traced boundary alone -- the same
@@ -391,6 +551,25 @@ LANDFORM = StepDefinition(
     # not been offered yet. (The roads step's entry will declare
     # access_point here.)
     user_inputs=(),
+    post_commit=(
+        PostCommitHook(
+            target="step_orchestrator.attach_keypoint_relationships",
+            why=(
+                "The keypoint layer's feature_relationships are DERIVED FROM "
+                "COMMITS -- distance and elevation differential from each "
+                "keypoint to the nearest committed production area and to the "
+                "selected water zone. Keypoints are not interactive and never "
+                "appear in the Design Document (they are a read-only context "
+                "layer, recomputed with the terrain warm-up), so the only way "
+                "their relationship data can reflect a landform commit is for "
+                "this to re-run after one. It re-runs again after the water "
+                "commit, at which point the water half stops being "
+                "'no_feature' -- which is exactly why it is DECLARED on the "
+                "steps it depends on rather than branched on in the commit "
+                "path."
+            ),
+        ),
+    ),
     failure_layers=(
         # A LayerFetchError names its own layer, which is how /api/
         # production-zones reports one. Listed FIRST so it is matched before
@@ -479,6 +658,37 @@ def dependents_of(step_id: str) -> tuple:
     )
 
 
+def transitive_dependents(step_id: str) -> tuple:
+    """
+    Every REGISTERED step reachable from `step_id` along consumes edges, at
+    any depth, in STEP_ORDER. What a reopen or a re-commit of `step_id`
+    invalidates.
+
+    TRANSITIVE BECAUSE THE STALENESS IS. If roads consumes water's commit and
+    water consumes landform's, then reopening landform makes the ROADS
+    proposals stale too -- they were computed from a water answer that was
+    itself computed from the landform commit now being re-edited. A one-hop
+    walk would leave those proposals in the cache looking current.
+
+    Excludes `step_id` itself. Cycles cannot occur -- validate_registry()
+    rejects any consumes edge that is not strictly upstream in STEP_ORDER --
+    so this terminates without a visited-set guard; it keeps one anyway,
+    because a walk that would loop forever on a malformed table is a worse
+    failure than one that returns a wrong answer loudly.
+    """
+    if step_id not in STEP_ORDER:
+        raise RegistryError(f"unknown step id '{step_id}'")
+    reached = set()
+    frontier = [step_id]
+    while frontier:
+        current = frontier.pop()
+        for dependent in dependents_of(current):
+            if dependent not in reached:
+                reached.add(dependent)
+                frontier.append(dependent)
+    return tuple(step for step in registered_steps() if step in reached)
+
+
 def validate_registry() -> None:
     """
     Structural validation of every entry, in the same fail-loud posture
@@ -507,6 +717,11 @@ def validate_registry() -> None:
             raise RegistryError(f"{where} declares no generate target")
         if not definition.payload:
             raise RegistryError(f"{where} declares no payload builder")
+        if not definition.proposal_collection:
+            raise RegistryError(
+                f"{where} names no proposal_collection; the reopen restore "
+                f"cannot find this step's proposals on its own payload"
+            )
         if not definition.produces:
             raise RegistryError(
                 f"{where} produces nothing; a step that contributes no "
@@ -533,11 +748,11 @@ def validate_registry() -> None:
                         f"{where}: cache-sourced '{consumed.name}' declares "
                         f"no cache_path"
                     )
-                if consumed.from_step or consumed.rehydrate:
+                if consumed.from_step or consumed.rehydrate or consumed.empty_commit:
                     raise RegistryError(
                         f"{where}: cache-sourced '{consumed.name}' declares "
-                        f"from_step/rehydrate, which only a committed source "
-                        f"uses"
+                        f"from_step/rehydrate/empty_commit, which only a "
+                        f"committed source uses"
                     )
             else:
                 if not consumed.from_step:
@@ -565,6 +780,35 @@ def validate_registry() -> None:
                         f"rehydrate translator; a commit reaches an override "
                         f"only through the inbound boundary"
                     )
+
+        for hook in definition.post_commit:
+            if not isinstance(hook, PostCommitHook):
+                raise RegistryError(
+                    f"{where} declares a post_commit entry that is not a "
+                    f"PostCommitHook: {hook!r}"
+                )
+            if not hook.target:
+                raise RegistryError(f"{where} declares a post-commit hook with no target")
+
+        contract = definition.commit_contract
+        if not contract.layer:
+            raise RegistryError(f"{where}'s commit contract names no layer")
+        if not contract.geometry_types:
+            raise RegistryError(
+                f"{where}'s commit contract permits no geometry type, so no "
+                f"commit to it could ever be valid"
+            )
+        if not contract.rehydrate:
+            raise RegistryError(
+                f"{where}'s commit contract declares no rehydrator; a commit "
+                f"reaches an internal shape -- and is checked for geometric "
+                f"validity -- only through the inbound boundary"
+            )
+        if contract.max_features is not None and contract.max_features < contract.min_features:
+            raise RegistryError(
+                f"{where} declares max_features {contract.max_features} below "
+                f"min_features {contract.min_features}"
+            )
 
         forwarded = [c.forward_as for c in definition.consumes if c.forward_as]
         if len(forwarded) != len(set(forwarded)):

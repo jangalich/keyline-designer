@@ -1398,6 +1398,34 @@ def rehydrate_production_zone(feature: dict, dem: dict, zone_id: Optional[int] =
     return patch
 
 
+def internal_zone_id(feature_id: Any) -> Optional[int]:
+    """
+    The integer patch id behind an outbound feature id, or None when this
+    module's outbound half did not build that id.
+
+    THE PUBLIC HALF of _zone_id_from_feature_id() below, and the question the
+    COMMIT PATH has to ask before it can rehydrate anything: "does this
+    committed feature carry a pipeline id, or is it a shape somebody drew?"
+    A drawn zone must be given an internal id the commit path allocates (see
+    step_registry.CommitContract.internal_id_parameter), and asking by
+    catching InboundGeometryError off the private function would be using an
+    exception to answer a question that has a plain answer. None is that
+    answer -- it means "not one of ours", never "malformed".
+
+    Spelling the id is this module's job and nowhere else's: outbound builds
+    f"production-area-{patch['id']}" and inbound parses exactly that, and a
+    second parser in the commit path would be a second spelling waiting to
+    disagree with this one.
+    """
+    if isinstance(feature_id, int) and not isinstance(feature_id, bool):
+        return feature_id
+    if isinstance(feature_id, str) and feature_id.startswith(_PRODUCTION_FEATURE_ID_PREFIX):
+        tail = feature_id[len(_PRODUCTION_FEATURE_ID_PREFIX):]
+        if tail.isdigit():
+            return int(tail)
+    return None
+
+
 def _zone_id_from_feature_id(feature_id: Any, where: str) -> int:
     """
     The integer patch id behind an outbound feature id.
@@ -1413,12 +1441,9 @@ def _zone_id_from_feature_id(feature_id: Any, where: str) -> int:
     suggested zone's id in the same commit, and a collision would silently
     merge two zones' served-area accounting. Raise instead.
     """
-    if isinstance(feature_id, int) and not isinstance(feature_id, bool):
-        return feature_id
-    if isinstance(feature_id, str) and feature_id.startswith(_PRODUCTION_FEATURE_ID_PREFIX):
-        tail = feature_id[len(_PRODUCTION_FEATURE_ID_PREFIX):]
-        if tail.isdigit():
-            return int(tail)
+    zone_id = internal_zone_id(feature_id)
+    if zone_id is not None:
+        return zone_id
     raise InboundGeometryError(
         f"{where}: cannot determine an integer zone id from feature id {feature_id!r}. A suggested zone "
         "carries \"production-area-<n>\"; a user-drawn zone has no pipeline id, so its caller must pass "
