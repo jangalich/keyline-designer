@@ -1057,9 +1057,24 @@ with Harness() as h:
     third_payload = s.generate("water")
     third = [f["id"] for f in _zone_features(third_payload)]
 
-    assert first == second == third, (
-        f"the survey-zone id set must be identical across regenerates and "
-        f"across a cache eviction:\n  1: {first}\n  2: {second}\n  3: {third}"
+    # AND A FOURTH, with BOTH caches thrown away -- a fresh FetchCache means
+    # ParcelData is fetched again and the DEM the surfaces are computed over
+    # is a different object with the same numbers. That is the state a server
+    # restart leaves a session in, and it is the one an id-based selection
+    # would break silently under.
+    refetches_before = h.fetch_parcel_data.call_count
+    s.fetch_cache, s.cache = _fresh_caches()
+    fourth = [f["id"] for f in _zone_features(s.generate("water"))]
+    refetched = h.fetch_parcel_data.call_count - refetches_before
+
+    assert refetched == 1, (
+        f"the fourth generate must have re-fetched ParcelData ({refetched} "
+        f"fetches), or it is not the cold path it claims to be"
+    )
+    assert first == second == third == fourth, (
+        f"the survey-zone id set must be identical across regenerates, across "
+        f"a session-cache eviction, and across a full re-fetch:\n"
+        f"  1: {first}\n  2: {second}\n  3: {third}\n  4: {fourth}"
     )
     assert len(set(first)) == len(first), f"ids must be unique: {first}"
     assert evicted_context_rebuilt, (
@@ -1073,10 +1088,11 @@ with Harness() as h:
     }
 
 print(
-    f"6 [test 7]. ID STABILITY: three generates -- two warm, one after the "
-    f"session cache was evicted and the context rebuilt from the document -- "
-    f"produced the IDENTICAL id set {first}, each id keeping its survey type "
-    f"({types_by_id})."
+    f"6 [test 7]. ID STABILITY: four generates -- two warm, one after the "
+    f"session cache was evicted and the context rebuilt from the document, "
+    f"and one after BOTH caches were thrown away so ParcelData was fetched "
+    f"again ({refetched} fetch) -- produced the IDENTICAL id set {first}, "
+    f"each id keeping its survey type ({types_by_id})."
 )
 
 
