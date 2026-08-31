@@ -4,6 +4,7 @@ session_api.py
 THE HTTP SURFACE over the session orchestrator
 (interactive-design-architecture-proposal.md section 3.1).
 
+    GET    /api/steps                                -> 200 {step_order}
     POST   /api/sessions                             -> 201 document
     GET    /api/sessions/<sid>                       -> 200 document
     POST   /api/sessions/<sid>/steps/<step>/generate -> 202 {job_id, status}
@@ -395,13 +396,59 @@ def _json_body() -> dict:
 
 def build_blueprint(deps: Optional[Dependencies] = None, name: str = "sessions"):
     """
-    The seven routes, bound to `deps`. `name` is Flask's blueprint name and
+    The eight routes, bound to `deps`. `name` is Flask's blueprint name and
     only has to be unique per app -- a test registering a second blueprint on
     a fresh app passes its own.
+
+    SEVEN OF THEM TOUCH A SESSION AND ONE DOES NOT. GET /api/steps takes no
+    `deps` at all -- it serves a constant -- and it is registered here anyway
+    rather than on its own blueprint, because it is the same surface, under
+    the same prefix, with the same CORS policy and the same JSON conventions.
+    A second blueprint for one constant would be a second thing to mount.
     """
     if deps is None:
         deps = Dependencies()
     blueprint = Blueprint(name, __name__)
+
+    @blueprint.route("/api/steps", methods=["GET"])
+    @_handled
+    def get_steps_endpoint():
+        """
+        THE STEP ORDER, WITH NO SESSION IN IT. design_document.STEP_ORDER,
+        served as `step_order` -- the same array under the same name that
+        document_body() puts on every document, from the same constant.
+
+        WHY A ROUTE FOR A CONSTANT. The frontend's step rail enumerates the
+        pipeline, and before POST /api/sessions there is no document, so
+        there is no `step_order`, so it had nothing to enumerate and showed
+        the boundary alone. The alternative to this route is a hardcoded
+        copy of the six ids over there -- which is precisely the drift
+        document_body()'s docstring exists to argue against. That argument
+        does not stop applying because a session has not started yet.
+
+        SAME NAME AS THE DOCUMENT'S FIELD, DELIBERATELY. A client reading
+        the order pre-session and post-session reads the same key holding
+        the same list, so the fallback is a second SOURCE and never a second
+        SHAPE -- there is no translation step between the two to get wrong.
+
+        IDS ONLY, NO TITLES. The frontend owns display titles already: they
+        are the `title` field of its own step definitions, which is where a
+        step says what its panel header reads, and the rail renders that.
+        Adding titles here would put "Landform" in two repositories and make
+        the copy that shows a coin toss. What the backend owns is the ORDER
+        -- the thing that is a fact about the pipeline rather than about the
+        chrome -- and that is exactly what this serves. A step id with no
+        definition on the client is named by its id, which is what the rail
+        already does for the five steps this build has no chrome for.
+
+        NO SESSION, NO AUTH, NO PARAMETERS, and nothing in `deps` is touched.
+        Every other route in this file resolves a store; this one cannot
+        fail in any way a store could, so there is no 404 and no 409 it can
+        reach. It is @_handled anyway for the same reason the others are:
+        the wrapper is what makes an unexpected exception a 500 with this
+        surface's error shape rather than Flask's HTML default.
+        """
+        return jsonify({"step_order": list(design_document.STEP_ORDER)})
 
     @blueprint.route("/api/sessions", methods=["POST"])
     @_handled
