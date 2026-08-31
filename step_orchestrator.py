@@ -929,10 +929,13 @@ def build_water_payload(result: dict, assembled: dict) -> dict:
         "summary": {
             key: value for key, value in narrative.items() if key != "zones"
         },
-        # The gate accounting in its native form, beside the narrative's
-        # imperial digest of it -- the same two-representations posture the
-        # landform payload takes with `zones` and `suggested_zones`.
-        "gate_mask_stats": narrative["gates"],
+        # NO SEPARATE gate_mask_stats KEY. The result carries one
+        # (compute_water_survey_areas()'s own), and it is numpy and shapely
+        # -- not JSON-serializable, by that function's own statement. What
+        # CAN go on the wire is build_narrative_data()'s digest of it, which
+        # is already here as summary["gates"]. A second key holding that same
+        # digest under the internal name would look like the native object
+        # and be a copy of the digest.
     }
 
 

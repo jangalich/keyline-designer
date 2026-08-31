@@ -458,7 +458,7 @@ with Harness() as h:
     water_payload = s.generate("water")
     water_generate_network = h.total_network_calls - network_before
 
-    assert sorted(water_payload) == ["gate_mask_stats", "summary", "survey_zones", "zones"], (
+    assert sorted(water_payload) == ["summary", "survey_zones", "zones"], (
         f"the water payload's keys: {sorted(water_payload)}"
     )
     collection = water_payload["survey_zones"]
