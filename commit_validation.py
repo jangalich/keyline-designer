@@ -561,12 +561,21 @@ def check_commit(
         properties = feature.get("properties") or {}
         rejected_here = False
 
-        if properties.get("layer") != contract.layer:
+        if properties.get("layer") not in contract.layers:
+            # MEMBERSHIP, not equality -- a step may commit more than one
+            # layer. The water step commits both survey_zone_embankment and
+            # survey_zone_excavated, because a survey zone's TYPE is carried
+            # by its layer and a selection spans both types freely. The
+            # message lists what is accepted rather than naming one, so a
+            # client sending a member footprint or a dropped zone is told
+            # which layers ARE committable instead of being told it sent the
+            # wrong one of two.
+            accepted = " or ".join(repr(layer) for layer in contract.layers)
             rejections.append(
                 FeatureRejection(
                     feature_id,
                     REJECT_WRONG_LAYER,
-                    f"This step commits {contract.layer!r} features; this one "
+                    f"This step commits {accepted} features; this one "
                     f"carries layer {properties.get('layer')!r}.",
                 )
             )

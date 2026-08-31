@@ -41,14 +41,15 @@ from design_document import STEP_ORDER
 
 step_registry.validate_registry()
 
-assert step_registry.registered_steps() == ("landform",), (
-    f"one entry is expected on this branch: {step_registry.registered_steps()}"
+assert step_registry.registered_steps() == ("landform", "water"), (
+    f"two entries are expected on this branch: {step_registry.registered_steps()}"
 )
 assert set(step_registry.STEP_REGISTRY) <= set(STEP_ORDER), (
     "the registry may not invent steps the design document cannot hold"
 )
 
 _LANDFORM = step_registry.get_step("landform")
+_WATER = step_registry.get_step("water")
 
 
 def _rejects(broken, why, key=None):
@@ -254,10 +255,117 @@ print(
     f"({', '.join(sorted(_consumed))}), forwards "
     f"{len([c for c in _LANDFORM.consumes if c.forward_as])} of them as "
     f"overrides, produces {_LANDFORM.produces}, declares a commit contract "
-    f"({_contract.layer}, >={_contract.min_features} features, within "
+    f"({'/'.join(_contract.layers)}, >={_contract.min_features} features, within "
     f"{step_registry.COMMIT_MUST_LIE_WITHIN}), "
     f"{len(_LANDFORM.post_commit)} post-commit hook(s) and "
     f"{len(_LANDFORM.user_inputs)} user inputs."
+)
+
+
+# --- 2b. WATER'S DECLARED SHAPE ---------------------------------------
+#
+# THE SECOND ENTRY, AND THEREFORE THE FIRST TEST OF WHETHER THE SCHEMA
+# GENERALISES. Everything asserted here is a field landform either did not
+# exercise (a committed consumes edge, empty_commit, combine, a multi-layer
+# contract, internal_id_parameter=None) or exercised in only one way.
+
+assert _WATER.step_id == "water"
+assert _WATER.generate == "water_survey_areas.identify_water_survey_areas", (
+    f"ONE entry point, ONE zone list -- both survey types come back from the "
+    f"same call with survey_type on each zone: {_WATER.generate!r}"
+)
+assert _WATER.produces == ("water_zones", "selected_water_zone"), _WATER.produces
+assert _WATER.user_inputs == (), (
+    "selecting a survey zone collects no extra parameter -- the selection IS "
+    "the user's input"
+)
+assert _WATER.proposal_collection == "survey_zones", (
+    "the reopen restore finds this step's proposals by the key the REGISTRY "
+    "names"
+)
+
+_water_consumed = {c.name: c for c in _WATER.consumes}
+assert set(_water_consumed) == {
+    "boundary_coordinates",
+    "dem",
+    "boundary_polygon_utm",
+    "canopy_height",
+    "existing_roads",
+    "soil_inputs",
+    "production_areas",
+}, f"water's consumes set: {sorted(_water_consumed)}"
+assert all(c.why for c in _WATER.consumes), (
+    "every consumes edge carries its own reason"
+)
+
+# THE COMMITTED EDGE -- the first in the table, and the reason this step can
+# refuse to generate at all.
+_production = _water_consumed["production_areas"]
+assert _production.source == step_registry.SOURCE_COMMITTED
+assert _production.from_step == "landform"
+assert _production.forward_as == "production_areas"
+assert _production.rehydrate == "wire_translation.rehydrate_production_zones"
+assert _production.empty_commit is None, (
+    "landform's rehydrator returns [] for an empty commit and [] already "
+    "means 'checked, no production ground' to every consumer of "
+    "production_areas= -- so this edge declares no sentinel, which is a "
+    "CLAIM about that rehydrator rather than a gap"
+)
+assert _WATER.upstream_steps() == ("landform",), _WATER.upstream_steps()
+
+# UNLIKE LANDFORM, this entry point takes a boundary_polygon_utm override, so
+# the edge forwards instead of recording a dependency it cannot pass.
+assert _water_consumed["boundary_polygon_utm"].forward_as == "boundary_polygon_utm"
+assert _water_consumed["existing_roads"].forward_as == "road_exclusion_union_utm", (
+    "the warm-up's road union closes this step's own road fetch"
+)
+
+# `combine` -- the field the second entry earned. cache_path names ONE
+# attribute; soil_inputs is three ParcelData layers assembled all-or-nothing.
+_soil = _water_consumed["soil_inputs"]
+assert _soil.cache_path == "parcel_data"
+assert _soil.combine == "water_survey_areas.soil_inputs_for_parcel_data"
+assert callable(step_registry.resolve(_soil.combine))
+assert all(c.combine is None for c in _LANDFORM.consumes), (
+    "landform needed no combine: every one of its edges is an identity, "
+    "which is why the field did not exist until there was a second entry"
+)
+
+_water_contract = _WATER.commit_contract
+assert len(_water_contract.layers) == 2, (
+    f"a survey zone's TYPE is carried by its layer and a selection spans both "
+    f"types freely: {_water_contract.layers}"
+)
+assert _water_contract.min_features == 0, (
+    "zero committed zones is a real decision ('no water system on this "
+    "parcel') and reaches downstream as the sentinel, never as None"
+)
+assert _water_contract.max_features is None, (
+    "multi-select is the product decision -- a cap here would be the registry "
+    "deciding how many ponds a farm may have"
+)
+assert _water_contract.rehydrate == "wire_translation.rehydrate_water_survey_zones"
+assert _water_contract.internal_id_parameter is None, (
+    "water is SELECT-ONLY: every committable feature is one this pipeline "
+    "generated and it carries its own id, so there is nothing to allocate"
+)
+assert _water_contract.requires_provenance is True
+assert _WATER.post_commit == (), (
+    "the keypoint hook is NOT declared here -- see the entry's own note: it "
+    "reads representative_elevation_m off the selected zone and a union of "
+    "zones has none, so declaring it would make the hook write 'no_feature' "
+    "for a selection the user actually made"
+)
+
+print(
+    f"2b. WATER SHAPE: consumes {len(_WATER.consumes)} values "
+    f"({', '.join(sorted(_water_consumed))}) -- "
+    f"{len([c for c in _WATER.consumes if c.source == step_registry.SOURCE_COMMITTED])} "
+    f"committed, {len([c for c in _WATER.consumes if c.combine])} combined -- "
+    f"forwards {len([c for c in _WATER.consumes if c.forward_as])} of them, "
+    f"produces {_WATER.produces}, and declares a select-only contract "
+    f"({'/'.join(_water_contract.layers)}, >={_water_contract.min_features} "
+    f"features, no ceiling, no internal_id_parameter)."
 )
 
 
@@ -277,6 +385,19 @@ for _failure in _LANDFORM.failure_layers:
         _exception_class, BaseException
     ), f"declared failure {_failure.exception} is not an exception class"
 
+_water_generate = _WATER.resolve_generate()
+assert callable(_water_generate), _water_generate
+_water_payload = _WATER.resolve_payload()
+assert callable(_water_payload)
+assert callable(step_registry.resolve(_WATER.commit_contract.rehydrate))
+assert callable(step_registry.resolve(_production.rehydrate))
+assert callable(step_registry.resolve(_soil.combine))
+for _failure in _WATER.failure_layers:
+    _exception_class = step_registry.resolve(_failure.exception)
+    assert isinstance(_exception_class, type) and issubclass(
+        _exception_class, BaseException
+    ), f"declared failure {_failure.exception} is not an exception class"
+
 _resolve_errors = 0
 for _bad in ("nosuchmodule.thing", "step_registry.no_such_attribute", "bare"):
     try:
@@ -290,7 +411,10 @@ print(
     f"{_generate_target.__name__}), payload ({_payload_target.__module__}."
     f"{_payload_target.__name__}), the inbound rehydrator, and "
     f"{len(_LANDFORM.failure_layers)} declared failure exception classes all "
-    f"resolve; 3 unresolvable paths each raise."
+    f"resolve; 3 unresolvable paths each raise. Water's generate "
+    f"({_water_generate.__module__}.{_water_generate.__name__}), payload "
+    f"({_water_payload.__module__}.{_water_payload.__name__}), both "
+    f"rehydrators and its soil combine all resolve and are callable."
 )
 
 
@@ -311,6 +435,35 @@ for _c in _LANDFORM.consumes:
         f"{sorted(_signature.parameters)}"
     )
 
+_water_signature = inspect.signature(_water_generate)
+for _c in _WATER.consumes:
+    if _c.forward_as is None:
+        continue
+    assert _c.forward_as in _water_signature.parameters, (
+        f"consumed '{_c.name}' forwards as '{_c.forward_as}', which is not a "
+        f"parameter of {_WATER.generate}: {sorted(_water_signature.parameters)}"
+    )
+
+# WATER'S FORWARDED SET against build_pipeline_context()'s own call. Every
+# override the batch path supplies, the session path must supply too --
+# otherwise this generate self-fetches soil, roads or canopy on a path whose
+# whole premise is that it does not touch the network.
+_WATER_BATCH_FORWARDS = {
+    "boundary_coordinates",
+    "dem",
+    "boundary_polygon_utm",
+    "production_areas",
+    "canopy_height",
+    "road_exclusion_union_utm",
+    "soil_inputs",
+}
+_water_forwards = {c.forward_as for c in _WATER.consumes if c.forward_as}
+assert _water_forwards == _WATER_BATCH_FORWARDS, (
+    f"the water entry must forward exactly what build_pipeline_context() "
+    f"forwards into identify_water_survey_areas(): expected "
+    f"{sorted(_WATER_BATCH_FORWARDS)}, got {sorted(_water_forwards)}"
+)
+
 # The forwarded set matches what build_pipeline_context() forwards into this
 # same function. The batch path and the session path are one computation
 # reached two ways (proposal section 2.3), so a divergence here is the two
@@ -326,7 +479,9 @@ assert _registry_forwards == _BATCH_FORWARDS, (
 print(
     f"4. SIGNATURE: every forwarded parameter {sorted(_registry_forwards)} is "
     f"a real parameter of {_LANDFORM.generate}, and the set matches what "
-    f"build_pipeline_context() forwards into it."
+    f"build_pipeline_context() forwards into it. Water's "
+    f"{sorted(_water_forwards)} likewise, against "
+    f"identify_water_survey_areas()."
 )
 
 
@@ -335,9 +490,13 @@ print(
 import production_zone_payload  # noqa: E402  -- after the resolve checks above
 import wire_translation  # noqa: E402
 
-assert _contract.layer == wire_translation.LAYER_PRODUCTION_AREA, (
-    f"the commit contract's layer must be wire_translation's own constant: "
-    f"{_contract.layer!r} vs {wire_translation.LAYER_PRODUCTION_AREA!r}"
+assert _contract.layers == (wire_translation.LAYER_PRODUCTION_AREA,), (
+    f"the commit contract's layers must be wire_translation's own constant: "
+    f"{_contract.layers!r} vs {(wire_translation.LAYER_PRODUCTION_AREA,)!r}"
+)
+assert _WATER.commit_contract.layers == wire_translation.LAYER_SURVEY_ZONES, (
+    f"the water contract's layers must be wire_translation's own pair: "
+    f"{_WATER.commit_contract.layers!r} vs {wire_translation.LAYER_SURVEY_ZONES!r}"
 )
 
 _canopy = next(f for f in _LANDFORM.failure_layers if f.layer == "canopy")
@@ -356,8 +515,10 @@ assert len(_self_describing) == 1 and _self_describing[0].exception == (
 ), "LayerFetchError names its own layer and must be the self-describing row"
 
 print(
-    f"5. CONSTANTS: commit contract layer == wire_translation."
-    f"LAYER_PRODUCTION_AREA ({_contract.layer!r}); the canopy failure pair == "
+    f"5. CONSTANTS: landform's commit layers == (wire_translation."
+    f"LAYER_PRODUCTION_AREA,) ({_contract.layers!r}) and water's == "
+    f"wire_translation.LAYER_SURVEY_ZONES "
+    f"({_WATER.commit_contract.layers!r}); the canopy failure pair == "
     f"production_zone_payload.LAYER_CANOPY {production_zone_payload.LAYER_CANOPY}; "
     f"the generic error is the endpoint's own prose."
 )
@@ -369,7 +530,7 @@ assert step_registry.registered_steps() == tuple(
     s for s in STEP_ORDER if s in step_registry.STEP_REGISTRY
 ), "registered_steps() must FILTER STEP_ORDER, never restate an order"
 
-for _unregistered in ("water", "roads", "trees", "structures", "fencing"):
+for _unregistered in ("roads", "trees", "structures", "fencing"):
     try:
         step_registry.get_step(_unregistered)
     except step_registry.RegistryError as exc:
@@ -386,15 +547,21 @@ except step_registry.RegistryError as exc:
 else:
     raise AssertionError("a step outside STEP_ORDER must be reported as unknown")
 
-assert step_registry.dependents_of("landform") == (), (
-    "nothing registered consumes a landform commit yet -- water is B5b's"
+assert step_registry.dependents_of("landform") == ("water",), (
+    "water consumes landform's commit, and the consumes edge IS the "
+    "invalidation edge -- read off the declaration, never restated"
+)
+assert step_registry.transitive_dependents("landform") == ("water",)
+assert step_registry.dependents_of("water") == (), (
+    "roads and trees consume the water commit, but neither has an entry yet"
 )
 
 print(
     f"6. STEP ORDER: registered_steps() filters design_document.STEP_ORDER "
-    f"{STEP_ORDER} to {step_registry.registered_steps()}; the five "
+    f"{STEP_ORDER} to {step_registry.registered_steps()}; the four "
     f"unregistered steps each report 'no registry entry yet' and a step "
-    f"outside STEP_ORDER reports 'unknown step id'."
+    f"outside STEP_ORDER reports 'unknown step id'. dependents_of('landform') "
+    f"== {step_registry.dependents_of('landform')} off the consumes edge."
 )
 
 

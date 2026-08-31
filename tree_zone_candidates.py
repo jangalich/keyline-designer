@@ -49,15 +49,23 @@ tree zones (a later, separate pass), not the reverse.
             consumed almost everything selection could have freed up --
             swapping in the optimized output is what actually recovers
             the withheld acreage.
-          - the SINGLE selected water-system zone
-            (water_suitability.select_optimal_water_zone()) -- not every
-            water candidate. Per product decision, this app targets small
-            farms only: one well-suited water zone is sufficient, so only
-            that one zone's own geometry counts as "claimed." BUFFERED by
-            TREE_ZONE_WATER_BUFFER_METERS (same plain shapely.buffer()
+          - the UNION OF THE SELECTED water-system zones -- not every
+            water candidate. SUPERSEDED PRODUCT DECISION, recorded because
+            this paragraph used to state the opposite: the app once
+            targeted "one well-suited water zone is sufficient" and passed
+            a single rank-1 zone. The water step is now SELECT-ONLY and
+            MULTI-SELECT -- a user may choose any number of survey zones,
+            across both survey types, or none -- and every zone they chose
+            is claimed ground. So `selected_water_zone` carries ONE
+            zone-shaped value whose render_fill_polygon_utm is the union of
+            the selection (wire_translation.water_zone_union()), and this
+            function is unchanged by that: it reads that one field and
+            unions it into water_polygons_utm exactly as before. BUFFERED
+            by TREE_ZONE_WATER_BUFFER_METERS (same plain shapely.buffer()
             mechanism as production's own buffer just above, around its
             render_fill_polygon_utm) before being subtracted, same
-            zero-clearance reasoning.
+            zero-clearance reasoning -- the buffer is applied to the union,
+            which is why the union carries no buffer of its own.
           - the road NETWORK (road_corridors.build_road_network()'s own
             full, possibly-multi-branch network -- a trunk plus spur(s),
             not a single selected route) -- one network per property, same

@@ -142,6 +142,10 @@ class Consumed:
                 own empty answer already says it. See EMPTY IS AN ANSWER
                 below -- this field is the whole of how a "committed
                 nothing" decision survives the trip to a consumer.
+    combine     the dotted path of a function from the RESOLVED SOURCE VALUE
+                to the shape this override actually takes, or None when the
+                source value already is that shape. See ONE SOURCE, ANOTHER
+                SHAPE below.
     forward_as  the entry point's PARAMETER NAME for this value, or None.
 
     EMPTY IS AN ANSWER, AND MOST OVERRIDES CANNOT SAY IT. Every KSOP entry
@@ -168,6 +172,36 @@ class Consumed:
     answer is already explicit" -- not a gap, and the resolver enforces it
     by never substituting None of its own.
 
+    ONE SOURCE, ANOTHER SHAPE -- `combine`, AND THE SECOND ENTRY IS WHAT
+    EARNED IT. Landform needed none: what the cache holds and what the
+    rehydrator returns are already exactly what identify_optimized_
+    production_areas() takes, so the edge was an identity and the table did
+    not have to say so. The water entry has two edges that are not, for two
+    different reasons, and both are declarations about SHAPE rather than
+    about computation:
+
+      MANY COMMITTED FEATURES, ONE OVERRIDE VALUE. The water step commits a
+      SET of selected survey zones, and every `selected_water_zone=`
+      consumer takes ONE zone. The rehydrator returns the list (it must --
+      the commit gate checks the features one at a time and the document
+      records all of them), and `combine` names the reduction to the single
+      unioned value the override wants: wire_translation.water_zone_union.
+
+      ONE CACHE FIELD, A COMPOSITE OVERRIDE. `soil_inputs` is three
+      ParcelData layers assembled into one dict, and only when ALL THREE are
+      present -- a rule that is the water scorer's own all-or-nothing soil
+      posture, not the cache's. `cache_path` names ONE attribute path by
+      design (a composite path would be a small expression language in a
+      table); `combine` names the function that assembles the override from
+      the object that path resolves to.
+
+    WHAT `combine` MAY NOT BE is a place to compute. It is applied to a
+    value the resolvers already produced and its result is handed straight
+    to the entry point, so a target that fetches, rasterises, or decides
+    anything would be moving a step's work into the table's edges, where the
+    cascade cannot see it and no test of the step's generate would cover it.
+    Both targets above are a union and a dict literal.
+
     forward_as=None IS A REAL CASE, not a placeholder. A value can be a
     genuine input to the computation -- and therefore a genuine invalidation
     edge -- while the entry point derives it internally and exposes no
@@ -187,6 +221,7 @@ class Consumed:
     from_step: Optional[str] = None
     rehydrate: Optional[str] = None
     empty_commit: Optional[str] = None
+    combine: Optional[str] = None
     why: str = ""
 
 
@@ -295,8 +330,20 @@ class CommitContract:
     overlaps the hydric, canopy, slope, roads or setback mask is VALID, and
     the crossing is written into the document alongside the feature.
 
-    layer            the feature_schema layer name the committed
-                     FeatureCollection's features must carry.
+    layers           the feature_schema layer name(s) a committed feature
+                     may carry. A TUPLE, and the water entry is what earned
+                     the plural: landform commits one layer
+                     ("production_area_candidate") and this was a bare
+                     string, but a water survey zone's TYPE is carried BY
+                     ITS LAYER -- survey_zone_embankment and
+                     survey_zone_excavated -- and a selection spans both
+                     types freely, which is the product decision this step
+                     exists to serve. Collapsing the two onto one layer to
+                     fit a scalar field would delete the distinction the
+                     frontend styles on; a per-step "and also this other
+                     layer" escape hatch would be the same tuple with a
+                     worse name. Same shape and same reasoning as
+                     geometry_types below.
     geometry_types   permitted GeoJSON geometry types.
     min_features     the floor. ZERO for every step, and load-bearing: a
                      committed-empty step is a real decision ("nothing goes
@@ -321,7 +368,7 @@ class CommitContract:
                      design_document.PROVENANCE_VALUES classification.
     """
 
-    layer: str
+    layers: tuple
     geometry_types: tuple
     min_features: int
     max_features: Optional[int]
@@ -528,7 +575,7 @@ LANDFORM = StepDefinition(
         # imported for the reason in the module docstring -- this table
         # imports nothing from the pipeline -- and asserted equal to the
         # constant in test_step_registry.py so the two cannot drift.
-        layer="production_area_candidate",
+        layers=("production_area_candidate",),
         # A drawn zone with a hole, or a zone the disc opening severed into
         # two lobes, are both real and both arrive as MultiPolygon.
         geometry_types=("Polygon", "MultiPolygon"),
@@ -596,8 +643,230 @@ LANDFORM = StepDefinition(
 )
 
 
+WATER = StepDefinition(
+    step_id="water",
+    consumes=(
+        # SEVEN EDGES: six off the cache, one off landform's commit. The
+        # first four below are landform's own, at the same values; the next
+        # two (roads, soil) are this step's alone; the last is the committed
+        # one. Every override identify_water_survey_areas() does not get, it
+        # FETCHES -- so the six cache edges are not conveniences, they are
+        # what keeps a repeatable generate off the network.
+        #
+        # The four shared ones, first. Unlike landform, this step's entry
+        # point exposes a real boundary_polygon_utm= override, so that edge
+        # forwards rather than recording a dependency it cannot pass (see
+        # Consumed.forward_as).
+        Consumed(
+            name="boundary_coordinates",
+            source=SOURCE_CACHE,
+            cache_path="boundary",
+            forward_as="boundary_coordinates",
+            why=(
+                "The parcel ring the suitability surfaces are computed over, "
+                "read off the context for landform's reason: a rebuilt "
+                "context and a warm one supply the identical value."
+            ),
+        ),
+        Consumed(
+            name="dem",
+            source=SOURCE_CACHE,
+            cache_path="dem",
+            forward_as="dem",
+            why=(
+                "ParcelData's already-fetched elevation grid. Omitted, the "
+                "entry point calls get_dem_for_boundary() itself -- a 3DEP "
+                "raster fetch, on every regenerate."
+            ),
+        ),
+        Consumed(
+            name="boundary_polygon_utm",
+            source=SOURCE_CACHE,
+            cache_path="boundary_polygon_utm",
+            forward_as="boundary_polygon_utm",
+            why=(
+                "FORWARDED HERE, unlike landform's identically-named edge: "
+                "identify_water_survey_areas() takes this override, and "
+                "rebuilding it from boundary_coordinates against dem['crs'] "
+                "would re-derive a polygon ParcelData already holds. It is "
+                "also the polygon the gate mask, the parcel-relative TWI "
+                "population and every envelope clip are measured against, so "
+                "supplying the cache's own copy is what keeps this step's "
+                "geometry identical to the exclusion masks' next door."
+            ),
+        ),
+        Consumed(
+            name="canopy_height",
+            source=SOURCE_CACHE,
+            cache_path="parcel_data.canopy_height",
+            forward_as="canopy_height",
+            why=(
+                "ParcelData's already-fetched HAG layer. LOAD-BEARING here in "
+                "a way it is not for landform: this step's canopy posture is "
+                "FETCH-OR-RAISE (get_required_tree_root_zone_mask_utm at the "
+                "water canopy buffer), so without the override every "
+                "generate issues a Planetary Computer fetch and a coverage "
+                "gap becomes a failed generate rather than a measured "
+                "overlap."
+            ),
+        ),
+        Consumed(
+            name="existing_roads",
+            source=SOURCE_CACHE,
+            cache_path="existing_roads",
+            forward_as="road_exclusion_union_utm",
+            why=(
+                "The road exclusion union the terrain warm-up already built "
+                "from ParcelData's own rows and handed to the exclusion gate "
+                "-- exactly what build_pipeline_context() forwards, at the "
+                "same buffer. Closes this step's own road fetch. A REAL None "
+                "is meaningful and is forwarded as itself: the entry point "
+                "distinguishes 'not supplied' (its own sentinel default, "
+                "which triggers the fetch) from None ('checked, genuinely no "
+                "mapped road'), and the warm-up's None is the second."
+            ),
+        ),
+        Consumed(
+            name="soil_inputs",
+            source=SOURCE_CACHE,
+            cache_path="parcel_data",
+            combine="water_survey_areas.soil_inputs_for_parcel_data",
+            forward_as="soil_inputs",
+            why=(
+                "The soil trio -- ksat rows, component rows carrying hydgrp, "
+                "clipped map-unit geometry -- assembled into the one override "
+                "the scorer takes, ALL THREE OR NONE. Fetched once behind "
+                "ParcelData's hard-fail contract, so forwarding it is what "
+                "keeps this generate network-free; without it the entry point "
+                "runs its own standalone whole-boundary soil fetch on every "
+                "regenerate. The all-or-nothing rule is the water scorer's "
+                "own and lives with it (see the combine target), not in this "
+                "table and not in the cache."
+            ),
+        ),
+        Consumed(
+            name="production_areas",
+            source=SOURCE_COMMITTED,
+            from_step="landform",
+            rehydrate="wire_translation.rehydrate_production_zones",
+            forward_as="production_areas",
+            why=(
+                "THE FIRST COMMITTED EDGE IN THIS TABLE, and the reason the "
+                "water step cannot be generated before landform is committed. "
+                "The production ground a pond site is judged against -- "
+                "production_overlap_pct, the gravity relationships, "
+                "served_production_area_ids -- must be the ground the USER "
+                "chose, not the optimiser's own answer. The entry point's "
+                "None path re-runs identify_optimized_production_areas() and "
+                "sites water against zones the user may have rejected, which "
+                "is precisely the plausible-wrong-answer failure "
+                "UpstreamNotCommittedError exists to refuse. "
+                "build_pipeline_context() forwards scored_patches into this "
+                "same parameter; the rehydrated commit is the same shape, "
+                "with each selected proposal keeping its own pipeline id so "
+                "served_production_area_ids still names something."
+            ),
+        ),
+    ),
+    generate="water_survey_areas.identify_water_survey_areas",
+    payload="step_orchestrator.build_water_payload",
+    # ONE ENTRY POINT, ONE ZONE LIST. Both survey types come back from the
+    # single call with `survey_type` on each zone; SURVEY_TYPES drives the
+    # per-type logic inside the module. This is deliberately NOT two generate
+    # targets: the two surfaces share the gate mask, the soil scorer and the
+    # derived screens, and cross_type_overlaps is an agreement report BETWEEN
+    # them that only exists because one call sees both.
+    proposal_collection="survey_zones",
+    produces=(
+        # PipelineContext's own field names, as landform's are. water_zones is
+        # the flagged-not-filtered zone+member FeatureCollection's features;
+        # selected_water_zone is the one value downstream overrides take --
+        # here the UNION of the user's selection rather than the batch path's
+        # pooled rank-1 pick.
+        "water_zones",
+        "selected_water_zone",
+    ),
+    commit_contract=CommitContract(
+        # BOTH ZONE LAYERS. wire_translation.LAYER_SURVEY_ZONES, spelled out
+        # rather than imported (this table imports nothing from the pipeline)
+        # and asserted equal to that constant in test_step_registry.py. The
+        # member and dropped layers are absent on purpose: a member footprint
+        # is a sub-feature of a zone and a dropped zone is below the acreage
+        # floor, so neither is selectable and a commit carrying one is
+        # rejected by name.
+        layers=("survey_zone_embankment", "survey_zone_excavated"),
+        # A zone envelope is a convex hull clipped to the parcel, so a
+        # concave-boundary parcel can cut one into several pieces.
+        geometry_types=("Polygon", "MultiPolygon"),
+        # ZERO IS A DECISION -- "no water system on this parcel" -- and this
+        # is the step where that stops being theoretical. It reaches the five
+        # downstream consumers as the empty_commit sentinel below, never as
+        # None. See CommitContract.min_features and Consumed.empty_commit.
+        min_features=0,
+        # NO CEILING. Multi-select is the product decision: a user may select
+        # any number of zones across both types, and downstream consumes the
+        # union of them. A cap here would be this table deciding how many
+        # ponds a farm may have.
+        max_features=None,
+        rehydrate="wire_translation.rehydrate_water_survey_zones",
+        # NONE, and the contrast with landform is the whole story of this
+        # step. internal_id_parameter exists because a DRAWN zone has no
+        # pipeline id and the commit path must allocate one. Water is
+        # SELECT-ONLY: every committable feature is one this pipeline
+        # generated and handed to the client, carrying its own
+        # "water-survey-zone-<n>". So there is nothing to allocate, and the
+        # rehydrator refuses a feature whose id does not parse rather than
+        # inventing one -- an invented id would be a survey recommendation
+        # for ground no suitability surface ever nominated.
+        internal_id_parameter=None,
+        # STILL REQUIRED, even though every zone is generated. The
+        # classification is the user's own statement about what a feature is,
+        # and a commit that omits it is a client that has stopped saying --
+        # which is exactly when a drawn shape could start arriving unnoticed
+        # if this step ever gains an editor.
+        requires_provenance=True,
+    ),
+    # NONE. Selecting a survey zone collects no extra parameter: the
+    # suitability surfaces are computed over the whole parcel and the user's
+    # input IS the selection.
+    user_inputs=(),
+    # NO POST-COMMIT HOOK, AND THIS IS A REPORTED GAP RATHER THAN AN
+    # OVERSIGHT. attach_keypoint_relationships (declared by landform) writes
+    # each keypoint's distance and elevation differential to the selected
+    # water zone, and it reads representative_elevation_m off that zone. The
+    # value forwarded here is a UNION of the selected zones, which has no
+    # single representative elevation -- the honest answer is per-keypoint,
+    # against the NEAREST selected zone, and that is a change to
+    # pipeline_context._attach_keypoint_feature_relationships()'s signature
+    # and to what the BATCH pipeline means by the keypoint water
+    # relationship. Declaring the hook here without that change would make it
+    # re-run after a real water commit and write "no_feature" for a selection
+    # the user actually made, turning a truthful answer into a false one. So
+    # the hook stays on landform alone and the water half of every keypoint
+    # relationship keeps reading "no_feature", exactly as it does today.
+    post_commit=(),
+    failure_layers=(
+        # Canopy is MANDATORY on this path too, and for a stronger reason
+        # than landform's: canopy_overlap_pct is one of the three sentinel
+        # measurements every zone carries, and its None/0.0 split ("never
+        # checked" vs "checked and genuinely none") is only meaningful
+        # because the mask is fetch-or-RAISE. Degrading here would print "no
+        # trees on this pond site" for ground nobody looked at. The pair is
+        # production_zone_payload.LAYER_CANOPY, asserted equal to that
+        # constant in test_step_registry.py.
+        LayerFailure(
+            exception="canopy_height_data.CanopyCoverageIncompleteError",
+            layer="canopy",
+            label="tree canopy height",
+        ),
+    ),
+    generic_error="Water survey areas could not be generated.",
+)
+
+
 STEP_REGISTRY = {
     LANDFORM.step_id: LANDFORM,
+    WATER.step_id: WATER,
 }
 
 
@@ -791,8 +1060,14 @@ def validate_registry() -> None:
                 raise RegistryError(f"{where} declares a post-commit hook with no target")
 
         contract = definition.commit_contract
-        if not contract.layer:
+        if not contract.layers:
             raise RegistryError(f"{where}'s commit contract names no layer")
+        if isinstance(contract.layers, str):
+            raise RegistryError(
+                f"{where}'s commit contract declares layers as a bare string "
+                f"{contract.layers!r}; it is a TUPLE of layer names, and a "
+                f"string would be iterated one character at a time"
+            )
         if not contract.geometry_types:
             raise RegistryError(
                 f"{where}'s commit contract permits no geometry type, so no "

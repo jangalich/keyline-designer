@@ -1101,11 +1101,43 @@ with Harness() as h:
 
     # A REAL step whose registry entry is not written yet. Same status --
     # this URL names no resource either -- but the message tells them apart,
-    # which is get_step()'s own contract.
-    unregistered = c.generate(session_id, step_id="water")
+    # which is get_step()'s own contract. "roads", not "water": water HAS an
+    # entry as of the water branch, and asks a different question of this
+    # surface -- see the 409 below.
+    unregistered = c.generate(session_id, step_id="roads")
     assert unregistered.status_code == 404, unregistered.get_json()
     assert "no registry entry yet" in unregistered.get_json()["error"], (
         unregistered.get_json()
+    )
+
+    # A REGISTERED step whose UPSTREAM COMMIT IS NOT THERE: 409, and the
+    # request never became a job.
+    #
+    # THE HTTP HALF OF B7'S FIX, asserted here because here is where it was
+    # visible as wrong. UpstreamNotCommittedError is raised inside
+    # assemble_consumes(), which runs on the JOB'S THREAD -- so this used to
+    # come back 202 with a job id, and the failure the client then polled for
+    # was the water step's generic "Water survey areas could not be
+    # generated": the parcel's data failed, when the truth was "commit
+    # landform first". step_orchestrator.generate_step() now resolves the
+    # committed edges synchronously before submitting, so the answer arrives
+    # as the status code with the upstream step named in the body.
+    #
+    # landform is COMMITTED by this point in the section, so water is asked
+    # for on a fresh session where it is not.
+    fresh = c.create()
+    fresh_id = fresh.get_json()["session_id"]
+    uncommitted_upstream = c.generate(fresh_id, step_id="water")
+    assert uncommitted_upstream.status_code == 409, (
+        uncommitted_upstream.status_code, uncommitted_upstream.get_json()
+    )
+    upstream_body = uncommitted_upstream.get_json()
+    assert upstream_body["step_id"] == "water"
+    assert upstream_body["upstream_step"] == "landform"
+    assert upstream_body["upstream_status"] == "not_started", upstream_body
+    assert "job_id" not in upstream_body, (
+        "a 409 must not carry a job id -- no work was accepted, so nothing "
+        "should be pollable"
     )
 
     unknown_job = c.job("not-a-job-id")
@@ -1181,7 +1213,13 @@ with Harness() as h:
 print(
     f"9. 404s AND REJECTED INPUT: an unknown session is 404 on all five verbs; "
     f"an unknown step id ('orchard') is 404 and a REGISTERED-BUT-UNWRITTEN one "
-    f"('water') is 404 with a different message; an unknown job id is 404. "
+    f"('roads') is 404 with a different message; an unknown job id is 404. "
+    f"A REGISTERED step whose upstream commit is missing (water, before "
+    f"landform) is {uncommitted_upstream.status_code} naming "
+    f"'{upstream_body['upstream_step']}' at status "
+    f"'{upstream_body['upstream_status']}' -- with NO job id, because "
+    f"generate_step() resolves the committed edges before it submits rather "
+    f"than on the job's thread. "
     f"Undeclared params are a 400 with NO job id, a collinear boundary is 400, "
     f"a commit missing base_revision is 400, and reopening an uncommitted step "
     f"is 409. A commit body with no 'features' at all, and one whose features "

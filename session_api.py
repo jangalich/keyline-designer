@@ -261,20 +261,19 @@ _API_ERRORS = (
     (commit_validation.CommitRejectedError, 422, _rejection_payload),
     # --- 409: the request is fine, the session's state is not -----------
     (design_document.RevisionConflictError, 409, _conflict_payload),
-    # WHERE THIS ONE CAN AND CANNOT REACH A CLIENT, because the difference is
-    # not this table's to fix. assemble_consumes() raises it, and the two
-    # callers of that sit on opposite sides of the async boundary:
-    # step_payload() is synchronous, so GET .../layers answers 409 naming the
-    # upstream step; run_generate() is on the JOB'S THREAD, so a generate
-    # whose upstream commit is missing becomes a failed job carrying the
-    # step's generic error rather than this 409. That is the orchestrator's
-    # own posture (generate_step() validates the step and the params before
-    # submitting, and nothing else), and pre-checking it here would mean a
-    # route re-deriving which upstream commits a step needs -- a second
-    # opinion about the consumes edges, kept in a place that cannot see the
-    # registry's cascade. It is reported rather than patched over. No
-    # registered step consumes a commit today, so nothing hits it yet; the
-    # water entry is when it starts to matter.
+    # REACHES A CLIENT FROM BOTH VERBS NOW. step_payload() is synchronous, so
+    # GET .../layers has always answered 409 naming the upstream step. POST
+    # .../generate used to NOT: assemble_consumes() raises this on the job's
+    # thread, so a generate whose upstream commit was missing became a failed
+    # job carrying the step's generic error -- "Water survey areas could not
+    # be generated", which says the parcel's data failed when the truth was
+    # "commit landform first". step_orchestrator.generate_step() now resolves
+    # the committed edges BEFORE it submits, through the registry's own walk
+    # (check_upstream_commits), so the 409 arrives with no job id issued. The
+    # fix is the orchestrator's and not this table's, for the reason it always
+    # was: a route pre-checking it here would be re-deriving which upstream
+    # commits a step needs, a second opinion about the consumes edges kept
+    # where the registry's cascade cannot see it.
     (step_orchestrator.UpstreamNotCommittedError, 409, _upstream_payload),
     (step_orchestrator.StepNotGeneratedError, 409, _not_generated_payload),
     # SchemaVersionError -> 409. THE CHOICE, and the reasoning:
