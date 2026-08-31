@@ -123,15 +123,44 @@ def _resolve_from_cache(definition, consumed, context, document):
     properties over ParcelData; `parcel_data.canopy_height` walks one level
     in. operator.attrgetter handles both, so the registry can name any of
     them without this function enumerating them.
+
+    Then the edge's declared `combine`, when it has one -- see _combined().
+    Water's `soil_inputs` reaches its override that way: the cache holds the
+    three soil layers on ParcelData and the entry point takes one dict
+    assembled from them.
     """
     try:
-        return operator.attrgetter(consumed.cache_path)(context)
+        value = operator.attrgetter(consumed.cache_path)(context)
     except AttributeError as exc:
         raise StepOrchestrationError(
             f"consumed '{consumed.name}' declares cache_path "
             f"'{consumed.cache_path}', which the session context does not "
             f"have: {exc}"
         ) from None
+    return _combined(consumed, value)
+
+
+def _combined(consumed, value):
+    """
+    The edge's declared `combine` applied to a resolved value, or the value
+    unchanged when it declares none.
+
+    ONE FUNCTION FOR BOTH SOURCES because it is one statement about the edge
+    -- "the shape the override takes is this function of the shape the source
+    holds" -- and it is true of a cache read and of a rehydrated commit alike.
+    See step_registry.Consumed's ONE SOURCE, ANOTHER SHAPE note for what may
+    and may not be declared here.
+
+    APPLIED ON EVERY READ, INCLUDING A CACHE HIT, and that is deliberate: the
+    committed cache holds the REHYDRATION (what the commit gate already paid
+    for), not the combination, so a hit and a miss go through the same
+    reduction and cannot answer differently. The reductions are a shapely
+    union and a dict literal; caching either would be caching something
+    cheaper to recompute than to key correctly.
+    """
+    if not consumed.combine:
+        return value
+    return step_registry.resolve(consumed.combine)(value)
 
 
 class UpstreamNotCommittedError(StepOrchestrationError):
@@ -170,6 +199,48 @@ class UpstreamNotCommittedError(StepOrchestrationError):
         )
 
 
+def committed_entry_or_refuse(definition, consumed, document):
+    """
+    The document entry behind one committed consumes edge, or
+    UpstreamNotCommittedError.
+
+    A DOCUMENT READ AND NOTHING ELSE -- no context, no rehydration, no
+    network. Split out because the question "is the upstream commit there"
+    has TWO askers now and they must not answer differently: the consumes
+    resolver below asks it on its way to a value, and generate_step() asks it
+    BEFORE it creates a job, so a client gets a 409 naming the upstream step
+    instead of a failed job carrying this step's generic error. One
+    implementation, so the pre-check cannot drift from the resolver it is
+    pre-checking.
+    """
+    entry = document["steps"][consumed.from_step]
+    if entry["status"] != design_document.STATUS_COMMITTED:
+        raise UpstreamNotCommittedError(
+            step_id=definition.step_id,
+            upstream_step=consumed.from_step,
+            upstream_status=entry["status"],
+            name=consumed.name,
+        )
+    return entry
+
+
+def check_upstream_commits(definition, document) -> None:
+    """
+    Every committed consumes edge this step declares, checked against the
+    document in declaration order. Raises UpstreamNotCommittedError on the
+    first one that is not committed; returns None when they all are.
+
+    THE REGISTRY'S OWN EDGES, WALKED, not a list of upstream steps written
+    down somewhere a route can read. There is exactly one place that says
+    what water needs from landform and it is the water entry's `consumes`;
+    anything else is a second opinion that can go stale the day an edge is
+    added.
+    """
+    for consumed in definition.consumes:
+        if consumed.source == step_registry.SOURCE_COMMITTED:
+            committed_entry_or_refuse(definition, consumed, document)
+
+
 def _resolve_from_committed(definition, consumed, context, document):
     """
     A committed upstream step's features, read off the document and put
@@ -188,6 +259,7 @@ def _resolve_from_committed(definition, consumed, context, document):
 
       COMMITTED WITH ZERO FEATURES -> the declared `empty_commit` sentinel if
         the consumer has one, and otherwise the rehydrator's own empty answer.
+        DECIDED BEFORE THE CACHE IS CONSULTED -- see committed_value().
         NEVER None, under any circumstance. An empty commit is a DECISION
         ("nothing goes here"), None is every consumer's "not supplied, go
         compute it", and collapsing the first into the second is what turns
@@ -196,15 +268,7 @@ def _resolve_from_committed(definition, consumed, context, document):
         AN ANSWER note for the full argument and for how a step declares its
         sentinel.
     """
-    entry = document["steps"][consumed.from_step]
-    if entry["status"] != design_document.STATUS_COMMITTED:
-        raise UpstreamNotCommittedError(
-            step_id=definition.step_id,
-            upstream_step=consumed.from_step,
-            upstream_status=entry["status"],
-            name=consumed.name,
-        )
-
+    committed_entry_or_refuse(definition, consumed, document)
     return committed_value(consumed, context, document)
 
 
@@ -220,11 +284,6 @@ def committed_value(consumed, context, document):
     step_id = consumed.from_step
     entry = document["steps"][step_id]
     revision = entry.get("revision", 0)
-
-    cached = context.step_committed.get(step_id)
-    if cached is not None and cached["revision"] == revision:
-        return cached["value"]
-
     features = entry["features"]
     provenance = entry.get("provenance", {})
     contract = step_registry.get_step(step_id).commit_contract
@@ -233,13 +292,30 @@ def committed_value(consumed, context, document):
         # THE SENTINEL, or the rehydrator's own explicit empty. Not cached:
         # it is a constant-time answer, and caching a sentinel object under a
         # revision key invites someone to mutate it.
+        #
+        # AHEAD OF THE CACHE READ, AND THAT ORDERING IS THE WHOLE OF WHETHER
+        # THE SENTINEL WORKS. commit_step() writes the gate's rehydrated list
+        # into step_committed under the new revision, and for a commit of
+        # ZERO features that list is []. Consulting the cache first would
+        # therefore serve [] for every read until the context happened to be
+        # evicted -- the sentinel would fire only on a cold cache, which is
+        # the worst possible shape for a value whose entire job is to stop
+        # five consumers re-running the water pipeline. The comment above
+        # already said this answer is not cached; this is where that stops
+        # being true only by accident.
         if consumed.empty_commit:
             return step_registry.resolve(consumed.empty_commit)
-        return step_registry.resolve(contract.rehydrate)(features, context.dem)
+        return _combined(
+            consumed, step_registry.resolve(contract.rehydrate)(features, context.dem)
+        )
+
+    cached = context.step_committed.get(step_id)
+    if cached is not None and cached["revision"] == revision:
+        return _combined(consumed, cached["value"])
 
     value = _rehydrate_committed(features, provenance, contract, context.dem)
     context.step_committed[step_id] = {"revision": revision, "value": value}
-    return value
+    return _combined(consumed, value)
 
 
 def _rehydrate_committed(features, provenance, contract, dem):
@@ -403,13 +479,41 @@ def generate_step(
 
     The two failure classes are deliberately different:
 
-      * A step that cannot be generated AT ALL -- unregistered, or params
-        that do not match its declared user_inputs -- raises RIGHT HERE, from
-        this call, before a job exists. There is nothing to poll for; the
-        request was wrong, and an HTTP layer turns this into a 400/404.
+      * A step that cannot be generated AT ALL -- unregistered, params that
+        do not match its declared user_inputs, or an UPSTREAM COMMIT THAT IS
+        NOT THERE -- raises RIGHT HERE, from this call, before a job exists.
+        There is nothing to poll for; the request was wrong, and an HTTP
+        layer turns this into a 400/404/409.
       * Anything that goes wrong DURING the generate becomes the job's
         `failed` state with the error payload above. The caller already holds
         a job id and finds out by asking.
+
+    WHY THE UPSTREAM CHECK MOVED IN FRONT OF THE JOB. assemble_consumes()
+    raises UpstreamNotCommittedError, and it runs on the job's thread -- so a
+    water generate asked for before landform was committed used to become a
+    FAILED JOB carrying the water step's generic "Water survey areas could
+    not be generated." The client would be told the parcel's data failed,
+    when in fact the request was answerable and the answer was "go commit
+    landform first" -- the one thing UpstreamNotCommittedError carries and
+    the generic error throws away. Nothing hit it while landform was the only
+    entry, because landform consumes no commit; water is the first step that
+    does.
+
+    So the committed edges are resolved SYNCHRONOUSLY, here, through the
+    registry's own walk (check_upstream_commits) rather than a second opinion
+    assembled in a route. It costs one document read and no network -- an
+    upstream step's status is a field on a document this process is about to
+    load anyway -- and a 409 before a job id is issued is the honest answer:
+    no work was accepted, so none should be reported as accepted.
+
+    TWO THINGS IT DELIBERATELY DOES NOT DO. It does not read the document at
+    all for a step with no committed edges (landform), because there would be
+    nothing to ask of it. And it lets the store's own failures -- an unknown
+    session, an unreadable file -- fall through to the job exactly as before,
+    rather than converting them here: those are not statements about upstream
+    steps, test_step_orchestrator.py asserts that an unknown session_id fails
+    INSIDE the job, and the HTTP layer already asks store.get() for itself so
+    a stale bookmark still gets its 404 (session_api.generate_step_endpoint).
 
     A caller that wants the result synchronously calls
     `generate_step(...).wait()` and reads `.result["payload"]`. That is what
@@ -417,6 +521,19 @@ def generate_step(
     """
     definition = step_registry.get_step(step_id)
     validated_params = validate_params(definition, params)
+
+    if definition.upstream_steps():
+        try:
+            document = store.get(session_id)
+        except Exception:
+            # See the docstring's TWO THINGS: the store's failures stay the
+            # job's. Swallowed only for the purpose of skipping a check that
+            # has no document to run against -- the same store call is made
+            # again on the job's thread and raises there.
+            document = None
+        if document is not None:
+            check_upstream_commits(definition, document)
+
     # `is None`, never `or`: JobRunner defines __len__, so a caller-supplied
     # runner holding no jobs is FALSY and `or` would silently swap in the
     # process-wide default on exactly the first submission of a fresh
@@ -740,6 +857,85 @@ def build_landform_payload(result: dict, assembled: dict) -> dict:
     )
 
 
+def build_water_payload(result: dict, assembled: dict) -> dict:
+    """
+    The water step's wire payload: the survey zones the user selects from,
+    plus the step-level block the panel reads.
+
+    TWO SOURCES, WHICH IS production_zone_payload.assemble_production_zone_
+    payload()'S OWN SPLIT AND NOT A NEW ONE. That assembler -- the established
+    precedent for this shape -- takes its per-feature values off the feature
+    properties the pipeline already built, and its step-level values
+    (`scales`, the parcel aggregates in `summary`) off build_narrative_data().
+    Water's two halves are the same two:
+
+      PER-FEATURE -> water_survey_areas._zone_feature_properties(), described
+        by its own docstring as the full measurement contract every feature
+        carries, and already on every feature of the result's zones_geojson.
+      STEP-LEVEL -> water_survey_areas.build_narrative_data(), already
+        computed by the entry point and carried on the result.
+
+    WHERE IT DIFFERS FROM THE PRODUCTION ASSEMBLER, and why the difference is
+    the pipeline's rather than this function's: production's map geometry is
+    the render-fill OPENING of its wire geometry, so that assembler has to
+    swap the geometry of every feature and drop the zones whose opening came
+    back empty. A survey zone's envelope and its render fill are ONE OBJECT
+    (water_survey_areas.build_survey_zones()), so there is nothing to swap
+    and nothing that can vanish. This function therefore carries the
+    collection through unchanged rather than rebuilding it -- the difference
+    is that water has no second geometry, not that water is being assembled
+    more loosely.
+
+    NOTHING IS RECOMPUTED, COERCED OR DEFAULTED HERE, and for this step that
+    is a hard requirement rather than tidiness:
+
+      * THE OVERLAP SENTINELS. canopy_overlap_pct, road_overlap_pct and
+        production_overlap_pct each use None for "never checked" and 0.0 for
+        "checked and genuinely none". The frontend renders an em-dash for
+        null precisely so the second never prints as the first. A `or 0.0`
+        anywhere on this path would erase a measurement's absence.
+      * cross_type_overlaps. The agreement report between the two survey
+        instruments, computed at GENERATE time against the SURVIVING zones.
+        It is a finding about the ground, not about the selection, so it is
+        not recomputed against a commit set and does not change when one
+        changes.
+      * MEMBERS RIDE AS THEIR OWN FEATURES on survey_zone_member_<type>,
+        beside the zone envelopes on survey_zone_<type>, exactly as the
+        entry point built them. The frontend styles on survey_type, which is
+        carried both as a property and as the layer name.
+
+    `assembled` is the orchestrator's consumes dict. Unread here -- every
+    value this payload needs is on `result` -- and taken anyway because the
+    payload signature is the registry's, not this step's. The landform
+    builder reads its exclusion half from it; water's entry point already
+    folded its inputs into the result.
+    """
+    narrative = result["narrative_data"]
+    return {
+        # The proposals. Named by the water entry's proposal_collection, which
+        # is what the reopen restore matches committed ids against.
+        "survey_zones": result["zones_geojson"],
+        # The tabular half, as `zones` is for landform: build_narrative_data()
+        # has already reduced every surviving zone to the imperial,
+        # JSON-native block a panel row needs (dual acreage, the criterion
+        # means, the three overlaps with their sentinels intact, the gravity
+        # block, the cross-type finding).
+        "zones": narrative["zones"],
+        # THE STEP-LEVEL BLOCK, whole. Counts per type, the dropped count, the
+        # gate accounting, the threshold and grouping distance the zones were
+        # produced under, the parcel-relative TWI caveat, and soil_checked.
+        # Passed as one object rather than spread into the payload's top level
+        # so the panel reads the same block the report does.
+        "summary": {
+            key: value for key, value in narrative.items() if key != "zones"
+        },
+        # The gate accounting in its native form, beside the narrative's
+        # imperial digest of it -- the same two-representations posture the
+        # landform payload takes with `zones` and `suggested_zones`.
+        "gate_mask_stats": narrative["gates"],
+    }
+
+
 # ======================================================================
 # Post-commit hooks
 # ======================================================================
@@ -771,8 +967,9 @@ def run_post_commit_hooks(definition, context, document) -> tuple:
 def attach_keypoint_relationships(context, document) -> None:
     """
     THE KEYPOINT RELATIONSHIP LAYER, recomputed against what is committed
-    NOW. Declared by the landform entry's post_commit, and by the water
-    entry's when that exists.
+    NOW. Declared by the landform entry's post_commit, and DELIBERATELY NOT
+    by the water entry's -- see THE WATER HALF below, which is a reported gap
+    rather than a step that does not exist yet.
 
     WHAT IT IS. Every keypoint gains a `feature_relationships` dict: distance
     and signed elevation differential to the nearest production area and to
@@ -793,13 +990,29 @@ def attach_keypoint_relationships(context, document) -> None:
 
     IDEMPOTENT. The implementation OVERWRITES kp["feature_relationships"]
     rather than appending to it, so running after the landform commit and
-    again after the water commit and again after a re-commit converges on the
-    same answer each time. That is what makes it safe to declare on two steps.
+    again after a re-commit converges on the same answer each time. That is
+    what would make it safe to declare on a second step.
 
-    THE WATER HALF IS "no_feature" UNTIL THE WATER STEP EXISTS, and that is a
-    truthful answer rather than a placeholder: no water zone has been
-    selected, which is precisely what "no_feature" means -- the same value
-    the batch pipeline produces for a parcel where nothing qualified.
+    THE WATER HALF IS STILL "no_feature", AND THAT IS NOW A KNOWN GAP RATHER
+    THAN A STEP THAT DOES NOT EXIST. The water entry is written and the water
+    step commits a SELECTION of survey zones, which reaches consumers as ONE
+    value whose geometry is the UNION of them
+    (wire_translation.water_zone_union()). But the implementation below reads
+    TWO fields off the selected water zone -- render_fill_polygon_utm for the
+    distance, and representative_elevation_m for the differential -- and a
+    union of several zones has no single representative elevation. The honest
+    answer is per-keypoint, against the NEAREST selected zone, which changes
+    _attach_keypoint_feature_relationships()'s signature and changes what the
+    BATCH pipeline means by the keypoint water relationship; the union
+    deliberately carries no elevation rather than inventing one.
+
+    So the hook stays declared on landform alone. Nothing regressed: the
+    water half reads "no_feature" exactly as it did before the water entry
+    existed. What is NOT true any more is that "no_feature" is a truthful
+    answer -- after a real water commit it is a STALE one, and declaring the
+    hook on the water entry without fixing the elevation question would only
+    make it stale faster. Fixing it is the branch that gives the keypoint
+    layer a per-zone answer.
 
     Resolved late (step_registry.resolve) rather than imported at module
     scope: pipeline_context.py pulls in the whole batch pipeline, and this
@@ -811,15 +1024,14 @@ def attach_keypoint_relationships(context, document) -> None:
     attach(
         context.keypoints,
         committed_internal_value(context, document, "landform") or [],
-        # THE ONE SELECTION THIS HOOK STILL CANNOT READ. The water step
-        # commits a set of candidate zones, and the batch pipeline's
-        # `selected_water_zone` is ONE zone chosen from them -- a narrowing
-        # this commit path has no declaration for, because the water registry
-        # entry that would declare it does not exist yet. None here is
-        # therefore honest: no water step has been committed at all, so there
-        # is no selection to read, and the hook writes "no_feature". The
-        # water entry has to say how its commit names the selected zone
-        # before this can be anything else.
+        # THE ONE SELECTION THIS HOOK STILL CANNOT READ, and the reason is
+        # no longer "the water entry does not exist". It exists, and it says
+        # how its commit reaches a consumer: as the UNION of the selected
+        # zones. What the union cannot supply is the second field the
+        # implementation reads off it, representative_elevation_m -- a union
+        # of three zones has no representative elevation, and putting a
+        # number there would be inventing a measurement of an object no
+        # suitability surface nominated. See this function's docstring.
         None,
     )
 

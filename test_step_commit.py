@@ -1293,12 +1293,17 @@ print(
 
 # --- 12. CASCADE INVALIDATION, AND THE COMMITTED RESOLVER -------------
 #
-# BOTH NEED A SECOND REGISTRY ENTRY, and only landform exists. So one is
-# SYNTHESISED here: a water entry consuming landform's commit through the
-# real rehydrator. That is not a workaround -- it is the assertion that the
-# second entry is a ROW IN THE TABLE and nothing else, which is the whole
-# claim step_registry.py makes about itself. If adding it here required
-# touching the orchestrator, the claim would be false.
+# A MINIMAL SECOND ENTRY, SYNTHESISED, and it stays synthetic now that the
+# real water entry exists. Both assertions here are about the CASCADE and the
+# committed resolver -- one consumes edge, one commit, one invalidation -- and
+# the real water entry brings six more edges, a union `combine` and an
+# empty-commit sentinel, none of which this section is testing. Keeping the
+# fixture minimal is what makes a failure here point at the cascade rather
+# than at water's own machinery (test_water_step.py covers that).
+#
+# It is also still the standing assertion that a second entry is a ROW IN THE
+# TABLE and nothing else: this one was written before the water entry existed
+# and needed no orchestrator change then, and needs none now.
 
 SYNTHETIC_WATER = step_registry.StepDefinition(
     step_id="water",
@@ -1317,7 +1322,7 @@ SYNTHETIC_WATER = step_registry.StepDefinition(
     proposal_collection="suggested_zones",
     produces=("selected_water_zone",),
     commit_contract=step_registry.CommitContract(
-        layer="water_candidate_zone",
+        layers=("water_candidate_zone",),
         geometry_types=("Polygon", "MultiPolygon"),
         min_features=0,
         max_features=None,

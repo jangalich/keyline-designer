@@ -393,6 +393,7 @@ silently patching another module or reimplementing its logic)
 """
 
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Optional
 
 from rasterio.warp import transform as warp_transform
@@ -849,17 +850,25 @@ def build_pipeline_context(
     # missing pieces dressed up as one checked answer. When not
     # assembled, the kwarg is simply omitted and the water step keeps its
     # own standalone fetch-or-degrade posture.
+    #
+    # THE ASSEMBLY ITSELF now lives with the step that owns the rule --
+    # water_survey_areas.soil_inputs_for_parcel_data(). The step registry's
+    # water entry needs the identical assembly (a registry cache_path names
+    # ONE attribute and this override is three), and an all-or-nothing rule
+    # written twice is an any-two-of-three rule waiting to happen. This
+    # function holds the three layers as separate locals rather than as a
+    # ParcelData, so it passes a small stand-in with the three attributes on
+    # it rather than reaching for an object it does not have.
     water_step_kwargs = {}
-    if (
-        soil_components is not None
-        and soil_geometries is not None
-        and saturated_hydraulic_conductivity is not None
-    ):
-        water_step_kwargs["soil_inputs"] = {
-            "ksat_rows": saturated_hydraulic_conductivity,
-            "components": soil_components,
-            "geometries_by_mukey": soil_geometries,
-        }
+    _soil_inputs = water_survey_areas.soil_inputs_for_parcel_data(
+        SimpleNamespace(
+            saturated_hydraulic_conductivity=saturated_hydraulic_conductivity,
+            soil_components=soil_components,
+            soil_geometries=soil_geometries,
+        )
+    )
+    if _soil_inputs is not None:
+        water_step_kwargs["soil_inputs"] = _soil_inputs
 
     water_system_result = water_survey_areas.identify_water_survey_areas(
         boundary_coordinates,

@@ -2383,6 +2383,37 @@ def summarize_water_survey_areas(result: dict) -> str:
 _SOIL_INPUTS_NOT_SUPPLIED = object()
 
 
+def soil_inputs_for_parcel_data(parcel_data) -> Optional[dict]:
+    """
+    A ParcelData -> this step's `soil_inputs` override, or None.
+
+    ALL THREE PIECES OR NONE, which is the water scorer's own posture stated
+    once. build_soil_score_grid() renormalizes over sub-signals that are
+    absent WITHIN a successful fetch; a partial FETCH is a different fact and
+    must not be dressed up as one -- so a ParcelData missing any of the three
+    yields None ("never checked"), and the whole soil criterion degrades to
+    neutral with the confidence signal lost and the narrative saying so.
+
+    HERE RATHER THAN IN ITS TWO CALLERS. build_pipeline_context() assembled
+    this inline, and the step registry's water entry now needs the same
+    assembly (as its soil_inputs edge's `combine`) because a registry
+    cache_path names ONE attribute and this override is three. Two copies of
+    an all-or-nothing rule is two places for it to become an
+    any-two-of-three rule. It reads a ParcelData and builds a dict -- no
+    fetch, no computation, nothing this module's suitability path can see.
+    """
+    ksat_rows = getattr(parcel_data, "saturated_hydraulic_conductivity", None)
+    components = getattr(parcel_data, "soil_components", None)
+    geometries_by_mukey = getattr(parcel_data, "soil_geometries", None)
+    if ksat_rows is None or components is None or geometries_by_mukey is None:
+        return None
+    return {
+        "ksat_rows": ksat_rows,
+        "components": components,
+        "geometries_by_mukey": geometries_by_mukey,
+    }
+
+
 def _fetch_soil_inputs(boundary_coordinates: list[tuple[float, float]]) -> dict:
     """
     STANDALONE-CALLER FALLBACK ONLY -- the pipeline path never reaches

@@ -134,7 +134,23 @@ LAYER_ELIGIBLE_GROUND = "eligible_ground"
 LAYER_EXCLUSION_GATE = "exclusion_gate"
 # Water survey layers are computed per zone ("survey_zone_<type>",
 # "survey_zone_member_<type>", "survey_zone_dropped") -- see
-# water_survey_zones_to_feature_collection().
+# water_survey_zones_to_feature_collection(). The two ZONE layers are named
+# here as well, because the water step's commit contract has to declare the
+# layers a committed feature may carry and a contract built out of f-strings
+# would be a second spelling of a name this module owns. The member and
+# dropped layers are deliberately NOT named here: neither is committable
+# (a member is a sub-feature of a zone; a dropped zone is below the floor
+# and not selectable), so a constant for them would invite a contract to
+# accept one.
+LAYER_SURVEY_ZONE_EMBANKMENT = "survey_zone_embankment"
+LAYER_SURVEY_ZONE_EXCAVATED = "survey_zone_excavated"
+LAYER_SURVEY_ZONES = (LAYER_SURVEY_ZONE_EMBANKMENT, LAYER_SURVEY_ZONE_EXCAVATED)
+
+# The wire id prefix water_survey_zones_to_feature_collection() mints for a
+# zone. Written down once, here, for the same reason _PRODUCTION_FEATURE_ID_
+# PREFIX is: outbound builds it and inbound parses it, and a second spelling
+# in the commit path would be a second answer waiting to disagree.
+_WATER_SURVEY_ZONE_FEATURE_ID_PREFIX = "water-survey-zone-"
 
 
 PARCEL_BOUNDARY_CONFIDENCE_NOTES = (
@@ -1164,8 +1180,8 @@ def _polygonal_shape_from_wire(geometry: dict, dem: dict, where: str):
     geometry_type = geometry.get("type")
     if geometry_type not in ("Polygon", "MultiPolygon"):
         raise InboundGeometryError(
-            f"{where}: a production zone must be a Polygon or MultiPolygon, got {geometry_type!r}. "
-            "A production zone is an area of ground; a Point or LineString has no acreage to attribute "
+            f"{where}: a committed zone must be a Polygon or MultiPolygon, got {geometry_type!r}. "
+            "A zone is an area of ground; a Point or LineString has no acreage to attribute "
             "and no cells to sample."
         )
 
@@ -1491,3 +1507,247 @@ def rehydrate_production_zones(
         rehydrate_production_zone(feature, dem, zone_id=None if zone_ids is None else zone_ids[index])
         for index, feature in enumerate(features)
     ]
+
+
+# ======================================================================
+# INBOUND -- the water step's survey zones
+# ======================================================================
+#
+# WHY THIS IS SHORTER THAN THE PRODUCTION HALF ABOVE, AND WHY THAT IS NOT
+# AN OMISSION. The water step is SELECT-ONLY: there is no drawing tool and
+# no editing, so every committed feature is one this pipeline generated and
+# handed to the client, coming home with its geometry untouched. That
+# removes at a stroke everything rehydrate_production_zone() has to do for
+# a drawn ring -- there is no id to allocate (see internal_water_survey_
+# zone_id()), no clamped multi-part shape to reassemble, and no morphology
+# to re-derive, because a survey zone's render fill IS its own envelope
+# (water_survey_areas.build_survey_zones() sets the two to the same object).
+#
+# The structural checks still run in full. Select-only makes an invalid
+# geometry unlikely, not impossible -- a client can send anything -- and a
+# gate that is only correct while the client behaves is not a gate.
+
+
+def internal_water_survey_zone_id(feature_id: Any) -> Optional[int]:
+    """
+    The integer zone id behind an outbound water-survey-zone feature id, or
+    None when this module's outbound half did not build that id.
+
+    THE MEMBER AND DROPPED IDS DO NOT PARSE, WHICH IS THE POINT. All three
+    of "water-survey-zone-7", "water-survey-zone-member-7" and
+    "water-survey-zone-dropped-7" share this prefix, and only the first
+    names a committable zone. The tail is required to be all digits, so the
+    other two return None and a commit carrying one is rejected by name
+    rather than silently rehydrated as zone 7 -- which would attribute a
+    member's footprint, or a zone the acreage floor dropped, to a selection
+    the user never made.
+    """
+    if isinstance(feature_id, int) and not isinstance(feature_id, bool):
+        return feature_id
+    if isinstance(feature_id, str) and feature_id.startswith(
+        _WATER_SURVEY_ZONE_FEATURE_ID_PREFIX
+    ):
+        tail = feature_id[len(_WATER_SURVEY_ZONE_FEATURE_ID_PREFIX):]
+        if tail.isdigit():
+            return int(tail)
+    return None
+
+
+def rehydrate_water_survey_zone(feature: dict, dem: dict) -> dict:
+    """
+    ONE committed water survey-zone Feature -> the internal zone dict.
+
+    WHAT IT CARRIES, AND WHY SO LITTLE. Identity (`id`, `survey_type`) and
+    geometry, and nothing else. A survey zone's full measurement set --
+    suitability, dual acreage, the three overlap sentinels, the gravity
+    block, cross_type_overlaps -- was computed at GENERATE time against the
+    whole parcel's surfaces and is already recorded twice: in the payload
+    the user selected from, and in this very feature's own `properties`,
+    which the Design Document stores verbatim. Copying a subset of it onto
+    a second object here would be a second copy of the same measurements
+    with nothing keeping the two in step, and re-DERIVING any of it is not
+    possible from a polygon and a DEM: the numbers are functions of the
+    suitability surfaces, not of the shape.
+
+    So this returns what a consumer of a committed selection can use --
+    where the ground is -- and refers everything else to the record.
+
+    THE RENDER FILL IS THE ENVELOPE, BY IDENTITY. build_survey_zones() sets
+    render_fill_polygon_utm to the clipped hull object itself and states
+    that no further morphology is ever applied to it; the outbound half
+    puts that same geometry on the wire. So the inverse hop reconstructs
+    ONE polygon and both names point at it -- unlike a production patch,
+    where the wire geometry is the editable source and the render fill is a
+    morphological opening of it.
+
+    `zone_acres` IS re-derived (polygon area over the parcel-clipped hull --
+    build_survey_zones()'s own expression), because it is a function of the
+    geometry alone and a consumer holding this dict should not have to reach
+    back into the wire properties for the one number that survives the trip
+    honestly.
+
+    Raises InboundGeometryError, with the defect named, on anything that
+    cannot become a valid zone.
+    """
+    from raster_grid import SQUARE_METERS_PER_ACRE
+
+    if not isinstance(feature, dict):
+        raise InboundGeometryError(
+            f"a water survey zone must be a GeoJSON Feature dict, got {type(feature).__name__}"
+        )
+
+    feature_id = feature.get("id")
+    where = (
+        f"water survey zone {feature_id!r}" if feature_id is not None else "water survey zone"
+    )
+
+    zone_id = internal_water_survey_zone_id(feature_id)
+    if zone_id is None:
+        # NO ALLOCATION FALLBACK, deliberately -- the opposite of the
+        # production path's. There is no drawing tool at this step, so a
+        # feature without a pipeline id is not a shape the user made; it is a
+        # feature that did not come from this step's proposals (a member
+        # footprint, a dropped zone, a hand-assembled request). Allocating an
+        # id for it would manufacture a zone that no suitability surface ever
+        # nominated and attribute a survey recommendation to it.
+        raise InboundGeometryError(
+            f"{where}: cannot determine a survey-zone id from feature id {feature_id!r}. Every "
+            f"committable zone carries \"{_WATER_SURVEY_ZONE_FEATURE_ID_PREFIX}<n>\" -- this step is "
+            "select-only, so a feature with no pipeline id did not come from its proposals and no id "
+            "is invented for it."
+        )
+
+    layer = (feature.get("properties") or {}).get("layer")
+    if layer not in LAYER_SURVEY_ZONES:
+        raise InboundGeometryError(
+            f"{where}: carries layer {layer!r}; a committable survey zone is on one of "
+            f"{list(LAYER_SURVEY_ZONES)}. The layer is where the zone's TYPE lives, and a zone with "
+            "no type cannot be told apart from the other instrument's answer for the same ground."
+        )
+
+    polygon_utm = _polygonal_shape_from_wire(feature.get("geometry"), dem, where)
+
+    return {
+        "id": zone_id,
+        # READ OFF THE LAYER, not off properties.survey_type. The layer is
+        # the field the commit contract gated on, so it is the one the commit
+        # path has actually established; a properties value disagreeing with
+        # it would be believed here and refused there.
+        "survey_type": layer[len("survey_zone_"):],
+        "zone_acres": round(float(polygon_utm.area / SQUARE_METERS_PER_ACRE), 4),
+        "polygon_utm": polygon_utm,
+        "render_fill_polygon_utm": polygon_utm,
+        # OFF THE WIRE, NOT REPROJECTED BACK. The feature's geometry IS the
+        # zone's stored geometry_wgs84 -- built once at the zone's birth and
+        # never edited, because this step has no editor -- so round-tripping
+        # it through two transform_geom() hops would replace an exact value
+        # with a numerically perturbed copy of itself.
+        "geometry_wgs84": feature.get("geometry"),
+        "render_fill_geometry_wgs84": feature.get("geometry"),
+    }
+
+
+def rehydrate_water_survey_zones(
+    collection: Optional[dict],
+    dem: dict,
+) -> list[dict]:
+    """
+    A whole committed water survey-zone FeatureCollection -> the list of
+    internal zone dicts.
+
+    EMPTY IN, EMPTY OUT, AND [] IS NOT THE ANSWER A CONSUMER GETS. Every
+    consumer of `selected_water_zone=` takes ONE zone or the explicit
+    water_suitability.NO_WATER_ZONE sentinel; none of them takes a list. So
+    an empty commit does not travel as this function's [] -- the registry's
+    `empty_commit` declaration intercepts it first and forwards the sentinel
+    (step_registry.Consumed's EMPTY IS AN ANSWER note). [] here means only
+    "no features to rehydrate", and the one caller that can see it is the
+    commit gate, which is checking a collection it already counted.
+
+    NO `zone_ids` PARAMETER, unlike the production rehydrator. That
+    parameter exists there so the COMMIT PATH can allocate an id for a drawn
+    zone; there is no drawing at this step, so there is no id to allocate
+    and the water commit contract declares no internal_id_parameter.
+
+    A single bad feature fails the WHOLE call, for the production
+    rehydrator's reason: a partial list is a selection nobody made.
+    """
+    features = (collection or {}).get("features") if isinstance(collection, dict) else collection
+    return [rehydrate_water_survey_zone(feature, dem) for feature in list(features or [])]
+
+
+def water_zone_union(zones: list[dict]) -> dict:
+    """
+    MANY selected survey zones -> the ONE zone-shaped value every
+    `selected_water_zone=` override takes.
+
+    THE UNION IS THE WHOLE OF WHAT MULTI-SELECT MEANS DOWNSTREAM. The water
+    step lets a user select any number of zones, across both survey types;
+    downstream, all of them are claimed ground. Every consumer of a selected
+    water zone reads exactly one field off it -- render_fill_polygon_utm --
+    and applies its OWN buffer to it (road_corridors' pond exclusion,
+    tree_zone_candidates' water polygons, solar_suitability's water
+    exclusion, fencing, the layout map), so a single geometry carrying the
+    union of the selection is a complete answer for all of them and NO
+    consumer signature changes. Buffering is not this boundary's concern and
+    must not become it.
+
+    WHAT THIS DICT DELIBERATELY DOES NOT CARRY, which is the more important
+    half. There is no `id`, no `survey_type`, no `rank`, no
+    `mean_suitability`, no `zone_acres`, no `representative_elevation_m`.
+    The union is not a zone: no suitability surface nominated it, no
+    surveyor would rope it off as one claim, and every one of those fields
+    would be a fabricated measurement of an object that does not exist.
+    Leaving them absent means a consumer that reaches for one gets a
+    KeyError naming the field -- which is the loud, immediate failure this
+    boundary owes it -- rather than a plausible number that reads as
+    measured.
+
+    ONE CONSUMER TODAY IS IN EXACTLY THAT POSITION and it is reported rather
+    than papered over: pipeline_context._attach_keypoint_feature_
+    relationships() reads `representative_elevation_m` off the selected
+    water zone to compute each keypoint's elevation differential. A union of
+    three zones has no single representative elevation -- the honest answer
+    is per-keypoint, against the NEAREST selected zone, which is a change to
+    that function's signature and to what the batch pipeline means by the
+    keypoint water relationship. So this dict does not answer it, and the
+    water registry entry does NOT declare the keypoint post-commit hook: the
+    hook keeps running on the landform commit alone, and the water half of
+    every keypoint relationship keeps reading "no_feature" exactly as it
+    does today. That is a known gap, not a silent one.
+
+    Raises ValueError on an empty selection rather than inventing a value
+    for it. An empty commit is a real decision and it has a real
+    representation -- water_suitability.NO_WATER_ZONE, declared as the water
+    consumes edge's `empty_commit` -- and reaching this function with nothing
+    means that declaration was bypassed.
+    """
+    from shapely.ops import unary_union
+
+    if not zones:
+        raise ValueError(
+            "water_zone_union() was called with no zones. An empty water selection is a DECISION "
+            "and travels as water_suitability.NO_WATER_ZONE (the water consumes edge's empty_commit "
+            "declaration), never as a union of nothing and never as None -- every downstream "
+            "consumer reads None as 'not supplied' and re-runs the whole water pipeline."
+        )
+
+    union = unary_union([zone["render_fill_polygon_utm"] for zone in zones])
+    return {
+        # THE ONE FIELD EVERY CONSUMER READS, and the reason this shape works
+        # at all. See the docstring for what is absent and why.
+        "render_fill_polygon_utm": union,
+        # The same geometry under the survey zone's other name for it. A
+        # survey zone's envelope and its render fill are one object
+        # (build_survey_zones()), so the union of one is the union of the
+        # other; carried so a consumer written against `polygon_utm` sees
+        # the identical ground rather than a KeyError that would be
+        # misleading -- this field is not missing, it is the same answer.
+        "polygon_utm": union,
+        # PROVENANCE OF THE UNION, so a reader holding this dict can say
+        # which zones it was built from without going back to the document.
+        # Not an identity: `zone_ids` is a list precisely so it cannot be
+        # mistaken for the `id` of a zone.
+        "zone_ids": [zone["id"] for zone in zones],
+        "survey_types": sorted({zone["survey_type"] for zone in zones}),
+    }

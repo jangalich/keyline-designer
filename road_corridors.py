@@ -37,7 +37,7 @@ Pipeline (build_road_network()):
      detection design's own "does this cell sit on a ridge at all"
      boolean test.
   3. HARD exclusion mask: the parcel boundary (off-parcel cells) + the
-     single selected water-system candidate zone, buffered
+     UNION OF THE SELECTED water-system zones, buffered
      (POND_ZONE_EXCLUSION_BUFFER_METERS) — via the existing
      _build_exclusion_cell_mask(). Production is deliberately NOT part of
      this mask anymore (see step 5) — that's the whole point of this
@@ -83,13 +83,31 @@ Constraint stack, current design:
   - HARD (np.inf in cost_raster, a branch genuinely cannot cross it at
     all, road_cost_path.build_cost_raster()'s own excluded_mask/
     impassable_grade_pct arguments):
-      - outside the single SELECTED water-system candidate zone
-        (water_suitability.fetch_and_select_optimal_water_zone() — the
-        one rank-1 zone this property's own water-suitability scoring
-        actually picked, not every unscored candidate zone
-        water_candidate_zones.py generates), buffered
+      - outside the SELECTED water-system zones, buffered
         (POND_ZONE_EXCLUSION_BUFFER_METERS) — routing on the uphill side
         of a pond/dam, not across its face or catchment inlet.
+
+        SUPERSEDED PRODUCT DECISION, recorded because these lines used to
+        state the opposite: this was "the one rank-1 zone this property's
+        own water-suitability scoring actually picked". The water step is
+        now SELECT-ONLY and MULTI-SELECT — the user may choose any number
+        of survey zones, across both survey types, or none — and all of
+        them are claimed ground. `selected_water_zone` therefore carries
+        ONE zone-shaped value whose render_fill_polygon_utm is the UNION
+        of the selection (wire_translation.water_zone_union()), and
+        nothing below changes: pond_union buffers that one geometry
+        exactly as it buffered one zone's.
+
+        ONE CONSEQUENCE IS REPORTED AND NOT FIXED HERE. The same prepared
+        object also derives water_target_cells (the one-cell ring just
+        outside the buffered exclusion), and road_network_router.py tries
+        the water spur ONCE, taking the cheapest reachable target under
+        MAX_WATER_SPUR_METERS. Under a union that ring surrounds ALL the
+        selected zones, so selecting three zones still gets ONE spur, to
+        whichever is cheapest. That is accepted for now — but
+        narrative_data's `reaches_water_zone` is a BOOLEAN and cannot say
+        WHICH zone was reached, so the report can no longer name the
+        served site. It surfaces at the roads step.
       - the parcel boundary itself (off-parcel cells).
       - grade above MAX_ROAD_GRADE_PCT — a genuine ceiling now (see that
         constant's own comment for why this changed).
@@ -600,16 +618,21 @@ def build_road_network(
 ) -> dict:
     """
     Pure geometric core — see module docstring for why this takes
-    already-computed inputs (production areas, the single selected water
-    zone, floodplain cost-penalty union) rather than fetching or
-    delineating anything itself.
+    already-computed inputs (production areas, the selected water ground,
+    floodplain cost-penalty union) rather than fetching or delineating
+    anything itself.
 
-    selected_water_zone is water_suitability.fetch_and_select_optimal_
-    water_zone()'s own single rank-1 answer (or None if no water zone was
-    identified) -- each entry carrying 'render_fill_polygon_utm' (SAME
+    selected_water_zone is ONE zone-shaped dict standing for all the water
+    ground the user selected -- the union of the committed survey zones on
+    the interactive path (wire_translation.water_zone_union()), or a single
+    self-computed answer on the batch path -- or None if there is none. It
+    is read for exactly one field, 'render_fill_polygon_utm' (the SAME
     optimized/final geometry production_areas below uses, not the raw
     'polygon_utm'), HARD-excluded (buffered by
-    POND_ZONE_EXCLUSION_BUFFER_METERS).
+    POND_ZONE_EXCLUSION_BUFFER_METERS). One field is the whole contract:
+    the union carries no id, acreage or elevation, because a union of
+    several zones is not itself a zone and a value for any of those would
+    be invented.
     production_areas is production_area_ceiling.identify_optimized_
     production_areas()'s own 'scored_patches' -- the OPTIMIZED/final,
     ceiling-trimmed patch shape (each entry carrying
