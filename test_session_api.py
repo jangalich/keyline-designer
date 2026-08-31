@@ -43,6 +43,7 @@ Sections:
   8.  LAYERS AFTER EVICTION -- rebuilt, byte-identical.
   9.  404s -- unknown session, unknown step, unknown job.
   10. /api/production-zones UNCHANGED -- the frontend spike still works.
+  11. GET /api/steps -- the step order, with no session in existence.
 """
 
 import json
@@ -384,6 +385,9 @@ class Client:
 
     def job(self, job_id):
         return self.http.get(f"/api/jobs/{job_id}")
+
+    def steps(self):
+        return self.http.get("/api/steps")
 
     # --- polling, the way a real client does it ---
 
@@ -1226,9 +1230,12 @@ with Harness() as h:
     served = {
         rule.rule
         for rule in api.app.url_map.iter_rules()
-        if rule.rule.startswith("/api/sessions") or rule.rule.startswith("/api/jobs")
+        if rule.rule.startswith("/api/sessions")
+        or rule.rule.startswith("/api/jobs")
+        or rule.rule == "/api/steps"
     }
     assert served == {
+        "/api/steps",
         "/api/sessions",
         "/api/sessions/<session_id>",
         "/api/sessions/<session_id>/steps/<step_id>/generate",
@@ -1246,6 +1253,83 @@ print(
     f"missing-boundary branch still 400s, and /api/health still 200s. The "
     f"deployed app carries all {len(served)} session/job routes from the same "
     f"blueprint factory sections 1-9 ran over."
+)
+
+
+# --- 11. GET /api/steps, WITH NO SESSION ------------------------------
+#
+# The step rail enumerates the pipeline, and before POST /api/sessions there
+# is no document to enumerate it from. This route is where that list comes
+# from, and the only thing that makes it worth having instead of six ids
+# hardcoded in the frontend is that it and `step_order` cannot disagree.
+# So the section asserts the agreement, not just the contents.
+
+# A CLIENT THAT HAS NEVER CREATED A SESSION, over its own empty temp store --
+# and asserted empty, so "no session in existence" is a checked precondition
+# rather than an assumption about what ran above.
+steps_client = Client()
+assert steps_client.deps.store.list_sessions() == [], (
+    f"this section is about the no-session case, so the store must be empty "
+    f"before the call: {steps_client.deps.store.list_sessions()}"
+)
+
+no_session = steps_client.steps()
+assert no_session.status_code == 200, (
+    no_session.status_code, no_session.get_data(as_text=True)[:400]
+)
+steps_body = no_session.get_json()
+
+# THE SIX IDS, IN STEP_ORDER'S ORDER. A list comparison, not a set one: the
+# order IS the payload, and `sorted(...) == sorted(...)` would pass for the
+# alphabetical serialisation this route exists to avoid.
+assert steps_body == {"step_order": list(design_document.STEP_ORDER)}, steps_body
+assert len(steps_body["step_order"]) == 6, steps_body
+assert steps_body["step_order"] != sorted(steps_body["step_order"]), (
+    "STEP_ORDER is not alphabetical, so a payload that IS alphabetical means "
+    "something sorted it on the way out -- which is the exact failure this "
+    f"route exists to prevent: {steps_body['step_order']}"
+)
+
+# IDS ONLY, NO TITLES. The frontend owns display titles in its own step
+# definitions; a title here would be a second copy of one. Asserted, so the
+# division is a contract rather than an omission someone later "fixes".
+assert set(steps_body) == {"step_order"}, (
+    f"/api/steps serves the order and nothing else -- ids, no titles. Extra "
+    f"keys: {sorted(set(steps_body) - {'step_order'})}"
+)
+assert all(isinstance(step_id, str) for step_id in steps_body["step_order"]), steps_body
+
+# AND IT IS THE SAME ARRAY A DOCUMENT CARRIES. Same client, so the only
+# variable between the two calls is whether a session exists.
+with Harness():
+    steps_created = steps_client.create()
+assert steps_created.status_code == 201, steps_created.get_json()
+steps_document = steps_created.get_json()
+
+assert steps_document["step_order"] == steps_body["step_order"], (
+    f"pre-session and post-session must hand the client the SAME list under "
+    f"the SAME key, or the rail's fallback is a second source of truth: "
+    f"{steps_body['step_order']} vs {steps_document['step_order']}"
+)
+
+# The route is a constant and says so: creating a session did not move it.
+assert steps_client.steps().get_json() == steps_body, steps_client.steps().get_json()
+
+# And the alphabetical order really is different, which is why any of this
+# is load-bearing.
+assert list(steps_document["steps"]) == sorted(design_document.STEP_ORDER), (
+    f"Flask sorts the steps object; if it ever stops, the reason this route "
+    f"exists changes: {list(steps_document['steps'])}"
+)
+
+print(
+    f"11. GET /api/steps: with an empty store and no session in existence it "
+    f"returned 200 with {steps_body['step_order']} -- the six ids in "
+    f"STEP_ORDER's order, ids only and no titles (the frontend owns those). "
+    f"The same client's new document carries an IDENTICAL `step_order`, under "
+    f"the same key, while its `steps` object serialises as "
+    f"{list(steps_document['steps'])} -- the alphabetical order the array "
+    f"exists to override."
 )
 
 
