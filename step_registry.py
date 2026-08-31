@@ -646,12 +646,17 @@ LANDFORM = StepDefinition(
 WATER = StepDefinition(
     step_id="water",
     consumes=(
-        # The four cache edges landform also declares, at the same values --
-        # water_survey_areas.identify_water_survey_areas() takes an override
-        # for each, and every one it does not get it FETCHES. Unlike
-        # landform, this step's entry point exposes a real
-        # boundary_polygon_utm= override, so that edge forwards rather than
-        # recording a dependency it cannot pass (see Consumed.forward_as).
+        # SEVEN EDGES: six off the cache, one off landform's commit. The
+        # first four below are landform's own, at the same values; the next
+        # two (roads, soil) are this step's alone; the last is the committed
+        # one. Every override identify_water_survey_areas() does not get, it
+        # FETCHES -- so the six cache edges are not conveniences, they are
+        # what keeps a repeatable generate off the network.
+        #
+        # The four shared ones, first. Unlike landform, this step's entry
+        # point exposes a real boundary_polygon_utm= override, so that edge
+        # forwards rather than recording a dependency it cannot pass (see
+        # Consumed.forward_as).
         Consumed(
             name="boundary_coordinates",
             source=SOURCE_CACHE,
