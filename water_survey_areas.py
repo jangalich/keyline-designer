@@ -13,6 +13,49 @@ types:
         topographic wetness, real natural depressions), water-holding
         soil, flat ground, and only a mild preference for run-on.
 
+THE TWO TYPES DIFFER IN GENERATION MECHANISM NOW, not just criteria
+(this branch's design change). An embankment pond is a VALLEY
+COMPARTMENT -- a dam site at a narrows, a storage reach above it,
+flanking ridges either side -- and a dugout is not, so one extraction
+mechanism could never describe both:
+
+    EXCAVATED keeps the full existing pipeline: threshold extraction
+        into 8-connected member regions, closing aggregation, convex-
+        hull envelope (now clipped at the road exclusion union exactly
+        as at the parcel boundary -- truncated_by_road).
+    EMBANKMENT keeps stages 1-2 only (criteria scoring, the weighted
+        blend) as a NOMINATION SURFACE; the threshold/components/
+        members/closing/hull machinery has left that path entirely,
+        replaced by SEED-BASED VALLEY COMPARTMENTS: iterative highest-
+        blend seeding (EMBANKMENT_SEED_MIN_SCORE, uncapped), a
+        downstream D8 pinch walk to the valley's crest-to-crest width
+        minimum (the embankment cell), and a compartment assembled from
+        the pinch cell's watershed clipped to the band between two
+        baseline-perpendicular crest transects -- the lateral boundary
+        of that clip IS the ridge line (hydrology handles branching
+        crests; no crest-tracing). The pinch is the width MINIMUM
+        among all walked stations, interior or TERMINAL: a minimum at
+        the walk's end (the property line, an existing road, or the
+        walk limit) is ACCEPTED AND DISCLOSED with a pinch_at_* flag
+        and the still-narrowing statement -- the narrowest buildable
+        crossing within the surveyed extent is a legitimate finding
+        (the dam-at-the-edge doctrine; see the flag constants for the
+        history of the retired interior-only rule). The one honest
+        failure is a valley that never narrows below its seed station
+        (no_constriction): a dam at the storage cell is degenerate,
+        the seed produces NOTHING, and the hull does not exist on this
+        path to fall back to. See the compartment constants/section
+        for the full construction, the reporting honesty split (seed
+        anchor claim vs compartment means), and the dedupe rules.
+
+EXISTING FARM ROADS ARE A GEOMETRIC EXCLUSION for both types, exactly
+like the parcel boundary: zone geometry clips at the road exclusion
+union (truncated_by_road), and the embankment walks additionally treat
+road cells as hard terminators. road_overlap_pct survives as a REPORTED
+property by measuring the PRE-clip geometry -- the share of the
+walkable claim the clip removed -- because measuring the clipped
+geometry would be a guaranteed zero.
+
 This REPLACES pool/wall simulation as the pipeline's water step. The
 level-pool arc (water_candidate_zones.py + valley_level_pool.py, both now
 DEMOTED to diagnostic-consumed modules) proved the reference property
@@ -85,8 +128,9 @@ Everything else that used to gate is a reported measurement here: canopy
 and road overlap, production overlap, gravity relationship, boundary
 adjacency -- all context for the site visit, none of them drops a region.
 
-EXTRACTION AND AGGREGATION, per type -- scoring stays sharp, grouping
-makes the survey areas:
+EXTRACTION AND AGGREGATION -- EXCAVATED ONLY since the compartment
+change (embankment generation is described above and at its own
+section) -- scoring stays sharp, grouping makes the survey areas:
 
   1. MEMBER REGIONS: cells at/above SUITABILITY_THRESHOLD on the RAW
      blended surface (0.5, decided from the raw-surface comparison
@@ -138,19 +182,23 @@ cross_type_overlaps (the two surfaces agreeing about the same ground
 -- CROSS_TYPE_OVERLAP_NOTE_FRACTION drives the either-type narrative
 line).
 
-SELECTION (the pooled rule, unchanged): the two types are POOLED by
-member-mean suitability (member-acreage tiebreak) and the pooled
+SELECTION (the pooled rule, still provisional, documented): each type
+ranks on its own instrument -- embankment by SEED blend score (the
+anchor claim; the compartment's walked-ground mean deliberately
+includes low-scoring side slopes and would punish a compartment for
+doing its job), excavated by member-mean suitability as always -- and
+the two are POOLED on those scores (acreage tiebreak); the pooled
 rank-1 SURVIVING zone becomes `selected_water_zone` for downstream
 consumers (tree search-space subtraction, fencing, solar exclusion,
 road exclusion, the map's ripple clip, keypoint relationships).
 Pooling embankment against excavated compares two different
 instruments on one scale -- kept because downstream needs ONE
-unambiguous answer. The selected zone carries every field on the
-established selected_water_zone consumer contract
-(render_fill_polygon_utm = the clipped hull, identity;
+unambiguous answer; revisit from the tuned run. The selected zone
+carries every field on the established selected_water_zone consumer
+contract (render_fill_polygon_utm = the clipped geometry, identity;
 representative_elevation_m; id -- plus rank and
 served_production_area_ids read by pipeline tests), so rank-1 slots in
-unchanged.
+unchanged whichever type wins.
 
 identify_water_survey_areas() is the fetch-and-compute entry point,
 following the established conventions: independent optional overrides
@@ -473,10 +521,14 @@ for _survey_type, _weights in ((SURVEY_TYPE_EMBANKMENT, EMBANKMENT_WEIGHTS), (SU
 SURVEY_SMOOTHING_RADIUS_METERS = 15.0
 
 
-# --- region extraction ----------------------------------------------------
+# --- region extraction (EXCAVATED ONLY since the compartment change) ------
 
 # Cells at/above this RAW blended suitability score are extracted into
-# member regions. 0.5, DECIDED FROM MEASURED EVIDENCE (the final tuning
+# member regions -- ON THE EXCAVATED SURFACE ONLY. The embankment type
+# no longer extracts regions at all: its surface is a NOMINATION SURFACE
+# for seed-based valley compartments (see EMBANKMENT_SEED_MIN_SCORE,
+# which carries this constant's 0.5 value over with a recorded semantic
+# shift). 0.5, DECIDED FROM MEASURED EVIDENCE (the final tuning
 # pass): 0.6 had been chosen from the first run's PRE-smoothing
 # isobands; with smoothing retired, the raw-surface threshold comparison
 # on the reference property read 16 member regions / 0.51 ac of
@@ -486,11 +538,92 @@ SURVEY_SMOOTHING_RADIUS_METERS = 15.0
 # a threshold judges against attainable scores, and 0.6 was demanding
 # ~3/4 of the attainable ceiling while 0.5 sits at the coherence line
 # the isobands actually show. The diagnostic keeps printing the
-# THRESHOLD COMPARISON (0.5 / 0.6 / 0.7 on the raw surfaces,
-# 8-connected) every run, so the choice remains evidence-checked. This
-# constant only supplies the extraction function's DEFAULT; it is not
-# baked into the math anywhere. CONFIGURABLE.
+# THRESHOLD COMPARISON (0.5 / 0.6 / 0.7, 8-connected) every run for the
+# EXCAVATED surface, so the choice remains evidence-checked; the
+# embankment threshold-comparison lines are retired WITH extraction
+# (the number that instrument tuned no longer exists on that path).
+# This constant only supplies the extraction function's DEFAULT; it is
+# not baked into the math anywhere. CONFIGURABLE.
 SUITABILITY_THRESHOLD = 0.5
+
+
+# --- embankment seed-based compartments ------------------------------------
+# THE EMBANKMENT GENERATION MECHANISM (this branch's design change): the
+# two survey types now differ in GENERATION, not just criteria. An
+# embankment pond is a VALLEY COMPARTMENT -- a dam site at a narrows, a
+# storage reach above it, flanking ridges either side -- and a dugout is
+# not. Stages 1-2 (criteria scoring, the weighted blend) survive
+# unchanged as the embankment NOMINATION SURFACE; stage 3 and after
+# (threshold, 8-connected components, members, closing, hull) leave the
+# embankment path entirely. From each seed (an iteratively-claimed
+# highest-blend cell) the machinery walks DOWNSTREAM along D8 flow to
+# find the valley's width minimum (the pinch -- the embankment cell),
+# then assembles the compartment: baseline seed->pinch, perpendicular
+# crest transects at both ends, and the pinch cell's watershed clipped
+# to the band between them. The hull does not exist on this path; a seed
+# with no on-parcel pinch produces NOTHING, honestly, with a reason
+# code. The excavated type keeps the full existing pipeline.
+
+# Minimum blend score for a cell to qualify as a compartment seed.
+# CARRIES THE RETIRED EMBANKMENT EXTRACTION THRESHOLD'S VALUE (0.5 --
+# see SUITABILITY_THRESHOLD's evidence note), with a RECORDED SEMANTIC
+# SHIFT: under extraction, 0.5 meant "this cell is part of a survey
+# area"; here it means "this cell is worth NOMINATING a compartment
+# from" -- a weaker claim, because the compartment that results is
+# defined by valley geometry (pinch + watershed band), not by which
+# cells cleared the number. The evidence basis (judged against the
+# parcel's ~0.82 attainable ceiling) carries over with the value.
+# CONFIGURABLE.
+EMBANKMENT_SEED_MIN_SCORE = 0.5
+
+# Claim radius of the iterative seeding: each accepted seed claims every
+# qualifying cell within this real-ground distance, and seeding repeats
+# on the highest remaining blend until no qualifying cell is left --
+# UNCAPPED, per the standing no-cap rule (every seed is walked; failures
+# report their reason). The VALUE is the old grouping distance's 30 m
+# ("two high-suitability patches within 30 m are one site visit, not
+# two" -- the same judgement, re-aimed: two seeds within 30 m are one
+# candidate compartment, not two), but this is deliberately its OWN
+# constant, never aliased to SURVEY_ZONE_GROUPING_DISTANCE_METERS: that
+# one is excavated closing machinery and the two numbers must be able to
+# move independently. CONFIGURABLE.
+EMBANKMENT_SEED_SEPARATION_METERS = 30.0
+
+# How far downstream of its seed the pinch walk will look for the
+# embankment cell before giving up. A dam more than ~100 m below the
+# storage ground it anchors stops being "this compartment's dam" at
+# parcel scale -- and the walk's honesty depends on a bound: without
+# one, every seed eventually finds SOME narrows somewhere downstream.
+# v1 prior, TUNE FROM FIRST RUN. CONFIGURABLE.
+EMBANKMENT_PINCH_WALK_MAX_METERS = 100.0
+
+# The false-crest prominence guard for every outward crest walk (valley
+# width at pinch stations, and the compartment transects): a bump along
+# the outward-and-up walk only counts as THE crest once elevation has
+# fallen at least this far below the highest point seen -- a 0.5 m
+# knoll mid-slope dips and the walk keeps climbing past it; a real
+# ridge falls away and the walk declares the crest at the high point.
+# 1.0 m sits well above the DEM's per-cell vertical noise while staying
+# below any real flanking-ridge relief. v1 prior, TUNE FROM FIRST RUN.
+# CONFIGURABLE.
+RIDGE_PROMINENCE_METERS = 1.0
+
+# Bound on each outward crest walk's half-width. A "valley" wider than
+# ~200 m crest-to-crest is not a pond narrows at this pipeline's parcel
+# scale, and an unbounded walk on a plain would march to the grid edge.
+# Hitting the bound is FLAGGED (half_width_bound_hit), never silent:
+# the width recorded at a bounded station is a floor on the truth, not
+# a measurement of it. v1 prior, TUNE FROM FIRST RUN. CONFIGURABLE.
+RIDGE_WALK_MAX_HALF_WIDTH_METERS = 100.0
+
+# When two compartments overlap by more than this fraction of the
+# SMALLER one's area, they are duplicates -- two seeds describing one
+# valley compartment -- and collapse to the higher-blend seed's
+# compartment; the loser is dropped with a duplicate_of_zone_<id>
+# reason code (seeds that walk to the SAME embankment cell collapse
+# earlier, before assembly, on the same keep-the-higher-blend rule).
+# CONFIGURABLE.
+COMPARTMENT_DUPLICATE_OVERLAP_FRACTION = 0.5
 
 
 # --- survey-zone grouping (the closing over extracted regions) ------------
@@ -626,10 +759,102 @@ reason/flag enumeration: a caller or test that reacts to a flag compares
 against a name, never a re-typed string. no_service_relationship and
 sparse_anchor are pure FLAGS (informational, never an outcome);
 below_min_area doubles as the drop_reason code when a zone's walkable
-envelope falls under the tuned floor (member REGIONS still only ever
-carry it as a flag)."""
+envelope (excavated) or compartment polygon (embankment) falls under the
+tuned floor (member REGIONS still only ever carry it as a flag).
+sparse_anchor is EXCAVATED-ONLY: a compartment has no members, so the
+member/envelope ratio it guards does not exist on the embankment path."""
+
+# Compartment truncation flags -- the established truncated_by_* naming
+# from the demoted water_candidate_zones arc, carried into this module
+# now that zone geometry clips at real ground constraints: fired only
+# when a clip actually removed area, reported as both a flags entry and
+# a boolean property, never a rejection.
+FLAG_TRUNCATED_BY_BOUNDARY = "truncated_by_boundary"
+FLAG_TRUNCATED_BY_ROAD = "truncated_by_road"
+
+# An outward crest walk that ran out its RIDGE_WALK_MAX_HALF_WIDTH_METERS
+# bound (or left the grid) before elevation fell away: the recorded
+# width/transect is a FLOOR on the truth, not a measurement of it.
+FLAG_HALF_WIDTH_BOUND_HIT = "half_width_bound_hit"
+
+# --- terminal pinches: accepted, disclosed, not refused -------------------
+# HISTORY, kept on purpose. The first cut of the compartment change
+# required an INTERIOR width minimum -- a station with the valley
+# demonstrably narrowing to it AND widening beyond it -- and refused a
+# minimum sitting at the walk's terminal station with a reason naming
+# the terminator (the retired codes pinch_off_parcel /
+# pinch_blocked_by_road, plus no_pinch_within_bound doubling for the
+# bound-hit case). The first networked run then showed what that rule
+# does on a real parcel: most seeds failed pinch_off_parcel because
+# their valleys were STILL NARROWING at the property line, and the rule
+# read "the true throat lies beyond the boundary" as a refusal. The
+# confirmed doctrine (the dam-at-the-edge precedent from the wall-walk
+# era) is the opposite: the narrowest BUILDABLE crossing is a
+# legitimate -- often the most valuable -- survey finding. Honesty
+# therefore moved from refusal to DISCLOSURE: a terminal minimum is
+# accepted and flagged with exactly one of the pinch_at_* flags below,
+# carries still_narrowing_at_termination plus the walked width
+# profile's min/max, and the narrative states that the valley continues
+# to narrow beyond the terminator -- the marked dam reach is the
+# narrowest buildable crossing WITHIN THE SURVEYED EXTENT. Boundary,
+# road, and the 100 m walk bound all get the same treatment.
+FLAG_PINCH_AT_BOUNDARY = "pinch_at_boundary"
+"""The embankment cell is the walk's terminal station because the next
+channel cell is off-parcel: the dam reach sits at the property line."""
+FLAG_PINCH_AT_ROAD = "pinch_at_road"
+"""The embankment cell is the walk's terminal station because the next
+channel cell is inside the road exclusion union: the dam reach sits
+against an existing farm road."""
+FLAG_PINCH_AT_WALK_BOUND = "pinch_at_walk_bound"
+"""The embankment cell is the walk's terminal station because the walk
+ran out -- the EMBANKMENT_PINCH_WALK_MAX_METERS distance bound, or the
+D8 flow field itself ending (a flat-tie/outlet cell, the rarer case,
+grouped here deliberately: either way the SURVEYED EXTENT ended, and
+'walk limit' is the honest noun for both)."""
+FLAG_STILL_NARROWING = "still_narrowing_at_termination"
+"""Rides every terminal pinch whose terminal width is strictly below
+the preceding station's (by the first-of-ties minimum rule this is
+every terminal pinch -- carried explicitly anyway so the disclosure is
+a readable property, not an inference): the valley was still narrowing
+when the walk was cut off."""
+
+# The SOLE remaining walk failure: the width minimum sits at the SEED
+# station itself (a monotonically widening -- or never-narrowing --
+# profile). A compartment needs a baseline, and a dam at the storage
+# cell is degenerate; this seed honestly produces nothing.
+REASON_NO_CONSTRICTION = "no_constriction"
+
+REASON_COMPARTMENT_EMPTY_AFTER_CLIP = "compartment_empty_after_clip"
+"""Defensive only -- cannot occur by construction (the baseline's own
+cells are on-parcel and never road cells, so the clipped watershed band
+always keeps ground): guarded so a geometry-library edge case degrades
+to an attributed failed seed, never a crash."""
+
+# The dedupe reason code is dynamic (it names the surviving zone):
+# duplicate_of_zone_<id>. The prefix is the constant so tests and
+# consumers match against a name, never a re-typed string.
+DUPLICATE_OF_ZONE_REASON_PREFIX = "duplicate_of_zone_"
+
+
+def duplicate_of_zone_reason(zone_id: int) -> str:
+    """The dedupe drop_reason/reason_code for a seed or compartment that
+    collapsed into surviving zone `zone_id` -- two seeds walking to the
+    same embankment cell, or two compartments overlapping beyond
+    COMPARTMENT_DUPLICATE_OVERLAP_FRACTION of the smaller."""
+    return f"{DUPLICATE_OF_ZONE_REASON_PREFIX}{zone_id}"
+
 
 PROVENANCE_SUITABILITY_SURFACE = "suitability_surface"
+PROVENANCE_SEED_COMPARTMENT = "seed_compartment"
+"""Per-object provenance: excavated zones still come from threshold
+extraction over the suitability surface; an embankment zone is a valley
+compartment generated from a seed (the surface is its NOMINATION
+instrument, not its extraction instrument)."""
+
+# Seed lifecycle status values, mirroring the zone status pattern: every
+# seed either produced a compartment or failed with an attributed reason.
+SEED_STATUS_COMPARTMENT = "compartment"
+SEED_STATUS_FAILED = "failed"
 
 
 # --- narrative note constants ---------------------------------------------
@@ -1503,6 +1728,7 @@ def build_survey_zones(
     gate_context: dict,
     boundary_polygon_utm: Polygon,
     grouping_distance_meters: float = SURVEY_ZONE_GROUPING_DISTANCE_METERS,
+    road_union_utm=None,
 ) -> list[dict]:
     """
     The aggregation step: per type, member regions whose footprints sit
@@ -1510,6 +1736,15 @@ def build_survey_zones(
     ZONE -- one code path for clusters and singletons. The zone is the
     deliverable object downstream consumers receive; members ride along
     intact as sub-features with zone-id linkage both ways.
+
+    Since the compartment change this builder serves the EXCAVATED type
+    alone in practice -- the embankment type generates no member regions
+    (see generate_embankment_compartments()), so its loop iteration
+    naturally yields nothing. `road_union_utm`, when not None, clips the
+    drawn envelope at the road exclusion union exactly as the boundary
+    clip below does (roads are a geometric exclusion now), flagged
+    truncated_by_road; the pre-clip envelope is kept for the
+    road_overlap_pct measurement.
 
     GROUPING AND DRAWING ARE TWO DECISIONS (pre-merge change): the 30 m
     vector closing still decides WHICH members belong together --
@@ -1585,6 +1820,32 @@ def build_survey_zones(
                 logger.warning("build_survey_zones: clipped hull empty -- using member footprints")
                 clipped_envelope = member_union
 
+            # ROADS ARE A GEOMETRIC EXCLUSION now, for both types: the
+            # hull clips at the road exclusion union exactly as it
+            # clips at the parcel boundary, flagged truncated_by_road
+            # when the clip actually removed area (the established
+            # truncated_by_* convention). road_union_utm None -- road
+            # never checked, or checked and genuinely no mapped road --
+            # takes none of these branches, which is what keeps the
+            # roadless excavated output byte-identical to the
+            # pre-road-clip behavior. The PRE-clip envelope is kept so
+            # road_overlap_pct can measure the ground the clip removed
+            # (measuring the clipped envelope would be guaranteed
+            # zero -- see the compute core's overlap pass).
+            truncated_by_road = False
+            pre_road_clip_envelope = clipped_envelope
+            if road_union_utm is not None:
+                after_road = _polygonal(clipped_envelope.difference(road_union_utm))
+                if not after_road.is_empty and after_road.area < clipped_envelope.area - 1e-6:
+                    truncated_by_road = True
+                    clipped_envelope = after_road
+                elif after_road.is_empty:
+                    # A hull entirely inside the road union: keep the
+                    # unclipped envelope with the flag rather than
+                    # emitting empty geometry (the overlap measurement
+                    # then reads ~100% -- the honest picture).
+                    truncated_by_road = True
+
             member_cells = [cell for member in zone_members for cell in member["cells"]]
             member_acres = len(member_cells) * cell_area_acres(dem)
             zone_acres = clipped_envelope.area / SQUARE_METERS_PER_ACRE
@@ -1604,10 +1865,12 @@ def build_survey_zones(
             )
 
             flags = []
-            # The floor's basis is ZONE acres now (the walkable hull --
-            # see MIN_SURVEY_REGION_AREA_ACRES's history note); the flag
-            # here mirrors the drop decision the compute core makes on
-            # the same number.
+            if truncated_by_road:
+                flags.append(FLAG_TRUNCATED_BY_ROAD)
+            # The floor's basis is ZONE acres now (the walkable hull,
+            # post-clip -- see MIN_SURVEY_REGION_AREA_ACRES's history
+            # note); the flag here mirrors the drop decision the
+            # compute core makes on the same number.
             if zone_acres < MIN_SURVEY_REGION_AREA_ACRES:
                 flags.append(FLAG_BELOW_MIN_AREA)
             # The honesty guard: a walkable claim vastly exceeding its
@@ -1636,6 +1899,8 @@ def build_survey_zones(
                     "flags": flags,
                     "below_min_area": FLAG_BELOW_MIN_AREA in flags,
                     "sparse_anchor": FLAG_SPARSE_ANCHOR in flags,
+                    "truncated_by_road": truncated_by_road,
+                    "pre_road_clip_polygon_utm": pre_road_clip_envelope,
                     "boundary_adjacency_fraction": round(
                         _boundary_adjacency_fraction(clipped_envelope, boundary_polygon_utm), 3
                     ),
@@ -1667,6 +1932,842 @@ def _cells_in_polygon_utm(dem: dict, polygon_utm) -> list:
     xs, ys = np.meshgrid(col_x, row_y)
     inside = contains_xy(polygon_utm, xs, ys)
     return [(int(r), int(c)) for r, c in np.argwhere(inside)]
+
+
+# ==========================================================================
+# Embankment compartments: seed -> pinch -> compartment
+# ==========================================================================
+# The embankment generation mechanism (see the constants section above
+# for the design statement). The excavated path never touches any of
+# this; the shared machinery reused here is the existing D8 flow field
+# (valley_delineation), keypoint_detection.build_upstream_map() (the
+# watershed inversion -- reused, never reimplemented), and the
+# measurement/overlap/gravity helpers both types already share.
+
+def _polygonal(geometry):
+    """Normalizes a clip result to polygonal geometry: a shapely
+    intersection/difference can legitimately come back as a
+    GeometryCollection carrying line/point fragments beside the real
+    polygons (a transect band edge grazing a cell corner does it), and
+    downstream measurement (perimeter adjacency, area, the wire form)
+    is defined over the polygonal part only. Polygon/MultiPolygon pass
+    through untouched; a collection keeps its polygonal parts; anything
+    else (all-linear, empty) reads as the empty Polygon."""
+    if geometry.is_empty:
+        return geometry if geometry.geom_type in ("Polygon", "MultiPolygon") else Polygon()
+    if geometry.geom_type in ("Polygon", "MultiPolygon"):
+        return geometry
+    if geometry.geom_type == "GeometryCollection":
+        parts = [part for part in geometry.geoms if part.geom_type in ("Polygon", "MultiPolygon")]
+        if not parts:
+            return Polygon()
+        return unary_union(parts)
+    return Polygon()
+
+
+def _road_cell_mask(dem: dict, road_union_utm) -> np.ndarray:
+    """Boolean grid marking cells whose CENTERS fall inside the road
+    exclusion union (the pipeline-wide raster<->vector convention).
+    All-False when no union is in play -- an unchecked or clean-None road
+    answer leaves every walk and seed ungated, which is what makes the
+    roadless path byte-identical to the pre-road-exclusion behavior."""
+    shape = dem["array"].shape
+    if road_union_utm is None:
+        return np.zeros(shape, dtype=bool)
+    rows, cols = shape
+    px, py = dem["resolution_meters"]
+    col_x = dem["origin_x"] + (np.arange(cols) + 0.5) * px
+    row_y = dem["origin_y"] - (np.arange(rows) + 0.5) * py
+    xs, ys = np.meshgrid(col_x, row_y)
+    return contains_xy(road_union_utm, xs, ys)
+
+
+def select_embankment_seeds(
+    dem: dict,
+    surface: np.ndarray,
+    gate_mask: np.ndarray,
+    road_cell_mask: np.ndarray,
+    criteria: dict,
+    min_score: float = EMBANKMENT_SEED_MIN_SCORE,
+    separation_meters: float = EMBANKMENT_SEED_SEPARATION_METERS,
+) -> list[dict]:
+    """
+    Iterative highest-blend seeding over the embankment NOMINATION
+    surface: a seed candidate is a gated cell (on-parcel, under the
+    contributing-area ceiling, outside the inert setback) NOT inside the
+    road exclusion union, with blend >= min_score. The highest-blend
+    qualifying cell becomes a seed and claims every qualifying cell
+    within separation_meters (real-ground disc); seeding repeats on the
+    highest remaining blend until no qualifying cell is left. UNCAPPED,
+    per the standing no-cap rule -- every seed is walked downstream and
+    the failures report their reasons rather than being pre-pruned here.
+
+    Each seed dict carries the ANCHOR CLAIM the reporting honesty split
+    keys on: the seed's own blend score and its per-criterion signature
+    (the raw criterion scores AT the seed cell), kept separate from
+    whatever the eventual compartment's walked ground averages to.
+    Deterministic: argmax ties resolve to the first cell in row-major
+    order, so the same surface always seeds identically.
+    """
+    eligible = gate_mask & ~road_cell_mask & (surface >= min_score)
+    working = np.where(eligible, surface, -np.inf)
+    rows, cols = surface.shape
+    offsets = build_disc_kernel_offsets(dem["resolution_meters"], separation_meters)
+
+    seeds: list[dict] = []
+    while True:
+        flat_index = int(np.argmax(working))
+        r, c = divmod(flat_index, cols)
+        if not np.isfinite(working[r, c]):
+            break
+        x, y = pixel_center_xy(dem, r, c)
+        lon, lat = warp_transform(dem["crs"], "EPSG:4326", [x], [y])
+        seeds.append(
+            {
+                "rowcol": (r, c),
+                "xy": (x, y),
+                "geometry_wgs84": {"type": "Point", "coordinates": (lon[0], lat[0])},
+                "blend_score": round(float(surface[r, c]), 4),
+                "criteria_signature": {
+                    name: round(float(criteria[name][r, c]), 3) for name in EMBANKMENT_WEIGHTS
+                },
+            }
+        )
+        for dr, dc in offsets:
+            nr, nc = r + dr, c + dc
+            if 0 <= nr < rows and 0 <= nc < cols:
+                working[nr, nc] = -np.inf
+    return seeds
+
+
+def _flow_direction_unit(dem: dict, rowcol: tuple, flow_to_row: np.ndarray, flow_to_col: np.ndarray):
+    """Unit ground-space (dx, dy) vector of the D8 flow step out of
+    `rowcol`, or None at the -1 sentinel (outlet / flat-plateau tie --
+    compute_flow_direction()'s own convention). Row increases downward
+    while y increases upward, hence the dy sign flip."""
+    r, c = rowcol
+    tr, tc = int(flow_to_row[r, c]), int(flow_to_col[r, c])
+    if tr < 0:
+        return None
+    px, py = dem["resolution_meters"]
+    dx = (tc - c) * px
+    dy = -(tr - r) * py
+    length = math.hypot(dx, dy)
+    return (dx / length, dy / length)
+
+
+def ridge_crest_walk(
+    dem: dict,
+    start_xy: tuple,
+    direction_unit: tuple,
+    prominence_meters: float = RIDGE_PROMINENCE_METERS,
+    max_half_width_meters: float = RIDGE_WALK_MAX_HALF_WIDTH_METERS,
+) -> dict:
+    """
+    One outward-and-up crest walk: from start_xy, march along
+    direction_unit sampling the RAW DEM at half-cell steps, tracking the
+    highest elevation seen and where it was. The crest is declared AT
+    THAT HIGH POINT once elevation has fallen at least prominence_meters
+    below it -- the false-crest guard: a sub-prominence knoll dips and
+    the walk keeps climbing past it; only a drop that big means the
+    ground has genuinely fallen away behind a crest.
+
+    Bound behavior, honest and flagged: if the walk runs out its
+    max_half_width_meters bound -- or leaves the grid / hits nodata --
+    before the prominence drop confirms a crest, the returned point is
+    the walk's END (not the unconfirmed running high), half_width_m is
+    the distance actually walked (the bound value when the bound itself
+    ended it), and bound_hit is True: the number is a FLOOR on the
+    valley's true half-width, never presented as a measurement of it.
+
+    Returns {'half_width_m', 'crest_xy', 'crest_rowcol',
+    'crest_elevation_m', 'bound_hit'}.
+    """
+    array = dem["array"]
+    rows, cols = array.shape
+    px, py = dem["resolution_meters"]
+    step = min(px, py) / 2.0
+    x0, y0 = start_xy
+    ux, uy = direction_unit
+
+    def _sample(x: float, y: float):
+        col = int(math.floor((x - dem["origin_x"]) / px))
+        row = int(math.floor((dem["origin_y"] - y) / py))
+        if 0 <= row < rows and 0 <= col < cols:
+            value = float(array[row, col])
+            if not math.isnan(value):
+                return row, col, value
+        return None
+
+    best_elevation = -math.inf
+    best_distance = 0.0
+    best_xy = (x0, y0)
+    best_rowcol = None
+    start_sample = _sample(x0, y0)
+    if start_sample is not None:
+        best_rowcol = (start_sample[0], start_sample[1])
+        best_elevation = start_sample[2]
+
+    distance = 0.0
+    last_xy = (x0, y0)
+    last_rowcol = best_rowcol
+    last_elevation = best_elevation
+    while distance < max_half_width_meters:
+        distance = min(distance + step, max_half_width_meters)
+        x = x0 + ux * distance
+        y = y0 + uy * distance
+        sample = _sample(x, y)
+        if sample is None:
+            # Off-grid or nodata before a confirmed crest: the walk ends
+            # at its last measurable point, flagged.
+            return {
+                "half_width_m": round(distance, 1),
+                "crest_xy": last_xy,
+                "crest_rowcol": last_rowcol,
+                "crest_elevation_m": (
+                    round(last_elevation, 2) if math.isfinite(last_elevation) else None
+                ),
+                "bound_hit": True,
+            }
+        row, col, elevation = sample
+        last_xy, last_rowcol, last_elevation = (x, y), (row, col), elevation
+        if elevation > best_elevation:
+            best_elevation = elevation
+            best_distance = distance
+            best_xy = (x, y)
+            best_rowcol = (row, col)
+        elif best_elevation - elevation >= prominence_meters:
+            return {
+                "half_width_m": round(best_distance, 1),
+                "crest_xy": best_xy,
+                "crest_rowcol": best_rowcol,
+                "crest_elevation_m": round(best_elevation, 2),
+                "bound_hit": False,
+            }
+
+    return {
+        "half_width_m": round(max_half_width_meters, 1),
+        "crest_xy": last_xy,
+        "crest_rowcol": last_rowcol,
+        "crest_elevation_m": (
+            round(last_elevation, 2) if math.isfinite(last_elevation) else None
+        ),
+        "bound_hit": True,
+    }
+
+
+def measure_valley_width(
+    dem: dict,
+    rowcol: tuple,
+    direction_unit: tuple,
+    prominence_meters: float = RIDGE_PROMINENCE_METERS,
+    max_half_width_meters: float = RIDGE_WALK_MAX_HALF_WIDTH_METERS,
+) -> dict:
+    """
+    Crest-to-crest valley width at one channel cell: two ridge_crest_
+    walk()s outward perpendicular to direction_unit (the LOCAL flow
+    direction at a pinch station; the BASELINE direction at a
+    compartment transect -- the caller decides, this function only takes
+    the vector). width_m is the sum of the two half-widths; bound_hit is
+    True when EITHER side's walk was bounded (the width is then a floor
+    on the truth -- see ridge_crest_walk()).
+    """
+    x, y = pixel_center_xy(dem, rowcol[0], rowcol[1])
+    perpendicular = (-direction_unit[1], direction_unit[0])
+    left = ridge_crest_walk(dem, (x, y), perpendicular, prominence_meters, max_half_width_meters)
+    right = ridge_crest_walk(
+        dem, (x, y), (-perpendicular[0], -perpendicular[1]), prominence_meters, max_half_width_meters
+    )
+    return {
+        "width_m": round(left["half_width_m"] + right["half_width_m"], 1),
+        "left": left,
+        "right": right,
+        "bound_hit": left["bound_hit"] or right["bound_hit"],
+    }
+
+
+def walk_embankment_pinch(
+    dem: dict,
+    seed_rowcol: tuple,
+    flow_to_row: np.ndarray,
+    flow_to_col: np.ndarray,
+    on_parcel_mask: np.ndarray,
+    road_cell_mask: np.ndarray,
+    max_walk_meters: float = EMBANKMENT_PINCH_WALK_MAX_METERS,
+    prominence_meters: float = RIDGE_PROMINENCE_METERS,
+    max_half_width_meters: float = RIDGE_WALK_MAX_HALF_WIDTH_METERS,
+) -> dict:
+    """
+    The pinch walk: from the seed, downstream along the D8 flow
+    direction, measuring crest-to-crest valley width (perpendicular to
+    the LOCAL flow direction) at every channel cell visited, bounded by
+    max_walk_meters of along-channel ground distance. The walk
+    TERMINATES before stepping onto an off-parcel cell, onto a
+    road-exclusion cell, past the distance bound, or off the flow field
+    (the -1 outlet/flat sentinel) -- so every measured station is
+    on-parcel, pre-road, within bound by construction.
+
+    THE EMBANKMENT CELL is the MINIMUM-WIDTH station among ALL walked
+    stations -- interior or terminal. A minimum sitting at the walk's
+    terminal station is ACCEPTED AND DISCLOSED, never refused (the
+    dam-at-the-edge doctrine -- see the pinch_at_* flag constants for
+    the history that retired the interior-only rule): the narrowest
+    buildable crossing within the surveyed extent is a legitimate,
+    often the most valuable, survey finding. A terminal pinch carries
+    exactly one of 'boundary' / 'road' / 'walk_bound' in `terminal`
+    (naming what ended the walk; the flow field running out groups
+    under walk_bound -- the surveyed extent ended either way), plus
+    still_narrowing_at_termination and the walked width profile's
+    min/max, so the constriction's strength is readable.
+
+    THE SOLE REMAINING FAILURE, honest, no fallback: the minimum sits
+    at the SEED station itself (a monotonically widening -- or
+    never-narrowing -- profile). A compartment needs a baseline, and a
+    dam at the storage cell is degenerate: reason_code no_constriction.
+
+    Returns {'found', 'stations', 'terminator',
+    'still_narrowing_at_termination', 'width_profile_min_m',
+    'width_profile_max_m', and either {'pinch_index', 'pinch_rowcol',
+    'pinch_width_m', 'walk_distance_m', 'half_width_bound_hit',
+    'terminal' (None for an interior pinch)} or {'reason_code'}}.
+    Stations carry each cell's width measurement for the
+    diagnostic/export instruments.
+    """
+    px, py = dem["resolution_meters"]
+    stations: list[dict] = []
+    current = seed_rowcol
+    distance = 0.0
+    terminator = "flow_end"
+    previous_direction = None
+
+    while True:
+        direction = _flow_direction_unit(dem, current, flow_to_row, flow_to_col)
+        if direction is None and previous_direction is not None:
+            # Terminal station on a flat tie/outlet: measure with the
+            # incoming direction rather than skipping the cell.
+            direction = previous_direction
+        if direction is None:
+            # The seed itself has no flow direction: nothing measurable.
+            terminator = "flow_end"
+            break
+
+        measurement = measure_valley_width(
+            dem, current, direction, prominence_meters, max_half_width_meters
+        )
+        stations.append(
+            {
+                "rowcol": current,
+                "distance_m": round(distance, 1),
+                "width_m": measurement["width_m"],
+                "measurement": measurement,
+            }
+        )
+
+        r, c = current
+        tr, tc = int(flow_to_row[r, c]), int(flow_to_col[r, c])
+        if tr < 0:
+            terminator = "flow_end"
+            break
+        step_meters = math.hypot((tc - c) * px, (tr - r) * py)
+        if distance + step_meters > max_walk_meters:
+            terminator = "distance_bound"
+            break
+        if not on_parcel_mask[tr, tc]:
+            terminator = "boundary"
+            break
+        if road_cell_mask[tr, tc]:
+            terminator = "road"
+            break
+        previous_direction = direction
+        current = (tr, tc)
+        distance += step_meters
+
+    if not stations:
+        # The seed itself was unmeasurable (no flow direction at all):
+        # degenerate in the same way a seed-station minimum is.
+        return {
+            "found": False,
+            "reason_code": REASON_NO_CONSTRICTION,
+            "terminator": terminator,
+            "stations": stations,
+            "still_narrowing_at_termination": False,
+            "width_profile_min_m": None,
+            "width_profile_max_m": None,
+        }
+
+    widths = [station["width_m"] for station in stations]
+    minimum_index = int(np.argmin(widths))
+    still_narrowing = len(widths) >= 2 and widths[-1] < widths[-2]
+    profile = {
+        "still_narrowing_at_termination": still_narrowing,
+        "width_profile_min_m": round(min(widths), 1),
+        "width_profile_max_m": round(max(widths), 1),
+    }
+    if minimum_index == 0:
+        # The valley never narrows below its seed station: no baseline
+        # exists to build a compartment on -- the one honest failure.
+        return {
+            "found": False,
+            "reason_code": REASON_NO_CONSTRICTION,
+            "terminator": terminator,
+            "stations": stations,
+            **profile,
+        }
+
+    # A terminal minimum is ACCEPTED: `terminal` names what ended the
+    # walk (distance bound and the flow field running out both read
+    # walk_bound -- the surveyed extent ended either way).
+    terminal = None
+    if minimum_index == len(stations) - 1:
+        terminal = {"boundary": "boundary", "road": "road"}.get(terminator, "walk_bound")
+
+    pinch_station = stations[minimum_index]
+    return {
+        "found": True,
+        "terminator": terminator,
+        "stations": stations,
+        "pinch_index": minimum_index,
+        "pinch_rowcol": pinch_station["rowcol"],
+        "pinch_width_m": pinch_station["width_m"],
+        "walk_distance_m": pinch_station["distance_m"],
+        "half_width_bound_hit": pinch_station["measurement"]["bound_hit"],
+        "terminal": terminal,
+        **profile,
+    }
+
+
+def watershed_cells(pinch_rowcol: tuple, upstream_map: dict) -> set:
+    """
+    The full watershed (every cell draining through pinch_rowcol,
+    itself included): transitive closure of keypoint_detection.
+    build_upstream_map()'s one-step feeder adjacency -- the EXISTING
+    upstream-map machinery, reused rather than reimplemented (the same
+    fan-out valley_level_pool's backwater delineation runs, minus its
+    elevation/distance predicates). The flow field is a DAG (flow only
+    ever points strictly downhill), so this terminates; the seen set
+    guards ties defensively regardless.
+    """
+    from collections import deque
+
+    seen = {pinch_rowcol}
+    frontier = deque([pinch_rowcol])
+    while frontier:
+        current = frontier.popleft()
+        for feeder in upstream_map.get(current, ()):
+            if feeder not in seen:
+                seen.add(feeder)
+                frontier.append(feeder)
+    return seen
+
+
+def _line_geometry_wgs84(dem: dict, points_utm: list) -> dict:
+    """LineString WGS84 wire form for a list of (x, y) UTM points, built
+    at the object's birth (stored wire forms -- no serialization-time
+    reprojection anywhere in this module)."""
+    lons, lats = warp_transform(
+        dem["crs"], "EPSG:4326", [p[0] for p in points_utm], [p[1] for p in points_utm]
+    )
+    return {"type": "LineString", "coordinates": list(zip(lons, lats))}
+
+
+def build_embankment_compartment(
+    dem: dict,
+    seed: dict,
+    walk: dict,
+    upstream_map: dict,
+    boundary_polygon_utm: Polygon,
+    road_union_utm,
+    surfaces: dict,
+    gate_context: dict,
+    prominence_meters: float = RIDGE_PROMINENCE_METERS,
+    max_half_width_meters: float = RIDGE_WALK_MAX_HALF_WIDTH_METERS,
+) -> Optional[dict]:
+    """
+    The compartment (the survey area) for one seed whose pinch walk
+    found an embankment cell:
+
+      * BASELINE = seed -> embankment cell (the storage reach's spine).
+      * TRANSECTS at BOTH endpoints: outward-and-up crest walks
+        perpendicular to the BASELINE direction (not local flow), both
+        sides, same prominence guard and half-width bound -- four crest
+        points, two transect lines.
+      * RIDGE CONNECTION: the embankment cell's watershed (the existing
+        upstream-map machinery -- watershed_cells()), clipped to the
+        band between the two transects. The lateral boundary of that
+        clip IS the ridge line between the transect ends -- hydrology
+        handles branching crests and spurs; no crest-tracing exists
+        anywhere on this path.
+      * The compartment polygon = that bounded watershed band, clipped
+        to the parcel boundary AND the road exclusion union, each clip
+        flagged (truncated_by_boundary / truncated_by_road) when it
+        actually removed area. render_fill_polygon_utm IS the clipped
+        compartment, identity; WGS84 stored beside UTM for the
+        compartment, the baseline, and both transects, all at birth.
+
+    The band is padded half a cell beyond each endpoint along the
+    baseline so the seed and embankment CELLS belong to their own
+    compartment whole -- a cut exactly through an endpoint's center
+    would exclude the two defining cells from the compartment's own
+    cell population.
+
+    Score statistics over the compartment's own cells deliberately
+    include low-scoring side slopes and the wall reach -- THAT IS THEIR
+    JOB (the compartment is the ground one survey walks, ridge to
+    ridge); the seed's blend score and criteria signature ride the
+    `seed` block SEPARATELY as the anchor claim, per the reporting
+    honesty split. Returns None only on the defensive
+    empty-after-clip guard (see REASON_COMPARTMENT_EMPTY_AFTER_CLIP).
+    """
+    seed_rowcol = seed["rowcol"]
+    pinch_rowcol = walk["pinch_rowcol"]
+    seed_xy = pixel_center_xy(dem, seed_rowcol[0], seed_rowcol[1])
+    pinch_xy = pixel_center_xy(dem, pinch_rowcol[0], pinch_rowcol[1])
+
+    baseline_dx = pinch_xy[0] - seed_xy[0]
+    baseline_dy = pinch_xy[1] - seed_xy[1]
+    baseline_length = math.hypot(baseline_dx, baseline_dy)
+    baseline_unit = (baseline_dx / baseline_length, baseline_dy / baseline_length)
+    perpendicular = (-baseline_unit[1], baseline_unit[0])
+
+    transects = []
+    for end_name, end_xy in (("seed", seed_xy), ("pinch", pinch_xy)):
+        left = ridge_crest_walk(dem, end_xy, perpendicular, prominence_meters, max_half_width_meters)
+        right = ridge_crest_walk(
+            dem, end_xy, (-perpendicular[0], -perpendicular[1]), prominence_meters, max_half_width_meters
+        )
+        points_utm = [left["crest_xy"], end_xy, right["crest_xy"]]
+        transects.append(
+            {
+                "end": end_name,
+                "left": left,
+                "right": right,
+                "width_m": round(left["half_width_m"] + right["half_width_m"], 1),
+                "bound_hit": left["bound_hit"] or right["bound_hit"],
+                "points_utm": points_utm,
+                "geometry_wgs84": _line_geometry_wgs84(dem, points_utm),
+            }
+        )
+
+    # The watershed band: every cell draining through the embankment
+    # cell, cut to the strip between the two transects. The band
+    # rectangle spans the baseline (padded half a cell each end -- see
+    # docstring) and extends laterally far beyond any possible watershed
+    # (the grid diagonal), so its only real cuts are the two transect-
+    # perpendicular ends; the lateral boundary of the clip is the
+    # watershed's own divide -- the ridge line.
+    px, py = dem["resolution_meters"]
+    end_pad = (px + py) / 4.0
+    rows, cols = dem["array"].shape
+    lateral_reach = math.hypot(rows * py, cols * px)
+    a0 = (seed_xy[0] - baseline_unit[0] * end_pad, seed_xy[1] - baseline_unit[1] * end_pad)
+    a1 = (pinch_xy[0] + baseline_unit[0] * end_pad, pinch_xy[1] + baseline_unit[1] * end_pad)
+    band = Polygon(
+        [
+            (a0[0] + perpendicular[0] * lateral_reach, a0[1] + perpendicular[1] * lateral_reach),
+            (a0[0] - perpendicular[0] * lateral_reach, a0[1] - perpendicular[1] * lateral_reach),
+            (a1[0] - perpendicular[0] * lateral_reach, a1[1] - perpendicular[1] * lateral_reach),
+            (a1[0] + perpendicular[0] * lateral_reach, a1[1] + perpendicular[1] * lateral_reach),
+        ]
+    )
+
+    shed = watershed_cells(pinch_rowcol, upstream_map)
+    shed_mask = np.zeros(dem["array"].shape, dtype=bool)
+    for r, c in shed:
+        shed_mask[r, c] = True
+    shed_footprint = cell_union_footprint(dem, shed_mask)
+
+    banded = _polygonal(shed_footprint.intersection(band))
+
+    flags: list[str] = []
+    area_epsilon = 1e-6
+    clipped = _polygonal(banded.intersection(boundary_polygon_utm))
+    if clipped.area < banded.area - area_epsilon:
+        flags.append(FLAG_TRUNCATED_BY_BOUNDARY)
+    pre_road_clip = clipped
+    if road_union_utm is not None and not clipped.is_empty:
+        after_road = _polygonal(clipped.difference(road_union_utm))
+        if after_road.area < clipped.area - area_epsilon:
+            flags.append(FLAG_TRUNCATED_BY_ROAD)
+        clipped = after_road
+    if clipped.is_empty:
+        # Cannot occur by construction (the baseline's own on-parcel,
+        # non-road cells always survive both clips) -- guarded so a
+        # geometry-library edge case degrades to an attributed failed
+        # seed, never a crash.
+        logger.warning(
+            "build_embankment_compartment: compartment clipped to empty for seed %s -- skipped",
+            seed_rowcol,
+        )
+        return None
+
+    if walk["half_width_bound_hit"] or any(t["bound_hit"] for t in transects):
+        flags.append(FLAG_HALF_WIDTH_BOUND_HIT)
+
+    # Terminal-pinch disclosure (the accepted-not-refused doctrine --
+    # see the pinch_at_* constants): exactly one flag naming the
+    # terminator, plus the still-narrowing statement, so a dam reach at
+    # the property line / an existing road / the walk limit announces
+    # itself rather than reading as an ordinary interior narrows.
+    pinch_terminal = walk.get("terminal")
+    if pinch_terminal is not None:
+        flags.append(
+            {
+                "boundary": FLAG_PINCH_AT_BOUNDARY,
+                "road": FLAG_PINCH_AT_ROAD,
+                "walk_bound": FLAG_PINCH_AT_WALK_BOUND,
+            }[pinch_terminal]
+        )
+        if walk["still_narrowing_at_termination"]:
+            flags.append(FLAG_STILL_NARROWING)
+
+    compartment_acres = clipped.area / SQUARE_METERS_PER_ACRE
+    cells = _cells_in_polygon_utm(dem, clipped)
+    # A compartment too small to hold a single cell center is headed for
+    # the acreage floor regardless; its stats honestly come from the
+    # anchor cell rather than nothing.
+    measurement_cells = cells if cells else [seed_rowcol]
+
+    measurements = _measure_member_cells(
+        dem,
+        measurement_cells,
+        surfaces[SURVEY_TYPE_EMBANKMENT],
+        surfaces["criteria"][SURVEY_TYPE_EMBANKMENT],
+        EMBANKMENT_WEIGHTS,
+        gate_context["twi_percentile"],
+        gate_context["depression_depth"],
+        gate_context["flow_accumulation"],
+        gate_context["slope_pct"],
+        gate_context["soil_covered_mask"],
+        gate_context["soil_checked"],
+    )
+
+    geometry_wgs84 = transform_geom(dem["crs"], "EPSG:4326", mapping(clipped))
+    seed_lon, seed_lat = seed["geometry_wgs84"]["coordinates"]
+    pinch_lons, pinch_lats = warp_transform(dem["crs"], "EPSG:4326", [pinch_xy[0]], [pinch_xy[1]])
+    baseline_points_utm = [seed_xy, pinch_xy]
+
+    return {
+        "survey_type": SURVEY_TYPE_EMBANKMENT,
+        "nominated_by": PROVENANCE_SEED_COMPARTMENT,
+        "cells": cells,
+        "cell_count": len(cells),
+        # THE compartment acreage: the drawn polygon's own area (a
+        # compartment is a drawn boundary, not a cell population -- the
+        # same cell-vs-polygon acreage split the excavated hull uses).
+        # Carried under the shared zone_acres key so the floor, the
+        # drop accounting, and every shape-generic consumer read one
+        # name; there is deliberately NO member_acres here -- a
+        # compartment has no members.
+        "zone_acres": round(compartment_acres, 4),
+        **measurements,
+        # THE ANCHOR CLAIM, separate from the walked ground's means
+        # (the reporting honesty split): the seed's own blend score and
+        # per-criterion signature, plus the walk records.
+        "seed": {
+            "rowcol": seed_rowcol,
+            "xy": seed_xy,
+            "geometry_wgs84": {"type": "Point", "coordinates": (seed_lon, seed_lat)},
+            "blend_score": seed["blend_score"],
+            "criteria_signature": dict(seed["criteria_signature"]),
+        },
+        "seed_blend_score": seed["blend_score"],
+        "pinch": {
+            "rowcol": pinch_rowcol,
+            "xy": pinch_xy,
+            "geometry_wgs84": {"type": "Point", "coordinates": (pinch_lons[0], pinch_lats[0])},
+            "width_m": walk["pinch_width_m"],
+            "walk_distance_m": walk["walk_distance_m"],
+            "half_width_bound_hit": walk["half_width_bound_hit"],
+            # Terminal disclosure: None for an interior pinch;
+            # 'boundary' / 'road' / 'walk_bound' when the embankment
+            # cell is the walk's terminal station, with the
+            # still-narrowing statement and the walked width profile's
+            # extremes beside it.
+            "terminal": pinch_terminal,
+            "still_narrowing_at_termination": walk["still_narrowing_at_termination"],
+            "width_profile_min_m": walk["width_profile_min_m"],
+            "width_profile_max_m": walk["width_profile_max_m"],
+        },
+        "pinch_terminal": pinch_terminal,
+        "still_narrowing_at_termination": (
+            pinch_terminal is not None and walk["still_narrowing_at_termination"]
+        ),
+        "baseline": {
+            "points_utm": baseline_points_utm,
+            "length_m": round(baseline_length, 1),
+            "geometry_wgs84": _line_geometry_wgs84(dem, baseline_points_utm),
+        },
+        "transects": transects,
+        "walk_stations": walk["stations"],
+        "flags": flags,
+        "below_min_area": False,  # decided at the floor, over zone_acres
+        "truncated_by_boundary": FLAG_TRUNCATED_BY_BOUNDARY in flags,
+        "truncated_by_road": FLAG_TRUNCATED_BY_ROAD in flags,
+        "half_width_bound_hit": FLAG_HALF_WIDTH_BOUND_HIT in flags,
+        "boundary_adjacency_fraction": round(
+            _boundary_adjacency_fraction(clipped, boundary_polygon_utm), 3
+        ),
+        "polygon_utm": clipped,
+        "geometry_wgs84": geometry_wgs84,
+        # IDENTITY of the clipped compartment -- the clip at the parcel
+        # boundary and the road union is part of the object's own
+        # definition; no further morphology downstream, ever (the same
+        # render_fill contract every water zone has carried).
+        "render_fill_polygon_utm": clipped,
+        "render_fill_geometry_wgs84": geometry_wgs84,
+        # PRE-road-clip geometry, kept so road_overlap_pct can measure
+        # the ground the road clip REMOVED from the walkable claim --
+        # the meaningful number now that the drawn geometry is clipped
+        # at roads (measuring the clipped envelope would be a
+        # guaranteed zero).
+        "pre_road_clip_polygon_utm": pre_road_clip,
+    }
+
+
+def generate_embankment_compartments(
+    dem: dict,
+    surfaces: dict,
+    gate_mask: np.ndarray,
+    on_parcel_mask: np.ndarray,
+    road_cell_mask: np.ndarray,
+    road_union_utm,
+    boundary_polygon_utm: Polygon,
+    flow_to_row: np.ndarray,
+    flow_to_col: np.ndarray,
+    gate_context: dict,
+) -> tuple[list[dict], list[dict]]:
+    """
+    The full embankment generation pass: seed, walk, assemble, and
+    PINCH-LEVEL dedupe. Returns (compartment_zones, seed_records).
+
+    seed_records carries EVERY seed with its outcome, per the
+    dropped-feature pattern -- status 'compartment' with the eventual
+    zone linkage, or status 'failed' with the walk's reason code. Two
+    seeds walking to the SAME embankment cell collapse here to the
+    higher-blend seed (seeding order is blend-descending, so the first
+    claimant wins); the loser's reason code is patched to
+    duplicate_of_zone_<id> by the compute core once zone ids exist (via
+    the private _duplicate_of_zone reference), or falls back to naming
+    the winner seed if the winner itself is later deduped away.
+    COMPARTMENT-level overlap dedupe happens in the compute core, after
+    every compartment exists (it needs the assembled polygons).
+    """
+    seeds = select_embankment_seeds(
+        dem,
+        surfaces[SURVEY_TYPE_EMBANKMENT],
+        gate_mask,
+        road_cell_mask,
+        surfaces["criteria"][SURVEY_TYPE_EMBANKMENT],
+    )
+
+    upstream_map = None
+    compartments: list[dict] = []
+    seed_records: list[dict] = []
+    zone_by_pinch: dict = {}
+
+    for seed in seeds:
+        record = {
+            "rowcol": seed["rowcol"],
+            "xy": seed["xy"],
+            "geometry_wgs84": seed["geometry_wgs84"],
+            "blend_score": seed["blend_score"],
+            "criteria_signature": seed["criteria_signature"],
+        }
+        walk = walk_embankment_pinch(
+            dem, seed["rowcol"], flow_to_row, flow_to_col, on_parcel_mask, road_cell_mask
+        )
+        if not walk["found"]:
+            record["status"] = SEED_STATUS_FAILED
+            record["reason_code"] = walk["reason_code"]
+            record["terminator"] = walk["terminator"]
+            record["stations_measured"] = len(walk["stations"])
+            logger.info(
+                "embankment seed %s produced nothing: %s (terminator=%s, %d station(s))",
+                seed["rowcol"],
+                walk["reason_code"],
+                walk["terminator"],
+                len(walk["stations"]),
+            )
+            seed_records.append(record)
+            continue
+
+        pinch_rowcol = walk["pinch_rowcol"]
+        if pinch_rowcol in zone_by_pinch:
+            # Same embankment cell as an earlier (higher-blend -- seeds
+            # come out blend-descending) seed: one compartment, the
+            # higher-blend seed keeps it, this one is its duplicate.
+            record["status"] = SEED_STATUS_FAILED
+            record["_duplicate_of_zone"] = zone_by_pinch[pinch_rowcol]
+            record["terminator"] = walk["terminator"]
+            record["stations_measured"] = len(walk["stations"])
+            seed_records.append(record)
+            continue
+
+        if upstream_map is None:
+            # Built lazily, once, from the SAME flow arrays the walks
+            # used -- the existing keypoint machinery, reused.
+            from keypoint_detection import build_upstream_map
+
+            upstream_map = build_upstream_map(flow_to_row, flow_to_col)
+
+        compartment = build_embankment_compartment(
+            dem,
+            seed,
+            walk,
+            upstream_map,
+            boundary_polygon_utm,
+            road_union_utm,
+            surfaces,
+            gate_context,
+        )
+        if compartment is None:
+            record["status"] = SEED_STATUS_FAILED
+            record["reason_code"] = REASON_COMPARTMENT_EMPTY_AFTER_CLIP
+            record["terminator"] = walk["terminator"]
+            record["stations_measured"] = len(walk["stations"])
+            seed_records.append(record)
+            continue
+
+        compartments.append(compartment)
+        zone_by_pinch[pinch_rowcol] = compartment
+        record["status"] = SEED_STATUS_COMPARTMENT
+        record["_zone"] = compartment
+        seed_records.append(record)
+
+    return compartments, seed_records
+
+
+def dedupe_compartments_by_overlap(
+    compartments: list[dict],
+    overlap_fraction: float = COMPARTMENT_DUPLICATE_OVERLAP_FRACTION,
+) -> tuple[list[dict], list[dict]]:
+    """
+    COMPARTMENT-level dedupe: two compartments overlapping beyond
+    overlap_fraction of the SMALLER one's area are two seeds describing
+    one valley compartment -- the higher-blend seed's compartment is
+    kept, the loser is returned in the duplicates list carrying a
+    _duplicate_of_zone reference (the compute core writes the
+    duplicate_of_zone_<id> reason once ids exist). Kept compartments
+    are compared in blend-descending order so a chain of overlaps
+    collapses onto the single best seed.
+    """
+    ordered = sorted(compartments, key=lambda z: -z["seed_blend_score"])
+    kept: list[dict] = []
+    duplicates: list[dict] = []
+    for compartment in ordered:
+        winner = None
+        for existing in kept:
+            intersection = compartment["polygon_utm"].intersection(existing["polygon_utm"]).area
+            smaller = min(compartment["polygon_utm"].area, existing["polygon_utm"].area)
+            if smaller > 0 and intersection > overlap_fraction * smaller:
+                winner = existing
+                break
+        if winner is None:
+            kept.append(compartment)
+        else:
+            compartment["_duplicate_of_zone"] = winner
+            duplicates.append(compartment)
+    return kept, duplicates
 
 
 # ==========================================================================
@@ -1770,7 +2871,11 @@ def _soil_note(region: dict, soil_checked: bool) -> str:
 
 def _confidence_notes_for_region(region: dict, soil_checked: bool) -> str:
     type_note = (
-        "Embankment-type: a small dam across a drainageway (AH590)."
+        "Embankment-type: a small dam across a drainageway (AH590), generated as a VALLEY "
+        "COMPARTMENT -- dam site at the walked width minimum, storage reach above it, ridge-bounded "
+        "by the dam site's own watershed; the compartment's score statistics deliberately include "
+        "its low-scoring side slopes and wall reach (the seed's own blend score is reported "
+        "separately as the anchor claim)."
         if region["survey_type"] == SURVEY_TYPE_EMBANKMENT
         else "Excavated-type: a dugout in wet, flat ground (AH590)."
     )
@@ -1785,18 +2890,40 @@ def _confidence_notes_for_region(region: dict, soil_checked: bool) -> str:
     )
 
 
+def _selection_score(zone: dict) -> float:
+    """The one number each type ranks and pools on: the SEED's blend
+    score for an embankment compartment (the anchor claim -- the
+    compartment's walked-ground mean deliberately includes low-scoring
+    side slopes and the wall reach, so ranking on it would punish a
+    compartment for doing its job), and the MEMBER-mean suitability for
+    an excavated zone (as today)."""
+    if zone["survey_type"] == SURVEY_TYPE_EMBANKMENT:
+        return zone["seed_blend_score"]
+    return zone["mean_suitability"]
+
+
+def _selection_tiebreak_acres(zone: dict) -> float:
+    """Acreage tiebreak between equally-scored zones: the anchoring
+    member acres for excavated (the envelope's own acreage never ranks
+    anything there); the compartment's own acreage for embankment (the
+    only acreage a compartment has)."""
+    if zone["survey_type"] == SURVEY_TYPE_EMBANKMENT:
+        return zone["zone_acres"]
+    return zone["member_acres"]
+
+
 def rank_survey_zones_per_type(zones: list[dict]) -> None:
     """
-    Assigns `rank` per type IN PLACE: 1 = highest MEMBER-mean
-    suitability within that type, member acreage as the tiebreak
-    (larger anchoring signal first -- between two equally-scored zones,
-    the one anchored by more high-suitability ground ranks first; the
-    envelope's own acreage never ranks anything). Every zone is ranked;
-    flags never affect rank (first-run posture).
+    Assigns `rank` per type IN PLACE: 1 = highest score within that
+    type, acreage as the tiebreak (see _selection_score() /
+    _selection_tiebreak_acres() for the per-type definitions --
+    embankment ranks by SEED blend score since the compartment change;
+    excavated by member-mean suitability with member acreage, as
+    always). Every zone is ranked; flags never affect rank.
     """
     for survey_type in SURVEY_TYPES:
         typed = [zone for zone in zones if zone["survey_type"] == survey_type]
-        typed.sort(key=lambda zone: (-zone["mean_suitability"], -zone["member_acres"]))
+        typed.sort(key=lambda zone: (-_selection_score(zone), -_selection_tiebreak_acres(zone)))
         for rank, zone in enumerate(typed, start=1):
             zone["rank"] = rank
 
@@ -1832,20 +2959,21 @@ def attach_cross_type_overlaps(zones: list[dict]) -> None:
 def select_survey_zone(zones: list[dict]) -> Optional[dict]:
     """
     The single selected_water_zone answer for downstream consumers:
-    embankment and excavated POOLED by member-mean suitability (member
-    acreage tiebreak), rank-1 of the pool wins. PROVISIONAL,
-    deliberately simple -- pooling compares two different survey
-    instruments on one scale, which is defensible only because
-    downstream needs ONE unambiguous answer; revisit from the tuned run
-    (the winner's type is itself a finding). Flags never affect
-    selection (a below-min-area zone CAN win -- first-run posture; the
-    flag rides along for the reader). Returns None when no zone exists
-    at all -- the real, reportable "nothing cleared the threshold"
-    outcome, not an error.
+    embankment and excavated POOLED on each type's own selection score
+    (acreage tiebreak), rank-1 of the pool wins. Since the compartment
+    change the pooled scale compares an embankment SEED's blend score
+    against an excavated zone's MEMBER-mean suitability -- two
+    different instruments' anchor numbers on one 0-1 scale.
+    PROVISIONAL AND DOCUMENTED AS SUCH, deliberately simple: pooling
+    two instruments is defensible only because downstream needs ONE
+    unambiguous answer; revisit from the tuned run (the winner's type
+    is itself a finding). Flags never affect selection. Returns None
+    when no zone exists at all -- the real, reportable "nothing
+    survived" outcome, not an error.
     """
     if not zones:
         return None
-    return max(zones, key=lambda zone: (zone["mean_suitability"], zone["member_acres"]))
+    return max(zones, key=lambda zone: (_selection_score(zone), _selection_tiebreak_acres(zone)))
 
 
 # ==========================================================================
@@ -1863,6 +2991,8 @@ def compute_water_survey_areas(
     filled: Optional[np.ndarray] = None,
     flow_accumulation: Optional[np.ndarray] = None,
     slope_pct: Optional[np.ndarray] = None,
+    flow_to_row: Optional[np.ndarray] = None,
+    flow_to_col: Optional[np.ndarray] = None,
 ) -> dict:
     """
     Pure computation over already-fetched inputs -- no network I/O
@@ -1873,17 +3003,27 @@ def compute_water_survey_areas(
     optimized scored_patches list. canopy_root_zone_mask_utm /
     road_exclusion_union_utm carry the shared unchecked sentinels from
     water_candidate_zones (None on the road union is the CLEAN "checked,
-    genuinely no mapped road" answer, per the established semantics).
+    genuinely no mapped road" answer, per the established semantics) --
+    since the roads-as-exclusion change the union is no longer only a
+    measurement: it gates embankment seeds, terminates embankment pinch
+    walks, and clips BOTH types' zone geometry (truncated_by_road).
     soil_inputs: see build_soil_score_grid(). filled /
-    flow_accumulation / slope_pct are optional precomputed overrides so
-    an orchestrator (or a test spying on call counts) can guarantee each
-    derivation runs EXACTLY ONCE; each self-computes when absent.
+    flow_accumulation / slope_pct / flow_to_row / flow_to_col are
+    optional precomputed overrides so an orchestrator (or a test spying
+    on call counts) can guarantee each derivation runs EXACTLY ONCE;
+    each self-computes when absent (the flow-direction pair is needed
+    unconditionally now -- the embankment pinch walks follow it).
 
-    Returns a dict of survey ZONES (the deliverable: closing-aggregated,
-    flagged not filtered, per-type lists, pooled selection), their
-    member REGIONS (all of them, footprints intact), the surfaces dict
-    (surfaces[type] = the RAW blend extraction thresholds -- smoothing
-    is retired from this path, see masked_focal_mean(); surfaces
+    Returns a dict of survey ZONES (the deliverable, per-type lists,
+    pooled selection): EXCAVATED zones are closing-aggregated hull
+    envelopes over threshold-extracted member REGIONS (all members
+    carried, footprints intact) exactly as before; EMBANKMENT zones are
+    SEED-BASED VALLEY COMPARTMENTS (see the compartment section) with
+    NO members -- extraction, closing, and the hull no longer exist on
+    that path. Also returned: embankment_seeds (every seed with its
+    outcome -- the dropped-feature pattern), the surfaces dict
+    (surfaces[type] = the RAW blends; the embankment one is a
+    NOMINATION surface now -- nothing thresholds it; surfaces
     ["criteria"] = the raw criterion grids), the screens (including the
     unfloored depression_depth_raw for the excavated instrumentation),
     the gate mask, and its stats (numpy/shapely -- NOT
@@ -1894,8 +3034,9 @@ def compute_water_survey_areas(
 
     if filled is None:
         filled = fill_depressions(array)
-    if flow_accumulation is None:
+    if flow_to_row is None or flow_to_col is None:
         flow_to_row, flow_to_col = compute_flow_direction(filled, dem["resolution_meters"])
+    if flow_accumulation is None:
         flow_accumulation = compute_flow_accumulation(filled, flow_to_row, flow_to_col)
     if slope_pct is None:
         # RAW array, not filled -- the same choice the demoted water arc
@@ -1937,68 +3078,113 @@ def compute_water_survey_areas(
         dem, gate_mask, flow_accumulation, slope_pct, twi_percentile, depression_depth, soil["score_grid"]
     )
 
-    regions: list[dict] = []
-    for survey_type in SURVEY_TYPES:
-        regions.extend(
-            extract_survey_regions(
-                dem,
-                surfaces[survey_type],
-                surfaces["criteria"][survey_type],
-                survey_type,
-                gate_mask,
-                boundary_polygon_utm,
-                twi_percentile,
-                depression_depth,
-                flow_accumulation,
-                slope_pct,
-                soil["covered_mask"],
-                soil_checked,
-                threshold=threshold,
-            )
-        )
-
-    # The aggregation: member regions close into survey zones -- the
-    # deliverable objects everything below attaches to.
-    zones = build_survey_zones(
-        dem,
-        regions,
-        surfaces,
-        {
-            "twi_percentile": twi_percentile,
-            "depression_depth": depression_depth,
-            "flow_accumulation": flow_accumulation,
-            "slope_pct": slope_pct,
-            "soil_covered_mask": soil["covered_mask"],
-            "soil_checked": soil_checked,
-        },
-        boundary_polygon_utm,
-    )
-
-    # Overlaps + gravity on the ZONE, both pure measurements over inputs
-    # in hand. Canopy/road overlap runs on the ENVELOPE's cell
-    # population (the ground being surveyed -- the established
-    # cell-fraction machinery and its None/0.0 sentinel semantics,
-    # unchanged); production overlap on the envelope polygon; gravity
-    # and representative elevation from MEMBER cells via the existing
-    # representative-point machinery.
+    # The road union resolves EARLY now: it gates embankment seeds,
+    # terminates embankment walks, and clips both types' geometry, in
+    # addition to the overlap measurement it always fed. The sentinel
+    # semantics are unchanged: unchecked and clean-None both mean "no
+    # road constraint in play" for the geometry (and the roadless path
+    # is byte-identical to the pre-road-exclusion behavior); they still
+    # differ for the reported percentage (None vs 0.0).
     canopy_checked = canopy_root_zone_mask_utm is not _CANOPY_CHECK_UNCHECKED
     canopy_mask = canopy_root_zone_mask_utm if canopy_checked else None
     road_checked = road_exclusion_union_utm is not _ROAD_CHECK_UNCHECKED
     road_union = road_exclusion_union_utm if road_checked and road_exclusion_union_utm is not None else None
     road_prepared = prep(road_union) if road_union is not None else None
+    road_cells = _road_cell_mask(dem, road_union)
 
+    gate_context = {
+        "twi_percentile": twi_percentile,
+        "depression_depth": depression_depth,
+        "flow_accumulation": flow_accumulation,
+        "slope_pct": slope_pct,
+        "soil_covered_mask": soil["covered_mask"],
+        "soil_checked": soil_checked,
+    }
+
+    # EXCAVATED: the full existing pipeline -- threshold extraction into
+    # member regions, closing aggregation, hull envelope (now clipped at
+    # the road union as at the boundary).
+    regions = extract_survey_regions(
+        dem,
+        surfaces[SURVEY_TYPE_EXCAVATED],
+        surfaces["criteria"][SURVEY_TYPE_EXCAVATED],
+        SURVEY_TYPE_EXCAVATED,
+        gate_mask,
+        boundary_polygon_utm,
+        twi_percentile,
+        depression_depth,
+        flow_accumulation,
+        slope_pct,
+        soil["covered_mask"],
+        soil_checked,
+        threshold=threshold,
+    )
+    excavated_zones = build_survey_zones(
+        dem,
+        regions,
+        surfaces,
+        gate_context,
+        boundary_polygon_utm,
+        road_union_utm=road_union,
+    )
+
+    # EMBANKMENT: seed-based valley compartments. The blend surface is
+    # the NOMINATION instrument; generation is seeding + the pinch walk
+    # + the watershed-band compartment. Pinch-level dedupe happens
+    # inside; compartment-overlap dedupe here, where every polygon
+    # exists.
+    compartments, embankment_seeds = generate_embankment_compartments(
+        dem,
+        surfaces,
+        gate_mask,
+        on_parcel,
+        road_cells,
+        road_union,
+        boundary_polygon_utm,
+        flow_to_row,
+        flow_to_col,
+        gate_context,
+    )
+    kept_compartments, duplicate_compartments = dedupe_compartments_by_overlap(compartments)
+
+    # One cross-type zone list: kept compartments and excavated zones
+    # are the live candidates; overlap-duplicate compartments ride along
+    # for identity/attribution and are force-dropped below.
+    zones = kept_compartments + excavated_zones + duplicate_compartments
+
+    # Overlaps + gravity on the ZONE, both pure measurements over inputs
+    # in hand. Canopy overlap runs on the (clipped) envelope's cell
+    # population and production overlap on the envelope polygon, as
+    # always. ROAD overlap now measures the PRE-road-clip geometry --
+    # the ground the road clip REMOVED from the walkable claim -- since
+    # the drawn geometry clips at the union and measuring it there
+    # would be a guaranteed zero (None still means never checked; 0.0
+    # means checked and nothing removed). Gravity and representative
+    # elevation via the existing representative-point machinery -- from
+    # member cells for excavated, from the compartment for embankment.
     for zone in zones:
         envelope_cells = _cells_in_polygon_utm(dem, zone["polygon_utm"])
         zone["canopy_overlap_pct"] = _overlap_fraction_pct(envelope_cells, dem, canopy_checked, mask_utm=canopy_mask)
+        road_measurement_polygon = zone.get("pre_road_clip_polygon_utm") or zone["polygon_utm"]
+        road_measurement_cells = (
+            envelope_cells
+            if road_measurement_polygon is zone["polygon_utm"]
+            else _cells_in_polygon_utm(dem, road_measurement_polygon)
+        )
         zone["road_overlap_pct"] = _overlap_fraction_pct(
-            envelope_cells, dem, road_checked, prepared_union=road_prepared
+            road_measurement_cells, dem, road_checked, prepared_union=road_prepared
         )
         zone["production_overlap_pct"] = _production_overlap_pct(zone["polygon_utm"], production_areas)
 
-        member_union = unary_union([member["polygon_utm"] for member in zone["members"]])
+        if zone["survey_type"] == SURVEY_TYPE_EMBANKMENT:
+            representative_point = zone["polygon_utm"].centroid
+        else:
+            representative_point = unary_union(
+                [member["polygon_utm"] for member in zone["members"]]
+            ).centroid
         relationships = (
             _zone_production_area_relationships(
-                member_union.centroid,
+                representative_point,
                 zone["representative_elevation_m"],
                 production_areas,
                 MAX_SERVICE_DISTANCE_METERS,
@@ -2020,14 +3206,16 @@ def compute_water_survey_areas(
     # Ids, member linkage, confidence -- over ALL zones (a dropped zone
     # keeps its full property set so the diagnostic and export can show
     # it attributed, never silent). Zone ids are assigned over the full
-    # cross-type list so every zone -- dropped included -- has one
-    # unambiguous identity; member regions get their own ids and each
-    # carries its parent's zone_id.
+    # cross-type list -- overlap-duplicates included -- so every zone
+    # has one unambiguous identity and every duplicate_of_zone_<id>
+    # reason can name a real id; member regions get their own ids and
+    # each carries its parent's zone_id (excavated only -- a compartment
+    # has no members).
     for zone_id, zone in enumerate(zones):
         zone["id"] = zone_id
     for region_id, region in enumerate(regions):
         region["id"] = region_id
-    for zone in zones:
+    for zone in excavated_zones:
         zone["member_ids"] = [member["id"] for member in zone["members"]]
         for member in zone["members"]:
             member["zone_id"] = zone["id"]
@@ -2037,20 +3225,45 @@ def compute_water_survey_areas(
     for region in regions:
         region["confidence"] = _confidence_for_region(region, soil_checked)
 
-    # THE FLOOR FILTERS on ZONE acres -- the walkable hull (see
-    # MIN_SURVEY_REGION_AREA_ACRES's history note for the two prior
-    # bases): a zone whose clipped envelope sits under the floor is
-    # dropped from the pipeline output -- status/reason attached, rank
-    # None -- and survives only in the diagnostic table and the export's
-    # dropped layer, carrying BOTH acreages.
+    # Seed-record linkage, now that ids exist: a seed that built a
+    # compartment carries its zone_id; a seed that lost a pinch-level or
+    # overlap-level dedupe carries duplicate_of_zone_<winner id>. The
+    # private object references never leave this function.
+    for record in embankment_seeds:
+        winner = record.pop("_duplicate_of_zone", None)
+        if winner is not None:
+            record["reason_code"] = duplicate_of_zone_reason(winner["id"])
+        zone_ref = record.pop("_zone", None)
+        if zone_ref is not None:
+            record["zone_id"] = zone_ref["id"]
+
+    # THE FLOOR FILTERS on ZONE acres -- the walkable hull for
+    # excavated, the compartment's own polygon acreage for embankment
+    # (see MIN_SURVEY_REGION_AREA_ACRES's history note): a zone under
+    # the floor is dropped from the pipeline output -- status/reason
+    # attached, rank None -- and survives only in the diagnostic table
+    # and the export's dropped layer. An overlap-duplicate compartment
+    # drops FIRST, with its duplicate_of_zone_<id> reason (dedupe
+    # decides existence; the floor only ever judges survivors).
     surviving_zones: list[dict] = []
     dropped_zones: list[dict] = []
+    duplicate_set = {id(zone) for zone in duplicate_compartments}
     for zone in zones:
-        if zone["zone_acres"] < MIN_SURVEY_REGION_AREA_ACRES:
+        if id(zone) in duplicate_set:
+            winner = zone.pop("_duplicate_of_zone")
+            zone["status"] = ZONE_STATUS_DROPPED
+            zone["drop_reason"] = duplicate_of_zone_reason(winner["id"])
+            zone["rank"] = None
+            zone["cross_type_overlaps"] = []
+            dropped_zones.append(zone)
+        elif zone["zone_acres"] < MIN_SURVEY_REGION_AREA_ACRES:
             zone["status"] = ZONE_STATUS_DROPPED
             zone["drop_reason"] = FLAG_BELOW_MIN_AREA
             zone["rank"] = None
             zone["cross_type_overlaps"] = []
+            zone["below_min_area"] = True
+            if FLAG_BELOW_MIN_AREA not in zone["flags"]:
+                zone["flags"].append(FLAG_BELOW_MIN_AREA)
             dropped_zones.append(zone)
         else:
             zone["status"] = ZONE_STATUS_NOMINATED
@@ -2076,6 +3289,7 @@ def compute_water_survey_areas(
             survey_type: [region for region in regions if region["survey_type"] == survey_type]
             for survey_type in SURVEY_TYPES
         },
+        "embankment_seeds": embankment_seeds,
         "selected_water_zone": selected,
         "surfaces": surfaces,
         "screens": {
@@ -2101,10 +3315,18 @@ def compute_water_survey_areas(
 
 def _zone_feature_properties(zone: dict) -> dict:
     """The JSON-serializable property set every survey-zone feature
-    carries -- the full measurement contract, flagged not filtered, with
-    DUAL ACREAGE (member_acres = the anchoring signal; zone_acres = the
-    clipped envelope, the ground to walk) and member linkage."""
-    return {
+    carries -- the full measurement contract, flagged not filtered.
+    TYPE-DISPATCHED since the compartment change (the honesty split made
+    wire shape): an EXCAVATED zone carries dual acreage (member_acres =
+    the anchoring signal; zone_acres = the clipped hull, the ground to
+    walk), member linkage and the sparse_anchor guard; an EMBANKMENT
+    zone is a valley compartment with NO members -- it carries the
+    SEED's blend score and criteria signature (the anchor claim,
+    separate from the compartment's own criterion means, which
+    deliberately average in side slopes and the wall reach), the pinch
+    record (crest-to-crest width, walk distance), the baseline length,
+    and the truncation/bound flags."""
+    properties = {
         "zone_id": zone["id"],
         "survey_type": zone["survey_type"],
         "nominated_by": zone["nominated_by"],
@@ -2115,14 +3337,9 @@ def _zone_feature_properties(zone: dict) -> dict:
         "status": zone["status"],
         "drop_reason": zone["drop_reason"],
         "rank": zone["rank"],
-        # The honesty reports: the sparse-anchor guard and the
-        # cross-type agreement (fractions of THIS zone's envelope
-        # overlapped by surviving zones of the other type).
-        "sparse_anchor": zone["sparse_anchor"],
+        # The cross-type agreement report (fractions of THIS zone's
+        # envelope overlapped by surviving zones of the other type).
         "cross_type_overlaps": list(zone["cross_type_overlaps"]),
-        "member_ids": list(zone["member_ids"]),
-        "member_count": zone["member_count"],
-        "member_acres": zone["member_acres"],
         "zone_acres": zone["zone_acres"],
         "cell_count": zone["cell_count"],
         "mean_suitability": zone["mean_suitability"],
@@ -2136,6 +3353,10 @@ def _zone_feature_properties(zone: dict) -> dict:
         "slope_median_pct": zone["slope_median_pct"],
         "boundary_adjacency_fraction": zone["boundary_adjacency_fraction"],
         "canopy_overlap_pct": zone["canopy_overlap_pct"],
+        # Since roads became a geometric exclusion this measures the
+        # PRE-road-clip geometry -- the share of the walkable claim the
+        # road clip removed (the drawn geometry already excludes it);
+        # None still means the road layer was never checked.
         "road_overlap_pct": zone["road_overlap_pct"],
         "production_overlap_pct": zone["production_overlap_pct"],
         "primary_production_area_relationship": zone["primary_production_area_relationship"],
@@ -2146,8 +3367,46 @@ def _zone_feature_properties(zone: dict) -> dict:
         "criteria_complete": zone["criteria_complete"],
         "flags": list(zone["flags"]),
         "below_min_area": zone["below_min_area"],
+        "truncated_by_road": zone["truncated_by_road"],
         "representative_elevation_m": round(zone["representative_elevation_m"], 2),
     }
+    if zone["survey_type"] == SURVEY_TYPE_EMBANKMENT:
+        properties.update(
+            {
+                # THE ANCHOR CLAIM, kept separate from the compartment's
+                # criterion_contributions above (the walked ground).
+                "seed_blend_score": zone["seed_blend_score"],
+                "seed_criteria_signature": dict(zone["seed"]["criteria_signature"]),
+                "seed_rowcol": list(zone["seed"]["rowcol"]),
+                "pinch_rowcol": list(zone["pinch"]["rowcol"]),
+                "pinch_width_m": zone["pinch"]["width_m"],
+                "pinch_walk_distance_m": zone["pinch"]["walk_distance_m"],
+                # The terminal-pinch disclosure (accepted, not refused):
+                # None for an interior pinch, else which terminator the
+                # dam reach sits against, with the still-narrowing
+                # statement and the walked width profile's extremes so
+                # the constriction's strength is readable on the wire.
+                "pinch_terminal": zone["pinch_terminal"],
+                "still_narrowing_at_termination": zone["still_narrowing_at_termination"],
+                "width_profile_min_m": zone["pinch"]["width_profile_min_m"],
+                "width_profile_max_m": zone["pinch"]["width_profile_max_m"],
+                "baseline_length_m": zone["baseline"]["length_m"],
+                "truncated_by_boundary": zone["truncated_by_boundary"],
+                "half_width_bound_hit": zone["half_width_bound_hit"],
+            }
+        )
+    else:
+        properties.update(
+            {
+                # The excavated honesty reports: dual acreage, member
+                # linkage, the sparse-anchor guard.
+                "sparse_anchor": zone["sparse_anchor"],
+                "member_ids": list(zone["member_ids"]),
+                "member_count": zone["member_count"],
+                "member_acres": zone["member_acres"],
+            }
+        )
+    return properties
 
 
 def _member_feature_properties(region: dict) -> dict:
@@ -2186,10 +3445,12 @@ _MEMBER_FEATURE_NOTE = (
 
 
 _DROPPED_ZONE_NOTE = (
-    "DROPPED at the zone-acreage floor (status: dropped, drop_reason: below_min_area): this zone's "
-    "walkable hull envelope measures under the 0.1 ac floor, so it is excluded from the pipeline "
-    "output -- carried here visible and attributed, never silently. Both acreages ride the record: "
-    "zone_acres (the envelope that was judged) and member_acres (the anchoring signal inside it)."
+    "DROPPED from the pipeline output (status: dropped; drop_reason names why): below_min_area means "
+    "the judged acreage -- the walkable hull envelope for an excavated zone, the compartment's own "
+    "polygon for an embankment zone -- measures under the 0.1 ac floor; duplicate_of_zone_<id> means "
+    "this compartment collapsed into a better-seeded one describing the same valley ground. Carried "
+    "here visible and attributed, never silently, with the judged acreage on the record (zone_acres; "
+    "excavated records also keep member_acres, the anchoring signal inside the envelope)."
 )
 
 
@@ -2261,54 +3522,98 @@ def build_narrative_data(result: dict) -> dict:
                 "elevation_differential_ft": _feet(primary["elevation_differential_m"]),
                 "distance_ft": _feet(primary["distance_m"]),
             }
-        zone_blocks.append(
-            {
-                "id": zone["id"],
-                "survey_type": zone["survey_type"],
-                "rank": zone["rank"],
-                "member_count": zone["member_count"],
-                # DUAL ACREAGE, both labeled -- the report's sentence is
-                # "zone_acres to survey, anchored by member_acres of
-                # high-suitability ground".
-                "member_acres": round(zone["member_acres"], 1),
-                "zone_acres": round(zone["zone_acres"], 1),
-                "mean_suitability": zone["mean_suitability"],
-                "max_suitability": zone["max_suitability"],
-                "criteria": {
-                    name: {"weight": entry["weight"], "mean_score": entry["mean_score"]}
-                    for name, entry in zone["criterion_contributions"].items()
-                },
-                "twi_percentile_mean": zone["twi_percentile_mean"],
-                "depression_depth_max_ft": _feet(zone["depression_depth_max_m"]),
-                "contributing_area_acres_at_wettest_cell": zone["contributing_area_acres_at_wettest_cell"],
-                "boundary_adjacency_pct": round(zone["boundary_adjacency_fraction"] * 100, 1),
-                "overlaps": {
-                    # All three REPORTED, none scored, measured on the
-                    # ENVELOPE (the ground being surveyed). None means
-                    # never checked; 0.0 means checked and genuinely none.
-                    "canopy_pct": zone["canopy_overlap_pct"],
-                    "road_pct": zone["road_overlap_pct"],
-                    "production_pct": zone["production_overlap_pct"],
-                },
-                "gravity": gravity,
-                "flags": list(zone["flags"]),
-                "below_min_area": zone["below_min_area"],
-                "sparse_anchor": zone["sparse_anchor"],
-                # The agreement report: percent of THIS zone's envelope
-                # overlapped by each surviving zone of the other type,
-                # plus the constant-driven either-type finding the
-                # report's consultant line keys on.
-                "cross_type_overlaps": [
-                    {"zone_id": entry["zone_id"], "overlap_pct": round(entry["fraction"] * 100, 1)}
-                    for entry in zone["cross_type_overlaps"]
-                ],
-                "either_type_candidate": any(
-                    entry["fraction"] >= CROSS_TYPE_OVERLAP_NOTE_FRACTION
-                    for entry in zone["cross_type_overlaps"]
-                ),
-                "confidence": zone["confidence"],
-            }
-        )
+        block = {
+            "id": zone["id"],
+            "survey_type": zone["survey_type"],
+            "rank": zone["rank"],
+            "zone_acres": round(zone["zone_acres"], 1),
+            "mean_suitability": zone["mean_suitability"],
+            "max_suitability": zone["max_suitability"],
+            "criteria": {
+                name: {"weight": entry["weight"], "mean_score": entry["mean_score"]}
+                for name, entry in zone["criterion_contributions"].items()
+            },
+            "twi_percentile_mean": zone["twi_percentile_mean"],
+            "depression_depth_max_ft": _feet(zone["depression_depth_max_m"]),
+            "contributing_area_acres_at_wettest_cell": zone["contributing_area_acres_at_wettest_cell"],
+            "boundary_adjacency_pct": round(zone["boundary_adjacency_fraction"] * 100, 1),
+            "overlaps": {
+                # All three REPORTED, none scored. Canopy/production are
+                # measured on the (clipped) envelope -- the ground being
+                # surveyed; road_pct measures the PRE-road-clip
+                # geometry, i.e. the share of the walkable claim the
+                # road clip removed (the drawn geometry already
+                # excludes it). None means never checked; 0.0 means
+                # checked and genuinely none.
+                "canopy_pct": zone["canopy_overlap_pct"],
+                "road_pct": zone["road_overlap_pct"],
+                "production_pct": zone["production_overlap_pct"],
+            },
+            "gravity": gravity,
+            "flags": list(zone["flags"]),
+            "below_min_area": zone["below_min_area"],
+            "truncated_by_road": zone["truncated_by_road"],
+            # The agreement report: percent of THIS zone's envelope
+            # overlapped by each surviving zone of the other type,
+            # plus the constant-driven either-type finding the
+            # report's consultant line keys on.
+            "cross_type_overlaps": [
+                {"zone_id": entry["zone_id"], "overlap_pct": round(entry["fraction"] * 100, 1)}
+                for entry in zone["cross_type_overlaps"]
+            ],
+            "either_type_candidate": any(
+                entry["fraction"] >= CROSS_TYPE_OVERLAP_NOTE_FRACTION
+                for entry in zone["cross_type_overlaps"]
+            ),
+            "confidence": zone["confidence"],
+        }
+        if zone["survey_type"] == SURVEY_TYPE_EMBANKMENT:
+            # THE HONESTY SPLIT, translated to narrative: the SEED's
+            # blend score and criteria signature (the anchor claim)
+            # ride SEPARATELY from `criteria` above, which holds the
+            # COMPARTMENT's means over the walked ground -- ground
+            # that deliberately includes low-scoring side slopes and
+            # the wall reach, because that is the compartment's job.
+            # The report's sentence is "zone_acres acres to survey --
+            # a valley compartment anchored by a
+            # seed_blend_score-scoring storage cell, dam reach at the
+            # downstream end."
+            block.update(
+                {
+                    "seed_blend_score": zone["seed_blend_score"],
+                    "seed_criteria_signature": dict(zone["seed"]["criteria_signature"]),
+                    "pinch_width_ft": _feet(zone["pinch"]["width_m"]),
+                    "pinch_walk_distance_ft": _feet(zone["pinch"]["walk_distance_m"]),
+                    # The terminal-pinch disclosure: None for an
+                    # interior pinch; else which terminator the dam
+                    # reach sits against, the still-narrowing
+                    # statement, and the walked width profile's
+                    # extremes -- the report's per-terminator caveat
+                    # keys on these.
+                    "pinch_terminal": zone["pinch_terminal"],
+                    "still_narrowing_at_termination": zone["still_narrowing_at_termination"],
+                    "width_profile_min_ft": _feet(zone["pinch"]["width_profile_min_m"]),
+                    "width_profile_max_ft": _feet(zone["pinch"]["width_profile_max_m"]),
+                    "baseline_length_ft": _feet(zone["baseline"]["length_m"]),
+                    "truncated_by_boundary": zone["truncated_by_boundary"],
+                    "half_width_bound_hit": zone["half_width_bound_hit"],
+                }
+            )
+        else:
+            # DUAL ACREAGE, both labeled -- the excavated sentence
+            # stays "zone_acres to survey, anchored by member_acres of
+            # high-suitability ground".
+            block.update(
+                {
+                    "member_count": zone["member_count"],
+                    "member_acres": round(zone["member_acres"], 1),
+                    "sparse_anchor": zone["sparse_anchor"],
+                }
+            )
+        zone_blocks.append(block)
+
+    seeds = result.get("embankment_seeds", [])
+    failed_seeds = [record for record in seeds if record["status"] == SEED_STATUS_FAILED]
 
     return {
         "zone_found": bool(surviving),
@@ -2317,6 +3622,21 @@ def build_narrative_data(result: dict) -> dict:
         "member_region_count": len(result["regions"]),
         "embankment_zone_count": len(result["zones_by_type"][SURVEY_TYPE_EMBANKMENT]),
         "excavated_zone_count": len(result["zones_by_type"][SURVEY_TYPE_EXCAVATED]),
+        # The embankment generation accounting (the dropped-feature
+        # pattern, seed edition): every seed either built a compartment
+        # or failed with its reason named -- a reach with no on-parcel
+        # pinch reports honestly as nothing.
+        "embankment_generation": PROVENANCE_SEED_COMPARTMENT,
+        "embankment_seed_count": len(seeds),
+        "embankment_failed_seed_count": len(failed_seeds),
+        "embankment_failed_seeds": [
+            {
+                "rowcol": list(record["rowcol"]),
+                "blend_score": record["blend_score"],
+                "reason_code": record.get("reason_code"),
+            }
+            for record in failed_seeds
+        ],
         "suitability_threshold": result["threshold"],
         "grouping_distance_meters": SURVEY_ZONE_GROUPING_DISTANCE_METERS,
         "twi_is_parcel_relative": True,
@@ -2343,11 +3663,17 @@ def build_narrative_data(result: dict) -> dict:
 def summarize_water_survey_areas(result: dict) -> str:
     zones = result["zones"]
     dropped = result["dropped_zones"]
-    if not zones and not dropped:
-        return "No water survey zones: nothing cleared the suitability threshold."
+    seeds = result.get("embankment_seeds", [])
+    failed_seeds = [record for record in seeds if record["status"] == SEED_STATUS_FAILED]
+    if not zones and not dropped and not failed_seeds:
+        return (
+            "No water survey zones: no embankment seed qualified and nothing cleared the excavated "
+            "suitability threshold."
+        )
     lines = [
-        f"Water survey zones ({len(zones)} surviving -- all listed, "
-        f"{len(dropped)} dropped at the zone-acre floor; {len(result['regions'])} member region(s)):"
+        f"Water survey zones ({len(zones)} surviving -- all listed, {len(dropped)} dropped; "
+        f"{len(result['regions'])} excavated member region(s); "
+        f"{len(seeds)} embankment seed(s), {len(failed_seeds)} failed):"
     ]
     for zone in sorted(zones, key=lambda z: (z["survey_type"], z["rank"])):
         top_two = sorted(
@@ -2356,17 +3682,37 @@ def summarize_water_survey_areas(result: dict) -> str:
         )[:2]
         criteria_text = ", ".join(f"{name}={entry['mean_score']}" for name, entry in top_two)
         flag_text = f" [{', '.join(zone['flags'])}]" if zone["flags"] else ""
-        lines.append(
-            f"  - {zone['survey_type']} rank {zone['rank']}: zone {zone['id']}, "
-            f"{zone['zone_acres']} ac to survey anchored by {zone['member_acres']} ac "
-            f"({zone['member_count']} member(s)), mean {zone['mean_suitability']}, top criteria: "
-            f"{criteria_text}{flag_text}"
-        )
+        if zone["survey_type"] == SURVEY_TYPE_EMBANKMENT:
+            lines.append(
+                f"  - embankment rank {zone['rank']}: zone {zone['id']}, "
+                f"{zone['zone_acres']} ac valley compartment anchored by a "
+                f"{zone['seed_blend_score']}-scoring seed (pinch width {zone['pinch']['width_m']} m at "
+                f"{zone['pinch']['walk_distance_m']} m downstream), compartment mean "
+                f"{zone['mean_suitability']}, compartment criteria: {criteria_text}{flag_text}"
+            )
+        else:
+            lines.append(
+                f"  - excavated rank {zone['rank']}: zone {zone['id']}, "
+                f"{zone['zone_acres']} ac to survey anchored by {zone['member_acres']} ac "
+                f"({zone['member_count']} member(s)), mean {zone['mean_suitability']}, top criteria: "
+                f"{criteria_text}{flag_text}"
+            )
     for zone in dropped:
+        if zone["survey_type"] == SURVEY_TYPE_EMBANKMENT:
+            lines.append(
+                f"  - DROPPED ({zone['drop_reason']}): embankment zone {zone['id']}, compartment "
+                f"{zone['zone_acres']} ac (seed blend {zone['seed_blend_score']})"
+            )
+        else:
+            lines.append(
+                f"  - DROPPED ({zone['drop_reason']}): excavated zone {zone['id']}, envelope "
+                f"{zone['zone_acres']} ac (anchored by {zone['member_acres']} ac) under the "
+                f"{MIN_SURVEY_REGION_AREA_ACRES} ac floor"
+            )
+    for record in failed_seeds:
         lines.append(
-            f"  - DROPPED ({zone['drop_reason']}): {zone['survey_type']} zone {zone['id']}, envelope "
-            f"{zone['zone_acres']} ac (anchored by {zone['member_acres']} ac) under the "
-            f"{MIN_SURVEY_REGION_AREA_ACRES} ac floor"
+            f"  - FAILED SEED ({record.get('reason_code')}): blend {record['blend_score']} at "
+            f"{tuple(record['rowcol'])} -- no compartment, honestly (no fallback exists on this path)"
         )
     return "\n".join(lines)
 
@@ -2469,7 +3815,11 @@ def identify_water_survey_areas(
       roads -- fetch-or-degrade: an outage yields road_overlap_pct=None
         ("never checked"), never a fabricated 0.0; a caller-supplied
         real None is the CLEAN "checked, genuinely no mapped road"
-        answer and is reused, not re-fetched.
+        answer and is reused, not re-fetched. THE UNION IS A GEOMETRIC
+        EXCLUSION now, not just a measurement: it gates embankment
+        seeds, hard-terminates embankment pinch walks, and clips both
+        types' zone geometry (truncated_by_road) -- an unavailable or
+        clean-None union simply leaves no road constraint in play.
       soil -- LAYER 1 ON THE PIPELINE PATH: all three pieces (ksat rows,
         component rows carrying hydgrp, clipped map-unit geometry) are
         ParcelData fields, fetched once behind its hard-fail contract
@@ -2565,6 +3915,7 @@ def identify_water_survey_areas(
         "dropped_zones": result["dropped_zones"],
         "regions": result["regions"],
         "regions_by_type": result["regions_by_type"],
+        "embankment_seeds": result["embankment_seeds"],
         "selected_water_zone": result["selected_water_zone"],
         "narrative_data": build_narrative_data(result),
         "gate_mask_stats": result["gate_mask_stats"],

@@ -205,6 +205,42 @@ for r in range(ROWS):
             # the two halves either direction.
             array[r, c] = 1200.0 - abs(c - RIDGE_COL) * 4.0 - r * _row_weight(c, RIDGE_COL)
 
+
+def _crest_offset_cells(r: int) -> int:
+    """The valley's crest offset from VALLEY_COL, per row: 7 cells
+    below row 24, then a long 3-cell throat, narrowing to 2 from row 9
+    and to 1 at the row-0 outlet -- the compartment change's addition
+    to this fixture. The uniform V gave the embankment pinch walks a
+    constant crest-to-crest width, so every seed honestly failed (now:
+    no_constriction) and selected_water_zone was None. This profile
+    produces BOTH pinch postures through one real context run: the
+    walk from the high-blend seed rides the still-narrowing throat all
+    the way to the flow field's row-0 end, so its width minimum sits
+    at the TERMINAL station -- accepted and disclosed
+    (pinch_at_walk_bound + still_narrowing_at_termination) under the
+    dam-at-the-edge doctrine, never refused -- and that
+    terminal-pinch VALLEY COMPARTMENT is the pooled rank-1 selection
+    section 6 asserts the consumer contract on, with interior-pinch
+    compartments ranked beside it (excavated still produces nothing
+    here)."""
+    if r >= 24:
+        return 7
+    if r >= 9:
+        return 3
+    return 2 if r >= 1 else 1
+
+
+# One-cell side trenches 6 m deep just beyond the crest offset: the V
+# wall's outward rise turns into a >= 1 m fall there, so the crest walk
+# declares its crest at _crest_offset_cells(r) instead of walking to its
+# bound. Trench cells drain INWARD (their inner neighbor is lower on the
+# V), so no closed pit and no new drainage line is introduced.
+for r in range(ROWS):
+    for _side in (-1, 1):
+        _trench_col = VALLEY_COL + _side * (_crest_offset_cells(r) + 1)
+        if 0 <= _trench_col < 30:
+            array[r, _trench_col] -= 6.0
+
 synthetic_dem = {
     "array": array,
     "resolution_meters": (RESOLUTION, RESOLUTION),
@@ -885,6 +921,40 @@ if ctx.selected_water_zone is not None:
         "_attach_keypoint_feature_relationships() dereferences representative_elevation_m on any "
         "non-None selected water zone"
     )
+# THE COMPARTMENT-AS-RANK-1 CASE (the compartment change): this fixture's
+# valley throat (see _crest_offset_cells()) makes the pooled rank-1 a
+# seed-based VALLEY COMPARTMENT, and the full consumer contract must hold
+# on it exactly as it did on a hull zone -- same fields, same identities,
+# through the same single call.
+assert ctx.selected_water_zone is not None and ctx.selected_water_zone["survey_type"] == "embankment", (
+    "this fixture's throat is built to select a valley compartment as the pooled rank-1 -- a None or "
+    "excavated selection means the compartment path regressed"
+)
+assert ctx.selected_water_zone["rank"] == 1
+# ...and it is a TERMINAL-pinch compartment (the accepted-not-refused
+# correction): the winning walk rides the still-narrowing throat to the
+# flow field's end, so the selection exercises the disclosure fields the
+# consumers now carry -- through the real build_pipeline_context() run.
+assert ctx.selected_water_zone["pinch_terminal"] == "walk_bound", (
+    "the rank-1 compartment's pinch sits at the walk's end -- accepted with its terminator named, "
+    "never refused"
+)
+assert ctx.selected_water_zone["still_narrowing_at_termination"] is True
+assert "pinch_at_walk_bound" in ctx.selected_water_zone["flags"]
+assert "still_narrowing_at_termination" in ctx.selected_water_zone["flags"]
+assert ctx.selected_water_zone["render_fill_polygon_utm"] is ctx.selected_water_zone["polygon_utm"], (
+    "the compartment's render_fill is the IDENTITY of its clipped compartment polygon"
+)
+assert isinstance(ctx.selected_water_zone["representative_elevation_m"], float)
+assert ctx.selected_water_zone["served_production_area_ids"] == [], (
+    "the fixture's fake production patch sits outside service range"
+)
+assert "seed_blend_score" in ctx.selected_water_zone and "pinch" in ctx.selected_water_zone, (
+    "the compartment carries its anchor claim (seed blend) and pinch record through the context"
+)
+assert "members" not in ctx.selected_water_zone and "member_acres" not in ctx.selected_water_zone, (
+    "a compartment has NO members -- member-only statistics must not resurface on it"
+)
 print(
     "selected_water_zone is the single identify_water_survey_areas() call's own pooled selection "
     f"({'a real ' + ctx.selected_water_zone['survey_type'] + '-type region' if ctx.selected_water_zone is not None else 'genuinely None'} "

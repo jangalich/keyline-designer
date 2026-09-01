@@ -108,14 +108,35 @@ KNEE_ROW = int(round((ORIGIN_Y - _centroid.y) / RESOLUTION_METERS))
 
 
 def _build_dem() -> dict:
-    """A 4% bench with one incised drainage down CHANNEL_COL -- B5a's
-    fixture, not a water-specific one. The drainage carries the flow
-    accumulation the embankment surface wants; the bench carries the flat,
-    wet ground the excavated surface wants."""
-    rows = np.arange(ROWS)[:, None].astype(np.float32)
-    cols = np.arange(COLS)[None, :].astype(np.float32)
+    """B5a's 4% bench with one incised drainage down CHANNEL_COL, PLUS
+    flanking levee ridges whose spacing narrows to a throat at KNEE_ROW
+    (the water-step addition for the compartment change). The drainage
+    carries the flow accumulation the embankment surface wants and the
+    THROAT gives its pinch walks a real crest-to-crest width minimum --
+    without it the prism's constant cross-section makes every seed
+    honestly fail (now: no_constriction) and the embankment type
+    produces zero zones (a correct outcome this step test cannot live
+    on: its multi-select/id/union sections need both types). The bench
+    still carries the flat, wet ground the excavated surface wants; the
+    2.5 m levees are local bumps beside the channel that leave the
+    bench's landform ground alone."""
+    rows = np.arange(ROWS)[:, None].astype(np.float64)
+    cols = np.arange(COLS)[None, :].astype(np.float64)
     array = 300.0 + 0.20 * rows + 0.05 * cols
-    array -= 9.0 * np.exp(-((cols - CHANNEL_COL) ** 2) / (2 * 3.0 ** 2))
+    # The incision is SHALLOW (2.5 m over a wide sigma) since the
+    # compartment change: a 9 m gorge makes the valley floor's
+    # Horn-kernel slope ~14%, which zeroes the excavated slope score
+    # along the channel and leaves the two instruments no common ground
+    # -- and section 9's cross-type invariance would go vacuous. The
+    # gentle swale keeps the channel wet AND flat enough for the
+    # excavated ribbon while still concentrating the flow the
+    # embankment seeding wants.
+    array -= 2.5 * np.exp(-((cols - CHANNEL_COL) ** 2) / (2 * 4.0 ** 2))
+    # Flanking ridges: 8 cells (40 m) off-channel on each side, closing
+    # to 5 cells (25 m) at the KNEE_ROW throat.
+    levee_offset = 5.0 + 3.0 * (1.0 - np.exp(-((rows - KNEE_ROW) ** 2) / (2 * 8.0 ** 2)))
+    for side in (-1, 1):
+        array += 2.5 * np.exp(-((cols - (CHANNEL_COL + side * levee_offset)) ** 2) / (2 * 2.0 ** 2))
     return {
         "array": array.astype(np.float32),
         "resolution_meters": (RESOLUTION_METERS, RESOLUTION_METERS),
@@ -505,21 +526,34 @@ with Harness() as h:
 
     # THE PER-FEATURE HALF -- water_survey_areas._zone_feature_properties()'s
     # full measurement contract, named here so a payload that drops one fails
-    # with the name of what was lost.
+    # with the name of what was lost. TYPE-DISPATCHED since the compartment
+    # change: the shared core rides every zone; the member/sparse-anchor
+    # vocabulary is excavated-only, and the seed/pinch/baseline vocabulary
+    # (the honesty split's anchor claim) is embankment-only.
     ZONE_PROPERTIES = (
         "zone_id", "survey_type", "status", "drop_reason", "rank",
-        "sparse_anchor", "cross_type_overlaps", "member_ids", "member_count",
-        "member_acres", "zone_acres", "mean_suitability", "max_suitability",
-        "criterion_contributions", "twi_percentile_mean",
+        "cross_type_overlaps", "zone_acres", "mean_suitability",
+        "max_suitability", "criterion_contributions", "twi_percentile_mean",
         "depression_depth_max_m", "slope_median_pct",
         "boundary_adjacency_fraction", "canopy_overlap_pct", "road_overlap_pct",
         "production_overlap_pct", "primary_production_area_relationship",
         "has_service_relationship", "served_production_area_ids",
         "soil_coverage_fraction", "criteria_complete", "flags",
-        "representative_elevation_m",
+        "truncated_by_road", "representative_elevation_m",
+    )
+    EXCAVATED_ZONE_PROPERTIES = ("sparse_anchor", "member_ids", "member_count", "member_acres")
+    EMBANKMENT_ZONE_PROPERTIES = (
+        "seed_blend_score", "seed_criteria_signature", "seed_rowcol", "pinch_rowcol",
+        "pinch_width_m", "pinch_walk_distance_m", "baseline_length_m",
+        "truncated_by_boundary", "half_width_bound_hit",
     )
     for feature in ZONES:
-        missing = [key for key in ZONE_PROPERTIES if key not in feature["properties"]]
+        typed = (
+            EMBANKMENT_ZONE_PROPERTIES
+            if feature["properties"]["survey_type"] == water_survey_areas.SURVEY_TYPE_EMBANKMENT
+            else EXCAVATED_ZONE_PROPERTIES
+        )
+        missing = [key for key in ZONE_PROPERTIES + typed if key not in feature["properties"]]
         assert not missing, f"zone {feature['id']} is missing {missing}"
         assert feature["properties"]["status"] == water_survey_areas.ZONE_STATUS_NOMINATED
 

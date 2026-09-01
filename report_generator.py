@@ -549,6 +549,15 @@ def _format_water_candidate_zones_summary(water_narrative: Optional[dict]) -> st
     return "\n".join(lines)
 
 
+def _seed_signature_clause(region: dict) -> str:
+    """The embankment seed's per-criterion signature as prose -- the
+    anchor-claim half of the compartment honesty split (its counterpart,
+    the compartment's own means, is the criteria clause beside it)."""
+    return ", ".join(
+        f"{name} {score}" for name, score in region.get("seed_criteria_signature", {}).items()
+    )
+
+
 def _format_water_survey_areas_summary(water_narrative: Optional[dict]) -> str:
     """Formats water_survey_areas.build_narrative_data()'s block (the
     survey-area water step that replaced the demoted level-pool arc --
@@ -556,52 +565,75 @@ def _format_water_survey_areas_summary(water_narrative: Optional[dict]) -> str:
     every _format_*_summary() here: reads ONLY the pre-digested narrative
     block, never geometry; every number was converted and rounded at the
     source. ALL survey zones are listed (no presentation cap --
-    first-run posture), each with its DUAL ACREAGE sentence ("X acres to
-    survey, anchored by Y acres of high-suitability ground") and its
-    per-criterion mean scores (member cells only) as the narrative-
-    honesty mechanism: prose may only claim what a criterion actually
-    scored. _format_water_candidate_zones_summary() above remains for
-    the demoted layer's narrative shape and is no longer called on the
+    first-run posture). The two types carry their own sentences since
+    the compartment change: an EXCAVATED zone gets the DUAL ACREAGE
+    sentence ("X acres to survey, anchored by Y acres of
+    high-suitability ground") with per-criterion means over member
+    cells; an EMBANKMENT zone is a VALLEY COMPARTMENT and gets the
+    honesty-split sentence -- the SEED's blend score (the anchor claim)
+    beside the compartment's own criterion means (the walked ground,
+    which deliberately includes low-scoring side slopes and the wall
+    reach). Prose may only claim what a criterion actually scored.
+    _format_water_candidate_zones_summary() above remains for the
+    demoted layer's narrative shape and is no longer called on the
     pipeline path."""
     if not water_narrative or not water_narrative.get("zone_found"):
         return (
-            "No water survey areas cleared the suitability threshold (or DEM "
+            "No water survey areas were identified (no embankment seed produced a valley "
+            "compartment and nothing cleared the excavated suitability threshold -- or DEM "
             "data wasn't available for this property)."
         )
 
     selection = water_narrative["selection"]
     lines = [
-        f"{water_narrative['zone_count']} water SURVEY ZONE(S) identified from weighted-overlay "
-        f"suitability surfaces ({water_narrative['embankment_zone_count']} embankment-type -- small "
-        f"dam across a drainageway; {water_narrative['excavated_zone_count']} excavated-type -- "
-        "dugout or seep-fed excavated pond; NRCS Agriculture Handbook 590's two pond types). A zone "
-        "is the ground ONE SURVEY VISIT walks: nearby high-suitability regions grouped into a "
-        f"single envelope ({water_narrative['member_region_count']} member region(s) across all "
-        "zones), with the anchoring ground carried intact inside it. These are GENERAL AREAS WORTH "
+        f"{water_narrative['zone_count']} water SURVEY ZONE(S) identified "
+        f"({water_narrative['embankment_zone_count']} embankment-type -- small dam across a "
+        f"drainageway; {water_narrative['excavated_zone_count']} excavated-type -- dugout or "
+        "seep-fed excavated pond; NRCS Agriculture Handbook 590's two pond types). THE TWO TYPES "
+        "ARE GENERATED DIFFERENTLY: an embankment zone is a VALLEY COMPARTMENT -- a dam site at "
+        "the valley's walked width minimum, the storage reach above it, ridge-bounded by the dam "
+        "site's own watershed -- seeded from the highest-scoring cells of its suitability surface; "
+        "an excavated zone is nearby high-suitability ground grouped into a single walkable "
+        f"envelope ({water_narrative['member_region_count']} member region(s) across the excavated "
+        "zones), the anchoring ground carried intact inside it. These are GENERAL AREAS WORTH "
         "SURVEYING, not designed ponds -- no pool, wall, volume, or station is computed anywhere in "
         "this step, deliberately. "
         + water_narrative["twi_note"]
     ]
     # The counts line: everything that survived is shown (the
     # presentation cap was deleted -- the user decides), plus what the
-    # floor pruned, so the reader knows exactly what this section is NOT
+    # floor/dedupe pruned and which embankment seeds honestly produced
+    # nothing, so the reader knows exactly what this section is NOT
     # showing and why.
     lines.append(
         f"All {water_narrative['zone_count']} surviving zone(s) are listed, ranked per type -- "
         "no presentation cap; you decide which to walk"
         + (
-            f". {water_narrative['dropped_count']} zone(s) whose walkable envelope fell under the "
-            "0.1-acre floor were dropped -- listed in the diagnostic export, not planned on"
+            f". {water_narrative['dropped_count']} zone(s) were dropped (under the 0.1-acre floor, "
+            "or a duplicate of a better-seeded compartment) -- listed in the diagnostic export "
+            "with their reasons, not planned on"
             if water_narrative["dropped_count"]
             else ""
         )
         + "."
     )
+    if water_narrative.get("embankment_failed_seed_count"):
+        failed = water_narrative["embankment_failed_seeds"]
+        reason_clause = "; ".join(
+            f"blend {entry['blend_score']}: {entry['reason_code']}" for entry in failed
+        )
+        lines.append(
+            f"{water_narrative['embankment_failed_seed_count']} of "
+            f"{water_narrative['embankment_seed_count']} embankment seed(s) produced NO compartment "
+            "-- honestly, with the terminator named, because there is no fallback on the "
+            f"compartment path ({reason_clause})."
+        )
     if selection["selected_zone_id"] is not None:
         lines.append(
             f"Selected for downstream planning: zone {selection['selected_zone_id']} "
-            f"({selection['selected_survey_type']}-type) -- the two types pooled by member-mean "
-            "suitability (a provisional selection rule awaiting tuning against the next real run)."
+            f"({selection['selected_survey_type']}-type) -- the two types pooled on each type's own "
+            "score (embankment by seed blend, excavated by member-mean suitability; a provisional "
+            "selection rule awaiting tuning against the next real run)."
         )
 
     for region in water_narrative["zones"]:
@@ -609,18 +641,69 @@ def _format_water_survey_areas_summary(water_narrative: Optional[dict]) -> str:
             f"{name} {entry['mean_score']} (weight {entry['weight']})"
             for name, entry in region["criteria"].items()
         )
-        lines.append(
-            f"\nSurvey zone {region['id']} ({region['survey_type']}-type, rank {region['rank']} of its "
-            f"type): {region['zone_acres']} acres to survey, anchored by {region['member_acres']} "
-            f"acres of high-suitability ground ({region['member_count']} member region(s)); member-"
-            f"cell mean suitability {region['mean_suitability']} (max {region['max_suitability']}), "
-            f"confidence {region['confidence']}."
-        )
-        lines.append(
-            f"Per-criterion mean scores over the ANCHORING ground only -- the envelope never "
-            f"launders sub-threshold ground into a score (prose may claim only these): "
-            f"{criteria_clause}."
-        )
+        if region["survey_type"] == "embankment":
+            lines.append(
+                f"\nSurvey zone {region['id']} (embankment-type, rank {region['rank']} of its "
+                f"type): {region['zone_acres']} acres to survey -- a valley compartment anchored "
+                f"by a {region['seed_blend_score']}-scoring storage cell, dam reach at the "
+                f"downstream end; confidence {region['confidence']}."
+            )
+            lines.append(
+                f"The narrows: {region['pinch_width_ft']} ft crest-to-crest at "
+                f"{region['pinch_walk_distance_ft']} ft downstream of the seed (crest-to-crest "
+                "width is a survey measure that OVERSTATES dam length). THE HONESTY SPLIT: the "
+                f"seed's own criterion signature is {_seed_signature_clause(region)}; the "
+                "COMPARTMENT's per-criterion means over the walked ground -- which deliberately "
+                "includes low-scoring side slopes and the wall reach, that is its job -- are "
+                f"{criteria_clause} (compartment mean {region['mean_suitability']}, max "
+                f"{region['max_suitability']})."
+            )
+            # The terminal-pinch caveat (accepted, disclosed): a dam
+            # reach at the property line / an existing road / the walk
+            # limit states plainly that the surveyed extent -- not the
+            # terrain -- is what bounded the finding.
+            if region.get("pinch_terminal") is not None:
+                terminator_noun = {
+                    "boundary": "the property line",
+                    "road": "the existing road",
+                    "walk_bound": "the walk limit",
+                }[region["pinch_terminal"]]
+                narrowing_clause = (
+                    f"the valley continues to narrow beyond {terminator_noun}; "
+                    if region.get("still_narrowing_at_termination")
+                    else ""
+                )
+                lines.append(
+                    f"TERMINAL PINCH: {narrowing_clause}the marked dam reach is the narrowest "
+                    "buildable crossing within the surveyed extent (walked widths ran "
+                    f"{region['width_profile_min_ft']}-{region['width_profile_max_ft']} ft "
+                    "crest-to-crest)."
+                )
+            if region.get("truncated_by_boundary") or region.get("truncated_by_road"):
+                cut_by = " and ".join(
+                    name
+                    for name, hit in (
+                        ("the property boundary", region.get("truncated_by_boundary")),
+                        ("the road exclusion", region.get("truncated_by_road")),
+                    )
+                    if hit
+                )
+                lines.append(
+                    f"This compartment is TRUNCATED by {cut_by} -- the drawn geometry stops there."
+                )
+        else:
+            lines.append(
+                f"\nSurvey zone {region['id']} ({region['survey_type']}-type, rank {region['rank']} of its "
+                f"type): {region['zone_acres']} acres to survey, anchored by {region['member_acres']} "
+                f"acres of high-suitability ground ({region['member_count']} member region(s)); member-"
+                f"cell mean suitability {region['mean_suitability']} (max {region['max_suitability']}), "
+                f"confidence {region['confidence']}."
+            )
+            lines.append(
+                f"Per-criterion mean scores over the ANCHORING ground only -- the envelope never "
+                f"launders sub-threshold ground into a score (prose may claim only these): "
+                f"{criteria_clause}."
+            )
         if region.get("either_type_candidate"):
             overlap_clause = "; ".join(
                 f"zone {entry['zone_id']} ({entry['overlap_pct']}% of this envelope)"
@@ -662,7 +745,9 @@ def _format_water_survey_areas_summary(water_narrative: Optional[dict]) -> str:
             return f"{label} NOT CHECKED" if value is None else f"{label} {value}%"
 
         lines.append(
-            "Reported overlaps (context for the site visit, never used to shrink the area): "
+            "Reported overlaps (canopy and production are context for the site visit, never used "
+            "to shrink the area; the road figure is the share of this area's pre-clip claim that "
+            "the road exclusion REMOVED -- the drawn geometry already stops at mapped farm roads): "
             + ", ".join(
                 (
                     _overlap_clause(overlaps["canopy_pct"], "canopy"),

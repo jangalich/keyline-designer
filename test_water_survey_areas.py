@@ -818,71 +818,91 @@ assert all(
     if c != V_CHANNEL
 ), "every side cell stays out of both ribbons at 0.5"
 
-for survey_type, expected_grid in (
-    (SURVEY_TYPE_EMBANKMENT, v_emb_expected),
-    (SURVEY_TYPE_EXCAVATED, v_exc_expected),
-):
-    typed_members = v_result["regions_by_type"][survey_type]
-    assert len(typed_members) == 1, f"{survey_type}: one 8-connected channel member, got {len(typed_members)}"
-    assert set(typed_members[0]["cells"]) == expected_channel
-    typed_mean = round(float(np.mean([expected_grid[r, c] for r, c in expected_channel])), 4)
-    assert typed_members[0]["mean_suitability"] == typed_mean, (
-        f"{survey_type}: hand-summed member mean {typed_mean}, got {typed_members[0]['mean_suitability']}"
-    )
-    typed_zones = v_result["zones_by_type"][survey_type]
-    assert len(typed_zones) == 1 and typed_zones[0]["member_count"] == 1
-    assert typed_zones[0]["mean_suitability"] == typed_mean, "zone statistics are the member chain's own"
-    # A straight one-cell-wide ribbon is a convex 5x180 m rectangle, so
-    # its HULL is exactly itself (900 m^2); the boundary clip then
-    # shaves the 0.1 m the fixture's boundary sits inside the end
-    # cells' edges -> 5 x 179.8 = 899 m^2. Hand-stated: 0.2222 ac
-    # envelope vs 0.2224 ac anchor -- hull-exact up to the real clip,
-    # no closing discretization anymore:
-    assert abs(typed_zones[0]["zone_acres"] - typed_zones[0]["member_acres"]) < 0.001
-    assert math.isclose(typed_zones[0]["zone_acres"], round(5.0 * 179.8 / 4046.8564224, 4)), (
-        f"{survey_type}: the clipped hull is exactly the 899 m^2 strip, got {typed_zones[0]['zone_acres']}"
-    )
-    assert typed_zones[0]["wettest_cell_rowcol"] == (37, V_CHANNEL)
-    assert typed_zones[0]["boundary_adjacency_fraction"] < 0.1
-
-# Both zones survive the floor and BOTH are in the output -- the
-# presentation cap is deleted, so surviving IS shipping (no `presented`
-# key exists on any zone). The pooled selection is the embankment zone
-# (higher member mean).
-v_emb_zone = v_result["zones_by_type"][SURVEY_TYPE_EMBANKMENT][0]
-v_exc_zone = v_result["zones_by_type"][SURVEY_TYPE_EXCAVATED][0]
-assert "presented" not in v_emb_zone and "presented" not in v_exc_zone
-assert v_emb_zone["rank"] == 1 and v_exc_zone["rank"] == 1, "each type's lone zone ranks 1 within its type"
-assert v_emb_zone["mean_suitability"] > v_exc_zone["mean_suitability"]
-assert v_result["selected_water_zone"] is v_emb_zone
-
-# CROSS-TYPE OVERLAP (pre-merge change 4), hand-derived: both types'
-# zones are the SAME 5x180 m channel rectangle (identical member cells
-# -> identical hulls), so each envelope is 100% covered by the other --
-# fraction 1.0 both ways, pointing at the other zone's id. 1.0 >= the
-# 0.5 note fraction -> this is exactly the either-type ground the
-# consultant line is for. Sparse anchor is silent (member == zone).
-assert v_emb_zone["cross_type_overlaps"] == [{"zone_id": v_exc_zone["id"], "fraction": 1.0}], (
-    f"the embankment envelope is fully covered by the excavated one, got {v_emb_zone['cross_type_overlaps']}"
+# EXCAVATED keeps the full extraction pipeline, and the ribbon math is
+# unchanged:
+exc_members = v_result["regions_by_type"][SURVEY_TYPE_EXCAVATED]
+assert len(exc_members) == 1, f"excavated: one 8-connected channel member, got {len(exc_members)}"
+assert set(exc_members[0]["cells"]) == expected_channel
+exc_mean = round(float(np.mean([v_exc_expected[r, c] for r, c in expected_channel])), 4)
+assert exc_members[0]["mean_suitability"] == exc_mean, (
+    f"excavated: hand-summed member mean {exc_mean}, got {exc_members[0]['mean_suitability']}"
 )
-assert v_exc_zone["cross_type_overlaps"] == [{"zone_id": v_emb_zone["id"], "fraction": 1.0}], (
-    "the agreement is symmetric on identical envelopes"
+exc_zones = v_result["zones_by_type"][SURVEY_TYPE_EXCAVATED]
+assert len(exc_zones) == 1 and exc_zones[0]["member_count"] == 1
+assert exc_zones[0]["mean_suitability"] == exc_mean, "zone statistics are the member chain's own"
+# A straight one-cell-wide ribbon is a convex 5x180 m rectangle, so
+# its HULL is exactly itself (900 m^2); the boundary clip then
+# shaves the 0.1 m the fixture's boundary sits inside the end
+# cells' edges -> 5 x 179.8 = 899 m^2. Hand-stated: 0.2222 ac
+# envelope vs 0.2224 ac anchor -- hull-exact up to the real clip,
+# no closing discretization anymore:
+assert abs(exc_zones[0]["zone_acres"] - exc_zones[0]["member_acres"]) < 0.001
+assert math.isclose(exc_zones[0]["zone_acres"], round(5.0 * 179.8 / 4046.8564224, 4)), (
+    f"excavated: the clipped hull is exactly the 899 m^2 strip, got {exc_zones[0]['zone_acres']}"
 )
-assert v_emb_zone["sparse_anchor"] is False and v_exc_zone["sparse_anchor"] is False
+assert exc_zones[0]["wettest_cell_rowcol"] == (37, V_CHANNEL)
+assert exc_zones[0]["boundary_adjacency_fraction"] < 0.1
 
-# The narrative carries the finding: overlap_pct 100.0 and the
-# either_type_candidate line-gate True on both blocks (1.0 >= 0.5).
+# EMBANKMENT no longer extracts ANYTHING from this surface -- it is a
+# NOMINATION surface now (the formulas assertion above still pins it),
+# and the generation is seed-based. No member regions exist for the
+# type at all:
+assert v_result["regions_by_type"][SURVEY_TYPE_EMBANKMENT] == [], (
+    "the embankment path has no extraction stage -- member regions are excavated-only"
+)
+# The seeding, hand-derived: the qualifying cells are exactly the 36
+# on-parcel channel cells (blend 0.5635..0.863, ascending with r; every
+# side cell is 0.4691 < 0.5). Iterative claiming at 30 m (6 cells of
+# row distance, inclusive): the r=37 seed claims rows 31..37, then
+# r=30 claims 24..30, and so on -> seeds at rows 37, 30, 23, 16, 9, 2.
+v_seeds = v_result["embankment_seeds"]
+assert [record["rowcol"] for record in v_seeds] == [
+    (37, V_CHANNEL), (30, V_CHANNEL), (23, V_CHANNEL), (16, V_CHANNEL), (9, V_CHANNEL), (2, V_CHANNEL)
+], f"hand-derived 30 m claiming order, got {[record['rowcol'] for record in v_seeds]}"
+assert all(record["blend_score"] >= 0.5 for record in v_seeds)
+# Every seed FAILS, honestly, because this prism valley has a CONSTANT
+# cross-section -- crest-to-crest width is identical at every station,
+# so the along-channel minimum lands on the seed's own station (argmin
+# tie -> index 0: the valley never narrows below the seed) -- the ONE
+# failure the accepted-terminal doctrine kept: no_constriction. (The
+# r=37 seed's walk is cut by the boundary with only its own station
+# measured -- a single station IS the seed station, so it reads
+# no_constriction too, not a terminal acceptance: a dam at the storage
+# cell is degenerate.)
+assert all(record["status"] == wsa.SEED_STATUS_FAILED for record in v_seeds), (
+    "a constant-width prism never narrows below any seed -- every seed reports nothing"
+)
+assert all(
+    record["reason_code"] == wsa.REASON_NO_CONSTRICTION for record in v_seeds
+), f"widths never drop below the seed station -> no_constriction, got {[r['reason_code'] for r in v_seeds]}"
+assert v_result["zones_by_type"][SURVEY_TYPE_EMBANKMENT] == [], (
+    "no constriction, no compartment, no fallback -- the hull does not exist on this path"
+)
+
+# The lone excavated zone survives, ranks 1, selects; with no
+# embankment zone there is no cross-type agreement to report.
+v_exc_zone = exc_zones[0]
+assert "presented" not in v_exc_zone
+assert v_exc_zone["rank"] == 1
+assert v_result["selected_water_zone"] is v_exc_zone
+assert v_exc_zone["cross_type_overlaps"] == []
+assert v_exc_zone["sparse_anchor"] is False
+
+# The narrative carries the seed accounting: 6 seeds, 6 failed, each
+# with its reason code -- the reach with no on-parcel pinch reports
+# honestly as nothing.
 v_narrative = build_narrative_data(v_result)
-for block in v_narrative["zones"]:
-    assert block["either_type_candidate"] is True, "1.0 >= CROSS_TYPE_OVERLAP_NOTE_FRACTION -> the line fires"
-    assert block["cross_type_overlaps"][0]["overlap_pct"] == 100.0
-assert v_narrative["zone_count"] == 2 and len(v_narrative["zones"]) == 2, (
-    "ALL survivors are listed with the total count -- no cap"
-)
+assert v_narrative["zone_count"] == 1 and len(v_narrative["zones"]) == 1
+assert v_narrative["embankment_zone_count"] == 0 and v_narrative["excavated_zone_count"] == 1
+assert v_narrative["embankment_generation"] == wsa.PROVENANCE_SEED_COMPARTMENT
+assert v_narrative["embankment_seed_count"] == 6 and v_narrative["embankment_failed_seed_count"] == 6
+assert {entry["reason_code"] for entry in v_narrative["embankment_failed_seeds"]} == {
+    wsa.REASON_NO_CONSTRICTION
+}
 print(
-    f"Fixture 2 (V-valley, final defaults): BOTH types ribbon the 36 channel cells (emb mean "
-    f"{v_emb_zone['mean_suitability']}, exc mean {v_exc_zone['mean_suitability']} -- the seep widening "
-    "at work), cross-type overlap 1.0 both ways with the either-type line gated on, embankment selected."
+    f"Fixture 2 (V-valley, compartment change): excavated ribbons the 36 channel cells (mean "
+    f"{v_exc_zone['mean_suitability']}); embankment seeds 6 channel cells and every walk honestly fails "
+    "no_constriction (constant prism cross-section -- the valley never narrows below any seed)."
 )
 
 # --- FIXTURE 2b: member-vs-zone split where the envelope ADDS ground.
@@ -1057,28 +1077,41 @@ _called_names = {
 assert "apply_presentation" not in _called_names, "nothing in the module still calls the deleted machinery"
 
 # Rank + selection on hand-built zone dicts: every survivor is ranked
-# within its type, and the pooled rank-1 invariant holds with NO cap in
-# between -- the selection is the pooled member-mean max, full stop.
-def _mini_zone(zid, stype, mean, acres, poly):
-    return {
+# within its type ON ITS TYPE'S OWN INSTRUMENT -- embankment by SEED
+# blend score (the compartment change), excavated by member-mean
+# suitability -- and the pooled rank-1 invariant holds with NO cap in
+# between. The embankment minis carry a deliberately LOW compartment
+# mean_suitability (0.1) beside their seed blends: if ranking or
+# selection ever read the compartment mean, every assertion below
+# flips -- the walked ground's mean must never rank a compartment.
+def _mini_zone(zid, stype, mean, acres, poly, seed_blend=None):
+    zone = {
         "id": zid, "survey_type": stype, "mean_suitability": mean,
-        "member_acres": acres, "polygon_utm": poly,
+        "polygon_utm": poly,
     }
+    if stype == SURVEY_TYPE_EMBANKMENT:
+        zone["seed_blend_score"] = seed_blend
+        zone["zone_acres"] = acres
+    else:
+        zone["member_acres"] = acres
+    return zone
 
 
 rank_pool = [
-    _mini_zone(0, SURVEY_TYPE_EMBANKMENT, 0.9, 1.0, box(0, 0, 20, 20)),
-    _mini_zone(1, SURVEY_TYPE_EMBANKMENT, 0.8, 1.0, box(100, 0, 120, 20)),
-    _mini_zone(2, SURVEY_TYPE_EMBANKMENT, 0.7, 1.0, box(200, 0, 220, 20)),
+    _mini_zone(0, SURVEY_TYPE_EMBANKMENT, 0.1, 1.0, box(0, 0, 20, 20), seed_blend=0.9),
+    _mini_zone(1, SURVEY_TYPE_EMBANKMENT, 0.1, 1.0, box(100, 0, 120, 20), seed_blend=0.8),
+    _mini_zone(2, SURVEY_TYPE_EMBANKMENT, 0.1, 1.0, box(200, 0, 220, 20), seed_blend=0.7),
     _mini_zone(3, SURVEY_TYPE_EXCAVATED, 0.65, 1.0, box(10, 0, 30, 20)),
     _mini_zone(4, SURVEY_TYPE_EXCAVATED, 0.6, 1.0, box(300, 0, 320, 20)),
 ]
 rank_survey_zones_per_type(rank_pool)
 assert [z["rank"] for z in rank_pool] == [1, 2, 3, 1, 2], (
-    "EVERY survivor is ranked within its type -- rank 3 exists because nothing caps the list at 3 anymore"
+    "EVERY survivor is ranked within its type (embankment by seed blend, despite the 0.1 compartment "
+    "means) -- rank 3 exists because nothing caps the list at 3 anymore"
 )
 assert select_survey_zone(rank_pool) is rank_pool[0], (
-    "the rank-1 invariant with no cap in between: the pooled member-mean max selects, directly"
+    "the pooled rank-1 invariant on the per-type scores: seed blend 0.9 beats member-mean 0.65 -- and "
+    "the 0.1 compartment mean never enters the pool"
 )
 
 # attach_cross_type_overlaps on the same pool, hand-derived: emb zone 0
@@ -1312,10 +1345,13 @@ json.dumps(dropped_collection)
 print("Dropped-zone export: survey_zone_dropped layer validates with status: dropped + reason code.")
 
 # GREP-ASSERT: no serialization-time reprojection in any emitter.
+import wire_translation as _wt  # noqa: E402
+
 for emitter in (
     survey_areas_to_geojson,
     wsa._zone_feature_properties,
     wsa._member_feature_properties,
+    _wt.water_embankment_detail_features,
     diag._isoband_features,
     diag._criterion_isoband_features,
     diag._context_features,
@@ -1349,12 +1385,17 @@ assert "ksat_sc" in rider_table and "grp_sc" in rider_table and "hydric_sh" in r
 assert "uncovered" not in rider_table, "every gated cell is inside mukey 1's geometry on this fixture"
 assert " 1 " in rider_table, "the covered cells' map unit symbol appears in the table"
 assert "  1.000" in rider_table, "the D-group/hydric/ksat sub-signals (1.0) appear per cell"
-# And the threshold comparison prints, on RAW surfaces:
+# And the threshold comparison prints, on the RAW EXCAVATED surface --
+# the embankment lines are RETIRED with extraction and the instrument
+# records why every run instead of falling silent:
 comparison = diag.summarize_threshold_comparison(identify_like, FLAT_DEM)
-assert "THRESHOLD COMPARISON (raw surfaces" in comparison and "t=0.7" in comparison, (
-    "the comparison instrument keeps printing all three thresholds"
+assert "THRESHOLD COMPARISON (raw excavated surface" in comparison and "t=0.7" in comparison, (
+    "the comparison instrument keeps printing all three thresholds for the excavated surface"
 )
 assert "t=0.5:" in comparison and "<- default" in comparison, "the final-tuning 0.5 default is marked"
+assert "embankment: RETIRED with extraction" in comparison, (
+    "the retired embankment lines leave a recorded reason in the instrument, never a silent absence"
+)
 print("Instrumentation rider: soil sub-signals + map unit in the deepest-fill table; threshold comparison prints on raw surfaces.")
 
 
