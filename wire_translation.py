@@ -611,22 +611,37 @@ def water_survey_zones_to_feature_collection(
 
     features = []
     for zone in (zones or []):
+        if zone["survey_type"] == "embankment":
+            # A valley compartment has no members: its label carries
+            # the honesty split's two numbers -- the compartment
+            # acreage and the SEED's anchoring blend score.
+            label = (
+                f"Survey zone {zone['id']} (embankment-type, rank {zone['rank']}): "
+                f"{zone['zone_acres']} ac valley compartment anchored by a "
+                f"{zone['seed_blend_score']}-scoring storage cell, dam reach at the downstream end"
+            )
+        else:
+            label = (
+                f"Survey zone {zone['id']} ({zone['survey_type']}-type, rank {zone['rank']}): "
+                f"{zone['zone_acres']} ac to survey, anchored by {zone['member_acres']} ac of "
+                f"high-suitability ground ({zone['member_count']} member(s))"
+            )
         features.append(
             make_feature(
                 feature_id=f"water-survey-zone-{zone['id']}",
                 geometry=zone["geometry_wgs84"],
                 layer=f"survey_zone_{zone['survey_type']}",
-                label=(
-                    f"Survey zone {zone['id']} ({zone['survey_type']}-type, rank {zone['rank']}): "
-                    f"{zone['zone_acres']} ac to survey, anchored by {zone['member_acres']} ac of "
-                    f"high-suitability ground ({zone['member_count']} member(s))"
-                ),
+                label=label,
                 confidence=zone["confidence"],
                 confidence_notes=zone["confidence_notes"],
                 extra_properties=_zone_feature_properties(zone),
             )
         )
-        for member in zone["members"]:
+        # Member sub-features are EXCAVATED-ONLY since the compartment
+        # change -- an embankment zone carries no members key at all
+        # (the honesty split: member-only statistics have no members
+        # there).
+        for member in zone.get("members", ()):
             features.append(
                 make_feature(
                     feature_id=f"water-survey-zone-member-{member['id']}",
@@ -642,21 +657,172 @@ def water_survey_zones_to_feature_collection(
                 )
             )
     for zone in dropped_zones or []:
+        if zone["survey_type"] == "embankment":
+            # Dropped compartments carry their own reason -- the 0.1 ac
+            # floor on compartment acreage, or a dedupe
+            # duplicate_of_zone_<id> -- named in the label.
+            label = (
+                f"DROPPED survey zone {zone['id']} (embankment-type, {zone['drop_reason']}): "
+                f"{zone['zone_acres']} ac compartment (seed blend {zone['seed_blend_score']})"
+            )
+        else:
+            label = (
+                f"DROPPED survey zone {zone['id']} ({zone['survey_type']}-type, "
+                f"{zone['drop_reason']}): {zone['zone_acres']} ac envelope (member ground "
+                f"{zone['member_acres']} ac) under the {MIN_SURVEY_REGION_AREA_ACRES} ac floor"
+            )
         features.append(
             make_feature(
                 feature_id=f"water-survey-zone-dropped-{zone['id']}",
                 geometry=zone["geometry_wgs84"],
                 layer="survey_zone_dropped",
-                label=(
-                    f"DROPPED survey zone {zone['id']} ({zone['survey_type']}-type): member ground "
-                    f"{zone['member_acres']} ac under the {MIN_SURVEY_REGION_AREA_ACRES} ac floor"
-                ),
+                label=label,
                 confidence=zone["confidence"],
                 confidence_notes=_DROPPED_ZONE_NOTE,
                 extra_properties=_zone_feature_properties(zone),
             )
         )
     return make_feature_collection(features)
+
+
+_EMBANKMENT_DETAIL_NOTE = (
+    "Embankment compartment instrument geometry (diagnostic export): the seed (the compartment's "
+    "anchoring storage cell -- the seed's own blend score, not the compartment's mean), the pinch "
+    "(the walked crest-to-crest width minimum -- the embankment cell; its width is a crest-to-crest "
+    "survey measure that OVERSTATES dam length), the baseline (seed -> pinch), and the two "
+    "baseline-perpendicular crest transects that bound the compartment's watershed band. Derived "
+    "from the same DEM and D8 flow field as everything else in the water step -- not surveyed, not "
+    "field-verified; ground-truth before committing to anything."
+)
+
+_FAILED_SEED_NOTE = (
+    "FAILED embankment seed (the dropped-feature pattern, seed edition): this seed qualified on the "
+    "nomination surface but produced NO compartment -- the reason_code names why (no interior width "
+    "minimum within the walk bound, pinch off-parcel, pinch blocked by a farm road, or a dedupe "
+    "collapse into duplicate_of_zone_<id>). There is deliberately no fallback: the hull does not "
+    "exist on the embankment path."
+)
+
+
+def water_embankment_detail_features(zones: list[dict], seed_records: list[dict]) -> list[dict]:
+    """
+    The embankment compartment instrument layers (diagnostic export):
+
+        embankment_seed        -- every seed that built a surviving-or-
+                                  dropped compartment (Point; blend
+                                  score, criteria signature, zone link)
+        embankment_seed_failed -- every seed that produced nothing
+                                  (Point; reason_code -- the dropped-
+                                  feature pattern)
+        embankment_pinch       -- each compartment's embankment cell
+                                  (Point; crest-to-crest width, walk
+                                  distance)
+        embankment_baseline    -- seed -> pinch (LineString)
+        embankment_transect    -- the two baseline-perpendicular crest
+                                  transects per compartment (LineString;
+                                  end = seed|pinch, width, bound flag)
+
+    STORED WIRE FORMS ONLY, like everything on this boundary: every
+    geometry is the object's own geometry_wgs84 built at its birth in
+    water_survey_areas.py -- no reprojection here.
+    """
+    features: list[dict] = []
+    for zone in zones or []:
+        if zone["survey_type"] != "embankment":
+            continue
+        zone_id = zone["id"]
+        seed = zone["seed"]
+        pinch = zone["pinch"]
+        features.append(
+            make_feature(
+                feature_id=f"embankment-seed-{zone_id}",
+                geometry=seed["geometry_wgs84"],
+                layer="embankment_seed",
+                label=f"Seed for compartment {zone_id} (blend {seed['blend_score']})",
+                confidence=zone["confidence"],
+                confidence_notes=_EMBANKMENT_DETAIL_NOTE,
+                extra_properties={
+                    "zone_id": zone_id,
+                    "blend_score": seed["blend_score"],
+                    "criteria_signature": dict(seed["criteria_signature"]),
+                    "rowcol": list(seed["rowcol"]),
+                },
+            )
+        )
+        features.append(
+            make_feature(
+                feature_id=f"embankment-pinch-{zone_id}",
+                geometry=pinch["geometry_wgs84"],
+                layer="embankment_pinch",
+                label=(
+                    f"Pinch (embankment cell) for compartment {zone_id}: "
+                    f"{pinch['width_m']} m crest-to-crest at {pinch['walk_distance_m']} m downstream"
+                ),
+                confidence=zone["confidence"],
+                confidence_notes=_EMBANKMENT_DETAIL_NOTE,
+                extra_properties={
+                    "zone_id": zone_id,
+                    "width_m": pinch["width_m"],
+                    "walk_distance_m": pinch["walk_distance_m"],
+                    "half_width_bound_hit": pinch["half_width_bound_hit"],
+                    "rowcol": list(pinch["rowcol"]),
+                },
+            )
+        )
+        features.append(
+            make_feature(
+                feature_id=f"embankment-baseline-{zone_id}",
+                geometry=zone["baseline"]["geometry_wgs84"],
+                layer="embankment_baseline",
+                label=f"Baseline for compartment {zone_id} ({zone['baseline']['length_m']} m)",
+                confidence=zone["confidence"],
+                confidence_notes=_EMBANKMENT_DETAIL_NOTE,
+                extra_properties={"zone_id": zone_id, "length_m": zone["baseline"]["length_m"]},
+            )
+        )
+        for transect in zone["transects"]:
+            features.append(
+                make_feature(
+                    feature_id=f"embankment-transect-{zone_id}-{transect['end']}",
+                    geometry=transect["geometry_wgs84"],
+                    layer="embankment_transect",
+                    label=(
+                        f"Transect at the {transect['end']} end of compartment {zone_id} "
+                        f"({transect['width_m']} m crest-to-crest)"
+                    ),
+                    confidence=zone["confidence"],
+                    confidence_notes=_EMBANKMENT_DETAIL_NOTE,
+                    extra_properties={
+                        "zone_id": zone_id,
+                        "end": transect["end"],
+                        "width_m": transect["width_m"],
+                        "bound_hit": transect["bound_hit"],
+                    },
+                )
+            )
+    for index, record in enumerate(seed_records or []):
+        if record.get("status") != "failed":
+            continue
+        features.append(
+            make_feature(
+                feature_id=f"embankment-seed-failed-{index}",
+                geometry=record["geometry_wgs84"],
+                layer="embankment_seed_failed",
+                label=(
+                    f"FAILED seed (blend {record['blend_score']}): {record.get('reason_code')}"
+                ),
+                confidence="low",
+                confidence_notes=_FAILED_SEED_NOTE,
+                extra_properties={
+                    "blend_score": record["blend_score"],
+                    "reason_code": record.get("reason_code"),
+                    "terminator": record.get("terminator"),
+                    "stations_measured": record.get("stations_measured"),
+                    "rowcol": list(record["rowcol"]),
+                },
+            )
+        )
+    return features
 
 
 def water_zone_features_to_feature_collection(

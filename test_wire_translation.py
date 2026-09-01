@@ -180,7 +180,7 @@ def _water_member(mid, x0, y0):
     return {
         "id": mid,
         "zone_id": 1,
-        "survey_type": "embankment",
+        "survey_type": "excavated",
         "area_acres": _acres(poly),
         "cell_count": 16,
         "cells": [(1, 1)],
@@ -210,12 +210,13 @@ def _water_zone(zid, x0, y0, members):
     poly = box(x0, y0, x0 + 40, y0 + 40)
     return {
         "id": zid,
-        "survey_type": "embankment",
+        "survey_type": "excavated",
         "nominated_by": "suitability_surface",
         "status": "surviving",
         "drop_reason": None,
         "rank": zid,
         "sparse_anchor": False,
+        "truncated_by_road": False,
         "cross_type_overlaps": [],
         "member_ids": [m["id"] for m in members],
         "member_count": len(members),

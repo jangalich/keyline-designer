@@ -205,6 +205,34 @@ for r in range(ROWS):
             # the two halves either direction.
             array[r, c] = 1200.0 - abs(c - RIDGE_COL) * 4.0 - r * _row_weight(c, RIDGE_COL)
 
+
+def _crest_offset_cells(r: int) -> int:
+    """The valley's crest offset from VALLEY_COL, per row: 6 cells
+    upstream of the throat, 3 through it (rows 18-23), 7 below --
+    the compartment change's addition to this fixture. The uniform V
+    gave the embankment pinch walks a constant crest-to-crest width, so
+    every seed honestly reported no_pinch_within_bound and
+    selected_water_zone was None; the throat gives the walk a real
+    interior width minimum, and the resulting VALLEY COMPARTMENT is the
+    pooled rank-1 selection (excavated still produces nothing here) --
+    exactly the compartment-as-rank-1 case section 6 asserts the
+    consumer contract on."""
+    if 18 <= r <= 23:
+        return 3
+    return 6 if r < 18 else 7
+
+
+# One-cell side trenches 6 m deep just beyond the crest offset: the V
+# wall's outward rise turns into a >= 1 m fall there, so the crest walk
+# declares its crest at _crest_offset_cells(r) instead of walking to its
+# bound. Trench cells drain INWARD (their inner neighbor is lower on the
+# V), so no closed pit and no new drainage line is introduced.
+for r in range(ROWS):
+    for _side in (-1, 1):
+        _trench_col = VALLEY_COL + _side * (_crest_offset_cells(r) + 1)
+        if 0 <= _trench_col < 30:
+            array[r, _trench_col] -= 6.0
+
 synthetic_dem = {
     "array": array,
     "resolution_meters": (RESOLUTION, RESOLUTION),
@@ -885,6 +913,29 @@ if ctx.selected_water_zone is not None:
         "_attach_keypoint_feature_relationships() dereferences representative_elevation_m on any "
         "non-None selected water zone"
     )
+# THE COMPARTMENT-AS-RANK-1 CASE (the compartment change): this fixture's
+# valley throat (see _crest_offset_cells()) makes the pooled rank-1 a
+# seed-based VALLEY COMPARTMENT, and the full consumer contract must hold
+# on it exactly as it did on a hull zone -- same fields, same identities,
+# through the same single call.
+assert ctx.selected_water_zone is not None and ctx.selected_water_zone["survey_type"] == "embankment", (
+    "this fixture's throat is built to select a valley compartment as the pooled rank-1 -- a None or "
+    "excavated selection means the compartment path regressed"
+)
+assert ctx.selected_water_zone["rank"] == 1
+assert ctx.selected_water_zone["render_fill_polygon_utm"] is ctx.selected_water_zone["polygon_utm"], (
+    "the compartment's render_fill is the IDENTITY of its clipped compartment polygon"
+)
+assert isinstance(ctx.selected_water_zone["representative_elevation_m"], float)
+assert ctx.selected_water_zone["served_production_area_ids"] == [], (
+    "the fixture's fake production patch sits outside service range"
+)
+assert "seed_blend_score" in ctx.selected_water_zone and "pinch" in ctx.selected_water_zone, (
+    "the compartment carries its anchor claim (seed blend) and pinch record through the context"
+)
+assert "members" not in ctx.selected_water_zone and "member_acres" not in ctx.selected_water_zone, (
+    "a compartment has NO members -- member-only statistics must not resurface on it"
+)
 print(
     "selected_water_zone is the single identify_water_survey_areas() call's own pooled selection "
     f"({'a real ' + ctx.selected_water_zone['survey_type'] + '-type region' if ctx.selected_water_zone is not None else 'genuinely None'} "

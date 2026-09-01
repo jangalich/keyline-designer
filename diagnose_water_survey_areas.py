@@ -28,11 +28,19 @@ Layers written:
         -- zones the ZONE-acreage floor filtered OUT of the pipeline
            output, carried here with status: dropped + drop_reason
            (visible and attributed, never silent)
+    embankment_seed / embankment_seed_failed / embankment_pinch /
+    embankment_baseline / embankment_transect
+        -- the compartment instrument layers (seed points with blend
+           scores; failed seeds with reason codes -- the dropped-
+           feature pattern, seed edition; pinch points with
+           crest-to-crest width and walk distance; baseline and
+           transect lines), for surviving AND dropped compartments
     suitability_isoband_embankment / suitability_isoband_excavated
         -- filled contour bands of each RAW blended surface at
-           ISOBAND_LEVELS (what extraction actually thresholds --
-           pre-threshold smoothing is retired, see
-           water_survey_areas.masked_focal_mean())
+           ISOBAND_LEVELS (the excavated one is what extraction
+           thresholds; the embankment one is the NOMINATION surface
+           the seeding claims from -- pre-threshold smoothing is
+           retired, see water_survey_areas.masked_focal_mean())
     criterion_isoband_<type>_<criterion>
         -- filled contour bands of every RAW criterion grid, both
            types (the excavated-diagnosis layer: which criterion kills
@@ -45,9 +53,11 @@ Layers written:
            properties (grid/on-parcel/ceiling-removed/gated cell counts)
 
 The terminal output additionally prints the THRESHOLD COMPARISON
-(region count / total acreage / largest region per type at 0.5/0.6/0.7
-on the RAW surfaces, 8-connected -- the 0.6 default stays tunable from
-evidence every run), the depression-depth distribution before/after the
+(region count / total acreage / largest region at 0.5/0.6/0.7 on the
+RAW EXCAVATED surface, 8-connected -- the 0.5 default stays tunable
+from evidence every run; the embankment lines are RETIRED with
+extraction and the instrument records why every run -- see
+summarize_threshold_comparison()), the depression-depth distribution before/after the
 noise floor with the 10 deepest-fill cells' full scoring rows -- now
 including each cell's SSURGO map unit and its three soil sub-signals
 (ksat score / hydrologic-group score / hydric share), the soil-oddity
@@ -93,6 +103,7 @@ from water_survey_areas import (
     DEPRESSION_FULL_CREDIT_METERS,
     DEPRESSION_NOISE_FLOOR_METERS,
     EXCAVATED_WEIGHTS,
+    SURVEY_TYPE_EMBANKMENT,
     SURVEY_TYPE_EXCAVATED,
     SURVEY_TYPES,
     WATER_REGION_CONNECTIVITY,
@@ -293,6 +304,19 @@ def export_water_survey_areas_geojson(
             identify_result["zones"], dropped_zones=identify_result.get("dropped_zones")
         )["features"]
     )
+    # The embankment compartment instrument layers (seed / pinch /
+    # baseline / transect, plus failed seeds with their reason codes --
+    # the dropped-feature pattern, seed edition). Surviving AND dropped
+    # compartments both get their instruments: a dropped compartment's
+    # geometry is exactly what a tuning pass needs to see.
+    from wire_translation import water_embankment_detail_features
+
+    features.extend(
+        water_embankment_detail_features(
+            list(identify_result["zones"]) + list(identify_result.get("dropped_zones", [])),
+            identify_result.get("embankment_seeds", []),
+        )
+    )
     for survey_type in SURVEY_TYPES:
         features.extend(_isoband_features(survey_type, isobands_by_type[survey_type]))
     if criterion_isobands_by_type:
@@ -338,7 +362,11 @@ def summarize_survey_zones_table(identify_result: dict) -> str:
         zones = identify_result["zones_by_type"][survey_type]
         lines.append(f"=== {survey_type.upper()}-TYPE SURVEY ZONES ({len(zones)} surviving) ===")
         if not zones:
-            lines.append("  (none cleared the threshold and floor)")
+            lines.append(
+                "  (no seed produced a surviving compartment)"
+                if survey_type == SURVEY_TYPE_EMBANKMENT
+                else "  (none cleared the threshold and floor)"
+            )
             continue
         for zone in zones:
             top_two = sorted(
@@ -351,26 +379,63 @@ def summarize_survey_zones_table(identify_result: dict) -> str:
                 f", either-type w/ zone {entry['zone_id']} ({entry['fraction']:.0%})"
                 for entry in zone.get("cross_type_overlaps", [])
             )
-            lines.append(
-                f"  #{zone['rank']} zone {zone['id']}: {zone['zone_acres']:.2f} ac to survey "
-                f"anchored by {zone['member_acres']:.2f} ac ({zone['member_count']} member(s)), "
-                f"mean {zone['mean_suitability']:.3f} / max {zone['max_suitability']:.3f}, "
-                f"top: {criteria_text}, {_gravity_cell(zone)}, "
-                f"canopy {_overlap_cell(zone['canopy_overlap_pct'])} / road "
-                f"{_overlap_cell(zone['road_overlap_pct'])} / prod "
-                f"{_overlap_cell(zone['production_overlap_pct'])}, "
-                f"boundary-adj {zone['boundary_adjacency_fraction']:.0%}, "
-                f"conf {zone['confidence']}{cross}{flags}"
-            )
+            if survey_type == SURVEY_TYPE_EMBANKMENT:
+                # A compartment's line carries the honesty split: the
+                # SEED's blend (the rank driver) beside the
+                # compartment's own mean over the walked ground.
+                lines.append(
+                    f"  #{zone['rank']} zone {zone['id']}: {zone['zone_acres']:.2f} ac compartment, "
+                    f"seed blend {zone['seed_blend_score']:.3f} / compartment mean "
+                    f"{zone['mean_suitability']:.3f}, pinch {zone['pinch']['width_m']:.0f} m wide at "
+                    f"{zone['pinch']['walk_distance_m']:.0f} m, "
+                    f"top: {criteria_text}, {_gravity_cell(zone)}, "
+                    f"canopy {_overlap_cell(zone['canopy_overlap_pct'])} / road-clip "
+                    f"{_overlap_cell(zone['road_overlap_pct'])} / prod "
+                    f"{_overlap_cell(zone['production_overlap_pct'])}, "
+                    f"boundary-adj {zone['boundary_adjacency_fraction']:.0%}, "
+                    f"conf {zone['confidence']}{cross}{flags}"
+                )
+            else:
+                lines.append(
+                    f"  #{zone['rank']} zone {zone['id']}: {zone['zone_acres']:.2f} ac to survey "
+                    f"anchored by {zone['member_acres']:.2f} ac ({zone['member_count']} member(s)), "
+                    f"mean {zone['mean_suitability']:.3f} / max {zone['max_suitability']:.3f}, "
+                    f"top: {criteria_text}, {_gravity_cell(zone)}, "
+                    f"canopy {_overlap_cell(zone['canopy_overlap_pct'])} / road-clip "
+                    f"{_overlap_cell(zone['road_overlap_pct'])} / prod "
+                    f"{_overlap_cell(zone['production_overlap_pct'])}, "
+                    f"boundary-adj {zone['boundary_adjacency_fraction']:.0%}, "
+                    f"conf {zone['confidence']}{cross}{flags}"
+                )
     dropped = identify_result.get("dropped_zones", [])
-    lines.append(f"=== DROPPED AT THE ZONE-ACRE FLOOR ({len(dropped)}) ===")
+    lines.append(f"=== DROPPED ZONES ({len(dropped)}: floor and dedupe, each with its reason) ===")
     if not dropped:
         lines.append("  (none)")
     for zone in dropped:
+        if zone["survey_type"] == SURVEY_TYPE_EMBANKMENT:
+            lines.append(
+                f"  DROPPED ({zone['drop_reason']}): embankment zone {zone['id']}, compartment "
+                f"{zone['zone_acres']:.4f} ac, seed blend {zone['seed_blend_score']:.3f} -- "
+                "excluded from the pipeline output"
+            )
+        else:
+            lines.append(
+                f"  DROPPED ({zone['drop_reason']}): {zone['survey_type']} zone {zone['id']}, envelope "
+                f"{zone['zone_acres']:.4f} ac anchored by {zone['member_acres']:.4f} ac, "
+                f"mean {zone['mean_suitability']:.3f} -- excluded from the pipeline output"
+            )
+    seeds = identify_result.get("embankment_seeds", [])
+    failed = [record for record in seeds if record.get("status") == "failed"]
+    lines.append(
+        f"=== EMBANKMENT SEEDS ({len(seeds)} seeded, uncapped; {len(failed)} produced nothing) ==="
+    )
+    if not seeds:
+        lines.append("  (no gated cell reached the seed score)")
+    for record in failed:
         lines.append(
-            f"  DROPPED ({zone['drop_reason']}): {zone['survey_type']} zone {zone['id']}, envelope "
-            f"{zone['zone_acres']:.4f} ac anchored by {zone['member_acres']:.4f} ac, "
-            f"mean {zone['mean_suitability']:.3f} -- excluded from the pipeline output"
+            f"  FAILED ({record.get('reason_code')}): blend {record['blend_score']:.3f} at "
+            f"{tuple(record['rowcol'])}, terminator={record.get('terminator')}, "
+            f"{record.get('stations_measured', 0)} station(s) measured -- no compartment, honestly"
         )
     return "\n".join(lines)
 
@@ -415,32 +480,46 @@ def summarize_gate_and_criteria(identify_result: dict) -> str:
 
 def summarize_threshold_comparison(identify_result: dict, dem: dict) -> str:
     """
-    THE THRESHOLD RE-VERIFICATION: member-region count, total acreage,
-    and largest-region acreage per type at each
-    THRESHOLD_COMPARISON_LEVELS value, on the RAW surfaces (the ones
-    extraction actually thresholds -- pre-threshold smoothing is
-    retired), 8-connected -- so the 0.6 default stays a choice made
-    from evidence, re-decided every run.
+    THE THRESHOLD RE-VERIFICATION, EXCAVATED ONLY since the compartment
+    change: member-region count, total acreage, and largest-region
+    acreage at each THRESHOLD_COMPARISON_LEVELS value, on the RAW
+    excavated surface (the one extraction actually thresholds --
+    pre-threshold smoothing is retired), 8-connected -- so the 0.5
+    default stays a choice made from evidence, re-decided every run.
+
+    THE EMBANKMENT LINES ARE RETIRED WITH EXTRACTION, and the instrument
+    says so every run rather than falling silent: the embankment surface
+    no longer thresholds into anything -- it is a NOMINATION surface for
+    seed-based valley compartments, and the number this instrument
+    existed to tune (the embankment extraction threshold) no longer
+    exists on that path. What replaced it -- EMBANKMENT_SEED_MIN_SCORE,
+    the same 0.5 with a recorded semantic shift -- is tuned from the
+    seed/failure accounting in the zones table and the seed layers of
+    the export, not from component counts at hypothetical thresholds.
     """
     result = identify_result["result"]
     gate_mask = result["gate_mask"]
     area_per_cell = cell_area_acres(dem)
-    lines = ["=== THRESHOLD COMPARISON (raw surfaces, 8-connected) ==="]
-    for survey_type in SURVEY_TYPES:
-        surface = result["surfaces"][survey_type]
-        lines.append(f"  {survey_type}:")
-        for threshold in THRESHOLD_COMPARISON_LEVELS:
-            member_mask = gate_mask & (surface >= threshold)
-            labels, count = connected_components(member_mask, connectivity=WATER_REGION_CONNECTIVITY)
-            total_cells = int(np.count_nonzero(member_mask))
-            largest_cells = 0
-            for label in range(count):
-                largest_cells = max(largest_cells, int(np.count_nonzero(labels == label)))
-            marker = "  <- default" if threshold == result["threshold"] else ""
-            lines.append(
-                f"    t={threshold}: {count} region(s), {total_cells * area_per_cell:.2f} ac total, "
-                f"largest {largest_cells * area_per_cell:.2f} ac{marker}"
-            )
+    lines = ["=== THRESHOLD COMPARISON (raw excavated surface, 8-connected) ==="]
+    surface = result["surfaces"][SURVEY_TYPE_EXCAVATED]
+    lines.append(f"  {SURVEY_TYPE_EXCAVATED}:")
+    for threshold in THRESHOLD_COMPARISON_LEVELS:
+        member_mask = gate_mask & (surface >= threshold)
+        labels, count = connected_components(member_mask, connectivity=WATER_REGION_CONNECTIVITY)
+        total_cells = int(np.count_nonzero(member_mask))
+        largest_cells = 0
+        for label in range(count):
+            largest_cells = max(largest_cells, int(np.count_nonzero(labels == label)))
+        marker = "  <- default" if threshold == result["threshold"] else ""
+        lines.append(
+            f"    t={threshold}: {count} region(s), {total_cells * area_per_cell:.2f} ac total, "
+            f"largest {largest_cells * area_per_cell:.2f} ac{marker}"
+        )
+    lines.append(
+        "  embankment: RETIRED with extraction -- the embankment surface nominates seeds now "
+        "(seed-based valley compartments); the threshold this instrument tuned no longer exists "
+        "on that path. See the EMBANKMENT SEEDS section of the zones table instead."
+    )
     return "\n".join(lines)
 
 
@@ -696,9 +775,11 @@ def main() -> None:
     print(state_excavated_finding(identify_result))
 
     result = identify_result["result"]
-    # surfaces[type] is the SMOOTHED blend -- the blended isobands show
-    # exactly what extraction thresholds; the per-criterion bands below
-    # show the RAW ground.
+    # surfaces[type] is the RAW blend (smoothing is retired -- see
+    # masked_focal_mean()): the excavated isobands show exactly what
+    # extraction thresholds; the embankment isobands show the NOMINATION
+    # surface the seeding claims from; the per-criterion bands below
+    # show the criterion ground.
     isobands_by_type = {
         survey_type: compute_suitability_isobands(dem, result["surfaces"][survey_type])
         for survey_type in SURVEY_TYPES

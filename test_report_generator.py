@@ -583,6 +583,13 @@ _survey_nd = {
     "gates": {"on_parcel_cells": 612, "ceiling_removed_cells": 4, "setback_removed_cells": 0,
               "gated_cells": 608, "max_contributing_area_acres": 20.0},
     "soil_checked": True,
+    "embankment_generation": "seed_compartment",
+    "embankment_seed_count": 3,
+    "embankment_failed_seed_count": 2,
+    "embankment_failed_seeds": [
+        {"rowcol": [12, 4], "blend_score": 0.58, "reason_code": "no_pinch_within_bound"},
+        {"rowcol": [30, 9], "blend_score": 0.52, "reason_code": "pinch_blocked_by_road"},
+    ],
     "selection": {"selected_zone_id": 0, "selected_survey_type": "excavated",
                   "selection_rule": "pooled_member_mean_suitability_member_acreage_tiebreak"},
     "zones": [
@@ -598,30 +605,39 @@ _survey_nd = {
          "overlaps": {"canopy_pct": 12.5, "road_pct": None, "production_pct": 0.0},
          "gravity": {"has_service_relationship": True, "can_gravity_feed": False,
                      "production_area_id": 3, "elevation_differential_ft": -18.4, "distance_ft": 210.0},
-         "flags": [], "below_min_area": False, "sparse_anchor": False,
+         "flags": ["sparse_anchor"], "below_min_area": False, "sparse_anchor": True,
+         "truncated_by_road": False,
          "cross_type_overlaps": [{"zone_id": 1, "overlap_pct": 62.0}], "either_type_candidate": True,
          "confidence": "high"},
-        {"id": 1, "survey_type": "embankment", "rank": 1, "member_count": 1,
-         "member_acres": 0.1, "zone_acres": 0.1,
+        # The embankment block is a VALLEY COMPARTMENT since the
+        # compartment change: no members, the SEED's anchor claim beside
+        # the compartment's own criterion means (the honesty split).
+        {"id": 1, "survey_type": "embankment", "rank": 1, "zone_acres": 0.8,
          "mean_suitability": 0.55, "max_suitability": 0.61,
-         "criteria": {"drainage_area": {"weight": 0.30, "mean_score": 0.7},
-                      "slope": {"weight": 0.25, "mean_score": 1.0},
+         "seed_blend_score": 0.73,
+         "seed_criteria_signature": {"drainage_area": 0.7, "slope": 1.0, "soil": 0.5, "twi": 0.9},
+         "pinch_width_ft": 88.6, "pinch_walk_distance_ft": 137.8, "baseline_length_ft": 137.8,
+         "truncated_by_boundary": True, "truncated_by_road": False, "half_width_bound_hit": False,
+         "criteria": {"drainage_area": {"weight": 0.30, "mean_score": 0.4},
+                      "slope": {"weight": 0.25, "mean_score": 0.6},
                       "soil": {"weight": 0.25, "mean_score": 0.5},
-                      "twi": {"weight": 0.20, "mean_score": 0.9}},
+                      "twi": {"weight": 0.20, "mean_score": 0.7}},
          "twi_percentile_mean": 0.9, "depression_depth_max_ft": 0.0,
          "contributing_area_acres_at_wettest_cell": 5.4, "boundary_adjacency_pct": 0.0,
          "overlaps": {"canopy_pct": 0.0, "road_pct": 0.0, "production_pct": None},
          "gravity": {"has_service_relationship": False, "can_gravity_feed": None},
-         "flags": ["below_min_area", "no_service_relationship", "sparse_anchor"], "below_min_area": True,
-         "sparse_anchor": True, "cross_type_overlaps": [], "either_type_candidate": False,
+         "flags": ["truncated_by_boundary", "no_service_relationship"], "below_min_area": False,
+         "cross_type_overlaps": [], "either_type_candidate": False,
          "confidence": "medium"},
     ],
 }
 _survey_prose = _format_water_survey_areas_summary(_survey_nd)
 assert "2 water SURVEY ZONE(S)" in _survey_prose
 assert "1 embankment-type" in _survey_prose and "1 excavated-type" in _survey_prose
-assert "3 member region(s)" in _survey_prose, "the member count travels with the zone framing"
-assert "ground ONE SURVEY VISIT walks" in _survey_prose
+assert "3 member region(s)" in _survey_prose, "the member count travels with the excavated framing"
+assert "GENERATED DIFFERENTLY" in _survey_prose and "VALLEY COMPARTMENT" in _survey_prose, (
+    "the opener states the per-type generation mechanisms -- the compartment change's design claim"
+)
 assert "GENERAL AREAS WORTH SURVEYING" in _survey_prose
 assert "no pool, wall, volume, or station" in _survey_prose, (
     "the redesign's central promise -- no precision theater -- must be stated in the prose"
@@ -633,49 +649,73 @@ assert "All 2 surviving zone(s) are listed, ranked per type -- no presentation c
     "the counts line states that everything surviving is shown -- the cap is deleted"
 )
 assert "you decide which to walk" in _survey_prose
-assert "1 zone(s) whose walkable envelope fell under the 0.1-acre floor were dropped" in _survey_prose, (
-    "the floor's drops are stated on their zone-acre basis, never silent"
+assert "1 zone(s) were dropped (under the 0.1-acre floor, or a duplicate of a better-seeded compartment)" in _survey_prose, (
+    "the drops are stated with their possible reasons, never silent"
 )
 assert "each pond type's best zone appears" not in _survey_prose, (
     "the deleted per-type guarantee's phrasing must not resurface"
+)
+assert "2 of 3 embankment seed(s) produced NO compartment" in _survey_prose, (
+    "the failed-seed accounting reaches the prose -- a reach with no on-parcel pinch reports honestly"
+)
+assert "blend 0.52: pinch_blocked_by_road" in _survey_prose, (
+    "each failed seed's reason code is named in the prose"
 )
 assert "EITHER-TYPE CANDIDATE" in _survey_prose and "zone 1 (62.0% of this envelope)" in _survey_prose, (
     "the cross-type agreement renders as the consultant either-type line with its overlap numbers"
 )
 assert "evaluate both approaches during the survey" in _survey_prose
 assert "SPARSE ANCHOR" in _survey_prose and "scattered good ground within a larger area" in _survey_prose, (
-    "the sparse-anchor honesty line renders when the flag is set"
+    "the sparse-anchor honesty line renders when the flag is set (excavated-only since the change)"
 )
 assert "dugout or seep-fed excavated pond" in _survey_prose, "the seep-widened excavated framing reaches the prose"
 assert "Selected for downstream planning: zone 0 (excavated-type)" in _survey_prose
 assert "provisional selection rule" in _survey_prose
+assert "embankment by seed blend, excavated by member-mean suitability" in _survey_prose, (
+    "the pooled rule states each type's own instrument"
+)
 assert "2.6 acres to survey, anchored by 1.4 acres of high-suitability ground" in _survey_prose, (
-    "the DUAL-ACREAGE sentence is the zone narrative's spine -- both numbers, both labeled"
+    "the DUAL-ACREAGE sentence is the excavated narrative's spine -- both numbers, both labeled"
+)
+assert "0.8 acres to survey -- a valley compartment anchored by a 0.73-scoring storage cell, dam reach at the downstream end" in _survey_prose, (
+    "the compartment sentence carries the seed's anchor claim, verbatim per the design"
+)
+assert "THE HONESTY SPLIT" in _survey_prose and "drainage_area 0.7" in _survey_prose and "drainage_area 0.4 (weight 0.3)" in _survey_prose, (
+    "seed signature and compartment means are BOTH in the prose, distinct -- the reporting honesty split"
+)
+assert "OVERSTATES dam length" in _survey_prose, (
+    "crest-to-crest width is a survey measure, not a dam length -- the caveat must reach the prose"
+)
+assert "TRUNCATED by the property boundary" in _survey_prose, (
+    "a clipped compartment says where its drawn geometry stops"
 )
 assert "wetness 0.82 (weight 0.35)" in _survey_prose, (
     "per-criterion mean scores are the narrative-honesty mechanism -- prose may only claim what a "
     "criterion actually scored, so the scores themselves must be in the prompt"
 )
 assert "over the ANCHORING ground only" in _survey_prose, (
-    "the prose must say the scores describe member cells, never the envelope"
+    "the excavated prose must say the scores describe member cells, never the envelope"
 )
 assert "PUMP-REQUIRED" in _survey_prose and "18.4 ft BELOW production area 3" in _survey_prose
 assert "No production area within service range" in _survey_prose, (
     "the no-service case reads as a flag, never as a dropped region"
 )
 assert "roads NOT CHECKED" in _survey_prose, "a never-checked overlap must read NOT CHECKED, not 0%"
+assert "the road exclusion REMOVED" in _survey_prose, (
+    "the road figure's clipped-geometry semantics are stated where the numbers are"
+)
 assert "production ground NOT CHECKED" in _survey_prose
 assert "canopy 12.5%" in _survey_prose
 assert "42.0% of this area's perimeter" in _survey_prose, "boundary adjacency is site-visit context"
-assert "Flags: below_min_area, no_service_relationship, sparse_anchor." in _survey_prose, (
+assert "Flags: truncated_by_boundary, no_service_relationship." in _survey_prose, (
     "flags ride into the prose -- flagged, never filtered"
 )
 assert "TUNE FROM FIRST RUN" in _survey_prose and "isobands" in _survey_prose
-assert "No water survey areas cleared" in _format_water_survey_areas_summary(None)
-assert "No water survey areas cleared" in _format_water_survey_areas_summary({"region_found": False})
-print("_format_water_survey_areas_summary(): both types with per-criterion scores, the TWI caveat, "
-      "pump/no-service gravity cases, overlap sentinels, flags, and the tuning note all rendered; "
-      "no-region and missing blocks read as no data.")
+assert "No water survey areas were identified" in _format_water_survey_areas_summary(None)
+assert "No water survey areas were identified" in _format_water_survey_areas_summary({"region_found": False})
+print("_format_water_survey_areas_summary(): excavated dual-acreage and compartment honesty-split "
+      "sentences, seed-failure accounting, the TWI caveat, pump/no-service gravity cases, overlap "
+      "sentinels, flags, and the tuning note all rendered; no-region and missing blocks read as no data.")
 
 _solar_nd = {
     "site_found": True,
@@ -863,7 +903,7 @@ _unwired_prompt = _capture_prompt(
 )
 for _no_data in (
     "No production-area candidate data available",
-    "No water survey areas cleared",
+    "No water survey areas were identified",
     "No road network data available",
     "No tree zone candidate data available",
     "No solar structure candidate site identified",
