@@ -862,23 +862,21 @@ assert [record["rowcol"] for record in v_seeds] == [
 assert all(record["blend_score"] >= 0.5 for record in v_seeds)
 # Every seed FAILS, honestly, because this prism valley has a CONSTANT
 # cross-section -- crest-to-crest width is identical at every station,
-# so the along-channel minimum lands on the first station (argmin tie
-# -> index 0: the valley never demonstrably narrows downstream) -- with
-# ONE exception: the r=37 seed's walk steps straight off the parcel
-# (row 38 is outside the boundary) with only its own station measured,
-# so its minimum sits at the terminal station and the reason NAMES THE
-# TERMINATOR: pinch_off_parcel.
+# so the along-channel minimum lands on the seed's own station (argmin
+# tie -> index 0: the valley never narrows below the seed) -- the ONE
+# failure the accepted-terminal doctrine kept: no_constriction. (The
+# r=37 seed's walk is cut by the boundary with only its own station
+# measured -- a single station IS the seed station, so it reads
+# no_constriction too, not a terminal acceptance: a dam at the storage
+# cell is degenerate.)
 assert all(record["status"] == wsa.SEED_STATUS_FAILED for record in v_seeds), (
-    "a constant-width prism yields no interior width minimum anywhere -- every seed reports nothing"
-)
-assert v_seeds[0]["reason_code"] == wsa.REASON_PINCH_OFF_PARCEL, (
-    f"the r=37 walk is cut by the boundary at its first step, got {v_seeds[0]['reason_code']}"
+    "a constant-width prism never narrows below any seed -- every seed reports nothing"
 )
 assert all(
-    record["reason_code"] == wsa.REASON_NO_PINCH_WITHIN_BOUND for record in v_seeds[1:]
-), f"widths never drop -> no_pinch_within_bound, got {[r['reason_code'] for r in v_seeds[1:]]}"
+    record["reason_code"] == wsa.REASON_NO_CONSTRICTION for record in v_seeds
+), f"widths never drop below the seed station -> no_constriction, got {[r['reason_code'] for r in v_seeds]}"
 assert v_result["zones_by_type"][SURVEY_TYPE_EMBANKMENT] == [], (
-    "no pinch, no compartment, no fallback -- the hull does not exist on this path"
+    "no constriction, no compartment, no fallback -- the hull does not exist on this path"
 )
 
 # The lone excavated zone survives, ranks 1, selects; with no
@@ -899,12 +897,12 @@ assert v_narrative["embankment_zone_count"] == 0 and v_narrative["excavated_zone
 assert v_narrative["embankment_generation"] == wsa.PROVENANCE_SEED_COMPARTMENT
 assert v_narrative["embankment_seed_count"] == 6 and v_narrative["embankment_failed_seed_count"] == 6
 assert {entry["reason_code"] for entry in v_narrative["embankment_failed_seeds"]} == {
-    wsa.REASON_PINCH_OFF_PARCEL, wsa.REASON_NO_PINCH_WITHIN_BOUND
+    wsa.REASON_NO_CONSTRICTION
 }
 print(
     f"Fixture 2 (V-valley, compartment change): excavated ribbons the 36 channel cells (mean "
     f"{v_exc_zone['mean_suitability']}); embankment seeds 6 channel cells and every walk honestly fails "
-    "(constant prism cross-section -> no interior width minimum; the boundary-cut seed names its terminator)."
+    "no_constriction (constant prism cross-section -- the valley never narrows below any seed)."
 )
 
 # --- FIXTURE 2b: member-vs-zone split where the envelope ADDS ground.

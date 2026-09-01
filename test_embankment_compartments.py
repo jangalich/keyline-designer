@@ -15,11 +15,13 @@ Sections (the design's numbered test items in brackets):
            against hand-derived values; the embankment cell lands at the
            hand-known waist row; the false-crest prominence guard walks
            past a sub-prominence knoll.
-  2  [2]   HONEST FAILURES -- monotonically widening ->
-           no_pinch_within_bound; a boundary cutting the walk while the
-           valley still narrows -> pinch_off_parcel; a road strip doing
-           the same -> pinch_blocked_by_road (the reason NAMES the
-           terminator).
+  2  [2]   TERMINAL ACCEPTANCE (the accepted-not-refused correction) --
+           a width minimum at the boundary / a road strip / the 100 m
+           walk bound is ACCEPTED with its pinch_at_* flag and the
+           still-narrowing disclosure; the rewidened variant keeps its
+           interior pinch; monotone widening is the sole failure,
+           no_constriction. Plus the AST-level retirement of the three
+           refusal codes and a shared-terminal-pinch dedupe.
   3  [3]   COMPARTMENT ASSEMBLY -- transect crest points at hand-computed
            offsets; the watershed-band ridge connection matches the
            fixture's hand-enumerated divides (the staircase); compartment
@@ -61,9 +63,6 @@ from raster_grid import SQUARE_METERS_PER_ACRE, pixel_center_xy
 from valley_delineation import compute_flow_accumulation, compute_flow_direction, fill_depressions
 from water_survey_areas import (
     EMBANKMENT_WEIGHTS,
-    REASON_NO_PINCH_WITHIN_BOUND,
-    REASON_PINCH_BLOCKED_BY_ROAD,
-    REASON_PINCH_OFF_PARCEL,
     SURVEY_TYPE_EMBANKMENT,
     SURVEY_TYPE_EXCAVATED,
     build_embankment_compartment,
@@ -238,10 +237,13 @@ unbounded = ridge_crest_walk(_dem(rising), pixel_center_xy(_dem(rising), 1, 1), 
 assert unbounded["bound_hit"] is True and unbounded["half_width_m"] == 20.0
 print("1b. Prominence guard: the walk passes the 0.5 m knoll (crest at the real ridge, 22.5 m); a monotone rise bound-hits, flagged.")
 
-# --- 2 [2]. honest failures, the reason naming the terminator ---
+# --- 2 [1-2 of the terminal-acceptance correction]. TERMINAL MINIMA ARE
+# --- ACCEPTED, DISCLOSED, NOT REFUSED; the sole failure is
+# --- no_constriction (minimum at the seed station) ---
 
 # Monotonically widening: k grows downstream from the seed, so the width
-# minimum is the seed's own station -- no interior minimum exists.
+# minimum is the seed's own station -- a dam at the storage cell is
+# degenerate, and this is the ONE remaining walk failure.
 def _widening_k(r):
     if r < 5:
         return 2
@@ -254,40 +256,95 @@ B_DEM = _dem(_valley_array(A_ROWS, A_COLS, A_CHANNEL, _widening_k))
 B_FILLED, B_FTR, B_FTC = _flow(B_DEM)
 B_ON_PARCEL = _on_parcel(B_DEM, A_BOUNDARY)
 widening = walk_embankment_pinch(B_DEM, (2, A_CHANNEL), B_FTR, B_FTC, B_ON_PARCEL, A_NO_ROAD)
-assert widening["found"] is False and widening["reason_code"] == REASON_NO_PINCH_WITHIN_BOUND, (
-    f"a monotonically widening valley yields nothing: {widening.get('reason_code')}"
+assert widening["found"] is False and widening["reason_code"] == wsa.REASON_NO_CONSTRICTION, (
+    f"a monotonically widening valley yields nothing -- no_constriction: {widening.get('reason_code')}"
+)
+assert widening["still_narrowing_at_termination"] is False
+assert widening["width_profile_min_m"] == 17.5 and widening["width_profile_max_m"] == 47.5, (
+    "the failure record still discloses the walked width profile"
 )
 
-# Pinch off-parcel: the boundary ends at row 18 -- the walk's LAST
-# on-parcel station is the first waist row, so the minimum sits at the
-# terminal station while the valley is still narrowing: the true pinch
-# plausibly lies beyond the line, and the reason NAMES the terminator.
+# TERMINAL ACCEPTANCE at the BOUNDARY: the boundary ends at row 18 --
+# the walk's LAST on-parcel station is the first waist row, the valley
+# still narrowing at the line. The old rule refused this
+# (pinch_off_parcel); the dam-at-the-edge doctrine ACCEPTS it: the
+# narrowest buildable crossing within the surveyed extent, flagged and
+# disclosed.
 SHORT_BOUNDARY = box(
     ORIGIN_X + 1 * RESOLUTION + 0.1,
     ORIGIN_Y - 19 * RESOLUTION + 0.1,
     ORIGIN_X + 20 * RESOLUTION - 0.1,
     ORIGIN_Y - 1 * RESOLUTION - 0.1,
 )
-off_parcel = walk_embankment_pinch(
+at_boundary = walk_embankment_pinch(
     A_DEM, (10, A_CHANNEL), A_FTR, A_FTC, _on_parcel(A_DEM, SHORT_BOUNDARY), A_NO_ROAD
 )
-assert off_parcel["found"] is False and off_parcel["reason_code"] == REASON_PINCH_OFF_PARCEL, (
-    f"boundary-terminated while still narrowing -> pinch_off_parcel, got {off_parcel.get('reason_code')}"
+assert at_boundary["found"] is True, "a terminal minimum is accepted, not refused"
+assert at_boundary["pinch_rowcol"] == (18, A_CHANNEL) and at_boundary["terminal"] == "boundary"
+assert at_boundary["terminator"] == "boundary"
+assert at_boundary["still_narrowing_at_termination"] is True, (
+    "17.5 at the terminal station, strictly below the 37.5 before it"
 )
-assert off_parcel["terminator"] == "boundary"
+assert at_boundary["width_profile_min_m"] == 17.5 and at_boundary["width_profile_max_m"] == 37.5
 
-# Pinch blocked by a road: a road strip across the valley at row 19 --
-# same shape of failure, the road being the terminator.
+# TERMINAL ACCEPTANCE at a ROAD: a road strip across the valley at row
+# 19 -- same acceptance, the road being the named terminator.
 road_mask = np.zeros(A_DEM["array"].shape, dtype=bool)
 road_mask[19, :] = True
-blocked = walk_embankment_pinch(A_DEM, (10, A_CHANNEL), A_FTR, A_FTC, A_ON_PARCEL, road_mask)
-assert blocked["found"] is False and blocked["reason_code"] == REASON_PINCH_BLOCKED_BY_ROAD, (
-    f"road-terminated while still narrowing -> pinch_blocked_by_road, got {blocked.get('reason_code')}"
+at_road = walk_embankment_pinch(A_DEM, (10, A_CHANNEL), A_FTR, A_FTC, A_ON_PARCEL, road_mask)
+assert at_road["found"] is True and at_road["terminal"] == "road"
+assert at_road["pinch_rowcol"] == (18, A_CHANNEL) and at_road["terminator"] == "road"
+assert at_road["still_narrowing_at_termination"] is True
+
+# TERMINAL ACCEPTANCE at the 100 m WALK BOUND: a valley whose crest
+# offset steps down from 6 to 5 exactly at the walk's 20th step (row
+# 25 for a row-5 seed: 20 x 5 m = 100 m, the last station the bound
+# admits), so the minimum (47.5) sits at the terminal station.
+def _bound_k(r):
+    return 6 if r < 25 else 5
+
+
+C_DEM = _dem(_valley_array(A_ROWS, A_COLS, A_CHANNEL, _bound_k))
+C_FILLED, C_FTR, C_FTC = _flow(C_DEM)
+C_ON_PARCEL = _on_parcel(C_DEM, A_BOUNDARY)
+at_bound = walk_embankment_pinch(C_DEM, (5, A_CHANNEL), C_FTR, C_FTC, C_ON_PARCEL, A_NO_ROAD)
+assert at_bound["found"] is True and at_bound["terminal"] == "walk_bound"
+assert at_bound["terminator"] == "distance_bound"
+assert at_bound["pinch_rowcol"] == (25, A_CHANNEL) and at_bound["walk_distance_m"] == 100.0
+assert at_bound["pinch_width_m"] == 47.5 and at_bound["still_narrowing_at_termination"] is True
+assert at_bound["width_profile_min_m"] == 47.5 and at_bound["width_profile_max_m"] == 57.5
+
+# THE TERMINAL-WIDENED VARIANT: the waist sits mid-walk near the end
+# and the terminal station WIDENS again (k back up to 3), so the pinch
+# is the interior waist, no terminal flag, still_narrowing False.
+def _rewiden_k(r):
+    if r < 16:
+        return 4
+    return 2 if r <= 18 else 3
+
+
+D_DEM = _dem(_valley_array(A_ROWS, A_COLS, A_CHANNEL, _rewiden_k))
+D_FILLED, D_FTR, D_FTC = _flow(D_DEM)
+REWIDEN_BOUNDARY = box(
+    ORIGIN_X + 1 * RESOLUTION + 0.1,
+    ORIGIN_Y - 20 * RESOLUTION + 0.1,
+    ORIGIN_X + 20 * RESOLUTION - 0.1,
+    ORIGIN_Y - 1 * RESOLUTION - 0.1,
 )
-assert blocked["terminator"] == "road"
+rewidened = walk_embankment_pinch(
+    D_DEM, (10, A_CHANNEL), D_FTR, D_FTC, _on_parcel(D_DEM, REWIDEN_BOUNDARY), A_NO_ROAD
+)
+assert rewidened["found"] is True and rewidened["terminal"] is None, (
+    "the mid-walk waist is an ordinary interior pinch -- no terminal flag"
+)
+assert rewidened["pinch_rowcol"] == (16, A_CHANNEL)
+assert rewidened["still_narrowing_at_termination"] is False, (
+    "the terminal station widened (27.5 after 17.5) -- the disclosure reads False"
+)
 print(
-    "2. Honest failures: widening -> no_pinch_within_bound; boundary cut -> pinch_off_parcel; "
-    "road strip -> pinch_blocked_by_road. The seed produces NOTHING each time -- no fallback exists."
+    "2. Terminal acceptance x3 (boundary / road / walk bound), each flagged with its terminator and "
+    "still-narrowing True; the rewidened variant keeps its interior pinch (flag None, disclosure "
+    "False); monotone widening is the one failure: no_constriction."
 )
 
 # --- 3 [3]. compartment assembly: transects, the watershed band, area ---
@@ -461,7 +518,76 @@ assert kept == [mini_a, mini_c] and duplicates == [mini_b], (
 )
 assert duplicates[0]["_duplicate_of_zone"] is mini_a
 assert duplicate_of_zone_reason(7) == "duplicate_of_zone_7", "the reason code names the surviving zone"
-print("4. Dedupe: same-pinch seeds collapse to the higher blend (loser attributed); overlap beyond half the smaller collapses likewise.")
+
+# DEDUPE ON A SHARED TERMINAL PINCH (likely on a real parcel, where
+# parallel reaches exit the same boundary stretch): two seeds on the
+# same channel, the boundary cutting the walk at the still-narrowing
+# waist -- both walks end at the SAME terminal embankment cell, and the
+# pinch-cell dedupe collapses them exactly as it does an interior pair.
+_terminal_surface = np.zeros(A_DEM["array"].shape)
+_terminal_surface[6, A_CHANNEL] = 0.9
+_terminal_surface[13, A_CHANNEL] = 0.8
+_terminal_surfaces = {
+    SURVEY_TYPE_EMBANKMENT: _terminal_surface,
+    "criteria": {
+        SURVEY_TYPE_EMBANKMENT: {name: np.full(A_DEM["array"].shape, 0.5) for name in EMBANKMENT_WEIGHTS}
+    },
+}
+_short_on_parcel = _on_parcel(A_DEM, SHORT_BOUNDARY)
+terminal_compartments, terminal_records = generate_embankment_compartments(
+    A_DEM,
+    _terminal_surfaces,
+    _short_on_parcel,
+    _short_on_parcel,
+    A_NO_ROAD,
+    None,
+    SHORT_BOUNDARY,
+    A_FTR,
+    A_FTC,
+    _screens,
+)
+assert len(terminal_compartments) == 1, "two seeds, one boundary throat -> one compartment"
+assert terminal_compartments[0]["seed"]["rowcol"] == (6, A_CHANNEL), "the higher-blend seed keeps it"
+assert terminal_compartments[0]["pinch"]["rowcol"] == (18, A_CHANNEL)
+assert terminal_compartments[0]["pinch_terminal"] == "boundary"
+assert wsa.FLAG_PINCH_AT_BOUNDARY in terminal_compartments[0]["flags"]
+assert wsa.FLAG_STILL_NARROWING in terminal_compartments[0]["flags"]
+assert terminal_compartments[0]["still_narrowing_at_termination"] is True
+assert terminal_records[1]["status"] == wsa.SEED_STATUS_FAILED
+assert terminal_records[1]["_duplicate_of_zone"] is terminal_compartments[0]
+print(
+    "4. Dedupe: same-pinch seeds collapse to the higher blend (loser attributed) -- for interior AND "
+    "shared TERMINAL pinches (one boundary throat, one compartment, flagged); overlap beyond half "
+    "the smaller collapses likewise."
+)
+
+# --- reason-code retirement, AST-level per house pattern ---
+# The refusal vocabulary is DELETED, not zeroed: the module has no such
+# constants and no code path names them (docstrings may narrate the
+# history -- an AST Name scan does not see string literals inside
+# docstrings, which is exactly the house distinction).
+import ast as _ast  # noqa: E402
+import inspect as _inspect  # noqa: E402
+
+for retired in ("REASON_PINCH_OFF_PARCEL", "REASON_PINCH_BLOCKED_BY_ROAD", "REASON_NO_PINCH_WITHIN_BOUND"):
+    assert not hasattr(wsa, retired), f"{retired} is retired -- deleted, never aliased"
+_wsa_ast = _ast.parse(_inspect.getsource(wsa))
+_named = {node.id for node in _ast.walk(_wsa_ast) if isinstance(node, _ast.Name)}
+for retired in ("REASON_PINCH_OFF_PARCEL", "REASON_PINCH_BLOCKED_BY_ROAD", "REASON_NO_PINCH_WITHIN_BOUND"):
+    assert retired not in _named, f"no code path may still name {retired}"
+_string_values = {
+    node.value
+    for node in _ast.walk(_wsa_ast)
+    if isinstance(node, _ast.Constant) and isinstance(node.value, str)
+}
+for retired_value in ("pinch_off_parcel", "pinch_blocked_by_road", "no_pinch_within_bound"):
+    assert retired_value not in _string_values, (
+        f"the retired code {retired_value!r} must not survive as an exact string constant anywhere "
+        "in the module -- a docstring may NARRATE it inside prose, but no literal equal to the code "
+        "itself may exist for anything to emit"
+    )
+assert wsa.REASON_NO_CONSTRICTION == "no_constriction"
+print("   Retirement: the three refusal codes are absent at the attribute, AST-name, and string-constant level; no_constriction replaces them.")
 
 # --- the full compute path: seeds, waist pinch, dedupe codes ---
 # FIXTURE A2: the same construction with the waist moved DOWNSTREAM
@@ -489,11 +615,28 @@ assert all(z["pinch"]["rowcol"][0] in range(28, 32) and z["pinch"]["rowcol"][1] 
     f"every surviving compartment's embankment cell sits at the waist: "
     f"{[z['pinch']['rowcol'] for z in a_comps]}"
 )
+# INTERIOR-PINCH REGRESSION, pinned: the accepted-terminal correction
+# must not move an interior pinch by a cell or flag it -- same seed,
+# same pinch, same hand-derived acreage, terminal None, none of the
+# pinch_at_* flags, and the failure vocabulary is no_constriction plus
+# dedupe codes ONLY.
+_interior = a_comps[0]
+assert _interior["seed"]["rowcol"] == (24, A_CHANNEL) and _interior["pinch"]["rowcol"] == (28, A_CHANNEL)
+assert _interior["zone_acres"] == round(23 * 25.0 / SQUARE_METERS_PER_ACRE, 4)
+assert _interior["pinch_terminal"] is None and _interior["still_narrowing_at_termination"] is False
+assert not any(
+    flag in _interior["flags"]
+    for flag in (wsa.FLAG_PINCH_AT_BOUNDARY, wsa.FLAG_PINCH_AT_ROAD, wsa.FLAG_PINCH_AT_WALK_BOUND, wsa.FLAG_STILL_NARROWING)
+), "an interior pinch carries no terminal disclosure -- unchanged behavior"
+
 a_seeds = a_result["embankment_seeds"]
 a_failed = [r for r in a_seeds if r["status"] == wsa.SEED_STATUS_FAILED]
-assert a_failed, "the walk-limit/duplicate seeds report their reasons"
+assert a_failed, "the never-narrowing/duplicate seeds report their reasons"
 for record in a_failed:
     assert record.get("reason_code"), f"every failed seed carries a reason code: {record}"
+    assert record["reason_code"] == wsa.REASON_NO_CONSTRICTION or record["reason_code"].startswith(
+        wsa.DUPLICATE_OF_ZONE_REASON_PREFIX
+    ), f"the failure vocabulary is no_constriction + dedupe only now: {record['reason_code']}"
 _dup_codes = [r["reason_code"] for r in a_failed if r["reason_code"].startswith(wsa.DUPLICATE_OF_ZONE_REASON_PREFIX)]
 for code in _dup_codes:
     named = int(code[len(wsa.DUPLICATE_OF_ZONE_REASON_PREFIX):])
@@ -588,6 +731,64 @@ _ = selected["render_fill_polygon_utm"] if selected else None   # fencing truthi
 _ = 101.5 - selected["representative_elevation_m"]              # keypoint elevation differential
 _ = f"Water zone {selected['id']}: log line"                    # render_layout_map id branch
 print("   Contract: the rank-1 compartment carries every consumer access pattern intact.")
+
+# --- terminal-pinch compartment as the pooled RANK-1, full compute path ---
+# Fixture A2 with the parcel line drawn at the FIRST waist row (28):
+# the winning seed's walk is cut at the line while still narrowing, the
+# terminal minimum is accepted, and the boundary-flagged compartment is
+# the pooled rank-1 -- the first networked run's pinch_off_parcel
+# failures, converted into the property's honest answer. (The same
+# case runs through the real build_pipeline_context() in
+# test_pipeline_context.py.)
+WAIST_BOUNDARY = box(
+    ORIGIN_X + 1 * RESOLUTION + 0.1,
+    ORIGIN_Y - 29 * RESOLUTION + 0.1,
+    ORIGIN_X + 20 * RESOLUTION - 0.1,
+    ORIGIN_Y - 1 * RESOLUTION - 0.1,
+)
+terminal_result = compute_water_survey_areas(A2_DEM, WAIST_BOUNDARY)
+terminal_zone = terminal_result["selected_water_zone"]
+assert terminal_zone is not None and terminal_zone["survey_type"] == SURVEY_TYPE_EMBANKMENT, (
+    "the boundary-terminal compartment is the pooled rank-1 on this fixture"
+)
+assert terminal_zone["rank"] == 1
+assert terminal_zone["pinch"]["rowcol"] == (28, A_CHANNEL), "the dam reach sits at the line"
+assert terminal_zone["pinch_terminal"] == "boundary"
+assert terminal_zone["still_narrowing_at_termination"] is True
+assert wsa.FLAG_PINCH_AT_BOUNDARY in terminal_zone["flags"]
+assert wsa.FLAG_STILL_NARROWING in terminal_zone["flags"]
+assert wsa.FLAG_PINCH_AT_ROAD not in terminal_zone["flags"] and wsa.FLAG_PINCH_AT_WALK_BOUND not in terminal_zone["flags"], (
+    "exactly one terminal flag, naming the terminator"
+)
+# The consumer contract holds on a terminal-pinch selection:
+assert terminal_zone["render_fill_polygon_utm"] is terminal_zone["polygon_utm"]
+assert isinstance(terminal_zone["representative_elevation_m"], float)
+assert isinstance(terminal_zone["id"], int) and terminal_zone["served_production_area_ids"] == []
+_ = terminal_zone["render_fill_polygon_utm"].buffer(6.096)
+_ = unary_union([terminal_zone["render_fill_polygon_utm"]])
+# The disclosure travels: narrative block and wire properties both
+# carry the terminator, the still-narrowing statement, and the walked
+# width profile's extremes.
+terminal_narrative = wsa.build_narrative_data(terminal_result)
+terminal_block = next(b for b in terminal_narrative["zones"] if b["id"] == terminal_zone["id"])
+assert terminal_block["pinch_terminal"] == "boundary"
+assert terminal_block["still_narrowing_at_termination"] is True
+assert terminal_block["width_profile_min_ft"] < terminal_block["width_profile_max_ft"]
+json.dumps(terminal_narrative)
+terminal_feature = next(
+    f
+    for f in wsa.survey_areas_to_geojson(terminal_result["zones"])["features"]
+    if f["properties"].get("zone_id") == terminal_zone["id"]
+)
+assert terminal_feature["properties"]["pinch_terminal"] == "boundary"
+assert terminal_feature["properties"]["still_narrowing_at_termination"] is True
+assert terminal_feature["properties"]["width_profile_min_m"] == terminal_zone["pinch"]["width_profile_min_m"]
+assert wsa.FLAG_PINCH_AT_BOUNDARY in terminal_feature["properties"]["flags"]
+print(
+    f"   Terminal rank-1: the boundary-cut walk yields a {terminal_zone['zone_acres']} ac compartment "
+    "with pinch_at_boundary + still_narrowing_at_termination, selected, contract intact, disclosure "
+    "on the narrative block and the wire."
+)
 
 # --- 7 [7]. excavated regression: byte-identical roadless, clipped+flagged with a road ---
 

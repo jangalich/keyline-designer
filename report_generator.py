@@ -658,6 +658,27 @@ def _format_water_survey_areas_summary(water_narrative: Optional[dict]) -> str:
                 f"{criteria_clause} (compartment mean {region['mean_suitability']}, max "
                 f"{region['max_suitability']})."
             )
+            # The terminal-pinch caveat (accepted, disclosed): a dam
+            # reach at the property line / an existing road / the walk
+            # limit states plainly that the surveyed extent -- not the
+            # terrain -- is what bounded the finding.
+            if region.get("pinch_terminal") is not None:
+                terminator_noun = {
+                    "boundary": "the property line",
+                    "road": "the existing road",
+                    "walk_bound": "the walk limit",
+                }[region["pinch_terminal"]]
+                narrowing_clause = (
+                    f"the valley continues to narrow beyond {terminator_noun}; "
+                    if region.get("still_narrowing_at_termination")
+                    else ""
+                )
+                lines.append(
+                    f"TERMINAL PINCH: {narrowing_clause}the marked dam reach is the narrowest "
+                    "buildable crossing within the surveyed extent (walked widths ran "
+                    f"{region['width_profile_min_ft']}-{region['width_profile_max_ft']} ft "
+                    "crest-to-crest)."
+                )
             if region.get("truncated_by_boundary") or region.get("truncated_by_road"):
                 cut_by = " and ".join(
                     name

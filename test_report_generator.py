@@ -587,8 +587,8 @@ _survey_nd = {
     "embankment_seed_count": 3,
     "embankment_failed_seed_count": 2,
     "embankment_failed_seeds": [
-        {"rowcol": [12, 4], "blend_score": 0.58, "reason_code": "no_pinch_within_bound"},
-        {"rowcol": [30, 9], "blend_score": 0.52, "reason_code": "pinch_blocked_by_road"},
+        {"rowcol": [12, 4], "blend_score": 0.58, "reason_code": "no_constriction"},
+        {"rowcol": [30, 9], "blend_score": 0.52, "reason_code": "duplicate_of_zone_1"},
     ],
     "selection": {"selected_zone_id": 0, "selected_survey_type": "excavated",
                   "selection_rule": "pooled_member_mean_suitability_member_acreage_tiebreak"},
@@ -617,6 +617,10 @@ _survey_nd = {
          "seed_blend_score": 0.73,
          "seed_criteria_signature": {"drainage_area": 0.7, "slope": 1.0, "soil": 0.5, "twi": 0.9},
          "pinch_width_ft": 88.6, "pinch_walk_distance_ft": 137.8, "baseline_length_ft": 137.8,
+         # A TERMINAL pinch at the property line, still narrowing -- the
+         # accepted-not-refused disclosure the caveat sentence keys on.
+         "pinch_terminal": "boundary", "still_narrowing_at_termination": True,
+         "width_profile_min_ft": 88.6, "width_profile_max_ft": 137.8,
          "truncated_by_boundary": True, "truncated_by_road": False, "half_width_bound_hit": False,
          "criteria": {"drainage_area": {"weight": 0.30, "mean_score": 0.4},
                       "slope": {"weight": 0.25, "mean_score": 0.6},
@@ -658,7 +662,7 @@ assert "each pond type's best zone appears" not in _survey_prose, (
 assert "2 of 3 embankment seed(s) produced NO compartment" in _survey_prose, (
     "the failed-seed accounting reaches the prose -- a reach with no on-parcel pinch reports honestly"
 )
-assert "blend 0.52: pinch_blocked_by_road" in _survey_prose, (
+assert "blend 0.58: no_constriction" in _survey_prose, (
     "each failed seed's reason code is named in the prose"
 )
 assert "EITHER-TYPE CANDIDATE" in _survey_prose and "zone 1 (62.0% of this envelope)" in _survey_prose, (
@@ -686,6 +690,13 @@ assert "THE HONESTY SPLIT" in _survey_prose and "drainage_area 0.7" in _survey_p
 assert "OVERSTATES dam length" in _survey_prose, (
     "crest-to-crest width is a survey measure, not a dam length -- the caveat must reach the prose"
 )
+assert "TERMINAL PINCH: the valley continues to narrow beyond the property line" in _survey_prose, (
+    "the accepted terminal pinch discloses its terminator with the still-narrowing clause"
+)
+assert "narrowest buildable crossing within the surveyed extent" in _survey_prose, (
+    "the dam-at-the-edge doctrine's claim, verbatim intent"
+)
+assert "88.6-137.8 ft" in _survey_prose, "the walked width profile's extremes ride the caveat"
 assert "TRUNCATED by the property boundary" in _survey_prose, (
     "a clipped compartment says where its drawn geometry stops"
 )

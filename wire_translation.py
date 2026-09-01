@@ -697,10 +697,12 @@ _EMBANKMENT_DETAIL_NOTE = (
 
 _FAILED_SEED_NOTE = (
     "FAILED embankment seed (the dropped-feature pattern, seed edition): this seed qualified on the "
-    "nomination surface but produced NO compartment -- the reason_code names why (no interior width "
-    "minimum within the walk bound, pinch off-parcel, pinch blocked by a farm road, or a dedupe "
-    "collapse into duplicate_of_zone_<id>). There is deliberately no fallback: the hull does not "
-    "exist on the embankment path."
+    "nomination surface but produced NO compartment -- the reason_code names why (no_constriction: "
+    "the valley never narrows below the seed station, so no baseline exists and a dam at the storage "
+    "cell would be degenerate; or a dedupe collapse into duplicate_of_zone_<id>). A width minimum at "
+    "the walk's TERMINAL station is not a failure: it is accepted as a compartment and disclosed with "
+    "a pinch_at_* flag. There is deliberately no fallback: the hull does not exist on the embankment "
+    "path."
 )
 
 

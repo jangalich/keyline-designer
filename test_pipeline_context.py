@@ -207,19 +207,27 @@ for r in range(ROWS):
 
 
 def _crest_offset_cells(r: int) -> int:
-    """The valley's crest offset from VALLEY_COL, per row: 6 cells
-    upstream of the throat, 3 through it (rows 18-23), 7 below --
-    the compartment change's addition to this fixture. The uniform V
-    gave the embankment pinch walks a constant crest-to-crest width, so
-    every seed honestly reported no_pinch_within_bound and
-    selected_water_zone was None; the throat gives the walk a real
-    interior width minimum, and the resulting VALLEY COMPARTMENT is the
-    pooled rank-1 selection (excavated still produces nothing here) --
-    exactly the compartment-as-rank-1 case section 6 asserts the
-    consumer contract on."""
-    if 18 <= r <= 23:
+    """The valley's crest offset from VALLEY_COL, per row: 7 cells
+    below row 24, then a long 3-cell throat, narrowing to 2 from row 9
+    and to 1 at the row-0 outlet -- the compartment change's addition
+    to this fixture. The uniform V gave the embankment pinch walks a
+    constant crest-to-crest width, so every seed honestly failed (now:
+    no_constriction) and selected_water_zone was None. This profile
+    produces BOTH pinch postures through one real context run: the
+    walk from the high-blend seed rides the still-narrowing throat all
+    the way to the flow field's row-0 end, so its width minimum sits
+    at the TERMINAL station -- accepted and disclosed
+    (pinch_at_walk_bound + still_narrowing_at_termination) under the
+    dam-at-the-edge doctrine, never refused -- and that
+    terminal-pinch VALLEY COMPARTMENT is the pooled rank-1 selection
+    section 6 asserts the consumer contract on, with interior-pinch
+    compartments ranked beside it (excavated still produces nothing
+    here)."""
+    if r >= 24:
+        return 7
+    if r >= 9:
         return 3
-    return 6 if r < 18 else 7
+    return 2 if r >= 1 else 1
 
 
 # One-cell side trenches 6 m deep just beyond the crest offset: the V
@@ -923,6 +931,17 @@ assert ctx.selected_water_zone is not None and ctx.selected_water_zone["survey_t
     "excavated selection means the compartment path regressed"
 )
 assert ctx.selected_water_zone["rank"] == 1
+# ...and it is a TERMINAL-pinch compartment (the accepted-not-refused
+# correction): the winning walk rides the still-narrowing throat to the
+# flow field's end, so the selection exercises the disclosure fields the
+# consumers now carry -- through the real build_pipeline_context() run.
+assert ctx.selected_water_zone["pinch_terminal"] == "walk_bound", (
+    "the rank-1 compartment's pinch sits at the walk's end -- accepted with its terminator named, "
+    "never refused"
+)
+assert ctx.selected_water_zone["still_narrowing_at_termination"] is True
+assert "pinch_at_walk_bound" in ctx.selected_water_zone["flags"]
+assert "still_narrowing_at_termination" in ctx.selected_water_zone["flags"]
 assert ctx.selected_water_zone["render_fill_polygon_utm"] is ctx.selected_water_zone["polygon_utm"], (
     "the compartment's render_fill is the IDENTITY of its clipped compartment polygon"
 )

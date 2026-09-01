@@ -33,14 +33,20 @@ mechanism could never describe both:
         the pinch cell's watershed clipped to the band between two
         baseline-perpendicular crest transects -- the lateral boundary
         of that clip IS the ridge line (hydrology handles branching
-        crests; no crest-tracing). A seed with no on-parcel pinch
-        produces NOTHING, with a reason code naming the terminator
-        (no_pinch_within_bound / pinch_off_parcel /
-        pinch_blocked_by_road) -- the hull does not exist on this path
-        and there is nothing to fall back to. See the compartment
-        constants/section for the full construction, the reporting
-        honesty split (seed anchor claim vs compartment means), and
-        the dedupe rules.
+        crests; no crest-tracing). The pinch is the width MINIMUM
+        among all walked stations, interior or TERMINAL: a minimum at
+        the walk's end (the property line, an existing road, or the
+        walk limit) is ACCEPTED AND DISCLOSED with a pinch_at_* flag
+        and the still-narrowing statement -- the narrowest buildable
+        crossing within the surveyed extent is a legitimate finding
+        (the dam-at-the-edge doctrine; see the flag constants for the
+        history of the retired interior-only rule). The one honest
+        failure is a valley that never narrows below its seed station
+        (no_constriction): a dam at the storage cell is degenerate,
+        the seed produces NOTHING, and the hull does not exist on this
+        path to fall back to. See the compartment constants/section
+        for the full construction, the reporting honesty split (seed
+        anchor claim vs compartment means), and the dedupe rules.
 
 EXISTING FARM ROADS ARE A GEOMETRIC EXCLUSION for both types, exactly
 like the parcel boundary: zone geometry clips at the road exclusion
@@ -771,24 +777,53 @@ FLAG_TRUNCATED_BY_ROAD = "truncated_by_road"
 # width/transect is a FLOOR on the truth, not a measurement of it.
 FLAG_HALF_WIDTH_BOUND_HIT = "half_width_bound_hit"
 
-# Pinch-walk failure reason codes -- a seed that finds no embankment cell
-# produces NOTHING (there is no hull on this path; nothing to fall back
-# to) and is logged/exported with the reason that names its terminator:
-REASON_NO_PINCH_WITHIN_BOUND = "no_pinch_within_bound"
-"""The walked reach held no interior width minimum on its own merits:
-the valley widened monotonically downstream of the seed, or the distance
-bound (or the flow field itself) ended the walk while no confirmed pinch
-existed behind it."""
-REASON_PINCH_OFF_PARCEL = "pinch_off_parcel"
-"""The walk hit the parcel boundary while the valley was still
-narrowing -- the width minimum sits at the terminal on-parcel station,
-so the true pinch plausibly lies off-parcel, where this pipeline does
-not site dams."""
-REASON_PINCH_BLOCKED_BY_ROAD = "pinch_blocked_by_road"
-"""The walk hit a road-exclusion cell while the valley was still
-narrowing -- the reach's pinch sits at or beyond an existing farm road,
-which is a hard terminator (roads are a geometric exclusion, like the
-boundary), so the seed honestly yields nothing."""
+# --- terminal pinches: accepted, disclosed, not refused -------------------
+# HISTORY, kept on purpose. The first cut of the compartment change
+# required an INTERIOR width minimum -- a station with the valley
+# demonstrably narrowing to it AND widening beyond it -- and refused a
+# minimum sitting at the walk's terminal station with a reason naming
+# the terminator (the retired codes pinch_off_parcel /
+# pinch_blocked_by_road, plus no_pinch_within_bound doubling for the
+# bound-hit case). The first networked run then showed what that rule
+# does on a real parcel: most seeds failed pinch_off_parcel because
+# their valleys were STILL NARROWING at the property line, and the rule
+# read "the true throat lies beyond the boundary" as a refusal. The
+# confirmed doctrine (the dam-at-the-edge precedent from the wall-walk
+# era) is the opposite: the narrowest BUILDABLE crossing is a
+# legitimate -- often the most valuable -- survey finding. Honesty
+# therefore moved from refusal to DISCLOSURE: a terminal minimum is
+# accepted and flagged with exactly one of the pinch_at_* flags below,
+# carries still_narrowing_at_termination plus the walked width
+# profile's min/max, and the narrative states that the valley continues
+# to narrow beyond the terminator -- the marked dam reach is the
+# narrowest buildable crossing WITHIN THE SURVEYED EXTENT. Boundary,
+# road, and the 100 m walk bound all get the same treatment.
+FLAG_PINCH_AT_BOUNDARY = "pinch_at_boundary"
+"""The embankment cell is the walk's terminal station because the next
+channel cell is off-parcel: the dam reach sits at the property line."""
+FLAG_PINCH_AT_ROAD = "pinch_at_road"
+"""The embankment cell is the walk's terminal station because the next
+channel cell is inside the road exclusion union: the dam reach sits
+against an existing farm road."""
+FLAG_PINCH_AT_WALK_BOUND = "pinch_at_walk_bound"
+"""The embankment cell is the walk's terminal station because the walk
+ran out -- the EMBANKMENT_PINCH_WALK_MAX_METERS distance bound, or the
+D8 flow field itself ending (a flat-tie/outlet cell, the rarer case,
+grouped here deliberately: either way the SURVEYED EXTENT ended, and
+'walk limit' is the honest noun for both)."""
+FLAG_STILL_NARROWING = "still_narrowing_at_termination"
+"""Rides every terminal pinch whose terminal width is strictly below
+the preceding station's (by the first-of-ties minimum rule this is
+every terminal pinch -- carried explicitly anyway so the disclosure is
+a readable property, not an inference): the valley was still narrowing
+when the walk was cut off."""
+
+# The SOLE remaining walk failure: the width minimum sits at the SEED
+# station itself (a monotonically widening -- or never-narrowing --
+# profile). A compartment needs a baseline, and a dam at the storage
+# cell is degenerate; this seed honestly produces nothing.
+REASON_NO_CONSTRICTION = "no_constriction"
+
 REASON_COMPARTMENT_EMPTY_AFTER_CLIP = "compartment_empty_after_clip"
 """Defensive only -- cannot occur by construction (the baseline's own
 cells are on-parcel and never road cells, so the clipped watershed band
@@ -2172,24 +2207,31 @@ def walk_embankment_pinch(
     (the -1 outlet/flat sentinel) -- so every measured station is
     on-parcel, pre-road, within bound by construction.
 
-    THE EMBANKMENT CELL is the along-channel width minimum among the
-    measured stations, and it must be an INTERIOR minimum -- at least
-    one station before it (the valley demonstrably narrowed to it) and
-    at least one after it (the valley demonstrably widened beyond it).
-    FAILURE IS HONEST, NO FALLBACK -- the hull does not exist on this
-    path and there is nothing to fall back to:
+    THE EMBANKMENT CELL is the MINIMUM-WIDTH station among ALL walked
+    stations -- interior or terminal. A minimum sitting at the walk's
+    terminal station is ACCEPTED AND DISCLOSED, never refused (the
+    dam-at-the-edge doctrine -- see the pinch_at_* flag constants for
+    the history that retired the interior-only rule): the narrowest
+    buildable crossing within the surveyed extent is a legitimate,
+    often the most valuable, survey finding. A terminal pinch carries
+    exactly one of 'boundary' / 'road' / 'walk_bound' in `terminal`
+    (naming what ended the walk; the flow field running out groups
+    under walk_bound -- the surveyed extent ended either way), plus
+    still_narrowing_at_termination and the walked width profile's
+    min/max, so the constriction's strength is readable.
 
-      * minimum at the LAST station -> the valley was still narrowing
-        when the walk was cut off; the reason NAMES THE TERMINATOR:
-        pinch_off_parcel (boundary), pinch_blocked_by_road (road), or
-        no_pinch_within_bound (distance bound / flow field ran out).
-      * minimum at the FIRST station (the seed itself) -> the valley
-        widens monotonically downstream: no_pinch_within_bound.
+    THE SOLE REMAINING FAILURE, honest, no fallback: the minimum sits
+    at the SEED station itself (a monotonically widening -- or
+    never-narrowing -- profile). A compartment needs a baseline, and a
+    dam at the storage cell is degenerate: reason_code no_constriction.
 
-    Returns {'found', 'stations', 'terminator', and either
-    {'pinch_index', 'pinch_rowcol', 'pinch_width_m', 'walk_distance_m',
-    'half_width_bound_hit'} or {'reason_code'}}. Stations carry each
-    cell's width measurement for the diagnostic/export instruments.
+    Returns {'found', 'stations', 'terminator',
+    'still_narrowing_at_termination', 'width_profile_min_m',
+    'width_profile_max_m', and either {'pinch_index', 'pinch_rowcol',
+    'pinch_width_m', 'walk_distance_m', 'half_width_bound_hit',
+    'terminal' (None for an interior pinch)} or {'reason_code'}}.
+    Stations carry each cell's width measurement for the
+    diagnostic/export instruments.
     """
     px, py = dem["resolution_meters"]
     stations: list[dict] = []
@@ -2241,28 +2283,43 @@ def walk_embankment_pinch(
         distance += step_meters
 
     if not stations:
+        # The seed itself was unmeasurable (no flow direction at all):
+        # degenerate in the same way a seed-station minimum is.
         return {
             "found": False,
-            "reason_code": REASON_NO_PINCH_WITHIN_BOUND,
+            "reason_code": REASON_NO_CONSTRICTION,
             "terminator": terminator,
             "stations": stations,
+            "still_narrowing_at_termination": False,
+            "width_profile_min_m": None,
+            "width_profile_max_m": None,
         }
 
     widths = [station["width_m"] for station in stations]
     minimum_index = int(np.argmin(widths))
-    if minimum_index == len(stations) - 1:
-        reason = {
-            "boundary": REASON_PINCH_OFF_PARCEL,
-            "road": REASON_PINCH_BLOCKED_BY_ROAD,
-        }.get(terminator, REASON_NO_PINCH_WITHIN_BOUND)
-        return {"found": False, "reason_code": reason, "terminator": terminator, "stations": stations}
+    still_narrowing = len(widths) >= 2 and widths[-1] < widths[-2]
+    profile = {
+        "still_narrowing_at_termination": still_narrowing,
+        "width_profile_min_m": round(min(widths), 1),
+        "width_profile_max_m": round(max(widths), 1),
+    }
     if minimum_index == 0:
+        # The valley never narrows below its seed station: no baseline
+        # exists to build a compartment on -- the one honest failure.
         return {
             "found": False,
-            "reason_code": REASON_NO_PINCH_WITHIN_BOUND,
+            "reason_code": REASON_NO_CONSTRICTION,
             "terminator": terminator,
             "stations": stations,
+            **profile,
         }
+
+    # A terminal minimum is ACCEPTED: `terminal` names what ended the
+    # walk (distance bound and the flow field running out both read
+    # walk_bound -- the surveyed extent ended either way).
+    terminal = None
+    if minimum_index == len(stations) - 1:
+        terminal = {"boundary": "boundary", "road": "road"}.get(terminator, "walk_bound")
 
     pinch_station = stations[minimum_index]
     return {
@@ -2274,6 +2331,8 @@ def walk_embankment_pinch(
         "pinch_width_m": pinch_station["width_m"],
         "walk_distance_m": pinch_station["distance_m"],
         "half_width_bound_hit": pinch_station["measurement"]["bound_hit"],
+        "terminal": terminal,
+        **profile,
     }
 
 
@@ -2444,6 +2503,23 @@ def build_embankment_compartment(
     if walk["half_width_bound_hit"] or any(t["bound_hit"] for t in transects):
         flags.append(FLAG_HALF_WIDTH_BOUND_HIT)
 
+    # Terminal-pinch disclosure (the accepted-not-refused doctrine --
+    # see the pinch_at_* constants): exactly one flag naming the
+    # terminator, plus the still-narrowing statement, so a dam reach at
+    # the property line / an existing road / the walk limit announces
+    # itself rather than reading as an ordinary interior narrows.
+    pinch_terminal = walk.get("terminal")
+    if pinch_terminal is not None:
+        flags.append(
+            {
+                "boundary": FLAG_PINCH_AT_BOUNDARY,
+                "road": FLAG_PINCH_AT_ROAD,
+                "walk_bound": FLAG_PINCH_AT_WALK_BOUND,
+            }[pinch_terminal]
+        )
+        if walk["still_narrowing_at_termination"]:
+            flags.append(FLAG_STILL_NARROWING)
+
     compartment_acres = clipped.area / SQUARE_METERS_PER_ACRE
     cells = _cells_in_polygon_utm(dem, clipped)
     # A compartment too small to hold a single cell center is headed for
@@ -2502,7 +2578,20 @@ def build_embankment_compartment(
             "width_m": walk["pinch_width_m"],
             "walk_distance_m": walk["walk_distance_m"],
             "half_width_bound_hit": walk["half_width_bound_hit"],
+            # Terminal disclosure: None for an interior pinch;
+            # 'boundary' / 'road' / 'walk_bound' when the embankment
+            # cell is the walk's terminal station, with the
+            # still-narrowing statement and the walked width profile's
+            # extremes beside it.
+            "terminal": pinch_terminal,
+            "still_narrowing_at_termination": walk["still_narrowing_at_termination"],
+            "width_profile_min_m": walk["width_profile_min_m"],
+            "width_profile_max_m": walk["width_profile_max_m"],
         },
+        "pinch_terminal": pinch_terminal,
+        "still_narrowing_at_termination": (
+            pinch_terminal is not None and walk["still_narrowing_at_termination"]
+        ),
         "baseline": {
             "points_utm": baseline_points_utm,
             "length_m": round(baseline_length, 1),
@@ -3292,6 +3381,15 @@ def _zone_feature_properties(zone: dict) -> dict:
                 "pinch_rowcol": list(zone["pinch"]["rowcol"]),
                 "pinch_width_m": zone["pinch"]["width_m"],
                 "pinch_walk_distance_m": zone["pinch"]["walk_distance_m"],
+                # The terminal-pinch disclosure (accepted, not refused):
+                # None for an interior pinch, else which terminator the
+                # dam reach sits against, with the still-narrowing
+                # statement and the walked width profile's extremes so
+                # the constriction's strength is readable on the wire.
+                "pinch_terminal": zone["pinch_terminal"],
+                "still_narrowing_at_termination": zone["still_narrowing_at_termination"],
+                "width_profile_min_m": zone["pinch"]["width_profile_min_m"],
+                "width_profile_max_m": zone["pinch"]["width_profile_max_m"],
                 "baseline_length_m": zone["baseline"]["length_m"],
                 "truncated_by_boundary": zone["truncated_by_boundary"],
                 "half_width_bound_hit": zone["half_width_bound_hit"],
@@ -3486,6 +3584,16 @@ def build_narrative_data(result: dict) -> dict:
                     "seed_criteria_signature": dict(zone["seed"]["criteria_signature"]),
                     "pinch_width_ft": _feet(zone["pinch"]["width_m"]),
                     "pinch_walk_distance_ft": _feet(zone["pinch"]["walk_distance_m"]),
+                    # The terminal-pinch disclosure: None for an
+                    # interior pinch; else which terminator the dam
+                    # reach sits against, the still-narrowing
+                    # statement, and the walked width profile's
+                    # extremes -- the report's per-terminator caveat
+                    # keys on these.
+                    "pinch_terminal": zone["pinch_terminal"],
+                    "still_narrowing_at_termination": zone["still_narrowing_at_termination"],
+                    "width_profile_min_ft": _feet(zone["pinch"]["width_profile_min_m"]),
+                    "width_profile_max_ft": _feet(zone["pinch"]["width_profile_max_m"]),
                     "baseline_length_ft": _feet(zone["baseline"]["length_m"]),
                     "truncated_by_boundary": zone["truncated_by_boundary"],
                     "half_width_bound_hit": zone["half_width_bound_hit"],

@@ -114,7 +114,7 @@ def _build_dem() -> dict:
     carries the flow accumulation the embankment surface wants and the
     THROAT gives its pinch walks a real crest-to-crest width minimum --
     without it the prism's constant cross-section makes every seed
-    honestly report no_pinch_within_bound and the embankment type
+    honestly fail (now: no_constriction) and the embankment type
     produces zero zones (a correct outcome this step test cannot live
     on: its multi-select/id/union sections need both types). The bench
     still carries the flat, wet ground the excavated surface wants; the
