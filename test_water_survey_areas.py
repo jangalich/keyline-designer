@@ -309,20 +309,50 @@ print("TWI: ln(a/tan-beta) with the flat singularity floored at tan=0.001 -- ln(
 # Weight-sum assertions (the import-time asserts, re-stated as tests):
 assert math.isclose(sum(EMBANKMENT_WEIGHTS.values()), 1.0, abs_tol=1e-9)
 assert math.isclose(sum(EXCAVATED_WEIGHTS.values()), 1.0, abs_tol=1e-9)
-assert EMBANKMENT_WEIGHTS == {"drainage_area": 0.30, "slope": 0.25, "soil": 0.25, "twi": 0.20}
+# THREE EMBANKMENT CRITERIA, NOT FOUR: drainage_area left the SEEDING
+# blend when the band moved to the pinch cell (see EMBANKMENT_WEIGHTS's
+# note), and the survivors were RENORMALIZED rather than retuned --
+# 0.25/0.25/0.20 over their 0.70 sum, to 2 dp. The ratios are therefore
+# preserved exactly, which is the property the renormalization claims
+# and the only one worth asserting about the numbers themselves.
+assert EMBANKMENT_WEIGHTS == {"slope": 0.36, "soil": 0.36, "twi": 0.28}
+assert "drainage_area" not in EMBANKMENT_WEIGHTS, (
+    "contributing area is no longer a per-cell embankment SEEDING criterion"
+)
+assert EMBANKMENT_WEIGHTS["slope"] == EMBANKMENT_WEIGHTS["soil"], (
+    "slope and soil were equal before renormalization and stay equal after it"
+)
+# EACH WEIGHT IS ITS EXACT RENORMALIZED VALUE, ROUNDED TO 2 dp. The
+# retired blend's 0.25 / 0.25 / 0.20 over their 0.70 sum is
+# 0.3571 / 0.3571 / 0.2857; two of those round up and the third must
+# round DOWN to hold the sum at exactly 1.0, so TWI pays the 0.0057 of
+# rounding rather than the sum being broken. That is the whole of the
+# arithmetic -- no judgement entered it, which is the claim being
+# pinned here.
+for _name, _exact in (("slope", 0.25 / 0.70), ("soil", 0.25 / 0.70), ("twi", 0.20 / 0.70)):
+    assert abs(EMBANKMENT_WEIGHTS[_name] - _exact) < 0.01, (
+        f"{_name} must be its renormalized value to 2 dp, not a retuned one: "
+        f"{EMBANKMENT_WEIGHTS[_name]} vs {_exact:.4f}"
+    )
+# THE EXCAVATED SIDE IS UNTOUCHED, drainage_runon included: a dugout has
+# no pinch and its ground is extraction-based, so a per-cell run-on
+# preference at 0.10 is still exactly the right instrument there.
 assert EXCAVATED_WEIGHTS == {"wetness": 0.35, "soil": 0.30, "slope": 0.25, "drainage_runon": 0.10}
-print("Weights: both types sum to 1.0 at the documented v1 priors.")
+print("Weights: embankment renormalized to three criteria (0.36/0.36/0.28); excavated untouched.")
 
 # One hand-computed cell through each type's FULL blend. Inputs chosen so
 # every criterion lands at a hand-checkable value at 5m cells
 # (cell area = 25/4046.8564224 = 0.0061776 ac):
-#   accumulation 324 cells -> 2.0016 ac -> drainage band 1.0, run-on 1.0
+#   accumulation 324 cells -> 2.0016 ac -> run-on 1.0 (EXCAVATED ONLY;
+#                             the embankment blend no longer reads
+#                             contributing area at all, which is what
+#                             the two expected values below encode)
 #   slope 5%               -> embankment 1.0 (in 3-8), excavated 1.0
 #                             (full credit through the seep-widened 5%)
 #   TWI percentile 0.6 (given directly), depression 0.25 m -> 0.5
 #     -> wetness = 0.5*0.6 + 0.5*0.5 = 0.55
 #   soil grid 0.8
-# embankment = .30*1 + .25*1 + .25*.8 + .20*.6              = 0.87
+# embankment = .36*1 + .36*.8 + .28*.6                      = 0.816
 # excavated  = .35*.55 + .30*.8 + .25*1.0 + .10*1           = 0.7825
 blend_dem = _dem(np.full((3, 3), 100.0))
 surfaces = compute_suitability_surfaces(
@@ -334,8 +364,15 @@ surfaces = compute_suitability_surfaces(
     depression_depth=np.full((3, 3), 0.25),
     soil_score_grid=np.full((3, 3), 0.8),
 )
-assert np.allclose(surfaces[SURVEY_TYPE_EMBANKMENT], 0.87), (
-    f"hand-computed embankment blend 0.87, got {surfaces[SURVEY_TYPE_EMBANKMENT][1, 1]}"
+assert np.allclose(surfaces[SURVEY_TYPE_EMBANKMENT], 0.816), (
+    f"hand-computed embankment blend 0.816, got {surfaces[SURVEY_TYPE_EMBANKMENT][1, 1]}"
+)
+assert "drainage_area" not in surfaces["criteria"][SURVEY_TYPE_EMBANKMENT], (
+    "the embankment criteria grids carry three criteria; contributing area is measured per "
+    "compartment at the pinch cell, not per cell here"
+)
+assert "drainage_runon" in surfaces["criteria"][SURVEY_TYPE_EXCAVATED], (
+    "the excavated run-on grid is untouched by that move"
 )
 assert np.allclose(surfaces[SURVEY_TYPE_EXCAVATED], 0.7825), (
     f"hand-computed excavated blend 0.7825, got {surfaces[SURVEY_TYPE_EXCAVATED][1, 1]}"
@@ -351,7 +388,7 @@ gated = compute_suitability_surfaces(
     soil_score_grid=np.full((3, 3), 0.8),
 )
 assert np.all(gated[SURVEY_TYPE_EMBANKMENT] == 0.0) and np.all(gated[SURVEY_TYPE_EXCAVATED] == 0.0)
-print("Surface blend: one cell hand-computed through both full blends (0.87 / 0.7825); mask zeroes both.")
+print("Surface blend: one cell hand-computed through both full blends (0.816 / 0.7825); mask zeroes both.")
 
 
 # =========================================================================
@@ -941,7 +978,14 @@ for r in range(V_ROWS):
             twi = side_twi
         d = min(max((acres - 0.5) / 1.5, 0.0), 1.0)
         runon = min(max(acres / 2.0, 0.0), 1.0)
-        v_emb_expected[r, c] = 0.30 * d + 0.25 * 1.0 + 0.25 * 0.5 + 0.20 * twi
+        # THREE CRITERIA. `d` (the drainage band on this cell's own
+        # acres) is deliberately computed and deliberately UNUSED by
+        # the embankment formula: contributing area is measured per
+        # COMPARTMENT at the pinch cell now, never per seed cell. It is
+        # kept in scope because the excavated run-on below still reads
+        # this cell's acres and the two must be seen not to share a
+        # term.
+        v_emb_expected[r, c] = 0.36 * 1.0 + 0.36 * 0.5 + 0.28 * twi
         v_exc_expected[r, c] = 0.35 * (0.5 * twi) + 0.30 * 0.5 + 0.25 * v_slope_score_exc + 0.10 * runon
 assert np.allclose(
     np.where(v_gate, v_result["surfaces"][SURVEY_TYPE_EMBANKMENT], 0.0), v_emb_expected
@@ -951,14 +995,29 @@ assert np.allclose(
 ), "the RAW excavated blend must match the stated per-cell formulas on every gated cell"
 
 expected_channel = {(r, V_CHANNEL) for r in range(2, 38)}
-assert all(v_emb_expected[r, c] >= 0.5 for r, c in expected_channel)
+# THE RIBBON CLAIM IS EXCAVATED-ONLY, and it always should have been:
+# the embankment surface is a NOMINATION surface (nothing thresholds
+# it; generation is seed-based) and asserting where its 0.5 contour
+# falls was testing a threshold that does not exist on that path. It
+# reads differently now for a real reason -- with the drainage term
+# gone, an off-channel cell keeps its full slope and soil merit
+# (0.36 + 0.18 = 0.54) instead of being held under a cap by a criterion
+# scoring 0 on it -- and that is the branch's intent, not a regression.
+# The embankment formula stays pinned cell by cell above; the SEEDING
+# consequences are pinned in the two tiers below.
 assert all(v_exc_expected[r, c] >= 0.5 for r, c in expected_channel)
 assert all(
-    v_emb_expected[r, c] < 0.5 and v_exc_expected[r, c] < 0.5
+    v_exc_expected[r, c] < 0.5
     for r in range(2, 38)
     for c in range(2, 19)
     if c != V_CHANNEL
-), "every side cell stays out of both ribbons at 0.5"
+), "every side cell stays out of the EXCAVATED ribbon at 0.5 -- the only thresholded surface"
+assert all(
+    v_emb_expected[r, V_CHANNEL] > v_emb_expected[r, c]
+    for r in range(2, 38)
+    for c in range(2, 19)
+    if c != V_CHANNEL
+), "the embankment NOMINATION surface still ranks channel above side slope, everywhere"
 
 # EXCAVATED keeps the full extraction pipeline, and the ribbon math is
 # unchanged:
@@ -1049,15 +1108,36 @@ _channel_blends = [record["blend_score"] for record in v_seeds[:6]]
 assert _channel_blends == sorted(_channel_blends, reverse=True) and len(set(_channel_blends)) == 6, (
     f"the plateau is gone -- every channel seed carries its own catchment's score, got {_channel_blends}"
 )
-assert math.isclose(_channel_blends[0], 0.8737, abs_tol=5e-5), (
-    "the most-accumulated channel cell tops the surface, below the 0.875 the retired fixed curve "
-    "manufactured for a third of the channel at once"
+assert math.isclose(_channel_blends[0], 0.8182, abs_tol=5e-5), (
+    "the most-accumulated channel cell tops the surface: 0.36 slope + 0.18 soil + 0.28*twi_max"
 )
-assert all(math.isclose(record["blend_score"], 0.375) for record in v_seeds[6:]), (
-    "and every side seed sits at the off-channel arithmetic cap, all twelve at exactly 0.375"
+# EVERY SIDE SEED SITS AT EXACTLY 0.54 -- 0.36*1.0 (slope) + 0.36*0.5
+# (neutral soil) + 0.28*0 (raw TWI 4.16, under the ramp's floor). THIS
+# NUMBER USED TO BE 0.375 AND THE DIFFERENCE IS THE WHOLE BRANCH:
+# under the four-criterion blend an off-channel cell was held to
+# 0.25*1.0 + 0.25*0.5 = 0.375 no matter how good its ground was,
+# because a criterion carrying 0.30 scored 0 on it BY CONSTRUCTION.
+# That was an arithmetic cap on an entire archetype, not a judgement
+# about it, and with contributing area measured at the pinch instead
+# the cap is simply gone: off-channel ground now scores its slope and
+# soil merit outright.
+assert all(math.isclose(record["blend_score"], 0.54) for record in v_seeds[6:]), (
+    "every side seed sits at its own slope+soil merit, all twelve at exactly 0.54"
 )
 assert all(record["blend_score"] >= wsa.EMBANKMENT_SEED_MIN_SCORE for record in v_seeds)
-assert 0.375 < 0.5, "the side tier would not have been nominated at all under the old 0.50 minimum"
+# AND THIS IS THE MEASUREMENT EMBANKMENT_SEED_MIN_SCORE'S NEXT DECISION
+# IS MADE FROM. The old 0.50 minimum was lowered to 0.30 precisely
+# because 0.375 excluded the off-channel archetype by arithmetic; at
+# 0.54 that archetype clears 0.50 on its own merits, so the argument
+# that lowered the floor no longer applies to it. The floor is NOT
+# retuned in this branch -- the ladder measures the new distribution and
+# the next branch decides -- but the fact is pinned here rather than
+# left to be rediscovered.
+assert 0.54 > 0.5, (
+    "the off-channel tier now clears the OLD 0.50 minimum unaided -- the arithmetic exclusion "
+    "that justified lowering the floor to 0.30 is gone, and the floor's re-decision is the next "
+    "branch's, against the ladder"
+)
 
 # EVERY CHANNEL SEED FAILS, honestly, because this prism valley has a
 # CONSTANT cross-section -- crest-to-crest width is identical at every
@@ -1097,18 +1177,55 @@ assert sum(1 for r in _v_dropped_reasons if r == wsa.FLAG_BELOW_MIN_AREA) == 2
 v_emb_zones = v_result["zones_by_type"][SURVEY_TYPE_EMBANKMENT]
 assert len(v_emb_zones) == 2, "two off-channel compartments survive the floor"
 assert {zone["seed"]["rowcol"] for zone in v_emb_zones} == {(14, 2), (26, 2)}
-assert all(zone["seed_blend_score"] == 0.375 for zone in v_emb_zones), (
-    "THE EVIDENCE THE LOWER MINIMUM ADMITS REAL GROUND: both surviving embankment zones on this "
-    "fixture are anchored by seeds that the old 0.50 minimum would never have nominated"
+assert all(zone["seed_blend_score"] == 0.54 for zone in v_emb_zones)
+
+# THE FILL CLAIM, AND IT IS THIS BRANCH'S WHOLE ARGUMENT IN ONE FIXTURE.
+# Both surviving compartments are anchored on SIDE-SLOPE seeds whose own
+# contributing area is a single cell -- 0.0062 ac, which the drainage
+# band scores 0.0. Under the retired per-cell measurement that 0.0 was
+# 30% of their nomination score and the reason the whole off-channel
+# class was capped. But their pinches sit down in the channel, and the
+# catchment ABOVE THE DAM REACH -- the water that would actually fill
+# these ponds -- is 8.5 and 13.0 acres, full credit on the very same
+# band with the very same constants. The criterion was asking the right
+# question of the wrong cell, and this is what recovering it looks like.
+_v_seed_acres = 1 * CA
+assert wsa.drainage_band_score(np.array(_v_seed_acres)) == 0.0, (
+    "a side-slope seed's OWN catchment is one cell and scores zero -- the measurement that was "
+    "killing this archetype"
+)
+for zone in v_emb_zones:
+    assert zone["pinch_catchment_acres"] > 8.0, (
+        f"the pinch of an off-channel compartment sits in the channel: "
+        f"{zone['pinch_catchment_acres']} ac"
+    )
+    assert zone["pinch_catchment_acres"] < wsa.MAX_VALLEY_CONTRIBUTING_AREA_ACRES, (
+        "and still under the ceiling -- this fixture is not testing the disqualifier"
+    )
+    assert zone["pinch_drainage_score"] == 1.0, "full credit on the unchanged band"
+    assert zone["catchment_exceeds_ceiling"] is False
+    # The composite, and both its inputs, on the same record.
+    assert zone["compartment_rank_score"] == wsa.compartment_rank_score(0.54, 1.0) == 0.77
+_v_by_seed = {zone["seed"]["rowcol"]: zone for zone in v_emb_zones}
+assert _v_by_seed[(26, 2)]["pinch_catchment_acres"] > _v_by_seed[(14, 2)]["pinch_catchment_acres"], (
+    "the downstream compartment's dam reach carries more catchment"
 )
 
-# The excavated zone still ranks 1 within its own type and still
-# selects: pooled selection compares the embankment SEED blend (0.375)
-# against the excavated member mean, and the excavated zone wins.
+# THE SELECTION FLIPPED, AND SAYING SO IS THE POINT. Pooled selection
+# compares the embankment COMPARTMENT RANK SCORE against the excavated
+# member mean. On the seed blend alone (0.54) the excavated zone won at
+# 0.5843; combined with a full-credit fill claim the compartment reads
+# 0.77 and wins. That is not a tuning artifact -- it is the pipeline
+# finally able to see that the off-channel compartments on this fixture
+# have real water above them, which no per-seed measurement could say.
 v_exc_zone = exc_zones[0]
 assert "presented" not in v_exc_zone
-assert v_exc_zone["rank"] == 1
-assert v_result["selected_water_zone"] is v_exc_zone
+assert v_exc_zone["rank"] == 1, "still rank 1 WITHIN its own type -- ranking is per type"
+assert v_exc_zone["mean_suitability"] == 0.5843
+assert v_result["selected_water_zone"] in v_emb_zones, (
+    "the pooled winner is an embankment compartment now: 0.77 over the excavated 0.5843"
+)
+assert v_result["selected_water_zone"]["rank"] == 1
 assert v_exc_zone["sparse_anchor"] is False
 
 # The narrative carries the seed accounting: 18 seeds, 10 failed, each
@@ -1358,20 +1475,27 @@ _called_names = {
 assert "apply_presentation" not in _called_names, "nothing in the module still calls the deleted machinery"
 
 # Rank + selection on hand-built zone dicts: every survivor is ranked
-# within its type ON ITS TYPE'S OWN INSTRUMENT -- embankment by SEED
-# blend score (the compartment change), excavated by member-mean
-# suitability -- and the pooled rank-1 invariant holds with NO cap in
-# between. The embankment minis carry a deliberately LOW compartment
-# mean_suitability (0.1) beside their seed blends: if ranking or
-# selection ever read the compartment mean, every assertion below
-# flips -- the walked ground's mean must never rank a compartment.
-def _mini_zone(zid, stype, mean, acres, poly, seed_blend=None):
+# within its type ON ITS TYPE'S OWN INSTRUMENT -- embankment by the
+# COMPARTMENT RANK SCORE (seed blend combined with the pinch cell's
+# drainage score), excavated by member-mean suitability -- and the
+# pooled rank-1 invariant holds with NO cap in between. The embankment
+# minis carry a deliberately LOW compartment mean_suitability (0.1)
+# beside their two claims: if ranking or selection ever read the
+# compartment mean, every assertion below flips -- the walked ground's
+# mean must never rank a compartment.
+def _mini_zone(zid, stype, mean, acres, poly, seed_blend=None, pinch_drainage=None, catchment=None):
     zone = {
         "id": zid, "survey_type": stype, "mean_suitability": mean,
         "polygon_utm": poly,
     }
     if stype == SURVEY_TYPE_EMBANKMENT:
+        # The composite is DERIVED from the two claims by the module's
+        # own unit, never hand-written into the fixture: a test that
+        # typed 0.95 here would pass whatever the ranking rule did.
         zone["seed_blend_score"] = seed_blend
+        zone["pinch_drainage_score"] = pinch_drainage
+        zone["pinch_catchment_acres"] = catchment
+        zone["compartment_rank_score"] = wsa.compartment_rank_score(seed_blend, pinch_drainage)
         zone["zone_acres"] = acres
     else:
         zone["member_acres"] = acres
@@ -1379,20 +1503,54 @@ def _mini_zone(zid, stype, mean, acres, poly, seed_blend=None):
 
 
 rank_pool = [
-    _mini_zone(0, SURVEY_TYPE_EMBANKMENT, 0.1, 1.0, box(0, 0, 20, 20), seed_blend=0.9),
-    _mini_zone(1, SURVEY_TYPE_EMBANKMENT, 0.1, 1.0, box(100, 0, 120, 20), seed_blend=0.8),
-    _mini_zone(2, SURVEY_TYPE_EMBANKMENT, 0.1, 1.0, box(200, 0, 220, 20), seed_blend=0.7),
+    _mini_zone(0, SURVEY_TYPE_EMBANKMENT, 0.1, 1.0, box(0, 0, 20, 20),
+               seed_blend=0.9, pinch_drainage=1.0, catchment=6.0),
+    _mini_zone(1, SURVEY_TYPE_EMBANKMENT, 0.1, 1.0, box(100, 0, 120, 20),
+               seed_blend=0.8, pinch_drainage=0.8, catchment=1.7),
+    _mini_zone(2, SURVEY_TYPE_EMBANKMENT, 0.1, 1.0, box(200, 0, 220, 20),
+               seed_blend=0.7, pinch_drainage=0.6, catchment=1.4),
     _mini_zone(3, SURVEY_TYPE_EXCAVATED, 0.65, 1.0, box(10, 0, 30, 20)),
     _mini_zone(4, SURVEY_TYPE_EXCAVATED, 0.6, 1.0, box(300, 0, 320, 20)),
 ]
 rank_survey_zones_per_type(rank_pool)
 assert [z["rank"] for z in rank_pool] == [1, 2, 3, 1, 2], (
-    "EVERY survivor is ranked within its type (embankment by seed blend, despite the 0.1 compartment "
-    "means) -- rank 3 exists because nothing caps the list at 3 anymore"
+    "EVERY survivor is ranked within its type (embankment by its compartment rank score, despite "
+    "the 0.1 compartment means) -- rank 3 exists because nothing caps the list at 3 anymore"
+)
+assert [z["compartment_rank_score"] for z in rank_pool[:3]] == [0.95, 0.8, 0.65], (
+    "the composite is the equal-weight mean of the two claims, computed by the module"
 )
 assert select_survey_zone(rank_pool) is rank_pool[0], (
-    "the pooled rank-1 invariant on the per-type scores: seed blend 0.9 beats member-mean 0.65 -- and "
-    "the 0.1 compartment mean never enters the pool"
+    "the pooled rank-1 invariant on the per-type scores: compartment rank score 0.95 beats "
+    "member-mean 0.65 -- and the 0.1 compartment mean never enters the pool"
+)
+
+# IDENTICAL SEED BLENDS, DIFFERENT CATCHMENTS: the fill claim breaks the
+# tie, which is the entire reason the composite exists. Under the
+# retired seed-blend-only ranking these two were indistinguishable and
+# their order fell to the acreage tiebreak -- so the pair is built with
+# the WORSE-FILLED one holding the LARGER acreage, which means an
+# acreage-tiebreak ordering and a fill-claim ordering disagree and only
+# one of them can produce the ranks asserted here.
+tie_pool = [
+    _mini_zone(0, SURVEY_TYPE_EMBANKMENT, 0.1, 5.0, box(0, 0, 20, 20),
+               seed_blend=0.6, pinch_drainage=0.0, catchment=0.2),
+    _mini_zone(1, SURVEY_TYPE_EMBANKMENT, 0.1, 1.0, box(100, 0, 120, 20),
+               seed_blend=0.6, pinch_drainage=1.0, catchment=9.4),
+]
+rank_survey_zones_per_type(tie_pool)
+assert tie_pool[1]["rank"] == 1 and tie_pool[0]["rank"] == 2, (
+    "equal seed blends rank by the catchment above their dam reaches, not by acreage: "
+    f"{[(z['id'], z['rank'], z['compartment_rank_score']) for z in tie_pool]}"
+)
+assert tie_pool[0]["seed_blend_score"] == tie_pool[1]["seed_blend_score"] == 0.6, (
+    "and BOTH inputs stay on the record beside the composite -- the anchor claim is not consumed "
+    "by the ranking, it is reported next to it"
+)
+assert (tie_pool[0]["compartment_rank_score"], tie_pool[1]["compartment_rank_score"]) == (0.3, 0.8)
+assert select_survey_zone(tie_pool) is tie_pool[1], (
+    "a compartment with no water above it does not win a pool against one that has water, however "
+    "much ground it covers"
 )
 
 # attach_cross_type_overlaps on the same pool, hand-derived: emb zone 0
@@ -1953,7 +2111,31 @@ assert {row["key"] for row in _maximal[1]} | {"pinch_terminal", "still_narrowing
 
 # --- THE SCALES, on a real synthetic result ---
 _scales = wsa.build_scales(flat_result)
-assert set(_scales) == {"suitability", "rank", "overlap_pct", "boundary_adjacency_pct"}
+# Six entries: the four shape-generic ones plus the fill claim's two.
+# Neither of the new ones is a panel row (see PANEL_EXCLUDED_KEYS), and
+# they are here anyway because the rule is about scored values crossing
+# the wire, not about the panel -- narrative_data and the report read
+# both, and a drainage score that reads 0.0 for too-little AND for
+# too-much water is unreadable without its band.
+assert set(_scales) == {
+    "suitability",
+    "rank",
+    "overlap_pct",
+    "boundary_adjacency_pct",
+    "pinch_drainage_score",
+    "compartment_rank_score",
+}, sorted(_scales)
+assert _scales["pinch_drainage_score"]["min_acres"] == wsa.EMBANKMENT_DRAINAGE_MIN_ACRES
+assert (
+    _scales["pinch_drainage_score"]["full_credit_acres"]
+    == wsa.EMBANKMENT_DRAINAGE_FULL_CREDIT_ACRES
+)
+assert (
+    _scales["pinch_drainage_score"]["ceiling_acres"] == wsa.MAX_VALLEY_CONTRIBUTING_AREA_ACRES
+), "the band's three externally anchored numbers ride with the score they produced"
+assert _scales["compartment_rank_score"]["weights"] == dict(
+    wsa.EMBANKMENT_COMPARTMENT_RANK_WEIGHTS
+), "a composite without its recipe is a number no consumer can argue with"
 assert _scales["suitability"]["min"] == 0.0 and _scales["suitability"]["max"] == 1.0
 assert _scales["suitability"]["higher_is_better"] is True
 for _type in wsa.SURVEY_TYPES:

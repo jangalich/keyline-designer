@@ -926,7 +926,68 @@ for zone in _floor_drops:
 # same pinch, same hand-derived acreage, terminal None, none of the
 # pinch_at_* flags, and the failure vocabulary is no_constriction plus
 # dedupe codes ONLY.
-_interior = _channel_comps[0]
+#
+# BUILT FROM A PINNED SEED AT (24, A_CHANNEL), NOT FROM WHATEVER THE
+# BLEND NOMINATES, and the reason is a real change rather than a
+# convenience. This pin is about the PINCH WALK and the compartment
+# assembly -- geometry that depends on the seed cell, the flow field and
+# the terrain, and on nothing else. It used to reach that seed through
+# end-to-end seeding, which was incidental: when drainage area left the
+# seeding blend (it is measured at the PINCH now -- see EMBANKMENT_
+# WEIGHTS), the highest-blend channel cell moved upstream to (12,
+# A_CHANNEL), because the downstream reach was being lifted by a
+# catchment credit that no longer scores seeds. THE PINCH DID NOT MOVE
+# (the end-to-end assertion above still finds it at (28, A_CHANNEL)) and
+# neither did any hand-derived number below, which is exactly the point:
+# driving the seed directly makes this pin insensitive to blend changes
+# it was never meant to be measuring.
+_interior_walk = walk_embankment_pinch(
+    A2_DEM, (24, A_CHANNEL), _A2_FTR, _A2_FTC, A_ON_PARCEL, A_NO_ROAD
+)
+assert _interior_walk["found"], "the pinned channel seed still finds its narrows"
+_interior_seed = {
+    "rowcol": (24, A_CHANNEL),
+    "xy": pixel_center_xy(A2_DEM, 24, A_CHANNEL),
+    "geometry_wgs84": {
+        "type": "Point",
+        "coordinates": tuple(
+            transform_geom(
+                CRS,
+                "EPSG:4326",
+                {"type": "Point", "coordinates": pixel_center_xy(A2_DEM, 24, A_CHANNEL)},
+            )["coordinates"]
+        ),
+    },
+    "blend_score": 0.6,
+    "criteria_signature": {name: 0.5 for name in EMBANKMENT_WEIGHTS},
+}
+_interior_context = {
+    "twi_score": np.full(A2_DEM["array"].shape, 0.5),
+    "depression_depth": np.zeros(A2_DEM["array"].shape),
+    "flow_accumulation": a2_accumulation,
+    "slope_pct": np.full(A2_DEM["array"].shape, 5.0),
+    "soil_covered_mask": np.zeros(A2_DEM["array"].shape, dtype=bool),
+    "soil_checked": False,
+}
+_interior_surfaces = {
+    SURVEY_TYPE_EMBANKMENT: np.full(A2_DEM["array"].shape, 0.6),
+    "criteria": {
+        SURVEY_TYPE_EMBANKMENT: {
+            name: np.full(A2_DEM["array"].shape, 0.5) for name in EMBANKMENT_WEIGHTS
+        }
+    },
+}
+_interior = build_embankment_compartment(
+    A2_DEM,
+    _interior_seed,
+    _interior_walk,
+    build_upstream_map(_A2_FTR, _A2_FTC),
+    A_BOUNDARY,
+    None,
+    _interior_surfaces,
+    _interior_context,
+)
+assert _interior is not None
 assert _interior["seed"]["rowcol"] == (24, A_CHANNEL) and _interior["pinch"]["rowcol"] == (28, A_CHANNEL)
 # DUAL ACREAGE, both hand-derived. The footprint is the 23-cell
 # staircase; its hull is the hexagon (7,24) (14,24) (14,26) (11,29)

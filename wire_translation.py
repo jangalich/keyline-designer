@@ -665,12 +665,18 @@ def water_survey_zones_to_feature_collection(
     for zone in dropped_zones or []:
         if zone["survey_type"] == "embankment":
             # Dropped compartments carry their own reason -- the 0.1 ac
-            # floor on compartment acreage, or a dedupe
-            # duplicate_of_zone_<id> -- named in the label.
+            # floor on compartment acreage, a dedupe
+            # duplicate_of_zone_<id>, or catchment_exceeds_ceiling (the
+            # pinch cell's catchment is past farm-pond scale) -- named
+            # in the label. The catchment rides the label whatever the
+            # reason, because for the ceiling drop it IS the reason and
+            # for the others it is the fill claim the reader still
+            # needs.
             label = (
                 f"DROPPED survey zone {zone['id']} (embankment-type, {zone['drop_reason']}): "
                 f"{zone['zone_acres']} ac hull over a {zone['compartment_footprint_acres']} ac "
-                f"compartment (seed blend {zone['seed_blend_score']})"
+                f"compartment (seed blend {zone['seed_blend_score']}, "
+                f"{zone['pinch_catchment_acres']} ac of catchment at the pinch cell)"
             )
         else:
             label = (
@@ -696,7 +702,9 @@ _EMBANKMENT_DETAIL_NOTE = (
     "Embankment compartment instrument geometry (diagnostic export): the seed (the compartment's "
     "anchoring storage cell -- the seed's own blend score, not the compartment's mean), the pinch "
     "(the walked crest-to-crest width minimum -- the embankment cell; its width is a crest-to-crest "
-    "survey measure that OVERSTATES dam length), the baseline (seed -> pinch), and the two "
+    "survey measure that OVERSTATES dam length, and its CATCHMENT -- contributing area at that very "
+    "cell -- is what the compartment would impound and the number the drainage band is scored on), "
+    "the baseline (seed -> pinch), and the two "
     "baseline-perpendicular crest transects that bound the compartment's watershed band. Derived "
     "from the same DEM and D8 flow field as everything else in the water step -- not surveyed, not "
     "field-verified; ground-truth before committing to anything."
@@ -706,7 +714,9 @@ _FAILED_SEED_NOTE = (
     "FAILED embankment seed (the dropped-feature pattern, seed edition): this seed qualified on the "
     "nomination surface but produced NO compartment -- the reason_code names why (no_constriction: "
     "the valley never narrows below the seed station, so no baseline exists and a dam at the storage "
-    "cell would be degenerate; or a dedupe collapse into duplicate_of_zone_<id>). A width minimum at "
+    "cell would be degenerate; or a dedupe collapse into duplicate_of_zone_<id>). A compartment that "
+    "was BUILT and then refused for its catchment (catchment_exceeds_ceiling) is not here -- it is a "
+    "dropped ZONE, on survey_zone_dropped, because it has geometry to show. A width minimum at "
     "the walk's TERMINAL station is not a failure: it is accepted as a compartment and disclosed with "
     "a pinch_at_* flag. There is deliberately no fallback: the hull does not exist on the embankment "
     "path."
@@ -765,7 +775,9 @@ def water_embankment_detail_features(zones: list[dict], seed_records: list[dict]
                 layer="embankment_pinch",
                 label=(
                     f"Pinch (embankment cell) for compartment {zone_id}: "
-                    f"{pinch['width_m']} m crest-to-crest at {pinch['walk_distance_m']} m downstream"
+                    f"{pinch['width_m']} m crest-to-crest at {pinch['walk_distance_m']} m downstream, "
+                    f"{pinch['catchment_acres']} ac of catchment above it "
+                    f"(drainage {pinch['drainage_score']})"
                 ),
                 confidence=zone["confidence"],
                 confidence_notes=_EMBANKMENT_DETAIL_NOTE,
@@ -774,6 +786,12 @@ def water_embankment_detail_features(zones: list[dict], seed_records: list[dict]
                     "width_m": pinch["width_m"],
                     "walk_distance_m": pinch["walk_distance_m"],
                     "half_width_bound_hit": pinch["half_width_bound_hit"],
+                    # THE FILL CLAIM, on the cell it is measured at.
+                    # This is the layer where "what does the dam
+                    # impound" is answerable by clicking the dam.
+                    "catchment_acres": pinch["catchment_acres"],
+                    "drainage_score": pinch["drainage_score"],
+                    "catchment_exceeds_ceiling": pinch["catchment_exceeds_ceiling"],
                     "rowcol": list(pinch["rowcol"]),
                 },
             )
