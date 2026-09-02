@@ -479,7 +479,7 @@ with Harness() as h:
     water_payload = s.generate("water")
     water_generate_network = h.total_network_calls - network_before
 
-    assert sorted(water_payload) == ["summary", "survey_zones", "zones"], (
+    assert sorted(water_payload) == ["scales", "summary", "survey_zones", "zones"], (
         f"the water payload's keys: {sorted(water_payload)}"
     )
     collection = water_payload["survey_zones"]
@@ -546,6 +546,11 @@ with Harness() as h:
         "seed_blend_score", "seed_criteria_signature", "seed_rowcol", "pinch_rowcol",
         "pinch_width_m", "pinch_walk_distance_m", "baseline_length_m",
         "truncated_by_boundary", "half_width_bound_hit",
+        # DUAL ACREAGE AND THE GUARD, on this type too since the
+        # compartment envelopes became hulls: zone_acres above is the
+        # DRAWN HULL, this is the watershed band anchoring it, and
+        # sparse_anchor is what says when the two are far apart.
+        "compartment_footprint_acres", "sparse_anchor",
     )
     for feature in ZONES:
         typed = (
@@ -579,6 +584,10 @@ with Harness() as h:
     assert "zones" not in summary, (
         "the tabular rows live at payload['zones']; carrying them twice would "
         "be two copies of the same reduction"
+    )
+    assert "scales" not in summary, (
+        "scales rides the payload's TOP LEVEL, where production's does -- a "
+        "scale describes the instrument, not one step's summary of it"
     )
     assert summary["zone_count"] == len(ZONES)
     assert summary["soil_checked"] is True, (
@@ -616,6 +625,178 @@ print(
     f"threshold {summary['suitability_threshold']}). "
     f"{water_generate_network} network calls during the generate; the "
     f"document says 'generated' and holds no features."
+)
+
+
+# --- 1b. THE PANEL BLOCK, THE SCALES, AND THE JOIN --------------------
+#
+# The three things the payload gained for the interactive map's zone tab.
+# Asserted HERE, on the orchestrated session payload, because that is the
+# shape the frontend actually receives; build_zone_panel()'s own row rules
+# (which rows fire, which are excluded, the None-is-not-zero sentinel) are
+# unit-tested against controlled fixtures in test_water_survey_areas.py.
+
+with Harness() as h:
+    s = Session()
+    s.commit_landform()
+
+    # The assembler's own args, captured so the parity assertion below can
+    # re-run it on exactly what the session path handed it.
+    captured = {}
+    real_build_water_payload = step_orchestrator.build_water_payload
+
+    def _recording_build_water_payload(result, assembled):
+        captured["result"] = result
+        captured["assembled"] = assembled
+        return real_build_water_payload(result, assembled)
+
+    with mock_patch.object(
+        step_orchestrator, "build_water_payload", _recording_build_water_payload
+    ):
+        panel_payload = s.generate("water")
+
+    PANEL_ZONES = _zone_features(panel_payload)
+    assert PANEL_ZONES, "no zones would make every assertion below vacuous"
+
+    # THE JOIN. Every tabular row carries feature_id -- the wire id of ITS
+    # OWN map feature -- beside the bare integer id, and it MATCHES.
+    features_by_id = {feature["id"]: feature for feature in PANEL_ZONES}
+    for row in panel_payload["zones"]:
+        assert "feature_id" in row, f"row {row['id']} carries no feature_id: {sorted(row)}"
+        assert "id" in row, "the bare integer id STAYS -- this is an addition, not a migration"
+        assert row["feature_id"] in features_by_id, (
+            f"row {row['id']}'s feature_id {row['feature_id']!r} names no feature on the map"
+        )
+        assert features_by_id[row["feature_id"]]["properties"]["zone_id"] == row["id"], (
+            "the row and the feature it names must be the SAME zone"
+        )
+    assert len({row["feature_id"] for row in panel_payload["zones"]}) == len(
+        panel_payload["zones"]
+    ), "one row, one feature -- no two rows may name the same map feature"
+
+    # ... AND IT IS CARRIED, NOT MINTED. A format string here would be a
+    # second source of truth for one identity, joined by a template nothing
+    # checks: rename wire_translation's prefix and selection stops matching,
+    # silently. AST-level, per house pattern -- the payload path may contain
+    # no f-string, no .format(), and no literal spelling the prefix.
+    import ast as _panel_ast  # noqa: E402
+    import inspect as _panel_inspect  # noqa: E402
+    import textwrap as _panel_textwrap  # noqa: E402
+
+    _assembler_function = _panel_ast.parse(
+        _panel_textwrap.dedent(_panel_inspect.getsource(real_build_water_payload))
+    ).body[0]
+    # The function's DOCSTRING is the one string allowed to spell the prefix
+    # -- it argues about why the id is carried rather than minted -- so it is
+    # DROPPED from the tree before the walk, not filtered during it (walk()
+    # descends into a skipped Expr and reaches its Constant anyway). Same
+    # narrate-but-never-emit distinction the compartment reason-code
+    # retirement test makes.
+    if (
+        _assembler_function.body
+        and isinstance(_assembler_function.body[0], _panel_ast.Expr)
+        and isinstance(_assembler_function.body[0].value, _panel_ast.Constant)
+        and isinstance(_assembler_function.body[0].value.value, str)
+    ):
+        _assembler_function.body = _assembler_function.body[1:]
+    assert _assembler_function.body, "the assembler is more than a docstring"
+    for node in _panel_ast.walk(_assembler_function):
+        assert not isinstance(node, _panel_ast.JoinedStr), (
+            "no f-string may appear in the water payload assembler -- the wire "
+            "feature id is looked up off the features, never minted"
+        )
+        if isinstance(node, _panel_ast.Attribute):
+            assert node.attr != "format", "no .format() may mint an id here either"
+        if isinstance(node, _panel_ast.Constant) and isinstance(node.value, str):
+            assert "water-survey-zone" not in node.value, (
+                f"the feature-id prefix is spelled in the assembler: {node.value!r}"
+            )
+
+    # THE SCALES, so no number renders without meaning.
+    scales = panel_payload["scales"]
+    assert set(scales) == {"suitability", "rank", "overlap_pct", "boundary_adjacency_pct"}, sorted(scales)
+    assert scales["suitability"]["min"] == 0.0 and scales["suitability"]["max"] == 1.0
+    assert scales["suitability"]["higher_is_better"] is True
+    assert scales["overlap_pct"] == {"min": 0, "max": 100}
+    assert scales["boundary_adjacency_pct"] == {"min": 0, "max": 100}
+
+    # parcel_observed_max IS THE SURFACE'S OWN MAXIMUM, per type -- the
+    # parcel's attainable ceiling, measured. Asserted against the surfaces
+    # the generate actually blended.
+    observed = scales["suitability"]["parcel_observed_max"]
+    _surfaces = captured["result"]["result"]["surfaces"]
+    for survey_type in water_survey_areas.SURVEY_TYPES:
+        assert observed[survey_type] == round(float(np.max(_surfaces[survey_type])), 4), (
+            f"{survey_type}'s observed ceiling must be its own surface's maximum"
+        )
+        assert 0.0 < observed[survey_type] <= 1.0
+        # Every zone of that type reads at or below its own parcel ceiling.
+        for feature in PANEL_ZONES:
+            if feature["properties"]["survey_type"] != survey_type:
+                continue
+            assert feature["properties"]["mean_suitability"] <= observed[survey_type] + 1e-9
+
+    # rank carries the PER-TYPE COUNT, so "rank 2" renders as "2 of 3".
+    for survey_type in water_survey_areas.SURVEY_TYPES:
+        count = scales["rank"][survey_type]["count"]
+        of_type = [f for f in PANEL_ZONES if f["properties"]["survey_type"] == survey_type]
+        assert count == len(of_type), f"{survey_type}: scale count {count} vs {len(of_type)} zones"
+        assert sorted(f["properties"]["rank"] for f in of_type) == list(range(1, count + 1)), (
+            "the count is the rank scale's denominator, so the ranks must fill it exactly"
+        )
+
+    # THE PANEL ROWS reach the wire on every tabular row, shaped so a
+    # renderer can draw a row it has never heard of.
+    for row in panel_payload["zones"]:
+        panel = row["panel"]
+        assert isinstance(panel, list) and panel, f"zone {row['id']} carries no panel rows"
+        for entry in panel:
+            assert set(entry) == {"key", "label", "value", "unit"}, entry
+        keys = [entry["key"] for entry in panel]
+        assert keys[:5] == list(water_survey_areas.PANEL_ALWAYS_ROWS), (
+            f"the five always-rows lead every panel, in order: {keys[:5]}"
+        )
+        assert len(keys) == len(set(keys)), f"a panel row key repeats: {keys}"
+    # The panel is on the TABULAR rows, not on the features: the feature's
+    # property set is the diagnostic/imagery contract and gains nothing.
+    for feature in PANEL_ZONES:
+        assert "panel" not in feature["properties"], (
+            "the panel is a curated READING of a zone; the feature keeps its full record"
+        )
+
+    # ASSEMBLER PARITY. There is no /api/water-zones endpoint to compare
+    # against (the water step is session-only today), so the strongest
+    # available statement is the one the production template's test makes in
+    # the other direction: the payload the session returned is EXACTLY what
+    # the named assembler produces from the same result, with nothing added,
+    # removed or re-derived on the way out -- and re-running the assembler on
+    # that result reproduces it. If an endpoint is ever wired, it calls this
+    # same function and this assertion becomes the two-path one verbatim.
+    from test_step_orchestrator import equivalent  # noqa: E402
+
+    reassembled = real_build_water_payload(captured["result"], captured["assembled"])
+    difference = equivalent(panel_payload, reassembled, "water_payload")
+    assert difference is None, (
+        f"the session payload must be the assembler's own output: {difference}"
+    )
+    assert step_registry.get_step("water").payload == (
+        "step_orchestrator.build_water_payload"
+    ), "one assembler, named by the registry -- two would be two contracts"
+
+_ceilings = ", ".join(
+    f"{survey_type} {value}"
+    for survey_type, value in sorted(panel_payload["scales"]["suitability"]["parcel_observed_max"].items())
+)
+_rank_counts = ", ".join(
+    f"{survey_type} {entry['count']}"
+    for survey_type, entry in sorted(panel_payload["scales"]["rank"].items())
+)
+print(
+    f"1b. PANEL/SCALES/JOIN: all {len(panel_payload['zones'])} tabular rows carry a feature_id "
+    f"matching their own map feature (carried, never minted -- AST-asserted), the five always-rows "
+    f"lead every panel, and the payload's scales block carries the parcel's own observed ceilings "
+    f"({_ceilings}) beside per-type rank counts ({_rank_counts}). The session payload is "
+    f"byte-equivalent to build_water_payload()'s own output."
 )
 
 

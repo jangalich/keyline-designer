@@ -382,9 +382,13 @@ def summarize_survey_zones_table(identify_result: dict) -> str:
             if survey_type == SURVEY_TYPE_EMBANKMENT:
                 # A compartment's line carries the honesty split: the
                 # SEED's blend (the rank driver) beside the
-                # compartment's own mean over the walked ground.
+                # compartment's own mean over the walked ground -- and
+                # DUAL ACREAGE, the drawn hull beside the watershed
+                # band anchoring it, so a resurrection-by-hull is
+                # readable on this table rather than by eye on the map.
                 lines.append(
-                    f"  #{zone['rank']} zone {zone['id']}: {zone['zone_acres']:.2f} ac compartment, "
+                    f"  #{zone['rank']} zone {zone['id']}: {zone['zone_acres']:.2f} ac to survey "
+                    f"anchored by {zone['compartment_footprint_acres']:.2f} ac compartment, "
                     f"seed blend {zone['seed_blend_score']:.3f} / compartment mean "
                     f"{zone['mean_suitability']:.3f}, pinch {zone['pinch']['width_m']:.0f} m wide at "
                     f"{zone['pinch']['walk_distance_m']:.0f} m, "
@@ -414,8 +418,10 @@ def summarize_survey_zones_table(identify_result: dict) -> str:
     for zone in dropped:
         if zone["survey_type"] == SURVEY_TYPE_EMBANKMENT:
             lines.append(
-                f"  DROPPED ({zone['drop_reason']}): embankment zone {zone['id']}, compartment "
-                f"{zone['zone_acres']:.4f} ac, seed blend {zone['seed_blend_score']:.3f} -- "
+                f"  DROPPED ({zone['drop_reason']}): embankment zone {zone['id']}, hull "
+                f"{zone['zone_acres']:.4f} ac anchored by "
+                f"{zone['compartment_footprint_acres']:.4f} ac compartment, "
+                f"seed blend {zone['seed_blend_score']:.3f} -- "
                 "excluded from the pipeline output"
             )
         else:

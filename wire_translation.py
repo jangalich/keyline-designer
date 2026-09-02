@@ -590,9 +590,13 @@ def water_survey_zones_to_feature_collection(
 
     STORED WIRE FORMS ONLY. Every geometry is the object's own
     geometry_wgs84, built at its birth. For a survey zone that WGS84 form
-    is the clipped closing envelope, which is ALSO its
-    render_fill_polygon_utm -- so unlike production, the geometry on the
-    wire and the geometry the map draws are the same. Confidence and (for
+    is the DRAWN HULL -- the closing hull over member footprints for an
+    excavated zone, the re-clipped hull over the watershed band for an
+    embankment compartment -- which is ALSO its render_fill_polygon_utm,
+    so unlike production, the geometry on the wire and the geometry the
+    map draws are the same. (The measured footprints beneath those hulls
+    ride the member layers for excavated zones and, for embankment
+    compartments, as compartment_footprint_* on the zone itself.) Confidence and (for
     zones) confidence_notes are per-object.
 
     Note that PipelineContext.water_zones is ALREADY this function's own
@@ -612,12 +616,14 @@ def water_survey_zones_to_feature_collection(
     features = []
     for zone in (zones or []):
         if zone["survey_type"] == "embankment":
-            # A valley compartment has no members: its label carries
-            # the honesty split's two numbers -- the compartment
-            # acreage and the SEED's anchoring blend score.
+            # A valley compartment has no members, but it does have an
+            # anchor: the label carries the honesty split's numbers --
+            # the drawn hull's acreage, the watershed band beneath it,
+            # and the SEED's anchoring blend score.
             label = (
                 f"Survey zone {zone['id']} (embankment-type, rank {zone['rank']}): "
-                f"{zone['zone_acres']} ac valley compartment anchored by a "
+                f"{zone['zone_acres']} ac to survey, anchored by a "
+                f"{zone['compartment_footprint_acres']} ac valley compartment and a "
                 f"{zone['seed_blend_score']}-scoring storage cell, dam reach at the downstream end"
             )
         else:
@@ -663,7 +669,8 @@ def water_survey_zones_to_feature_collection(
             # duplicate_of_zone_<id> -- named in the label.
             label = (
                 f"DROPPED survey zone {zone['id']} (embankment-type, {zone['drop_reason']}): "
-                f"{zone['zone_acres']} ac compartment (seed blend {zone['seed_blend_score']})"
+                f"{zone['zone_acres']} ac hull over a {zone['compartment_footprint_acres']} ac "
+                f"compartment (seed blend {zone['seed_blend_score']})"
             )
         else:
             label = (

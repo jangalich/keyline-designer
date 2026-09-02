@@ -52,7 +52,7 @@ import json
 
 import numpy as np
 from rasterio.warp import transform_geom
-from shapely.geometry import box, mapping, shape
+from shapely.geometry import Polygon, box, mapping, shape
 from shapely.ops import unary_union
 from shapely import contains_xy
 
@@ -423,10 +423,52 @@ assert len(expected_cells) == 51
 assert set(compartment["cells"]) == expected_cells, (
     "the compartment's cell population is the watershed staircase clipped to the transect band"
 )
-expected_acres = 51 * 25.0 / SQUARE_METERS_PER_ACRE
-assert abs(compartment["zone_acres"] - expected_acres) < 0.002, (
-    f"hand-derived compartment area {expected_acres:.4f} ac, got {compartment['zone_acres']}"
+expected_footprint_acres = 51 * 25.0 / SQUARE_METERS_PER_ACRE
+assert abs(compartment["compartment_footprint_acres"] - expected_footprint_acres) < 0.002, (
+    f"hand-derived compartment footprint {expected_footprint_acres:.4f} ac, got "
+    f"{compartment['compartment_footprint_acres']}"
 )
+
+# THE DRAWN HULL, HAND-DERIVED FROM THE SAME STAIRCASE. In cell units
+# (x = column edge, y = row edge downward) the 51-cell footprint is
+#   x 7..14, y 10..16   |  x 8..13, y 16..17
+#   x 9..12, y 17..18   |  x 10..11, y 18..19
+# whose extreme points are (7,10) (14,10) (14,16) (13,17) (12,18)
+# (11,19) (10,19) (9,18) (8,17) (7,16). The three right-side steps sit
+# EXACTLY on the line (14,16)->(11,19) (each step is -1 in x per +1 in
+# y) and the three left-side steps on (10,19)->(7,16), so the hull is
+# the hexagon (7,10) (14,10) (14,16) (11,19) (10,19) (7,16). Shoelace:
+#   |(-70) + 84 + 90 + 19 + 27 + (-42)| / 2 = 54 cell^2
+# = 54 * 25 m^2 = 1350 m^2 -- three cells of side-slope more than the
+# 51-cell band, which is the hull reading wider where the valley
+# pinches (build_embankment_compartment()'s own statement).
+expected_hull_acres = 54 * 25.0 / SQUARE_METERS_PER_ACRE
+assert abs(compartment["zone_acres"] - expected_hull_acres) < 0.002, (
+    f"hand-derived drawn hull {expected_hull_acres:.4f} ac, got {compartment['zone_acres']}"
+)
+assert compartment["zone_acres"] > compartment["compartment_footprint_acres"], (
+    "the hull is the wider claim; the footprint is the measured ground beneath it"
+)
+# THE FOOTPRINT SURVIVES INTACT -- the cell staircase is still there,
+# which is what makes it the honest record rather than a second drawing.
+footprint_polygon = compartment["compartment_footprint_polygon_utm"]
+assert abs(footprint_polygon.area - 51 * 25.0) < 1e-6
+assert footprint_polygon.within(compartment["polygon_utm"].buffer(1e-9)), (
+    "the drawn hull contains its own footprint by construction"
+)
+assert compartment["polygon_utm"].equals(footprint_polygon.convex_hull), (
+    "with no clip in play the drawn zone IS the footprint's convex hull"
+)
+assert len(footprint_polygon.exterior.coords) > len(compartment["polygon_utm"].exterior.coords), (
+    "the staircase is preserved in the footprint and absent from the hull"
+)
+# BOTH GEOMETRIES CARRY A STORED WGS84 FORM, built at birth.
+for key in ("geometry_wgs84", "compartment_footprint_geometry_wgs84"):
+    assert compartment[key]["type"] == "Polygon", key
+assert shape(compartment["compartment_footprint_geometry_wgs84"]).is_valid
+# The sparse-anchor guard is SILENT on a dense compartment: 51/54 =
+# 0.94, far above the 0.2 ratio.
+assert compartment["sparse_anchor"] is False and wsa.FLAG_SPARSE_ANCHOR not in compartment["flags"]
 assert compartment["truncated_by_boundary"] is False and compartment["truncated_by_road"] is False
 assert compartment["baseline"]["length_m"] == 40.0
 assert compartment["render_fill_polygon_utm"] is compartment["polygon_utm"], "render_fill identity"
@@ -464,10 +506,184 @@ assert road_clipped["polygon_utm"].intersection(road_union).area < 1e-6, (
 assert road_clipped["pre_road_clip_polygon_utm"].intersection(road_union).area > 1.0, (
     "the PRE-clip geometry keeps the removed ground for the road_overlap_pct measurement"
 )
+
+# HULL ORDER, THE WHOLE POINT OF IT: a road strip cutting a notch clean
+# THROUGH the compartment is bridged straight back over by the convex
+# hull of the notched shape. Hulling AFTER the clip would hand that
+# ground back; hulling FIRST and re-clipping does not. The strip below
+# spans the full width of the band at rows 13-14, so the footprint is
+# genuinely severed and its hull spans the gap.
+severing_road = box(
+    ORIGIN_X + 0 * RESOLUTION,
+    ORIGIN_Y - 15 * RESOLUTION,
+    ORIGIN_X + 21 * RESOLUTION,
+    ORIGIN_Y - 13 * RESOLUTION,
+)
+severed = build_embankment_compartment(
+    A_DEM, _seed, walk, A_UPSTREAM, A_BOUNDARY, severing_road, _surfaces, _screens
+)
+severed_footprint = severed["compartment_footprint_polygon_utm"]
+assert severed_footprint.geom_type == "MultiPolygon", "the road strip severs the band in two"
+assert severed_footprint.convex_hull.intersection(severing_road).area > 100.0, (
+    "the naive hull of the clipped footprint DOES re-swallow the road strip -- which is the "
+    "failure the documented order exists to prevent"
+)
+assert severed["polygon_utm"].intersection(severing_road).area < 1e-6, (
+    "hull FIRST, then re-clip: the delivered geometry excludes the road strip"
+)
+assert severed["truncated_by_road"] is True and wsa.FLAG_TRUNCATED_BY_ROAD in severed["flags"]
+
+# THE BOUNDARY EQUIVALENT, same shape of argument. A straight cut can
+# never be re-crossed by the convex hull of what it left behind, so the
+# fixture is a parcel with a NOTCH biting into the compartment's east
+# flank at rows 14-15 (cols 12-13): the footprint goes concave around
+# it, the hull bridges straight over it, and the re-clip takes it out
+# again.
+notched_boundary = A_BOUNDARY.difference(
+    box(
+        ORIGIN_X + 12 * RESOLUTION,
+        ORIGIN_Y - 16 * RESOLUTION,
+        ORIGIN_X + 21 * RESOLUTION,
+        ORIGIN_Y - 14 * RESOLUTION,
+    )
+)
+notched = build_embankment_compartment(
+    A_DEM, _seed, walk, A_UPSTREAM, notched_boundary, None, _surfaces, _screens
+)
+notched_footprint = notched["compartment_footprint_polygon_utm"]
+assert notched_footprint.difference(notched_boundary).area < 1e-6, "the footprint is on-parcel"
+assert notched_footprint.convex_hull.difference(notched_boundary).area > 25.0, (
+    "the naive hull of the clipped footprint bridges straight back over the boundary notch -- "
+    "the failure the documented order exists to prevent, boundary edition"
+)
+assert notched["polygon_utm"].difference(notched_boundary).area < 1e-6, (
+    "hull FIRST, then re-clip: the delivered geometry stays on-parcel"
+)
+assert notched["truncated_by_boundary"] is True
+assert wsa.FLAG_TRUNCATED_BY_BOUNDARY in notched["flags"]
+
+# AND THE FLAG SURVIVES A STRAIGHT CUT, which is the case a naive
+# before/after comparison on the hull loses: the west-flank box above
+# clips the compartment at a straight line, so hull(footprint) sits
+# flat against it and crosses nothing -- yet the boundary plainly
+# removed ground this survey area would otherwise claim, and the flag
+# says so because it is measured against the unconstrained claim.
+assert clipped_compartment["polygon_utm"].convex_hull.difference(narrow_boundary).area < 1e-6, (
+    "the straight cut leaves a hull that crosses nothing -- the case being guarded"
+)
+assert clipped_compartment["truncated_by_boundary"] is True
+
 print(
     f"3. Assembly: transect crests at +/-17.5 (seed) and +/-7.5 m (pinch); the watershed staircase "
-    f"matches the hand-enumerated divide; compartment = 51 cells = {expected_acres:.4f} ac (got "
-    f"{compartment['zone_acres']}); boundary and road clips each flagged."
+    f"matches the hand-enumerated divide; footprint = 51 cells = {expected_footprint_acres:.4f} ac, "
+    f"drawn hull = 54 cells = {expected_hull_acres:.4f} ac (got {compartment['zone_acres']}); "
+    f"hull-then-clip proven on a severing road and a boundary notch the naive hull bridges; "
+    f"boundary and road clips each flagged."
+)
+
+# --- 3b. THE SPARSE-ANCHOR GUARD ON THE EMBANKMENT PATH ---
+#
+# The guard that makes a hull-based floor honest for a type whose anchor
+# is one narrow watershed band. anchor = compartment_footprint_acres,
+# claim = zone_acres (the drawn hull); under
+# SPARSE_ANCHOR_MEMBER_FRACTION the zone says so on its own record.
+#
+# THE THIN FIXTURE IS A V-SHAPED WATERSHED, hand-built: two one-cell
+# arms converging on the embankment cell. A convex hull only inflates
+# over a non-convex shape, so a straight band (fixture A's staircase, 51
+# cells under a 54-cell hull, ratio 0.94) can never trip this -- a
+# BENDING valley is what can, and it is the shape the guard is for. The
+# upstream map is handed in directly, which is what watershed_cells()
+# takes; no DEM is bent to produce it.
+#
+# HAND-DERIVED. Arms (8+i, i) and (8+i, 20-i) for i in 0..10, meeting at
+# (18, 10): 21 distinct cells. In cell units (x = column edge, ry = row
+# edge downward) their extreme corners are (0,8) (21,8) (21,9) (11,19)
+# (10,19) (0,9) -- every intermediate arm corner sits EXACTLY on
+# (21,9)->(11,19) or (0,9)->(10,19) (each arm steps one column per row),
+# so the hull is that hexagon. Shoelace:
+#   |(-168) + 21 + 300 + 19 + 90 + 0| / 2 = 131 cell^2
+# Anchor/claim = 21/131 = 0.160, under the 0.2 guard -> it fires.
+WIDE_BOUNDARY = box(
+    ORIGIN_X - RESOLUTION,
+    ORIGIN_Y - 41 * RESOLUTION,
+    ORIGIN_X + 22 * RESOLUTION,
+    ORIGIN_Y + RESOLUTION,
+)
+_v_pinch = (18, A_CHANNEL)
+_v_arm_cells = [(8 + i, i) for i in range(11)] + [(8 + i, 20 - i) for i in range(11)]
+assert len(set(_v_arm_cells)) == 21, "the two arms share only the embankment cell"
+# One-step feeder adjacency along each arm, toward the pinch.
+_v_upstream = {}
+for _arm in ((8 + i, i) for i in range(11)), ((8 + i, 20 - i) for i in range(11)):
+    _chain = list(_arm)
+    for _upper, _lower in zip(_chain, _chain[1:]):
+        _v_upstream.setdefault(_lower, []).append(_upper)
+assert watershed_cells(_v_pinch, _v_upstream) == set(_v_arm_cells)
+
+_v_seed_xy = pixel_center_xy(A_DEM, 8, A_CHANNEL)
+_v_seed_lon, _v_seed_lat = transform_geom(CRS, "EPSG:4326", {"type": "Point", "coordinates": _v_seed_xy})[
+    "coordinates"
+]
+_v_seed = {
+    "rowcol": (8, A_CHANNEL),
+    "xy": _v_seed_xy,
+    "geometry_wgs84": {"type": "Point", "coordinates": (_v_seed_lon, _v_seed_lat)},
+    "blend_score": 0.8,
+    "criteria_signature": {name: 0.5 for name in EMBANKMENT_WEIGHTS},
+}
+_v_walk = {
+    "found": True,
+    "terminator": None,
+    "stations": [],
+    "pinch_index": 2,
+    "pinch_rowcol": _v_pinch,
+    "pinch_width_m": 17.5,
+    "walk_distance_m": 50.0,
+    "half_width_bound_hit": False,
+    "terminal": None,
+    "still_narrowing_at_termination": False,
+    "width_profile_min_m": 17.5,
+    "width_profile_max_m": 37.5,
+}
+sparse = build_embankment_compartment(
+    A_DEM, _v_seed, _v_walk, _v_upstream, WIDE_BOUNDARY, None, _surfaces, _screens
+)
+assert abs(sparse["compartment_footprint_acres"] - 21 * 25.0 / SQUARE_METERS_PER_ACRE) < 0.002, (
+    f"hand-derived V band 21 cells, got {sparse['compartment_footprint_acres']}"
+)
+assert abs(sparse["zone_acres"] - 131 * 25.0 / SQUARE_METERS_PER_ACRE) < 0.002, (
+    f"hand-derived hull 131 cells, got {sparse['zone_acres']}"
+)
+_sparse_ratio = sparse["compartment_footprint_acres"] / sparse["zone_acres"]
+assert _sparse_ratio < wsa.SPARSE_ANCHOR_MEMBER_FRACTION, _sparse_ratio
+assert sparse["sparse_anchor"] is True and wsa.FLAG_SPARSE_ANCHOR in sparse["flags"], (
+    "a hull vastly exceeding its band announces itself rather than reading as solid candidate ground"
+)
+# ... and stays SILENT on the dense one, which is the same code path with
+# a different shape underneath it (0.94, nowhere near the ratio).
+_dense_ratio = compartment["compartment_footprint_acres"] / compartment["zone_acres"]
+assert _dense_ratio > wsa.SPARSE_ANCHOR_MEMBER_FRACTION
+assert compartment["sparse_anchor"] is False and wsa.FLAG_SPARSE_ANCHOR not in compartment["flags"]
+# The guard rides the wire on both the feature and the narrative block --
+# it is the reason a hull-based floor is honest, so it may not be
+# internal-only.
+_sparse_feature = wsa._zone_feature_properties(
+    {
+        **sparse,
+        "id": 0, "rank": 1, "status": wsa.ZONE_STATUS_NOMINATED, "drop_reason": None,
+        "cross_type_overlaps": [], "canopy_overlap_pct": None, "road_overlap_pct": None,
+        "production_overlap_pct": None, "primary_production_area_relationship": None,
+        "production_area_relationships": [], "has_service_relationship": False,
+        "served_production_area_ids": [],
+    }
+)
+assert _sparse_feature["sparse_anchor"] is True
+assert _sparse_feature["compartment_footprint_acres"] == sparse["compartment_footprint_acres"]
+print(
+    f"3b. Sparse anchor on the embankment path: a V-shaped 21-cell band under a hand-derived "
+    f"131-cell hull reads {_sparse_ratio:.3f} and FIRES; fixture A's straight band reads "
+    f"{_dense_ratio:.3f} and stays silent. Both acreages and the guard ride the wire."
 )
 
 # --- 4 [4]. dedupe: two seeds, one pinch -> one compartment ---
@@ -595,10 +811,22 @@ print("   Retirement: the three refusal codes are absent at the attribute, AST-n
 # qualifying seed (row 24 -- the highest-blend channel cell its claim
 # window leaves above the waist) far enough above the pinch for the
 # compartment to clear the 0.1 ac floor: the staircase for a 4-row
-# span is 7+7+5+3+1 = 23 cells = 0.1421 ac. On this valley the
+# span is 7+7+5+3+1 = 23 cells = 0.1421 ac of FOOTPRINT, hulled to
+# 26 cells = 0.1606 ac (hand-derived below). On this valley the
 # excavated surface scores nothing (the floor's ~11% Horn slope is past
 # the seep taper's meaningful range at these wetness levels), so the
-# surviving compartment is also the pooled rank-1 selection.
+# channel compartment is also the pooled rank-1 selection.
+#
+# THE RESURRECTIONS ARE THE POINT OF THE HULL CHANGE AND ARE ASSERTED
+# HERE. Two off-channel compartments on the valley's outer flanks
+# measured 0.0801/0.0803 ac of watershed band and were dropped under
+# the 0.1 ac floor; their hulls measure 0.1197/0.1205 ac and they now
+# survive. That is the floor asking the right question (the walkable
+# claim) rather than a floor quietly widened -- and the read the design
+# asked for is whether a resurrection is a survey area or a sliver
+# wearing a generous hull. These two are survey areas: anchor/claim of
+# ~0.67, nowhere near the 0.2 sparse_anchor ratio. A compartment
+# genuinely too small still drops.
 
 
 def _k2_of_row(r):
@@ -611,18 +839,59 @@ A2_DEM = _dem(_valley_array(A_ROWS, A_COLS, A_CHANNEL, _k2_of_row))
 a_result = compute_water_survey_areas(A2_DEM, A_BOUNDARY)
 a_comps = a_result["zones_by_type"][SURVEY_TYPE_EMBANKMENT]
 assert a_comps, "the real blend seeds the channel and at least one compartment survives"
-assert all(z["pinch"]["rowcol"][0] in range(28, 32) and z["pinch"]["rowcol"][1] == A_CHANNEL for z in a_comps), (
-    f"every surviving compartment's embankment cell sits at the waist: "
-    f"{[z['pinch']['rowcol'] for z in a_comps]}"
+_channel_comps = [z for z in a_comps if z["seed"]["rowcol"][1] == A_CHANNEL]
+assert len(_channel_comps) == 1, "one compartment is seeded on the channel itself"
+assert _channel_comps[0]["pinch"]["rowcol"] == (28, A_CHANNEL), (
+    "the channel compartment's embankment cell sits at the waist"
 )
+
+# THE RESURRECTED FLANK COMPARTMENTS -- see the fixture note. Each
+# carries BOTH acreages, each clears the floor on the hull and would
+# not have on the band, and neither trips the sparse-anchor guard.
+_flank_comps = [z for z in a_comps if z["seed"]["rowcol"][1] != A_CHANNEL]
+assert len(_flank_comps) == 2, f"two flank compartments resurrect: {[z['id'] for z in a_comps]}"
+for zone in _flank_comps:
+    assert zone["compartment_footprint_acres"] < wsa.MIN_SURVEY_REGION_AREA_ACRES, (
+        "the band alone would not have cleared the floor -- this zone is a resurrection"
+    )
+    assert zone["zone_acres"] >= wsa.MIN_SURVEY_REGION_AREA_ACRES, "its walkable claim does"
+    assert zone["sparse_anchor"] is False, (
+        "read for sliver-with-a-generous-hull: these are anchored at ~0.67, not near the 0.2 ratio"
+    )
+# ... AND A GENUINELY TINY ONE STILL DROPS, with the reason and both
+# acreages on its record. The floor moving basis is not the floor going
+# away: the same run that resurrects two compartments drops a third.
+_floor_drops = [
+    zone
+    for zone in a_result["dropped_zones"]
+    if zone["survey_type"] == SURVEY_TYPE_EMBANKMENT
+    and zone["drop_reason"] == wsa.FLAG_BELOW_MIN_AREA
+]
+assert _floor_drops, "a compartment too small even as a hull must still be dropped on this fixture"
+for zone in _floor_drops:
+    assert zone["zone_acres"] < wsa.MIN_SURVEY_REGION_AREA_ACRES, (
+        "the judged number is the DRAWN HULL -- one rule, both types"
+    )
+    assert 0 < zone["compartment_footprint_acres"] <= zone["zone_acres"], (
+        "both acreages ride the dropped record, never one"
+    )
+    assert zone["status"] == wsa.ZONE_STATUS_DROPPED and zone["rank"] is None
+
 # INTERIOR-PINCH REGRESSION, pinned: the accepted-terminal correction
 # must not move an interior pinch by a cell or flag it -- same seed,
 # same pinch, same hand-derived acreage, terminal None, none of the
 # pinch_at_* flags, and the failure vocabulary is no_constriction plus
 # dedupe codes ONLY.
-_interior = a_comps[0]
+_interior = _channel_comps[0]
 assert _interior["seed"]["rowcol"] == (24, A_CHANNEL) and _interior["pinch"]["rowcol"] == (28, A_CHANNEL)
-assert _interior["zone_acres"] == round(23 * 25.0 / SQUARE_METERS_PER_ACRE, 4)
+# DUAL ACREAGE, both hand-derived. The footprint is the 23-cell
+# staircase; its hull is the hexagon (7,24) (14,24) (14,26) (11,29)
+# (10,29) (7,26) in cell units -- the three right-side steps sit on
+# (14,26)->(11,29) and the three left-side on (10,29)->(7,26), same
+# construction as the section-3 hull. Shoelace: |(-168) + 28 + 120 +
+# 29 + 57 + (-14)| / 2 = 26 cell^2.
+assert _interior["compartment_footprint_acres"] == round(23 * 25.0 / SQUARE_METERS_PER_ACRE, 4)
+assert _interior["zone_acres"] == round(26 * 25.0 / SQUARE_METERS_PER_ACRE, 4)
 assert _interior["pinch_terminal"] is None and _interior["still_narrowing_at_termination"] is False
 assert not any(
     flag in _interior["flags"]
@@ -660,8 +929,12 @@ for zone in floored_comps:
         continue  # dedupe drops keep their own reason -- dedupe decides existence before the floor
     assert zone["drop_reason"] == wsa.FLAG_BELOW_MIN_AREA, zone["drop_reason"]
     assert zone["zone_acres"] > 0 and zone["zone_acres"] < 1000.0, (
-        "the judged compartment acreage rides the dropped record"
+        "the judged acreage -- the DRAWN HULL, one rule for both types -- rides the dropped record"
     )
+    assert zone["compartment_footprint_acres"] > 0, (
+        "and so does the anchoring band beneath it: both acreages, never one"
+    )
+    assert zone["zone_acres"] >= zone["compartment_footprint_acres"]
     assert zone["seed_blend_score"] > 0
 floored_narrative = wsa.build_narrative_data(floored)
 assert floored_narrative["dropped_count"] == len(floored["dropped_zones"]), (
@@ -674,7 +947,7 @@ print(
 
 # --- 6 [6]. the reporting honesty split: seed score vs compartment means ---
 
-split_zone = a_comps[0]
+split_zone = _channel_comps[0]
 assert split_zone["seed_blend_score"] != split_zone["mean_suitability"], (
     "the anchor claim and the walked ground's mean differ on this fixture -- the compartment "
     "deliberately averages in its side slopes"
@@ -699,11 +972,16 @@ feature = next(
     for f in wsa.survey_areas_to_geojson(a_result["zones"])["features"]
     if f["properties"]["layer"] == "survey_zone_embankment" and f["properties"]["zone_id"] == split_zone["id"]
 )
-assert "valley compartment anchored by a" in feature["properties"]["label"]
+assert f"{split_zone['zone_acres']} ac to survey, anchored by a" in feature["properties"]["label"]
+assert (
+    f"{split_zone['compartment_footprint_acres']} ac valley compartment" in feature["properties"]["label"]
+), "the label carries BOTH acreages -- the drawn claim and the band anchoring it"
 assert f"{split_zone['seed_blend_score']}-scoring storage cell" in feature["properties"]["label"]
 assert "dam reach at the downstream end" in feature["properties"]["label"]
 assert feature["properties"]["seed_blend_score"] == split_zone["seed_blend_score"]
 assert feature["properties"]["mean_suitability"] == split_zone["mean_suitability"]
+assert feature["properties"]["compartment_footprint_acres"] == split_zone["compartment_footprint_acres"]
+assert feature["properties"]["sparse_anchor"] == split_zone["sparse_anchor"]
 print(
     f"6. Honesty split: seed {split_zone['seed_blend_score']} vs compartment mean "
     f"{split_zone['mean_suitability']} -- distinct on the record, both in the narrative block and the wire label."
