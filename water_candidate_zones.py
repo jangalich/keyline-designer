@@ -452,7 +452,7 @@ MIN_WATER_SEED_SEPARATION_METERS = 30.0
 # distance the wall has stopped being the keypoint's dam and become a
 # different site, which family 2 would nominate on its own merits anyway.
 #
-# A walk that runs out -- on distance, on the grid edge, or on the flat-tie
+# A walk that runs out -- on distance, on the grid edge, or on an interior
 # sentinel -- does NOT fall back to a partial-height wall. It reports
 # REASON_WALL_SITE_NOT_FOUND_DOWNSTREAM and the keypoint nominates nothing.
 # A shorter wall is a different structure impounding different water, and
@@ -629,11 +629,16 @@ REASON_EMPTY_AFTER_OVERLAP_TRIM = "empty_after_overlap_trim"
 REASON_KEYPOINT_EXCEEDS_CEILING = "keypoint_exceeds_ceiling"
 # The two ways the WALL-SITE WALK downstream of a keypoint can fail. Both
 # are honest empty answers, never a partial-height fallback:
-#   * ..._NOT_FOUND_DOWNSTREAM -- the walk hit the flat-tie sentinel, the
-#     grid edge, or MAX_WALL_SEARCH_DOWNSTREAM_METERS before accumulating
-#     the full reference drop. On marsh ground this is
-#     valley_delineation.py's flat-tie limitation surfacing at NOMINATION
-#     rather than later as a short stem; report it, do not fix it here.
+#   * ..._NOT_FOUND_DOWNSTREAM -- the walk hit the grid edge, a -1
+#     sentinel on nodata-walled ground, or MAX_WALL_SEARCH_DOWNSTREAM_
+#     METERS before accumulating the full reference drop. This used to
+#     fire on marsh ground as flat_tie_sentinel AT the keypoint -- the
+#     hydrology layer's flat-tie limitation surfacing at NOMINATION -- and
+#     it was reported here rather than fixed here. The fix landed where it
+#     belonged: fill_depressions() is the epsilon variant, so the walk now
+#     CROSSES a flat and a distance_bound ending on level ground is a
+#     statement about the terrain (no drop available in 150 m), not about
+#     the flow field.
 #   * ..._EXCEEDS_CEILING -- contributing area increases strictly
 #     downstream, so a wall site far enough below a keypoint can sit on a
 #     drainage the ceiling disqualifies even when the keypoint itself
@@ -1027,12 +1032,20 @@ def _find_wall_site(
                                 on a reach too gentle to give up the height.
       * 'grid_edge'          -- the -1 sentinel on a border cell: the DEM
                                 simply does not extend far enough.
-      * 'flat_tie_sentinel'  -- the -1 sentinel on an INTERIOR cell, which
-                                is valley_delineation.py's plain
-                                priority-flood leaving a filled flat with no
-                                strictly-downhill neighbour. This is the
-                                known hydrology limitation, surfacing here
-                                at nomination time.
+      * 'flat_tie_sentinel'  -- the -1 sentinel on an INTERIOR cell. Under
+                                the plain priority-flood this was the
+                                COMMON failure: a filled flat had no
+                                strictly-downhill neighbour anywhere and
+                                the walk could not take a step. Since the
+                                epsilon fill it is RARE and means something
+                                narrower -- an interior cell nodata walls
+                                off from every grid border, the one class
+                                the flood still cannot reach. The name is
+                                kept (it is on the wire and in the
+                                diagnostics) and the branch is kept: a
+                                sentinel on an interior cell is still a
+                                real thing to report, just no longer the
+                                everyday one.
       * 'nodata'             -- the walk stepped onto a cell with no
                                 elevation. A hole in the DEM is not the
                                 edge of it and not a flat, so it gets its
@@ -2155,8 +2168,9 @@ def _level_pool_narrative(zone: dict) -> dict:
     beyond the end of the traced channel reports 'unreachable_stem_end'
     with width and area absent; it must never be narrated as dry ground,
     which is a measurement it does not have. stem_upstream_length_ft says
-    how far the channel was traceable at all -- a short one is the visible
-    fingerprint of valley_delineation.py's flat-tie limitation.
+    how far the channel was traceable at all. A short one used to be the
+    visible fingerprint of valley_delineation.py's flat-tie limitation;
+    since the epsilon fill it is a statement about the channel.
     """
     pool = zone["level_pool"]
     left = zone["abutments"]["left"]

@@ -15,6 +15,7 @@ import numpy as np
 from shapely.geometry import Point, box
 
 from valley_delineation import (
+    FILL_EPSILON_METERS,
     MIN_PRIMARY_VALLEY_CONTRIBUTING_AREA_ACRES,
     VALLEY_CONFIDENCE_NOTES,
     compute_flow_accumulation,
@@ -40,8 +41,16 @@ def _dem(array: np.ndarray) -> dict:
     return {**BASE_DEM, "array": array}
 
 
-# --- fill_depressions: a single interior pit gets raised to its spill elevation ---
+# --- fill_depressions: a single interior pit gets raised JUST ABOVE its
+# --- spill elevation (the epsilon variant), never to an exact tie -------
 
+# EXPECTATION CORRECTED BY THE EPSILON-FILL BRANCH. This asserted
+# filled[1, 1] == 10.0 exactly -- the plain priority-flood's answer, and
+# precisely the tie that made the filled cell unroutable: compute_flow_
+# direction() needs a strictly positive slope, so a pit sitting AT its
+# spill got the -1 sentinel and stopped every downstream walk. The fill is
+# now Barnes' epsilon variant, so the pit lands one FILL_EPSILON_METERS
+# above the spill and drains. See test_epsilon_fill.py for the full set.
 pit = np.array(
     [
         [10.0, 10.0, 10.0],
@@ -51,9 +60,21 @@ pit = np.array(
     dtype=np.float32,
 )
 filled = fill_depressions(pit)
-assert filled[1, 1] == 10.0, f"pit should be filled to its surrounding elevation, got {filled[1, 1]}"
+assert abs(float(filled[1, 1]) - (10.0 + FILL_EPSILON_METERS)) < 1e-6, (
+    f"pit should be filled to its spill elevation plus one epsilon, got {filled[1, 1]}"
+)
+assert float(filled[1, 1]) > 10.0, "the filled pit must sit STRICTLY above its spill neighbours"
 assert filled[0, 0] == 10.0, "cells that weren't pits shouldn't be altered"
-print("fill_depressions raises an interior pit to its spill elevation.")
+# ...and the point of the increment: the pit now has a flow direction,
+# where the plain fill left it on the -1 sentinel.
+_pit_ftr, _pit_ftc = compute_flow_direction(filled, RESOLUTION)
+assert int(_pit_ftr[1, 1]) >= 0 and int(_pit_ftc[1, 1]) >= 0, (
+    f"the filled pit must route: got {(int(_pit_ftr[1, 1]), int(_pit_ftc[1, 1]))}"
+)
+print(
+    f"fill_depressions raises an interior pit to its spill elevation plus one epsilon "
+    f"({float(filled[1, 1]):.5f} m), so it routes instead of tying."
+)
 
 
 # --- compute_flow_direction: flow points toward the single lowest neighbor ---

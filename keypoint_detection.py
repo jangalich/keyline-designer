@@ -43,9 +43,11 @@ form):
   1. Profile the RAW elevation array, never the FILLED one.
      delineate_valleys() builds branches_utm from filled[r, c], and
      fill_depressions() raises every pit to its spill elevation, so a marsh
-     reads as a dead-flat plateau and any inflection detector fires on the
-     steep-to-flat transition ENTERING the fill -- an artifact of the
-     filling, not landform. Measured on a synthetic bowl: profiling raw puts
+     reads as a near-flat plateau (the epsilon fill's per-cell increment
+     tilts it by a millimetre, which routes it but does not make it
+     terrain) and any inflection detector fires on the steep-to-flat
+     transition ENTERING the fill -- an artifact of the filling, not
+     landform. Measured on a synthetic bowl: profiling raw puts
      the break at the bowl bottom where the fill-depth gate rejects it;
      profiling filled puts it at the plateau entrance with a large drop and
      zero fill depth, which would sail through every gate. Flow direction
@@ -223,9 +225,10 @@ def build_upstream_map(
     This is the exact inverse of the downstream flow field -- flow direction
     says where a cell drains TO; this says what drains INTO a cell -- and is
     what the upstream stem walk (highest-accumulation feeder each step) is
-    traced over. Cells with flow_to_row < 0 (grid-edge outlets / flat-plateau
-    ties, compute_flow_direction()'s -1 sentinel) have no downstream target
-    and contribute no upstream edge.
+    traced over. Cells with flow_to_row < 0 (grid-edge outlets, or cells
+    nodata walls off from the border -- compute_flow_direction()'s -1
+    sentinel, which since the epsilon fill no longer appears on interior
+    flats) have no downstream target and contribute no upstream edge.
     """
     rows, cols = flow_to_row.shape
     upstream: dict[tuple[int, int], list[tuple[int, int]]] = {}

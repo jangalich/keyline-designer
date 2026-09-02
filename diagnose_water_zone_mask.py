@@ -481,8 +481,9 @@ def main(
                     f"      station {station['station_index']} target {station['offset_upstream_m']}m: "
                     f"{station['status'].upper()} -- the traced stem ends at "
                     f"{station['along_stem_distance_m']}m. NOT a dry cross-section: there is no channel "
-                    "here to measure. (Short stems are valley_delineation.py's flat-tie limitation "
-                    "surfacing -- flagged, not fixed here.)"
+                    "here to measure. (Short stems used to be valley_delineation.py's flat-tie "
+                    "limitation surfacing; since the epsilon fill routes filled flats, a short stem is "
+                    "a statement about the channel.)"
                 )
                 continue
             print(
@@ -532,8 +533,9 @@ def main(
                 f"found only {outcome['wall_drop_m']}m of the required "
                 f"{POOL_REFERENCE_HEIGHT_METERS}m before "
                 f"'{outcome['wall_walk_end_reason']}'"
-                + ("  (flat_tie_sentinel is valley_delineation.py's flat-tie limitation surfacing -- "
-                   "a filled depression is unroutable under strict-slope D8; flagged, not fixed here)"
+                + ("  (flat_tie_sentinel = the -1 sentinel on an INTERIOR cell. Since the epsilon "
+                   "fill this no longer means 'filled flat'; it means a cell nodata walls off from "
+                   "every grid border -- rare, and worth looking at the DEM for)"
                    if outcome["wall_walk_end_reason"] == "flat_tie_sentinel" else "")
             )
     print(

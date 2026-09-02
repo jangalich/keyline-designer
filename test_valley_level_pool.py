@@ -71,6 +71,7 @@ import numpy as np
 
 from keypoint_detection import build_upstream_map
 from valley_delineation import (
+    FILL_EPSILON_METERS,
     compute_flow_accumulation,
     compute_flow_direction,
     fill_depressions,
@@ -367,9 +368,18 @@ print(
 # a few meters downstream of the anchor. The priority-flood dams the whole
 # reach behind it: the only escape is back up the channel to the grid
 # border at row 0, where the channel floor is z(0, 20) = 100.0, so every
-# enclosed cell below 100.0 is raised to exactly 100.0. (Verified below on
-# row 30: filled reads 100.0 across columns 17-23 where raw reads
-# 100, 99, 98, 97, 98, 99, 100.)
+# enclosed cell below 100.0 is raised to 100.0 PLUS the epsilon fill's own
+# increments -- 100.03 on row 30, thirty D8 hops in from the row-0 outlet.
+# (Verified below on row 30: filled reads a uniform 100.03 across columns
+# 17-23 where raw reads 100, 99, 98, 97, 98, 99, 100.)
+#
+# THE 100.0 -> 100.03 MOVE IS THE EPSILON FILL, and it changes nothing
+# about what this half of the fixture tests. The raw run's numbers below
+# are IDENTICAL to what they were under the plain fill -- which is the
+# point: the elevation tests read raw, so a change in the filled surface
+# must be invisible to them. Only the deliberately-wrong CONTRAST run
+# (which passes the filled array AS the elevation source) moves, and it
+# moves by exactly the accumulated 0.03 m.
 #
 # The RAW run (the real one) must be BLIND to all of that -- its answers
 # must match fixture 1's exactly, because the raw terrain is unchanged:
@@ -379,47 +389,59 @@ print(
 # The CONTRAST run passes a dem whose 'array' IS the filled array -- i.e.
 # exactly what this module would report if the elevation test read filled
 # -- and must differ on every one of those numbers:
-#     anchor reads 100.0, waterline 102.5.
-#     Abutment: filled row 30 is 100.0 out to |k| = 3, then raw takes over
-#       at 101.0 (k=4) and 102.0 (k=5); the first sample at or above 102.5
+#     anchor reads 100.03, waterline 102.53.
+#     Abutment: filled row 30 is 100.03 out to |k| = 3, then raw takes over
+#       at 101.0 (k=4) and 102.0 (k=5); the first sample at or above 102.53
 #       is k = 6 (z = 103.0) -> 30.0 m each side, 13 band cells.
-#     Station 0: below 102.5 for |k| <= 5 -> 11 samples -> 55.0 m wide;
-#       depths 2.5 for |k| <= 3 (7 samples), 1.5 at |k| = 4, 0.5 at
-#       |k| = 5 -> (2.5*7 + 1.5*2 + 0.5*2) * 5 = 21.5 * 5 = 107.5 m^2.
+#     Station 0: below 102.53 for |k| <= 5 -> 11 samples -> 55.0 m wide;
+#       depths 2.53 for |k| <= 3 (7 samples), 1.53 at |k| = 4, 0.53 at
+#       |k| = 5 -> (2.53*7 + 1.53*2 + 0.53*2) * 5 = 21.62 * 5 = 108.1 m^2.
 #
 # A pool drawn on the filled array would claim a 55 m wide flooded
 # cross-section where the real ground holds 25 m: that is the bug the raw
 # elevation test exists to prevent, and it is the same fix
 # keypoint_detection.py's own #1 makes for the same reason.
 #
-# 4b. CONNECTIVITY COMES FROM THE FILLED FLOW FIELD -- AND ITS REAL LIMIT.
+# 4b. CONNECTIVITY COMES FROM THE FILLED FLOW FIELD -- AND IT NOW CROSSES
+#     A DEPRESSION.
 #
 # The walk runs over the upstream map inverted from the flow direction
 # computed on the FILLED array, which is what makes it a well-defined,
 # acyclic, terminating walk at all.
 #
-# What that does NOT buy, in this repository, is crossing a depression.
-# valley_delineation.fill_depressions() is the PLAIN priority-flood (no
-# epsilon), so it raises a pit to EXACTLY its spill elevation, and
-# compute_flow_direction() requires a STRICTLY positive slope -- so every
-# filled cell ties with the neighbour it should drain to and gets the -1
-# "no downhill neighbour" sentinel. That is the flat-tie limitation
-# valley_delineation.py's own module docstring already states, and it
-# means a pit sitting ON the channel TRUNCATES the backwater at the pit
-# rather than being crossed.
+# THIS TEST WAS A TRIPWIRE, AND IT FIRED. Its previous form asserted the
+# OPPOSITE of what it asserts now, deliberately: valley_delineation.
+# fill_depressions() was the PLAIN priority-flood, so it raised a pit to
+# EXACTLY its spill elevation, compute_flow_direction() requires a
+# STRICTLY positive slope, and the filled pit therefore tied with the
+# neighbour it should drain to and took the -1 sentinel. A pit sitting ON
+# the channel TRUNCATED the backwater at the pit instead of being crossed.
+# The old expectation pinned that truncation -- "the backwater stops at
+# row 25" -- and said in as many words that if valley_delineation.py ever
+# grew an epsilon fill this test should fail LOUDLY and its expectations
+# be corrected. The epsilon-fill branch landed; it failed loudly; these
+# are the corrected expectations, and the firing is the design working,
+# not a regression to silence.
 #
-# Fixture: the V-valley with (24, 20) dug from 97.6 to 90.0, six rows
-# upstream of the anchor. Priority-flood raises it to 97.5 -- the
-# elevation of its own lowest downstream neighbour (25, 20) -- an exact
-# tie, so (24, 20) becomes a flow sink and the walk from the anchor stops
-# at row 25.
+# Fixture, unchanged: the V-valley with (24, 20) dug from 97.6 to 90.0,
+# six rows upstream of the anchor.
 #
-# This is asserted here rather than worked around: it is a pre-existing
-# property of the hydrology layer, not of this module, and pinning it
-# means that if valley_delineation.py ever grows an epsilon fill or a
-# flat-resolution step, this test fails LOUDLY and the (already correct)
-# raw-vs-filled split here starts doing visible work instead of silently
-# being untestable.
+#   BEFORE (plain fill): filled[24, 20] == 97.5 == filled[25, 20], an
+#   exact tie; flow_to_row[24, 20] == -1; the pit was a flow sink; the
+#   backwater from the anchor at (30, 20) reached only row 25, 41 cells.
+#
+#   AFTER (epsilon fill): filled[24, 20] == 97.501, one epsilon ABOVE its
+#   spill neighbour (25, 20) at 97.5; the pit routes to (25, 20); the
+#   backwater crosses it and reaches row 6 -- 65 cells, which is EXACTLY
+#   the count and extent the pit-free V-valley of fixture 1 produces
+#   (see its own hand-computed 65). The dug pit no longer truncates
+#   anything, which is the whole point.
+#
+# THE RAW-VS-FILLED SPLIT NOW DOES VISIBLE WORK ON THE BACKWATER TOO, as
+# the old note predicted it would: (24, 20) is in the pool because the
+# FILLED field connects it, while every elevation the pool reports at that
+# cell still comes from the RAW 90.0 m -- connectivity from one array,
+# elevation truth from the other, on the same cell, in the same result.
 # =====================================================================
 R_SIZE = 40
 _r_array = _v_array.copy()
@@ -427,7 +449,14 @@ _r_array[31, 14:27] = 101.0
 R_DEM = _dem(_r_array)
 R_FILLED, R_FTR, R_FTC, R_ACC, R_UP = _hydrology(R_DEM)
 
-assert list(R_FILLED[30, 17:24]) == [100.0] * 7, list(R_FILLED[30, 17:24])
+# The dammed reach fills to the row-0 outlet's 100.0 plus 30 epsilon
+# increments -- one per D8 hop back up the channel -- so row 30 reads a
+# uniform 100.03. Uniform ACROSS the row (all seven cells are the same hop
+# count from the outlet) but strictly above row 29, which is what routes it.
+assert all(abs(float(_z) - 100.03) < 1e-6 for _z in R_FILLED[30, 17:24]), list(R_FILLED[30, 17:24])
+assert float(R_FILLED[30, 20]) > float(R_FILLED[29, 20]) > float(R_FILLED[28, 20]), (
+    "the filled reach slopes back toward the row-0 outlet, one epsilon per row"
+)
 assert list(_r_array[30, 17:24]) == [100.0, 99.0, 98.0, 97.0, 98.0, 99.0, 100.0], list(_r_array[30, 17:24])
 
 r_pool = delineate_level_pool(R_DEM, R_FILLED, R_FTR, R_FTC, R_ACC, R_UP, V_ANCHOR)
@@ -438,16 +467,38 @@ assert r_pool["abutments"]["right"]["lateral_distance_m"] == 15.0
 assert len(r_pool["band_cells"]) == 7
 # Station 0 (the anchor) reads exactly the straight-V numbers, because the
 # raw terrain at the dam line is unchanged. Stations 1 and 2 come back
-# UNREACHABLE, and that is the correct answer rather than a regression:
-# the transverse ridge makes the priority-flood raise the whole reach to a
-# flat 100.0, every cell ties with its neighbour, and this repo's
-# strictly-positive-slope D8 hands them all the -1 sentinel -- so there is
-# no traced stem above the anchor at all (stem_upstream_length_m == 0.0).
+# UNREACHABLE, and that is still the correct answer -- but the REASON
+# CHANGED WITH THE EPSILON FILL and is worth stating precisely, because
+# the old one no longer exists.
+#
+#   OLD REASON (plain fill). The whole dammed reach was raised to a flat
+#   100.0, every cell tied with its neighbour, and the strictly-positive-
+#   slope D8 handed them all the -1 sentinel. There was no flow field in
+#   the reach at all: stem_cells was just [(30, 20)], the anchor alone.
+#
+#   NEW REASON (epsilon fill). The reach now routes -- and it routes
+#   BACKWARD relative to the raw channel. The dam's only escape is back up
+#   the channel to the row-0 grid border, so the epsilon increments slope
+#   the filled surface NORTHWARD and (30, 20) drains to (29, 20) drains to
+#   (28, 20). The anchor therefore sits at the traced stem's UPSTREAM END
+#   (stem_cells == [(28, 20), (29, 20), (30, 20)], anchor_stem_index == 2)
+#   and there is still nothing above it: stem_upstream_length_m == 0.0.
+#
+# That reversal is not a defect. The filled field is a CONNECTIVITY model,
+# not terrain: behind a dam with no downstream exit, "which way does water
+# leave" genuinely is back the way it came. It is also exactly why the
+# elevation tests read raw -- and this fixture's raw numbers, above, did
+# not move by so much as a millimetre.
+#
 # Under the retired straight-axis design these two stations reported
-# fabricated widths off a fitted direction; they now report the absence of
-# a channel to measure. This is valley_delineation.py's flat-tie
-# limitation surfacing honestly, FLAGGED not fixed.
+# fabricated widths off a fitted direction; they still report the absence
+# of a channel to measure.
 assert r_pool["stem_upstream_length_m"] == 0.0, r_pool["stem_upstream_length_m"]
+assert r_pool["stem_cells"] == [(28, 20), (29, 20), (30, 20)], r_pool["stem_cells"]
+assert r_pool["anchor_stem_index"] == 2, r_pool["anchor_stem_index"]
+assert (int(R_FTR[30, 20]), int(R_FTC[30, 20])) == (29, 20), (
+    "the epsilon fill routes the dammed reach back toward the row-0 outlet -- the anchor drains NORTH"
+)
 assert r_pool["stations"][0]["status"] == STATION_MEASURED
 assert (r_pool["stations"][0]["flooded_width_m"], r_pool["stations"][0]["flooded_cross_section_area_m2"]) == (
     25.0, 32.5
@@ -464,23 +515,24 @@ for _s in r_pool["stations"][1:]:
 _r_dem_filled = dict(R_DEM)
 _r_dem_filled["array"] = R_FILLED
 r_pool_filled = delineate_level_pool(_r_dem_filled, R_FILLED, R_FTR, R_FTC, R_ACC, R_UP, V_ANCHOR)
-assert r_pool_filled["anchor_elevation_m"] == 100.0, r_pool_filled["anchor_elevation_m"]
-assert r_pool_filled["waterline_elevation_m"] == 102.5
+assert abs(r_pool_filled["anchor_elevation_m"] - 100.03) < 1e-6, r_pool_filled["anchor_elevation_m"]
+assert abs(r_pool_filled["waterline_elevation_m"] - 102.53) < 1e-6
 assert r_pool_filled["abutments"]["left"]["lateral_distance_m"] == 30.0
 assert r_pool_filled["abutments"]["right"]["lateral_distance_m"] == 30.0
 assert len(r_pool_filled["band_cells"]) == 13
-assert (
-    r_pool_filled["stations"][0]["flooded_width_m"],
-    r_pool_filled["stations"][0]["flooded_cross_section_area_m2"],
-) == (55.0, 107.5), r_pool_filled["stations"][0]
+assert r_pool_filled["stations"][0]["flooded_width_m"] == 55.0, r_pool_filled["stations"][0]
+assert abs(r_pool_filled["stations"][0]["flooded_cross_section_area_m2"] - 108.1) < 1e-6, (
+    r_pool_filled["stations"][0]
+)
 print(
     "Test 4a -- the elevation tests read RAW: behind a transverse ridge the priority-flood raises the "
-    "whole reach to 100.0 m, but the real run still reports the raw anchor (97.0 m), raw abutments "
-    "(15.0 m each side) and a raw 25.0 m station-0 width. Reading the FILLED array instead would claim a "
-    "100.0 m anchor, 30.0 m abutments and a 55.0 m flooded width at the dam line -- more than double the "
-    "real ground. Stations 1 and 2 correctly report unreachable_stem_end (the flat-filled reach leaves no "
-    "traceable stem above the anchor) rather than the fabricated widths the retired straight-axis design "
-    "produced there."
+    "whole reach to 100.03 m, but the real run still reports the raw anchor (97.0 m), raw abutments "
+    "(15.0 m each side) and a raw 25.0 m station-0 width -- not one of those numbers moved when the fill "
+    "grew its epsilon. Reading the FILLED array instead would claim a 100.03 m anchor, 30.0 m abutments "
+    "and a 55.0 m flooded width at the dam line -- more than double the real ground. Stations 1 and 2 "
+    "still report unreachable_stem_end, now because the epsilon fill routes the dammed reach BACKWARD to "
+    "the row-0 outlet and leaves the anchor at the stem's upstream end, rather than because the reach had "
+    "no flow field at all."
 )
 
 _p_array = _v_array.copy()
@@ -489,22 +541,33 @@ P_DEM = _dem(_p_array)
 P_FILLED, P_FTR, P_FTC, P_ACC, P_UP = _hydrology(P_DEM)
 
 assert P_FILLED[24, 20] > _p_array[24, 20], "precondition: the priority-flood must actually raise the pit"
-assert abs(float(P_FILLED[24, 20]) - 97.5) < 1e-6, float(P_FILLED[24, 20])
-assert abs(float(P_FILLED[25, 20]) - 97.5) < 1e-6, "the pit is raised to EXACTLY its downstream neighbour"
-assert int(P_FTR[24, 20]) == -1, (
-    "the filled pit ties with its spill neighbour, so compute_flow_direction() gives it the -1 "
-    "no-downhill-neighbour sentinel -- the flat-tie limitation this test pins"
+assert abs(float(P_FILLED[25, 20]) - 97.5) < 1e-6, float(P_FILLED[25, 20])
+assert abs(float(P_FILLED[24, 20]) - (97.5 + FILL_EPSILON_METERS)) < 1e-9, (
+    "the pit is raised to its spill neighbour PLUS one epsilon -- not to an exact tie with it, which is "
+    f"what used to strand it: {float(P_FILLED[24, 20])}"
+)
+assert (int(P_FTR[24, 20]), int(P_FTC[24, 20])) == (25, 20), (
+    "the filled pit now sits strictly above (25, 20) and drains into it -- where the plain fill left it "
+    f"tied and gave it the -1 sentinel. Got {(int(P_FTR[24, 20]), int(P_FTC[24, 20]))}"
 )
 
 p_pool = delineate_level_pool(P_DEM, P_FILLED, P_FTR, P_FTC, P_ACC, P_UP, V_ANCHOR)
 _p_rows = sorted({r for r, _c in p_pool["pool_cells"]})
-assert _p_rows[0] == 25, (
-    f"TEST 4b: a filled pit is an unrouted flat, so the backwater stops at row 25 (one below the pit); "
-    f"got {_p_rows[0]}. If this now reads 6, valley_delineation.py grew an epsilon/flat-resolution fill "
-    "-- update this expectation, and note the raw-vs-filled elevation split above now does visible work "
-    "on the backwater too."
+assert _p_rows[0] == 6, (
+    f"TEST 4b: the epsilon fill routes the pit, so the backwater CROSSES it and reaches row 6 -- the same "
+    f"extent the pit-free V-valley of fixture 1 reaches; got {_p_rows[0]}. This assertion read 25 under "
+    "the plain fill, when the pit was an unrouted flat that truncated the walk."
 )
-assert (24, 20) not in p_pool["pool_cells"], "the sink cell itself is not reachable from downstream"
+assert (24, 20) in p_pool["pool_cells"], (
+    "the pit cell is now reachable from downstream: it drains to (25, 20) instead of being a sink"
+)
+assert len(p_pool["pool_cells"]) == len(v_pool["pool_cells"]) == 65, (
+    f"digging a 7.6 m pit into the channel no longer changes the backwater at all: "
+    f"{len(p_pool['pool_cells'])} vs the pit-free {len(v_pool['pool_cells'])}"
+)
+# CONNECTIVITY FROM FILLED, ELEVATION FROM RAW -- on the pit cell itself.
+assert float(_p_array[24, 20]) == 90.0
+assert float(P_FILLED[24, 20]) > 97.5
 # Connectivity is EXACTLY what the filled flow field says: every pool cell
 # reaches the anchor by walking the filled flow direction arrays.
 for _cell in p_pool["pool_cells"]:
@@ -518,11 +581,12 @@ for _cell in p_pool["pool_cells"]:
     assert _walk == V_ANCHOR, f"TEST 4b: pool cell {_cell} never reaches the anchor"
 print(
     f"Test 4b -- connectivity comes from the FILLED flow field: every one of the {len(p_pool['pool_cells'])} "
-    "pool cells drains to the anchor under those exact arrays. The pit at (24, 20) fills to its 97.5 m "
-    "spill elevation -- an EXACT tie with (25, 20) -- so this repo's strictly-positive-slope D8 marks it a "
-    f"sink and the backwater stops at row {_p_rows[0]} rather than crossing it. That is "
-    "valley_delineation.py's documented flat-tie limitation, pinned here so an epsilon fill would surface "
-    "it loudly."
+    f"pool cells drains to the anchor under those exact arrays. The pit at (24, 20) now fills to "
+    f"{float(P_FILLED[24, 20]):.4f} m -- one epsilon ABOVE its 97.5 m spill neighbour (25, 20), not tied "
+    f"with it -- so it routes, the backwater CROSSES it and reaches row {_p_rows[0]}, and the pool is the "
+    f"same {len(p_pool['pool_cells'])} cells the pit-free valley gives. This test was pinned to the old "
+    "truncation (stops at row 25) precisely so the epsilon fill would fail it loudly; it did, and these "
+    "are the corrected expectations. The pit cell's elevation still reads its RAW 90.0 m."
 )
 
 
