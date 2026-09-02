@@ -573,7 +573,12 @@ def _format_water_survey_areas_summary(water_narrative: Optional[dict]) -> str:
     honesty-split sentence -- the SEED's blend score (the anchor claim)
     beside the compartment's own criterion means (the walked ground,
     which deliberately includes low-scoring side slopes and the wall
-    reach). Prose may only claim what a criterion actually scored.
+    reach), plus the FILL CLAIM as its own sentence -- the catchment at
+    the compartment's dam reach and the drainage band scored on it,
+    which is a different question from either of those two and is
+    reported apart from both so a compartment can honestly read as good
+    ground with no water above it. Prose may only claim what a
+    criterion actually scored.
     _format_water_candidate_zones_summary() above remains for the
     demoted layer's narrative shape and is no longer called on the
     pipeline path."""
@@ -632,7 +637,8 @@ def _format_water_survey_areas_summary(water_narrative: Optional[dict]) -> str:
         lines.append(
             f"Selected for downstream planning: zone {selection['selected_zone_id']} "
             f"({selection['selected_survey_type']}-type) -- the two types pooled on each type's own "
-            "score (embankment by seed blend, excavated by member-mean suitability; a provisional "
+            "score (embankment by its compartment rank score -- seed blend combined with the "
+            "catchment at its dam reach -- excavated by member-mean suitability; a provisional "
             "selection rule awaiting tuning against the next real run)."
         )
 
@@ -657,6 +663,25 @@ def _format_water_survey_areas_summary(water_narrative: Optional[dict]) -> str:
                 "includes low-scoring side slopes and the wall reach, that is its job -- are "
                 f"{criteria_clause} (compartment mean {region['mean_suitability']}, max "
                 f"{region['max_suitability']})."
+            )
+            # THE FILL CLAIM, its own sentence. The anchor claim above
+            # says whether the storage ground is any good; this says
+            # whether water arrives to fill it, and the two are
+            # reported apart precisely so the report can state the
+            # uncomfortable combination -- good ground, no catchment --
+            # rather than average it away into the rank.
+            lines.append(
+                f"WHAT WOULD FILL IT: {region['pinch_catchment_acres']} acres of catchment drain "
+                f"through the dam reach, scoring {region['pinch_drainage_score']} on the drainage "
+                f"band (0 below half an acre -- too little to refill a pond -- rising to full "
+                f"credit at 2 acres, and 0 again above the "
+                f"{region['catchment_ceiling_acres']}-acre ceiling, where a pond would need an "
+                f"engineered spillway). This is measured AT THE PINCH CELL, which is the outlet of "
+                f"the catchment this compartment would impound -- not at the seed, whose own "
+                f"drainage says only whether the storage ground sits in a channel. Rank score "
+                f"{region['compartment_rank_score']} combines the two claims at equal weight, a "
+                f"provisional rule: read the seed blend and the drainage score, not just the "
+                f"composite."
             )
             # The terminal-pinch caveat (accepted, disclosed): a dam
             # reach at the property line / an existing road / the walk

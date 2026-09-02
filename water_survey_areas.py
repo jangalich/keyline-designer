@@ -6,9 +6,12 @@ weighted-overlay suitability surfaces -- general areas worth surveying for
 a farm water system, anchored to NRCS Agriculture Handbook 590's two pond
 types:
 
-    EMBANKMENT-type -- a small dam across a drainageway. Wants real (but
-        bounded) catchment, a moderate valley grade, water-holding soil,
-        and locally wet ground.
+    EMBANKMENT-type -- a small dam across a drainageway. Wants a
+        moderate valley grade, water-holding soil, and locally wet
+        ground for its STORAGE reach; real (but bounded) catchment
+        above its DAM reach. Those are two questions about two
+        different cells, and the machinery now asks them separately --
+        see WHERE CATCHMENT IS MEASURED below.
     EXCAVATED-type -- a dugout in wet, flat ground. Wants wetness (high
         topographic wetness, real natural depressions), water-holding
         soil, flat ground, and only a mild preference for run-on.
@@ -89,6 +92,32 @@ the cross-type agreement report. The diagnostic's instruments
 (threshold comparison, isobands, the excavated interrogation) keep
 printing every run so each decision remains evidence-checked rather
 than trusted forward.
+
+WHERE CATCHMENT IS MEASURED, AND WHY IT MOVED. Contributing area is not
+an embankment SEEDING criterion. It was -- at 0.30, the blend's largest
+weight and its only externally anchored one (AH-590, NRCS CPS 378, PA
+Ch. 105) -- and on the reference property it was ANTI-CORRELATED with
+producing a survey area at all: every high-drainage seed died at
+no_constriction or the acreage floor, and every surviving zone carried
+drainage 0.000. The cause was a QUESTION MISMATCH. Under the compartment
+construction the seed is the STORAGE anchor, and a cell already sitting
+in an established drainageway is at the valley's narrow point, so its
+downstream walk finds only widening. What fills a pond is the catchment
+ABOVE the compartment, delivered through the dam reach.
+
+So the band moved rather than being deleted, with its constants
+untouched: it is scored at the PINCH CELL of an assembled compartment
+(compartment_pinch_catchment()), which by construction is the outlet of
+the catchment that compartment would impound. The seeding blend
+renormalized to slope/soil/TWI, and a compartment is now RANKED on both
+claims -- the seed's blend (good storage ground?) combined with the
+pinch cell's drainage score (water above it?) -- reported separately
+everywhere so neither hides inside the composite. The 20-acre ceiling
+does double duty: still a hard gate on the nomination mask, and now also
+a compartment-level disqualifier (a pinch sits downstream of its gated
+seed, so it can carry more -- REASON_CATCHMENT_EXCEEDS_CEILING). The
+EXCAVATED type's per-cell drainage_runon criterion is untouched by all
+of this: a dugout has no pinch.
 
 THE TWO SURFACES ARE KEPT SEPARATE END TO END. Each is a per-cell 0-1
 score, a weighted blend of classed criteria (weights sum to 1.0 per type,
@@ -683,6 +712,18 @@ DEPRESSION_FULL_CREDIT_METERS = 0.5
 #   ceiling, then a HARD ZERO above it (the ceiling is both a gate and
 #   this band's cliff -- a pond must not demand engineered spillways).
 # v1 prior, literature-informed, TUNE FROM FIRST RUN.
+#
+# THE BAND DID NOT MOVE. THE CELL IT IS MEASURED AT DID. These three
+# numbers (0.5 ac ramp, 2 ac plateau, the 20 ac ceiling) are the only
+# externally anchored constants in the embankment blend -- AH-590's
+# fill-vs-flood guidance, NRCS CPS 378's spillway line, PA Chapter 105's
+# small-dam threshold -- and NOTHING HERE IS RETUNED BY THE CHANGE THAT
+# MOVED THE MEASUREMENT POINT. What moved: the band used to score
+# contributing area AT THE SEED CELL as one of four SEEDING criteria;
+# it now scores contributing area AT THE PINCH CELL of an assembled
+# compartment. See EMBANKMENT_WEIGHTS's own note for the finding that
+# forced the move, and compartment_pinch_catchment() for where it is
+# read now.
 EMBANKMENT_DRAINAGE_MIN_ACRES = 0.5
 EMBANKMENT_DRAINAGE_FULL_CREDIT_ACRES = 2.0
 
@@ -797,15 +838,59 @@ MIN_SOIL_COVERAGE_FRACTION = 0.3
 # v1 priors, literature-informed (AH590's relative emphasis per pond
 # type), TUNE FROM FIRST RUN. All CONFIGURABLE.
 
-# Embankment-type: catchment is the defining requirement of a dam across
-# a drainageway (0.30); valley grade decides whether a dam stores
-# anything (0.25); soil decides whether the pool holds (0.25); TWI
-# corroborates that water actually converges there (0.20).
+# Embankment-type SEEDING blend: valley grade decides whether a dam
+# stores anything (0.36); soil decides whether the pool holds (0.36);
+# TWI corroborates that water converges on this ground (0.28). THREE
+# criteria, not four -- see below.
+#
+# DRAINAGE AREA LEFT THIS BLEND, AND THE REASON IS A MEASURED FINDING,
+# not a change of mind about catchment. The drainage-area criterion
+# carried the highest weight here (0.30) and was the only criterion in
+# it with real external anchoring (AH-590's fill-vs-flood guidance,
+# NRCS CPS 378, PA Chapter 105). On the reference property it was
+# ANTI-CORRELATED with producing a survey area:
+#
+#   * every high-drainage seed died -- seed-ladder ranks 1-5 carried
+#     drainage 0.740-1.000 and every one of them failed either
+#     no_constriction or the acreage floor;
+#   * every surviving zone carried drainage 0.000 -- all of them
+#     off-channel, slope- or TWI-led, under both boundaries;
+#   * and the user confirmed the zero-drainage zones are ground they
+#     would actually walk to survey for a pond.
+#
+# THE CAUSE IS A QUESTION MISMATCH, NOT A BAD CRITERION. Drainage was
+# measured AT THE SEED, and under the compartment construction the seed
+# is the STORAGE ANCHOR -- the ground the pool would sit on. A cell
+# already sitting in an established drainageway is at the valley's
+# narrow point by definition, so its downstream walk finds only
+# widening and dies at no_constriction. What actually fills a pond is
+# the catchment ABOVE the compartment, delivered through the dam reach.
+# The criterion was asking the right question of the wrong cell.
+#
+# So the band moved rather than being deleted: it is now a
+# PER-COMPARTMENT measurement taken AFTER the pinch is found, scored on
+# the SAME band and the SAME constants at the PINCH CELL -- which is,
+# by construction, the outlet of the catchment the compartment would
+# impound. See compartment_pinch_catchment() and
+# EMBANKMENT_COMPARTMENT_RANK_WEIGHTS.
+#
+# THESE THREE WEIGHTS ARE DERIVED BY RENORMALIZATION, NOT BY TUNING.
+# The retired blend's slope 0.25 / soil 0.25 / twi 0.20 sum to 0.70;
+# each divided by 0.70 is 0.3571 / 0.3571 / 0.2857, and 2 dp is the
+# convention every weight in this module is written at. Two of the three
+# round up, so the third must round DOWN for the sum to stay exactly
+# 1.0: TWI pays 0.0057 of rounding and reads 0.28 rather than 0.29.
+# That is the only judgement in these numbers, and it is an arithmetic
+# one. NOTHING
+# ELSE WAS RETUNED IN THIS BRANCH ON PURPOSE: retuning the survivors in
+# the same change that removed a criterion would confound the two
+# effects and leave no way to read which did what. The seed ladder this
+# branch's runs print measures the new three-criterion distribution;
+# the next branch retunes against it. CONFIGURABLE.
 EMBANKMENT_WEIGHTS = {
-    "drainage_area": 0.30,
-    "slope": 0.25,
-    "soil": 0.25,
-    "twi": 0.20,
+    "slope": 0.36,
+    "soil": 0.36,
+    "twi": 0.28,
 }
 
 # Excavated-type: wetness IS the siting question for a dugout (0.35);
@@ -950,6 +1035,23 @@ SUITABILITY_THRESHOLD = 0.5
 # branch the ladder is measuring. THE RE-DECISION IS THE NEXT BRANCH'S,
 # against the ladder this branch's runs produce.
 #
+# ITS MEANING SHIFTED AGAIN, AND IT IS AGAIN DELIBERATELY NOT RETUNED.
+# The blend this number scores is no longer the same blend: drainage
+# area left the seeding criteria entirely and slope/soil/TWI were
+# renormalized to 0.36/0.36/0.28 (see EMBANKMENT_WEIGHTS's note for the
+# anti-correlation finding that moved it). A cell's seed score is
+# therefore a DIFFERENT NUMBER on the same 0-1 scale than it was last
+# run, and every band edge below has moved underneath this constant --
+# the OFF-CHANNEL ARCHETYPE that used to cap at 0.375 by arithmetic now
+# scores its slope/soil/TWI merits outright, so scores rise across the
+# board and 0.30 admits proportionally more ground than it did.
+#
+# 0.30 STAYS PUT ANYWAY, for exactly the reason it stayed put through
+# the TWI recalibration: the ladder is the instrument that measures a
+# floor, and a floor cannot also be an output of the branch whose
+# surface the ladder is measuring. THIS BRANCH MEASURES THE NEW
+# DISTRIBUTION; THE NEXT BRANCH DECIDES THE FLOOR against it.
+#
 # v1 prior. TUNE FROM EVIDENCE: diagnose_water_survey_areas.py prints
 # the SEED LADDER (every seed in blend-descending order with its
 # outcome) and the BANDED SUMMARY (0.30-0.35 / 0.35-0.40 / 0.40-0.45 /
@@ -1009,6 +1111,39 @@ RIDGE_WALK_MAX_HALF_WIDTH_METERS = 100.0
 # earlier, before assembly, on the same keep-the-higher-blend rule).
 # CONFIGURABLE.
 COMPARTMENT_DUPLICATE_OVERLAP_FRACTION = 0.5
+
+# HOW A COMPARTMENT RANKS: the two claims a compartment makes, weighted.
+#
+#   seed_blend       THE ANCHOR CLAIM -- is the storage ground any good?
+#                    (the seed's own slope/soil/TWI blend)
+#   pinch_drainage   THE FILL CLAIM -- is there water above it?
+#                    (drainage_band_score() at the compartment's PINCH
+#                    CELL, i.e. the catchment the dam would impound)
+#
+# A pond needs BOTH and neither substitutes for the other: suitable
+# storage ground with no catchment above it is a dry hole, and a large
+# catchment delivered onto ground that cannot hold a pool is a
+# spillway. Ranking on the anchor claim alone -- what this pipeline did
+# until the drainage criterion moved to the pinch -- could not see the
+# second question at all, which is precisely how a parcel's whole
+# surviving set came to carry drainage 0.000.
+#
+# EQUAL WEIGHT IS A v1 PRIOR AND NOTHING MORE. There is no evidence yet
+# that the two claims deserve the same say; equal weight is the honest
+# starting position when neither has earned dominance, the same posture
+# WETNESS_TWI_SUBWEIGHT takes for the same reason. The ladder this
+# branch prints -- every compartment's seed blend, pinch catchment and
+# drainage score side by side with its outcome -- is what retunes this.
+# The two inputs are REPORTED SEPARATELY everywhere the composite
+# appears, so neither claim can hide inside the mean. CONFIGURABLE.
+EMBANKMENT_COMPARTMENT_RANK_WEIGHTS = {
+    "seed_blend": 0.5,
+    "pinch_drainage": 0.5,
+}
+_rank_weight_sum = sum(EMBANKMENT_COMPARTMENT_RANK_WEIGHTS.values())
+assert math.isclose(_rank_weight_sum, 1.0, abs_tol=1e-9), (
+    f"compartment ranking weights must sum to 1.0, got {_rank_weight_sum}"
+)
 
 
 # --- survey-zone grouping (the closing over extracted regions) ------------
@@ -1236,11 +1371,39 @@ every terminal pinch -- carried explicitly anyway so the disclosure is
 a readable property, not an inference): the valley was still narrowing
 when the walk was cut off."""
 
+# The compartment-level catchment disqualifier as a FLAG as well as a
+# drop reason, so it rides zone['flags'] like every other finding about
+# a zone and is readable on the wire even where the drop reason is not
+# in view. See REASON_CATCHMENT_EXCEEDS_CEILING for the reasoning.
+FLAG_CATCHMENT_EXCEEDS_CEILING = "catchment_exceeds_ceiling"
+
 # The SOLE remaining walk failure: the width minimum sits at the SEED
 # station itself (a monotonically widening -- or never-narrowing --
 # profile). A compartment needs a baseline, and a dam at the storage
 # cell is degenerate; this seed honestly produces nothing.
 REASON_NO_CONSTRICTION = "no_constriction"
+
+REASON_CATCHMENT_EXCEEDS_CEILING = "catchment_exceeds_ceiling"
+"""THE 20-ACRE CEILING AS A COMPARTMENT-LEVEL DISQUALIFIER, the second
+place the same externally anchored number does work.
+
+It has always been a HARD GATE on the NOMINATION MASK (compute_gate_
+mask(): a cell above MAX_VALLEY_CONTRIBUTING_AREA_ACRES is not
+surveyable ground, NRCS CPS 378's spillway line), and it remains one,
+untouched. But that gate only ever asked the question of a SEED. The
+pinch cell sits DOWNSTREAM of its seed by construction, so its
+catchment is always at least the seed's and can be far larger: a
+compartment can be anchored on a perfectly gated seed and still put its
+dam across a drainage too big for farm-pond scale. That compartment is
+a real engineered structure with a designed spillway, not the survey
+area this pipeline nominates, and it is dropped -- attributed, in the
+dropped list and on the seed ladder, never silently.
+
+Dropped BEFORE the compartment-overlap dedupe on purpose: a compartment
+disqualified by its own catchment must not be able to win a valley away
+from a qualifying one. Its zone record survives complete, so the
+diagnostic can show exactly which reach was refused and how much water
+was above it."""
 
 REASON_COMPARTMENT_EMPTY_AFTER_CLIP = "compartment_empty_after_clip"
 """Defensive only -- cannot occur by construction (the baseline's own
@@ -2163,6 +2326,17 @@ def compute_suitability_surfaces(
     terrain and soil alone -- redrawing the boundary changes WHICH cells
     are gated, never what a gated cell scores.
 
+    THE EMBANKMENT SURFACE SCORES THREE CRITERIA (slope, soil, TWI) and
+    the excavated surface four. drainage_area is NOT an embankment
+    criterion any more: contributing area at the seed cell answered the
+    wrong question under the compartment construction, so the band it
+    was scored on moved to the PINCH CELL of an assembled compartment,
+    where it measures the catchment the compartment would actually
+    impound. `drainage_runon` on the EXCAVATED side is untouched -- a
+    dugout has no pinch and its ground is extraction-based, so a
+    per-cell run-on preference is still exactly the right instrument
+    there.
+
     Returns {'embankment', 'excavated', 'criteria': {type: {criterion:
     array}}} -- the criteria grids ride along so per-region
     per-criterion mean contributions (the narrative-honesty mechanism)
@@ -2172,8 +2346,14 @@ def compute_suitability_surfaces(
     contributing_acres = flow_accumulation.astype(np.float64) * cell_area_acres(dem)
     twi_blend_score = np.where(np.isnan(twi_score_grid), 0.0, twi_score_grid)
 
+    # THREE CRITERIA, NOT FOUR. drainage_area is deliberately absent
+    # here: it is no longer a per-cell seeding criterion for the
+    # embankment type but a PER-COMPARTMENT measurement taken at the
+    # PINCH CELL after the pinch walk finds it (see EMBANKMENT_WEIGHTS's
+    # note for the anti-correlation finding, and
+    # compartment_pinch_catchment() for where the band is read now).
+    # Nothing about the band moved -- only the cell it is measured at.
     embankment_criteria = {
-        "drainage_area": drainage_band_score(contributing_acres),
         "slope": embankment_slope_score(slope_pct),
         "soil": soil_score_grid,
         "twi": twi_blend_score,
@@ -3125,6 +3305,93 @@ def watershed_cells(pinch_rowcol: tuple, upstream_map: dict) -> set:
     return seen
 
 
+def compartment_pinch_catchment(
+    dem: dict,
+    pinch_rowcol: tuple,
+    flow_accumulation: np.ndarray,
+    ceiling_acres: float = MAX_VALLEY_CONTRIBUTING_AREA_ACRES,
+) -> dict:
+    """
+    THE FILL CLAIM: the contributing area at a compartment's PINCH CELL,
+    in acres, with the embankment drainage band scored on it and the
+    compartment-level ceiling verdict beside it.
+
+    WHY THE PINCH CELL AND NOT THE SEED. A compartment is a dam at a
+    narrows with storage ground behind it. The SEED is the storage
+    anchor -- the ground the pool would sit on -- and the PINCH is the
+    dam reach. Everything that drains through the pinch cell is, BY THE
+    CONSTRUCTION OF THIS COMPARTMENT, exactly the catchment the dam
+    would impound: watershed_cells() builds the compartment's own
+    footprint from that same cell's upstream closure, so this number and
+    the compartment's shape answer to one definition rather than two.
+    Measuring at the seed asked whether the STORAGE GROUND sat in a
+    drainageway, which is a different question and, on the reference
+    property, an actively misleading one -- a cell already in an
+    established channel is at the valley's narrow point, so its
+    downstream walk finds only widening and the seed dies at
+    no_constriction. See EMBANKMENT_WEIGHTS's note for the full finding.
+
+    NO NEW COMPUTATION. This reads the SAME flow-accumulation grid the
+    gate mask, the excavated run-on criterion and every walk already
+    used -- one cell out of it, times the cell's own acreage. Nothing is
+    re-derived, so this number cannot drift from the one the rest of the
+    run scored on.
+
+    THE BAND AND ITS CONSTANTS ARE UNCHANGED: drainage_band_score() on
+    the same 0.5 ac ramp / 2 ac plateau / 20 ac ceiling. Only the cell
+    moved.
+
+    Returns {'acres', 'score', 'exceeds_ceiling', 'ceiling_acres'}.
+    `exceeds_ceiling` is the compartment-level disqualifier (see
+    REASON_CATCHMENT_EXCEEDS_CEILING) and is reported SEPARATELY from
+    the score rather than being inferred from a 0.0: the band reads 0.0
+    both below its minimum (too little water) and above the ceiling (too
+    much), and those are opposite findings that must never collapse into
+    one number.
+    """
+    r, c = pinch_rowcol
+    acres = float(flow_accumulation[r, c]) * cell_area_acres(dem)
+    return {
+        "acres": round(acres, 4),
+        "score": round(float(drainage_band_score(np.array(acres), ceiling_acres)), 4),
+        "exceeds_ceiling": bool(acres > ceiling_acres),
+        "ceiling_acres": float(ceiling_acres),
+    }
+
+
+def compartment_rank_score(
+    seed_blend_score: float,
+    pinch_drainage_score: float,
+    weights: dict = EMBANKMENT_COMPARTMENT_RANK_WEIGHTS,
+) -> float:
+    """
+    The one number an embankment compartment is RANKED on: the weighted
+    combination of its two claims -- the seed's blend score (suitable
+    storage ground) and the pinch cell's drainage-band score (a
+    catchment that fills it).
+
+    THIS IS A v1 PRIOR AWAITING THE LADDER'S EVIDENCE, and equal weight
+    is the honest form of "neither claim has earned dominance yet"
+    rather than a finding about ponds. What it encodes is only the
+    structural claim that a compartment needs BOTH: storage ground with
+    nothing above it is a dry hole; a catchment delivered onto ground
+    that cannot hold a pool is a spillway. Ranking on the seed blend
+    alone -- what this pipeline did until the drainage band moved to the
+    pinch -- could not ask the second question at all.
+
+    Both inputs are reported separately wherever this composite appears
+    (feature properties, narrative_data, the summary, the seed ladder),
+    on purpose: a mean of two 0-1 numbers is unreadable without them,
+    and neither claim may hide inside it. See
+    EMBANKMENT_COMPARTMENT_RANK_WEIGHTS.
+    """
+    return round(
+        weights["seed_blend"] * float(seed_blend_score)
+        + weights["pinch_drainage"] * float(pinch_drainage_score),
+        4,
+    )
+
+
 def _line_geometry_wgs84(dem: dict, points_utm: list) -> dict:
     """LineString WGS84 wire form for a list of (x, y) UTM points, built
     at the object's birth (stored wire forms -- no serialization-time
@@ -3224,8 +3491,26 @@ def build_embankment_compartment(
     JOB (the compartment is the ground one survey walks, ridge to
     ridge); the seed's blend score and criteria signature ride the
     `seed` block SEPARATELY as the anchor claim, per the reporting
-    honesty split. Returns None only on the defensive
-    empty-after-clip guard (see REASON_COMPARTMENT_EMPTY_AFTER_CLIP).
+    honesty split.
+
+    THE FILL CLAIM IS MEASURED HERE, and it is the third number this
+    function reports beside those two. Once the pinch cell is known,
+    compartment_pinch_catchment() reads the contributing area AT THAT
+    CELL off the flow-accumulation grid already in gate_context and
+    scores it on the embankment drainage band -- the catchment this
+    compartment would impound, which is what fills a pond. It rides as
+    pinch_catchment_acres / pinch_drainage_score, and combines with the
+    seed blend into compartment_rank_score, the number the compartment
+    is RANKED on (compartment_rank_score()). All three stay separately
+    readable; the composite never replaces its inputs anywhere.
+
+    A compartment whose pinch catchment EXCEEDS the ceiling is marked
+    catchment_exceeds_ceiling (flag and boolean) and built out complete
+    anyway: it is dropped by the compute core with that reason, in the
+    dropped list and on the seed ladder, so the refused reach is
+    visible and attributed rather than absent. Returns None only on the
+    defensive empty-after-clip guard (see
+    REASON_COMPARTMENT_EMPTY_AFTER_CLIP).
     """
     seed_rowcol = seed["rowcol"]
     pinch_rowcol = walk["pinch_rowcol"]
@@ -3414,6 +3699,18 @@ def build_embankment_compartment(
     if sparse_anchor:
         flags.append(FLAG_SPARSE_ANCHOR)
 
+    # THE FILL CLAIM (see the docstring): contributing area at the PINCH
+    # cell -- the outlet of the very watershed this compartment was
+    # assembled from -- scored on the unchanged embankment drainage
+    # band. Read off the SAME flow-accumulation grid every other part of
+    # this run used; nothing is recomputed.
+    pinch_catchment = compartment_pinch_catchment(
+        dem, pinch_rowcol, gate_context["flow_accumulation"]
+    )
+    if pinch_catchment["exceeds_ceiling"]:
+        flags.append(FLAG_CATCHMENT_EXCEEDS_CEILING)
+    rank_score = compartment_rank_score(seed["blend_score"], pinch_catchment["score"])
+
     measurements = _measure_member_cells(
         dem,
         measurement_cells,
@@ -3470,6 +3767,19 @@ def build_embankment_compartment(
             "criteria_signature": dict(seed["criteria_signature"]),
         },
         "seed_blend_score": seed["blend_score"],
+        # THE FILL CLAIM, at the top level beside the anchor claim and
+        # never folded into it: the pinch cell's own catchment, the band
+        # score read on it, and the ceiling verdict (separate from the
+        # score because the band reads 0.0 at BOTH ends -- too little
+        # water and too much -- and those are opposite findings).
+        "pinch_catchment_acres": pinch_catchment["acres"],
+        "pinch_drainage_score": pinch_catchment["score"],
+        "catchment_exceeds_ceiling": pinch_catchment["exceeds_ceiling"],
+        "catchment_ceiling_acres": pinch_catchment["ceiling_acres"],
+        # THE COMPOSITE THE COMPARTMENT RANKS ON -- reported here, but
+        # never in place of the two inputs above (see
+        # compartment_rank_score()).
+        "compartment_rank_score": rank_score,
         "pinch": {
             "rowcol": pinch_rowcol,
             "xy": pinch_xy,
@@ -3477,6 +3787,12 @@ def build_embankment_compartment(
             "width_m": walk["pinch_width_m"],
             "walk_distance_m": walk["walk_distance_m"],
             "half_width_bound_hit": walk["half_width_bound_hit"],
+            # The fill claim, repeated inside the pinch record because
+            # it is a property OF the pinch cell -- the same two numbers
+            # the top level carries, one object.
+            "catchment_acres": pinch_catchment["acres"],
+            "drainage_score": pinch_catchment["score"],
+            "catchment_exceeds_ceiling": pinch_catchment["exceeds_ceiling"],
             # Terminal disclosure: None for an interior pinch;
             # 'boundary' / 'road' / 'walk_bound' when the embankment
             # cell is the walk's terminal station, with the
@@ -3657,6 +3973,14 @@ def dedupe_compartments_by_overlap(
     duplicate_of_zone_<id> reason once ids exist). Kept compartments
     are compared in blend-descending order so a chain of overlaps
     collapses onto the single best seed.
+
+    COMPARTMENTS DISQUALIFIED BY THE CATCHMENT CEILING NEVER REACH
+    HERE: the compute core partitions them out first, precisely so a
+    compartment that cannot survive on its own evidence cannot claim a
+    valley away from one that can. Ordering by seed blend (rather than
+    by the composite compartment_rank_score) is deliberate and
+    unchanged: dedupe asks which SEED better anchors one piece of
+    ground, which is the anchor claim's question, not the fill claim's.
     """
     ordered = sorted(compartments, key=lambda z: -z["seed_blend_score"])
     kept: list[dict] = []
@@ -3798,14 +4122,25 @@ def _confidence_notes_for_region(region: dict, soil_checked: bool) -> str:
 
 
 def _selection_score(zone: dict) -> float:
-    """The one number each type ranks and pools on: the SEED's blend
-    score for an embankment compartment (the anchor claim -- the
-    compartment's walked-ground mean deliberately includes low-scoring
-    side slopes and the wall reach, so ranking on it would punish a
-    compartment for doing its job), and the MEMBER-mean suitability for
-    an excavated zone (as today)."""
+    """The one number each type ranks and pools on: the COMPARTMENT RANK
+    SCORE for an embankment compartment, and the MEMBER-mean suitability
+    for an excavated zone (as today).
+
+    THE EMBANKMENT NUMBER GAINED ITS SECOND HALF when the drainage band
+    moved to the pinch. It used to be the seed's blend score alone --
+    the ANCHOR claim (is this good storage ground?) -- which is still
+    the right instrument for that question and still the reason the
+    compartment's own walked-ground mean is NOT used here (that mean
+    deliberately includes low-scoring side slopes and the wall reach, so
+    ranking on it would punish a compartment for doing its job). What
+    the anchor claim could not ask is whether any water arrives: a
+    compartment now ranks on the anchor claim COMBINED with the FILL
+    claim, the drainage band scored at its pinch cell
+    (compartment_rank_score(), EMBANKMENT_COMPARTMENT_RANK_WEIGHTS).
+    Both inputs stay separately reported everywhere the composite
+    appears."""
     if zone["survey_type"] == SURVEY_TYPE_EMBANKMENT:
-        return zone["seed_blend_score"]
+        return zone["compartment_rank_score"]
     return zone["mean_suitability"]
 
 
@@ -3824,9 +4159,12 @@ def rank_survey_zones_per_type(zones: list[dict]) -> None:
     Assigns `rank` per type IN PLACE: 1 = highest score within that
     type, acreage as the tiebreak (see _selection_score() /
     _selection_tiebreak_acres() for the per-type definitions --
-    embankment ranks by SEED blend score since the compartment change;
-    excavated by member-mean suitability with member acreage, as
-    always). Every zone is ranked; flags never affect rank.
+    embankment ranks by the COMPARTMENT RANK SCORE, the documented
+    combination of the seed's blend score and the pinch cell's drainage
+    score; excavated by member-mean suitability with member acreage, as
+    always). Two compartments with identical seed blends therefore rank
+    by the catchment above their dam reaches, which is the whole point
+    of the composite. Every zone is ranked; flags never affect rank.
     """
     for survey_type in SURVEY_TYPES:
         typed = [zone for zone in zones if zone["survey_type"] == survey_type]
@@ -3867,10 +4205,11 @@ def select_survey_zone(zones: list[dict]) -> Optional[dict]:
     """
     The single selected_water_zone answer for downstream consumers:
     embankment and excavated POOLED on each type's own selection score
-    (acreage tiebreak), rank-1 of the pool wins. Since the compartment
-    change the pooled scale compares an embankment SEED's blend score
-    against an excavated zone's MEMBER-mean suitability -- two
-    different instruments' anchor numbers on one 0-1 scale.
+    (acreage tiebreak), rank-1 of the pool wins. The pooled scale
+    compares an embankment COMPARTMENT RANK SCORE (seed blend combined
+    with the pinch cell's drainage score) against an excavated zone's
+    MEMBER-mean suitability -- two different instruments' numbers on one
+    0-1 scale.
     PROVISIONAL AND DOCUMENTED AS SUCH, deliberately simple: pooling
     two instruments is defensible only because downstream needs ONE
     unambiguous answer; revisit from the tuned run (the winner's type
@@ -4069,12 +4408,33 @@ def compute_water_survey_areas(
         flow_to_col,
         gate_context,
     )
-    kept_compartments, duplicate_compartments = dedupe_compartments_by_overlap(compartments)
+    # THE COMPARTMENT-LEVEL CEILING, APPLIED BEFORE DEDUPE. The pinch
+    # cell sits downstream of its gated seed, so its catchment can
+    # exceed the ceiling the nomination mask enforced on the seed; a dam
+    # across a drainage that large is an engineered structure with a
+    # designed spillway, not this pipeline's survey area (see
+    # REASON_CATCHMENT_EXCEEDS_CEILING). It is partitioned out HERE, not
+    # in the drop loop below, so a disqualified compartment can never
+    # win a valley away from a qualifying one in the overlap dedupe.
+    # Both partitions ride into `zones` and get ids -- the refused ones
+    # are force-dropped attributed, per the dropped-feature pattern.
+    over_ceiling_compartments = [
+        compartment for compartment in compartments if compartment["catchment_exceeds_ceiling"]
+    ]
+    within_ceiling_compartments = [
+        compartment for compartment in compartments if not compartment["catchment_exceeds_ceiling"]
+    ]
+    kept_compartments, duplicate_compartments = dedupe_compartments_by_overlap(
+        within_ceiling_compartments
+    )
 
     # One cross-type zone list: kept compartments and excavated zones
-    # are the live candidates; overlap-duplicate compartments ride along
-    # for identity/attribution and are force-dropped below.
-    zones = kept_compartments + excavated_zones + duplicate_compartments
+    # are the live candidates; overlap-duplicate and over-ceiling
+    # compartments ride along for identity/attribution and are
+    # force-dropped below.
+    zones = (
+        kept_compartments + excavated_zones + duplicate_compartments + over_ceiling_compartments
+    )
 
     # Overlaps + gravity on the ZONE, both pure measurements over inputs
     # in hand. Canopy overlap runs on the (clipped) envelope's cell
@@ -4166,14 +4526,30 @@ def compute_water_survey_areas(
     # (see MIN_SURVEY_REGION_AREA_ACRES's history note): a zone under
     # the floor is dropped from the pipeline output -- status/reason
     # attached, rank None -- and survives only in the diagnostic table
-    # and the export's dropped layer. An overlap-duplicate compartment
-    # drops FIRST, with its duplicate_of_zone_<id> reason (dedupe
-    # decides existence; the floor only ever judges survivors).
+    # and the export's dropped layer. An over-ceiling compartment drops
+    # FIRST of all (its catchment disqualifies it outright), then an
+    # overlap-duplicate compartment with its duplicate_of_zone_<id>
+    # reason (dedupe decides existence; the floor only ever judges
+    # survivors).
     surviving_zones: list[dict] = []
     dropped_zones: list[dict] = []
     duplicate_set = {id(zone) for zone in duplicate_compartments}
+    over_ceiling_set = {id(zone) for zone in over_ceiling_compartments}
     for zone in zones:
-        if id(zone) in duplicate_set:
+        if id(zone) in over_ceiling_set:
+            # The compartment-level catchment disqualifier, decided
+            # before dedupe and before the floor: this compartment's
+            # dam reach carries more catchment than farm-pond scale
+            # admits, and no amount of acreage or uniqueness redeems
+            # that. Dropped with its full record intact so the
+            # diagnostic and the export can show exactly which reach
+            # was refused and how much water was above it.
+            zone["status"] = ZONE_STATUS_DROPPED
+            zone["drop_reason"] = REASON_CATCHMENT_EXCEEDS_CEILING
+            zone["rank"] = None
+            zone["cross_type_overlaps"] = []
+            dropped_zones.append(zone)
+        elif id(zone) in duplicate_set:
             winner = zone.pop("_duplicate_of_zone")
             zone["status"] = ZONE_STATUS_DROPPED
             zone["drop_reason"] = duplicate_of_zone_reason(winner["id"])
@@ -4268,12 +4644,23 @@ def _zone_feature_properties(zone: dict) -> dict:
       EMBANKMENT  compartment_footprint_acres (the bounded watershed
                   band) and NO members; zone_acres = the re-clipped
                   hull of that band. It additionally carries the SEED's
-                  blend score and criteria signature (the anchor claim,
+                  blend score and criteria signature (the ANCHOR claim,
                   separate from the compartment's own criterion means,
                   which deliberately average in side slopes and the
                   wall reach), the pinch record (crest-to-crest width,
-                  walk distance), the baseline length, and the
-                  truncation/bound flags.
+                  walk distance, and the FILL claim -- catchment acres
+                  at the pinch cell with the drainage band scored on
+                  them), the composite the compartment ranks on, the
+                  baseline length, and the truncation/bound flags.
+
+                  THE THREE EMBANKMENT NUMBERS ARE REPORTED SEPARATELY
+                  AND ALWAYS WILL BE: seed_blend_score (good storage
+                  ground?), pinch_drainage_score with its
+                  pinch_catchment_acres (water above it?), and
+                  compartment_rank_score (the documented v1
+                  combination). A consumer that wants to argue with the
+                  ranking rule can recompute it from the two inputs on
+                  this same record.
 
     NOTHING IS REMOVED FROM THIS SET by the panel block that now rides
     the payload. This is the DIAGNOSTIC AND IMAGERY CONTRACT -- the
@@ -4332,6 +4719,16 @@ def _zone_feature_properties(zone: dict) -> dict:
                 # criterion_contributions above (the walked ground).
                 "seed_blend_score": zone["seed_blend_score"],
                 "seed_criteria_signature": dict(zone["seed"]["criteria_signature"]),
+                # THE FILL CLAIM, kept separate from BOTH of those: the
+                # catchment above the dam reach and the drainage band
+                # scored on it. Three numbers, three questions, none of
+                # them folded into another -- the composite below is the
+                # ranking instrument, never a substitute for its inputs.
+                "pinch_catchment_acres": zone["pinch_catchment_acres"],
+                "pinch_drainage_score": zone["pinch_drainage_score"],
+                "catchment_exceeds_ceiling": zone["catchment_exceeds_ceiling"],
+                "catchment_ceiling_acres": zone["catchment_ceiling_acres"],
+                "compartment_rank_score": zone["compartment_rank_score"],
                 "seed_rowcol": list(zone["seed"]["rowcol"]),
                 "pinch_rowcol": list(zone["pinch"]["rowcol"]),
                 "pinch_width_m": zone["pinch"]["width_m"],
@@ -4409,9 +4806,15 @@ _DROPPED_ZONE_NOTE = (
     "DROPPED from the pipeline output (status: dropped; drop_reason names why): below_min_area means "
     "the judged acreage -- zone_acres, the DRAWN HULL, one rule for both types -- measures under the "
     "0.1 ac floor; duplicate_of_zone_<id> means this compartment collapsed into a better-seeded one "
-    "describing the same valley ground. Carried here visible and attributed, never silently, with "
+    "describing the same valley ground; catchment_exceeds_ceiling means the compartment's PINCH CELL "
+    f"drains more than the {MAX_VALLEY_CONTRIBUTING_AREA_ACRES}-acre ceiling -- a dam across a "
+    "drainage that large is an engineered structure with a designed spillway, not a farm-pond survey "
+    "area, and the compartment is refused however good its storage ground is (the same ceiling gates "
+    "the nomination mask cell by cell; a pinch sits downstream of its gated seed, so it can carry "
+    "more). Carried here visible and attributed, never silently, with "
     "BOTH acreages on the record: zone_acres beside the anchoring ground inside it (member_acres for "
-    "an excavated record, compartment_footprint_acres for an embankment one)."
+    "an excavated record, compartment_footprint_acres for an embankment one), and for an embankment "
+    "record the pinch-cell catchment beside them."
 )
 
 
@@ -4515,6 +4918,21 @@ PANEL_EXCLUDED_KEYS = (
     "seed_criteria_signature",
     "seed_blend_score",
     "max_suitability",
+    # THE FILL CLAIM AND ITS COMPOSITE -- DECIDED AGAINST THE PANEL, not
+    # forgotten. The five always-rows are the panel's whole budget and
+    # they are TYPE-GENERIC by design; pinch_catchment_acres is an
+    # embankment-only quantity, so adding it would either make a sixth
+    # always-row that reads blank on every excavated zone or make the
+    # always-set type-dependent, and both break the thing this block
+    # exists to guarantee. The catchment figure rides narrative_data and
+    # the feature properties instead, where the report has room to say
+    # what it means. compartment_rank_score is excluded for the
+    # different reason that a composite with its inputs off-panel is
+    # exactly the number a reader cannot check -- the `rank` row already
+    # carries its consequence.
+    "pinch_catchment_acres",
+    "pinch_drainage_score",
+    "compartment_rank_score",
     # EMBANKMENT INSTRUMENT DETAIL.
     "pinch_width_m",
     "pinch_width_ft",
@@ -4737,9 +5155,24 @@ def build_scales(result: dict) -> dict:
     The count is per type for the same reason the rank is: each type is
     ranked on its own instrument.
 
+    pinch_drainage_score carries the BAND ITSELF, not just 0-1, because
+    that band is non-monotonic in the thing it scores: it reads 0.0
+    BOTH below EMBANKMENT_DRAINAGE_MIN_ACRES (too little water to fill
+    a pond) and above MAX_VALLEY_CONTRIBUTING_AREA_ACRES (too much
+    water for one without an engineered spillway). A reader handed
+    "0.0" with a plain 0-1 range would draw the wrong conclusion half
+    the time, so the ramp, the plateau and the ceiling ride with it and
+    the catchment acreage sits beside it on every zone block.
+    compartment_rank_score carries its WEIGHTS for the same reason: a
+    composite whose recipe is not on the wire is a number no consumer
+    can argue with.
+
     ANY SCORED VALUE THE PANEL LATER GAINS ARRIVES WITH ITS SCALE IN
     THIS BLOCK. That is the contract, not a convention -- a number
     without an entry here is a number the panel cannot honestly render.
+    Entries may also describe values the panel deliberately does NOT
+    show (the two above), because narrative_data and the report read
+    them and they need reading correctly there too.
     """
     surfaces = result["surfaces"]
     return {
@@ -4758,6 +5191,29 @@ def build_scales(result: dict) -> dict:
         },
         "overlap_pct": {"min": 0, "max": 100},
         "boundary_adjacency_pct": {"min": 0, "max": 100},
+        # THE FILL CLAIM'S TWO SCALES. Neither value is a panel row (see
+        # PANEL_EXCLUDED_KEYS for why the catchment figure stayed off
+        # the five-row budget), but both ride narrative_data and the
+        # report reads them there, and the rule this block encodes is
+        # about SCORED VALUES CROSSING THE WIRE, not about the panel
+        # specifically: "0.0 for drainage" is unreadable without knowing
+        # the band reads 0.0 at both ends, and "31 acres of catchment"
+        # is unreadable without the ceiling it is over.
+        "pinch_drainage_score": {
+            "min": 0.0,
+            "max": 1.0,
+            "higher_is_better": True,
+            "zero_means": "below_min_acres_or_above_ceiling",
+            "min_acres": EMBANKMENT_DRAINAGE_MIN_ACRES,
+            "full_credit_acres": EMBANKMENT_DRAINAGE_FULL_CREDIT_ACRES,
+            "ceiling_acres": MAX_VALLEY_CONTRIBUTING_AREA_ACRES,
+        },
+        "compartment_rank_score": {
+            "min": 0.0,
+            "max": 1.0,
+            "higher_is_better": True,
+            "weights": dict(EMBANKMENT_COMPARTMENT_RANK_WEIGHTS),
+        },
     }
 
 
@@ -4787,6 +5243,16 @@ def build_narrative_data(result: dict) -> dict:
     caveat -- the one that replaced the retired parcel-relative caveat
     when TWI became absolute -- so the report layer states the real
     limitation and cannot revive the old one.
+
+    AN EMBANKMENT BLOCK NOW CARRIES THREE NUMBERS WHERE IT CARRIED ONE,
+    and they are three because they answer three questions that must
+    stay answerable apart: seed_blend_score (is the storage ground any
+    good?), pinch_catchment_acres with pinch_drainage_score (is there
+    water above the dam reach to fill it?), and compartment_rank_score
+    (the documented v1 combination the rank was assigned on). Reporting
+    only the composite would let a compartment with excellent ground and
+    no catchment read as a middling site rather than as the specific,
+    reportable finding it is.
 
     TWO BLOCKS EXIST FOR THE INTERACTIVE PANEL RATHER THAN THE REPORT,
     and they are built here because they are readings OF these same
@@ -4884,6 +5350,22 @@ def build_narrative_data(result: dict) -> dict:
                 {
                     "seed_blend_score": zone["seed_blend_score"],
                     "seed_criteria_signature": dict(zone["seed"]["criteria_signature"]),
+                    # THE FILL CLAIM, the third separately-reported
+                    # number: how much catchment sits above the dam
+                    # reach, and what the (unchanged) embankment
+                    # drainage band scores it. Acres, already imperial.
+                    # Reported beside the anchor claim rather than
+                    # inside compartment_rank_score, so the report can
+                    # say "good ground, no water above it" -- which on
+                    # this pipeline's reference property may well be
+                    # the honest finding.
+                    "pinch_catchment_acres": round(zone["pinch_catchment_acres"], 2),
+                    "pinch_drainage_score": zone["pinch_drainage_score"],
+                    "catchment_ceiling_acres": zone["catchment_ceiling_acres"],
+                    # The composite the rank above was assigned on --
+                    # published so the rank is checkable against its two
+                    # inputs, never as a replacement for them.
+                    "compartment_rank_score": zone["compartment_rank_score"],
                     "pinch_width_ft": _feet(zone["pinch"]["width_m"]),
                     "pinch_walk_distance_ft": _feet(zone["pinch"]["walk_distance_m"]),
                     # The terminal-pinch disclosure: None for an
@@ -5006,7 +5488,14 @@ def build_narrative_data(result: dict) -> dict:
             "selected_survey_type": selected["survey_type"] if selected is not None else None,
             # PROVISIONAL pooling rule, restated where the report reads it
             # -- see select_survey_zone().
-            "selection_rule": "pooled_member_mean_suitability_member_acreage_tiebreak",
+            # NAMES BOTH INSTRUMENTS, because the pool compares two:
+            # an embankment compartment's seed-blend/pinch-drainage
+            # composite against an excavated zone's member-mean
+            # suitability. Still PROVISIONAL -- see select_survey_zone().
+            "selection_rule": (
+                "pooled_embankment_compartment_rank_score_vs_excavated_member_mean_suitability"
+                "_acreage_tiebreak"
+            ),
         },
         "zones": zone_blocks,
     }
@@ -5043,6 +5532,19 @@ def summarize_water_survey_areas(result: dict) -> str:
                 f"{zone['pinch']['walk_distance_m']} m downstream), compartment mean "
                 f"{zone['mean_suitability']}, compartment criteria: {criteria_text}{flag_text}"
             )
+            # THE FILL CLAIM ON ITS OWN LINE, never merged into the
+            # anchor sentence above: the two claims are separate
+            # findings and a reader must be able to see a compartment
+            # score well on one and badly on the other.
+            lines.append(
+                f"      fill claim: {zone['pinch_catchment_acres']} ac of catchment at the pinch "
+                f"cell -> drainage {zone['pinch_drainage_score']} "
+                f"(band {EMBANKMENT_DRAINAGE_MIN_ACRES}-{EMBANKMENT_DRAINAGE_FULL_CREDIT_ACRES} ac "
+                f"ramp, {zone['catchment_ceiling_acres']} ac ceiling); "
+                f"rank score {zone['compartment_rank_score']} "
+                f"= {EMBANKMENT_COMPARTMENT_RANK_WEIGHTS['seed_blend']}*seed "
+                f"+ {EMBANKMENT_COMPARTMENT_RANK_WEIGHTS['pinch_drainage']}*drainage"
+            )
         else:
             lines.append(
                 f"  - excavated rank {zone['rank']}: zone {zone['id']}, "
@@ -5055,7 +5557,9 @@ def summarize_water_survey_areas(result: dict) -> str:
             lines.append(
                 f"  - DROPPED ({zone['drop_reason']}): embankment zone {zone['id']}, hull "
                 f"{zone['zone_acres']} ac (anchored by {zone['compartment_footprint_acres']} ac of "
-                f"compartment, seed blend {zone['seed_blend_score']})"
+                f"compartment, seed blend {zone['seed_blend_score']}, "
+                f"{zone['pinch_catchment_acres']} ac at the pinch -> drainage "
+                f"{zone['pinch_drainage_score']})"
             )
         else:
             lines.append(

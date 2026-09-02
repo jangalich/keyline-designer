@@ -160,10 +160,15 @@ from water_survey_areas import (
     DEPRESSION_FULL_CREDIT_METERS,
     DEPRESSION_NOISE_FLOOR_METERS,
     DUPLICATE_OF_ZONE_REASON_PREFIX,
+    EMBANKMENT_COMPARTMENT_RANK_WEIGHTS,
+    EMBANKMENT_DRAINAGE_FULL_CREDIT_ACRES,
+    EMBANKMENT_DRAINAGE_MIN_ACRES,
     EMBANKMENT_SEED_MIN_SCORE,
     EMBANKMENT_WEIGHTS,
     EXCAVATED_WEIGHTS,
+    MAX_VALLEY_CONTRIBUTING_AREA_ACRES,
     MIN_SURVEY_REGION_AREA_ACRES,
+    REASON_CATCHMENT_EXCEEDS_CEILING,
     # RETIRED from every scoring path (see the constants' own note).
     # Imported HERE, and only here, so the before/after can score the
     # same cells on the fixed curve the window-referenced one replaced.
@@ -447,8 +452,12 @@ def summarize_survey_zones_table(identify_result: dict) -> str:
     (zone acres to survey, anchored by member acres), member-cell
     mean/max suitability, top two contributing criteria, gravity note,
     envelope overlaps, cross-type agreement, boundary adjacency, flags
-    -- followed by the floor's DROPPED zones, each with its reason code
-    and both acreages (visible and attributed, never silent)."""
+    -- followed by the DROPPED zones, each with its reason code and both
+    acreages (visible and attributed, never silent). An embankment line
+    carries THREE separate claims and never a composite alone: the
+    seed's blend (good storage ground?), the pinch cell's catchment and
+    drainage score (water above it?), and the rank score the two
+    combine into."""
     lines = []
     for survey_type in SURVEY_TYPES:
         zones = identify_result["zones_by_type"][survey_type]
@@ -483,7 +492,10 @@ def summarize_survey_zones_table(identify_result: dict) -> str:
                     f"anchored by {zone['compartment_footprint_acres']:.2f} ac compartment, "
                     f"seed blend {zone['seed_blend_score']:.3f} / compartment mean "
                     f"{zone['mean_suitability']:.3f}, pinch {zone['pinch']['width_m']:.0f} m wide at "
-                    f"{zone['pinch']['walk_distance_m']:.0f} m, "
+                    f"{zone['pinch']['walk_distance_m']:.0f} m draining "
+                    f"{zone['pinch_catchment_acres']:.2f} ac "
+                    f"(drainage {zone['pinch_drainage_score']:.3f}), "
+                    f"rank score {zone['compartment_rank_score']:.3f}, "
                     f"top: {criteria_text}, {_gravity_cell(zone)}, "
                     f"canopy {_overlap_cell(zone['canopy_overlap_pct'])} / road-clip "
                     f"{_overlap_cell(zone['road_overlap_pct'])} / prod "
@@ -504,7 +516,10 @@ def summarize_survey_zones_table(identify_result: dict) -> str:
                     f"conf {zone['confidence']}{cross}{flags}"
                 )
     dropped = identify_result.get("dropped_zones", [])
-    lines.append(f"=== DROPPED ZONES ({len(dropped)}: floor and dedupe, each with its reason) ===")
+    lines.append(
+        f"=== DROPPED ZONES ({len(dropped)}: the catchment ceiling, dedupe and the acreage floor, "
+        "each with its reason) ==="
+    )
     if not dropped:
         lines.append("  (none)")
     for zone in dropped:
@@ -513,7 +528,9 @@ def summarize_survey_zones_table(identify_result: dict) -> str:
                 f"  DROPPED ({zone['drop_reason']}): embankment zone {zone['id']}, hull "
                 f"{zone['zone_acres']:.4f} ac anchored by "
                 f"{zone['compartment_footprint_acres']:.4f} ac compartment, "
-                f"seed blend {zone['seed_blend_score']:.3f} -- "
+                f"seed blend {zone['seed_blend_score']:.3f}, "
+                f"{zone['pinch_catchment_acres']:.2f} ac at the pinch "
+                f"(drainage {zone['pinch_drainage_score']:.3f}) -- "
                 "excluded from the pipeline output"
             )
         else:
@@ -539,6 +556,13 @@ def summarize_survey_zones_table(identify_result: dict) -> str:
     if not seeds:
         lines.append(f"  (no gated cell reached {EMBANKMENT_SEED_MIN_SCORE})")
     return "\n".join(lines)
+
+
+# The band breakdown key a compartment refused by the catchment ceiling
+# lands under -- _seed_outcome() composes it as f"dropped:{reason}", and
+# the banded summary promotes it to its own column. Named here rather
+# than re-typed at the two sites that must agree.
+_OVER_CEILING_BREAKDOWN_KEY = f"dropped:{REASON_CATCHMENT_EXCEEDS_CEILING}"
 
 
 def _collapse_reason(reason) -> str:
@@ -583,8 +607,17 @@ def _seed_outcome(record: dict, zone_by_id: dict) -> tuple:
     zone = zone_by_id.get(record.get("zone_id"))
     if zone is None:
         return ("compartment", "compartment built (zone not found in this result)", "compartment")
+    # THE FILL CLAIM RIDES EVERY BUILT SEED'S LINE. The ladder's whole
+    # job is to make a seeding decision falsifiable, and since the
+    # drainage band moved to the pinch, "what did this seed produce" is
+    # only half answerable without "and what water sits above it".
+    # Printed for dropped compartments too -- a compartment refused by
+    # the catchment ceiling is exactly the row this column exists for.
     acreage = (
         f"band {zone['compartment_footprint_acres']:.4f} ac / hull {zone['zone_acres']:.4f} ac"
+        f"; pinch catchment {zone['pinch_catchment_acres']:.2f} ac"
+        f" -> drainage {zone['pinch_drainage_score']:.3f}"
+        f"; rank score {zone['compartment_rank_score']:.4f}"
     )
     if zone.get("status") == ZONE_STATUS_DROPPED:
         drop_reason = zone.get("drop_reason")
@@ -628,12 +661,42 @@ def summarize_seed_ladder(identify_result: dict) -> str:
     cost of a lower minimum is exactly linear in the seeds it admits.
     Printing both states that rather than leaving it to be inferred.
 
-    ONE CAVEAT TRAVELS WITH EVERY NUMBER HERE: TWI is heavily floored on
-    the reference property under the shipped breakpoints, so these blend
-    scores are depressed by an under-calibrated criterion. The bands are
-    still the right instrument; their EDGES will need re-reading once
-    the TWI calibration decision is made. See
-    EMBANKMENT_SEED_MIN_SCORE's note.
+    WHAT THIS RUN'S LADDER IS ACTUALLY ASKING. The blend scored here is
+    a NEW BLEND: drainage area left the seeding criteria and slope /
+    soil / TWI were renormalized to 0.36 / 0.36 / 0.28, because on the
+    reference property the drainage criterion was ANTI-CORRELATED with
+    producing a survey area -- every high-drainage seed died at
+    no_constriction or the floor, and every surviving zone carried
+    drainage 0.000. The diagnosis was that drainage was being measured
+    AT THE SEED, which under the compartment construction is the storage
+    anchor, while what fills a pond is the catchment ABOVE the
+    compartment, delivered through the dam reach. So the band moved to
+    the PINCH CELL rather than being deleted.
+
+    THE QUESTION THE NEXT RUN ANSWERS, and the reason each built seed's
+    line now carries its pinch catchment and drainage score:
+
+        DO THE HIGH-CATCHMENT REACHES THAT PREVIOUSLY DIED AT
+        no_constriction NOW APPEAR AS WELL-FILLED COMPARTMENTS ANCHORED
+        ON OFF-CHANNEL SEEDS ABOVE THEM? That is: does measuring
+        drainage at the pinch RECOVER the catchment signal the
+        seed-level measurement was throwing away?
+
+    Read it as two columns of the same table. If off-channel seeds that
+    survive now show real pinch catchment, the answer is yes and the
+    criterion was asking the right question of the wrong cell, exactly
+    as diagnosed. IF THE SURVIVING COMPARTMENTS CARRY NEGLIGIBLE PINCH
+    CATCHMENT, THE ANSWER IS NO AND THE FINDING IS ABOUT THE PARCEL, NOT
+    THE INSTRUMENT: this ground's walkable storage sites have no water
+    above them, which belongs in the narrative as a stated finding
+    rather than being scored around.
+
+    ONE CAVEAT TRAVELS WITH EVERY NUMBER HERE: these blend scores are
+    NOT comparable to the previous run's. They are the three-criterion
+    blend, so every score rises relative to the four-criterion one
+    (nothing is dividing credit with a criterion that read 0.000 on most
+    of the parcel) and every band edge has moved underneath a constant
+    that deliberately did not. See EMBANKMENT_SEED_MIN_SCORE's note.
     """
     result = identify_result["result"]
     seeds = result.get("embankment_seeds", [])
@@ -671,7 +734,10 @@ def summarize_seed_ladder(identify_result: dict) -> str:
 
     # THE BANDED SUMMARY -- the table the next tuning decision is made
     # from. Bands are half-open [low, high); the top one is open-ended.
-    lines.append("  BANDS (seeded / built a compartment / survived the floor):")
+    lines.append(
+        "  BANDS (seeded / built a compartment / refused by the catchment ceiling / "
+        "survived the floor):"
+    )
     edges = list(SEED_LADDER_BANDS)
     for index, low in enumerate(edges):
         high = edges[index + 1] if index + 1 < len(edges) else None
@@ -693,16 +759,55 @@ def summarize_seed_ladder(identify_result: dict) -> str:
         breakdown: dict = {}
         for _score, _bucket, key in in_band:
             breakdown[key] = breakdown.get(key, 0) + 1
+        # ITS OWN COLUMN, not just a breakdown key: a compartment
+        # refused because its dam reach drains more than farm-pond scale
+        # is a DIFFERENT finding from one that never formed and from one
+        # that formed too small, and this is the branch that made that
+        # outcome possible. A column that reads 0 all the way down is
+        # itself the answer ("the ceiling never bound on this parcel");
+        # buried in a breakdown string it would be neither.
+        over_ceiling = breakdown.get(_OVER_CEILING_BREAKDOWN_KEY, 0)
         lines.append(
-            f"    {label}: {len(in_band)} seeded / {built} built / {survived} survived   "
+            f"    {label}: {len(in_band)} seeded / {built} built / "
+            f"{over_ceiling} over-ceiling / {survived} survived   "
             + ", ".join(f"{key}={count}" for key, count in sorted(breakdown.items()))
         )
     lines.append(
         "  READ IT BOTTOM-UP: a low band seeding many and surviving none is the evidence for "
         "raising EMBANKMENT_SEED_MIN_SCORE (and says where to); one real compartment down there is "
-        "the evidence the lower minimum was right. Blend scores here are depressed by TWI's "
-        "current flooring -- re-read the band edges after the TWI calibration decision."
+        "the evidence the lower minimum was right. THESE SCORES ARE NOT COMPARABLE TO THE PREVIOUS "
+        f"RUN'S: drainage area left the seeding blend and the remaining three renormalized to "
+        + ", ".join(f"{name} {weight}" for name, weight in EMBANKMENT_WEIGHTS.items())
+        + " -- band edges moved underneath a minimum that deliberately did not."
     )
+    # THE QUESTION THIS RUN EXISTS TO ANSWER, printed with the table so
+    # it is asked of the numbers rather than remembered afterwards.
+    survived_catchments = [
+        zone["pinch_catchment_acres"]
+        for zone in result["zones"]
+        if zone["survey_type"] == SURVEY_TYPE_EMBANKMENT
+    ]
+    lines.append(
+        "  THE QUESTION THIS BRANCH ASKS: do the high-catchment reaches that previously died at "
+        "no_constriction now appear as WELL-FILLED compartments anchored on off-channel seeds "
+        "ABOVE them -- i.e. does measuring drainage at the PINCH recover the catchment signal the "
+        f"seed-level measurement was throwing away? The band is {EMBANKMENT_DRAINAGE_MIN_ACRES}-"
+        f"{EMBANKMENT_DRAINAGE_FULL_CREDIT_ACRES} ac ramp to full credit, hard zero above "
+        f"{MAX_VALLEY_CONTRIBUTING_AREA_ACRES} ac; the pinch-catchment column above is the answer."
+    )
+    if survived_catchments:
+        lines.append(
+            "    surviving embankment compartments' pinch catchments (ac): "
+            + ", ".join(f"{acres:.2f}" for acres in sorted(survived_catchments, reverse=True))
+            + " -- IF THESE ARE NEGLIGIBLE the honest finding is about this PARCEL, not the "
+            "instrument: its walkable storage ground has no water above it, and that belongs in "
+            "the narrative rather than being scored around."
+        )
+    else:
+        lines.append(
+            "    (no surviving embankment compartment on this run -- the question has no answer "
+            "from this boundary)"
+        )
     return "\n".join(lines)
 
 
@@ -1380,11 +1485,14 @@ def summarize_twi_scoring_comparison(runs: list) -> str:
 
 
 def _embankment_surface_without_twi(criteria: dict) -> np.ndarray:
-    """The embankment blend with TWI REMOVED and its 0.20 redistributed
-    PROPORTIONALLY across drainage_area / slope / soil (so the remaining
-    weights still sum to 1.0 and their relative emphasis is untouched --
-    the only honest way to ask "what does the blend say without this
-    criterion" without also changing what the others mean)."""
+    """The embankment blend with TWI REMOVED and its weight redistributed
+    PROPORTIONALLY across the remaining seeding criteria -- slope and
+    soil since the drainage band moved to the pinch cell (so the
+    remaining weights still sum to 1.0 and their relative emphasis is
+    untouched -- the only honest way to ask "what does the blend say
+    without this criterion" without also changing what the others
+    mean). Reads EMBANKMENT_WEIGHTS rather than naming the criteria, so
+    it stays correct across changes to the blend's membership."""
     remaining = {name: weight for name, weight in EMBANKMENT_WEIGHTS.items() if name != "twi"}
     total = sum(remaining.values())
     surface = np.zeros(criteria["twi"].shape, dtype=np.float64)
@@ -1473,9 +1581,14 @@ def summarize_twi_independent_signal(identify_result: dict, label: str) -> str:
     twi_gated = criteria[SURVEY_TYPE_EMBANKMENT]["twi"][gate_mask]
 
     lines.append("  1. CORRELATION of the absolute TWI score against the criteria it may be re-voting")
+    # drainage_area is no longer an embankment criterion GRID (the band
+    # moved to the pinch cell, where it is measured per compartment, not
+    # per cell), so the embankment side correlates TWI against the two
+    # criteria it can actually re-vote. The excavated run-on grid stays
+    # exactly where it was -- that criterion did not move.
     pairs = (
-        (SURVEY_TYPE_EMBANKMENT, "drainage_area", criteria[SURVEY_TYPE_EMBANKMENT]["drainage_area"]),
         (SURVEY_TYPE_EMBANKMENT, "slope", criteria[SURVEY_TYPE_EMBANKMENT]["slope"]),
+        (SURVEY_TYPE_EMBANKMENT, "soil", criteria[SURVEY_TYPE_EMBANKMENT]["soil"]),
         (SURVEY_TYPE_EXCAVATED, "drainage_runon", criteria[SURVEY_TYPE_EXCAVATED]["drainage_runon"]),
         (SURVEY_TYPE_EXCAVATED, "slope", criteria[SURVEY_TYPE_EXCAVATED]["slope"]),
     )
@@ -1560,7 +1673,14 @@ def summarize_twi_independent_signal(identify_result: dict, label: str) -> str:
         f"{len(seeds_with - seeds_without)} lost, {len(seeds_without - seeds_with)} gained"
     )
 
-    lines.append("  3. SURVIVING SEEDS' FULL CRITERIA SIGNATURES (the archetype count)")
+    lines.append(
+        "  3. SURVIVING SEEDS' FULL CRITERIA SIGNATURES, with the FILL CLAIM beside them. "
+        "The channel-anchored/off-channel archetype split is RETIRED AT THE SEED: no seeding "
+        "criterion measures channel position any more (drainage area moved to the pinch cell), so "
+        "every seed is off-channel by construction and naming it that says nothing. The archetype "
+        "column now reports which of the three remaining criteria LED the seed; the pinch-catchment "
+        "column answers the channel question where it is actually asked."
+    )
     criterion_names = list(EMBANKMENT_WEIGHTS)
     surviving = [
         zone for zone in result["zones"] if zone["survey_type"] == SURVEY_TYPE_EMBANKMENT
@@ -1569,20 +1689,29 @@ def summarize_twi_independent_signal(identify_result: dict, label: str) -> str:
         lines.append("    (no surviving embankment zone on this boundary)")
     else:
         lines.append(
-            "    zone          blend  " + "".join(f"{name:>15}" for name in criterion_names) + "   archetype"
+            "    zone          blend  "
+            + "".join(f"{name:>15}" for name in criterion_names)
+            + "     pinch ac  drainage   archetype"
         )
         for zone in sorted(surviving, key=lambda z: z["rank"]):
             signature = zone["seed"]["criteria_signature"]
-            # The two archetypes named by their DOMINANT WEIGHTED
+            # The seeding archetype named by its DOMINANT WEIGHTED
             # contribution, since a signature is only readable against
-            # the weights that consume it.
+            # the weights that consume it. EVERY SEED IS OFF-CHANNEL BY
+            # CONSTRUCTION NOW -- the channel-anchored archetype was
+            # defined by a drainage criterion that no longer scores
+            # seeds -- so the name reports which of the three remaining
+            # criteria led, and the FILL CLAIM is printed beside it
+            # rather than inferred from the seed. Those two columns
+            # together are the branch's own question: does an
+            # off-channel seed sit above a real catchment?
             weighted = {name: EMBANKMENT_WEIGHTS[name] * signature[name] for name in criterion_names}
             top = max(weighted, key=lambda name: weighted[name])
-            archetype = "channel-anchored" if top == "drainage_area" else f"off-channel ({top}-led)"
             lines.append(
                 f"    embankment {zone['rank']:<2} {zone['seed_blend_score']:>6.3f}  "
                 + "".join(f"{signature[name]:>15.3f}" for name in criterion_names)
-                + f"   {archetype}"
+                + f"  {zone['pinch_catchment_acres']:>11.2f}  {zone['pinch_drainage_score']:>8.3f}"
+                + f"   {top}-led"
             )
     lines.append(
         "  STATED, NOT ACTED ON: no weight moved in this branch. The removal/reweight decision "

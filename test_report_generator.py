@@ -616,17 +616,23 @@ _survey_nd = {
         {"id": 1, "survey_type": "embankment", "rank": 1, "zone_acres": 0.8,
          "mean_suitability": 0.55, "max_suitability": 0.61,
          "seed_blend_score": 0.73,
-         "seed_criteria_signature": {"drainage_area": 0.7, "slope": 1.0, "soil": 0.5, "twi": 0.9},
+         "seed_criteria_signature": {"slope": 1.0, "soil": 0.5, "twi": 0.9},
+         # THE FILL CLAIM, the third separately-reported number: the
+         # catchment at the DAM REACH (not at the seed) and the
+         # unchanged drainage band scored on it, plus the composite the
+         # rank was assigned on. 6.2 ac is past the band's 2 ac full
+         # credit and well under the 20 ac ceiling -> 1.0.
+         "pinch_catchment_acres": 6.2, "pinch_drainage_score": 1.0,
+         "catchment_ceiling_acres": 20.0, "compartment_rank_score": 0.865,
          "pinch_width_ft": 88.6, "pinch_walk_distance_ft": 137.8, "baseline_length_ft": 137.8,
          # A TERMINAL pinch at the property line, still narrowing -- the
          # accepted-not-refused disclosure the caveat sentence keys on.
          "pinch_terminal": "boundary", "still_narrowing_at_termination": True,
          "width_profile_min_ft": 88.6, "width_profile_max_ft": 137.8,
          "truncated_by_boundary": True, "truncated_by_road": False, "half_width_bound_hit": False,
-         "criteria": {"drainage_area": {"weight": 0.30, "mean_score": 0.4},
-                      "slope": {"weight": 0.25, "mean_score": 0.6},
-                      "soil": {"weight": 0.25, "mean_score": 0.5},
-                      "twi": {"weight": 0.20, "mean_score": 0.7}},
+         "criteria": {"slope": {"weight": 0.36, "mean_score": 0.6},
+                      "soil": {"weight": 0.36, "mean_score": 0.5},
+                      "twi": {"weight": 0.28, "mean_score": 0.7}},
          "twi_score_mean": 0.9, "depression_depth_max_ft": 0.0,
          "contributing_area_acres_at_wettest_cell": 5.4, "boundary_adjacency_pct": 0.0,
          "overlaps": {"canopy_pct": 0.0, "road_pct": 0.0, "production_pct": None},
@@ -684,7 +690,10 @@ assert "SPARSE ANCHOR" in _survey_prose and "scattered good ground within a larg
 assert "dugout or seep-fed excavated pond" in _survey_prose, "the seep-widened excavated framing reaches the prose"
 assert "Selected for downstream planning: zone 0 (excavated-type)" in _survey_prose
 assert "provisional selection rule" in _survey_prose
-assert "embankment by seed blend, excavated by member-mean suitability" in _survey_prose, (
+assert (
+    "embankment by its compartment rank score -- seed blend combined with the catchment at its "
+    "dam reach -- excavated by member-mean suitability"
+) in _survey_prose, (
     "the pooled rule states each type's own instrument"
 )
 assert "2.6 acres to survey, anchored by 1.4 acres of high-suitability ground" in _survey_prose, (
@@ -693,8 +702,26 @@ assert "2.6 acres to survey, anchored by 1.4 acres of high-suitability ground" i
 assert "0.8 acres to survey -- a valley compartment anchored by a 0.73-scoring storage cell, dam reach at the downstream end" in _survey_prose, (
     "the compartment sentence carries the seed's anchor claim, verbatim per the design"
 )
-assert "THE HONESTY SPLIT" in _survey_prose and "drainage_area 0.7" in _survey_prose and "drainage_area 0.4 (weight 0.3)" in _survey_prose, (
+assert "THE HONESTY SPLIT" in _survey_prose and "twi 0.9" in _survey_prose and "twi 0.7 (weight 0.28)" in _survey_prose, (
     "seed signature and compartment means are BOTH in the prose, distinct -- the reporting honesty split"
+)
+assert "drainage_area" not in _survey_prose, (
+    "contributing area is no longer a per-cell embankment criterion, so it must not appear as one "
+    "in the prose -- it appears as the compartment's FILL CLAIM instead"
+)
+# THE FILL CLAIM AS ITS OWN SENTENCE, with all three numbers legible and
+# none of them standing in for another: the catchment, the band score,
+# and the composite whose recipe the sentence names.
+assert "6.2 acres of catchment drain through the dam reach" in _survey_prose, (
+    "the catchment is measured AT THE PINCH and the prose says where"
+)
+assert "scoring 1.0 on the drainage band" in _survey_prose
+assert "not at the seed" in _survey_prose, (
+    "the sentence states which cell was measured -- the whole finding is that it used to be the "
+    "wrong one"
+)
+assert "Rank score 0.865" in _survey_prose and "provisional" in _survey_prose, (
+    "the composite is published with its inputs and flagged as the v1 prior it is"
 )
 assert "OVERSTATES dam length" in _survey_prose, (
     "crest-to-crest width is a survey measure, not a dam length -- the caveat must reach the prose"

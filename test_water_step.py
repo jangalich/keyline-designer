@@ -714,7 +714,27 @@ with Harness() as h:
 
     # THE SCALES, so no number renders without meaning.
     scales = panel_payload["scales"]
-    assert set(scales) == {"suitability", "rank", "overlap_pct", "boundary_adjacency_pct"}, sorted(scales)
+    # pinch_drainage_score and compartment_rank_score joined the block
+    # when the drainage band moved to the pinch cell: neither is a panel
+    # row (PANEL_EXCLUDED_KEYS says why the catchment figure stayed off
+    # the five-row budget), but both ride narrative_data and both are
+    # scored values that cannot be read without their scale -- the
+    # drainage band reads 0.0 at BOTH ends, and a composite without its
+    # weights is unarguable.
+    assert set(scales) == {
+        "suitability",
+        "rank",
+        "overlap_pct",
+        "boundary_adjacency_pct",
+        "pinch_drainage_score",
+        "compartment_rank_score",
+    }, sorted(scales)
+    assert scales["pinch_drainage_score"]["zero_means"] == "below_min_acres_or_above_ceiling", (
+        "a band that reads 0.0 for too-little AND too-much water must say so on the wire"
+    )
+    assert scales["compartment_rank_score"]["weights"] == dict(
+        water_survey_areas.EMBANKMENT_COMPARTMENT_RANK_WEIGHTS
+    ), "the composite's recipe rides with it"
     assert scales["suitability"]["min"] == 0.0 and scales["suitability"]["max"] == 1.0
     assert scales["suitability"]["higher_is_better"] is True
     assert scales["overlap_pct"] == {"min": 0, "max": 100}

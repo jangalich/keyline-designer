@@ -45,7 +45,7 @@ This file pins the fix:
     4. THE BOUNDARY-STABILITY REPORT -- survive-both vs appear-in-one
        classification and per-criterion deltas, on a two-boundary
        synthetic.
-    5b. THE PINNED-vs-LIVE COUPLING -- BUG_ERA_SEED_MINIMUM really is
+    5b. THE PINNED-vs-LIVE COUPLING -- COMPARISON_BAR really is
        decoupled from the live seeding constant, the pinned counts
        really are measured at the pinned bar, and the live-tracking
        assertion really measures something else. That coupling broke
@@ -273,19 +273,41 @@ _xs, _ys = np.meshgrid(col_x, row_y)
 IN_SMALL_BOX = contains_xy(SMALL_BOUNDARY, _xs, _ys)
 
 
-# THE COMPARISON THRESHOLD IS PINNED, NOT READ FROM THE LIVE CONSTANT.
+# THE COMPARISON BAR IS PINNED, NOT READ FROM THE LIVE CONSTANT.
 # EMBANKMENT_SEED_MIN_SCORE is a SEEDING POLICY number that moves for
-# reasons of its own (it has since dropped to 0.30 to admit the
-# off-channel archetype). This test is about the TWI SCORE, and it must
-# keep measuring the same thing when that policy moves -- so it states
-# the value the constant held WHEN THE BUG WAS FOUND and compares
-# against that. Reading the live constant here would let an unrelated
-# tuning change quietly rewrite what this test demonstrates, which is
-# precisely the coupling the branch exists to remove.
-BUG_ERA_SEED_MINIMUM = 0.50
+# reasons of its own (it dropped to 0.30 to admit the off-channel
+# archetype). This paragraph is about the TWI SCORE, and it must keep
+# measuring the same thing when that policy moves -- so it states its
+# own bar. Reading the live constant here would let an unrelated tuning
+# change quietly rewrite what this test demonstrates.
+#
+# THE BAR MOVED FROM 0.50 TO 0.55, AND WHY IS WORTH STATING, because it
+# is not a tuning nudge. A comparison bar has one job: sit somewhere the
+# two TWI scorings can DISAGREE about an outcome. 0.50 did that on the
+# FOUR-criterion blend, where an off-channel cell floored at 0.375
+# (0.25*slope + 0.25*soil, with a drainage criterion scoring 0 on it by
+# construction). When contributing area moved to the pinch cell and the
+# survivors renormalized to 0.36/0.36/0.28, that floor rose to 0.54 --
+# so 0.50 now sits BELOW the arithmetic floor, every gated cell clears
+# it under either scoring, and the comparison says nothing at all. 0.55
+# is the same instrument re-aimed at the new blend's discriminating
+# range, and it reproduces the original demonstration's exact shape: the
+# absolute curve's count is IDENTICAL under both boundaries, the retired
+# percentile's is not.
+#
+# NOTHING ABOUT THE BUG OR ITS FIX CHANGED HERE. The per-cell TWI delta
+# is still exactly 0.0000 and every assertion above this paragraph is
+# untouched; only a bar chosen relative to a blend moved when that blend
+# did.
+COMPARISON_BAR = 0.55
+RETIRED_BUG_ERA_BAR = 0.50
+"""What COMPARISON_BAR was, and the value it discriminated at: the
+seeding minimum in force when the boundary-dependence bug was found,
+against the four-criterion blend. Kept as a named number so the history
+is legible rather than lost in a diff."""
 
 
-def _clearing_count(result, surface, threshold=BUG_ERA_SEED_MINIMUM):
+def _clearing_count(result, surface, threshold=COMPARISON_BAR):
     return int(np.count_nonzero((surface >= threshold) & result["gate_mask"] & IN_SMALL_BOX))
 
 
@@ -303,12 +325,21 @@ absolute_large = _clearing_count(large, large["surfaces"][SURVEY_TYPE_EMBANKMENT
 retired_small = _clearing_count(small, _retired_surface(small, small_pct))
 retired_large = _clearing_count(large, _retired_surface(large, large_pct))
 assert absolute_small == absolute_large == 38, (
-    f"every cell that clears the bug-era seeding bar inside the small boundary still clears it "
+    f"every cell that clears the comparison bar inside the small boundary still clears it "
     f"when the boundary grows (got {absolute_small} then {absolute_large})"
 )
-assert retired_small == 442 and retired_large == 0, (
+# THE INVARIANT IS THE EQUALITY, and the magnitudes are pinned beside it
+# so a silent drift in either scoring is visible. Under the retired
+# percentile the SAME ground changes its verdict when the corridor joins
+# the parcel: cells are disqualified by terrain OUTSIDE the area being
+# scored, which is the bug in one number.
+assert retired_small == 466 and retired_large == 428, (
     f"under the retired percentile the SAME ground went from {retired_small} qualifying cells to "
-    f"{retired_large} -- the entire candidate valley disqualified by ground outside it"
+    f"{retired_large} -- ground outside the candidate valley changing what is inside it"
+)
+assert retired_small != retired_large, (
+    "the retired scoring's verdict depends on the boundary; the absolute curve's does not -- that "
+    "difference, not either magnitude, is the finding"
 )
 # The same invariant at whatever the seeding minimum is TODAY: the count
 # is a different number at a different bar, and it must still be the
@@ -366,7 +397,7 @@ for seed_cell, small_zone in small_embankment.items():
 print(
     f"1. The bug, pinned: probe cell raw TWI {raw_small:.4f} scores {score_small:.4f} under BOTH "
     f"boundaries (retired percentile: {old_small:.4f} -> {old_large:.4f}); cells clearing the "
-    f"bug-era {BUG_ERA_SEED_MINIMUM} bar in the candidate valley {absolute_small} -> "
+    f"{COMPARISON_BAR} bar in the candidate valley {absolute_small} -> "
     f"{absolute_large} absolute vs {retired_small} -> {retired_large} retired, and "
     f"{live_small} -> {live_large} at the live {EMBANKMENT_SEED_MIN_SCORE} minimum; the "
     f"{len(small_embankment)} compartment(s) survive both (the larger boundary gains "
@@ -726,7 +757,17 @@ assert "with TWI 466/874" in _signal and "without TWI 466/874" in _signal, (
     f"the with/without-TWI clearing share is measured on this fixture:\n{_signal}"
 )
 assert "embankment SEEDS:" in _signal and "lost," in _signal
-assert "archetype" in _signal and "off-channel" in _signal
+# THE ARCHETYPE COLUMN SURVIVES; the channel-anchored/off-channel
+# NAMING does not, and that is a consequence rather than a rewording:
+# with contributing area measured at the pinch, no SEEDING criterion
+# measures channel position, so every seed is off-channel by
+# construction and the label carried no information. The report says so
+# in place of the old split, names the leading criterion instead, and
+# prints the fill claim -- which is where the channel question is now
+# actually answered.
+assert "archetype" in _signal and "RETIRED AT THE SEED" in _signal
+assert "-led" in _signal, "the archetype column names the criterion that led the seed"
+assert "pinch" in _signal.lower(), "and the fill claim rides beside the signature"
 assert "no weight moved in this branch" in _signal
 
 # The without-TWI surfaces redistribute proportionally and stay valid
@@ -754,44 +795,54 @@ print(
 # =========================================================================
 # 5b. THE PINNED-vs-LIVE COUPLING, VERIFIED RATHER THAN ASSUMED
 # =========================================================================
-# BUG_ERA_SEED_MINIMUM exists because reading the LIVE seeding constant
-# in section 1 would let an unrelated tuning change quietly rewrite what
+# COMPARISON_BAR exists because reading the LIVE seeding constant in
+# section 1 would let an unrelated tuning change quietly rewrite what
 # this file demonstrates. That is a claim about the code, and it was
 # broken once already, so it is CHECKED here rather than trusted:
 #
-#   1. the pinned value is the constant's BUG-ERA value (0.50), not
-#      whatever it is today,
-#   2. it is genuinely decoupled -- the live constant has since moved,
-#      so the two are not accidentally equal,
+#   1. the bar is pinned to a literal, not to the live constant,
+#   2. it is genuinely decoupled -- the live constant is a different
+#      number, so the two are not accidentally equal,
 #   3. the pinned assertions really are evaluated at the pinned bar
-#      (_clearing_count's default IS BUG_ERA_SEED_MINIMUM), and
+#      (_clearing_count's default IS COMPARISON_BAR), and
 #   4. the live-tracking assertion really does read the live constant,
 #      and measures something DIFFERENT from the pinned one -- if the
 #      two counts were equal the "live" half would be a duplicate
 #      dressed as a second check.
-assert BUG_ERA_SEED_MINIMUM == 0.50, "the pinned value is the seeding minimum AS OF THE BUG"
-assert BUG_ERA_SEED_MINIMUM != EMBANKMENT_SEED_MIN_SCORE, (
+#
+# DECOUPLED IS NOT THE SAME AS FROZEN, and the bar's own history is the
+# proof: it moved from the bug-era 0.50 to 0.55 when the embankment
+# blend lost its drainage criterion, because 0.50 stopped being able to
+# discriminate at all once the off-channel floor rose above it (see
+# COMPARISON_BAR's note). It moved because THE BLEND changed, which is
+# the one thing that can invalidate a bar, and never because a seeding
+# policy did -- that is exactly the coupling these four checks exist to
+# police.
+assert COMPARISON_BAR == 0.55, "the bar is a literal of this file's own, chosen against the blend"
+assert RETIRED_BUG_ERA_BAR == 0.50, "and the value it replaced is recorded, not lost"
+assert COMPARISON_BAR != EMBANKMENT_SEED_MIN_SCORE, (
     f"the pinned bar must not track the live one -- the live minimum is "
-    f"{EMBANKMENT_SEED_MIN_SCORE} and the pinned bar stays at the bug's 0.50"
+    f"{EMBANKMENT_SEED_MIN_SCORE} and the pinned bar stays at {COMPARISON_BAR}"
 )
 import inspect as _inspect  # noqa: E402  (local to this check, deliberately)
 
 _clearing_signature = _inspect.signature(_clearing_count)
-assert _clearing_signature.parameters["threshold"].default == BUG_ERA_SEED_MINIMUM, (
-    "the pinned 38/38 and 442/0 counts must be measured AT the pinned bar, or they stop recording "
-    "the bug"
+assert _clearing_signature.parameters["threshold"].default == COMPARISON_BAR, (
+    "the pinned 38/38 and 466/428 counts must be measured AT the pinned bar, or they stop "
+    "recording the bug"
 )
 assert absolute_small == absolute_large and retired_small != retired_large, (
-    "the pinned pair still says exactly what it claims: identical under the live curve, collapsed "
-    "under the retired percentile"
+    "the pinned pair still says exactly what it claims: identical under the live curve, "
+    "boundary-dependent under the retired percentile"
 )
 assert live_small == live_large and live_small != absolute_small, (
     f"the live-tracking half must measure a DIFFERENT number at the live bar ({live_small} at "
-    f"{EMBANKMENT_SEED_MIN_SCORE} vs {absolute_small} at {BUG_ERA_SEED_MINIMUM}) -- equal counts "
+    f"{EMBANKMENT_SEED_MIN_SCORE} vs {absolute_small} at {COMPARISON_BAR}) -- equal counts "
     "would mean the second assertion is the first one repeated"
 )
 print(
-    f"5b. Pinned-vs-live coupling verified: BUG_ERA_SEED_MINIMUM stays {BUG_ERA_SEED_MINIMUM} while "
+    f"5b. Pinned-vs-live coupling verified: COMPARISON_BAR stays {COMPARISON_BAR} (re-aimed from "
+    f"the bug-era {RETIRED_BUG_ERA_BAR} when the blend lost its drainage criterion) while "
     f"the live minimum is {EMBANKMENT_SEED_MIN_SCORE}; the pinned counts ({absolute_small}/"
     f"{absolute_large} vs {retired_small}/{retired_large}) are measured at the pinned bar and the "
     f"live counts ({live_small}/{live_large}) at the live one -- two different measurements, both "
@@ -866,11 +917,31 @@ _floor_dropped_zone = {
     "drop_reason": wsa.FLAG_BELOW_MIN_AREA,
     "compartment_footprint_acres": 0.0412,
     "zone_acres": 0.0688,
+    # THE FILL CLAIM RIDES EVERY LADDER LINE, dropped compartments
+    # included -- a compartment's catchment is exactly as much a fact
+    # about it when it is refused as when it survives.
+    "pinch_catchment_acres": 3.25,
+    "pinch_drainage_score": 1.0,
+    "compartment_rank_score": 0.79,
 }
 _bucket, _detail, _key = diag._seed_outcome(_built_then_dropped, {99: _floor_dropped_zone})
 assert _bucket == "dropped" and _key == f"dropped:{wsa.FLAG_BELOW_MIN_AREA}"
 assert "0.0412 ac" in _detail and "0.0688 ac" in _detail and wsa.FLAG_BELOW_MIN_AREA in _detail
+assert "3.25 ac" in _detail and "1.000" in _detail, (
+    f"the ladder line carries the pinch catchment and its drainage score: {_detail}"
+)
 assert "SURVIVED" not in _detail, "a compartment dropped after it was built is not a survivor"
+# THE CEILING DISQUALIFIER GETS ITS OWN OUTCOME CLASS, which is what the
+# banded summary promotes to a column.
+_over_ceiling = dict(
+    _floor_dropped_zone,
+    drop_reason=wsa.REASON_CATCHMENT_EXCEEDS_CEILING,
+    pinch_catchment_acres=31.4,
+    pinch_drainage_score=0.0,
+)
+_oc_bucket, _oc_detail, _oc_key = diag._seed_outcome(_built_then_dropped, {99: _over_ceiling})
+assert _oc_bucket == "dropped" and _oc_key == diag._OVER_CEILING_BREAKDOWN_KEY
+assert "31.40 ac" in _oc_detail and wsa.REASON_CATCHMENT_EXCEEDS_CEILING in _oc_detail
 # ...and the same seed whose compartment lost an OVERLAP dedupe collapses
 # to the class, not to the winner's id.
 _dedupe_dropped = dict(_floor_dropped_zone, drop_reason=wsa.duplicate_of_zone_reason(3))
@@ -889,7 +960,11 @@ assert diag._collapse_reason(None) == "unknown"
 # THE BANDS: every seed lands in exactly one, the counts reconcile with
 # the ladder, and a band wholly below the live minimum is labelled as
 # such rather than left looking like ground that failed.
-assert "BANDS (seeded / built a compartment / survived the floor):" in _ladder
+assert (
+    "BANDS (seeded / built a compartment / refused by the catchment ceiling / survived the floor):"
+    in _ladder
+), "the ceiling refusal is its OWN column, not a key buried in a breakdown string"
+assert " over-ceiling / " in _ladder, "and every band line prints it, including the zero ones"
 _band_lines = [line.strip() for line in _ladder.split("\n") if "seeded" in line and ":" in line]
 _band_lines = [line for line in _band_lines if line[0].isdigit()]
 assert len(_band_lines) == len(diag.SEED_LADDER_BANDS), "one line per band, always printed"
