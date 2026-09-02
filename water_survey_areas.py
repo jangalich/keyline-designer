@@ -426,7 +426,8 @@ TWI_MIN_SLOPE_TAN = 0.001
 # further into a stream corridor. Mechanism: adding the wettest cells on
 # the landscape took the top percentile ranks and pushed every other
 # cell's rank DOWN; at TWI's 0.20 of the embankment blend that is enough
-# to drop a ~0.52 seed under EMBANKMENT_SEED_MIN_SCORE (0.50) with the
+# to drop a ~0.52 seed under the THEN-0.50 EMBANKMENT_SEED_MIN_SCORE
+# (the constant has since moved -- see its own note) with the
 # terrain unchanged. The direction is the tell -- INCLUDING MORE WATER
 # MADE THE WATER SITES SCORE WORSE, which no physical reading of wetness
 # can produce.
@@ -721,16 +722,68 @@ SUITABILITY_THRESHOLD = 0.5
 # code. The excavated type keeps the full existing pipeline.
 
 # Minimum blend score for a cell to qualify as a compartment seed.
-# CARRIES THE RETIRED EMBANKMENT EXTRACTION THRESHOLD'S VALUE (0.5 --
-# see SUITABILITY_THRESHOLD's evidence note), with a RECORDED SEMANTIC
-# SHIFT: under extraction, 0.5 meant "this cell is part of a survey
-# area"; here it means "this cell is worth NOMINATING a compartment
-# from" -- a weaker claim, because the compartment that results is
-# defined by valley geometry (pinch + watershed band), not by which
-# cells cleared the number. The evidence basis (judged against the
-# parcel's ~0.82 attainable ceiling) carries over with the value.
-# CONFIGURABLE.
-EMBANKMENT_SEED_MIN_SCORE = 0.5
+#
+# HISTORY: this carried the retired embankment EXTRACTION threshold's
+# value (0.5 -- see SUITABILITY_THRESHOLD's evidence note) with a
+# recorded semantic shift, because under extraction 0.5 meant "this cell
+# IS part of a survey area" while here it means "this cell is worth
+# NOMINATING a compartment from". The number never moved with the
+# meaning. It moves now.
+#
+# WHY LOWER: NOMINATION IS NOT QUALIFICATION. Several real gates already
+# sit DOWNSTREAM of seeding and each can refuse a seed on its own
+# evidence -- the pinch walk (a seed whose reach never narrows produces
+# nothing, reason_code no_constriction), the MIN_SURVEY_REGION_AREA_
+# ACRES hull floor, and both dedupe stages (pinch-level and
+# compartment-overlap). A compartment is defined by VALLEY GEOMETRY, not
+# by which cells cleared a number, so a high seeding bar refuses ground
+# at nomination that the geometry was never asked about. Starting with
+# more options and filtering from there is the better shape for this
+# pipeline.
+#
+# WHY 0.30 AND NOT NO MINIMUM AT ALL. Two reasons, and the second is the
+# one that matters.
+#   1. Cost. Seeding is ITERATIVE and separation-claimed
+#      (EMBANKMENT_SEED_SEPARATION_METERS), so with no floor it runs
+#      until every gated cell is claimed -- on the reference property's
+#      2,145 gated cells that is roughly 60-80 seeds at 30 m, each one
+#      walked.
+#   2. THE SEED MINIMUM IS THE ONLY STEP THAT ASKS WHETHER THIS WAS EVER
+#      WATER-RELEVANT GROUND. Every gate downstream of it is GEOMETRIC --
+#      does the reach narrow, is the hull big enough, is this the same
+#      valley as that one -- and none of them can answer that question,
+#      structurally. A narrowing reach on dry ground with no catchment
+#      still narrows. So the floor is not redundant with the downstream
+#      gates; it is the one thing they cannot replace, and it has to
+#      stay meaningful.
+# 0.30 keeps that question alive while admitting the OFF-CHANNEL
+# ARCHETYPE, which the absolute-TWI branch measured as capping at 0.375
+# (0.25*slope + 0.25*soil) for a cell with no drainage credit -- a class
+# 0.50 excluded by arithmetic rather than by judgement.
+#
+# RECORDED BESIDE THE VALUE, because it qualifies it: TWI IS CURRENTLY
+# ~66% FLOORED on the reference property under the shipped
+# TWI_SCORE_MIN_BREAKPOINT / TWI_SCORE_FULL_CREDIT_BREAKPOINT (6.0 /
+# 10.0) -- median raw TWI 5.44, 75th percentile 6.39, so two thirds of
+# gated cells score 0.0 for wetness. A criterion contributing 0.20 of
+# this blend and reading zero on most of the parcel depresses every
+# blend score, which means THIS LOWER MINIMUM PARTLY COMPENSATES FOR AN
+# UNDER-CALIBRATED CRITERION RATHER THAN REPAIRING IT. The TWI
+# calibration decision -- fixed breakpoints versus DEM-window-referenced
+# scoring -- is DELIBERATELY DEFERRED and must not be made here or
+# inferred from this constant's value. When it is made, this number is
+# re-decided against the seed ladder, not left standing.
+#
+# v1 prior. TUNE FROM EVIDENCE: diagnose_water_survey_areas.py prints
+# the SEED LADDER (every seed in blend-descending order with its
+# outcome) and the BANDED SUMMARY (0.30-0.35 / 0.35-0.40 / 0.40-0.45 /
+# 0.45-0.50 / 0.50+, each with seeded / compartment / survived-floor
+# counts and the outcome breakdown) every run. That table is what
+# decides where the productive band actually ends -- low bands producing
+# nothing but no_constriction and floor drops is the evidence for
+# raising this permanently; a 0.32-scoring seed yielding a real
+# compartment is the evidence the change was right. CONFIGURABLE.
+EMBANKMENT_SEED_MIN_SCORE = 0.30
 
 # Claim radius of the iterative seeding: each accepted seed claims every
 # qualifying cell within this real-ground distance, and seeding repeats
@@ -1141,7 +1194,7 @@ def parcel_relative_percentile(values: np.ndarray, parcel_mask: np.ndarray) -> n
     drawn boundary. The measured failure: a boundary extended into a
     stream corridor added the wettest cells on the landscape, they took
     the top ranks, every other cell's percentile fell, and a ~0.52
-    embankment seed dropped under the 0.50 minimum -- the same terrain
+    embankment seed dropped under the then-0.50 seeding minimum -- the same terrain
     scoring worse for including MORE water. See
     TWI_SCORE_MIN_BREAKPOINT's own note for the full mechanism and the
     trade that was reversed.

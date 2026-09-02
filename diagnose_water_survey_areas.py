@@ -52,7 +52,15 @@ Layers written:
         -- the parcel boundary, carrying the gate-mask summary as
            properties (grid/on-parcel/ceiling-removed/gated cell counts)
 
-The terminal output additionally prints the THRESHOLD COMPARISON
+The terminal output additionally prints the SEED LADDER -- every
+embankment seed in blend-descending order with its criteria signature
+and what became of it (reason code and terminator for a failure; band
+and hull acreage plus the floor verdict for a compartment), then the
+same seeds bucketed into blend bands with per-band seeded/built/survived
+counts. THAT TABLE IS WHERE EMBANKMENT_SEED_MIN_SCORE IS TUNED FROM: it
+is the only place a seed that was nominated and produced nothing is
+visible at all, which is what makes a lowered seeding minimum
+checkable rather than merely asserted. The THRESHOLD COMPARISON
 (region count / total acreage / largest region at 0.5/0.6/0.7 on the
 RAW EXCAVATED surface, 8-connected -- the 0.5 default stays tunable
 from evidence every run; the embankment lines are RETIRED with
@@ -140,9 +148,12 @@ from shapely.geometry import mapping
 from water_survey_areas import (
     DEPRESSION_FULL_CREDIT_METERS,
     DEPRESSION_NOISE_FLOOR_METERS,
+    DUPLICATE_OF_ZONE_REASON_PREFIX,
     EMBANKMENT_SEED_MIN_SCORE,
     EMBANKMENT_WEIGHTS,
     EXCAVATED_WEIGHTS,
+    MIN_SURVEY_REGION_AREA_ACRES,
+    SEED_STATUS_COMPARTMENT,
     SURVEY_TYPE_EMBANKMENT,
     SURVEY_TYPE_EXCAVATED,
     SURVEY_TYPES,
@@ -150,6 +161,7 @@ from water_survey_areas import (
     TWI_SCORE_MIN_BREAKPOINT,
     WATER_REGION_CONNECTIVITY,
     WETNESS_TWI_SUBWEIGHT,
+    ZONE_STATUS_DROPPED,
     depression_score,
     identify_water_survey_areas,
     # RETIRED from the scoring path (water_survey_areas.
@@ -179,6 +191,15 @@ WATER_SURVEY_AREAS_GEOJSON_PATH = "water_survey_areas.geojson"
 # per-criterion bands likewise on the RAW criterion grids.
 # CONFIGURABLE.
 ISOBAND_LEVELS = (0.2, 0.4, 0.6, 0.8)
+
+# Lower edges of the SEED LADDER's summary bands (see
+# summarize_seed_ladder()). The top band is open-ended. These bracket
+# EMBANKMENT_SEED_MIN_SCORE's move from 0.50 to 0.30 so the run says
+# directly what the newly-admitted range produced: a band below the
+# current minimum reads zero by construction, which is the honest way
+# for this table to show a raised floor rather than to hide it.
+# CONFIGURABLE.
+SEED_LADDER_BANDS = (0.30, 0.35, 0.40, 0.45, 0.50)
 
 # The thresholds the comparison table evaluates on the RAW surfaces --
 # printed every run so the 0.6 default remains a choice re-decided
@@ -483,19 +504,187 @@ def summarize_survey_zones_table(identify_result: dict) -> str:
                 f"{zone['zone_acres']:.4f} ac anchored by {zone['member_acres']:.4f} ac, "
                 f"mean {zone['mean_suitability']:.3f} -- excluded from the pipeline output"
             )
+    # THE SEED ACCOUNTING, one line. The per-failure list that used to
+    # sit here is RETIRED INTO summarize_seed_ladder(), which carries
+    # every one of these records with strictly more on it (criteria
+    # signature, and the acreages and floor verdict for the ones that
+    # built something). Printing both would print every failure twice --
+    # and at the 0.30 seeding minimum that is dozens of duplicated lines
+    # on a real parcel. The counts stay here because they are context for
+    # the zone table above them; the detail lives in one place.
     seeds = identify_result.get("embankment_seeds", [])
     failed = [record for record in seeds if record.get("status") == "failed"]
     lines.append(
-        f"=== EMBANKMENT SEEDS ({len(seeds)} seeded, uncapped; {len(failed)} produced nothing) ==="
+        f"=== EMBANKMENT SEEDS ({len(seeds)} seeded, uncapped; {len(failed)} produced nothing) "
+        "-- per-seed detail in the SEED LADDER below ==="
     )
     if not seeds:
-        lines.append("  (no gated cell reached the seed score)")
-    for record in failed:
-        lines.append(
-            f"  FAILED ({record.get('reason_code')}): blend {record['blend_score']:.3f} at "
-            f"{tuple(record['rowcol'])}, terminator={record.get('terminator')}, "
-            f"{record.get('stations_measured', 0)} station(s) measured -- no compartment, honestly"
+        lines.append(f"  (no gated cell reached {EMBANKMENT_SEED_MIN_SCORE})")
+    return "\n".join(lines)
+
+
+def _collapse_reason(reason) -> str:
+    """A reason code as its OUTCOME CLASS: every duplicate_of_zone_<id>
+    collapses to duplicate_of_zone. See _seed_outcome()."""
+    if not reason:
+        return "unknown"
+    if reason.startswith(DUPLICATE_OF_ZONE_REASON_PREFIX):
+        return DUPLICATE_OF_ZONE_REASON_PREFIX.rstrip("_")
+    return reason
+
+
+def _seed_outcome(record: dict, zone_by_id: dict) -> tuple:
+    """One seed's outcome as (bucket, detail, key): `bucket` is the
+    coarse class the banded summary counts, `detail` is the ladder
+    line's own text, and `key` is how the band breakdown names it.
+
+    THE KEY IS DELIBERATELY COARSER THAN THE DETAIL. A dedupe reason
+    names its winning zone (duplicate_of_zone_7), which is exactly right
+    on a per-seed line and exactly wrong in a summary, where it would
+    split one outcome class across as many keys as there are winners.
+    The line keeps the id; the band counts the class.
+
+    THE OUTCOME OF A SEED IS NOT ITS STATUS. A seed whose status is
+    'compartment' may still have had that compartment dropped afterwards
+    -- by the acre floor, or by compartment-overlap dedupe, neither of
+    which touches the seed record. So the compartment's own zone is
+    looked up and its status read: 'survived' means a compartment
+    exists AND cleared everything downstream, which is the only outcome
+    that put ground in front of the user."""
+    if record.get("status") != SEED_STATUS_COMPARTMENT:
+        reason = record.get("reason_code") or "unknown"
+        terminator = record.get("terminator")
+        stations = record.get("stations_measured")
+        detail = reason
+        if terminator is not None:
+            detail += f", terminator={terminator}"
+        if stations is not None:
+            detail += f", {stations} station(s)"
+        return ("failed", detail, _collapse_reason(reason))
+
+    zone = zone_by_id.get(record.get("zone_id"))
+    if zone is None:
+        return ("compartment", "compartment built (zone not found in this result)", "compartment")
+    acreage = (
+        f"band {zone['compartment_footprint_acres']:.4f} ac / hull {zone['zone_acres']:.4f} ac"
+    )
+    if zone.get("status") == ZONE_STATUS_DROPPED:
+        drop_reason = zone.get("drop_reason")
+        return (
+            "dropped",
+            f"{acreage}; DROPPED ({drop_reason})",
+            f"dropped:{_collapse_reason(drop_reason)}",
         )
+    return (
+        "survived",
+        f"{acreage}; SURVIVED the {MIN_SURVEY_REGION_AREA_ACRES} ac floor",
+        "survived",
+    )
+
+
+def summarize_seed_ladder(identify_result: dict) -> str:
+    """
+    THE INSTRUMENT THAT EARNS EMBANKMENT_SEED_MIN_SCORE's VALUE: every
+    seed this run nominated, in blend-descending order, with what became
+    of it -- then the same seeds bucketed by blend band.
+
+    WHY IT EXISTS. The seeding minimum dropped from 0.50 to 0.30 on the
+    argument that several real gates sit downstream of nomination and
+    should be allowed to do the filtering (see the constant's own note).
+    That argument is a PREDICTION, and this table is what tests it. Read
+    the banded summary bottom-up:
+
+      * a low band seeding many and surviving NONE -- nothing but
+        no_constriction and floor drops -- is the evidence for raising
+        the minimum permanently, and says where to raise it TO.
+      * a low band producing even one real compartment is the evidence
+        the change was right, and that ground would not have been
+        nominated at 0.50 at all.
+
+    Neither reading is available from the zone list alone, because a
+    zone that was never nominated leaves no trace anywhere else.
+
+    THE COST LINE is printed with it: seeds nominated and pinch walks
+    run. Every seed is walked -- none is pre-pruned, per the standing
+    no-cap rule -- so the two numbers are equal BY CONSTRUCTION and the
+    cost of a lower minimum is exactly linear in the seeds it admits.
+    Printing both states that rather than leaving it to be inferred.
+
+    ONE CAVEAT TRAVELS WITH EVERY NUMBER HERE: TWI is heavily floored on
+    the reference property under the shipped breakpoints, so these blend
+    scores are depressed by an under-calibrated criterion. The bands are
+    still the right instrument; their EDGES will need re-reading once
+    the TWI calibration decision is made. See
+    EMBANKMENT_SEED_MIN_SCORE's note.
+    """
+    result = identify_result["result"]
+    seeds = result.get("embankment_seeds", [])
+    zone_by_id = {
+        zone["id"]: zone for zone in result["zones"] + result["dropped_zones"]
+    }
+
+    lines = [
+        f"=== EMBANKMENT SEED LADDER (minimum {EMBANKMENT_SEED_MIN_SCORE}, uncapped) ===",
+        f"  {len(seeds)} seed(s) nominated; {len(seeds)} pinch walk(s) run "
+        "(one per seed -- nothing is pre-pruned, so the cost is linear in the seeds admitted)",
+    ]
+    if not seeds:
+        lines.append(f"  (no gated cell reached {EMBANKMENT_SEED_MIN_SCORE})")
+        return "\n".join(lines)
+
+    criterion_names = list(EMBANKMENT_WEIGHTS)
+    ordered = sorted(seeds, key=lambda record: record["blend_score"], reverse=True)
+    lines.append(
+        "   #   blend  cell        "
+        + "".join(f"{name:>15}" for name in criterion_names)
+        + "   outcome"
+    )
+    outcomes = []
+    for rank, record in enumerate(ordered, start=1):
+        bucket, detail, key = _seed_outcome(record, zone_by_id)
+        outcomes.append((record["blend_score"], bucket, key))
+        signature = record["criteria_signature"]
+        row, col = record["rowcol"]
+        lines.append(
+            f"  {rank:>3}  {record['blend_score']:.3f}  ({row:>3},{col:>3})  "
+            + "".join(f"{signature[name]:>15.3f}" for name in criterion_names)
+            + f"   {detail}"
+        )
+
+    # THE BANDED SUMMARY -- the table the next tuning decision is made
+    # from. Bands are half-open [low, high); the top one is open-ended.
+    lines.append("  BANDS (seeded / built a compartment / survived the floor):")
+    edges = list(SEED_LADDER_BANDS)
+    for index, low in enumerate(edges):
+        high = edges[index + 1] if index + 1 < len(edges) else None
+        in_band = [
+            entry for entry in outcomes
+            if entry[0] >= low and (high is None or entry[0] < high)
+        ]
+        label = f"{low:.2f}-{high:.2f}" if high is not None else f"{low:.2f}+"
+        if not in_band:
+            note = (
+                "  (below the current minimum)"
+                if high is not None and high <= EMBANKMENT_SEED_MIN_SCORE
+                else ""
+            )
+            lines.append(f"    {label}: 0 seeded{note}")
+            continue
+        built = sum(1 for entry in in_band if entry[1] in ("survived", "dropped", "compartment"))
+        survived = sum(1 for entry in in_band if entry[1] == "survived")
+        breakdown: dict = {}
+        for _score, _bucket, key in in_band:
+            breakdown[key] = breakdown.get(key, 0) + 1
+        lines.append(
+            f"    {label}: {len(in_band)} seeded / {built} built / {survived} survived   "
+            + ", ".join(f"{key}={count}" for key, count in sorted(breakdown.items()))
+        )
+    lines.append(
+        "  READ IT BOTTOM-UP: a low band seeding many and surviving none is the evidence for "
+        "raising EMBANKMENT_SEED_MIN_SCORE (and says where to); one real compartment down there is "
+        "the evidence the lower minimum was right. Blend scores here are depressed by TWI's "
+        "current flooring -- re-read the band edges after the TWI calibration decision."
+    )
     return "\n".join(lines)
 
 
@@ -840,7 +1029,8 @@ REFERENCE_BOUNDARY = [
 # where the reference boundary produced one -- the added corridor cells
 # were the wettest on the landscape, took the top percentile ranks, and
 # pushed every other cell's TWI rank down far enough (0.20 of the
-# embankment blend) to drop a ~0.52 seed under the 0.50 minimum. Kept
+# embankment blend) to drop a ~0.52 seed under the then-0.50 seeding
+# minimum. Kept
 # here as the second boundary of the standing two-boundary run.
 STREAM_CORRIDOR_BOUNDARY = [
     (-79.98395562171937, 40.6460162710763),
@@ -1433,6 +1623,8 @@ def main() -> None:
     production_areas = identify_result["_production_areas"]
 
     print(summarize_survey_zones_table(identify_result))
+    print()
+    print(summarize_seed_ladder(identify_result))
     print()
     print(summarize_gate_and_criteria(identify_result))
     print()

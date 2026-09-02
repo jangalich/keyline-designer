@@ -1160,7 +1160,23 @@ far_road = box(ORIGIN_X + 90 * RESOLUTION, ORIGIN_Y - 95 * RESOLUTION, ORIGIN_X 
 checked_far = compute_water_survey_areas(
     FLAT_DEM, FLAT_BOUNDARY, soil_inputs=WET_SOIL, road_exclusion_union_utm=far_road
 )
-assert unchecked["embankment_seeds"] == [] and unchecked["zones_by_type"][SURVEY_TYPE_EMBANKMENT] == []
+# THE EMBANKMENT PATH ON THIS DEAD-FLAT FIXTURE, since the seeding
+# minimum dropped to 0.30: every gated cell blends to exactly 0.3759
+# (0.30*0 no catchment + 0.25*0 dead-flat is under the embankment slope
+# floor + 0.25*1.0 best wet soil + 0.20*0.6293 TWI), so cells ARE now
+# nominated where at 0.50 none were. They all fail -- flat ground has no
+# valley to narrow -- and NO embankment zone is produced, which is what
+# this road-posture check needs. Asserted as the real outcome rather
+# than as an empty list, so a change in either direction is visible.
+assert unchecked["embankment_seeds"], "the 0.30 minimum nominates on this fixture; 0.50 did not"
+assert all(
+    record["status"] == wsa.SEED_STATUS_FAILED
+    and record["reason_code"] == wsa.REASON_NO_CONSTRICTION
+    for record in unchecked["embankment_seeds"]
+), "dead-flat ground never narrows -- every seed reports no_constriction, honestly"
+assert unchecked["zones_by_type"][SURVEY_TYPE_EMBANKMENT] == [], (
+    "and so no embankment zone exists: the excavated comparison below is unaffected"
+)
 assert _excavated_wire(unchecked) == _excavated_wire(checked_clean) == _excavated_wire(checked_far), (
     "BYTE-IDENTICAL excavated output on a roadless fixture -- road unchecked, checked-clean, and a "
     "road far away all produce the same wire bytes (road_overlap_pct's sentinel aside)"

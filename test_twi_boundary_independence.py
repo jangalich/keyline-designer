@@ -12,9 +12,9 @@ larger one reaching further into a stream corridor. TWI was the lone
 parcel-relative input in either blend -- a percentile rank over the
 on-parcel cells -- so adding the wettest cells on the landscape took the
 top ranks, pushed every other cell's rank DOWN, and at 0.20 of the
-embankment blend that was enough to drop a ~0.52 seed under the 0.50
-seeding minimum with the terrain unchanged. The direction is the tell:
-INCLUDING MORE WATER MADE THE WATER SITES SCORE WORSE.
+embankment blend that was enough to drop a ~0.52 seed under the
+then-0.50 seeding minimum with the terrain unchanged. The direction is
+the tell: INCLUDING MORE WATER MADE THE WATER SITES SCORE WORSE.
 
 water_survey_areas.twi_score() replaced that percentile with a fixed
 absolute curve over raw ln(a/tan(beta)). This file pins the fix:
@@ -226,8 +226,20 @@ _xs, _ys = np.meshgrid(col_x, row_y)
 IN_SMALL_BOX = contains_xy(SMALL_BOUNDARY, _xs, _ys)
 
 
-def _clearing_count(result, surface):
-    return int(np.count_nonzero((surface >= EMBANKMENT_SEED_MIN_SCORE) & result["gate_mask"] & IN_SMALL_BOX))
+# THE COMPARISON THRESHOLD IS PINNED, NOT READ FROM THE LIVE CONSTANT.
+# EMBANKMENT_SEED_MIN_SCORE is a SEEDING POLICY number that moves for
+# reasons of its own (it has since dropped to 0.30 to admit the
+# off-channel archetype). This test is about the TWI SCORE, and it must
+# keep measuring the same thing when that policy moves -- so it states
+# the value the constant held WHEN THE BUG WAS FOUND and compares
+# against that. Reading the live constant here would let an unrelated
+# tuning change quietly rewrite what this test demonstrates, which is
+# precisely the coupling the branch exists to remove.
+BUG_ERA_SEED_MINIMUM = 0.50
+
+
+def _clearing_count(result, surface, threshold=BUG_ERA_SEED_MINIMUM):
+    return int(np.count_nonzero((surface >= threshold) & result["gate_mask"] & IN_SMALL_BOX))
 
 
 def _retired_surface(result, percentile):
@@ -244,41 +256,74 @@ absolute_large = _clearing_count(large, large["surfaces"][SURVEY_TYPE_EMBANKMENT
 retired_small = _clearing_count(small, _retired_surface(small, small_pct))
 retired_large = _clearing_count(large, _retired_surface(large, large_pct))
 assert absolute_small == absolute_large == 38, (
-    f"every cell that qualifies as an embankment seed inside the small boundary still qualifies "
+    f"every cell that clears the bug-era seeding bar inside the small boundary still clears it "
     f"when the boundary grows (got {absolute_small} then {absolute_large})"
 )
 assert retired_small == 442 and retired_large == 0, (
     f"under the retired percentile the SAME ground went from {retired_small} qualifying cells to "
     f"{retired_large} -- the entire candidate valley disqualified by ground outside it"
 )
+# The same invariant at whatever the seeding minimum is TODAY: the count
+# is a different number at a different bar, and it must still be the
+# SAME number under both boundaries. This is the half that tracks the
+# live constant; the pinned numbers above are the half that records the
+# bug.
+live_small = _clearing_count(small, small["surfaces"][SURVEY_TYPE_EMBANKMENT], EMBANKMENT_SEED_MIN_SCORE)
+live_large = _clearing_count(large, large["surfaces"][SURVEY_TYPE_EMBANKMENT], EMBANKMENT_SEED_MIN_SCORE)
+assert live_small == live_large, (
+    f"at the live seeding minimum ({EMBANKMENT_SEED_MIN_SCORE}) the candidate valley must still "
+    f"qualify identically under both boundaries (got {live_small} then {live_large})"
+)
 
 # --- THE ZONE ITSELF SURVIVES BOTH, which is the acceptance question
-small_embankment = small["zones_by_type"][SURVEY_TYPE_EMBANKMENT]
-large_embankment = large["zones_by_type"][SURVEY_TYPE_EMBANKMENT]
-assert len(small_embankment) == 1 and len(large_embankment) == 1, (
-    "the candidate valley produces exactly one embankment compartment under each boundary"
+small_embankment = {
+    tuple(zone["seed"]["rowcol"]): zone for zone in small["zones_by_type"][SURVEY_TYPE_EMBANKMENT]
+}
+large_embankment = {
+    tuple(zone["seed"]["rowcol"]): zone for zone in large["zones_by_type"][SURVEY_TYPE_EMBANKMENT]
+}
+# NOTHING THE SMALLER BOUNDARY FOUND MAY GO MISSING. That is the
+# acceptance question in its exact shape -- the real failure was a zone
+# present under one boundary and absent under a larger one over the same
+# land. The larger boundary GAINING compartments is legitimate (it holds
+# ground the smaller one does not), so the assertion is one-directional.
+assert set(small_embankment) <= set(large_embankment), (
+    f"the larger boundary lost {set(small_embankment) - set(large_embankment)} -- the bug's own "
+    "signature, on ground it still contains"
 )
-assert small_embankment[0]["seed"]["rowcol"] == large_embankment[0]["seed"]["rowcol"], (
-    "anchored at the same cell under both"
-)
-assert small_embankment[0]["seed_blend_score"] == large_embankment[0]["seed_blend_score"], (
-    "with the identical seed blend score -- the number that vanished under the boundary the real "
-    "run lost the zone on"
-)
-assert math.isclose(small_embankment[0]["zone_acres"], large_embankment[0]["zone_acres"]), (
-    "and the identical walkable claim"
-)
-for name in wsa.EMBANKMENT_WEIGHTS:
-    a = small_embankment[0]["criterion_contributions"][name]["mean_score"]
-    b = large_embankment[0]["criterion_contributions"][name]["mean_score"]
-    assert a == b, f"criterion '{name}' moved between boundaries ({a} -> {b}) on identical ground"
+# WHICH CELLS BECOME SEEDS IS ALLOWED TO DIFFER, and only that. Seeding
+# is separation-claimed over the GATED population, and the gate mask IS
+# the boundary, so a larger gated population can claim in a different
+# order and expose a cell the smaller run's discs had covered. That is
+# the boundary deciding what is in play. What may never differ is what a
+# cell in play is WORTH -- asserted exhaustively per cell above, and per
+# criterion on every shared compartment here.
+CANDIDATE_SEED = (1, CANDIDATE_CHANNEL)
+assert CANDIDATE_SEED in small_embankment, "the candidate valley's compartment exists at all"
+for seed_cell, small_zone in small_embankment.items():
+    large_zone = large_embankment[seed_cell]
+    assert small_zone["seed_blend_score"] == large_zone["seed_blend_score"], (
+        f"{seed_cell}: the seed blend score moved between boundaries -- the number that vanished "
+        "under the boundary the real run lost the zone on"
+    )
+    assert math.isclose(small_zone["zone_acres"], large_zone["zone_acres"]), (
+        f"{seed_cell}: the walkable claim moved between boundaries"
+    )
+    for name in wsa.EMBANKMENT_WEIGHTS:
+        a = small_zone["criterion_contributions"][name]["mean_score"]
+        b = large_zone["criterion_contributions"][name]["mean_score"]
+        assert a == b, (
+            f"{seed_cell}: criterion '{name}' moved between boundaries ({a} -> {b}) on identical ground"
+        )
 
 print(
     f"1. The bug, pinned: probe cell raw TWI {raw_small:.4f} scores {score_small:.4f} under BOTH "
-    f"boundaries (retired percentile: {old_small:.4f} -> {old_large:.4f}); embankment-qualifying "
-    f"cells in the candidate valley {absolute_small} -> {absolute_large} absolute vs "
-    f"{retired_small} -> {retired_large} retired; the compartment survives both, every criterion "
-    "mean unchanged."
+    f"boundaries (retired percentile: {old_small:.4f} -> {old_large:.4f}); cells clearing the "
+    f"bug-era {BUG_ERA_SEED_MINIMUM} bar in the candidate valley {absolute_small} -> "
+    f"{absolute_large} absolute vs {retired_small} -> {retired_large} retired, and "
+    f"{live_small} -> {live_large} at the live {EMBANKMENT_SEED_MIN_SCORE} minimum; the "
+    f"{len(small_embankment)} compartment(s) survive both (the larger boundary gains "
+    f"{len(large_embankment) - len(small_embankment)} and loses none), every criterion mean unchanged."
 )
 
 
@@ -597,7 +642,7 @@ assert np.array_equal(_before, small["surfaces"][SURVEY_TYPE_EMBANKMENT]), (
 assert "EVIDENCE ONLY, NOTHING CHANGED" in _signal
 assert "Pearson" in _signal and "Spearman" in _signal
 assert f"CLEARING SHARE at EMBANKMENT_SEED_MIN_SCORE ({EMBANKMENT_SEED_MIN_SCORE})" in _signal
-assert "with TWI 38/874" in _signal and "without TWI 0/874" in _signal, (
+assert "with TWI 466/874" in _signal and "without TWI 466/874" in _signal, (
     f"the with/without-TWI clearing share is measured on this fixture:\n{_signal}"
 )
 assert "embankment SEEDS:" in _signal and "lost," in _signal
@@ -622,6 +667,136 @@ print(
     "percentile moving cells 0.3035 on average while the absolute curve moves none, and the "
     "independent-signal report states correlations, clearing shares and seed archetypes without "
     "touching a surface."
+)
+
+
+# =========================================================================
+# 6. THE SEED LADDER (the instrument EMBANKMENT_SEED_MIN_SCORE is tuned from)
+# =========================================================================
+# The seeding minimum dropped to 0.30 on the argument that downstream
+# gates should do the filtering. That is a prediction, and the ladder is
+# what tests it -- so the ladder itself has to be right about what
+# became of each seed. Checked against the fixture's own zones rather
+# than against the ladder's own words.
+_ladder = diag.summarize_seed_ladder(_as_run(small, SMALL_BOUNDARY))
+_seed_records = small["embankment_seeds"]
+assert f"minimum {EMBANKMENT_SEED_MIN_SCORE}" in _ladder
+assert f"{len(_seed_records)} seed(s) nominated; {len(_seed_records)} pinch walk(s) run" in _ladder, (
+    "the cost line states seeds and walks -- equal by construction, because nothing is pre-pruned"
+)
+# One ladder row per seed, in blend-DESCENDING order.
+_ranked = sorted(_seed_records, key=lambda r: r["blend_score"], reverse=True)
+for _rank, _record in enumerate(_ranked, start=1):
+    _row, _col = _record["rowcol"]
+    assert f"  {_rank:>3}  {_record['blend_score']:.3f}  ({_row:>3},{_col:>3})" in _ladder, (
+        f"seed {_record['rowcol']} must appear at ladder rank {_rank}, blend-descending"
+    )
+
+# EVERY OUTCOME CLASS IS DISTINGUISHED, and each is checked against the
+# zone the seed actually produced -- a seed whose compartment was
+# dropped afterwards is NOT a survivor, and the ladder must not read
+# like one.
+_zone_by_id = {z["id"]: z for z in small["zones"] + small["dropped_zones"]}
+_survived = _dropped = _failed = 0
+for _record in _seed_records:
+    _bucket, _detail, _key = diag._seed_outcome(_record, _zone_by_id)
+    if _record["status"] != wsa.SEED_STATUS_COMPARTMENT:
+        assert _bucket == "failed" and _record["reason_code"] in _detail
+        _failed += 1
+        continue
+    _zone = _zone_by_id[_record["zone_id"]]
+    if _zone["status"] == wsa.ZONE_STATUS_DROPPED:
+        assert _bucket == "dropped" and "DROPPED" in _detail and _zone["drop_reason"] in _detail
+        assert _key.startswith("dropped:")
+        _dropped += 1
+    else:
+        assert _bucket == "survived" and "SURVIVED" in _detail and _key == "survived"
+        _survived += 1
+    assert f"{_zone['compartment_footprint_acres']:.4f} ac" in _detail, "band acreage on the line"
+    assert f"{_zone['zone_acres']:.4f} ac" in _detail, "and hull acreage beside it"
+assert _survived == len(small["zones_by_type"][SURVEY_TYPE_EMBANKMENT]), (
+    "the ladder's survivor count is the run's own surviving embankment zone count"
+)
+assert _survived and _failed, "this fixture exercises both a survivor and a failure"
+
+# THE DROPPED CLASS, exercised directly since this fixture happens to
+# produce none: a seed that BUILT a compartment which was then dropped
+# must read as dropped, never as a survivor. This is the distinction the
+# banded summary's "built" and "survived" columns turn on, so it is
+# checked rather than assumed.
+_built_then_dropped = {
+    "status": wsa.SEED_STATUS_COMPARTMENT,
+    "zone_id": 99,
+    "rowcol": (4, 4),
+    "blend_score": 0.31,
+    "criteria_signature": {name: 0.5 for name in wsa.EMBANKMENT_WEIGHTS},
+}
+_floor_dropped_zone = {
+    "id": 99,
+    "status": wsa.ZONE_STATUS_DROPPED,
+    "drop_reason": wsa.FLAG_BELOW_MIN_AREA,
+    "compartment_footprint_acres": 0.0412,
+    "zone_acres": 0.0688,
+}
+_bucket, _detail, _key = diag._seed_outcome(_built_then_dropped, {99: _floor_dropped_zone})
+assert _bucket == "dropped" and _key == f"dropped:{wsa.FLAG_BELOW_MIN_AREA}"
+assert "0.0412 ac" in _detail and "0.0688 ac" in _detail and wsa.FLAG_BELOW_MIN_AREA in _detail
+assert "SURVIVED" not in _detail, "a compartment dropped after it was built is not a survivor"
+# ...and the same seed whose compartment lost an OVERLAP dedupe collapses
+# to the class, not to the winner's id.
+_dedupe_dropped = dict(_floor_dropped_zone, drop_reason=wsa.duplicate_of_zone_reason(3))
+assert diag._seed_outcome(_built_then_dropped, {99: _dedupe_dropped})[2] == "dropped:duplicate_of_zone"
+# A seed whose zone is missing from the result degrades to a named
+# outcome rather than raising.
+assert diag._seed_outcome(_built_then_dropped, {})[0] == "compartment"
+
+# A DEDUPE REASON NAMES ITS WINNER ON THE LINE AND ITS CLASS IN THE
+# BAND, so one outcome class cannot be split across as many keys as
+# there are winning zones.
+assert diag._collapse_reason("duplicate_of_zone_7") == "duplicate_of_zone"
+assert diag._collapse_reason(wsa.REASON_NO_CONSTRICTION) == wsa.REASON_NO_CONSTRICTION
+assert diag._collapse_reason(None) == "unknown"
+
+# THE BANDS: every seed lands in exactly one, the counts reconcile with
+# the ladder, and a band wholly below the live minimum is labelled as
+# such rather than left looking like ground that failed.
+assert "BANDS (seeded / built a compartment / survived the floor):" in _ladder
+_band_lines = [line.strip() for line in _ladder.split("\n") if "seeded" in line and ":" in line]
+_band_lines = [line for line in _band_lines if line[0].isdigit()]
+assert len(_band_lines) == len(diag.SEED_LADDER_BANDS), "one line per band, always printed"
+_counted = 0
+for _line in _band_lines:
+    _counted += int(_line.split(":")[1].strip().split(" ")[0])
+assert _counted == len(_seed_records), (
+    f"every seed is counted in exactly one band ({_counted} banded vs {len(_seed_records)} seeded)"
+)
+assert f"{sum(1 for r in _seed_records if r['blend_score'] >= 0.50)} seeded" in _ladder
+
+# A raised minimum must show as an EMPTY low band saying why, never as
+# a silently missing row.
+_high = diag.summarize_seed_ladder(_as_run(small, SMALL_BOUNDARY))
+assert "(below the current minimum)" not in _high, "at 0.30 no band sits below the minimum"
+_saved = wsa.EMBANKMENT_SEED_MIN_SCORE
+try:
+    wsa.EMBANKMENT_SEED_MIN_SCORE = 0.45
+    diag.EMBANKMENT_SEED_MIN_SCORE = 0.45
+    _raised = diag.summarize_seed_ladder(_as_run(small, SMALL_BOUNDARY))
+    assert "0.30-0.35: 0 seeded  (below the current minimum)" in _raised, (
+        f"a band under a raised minimum reads zero AND says why:\n{_raised}"
+    )
+finally:
+    wsa.EMBANKMENT_SEED_MIN_SCORE = _saved
+    diag.EMBANKMENT_SEED_MIN_SCORE = _saved
+
+# An empty run says so instead of printing an empty table.
+_no_seeds = _as_run(small, SMALL_BOUNDARY)
+_no_seeds["result"] = dict(small, embankment_seeds=[])
+assert "no gated cell reached" in diag.summarize_seed_ladder(_no_seeds)
+print(
+    f"6. Seed ladder: {len(_seed_records)} seeds, one row each in blend-descending order with "
+    f"signature and outcome ({_survived} survived / {_dropped} dropped / {_failed} failed, each "
+    "verified against the zone it produced), the cost line states seeds == walks, bands reconcile "
+    "to the seed count, and a raised minimum shows as an empty band that says why."
 )
 
 print("\nAll TWI boundary-independence checks passed.")

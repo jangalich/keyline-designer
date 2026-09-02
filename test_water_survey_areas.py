@@ -954,9 +954,17 @@ assert exc_zones[0]["boundary_adjacency_fraction"] < 0.1
 assert v_result["regions_by_type"][SURVEY_TYPE_EMBANKMENT] == [], (
     "the embankment path has no extraction stage -- member regions are excavated-only"
 )
-# The seeding, hand-derived. The qualifying cells are exactly the 36
-# on-parcel channel cells (blend 0.6652..0.875, ascending with r; every
-# side cell is 0.375 < 0.5).
+# The seeding, hand-derived, IN TWO TIERS since the seeding minimum
+# dropped to 0.30. The channel cells blend 0.6652..0.875; every side
+# cell blends EXACTLY 0.375 -- 0.30*0 (no catchment) + 0.25*1.0 (slope)
+# + 0.25*0.5 (neutral soil) + 0.20*0 (raw TWI 4.16, under the ramp's
+# floor). 0.375 is the OFF-CHANNEL ARCHETYPE'S ARITHMETIC CAP, the class
+# a 0.50 minimum excluded by construction rather than by judgement, and
+# it is exactly what EMBANKMENT_SEED_MIN_SCORE = 0.30 was lowered to
+# admit. This fixture is where that is visible: at 0.50 the side slopes
+# were not nominated at all; at 0.30 they are, twelve of them, and two
+# go on to produce surviving compartments while the channel -- higher
+# scoring on every criterion -- produces none.
 #
 # THE ABSOLUTE CURVE PUTS A PLATEAU AT THE TOP OF THIS SURFACE, and the
 # seeding order is worth stating because of it. Both of the
@@ -977,60 +985,107 @@ assert v_result["regions_by_type"][SURVEY_TYPE_EMBANKMENT] == [], (
 # seeding is deliberately not what this branch changed.
 #
 # Iterative claiming at 30 m (6 cells of row distance, symmetric and
-# inclusive): the row-5 seed claims rows 0..11 (taking rows 2-4 with
-# it), then row 12 claims 6..18, and so on -> seeds at rows 5, 12, 19,
-# 26, 33.
+# inclusive), blend-descending, so the channel tier claims first: the
+# row-5 seed claims rows 0..11 (taking rows 2-4 with it), then row 12
+# claims 6..18, and so on -> channel seeds at rows 5, 12, 19, 26, 33.
+# The 0.375 side tier then seeds what the channel discs did not claim,
+# ties resolved row-major, alternating flanks as the scan reaches them.
 v_seeds = v_result["embankment_seeds"]
-assert [record["rowcol"] for record in v_seeds] == [
-    (5, V_CHANNEL), (12, V_CHANNEL), (19, V_CHANNEL), (26, V_CHANNEL), (33, V_CHANNEL)
-], f"hand-derived 30 m claiming order, got {[record['rowcol'] for record in v_seeds]}"
-assert all(record["blend_score"] >= 0.5 for record in v_seeds)
-assert all(math.isclose(record["blend_score"], 0.875) for record in v_seeds), (
-    "every seed sits on the saturated plateau, all five at the identical 0.875"
+V_CHANNEL_SEEDS = [(5, V_CHANNEL), (12, V_CHANNEL), (19, V_CHANNEL), (26, V_CHANNEL), (33, V_CHANNEL)]
+V_SIDE_SEEDS = [
+    (2, 2), (2, 16), (8, 3), (8, 17), (14, 2), (14, 16),
+    (20, 3), (20, 17), (26, 2), (26, 18), (32, 3), (32, 16),
+]
+assert [record["rowcol"] for record in v_seeds] == V_CHANNEL_SEEDS + V_SIDE_SEEDS, (
+    f"hand-derived 30 m claiming order, channel tier then side tier, got "
+    f"{[record['rowcol'] for record in v_seeds]}"
 )
-# Every seed FAILS, honestly, because this prism valley has a CONSTANT
-# cross-section -- crest-to-crest width is identical at every station,
-# so the along-channel minimum lands on the seed's own station (argmin
-# tie -> index 0: the valley never narrows below the seed) -- the ONE
-# failure the accepted-terminal doctrine kept: no_constriction. (The
-# r=37 seed's walk is cut by the boundary with only its own station
-# measured -- a single station IS the seed station, so it reads
-# no_constriction too, not a terminal acceptance: a dam at the storage
-# cell is degenerate.)
-assert all(record["status"] == wsa.SEED_STATUS_FAILED for record in v_seeds), (
-    "a constant-width prism never narrows below any seed -- every seed reports nothing"
+assert all(math.isclose(record["blend_score"], 0.875) for record in v_seeds[:5]), (
+    "every channel seed sits on the saturated plateau, all five at the identical 0.875"
 )
-assert all(
-    record["reason_code"] == wsa.REASON_NO_CONSTRICTION for record in v_seeds
-), f"widths never drop below the seed station -> no_constriction, got {[r['reason_code'] for r in v_seeds]}"
-assert v_result["zones_by_type"][SURVEY_TYPE_EMBANKMENT] == [], (
-    "no constriction, no compartment, no fallback -- the hull does not exist on this path"
+assert all(math.isclose(record["blend_score"], 0.375) for record in v_seeds[5:]), (
+    "and every side seed sits at the off-channel arithmetic cap, all twelve at exactly 0.375"
+)
+assert all(record["blend_score"] >= wsa.EMBANKMENT_SEED_MIN_SCORE for record in v_seeds)
+assert 0.375 < 0.5, "the side tier would not have been nominated at all under the old 0.50 minimum"
+
+# EVERY CHANNEL SEED FAILS, honestly, because this prism valley has a
+# CONSTANT cross-section -- crest-to-crest width is identical at every
+# station, so the along-channel minimum lands on the seed's own station
+# (argmin tie -> index 0: the valley never narrows below the seed) --
+# the ONE failure the accepted-terminal doctrine kept: no_constriction.
+_channel_records = v_seeds[:5]
+assert all(record["status"] == wsa.SEED_STATUS_FAILED for record in _channel_records), (
+    "a constant-width prism never narrows below any channel seed -- every one reports nothing"
+)
+assert all(record["reason_code"] == wsa.REASON_NO_CONSTRICTION for record in _channel_records), (
+    f"widths never drop below the seed station -> no_constriction, got "
+    f"{[r['reason_code'] for r in _channel_records]}"
 )
 
-# The lone excavated zone survives, ranks 1, selects; with no
-# embankment zone there is no cross-type agreement to report.
+# THE SIDE TIER IS THE POINT OF THE LOWER MINIMUM, and it does not all
+# succeed either -- which is the shape the change predicted. The four
+# upslope-most side seeds walk reaches that never narrow (no_constriction
+# again); six build compartments, two of those lose a dedupe, and TWO
+# SURVIVE THE FLOOR. Ground scoring 0.375 -- half what the channel
+# scores -- is the only ground on this fixture that produces an
+# embankment survey zone at all.
+_side_records = v_seeds[5:]
+assert sum(1 for r in _side_records if r["status"] == wsa.SEED_STATUS_COMPARTMENT) == 6
+assert sum(
+    1 for r in _side_records
+    if r["status"] == wsa.SEED_STATUS_FAILED and r["reason_code"] == wsa.REASON_NO_CONSTRICTION
+) == 4
+assert sum(
+    1 for r in _side_records
+    if r["status"] == wsa.SEED_STATUS_FAILED
+    and r["reason_code"].startswith(wsa.DUPLICATE_OF_ZONE_REASON_PREFIX)
+) == 2
+v_emb_zones = v_result["zones_by_type"][SURVEY_TYPE_EMBANKMENT]
+assert len(v_emb_zones) == 2, "two off-channel compartments survive the floor"
+assert {zone["seed"]["rowcol"] for zone in v_emb_zones} == {(14, 2), (26, 2)}
+assert all(zone["seed_blend_score"] == 0.375 for zone in v_emb_zones), (
+    "THE EVIDENCE THE LOWER MINIMUM ADMITS REAL GROUND: both surviving embankment zones on this "
+    "fixture are anchored by seeds that the old 0.50 minimum would never have nominated"
+)
+
+# The excavated zone still ranks 1 within its own type and still
+# selects: pooled selection compares the embankment SEED blend (0.375)
+# against the excavated member mean, and the excavated zone wins.
 v_exc_zone = exc_zones[0]
 assert "presented" not in v_exc_zone
 assert v_exc_zone["rank"] == 1
 assert v_result["selected_water_zone"] is v_exc_zone
-assert v_exc_zone["cross_type_overlaps"] == []
 assert v_exc_zone["sparse_anchor"] is False
 
-# The narrative carries the seed accounting: 5 seeds, 5 failed, each
-# with its reason code -- the reach with no on-parcel pinch reports
-# honestly as nothing.
+# The narrative carries the seed accounting: 17 seeds, 11 failed, each
+# with its reason code -- a reach with no on-parcel pinch still reports
+# honestly as nothing, and now the count of them is the cost line the
+# seed ladder exists to make visible.
 v_narrative = build_narrative_data(v_result)
-assert v_narrative["zone_count"] == 1 and len(v_narrative["zones"]) == 1
-assert v_narrative["embankment_zone_count"] == 0 and v_narrative["excavated_zone_count"] == 1
 assert v_narrative["embankment_generation"] == wsa.PROVENANCE_SEED_COMPARTMENT
-assert v_narrative["embankment_seed_count"] == 5 and v_narrative["embankment_failed_seed_count"] == 5
-assert {entry["reason_code"] for entry in v_narrative["embankment_failed_seeds"]} == {
-    wsa.REASON_NO_CONSTRICTION
-}
+assert v_narrative["embankment_seed_count"] == 17 and v_narrative["embankment_failed_seed_count"] == 11
+assert v_narrative["embankment_zone_count"] == 2 and v_narrative["excavated_zone_count"] == 1
+assert v_narrative["zone_count"] == 3 and len(v_narrative["zones"]) == 3
+# The failure vocabulary is the two classes and nothing else, and every
+# dedupe reason names a REAL zone id -- which may itself be a zone that
+# was later dropped (a pinch-level duplicate names the seed that beat
+# it, and that winner can afterwards lose the compartment-overlap
+# dedupe). Naming the winner is a statement about seeding order, not a
+# promise that the winner survived.
+_v_failed_codes = {entry["reason_code"] for entry in v_narrative["embankment_failed_seeds"]}
+assert wsa.REASON_NO_CONSTRICTION in _v_failed_codes
+_v_all_zone_ids = {z["id"] for z in v_result["zones"] + v_result["dropped_zones"]}
+for _code in _v_failed_codes - {wsa.REASON_NO_CONSTRICTION}:
+    assert _code.startswith(wsa.DUPLICATE_OF_ZONE_REASON_PREFIX), f"unexpected failure code {_code}"
+    assert int(_code[len(wsa.DUPLICATE_OF_ZONE_REASON_PREFIX):]) in _v_all_zone_ids, (
+        f"{_code} must name a zone that exists in this result"
+    )
 print(
-    f"Fixture 2 (V-valley, compartment change): excavated ribbons the 36 channel cells (mean "
-    f"{v_exc_zone['mean_suitability']}); embankment seeds 5 plateau cells and every walk honestly fails "
-    "no_constriction (constant prism cross-section -- the valley never narrows below any seed)."
+    f"Fixture 2 (V-valley, seed minimum 0.30): excavated ribbons the 36 channel cells (mean "
+    f"{v_exc_zone['mean_suitability']}); 17 seeds in two tiers -- 5 channel cells at 0.875 that ALL "
+    "fail no_constriction (constant prism cross-section), and 12 off-channel cells at exactly 0.375 "
+    "(the archetype 0.50 excluded) of which two produce the fixture's only surviving embankment zones."
 )
 
 # --- FIXTURE 2b: member-vs-zone split where the envelope ADDS ground.
