@@ -105,21 +105,26 @@ THE TWO DERIVED SCREENS (both free from arrays already in hand):
         (valley_delineation.py), slope from the existing slope machinery
         (production_area.compute_slope_percent()); the flat/zero-slope
         singularity is guarded explicitly (TWI_MIN_SLOPE_TAN below).
-        Scored ABSOLUTELY -- a fixed classification curve over the raw
-        value (twi_score(), ramping between TWI_SCORE_MIN_BREAKPOINT and
-        TWI_SCORE_FULL_CREDIT_BREAKPOINT), exactly like every other
-        criterion in both blends. It was once scored parcel-relative, as
-        a percentile rank within the boundary, and that made the WHOLE
-        composite boundary-dependent by contagion: a boundary extended
-        into a stream corridor added the wettest cells on the landscape,
-        they took the top ranks, every other cell's rank fell, and an
-        embankment zone vanished from unchanged terrain. Absolute TWI IS
-        resolution-dependent -- that is real, and it is carried as a
-        FIXED CALIBRATION CAVEAT (the breakpoints hold at the reference
-        DEM's 5 m resolution and are documented as such, restated in
-        narrative_data as TWI_RESOLUTION_CALIBRATION_NOTE) rather than
-        dodged with a normalization that varies per run. Resolution is
-        constant for a DEM source; the boundary is user input.
+        Scored on a ramp between two breakpoints, exactly like every
+        other criterion in both blends -- and the breakpoints are
+        WINDOW-REFERENCED: fixed percentiles (TWI_WINDOW_FLOOR_
+        PERCENTILE / TWI_WINDOW_FULL_CREDIT_PERCENTILE) of the FETCHED
+        DEM WINDOW's own raw-TWI distribution, computed over a SNAPPED
+        sub-window of the raster and never over the gated cells. It was
+        once a parcel-relative percentile rank, which made the whole
+        composite boundary-dependent by contagion (a boundary extended
+        into a stream corridor took the top ranks and an embankment zone
+        vanished from unchanged terrain); it was then two hardcoded
+        breakpoints, which held scores still but read ~66% of the
+        reference property's gated cells at exactly 0.0. Window
+        referencing keeps the stillness -- the reference population is
+        the raster, so a boundary redrawn inside it cannot move a score
+        -- while letting the curve fit the landscape it is looking at.
+        The window derives from the boundary at FETCH time, so the
+        reference rectangle is quantized (TWI_REFERENCE_WINDOW_SNAP_
+        METERS) to make ordinary boundary edits produce the identical
+        population. See the WINDOW-REFERENCED CURVE section and
+        twi_reference_window().
 
     DEPRESSION DEPTH = filled DEM - raw DEM. Both arrays were already
         computed every run (priority-flood fill feeds flow direction);
@@ -349,12 +354,23 @@ TWI_MIN_SLOPE_TAN = 0.001
 # criterion, screen or statistic is computed relative to the parcel or
 # the gated mask rather than absolutely, with a verdict:
 #
-#   parcel_relative_percentile() on TWI -- ILLEGITIMATE, FIXED HERE. A
-#     cell's wetness score is a claim about that cell's ground. See
-#     TWI_SCORE_MIN_BREAKPOINT below and the retired function's own
-#     docstring. NO OTHER PRODUCTION CALLER EXISTS: the only remaining
-#     callers are tests and diagnose_water_survey_areas.py's explicit
-#     before/after comparison.
+#   parcel_relative_percentile() on TWI -- ILLEGITIMATE, FIXED. A
+#     cell's wetness score is a claim about that cell's ground. See the
+#     WINDOW-REFERENCED CURVE section below and the retired function's
+#     own docstring. NO OTHER PRODUCTION CALLER EXISTS: the only
+#     remaining callers are tests and diagnose_water_survey_areas.py's
+#     explicit before/after comparison.
+#
+#   twi_window_breakpoints() over twi_reference_window() -- RELATIVE TO
+#     THE DEM WINDOW, AND LEGITIMATE, stated here rather than left for
+#     someone to find. The population is the RASTER's own snapped
+#     sub-window: it is not the parcel, it is not the gate mask, and
+#     twi_reference_window()'s signature (dem only) makes it unable to
+#     consult either. Two cells with the same raw TWI in the same window
+#     score identically however the boundary inside it is drawn. The
+#     window does derive from the boundary at FETCH time, which is why
+#     the reference rectangle is SNAPPED (TWI_REFERENCE_WINDOW_SNAP_
+#     METERS) -- see that constant and twi_reference_window().
 #
 #   The gate mask (compute_gate_mask), every geometry clip to the
 #     boundary, boundary_adjacency_fraction, truncated_by_boundary, the
@@ -368,7 +384,9 @@ TWI_MIN_SLOPE_TAN = 0.001
 #     breakpoints; embankment_slope_score and excavated_slope_score on
 #     percent grade; depression_score on metres against
 #     DEPRESSION_FULL_CREDIT_METERS; the soil scorers on NRCS ksat
-#     classes and hydrologic groups; and now twi_score on raw TWI. The
+#     classes and hydrologic groups; and twi_score on raw TWI against
+#     WINDOW-derived breakpoints (absolute given the window -- see the
+#     entry above). The
 #     EXCAVATED WETNESS BLEND was boundary-dependent only through TWI
 #     (its other half, depression depth, was always absolute), so it
 #     becomes fully absolute with this change -- no separate fix needed.
@@ -407,79 +425,228 @@ TWI_MIN_SLOPE_TAN = 0.001
 #     check fetches ONE DEM over the UNION of the two boundaries -- with
 #     the raster held fixed, every delta it reports is attributable to
 #     the boundary alone.
+#
+#     WINDOW-REFERENCED TWI GIVES THIS ENTRY A SECOND EDGE, and the
+#     snap is the answer to it: the TWI CURVE now reads the window too,
+#     so DEM-extent dependence would reach the SCORES rather than only
+#     the flow model. TWI_REFERENCE_WINDOW_SNAP_METERS quantizes the
+#     reference rectangle so an edit that stays inside a snap cell
+#     yields the identical population and identical breakpoints. The
+#     FETCH itself is deliberately NOT snapped -- that would change the
+#     raster every Layer 1 consumer sees, which is out of this branch's
+#     scope; see twi_reference_window()'s docstring for why the
+#     reference population was quantized instead of the fetch.
 
 
-# --- the absolute TWI classification curve --------------------------------
-# TWI is scored ABSOLUTELY: a linear ramp over RAW ln(a/tan(beta)) from
-# TWI_SCORE_MIN_BREAKPOINT (score 0.0) to TWI_SCORE_FULL_CREDIT_BREAKPOINT
-# (score 1.0), saturated above. See twi_score().
+# --- the WINDOW-REFERENCED TWI classification curve ------------------------
+# TWI is scored on a linear ramp over RAW ln(a/tan(beta)) from a FLOOR
+# breakpoint (score 0.0) to a FULL-CREDIT breakpoint (score 1.0),
+# saturated above -- exactly the curve shape every other criterion in
+# this module uses. WHAT CHANGED IN THIS BRANCH IS WHERE THE TWO
+# BREAKPOINTS COME FROM: they are no longer two hardcoded numbers, they
+# are two FIXED PERCENTILES OF THE FETCHED DEM WINDOW'S OWN RAW-TWI
+# DISTRIBUTION. See twi_window_breakpoints() and twi_reference_window().
 #
-# WHY ABSOLUTE, AND WHAT THE PERCENTILE COST. This criterion used to be a
-# PARCEL-RELATIVE PERCENTILE RANK (parcel_relative_percentile(), now
-# retired from this path). That made the whole composite
-# BOUNDARY-DEPENDENT BY CONTAGION: every other criterion in both blends
-# is absolute with fixed physical breakpoints (drainage acres, slope
-# percent, ksat, hydrologic group), so TWI was the lone input whose score
-# for a FIXED cell moved when the USER redrew the parcel. The failure was
-# observed on a real run: the same land produced an embankment survey
-# zone under one boundary and none under a slightly larger one reaching
-# further into a stream corridor. Mechanism: adding the wettest cells on
-# the landscape took the top percentile ranks and pushed every other
-# cell's rank DOWN; at TWI's 0.20 of the embankment blend that is enough
-# to drop a ~0.52 seed under the THEN-0.50 EMBANKMENT_SEED_MIN_SCORE
-# (the constant has since moved -- see its own note) with the
-# terrain unchanged. The direction is the tell -- INCLUDING MORE WATER
-# MADE THE WATER SITES SCORE WORSE, which no physical reading of wetness
-# can produce.
+# THE THREE-STAGE HISTORY, because each stage fixed the previous one's
+# real defect and the next one must not undo either fix:
 #
-# The original rationale for the percentile was that absolute TWI is
-# resolution-dependent. That is TRUE and is not dodged here -- it is
-# accepted as a FIXED CALIBRATION CAVEAT below. It was the wrong trade:
-# resolution is CONSTANT for a given DEM source (the reference DEM is
-# 3DEP at 5 m, dem_data.py), while the boundary is USER INPUT that
-# changes between runs. The percentile traded a fixed, documentable
-# calibration problem for a variable instability problem.
+#   1. PARCEL-RELATIVE PERCENTILE (retired -- parcel_relative_percentile()).
+#      A cell's score was its rank among the cells the USER enclosed, so
+#      redrawing the boundary moved it. Measured failure: a boundary
+#      extended into a stream corridor added the wettest cells on the
+#      landscape, they took the top ranks, every other cell's rank fell,
+#      and a ~0.52 embankment seed dropped under the then-0.50 seeding
+#      minimum with the terrain unchanged. INCLUDING MORE WATER MADE THE
+#      WATER SITES SCORE WORSE. What it got RIGHT: it self-adapted to the
+#      landscape, so no region needed hand-tuned constants.
 #
-# THE RESOLUTION CAVEAT, STATED PLAINLY: TWI VALUES ARE
-# RESOLUTION-DEPENDENT. a is specific catchment area (contributing area
-# per unit contour width), so the same terrain resampled to a different
-# cell size shifts every absolute TWI value -- coarser cells aggregate
-# more upslope area per cell and read WETTER. THESE TWO BREAKPOINTS ARE
-# CALIBRATED AT THE REFERENCE DEM'S RESOLUTION (5 m) AND ARE NOT VALID
-# AT ANOTHER. A DEM source change is a recalibration, and the calibration
-# instrument that produces the evidence is
-# diagnose_water_survey_areas.py's TWI CALIBRATION section (raw-TWI
-# distribution over gated cells, printed under BOTH boundaries so the
-# chosen values can be read off where the two distributions agree --
-# which is what makes the CALIBRATION itself boundary-independent).
+#   2. FIXED ABSOLUTE BREAKPOINTS 6.0 / 10.0 (retired here -- see
+#      RETIRED_FIXED_TWI_MIN_BREAKPOINT below). A cell's score stopped
+#      moving when the boundary moved, which was the whole point and is
+#      KEPT. What it got WRONG, measured on the reference property: the
+#      curve was calibrated from the ln(a/tan(beta)) FORMULA at 5 m, not
+#      from an observed distribution, and on real ground it read ~66%
+#      OF GATED CELLS AT EXACTLY 0.0 (median raw TWI 5.44, 75th
+#      percentile 6.39, floor 6.0). A criterion carrying 0.20 of the
+#      embankment blend and 0.50 of the excavated wetness criterion,
+#      reading zero on two thirds of the parcel, is not a criterion --
+#      it is a constant subtraction. It also promised a per-region
+#      recalibration nobody could perform: the values were tailored to
+#      ONE property's arithmetic and had no way to travel.
 #
-# PROVENANCE OF THE CURRENT VALUES -- READ THIS BEFORE TRUSTING THEM.
-# They are NOT YET the observed-distribution calibration described above:
-# that run is networked (3DEP, SSURGO, Planetary Computer) and could not
-# be executed in the session that wrote this branch -- the egress policy
-# denied every data host. They are DERIVED FROM THE FORMULA AT 5 m, which
-# is arithmetic, not a preference:
+#   3. WINDOW-REFERENCED BREAKPOINTS (this branch). The floor and
+#      full-credit breakpoints are read off the DEM WINDOW's own TWI
+#      distribution at TWI_WINDOW_FLOOR_PERCENTILE and
+#      TWI_WINDOW_FULL_CREDIT_PERCENTILE. This keeps stage 1's
+#      self-adaptation (the curve fits the landscape it is looking at,
+#      so no hand-tuned per-region constants exist to go stale) AND
+#      stage 2's stability (the reference population is the WINDOW, not
+#      the boundary, so a cell's score cannot move because the user
+#      redrew a line inside that window). It also retires the
+#      calibrated-to-one-property problem outright.
+#
+# THE TWO PROPERTIES THIS CURVE MUST HAVE, both asserted in
+# test_twi_window_referenced.py rather than argued for here:
+#
+#   PER-CELL ABSOLUTE GIVEN THE WINDOW. Two cells with the same raw TWI
+#     in the same window score identically, whatever boundary is drawn
+#     inside it. The reference population is a property of the RASTER,
+#     never of the parcel.
+#
+#   THE GATED MASK NEVER ENTERS THE REFERENCE. twi_reference_window()
+#     takes the dem and NOTHING ELSE -- not the boundary polygon, not
+#     the gate mask, not the on-parcel mask. It cannot consult them; the
+#     signature is the guarantee. The boundary only selects which cells
+#     get SCORED, never what the scoring curve is.
+#
+# THE RESOLUTION CAVEAT IS LARGELY ANSWERED BY THIS CHANGE, and that is
+# a side benefit worth stating: absolute TWI is resolution-dependent
+# (a is specific catchment area, so coarser cells aggregate more upslope
+# area and read WETTER), which is why stage 2 had to carry a fixed
+# calibration caveat. A percentile of the window's own distribution
+# moves WITH the resolution shift, since every cell in the window
+# shifted together -- so a DEM source change is no longer a
+# recalibration. What remains resolution-dependent is the SHAPE of the
+# distribution (a coarser grid genuinely resolves less convergence),
+# which is a real modelling limit and not a constant that can go stale.
+
+# PROVENANCE OF THE TWO PERCENTILES -- READ THIS BEFORE TRUSTING THEM,
+# and read it as the direct successor to the note the retired fixed pair
+# carried. They are NOT read off an observed run either: the networked
+# run (3DEP, SSURGO, Planetary Computer) could not be executed in the
+# session that wrote this branch, exactly as it could not in the session
+# that wrote the fixed pair -- the egress policy denied every data host,
+# 3DEP included (403 at CONNECT).
+#
+# WHAT IS DIFFERENT, AND IT IS THE POINT OF THE CHANGE: an unvalidated
+# PERCENTILE is a far weaker commitment than an unvalidated RAW VALUE. A
+# floor at 6.0 was a claim about one property's arithmetic that could be
+# badly wrong on any other, and WAS badly wrong on the one it was
+# written for (66% floored). A floor at the window's own p25 cannot be
+# wrong in that way on any window: about a quarter of every landscape
+# reads dry by construction, whatever the terrain, the region, or the
+# DEM's resolution. What is still open is whether a QUARTER is the right
+# share -- and that is a shape question the diagnostic's printed
+# distribution answers on the first networked run, on every property at
+# once, rather than a constant that has to be re-derived per region.
+#
+# WHAT THE FIRST NETWORKED RUN MUST CHECK: the flooring share on the
+# gated row (it should be near a quarter of the WINDOW, and lower over
+# the gated cells wherever a parcel is wetter than its landscape), the
+# ramp width in raw-TWI units (a very narrow p25-to-p90 span means the
+# window is too uniform to reference and the fallbacks are in play), and
+# whether the excavated wetness criterion clears 0.5 on real marsh
+# ground. All three print every run.
+
+# The percentile of the reference window's raw-TWI distribution that
+# scores 0.0. THE HONEST v1 PRIOR: the driest quarter of the window is
+# the landscape's own hillslope, and hillslope earns nothing for
+# wetness -- the same claim stage 2's 6.0 was trying to make, now read
+# off the ground instead of derived from the formula. It is NOT a claim
+# that exactly 25% of any window is dry; it is the choice of where to
+# put the bottom of the ramp, and the diagnostic prints the whole
+# distribution every run so it can be moved against evidence.
+# PROVISIONAL. TUNE FROM THE FIRST NETWORKED RUN. CONFIGURABLE.
+TWI_WINDOW_FLOOR_PERCENTILE = 25.0
+
+# The percentile that scores 1.0. v1 prior: the wettest tenth of a
+# window on rolling farm ground is its drainageways, and a drainageway
+# is what full wetness credit is meant to name. Deliberately NOT 100 --
+# saturating at the window's single wettest cell would let one outlier
+# (a nodata-adjacent flat, a mapped channel) set the whole curve's top,
+# and would guarantee that essentially nothing else ever reaches full
+# credit. PROVISIONAL. TUNE FROM THE FIRST NETWORKED RUN. CONFIGURABLE.
+TWI_WINDOW_FULL_CREDIT_PERCENTILE = 90.0
+
+assert 0.0 <= TWI_WINDOW_FLOOR_PERCENTILE < TWI_WINDOW_FULL_CREDIT_PERCENTILE <= 100.0, (
+    "the window-referenced ramp needs a positive width in percentile space: the full-credit "
+    "percentile must sit above the floor percentile, and both inside [0, 100]"
+)
+
+# THE SNAP THAT CONVERTS "WEAKLY BOUNDARY-DEPENDENT" INTO "IDENTICAL FOR
+# MOST REAL EDITS" -- read this with twi_reference_window()'s docstring.
+#
+# The DEM window itself derives from the boundary: dem_data.
+# get_dem_for_boundary() takes the boundary's bounding box and pads it by
+# DEFAULT_BUFFER_METERS (100 m) on every side. So a redrawn boundary
+# yields a slightly different window, and a window-referenced curve would
+# then move every score with it -- THE SAME BUG AS STAGE 1, IN A WEAKER
+# FORM (weaker because the window is ~5x the parcel, so one added corridor
+# is a small share of the reference population rather than the top of it,
+# but weaker is not fixed).
+#
+# The fix is QUANTIZATION. The reference population is not the fetched
+# grid's exact extent; it is that extent SNAPPED INWARD to a fixed grid
+# of TWI_REFERENCE_WINDOW_SNAP_METERS in the DEM's own CRS. Snapping is a
+# step function, so any boundary edit that does not push the fetched
+# window's edge past a snap line yields the BYTE-IDENTICAL reference
+# rectangle, hence identical percentiles, hence identical breakpoints,
+# hence identical per-cell scores. An edit that does cross a snap line
+# yields a different window and a small score change, which the
+# diagnostic reports as a real number rather than hiding.
+#
+# WHY 100 m, AND WHY INWARD. 100 m is one DEM-fetch buffer
+# (dem_data.DEFAULT_BUFFER_METERS) and 20 cells at the reference DEM's
+# 5 m: coarse enough that ordinary boundary edits -- moving a corner,
+# following a fence line, correcting a survey -- land inside one snap
+# cell, and fine enough that the snapped rectangle keeps most of the
+# fetched window (on the reference property, 400 x 400 m of a 479.5 x
+# 539.8 m fetch). INWARD, because an inward snap is contained in the
+# fetched grid BY CONSTRUCTION and needs no clipping and no second
+# fetch; an outward snap would name ground the raster does not have.
+# PROVISIONAL. CONFIGURABLE.
+TWI_REFERENCE_WINDOW_SNAP_METERS = 100.0
+
+# The half-width used for the LAST-RESORT curve: a window in which every
+# measured cell carries the SAME raw TWI, so there is no gradient
+# anywhere to reference and any ramp width is arbitrary. The curve is
+# centred on that common value with this half-width, so every cell reads
+# the NEUTRAL 0.5 -- a window that cannot distinguish wet from dry should
+# say nothing about wetness, not accuse every cell of dryness. This is
+# the retired percentile's own dead-flat convention (it read 0.5
+# everywhere on a flat parcel, for the same reason), kept because it was
+# right, and the value only ever affects how far a hypothetical
+# out-of-window value would sit from neutral. The MILDER degeneracy --
+# the two percentiles tie but the window still has a spread -- falls
+# back to the observed min..max instead and never reaches this constant;
+# see twi_window_breakpoints(). Neither is reachable on real terrain: a
+# 10,000-cell 3DEP window has a p25-to-p90 spread. CONFIGURABLE.
+TWI_DEGENERATE_WINDOW_RAMP_HALF_WIDTH = 2.0
+
+# The percentiles the window's raw-TWI distribution is REPORTED at, in
+# narrative_data and the diagnostic. Includes the two the breakpoints are
+# read from, so a run's scoring curve is reproducible from its own output
+# without re-running anything.
+TWI_REPORTED_WINDOW_PERCENTILES = (0.0, 1.0, 5.0, 10.0, 25.0, 50.0, 75.0, 90.0, 95.0, 99.0, 100.0)
+
+# --- RETIRED: the fixed absolute breakpoints ------------------------------
+# RETIRED, NOT DELETED (house convention -- masked_focal_mean() and
+# parcel_relative_percentile() are the precedents). These are the two
+# hardcoded numbers stage 2 shipped: a floor at 6.0 and full credit at
+# 10.0, derived from the ln(a/tan(beta)) formula at 5 m rather than from
+# any observed distribution --
 #
 #   a = flow_accumulation_cells * cell_area / cell_width = 5 * cells (m)
 #   plain hillslope cell (accumulation 1, only itself):
 #       10% grade -> ln(5/0.10)  = 3.9      20% grade -> ln(5/0.20) = 3.2
-#        5% grade -> ln(5/0.05)  = 4.6
-#   convergent swale (~20 cells, 0.12 ac) at 6% -> ln(100/0.06)  = 7.4
-#   established drainageway (~200 cells, 1.2 ac) at 4% -> ln(1000/0.04) = 10.1
-#   at the contributing-area ceiling (20 ac = 3237 cells) at 3% -> 13.2
+#   convergent swale (~20 cells) at 6%  -> ln(100/0.06)  = 7.4
+#   established drainageway (~200 cells) at 4% -> ln(1000/0.04) = 10.1
 #
-# So at 5 m, ~3-5 is undifferentiated hillslope, ~7-8 is genuine
-# convergence, and ~10 is a drainageway that carries water. The floor
-# sits at 6.0 (above every plain-hillslope reading, so hillslope earns
-# NOTHING for wetness) and full credit at 10.0 (a real drainageway). TUNE
-# FROM THE CALIBRATION RUN -- both CONFIGURABLE, and the diagnostic
-# prints the distribution that decides them every networked run.
-TWI_SCORE_MIN_BREAKPOINT = 6.0
-TWI_SCORE_FULL_CREDIT_BREAKPOINT = 10.0
+# The arithmetic was sound and the ground disagreed with it: on the
+# reference property the floor sat ABOVE the median (5.44) and above the
+# 75th percentile (6.39), so ~66% of gated cells scored exactly 0.0 for
+# wetness. THAT is what window-referencing replaces.
+#
+# THEY ARE KEPT because the before/after must stay measurable:
+# diagnose_water_survey_areas.py scores the same cells on all three
+# curves (retired percentile, retired fixed, live window-referenced) so
+# this branch's effect is read off numbers rather than asserted. NEVER
+# import these into a scoring path -- twi_score() takes its breakpoints
+# as required arguments precisely so a fixed pair cannot become a
+# default again.
+RETIRED_FIXED_TWI_MIN_BREAKPOINT = 6.0
+RETIRED_FIXED_TWI_FULL_CREDIT_BREAKPOINT = 10.0
 
-assert TWI_SCORE_FULL_CREDIT_BREAKPOINT > TWI_SCORE_MIN_BREAKPOINT, (
-    "the TWI ramp needs a positive width: full credit must sit above the floor"
-)
 
 # Depression depths below this read 0 -- priority-flood fill raises tiny
 # sub-noise amounts across much of any real DEM (pit-filling artifacts at
@@ -761,18 +928,27 @@ SUITABILITY_THRESHOLD = 0.5
 # (0.25*slope + 0.25*soil) for a cell with no drainage credit -- a class
 # 0.50 excluded by arithmetic rather than by judgement.
 #
-# RECORDED BESIDE THE VALUE, because it qualifies it: TWI IS CURRENTLY
-# ~66% FLOORED on the reference property under the shipped
-# TWI_SCORE_MIN_BREAKPOINT / TWI_SCORE_FULL_CREDIT_BREAKPOINT (6.0 /
-# 10.0) -- median raw TWI 5.44, 75th percentile 6.39, so two thirds of
-# gated cells score 0.0 for wetness. A criterion contributing 0.20 of
-# this blend and reading zero on most of the parcel depresses every
-# blend score, which means THIS LOWER MINIMUM PARTLY COMPENSATES FOR AN
-# UNDER-CALIBRATED CRITERION RATHER THAN REPAIRING IT. The TWI
-# calibration decision -- fixed breakpoints versus DEM-window-referenced
-# scoring -- is DELIBERATELY DEFERRED and must not be made here or
-# inferred from this constant's value. When it is made, this number is
-# re-decided against the seed ladder, not left standing.
+# RECORDED BESIDE THE VALUE, because it qualified it, AND UPDATED
+# BECAUSE THE DEFERRED DECISION HAS SINCE BEEN MADE. What this note used
+# to say: TWI was ~66% FLOORED on the reference property under the
+# shipped fixed breakpoints (6.0 / 10.0 -- median raw TWI 5.44, 75th
+# percentile 6.39), so a criterion carrying 0.20 of this blend read zero
+# on two thirds of the parcel and depressed every blend score, which
+# meant THIS LOWER MINIMUM PARTLY COMPENSATED FOR AN UNDER-CALIBRATED
+# CRITERION RATHER THAN REPAIRING IT. The calibration decision -- fixed
+# breakpoints versus DEM-window-referenced scoring -- was deliberately
+# deferred at that point.
+#
+# IT WAS DECIDED: TWI is now WINDOW-REFERENCED (see the WINDOW-
+# REFERENCED CURVE section), so the flooring share is no longer a fixed
+# constant's artifact -- it is whatever share of a window sits below its
+# own p25, by construction about a quarter, and every blend score rises
+# accordingly. 0.30 IS DELIBERATELY NOT RETUNED HERE. Band edges shift
+# as blends rise, and retuning a seeding floor in the same branch that
+# moved the surface underneath it would confound the two: the seed
+# ladder measures the floor, the floor cannot also be an output of the
+# branch the ladder is measuring. THE RE-DECISION IS THE NEXT BRANCH'S,
+# against the ladder this branch's runs produce.
 #
 # v1 prior. TUNE FROM EVIDENCE: diagnose_water_survey_areas.py prints
 # the SEED LADDER (every seed in blend-descending order with its
@@ -1101,12 +1277,18 @@ SEED_STATUS_FAILED = "failed"
 
 # --- narrative note constants ---------------------------------------------
 
-TWI_RESOLUTION_CALIBRATION_NOTE = (
-    "Topographic wetness is scored on a FIXED ABSOLUTE curve over raw ln(a/tan(beta)), so a given "
-    "cell scores the same whatever boundary is drawn around it -- the score describes the ground, "
-    "not its rank among neighbours. The one caveat is calibration, not comparison: TWI values are "
-    "resolution-dependent, and this curve's breakpoints are calibrated at the 5 m reference DEM's "
-    "resolution. Read against a different elevation source they would need recalibrating."
+TWI_WINDOW_REFERENCED_NOTE = (
+    "Topographic wetness is scored on a curve WINDOW-REFERENCED to the analysed DEM tile: the "
+    f"floor sits at the {TWI_WINDOW_FLOOR_PERCENTILE:.0f}th percentile of raw ln(a/tan(beta)) "
+    f"across that tile and full credit at the {TWI_WINDOW_FULL_CREDIT_PERCENTILE:.0f}th, so the "
+    "curve fits the landscape being looked at rather than a constant tuned on another property. "
+    "The reference population is the ELEVATION TILE, never the parcel: a given cell scores the "
+    "same whatever boundary is drawn inside that tile -- the score describes the ground, not its "
+    "rank among the cells someone enclosed. The tile itself is snapped to a "
+    f"{TWI_REFERENCE_WINDOW_SNAP_METERS:.0f} m grid, so ordinary boundary edits reuse the "
+    "identical reference population and reproduce identical scores. The derived breakpoints and "
+    "the tile's full TWI distribution are reported with every run: read the score against them, "
+    "not against another property's."
 )
 
 WATER_SURVEY_AREAS_INTRO_NOTE = (
@@ -1158,11 +1340,13 @@ def compute_topographic_wetness_index(dem: dict, flow_accumulation: np.ndarray, 
     "extremely flat, finitely wet" instead).
 
     Returns RAW TWI values, unchanged by this branch -- the computation
-    and the flat-slope guard are exactly what they were. THESE ARE NOT
-    SCORES: twi_score() turns them into the 0-1 criterion, on a FIXED
-    absolute curve calibrated at the reference DEM's resolution (see
-    TWI_SCORE_MIN_BREAKPOINT). NaN where slope is NaN (unmeasured cell:
-    grid edge or nodata-adjacent -- Horn's kernel needs a full
+    and the flat-slope guard are exactly what they were, and every
+    branch in this arc has changed only what is done with them. THESE
+    ARE NOT SCORES: twi_score() turns them into the 0-1 criterion, on a
+    curve whose breakpoints twi_window_breakpoints() reads off the DEM
+    window's own distribution of exactly these values (see the
+    WINDOW-REFERENCED CURVE section). NaN where slope is NaN (unmeasured
+    cell: grid edge or nodata-adjacent -- Horn's kernel needs a full
     neighborhood) or the DEM is nodata.
     """
     px, py = dem["resolution_meters"]
@@ -1195,9 +1379,9 @@ def parcel_relative_percentile(values: np.ndarray, parcel_mask: np.ndarray) -> n
     stream corridor added the wettest cells on the landscape, they took
     the top ranks, every other cell's percentile fell, and a ~0.52
     embankment seed dropped under the then-0.50 seeding minimum -- the same terrain
-    scoring worse for including MORE water. See
-    TWI_SCORE_MIN_BREAKPOINT's own note for the full mechanism and the
-    trade that was reversed.
+    scoring worse for including MORE water. See the WINDOW-REFERENCED
+    CURVE section's three-stage history for the full mechanism, and for
+    what the two later stages kept and gave up.
 
     IT IS KEPT because a percentile over a stated population is a sound
     instrument when the population is the thing being described, and
@@ -1236,38 +1420,279 @@ def parcel_relative_percentile(values: np.ndarray, parcel_mask: np.ndarray) -> n
     return result
 
 
-def twi_score(
-    twi_raw: np.ndarray,
-    min_breakpoint: float = TWI_SCORE_MIN_BREAKPOINT,
-    full_credit_breakpoint: float = TWI_SCORE_FULL_CREDIT_BREAKPOINT,
-) -> np.ndarray:
+def twi_reference_window(
+    dem: dict,
+    snap_meters: float = TWI_REFERENCE_WINDOW_SNAP_METERS,
+) -> dict:
     """
-    THE ABSOLUTE TWI CRITERION: a fixed classification curve over RAW
-    ln(a/tan(beta)) -- 0.0 at/below min_breakpoint, a linear ramp, 1.0
-    at/above full_credit_breakpoint. No population, no ranking, no
-    parcel: a cell's wetness score depends on that cell's own terrain and
-    nothing else, so redrawing the boundary around the same ground cannot
-    move it. That is the whole point of the change (see
-    TWI_SCORE_MIN_BREAKPOINT).
+    THE REFERENCE POPULATION for the window-referenced TWI curve: a
+    boolean mask over the DEM grid selecting the cells whose raw TWI
+    distribution the breakpoints are read from.
 
-    Shaped exactly like every other criterion curve in this module --
-    drainage_band_score(), runon_score(), embankment_slope_score(),
-    excavated_slope_score(), depression_score() -- because it now IS one
-    of them rather than the lone relative exception.
+    IT TAKES THE DEM AND NOTHING ELSE. No boundary polygon, no gate
+    mask, no on-parcel mask -- the signature is the guarantee that the
+    parcel cannot enter the reference. The boundary decides which cells
+    get SCORED; it never decides what the scoring curve is.
 
-    THE BREAKPOINTS ARE RESOLUTION-DEPENDENT and are calibrated at the
-    reference DEM's resolution. This is a fixed calibration caveat, not a
-    normalization dodge: it is a property of ln(a/tan(beta)) itself, it
-    is documented at the constants, and it does not vary between runs on
-    one DEM source -- which is precisely what the retired percentile
-    could not say.
+    THE SNAP, AND WHY IT IS WHAT CONVERTS "WEAKLY BOUNDARY-DEPENDENT"
+    INTO "IDENTICAL FOR MOST REAL EDITS". The fetched window is itself
+    derived from the boundary -- dem_data.get_dem_for_boundary() pads
+    the boundary's bounding box by 100 m -- so referencing the raw
+    fetched extent would let a redrawn boundary shift the whole curve
+    and move every score. That is stage 1's bug in a weaker form, and
+    weaker is not fixed. So the reference rectangle is the fetched
+    extent SNAPPED INWARD to a fixed grid of `snap_meters` in the DEM's
+    own CRS: minimum edges snapped UP to the next multiple, maximum
+    edges snapped DOWN to the previous one. Snapping is a step function,
+    so ANY boundary edit that does not push a window edge past a snap
+    line produces the byte-identical rectangle -- identical population,
+    identical percentiles, identical breakpoints, identical per-cell
+    scores. An edit that does cross a snap line produces a different
+    rectangle and a small, real score change, which the diagnostic
+    reports as a number rather than hiding.
 
-    NaN PROPAGATES (an unmeasured cell stays unmeasured), matching the
-    percentile this replaces. compute_suitability_surfaces() does the
-    NaN -> 0.0 flag-not-poison conversion at the blend, as before, and
-    the criteria-completeness confidence signal reads the NaNs here.
+    WHY THE REFERENCE POPULATION IS QUANTIZED AND NOT THE FETCH. The
+    stronger version of this fix snaps the FETCH bbox, so that the
+    raster itself -- and with it the fill, the flow accumulation and
+    every criterion -- is identical across a small edit. It is not done
+    here, deliberately: get_dem_for_boundary() is Layer 1's single
+    elevation fetch, and every downstream layer (production area, solar,
+    roads, valleys, keypoints) reads the grid it returns. Changing the
+    fetched window changes the raster all of them see, which is a
+    pipeline-wide change with a pipeline-wide re-measurement behind it,
+    not a TWI change. Quantizing the reference population gets the same
+    guarantee for THIS curve with no fetch change and no Layer 1
+    contract change. The fetch snap stays available as a later, wider
+    branch.
+
+    INWARD, not outward: an inward snap is contained in the fetched grid
+    by construction, so it needs no clipping and can never name ground
+    the raster does not have.
+
+    Returns:
+        {
+            'mask': bool ndarray, the reference cells (cell CENTER
+                    inside the snapped rectangle -- the pipeline-wide
+                    containment convention),
+            'bounds': (min_x, min_y, max_x, max_y) of the snapped
+                    rectangle in the DEM's CRS, or the full grid extent
+                    when the snap could not be applied,
+            'grid_bounds': (min_x, min_y, max_x, max_y) of the FETCHED
+                    grid, for the diagnostic's side-by-side,
+            'snap_meters': the snap actually used,
+            'snapped': False when the fetched window is too small to
+                    contain a whole snap cell in some axis, in which
+                    case the reference falls back to the FULL fetched
+                    window (flagged, never silent -- the fallback
+                    population is still the raster and still excludes
+                    the parcel, it is simply not quantized),
+            'fallback_reason': None, or why the snap did not apply,
+            'cell_count': how many cells the mask selects,
+        }
+    """
+    array = dem["array"]
+    height, width = array.shape
+    px, py = dem["resolution_meters"]
+    grid_min_x = dem["origin_x"]
+    grid_max_x = dem["origin_x"] + width * px
+    grid_max_y = dem["origin_y"]
+    grid_min_y = dem["origin_y"] - height * py
+    grid_bounds = (grid_min_x, grid_min_y, grid_max_x, grid_max_y)
+
+    snapped_min_x = math.ceil(grid_min_x / snap_meters) * snap_meters
+    snapped_max_x = math.floor(grid_max_x / snap_meters) * snap_meters
+    snapped_min_y = math.ceil(grid_min_y / snap_meters) * snap_meters
+    snapped_max_y = math.floor(grid_max_y / snap_meters) * snap_meters
+
+    fallback_reason = None
+    if snapped_max_x <= snapped_min_x or snapped_max_y <= snapped_min_y:
+        # The fetched window does not span a whole snap cell in some
+        # axis -- a tiny parcel, or a coarse snap. Referencing the full
+        # window is the honest fallback: still the raster, still free of
+        # the parcel, simply not quantized. FLAGGED, so the diagnostic
+        # can say the stability guarantee is the weaker one here.
+        fallback_reason = (
+            f"the fetched window ({grid_max_x - grid_min_x:.1f} x {grid_max_y - grid_min_y:.1f} m) "
+            f"does not span a whole {snap_meters:.1f} m snap cell in both axes -- referencing the "
+            "full window instead, which is unquantized and therefore only weakly stable across a "
+            "boundary edit"
+        )
+        bounds = grid_bounds
+    else:
+        bounds = (snapped_min_x, snapped_min_y, snapped_max_x, snapped_max_y)
+
+    min_x, min_y, max_x, max_y = bounds
+    col_x = dem["origin_x"] + (np.arange(width) + 0.5) * px
+    row_y = dem["origin_y"] - (np.arange(height) + 0.5) * py
+    in_cols = (col_x >= min_x) & (col_x <= max_x)
+    in_rows = (row_y >= min_y) & (row_y <= max_y)
+    mask = in_rows[:, None] & in_cols[None, :]
+
+    return {
+        "mask": mask,
+        "bounds": bounds,
+        "grid_bounds": grid_bounds,
+        "snap_meters": snap_meters,
+        "snapped": fallback_reason is None,
+        "fallback_reason": fallback_reason,
+        "cell_count": int(np.count_nonzero(mask)),
+    }
+
+
+def twi_window_breakpoints(
+    twi_raw: np.ndarray,
+    reference_mask: np.ndarray,
+    floor_percentile: float = TWI_WINDOW_FLOOR_PERCENTILE,
+    full_credit_percentile: float = TWI_WINDOW_FULL_CREDIT_PERCENTILE,
+    degenerate_half_width: float = TWI_DEGENERATE_WINDOW_RAMP_HALF_WIDTH,
+) -> dict:
+    """
+    THE CURVE, DERIVED: the floor and full-credit breakpoints read off
+    the REFERENCE WINDOW's own raw-TWI distribution at two fixed
+    percentiles.
+
+    THE POPULATION IS THE WINDOW, NOT THE PARCEL. `reference_mask` comes
+    from twi_reference_window(), which cannot see the boundary or the
+    gate mask. Passing a gated mask here would reintroduce exactly the
+    bug three branches have now been spent on, which is why the two
+    functions are separate and why the reference one takes no boundary.
+
+    TWO FALLBACKS, IN ORDER, for a window whose chosen percentiles tie.
+    A zero-width ramp would score every cell 0.0 or 1.0 on a
+    floating-point coin flip, so it is never allowed to happen:
+
+      'observed_range' -- the two percentiles land on the same raw value
+        (some large tied mass of identical hillslope) but the window
+        DOES have a spread. The ramp then runs floor-to-ceiling over the
+        window's whole observed min..max. Still window-referenced, still
+        free of the parcel; it simply reads the gradient where the
+        gradient actually is instead of insisting on two percentiles
+        that cannot see it.
+
+      'centred_on_uniform_value' -- min == max: every measured cell in
+        the window carries the SAME raw TWI, so there is no gradient
+        anywhere. The curve is centred on that value with
+        `degenerate_half_width`, and every cell reads the neutral 0.5.
+        That is the retired percentile's own dead-flat convention, kept
+        because it was right: a window that cannot tell wet from dry
+        must say nothing about wetness, not accuse every cell of
+        dryness (see TWI_DEGENERATE_WINDOW_RAMP_HALF_WIDTH).
+
+    Both are reachable only on synthetic or pathological terrain -- a
+    real 10,000-cell 3DEP window has a p25-to-p90 spread -- and both are
+    REPORTED (`curve_fallback`) rather than silently applied, because a
+    run scored on a fallback curve is a run whose numbers mean something
+    slightly different.
+
+    EMPTY WINDOW (no measured TWI anywhere in the reference): there is
+    no distribution to read, so there is no curve. Returns
+    floor/full_credit of None and `measured_cell_count` 0. Every cell in
+    such a raster is NaN anyway, so twi_score() returns NaN throughout
+    and the criteria-completeness confidence signal reads it -- but the
+    caller must not invent breakpoints, and this shape makes that
+    impossible to do by accident.
+
+    Returns a JSON-ready dict (floats, not numpy scalars) so it can ride
+    narrative_data unchanged:
+        {'floor', 'full_credit', 'floor_percentile',
+         'full_credit_percentile', 'percentiles': {label: value},
+         'reference_cell_count', 'measured_cell_count', 'curve_fallback'}
     """
     raw = np.asarray(twi_raw, dtype=np.float64)
+    reference = np.asarray(reference_mask, dtype=bool) & ~np.isnan(raw)
+    values = raw[reference]
+
+    reported = {
+        f"p{percentile:g}": None for percentile in TWI_REPORTED_WINDOW_PERCENTILES
+    }
+    if values.size == 0:
+        return {
+            "floor": None,
+            "full_credit": None,
+            "floor_percentile": floor_percentile,
+            "full_credit_percentile": full_credit_percentile,
+            "percentiles": reported,
+            "reference_cell_count": int(np.count_nonzero(reference_mask)),
+            "measured_cell_count": 0,
+            "curve_fallback": None,
+        }
+
+    for percentile in TWI_REPORTED_WINDOW_PERCENTILES:
+        reported[f"p{percentile:g}"] = float(np.percentile(values, percentile))
+
+    floor = float(np.percentile(values, floor_percentile))
+    full_credit = float(np.percentile(values, full_credit_percentile))
+    curve_fallback = None
+    if not full_credit > floor:
+        observed_min, observed_max = float(np.min(values)), float(np.max(values))
+        if observed_max > observed_min:
+            curve_fallback = "observed_range"
+            floor, full_credit = observed_min, observed_max
+        else:
+            curve_fallback = "centred_on_uniform_value"
+            floor = observed_min - degenerate_half_width
+            full_credit = observed_min + degenerate_half_width
+
+    return {
+        # FULL PRECISION, deliberately. These are SCORING INPUTS -- every
+        # cell's wetness score divides by (full_credit - floor) -- so
+        # rounding here would perturb every score in the run to make a
+        # printout tidier. build_narrative_data() rounds for the wire,
+        # where the number is being read rather than divided by.
+        "floor": floor,
+        "full_credit": full_credit,
+        "floor_percentile": floor_percentile,
+        "full_credit_percentile": full_credit_percentile,
+        "percentiles": reported,
+        "reference_cell_count": int(np.count_nonzero(reference_mask)),
+        "measured_cell_count": int(values.size),
+        "curve_fallback": curve_fallback,
+    }
+
+
+def twi_score(
+    twi_raw: np.ndarray,
+    min_breakpoint: float,
+    full_credit_breakpoint: float,
+) -> np.ndarray:
+    """
+    THE TWI CRITERION: 0.0 at/below min_breakpoint, a linear ramp, 1.0
+    at/above full_credit_breakpoint. Shaped exactly like every other
+    criterion curve in this module -- drainage_band_score(),
+    runon_score(), embankment_slope_score(), excavated_slope_score(),
+    depression_score().
+
+    THE BREAKPOINTS ARE REQUIRED ARGUMENTS, deliberately and with no
+    defaults. They come from twi_window_breakpoints() over
+    twi_reference_window(), and having no default is what stops a fixed
+    pair from quietly becoming the curve again (the retired pair still
+    exists, for the diagnostic's before/after -- see
+    RETIRED_FIXED_TWI_MIN_BREAKPOINT).
+
+    GIVEN THE BREAKPOINTS THIS IS PURE PER-CELL ARITHMETIC: no
+    population, no ranking, no parcel. Two cells with the same raw TWI
+    scored on the same window's curve get the same number, so redrawing
+    a boundary inside that window cannot move either of them. That is
+    the property the whole three-branch arc exists to hold.
+
+    NaN PROPAGATES (an unmeasured cell stays unmeasured).
+    compute_suitability_surfaces() does the NaN -> 0.0
+    flag-not-poison conversion at the blend, as before, and the
+    criteria-completeness confidence signal reads the NaNs here. A None
+    breakpoint (an empty reference window -- see
+    twi_window_breakpoints()) means there is no curve at all: every cell
+    scores NaN, which is the honest answer and the one the completeness
+    signal already knows how to read.
+    """
+    raw = np.asarray(twi_raw, dtype=np.float64)
+    if min_breakpoint is None or full_credit_breakpoint is None:
+        return np.full(raw.shape, np.nan, dtype=np.float64)
+    if not full_credit_breakpoint > min_breakpoint:
+        raise ValueError(
+            "twi_score() needs a positive ramp width: full_credit_breakpoint must sit above "
+            f"min_breakpoint (got {min_breakpoint} and {full_credit_breakpoint}). "
+            "twi_window_breakpoints() guarantees this, including on a degenerate window."
+        )
     with np.errstate(invalid="ignore"):
         ramp = (raw - min_breakpoint) / (full_credit_breakpoint - min_breakpoint)
         score = np.clip(ramp, 0.0, 1.0)
@@ -1865,9 +2290,12 @@ def _measure_member_cells(
     # THE TIE-BREAK ARRIVED WITH THE ABSOLUTE CURVE and is not
     # decoration. The retired parcel-relative percentile gave every cell
     # a DISTINCT rank by construction, so a plain argmax always found
-    # one cell; twi_score() SATURATES at 1.0 above
-    # TWI_SCORE_FULL_CREDIT_BREAKPOINT, so an established drainageway
-    # ties at 1.0 along its whole length and a bare argmax would silently
+    # one cell; twi_score() SATURATES at 1.0 above its full-credit
+    # breakpoint (now the window's own p90), so an established
+    # drainageway ties at 1.0 along its whole length -- the tie is
+    # NARROWER under window referencing than under the fixed 10.0, since
+    # the breakpoint tracks the window's wet end rather than stopping
+    # below it, but it is still a tie -- and a bare argmax would silently
     # return whichever cell came first in the member list -- reporting
     # the catchment of an arbitrary cell as "the wet heart". Accumulation
     # is the right discriminator here because it is what the reported
@@ -3362,7 +3790,7 @@ def _confidence_notes_for_region(region: dict, soil_checked: bool) -> str:
         [
             WATER_SURVEY_AREAS_INTRO_NOTE,
             type_note,
-            TWI_RESOLUTION_CALIBRATION_NOTE,
+            TWI_WINDOW_REFERENCED_NOTE,
             _gravity_note(region),
             _soil_note(region, soil_checked),
         ]
@@ -3533,13 +3961,25 @@ def compute_water_survey_areas(
     # used rather than re-deriving its own.
     depression_depth_raw = compute_depression_depth(array, filled, noise_floor_meters=0.0)
     twi_raw = compute_topographic_wetness_index(dem, flow_accumulation, slope_pct)
-    # ABSOLUTE, per cell, over the raw ln(a/tan(beta)) -- no population
-    # is consulted, so no on-parcel population needs choosing and the
-    # score of a given cell is identical under every boundary that
-    # contains it. This line used to read parcel_relative_percentile(
-    # twi_raw, on_parcel) and WAS the boundary-dependence bug: see
-    # TWI_SCORE_MIN_BREAKPOINT and the retired function's own docstring.
-    twi_score_grid = twi_score(twi_raw)
+    # THE WINDOW-REFERENCED CURVE, in three lines that must be read
+    # together. The reference window is derived from the DEM ALONE --
+    # `dem` is the only argument twi_reference_window() takes, and that
+    # is the structural guarantee that the parcel cannot enter the
+    # reference population. The breakpoints are two fixed percentiles of
+    # THAT population's raw TWI. The scoring is then per-cell arithmetic
+    # on the resulting curve, so two cells with the same raw TWI in this
+    # window score identically however the boundary inside it is drawn.
+    #
+    # NOTE WHAT IS DELIBERATELY NOT PASSED HERE: gate_mask (computed
+    # above, in scope, and unused by any of these three lines) and
+    # on_parcel (built below, AFTER this block, so it cannot be reached
+    # from here even by mistake). The gated mask selects which cells get
+    # SCORED -- it never enters the reference. This line used to read
+    # parcel_relative_percentile(twi_raw, on_parcel) and WAS the
+    # boundary-dependence bug; see the WINDOW-REFERENCED CURVE section.
+    twi_reference = twi_reference_window(dem)
+    twi_breakpoints = twi_window_breakpoints(twi_raw, twi_reference["mask"])
+    twi_score_grid = twi_score(twi_raw, twi_breakpoints["floor"], twi_breakpoints["full_credit"])
 
     # on_parcel is still built -- the embankment compartment machinery
     # bounds its watershed band with it. It is legitimately
@@ -3776,6 +4216,13 @@ def compute_water_survey_areas(
         "embankment_seeds": embankment_seeds,
         "selected_water_zone": selected,
         "surfaces": surfaces,
+        # The DERIVED CURVE, carried out with the run so a run's
+        # scoring is reproducible from its own output: the reference
+        # window (bounds, snap, mask) and the breakpoints read off it
+        # (including the window's whole reported TWI distribution).
+        # Without these two, a score is an unfalsifiable number.
+        "twi_reference_window": twi_reference,
+        "twi_breakpoints": twi_breakpoints,
         "screens": {
             "twi_raw": twi_raw,
             "twi_score": twi_score_grid,
@@ -4314,6 +4761,13 @@ def build_scales(result: dict) -> dict:
     }
 
 
+def _round_or_none(value, digits: int):
+    """round(), but None passes through -- the window-referenced curve
+    reports None breakpoints for a window with no measured TWI, and a
+    wire form must carry that honestly rather than coerce it to 0."""
+    return None if value is None else round(float(value), digits)
+
+
 def build_narrative_data(result: dict) -> dict:
     """
     Pre-digested, FINAL, JSON-serializable narrative values -- imperial
@@ -4471,6 +4925,8 @@ def build_narrative_data(result: dict) -> dict:
 
     seeds = result.get("embankment_seeds", [])
     failed_seeds = [record for record in seeds if record["status"] == SEED_STATUS_FAILED]
+    breakpoints = result["twi_breakpoints"]
+    reference_window = result["twi_reference_window"]
 
     return {
         "zone_found": bool(surviving),
@@ -4501,11 +4957,42 @@ def build_narrative_data(result: dict) -> dict:
         # instrument, not one reading of it.
         "scales": build_scales(result),
         # THE CAVEAT THAT REPLACED THE PARCEL-RELATIVE ONE. TWI is
-        # absolute now, so "wettest on THIS parcel" stopped being true
-        # and had to go rather than be softened; what survives is the
-        # resolution-calibration caveat, which is still warranted.
+        # absolute given the window, so "wettest on THIS parcel" stopped
+        # being true and had to go rather than be softened.
         "twi_is_absolute": True,
-        "twi_note": TWI_RESOLUTION_CALIBRATION_NOTE,
+        "twi_note": TWI_WINDOW_REFERENCED_NOTE,
+        # THE CURVE THIS RUN ACTUALLY SCORED ON, on the wire. A
+        # window-referenced score is meaningless without the window it
+        # was referenced to -- "0.62 for wetness" is a claim only
+        # against the breakpoints it was measured on -- so the derived
+        # breakpoints, the percentiles they were read at, the reference
+        # window's snapped bounds and its whole reported TWI
+        # distribution all ride narrative_data. A run's scoring is
+        # reproducible from its own output; nothing has to be re-run to
+        # find out what curve produced a number. JSON-ready throughout
+        # (plain floats, bounds as a list) like every other value here.
+        "twi_curve": {
+            "reference_population": "dem_window_snapped",
+            # ROUNDED HERE AND ONLY HERE -- the run scored on the full
+            # precision values (see twi_window_breakpoints()); 4 dp is
+            # the wire convention and is far finer than the ~0.01
+            # resolution of the distribution these are read from.
+            "floor_breakpoint": _round_or_none(breakpoints["floor"], 4),
+            "full_credit_breakpoint": _round_or_none(breakpoints["full_credit"], 4),
+            "floor_percentile": breakpoints["floor_percentile"],
+            "full_credit_percentile": breakpoints["full_credit_percentile"],
+            "window_twi_percentiles": {
+                label: _round_or_none(value, 4) for label, value in breakpoints["percentiles"].items()
+            },
+            "reference_cell_count": breakpoints["reference_cell_count"],
+            "measured_cell_count": breakpoints["measured_cell_count"],
+            "curve_fallback": breakpoints["curve_fallback"],
+            "window_bounds": [round(value, 2) for value in reference_window["bounds"]],
+            "fetched_grid_bounds": [round(value, 2) for value in reference_window["grid_bounds"]],
+            "snap_meters": reference_window["snap_meters"],
+            "window_is_snapped": reference_window["snapped"],
+            "snap_fallback_reason": reference_window["fallback_reason"],
+        },
         "gates": {
             "on_parcel_cells": stats["on_parcel_cells"],
             "ceiling_removed_cells": stats["ceiling_removed_cells"],

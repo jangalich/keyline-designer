@@ -931,17 +931,35 @@ assert ctx.selected_water_zone is not None and ctx.selected_water_zone["survey_t
     "excavated selection means the compartment path regressed"
 )
 assert ctx.selected_water_zone["rank"] == 1
-# ...and it is a TERMINAL-pinch compartment (the accepted-not-refused
-# correction): the winning walk rides the still-narrowing throat to the
-# flow field's end, so the selection exercises the disclosure fields the
-# consumers now carry -- through the real build_pipeline_context() run.
-assert ctx.selected_water_zone["pinch_terminal"] == "walk_bound", (
-    "the rank-1 compartment's pinch sits at the walk's end -- accepted with its terminator named, "
-    "never refused"
+# ...and the run STILL PRODUCES a TERMINAL-pinch compartment (the
+# accepted-not-refused correction): a walk that rides the still-narrowing
+# throat to the flow field's end is accepted with its terminator named,
+# and the disclosure fields the consumers carry are exercised through the
+# real build_pipeline_context() run.
+#
+# IT IS NO LONGER THE RANK-1 ZONE, and that is a ranking move, not a
+# contract move. Window-referenced TWI un-floored this fixture's wetness
+# criterion, four compartments now tie at seed blend 0.625, and the
+# acreage tiebreak puts an interior-pinch one first. Which member of a
+# tie the pool selects is a SEEDING/RANKING question -- deliberately not
+# what the TWI branch changed and deliberately not what this section
+# guards. What this section guards is the consumer contract on whatever
+# compartment wins (asserted on rank-1 above and below) and the terminal
+# disclosure existing at all (asserted here, on the terminal compartment
+# the same single call produced).
+_terminal_zones = [
+    feature["properties"]
+    for feature in ctx.water_zones
+    if feature["properties"].get("pinch_terminal") == "walk_bound"
+]
+assert _terminal_zones, (
+    "the fixture's throat must still produce at least one terminal-pinch compartment -- accepted "
+    "with its terminator named, never refused"
 )
-assert ctx.selected_water_zone["still_narrowing_at_termination"] is True
-assert "pinch_at_walk_bound" in ctx.selected_water_zone["flags"]
-assert "still_narrowing_at_termination" in ctx.selected_water_zone["flags"]
+for _terminal in _terminal_zones:
+    assert _terminal["still_narrowing_at_termination"] is True
+    assert "pinch_at_walk_bound" in _terminal["flags"]
+    assert "still_narrowing_at_termination" in _terminal["flags"]
 assert ctx.selected_water_zone["render_fill_polygon_utm"] is ctx.selected_water_zone["polygon_utm"], (
     "the compartment's render_fill is the IDENTITY of its clipped compartment polygon"
 )

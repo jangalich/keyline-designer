@@ -16,16 +16,27 @@ embankment blend that was enough to drop a ~0.52 seed under the
 then-0.50 seeding minimum with the terrain unchanged. The direction is
 the tell: INCLUDING MORE WATER MADE THE WATER SITES SCORE WORSE.
 
-water_survey_areas.twi_score() replaced that percentile with a fixed
-absolute curve over raw ln(a/tan(beta)). This file pins the fix:
+water_survey_areas.twi_score() replaced that percentile -- first with a
+fixed absolute curve, now with a WINDOW-REFERENCED one whose breakpoints
+are percentiles of the fetched DEM window's own TWI distribution. THE
+INVARIANT THIS FILE GUARDS IS UNCHANGED ACROSS BOTH: a cell's score may
+not move because the user redrew a line around it. Window referencing
+holds it for a structural reason -- the reference population is the
+RASTER (twi_reference_window() takes the dem and nothing else), so two
+boundaries inside one window derive the identical curve. What the window
+CAN move is covered in test_twi_window_referenced.py, which owns the
+curve derivation, the snap quantization and the gate-exclusion proof.
+
+This file pins the fix:
 
     1. THE BUG, PINNED -- one synthetic DEM, two boundaries (the smaller
        one, and a larger one that adds a high-TWI stream corridor).
-       A fixed cell's TWI score is IDENTICAL under both, and a zone that
-       qualifies under the smaller boundary still qualifies under the
-       larger. The retired percentile is computed alongside on the same
-       cells, so the test states the size of what was fixed rather than
-       asserting that something was.
+       A fixed cell's TWI score is IDENTICAL under both -- exactly
+       0.0000 of delta -- and so are the derived breakpoints, and a zone
+       that qualifies under the smaller boundary still qualifies under
+       the larger. The retired percentile is computed alongside on the
+       same cells, so the test states the size of what was fixed rather
+       than asserting that something was.
     2. RETIREMENT -- parcel_relative_percentile() is absent from the TWI
        path at the AST level, and no user-facing string anywhere claims
        parcel-relative TWI.
@@ -34,6 +45,11 @@ absolute curve over raw ln(a/tan(beta)). This file pins the fix:
     4. THE BOUNDARY-STABILITY REPORT -- survive-both vs appear-in-one
        classification and per-criterion deltas, on a two-boundary
        synthetic.
+    5b. THE PINNED-vs-LIVE COUPLING -- BUG_ERA_SEED_MINIMUM really is
+       decoupled from the live seeding constant, the pinned counts
+       really are measured at the pinned bar, and the live-tracking
+       assertion really measures something else. That coupling broke
+       once; it is checked rather than trusted.
 
 Run:  python test_twi_boundary_independence.py   (no network)
 """
@@ -192,17 +208,48 @@ raw_large = float(large["screens"]["twi_raw"][PROBE])
 assert raw_small == raw_large, "raw ln(a/tan(beta)) is a property of the cell; both runs must agree"
 assert math.isclose(raw_small, 8.9889, abs_tol=5e-4), f"hand-checked raw TWI at the probe, got {raw_small}"
 
-# --- THE CENTRAL ASSERTION: the SCORE is identical under both boundaries
+# --- THE CENTRAL ASSERTION: the SCORE is identical under both
+#     boundaries. Under WINDOW REFERENCING the mechanism is worth
+#     naming, because it is not the same mechanism it was: the curve is
+#     no longer two constants, it is two percentiles of the DEM window's
+#     own TWI distribution -- and the window is a property of the
+#     RASTER, which both runs share. So both runs derive the IDENTICAL
+#     breakpoints and the probe scores the identical value. Asserted on
+#     the breakpoints too, not just the score, because "the scores
+#     matched" would also be true if both curves were wrong in the same
+#     way.
+_small_curve = small["twi_breakpoints"]
+_large_curve = large["twi_breakpoints"]
+assert (_small_curve["floor"], _small_curve["full_credit"]) == (
+    _large_curve["floor"], _large_curve["full_credit"]
+), (
+    f"the reference population is the WINDOW, so two boundaries inside one window must derive the "
+    f"IDENTICAL curve (got {_small_curve['floor']}/{_small_curve['full_credit']} vs "
+    f"{_large_curve['floor']}/{_large_curve['full_credit']})"
+)
+assert small["twi_reference_window"]["bounds"] == large["twi_reference_window"]["bounds"], (
+    "and the identical reference window, which is what makes the curves identical"
+)
+assert _small_curve["curve_fallback"] is None, (
+    "this fixture exercises the NORMAL percentile path, not a degeneracy fallback"
+)
 score_small = float(small["screens"]["twi_score"][PROBE])
 score_large = float(large["screens"]["twi_score"][PROBE])
 assert score_small == score_large, (
     f"THE WHOLE POINT: the same cell's TWI score must be byte-identical under both boundaries "
     f"(got {score_small} vs {score_large})"
 )
-assert math.isclose(score_small, (raw_small - wsa.TWI_SCORE_MIN_BREAKPOINT) / (
-    wsa.TWI_SCORE_FULL_CREDIT_BREAKPOINT - wsa.TWI_SCORE_MIN_BREAKPOINT
-)), "and it is the curve's own value, not a coincidence"
-assert math.isclose(score_small, 0.7472, abs_tol=5e-4)
+# EXACTLY 0.0000 OF DELTA, stated as the measurement it is:
+assert abs(score_small - score_large) == 0.0
+assert math.isclose(score_small, (raw_small - _small_curve["floor"]) / (
+    _small_curve["full_credit"] - _small_curve["floor"]
+)), "and it is the derived curve's own value, not a coincidence"
+assert math.isclose(score_small, 0.5994, abs_tol=5e-4)
+# THE VALUE'S OWN HISTORY, for the reader comparing branches: this same
+# probe cell read 0.7472 under the RETIRED FIXED 6.0/10.0 curve. It moves
+# because the curve moved (this window's p25/p90 are 4.61/11.92, not
+# 6/10), not because the cell or the boundary did -- and it moves
+# IDENTICALLY under both boundaries, which is the invariant that matters.
 
 # --- WHAT IT WOULD HAVE BEEN: the retired percentile, on the same cells.
 # THE OLD VALUES, STATED: 0.9788 under the SMALL boundary and 0.3432
@@ -387,9 +434,27 @@ def _strings(value):
 for _text in _strings(_narrative):
     for _claim in _FORBIDDEN:
         assert _claim not in _text, f"a surviving user-facing string still claims parcel-relative TWI: {_text!r}"
-assert "resolution-dependent" in _narrative["twi_note"] and "calibrated" in _narrative["twi_note"], (
-    "what replaced it is the RESOLUTION-CALIBRATION caveat, which is still true and still warranted"
+assert "WINDOW-REFERENCED" in _narrative["twi_note"] and "ELEVATION TILE" in _narrative["twi_note"], (
+    "what replaced it says what the curve IS referenced to -- the elevation tile, never the parcel"
 )
+# AND THE SECOND RETIRED CLAIM IS GONE TOO. The fixed-curve branch's own
+# note ("a FIXED ABSOLUTE curve ... calibrated at the 5 m reference DEM's
+# resolution") stopped being true when the breakpoints started coming
+# from the window, and had to be removed exactly as the parcel-relative
+# one was -- not softened, not left standing beside its replacement.
+assert "FIXED ABSOLUTE curve" not in _narrative["twi_note"]
+assert "calibrated at the 5 m reference DEM" not in _narrative["twi_note"]
+# THE CURVE ITSELF RIDES THE WIRE, which is what makes a
+# window-referenced score readable at all: a reader who sees 0.60 for
+# wetness can see the two breakpoints and the window distribution it was
+# measured against, in the same block, without re-running anything.
+_curve_block = _narrative["twi_curve"]
+assert _curve_block["floor_breakpoint"] is not None and _curve_block["full_credit_breakpoint"] is not None
+assert _curve_block["reference_population"] == "dem_window_snapped"
+assert _curve_block["window_twi_percentiles"]["p25"] == _curve_block["floor_breakpoint"], (
+    "the floor IS the window's p25 -- the block must let a reader check that, not just assert it"
+)
+assert _curve_block["window_twi_percentiles"]["p90"] == _curve_block["full_credit_breakpoint"]
 
 # THE REPORT PROSE, the other place a reader meets this claim: it is
 # built from the narrative block above and must carry the caveat that is
@@ -397,8 +462,11 @@ assert "resolution-dependent" in _narrative["twi_note"] and "calibrated" in _nar
 _prose = report_generator._format_water_survey_areas_summary(_narrative)
 for _claim in _FORBIDDEN:
     assert _claim not in _prose, f"the report prose still claims parcel-relative TWI: {_claim!r}"
-assert "FIXED ABSOLUTE curve" in _prose and "calibrated at the 5 m reference DEM" in _prose, (
-    "and it does carry the resolution-calibration caveat that replaced it"
+assert "WINDOW-REFERENCED" in _prose and "ELEVATION TILE" in _prose, (
+    "and the prose does carry what the curve is referenced to, which is what makes a score readable"
+)
+assert "FIXED ABSOLUTE curve" not in _prose, (
+    "the retired fixed-curve claim must leave the prose the same way the parcel-relative one did"
 )
 print(
     "2. Retirement: parcel_relative_percentile() is AST-absent from water_survey_areas (call site "
@@ -607,27 +675,39 @@ _diag_runs = [
     ("large", _as_run(large, LARGE_BOUNDARY), None),
 ]
 
-# --- calibration: the distribution under each boundary, and the
-#     per-percentile AGREEMENT that makes the calibration itself
-#     boundary-independent.
+# --- calibration: the reference WINDOW each boundary scored against,
+#     its distribution, the derived curve, and the GATED distribution
+#     printed beside it as context only.
 _calibration = diag.summarize_twi_calibration(_diag_runs)
-assert f"0.0 at/below {wsa.TWI_SCORE_MIN_BREAKPOINT}" in _calibration
-assert "874 gated cells with measured TWI" in _calibration
-assert "AGREEMENT between 'small' and 'large'" in _calibration
-assert "DEM resolution" in _calibration, "the resolution rides beside the distribution it calibrates"
-_single_calibration = diag.summarize_twi_calibration([_diag_runs[0]])
-assert "ONLY ONE BOUNDARY IN THIS RUN" in _single_calibration, (
-    "one boundary cannot calibrate boundary-independently, and the instrument says so"
+assert f"0.0 at the window's p{wsa.TWI_WINDOW_FLOOR_PERCENTILE:g} raw TWI" in _calibration
+assert f"1.0 at its p{wsa.TWI_WINDOW_FULL_CREDIT_PERCENTILE:g}" in _calibration
+assert "reference window 600 x 200 m (4800 cells" in _calibration, _calibration
+assert "DERIVED CURVE: floor 4.605" in _calibration and "full credit 11.918" in _calibration, _calibration
+assert "no breakpoint is read from it" in _calibration, (
+    "the gated row must be labelled as context, or a reader will take it for the reference"
 )
+assert "DEM resolution" in _calibration, "the resolution rides beside the distribution it calibrates"
+# BOTH CURVES, SIDE BY SIDE, on the gated cells -- the flooring number
+# this branch exists to move.
+assert "retired fixed curve: mean" in _calibration
+# THE SNAP SECTION, which is the one that shows quantization working.
+_snap = diag.summarize_reference_window_snap(_diag_runs)
+assert "snap grid: 100 m" in _snap and "SAME SNAPPED WINDOW" in _snap, _snap
+_single_snap = diag.summarize_reference_window_snap([_diag_runs[0]])
+assert "ONLY ONE BOUNDARY IN THIS RUN" in _single_snap
 
 # --- before/after: the decisive line is the per-cell change across
-#     boundaries. The absolute row must read exactly zero.
+#     boundaries, on all THREE curves, every one a measured number.
 _comparison = diag.summarize_twi_scoring_comparison(_diag_runs)
 assert "CELLS GATED UNDER BOTH (874)" in _comparison
-assert "absolute curve:     mean 0.0000, max 0.0000" in _comparison, (
-    f"the absolute curve must not move ANY cell between boundaries:\n{_comparison}"
+assert "window-referenced    mean 0.0000, max 0.0000" in _comparison, (
+    f"the live curve must not move ANY cell between two boundaries in one window:\n{_comparison}"
 )
-assert "retired percentile: mean 0.3035, max 0.6356" in _comparison, (
+assert "retired fixed curve  mean 0.0000, max 0.0000" in _comparison, (
+    f"the retired fixed curve held cells still too -- that property is KEPT, not traded away:"
+    f"\n{_comparison}"
+)
+assert "retired percentile   mean 0.3035, max 0.6356" in _comparison, (
     f"and the retired percentile's measured movement is stated, not asserted:\n{_comparison}"
 )
 
@@ -662,11 +742,60 @@ assert np.allclose(diag._embankment_surface_without_twi(_all_ones), 1.0), (
     "redistribution is proportional, and it conserves the total weight"
 )
 print(
-    "5. Diagnostic sections: the calibration prints both distributions plus their per-percentile "
-    "agreement (and refuses to calibrate from one boundary), the before/after measures the retired "
-    "percentile moving cells 0.3035 on average while the absolute curve moves none, and the "
-    "independent-signal report states correlations, clearing shares and seed archetypes without "
-    "touching a surface."
+    "5. Diagnostic sections: the calibration prints the reference WINDOW's distribution and the "
+    "curve derived from it (with the gated distribution beside it, labelled as context), the snap "
+    "section reports whether both boundaries land on one snapped window, the before/after measures "
+    "all three curves -- retired percentile moving cells 0.3035 on average, retired fixed curve and "
+    "live window-referenced curve moving none -- and the independent-signal report states "
+    "correlations, clearing shares and seed archetypes without touching a surface."
+)
+
+
+# =========================================================================
+# 5b. THE PINNED-vs-LIVE COUPLING, VERIFIED RATHER THAN ASSUMED
+# =========================================================================
+# BUG_ERA_SEED_MINIMUM exists because reading the LIVE seeding constant
+# in section 1 would let an unrelated tuning change quietly rewrite what
+# this file demonstrates. That is a claim about the code, and it was
+# broken once already, so it is CHECKED here rather than trusted:
+#
+#   1. the pinned value is the constant's BUG-ERA value (0.50), not
+#      whatever it is today,
+#   2. it is genuinely decoupled -- the live constant has since moved,
+#      so the two are not accidentally equal,
+#   3. the pinned assertions really are evaluated at the pinned bar
+#      (_clearing_count's default IS BUG_ERA_SEED_MINIMUM), and
+#   4. the live-tracking assertion really does read the live constant,
+#      and measures something DIFFERENT from the pinned one -- if the
+#      two counts were equal the "live" half would be a duplicate
+#      dressed as a second check.
+assert BUG_ERA_SEED_MINIMUM == 0.50, "the pinned value is the seeding minimum AS OF THE BUG"
+assert BUG_ERA_SEED_MINIMUM != EMBANKMENT_SEED_MIN_SCORE, (
+    f"the pinned bar must not track the live one -- the live minimum is "
+    f"{EMBANKMENT_SEED_MIN_SCORE} and the pinned bar stays at the bug's 0.50"
+)
+import inspect as _inspect  # noqa: E402  (local to this check, deliberately)
+
+_clearing_signature = _inspect.signature(_clearing_count)
+assert _clearing_signature.parameters["threshold"].default == BUG_ERA_SEED_MINIMUM, (
+    "the pinned 38/38 and 442/0 counts must be measured AT the pinned bar, or they stop recording "
+    "the bug"
+)
+assert absolute_small == absolute_large and retired_small != retired_large, (
+    "the pinned pair still says exactly what it claims: identical under the live curve, collapsed "
+    "under the retired percentile"
+)
+assert live_small == live_large and live_small != absolute_small, (
+    f"the live-tracking half must measure a DIFFERENT number at the live bar ({live_small} at "
+    f"{EMBANKMENT_SEED_MIN_SCORE} vs {absolute_small} at {BUG_ERA_SEED_MINIMUM}) -- equal counts "
+    "would mean the second assertion is the first one repeated"
+)
+print(
+    f"5b. Pinned-vs-live coupling verified: BUG_ERA_SEED_MINIMUM stays {BUG_ERA_SEED_MINIMUM} while "
+    f"the live minimum is {EMBANKMENT_SEED_MIN_SCORE}; the pinned counts ({absolute_small}/"
+    f"{absolute_large} vs {retired_small}/{retired_large}) are measured at the pinned bar and the "
+    f"live counts ({live_small}/{live_large}) at the live one -- two different measurements, both "
+    "boundary-invariant on the live curve."
 )
 
 

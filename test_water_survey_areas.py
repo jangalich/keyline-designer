@@ -210,13 +210,18 @@ assert ksat_only["hydrologic_group_score"] is None
 assert soil_water_score_for_mukey(None, None, None) is None, "no sub-signal at all -> None, cell falls back neutral"
 print("Soil composite: renormalized over available sub-signals; nothing available is None.")
 
-# --- THE ABSOLUTE TWI CURVE at its breakpoints: hand values BELOW / AT
-#     the floor / BETWEEN / AT full credit / ABOVE. No population is
-#     consulted anywhere, which is the whole point of the change. ---
-_lo, _hi = wsa.TWI_SCORE_MIN_BREAKPOINT, wsa.TWI_SCORE_FULL_CREDIT_BREAKPOINT
+# --- THE TWI CURVE at its breakpoints: hand values BELOW / AT the floor
+#     / BETWEEN / AT full credit / ABOVE. GIVEN the breakpoints this is
+#     pure per-cell arithmetic -- no population is consulted, which is
+#     what keeps a redrawn boundary from moving anyone's score. Where
+#     the breakpoints COME from (percentiles of the DEM window) is
+#     test_twi_window_referenced.py's subject; here they are supplied
+#     directly, because twi_score() now REQUIRES them and has no
+#     default pair to fall back on. ---
+_lo, _hi = 6.0, 10.0
 _mid = (_lo + _hi) / 2.0
 hand = np.array([[_lo - 3.0, _lo, _mid], [_hi, _hi + 3.0, _lo + 0.25 * (_hi - _lo)], [np.nan, 0.0, 1e6]])
-scored = twi_score(hand)
+scored = twi_score(hand, _lo, _hi)
 assert scored[0, 0] == 0.0, "below the floor scores 0.0 -- plain hillslope earns nothing for wetness"
 assert scored[0, 1] == 0.0, "AT the floor is still 0.0 (the ramp starts here, it does not step)"
 assert math.isclose(scored[0, 2], 0.5), "the midpoint of the ramp scores exactly 0.5 -- it is linear"
@@ -227,16 +232,33 @@ assert np.isnan(scored[2, 0]), "an unmeasured cell stays unmeasured -- NaN propa
 assert scored[2, 1] == 0.0 and scored[2, 2] == 1.0, "the curve is clipped on both sides, for any raw value"
 # The curve takes its breakpoints as ARGUMENTS -- they are configurable,
 # not baked into the arithmetic.
-assert math.isclose(twi_score(np.array([5.0]), min_breakpoint=0.0, full_credit_breakpoint=10.0)[0], 0.5)
-print(f"Absolute TWI curve: 0.0 at/below {_lo}, linear ramp, 1.0 at/above {_hi}; NaN propagates; configurable.")
+assert math.isclose(twi_score(np.array([5.0]), 0.0, 10.0)[0], 0.5)
+# AND THEY ARE REQUIRED, with no default pair. That is what stops a
+# hardcoded curve from quietly becoming the default again -- the reason
+# the two retired constants live under RETIRED_ names and are imported
+# only by the diagnostic's before/after.
+try:
+    twi_score(np.array([5.0]))
+    raise AssertionError("twi_score() must not accept a call with no breakpoints")
+except TypeError:
+    pass
+assert not hasattr(wsa, "TWI_SCORE_MIN_BREAKPOINT") and not hasattr(wsa, "TWI_SCORE_FULL_CREDIT_BREAKPOINT"), (
+    "the fixed breakpoint constants are RETIRED under their RETIRED_ names -- nothing may import "
+    "the old names and get a scoring curve"
+)
+assert wsa.RETIRED_FIXED_TWI_MIN_BREAKPOINT == 6.0 and wsa.RETIRED_FIXED_TWI_FULL_CREDIT_BREAKPOINT == 10.0, (
+    "retired, NOT deleted: the diagnostic's before/after needs the old pair to stay reproducible"
+)
+print(f"TWI curve: 0.0 at/below {_lo}, linear ramp, 1.0 at/above {_hi}; NaN propagates; "
+      "breakpoints are REQUIRED arguments with no default pair.")
 
 # THE PROPERTY THE WHOLE BRANCH EXISTS FOR, stated at the unit level: the
 # score of a value does not depend on what other values are present.
-assert twi_score(np.array([7.0]))[0] == twi_score(np.array([7.0, 20.0, 20.0, 20.0]))[0], (
-    "an absolute curve scores a value identically whatever population surrounds it -- "
+assert twi_score(np.array([7.0]), _lo, _hi)[0] == twi_score(np.array([7.0, 20.0, 20.0, 20.0]), _lo, _hi)[0], (
+    "given a curve, a value scores identically whatever population is passed alongside it -- "
     "adding the wettest cells on the landscape must not move anyone else's score"
 )
-print("Absolute TWI curve: one cell's score is independent of every other cell. That IS the fix.")
+print("TWI curve: given the breakpoints, one cell's score is independent of every other cell.")
 
 # --- The RETIRED percentile, still correct as an instrument (this
 #     branch's before/after comparison reproduces the old scores with
@@ -739,10 +761,29 @@ assert flat_result["gate_mask_stats"]["gated_cells"] == 100, "the boundary cover
 # IS wet in the ln(a/tan(beta)) sense, and says so identically whatever
 # is drawn around it, instead of reporting only that every cell is as
 # wet as every other.
-flat_twi = (math.log(5.0 / wsa.TWI_MIN_SLOPE_TAN) - wsa.TWI_SCORE_MIN_BREAKPOINT) / (
-    wsa.TWI_SCORE_FULL_CREDIT_BREAKPOINT - wsa.TWI_SCORE_MIN_BREAKPOINT
+# THE CURVE IS READ OFF THE RUN, not hardcoded: the breakpoints are
+# percentiles of this fixture's own DEM window, so the test asks the run
+# what curve it derived and scores the hand value on that. Hardcoding a
+# pair here would re-assert the retired fixed curve.
+_flat_bp = flat_result["twi_breakpoints"]
+flat_twi = min(max(
+    (math.log(5.0 / wsa.TWI_MIN_SLOPE_TAN) - _flat_bp["floor"])
+    / (_flat_bp["full_credit"] - _flat_bp["floor"]), 0.0), 1.0)
+# A DEAD-FLAT WINDOW IS THE LAST-RESORT CASE: every cell carries the
+# same raw ln(a/tan(beta)) (accumulation 1 everywhere, slope floored at
+# TWI_MIN_SLOPE_TAN), so there is no gradient anywhere to reference. The
+# curve is centred on that common value and every cell reads the neutral
+# 0.5.
+assert _flat_bp["curve_fallback"] == "centred_on_uniform_value", (
+    "a dead-flat window has no TWI gradient at all -- not at the percentiles and not in the "
+    "observed range"
 )
-assert math.isclose(flat_twi, 0.6292982978540596), "ln(5000) on the 6.0 -> 10.0 ramp"
+assert math.isclose(flat_twi, 0.5), "the centred curve reads dead-flat ground as neutral 0.5"
+# AND NOTE WHERE THAT LANDS: 0.5 is exactly what the RETIRED PERCENTILE
+# said here, by its own mean-rank convention on an all-tied population.
+# Two instruments that disagree everywhere else agree on the one case
+# where the honest answer is "this window cannot tell you" -- which is
+# why the member mean below is still the historic 0.6378.
 expected_flat_score = (
     0.35 * (0.5 * flat_twi + 0.5 * 0.0) + 0.30 * 1.0 + 0.25 * 1.0 + 0.10 * (CA / 2.0)
 )
@@ -865,6 +906,9 @@ v_result = compute_water_survey_areas(V_DEM, V_BOUNDARY, flow_accumulation=v_acc
 v_gate = np.zeros((V_ROWS, V_COLS), dtype=bool)
 v_gate[2:38, 2:19] = True
 V_TAN_BETA = 0.55 / math.hypot(5.0, 5.0)
+# The curve THIS fixture's window derived, read off the run -- see the
+# flat fixture above for why a test must never hardcode the pair.
+_V_BREAKPOINTS = v_result["twi_breakpoints"]
 
 
 def _v_twi(accumulation_cells):
@@ -875,14 +919,8 @@ def _v_twi(accumulation_cells):
     grid, which is exactly what the old `(576 + i) / 611` rank could not
     say."""
     raw = math.log(5.0 * accumulation_cells / V_TAN_BETA)
-    return min(
-        max(
-            (raw - wsa.TWI_SCORE_MIN_BREAKPOINT)
-            / (wsa.TWI_SCORE_FULL_CREDIT_BREAKPOINT - wsa.TWI_SCORE_MIN_BREAKPOINT),
-            0.0,
-        ),
-        1.0,
-    )
+    floor, full_credit = _V_BREAKPOINTS["floor"], _V_BREAKPOINTS["full_credit"]
+    return min(max((raw - floor) / (full_credit - floor), 0.0), 1.0)
 
 
 side_twi = _v_twi(1)
@@ -966,44 +1004,56 @@ assert v_result["regions_by_type"][SURVEY_TYPE_EMBANKMENT] == [], (
 # go on to produce surviving compartments while the channel -- higher
 # scoring on every criterion -- produces none.
 #
-# THE ABSOLUTE CURVE PUTS A PLATEAU AT THE TOP OF THIS SURFACE, and the
-# seeding order is worth stating because of it. Both of the
-# accumulation-driven criteria SATURATE: drainage_band_score reaches 1.0
-# at 2 acres (row 5) and twi_score reaches 1.0 at raw TWI 10.0 (also row
-# 5), so rows 5..37 all blend to EXACTLY 0.875 and the argmax is a
-# 33-way tie. select_embankment_seeds() resolves ties row-major (its own
-# documented determinism), so the first seed is the TOP of the plateau
-# at row 5 rather than the most-accumulated cell at row 37.
+# THE SATURATION PLATEAU IS GONE, AND THAT IS THE WINDOW-REFERENCED
+# CURVE'S DOING. Under the retired FIXED breakpoints, twi_score()
+# reached 1.0 at raw TWI 10.0 -- which this channel passes at row 5 --
+# so rows 5..37 all blended to EXACTLY 0.875, a 33-way argmax tie
+# broken row-major, and the first seed was the TOP of the plateau
+# rather than the most-accumulated cell. The plateau was an artifact of
+# a breakpoint that stopped below the ground's own range: every cell
+# above 10.0 was declared equal because the curve had run out, not
+# because the terrain had.
 #
-# UNDER THE RETIRED PERCENTILE THERE WAS NO PLATEAU: ranking gave every
-# channel cell a distinct score by construction, so seeds walked down
-# from row 37. The plateau is the honest consequence of an absolute
-# curve with full credit -- two cells that both carry an established
-# drainageway ARE equally good on these criteria, and a scoring system
-# that manufactures a difference between them is inventing precision.
-# Which member of a tie anchors a compartment is a SEEDING question, and
-# seeding is deliberately not what this branch changed.
+# The window-referenced curve ends where the WINDOW ends, so the channel
+# grades all the way to its wettest cell and seeding walks DOWN from
+# row 37 (the most accumulated) as a reading of catchment should. Note
+# this fixture lands on the 'observed_range' fallback -- 20 of its 21
+# columns are identical hillslope, so the p25 and p90 of the window tie
+# and the curve falls back to the window's observed min..max (see
+# twi_window_breakpoints()). A real 3DEP window does not do that; the
+# NORMAL percentile path is exercised in test_twi_window_referenced.py
+# against a purpose-built distribution.
 #
 # Iterative claiming at 30 m (6 cells of row distance, symmetric and
-# inclusive), blend-descending, so the channel tier claims first: the
-# row-5 seed claims rows 0..11 (taking rows 2-4 with it), then row 12
-# claims 6..18, and so on -> channel seeds at rows 5, 12, 19, 26, 33.
-# The 0.375 side tier then seeds what the channel discs did not claim,
-# ties resolved row-major, alternating flanks as the scan reaches them.
+# inclusive), blend-descending from row 37: row 37 claims rows 31..40,
+# then row 30 claims 24..36, and so on -> channel seeds at rows 37, 30,
+# 23, 16, 9, 2. The 0.375 side tier then seeds what the channel discs
+# did not claim, ties resolved row-major, alternating flanks as the scan
+# reaches them.
 v_seeds = v_result["embankment_seeds"]
-V_CHANNEL_SEEDS = [(5, V_CHANNEL), (12, V_CHANNEL), (19, V_CHANNEL), (26, V_CHANNEL), (33, V_CHANNEL)]
+V_CHANNEL_SEEDS = [
+    (37, V_CHANNEL), (30, V_CHANNEL), (23, V_CHANNEL),
+    (16, V_CHANNEL), (9, V_CHANNEL), (2, V_CHANNEL),
+]
 V_SIDE_SEEDS = [
-    (2, 2), (2, 16), (8, 3), (8, 17), (14, 2), (14, 16),
-    (20, 3), (20, 17), (26, 2), (26, 18), (32, 3), (32, 16),
+    (2, 2), (2, 17), (8, 3), (8, 16), (14, 2), (14, 17),
+    (20, 3), (20, 16), (26, 2), (26, 17), (32, 3), (32, 16),
 ]
 assert [record["rowcol"] for record in v_seeds] == V_CHANNEL_SEEDS + V_SIDE_SEEDS, (
     f"hand-derived 30 m claiming order, channel tier then side tier, got "
     f"{[record['rowcol'] for record in v_seeds]}"
 )
-assert all(math.isclose(record["blend_score"], 0.875) for record in v_seeds[:5]), (
-    "every channel seed sits on the saturated plateau, all five at the identical 0.875"
+# STRICTLY DESCENDING, not tied: the channel seeds now carry six
+# DISTINCT scores because nothing saturates the TWI half early any more.
+_channel_blends = [record["blend_score"] for record in v_seeds[:6]]
+assert _channel_blends == sorted(_channel_blends, reverse=True) and len(set(_channel_blends)) == 6, (
+    f"the plateau is gone -- every channel seed carries its own catchment's score, got {_channel_blends}"
 )
-assert all(math.isclose(record["blend_score"], 0.375) for record in v_seeds[5:]), (
+assert math.isclose(_channel_blends[0], 0.8737, abs_tol=5e-5), (
+    "the most-accumulated channel cell tops the surface, below the 0.875 the retired fixed curve "
+    "manufactured for a third of the channel at once"
+)
+assert all(math.isclose(record["blend_score"], 0.375) for record in v_seeds[6:]), (
     "and every side seed sits at the off-channel arithmetic cap, all twelve at exactly 0.375"
 )
 assert all(record["blend_score"] >= wsa.EMBANKMENT_SEED_MIN_SCORE for record in v_seeds)
@@ -1014,7 +1064,7 @@ assert 0.375 < 0.5, "the side tier would not have been nominated at all under th
 # station, so the along-channel minimum lands on the seed's own station
 # (argmin tie -> index 0: the valley never narrows below the seed) --
 # the ONE failure the accepted-terminal doctrine kept: no_constriction.
-_channel_records = v_seeds[:5]
+_channel_records = v_seeds[:6]
 assert all(record["status"] == wsa.SEED_STATUS_FAILED for record in _channel_records), (
     "a constant-width prism never narrows below any channel seed -- every one reports nothing"
 )
@@ -1026,21 +1076,24 @@ assert all(record["reason_code"] == wsa.REASON_NO_CONSTRICTION for record in _ch
 # THE SIDE TIER IS THE POINT OF THE LOWER MINIMUM, and it does not all
 # succeed either -- which is the shape the change predicted. The four
 # upslope-most side seeds walk reaches that never narrow (no_constriction
-# again); six build compartments, two of those lose a dedupe, and TWO
-# SURVIVE THE FLOOR. Ground scoring 0.375 -- half what the channel
+# again); eight build compartments, four of those lose the
+# compartment-overlap dedupe and two fall under the acre floor, and TWO
+# SURVIVE. Ground scoring 0.375 -- less than half what the channel
 # scores -- is the only ground on this fixture that produces an
 # embankment survey zone at all.
-_side_records = v_seeds[5:]
-assert sum(1 for r in _side_records if r["status"] == wsa.SEED_STATUS_COMPARTMENT) == 6
+_side_records = v_seeds[6:]
+assert sum(1 for r in _side_records if r["status"] == wsa.SEED_STATUS_COMPARTMENT) == 8
 assert sum(
     1 for r in _side_records
     if r["status"] == wsa.SEED_STATUS_FAILED and r["reason_code"] == wsa.REASON_NO_CONSTRICTION
 ) == 4
-assert sum(
-    1 for r in _side_records
-    if r["status"] == wsa.SEED_STATUS_FAILED
-    and r["reason_code"].startswith(wsa.DUPLICATE_OF_ZONE_REASON_PREFIX)
-) == 2
+# The dedupe that culls four of those eight is a ZONE-level overlap
+# dedupe, so it lands on the dropped ZONE's drop_reason, not on the seed
+# record (a pinch-level duplicate would land on the seed; this fixture
+# has none).
+_v_dropped_reasons = [zone["drop_reason"] for zone in v_result["dropped_zones"]]
+assert sum(1 for r in _v_dropped_reasons if r.startswith(wsa.DUPLICATE_OF_ZONE_REASON_PREFIX)) == 4
+assert sum(1 for r in _v_dropped_reasons if r == wsa.FLAG_BELOW_MIN_AREA) == 2
 v_emb_zones = v_result["zones_by_type"][SURVEY_TYPE_EMBANKMENT]
 assert len(v_emb_zones) == 2, "two off-channel compartments survive the floor"
 assert {zone["seed"]["rowcol"] for zone in v_emb_zones} == {(14, 2), (26, 2)}
@@ -1058,13 +1111,13 @@ assert v_exc_zone["rank"] == 1
 assert v_result["selected_water_zone"] is v_exc_zone
 assert v_exc_zone["sparse_anchor"] is False
 
-# The narrative carries the seed accounting: 17 seeds, 11 failed, each
+# The narrative carries the seed accounting: 18 seeds, 10 failed, each
 # with its reason code -- a reach with no on-parcel pinch still reports
 # honestly as nothing, and now the count of them is the cost line the
 # seed ladder exists to make visible.
 v_narrative = build_narrative_data(v_result)
 assert v_narrative["embankment_generation"] == wsa.PROVENANCE_SEED_COMPARTMENT
-assert v_narrative["embankment_seed_count"] == 17 and v_narrative["embankment_failed_seed_count"] == 11
+assert v_narrative["embankment_seed_count"] == 18 and v_narrative["embankment_failed_seed_count"] == 10
 assert v_narrative["embankment_zone_count"] == 2 and v_narrative["excavated_zone_count"] == 1
 assert v_narrative["zone_count"] == 3 and len(v_narrative["zones"]) == 3
 # The failure vocabulary is the two classes and nothing else, and every
@@ -1082,10 +1135,12 @@ for _code in _v_failed_codes - {wsa.REASON_NO_CONSTRICTION}:
         f"{_code} must name a zone that exists in this result"
     )
 print(
-    f"Fixture 2 (V-valley, seed minimum 0.30): excavated ribbons the 36 channel cells (mean "
-    f"{v_exc_zone['mean_suitability']}); 17 seeds in two tiers -- 5 channel cells at 0.875 that ALL "
-    "fail no_constriction (constant prism cross-section), and 12 off-channel cells at exactly 0.375 "
-    "(the archetype 0.50 excluded) of which two produce the fixture's only surviving embankment zones."
+    f"Fixture 2 (V-valley, seed minimum 0.30): excavated ribbons the channel (mean "
+    f"{v_exc_zone['mean_suitability']}); 18 seeds in two tiers -- 6 channel cells at six DISTINCT "
+    f"scores topping at {_channel_blends[0]:.4f} (the retired fixed curve's 0.875 plateau is gone) "
+    "that ALL fail no_constriction (constant prism cross-section), and 12 off-channel cells at "
+    "exactly 0.375 (the archetype 0.50 excluded) of which two produce the fixture's only surviving "
+    "embankment zones."
 )
 
 # --- FIXTURE 2b: member-vs-zone split where the envelope ADDS ground.
@@ -1444,18 +1499,33 @@ assert hit_result["selected_water_zone"] is hit_zone, "a pump-required zone stil
 print("Contract: consumer fields + access patterns on the ZONE, envelope render_fill identity, overlap sentinels, PUMP-REQUIRED survives.")
 
 # narrative_data is FINAL and JSON-serializable, lists ALL zones with
-# the dual-acreage numbers, and carries the TWI RESOLUTION-CALIBRATION
-# caveat (the one that replaced the retired parcel-relative caveat):
+# the dual-acreage numbers, and carries the TWI curve this run scored on
+# (the note plus the derived breakpoints -- a window-referenced score is
+# unreadable without the window it was referenced to):
 narrative = build_narrative_data(hit_result)
 json.dumps(narrative)
 assert narrative["zone_found"] is True
-assert narrative["twi_is_absolute"] is True, "TWI is absolute now and narrative_data says so"
+assert narrative["twi_is_absolute"] is True, "a cell's TWI score is absolute given the window"
 assert "THIS parcel" not in narrative["twi_note"], (
     "the retired parcel-relative claim must not survive in the note -- it is no longer true"
 )
-assert "resolution-dependent" in narrative["twi_note"] and "calibrated" in narrative["twi_note"], (
-    "what survives is the RESOLUTION-CALIBRATION caveat, which still is true"
+assert "WINDOW-REFERENCED" in narrative["twi_note"] and "ELEVATION TILE" in narrative["twi_note"], (
+    "the note must say what the curve is referenced TO -- that is the whole readability of a score"
 )
+assert "FIXED ABSOLUTE curve" not in narrative["twi_note"], (
+    "the retired fixed-curve claim is no longer true either, and must not survive the way the "
+    "parcel-relative one had to be removed"
+)
+# THE CURVE ITSELF, ON THE WIRE: a run's scoring reproducible from its
+# own output, without re-running anything.
+_curve = narrative["twi_curve"]
+assert _curve["floor_percentile"] == wsa.TWI_WINDOW_FLOOR_PERCENTILE
+assert _curve["full_credit_percentile"] == wsa.TWI_WINDOW_FULL_CREDIT_PERCENTILE
+assert _curve["full_credit_breakpoint"] > _curve["floor_breakpoint"], "the ramp has positive width"
+assert _curve["window_twi_percentiles"]["p50"] is not None, "the window's own distribution rides along"
+assert _curve["reference_cell_count"] >= _curve["measured_cell_count"] > 0
+assert _curve["snap_meters"] == wsa.TWI_REFERENCE_WINDOW_SNAP_METERS
+assert len(_curve["window_bounds"]) == 4 and len(_curve["fetched_grid_bounds"]) == 4
 assert "twi_is_parcel_relative" not in narrative, "the retired caveat flag is gone, not renamed in place"
 assert narrative["zones"] and len(narrative["zones"]) == narrative["zone_count"] == len(hit_result["zones"]), (
     "narrative lists ALL surviving zones with the total count -- the cap and its counters are gone"

@@ -847,26 +847,36 @@ A2_DEM = _dem(_valley_array(A_ROWS, A_COLS, A_CHANNEL, _k2_of_row))
 # flank draws. They carry 15-39 cells (0.09-0.24 ac) of catchment; a
 # percentile scored them near the top of the parcel simply for being the
 # wettest ground PRESENT, which put their blends at 0.5468-0.566 and
-# over the seeding minimum. twi_score() reads the same cells at raw TWI
-# 7.3-8.3 -- real convergence, modest -- and their blends land at 0.4885,
-# just under. The absolute curve is right about them and the arithmetic
-# is worth stating: an off-channel cell with no drainage credit tops out
-# at 0.25*slope + 0.25*soil = 0.375 plus its TWI, so under the absolute
-# curve an EMBANKMENT SEED REQUIRES REAL CONTRIBUTING AREA -- which is
-# the correct reading of a dam across a drainageway, and a finding this
-# branch reports rather than tunes around.
+# over the seeding minimum. An absolute curve reads the same cells at
+# raw TWI 7.3-8.3 -- real convergence, modest -- and the arithmetic is
+# worth stating: an off-channel cell with no drainage credit tops out at
+# 0.25*slope + 0.25*soil = 0.375 plus its TWI, so an EMBANKMENT SEED
+# REQUIRES REAL CONTRIBUTING AREA -- the correct reading of a dam across
+# a drainageway, and a finding this branch reports rather than tunes
+# around.
 #
 # So the fixture gives these draws catchment that genuinely earns the
-# score, instead of borrowing it from a ranking. THE SCALE IS CHOSEN, NOT
-# ROUNDED: 2.9 is the value at which EVERY hand-derived number below is
-# reproduced exactly -- the channel compartment still seeds at
+# score, instead of borrowing it from a ranking. THE SCALE IS CHOSEN,
+# NOT ROUNDED: it is the value at which EVERY hand-derived number below
+# is reproduced exactly -- the channel compartment seeds at
 # (24, A_CHANNEL) and pinches at (28, A_CHANNEL) with its 23-cell
-# staircase under a 26-cell hull, and the two flank compartments still
-# measure 0.0801/0.0803 ac of band under 0.1197/0.1205 ac of hull, an
-# anchor ratio of ~0.67. Nothing about the geometry this fixture tests
-# moved; only the wetness the flanks are entitled to claim did.
+# staircase under a 26-cell hull, and the two flank compartments measure
+# 0.0801/0.0803 ac of band under 0.1197/0.1205 ac of hull, an anchor
+# ratio of ~0.67. Nothing about the geometry this fixture tests moves;
+# only the wetness the flanks are entitled to claim does.
+#
+# IT MOVED FROM 2.9 TO 2.0 WHEN TWI BECAME WINDOW-REFERENCED, and the
+# DIRECTION is the readable part. The retired fixed breakpoints (6.0 /
+# 10.0) sat above most of this window, so TWI read near zero on ground
+# that has real convergence and the fixture had to buy the missing
+# wetness with 2.9x catchment. The window-referenced curve derives
+# floor 5.24 and full credit 8.83 from this window's own p25/p90, TWI
+# contributes what the terrain actually carries, and 2.0x is enough to
+# reproduce the same geometry. LESS SYNTHETIC INFLATION FOR THE SAME
+# ANSWER is what un-flooring a criterion looks like from inside a
+# fixture.
 _A2_FILLED, _A2_FTR, _A2_FTC = _flow(A2_DEM)
-A_ACCUMULATION_SCALE = 2.9
+A_ACCUMULATION_SCALE = 2.0
 a2_accumulation = (
     compute_flow_accumulation(_A2_FILLED, _A2_FTR, _A2_FTC).astype(float) * A_ACCUMULATION_SCALE
 )
