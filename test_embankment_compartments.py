@@ -363,7 +363,7 @@ _seed = {
     "criteria_signature": {name: 0.5 for name in EMBANKMENT_WEIGHTS},
 }
 _screens = {
-    "twi_percentile": np.full(A_DEM["array"].shape, 0.5),
+    "twi_score": np.full(A_DEM["array"].shape, 0.5),
     "depression_depth": np.zeros(A_DEM["array"].shape),
     "flow_accumulation": compute_flow_accumulation(A_FILLED, A_FTR, A_FTC),
     "slope_pct": np.full(A_DEM["array"].shape, 5.0),
@@ -836,7 +836,41 @@ def _k2_of_row(r):
 
 
 A2_DEM = _dem(_valley_array(A_ROWS, A_COLS, A_CHANNEL, _k2_of_row))
-a_result = compute_water_survey_areas(A2_DEM, A_BOUNDARY)
+
+# THE ACCUMULATION OVERRIDE, AND WHY THE ABSOLUTE TWI CURVE NEEDED IT.
+# Every cell carries THREE TIMES the upslope area this 40-row window
+# models -- the coherent reading of a fixture window that is the lower
+# reach of a longer valley, applied UNIFORMLY so no cell's standing
+# relative to another changes.
+#
+# It is here because the retired parcel-relative TWI was inflating these
+# flank draws. They carry 15-39 cells (0.09-0.24 ac) of catchment; a
+# percentile scored them near the top of the parcel simply for being the
+# wettest ground PRESENT, which put their blends at 0.5468-0.566 and
+# over the seeding minimum. twi_score() reads the same cells at raw TWI
+# 7.3-8.3 -- real convergence, modest -- and their blends land at 0.4885,
+# just under. The absolute curve is right about them and the arithmetic
+# is worth stating: an off-channel cell with no drainage credit tops out
+# at 0.25*slope + 0.25*soil = 0.375 plus its TWI, so under the absolute
+# curve an EMBANKMENT SEED REQUIRES REAL CONTRIBUTING AREA -- which is
+# the correct reading of a dam across a drainageway, and a finding this
+# branch reports rather than tunes around.
+#
+# So the fixture gives these draws catchment that genuinely earns the
+# score, instead of borrowing it from a ranking. THE SCALE IS CHOSEN, NOT
+# ROUNDED: 2.9 is the value at which EVERY hand-derived number below is
+# reproduced exactly -- the channel compartment still seeds at
+# (24, A_CHANNEL) and pinches at (28, A_CHANNEL) with its 23-cell
+# staircase under a 26-cell hull, and the two flank compartments still
+# measure 0.0801/0.0803 ac of band under 0.1197/0.1205 ac of hull, an
+# anchor ratio of ~0.67. Nothing about the geometry this fixture tests
+# moved; only the wetness the flanks are entitled to claim did.
+_A2_FILLED, _A2_FTR, _A2_FTC = _flow(A2_DEM)
+A_ACCUMULATION_SCALE = 2.9
+a2_accumulation = (
+    compute_flow_accumulation(_A2_FILLED, _A2_FTR, _A2_FTC).astype(float) * A_ACCUMULATION_SCALE
+)
+a_result = compute_water_survey_areas(A2_DEM, A_BOUNDARY, flow_accumulation=a2_accumulation)
 a_comps = a_result["zones_by_type"][SURVEY_TYPE_EMBANKMENT]
 assert a_comps, "the real blend seeds the channel and at least one compartment survives"
 _channel_comps = [z for z in a_comps if z["seed"]["rowcol"][1] == A_CHANNEL]
@@ -915,10 +949,21 @@ for code in _dup_codes:
 
 # --- 5 [5]. the floor on compartment acres, visible with reason AND acreage ---
 
+# Fixture A carries the SAME uniform accumulation scale as A2 and for
+# the same reason (see A_ACCUMULATION_SCALE): without it, the absolute
+# TWI curve leaves this DEM's three qualifying seeds all DOWNSTREAM of
+# the waist, so every walk honestly reports no_constriction and no
+# compartment is built at all -- which would leave this section with
+# nothing to drop and would silently stop testing the floor.
+a_floor_accumulation = (
+    compute_flow_accumulation(A_FILLED, A_FTR, A_FTC).astype(float) * A_ACCUMULATION_SCALE
+)
 _real_floor = wsa.MIN_SURVEY_REGION_AREA_ACRES
 try:
     wsa.MIN_SURVEY_REGION_AREA_ACRES = 1000.0  # everything sinks under it
-    floored = compute_water_survey_areas(A_DEM, A_BOUNDARY)
+    floored = compute_water_survey_areas(
+        A_DEM, A_BOUNDARY, flow_accumulation=a_floor_accumulation
+    )
 finally:
     wsa.MIN_SURVEY_REGION_AREA_ACRES = _real_floor
 assert floored["zones"] == [] and floored["selected_water_zone"] is None
@@ -1024,7 +1069,12 @@ WAIST_BOUNDARY = box(
     ORIGIN_X + 20 * RESOLUTION - 0.1,
     ORIGIN_Y - 1 * RESOLUTION - 0.1,
 )
-terminal_result = compute_water_survey_areas(A2_DEM, WAIST_BOUNDARY)
+# Same A2 DEM, same A_ACCUMULATION_SCALE override (accumulation is a
+# property of the DEM, not of the boundary, so the identical array
+# serves both runs) -- only the parcel line moves.
+terminal_result = compute_water_survey_areas(
+    A2_DEM, WAIST_BOUNDARY, flow_accumulation=a2_accumulation
+)
 terminal_zone = terminal_result["selected_water_zone"]
 assert terminal_zone is not None and terminal_zone["survey_type"] == SURVEY_TYPE_EMBANKMENT, (
     "the boundary-terminal compartment is the pooled rank-1 on this fixture"
@@ -1110,7 +1160,23 @@ far_road = box(ORIGIN_X + 90 * RESOLUTION, ORIGIN_Y - 95 * RESOLUTION, ORIGIN_X 
 checked_far = compute_water_survey_areas(
     FLAT_DEM, FLAT_BOUNDARY, soil_inputs=WET_SOIL, road_exclusion_union_utm=far_road
 )
-assert unchecked["embankment_seeds"] == [] and unchecked["zones_by_type"][SURVEY_TYPE_EMBANKMENT] == []
+# THE EMBANKMENT PATH ON THIS DEAD-FLAT FIXTURE, since the seeding
+# minimum dropped to 0.30: every gated cell blends to exactly 0.3759
+# (0.30*0 no catchment + 0.25*0 dead-flat is under the embankment slope
+# floor + 0.25*1.0 best wet soil + 0.20*0.6293 TWI), so cells ARE now
+# nominated where at 0.50 none were. They all fail -- flat ground has no
+# valley to narrow -- and NO embankment zone is produced, which is what
+# this road-posture check needs. Asserted as the real outcome rather
+# than as an empty list, so a change in either direction is visible.
+assert unchecked["embankment_seeds"], "the 0.30 minimum nominates on this fixture; 0.50 did not"
+assert all(
+    record["status"] == wsa.SEED_STATUS_FAILED
+    and record["reason_code"] == wsa.REASON_NO_CONSTRICTION
+    for record in unchecked["embankment_seeds"]
+), "dead-flat ground never narrows -- every seed reports no_constriction, honestly"
+assert unchecked["zones_by_type"][SURVEY_TYPE_EMBANKMENT] == [], (
+    "and so no embankment zone exists: the excavated comparison below is unaffected"
+)
 assert _excavated_wire(unchecked) == _excavated_wire(checked_clean) == _excavated_wire(checked_far), (
     "BYTE-IDENTICAL excavated output on a roadless fixture -- road unchecked, checked-clean, and a "
     "road far away all produce the same wire bytes (road_overlap_pct's sentinel aside)"

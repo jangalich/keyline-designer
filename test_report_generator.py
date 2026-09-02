@@ -575,10 +575,11 @@ _survey_nd = {
     "excavated_zone_count": 1,
     "suitability_threshold": 0.5,
     "grouping_distance_meters": 30.0,
-    "twi_is_parcel_relative": True,
+    "twi_is_absolute": True,
     "twi_note": (
-        "Topographic wetness scores here are PARCEL-RELATIVE percentile ranks: a score of 0.9 means "
-        "'among the wettest ground on THIS parcel', not wet by any universal standard."
+        "Topographic wetness is scored on a FIXED ABSOLUTE curve over raw ln(a/tan(beta)), so a "
+        "given cell scores the same whatever boundary is drawn around it. The one caveat is "
+        "calibration: the breakpoints are calibrated at the 5 m reference DEM's resolution."
     ),
     "gates": {"on_parcel_cells": 612, "ceiling_removed_cells": 4, "setback_removed_cells": 0,
               "gated_cells": 608, "max_contributing_area_acres": 20.0},
@@ -600,7 +601,7 @@ _survey_nd = {
                       "soil": {"weight": 0.30, "mean_score": 0.9},
                       "slope": {"weight": 0.25, "mean_score": 0.95},
                       "drainage_runon": {"weight": 0.10, "mean_score": 0.1}},
-         "twi_percentile_mean": 0.88, "depression_depth_max_ft": 1.3,
+         "twi_score_mean": 0.88, "depression_depth_max_ft": 1.3,
          "contributing_area_acres_at_wettest_cell": 3.2, "boundary_adjacency_pct": 42.0,
          "overlaps": {"canopy_pct": 12.5, "road_pct": None, "production_pct": 0.0},
          "gravity": {"has_service_relationship": True, "can_gravity_feed": False,
@@ -626,7 +627,7 @@ _survey_nd = {
                       "slope": {"weight": 0.25, "mean_score": 0.6},
                       "soil": {"weight": 0.25, "mean_score": 0.5},
                       "twi": {"weight": 0.20, "mean_score": 0.7}},
-         "twi_percentile_mean": 0.9, "depression_depth_max_ft": 0.0,
+         "twi_score_mean": 0.9, "depression_depth_max_ft": 0.0,
          "contributing_area_acres_at_wettest_cell": 5.4, "boundary_adjacency_pct": 0.0,
          "overlaps": {"canopy_pct": 0.0, "road_pct": 0.0, "production_pct": None},
          "gravity": {"has_service_relationship": False, "can_gravity_feed": None},
@@ -646,8 +647,16 @@ assert "GENERAL AREAS WORTH SURVEYING" in _survey_prose
 assert "no pool, wall, volume, or station" in _survey_prose, (
     "the redesign's central promise -- no precision theater -- must be stated in the prose"
 )
-assert "wettest ground on THIS parcel" in _survey_prose, (
-    "the parcel-relative TWI caveat must reach the prompt so the report cannot overclaim wetness"
+# THE CAVEAT SWAP: TWI is absolute now, so the old "wettest on THIS
+# parcel" claim is FALSE and must not survive anywhere in the prose; the
+# resolution-calibration caveat is the one that is still true and still
+# has to reach the prompt.
+assert "THIS parcel" not in _survey_prose, (
+    "the retired parcel-relative TWI claim must not survive in the prose -- TWI is absolute"
+)
+assert "calibrated at the 5 m reference DEM" in _survey_prose, (
+    "the resolution-calibration caveat that REPLACED it must reach the prompt, so the report "
+    "states the real limitation instead of the retired one"
 )
 assert "All 2 surviving zone(s) are listed, ranked per type -- no presentation cap" in _survey_prose, (
     "the counts line states that everything surviving is shown -- the cap is deleted"

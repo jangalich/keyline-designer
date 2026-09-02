@@ -105,14 +105,21 @@ THE TWO DERIVED SCREENS (both free from arrays already in hand):
         (valley_delineation.py), slope from the existing slope machinery
         (production_area.compute_slope_percent()); the flat/zero-slope
         singularity is guarded explicitly (TWI_MIN_SLOPE_TAN below).
-        Scored PARCEL-RELATIVE -- the percentile rank of each on-parcel
-        cell's TWI within the parcel boundary -- because ABSOLUTE TWI is
-        resolution-dependent (a is measured per unit contour width, so
-        the same terrain resampled to a different cell size shifts every
-        absolute value). A TWI score of 0.9 therefore reads "among the
-        wettest ground on THIS parcel", never "wet by a universal
-        standard" -- stated again in narrative_data
-        (TWI_PARCEL_RELATIVE_NOTE) so no narrative can overclaim it.
+        Scored ABSOLUTELY -- a fixed classification curve over the raw
+        value (twi_score(), ramping between TWI_SCORE_MIN_BREAKPOINT and
+        TWI_SCORE_FULL_CREDIT_BREAKPOINT), exactly like every other
+        criterion in both blends. It was once scored parcel-relative, as
+        a percentile rank within the boundary, and that made the WHOLE
+        composite boundary-dependent by contagion: a boundary extended
+        into a stream corridor added the wettest cells on the landscape,
+        they took the top ranks, every other cell's rank fell, and an
+        embankment zone vanished from unchanged terrain. Absolute TWI IS
+        resolution-dependent -- that is real, and it is carried as a
+        FIXED CALIBRATION CAVEAT (the breakpoints hold at the reference
+        DEM's 5 m resolution and are documented as such, restated in
+        narrative_data as TWI_RESOLUTION_CALIBRATION_NOTE) rather than
+        dodged with a normalization that varies per run. Resolution is
+        constant for a DEM source; the boundary is user input.
 
     DEPRESSION DEPTH = filled DEM - raw DEM. Both arrays were already
         computed every run (priority-flood fill feeds flow direction);
@@ -334,6 +341,145 @@ MIN_BOUNDARY_SETBACK_METERS = 0.0
 # guidance of its own for tan(beta)=0; a small positive floor is the
 # common practical guard). TUNE FROM FIRST RUN. CONFIGURABLE.
 TWI_MIN_SLOPE_TAN = 0.001
+
+# --- THE PARCEL-RELATIVE AUDIT --------------------------------------------
+# Written when TWI stopped being parcel-relative, because the question
+# "what else in this pipeline scores a cell against its neighbours?" is
+# the one that has to be answered ONCE and kept answered. Every place a
+# criterion, screen or statistic is computed relative to the parcel or
+# the gated mask rather than absolutely, with a verdict:
+#
+#   parcel_relative_percentile() on TWI -- ILLEGITIMATE, FIXED HERE. A
+#     cell's wetness score is a claim about that cell's ground. See
+#     TWI_SCORE_MIN_BREAKPOINT below and the retired function's own
+#     docstring. NO OTHER PRODUCTION CALLER EXISTS: the only remaining
+#     callers are tests and diagnose_water_survey_areas.py's explicit
+#     before/after comparison.
+#
+#   The gate mask (compute_gate_mask), every geometry clip to the
+#     boundary, boundary_adjacency_fraction, truncated_by_boundary, the
+#     embankment pinch walk's boundary termination, and the compartment
+#     watershed band's on-parcel bound -- LEGITIMATELY boundary-
+#     dependent. They ARE the boundary; they decide which ground is in
+#     play, never what a cell in play is worth.
+#
+#   The criteria themselves -- ALL ABSOLUTE, verified one by one:
+#     drainage_band_score and runon_score on acres against fixed
+#     breakpoints; embankment_slope_score and excavated_slope_score on
+#     percent grade; depression_score on metres against
+#     DEPRESSION_FULL_CREDIT_METERS; the soil scorers on NRCS ksat
+#     classes and hydrologic groups; and now twi_score on raw TWI. The
+#     EXCAVATED WETNESS BLEND was boundary-dependent only through TWI
+#     (its other half, depression depth, was always absolute), so it
+#     becomes fully absolute with this change -- no separate fix needed.
+#     The DEPRESSION SCREEN (filled DEM minus raw) is absolute per cell.
+#
+#   scales.suitability.parcel_observed_max (build_scales) -- boundary-
+#     dependent AND LEGITIMATE, but named here rather than left implicit.
+#     It is the max of the gate-masked surface, and it exists to render
+#     "0.53 of an attainable 0.82" instead of "0.53 of 1.0". It describes
+#     THE PARCEL, which is what a reader asked for, and it never enters a
+#     score. It does mean the denominator moves when the boundary moves;
+#     that is the honest behavior of a statement about the parcel, and
+#     the block labels it as one.
+#
+#   elevation_percentile_of_parcel (production_area_ceiling.py,
+#     water_candidate_zones.py) -- boundary-dependent AND LEGITIMATE, for
+#     the same reason: a linear position within the parcel's own relief,
+#     stated in prose as exactly that ("0 = the parcel's lowest ground"),
+#     never scored against and never blended.
+#
+#   Per-zone ranking and pooled selection -- relative to the run's own
+#     candidates by definition. A rank is a statement about which of THIS
+#     parcel's candidates to walk first, which is the question asked.
+#
+#   masked_focal_mean() -- normalizes over the mask, and is RETIRED from
+#     the extraction path (grep-asserted). Not on any path.
+#
+#   FLAGGED, NOT FIXED, and not a scoring defect: fill_depressions(),
+#     compute_flow_accumulation() and compute_slope_percent() all read
+#     the DEM WINDOW, and dem_data fetches that window for the boundary.
+#     A larger boundary therefore yields a larger raster and can resolve
+#     a basin's outlet or an edge cell's slope differently. This is
+#     DEM-EXTENT dependence, it is physically real (a wider window is a
+#     better model of the same ground, not a different opinion of it),
+#     and it is why diagnose_water_survey_areas.py's boundary-stability
+#     check fetches ONE DEM over the UNION of the two boundaries -- with
+#     the raster held fixed, every delta it reports is attributable to
+#     the boundary alone.
+
+
+# --- the absolute TWI classification curve --------------------------------
+# TWI is scored ABSOLUTELY: a linear ramp over RAW ln(a/tan(beta)) from
+# TWI_SCORE_MIN_BREAKPOINT (score 0.0) to TWI_SCORE_FULL_CREDIT_BREAKPOINT
+# (score 1.0), saturated above. See twi_score().
+#
+# WHY ABSOLUTE, AND WHAT THE PERCENTILE COST. This criterion used to be a
+# PARCEL-RELATIVE PERCENTILE RANK (parcel_relative_percentile(), now
+# retired from this path). That made the whole composite
+# BOUNDARY-DEPENDENT BY CONTAGION: every other criterion in both blends
+# is absolute with fixed physical breakpoints (drainage acres, slope
+# percent, ksat, hydrologic group), so TWI was the lone input whose score
+# for a FIXED cell moved when the USER redrew the parcel. The failure was
+# observed on a real run: the same land produced an embankment survey
+# zone under one boundary and none under a slightly larger one reaching
+# further into a stream corridor. Mechanism: adding the wettest cells on
+# the landscape took the top percentile ranks and pushed every other
+# cell's rank DOWN; at TWI's 0.20 of the embankment blend that is enough
+# to drop a ~0.52 seed under the THEN-0.50 EMBANKMENT_SEED_MIN_SCORE
+# (the constant has since moved -- see its own note) with the
+# terrain unchanged. The direction is the tell -- INCLUDING MORE WATER
+# MADE THE WATER SITES SCORE WORSE, which no physical reading of wetness
+# can produce.
+#
+# The original rationale for the percentile was that absolute TWI is
+# resolution-dependent. That is TRUE and is not dodged here -- it is
+# accepted as a FIXED CALIBRATION CAVEAT below. It was the wrong trade:
+# resolution is CONSTANT for a given DEM source (the reference DEM is
+# 3DEP at 5 m, dem_data.py), while the boundary is USER INPUT that
+# changes between runs. The percentile traded a fixed, documentable
+# calibration problem for a variable instability problem.
+#
+# THE RESOLUTION CAVEAT, STATED PLAINLY: TWI VALUES ARE
+# RESOLUTION-DEPENDENT. a is specific catchment area (contributing area
+# per unit contour width), so the same terrain resampled to a different
+# cell size shifts every absolute TWI value -- coarser cells aggregate
+# more upslope area per cell and read WETTER. THESE TWO BREAKPOINTS ARE
+# CALIBRATED AT THE REFERENCE DEM'S RESOLUTION (5 m) AND ARE NOT VALID
+# AT ANOTHER. A DEM source change is a recalibration, and the calibration
+# instrument that produces the evidence is
+# diagnose_water_survey_areas.py's TWI CALIBRATION section (raw-TWI
+# distribution over gated cells, printed under BOTH boundaries so the
+# chosen values can be read off where the two distributions agree --
+# which is what makes the CALIBRATION itself boundary-independent).
+#
+# PROVENANCE OF THE CURRENT VALUES -- READ THIS BEFORE TRUSTING THEM.
+# They are NOT YET the observed-distribution calibration described above:
+# that run is networked (3DEP, SSURGO, Planetary Computer) and could not
+# be executed in the session that wrote this branch -- the egress policy
+# denied every data host. They are DERIVED FROM THE FORMULA AT 5 m, which
+# is arithmetic, not a preference:
+#
+#   a = flow_accumulation_cells * cell_area / cell_width = 5 * cells (m)
+#   plain hillslope cell (accumulation 1, only itself):
+#       10% grade -> ln(5/0.10)  = 3.9      20% grade -> ln(5/0.20) = 3.2
+#        5% grade -> ln(5/0.05)  = 4.6
+#   convergent swale (~20 cells, 0.12 ac) at 6% -> ln(100/0.06)  = 7.4
+#   established drainageway (~200 cells, 1.2 ac) at 4% -> ln(1000/0.04) = 10.1
+#   at the contributing-area ceiling (20 ac = 3237 cells) at 3% -> 13.2
+#
+# So at 5 m, ~3-5 is undifferentiated hillslope, ~7-8 is genuine
+# convergence, and ~10 is a drainageway that carries water. The floor
+# sits at 6.0 (above every plain-hillslope reading, so hillslope earns
+# NOTHING for wetness) and full credit at 10.0 (a real drainageway). TUNE
+# FROM THE CALIBRATION RUN -- both CONFIGURABLE, and the diagnostic
+# prints the distribution that decides them every networked run.
+TWI_SCORE_MIN_BREAKPOINT = 6.0
+TWI_SCORE_FULL_CREDIT_BREAKPOINT = 10.0
+
+assert TWI_SCORE_FULL_CREDIT_BREAKPOINT > TWI_SCORE_MIN_BREAKPOINT, (
+    "the TWI ramp needs a positive width: full credit must sit above the floor"
+)
 
 # Depression depths below this read 0 -- priority-flood fill raises tiny
 # sub-noise amounts across much of any real DEM (pit-filling artifacts at
@@ -576,16 +722,68 @@ SUITABILITY_THRESHOLD = 0.5
 # code. The excavated type keeps the full existing pipeline.
 
 # Minimum blend score for a cell to qualify as a compartment seed.
-# CARRIES THE RETIRED EMBANKMENT EXTRACTION THRESHOLD'S VALUE (0.5 --
-# see SUITABILITY_THRESHOLD's evidence note), with a RECORDED SEMANTIC
-# SHIFT: under extraction, 0.5 meant "this cell is part of a survey
-# area"; here it means "this cell is worth NOMINATING a compartment
-# from" -- a weaker claim, because the compartment that results is
-# defined by valley geometry (pinch + watershed band), not by which
-# cells cleared the number. The evidence basis (judged against the
-# parcel's ~0.82 attainable ceiling) carries over with the value.
-# CONFIGURABLE.
-EMBANKMENT_SEED_MIN_SCORE = 0.5
+#
+# HISTORY: this carried the retired embankment EXTRACTION threshold's
+# value (0.5 -- see SUITABILITY_THRESHOLD's evidence note) with a
+# recorded semantic shift, because under extraction 0.5 meant "this cell
+# IS part of a survey area" while here it means "this cell is worth
+# NOMINATING a compartment from". The number never moved with the
+# meaning. It moves now.
+#
+# WHY LOWER: NOMINATION IS NOT QUALIFICATION. Several real gates already
+# sit DOWNSTREAM of seeding and each can refuse a seed on its own
+# evidence -- the pinch walk (a seed whose reach never narrows produces
+# nothing, reason_code no_constriction), the MIN_SURVEY_REGION_AREA_
+# ACRES hull floor, and both dedupe stages (pinch-level and
+# compartment-overlap). A compartment is defined by VALLEY GEOMETRY, not
+# by which cells cleared a number, so a high seeding bar refuses ground
+# at nomination that the geometry was never asked about. Starting with
+# more options and filtering from there is the better shape for this
+# pipeline.
+#
+# WHY 0.30 AND NOT NO MINIMUM AT ALL. Two reasons, and the second is the
+# one that matters.
+#   1. Cost. Seeding is ITERATIVE and separation-claimed
+#      (EMBANKMENT_SEED_SEPARATION_METERS), so with no floor it runs
+#      until every gated cell is claimed -- on the reference property's
+#      2,145 gated cells that is roughly 60-80 seeds at 30 m, each one
+#      walked.
+#   2. THE SEED MINIMUM IS THE ONLY STEP THAT ASKS WHETHER THIS WAS EVER
+#      WATER-RELEVANT GROUND. Every gate downstream of it is GEOMETRIC --
+#      does the reach narrow, is the hull big enough, is this the same
+#      valley as that one -- and none of them can answer that question,
+#      structurally. A narrowing reach on dry ground with no catchment
+#      still narrows. So the floor is not redundant with the downstream
+#      gates; it is the one thing they cannot replace, and it has to
+#      stay meaningful.
+# 0.30 keeps that question alive while admitting the OFF-CHANNEL
+# ARCHETYPE, which the absolute-TWI branch measured as capping at 0.375
+# (0.25*slope + 0.25*soil) for a cell with no drainage credit -- a class
+# 0.50 excluded by arithmetic rather than by judgement.
+#
+# RECORDED BESIDE THE VALUE, because it qualifies it: TWI IS CURRENTLY
+# ~66% FLOORED on the reference property under the shipped
+# TWI_SCORE_MIN_BREAKPOINT / TWI_SCORE_FULL_CREDIT_BREAKPOINT (6.0 /
+# 10.0) -- median raw TWI 5.44, 75th percentile 6.39, so two thirds of
+# gated cells score 0.0 for wetness. A criterion contributing 0.20 of
+# this blend and reading zero on most of the parcel depresses every
+# blend score, which means THIS LOWER MINIMUM PARTLY COMPENSATES FOR AN
+# UNDER-CALIBRATED CRITERION RATHER THAN REPAIRING IT. The TWI
+# calibration decision -- fixed breakpoints versus DEM-window-referenced
+# scoring -- is DELIBERATELY DEFERRED and must not be made here or
+# inferred from this constant's value. When it is made, this number is
+# re-decided against the seed ladder, not left standing.
+#
+# v1 prior. TUNE FROM EVIDENCE: diagnose_water_survey_areas.py prints
+# the SEED LADDER (every seed in blend-descending order with its
+# outcome) and the BANDED SUMMARY (0.30-0.35 / 0.35-0.40 / 0.40-0.45 /
+# 0.45-0.50 / 0.50+, each with seeded / compartment / survived-floor
+# counts and the outcome breakdown) every run. That table is what
+# decides where the productive band actually ends -- low bands producing
+# nothing but no_constriction and floor drops is the evidence for
+# raising this permanently; a 0.32-scoring seed yielding a real
+# compartment is the evidence the change was right. CONFIGURABLE.
+EMBANKMENT_SEED_MIN_SCORE = 0.30
 
 # Claim radius of the iterative seeding: each accepted seed claims every
 # qualifying cell within this real-ground distance, and seeding repeats
@@ -903,10 +1101,12 @@ SEED_STATUS_FAILED = "failed"
 
 # --- narrative note constants ---------------------------------------------
 
-TWI_PARCEL_RELATIVE_NOTE = (
-    "Topographic wetness scores here are PARCEL-RELATIVE percentile ranks: a score of 0.9 means "
-    "'among the wettest ground on THIS parcel', not wet by any universal standard -- absolute TWI is "
-    "resolution-dependent, so only the within-parcel ordering is trustworthy."
+TWI_RESOLUTION_CALIBRATION_NOTE = (
+    "Topographic wetness is scored on a FIXED ABSOLUTE curve over raw ln(a/tan(beta)), so a given "
+    "cell scores the same whatever boundary is drawn around it -- the score describes the ground, "
+    "not its rank among neighbours. The one caveat is calibration, not comparison: TWI values are "
+    "resolution-dependent, and this curve's breakpoints are calibrated at the 5 m reference DEM's "
+    "resolution. Read against a different elevation source they would need recalibrating."
 )
 
 WATER_SURVEY_AREAS_INTRO_NOTE = (
@@ -957,11 +1157,13 @@ def compute_topographic_wetness_index(dem: dict, flow_accumulation: np.ndarray, 
     (tan 0 would send TWI to +inf; the floor turns dead-flat into
     "extremely flat, finitely wet" instead).
 
-    Returns raw TWI values. THESE ARE NOT SCORES: absolute TWI is
-    resolution-dependent, so scoring happens parcel-relative in
-    parcel_relative_percentile() -- see the module docstring. NaN where
-    slope is NaN (unmeasured cell: grid edge or nodata-adjacent -- Horn's
-    kernel needs a full neighborhood) or the DEM is nodata.
+    Returns RAW TWI values, unchanged by this branch -- the computation
+    and the flat-slope guard are exactly what they were. THESE ARE NOT
+    SCORES: twi_score() turns them into the 0-1 criterion, on a FIXED
+    absolute curve calibrated at the reference DEM's resolution (see
+    TWI_SCORE_MIN_BREAKPOINT). NaN where slope is NaN (unmeasured cell:
+    grid edge or nodata-adjacent -- Horn's kernel needs a full
+    neighborhood) or the DEM is nodata.
     """
     px, py = dem["resolution_meters"]
     cell_width_m = (px + py) / 2.0
@@ -978,9 +1180,37 @@ def compute_topographic_wetness_index(dem: dict, flow_accumulation: np.ndarray, 
 
 def parcel_relative_percentile(values: np.ndarray, parcel_mask: np.ndarray) -> np.ndarray:
     """
+    RETIRED FROM THE TWI PATH (retired, not deleted, per house
+    convention -- masked_focal_mean() is the precedent). Nothing in this
+    module calls this function any more (AST-asserted in
+    test_water_survey_areas.py); the TWI criterion is scored absolutely
+    by twi_score().
+
+    WHY IT LEFT. Percentile rank is BOUNDARY-DEPENDENT BY CONSTRUCTION:
+    the population is the on-parcel cells, so a cell's score is a
+    statement about the other cells the USER happened to enclose, not
+    about that cell's ground. Since every other criterion in both blends
+    is absolute, this one input made the entire composite move with the
+    drawn boundary. The measured failure: a boundary extended into a
+    stream corridor added the wettest cells on the landscape, they took
+    the top ranks, every other cell's percentile fell, and a ~0.52
+    embankment seed dropped under the then-0.50 seeding minimum -- the same terrain
+    scoring worse for including MORE water. See
+    TWI_SCORE_MIN_BREAKPOINT's own note for the full mechanism and the
+    trade that was reversed.
+
+    IT IS KEPT because a percentile over a stated population is a sound
+    instrument when the population is the thing being described, and
+    because this branch's before/after comparison needs the OLD scores to
+    remain reproducible: diagnose_water_survey_areas.py imports this
+    function to print percentile and absolute TWI scores side by side per
+    zone, so the effect of the change is measured rather than asserted.
+    It must not return to any SCORING path -- a criterion score is a
+    claim about ground, and ground does not change when a line is redrawn
+    around it.
+
     Percentile rank (0.0-1.0) of each cell's value among the VALID
-    (non-NaN) on-parcel cells -- the parcel-relative scoring the module
-    docstring commits to. MEAN-RANK tie convention: rank = (count
+    (non-NaN) in-mask cells. MEAN-RANK tie convention: rank = (count
     strictly below + half the OTHER equal values) / (n - 1), so with all
     distinct values the parcel's minimum reads 0.0 and its maximum 1.0,
     while equal ground shares one percentile and a dead-flat parcel
@@ -1004,6 +1234,44 @@ def parcel_relative_percentile(values: np.ndarray, parcel_mask: np.ndarray) -> n
     tie_counts = np.searchsorted(sorted_values, valid_values, side="right") - below_counts
     result[valid] = (below_counts + 0.5 * (tie_counts - 1)) / (n - 1)
     return result
+
+
+def twi_score(
+    twi_raw: np.ndarray,
+    min_breakpoint: float = TWI_SCORE_MIN_BREAKPOINT,
+    full_credit_breakpoint: float = TWI_SCORE_FULL_CREDIT_BREAKPOINT,
+) -> np.ndarray:
+    """
+    THE ABSOLUTE TWI CRITERION: a fixed classification curve over RAW
+    ln(a/tan(beta)) -- 0.0 at/below min_breakpoint, a linear ramp, 1.0
+    at/above full_credit_breakpoint. No population, no ranking, no
+    parcel: a cell's wetness score depends on that cell's own terrain and
+    nothing else, so redrawing the boundary around the same ground cannot
+    move it. That is the whole point of the change (see
+    TWI_SCORE_MIN_BREAKPOINT).
+
+    Shaped exactly like every other criterion curve in this module --
+    drainage_band_score(), runon_score(), embankment_slope_score(),
+    excavated_slope_score(), depression_score() -- because it now IS one
+    of them rather than the lone relative exception.
+
+    THE BREAKPOINTS ARE RESOLUTION-DEPENDENT and are calibrated at the
+    reference DEM's resolution. This is a fixed calibration caveat, not a
+    normalization dodge: it is a property of ln(a/tan(beta)) itself, it
+    is documented at the constants, and it does not vary between runs on
+    one DEM source -- which is precisely what the retired percentile
+    could not say.
+
+    NaN PROPAGATES (an unmeasured cell stays unmeasured), matching the
+    percentile this replaces. compute_suitability_surfaces() does the
+    NaN -> 0.0 flag-not-poison conversion at the blend, as before, and
+    the criteria-completeness confidence signal reads the NaNs here.
+    """
+    raw = np.asarray(twi_raw, dtype=np.float64)
+    with np.errstate(invalid="ignore"):
+        ramp = (raw - min_breakpoint) / (full_credit_breakpoint - min_breakpoint)
+        score = np.clip(ramp, 0.0, 1.0)
+    return np.where(np.isnan(raw), np.nan, score)
 
 
 # ==========================================================================
@@ -1450,7 +1718,7 @@ def compute_suitability_surfaces(
     gate_mask: np.ndarray,
     flow_accumulation: np.ndarray,
     slope_pct: np.ndarray,
-    twi_percentile: np.ndarray,
+    twi_score_grid: np.ndarray,
     depression_depth: np.ndarray,
     soil_score_grid: np.ndarray,
 ) -> dict:
@@ -1460,9 +1728,15 @@ def compute_suitability_surfaces(
     (EMBANKMENT_WEIGHTS / EXCAVATED_WEIGHTS); the gate mask zeroes both
     surfaces outside the gated cells BEFORE any extraction or export
     reads them, so a masked cell can never clear a threshold or draw an
-    isoband. A NaN TWI percentile (unmeasured slope) contributes 0.0 --
-    same flag-not-poison handling as the slope scorers; the
+    isoband. A NaN TWI score (unmeasured slope) contributes 0.0 -- same
+    flag-not-poison handling as the slope scorers; the
     criteria-completeness confidence signal reports it.
+
+    `twi_score_grid` arrives ALREADY SCORED, on twi_score()'s absolute
+    curve. Every criterion this function blends is now absolute with
+    fixed breakpoints, so the surface a cell gets depends on that cell's
+    terrain and soil alone -- redrawing the boundary changes WHICH cells
+    are gated, never what a gated cell scores.
 
     Returns {'embankment', 'excavated', 'criteria': {type: {criterion:
     array}}} -- the criteria grids ride along so per-region
@@ -1471,15 +1745,18 @@ def compute_suitability_surfaces(
     the blend actually used, never a recomputation.
     """
     contributing_acres = flow_accumulation.astype(np.float64) * cell_area_acres(dem)
-    twi_score = np.where(np.isnan(twi_percentile), 0.0, twi_percentile)
+    twi_blend_score = np.where(np.isnan(twi_score_grid), 0.0, twi_score_grid)
 
     embankment_criteria = {
         "drainage_area": drainage_band_score(contributing_acres),
         "slope": embankment_slope_score(slope_pct),
         "soil": soil_score_grid,
-        "twi": twi_score,
+        "twi": twi_blend_score,
     }
-    wetness = WETNESS_TWI_SUBWEIGHT * twi_score + WETNESS_DEPRESSION_SUBWEIGHT * depression_score(depression_depth)
+    wetness = (
+        WETNESS_TWI_SUBWEIGHT * twi_blend_score
+        + WETNESS_DEPRESSION_SUBWEIGHT * depression_score(depression_depth)
+    )
     excavated_criteria = {
         "wetness": wetness,
         "soil": soil_score_grid,
@@ -1545,7 +1822,7 @@ def _measure_member_cells(
     surface: np.ndarray,
     criteria: dict,
     weights: dict,
-    twi_percentile: np.ndarray,
+    twi_score_grid: np.ndarray,
     depression_depth: np.ndarray,
     flow_accumulation: np.ndarray,
     slope_pct: np.ndarray,
@@ -1575,21 +1852,37 @@ def _measure_member_cells(
             "weighted_contribution": round(weight * mean_score, 3),
         }
 
-    twi_values = [twi_percentile[r, c] for r, c in cells]
+    twi_values = [twi_score_grid[r, c] for r, c in cells]
     twi_valid = [v for v in twi_values if not math.isnan(v)]
     depth_values = [depression_depth[r, c] for r, c in cells]
     depth_valid = [v for v in depth_values if not math.isnan(v)]
 
-    # "Wettest cell" = the member cell with the highest TWI percentile
-    # (falling back to highest accumulation if no TWI is valid) -- its
-    # contributing area answers "how much catchment does the wet heart
-    # of this ground actually tap".
+    # "Wettest cell" = the member cell with the highest TWI score, TIES
+    # BROKEN BY CONTRIBUTING AREA (and falling back to accumulation
+    # outright if no TWI is valid) -- its contributing area answers "how
+    # much catchment does the wet heart of this ground actually tap".
+    #
+    # THE TIE-BREAK ARRIVED WITH THE ABSOLUTE CURVE and is not
+    # decoration. The retired parcel-relative percentile gave every cell
+    # a DISTINCT rank by construction, so a plain argmax always found
+    # one cell; twi_score() SATURATES at 1.0 above
+    # TWI_SCORE_FULL_CREDIT_BREAKPOINT, so an established drainageway
+    # ties at 1.0 along its whole length and a bare argmax would silently
+    # return whichever cell came first in the member list -- reporting
+    # the catchment of an arbitrary cell as "the wet heart". Accumulation
+    # is the right discriminator here because it is what the reported
+    # number is ABOUT, and it is already this function's documented
+    # fallback when TWI is unavailable.
+    accumulation_values = np.array([flow_accumulation[r, c] for r, c in cells], dtype=np.float64)
     if twi_valid:
-        wettest_index = int(np.nanargmax(np.array(twi_values, dtype=np.float64)))
+        twi_array = np.array(twi_values, dtype=np.float64)
+        best_twi = np.nanmax(twi_array)
+        tied = np.flatnonzero(twi_array == best_twi)
+        wettest_index = int(tied[int(np.argmax(accumulation_values[tied]))])
     else:
-        wettest_index = int(np.argmax([flow_accumulation[r, c] for r, c in cells]))
+        wettest_index = int(np.argmax(accumulation_values))
     wettest_cell = cells[wettest_index]
-    wettest_contributing_acres = float(flow_accumulation[wettest_cell[0], wettest_cell[1]]) * area_per_cell
+    wettest_contributing_acres = float(accumulation_values[wettest_index]) * area_per_cell
 
     slope_values = [slope_pct[r, c] for r, c in cells]
     slope_valid = [v for v in slope_values if not math.isnan(v)]
@@ -1602,15 +1895,15 @@ def _measure_member_cells(
     # confidence signal). One unmeasured cell means part of the blend
     # scored 0.0 for lack of data rather than for lack of merit.
     complete_cells = sum(
-        1 for r, c in cells if not math.isnan(slope_pct[r, c]) and not math.isnan(twi_percentile[r, c])
+        1 for r, c in cells if not math.isnan(slope_pct[r, c]) and not math.isnan(twi_score_grid[r, c])
     )
 
     return {
         "mean_suitability": round(float(np.mean(cell_values)), 4),
         "max_suitability": round(float(np.max(cell_values)), 4),
         "criterion_contributions": criterion_contributions,
-        "twi_percentile_mean": round(float(np.mean(twi_valid)), 3) if twi_valid else None,
-        "twi_percentile_max": round(float(np.max(twi_valid)), 3) if twi_valid else None,
+        "twi_score_mean": round(float(np.mean(twi_valid)), 3) if twi_valid else None,
+        "twi_score_max": round(float(np.max(twi_valid)), 3) if twi_valid else None,
         "depression_depth_mean_m": round(float(np.mean(depth_valid)), 3) if depth_valid else None,
         "depression_depth_max_m": round(float(np.max(depth_valid)), 3) if depth_valid else None,
         "wettest_cell_rowcol": wettest_cell,
@@ -1635,7 +1928,7 @@ def extract_survey_regions(
     survey_type: str,
     gate_mask: np.ndarray,
     boundary_polygon_utm: Polygon,
-    twi_percentile: np.ndarray,
+    twi_score_grid: np.ndarray,
     depression_depth: np.ndarray,
     flow_accumulation: np.ndarray,
     slope_pct: np.ndarray,
@@ -1698,7 +1991,7 @@ def extract_survey_regions(
             surface,
             criteria,
             weights,
-            twi_percentile,
+            twi_score_grid,
             depression_depth,
             flow_accumulation,
             slope_pct,
@@ -1819,7 +2112,7 @@ def build_survey_zones(
     (SPARSE_ANCHOR_MEMBER_FRACTION).
 
     gate_context bundles the screen arrays _measure_member_cells()
-    needs: twi_percentile / depression_depth / flow_accumulation /
+    needs: twi_score_grid / depression_depth / flow_accumulation /
     slope_pct / soil_covered_mask / soil_checked.
 
     Overlaps, gravity, confidence, ids, and ranking are attached by the
@@ -1900,7 +2193,7 @@ def build_survey_zones(
                 surfaces[survey_type],
                 surfaces["criteria"][survey_type],
                 weights,
-                gate_context["twi_percentile"],
+                gate_context["twi_score"],
                 gate_context["depression_depth"],
                 gate_context["flow_accumulation"],
                 gate_context["slope_pct"],
@@ -2699,7 +2992,7 @@ def build_embankment_compartment(
         surfaces[SURVEY_TYPE_EMBANKMENT],
         surfaces["criteria"][SURVEY_TYPE_EMBANKMENT],
         EMBANKMENT_WEIGHTS,
-        gate_context["twi_percentile"],
+        gate_context["twi_score"],
         gate_context["depression_depth"],
         gate_context["flow_accumulation"],
         gate_context["slope_pct"],
@@ -3069,7 +3362,7 @@ def _confidence_notes_for_region(region: dict, soil_checked: bool) -> str:
         [
             WATER_SURVEY_AREAS_INTRO_NOTE,
             type_note,
-            TWI_PARCEL_RELATIVE_NOTE,
+            TWI_RESOLUTION_CALIBRATION_NOTE,
             _gravity_note(region),
             _soil_note(region, soil_checked),
         ]
@@ -3240,17 +3533,22 @@ def compute_water_survey_areas(
     # used rather than re-deriving its own.
     depression_depth_raw = compute_depression_depth(array, filled, noise_floor_meters=0.0)
     twi_raw = compute_topographic_wetness_index(dem, flow_accumulation, slope_pct)
-    # Parcel-relative over the ON-PARCEL population (not just gated
-    # cells): the ceiling gate removes high-accumulation cells from PLAY,
-    # but they are still parcel ground -- excluding them from the
-    # percentile population would silently inflate every surviving
-    # cell's wetness rank.
+    # ABSOLUTE, per cell, over the raw ln(a/tan(beta)) -- no population
+    # is consulted, so no on-parcel population needs choosing and the
+    # score of a given cell is identical under every boundary that
+    # contains it. This line used to read parcel_relative_percentile(
+    # twi_raw, on_parcel) and WAS the boundary-dependence bug: see
+    # TWI_SCORE_MIN_BREAKPOINT and the retired function's own docstring.
+    twi_score_grid = twi_score(twi_raw)
+
+    # on_parcel is still built -- the embankment compartment machinery
+    # bounds its watershed band with it. It is legitimately
+    # boundary-dependent (it IS the boundary); no SCORE reads it.
     px, py = dem["resolution_meters"]
     col_x = dem["origin_x"] + (np.arange(array.shape[1]) + 0.5) * px
     row_y = dem["origin_y"] - (np.arange(array.shape[0]) + 0.5) * py
     xs, ys = np.meshgrid(col_x, row_y)
     on_parcel = contains_xy(boundary_polygon_utm, xs, ys) & ~np.isnan(array)
-    twi_percentile = parcel_relative_percentile(twi_raw, on_parcel)
 
     soil_checked = soil_inputs is not None
     soil = build_soil_score_grid(dem, gate_mask, soil_inputs)
@@ -3261,7 +3559,7 @@ def compute_water_survey_areas(
     # masked_focal_mean()); the neighborhood claim happens after
     # extraction, in build_survey_zones() below.
     surfaces = compute_suitability_surfaces(
-        dem, gate_mask, flow_accumulation, slope_pct, twi_percentile, depression_depth, soil["score_grid"]
+        dem, gate_mask, flow_accumulation, slope_pct, twi_score_grid, depression_depth, soil["score_grid"]
     )
 
     # The road union resolves EARLY now: it gates embankment seeds,
@@ -3279,7 +3577,7 @@ def compute_water_survey_areas(
     road_cells = _road_cell_mask(dem, road_union)
 
     gate_context = {
-        "twi_percentile": twi_percentile,
+        "twi_score": twi_score_grid,
         "depression_depth": depression_depth,
         "flow_accumulation": flow_accumulation,
         "slope_pct": slope_pct,
@@ -3297,7 +3595,7 @@ def compute_water_survey_areas(
         SURVEY_TYPE_EXCAVATED,
         gate_mask,
         boundary_polygon_utm,
-        twi_percentile,
+        twi_score_grid,
         depression_depth,
         flow_accumulation,
         slope_pct,
@@ -3480,7 +3778,7 @@ def compute_water_survey_areas(
         "surfaces": surfaces,
         "screens": {
             "twi_raw": twi_raw,
-            "twi_percentile": twi_percentile,
+            "twi_score": twi_score_grid,
             "depression_depth": depression_depth,
             "depression_depth_raw": depression_depth_raw,
             "flow_accumulation": flow_accumulation,
@@ -3488,6 +3786,17 @@ def compute_water_survey_areas(
             "filled": filled,
         },
         "gate_mask": gate_mask,
+        # The two masks this run actually gated and seeded with, returned
+        # rather than left for a caller to rebuild. on_parcel is the
+        # population the RETIRED parcel-relative TWI ranked over, and the
+        # boundary-stability diagnostic needs exactly that population to
+        # reproduce the old scores; road_cell_mask is what seeding
+        # excluded, and the TWI independent-signal report re-derives seeds
+        # on a without-TWI surface with every other input held identical.
+        # Recomputing either at the call site would be a second source of
+        # truth for a mask this function already holds.
+        "on_parcel_mask": on_parcel,
+        "road_cell_mask": road_cells,
         "gate_mask_stats": gate_stats,
         "soil": soil,
         "soil_checked": soil_checked,
@@ -3544,8 +3853,8 @@ def _zone_feature_properties(zone: dict) -> dict:
         "mean_suitability": zone["mean_suitability"],
         "max_suitability": zone["max_suitability"],
         "criterion_contributions": zone["criterion_contributions"],
-        "twi_percentile_mean": zone["twi_percentile_mean"],
-        "twi_percentile_max": zone["twi_percentile_max"],
+        "twi_score_mean": zone["twi_score_mean"],
+        "twi_score_max": zone["twi_score_max"],
         "depression_depth_mean_m": zone["depression_depth_mean_m"],
         "depression_depth_max_m": zone["depression_depth_max_m"],
         "contributing_area_acres_at_wettest_cell": zone["contributing_area_acres_at_wettest_cell"],
@@ -3628,7 +3937,7 @@ def _member_feature_properties(region: dict) -> dict:
         "mean_suitability": region["mean_suitability"],
         "max_suitability": region["max_suitability"],
         "criterion_contributions": region["criterion_contributions"],
-        "twi_percentile_mean": region["twi_percentile_mean"],
+        "twi_score_mean": region["twi_score_mean"],
         "depression_depth_max_m": region["depression_depth_max_m"],
         "contributing_area_acres_at_wettest_cell": region["contributing_area_acres_at_wettest_cell"],
         "slope_median_pct": region["slope_median_pct"],
@@ -3752,8 +4061,8 @@ PANEL_EXCLUDED_KEYS = (
     "contributing_area_acres_at_wettest_cell",
     "representative_elevation_m",
     "slope_median_pct",
-    "twi_percentile_mean",
-    "twi_percentile_max",
+    "twi_score_mean",
+    "twi_score_max",
     "criteria",
     "criterion_contributions",
     "seed_criteria_signature",
@@ -4020,8 +4329,10 @@ def build_narrative_data(result: dict) -> dict:
     sentence's two numbers ("zone_acres to survey, anchored by
     member_acres of high-suitability ground"), with sparse_anchor and
     the cross-type either_type_candidate finding riding each block.
-    twi_is_parcel_relative + twi_note surface the parcel-relative
-    caveat so the report layer cannot overclaim wetness.
+    twi_is_absolute + twi_note surface the RESOLUTION-CALIBRATION
+    caveat -- the one that replaced the retired parcel-relative caveat
+    when TWI became absolute -- so the report layer states the real
+    limitation and cannot revive the old one.
 
     TWO BLOCKS EXIST FOR THE INTERACTIVE PANEL RATHER THAN THE REPORT,
     and they are built here because they are readings OF these same
@@ -4070,7 +4381,7 @@ def build_narrative_data(result: dict) -> dict:
                 name: {"weight": entry["weight"], "mean_score": entry["mean_score"]}
                 for name, entry in zone["criterion_contributions"].items()
             },
-            "twi_percentile_mean": zone["twi_percentile_mean"],
+            "twi_score_mean": zone["twi_score_mean"],
             "depression_depth_max_ft": _feet(zone["depression_depth_max_m"]),
             "contributing_area_acres_at_wettest_cell": zone["contributing_area_acres_at_wettest_cell"],
             "boundary_adjacency_pct": round(zone["boundary_adjacency_fraction"] * 100, 1),
@@ -4189,8 +4500,12 @@ def build_narrative_data(result: dict) -> dict:
         # this block, not inside a zone: a scale describes the
         # instrument, not one reading of it.
         "scales": build_scales(result),
-        "twi_is_parcel_relative": True,
-        "twi_note": TWI_PARCEL_RELATIVE_NOTE,
+        # THE CAVEAT THAT REPLACED THE PARCEL-RELATIVE ONE. TWI is
+        # absolute now, so "wettest on THIS parcel" stopped being true
+        # and had to go rather than be softened; what survives is the
+        # resolution-calibration caveat, which is still warranted.
+        "twi_is_absolute": True,
+        "twi_note": TWI_RESOLUTION_CALIBRATION_NOTE,
         "gates": {
             "on_parcel_cells": stats["on_parcel_cells"],
             "ceiling_removed_cells": stats["ceiling_removed_cells"],
