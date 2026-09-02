@@ -533,7 +533,7 @@ with Harness() as h:
     ZONE_PROPERTIES = (
         "zone_id", "survey_type", "status", "drop_reason", "rank",
         "cross_type_overlaps", "zone_acres", "mean_suitability",
-        "max_suitability", "criterion_contributions", "twi_percentile_mean",
+        "max_suitability", "criterion_contributions", "twi_score_mean",
         "depression_depth_max_m", "slope_median_pct",
         "boundary_adjacency_fraction", "canopy_overlap_pct", "road_overlap_pct",
         "production_overlap_pct", "primary_production_area_relationship",
@@ -577,7 +577,7 @@ with Harness() as h:
     for key in (
         "zone_found", "zone_count", "dropped_count", "member_region_count",
         "embankment_zone_count", "excavated_zone_count", "suitability_threshold",
-        "grouping_distance_meters", "twi_is_parcel_relative", "twi_note",
+        "grouping_distance_meters", "twi_is_absolute", "twi_note",
         "gates", "soil_checked", "selection",
     ):
         assert key in summary, f"the step-level block is missing {key}: {sorted(summary)}"

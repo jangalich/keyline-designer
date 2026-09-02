@@ -82,14 +82,52 @@ at the DEMOTED level-pool modules, deliberately -- it diagnoses that
 arc; this file diagnoses the survey-area step that replaced it on the
 pipeline path.
 
+THE TWO-BOUNDARY SECTIONS (this file's standing regression against
+boundary-dependent scoring -- see the BOUNDARY-STABILITY INSTRUMENT
+header further down) run the whole water step against TWO boundaries
+over ONE DEM and print:
+
+    TWI CALIBRATION -- the raw ln(a/tan(beta)) distribution over gated
+        cells under each boundary, plus the per-percentile AGREEMENT
+        between them. This is where TWI_SCORE_MIN_BREAKPOINT and
+        TWI_SCORE_FULL_CREDIT_BREAKPOINT are calibrated from, and
+        calibrating from the agreeing percentiles is what keeps the
+        calibration itself boundary-independent.
+    TWI SCORING: RETIRED PERCENTILE vs ABSOLUTE CURVE -- both scorings
+        over the same cells, including the per-cell |score change|
+        between the two boundaries under each. The absolute column must
+        read 0.0000; the percentile column is the bug, measured.
+    TWI INDEPENDENT-SIGNAL REPORT -- correlations of the TWI score
+        against the criteria it may be re-voting, the clearing share
+        with and without TWI's contribution, and every surviving seed's
+        criteria signature. EVIDENCE ONLY: no weight is changed by this
+        branch, deliberately (seeding is the blend's argmax, so a weight
+        change would confound the before/after).
+    BOUNDARY STABILITY -- which zones survive both boundaries, which
+        appear under only one, and the per-criterion blend delta on
+        every matched pair.
+
 Run:  python diagnose_water_survey_areas.py   (networked -- fetches DEM,
-production areas, canopy, roads, soil for the reference property)
+production areas, canopy, roads, soil)
+
+    --boundary PATH          JSON list of [lon, lat] pairs to run as the
+                             PRIMARY boundary. DEFAULTS TO THE REFERENCE
+                             BOUNDARY, so every pre-existing invocation
+                             is unchanged.
+    --compare-boundary PATH  the second boundary of the stability check
+                             (defaults to the stream-corridor boundary
+                             that lost a zone under the retired
+                             parcel-relative TWI)
+    --single-boundary        primary only; the two-boundary sections say
+                             they could not run rather than falling silent
 """
 
+import argparse
 import json
 
 import numpy as np
 from shapely.geometry import MultiPolygon, Polygon
+from shapely.ops import unary_union
 
 import contourpy
 
@@ -102,13 +140,28 @@ from shapely.geometry import mapping
 from water_survey_areas import (
     DEPRESSION_FULL_CREDIT_METERS,
     DEPRESSION_NOISE_FLOOR_METERS,
+    EMBANKMENT_SEED_MIN_SCORE,
+    EMBANKMENT_WEIGHTS,
     EXCAVATED_WEIGHTS,
     SURVEY_TYPE_EMBANKMENT,
     SURVEY_TYPE_EXCAVATED,
     SURVEY_TYPES,
+    TWI_SCORE_FULL_CREDIT_BREAKPOINT,
+    TWI_SCORE_MIN_BREAKPOINT,
     WATER_REGION_CONNECTIVITY,
+    WETNESS_TWI_SUBWEIGHT,
+    depression_score,
     identify_water_survey_areas,
+    # RETIRED from the scoring path (water_survey_areas.
+    # parcel_relative_percentile()'s own docstring says why). Imported
+    # HERE, and only here, so this branch's before/after comparison can
+    # reproduce the OLD parcel-relative scores beside the new absolute
+    # ones -- the effect of the change is measured, not asserted. It must
+    # never travel back into a scoring path.
+    parcel_relative_percentile,
+    select_embankment_seeds,
     survey_areas_to_geojson,
+    twi_score,
 )
 
 # Where the export lands, beside this script's terminal output. Passed
@@ -534,7 +587,7 @@ def summarize_depression_instrumentation(identify_result: dict, dem: dict) -> st
     The excavated-class interrogation, part 1: the depression-depth
     distribution over GATED cells BEFORE and AFTER the noise floor, plus
     the 10 deepest-fill cells' full scoring row (raw depth, floored
-    depth, TWI percentile, wetness criterion, slope score, soil score --
+    depth, TWI score, wetness criterion, slope score, soil score --
     AND the soil-oddity rider: the SSURGO map unit plus the three soil
     sub-signal values (ksat score / hydrologic-group score / hydric
     share) behind each cell's soil number, so the excavated follow-up
@@ -583,7 +636,7 @@ def summarize_depression_instrumentation(identify_result: dict, dem: dict) -> st
         order = np.argsort(np.nan_to_num(depths, nan=-1.0))[::-1][:10]
         for index in order:
             r, c = (int(v) for v in gated_cells[index])
-            twi = result["screens"]["twi_percentile"][r, c]
+            twi = result["screens"]["twi_score"][r, c]
             mukey = mukey_by_cell.get((r, c))
             subs = scores_by_mukey.get(mukey, {}) if mukey is not None else {}
             lines.append(
@@ -662,10 +715,10 @@ def state_excavated_finding(identify_result: dict) -> str:
         floored_vals = [floored[r, c] for r, c in deepest]
         zeroed_by_floor = sum(1 for raw, flr in zip(raw_vals, floored_vals) if raw > 0 and flr == 0.0)
         mean_dep_score = float(np.mean([min(max(flr / DEPRESSION_FULL_CREDIT_METERS, 0.0), 1.0) for flr in floored_vals]))
-        twi_vals = [screens["twi_percentile"][r, c] for r, c in deepest]
+        twi_vals = [screens["twi_score"][r, c] for r, c in deepest]
         mean_twi = float(np.nanmean(twi_vals)) if twi_vals else float("nan")
         lines.append(
-            f"  wetness split: mean TWI percentile {mean_twi:.3f}; mean depression score {mean_dep_score:.3f}; "
+            f"  wetness split: mean TWI score {mean_twi:.3f}; mean depression score {mean_dep_score:.3f}; "
             f"{zeroed_by_floor}/10 deepest cells had real fill zeroed by the {DEPRESSION_NOISE_FLOOR_METERS} m floor"
         )
         if zeroed_by_floor >= 5:
@@ -673,7 +726,7 @@ def state_excavated_finding(identify_result: dict) -> str:
         elif mean_dep_score < 0.5 and float(np.mean(floored_vals)) > 0:
             verdict = "DEPTH-TO-SCORE SCALING (suspect 2): real floored depth survives but scores too little"
         else:
-            verdict = "the TWI half of wetness: even the deepest fill's neighborhood ranks too dry parcel-relative"
+            verdict = "the TWI half of wetness: even the deepest fill's neighborhood reads too dry on the absolute curve"
     elif top_name == "slope":
         verdict = "the SLOPE CLASSES (suspect 3): the marsh cells' ground scores as too steep for a dugout"
     elif top_name == "soil":
@@ -750,25 +803,634 @@ def _criterion_isoband_features(criterion_isobands_by_type: dict) -> list[dict]:
     return features
 
 
-def main() -> None:
-    property_boundary = [
-        (-79.9838154, 40.6458343),
-        (-79.9836701, 40.6428581),
-        (-79.9813665, 40.6440549),
-        (-79.9804741, 40.6445667),
-        (-79.9827466, 40.6458894),
-        (-79.9838258, 40.6458343),
-    ]
 
-    print("Identifying water survey areas for the reference property (networked)...\n")
-    # dem and production are fetched HERE and passed as overrides -- the
-    # diagnostic needs both again for the export (isoband axes, context
-    # layer), and the override pattern means neither is fetched twice.
-    dem = get_dem_for_boundary(property_boundary)
-    production_areas = identify_optimized_production_areas(property_boundary, dem=dem)["scored_patches"]
-    identify_result = identify_water_survey_areas(
-        property_boundary, dem=dem, production_areas=production_areas
+# ==========================================================================
+# THE BOUNDARY-STABILITY INSTRUMENT
+# ==========================================================================
+# The standing regression against ONE bug class: a criterion that scores
+# a cell relative to the parcel makes the whole composite move when the
+# USER redraws the boundary, and the failure looks like terrain analysis
+# rather than like a bug. It was found by accident once (an embankment
+# survey zone existed under one boundary and not under a slightly larger
+# one over the same land); this section exists so it cannot be found by
+# accident again.
+#
+# WHAT IS AND IS NOT ALLOWED TO MOVE. Boundary-dependence is not itself
+# an error -- the gate mask IS the boundary, geometry clips at it, and
+# the embankment pinch walk terminates on it. Those are the boundary
+# doing its job. What must NOT move is a CELL'S SCORE: a criterion is a
+# claim about ground, and ground does not change when a line is redrawn
+# around it. So the report below reads per-criterion deltas on MATCHED
+# zones: a delta in `gated cells` is expected, a nonzero delta on a
+# criterion mean for the same ground is the bug returning.
+
+# The reference boundary this diagnostic has always run (unchanged).
+REFERENCE_BOUNDARY = [
+    (-79.9838154, 40.6458343),
+    (-79.9836701, 40.6428581),
+    (-79.9813665, 40.6440549),
+    (-79.9804741, 40.6445667),
+    (-79.9827466, 40.6458894),
+    (-79.9838258, 40.6458343),
+]
+
+# THE BOUNDARY THAT LOST THE ZONE: the same property drawn slightly
+# larger, reaching further into the stream corridor. Under the retired
+# parcel-relative TWI this boundary produced NO embankment survey zone
+# where the reference boundary produced one -- the added corridor cells
+# were the wettest on the landscape, took the top percentile ranks, and
+# pushed every other cell's TWI rank down far enough (0.20 of the
+# embankment blend) to drop a ~0.52 seed under the 0.50 minimum. Kept
+# here as the second boundary of the standing two-boundary run.
+STREAM_CORRIDOR_BOUNDARY = [
+    (-79.98395562171937, 40.6460162710763),
+    (-79.98374104499818, 40.642584987588364),
+    (-79.98047947883607, 40.64432504438868),
+    (-79.98097300529480, 40.645089354064524),
+    (-79.98150944709779, 40.645170663089445),
+    (-79.98266816139223, 40.64596748629134),
+]
+
+# How much two zones of the same type must overlap, as
+# intersection-over-union of their envelopes, to be called THE SAME ZONE
+# across two boundary runs. A compartment clipped by a larger boundary
+# genuinely grows, so the match cannot demand near-identity; 0.3 is loose
+# enough to survive a real clip difference and tight enough that two
+# distinct sites never pair. CONFIGURABLE.
+ZONE_MATCH_MIN_IOU = 0.3
+
+
+def load_boundary(path: str) -> list:
+    """A boundary from a JSON file: a list of [lon, lat] pairs, returned
+    as the list of tuples every entry point here takes. Ring closure is
+    the caller's business exactly as it is for the hardcoded boundaries
+    (shapely closes an open ring itself)."""
+    with open(path) as handle:
+        raw = json.load(handle)
+    return [(float(lon), float(lat)) for lon, lat in raw]
+
+
+def _pearson(x: np.ndarray, y: np.ndarray) -> float:
+    """Pearson r, or NaN when either input has no variance (a constant
+    criterion has no correlation to report, and saying 0.0 would be a
+    fabricated answer)."""
+    x = np.asarray(x, dtype=np.float64)
+    y = np.asarray(y, dtype=np.float64)
+    if x.size < 2 or np.std(x) == 0 or np.std(y) == 0:
+        return float("nan")
+    return float(np.corrcoef(x, y)[0, 1])
+
+
+def _spearman(x: np.ndarray, y: np.ndarray) -> float:
+    """Spearman rho = Pearson on MEAN RANKS (ties averaged, which
+    matters here: classed criteria plateau at 0.0 and 1.0 over large
+    cell populations, so ties are the common case, not the edge one)."""
+    def ranks(values: np.ndarray) -> np.ndarray:
+        values = np.asarray(values, dtype=np.float64)
+        order = np.argsort(values, kind="mergesort")
+        sorted_values = values[order]
+        result = np.empty(values.size, dtype=np.float64)
+        i = 0
+        while i < values.size:
+            j = i
+            while j + 1 < values.size and sorted_values[j + 1] == sorted_values[i]:
+                j += 1
+            result[order[i:j + 1]] = 0.5 * (i + j)
+            i = j + 1
+        return result
+
+    return _pearson(ranks(x), ranks(y))
+
+
+def summarize_twi_calibration(runs: list) -> str:
+    """
+    THE CALIBRATION INSTRUMENT for TWI_SCORE_MIN_BREAKPOINT and
+    TWI_SCORE_FULL_CREDIT_BREAKPOINT: the RAW TWI distribution (min,
+    percentiles, max) over GATED cells, printed under EVERY boundary in
+    the run.
+
+    WHY BOTH BOUNDARIES, AND WHY THAT IS THE POINT. The breakpoints are
+    absolute, so they are a calibration -- and a calibration read off one
+    boundary's cell population would smuggle boundary-dependence back in
+    through the constants' own values, which is the same bug wearing a
+    different hat. Choosing them from where the two distributions AGREE
+    makes the calibration itself boundary-independent by construction.
+    The AGREEMENT lines below do that arithmetic: per percentile, the two
+    boundaries' raw-TWI values and the gap between them. A percentile
+    whose gap is small is describing the same ground under both drawings
+    and is safe to calibrate from; a percentile whose gap is large is
+    describing the cells one boundary has and the other does not.
+
+    THE VALUES ARE RESOLUTION-DEPENDENT (see the constants). This prints
+    the reference DEM's resolution beside the distribution so a run
+    against another elevation source cannot be mistaken for a
+    recalibration of the same curve.
+    """
+    percentiles = (0, 1, 5, 10, 25, 50, 75, 90, 95, 99, 100)
+    lines = [
+        "=== TWI CALIBRATION: RAW ln(a/tan(beta)) OVER GATED CELLS ===",
+        f"  current curve: 0.0 at/below {TWI_SCORE_MIN_BREAKPOINT}, ramp, "
+        f"1.0 at/above {TWI_SCORE_FULL_CREDIT_BREAKPOINT}",
+    ]
+    distributions = {}
+    for label, identify_result, _boundary in runs:
+        result = identify_result["result"]
+        gate_mask = result["gate_mask"]
+        raw = result["screens"]["twi_raw"][gate_mask]
+        raw = raw[~np.isnan(raw)]
+        dem_res = identify_result.get("_dem_resolution_meters")
+        if raw.size == 0:
+            lines.append(f"  {label}: (no gated cells with measured TWI)")
+            continue
+        distributions[label] = np.percentile(raw, percentiles)
+        lines.append(
+            f"  {label}: {raw.size} gated cells with measured TWI"
+            + (f", DEM resolution {dem_res} m" if dem_res else "")
+        )
+        lines.append("    pctile " + "".join(f"{q:>8}" for q in percentiles))
+        lines.append("    raw    " + "".join(f"{v:>8.2f}" for v in distributions[label]))
+        scored = twi_score(raw)
+        lines.append(
+            f"    scored on the current curve: mean {float(np.mean(scored)):.3f}; "
+            f"{float(np.mean(scored == 0.0)) * 100:.1f}% at 0.0 (floor), "
+            f"{float(np.mean(scored == 1.0)) * 100:.1f}% at 1.0 (full credit)"
+        )
+
+    if len(distributions) >= 2:
+        (label_a, dist_a), (label_b, dist_b) = list(distributions.items())[:2]
+        lines.append(f"  AGREEMENT between '{label_a}' and '{label_b}' (|difference| in raw TWI):")
+        lines.append("    pctile " + "".join(f"{q:>8}" for q in percentiles))
+        lines.append("    gap    " + "".join(f"{abs(a - b):>8.2f}" for a, b in zip(dist_a, dist_b)))
+        lines.append(
+            "    CALIBRATE FROM THE SMALL-GAP PERCENTILES: those describe the same ground under "
+            "both drawings. A large gap is the cells one boundary has and the other does not, and "
+            "a breakpoint read off one would be boundary-dependent by another route."
+        )
+    else:
+        lines.append(
+            "  ONLY ONE BOUNDARY IN THIS RUN -- the agreement lines need two. The calibration this "
+            "instrument exists for is not complete from a single-boundary run: pass --boundary, or "
+            "run the default two-boundary comparison."
+        )
+    return "\n".join(lines)
+
+
+def summarize_twi_scoring_comparison(runs: list) -> str:
+    """
+    THE BEFORE/AFTER: for every boundary in the run, the RETIRED
+    parcel-relative percentile scores and the new absolute scores over
+    the same cells, so this branch's effect is MEASURED rather than
+    asserted.
+
+    parcel_relative_percentile() is imported here and nowhere else on any
+    scoring path (AST-asserted in test_water_survey_areas.py). The
+    percentile population is rebuilt exactly as the retired code built it
+    -- ON-PARCEL cells, not just gated ones, since the ceiling gate
+    removed cells from play but not from the parcel.
+
+    THE DECISIVE LINE is the cross-boundary one: the SAME cell's absolute
+    score under two boundaries (identical by construction) beside its
+    percentile score under the same two (which is what moved).
+    """
+    lines = ["=== TWI SCORING: RETIRED PERCENTILE vs ABSOLUTE CURVE ==="]
+    per_boundary = {}
+    for label, identify_result, _boundary in runs:
+        result = identify_result["result"]
+        gate_mask = result["gate_mask"]
+        screens = result["screens"]
+        raw = screens["twi_raw"]
+        on_parcel = identify_result["_on_parcel_mask"]
+        old_scores = parcel_relative_percentile(raw, on_parcel)
+        new_scores = screens["twi_score"]
+        per_boundary[label] = (old_scores, new_scores, gate_mask)
+
+        gated = gate_mask & ~np.isnan(raw)
+        if not np.any(gated):
+            lines.append(f"  {label}: (no gated cells)")
+            continue
+        lines.append(
+            f"  {label}: over {int(np.count_nonzero(gated))} gated cells -- "
+            f"percentile mean {float(np.mean(old_scores[gated])):.3f}, "
+            f"absolute mean {float(np.mean(new_scores[gated])):.3f}"
+        )
+
+    if len(per_boundary) >= 2:
+        (label_a, (old_a, new_a, mask_a)), (label_b, (old_b, new_b, mask_b)) = list(per_boundary.items())[:2]
+        both = mask_a & mask_b & ~np.isnan(old_a) & ~np.isnan(old_b)
+        if np.any(both):
+            old_delta = np.abs(old_a[both] - old_b[both])
+            new_delta = np.abs(new_a[both] - new_b[both])
+            lines.append(
+                f"  CELLS GATED UNDER BOTH ({int(np.count_nonzero(both))}) -- per-cell |score change| "
+                f"between '{label_a}' and '{label_b}':"
+            )
+            lines.append(
+                f"    retired percentile: mean {float(np.mean(old_delta)):.4f}, "
+                f"max {float(np.max(old_delta)):.4f}  <- the bug: same ground, different score"
+            )
+            lines.append(
+                f"    absolute curve:     mean {float(np.mean(new_delta)):.4f}, "
+                f"max {float(np.max(new_delta)):.4f}  <- must be 0.0000; anything else is a defect"
+            )
+    return "\n".join(lines)
+
+
+def _embankment_surface_without_twi(criteria: dict) -> np.ndarray:
+    """The embankment blend with TWI REMOVED and its 0.20 redistributed
+    PROPORTIONALLY across drainage_area / slope / soil (so the remaining
+    weights still sum to 1.0 and their relative emphasis is untouched --
+    the only honest way to ask "what does the blend say without this
+    criterion" without also changing what the others mean)."""
+    remaining = {name: weight for name, weight in EMBANKMENT_WEIGHTS.items() if name != "twi"}
+    total = sum(remaining.values())
+    surface = np.zeros(criteria["twi"].shape, dtype=np.float64)
+    for name, weight in remaining.items():
+        surface += (weight / total) * criteria[name]
+    return surface
+
+
+def _excavated_surface_without_twi(criteria: dict, depression_depth: np.ndarray) -> np.ndarray:
+    """The excavated blend without TWI. TWI is not a top-level excavated
+    criterion -- it is HALF of `wetness` (WETNESS_TWI_SUBWEIGHT) -- so
+    the proportional redistribution happens at the SUB-BLEND: wetness
+    becomes the depression score alone, its subweight renormalized to
+    1.0, and the four top-level weights are untouched. Same rule as the
+    embankment case, applied at the level TWI actually votes."""
+    surface = np.zeros(criteria["wetness"].shape, dtype=np.float64)
+    for name, weight in EXCAVATED_WEIGHTS.items():
+        grid = depression_score(depression_depth) if name == "wetness" else criteria[name]
+        surface += weight * grid
+    return surface
+
+
+def summarize_twi_independent_signal(identify_result: dict, label: str) -> str:
+    """
+    EVIDENCE FOR A LATER WEIGHT DECISION. NOTHING HERE CHANGES ANY
+    WEIGHT, and this branch deliberately does not: seeding is the blend's
+    argmax, so a weight change would move every seed and confound the
+    before/after this branch exists to measure. The weight/removal
+    decision is a later branch, where seeding is the thing being
+    measured. This section is that branch's input.
+
+    THE CHARGE. TWI is the one criterion in either blend with no external
+    anchor -- drainage acres, slope percent, ksat and hydrologic group
+    all carry published or physical breakpoints, while TWI's two
+    breakpoints are calibration. It is also substantially THE RATIO OF
+    TWO CRITERIA THAT ALREADY VOTE: ln(a/tan(beta)) is water arriving
+    over gentleness, and both halves are separately weighted in both
+    blends. So it may be partly RE-VOTING rather than adding signal.
+
+    THE THREE MEASUREMENTS, per type, over gated cells:
+      1. Correlation (Pearson and Spearman) of the absolute TWI score
+         against the drainage-area score and against the slope score.
+         High correlation with either is re-voting; low with both is
+         independent signal. Spearman is the one to read for a classed
+         criterion, since the classes plateau.
+      2. The share of gated cells clearing EMBANKMENT_SEED_MIN_SCORE WITH
+         and WITHOUT TWI's contribution, and how many surviving SEEDS
+         change. A criterion that moves neither is not deciding
+         anything.
+      3. Every surviving seed's full criteria signature, so the
+         CHANNEL-ANCHORED (drainage + TWI) and OFF-CHANNEL (slope + TWI +
+         soil) archetypes are countable rather than argued about.
+    """
+    result = identify_result["result"]
+    gate_mask = result["gate_mask"]
+    criteria = result["surfaces"]["criteria"]
+    screens = result["screens"]
+    lines = [f"=== TWI INDEPENDENT-SIGNAL REPORT ({label}) -- EVIDENCE ONLY, NOTHING CHANGED ==="]
+
+    if not np.any(gate_mask):
+        lines.append("  (no gated cells)")
+        return "\n".join(lines)
+
+    twi_gated = criteria[SURVEY_TYPE_EMBANKMENT]["twi"][gate_mask]
+
+    lines.append("  1. CORRELATION of the absolute TWI score against the criteria it may be re-voting")
+    pairs = (
+        (SURVEY_TYPE_EMBANKMENT, "drainage_area", criteria[SURVEY_TYPE_EMBANKMENT]["drainage_area"]),
+        (SURVEY_TYPE_EMBANKMENT, "slope", criteria[SURVEY_TYPE_EMBANKMENT]["slope"]),
+        (SURVEY_TYPE_EXCAVATED, "drainage_runon", criteria[SURVEY_TYPE_EXCAVATED]["drainage_runon"]),
+        (SURVEY_TYPE_EXCAVATED, "slope", criteria[SURVEY_TYPE_EXCAVATED]["slope"]),
     )
+    for survey_type, name, grid in pairs:
+        other = grid[gate_mask]
+        lines.append(
+            f"    {survey_type:<11} twi vs {name:<15} "
+            f"Pearson {_pearson(twi_gated, other):+.3f}   Spearman {_spearman(twi_gated, other):+.3f}"
+        )
+    lines.append(
+        "    (the embankment TWI grid is the criterion itself; on the excavated side TWI votes at "
+        f"{WETNESS_TWI_SUBWEIGHT} of `wetness`, so it is correlated against that type's own "
+        "run-on and slope criteria)"
+    )
+
+    lines.append(f"  2. CLEARING SHARE at EMBANKMENT_SEED_MIN_SCORE ({EMBANKMENT_SEED_MIN_SCORE}), with vs without TWI")
+    gated_count = int(np.count_nonzero(gate_mask))
+    without = {
+        SURVEY_TYPE_EMBANKMENT: _embankment_surface_without_twi(criteria[SURVEY_TYPE_EMBANKMENT]),
+        SURVEY_TYPE_EXCAVATED: _excavated_surface_without_twi(
+            criteria[SURVEY_TYPE_EXCAVATED], screens["depression_depth"]
+        ),
+    }
+    for survey_type in SURVEY_TYPES:
+        with_twi = result["surfaces"][survey_type][gate_mask]
+        wo_twi = without[survey_type][gate_mask]
+        n_with = int(np.count_nonzero(with_twi >= EMBANKMENT_SEED_MIN_SCORE))
+        n_without = int(np.count_nonzero(wo_twi >= EMBANKMENT_SEED_MIN_SCORE))
+        lines.append(
+            f"    {survey_type:<11} with TWI {n_with}/{gated_count} "
+            f"({n_with / gated_count * 100:.1f}%)   without TWI {n_without}/{gated_count} "
+            f"({n_without / gated_count * 100:.1f}%)   delta {n_without - n_with:+d} cells"
+        )
+
+    # Seeds are the thing a weight change would actually move, so the
+    # seed set is re-derived on the without-TWI surface with EVERY other
+    # input held identical (same gate mask, same road cells, same
+    # separation) and the two seed cell sets are compared directly.
+    seeds_with = {tuple(record["rowcol"]) for record in result.get("embankment_seeds", [])}
+    road_cells = identify_result["_road_cell_mask"]
+    seeds_without = {
+        tuple(seed["rowcol"])
+        for seed in select_embankment_seeds(
+            identify_result["_dem"],
+            without[SURVEY_TYPE_EMBANKMENT],
+            gate_mask,
+            road_cells,
+            criteria[SURVEY_TYPE_EMBANKMENT],
+        )
+    }
+    lines.append(
+        f"    embankment SEEDS: {len(seeds_with)} with TWI, {len(seeds_without)} without; "
+        f"{len(seeds_with & seeds_without)} at the same cell, "
+        f"{len(seeds_with - seeds_without)} lost, {len(seeds_without - seeds_with)} gained"
+    )
+
+    lines.append("  3. SURVIVING SEEDS' FULL CRITERIA SIGNATURES (the archetype count)")
+    criterion_names = list(EMBANKMENT_WEIGHTS)
+    surviving = [
+        zone for zone in result["zones"] if zone["survey_type"] == SURVEY_TYPE_EMBANKMENT
+    ]
+    if not surviving:
+        lines.append("    (no surviving embankment zone on this boundary)")
+    else:
+        lines.append(
+            "    zone          blend  " + "".join(f"{name:>15}" for name in criterion_names) + "   archetype"
+        )
+        for zone in sorted(surviving, key=lambda z: z["rank"]):
+            signature = zone["seed"]["criteria_signature"]
+            # The two archetypes named by their DOMINANT WEIGHTED
+            # contribution, since a signature is only readable against
+            # the weights that consume it.
+            weighted = {name: EMBANKMENT_WEIGHTS[name] * signature[name] for name in criterion_names}
+            top = max(weighted, key=lambda name: weighted[name])
+            archetype = "channel-anchored" if top == "drainage_area" else f"off-channel ({top}-led)"
+            lines.append(
+                f"    embankment {zone['rank']:<2} {zone['seed_blend_score']:>6.3f}  "
+                + "".join(f"{signature[name]:>15.3f}" for name in criterion_names)
+                + f"   {archetype}"
+            )
+    lines.append(
+        "  STATED, NOT ACTED ON: no weight moved in this branch. The removal/reweight decision "
+        "belongs where seeding is the measured thing."
+    )
+    return "\n".join(lines)
+
+
+def _zone_key(zone: dict) -> str:
+    return f"{zone['survey_type']} {zone['rank']}"
+
+
+def _match_zones(zones_a: list, zones_b: list) -> tuple:
+    """Pair zones across two boundary runs by best envelope
+    intersection-over-union WITHIN a survey type, greedily from the best
+    pair down (a greedy IoU match cannot produce the crossed pairing a
+    per-zone argmax can). Returns (matched pairs, unmatched from a,
+    unmatched from b)."""
+    candidates = []
+    for za in zones_a:
+        for zb in zones_b:
+            if za["survey_type"] != zb["survey_type"]:
+                continue
+            union = za["polygon_utm"].union(zb["polygon_utm"]).area
+            if union <= 0:
+                continue
+            iou = za["polygon_utm"].intersection(zb["polygon_utm"]).area / union
+            if iou >= ZONE_MATCH_MIN_IOU:
+                candidates.append((iou, za, zb))
+    candidates.sort(key=lambda entry: entry[0], reverse=True)
+    matched, used_a, used_b = [], set(), set()
+    for iou, za, zb in candidates:
+        if id(za) in used_a or id(zb) in used_b:
+            continue
+        matched.append((za, zb, iou))
+        used_a.add(id(za))
+        used_b.add(id(zb))
+    return (
+        matched,
+        [z for z in zones_a if id(z) not in used_a],
+        [z for z in zones_b if id(z) not in used_b],
+    )
+
+
+def summarize_boundary_stability(runs: list) -> str:
+    """
+    THE STANDING REGRESSION (see this section's header): the full water
+    step run against TWO boundaries over THE SAME DEM, reporting which
+    zones survive both, which appear under only one, and -- per matched
+    zone -- the blend delta broken out BY CRITERION.
+
+    ONE DEM, TWO BOUNDARIES, deliberately: the DEM is fetched over the
+    UNION of the boundaries and passed to both runs, so the elevation
+    grid, the priority-flood fill and the flow accumulation are
+    byte-identical between them and the only thing that varies is the
+    boundary itself. Fetching a DEM per boundary would let a different
+    raster window move the fill and the accumulation, and every delta
+    below would then be uninterpretable.
+
+    HOW TO READ IT. A zone appearing under only one boundary is not
+    automatically a defect: a larger boundary genuinely contains ground
+    the smaller one does not, and can legitimately gain a zone there.
+    The defect signature is the other direction and the criterion table:
+    a zone LOST by the larger boundary over ground it still contains, or
+    any nonzero per-criterion delta on a matched pair whose cells did not
+    change. The criterion rows are what separate the two cases, which is
+    why the report breaks the blend out rather than printing one number.
+    """
+    lines = ["=== BOUNDARY STABILITY: THE SAME DEM UNDER TWO BOUNDARIES ==="]
+    if len(runs) < 2:
+        lines.append(
+            "  ONLY ONE BOUNDARY IN THIS RUN -- this check needs two. It is the standing regression "
+            "against boundary-dependent scoring; a single-boundary run cannot perform it."
+        )
+        return "\n".join(lines)
+
+    label_a, run_a, _boundary_a = runs[0]
+    label_b, run_b, _boundary_b = runs[1]
+    zones_a = run_a["result"]["zones"]
+    zones_b = run_b["result"]["zones"]
+    stats_a = run_a["gate_mask_stats"]
+    stats_b = run_b["gate_mask_stats"]
+    lines.append(
+        f"  '{label_a}': {stats_a['gated_cells']} gated cells, {len(zones_a)} surviving zone(s)"
+    )
+    lines.append(
+        f"  '{label_b}': {stats_b['gated_cells']} gated cells, {len(zones_b)} surviving zone(s)"
+    )
+    lines.append(
+        "  (a gated-cell difference is EXPECTED and legitimate -- the gate mask IS the boundary)"
+    )
+
+    matched, only_a, only_b = _match_zones(zones_a, zones_b)
+    lines.append(f"  SURVIVES BOTH: {len(matched)} zone(s)")
+    for za, zb, iou in matched:
+        lines.append(
+            f"    {_zone_key(za):<14} <-> {_zone_key(zb):<14} envelope IoU {iou:.3f}   "
+            f"blend {za['mean_suitability']:.4f} -> {zb['mean_suitability']:.4f} "
+            f"(delta {zb['mean_suitability'] - za['mean_suitability']:+.4f})"
+        )
+        names = sorted(set(za["criterion_contributions"]) | set(zb["criterion_contributions"]))
+        for name in names:
+            sa = za["criterion_contributions"].get(name, {}).get("mean_score")
+            sb = zb["criterion_contributions"].get(name, {}).get("mean_score")
+            if sa is None or sb is None:
+                lines.append(f"      {name:<16} n/a under one boundary")
+                continue
+            flag = ""
+            if name == "twi" and abs(sb - sa) > 0:
+                # Not proof on its own -- a matched pair is not the same
+                # CELL SET, so a mean can move because the compartment
+                # grew. It is the line to look at first, and the
+                # cross-boundary per-cell comparison in the TWI SCORING
+                # section is the one that settles it.
+                flag = "   <- TWI moved; check the per-cell comparison above"
+            lines.append(f"      {name:<16} {sa:.4f} -> {sb:.4f}  (delta {sb - sa:+.4f}){flag}")
+        if za["survey_type"] == SURVEY_TYPE_EMBANKMENT:
+            lines.append(
+                f"      seed blend       {za['seed_blend_score']:.4f} -> {zb['seed_blend_score']:.4f}  "
+                f"(delta {zb['seed_blend_score'] - za['seed_blend_score']:+.4f})   "
+                f"[seeding threshold {EMBANKMENT_SEED_MIN_SCORE}]"
+            )
+
+    lines.append(f"  ONLY UNDER '{label_a}': {len(only_a)} zone(s)")
+    for zone in only_a:
+        lines.append(
+            f"    {_zone_key(zone):<14} {zone['zone_acres']:.2f} ac, blend {zone['mean_suitability']:.4f}"
+            + (
+                f", seed blend {zone['seed_blend_score']:.4f}"
+                if zone["survey_type"] == SURVEY_TYPE_EMBANKMENT
+                else ""
+            )
+            + "   <- LOST by the other boundary: the bug's own signature if the ground is still inside it"
+        )
+    lines.append(f"  ONLY UNDER '{label_b}': {len(only_b)} zone(s)")
+    for zone in only_b:
+        lines.append(
+            f"    {_zone_key(zone):<14} {zone['zone_acres']:.2f} ac, blend {zone['mean_suitability']:.4f}"
+            + (
+                f", seed blend {zone['seed_blend_score']:.4f}"
+                if zone["survey_type"] == SURVEY_TYPE_EMBANKMENT
+                else ""
+            )
+            + "   <- gained; legitimate if this ground is only inside this boundary"
+        )
+    return "\n".join(lines)
+
+
+def run_water_step(boundary: list, dem: dict) -> dict:
+    """One full water step for one boundary over a SUPPLIED dem, with the
+    few internals the comparison sections need attached under underscore
+    keys (the dem itself, the on-parcel mask the retired percentile's
+    population was built from, and the road cell mask, so the
+    without-TWI seed re-derivation holds every other input identical).
+    Underscored because they are instrument scaffolding, not part of any
+    wire form."""
+    production_areas = identify_optimized_production_areas(boundary, dem=dem)["scored_patches"]
+    identify_result = identify_water_survey_areas(boundary, dem=dem, production_areas=production_areas)
+    result = identify_result["result"]
+    identify_result["_dem"] = dem
+    identify_result["_dem_resolution_meters"] = dem["resolution_meters"]
+    identify_result["_production_areas"] = production_areas
+    # READ OFF THE RUN, never rebuilt here: the on-parcel population is
+    # the one the retired percentile ranked over, and the road cell mask
+    # is the one seeding excluded. A diagnostic that recomputed either
+    # would be comparing the run against a second construction of the
+    # same thing, which is exactly the mistake this file exists to catch.
+    identify_result["_on_parcel_mask"] = result["on_parcel_mask"]
+    identify_result["_road_cell_mask"] = result["road_cell_mask"]
+    return identify_result
+
+
+def dem_over_both_boundaries(boundaries: list) -> dict:
+    """ONE DEM covering every boundary in the run -- fetched over the
+    convex hull of their union, so both runs share one elevation grid,
+    one fill and one flow accumulation (see summarize_boundary_stability
+    for why that is the whole validity of the comparison)."""
+    hull = unary_union([Polygon(boundary) for boundary in boundaries]).convex_hull
+    return get_dem_for_boundary(list(hull.exterior.coords))
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__.split("\n")[3].strip())
+    # ARGUMENT PARSING ONLY -- no logic changed here. Omitting
+    # --boundary reproduces the reference run exactly as before, so
+    # every existing invocation is unchanged.
+    parser.add_argument(
+        "--boundary",
+        default=None,
+        metavar="PATH",
+        help=(
+            "Path to a JSON list of [lon, lat] pairs to run as the PRIMARY boundary. "
+            "Defaults to this script's reference boundary."
+        ),
+    )
+    parser.add_argument(
+        "--compare-boundary",
+        default=None,
+        metavar="PATH",
+        help=(
+            "Path to a JSON list of [lon, lat] pairs to run as the SECOND boundary of the "
+            "boundary-stability check. Defaults to the stream-corridor boundary that lost a zone "
+            "under the retired parcel-relative TWI."
+        ),
+    )
+    parser.add_argument(
+        "--single-boundary",
+        action="store_true",
+        help="Run the primary boundary only; the two-boundary stability sections report that they could not run.",
+    )
+    args = parser.parse_args()
+
+    property_boundary = load_boundary(args.boundary) if args.boundary else REFERENCE_BOUNDARY
+
+    compare_boundary = (
+        None
+        if args.single_boundary
+        else (load_boundary(args.compare_boundary) if args.compare_boundary else STREAM_CORRIDOR_BOUNDARY)
+    )
+    boundaries = [("primary", property_boundary)]
+    if compare_boundary is not None:
+        boundaries.append(("comparison", compare_boundary))
+
+    print("Identifying water survey areas (networked)...\n")
+    # ONE DEM for every boundary in the run -- fetched over their union
+    # so the two runs share an elevation grid, a fill and a flow
+    # accumulation, which is what makes the per-criterion deltas below
+    # attributable to the BOUNDARY rather than to a different raster
+    # window. With a single boundary the hull IS that boundary, so the
+    # reference run's DEM is unchanged.
+    dem = dem_over_both_boundaries([boundary for _label, boundary in boundaries])
+
+    runs = []
+    for label, boundary in boundaries:
+        print(f"  running '{label}' boundary...")
+        runs.append((label, run_water_step(boundary, dem), boundary))
+    print()
+
+    # The primary run remains THE subject of every pre-existing section:
+    # the export, the tables and the excavated finding are unchanged.
+    identify_result = runs[0][1]
+    production_areas = identify_result["_production_areas"]
 
     print(summarize_survey_zones_table(identify_result))
     print()
@@ -779,6 +1441,15 @@ def main() -> None:
     print(summarize_depression_instrumentation(identify_result, dem))
     print()
     print(state_excavated_finding(identify_result))
+    print()
+    print(summarize_twi_calibration(runs))
+    print()
+    print(summarize_twi_scoring_comparison(runs))
+    print()
+    for label, run, _boundary in runs:
+        print(summarize_twi_independent_signal(run, label))
+        print()
+    print(summarize_boundary_stability(runs))
 
     result = identify_result["result"]
     # surfaces[type] is the RAW blend (smoothing is retired -- see

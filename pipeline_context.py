@@ -233,8 +233,8 @@ FIELD NOTES
   for computation and which exist purely to feed the narrative. The
   water key is "water_survey_areas" -- water_survey_areas.build_
   narrative_data()'s block (ALL regions, no cap, per-criterion mean
-  scores as the narrative-honesty mechanism, and the parcel-relative
-  TWI caveat surfaced as twi_is_parcel_relative/twi_note).
+  scores as the narrative-honesty mechanism, and the TWI
+  resolution-calibration caveat surfaced as twi_is_absolute/twi_note).
 
 KNOWN LIMITATIONS (found while building this, deliberately NOT worked
 around here -- flagging per this branch's own instructions rather than

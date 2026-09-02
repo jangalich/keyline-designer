@@ -71,6 +71,7 @@ from water_survey_areas import (
     hydrologic_group_score,
     ksat_water_holding_score,
     parcel_relative_percentile,
+    twi_score,
     runon_score,
     soil_water_score_for_mukey,
     survey_areas_to_geojson,
@@ -209,8 +210,38 @@ assert ksat_only["hydrologic_group_score"] is None
 assert soil_water_score_for_mukey(None, None, None) is None, "no sub-signal at all -> None, cell falls back neutral"
 print("Soil composite: renormalized over available sub-signals; nothing available is None.")
 
-# --- TWI percentile on a hand-built 3x3: 9 distinct values -> ranks
-#     0/8 .. 8/8; a dead-flat 3x3 -> 0.5 everywhere (mean-rank ties) ---
+# --- THE ABSOLUTE TWI CURVE at its breakpoints: hand values BELOW / AT
+#     the floor / BETWEEN / AT full credit / ABOVE. No population is
+#     consulted anywhere, which is the whole point of the change. ---
+_lo, _hi = wsa.TWI_SCORE_MIN_BREAKPOINT, wsa.TWI_SCORE_FULL_CREDIT_BREAKPOINT
+_mid = (_lo + _hi) / 2.0
+hand = np.array([[_lo - 3.0, _lo, _mid], [_hi, _hi + 3.0, _lo + 0.25 * (_hi - _lo)], [np.nan, 0.0, 1e6]])
+scored = twi_score(hand)
+assert scored[0, 0] == 0.0, "below the floor scores 0.0 -- plain hillslope earns nothing for wetness"
+assert scored[0, 1] == 0.0, "AT the floor is still 0.0 (the ramp starts here, it does not step)"
+assert math.isclose(scored[0, 2], 0.5), "the midpoint of the ramp scores exactly 0.5 -- it is linear"
+assert scored[1, 0] == 1.0, "AT full credit scores 1.0"
+assert scored[1, 1] == 1.0, "above full credit saturates at 1.0, never overshoots"
+assert math.isclose(scored[1, 2], 0.25), "a quarter of the way up the ramp scores 0.25"
+assert np.isnan(scored[2, 0]), "an unmeasured cell stays unmeasured -- NaN propagates, as the percentile did"
+assert scored[2, 1] == 0.0 and scored[2, 2] == 1.0, "the curve is clipped on both sides, for any raw value"
+# The curve takes its breakpoints as ARGUMENTS -- they are configurable,
+# not baked into the arithmetic.
+assert math.isclose(twi_score(np.array([5.0]), min_breakpoint=0.0, full_credit_breakpoint=10.0)[0], 0.5)
+print(f"Absolute TWI curve: 0.0 at/below {_lo}, linear ramp, 1.0 at/above {_hi}; NaN propagates; configurable.")
+
+# THE PROPERTY THE WHOLE BRANCH EXISTS FOR, stated at the unit level: the
+# score of a value does not depend on what other values are present.
+assert twi_score(np.array([7.0]))[0] == twi_score(np.array([7.0, 20.0, 20.0, 20.0]))[0], (
+    "an absolute curve scores a value identically whatever population surrounds it -- "
+    "adding the wettest cells on the landscape must not move anyone else's score"
+)
+print("Absolute TWI curve: one cell's score is independent of every other cell. That IS the fix.")
+
+# --- The RETIRED percentile, still correct as an instrument (this
+#     branch's before/after comparison reproduces the old scores with
+#     it), but off every scoring path -- asserted at the AST level
+#     further down. ---
 values = np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]])
 mask = np.ones((3, 3), dtype=bool)
 pct = parcel_relative_percentile(values, mask)
@@ -219,10 +250,18 @@ assert np.allclose(pct, expected), f"distinct 3x3 must rank 0..1 in eighths, got
 flat_pct = parcel_relative_percentile(np.full((3, 3), 2.0), mask)
 assert np.allclose(flat_pct, 0.5), "all-equal ground shares the neutral mean-rank 0.5, never 'driest'"
 masked = parcel_relative_percentile(values, np.array([[True, True, False]] * 3))
-assert np.isnan(masked[0, 2]), "off-parcel cells carry NaN, excluded from the population"
-# 6 on-parcel values 1,2,4,5,7,8 -> value 7 has 4 below of n-1=5 -> 0.8
+assert np.isnan(masked[0, 2]), "off-mask cells carry NaN, excluded from the population"
+# 6 in-mask values 1,2,4,5,7,8 -> value 7 has 4 below of n-1=5 -> 0.8
 assert math.isclose(masked[2, 0], 0.8)
-print("TWI percentile: hand-built 3x3 ranks in eighths; flat ties read 0.5; mask bounds the population.")
+# ...and the DEFECT it was retired for, exercised directly: adding wetter
+# ground to the population drops an unchanged cell's score.
+_before = parcel_relative_percentile(np.array([1.0, 2.0, 3.0]), np.ones(3, dtype=bool))[2]
+_after = parcel_relative_percentile(np.array([1.0, 2.0, 3.0, 9.0, 9.0]), np.ones(5, dtype=bool))[2]
+assert _before == 1.0 and _after < _before, (
+    "the retired percentile's failure, pinned: the value 3.0 scored 1.0 and then 0.5 when wetter "
+    "cells joined the population -- same ground, worse score, which is the bug this branch reversed"
+)
+print("Retired percentile: still a correct rank instrument, and its boundary-dependence is pinned here.")
 
 # --- TWI singularity guard: slope 0 floors tan at TWI_MIN_SLOPE_TAN.
 #     Hand value at 5m cells, accumulation 1: a = 1 * 25 / 5 = 5 m;
@@ -269,7 +308,7 @@ surfaces = compute_suitability_surfaces(
     gate_mask=np.ones((3, 3), dtype=bool),
     flow_accumulation=np.full((3, 3), 324.0),
     slope_pct=np.full((3, 3), 5.0),
-    twi_percentile=np.full((3, 3), 0.6),
+    twi_score_grid=np.full((3, 3), 0.6),
     depression_depth=np.full((3, 3), 0.25),
     soil_score_grid=np.full((3, 3), 0.8),
 )
@@ -285,7 +324,7 @@ gated = compute_suitability_surfaces(
     gate_mask=np.zeros((3, 3), dtype=bool),
     flow_accumulation=np.full((3, 3), 324.0),
     slope_pct=np.full((3, 3), 5.0),
-    twi_percentile=np.full((3, 3), 0.6),
+    twi_score_grid=np.full((3, 3), 0.6),
     depression_depth=np.full((3, 3), 0.25),
     soil_score_grid=np.full((3, 3), 0.8),
 )
@@ -416,7 +455,7 @@ diag_regions = extract_survey_regions(
     SURVEY_TYPE_EMBANKMENT,
     diag_mask,
     diag_boundary,
-    twi_percentile=diag_zeros,
+    twi_score_grid=diag_zeros,
     depression_depth=diag_zeros,
     flow_accumulation=np.ones((20, 20)),
     slope_pct=diag_zeros,
@@ -439,7 +478,7 @@ diag_surfaces = {
     "criteria": {SURVEY_TYPE_EMBANKMENT: diag_criteria, SURVEY_TYPE_EXCAVATED: {}},
 }
 diag_gate_context = {
-    "twi_percentile": diag_zeros,
+    "twi_score": diag_zeros,
     "depression_depth": diag_zeros,
     "flow_accumulation": np.ones((20, 20)),
     "slope_pct": diag_zeros,
@@ -525,7 +564,7 @@ hull_surfaces = {
     },
 }
 hull_gate_context = {
-    "twi_percentile": hull_zeros,
+    "twi_score": hull_zeros,
     "depression_depth": hull_zeros,
     "flow_accumulation": np.ones((30, 30)),
     "slope_pct": hull_zeros,
@@ -686,7 +725,27 @@ GOOD_WET_SOIL_INPUTS = {
 flat_result = compute_water_survey_areas(FLAT_DEM, FLAT_BOUNDARY, soil_inputs=GOOD_WET_SOIL_INPUTS)
 
 assert flat_result["gate_mask_stats"]["gated_cells"] == 100, "the boundary covers exactly 100 cell centers"
-expected_flat_score = 0.35 * 0.25 + 0.30 * 1.0 + 0.25 * 1.0 + 0.10 * (CA / 2.0)
+# THE TWI HALF IS HAND-DERIVED FROM THE ABSOLUTE CURVE, and this fixture
+# is where the change shows most plainly. Dead-flat ground, every cell
+# accumulating only itself: a = 1 * 25 / 5 = 5 m, tan(beta) floored at
+# TWI_MIN_SLOPE_TAN, so raw TWI = ln(5/0.001) = ln(5000) = 8.5172 for
+# EVERY cell -- the same hand value checked at the singularity guard
+# above. On the curve that is (8.5172 - 6)/(10 - 6) = 0.6293.
+#
+# UNDER THE RETIRED PERCENTILE THIS READ 0.5: with every cell tied, the
+# mean-rank convention gave the whole parcel a neutral rank, and the
+# member mean came out 0.6378. The absolute curve says something the
+# percentile structurally could not -- this dead-flat, zero-slope ground
+# IS wet in the ln(a/tan(beta)) sense, and says so identically whatever
+# is drawn around it, instead of reporting only that every cell is as
+# wet as every other.
+flat_twi = (math.log(5.0 / wsa.TWI_MIN_SLOPE_TAN) - wsa.TWI_SCORE_MIN_BREAKPOINT) / (
+    wsa.TWI_SCORE_FULL_CREDIT_BREAKPOINT - wsa.TWI_SCORE_MIN_BREAKPOINT
+)
+assert math.isclose(flat_twi, 0.6292982978540596), "ln(5000) on the 6.0 -> 10.0 ramp"
+expected_flat_score = (
+    0.35 * (0.5 * flat_twi + 0.5 * 0.0) + 0.30 * 1.0 + 0.25 * 1.0 + 0.10 * (CA / 2.0)
+)
 
 flat_members = flat_result["regions_by_type"][SURVEY_TYPE_EXCAVATED]
 assert len(flat_members) == 1 and flat_members[0]["cell_count"] == 100
@@ -714,7 +773,7 @@ assert flat_zone["member_acres"] != flat_zone["zone_acres"], (
 assert flat_zone["mean_suitability"] == flat_member["mean_suitability"], (
     "zone score statistics are the member cells' own statistics"
 )
-assert flat_zone["twi_percentile_mean"] == 0.5 and flat_zone["depression_depth_max_m"] == 0.0
+assert flat_zone["twi_score_mean"] == round(flat_twi, 3) and flat_zone["depression_depth_max_m"] == 0.0
 assert flat_zone["soil_coverage_fraction"] == 1.0 and flat_zone["criteria_complete"] is True
 assert flat_zone["confidence"] == "high", "soil coverage + complete criteria = 2 signals = HIGH"
 assert FLAG_NO_SERVICE_RELATIONSHIP in flat_zone["flags"], (
@@ -748,19 +807,40 @@ print(
 # excavated slope (15-7.778)/10 = 0.7222 (the seep taper). Boundary
 # covers centers rows 2..37 x cols 2..18 (612 cells).
 # flow_accumulation is a hand-built OVERRIDE: 1 cell everywhere except
-# the channel column (c=10), which carries 15*(r+1) cells. TWI (uniform
-# tan) orders exactly by accumulation:
-#   576 side cells all equal -> mean-rank (0.5*575)/611 = 0.4705...
-#   36 on-parcel channel cells distinct, ranks (576+i)/611, i = r-2.
+# the channel column (c=10), which carries V_CHANNEL_ACCUMULATION_PER_ROW
+# * (r+1) cells. TWI IS ABSOLUTE NOW, so it is read off the raw value
+# rather than off a rank: uniform tan(beta) = 0.0777817, a = 5 * acc
+# metres, raw TWI = ln(5*acc / 0.0777817), scored on the 6.0 -> 10.0
+# ramp.
+#   side cells (acc 1):    raw ln(64.28) = 4.163 -> score 0.0 (FLOOR)
+#   channel cells (acc M*(r+1)): raw 9.36..12.30 -> 0.839..1.0
 # Per-cell RAW blends (soil never checked -> neutral 0.5):
-#   embankment side:    .25 + .125 + .20*0.4705            = 0.4691 < 0.5
-#   embankment channel: .30*d(r) + .375 + .20*twi(r)       = 0.5635..0.863
-#   excavated side:     .35*(.5*.4705) + .15 + .25*.7222
-#                       + .10*runon(1 cell)                = 0.4132 < 0.5
+#   embankment side:    .25 + .125 + .20*0.0                = 0.375  < 0.5
+#   embankment channel: .30*d(r) + .375 + .20*twi(r)        = 0.6652..0.875
+#   excavated side:     .35*(.5*0.0) + .15 + .25*.7222
+#                       + .10*runon(1 cell)                 = 0.3309 < 0.5
 #   excavated channel:  .35*(.5*twi(r)) + .15 + .25*.7222
-#                       + .10*clip(acres(r)/2)             = 0.5094..0.6055
+#                       + .10*clip(acres(r)/2)              = 0.5330..0.6055
 # => at the 0.5 default, EVERY on-parcel channel cell is a member of
 # BOTH types' ribbons; every side cell is out of both.
+#
+# WHY THE ACCUMULATION CONSTANT MOVED WITH THE ABSOLUTE CURVE (15 -> 60).
+# This fixture exists to test EXTRACTION GEOMETRY -- ribbons, members,
+# closing, hulls -- on a channel that qualifies end to end, so the
+# channel has to actually qualify. Under the retired percentile it did
+# at 15 cells/row, but only because a percentile GRADES ON THE PARCEL:
+# the headwater cells were the wettest ground present, so they ranked
+# near 1.0 no matter how little water they carried (0.28 acres of
+# catchment at row 2). The absolute curve reads them for what they are
+# -- raw TWI 7.97, a real but modest score -- and the top three rows
+# fell out of the embankment ribbon and the top six out of the excavated
+# one. That is the curve being RIGHT, not the fixture breaking; but a
+# fixture testing hull geometry should not also be testing where a
+# ribbon starts. 60 cells/row gives the channel genuine catchment
+# (1.11 ac at row 2, 14.08 ac at row 37 -- still under the 20 ac
+# ceiling gate), restoring the end-to-end ribbon this fixture's
+# downstream assertions are about. The behavior change itself is pinned
+# where it belongs, in the two-boundary test below.
 V_ROWS, V_COLS, V_CHANNEL = 40, 21, 10
 v_array = np.zeros((V_ROWS, V_COLS))
 for r in range(V_ROWS):
@@ -773,9 +853,10 @@ V_BOUNDARY = box(
     ORIGIN_X + 19 * RESOLUTION - 0.1,
     ORIGIN_Y - 2 * RESOLUTION - 0.1,
 )
+V_CHANNEL_ACCUMULATION_PER_ROW = 60
 v_accumulation = np.ones((V_ROWS, V_COLS))
 for r in range(V_ROWS):
-    v_accumulation[r, V_CHANNEL] = 15 * (r + 1)
+    v_accumulation[r, V_CHANNEL] = V_CHANNEL_ACCUMULATION_PER_ROW * (r + 1)
 
 v_result = compute_water_survey_areas(V_DEM, V_BOUNDARY, flow_accumulation=v_accumulation)
 
@@ -783,7 +864,29 @@ v_result = compute_water_survey_areas(V_DEM, V_BOUNDARY, flow_accumulation=v_acc
 # raw surfaces on every gated cell:
 v_gate = np.zeros((V_ROWS, V_COLS), dtype=bool)
 v_gate[2:38, 2:19] = True
-side_twi = (0.5 * 575) / 611
+V_TAN_BETA = 0.55 / math.hypot(5.0, 5.0)
+
+
+def _v_twi(accumulation_cells):
+    """The absolute TWI score for this fixture's uniform grade, from the
+    RAW value -- a = accumulation * cell_area / cell_width = 5 * cells,
+    tan(beta) uniform, then the module's own ramp. NO POPULATION: the
+    same accumulation scores the same here whatever else is on the
+    grid, which is exactly what the old `(576 + i) / 611` rank could not
+    say."""
+    raw = math.log(5.0 * accumulation_cells / V_TAN_BETA)
+    return min(
+        max(
+            (raw - wsa.TWI_SCORE_MIN_BREAKPOINT)
+            / (wsa.TWI_SCORE_FULL_CREDIT_BREAKPOINT - wsa.TWI_SCORE_MIN_BREAKPOINT),
+            0.0,
+        ),
+        1.0,
+    )
+
+
+side_twi = _v_twi(1)
+assert side_twi == 0.0, "acc-1 side cells sit under the ramp's floor -- plain hillslope, no wetness credit"
 v_slope_score_exc = (15.0 - 0.55 / math.hypot(5.0, 5.0) * 100.0) / 10.0  # 0.72218...
 v_emb_expected = np.zeros((V_ROWS, V_COLS))
 v_exc_expected = np.zeros((V_ROWS, V_COLS))
@@ -792,8 +895,9 @@ for r in range(V_ROWS):
         if not v_gate[r, c]:
             continue
         if c == V_CHANNEL:
-            acres = 15 * (r + 1) * CA
-            twi = (576 + (r - 2)) / 611
+            accumulation = V_CHANNEL_ACCUMULATION_PER_ROW * (r + 1)
+            acres = accumulation * CA
+            twi = _v_twi(accumulation)
         else:
             acres = 1 * CA
             twi = side_twi
@@ -850,16 +954,40 @@ assert exc_zones[0]["boundary_adjacency_fraction"] < 0.1
 assert v_result["regions_by_type"][SURVEY_TYPE_EMBANKMENT] == [], (
     "the embankment path has no extraction stage -- member regions are excavated-only"
 )
-# The seeding, hand-derived: the qualifying cells are exactly the 36
-# on-parcel channel cells (blend 0.5635..0.863, ascending with r; every
-# side cell is 0.4691 < 0.5). Iterative claiming at 30 m (6 cells of
-# row distance, inclusive): the r=37 seed claims rows 31..37, then
-# r=30 claims 24..30, and so on -> seeds at rows 37, 30, 23, 16, 9, 2.
+# The seeding, hand-derived. The qualifying cells are exactly the 36
+# on-parcel channel cells (blend 0.6652..0.875, ascending with r; every
+# side cell is 0.375 < 0.5).
+#
+# THE ABSOLUTE CURVE PUTS A PLATEAU AT THE TOP OF THIS SURFACE, and the
+# seeding order is worth stating because of it. Both of the
+# accumulation-driven criteria SATURATE: drainage_band_score reaches 1.0
+# at 2 acres (row 5) and twi_score reaches 1.0 at raw TWI 10.0 (also row
+# 5), so rows 5..37 all blend to EXACTLY 0.875 and the argmax is a
+# 33-way tie. select_embankment_seeds() resolves ties row-major (its own
+# documented determinism), so the first seed is the TOP of the plateau
+# at row 5 rather than the most-accumulated cell at row 37.
+#
+# UNDER THE RETIRED PERCENTILE THERE WAS NO PLATEAU: ranking gave every
+# channel cell a distinct score by construction, so seeds walked down
+# from row 37. The plateau is the honest consequence of an absolute
+# curve with full credit -- two cells that both carry an established
+# drainageway ARE equally good on these criteria, and a scoring system
+# that manufactures a difference between them is inventing precision.
+# Which member of a tie anchors a compartment is a SEEDING question, and
+# seeding is deliberately not what this branch changed.
+#
+# Iterative claiming at 30 m (6 cells of row distance, symmetric and
+# inclusive): the row-5 seed claims rows 0..11 (taking rows 2-4 with
+# it), then row 12 claims 6..18, and so on -> seeds at rows 5, 12, 19,
+# 26, 33.
 v_seeds = v_result["embankment_seeds"]
 assert [record["rowcol"] for record in v_seeds] == [
-    (37, V_CHANNEL), (30, V_CHANNEL), (23, V_CHANNEL), (16, V_CHANNEL), (9, V_CHANNEL), (2, V_CHANNEL)
+    (5, V_CHANNEL), (12, V_CHANNEL), (19, V_CHANNEL), (26, V_CHANNEL), (33, V_CHANNEL)
 ], f"hand-derived 30 m claiming order, got {[record['rowcol'] for record in v_seeds]}"
 assert all(record["blend_score"] >= 0.5 for record in v_seeds)
+assert all(math.isclose(record["blend_score"], 0.875) for record in v_seeds), (
+    "every seed sits on the saturated plateau, all five at the identical 0.875"
+)
 # Every seed FAILS, honestly, because this prism valley has a CONSTANT
 # cross-section -- crest-to-crest width is identical at every station,
 # so the along-channel minimum lands on the seed's own station (argmin
@@ -888,37 +1016,53 @@ assert v_result["selected_water_zone"] is v_exc_zone
 assert v_exc_zone["cross_type_overlaps"] == []
 assert v_exc_zone["sparse_anchor"] is False
 
-# The narrative carries the seed accounting: 6 seeds, 6 failed, each
+# The narrative carries the seed accounting: 5 seeds, 5 failed, each
 # with its reason code -- the reach with no on-parcel pinch reports
 # honestly as nothing.
 v_narrative = build_narrative_data(v_result)
 assert v_narrative["zone_count"] == 1 and len(v_narrative["zones"]) == 1
 assert v_narrative["embankment_zone_count"] == 0 and v_narrative["excavated_zone_count"] == 1
 assert v_narrative["embankment_generation"] == wsa.PROVENANCE_SEED_COMPARTMENT
-assert v_narrative["embankment_seed_count"] == 6 and v_narrative["embankment_failed_seed_count"] == 6
+assert v_narrative["embankment_seed_count"] == 5 and v_narrative["embankment_failed_seed_count"] == 5
 assert {entry["reason_code"] for entry in v_narrative["embankment_failed_seeds"]} == {
     wsa.REASON_NO_CONSTRICTION
 }
 print(
     f"Fixture 2 (V-valley, compartment change): excavated ribbons the 36 channel cells (mean "
-    f"{v_exc_zone['mean_suitability']}); embankment seeds 6 channel cells and every walk honestly fails "
+    f"{v_exc_zone['mean_suitability']}); embankment seeds 5 plateau cells and every walk honestly fails "
     "no_constriction (constant prism cross-section -- the valley never narrows below any seed)."
 )
 
 # --- FIXTURE 2b: member-vs-zone split where the envelope ADDS ground.
-# Same flat construction as fixture 1, but soil covers TWO patches
-# (cols 5..8 and cols 12..14) with best-wet soil; the 3-column gap
-# (15 m) scores the neutral 0.5 soil -> 0.4878 < 0.5 -> NOT a member.
-# 15 m < the 30 m grouping -> the two members fuse into ONE zone whose
-# envelope bridges the gap. Score statistics from members ONLY: every
-# member cell scores 0.63780888, so the zone mean must be exactly that
-# -- if envelope ground were laundered in, the 30 gap cells at 0.4878
-# would drag the mean to ~0.593.
+# Same flat construction as fixture 1, but WET soil covers TWO patches
+# (cols 5..8 and cols 12..14) and the 3-column gap (15 m) between them
+# is LEAKY soil (group A, rapid ksat -> soil score 0.0), which fails it
+# out of both ribbons. 15 m < the 30 m grouping -> the two members fuse
+# into ONE zone whose envelope bridges the gap. Score statistics from
+# members ONLY: every member cell scores the fixture-1 value, so the
+# zone mean must be exactly that -- if envelope ground were laundered
+# in, the 30 gap cells would drag the mean down.
+#
+# WHY THE GAP NEEDS REAL BAD SOIL NOW, WHERE THE NEUTRAL DEFAULT USED TO
+# DO IT. The gap used to be simply uncovered, taking SOIL_UNAVAILABLE_
+# SCORE (0.5) and landing at 0.4878 -- just under the threshold. That
+# margin came from the retired percentile scoring this dead-flat parcel
+# a flat 0.5 for wetness. The absolute curve reads the same ground at
+# raw TWI 8.52 -> 0.629 (see fixture 1's hand derivation), which lifts a
+# neutral-soil flat cell to 0.5104 -- OVER the line. That is the curve
+# being right about dead-flat, zero-slope ground rather than the fixture
+# being wrong, and the fixture wants a gap that fails for a stated
+# REASON rather than one that squeaks under a threshold by 0.012.
 split_soil_inputs = {
-    "ksat_rows": [{"mukey": "A", "ksat_r": 0.05}, {"mukey": "B", "ksat_r": 0.05}],
+    "ksat_rows": [
+        {"mukey": "A", "ksat_r": 0.05},
+        {"mukey": "B", "ksat_r": 0.05},
+        {"mukey": "C", "ksat_r": 200.0},
+    ],
     "components": [
         {"mukey": "A", "hydricrating": "Yes", "comppct_r": 100, "hydgrp": "D"},
         {"mukey": "B", "hydricrating": "Yes", "comppct_r": 100, "hydgrp": "D"},
+        {"mukey": "C", "hydricrating": "No", "comppct_r": 100, "hydgrp": "A"},
     ],
     "geometries_by_mukey": {
         "A": transform_geom(
@@ -927,11 +1071,16 @@ split_soil_inputs = {
         "B": transform_geom(
             CRS, "EPSG:4326", mapping(box(ORIGIN_X + 60.0, ORIGIN_Y - 75.0, ORIGIN_X + 75.0, ORIGIN_Y - 25.0))
         ),
+        "C": transform_geom(
+            CRS, "EPSG:4326", mapping(box(ORIGIN_X + 45.0, ORIGIN_Y - 75.0, ORIGIN_X + 60.0, ORIGIN_Y - 25.0))
+        ),
     },
 }
 split_result = compute_water_survey_areas(FLAT_DEM, FLAT_BOUNDARY, soil_inputs=split_soil_inputs)
 split_members = split_result["regions_by_type"][SURVEY_TYPE_EXCAVATED]
-assert len(split_members) == 2, f"two soil patches -> two members (gap cells at 0.4878 < 0.5), got {len(split_members)}"
+assert len(split_members) == 2, (
+    f"two wet-soil patches -> two members (the leaky gap scores 0.3604 < 0.5), got {len(split_members)}"
+)
 assert {m["cell_count"] for m in split_members} == {40, 30}, "4x10 and 3x10 cell patches"
 split_zones = split_result["zones_by_type"][SURVEY_TYPE_EXCAVATED]
 assert len(split_zones) == 1, "a 15 m gap at 30 m grouping fuses the two members into ONE zone"
@@ -1016,11 +1165,25 @@ STRIP_BOUNDARY = box(
     ORIGIN_X + 14 * RESOLUTION - 0.1,
     ORIGIN_Y - 6 * RESOLUTION - 0.1,
 )
+# The two wet patches sit in LEAKY ground (C/D, group A + rapid ksat),
+# for the same reason fixture 2b needed it: on the absolute TWI curve
+# dead-flat ground scores 0.629 for wetness, so an uncovered
+# neutral-soil flat cell now clears 0.5 on its own and would join the
+# ribbon. The gap has to fail on a stated soil reason, which is what
+# keeps this fixture about the MEMBER-vs-ZONE ACREAGE BASIS rather than
+# about a threshold margin.
 strip_soil_inputs = {
-    "ksat_rows": [{"mukey": "A", "ksat_r": 0.05}, {"mukey": "B", "ksat_r": 0.05}],
+    "ksat_rows": [
+        {"mukey": "A", "ksat_r": 0.05},
+        {"mukey": "B", "ksat_r": 0.05},
+        {"mukey": "C", "ksat_r": 200.0},
+        {"mukey": "D", "ksat_r": 200.0},
+    ],
     "components": [
         {"mukey": "A", "hydricrating": "Yes", "comppct_r": 100, "hydgrp": "D"},
         {"mukey": "B", "hydricrating": "Yes", "comppct_r": 100, "hydgrp": "D"},
+        {"mukey": "C", "hydricrating": "No", "comppct_r": 100, "hydgrp": "A"},
+        {"mukey": "D", "hydricrating": "No", "comppct_r": 100, "hydgrp": "A"},
     ],
     "geometries_by_mukey": {
         "A": transform_geom(
@@ -1028,6 +1191,14 @@ strip_soil_inputs = {
         ),
         "B": transform_geom(
             CRS, "EPSG:4326", mapping(box(ORIGIN_X + 55.0, ORIGIN_Y - 45.0, ORIGIN_X + 65.0, ORIGIN_Y - 30.0))
+        ),
+        # The 20 m gap between the patches...
+        "C": transform_geom(
+            CRS, "EPSG:4326", mapping(box(ORIGIN_X + 35.0, ORIGIN_Y - 45.0, ORIGIN_X + 55.0, ORIGIN_Y - 30.0))
+        ),
+        # ...and the strip's remaining column past patch B.
+        "D": transform_geom(
+            CRS, "EPSG:4326", mapping(box(ORIGIN_X + 65.0, ORIGIN_Y - 45.0, ORIGIN_X + 72.0, ORIGIN_Y - 30.0))
         ),
     },
 }
@@ -1218,11 +1389,19 @@ assert hit_result["selected_water_zone"] is hit_zone, "a pump-required zone stil
 print("Contract: consumer fields + access patterns on the ZONE, envelope render_fill identity, overlap sentinels, PUMP-REQUIRED survives.")
 
 # narrative_data is FINAL and JSON-serializable, lists ALL zones with
-# the dual-acreage numbers, and carries the parcel-relative TWI caveat:
+# the dual-acreage numbers, and carries the TWI RESOLUTION-CALIBRATION
+# caveat (the one that replaced the retired parcel-relative caveat):
 narrative = build_narrative_data(hit_result)
 json.dumps(narrative)
 assert narrative["zone_found"] is True
-assert narrative["twi_is_parcel_relative"] is True and "THIS parcel" in narrative["twi_note"]
+assert narrative["twi_is_absolute"] is True, "TWI is absolute now and narrative_data says so"
+assert "THIS parcel" not in narrative["twi_note"], (
+    "the retired parcel-relative claim must not survive in the note -- it is no longer true"
+)
+assert "resolution-dependent" in narrative["twi_note"] and "calibrated" in narrative["twi_note"], (
+    "what survives is the RESOLUTION-CALIBRATION caveat, which still is true"
+)
+assert "twi_is_parcel_relative" not in narrative, "the retired caveat flag is gone, not renamed in place"
 assert narrative["zones"] and len(narrative["zones"]) == narrative["zone_count"] == len(hit_result["zones"]), (
     "narrative lists ALL surviving zones with the total count -- the cap and its counters are gone"
 )

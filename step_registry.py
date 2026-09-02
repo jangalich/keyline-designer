@@ -689,8 +689,9 @@ WATER = StepDefinition(
                 "identify_water_survey_areas() takes this override, and "
                 "rebuilding it from boundary_coordinates against dem['crs'] "
                 "would re-derive a polygon ParcelData already holds. It is "
-                "also the polygon the gate mask, the parcel-relative TWI "
-                "population and every envelope clip are measured against, so "
+                "also the polygon the gate mask, the compartment "
+                "watershed band and every envelope clip are measured "
+                "against, so "
                 "supplying the cache's own copy is what keeps this step's "
                 "geometry identical to the exclusion masks' next door."
             ),
