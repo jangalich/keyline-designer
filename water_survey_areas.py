@@ -33,7 +33,14 @@ mechanism could never describe both:
         the pinch cell's watershed clipped to the band between two
         baseline-perpendicular crest transects -- the lateral boundary
         of that clip IS the ridge line (hydrology handles branching
-        crests; no crest-tracing). The pinch is the width MINIMUM
+        crests; no crest-tracing). The DRAWN compartment is the CONVEX
+        HULL of that band, taken FIRST and then RE-CLIPPED at the
+        parcel boundary and the road union (order documented at
+        build_embankment_compartment(): hulling after the clips would
+        let the hull re-swallow road-clipped ground), with the band's
+        own cell-union footprint surviving beneath it as
+        compartment_footprint_polygon_utm -- the same measured-record-
+        under-a-drawn-claim split the excavated members provide. The pinch is the width MINIMUM
         among all walked stations, interior or TERMINAL: a minimum at
         the walk's end (the property line, an existing road, or the
         walk limit) is ACCEPTED AND DISCLOSED with a pinch_at_* flag
@@ -167,19 +174,23 @@ unions, never redrawn; the zone's render_fill_polygon_utm IS its clipped
 envelope, the identity -- no further reduction downstream of the
 aggregation that defines the object (the exclusion_zones precedent).
 
-THE FLOOR (the one place the output narrows, visibly): a zone whose
-walkable envelope -- zone_acres, the clipped hull -- sits under the
-MIN_SURVEY_REGION_AREA_ACRES floor is DROPPED from the pipeline output:
+THE FLOOR (the one place the output narrows, visibly), ONE RULE FOR
+BOTH TYPES: THE FLOOR JUDGES THE WALKABLE CLAIM -- zone_acres, the
+drawn hull, whichever type drew it. A zone under
+MIN_SURVEY_REGION_AREA_ACRES is DROPPED from the pipeline output:
 status: dropped + drop_reason on the zone, both acreages on the record,
 carried in the diagnostic table and the export's survey_zone_dropped
-layer, never silent (see the constant's history note for the two prior
-bases). EVERY SURVIVING ZONE IS PRESENTED: a presentation cap was
+layer, never silent (see the constant's history note for its three
+prior bases -- the type-dispatched one is retired now that both types
+draw a hull). EVERY SURVIVING ZONE IS PRESENTED: a presentation cap was
 tried for one pass and deleted -- all survivors are listed, ranked per
 type, with the total count, and the user decides what to walk. Two
-honesty reports ride each survivor: sparse_anchor (walkable claim
-vastly exceeding its anchor -- SPARSE_ANCHOR_MEMBER_FRACTION) and
-cross_type_overlaps (the two surfaces agreeing about the same ground
--- CROSS_TYPE_OVERLAP_NOTE_FRACTION drives the either-type narrative
+honesty reports ride each survivor: sparse_anchor -- walkable claim
+vastly exceeding its anchor, on BOTH types now
+(SPARSE_ANCHOR_MEMBER_FRACTION: member footprints for excavated, the
+compartment footprint for embankment) -- and cross_type_overlaps (the
+two surfaces agreeing about the same ground --
+CROSS_TYPE_OVERLAP_NOTE_FRACTION drives the either-type narrative
 line).
 
 SELECTION (the pooled rule, still provisional, documented): each type
@@ -673,29 +684,60 @@ SURVEY_ZONE_GROUPING_DISTANCE_METERS = 30.0
 # the pipeline's 5 m DEM resolution), the "smaller than this is
 # probably raster noise" line.
 #
-# HISTORY, kept on purpose. Two prior bases, each honest in its era:
+# ONE RULE, ONE SENTENCE, BOTH TYPES: THE FLOOR JUDGES THE WALKABLE
+# CLAIM. zone_acres is the DRAWN HULL on both paths now -- the closing
+# hull over member footprints for excavated, the re-clipped hull over
+# the watershed band for embankment -- so there is no type dispatch
+# here and no second basis to keep straight.
+#
+# HISTORY, kept on purpose. Three prior bases, each honest in its era:
 # (1) through the tuning passes this was a FLAG, not a filter
 # (first-run posture -- every sliver visible while the open numbers
 # were decided from runs that needed to show everything); (2) when the
 # filter landed, its basis was MEMBER acres, because under the old
 # waisted closing envelope the member cells were the only honest size
-# -- the envelope hugged them and measured nothing extra. The pre-merge
-# hull change made zone acres the walkable claim (a real, drawn survey
-# boundary), so the floor moved to the number the question is actually
-# about. The honesty cost of that move is covered by the
-# sparse_anchor guard below: an envelope can now exceed its anchoring
-# ground, and a zone doing so by more than the guard's ratio says so.
+# -- the envelope hugged them and measured nothing extra; (3) the
+# pre-merge hull change made zone acres the walkable claim for the
+# EXCAVATED type, and for one branch the constant was TYPE-DISPATCHED
+# in effect -- an excavated hull against an embankment compartment's
+# raw watershed clip, two different kinds of object judged by one
+# number. Hulling the embankment envelopes retires that split: both
+# types now present a drawn survey boundary, and the floor asks the
+# same question of both.
+#
+# The honesty cost of judging a drawn claim is covered by the
+# sparse_anchor guard below, ALSO on both types: an envelope can
+# exceed its anchoring ground, and a zone doing so by more than the
+# guard's ratio says so. EXPECT RESURRECTIONS from the hull change --
+# compartments the reference run dropped at 0.012-0.049 ac of
+# watershed band clear 0.1 ac once hulled; that is the floor asking
+# the right question, and sparse_anchor is what distinguishes a real
+# small survey area from a sliver wearing a generous hull.
 # Individual member REGIONS below the floor still only carry the
 # below_min_area flag. CONFIGURABLE.
 MIN_SURVEY_REGION_AREA_ACRES = 0.1
 
-# The sparse-anchor honesty guard: a surviving zone whose member_acres /
-# zone_acres ratio falls below this fraction carries the sparse_anchor
-# flag -- its walkable claim (the hull) vastly exceeds the
-# high-suitability ground anchoring it, and the zone announces that
-# rather than reading as solid candidate area. Reported, never a gate;
-# dual acreage remains mandatory in every zone sentence regardless.
-# CONFIGURABLE.
+# The sparse-anchor honesty guard, ON BOTH TYPES: a surviving zone whose
+# ANCHOR / CLAIM acreage ratio falls below this fraction carries the
+# sparse_anchor flag -- its walkable claim (the drawn hull) vastly
+# exceeds the ground anchoring it, and the zone announces that rather
+# than reading as solid candidate area. Reported, never a gate; dual
+# acreage remains mandatory in every zone sentence regardless.
+#
+# THE PAIR, PER TYPE (the name keeps MEMBER for continuity with the
+# excavated arc that introduced it; the rule is anchor-over-claim):
+#     excavated   anchor = member_acres (cells that cleared the
+#                 suitability threshold), claim = zone_acres.
+#     embankment  anchor = compartment_footprint_acres (the bounded
+#                 watershed band the instrument actually found),
+#                 claim = zone_acres.
+#
+# THIS IS WHAT MAKES THE HULL-BASED FLOOR HONEST FOR THE EMBANKMENT
+# TYPE, whose anchor is a single narrow watershed band: a compartment
+# resurrected above the floor purely by a generous hull over a thin
+# band fails this ratio and says so on its own record, so "small survey
+# area" and "sliver with a generous hull" are distinguishable on the
+# wire rather than by eye. CONFIGURABLE.
 SPARSE_ANCHOR_MEMBER_FRACTION = 0.2
 
 # When a surviving zone's envelope overlaps a surviving zone of the
@@ -758,11 +800,13 @@ FLAG_SPARSE_ANCHOR = "sparse_anchor"
 reason/flag enumeration: a caller or test that reacts to a flag compares
 against a name, never a re-typed string. no_service_relationship and
 sparse_anchor are pure FLAGS (informational, never an outcome);
-below_min_area doubles as the drop_reason code when a zone's walkable
-envelope (excavated) or compartment polygon (embankment) falls under the
+below_min_area doubles as the drop_reason code when a zone's WALKABLE
+CLAIM -- the drawn hull, one rule for both types -- falls under the
 tuned floor (member REGIONS still only ever carry it as a flag).
-sparse_anchor is EXCAVATED-ONLY: a compartment has no members, so the
-member/envelope ratio it guards does not exist on the embankment path."""
+sparse_anchor rides BOTH types since the embankment envelopes became
+hulls: the ratio it guards is anchor-over-claim, and the embankment
+anchor is the compartment footprint where the excavated anchor is the
+member footprints (see SPARSE_ANCHOR_MEMBER_FRACTION)."""
 
 # Compartment truncation flags -- the established truncated_by_* naming
 # from the demoted water_candidate_zones arc, carried into this module
@@ -2397,12 +2441,56 @@ def build_embankment_compartment(
         clip IS the ridge line between the transect ends -- hydrology
         handles branching crests and spurs; no crest-tracing exists
         anywhere on this path.
-      * The compartment polygon = that bounded watershed band, clipped
-        to the parcel boundary AND the road exclusion union, each clip
-        flagged (truncated_by_boundary / truncated_by_road) when it
-        actually removed area. render_fill_polygon_utm IS the clipped
-        compartment, identity; WGS84 stored beside UTM for the
-        compartment, the baseline, and both transects, all at birth.
+      * THE COMPARTMENT FOOTPRINT = that bounded watershed band,
+        clipped to the parcel boundary AND the road exclusion union.
+        The measured record: cell-staircase edges and clip notches
+        intact, never redrawn (the no-morphology rule), carried as
+        compartment_footprint_polygon_utm with its stored WGS84 form
+        and compartment_footprint_acres.
+      * THE DRAWN ZONE = the CONVEX HULL of that footprint, RE-CLIPPED.
+        WGS84 stored beside UTM for the drawn zone, the footprint, the
+        baseline, and both transects, all at birth.
+
+    THE HULL, AND WHY THE DRAWN ZONE IS ONE (pre-merge change, the same
+    reasoning that hulled the excavated envelopes in
+    build_survey_zones()): a drawn zone is the SURVEYABLE CLAIM -- the
+    ground a surveyor would rope off -- and the bounded watershed clip
+    was never that object. Its outline is a 5 m cell staircase hung
+    with the notches every clip cut into it; nobody walks that
+    boundary. The hull is a NEW AGGREGATION OBJECT defined OVER the
+    footprint -- a boundary drawn AROUND measured geometry, never a
+    redrawing of it -- and the footprint survives beneath it intact,
+    exactly the role an excavated zone's member footprints play.
+
+    ORDER MATTERS, AND IT IS HULL FIRST, THEN RE-CLIP TO THE PARCEL
+    BOUNDARY AND THE ROAD EXCLUSION UNION. Boundary and roads are HARD
+    exclusions here -- ground this survey area may not claim, not
+    ground it merely overlaps. Hulling AFTER the clips (i.e. taking the
+    footprint's hull as final) would let the hull RE-SWALLOW exactly
+    the ground the road clip removed: a road strip cutting a notch
+    through a compartment is bridged straight back over by the convex
+    hull of the notched shape. So the hull is taken first and the two
+    clips are then applied to it, in that order, and the truncation
+    flags (truncated_by_boundary / truncated_by_road) RECOMPUTE for the
+    drawn hull rather than being inherited from the old pre-hull
+    compartment clips -- they describe what was cut from the DRAWN
+    zone, which is the object the flags are about. Their baseline is
+    the UNCONSTRAINED claim (the hull of the raw watershed band); see
+    the flag block below for why that, and not the drawn hull's
+    immediate predecessor, is the honest comparison.
+
+    THE HULL READS SLIGHTLY WIDER THAN THE COMPARTMENT WHERE THE
+    WATERSHED BAND PINCHES. A valley compartment narrows toward its dam
+    reach by construction, and a convex hull cannot narrow: it spans
+    the widest transect straight down to the pinch, taking in a little
+    side-slope ground the watershed itself drains elsewhere. That is
+    accepted and stated rather than hidden -- a survey area is a claim
+    about where to walk, not a measurement of the catchment, and the
+    catchment measurement survives underneath as
+    compartment_footprint_acres. The sparse_anchor guard
+    (SPARSE_ANCHOR_MEMBER_FRACTION) is what keeps the difference
+    honest: a hull that vastly exceeds the compartment anchoring it
+    says so.
 
     The band is padded half a cell beyond each endpoint along the
     baseline so the seed and embankment CELLS belong to their own
@@ -2480,22 +2568,82 @@ def build_embankment_compartment(
 
     flags: list[str] = []
     area_epsilon = 1e-6
-    clipped = _polygonal(banded.intersection(boundary_polygon_utm))
-    if clipped.area < banded.area - area_epsilon:
-        flags.append(FLAG_TRUNCATED_BY_BOUNDARY)
-    pre_road_clip = clipped
-    if road_union_utm is not None and not clipped.is_empty:
-        after_road = _polygonal(clipped.difference(road_union_utm))
-        if after_road.area < clipped.area - area_epsilon:
-            flags.append(FLAG_TRUNCATED_BY_ROAD)
-        clipped = after_road
-    if clipped.is_empty:
+
+    # THE COMPARTMENT FOOTPRINT -- the honest measured record beneath
+    # the drawn hull: the bounded watershed band at both hard
+    # exclusions, cell staircase and clip notches intact. Nothing
+    # downstream ever redraws it (the no-morphology rule); it is the
+    # embankment type's answer to "what ground did the instrument
+    # actually find", the role member footprints play on the excavated
+    # path, and the ANCHOR the sparse_anchor guard measures the hull
+    # against.
+    footprint = _polygonal(banded.intersection(boundary_polygon_utm))
+    if road_union_utm is not None and not footprint.is_empty:
+        footprint = _polygonal(footprint.difference(road_union_utm))
+    if footprint.is_empty:
         # Cannot occur by construction (the baseline's own on-parcel,
         # non-road cells always survive both clips) -- guarded so a
         # geometry-library edge case degrades to an attributed failed
         # seed, never a crash.
         logger.warning(
             "build_embankment_compartment: compartment clipped to empty for seed %s -- skipped",
+            seed_rowcol,
+        )
+        return None
+
+    # THE DRAWN ZONE: HULL FIRST, THEN RE-CLIP -- see the docstring's
+    # ORDER MATTERS paragraph. Reversing these two steps is not a
+    # refactor: it hands the hull back the road-clipped ground.
+    #
+    # The hull is taken over the FOOTPRINT, not over the unclipped band,
+    # and that is the conservative choice on purpose: an off-parcel arm
+    # of the watershed would drag the band's hull sideways and the
+    # re-clip would hand back a wider ON-PARCEL wedge that the
+    # compartment never covered -- on-parcel ground claimed on the
+    # strength of off-parcel watershed. hull(footprint) can only ever
+    # span ground the compartment's own two ends already reach.
+    hull = footprint.convex_hull
+    on_parcel_hull = _polygonal(hull.intersection(boundary_polygon_utm))
+    drawn = on_parcel_hull
+    # PRE-road-clip geometry, kept so road_overlap_pct can measure the
+    # ground the road clip REMOVED from the walkable claim (measuring
+    # the clipped hull would be a guaranteed zero).
+    pre_road_clip = on_parcel_hull
+    if road_union_utm is not None and not on_parcel_hull.is_empty:
+        drawn = _polygonal(on_parcel_hull.difference(road_union_utm))
+
+    # THE TRUNCATION FLAGS, RECOMPUTED FOR THE DRAWN HULL -- and
+    # measured against the UNCONSTRAINED CLAIM (the hull of the raw
+    # watershed band), not against the drawn hull's own immediate
+    # predecessor. The distinction is load-bearing and is the one place
+    # a naive "compare each clip's before and after" reading goes
+    # wrong: because the FOOTPRINT is clipped before it is hulled, a
+    # straight boundary that genuinely cut this compartment leaves
+    # hull(footprint) sitting flat against that line and crossing
+    # nothing -- so a before/after comparison on the hull would report
+    # a truncation that plainly happened as no truncation at all,
+    # silently, on the exact zones where it matters most.
+    #
+    # truncated_by_* means "a hard exclusion removed ground this survey
+    # area would otherwise claim". Sequenced over the unconstrained
+    # claim, that question is asked once and answered honestly for both
+    # exclusions, and it can neither over-fire (an exclusion touching
+    # nothing removes no area) nor lose a real cut (the raw band
+    # contains every version of the geometry downstream of it).
+    claim = _polygonal(banded).convex_hull
+    claim_on_parcel = _polygonal(claim.intersection(boundary_polygon_utm))
+    if claim_on_parcel.area < claim.area - area_epsilon:
+        flags.append(FLAG_TRUNCATED_BY_BOUNDARY)
+    if road_union_utm is not None and not claim_on_parcel.is_empty:
+        claim_off_road = _polygonal(claim_on_parcel.difference(road_union_utm))
+        if claim_off_road.area < claim_on_parcel.area - area_epsilon:
+            flags.append(FLAG_TRUNCATED_BY_ROAD)
+    if drawn.is_empty:
+        # Cannot occur: the footprint cleared both clips above and the
+        # hull contains the footprint, so the re-clipped hull contains
+        # it too. Guarded on the same degrade-never-crash principle.
+        logger.warning(
+            "build_embankment_compartment: drawn hull clipped to empty for seed %s -- skipped",
             seed_rowcol,
         )
         return None
@@ -2520,12 +2668,30 @@ def build_embankment_compartment(
         if walk["still_narrowing_at_termination"]:
             flags.append(FLAG_STILL_NARROWING)
 
-    compartment_acres = clipped.area / SQUARE_METERS_PER_ACRE
-    cells = _cells_in_polygon_utm(dem, clipped)
+    zone_acres = drawn.area / SQUARE_METERS_PER_ACRE
+    footprint_acres = footprint.area / SQUARE_METERS_PER_ACRE
+    # CELLS ARE THE FOOTPRINT'S, NOT THE HULL'S, and that is the same
+    # rule build_survey_zones() states for the excavated envelope: the
+    # drawn boundary never launders ground the instrument did not
+    # measure into a score. The compartment's own cells deliberately
+    # include low-scoring side slopes and the wall reach -- THAT IS
+    # THEIR JOB (the compartment is the ground the watershed band
+    # actually covers, ridge to ridge) -- but the hull's extra corners
+    # are not compartment ground and do not vote.
+    cells = _cells_in_polygon_utm(dem, footprint)
     # A compartment too small to hold a single cell center is headed for
     # the acreage floor regardless; its stats honestly come from the
     # anchor cell rather than nothing.
     measurement_cells = cells if cells else [seed_rowcol]
+
+    # THE SPARSE-ANCHOR HONESTY GUARD, now on both types (see
+    # SPARSE_ANCHOR_MEMBER_FRACTION): anchor = the compartment
+    # footprint, claim = the drawn hull. It is what makes a hull-based
+    # floor honest for a type whose anchor is a single narrow watershed
+    # band.
+    sparse_anchor = zone_acres > 0 and (footprint_acres / zone_acres) < SPARSE_ANCHOR_MEMBER_FRACTION
+    if sparse_anchor:
+        flags.append(FLAG_SPARSE_ANCHOR)
 
     measurements = _measure_member_cells(
         dem,
@@ -2541,7 +2707,8 @@ def build_embankment_compartment(
         gate_context["soil_checked"],
     )
 
-    geometry_wgs84 = transform_geom(dem["crs"], "EPSG:4326", mapping(clipped))
+    geometry_wgs84 = transform_geom(dem["crs"], "EPSG:4326", mapping(drawn))
+    footprint_geometry_wgs84 = transform_geom(dem["crs"], "EPSG:4326", mapping(footprint))
     seed_lon, seed_lat = seed["geometry_wgs84"]["coordinates"]
     pinch_lons, pinch_lats = warp_transform(dem["crs"], "EPSG:4326", [pinch_xy[0]], [pinch_xy[1]])
     baseline_points_utm = [seed_xy, pinch_xy]
@@ -2551,14 +2718,25 @@ def build_embankment_compartment(
         "nominated_by": PROVENANCE_SEED_COMPARTMENT,
         "cells": cells,
         "cell_count": len(cells),
-        # THE compartment acreage: the drawn polygon's own area (a
-        # compartment is a drawn boundary, not a cell population -- the
-        # same cell-vs-polygon acreage split the excavated hull uses).
-        # Carried under the shared zone_acres key so the floor, the
-        # drop accounting, and every shape-generic consumer read one
-        # name; there is deliberately NO member_acres here -- a
-        # compartment has no members.
-        "zone_acres": round(compartment_acres, 4),
+        # DUAL ACREAGE, the embankment edition -- the same two truths
+        # the excavated path carries under member_acres/zone_acres:
+        #   zone_acres                 the DRAWN HULL's own polygon
+        #                              area, the ground to walk and the
+        #                              number the floor judges (a drawn
+        #                              boundary, not a cell population
+        #                              -- the cell-vs-polygon acreage
+        #                              split exclusion_zones.py
+        #                              documents).
+        #   compartment_footprint_acres  the watershed band the
+        #                              instrument actually found, the
+        #                              anchoring signal.
+        # zone_acres keeps the shared name so the floor, the drop
+        # accounting and every shape-generic consumer read one key.
+        # There is still deliberately NO member_acres here -- a
+        # compartment has no members, and the anchor is its own
+        # footprint.
+        "zone_acres": round(zone_acres, 4),
+        "compartment_footprint_acres": round(footprint_acres, 4),
         **measurements,
         # THE ANCHOR CLAIM, separate from the walked ground's means
         # (the reporting honesty split): the seed's own blend score and
@@ -2601,25 +2779,33 @@ def build_embankment_compartment(
         "walk_stations": walk["stations"],
         "flags": flags,
         "below_min_area": False,  # decided at the floor, over zone_acres
+        "sparse_anchor": FLAG_SPARSE_ANCHOR in flags,
         "truncated_by_boundary": FLAG_TRUNCATED_BY_BOUNDARY in flags,
         "truncated_by_road": FLAG_TRUNCATED_BY_ROAD in flags,
         "half_width_bound_hit": FLAG_HALF_WIDTH_BOUND_HIT in flags,
         "boundary_adjacency_fraction": round(
-            _boundary_adjacency_fraction(clipped, boundary_polygon_utm), 3
+            _boundary_adjacency_fraction(drawn, boundary_polygon_utm), 3
         ),
-        "polygon_utm": clipped,
+        "polygon_utm": drawn,
         "geometry_wgs84": geometry_wgs84,
-        # IDENTITY of the clipped compartment -- the clip at the parcel
-        # boundary and the road union is part of the object's own
-        # definition; no further morphology downstream, ever (the same
-        # render_fill contract every water zone has carried).
-        "render_fill_polygon_utm": clipped,
+        # THE MEASURED RECORD BENEATH THE DRAWN HULL, carried in both
+        # frames with its WGS84 form stored at birth like every other
+        # geometry in this module. Intact -- no smoothing, no
+        # simplification, no reshaping -- because it is the answer to a
+        # different question than the hull answers.
+        "compartment_footprint_polygon_utm": footprint,
+        "compartment_footprint_geometry_wgs84": footprint_geometry_wgs84,
+        # IDENTITY of the drawn hull -- the hull and its two re-clips
+        # are the object's own definition; no further morphology
+        # downstream, ever (the same render_fill contract every water
+        # zone has carried).
+        "render_fill_polygon_utm": drawn,
         "render_fill_geometry_wgs84": geometry_wgs84,
-        # PRE-road-clip geometry, kept so road_overlap_pct can measure
-        # the ground the road clip REMOVED from the walkable claim --
-        # the meaningful number now that the drawn geometry is clipped
-        # at roads (measuring the clipped envelope would be a
-        # guaranteed zero).
+        # PRE-road-clip geometry (the on-parcel hull), kept so
+        # road_overlap_pct can measure the ground the road clip REMOVED
+        # from the walkable claim -- the meaningful number now that the
+        # drawn geometry is clipped at roads (measuring the clipped
+        # hull would be a guaranteed zero).
         "pre_road_clip_polygon_utm": pre_road_clip,
     }
 
@@ -3317,15 +3503,28 @@ def _zone_feature_properties(zone: dict) -> dict:
     """The JSON-serializable property set every survey-zone feature
     carries -- the full measurement contract, flagged not filtered.
     TYPE-DISPATCHED since the compartment change (the honesty split made
-    wire shape): an EXCAVATED zone carries dual acreage (member_acres =
-    the anchoring signal; zone_acres = the clipped hull, the ground to
-    walk), member linkage and the sparse_anchor guard; an EMBANKMENT
-    zone is a valley compartment with NO members -- it carries the
-    SEED's blend score and criteria signature (the anchor claim,
-    separate from the compartment's own criterion means, which
-    deliberately average in side slopes and the wall reach), the pinch
-    record (crest-to-crest width, walk distance), the baseline length,
-    and the truncation/bound flags."""
+    wire shape). BOTH types now carry dual acreage and the
+    sparse_anchor guard, because both now DRAW A HULL over measured
+    ground -- only the anchor's name differs:
+
+      EXCAVATED   member_acres (cells that cleared the threshold) +
+                  member linkage; zone_acres = the clipped hull.
+      EMBANKMENT  compartment_footprint_acres (the bounded watershed
+                  band) and NO members; zone_acres = the re-clipped
+                  hull of that band. It additionally carries the SEED's
+                  blend score and criteria signature (the anchor claim,
+                  separate from the compartment's own criterion means,
+                  which deliberately average in side slopes and the
+                  wall reach), the pinch record (crest-to-crest width,
+                  walk distance), the baseline length, and the
+                  truncation/bound flags.
+
+    NOTHING IS REMOVED FROM THIS SET by the panel block that now rides
+    the payload. This is the DIAGNOSTIC AND IMAGERY CONTRACT -- the
+    full measurement record, flagged not filtered -- and the panel is a
+    curated READING of a zone, not a replacement for its record. The
+    two are allowed to diverge, and the panel's exclusions (see
+    build_zone_panel()) are exclusions from the PANEL only."""
     properties = {
         "zone_id": zone["id"],
         "survey_type": zone["survey_type"],
@@ -3393,6 +3592,12 @@ def _zone_feature_properties(zone: dict) -> dict:
                 "baseline_length_m": zone["baseline"]["length_m"],
                 "truncated_by_boundary": zone["truncated_by_boundary"],
                 "half_width_bound_hit": zone["half_width_bound_hit"],
+                # THE MEASURED RECORD BENEATH THE DRAWN HULL: the
+                # bounded watershed band's own acreage (zone_acres
+                # above is the hull), and the guard that fires when the
+                # hull vastly exceeds it.
+                "compartment_footprint_acres": zone["compartment_footprint_acres"],
+                "sparse_anchor": zone["sparse_anchor"],
             }
         )
     else:
@@ -3446,11 +3651,11 @@ _MEMBER_FEATURE_NOTE = (
 
 _DROPPED_ZONE_NOTE = (
     "DROPPED from the pipeline output (status: dropped; drop_reason names why): below_min_area means "
-    "the judged acreage -- the walkable hull envelope for an excavated zone, the compartment's own "
-    "polygon for an embankment zone -- measures under the 0.1 ac floor; duplicate_of_zone_<id> means "
-    "this compartment collapsed into a better-seeded one describing the same valley ground. Carried "
-    "here visible and attributed, never silently, with the judged acreage on the record (zone_acres; "
-    "excavated records also keep member_acres, the anchoring signal inside the envelope)."
+    "the judged acreage -- zone_acres, the DRAWN HULL, one rule for both types -- measures under the "
+    "0.1 ac floor; duplicate_of_zone_<id> means this compartment collapsed into a better-seeded one "
+    "describing the same valley ground. Carried here visible and attributed, never silently, with "
+    "BOTH acreages on the record: zone_acres beside the anchoring ground inside it (member_acres for "
+    "an excavated record, compartment_footprint_acres for an embankment one)."
 )
 
 
@@ -3486,6 +3691,320 @@ def _feet(meters: Optional[float]) -> Optional[float]:
     return round(meters / METERS_PER_FOOT, 1)
 
 
+# ==========================================================================
+# The panel block: the server-curated reading of one survey zone
+# ==========================================================================
+# WHAT THE PANEL IS. The small, ORDERED set of data points the interactive
+# map's zone tab renders when someone clicks a survey area. It answers ONE
+# question -- SHOULD I WALK THIS? -- and everything that does not help
+# answer it is off the panel, on purpose.
+#
+# WHY THE SERVER OWNS IT. Field choice, field ORDER and the label each
+# field is read under are editorial decisions about a measurement, and
+# they belong beside the measurement. Shipping them as data
+# ({key, label, value, unit} rows) rather than as frontend code means the
+# panel can be retuned -- a row added, dropped, reordered, relabelled --
+# without a frontend deploy, and means the two survey types cannot drift
+# into being rendered by one hardcoded field list. That drift is not
+# hypothetical: the tab this block replaces rendered "anchor acres" and
+# "members" on an EMBANKMENT zone, which has neither. TYPE DISPATCH IS
+# THEREFORE MANDATORY HERE and is what the excluded-key list below
+# enforces structurally.
+#
+# DATA POINTS ONLY. No composed sentences anywhere in this block -- not in
+# a value, not in a label. A label names a quantity; a value is that
+# quantity. Prose about a zone belongs in the report, which has room to
+# make an argument; a panel row has room for a number and its unit.
+#
+# IMPERIAL AT THIS BOUNDARY, like every other narrative_data value: acres
+# and feet, never meters.
+#
+# NEGATIVE SPACE IS THE CHEAPEST CUT. Five rows are always present. Every
+# other row FIRES or is absent -- a zone with nothing wrong shows no
+# cautions at all, so a caution that IS there is worth reading. The one
+# thing absence may never mean is "we did not look": a never-checked
+# overlap is its own value (None) on a present row, because rendering it
+# as 0 -- or dropping it beside a genuine 0.0 -- would report an
+# unmeasured thing as a measured absence.
+
+PANEL_ALWAYS_ROWS = ("zone_acres", "survey_type", "suitability", "rank", "water_delivery")
+"""The five rows every panel carries, in order. A zone with no cautions
+and no service relationship shows exactly these and nothing else."""
+
+# The water_delivery answer, as three named values. The third is a real
+# computed answer ("nothing is in range"), not a missing one -- which is
+# why it is a VALUE of this row rather than the row's absence, and why
+# the differential row below is absent rather than 0.0 in that case.
+WATER_DELIVERY_GRAVITY = "gravity_feed"
+WATER_DELIVERY_PUMP = "pump_required"
+WATER_DELIVERY_NONE = "no_service_relationship"
+
+PANEL_EXCLUDED_KEYS = (
+    # TERRAIN AND SCORING INTERNALS -- every one of these stays on the
+    # feature and in narrative_data, where the diagnostic export and the
+    # report read them. They are how a zone got its score, not whether to
+    # walk it, and a panel that lists them is a diagnostic view wearing a
+    # panel's clothes. There is deliberately NO collapsed "full
+    # measurements" section either: the diagnostic view IS the export.
+    "depression_depth_max_m",
+    "depression_depth_max_ft",
+    "depression_depth_mean_m",
+    "contributing_area_acres_at_wettest_cell",
+    "representative_elevation_m",
+    "slope_median_pct",
+    "twi_percentile_mean",
+    "twi_percentile_max",
+    "criteria",
+    "criterion_contributions",
+    "seed_criteria_signature",
+    "seed_blend_score",
+    "max_suitability",
+    # EMBANKMENT INSTRUMENT DETAIL.
+    "pinch_width_m",
+    "pinch_width_ft",
+    "pinch_walk_distance_ft",
+    "walk_distance_m",
+    "baseline_length_ft",
+    "baseline_length_m",
+    "width_profile_min_ft",
+    "width_profile_max_ft",
+    "seed_rowcol",
+    "pinch_rowcol",
+    # EXCAVATED MEMBER VOCABULARY -- the specific words that must never
+    # reach an embankment panel, excluded from BOTH so there is one rule
+    # rather than a type test to get wrong.
+    "member_ids",
+    "member_count",
+    "member_acres",
+    # The anchor acreage of either type. sparse_anchor covers the only
+    # case where the anchor/claim difference changes a decision, and it
+    # covers it as one word instead of a second acreage the reader has to
+    # difference in their head.
+    "compartment_footprint_acres",
+    "anchor_acres",
+)
+"""Keys that are NOT panel rows, asserted absent from build_zone_panel()'s
+output and from its source. Named as a constant rather than left implicit
+because "we decided not to show this" is a decision with a reason, and a
+later hand adding one back should have to delete it from here first."""
+
+
+def _panel_row(key: str, label: str, value, unit: Optional[str] = None) -> dict:
+    """One panel row. The shape is fixed at {key, label, value, unit} so a
+    renderer can draw any row it is given without knowing which row it is:
+    `key` is the stable identifier a consumer may branch on (never the
+    label -- the label is display prose and will be reworded, the same
+    two-field split exclusion_zones._wire_layers() and
+    production_zone_payload.LayerFetchError document), `unit` is None for
+    a categorical or boolean value.
+
+    A LABEL NEVER SPELLS ITS OWN UNIT. The unit is a field, so a renderer
+    that shows both would print "acres to survey (acres)"; every label
+    below therefore names the quantity and leaves the unit to `unit`."""
+    return {"key": key, "label": label, "value": value, "unit": unit}
+
+
+def zone_display_name(zone: dict) -> str:
+    """A zone's identity as TYPE PLUS PER-TYPE RANK -- "embankment 2",
+    never "2". rank_survey_zones_per_type() ranks each type on its own
+    instrument, so there is an embankment rank 1 AND an excavated rank 1
+    on the same parcel describing different ground; the rank alone names
+    two things. Two data points joined by a space, which is a name, not a
+    sentence."""
+    return f"{zone['survey_type']} {zone['rank']}"
+
+
+def build_zone_panel(zone: dict, soil_checked: bool, zone_name_by_id: dict) -> list[dict]:
+    """
+    The ordered panel rows for ONE surviving survey zone -- see this
+    section's header for what the panel is and what it refuses to be.
+
+    THE FIVE ALWAYS-ROWS, in order (PANEL_ALWAYS_ROWS):
+
+      1. zone_acres     the walkable claim, acres, 1 dp. The ANCHOR
+                        acreage is deliberately NOT a row: sparse_anchor
+                        fires in exactly the case where the difference
+                        changes a decision, and says it in one word.
+      2. survey_type    embankment or excavated. Not decoration -- they
+                        are different site visits with different
+                        equipment, and the rank above is per type.
+      3. suitability    the zone's mean suitability, read against
+                        scales['suitability'] (which carries the
+                        parcel's own observed ceiling per type, because
+                        a 0-1 reading against a theoretical 1.0
+                        overstates what was attainable here).
+      4. rank           read against scales['rank'][type]['count'], so
+                        "2" renders as "2 of 3".
+      5. water_delivery gravity_feed / pump_required /
+                        no_service_relationship.
+
+    WHY water_delivery IS THREE ROWS AND NOT ONE. The row contract is
+    {key, label, value, unit}; a row whose value is a nested object is
+    not a row a generic renderer can draw, so the elevation differential
+    and the production area id ride as their own rows beside it. They
+    FIRE ONLY WHEN THERE IS A RELATIONSHIP -- absent, never 0.0 --
+    because a 0 ft differential to no production area is precisely the
+    fabricated zero this module refuses everywhere else. A zone with
+    nothing in range therefore shows the five always-rows and the
+    no_service_relationship value, which is a computed answer rather
+    than a gap.
+
+    THE CAUTION ROWS, each present only when it fires:
+
+      * production_overlap_pct / canopy_overlap_pct / road_overlap_pct
+        -- present when NONZERO (a real overlap worth knowing about) and
+        present when NONE (never checked -- its own value, and the whole
+        point of the sentinel: it must never be confused with, or
+        coerced into, a measured 0.0). ABSENT at exactly 0.0: checked,
+        and genuinely none, which is nothing to caution anybody about.
+      * pinch_terminal, plus still_narrowing as its own row. THE
+        CREST-TO-CREST CAVEAT IS NOT A PANEL ROW and must not later be
+        smuggled in as prose: a pinch width is a crest-to-crest survey
+        measure that OVERSTATES dam length, and saying so takes a
+        sentence. It is REPORT and tooltip territory; the pinch WIDTH
+        itself is not on the panel at all (PANEL_EXCLUDED_KEYS), so the
+        panel never shows the number that would need the caveat.
+      * truncated_by_boundary / truncated_by_road / sparse_anchor /
+        below_min_area -- only when True.
+      * either_type_candidate -- when the cross-type finding fires,
+        VALUED WITH THE OTHER ZONE'S NAME (type plus per-type rank; see
+        zone_display_name), because "the other instrument agrees" is
+        useless without saying which zone agreed.
+      * confidence -- only when it is not high. High confidence is the
+        expected case and says nothing.
+      * soil_never_checked -- when soil_checked is false. STEP-LEVEL,
+        repeated per zone on purpose: with soil unchecked EVERY zone's
+        suitability includes a NEUTRAL soil score
+        (SOIL_UNAVAILABLE_SCORE), so the number on row 3 of this very
+        panel is partly unmeasured and the panel must say so beside it.
+
+    `zone_name_by_id` maps internal zone id -> zone_display_name(), built
+    once by the caller over all surviving zones (cross_type_overlaps
+    names zones by internal id, which is not a wire feature id and means
+    nothing to a reader).
+    """
+    rows = [
+        _panel_row("zone_acres", "area to survey", round(zone["zone_acres"], 1), "acres"),
+        _panel_row("survey_type", "survey type", zone["survey_type"]),
+        _panel_row("suitability", "suitability", zone["mean_suitability"]),
+        _panel_row("rank", "rank", zone["rank"]),
+    ]
+
+    primary = zone["primary_production_area_relationship"]
+    if primary is None:
+        rows.append(_panel_row("water_delivery", "water delivery", WATER_DELIVERY_NONE))
+    else:
+        rows.append(
+            _panel_row(
+                "water_delivery",
+                "water delivery",
+                WATER_DELIVERY_GRAVITY if primary["above_production_area"] else WATER_DELIVERY_PUMP,
+            )
+        )
+        rows.append(
+            _panel_row(
+                "water_delivery_differential",
+                "elevation above production area",
+                _feet(primary["elevation_differential_m"]),
+                "feet",
+            )
+        )
+        rows.append(
+            _panel_row(
+                "water_delivery_production_area",
+                "production area served",
+                primary["production_area_id"],
+            )
+        )
+
+    # The three overlaps: nonzero fires, None fires as its own value,
+    # exactly 0.0 is silence.
+    for key, label in (
+        ("production_overlap_pct", "on committed production ground"),
+        ("canopy_overlap_pct", "under tree canopy"),
+        ("road_overlap_pct", "removed by existing farm road"),
+    ):
+        value = zone[key]
+        if value is None or value != 0:
+            rows.append(_panel_row(key, label, value, "percent"))
+
+    if zone.get("pinch_terminal") is not None:
+        rows.append(_panel_row("pinch_terminal", "dam reach sits at", zone["pinch_terminal"]))
+    if zone.get("still_narrowing_at_termination"):
+        rows.append(_panel_row("still_narrowing", "valley still narrowing there", True))
+
+    for key, label in (
+        ("truncated_by_boundary", "cut by the parcel boundary"),
+        ("truncated_by_road", "cut by an existing farm road"),
+        ("sparse_anchor", "little of the claim is anchoring ground"),
+        ("below_min_area", "under the minimum area floor"),
+    ):
+        if zone.get(key):
+            rows.append(_panel_row(key, label, True))
+
+    either_type = [
+        zone_name_by_id.get(entry["zone_id"], f"zone {entry['zone_id']}")
+        for entry in zone["cross_type_overlaps"]
+        if entry["fraction"] >= CROSS_TYPE_OVERLAP_NOTE_FRACTION
+    ]
+    if either_type:
+        rows.append(_panel_row("either_type_candidate", "also a candidate as", ", ".join(either_type)))
+
+    if zone["confidence"] != CONFIDENCE_HIGH:
+        rows.append(_panel_row("confidence", "confidence", zone["confidence"]))
+
+    if not soil_checked:
+        rows.append(_panel_row("soil_never_checked", "soil never checked", True))
+
+    return rows
+
+
+def build_scales(result: dict) -> dict:
+    """
+    HOW TO READ EVERY NUMBER THE PANEL SHOWS -- production_area_ceiling's
+    `scales` block is the precedent, and the rule it encodes is that no
+    scored value crosses the wire without its scale. A "0.53" with no
+    range is not a measurement a reader can act on.
+
+    suitability carries min/max AND parcel_observed_max PER TYPE. The
+    theoretical range is 0.0-1.0, but the SOIL criterion's parcel range
+    caps the blend: on a parcel whose best soil scores 0.6, no cell can
+    reach 1.0 no matter how good its slope, catchment and wetness are.
+    Reading 0.53 against 1.0 says "barely half" when the honest reading
+    is "0.53 of an attainable 0.82". The observed max is the max of the
+    type's own gate-masked suitability surface -- the parcel's own
+    ceiling, measured, not assumed. (The reference run: 0.82 embankment
+    / 0.60 excavated.) It is per type because the two surfaces are kept
+    separate end to end and are never comparable on one scale.
+
+    rank carries the PER-TYPE COUNT, so "rank 2" renders as "2 of 3".
+    The count is per type for the same reason the rank is: each type is
+    ranked on its own instrument.
+
+    ANY SCORED VALUE THE PANEL LATER GAINS ARRIVES WITH ITS SCALE IN
+    THIS BLOCK. That is the contract, not a convention -- a number
+    without an entry here is a number the panel cannot honestly render.
+    """
+    surfaces = result["surfaces"]
+    return {
+        "suitability": {
+            "min": 0.0,
+            "max": 1.0,
+            "higher_is_better": True,
+            "parcel_observed_max": {
+                survey_type: round(float(np.max(surfaces[survey_type])), 4)
+                for survey_type in SURVEY_TYPES
+            },
+        },
+        "rank": {
+            survey_type: {"count": len(result["zones_by_type"][survey_type])}
+            for survey_type in SURVEY_TYPES
+        },
+        "overlap_pct": {"min": 0, "max": 100},
+        "boundary_adjacency_pct": {"min": 0, "max": 100},
+    }
+
+
 def build_narrative_data(result: dict) -> dict:
     """
     Pre-digested, FINAL, JSON-serializable narrative values -- imperial
@@ -3503,11 +4022,29 @@ def build_narrative_data(result: dict) -> dict:
     the cross-type either_type_candidate finding riding each block.
     twi_is_parcel_relative + twi_note surface the parcel-relative
     caveat so the report layer cannot overclaim wetness.
+
+    TWO BLOCKS EXIST FOR THE INTERACTIVE PANEL RATHER THAN THE REPORT,
+    and they are built here because they are readings OF these same
+    values and must not be assembled a second time downstream:
+
+      block['panel'] -- the server-curated, ordered {key, label, value,
+        unit} rows the map's zone tab renders (build_zone_panel()). A
+        SUBSET AND A REORDERING of what is already in this block, never
+        a second source: every panel value is read off the zone the
+        surrounding block was built from.
+      ['scales'] -- how to read every scored value the panel shows
+        (build_scales()), production_area_ceiling's `scales` passthrough
+        being the precedent.
     """
     surviving = result["zones"]
     dropped = result["dropped_zones"]
     selected = result["selected_water_zone"]
     stats = result["gate_mask_stats"]
+
+    # Built once over all survivors: cross_type_overlaps names zones by
+    # INTERNAL id, which means nothing to a reader, so the panel's
+    # either_type_candidate row resolves it to a name here.
+    zone_name_by_id = {zone["id"]: zone_display_name(zone) for zone in surviving}
 
     zone_blocks = []
     for zone in sorted(surviving, key=lambda z: (z["survey_type"], z["rank"])):
@@ -3597,6 +4134,13 @@ def build_narrative_data(result: dict) -> dict:
                     "baseline_length_ft": _feet(zone["baseline"]["length_m"]),
                     "truncated_by_boundary": zone["truncated_by_boundary"],
                     "half_width_bound_hit": zone["half_width_bound_hit"],
+                    # DUAL ACREAGE, the embankment edition: zone_acres
+                    # above is the DRAWN HULL; this is the watershed
+                    # band anchoring it. The report's sentence carries
+                    # both, and sparse_anchor rides beside them exactly
+                    # as it does on the excavated block.
+                    "compartment_footprint_acres": round(zone["compartment_footprint_acres"], 1),
+                    "sparse_anchor": zone["sparse_anchor"],
                 }
             )
         else:
@@ -3610,6 +4154,8 @@ def build_narrative_data(result: dict) -> dict:
                     "sparse_anchor": zone["sparse_anchor"],
                 }
             )
+        # THE PANEL, built last so it reads a finished block's own zone.
+        block["panel"] = build_zone_panel(zone, result["soil_checked"], zone_name_by_id)
         zone_blocks.append(block)
 
     seeds = result.get("embankment_seeds", [])
@@ -3639,6 +4185,10 @@ def build_narrative_data(result: dict) -> dict:
         ],
         "suitability_threshold": result["threshold"],
         "grouping_distance_meters": SURVEY_ZONE_GROUPING_DISTANCE_METERS,
+        # HOW TO READ EVERY SCORED VALUE THE PANEL SHOWS. Top level of
+        # this block, not inside a zone: a scale describes the
+        # instrument, not one reading of it.
+        "scales": build_scales(result),
         "twi_is_parcel_relative": True,
         "twi_note": TWI_PARCEL_RELATIVE_NOTE,
         "gates": {
@@ -3685,7 +4235,8 @@ def summarize_water_survey_areas(result: dict) -> str:
         if zone["survey_type"] == SURVEY_TYPE_EMBANKMENT:
             lines.append(
                 f"  - embankment rank {zone['rank']}: zone {zone['id']}, "
-                f"{zone['zone_acres']} ac valley compartment anchored by a "
+                f"{zone['zone_acres']} ac to survey anchored by a "
+                f"{zone['compartment_footprint_acres']} ac valley compartment and a "
                 f"{zone['seed_blend_score']}-scoring seed (pinch width {zone['pinch']['width_m']} m at "
                 f"{zone['pinch']['walk_distance_m']} m downstream), compartment mean "
                 f"{zone['mean_suitability']}, compartment criteria: {criteria_text}{flag_text}"
@@ -3700,8 +4251,9 @@ def summarize_water_survey_areas(result: dict) -> str:
     for zone in dropped:
         if zone["survey_type"] == SURVEY_TYPE_EMBANKMENT:
             lines.append(
-                f"  - DROPPED ({zone['drop_reason']}): embankment zone {zone['id']}, compartment "
-                f"{zone['zone_acres']} ac (seed blend {zone['seed_blend_score']})"
+                f"  - DROPPED ({zone['drop_reason']}): embankment zone {zone['id']}, hull "
+                f"{zone['zone_acres']} ac (anchored by {zone['compartment_footprint_acres']} ac of "
+                f"compartment, seed blend {zone['seed_blend_score']})"
             )
         else:
             lines.append(

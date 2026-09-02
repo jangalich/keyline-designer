@@ -1440,4 +1440,241 @@ assert "EVIDENCE INDICTS:" in indicts_finding, (
 assert "LARGEST REMAINING SHORTFALL" not in indicts_finding and "not a defect claim" not in indicts_finding
 print("Conditional FINDING: survivors -> LARGEST REMAINING SHORTFALL + not-a-defect line; zero survivors (16% plane) -> EVIDENCE INDICTS.")
 
+# ======================================================================
+# THE PANEL BLOCK AND THE SCALES (pre-merge change 3/4)
+# ======================================================================
+# build_zone_panel() is the SERVER-CURATED reading of one zone -- the
+# small ordered row set the interactive map's tab renders. Unit-tested
+# here on HAND-BUILT zone dicts because the assertions are about which
+# rows exist under which conditions, which needs a zone whose every
+# caution can be switched on and off one at a time. The payload wiring
+# (feature_id, scales at the top level, the assembler parity) is
+# asserted on the orchestrated session payload in test_water_step.py.
+
+_PANEL_SCALARS = (str, int, float, bool, type(None))
+
+
+def _panel_zone(**overrides):
+    """A surviving zone with EVERY caution silent -- the clean case. Each
+    test below switches exactly one thing on."""
+    zone = {
+        "id": 0,
+        "survey_type": SURVEY_TYPE_EXCAVATED,
+        "rank": 1,
+        "zone_acres": 1.2345,
+        "mean_suitability": 0.6123,
+        "confidence": wsa.CONFIDENCE_HIGH,
+        "primary_production_area_relationship": None,
+        "canopy_overlap_pct": 0.0,
+        "road_overlap_pct": 0.0,
+        "production_overlap_pct": 0.0,
+        "cross_type_overlaps": [],
+        "truncated_by_boundary": False,
+        "truncated_by_road": False,
+        "sparse_anchor": False,
+        "below_min_area": False,
+        "pinch_terminal": None,
+        "still_narrowing_at_termination": False,
+    }
+    zone.update(overrides)
+    return zone
+
+
+def _panel_keys(zone, soil_checked=True, names=None):
+    return [row["key"] for row in wsa.build_zone_panel(zone, soil_checked, names or {})]
+
+
+# --- the five always-rows, both types, in order ---
+for _type in (SURVEY_TYPE_EMBANKMENT, SURVEY_TYPE_EXCAVATED):
+    _clean = _panel_zone(survey_type=_type)
+    _rows = wsa.build_zone_panel(_clean, True, {})
+    assert [row["key"] for row in _rows] == list(wsa.PANEL_ALWAYS_ROWS), (
+        f"a zone with nothing wrong shows exactly the five always-rows: {[r['key'] for r in _rows]}"
+    )
+    _by_key = {row["key"]: row for row in _rows}
+    assert _by_key["zone_acres"]["value"] == 1.2, "acres to 1 dp"
+    assert _by_key["zone_acres"]["unit"] == "acres"
+    assert _by_key["survey_type"]["value"] == _type
+    assert _by_key["suitability"]["value"] == 0.6123 and _by_key["suitability"]["unit"] is None
+    assert _by_key["rank"]["value"] == 1
+    assert _by_key["water_delivery"]["value"] == wsa.WATER_DELIVERY_NONE, (
+        "no service relationship reports as ITS OWN VALUE -- never a fabricated 0 ft to nowhere"
+    )
+    for row in _rows:
+        assert set(row) == {"key", "label", "value", "unit"}, row
+        assert isinstance(row["value"], _PANEL_SCALARS), (
+            f"a panel value is a data point, never a structure: {row}"
+        )
+        # DATA POINTS ONLY -- no composed sentences, in a value or a label.
+        for text in (row["label"], row["value"] if isinstance(row["value"], str) else ""):
+            assert "." not in text and ";" not in text, f"prose has reached the panel: {row}"
+
+# --- water delivery: the three answers, and the two companions ---
+_gravity = _panel_zone(
+    primary_production_area_relationship={
+        "above_production_area": True,
+        "elevation_differential_m": 6.096,   # exactly 20.0 ft
+        "production_area_id": 3,
+    }
+)
+_gravity_rows = {row["key"]: row for row in wsa.build_zone_panel(_gravity, True, {})}
+assert _gravity_rows["water_delivery"]["value"] == wsa.WATER_DELIVERY_GRAVITY
+assert _gravity_rows["water_delivery_differential"]["value"] == 20.0, "IMPERIAL at this boundary"
+assert _gravity_rows["water_delivery_differential"]["unit"] == "feet"
+assert _gravity_rows["water_delivery_production_area"]["value"] == 3
+_pump = _panel_zone(
+    primary_production_area_relationship={
+        "above_production_area": False,
+        "elevation_differential_m": -3.048,
+        "production_area_id": 1,
+    }
+)
+assert {row["key"]: row["value"] for row in wsa.build_zone_panel(_pump, True, {})}[
+    "water_delivery"
+] == wsa.WATER_DELIVERY_PUMP
+assert "water_delivery_differential" not in _panel_keys(_panel_zone()), (
+    "with nothing in range the differential row is ABSENT, not 0.0 -- the fabricated-zero rule"
+)
+
+# --- the three overlaps: nonzero fires, 0.0 is silence, None is ITS OWN VALUE ---
+for _key in ("production_overlap_pct", "canopy_overlap_pct", "road_overlap_pct"):
+    assert _key not in _panel_keys(_panel_zone()), f"a genuine 0.0 {_key} is nothing to caution about"
+    _fired = wsa.build_zone_panel(_panel_zone(**{_key: 12.5}), True, {})
+    assert {row["key"]: row["value"] for row in _fired}[_key] == 12.5
+    _never = wsa.build_zone_panel(_panel_zone(**{_key: None}), True, {})
+    _never_by_key = {row["key"]: row for row in _never}
+    assert _key in _never_by_key, f"{_key} never checked is its own value, not an absence"
+    assert _never_by_key[_key]["value"] is None, (
+        f"{_key} came back {_never_by_key[_key]['value']!r} for a layer nobody looked at -- a "
+        f"coerced 0 would print as a measured 'no overlap'"
+    )
+    assert _never_by_key[_key]["value"] is not 0 and _never_by_key[_key]["value"] != 0
+
+# --- the terminal-pinch disclosure, and the four booleans ---
+_terminal = _panel_zone(
+    survey_type=SURVEY_TYPE_EMBANKMENT,
+    pinch_terminal="boundary",
+    still_narrowing_at_termination=True,
+)
+_terminal_rows = {row["key"]: row["value"] for row in wsa.build_zone_panel(_terminal, True, {})}
+assert _terminal_rows["pinch_terminal"] == "boundary"
+assert _terminal_rows["still_narrowing"] is True, "the disclosure is its own row"
+assert "pinch_terminal" not in _panel_keys(_panel_zone(survey_type=SURVEY_TYPE_EMBANKMENT))
+for _flag in ("truncated_by_boundary", "truncated_by_road", "sparse_anchor", "below_min_area"):
+    assert _flag not in _panel_keys(_panel_zone()), f"{_flag} False is silence"
+    assert _flag in _panel_keys(_panel_zone(**{_flag: True})), f"{_flag} True fires"
+
+# --- either_type_candidate NAMES the other zone; confidence only when not high ---
+_agreeing = _panel_zone(cross_type_overlaps=[{"zone_id": 7, "fraction": 0.61}, {"zone_id": 8, "fraction": 0.1}])
+_named = {row["key"]: row["value"] for row in wsa.build_zone_panel(_agreeing, True, {7: "embankment 2"})}
+assert _named["either_type_candidate"] == "embankment 2", (
+    "the finding names the zone that agreed -- by TYPE AND PER-TYPE RANK, because rank alone names two "
+    f"pieces of ground: {_named['either_type_candidate']!r}"
+)
+assert "either_type_candidate" not in _panel_keys(
+    _panel_zone(cross_type_overlaps=[{"zone_id": 8, "fraction": 0.1}])
+), "an overlap under the note fraction is not the finding"
+assert "confidence" not in _panel_keys(_panel_zone()), "high confidence says nothing"
+assert "confidence" in _panel_keys(_panel_zone(confidence=wsa.CONFIDENCE_LOW))
+
+# --- soil_never_checked: step-level, repeated per zone on purpose ---
+assert "soil_never_checked" not in _panel_keys(_panel_zone(), soil_checked=True)
+assert "soil_never_checked" in _panel_keys(_panel_zone(), soil_checked=False), (
+    "with soil unchecked the suitability on this very panel includes a neutral soil score, and the "
+    "panel must say so beside it"
+)
+
+# --- THE EXCLUDED FIELDS, asserted absent structurally ---
+# Every zone shape this module can produce, with every caution firing,
+# so the exclusion assertion is made against the LARGEST panel that
+# exists rather than the smallest.
+_maximal = [
+    wsa.build_zone_panel(
+        _panel_zone(
+            survey_type=_type,
+            confidence=wsa.CONFIDENCE_LOW,
+            canopy_overlap_pct=1.0, road_overlap_pct=None, production_overlap_pct=2.0,
+            truncated_by_boundary=True, truncated_by_road=True,
+            sparse_anchor=True, below_min_area=True,
+            pinch_terminal="road", still_narrowing_at_termination=True,
+            cross_type_overlaps=[{"zone_id": 7, "fraction": 0.9}],
+            primary_production_area_relationship={
+                "above_production_area": True,
+                "elevation_differential_m": 1.0,
+                "production_area_id": 2,
+            },
+        ),
+        False,
+        {7: "excavated 1"},
+    )
+    for _type in (SURVEY_TYPE_EMBANKMENT, SURVEY_TYPE_EXCAVATED)
+]
+_all_panel_keys = {row["key"] for panel in _maximal for row in panel}
+for _excluded in wsa.PANEL_EXCLUDED_KEYS:
+    assert _excluded not in _all_panel_keys, (
+        f"{_excluded} is on PANEL_EXCLUDED_KEYS and must not be a panel row -- the diagnostic view "
+        f"is the export, not the panel"
+    )
+# ... and at the SOURCE level, so a row added under a different key but
+# the same name cannot slip past the output check.
+_panel_builder_ast = ast.parse(inspect.getsource(wsa.build_zone_panel)).body[0]
+if (
+    isinstance(_panel_builder_ast.body[0], ast.Expr)
+    and isinstance(_panel_builder_ast.body[0].value, ast.Constant)
+):
+    _panel_builder_ast.body = _panel_builder_ast.body[1:]   # the docstring may NARRATE an exclusion
+_panel_source_strings = {
+    node.value
+    for node in ast.walk(_panel_builder_ast)
+    if isinstance(node, ast.Constant) and isinstance(node.value, str)
+}
+for _excluded in wsa.PANEL_EXCLUDED_KEYS:
+    assert _excluded not in _panel_source_strings, (
+        f"the panel builder's code names {_excluded!r} -- delete it from PANEL_EXCLUDED_KEYS first "
+        f"if it is genuinely wanted"
+    )
+
+# --- TYPE DISPATCH: no excavated vocabulary on an embankment panel ---
+_EXCAVATED_VOCABULARY = ("member", "anchor acres", "members")
+_embankment_panel = _maximal[0]
+for row in _embankment_panel:
+    for word in _EXCAVATED_VOCABULARY:
+        assert word not in row["key"], f"excavated vocabulary on an embankment panel: {row}"
+        assert word not in row["label"], f"excavated vocabulary on an embankment panel: {row}"
+# The two types' panels differ ONLY in the rows their own facts fire --
+# the shared rows are shared by construction, not by a duplicated list.
+assert {row["key"] for row in _maximal[1]} | {"pinch_terminal", "still_narrowing"} >= {
+    row["key"] for row in _embankment_panel
+}, "an embankment panel adds only its own instrument's disclosures"
+
+# --- THE SCALES, on a real synthetic result ---
+_scales = wsa.build_scales(flat_result)
+assert set(_scales) == {"suitability", "rank", "overlap_pct", "boundary_adjacency_pct"}
+assert _scales["suitability"]["min"] == 0.0 and _scales["suitability"]["max"] == 1.0
+assert _scales["suitability"]["higher_is_better"] is True
+for _type in wsa.SURVEY_TYPES:
+    assert _scales["suitability"]["parcel_observed_max"][_type] == round(
+        float(np.max(flat_result["surfaces"][_type])), 4
+    ), "the observed ceiling IS the type's own surface maximum -- measured, not assumed"
+    assert _scales["rank"][_type]["count"] == len(flat_result["zones_by_type"][_type]), (
+        "the rank scale's denominator is the per-type surviving count"
+    )
+assert _scales["overlap_pct"] == {"min": 0, "max": 100}
+assert _scales["boundary_adjacency_pct"] == {"min": 0, "max": 100}
+
+# --- narrative_data carries both, JSON-native ---
+_narrative = build_narrative_data(flat_result)
+assert _narrative["scales"] == _scales
+for _block in _narrative["zones"]:
+    assert [row["key"] for row in _block["panel"]][:5] == list(wsa.PANEL_ALWAYS_ROWS)
+json.dumps(_narrative)
+print(
+    f"Panel: five always-rows on both types in order, {len(wsa.PANEL_EXCLUDED_KEYS)} excluded keys "
+    f"absent from the widest panel AND from the builder's source, no excavated vocabulary on an "
+    f"embankment panel, every caution silent on a clean zone and firing when it fires, and a "
+    f"never-checked overlap on the wire as null rather than 0. Scales: observed ceilings "
+    f"{_scales['suitability']['parcel_observed_max']} match the surface maxima; rank counts match "
+    f"the per-type survivor counts."
+)
+
 print("\nAll water_survey_areas checks passed.")

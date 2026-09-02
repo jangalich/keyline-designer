@@ -93,6 +93,10 @@ import session_cache
 import session_manager
 import step_registry
 from design_document import mark_step_generated
+# The two ENVELOPE layer names, from the module that mints them -- never
+# re-typed here (build_water_payload()'s feature_id lookup filters on them,
+# and "starts with survey_zone_" is true of the member layers too).
+from wire_translation import LAYER_SURVEY_ZONES
 
 
 class StepOrchestrationError(Exception):
@@ -873,7 +877,12 @@ def build_water_payload(result: dict, assembled: dict) -> dict:
         by its own docstring as the full measurement contract every feature
         carries, and already on every feature of the result's zones_geojson.
       STEP-LEVEL -> water_survey_areas.build_narrative_data(), already
-        computed by the entry point and carried on the result.
+        computed by the entry point and carried on the result -- including
+        the per-zone `panel` rows and the step's `scales` block, both built
+        there beside the values they read (see build_zone_panel() /
+        build_scales()). NEITHER IS ASSEMBLED HERE. A panel row list built
+        in a payload function would be a second editorial decision about the
+        same measurements, in a file that cannot see them.
 
     WHERE IT DIFFERS FROM THE PRODUCTION ASSEMBLER, and why the difference is
     the pipeline's rather than this function's: production's map geometry is
@@ -904,6 +913,22 @@ def build_water_payload(result: dict, assembled: dict) -> dict:
         entry point built them. The frontend styles on survey_type, which is
         carried both as a property and as the layer name.
 
+    THE ONE THING THIS FUNCTION ADDS: `feature_id` ON EVERY TABULAR ROW,
+    CARRIED FROM THE FEATURE AND NEVER REBUILT. This is production_zone_
+    payload.assemble_production_zone_payload()'s documented precedent,
+    applied to the step with the same split. `zones` (the narrative digest)
+    is keyed by the INTERNAL zone id; the map, the tabs and the commit body
+    all key on the WIRE feature id that water_survey_zones_to_feature_
+    collection() minted. A panel row that reconstructed that id with a
+    format string -- `f"water-survey-zone-{row['id']}"` -- would be one
+    identity with two sources of truth joined by a template nothing checks:
+    rename the prefix and selection stops matching, silently, with no error
+    anywhere. So the id is LOOKED UP off the features themselves, and the
+    bare `id` stays alongside it because the digest's own consumers key on
+    it. The lookup reads only the two ENVELOPE layers -- a member feature
+    carries no zone_id of its own kind and a dropped zone is not in this
+    collection at all.
+
     `assembled` is the orchestrator's consumes dict. Unread here -- every
     value this payload needs is on `result` -- and taken anyway because the
     payload signature is the registry's, not this step's. The landform
@@ -911,24 +936,45 @@ def build_water_payload(result: dict, assembled: dict) -> dict:
     folded its inputs into the result.
     """
     narrative = result["narrative_data"]
+
+    # THE WIRE FEATURE ID, CARRIED RATHER THAN REBUILT -- see this
+    # function's own note. Keyed by the internal zone_id the feature
+    # properties carry, which is the id the narrative digest's rows use.
+    feature_id_by_zone_id = {
+        feature["properties"]["zone_id"]: feature["id"]
+        for feature in result["zones_geojson"]["features"]
+        if feature["properties"]["layer"] in LAYER_SURVEY_ZONES
+    }
+
     return {
         # The proposals. Named by the water entry's proposal_collection, which
         # is what the reopen restore matches committed ids against.
         "survey_zones": result["zones_geojson"],
         # The tabular half, as `zones` is for landform: build_narrative_data()
         # has already reduced every surviving zone to the imperial,
-        # JSON-native block a panel row needs (dual acreage, the criterion
+        # JSON-native block the report reads (dual acreage, the criterion
         # means, the three overlaps with their sentinels intact, the gravity
-        # block, the cross-type finding).
-        "zones": narrative["zones"],
+        # block, the cross-type finding) AND the curated `panel` rows the
+        # map's zone tab renders -- a subset and a reordering of the same
+        # block, never a second source. Only `feature_id` is added here.
+        "zones": [
+            {**row, "feature_id": feature_id_by_zone_id[row["id"]]}
+            for row in narrative["zones"]
+        ],
         # THE STEP-LEVEL BLOCK, whole. Counts per type, the dropped count, the
         # gate accounting, the threshold and grouping distance the zones were
         # produced under, the parcel-relative TWI caveat, and soil_checked.
         # Passed as one object rather than spread into the payload's top level
         # so the panel reads the same block the report does.
         "summary": {
-            key: value for key, value in narrative.items() if key != "zones"
+            key: value for key, value in narrative.items() if key not in ("zones", "scales")
         },
+        # HOW TO READ EVERY SCORED VALUE IN A PANEL ROW, at the payload's
+        # top level exactly where the production payload puts its own --
+        # a scale describes the instrument, not one step's summary of it,
+        # and a panel that renders a number without its scale is showing a
+        # figure nobody can act on.
+        "scales": narrative["scales"],
         # NO SEPARATE gate_mask_stats KEY. The result carries one
         # (compute_water_survey_areas()'s own), and it is numpy and shapely
         # -- not JSON-serializable, by that function's own statement. What
