@@ -1212,9 +1212,11 @@ def summarize_twi_calibration(runs: list) -> str:
                 f"{float(np.mean(scored_fixed == 1.0)) * 100:.1f}% at 1.0"
             )
     lines.append(
-        "  THE FLOORING NUMBER TO WATCH is the '% at 0.0' pair on the GATED row: the retired fixed "
-        "curve read ~66% of this property's gated cells at exactly 0.0, which is what made TWI a "
-        "constant subtraction rather than a criterion."
+        "  THE FLOORING NUMBER TO WATCH is the '% at 0.0' pair on the GATED row. RECORDED FOR "
+        "COMPARISON, from the reference property under the retired fixed pair: ~66% of its gated "
+        "cells scored exactly 0.0 (median raw TWI 5.44 against a floor of 6.0), which is what made "
+        "TWI a constant subtraction there rather than a criterion. Whatever this run prints is "
+        "THIS property's number, not that one."
     )
     return "\n".join(lines)
 
