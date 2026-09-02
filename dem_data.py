@@ -95,6 +95,66 @@ def _boundary_bbox_wgs84(
     return min(lons), min(lats), max(lons), max(lats)
 
 
+def dem_window_bounds(
+    boundary_coordinates: list[tuple[float, float]],
+    resolution_meters: float = DEFAULT_RESOLUTION_METERS,
+    buffer_meters: float = DEFAULT_BUFFER_METERS,
+) -> dict:
+    """
+    THE WINDOW GEOMETRY, WITHOUT THE FETCH: everything
+    get_dem_for_boundary() computes before it touches the network — the
+    UTM zone, the buffered bbox, the (clamped) grid size and the actual
+    pixel size. get_dem_for_boundary() calls this and then requests
+    exactly this window, so the two can never disagree.
+
+    Extracted so a caller can ask "what window WOULD this boundary
+    fetch?" without fetching one. diagnose_water_survey_areas.py needs
+    exactly that: it runs two boundaries over ONE shared DEM (so the
+    per-criterion deltas are attributable to the boundary rather than to
+    a different raster), and still has to report what each boundary's
+    own window would have been, because the TWI curve is now referenced
+    to that window. Pure arithmetic and one coordinate transform — no
+    request, no contract change, and the returned dict is deliberately
+    NOT the DEM dict (no 'array', no 'origin_*'; it is the request
+    geometry, not a raster).
+
+    Returns:
+        {'crs', 'epsg', 'bbox': (min_x, min_y, max_x, max_y),
+         'size': (width, height), 'resolution_meters': (px, py)}
+    """
+    min_lon, min_lat, max_lon, max_lat = _boundary_bbox_wgs84(boundary_coordinates)
+    center_lon = (min_lon + max_lon) / 2
+    center_lat = (min_lat + max_lat) / 2
+
+    epsg = _utm_epsg_for_lonlat(center_lon, center_lat)
+    dst_crs = f"EPSG:{epsg}"
+
+    # Project just the bbox corners to UTM meters, to size the request grid
+    # and apply the buffer in real ground distance rather than degrees.
+    xs, ys = warp_transform(
+        "EPSG:4326", dst_crs, [min_lon, max_lon], [min_lat, max_lat]
+    )
+    min_x, max_x = min(xs) - buffer_meters, max(xs) + buffer_meters
+    min_y, max_y = min(ys) - buffer_meters, max(ys) + buffer_meters
+
+    width = max(2, min(MAX_GRID_DIMENSION, round((max_x - min_x) / resolution_meters)))
+    height = max(2, min(MAX_GRID_DIMENSION, round((max_y - min_y) / resolution_meters)))
+
+    # Actual pixel size given the (possibly clamped) integer grid size —
+    # kept separate from the requested resolution_meters so downstream
+    # distance/gradient math uses what the grid really is, not what was asked for.
+    pixel_size_x = (max_x - min_x) / width
+    pixel_size_y = (max_y - min_y) / height
+
+    return {
+        "crs": dst_crs,
+        "epsg": epsg,
+        "bbox": (min_x, min_y, max_x, max_y),
+        "size": (width, height),
+        "resolution_meters": (pixel_size_x, pixel_size_y),
+    }
+
+
 def get_dem_for_boundary(
     boundary_coordinates: list[tuple[float, float]],
     resolution_meters: float = DEFAULT_RESOLUTION_METERS,
@@ -126,29 +186,12 @@ def get_dem_for_boundary(
     synthetic DEM and no rasterio/network dependency at all. Only this
     module talks to rasterio and the network.
     """
-    min_lon, min_lat, max_lon, max_lat = _boundary_bbox_wgs84(boundary_coordinates)
-    center_lon = (min_lon + max_lon) / 2
-    center_lat = (min_lat + max_lat) / 2
-
-    epsg = _utm_epsg_for_lonlat(center_lon, center_lat)
-    dst_crs = f"EPSG:{epsg}"
-
-    # Project just the bbox corners to UTM meters, to size the request grid
-    # and apply the buffer in real ground distance rather than degrees.
-    xs, ys = warp_transform(
-        "EPSG:4326", dst_crs, [min_lon, max_lon], [min_lat, max_lat]
-    )
-    min_x, max_x = min(xs) - buffer_meters, max(xs) + buffer_meters
-    min_y, max_y = min(ys) - buffer_meters, max(ys) + buffer_meters
-
-    width = max(2, min(MAX_GRID_DIMENSION, round((max_x - min_x) / resolution_meters)))
-    height = max(2, min(MAX_GRID_DIMENSION, round((max_y - min_y) / resolution_meters)))
-
-    # Actual pixel size given the (possibly clamped) integer grid size —
-    # kept separate from the requested resolution_meters so downstream
-    # distance/gradient math uses what the grid really is, not what was asked for.
-    pixel_size_x = (max_x - min_x) / width
-    pixel_size_y = (max_y - min_y) / height
+    window = dem_window_bounds(boundary_coordinates, resolution_meters, buffer_meters)
+    epsg = window["epsg"]
+    dst_crs = window["crs"]
+    min_x, min_y, max_x, max_y = window["bbox"]
+    width, height = window["size"]
+    pixel_size_x, pixel_size_y = window["resolution_meters"]
 
     params = {
         "bbox": f"{min_x},{min_y},{max_x},{max_y}",

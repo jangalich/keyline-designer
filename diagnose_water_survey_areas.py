@@ -95,16 +95,25 @@ boundary-dependent scoring -- see the BOUNDARY-STABILITY INSTRUMENT
 header further down) run the whole water step against TWO boundaries
 over ONE DEM and print:
 
-    TWI CALIBRATION -- the raw ln(a/tan(beta)) distribution over gated
-        cells under each boundary, plus the per-percentile AGREEMENT
-        between them. This is where TWI_SCORE_MIN_BREAKPOINT and
-        TWI_SCORE_FULL_CREDIT_BREAKPOINT are calibrated from, and
-        calibrating from the agreeing percentiles is what keeps the
-        calibration itself boundary-independent.
-    TWI SCORING: RETIRED PERCENTILE vs ABSOLUTE CURVE -- both scorings
-        over the same cells, including the per-cell |score change|
-        between the two boundaries under each. The absolute column must
-        read 0.0000; the percentile column is the bug, measured.
+    TWI CALIBRATION -- the REFERENCE WINDOW each boundary scored
+        against, its raw ln(a/tan(beta)) distribution, and the two
+        breakpoints derived from it, beside the distribution over GATED
+        cells (context only -- no breakpoint is read from the gate).
+        There are no hardcoded breakpoints left to calibrate; what this
+        section now tunes is the two PERCENTILE choices, and it prints
+        the flooring share on both the live and the retired fixed curve
+        so the change is readable.
+    REFERENCE WINDOW SNAP -- what window each boundary would fetch on
+        its OWN (computed, not fetched, via dem_data.
+        dem_window_bounds()), what that window snaps to, and whether
+        both boundaries land on the same snapped rectangle. This is the
+        section that shows the quantization doing its job; the shared-DEM
+        sections cannot, because they only ever have one window.
+    TWI SCORING: TWO RETIRED CURVES vs THE LIVE ONE -- the retired
+        parcel-relative percentile, the retired fixed 6.0/10.0 pair, and
+        the live window-referenced curve over the same cells, including
+        the per-cell |score change| between the two boundaries under
+        each. Every column prints its MEASURED value; none is asserted.
     TWI INDEPENDENT-SIGNAL REPORT -- correlations of the TWI score
         against the criteria it may be re-voting, the clearing share
         with and without TWI's contribution, and every surviving seed's
@@ -112,8 +121,9 @@ over ONE DEM and print:
         branch, deliberately (seeding is the blend's argmax, so a weight
         change would confound the before/after).
     BOUNDARY STABILITY -- which zones survive both boundaries, which
-        appear under only one, and the per-criterion blend delta on
-        every matched pair.
+        appear under only one, the per-criterion blend delta on every
+        matched pair, and the per-cell TWI score delta with each
+        boundary's reference window printed beside it.
 
 Run:  python diagnose_water_survey_areas.py   (networked -- fetches DEM,
 production areas, canopy, roads, soil)
@@ -132,6 +142,7 @@ production areas, canopy, roads, soil)
 
 import argparse
 import json
+import math
 
 import numpy as np
 from shapely.geometry import MultiPolygon, Polygon
@@ -139,7 +150,7 @@ from shapely.ops import unary_union
 
 import contourpy
 
-from dem_data import get_dem_for_boundary
+from dem_data import dem_window_bounds, get_dem_for_boundary
 from feature_schema import CONFIDENCE_LOW, make_feature, make_feature_collection, validate_feature_collection
 from production_area_ceiling import identify_optimized_production_areas
 from raster_grid import cell_area_acres, connected_components, pixel_center_xy
@@ -153,12 +164,19 @@ from water_survey_areas import (
     EMBANKMENT_WEIGHTS,
     EXCAVATED_WEIGHTS,
     MIN_SURVEY_REGION_AREA_ACRES,
+    # RETIRED from every scoring path (see the constants' own note).
+    # Imported HERE, and only here, so the before/after can score the
+    # same cells on the fixed curve the window-referenced one replaced.
+    RETIRED_FIXED_TWI_FULL_CREDIT_BREAKPOINT,
+    RETIRED_FIXED_TWI_MIN_BREAKPOINT,
     SEED_STATUS_COMPARTMENT,
     SURVEY_TYPE_EMBANKMENT,
     SURVEY_TYPE_EXCAVATED,
     SURVEY_TYPES,
-    TWI_SCORE_FULL_CREDIT_BREAKPOINT,
-    TWI_SCORE_MIN_BREAKPOINT,
+    TWI_REFERENCE_WINDOW_SNAP_METERS,
+    TWI_REPORTED_WINDOW_PERCENTILES,
+    TWI_WINDOW_FLOOR_PERCENTILE,
+    TWI_WINDOW_FULL_CREDIT_PERCENTILE,
     WATER_REGION_CONNECTIVITY,
     WETNESS_TWI_SUBWEIGHT,
     ZONE_STATUS_DROPPED,
@@ -1094,95 +1112,221 @@ def _spearman(x: np.ndarray, y: np.ndarray) -> float:
 
 def summarize_twi_calibration(runs: list) -> str:
     """
-    THE CALIBRATION INSTRUMENT for TWI_SCORE_MIN_BREAKPOINT and
-    TWI_SCORE_FULL_CREDIT_BREAKPOINT: the RAW TWI distribution (min,
-    percentiles, max) over GATED cells, printed under EVERY boundary in
-    the run.
+    THE CURVE, READ OFF THE RUN: the reference window each boundary
+    scored against, the raw-TWI distribution over that window, and the
+    two breakpoints derived from it -- beside the distribution over
+    GATED cells, which is what the curve is NOT referenced to.
 
-    WHY BOTH BOUNDARIES, AND WHY THAT IS THE POINT. The breakpoints are
-    absolute, so they are a calibration -- and a calibration read off one
-    boundary's cell population would smuggle boundary-dependence back in
-    through the constants' own values, which is the same bug wearing a
-    different hat. Choosing them from where the two distributions AGREE
-    makes the calibration itself boundary-independent by construction.
-    The AGREEMENT lines below do that arithmetic: per percentile, the two
-    boundaries' raw-TWI values and the gap between them. A percentile
-    whose gap is small is describing the same ground under both drawings
-    and is safe to calibrate from; a percentile whose gap is large is
-    describing the cells one boundary has and the other does not.
+    WHY BOTH DISTRIBUTIONS, AND WHY THAT IS THE POINT. The breakpoints
+    are percentiles of the WINDOW. Printing the gated distribution
+    alongside is the check that the two populations genuinely differ:
+    if the gated cells are drier than the window (they usually are -- a
+    parcel is a subset of its landscape and the ceiling gate removes the
+    wettest, highest-catchment ground), then a curve read off the GATE
+    would sit lower and every parcel would flatter itself. The gap
+    between the two columns is the size of the mistake not being made.
 
-    THE VALUES ARE RESOLUTION-DEPENDENT (see the constants). This prints
-    the reference DEM's resolution beside the distribution so a run
-    against another elevation source cannot be mistaken for a
-    recalibration of the same curve.
+    WHAT THIS SECTION REPLACED. It used to be the calibration instrument
+    for two HARDCODED breakpoints, printing the gated distribution under
+    both boundaries so a human could read constants off where the two
+    agreed. There are no constants to read off any more: the percentiles
+    ARE the calibration and the run derives the values itself. The
+    percentile CHOICES (TWI_WINDOW_FLOOR_PERCENTILE /
+    TWI_WINDOW_FULL_CREDIT_PERCENTILE) are still v1 priors, and the
+    distribution printed here is still what they get tuned against --
+    but tuning them now moves a curve on every property at once instead
+    of fitting one.
     """
-    percentiles = (0, 1, 5, 10, 25, 50, 75, 90, 95, 99, 100)
+    percentiles = TWI_REPORTED_WINDOW_PERCENTILES
     lines = [
-        "=== TWI CALIBRATION: RAW ln(a/tan(beta)) OVER GATED CELLS ===",
-        f"  current curve: 0.0 at/below {TWI_SCORE_MIN_BREAKPOINT}, ramp, "
-        f"1.0 at/above {TWI_SCORE_FULL_CREDIT_BREAKPOINT}",
+        "=== TWI CALIBRATION: THE WINDOW-REFERENCED CURVE, DERIVED PER RUN ===",
+        f"  curve rule: 0.0 at the window's p{TWI_WINDOW_FLOOR_PERCENTILE:g} raw TWI, linear ramp, "
+        f"1.0 at its p{TWI_WINDOW_FULL_CREDIT_PERCENTILE:g}"
+        f"  (retired fixed pair, for scale: {RETIRED_FIXED_TWI_MIN_BREAKPOINT} / "
+        f"{RETIRED_FIXED_TWI_FULL_CREDIT_BREAKPOINT})",
     ]
-    distributions = {}
     for label, identify_result, _boundary in runs:
         result = identify_result["result"]
-        gate_mask = result["gate_mask"]
-        raw = result["screens"]["twi_raw"][gate_mask]
-        raw = raw[~np.isnan(raw)]
+        breakpoints = result["twi_breakpoints"]
+        reference = result["twi_reference_window"]
+        raw_grid = result["screens"]["twi_raw"]
         dem_res = identify_result.get("_dem_resolution_meters")
-        if raw.size == 0:
-            lines.append(f"  {label}: (no gated cells with measured TWI)")
-            continue
-        distributions[label] = np.percentile(raw, percentiles)
+
+        min_x, min_y, max_x, max_y = reference["bounds"]
         lines.append(
-            f"  {label}: {raw.size} gated cells with measured TWI"
+            f"  {label}: reference window {max_x - min_x:.0f} x {max_y - min_y:.0f} m "
+            f"({reference['cell_count']} cells, {breakpoints['measured_cell_count']} with measured "
+            f"TWI), snapped to {reference['snap_meters']:.0f} m: {reference['snapped']}"
             + (f", DEM resolution {dem_res} m" if dem_res else "")
         )
-        lines.append("    pctile " + "".join(f"{q:>8}" for q in percentiles))
-        lines.append("    raw    " + "".join(f"{v:>8.2f}" for v in distributions[label]))
-        scored = twi_score(raw)
+        if reference["fallback_reason"]:
+            lines.append(f"    SNAP DID NOT APPLY -- {reference['fallback_reason']}")
+        if breakpoints["floor"] is None:
+            lines.append("    (no measured TWI in the reference window -- no curve exists this run)")
+            continue
+
+        window_values = [breakpoints["percentiles"][f"p{q:g}"] for q in percentiles]
+        lines.append("    pctile " + "".join(f"{q:>8g}" for q in percentiles))
+        lines.append("    WINDOW " + "".join(f"{v:>8.2f}" for v in window_values))
+
+        gated_raw = raw_grid[result["gate_mask"]]
+        gated_raw = gated_raw[~np.isnan(gated_raw)]
+        if gated_raw.size:
+            gated_values = np.percentile(gated_raw, percentiles)
+            lines.append("    gated  " + "".join(f"{v:>8.2f}" for v in gated_values))
+            lines.append(
+                f"    ({gated_raw.size} gated cells, against {breakpoints['measured_cell_count']} "
+                "measured cells in the reference window -- the two populations OVERLAP but neither "
+                "contains the other, since the boundary can reach outside the snapped rectangle. "
+                "The gated row is CONTEXT ONLY; no breakpoint is read from it)"
+            )
+        else:
+            lines.append("    gated  (no gated cells with measured TWI)")
+
         lines.append(
-            f"    scored on the current curve: mean {float(np.mean(scored)):.3f}; "
-            f"{float(np.mean(scored == 0.0)) * 100:.1f}% at 0.0 (floor), "
-            f"{float(np.mean(scored == 1.0)) * 100:.1f}% at 1.0 (full credit)"
+            f"    DERIVED CURVE: floor {breakpoints['floor']:.3f} (p"
+            f"{breakpoints['floor_percentile']:g}), full credit {breakpoints['full_credit']:.3f} "
+            f"(p{breakpoints['full_credit_percentile']:g}), ramp width "
+            f"{breakpoints['full_credit'] - breakpoints['floor']:.3f}"
+            + (f"   [FALLBACK CURVE: {breakpoints['curve_fallback']} -- the two percentiles tied "
+               "on this window; see twi_window_breakpoints()]"
+               if breakpoints["curve_fallback"] else "")
+        )
+        for population, values in (("window", None), ("gated", gated_raw)):
+            source = raw_grid[result["twi_reference_window"]["mask"]] if population == "window" else values
+            if source is None or source.size == 0:
+                continue
+            source = source[~np.isnan(source)]
+            if source.size == 0:
+                continue
+            scored_now = twi_score(source, breakpoints["floor"], breakpoints["full_credit"])
+            scored_fixed = twi_score(
+                source, RETIRED_FIXED_TWI_MIN_BREAKPOINT, RETIRED_FIXED_TWI_FULL_CREDIT_BREAKPOINT
+            )
+            lines.append(
+                f"    scored over {population:<6} cells -- window-referenced: mean "
+                f"{float(np.mean(scored_now)):.3f}, {float(np.mean(scored_now == 0.0)) * 100:.1f}% "
+                f"at 0.0, {float(np.mean(scored_now == 1.0)) * 100:.1f}% at 1.0   |   retired "
+                f"fixed curve: mean {float(np.mean(scored_fixed)):.3f}, "
+                f"{float(np.mean(scored_fixed == 0.0)) * 100:.1f}% at 0.0, "
+                f"{float(np.mean(scored_fixed == 1.0)) * 100:.1f}% at 1.0"
+            )
+    lines.append(
+        "  THE FLOORING NUMBER TO WATCH is the '% at 0.0' pair on the GATED row. RECORDED FOR "
+        "COMPARISON, from the reference property under the retired fixed pair: ~66% of its gated "
+        "cells scored exactly 0.0 (median raw TWI 5.44 against a floor of 6.0), which is what made "
+        "TWI a constant subtraction there rather than a criterion. Whatever this run prints is "
+        "THIS property's number, not that one."
+    )
+    return "\n".join(lines)
+
+
+def summarize_reference_window_snap(runs: list) -> str:
+    """
+    THE QUANTIZATION, MEASURED: what window each boundary WOULD fetch on
+    its own, what that window snaps to, and whether the two boundaries
+    land on the same snapped rectangle.
+
+    WHY IT IS COMPUTED AND NOT FETCHED. The stability run deliberately
+    shares ONE DEM over the union of both boundaries (see
+    summarize_boundary_stability()), so both runs necessarily reference
+    the identical window and the per-cell delta below is exactly 0. That
+    is the right instrument for "does the boundary move a score", but it
+    cannot show the snap doing its job, because there is only one window
+    in play. So this section derives each boundary's OWN window
+    arithmetically -- dem_data.dem_window_bounds() is the same code path
+    get_dem_for_boundary() uses to size its request, with the request
+    removed -- and reports whether a real re-fetch under each boundary
+    would have produced the same reference rectangle.
+
+    HOW TO READ IT. `same snapped window: True` means a production run
+    under either boundary scores every shared cell identically -- the
+    snap held, and the quantization did what it exists for. `False`
+    means the edit crossed a snap line: the two runs reference different
+    populations and shared cells will differ by a small amount. Both
+    outcomes are informative; neither is asserted away.
+    """
+    lines = ["=== REFERENCE WINDOW SNAP: WHAT EACH BOUNDARY WOULD FETCH ON ITS OWN ==="]
+    lines.append(
+        f"  snap grid: {TWI_REFERENCE_WINDOW_SNAP_METERS:.0f} m in the DEM's CRS, applied INWARD to "
+        "the fetched extent (the fetch itself is NOT snapped -- see twi_reference_window())"
+    )
+    snapped_bounds = {}
+    for label, identify_result, boundary in runs:
+        if boundary is None:
+            # A synthetic run supplies its raster directly and has no
+            # lon/lat boundary to size a fetch from. Report the window
+            # the run ACTUALLY referenced instead of inventing one, and
+            # say which of the two this line is.
+            reference = tuple(identify_result["result"]["twi_reference_window"]["bounds"])
+            snapped_bounds[label] = reference
+            lines.append(
+                f"  {label}: no lon/lat boundary in this run (a supplied raster) -- reporting the "
+                "reference window the run actually used, not a derived would-be fetch"
+            )
+        else:
+            window = dem_window_bounds(boundary)
+            min_x, min_y, max_x, max_y = window["bbox"]
+            snap = TWI_REFERENCE_WINDOW_SNAP_METERS
+            reference = (
+                math.ceil(min_x / snap) * snap,
+                math.ceil(min_y / snap) * snap,
+                math.floor(max_x / snap) * snap,
+                math.floor(max_y / snap) * snap,
+            )
+            snapped_bounds[label] = reference
+            lines.append(
+                f"  {label}: would fetch {window['size'][0]}x{window['size'][1]} cells, "
+                f"x {min_x:.1f}..{max_x:.1f} ({max_x - min_x:.1f} m), "
+                f"y {min_y:.1f}..{max_y:.1f} ({max_y - min_y:.1f} m)"
+            )
+        lines.append(
+            f"    -> snapped reference window x {reference[0]:.0f}..{reference[2]:.0f} "
+            f"({reference[2] - reference[0]:.0f} m), y {reference[1]:.0f}..{reference[3]:.0f} "
+            f"({reference[3] - reference[1]:.0f} m)"
         )
 
-    if len(distributions) >= 2:
-        (label_a, dist_a), (label_b, dist_b) = list(distributions.items())[:2]
-        lines.append(f"  AGREEMENT between '{label_a}' and '{label_b}' (|difference| in raw TWI):")
-        lines.append("    pctile " + "".join(f"{q:>8}" for q in percentiles))
-        lines.append("    gap    " + "".join(f"{abs(a - b):>8.2f}" for a, b in zip(dist_a, dist_b)))
+    if len(snapped_bounds) >= 2:
+        (label_a, bounds_a), (label_b, bounds_b) = list(snapped_bounds.items())[:2]
+        same = bounds_a == bounds_b
         lines.append(
-            "    CALIBRATE FROM THE SMALL-GAP PERCENTILES: those describe the same ground under "
-            "both drawings. A large gap is the cells one boundary has and the other does not, and "
-            "a breakpoint read off one would be boundary-dependent by another route."
+            f"  SAME SNAPPED WINDOW for '{label_a}' and '{label_b}': {same}"
+            + (
+                "   -- a real re-fetch under either boundary references the identical population, "
+                "so every shared cell scores identically"
+                if same
+                else "   -- this edit crossed a snap line: a real re-fetch under each boundary "
+                "references different populations, and shared cells move by a small amount. The "
+                "snap bounds how far apart two windows can be, it does not abolish the difference."
+            )
         )
     else:
-        lines.append(
-            "  ONLY ONE BOUNDARY IN THIS RUN -- the agreement lines need two. The calibration this "
-            "instrument exists for is not complete from a single-boundary run: pass --boundary, or "
-            "run the default two-boundary comparison."
-        )
+        lines.append("  ONLY ONE BOUNDARY IN THIS RUN -- the snap comparison needs two.")
     return "\n".join(lines)
 
 
 def summarize_twi_scoring_comparison(runs: list) -> str:
     """
-    THE BEFORE/AFTER: for every boundary in the run, the RETIRED
-    parcel-relative percentile scores and the new absolute scores over
-    the same cells, so this branch's effect is MEASURED rather than
-    asserted.
+    THE THREE CURVES, ON THE SAME CELLS: the RETIRED parcel-relative
+    percentile, the RETIRED fixed 6.0/10.0 pair, and the LIVE
+    window-referenced curve -- so two branches' worth of change is
+    measured rather than asserted.
 
-    parcel_relative_percentile() is imported here and nowhere else on any
-    scoring path (AST-asserted in test_water_survey_areas.py). The
-    percentile population is rebuilt exactly as the retired code built it
-    -- ON-PARCEL cells, not just gated ones, since the ceiling gate
+    parcel_relative_percentile() is imported here and nowhere else on
+    any scoring path (AST-asserted in test_water_survey_areas.py). The
+    percentile population is rebuilt exactly as the retired code built
+    it -- ON-PARCEL cells, not just gated ones, since the ceiling gate
     removed cells from play but not from the parcel.
 
-    THE DECISIVE LINE is the cross-boundary one: the SAME cell's absolute
-    score under two boundaries (identical by construction) beside its
-    percentile score under the same two (which is what moved).
+    THE DECISIVE LINE is the cross-boundary one: the SAME cell's score
+    under two boundaries, on each curve. IT PRINTS THE ACTUAL NUMBER.
+    Under window referencing over one shared DEM the live column is
+    exactly 0.0000 because the reference window is a property of that
+    raster; if it ever is not, the number says so rather than an
+    assertion hiding it. What a real re-fetch under each boundary would
+    do is a different question, answered by the snap section above.
     """
-    lines = ["=== TWI SCORING: RETIRED PERCENTILE vs ABSOLUTE CURVE ==="]
+    lines = ["=== TWI SCORING: TWO RETIRED CURVES vs THE LIVE WINDOW-REFERENCED ONE ==="]
     per_boundary = {}
     for label, identify_result, _boundary in runs:
         result = identify_result["result"]
@@ -1191,37 +1335,47 @@ def summarize_twi_scoring_comparison(runs: list) -> str:
         raw = screens["twi_raw"]
         on_parcel = identify_result["_on_parcel_mask"]
         old_scores = parcel_relative_percentile(raw, on_parcel)
+        fixed_scores = twi_score(
+            raw, RETIRED_FIXED_TWI_MIN_BREAKPOINT, RETIRED_FIXED_TWI_FULL_CREDIT_BREAKPOINT
+        )
         new_scores = screens["twi_score"]
-        per_boundary[label] = (old_scores, new_scores, gate_mask)
+        per_boundary[label] = (old_scores, fixed_scores, new_scores, gate_mask)
 
         gated = gate_mask & ~np.isnan(raw)
         if not np.any(gated):
             lines.append(f"  {label}: (no gated cells)")
             continue
+        breakpoints = result["twi_breakpoints"]
         lines.append(
-            f"  {label}: over {int(np.count_nonzero(gated))} gated cells -- "
-            f"percentile mean {float(np.mean(old_scores[gated])):.3f}, "
-            f"absolute mean {float(np.mean(new_scores[gated])):.3f}"
+            f"  {label}: over {int(np.count_nonzero(gated))} gated cells -- retired percentile mean "
+            f"{float(np.mean(old_scores[gated])):.3f}, retired fixed-curve mean "
+            f"{float(np.mean(fixed_scores[gated])):.3f} "
+            f"({float(np.mean(fixed_scores[gated] == 0.0)) * 100:.1f}% floored), "
+            f"window-referenced mean {float(np.mean(new_scores[gated])):.3f} "
+            f"({float(np.mean(new_scores[gated] == 0.0)) * 100:.1f}% floored) on "
+            f"[{breakpoints['floor']:.3f}, {breakpoints['full_credit']:.3f}]"
         )
 
     if len(per_boundary) >= 2:
-        (label_a, (old_a, new_a, mask_a)), (label_b, (old_b, new_b, mask_b)) = list(per_boundary.items())[:2]
+        (label_a, (old_a, fixed_a, new_a, mask_a)), (label_b, (old_b, fixed_b, new_b, mask_b)) = (
+            list(per_boundary.items())[:2]
+        )
         both = mask_a & mask_b & ~np.isnan(old_a) & ~np.isnan(old_b)
         if np.any(both):
-            old_delta = np.abs(old_a[both] - old_b[both])
-            new_delta = np.abs(new_a[both] - new_b[both])
             lines.append(
                 f"  CELLS GATED UNDER BOTH ({int(np.count_nonzero(both))}) -- per-cell |score change| "
-                f"between '{label_a}' and '{label_b}':"
+                f"between '{label_a}' and '{label_b}', THE MEASURED NUMBER IN EVERY COLUMN:"
             )
-            lines.append(
-                f"    retired percentile: mean {float(np.mean(old_delta)):.4f}, "
-                f"max {float(np.max(old_delta)):.4f}  <- the bug: same ground, different score"
-            )
-            lines.append(
-                f"    absolute curve:     mean {float(np.mean(new_delta)):.4f}, "
-                f"max {float(np.max(new_delta)):.4f}  <- must be 0.0000; anything else is a defect"
-            )
+            for name, (a, b), note in (
+                ("retired percentile", (old_a, old_b), "the bug: same ground, different score"),
+                ("retired fixed curve", (fixed_a, fixed_b), "fixed breakpoints held it still, at the cost of flooring"),
+                ("window-referenced", (new_a, new_b), "the live curve; one shared DEM means one reference window"),
+            ):
+                delta = np.abs(a[both] - b[both])
+                lines.append(
+                    f"    {name:<20} mean {float(np.mean(delta)):.4f}, max {float(np.max(delta)):.4f}"
+                    f"  <- {note}"
+                )
     return "\n".join(lines)
 
 
@@ -1251,6 +1405,28 @@ def _excavated_surface_without_twi(criteria: dict, depression_depth: np.ndarray)
         grid = depression_score(depression_depth) if name == "wetness" else criteria[name]
         surface += weight * grid
     return surface
+
+
+def _surfaces_with_substituted_twi(criteria: dict, screens: dict, twi_scores: np.ndarray) -> dict:
+    """Both blends rebuilt with a DIFFERENT TWI score grid substituted in
+    and every other criterion held exactly as the run computed it -- the
+    only honest way to ask "what would this run have looked like on that
+    curve" without also re-deriving the criteria the question is not
+    about. The excavated side substitutes into the WETNESS blend at
+    WETNESS_TWI_SUBWEIGHT, mirroring compute_suitability_surfaces()'s own
+    arithmetic, and applies the same NaN -> 0.0 flag-not-poison
+    conversion."""
+    twi = np.where(np.isnan(twi_scores), 0.0, twi_scores)
+    embankment = np.zeros(twi.shape, dtype=np.float64)
+    for name, weight in EMBANKMENT_WEIGHTS.items():
+        embankment += weight * (twi if name == "twi" else criteria[SURVEY_TYPE_EMBANKMENT][name])
+
+    depression = depression_score(screens["depression_depth"])
+    wetness = WETNESS_TWI_SUBWEIGHT * twi + (1.0 - WETNESS_TWI_SUBWEIGHT) * depression
+    excavated = np.zeros(twi.shape, dtype=np.float64)
+    for name, weight in EXCAVATED_WEIGHTS.items():
+        excavated += weight * (wetness if name == "wetness" else criteria[SURVEY_TYPE_EXCAVATED][name])
+    return {SURVEY_TYPE_EMBANKMENT: embankment, SURVEY_TYPE_EXCAVATED: excavated}
 
 
 def summarize_twi_independent_signal(identify_result: dict, label: str) -> str:
@@ -1323,15 +1499,43 @@ def summarize_twi_independent_signal(identify_result: dict, label: str) -> str:
             criteria[SURVEY_TYPE_EXCAVATED], screens["depression_depth"]
         ),
     }
+    # THE SAME SHARE ON THE RETIRED FIXED CURVE, because the sign of this
+    # delta is the reading the window-referencing branch has to re-take.
+    # Under the fixed 6.0/10.0 pair TWI was floored across most of the
+    # reference property, so INCLUDING it REDUCED the embankment clearing
+    # share -- a criterion that only ever subtracted. Whether that sign
+    # flips is the question, and printing both columns is how the run
+    # answers it instead of the reader inferring it.
+    fixed_twi = twi_score(
+        screens["twi_raw"], RETIRED_FIXED_TWI_MIN_BREAKPOINT, RETIRED_FIXED_TWI_FULL_CREDIT_BREAKPOINT
+    )
+    fixed_surfaces = _surfaces_with_substituted_twi(criteria, screens, fixed_twi)
     for survey_type in SURVEY_TYPES:
         with_twi = result["surfaces"][survey_type][gate_mask]
         wo_twi = without[survey_type][gate_mask]
+        fixed = fixed_surfaces[survey_type][gate_mask]
         n_with = int(np.count_nonzero(with_twi >= EMBANKMENT_SEED_MIN_SCORE))
         n_without = int(np.count_nonzero(wo_twi >= EMBANKMENT_SEED_MIN_SCORE))
+        n_fixed = int(np.count_nonzero(fixed >= EMBANKMENT_SEED_MIN_SCORE))
         lines.append(
             f"    {survey_type:<11} with TWI {n_with}/{gated_count} "
             f"({n_with / gated_count * 100:.1f}%)   without TWI {n_without}/{gated_count} "
             f"({n_without / gated_count * 100:.1f}%)   delta {n_without - n_with:+d} cells"
+        )
+        def _direction(count: int) -> str:
+            if count > n_without:
+                return "ADDS"
+            return "SUBTRACTS" if count < n_without else "is NEUTRAL"
+
+        live_direction, fixed_direction = _direction(n_with), _direction(n_fixed)
+        lines.append(
+            f"    {'':<11} on the RETIRED FIXED curve: {n_fixed}/{gated_count} "
+            f"({n_fixed / gated_count * 100:.1f}%), delta {n_without - n_fixed:+d} vs without-TWI"
+        )
+        lines.append(
+            f"    {'':<11} SIGN: window-referenced TWI {live_direction}, retired fixed TWI "
+            f"{fixed_direction}  -> the sign "
+            + ("did NOT change" if live_direction == fixed_direction else "CHANGED")
         )
 
     # Seeds are the thing a weight change would actually move, so the
@@ -1446,6 +1650,16 @@ def summarize_boundary_stability(runs: list) -> str:
     any nonzero per-criterion delta on a matched pair whose cells did not
     change. The criterion rows are what separate the two cases, which is
     why the report breaks the blend out rather than printing one number.
+
+    THE HEADLINE NUMBER IS MEASURED, NOT ASSERTED. The per-cell TWI
+    delta over the cells gated under both boundaries is printed as a
+    value, with each boundary's reference window beside it. Under
+    window referencing over one shared DEM it reads exactly 0.0000
+    because the reference window is a property of the raster and both
+    runs therefore reference the same one -- and the window bounds
+    printed alongside are what let a reader SEE that rather than take
+    it on faith. If the two windows ever differ, the delta is small and
+    nonzero and both facts are on the page.
     """
     lines = ["=== BOUNDARY STABILITY: THE SAME DEM UNDER TWO BOUNDARIES ==="]
     if len(runs) < 2:
@@ -1471,6 +1685,61 @@ def summarize_boundary_stability(runs: list) -> str:
         "  (a gated-cell difference is EXPECTED and legitimate -- the gate mask IS the boundary)"
     )
 
+    # THE REAL PER-CELL NUMBER, with the window that produced it beside
+    # it. Printed here as well as in the scoring section because this is
+    # the section a reader opens to ask "did the boundary move a score",
+    # and a report that answers that with an assertion instead of a
+    # measurement is the thing this whole arc exists to stop doing.
+    if not all("twi_reference_window" in run["result"] for run in (run_a, run_b)):
+        # A hand-built instrument fixture (the classification tests) has
+        # no raster behind it. Say so rather than raising or, worse,
+        # printing nothing where a number belongs.
+        lines.append(
+            "  TWI REFERENCE WINDOW / PER-CELL DELTA: not available -- these runs carry no raster "
+            "(hand-built zone fixtures exercise the classification, not the scoring)."
+        )
+        return _finish_boundary_stability(lines, label_a, label_b, zones_a, zones_b)
+    for label, run in ((label_a, run_a), (label_b, run_b)):
+        reference = run["result"]["twi_reference_window"]
+        breakpoints = run["result"]["twi_breakpoints"]
+        min_x, min_y, max_x, max_y = reference["bounds"]
+        lines.append(
+            f"  '{label}' TWI reference window: x {min_x:.1f}..{max_x:.1f}, y {min_y:.1f}..{max_y:.1f} "
+            f"({reference['cell_count']} cells, snapped {reference['snapped']}) -> curve "
+            f"[{breakpoints['floor']}, {breakpoints['full_credit']}]"
+        )
+    windows_match = run_a["result"]["twi_reference_window"]["bounds"] == run_b["result"]["twi_reference_window"]["bounds"]
+    lines.append(
+        f"  SAME REFERENCE WINDOW: {windows_match}"
+        + ("  (one shared DEM, so one window -- see the SNAP section for what a real re-fetch "
+           "under each boundary would reference)" if windows_match else "")
+    )
+    twi_a = run_a["result"]["screens"]["twi_score"]
+    twi_b = run_b["result"]["screens"]["twi_score"]
+    both_gated = (
+        run_a["result"]["gate_mask"]
+        & run_b["result"]["gate_mask"]
+        & ~np.isnan(twi_a)
+        & ~np.isnan(twi_b)
+    )
+    if np.any(both_gated):
+        cell_delta = np.abs(twi_a[both_gated] - twi_b[both_gated])
+        lines.append(
+            f"  PER-CELL TWI SCORE DELTA over the {int(np.count_nonzero(both_gated))} cells gated "
+            f"under both: mean {float(np.mean(cell_delta)):.4f}, max {float(np.max(cell_delta)):.4f} "
+            "(THE MEASURED VALUE -- 0.0000 when the two runs share a reference window, small and "
+            "nonzero when they do not; both are informative)"
+        )
+    else:
+        lines.append("  PER-CELL TWI SCORE DELTA: no cell is gated under both boundaries.")
+
+    return _finish_boundary_stability(lines, label_a, label_b, zones_a, zones_b)
+
+
+def _finish_boundary_stability(lines: list, label_a: str, label_b: str, zones_a: list, zones_b: list) -> str:
+    """The zone-matching half of summarize_boundary_stability(), split
+    out so the TWI-window half can report its own unavailability and
+    still hand back a complete report rather than a truncated one."""
     matched, only_a, only_b = _match_zones(zones_a, zones_b)
     lines.append(f"  SURVIVES BOTH: {len(matched)} zone(s)")
     for za, zb, iou in matched:
@@ -1635,6 +1904,8 @@ def main() -> None:
     print(state_excavated_finding(identify_result))
     print()
     print(summarize_twi_calibration(runs))
+    print()
+    print(summarize_reference_window_snap(runs))
     print()
     print(summarize_twi_scoring_comparison(runs))
     print()
