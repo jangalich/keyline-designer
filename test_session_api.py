@@ -1101,10 +1101,10 @@ with Harness() as h:
 
     # A REAL step whose registry entry is not written yet. Same status --
     # this URL names no resource either -- but the message tells them apart,
-    # which is get_step()'s own contract. "roads", not "water": water HAS an
-    # entry as of the water branch, and asks a different question of this
-    # surface -- see the 409 below.
-    unregistered = c.generate(session_id, step_id="roads")
+    # which is get_step()'s own contract. "trees", not "water" or "roads":
+    # both HAVE entries as of their branches, and ask different questions of
+    # this surface -- see the 409 below.
+    unregistered = c.generate(session_id, step_id="trees")
     assert unregistered.status_code == 404, unregistered.get_json()
     assert "no registry entry yet" in unregistered.get_json()["error"], (
         unregistered.get_json()
@@ -1213,7 +1213,7 @@ with Harness() as h:
 print(
     f"9. 404s AND REJECTED INPUT: an unknown session is 404 on all five verbs; "
     f"an unknown step id ('orchard') is 404 and a REGISTERED-BUT-UNWRITTEN one "
-    f"('roads') is 404 with a different message; an unknown job id is 404. "
+    f"('trees') is 404 with a different message; an unknown job id is 404. "
     f"A REGISTERED step whose upstream commit is missing (water, before "
     f"landform) is {uncommitted_upstream.status_code} naming "
     f"'{upstream_body['upstream_step']}' at status "
@@ -1280,6 +1280,9 @@ with Harness() as h:
         "/api/sessions/<session_id>/steps/<step_id>/commit",
         "/api/sessions/<session_id>/steps/<step_id>/reopen",
         "/api/sessions/<session_id>/steps/<step_id>/layers",
+        # The accumulating step's own write verb (the roads entry): free
+        # one candidate set's slot.
+        "/api/sessions/<session_id>/steps/<step_id>/discard",
         "/api/jobs/<job_id>",
     }, sorted(served)
 

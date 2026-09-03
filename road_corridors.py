@@ -22,9 +22,20 @@ branches) is an OUTPUT of the algorithm, not something this module
 searches a landform for in advance. See road_network_router.py's own
 module docstring for the full algorithm; build_road_network() below is
 the thin wrapper that turns this module's own inputs (production areas,
-the single selected water zone, the floodplain cost-penalty union) into
-the cost surface and demand mask that router needs, then turns its
+the union of the selected water zones, the floodplain cost-penalty union)
+into the cost surface and demand mask that router needs, then turns its
 per-branch cell output back into real geometry.
+
+ONE NETWORK PER CALL, AND THE BRANCHES ARE NOT ALTERNATIVES. identify_
+road_corridor_candidates() is named like its siblings but returns ONE
+road_network; the branches inside it form a tree (each carries
+joins_branch_index, and newly_served_acres is computed given the branches
+already placed). On the interactive path the CANDIDATES are therefore
+networks, one per access point the user tries -- step_registry.py's roads
+entry declares that (Accumulation) and step_orchestrator.py keeps the
+networks side by side. Each call routes independently: the router works on
+a fresh copy of the cost raster, so a network generated earlier in the
+session is never seen as existing infrastructure by a later one.
 
 Pipeline (build_road_network()):
 
@@ -1331,11 +1342,14 @@ def identify_road_corridor_candidates(
 ) -> dict:
     """
     Full pipeline entry point: fetches/derives everything build_road_
-    network() needs (optimized production areas, the single selected water
-    zone, floodplain cost-penalty union) and returns the
-    "suggested_road_corridor" GeoJSON FeatureCollection. Every real-data
-    fetch degrades independently and gracefully, same pattern as
-    water_candidate_zones.py and solar_suitability.py.
+    network() needs (optimized production areas, the selected water ground
+    -- ONE zone-shaped value whose geometry is the UNION of the user's
+    selected survey zones on the interactive path, or the batch path's own
+    single pick -- and the floodplain cost-penalty union) and returns the
+    "suggested_road_corridor" GeoJSON FeatureCollection for ONE network
+    grown from anchor_lon_lat. Every real-data fetch degrades independently
+    and gracefully, same pattern as water_candidate_zones.py and
+    solar_suitability.py.
 
     canopy_height is an optional pre-fetched override (the same dict
     canopy_height_data.get_canopy_height_for_boundary() returns, e.g.
@@ -1469,15 +1483,18 @@ def identify_road_corridor_candidates(
     if valleys is None:
         valleys = delineate_valleys(dem)  # reused for the floodplain fallback below
 
-    # The single water zone this property's OWN water-suitability scoring
-    # actually selected (rank 1), not every unscored candidate zone
-    # water_candidate_zones.py generates -- see module docstring.
-    # water_suitability.NO_WATER_ZONE is the EXPLICIT "already ran the
-    # selection, nothing qualified" answer (see that constant's own
-    # docstring): reuse it (normalized back to None -- everything below
+    # The selected water ground: on the interactive path the UNION of the
+    # user's committed survey zones (wire_translation.water_zone_union()),
+    # on the batch path the one zone its own scoring picked -- never every
+    # unscored candidate zone water_candidate_zones.py generates (see
+    # module docstring). water_suitability.NO_WATER_ZONE is the EXPLICIT
+    # "already ran the selection, nothing qualified" answer (see that
+    # constant's own docstring) AND the answer an EMPTY water commit
+    # arrives as: reuse it (normalized back to None -- everything below
     # keeps None's existing "no zone" meaning) rather than treating it as
-    # "not supplied" and re-running the whole water pipeline. A bare None
-    # still self-computes exactly as before.
+    # "not supplied" and re-running the whole water pipeline, which would
+    # override a user's deliberate "no water zone". A bare None still
+    # self-computes exactly as before.
     if selected_water_zone is NO_WATER_ZONE:
         selected_water_zone = None
     elif selected_water_zone is None:

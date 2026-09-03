@@ -39,13 +39,28 @@ and the document's is the one the frontend, the cascade and the reset all
 already read. registered_steps() filters that constant; it does not restate
 it.
 
-PARTIALLY POPULATED, ON PURPOSE. ONE entry today: landform. water, roads,
-trees, structures and fencing are named in STEP_ORDER and absent here, and
-the difference is meaningful rather than an oversight -- registered_steps()
-returns what can actually be generated, and asking for an unregistered step
-raises with the list of what is registered. The parity test against
-build_pipeline_context() belongs at the end of stage 3, when all six exist
-and there is something to compare.
+PARTIALLY POPULATED, ON PURPOSE. THREE entries today: landform, water and
+roads. trees, structures and fencing are named in STEP_ORDER and absent
+here, and the difference is meaningful rather than an oversight --
+registered_steps() returns what can actually be generated, and asking for
+an unregistered step raises with the list of what is registered. The parity
+test against build_pipeline_context() belongs at the end of stage 3, when
+all six exist and there is something to compare.
+
+THE THIRD ENTRY BROKE TWO ASSUMPTIONS THE FIRST TWO SHARED, and the schema
+grew two declarations rather than the orchestrator growing a branch:
+
+  ONE GENERATE PER STEP. Landform and water each generate once and REPLACE;
+  the candidates are N independent features from one call. Roads generates
+  ONE network per ACCESS POINT and the candidates are the networks, so the
+  user generates them by choosing different access points and the results
+  ACCUMULATE. `StepDefinition.accumulate` (an Accumulation) declares that,
+  with the cap and the document key the tried inputs are recorded under.
+
+  A USER INPUT IS A NAME. `user_inputs` was a bare tuple of parameter names
+  with no type, no validation and no way to forward under a different name
+  than the client sends. The access point is the first input any step
+  actually collects, and it needs all three -- see UserInput.
 
 WHAT THIS MODULE DOES NOT DO. It does not execute, orchestrate, cache,
 translate, validate a commit, or import a single KSOP module. Every target
@@ -375,6 +390,139 @@ class CommitContract:
     rehydrate: Optional[str]
     internal_id_parameter: Optional[str] = None
     requires_provenance: bool = True
+    # THE UNIT THE COUNT BOUNDS APPLY TO, when it is not the feature. None
+    # for landform and water: each committed feature is its own unit and
+    # min/max_features count features. The roads entry sets it to
+    # "network_id": a road network is committed as one feature PER BRANCH
+    # (the wire shape wire_translation.road_network_to_feature_collection()
+    # has always produced -- trunk and spurs each carry their own grade,
+    # length and served acreage), but the unit the user commits is the
+    # NETWORK, and "exactly one network or none" cannot be said by counting
+    # branches. So the features are GROUPED by this property's value and
+    # min/max_features count the groups. A feature that does not carry the
+    # property is rejected by name, because a feature with no group cannot
+    # be counted as anything.
+    #
+    # THIS IS THE SCHEMA ADMITTING IT ASSUMED "feature" AND "candidate" WERE
+    # THE SAME WORD. They were, for two entries.
+    feature_group: Optional[str] = None
+    # A dotted path called once per group as check(group_key, [features]) and
+    # expected to raise ValueError naming the defect when the group is not a
+    # coherent unit. The commit gate turns that into a per-feature rejection
+    # for every feature in the group. A road network's branches form a TREE
+    # (each spur carries joins_branch_index), and a spur committed without
+    # its trunk is not a shorter network, it is an incoherent one -- and
+    # nothing about a single feature can say so. Only set alongside
+    # feature_group; a per-feature defect belongs in the rehydrator.
+    group_check: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class UserInput:
+    """
+    ONE parameter a step collects from the user at generate time, beyond
+    what the cache and the upstream commits supply.
+
+    WHAT REPLACED A BARE NAME, AND WHY. `user_inputs` used to be a tuple of
+    strings that were assumed to be the entry point's own parameter names,
+    passed through verbatim. B5a flagged it as the field the water step
+    would not exercise and roads would, and roads needed all three things a
+    name cannot carry:
+
+      forward_as   the entry point calls it `anchor_lon_lat`; the client
+                   sends `access_point`. The consumed edges already have
+                   this rename (Consumed.forward_as) for the same reason.
+      shape        a JSON value has to be SOMETHING before it is forwarded
+                   into a routing pass, and "a two-element array of numbers
+                   in lon/lat range" is a shape check the orchestrator can
+                   run before a job exists, so a client sending [lat, lon]
+                   or a string is told at 400 rather than at a failed job.
+      validate     the on-boundary rule. road_corridors.validate_access_
+                   point_on_boundary() already exists and is the ONE
+                   implementation of "a real access point is where the
+                   parcel meets a road along its own perimeter"; a second
+                   validator in this table would be a second opinion. It is
+                   a dotted path resolved at call time, like every other
+                   target here, called as validate(boundary_coordinates,
+                   value), and a ValueError from it is the rejection.
+
+    name       the key the client sends under `params`, and the key an
+               accumulating step's candidate sets are keyed by.
+    forward_as the entry point's parameter name; None means `name`.
+    shape      one of VALID_INPUT_SHAPES. The orchestrator owns the check
+               for each shape and NORMALISES the value (a JSON array
+               becomes a tuple of floats) before forwarding it.
+    validate   optional dotted path, see above.
+    """
+
+    name: str
+    forward_as: Optional[str] = None
+    shape: str = "lon_lat"
+    validate: Optional[str] = None
+    why: str = ""
+
+    @property
+    def parameter(self) -> str:
+        return self.forward_as or self.name
+
+
+# The vocabulary of UserInput.shape. ONE value today, and that is honest:
+# the access point is the only user input any step collects. A second
+# shape is added here WITH its check in step_orchestrator, never as a bare
+# string that nothing enforces.
+INPUT_SHAPE_LON_LAT = "lon_lat"
+VALID_INPUT_SHAPES = (INPUT_SHAPE_LON_LAT,)
+
+
+@dataclass(frozen=True)
+class Accumulation:
+    """
+    A step whose generates ACCUMULATE rather than replace: one candidate set
+    per distinct value of a user input, kept side by side, up to a cap.
+
+    THE ROADS INTERACTION, AS DATA. The user places an access point and
+    generates; that produces ONE network, which becomes ONE candidate. They
+    may place another access point and generate again, and the first
+    candidate stays. Any candidate may be discarded. They commit exactly one
+    network, or none. Landform and water have none of this -- a generate
+    replaces the last one -- and their entries leave this field None, which
+    is what keeps the replace path exactly as it was.
+
+    keyed_by       the UserInput whose value identifies a candidate set.
+    key            dotted path of a function from that input's NORMALISED
+                   value to a short stable string -- the candidate set's
+                   identity. It is also what the step's payload builder
+                   stamps on every proposal feature so ids stay stable
+                   across generates for OTHER inputs (see
+                   wire_translation.access_point_key), and what the commit
+                   gate matches a committed feature's origin against.
+    inputs_list    the key under the step's document `inputs` holding EVERY
+                   value the user tried, in the order they tried them --
+                   not just the committed one. The alternatives are part of
+                   the user's work: a reopen restores all of them, and a
+                   cold cache rebuilds all of them, from this list. It is
+                   written by generate and discard (the document records
+                   the decision to try an access point) and it is what the
+                   cap below is enforced against, so the cap holds across
+                   an eviction and not only in one process's cache.
+    feature_key_property
+                   the feature property carrying the candidate set's key on
+                   every proposal. The commit gate reads it to check that a
+                   committed feature came from a candidate set whose input
+                   is in inputs_list -- an input that is not there is the
+                   silent-empty-commit class, and it is refused.
+    max_candidates the cap. THREE for roads: the map has room for three
+                   networks to be compared and no more, and a fourth
+                   generate is refused server-side rather than left to the
+                   client.
+    """
+
+    keyed_by: str
+    key: str
+    inputs_list: str
+    feature_key_property: str
+    max_candidates: int
+    why: str = ""
 
 
 @dataclass(frozen=True)
@@ -421,7 +569,15 @@ class StepDefinition:
     generate: str  # dotted path
     produces: tuple
     commit_contract: CommitContract
+    # UserInputs -- see that class. Empty for landform and water; the roads
+    # entry declares the access point.
     user_inputs: tuple = ()
+    # None for a step whose generate REPLACES its proposals (landform,
+    # water); an Accumulation for one whose generates accumulate one
+    # candidate set per user input (roads). See Accumulation. The
+    # orchestrator branches on whether this is set -- a declaration, not a
+    # step id.
+    accumulate: Optional[Accumulation] = None
     # PostCommitHooks, run in declaration order after a commit to this step
     # is persisted. See PostCommitHook for why this is data and not a branch.
     post_commit: tuple = ()
@@ -460,6 +616,18 @@ class StepDefinition:
 
     def consumed_names(self) -> tuple:
         return tuple(consumed.name for consumed in self.consumes)
+
+    def user_input_names(self) -> tuple:
+        return tuple(user_input.name for user_input in self.user_inputs)
+
+    def user_input(self, name: str) -> UserInput:
+        for user_input in self.user_inputs:
+            if user_input.name == name:
+                return user_input
+        raise RegistryError(
+            f"step '{self.step_id}' declares no user input '{name}'; it "
+            f"declares {self.user_input_names() or '()'}"
+        )
 
     def upstream_steps(self) -> tuple:
         """
@@ -865,9 +1033,225 @@ WATER = StepDefinition(
 )
 
 
+ROADS = StepDefinition(
+    step_id="roads",
+    consumes=(
+        # NINE EDGES: seven off the cache, two off commits. The cache edges
+        # are what keep a generate network-free -- every override
+        # identify_road_corridor_candidates() does not get, it FETCHES or
+        # re-derives (a DEM fetch, a valley delineation, an NHD + SSURGO
+        # floodplain fetch, a canopy fetch, and the water self-compute that
+        # test 10 exists to catch).
+        Consumed(
+            name="boundary_coordinates",
+            source=SOURCE_CACHE,
+            cache_path="boundary",
+            forward_as="boundary_coordinates",
+            why=(
+                "The parcel ring, read off the context for landform's reason: "
+                "a rebuilt context and a warm one supply the identical value. "
+                "The access point is validated against this same ring."
+            ),
+        ),
+        Consumed(
+            name="dem",
+            source=SOURCE_CACHE,
+            cache_path="dem",
+            forward_as="dem",
+            why=(
+                "ParcelData's already-fetched elevation grid. Omitted, the "
+                "entry point calls get_dem_for_boundary() itself."
+            ),
+        ),
+        Consumed(
+            name="boundary_polygon_utm",
+            source=SOURCE_CACHE,
+            cache_path="boundary_polygon_utm",
+            forward_as="boundary_polygon_utm",
+            why=(
+                "The hard limit on which DEM cells routing may draw from at "
+                "all. Forwarded rather than re-derived so the network is "
+                "clipped to the same polygon the exclusion masks were."
+            ),
+        ),
+        Consumed(
+            name="valleys",
+            source=SOURCE_CACHE,
+            cache_path="valleys",
+            forward_as="valleys",
+            why=(
+                "The terrain warm-up's own delineation. The entry point reads "
+                "valleys only for the floodplain FALLBACK (buffered valley "
+                "lines when NHD and SSURGO are both unreachable), and without "
+                "the override it runs delineate_valleys() again to have them "
+                "in hand -- a whole-DEM pass on every regenerate."
+            ),
+        ),
+        Consumed(
+            name="canopy_height",
+            source=SOURCE_CACHE,
+            cache_path="parcel_data.canopy_height",
+            forward_as="canopy_height",
+            why=(
+                "ParcelData's already-fetched HAG layer, for the SOFT canopy "
+                "crossing penalty. Roads DEGRADE on a canopy outage rather "
+                "than raising -- the network is still generated, without the "
+                "term -- which is why this step declares no canopy failure "
+                "layer below. Forwarded so the term is real on every "
+                "generate rather than silently dropped after a failed fetch."
+            ),
+        ),
+        Consumed(
+            name="hydric_floodplain_union",
+            source=SOURCE_CACHE,
+            cache_path="hydric_floodplain_union",
+            forward_as="hydric_floodplain_union",
+            why=(
+                "THE EDGE THE CACHE HAD TO GROW A FIELD FOR. The floodplain "
+                "cost-penalty union (NHD stream and water-body buffers plus "
+                "SSURGO hydric polygons) was a batch-path product -- "
+                "build_pipeline_context() builds it once and forwards it to "
+                "roads, solar and trees -- with no home on the SessionContext. "
+                "Without it the entry point fetches NHD and SSURGO on every "
+                "generate, which is exactly the fetch-per-regenerate the "
+                "cache exists to close. So the terrain warm-up now derives it "
+                "from ParcelData's own rows (network-free), for the three "
+                "steps that read it. A real None is forwarded as itself and "
+                "IS re-fetched by the entry point -- that is the entry point's "
+                "own override convention, and it fires only when neither "
+                "source found anything AND no valley exists to fall back on."
+            ),
+        ),
+        Consumed(
+            name="floodplain_data_is_fallback",
+            source=SOURCE_CACHE,
+            cache_path="hydric_floodplain_is_fallback",
+            forward_as="floodplain_data_is_fallback",
+            why=(
+                "Whether the union above is the DEM-only valley-line proxy "
+                "rather than real NHD/SSURGO data. It changes every branch's "
+                "confidence notes and travels beside the union it describes; "
+                "a caller supplying one without the other mislabels a "
+                "fallback as real."
+            ),
+        ),
+        Consumed(
+            name="production_areas",
+            source=SOURCE_COMMITTED,
+            from_step="landform",
+            rehydrate="wire_translation.rehydrate_production_zones",
+            forward_as="production_areas",
+            why=(
+                "THE DEMAND. A road exists to serve production ground, and "
+                "the ground it serves must be the ground the USER committed. "
+                "The entry point's None path re-runs the production optimiser "
+                "and routes to zones the user may have rejected."
+            ),
+        ),
+        Consumed(
+            name="selected_water_zone",
+            source=SOURCE_COMMITTED,
+            from_step="water",
+            rehydrate="wire_translation.rehydrate_water_survey_zones",
+            combine="wire_translation.water_zone_union",
+            # THE SENTINEL'S FIRST PRODUCTION USE. Water may be committed
+            # EMPTY, deliberately. Without this line an empty water commit
+            # reaches identify_road_corridor_candidates() as None, and its
+            # `elif selected_water_zone is None` branch calls
+            # fetch_and_select_optimal_water_zone() -- a full self-compute
+            # that silently overrides the user's "no water zone" decision
+            # with a zone they never selected, and hard-excludes it from
+            # routing. Test 10 counts that call at zero.
+            empty_commit="water_suitability.NO_WATER_ZONE",
+            forward_as="selected_water_zone",
+            why=(
+                "The selected water ground is hard-excluded from routing at "
+                "the pond buffer, and its edge is the target of the water "
+                "spur. Reaches the entry point as the UNION of the selection "
+                "(the water branch's rule; the entry point reads exactly one "
+                "field, render_fill_polygon_utm) or as the sentinel."
+            ),
+        ),
+    ),
+    generate="road_corridors.identify_road_corridor_candidates",
+    payload="step_orchestrator.build_roads_payload",
+    proposal_collection="road_corridors",
+    produces=(
+        # PipelineContext's own field name. The batch path stores the full
+        # network dict there (branches=[] and all, never None) so an empty
+        # network is an explicit answer downstream; the interactive path's
+        # committed value is the same shape, one dict per committed network.
+        "selected_road_corridor",
+    ),
+    commit_contract=CommitContract(
+        # wire_translation.LAYER_ROAD_CORRIDOR, spelled out for the module
+        # docstring's reason and asserted equal in test_roads_step.py.
+        layers=("suggested_road_corridor",),
+        geometry_types=("LineString",),
+        # ZERO IS A DECISION: "no road on this parcel". Legal with or
+        # without an access point ever having been tried.
+        min_features=0,
+        # ONE NETWORK, OR NONE. The frontend's eye is a radio here where
+        # landform and water are checkboxes, and the constraint is declared
+        # rather than left to the client. Counted in NETWORKS, not branches
+        # -- see feature_group.
+        max_features=1,
+        feature_group="network_id",
+        group_check="wire_translation.check_road_network_complete",
+        rehydrate="wire_translation.rehydrate_road_networks",
+        # SELECT-ONLY, like water: every committable branch is one this
+        # pipeline routed and stamped with its network's id. There is no
+        # drawing tool for roads, so nothing to allocate and the rehydrator
+        # refuses an id it did not mint.
+        internal_id_parameter=None,
+        requires_provenance=True,
+    ),
+    user_inputs=(
+        UserInput(
+            name="access_point",
+            forward_as="anchor_lon_lat",
+            shape=INPUT_SHAPE_LON_LAT,
+            validate="road_corridors.validate_access_point_on_boundary",
+            why=(
+                "Where the parcel meets a road along its own perimeter -- the "
+                "real, existing point the network is grown outward FROM. A "
+                "product decision, not derivable from the boundary, which is "
+                "why the entry point has no fallback for it and why landform "
+                "and water do not ask for it. Placed EXPLICITLY by the user; "
+                "never auto-armed."
+            ),
+        ),
+    ),
+    accumulate=Accumulation(
+        keyed_by="access_point",
+        key="wire_translation.access_point_key",
+        inputs_list="access_points",
+        feature_key_property="network_id",
+        max_candidates=3,
+        why=(
+            "identify_road_corridor_candidates() returns ONE network per "
+            "call, and the branches inside it are a tree, not alternatives. "
+            "The candidates are therefore NETWORKS, one per access point, "
+            "and the user generates them by trying different access points. "
+            "Three is the cap; the document records every one tried."
+        ),
+    ),
+    post_commit=(),
+    # NONE, and honestly so. Every real-data fetch in road_corridors.py
+    # degrades gracefully (canopy drops the soft term, floodplain falls
+    # back to valley lines, and the water self-compute is closed by the
+    # sentinel above), so no layer failure can escape the entry point as a
+    # named exception. The generic error below is what a genuine failure
+    # reports, and it says so.
+    failure_layers=(),
+    generic_error="Road corridors could not be generated.",
+)
+
+
 STEP_REGISTRY = {
     LANDFORM.step_id: LANDFORM,
     WATER.step_id: WATER,
+    ROADS.step_id: ROADS,
 }
 
 
@@ -1086,15 +1470,93 @@ def validate_registry() -> None:
                 f"min_features {contract.min_features}"
             )
 
+        if contract.group_check and not contract.feature_group:
+            raise RegistryError(
+                f"{where}'s commit contract declares a group_check with no "
+                f"feature_group; a coherence check needs a unit to check"
+            )
+        if contract.feature_group is not None and not isinstance(contract.feature_group, str):
+            raise RegistryError(
+                f"{where}'s commit contract declares feature_group "
+                f"{contract.feature_group!r}; it is a feature PROPERTY NAME"
+            )
+
         forwarded = [c.forward_as for c in definition.consumes if c.forward_as]
         if len(forwarded) != len(set(forwarded)):
             raise RegistryError(
                 f"{where} forwards two consumed values into the same "
                 f"parameter: {sorted(forwarded)}"
             )
-        overlap = set(forwarded) & set(definition.user_inputs)
+
+        # USER INPUTS ARE DECLARATIONS, NOT NAMES. A bare string here is the
+        # shape this field used to have, and it is rejected by name so the
+        # message says what replaced it.
+        input_names = set()
+        input_parameters = []
+        for user_input in definition.user_inputs:
+            if not isinstance(user_input, UserInput):
+                raise RegistryError(
+                    f"{where} declares user input {user_input!r}, which is "
+                    f"not a UserInput; a bare name carries no shape, no "
+                    f"validator and no forward_as"
+                )
+            if not user_input.name:
+                raise RegistryError(f"{where} declares a user input with no name")
+            if user_input.name in input_names:
+                raise RegistryError(
+                    f"{where} declares user input '{user_input.name}' twice"
+                )
+            input_names.add(user_input.name)
+            if user_input.shape not in VALID_INPUT_SHAPES:
+                raise RegistryError(
+                    f"{where}: user input '{user_input.name}' has shape "
+                    f"{user_input.shape!r}; must be one of {VALID_INPUT_SHAPES}"
+                )
+            input_parameters.append(user_input.parameter)
+        if len(input_parameters) != len(set(input_parameters)):
+            raise RegistryError(
+                f"{where} forwards two user inputs into the same parameter: "
+                f"{sorted(input_parameters)}"
+            )
+        overlap = set(forwarded) & set(input_parameters)
         if overlap:
             raise RegistryError(
                 f"{where}: user input(s) {sorted(overlap)} collide with a "
                 f"forwarded consumed value's parameter"
             )
+
+        accumulation = definition.accumulate
+        if accumulation is not None:
+            if not isinstance(accumulation, Accumulation):
+                raise RegistryError(
+                    f"{where} declares accumulate={accumulation!r}, which is "
+                    f"not an Accumulation"
+                )
+            if accumulation.keyed_by not in input_names:
+                raise RegistryError(
+                    f"{where} accumulates by user input "
+                    f"'{accumulation.keyed_by}', which it does not declare"
+                )
+            if not accumulation.key:
+                raise RegistryError(
+                    f"{where} accumulates with no key function; a candidate "
+                    f"set needs an identity"
+                )
+            if not accumulation.inputs_list or accumulation.inputs_list in input_names:
+                raise RegistryError(
+                    f"{where} accumulates into document inputs key "
+                    f"{accumulation.inputs_list!r}, which must be non-empty "
+                    f"and distinct from every user input name"
+                )
+            if not accumulation.feature_key_property:
+                raise RegistryError(
+                    f"{where} accumulates with no feature_key_property; the "
+                    f"commit gate cannot tell which candidate set a feature "
+                    f"came from"
+                )
+            if not isinstance(accumulation.max_candidates, int) or accumulation.max_candidates < 1:
+                raise RegistryError(
+                    f"{where} accumulates with max_candidates "
+                    f"{accumulation.max_candidates!r}; the cap is a positive "
+                    f"integer"
+                )
