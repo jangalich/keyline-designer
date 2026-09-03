@@ -42,10 +42,10 @@ form):
 
   1. Profile the RAW elevation array, never the FILLED one.
      delineate_valleys() builds branches_utm from filled[r, c], and
-     fill_depressions() raises every pit to its spill elevation, so a marsh
-     reads as a near-flat plateau (the epsilon fill's per-cell increment
-     tilts it by a millimetre, which routes it but does not make it
-     terrain) and any inflection detector fires on the steep-to-flat
+     the depression fill raises every pit to its spill elevation, so a marsh
+     reads as a near-flat plateau (flat resolution then tilts it by a
+     millimetre or two, which routes it but does not make it terrain) and
+     any inflection detector fires on the steep-to-flat
      transition ENTERING the fill -- an artifact of the filling, not
      landform. Measured on a synthetic bowl: profiling raw puts
      the break at the bowl bottom where the fill-depth gate rejects it;
@@ -123,7 +123,7 @@ from valley_delineation import (
     compute_flow_accumulation,
     compute_flow_direction,
     delineate_valleys,
-    fill_depressions,
+    fill_and_resolve,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -508,7 +508,7 @@ def detect_keypoints(
         }
     """
     if filled is None:
-        filled = fill_depressions(dem["array"])
+        filled = fill_and_resolve(dem["array"])
     if flow_to_row is None or flow_to_col is None:
         flow_to_row, flow_to_col = compute_flow_direction(filled, dem["resolution_meters"])
     if flow_accumulation is None:

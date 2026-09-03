@@ -43,26 +43,77 @@ report using the Claude API.
 - `valley_delineation.py` — delineates primary valleys from a DEM via
   standard D8 terrain analysis (priority-flood depression fill -> flow
   direction -> flow accumulation -> threshold -> trace). Outputs a
-  schema-conformant `valley` layer. The fill is the **EPSILON variant**
-  (Barnes et al. 2014's Priority-Flood+ε, `FILL_EPSILON_METERS` = 0.001 m):
-  each cell is raised to at least its flood predecessor's filled elevation
-  PLUS that increment, so a filled pit or plateau slopes gently toward its
-  own outlet. The plain variant raised a pit to EXACTLY its spill
-  elevation, which left the filled cell tied with the neighbour it should
-  drain to; `compute_flow_direction()` requires a strictly positive slope,
-  so every tied cell took the `-1` sentinel and every consumer that walks
-  the flow field stopped there. That one defect produced five separately-
-  reported symptoms across this project's history (truncated backwaters,
-  `flat_tie_sentinel` wall walks, `unreachable_stem_end` cross-section
-  stations, raw-vs-filled contour weave, embankment seeds terminating
-  `flow_end` with 0-2 stations measured). The increment sits ~100x below
-  the DEM's own vertical accuracy and this repo's two fill-vs-noise
-  thresholds, and ~33x above float32's resolution at the reference
-  property's elevations — both bounds asserted in `test_epsilon_fill.py`
-  against the real dtype. **This module is read by every KSOP step**, so
-  the fill is a pipeline-wide input, not a water-layer detail; the `-1`
-  sentinel is NOT deleted and still marks grid-edge outlets and cells
-  nodata walls off from the border.
+  schema-conformant `valley` layer. The conditioning prefix is one call,
+  `fill_and_resolve()`: a **plain priority-flood depression fill** followed
+  by **Garbrecht–Martz flat resolution** (`resolve_flats()`), and every
+  consumer in the repo goes through it.
+
+  The problem it solves is two-layered. A plain fill raises a pit to
+  EXACTLY its spill elevation, leaving the filled cell tied with the
+  neighbour it should drain to; `compute_flow_direction()` requires a
+  strictly positive slope, so every tied cell took the `-1` sentinel and
+  every consumer that walks the flow field stopped there — one defect with
+  five separately-reported symptoms across this project's history
+  (truncated backwaters, `flat_tie_sentinel` wall walks,
+  `unreachable_stem_end` cross-section stations, raw-vs-filled contour
+  weave, embankment seeds terminating `flow_end` with 0-2 stations
+  measured). Barnes et al. 2014's Priority-Flood+ε
+  (`FILL_EPSILON_METERS` = 0.001 m) fixed that by tilting each flat
+  outward from wherever the flood reached it first. But on genuinely level
+  ground the direction that assigns is a property of the priority queue,
+  not of the land — and it feeds TWI, which is scored twice (the
+  embankment blend's `twi` term, and half the excavated blend's wetness
+  term), plus the drainage band read at every compartment's pinch.
+
+  Flat resolution replaces the flood-order pattern with one derived from
+  the flat's own geometry: a breadth-first gradient TOWARD the flat's
+  outlets (where its water leaves) combined with one AWAY FROM its inlets
+  (the higher ground that feeds it). `FLAT_RESOLUTION_INCREMENT_METERS`
+  (0.001 m) and `FLAT_RESOLUTION_OUTLET_WEIGHT` (2.0) carry the same two
+  bounds the epsilon did — the guaranteed descent is exactly one
+  increment, so the float32 margin is the epsilon's unchanged (~33x above
+  float32's resolution at the reference property's elevations), while the
+  accumulated rise is 0.002 m per hop of outlet distance, so a flat must
+  run **50 hops (250 m) from its furthest cell to its nearest outlet**
+  before the increment alone reaches the 0.1 m depression noise floor.
+  That headroom is HALF the epsilon's 100 hops; the halving is the
+  intrinsic price of carrying a second gradient, and the lever that buys
+  it back (lowering the outlet weight) is documented at the constant
+  rather than pre-tuned. Both bounds are asserted in
+  `test_flat_resolution.py` against the real dtype.
+
+  Two deliberate departures, both measured rather than asserted:
+  **the weights are inverted relative to Garbrecht & Martz as published**
+  (they weight away-from-higher more heavily and then repair the cells
+  that strands; on a 44-DEM corpus the published weighting strands 116
+  cells and this one strands 0), and **outlet cells are pinned to a zero
+  increment**, so a rim flat keeps its `-1` and its water LEAVES the DEM
+  window instead of running along an arbitrary crop edge (measured at 3348
+  cells of accumulation carried sideways before this was fixed).
+
+  **This module is read by every KSOP step**, so the conditioning is a
+  pipeline-wide input, not a water-layer detail. The `-1` sentinel is NOT
+  deleted: it still marks grid-edge outlets and cells nodata walls off
+  from the border, and `test_flat_resolution.py` re-asserts that nothing
+  else carries it. `fill_depressions()` keeps its epsilon parameter — it
+  is correct for that function considered alone, `test_epsilon_fill.py`
+  still pins it, and `fill_and_resolve()` uses the `epsilon_meters=0.0`
+  plain variant the same parameter provides — but the pipeline no longer
+  reads the epsilon.
+
+  **What it changed on a real parcel: nothing yet measured.** On both
+  synthetic stand-in parcels in `diagnose_flat_resolution_pipeline.py` —
+  one with four hand-placed flats, one quantised to 0.5 m so 147 flats
+  cover 90% of the grid — flat resolution re-routes 0 and 3 cells
+  respectively and moves **0 of 26 reported pipeline numbers** (valleys,
+  keypoints, production, water, roads, solar, trees). The two methods
+  coincide whenever a flat has one connected outlet set that the flood
+  enters through, which is the common case; they diverge on low-relief
+  terrain with several spills at different elevations, where a sweep of 80
+  quantised fixtures re-routes up to 31 cells. Treat this branch as
+  **correctness insurance for parcels with real flats**, not as a change
+  to this one — and see the Roadmap for the still-outstanding live
+  reference-property run, which this sandbox's egress policy blocks.
 - `production_area.py` / `production_area_ceiling.py` /
   `production_suitability.py` — the consolidated production-zone
   pipeline, restructured (see Roadmap history) from an earlier three-pass
@@ -581,6 +632,27 @@ tool (built with Leaflet).
   container/group layer, not real road data, and silently returned zero
   results forever. Confirmed live and fixed — see `farm_roads_data.py`'s
   own module docstring and the `ROAD_LAYERS` bullet above.
+- **Outstanding, required, not yet done**: run the KSOP pipeline against
+  the real six-point reference property from an environment with actual
+  network access, before and after the Garbrecht–Martz flat resolution
+  branch, and report what moved. Everything measured for that branch so
+  far is on SYNTHETIC stand-in parcels
+  (`diagnose_flat_resolution_pipeline.py`) because this sandbox's egress
+  policy blocks `elevation.nationalmap.gov` — a confirmed policy denial,
+  the same blocker recorded below. Four specific numbers are wanted, all
+  of them raised by the epsilon branch's own live run and none of them
+  reproducible here: the marsh cells (72, 24), (73, 24), (72, 25), whose
+  TWI percentile jumped to 0.944/1.000/1.000 under the epsilon fill and
+  on which the excavated class's best ground currently rests; Zone 1's
+  pinch catchment (2.22 ac, drainage 1.000) and the drainage score at
+  every surviving compartment's pinch, since the band is read on
+  accumulation; the reference property's LONGEST flat, in D8 hops from
+  its furthest cell to its nearest outlet, against the 50-hop headroom
+  above (a flat at or past 50 hops is a finding, not a number to retune
+  the noise floor around); and the per-cell TWI delta under the
+  shared-DEM boundary protocol, which must stay 0.0000
+  (`test_twi_boundary_independence.py` holds this on synthetics and
+  passes unchanged).
 - **Outstanding, required, not yet done**: re-run `production_suitability.py`
   against the real six-point reference property from an environment with
   actual network access (this sandbox's egress policy blocks

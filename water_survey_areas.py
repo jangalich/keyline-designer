@@ -163,13 +163,19 @@ THE TWO DERIVED SCREENS (both free from arrays already in hand):
         basins map directly. A noise floor
         (DEPRESSION_NOISE_FLOOR_METERS) zeroes sub-threshold fill
         artifacts. NOTE: this reading is unchanged by the hydrology
-        layer's epsilon fill, which lands its increment INSIDE the same
-        noise floor -- 0.001 m per D8 hop across a flat, i.e. a flat
-        would have to be 100 hops (500 m at this resolution) across in
-        one dead-level piece before the epsilon alone reached
-        DEPRESSION_NOISE_FLOOR_METERS. Measured on the reference
-        fixtures at 0.03-0.04 m worst case; asserted in
-        test_epsilon_fill.py. The noise floor is deliberately NOT
+        layer's flat resolution, which lands its increment INSIDE the
+        same noise floor -- 0.002 m per D8 hop of OUTLET DISTANCE across
+        a flat, i.e. a flat would have to be 50 hops (250 m at this
+        resolution) from its furthest cell to its nearest outlet, in one
+        dead-level piece, before the increment alone reached
+        DEPRESSION_NOISE_FLOOR_METERS. That is HALF the headroom the
+        epsilon fill had (100 hops at 0.001 m), which is the price of
+        carrying two gradients instead of one and is stated as such at
+        FLAT_RESOLUTION_OUTLET_WEIGHT, along with the lever that buys it
+        back. Measured on the reference fixtures at 0.027-0.079 m worst
+        case, and no cell is lifted from 0.0 depression depth into
+        nonzero by the increment alone; asserted in
+        test_flat_resolution.py. The noise floor is deliberately NOT
         retuned for it.
 
 GATES (unchanged trio, ported from water_candidate_zones.py): on-parcel
@@ -301,7 +307,11 @@ from soil_data import (
     get_soil_geometries_for_polygon,
     is_hydric,
 )
-from valley_delineation import compute_flow_accumulation, compute_flow_direction, fill_depressions
+from valley_delineation import (
+    compute_flow_accumulation,
+    compute_flow_direction,
+    fill_and_resolve,
+)
 
 # The demoted level-pool arc stays the home of the shared gate/measurement
 # machinery this module reuses -- ONE definition each of the contributing-
@@ -4286,7 +4296,7 @@ def compute_water_survey_areas(
     array = dem["array"]
 
     if filled is None:
-        filled = fill_depressions(array)
+        filled = fill_and_resolve(array)
     if flow_to_row is None or flow_to_col is None:
         flow_to_row, flow_to_col = compute_flow_direction(filled, dem["resolution_meters"])
     if flow_accumulation is None:

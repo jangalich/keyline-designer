@@ -219,7 +219,7 @@ from valley_delineation import (
     compute_flow_accumulation,
     compute_flow_direction,
     delineate_valleys,
-    fill_depressions,
+    fill_and_resolve,
     get_flow_accumulation_for_dem,
     valleys_to_geojson,
 )
@@ -635,10 +635,12 @@ REASON_KEYPOINT_EXCEEDS_CEILING = "keypoint_exceeds_ceiling"
 #     fire on marsh ground as flat_tie_sentinel AT the keypoint -- the
 #     hydrology layer's flat-tie limitation surfacing at NOMINATION -- and
 #     it was reported here rather than fixed here. The fix landed where it
-#     belonged: fill_depressions() is the epsilon variant, so the walk now
-#     CROSSES a flat and a distance_bound ending on level ground is a
-#     statement about the terrain (no drop available in 150 m), not about
-#     the flow field.
+#     belonged: the conditioning is fill_and_resolve() -- a plain fill
+#     plus Garbrecht-Martz flat resolution -- so the walk now CROSSES a
+#     flat and a distance_bound ending on level ground is a statement
+#     about the terrain (no drop available in 150 m), not about the flow
+#     field. The direction it crosses in is the flat's own inlet-to-outlet
+#     geometry, not the order a flood filled it.
 #   * ..._EXCEEDS_CEILING -- contributing area increases strictly
 #     downstream, so a wall site far enough below a keypoint can sit on a
 #     drainage the ceiling disqualifies even when the keypoint itself
@@ -958,7 +960,7 @@ def _flow_arrays_for_dem(
     Returns (filled, flow_to_row, flow_to_col, flow_accumulation).
     """
     if filled is None:
-        filled = fill_depressions(dem["array"])
+        filled = fill_and_resolve(dem["array"])
     if flow_to_row is None or flow_to_col is None:
         flow_to_row, flow_to_col = compute_flow_direction(filled, dem["resolution_meters"])
     if flow_accumulation is None:
