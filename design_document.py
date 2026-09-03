@@ -305,6 +305,48 @@ def mark_step_generated(document: dict, step_id: str) -> dict:
     return new_document
 
 
+def record_step_inputs(document: dict, step_id: str, inputs: dict) -> dict:
+    """
+    Write a GENERATED step's `inputs` -- and nothing else. Returns the
+    document unchanged (the same object) when the entry already holds
+    exactly these inputs, so callers compare identity to decide whether to
+    persist, as they do with mark_step_generated().
+
+    WHY A GENERATE WRITES AN INPUT TO THE DOCUMENT AT ALL, when a generate
+    otherwise writes only a status. The document holds DECISIONS, never
+    derived data, and an access point IS a decision: the user placed it,
+    and the alternatives they tried are part of their work. The roads step
+    accumulates one candidate network per access point, up to a cap, and
+    three things depend on the tried set being in the document rather than
+    only in the session cache -- a reopen restores every candidate, a cold
+    cache rebuilds every candidate, and the cap is enforced against the
+    same list in every process. What is NOT written is anything the
+    generate computed from those inputs; that stays derived and disposable.
+
+    GENERATED ONLY. A not_started step has no inputs to hold (it must carry
+    only its status, per validate_document), and a committed step's inputs
+    are the commit's own, written by commit_step and changed only by
+    re-committing. Raises DocumentError for either.
+    """
+    _require_known_step(step_id)
+    if not isinstance(inputs, dict):
+        raise DocumentError(f"inputs for step '{step_id}' must be a dict")
+    current = document["steps"][step_id]
+    if current["status"] != STATUS_GENERATED:
+        raise DocumentError(
+            f"cannot record inputs on step '{step_id}' with status "
+            f"'{current['status']}'; only a generated step collects inputs "
+            f"outside a commit"
+        )
+    if current.get("inputs") == inputs:
+        return document
+    new_document = copy.deepcopy(document)
+    new_document["steps"][step_id]["inputs"] = copy.deepcopy(inputs)
+    new_document["document_revision"] += 1
+    new_document["updated_at"] = _utc_now_iso()
+    return new_document
+
+
 def reopen_step(document: dict, step_id: str) -> dict:
     """
     Reopen a committed step for editing: status goes to "generated" with

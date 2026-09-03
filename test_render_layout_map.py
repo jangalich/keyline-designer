@@ -1520,9 +1520,25 @@ _diag_counts, _diag_call_site_logs = diag_fetch_layout_layers.run()
 _diag_canopy_sites = _diag_call_site_logs["get_canopy_height_for_boundary"]
 # The call-site key is basename:lineno of the get_canopy_height_for_boundary() call inside
 # parcel_data.fetch_parcel_data() (see diagnose_fetch_layout_layers_redundant_fetches.py's own
-# _call_site_label()). That line moved to 192 when the irradiance-baseline branch added its own
-# fetch above it, so this pinned lineno is updated to match the current source.
-_diag_canopy_from_parcel_data = _diag_canopy_sites.get("parcel_data.py:192 in fetch_parcel_data", 0)
+# _call_site_label()). DERIVED from the source rather than pinned: it was pinned at 192 and moved
+# every time parcel_data.py gained a line above it (the irradiance-baseline branch, then the
+# roads branch's layer identity on ParcelDataIncompleteError), failing this assertion for a
+# reason that had nothing to do with canopy fetch counts.
+import inspect as _diag_inspect  # noqa: E402
+
+import parcel_data as _diag_parcel_data  # noqa: E402
+
+_diag_fetch_lines, _diag_fetch_start = _diag_inspect.getsourcelines(_diag_parcel_data.fetch_parcel_data)
+_diag_canopy_lineno = next(
+    _diag_fetch_start + offset
+    for offset, line in enumerate(_diag_fetch_lines)
+    # The CALL, not the docstring line two paragraphs above it that names
+    # the same function.
+    if "canopy_height = get_canopy_height_for_boundary(" in line
+)
+_diag_canopy_from_parcel_data = _diag_canopy_sites.get(
+    f"parcel_data.py:{_diag_canopy_lineno} in fetch_parcel_data", 0
+)
 _diag_canopy_total = _diag_counts["get_canopy_height_for_boundary"]
 _diag_canopy_from_compute_layer = _diag_canopy_total - _diag_canopy_from_parcel_data
 

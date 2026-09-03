@@ -61,6 +61,17 @@ COMMIT AND REOPEN LIVE HERE TOO, and complete the per-step verb set:
                 base_revision, store, inputs=None)                 -> document
     reopen_step(session_id, step_id, store)                        -> document
     step_payload(session_id, step_id, store)                       -> payload
+    discard_candidate(session_id, step_id, store, params)          -> document
+
+ACCUMULATING STEPS (the roads entry's step_registry.Accumulation). Every
+verb above still reads the registry rather than a step id, but a step that
+declares `accumulate` takes a different path through generate, payload,
+restore and discard: its proposals are a KEYED STORE of candidate sets, one
+per distinct value of the declared user input, and a generate REPLACES
+exactly the set for its own input while leaving every other set untouched.
+The tried inputs are recorded on the document (design_document.record_
+step_inputs) so a cold cache and a reopen rebuild every set, and the cap is
+enforced against that record. See _ensure_accumulated_proposals().
 
 step_payload() is the READ verb over what generate produced -- a resume or a
 reload wants the proposals back without paying for them again, and every
@@ -82,6 +93,7 @@ transport over these five verbs and adds no behaviour of its own -- if a
 route ever seems to need a rule that is not here, the rule belongs here.
 """
 
+import math
 import operator
 from typing import Optional
 
@@ -384,7 +396,13 @@ def forwarded_arguments(definition, assembled: dict, params: dict) -> dict:
         for consumed in definition.consumes
         if consumed.forward_as
     }
-    arguments.update(params)
+    # USER INPUTS UNDER THEIR OWN forward_as. The client sends `access_point`
+    # and the entry point takes `anchor_lon_lat`; the UserInput declaration
+    # carries the rename, exactly as Consumed.forward_as does for the cache
+    # edges. `params` is validate_params()'s output, keyed by input NAME.
+    for user_input in definition.user_inputs:
+        if user_input.name in params:
+            arguments[user_input.parameter] = params[user_input.name]
     return arguments
 
 
@@ -401,19 +419,238 @@ def validate_params(definition, params: Optional[dict]) -> dict:
     read and believing it took effect.
     """
     params = dict(params or {})
-    declared = set(definition.user_inputs)
-    unknown = sorted(set(params) - declared)
+    declared = definition.user_input_names()
+    unknown = sorted(set(params) - set(declared))
     if unknown:
         raise StepOrchestrationError(
             f"step '{definition.step_id}' accepts user inputs "
-            f"{definition.user_inputs or '()'}; got unknown {unknown}"
+            f"{declared or '()'}; got unknown {unknown}"
         )
-    missing = sorted(declared - set(params))
+    missing = sorted(set(declared) - set(params))
     if missing:
         raise StepOrchestrationError(
             f"step '{definition.step_id}' requires user input(s) {missing}"
         )
-    return params
+    # SHAPE-CHECKED AND NORMALISED, per the declared UserInput.shape. What
+    # comes back is what the entry point is called with -- a JSON array has
+    # become a tuple of floats -- so a client sending [lat, lon] as a string,
+    # or a three-element array, is told here at 400 rather than at a failed
+    # job deep inside a routing pass.
+    return {
+        user_input.name: _INPUT_SHAPE_CHECKS[user_input.shape](
+            params[user_input.name],
+            f"step '{definition.step_id}' user input '{user_input.name}'",
+        )
+        for user_input in definition.user_inputs
+    }
+
+
+def _check_lon_lat(value, where: str) -> tuple:
+    """A [lon, lat] pair of finite numbers in range -> (lon, lat) floats."""
+    ok = (
+        isinstance(value, (list, tuple))
+        and len(value) == 2
+        and all(
+            isinstance(part, (int, float)) and not isinstance(part, bool)
+            for part in value
+        )
+    )
+    if ok:
+        lon, lat = float(value[0]), float(value[1])
+        if math.isfinite(lon) and math.isfinite(lat) and -180.0 <= lon <= 180.0 and -90.0 <= lat <= 90.0:
+            return (lon, lat)
+    raise StepOrchestrationError(
+        f"{where} must be a [lon, lat] pair of numbers (lon in [-180, 180], "
+        f"lat in [-90, 90]); got {value!r}"
+    )
+
+
+# ONE CHECK PER step_registry.VALID_INPUT_SHAPES ENTRY. The registry names
+# the shape; this is where it is enforced. A shape added there without a
+# check here fails validate_params() with a KeyError rather than passing
+# unchecked, which is the right failure.
+_INPUT_SHAPE_CHECKS = {
+    step_registry.INPUT_SHAPE_LON_LAT: _check_lon_lat,
+}
+
+
+def validate_inputs_on_boundary(definition, params: dict, boundary) -> None:
+    """
+    Every declared UserInput with a `validate` target, run against the
+    session's own boundary. A ValueError from the validator is the
+    rejection, re-raised as a StepOrchestrationError so a transport maps it
+    to 400 like every other bad-params case.
+
+    THE VALIDATOR IS THE PIPELINE'S OWN. road_corridors.validate_access_
+    point_on_boundary() is the one implementation of "a real access point
+    is where the parcel meets a road along its perimeter", and it needs no
+    DEM -- it derives a lightweight UTM CRS from the boundary -- which is
+    what lets this run synchronously, before a job exists.
+    """
+    for user_input in definition.user_inputs:
+        if not user_input.validate or user_input.name not in params:
+            continue
+        try:
+            step_registry.resolve(user_input.validate)(boundary, params[user_input.name])
+        except ValueError as exc:
+            raise StepOrchestrationError(
+                f"step '{definition.step_id}' user input '{user_input.name}' "
+                f"was rejected: {exc}"
+            ) from exc
+
+
+# ======================================================================
+# Accumulating steps
+# ======================================================================
+#
+# THE ONE PLACE THE REPLACE/ACCUMULATE DIFFERENCE LIVES. Everything below
+# reads step_registry.Accumulation and nothing below names a step.
+
+
+class CandidateCapReachedError(StepOrchestrationError):
+    """
+    A generate for an accumulating step whose document already records the
+    cap of candidate sets, for an input that is not one of them.
+
+    ENFORCED AGAINST THE DOCUMENT, not the cache: the tried inputs are
+    recorded there precisely so the cap holds in every process and across
+    an eviction, and so the frontend's own limit is a convenience rather
+    than the rule. A regenerate for an input ALREADY recorded is not
+    refused -- it replaces that set and holds no new slot.
+    """
+
+    def __init__(self, step_id: str, max_candidates: int, candidates: list):
+        self.step_id = step_id
+        self.max_candidates = max_candidates
+        self.candidates = candidates
+        super().__init__(
+            f"step '{step_id}' already holds its maximum of {max_candidates} "
+            f"candidate set(s) ({candidates}); discard one before generating "
+            f"for a new input."
+        )
+
+
+class CandidateNotFoundError(StepOrchestrationError):
+    """A discard naming an input the step's document does not record."""
+
+    def __init__(self, step_id: str, candidate):
+        self.step_id = step_id
+        self.candidate = candidate
+        super().__init__(
+            f"step '{step_id}' holds no candidate set for {candidate!r}; "
+            f"nothing to discard."
+        )
+
+
+class CommitInputError(StepOrchestrationError):
+    """
+    A commit to a step that declares a required user input, whose body does
+    not carry it.
+
+    REFUSED, NEVER READ AS EMPTY. buildCommitBody on the client sends
+    `inputs` only when non-empty, so a lost input leaves the key OFF the
+    body rather than erroring -- and a server that accepted a roads commit
+    with no access points would be recording a decision the user never made
+    about where the road starts. That is the same silent-empty-commit class
+    that has already produced three separate bugs, and this is the server
+    end of the fix; the client end is a separate branch.
+    """
+
+
+def accumulation_key(definition, params: dict) -> str:
+    """The candidate-set key of validated `params`, through the declared
+    Accumulation.key function."""
+    accumulation = definition.accumulate
+    return step_registry.resolve(accumulation.key)(params[accumulation.keyed_by])
+
+
+def recorded_candidate_inputs(definition, entry: dict) -> list:
+    """
+    The values of the accumulating input this step's document entry records,
+    normalised through the input's shape check, in the order they were tried.
+    [] for an entry recording none.
+    """
+    accumulation = definition.accumulate
+    user_input = definition.user_input(accumulation.keyed_by)
+    raw = (entry.get("inputs") or {}).get(accumulation.inputs_list) or []
+    check = _INPUT_SHAPE_CHECKS[user_input.shape]
+    return [
+        check(value, f"step '{definition.step_id}' recorded input '{accumulation.keyed_by}'")
+        for value in raw
+    ]
+
+
+def _inputs_document(definition, values: list) -> dict:
+    """The document `inputs` for an accumulating step: the list key holding
+    every tried value, JSON-native (lists of floats)."""
+    return {definition.accumulate.inputs_list: [list(value) for value in values]}
+
+
+def check_candidate_cap(definition, document: dict, key: str) -> None:
+    """Refuse a generate that would exceed Accumulation.max_candidates. A
+    key already recorded holds no new slot and passes."""
+    accumulation = definition.accumulate
+    recorded = recorded_candidate_inputs(definition, document["steps"][definition.step_id])
+    key_of = step_registry.resolve(accumulation.key)
+    if key in {key_of(value) for value in recorded}:
+        return
+    if len(recorded) >= accumulation.max_candidates:
+        raise CandidateCapReachedError(
+            definition.step_id,
+            accumulation.max_candidates,
+            [list(value) for value in recorded],
+        )
+
+
+def _run_entry_point(definition, assembled: dict, params: dict):
+    return definition.resolve_generate()(**forwarded_arguments(definition, assembled, params))
+
+
+def _ensure_accumulated_proposals(definition, context, document, assembled) -> dict:
+    """
+    The keyed candidate-set store for an accumulating step, brought into
+    agreement with the DOCUMENT's recorded inputs: every recorded input has
+    a result (regenerated if the cache lost it), and nothing the document
+    does not record survives (a discard in another process). Returns the
+    store, which is SessionContext.step_proposals[step_id].
+
+    HOW ACCUMULATED PROPOSALS ARE CACHED, AND WHY: several results keyed by
+    the candidate set's key, in the document's order -- not one merged
+    collection. Three requirements decided it. Regenerating for A must not
+    disturb B, and a keyed store makes that structural rather than careful:
+    the write for A touches A's key. A discard frees one slot, which is one
+    pop. And a cold cache must rebuild every candidate the user tried, which
+    is a walk over the document's list regenerating whatever is missing --
+    the same walk this function is. The merge into one collection happens
+    at payload time (build_roads_payload), where the one-collection wire
+    contract lives, and nowhere earlier.
+
+    ORDER-INDEPENDENT BY CONSTRUCTION: each set is computed from the same
+    `assembled` inputs plus its own user input, never from another set's
+    result, so the store's contents do not depend on the order the sets
+    were generated in. test_roads_step.py section 5 asserts that rather
+    than trusting this sentence.
+    """
+    accumulation = definition.accumulate
+    key_of = step_registry.resolve(accumulation.key)
+    recorded = recorded_candidate_inputs(definition, document["steps"][definition.step_id])
+
+    existing = context.step_proposals.get(definition.step_id)
+    if not isinstance(existing, dict) or any(
+        not isinstance(entry, dict) or "result" not in entry for entry in existing.values()
+    ):
+        existing = {}
+
+    rebuilt = {}
+    for value in recorded:
+        key = key_of(value)
+        if key in existing:
+            rebuilt[key] = existing[key]
+            continue
+        params = {accumulation.keyed_by: value}
+        rebuilt[key] = {"inputs": params, "result": _run_entry_point(definition, assembled, params)}
+    context.step_proposals[definition.step_id] = rebuilt
+    return rebuilt
 
 
 # ======================================================================
@@ -526,7 +763,11 @@ def generate_step(
     definition = step_registry.get_step(step_id)
     validated_params = validate_params(definition, params)
 
-    if definition.upstream_steps():
+    # THREE SYNCHRONOUS CHECKS NEED THE DOCUMENT: the upstream commits, a
+    # user input's validator (the access point against the boundary), and
+    # an accumulating step's cap. A step with none of them (landform) reads
+    # no document here, exactly as before.
+    if definition.upstream_steps() or definition.user_inputs or definition.accumulate:
         try:
             document = store.get(session_id)
         except Exception:
@@ -537,6 +778,11 @@ def generate_step(
             document = None
         if document is not None:
             check_upstream_commits(definition, document)
+            validate_inputs_on_boundary(definition, validated_params, document["boundary"])
+            if definition.accumulate:
+                check_candidate_cap(
+                    definition, document, accumulation_key(definition, validated_params)
+                )
 
     # `is None`, never `or`: JobRunner defines __len__, so a caller-supplied
     # runner holding no jobs is FALSY and `or` would silently swap in the
@@ -678,10 +924,13 @@ def _generate(
         session_id, store, fetch_cache=fetch_cache, cache=cache
     )
 
+    validate_inputs_on_boundary(definition, params, document["boundary"])
     assembled = assemble_consumes(definition, context, document)
-    arguments = forwarded_arguments(definition, assembled, params)
 
-    result = definition.resolve_generate()(**arguments)
+    if definition.accumulate:
+        return _generate_accumulated(definition, store, context, document, assembled, params)
+
+    result = _run_entry_point(definition, assembled, params)
 
     # The proposals, cached where session_cache.py reserved room for them:
     # heavy, native, and regenerable from the document, so they belong in
@@ -706,6 +955,124 @@ def _generate(
         store.put(updated)
 
     return payload, updated
+
+
+def _generate_accumulated(definition, store, context, document, assembled, params) -> tuple:
+    """
+    The accumulate branch of _generate(): (payload, document).
+
+    ONE SET REPLACED, THE REST KEPT. The store is first brought into
+    agreement with the document (every recorded input has a result), then
+    the set for THIS input is computed and written under its key --
+    replacing a previous result for the same input, appending for a new one
+    -- and the payload is built over the whole store.
+
+    TWO DOCUMENT WRITES, COLLAPSED INTO ONE PUT. The status (mark_step_
+    generated, a no-op after the first) and the recorded inputs (record_
+    step_inputs, a no-op for an input already recorded). A regenerate for a
+    recorded input therefore bumps nothing, which is the same repeatability
+    contract the replace path keeps.
+    """
+    accumulation = definition.accumulate
+    key = accumulation_key(definition, params)
+    check_candidate_cap(definition, document, key)
+
+    proposals = _ensure_accumulated_proposals(definition, context, document, assembled)
+    proposals[key] = {"inputs": params, "result": _run_entry_point(definition, assembled, params)}
+
+    payload = definition.resolve_payload()(proposals, assembled)
+
+    updated = mark_step_generated(document, definition.step_id)
+    recorded = recorded_candidate_inputs(definition, updated["steps"][definition.step_id])
+    key_of = step_registry.resolve(accumulation.key)
+    if key not in {key_of(value) for value in recorded}:
+        recorded.append(params[accumulation.keyed_by])
+    updated = design_document.record_step_inputs(
+        updated, definition.step_id, _inputs_document(definition, recorded)
+    )
+    if updated is not document:
+        store.put(updated)
+    return payload, updated
+
+
+def accumulated_payload(definition, context, document) -> dict:
+    """
+    An accumulating step's payload over EVERY recorded candidate set --
+    the read verb's and the restore's shared path. Regenerates whatever the
+    cache lost, writes nothing to the document.
+    """
+    assembled = assemble_consumes(definition, context, document)
+    proposals = _ensure_accumulated_proposals(definition, context, document, assembled)
+    return definition.resolve_payload()(proposals, assembled)
+
+
+def discard_candidate(
+    session_id: str,
+    step_id: str,
+    store,
+    params: Optional[dict] = None,
+    fetch_cache: Optional[session_cache.FetchCache] = None,
+    cache: Optional[session_cache.SessionCache] = None,
+) -> dict:
+    """
+    Discard ONE candidate set of an accumulating step, freeing its slot.
+    Returns the NEW Design Document.
+
+    `params` names the set exactly as the generate that made it did -- the
+    same user input, validated the same way -- so a client discards what it
+    generated with the value it generated it from. The document's recorded
+    list loses the value (design_document.record_step_inputs) and the cache
+    loses the result; a subsequent generate for the same input starts a
+    fresh set in a fresh slot.
+
+    SYNCHRONOUS AND CHEAP: one document write and one dict pop. The cache is
+    consulted without rebuilding it -- a discard on an evicted session has
+    nothing to pop, and rebuilding a context to remove one key from it would
+    be the opposite of cheap.
+
+    Refuses (StepOrchestrationError -> 400) a step that does not accumulate:
+    its generate replaces, so there is no slot to free. Refuses
+    (DocumentError -> 409) a step that is not generated: a committed step's
+    inputs are the commit's own, and a not_started step records none.
+    Refuses (CandidateNotFoundError -> 404) an input the step does not hold.
+    """
+    definition = step_registry.get_step(step_id)
+    if not definition.accumulate:
+        raise StepOrchestrationError(
+            f"step '{step_id}' does not accumulate candidate sets; its "
+            f"generate replaces its proposals, so there is nothing to discard"
+        )
+    validated = validate_params(definition, params)
+    key = accumulation_key(definition, validated)
+    accumulation = definition.accumulate
+    key_of = step_registry.resolve(accumulation.key)
+
+    document = store.get(session_id)
+    entry = document["steps"][step_id]
+    if entry["status"] != design_document.STATUS_GENERATED:
+        raise design_document.DocumentError(
+            f"cannot discard a candidate from step '{step_id}' with status "
+            f"'{entry['status']}'; only a generated step holds candidate sets"
+        )
+    recorded = recorded_candidate_inputs(definition, entry)
+    remaining = [value for value in recorded if key_of(value) != key]
+    if len(remaining) == len(recorded):
+        raise CandidateNotFoundError(step_id, list(validated[accumulation.keyed_by]))
+
+    updated = design_document.record_step_inputs(
+        document, step_id, _inputs_document(definition, remaining)
+    )
+    store.put(updated)
+
+    if cache is None:
+        cache = session_cache.DEFAULT_SESSION_CACHE
+    context = cache.get(session_id)
+    if context is not None:
+        proposals = context.step_proposals.get(step_id)
+        if isinstance(proposals, dict):
+            proposals.pop(key, None)
+        context.step_restored.pop(step_id, None)
+    return updated
 
 
 # ======================================================================
@@ -796,6 +1163,13 @@ def step_payload(
     context = session_manager.get_session_context(
         session_id, store, fetch_cache=fetch_cache, cache=cache
     )
+    # AN ACCUMULATING STEP'S PAYLOAD IS EVERY RECORDED CANDIDATE SET, hit or
+    # miss: the store is reconciled with the document's list and whatever
+    # the cache lost is regenerated. A partial miss (three recorded, one
+    # evicted) is the same walk.
+    if definition.accumulate:
+        return accumulated_payload(definition, context, document)
+
     result = context.step_proposals.get(step_id)
     if result is None:
         return run_generate(
@@ -982,6 +1356,84 @@ def build_water_payload(result: dict, assembled: dict) -> dict:
         # is already here as summary["gates"]. A second key holding that same
         # digest under the internal name would look like the native object
         # and be a copy of the digest.
+    }
+
+
+def build_roads_payload(proposals: dict, assembled: dict) -> dict:
+    """
+    The roads step's wire payload: EVERY candidate network, merged into one
+    proposal collection, beside a per-network block.
+
+    `proposals` is the accumulating step's KEYED STORE (see _ensure_
+    accumulated_proposals) -- candidate-set key -> {"inputs", "result"} --
+    not one entry point result, which is the shape difference between this
+    builder and the two before it. Each result is identify_road_corridor_
+    candidates()'s own return for ONE access point.
+
+        {
+          "road_corridors": FeatureCollection,   # one LineString per branch,
+                                                 #   every network, ids carrying
+                                                 #   the network id
+          "networks": [                          # in the order the access
+            {                                    #   points were tried
+              "network_id", "access_point", "feature_ids",
+              ...build_narrative_data()'s block, whole: network_found,
+                 stop_reason, determination, access, branches
+            }, ...
+          ],
+          "summary": {"network_count", "max_networks", "slots_remaining"},
+        }
+
+    THE COLLECTION IS REBUILT HERE WITH THE NETWORK ID, not carried from the
+    result's own zones_geojson: the entry point minted "road-corridor-<n>"
+    knowing nothing of other networks, and two networks' trunks would share
+    an id. wire_translation.road_network_to_feature_collection() takes the
+    network id and the access point and stamps both; nothing else about the
+    features changes. floodplain_data_is_fallback is read off the result's
+    OWN narrative block -- the value the run actually applied.
+
+    EACH NETWORK'S NARRATIVE BLOCK IS ITS OWN. build_narrative_data() ran
+    once per generate, so `access.reaches_water_zone` -- a boolean that was
+    ambiguous with one network and a union of zones -- is a per-network fact
+    here: this network's spur reached the selected water ground, or did
+    not. Nothing had to change for that to be true; the per-network
+    candidate is what made the boolean unambiguous.
+    """
+    from feature_schema import make_feature_collection
+    from wire_translation import road_network_to_feature_collection
+
+    features = []
+    networks = []
+    for key, entry in proposals.items():
+        result = entry["result"]
+        access_point = entry["inputs"]["access_point"]
+        narrative = result["narrative_data"]
+        collection = road_network_to_feature_collection(
+            result["road_network"],
+            floodplain_data_is_fallback=bool(
+                narrative["determination"]["floodplain_data_is_fallback"]
+            ),
+            network_id=key,
+            access_point=access_point,
+        )
+        features.extend(collection["features"])
+        networks.append(
+            {
+                "network_id": key,
+                "access_point": [float(access_point[0]), float(access_point[1])],
+                "feature_ids": [feature["id"] for feature in collection["features"]],
+                **narrative,
+            }
+        )
+    max_networks = step_registry.get_step("roads").accumulate.max_candidates
+    return {
+        "road_corridors": make_feature_collection(features),
+        "networks": networks,
+        "summary": {
+            "network_count": len(networks),
+            "max_networks": max_networks,
+            "slots_remaining": max(max_networks - len(networks), 0),
+        },
     }
 
 
@@ -1175,11 +1627,17 @@ def commit_step(
     current document, so the caller can rebase without a round trip) comes
     from the write.
 
-    `inputs` is the step's collected user inputs, stored verbatim on the
-    entry. Landform collects none.
+    `inputs` is the step's collected user inputs. Landform and water collect
+    none and store whatever arrives verbatim (None). A step that DECLARES
+    user inputs has them checked FIRST (validate_commit_inputs): the body
+    must carry them, in shape and on the boundary, or the commit is refused
+    before any geometry is looked at -- and for an accumulating step every
+    committed feature must come from a candidate set whose input is in the
+    declared list, checked after the gate as a per-feature rejection.
     """
     definition = step_registry.get_step(step_id)
     document = store.get(session_id)
+    inputs = validate_commit_inputs(definition, inputs, document["boundary"])
     context = session_manager.get_session_context(
         session_id, store, fetch_cache=fetch_cache, cache=cache
     )
@@ -1192,6 +1650,7 @@ def commit_step(
         context.dem,
         context.boundary_polygon_utm,
     )
+    check_features_against_inputs(definition, features, inputs)
 
     # 2. Crossings, recorded alongside each feature. Measured against the
     # session's own exclusion result -- the same gates the proposals were
@@ -1216,9 +1675,26 @@ def commit_step(
     # through committed_internal_value() gets the rehydration this commit
     # already paid for rather than doing it a second time. Keyed by the
     # revision the write just produced.
+    #
+    # WARM AND COLD MUST AGREE. For an ungrouped contract the gate's
+    # per-feature rehydration IS the collection's (one patch per feature),
+    # so it is cached as paid for. For a GROUPED contract it is not: the
+    # gate rehydrated each road branch alone, producing one-branch networks,
+    # where the collection rehydrator assembles the branches into their
+    # network. Caching the gate's list would serve a different shape on a
+    # warm read than a cold read rebuilds -- so a grouped commit is put
+    # through the same _rehydrate_committed() the cold path uses. One more
+    # pass over geometry in hand; identical answers by construction.
+    if definition.commit_contract.feature_group:
+        value = _rehydrate_committed(
+            updated["steps"][step_id]["features"], provenance,
+            definition.commit_contract, context.dem,
+        )
+    else:
+        value = check.rehydrated
     context.step_committed[step_id] = {
         "revision": updated["steps"][step_id]["revision"],
-        "value": check.rehydrated,
+        "value": value,
     }
     # A COMMIT INVALIDATES THE SAME THINGS A REOPEN DOES. design_document.
     # commit_step() resets every later step in the document when it
@@ -1233,6 +1709,118 @@ def commit_step(
     run_post_commit_hooks(definition, context, updated)
 
     return updated
+
+
+def validate_commit_inputs(definition, inputs, boundary):
+    """
+    A commit body's `inputs` against the step's declared UserInputs.
+    Returns the normalised inputs to store, or `inputs` untouched for a
+    step that declares none.
+
+    THE SERVER END OF A KNOWN CLIENT GAP. See CommitInputError: a body
+    missing a declared input is refused at 400, never accepted as a commit
+    with no input. For an accumulating step the input travels as the LIST
+    of every value tried (Accumulation.inputs_list), and every element is
+    shape-checked and boundary-validated exactly as a generate's param is.
+    An EMPTY list is legal only alongside an EMPTY commit -- "no road, and no
+    access point was ever placed" -- which check_features_against_inputs()
+    enforces once the features are known.
+    """
+    if not definition.user_inputs:
+        return inputs
+    if not isinstance(inputs, dict):
+        raise CommitInputError(
+            f"step '{definition.step_id}' declares required user input(s) "
+            f"{definition.user_input_names()}; the commit body carries no "
+            f"'inputs'. An absent input is not a decision."
+        )
+    accumulation = definition.accumulate
+    normalised = {}
+    singular = list(definition.user_inputs)
+    if accumulation is not None:
+        user_input = definition.user_input(accumulation.keyed_by)
+        singular = [ui for ui in singular if ui.name != accumulation.keyed_by]
+        values = inputs.get(accumulation.inputs_list)
+        if not isinstance(values, list):
+            raise CommitInputError(
+                f"step '{definition.step_id}' records every "
+                f"'{accumulation.keyed_by}' tried under "
+                f"inputs['{accumulation.inputs_list}'] (a list); the commit "
+                f"body carries {values!r}."
+            )
+        checked = []
+        for index, value in enumerate(values):
+            where = (
+                f"step '{definition.step_id}' inputs['{accumulation.inputs_list}'][{index}]"
+            )
+            normal = _INPUT_SHAPE_CHECKS[user_input.shape](value, where)
+            if user_input.validate:
+                try:
+                    step_registry.resolve(user_input.validate)(boundary, normal)
+                except ValueError as exc:
+                    raise StepOrchestrationError(f"{where} was rejected: {exc}") from exc
+            checked.append(list(normal))
+        normalised[accumulation.inputs_list] = checked
+    for user_input in singular:
+        if user_input.name not in inputs:
+            raise CommitInputError(
+                f"step '{definition.step_id}' declares required user input "
+                f"'{user_input.name}'; the commit body's inputs carry "
+                f"{sorted(inputs)}."
+            )
+        where = f"step '{definition.step_id}' inputs['{user_input.name}']"
+        normal = _INPUT_SHAPE_CHECKS[user_input.shape](inputs[user_input.name], where)
+        if user_input.validate:
+            try:
+                step_registry.resolve(user_input.validate)(boundary, normal)
+            except ValueError as exc:
+                raise StepOrchestrationError(f"{where} was rejected: {exc}") from exc
+        normalised[user_input.name] = list(normal)
+    unknown = sorted(set(inputs) - set(normalised))
+    if unknown:
+        raise CommitInputError(
+            f"step '{definition.step_id}' accepts inputs {sorted(normalised)}; "
+            f"got unknown {unknown}"
+        )
+    return normalised
+
+
+def check_features_against_inputs(definition, features: dict, inputs) -> None:
+    """
+    For an accumulating step: every committed feature must carry the key of
+    a candidate set whose input is in the declared list. Raises
+    CommitRejectedError naming each feature that does not.
+
+    WHY THIS IS A GATE. The declared list is what a reopen regenerates from
+    and what the document says the user tried. A committed network whose
+    access point is not in that list would be restored as nothing -- its
+    ids matching no regenerated proposal -- and the user's selection would
+    quietly vanish on reopen. The mismatch is a client that lost an input,
+    and it is told so at commit rather than at reopen.
+    """
+    accumulation = definition.accumulate
+    if accumulation is None or not definition.user_inputs:
+        return
+    key_of = step_registry.resolve(accumulation.key)
+    declared = {key_of(value) for value in inputs.get(accumulation.inputs_list, [])}
+    rejections = []
+    for feature in (features or {}).get("features") or []:
+        key = (feature.get("properties") or {}).get(accumulation.feature_key_property)
+        if key not in declared:
+            rejections.append(
+                commit_validation.FeatureRejection(
+                    feature.get("id"),
+                    commit_validation.REJECT_INPUT_NOT_DECLARED,
+                    f"This feature came from the candidate set "
+                    f"{accumulation.feature_key_property}={key!r}, whose "
+                    f"'{accumulation.keyed_by}' is not among the "
+                    f"{len(declared)} declared in "
+                    f"inputs['{accumulation.inputs_list}']. A reopen could "
+                    f"not restore it.",
+                )
+            )
+    if rejections:
+        raise commit_validation.CommitRejectedError(definition.step_id, rejections)
 
 
 # ======================================================================
@@ -1339,14 +1927,24 @@ def restore_step_state(
     # the roads step from a different access point than the one they chose
     # would restore a candidate set they never saw. Landform collects none,
     # so this is {} there and the validation is the meaningful part.
-    payload = run_generate(
-        session_id,
-        definition,
-        store,
-        validate_params(definition, entry.get("inputs")),
-        fetch_cache=fetch_cache,
-        cache=cache,
-    )
+    if definition.accumulate:
+        # EVERY CANDIDATE, NOT JUST THE COMMITTED ONE. The reopened entry's
+        # `inputs` list carries every access point the user tried (the
+        # commit gate required it), and the restore regenerates a network
+        # for each -- the alternatives are part of their work.
+        context = session_manager.get_session_context(
+            session_id, store, fetch_cache=fetch_cache, cache=cache
+        )
+        payload = accumulated_payload(definition, context, document)
+    else:
+        payload = run_generate(
+            session_id,
+            definition,
+            store,
+            validate_params(definition, entry.get("inputs")),
+            fetch_cache=fetch_cache,
+            cache=cache,
+        )
 
     features = (entry.get("features") or {}).get("features") or []
     provenance = entry.get("provenance") or {}

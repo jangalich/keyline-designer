@@ -123,6 +123,7 @@ import exclusion_zones
 import farm_roads_data
 import keypoint_detection
 import parcel_data
+import road_corridors
 import valley_delineation
 
 # --- boundary hashing ------------------------------------------------
@@ -358,12 +359,33 @@ class SessionContext:
     valleys: list
     keypoints: list
     exclusion_zones: dict
+    # THE FLOODPLAIN COST-PENALTY UNION, and whether it is the DEM-only
+    # valley-line fallback. NHD stream/water-body buffers plus SSURGO hydric
+    # polygons, derived by road_corridors._fetch_floodplain_hydric_union()
+    # from ParcelData's OWN rows -- network-free, exactly as
+    # build_pipeline_context() derives it -- and kept here because ROADS,
+    # SOLAR and TREES all read the same union as a soft routing/siting
+    # penalty. It joined the warm-up with the roads registry entry: the
+    # registry can only forward what the cache holds, and without a home
+    # here the roads generate re-fetched NHD and SSURGO on every regenerate.
+    # Legitimately None when neither source found anything and no valley
+    # exists to fall back on (the same None the batch path forwards).
+    hydric_floodplain_union: object = None
+    hydric_floodplain_is_fallback: bool = False
     # PER-STEP GENERATE PROPOSALS, step_id -> the entry point's own internal
     # result. Heavy, native, and regenerable from the document, so they
     # belong in this tier and not in the document, which records only
     # decisions. Warm-up creates none and rebuild restores none: a proposal
     # is recreated by re-running the step's generate, which is idempotent and
     # network-free by contract.
+    #
+    # ONE SHAPE PER KIND OF STEP. A step whose generate REPLACES (landform,
+    # water) holds its entry point's result directly. A step whose generates
+    # ACCUMULATE (roads -- step_registry.Accumulation) holds an insertion-
+    # ordered dict, candidate-set key -> {"inputs": {...}, "result": ...},
+    # one entry per user input tried, so regenerating for one input
+    # replaces exactly that entry and disturbs no other. The orchestrator
+    # reads the registry to know which; nothing here does.
     step_proposals: dict = field(default_factory=dict)
 
     # PER-STEP COMMITTED VALUES, REHYDRATED. step_id -> {"revision": int,
@@ -466,11 +488,30 @@ def run_terrain_warm_up(boundary_coordinates: list, parcel: object) -> dict:
         road_exclusion_union_utm=existing_roads,
     )
 
+    # THE FLOODPLAIN UNION, from ParcelData's own rows -- soil_components,
+    # water_features and soil_geometries are all forwarded, so the builder
+    # issues none of its three fetches; only its clip/buffer/union arithmetic
+    # runs. valleys= is the fallback source when neither real source has
+    # anything. See SessionContext.hydric_floodplain_union.
+    hydric_floodplain_union, hydric_floodplain_is_fallback = (
+        road_corridors._fetch_floodplain_hydric_union(
+            boundary_coordinates,
+            dem,
+            valleys,
+            boundary_polygon_utm,
+            soil_components=parcel.soil_components,
+            water_features=parcel.water_features,
+            soil_geometries=parcel.soil_geometries,
+        )
+    )
+
     return {
         "valleys": valleys,
         "keypoints": keypoints,
         "existing_roads": existing_roads,
         "exclusion_zones": exclusion_result,
+        "hydric_floodplain_union": hydric_floodplain_union,
+        "hydric_floodplain_is_fallback": hydric_floodplain_is_fallback,
     }
 
 
@@ -498,6 +539,8 @@ def build_session_context(
         valleys=warm["valleys"],
         keypoints=warm["keypoints"],
         exclusion_zones=warm["exclusion_zones"],
+        hydric_floodplain_union=warm["hydric_floodplain_union"],
+        hydric_floodplain_is_fallback=warm["hydric_floodplain_is_fallback"],
     )
 
 

@@ -11,6 +11,7 @@ THE HTTP SURFACE over the session orchestrator
     POST   /api/sessions/<sid>/steps/<step>/commit   -> 200 document
     POST   /api/sessions/<sid>/steps/<step>/reopen   -> 200 document
     GET    /api/sessions/<sid>/steps/<step>/layers   -> 200 step payload
+    POST   /api/sessions/<sid>/steps/<step>/discard  -> 200 document
     GET    /api/jobs/<jid>                           -> 200 {status, result|error}
 
 WIRING, AND NOTHING BUT. Every behaviour these routes expose already exists
@@ -84,10 +85,13 @@ from typing import Optional
 
 from flask import Blueprint, current_app, jsonify, request
 
+import canopy_height_data
 import commit_validation
 import design_document
 import document_store
 import job_runner
+import parcel_data
+import production_zone_payload
 import session_cache
 import session_manager
 import step_orchestrator
@@ -240,6 +244,56 @@ def _not_generated_payload(exc: step_orchestrator.StepNotGeneratedError) -> dict
     return {"error": str(exc), "step_id": exc.step_id, "status": exc.status}
 
 
+def _cap_payload(exc: step_orchestrator.CandidateCapReachedError) -> dict:
+    """
+    409 NAMING THE CAP AND THE CANDIDATES HOLDING IT. The client's next
+    action is "discard one", and that needs the list of what is there.
+    """
+    return {
+        "error": str(exc),
+        "step_id": exc.step_id,
+        "max_candidates": exc.max_candidates,
+        "candidates": exc.candidates,
+    }
+
+
+def _failed_layer_payload(exc: BaseException) -> dict:
+    """
+    502 CARRYING failed_layer {type, label} -- THE GENERATE-JOB SHAPE, ON
+    THE SESSION-CREATION PATH.
+
+    POST /api/sessions fetches Layer 1 and runs the terrain warm-up before
+    it returns, so a data source that does not answer fails the CREATE, and
+    until this builder existed that failure reached Flask's 500 handler
+    with no failed_layer on the wire. The frontend already renders a
+    failure notice from `failed_layer.label` (InstructionBar.jsx) and
+    branches on `.type`; it just could not name the layer, because nothing
+    put one in the body. This is the same {error, failed_layer} shape
+    /api/production-zones sends at 502 and a failed generate job carries,
+    read off the exception's OWN layer/label -- LayerFetchError has always
+    carried them, ParcelDataIncompleteError carries them since the roads
+    branch, and the canopy coverage error names the canopy pair.
+
+    502, not 500: the request was fine and the server's own code did not
+    break; an upstream source did. Same code /api/production-zones uses
+    for the same condition, so a client's retry policy sees one number.
+
+    A raise site that carries no layer reports the generic error and NO
+    failed_layer -- the "the data sources did not respond" branch the
+    frontend already renders for a null layer -- rather than inventing one.
+    """
+    if isinstance(exc, canopy_height_data.CanopyCoverageIncompleteError):
+        layer, label = production_zone_payload.LAYER_CANOPY
+    else:
+        layer, label = getattr(exc, "layer", None), getattr(exc, "label", None)
+    if not layer:
+        return {"error": "The parcel's data sources did not respond."}
+    return {
+        "error": f"The {label} could not be retrieved.",
+        "failed_layer": {"type": layer, "label": label},
+    }
+
+
 # (exception type, status, payload builder). A payload builder of None means
 # the generic {"error": str(exc)} shape the endpoints in api.py already send.
 _API_ERRORS = (
@@ -306,11 +360,29 @@ _API_ERRORS = (
     # unreachable from these routes -- commit_validation.check_commit() runs
     # first and rejects all of it at 422, per feature.
     (design_document.DocumentError, 409, None),
+    # An accumulating step already holding its cap of candidate sets. The
+    # request was well-formed; the session's state refuses it. Listed ABOVE
+    # StepOrchestrationError, its base, so it is not swallowed into a 400.
+    (step_orchestrator.CandidateCapReachedError, 409, _cap_payload),
+    # A discard naming a candidate the step does not hold -- the thing
+    # addressed does not exist. Above its base for the same reason.
+    (step_orchestrator.CandidateNotFoundError, 404, None),
+    # --- 502: an upstream data source did not answer ------------------
+    # THE SESSION-CREATION PATH'S failed_layer. See _failed_layer_payload.
+    # These were absent from this table, so _map_error returned None and a
+    # failed POST /api/sessions reached the 500 handler unable to name the
+    # layer. Nothing else on this surface can raise them: every generate
+    # runs on a job and reports through step_orchestrator.error_payload().
+    (production_zone_payload.LayerFetchError, 502, _failed_layer_payload),
+    (parcel_data.ParcelDataIncompleteError, 502, _failed_layer_payload),
+    (canopy_height_data.CanopyCoverageIncompleteError, 502, _failed_layer_payload),
     # --- 400: the request itself is malformed --------------------------
     (session_manager.BoundaryValidationError, 400, None),
-    # Unknown or missing `params` against the step's declared user_inputs.
-    # Raised by generate_step() BEFORE a job exists, which is what makes it
-    # a 400 rather than a failed job -- there is nothing to poll for.
+    # Unknown or missing `params` against the step's declared user_inputs,
+    # a param of the wrong shape or off the boundary, or a commit body
+    # missing an input the step declares as required. Raised by
+    # generate_step() BEFORE a job exists, which is what makes it a 400
+    # rather than a failed job -- there is nothing to poll for.
     (step_orchestrator.StepOrchestrationError, 400, None),
 )
 
@@ -673,6 +745,38 @@ def build_blueprint(deps: Optional[Dependencies] = None, name: str = "sessions")
                 cache=deps.cache,
             )
         )
+
+    @blueprint.route(
+        "/api/sessions/<session_id>/steps/<step_id>/discard", methods=["POST"]
+    )
+    @_handled
+    def discard_candidate_endpoint(session_id, step_id):
+        """
+        Discard ONE candidate set of an ACCUMULATING step, freeing its slot.
+        Expects the same body a generate takes -- {"params": {...}} naming
+        the user input the candidate set was generated from -- and returns
+        the NEW Design Document, 200.
+
+        THE VERB THE THIRD REGISTRY ENTRY NEEDED. Landform and water replace
+        their proposals on every generate, so "discard" was "generate
+        again". Roads keeps one network per access point side by side, up
+        to a cap the server enforces, and freeing a slot is a decision the
+        document records (the tried access points live there) -- so it is a
+        write verb of its own rather than a client-side deletion the server
+        never hears about.
+
+        A step whose registry entry does not accumulate has nothing to
+        discard and answers 400; a candidate the step does not hold is 404.
+        """
+        document = step_orchestrator.discard_candidate(
+            session_id,
+            step_id,
+            deps.resolved_store(),
+            params=_json_body().get("params"),
+            fetch_cache=deps.fetch_cache,
+            cache=deps.cache,
+        )
+        return jsonify(_document_body(document))
 
     @blueprint.route("/api/jobs/<job_id>", methods=["GET"])
     @_handled

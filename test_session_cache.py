@@ -387,6 +387,11 @@ assert set(vars(context)) == {
     "valleys",
     "keypoints",
     "exclusion_zones",
+    # The floodplain cost-penalty union and its fallback flag, derived by the
+    # warm-up from ParcelData's own rows for the roads, solar and trees
+    # steps -- regenerable from the document, so it belongs here.
+    "hydric_floodplain_union",
+    "hydric_floodplain_is_fallback",
     "step_proposals",
     "step_committed",
     "step_restored",

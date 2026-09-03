@@ -1035,10 +1035,11 @@ SYNTHETIC_TREES = step_registry.StepDefinition(
 with Harness() as h, mock_patch.dict(
     step_registry.STEP_REGISTRY, {"trees": SYNTHETIC_TREES}
 ):
-    assert step_registry.dependents_of("water") == ("trees",), (
-        "the consumes edge IS the invalidation edge"
+    assert step_registry.dependents_of("water") == ("roads", "trees"), (
+        "the consumes edge IS the invalidation edge -- the real roads entry and "
+        "the synthetic trees one both read water's commit"
     )
-    assert step_registry.transitive_dependents("landform") == ("water", "trees"), (
+    assert step_registry.transitive_dependents("landform") == ("water", "roads", "trees"), (
         "staleness is transitive: reopening landform makes the tree proposals "
         "stale too, because they were computed from a water answer that was "
         "itself computed from the landform commit"

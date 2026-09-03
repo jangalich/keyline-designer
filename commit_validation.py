@@ -167,6 +167,16 @@ REJECT_UNKNOWN_PROVENANCE = "unknown_provenance"
 REJECT_ORPHAN_PROVENANCE = "provenance_names_no_feature"
 REJECT_INVALID_GEOMETRY = "invalid_geometry"
 REJECT_OUTSIDE_BOUNDARY = "outside_boundary"
+# A contract that counts GROUPS of features (CommitContract.feature_group)
+# needs every feature to say which group it is in; one that does not cannot
+# be counted as anything.
+REJECT_MISSING_GROUP = "missing_feature_group"
+# The group's own coherence check (CommitContract.group_check) refused it --
+# for roads, a spur committed without the trunk it grows off.
+REJECT_INCOHERENT_GROUP = "incoherent_feature_group"
+# A feature from a candidate set whose user input is not among the inputs
+# the commit declares (step_registry.Accumulation.feature_key_property).
+REJECT_INPUT_NOT_DECLARED = "input_not_declared"
 
 
 @dataclass(frozen=True)
@@ -503,22 +513,45 @@ def check_commit(
     # THE COUNT. min_features is 0 for every step, and an empty commit is a
     # decision rather than an omission -- so this is not a "did you forget to
     # select something" check and must never become one.
-    if len(feature_list) < contract.min_features:
+    #
+    # COUNTED IN THE CONTRACT'S UNIT. For landform and water the unit is the
+    # feature. For a contract declaring feature_group the unit is the GROUP
+    # of features sharing that property's value -- a road network committed
+    # as its branches -- and "at most one" means one network, however many
+    # branches it has. See CommitContract.feature_group.
+    unit = "feature"
+    unit_count = len(feature_list)
+    if contract.feature_group:
+        unit = f"{contract.feature_group} group"
+        unit_count = len(
+            {
+                (feature.get("properties") or {}).get(contract.feature_group)
+                for feature in feature_list
+                if isinstance(feature, dict)
+                and (feature.get("properties") or {}).get(contract.feature_group) is not None
+            }
+        )
+    if unit_count < contract.min_features:
         rejections.append(
             FeatureRejection(
                 None,
                 REJECT_TOO_FEW,
-                f"This step needs at least {contract.min_features} feature(s); "
-                f"{len(feature_list)} were committed.",
+                f"This step needs at least {contract.min_features} {unit}(s); "
+                f"{unit_count} were committed.",
             )
         )
-    if contract.max_features is not None and len(feature_list) > contract.max_features:
+    if contract.max_features is not None and unit_count > contract.max_features:
         rejections.append(
             FeatureRejection(
                 None,
                 REJECT_TOO_MANY,
-                f"This step takes at most {contract.max_features} feature(s); "
-                f"{len(feature_list)} were committed.",
+                f"This step takes at most {contract.max_features} {unit}(s); "
+                f"{unit_count} were committed"
+                + (
+                    f" ({len(feature_list)} features across them)."
+                    if contract.feature_group
+                    else "."
+                ),
             )
         )
 
@@ -593,6 +626,19 @@ def check_commit(
             )
             rejected_here = True
 
+        if contract.feature_group and properties.get(contract.feature_group) is None:
+            rejections.append(
+                FeatureRejection(
+                    feature_id,
+                    REJECT_MISSING_GROUP,
+                    f"This step counts its commit in groups by "
+                    f"{contract.feature_group!r}, and this feature carries no "
+                    f"{contract.feature_group}. A feature with no group cannot "
+                    "be counted as anything.",
+                )
+            )
+            rejected_here = True
+
         if contract.requires_provenance:
             classification = provenance.get(feature_id)
             if classification is None:
@@ -634,6 +680,31 @@ def check_commit(
                     "committed feature set.",
                 )
             )
+
+    # --- per group, the coherence check --------------------------------
+    #
+    # ONLY FOR A GROUPED CONTRACT, and only over features that passed every
+    # cheap check -- a feature already rejected is not made incoherent a
+    # second time. The check reads ids and properties, not geometry, so it
+    # runs ahead of rehydration for the same cheapest-first reason.
+    if contract.feature_group and contract.group_check:
+        group_check = step_registry.resolve(contract.group_check)
+        groups = {}
+        for index in checkable:
+            feature = feature_list[index]
+            key = (feature.get("properties") or {}).get(contract.feature_group)
+            groups.setdefault(key, []).append(index)
+        for key, indexes in groups.items():
+            try:
+                group_check(key, [feature_list[index] for index in indexes])
+            except ValueError as exc:
+                for index in indexes:
+                    rejections.append(
+                        FeatureRejection(
+                            feature_list[index]["id"], REJECT_INCOHERENT_GROUP, str(exc)
+                        )
+                    )
+                checkable = [index for index in checkable if index not in indexes]
 
     # --- per feature, the expensive checks ----------------------------
     internal_ids = internal_ids_for(feature_list, provenance)

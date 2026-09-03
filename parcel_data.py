@@ -64,6 +64,7 @@ any KSOP module yet; that's later, separate branches.
 """
 
 from dataclasses import dataclass
+from typing import Optional
 
 from rasterio.warp import transform as warp_transform
 from shapely.geometry import Polygon
@@ -95,7 +96,31 @@ class ParcelDataIncompleteError(RuntimeError):
     exception on its own. ParcelData has no Optional fields, so that
     sentinel is converted into a hard failure here instead of being
     passed through as None.
+
+    `layer` / `label` NAME THE LAYER, the same two-field split
+    production_zone_payload.LayerFetchError carries: a stable type to
+    branch on and display prose to print. Added so a failed session
+    creation (session_api.py's POST /api/sessions, which reaches
+    fetch_parcel_data() through the fetch cache) can put `failed_layer
+    {type, label}` on the wire the way a failed generate job does, instead
+    of a 500 that cannot say which source did not answer. Both are None on
+    a raise site that predates them, and the API then reports the generic
+    error rather than inventing a layer.
     """
+
+    def __init__(self, message: str, layer: Optional[str] = None, label: Optional[str] = None):
+        super().__init__(message)
+        self.layer = layer
+        self.label = label
+
+
+# The (type, label) pairs the two mandatory-layer raises below report as.
+# The canopy pair is production_zone_payload.LAYER_CANOPY's, asserted equal
+# in test_roads_step.py rather than imported (production_zone_payload
+# imports the whole production pipeline; this module is Layer 1 and must
+# stay below it).
+LAYER_CANOPY = ("canopy", "tree canopy height")
+LAYER_IMAGERY = ("imagery", "satellite imagery")
 
 
 @dataclass
@@ -195,7 +220,8 @@ def fetch_parcel_data(boundary_coordinates: list[tuple[float, float]]) -> Parcel
             "get_canopy_height_for_boundary() found no LiDAR HAG coverage for this "
             "boundary -- canopy_height is a mandatory layer in this module, so a "
             "genuine no-coverage result is a hard failure here, not a value to degrade "
-            "gracefully on."
+            "gracefully on.",
+            *LAYER_CANOPY,
         )
 
     imagery_summary = get_imagery_summary_for_boundary(boundary_coordinates)
@@ -204,7 +230,8 @@ def fetch_parcel_data(boundary_coordinates: list[tuple[float, float]]) -> Parcel
             "get_imagery_summary_for_boundary() found no recent low-cloud scene for this "
             "boundary -- imagery_summary is a mandatory layer in this module (the map is "
             "essential to the report), so a genuine no-scene result is a hard failure "
-            "here, not a value to degrade gracefully on."
+            "here, not a value to degrade gracefully on.",
+            *LAYER_IMAGERY,
         )
 
     # irradiance: the ONE non-hard-failing field (see the dataclass comment

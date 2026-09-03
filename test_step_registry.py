@@ -41,8 +41,8 @@ from design_document import STEP_ORDER
 
 step_registry.validate_registry()
 
-assert step_registry.registered_steps() == ("landform", "water"), (
-    f"two entries are expected on this branch: {step_registry.registered_steps()}"
+assert step_registry.registered_steps() == ("landform", "water", "roads"), (
+    f"three entries are expected on this branch: {step_registry.registered_steps()}"
 )
 assert set(step_registry.STEP_REGISTRY) <= set(STEP_ORDER), (
     "the registry may not invent steps the design document cannot hold"
@@ -530,7 +530,7 @@ assert step_registry.registered_steps() == tuple(
     s for s in STEP_ORDER if s in step_registry.STEP_REGISTRY
 ), "registered_steps() must FILTER STEP_ORDER, never restate an order"
 
-for _unregistered in ("roads", "trees", "structures", "fencing"):
+for _unregistered in ("trees", "structures", "fencing"):
     try:
         step_registry.get_step(_unregistered)
     except step_registry.RegistryError as exc:
@@ -547,14 +547,15 @@ except step_registry.RegistryError as exc:
 else:
     raise AssertionError("a step outside STEP_ORDER must be reported as unknown")
 
-assert step_registry.dependents_of("landform") == ("water",), (
-    "water consumes landform's commit, and the consumes edge IS the "
-    "invalidation edge -- read off the declaration, never restated"
+assert step_registry.dependents_of("landform") == ("water", "roads"), (
+    "water and roads both consume landform's commit, and the consumes edge IS "
+    "the invalidation edge -- read off the declaration, never restated"
 )
-assert step_registry.transitive_dependents("landform") == ("water",)
-assert step_registry.dependents_of("water") == (), (
-    "roads and trees consume the water commit, but neither has an entry yet"
+assert step_registry.transitive_dependents("landform") == ("water", "roads")
+assert step_registry.dependents_of("water") == ("roads",), (
+    "roads consumes the water commit (its entry exists); trees does not yet"
 )
+assert step_registry.transitive_dependents("roads") == ()
 
 print(
     f"6. STEP ORDER: registered_steps() filters design_document.STEP_ORDER "

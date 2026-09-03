@@ -1333,11 +1333,11 @@ SYNTHETIC_WATER = step_registry.StepDefinition(
 with Harness() as h, mock_patch.dict(
     step_registry.STEP_REGISTRY, {"water": SYNTHETIC_WATER}
 ):
-    assert step_registry.dependents_of("landform") == ("water",), (
+    assert step_registry.dependents_of("landform") == ("water", "roads"), (
         "the consumes edge is the invalidation edge -- read off the "
-        "declaration, never restated"
+        "declaration, never restated (roads consumes landform directly too)"
     )
-    assert step_registry.transitive_dependents("landform") == ("water",)
+    assert step_registry.transitive_dependents("landform") == ("water", "roads")
 
     s = Session()
     payload = s.generate()
@@ -1407,7 +1407,10 @@ with Harness() as h, mock_patch.dict(
     # AND THE PRECISION IS REAL: a registered step that consumes NOTHING from
     # landform keeps its cache, where design_document.downstream_steps()
     # would reset it. That difference is why the edges are written down.
-    assert step_registry.transitive_dependents("water") == ()
+    assert step_registry.transitive_dependents("water") == ("roads",), (
+        "the real roads entry consumes the water commit; the synthetic water "
+        "entry here changes nothing about that edge"
+    )
     assert "water" in design_document.downstream_steps("landform")
 
 print(

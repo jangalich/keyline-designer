@@ -104,6 +104,8 @@ ring) by construction.
 
 from typing import Any, Optional
 
+import numpy as np
+
 from feature_schema import (
     CONFIDENCE_LOW,
     CONFIDENCE_MEDIUM,
@@ -896,14 +898,88 @@ def selected_water_zone_to_feature_collection(
     return water_survey_zones_to_feature_collection([selected_water_zone])
 
 
+_ROAD_CORRIDOR_FEATURE_ID_PREFIX = "road-corridor-"
+# The number of hex characters of access_point_key(). Ten -- 40 bits -- is
+# far past any collision a single session's three access points could
+# produce and short enough to read in a feature id.
+_ACCESS_POINT_KEY_LENGTH = 10
+# The coordinate precision the key is taken at. 1e-7 degrees is ~1 cm, the
+# same order as session_cache.BOUNDARY_HASH_PRECISION's reasoning: two
+# access points that differ by less than a centimetre are the same access
+# point, and must key the same so a regenerate replaces rather than adds.
+_ACCESS_POINT_KEY_PRECISION = 7
+ROAD_BRANCH_ROLES = ("trunk", "spur", "water_spur")
+
+
+def access_point_key(lon_lat) -> str:
+    """
+    A short, stable identity for ONE access point: the first ten hex
+    characters of a sha256 over its coordinates at _ACCESS_POINT_KEY_
+    PRECISION. Declared as the roads entry's Accumulation.key.
+
+    WHY AN ID NEEDS THIS. Landform and water got id stability for free: every
+    generate has the same inputs, so a deterministic labelling numbers the
+    same features the same way. Roads generates one network per ACCESS
+    POINT, and identify_road_corridor_candidates() numbers its branches
+    0..n from that call alone -- so a second network's branch 0 would take
+    the same "road-corridor-1" the first network's did, and the user's
+    selection of the first would silently point at the second. Carrying the
+    access point's identity in the id (see road_network_to_feature_
+    collection's `network_id`) is what makes generating for B leave A's ids
+    exactly as they were, which test_roads_step.py asserts rather than
+    assumes.
+
+    A HASH, NOT THE COORDINATES SPELLED OUT: "-79.9835616_40.6430351" in a
+    feature id would be parsed by someone eventually, and a negative sign
+    and two decimal points inside an id that is also split on hyphens is a
+    parser waiting to be written wrong. The key is opaque on purpose; the
+    coordinates travel beside it as properties.access_point.
+
+    Stable across processes and runs (sha256 over a canonical text form,
+    not Python's salted hash()), so a rebuilt cache mints the same ids the
+    evicted one did.
+    """
+    import hashlib
+
+    lon, lat = float(lon_lat[0]), float(lon_lat[1])
+    canonical = f"{lon:.{_ACCESS_POINT_KEY_PRECISION}f},{lat:.{_ACCESS_POINT_KEY_PRECISION}f}"
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:_ACCESS_POINT_KEY_LENGTH]
+
+
+def road_corridor_feature_id(branch_index: int, network_id: Optional[str] = None) -> str:
+    """
+    The ONE spelling of a road branch's wire id, used by the outbound
+    builder below and parsed back by internal_road_branch_identity().
+
+    "road-corridor-<n>" with no network (the batch path, one network per
+    report), or "road-corridor-<network_id>-<n>" on the interactive path,
+    where <network_id> is access_point_key() of the access point the
+    network was grown from. <n> is branch_index + 1, as it always was.
+    """
+    if network_id is None:
+        return f"{_ROAD_CORRIDOR_FEATURE_ID_PREFIX}{branch_index + 1}"
+    return f"{_ROAD_CORRIDOR_FEATURE_ID_PREFIX}{network_id}-{branch_index + 1}"
+
+
 def road_network_to_feature_collection(
     road_network: Optional[dict],
     floodplain_data_is_fallback: bool = False,
+    network_id: Optional[str] = None,
+    access_point: Optional[list] = None,
 ) -> dict:
     """
     road_corridors.build_road_network() output -- ONE LineString Feature
     PER BRANCH, trunk and spur alike, never one feature for the whole
     network (layer="suggested_road_corridor").
+
+    network_id / access_point are the INTERACTIVE PATH's additions, both
+    optional and both absent on the batch path, whose output is unchanged
+    byte for byte. When given, every feature id carries the network id (see
+    road_corridor_feature_id() and access_point_key() for why a session
+    with several networks needs that) and every feature's properties gain
+    `network_id` and `access_point` [lon, lat] -- the id the commit gate
+    groups and counts by, and the input the network was grown from, carried
+    so a client can name a candidate by where it starts.
 
     MOVED here verbatim from road_corridors.corridors_to_geojson(), which
     is now an alias for this function.
@@ -931,9 +1007,20 @@ def road_network_to_feature_collection(
 
     features = []
     for branch in road_network["branches"]:
+        # The two interactive-path properties, added only when a network id
+        # is given so the batch path's feature properties stay exactly as
+        # they were.
+        network_properties = {}
+        if network_id is not None:
+            network_properties["network_id"] = network_id
+            network_properties["access_point"] = (
+                [float(access_point[0]), float(access_point[1])]
+                if access_point is not None
+                else None
+            )
         features.append(
             make_feature(
-                feature_id=f"road-corridor-{branch['branch_index'] + 1}",
+                feature_id=road_corridor_feature_id(branch["branch_index"], network_id),
                 geometry=branch["geometry_wgs84"],
                 layer=LAYER_ROAD_CORRIDOR,
                 label="Suggested road corridor",
@@ -965,7 +1052,13 @@ def road_network_to_feature_collection(
                     # back up itself.
                     "total_length_ft": round(road_network["total_length_meters"] / METERS_PER_FOOT, 1),
                     "total_served_acres": round(road_network["total_served_acres"], 3),
+                    # Carried since the roads registry entry: the inbound
+                    # rehydrator rebuilds the network dict from its
+                    # branches, and served/unserved are the two halves of
+                    # the demand it was routed against. Additive.
+                    "unserved_acres": round(road_network["unserved_acres"], 3),
                     "stop_reason": road_network["stop_reason"],
+                    **network_properties,
                     # Grade is a genuine HARD ceiling now (impassable_
                     # grade_pct, see MAX_ROAD_GRADE_PCT), so unlike before
                     # this branch it's a real guarantee every branch
@@ -1944,3 +2037,333 @@ def water_zone_union(zones: list[dict]) -> dict:
         "zone_ids": [zone["id"] for zone in zones],
         "survey_types": sorted({zone["survey_type"] for zone in zones}),
     }
+
+
+# ======================================================================
+# INBOUND: road networks
+# ======================================================================
+#
+# THE THIRD REHYDRATOR, AND THE FIRST OVER LINES. A committed road branch is
+# a LineString whose vertices are DEM cell CENTRES -- build_road_network()
+# builds geometry_wgs84 from path_cells_to_points_xyz(), which is
+# pixel_center_xy() per cell -- so the inverse hop is exact: each vertex
+# maps back to the one cell whose centre it is, and the branch's `cells`,
+# `points_xyz`, `line_utm` and `cell_footprint_polygon_utm` are all
+# reconstructed from that cell list by the same helpers that built them.
+# Nothing is re-routed, re-costed or re-graded: the per-branch measurements
+# (grade, length, served acreage, crossings) come back off the feature's own
+# properties, which the Design Document stores verbatim, for the reason
+# rehydrate_water_survey_zone() gives -- they are functions of the routing
+# pass, not of the shape, and a second copy re-derived from the shape would
+# be a second answer.
+#
+# WHAT A CONSUMER READS. Every downstream reader of a committed network
+# (tree_zone_candidates, solar_suitability, fencing, render_layout_map)
+# reads exactly two network-level fields -- `cells` and
+# `cell_footprint_polygon_utm` -- and both are reconstructed here, so the
+# rehydrated network is a complete answer for all of them.
+
+
+def internal_road_branch_identity(feature_id: Any) -> Optional[tuple]:
+    """
+    (network_id or None, branch_index) behind an outbound road branch
+    feature id, or None when this module's outbound half did not build it.
+
+    Both spellings parse -- "road-corridor-<n>" (batch, no network) and
+    "road-corridor-<network_id>-<n>" (interactive) -- and the tail is
+    required to be all digits, so an id with the prefix and anything else
+    returns None and is refused by the rehydrator rather than guessed at.
+    """
+    if not isinstance(feature_id, str) or not feature_id.startswith(
+        _ROAD_CORRIDOR_FEATURE_ID_PREFIX
+    ):
+        return None
+    tail = feature_id[len(_ROAD_CORRIDOR_FEATURE_ID_PREFIX):]
+    network_id, separator, ordinal = tail.rpartition("-")
+    if not ordinal.isdigit() or int(ordinal) < 1:
+        return None
+    if not separator:
+        return (None, int(ordinal) - 1)
+    if not network_id or not all(c in "0123456789abcdef" for c in network_id):
+        return None
+    return (network_id, int(ordinal) - 1)
+
+
+def _cell_of_utm_point(dem: dict, x: float, y: float, where: str) -> tuple:
+    """The (row, col) whose ground square contains (x, y), or
+    InboundGeometryError when the point is off the grid."""
+    import math
+
+    px, py = dem["resolution_meters"]
+    col = int(math.floor((x - dem["origin_x"]) / px))
+    row = int(math.floor((dem["origin_y"] - y) / py))
+    rows, cols = dem["array"].shape
+    if not (0 <= row < rows and 0 <= col < cols):
+        raise InboundGeometryError(
+            f"{where}: vertex ({x:.1f}, {y:.1f}) lies outside the DEM grid "
+            f"({rows}x{cols} cells); a road branch is routed over on-parcel "
+            f"cells and cannot leave the grid."
+        )
+    return (row, col)
+
+
+def rehydrate_road_branch(feature: dict, dem: dict) -> dict:
+    """
+    ONE committed road branch Feature -> the internal branch dict, in the
+    shape build_road_network() emits per branch.
+
+    Raises InboundGeometryError, naming the defect, on an id this module did
+    not mint, the wrong layer, a non-LineString, fewer than two vertices, a
+    vertex off the DEM grid, or an unknown branch role. No repair, no
+    invented id: roads are select-only, so a feature without a minted id
+    did not come from this step's proposals.
+    """
+    from rasterio.warp import transform as warp_transform
+    from shapely.geometry import LineString
+
+    from raster_grid import cell_union_footprint
+    from road_cost_path import path_cells_to_points_xyz
+
+    if not isinstance(feature, dict):
+        raise InboundGeometryError(
+            f"a road branch must be a GeoJSON Feature dict, got {type(feature).__name__}"
+        )
+    feature_id = feature.get("id")
+    where = f"road branch {feature_id!r}" if feature_id is not None else "road branch"
+
+    identity = internal_road_branch_identity(feature_id)
+    if identity is None:
+        raise InboundGeometryError(
+            f"{where}: cannot determine a branch identity from feature id {feature_id!r}. "
+            f"Every committable branch carries \"{_ROAD_CORRIDOR_FEATURE_ID_PREFIX}<network>-<n>\" "
+            "-- this step is select-only, so a feature with no pipeline id did not come from its "
+            "proposals and no id is invented for it."
+        )
+    network_id, branch_index = identity
+
+    properties = feature.get("properties") or {}
+    layer = properties.get("layer")
+    if layer != LAYER_ROAD_CORRIDOR:
+        raise InboundGeometryError(
+            f"{where}: carries layer {layer!r}; a committable road branch is on {LAYER_ROAD_CORRIDOR!r}."
+        )
+
+    geometry = feature.get("geometry")
+    if not isinstance(geometry, dict) or geometry.get("type") != "LineString":
+        got = geometry.get("type") if isinstance(geometry, dict) else type(geometry).__name__
+        raise InboundGeometryError(
+            f"{where}: a road branch must be a LineString, got {got!r}. A branch is a route "
+            "over cells; a polygon has no direction and a point no length."
+        )
+    coordinates = geometry.get("coordinates") or []
+    if len(coordinates) < 2:
+        raise InboundGeometryError(
+            f"{where}: a LineString needs at least 2 positions to be a route; got {len(coordinates)}."
+        )
+
+    role = properties.get("branch_role")
+    if role not in ROAD_BRANCH_ROLES:
+        raise InboundGeometryError(
+            f"{where}: branch_role {role!r} is not one of {list(ROAD_BRANCH_ROLES)}."
+        )
+    joins = properties.get("joins_branch_index")
+    if joins is not None and (not isinstance(joins, int) or isinstance(joins, bool) or joins < 0):
+        raise InboundGeometryError(
+            f"{where}: joins_branch_index {joins!r} is not a branch index or null."
+        )
+
+    lons = [float(position[0]) for position in coordinates]
+    lats = [float(position[1]) for position in coordinates]
+    xs, ys = warp_transform("EPSG:4326", dem["crs"], lons, lats)
+
+    # EACH VERTEX IS A CELL CENTRE, so consecutive vertices are distinct
+    # cells; a duplicate cell in sequence would be a vertex that moved less
+    # than a cell, which the outbound builder never produces. Collapsed
+    # rather than refused: it changes no geometry a consumer reads.
+    cells = []
+    for x, y in zip(xs, ys):
+        cell = _cell_of_utm_point(dem, x, y, where)
+        if not cells or cells[-1] != cell:
+            cells.append(cell)
+    if len(cells) < 2:
+        raise InboundGeometryError(
+            f"{where}: the route covers a single DEM cell; a branch needs at least two."
+        )
+
+    points = path_cells_to_points_xyz(dem, cells)
+    line = LineString([(p[0], p[1]) for p in points])
+    branch_cell_mask = np.zeros(dem["array"].shape, dtype=bool)
+    for r, c in cells:
+        branch_cell_mask[r, c] = True
+    footprint = cell_union_footprint(dem, branch_cell_mask)
+
+    def _meters_from_feet(value):
+        return None if value is None else float(value) * METERS_PER_FOOT
+
+    length_ft = properties.get("length_ft")
+    return {
+        "cells": cells,
+        "branch_role": role,
+        "branch_index": branch_index,
+        "joins_branch_index": joins,
+        # NEW construction only, as the router reports it -- read off the
+        # wire, since the joint cell's contribution is the router's to say.
+        # Falls back to the centreline's own length for a feature that
+        # predates the property.
+        "length_meters": (
+            _meters_from_feet(length_ft) if length_ft is not None else float(line.length)
+        ),
+        "newly_served_acres": float(properties.get("newly_served_acres") or 0.0),
+        "points_xyz": points,
+        "line_utm": line,
+        # OFF THE WIRE, NOT REPROJECTED BACK, for the water rehydrator's
+        # reason: it was built once from points_xyz and never edited.
+        "geometry_wgs84": geometry,
+        "cell_footprint_polygon_utm": footprint,
+        "avg_grade_pct": float(properties.get("avg_grade_pct") or 0.0),
+        "max_grade_pct": float(properties.get("max_grade_pct") or 0.0),
+        "steep_meters": _meters_from_feet(properties.get("steep_ft")) or 0.0,
+        "crosses_floodplain": bool(properties.get("crosses_floodplain", False)),
+        "crosses_production_zone": bool(properties.get("crosses_production_zone", False)),
+        # Provenance of the branch's network, carried up to the network
+        # dict by rehydrate_road_networks().
+        "network_id": network_id,
+        "access_point": properties.get("access_point"),
+        "_network_totals": {
+            "total_length_meters": _meters_from_feet(properties.get("total_length_ft")),
+            "total_served_acres": properties.get("total_served_acres"),
+            "unserved_acres": properties.get("unserved_acres"),
+            "stop_reason": properties.get("stop_reason"),
+        },
+    }
+
+
+def check_road_network_complete(network_id, features: list) -> None:
+    """
+    The roads commit contract's `group_check`: the branches committed under
+    ONE network id must form the closed tree the router built.
+
+    A SPUR WITHOUT ITS TRUNK IS INCOHERENT, not shorter. Each branch's
+    newly_served_acres was computed given the branches already placed, and
+    a spur's joins_branch_index names the branch it grows off; commit the
+    spur alone and every figure on it describes a network that is not
+    there. So: branch 0 (the trunk) must be present, no index may appear
+    twice, and every joins_branch_index must name a committed branch.
+
+    Raises ValueError naming the missing index(es); the commit gate turns
+    that into a rejection on every feature in the group. Reads the feature
+    ids and properties only -- no geometry, no DEM -- so it can run before
+    rehydration.
+    """
+    present = {}
+    joins = {}
+    for feature in features:
+        identity = internal_road_branch_identity((feature or {}).get("id"))
+        if identity is None:
+            raise ValueError(
+                f"network {network_id!r}: feature {(feature or {}).get('id')!r} carries no branch identity"
+            )
+        _network, branch_index = identity
+        if branch_index in present:
+            raise ValueError(
+                f"network {network_id!r}: branch {branch_index} is committed twice"
+            )
+        present[branch_index] = feature
+        joins[branch_index] = ((feature.get("properties") or {}).get("joins_branch_index"))
+    if 0 not in present:
+        raise ValueError(
+            f"network {network_id!r}: the trunk (branch 0) is not in the commit; a spur "
+            "without its trunk is not a shorter network, it is an incoherent one -- its "
+            "served acreage was computed given the trunk it grows off."
+        )
+    missing = sorted(
+        {parent for parent in joins.values() if parent is not None and parent not in present}
+    )
+    if missing:
+        raise ValueError(
+            f"network {network_id!r}: committed branch(es) join branch(es) {missing}, which "
+            "are not in the commit. A network commits whole: every branch a committed spur "
+            "grows off must be committed with it."
+        )
+
+
+def rehydrate_road_networks(collection: Optional[dict], dem: dict) -> list:
+    """
+    A whole committed road FeatureCollection -> a list of internal NETWORK
+    dicts, one per network id, in order of first appearance, each in the
+    shape road_corridors.build_road_network() returns (branches ordered by
+    branch_index, the network-level `cells` and `cell_footprint_polygon_utm`
+    every downstream consumer reads, the totals off the wire).
+
+    ONE FEATURE IN, ONE ONE-BRANCH NETWORK OUT. The commit gate rehydrates
+    a feature at a time through this same function and reads `polygon_utm`
+    off the result for the boundary-containment check; so every network
+    dict carries `polygon_utm` as an alias of its cell footprint. A footprint
+    rather than the zero-width centreline, because containment is measured
+    in acres and a line has none -- a branch's cells are ~5 m squares, and
+    a branch that leaves the parcel leaves it by whole cells.
+
+    NO TREE-CLOSURE CHECK HERE, deliberately. This function sees whatever
+    collection it is handed, one feature or a whole commit, and a lone spur
+    is a legitimate one-feature call from the gate. Closure is
+    check_road_network_complete(), declared as the contract's group_check
+    and run by the gate over each network's features together.
+
+    EMPTY IN, EMPTY OUT: [] is "no road", a real committed decision. There
+    is no sentinel to substitute, because every consumer of a road network
+    takes the full dict shape and treats branches=[] as "no network" -- the
+    batch path forwards exactly that. A downstream registry entry that
+    consumes this commit takes the ONE committed network (max_features=1)
+    through a combine, or an empty-network dict for [].
+    """
+    from raster_grid import cell_union_footprint
+
+    features = (collection or {}).get("features") if isinstance(collection, dict) else collection
+    branches = [rehydrate_road_branch(feature, dem) for feature in list(features or [])]
+
+    grouped = {}
+    for branch in branches:
+        grouped.setdefault(branch["network_id"], []).append(branch)
+
+    networks = []
+    for network_id, members in grouped.items():
+        members = sorted(members, key=lambda b: b["branch_index"])
+        totals = members[0]["_network_totals"]
+        for branch in members:
+            branch.pop("_network_totals", None)
+        cells, seen = [], set()
+        network_mask = np.zeros(dem["array"].shape, dtype=bool)
+        for branch in members:
+            for cell in branch["cells"]:
+                network_mask[cell[0], cell[1]] = True
+                if cell not in seen:
+                    seen.add(cell)
+                    cells.append(cell)
+        footprint = cell_union_footprint(dem, network_mask)
+        networks.append(
+            {
+                "network_id": network_id,
+                "access_point": members[0]["access_point"],
+                "branches": members,
+                "total_length_meters": (
+                    float(totals["total_length_meters"])
+                    if totals["total_length_meters"] is not None
+                    else float(sum(b["length_meters"] for b in members))
+                ),
+                "total_served_acres": (
+                    float(totals["total_served_acres"])
+                    if totals["total_served_acres"] is not None
+                    else float(sum(b["newly_served_acres"] for b in members))
+                ),
+                "unserved_acres": (
+                    float(totals["unserved_acres"]) if totals["unserved_acres"] is not None else None
+                ),
+                "stop_reason": totals["stop_reason"],
+                "max_grade_pct": max((b["max_grade_pct"] for b in members), default=0.0),
+                "steep_meters": float(sum(b["steep_meters"] for b in members)),
+                "cells": cells,
+                "cell_footprint_polygon_utm": footprint,
+                "polygon_utm": footprint,
+            }
+        )
+    return networks
