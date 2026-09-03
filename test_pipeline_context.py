@@ -525,7 +525,24 @@ with ExitStack() as _stack:
     # first three are NOT intercepted, so delineate_valleys()'s (real,
     # above) own internal fill/accumulation passes don't pollute the count.
     mock_ws_fill = _enter(
-        mock_patch.object(pc.water_survey_areas, "fill_depressions", wraps=pc.water_survey_areas.fill_depressions)
+        mock_patch.object(pc.water_survey_areas, "fill_and_resolve", wraps=pc.water_survey_areas.fill_and_resolve)
+    )
+    # THE FLAT-RESOLUTION PASS, counted against the fill it rides on.
+    # These two are patched at VALLEY_DELINEATION's bindings, so unlike the
+    # four above they see EVERY caller in the whole context build, not just
+    # the survey step -- which is the point: the invariant worth pinning is
+    # that the pipeline runs exactly ONE flat resolution per depression
+    # fill, everywhere, with no path left doing a bare epsilon fill and no
+    # path resolving twice.
+    mock_vd_fill = _enter(
+        mock_patch.object(
+            pc.valley_delineation, "fill_depressions", wraps=pc.valley_delineation.fill_depressions
+        )
+    )
+    mock_vd_resolve = _enter(
+        mock_patch.object(
+            pc.valley_delineation, "resolve_flats", wraps=pc.valley_delineation.resolve_flats
+        )
     )
     mock_ws_accum = _enter(
         mock_patch.object(
@@ -864,10 +881,17 @@ print(
 # regression that re-derives a surface per survey type (there are two) or per region would double
 # a count here, not hide.
 assert mock_ws_fill.call_count == 1, (
-    f"fill_depressions() must run EXACTLY ONCE inside the one identify_water_survey_areas() call, got "
-    f"{mock_ws_fill.call_count} -- more means the filled surface is being re-derived somewhere inside "
-    "the survey step"
+    f"fill_and_resolve() must run EXACTLY ONCE inside the one identify_water_survey_areas() call, got "
+    f"{mock_ws_fill.call_count} -- more means the conditioned surface is being re-derived somewhere "
+    "inside the survey step"
 )
+assert mock_vd_fill.call_count == mock_vd_resolve.call_count, (
+    f"every depression fill in the whole pipeline run must be followed by EXACTLY ONE flat "
+    f"resolution, got {mock_vd_fill.call_count} fills against {mock_vd_resolve.call_count} "
+    "resolutions -- a fill without a resolution is a path still taking its drainage pattern from "
+    "flood order, and a second resolution would tilt an already-tilted flat"
+)
+assert mock_vd_fill.call_count > 0, "precondition: the fill must actually have run"
 assert mock_ws_accum.call_count == 1, (
     f"compute_flow_accumulation() must run EXACTLY ONCE inside the one identify_water_survey_areas() "
     f"call, got {mock_ws_accum.call_count} -- the accumulation grid feeds the gate mask, both drainage "
@@ -883,10 +907,14 @@ assert mock_ws_twi.call_count == 1, (
     f"identify_water_survey_areas() call, got {mock_ws_twi.call_count}"
 )
 print(
-    "MEASURED at water_survey_areas.py's own bindings: fill_depressions() x1, "
-    "compute_flow_accumulation() x1, compute_slope_percent() x1, compute_topographic_wetness_index() "
-    "x1 -- the survey step's self-derived hydrology inputs are each computed exactly once inside the "
-    "single water call, shared across both survey types' surfaces."
+    f"MEASURED at water_survey_areas.py's own bindings: fill_and_resolve() x1, "
+    f"compute_flow_accumulation() x1, compute_slope_percent() x1, "
+    f"compute_topographic_wetness_index() x1 -- the survey step's self-derived hydrology inputs are "
+    f"each computed exactly once inside the single water call, shared across both survey types' "
+    f"surfaces. And MEASURED at valley_delineation's own bindings, across the WHOLE context build: "
+    f"{mock_vd_fill.call_count} depression fills against {mock_vd_resolve.call_count} flat "
+    f"resolutions -- exactly one resolution per fill, so no path is left routing flats by flood "
+    f"order and none tilts an already-tilted flat."
 )
 
 # --- 6. selected_water_zone comes from the SAME single call -- no second selection pass exists ---

@@ -80,18 +80,20 @@ filled pit therefore TIED with the neighbour it should drain to, took the
 -1 "no downhill neighbour" sentinel, and the backwater walk STOPPED at a
 pit on the channel instead of crossing it. This docstring said the fix
 belonged in the hydrology layer as an epsilon fill, not in a consumer;
-that is where it landed. fill_depressions() is now the epsilon variant
-(FILL_EPSILON_METERS), a filled pit sits one increment ABOVE its spill
-neighbour, and the backwater crosses it -- measured on this module's own
+that is where it landed. The conditioning is now fill_and_resolve() -- a
+plain priority-flood plus Garbrecht-Martz flat resolution
+(FLAT_RESOLUTION_INCREMENT_METERS) -- a filled pit sits at least one
+increment ABOVE the neighbour it drains to, and the backwater crosses it
+-- measured on this module's own
 TEST 4b, where digging a 7.6 m pit into the channel now changes the
 65-cell pool by nothing at all. Not one line of this module changed for
 that; the walk simply reaches further because the field it walks is
 complete.
 
 The RAW elevation test below is unaffected and remains load-bearing: the
-epsilon fill still raises a marsh bottom to its spill level (plus a
-millimetre), so a filled-DEM elevation test would still report flooded
-ground that a real pool would never touch.
+fill still raises a marsh bottom to its spill level, and flat resolution
+then adds a millimetre-scale tilt on top, so a filled-DEM elevation test
+would still report flooded ground that a real pool would never touch.
 
 What the fill still buys the walk is that the flow field is WELL-DEFINED
 and acyclic at all -- which is what makes "walk upstream until the
@@ -101,8 +103,8 @@ that do NOT go through the flow field -- the abutment search and the
 station cross-sections read the raw DEM directly, where a filled reach can
 read metres high and would more than double the reported flooded width.
 test_valley_level_pool.py asserts both halves separately, including the
-pit truncation, so an epsilon fill in the layer below fails these tests
-loudly rather than silently changing what a pool means.
+pit truncation, so a change to the conditioning in the layer below fails
+these tests loudly rather than silently changing what a pool means.
 
 UNREACHABLE IS NOT DRY. A station past the end of the traced stem reports
 status 'unreachable_stem_end' with the along-stem distance actually
@@ -113,9 +115,11 @@ Both statuses are part of the measurement contract the scoring branch
 reads. This used to be where valley_delineation.py's flat-tie limitation
 showed itself -- as short stems and unreachable stations rather than as
 fabricated dry ones -- and it was FLAGGED here on the argument that the
-fix belonged in the hydrology layer. It went there: the fill is now the
-epsilon variant, filled flats route, and a stem that stops short now says
-something about the terrain rather than about the algorithm.
+fix belonged in the hydrology layer. It went there: filled flats route --
+first by the epsilon fill, now by Garbrecht-Martz flat resolution, which
+routes them by their own inlet/outlet geometry rather than by flood order
+-- and a stem that stops short now says something about the terrain rather
+than about the algorithm.
 
 NO VOLUME, ANYWHERE. This module computes flooded WIDTH (meters) and
 flooded CROSS-SECTIONAL AREA (square meters) at discrete stations. It
