@@ -1716,19 +1716,40 @@ print(
 # Test 14 -- WALK FAILURES ARE HONEST, and the two kinds are distinct.
 #
 # (a) FLAT LOWER REACH. The same steep-above fixture with the reach below
-#     the keypoint made dead level (z = 95.0 for every r >= 10). The
-#     priority-flood leaves a filled flat, this repo's strictly-positive-
-#     slope D8 hands every cell the -1 sentinel, and the walk dies AT the
-#     keypoint having accumulated 0.0 m. That is valley_delineation.py's
-#     flat-tie limitation surfacing at NOMINATION -- reported, not fixed
-#     here.
+#     the keypoint made dead level (z = 95.0 for every r >= 10). The walk
+#     runs the full 150 m search and accumulates 0.0 m of drop, because
+#     there is genuinely no drop there.
 # (b) DISTANCE BOUND. The reach below the keypoint at 0.01 m per cell
 #     (0.2%): 2.5 m of drop would need 250 cells = 1250 m, far past the
 #     150 m bound. The walk dies at (40, 20) with 0.3 m accumulated.
 #
 # Both yield REASON_WALL_SITE_NOT_FOUND_DOWNSTREAM and no candidate -- no
-# partial-height fallback -- but wall_walk_end_reason tells them apart,
-# which matters: one is a data limitation, the other is real terrain.
+# partial-height fallback.
+#
+# EXPECTATIONS CORRECTED BY THE EPSILON-FILL BRANCH, and the correction is
+# the branch's whole point arriving at this instrument. Case (a) used to
+# end 'flat_tie_sentinel' AT the keypoint (10, 20): the plain
+# priority-flood left the dead-level reach tied cell-to-cell, this repo's
+# strictly-positive-slope D8 handed every one of them the -1 sentinel, and
+# the walk could not take a single step. That was a DATA LIMITATION being
+# reported as a terrain finding, and this block existed partly to keep the
+# two apart. The epsilon fill gives the flat a gradient toward its outlet
+# (0.03 m accumulated across the whole 30-cell reach, well under
+# water_survey_areas.DEPRESSION_NOISE_FLOOR_METERS), so the walk now
+# CROSSES it and reports what the ground actually does: 0.0 m of drop in
+# 150 m. Case (a) therefore ends 'distance_bound' at (40, 20), the same
+# code as case (b).
+#
+# THE TWO CASES ARE STILL DISTINCT, on wall_drop_m rather than on
+# wall_walk_end_reason: dead flat accumulates 0.0 m, the gentle-but-long
+# reach accumulates 0.3 m. What is gone is the third thing that used to be
+# conflated with them -- "the flow field stopped existing here".
+#
+# flat_tie_sentinel IS NOT DELETED and _find_wall_site() still returns it:
+# it now means what it should always have meant, a -1 sentinel on an
+# INTERIOR cell, which after the epsilon fill happens only where nodata
+# walls a cell off from every grid border. It is asserted below to be
+# absent from these two fixtures, not absent from the code.
 # =====================================================================
 def _w_variant(lower_grade):
     array = np.zeros((W_SIZE, W_SIZE), dtype=np.float64)
@@ -1740,7 +1761,7 @@ def _w_variant(lower_grade):
 
 
 for _grade, _expected_end, _expected_cell, _expected_drop, _label in (
-    (0.0, "flat_tie_sentinel", (10, 20), 0.0, "flat lower reach"),
+    (0.0, "distance_bound", (40, 20), 0.0, "flat lower reach"),
     (0.01, "distance_bound", (40, 20), 0.3, "gentle-but-long lower reach"),
 ):
     _v_dem = _w_variant(_grade)
@@ -1759,12 +1780,25 @@ for _grade, _expected_end, _expected_cell, _expected_drop, _label in (
     assert _v_outcome["wall_walk_end_rowcol"] == _expected_cell, _v_outcome
     assert _v_outcome["wall_drop_m"] == _expected_drop, _v_outcome
     assert _v_outcome["anchor_rowcol"] is None
+    assert _v_outcome["wall_walk_end_reason"] != "flat_tie_sentinel", (
+        "after the epsilon fill no interior cell on these fixtures is left on the -1 sentinel"
+    )
     print(
         f"Test 14 -- {_label}: the walk dies at {_v_outcome['wall_walk_end_rowcol']} "
         f"('{_v_outcome['wall_walk_end_reason']}') with {_v_outcome['wall_drop_m']} m of the "
         f"{POOL_REFERENCE_HEIGHT_METERS} m needed, so the keypoint reports "
         f"'{_v_outcome['outcome']}' and nominates nothing."
     )
+
+# The two failures are told apart by the DROP now, not by the end reason:
+# 0.0 m on dead-flat ground, 0.3 m on the gentle-but-long reach. Both walks
+# ran the full search; neither was stopped by a missing flow field.
+print(
+    "Test 14 -- the flat reach no longer reports 'flat_tie_sentinel' at the keypoint: the epsilon fill "
+    "routes it, the walk crosses all 150 m of it, and the honest finding (0.0 m of drop available) "
+    "replaces the old data limitation. wall_drop_m, not wall_walk_end_reason, is what now separates dead "
+    "flat (0.0 m) from gentle-but-long (0.3 m)."
+)
 
 
 # =====================================================================

@@ -157,16 +157,20 @@ THE TWO DERIVED SCREENS (both free from arrays already in hand):
 
     DEPRESSION DEPTH = filled DEM - raw DEM. Both arrays were already
         computed every run (priority-flood fill feeds flow direction);
-        the difference was simply discarded. Keeping it converts the
-        flat-tie problem into signal: where priority-flood raised the
-        raw surface is exactly where water would pond naturally, so
-        natural storage basins map directly. A noise floor
+        the difference was simply discarded. Keeping it turns the fill
+        into signal: where priority-flood raised the raw surface is
+        exactly where water would pond naturally, so natural storage
+        basins map directly. A noise floor
         (DEPRESSION_NOISE_FLOOR_METERS) zeroes sub-threshold fill
-        artifacts. NOTE: this also reduces the urgency of an
-        epsilon-fill rewrite for the WATER layer specifically -- the
-        fill's flat ties stop being a lost signal here because the fill
-        depth itself is now consumed -- flagged, not fixed, in this
-        branch.
+        artifacts. NOTE: this reading is unchanged by the hydrology
+        layer's epsilon fill, which lands its increment INSIDE the same
+        noise floor -- 0.001 m per D8 hop across a flat, i.e. a flat
+        would have to be 100 hops (500 m at this resolution) across in
+        one dead-level piece before the epsilon alone reached
+        DEPRESSION_NOISE_FLOOR_METERS. Measured on the reference
+        fixtures at 0.03-0.04 m worst case; asserted in
+        test_epsilon_fill.py. The noise floor is deliberately NOT
+        retuned for it.
 
 GATES (unchanged trio, ported from water_candidate_zones.py): on-parcel
 AND contributing-area ceiling AND boundary setback (the setback constant
@@ -1361,9 +1365,11 @@ against an existing farm road."""
 FLAG_PINCH_AT_WALK_BOUND = "pinch_at_walk_bound"
 """The embankment cell is the walk's terminal station because the walk
 ran out -- the EMBANKMENT_PINCH_WALK_MAX_METERS distance bound, or the
-D8 flow field itself ending (a flat-tie/outlet cell, the rarer case,
-grouped here deliberately: either way the SURVEYED EXTENT ended, and
-'walk limit' is the honest noun for both)."""
+D8 flow field itself ending (an outlet cell, the rarer case -- rarer
+still since the epsilon fill, which leaves the -1 sentinel only at grid
+edges and nodata-walled ground -- grouped here deliberately: either way
+the SURVEYED EXTENT ended, and 'walk limit' is the honest noun for
+both)."""
 FLAG_STILL_NARROWING = "still_narrowing_at_termination"
 """Rides every terminal pinch whose terminal width is strictly below
 the preceding station's (by the first-of-ties minimum rule this is
@@ -2987,8 +2993,9 @@ def select_embankment_seeds(
 
 def _flow_direction_unit(dem: dict, rowcol: tuple, flow_to_row: np.ndarray, flow_to_col: np.ndarray):
     """Unit ground-space (dx, dy) vector of the D8 flow step out of
-    `rowcol`, or None at the -1 sentinel (outlet / flat-plateau tie --
-    compute_flow_direction()'s own convention). Row increases downward
+    `rowcol`, or None at the -1 sentinel (a grid-edge outlet, or
+    nodata-walled ground -- compute_flow_direction()'s own convention;
+    since the epsilon fill an interior flat is no longer one of these). Row increases downward
     while y increases upward, hence the dy sign flip."""
     r, c = rowcol
     tr, tc = int(flow_to_row[r, c]), int(flow_to_col[r, c])
@@ -3188,8 +3195,8 @@ def walk_embankment_pinch(
     while True:
         direction = _flow_direction_unit(dem, current, flow_to_row, flow_to_col)
         if direction is None and previous_direction is not None:
-            # Terminal station on a flat tie/outlet: measure with the
-            # incoming direction rather than skipping the cell.
+            # Terminal station on an outlet: measure with the incoming
+            # direction rather than skipping the cell.
             direction = previous_direction
         if direction is None:
             # The seed itself has no flow direction: nothing measurable.

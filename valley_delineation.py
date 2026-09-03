@@ -7,7 +7,8 @@ piece ("real LiDAR-based keypoint detection... running real terrain-
 analysis tools to mathematically locate keypoints and candidate keylines").
 
 Pipeline, standard D8 hydrology terrain analysis (Barnes-style priority-
-flood fill, then D8 flow direction, then flow accumulation):
+flood fill, EPSILON variant, then D8 flow direction, then flow
+accumulation):
 
     DEM grid --> fill depressions --> D8 flow direction --> flow
     accumulation --> threshold to valley cells --> group into connected
@@ -25,10 +26,14 @@ otherwise, per this feature's actual debugging history.
 
 Known limitations, stated plainly rather than glossed over:
   - D8 (steepest single-neighbor descent) is the simplest standard flow
-    model. It can't represent flow splitting/braiding, and ties on a
-    perfectly flat filled cell (e.g. a real pond/wetland) aren't resolved
-    beyond one exit path — a small, standard limitation of this approach,
-    not a bug.
+    model. It can't represent flow splitting/braiding: a cell gets one
+    exit path even where real water would spread. Flat TIES are no longer
+    part of that limitation — the fill is the epsilon variant
+    (FILL_EPSILON_METERS), so a filled pit or plateau slopes gently
+    toward its own outlet and every filled cell routes. The -1
+    "no downhill neighbour" sentinel survives, and correctly, at cells
+    the flood never reaches: the grid's own border seeds, and valid cells
+    walled off from the border by nodata.
   - Depression filling assumes the fetched DEM's outer edge (the buffer
     around the property from dem_data.py) is a legitimate place for water
     to exit the grid. That's a reasonable assumption for a property-scale
@@ -60,6 +65,61 @@ MIN_STREAM_CONTRIBUTING_AREA_ACRES = 0.5
 # above. Must be >= MIN_STREAM_CONTRIBUTING_AREA_ACRES.
 MIN_PRIMARY_VALLEY_CONTRIBUTING_AREA_ACRES = 2.0
 
+# The epsilon increment the depression fill adds per cell along a filled
+# flat's own drainage path, so a filled cell never TIES with the
+# neighbour it drains to.
+#
+# WHY IT EXISTS. fill_depressions() used to be the PLAIN priority-flood:
+# it raised a pit to EXACTLY its spill elevation, so the filled cell and
+# the neighbour it should drain to sat at the same elevation.
+# compute_flow_direction() requires a STRICTLY positive slope, so every
+# one of those tied cells got the -1 "no downhill neighbour" sentinel and
+# was unroutable -- and every consumer that walks the flow field died
+# there (truncated backwaters, wall walks ending flat_tie_sentinel,
+# unreachable_stem_end cross-section stations, embankment seeds
+# terminating flow_end with 0-2 stations measured). The epsilon variant
+# (Barnes et al. 2014's own "Priority-Flood+epsilon") raises each cell to
+# at least its predecessor's FILLED elevation plus this increment, so the
+# filled surface slopes gently toward the outlet and every filled cell
+# has a defined direction.
+#
+# WHY 0.001 m, stated as the two bounds it has to sit between:
+#
+#   UPPER BOUND -- it must be far too small to manufacture terrain
+#   signal. USGS 3DEP's vertical accuracy is specified in the 0.1 m
+#   neighbourhood (QL2 lidar's 10 cm RMSEz; the coarser 1/3 arc-second
+#   product is worse), and this repo's own two independent "is this fill
+#   real or noise" thresholds sit at 0.10 m
+#   (water_survey_areas.DEPRESSION_NOISE_FLOOR_METERS) and 0.15 m
+#   (keypoint_detection.KEYPOINT_FILL_ARTIFACT_THRESHOLD_M). At 0.001 m
+#   a filled flat has to be 100 D8 HOPS across -- 500 m at this DEM's 5 m
+#   resolution, in one dead-level piece -- before the accumulated rise
+#   reaches even the lower of those two. (Hops, not cells: the flood
+#   spreads outward from the spill, so a cell's increment count is its
+#   Chebyshev distance from the spill point, not the flat's area. A
+#   40x40 flat is 1600 cells and accumulates 40 increments, measured in
+#   test_epsilon_fill.py.) That is two orders of magnitude below the
+#   DEM's own ability to tell ground apart.
+#
+#   LOWER BOUND -- it must not vanish to floating-point rounding.
+#   dem_data.get_dem_for_boundary() returns float32 (`src.read(1).
+#   astype("float32")`), and fill_depressions() preserves its input's
+#   dtype, so the increment is added at float32 precision. float32's ulp
+#   at an elevation z is 2^(floor(log2 z) - 23): at the reference
+#   property's ~346 m that is 3.05e-5 m, so 0.001 m is ~33 ulps and every
+#   increment lands on a strictly greater float32. The margin holds up to
+#   z = 0.001 * 2^23 = 8388 m, above every land elevation this tool can
+#   be pointed at. (test_epsilon_fill.py asserts this against the real
+#   float32 dtype via np.spacing() rather than taking it on faith.)
+#
+# CONFIGURABLE, but not a tuning knob in the ordinary sense: raising it
+# buys nothing and starts eating into the noise floor above; lowering it
+# eventually loses the strict inequality it exists to guarantee. v1
+# prior -- if a filled flat on some property is ever long enough for the
+# accumulated rise to approach DEPRESSION_NOISE_FLOOR_METERS, that is a
+# finding to report, not a number to retune away.
+FILL_EPSILON_METERS = 0.001
+
 VALLEY_CONFIDENCE_NOTES = (
     "Valley lines are computed from an interpolated DEM (LiDAR-derived "
     "where flown, coarser 1/3 arc-second elsewhere — see dem_data.py) "
@@ -82,14 +142,37 @@ def _valid_mask(array: np.ndarray) -> np.ndarray:
     return ~np.isnan(array)
 
 
-def fill_depressions(array: np.ndarray) -> np.ndarray:
+def fill_depressions(array: np.ndarray, epsilon_meters: float = FILL_EPSILON_METERS) -> np.ndarray:
     """
-    Priority-flood depression filling (Barnes et al. 2014, plain variant):
-    raises every interior cell to at least the elevation of the lowest
-    path connecting it to the grid's valid border, so every valid cell has
-    a monotonically non-increasing path to an edge. Without this, any
-    local pit (real or a DEM interpolation artifact) would trap flow
-    accumulation and break valley tracing at that point.
+    Priority-flood depression filling, EPSILON variant (Barnes et al.
+    2014's Priority-Flood+epsilon): raises every interior cell to at
+    least its own flood predecessor's FILLED elevation plus
+    epsilon_meters, so every valid cell has a STRICTLY DECREASING path to
+    the grid's valid border. Without any fill, a local pit (real or a DEM
+    interpolation artifact) traps flow accumulation and breaks valley
+    tracing at that point.
+
+    THE EPSILON IS THE POINT, not a detail. The plain variant this
+    replaced raised a pit to EXACTLY its spill elevation, which left the
+    filled cell TIED with the neighbour it should drain to;
+    compute_flow_direction() requires a strictly positive slope, so every
+    such cell got the -1 sentinel and was unroutable, and every consumer
+    that walks the flow field stopped there. Raising by epsilon per cell
+    gives the filled flat a defined flow direction toward its outlet. See
+    FILL_EPSILON_METERS for the increment's two bounds (well under the
+    DEM's vertical accuracy, well over float32's resolution) and for what
+    the accumulated rise along a long flat costs.
+
+    A cell already MORE than epsilon_meters above its predecessor is left
+    alone — this raises only what it has to, so terrain outside the
+    depressions and flats is bitwise unchanged. The RAW input array is
+    never modified (a copy is filled and returned); the raw/filled
+    division of labour — connectivity from the filled field, elevation
+    truth from the raw — is a hard architectural boundary this function
+    is on one side of.
+
+    Passing epsilon_meters=0.0 reproduces the plain variant exactly, for
+    before/after measurement only; nothing in the pipeline does that.
 
     nodata (np.nan) cells are excluded entirely — treated as barriers, not
     filled or flowed through.
@@ -118,12 +201,15 @@ def fill_depressions(array: np.ndarray) -> np.ndarray:
 
     while heap:
         elevation, _, r, c = heapq.heappop(heap)
+        minimum_neighbor_elevation = elevation + epsilon_meters
         for dr, dc in D8_OFFSETS:
             nr, nc = r + dr, c + dc
             if 0 <= nr < rows and 0 <= nc < cols and valid[nr, nc] and not closed[nr, nc]:
                 closed[nr, nc] = True
-                if filled[nr, nc] < elevation:
-                    filled[nr, nc] = elevation
+                if filled[nr, nc] < minimum_neighbor_elevation:
+                    # The epsilon increment: this cell now sits strictly
+                    # above the cell it drains to, so it routes.
+                    filled[nr, nc] = minimum_neighbor_elevation
                 heapq.heappush(heap, (float(filled[nr, nc]), counter, nr, nc))
                 counter += 1
 
@@ -140,8 +226,21 @@ def compute_flow_direction(
     sqrt(2)x the distance of cardinal ones).
 
     Returns (flow_to_row, flow_to_col), each shaped like `filled`, with -1
-    at cells that have no downhill neighbor (a grid-edge outlet, or a flat
-    plateau tie — see module docstring).
+    at cells that have no downhill neighbor.
+
+    WHERE THE -1 SENTINEL LEGITIMATELY REMAINS, now that fill_depressions()
+    is the epsilon variant: a border cell that is the local minimum of its
+    own neighbourhood (a grid-edge outlet — the flood SEEDS the border
+    rather than raising it, so border cells are the one class it never
+    gives a gradient to), and a valid cell the flood cannot reach at all
+    because nodata walls it off from every border. Every cell the flood
+    DOES reach was raised to at least its predecessor's filled elevation
+    plus FILL_EPSILON_METERS, so it has a strictly lower neighbour by
+    construction and gets a real direction. Interior flat ties — the old
+    dominant source of this sentinel, and the defect the epsilon fill
+    exists to remove — are gone. Downstream code still has to handle -1;
+    it means "no direction here" and that is still a real answer at an
+    outlet.
     """
     rows, cols = filled.shape
     valid = _valid_mask(filled)
@@ -273,13 +372,14 @@ def get_flow_direction_for_dem(dem: dict) -> np.ndarray:
 
     i.e. the ABSOLUTE (row, col) of the single downhill neighbor that
     cell flows into (not a relative offset or direction code). (-1, -1)
-    means no downhill neighbor at all (a grid-edge outlet, or a flat-
-    plateau tie -- see module docstring) -- matches
-    compute_flow_direction()'s own -1 sentinel exactly.
+    means no downhill neighbor at all (a grid-edge outlet, or a valid
+    cell nodata walls off from the border -- see compute_flow_direction()
+    for where the sentinel legitimately survives the epsilon fill) --
+    matches compute_flow_direction()'s own -1 sentinel exactly.
 
     A caller walking the grid cell-to-cell reads target_row, target_col =
     get_flow_direction_for_dem(dem)[row, col]; if target_row < 0, stop
-    (outlet/tie); otherwise move to (target_row, target_col) and repeat.
+    (outlet); otherwise move to (target_row, target_col) and repeat.
     """
     filled = fill_depressions(dem["array"])
     flow_to_row, flow_to_col = compute_flow_direction(filled, dem["resolution_meters"])

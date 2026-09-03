@@ -142,12 +142,43 @@ print("Constants are the calibrated reference values.")
 # ENTRANCE (the rim), where fill depth is ~0 -- so the fill-depth gate alone
 # would NOT catch it. Profiling RAW is what prevents that false keypoint.
 #
-# The detect-level tracer cannot cross the filled bowl (D8 does not resolve
-# drainage across a perfectly flat filled plateau -- a documented limitation
-# in valley_delineation.py), so it stops at the bowl rim and never profiles
-# through the depression. The raw-vs-filled contrast is therefore shown by
-# profiling the KNOWN center-column stem directly, which is what exposes the
-# artifact deterministically.
+# The raw-vs-filled contrast is shown by profiling the KNOWN center-column
+# stem directly, which is what exposes the artifact deterministically.
+#
+# EXPECTATIONS CORRECTED BY THE EPSILON-FILL BRANCH, and why. This block
+# used to assert that detect_keypoints() returns a keypoint here, at
+# (22, 7). It no longer does, and the change is entirely explained by
+# routing that previously died:
+#
+#   BEFORE. valley_delineation.fill_depressions() was the plain
+#   priority-flood, so the filled bowl was dead level, every one of its
+#   cells took compute_flow_direction()'s -1 sentinel, and the stem tracer
+#   STOPPED AT THE BOWL RIM. The profile it fitted therefore covered only
+#   the steep upper reach and the rim: the fit's break landed at (22, 7)
+#   on real landform, with fill depth 0.0 m, and the fill-artifact gate
+#   never fired (rejected_fill_artifact = 0). The gate was not doing its
+#   job here -- the TRUNCATION was, accidentally, by keeping the artifact
+#   ground out of reach.
+#
+#   AFTER. The epsilon fill gives every bowl cell a direction, so the stem
+#   now runs through the depression to the valley outlet, exactly as
+#   intended. The raw profile it fits now contains the bowl's own 12 m
+#   plunge, which is a far larger slope drop than the real steep-to-gentle
+#   break at row 24 -- so the two-segment fit selects the bowl, and the
+#   fill-artifact gate REJECTS it (rejected_fill_artifact = 1). The gate is
+#   doing more work than before, not less, and it is doing exactly the work
+#   it was written for.
+#
+#   THE CONSEQUENCE, REPORTED NOT FIXED. detect_keypoints() emits at most
+#   ONE keypoint per valley, so a single gate rejection now costs this
+#   valley its keypoint entirely, where the old truncation quietly handed
+#   back the upper-reach break instead. On a valley whose stem crosses a
+#   marsh that is a real behaviour change: the honest answer ("the
+#   strongest break on this stem is fill artifact") replaces a break found
+#   only because the stem was cut short. Whether the fit should be
+#   restricted to non-filled ground, or a rejected split should fall back
+#   to the next candidate, is DOWNSTREAM TUNING and belongs to a later
+#   branch -- flagged here, not acted on.
 # ============================================================================
 _rows1, _cols1 = 40, 15
 _c0_1 = _cols1 // 2
@@ -165,17 +196,31 @@ for _r in _BOWL_ROWS:
         _arr1[_r, _c] -= 12.0
 _dem1 = _dem(_arr1)
 
-# detect (RAW, the real path): a real keypoint is found, and it is NOT inside
-# the depression.
-_kps1 = detect_keypoints(_dem1, _full_boundary(_rows1, _cols1))
-assert _kps1, "expected a keypoint on the steep upper reach above the bowl"
+# detect (RAW, the real path). The stem now crosses the filled bowl, the
+# fit selects the bowl's own plunge, and the fill-artifact gate rejects it
+# -- so this valley yields NO keypoint. What must hold is that nothing
+# inside the depression is ever RETURNED: the gate is what guarantees that,
+# and it is now the thing actually doing it.
+_diag1 = {}
+_kps1 = detect_keypoints(_dem1, _full_boundary(_rows1, _cols1), diagnostics=_diag1)
 for _k in _kps1:
     assert _k["rowcol"][0] not in _BOWL_ROWS, (
         f"RAW profiling must not return a keypoint inside the depression, got {_k['rowcol']}"
     )
+assert _kps1 == [], (
+    "with the epsilon fill the stem crosses the bowl, the two-segment fit selects the bowl's own "
+    f"plunge, and the fill-artifact gate rejects it -- expected no surviving keypoint, got "
+    f"{[k['rowcol'] for k in _kps1]}. If this returns a keypoint again, the fit or the gate changed."
+)
+assert _diag1["valleys"] == 1, _diag1
+assert _diag1["rejected_fill_artifact"] == 1, (
+    f"the fill-artifact gate must be the thing that rejected it -- {_diag1}"
+)
+assert _diag1["surviving"] == 0, _diag1
 print(
-    f"Test 1: detect (raw) returned keypoint(s) at {[k['rowcol'] for k in _kps1]}, "
-    f"none inside the bowl rows {_BOWL_ROWS.start}-{_BOWL_ROWS.stop - 1}."
+    f"Test 1: detect (raw) returns no keypoint on this valley -- the stem now crosses the bowl (the "
+    f"epsilon fill routes it) and the fill-artifact gate rejects the bowl break: {_diag1}. Under the "
+    f"plain fill the tracer stopped at the rim and returned (22, 7) with the gate never firing."
 )
 
 # Inline raw-vs-filled contrast along the known center-column stem.
@@ -382,15 +427,29 @@ print(
 # The keypoint location is fixed by terrain (independent of the boundary,
 # which only feeds the margin gate). Find it once, then place boundaries whose
 # nearest edge is 10 m, 20 m, and 60 m from it.
+#
+# FIXTURE CORRECTED BY THE EPSILON-FILL BRANCH. This test used to borrow
+# TEST 1's DEM, which no longer yields a keypoint at all: the epsilon fill
+# routes the stem through TEST 1's bowl and the fill-artifact gate rejects
+# the resulting break (see TEST 1's own note). The dependence was always
+# incidental -- this test is about the MARGIN gate and needs only some
+# valley with a keypoint in it -- so it now builds TEST 1's DEM WITHOUT the
+# bowl: the same profile and cross-section, pure landform, whose keypoint
+# lands at (24, 7), the profile's true steep-to-gentle inflection at row 24.
 # ============================================================================
-_kp6 = detect_keypoints(_dem1, _full_boundary(_rows1, _cols1))[0]
+_arr6 = _v_valley(_rows1, _cols1, _profile1, cross=2.0)
+_dem6 = _dem(_arr6)
+_kps6_full = detect_keypoints(_dem6, _full_boundary(_rows1, _cols1))
+assert len(_kps6_full) == 1, [k["rowcol"] for k in _kps6_full]
+_kp6 = _kps6_full[0]
+assert tuple(_kp6["rowcol"]) == (24, 7), _kp6["rowcol"]
 _P6 = _kp6["point_utm"]
 _kept6 = {}
 for _offset in (10.0, 20.0, 60.0):
     # A box lying entirely to the north of P, its southern edge _offset metres away.
     _bnd = box(_P6.x - 100.0, _P6.y + _offset, _P6.x + 100.0, _P6.y + _offset + 300.0)
     assert not _bnd.contains(_P6)
-    _res = detect_keypoints(_dem1, _bnd)
+    _res = detect_keypoints(_dem6, _bnd)
     _kept6[_offset] = _res
 
 assert len(_kept6[10.0]) == 1 and _kept6[10.0][0]["on_parcel"] is False
@@ -399,7 +458,8 @@ assert len(_kept6[20.0]) == 1 and _kept6[20.0][0]["on_parcel"] is False
 assert abs(_kept6[20.0][0]["distance_outside_boundary_m"] - 20.0) < 0.01
 assert _kept6[60.0] == [], "a keypoint 60 m outside the boundary (> 25 m margin) must be dropped"
 print(
-    "Test 6: keypoint kept at 10 m outside (on_parcel=False, distance="
+    f"Test 6: on the bowl-free landform DEM the keypoint lands at {tuple(_kp6['rowcol'])} (row 24 is the "
+    "profile's true inflection). Kept at 10 m outside (on_parcel=False, distance="
     f"{_kept6[10.0][0]['distance_outside_boundary_m']} m) and at 20 m outside (distance="
     f"{_kept6[20.0][0]['distance_outside_boundary_m']} m); dropped at 60 m outside (empty)."
 )

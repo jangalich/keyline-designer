@@ -769,6 +769,35 @@ assert math.isclose(CA, 25.0 / 4046.8564224)
 
 flat_array = np.full((20, 20), 100.0)
 FLAT_DEM = _dem(flat_array)
+# EVERY CELL ACCUMULATES ONLY ITSELF -- now stated as an OVERRIDE rather
+# than left to fall out of the fill, which is what the epsilon-fill branch
+# changed here.
+#
+# On dead-flat ground the plain priority-flood left every cell tied with
+# every neighbour, so compute_flow_direction() gave them all the -1
+# sentinel and compute_flow_accumulation() returned 1 everywhere by
+# default. This fixture's whole hand-derivation ("a = 1 * 25 / 5 = 5 m for
+# EVERY cell") rode on that accident. The epsilon fill routes the flat --
+# correctly, that is the branch -- so accumulation now runs 1..10 as the
+# flood's own spread order converges flow toward the window's border, TWI
+# gains a ~2.3 ln-unit spread, and the curve stops being uniform.
+#
+# THAT SPREAD IS A FILL ARTIFACT, NOT TERRAIN, and it is worth being blunt
+# about: Priority-Flood+epsilon resolves a flat by the order the flood
+# reaches its cells, so the drainage pattern it imposes on perfectly level
+# ground is an artifact of the algorithm (a documented property of the
+# method; a Garbrecht-Martz-style flat resolution would instead route
+# toward the flat's low edges and away from its high ones). It is still a
+# strict improvement on the alternative -- the plain fill reported "no
+# convergence anywhere" on a marsh, which is what this whole branch
+# exists to fix -- but it is not a signal to hand a hand-derivation.
+#
+# So this fixture supplies its own accumulation, exactly the way FIXTURE 2
+# below already does, and the assumption is now visible in the test rather
+# than borrowed from the fill. Nothing else about the fixture moves, and
+# the uniform-value curve fallback keeps its direct unit coverage in
+# test_twi_window_referenced.py.
+FLAT_SELF_ACCUMULATION = np.ones((20, 20), dtype=np.int64)
 FLAT_BOUNDARY = box(
     ORIGIN_X + 5 * RESOLUTION + 0.1,
     ORIGIN_Y - 15 * RESOLUTION + 0.1,
@@ -781,7 +810,10 @@ GOOD_WET_SOIL_INPUTS = {
     "geometries_by_mukey": {"1": transform_geom(CRS, "EPSG:4326", mapping(FLAT_BOUNDARY.buffer(20.0)))},
 }
 
-flat_result = compute_water_survey_areas(FLAT_DEM, FLAT_BOUNDARY, soil_inputs=GOOD_WET_SOIL_INPUTS)
+flat_result = compute_water_survey_areas(
+    FLAT_DEM, FLAT_BOUNDARY, soil_inputs=GOOD_WET_SOIL_INPUTS,
+    flow_accumulation=FLAT_SELF_ACCUMULATION,
+)
 
 assert flat_result["gate_mask_stats"]["gated_cells"] == 100, "the boundary covers exactly 100 cell centers"
 # THE TWI HALF IS HAND-DERIVED FROM THE ABSOLUTE CURVE, and this fixture
@@ -1303,7 +1335,10 @@ split_soil_inputs = {
         ),
     },
 }
-split_result = compute_water_survey_areas(FLAT_DEM, FLAT_BOUNDARY, soil_inputs=split_soil_inputs)
+split_result = compute_water_survey_areas(
+    FLAT_DEM, FLAT_BOUNDARY, soil_inputs=split_soil_inputs,
+    flow_accumulation=FLAT_SELF_ACCUMULATION,
+)
 split_members = split_result["regions_by_type"][SURVEY_TYPE_EXCAVATED]
 assert len(split_members) == 2, (
     f"two wet-soil patches -> two members (the leaky gap scores 0.3604 < 0.5), got {len(split_members)}"
@@ -1353,7 +1388,10 @@ TINY_BOUNDARY = box(
     ORIGIN_X + 11 * RESOLUTION - 0.1,
     ORIGIN_Y - 8 * RESOLUTION - 0.1,
 )
-tiny_result = compute_water_survey_areas(FLAT_DEM, TINY_BOUNDARY, soil_inputs=GOOD_WET_SOIL_INPUTS)
+tiny_result = compute_water_survey_areas(
+    FLAT_DEM, TINY_BOUNDARY, soil_inputs=GOOD_WET_SOIL_INPUTS,
+    flow_accumulation=FLAT_SELF_ACCUMULATION,
+)
 assert tiny_result["zones"] == [] and tiny_result["zones_by_type"][SURVEY_TYPE_EXCAVATED] == [], (
     "a sub-floor zone is OUT of the pipeline output -- the floor is a filter now"
 )
@@ -1429,7 +1467,10 @@ strip_soil_inputs = {
         ),
     },
 }
-strip_result = compute_water_survey_areas(FLAT_DEM, STRIP_BOUNDARY, soil_inputs=strip_soil_inputs)
+strip_result = compute_water_survey_areas(
+    FLAT_DEM, STRIP_BOUNDARY, soil_inputs=strip_soil_inputs,
+    flow_accumulation=FLAT_SELF_ACCUMULATION,
+)
 strip_members = strip_result["regions_by_type"][SURVEY_TYPE_EXCAVATED]
 assert len(strip_members) == 2 and all(m["cell_count"] == 6 for m in strip_members)
 assert all(m["below_min_area"] for m in strip_members), "member REGIONS still just carry the flag"

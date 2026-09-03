@@ -43,7 +43,26 @@ report using the Claude API.
 - `valley_delineation.py` — delineates primary valleys from a DEM via
   standard D8 terrain analysis (priority-flood depression fill -> flow
   direction -> flow accumulation -> threshold -> trace). Outputs a
-  schema-conformant `valley` layer.
+  schema-conformant `valley` layer. The fill is the **EPSILON variant**
+  (Barnes et al. 2014's Priority-Flood+ε, `FILL_EPSILON_METERS` = 0.001 m):
+  each cell is raised to at least its flood predecessor's filled elevation
+  PLUS that increment, so a filled pit or plateau slopes gently toward its
+  own outlet. The plain variant raised a pit to EXACTLY its spill
+  elevation, which left the filled cell tied with the neighbour it should
+  drain to; `compute_flow_direction()` requires a strictly positive slope,
+  so every tied cell took the `-1` sentinel and every consumer that walks
+  the flow field stopped there. That one defect produced five separately-
+  reported symptoms across this project's history (truncated backwaters,
+  `flat_tie_sentinel` wall walks, `unreachable_stem_end` cross-section
+  stations, raw-vs-filled contour weave, embankment seeds terminating
+  `flow_end` with 0-2 stations measured). The increment sits ~100x below
+  the DEM's own vertical accuracy and this repo's two fill-vs-noise
+  thresholds, and ~33x above float32's resolution at the reference
+  property's elevations — both bounds asserted in `test_epsilon_fill.py`
+  against the real dtype. **This module is read by every KSOP step**, so
+  the fill is a pipeline-wide input, not a water-layer detail; the `-1`
+  sentinel is NOT deleted and still marks grid-edge outlets and cells
+  nodata walls off from the border.
 - `production_area.py` / `production_area_ceiling.py` /
   `production_suitability.py` — the consolidated production-zone
   pipeline, restructured (see Roadmap history) from an earlier three-pass

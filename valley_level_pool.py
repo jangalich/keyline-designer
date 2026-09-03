@@ -34,13 +34,14 @@ fitted. An earlier version derived a single straight valley axis at the
 anchor by total least squares through a short walk and used it for the dam
 band AND for placing every station -- and that straight-line assumption is
 what this module no longer makes. Where a valley is emphatic the fit was
-harmless; where it is subtle -- flat marshy ground, or a reach whose flow
-field is thinned by valley_delineation.py's flat-tie sentinel -- it had
-almost no signal and could settle up to 90 degrees off, putting the
-"perpendicular" ALONG the channel and marching the stations up a side
-slope. On the reference property five of six candidates reported a
-station-0 flooded width of exactly the full sampling window with the next
-station bone dry: not a valley profile, the signature of a rotated axis.
+harmless; where it is subtle -- flat marshy ground, or (before the
+hydrology layer's epsilon fill) a reach whose flow field was thinned by
+valley_delineation.py's flat-tie sentinel -- it had almost no signal and
+could settle up to 90 degrees off, putting the "perpendicular" ALONG the
+channel and marching the stations up a side slope. On the reference
+property five of six candidates reported a station-0 flooded width of
+exactly the full sampling window with the next station bone dry: not a
+valley profile, the signature of a rotated axis.
 See local_stem_direction() for the replacement and STEM_DIRECTION_WINDOW_
 CELLS for the one remaining tuning knob.
 
@@ -61,7 +62,8 @@ keypoint_detection.py's fix #1 exactly:
     walk terminates. A pit in the raw DEM (real marsh or interpolation
     artifact) would otherwise sever the backwater at the pit.
   * The ELEVATION TEST reads the RAW DEM. fill_depressions() raises every
-    pit to its spill elevation, so a filled-DEM elevation test would
+    pit to its spill elevation (plus the epsilon increment that gives the
+    filled flat a direction), so a filled-DEM elevation test would
     report a marsh bottom as sitting AT the spill level and exclude ground
     that a real pool would genuinely flood. The pool is only honest if the
     "is this ground under the waterline" question is asked of the terrain
@@ -70,17 +72,26 @@ keypoint_detection.py's fix #1 exactly:
 So: the walk goes where the FILLED flow field says water comes from, and
 the waterline is compared against what the RAW DEM says the ground is.
 
-ONE HONEST LIMIT ON THE FIRST HALF, MEASURED RATHER THAN ASSUMED.
-valley_delineation.fill_depressions() is the PLAIN priority-flood -- it
-raises a pit to EXACTLY its spill elevation, with no epsilon -- and
-compute_flow_direction() requires a STRICTLY positive slope. A filled pit
-therefore TIES with the neighbour it should drain to and gets that
-function's -1 "no downhill neighbour" sentinel, so the backwater walk
-STOPS at a pit on the channel instead of crossing it. That is
-valley_delineation.py's own documented flat-tie limitation (see its module
-docstring), it is pre-existing, and nothing here can or should paper over
-it: the fix belongs in the hydrology layer, as an epsilon fill or a
-flat-resolution pass, not in a consumer.
+THE LIMIT THIS USED TO CARRY IS FIXED, IN THE RIGHT LAYER.
+valley_delineation.fill_depressions() used to be the PLAIN priority-flood
+-- it raised a pit to EXACTLY its spill elevation, with no epsilon --
+while compute_flow_direction() requires a STRICTLY positive slope. A
+filled pit therefore TIED with the neighbour it should drain to, took the
+-1 "no downhill neighbour" sentinel, and the backwater walk STOPPED at a
+pit on the channel instead of crossing it. This docstring said the fix
+belonged in the hydrology layer as an epsilon fill, not in a consumer;
+that is where it landed. fill_depressions() is now the epsilon variant
+(FILL_EPSILON_METERS), a filled pit sits one increment ABOVE its spill
+neighbour, and the backwater crosses it -- measured on this module's own
+TEST 4b, where digging a 7.6 m pit into the channel now changes the
+65-cell pool by nothing at all. Not one line of this module changed for
+that; the walk simply reaches further because the field it walks is
+complete.
+
+The RAW elevation test below is unaffected and remains load-bearing: the
+epsilon fill still raises a marsh bottom to its spill level (plus a
+millimetre), so a filled-DEM elevation test would still report flooded
+ground that a real pool would never touch.
 
 What the fill still buys the walk is that the flow field is WELL-DEFINED
 and acyclic at all -- which is what makes "walk upstream until the
@@ -99,10 +110,12 @@ reached, and its width and area are absent (None) -- never 0.0. Zero width
 is a real measurement, "the ground rises above the waterline here";
 unreachable is the absence of one, "there is no channel here to measure."
 Both statuses are part of the measurement contract the scoring branch
-reads. This is also where valley_delineation.py's known flat-tie
-limitation now shows itself honestly -- as short stems and unreachable
-stations rather than as fabricated dry ones. It is FLAGGED here, not fixed
-here; the fix belongs in the hydrology layer.
+reads. This used to be where valley_delineation.py's flat-tie limitation
+showed itself -- as short stems and unreachable stations rather than as
+fabricated dry ones -- and it was FLAGGED here on the argument that the
+fix belonged in the hydrology layer. It went there: the fill is now the
+epsilon variant, filled flats route, and a stem that stops short now says
+something about the terrain rather than about the algorithm.
 
 NO VOLUME, ANYWHERE. This module computes flooded WIDTH (meters) and
 flooded CROSS-SECTIONAL AREA (square meters) at discrete stations. It
@@ -310,8 +323,9 @@ def _downstream_walk(
     """
     Up to `steps` cells downstream of `anchor`, following the D8 flow field
     (valley_delineation.compute_flow_direction()'s own (flow_to_row,
-    flow_to_col) pair). Stops early at a -1 sentinel (grid-edge outlet or
-    flat-plateau tie) or on revisiting a cell (defensive; the filled flow
+    flow_to_col) pair). Stops early at a -1 sentinel (a grid-edge outlet, or a
+    cell nodata walls off from the border -- see compute_flow_direction()) or
+    on revisiting a cell (defensive; the filled flow
     field is acyclic). `anchor` itself is NOT included.
     """
     walk: list[tuple[int, int]] = []
@@ -444,15 +458,15 @@ def local_stem_direction(
     straight axis is only as good as the assumption that the valley IS
     straight there. Where the valley is emphatic (a confluence, a sharp V)
     that assumption is harmless; where it is subtle -- flat, marshy ground,
-    or a reach whose flow field is thinned by the flat-tie sentinel -- the
-    fit has almost no signal to work with and can settle up to 90 degrees
-    off, which puts the "perpendicular" ALONG the channel and marches the
-    stations up a side slope. Observed on the reference property: five of
-    six candidates reported a station-0 flooded width of exactly the full
-    sampling window with the next station bone dry, which is not a valley
-    profile at all. Nothing is fitted now: every direction comes from the
-    stem itself, at the place it is needed, so a curved valley is followed
-    rather than approximated.
+    or (before the epsilon fill) a reach whose flow field was thinned by
+    the flat-tie sentinel -- the fit has almost no signal to work with and
+    can settle up to 90 degrees off, which puts the "perpendicular" ALONG
+    the channel and marches the stations up a side slope. Observed on the
+    reference property: five of six candidates reported a station-0
+    flooded width of exactly the full sampling window with the next
+    station bone dry, which is not a valley profile at all. Nothing is
+    fitted now: every direction comes from the stem itself, at the place it
+    is needed, so a curved valley is followed rather than approximated.
 
     DEGENERATE WINDOWS. If the clamped endpoints coincide (they can only do
     so on a stem of length 1, or when both clamp to the same cell), the
@@ -803,8 +817,9 @@ def delineate_level_pool(
        the DEM's own, which is what makes these numbers hand-checkable.)
 
        UNREACHABLE IS NOT DRY. The stem walk can end before the last
-       station -- a flat-tie -1 sentinel in the flow field, the grid edge,
-       or simply a stem shorter than station_count * spacing. A station
+       station -- a -1 sentinel in the flow field (since the epsilon fill,
+       a grid-edge outlet or nodata-walled ground, no longer an interior
+       flat tie), or simply a stem shorter than station_count * spacing. A station
        past the stem's end reports status "unreachable_stem_end" with the
        along-stem distance actually reached, and its width/area are None.
        IT IS NEVER REPORTED AS 0.0 m WIDE. Those are different facts:
@@ -812,10 +827,9 @@ def delineate_level_pool(
        here"), unreachable is the ABSENCE of one ("there is no channel
        here to measure"). A scoring layer that averaged them together
        would score a marsh whose flow field died as though it were a
-       ridge. This is also where valley_delineation.py's known flat-tie
-       limitation now surfaces honestly -- as short stems and unreachable
-       stations rather than as fabricated dry ones. It is FLAGGED here,
-       not fixed here.
+       ridge. That marsh case is now rare rather than routine: the
+       hydrology layer's epsilon fill routes filled flats, so an
+       unreachable station reports terrain, not a stalled algorithm.
 
        NO VOLUME IS COMPUTED, STORED, OR REPORTED, here or downstream. See
        the module docstring for why. No key below names a capacity.
