@@ -85,10 +85,13 @@ Pipeline (build_road_network()):
      geometry (points_xyz, line_utm, geometry_wgs84,
      cell_footprint_polygon_utm) plus per-branch floodplain/production-
      crossing diagnostics.
- 10. min_corridor_length_meters is applied to the network's TOTAL length
-     (every branch summed), not any single branch — a network that's
-     mostly one long branch plus a few short spurs is judged as a whole,
-     not branch by branch.
+ 10. WHATEVER THE ROUTER BUILT IS KEPT. There is no length floor: a
+     network the router judged worth building is not thrown away here for
+     being short. The router's own per-acre stopping rule already decides
+     what is worth building, and a second, terrain-blind rule on the
+     summed total could only discard a network that rule had accepted --
+     silently, and for a reason ("it is short") that is not itself a
+     reason a road is not worth having.
 
 Constraint stack, current design:
   - HARD (np.inf in cost_raster, a branch genuinely cannot cross it at
@@ -301,10 +304,6 @@ FLOODPLAIN_FETCH_CONTEXT_BUFFER_METERS = 200.0
 # because its own 30m buffer stroke doesn't quite reach the boundary.
 # CONFIGURABLE.
 FLOODPLAIN_FINAL_RELEVANCE_BUFFER_METERS = 75.0
-
-# Drop the whole network if its TOTAL length (every branch summed) is
-# shorter than this -- not a meaningful road. CONFIGURABLE.
-MIN_CORRIDOR_LENGTH_METERS = 100.0
 
 ROAD_CORRIDOR_CONFIDENCE_NOTES_TEMPLATE = (
     "This is a TOPOGRAPHIC SUGGESTION only, not a surveyed road alignment — "
@@ -594,10 +593,9 @@ def _empty_road_network(stop_reason: str, unserved_acres: float = 0.0) -> dict:
     that doesn't come from road_network_router.route_road_network() itself
     (which already returns this same branches=[] shape on its own for its
     own stop_reason values -- see that function's own docstring). Used
-    here for the two failure modes that happen BEFORE or AFTER the router
-    ever runs: the anchor snapping to no eligible cell at all, and the
-    router's own result being discarded because its total length falls
-    below min_corridor_length_meters.
+    here for the one failure mode that happens BEFORE the router ever
+    runs: the anchor snapping to no eligible cell at all. Nothing discards
+    a network the router DID build -- see the module docstring's step 10.
     """
     return {
         "branches": [],
@@ -620,7 +618,6 @@ def build_road_network(
     anchor_lon_lat: tuple[float, float],
     hydric_floodplain_union=None,
     canopy_mask: Optional[np.ndarray] = None,
-    min_corridor_length_meters: float = MIN_CORRIDOR_LENGTH_METERS,
     slope_pct: Optional[np.ndarray] = None,
     tpi: Optional[np.ndarray] = None,
     service_radius_meters: float = PRODUCTION_SERVICE_RADIUS_METERS,
@@ -736,9 +733,9 @@ def build_road_network(
 
     Returns the empty-network shape (_empty_road_network(), branches=[],
     never None, never an exception) if the anchor snaps to no eligible
-    cell at all, or if the router's own total_length_meters comes back
-    below min_corridor_length_meters -- both real, reportable "no network"
-    outcomes, not errors. route_road_network() itself already returns this
+    cell at all -- a real, reportable "no network" outcome, not an error.
+    A network the router DID build is returned as it stands, however
+    short. route_road_network() itself already returns this
     same branches=[] shape (with its own stop_reason) when demand_mask has
     no True cells at all ("no_demand"), the anchor's own baseline coverage
     already serves every acre of demand ("all_demand_served"), no
@@ -825,10 +822,6 @@ def build_road_network(
         max_meters_per_served_acre=max_meters_per_served_acre,
         max_water_spur_meters=max_water_spur_meters,
     )
-
-    if network_result["branches"] and network_result["total_length_meters"] < min_corridor_length_meters:
-        total_demand_acres = network_result["total_served_acres"] + network_result["unserved_acres"]
-        return _empty_road_network("corridor_too_short", unserved_acres=total_demand_acres)
 
     branches_out = []
     network_cell_mask = np.zeros(dem["array"].shape, dtype=bool)
@@ -1545,6 +1538,36 @@ def identify_road_corridor_candidates(
             canopy_data_available=canopy_mask is not None,
         ),
     }
+
+
+def road_network_is_empty(result: dict) -> bool:
+    """
+    True when identify_road_corridor_candidates()'s result holds NO ROUTED
+    NETWORK -- the router grew nothing from this access point.
+
+    THE STEP REGISTRY'S OWN PREDICATE, declared by the roads entry as
+    Accumulation.empty_result and called by step_orchestrator.py, which
+    cannot read this result shape for itself. What "no network" means is
+    this module's fact, so the test for it lives with the function that
+    produces it rather than as an `if step_id == "roads"` in the
+    orchestrator.
+
+    READS narrative_data.network_found, which is `bool(branches)` -- the
+    same emptiness build_narrative_data() already publishes, not a second
+    opinion assembled here. Every no-network outcome reaches this as
+    False: the router's own stop_reason values (no_demand,
+    all_demand_served, no_reachable_demand, cost_per_acre_exceeded on the
+    very first candidate) and _empty_road_network()'s two (no_anchor_given,
+    no_eligible_anchor) alike. They are one answer to the user -- "no road
+    comes from here" -- and the access point is the thing they have in
+    common, which is why the orchestrator treats them the same.
+
+    NOT AN ERROR, and this returning True is not a failure of this module:
+    a parcel with no production ground honestly has no road to build. It is
+    the ORCHESTRATOR that decides an access point which routes nothing is
+    not a candidate worth a slot.
+    """
+    return not bool(result["narrative_data"]["network_found"])
 
 
 def fetch_and_select_optimal_road_corridor(

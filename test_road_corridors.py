@@ -41,7 +41,6 @@ from feature_schema import validate_feature_collection
 from raster_grid import pixel_center_xy
 from road_corridors import (
     MAX_ROAD_GRADE_PCT,
-    MIN_CORRIDOR_LENGTH_METERS,
     STEEP_GRADE_ENGINEERING_NOTE_THRESHOLD_PCT,
     _build_production_cell_mask,
     _snap_anchor_to_eligible_cell,
@@ -152,17 +151,14 @@ network_production_areas = [
 ]  # a large block spanning the full height of the DEM -- large enough (and far enough beyond the
 # anchor's own PRODUCTION_SERVICE_RADIUS_METERS baseline coverage) that a real branch is worth building
 
-# min_corridor_length_meters is pinned low here on purpose: THIS test
-# exercises real multi-branch network GROWTH, not the total-length floor
-# (that's test 4 below, which passes its own explicit huge floor). This
-# synthetic fixture's network totals ~104m, so leaving the floor at its
-# MIN_CORRIDOR_LENGTH_METERS default (100.0) would couple a network-growth
-# assertion to a ~4m margin against that floor -- a future router-tuning
-# change could then flip this into a confusing 'corridor_too_short' failure
-# that has nothing to do with what this test is actually checking.
+# NO FLOOR TO PIN DOWN ANY MORE. This test used to pass
+# min_corridor_length_meters=1.0 so that a network-growth assertion could
+# not be flipped by this fixture's ~104 m total sitting a few metres above
+# the 100 m default floor. That floor is deleted -- whatever the router
+# builds is kept -- so the coupling is gone with it and the call is the
+# plain one.
 network = build_road_network(
     network_dem, network_production_areas, None, network_boundary, network_anchor,
-    min_corridor_length_meters=1.0,
 )
 assert network["branches"], (
     "expected at least one branch: there is real, nearby, reachable production demand for the "
@@ -323,17 +319,32 @@ assert no_production_result["stop_reason"] == "no_demand"
 print("build_road_network() with no production areas at all (zero demand) returns the empty-network "
       "shape with stop_reason='no_demand'.")
 
-# --- 4. total network length below min_corridor_length_meters (real branches found, then discarded) ---
+# --- 4. THE NETWORK-LENGTH FLOOR IS GONE: a short network is KEPT ---
+#
+# This section used to pass min_corridor_length_meters=1_000_000.0 and
+# assert that build_road_network() threw the router's own real result away
+# with stop_reason 'corridor_too_short'. Both the parameter and the floor
+# are deleted, so what is asserted now is the opposite and it is the point
+# of the deletion: this fixture's network totals about 104 m, well under
+# the 100 m the old default would have measured it against once a spur or
+# two came off, and it survives. There is no length at which a routed
+# network is discarded.
+import inspect as _inspect  # noqa: E402
+import road_corridors as _road_corridors  # noqa: E402
 
-too_strict_result = build_road_network(
+assert not hasattr(_road_corridors, "MIN_CORRIDOR_LENGTH_METERS")
+assert "min_corridor_length_meters" not in _inspect.signature(build_road_network).parameters
+_short_result = build_road_network(
     network_dem, network_production_areas, None, network_boundary, network_anchor,
-    min_corridor_length_meters=1_000_000.0,
 )
-_assert_empty_network_shape(too_strict_result, "below min_corridor_length_meters")
-assert too_strict_result["stop_reason"] == "corridor_too_short"
-print(f"build_road_network() with an unreasonably high min_corridor_length_meters (real demand exists, "
-      f"but MIN_CORRIDOR_LENGTH_METERS default is {MIN_CORRIDOR_LENGTH_METERS}) still returns the "
-      f"empty-network shape, discarding the router's own real result.")
+assert _short_result["branches"], "the router's own result must reach the caller"
+assert _short_result["stop_reason"] != "corridor_too_short"
+assert _short_result["total_length_meters"] > 0
+print(f"build_road_network() KEEPS the network the router built "
+      f"({_short_result['total_length_meters']:.1f} m over "
+      f"{len(_short_result['branches'])} branch(es), stop_reason "
+      f"{_short_result['stop_reason']!r}); the length floor and its "
+      f"'corridor_too_short' outcome are deleted, constant and parameter alike.")
 
 
 # =====================================================================
@@ -352,7 +363,16 @@ buffered_production_areas = [
 ]
 
 buffered_network = build_road_network(
-    buffered_dem, buffered_production_areas, None, parcel_boundary, buffered_anchor
+    buffered_dem, buffered_production_areas, None, parcel_boundary, buffered_anchor,
+    # A HUGE PER-ACRE CEILING, because this section is about GEOMETRY and
+    # must not be a router-tuning assertion in disguise. The anchor sits
+    # deliberately far from the demand block (that is the bug being
+    # regressed -- an off-parcel anchor near the buffered DEM's edge), so
+    # with PRODUCTION_SERVICE_RADIUS_METERS at 25 m the first extension the
+    # router finds already costs more per acre than it will pay and it
+    # stops with no branch to check the clipping of. Freeing the ceiling
+    # puts the branches back; every assertion below is about where they run.
+    max_meters_per_served_acre=1e9,
 )
 assert buffered_network["branches"], "expected at least one branch on this uniform, buffered DEM"
 for branch in buffered_network["branches"]:
@@ -616,11 +636,11 @@ _steep_network = build_road_network(
     _steep_dem, _steep_production, None, _steep_boundary, _steep_anchor,
     slope_pct=_steep_slope, tpi=_steep_tpi,
     # small service radius so the anchor's own baseline coverage doesn't
-    # already reach the far plateau (which would need no road at all); a
-    # huge per-acre ceiling and a zero length floor so the router is free
-    # to build the crossing rather than stopping short in this tiny fixture.
+    # already reach the far plateau (which would need no road at all), and a
+    # huge per-acre ceiling so the router is free to build the crossing
+    # rather than stopping short in this tiny fixture. There is no length
+    # floor to disable any more.
     service_radius_meters=15.0, max_meters_per_served_acre=1e9,
-    min_corridor_length_meters=0.0,
 )
 assert _steep_network["branches"], (
     "with the 35% cliff ceiling a road network MUST be produced across the band -- the old 15% wall "

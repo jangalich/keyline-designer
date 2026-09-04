@@ -906,6 +906,17 @@ _ROAD_NETWORK_STOP_REASON_SENTENCES = {
         "(every nearby cell is excluded or impassable), so no road network was "
         "generated."
     ),
+    # RETAINED AS VOCABULARY, THOUGH NOTHING PRODUCES IT ANY MORE. The
+    # network-length floor that raised this (road_corridors.MIN_CORRIDOR_
+    # LENGTH_METERS) is deleted, so no new run can carry this stop_reason.
+    # The sentence stays because this map is a CLOSED SET that RAISES on a
+    # value it does not know, and stop_reason is a STORED field: it is
+    # written into the narrative block a session keeps, so a design document
+    # generated before that floor was removed still carries this value and
+    # still has to produce a report. Deleting the entry would turn every one
+    # of those into a ValueError at report time -- a hard failure, in the
+    # one direction the closed set was never meant to be strict about.
+    # Delete it when no stored document can hold it, not before.
     "corridor_too_short": (
         "The only network worth building came out shorter than the minimum "
         "meaningful road length, so none is recommended."

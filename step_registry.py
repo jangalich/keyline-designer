@@ -515,6 +515,30 @@ class Accumulation:
                    networks to be compared and no more, and a fourth
                    generate is refused server-side rather than left to the
                    client.
+    empty_result   dotted path of a predicate over the entry point's OWN
+                   result -- True when that result is no candidate at all.
+                   An input whose generate produces one is NOT recorded in
+                   inputs_list and holds NO slot: the generate reports it
+                   and the user places again. None (landform, water, and
+                   any accumulating step that has no such outcome) keeps
+                   every result a candidate, which is the behaviour every
+                   step had before this field existed.
+
+                   WHY IT IS DECLARED HERE rather than tested in the
+                   orchestrator: what "produced nothing" means belongs to
+                   the module that produced it -- roads reads
+                   narrative_data.network_found (road_corridors.road_
+                   network_is_empty) -- and the orchestrator can no more
+                   read that shape than it can read a survey zone's. It is
+                   NOT a failure declaration: failure_layers is for a data
+                   source that did not answer, which is retryable and
+                   leaves the input alone. This is a routing pass that ran
+                   fine and honestly found nothing, which is not.
+    empty_error    the prose a client shows when empty_result fires --
+                   about THIS input, in the user's terms, because
+                   generic_error ("Road corridors could not be generated")
+                   is the wrong sentence for a generate that worked. Read
+                   only when empty_result is set.
     """
 
     keyed_by: str
@@ -522,6 +546,8 @@ class Accumulation:
     inputs_list: str
     feature_key_property: str
     max_candidates: int
+    empty_result: Optional[str] = None
+    empty_error: str = ""
     why: str = ""
 
 
@@ -1228,6 +1254,22 @@ ROADS = StepDefinition(
         inputs_list="access_points",
         feature_key_property="network_id",
         max_candidates=3,
+        # AN ACCESS POINT THAT ROUTES NOTHING IS NOT A CANDIDATE. The
+        # router grew no branch from it, and it will grow none on a retry
+        # from the same point -- the terrain and the exclusions are the
+        # same. Recording it would spend one of the three slots on a
+        # network that does not exist, and the user would have to discard
+        # it before trying a fourth point. So the generate reports the
+        # outcome and the input is not kept; the slot stays free and they
+        # place again. A FETCH that did not answer is the opposite case and
+        # is not this one: nothing is wrong with the access point, so it is
+        # left exactly where it is (see this field's own docstring).
+        empty_result="road_corridors.road_network_is_empty",
+        empty_error=(
+            "No road network could be routed from that access point. Place "
+            "the access point somewhere else along the boundary and generate "
+            "again."
+        ),
         why=(
             "identify_road_corridor_candidates() returns ONE network per "
             "call, and the branches inside it are a tree, not alternatives. "

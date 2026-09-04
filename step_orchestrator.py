@@ -542,6 +542,45 @@ class CandidateNotFoundError(StepOrchestrationError):
         )
 
 
+class EmptyCandidateError(StepOrchestrationError):
+    """
+    A generate for an accumulating step whose entry point produced NO
+    CANDIDATE -- declared by that step's Accumulation.empty_result
+    predicate, and for roads meaning the router grew no branch from the
+    access point.
+
+    THE INPUT IS NOT KEPT, and that is the whole point of this class. A
+    recorded input holds one of the step's slots and is restored by a
+    reopen and rebuilt by a cold cache; an access point that routes
+    nothing has none of that to restore, and the user's next move is to
+    place a different point rather than to discard the one that failed.
+    So _generate_accumulated() does not record it -- and REMOVES it if a
+    previous generate had -- and raises this instead.
+
+    NOT A DATA FAILURE, and a client must be able to tell the two apart
+    because they get opposite treatment. A fetch that did not answer is
+    retryable and says nothing about the access point: it keeps its slot
+    and the user presses retry. This says the routing pass RAN, over real
+    terrain, and found nothing to build -- retrying from the same point
+    produces the same nothing. error_payload() therefore reports this as
+    `no_candidate` carrying the input that produced it, never as
+    `failed_layer`; the two keys are mutually exclusive and each is
+    POSITIVE, so no client has to infer a kind from a missing key.
+
+    Carries the step id and the input, so the report can name the point
+    the user placed rather than "the generate failed".
+    """
+
+    def __init__(self, step_id: str, input_name: str, value):
+        self.step_id = step_id
+        self.input_name = input_name
+        self.value = value
+        super().__init__(
+            f"step '{step_id}' produced no candidate for {input_name} "
+            f"{value!r}; the input was not recorded and holds no slot."
+        )
+
+
 class CommitInputError(StepOrchestrationError):
     """
     A commit to a step that declares a required user input, whose body does
@@ -674,7 +713,42 @@ def error_payload(definition, exc: BaseException) -> dict:
     name -- so both halves of this are a working frontend's contract, not a
     convention. Never a traceback: the exception stays on the Job for
     server-side logging (job_runner.py).
+
+    PLUS ONE MORE SHAPE, AND THE TWO ARE TOLD APART BY A KEY EACH CARRIES
+    RATHER THAN BY ONE THEY LACK:
+
+        {"error": prose, "no_candidate": {"input": name, "value": ...}}
+
+    for EmptyCandidateError -- the entry point ran to completion over real
+    data and produced no candidate (for roads: the router grew no branch
+    from that access point). These two are MUTUALLY EXCLUSIVE and neither
+    is the default: `failed_layer` means a data source did not answer, so
+    the input is untouched, still holds its slot, and a retry is worth
+    offering; `no_candidate` means the input itself is the answer, it was
+    not recorded, its slot is free, and a retry from the same value returns
+    the same nothing. A client that had to read "no failed_layer" as "must
+    be the other kind" would be one new failure mode away from telling a
+    user their data source is down when their access point simply routes
+    nothing -- so the second kind names itself, and `value` is the input it
+    names, for a report that can say WHICH point.
     """
+    if isinstance(exc, EmptyCandidateError):
+        return {
+            # The step's OWN prose for this outcome, never generic_error:
+            # "Road corridors could not be generated" describes a generate
+            # that broke, and this one did not.
+            "error": definition.accumulate.empty_error,
+            # JSON-NATIVE, like _inputs_document()'s list-of-floats and the
+            # payload's own access_point: an input's shape check normalises
+            # a lon/lat to a TUPLE, and a tuple on this wire is a shape no
+            # other endpoint sends -- the client compares this value against
+            # the access points it holds, and those arrive as lists.
+            "no_candidate": {
+                "input": exc.input_name,
+                "value": list(exc.value) if isinstance(exc.value, tuple) else exc.value,
+            },
+        }
+
     for failure in definition.failure_layers:
         try:
             exception_class = step_registry.resolve(failure.exception)
@@ -957,6 +1031,75 @@ def _generate(
     return payload, updated
 
 
+def _is_empty_candidate(definition, result) -> bool:
+    """
+    Whether an accumulating step's entry-point result is NO CANDIDATE AT
+    ALL, per its own Accumulation.empty_result predicate.
+
+    False for a step that declares none, which is every step but roads and
+    is what keeps the accumulate path exactly as it was for them. The
+    predicate is resolved through the registry like every other declared
+    target, so an unresolvable path fails loudly here rather than being
+    read as "not empty" -- silently keeping a candidate the step said was
+    not one is the failure mode worth being noisy about.
+    """
+    accumulation = definition.accumulate
+    if not accumulation or not accumulation.empty_result:
+        return False
+    return bool(step_registry.resolve(accumulation.empty_result)(result))
+
+
+def _discard_empty_candidate(definition, store, context, document, key: str) -> None:
+    """
+    Leave NOTHING behind for an input whose generate produced no candidate:
+    the document does not record it, and the cache does not hold it.
+
+    A SKIP IS NOT ENOUGH, WHICH IS WHY THIS IS A REMOVAL. For a FRESH
+    input -- the ordinary case, a point the user has just placed -- there
+    is genuinely nothing to remove: _generate_accumulated() runs the entry
+    point BEFORE it records anything, so not recording is the whole of the
+    work and the document is never written at all. But an input can also
+    have been recorded by an EARLIER generate that did route, and be
+    regenerated into nothing later: the entry point re-fetches what the
+    cache did not forward (canopy is the live example -- a fetch that
+    answered once and not the next time changes the cost surface), so the
+    same point can stop routing without the user doing anything to it.
+    Skipping the write would leave that stale input recorded, holding a
+    slot for a network the store no longer has -- and a reopen or a cold
+    cache would then rebuild a candidate that produces nothing, which is
+    the state this whole path exists to prevent. So the recorded list is
+    rewritten without the key whenever it held it.
+
+    THE CACHE ENTRY GOES TOO, for the same reason discard_candidate() pops
+    it: _ensure_accumulated_proposals() reconciles the store against the
+    document, and a keyed result the document does not record would be
+    dropped on the next generate anyway -- but not before this generate's
+    own payload could have been built over it.
+
+    WRITES ONLY WHEN SOMETHING CHANGED. record_step_inputs() returns the
+    same object for an unchanged list, so the fresh case makes no store
+    call and bumps no revision: a generate that produced nothing and
+    changed nothing leaves the document byte-identical, which is what the
+    client's mirror already believes.
+    """
+    accumulation = definition.accumulate
+    entry = document["steps"][definition.step_id]
+    if entry["status"] == design_document.STATUS_GENERATED:
+        key_of = step_registry.resolve(accumulation.key)
+        recorded = recorded_candidate_inputs(definition, entry)
+        remaining = [value for value in recorded if key_of(value) != key]
+        if len(remaining) != len(recorded):
+            updated = design_document.record_step_inputs(
+                document, definition.step_id, _inputs_document(definition, remaining)
+            )
+            if updated is not document:
+                store.put(updated)
+
+    proposals = context.step_proposals.get(definition.step_id)
+    if isinstance(proposals, dict):
+        proposals.pop(key, None)
+
+
 def _generate_accumulated(definition, store, context, document, assembled, params) -> tuple:
     """
     The accumulate branch of _generate(): (payload, document).
@@ -972,13 +1115,30 @@ def _generate_accumulated(definition, store, context, document, assembled, param
     step_inputs, a no-op for an input already recorded). A regenerate for a
     recorded input therefore bumps nothing, which is the same repeatability
     contract the replace path keeps.
+
+    AN INPUT THAT PRODUCED NOTHING IS NOT RECORDED -- see _discard_empty_
+    candidate() below for the sequencing and for why it is a removal and
+    not merely a skip.
     """
     accumulation = definition.accumulate
     key = accumulation_key(definition, params)
     check_candidate_cap(definition, document, key)
 
     proposals = _ensure_accumulated_proposals(definition, context, document, assembled)
-    proposals[key] = {"inputs": params, "result": _run_entry_point(definition, assembled, params)}
+    result = _run_entry_point(definition, assembled, params)
+
+    # BEFORE THE STORE IS WRITTEN AND BEFORE THE DOCUMENT IS TOUCHED. The
+    # entry point has already run -- it has to, since whether there is a
+    # candidate is something only its result can say -- so this is the
+    # first moment the answer exists, and the earliest point at which
+    # nothing has yet been kept.
+    if _is_empty_candidate(definition, result):
+        _discard_empty_candidate(definition, store, context, document, key)
+        raise EmptyCandidateError(
+            definition.step_id, accumulation.keyed_by, params[accumulation.keyed_by]
+        )
+
+    proposals[key] = {"inputs": params, "result": result}
 
     payload = definition.resolve_payload()(proposals, assembled)
 
