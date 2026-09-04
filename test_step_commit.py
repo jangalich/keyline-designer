@@ -124,11 +124,74 @@ KNEE_ROW = int(round((ORIGIN_Y - _centroid.y) / RESOLUTION_METERS))
 def _build_dem() -> dict:
     """A 4% bench with one incised drainage down CHANNEL_COL -- B5a's fixture,
     so the proposals committed here are the proposals that branch asserted
-    over."""
+    over -- PLUS flanking levee ridges whose spacing narrows to a throat at
+    KNEE_ROW.
+
+    THE THROAT IS NOT DECORATION, AND IT IS NOT LANDFORM'S. It is what the
+    EMBANKMENT survey type needs in order to exist at all, and this harness is
+    the one every consumer of this file drives: serve_test_backend.py serves
+    it, and the frontend's water.test.jsx runs its whole end-to-end suite
+    through that server.
+
+    B5a's prism has a CONSTANT CROSS-SECTION, so an embankment seed's pinch
+    walk finds no crest-to-crest width minimum anywhere and every seed fails
+    honestly -- `no_constriction`, which is the correct reading of a landform
+    with no pinch in it. The consequence was ZERO embankment zones from this
+    harness while test_water_step.py's own fixture (which grew the throat when
+    the compartment change landed, and says so in its own docstring) produced
+    four from the same boundary. Six frontend tests then failed on a terrain
+    gap rather than on anything either side had got wrong: no embankment rank 1
+    to name, no second type to draw into its own pane, and no cross-type
+    agreement to report.
+
+    The levees are LOCAL BUMPS BESIDE ONE REACH OF THE CHANNEL -- 2.5 m at
+    13 cells (65 m) off-channel, closing to 9 cells (45 m) at the throat, and
+    fading out along the valley either side of it -- so the bench's own
+    landform ground is left alone and the incision, the gradient and the
+    exclusion fixtures below are B5a's, unchanged. Three zones still come out
+    of the landform generate, as they did before; the water generate that
+    followed it now returns five embankment zones and three excavated ones,
+    where it returned none and three.
+
+    THREE THINGS ABOUT THE SHAPE, AND ALL THREE ARE THIS FILE'S OTHER
+    FIXTURES RATHER THAN A VIEW ABOUT THE LANDFORM.
+
+    THEY SIT FURTHER OFF THE CHANNEL THAN test_water_step.py'S (9/13 cells,
+    not 5/8). HYDRIC_ZONE_RING (section 6, the most important test here) sits
+    5 to 7 cells west of the channel, and the hydric gate is derived as
+    `slope_ok & disqualifying_soil` -- exclusion_zones.py says so at length --
+    so a levee crest laid over that ground turns those cells too steep, drops
+    them out of the HYDRIC layer, and leaves the section asserting a crossing
+    that has quietly become a slope one. Pushed out, the two fixtures do not
+    touch: the hydric layer, its crossing with HYDRIC_ZONE_RING (0.089 acres)
+    and the graze ring's above/below-floor pair are all identical to what
+    B5a's bare prism produced.
+
+    THEY FADE OUT ALONG THE VALLEY rather than running the parcel's whole
+    length, and that is what a throat IS -- a valley narrows at a reach, and a
+    ridge pair running end to end is a canyon. It is also what the ROADS
+    fixtures need: two of the four surveyed access points sit OUTSIDE the
+    western crest line, and a 2.5 m ridge across their whole approach is a
+    grade the router cannot cross, so a full-length pair returned
+    network_found false from points that had always routed. At 100 m of reach
+    the crest is about a metre where those two points are -- 1.2 m and 0.9 m --
+    and the routes are back.
+
+    THEY ARE THE SAME EXPRESSION test_water_step.py USES otherwise. Two
+    harnesses over one boundary that disagree about its terrain are two
+    reference parcels, and the whole value of this one is that it is the
+    other's.
+    """
     rows = np.arange(ROWS)[:, None].astype(np.float32)
     cols = np.arange(COLS)[None, :].astype(np.float32)
     array = 300.0 + 0.20 * rows + 0.05 * cols
     array -= 9.0 * np.exp(-((cols - CHANNEL_COL) ** 2) / (2 * 3.0 ** 2))
+    levee_offset = 9.0 + 4.0 * (1.0 - np.exp(-((rows - KNEE_ROW) ** 2) / (2 * 8.0 ** 2)))
+    levee_height = 2.5 * np.exp(-((rows - KNEE_ROW) ** 2) / (2 * 20.0 ** 2))
+    for side in (-1, 1):
+        array = array + levee_height * np.exp(
+            -((cols - (CHANNEL_COL + side * levee_offset)) ** 2) / (2 * 2.0 ** 2)
+        )
     return {
         "array": array.astype(np.float32),
         "resolution_meters": (RESOLUTION_METERS, RESOLUTION_METERS),
