@@ -8,7 +8,11 @@ see THE CONTRACT below for where and why this departs from what section 2.5
 proposed).
 
     check_commit(...)         -> CommitCheck, or raises CommitRejectedError
-    exclusion_crossings(...)  -> what one committed geometry crosses
+    crossings(...)            -> what one committed geometry crosses, against
+                                 a list of GROUNDS
+    exclusion_grounds(...)    -> the session's exclusion gates as grounds
+    exclusion_crossings(...)  -> the two above composed: what one committed
+                                 geometry crosses of the exclusion gates
     annotate_crossings(...)   -> the FeatureCollection as it enters the
                                  document, each feature carrying its own
 
@@ -267,7 +271,7 @@ class CommitCheck:
 # ======================================================================
 
 
-def internal_ids_for(features: list, provenance: dict) -> list:
+def internal_ids_for(features: list, provenance: dict, parse=None) -> list:
     """
     One INTERNAL id per committed feature, in order.
 
@@ -277,6 +281,15 @@ def internal_ids_for(features: list, provenance: dict) -> list:
     against that id (water's served_production_area_ids, for one).
     wire_translation.internal_zone_id() is the one place that spelling is
     parsed.
+
+    THE PARSER IS THE STEP'S, NOT THIS FUNCTION'S. `parse` is the step's
+    declared CommitContract.internal_id_parser resolved to a callable --
+    wire_translation.internal_zone_id for production zones, internal_tree_
+    zone_id for tree zones -- because each drawn layer spells its ids its
+    own way and a parser hardcoded here would read every tree zone's
+    "tree-zone-candidate-<n>" as "not one of ours" and renumber the whole
+    commit. None keeps the production parser, for callers that predate the
+    trees entry.
 
     A USER-DRAWN FEATURE has no pipeline id, and the rehydrator refuses to
     invent one -- an invented id can collide with a generated zone's in the
@@ -298,10 +311,12 @@ def internal_ids_for(features: list, provenance: dict) -> list:
     # BEFORE it has raised on a malformed collection -- a positional id list
     # has to line up with the features list even when one of them is junk, or
     # the report the caller is about to get is the wrong exception.
+    if parse is None:
+        parse = wire_translation.internal_zone_id
     wire_ids = [
         feature.get("id") if isinstance(feature, dict) else None for feature in features
     ]
-    parsed = [wire_translation.internal_zone_id(wire_id) for wire_id in wire_ids]
+    parsed = [parse(wire_id) for wire_id in wire_ids]
     next_id = max((zone_id for zone_id in parsed if zone_id is not None), default=-1) + 1
 
     ids = []
@@ -322,8 +337,84 @@ def internal_ids_for(features: list, provenance: dict) -> list:
 
 
 # ======================================================================
-# Exclusion crossings -- recorded, never rejected
+# Crossings -- recorded, never rejected
 # ======================================================================
+#
+# A CROSSING IS MEASURED AGAINST A GROUND, and a ground is one dict:
+#
+#     {"type": "hydric", "label": "hydric soil", "polygon_utm": <shapely>}
+#
+# `type` the stable identifier a client branches on, `label` the display
+# prose, `polygon_utm` the ground itself in the DEM's CRS. For landform,
+# water and roads the grounds are the session's exclusion gates
+# (exclusion_grounds() below), which is what this module measured against
+# before the trees entry existed. TREES IS THE STEP THAT MADE THE GROUND A
+# PARAMETER: a tree zone is sited on the ground the exclusion gates
+# REJECTED -- steep, wet, poor soil is the point of the step -- so a
+# crossing of the hydric or slope gate is not a caution there, and the
+# things a drawn tree zone must be warned about are the three COMMITTED
+# claims (production, water, road) plus existing canopy. Those are
+# declared on the trees CommitContract (step_registry.CrossingGround) and
+# resolved into this dict shape by step_orchestrator.crossing_grounds(); the
+# measurement, the floor and the record shape below are the same for every
+# step, which is the whole reason the ground is data here and not a
+# branch.
+
+
+def exclusion_grounds(exclusion_result: dict) -> list:
+    """
+    The session's exclusion gates as crossing grounds, in
+    exclusion_zones.LAYER_ORDER -- the wire block iterated for
+    exclusion_crossings()'s own reasons (it is already in order, and it
+    carries label and availability in the exact form the client received
+    them).
+
+    A gate whose data_available is false is OMITTED, not returned clear --
+    "we did not look" and "it is clear" are different statements, and the
+    panel's standing caveat is what says the first one. A gate with no
+    footprint on this parcel is omitted too (the client's
+    `!layer.geometry_wgs84`, the same geometry seen empty).
+    """
+    layers = exclusion_result["layers"]
+    grounds = []
+    for wire_layer in exclusion_result["wire"]["layers"]:
+        name = wire_layer["type"]
+        if not wire_layer["data_available"]:
+            continue
+        gate_polygon = layers[name]["polygon_utm"]
+        if gate_polygon.is_empty:
+            continue
+        grounds.append({"type": name, "label": wire_layer["label"], "polygon_utm": gate_polygon})
+    return grounds
+
+
+def crossings(polygon_utm, grounds: list) -> list:
+    """
+    What ONE committed geometry crosses, per ground, above the floor, in the
+    order the grounds were given:
+
+        [{"type": "hydric", "label": "hydric soil", "acres": 1.23}, ...]
+
+    Per ground, INDEPENDENTLY -- two crossings for a zone over canopy and a
+    committed pond, never one merged figure, because they are two different
+    facts about the ground -- and CROSSING_MIN_ACRES applied the same way
+    zoneGeometry.js applies it, so the document never carries a caution the
+    user was not shown. No centroid, for exclusion_crossings()'s reason.
+    """
+    if polygon_utm is None or polygon_utm.is_empty:
+        return []
+    recorded = []
+    for ground in grounds:
+        hit = polygon_utm.intersection(ground["polygon_utm"])
+        if hit.is_empty:
+            continue
+        acres = _acres(hit)
+        if acres < CROSSING_MIN_ACRES:
+            # See CROSSING_MIN_ACRES. Dropped rather than recorded with a
+            # hedge, and dropped at the same threshold the client drops it.
+            continue
+        recorded.append({"type": ground["type"], "label": ground["label"], "acres": round(acres, 2)})
+    return recorded
 
 
 def exclusion_crossings(polygon_utm, exclusion_result: dict) -> list:
@@ -359,47 +450,29 @@ def exclusion_crossings(polygon_utm, exclusion_result: dict) -> list:
     record does not, and a coordinate written into the document would be a
     display decision frozen into a decision record.
     """
-    if polygon_utm is None or polygon_utm.is_empty:
-        return []
-
-    layers = exclusion_result["layers"]
-    crossings = []
-    # The wire block is iterated rather than LAYER_ORDER directly: it is
-    # already in LAYER_ORDER, it carries the label and the availability flag
-    # in the exact form the client received them, and reading the two halves
-    # off one source is what stops the server's record and the client's
-    # caution disagreeing about a gate's identity.
-    for wire_layer in exclusion_result["wire"]["layers"]:
-        name = wire_layer["type"]
-        if not wire_layer["data_available"]:
-            # "We did not look" is not "it is clear". Skipped in silence
-            # here exactly as cautionsFor() skips it, because the honest
-            # statement about an unchecked gate is the step-wide caveat the
-            # panel already renders, not a per-feature record.
-            continue
-        gate_polygon = layers[name]["polygon_utm"]
-        if gate_polygon.is_empty:
-            continue
-        hit = polygon_utm.intersection(gate_polygon)
-        if hit.is_empty:
-            continue
-        acres = _acres(hit)
-        if acres < CROSSING_MIN_ACRES:
-            # See CROSSING_MIN_ACRES. Dropped rather than recorded with a
-            # hedge, and dropped at the same threshold the client drops it,
-            # so the document never carries a caution the user was not shown.
-            continue
-        crossings.append(
-            {"type": name, "label": wire_layer["label"], "acres": round(acres, 2)}
-        )
-    return crossings
+    # The wire block is iterated rather than LAYER_ORDER directly (see
+    # exclusion_grounds()): it is already in LAYER_ORDER, it carries the
+    # label and the availability flag in the exact form the client received
+    # them, and reading the two halves off one source is what stops the
+    # server's record and the client's caution disagreeing about a gate's
+    # identity. "We did not look" is not "it is clear": an unavailable gate
+    # is skipped in silence exactly as cautionsFor() skips it.
+    return crossings(polygon_utm, exclusion_grounds(exclusion_result))
 
 
-def annotate_crossings(features: list, rehydrated: list, exclusion_result: dict) -> dict:
+def annotate_crossings(features: list, rehydrated: list, grounds: list) -> dict:
     """
     The FeatureCollection as it enters the Design Document: every feature
-    exactly as it arrived, plus its own crossings under
-    properties.exclusion_crossings.
+    exactly as it arrived, plus its own crossings against `grounds` (see the
+    section header -- the exclusion gates for most steps, the committed
+    claims plus canopy for trees) under properties.exclusion_crossings.
+
+    THE KEY IS exclusion_crossings FOR EVERY STEP, including trees, whose
+    grounds are not exclusion gates. The key is the document's and the
+    client's -- one place every committed feature's cautions are read from
+    -- and a second key for one step would make a reader that walks all six
+    steps' features look in two places for the same kind of fact. The
+    `type` on each record says what was crossed.
 
     ALONGSIDE THE FEATURE, not in a parallel map keyed by id. A committed
     feature and what it crosses are one fact, and splitting them puts the
@@ -420,9 +493,7 @@ def annotate_crossings(features: list, rehydrated: list, exclusion_result: dict)
     annotated = []
     for feature, patch in zip(features, rehydrated):
         properties = dict(feature.get("properties") or {})
-        properties["exclusion_crossings"] = exclusion_crossings(
-            patch["polygon_utm"], exclusion_result
-        )
+        properties["exclusion_crossings"] = crossings(patch["polygon_utm"], grounds)
         annotated.append({**feature, "properties": properties})
     return {"type": "FeatureCollection", "features": annotated}
 
@@ -707,7 +778,11 @@ def check_commit(
                 checkable = [index for index in checkable if index not in indexes]
 
     # --- per feature, the expensive checks ----------------------------
-    internal_ids = internal_ids_for(feature_list, provenance)
+    internal_ids = internal_ids_for(
+        feature_list,
+        provenance,
+        step_registry.resolve(contract.internal_id_parser) if contract.internal_id_parser else None,
+    )
     rehydrate = step_registry.resolve(contract.rehydrate)
     rehydrated = [None] * len(feature_list)
 

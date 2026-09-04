@@ -200,6 +200,49 @@ from water_suitability import NO_WATER_ZONE, fetch_and_select_optimal_water_zone
 
 METERS_PER_FOOT = 0.3048
 
+# The EXPLICIT "the roads step already ran and selected NO road" answer, for
+# forwarding selected_road_corridor between pipeline steps. The exact
+# counterpart of water_suitability.NO_WATER_ZONE, for the exact reason that
+# constant exists (see its own docstring): every selected_road_corridor
+# override parameter downstream (tree_zone_candidates.identify_tree_zone_
+# candidates(), solar_suitability.identify_solar_candidate_zones(),
+# fencing.identify_fencing()) treats None as "not supplied" (this pipeline's
+# standard None-as-sentinel override convention) and reacts by re-running
+# this ENTIRE module's routing pass as its self-compute fallback -- a full
+# cost-surface build and a greedy network route, from an anchor the caller
+# may not even hold -- and the network it grows is then hard-excluded from
+# tree siting and used as the structure's road source, silently overriding
+# the decision it was standing in for.
+#
+# The BATCH path never needed this: pipeline_context.py forwards
+# build_road_network()'s full dict, branches=[] and all, NEVER None, so an
+# empty routing result already travels as a real value there. The
+# INTERACTIVE path does need it. A roads commit of ZERO features is a
+# deliberate "no road on this property" (step_registry.CommitContract.
+# min_features), and the committed value behind it is an empty LIST of
+# networks, which no `selected_road_corridor=` consumer takes -- each takes
+# ONE network dict. Forwarding None in its place is the silent override
+# above; forwarding an empty-network dict would be a value indistinguishable
+# from a routing pass that ran and found nothing, and one that every
+# consumer would try to read fields off. So, as for water, an explicit
+# constant IS the value: the step registry declares it as the roads consumes
+# edge's `empty_commit` and forwards it, by identity, whenever the roads
+# commit is empty. Each accepting entry point normalizes it back to None
+# internally (its downstream code keeps None's existing "no road" meaning)
+# and skips the self-compute. A caller-supplied bare None still self-computes
+# exactly as before -- the existing override convention is untouched.
+#
+# IT IS TRUTHY, AND THAT IS THE RIGHT SHAPE. object() is what NO_WATER_ZONE
+# is, so the two are compared, normalized and declared identically. A falsy
+# sentinel was considered and rejected: it would pass silently through every
+# `if selected_road_corridor:` guard downstream without any consumer having
+# to know it exists -- which is exactly the property that lets a consumer
+# that was never taught the sentinel keep working by accident until the day
+# one of them reads a field off it. A truthy opaque object reaching an
+# un-normalizing consumer fails at once, on the first subscript, naming
+# the object; that is the loud failure a sentinel owes the code around it.
+NO_ROAD_CORRIDOR = object()
+
 # CLIFF cutoff, NOT a buildable-grade limit. Any cell whose slope_pct
 # exceeds this is HARD-excluded (road_cost_path.build_cost_raster()'s own
 # impassable_grade_pct argument, see build_road_network()) -- but the bar

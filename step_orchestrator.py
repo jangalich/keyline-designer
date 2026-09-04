@@ -349,7 +349,9 @@ def _rehydrate_committed(features, provenance, contract, dem):
     kwargs = {}
     if contract.internal_id_parameter:
         kwargs[contract.internal_id_parameter] = commit_validation.internal_ids_for(
-            features.get("features") or [], provenance
+            features.get("features") or [],
+            provenance,
+            step_registry.resolve(contract.internal_id_parser),
         )
     return step_registry.resolve(contract.rehydrate)(features, dem, **kwargs)
 
@@ -1597,6 +1599,66 @@ def build_roads_payload(proposals: dict, assembled: dict) -> dict:
     }
 
 
+def build_trees_payload(result: dict, assembled: dict) -> dict:
+    """
+    The trees step's wire payload: the ranked candidates the user selects
+    from (and draws beside), plus the step-level block the panel reads.
+
+    THE WATER SHAPE, NOT THE PRODUCTION ONE, and confirmed rather than
+    assumed: identify_tree_zone_candidates() records the SAME object under
+    polygon_utm and render_fill_polygon_utm ("a tree zone is a real planted
+    footprint"), so there is no geometry to swap and no zone that can
+    vanish in a swap -- the collection is carried through as the entry
+    point built it, exactly as build_water_payload() carries its own. The
+    two halves are the same two:
+
+      PER-FEATURE -> tree_zones_to_feature_collection(), already on every
+        feature of the result's zones_geojson: the score, the four factors,
+        avg_slope_pct, rank, and THE THREE *_data_available FLAGS, which
+        are load-bearing rather than decoration -- soil_marginality_factor
+        defaults to _NEUTRAL_FACTOR_VALUE (0.5) when the prime-farmland
+        data was unavailable, indistinguishable from a measured 0.5 without
+        the flag. They ride the feature, they are inherited verbatim by the
+        rehydrator, and nothing here recomputes or defaults them.
+      STEP-LEVEL -> build_narrative_data(), already on the result: the
+        search-space accounting, the selection rules, the gate flags, and
+        under selection.factor_weights_pct THE FOUR FACTOR WEIGHTS -- what
+        lets a panel explain a score without hardcoding a weight, which is
+        the thing water's `scales` could not do. Passed whole.
+
+    THE ONE THING ADDED: `feature_id` on every tabular row, carried from the
+    feature and never rebuilt (build_water_payload()'s precedent). The
+    narrative rows carry no patch id, only `rank`; ranks are unique
+    (1..n, assigned by the scorer), so the lookup is by rank against the
+    same features.
+
+    `search_space` IS ADDITIONAL, and named for what it is. The result
+    carries the entry point's Step-1 diagnostic -- the leftover ground it
+    scored -- as GeoJSON already (layer tree_search_space_diagnostic). A
+    frontend that lets a user DRAW a tree zone needs to show where the step
+    looked, the way the landform payload's eligible_union shows where
+    production looked; it is the same kind of guide and costs no
+    computation to include. It is a diagnostic of THIS generate, not a
+    gate: drawing outside it is legal and its cautions are the crossings.
+
+    `assembled` is unread, for build_water_payload()'s reason.
+    """
+    narrative = result["narrative_data"]
+    feature_id_by_rank = {
+        feature["properties"]["rank"]: feature["id"]
+        for feature in result["zones_geojson"]["features"]
+    }
+    return {
+        "tree_zones": result["zones_geojson"],
+        "zones": [
+            {**row, "feature_id": feature_id_by_rank[row["rank"]]}
+            for row in narrative["zones"]
+        ],
+        "summary": {key: value for key, value in narrative.items() if key != "zones"},
+        "search_space": result["search_space_geojson"],
+    }
+
+
 # ======================================================================
 # Post-commit hooks
 # ======================================================================
@@ -1813,11 +1875,18 @@ def commit_step(
     check_features_against_inputs(definition, features, inputs)
 
     # 2. Crossings, recorded alongside each feature. Measured against the
-    # session's own exclusion result -- the same gates the proposals were
+    # step's DECLARED grounds (crossing_grounds): the session's own
+    # exclusion result for most steps -- the same gates the proposals were
     # computed against, so a zone's record cannot describe a different
-    # parcel's masks than the ones the user was shown.
+    # parcel's masks than the ones the user was shown -- and for trees the
+    # committed claims plus canopy, resolved through the same consumes
+    # resolvers the generate used. Not resolved for an EMPTY commit: there
+    # is nothing to annotate, and resolving a committed ground would refuse
+    # a "no tree zones" decision on a session whose upstream is uncommitted
+    # for the sake of a measurement nothing would read.
+    grounds = crossing_grounds(definition, context, document) if features["features"] else []
     annotated = commit_validation.annotate_crossings(
-        features["features"], check.rehydrated, context.exclusion_zones
+        features["features"], check.rehydrated, grounds
     )
 
     # 3. THE WRITE.
@@ -1869,6 +1938,57 @@ def commit_step(
     run_post_commit_hooks(definition, context, updated)
 
     return updated
+
+
+def crossing_grounds(definition, context, document) -> list:
+    """
+    The grounds a commit to this step records crossings against, as
+    commit_validation's {"type", "label", "polygon_utm"} dicts, in
+    declaration order.
+
+    THE REGISTRY SAYS WHAT, THIS SAYS HOW. A contract with crossings=None
+    gets the session's exclusion gates -- commit_validation.exclusion_
+    grounds(), the behaviour every step had before the trees entry. A
+    contract that declares CrossingGrounds gets each one resolved:
+
+      * an exclusion-gate ground is the matching gate out of that same
+        list, so its label, its availability rule and its emptiness rule
+        are exactly the ones every other step's cautions follow -- an
+        unavailable or empty gate is OMITTED, never reported clear;
+      * a committed-claim ground is the named consumes edge, resolved
+        through _CONSUMES_RESOLVERS exactly as a generate resolves it
+        (rehydrated, combined, or the empty_commit sentinel), handed to the
+        declared footprint function, and omitted when that returns None or
+        an empty geometry -- "no water zone" is not a ground.
+
+    So a tree zone's production crossing is measured against the same
+    rehydrated fills the tree generate carved its search space around, not
+    against a second reading of the document.
+    """
+    contract = definition.commit_contract
+    exclusion = commit_validation.exclusion_grounds(context.exclusion_zones)
+    if contract.crossings is None:
+        return exclusion
+
+    gate_by_type = {ground["type"]: ground for ground in exclusion}
+    consumed_by_name = {consumed.name: consumed for consumed in definition.consumes}
+    grounds = []
+    for ground in contract.crossings:
+        if ground.exclusion_layer:
+            gate = gate_by_type.get(ground.exclusion_layer)
+            if gate is None:
+                continue
+            grounds.append(
+                {"type": ground.type, "label": ground.label or gate["label"], "polygon_utm": gate["polygon_utm"]}
+            )
+            continue
+        consumed = consumed_by_name[ground.consumed]
+        value = _CONSUMES_RESOLVERS[consumed.source](definition, consumed, context, document)
+        footprint = step_registry.resolve(ground.footprint)(value)
+        if footprint is None or footprint.is_empty:
+            continue
+        grounds.append({"type": ground.type, "label": ground.label, "polygon_utm": footprint})
+    return grounds
 
 
 def validate_commit_inputs(definition, inputs, boundary):

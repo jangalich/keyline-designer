@@ -39,13 +39,30 @@ and the document's is the one the frontend, the cascade and the reset all
 already read. registered_steps() filters that constant; it does not restate
 it.
 
-PARTIALLY POPULATED, ON PURPOSE. THREE entries today: landform, water and
-roads. trees, structures and fencing are named in STEP_ORDER and absent
+PARTIALLY POPULATED, ON PURPOSE. FOUR entries today: landform, water,
+roads and trees. structures and fencing are named in STEP_ORDER and absent
 here, and the difference is meaningful rather than an oversight --
 registered_steps() returns what can actually be generated, and asking for
 an unregistered step raises with the list of what is registered. The parity
 test against build_pipeline_context() belongs at the end of stage 3, when
 all six exist and there is something to compare.
+
+THE FOURTH ENTRY -- the second with DRAWING -- found two things the schema
+had left implicit, and both became declarations on CommitContract rather
+than branches in the commit path:
+
+  WHAT A CROSSING IS MEASURED AGAINST. Three steps recorded crossings of
+  the session's exclusion gates, and nothing said so; it was simply what
+  commit_validation.annotate_crossings() did. A tree zone is sited on the
+  ground those gates REJECT, so its cautions are the committed claims
+  (production, water, road) plus existing canopy, and hydric or slope are
+  not cautions at all. `crossings` (a tuple of CrossingGround) declares the
+  grounds; None keeps the exclusion gates, unchanged, for everything else.
+
+  HOW A GENERATED FEATURE'S ID IS SPELLED. internal_id_parameter named the
+  rehydrator's keyword for an allocated id, and the parser that decides
+  whether a feature NEEDS one was hardcoded to production's spelling. A
+  tree zone's is different, so `internal_id_parser` names it.
 
 THE THIRD ENTRY BROKE TWO ASSUMPTIONS THE FIRST TWO SHARED, and the schema
 grew two declarations rather than the orchestrator growing a branch:
@@ -389,7 +406,23 @@ class CommitContract:
     max_features: Optional[int]
     rehydrate: Optional[str]
     internal_id_parameter: Optional[str] = None
+    # THE PARSER BEHIND internal_id_parameter: the dotted path of the
+    # function from a wire feature id to the integer pipeline id it carries,
+    # or None when it carries none (wire_translation.internal_zone_id for
+    # production zones, internal_tree_zone_id for tree zones). It is how
+    # the commit path tells a selected candidate -- which keeps its id --
+    # from a drawn zone, which is allocated one. Required whenever
+    # internal_id_parameter is set, because the allocation is meaningless
+    # without the test for who needs it; meaningless without it, because a
+    # select-only step's rehydrator parses its own ids and refuses the rest.
+    internal_id_parser: Optional[str] = None
     requires_provenance: bool = True
+    # WHAT A COMMITTED FEATURE'S CROSSINGS ARE MEASURED AGAINST -- a tuple of
+    # CrossingGround, or None for the session's exclusion gates (every gate
+    # with data, in exclusion_zones.LAYER_ORDER -- the behaviour landform,
+    # water and roads have always had). See CrossingGround, and the module
+    # docstring's THE FOURTH ENTRY note for why this is data.
+    crossings: Optional[tuple] = None
     # THE UNIT THE COUNT BOUNDS APPLY TO, when it is not the feature. None
     # for landform and water: each committed feature is its own unit and
     # min/max_features count features. The roads entry sets it to
@@ -415,6 +448,56 @@ class CommitContract:
     # nothing about a single feature can say so. Only set alongside
     # feature_group; a per-feature defect belongs in the rehydrator.
     group_check: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class CrossingGround:
+    """
+    ONE ground a committed feature's crossings are recorded against
+    (CommitContract.crossings). A crossing is never a rejection -- see
+    commit_validation's contract -- it is a caution written beside the
+    feature, and this declares what a step's cautions are ABOUT.
+
+    Two kinds, and a declaration is exactly one of them:
+
+      A COMMITTED CLAIM. `consumed` names one of THIS step's consumes edges
+      whose source is an upstream commit, and `footprint` names the
+      function from that edge's RESOLVED value -- the rehydrated, combined,
+      or sentinel value the generate itself receives -- to one shapely
+      geometry in the DEM's CRS, or None for "there is none". The
+      orchestrator resolves the edge exactly as it does for a generate, so
+      a crossing is measured against the same ground the proposals were
+      computed against, and a sentinel (water_suitability.NO_WATER_ZONE,
+      road_corridors.NO_ROAD_CORRIDOR) is the footprint function's to turn
+      into None. `label` is required: there is no wire block to take it
+      from.
+
+      AN EXCLUSION GATE. `exclusion_layer` names a gate in exclusion_zones.
+      LAYER_ORDER, and the ground, its label and its availability come off
+      the session's exclusion result exactly as they do for every other
+      step -- an unavailable or empty gate is omitted, never reported
+      clear. `label` may be left empty to take the gate's own.
+
+    `type` is the stable identifier on the record ({"type", "label",
+    "acres"}), which a client branches on; it must be unique within the
+    step.
+
+    WHY THE FOOTPRINT IS A FUNCTION AND NOT A FIELD NAME. Three committed
+    values, three shapes: a LIST of production patches (union their fills),
+    ONE water union dict or its sentinel (one field), ONE road network dict
+    or its sentinel (a different field). A field name cannot say "union
+    the list" or "the sentinel means none", and the three functions that
+    can are a union and two field reads (wire_translation.production_
+    zones_footprint / water_zone_footprint / road_network_footprint) --
+    the same "not a place to compute" rule Consumed.combine lives under.
+    """
+
+    type: str
+    label: str = ""
+    consumed: Optional[str] = None
+    footprint: Optional[str] = None
+    exclusion_layer: Optional[str] = None
+    why: str = ""
 
 
 @dataclass(frozen=True)
@@ -782,9 +865,15 @@ LANDFORM = StepDefinition(
         # rehydrate_production_zones(collection, dem, zone_ids=...). See
         # CommitContract.internal_id_parameter: a drawn zone carries no
         # "production-area-<n>" id, so the commit path allocates one above
-        # every id the same commit already uses.
+        # every id the same commit already uses. The parser is the one that
+        # reads that spelling.
         internal_id_parameter="zone_ids",
+        internal_id_parser="wire_translation.internal_zone_id",
         requires_provenance=True,
+        # NONE: the exclusion gates, as always. A production zone is sited on
+        # eligible ground, so the gates it may knowingly cross ARE its
+        # cautions.
+        crossings=None,
     ),
     # NONE. The landform step runs on the traced boundary alone -- the same
     # reason /api/production-zones takes no access_point: nothing here routes
@@ -1290,10 +1379,258 @@ ROADS = StepDefinition(
 )
 
 
+TREES = StepDefinition(
+    step_id="trees",
+    # WHAT TREES IS, so the edges below read correctly. Tree zones are a
+    # MARGINAL-LAND CROP, not conservation planting: tree_zone_candidates.py
+    # inverts slope_factor from production's, weights hydric overlap
+    # heaviest (0.40), REWARDS soil marginality and treats a stream as a
+    # positive. A high score is ground production does not want -- steep,
+    # wet, poor, near water -- put to its productive use. Everything about
+    # this entry that looks backwards from landform's (no hydric or slope
+    # caution, the exclusion gates NOT being the crossing grounds) is that
+    # fact and not an omission.
+    consumes=(
+        # EIGHT EDGES: five off the cache, three off commits -- one per
+        # upstream step, which makes this the first entry to consume every
+        # step before it. Shaped like landform (select-only candidates PLUS
+        # drawing), sourced like roads (every upstream decision is a
+        # committed edge).
+        Consumed(
+            name="boundary_coordinates",
+            source=SOURCE_CACHE,
+            cache_path="boundary",
+            forward_as="boundary_coordinates",
+            why=(
+                "The parcel ring, read off the context for landform's reason: "
+                "a rebuilt context and a warm one supply the identical value."
+            ),
+        ),
+        Consumed(
+            name="dem",
+            source=SOURCE_CACHE,
+            cache_path="dem",
+            forward_as="dem",
+            why=(
+                "ParcelData's already-fetched elevation grid. Omitted, the "
+                "entry point calls get_dem_for_boundary() itself."
+            ),
+        ),
+        Consumed(
+            name="boundary_polygon_utm",
+            source=SOURCE_CACHE,
+            cache_path="boundary_polygon_utm",
+            forward_as="boundary_polygon_utm",
+            why=(
+                "The polygon the search space is cut from and every patch "
+                "footprint is clipped to. Forwarded so the setback ring and "
+                "the clip are measured against the same polygon the "
+                "exclusion masks and the three upstream commits were."
+            ),
+        ),
+        Consumed(
+            name="canopy_height",
+            source=SOURCE_CACHE,
+            cache_path="parcel_data.canopy_height",
+            forward_as="canopy_height",
+            why=(
+                "ParcelData's already-fetched HAG layer, for the MANDATORY "
+                "canopy gate (get_required_tree_root_zone_mask_utm at "
+                "TREE_ZONE_CANOPY_BUFFER_METERS -- fetch-or-raise, never "
+                "degrade). Without the override every generate is a "
+                "Planetary Computer fetch and a coverage gap is a failed "
+                "generate. It is also what makes the canopy CROSSING ground "
+                "below always present on a generate that succeeded."
+            ),
+        ),
+        Consumed(
+            name="scoring_inputs",
+            source=SOURCE_CACHE,
+            cache_path="parcel_data",
+            combine="tree_zone_candidates.scoring_inputs_for_parcel_data",
+            forward_as="scoring_inputs",
+            why=(
+                "THE EDGE THE ENTRY POINT HAD TO GROW AN OVERRIDE FOR. Step "
+                "2's three factor geometries -- prime farmland, hydric soil, "
+                "streams -- were three network fetches (two SDA, one NHD) "
+                "with no override slot, on every generate. ParcelData already "
+                "holds the four layers those fetches return, for the same "
+                "whole boundary, behind its hard-fail contract; this edge "
+                "assembles them (water's soil_inputs pattern, all-or-nothing) "
+                "and the entry point derives the three unions from them with "
+                "the same helpers its fetch path runs after ITS fetch. Same "
+                "geometry, no network, and every *_data_available flag "
+                "truthfully True. A None (a partial ParcelData) is forwarded "
+                "as itself and the entry point fetches as before."
+            ),
+        ),
+        Consumed(
+            name="production_areas",
+            source=SOURCE_COMMITTED,
+            from_step="landform",
+            rehydrate="wire_translation.rehydrate_production_zones",
+            # NONE, AND THAT IS A CLAIM: an empty landform commit rehydrates
+            # to [], which is an explicit answer to this entry point --
+            # production_polygons_utm = [] and nothing self-computes. Only a
+            # None reaches identify_optimized_production_areas(), and the
+            # resolver never substitutes one. Test 3b in test_trees_step.py
+            # measures it.
+            empty_commit=None,
+            forward_as="production_areas",
+            why=(
+                "The first of the three CLAIMED grounds the search space is "
+                "the complement of. Must be the ground the USER committed: "
+                "the entry point's None path re-runs the production optimiser "
+                "and carves the tree search space around zones the user may "
+                "have rejected."
+            ),
+        ),
+        Consumed(
+            name="selected_water_zone",
+            source=SOURCE_COMMITTED,
+            from_step="water",
+            rehydrate="wire_translation.rehydrate_water_survey_zones",
+            combine="wire_translation.water_zone_union",
+            # THE SENTINEL'S SECOND PRODUCTION USE, and the same silent
+            # failure as roads': identify_tree_zone_candidates()'s
+            # `elif selected_water_zone is None` branch re-runs the whole
+            # water pipeline and claims a zone the user rejected. Test 4.
+            empty_commit="water_suitability.NO_WATER_ZONE",
+            forward_as="selected_water_zone",
+            why=(
+                "The second claimed ground, buffered at TREE_ZONE_WATER_"
+                "BUFFER_METERS by the entry point. Reaches it as the UNION "
+                "of the selection (the entry point reads exactly one field, "
+                "render_fill_polygon_utm) or as the sentinel."
+            ),
+        ),
+        Consumed(
+            name="selected_road_corridor",
+            source=SOURCE_COMMITTED,
+            from_step="roads",
+            rehydrate="wire_translation.rehydrate_road_networks",
+            # ONE committed network, or none: the roads contract caps the
+            # commit at one and this reduction refuses anything else.
+            combine="wire_translation.selected_road_network",
+            # THE ROAD SENTINEL'S FIRST USE, AND THE REASON IT EXISTS. Roads
+            # may be committed EMPTY -- "no road on this property". Without
+            # this line that decision reaches identify_tree_zone_candidates()
+            # as None, and its `if selected_road_corridor is None` branch
+            # runs a FULL routing pass (identify_road_corridor_candidates)
+            # and claims the network it grew, silently, with no anchor even
+            # supplied. The same failure NO_WATER_ZONE closes for water, in a
+            # module that had no equivalent until this entry. Test 3 counts
+            # that self-compute at zero, with a control that counts it at
+            # one.
+            empty_commit="road_corridors.NO_ROAD_CORRIDOR",
+            forward_as="selected_road_corridor",
+            why=(
+                "The third claimed ground: the network's real cell footprint "
+                "(every branch), dilated by TREE_ZONE_ROAD_BUFFER_CELLS by "
+                "the entry point's own _road_corridor_exclusion_polygon(). "
+                "The entry point reads one network-level field, `cells`, "
+                "which rehydrate_road_networks() reconstructs."
+            ),
+        ),
+        # NOT DECLARED, DELIBERATELY: valleys, hydric_floodplain_union,
+        # floodplain_data_is_fallback and anchor_lon_lat. The entry point
+        # takes all four, and forwards every one of them ONLY into the
+        # nested water and road self-computes that the three committed
+        # edges above close -- with those committed there is no code path
+        # on which any of the four can change the output. An edge that
+        # cannot change the output is a false invalidation edge: the cascade
+        # would report a dependency on the terrain warm-up's valleys that
+        # the tree zones do not have.
+    ),
+    generate="tree_zone_candidates.identify_tree_zone_candidates",
+    payload="step_orchestrator.build_trees_payload",
+    proposal_collection="tree_zones",
+    produces=(
+        # PipelineContext's own field name (the entry point's `patches`).
+        # The committed value is the same shape: a list of patches, every
+        # consumer takes the list, and [] is "no tree zones" -- so no
+        # downstream entry will need a sentinel for this one.
+        "tree_zone_patches",
+    ),
+    commit_contract=CommitContract(
+        # wire_translation.LAYER_TREE_ZONE, spelled out for the module
+        # docstring's reason and asserted equal in test_trees_step.py.
+        layers=("tree_zone_candidate",),
+        # A generated tree patch is routinely a MultiPolygon (a cell union
+        # intersected with the search space and the parcel), and so is a
+        # drawn zone the clamp split.
+        geometry_types=("Polygon", "MultiPolygon"),
+        # ZERO IS A DECISION: "no tree crop on this parcel".
+        min_features=0,
+        # NO CEILING. A farm carries any number of tree zones; the entry
+        # point itself says so (there is no selected_* tree zone).
+        max_features=None,
+        rehydrate="wire_translation.rehydrate_tree_zones",
+        # DRAWING, like landform: a drawn zone carries no
+        # "tree-zone-candidate-<n>" id and the commit path allocates one.
+        internal_id_parameter="zone_ids",
+        internal_id_parser="wire_translation.internal_tree_zone_id",
+        requires_provenance=True,
+        # FOUR GROUNDS, EXACTLY, AND NOT THE EXCLUSION GATES. A drawn tree
+        # zone is warned about the three things the user has COMMITTED that
+        # it overlaps, and about existing canopy -- which is a different
+        # kind of statement ("there are already trees here", and these are
+        # tree CROPS, a different thing from standing canopy), a caution
+        # and not a rule. NOT hydric, NOT slope: tree zones deliberately
+        # target that ground, and a drawn zone on hydric soil is the step
+        # working. The canopy ground has no sentinel problem -- the mask is
+        # mandatory server-side, so it is present on every session that
+        # generated at all; the other three are committed geometry, always
+        # known.
+        crossings=(
+            CrossingGround(
+                type="production",
+                label="committed production area",
+                consumed="production_areas",
+                footprint="wire_translation.production_zones_footprint",
+            ),
+            CrossingGround(
+                type="water",
+                label="committed water zone",
+                consumed="selected_water_zone",
+                footprint="wire_translation.water_zone_footprint",
+            ),
+            CrossingGround(
+                type="road",
+                label="committed road corridor",
+                consumed="selected_road_corridor",
+                footprint="wire_translation.road_network_footprint",
+            ),
+            CrossingGround(type="canopy", exclusion_layer="canopy"),
+        ),
+    ),
+    # NONE. The suitability surface is computed over the leftover ground
+    # and the user's input is the selection plus what they draw.
+    user_inputs=(),
+    # NONE. The keypoint relationship layer reads production and water; it
+    # has no tree half.
+    post_commit=(),
+    failure_layers=(
+        # Canopy is MANDATORY here, at the same buffer production uses --
+        # the gate is fetch-or-raise, and the one exception this entry
+        # point can raise by name. The three Step 2 fetches degrade
+        # independently (and do not run at all with scoring_inputs
+        # forwarded), so nothing else escapes as a named layer.
+        LayerFailure(
+            exception="canopy_height_data.CanopyCoverageIncompleteError",
+            layer="canopy",
+            label="tree canopy height",
+        ),
+    ),
+    generic_error="Tree zones could not be generated.",
+)
+
+
 STEP_REGISTRY = {
     LANDFORM.step_id: LANDFORM,
     WATER.step_id: WATER,
     ROADS.step_id: ROADS,
+    TREES.step_id: TREES,
 }
 
 
@@ -1522,6 +1859,77 @@ def validate_registry() -> None:
                 f"{where}'s commit contract declares feature_group "
                 f"{contract.feature_group!r}; it is a feature PROPERTY NAME"
             )
+
+        # AN ALLOCATED ID NEEDS A PARSER, AND A PARSER NEEDS SOMETHING TO
+        # ALLOCATE. See CommitContract.internal_id_parser.
+        if bool(contract.internal_id_parameter) != bool(contract.internal_id_parser):
+            raise RegistryError(
+                f"{where}'s commit contract declares internal_id_parameter="
+                f"{contract.internal_id_parameter!r} with internal_id_parser="
+                f"{contract.internal_id_parser!r}; the two are declared "
+                f"together or not at all"
+            )
+
+        # CROSSING GROUNDS: a tuple of CrossingGround, each exactly one of
+        # (a committed claim on one of THIS step's edges, with a footprint
+        # function) or (an exclusion gate), with unique types.
+        if contract.crossings is not None:
+            if isinstance(contract.crossings, (str, CrossingGround)):
+                raise RegistryError(
+                    f"{where}'s commit contract declares crossings="
+                    f"{contract.crossings!r}; it is a TUPLE of CrossingGround"
+                )
+            consumed_names = {c.name: c for c in definition.consumes}
+            ground_types = set()
+            for ground in contract.crossings:
+                if not isinstance(ground, CrossingGround):
+                    raise RegistryError(
+                        f"{where} declares a crossing ground that is not a "
+                        f"CrossingGround: {ground!r}"
+                    )
+                if not ground.type:
+                    raise RegistryError(f"{where} declares a crossing ground with no type")
+                if ground.type in ground_types:
+                    raise RegistryError(
+                        f"{where} declares crossing ground type {ground.type!r} twice"
+                    )
+                ground_types.add(ground.type)
+                if bool(ground.consumed) == bool(ground.exclusion_layer):
+                    raise RegistryError(
+                        f"{where}: crossing ground {ground.type!r} must name "
+                        f"exactly one of consumed= or exclusion_layer="
+                    )
+                if ground.consumed:
+                    edge = consumed_names.get(ground.consumed)
+                    if edge is None:
+                        raise RegistryError(
+                            f"{where}: crossing ground {ground.type!r} names "
+                            f"consumed edge {ground.consumed!r}, which this step "
+                            f"does not declare"
+                        )
+                    if edge.source != SOURCE_COMMITTED:
+                        raise RegistryError(
+                            f"{where}: crossing ground {ground.type!r} names "
+                            f"consumed edge {ground.consumed!r}, which is not a "
+                            f"committed claim"
+                        )
+                    if not ground.footprint:
+                        raise RegistryError(
+                            f"{where}: crossing ground {ground.type!r} names a "
+                            f"committed edge and no footprint function"
+                        )
+                    if not ground.label:
+                        raise RegistryError(
+                            f"{where}: crossing ground {ground.type!r} names a "
+                            f"committed edge and no label; there is no wire block "
+                            f"to take one from"
+                        )
+                elif ground.footprint:
+                    raise RegistryError(
+                        f"{where}: crossing ground {ground.type!r} is an exclusion "
+                        f"gate and declares a footprint function; the gate's own "
+                        f"polygon is the ground"
+                    )
 
         forwarded = [c.forward_as for c in definition.consumes if c.forward_as]
         if len(forwarded) != len(set(forwarded)):

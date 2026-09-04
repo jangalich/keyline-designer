@@ -28,7 +28,8 @@ discarded, and exactly one -- or none -- is committed.
 
 Sections (the branch's numbered tests in brackets):
   1  [1]  REGISTRY -- the roads entry's shape, validate_registry() with
-          three entries, constants agree with the modules that own them.
+          every entry (four, since the trees branch), constants agree with
+          the modules that own them.
   2  [2]  GENERATE with an access point -> one network. Zero network calls.
   3  [3]  ACCUMULATION -- A then B; both exist; A is byte-identical.
   4  [4]  ID STABILITY across accumulated generates and a cache eviction.
@@ -601,7 +602,7 @@ print(
 # --- 1 [test 1]. THE REGISTRY ENTRY ----------------------------------
 
 step_registry.validate_registry()
-assert step_registry.registered_steps() == ("landform", "water", "roads"), step_registry.registered_steps()
+assert step_registry.registered_steps() == ("landform", "water", "roads", "trees"), step_registry.registered_steps()
 ROADS = step_registry.get_step("roads")
 
 assert ROADS.generate == "road_corridors.identify_road_corridor_candidates"
@@ -693,10 +694,12 @@ for _c in ROADS.consumes:
 assert _access.parameter in _signature
 
 # THE CASCADE EDGES, read off the declarations.
-assert step_registry.dependents_of("water") == ("roads",)
-assert step_registry.dependents_of("landform") == ("water", "roads")
-assert step_registry.transitive_dependents("landform") == ("water", "roads")
-assert step_registry.transitive_dependents("roads") == ()
+assert step_registry.dependents_of("water") == ("roads", "trees")
+assert step_registry.dependents_of("landform") == ("water", "roads", "trees")
+assert step_registry.transitive_dependents("landform") == ("water", "roads", "trees")
+assert step_registry.transitive_dependents("roads") == ("trees",), (
+    "trees consumes the roads commit as of the trees branch"
+)
 
 # CONSTANTS AGREE with the modules that own them.
 assert parcel_data.LAYER_CANOPY == production_zone_payload.LAYER_CANOPY
@@ -723,7 +726,7 @@ else:
     raise AssertionError("accumulating by an undeclared input must be rejected")
 
 print(
-    f"1 [test 1]. REGISTRY: validate_registry() passes with three entries "
+    f"1 [test 1]. REGISTRY: validate_registry() passes with every entry "
     f"{step_registry.registered_steps()}. The roads entry consumes {len(ROADS.consumes)} "
     f"edges (7 cache, 2 committed: landform's production areas, water's zones as a union "
     f"with empty_commit=NO_WATER_ZONE), declares the access point as a UserInput "

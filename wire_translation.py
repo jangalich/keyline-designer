@@ -12,8 +12,9 @@ FeatureCollection, one function per layer the frontend displays or edits.
 INBOUND: committed GeoJSON -> the internal per-feature dict shape the
 downstream override parameters expect ("rehydration"), so a user-authored
 feature travels down the same override params as a computer-authored one.
-PRODUCTION ZONES ONLY so far -- tree zones and structure sites follow once
-this pattern is proven. See the INBOUND section header near the bottom of
+PRODUCTION ZONES AND TREE ZONES so far -- production first (B4), tree zones
+second, as the proof that the pattern carries to another drawn layer;
+structure sites follow. See the INBOUND section header near the bottom of
 this file for the governing rule and what is derived versus inherited.
 
 BOTH DIRECTIONS LIVE IN THIS ONE MODULE ON PURPOSE, and a later branch must
@@ -1292,7 +1293,7 @@ def tree_zones_to_feature_collection(patches: Optional[list[dict]]) -> dict:
 
         features.append(
             make_feature(
-                feature_id=f"tree-zone-candidate-{patch['id']}",
+                feature_id=f"{_TREE_ZONE_FEATURE_ID_PREFIX}{patch['id']}",
                 geometry=patch["geometry_wgs84"],
                 layer=LAYER_TREE_ZONE,
                 label=f"Tree zone candidate {patch['id']} (rank {patch['rank']})",
@@ -1419,6 +1420,12 @@ _ADVISORY_FIELDS_NOT_ON_THE_WIRE = ("area_score", "compactness_score", "aspect_a
 # scored_production_areas_to_feature_collection() emit
 # f"production-area-{patch['id']}".
 _PRODUCTION_FEATURE_ID_PREFIX = "production-area-"
+
+# The same statement for tree zones: tree_zones_to_feature_collection()
+# emits f"tree-zone-candidate-{patch['id']}" and internal_tree_zone_id()
+# parses exactly that. Defined up here, beside production's, because the
+# outbound function above reads it and the inbound half below parses it.
+_TREE_ZONE_FEATURE_ID_PREFIX = "tree-zone-candidate-"
 
 
 # The dimensionless degeneracy floor _polygonal_shape_from_wire() rejects a
@@ -2367,3 +2374,323 @@ def rehydrate_road_networks(collection: Optional[dict], dem: dict) -> list:
             }
         )
     return networks
+
+
+# ======================================================================
+# INBOUND: tree zones -- B4's pattern, second use
+# ======================================================================
+#
+# THE FOURTH REHYDRATOR AND THE SECOND OVER A DRAWN LAYER. The governing rule
+# is unchanged from the production half above: rehydration RE-DERIVES
+# FORWARD from the edited source and NEVER reconstructs a source from a
+# derived form. Trees is the easier case of it. tree_zone_candidates.score_
+# tree_search_space() records the SAME object under `polygon_utm` and
+# `render_fill_polygon_utm` -- a tree zone is a real planted footprint, not
+# an opened cell union, and that module says so at length -- so the
+# asymmetric-opening non-invertibility that shaped rehydrate_production_
+# zone() does not exist here. A drawn zone's outline IS its fill. There is
+# no cell list, no representative elevation and no hole footprint on a tree
+# patch, so there is nothing to rasterize either.
+#
+# WHAT A TREE PATCH CARRIES, read off the producer's own literal (score_tree_
+# search_space(), `patches.append({...})`) rather than from memory:
+#
+#   DERIVED HERE, from the wire geometry and the cached DEM's CRS alone:
+#     id                        parsed off "tree-zone-candidate-<n>", or the
+#                               commit path's allocated zone_id for a drawn
+#                               zone (internal_tree_zone_id / zone_id=)
+#     polygon_utm               the wire geometry, reprojected into dem['crs']
+#     render_fill_polygon_utm   the SAME object as polygon_utm -- the
+#                               producer's own identity, kept as an identity
+#     geometry_wgs84            transform_geom(polygon_utm), the producer's
+#                               own expression
+#     area_acres                polygon_utm.area / SQUARE_METERS_PER_ACRE,
+#                               rounded as the producer rounds it
+#
+#   INHERITED VERBATIM from the feature's properties when the feature was
+#   scored, and ABSENT -- not zeroed, not None -- when it was not
+#   (_TREE_ADVISORY_WIRE_FIELDS, gated on `tree_suitability_score`):
+#     rank, tree_suitability_score, the four *_factor values, avg_slope_pct,
+#     and the three *_data_available flags.
+#
+# THE ADVISORY BLOCK IS DERIVABLE IN PRINCIPLE AND IS NOT DERIVED, and the
+# report should be honest about which. Every factor is a per-cell function
+# of the DEM (slope), the cached ParcelData's soil rows (prime farmland,
+# hydric) and its hydrology rows (streams), averaged over the zone's cells --
+# pure and local, nothing a network is needed for. It is NOT derived here for
+# three reasons. First, a rank is not derivable at all: it is a position
+# among the candidates of a generate this zone was not part of. Second,
+# scoring a drawn zone would be running the generator's scorer against its
+# own thresholds from inside the translation boundary -- a zone the user
+# drew below MIN_TREE_SUITABILITY_SCORE would then carry a number that says
+# "scored badly" where the truth is "not scored", which is the exact
+# distinction the production half established (0.0 is a legible score). And
+# third, the three *_data_available flags are the only thing that separates
+# a measured 0.5 from _NEUTRAL_FACTOR_VALUE; they travel WITH the factors or
+# not at all. So the block is all-or-nothing, as production's is.
+#
+# NO confidence_notes IN THE BLOCK, unlike production, and deliberately. A
+# scored production patch carries confidence_notes internally, so
+# inheriting it there restores a field cluster_and_gate() produced. A tree
+# patch does NOT: tree_zones_to_feature_collection() composes the note at
+# outbound time from module constants plus the availability flags, and
+# nothing internal ever holds it. Inheriting it would put a client-authored
+# display string on the internal dict as though the scorer had produced it,
+# and would make a generated patch's round trip come home with one field
+# more than it left with.
+#
+# NO CELL-CENTRE REQUIREMENT, unlike production, and that too is deliberate.
+# rehydrate_production_zone() rejects a zone covering no DEM cell centre
+# because it has nothing to take a median elevation over and no mask to
+# open. A tree zone derives neither, and no consumer of `tree_zone_
+# patches=` reads a cell (solar and fencing buffer the fill; the layout map
+# draws it), so a thin planted strip narrower than the gap between cell
+# centres -- a hedgerow, which the generator cannot produce but a person can
+# draw -- is a legitimate zone rather than a rejected one. The structural
+# checks (type, ring vertex count, validity, non-degenerate area) run in
+# full through _polygonal_shape_from_wire(), as for every inbound polygon.
+#
+# NO NETWORK, EVER -- the same contract as the production half, asserted the
+# same way (a socket counter, not a stopwatch) in test_trees_step.py.
+
+
+# The advisory block score_tree_search_space() ADDS on top of the geometric
+# fields, restricted to what tree_zones_to_feature_collection() puts on the
+# wire -- which is all of it. Read back verbatim, never recomputed; see the
+# section header above. Gated on 'tree_suitability_score'.
+_TREE_ADVISORY_WIRE_FIELDS = (
+    "rank",
+    "tree_suitability_score",
+    "soil_marginality_factor",
+    "slope_factor",
+    "hydric_overlap_factor",
+    "stream_proximity_factor",
+    "avg_slope_pct",
+    "soil_marginality_data_available",
+    "hydric_data_available",
+    "stream_data_available",
+)
+
+
+def internal_tree_zone_id(feature_id: Any) -> Optional[int]:
+    """
+    The integer patch id behind an outbound tree-zone feature id, or None
+    when this module's outbound half did not build that id.
+
+    internal_zone_id()'s counterpart for the trees layer, and the parser
+    the trees commit contract declares (step_registry.CommitContract.
+    internal_id_parser) so commit_validation.internal_ids_for() can tell a
+    selected candidate ("tree-zone-candidate-<n>", which keeps its id) from a
+    drawn zone (anything else, which is allocated one). A bare int passes
+    through for the same reason it does for production: a caller already
+    holding the id.
+    """
+    if isinstance(feature_id, int) and not isinstance(feature_id, bool):
+        return feature_id
+    if isinstance(feature_id, str) and feature_id.startswith(_TREE_ZONE_FEATURE_ID_PREFIX):
+        tail = feature_id[len(_TREE_ZONE_FEATURE_ID_PREFIX):]
+        if tail.isdigit():
+            return int(tail)
+    return None
+
+
+def rehydrate_tree_zone(feature: dict, dem: dict, zone_id: Optional[int] = None) -> dict:
+    """
+    ONE committed tree-zone Feature -> the internal patch dict the
+    `tree_zone_patches=` override parameters expect (solar_suitability's
+    tree-zone exclusion, fencing.identify_fencing(), render_layout_map). The
+    exact counterpart of tree_zones_to_feature_collection() above; see the
+    section header for what is derived and what is inherited.
+
+    `zone_id` overrides the integer id; when None it is parsed off the
+    feature's own "tree-zone-candidate-<n>" id, and a feature carrying
+    neither is refused rather than given an invented id, for
+    _zone_id_from_feature_id()'s reason.
+
+    ONE FEATURE IS ONE PATCH, EVEN WHEN THE CLAMP SPLIT IT -- a multi-part
+    geometry becomes one patch whose polygon_utm is a MultiPolygon, exactly
+    as for production. A generated tree patch is routinely a MultiPolygon
+    already (the producer's own footprint is a cell union intersected with
+    the search space and the parcel), so every consumer has always handled
+    one.
+
+    NOT CLIPPED TO THE PARCEL, for rehydrate_production_zone()'s two
+    reasons: re-clipping would perturb an unedited generated zone's
+    round-trip identity, and would silently repair an off-parcel commit the
+    commit gate exists to reject.
+
+    Raises InboundGeometryError, with the defect named, on anything that
+    cannot become a valid patch.
+    """
+    from rasterio.warp import transform_geom
+    from shapely.geometry import mapping
+
+    from raster_grid import SQUARE_METERS_PER_ACRE
+
+    if not isinstance(feature, dict):
+        raise InboundGeometryError(f"a tree zone must be a GeoJSON Feature dict, got {type(feature).__name__}")
+
+    feature_id = feature.get("id")
+    where = f"tree zone {feature_id!r}" if feature_id is not None else "tree zone"
+
+    if zone_id is None:
+        zone_id = internal_tree_zone_id(feature_id)
+        if zone_id is None:
+            raise InboundGeometryError(
+                f"{where}: cannot determine an integer zone id from feature id {feature_id!r}. A generated "
+                "tree zone carries \"tree-zone-candidate-<n>\"; a user-drawn zone has no pipeline id, so its "
+                "caller must pass zone_id= explicitly rather than have one invented here (an invented id can "
+                "collide with a generated zone's in the same commit)."
+            )
+
+    polygon_utm = _polygonal_shape_from_wire(feature.get("geometry"), dem, where)
+
+    patch = {
+        "id": zone_id,
+        "polygon_utm": polygon_utm,
+        # THE SAME OBJECT, as the producer records it. Not a copy, not a
+        # buffer(0), not an opening -- identity is the statement.
+        "render_fill_polygon_utm": polygon_utm,
+        "geometry_wgs84": transform_geom(dem["crs"], "EPSG:4326", mapping(polygon_utm)),
+        "area_acres": round(float(polygon_utm.area / SQUARE_METERS_PER_ACRE), 2),
+    }
+
+    properties = feature.get("properties") or {}
+    if "tree_suitability_score" in properties:
+        for field in _TREE_ADVISORY_WIRE_FIELDS:
+            if field in properties:
+                patch[field] = properties[field]
+
+    return patch
+
+
+def rehydrate_tree_zones(
+    collection: Optional[dict],
+    dem: dict,
+    zone_ids: Optional[list[int]] = None,
+) -> list[dict]:
+    """
+    A whole committed tree-zone FeatureCollection -> the list every
+    `tree_zone_patches=` override takes.
+
+    EMPTY IN, EMPTY OUT, AND [] IS THE ANSWER A CONSUMER GETS. Unlike the
+    water and roads commits, every consumer of tree patches takes the LIST
+    and treats an empty one as "checked, no tree zones" -- solar builds no
+    exclusion, fencing draws no loop, the map draws nothing -- so an empty
+    trees commit needs no sentinel and the registry entry declares none
+    (step_registry.Consumed.empty_commit's LIST case). No consumer of this
+    value exists in the registry yet; the structures and fencing entries
+    will consume it, and this is the shape they will receive.
+
+    `zone_ids` is the production rehydrator's own contract: one id per
+    feature, in order, for a commit whose drawn zones carry no pipeline id.
+    A single bad feature fails the WHOLE call, for the same reason.
+    """
+    features = (collection or {}).get("features") if isinstance(collection, dict) else collection
+    features = list(features or [])
+
+    if zone_ids is not None and len(zone_ids) != len(features):
+        raise InboundGeometryError(
+            f"zone_ids has {len(zone_ids)} entries for {len(features)} features -- one id per feature, "
+            "in order, or None to parse each feature's own id."
+        )
+
+    return [
+        rehydrate_tree_zone(feature, dem, zone_id=None if zone_ids is None else zone_ids[index])
+        for index, feature in enumerate(features)
+    ]
+
+
+# ======================================================================
+# The roads commit as ONE override value, and the claimed footprints
+# ======================================================================
+
+
+def selected_road_network(networks: list) -> dict:
+    """
+    The committed road networks -> the ONE network dict every
+    `selected_road_corridor=` override takes.
+
+    water_zone_union()'s counterpart for the roads edge, and a much smaller
+    statement: the roads commit contract caps the commit at ONE network
+    (max_features=1, counted in networks), so there is nothing to union --
+    this returns the one network exactly as rehydrate_road_networks() built
+    it, with every field a consumer reads (`cells`,
+    `cell_footprint_polygon_utm`, the branches) intact.
+
+    Raises ValueError on an empty list rather than inventing a value, for
+    water_zone_union()'s reason: an empty roads commit is a DECISION with a
+    real representation -- road_corridors.NO_ROAD_CORRIDOR, declared as the
+    roads consumes edge's `empty_commit` -- and reaching this function with
+    nothing means that declaration was bypassed. Raises on more than one
+    too: that is a commit the gate should have refused, and a silent
+    first-of-two would hand downstream a road the user did not choose over
+    one they did.
+    """
+    if not networks:
+        raise ValueError(
+            "selected_road_network() was called with no networks. An empty roads commit is a DECISION "
+            "and travels as road_corridors.NO_ROAD_CORRIDOR (the roads consumes edge's empty_commit "
+            "declaration), never as None -- every downstream consumer reads None as 'not supplied' "
+            "and routes a whole network in its place."
+        )
+    if len(networks) != 1:
+        raise ValueError(
+            f"selected_road_network() was handed {len(networks)} networks; the roads commit contract "
+            "allows exactly one, and picking the first would silently discard a committed road."
+        )
+    return networks[0]
+
+
+def production_zones_footprint(patches):
+    """
+    The committed production ground as ONE shapely geometry, or None when
+    there is none: the union of every patch's render_fill_polygon_utm --
+    the form tree_zone_candidates.compute_tree_search_space() claims
+    ("GEOMETRY FORM CLAIMED"), unbuffered, because a crossing records
+    overlap with the ground itself and not with a siting clearance.
+
+    A CROSSING GROUND for the trees commit contract (step_registry.
+    CrossingGround.footprint). Takes the resolved consumed value of the
+    landform edge -- the rehydrated list -- and nothing else.
+    """
+    from shapely.ops import unary_union
+
+    fills = [
+        patch["render_fill_polygon_utm"]
+        for patch in (patches or [])
+        if patch.get("render_fill_polygon_utm") is not None and not patch["render_fill_polygon_utm"].is_empty
+    ]
+    return unary_union(fills) if fills else None
+
+
+def water_zone_footprint(zone):
+    """
+    The committed water ground as ONE shapely geometry, or None. Takes the
+    resolved consumed value of the water edge: water_zone_union()'s dict
+    (the one field every consumer reads, render_fill_polygon_utm) or
+    water_suitability.NO_WATER_ZONE, which is "no water zone" and yields
+    None. A crossing ground for the trees commit contract.
+    """
+    from water_suitability import NO_WATER_ZONE
+
+    if zone is None or zone is NO_WATER_ZONE:
+        return None
+    footprint = zone["render_fill_polygon_utm"]
+    return None if footprint is None or footprint.is_empty else footprint
+
+
+def road_network_footprint(network):
+    """
+    The committed road corridor as ONE shapely geometry, or None. Takes the
+    resolved consumed value of the roads edge: selected_road_network()'s
+    dict (its real, unbuffered cell footprint -- the network-level field
+    every consumer reads) or road_corridors.NO_ROAD_CORRIDOR, which is "no
+    road" and yields None. A crossing ground for the trees commit contract.
+    """
+    from road_corridors import NO_ROAD_CORRIDOR
+
+    if network is None or network is NO_ROAD_CORRIDOR:
+        return None
+    footprint = network["cell_footprint_polygon_utm"]
+    return None if footprint is None or footprint.is_empty else footprint

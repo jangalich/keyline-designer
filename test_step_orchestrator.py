@@ -1080,13 +1080,13 @@ with Harness() as h:
     # A step with no registry entry fails BEFORE a job exists: the request
     # was wrong, and there is nothing to poll for.
     #
-    # "trees", NOT "water" or "roads": both have registry entries as of their
+    # "structures", NOT "water", "roads" or "trees": all have registry entries as of their
     # branches. A real STEP_ORDER step whose entry is not written yet and a
     # step the document has never heard of are still told apart in the
     # message, which is the assertion -- it just needs a step that is
     # genuinely unwritten.
     edge_failures = 0
-    for bad_step in ("trees", "orchards"):
+    for bad_step in ("structures", "orchards"):
         try:
             step_orchestrator.generate_step(
                 session_id, bad_step, store,
