@@ -1,7 +1,7 @@
 """
 test_road_network_router.py
 
-Offline (no-network) checks for road_network_router.route_road_network() --
+Offline (no-network) checks for road_network_router._route() --
 the coverage-greedy road network router. Script-style convention, same as
 test_road_cost_path.py: synthetic DEMs with hand-derivable geometry, plain
 asserts, and a print per check. Every fixture below is a uniform flat cost
@@ -10,13 +10,17 @@ concern, already covered by test_road_cost_path.py -- this file is purely
 about the coverage-greedy SELECT/STOP loop, the reversible coverage
 counter, branch trimming/joining, and the water spur).
 
-A note on distances throughout: PRODUCTION_SERVICE_RADIUS_METERS (100m)
-and MAX_ROAD_METERS_PER_SERVED_ACRE (100m/acre) together leave very little
-slack on a uniform cost raster -- a demand block has to be both close
-enough and big enough that its own real acreage supports the real distance
-needed to reach it. Every fixture's numbers below were chosen (and
-verified against this module's own actual output, not hand-guessed) to
-clear that bar with real margin, not to sit exactly on the edge of it.
+A note on distances throughout: a 100m service radius and a 100m/acre
+ceiling together leave very little slack on a uniform cost raster -- a
+demand block has to be both close enough and big enough that its own real
+acreage supports the real distance needed to reach it. Every fixture's
+numbers below were chosen (and verified against this module's own actual
+output, not hand-guessed) to clear that bar with real margin, not to sit
+exactly on the edge of it. Those two figures are PINNED here (see _route()
+below) rather than read off PRODUCTION_SERVICE_RADIUS_METERS and
+MAX_ROAD_METERS_PER_SERVED_ACRE, which are configurable and have since
+moved: a fixture measured against one radius asserts nothing once another
+is substituted under it.
 """
 
 import math
@@ -27,7 +31,43 @@ import numpy as np
 
 from raster_grid import SQUARE_METERS_PER_ACRE, cell_area_acres
 from road_cost_path import least_cost_path
-from road_network_router import route_road_network
+from road_network_router import (
+    MAX_ROAD_METERS_PER_SERVED_ACRE,
+    PRODUCTION_SERVICE_RADIUS_METERS,
+    route_road_network,
+)
+
+# THE GEOMETRY THESE FIXTURES WERE BUILT FOR, PINNED RATHER THAN INHERITED.
+# Every block size, offset and distance below was measured against a 100 m
+# service radius and a 100 m/acre ceiling, and each sits clear of the edge
+# ON THOSE NUMBERS. They are CONFIGURABLE constants, and this branch moved
+# both -- the radius to 25 m, the ceiling to 200 -- which silently re-aimed
+# every fixture here at geometry it was not built for: at a 25 m radius a
+# demand block that used to fall entirely within one trunk's service area
+# no longer does, and section 1's "exactly one branch" became zero.
+#
+# So the fixtures now state the geometry they mean. This file is about the
+# SELECT/STOP loop, the reversible coverage counter, branch trimming and
+# joining, and the water spur -- none of which is a claim about what the
+# constants should BE, and all of which is untestable if a tuning change
+# can move the fixture out from under the assertion. The defaults' actual
+# values are asserted once, just below, and by test_roads_step.py section 1
+# against the reference parcel.
+FIXTURE_SERVICE_RADIUS_METERS = 100.0
+FIXTURE_MAX_METERS_PER_SERVED_ACRE = 100.0
+
+
+def _route(*args, **kwargs):
+    """route_road_network() with this file's own fixture geometry, unless a
+    section overrides it explicitly."""
+    kwargs.setdefault("service_radius_meters", FIXTURE_SERVICE_RADIUS_METERS)
+    kwargs.setdefault("max_meters_per_served_acre", FIXTURE_MAX_METERS_PER_SERVED_ACRE)
+    return route_road_network(*args, **kwargs)
+
+
+# The shipped defaults, which the fixtures deliberately do NOT use.
+assert PRODUCTION_SERVICE_RADIUS_METERS == 25.0
+assert MAX_ROAD_METERS_PER_SERVED_ACRE == 200.0
 
 RESOLUTION = (5.0, 5.0)
 
@@ -66,7 +106,7 @@ block1_rows, block1_cols = (35, 45), (22, 32)
 demand1 = _block_mask(shape1, block1_rows, block1_cols)
 block1_area = (block1_rows[1] - block1_rows[0]) * (block1_cols[1] - block1_cols[0]) * cell_area_acres(dem1)
 
-result1 = route_road_network(dem1, cost_raster1, anchor1, demand1)
+result1 = _route(dem1, cost_raster1, anchor1, demand1)
 
 assert len(result1["branches"]) == 1, f"expected exactly one branch, got {len(result1['branches'])}"
 branch1 = result1["branches"][0]
@@ -96,7 +136,7 @@ cost_raster2 = np.ones(shape2, dtype=np.float64)
 anchor2 = (20, 0)
 demand2 = _block_mask(shape2, (19, 22), (3, 6))  # well within 100m of the anchor
 
-result2 = route_road_network(dem2, cost_raster2, anchor2, demand2)
+result2 = _route(dem2, cost_raster2, anchor2, demand2)
 
 assert result2["branches"] == [], f"expected no branches, got {result2['branches']}"
 assert result2["stop_reason"] == "all_demand_served", f"expected 'all_demand_served', got {result2['stop_reason']}"
@@ -117,7 +157,7 @@ cost_raster3 = np.ones(shape3, dtype=np.float64)
 anchor3 = (15, 15)
 demand3 = np.zeros(shape3, dtype=bool)
 
-result3 = route_road_network(dem3, cost_raster3, anchor3, demand3)
+result3 = _route(dem3, cost_raster3, anchor3, demand3)
 
 assert result3["branches"] == [], f"expected no branches with zero demand, got {result3['branches']}"
 assert result3["stop_reason"] == "no_demand", f"expected stop_reason 'no_demand', got {result3['stop_reason']}"
@@ -137,7 +177,7 @@ anchor4 = (40, 0)
 demand4 = _block_mask(shape4, (35, 45), (22, 32))       # block A: east of the anchor
 demand4 |= _block_mask(shape4, (10, 20), (5, 15))       # block B: north of the anchor
 
-result4 = route_road_network(dem4, cost_raster4, anchor4, demand4)
+result4 = _route(dem4, cost_raster4, anchor4, demand4)
 
 assert len(result4["branches"]) == 2, f"expected exactly two branches, got {len(result4['branches'])}"
 trunk4, spur4 = result4["branches"]
@@ -181,13 +221,13 @@ def _cost_raster5(band_cost: float) -> np.ndarray:
     return cost_raster
 
 
-result5_cheap = route_road_network(dem5, _cost_raster5(2.0), anchor5, demand5)
+result5_cheap = _route(dem5, _cost_raster5(2.0), anchor5, demand5)
 assert len(result5_cheap["branches"]) == 1, (
     f"expected a branch to be built with a cheap band, got {result5_cheap['branches']}"
 )
 assert result5_cheap["stop_reason"] != "cost_per_acre_exceeded"
 
-result5_expensive = route_road_network(dem5, _cost_raster5(1000.0), anchor5, demand5)
+result5_expensive = _route(dem5, _cost_raster5(1000.0), anchor5, demand5)
 assert result5_expensive["branches"] == [], (
     f"expected no branches once the band forces a too-long detour, got {result5_expensive['branches']}"
 )
@@ -223,7 +263,7 @@ area_b6 = 10 * 30
 overlap6 = 10 * 10
 assert true_union_cells6 == area_a6 + area_b6 - overlap6, "inclusion-exclusion sanity check on the fixture itself"
 
-result6 = route_road_network(dem6, cost_raster6, anchor6, demand6)
+result6 = _route(dem6, cost_raster6, anchor6, demand6)
 assert len(result6["branches"]) >= 2, f"expected 2+ branches (discs must overlap), got {len(result6['branches'])}"
 assert abs(result6["total_served_acres"] - true_union_acres6) < 1e-9, (
     f"total_served_acres ({result6['total_served_acres']}) must equal the true union area ({true_union_acres6}), "
@@ -248,7 +288,7 @@ anchor7 = (0, 0)
 demand7 = np.zeros(shape7, dtype=bool)
 water_targets7 = [(24, 0)]  # 120m straight south -- within the default 150m max_water_spur_meters
 
-result7 = route_road_network(dem7, cost_raster7, anchor7, demand7, water_target_cells=water_targets7)
+result7 = _route(dem7, cost_raster7, anchor7, demand7, water_target_cells=water_targets7)
 
 water_branches7 = [b for b in result7["branches"] if b["branch_role"] == "water_spur"]
 assert len(water_branches7) == 1, f"expected exactly one water_spur branch, got {len(water_branches7)}"
@@ -266,7 +306,7 @@ print(
 # --- achievable distance skips the spur entirely -- no branch, no
 # --- exception. ---
 
-result8 = route_road_network(
+result8 = _route(
     dem7, cost_raster7, anchor7, demand7, water_target_cells=water_targets7, max_water_spur_meters=100.0
 )
 water_branches8 = [b for b in result8["branches"] if b["branch_role"] == "water_spur"]
@@ -277,7 +317,7 @@ print("8. Water spur out of range (max_water_spur_meters=100.0 < achievable 120m
 # --- 9. Determinism: the same fixture run 5 times produces byte-identical
 # --- branch cell lists every time. ---
 
-runs9 = [route_road_network(dem4, cost_raster4, anchor4, demand4) for _ in range(5)]
+runs9 = [_route(dem4, cost_raster4, anchor4, demand4) for _ in range(5)]
 first_cells9 = [b["cells"] for b in runs9[0]["branches"]]
 for i, run in enumerate(runs9[1:], start=2):
     cells_i = [b["cells"] for b in run["branches"]]
@@ -347,7 +387,7 @@ def _run_timing(label, grid_side_meters, demand_acres_target, resolution_meters)
     anchor = (0, n // 2)
 
     start = time.perf_counter()
-    result = route_road_network(dem, cost_raster, anchor, demand_mask)
+    result = _route(dem, cost_raster, anchor, demand_mask)
     elapsed = time.perf_counter() - start
 
     print(

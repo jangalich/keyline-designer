@@ -80,7 +80,7 @@ from road_cost_path import backtrace_route, cost_distance_field
 # visited across every iteration. CONFIGURABLE, same deliberately-
 # unvalidated-starting-value caveat every other threshold in this
 # pipeline carries -- not tuned against any real diagnostic sweep yet.
-PRODUCTION_SERVICE_RADIUS_METERS = 100.0
+PRODUCTION_SERVICE_RADIUS_METERS = 25.0
 
 # Stopping threshold, in real meters of NEW road construction per newly
 # served acre -- once the cheapest remaining extension (by
@@ -89,7 +89,7 @@ PRODUCTION_SERVICE_RADIUS_METERS = 100.0
 # than accepting it. Deliberately a real-distance figure, not a cost
 # figure -- see this module's own docstring for why SELECT and STOP use
 # different ratios. CONFIGURABLE, same unvalidated-starting-value caveat.
-MAX_ROAD_METERS_PER_SERVED_ACRE = 100.0
+MAX_ROAD_METERS_PER_SERVED_ACRE = 200.0
 
 # Real-meters ceiling on the water spur's own NEW construction length
 # (existing-road cells the spur happens to reuse don't count against

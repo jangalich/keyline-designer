@@ -70,6 +70,7 @@ import production_area
 import production_area_ceiling
 import production_zone_payload
 import road_corridors
+import road_network_router
 import session_api
 import session_cache
 import session_manager
@@ -118,19 +119,47 @@ def _boundary_point(edge_index: int, fraction: float) -> tuple:
     return (float(lons[0]), float(lats[0]))
 
 
-# FOUR REAL ACCESS POINTS on four different edges, chosen from a survey of
-# fifteen edge points on this fixture so that each yields a DIFFERENT
-# network: A on the long west edge (N Montour Rd side) a trunk and a spur;
-# B on the south-east edge a five-branch network; C on the north edge a
-# trunk with a WATER SPUR to the committed zones; D on the south-west edge,
-# for the cap test. A fifth, NO_NETWORK, sits where the anchor's own
-# service radius already covers the nearest production ground, so the
-# router honestly returns no network (stop_reason corridor_too_short).
+# FOUR REAL ACCESS POINTS on four different edges, RE-SURVEYED for this
+# branch's routing constants and moved where the answer moved. Thirty edge
+# points were measured again; these are chosen so each yields a DIFFERENT
+# network: A on the long west edge (N Montour Rd side) a three-branch
+# network; B on the north-east edge the longest and richest one on the
+# parcel; C on the north edge, the one with a WATER SPUR to the committed
+# zones; D on the south edge a single trunk, for the cap test.
+#
+# B MOVED, AND WHY IT HAD TO. It sat on the short east edge and grew five
+# branches there. PRODUCTION_SERVICE_RADIUS_METERS is now 25 m rather than
+# 100, so a road cell serves a sixteenth of the ground it used to and every
+# network on this parcel is smaller: that edge yields a lone trunk at every
+# fraction measured, and section 8 needs a network with a spur to reject
+# half of. The east edge cannot supply one any more, so B is on the
+# north-east edge. Its compass labels below were also wrong before this
+# (edge 2 is east, not south-east; edge 1 is south, not south-west) and are
+# now the measured bearing of each edge's own midpoint.
+#
+# A FIFTH, NO_NETWORK, IS AN ACCESS POINT THE ROUTER REFUSES, and finding
+# one is no longer free. It used to sit on the east edge and be refused by
+# road_corridors.MIN_CORRIDOR_LENGTH_METERS -- the router built an 87.4 m
+# network there and the length floor threw it away. That floor is gone, so
+# that point now routes (ten branches at the current constants) and the
+# refusal has to be the ROUTER'S OWN. Re-surveying the same thirty points
+# found exactly two that route nothing, both on the south-west edge, and
+# this is the first: the cheapest extension the router can find from here
+# already costs more than MAX_ROAD_METERS_PER_SERVED_ACRE per acre it would
+# serve, so it stops before accepting a single branch (stop_reason
+# 'cost_per_acre_exceeded', branches=[]). It shares an edge with D as a
+# result, which the four above deliberately do not -- there is no fifth
+# edge that refuses.
+#
+# THE REFUSAL IS THE TERRAIN'S, NOT A MOCK'S, which is what makes it worth
+# the survey: section 15 asserts what a real routing pass over real
+# exclusions does with an access point it cannot use, and a retry from the
+# same point is refused identically because nothing about it is chance.
 ACCESS_A = _boundary_point(0, 0.85)
-ACCESS_B = _boundary_point(2, 0.50)
+ACCESS_B = _boundary_point(3, 0.85)
 ACCESS_C = _boundary_point(4, 0.50)
 ACCESS_D = _boundary_point(1, 0.50)
-ACCESS_NO_NETWORK = _boundary_point(3, 0.50)
+ACCESS_NO_NETWORK = _boundary_point(1, 0.35)
 # An interior point, ~40 m inside: not an access point by the validator's
 # own rule.
 _centroid_lon, _centroid_lat = warp_transform(
@@ -562,10 +591,10 @@ print(
     f"{RESOLUTION_METERS:.0f} m. Same boundary and same DEM fixture as the water step.\n"
     f"Access points, each exactly on the parcel edge:\n"
     f"  A (west edge)        {ACCESS_A}  key {KEY_A}\n"
-    f"  B (south-east edge)  {ACCESS_B}  key {KEY_B}\n"
+    f"  B (north-east edge)  {ACCESS_B}  key {KEY_B}\n"
     f"  C (north edge)       {ACCESS_C}  key {KEY_C}\n"
-    f"  D (south-west edge)  {ACCESS_D}  key {KEY_D}\n"
-    f"  NO_NETWORK (east)    {ACCESS_NO_NETWORK}  key {KEY_NO_NETWORK}\n"
+    f"  D (south edge)       {ACCESS_D}  key {KEY_D}\n"
+    f"  NO_NETWORK (south)   {ACCESS_NO_NETWORK}  key {KEY_NO_NETWORK}\n"
 )
 
 
@@ -615,6 +644,29 @@ assert ROADS.accumulate.feature_key_property == "network_id"
 assert ROADS.accumulate.max_candidates == 3
 assert step_registry.resolve(ROADS.accumulate.key) is wire_translation.access_point_key
 
+# AN INPUT THAT PRODUCES NO CANDIDATE, DECLARED. The orchestrator cannot read
+# a road network's shape, so the test for "the router grew nothing" is the
+# roads module's own function and the registry names it. Landform and water
+# leave it None, which is what keeps their generates untouched.
+assert ROADS.accumulate.empty_result == "road_corridors.road_network_is_empty"
+assert step_registry.resolve(ROADS.accumulate.empty_result) is road_corridors.road_network_is_empty
+assert ROADS.accumulate.empty_error and "access point" in ROADS.accumulate.empty_error, (
+    "the empty-result prose must be about the access point; generic_error "
+    "describes a generate that broke and this one did not"
+)
+assert step_registry.get_step("landform").accumulate is None
+assert step_registry.get_step("water").accumulate is None
+
+# THE TWO ROUTING CONSTANTS THIS BRANCH MOVED, asserted against the module
+# that owns them rather than restated here.
+assert road_network_router.MAX_ROAD_METERS_PER_SERVED_ACRE == 200.0
+assert road_network_router.PRODUCTION_SERVICE_RADIUS_METERS == 25.0
+assert not hasattr(road_corridors, "MIN_CORRIDOR_LENGTH_METERS"), (
+    "the network-length floor is deleted, not merely unused: a constant left "
+    "behind is one a later caller can pass again"
+)
+
+
 # THE COMMIT CONTRACT: one network or none, counted in networks.
 _contract = ROADS.commit_contract
 assert _contract.layers == (wire_translation.LAYER_ROAD_CORRIDOR,)
@@ -632,6 +684,9 @@ assert callable(ROADS.resolve_generate()) and callable(ROADS.resolve_payload())
 import inspect as _inspect  # noqa: E402
 
 _signature = _inspect.signature(road_corridors.identify_road_corridor_candidates).parameters
+assert "min_corridor_length_meters" not in _inspect.signature(
+    road_corridors.build_road_network
+).parameters, "the deleted floor must not survive as a parameter callers can still pass"
 for _c in ROADS.consumes:
     if _c.forward_as:
         assert _c.forward_as in _signature, f"{_c.name} forwards as {_c.forward_as!r}, not a parameter"
@@ -1501,5 +1556,157 @@ with Harness() as h:
         f"(generate), 409 (cap, naming {capped.get_json()['max_candidates']} candidates), "
         f"200/404 (discard), 422 (two networks), 200 (one network), and reopen restores both."
     )
+
+# --- 15 [tests 3, 4, 5]. AN ACCESS POINT THAT ROUTES NOTHING LEAVES NOTHING
+# BEHIND -- and the upstream-failure control that says the narrowing is real.
+
+with Harness() as h:
+    s = Session()
+    s.upstream()
+
+    # A routes for real and takes a slot. Everything below is measured
+    # against this: one recorded point, two slots free.
+    payload_a = s.roads(ACCESS_A)
+    assert s.stored()["steps"]["roads"]["inputs"]["access_points"] == [list(ACCESS_A)]
+    assert payload_a["summary"]["slots_remaining"] == 2
+    revision_before = s.stored()["document_revision"]
+    calls_before = h.road_selfcomputes()
+    network_before = h.total_network_calls
+
+    # --- THE ROUTER FAILURE. Real terrain, no mock: the cheapest extension
+    # from NO_NETWORK already costs more per acre than the router will pay,
+    # so it accepts no branch at all.
+    failed = s.job("roads", {"access_point": list(ACCESS_NO_NETWORK)}).wait(timeout=900)
+    assert failed.status == job_runner.STATUS_FAILED, failed.status
+    assert isinstance(failed.exception, step_orchestrator.EmptyCandidateError), failed.exception
+
+    # THE WIRE SHAPE, AND THE WHOLE POINT OF IT: `no_candidate` is PRESENT
+    # and names the input, and `failed_layer` is ABSENT. A client tells the
+    # two failure kinds apart by the key each one carries, never by the key
+    # the other lacks -- see error_payload().
+    assert set(failed.error) == {"error", "no_candidate"}, failed.error
+    assert failed.error["no_candidate"] == {
+        "input": "access_point", "value": list(ACCESS_NO_NETWORK)
+    }, failed.error
+    assert "failed_layer" not in failed.error
+    assert "access point" in failed.error["error"]
+
+    # NOTHING RECORDED, NO SLOT SPENT, NO DOCUMENT WRITE. The document is
+    # byte-identical to before the generate -- the same revision, the same
+    # list -- because the input was never recorded in the first place.
+    entry_after = s.stored()["steps"]["roads"]
+    assert entry_after["inputs"]["access_points"] == [list(ACCESS_A)], entry_after["inputs"]
+    assert entry_after["status"] == "generated"
+    assert s.stored()["document_revision"] == revision_before, "a failed generate wrote a document"
+    layers_after = s.layers("roads")
+    assert [n["network_id"] for n in layers_after["networks"]] == [KEY_A]
+    assert layers_after["summary"]["slots_remaining"] == 2, layers_after["summary"]
+    # The cache holds no half-written candidate either.
+    assert set(s.context().step_proposals["roads"]) == {KEY_A}
+
+    # THE REFUSAL IS THE ROUTER'S, NOT A FETCH'S. Every network call on
+    # this step is mocked and counted, and a refusal that had gone to the
+    # network for its answer would say nothing about the access point.
+    assert h.total_network_calls == network_before, (
+        "the refusal must not have gone to the network"
+    )
+    assert calls_before == h.road_selfcomputes(), (
+        "the refusal must not have re-run a road self-compute either"
+    )
+
+    # RETRYING THE SAME POINT IS REFUSED IDENTICALLY -- the terrain has not
+    # moved, which is exactly why the input is not worth keeping.
+    again = s.job("roads", {"access_point": list(ACCESS_NO_NETWORK)}).wait(timeout=900)
+    assert again.status == job_runner.STATUS_FAILED
+    assert again.error == failed.error
+    assert s.stored()["steps"]["roads"]["inputs"]["access_points"] == [list(ACCESS_A)]
+
+    # --- [test 4] THE UPSTREAM-DATA-FAILURE CONTROL. Same step, same verb,
+    # a point that IS recorded -- and the opposite outcome, unchanged from
+    # before this branch: the access point keeps its slot and a retry is
+    # worth offering, because nothing is wrong with the point.
+    payload_b = s.roads(ACCESS_B)
+    assert s.stored()["steps"]["roads"]["inputs"]["access_points"] == [list(ACCESS_A), list(ACCESS_B)]
+    assert payload_b["summary"]["slots_remaining"] == 1
+    revision_recorded = s.stored()["document_revision"]
+
+    # A COLD CACHE PLUS A SOURCE THAT DOES NOT ANSWER. Roads forwards the
+    # DEM off the context, so the fetch that can actually fail under it is
+    # the one rebuilding that context -- Layer 1, exactly as it fails on
+    # session creation.
+    s.cache.discard(s.id)
+    s.fetch_cache.clear()
+    with mock_patch.object(
+        parcel_data, "fetch_parcel_data",
+        side_effect=parcel_data.ParcelDataIncompleteError(
+            "imagery did not answer", *parcel_data.LAYER_IMAGERY
+        ),
+    ):
+        upstream_failed = s.job("roads", {"access_point": list(ACCESS_B)}).wait(timeout=900)
+    assert upstream_failed.status == job_runner.STATUS_FAILED, upstream_failed.status
+    assert "no_candidate" not in upstream_failed.error, upstream_failed.error
+    # B IS STILL THERE, with its slot -- the assertion that makes the
+    # narrowing above a narrowing and not a rule about failed generates.
+    kept = s.stored()["steps"]["roads"]["inputs"]["access_points"]
+    assert kept == [list(ACCESS_A), list(ACCESS_B)], kept
+    assert s.stored()["document_revision"] == revision_recorded
+    assert s.layers("roads")["summary"]["slots_remaining"] == 1
+
+    # --- [test 5] THE CAP STILL COUNTS THE SURVIVORS. Two real points are
+    # held and the router failure spent nothing, so a THIRD still fits --
+    # which it would not if the refusal had taken a slot -- and only the
+    # fourth is refused.
+    payload_c = s.roads(ACCESS_C)
+    assert payload_c["summary"]["slots_remaining"] == 0
+    recorded_three = s.stored()["steps"]["roads"]["inputs"]["access_points"]
+    assert recorded_three == [list(ACCESS_A), list(ACCESS_B), list(ACCESS_C)], recorded_three
+    assert list(ACCESS_NO_NETWORK) not in recorded_three, (
+        "the refused point must never have been recorded"
+    )
+    try:
+        s.job("roads", {"access_point": list(ACCESS_D)})
+        raise AssertionError("a fourth access point must be refused")
+    except step_orchestrator.CandidateCapReachedError as exc:
+        assert exc.max_candidates == 3 and len(exc.candidates) == 3
+        assert list(ACCESS_NO_NETWORK) not in exc.candidates, (
+            "the cap must not name a point the router refused"
+        )
+
+    # AND THE CAP IS COUNTED AGAINST THE DOCUMENT, so a refusal AT the cap
+    # is refused by the cap and not by the router: NO_NETWORK does not even
+    # reach a job while three points are held.
+    try:
+        s.job("roads", {"access_point": list(ACCESS_NO_NETWORK)})
+        raise AssertionError("the cap must be checked before the entry point runs")
+    except step_orchestrator.CandidateCapReachedError:
+        pass
+
+    # A FREED SLOT SURVIVES A REFUSAL SPENDING IT. Discard C, let the router
+    # refuse the replacement, and the slot is still free for a real point.
+    s.discard(ACCESS_C)
+    assert s.layers("roads")["summary"]["slots_remaining"] == 1
+    refused_at_cap = s.job("roads", {"access_point": list(ACCESS_NO_NETWORK)}).wait(timeout=900)
+    assert refused_at_cap.status == job_runner.STATUS_FAILED
+    assert "no_candidate" in refused_at_cap.error
+    assert s.layers("roads")["summary"]["slots_remaining"] == 1, "the freed slot was spent by a refusal"
+    assert s.roads(ACCESS_D)["summary"]["slots_remaining"] == 0
+    assert s.stored()["steps"]["roads"]["inputs"]["access_points"] == [
+        list(ACCESS_A), list(ACCESS_B), list(ACCESS_D)
+    ]
+
+    print(
+        f"15 [tests 3, 4, 5]. ROUTER FAILURE LEAVES NOTHING: an access point the "
+        f"router refuses on real terrain (stop_reason 'cost_per_acre_exceeded' before "
+        f"a single branch is accepted, 0 network calls) fails the job with "
+        f"`no_candidate` naming the input and NO `failed_layer`, and the document is "
+        f"byte-identical across it -- same revision, {len(entry_after['inputs']['access_points'])} "
+        f"recorded point, {layers_after['summary']['slots_remaining']} slots still free, "
+        f"nothing in the cache. A retry is refused identically. THE CONTROL: the same "
+        f"step's upstream ParcelDataIncompleteError KEEPS its recorded access point and its slot "
+        f"and carries no `no_candidate`, unchanged. The cap counts the survivors only "
+        f"-- three real points fill it, a fourth is refused before a job exists, "
+        f"and a slot freed by a discard survives a refusal spending it."
+    )
+
 
 print("\nAll roads step checks passed.")
