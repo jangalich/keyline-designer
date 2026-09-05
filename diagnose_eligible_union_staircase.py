@@ -84,7 +84,7 @@ from shapely.geometry import LineString
 CELL = 5.0  # the pipeline's own DEM resolution
 
 # Option 1's settings: the gentlest supportable values, matching the pattern
-# PRODUCTION_FILL_SIMPLIFY_TOLERANCE_CELLS / PRODUCTION_FILL_CHAIKIN_ITERATIONS
+# DISPLAY_OUTLINE_SIMPLIFY_TOLERANCE_CELLS / DISPLAY_OUTLINE_CHAIKIN_ITERATIONS
 # already use. Expressed in CELLS and multiplied by the DEM's own resolution at
 # the point of use, so "one cell" stays one cell at any resolution.
 SIMPLIFY_TOLERANCE_CELLS = 1.0

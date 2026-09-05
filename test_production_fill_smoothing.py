@@ -2,8 +2,9 @@
 test_production_fill_smoothing.py
 
 Offline (no-network) verification for the DISPLAY-TIME smoothing of the
-production zone fill used as the contour clip mask -- render_layout_map.py's
-own call to raster_grid.angular_smooth_polygon(), which is where the four ring
+production zone fill used as the contour clip mask -- the
+display_outline.smoothed_display_outline() call render_layout_map.py makes,
+over raster_grid.angular_smooth_polygon(), which is where the four ring
 smoothers and this polygon-level wrapper now live (they were private to the
 renderer until exclusion_zones.py needed them too). This is still a Layer-3
 display transform at the CALL SITE: it
@@ -38,14 +39,21 @@ from production_area import cluster_and_gate, compute_step1_eligible_cells
 from production_suitability import score_production_areas
 import raster_grid
 from raster_grid import angular_smooth_polygon
-from render_layout_map import (
-    PRODUCTION_FILL_CHAIKIN_ITERATIONS,
-    PRODUCTION_FILL_SIMPLIFY_TOLERANCE_CELLS,
+# THE SPEC MOVED OUT OF THE RENDERER, and the values did not. It was
+# render_layout_map.PRODUCTION_FILL_{SIMPLIFY_TOLERANCE_CELLS,CHAIKIN_ITERATIONS}
+# while the PDF's contour clip was the only consumer; the interactive map now
+# draws the same smoothed outline for production and tree zones, so the
+# tolerance, the iteration count and the call itself live in display_outline.py
+# -- one implementation for both maps. This file still asserts what the CALL
+# SITE does with them, which is unchanged.
+from display_outline import (
+    DISPLAY_OUTLINE_CHAIKIN_ITERATIONS,
+    DISPLAY_OUTLINE_SIMPLIFY_TOLERANCE_CELLS,
 )
 
 _CELL = 5.0
-_TOL = PRODUCTION_FILL_SIMPLIFY_TOLERANCE_CELLS * _CELL  # one cell at 5m resolution
-_ITERS = PRODUCTION_FILL_CHAIKIN_ITERATIONS
+_TOL = DISPLAY_OUTLINE_SIMPLIFY_TOLERANCE_CELLS * _CELL  # one cell at 5m resolution
+_ITERS = DISPLAY_OUTLINE_CHAIKIN_ITERATIONS
 _OX, _OY = 500000.0, 4500000.0
 
 

@@ -210,10 +210,10 @@ DISPLAY SMOOTHING: the fill is a true cell-union boundary, a 5m right-angle
 staircase, so clipping contours straight against it lets each 5m step run
 one contour slightly longer than its neighbour -- the contour ends read as
 a frayed comb rather than a field edge. At render time the clip mask is
-therefore angular-simplified + Chaikin-softened (PRODUCTION_FILL_SIMPLIFY_
-TOLERANCE_CELLS / PRODUCTION_FILL_CHAIKIN_ITERATIONS, then re-clipped to
-polygon_utm) via angular_smooth_polygon(), so contours
-terminate along a clean curve. This is a Layer-3 display transform only:
+therefore angular-simplified + Chaikin-softened and re-clipped to polygon_utm
+by display_outline.smoothed_display_outline() (DISPLAY_OUTLINE_SIMPLIFY_
+TOLERANCE_CELLS / DISPLAY_OUTLINE_CHAIKIN_ITERATIONS, which that module owns),
+so contours terminate along a clean curve. This is a Layer-3 display transform only:
 the stored render_fill_polygon_utm the four consumer modules read as
 production exclusion geometry is NOT smoothed.
 
@@ -395,14 +395,11 @@ from shapely.ops import unary_union
 from shapely.plotting import plot_line, plot_points, plot_polygon
 
 from contour_lines import compute_contour_lines
+from display_outline import smoothed_display_outline
 from fencing import identify_fencing
 from parcel_data import ParcelData, fetch_parcel_data
 from pipeline_context import build_pipeline_context
-from raster_grid import (
-    angular_simplify_closed_ring,
-    angular_smooth_polygon,
-    chaikin_smooth_coords,
-)
+from raster_grid import angular_simplify_closed_ring, chaikin_smooth_coords
 from road_corridors import identify_road_corridor_candidates
 from solar_suitability import identify_solar_candidate_zones
 from tree_zone_candidates import identify_tree_zone_candidates
@@ -793,25 +790,18 @@ FENCE_RENDER_ANGULAR_SIMPLIFY_TOLERANCE_M = 6.0  # was 4.0
 # CONFIGURABLE.
 ZONE_FENCE_BOUNDARY_COINCIDENCE_TOLERANCE_M = 5.0  # was 1.0
 
-# DISPLAY-ONLY simplify tolerance for the production zone fill used as the
-# contour clip mask -- expressed in DEM CELLS, multiplied by the DEM's own cell
-# size at the point of use (dem["resolution_meters"] is in scope in
-# render_layout_map()), so it stays "one cell" at any resolution instead of
-# hardcoding ~5m. The production fill is a true cell-union boundary (a 5m
-# right-angle staircase after the bounded opening); simplifying collapses that
-# staircase's collinear runs down to the shape's real turns, so the Chaikin pass
-# below has actual corners to round rather than hundreds of individual cell
-# steps. Separate constant from the fence/road render tolerances even though it
-# starts near them -- three different geometries with three different retuning
-# pressures, per the standing convention. CONFIGURABLE.
-PRODUCTION_FILL_SIMPLIFY_TOLERANCE_CELLS = 1.0
-
-# Post-simplify Chaikin softening for the production fill clip mask. Kept small
-# deliberately: this geometry is a clip mask for contour lines, so over-
-# smoothing moves where every contour terminates. Separate from the fence/road
-# Chaikin iteration counts by the same standing convention. CONFIGURABLE --
-# start light.
-PRODUCTION_FILL_CHAIKIN_ITERATIONS = 1
+# THE DISPLAY-ONLY SMOOTHING SPEC IS NOT DECLARED HERE ANY MORE. It was
+# PRODUCTION_FILL_SIMPLIFY_TOLERANCE_CELLS / PRODUCTION_FILL_CHAIKIN_ITERATIONS
+# in this file while the production contour clip below was its only consumer.
+# The interactive map now draws the same smoothed outline for production AND
+# tree zones, so the tolerance, the iteration count and the smoothing call
+# itself live in display_outline.py -- one implementation, imported here rather
+# than duplicated there. See that module's docstring for the display-only rule
+# the wire side is bound by; nothing about this file's use of it changed.
+# smoothed_display_outline() is imported above; DISPLAY_OUTLINE_SIMPLIFY_
+# TOLERANCE_CELLS and DISPLAY_OUTLINE_CHAIKIN_ITERATIONS are read there, not
+# here -- a re-export under this module's name would be a second place to look
+# for one configurable value.
 
 
 # ===========================================================================
@@ -1931,11 +1921,11 @@ def render_layout_map(
         # within that slack -- but clip anyway to keep the invariant hard).
         # Computed ONCE per patch, not per contour line. The stored
         # render_fill_polygon_utm is untouched.
-        production_fill_clip = angular_smooth_polygon(
+        production_fill_clip = smoothed_display_outline(
             patch["render_fill_polygon_utm"],
-            PRODUCTION_FILL_SIMPLIFY_TOLERANCE_CELLS * max(dem["resolution_meters"]),
-            PRODUCTION_FILL_CHAIKIN_ITERATIONS,
-        ).intersection(patch["polygon_utm"])
+            patch["polygon_utm"],
+            max(dem["resolution_meters"]),
+        )
 
         for contour in contour_lines:
             clipped = contour["lines_utm"].intersection(production_fill_clip)

@@ -80,6 +80,7 @@ from shapely.ops import unary_union
 import canopy_height_data
 import commit_validation
 import design_document
+import display_outline
 import exclusion_zones
 import farm_roads_data
 import fencing
@@ -1122,7 +1123,44 @@ for original in GENERATED_PATCHES:
 
 OUTBOUND = wire_translation.tree_zones_to_feature_collection(GENERATED_PATCHES)
 validate_feature_collection(OUTBOUND)
-assert OUTBOUND == GENERATE_PAYLOAD["tree_zones"], "the payload carries the outbound collection unchanged"
+
+# THE PAYLOAD CARRIES THE OUTBOUND COLLECTION PLUS EXACTLY ONE PROPERTY, and
+# the difference is asserted rather than tolerated. build_trees_payload() adds
+# `display_only_smoothed_outline` -- a DISPLAY-ONLY rendering of each feature's
+# own geometry (display_outline.py) that nothing may compute from. Stripping it
+# must return the collection this file just built, byte for byte: the geometry,
+# the ids, the scores, the four factors and the three availability flags are
+# all untouched by its existence, which is the whole of the claim.
+DISPLAY_ONLY_OUTLINE = display_outline.DISPLAY_ONLY_OUTLINE_PROPERTY
+PAYLOAD_COLLECTION = GENERATE_PAYLOAD["tree_zones"]
+
+
+def _without_display_only_outline(collection):
+    return {
+        **collection,
+        "features": [
+            {
+                **feature,
+                "properties": {
+                    key: value
+                    for key, value in feature["properties"].items()
+                    if key != DISPLAY_ONLY_OUTLINE
+                },
+            }
+            for feature in collection["features"]
+        ],
+    }
+
+
+assert _without_display_only_outline(PAYLOAD_COLLECTION) == OUTBOUND, (
+    "the payload carries the outbound collection unchanged apart from the display-only outline"
+)
+for feature, outbound in zip(PAYLOAD_COLLECTION["features"], OUTBOUND["features"]):
+    assert set(feature["properties"]) - set(outbound["properties"]) == {DISPLAY_ONLY_OUTLINE}, (
+        f"{feature['id']}: the payload added more than the display-only outline"
+    )
+    outline = feature["properties"][DISPLAY_ONLY_OUTLINE]
+    assert outline is not None and outline["type"] in ("Polygon", "MultiPolygon"), outline
 
 worst_relative_symmetric_difference = 0.0
 for feature, original in zip(OUTBOUND["features"], GENERATED_PATCHES):
@@ -1639,6 +1677,10 @@ assert "not available" not in _wire["features"][1]["properties"]["confidence_not
 _payload = step_orchestrator.build_trees_payload(
     {
         "zones_geojson": _wire,
+        # The entry point's own result shape: the patches ride beside the
+        # collection, and build_trees_payload() reads them for the display-only
+        # smoothed outline it puts on every feature.
+        "patches": [_defaulted, _measured],
         "search_space_geojson": {"type": "FeatureCollection", "features": []},
         "narrative_data": tree_zone_candidates.build_narrative_data(
             [_defaulted, _measured], BOUNDARY_POLYGON_UTM, PARCEL_ACRES, 1.0, 2.0,

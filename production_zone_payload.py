@@ -119,6 +119,30 @@ if its input did, and the narrative is the PDF's contract, not this one.
 The consequence is real and is reported rather than hidden -- see this
 module's own note in build_production_zone_payload().
 
+THE DISPLAY-ONLY SMOOTHED OUTLINE
+---------------------------------
+Every suggested-zone feature also carries
+`properties.display_only_smoothed_outline`: the same opening its `geometry`
+carries, run through display_outline.smoothed_display_outline() -- the function
+render_layout_map.py uses for the PDF's contour clip.
+
+WHY IT IS ON THE WIRE AT ALL. A production zone is a union of 5 m DEM cells, so
+its outline is a right-angle staircase. The PDF has never shown that staircase;
+the interactive map did, which made the two maps of one parcel disagree about
+what one zone looks like. Computing it here rather than porting the smoother to
+JS keeps ONE implementation of a geometric operation -- see display_outline.py
+for why that rule is worth a wire field.
+
+NOTHING MAY COMPUTE FROM IT, AND THE NAME SAYS SO. `geometry` is still the
+shape; cautions, clamping, acreage, commit validation and every downstream
+consumer read that and not this. A client that measured against the real
+geometry while DRAWING the smoothed one could show a zone visually missing a
+crossing it records, which is precisely the client/server disagreement the
+crossing-grounds tests closed.
+
+It is None for a patch with no drawn shape, matching `geometry`'s own
+convention, and it is rounded like every other coordinate here.
+
 COORDINATE PRECISION
 --------------------
 Geometry arrives from rasterio's transform_geom at full float repr -- 14 to
@@ -144,12 +168,15 @@ of numbers that are contractually FINAL.
 from typing import Optional
 
 from rasterio.warp import transform as warp_transform
-from shapely.geometry import Polygon
+from rasterio.warp import transform_geom
+from shapely.geometry import Polygon, mapping
 
 import dem_data
 from canopy_height_data import get_canopy_height_for_boundary
+from display_outline import DISPLAY_ONLY_OUTLINE_PROPERTY, smoothed_display_outline
 from exclusion_zones import identify_exclusion_zones
 from production_area_ceiling import identify_optimized_production_areas
+
 
 
 # See this module's COORDINATE PRECISION note. ~11 cm at these latitudes,
@@ -352,10 +379,19 @@ def assemble_production_zone_payload(exclusion: dict, production: dict) -> dict:
     # cluster_and_gate() and are read here, never recomputed -- the opening is
     # a raster morphological operation and a second implementation of it in a
     # serialisation layer would be a second answer to the same question.
+    #
+    # THE THIRD ENTRY IS NOT A THIRD GEOMETRY. `outline` is the DISPLAY-ONLY
+    # smoothed rendering of the SAME opening -- computed here, inside the
+    # generate, rather than lazily at a layers fetch, so a payload is a payload
+    # by the time anything reads it. It is display_outline.py's own function,
+    # the one render_layout_map.py calls for the PDF's contour clip, so the
+    # interactive map and the printed map smooth by one implementation. Nothing
+    # computes from it; see display_outline.DISPLAY_ONLY_OUTLINE_PROPERTY.
     drawn = {
         int(patch["id"]): {
             "geometry": patch["render_fill_geometry_wgs84"],
             "acres": patch["render_fill_area_acres"],
+            "outline": _display_only_outline_wgs84(patch, wire),
         }
         for patch in production["scored_patches"]
     }
@@ -380,6 +416,14 @@ def assemble_production_zone_payload(exclusion: dict, production: dict) -> dict:
                 "properties": {
                     **feature["properties"],
                     "area_acres": drawn[patch_id]["acres"],
+                    # Through _round_geometry() like every other coordinate on
+                    # this payload -- 11 cm, an order of magnitude finer than
+                    # the 5 m cell the outline is a smoothing OF. A display
+                    # field is the last thing that should ship at nanometre
+                    # precision.
+                    DISPLAY_ONLY_OUTLINE_PROPERTY: _round_geometry(
+                        drawn[patch_id]["outline"]
+                    ),
                 },
             }
         )
@@ -442,3 +486,44 @@ def assemble_production_zone_payload(exclusion: dict, production: dict) -> dict:
         "wire": {key: value for key, value in wire.items() if key != "layers"},
         "zones_without_drawn_shape": len(drawn) - len(drawable),
     }
+
+
+def _display_only_outline_wgs84(patch: dict, wire: dict) -> Optional[dict]:
+    """
+    One production patch's DISPLAY-ONLY smoothed outline, as a WGS84 GeoJSON
+    geometry -- or None when the patch has no drawn shape at all.
+
+    NOTHING MAY COMPUTE FROM THE RESULT. It is a rendering of
+    render_fill_polygon_utm, not a second version of it; see
+    display_outline.py, which owns both the rule and the smoothing.
+
+    THE SAME SHAPE THE FEATURE'S OWN GEOMETRY IS. The wire geometry for a
+    production zone is the opening (render_fill_geometry_wgs84), so the outline
+    smooths render_fill_polygon_utm and re-clips to polygon_utm -- exactly what
+    render_layout_map.py hands the same function for the PDF's contour clip.
+    Smoothing anything else would ship an outline of a shape the map does not
+    draw.
+
+    THE CRS AND THE CELL SIZE COME OFF THE EXCLUSION WIRE BLOCK, which is
+    already this payload's published answer to "what projection are these
+    metres in" and "how big is a cell" -- the same two values a frontend
+    computing an acreage from an intersection is told to use. Reading them here
+    rather than re-deriving them from a DEM this function does not have is what
+    keeps the endpoint path and the session path identical.
+
+    EMPTY IS A REAL OUTCOME and returns None, matching
+    render_fill_geometry_wgs84's own convention for a patch whose opening came
+    back empty -- such a patch is dropped from the payload entirely, so this is
+    belt-and-braces rather than a case a consumer sees.
+    """
+    render_fill_polygon_utm = patch["render_fill_polygon_utm"]
+    if render_fill_polygon_utm.is_empty:
+        return None
+    outline_utm = smoothed_display_outline(
+        render_fill_polygon_utm,
+        patch["polygon_utm"],
+        max(wire["cell_size_meters"]),
+    )
+    if outline_utm.is_empty:
+        return None
+    return transform_geom(wire["crs"], "EPSG:4326", mapping(outline_utm))
