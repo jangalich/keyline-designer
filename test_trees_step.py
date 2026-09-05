@@ -645,8 +645,15 @@ assert TREES.user_inputs == () and TREES.accumulate is None and TREES.post_commi
 _consumed = {c.name: c for c in TREES.consumes}
 assert set(_consumed) == {
     "boundary_coordinates", "dem", "boundary_polygon_utm", "canopy_height", "scoring_inputs",
+    "exclusion_zones",
     "production_areas", "selected_water_zone", "selected_road_corridor",
 }, sorted(_consumed)
+# THE NINTH EDGE IS NOT AN INPUT TO THE GENERATE: the session's exclusion
+# gate, consumed unforwarded so the payload can ship the canopy crossing
+# ground (section 8). The entry point never sees it.
+assert _consumed["exclusion_zones"].source == step_registry.SOURCE_CACHE
+assert _consumed["exclusion_zones"].cache_path == "exclusion_zones"
+assert _consumed["exclusion_zones"].forward_as is None
 for _name in ("valleys", "hydric_floodplain_union", "floodplain_data_is_fallback", "anchor_lon_lat"):
     assert _name not in _consumed, f"{_name} only feeds a self-compute the committed edges close"
 
@@ -790,7 +797,7 @@ with Harness() as h:
     trees_network_calls = h.total_network_calls - network_before
     selfcomputes = {k: v - selfcomputes_before[k] for k, v in h.tree_selfcomputes().items()}
 
-    assert sorted(payload) == ["search_space", "summary", "tree_zones", "zones"], sorted(payload)
+    assert sorted(payload) == ["crossing_grounds", "search_space", "summary", "tree_zones", "zones"], sorted(payload)
     assert h.identify_trees.call_count == 1
     validate_feature_collection(payload["tree_zones"])
     CANDIDATES = payload["tree_zones"]["features"]
@@ -1356,10 +1363,74 @@ print(
 
 # --- 8 [test 8]. CROSSINGS: four grounds, and NOT hydric or slope -------
 
+# A DIRECT PORT of zoneGeometry.js's cautionsFor() over GROUNDS -- the shape
+# the trees payload ships and the client clips against: {type, label,
+# geometry_wgs84}, a ground with no geometry skipped, intersected per ground
+# independently, measured with geo.js's own lon/lat area formula, dropped
+# under CAUTION_MIN_ACRES. test_step_commit.py section 7 ports the same
+# function over landform's exclusion_layers; this is the same port over the
+# trees step's grounds, so the two implementations of one question -- shapely
+# in UTM at commit, polygon-clipping in lon/lat while drawing -- are asked
+# whether they agree about EVERY ground, road and canopy included.
+
+CAUTION_MIN_ACRES = 0.05  # zoneGeometry.js's own constant, at its own value
+METRES_PER_DEGREE_LATITUDE = 111132.0  # geo.js
+METRES_PER_DEGREE_LONGITUDE_AT_EQUATOR = 111320.0  # geo.js
+SQUARE_METRES_PER_ACRE_JS = 4046.8564224  # geo.js
+
+
+def _js_multi_polygon_area_acres(polygons) -> float:
+    """geo.js multiPolygonAreaAcres(), ported (see test_step_commit.py)."""
+    import math
+
+    if not polygons:
+        return 0.0
+    first = polygons[0][0]
+    scale = math.cos(math.radians(sum(lat for _, lat in first) / len(first)))
+    square_degrees = 0.0
+    for polygon in polygons:
+        for ring_index, ring in enumerate(polygon):
+            double_area = 0.0
+            for index in range(len(ring)):
+                lng1, lat1 = ring[index]
+                lng2, lat2 = ring[(index + 1) % len(ring)]
+                double_area += lat1 * (lng2 * scale) - lat2 * (lng1 * scale)
+            square_degrees += (1 if ring_index == 0 else -1) * abs(double_area) / 2
+    return square_degrees * METRES_PER_DEGREE_LATITUDE * METRES_PER_DEGREE_LONGITUDE_AT_EQUATOR / SQUARE_METRES_PER_ACRE_JS
+
+
+def _as_multi(geometry):
+    if geometry.is_empty:
+        return []
+    parts = list(geometry.geoms) if geometry.geom_type.startswith("Multi") else [geometry]
+    return [
+        [list(part.exterior.coords)] + [list(interior.coords) for interior in part.interiors]
+        for part in parts
+        if part.geom_type == "Polygon"
+    ]
+
+
+def js_cautions_for(geometry_wgs84, grounds) -> list:
+    """zoneGeometry.js cautionsFor(multi, grounds), ported. [(type, label, acres), ...]."""
+    drawn = shape(geometry_wgs84)
+    cautions = []
+    for ground in grounds:
+        if not ground.get("geometry_wgs84"):
+            continue
+        hit = drawn.intersection(shape(ground["geometry_wgs84"]))
+        if hit.is_empty:
+            continue
+        acres = _js_multi_polygon_area_acres(_as_multi(hit))
+        if acres < CAUTION_MIN_ACRES:
+            continue
+        cautions.append((ground["type"], ground["label"], acres))
+    return cautions
+
+
 with Harness() as h:
     s = Session()
     s.upstream()
-    s.trees()
+    payload = s.trees()
     context = s.context()
     production_patches = s.committed("landform")
     water_union = s.assembled()["selected_water_zone"]
@@ -1377,6 +1448,34 @@ with Harness() as h:
     assert grounds[0]["polygon_utm"].equals(unary_union([p["render_fill_polygon_utm"] for p in production_patches]))
     assert grounds[1]["polygon_utm"].equals(water_union["render_fill_polygon_utm"])
     assert grounds[2]["polygon_utm"].equals(road_network["cell_footprint_polygon_utm"])
+
+    # [tests 1-3 of the payload branch] THE SAME FOUR GROUNDS SHIP ON THE
+    # LAYERS PAYLOAD, as {type, label, geometry_wgs84}, in the same order
+    # with the same labels -- and they are the SAME geometry the commit
+    # measures against, round-tripped through EPSG:4326.
+    shipped = payload["crossing_grounds"]
+    assert [g["type"] for g in shipped] == ["production", "water", "road", "canopy"], [g["type"] for g in shipped]
+    assert [g["label"] for g in shipped] == [g["label"] for g in grounds]
+    for wire, resolved in zip(shipped, grounds):
+        assert set(wire) == {"type", "label", "geometry_wgs84"}, sorted(wire)
+        assert wire["geometry_wgs84"]["type"] in ("Polygon", "MultiPolygon"), (wire["type"], wire["geometry_wgs84"]["type"])
+        round_trip = shape(transform_geom("EPSG:4326", CRS, wire["geometry_wgs84"]))
+        drift = round_trip.symmetric_difference(resolved["polygon_utm"]).area
+        assert drift < 1e-3 * resolved["polygon_utm"].area + 1e-6, (wire["type"], drift, resolved["polygon_utm"].area)
+    # THE ROAD GROUND IS THE CELL FOOTPRINT: it has AREA, at the cell width
+    # the committed LineStrings do not carry.
+    road_wire_utm = shape(transform_geom("EPSG:4326", CRS, shipped[2]["geometry_wgs84"]))
+    assert road_wire_utm.area > 0 and road_wire_utm.geom_type in ("Polygon", "MultiPolygon")
+    assert road_wire_utm.area / SQUARE_METERS_PER_ACRE >= commit_validation.CROSSING_MIN_ACRES, (
+        f"the road footprint is {road_wire_utm.area / SQUARE_METERS_PER_ACRE:.4f} ac; a zone drawn over it must be able to clear the floor"
+    )
+    # THE CANOPY GROUND MATCHES THE MASK USED AT COMMIT: the exclusion
+    # result's own gate, the same object the commit path reads.
+    canopy_wire_utm = shape(transform_geom("EPSG:4326", CRS, shipped[3]["geometry_wgs84"]))
+    canopy_mask = exclusion["layers"]["canopy"]["polygon_utm"]
+    assert canopy_wire_utm.symmetric_difference(canopy_mask).area < 1e-3 * canopy_mask.area + 1e-6
+    # AND THE READ VERB SHIPS THE SAME GROUNDS the generate did.
+    assert s.layers("trees")["crossing_grounds"] == shipped
 
     # FOUR DRAWN ZONES, one over each ground, built off the committed
     # geometry itself so they cross by construction.
@@ -1445,6 +1544,27 @@ with Harness() as h:
         assert set(crossed) <= {"production", "water", "road", "canopy"}, (feature_id, crossed)
         assert "hydric" not in crossed and "slope" not in crossed and "setback" not in crossed and "roads" not in crossed
 
+    # [test 4 of the payload branch] TWO IMPLEMENTATIONS, ONE ANSWER, FOR
+    # EVERY GROUND. The client's cautionsFor() over the SHIPPED grounds and
+    # the server's recorded crossings for the SAME six rings must name the
+    # same grounds in the same order with the same labels -- road and canopy
+    # included, which the client could not measure before the payload carried
+    # them -- and agree on acreage to within the projection difference (the
+    # client measures in lon/lat with a cosine-latitude scale, the server in
+    # UTM metres, rounded to two places).
+    agreement = {}
+    for feature_id, zone in zones.items():
+        client = js_cautions_for(zone["geometry"], shipped)
+        server = recorded[feature_id]
+        assert [t for t, _, _ in client] == [c["type"] for c in server], (
+            f"{feature_id}: client {[t for t, _, _ in client]} vs server {[c['type'] for c in server]}"
+        )
+        assert [l for _, l, _ in client] == [c["label"] for c in server], feature_id
+        for (_, _, client_acres), c in zip(client, server):
+            assert abs(client_acres - c["acres"]) <= 0.02 + 0.02 * client_acres, (feature_id, c["type"], client_acres, c["acres"])
+        agreement[feature_id] = [(t, round(a, 3), next(c["acres"] for c in server if c["type"] == t)) for t, _, a in client]
+    assert agreement["drawn-hydric"] == [] or all(t != "hydric" for t, _, _ in agreement["drawn-hydric"])
+
     # THE CONTROL: against the EXCLUSION gates the hydric and steep zones
     # WOULD have recorded hydric and slope -- so their absence above is a
     # declaration working, not ground that happened to be clear.
@@ -1474,7 +1594,12 @@ print(
     f"hydric or slope, while the exclusion gates (the control) would have recorded "
     f"{gate_hydric} and {gate_steep} -- and the same hydric ring committed as a PRODUCTION zone "
     f"records {landform_types}. The canopy ground is the exclusion result's own gate, "
-    f"data_available True."
+    f"data_available True.\n"
+    f"   THE PAYLOAD SHIPS ALL FOUR as crossing_grounds {[g['type'] for g in shipped]} with "
+    f"{{type, label, geometry_wgs84}}; the road ground is the cell footprint, "
+    f"{road_wire_utm.area / SQUARE_METERS_PER_ACRE:.3f} ac of area; the canopy ground round-trips "
+    f"to the commit mask. AGREEMENT [test 4], zoneGeometry.js cautionsFor() over the shipped grounds vs "
+    f"the recorded crossings, (type, client ac, server ac): { {k: v for k, v in agreement.items()} }."
 )
 
 
@@ -1507,7 +1632,10 @@ for flag in ("soil_marginality_data_available", "hydric_data_available", "stream
     assert _back[0][flag] is False and _back[1][flag] is True, flag
 assert "not available" in _wire["features"][0]["properties"]["confidence_notes"]
 assert "not available" not in _wire["features"][1]["properties"]["confidence_notes"]
-# And a build_trees_payload over such a result carries the gates block.
+# And a build_trees_payload over such a result carries the gates block. The
+# `assembled` here is the orchestrator's shape with NOTHING committed and NO
+# gate available: every consumed value is its empty answer, so the payload
+# ships NO crossing ground -- absent, not present with a null geometry.
 _payload = step_orchestrator.build_trees_payload(
     {
         "zones_geojson": _wire,
@@ -1518,11 +1646,26 @@ _payload = step_orchestrator.build_trees_payload(
             stream_data_available=False, existing_canopy_excluded=True,
         ),
     },
-    {},
+    {
+        "dem": DEM,
+        "exclusion_zones": {"wire": {"layers": []}, "layers": {}},
+        "production_areas": [],
+        "selected_water_zone": water_suitability.NO_WATER_ZONE,
+        "selected_road_corridor": road_corridors.NO_ROAD_CORRIDOR,
+    },
 )
 assert _payload["summary"]["gates"] == {
     "soil_marginality_data_available": False, "hydric_data_available": False, "stream_data_available": False,
 }
+assert _payload["crossing_grounds"] == [], _payload["crossing_grounds"]
+# And a contract declaring a gate ground with no exclusion edge assembled is
+# refused, not shipped clear.
+try:
+    step_orchestrator.wire_crossing_grounds(TREES, {"dem": DEM, "production_areas": []})
+except step_orchestrator.StepOrchestrationError as exc:
+    assert "exclusion_zones" in str(exc)
+else:
+    raise AssertionError("a gate ground with no exclusion edge must be refused")
 assert _payload["summary"]["selection"]["factor_weights_pct"] == WEIGHTS
 
 print(

@@ -1641,7 +1641,12 @@ def build_trees_payload(result: dict, assembled: dict) -> dict:
     computation to include. It is a diagnostic of THIS generate, not a
     gate: drawing outside it is legal and its cautions are the crossings.
 
-    `assembled` is unread, for build_water_payload()'s reason.
+    `crossing_grounds` IS WHAT THOSE CAUTIONS ARE MEASURED AGAINST: the
+    contract's four grounds, resolved off `assembled` exactly as the commit
+    resolves them, in WGS84 -- see wire_crossing_grounds(). This is the one
+    payload builder that READS `assembled`: the grounds are the consumed
+    values (the three upstream commits, and the session's exclusion gate
+    for canopy), and nothing else on this payload is.
     """
     narrative = result["narrative_data"]
     feature_id_by_rank = {
@@ -1656,6 +1661,7 @@ def build_trees_payload(result: dict, assembled: dict) -> dict:
         ],
         "summary": {key: value for key, value in narrative.items() if key != "zones"},
         "search_space": result["search_space_geojson"],
+        "crossing_grounds": wire_crossing_grounds(step_registry.get_step("trees"), assembled),
     }
 
 
@@ -1944,34 +1950,52 @@ def crossing_grounds(definition, context, document) -> list:
     """
     The grounds a commit to this step records crossings against, as
     commit_validation's {"type", "label", "polygon_utm"} dicts, in
-    declaration order.
+    declaration order -- THE COMMIT PATH's entry to resolve_crossing_grounds().
 
-    THE REGISTRY SAYS WHAT, THIS SAYS HOW. A contract with crossings=None
-    gets the session's exclusion gates -- commit_validation.exclusion_
-    grounds(), the behaviour every step had before the trees entry. A
-    contract that declares CrossingGrounds gets each one resolved:
-
-      * an exclusion-gate ground is the matching gate out of that same
-        list, so its label, its availability rule and its emptiness rule
-        are exactly the ones every other step's cautions follow -- an
-        unavailable or empty gate is OMITTED, never reported clear;
-      * a committed-claim ground is the named consumes edge, resolved
-        through _CONSUMES_RESOLVERS exactly as a generate resolves it
-        (rehydrated, combined, or the empty_commit sentinel), handed to the
-        declared footprint function, and omitted when that returns None or
-        an empty geometry -- "no water zone" is not a ground.
-
-    So a tree zone's production crossing is measured against the same
-    rehydrated fills the tree generate carved its search space around, not
-    against a second reading of the document.
+    A contract with crossings=None gets the session's exclusion gates --
+    commit_validation.exclusion_grounds(), the behaviour every step had
+    before the trees entry -- with nothing assembled. A contract that
+    declares CrossingGrounds has its consumes assembled exactly as a generate
+    assembles them (rehydrated, combined, or the empty_commit sentinel) and
+    handed to the one resolver the layers payload also uses, so a tree zone's
+    production crossing is measured against the same rehydrated fills the
+    tree generate carved its search space around, and the same fills the
+    payload shipped to the client as geometry_wgs84.
     """
     contract = definition.commit_contract
-    exclusion = commit_validation.exclusion_grounds(context.exclusion_zones)
     if contract.crossings is None:
-        return exclusion
+        return commit_validation.exclusion_grounds(context.exclusion_zones)
+    assembled = assemble_consumes(definition, context, document)
+    return resolve_crossing_grounds(definition, assembled, context.exclusion_zones)
 
-    gate_by_type = {ground["type"]: ground for ground in exclusion}
-    consumed_by_name = {consumed.name: consumed for consumed in definition.consumes}
+
+def resolve_crossing_grounds(definition, assembled: dict, exclusion_result) -> list:
+    """
+    THE REGISTRY SAYS WHAT, THIS SAYS HOW -- once, for the commit AND for the
+    layers payload. Each declared CrossingGround becomes
+    {"type", "label", "polygon_utm"}, in declaration order:
+
+      * an exclusion-gate ground is the matching gate out of
+        commit_validation.exclusion_grounds(exclusion_result), so its label,
+        its availability rule and its emptiness rule are exactly the ones
+        every other step's cautions follow -- an unavailable or empty gate
+        is OMITTED, never reported clear;
+      * a committed-claim ground is the named consumes edge's RESOLVED value
+        out of `assembled` (the dict assemble_consumes() builds), handed to
+        the declared footprint function, and omitted when that returns None
+        or an empty geometry -- "no water zone" is not a ground.
+
+    `exclusion_result` is the session's identify_exclusion_zones() result.
+    The commit path passes context.exclusion_zones; the payload path passes
+    the same object off the step's own cache edge (see the trees entry's
+    `exclusion_zones` consume). ONE OBJECT, so a caution shown while drawing
+    and a crossing recorded on commit are measured against one mask.
+    """
+    contract = definition.commit_contract
+    if contract.crossings is None:
+        return commit_validation.exclusion_grounds(exclusion_result)
+
+    gate_by_type = {ground["type"]: ground for ground in commit_validation.exclusion_grounds(exclusion_result)}
     grounds = []
     for ground in contract.crossings:
         if ground.exclusion_layer:
@@ -1982,13 +2006,83 @@ def crossing_grounds(definition, context, document) -> list:
                 {"type": ground.type, "label": ground.label or gate["label"], "polygon_utm": gate["polygon_utm"]}
             )
             continue
-        consumed = consumed_by_name[ground.consumed]
-        value = _CONSUMES_RESOLVERS[consumed.source](definition, consumed, context, document)
+        if ground.consumed not in assembled:
+            raise StepOrchestrationError(
+                f"{definition.step_id}: crossing ground {ground.type!r} reads consumed "
+                f"'{ground.consumed}', which was not assembled"
+            )
+        value = assembled[ground.consumed]
         footprint = step_registry.resolve(ground.footprint)(value)
         if footprint is None or footprint.is_empty:
             continue
         grounds.append({"type": ground.type, "label": ground.label, "polygon_utm": footprint})
     return grounds
+
+
+def wire_crossing_grounds(definition, assembled: dict) -> list:
+    """
+    The step's crossing grounds FOR THE LAYERS PAYLOAD: every declared
+    ground that resolves, as {"type", "label", "geometry_wgs84"} in
+    declaration order -- the exclusion layers' own {type, label} convention,
+    with the geometry in EPSG:4326 the way exclusion_zones._wire_layers()
+    ships a gate.
+
+    WHY THE PAYLOAD CARRIES THEM. A drawn zone is warned about what it
+    crosses WHILE IT IS DRAWN (zoneGeometry.js cautionsFor), and the client
+    can only warn about ground it holds. Two of trees' four grounds it does
+    not: the road ground is the network's cell footprint -- a real width the
+    server has and the committed LineStrings do not -- and the canopy is a
+    session gate that is never otherwise on the wire. Shipping all four from
+    the one resolver the commit path runs is what makes the caution and the
+    recorded crossing two readings of ONE geometry; shipping only the two
+    the client lacked would have the client unioning the other two itself,
+    from a second reading of the document.
+
+    A GROUND THAT DOES NOT RESOLVE IS ABSENT, not present with a null
+    geometry: an empty water commit is not a ground, and an omitted entry is
+    the same statement the commit path makes when it records nothing for it.
+    The client skips a ground it does not receive; it never has to read a
+    sentinel.
+
+    `type` is the stable key the client branches on; `label` is display
+    prose, taken from the registry (a committed claim) or the gate's own wire
+    label (an exclusion gate), never reworded client-side.
+
+    The exclusion result comes off the step's own cache edge (cache_path
+    "exclusion_zones"); a contract declaring an exclusion-gate ground without
+    consuming it is a registry mistake and is raised as one.
+    """
+    from rasterio.warp import transform_geom
+    from shapely.geometry import mapping
+
+    contract = definition.commit_contract
+    if contract.crossings is None:
+        return []
+    exclusion_result = None
+    if any(ground.exclusion_layer for ground in contract.crossings):
+        edge = next(
+            (
+                consumed
+                for consumed in definition.consumes
+                if consumed.source == step_registry.SOURCE_CACHE and consumed.cache_path == "exclusion_zones"
+            ),
+            None,
+        )
+        if edge is None or edge.name not in assembled:
+            raise StepOrchestrationError(
+                f"{definition.step_id}: a crossing ground is an exclusion gate, but the entry "
+                f"consumes no cache edge with cache_path='exclusion_zones' to read it off"
+            )
+        exclusion_result = assembled[edge.name]
+    dem = assembled["dem"]
+    return [
+        {
+            "type": ground["type"],
+            "label": ground["label"],
+            "geometry_wgs84": transform_geom(dem["crs"], "EPSG:4326", mapping(ground["polygon_utm"])),
+        }
+        for ground in resolve_crossing_grounds(definition, assembled, exclusion_result)
+    ]
 
 
 def validate_commit_inputs(definition, inputs, boundary):
