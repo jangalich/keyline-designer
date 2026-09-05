@@ -1391,11 +1391,13 @@ TREES = StepDefinition(
     # caution, the exclusion gates NOT being the crossing grounds) is that
     # fact and not an omission.
     consumes=(
-        # EIGHT EDGES: five off the cache, three off commits -- one per
+        # NINE EDGES: six off the cache, three off commits -- one per
         # upstream step, which makes this the first entry to consume every
         # step before it. Shaped like landform (select-only candidates PLUS
         # drawing), sourced like roads (every upstream decision is a
-        # committed edge).
+        # committed edge). The sixth cache edge (exclusion_zones, below) is
+        # not an input to the generate at all: it is the canopy CROSSING
+        # GROUND, consumed so the payload can ship it.
         Consumed(
             name="boundary_coordinates",
             source=SOURCE_CACHE,
@@ -1462,6 +1464,27 @@ TREES = StepDefinition(
                 "geometry, no network, and every *_data_available flag "
                 "truthfully True. A None (a partial ParcelData) is forwarded "
                 "as itself and the entry point fetches as before."
+            ),
+        ),
+        Consumed(
+            name="exclusion_zones",
+            source=SOURCE_CACHE,
+            cache_path="exclusion_zones",
+            # NOT FORWARDED -- see Consumed's forward_as note. The tree
+            # generate does not read the exclusion gates (its canopy gate is
+            # its own, get_required_tree_root_zone_mask_utm); the CANOPY
+            # CROSSING GROUND below does, and it has to reach the payload.
+            forward_as=None,
+            why=(
+                "THE CANOPY CROSSING GROUND'S SOURCE, on the wire. The commit "
+                "contract's `canopy` ground is the session's exclusion gate "
+                "(CrossingGround.exclusion_layer), and the commit path reads "
+                "it off the context. The LAYERS PAYLOAD has to carry the same "
+                "gate as geometry_wgs84 so a drawn zone can be warned about "
+                "existing canopy WHILE IT IS DRAWN, not only when it is "
+                "committed -- and the payload builder sees only what this "
+                "entry consumes. Same cached object either way, so the "
+                "caution and the record are measured against one mask."
             ),
         ),
         Consumed(
@@ -1582,6 +1605,15 @@ TREES = StepDefinition(
         # mandatory server-side, so it is present on every session that
         # generated at all; the other three are committed geometry, always
         # known.
+        #
+        # ALL FOUR SHIP ON THE LAYERS PAYLOAD as `crossing_grounds`
+        # [{type, label, geometry_wgs84}] -- step_orchestrator.wire_crossing_
+        # grounds(), the same resolution the commit runs, in WGS84. The
+        # client cannot derive two of them (the road ground is the network's
+        # CELL FOOTPRINT, a width the LineStrings do not carry; the canopy is
+        # a session gate that is otherwise never on the wire), and shipping
+        # all four from one source is what keeps the caution while drawing
+        # and the crossing recorded at commit measured against one geometry.
         crossings=(
             CrossingGround(
                 type="production",

@@ -300,7 +300,19 @@ def _build_parcel_data(_boundary=None) -> ParcelData:
         erosion_factor=[],
         saturated_hydraulic_conductivity=[],
         soil_geometries=HYDRIC_GEOMETRIES,
-        water_features={"features": []},
+        # THE SHAPE hydrology_data.get_water_features_for_boundary() RETURNS,
+        # empty: no streams and no water bodies near this fixture. It was
+        # `{"features": []}`, a shape no reader of this field produces, and
+        # every consumer that read `["streams"]` off it raised a KeyError:
+        # road_corridors' floodplain union caught it (and logged "unexpected
+        # failure, not a network error" on every run) and went on to the
+        # hydric half unchanged, while tree_zone_candidates' stream union
+        # did NOT catch it -- so every trees generate through this harness,
+        # and through serve_test_backend.py on top of it, failed with the
+        # step's generic error before scoring. The value below changes no
+        # figure water or roads assert (section 14 measures that) and lets
+        # the fourth step run.
+        water_features={"streams": [], "water_bodies": []},
         farm_roads=FIXTURE_ROADS,
         climate_summary={},
         elevation_grid=[],
@@ -1535,5 +1547,93 @@ print(
     f"are closed fetches rather than paths that never ran."
 )
 
+
+# ======================================================================
+# 14. THE FOURTH STEP RUNS THROUGH THIS HARNESS
+# ======================================================================
+# serve_test_backend.py serves the real app inside THIS harness, and the
+# frontend's live suites drive every step through it -- so a step this
+# harness cannot run is a step nobody can test end to end. Trees could
+# not: _build_parcel_data()'s water_features carried a shape no fetch
+# produces (see the note there), and the tree scorer read `["streams"]` off
+# it. This section walks all four steps and reports the figures the other
+# suites assert, so the harness's water-features shape cannot quietly move
+# them again: the landform proposal count and the hydric crossing (sections
+# 1 and 6), the water survey zone counts per type and their dropped count,
+# the road network's length and served acres from the frontend's surveyed
+# access point A, and the trees candidates with all four crossing grounds.
+
+FRONTEND_ACCESS_A = [-79.9836992, 40.6434533]  # roads.test.jsx's ACCESS_A, [lon, lat]
+
+with Harness() as h:
+    s = Session()
+    landform_payload = s.generate("landform")
+    proposals = landform_payload["suggested_zones"]["features"]
+    hydric_zone = _drawn("drawn-hydric", HYDRIC_ZONE_RING)
+    provenance = {f["id"]: "generated" for f in proposals}
+    provenance["drawn-hydric"] = "user_added"
+    document = s.commit(_collection(proposals + [hydric_zone]), provenance, base_revision=0)
+    hydric_crossings = next(
+        f for f in document["steps"]["landform"]["features"]["features"] if f["id"] == "drawn-hydric"
+    )["properties"]["exclusion_crossings"]
+    assert [(c["type"], c["acres"]) for c in hydric_crossings] == [("hydric", 0.09)], hydric_crossings
+
+    water_payload = s.generate("water")
+    survey_zones = [
+        f for f in water_payload["survey_zones"]["features"]
+        if f["properties"]["layer"] in wire_translation.LAYER_SURVEY_ZONES
+    ]
+    per_type = {
+        kind: sum(1 for f in survey_zones if f["properties"]["survey_type"] == kind)
+        for kind in ("embankment", "excavated")
+    }
+    assert survey_zones, "the fixture must produce water survey zones"
+    s.commit(
+        _collection(survey_zones[:1]), {survey_zones[0]["id"]: "generated"}, base_revision=0, step_id="water"
+    )
+
+    roads_job = step_orchestrator.generate_step(
+        s.id, "roads", s.store, params={"access_point": FRONTEND_ACCESS_A},
+        fetch_cache=s.fetch_cache, cache=s.cache, runner=s.runner,
+    ).wait(timeout=600)
+    assert roads_job.status == job_runner.STATUS_DONE, (roads_job.error, roads_job.exception)
+    network = roads_job.result["payload"]["networks"][0]
+    assert network["network_found"], network["stop_reason"]
+    branches = [
+        f for f in roads_job.result["payload"]["road_corridors"]["features"]
+        if f["properties"]["network_id"] == network["network_id"]
+    ]
+    s.commit(
+        _collection(branches), {f["id"]: "generated" for f in branches}, base_revision=0,
+        step_id="roads", inputs={"access_points": [network["access_point"]]},
+    )
+
+    # THE STEP THIS SECTION EXISTS FOR.
+    trees_payload = s.generate("trees")
+    assert sorted(trees_payload) == ["crossing_grounds", "search_space", "summary", "tree_zones", "zones"], (
+        sorted(trees_payload)
+    )
+    candidates = trees_payload["tree_zones"]["features"]
+    grounds = trees_payload["crossing_grounds"]
+    assert [g["type"] for g in grounds] == ["production", "water", "road", "canopy"], [g["type"] for g in grounds]
+    for g in grounds:
+        assert set(g) == {"type", "label", "geometry_wgs84"}, sorted(g)
+        assert g["geometry_wgs84"]["type"] in ("Polygon", "MultiPolygon"), (g["type"], g["geometry_wgs84"]["type"])
+    assert trees_payload["summary"]["gates"] == {
+        "soil_marginality_data_available": True, "hydric_data_available": True, "stream_data_available": True,
+    }, trees_payload["summary"]["gates"]
+
+    print(
+        f"14. THE TREES STEP THROUGH THIS HARNESS: landform {len(proposals)} proposals and the drawn "
+        f"hydric zone recorded {[(c['type'], c['acres']) for c in hydric_crossings]}; water "
+        f"{per_type['embankment']} embankment + {per_type['excavated']} excavated survey zones, "
+        f"{water_payload['summary'].get('dropped_count')} dropped; the road network from access point A "
+        f"{network['access']['total_length_ft']} ft over {network['access']['branch_count']} branches "
+        f"serving {network['access']['served_acres']} acres (floodplain available "
+        f"{network['determination']['floodplain_data_available']}, fallback "
+        f"{network['determination']['floodplain_data_is_fallback']}); trees generated "
+        f"{len(candidates)} candidate(s) scoring {[r['score'] for r in trees_payload['zones']]} with all three "
+        f"gates True and the four crossing grounds {[g['type'] for g in grounds]} on the payload."
+    )
 
 print("\nAll step_commit checks passed.")
