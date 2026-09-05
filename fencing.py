@@ -136,7 +136,7 @@ from dem_data import get_dem_for_boundary
 from feature_schema import CONFIDENCE_HIGH, CONFIDENCE_MEDIUM, make_feature, make_feature_collection
 from hydrology_data import get_water_features_geojson
 from raster_grid import SQUARE_METERS_PER_ACRE
-from road_corridors import identify_road_corridor_candidates
+from road_corridors import NO_ROAD_CORRIDOR, identify_road_corridor_candidates
 from tree_zone_candidates import identify_tree_zone_candidates
 from water_suitability import fetch_and_select_optimal_water_zone
 
@@ -1002,6 +1002,17 @@ def identify_fencing(
         water_features_geojson = get_water_features_geojson(boundary_coordinates)
     if dem is None:
         dem = get_dem_for_boundary(boundary_coordinates)
+
+    # road_corridors.NO_ROAD_CORRIDOR is the EXPLICIT "the roads step already
+    # ran and selected no road" answer (see that constant's own docstring)
+    # -- what an EMPTY roads commit arrives as on the interactive path.
+    # Normalized back to None up front so every read below (the tree-zone
+    # self-compute's own `is None` guard, and the road footprint handed to
+    # the boundary fence) keeps None's existing "no corridor" meaning, and
+    # the nested road self-compute is SKIPPED. A bare None still
+    # self-computes exactly as before.
+    if selected_road_corridor is NO_ROAD_CORRIDOR:
+        selected_road_corridor = None
 
     if boundary_polygon_utm is None:
         boundary_xs, boundary_ys = warp_transform(

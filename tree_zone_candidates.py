@@ -257,7 +257,7 @@ from hydrology_data import get_water_features_for_boundary
 from production_area import compute_slope_percent, get_required_tree_root_zone_mask_utm
 from production_area_ceiling import identify_optimized_production_areas
 from raster_grid import SQUARE_METERS_PER_ACRE, binary_dilate, cell_union_footprint, connected_components, pixel_center_xy
-from road_corridors import identify_road_corridor_candidates
+from road_corridors import NO_ROAD_CORRIDOR, identify_road_corridor_candidates
 from soil_data import (
     coordinates_to_wkt_polygon,
     get_farmland_classification_for_polygon,
@@ -1002,6 +1002,20 @@ def _fetch_prime_farmland_union(boundary_coordinates: list[tuple[float, float]],
         return None
 
     geometries_by_mukey = get_soil_geometries_for_polygon(wkt_polygon)
+    return _prime_farmland_union_from_rows(classifications, geometries_by_mukey, dem)
+
+
+def _prime_farmland_union_from_rows(classifications: list, geometries_by_mukey: dict, dem: dict) -> Optional[object]:
+    """
+    The derive half of _fetch_prime_farmland_union(): the same union, from
+    farmland-classification rows and per-mukey geometry ALREADY IN HAND --
+    ParcelData.farmland_classification and ParcelData.soil_geometries on
+    the interactive path (see identify_tree_zone_candidates()'s
+    scoring_inputs). Pure geometry, no network.
+    """
+    prime_mukeys = {c["mukey"] for c in classifications if is_prime_farmland(c.get("farmland_classification"))}
+    if not prime_mukeys:
+        return None
     pieces = [
         shape(transform_geom("EPSG:4326", dem["crs"], geometries_by_mukey[mukey]))
         for mukey in prime_mukeys
@@ -1027,6 +1041,19 @@ def _fetch_hydric_soil_union(boundary_coordinates: list[tuple[float, float]], de
         return None
 
     geometries_by_mukey = get_soil_geometries_for_polygon(wkt_polygon)
+    return _hydric_soil_union_from_rows(soil_components, geometries_by_mukey, dem)
+
+
+def _hydric_soil_union_from_rows(soil_components: list, geometries_by_mukey: dict, dem: dict) -> Optional[object]:
+    """
+    The derive half of _fetch_hydric_soil_union(): the same union, from
+    component rows and per-mukey geometry ALREADY IN HAND (ParcelData.
+    soil_components / soil_geometries on the interactive path). Pure
+    geometry, no network.
+    """
+    disqualifying_mukeys = hydric_disqualifying_mukeys(soil_components)
+    if not disqualifying_mukeys:
+        return None
     pieces = [
         shape(transform_geom("EPSG:4326", dem["crs"], geometries_by_mukey[mukey]))
         for mukey in disqualifying_mukeys
@@ -1043,6 +1070,16 @@ def _fetch_stream_union(boundary_coordinates: list[tuple[float, float]], dem: di
     dem['crs']. Returns None if no streams were found nearby.
     """
     water_features = get_water_features_for_boundary(boundary_coordinates)
+    return _stream_union_from_features(water_features, dem)
+
+
+def _stream_union_from_features(water_features: dict, dem: dict) -> Optional[object]:
+    """
+    The derive half of _fetch_stream_union(): the same union, from the
+    hydrology_data.get_water_features_for_boundary() result ALREADY IN HAND
+    (ParcelData.water_features on the interactive path). Streams only, as
+    before. Pure geometry, no network.
+    """
     pieces = []
     for feature in water_features["streams"]:
         geometry = feature.get("geometry")
@@ -1050,6 +1087,37 @@ def _fetch_stream_union(boundary_coordinates: list[tuple[float, float]], dem: di
             continue
         pieces.append(shape(transform_geom("EPSG:4326", dem["crs"], geometry)))
     return unary_union(pieces) if pieces else None
+
+
+def scoring_inputs_for_parcel_data(parcel_data) -> Optional[dict]:
+    """
+    A ParcelData -> identify_tree_zone_candidates()'s `scoring_inputs`
+    override, or None.
+
+    ALL FOUR LAYERS OR NONE. The three Step 2 factors degrade independently
+    on the FETCH path, but a ParcelData is fetched under Layer 1's hard-fail
+    contract, so a present ParcelData carries every layer or was never
+    built; a partial one (a test double, a future optional layer) is a
+    different fact and must not be dressed up as a complete fetch -- so it
+    yields None ("not supplied") and the entry point fetches for itself,
+    with its documented per-factor degradation.
+
+    HERE RATHER THAN IN THE STEP REGISTRY, for water_survey_areas.soil_
+    inputs_for_parcel_data()'s reason: a registry cache_path names ONE
+    attribute and this override is four, and the rule that says which four
+    belongs with the function that reads them. It reads a ParcelData and
+    builds a dict -- no fetch, no computation; the derivations run inside
+    the entry point, where the fetch path's own run.
+    """
+    layers = {
+        "farmland_classification": getattr(parcel_data, "farmland_classification", None),
+        "soil_components": getattr(parcel_data, "soil_components", None),
+        "soil_geometries": getattr(parcel_data, "soil_geometries", None),
+        "water_features": getattr(parcel_data, "water_features", None),
+    }
+    if any(value is None for value in layers.values()):
+        return None
+    return layers
 
 
 def _data_availability_note(
@@ -1314,6 +1382,7 @@ def identify_tree_zone_candidates(
     hydric_floodplain_union=None,
     floodplain_data_is_fallback: Optional[bool] = None,
     canopy_height: Optional[dict] = None,
+    scoring_inputs: Optional[dict] = None,
     **score_kwargs,
 ) -> dict:
     """
@@ -1379,7 +1448,15 @@ def identify_tree_zone_candidates(
     before); once resolved, the identify_road_corridor_candidates() call
     below forwards the same explicit form (re-wrapping a resolved None as
     NO_WATER_ZONE) so that nested call never re-runs the water pipeline
-    either. valleys is a pure pass-through convenience: it
+    either. selected_road_corridor likewise ALSO accepts road_corridors.
+    NO_ROAD_CORRIDOR -- the explicit "the roads step already ran and
+    selected no road" answer (see that constant's own docstring, and
+    NO_WATER_ZONE's for the trap both exist to close): it is normalized
+    back to None here and the road self-compute is SKIPPED, unlike a bare
+    None, which is indistinguishable from "not supplied" and still routes
+    a whole network as before -- a network that would then be claimed
+    ground here, overriding a user's deliberate "no road" decision without
+    an error anywhere. valleys is a pure pass-through convenience: it
     is forwarded as-is (including None) to the identify_water_suitability()/
     identify_road_corridor_candidates() calls below, which already have
     their own correct None-falls-back-to-self-compute handling for it --
@@ -1403,6 +1480,22 @@ def identify_tree_zone_candidates(
     tree_root_zone_mask_utm itself is still always computed here (at this
     module's own TREE_ZONE_CANOPY_BUFFER_METERS), never passed in, a
     deliberate separate scope decision.
+
+    scoring_inputs is an optional pre-fetched override for Step 2's THREE
+    soil/stream fetches -- the same four ParcelData layers those fetches
+    would otherwise pull from SSURGO and NHD themselves, assembled by
+    scoring_inputs_for_parcel_data() (the step registry's `combine` for
+    the trees entry's parcel_data edge). When supplied, the prime-farmland,
+    hydric-soil and stream unions are DERIVED from those rows by the same
+    three helpers the fetch path calls after ITS fetch returns, so the
+    factor geometry is identical either way and no network is touched;
+    every *_data_available flag is then True, because ParcelData's
+    hard-fail contract means a layer that is present was fetched
+    successfully. When None (the default, and every standalone caller) the
+    three fetches run exactly as before, each degrading independently.
+    This changes what is FETCHED, never what is scored: the unions reach
+    score_tree_search_space() through the same parameters carrying the
+    same geometry.
     """
     if dem is None:
         dem = get_dem_for_boundary(boundary_coordinates)
@@ -1463,7 +1556,19 @@ def identify_tree_zone_candidates(
     # generate_full_report.py). None here degrades the same clean way
     # identify_road_corridor_candidates() itself already handles a missing
     # anchor: no road routes, not an error.
-    if selected_road_corridor is None:
+    #
+    # road_corridors.NO_ROAD_CORRIDOR is the EXPLICIT "the roads step
+    # already ran and selected no road" answer (see that constant's own
+    # docstring) AND the answer an EMPTY roads commit arrives as: reuse it
+    # (normalized back to None -- everything below keeps None's existing
+    # "no road" meaning, and the `if selected_road_corridor` guard on the
+    # exclusion polygon below sees the None, never the sentinel) rather
+    # than treating it as "not supplied" and routing a whole network the
+    # user decided against. A bare None still self-computes exactly as
+    # before.
+    if selected_road_corridor is NO_ROAD_CORRIDOR:
+        selected_road_corridor = None
+    elif selected_road_corridor is None:
         road_result = identify_road_corridor_candidates(
             boundary_coordinates,
             anchor_lon_lat=anchor_lon_lat,
@@ -1530,24 +1635,38 @@ def identify_tree_zone_candidates(
     # several optional fetches). ---
     prime_farmland_union: Optional[object] = None
     prime_farmland_data_available = True
-    try:
-        prime_farmland_union = _fetch_prime_farmland_union(boundary_coordinates, dem)
-    except Exception:
-        prime_farmland_data_available = False
-
     hydric_union: Optional[object] = None
     hydric_data_available = True
-    try:
-        hydric_union = _fetch_hydric_soil_union(boundary_coordinates, dem)
-    except Exception:
-        hydric_data_available = False
-
     stream_union: Optional[object] = None
     stream_data_available = True
-    try:
-        stream_union = _fetch_stream_union(boundary_coordinates, dem)
-    except Exception:
-        stream_data_available = False
+    if scoring_inputs is not None:
+        # THE CACHE'S OWN ROWS, through the same derivations the fetch path
+        # runs on what it fetched (see the docstring's scoring_inputs
+        # paragraph). No try/except: these are pure geometry over rows
+        # already in hand, and an exception here is a programming error to
+        # see, not a fetch outage to degrade on.
+        prime_farmland_union = _prime_farmland_union_from_rows(
+            scoring_inputs["farmland_classification"], scoring_inputs["soil_geometries"], dem
+        )
+        hydric_union = _hydric_soil_union_from_rows(
+            scoring_inputs["soil_components"], scoring_inputs["soil_geometries"], dem
+        )
+        stream_union = _stream_union_from_features(scoring_inputs["water_features"], dem)
+    else:
+        try:
+            prime_farmland_union = _fetch_prime_farmland_union(boundary_coordinates, dem)
+        except Exception:
+            prime_farmland_data_available = False
+
+        try:
+            hydric_union = _fetch_hydric_soil_union(boundary_coordinates, dem)
+        except Exception:
+            hydric_data_available = False
+
+        try:
+            stream_union = _fetch_stream_union(boundary_coordinates, dem)
+        except Exception:
+            stream_data_available = False
 
     patches = score_tree_search_space(
         dem,

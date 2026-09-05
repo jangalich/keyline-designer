@@ -1101,10 +1101,10 @@ with Harness() as h:
 
     # A REAL step whose registry entry is not written yet. Same status --
     # this URL names no resource either -- but the message tells them apart,
-    # which is get_step()'s own contract. "trees", not "water" or "roads":
-    # both HAVE entries as of their branches, and ask different questions of
-    # this surface -- see the 409 below.
-    unregistered = c.generate(session_id, step_id="trees")
+    # which is get_step()'s own contract. "structures", not "water", "roads"
+    # or "trees": all three HAVE entries as of their branches, and ask
+    # different questions of this surface -- see the 409 below.
+    unregistered = c.generate(session_id, step_id="structures")
     assert unregistered.status_code == 404, unregistered.get_json()
     assert "no registry entry yet" in unregistered.get_json()["error"], (
         unregistered.get_json()

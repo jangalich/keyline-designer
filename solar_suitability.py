@@ -204,7 +204,7 @@ from farm_roads_data import get_farm_roads_for_boundary
 from production_area import get_required_tree_root_zone_mask_utm
 from production_area_ceiling import identify_optimized_production_areas
 from raster_grid import SQUARE_METERS_PER_ACRE, pixel_center_xy
-from road_corridors import POND_ZONE_EXCLUSION_BUFFER_METERS, identify_road_corridor_candidates
+from road_corridors import NO_ROAD_CORRIDOR, POND_ZONE_EXCLUSION_BUFFER_METERS, identify_road_corridor_candidates
 from soil_data import coordinates_to_wkt_polygon, get_farmland_classification_for_polygon, is_prime_farmland
 from terrain_metrics import aspect_score, aspect_to_compass_label, compute_shading_score, compute_slope_and_aspect
 from tree_zone_candidates import identify_tree_zone_candidates
@@ -1347,8 +1347,18 @@ def identify_solar_candidate_zones(
     # convention every other override in this function uses) and still
     # self-computes -- the Tier 1/Tier 2 scoring branching below is
     # unaffected either way, since it already treats a self-computed None
-    # (no corridor exists) and any other None identically. ---
-    if selected_road_corridor is None:
+    # (no corridor exists) and any other None identically.
+    #
+    # road_corridors.NO_ROAD_CORRIDOR is the EXPLICIT "the roads step
+    # already ran and selected no road" answer (see that constant's own
+    # docstring) -- the value an EMPTY roads commit arrives as on the
+    # interactive path. Normalized back to None here (everything below,
+    # Tier 1's skip and Tier 2's fallback included, keeps None's existing
+    # "no corridor exists" meaning) and the self-compute is SKIPPED, exactly
+    # as NO_WATER_ZONE is handled above. A bare None still self-computes. ---
+    if selected_road_corridor is NO_ROAD_CORRIDOR:
+        selected_road_corridor = None
+    elif selected_road_corridor is None:
         corridor_result = identify_road_corridor_candidates(
             boundary_coordinates,
             anchor_lon_lat=anchor_lon_lat,
