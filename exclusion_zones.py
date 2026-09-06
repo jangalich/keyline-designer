@@ -427,7 +427,7 @@ are defensible and close to inert. Neither is where the risk lives."""
 ELIGIBLE_UNION_SIMPLIFY_TOLERANCE_CELLS = 1.0
 """Angular simplify tolerance for the eligible union, in DEM CELLS --
 multiplied by the DEM's own cell size at the point of use, the same pattern
-render_layout_map.PRODUCTION_FILL_SIMPLIFY_TOLERANCE_CELLS uses, so it stays
+display_outline.DISPLAY_OUTLINE_SIMPLIFY_TOLERANCE_CELLS uses, so it stays
 "one cell" at any resolution. A metres constant would hardcode the grid.
 
 WHAT THIS BUYS, MEASURED (diagnose_eligible_union_staircase.py, two
