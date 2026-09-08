@@ -602,7 +602,7 @@ print(
 # --- 1 [test 1]. THE REGISTRY ENTRY ----------------------------------
 
 step_registry.validate_registry()
-assert step_registry.registered_steps() == ("landform", "water", "roads", "trees"), step_registry.registered_steps()
+assert step_registry.registered_steps() == ("landform", "water", "roads", "trees", "structures"), step_registry.registered_steps()
 ROADS = step_registry.get_step("roads")
 
 assert ROADS.generate == "road_corridors.identify_road_corridor_candidates"
@@ -694,10 +694,10 @@ for _c in ROADS.consumes:
 assert _access.parameter in _signature
 
 # THE CASCADE EDGES, read off the declarations.
-assert step_registry.dependents_of("water") == ("roads", "trees")
-assert step_registry.dependents_of("landform") == ("water", "roads", "trees")
-assert step_registry.transitive_dependents("landform") == ("water", "roads", "trees")
-assert step_registry.transitive_dependents("roads") == ("trees",), (
+assert step_registry.dependents_of("water") == ("roads", "trees", "structures")
+assert step_registry.dependents_of("landform") == ("water", "roads", "trees", "structures")
+assert step_registry.transitive_dependents("landform") == ("water", "roads", "trees", "structures")
+assert step_registry.transitive_dependents("roads") == ("trees", "structures"), (
     "trees consumes the roads commit as of the trees branch"
 )
 

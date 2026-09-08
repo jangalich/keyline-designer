@@ -62,6 +62,14 @@ COMMIT AND REOPEN LIVE HERE TOO, and complete the per-step verb set:
     reopen_step(session_id, step_id, store)                        -> document
     step_payload(session_id, step_id, store)                       -> payload
     discard_candidate(session_id, step_id, store, params)          -> document
+    score_placed_feature(session_id, step_id, store, params)       -> Feature
+
+PLACED FEATURES (the structures entry's step_registry.Placement). A step
+that declares one lets its user place a feature and have it MEASURED
+against the step's current proposals before any commit: score_placed_
+feature() reads the entry's declared scorer and wire builder, checks the
+input's shape as a user input's is checked, and returns the Feature the
+client commits as "user_added". It writes nothing. See that verb.
 
 ACCUMULATING STEPS (the roads entry's step_registry.Accumulation). Every
 verb above still reads the registry rather than a step id, but a step that
@@ -1359,6 +1367,109 @@ def step_payload(
 
 
 # ======================================================================
+# Scoring a placed feature
+# ======================================================================
+
+
+def score_placed_feature(
+    session_id: str,
+    step_id: str,
+    store,
+    params: Optional[dict] = None,
+    fetch_cache: Optional[session_cache.FetchCache] = None,
+    cache: Optional[session_cache.SessionCache] = None,
+) -> dict:
+    """
+    Measure a feature the user PLACED, against the step's current
+    proposals, and return the Feature they can commit -- the sixth verb,
+    and the first that is neither a write nor a read of the document.
+
+        score_placed_feature(session_id, step_id, store, params) -> Feature
+
+    A READ, NOT A WRITE. Nothing is persisted: the placed site holds no
+    slot, the document is not touched, and the same point can be asked
+    about any number of times. What the caller gets is a Feature carrying
+    the full measurement set (for structures: the composite score, the
+    four factors, slope, aspect, the distances, and every hard gate's
+    outcome), with provenance left to the commit -- the client sends it
+    back as "user_added" beside whatever generated candidates it selects,
+    and CommitContract.max_user_added is where the ceiling on placed
+    features is enforced.
+
+    AGAINST THE STEP'S OWN CURRENT RUN, which is why the step must be
+    `generated`: the scorer measures the point against the same production
+    ground, water exclusion, road tier, canopy mask and tree-zone exclusion
+    the generated candidates were measured against (the run's own
+    `run_inputs`), and that run is the cached generate result. A
+    not_started step has no run to measure against; a committed one has
+    a decision, and reopen is the verb that gives its run back. On a
+    cache miss the run is regenerated, transparently, for step_payload()'s
+    reason.
+
+    NOTHING HERE NAMES A STEP. The scorer, the wire builder, the input's
+    name and its shape all come off the entry's Placement declaration;
+    the shape check is the same one a user input gets. A step that
+    declares no placement is refused (StepOrchestrationError -> 400): its
+    user cannot place anything, and a client asking is a client with the
+    wrong step.
+
+    A point the scorer refuses -- off the parcel, or over no measurable
+    ground -- is a ValueError from it, re-raised as a
+    StepOrchestrationError naming the input, so a transport reports it as
+    a 400 like every other bad-params case. Containment is the one hard
+    gate; everything else about the spot is measured and reported.
+    """
+    definition = step_registry.get_step(step_id)
+    placement = definition.placement
+    if placement is None:
+        raise StepOrchestrationError(
+            f"step '{step_id}' declares no placement; its user cannot place a "
+            f"feature to be scored"
+        )
+    params = dict(params or {})
+    unknown = sorted(set(params) - {placement.input})
+    if unknown:
+        raise StepOrchestrationError(
+            f"step '{step_id}' scores a placed '{placement.input}'; got unknown {unknown}"
+        )
+    if placement.input not in params:
+        raise StepOrchestrationError(
+            f"step '{step_id}' requires the placed '{placement.input}' to score"
+        )
+    value = _INPUT_SHAPE_CHECKS[placement.shape](
+        params[placement.input], f"step '{step_id}' placed '{placement.input}'"
+    )
+
+    document = store.get(session_id)
+    entry = document["steps"][step_id]
+    if entry["status"] != design_document.STATUS_GENERATED:
+        raise StepNotGeneratedError(step_id, entry["status"])
+
+    context = session_manager.get_session_context(
+        session_id, store, fetch_cache=fetch_cache, cache=cache
+    )
+    result = context.step_proposals.get(step_id)
+    if result is None:
+        run_generate(
+            session_id,
+            definition,
+            store,
+            validate_params(definition, entry.get("inputs")),
+            fetch_cache=fetch_cache,
+            cache=cache,
+        )
+        result = context.step_proposals[step_id]
+
+    try:
+        site = step_registry.resolve(placement.score)(value, result)
+    except ValueError as exc:
+        raise StepOrchestrationError(
+            f"step '{step_id}' placed '{placement.input}' was rejected: {exc}"
+        ) from exc
+    return step_registry.resolve(placement.feature)(site, result)
+
+
+# ======================================================================
 # Outbound translation: the landform payload
 # ======================================================================
 
@@ -1684,6 +1795,104 @@ def build_trees_payload(result: dict, assembled: dict) -> dict:
     }
 
 
+def build_structures_payload(result: dict, assembled: dict) -> dict:
+    """
+    The structures step's wire payload: the ranked candidates the user
+    selects from (and places beside), plus the step-level block the panel
+    reads.
+
+    THE WATER SHAPE. A solar candidate's wire geometry IS its clipped
+    footprint (find_candidate_solar_zones() records the same polygon under
+    polygon_utm and emits its geometry_wgs84), so there is nothing to swap
+    and nothing that can vanish -- the collection is carried through as the
+    entry point built it, under the run's own confidence notes. The two
+    halves are the same two:
+
+      PER-FEATURE -> structure_sites_to_feature_collection(), already on
+        every feature: rank, the composite, THE FOUR FACTOR SCORES (on the
+        wire since this entry -- see that function), slope, aspect, the
+        three distances in feet, the production relationship,
+        road_proximity_source (which tier answered), the constraints the
+        candidate is guaranteed to satisfy, prime farmland when checked,
+        and site_origin.
+      STEP-LEVEL -> build_narrative_data(), already on the result: the
+        gate accounting (including road_proximity_source, again -- it is
+        the one value a client needs to say which tier the user got) and
+        the selected site's own digest. Passed whole under `summary`,
+        with three things beside it that the narrative does not carry:
+        the two caps (three generated, from solar's own MAX_CANDIDATES;
+        two placed, from this entry's contract), the four run-level flags
+        surfaced by this branch, and the four factor weights, for
+        trees' reason -- a panel that explains a score without hardcoding
+        a weight.
+
+    `sites` IS A PROJECTION OF THE FEATURES, NOT A SECOND MEASUREMENT. The
+    narrative has no per-candidate rows (its winner-only convention), and
+    a payload function is the wrong place to compose one from native
+    values it cannot see the units of. So each row is read STRAIGHT OFF
+    its feature's properties -- the same numbers, the same units, keyed by
+    the wire feature id -- for a panel that wants a list rather than a
+    map. Nothing is converted, defaulted or rounded here.
+
+    `placement` tells the client how to ask for a placed site to be
+    scored: the params key and its shape, off the entry's own Placement
+    declaration, so the client does not spell the parameter for itself.
+
+    NO crossing_grounds KEY. The contract declares crossings absent
+    (step_registry.CROSSINGS_NOT_RECORDED); wire_crossing_grounds()
+    returns [] for it, and an empty list under that key would invite a
+    client to draw cautions this step does not make.
+
+    `assembled` is unread: everything this payload needs is on `result`.
+    """
+    max_candidates = step_registry.resolve("solar_suitability.MAX_CANDIDATES")
+    weights = {
+        "slope": step_registry.resolve("solar_suitability.SLOPE_SCORE_WEIGHT"),
+        "aspect": step_registry.resolve("solar_suitability.ASPECT_SCORE_WEIGHT"),
+        "shading": step_registry.resolve("solar_suitability.SHADING_SCORE_WEIGHT"),
+        "production_proximity": step_registry.resolve(
+            "solar_suitability.PRODUCTION_PROXIMITY_SCORE_WEIGHT"
+        ),
+    }
+    definition = step_registry.get_step("structures")
+    narrative = result["narrative_data"]
+    features = result["zones_geojson"]["features"]
+
+    row_fields = (
+        "rank", "suitability_score", "slope_score", "aspect_score", "shading_score",
+        "production_proximity_score", "avg_slope_pct", "aspect", "footprint_area_acres",
+        "distance_to_road_ft", "road_proximity_source", "distance_to_production_zone_ft",
+        "production_zone_relationship", "distance_to_water_zone_ft", "prime_farmland_conflict",
+        "site_origin",
+    )
+    sites = [
+        {
+            "feature_id": feature["id"],
+            **{key: feature["properties"].get(key) for key in row_fields},
+        }
+        for feature in features
+    ]
+
+    return {
+        "structure_sites": result["zones_geojson"],
+        "sites": sites,
+        "summary": {
+            **narrative,
+            "max_candidates": max_candidates,
+            "max_placed": definition.commit_contract.max_user_added,
+            "run_flags": dict(result["run_flags"]),
+            "factor_weights_pct": {
+                name: round(weight * 100, 1) for name, weight in weights.items()
+            },
+        },
+        "placement": {
+            "input": definition.placement.input,
+            "shape": definition.placement.shape,
+            "max_placed": definition.commit_contract.max_user_added,
+        },
+    }
+
+
 def _with_display_only_outlines(collection: dict, patches: list, dem: dict) -> dict:
     """
     `collection` with every feature carrying its patch's DISPLAY-ONLY smoothed
@@ -1978,9 +2187,16 @@ def commit_step(
     # a "no tree zones" decision on a session whose upstream is uncommitted
     # for the sake of a measurement nothing would read.
     grounds = crossing_grounds(definition, context, document) if features["features"] else []
-    annotated = commit_validation.annotate_crossings(
-        features["features"], check.rehydrated, grounds
-    )
+    # A STEP THAT RECORDS NO CROSSINGS (crossing_grounds() -> None) stores
+    # the features exactly as they arrived: no exclusion_crossings key at
+    # all, which is the statement "not recorded" -- distinct from `[]`,
+    # "checked, crosses nothing". See step_registry.CROSSINGS_NOT_RECORDED.
+    if grounds is None:
+        annotated = {"type": "FeatureCollection", "features": list(features["features"])}
+    else:
+        annotated = commit_validation.annotate_crossings(
+            features["features"], check.rehydrated, grounds
+        )
 
     # 3. THE WRITE.
     updated = design_document.commit_step(
@@ -2050,6 +2266,11 @@ def crossing_grounds(definition, context, document) -> list:
     payload shipped to the client as geometry_wgs84.
     """
     contract = definition.commit_contract
+    # NONE, NOT [], for a contract that records no crossings: the commit
+    # path reads None as "write no key", where [] would annotate every
+    # feature with an empty crossing list.
+    if not step_registry.records_crossings(contract):
+        return None
     if contract.crossings is None:
         return commit_validation.exclusion_grounds(context.exclusion_zones)
     assembled = assemble_consumes(definition, context, document)
@@ -2079,6 +2300,8 @@ def resolve_crossing_grounds(definition, assembled: dict, exclusion_result) -> l
     and a crossing recorded on commit are measured against one mask.
     """
     contract = definition.commit_contract
+    if not step_registry.records_crossings(contract):
+        return []
     if contract.crossings is None:
         return commit_validation.exclusion_grounds(exclusion_result)
 
@@ -2143,7 +2366,7 @@ def wire_crossing_grounds(definition, assembled: dict) -> list:
     from shapely.geometry import mapping
 
     contract = definition.commit_contract
-    if contract.crossings is None:
+    if contract.crossings is None or not step_registry.records_crossings(contract):
         return []
     exclusion_result = None
     if any(ground.exclusion_layer for ground in contract.crossings):

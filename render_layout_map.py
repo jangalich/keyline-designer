@@ -1498,6 +1498,16 @@ def fetch_layout_layers(
     those flags forward on its result; that is a change to a KSOP module's
     return contract, out of this branch's scope, and flagged rather than
     made.
+
+    THE STRUCTURES REGISTRY BRANCH MADE THAT FIX: identify_solar_candidate_
+    zones() now returns the flags as `run_flags`, exactly candidates_to_
+    geojson()'s keyword set, and test_structures_step.py asserts that the
+    rank-1 Feature rebuilt from selected_structure_site under them equals
+    this call's own zones_geojson feature 0. This function could therefore
+    read structure_site from context now; it is deliberately NOT changed
+    on that branch (reported, not done), so the paragraph above still
+    describes what this code does, and the paragraph you are reading says
+    why it no longer has to.
     """
     if parcel_data is None:
         parcel_data = fetch_parcel_data(boundary_coordinates)

@@ -39,13 +39,37 @@ and the document's is the one the frontend, the cascade and the reset all
 already read. registered_steps() filters that constant; it does not restate
 it.
 
-PARTIALLY POPULATED, ON PURPOSE. FOUR entries today: landform, water,
-roads and trees. structures and fencing are named in STEP_ORDER and absent
+PARTIALLY POPULATED, ON PURPOSE. FIVE entries today: landform, water,
+roads, trees and structures. fencing is named in STEP_ORDER and absent
 here, and the difference is meaningful rather than an oversight --
 registered_steps() returns what can actually be generated, and asking for
 an unregistered step raises with the list of what is registered. The parity
 test against build_pipeline_context() belongs at the end of stage 3, when
 all six exist and there is something to compare.
+
+THE FIFTH ENTRY -- the first POINT layer, and the first whose user-authored
+feature is SCORED -- found three things the schema could not say, and each
+became a declaration rather than a branch:
+
+  A USER MAY PLACE A FEATURE THE SERVER MEASURES. Landform and trees let
+  the user DRAW a zone and deliberately leave it unscored. Structures lets
+  the user PLACE a site and scores it with the full candidate measurement
+  set, on request, before any commit (see Placement, and solar_
+  suitability.score_placed_structure_site() for why the two steps differ).
+  `StepDefinition.placement` declares the scorer, the wire builder and the
+  input's shape; step_orchestrator.score_placed_feature() is the verb.
+
+  A CAP ON WHAT THE USER ADDS, SEPARATE FROM THE COMMIT'S SIZE. Any number
+  of structure sites may be committed, but at most TWO of them may be the
+  user's own. `CommitContract.max_user_added` counts features by provenance
+  and is enforced server-side in commit_validation.check_commit().
+
+  A STEP THAT RECORDS NO CROSSINGS AT ALL. `crossings=None` means the
+  exclusion gates and `crossings=()` would mean "declared, resolves to
+  nothing" -- neither says ABSENT. `CROSSINGS_NOT_RECORDED` does: the
+  commit path writes no exclusion_crossings key on a structure site,
+  because the information the user wants about a placed site is its
+  measurement set, not what it overlaps.
 
 THE FOURTH ENTRY -- the second with DRAWING -- found two things the schema
 had left implicit, and both became declarations on CommitContract rather
@@ -337,6 +361,24 @@ class LayerFailure:
 COMMIT_MUST_LIE_WITHIN = "parcel_boundary"
 
 
+# CommitContract.crossings' third value: NO crossings are recorded for this
+# step, at all. Distinct from None (the session's exclusion gates -- the
+# default every polygon step had before trees) and from an empty tuple (a
+# declared ground list that happens to resolve to nothing, which the commit
+# path would still annotate as `exclusion_crossings: []`, "checked, crosses
+# nothing"). A step declaring this sentinel gets NO exclusion_crossings key
+# on its committed features and ships no crossing_grounds on its payload.
+# The structures entry is the reason it exists; see its contract.
+CROSSINGS_NOT_RECORDED = object()
+
+
+def records_crossings(contract) -> bool:
+    """Whether a commit to this contract records crossings at all -- False
+    only for CROSSINGS_NOT_RECORDED. The one place the sentinel is tested,
+    so the orchestrator and the payload builders ask one question."""
+    return contract.crossings is not CROSSINGS_NOT_RECORDED
+
+
 @dataclass(frozen=True)
 class CommitContract:
     """
@@ -420,9 +462,20 @@ class CommitContract:
     # WHAT A COMMITTED FEATURE'S CROSSINGS ARE MEASURED AGAINST -- a tuple of
     # CrossingGround, or None for the session's exclusion gates (every gate
     # with data, in exclusion_zones.LAYER_ORDER -- the behaviour landform,
-    # water and roads have always had). See CrossingGround, and the module
-    # docstring's THE FOURTH ENTRY note for why this is data.
+    # water and roads have always had), or CROSSINGS_NOT_RECORDED for a step
+    # that records none (structures). See CrossingGround, the sentinel's own
+    # comment, and the module docstring's THE FOURTH and FIFTH ENTRY notes
+    # for why this is data.
     crossings: Optional[tuple] = None
+    # THE CEILING ON USER-AUTHORED FEATURES IN ONE COMMIT, counted by
+    # provenance ("user_added"), or None for no ceiling -- landform and
+    # trees, where a user may draw as many zones as they like. Distinct from
+    # max_features, which bounds the whole commit: structures bounds
+    # NEITHER the commit (any number of sites may be committed) NOR the
+    # selected candidates (there are at most three to select) but only the
+    # sites the user placed, at two. Enforced server-side in commit_
+    # validation.check_commit(), never only in the UI.
+    max_user_added: Optional[int] = None
     # THE UNIT THE COUNT BOUNDS APPLY TO, when it is not the feature. None
     # for landform and water: each committed feature is its own unit and
     # min/max_features count features. The roads entry sets it to
@@ -635,6 +688,50 @@ class Accumulation:
 
 
 @dataclass(frozen=True)
+class Placement:
+    """
+    A step whose user may PLACE a feature and have the server MEASURE it,
+    before any commit, with the same instrument that measured the generated
+    candidates.
+
+    WHAT IT IS NOT. Not drawing: a drawn zone (landform, trees) is a
+    polygon the user authors and the server records unscored, because those
+    steps' scorers rank REGIONS competing for a slot and a drawn region
+    scoring below the floor would read as scored badly rather than
+    unscored. Not a user input to generate (roads' access point): the
+    generate does not take the placed site, the user places it AFTER
+    generating, against the run the generate produced. It is a third kind
+    of user authorship, and the structures entry is the first to need it.
+
+    input      the key the client sends under `params` (the placed point).
+    shape      its shape, one of VALID_INPUT_SHAPES -- checked and
+               normalised by the orchestrator exactly as a user input is.
+    score      dotted path of the scorer, called as
+               score(value, result) where `result` is the step's OWN
+               cached generate result (SessionContext.step_proposals),
+               returning the internal site dict. It raises ValueError for
+               a point that cannot be scored -- off the parcel, or no
+               measurable ground -- and the orchestrator reports that as a
+               400. Pure and local by contract: no network.
+    feature    dotted path of the wire builder, called as
+               feature(site, result), returning the Feature the client
+               commits (with provenance "user_added").
+    why        prose.
+
+    THE CAP IS NOT HERE. A placed site holds nothing server-side until it
+    is committed -- scoring is a read, and the same point can be asked
+    about any number of times -- so the ceiling on placed sites is a
+    commit rule: CommitContract.max_user_added.
+    """
+
+    input: str
+    score: str
+    feature: str
+    shape: str = INPUT_SHAPE_LON_LAT
+    why: str = ""
+
+
+@dataclass(frozen=True)
 class PostCommitHook:
     """
     Something that must RE-RUN after a commit to this step lands, declared as
@@ -690,6 +787,11 @@ class StepDefinition:
     # PostCommitHooks, run in declaration order after a commit to this step
     # is persisted. See PostCommitHook for why this is data and not a branch.
     post_commit: tuple = ()
+    # None for a step whose user cannot place a feature to be scored; a
+    # Placement for one whose user can (structures). See Placement. The
+    # orchestrator's score_placed_feature() refuses a step that declares
+    # none -- a declaration, not a step id.
+    placement: Optional[Placement] = None
     # The key on this step's WIRE PAYLOAD holding its proposals as a
     # FeatureCollection.
     #
@@ -1658,11 +1760,300 @@ TREES = StepDefinition(
 )
 
 
+STRUCTURES = StepDefinition(
+    step_id="structures",
+    # WHAT STRUCTURES IS, so the edges below read correctly. A SMALL, FIXED-
+    # FOOTPRINT solar-generating building -- a barn or shed with rooftop
+    # panels -- sited as POINT candidates on a 25 m grid, each scored over
+    # its own ~0.1-acre pad (solar_suitability.py's module docstring). Up
+    # to MAX_CANDIDATES (three) generated candidates, SELECT-ONLY; plus up
+    # to TWO sites the user PLACES, each scored on request with the full
+    # candidate measurement set so it is rankable against the generated
+    # ones (see `placement` below). Any number may be committed. Production
+    # is a scored PREFERENCE here, not an exclusion (a shed sits at a field's
+    # edge without taking the field out of production); the committed water
+    # ground, existing canopy and the committed TREE ZONES are hard
+    # exclusions; the committed ROAD is the primary proximity source.
+    consumes=(
+        # TEN EDGES: six off the cache, four off commits -- one per upstream
+        # step, the first entry to consume all four. The cache edges are
+        # what keep a generate network-free: identify_solar_candidate_zones()
+        # FETCHES every override it does not get (a DEM, a canopy mask, the
+        # production optimiser, the water pipeline, a routing pass, the
+        # tree generate with its own SDA/NHD fetches, mapped roads, SSURGO
+        # farmland classes).
+        Consumed(
+            name="boundary_coordinates",
+            source=SOURCE_CACHE,
+            cache_path="boundary",
+            forward_as="boundary_coordinates",
+            why=(
+                "The parcel ring, read off the context for landform's reason: "
+                "a rebuilt context and a warm one supply the identical value."
+            ),
+        ),
+        Consumed(
+            name="dem",
+            source=SOURCE_CACHE,
+            cache_path="dem",
+            forward_as="dem",
+            why=(
+                "ParcelData's already-fetched elevation grid. Omitted, the "
+                "entry point calls get_dem_for_boundary() itself."
+            ),
+        ),
+        Consumed(
+            name="boundary_polygon_utm",
+            source=SOURCE_CACHE,
+            cache_path="boundary_polygon_utm",
+            forward_as="boundary_polygon_utm",
+            why=(
+                "The polygon every footprint is clipped to and every sample "
+                "point is tested against. Forwarded so the pads are measured "
+                "against the same polygon the exclusion masks and the four "
+                "upstream commits were."
+            ),
+        ),
+        Consumed(
+            name="canopy_height",
+            source=SOURCE_CACHE,
+            cache_path="parcel_data.canopy_height",
+            forward_as="canopy_height",
+            why=(
+                "ParcelData's already-fetched HAG layer, for the MANDATORY "
+                "canopy gate (get_required_tree_root_zone_mask_utm at "
+                "TREE_ROOT_ZONE_BUFFER_METERS -- fetch-or-raise, never "
+                "degrade: siting a building under trees nobody looked for is "
+                "a physical siting error, not a caveat). Without the override "
+                "every generate is a Planetary Computer fetch."
+            ),
+        ),
+        Consumed(
+            name="farm_roads",
+            source=SOURCE_CACHE,
+            cache_path="parcel_data.farm_roads",
+            forward_as="farm_roads",
+            why=(
+                "ParcelData's own mapped-road rows, for TIER 2 of the road-"
+                "proximity constraint: real mapped roads, used only when the "
+                "committed corridor yields no candidate -- which is exactly "
+                "the case of a roads step committed EMPTY. The entry point "
+                "fetched these on every Tier 2 run; the rows are the same "
+                "rows, already in hand. A cache closure the structures "
+                "branch added beyond its two named solar changes, reported "
+                "as such."
+            ),
+        ),
+        Consumed(
+            name="farmland_classifications",
+            source=SOURCE_CACHE,
+            cache_path="parcel_data.farmland_classification",
+            forward_as="farmland_classifications",
+            why=(
+                "ParcelData's own SSURGO farmland-class rows, for the "
+                "parcel-level prime-farmland flag every candidate carries. "
+                "The entry point issued an SDA query for them on every "
+                "generate; without the override a repeatable generate is a "
+                "network call. The other cache closure this branch added."
+            ),
+        ),
+        Consumed(
+            name="production_areas",
+            source=SOURCE_COMMITTED,
+            from_step="landform",
+            rehydrate="wire_translation.rehydrate_production_zones",
+            # [] is the explicit empty answer for a list override, as for
+            # trees: no production edge to be near, the proximity factor
+            # scores a neutral 0.5, and nothing self-computes.
+            empty_commit=None,
+            forward_as="production_areas",
+            why=(
+                "The production ground a site's edge-proximity PREFERENCE is "
+                "scored against (production_proximity_score, production_zone_"
+                "relationship, distance_to_production_zone). Must be the "
+                "ground the USER committed: the entry point's None path re-"
+                "runs the production optimiser and scores proximity to zones "
+                "the user may have rejected."
+            ),
+        ),
+        Consumed(
+            name="selected_water_zone",
+            source=SOURCE_COMMITTED,
+            from_step="water",
+            rehydrate="wire_translation.rehydrate_water_survey_zones",
+            combine="wire_translation.water_zone_union",
+            # THE SENTINEL'S THIRD PRODUCTION USE, and the entry point
+            # normalizes it at its own `if selected_water_zone is
+            # NO_WATER_ZONE` -- an empty water commit means no water
+            # exclusion, and the water pipeline does not re-run to invent
+            # one. Test 7 in test_structures_step.py counts it at zero.
+            empty_commit="water_suitability.NO_WATER_ZONE",
+            forward_as="selected_water_zone",
+            why=(
+                "The HARD, buffered water exclusion (POND_ZONE_EXCLUSION_"
+                "BUFFER_METERS): a structure cannot sit on or against pond-"
+                "siting ground. Reaches the entry point as the UNION of the "
+                "selection (it reads one field, render_fill_polygon_utm) or "
+                "as the sentinel."
+            ),
+        ),
+        Consumed(
+            name="selected_road_corridor",
+            source=SOURCE_COMMITTED,
+            from_step="roads",
+            rehydrate="wire_translation.rehydrate_road_networks",
+            combine="wire_translation.selected_road_network",
+            # THE ROAD SENTINEL'S SECOND USE. The entry point ALREADY
+            # normalizes NO_ROAD_CORRIDOR (the trees branch wired it, at
+            # its `if selected_road_corridor is NO_ROAD_CORRIDOR`); this
+            # entry asserts that still holds and adds nothing. An empty
+            # roads commit therefore reaches solar as "no corridor", Tier 1
+            # is skipped, and Tier 2 -- the mapped-road rows above --
+            # answers, with road_proximity_source saying so on the payload.
+            empty_commit="road_corridors.NO_ROAD_CORRIDOR",
+            forward_as="selected_road_corridor",
+            why=(
+                "TIER 1 of the road-proximity constraint: a candidate must "
+                "sit within ROAD_CORRIDOR_PROXIMITY_METERS of the committed "
+                "network's cell footprint. The entry point reads one network-"
+                "level field, cell_footprint_polygon_utm, which rehydrate_"
+                "road_networks() reconstructs; the None path would route a "
+                "whole network from no anchor."
+            ),
+        ),
+        Consumed(
+            name="tree_zone_patches",
+            source=SOURCE_COMMITTED,
+            from_step="trees",
+            rehydrate="wire_translation.rehydrate_tree_zones",
+            # THE NEW EDGE, and the reason identify_solar_candidate_zones()
+            # grew its tree_zone_patches= override on this branch. Without
+            # it the entry point REGENERATES tree candidates (a nested
+            # identify_tree_zone_candidates() call, with its own SDA and NHD
+            # fetches) and excludes ground the user never committed. Test 3
+            # counts the nested generate at ZERO with the override and at
+            # ONE without; test 4 compares the regenerated set against the
+            # committed one.
+            #
+            # NONE, AND THAT IS A CLAIM: an empty trees commit rehydrates to
+            # [], the rehydrator's own explicit empty, and the entry point
+            # reads [] as "checked, no planned tree ground" -- no exclusion
+            # polygon, tree_zone_exclusion_available stays True, nothing
+            # self-computes. WHAT TREES COMMITTED EMPTY MEANS TO SOLAR: there
+            # is nothing to stay clear of, which is the user's decision, not
+            # a gap in the data. No sentinel is needed for a list override.
+            empty_commit=None,
+            forward_as="tree_zone_patches",
+            why=(
+                "The HARD, buffered tree-zone exclusion (TREE_ZONE_STRUCTURE_"
+                "EXCLUSION_BUFFER_METERS around the union of every committed "
+                "patch's render_fill_polygon_utm). Must be the zones the USER "
+                "committed -- selected candidates and drawn zones alike -- "
+                "not a fresh ranking the user never saw."
+            ),
+        ),
+        # NOT DECLARED, DELIBERATELY: valleys, hydric_floodplain_union,
+        # floodplain_data_is_fallback and anchor_lon_lat. The entry point
+        # takes all four and forwards them ONLY into the nested water, road
+        # and tree self-computes that the committed edges above close; with
+        # those committed there is no code path on which any of them can
+        # change the output, so declaring them would be a false invalidation
+        # edge (the trees entry's own reasoning). Nor exclusion_zones: this
+        # step records no crossings, so nothing reads the gates.
+    ),
+    generate="solar_suitability.identify_solar_candidate_zones",
+    payload="step_orchestrator.build_structures_payload",
+    proposal_collection="structure_sites",
+    produces=(
+        # NOT PipelineContext's field name, and honestly so. The batch
+        # context holds `selected_structure_site` -- ONE dict, select_
+        # optimal_structure_site()'s rank-1 pick, because the batch path
+        # decides for the user. The interactive commit is ANY NUMBER of
+        # sites, selected and placed, and every consumer will take the
+        # list. Naming the list after the singular field would say the two
+        # paths carry the same value when they do not; the fencing entry,
+        # which consumes this, will declare the reduction it needs.
+        "structure_sites",
+    ),
+    commit_contract=CommitContract(
+        # wire_translation.LAYER_SOLAR, spelled out for the module
+        # docstring's reason and asserted equal in test_structures_step.py.
+        layers=("solar_infrastructure",),
+        # A generated candidate is its clipped footprint: a Polygon, or a
+        # MultiPolygon where a concave boundary cut the pad. A PLACED site
+        # is a POINT -- the first point geometry any contract accepts. The
+        # rehydrator derives the pad from the point.
+        geometry_types=("Polygon", "MultiPolygon", "Point"),
+        # ZERO IS A DECISION: "no structure on this parcel".
+        min_features=0,
+        # NO CEILING ON THE COMMIT. None, one or several sites may be
+        # committed; the ceilings are on the SOURCES -- three generated
+        # (solar_suitability.MAX_CANDIDATES) and two placed (below).
+        max_features=None,
+        # TWO PLACED SITES AT MOST, counted by provenance and enforced in
+        # commit_validation.check_commit(). See CommitContract.max_user_added.
+        max_user_added=2,
+        rehydrate="wire_translation.rehydrate_structure_sites",
+        # A PLACED site carries no "solar-candidate-<n>" id and the commit
+        # path allocates one, through this layer's own parser (the rank is
+        # a generated candidate's only identity).
+        internal_id_parameter="site_ids",
+        internal_id_parser="wire_translation.internal_structure_site_id",
+        requires_provenance=True,
+        # NO CROSSINGS, DECLARED AS ABSENT. A placed structure site reports
+        # no crossings: what the user wants to know about a spot is its
+        # measurement set -- score, slope, aspect, shading, distances, and
+        # which hard constraints it fails (properties.constraints_violated)
+        # -- not what it overlaps. An empty ground tuple would still write
+        # `exclusion_crossings: []` ("checked, crosses nothing") on every
+        # feature, which is a different statement; the sentinel writes no
+        # key at all.
+        crossings=CROSSINGS_NOT_RECORDED,
+    ),
+    # NONE. The candidates are computed over the whole parcel and the
+    # user's input is the selection plus what they place -- and a placed
+    # site is not an input to GENERATE, it is measured against a generate.
+    user_inputs=(),
+    placement=Placement(
+        input="site",
+        shape=INPUT_SHAPE_LON_LAT,
+        score="solar_suitability.score_placed_structure_site",
+        feature="wire_translation.placed_structure_site_to_feature",
+        why=(
+            "THE DELIBERATE DIVERGENCE FROM TREES. Trees does not score a "
+            "drawn zone; a zone below the floor would read as scored badly "
+            "rather than unscored. A placed structure site is the opposite "
+            "case: the user is not proposing a candidate that competes for "
+            "a ranking slot, they are saying 'I want the building here -- "
+            "tell me about this spot', and an honest score with every gate's "
+            "outcome beside it IS the answer. So it is measured by exactly "
+            "the code that measures a generated candidate, against the same "
+            "run, and carries the full measurement set including the "
+            "composite -- rankable against the generated three. Pure and "
+            "local: no network."
+        ),
+    ),
+    post_commit=(),
+    failure_layers=(
+        # Canopy is MANDATORY, at production's own buffer -- the one
+        # exception the entry point raises by name. Every other fetch it
+        # can reach degrades (and none runs with the ten edges supplied).
+        LayerFailure(
+            exception="canopy_height_data.CanopyCoverageIncompleteError",
+            layer="canopy",
+            label="tree canopy height",
+        ),
+    ),
+    generic_error="Structure sites could not be generated.",
+)
+
+
 STEP_REGISTRY = {
     LANDFORM.step_id: LANDFORM,
     WATER.step_id: WATER,
     ROADS.step_id: ROADS,
     TREES.step_id: TREES,
+    STRUCTURES.step_id: STRUCTURES,
 }
 
 
@@ -1902,10 +2293,30 @@ def validate_registry() -> None:
                 f"together or not at all"
             )
 
+        # THE USER-ADDED CEILING: a non-negative int, never above the
+        # commit's own ceiling when both are set (a cap the commit ceiling
+        # already makes unreachable is a second value nothing enforces).
+        if contract.max_user_added is not None:
+            if (
+                not isinstance(contract.max_user_added, int)
+                or isinstance(contract.max_user_added, bool)
+                or contract.max_user_added < 0
+            ):
+                raise RegistryError(
+                    f"{where} declares max_user_added {contract.max_user_added!r}; "
+                    f"it is a non-negative integer or None"
+                )
+            if contract.max_features is not None and contract.max_user_added > contract.max_features:
+                raise RegistryError(
+                    f"{where} declares max_user_added {contract.max_user_added} above "
+                    f"max_features {contract.max_features}"
+                )
+
         # CROSSING GROUNDS: a tuple of CrossingGround, each exactly one of
         # (a committed claim on one of THIS step's edges, with a footprint
-        # function) or (an exclusion gate), with unique types.
-        if contract.crossings is not None:
+        # function) or (an exclusion gate), with unique types -- or None
+        # (the exclusion gates), or CROSSINGS_NOT_RECORDED (none at all).
+        if records_crossings(contract) and contract.crossings is not None:
             if isinstance(contract.crossings, (str, CrossingGround)):
                 raise RegistryError(
                     f"{where}'s commit contract declares crossings="
@@ -2006,6 +2417,33 @@ def validate_registry() -> None:
                 f"{where}: user input(s) {sorted(overlap)} collide with a "
                 f"forwarded consumed value's parameter"
             )
+
+        # A PLACEMENT IS A DECLARATION: a scorer, a wire builder, a named
+        # input of a known shape, and nothing shared with the generate's
+        # own user inputs (a placed feature is measured against a generate,
+        # never fed into one).
+        placement = definition.placement
+        if placement is not None:
+            if not isinstance(placement, Placement):
+                raise RegistryError(
+                    f"{where} declares placement={placement!r}, which is not a Placement"
+                )
+            if not placement.input:
+                raise RegistryError(f"{where} declares a placement with no input name")
+            if placement.input in input_names:
+                raise RegistryError(
+                    f"{where}'s placement input '{placement.input}' collides with a "
+                    f"declared user input of the same name"
+                )
+            if placement.shape not in VALID_INPUT_SHAPES:
+                raise RegistryError(
+                    f"{where}: placement input '{placement.input}' has shape "
+                    f"{placement.shape!r}; must be one of {VALID_INPUT_SHAPES}"
+                )
+            if not placement.score:
+                raise RegistryError(f"{where} declares a placement with no score target")
+            if not placement.feature:
+                raise RegistryError(f"{where} declares a placement with no feature builder")
 
         accumulation = definition.accumulate
         if accumulation is not None:

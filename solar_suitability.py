@@ -51,7 +51,10 @@ selected road corridor):
     (tree_zone_candidates.identify_tree_zone_candidates()'s own 'patches'
     — the full ranked list, not just the top one: unlike water/road,
     trees has no single "selected" zone by design, since each ranked
-    patch is independently, separately plantable). A candidate footprint
+    patch is independently, separately plantable — OR, on the interactive
+    path, the trees step's COMMITTED selection supplied through
+    identify_solar_candidate_zones()'s tree_zone_patches= override, which
+    is the same list shape and closes the self-compute). A candidate footprint
     intersecting the union of every tree-zone candidate's own
     'render_fill_polygon_utm', buffered by
     TREE_ZONE_STRUCTURE_EXCLUSION_BUFFER_METERS (10ft — a real,
@@ -344,8 +347,15 @@ TREE_ZONE_STRUCTURE_EXCLUSION_BUFFER_METERS = 10 * METERS_PER_FOOT
 # How many top-ranked candidates to return. Deliberately more than 1 —
 # per this feature's framing, ties/close calls should surface as multiple
 # candidates for Claude to compare, not get silently collapsed into one.
+# THREE, down from five, with the structures registry entry: the
+# interactive step is select-only over these plus up to two sites the user
+# PLACES themselves (see score_placed_structure_site()), and five generated
+# footprints beside two placed ones is more shortlist than a small parcel's
+# map has room to compare. The ranking is unchanged -- this is the same
+# best-first list, cut two shorter -- and the dropped ranks 4 and 5 are
+# reported on the reference parcel in test_structures_step.py.
 # CONFIGURABLE.
-MAX_CANDIDATES = 5
+MAX_CANDIDATES = 3
 
 SOLAR_CONFIDENCE_NOTES_TEMPLATE = (
     "This identifies a ranked CANDIDATE SITE for a small, fixed-footprint solar-generating "
@@ -635,6 +645,110 @@ def find_candidate_solar_zones(
             'geometry_wgs84': GeoJSON geometry dict,
         }
     """
+    run = _prepare_scoring_run(
+        dem,
+        production_areas,
+        water_zones,
+        road_geometries_utm,
+        boundary_polygon_utm,
+        canopy_mask_utm=canopy_mask_utm,
+        tree_zone_exclusion_polygon_utm=tree_zone_exclusion_polygon_utm,
+        max_solar_slope_pct=max_solar_slope_pct,
+        min_suitability_score=min_suitability_score,
+        water_zone_exclusion_buffer_meters=water_zone_exclusion_buffer_meters,
+        road_proximity_buffer_meters=road_proximity_buffer_meters,
+        max_structure_footprint_acres=max_structure_footprint_acres,
+        production_edge_adjacency_meters=production_edge_adjacency_meters,
+        production_proximity_reference_meters=production_proximity_reference_meters,
+    )
+
+    # Generation-time-only optimization (see this function's own
+    # docstring): restrict the sampled search region to stay near the
+    # active road source, rather than scanning the full parcel. The real
+    # per-footprint distance gate inside _measure_footprint() is unchanged
+    # and is what actually decides eligibility -- this purely avoids
+    # wasting a sample point on ground that gate could never let through.
+    search_region = boundary_polygon_utm
+    road_union = run["road_union"]
+    if run["apply_road_constraint"] and road_union is not None and not road_union.is_empty:
+        restricted = boundary_polygon_utm.intersection(
+            road_union.buffer(road_proximity_buffer_meters + run["footprint_side_m"])
+        )
+        if not restricted.is_empty:
+            search_region = restricted
+
+    candidates = []
+
+    for x, y in _generate_candidate_points(search_region, candidate_point_spacing_meters):
+        measured = _measure_footprint(x, y, run)
+        if measured is None:
+            continue  # off-parcel, too little pad survives clipping, or no measurable DEM under it
+        # A GENERATED CANDIDATE PASSES EVERY GATE OR IS NOT ONE. The
+        # conjunction the inline loop used to express as a chain of
+        # `continue`s; the outcomes themselves are not stored on a
+        # generated candidate (they are all True by construction), which
+        # keeps its dict exactly the shape it has always been.
+        constraints = measured.pop("constraints")
+        if not all(constraints.values()):
+            continue
+        candidates.append(measured)
+
+    candidates.sort(key=lambda cand: -cand["suitability_score"])
+    candidates = candidates[:max_candidates]
+    for rank, candidate in enumerate(candidates, start=1):
+        candidate["rank"] = rank
+
+    return candidates
+
+
+# =====================================================================
+# THE SCORING RUN, AND ONE FOOTPRINT'S MEASUREMENT
+# =====================================================================
+#
+# find_candidate_solar_zones() used to hold its whole per-point loop
+# inline. It is split into the two pieces below so a site the USER PLACES
+# can be measured by exactly the code that measures a sampled candidate
+# (score_placed_structure_site(), further down) rather than by a second
+# scorer that would drift from the first:
+#
+#   _prepare_scoring_run()   everything computed ONCE per run: the terrain
+#                            derivatives over the whole DEM, the production
+#                            edge line, the buffered water exclusion, the
+#                            road union, the footprint dimensions.
+#   _measure_footprint()     the FULL measurement of one footprint against
+#                            that run -- every field a candidate carries --
+#                            PLUS the outcome of every hard constraint,
+#                            keyed by the constraint's own wire name.
+#
+# BEHAVIOUR-PRESERVING FOR THE GENERATOR, and asserted rather than assumed
+# (test_solar_suitability.py runs the fixtures it always has, unchanged).
+# The generator keeps a footprint iff every constraint outcome is True --
+# the same conjunction the inline loop expressed by `continue`-ing at the
+# first failed gate. The one difference is cost, not outcome: a footprint
+# the old loop dropped at its first failed gate now has its remaining
+# gates evaluated too, over a handful of cells, before it is dropped. What
+# is measured, how it is rounded and what is stored are unchanged; the
+# candidate dict literal is the same literal, moved.
+
+
+def _prepare_scoring_run(
+    dem: dict,
+    production_areas: list[dict],
+    water_zones: list[dict],
+    road_geometries_utm: Optional[list],
+    boundary_polygon_utm: Polygon,
+    canopy_mask_utm: Optional[np.ndarray] = None,
+    tree_zone_exclusion_polygon_utm: Optional[object] = None,
+    max_solar_slope_pct: float = MAX_SOLAR_SLOPE_PCT,
+    min_suitability_score: float = MIN_SUITABILITY_SCORE,
+    water_zone_exclusion_buffer_meters: float = POND_ZONE_EXCLUSION_BUFFER_METERS,
+    road_proximity_buffer_meters: float = ROAD_PROXIMITY_BUFFER_METERS,
+    max_structure_footprint_acres: float = MAX_STRUCTURE_FOOTPRINT_ACRES,
+    production_edge_adjacency_meters: float = PRODUCTION_EDGE_ADJACENCY_METERS,
+    production_proximity_reference_meters: float = PRODUCTION_PROXIMITY_REFERENCE_METERS,
+) -> dict:
+    """The per-run state one measurement reads. Parameters are
+    find_candidate_solar_zones()'s own, with the same meanings."""
     array = dem["array"]
     resolution = dem["resolution_meters"]
     rows, cols = array.shape
@@ -662,125 +776,345 @@ def find_candidate_solar_zones(
         max_structure_footprint_acres * SQUARE_METERS_PER_ACRE * MIN_STRUCTURE_FOOTPRINT_FRACTION
     )
 
-    # Generation-time-only optimization (see this function's own
-    # docstring): restrict the sampled search region to stay near the
-    # active road source, rather than scanning the full parcel. The real
-    # per-footprint distance gate below is unchanged and is what actually
-    # decides eligibility -- this purely avoids wasting a sample point on
-    # ground that gate could never let through.
-    search_region = boundary_polygon_utm
-    if apply_road_constraint and road_union is not None and not road_union.is_empty:
-        restricted = boundary_polygon_utm.intersection(
-            road_union.buffer(road_proximity_buffer_meters + footprint_side_m)
+    return {
+        "dem": dem,
+        "rows": rows,
+        "cols": cols,
+        "slope_pct": slope_pct,
+        "aspect_deg": aspect_deg,
+        "shading": shading,
+        "boundary_polygon_utm": boundary_polygon_utm,
+        "raw_production_union": raw_production_union,
+        "production_boundary_geom": production_boundary_geom,
+        "raw_water_union": raw_water_union,
+        "water_exclusion": water_exclusion,
+        "road_union": road_union,
+        "apply_road_constraint": apply_road_constraint,
+        "road_proximity_buffer_meters": road_proximity_buffer_meters,
+        "canopy_mask_utm": canopy_mask_utm,
+        "tree_zone_exclusion_polygon_utm": tree_zone_exclusion_polygon_utm,
+        "max_solar_slope_pct": max_solar_slope_pct,
+        "min_suitability_score": min_suitability_score,
+        "footprint_side_m": footprint_side_m,
+        "min_footprint_area_m2": min_footprint_area_m2,
+        "production_edge_adjacency_meters": production_edge_adjacency_meters,
+        "production_proximity_reference_meters": production_proximity_reference_meters,
+    }
+
+
+def _measure_footprint(x: float, y: float, run: dict) -> Optional[dict]:
+    """
+    The full measurement of the fixed-size footprint centred on (x, y),
+    against a prepared run. Returns None when the footprint is NOT
+    MEASURABLE AT ALL -- off-parcel, too little of the nominal pad survives
+    clipping to the parcel (MIN_STRUCTURE_FOOTPRINT_FRACTION), no DEM cell
+    centre under it, or no cell with a defined slope (Horn's method needs
+    a full 3x3 neighbourhood, so an edge/nodata-adjacent footprint can end
+    up empty). Those are absences of measurement, not failed gates, and a
+    caller cannot report a score for them.
+
+    Otherwise returns the candidate dict find_candidate_solar_zones() has
+    always built -- every measured field, the four stored factor scores,
+    the composite -- plus ONE extra key, `constraints`: {wire name -> bool}
+    for every hard constraint the run applied, in the order the generator
+    tests them. The keys are the exact strings structure_sites_to_feature_
+    collection() publishes under `constraints_satisfied`, so a placed
+    site's outcomes reach the wire under the names a generated candidate's
+    guarantees already use. A constraint the run does NOT apply (no road
+    source, no tree-zone exclusion polygon) has no key -- absent, not
+    trivially True -- for the same reason an unavailable exclusion gate is
+    omitted from a crossing record rather than reported clear.
+    """
+    dem = run["dem"]
+    footprint_side_m = run["footprint_side_m"]
+    nominal_footprint = box(
+        x - footprint_side_m / 2, y - footprint_side_m / 2, x + footprint_side_m / 2, y + footprint_side_m / 2
+    )
+
+    footprint = nominal_footprint.intersection(run["boundary_polygon_utm"])
+    if footprint.is_empty or footprint.area < run["min_footprint_area_m2"]:
+        return None  # off-parcel, or too little of the nominal footprint survives clipping to be a real pad
+
+    cells = _cells_within_polygon(dem, footprint, run["rows"], run["cols"])
+    if not cells:
+        return None  # no DEM data at all under this footprint
+
+    slope_pct = run["slope_pct"]
+    cell_slopes = [float(slope_pct[r, c]) for r, c in cells if not math.isnan(slope_pct[r, c])]
+    if not cell_slopes:
+        return None  # Horn's method needs a full 3x3 neighborhood -- an edge/nodata-adjacent footprint can end up empty here
+    avg_slope_pct = float(np.mean(cell_slopes))
+
+    water_exclusion = run["water_exclusion"]
+    tree_zone_exclusion_polygon_utm = run["tree_zone_exclusion_polygon_utm"]
+    canopy_mask_utm = run["canopy_mask_utm"]
+    road_union = run["road_union"]
+    max_solar_slope_pct = run["max_solar_slope_pct"]
+
+    # THE HARD CONSTRAINTS, in the generator's own order, each an outcome
+    # rather than an exit. See the docstring for why an unapplied one has
+    # no key.
+    constraints = {
+        # a structure can't sit on/against pond-siting ground
+        "outside_water_candidate_zone": not (
+            water_exclusion is not None and footprint.intersects(water_exclusion)
+        ),
+    }
+    if tree_zone_exclusion_polygon_utm is not None:
+        # a structure shouldn't sit on/against planned tree-zone ground
+        constraints["outside_tree_zone_candidate_buffer"] = not footprint.intersects(
+            tree_zone_exclusion_polygon_utm
         )
-        if not restricted.is_empty:
-            search_region = restricted
-
-    candidates = []
-
-    for x, y in _generate_candidate_points(search_region, candidate_point_spacing_meters):
-        nominal_footprint = box(
-            x - footprint_side_m / 2, y - footprint_side_m / 2, x + footprint_side_m / 2, y + footprint_side_m / 2
-        )
-
-        footprint = nominal_footprint.intersection(boundary_polygon_utm)
-        if footprint.is_empty or footprint.area < min_footprint_area_m2:
-            continue  # off-parcel, or too little of the nominal footprint survives clipping to be a real pad
-
-        if water_exclusion is not None and footprint.intersects(water_exclusion):
-            continue  # hard exclusion, unchanged in spirit -- a structure can't sit on/against pond-siting ground
-
-        if tree_zone_exclusion_polygon_utm is not None and footprint.intersects(tree_zone_exclusion_polygon_utm):
-            continue  # hard exclusion -- a structure shouldn't sit on/against planned tree-zone ground
-
-        cells = _cells_within_polygon(dem, footprint, rows, cols)
-        if not cells:
-            continue  # no DEM data at all under this footprint
-
-        if canopy_mask_utm is not None and any(canopy_mask_utm[r, c] for r, c in cells):
-            continue  # hard exclusion, before any scoring -- footprint touches real, existing tree canopy
-
-        cell_slopes = [float(slope_pct[r, c]) for r, c in cells if not math.isnan(slope_pct[r, c])]
-        if not cell_slopes:
-            continue  # Horn's method needs a full 3x3 neighborhood -- an edge/nodata-adjacent footprint can end up empty here
-        avg_slope_pct = float(np.mean(cell_slopes))
-        if avg_slope_pct > max_solar_slope_pct:
-            continue  # too steep to build on -- a real buildability ceiling, independent of production-zone proximity
-
-        if apply_road_constraint:
-            if road_union is None or footprint.distance(road_union) > road_proximity_buffer_meters:
-                continue
-
-        cell_aspects = [float(aspect_deg[r, c]) for r, c in cells if not math.isnan(aspect_deg[r, c])]
-        mean_aspect = _circular_mean_aspect_deg(cell_aspects)
-        a_score = aspect_score(mean_aspect if mean_aspect is not None else float("nan"))
-
-        cell_shading = [float(shading[r, c]) for r, c in cells if not math.isnan(shading[r, c])]
-        sh_score = float(np.mean(cell_shading)) if cell_shading else 0.5
-
-        s_score = _slope_score(avg_slope_pct, max_solar_slope_pct)
-
-        distance_to_production_edge_m = (
-            float(footprint.distance(production_boundary_geom)) if production_boundary_geom is not None else None
-        )
-        p_score = _production_proximity_score(distance_to_production_edge_m, production_proximity_reference_meters)
-
-        combined = (
-            SLOPE_SCORE_WEIGHT * s_score
-            + ASPECT_SCORE_WEIGHT * a_score
-            + SHADING_SCORE_WEIGHT * sh_score
-            + PRODUCTION_PROXIMITY_SCORE_WEIGHT * p_score
-        )
-        if combined < min_suitability_score:
-            continue
-
-        relationship = _classify_production_zone_relationship(
-            footprint, raw_production_union, distance_to_production_edge_m, production_edge_adjacency_meters
-        )
-
-        distance_to_water_zone_m = (
-            float(footprint.distance(raw_water_union)) if raw_water_union is not None else None
-        )
-        distance_to_road_m = float(footprint.distance(road_union)) if road_union is not None else None
-
-        geometry_wgs84 = transform_geom(dem["crs"], "EPSG:4326", mapping(footprint))
-
-        candidates.append(
-            {
-                "suitability_score": round(combined * 100, 1),
-                # The composite's own four components, stored (0-1, same
-                # native scale as every other *_factor field in this
-                # pipeline) rather than discarded -- purely additive to
-                # the candidate shape, so "why did this site score what
-                # it did" can be answered downstream (narrative_data,
-                # tests) without re-running any scoring.
-                "slope_score": round(s_score, 3),
-                "aspect_score": round(a_score, 3),
-                "shading_score": round(sh_score, 3),
-                "production_proximity_score": round(p_score, 3),
-                "avg_slope_pct": round(avg_slope_pct, 1),
-                "aspect_deg": round(mean_aspect, 1) if mean_aspect is not None else None,
-                "aspect_label": aspect_to_compass_label(mean_aspect) if mean_aspect is not None else "flat",
-                "distance_to_road_m": round(distance_to_road_m, 1) if distance_to_road_m is not None else None,
-                "distance_to_production_zone_m": (
-                    round(distance_to_production_edge_m, 1) if distance_to_production_edge_m is not None else None
-                ),
-                "production_zone_relationship": relationship,
-                "distance_to_water_zone_m": (
-                    round(distance_to_water_zone_m, 1) if distance_to_water_zone_m is not None else None
-                ),
-                "footprint_area_acres": round(footprint.area / SQUARE_METERS_PER_ACRE, 3),
-                "polygon_utm": footprint,
-                "geometry_wgs84": geometry_wgs84,
-            }
+    # before any scoring -- a footprint touching real, existing tree canopy
+    constraints["outside_existing_canopy"] = not (
+        canopy_mask_utm is not None and any(canopy_mask_utm[r, c] for r, c in cells)
+    )
+    # too steep to build on -- a real buildability ceiling, independent of production-zone proximity
+    constraints[f"max_slope<={max_solar_slope_pct:.0f}pct"] = avg_slope_pct <= max_solar_slope_pct
+    if run["apply_road_constraint"]:
+        constraints["within_road_proximity_buffer"] = (
+            road_union is not None and footprint.distance(road_union) <= run["road_proximity_buffer_meters"]
         )
 
-    candidates.sort(key=lambda cand: -cand["suitability_score"])
-    candidates = candidates[:max_candidates]
-    for rank, candidate in enumerate(candidates, start=1):
-        candidate["rank"] = rank
+    aspect_deg = run["aspect_deg"]
+    cell_aspects = [float(aspect_deg[r, c]) for r, c in cells if not math.isnan(aspect_deg[r, c])]
+    mean_aspect = _circular_mean_aspect_deg(cell_aspects)
+    a_score = aspect_score(mean_aspect if mean_aspect is not None else float("nan"))
 
-    return candidates
+    shading = run["shading"]
+    cell_shading = [float(shading[r, c]) for r, c in cells if not math.isnan(shading[r, c])]
+    sh_score = float(np.mean(cell_shading)) if cell_shading else 0.5
+
+    s_score = _slope_score(avg_slope_pct, max_solar_slope_pct)
+
+    production_boundary_geom = run["production_boundary_geom"]
+    distance_to_production_edge_m = (
+        float(footprint.distance(production_boundary_geom)) if production_boundary_geom is not None else None
+    )
+    p_score = _production_proximity_score(
+        distance_to_production_edge_m, run["production_proximity_reference_meters"]
+    )
+
+    combined = (
+        SLOPE_SCORE_WEIGHT * s_score
+        + ASPECT_SCORE_WEIGHT * a_score
+        + SHADING_SCORE_WEIGHT * sh_score
+        + PRODUCTION_PROXIMITY_SCORE_WEIGHT * p_score
+    )
+    min_suitability_score = run["min_suitability_score"]
+    constraints[f"suitability_score>={min_suitability_score * 100:.0f}"] = combined >= min_suitability_score
+
+    relationship = _classify_production_zone_relationship(
+        footprint,
+        run["raw_production_union"],
+        distance_to_production_edge_m,
+        run["production_edge_adjacency_meters"],
+    )
+
+    raw_water_union = run["raw_water_union"]
+    distance_to_water_zone_m = (
+        float(footprint.distance(raw_water_union)) if raw_water_union is not None else None
+    )
+    distance_to_road_m = float(footprint.distance(road_union)) if road_union is not None else None
+
+    geometry_wgs84 = transform_geom(dem["crs"], "EPSG:4326", mapping(footprint))
+
+    return {
+        "suitability_score": round(combined * 100, 1),
+        # The composite's own four components, stored (0-1, same
+        # native scale as every other *_factor field in this
+        # pipeline) rather than discarded -- purely additive to
+        # the candidate shape, so "why did this site score what
+        # it did" can be answered downstream (narrative_data,
+        # tests) without re-running any scoring.
+        "slope_score": round(s_score, 3),
+        "aspect_score": round(a_score, 3),
+        "shading_score": round(sh_score, 3),
+        "production_proximity_score": round(p_score, 3),
+        "avg_slope_pct": round(avg_slope_pct, 1),
+        "aspect_deg": round(mean_aspect, 1) if mean_aspect is not None else None,
+        "aspect_label": aspect_to_compass_label(mean_aspect) if mean_aspect is not None else "flat",
+        "distance_to_road_m": round(distance_to_road_m, 1) if distance_to_road_m is not None else None,
+        "distance_to_production_zone_m": (
+            round(distance_to_production_edge_m, 1) if distance_to_production_edge_m is not None else None
+        ),
+        "production_zone_relationship": relationship,
+        "distance_to_water_zone_m": (
+            round(distance_to_water_zone_m, 1) if distance_to_water_zone_m is not None else None
+        ),
+        "footprint_area_acres": round(footprint.area / SQUARE_METERS_PER_ACRE, 3),
+        "polygon_utm": footprint,
+        "geometry_wgs84": geometry_wgs84,
+        "constraints": constraints,
+    }
+
+
+# What a PLACED site is tagged with, on its internal dict and on the wire,
+# so a reader holding a mixed list can tell it from a generated candidate
+# without consulting the document's provenance. A generated candidate
+# carries no site_origin key at all -- its dict is unchanged by placed
+# sites existing -- and wire_translation stamps "generated" on its
+# feature for it.
+SITE_ORIGIN_USER_PLACED = "user_placed"
+SITE_ORIGIN_GENERATED = "generated"
+
+
+def measure_structure_site(
+    x_utm: float,
+    y_utm: float,
+    dem: dict,
+    production_areas: list[dict],
+    water_zones: list[dict],
+    road_geometries_utm: Optional[list],
+    boundary_polygon_utm: Polygon,
+    canopy_mask_utm: Optional[np.ndarray] = None,
+    tree_zone_exclusion_polygon_utm: Optional[object] = None,
+    **thresholds,
+) -> Optional[dict]:
+    """
+    THE SECOND ENTRY INTO THE SCORER: one footprint, centred on a point the
+    caller chose, measured against the same inputs and the same code as a
+    sampled candidate. Takes find_candidate_solar_zones()'s own parameters
+    (minus the sampling-only ones -- spacing and max_candidates mean
+    nothing for a single point) and returns _measure_footprint()'s dict
+    WITH its `constraints` key, or None when the spot is not measurable at
+    all (see that function).
+
+    NOT DROPPED FOR A FAILED GATE, and that is the whole difference from
+    the generator. A sampled point that fails the slope ceiling is simply
+    not a candidate; a point the user placed and asked about IS the
+    question, and "this spot averages 27% slope, above the 20% ceiling" is
+    the answer -- so every gate's outcome comes back beside the score.
+
+    PURE AND LOCAL: one Horn pass and one shading pass over the cached
+    DEM, a handful of shapely predicates against geometry already in hand,
+    one reprojection out. No network, asserted in test_structures_step.py
+    under a socket guard.
+    """
+    run = _prepare_scoring_run(
+        dem,
+        production_areas,
+        water_zones,
+        road_geometries_utm,
+        boundary_polygon_utm,
+        canopy_mask_utm=canopy_mask_utm,
+        tree_zone_exclusion_polygon_utm=tree_zone_exclusion_polygon_utm,
+        **thresholds,
+    )
+    return _measure_footprint(x_utm, y_utm, run)
+
+
+def score_placed_structure_site(lon_lat, result: dict) -> dict:
+    """
+    A site the USER PLACED, scored against the run that produced `result`
+    -- identify_solar_candidate_zones()'s own return dict -- so it carries
+    the FULL CANDIDATE MEASUREMENT SET, composite score included, and is
+    directly comparable to the generated candidates beside it.
+
+    THIS IS A DELIBERATE DIVERGENCE FROM TREES, AND THE REASONING IS
+    DIFFERENT, so the next reader does not "fix" it into consistency. Trees
+    refuses to score a drawn zone (wire_translation.rehydrate_tree_zone():
+    a zone scoring below the floor would read as scored BADLY rather than
+    as UNSCORED, and a drawn tree zone competes for a ranking slot it never
+    entered). A placed structure site is the opposite case: the user is not
+    proposing a candidate for the ranking, they are saying "I want the
+    building HERE -- tell me about this spot." An honest score, with every
+    gate's outcome beside it, IS the answer they asked for, and withholding
+    it would waste a measurement this module can make for free. So a
+    placed site is measured by the same code as a sampled candidate, kept
+    whether or not it clears the gates, and told which ones it failed.
+
+    `lon_lat` is the placed point, WGS84. `result` must carry `run_inputs`
+    (every input the run scored against, natively) and
+    `all_scored_candidates` (the generated shortlist), both of which
+    identify_solar_candidate_zones() puts there -- the placed site is
+    scored against the SAME production ground, water exclusion, road tier,
+    canopy mask and tree-zone exclusion the generated candidates were,
+    which is the only thing that makes the comparison honest.
+
+    Raises ValueError, naming the reason, for a point off the parcel (the
+    one hard gate) or a point with no measurable DEM under it. Never
+    returns a half-measured site.
+
+    WHAT IT ADDS TO THE CANDIDATE SHAPE, and nothing else:
+
+        site_origin      "user_placed" -- the tag that distinguishes it
+                         from a generated candidate in any mixed list;
+                         the document's provenance ("user_added") is the
+                         same fact recorded by the commit
+        placed_lon_lat   the point as placed, [lon, lat]
+        point_utm        the same point in the DEM's CRS
+        constraints      {wire name -> bool}, every hard gate the run
+                         applied, from _measure_footprint()
+        rank             WHERE THIS SPOT WOULD SIT in the generated
+                         shortlist: 1 + the number of generated candidates
+                         that score strictly higher. Rank 1 means better
+                         than every generated candidate; a tie goes to the
+                         generated one. The generated candidates' own ranks
+                         are NOT re-numbered -- they are the run's ranking
+                         and stay stable -- so two placed sites may share
+                         a rank with each other or with a generated
+                         candidate. `rank` is therefore a comparison on a
+                         placed site and an identity on a generated one;
+                         site_origin says which reading applies.
+        prime_farmland_conflict / prime_farmland_note
+                         INHERITED from the run, when the run checked it.
+                         The SSURGO flag is parcel-level ("prime soil was
+                         found somewhere in this boundary" -- see
+                         flag_prime_farmland_conflicts()), so every site on
+                         the parcel carries the same answer, and re-asking
+                         SSURGO for a placed point would be a network call
+                         for a value already in hand.
+    """
+    run_inputs = result.get("run_inputs")
+    if not run_inputs:
+        raise ValueError(
+            "score_placed_structure_site() needs the run's own inputs (result['run_inputs']); the result "
+            "handed in does not carry them, so a placed site could not be scored against the same run"
+        )
+    dem = run_inputs["dem"]
+    boundary_polygon_utm = run_inputs["boundary_polygon_utm"]
+
+    lon, lat = float(lon_lat[0]), float(lon_lat[1])
+    xs, ys = warp_transform("EPSG:4326", dem["crs"], [lon], [lat])
+    point_utm = Point(xs[0], ys[0])
+    if not boundary_polygon_utm.contains(point_utm):
+        raise ValueError(
+            f"placed site [{lon:.6f}, {lat:.6f}] lies outside the parcel boundary. The parcel is the one "
+            "hard limit on where a structure can be placed; everything else this step checks is measured "
+            "and reported, never refused."
+        )
+
+    measured = measure_structure_site(
+        point_utm.x,
+        point_utm.y,
+        dem,
+        run_inputs["production_areas"],
+        run_inputs["water_zones"],
+        run_inputs["road_geometries_utm"],
+        boundary_polygon_utm,
+        canopy_mask_utm=run_inputs["canopy_mask_utm"],
+        tree_zone_exclusion_polygon_utm=run_inputs["tree_zone_exclusion_polygon_utm"],
+        **run_inputs["thresholds"],
+    )
+    if measured is None:
+        raise ValueError(
+            f"placed site [{lon:.6f}, {lat:.6f}] cannot be measured: its footprint either keeps less than "
+            f"{MIN_STRUCTURE_FOOTPRINT_FRACTION:.0%} of a building pad inside the parcel or covers no DEM "
+            "cell with a defined slope. Place it a little further inside the boundary."
+        )
+
+    generated = result.get("all_scored_candidates") or []
+    measured["rank"] = 1 + sum(
+        1 for candidate in generated if candidate["suitability_score"] > measured["suitability_score"]
+    )
+    measured["site_origin"] = SITE_ORIGIN_USER_PLACED
+    measured["placed_lon_lat"] = [lon, lat]
+    measured["point_utm"] = point_utm
+    if generated and "prime_farmland_conflict" in generated[0]:
+        measured["prime_farmland_conflict"] = generated[0]["prime_farmland_conflict"]
+        measured["prime_farmland_note"] = generated[0]["prime_farmland_note"]
+    return measured
 
 
 def flag_prime_farmland_conflicts(
@@ -1070,11 +1404,13 @@ def candidates_to_geojson(
 
     CONSOLIDATED into wire_translation.py (as structure_sites_to_feature_
     collection) -- this name stays as the module's own entry point,
-    forwarding to the single implementation kept there. Note that the four
-    run-level flags in this signature reach the wire ONLY baked into
-    confidence_notes and are NOT recorded on any candidate dict or on this
-    module's return contract, so this call site is the only place they
-    survive -- see the wire_translation function's own docstring."""
+    forwarding to the single implementation kept there. The four run-level
+    flags in this signature reach the wire baked into confidence_notes and
+    are not recorded on any candidate dict -- but they ARE now recorded on
+    identify_solar_candidate_zones()'s return, under 'run_flags', as
+    exactly this keyword set, so a caller holding that result can call
+    this function and reproduce its zones_geojson byte for byte. See that
+    function's docstring."""
     from wire_translation import structure_sites_to_feature_collection
 
     return structure_sites_to_feature_collection(
@@ -1100,6 +1436,9 @@ def identify_solar_candidate_zones(
     floodplain_data_is_fallback: Optional[bool] = None,
     check_prime_farmland: bool = True,
     canopy_height: Optional[dict] = None,
+    tree_zone_patches: Optional[list[dict]] = None,
+    farm_roads: Optional[list[dict]] = None,
+    farmland_classifications: Optional[list[dict]] = None,
     **zone_kwargs,
 ) -> dict:
     """
@@ -1130,10 +1469,43 @@ def identify_solar_candidate_zones(
     itself supplied, same as production_areas/valleys/boundary_polygon_
     utm below.
 
-    canopy_mask_utm and tree_zone_exclusion_polygon_utm are NOT among
-    these overrides -- both are always self-computed here (see module
-    docstring); that's a deliberate, separate scope decision, not an
-    oversight.
+    canopy_mask_utm is NOT among these overrides -- it is always
+    self-computed here (see module docstring); that's a deliberate,
+    separate scope decision, not an oversight. tree_zone_exclusion_
+    polygon_utm is not one either, but its SOURCE now is: see
+    tree_zone_patches below.
+
+    tree_zone_patches is the override for the tree-zone exclusion's
+    source -- the list every `tree_zone_patches=` consumer takes
+    (identify_tree_zone_candidates()'s own 'patches', or the trees step's
+    committed selection rehydrated by wire_translation.rehydrate_tree_
+    zones()). None (the default) self-computes exactly as before, by the
+    nested identify_tree_zone_candidates() call below. A LIST is used as
+    given, and an EMPTY list is an answer: "checked, no planned tree
+    ground" -- no exclusion polygon is built, tree_zone_exclusion_
+    available stays True, and the nested call does not run. That is what
+    a trees step committed EMPTY means to this module: not "unavailable",
+    but "nothing to stay clear of", which is the user's own decision and
+    the reason the override exists at all. Without it a structures
+    generate on the interactive path would REGENERATE tree candidates
+    and silently exclude ground the user never committed -- and, because
+    the nested call's own soil/stream fetches have no cache override here,
+    do it over the network. Measured, not assumed: test_structures_step.py
+    compares the regenerated set against the committed one on the
+    reference parcel and reports whether the candidates move.
+
+    farm_roads and farmland_classifications are cache closures in the same
+    None-falls-back-to-self-fetch family, each the rows the corresponding
+    fetch returns (farm_roads_data.get_farm_roads_for_boundary() and
+    soil_data.get_farmland_classification_for_polygon(), which are exactly
+    parcel_data.ParcelData.farm_roads and .farmland_classification). They
+    exist because Tier 2's road fetch and the SSURGO prime-farmland check
+    were this function's last two network calls on a run whose every other
+    input was supplied, and a step registry generate is network-free BY
+    CONTRACT (step_orchestrator.py's IDEMPOTENT AND REPEATABLE). Neither
+    changes what is computed: the rows go through the same code the fetch
+    path runs on what it fetched. They are additions beyond the two solar
+    changes the structures branch named, and are reported as such.
 
     Returns:
         {
@@ -1145,7 +1517,38 @@ def identify_solar_candidate_zones(
                                                            # candidates exist
             'narrative_data': dict,                  # report-facing, FINAL, JSON-serialisable
                                                         # values -- see build_narrative_data()
+            'run_flags': dict,                       # THE RUN-LEVEL FLAGS -- see below
+            'run_inputs': dict,                      # what the run scored against, natively
         }
+
+    'run_flags' SURFACES WHAT USED TO LIVE ONLY IN THIS FUNCTION'S LOCAL
+    SCOPE. candidates_to_geojson() bakes four run-level values into every
+    feature's confidence_notes -- shading_is_rough_proxy, road_proximity_
+    source, tree_zone_exclusion_available, and the footprint/spacing
+    thresholds (spacing_meters, max_structure_footprint_acres) -- and until
+    this key existed none of them was recorded anywhere a caller could
+    read: not on a candidate dict, not on PipelineContext, not on this
+    return. render_layout_map.fetch_layout_layers() therefore read its
+    structure_site Feature off THIS call's zones_geojson, the only artifact
+    that knew which run produced the notes. 'run_flags' is exactly
+    candidates_to_geojson()'s keyword set, so
+
+        candidates_to_geojson(result["all_scored_candidates"], **result["run_flags"])
+
+    reproduces result["zones_geojson"] byte for byte (asserted in
+    test_structures_step.py) and a caller holding the context can now
+    rebuild the wire form of any candidate under the notes of the run that
+    produced it. fetch_layout_layers() is NOT changed on this branch; it
+    could now read from context, and the structures branch report says so.
+
+    'run_inputs' is the native counterpart: the DEM, the parcel polygon,
+    the production patches, the water zones, the road geometry and buffer
+    of the tier that ACTUALLY produced the candidates, the canopy mask,
+    the tree-zone exclusion polygon, and the thresholds. It is what
+    score_placed_structure_site() scores a user-placed site against, so a
+    placed site and a generated candidate are measured against one run.
+    Native objects (numpy, shapely), like all_scored_candidates -- not
+    JSON, and not for the wire.
 
     'narrative_data' is PURELY ADDITIVE at this level: every other key
     above is byte-identical to what this function returned before it
@@ -1258,9 +1661,11 @@ def identify_solar_candidate_zones(
     properties.
 
     TREE-ZONE-CANDIDATE exclusion (identify_tree_zone_candidates(), the
-    full ranked 'patches' list) degrades GRACEFULLY on an ordinary fetch
-    failure — noted in confidence_notes via candidates_to_geojson()'s own
-    tree_zone_exclusion_available flag — UNLESS the failure is
+    full ranked 'patches' list -- SKIPPED ENTIRELY when this function's own
+    tree_zone_patches override is supplied, see above) degrades GRACEFULLY
+    on an ordinary fetch failure — noted in confidence_notes via
+    candidates_to_geojson()'s own tree_zone_exclusion_available flag —
+    UNLESS the failure is
     specifically canopy_height_data.CanopyCoverageIncompleteError
     bubbling up from that call's own internal mandatory canopy gate, in
     which case it propagates uncaught here too, same reasoning as the
@@ -1387,30 +1792,37 @@ def identify_solar_candidate_zones(
     # pipeline_context.py's own build_pipeline_context() started supplying
     # these overrides (see that module's own KNOWN LIMITATIONS #4, prior
     # to this fix).
+    #
+    # tree_zone_patches= CLOSES THE SELF-COMPUTE, the same way every other
+    # override in this function does: a supplied list is the answer, None
+    # regenerates. See this function's docstring for what an EMPTY list
+    # means and why the override exists.
     tree_zone_exclusion_polygon_utm = None
     tree_zone_exclusion_available = True
-    try:
-        tree_zone_result = identify_tree_zone_candidates(
-            boundary_coordinates,
-            dem=dem,
-            anchor_lon_lat=anchor_lon_lat,
-            boundary_polygon_utm=boundary_polygon_utm,
-            production_areas=production_areas,
-            valleys=valleys,
-            selected_water_zone=resolved_water_zone_answer,
-            selected_road_corridor=selected_road_corridor,
-            hydric_floodplain_union=hydric_floodplain_union,
-            floodplain_data_is_fallback=floodplain_data_is_fallback,
-            canopy_height=canopy_height,
-        )
-        tree_zone_patches = tree_zone_result["patches"]
-        if tree_zone_patches:
-            tree_zone_union = unary_union([p["render_fill_polygon_utm"] for p in tree_zone_patches])
-            tree_zone_exclusion_polygon_utm = tree_zone_union.buffer(TREE_ZONE_STRUCTURE_EXCLUSION_BUFFER_METERS)
-    except CanopyCoverageIncompleteError:
-        raise
-    except Exception:
-        tree_zone_exclusion_available = False
+    if tree_zone_patches is None:
+        try:
+            tree_zone_result = identify_tree_zone_candidates(
+                boundary_coordinates,
+                dem=dem,
+                anchor_lon_lat=anchor_lon_lat,
+                boundary_polygon_utm=boundary_polygon_utm,
+                production_areas=production_areas,
+                valleys=valleys,
+                selected_water_zone=resolved_water_zone_answer,
+                selected_road_corridor=selected_road_corridor,
+                hydric_floodplain_union=hydric_floodplain_union,
+                floodplain_data_is_fallback=floodplain_data_is_fallback,
+                canopy_height=canopy_height,
+            )
+            tree_zone_patches = tree_zone_result["patches"]
+        except CanopyCoverageIncompleteError:
+            raise
+        except Exception:
+            tree_zone_exclusion_available = False
+            tree_zone_patches = None
+    if tree_zone_patches:
+        tree_zone_union = unary_union([p["render_fill_polygon_utm"] for p in tree_zone_patches])
+        tree_zone_exclusion_polygon_utm = tree_zone_union.buffer(TREE_ZONE_STRUCTURE_EXCLUSION_BUFFER_METERS)
 
     common_zone_kwargs = dict(
         canopy_mask_utm=canopy_mask_utm,
@@ -1423,15 +1835,20 @@ def identify_solar_candidate_zones(
     # earlier -- see that block's own comment). ---
     candidates = []
     road_proximity_source = "unavailable"
+    # THE ROAD SOURCE THE RESULT WAS SCORED AGAINST -- (geometries, buffer)
+    # of whichever tier answered -- recorded so run_inputs can say it and a
+    # placed site can be measured against the same one.
+    road_source = (None, ROAD_PROXIMITY_BUFFER_METERS)
 
     if selected_road_corridor is not None:
+        road_source = ([selected_road_corridor["cell_footprint_polygon_utm"]], ROAD_CORRIDOR_PROXIMITY_METERS)
         candidates = find_candidate_solar_zones(
             dem,
             production_areas,
             water_zones,
-            [selected_road_corridor["cell_footprint_polygon_utm"]],
+            road_source[0],
             boundary_polygon_utm,
-            road_proximity_buffer_meters=ROAD_CORRIDOR_PROXIMITY_METERS,
+            road_proximity_buffer_meters=road_source[1],
             **common_zone_kwargs,
         )
         if candidates:
@@ -1442,7 +1859,7 @@ def identify_solar_candidate_zones(
     # nothing survived the rest of the constraint stack near it. ---
     if not candidates:
         try:
-            roads = get_farm_roads_for_boundary(boundary_coordinates)
+            roads = farm_roads if farm_roads is not None else get_farm_roads_for_boundary(boundary_coordinates)
             road_lines_wgs84 = [g["geometry"] for g in roads]
         except Exception:
             road_lines_wgs84 = None  # real fetch failure, not "zero roads found"
@@ -1456,13 +1873,14 @@ def identify_solar_candidate_zones(
                     xs, ys = warp_transform("EPSG:4326", dem["crs"], [p[0] for p in line], [p[1] for p in line])
                     road_geometries_utm.append(LineString(zip(xs, ys)))
 
+            road_source = (road_geometries_utm, ROAD_PROXIMITY_BUFFER_METERS)
             candidates = find_candidate_solar_zones(
                 dem,
                 production_areas,
                 water_zones,
-                road_geometries_utm,
+                road_source[0],
                 boundary_polygon_utm,
-                road_proximity_buffer_meters=ROAD_PROXIMITY_BUFFER_METERS,
+                road_proximity_buffer_meters=road_source[1],
                 **common_zone_kwargs,
             )
             road_proximity_source = "real_mapped_road"
@@ -1470,6 +1888,7 @@ def identify_solar_candidate_zones(
             # Tier 2's own fetch failed outright, AND Tier 1 produced
             # nothing -- fall through to the terminal behavior: disable
             # the road constraint entirely for a final scoring pass.
+            road_source = (None, ROAD_PROXIMITY_BUFFER_METERS)
             candidates = find_candidate_solar_zones(
                 dem,
                 production_areas,
@@ -1482,18 +1901,50 @@ def identify_solar_candidate_zones(
 
     if check_prime_farmland and candidates:
         try:
-            wkt_polygon = coordinates_to_wkt_polygon(boundary_coordinates)
-            farmland_classifications = get_farmland_classification_for_polygon(wkt_polygon)
+            if farmland_classifications is None:
+                wkt_polygon = coordinates_to_wkt_polygon(boundary_coordinates)
+                farmland_classifications = get_farmland_classification_for_polygon(wkt_polygon)
             candidates = flag_prime_farmland_conflicts(candidates, farmland_classifications)
         except Exception:
             pass  # SSURGO outage -- candidates just won't carry a prime_farmland_conflict flag this run
 
-    return {
-        "zones_geojson": candidates_to_geojson(
-            candidates,
-            road_proximity_source=road_proximity_source,
-            tree_zone_exclusion_available=tree_zone_exclusion_available,
+    # THE FOUR RUN-LEVEL FLAGS, as candidates_to_geojson()'s own keyword
+    # set -- see this function's docstring. shading_is_rough_proxy is True
+    # on every run this module can make today: the shading signal is
+    # terrain_metrics' DEM-only horizon proxy, and no canopy height model
+    # or NDVI reaches the scorer.
+    run_flags = {
+        "shading_is_rough_proxy": True,
+        "road_proximity_source": road_proximity_source,
+        "tree_zone_exclusion_available": tree_zone_exclusion_available,
+        "spacing_meters": zone_kwargs.get("candidate_point_spacing_meters", CANDIDATE_POINT_SPACING_METERS),
+        "max_structure_footprint_acres": zone_kwargs.get(
+            "max_structure_footprint_acres", MAX_STRUCTURE_FOOTPRINT_ACRES
         ),
+    }
+    # The thresholds a placed site must be measured under: whatever
+    # zone_kwargs overrode, else the scorer's own defaults (the sampling-
+    # only parameters mean nothing for one point and are left out).
+    thresholds = {
+        key: value
+        for key, value in zone_kwargs.items()
+        if key not in ("candidate_point_spacing_meters", "max_candidates", "canopy_mask_utm",
+                       "tree_zone_exclusion_polygon_utm", "road_proximity_buffer_meters")
+    }
+    thresholds["road_proximity_buffer_meters"] = road_source[1]
+    run_inputs = {
+        "dem": dem,
+        "boundary_polygon_utm": boundary_polygon_utm,
+        "production_areas": production_areas,
+        "water_zones": water_zones,
+        "road_geometries_utm": road_source[0],
+        "canopy_mask_utm": common_zone_kwargs["canopy_mask_utm"],
+        "tree_zone_exclusion_polygon_utm": common_zone_kwargs["tree_zone_exclusion_polygon_utm"],
+        "thresholds": thresholds,
+    }
+
+    return {
+        "zones_geojson": candidates_to_geojson(candidates, **run_flags),
         "all_scored_candidates": candidates,
         "selected_structure_site": select_optimal_structure_site(candidates),
         "narrative_data": build_narrative_data(
@@ -1506,6 +1957,8 @@ def identify_solar_candidate_zones(
             # function returns at all was canopy-gated.
             existing_canopy_excluded=True,
         ),
+        "run_flags": run_flags,
+        "run_inputs": run_inputs,
     }
 
 

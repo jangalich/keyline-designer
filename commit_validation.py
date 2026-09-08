@@ -181,6 +181,11 @@ REJECT_INCOHERENT_GROUP = "incoherent_feature_group"
 # A feature from a candidate set whose user input is not among the inputs
 # the commit declares (step_registry.Accumulation.feature_key_property).
 REJECT_INPUT_NOT_DECLARED = "input_not_declared"
+# More user-authored features than the contract's ceiling on them
+# (CommitContract.max_user_added) -- for structures, a third placed site.
+# A collection-level rejection, like too_many_features, because the
+# ceiling is on the set and no one feature is the one too many.
+REJECT_TOO_MANY_USER_ADDED = "too_many_user_added_features"
 
 
 @dataclass(frozen=True)
@@ -625,6 +630,28 @@ def check_commit(
                 ),
             )
         )
+
+    # THE USER-ADDED CEILING, counted by provenance over the features
+    # actually sent -- a provenance entry naming no feature is its own
+    # rejection below and holds no slot here. SERVER-SIDE, which is the
+    # point: the UI's own limit is a convenience, and this is the rule.
+    if contract.max_user_added is not None:
+        user_added = [
+            feature.get("id")
+            for feature in feature_list
+            if isinstance(feature, dict)
+            and isinstance(feature.get("id"), str)
+            and provenance.get(feature["id"]) == "user_added"
+        ]
+        if len(user_added) > contract.max_user_added:
+            rejections.append(
+                FeatureRejection(
+                    None,
+                    REJECT_TOO_MANY_USER_ADDED,
+                    f"This step takes at most {contract.max_user_added} user-added "
+                    f"feature(s); {len(user_added)} were committed ({', '.join(user_added)}).",
+                )
+            )
 
     # --- per feature, the cheap checks --------------------------------
     seen_ids = set()

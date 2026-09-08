@@ -584,9 +584,25 @@ print(
 # =====================================================================
 import json  # noqa: E402
 
-assert set(result) == {"zones_geojson", "all_scored_candidates", "selected_structure_site", "narrative_data"}, (
-    "narrative_data must be the ONLY new top-level key on identify_solar_candidate_zones() -- got "
-    f"{set(result)}"
+# SIX top-level keys: the four the point-candidate model always carried,
+# plus the two the structures registry entry added -- run_flags (the four
+# run-level flags candidates_to_geojson() bakes into confidence_notes,
+# surfaced so a caller can rebuild the wire form of any candidate under
+# the notes of the run that produced it) and run_inputs (what the run
+# scored against, natively, so a user-placed site is measured against the
+# same run). Both are additive: every other key is what it was.
+assert set(result) == {
+    "zones_geojson", "all_scored_candidates", "selected_structure_site", "narrative_data",
+    "run_flags", "run_inputs",
+}, f"unexpected top-level keys on identify_solar_candidate_zones(): {set(result)}"
+assert set(result["run_flags"]) == {
+    "shading_is_rough_proxy", "road_proximity_source", "tree_zone_exclusion_available",
+    "spacing_meters", "max_structure_footprint_acres",
+}, sorted(result["run_flags"])
+# The flags reproduce the run's own wire form byte for byte.
+from solar_suitability import candidates_to_geojson as _ctg  # noqa: E402
+assert _ctg(result["all_scored_candidates"], **result["run_flags"]) == result["zones_geojson"], (
+    "run_flags must be exactly candidates_to_geojson()'s keyword set, so the wire form is reproducible"
 )
 _nd = result["narrative_data"]
 assert json.loads(json.dumps(_nd)) == _nd, "narrative_data must be json.dumps()-clean with no custom encoder"
