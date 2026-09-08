@@ -153,11 +153,18 @@ def get_water_features_for_boundary(
     stream_features = _query_layer(FLOWLINE_LAYER, bbox)
     waterbody_features = _query_layer(WATERBODY_LAYER, bbox)
 
+    # `permanent_identifier` is carried beside the three original keys so
+    # water_features_to_geojson() below can mint the SAME schema feature id
+    # get_water_features_geojson() mints from the raw NHD row
+    # ("nhd-streams-<permanent id>"). Additive: every existing reader of
+    # these rows (summarize_water_features, the report's water summary,
+    # ParcelData) reads name/feature_code/geometry and ignores the rest.
     streams = [
         {
             "name": f["properties"].get("gnis_name") or "Unnamed stream",
             "feature_code": f["properties"].get("fcode"),
             "geometry": f["geometry"],
+            "permanent_identifier": _nhd_permanent_identifier(f),
         }
         for f in stream_features
     ]
@@ -167,11 +174,77 @@ def get_water_features_for_boundary(
             "name": f["properties"].get("gnis_name") or "Unnamed water body",
             "feature_code": f["properties"].get("fcode"),
             "geometry": f["geometry"],
+            "permanent_identifier": _nhd_permanent_identifier(f),
         }
         for f in waterbody_features
     ]
 
     return {"streams": streams, "water_bodies": water_bodies}
+
+
+def _nhd_permanent_identifier(raw_feature: dict):
+    """The id _nhd_feature_to_schema() builds a feature id from: NHD's
+    permanent_identifier, or objectid when a row lacks one."""
+    props = raw_feature.get("properties") or {}
+    return props.get("permanent_identifier") or props.get("objectid")
+
+
+def water_features_to_geojson(water_features: Optional[dict]) -> dict:
+    """
+    get_water_features_for_boundary()'s ALREADY-FETCHED rows -> the same
+    schema-conformant FeatureCollection get_water_features_geojson() returns
+    from a fresh fetch. A WRAPPING step and nothing else: no query, no
+    geometry transform, the same make_feature() envelope, the same layer
+    names ("hydrology-streams" / "hydrology-water_bodies"), the same
+    confidence notes.
+
+    WHY IT EXISTS. ParcelData holds these rows for the whole boundary
+    (parcel_data.ParcelData.water_features), fetched once behind its
+    hard-fail contract, and fencing.identify_fencing()'s stream-exclusion
+    pass reads the GeoJSON form. Without a conversion the interactive
+    fencing step's only way to that form is get_water_features_geojson() --
+    a second NHD fetch of the same two layers over the same bbox on every
+    generate. The registry's fencing entry forwards this function's output
+    off the cache instead (step_registry.Consumed.combine).
+
+    THE FEATURE ID. Rows fetched since permanent_identifier was carried
+    on them (get_water_features_for_boundary above) yield the identical
+    "nhd-<sublayer>-<permanent id>" the fetch path mints. A row without
+    one -- an older cached ParcelData, or a test fixture -- is identified
+    by its POSITION in its list ("nhd-streams-0"), which is stable for the
+    life of that ParcelData and is all the stream-exclusion pass needs
+    (it labels a fence loop by the stream it buffered). Reported rather
+    than hidden: a fixture-built stream fence carries a positional id, a
+    fetched one carries NHD's.
+
+    None or a partial dict yields an empty collection, never an error:
+    "computed, nothing there" is the shape every wire function in this
+    codebase returns for an empty layer.
+    """
+    features = []
+    for sublayer, default_label in (("streams", "Unnamed stream"), ("water_bodies", "Unnamed water body")):
+        for index, row in enumerate((water_features or {}).get(sublayer) or []):
+            geometry = row.get("geometry")
+            if not geometry:
+                continue
+            permanent_id = row.get("permanent_identifier")
+            feature_id = f"nhd-{sublayer}-{permanent_id if permanent_id is not None else index}"
+            features.append(
+                make_feature(
+                    feature_id=feature_id,
+                    geometry=geometry,
+                    layer=f"hydrology-{sublayer}",
+                    label=row.get("name") or default_label,
+                    confidence=CONFIDENCE_MEDIUM,
+                    confidence_notes=NHD_CONFIDENCE_NOTES,
+                    extra_properties={
+                        "gnis_id": row.get("gnis_id"),
+                        "feature_code": row.get("feature_code"),
+                        "reach_code": row.get("reach_code"),
+                    },
+                )
+            )
+    return make_feature_collection(features)
 
 
 def _nhd_feature_to_schema(raw_feature: dict, sublayer: str, default_label: str) -> dict:

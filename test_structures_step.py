@@ -667,7 +667,7 @@ print(
 # --- 1 [test 1]. THE REGISTRY ENTRY ----------------------------------
 
 step_registry.validate_registry()
-assert step_registry.registered_steps() == ("landform", "water", "roads", "trees", "structures"), (
+assert step_registry.registered_steps() == ("landform", "water", "roads", "trees", "structures", "fencing"), (
     step_registry.registered_steps()
 )
 STRUCTURES = step_registry.get_step("structures")
@@ -720,8 +720,11 @@ assert _contract.feature_group is None and _contract.group_check is None
 assert _contract.crossings is step_registry.CROSSINGS_NOT_RECORDED
 assert step_registry.records_crossings(_contract) is False
 for _other in step_registry.STEP_REGISTRY.values():
-    if _other.step_id != "structures":
+    # fencing declares the same sentinel for its own reason (a fence line
+    # has no acres to overlap -- see its entry); every other entry records.
+    if _other.step_id not in ("structures", "fencing"):
         assert step_registry.records_crossings(_other.commit_contract) is True
+    if _other.step_id != "structures":
         assert _other.commit_contract.max_user_added is None
 
 # THE PLACEMENT DECLARATION.
@@ -756,10 +759,10 @@ assert STRUCTURES.failure_layers[0].exception == "canopy_height_data.CanopyCover
 assert (STRUCTURES.failure_layers[0].layer, STRUCTURES.failure_layers[0].label) == production_zone_payload.LAYER_CANOPY
 
 # THE EDGE HELPERS see the fifth entry.
-assert step_registry.dependents_of("trees") == ("structures",)
-assert step_registry.dependents_of("roads") == ("trees", "structures")
-assert step_registry.transitive_dependents("landform") == ("water", "roads", "trees", "structures")
-assert step_registry.transitive_dependents("structures") == ()
+assert step_registry.dependents_of("trees") == ("structures", "fencing")
+assert step_registry.dependents_of("roads") == ("trees", "structures", "fencing")
+assert step_registry.transitive_dependents("landform") == ("water", "roads", "trees", "structures", "fencing")
+assert step_registry.transitive_dependents("structures") == ("fencing",)
 
 # THE THREE NEW DECLARATIONS ARE VALIDATED.
 import dataclasses
