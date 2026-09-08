@@ -631,7 +631,7 @@ print(
 # --- 1 [test 1]. THE REGISTRY ENTRY ----------------------------------
 
 step_registry.validate_registry()
-assert step_registry.registered_steps() == ("landform", "water", "roads", "trees"), (
+assert step_registry.registered_steps() == ("landform", "water", "roads", "trees", "structures"), (
     step_registry.registered_steps()
 )
 TREES = step_registry.get_step("trees")
@@ -707,7 +707,10 @@ for _t in ("production", "water", "road"):
     assert _grounds[_t].footprint and callable(step_registry.resolve(_grounds[_t].footprint))
     assert _grounds[_t].label
 for _other in step_registry.STEP_REGISTRY.values():
-    if _other.step_id != "trees":
+    # structures declares NO crossings at all (step_registry.CROSSINGS_NOT_
+    # RECORDED, its own branch's third declaration); every other entry keeps
+    # the exclusion gates.
+    if _other.step_id not in ("trees", "structures"):
         assert _other.commit_contract.crossings is None, (
             f"{_other.step_id} keeps the exclusion gates as its grounds"
         )
@@ -733,10 +736,10 @@ assert TREES.failure_layers[0].exception == "canopy_height_data.CanopyCoverageIn
 assert (TREES.failure_layers[0].layer, TREES.failure_layers[0].label) == production_zone_payload.LAYER_CANOPY
 
 # THE EDGE HELPERS see the new entry.
-assert step_registry.dependents_of("roads") == ("trees",)
-assert step_registry.dependents_of("water") == ("roads", "trees")
-assert step_registry.transitive_dependents("landform") == ("water", "roads", "trees")
-assert step_registry.transitive_dependents("trees") == ()
+assert step_registry.dependents_of("roads") == ("trees", "structures")
+assert step_registry.dependents_of("water") == ("roads", "trees", "structures")
+assert step_registry.transitive_dependents("landform") == ("water", "roads", "trees", "structures")
+assert step_registry.transitive_dependents("trees") == ("structures",)
 
 # THE TWO NEW DECLARATIONS ARE VALIDATED. A copy of the trees entry with
 # each malformation must be refused.
@@ -770,7 +773,7 @@ _rejects(_contract_with(crossings=_G(type="x", exclusion_layer="canopy")), "a ba
 step_registry.validate_registry()
 
 print(
-    f"1 [test 1]. REGISTRY: validate_registry() passes with four entries "
+    f"1 [test 1]. REGISTRY: validate_registry() passes with five entries "
     f"{step_registry.registered_steps()}. The trees entry consumes {len(TREES.consumes)} "
     f"values -- 5 off the cache (scoring_inputs through a combine), 3 off commits, one per "
     f"upstream step, with empty_commit None (landform, [] is explicit), NO_WATER_ZONE (water) "

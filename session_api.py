@@ -12,6 +12,7 @@ THE HTTP SURFACE over the session orchestrator
     POST   /api/sessions/<sid>/steps/<step>/reopen   -> 200 document
     GET    /api/sessions/<sid>/steps/<step>/layers   -> 200 step payload
     POST   /api/sessions/<sid>/steps/<step>/discard  -> 200 document
+    POST   /api/sessions/<sid>/steps/<step>/score    -> 200 {feature}
     GET    /api/jobs/<jid>                           -> 200 {status, result|error}
 
 WIRING, AND NOTHING BUT. Every behaviour these routes expose already exists
@@ -408,7 +409,7 @@ def _handled(function):
     Run a route body, mapping any known exception through _API_ERRORS.
 
     A DECORATOR RATHER THAN A try/except IN EVERY HANDLER: the mapping must
-    be identical on all seven routes, and seven copies of it is seven chances
+    be identical on all nine routes, and nine copies of it is nine chances
     for one of them to drift. Flask's own errorhandler() would apply to the
     whole app, which would silently change how api.py's existing endpoints
     report failures -- explicitly out of scope for this branch.
@@ -467,11 +468,11 @@ def _json_body() -> dict:
 
 def build_blueprint(deps: Optional[Dependencies] = None, name: str = "sessions"):
     """
-    The eight routes, bound to `deps`. `name` is Flask's blueprint name and
+    The nine routes, bound to `deps`. `name` is Flask's blueprint name and
     only has to be unique per app -- a test registering a second blueprint on
     a fresh app passes its own.
 
-    SEVEN OF THEM TOUCH A SESSION AND ONE DOES NOT. GET /api/steps takes no
+    EIGHT OF THEM TOUCH A SESSION AND ONE DOES NOT. GET /api/steps takes no
     `deps` at all -- it serves a constant -- and it is registered here anyway
     rather than on its own blueprint, because it is the same surface, under
     the same prefix, with the same CORS policy and the same JSON conventions.
@@ -777,6 +778,41 @@ def build_blueprint(deps: Optional[Dependencies] = None, name: str = "sessions")
             cache=deps.cache,
         )
         return jsonify(_document_body(document))
+
+    @blueprint.route(
+        "/api/sessions/<session_id>/steps/<step_id>/score", methods=["POST"]
+    )
+    @_handled
+    def score_placed_feature_endpoint(session_id, step_id):
+        """
+        Score a feature the user PLACED against the step's current
+        proposals. Expects {"params": {<the step's placement input>: ...}}
+        -- for structures, {"params": {"site": [lon, lat]}} -- and returns
+        {"feature": <Feature>}, 200: the Feature carrying the full
+        measurement set, which the client commits as "user_added".
+
+        A READ. Nothing is persisted, the document does not move, and the
+        same point can be asked about repeatedly -- so 200 with the answer,
+        not 202 with a job: the work is one footprint's measurement over
+        geometry already in memory (step_orchestrator.score_placed_
+        feature()).
+
+        A step that declares no placement is a 400 (its user cannot place
+        anything); a step that is not `generated` is a 409 naming its
+        status (there is no run to measure against); a point off the
+        parcel is a 400 naming the input. The ceiling on placed features is
+        NOT enforced here -- a scored site holds no slot -- but at commit,
+        server-side, per the step's CommitContract.max_user_added.
+        """
+        feature = step_orchestrator.score_placed_feature(
+            session_id,
+            step_id,
+            deps.resolved_store(),
+            params=_json_body().get("params"),
+            fetch_cache=deps.fetch_cache,
+            cache=deps.cache,
+        )
+        return jsonify({"feature": feature})
 
     @blueprint.route("/api/jobs/<job_id>", methods=["GET"])
     @_handled

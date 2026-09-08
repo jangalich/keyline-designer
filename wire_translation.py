@@ -12,10 +12,13 @@ FeatureCollection, one function per layer the frontend displays or edits.
 INBOUND: committed GeoJSON -> the internal per-feature dict shape the
 downstream override parameters expect ("rehydration"), so a user-authored
 feature travels down the same override params as a computer-authored one.
-PRODUCTION ZONES AND TREE ZONES so far -- production first (B4), tree zones
-second, as the proof that the pattern carries to another drawn layer;
-structure sites follow. See the INBOUND section header near the bottom of
-this file for the governing rule and what is derived versus inherited.
+PRODUCTION ZONES, TREE ZONES AND STRUCTURE SITES -- production first (B4),
+tree zones second, as the proof that the pattern carries to another drawn
+layer, and structure sites third: the first layer whose user-authored
+feature is a POINT rather than a polygon, and the first that comes home
+SCORED (see that section's header for why that is a deliberate divergence
+from trees). See the INBOUND section headers near the bottom of this file
+for the governing rule and what is derived versus inherited.
 
 BOTH DIRECTIONS LIVE IN THIS ONE MODULE ON PURPOSE, and a later branch must
 not split them. The proposal's reason: the modules stay agnostic of the
@@ -1151,6 +1154,69 @@ def structure_sites_to_feature_collection(
 
     features = []
     for candidate in candidates:
+        # Confidence reflects geometric/data-quality reliability (this
+        # layer stacks a slope-only production heuristic, a DEM-only
+        # shading proxy, and public-only road data), NOT site
+        # desirability — a prime-farmland conflict, or sitting inside a
+        # production zone, doesn't make the geometry itself any less
+        # trustworthy, so neither is folded into confidence.
+        features.append(
+            make_feature(
+                feature_id=f"{_STRUCTURE_SITE_FEATURE_ID_PREFIX}{candidate['rank']}",
+                geometry=candidate["geometry_wgs84"],
+                layer=LAYER_SOLAR,
+                label=f"Solar structure candidate (rank {candidate['rank']})",
+                confidence=CONFIDENCE_LOW,
+                confidence_notes=confidence_notes,
+                extra_properties=_structure_site_properties(
+                    candidate, road_proximity_source, tree_zone_exclusion_available
+                ),
+            )
+        )
+
+    return make_feature_collection(features)
+
+
+def _structure_site_properties(
+    candidate: dict, road_proximity_source: str, tree_zone_exclusion_available: bool
+) -> dict:
+    """
+    THE MEASUREMENT SET ON THE WIRE, for a generated candidate and a placed
+    site alike -- one property block, so the two are comparable field for
+    field and a panel renders both off one shape.
+
+    THE FOUR FACTOR SCORES ride here now (slope_score, aspect_score,
+    shading_score, production_proximity_score -- 0-1, the candidate's own
+    stored values). They were on the candidate dict and never on the wire,
+    which left the inbound half unable to bring them home: a placed site
+    committed as a Point has no scoring run to re-derive them from, so
+    what the wire does not carry the document cannot hold. Additive; every
+    property that was here is still here, spelled the same.
+
+    `constraints_satisfied` is the generated candidate's GUARANTEE (every
+    gate the run applied, satisfied by construction) unless the candidate
+    carries its own `constraints` outcomes -- a placed site does
+    (solar_suitability._measure_footprint()) -- in which case the list is
+    the gates it actually cleared and `constraints_violated` names the ones
+    it did not. A generated candidate never carries the second key: it has
+    nothing to put in it, and an empty list would read as "checked, none"
+    on a feature whose gates were exits rather than outcomes.
+
+    `site_origin` says which kind of site this is, on the wire, without a
+    document to consult: "generated" or "user_placed". See
+    solar_suitability.SITE_ORIGIN_USER_PLACED.
+    """
+    from solar_suitability import (
+        MAX_SOLAR_SLOPE_PCT,
+        MIN_SUITABILITY_SCORE,
+        SITE_ORIGIN_GENERATED,
+    )
+
+    constraints = candidate.get("constraints")
+    if constraints is not None:
+        constraints_satisfied = [name for name, satisfied in constraints.items() if satisfied]
+        constraints_violated = [name for name, satisfied in constraints.items() if not satisfied]
+    else:
         constraints_satisfied = [
             "outside_water_candidate_zone",
             "outside_existing_canopy",
@@ -1161,60 +1227,138 @@ def structure_sites_to_feature_collection(
             constraints_satisfied.append("outside_tree_zone_candidate_buffer")
         if candidate.get("distance_to_road_m") is not None:
             constraints_satisfied.append("within_road_proximity_buffer")
+        constraints_violated = None
 
-        distance_to_road_ft = (
-            round(candidate["distance_to_road_m"] / METERS_PER_FOOT, 1)
-            if candidate.get("distance_to_road_m") is not None
-            else None
-        )
-        distance_to_production_zone_ft = (
-            round(candidate["distance_to_production_zone_m"] / METERS_PER_FOOT, 1)
-            if candidate.get("distance_to_production_zone_m") is not None
-            else None
-        )
-        distance_to_water_zone_ft = (
-            round(candidate["distance_to_water_zone_m"] / METERS_PER_FOOT, 1)
-            if candidate.get("distance_to_water_zone_m") is not None
-            else None
-        )
+    distance_to_road_ft = (
+        round(candidate["distance_to_road_m"] / METERS_PER_FOOT, 1)
+        if candidate.get("distance_to_road_m") is not None
+        else None
+    )
+    distance_to_production_zone_ft = (
+        round(candidate["distance_to_production_zone_m"] / METERS_PER_FOOT, 1)
+        if candidate.get("distance_to_production_zone_m") is not None
+        else None
+    )
+    distance_to_water_zone_ft = (
+        round(candidate["distance_to_water_zone_m"] / METERS_PER_FOOT, 1)
+        if candidate.get("distance_to_water_zone_m") is not None
+        else None
+    )
 
-        extra_properties = {
-            "rank": candidate["rank"],
-            "suitability_score": candidate["suitability_score"],
-            "avg_slope_pct": candidate["avg_slope_pct"],
-            "aspect": candidate["aspect_label"],
-            "aspect_degrees": candidate["aspect_deg"],
-            "footprint_area_acres": candidate["footprint_area_acres"],
-            "distance_to_road_ft": distance_to_road_ft,
-            "road_proximity_source": road_proximity_source,
-            "distance_to_production_zone_ft": distance_to_production_zone_ft,
-            "production_zone_relationship": candidate["production_zone_relationship"],
-            "distance_to_water_zone_ft": distance_to_water_zone_ft,
-            "constraints_satisfied": constraints_satisfied,
-        }
-        if "prime_farmland_conflict" in candidate:
-            extra_properties["prime_farmland_conflict"] = candidate["prime_farmland_conflict"]
-            extra_properties["prime_farmland_note"] = candidate["prime_farmland_note"]
+    extra_properties = {
+        "rank": candidate["rank"],
+        "suitability_score": candidate["suitability_score"],
+        "slope_score": candidate["slope_score"],
+        "aspect_score": candidate["aspect_score"],
+        "shading_score": candidate["shading_score"],
+        "production_proximity_score": candidate["production_proximity_score"],
+        "avg_slope_pct": candidate["avg_slope_pct"],
+        "aspect": candidate["aspect_label"],
+        "aspect_degrees": candidate["aspect_deg"],
+        "footprint_area_acres": candidate["footprint_area_acres"],
+        "distance_to_road_ft": distance_to_road_ft,
+        "road_proximity_source": road_proximity_source,
+        "distance_to_production_zone_ft": distance_to_production_zone_ft,
+        "production_zone_relationship": candidate["production_zone_relationship"],
+        "distance_to_water_zone_ft": distance_to_water_zone_ft,
+        "constraints_satisfied": constraints_satisfied,
+        "site_origin": candidate.get("site_origin", SITE_ORIGIN_GENERATED),
+    }
+    if constraints_violated is not None:
+        extra_properties["constraints_violated"] = constraints_violated
+    if "prime_farmland_conflict" in candidate:
+        extra_properties["prime_farmland_conflict"] = candidate["prime_farmland_conflict"]
+        extra_properties["prime_farmland_note"] = candidate["prime_farmland_note"]
+    return extra_properties
 
-        # Confidence reflects geometric/data-quality reliability (this
-        # layer stacks a slope-only production heuristic, a DEM-only
-        # shading proxy, and public-only road data), NOT site
-        # desirability — a prime-farmland conflict, or sitting inside a
-        # production zone, doesn't make the geometry itself any less
-        # trustworthy, so neither is folded into confidence.
-        features.append(
-            make_feature(
-                feature_id=f"solar-candidate-{candidate['rank']}",
-                geometry=candidate["geometry_wgs84"],
-                layer=LAYER_SOLAR,
-                label=f"Solar structure candidate (rank {candidate['rank']})",
-                confidence=CONFIDENCE_LOW,
-                confidence_notes=confidence_notes,
-                extra_properties=extra_properties,
-            )
-        )
 
-    return make_feature_collection(features)
+PLACED_STRUCTURE_SITE_NOTE = (
+    " THIS SITE WAS PLACED BY THE USER, not sampled by the grid: the point is theirs, and the "
+    "footprint is the same fixed building pad every generated candidate gets, centred on it and "
+    "clipped to the parcel. It is measured by exactly the code that measures a generated candidate, "
+    "against the same run, and its score is directly comparable to theirs -- but unlike a generated "
+    "candidate it is NOT guaranteed to clear the hard constraints: properties.constraints_violated "
+    "names any it failed, and properties.rank is where it WOULD sit in the generated shortlist, not "
+    "a slot in it."
+)
+
+
+def placed_structure_site_to_feature(site: dict, result: dict) -> dict:
+    """
+    ONE user-placed structure site -- solar_suitability.score_placed_
+    structure_site()'s dict -- as the Feature the client commits, under the
+    run flags of the run it was scored against.
+
+    A POINT, NOT A POLYGON. The user placed a point, and that is what the
+    document should hold as the editable source: a commit whose geometry
+    is the derived pad would record a footprint the user never drew and
+    could not have drawn differently. The pad rides along as
+    properties.footprint_wgs84 -- the real, parcel-clipped polygon the
+    measurements were taken over -- so a map can draw it and a reader can
+    see what was measured, exactly as a tree zone's display outline rides
+    as a property beside the geometry it renders. Nothing computes from
+    it; the inbound half derives the pad again from the point (see
+    rehydrate_structure_site()).
+
+    THE ID is minted here, deterministically from the placed point, the
+    way a road network's id comes from its access point
+    (access_point_key): the same point placed twice is the same feature,
+    and two placed sites cannot collide unless they are the same place.
+    It does not parse as a generated candidate's id, so the commit path
+    allocates it an internal id (internal_structure_site_id() returns
+    None for it) rather than mistaking it for rank N.
+
+    The property block is _structure_site_properties()'s, the same one a
+    generated candidate carries, so the two are comparable field for field
+    -- plus the placed point and the pad. The confidence notes are the
+    RUN'S notes (result["run_flags"], the four flags surfaced by
+    identify_solar_candidate_zones()) with the placed-site sentence
+    appended: the caveats about the run apply to this site exactly as to
+    a generated one, and one more applies to it alone.
+    """
+    from solar_suitability import (
+        CANDIDATE_POINT_SPACING_METERS,
+        MAX_STRUCTURE_FOOTPRINT_ACRES,
+        SITE_ORIGIN_USER_PLACED,
+    )
+
+    run_flags = dict(result.get("run_flags") or {})
+    if run_flags.get("spacing_meters") is None:
+        run_flags["spacing_meters"] = CANDIDATE_POINT_SPACING_METERS
+    if run_flags.get("max_structure_footprint_acres") is None:
+        run_flags["max_structure_footprint_acres"] = MAX_STRUCTURE_FOOTPRINT_ACRES
+    road_proximity_source = run_flags.get("road_proximity_source", "unavailable")
+    tree_zone_exclusion_available = bool(run_flags.get("tree_zone_exclusion_available", True))
+
+    # THE RUN'S OWN NOTES, taken off a one-candidate build through the
+    # same function rather than re-templated here -- so the placed site's
+    # caveat text can never drift from the generated candidates' beside it.
+    run_notes = structure_sites_to_feature_collection([site], **run_flags)["features"][0]["properties"][
+        "confidence_notes"
+    ]
+
+    lon, lat = float(site["placed_lon_lat"][0]), float(site["placed_lon_lat"][1])
+    properties = _structure_site_properties(site, road_proximity_source, tree_zone_exclusion_available)
+    properties["site_origin"] = SITE_ORIGIN_USER_PLACED
+    properties["placed_lon_lat"] = [lon, lat]
+    properties["footprint_wgs84"] = site["geometry_wgs84"]
+
+    return make_feature(
+        feature_id=placed_structure_site_feature_id((lon, lat)),
+        geometry={"type": "Point", "coordinates": [lon, lat]},
+        layer=LAYER_SOLAR,
+        label="Placed structure site",
+        confidence=CONFIDENCE_LOW,
+        confidence_notes=run_notes + PLACED_STRUCTURE_SITE_NOTE,
+        extra_properties=properties,
+    )
+
+
+def placed_structure_site_feature_id(lon_lat) -> str:
+    """The wire id of a placed structure site: the placed-site prefix plus
+    access_point_key()'s stable digest of the point. See
+    placed_structure_site_to_feature()."""
+    return f"{_PLACED_STRUCTURE_SITE_FEATURE_ID_PREFIX}{access_point_key(lon_lat)}"
 
 
 def selected_structure_site_to_feature_collection(
@@ -1426,6 +1570,17 @@ _PRODUCTION_FEATURE_ID_PREFIX = "production-area-"
 # parses exactly that. Defined up here, beside production's, because the
 # outbound function above reads it and the inbound half below parses it.
 _TREE_ZONE_FEATURE_ID_PREFIX = "tree-zone-candidate-"
+
+# And for structure sites, TWO spellings because there are two kinds of
+# site. structure_sites_to_feature_collection() emits
+# f"solar-candidate-{candidate['rank']}" for a generated candidate -- the
+# RANK is the candidate's only identity, there is no separate patch id --
+# and internal_structure_site_id() parses exactly that. A PLACED site is
+# f"structure-site-placed-{access_point_key(lon_lat)}", a digest of the
+# point rather than a number, and deliberately does not parse: the commit
+# path allocates it an internal id, exactly as it does a drawn zone's.
+_STRUCTURE_SITE_FEATURE_ID_PREFIX = "solar-candidate-"
+_PLACED_STRUCTURE_SITE_FEATURE_ID_PREFIX = "structure-site-placed-"
 
 
 # The dimensionless degeneracy floor _polygonal_shape_from_wire() rejects a
@@ -2597,6 +2752,258 @@ def rehydrate_tree_zones(
 
     return [
         rehydrate_tree_zone(feature, dem, zone_id=None if zone_ids is None else zone_ids[index])
+        for index, feature in enumerate(features)
+    ]
+
+
+# ======================================================================
+# INBOUND: structure sites -- the third rehydrated layer, the first POINT
+# ======================================================================
+#
+# WHAT IS DIFFERENT HERE, and it is less than it looks. Landform and trees
+# rehydrate a POLYGON the user drew or selected: reproject, validate the
+# ring, rasterise, and for production open the fill. A structure site is
+# one of two things on the wire -- a generated candidate's clipped
+# footprint POLYGON, coming home as it went out, or a PLACED site's POINT.
+# The polygon case is the two prior layers' case exactly. The point case
+# has no ring to validate, no clamp to preserve and no crossing geometry
+# to measure: the pad is DERIVED from the point by the same rule the
+# scorer applies to every sampled candidate (the fixed square,
+# MAX_STRUCTURE_FOOTPRINT_ACRES, centred on it), and the point's own
+# validity is a containment question the commit gate already asks.
+#
+# WHAT IS DERIVED AND WHAT IS INHERITED, the same rule as the two before:
+#
+#     polygon_utm            DERIVED -- the wire polygon reprojected, or the
+#                            pad built around the reprojected point
+#     geometry_wgs84         DERIVED -- that polygon back out to WGS84
+#     footprint_area_acres   DERIVED -- polygon_utm's own area
+#     point_utm / placed_lon_lat
+#                            DERIVED, a placed site only -- the point itself
+#     site_origin            READ off the feature ("generated" or
+#                            "user_placed"; absent reads as generated)
+#
+# ...and THE MEASUREMENT SET IS INHERITED, verbatim where the wire carries
+# the internal spelling and through the inverse of the outbound rename
+# where it does not (aspect -> aspect_label, aspect_degrees -> aspect_deg,
+# *_ft -> *_m). All-or-nothing on `suitability_score`, as for the two
+# prior layers. THIS IS THE DIVERGENCE FROM TREES, and it is deliberate:
+# a drawn tree zone comes home UNSCORED because trees would not score it;
+# a placed structure site comes home SCORED because solar did -- score_
+# placed_structure_site() measured it against the same run as the
+# generated candidates, and the wire is how that measurement reaches the
+# document. The rehydrator does not re-score: it has the DEM and nothing
+# else, and the run's production ground, water exclusion, road tier and
+# canopy mask are the orchestrator's to assemble, not this boundary's.
+# The fields are therefore ADVISORY on a rehydrated site in exactly the
+# sense production's are -- the wire's own statement about the run that
+# produced them -- and no consumer of the committed value computes from
+# them.
+#
+# THE ONE THING THAT DOES NOT ROUND-TRIP EXACTLY: the three distances go
+# out in feet at one decimal and come home converted back to metres, so a
+# rehydrated distance_to_*_m agrees with the original to within 0.05 m
+# rather than bit for bit. Asserted at that tolerance, and only that one,
+# in test_structures_step.py.
+#
+# THE PAD OF A PLACED SITE IS NOT CLIPPED TO THE PARCEL here, for
+# rehydrate_production_zone()'s reason (this boundary does not clip), so
+# a placed site near the boundary rehydrates with the full square while
+# its scored footprint_area_acres described the clipped pad. The commit
+# gate's containment check runs on the full square, which is the honest
+# gate for a point: a point whose pad hangs more than
+# commit_validation.BOUNDARY_OVERHANG_MIN_ACRES off the parcel is a point
+# on or outside the line, and is refused.
+
+# {wire property -> (internal field, converter)} for the inherited
+# measurement set. Identity for the fields the wire spells as the
+# candidate dict does; the outbound rename's inverse for the rest.
+_STRUCTURE_ADVISORY_WIRE_FIELDS = (
+    ("rank", "rank", None),
+    ("suitability_score", "suitability_score", None),
+    ("slope_score", "slope_score", None),
+    ("aspect_score", "aspect_score", None),
+    ("shading_score", "shading_score", None),
+    ("production_proximity_score", "production_proximity_score", None),
+    ("avg_slope_pct", "avg_slope_pct", None),
+    ("aspect_degrees", "aspect_deg", None),
+    ("aspect", "aspect_label", None),
+    ("distance_to_road_ft", "distance_to_road_m", "feet"),
+    ("distance_to_production_zone_ft", "distance_to_production_zone_m", "feet"),
+    ("distance_to_water_zone_ft", "distance_to_water_zone_m", "feet"),
+    ("production_zone_relationship", "production_zone_relationship", None),
+    ("road_proximity_source", "road_proximity_source", None),
+    ("constraints_satisfied", "constraints_satisfied", None),
+    ("constraints_violated", "constraints_violated", None),
+    ("prime_farmland_conflict", "prime_farmland_conflict", None),
+    ("prime_farmland_note", "prime_farmland_note", None),
+)
+
+
+def _feet_to_meters(value):
+    return None if value is None else round(float(value) * METERS_PER_FOOT, 1)
+
+
+def internal_structure_site_id(feature_id: Any) -> Optional[int]:
+    """
+    The integer behind a GENERATED structure candidate's feature id
+    ("solar-candidate-<n>" -- n is the candidate's rank, its only identity)
+    or None for anything else, a placed site's "structure-site-placed-<key>"
+    included.
+
+    internal_zone_id()'s counterpart for this layer and the parser the
+    structures commit contract declares (step_registry.CommitContract.
+    internal_id_parser), so commit_validation.internal_ids_for() keeps a
+    selected candidate's number and ALLOCATES one for a placed site above
+    every number the commit already uses. A bare int passes through for
+    the same reason it does for production.
+    """
+    if isinstance(feature_id, int) and not isinstance(feature_id, bool):
+        return feature_id
+    if isinstance(feature_id, str) and feature_id.startswith(_STRUCTURE_SITE_FEATURE_ID_PREFIX):
+        tail = feature_id[len(_STRUCTURE_SITE_FEATURE_ID_PREFIX):]
+        if tail.isdigit():
+            return int(tail)
+    return None
+
+
+def rehydrate_structure_site(feature: dict, dem: dict, site_id: Optional[int] = None) -> dict:
+    """
+    ONE committed structure-site Feature -> the internal site dict the
+    structures step's committed value is a list of. The exact counterpart
+    of structure_sites_to_feature_collection() (a generated candidate,
+    Polygon) and placed_structure_site_to_feature() (a placed site,
+    Point); see the section header for what is derived and what is
+    inherited, and for why a placed site comes home scored.
+
+    `site_id` overrides the integer id; when None it is parsed off a
+    generated candidate's own "solar-candidate-<n>", and a feature
+    carrying neither is refused rather than given an invented id, for
+    _zone_id_from_feature_id()'s reason.
+
+    A POINT becomes the fixed building pad centred on it, in the DEM's
+    CRS, NOT clipped (see the header). A POLYGON or MULTIPOLYGON goes
+    through _polygonal_shape_from_wire() exactly as a zone does. Either
+    way the pad must cover at least one DEM cell centre -- a site with no
+    cell under it has no ground to be measured on, and nothing downstream
+    could say anything about it.
+
+    Raises InboundGeometryError, with the defect named, on anything that
+    cannot become a valid site.
+    """
+    from rasterio.warp import transform as warp_transform
+    from rasterio.warp import transform_geom
+    from shapely.geometry import Point, box, mapping
+
+    from raster_grid import SQUARE_METERS_PER_ACRE, cells_in_polygon
+    from solar_suitability import (
+        MAX_STRUCTURE_FOOTPRINT_ACRES,
+        SITE_ORIGIN_GENERATED,
+        SITE_ORIGIN_USER_PLACED,
+        _footprint_side_meters,
+    )
+
+    if not isinstance(feature, dict):
+        raise InboundGeometryError(
+            f"a structure site must be a GeoJSON Feature dict, got {type(feature).__name__}"
+        )
+
+    feature_id = feature.get("id")
+    where = f"structure site {feature_id!r}" if feature_id is not None else "structure site"
+
+    if site_id is None:
+        site_id = internal_structure_site_id(feature_id)
+        if site_id is None:
+            raise InboundGeometryError(
+                f"{where}: cannot determine an integer site id from feature id {feature_id!r}. A generated "
+                "candidate carries \"solar-candidate-<n>\"; a placed site has no pipeline id, so its caller "
+                "must pass site_id= explicitly rather than have one invented here (an invented id can "
+                "collide with a generated candidate's in the same commit)."
+            )
+
+    geometry = feature.get("geometry")
+    if not isinstance(geometry, dict):
+        raise InboundGeometryError(
+            f"{where}: geometry must be a GeoJSON geometry dict, got {type(geometry).__name__}"
+        )
+    properties = feature.get("properties") or {}
+
+    site = {"id": site_id}
+    if geometry.get("type") == "Point":
+        coordinates = geometry.get("coordinates")
+        try:
+            lon, lat = float(coordinates[0]), float(coordinates[1])
+        except (TypeError, IndexError, ValueError):
+            raise InboundGeometryError(
+                f"{where}: a Point needs [lon, lat] coordinates, got {coordinates!r}"
+            ) from None
+        if not (-180.0 <= lon <= 180.0 and -90.0 <= lat <= 90.0):
+            raise InboundGeometryError(f"{where}: [{lon}, {lat}] is not a lon/lat position")
+        xs, ys = warp_transform("EPSG:4326", dem["crs"], [lon], [lat])
+        point_utm = Point(xs[0], ys[0])
+        half = _footprint_side_meters(MAX_STRUCTURE_FOOTPRINT_ACRES) / 2
+        polygon_utm = box(point_utm.x - half, point_utm.y - half, point_utm.x + half, point_utm.y + half)
+        site["point_utm"] = point_utm
+        site["placed_lon_lat"] = [lon, lat]
+        # A POINT IS A PLACED SITE, whatever its properties say: no
+        # generated candidate is ever a point, so the geometry is the
+        # stronger statement and the property is not consulted.
+        site["site_origin"] = SITE_ORIGIN_USER_PLACED
+    else:
+        polygon_utm = _polygonal_shape_from_wire(geometry, dem, where)
+        site["site_origin"] = properties.get("site_origin", SITE_ORIGIN_GENERATED)
+
+    if not cells_in_polygon(dem, polygon_utm):
+        raise InboundGeometryError(
+            f"{where}: its footprint covers no DEM cell center ({polygon_utm.area:.2f} m^2 at "
+            f"{dem['resolution_meters'][0]:.1f}x{dem['resolution_meters'][1]:.1f} m resolution), so there is "
+            "no ground under it to measure."
+        )
+
+    site["polygon_utm"] = polygon_utm
+    site["geometry_wgs84"] = transform_geom(dem["crs"], "EPSG:4326", mapping(polygon_utm))
+    site["footprint_area_acres"] = round(float(polygon_utm.area / SQUARE_METERS_PER_ACRE), 3)
+
+    # The measurement set, all-or-nothing on the composite (see the header).
+    if "suitability_score" in properties:
+        for wire_name, internal_name, converter in _STRUCTURE_ADVISORY_WIRE_FIELDS:
+            if wire_name in properties:
+                value = properties[wire_name]
+                site[internal_name] = _feet_to_meters(value) if converter == "feet" else value
+
+    return site
+
+
+def rehydrate_structure_sites(
+    collection: Optional[dict],
+    dem: dict,
+    site_ids: Optional[list[int]] = None,
+) -> list[dict]:
+    """
+    A whole committed structure-site FeatureCollection -> the list the
+    structures step's committed value is.
+
+    EMPTY IN, EMPTY OUT, and [] is the answer a consumer gets: the fencing
+    entry, when it consumes this, will take the list and treat an empty
+    one as "no structure" -- so an empty structures commit needs no
+    sentinel and the registry entry will declare none (step_registry.
+    Consumed.empty_commit's LIST case, as for tree zones).
+
+    `site_ids` is the production rehydrator's own contract: one id per
+    feature, in order, for a commit whose placed sites carry no pipeline
+    id. A single bad feature fails the WHOLE call, for the same reason.
+    """
+    features = (collection or {}).get("features") if isinstance(collection, dict) else collection
+    features = list(features or [])
+
+    if site_ids is not None and len(site_ids) != len(features):
+        raise InboundGeometryError(
+            f"site_ids has {len(site_ids)} entries for {len(features)} features -- one id per feature, "
+            "in order, or None to parse each feature's own id."
+        )
+
+    return [
+        rehydrate_structure_site(feature, dem, site_id=None if site_ids is None else site_ids[index])
         for index, feature in enumerate(features)
     ]
 
