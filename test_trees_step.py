@@ -867,7 +867,14 @@ with Harness() as h:
     # THE STEP-LEVEL BLOCK: the narrative whole, and the FOUR FACTOR WEIGHTS
     # on the wire -- what lets a panel explain a score.
     summary = payload["summary"]
-    assert set(summary) == {"candidate_count", "search_space", "selection", "gates"}, sorted(summary)
+    assert set(summary) == {
+        "candidate_count", "dropped_invalid_count", "search_space", "selection", "gates",
+    }, sorted(summary)
+    # A patch the scorer refused to emit is COUNTED, not silently absent -- the
+    # emission gate's own convention, water's `dropped_count` precedent. Zero
+    # on this fixture, and the count's own coverage is
+    # test_tree_zone_geometry_validity.py's.
+    assert summary["dropped_invalid_count"] == 0, summary["dropped_invalid_count"]
     WEIGHTS = summary["selection"]["factor_weights_pct"]
     assert WEIGHTS == {
         "hydric_overlap": round(tree_zone_candidates.HYDRIC_OVERLAP_FACTOR_WEIGHT * 100, 1),
@@ -1127,43 +1134,26 @@ for original in GENERATED_PATCHES:
 OUTBOUND = wire_translation.tree_zones_to_feature_collection(GENERATED_PATCHES)
 validate_feature_collection(OUTBOUND)
 
-# THE PAYLOAD CARRIES THE OUTBOUND COLLECTION PLUS EXACTLY ONE PROPERTY, and
-# the difference is asserted rather than tolerated. build_trees_payload() adds
-# `display_only_smoothed_outline` -- a DISPLAY-ONLY rendering of each feature's
-# own geometry (display_outline.py) that nothing may compute from. Stripping it
-# must return the collection this file just built, byte for byte: the geometry,
-# the ids, the scores, the four factors and the three availability flags are
-# all untouched by its existence, which is the whole of the claim.
+# THE PAYLOAD CARRIES THE OUTBOUND COLLECTION AND NOTHING ELSE, and the
+# equality is asserted rather than tolerated. build_trees_payload() used to add
+# `display_only_smoothed_outline`, and it no longer does: render_layout_map.py
+# draws the tree hatch from the cell-union footprint verbatim ("no hull, no
+# opening, no smoothing of any kind"), so a smoothed outline on a tree feature
+# made the interactive map disagree with the printed one instead of agreeing
+# with it -- and the smooth is anti-extensive, so what it moved it moved off
+# the thin arms this layer exists to find. Production still carries its
+# outline, where it does match the layout map; that is section 1 of
+# test_display_outline.py. See display_outline.py.
 DISPLAY_ONLY_OUTLINE = display_outline.DISPLAY_ONLY_OUTLINE_PROPERTY
 PAYLOAD_COLLECTION = GENERATE_PAYLOAD["tree_zones"]
 
-
-def _without_display_only_outline(collection):
-    return {
-        **collection,
-        "features": [
-            {
-                **feature,
-                "properties": {
-                    key: value
-                    for key, value in feature["properties"].items()
-                    if key != DISPLAY_ONLY_OUTLINE
-                },
-            }
-            for feature in collection["features"]
-        ],
-    }
-
-
-assert _without_display_only_outline(PAYLOAD_COLLECTION) == OUTBOUND, (
-    "the payload carries the outbound collection unchanged apart from the display-only outline"
+assert PAYLOAD_COLLECTION == OUTBOUND, (
+    "the payload carries the outbound collection unchanged -- nothing added"
 )
-for feature, outbound in zip(PAYLOAD_COLLECTION["features"], OUTBOUND["features"]):
-    assert set(feature["properties"]) - set(outbound["properties"]) == {DISPLAY_ONLY_OUTLINE}, (
-        f"{feature['id']}: the payload added more than the display-only outline"
+for feature in PAYLOAD_COLLECTION["features"]:
+    assert DISPLAY_ONLY_OUTLINE not in feature["properties"], (
+        f"{feature['id']}: a tree feature must carry no display-only smoothed outline"
     )
-    outline = feature["properties"][DISPLAY_ONLY_OUTLINE]
-    assert outline is not None and outline["type"] in ("Polygon", "MultiPolygon"), outline
 
 worst_relative_symmetric_difference = 0.0
 for feature, original in zip(OUTBOUND["features"], GENERATED_PATCHES):
@@ -1772,6 +1762,7 @@ print(
     "\n11 [test 11]. REGRESSION: run the other test files separately -- test_step_registry.py, "
     "test_wire_translation.py, test_wire_translation_inbound.py, test_step_orchestrator.py, "
     "test_step_commit.py, test_water_step.py, test_roads_step.py, test_tree_zone_candidates.py, "
-    "test_session_api.py, test_solar_suitability.py, test_fencing.py, test_render_layout_map.py."
+    "test_session_api.py, test_solar_suitability.py, test_fencing.py, test_render_layout_map.py, "
+    "test_tree_zone_geometry_validity.py, test_tree_zone_render_footprint.py."
 )
 print("\nAll trees step checks passed.")

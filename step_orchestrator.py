@@ -116,10 +116,6 @@ import session_cache
 import session_manager
 import step_registry
 from design_document import mark_step_generated
-# THE DISPLAY-ONLY OUTLINE'S OWN MODULE: the smoothing, and the ONE spelling of
-# the property it rides under -- landform's payload reads the same constant, so
-# the two steps cannot ship a frontend two names for one field.
-from display_outline import DISPLAY_ONLY_OUTLINE_PROPERTY, smoothed_display_outline
 # The two ENVELOPE layer names, from the module that mints them -- never
 # re-typed here (build_water_payload()'s feature_id lookup filters on them,
 # and "starts with survey_zone_" is true of the member layers too).
@@ -1759,15 +1755,29 @@ def build_trees_payload(result: dict, assembled: dict) -> dict:
     computation to include. It is a diagnostic of THIS generate, not a
     gate: drawing outside it is legal and its cautions are the crossings.
 
-    THE ONE THING ADDED TO THE FEATURES: `display_only_smoothed_outline`, on
-    every candidate, put there by _with_display_only_outlines() below. A tree
-    zone is a union of 5 m DEM cells and its outline is a right-angle
-    staircase; this is that staircase smoothed, by the same
-    smoothed_display_outline() the PDF's layout map uses, so
-    the interactive map and the printed one agree. It is DISPLAY ONLY --
-    nothing computes from it, the feature's own `geometry` is untouched, and
-    the crossings below are still measured against real geometry. See
-    display_outline.py.
+    NOTHING IS ADDED TO THE FEATURES, and the one thing that used to be is
+    the reason this paragraph is still here. Tree candidates once shipped
+    `display_only_smoothed_outline`, on the argument that a tree zone is a
+    union of 5 m DEM cells and its staircase should be smoothed the way
+    production's is. That argument does not survive contact with what the
+    layout map actually draws: render_layout_map.py smooths the PRODUCTION
+    FILL, because that geometry is what its contour lines are clipped against
+    and a 5 m staircase shows in the clip; it draws the TREE hatch from the
+    cell-union footprint verbatim -- "no hull, no opening, no smoothing of any
+    kind" -- so a smoothed outline on a tree feature made the interactive map
+    disagree with the printed one rather than agree with it.
+
+    AND THE SMOOTH WAS ANTI-EXTENSIVE, WHICH IS THE PART THAT MATTERED. A
+    simplify-plus-Chaikin pass on a cell union cuts corners inward; measured
+    on the reference parcel it moved 19.56% of a 0.32 ac candidate, all of it
+    a loss, which is exactly the thin-arm deletion tree_zone_candidates.py's
+    own render docstring refuses an opening for. A windbreak row one cell wide
+    is the geometry this layer exists to find, and it was being eaten for a
+    cosmetic reason the PDF does not share.
+
+    PRODUCTION STILL CARRIES ITS OUTLINE, unchanged, through
+    production_zone_payload.py -- there it does match the layout map, byte for
+    byte. See display_outline.py, which owns the rule and the smoothing.
 
     `crossing_grounds` IS WHAT THOSE CAUTIONS ARE MEASURED AGAINST: the
     contract's four grounds, resolved off `assembled` exactly as the commit
@@ -1782,9 +1792,7 @@ def build_trees_payload(result: dict, assembled: dict) -> dict:
         for feature in result["zones_geojson"]["features"]
     }
     return {
-        "tree_zones": _with_display_only_outlines(
-            result["zones_geojson"], result["patches"], assembled["dem"]
-        ),
+        "tree_zones": result["zones_geojson"],
         "zones": [
             {**row, "feature_id": feature_id_by_rank[row["rank"]]}
             for row in narrative["zones"]
@@ -1890,74 +1898,6 @@ def build_structures_payload(result: dict, assembled: dict) -> dict:
             "shape": definition.placement.shape,
             "max_placed": definition.commit_contract.max_user_added,
         },
-    }
-
-
-def _with_display_only_outlines(collection: dict, patches: list, dem: dict) -> dict:
-    """
-    `collection` with every feature carrying its patch's DISPLAY-ONLY smoothed
-    outline in properties, as a WGS84 GeoJSON geometry.
-
-    NOTHING MAY COMPUTE FROM THE FIELD. It is a rendering of the feature's own
-    geometry, not a second version of it -- see display_outline.py, which owns
-    both the rule and the smoothing. The feature's `geometry`, its acreage, its
-    factors and the crossings the commit records are all untouched.
-
-    COMPUTED HERE, INSIDE THE GENERATE, and not lazily when the layers are
-    fetched: this builder is what a generate returns and what step_payload()
-    rebuilds on a re-read, so the outline is part of the payload wherever the
-    payload comes from. It costs one simplify plus one Chaikin pass per
-    candidate over geometry already in hand.
-
-    SMOOTHED FROM THE PATCH, NOT FROM THE WIRE. The patch holds
-    render_fill_polygon_utm in the DEM's own projected metres, which is where a
-    metre-denominated tolerance means anything; reprojecting the feature's
-    WGS84 ring back to UTM to smooth it would be a second, lossy route to the
-    same geometry. tree_zone_candidates.py records the same object under
-    polygon_utm and render_fill_polygon_utm ("a tree zone is a real planted
-    footprint"), so the smooth and its re-clip run against one shape here --
-    the same call production's opening takes.
-
-    JOINED ON `rank`, the same join build_trees_payload() already makes to put
-    `feature_id` on a tabular row: ranks are 1..n and unique, assigned by the
-    scorer, and both sides carry one. Rebuilding the feature id from the patch
-    id with a format string is the thing this codebase keeps taking out -- one
-    identity with two sources of truth, joined by a template literal nothing
-    checks.
-
-    A PATCH WITH NO FEATURE, OR A FEATURE WITH NO PATCH, IS NOT AN ERROR TO
-    RAISE HERE: a feature the join misses carries None and draws its own
-    geometry, which is what a client does for a drawn zone anyway. A display
-    field is the wrong place to fail a generate.
-    """
-    outlines = {}
-    for patch in patches or []:
-        polygon_utm = patch["render_fill_polygon_utm"]
-        if polygon_utm.is_empty:
-            continue
-        outline_utm = smoothed_display_outline(
-            polygon_utm, patch["polygon_utm"], max(dem["resolution_meters"])
-        )
-        if outline_utm.is_empty:
-            continue
-        outlines[patch["rank"]] = transform_geom(
-            dem["crs"], "EPSG:4326", mapping(outline_utm)
-        )
-
-    return {
-        **collection,
-        "features": [
-            {
-                **feature,
-                "properties": {
-                    **feature["properties"],
-                    DISPLAY_ONLY_OUTLINE_PROPERTY: outlines.get(
-                        feature["properties"].get("rank")
-                    ),
-                },
-            }
-            for feature in collection["features"]
-        ],
     }
 
 

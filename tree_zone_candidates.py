@@ -246,9 +246,10 @@ from typing import Optional
 import numpy as np
 from rasterio.warp import transform as warp_transform
 from rasterio.warp import transform_geom
-from shapely.geometry import Point, Polygon, box, mapping, shape
+from shapely.geometry import MultiPolygon, Point, Polygon, box, mapping, shape
 from shapely.ops import unary_union
 from shapely.prepared import prep
+from shapely.validation import explain_validity, make_valid
 
 from canopy_height_data import TREE_ROOT_ZONE_BUFFER_METERS
 from dem_data import get_dem_for_boundary
@@ -393,6 +394,50 @@ MIN_TREE_SUITABILITY_SCORE = 31.0
 # tuned constant is documented as deliberately NOT aliased so the two floors
 # can be retuned without one silently dragging the other along.
 MIN_TREE_ZONE_ACRES = 0.1
+
+# The largest INTERIOR RING, measured in DEM CELLS, that is FILLED before a
+# patch is emitted. Stated in CELLS and not in acres or square metres on
+# purpose: what this threshold is really about is how many independent gate
+# decisions a hole represents, and a gate decision is made once per cell. An
+# area floor would mean a different number of decisions at 1 m than at 10 m,
+# which is the wrong invariant for a rule whose whole justification is "one
+# threshold crossing is not a feature."
+#
+# 1.0 CELLS, WHICH MEANS EXACTLY ONE. This module's render docstring argues
+# that interior pockets stay OPEN as real holes, because the zone genuinely
+# wraps around existing canopy. That argument is strong and it is KEPT: for a
+# canopy pocket there are real trees standing there, and for any pocket of two
+# cells or more there are at least two independent gate decisions agreeing
+# that the ground inside is different from the ground around it.
+#
+# It is weak for exactly one case, which is the case observed live: a SINGLE
+# cell that the SLOPE gate dropped. That is one threshold crossing on a 5 m
+# grid -- one 5 m square whose neighbours on all four sides qualified -- and
+# nobody would walk around it. Left open it is unplantable-by-omission: the
+# map draws a hole and the acreage subtracts one cell for a feature that does
+# not exist on the ground. Filling it costs at most 25 m^2 (0.0062 ac) of
+# attributed area per hole, and the acreage it adds back is ground the layer
+# already surrounds on every side.
+#
+# The threshold therefore sits BELOW two cells by construction, so a genuine
+# multi-cell pocket -- the canopy pocket the render docstring is about -- is
+# untouched. Measured on the ragged reference-parcel DEM in
+# test_tree_zone_geometry_validity.py, this fills 22 of the 28 interior rings
+# the two candidates carry and leaves all 6 multi-cell pockets standing, the
+# largest of them 4 cells; the acreage moves by 550 m^2, exactly 22 cells.
+# CONFIGURABLE, but raising it past 1.0 starts closing pockets the render
+# docstring's own reasoning says are real, so raise it only with a live
+# measurement that says otherwise.
+FILLED_INTERIOR_RING_MAX_CELLS = 1.0
+
+# Fractional slack on FILLED_INTERIOR_RING_MAX_CELLS, so a hole that IS one
+# cell is judged as one cell. A single-cell ring is px*py exactly only when
+# the search-space and boundary clips missed it entirely; a ring the clip
+# grazed comes back a hair under, and one carried through a union/difference
+# pair comes back a hair over. 1e-6 of a cell is 2.5e-5 m^2 at 5 m -- far
+# below any real difference in ring size (the next real size up is a whole
+# second cell) and far above the 1e-10-ish drift a GEOS overlay introduces.
+_INTERIOR_RING_CELL_TOLERANCE = 1e-6
 
 # Buffer (meters) around EXISTING tree canopy (real USGS 3DEP lidar HAG
 # coverage, canopy_height_data.tree_root_zone_mask()) within which a DEM
@@ -602,6 +647,142 @@ def _polygonal_parts(geom):
     return None
 
 
+def _fill_subthreshold_interior_rings(footprint, cell_area_sq_meters: float, max_cells: float):
+    """
+    `footprint` with every interior ring at or below `max_cells` DEM cells of
+    area FILLED, and every larger one left standing. Returns (geometry,
+    filled_count, kept_count).
+
+    WHY THIS IS NOT A CONTRADICTION OF THE RENDER RULE. score_tree_search_
+    space()'s own render-footprint comment argues interior pockets are kept
+    OPEN as real holes because the zone genuinely wraps around existing
+    canopy, and that reasoning is untouched here: a canopy pocket is many
+    cells and survives this function unchanged. What does not survive is a
+    ONE-CELL hole, which is a single gate crossing on a 5 m grid rather than
+    anything on the ground -- see FILLED_INTERIOR_RING_MAX_CELLS for the full
+    argument and the live measurement behind the threshold.
+
+    STRICTLY ADDITIVE, AND THAT IS THE INVARIANT WORTH NAMING. Filling a ring
+    can only ADD the ring's own area; no exterior ring is touched, no part is
+    dropped, and nothing is buffered, opened, simplified or smoothed, so a
+    thin arm cannot be narrowed or deleted by this. It is the exact opposite
+    of the anti-extensive transforms this layer refuses (see the render
+    comment): the acreage moves up by the filled cells and by nothing else,
+    which is what makes the acreage change reportable as a sum of whole cells.
+
+    REBUILT FROM RINGS, NOT BUFFERED. A Polygon is reconstructed from its own
+    exterior and its surviving interiors, so the geometry that comes out is
+    made of the same coordinates that went in. buffer(0) would also close a
+    small hole, and it is refused here for exactly the reason wire_
+    translation.py refuses it on the inbound side: it is an overlay that
+    silently rewrites whatever else it finds wrong, and a repair nobody can
+    predict is not a repair. Rebuilding rings can leave the result INVALID
+    (a filled ring that touched the shell), which is why this runs BEFORE the
+    validity repair and never instead of it.
+    """
+    threshold = max_cells * cell_area_sq_meters * (1.0 + _INTERIOR_RING_CELL_TOLERANCE)
+    is_multi = footprint.geom_type == "MultiPolygon"
+    parts = list(footprint.geoms) if is_multi else [footprint]
+
+    filled = 0
+    kept = 0
+    rebuilt = []
+    for part in parts:
+        survivors = []
+        for ring in part.interiors:
+            if Polygon(ring).area <= threshold:
+                filled += 1
+            else:
+                survivors.append(ring)
+                kept += 1
+        rebuilt.append(Polygon(part.exterior, survivors) if len(survivors) != len(part.interiors) else part)
+
+    if filled == 0:
+        # NOTHING TO FILL RETURNS THE SAME OBJECT, not an equal one. It is what
+        # makes this step invisible on the overwhelming majority of patches --
+        # the shipped reference parcel's candidates carry no holes at all --
+        # so their geometry is byte-identical to what the module emitted
+        # before this function existed.
+        return footprint, 0, kept
+    # THE INPUT'S OWN GEOM_TYPE IS PRESERVED. A MultiPolygon comes back a
+    # MultiPolygon even if it has one part: the round-trip test asserts a
+    # patch's geom_type survives the wire, and a type that changed depending
+    # on whether a hole happened to be filled would break it for one parcel
+    # and not the next.
+    return (MultiPolygon(rebuilt) if is_multi else rebuilt[0]), filled, kept
+
+
+def _valid_polygonal(footprint):
+    """
+    `footprint` made OGC-valid without eroding it, or None if it cannot be.
+
+    A cell union reaches this function with two kinds of defect, and only the
+    second one is a validity problem: an interior ring that
+    _fill_subthreshold_interior_rings() has just filled can leave the rebuilt
+    ring touching the shell, and two cells meeting only DIAGONALLY leave an
+    exterior ring that touches itself at that shared corner. Both draw fine
+    and both are invalid by OGC validity, which is what wire_translation.py
+    rejects the geometry on at commit.
+
+    make_valid() IS THE TOOL, AND THE TWO ALTERNATIVES ARE REFUSED BY NAME.
+    buffer(0) is refused because it is the operation wire_translation.py's own
+    rule exists to prevent -- on a self-intersecting ring it silently returns
+    lobes nobody drew, and the acreage attributed to them would be fiction. A
+    morphological OPENING is refused because it deletes every feature narrower
+    than its own diameter, and the thin arms it would delete -- a windbreak
+    row, a riparian strip, an edge planting -- are exactly the geometry this
+    layer exists to find; that is this module's own stated position on its
+    render footprint and it is not weakened to fix a corner touch. make_valid()
+    in shapely's default 'linework' mode adds no vertex that was not already
+    in the input and removes no ground: it re-noded the same linework, so the
+    AREA IS PRESERVED EXACTLY (asserted per patch in
+    test_tree_zone_geometry_validity.py).
+
+    WHAT IT DOES TO A DIAGONAL CORNER TOUCH: IT SPLITS. This is the case where
+    make_valid() heals nothing -- there is no way to make one ring that
+    touches itself into one ring that does not, without either adding ground
+    at the corner or taking some away -- so it returns the two lobes as a
+    MultiPolygon, or as a GeometryCollection when a degenerate line falls out
+    of the noding as well. THE PIECES STAY ONE CANDIDATE, carried as
+    multi-part geometry, and that is a deliberate decision rather than an
+    accident of what make_valid() returns:
+
+      - The pieces ARE one candidate. connected_components() labelled these
+        cells as ONE 8-connected component and the scorer scored them as one:
+        every factor on the patch, its area, its rank and its id are that
+        component's. Emitting the lobes as two candidates would hand the user
+        two features carrying one component's score, and would put a second
+        candidate on the wire that nothing ever scored.
+      - Trees already ships MultiPolygons. footprint is already
+        unary_union(squares) clipped twice, and a clip that severs a patch
+        against the search space or the boundary has always been able to
+        return a MultiPolygon; every consumer downstream -- the GeoJSON
+        writer, fencing.py, the rehydrator, commit validation -- takes one
+        already. Multi-part is the form this layer is built for, so the
+        cheapest correct answer is also the honest one.
+      - Splitting into separate candidates would also be irreversible in the
+        wrong direction: two candidates cannot be recombined by anything
+        downstream, whereas a multi-part candidate is exactly what a user who
+        wants only one lobe can edit.
+
+    NON-POLYGONAL PARTS ARE DROPPED, the same rule _polygonal_parts() applies
+    everywhere else in this module: a bare line from the re-noding is not
+    ground, has no acreage to attribute, and is not a shape a wire consumer
+    can draw.
+
+    Returns None when there is nothing polygonal left, or when the repaired
+    geometry is STILL invalid -- this function never returns something it has
+    not checked, so its caller can treat a non-None result as emittable.
+    """
+    if footprint.is_valid:
+        return footprint
+
+    repaired = _polygonal_parts(make_valid(footprint))
+    if repaired is None or repaired.is_empty or not repaired.is_valid:
+        return None
+    return repaired
+
+
 def _road_corridor_exclusion_polygon(dem: dict, selected_road_corridor: dict):
     """
     This module's own BUFFERED cell-footprint polygon for the selected
@@ -760,6 +941,8 @@ def score_tree_search_space(
     stream_proximity_reference_meters: float = STREAM_PROXIMITY_REFERENCE_METERS,
     min_score: float = MIN_TREE_SUITABILITY_SCORE,
     min_area_acres: float = MIN_TREE_ZONE_ACRES,
+    filled_interior_ring_max_cells: float = FILLED_INTERIOR_RING_MAX_CELLS,
+    dropped_invalid: Optional[list] = None,
 ) -> list[dict]:
     """
     Pure scoring core -- Steps 2-3 (see module docstring). Takes an
@@ -784,6 +967,33 @@ def score_tree_search_space(
     canopy), not "checked, found none" -- identify_tree_zone_candidates()
     always supplies a real mask (its own canopy fetch is mandatory,
     non-degrading, same as production_area.py's).
+
+    filled_interior_ring_max_cells is the interior-ring floor, in DEM cells,
+    below which a hole is FILLED before the patch is emitted -- defaults to
+    FILLED_INTERIOR_RING_MAX_CELLS, see that constant for the threshold's own
+    reasoning and 0.0 for a real, usable "fill nothing" path.
+
+    dropped_invalid, when a list is passed, RECEIVES one dict per patch this
+    function refused to emit because its geometry could not be made valid:
+        {'id': int, 'area_acres': float, 'reason': str}
+    A caller that wants the count -- identify_tree_zone_candidates() does, for
+    narrative_data -- passes a list and reads its length; every other caller
+    passes nothing and is unaffected. An out-parameter rather than a second
+    return value on purpose: this function's return type is a plain list that
+    a dozen call sites and tests index directly, and a drop is the rare case,
+    not the shape of the answer.
+
+    EVERY PATCH THIS FUNCTION EMITS IS OGC-VALID. That is checked here, at
+    emission, and not left to the commit boundary. The check belongs on this
+    side because a generated patch reaching wire_translation.py invalid is a
+    bug that surfaces at the worst possible moment -- after the user has
+    picked candidates and pressed commit, on geometry they did not draw --
+    and because the commit-side rule is deliberately a REFUSAL and not a
+    repair (rehydration never repairs geometry; see _polygonal_shape_from_
+    wire()). A patch is hole-filled, then repaired if the rebuild or a
+    diagonal corner touch left it invalid, then re-checked; one that is still
+    invalid is DROPPED and recorded, never emitted and never silently
+    discarded. See _fill_subthreshold_interior_rings() and _valid_polygonal().
 
     Returns one entry per resulting tree-zone candidate patch, ranked
     best-first:
@@ -907,6 +1117,47 @@ def score_tree_search_space(
         if footprint is None or footprint.is_empty:
             continue
 
+        # --- THE EMISSION GATE (see this function's own docstring). Runs
+        # BEFORE the area floor, because both steps below move area: filling
+        # a hole adds it, and a patch dropped as unrepairable must not be
+        # judged against a floor it was never measured for. ---
+        #
+        # Sub-threshold interior rings first. Strictly additive -- it can only
+        # close single-cell gate pinholes, never narrow an arm -- and it is
+        # what can leave a rebuilt ring touching the shell, so it runs before
+        # the validity repair rather than after it.
+        footprint, _filled, _kept = _fill_subthreshold_interior_rings(
+            footprint, px * py, filled_interior_ring_max_cells
+        )
+
+        # Then validity, unconditionally. No opening and no buffer(0): see
+        # _valid_polygonal() for why both are refused by name and what a
+        # diagonal corner touch does to the patch (it splits, and the pieces
+        # stay ONE candidate as multi-part geometry).
+        repaired = _valid_polygonal(footprint)
+        if repaired is None:
+            # UNREPAIRABLE, SO DROPPED -- with a record, never silently. A
+            # generate that raised here would lose every other candidate on
+            # the property over one ragged component the user never asked
+            # for; a generate that emitted it would fail at commit instead,
+            # which is the moment this whole gate exists to move off. The
+            # count reaches the report through narrative_data.
+            if dropped_invalid is not None:
+                dropped_invalid.append(
+                    {
+                        "id": int(component_id),
+                        "area_acres": round(footprint.area / SQUARE_METERS_PER_ACRE, 2),
+                        "reason": explain_validity(footprint),
+                    }
+                )
+            print(
+                f"score_tree_search_space: component {component_id} "
+                f"({footprint.area / SQUARE_METERS_PER_ACRE:.2f} ac) could not be made valid "
+                f"({explain_validity(footprint)}); dropped rather than emitted."
+            )
+            continue
+        footprint = repaired
+
         area_acres = footprint.area / SQUARE_METERS_PER_ACRE
         if area_acres < min_area_acres:
             continue
@@ -932,12 +1183,23 @@ def score_tree_search_space(
 
         geometry_wgs84 = transform_geom(dem["crs"], "EPSG:4326", mapping(footprint))
 
-        # render_fill_polygon_utm is the patch's real cell-union footprint,
-        # UNMODIFIED -- no hull, no opening, no smoothing, buffering, closing,
-        # or simplification of any kind. footprint is already
-        # unary_union(squares).intersection(search_space_utm).intersection(
-        # boundary_polygon_utm), so it is already constrained to the search
-        # space and the boundary; do NOT re-intersect with either.
+        # render_fill_polygon_utm is the patch's real cell-union footprint --
+        # no hull, no opening, no smoothing, buffering or simplification of
+        # any kind. footprint is already unary_union(squares).intersection(
+        # search_space_utm).intersection(boundary_polygon_utm), so it is
+        # already constrained to the search space and the boundary; do NOT
+        # re-intersect with either.
+        #
+        # TWO OPERATIONS HAVE TOUCHED IT, both in the emission gate above and
+        # NEITHER of them anti-extensive -- that is the property that matters
+        # here, because every transform this comment refuses below is one that
+        # REMOVES ground. Sub-threshold interior rings are filled, which only
+        # ADDS the filled cells; and the result is made OGC-valid by
+        # make_valid()'s own re-noding, which preserves area exactly and can
+        # only split a self-touch into multi-part geometry this layer already
+        # ships. No arm is narrowed and no feature is deleted by either, which
+        # is the whole reason those two were chosen over the opening and the
+        # buffer(0) that would also have produced valid output.
         #
         # This layer deliberately DIVERGES from production_area.cluster_and_
         # gate() and water_candidate_zones.find_candidate_zones(), which both
@@ -951,7 +1213,12 @@ def score_tree_search_space(
         # delete precisely that branching, so none is applied. Interior
         # pockets are preserved too: an excluded-canopy hole renders as a real
         # hole, which is correct -- the zone genuinely wraps around existing
-        # canopy. A thin arm is unworkable as a cultivation block or a pond
+        # canopy. That holds for a POCKET; it does not hold for a single cell
+        # the SLOPE gate dropped, which is one threshold crossing on a 5 m
+        # grid rather than anything a person would walk around, and which the
+        # emission gate above therefore fills -- see FILLED_INTERIOR_RING_MAX_
+        # CELLS. Every pocket of two cells or more is untouched.
+        # A thin arm is unworkable as a cultivation block or a pond
         # (hence production/water open theirs) but is a genuinely useful tree
         # feature. render_fill_polygon_utm therefore equals polygon_utm here;
         # it stays a separate field for interface parity with those layers and
@@ -1247,6 +1514,7 @@ def build_narrative_data(
     existing_canopy_excluded: bool,
     min_score: float = MIN_TREE_SUITABILITY_SCORE,
     min_area_acres: float = MIN_TREE_ZONE_ACRES,
+    dropped_invalid_count: int = 0,
 ) -> dict:
     """
     The 'narrative_data' block identify_tree_zone_candidates() attaches
@@ -1268,10 +1536,23 @@ def build_narrative_data(
     ground" off a run where the SSURGO fetch was down and the factor was
     a neutral default, not a measurement.
 
+    dropped_invalid_count follows the same convention water_survey_areas.py's
+    own narrative already uses for its `dropped_count`: a patch the step
+    scored and then refused to put on the wire is REPORTED, not silently
+    absent. Zero on every healthy run, and identify_tree_zone_candidates()
+    passes the real count from score_tree_search_space()'s own
+    dropped_invalid sink. A reader who sees candidate_count fall between two
+    generates of the same property can tell a scoring change from a geometry
+    drop, which is the whole point of carrying it.
+
     Shape:
 
         {
           'candidate_count': int,
+          'dropped_invalid_count': int,   # patches score_tree_search_space()
+                                          #   scored but refused to emit
+                                          #   because their geometry could
+                                          #   not be made valid -- see below
           'search_space': {         # stage 1 -- what ground was considered
             'parcel_acres',
             'claimed_acres',        #   production + selected water + road
@@ -1318,6 +1599,7 @@ def build_narrative_data(
     """
     return {
         "candidate_count": len(patches),
+        "dropped_invalid_count": int(dropped_invalid_count),
         "search_space": {
             "parcel_acres": _round1(boundary_acres),
             "claimed_acres": _round1(claimed_acres),
@@ -1407,6 +1689,11 @@ def identify_tree_zone_candidates(
             'narrative_data': dict,                       # report-facing, FINAL, JSON-serialisable
                                                              # values -- see build_narrative_data()
         }
+
+    A patch this function's scorer refused to emit -- geometry that could
+    not be made valid, see score_tree_search_space()'s own emission gate --
+    is absent from 'patches'/'zones_geojson' and COUNTED in narrative_data's
+    dropped_invalid_count. It is zero on a healthy generate.
 
     'narrative_data' is PURELY ADDITIVE: every other key above, and every
     field on every patch, is byte-identical to what this function
@@ -1668,6 +1955,10 @@ def identify_tree_zone_candidates(
         except Exception:
             stream_data_available = False
 
+    # The sink score_tree_search_space() records an unemittable patch in --
+    # see its own docstring. Passed on every run, read once below for
+    # narrative_data's dropped_invalid_count; empty on a healthy generate.
+    dropped_invalid: list = []
     patches = score_tree_search_space(
         dem,
         search_space,
@@ -1679,6 +1970,7 @@ def identify_tree_zone_candidates(
         stream_union=stream_union,
         stream_data_available=stream_data_available,
         tree_root_zone_mask_utm=tree_root_zone_mask_utm,
+        dropped_invalid=dropped_invalid,
         **score_kwargs,
     )
 
@@ -1714,6 +2006,7 @@ def identify_tree_zone_candidates(
             # or this module's defaults.
             min_score=score_kwargs.get("min_score", MIN_TREE_SUITABILITY_SCORE),
             min_area_acres=score_kwargs.get("min_area_acres", MIN_TREE_ZONE_ACRES),
+            dropped_invalid_count=len(dropped_invalid),
         ),
     }
 

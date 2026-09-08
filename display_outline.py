@@ -1,24 +1,46 @@
 """
 display_outline.py
 
-THE DISPLAY-ONLY SMOOTHED OUTLINE of a cell-union zone -- ONE implementation,
-read by the PDF's layout map and shipped, as a rendering hint and nothing else,
-on the interactive map's production and tree features.
+THE DISPLAY-ONLY SMOOTHED OUTLINE of the production fill -- ONE
+implementation, read by the PDF's layout map and shipped, as a rendering hint
+and nothing else, on the interactive map's production features.
 
-WHAT THE PROBLEM IS. Production zones and tree zones are unions of 5 m DEM
-cells. Their edges are therefore pixel boundaries: an unbroken right-angle
-staircase that reads as a raster artefact rather than as a field edge. The PDF
-has never had that look, because render_layout_map.py has always run its
-production clip mask through raster_grid.angular_smooth_polygon() before
-clipping contours to it. The interactive map drew the staircase raw, so the two
-maps of the same parcel disagreed about what the same zone looks like.
+WHAT THE PROBLEM IS. A production zone is a union of 5 m DEM cells. Its edge is
+therefore a pixel boundary: an unbroken right-angle staircase that reads as a
+raster artefact rather than as a field edge. The PDF has never had that look,
+because render_layout_map.py has always run its production clip mask through
+raster_grid.angular_smooth_polygon() before clipping contours to it. The
+interactive map drew the staircase raw, so the two maps of the same parcel
+disagreed about what the same zone looks like.
 
 WATER AND ROADS ARE NOT CELL UNIONS AND ARE NOT SMOOTHED. A water zone is a
 clipped envelope and a road is a LineString; neither has a staircase, and
-running either through a corner-cutter would move geometry for no reason. This
-module is called from exactly two producer sites (production_area.py's clusters
-by way of production_zone_payload.py, and tree_zone_candidates.py's patches by
-way of step_orchestrator.build_trees_payload()) plus render_layout_map.py, and
+running either through a corner-cutter would move geometry for no reason.
+
+TREE ZONES ARE CELL UNIONS AND ARE STILL NOT SMOOTHED, which is the one case
+where the staircase is real and the smooth is wrong anyway. This module once
+had a second producer site, on tree_zone_candidates.py's patches by way of
+step_orchestrator.build_trees_payload(), and it was removed. The test the
+smooth was justified by -- that the interactive map should agree with the
+printed one -- is the test it FAILS for trees: render_layout_map.py smooths the
+production fill because that geometry is what its contour lines are clipped
+against, and it draws the tree hatch from the cell-union footprint verbatim,
+"no hull, no opening, no smoothing of any kind." Smoothing a tree feature made
+the two maps disagree.
+
+AND SMOOTHING IS ANTI-EXTENSIVE, which is what made it more than a cosmetic
+mismatch there. A simplify-plus-Chaikin pass cuts corners inward; measured on
+the reference parcel it moved 19.56% of a 0.32 ac tree candidate, all of it a
+loss. A tree candidate is the thin, branching leftover ground threading between
+production, water and road, and a windbreak row one cell wide is exactly the
+geometry that layer exists to find -- so the smooth was deleting the features
+tree_zone_candidates.py's own render docstring refuses a morphological opening
+in order to keep. A production zone has no such arms to lose: its render fill
+is already the output of a 12 m opening, so a light corner-cut moves an edge
+that has already been placed a full cell inside the real footprint.
+
+So this module is called from exactly one producer site (production_area.py's
+clusters by way of production_zone_payload.py) plus render_layout_map.py, and
 nowhere else.
 
   ***********************************************************************
@@ -65,8 +87,8 @@ from shapely.ops import unary_union
 from raster_grid import angular_smooth_polygon
 
 
-# THE FEATURE PROPERTY THE OUTLINE RIDES UNDER, written down once because two
-# payload builders put it there and a frontend keys on it -- a second spelling
+# THE FEATURE PROPERTY THE OUTLINE RIDES UNDER, written down once because a
+# payload builder puts it there and a frontend keys on it -- a second spelling
 # would be a field nothing reads, silently.
 #
 # NAMED FOR ITS STATUS, NOT FOR ITS SHAPE. "display_only" is in the identifier
@@ -87,12 +109,13 @@ DISPLAY_ONLY_OUTLINE_PROPERTY = "display_only_smoothed_outline"
 # the Chaikin pass below has actual corners to round rather than hundreds of
 # individual cell steps.
 #
-# ONE VALUE FOR EVERY CELL-UNION LAYER, deliberately. This was
+# IN CELLS AND NOT IN METRES because the staircase it is simplifying is made
+# of cells: one cell is the size of the smallest step in the input, whatever
+# the DEM's resolution happens to be. This was
 # render_layout_map.PRODUCTION_FILL_SIMPLIFY_TOLERANCE_CELLS while the
-# production contour clip was the only consumer. Production zones and tree
-# zones are the same kind of geometry gridded at the same resolution, and
-# giving each its own tolerance would be two numbers describing one staircase.
-# CONFIGURABLE.
+# production contour clip was the only consumer, and it is unchanged in value;
+# the payload builder and the renderer read this one number so the shipped
+# outline and the printed one cannot drift apart. CONFIGURABLE.
 DISPLAY_OUTLINE_SIMPLIFY_TOLERANCE_CELLS = 1.0
 
 # Post-simplify Chaikin softening. Kept small deliberately: this geometry
@@ -108,26 +131,23 @@ def smoothed_display_outline(cell_union_polygon_utm, clip_polygon_utm, cell_size
     The DISPLAY-ONLY smoothed outline of one cell-union zone, in the DEM's own
     UTM CRS. Nothing may compute from the result -- see this module's docstring.
 
-    `cell_union_polygon_utm` is the shape actually drawn for the zone (the
-    production opening's render_fill_polygon_utm; for a tree patch, its
-    footprint, which that module records under polygon_utm and
-    render_fill_polygon_utm alike). `clip_polygon_utm` is the zone's REAL
-    footprint.
+    `cell_union_polygon_utm` is the shape actually drawn for the zone -- the
+    production opening's render_fill_polygon_utm. `clip_polygon_utm` is the
+    zone's REAL footprint.
 
     RE-CLIPPED TO THE REAL FOOTPRINT, always. Chaikin can push outward at a
     reflex vertex, and a display shape that covered ground the cell gate
     excluded would be the map overstating what qualified. Production's lead
     erode already leaves the fill a full cell inside polygon_utm, so a light
     smooth stays within that slack anyway -- the clip is there to make the
-    invariant hard rather than probable. For a tree patch the two arguments are
-    the same object and the clip is a no-op on the same geometry.
+    invariant hard rather than probable.
 
     POLYGONAL PARTS ONLY. An intersection can in principle return a
     GeometryCollection where the smoothed ring touches the clip tangentially;
     a line or a point is not an outline, contributes nothing to the contour
     clip the PDF uses this for, and is not a shape a wire consumer can draw.
     Dropping the non-polygonal parts here rather than at either call site is
-    what keeps the two callers' answers byte-identical.
+    what keeps the payload builder's answer and the renderer's byte-identical.
 
     DEGRADES, NEVER RAISES, because angular_smooth_polygon() does: a smooth
     that comes back empty or invalid falls back to the unsmoothed input, which
