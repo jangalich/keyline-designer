@@ -69,6 +69,7 @@ import production_area_ceiling
 import production_zone_payload
 import session_api
 import session_cache
+import step_registry
 import valley_delineation
 import wire_translation
 from dem_data import _utm_epsg_for_lonlat
@@ -1099,12 +1100,18 @@ with Harness() as h:
     assert nonsense.status_code == 404, (nonsense.status_code, nonsense.get_json())
     assert "orchard" in nonsense.get_json()["error"], nonsense.get_json()
 
-    # A REAL step whose registry entry is not written yet. Same status --
-    # this URL names no resource either -- but the message tells them apart,
-    # which is get_step()'s own contract. "fencing", not "water", "roads",
-    # "trees" or "structures": all four HAVE entries as of their branches, and
-    # ask different questions of this surface -- see the 409 below.
-    unregistered = c.generate(session_id, step_id="fencing")
+    # A REAL step whose registry entry is not written. Same status -- this
+    # URL names no resource either -- but the message tells them apart,
+    # which is get_step()'s own contract. EVERY step has an entry as of the
+    # fencing branch, so the case is exercised with fencing's entry
+    # deliberately removed for the one request; a registered fencing asks
+    # a different question of this surface -- see the 409 below.
+    _full_registry = step_registry.STEP_REGISTRY
+    step_registry.STEP_REGISTRY = {k: v for k, v in _full_registry.items() if k != "fencing"}
+    try:
+        unregistered = c.generate(session_id, step_id="fencing")
+    finally:
+        step_registry.STEP_REGISTRY = _full_registry
     assert unregistered.status_code == 404, unregistered.get_json()
     assert "no registry entry yet" in unregistered.get_json()["error"], (
         unregistered.get_json()

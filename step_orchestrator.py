@@ -1901,6 +1901,81 @@ def build_structures_payload(result: dict, assembled: dict) -> dict:
     }
 
 
+def build_fencing_payload(result: dict, assembled: dict) -> dict:
+    """
+    The fencing step's wire payload: the committable fence lines, the
+    per-type blocks the panel's tabs are built from, and the step-level
+    block.
+
+        {
+          "fence_lines": FeatureCollection,   # every "perimeter_fencing" feature,
+                                              #   stamped fence_index / fence_count /
+                                              #   loop_count / length_ft
+          "fence_types": [                    # ALWAYS ALL THREE, in fencing.
+            {                                 #   CANDIDATE_FENCE_TYPES order
+              "fence_type", "label", "generated", "candidate",
+              "loop_count", "feature_count", "total_length_ft",
+              "feature_ids", "features", "reason"
+            }, ...
+          ],
+          "candidate_fence_types": [...],     # the tabs: the types with candidate=True
+          "summary": {...},                   # the rest of build_narrative_data()
+        }
+
+    A TAB IS A TYPE. `fence_types` is what the panel renders one tab per
+    candidate from -- the type, its SUMMED length over every loop, its loop
+    count, and `feature_ids`, the ids in `fence_lines` a commit of that
+    type carries (all of them; the contract's group_check enforces that).
+    The geometry is in `fence_lines`, one feature per loop, so the map
+    draws what the tab describes. `features` is the per-feature breakdown
+    of the same measurements, kept because a boundary fence split into two
+    rings is one type and a reader may want to see the split.
+
+    ABSENCE IS EXPLICIT. A type with nothing to fence (water committed
+    empty, trees committed empty) is IN the list with generated=False,
+    loop_count 0, total_length_ft None and a reason -- distinguishable from
+    a type whose pass ran and produced nothing (generated=True, loop_count
+    0, total_length_ft 0.0) and from a candidate. Nothing is inferred from
+    a missing key. `candidate_fence_types` is the same answer as a list, so
+    the tab count (one to three) is one read.
+
+    NARRATIVE-ONLY FENCING STAYS OUT OF fence_lines AND IN summary. Stream
+    exclusion fencing is computed, is in the result's fencing_geojson, and
+    is counted with its own summed length under summary.narrative_only;
+    it is filtered out of fence_lines by layer (wire_translation.fence_
+    lines_to_feature_collection) so it is never a candidate. Road fencing
+    is listed there with generated=False and the module's reason.
+
+    UNITS: FEET, one decimal, converted in fencing.build_narrative_data()
+    and never here -- the road entry's precedent and the report's own
+    convention. Nothing is recomputed, coerced or defaulted in this
+    function; every number is read off the result's narrative block.
+
+    `assembled` is unread: everything this payload needs is on `result`.
+    """
+    from wire_translation import fence_lines_to_feature_collection
+
+    narrative = result["narrative_data"]
+    fence_lines = fence_lines_to_feature_collection(result)
+    ids_by_type = {}
+    for feature in fence_lines["features"]:
+        ids_by_type.setdefault(feature["properties"]["fence_type"], []).append(feature["id"])
+
+    return {
+        "fence_lines": fence_lines,
+        "fence_types": [
+            {**block, "feature_ids": ids_by_type.get(block["fence_type"], [])}
+            for block in narrative["fence_types"]
+        ],
+        "candidate_fence_types": list(narrative["candidate_fence_types"]),
+        "summary": {
+            key: value
+            for key, value in narrative.items()
+            if key not in ("fence_types", "candidate_fence_types")
+        },
+    }
+
+
 # ======================================================================
 # Post-commit hooks
 # ======================================================================

@@ -41,8 +41,8 @@ from design_document import STEP_ORDER
 
 step_registry.validate_registry()
 
-assert step_registry.registered_steps() == ("landform", "water", "roads", "trees", "structures"), (
-    f"five entries are expected on this branch: {step_registry.registered_steps()}"
+assert step_registry.registered_steps() == ("landform", "water", "roads", "trees", "structures", "fencing"), (
+    f"six entries are expected on this branch: {step_registry.registered_steps()}"
 )
 assert set(step_registry.STEP_REGISTRY) <= set(STEP_ORDER), (
     "the registry may not invent steps the design document cannot hold"
@@ -530,15 +530,25 @@ assert step_registry.registered_steps() == tuple(
     s for s in STEP_ORDER if s in step_registry.STEP_REGISTRY
 ), "registered_steps() must FILTER STEP_ORDER, never restate an order"
 
-for _unregistered in ("fencing",):
+# EVERY STEP_ORDER STEP HAS AN ENTRY NOW -- the sixth (fencing) closed the
+# set -- so the "no registry entry yet" message is exercised against a
+# registry with one entry deliberately removed, not against a real gap.
+assert set(step_registry.STEP_REGISTRY) == set(STEP_ORDER), (
+    f"all six steps are registered: {step_registry.registered_steps()} vs {STEP_ORDER}"
+)
+_full_registry = step_registry.STEP_REGISTRY
+step_registry.STEP_REGISTRY = {k: v for k, v in _full_registry.items() if k != "fencing"}
+try:
     try:
-        step_registry.get_step(_unregistered)
+        step_registry.get_step("fencing")
     except step_registry.RegistryError as exc:
         assert "no registry entry yet" in str(exc), (
             f"a real STEP_ORDER step without an entry must say so: {exc}"
         )
     else:
-        raise AssertionError(f"'{_unregistered}' should have no registry entry")
+        raise AssertionError("'fencing' should report no entry with its entry removed")
+finally:
+    step_registry.STEP_REGISTRY = _full_registry
 
 try:
     step_registry.get_step("orchards")
@@ -547,25 +557,25 @@ except step_registry.RegistryError as exc:
 else:
     raise AssertionError("a step outside STEP_ORDER must be reported as unknown")
 
-assert step_registry.dependents_of("landform") == ("water", "roads", "trees", "structures"), (
+assert step_registry.dependents_of("landform") == ("water", "roads", "trees", "structures", "fencing"), (
     "water, roads and trees all consume landform's commit, and the consumes edge "
     "IS the invalidation edge -- read off the declaration, never restated"
 )
-assert step_registry.transitive_dependents("landform") == ("water", "roads", "trees", "structures")
-assert step_registry.dependents_of("water") == ("roads", "trees", "structures"), (
+assert step_registry.transitive_dependents("landform") == ("water", "roads", "trees", "structures", "fencing")
+assert step_registry.dependents_of("water") == ("roads", "trees", "structures", "fencing"), (
     "roads and trees both consume the water commit"
 )
-assert step_registry.dependents_of("roads") == ("trees", "structures"), (
+assert step_registry.dependents_of("roads") == ("trees", "structures", "fencing"), (
     "trees is the first entry to consume the roads commit"
 )
-assert step_registry.transitive_dependents("roads") == ("trees", "structures")
-assert step_registry.transitive_dependents("trees") == ("structures",)
-assert step_registry.transitive_dependents("structures") == ()
+assert step_registry.transitive_dependents("roads") == ("trees", "structures", "fencing")
+assert step_registry.transitive_dependents("trees") == ("structures", "fencing")
+assert step_registry.transitive_dependents("structures") == ("fencing",)
 
 print(
     f"6. STEP ORDER: registered_steps() filters design_document.STEP_ORDER "
-    f"{STEP_ORDER} to {step_registry.registered_steps()}; the two "
-    f"unregistered steps each report 'no registry entry yet' and a step "
+    f"{STEP_ORDER} to {step_registry.registered_steps()} -- the full set; a "
+    f"step with its entry removed reports 'no registry entry yet' and a step "
     f"outside STEP_ORDER reports 'unknown step id'. dependents_of('landform') "
     f"== {step_registry.dependents_of('landform')} off the consumes edge."
 )

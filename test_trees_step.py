@@ -631,7 +631,7 @@ print(
 # --- 1 [test 1]. THE REGISTRY ENTRY ----------------------------------
 
 step_registry.validate_registry()
-assert step_registry.registered_steps() == ("landform", "water", "roads", "trees", "structures"), (
+assert step_registry.registered_steps() == ("landform", "water", "roads", "trees", "structures", "fencing"), (
     step_registry.registered_steps()
 )
 TREES = step_registry.get_step("trees")
@@ -708,9 +708,10 @@ for _t in ("production", "water", "road"):
     assert _grounds[_t].label
 for _other in step_registry.STEP_REGISTRY.values():
     # structures declares NO crossings at all (step_registry.CROSSINGS_NOT_
-    # RECORDED, its own branch's third declaration); every other entry keeps
-    # the exclusion gates.
-    if _other.step_id not in ("trees", "structures"):
+    # RECORDED, its own branch's third declaration), and so does fencing (a
+    # line has no acres to overlap); every other entry keeps the exclusion
+    # gates.
+    if _other.step_id not in ("trees", "structures", "fencing"):
         assert _other.commit_contract.crossings is None, (
             f"{_other.step_id} keeps the exclusion gates as its grounds"
         )
@@ -736,10 +737,10 @@ assert TREES.failure_layers[0].exception == "canopy_height_data.CanopyCoverageIn
 assert (TREES.failure_layers[0].layer, TREES.failure_layers[0].label) == production_zone_payload.LAYER_CANOPY
 
 # THE EDGE HELPERS see the new entry.
-assert step_registry.dependents_of("roads") == ("trees", "structures")
-assert step_registry.dependents_of("water") == ("roads", "trees", "structures")
-assert step_registry.transitive_dependents("landform") == ("water", "roads", "trees", "structures")
-assert step_registry.transitive_dependents("trees") == ("structures",)
+assert step_registry.dependents_of("roads") == ("trees", "structures", "fencing")
+assert step_registry.dependents_of("water") == ("roads", "trees", "structures", "fencing")
+assert step_registry.transitive_dependents("landform") == ("water", "roads", "trees", "structures", "fencing")
+assert step_registry.transitive_dependents("trees") == ("structures", "fencing")
 
 # THE TWO NEW DECLARATIONS ARE VALIDATED. A copy of the trees entry with
 # each malformation must be refused.
