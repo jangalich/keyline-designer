@@ -1927,7 +1927,10 @@ def build_fencing_payload(result: dict, assembled: dict) -> dict:
     count, and `feature_ids`, the ids in `fence_lines` a commit of that
     type carries (all of them; the contract's group_check enforces that).
     The geometry is in `fence_lines`, one feature per loop, so the map
-    draws what the tab describes. `features` is the per-feature breakdown
+    draws what the tab describes -- and each feature also carries its
+    DISPLAY-ONLY line under fence_display_geometry.DISPLAY_ONLY_FENCE_LINE_
+    PROPERTY, the angular-simplified, coincidence-trimmed rendering the PDF
+    draws, which the map draws too and from which nothing may compute. `features` is the per-feature breakdown
     of the same measurements, kept because a boundary fence split into two
     rings is one type and a reader may want to see the split.
 

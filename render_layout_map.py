@@ -103,7 +103,8 @@ structure site pin). There is always at least one segment --
 fencing.find_boundary_fencing()'s own plain-wrap case on a bare property
 (no developed footprint) -- so there's no fallback path to the old stroke.
 Before drawing, each segment's geometry is run through
-angular_simplify_closed_ring() -- a shapely simplify() pass
+fence_display_geometry.fence_display_lines() -- pass 1 of which is
+angular_simplify_closed_ring(), a shapely simplify() pass
 (FENCE_RENDER_ANGULAR_SIMPLIFY_TOLERANCE_M) ONLY, no Chaikin: the boundary
 fence renders pure-angular, the same treatment as every other fence type
 (an earlier session's boundary-specific post-angular Chaikin softening
@@ -129,8 +130,11 @@ boundary fence (drawn at FENCE_ZORDER, see that constant's own comment),
 these two render at EXCLUSION_FENCE_ZORDER instead -- its own separate,
 unchanged constant, deliberately NOT bumped alongside the boundary fence's
 own zorder (see EXCLUSION_FENCE_ZORDER's own comment). Each simplified ring
-is first trimmed by the union of every OTHER simplified ring about to be
-drawn -- the boundary fence ring(s) PLUS every other zone ring (the water
+is first trimmed (pass 2 of fence_display_geometry.fence_display_lines(),
+the SAME function the interactive map's fence features ship the result of
+under fence_display_geometry.DISPLAY_ONLY_FENCE_LINE_PROPERTY -- one
+implementation, both maps) by the union of every OTHER simplified ring about
+to be drawn -- the boundary fence ring(s) PLUS every other zone ring (the water
 zone and every other tree zone candidate), buffered by ZONE_FENCE_BOUNDARY_
 COINCIDENCE_TOLERANCE_M -- to suppress the doubled line where find_boundary_
 fencing()'s union made a zone and the boundary coincident and, equally, where
@@ -391,7 +395,6 @@ from PIL import Image
 from rasterio.warp import transform as warp_transform
 from rasterio.warp import transform_geom
 from shapely.geometry import LineString, MultiPolygon, Polygon, box, mapping, shape
-from shapely.ops import unary_union
 from shapely.plotting import plot_line, plot_points, plot_polygon
 
 from contour_lines import compute_contour_lines
@@ -399,7 +402,12 @@ from display_outline import smoothed_display_outline
 from fencing import identify_fencing
 from parcel_data import ParcelData, fetch_parcel_data
 from pipeline_context import build_pipeline_context
-from raster_grid import angular_simplify_closed_ring, chaikin_smooth_coords
+from fence_display_geometry import (
+    FENCE_RENDER_ANGULAR_SIMPLIFY_TOLERANCE_M,
+    ZONE_FENCE_BOUNDARY_COINCIDENCE_TOLERANCE_M,
+    fence_display_lines,
+)
+from raster_grid import chaikin_smooth_coords
 from road_corridors import identify_road_corridor_candidates
 from solar_suitability import identify_solar_candidate_zones
 from tree_zone_candidates import identify_tree_zone_candidates
@@ -758,37 +766,18 @@ EXCLUSION_FENCE_ZORDER = 42.9
 # tangent crossing, not a real segment worth drawing.
 EXCLUSION_FENCE_CLIP_MIN_LENGTH = 0.5
 
-# DISPLAY-ONLY simplify tolerance for fence rings (see angular_simplify_closed_ring()) --
-# a shapely simplify() pass ONLY, no Chaikin/corner-rounding at all: fence lines render
-# ANGULAR now, not curved, per explicit request. Meaningfully larger than the road
-# corridor's own ROAD_RENDER_SIMPLIFY_TOLERANCE_M (2.5m) so the DEM-resolution stairstep
-# zigzags a fence line inherits from its own underlying cell/canopy geometry collapse into
-# fewer, longer straight segments rather than just having their corners rounded off.
-# CONFIGURABLE -- tune by eye against a real property.
-FENCE_RENDER_ANGULAR_SIMPLIFY_TOLERANCE_M = 6.0  # was 4.0
-
-# DISPLAY-ONLY coincidence tolerance (meters) for trimming a water/tree zone
-# fence ring where it runs on top of ANOTHER drawn fence ring -- the boundary
-# fence OR another zone's fence. find_boundary_fencing() unions each zone's OWN
-# buffered polygon (via the shared _buffered_zone_polygon()) into the boundary
-# fence, so along a shared stretch the two rings are data-exact coincident -- but
-# each ring is angular-simplified INDEPENDENTLY before drawing, and independent
-# simplification of the same stretch (in the context of each ring's own different
-# overall shape) can keep different vertices, rendering as two visibly separate
-# near-parallel lines. Two ADJACENT zones produce the same visual mess for the same
-# reason: each zone's fence is its own zone polygon buffered by the same amount, so
-# where the zones neighbour each other the two rings run near-parallel a buffer's
-# width apart. AFTER every ring is simplified, each zone ring is trimmed by the
-# union of all the OTHER drawn rings buffered by this tolerance, so the redundant
-# (doubled) portion of the RENDERED line is suppressed. That trim is SYMMETRIC, not
-# priority-based: where two zones run close BOTH rings lose the near-shared stretch,
-# leaving a real visible gap between them -- the intended result, not a defect to
-# close. Wide enough to catch NEAR-coincident stretches (where independent
-# simplification left the rings a few meters apart), not just pixel-exact overlap;
-# note that widening it widens that inter-zone gap too. Render-only -- every zone's
-# full, untrimmed ring is still written to fencing_geojson by fencing.py.
-# CONFIGURABLE.
-ZONE_FENCE_BOUNDARY_COINCIDENCE_TOLERANCE_M = 5.0  # was 1.0
+# THE FENCE DISPLAY SPEC IS NOT DECLARED HERE ANY MORE. FENCE_RENDER_ANGULAR_
+# SIMPLIFY_TOLERANCE_M (6.0, the pass-1 angular simplify) and ZONE_FENCE_
+# BOUNDARY_COINCIDENCE_TOLERANCE_M (5.0, the pass-2 symmetric coincidence
+# trim) were declared in this file while the PDF was the only consumer of the
+# two passes. The interactive map now draws the same simplified, trimmed fence
+# line, so the two tolerances and the two passes themselves live in
+# fence_display_geometry.py -- one implementation, imported here (both names
+# are re-exported above, unchanged in value) rather than duplicated there. See
+# that module's docstring for the display-only rule the wire side is bound by,
+# and for why the trim is symmetric and must stay so; nothing about this
+# file's use of it changed. The boundary clip and the minimum piece length
+# below are this file's own and stay here.
 
 # THE DISPLAY-ONLY SMOOTHING SPEC IS NOT DECLARED HERE ANY MORE. It was
 # PRODUCTION_FILL_SIMPLIFY_TOLERANCE_CELLS / PRODUCTION_FILL_CHAIKIN_ITERATIONS
@@ -1828,79 +1817,28 @@ def render_layout_map(
     # segment count.
     fencing_features = fencing_result["fencing_geojson"]["features"]
     boundary_fence_features = [f for f in fencing_features if f["properties"].get("fence_type") == "boundary"]
-    boundary_fence_render_rings = []
-    for feature in boundary_fence_features:
-        fence_geom = _reproject_geometry_to_mercator(feature["geometry"])
-        render_ring = angular_simplify_closed_ring(fence_geom, FENCE_RENDER_ANGULAR_SIMPLIFY_TOLERANCE_M)
-        boundary_fence_render_rings.append(render_ring)
-        _draw_boundary_fence(ax, render_ring)
-        drew_fencing = True
-
-    # Everything-else fencing (fencing.identify_fencing()'s own "water_zone_exclusion" /
-    # "tree_zone_exclusion" fence_types, same "perimeter_fencing" layer -- no road fence
-    # loop exists anymore, see fencing.py's own module docstring) -- both are fully
-    # enclosed closed loops (per their own spec), so the same drawing helper as boundary
-    # fencing applies, at EXCLUSION_FENCE_ZORDER rather than boundary fencing's own
-    # FENCE_ZORDER (see that constant's own comment for why they don't share a zorder)
-    # -- see this module's own WATER/TREE EXCLUSION FENCE STYLE docstring section. Both
-    # stay purely angular (angular_simplify_closed_ring(), same as the boundary fence
-    # above). Looped over generically rather than as two near-duplicate blocks; only the
-    # legend label differs per fence_type. INDEPENDENT of the boundary fence and of each
-    # other in the DATA -- an overlap between either of them and the boundary fence is
-    # expected there, not a bug; the mutual trim below is purely about what gets DRAWN.
-    # Each simplified ring is (a) trimmed by the buffered union of the boundary fence
-    # ring(s) AND every OTHER zone ring (see the two-pass structure below), dropping the
-    # stretch it shares with a neighbour, then (b) clipped to boundary_polygon (render-only
-    # -- see this module's own WATER/TREE EXCLUSION FENCE STYLE docstring section for why),
-    # both AFTER simplifying: the simplify helper re-closes a genuinely closed ring, which
-    # would be WRONG on an already-open arc piece (it would force-close a real arc into a
-    # bogus loop), so the whole ring is simplified first, while still guaranteed closed,
-    # and only THEN differenced/clipped into however many open/closed pieces result. Either
-    # op can split one ring into several line pieces, all drawn -- but they contribute to
-    # the SAME single collapsed "Fencing" legend entry as the boundary fence above,
-    # regardless of fence_type or piece count.
     extra_fence_features = [
         f for f in fencing_features if f["properties"].get("fence_type") in ("water_zone_exclusion", "tree_zone_exclusion")
     ]
+    # BOTH DISPLAY PASSES -- the angular simplify of every ring and the
+    # symmetric coincidence trim of the zone rings -- are fence_display_
+    # geometry.fence_display_lines(), the one implementation the wire side
+    # ships too, called here on the reprojected Mercator rings exactly as the
+    # inline code it replaced was: boundary rings come back simplified and
+    # untrimmed, zone rings simplified and trimmed against every OTHER ring,
+    # each on its own. What follows is this file's own: the boundary ring(s)
+    # drawn as-is at FENCE_ZORDER, then each zone ring (b) clipped to the
+    # drawn property boundary and drawn piece by piece at EXCLUSION_FENCE_
+    # ZORDER, slivers dropped.
+    boundary_fence_render_rings, zone_fence_render_rings = fence_display_lines(
+        [_reproject_geometry_to_mercator(feature["geometry"]) for feature in boundary_fence_features],
+        [_reproject_geometry_to_mercator(feature["geometry"]) for feature in extra_fence_features],
+    )
+    for render_ring in boundary_fence_render_rings:
+        _draw_boundary_fence(ax, render_ring)
+        drew_fencing = True
 
-    # PASS 1 -- simplify every zone ring FIRST, before any of them is trimmed, so pass 2
-    # can compare each ring against the others' ORIGINAL (pre-trim) geometry. Deliberately
-    # two passes rather than trimming inline: the mutual trim is SYMMETRIC and has no
-    # ordering/priority/rank dependency at all, so a trimmed result must never be fed into
-    # a later zone's comparison (that would make zone A's drawn line depend on where zone B
-    # happened to sit in this list). What's compared is exactly what's about to be drawn --
-    # each ring is already angular-simplified here.
-    zone_fence_render_rings = [
-        angular_simplify_closed_ring(
-            _reproject_geometry_to_mercator(feature["geometry"]), FENCE_RENDER_ANGULAR_SIMPLIFY_TOLERANCE_M
-        )
-        for feature in extra_fence_features
-    ]
-
-    # PASS 2 -- trim, clip and draw each zone ring on its own. For zone i the trim mask is
-    # the buffered union of the boundary fence ring(s) plus every OTHER zone ring (water +
-    # every other tree zone), all taken from pass 1's untouched list. Where two zones run
-    # within ZONE_FENCE_BOUNDARY_COINCIDENCE_TOLERANCE_M of each other BOTH lose that
-    # stretch, so the pair renders as two separate line pieces with a real gap between them
-    # -- that gap is the intended result, not a defect (see that constant's own comment).
-    # Each zone's own trimmed ring is drawn SEPARATELY -- never merged/unioned with a
-    # neighbour's into one continuous outline -- so every zone stays its own rendered
-    # feature and keeps its own legend entry below. A zone with no near neighbour and no
-    # near boundary stretch loses nothing and still renders its full loop. Render-only
-    # throughout: fencing_geojson keeps every zone's full, untrimmed ring exactly as
-    # find_water_zone_fencing()/find_tree_zone_fencing() computed it.
-    for index, (feature, render_ring) in enumerate(zip(extra_fence_features, zone_fence_render_rings)):
-        other_rings = boundary_fence_render_rings + [
-            ring for other_index, ring in enumerate(zone_fence_render_rings) if other_index != index
-        ]
-        # (a) trim every stretch near the boundary fence or near another zone's ring
-        if other_rings:
-            other_rings_union = unary_union(other_rings)
-            trimmed_ring = render_ring.difference(
-                other_rings_union.buffer(ZONE_FENCE_BOUNDARY_COINCIDENCE_TOLERANCE_M)
-            )
-        else:
-            trimmed_ring = render_ring
+    for trimmed_ring in zone_fence_render_rings:
         # (b) clip to the drawn property boundary, same render-only reason as before
         clipped_ring = trimmed_ring.intersection(boundary_polygon)
         for line in _iter_line_parts(clipped_ring):

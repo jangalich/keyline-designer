@@ -116,6 +116,7 @@ from feature_schema import (
     make_feature,
     make_feature_collection,
 )
+from fence_display_geometry import DISPLAY_ONLY_FENCE_LINE_PROPERTY, display_only_fence_lines_wgs84
 
 METERS_PER_FOOT = 0.3048
 
@@ -3203,6 +3204,17 @@ def fence_lines_to_feature_collection(fencing_result: Optional[dict]) -> dict:
         length_ft     this feature's length, feet, one decimal -- read off
                       the module's own narrative_data, never re-measured
 
+    plus ONE DISPLAY-ONLY property, fence_display_geometry.DISPLAY_ONLY_
+    FENCE_LINE_PROPERTY ("display_only_fence_line"): the feature's ring
+    angular-simplified and, for a zone ring, trimmed where it runs on top of
+    another drawn ring -- the two passes render_layout_map.py has always run
+    before drawing, computed by that module's ONE function on the wire side
+    too, in WGS84, or None where the trim left nothing to draw. NOTHING MAY
+    COMPUTE FROM IT: `geometry` stays the real ring, length_ft is read off
+    the narrative block (which measured the real UTM ring), and the
+    rehydrator never reads the field, so a trimmed display line and its
+    reported length legitimately disagree. See fence_display_geometry.py.
+
     fence_index / fence_count are what make "commit a type, commit every
     loop of it" checkable server-side (see check_fence_type_complete()).
     They are stamped HERE and not in fencing.py's own *_to_geojson()
@@ -3237,8 +3249,18 @@ def fence_lines_to_feature_collection(fencing_result: Optional[dict]) -> dict:
     for feature in features:
         by_type.setdefault(feature["properties"].get("fence_type"), []).append(feature)
 
+    # THE DISPLAY LINES, computed ONCE for the whole collection because pass 2
+    # is a mutual trim: each zone ring is trimmed against every OTHER ring, so
+    # no feature's display line can be computed from that feature alone. In
+    # collection order, one entry per feature, None where nothing is left to
+    # draw. Zone rings are the two non-boundary candidate types; the boundary
+    # ring(s) are simplified and never trimmed. See fence_display_geometry.py.
+    display_lines = display_only_fence_lines_wgs84(
+        features, zone_fence_types=("water_zone_exclusion", "tree_zone_exclusion")
+    )
+
     stamped = []
-    for feature in features:
+    for feature, display_line in zip(features, display_lines):
         fence_type = feature["properties"].get("fence_type")
         siblings = by_type[fence_type]
         row = per_feature.get(feature["id"], {})
@@ -3251,6 +3273,7 @@ def fence_lines_to_feature_collection(fencing_result: Optional[dict]) -> dict:
                     "fence_count": len(siblings),
                     "loop_count": row.get("loop_count"),
                     "length_ft": row.get("length_ft"),
+                    DISPLAY_ONLY_FENCE_LINE_PROPERTY: display_line,
                 },
             }
         )
