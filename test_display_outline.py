@@ -1,9 +1,20 @@
 """
 test_display_outline.py
 
-THE DISPLAY-ONLY SMOOTHED OUTLINE, end to end -- the field production and tree
-features now carry so the interactive map stops drawing a 5 m cell staircase,
-and the rule that it is a rendering and nothing else.
+THE DISPLAY-ONLY SMOOTHED OUTLINE, end to end -- the field PRODUCTION features
+carry so the interactive map stops drawing a 5 m cell staircase, and the rule
+that it is a rendering and nothing else.
+
+TREE FEATURES NO LONGER CARRY IT, and section 1 asserts the absence beside
+water's and roads'. A tree zone IS a cell union, so it is the one layer where
+the staircase argument applied and the answer is still no: render_layout_map.py
+draws the tree hatch from the cell-union footprint verbatim, so smoothing a
+tree feature made the two maps disagree rather than agree -- and the smooth is
+anti-extensive, measured here at 19.56% of a 0.32 ac candidate with 255.7 m^2
+removed and NOTHING added, which is the thin-arm deletion the tree layer
+refuses a morphological opening in order to prevent. The measurement itself
+lives in test_tree_zone_geometry_validity.py, where it is the justification for
+the removal; what is asserted here is that no tree feature carries the field.
 
 Run as:
 
@@ -21,9 +32,10 @@ taken on a session that file has just proved sound. Its output is captured and
 reprinted only if it fails.
 
 Sections (the branch's numbered backend tests in brackets):
-  1  [1]  WHO CARRIES IT. Production and tree features carry the outline;
-          water and road features do not, and the reason they must not is
-          that neither is a cell union.
+  1  [1]  WHO CARRIES IT. Production features carry the outline; tree,
+          water and road features do not -- water and roads because neither
+          is a cell union, trees because the layout map does not smooth
+          them and the smooth ate their thin arms.
   2  [2]  ONE IMPLEMENTATION, BYTE-IDENTICAL. The shipped outline is exactly
           what render_layout_map.py computes for the same zone -- asserted
           three ways: the function is the same object, the renderer holds no
@@ -35,7 +47,9 @@ Sections (the branch's numbered backend tests in brackets):
           and the feature's own `geometry` is the unsmoothed opening.
   4  [4]  NOTHING DOWNSTREAM READS IT -- grepped across the backend, and
           MEASURED: every rehydrator returns a field-identical internal dict
-          whether the property is present or stripped.
+          whether the property is present or stripped. A tree feature, which
+          no longer carries it, is INJECTED with one so the claim stays a
+          measurement rather than a vacuous truth.
   5  [5]  WHAT IT COSTS, per zone and per generate, and what the largest
           deviation from the real geometry is on the reference parcel.
   5b      THE DEGRADATION CONTRACT at the boundaries -- empty in, non-polygonal
@@ -98,6 +112,9 @@ with fixture.Harness() as _harness:
     PRODUCTION_PATCHES = CONTEXT.step_proposals["landform"]["scored_patches"]
     TREE_PATCHES = CONTEXT.step_proposals["trees"]["patches"]
     EXCLUSION = SESSION.assembled("landform")["exclusion_zones"]
+    # Section 3 rebuilds the trees payload; assembling its consumed values
+    # needs the harness's mocks, so it happens here rather than below.
+    SESSION_ASSEMBLED = SESSION.assembled("trees")
 
 assert PRODUCTION_FEATURES and TREE_FEATURES and WATER_FEATURES and ROAD_FEATURES, (
     "the fixture must produce all four layers, or every assertion below is vacuous"
@@ -106,12 +123,23 @@ assert PRODUCTION_FEATURES and TREE_FEATURES and WATER_FEATURES and ROAD_FEATURE
 
 # --- 1 [test 1]. WHO CARRIES THE OUTLINE, AND WHO MUST NOT --------------
 #
-# Production and tree zones are unions of 5 m DEM cells; their edges ARE pixel
-# boundaries and that is the whole defect. A water survey zone is a clipped
-# envelope and a road corridor is a LineString -- neither is a cell union,
-# neither has a staircase, and smoothing either would move geometry for no
-# reason at all. So this is two assertions, not one: the field is present where
-# the staircase is, and ABSENT where it is not.
+# A production zone is a union of 5 m DEM cells; its edge IS a pixel boundary
+# and that is the whole defect. A water survey zone is a clipped envelope and a
+# road corridor is a LineString -- neither is a cell union, neither has a
+# staircase, and smoothing either would move geometry for no reason at all.
+#
+# A TREE ZONE IS A CELL UNION AND STILL MUST NOT CARRY IT, which is why it is
+# asserted here beside water and roads rather than beside production. The
+# staircase is real on a tree candidate; the smooth is wrong anyway, for two
+# reasons that are separate and each sufficient. render_layout_map.py does not
+# smooth tree zones -- it draws the tree hatch from the cell-union footprint
+# verbatim and smooths only the production fill, which its contour clip runs
+# against -- so the field made the interactive map disagree with the printed
+# one, which is the opposite of what it exists for. And the smooth is
+# ANTI-EXTENSIVE: on this same parcel it removed 255.7 m^2 from a 0.32 ac
+# candidate and added nothing, 19.56% of the zone, off the thin arms the tree
+# layer refuses an opening in order to keep. See display_outline.py and
+# test_tree_zone_geometry_validity.py, which measures it.
 
 for feature in PRODUCTION_FEATURES:
     assert OUTLINE in feature["properties"], f"{feature['id']} carries no display outline"
@@ -119,9 +147,10 @@ for feature in PRODUCTION_FEATURES:
     assert outline is not None and outline["type"] in ("Polygon", "MultiPolygon"), outline
 
 for feature in TREE_FEATURES:
-    assert OUTLINE in feature["properties"], f"{feature['id']} carries no display outline"
-    outline = feature["properties"][OUTLINE]
-    assert outline is not None and outline["type"] in ("Polygon", "MultiPolygon"), outline
+    assert OUTLINE not in feature["properties"], (
+        f"{feature['id']} carries a display outline: the layout map draws tree zones "
+        f"unsmoothed, and the smooth is anti-extensive on exactly their thin arms"
+    )
 
 for feature in WATER_FEATURES + ROAD_FEATURES:
     assert OUTLINE not in feature["properties"], (
@@ -129,18 +158,19 @@ for feature in WATER_FEATURES + ROAD_FEATURES:
         f"road corridors are LineStrings -- neither is a cell union and neither may be smoothed"
     )
 
-# THE CONTROL THAT MAKES THE ABSENCE A MEASUREMENT. Water and road features
-# carry properties at all, and plenty of them, so "no such key" above is a
-# statement about this key rather than about an empty properties dict.
-assert all(len(f["properties"]) > 3 for f in WATER_FEATURES + ROAD_FEATURES)
+# THE CONTROL THAT MAKES THE ABSENCE A MEASUREMENT. The features that carry no
+# outline carry properties at all, and plenty of them, so "no such key" above is
+# a statement about this key rather than about an empty properties dict.
+_WITHOUT = TREE_FEATURES + WATER_FEATURES + ROAD_FEATURES
+assert all(len(f["properties"]) > 3 for f in _WITHOUT)
 
 print(
-    f"1 [test 1]. WHO CARRIES IT: {len(PRODUCTION_FEATURES)} production and {len(TREE_FEATURES)} "
-    f"tree feature(s) carry '{OUTLINE}' as a Polygon/MultiPolygon; "
-    f"{len(WATER_FEATURES)} water and {len(ROAD_FEATURES)} road feature(s) carry no such key "
-    f"(they average {sum(len(f['properties']) for f in WATER_FEATURES + ROAD_FEATURES) // (len(WATER_FEATURES) + len(ROAD_FEATURES))} "
-    f"properties each, so the absence is about this key). Water zones are clipped envelopes and "
-    f"roads are LineStrings -- neither is a cell union."
+    f"1 [test 1]. WHO CARRIES IT: {len(PRODUCTION_FEATURES)} production feature(s) carry "
+    f"'{OUTLINE}' as a Polygon/MultiPolygon; {len(TREE_FEATURES)} tree, {len(WATER_FEATURES)} "
+    f"water and {len(ROAD_FEATURES)} road feature(s) carry no such key (they average "
+    f"{sum(len(f['properties']) for f in _WITHOUT) // len(_WITHOUT)} properties each, so the "
+    f"absence is about this key). Water zones are clipped envelopes and roads are LineStrings -- "
+    f"neither is a cell union; a tree zone is one, and the layout map draws it unsmoothed anyway."
 )
 
 
@@ -154,9 +184,17 @@ print(
 
 # (a) THE SAME FUNCTION OBJECT. Not two functions that agree today.
 assert render_layout_map.smoothed_display_outline is display_outline.smoothed_display_outline
-assert step_orchestrator.smoothed_display_outline is display_outline.smoothed_display_outline
 assert (
     production_zone_payload.smoothed_display_outline is display_outline.smoothed_display_outline
+)
+# AND step_orchestrator IMPORTS IT NO LONGER. The trees payload builder was the
+# second producer site; removing the call without removing the import would
+# leave a name that reads as a live consumer.
+assert not hasattr(step_orchestrator, "smoothed_display_outline"), (
+    "step_orchestrator still imports the smoother -- trees does not smooth"
+)
+assert not hasattr(step_orchestrator, "_with_display_only_outlines"), (
+    "step_orchestrator still holds the tree outline builder"
 )
 
 # (b) THE RENDERER HOLDS NO SMOOTHING CALL OF ITS OWN. A source read rather
@@ -225,22 +263,10 @@ for feature in PRODUCTION_FEATURES:
     assert feature["properties"][OUTLINE] == expected_wire, feature["id"]
     _utm_identical += 1
 
-for feature in TREE_FEATURES:
-    patch = _tree_by_rank[feature["properties"]["rank"]]
-    expected_utm = _renderer_expression(patch)
-    shipped_utm = display_outline.smoothed_display_outline(
-        patch["render_fill_polygon_utm"], patch["polygon_utm"], CELL_M
-    )
-    assert shipped_utm.wkb == expected_utm.wkb, f"{feature['id']}: UTM geometry differs"
-    from rasterio.warp import transform_geom
-
-    expected_wire = transform_geom(DEM["crs"], "EPSG:4326", mapping(expected_utm))
-    assert feature["properties"][OUTLINE] == expected_wire, feature["id"]
-    _utm_identical += 1
-
 print(
     f"2 [test 2]. ONE IMPLEMENTATION: render_layout_map.smoothed_display_outline IS "
-    f"display_outline.smoothed_display_outline (and so is the one both payload builders call); "
+    f"display_outline.smoothed_display_outline (and so is the one the payload builder calls, "
+    f"the only one left); "
     f"render_layout_map.py holds no angular_smooth_polygon() call of its own; and all "
     f"{_utm_identical} zone outline(s) are WKB-IDENTICAL to a literal transcription of the "
     f"expression that renderer used to evaluate inline -- "
@@ -269,9 +295,12 @@ _tree_before = {
 _rebuilt_landform = production_zone_payload.assemble_production_zone_payload(
     EXCLUSION, CONTEXT.step_proposals["landform"]
 )
-_rebuilt_trees = step_orchestrator._with_display_only_outlines(
-    CONTEXT.step_proposals["trees"]["zones_geojson"], TREE_PATCHES, DEM
-)
+# The trees payload builder is rebuilt whole -- there is no outline step left
+# to isolate, and rebuilding the builder is the stronger statement anyway: it
+# says a re-read returns the generate's own answer, outline or no outline.
+_rebuilt_trees = step_orchestrator.build_trees_payload(
+    CONTEXT.step_proposals["trees"], SESSION_ASSEMBLED
+)["tree_zones"]
 
 for patch in PRODUCTION_PATCHES:
     assert _before[patch["id"]] == (
@@ -300,10 +329,12 @@ for feature in PRODUCTION_FEATURES:
     assert feature["geometry"] != feature["properties"][OUTLINE], (
         f"{feature['id']}: the outline equals the geometry -- the smooth did nothing"
     )
+# A tree feature's geometry is its own footprint, and it is the ONLY geometry
+# the feature carries -- there is no second version of it in properties.
 for feature in TREE_FEATURES:
     patch = _tree_by_rank[feature["properties"]["rank"]]
     assert feature["geometry"] == patch["geometry_wgs84"], feature["id"]
-    assert feature["geometry"] != feature["properties"][OUTLINE], feature["id"]
+    assert OUTLINE not in feature["properties"], feature["id"]
 
 # The rebuilt payloads agree with the shipped ones, which is what says a
 # re-read (step_payload) returns the generate's own answer.
@@ -313,9 +344,10 @@ assert _rebuilt_trees["features"] == TREE_FEATURES
 print(
     f"3 [test 3]. REAL GEOMETRY UNTOUCHED: polygon_utm and render_fill_polygon_utm are "
     f"WKB-identical across a payload rebuild on all {len(PRODUCTION_PATCHES)} production and "
-    f"{len(TREE_PATCHES)} tree patch(es); every feature's own `geometry` is still the unsmoothed "
-    f"shape (production's opening, a tree's footprint) and differs from its outline on every "
-    f"zone; and a rebuild returns the shipped payload byte for byte."
+    f"{len(TREE_PATCHES)} tree patch(es); every production feature's own `geometry` is still the "
+    f"unsmoothed opening and differs from its outline on every zone; every tree feature's is its "
+    f"own footprint and carries no outline at all; and a rebuild returns the shipped payload "
+    f"byte for byte."
 )
 
 
@@ -328,9 +360,21 @@ print(
 #     literal name or through the one constant that spells it.
 _producers = {
     "display_outline.py",          # the rule, and the property's one spelling
-    "production_zone_payload.py",  # production's own use
-    "step_orchestrator.py",        # trees' own use
+    "production_zone_payload.py",  # production's own use -- the ONE producer
+    "step_orchestrator.py",        # a docstring naming what trees stopped doing
 }
+# THE THIRD ONE IS PROSE, NOT CODE, and the difference is asserted rather than
+# assumed: step_orchestrator.py names the property only in build_trees_payload()'s
+# docstring, explaining why a tree feature no longer carries it. A grep that
+# could not tell those apart would go on passing if the call came back.
+_orchestrator_lines = [
+    line for line in open("step_orchestrator.py").read().splitlines()
+    if OUTLINE in line or "DISPLAY_ONLY_OUTLINE_PROPERTY" in line
+]
+assert _orchestrator_lines and all(
+    not line.strip().startswith(("from ", "import ")) and "=" not in line and "(" not in line
+    for line in _orchestrator_lines
+), _orchestrator_lines
 _mentions = subprocess.run(
     ["grep", "-rl", "-e", OUTLINE, "-e", "DISPLAY_ONLY_OUTLINE_PROPERTY", "--include=*.py", "."],
     capture_output=True, text=True, check=False,
@@ -362,10 +406,24 @@ def _comparable(patch):
     }
 
 
+# A TREE FEATURE NO LONGER CARRIES THE FIELD, so stripping one proves nothing.
+# It is INJECTED instead: a feature with the property added and the same feature
+# without it must rehydrate identically. That keeps the claim a measurement --
+# the rehydrator ignores this key whether or not anything ever ships it -- and
+# it is the assertion that would catch a rehydrator learning to read it back.
+
+
+def _injected(feature):
+    return {
+        **feature,
+        "properties": {**feature["properties"], OUTLINE: feature["geometry"]},
+    }
+
+
 _rehydrations = 0
 for feature in TREE_FEATURES:
-    with_field = wire_translation.rehydrate_tree_zone(feature, DEM)
-    without = wire_translation.rehydrate_tree_zone(_stripped(feature), DEM)
+    with_field = wire_translation.rehydrate_tree_zone(_injected(feature), DEM)
+    without = wire_translation.rehydrate_tree_zone(feature, DEM)
     assert _comparable(with_field) == _comparable(without), feature["id"]
     assert OUTLINE not in with_field, "the rehydrator inherited a display field"
     _rehydrations += 1
@@ -378,10 +436,12 @@ for feature in PRODUCTION_FEATURES:
 
 print(
     f"4 [test 4]. NOTHING READS IT: the property is named in exactly "
-    f"{len(_producers)} non-test backend files ({', '.join(sorted(_producers))}) -- the two that "
-    f"put it on the wire and the one that owns the rule. And {_rehydrations} rehydration(s) "
-    f"return a field-identical internal dict with the property present and with it stripped, so "
-    f"no consumer downstream of the wire can be reading it."
+    f"{len(_producers)} non-test backend files ({', '.join(sorted(_producers))}) -- the one that "
+    f"puts it on the wire, the one that owns the rule, and {len(_orchestrator_lines)} line(s) of "
+    f"docstring prose in step_orchestrator.py saying why trees stopped. And {_rehydrations} "
+    f"rehydration(s) return a field-identical internal dict with the property present and with it "
+    f"absent (injected on a tree feature, which ships none), so no consumer downstream of the "
+    f"wire can be reading it."
 )
 
 
@@ -407,9 +467,7 @@ def _time_outlines(patches):
 
 
 _production_ms = _time_outlines(PRODUCTION_PATCHES)
-_tree_ms = _time_outlines(TREE_PATCHES)
 _per_production = _production_ms / len(PRODUCTION_PATCHES)
-_per_tree = _tree_ms / len(TREE_PATCHES)
 
 # THE DEVIATION. How far the drawn edge moves from the real one, per zone --
 # the worst Hausdorff distance (the furthest any point on one boundary is from
@@ -419,7 +477,7 @@ _per_tree = _tree_ms / len(TREE_PATCHES)
 # deviation is a function of how ragged and how small a zone is, and a single
 # worst case says nothing about whether that is one zone or all of them.
 _rows = []
-for label, patches in (("production", PRODUCTION_PATCHES), ("tree", TREE_PATCHES)):
+for label, patches in (("production", PRODUCTION_PATCHES),):
     for patch in patches:
         real = patch["render_fill_polygon_utm"]
         outline = display_outline.smoothed_display_outline(real, patch["polygon_utm"], CELL_M)
@@ -444,7 +502,7 @@ for row in sorted(_rows, key=lambda row: -row["hausdorff_m"]):
 
 # THE SMOOTH NEVER CLAIMS GROUND THE GATE EXCLUDED. The re-clip to polygon_utm
 # is what makes this hard rather than probable -- see smoothed_display_outline().
-for label, patches in (("production", PRODUCTION_PATCHES), ("tree", TREE_PATCHES)):
+for label, patches in (("production", PRODUCTION_PATCHES),):
     for patch in patches:
         outline = display_outline.smoothed_display_outline(
             patch["render_fill_polygon_utm"], patch["polygon_utm"], CELL_M
@@ -475,10 +533,10 @@ assert _worst["hausdorff_m"] < DEVIATION_BOUND_CELLS * CELL_M, (_worst, CELL_M)
 
 print(
     f"5 [test 5]. COST AND DEVIATION: the smoothing pass costs "
-    f"{_per_production:.2f} ms per production zone and {_per_tree:.2f} ms per tree candidate "
-    f"({_production_ms:.2f} ms for {len(PRODUCTION_PATCHES)} production zones, {_tree_ms:.2f} ms "
-    f"for {len(TREE_PATCHES)} tree candidates, mean of {_REPEATS} runs) -- so twelve tree "
-    f"candidates would cost about {_per_tree * 12:.1f} ms. LARGEST DEVIATION on this parcel: "
+    f"{_per_production:.2f} ms per production zone "
+    f"({_production_ms:.2f} ms for {len(PRODUCTION_PATCHES)} production zones, mean of "
+    f"{_REPEATS} runs) -- so twelve zones would cost about {_per_production * 12:.1f} ms. "
+    f"LARGEST DEVIATION on this parcel: "
     f"{_worst['label']} ({_worst['acres']:.2f} ac), Hausdorff {_worst['hausdorff_m']:.2f} m "
     f"against a {DEVIATION_BOUND_CELLS:.0f}-cell ({DEVIATION_BOUND_CELLS * CELL_M:.0f} m) bound "
     f"-- symmetric difference {_worst['difference_pct']:.2f}% of that zone, "
@@ -541,7 +599,7 @@ print(
     "(run above, as this file's fixture), test_production_fill_smoothing.py, "
     "test_production_zone_payload.py, test_step_orchestrator.py, test_step_commit.py, "
     "test_wire_translation.py, test_wire_translation_inbound.py, test_water_step.py, "
-    "test_roads_step.py, test_render_layout_map.py."
+    "test_roads_step.py, test_render_layout_map.py, test_tree_zone_geometry_validity.py."
 )
 
 print("\nAll display outline checks passed.")
