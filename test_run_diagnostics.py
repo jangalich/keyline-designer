@@ -35,7 +35,10 @@ Sections (the branch's numbered tests in brackets):
           record-building function in the module is replaced by one that
           raises, and a full generate-and-commit runs clean.
   7  [7]  THE ENVIRONMENT GROUP, and the wire's coordinate precision.
-  8  [8]  Regression is the other test files, run separately.
+  8  [8]  THE DROP SINK, SURFACED: an induced drop puts a real
+          {id, area_acres, reason} row on the result and into the
+          record, where only its len() used to reach anything.
+  9  [9]  Regression is the other test files, run separately.
 """
 
 import copy
@@ -664,11 +667,34 @@ assert not os.path.exists(_off_dir), f"a disabled run created {_off_dir}"
 assert [event["event"] for event in _on_record["events"]] == ["generate", "commit"]
 assert _on_record["events"][0]["step_id"] == "landform"
 
+# THE DEFAULT PATH, with DIRECTORY_ENV saying nothing: `diagnostics/`
+# under the working directory, the cwd-relative shape session_api uses
+# for `sessions/`. `.gitignore` must carry it -- a record is a capture of
+# ONE machine's runs and checking one in puts somebody else's evidence
+# where yours belongs.
+_saved_directory_env = os.environ.pop(run_diagnostics.DIRECTORY_ENV, None)
+try:
+    assert run_diagnostics.directory() == "diagnostics", run_diagnostics.directory()
+    os.environ[run_diagnostics.DIRECTORY_ENV] = ""
+    assert run_diagnostics.directory() == "diagnostics", "an empty variable is not a configured path"
+finally:
+    os.environ.pop(run_diagnostics.DIRECTORY_ENV, None)
+    if _saved_directory_env is not None:
+        os.environ[run_diagnostics.DIRECTORY_ENV] = _saved_directory_env
+
+_gitignore = open(
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), ".gitignore"), encoding="utf-8"
+).read()
+assert "diagnostics/" in _gitignore.split(), "\n".join(_gitignore.split())
+
 print(
     f"1 [test 1]. ON/OFF: with {run_diagnostics.ENABLED_ENV}=1 a landform generate and commit wrote "
     f"one file ({_on_session.id}.json) carrying {_on_record['header']['event_count']} events "
     f"{[e['event'] for e in _on_record['events']]}; with the variable UNSET the identical run wrote "
-    f"nothing and did not even create the directory ({_off_dir!r} does not exist)."
+    f"nothing and did not even create the directory ({_off_dir!r} does not exist). With "
+    f"{run_diagnostics.DIRECTORY_ENV} unset or empty the path is "
+    f"{run_diagnostics.DEFAULT_DIRECTORY!r} under the working directory, and .gitignore carries "
+    f"'diagnostics/'."
 )
 
 
@@ -1214,11 +1240,136 @@ print(
 
 
 # =========================================================================
-# 8 [test 8]. REGRESSION
+# 8 [test 8]. THE DROP SINK, SURFACED -- ROWS AND REASONS, NOT A LENGTH
+# =========================================================================
+#
+# score_tree_search_space() records one {'id', 'area_acres', 'reason'} per
+# patch it scored and then refused to emit, and identify_tree_zone_
+# candidates() used to read only len() of that list before it died with
+# the call -- so an intermittent geometry drop left a number and no
+# evidence. It now RETURNS the sink, and the record carries the rows.
+#
+# THE FIXTURE DROPS NOTHING on a healthy generate, which is the whole
+# reason a drop has to be induced to test this at all. It is induced as
+# the REAL DEFECT rather than by stubbing the verdict: the first
+# component's footprint is replaced with a genuine self-intersecting
+# bowtie, and make_valid() is made to hand it back unrepaired -- which is
+# exactly the "the rebuild could not be made valid" case _valid_polygonal()
+# exists to catch. Everything downstream is the real path: the module's
+# own gate refuses it, its own explain_validity() names the defect AND
+# THE COORDINATE, its own sink records it, its own result returns it.
+
+_drop_dir = tempfile.mkdtemp(prefix="run_diagnostics_drop_")
+_real_fill_rings = tree_zone_candidates._fill_subthreshold_interior_rings
+_bowtied = []
+
+
+def _bowtie_at(geometry):
+    """A self-intersecting ring on the same ground as `geometry` -- the
+    corners visited out of order, so the two sides cross."""
+    minx, miny, maxx, maxy = geometry.bounds
+    return Polygon([(minx, miny), (maxx, maxy), (minx, maxy), (maxx, miny)])
+
+
+def _bowtie_first(footprint, cell_area, max_cells):
+    """_fill_subthreshold_interior_rings(), handing back a bowtie exactly
+    once. Every later component goes through the module's real one."""
+    if not _bowtied:
+        broken = _bowtie_at(footprint)
+        _bowtied.append(broken)
+        return broken, 0, 0
+    return _real_fill_rings(footprint, cell_area, max_cells)
+
+
+with Diagnostics(on=True, directory=_drop_dir), Harness(), ExitStack() as _stack:
+    _stack.enter_context(
+        mock_patch.object(
+            tree_zone_candidates, "_fill_subthreshold_interior_rings", _bowtie_first
+        )
+    )
+    # make_valid() returning its input unrepaired is what makes the
+    # bowtie UNREPAIRABLE rather than merely invalid -- without this the
+    # gate would repair it into two lobes and emit them, which is the
+    # gate working and not the drop this section is about.
+    _stack.enter_context(
+        mock_patch.object(tree_zone_candidates, "make_valid", lambda geometry: geometry)
+    )
+    _drop_session = Session()
+    _drop_session.upstream()
+    _drop_session.trees()
+    _drop_record = run_diagnostics.read_record(_drop_session.id)
+    _drop_result = _drop_session.context().step_proposals["trees"]
+
+assert _bowtied, "the induced drop did not happen -- the gate was never reached"
+assert not _bowtied[0].is_valid, "the induced footprint must genuinely be invalid"
+
+# THE PIPELINE now returns the sink rather than discarding it.
+_sink = _drop_result["dropped_invalid"]
+assert len(_sink) == 1, _sink
+assert set(_sink[0]) == {"id", "area_acres", "reason"}, sorted(_sink[0])
+
+_drop_event = _generate_events(_drop_record, "trees")[0]
+_recorded_drops = _drop_event["gates"]["drops"]["result.dropped_invalid"]
+
+# THE ROWS ARE THE SINK'S, by value, field for field. Not a summary of it
+# and not a re-derivation: this is test 5's rule applied to the group
+# added for the sink.
+assert _recorded_drops == _sink, (_recorded_drops, _sink)
+
+# AND THE COUNT IS STILL THERE, beside the rows and answering a different
+# question -- narrative_data keeps it, because the report says how many
+# candidates were lost, not which ring crossed itself where.
+assert _drop_event["gates"]["counts"]["result.narrative_data.dropped_invalid_count"] == 1
+assert _drop_event["gates"]["narrative_data"]["dropped_invalid_count"] == 1
+
+# The reason is explain_validity()'s own message on the refused footprint,
+# not a sentence this module wrote -- AND IT CARRIES THE COORDINATE,
+# which is the whole reason a row beats a count.
+_reason = _recorded_drops[0]["reason"]
+from shapely.validation import explain_validity as _explain
+
+assert _reason == _explain(_bowtied[0]), (_reason, _explain(_bowtied[0]))
+assert "Self-intersection" in _reason, _reason
+_drop_coordinate = _reason.split("Self-intersection[", 1)[1].split("]", 1)[0]
+assert len(_drop_coordinate.split()) == 2, _drop_coordinate
+
+# A HEALTHY GENERATE RECORDS THE SINK AS `[]`, NOT AS AN ABSENT KEY -- so
+# the line above is a CHANGE in a diff against a clean run rather than an
+# addition to it.
+_clean_drops = _generate_events(_full_record, "trees")[0]["gates"]["drops"]
+assert _clean_drops.get("result.dropped_invalid") == [], _clean_drops
+
+# The generic collector reaches every step's sink, with none named in the
+# module: water's dropped zones carry their own drop_reason.
+_water_drops = _generate_events(_drop_record, "water")[0]["gates"]["drops"]
+_water_rows = _water_drops.get("result.dropped_zones", [])
+assert _water_rows and all("drop_reason" in row for row in _water_rows), _water_drops
+# ONE ROW PER DROPPED OBJECT: the water result holds the same list under
+# `result.dropped_zones` and the nested `result.result.dropped_zones`, and
+# the second is not recorded again.
+assert "result.result.dropped_zones" not in _water_drops, sorted(_water_drops)
+
+print(
+    f"8 [test 8]. THE DROP SINK, SURFACED: with one component's footprint replaced by a genuine "
+    f"self-intersecting bowtie that make_valid() could not rescue, "
+    f"identify_tree_zone_candidates() RETURNED its dropped_invalid sink -- {len(_sink)} row "
+    f"{sorted(_sink[0])} -- and the record carries it verbatim under gates.drops"
+    f"['result.dropped_invalid'], equal to the pipeline's list by value. The reason is "
+    f"explain_validity()'s own message: {_reason!r}. dropped_invalid_count is still 1 beside it, "
+    f"in both counts and narrative_data. A healthy generate records the sink as [] rather than "
+    f"omitting it. The collector is generic: water's {len(_water_rows)} dropped zones are recorded "
+    f"with their own drop_reason "
+    f"{sorted({row['drop_reason'] for row in _water_rows})}, once each despite the result holding "
+    f"that list under two paths."
+)
+
+
+# =========================================================================
+# 9 [test 9]. REGRESSION
 # =========================================================================
 
 print(
-    "\n8 [test 8]. REGRESSION: run the other test files separately -- test_step_orchestrator.py, "
+    "\n9 [test 9]. REGRESSION: run the other test files separately -- test_step_orchestrator.py, "
     "test_step_commit.py, test_step_registry.py, test_session_api.py, test_session_manager.py, "
     "test_session_cache.py, test_trees_step.py, test_water_step.py, test_roads_step.py, "
     "test_structures_step.py, test_fencing_step.py, test_wire_translation.py, "

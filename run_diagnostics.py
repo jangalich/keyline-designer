@@ -119,12 +119,23 @@ The cost of a disabled hook is a function call and a boolean test.
 WHERE IT WRITES
 ===============
 One JSON file per session, `<session_id>.json`, in
-`$KEYLINE_RUN_DIAGNOSTICS_DIR`, defaulting to a `diagnostics/`
-subdirectory of the Design Document store -- BESIDE the documents, and
-resolved through `session_api.store_directory()` so pointing a deploy's
-persistent disk at the sessions also captures their diagnostics. It is a
-DIRECTORY and not a `.json` file, so `JSONFileStore.list_sessions()` --
-which filters on the `.json` extension -- does not see it as a session.
+`$KEYLINE_RUN_DIAGNOSTICS_DIR`, defaulting to `diagnostics/` under the
+working directory -- the same cwd-relative shape
+`session_api.DEFAULT_STORE_DIRECTORY` uses for `sessions/`, so the two
+sit side by side in a checkout and a deploy points each at its own disk.
+`.gitignore` carries `diagnostics/`: these are captures of one machine's
+runs, and the whole point of the record is to diff YOUR run against
+someone else's, not to check either one in.
+
+RESOLVED WITHOUT session_api, deliberately. Reading the default off
+`session_api.store_directory()` would make the diagnostics directory
+move whenever the document store moved -- which sounds tidy and is
+wrong: it puts run captures inside the one directory a deploy is told to
+back with a persistent disk, so the thing that must survive a restart
+and the thing that must not would share a volume and a retention
+policy. It also cost a function-local `import session_api` to dodge the
+import cycle (session_api -> step_orchestrator -> this module), which is
+now simply gone.
 
 Written atomically (temp file + os.replace in the same directory) and
 under a per-session lock, for document_store.py's reasons exactly: Flask
@@ -161,9 +172,13 @@ import threading
 ENABLED_ENV = "KEYLINE_RUN_DIAGNOSTICS"
 DIRECTORY_ENV = "KEYLINE_RUN_DIAGNOSTICS_DIR"
 
-# The subdirectory of the Design Document store used when DIRECTORY_ENV
-# says nothing. See the module docstring's WHERE IT WRITES.
-DEFAULT_SUBDIRECTORY = "diagnostics"
+# Where records are written when DIRECTORY_ENV says nothing: a relative
+# path under the working directory (/app in the Dockerfile), exactly like
+# session_api.DEFAULT_STORE_DIRECTORY's "sessions". Named as a constant
+# for the same reason that one is -- the thing a deploy may have to point
+# somewhere else gets one obvious name. See the module docstring's WHERE
+# IT WRITES.
+DEFAULT_DIRECTORY = "diagnostics"
 
 # Values of ENABLED_ENV that mean "no". Anything else -- including "1",
 # "true", "yes" and a bare "x" -- enables. A variable that is SET is a
@@ -200,6 +215,29 @@ _FLAG_KEY_EXACT = frozenset({"data_available", "is_fallback"})
 
 _COUNT_KEY_SUFFIXES = ("_count",)
 _COUNT_KEY_PREFIXES = ("dropped",)
+
+# A DROP SINK is a list of dicts under a `dropped*` key -- trees'
+# `dropped_invalid`, water's `dropped_zones`. Each entry describes one
+# thing the step scored and then refused, and `reason`/`drop_reason` on
+# it is the only statement anywhere of WHY. Same naming-shape rule as
+# the flags above, for the same reason: a seventh step's sink is
+# recorded the day it lands, with nothing named here.
+_DROP_KEY_PREFIXES = ("dropped",)
+
+# Drop rows recorded per generate, across every sink. A bound rather
+# than a budget -- a healthy generate drops nothing and a pathological
+# one must not be able to write a record nobody will open.
+_MAX_RECORDED_DROPS = 200
+
+# How much of a STRING field on a drop row is kept. A drop row is
+# recorded for its REASON, and a reason is a sentence: trees' is
+# explain_validity()'s message with its coordinate, water's is a status
+# constant. What overruns this is display prose -- water's dropped zones
+# are whole zone dicts and carry the two-kilobyte `confidence_notes`
+# essay the wire already delivers, which doubled the file to say nothing
+# about the drop. Truncation is marked in the value, never silent.
+_MAX_RECORDED_DROP_STRING = 400
+_TRUNCATION_MARKER = "...[truncated by run_diagnostics]"
 
 # Scan bounds. A result dict holds whole GeoJSON collections, and an
 # unbounded walk over one is both slow and pointless -- a coordinate
@@ -245,20 +283,13 @@ def enabled() -> bool:
 
 def directory() -> str:
     """
-    Where records are written. DIRECTORY_ENV first, otherwise a
-    `diagnostics/` subdirectory of the Design Document store.
-
-    session_api is imported HERE and not at module scope: it imports
-    step_orchestrator, which imports this module, and a module-level
-    import would close that cycle. The import is also the reason this
-    function is not called on the disabled path -- see enabled().
+    Where records are written. DIRECTORY_ENV first, DEFAULT_DIRECTORY
+    otherwise -- session_api.store_directory()'s shape, and for its
+    reasons, including the empty-string case: a variable set to "" is not
+    a configured path and falls through to the default rather than
+    naming the process's own working directory.
     """
-    configured = os.environ.get(DIRECTORY_ENV)
-    if configured:
-        return configured
-    import session_api
-
-    return os.path.join(session_api.store_directory(), DEFAULT_SUBDIRECTORY)
+    return os.environ.get(DIRECTORY_ENV) or DEFAULT_DIRECTORY
 
 
 def record_path(session_id: str) -> str:
@@ -342,8 +373,10 @@ def environment() -> dict:
 
 class _Scan:
     """
-    A bounded, path-qualified walk over a pipeline value, collecting the
-    SCALARS sitting at flag-shaped and count-shaped keys.
+    A bounded, path-qualified walk over a pipeline value, collecting
+    three things by the shape of the key they sit under: the SCALARS at
+    flag-shaped keys, the INTEGERS at count-shaped keys, and the ROWS of
+    every drop sink (see _record_drops()).
 
     PATH-QUALIFIED because the same flag name legitimately appears in
     several places on one result -- `hydric_data_available` rides every
@@ -366,8 +399,11 @@ class _Scan:
     def __init__(self):
         self.flags = {}
         self.counts = {}
+        self.drops = {}
         self.truncated = False
         self._nodes = 0
+        self._drop_rows = 0
+        self._dropped_seen = set()
 
     def walk(self, value, path: str, depth: int = 0) -> None:
         if depth > _SCAN_MAX_DEPTH:
@@ -400,12 +436,61 @@ class _Scan:
                     and "[" not in child_path
                 ):
                     self.counts[child_path] = child
+                elif _is_drop_key(key) and isinstance(child, list):
+                    self._record_drops(child_path, child)
                 self.walk(child, child_path, depth + 1)
         elif isinstance(value, list):
             for index, child in enumerate(value):
                 # Only dict elements. See this class's docstring.
                 if isinstance(child, dict):
                     self.walk(child, f"{path}[{index}]", depth + 1)
+
+    def _record_drops(self, path: str, entries: list) -> None:
+        """
+        One drop sink, recorded ROW BY ROW rather than as its length.
+
+        THE COUNT WAS NEVER THE ANSWER. `dropped_invalid_count` says a
+        patch was lost; the row says which defect lost it and -- because
+        `reason` is explain_validity()'s own message -- at which
+        coordinate. That detail existed for exactly the length of the
+        call that produced it and was thrown away at the one moment it
+        was in hand, which is the position commit rejections were in
+        before this module.
+
+        EVERY FIELD OF EVERY ROW, through _scalar(), so a sink whose rows
+        carry geometry (water's dropped zones are whole zone dicts) still
+        records every scalar it carries and names the type of what it
+        does not. Nothing is selected for; a row is copied.
+        """
+        rows = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            # ONE ROW PER DROPPED OBJECT, WHICHEVER SINK REACHES IT
+            # FIRST -- _collect_patches()'s rule. The water result holds
+            # its dropped zones under both `dropped_zones` and the
+            # nested `result.dropped_zones`, one list of the same dicts
+            # reached two ways, and recording both said everything twice.
+            if id(entry) in self._dropped_seen:
+                continue
+            if self._drop_rows >= _MAX_RECORDED_DROPS:
+                self.truncated = True
+                break
+            self._dropped_seen.add(id(entry))
+            self._drop_rows += 1
+            rows.append(
+                {key: _drop_field(entry[key]) for key in sorted(entry) if isinstance(key, str)}
+            )
+        # AN EMPTY SINK IS RECORDED AS `[]`, AND A FULLY-DEDUPED ONE IS
+        # NOT RECORDED AT ALL. The two are different statements: `[]`
+        # says this step ran its gate and dropped nothing -- a stable
+        # line that a later non-empty run shows up against as a CHANGE
+        # rather than as an addition, which is what a diff reads best --
+        # while a sink whose every row was already recorded under
+        # another path has nothing left to say and must not claim to be
+        # empty.
+        if rows or not entries:
+            self.drops[path] = rows
 
 
 def _is_flag_key(key: str) -> bool:
@@ -416,17 +501,60 @@ def _is_count_key(key: str) -> bool:
     return key.endswith(_COUNT_KEY_SUFFIXES) or key.startswith(_COUNT_KEY_PREFIXES)
 
 
+def _is_drop_key(key: str) -> bool:
+    return key.startswith(_DROP_KEY_PREFIXES)
+
+
+def _drop_field(value):
+    """
+    One field of one drop row: _scalar(), with a long string cut to
+    _MAX_RECORDED_DROP_STRING and MARKED as cut.
+
+    The cut is on the record's own copy and nothing else -- the pipeline
+    value is untouched and the marker says plainly that what is here is
+    not all of what was there, so no reader can mistake a truncated
+    essay for a short reason.
+    """
+    recorded = _scalar(value)
+    if type(recorded) is str and len(recorded) > _MAX_RECORDED_DROP_STRING:
+        return recorded[:_MAX_RECORDED_DROP_STRING] + _TRUNCATION_MARKER
+    return recorded
+
+
+_JSON_SCALARS = (bool, int, float, str)
+
+
 def _scalar(value):
     """
-    A value fit for the record: JSON scalars verbatim, anything else as
-    its type name in angle brackets.
+    A value fit for the record: JSON scalars verbatim, a numpy scalar as
+    the Python number it stands for, anything else as its type name in
+    angle brackets.
 
     NEVER DROPPED SILENTLY. A flag holding a Polygon is a fact about the
     run ("this key was not the boolean a reader expects"), and a record
     that omitted the key would say the flag was absent.
+
+    THE NUMPY CASE IS NOT A CONVERSION THIS MODULE CHOSE. A pipeline
+    value read off a grid is an np.bool_ or an np.int64, which json
+    cannot serialise and which `isinstance` does not agree about across
+    platforms -- np.float64 IS a float, np.int64 is not an int. `.item()`
+    is numpy's own name for the Python number the scalar already is, so
+    this records the value rather than a `<bool_>` marker standing in for
+    one. Guarded on a zero-dimensional shape so an ARRAY, which is not a
+    scalar and has no business in a record, still reports as its type.
+
+    EXACT TYPES, not isinstance, for the first test: a subclass of str or
+    int (an enum, a numpy scalar) goes down the second path and is
+    normalised there rather than being written out as whatever its
+    repr happens to be.
     """
-    if value is None or isinstance(value, (bool, int, float, str)):
+    if value is None or type(value) in _JSON_SCALARS:
         return value
+    item = getattr(value, "item", None)
+    if item is not None and getattr(value, "shape", None) == ():
+        converted = item()
+        if converted is None or type(converted) in _JSON_SCALARS:
+            return converted
     return f"<{type(value).__name__}>"
 
 
@@ -446,6 +574,7 @@ def _sorted_scan(sources: dict) -> dict:
     return {
         "flags": {key: scan.flags[key] for key in sorted(scan.flags)},
         "counts": {key: scan.counts[key] for key in sorted(scan.counts)},
+        "drops": {key: scan.drops[key] for key in sorted(scan.drops)},
         "scan_truncated": scan.truncated,
     }
 
@@ -938,8 +1067,8 @@ def comparable_body(record: dict) -> dict:
 # test `enabled()` -- one os.environ lookup -- and return. `record_
 # generate()` tests its probe for None and returns. No record is built,
 # no geometry is reprojected, no directory is created, no file is
-# opened, and `directory()` (which imports session_api) is never
-# reached. The whole disabled path is a call and a boolean.
+# opened, and `directory()` is never reached. The whole disabled path is
+# a call and a boolean.
 #
 # A HOOK NEVER FAILS A RUN. Every one of them catches everything and
 # prints; a diagnostic that turned a working generate into a 500 would
@@ -1069,6 +1198,10 @@ def record_generate(probe, result, payload, context) -> None:
                         result.get("narrative_data") if isinstance(result, dict) else None
                     ),
                     "counts": scanned["counts"],
+                    # EVERY DROP REASON, not just how many drops. See
+                    # _Scan._record_drops(): the count is in `counts`
+                    # beside this and answers a different question.
+                    "drops": scanned["drops"],
                 },
                 # --- group 4 -------------------------------------------
                 "geometry": {
