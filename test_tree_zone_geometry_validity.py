@@ -91,8 +91,10 @@ except BaseException:
 
 import numpy as np
 import shapely
+import json
+
 from rasterio.warp import transform_geom
-from shapely.geometry import Polygon, box, mapping
+from shapely.geometry import Polygon, box, mapping, shape
 from shapely.ops import unary_union
 from shapely.validation import explain_validity, make_valid
 
@@ -543,6 +545,105 @@ for patch_id in sorted(AFTER_BY_ID):
         f"    arm    candidate {row['id']:<3} narrowest {row['before']:.2f} m -> {row['after']:.2f} m"
     )
 
+# AND ACROSS THE ROUND-TRIP GATE SPECIFICALLY. The rows above measure the gate
+# as a whole (hole fill on vs off). _wire_survivable() is the step this branch
+# added, and it is the only one in the gate that MOVES a vertex -- it snaps to a
+# WIRE_VERTEX_SEPARATION_METERS grid -- so it is the one an arm could in
+# principle be lost to. Measured on its own, on the same real ragged patches:
+# the input to the step against its output.
+#
+# A 1 mm grid against a 5.00 m one-cell arm is 5000:1, so the expectation is
+# that nothing moves at all. The point of measuring is that "expected" is not
+# "observed", and the arms are what this layer exists for.
+_wire_gate_rows = []
+for patch_id in sorted(AFTER_BY_ID):
+    _into_gate = AFTER_BY_ID[patch_id]["polygon_utm"]
+    _out_of_gate = tzc._wire_survivable(_into_gate, RAGGED_DEM)
+    assert _out_of_gate is not None, f"candidate {patch_id} was dropped by the round-trip gate"
+    _wire_gate_rows.append(
+        {
+            "id": patch_id,
+            "arm_before": narrowest_arm_meters(_into_gate),
+            "arm_after": narrowest_arm_meters(_out_of_gate),
+            "area_before": _into_gate.area,
+            "area_after": _out_of_gate.area,
+            "untouched": _out_of_gate is _into_gate,
+        }
+    )
+
+for row in _wire_gate_rows:
+    assert row["arm_before"] is not None and row["arm_after"] is not None, row
+    # THE ASSERTION, the same one section 4 makes of the gate as a whole: the
+    # narrowest arm does not get narrower and does not vanish.
+    assert row["arm_after"] >= row["arm_before"] - 1e-6, row
+    # AND THE AREA, which section 5 accounts for across the gate but not
+    # across this step. A snap moves each vertex by at most half a grid
+    # diagonal, so the bound is a perimeter-scale quantity and nowhere near a
+    # cell. One cell is the smallest change this pipeline can even represent.
+    assert abs(row["area_after"] - row["area_before"]) < CELL_AREA_M2, row
+
+_wire_gate_touched = [row for row in _wire_gate_rows if not row["untouched"]]
+_wire_gate_worst_area = max(abs(row["area_after"] - row["area_before"]) for row in _wire_gate_rows)
+for row in _wire_gate_rows:
+    print(
+        f"    wire   candidate {row['id']:<3} narrowest {row['arm_before']:.2f} m -> "
+        f"{row['arm_after']:.2f} m, area {row['area_before']:.4f} -> {row['area_after']:.4f} m^2 "
+        f"({'untouched' if row['untouched'] else 'snapped'})"
+    )
+
+# AND ON GEOMETRY THAT THE STEP ACTUALLY SNAPS. Every candidate above passed
+# the round-trip gate untouched, which is the healthy case and proves the step
+# is a no-op on sound geometry -- but it means none of those rows measures what
+# the SNAP does to an arm. The captured failure does: all four of its
+# candidates are real geometry that a live commit refused, and two of them are
+# repaired by the snap rather than returned as themselves.
+#
+# The fixture is loaded here rather than in test_tree_zone_roundtrip_fixture.py
+# because narrowest_arm_meters() and its calibration live in THIS file, and a
+# second copy of the metric is how two files start disagreeing about what a
+# thin arm is.
+with open("tree_roundtrip_rejection_fixture.json") as _fixture_fh:
+    _CAPTURE = json.load(_fixture_fh)
+_CAPTURE_DEM = {"crs": _CAPTURE["provenance"]["dem_crs"]}
+
+_snap_rows = []
+for _feature in _CAPTURE["rejected_features"]:
+    _reconstructed = shape(
+        transform_geom("EPSG:4326", _CAPTURE_DEM["crs"], _feature["geometry"])
+    )
+    _into_gate = tzc._valid_polygonal(_reconstructed)
+    assert _into_gate is not None, _feature["id"]
+    _out_of_gate = tzc._wire_survivable(_into_gate, _CAPTURE_DEM)
+    assert _out_of_gate is not None, f"{_feature['id']} was dropped by the round-trip gate"
+    _snap_rows.append(
+        {
+            "id": _feature["id"],
+            "arm_before": narrowest_arm_meters(_into_gate),
+            "arm_after": narrowest_arm_meters(_out_of_gate),
+            "area_before": _into_gate.area,
+            "area_after": _out_of_gate.area,
+            "snapped": _out_of_gate is not _into_gate,
+        }
+    )
+
+for _row in _snap_rows:
+    if _row["arm_before"] is None or _row["arm_after"] is None:
+        # A patch with no feature the metric can delete inside its search
+        # range has no arm to lose; reported, not silently skipped.
+        continue
+    assert _row["arm_after"] >= _row["arm_before"] - 1e-6, _row
+    assert abs(_row["area_after"] - _row["area_before"]) < CELL_AREA_M2, _row
+
+_snapped_only = [row for row in _snap_rows if row["snapped"]]
+for _row in _snap_rows:
+    _arm_before = "none" if _row["arm_before"] is None else f"{_row['arm_before']:.2f} m"
+    _arm_after = "none" if _row["arm_after"] is None else f"{_row['arm_after']:.2f} m"
+    print(
+        f"    snap   {_row['id']:<24} narrowest {_arm_before} -> {_arm_after}, area "
+        f"{_row['area_before']:.6f} -> {_row['area_after']:.6f} m^2 "
+        f"({'SNAPPED' if _row['snapped'] else 'untouched'})"
+    )
+
 # AND ON THE SHIPPED PARCEL, against the transform that was removed. The
 # smoothing pass build_trees_payload() used to apply is run here on the shipped
 # candidates -- not to ship it, but to measure what it was doing: strictly
@@ -720,6 +821,56 @@ tzc.score_tree_search_space(
 )
 assert _sink == [], "a healthy run records nothing"
 
+# (d) THE ROUND-TRIP HALF OF THE SAME GATE. _wire_survivable() has its own
+#     unrepairable case, and it is a DIFFERENT one: geometry shapely calls
+#     VALID that still cannot be put on the wire. A sliver a nanometre across
+#     is the real shape of it -- distinct doubles in UTM, so is_valid is true
+#     and _valid_polygonal() rightly passes it, but below the resolution the
+#     WGS84 wire can represent, so it collapses on the way out and a 1 mm
+#     snap has nothing left to keep.
+_nanometre_sliver = Polygon(
+    [(586000.0, 4499800.0), (586000.0 + 1e-9, 4499800.0), (586000.0, 4499800.0 + 1e-9)]
+)
+assert _nanometre_sliver.is_valid, "the point of this case is that the UTM verdict is VALID"
+assert tzc._valid_polygonal(_nanometre_sliver) is _nanometre_sliver
+assert tzc._survives_the_wire(_nanometre_sliver, RAGGED_DEM) is False
+assert tzc._wire_survivable(_nanometre_sliver, RAGGED_DEM) is None
+# AND THE INVISIBLE CASE, again: a patch that already survives comes back as
+# ITSELF, so the step cannot perturb a healthy generate.
+assert tzc._wire_survivable(_square, RAGGED_DEM) is _square
+
+# (e) END TO END for the round-trip drop, by the same means and for the same
+#     stated reason as (c): the helper is patched for ONE component, because
+#     what is under test is the drop path and not the geometry that reaches
+#     it. The reason recorded must name the ROUND TRIP -- explain_validity()
+#     would say "Valid Geometry" here, which in a drop record reads as a bug
+#     in the record rather than the fact it is.
+_real_wire_survivable = tzc._wire_survivable
+
+
+def _drop_one_wire(footprint, dem):
+    _drop_one_wire.calls += 1
+    return None if _drop_one_wire.calls == 1 else _real_wire_survivable(footprint, dem)
+
+
+_drop_one_wire.calls = 0
+tzc._wire_survivable = _drop_one_wire
+try:
+    _wire_dropped = ragged_generate()
+finally:
+    tzc._wire_survivable = _real_wire_survivable
+_wire_sink = _wire_dropped["dropped_invalid"]
+
+assert len(_wire_dropped["patches"]) == len(RAGGED_PATCHES) - 1, (
+    len(_wire_dropped["patches"]), len(RAGGED_PATCHES)
+)
+assert _wire_dropped["narrative_data"]["dropped_invalid_count"] == 1
+assert len(_wire_dropped["zones_geojson"]["features"]) == len(RAGGED_PATCHES) - 1
+assert len(_wire_sink) == 1, _wire_sink
+assert set(_wire_sink[0]) == {"id", "area_acres", "reason"}, _wire_sink[0]
+assert "round trip" in _wire_sink[0]["reason"], _wire_sink[0]["reason"]
+assert "Valid Geometry" not in _wire_sink[0]["reason"], _wire_sink[0]["reason"]
+
 print(
     f"6. UNREPAIRABLE: _valid_polygonal() returns None for a degenerate ring make_valid() re-nodes "
     f"into a {make_valid(_degenerate).geom_type} (not ground), and returns a valid patch AS "
@@ -727,7 +878,14 @@ print(
     f"{len(_dropped_result['patches'])} patches instead of {len(RAGGED_PATCHES)}, the same count "
     f"on zones_geojson -- and COUNTED: narrative_data.dropped_invalid_count == "
     f"{_dropped_narrative['dropped_invalid_count']}, against 0 on both healthy parcels. Never "
-    f"raised, never silent."
+    f"raised, never silent.\n"
+    f"   THE ROUND-TRIP HALF: _wire_survivable() returns None for a nanometre-wide sliver that "
+    f"shapely calls VALID -- the case _valid_polygonal() cannot catch because there is nothing "
+    f"wrong with the shape in the frame it is judged in -- and returns a healthy patch AS ITSELF. "
+    f"End to end it takes the SAME path: {len(_wire_dropped['patches'])} patches instead of "
+    f"{len(RAGGED_PATCHES)}, the same count on zones_geojson, dropped_invalid_count == "
+    f"{_wire_dropped['narrative_data']['dropped_invalid_count']}, and one row in the sink whose "
+    f"reason names the round trip rather than explain_validity()'s 'Valid Geometry'."
 )
 
 

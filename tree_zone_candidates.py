@@ -246,6 +246,7 @@ from typing import Optional
 import numpy as np
 from rasterio.warp import transform as warp_transform
 from rasterio.warp import transform_geom
+from shapely import set_precision
 from shapely.geometry import MultiPolygon, Point, Polygon, box, mapping, shape
 from shapely.ops import unary_union
 from shapely.prepared import prep
@@ -438,6 +439,44 @@ FILLED_INTERIOR_RING_MAX_CELLS = 1.0
 # below any real difference in ring size (the next real size up is a whole
 # second cell) and far above the 1e-10-ish drift a GEOS overlay introduces.
 _INTERIOR_RING_CELL_TOLERANCE = 1e-6
+
+# THE MINIMUM SEPARATION (meters) THIS LAYER WILL PUT ON THE WIRE between two
+# vertices of one patch. A patch whose round trip fails is snapped to this
+# grid; see _wire_survivable() for why the round trip fails at all and why
+# snapping is the repair.
+#
+# WHY THERE IS A FLOOR AT ALL. The wire carries WGS84 DEGREES and the producer
+# validates UTM METRES, and those are two different float grids. At the
+# latitude of the captured failure one longitude ULP is 1.2e-9 m while one
+# easting ULP is 1.2e-10 m -- the wire's grid is TEN TIMES COARSER IN GROUND
+# DISTANCE than the one the emission gate's verdict was reached on. Two
+# vertices about a nanometre apart are therefore distinct doubles in UTM (a
+# valid ring, and the gate is right to pass it) and the SAME double in
+# degrees (a ring that visits one point twice, which is invalid). Nothing
+# rounds anything; the representable grid does it. See
+# test_tree_zone_roundtrip_fixture.py, which measures both ULPs off the
+# captured geometry.
+#
+# WHY 1 MILLIMETRE. It is chosen against the two numbers that bracket it, not
+# for being round:
+#
+#   ABOVE the collapse threshold by a factor of ~1e6. Vertices this far apart
+#   cannot land on one double in degrees, so the defect cannot survive the
+#   snap. Measured, not assumed: the same fixture puts the observed round-trip
+#   displacement at ~1e-9 m per vertex.
+#
+#   BELOW one DEM cell by a factor of 5000. The narrowest feature this layer
+#   can produce is a one-cell arm, 5.00 m across. A 1 mm grid cannot narrow
+#   it, cannot sever it and cannot delete it -- which is the property the
+#   morphological opening this module refuses by name does NOT have.
+#
+# It is a QUANTIZATION, not an erosion. set_precision() moves each vertex to
+# the nearest grid point (at most 0.71 mm) and merges vertices that land
+# together; it does not walk a structuring element around the boundary
+# removing everything thinner than a radius. That distinction is the whole
+# reason it is allowed here and an opening is not.
+WIRE_VERTEX_SEPARATION_METERS = 0.001
+
 
 # Buffer (meters) around EXISTING tree canopy (real USGS 3DEP lidar HAG
 # coverage, canopy_height_data.tree_root_zone_mask()) within which a DEM
@@ -783,6 +822,100 @@ def _valid_polygonal(footprint):
     return repaired
 
 
+def _survives_the_wire(footprint, dem) -> bool:
+    """
+    Whether `footprint` still rehydrates after the trip it is about to take:
+    UTM -> WGS84 onto the wire, WGS84 -> UTM at commit.
+
+    THROUGH THE COMMIT GATE'S OWN CODE, NOT A SECOND OPINION. This calls
+    wire_translation._polygonal_shape_from_wire() -- the private helper every
+    polygon rehydrator runs and therefore the exact predicate a commit
+    applies. A reprojection-and-validate written out here instead could
+    differ from it in a detail (the source CRS, the argument order, a later
+    change to the helper) and would then pass a patch the commit gate
+    refuses, which is the precise failure this whole gate exists to prevent.
+    run_diagnostics._roundtrip() calls the same helper for the same reason.
+
+    THE WIRE FORM IS BUILT THE WAY THE PRODUCER BUILDS IT, with the same
+    transform_geom(dem['crs'] -> EPSG:4326) call on mapping(footprint), so
+    what is checked is the object that will actually be stored as
+    `geometry_wgs84` rather than something equivalent to it.
+
+    The import is FUNCTION-LOCAL, following wire_translation.py's own
+    concession on this edge: that module imports from this one inside its
+    functions to keep the boundary free of an import cycle, and the same
+    reasoning applies in this direction.
+    """
+    import wire_translation
+
+    wire = transform_geom(dem["crs"], "EPSG:4326", mapping(footprint))
+    try:
+        wire_translation._polygonal_shape_from_wire(wire, dem, "tree zone emission gate")
+    except wire_translation.InboundGeometryError:
+        return False
+    return True
+
+
+def _wire_survivable(footprint, dem):
+    """
+    `footprint` in a form that survives the wire, or None if it cannot be.
+
+    WHY THE EMISSION GATE IS NOT ENOUGH ON ITS OWN. _valid_polygonal() above
+    validates `polygon_utm` -- the UTM object this module holds. The wire
+    carries `geometry_wgs84`, and a commit validates THAT, reprojected back.
+    Those are two different geometries, and a real capture
+    (test_tree_zone_roundtrip_fixture.py) has all four candidates of one
+    generate passing the first check and failing the second: polygon_utm.
+    is_valid true with invalidity null on every one, dropped_invalid empty,
+    and every one of them refused at commit. Validating the shape this layer
+    keeps, rather than the shape it ships, is what let that reach a tab.
+
+    THE UNTOUCHED CASE IS THE COMMON ONE. A patch that already survives is
+    returned AS ITSELF, byte for byte -- not re-snapped, not normalised.
+    Only a patch that would be refused is repaired, so a healthy generate's
+    geometry and acreage are exactly what they were before this gate existed.
+
+    THE REPAIR IS set_precision(), AND THE ALTERNATIVES ARE REFUSED FOR THE
+    REASONS THEY WERE ALREADY REFUSED. buffer(0) stays out: it is what
+    wire_translation.py's rule exists to prevent, and on a self-touching ring
+    it returns lobes nobody drew. A morphological OPENING stays out: it
+    deletes every feature narrower than its diameter, and the thin branching
+    arms it would delete are the entire reason this layer exists. make_valid()
+    alone CANNOT do this job either, and that is the point most easily missed
+    -- it repairs the shape it is handed, in the frame it is handed it in, and
+    the shape here is already valid in that frame. There is nothing for it to
+    fix; the defect only exists in the frame it is going to.
+
+    WHAT set_precision() DOES INSTEAD. It snaps every vertex to a
+    WIRE_VERTEX_SEPARATION_METERS grid and re-nodes, which MERGES the
+    near-coincident pair that would otherwise collapse on its own during
+    reprojection -- deliberately, in the frame where the result can still be
+    checked, rather than accidentally in the frame where nothing looks. A
+    merge that turns a near-pinch into a real self-touch is then resolved by
+    the same re-noding, splitting the ring into parts exactly as make_valid()
+    does at a diagonal corner; those pieces STAY ONE CANDIDATE, carried as
+    multi-part geometry, for _valid_polygonal()'s reasons.
+
+    AND THEN IT IS CHECKED AGAIN, because the argument above is a reason to
+    expect the repair to work and not evidence that it did. A repaired patch
+    that still fails the round trip returns None and is DROPPED AND COUNTED by
+    the caller. This function never returns something it has not re-checked.
+
+    NON-POLYGONAL PARTS ARE DROPPED and the result is re-validated in UTM
+    too, the same contract _valid_polygonal() offers: a non-None result is
+    emittable in both frames.
+    """
+    if _survives_the_wire(footprint, dem):
+        return footprint
+
+    snapped = _polygonal_parts(set_precision(footprint, WIRE_VERTEX_SEPARATION_METERS))
+    if snapped is None or snapped.is_empty or not snapped.is_valid:
+        return None
+    if not _survives_the_wire(snapped, dem):
+        return None
+    return snapped
+
+
 def _road_corridor_exclusion_polygon(dem: dict, selected_road_corridor: dict):
     """
     This module's own BUFFERED cell-footprint polygon for the selected
@@ -998,6 +1131,18 @@ def score_tree_search_space(
     invalid is DROPPED and recorded, never emitted and never silently
     discarded. See _fill_subthreshold_interior_rings() and _valid_polygonal().
 
+    AND EVERY PATCH SURVIVES THE WIRE, which is a SECOND and genuinely
+    different claim. OGC-valid is a verdict about `polygon_utm`, the object
+    this module holds; the wire carries `geometry_wgs84` and a commit
+    validates THAT, reprojected back. The two frames are two different float
+    grids, and a patch can be valid in one and broken in the other -- a real
+    capture has all four candidates of one generate passing the validity
+    check honestly and every one of them refused at commit. So the
+    round-tripped form is checked here too, and a patch that cannot be made
+    to survive it is DROPPED and recorded by the same convention. See
+    _wire_survivable(), which explains why make_valid() cannot cover this
+    case and why an opening and buffer(0) stay refused.
+
     Returns one entry per resulting tree-zone candidate patch, ranked
     best-first:
         {
@@ -1160,6 +1305,43 @@ def score_tree_search_space(
             )
             continue
         footprint = repaired
+
+        # Then the ROUND TRIP, because valid-in-UTM is not the same claim as
+        # emittable. _valid_polygonal() above checked the object this module
+        # holds; this checks the object it is about to ship. See
+        # _wire_survivable() for the mechanism and for why make_valid() cannot
+        # cover this case.
+        survivable = _wire_survivable(footprint, dem)
+        if survivable is None:
+            # UNREPAIRABLE, SO DROPPED -- the same sink, the same convention
+            # and the same reasoning as the validity drop above: never
+            # silently emitted (it would fail at commit, which is the moment
+            # this gate exists to move off) and never raised (one ragged
+            # component must not cost the user every other candidate on the
+            # property). The reason names the round trip rather than
+            # explain_validity(), because shapely calls this footprint VALID
+            # -- a reader handed "Valid Geometry" as a drop reason would
+            # reasonably think the record was broken.
+            if dropped_invalid is not None:
+                dropped_invalid.append(
+                    {
+                        "id": int(component_id),
+                        "area_acres": round(footprint.area / SQUARE_METERS_PER_ACRE, 2),
+                        "reason": (
+                            "valid in "
+                            f"{dem['crs']} but does not survive the WGS84 round trip the wire "
+                            "takes; snapping to "
+                            f"{WIRE_VERTEX_SEPARATION_METERS} m did not repair it"
+                        ),
+                    }
+                )
+            print(
+                f"score_tree_search_space: component {component_id} "
+                f"({footprint.area / SQUARE_METERS_PER_ACRE:.2f} ac) is valid in {dem['crs']} but "
+                "does not survive the WGS84 round trip; dropped rather than emitted."
+            )
+            continue
+        footprint = survivable
 
         area_acres = footprint.area / SQUARE_METERS_PER_ACRE
         if area_acres < min_area_acres:
