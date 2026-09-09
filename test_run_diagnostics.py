@@ -38,14 +38,19 @@ Sections (the branch's numbered tests in brackets):
   8  [8]  THE DROP SINK, SURFACED: an induced drop puts a real
           {id, area_acres, reason} row on the result and into the
           record, where only its len() used to reach anything.
-  9  [9]  Regression is the other test files, run separately.
+  9  [9]  END TO END: the real Flask app over HTTP, process-wide
+          defaults, the DEFAULT directory, a file on disk. The positive
+          counterpart section 6 needs to mean anything.
+ 10 [10]  Regression is the other test files, run separately.
 """
 
 import copy
+import io
 import json
 import os
 import shutil
 import tempfile
+import time
 from contextlib import ExitStack
 from unittest.mock import MagicMock
 from unittest.mock import patch as mock_patch
@@ -64,6 +69,7 @@ import production_area
 import production_area_ceiling
 import road_corridors
 import run_diagnostics
+import session_api
 import session_cache
 import session_manager
 import step_orchestrator
@@ -1064,6 +1070,16 @@ print(
 #
 # The stopwatch is printed alongside as an observation, not asserted on: a
 # wall-clock threshold in a test file is a flake waiting for a slow CI box.
+#
+# WHAT THIS SECTION CANNOT SEE, stated here so nobody reads more into it
+# than it says. It asserts that the record-building functions DO NOT
+# fire, and a function that is never called never fires -- so it passes
+# IDENTICALLY on a build with the hooks torn out of step_orchestrator.
+# It cannot tell "correctly silent when disabled" from "silent always".
+# That was measured, not assumed: with the four hook call sites replaced
+# by `pass`, this section still passes and section 9 fails. Section 9 is
+# the positive counterpart that makes this one mean something, and
+# section 1 catches the same tear from the other end.
 
 _NEVER = [
     "environment",
@@ -1365,11 +1381,170 @@ print(
 
 
 # =========================================================================
-# 9 [test 9]. REGRESSION
+# 9 [test 9]. END TO END: THE HTTP SURFACE, THE DEFAULT DIRECTORY, A FILE
+# =========================================================================
+#
+# THE TEST THIS FEATURE NEEDED AND DID NOT HAVE. Every section above does
+# drive a real orchestrator generate -- through Session.generate() ->
+# step_orchestrator.generate_step() -> the job runner -> _generate() --
+# but all of them differ from a live server in the same two ways, and
+# those two ways are exactly where a silent failure would hide:
+#
+#   * They pass an EXPLICIT store, fetch cache, session cache and job
+#     runner. A live server passes none of them: session_api's
+#     Dependencies() is all None and every layer falls back to its
+#     process-wide default. begin_generate() resolves those defaults
+#     ITSELF -- it has to, to sample the same caches the generate will
+#     use -- and that resolution is code no test above ever ran.
+#   * They set KEYLINE_RUN_DIAGNOSTICS_DIR. A live server usually does
+#     not, so the path is the RELATIVE default against the server's
+#     working directory, and nothing above ever wrote to it.
+#
+# So this drives the real Flask app over HTTP, with process-wide
+# defaults, with the directory variable UNSET, from a working directory
+# that starts empty -- and asserts a file appears with the generate AND
+# the commit in it. Nothing is stubbed but the network.
+#
+# AND IT IS THE POSITIVE COUNTERPART TO SECTION 6, which section 6 needs
+# to mean anything. Section 6 asserts that the record-building functions
+# DO NOT fire when disabled, and a function that is never called never
+# fires -- so on a build where the hooks were removed entirely, section 6
+# would still pass. It cannot tell "correctly silent when disabled" from
+# "silent always". This one can only pass if the hooks are wired.
+
+_e2e_cwd = tempfile.mkdtemp(prefix="run_diagnostics_e2e_")
+_e2e_store = os.path.join(_e2e_cwd, "sessions")
+_e2e_previous_cwd = os.getcwd()
+_e2e_saved = {
+    key: os.environ.get(key)
+    for key in (
+        run_diagnostics.ENABLED_ENV,
+        run_diagnostics.DIRECTORY_ENV,
+        "KEYLINE_SESSION_STORE_DIR",
+    )
+}
+
+try:
+    os.environ[run_diagnostics.ENABLED_ENV] = "1"
+    # UNSET, deliberately -- the default path is the thing under test.
+    os.environ.pop(run_diagnostics.DIRECTORY_ENV, None)
+    os.environ["KEYLINE_SESSION_STORE_DIR"] = _e2e_store
+    os.chdir(_e2e_cwd)
+
+    # The app api.py builds: `app.register_blueprint(session_api.
+    # build_blueprint())`, no Dependencies argument, so the store, both
+    # caches and the job runner are the process-wide ones.
+    _e2e_app = session_api.create_app()
+    _e2e_client = _e2e_app.test_client()
+
+    with Harness():
+        _e2e_created = _e2e_client.post(
+            "/api/sessions", json={"boundary": [list(point) for point in REAL_BOUNDARY]}
+        )
+        assert _e2e_created.status_code == 201, _e2e_created.status_code
+        _e2e_document = _e2e_created.get_json()
+        _e2e_id = _e2e_document["session_id"]
+
+        _e2e_started = _e2e_client.post(
+            f"/api/sessions/{_e2e_id}/steps/landform/generate", json={}
+        )
+        assert _e2e_started.status_code == 202, _e2e_started.status_code
+        _e2e_job_id = _e2e_started.get_json()["job_id"]
+        for _ in range(3000):
+            _e2e_job = _e2e_client.get(f"/api/jobs/{_e2e_job_id}").get_json()
+            if _e2e_job["status"] in ("done", "failed"):
+                break
+            time.sleep(0.2)
+        assert _e2e_job["status"] == "done", _e2e_job
+
+        _e2e_zones = _e2e_job["result"]["payload"]["suggested_zones"]["features"]
+        assert _e2e_zones, "the fixture must produce production zones to commit"
+        _e2e_committed = _e2e_client.post(
+            f"/api/sessions/{_e2e_id}/steps/landform/commit",
+            json={
+                "features": {"type": "FeatureCollection", "features": _e2e_zones},
+                "provenance": {feature["id"]: "generated" for feature in _e2e_zones},
+                "base_revision": 0,
+            },
+        )
+        assert _e2e_committed.status_code == 200, _e2e_committed.get_json()
+
+    # THE FILE, AT THE DEFAULT PATH, RELATIVE TO THE SERVER'S CWD.
+    _e2e_directory = os.path.join(_e2e_cwd, run_diagnostics.DEFAULT_DIRECTORY)
+    assert os.path.isdir(_e2e_directory), (
+        f"no diagnostics directory at {_e2e_directory} after an enabled generate and commit "
+        f"over the HTTP surface -- swallowed failures: {run_diagnostics.FAILURES}"
+    )
+    _e2e_files = sorted(os.listdir(_e2e_directory))
+    assert _e2e_files == [f"{_e2e_id}.json"], _e2e_files
+    _e2e_record = run_diagnostics.read_record(_e2e_id)
+finally:
+    os.chdir(_e2e_previous_cwd)
+    for _key, _value in _e2e_saved.items():
+        if _value is None:
+            os.environ.pop(_key, None)
+        else:
+            os.environ[_key] = _value
+
+assert [
+    (event["event"], event["step_id"]) for event in _e2e_record["events"]
+] == [("generate", "landform"), ("commit", "landform")], _e2e_record["events"]
+assert _e2e_record["events"][0]["geometry"]["patches"], "the generate event recorded no geometry"
+assert _e2e_record["events"][1]["gate_outcome"] == "accepted"
+# NOTHING WAS SWALLOWED. A hook that failed and was caught would leave
+# the run looking exactly like a hook that was never wired, which is the
+# failure mode this section exists to make impossible to miss.
+assert run_diagnostics.FAILURES == [], run_diagnostics.FAILURES
+
+# AND THE SELF-CHECK AGREES, from the same posture -- it is what a person
+# runs on a machine where this is silent, so it must not disagree with a
+# run that demonstrably works.
+_selfcheck_out = io.StringIO()
+_e2e_previous_cwd = os.getcwd()
+try:
+    os.environ[run_diagnostics.ENABLED_ENV] = "1"
+    os.environ.pop(run_diagnostics.DIRECTORY_ENV, None)
+    os.chdir(_e2e_cwd)
+    _selfcheck_ok = run_diagnostics.self_check(stream=_selfcheck_out)
+finally:
+    os.chdir(_e2e_previous_cwd)
+    for _key, _value in _e2e_saved.items():
+        if _value is None:
+            os.environ.pop(_key, None)
+        else:
+            os.environ[_key] = _value
+assert _selfcheck_ok, _selfcheck_out.getvalue()
+assert "RECORDS WOULD BE WRITTEN" in _selfcheck_out.getvalue()
+
+# THE HOOKS ARE WIRED IN THE LOADED BYTECODE. Asserted directly, off the
+# compiled code objects rather than off the file, because that is the one
+# question a disabled-path test structurally cannot ask -- and it is the
+# question a stale long-running server answers differently from its own
+# checkout.
+_wiring = run_diagnostics._hook_sites()
+assert _wiring and all(_wiring.values()), _wiring
+
+print(
+    f"9 [test 9]. END TO END over the HTTP surface: session_api.create_app() with NO Dependencies "
+    f"(the process-wide store, both caches and the job runner, exactly api.py's wiring), "
+    f"{run_diagnostics.DIRECTORY_ENV} UNSET so the RELATIVE default path is used, and the working "
+    f"directory a fresh empty temp dir. POST /api/sessions -> 201, POST .../landform/generate -> "
+    f"202 polled to done, POST .../landform/commit -> 200 with {len(_e2e_zones)} zones. "
+    f"{run_diagnostics.DEFAULT_DIRECTORY}/{_e2e_id}.json appeared, carrying "
+    f"{[(e['event'], e['step_id']) for e in _e2e_record['events']]} with "
+    f"{len(_e2e_record['events'][0]['geometry']['patches'])} patches recorded on the generate. "
+    f"Zero swallowed failures; self_check() agrees from the same posture; and all "
+    f"{len(_wiring)} hook sites read as wired in the LOADED bytecode. Measured against a build "
+    f"with the four hook calls replaced by `pass`: this section fails and section 6 still passes."
+)
+
+
+# =========================================================================
+# 10 [test 10]. REGRESSION
 # =========================================================================
 
 print(
-    "\n9 [test 9]. REGRESSION: run the other test files separately -- test_step_orchestrator.py, "
+    "\n10 [test 10]. REGRESSION: run the other test files separately -- test_step_orchestrator.py, "
     "test_step_commit.py, test_step_registry.py, test_session_api.py, test_session_manager.py, "
     "test_session_cache.py, test_trees_step.py, test_water_step.py, test_roads_step.py, "
     "test_structures_step.py, test_fencing_step.py, test_wire_translation.py, "
