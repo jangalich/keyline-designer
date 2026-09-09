@@ -976,8 +976,11 @@ def score_tree_search_space(
     dropped_invalid, when a list is passed, RECEIVES one dict per patch this
     function refused to emit because its geometry could not be made valid:
         {'id': int, 'area_acres': float, 'reason': str}
-    A caller that wants the count -- identify_tree_zone_candidates() does, for
-    narrative_data -- passes a list and reads its length; every other caller
+    `reason` is explain_validity()'s own message, WITH THE OFFENDING
+    COORDINATE in it -- "Self-intersection[586007.1 4499758.4]" -- which is
+    the only place the geometry that was dropped is described at all.
+    identify_tree_zone_candidates() passes a list and RETURNS IT WHOLE on its
+    result, alongside the count narrative_data carries; every other caller
     passes nothing and is unaffected. An out-parameter rather than a second
     return value on purpose: this function's return type is a plain list that
     a dozen call sites and tests index directly, and a drop is the rare case,
@@ -1545,6 +1548,12 @@ def build_narrative_data(
     generates of the same property can tell a scoring change from a geometry
     drop, which is the whole point of carrying it.
 
+    THE COUNT AND NOT THE ENTRIES, deliberately. The sink's per-drop
+    {'id', 'area_acres', 'reason'} rows ride the RESULT, under
+    `dropped_invalid` -- a narrative block is what the report reads, and
+    a report says how many candidates were lost, not which ring crossed
+    itself at which coordinate.
+
     Shape:
 
         {
@@ -1956,8 +1965,9 @@ def identify_tree_zone_candidates(
             stream_data_available = False
 
     # The sink score_tree_search_space() records an unemittable patch in --
-    # see its own docstring. Passed on every run, read once below for
-    # narrative_data's dropped_invalid_count; empty on a healthy generate.
+    # see its own docstring. Passed on every run; empty on a healthy one.
+    # Its LENGTH goes to narrative_data as dropped_invalid_count and its
+    # CONTENTS come back on this result under the same name.
     dropped_invalid: list = []
     patches = score_tree_search_space(
         dem,
@@ -1990,6 +2000,30 @@ def identify_tree_zone_candidates(
         "claimed_acres": round(claimed_acres, 2),
         "boundary_acres": round(boundary_acres, 2),
         "patches": patches,
+        # THE DROP SINK ITSELF, NOT JUST ITS LENGTH. One
+        # {'id', 'area_acres', 'reason'} per patch the scorer scored and
+        # then refused to emit, in the order it refused them; [] on a
+        # healthy generate.
+        #
+        # WHY IT IS RETURNED AT ALL, when narrative_data already carries
+        # the count. The count says a patch was dropped; `reason` says
+        # WHICH DEFECT dropped it and, because it is explain_validity()'s
+        # own message, AT WHICH COORDINATE. Reading only the length threw
+        # that away at the one moment it existed -- the list is local to
+        # this call and dies with it -- so an intermittent geometry drop
+        # left behind a number and no evidence, which is exactly the
+        # position the commit-side rejections were in before
+        # run_diagnostics.py. Anything that wants the detail (that module
+        # records it per generate) can now read it instead of
+        # reconstructing it, which it could not do anyway: the patch is
+        # gone by the time anyone downstream looks.
+        #
+        # NOT PUT ON narrative_data. That block is the REPORT's, and a
+        # report says how many candidates were lost, not which ring
+        # crossed itself where -- so the count stays there and the detail
+        # rides here, beside `patches`, where the other internal-shaped
+        # values live.
+        "dropped_invalid": dropped_invalid,
         "narrative_data": build_narrative_data(
             patches,
             boundary_polygon_utm,

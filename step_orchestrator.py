@@ -112,6 +112,7 @@ import commit_validation
 import design_document
 import job_runner
 import production_zone_payload
+import run_diagnostics
 import session_cache
 import session_manager
 import step_registry
@@ -1003,6 +1004,17 @@ def _generate(
     # read from it.
     document = store.get(session_id)
 
+    # THE DIAGNOSTIC PROBE, HERE AND NOT LOWER DOWN. It samples the two
+    # cache states, and the next statement destroys both answers:
+    # get_session_context() populates the session cache on a miss and the
+    # fetch cache on a cold boundary, so after it the answer is "warm"
+    # either way. None when diagnostics are off, and then every later
+    # call on it returns on that None -- see run_diagnostics.py's OFF BY
+    # DEFAULT section.
+    probe = run_diagnostics.begin_generate(
+        session_id, definition.step_id, document, fetch_cache=fetch_cache, cache=cache
+    )
+
     # A cache hit, or a rebuild from that document. Either way the terrain
     # warm-up's products are in hand and NOTHING upstream recomputes on a
     # hit -- which is what makes regenerating cheap and what
@@ -1015,7 +1027,9 @@ def _generate(
     assembled = assemble_consumes(definition, context, document)
 
     if definition.accumulate:
-        return _generate_accumulated(definition, store, context, document, assembled, params)
+        return _generate_accumulated(
+            definition, store, context, document, assembled, params, probe=probe
+        )
 
     result = _run_entry_point(definition, assembled, params)
 
@@ -1027,6 +1041,12 @@ def _generate(
     context.step_proposals[definition.step_id] = result
 
     payload = definition.resolve_payload()(result, assembled)
+
+    # The record, over the result and the payload THIS generate produced
+    # -- both already in hand, neither recomputed for it. Before the
+    # document write only because a write that failed would otherwise
+    # lose the record of the generate that preceded it.
+    run_diagnostics.record_generate(probe, result, payload, context)
 
     # The ONLY document write a generate makes. mark_step_generated() is a
     # no-op on a step already generated, so a regenerate does not bump
@@ -1113,7 +1133,7 @@ def _discard_empty_candidate(definition, store, context, document, key: str) -> 
         proposals.pop(key, None)
 
 
-def _generate_accumulated(definition, store, context, document, assembled, params) -> tuple:
+def _generate_accumulated(definition, store, context, document, assembled, params, probe=None) -> tuple:
     """
     The accumulate branch of _generate(): (payload, document).
 
@@ -1154,6 +1174,11 @@ def _generate_accumulated(definition, store, context, document, assembled, param
     proposals[key] = {"inputs": params, "result": result}
 
     payload = definition.resolve_payload()(proposals, assembled)
+
+    # THIS candidate set's result, not the accumulated store: the record
+    # is of the generate that just ran, and the sets it did not touch
+    # were recorded by the generates that produced them.
+    run_diagnostics.record_generate(probe, result, payload, context)
 
     updated = mark_step_generated(document, definition.step_id)
     recorded = recorded_candidate_inputs(definition, updated["steps"][definition.step_id])
@@ -2161,6 +2186,13 @@ def commit_step(
     the document is touched, so a rejected commit leaves the step exactly as
     it was and can be retried with the same base_revision.
 
+    THE GATE'S VERDICT IS RECORDED EITHER WAY when run diagnostics are
+    enabled -- and on a rejection the offending feature's full GeoJSON goes
+    into the session's diagnostic record, because that geometry does not
+    otherwise outlive the request that carried it and an intermittent
+    rejection cannot be investigated without it. Off by default and
+    free when off; see run_diagnostics.py.
+
     VALIDATION BEFORE THE REVISION CHECK, deliberately. A stale base_revision
     is a retry-after-refetch; a self-intersecting ring is a drawing to fix.
     Both can be true at once, and the second is the one the user has to act
@@ -2185,13 +2217,25 @@ def commit_step(
     )
 
     # 1. THE GATE. Raises CommitRejectedError carrying every problem.
-    check = commit_validation.check_commit(
-        definition,
-        features,
-        provenance,
-        context.dem,
-        context.boundary_polygon_utm,
-    )
+    #
+    # RECORDED EITHER WAY, and the rejection branch is the one this
+    # diagnostic exists for: it dumps the offending feature's full
+    # GeoJSON into the session's record, which is the only place an
+    # intermittent geometry rejection survives the request that produced
+    # it. The error is re-raised untouched -- the record is a bystander
+    # here and changes nothing about what the caller sees.
+    try:
+        check = commit_validation.check_commit(
+            definition,
+            features,
+            provenance,
+            context.dem,
+            context.boundary_polygon_utm,
+        )
+    except commit_validation.CommitRejectedError as exc:
+        run_diagnostics.record_commit(session_id, step_id, features, context, rejection=exc)
+        raise
+    run_diagnostics.record_commit(session_id, step_id, features, context)
     check_features_against_inputs(definition, features, inputs)
 
     # 2. Crossings, recorded alongside each feature. Measured against the

@@ -801,6 +801,47 @@ One of these is required before this surface is used for real:
   changed. That is the right answer the moment more than one process serves
   this app.
 
+### Run diagnostics (off by default)
+
+`run_diagnostics.py` writes a per-session JSON record of what each generate
+and each commit actually did — the environment (shapely/GEOS, rasterio's
+GDAL/PROJ, Python, the backend git commit), which caches were warm, every
+availability/fallback flag the pipeline set, each step's own
+`narrative_data` verbatim, every drop sink row by row with its reason, and
+the geometry health of every emitted feature. On a commit rejection it dumps
+the offending feature's full GeoJSON, so an intermittent geometry failure
+survives the request that produced it.
+
+It exists to be **diffed**: two runs on the same parcel produce records that
+are byte-identical outside a header carrying the timestamps and the session
+id, so whatever differs between a run that failed and a run that did not is
+what the diff shows.
+
+```
+export KEYLINE_RUN_DIAGNOSTICS=1                 # unset/0/false/no/off = disabled
+export KEYLINE_RUN_DIAGNOSTICS_DIR=/data/diags   # optional; defaults to ./diagnostics
+```
+
+Records land in `diagnostics/` under the working directory, beside
+`sessions/` and with the same cwd-relative shape. `.gitignore` carries
+`diagnostics/`: a record captures one machine's runs, and the value of one is
+diffing it against another machine's, not checking either in. Unlike the
+Design Documents these are disposable — losing them to an ephemeral
+container costs nothing, so they do not need the persistent disk above, and
+deliberately do not default to living on it.
+
+**Leave it off in production.** It writes on every generate and every commit.
+Disabled, the hooks return on an environment lookup before building anything
+— `test_run_diagnostics.py` section 6 asserts that by replacing every
+record-building function in the module with one that raises and running a
+full six-step session underneath.
+
+It records; it does not compute. Every figure in a record is read from
+something the pipeline already produced, so the record cannot drift into
+disagreeing with the run it describes. Section 5 of its test file asserts
+that by walking each recorded value back along the record's own path into
+the live pipeline object.
+
 Two related single-process assumptions travel with it, both fine today under
 `--workers 1` and both broken by a second worker: `job_runner.py`'s job
 registry is in-memory (a client would poll a worker that never heard of its

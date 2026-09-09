@@ -6,3 +6,10 @@ __pycache__/
 # Static assets (icons, etc.) are checked-in source, not rendered output --
 # excepted from the blanket *.png rule above.
 !assets/icons/*.png
+
+# Run diagnostic records (run_diagnostics.py, KEYLINE_RUN_DIAGNOSTICS=1).
+# One JSON file per session, capturing what one machine's runs actually
+# did. The whole value of a record is diffing it against a record from a
+# DIFFERENT machine or a different run, so a checked-in one would be
+# somebody else's evidence sitting where yours belongs.
+diagnostics/
