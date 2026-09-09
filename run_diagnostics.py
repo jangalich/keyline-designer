@@ -164,6 +164,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import tempfile
 import threading
 
@@ -171,6 +172,14 @@ import threading
 # separate questions they answer: whether to record at all, and where.
 ENABLED_ENV = "KEYLINE_RUN_DIAGNOSTICS"
 DIRECTORY_ENV = "KEYLINE_RUN_DIAGNOSTICS_DIR"
+
+# STRICT MODE: re-raise instead of swallowing. Off by default, because a
+# diagnostic must never turn a working generate into a 500 -- but that
+# swallow is also the one thing that can make this feature fail
+# invisibly, so there has to be a way to turn it off while chasing
+# exactly that. With it set, a hook's exception propagates out of the
+# generate and lands in the job's error payload where a client sees it.
+STRICT_ENV = "KEYLINE_RUN_DIAGNOSTICS_STRICT"
 
 # Where records are written when DIRECTORY_ENV says nothing: a relative
 # path under the working directory (/app in the Dockerfile), exactly like
@@ -267,6 +276,15 @@ def _session_lock(session_id: str) -> threading.Lock:
 # ======================================================================
 
 
+def strict() -> bool:
+    """
+    Whether a hook re-raises instead of swallowing. See STRICT_ENV.
+
+    Read from the environment on every call, enabled()'s reason exactly.
+    """
+    return os.environ.get(STRICT_ENV, "").strip().lower() not in _DISABLED_VALUES
+
+
 def enabled() -> bool:
     """
     Whether run diagnostics are on, read from the environment EVERY TIME.
@@ -354,13 +372,20 @@ def environment() -> dict:
 
     return {
         "python_version": platform.python_version(),
-        "shapely_version": shapely.__version__,
+        "shapely_version": getattr(shapely, "__version__", None),
         # A 3-tuple; joined so a diff shows "3.13.1" and not a JSON array
         # that reads differently from the version_string beside it.
         "shapely_geos_version": ".".join(str(part) for part in shapely.geos_version),
         "shapely_geos_version_string": shapely.geos_version_string,
-        "rasterio_version": rasterio.__version__,
-        "rasterio_gdal_version": rasterio.__gdal_version__,
+        # getattr THROUGHOUT, and not because these are expected to be
+        # missing. environment() runs inside _new_record(), which runs on
+        # the FIRST event of every session -- so an AttributeError here
+        # is not a missing line in one record, it is every record of
+        # every session on that machine failing to be written, reported
+        # only as a swallowed exception. A version this build's rasterio
+        # does not publish is worth a null; it is not worth the feature.
+        "rasterio_version": getattr(rasterio, "__version__", None),
+        "rasterio_gdal_version": getattr(rasterio, "__gdal_version__", None),
         "rasterio_proj_version": getattr(rasterio, "__proj_version__", None),
         "backend_git_commit": _git_commit(),
     }
@@ -1078,9 +1103,45 @@ def comparable_body(record: dict) -> dict:
 
 _FAILURE_PREFIX = "run_diagnostics: recording failed --"
 
+# Every failure this module has swallowed in this process, newest last,
+# as {"what", "error", "traceback"}. IN MEMORY AND NOT IN THE RECORD,
+# necessarily: the failure being reported may BE the failure to write the
+# record, so a sink that writes cannot report it. self_check() prints
+# this, and a live process can be asked for it directly.
+FAILURES = []
+_MAX_REMEMBERED_FAILURES = 50
+
 
 def _report_failure(what: str, exc: BaseException) -> None:
-    print(f"{_FAILURE_PREFIX} {what}: {type(exc).__name__}: {exc}")
+    """
+    One swallowed hook failure: remembered, and printed TO STDERR with a
+    traceback.
+
+    STDERR AND NOT STDOUT, which is what it used to be and what made this
+    module able to fail invisibly. A Flask or gunicorn process routinely
+    has stdout buffered or redirected somewhere nobody reads, so a
+    `print()` here could vanish completely -- and the symptom of a
+    vanished report is EXACTLY the symptom of the feature not being
+    wired at all: enabled, hooks in place, nothing on disk, nothing in
+    the log. Server logs carry stderr.
+
+    WITH THE TRACEBACK, for the same reason. "AttributeError: x" names
+    the exception and not the line, and the line is the whole question
+    when a hook fails on one machine and not another.
+
+    Re-raised rather than reported when STRICT_ENV is set: see strict().
+    """
+    import traceback
+
+    detail = traceback.format_exc()
+    if len(FAILURES) >= _MAX_REMEMBERED_FAILURES:
+        del FAILURES[0]
+    FAILURES.append(
+        {"what": what, "error": f"{type(exc).__name__}: {exc}", "traceback": detail}
+    )
+    print(f"{_FAILURE_PREFIX} {what}: {type(exc).__name__}: {exc}", file=sys.stderr)
+    print(detail, file=sys.stderr)
+    sys.stderr.flush()
 
 
 class GenerateProbe:
@@ -1136,6 +1197,8 @@ def begin_generate(session_id, step_id, document, fetch_cache=None, cache=None):
         }
         return GenerateProbe(session_id, step_id, provenance)
     except Exception as exc:
+        if strict():
+            raise
         _report_failure(f"begin_generate({session_id!r}, {step_id!r})", exc)
         return None
 
@@ -1213,6 +1276,8 @@ def record_generate(probe, result, payload, context) -> None:
             },
         )
     except Exception as exc:
+        if strict():
+            raise
         _report_failure(f"record_generate({probe.session_id!r}, {probe.step_id!r})", exc)
 
 
@@ -1280,4 +1345,133 @@ def record_commit(session_id, step_id, features, context, rejection=None) -> Non
             },
         )
     except Exception as exc:
+        if strict():
+            raise
         _report_failure(f"record_commit({session_id!r}, {step_id!r})", exc)
+
+
+# ======================================================================
+# self_check() -- one command that says why nothing is being written
+# ======================================================================
+
+
+def _hook_sites() -> dict:
+    """
+    Whether the hooks are wired into the step_orchestrator THIS
+    INTERPRETER IS RUNNING -- read off each function's COMPILED CODE
+    OBJECT.
+
+    THAT DISTINCTION IS THE WHOLE POINT, and it is why this does not use
+    inspect.getsource(). `grep step_orchestrator.py` answers "does the
+    CHECKOUT have the hooks", which is a different question from "does
+    the RUNNING PROCESS have them" the moment a long-lived server
+    imported that module before the checkout changed -- and
+    inspect.getsource() answers the checkout's question too, because it
+    reads the file off disk through linecache rather than reading the
+    loaded function. On a server running yesterday's code both would
+    report the hooks present while none of them execute, which is
+    exactly the silence this check exists to explain.
+
+    `co_names` is the compiled tuple of global and attribute names the
+    function body actually references. A wired _generate loads the global
+    `run_diagnostics` and reads `begin_generate` off it, so both names
+    are in there; an unwired one has neither, whatever the file says.
+    """
+    import step_orchestrator
+
+    sites = {}
+    for name, attribute in (
+        ("_generate.begin_generate", "begin_generate"),
+        ("_generate.record_generate", "record_generate"),
+        ("_generate_accumulated.record_generate", "record_generate"),
+        ("commit_step.record_commit", "record_commit"),
+    ):
+        function = getattr(step_orchestrator, name.split(".")[0], None)
+        code = getattr(function, "__code__", None)
+        if code is None:
+            sites[name] = None
+            continue
+        sites[name] = "run_diagnostics" in code.co_names and attribute in code.co_names
+    return sites
+
+
+def self_check(stream=None) -> bool:
+    """
+    Print why this module is or is not writing, and return whether a
+    record could be written right now. `python3 run_diagnostics.py`.
+
+    WRITTEN BECAUSE THE FEATURE CAN FAIL SILENTLY AND DID. Every
+    individual check a person would run by hand -- is the variable set,
+    does enabled() say yes, is the directory writable, are the hooks in
+    the file -- can pass while nothing is written, because none of them
+    asks the two questions that actually decide it: what does the LOADED
+    orchestrator call, and does an ACTUAL append_event() succeed from
+    THIS process's working directory. Both are asked below, the second by
+    really writing a record and deleting it.
+
+    Everything is reported as it is found, including the raw environment
+    strings, because "KEYLINE_RUN_DIAGNOSTICS=1 " with a trailing space
+    and an unset variable are different problems with the same symptom.
+    """
+    out = stream if stream is not None else sys.stdout
+    ok = True
+
+    def say(label, value, good=None):
+        nonlocal ok
+        mark = "    " if good is None else ("[ok] " if good else "[!!] ")
+        if good is False:
+            ok = False
+        print(f"{mark}{label}: {value}", file=out)
+
+    print("run_diagnostics self-check", file=out)
+    print(f"  module file: {os.path.abspath(__file__)}", file=out)
+
+    raw_enabled = os.environ.get(ENABLED_ENV)
+    say(f"{ENABLED_ENV} (raw)", repr(raw_enabled))
+    say("enabled()", enabled(), enabled())
+    say(f"{STRICT_ENV} (raw)", repr(os.environ.get(STRICT_ENV)))
+    say("strict()", strict())
+
+    raw_directory = os.environ.get(DIRECTORY_ENV)
+    say(f"{DIRECTORY_ENV} (raw)", repr(raw_directory))
+    say("directory()", repr(directory()))
+    say("working directory", os.getcwd())
+    say("resolved absolute path", os.path.abspath(directory()))
+
+    # GUARDED, because importing step_orchestrator pulls in the whole
+    # pipeline and a self-check that dies on an unrelated missing
+    # dependency tells the person nothing about the question they came
+    # with. A failure here is reported as the failure it is.
+    try:
+        sites = _hook_sites()
+    except Exception as exc:
+        say("hooks in loaded step_orchestrator", f"{type(exc).__name__}: {exc}", False)
+        sites = {}
+    for name, wired in sorted(sites.items()):
+        say(f"hook wired in loaded step_orchestrator.{name}", wired, bool(wired))
+
+    # THE REAL WRITE. Not os.access() -- a permission bit that says yes
+    # and a write that fails are both things that happen, and only one of
+    # them is what this module does.
+    probe_id = "selfcheck0000000000000"
+    try:
+        append_event(probe_id, {"event": "self_check", "step_id": None})
+        written = os.path.exists(record_path(probe_id))
+        say("append_event() wrote a record", written, written)
+        os.unlink(record_path(probe_id))
+    except Exception as exc:
+        say("append_event() wrote a record", f"{type(exc).__name__}: {exc}", False)
+
+    if FAILURES:
+        print(f"  {len(FAILURES)} swallowed failure(s) in this process:", file=out)
+        for failure in FAILURES:
+            print(f"    {failure['what']}: {failure['error']}", file=out)
+    else:
+        say("swallowed failures in this process", 0)
+
+    print(f"\n  {'RECORDS WOULD BE WRITTEN' if ok else 'RECORDS WOULD NOT BE WRITTEN'}", file=out)
+    return ok
+
+
+if __name__ == "__main__":
+    sys.exit(0 if self_check() else 1)

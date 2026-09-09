@@ -830,11 +830,39 @@ Design Documents these are disposable — losing them to an ephemeral
 container costs nothing, so they do not need the persistent disk above, and
 deliberately do not default to living on it.
 
+### When it writes nothing
+
+Run the self-check, in the same environment and working directory as the
+server:
+
+```
+KEYLINE_RUN_DIAGNOSTICS=1 python3 run_diagnostics.py
+```
+
+It prints the raw environment strings, the resolved absolute path, whether
+the hooks are wired **in the loaded bytecode** (not in the file — a
+long-running server keeps executing the code it imported at start, so a
+checkout that greps clean proves nothing about the process), and whether an
+actual `append_event()` write succeeds. It exits non-zero if a record could
+not be written.
+
+Hook failures are swallowed so a diagnostic can never turn a working
+generate into a 500. They are reported on **stderr** with a traceback and
+remembered in `run_diagnostics.FAILURES`. To stop swallowing them while
+chasing one:
+
+```
+export KEYLINE_RUN_DIAGNOSTICS_STRICT=1   # hooks re-raise instead of catching
+```
+
 **Leave it off in production.** It writes on every generate and every commit.
 Disabled, the hooks return on an environment lookup before building anything
 — `test_run_diagnostics.py` section 6 asserts that by replacing every
 record-building function in the module with one that raises and running a
-full six-step session underneath.
+full six-step session underneath. Section 6 alone cannot distinguish
+"correctly silent when disabled" from "silent always", so section 9 is its
+positive counterpart: the real Flask app over HTTP, process-wide
+dependencies, the default directory, a file on disk.
 
 It records; it does not compute. Every figure in a record is read from
 something the pipeline already produced, so the record cannot drift into
