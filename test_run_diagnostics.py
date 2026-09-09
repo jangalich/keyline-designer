@@ -851,6 +851,20 @@ try:
 except wire_translation.InboundGeometryError as _replayed:
     pass
 
+# THE FRAME, AND IT COMES OFF THE RECORD TOO. The replay above still
+# reached into the live session for the DEM. This one does not: the CRS
+# the rehydrator reprojects into is recorded beside the dump, so the
+# failing operation -- and this defect IS a reprojection defect -- can be
+# re-run from the file alone. A ring without its frame is evidence that
+# cannot be re-run, which is not what "permanent fixture" has to mean.
+_recorded_crs = _reject_event["geometry"]["dem"]["crs"]
+assert _recorded_crs == str(_reject_dem["crs"]), (_recorded_crs, str(_reject_dem["crs"]))
+try:
+    wire_translation.rehydrate_tree_zone(_dumped[0], {"crs": _recorded_crs}, zone_id=99)
+    _fail("the dump must reproduce the rejection off the RECORDED CRS alone")
+except wire_translation.InboundGeometryError:
+    pass
+
 _recorded_reason = _reject_event["rejections"][0]["reason"]
 assert "Self-intersection" in _recorded_reason, _recorded_reason
 # The offending COORDINATE, as shapely gives it, survives into the record.
@@ -872,7 +886,9 @@ print(
     f"{_dumped[0]['id']!r}, {len(_dumped[0]['geometry']['coordinates'][0])} positions -- byte "
     f"identical to what was committed, and ONLY the rejected one (the accepted zone is not "
     f"dumped). Replayed from the record alone through rehydrate_tree_zone() it fails the same "
-    f"way. The message carries the offending coordinate: Self-intersection[{_coordinate}]."
+    f"way -- and replayed against the RECORDED CRS {_recorded_crs!r} alone, with no session in "
+    f"hand, it fails the same way again. The message carries the offending coordinate: "
+    f"Self-intersection[{_coordinate}]."
 )
 
 
@@ -902,6 +918,14 @@ assert len(_patch_records) == len(_pair_result["patches"]), (
 )
 assert _pair_event["geometry"]["patches_truncated"] is False
 
+# THE FRAME THE ROUND TRIP RAN IN, on the generate event too. A patch
+# whose two verdicts DISAGREE is the bug, and this event is where that
+# disagreement is recorded -- so the CRS the `roundtrip` half was reached
+# in belongs here, not only on a commit rejection.
+assert _pair_event["geometry"]["dem"]["crs"] == str(_pair_session.context().dem["crs"]), (
+    _pair_event["geometry"]["dem"], str(_pair_session.context().dem["crs"])
+)
+
 _disagreements = []
 for _entry in _patch_records:
     assert _entry["polygon_utm"]["is_valid"] in (True, False), _entry
@@ -929,7 +953,8 @@ print(
     f"4 [test 4]. UTM VS ROUND TRIP: all {len(_patch_records)} emitted tree patches carry BOTH "
     f"verdicts -- polygon_utm.is_valid "
     f"{[e['polygon_utm']['is_valid'] for e in _patch_records]} and the rehydrator's verdict on "
-    f"geometry_wgs84 reprojected back into {_pair_session.context().dem['crs']} "
+    f"geometry_wgs84 reprojected back into the recorded frame "
+    f"{_pair_event['geometry']['dem']['crs']} "
     f"{[e['roundtrip']['is_valid'] for e in _patch_records]} -- plus verdicts_agree "
     f"{[e['verdicts_agree'] for e in _patch_records]}. Disagreements on this fixture: "
     f"{len(_disagreements)}. Each recorded verdict re-checked against shapely and against "

@@ -74,7 +74,10 @@ FOUR CAPTURE GROUPS
    message, which carries the offending coordinate. ON A COMMIT
    REJECTION the offending feature's FULL GeoJSON is dumped into the
    record, which is what turns an intermittent bug into a permanent
-   fixture.
+   fixture. Beside it, THE DEM'S OWN CRS -- the frame that dump is
+   replayed in. The defect is a reprojection defect, so a ring recorded
+   without the CRS it failed to reproject into is evidence that cannot
+   be re-run; see _dem_frame().
 
 THE OPEN HYPOTHESIS, AND WHY EVERY PATCH IS CHECKED TWICE
 =========================================================
@@ -808,6 +811,44 @@ def _roundtrip(geometry_wgs84, dem) -> dict:
     }
 
 
+def _dem_frame(dem):
+    """
+    THE FRAME A DUMPED GEOMETRY IS REPLAYED IN: the DEM's own CRS.
+
+    record_commit()'s `rejected_features_geojson` puts the offending ring
+    into the record verbatim, which is what makes an intermittent
+    rejection a permanent fixture. A RING ALONE IS NOT REPLAYABLE. The
+    defect this module exists for is a REPROJECTION defect -- it appears
+    when wire_translation._polygonal_shape_from_wire() takes that WGS84
+    ring back into `dem['crs']` -- so a reader who cannot name that CRS
+    can look at the coordinates the run failed on but cannot run the
+    operation that failed on them. Recording the ring and withholding the
+    frame captures the evidence and not the experiment.
+
+    NOT INFERRED FROM THE COORDINATES. A lon/lat ring implies a UTM zone
+    and deriving one here would be easy. It would also be this module
+    DECIDING which frame the run used rather than recording it, and it
+    would be silently wrong on any run whose DEM is not in the zone its
+    own centre falls in. Read off the DEM the pipeline actually handed
+    the rehydrator, or null.
+
+    str(), NOT _scalar(). A rasterio CRS is not a JSON scalar, so
+    _scalar() would correctly report it as `<CRS>` -- the type name in
+    place of the one value this capture exists for. str() is the CRS
+    object's own name for itself ("EPSG:32617"), and it is also the form
+    transform_geom() accepts, so a replay can paste it straight back in.
+    """
+    if dem is None:
+        return None
+    if not isinstance(dem, dict):
+        # _scalar()'s convention, for _scalar()'s reason: a DEM that is
+        # not the dict the pipeline passes everywhere is a fact about the
+        # run, and a null here would say there was no DEM at all.
+        return {"crs": f"<{type(dem).__name__}>"}
+    crs = dem.get("crs")
+    return {"crs": None if crs is None else str(crs)}
+
+
 def _patch_health(patch: dict, dem) -> dict:
     """
     One internal patch's geometry health -- BOTH VERDICTS SIDE BY SIDE.
@@ -1268,6 +1309,11 @@ def record_generate(probe, result, payload, context) -> None:
                 },
                 # --- group 4 -------------------------------------------
                 "geometry": {
+                    # The CRS every `roundtrip` verdict below was reached
+                    # in -- see _dem_frame(). Recorded on the generate as
+                    # well as the commit because a patch whose verdicts
+                    # DISAGREE is reproducible from this event alone.
+                    "dem": _dem_frame(dem),
                     "patches": patches,
                     "patches_truncated": patches_truncated,
                     "wire_features": features,
@@ -1330,6 +1376,10 @@ def record_commit(session_id, step_id, features, context, rejection=None) -> Non
                 "gate_outcome": "rejected" if rejection is not None else "accepted",
                 "rejections": rejections,
                 "geometry": {
+                    # THE FRAME `rejected_features_geojson` BELOW IS
+                    # REPLAYED IN. Without it the dump is coordinates
+                    # nobody can re-run. See _dem_frame().
+                    "dem": _dem_frame(dem),
                     "committed_features": [
                         {"source": f"features[{index}]", **_feature_health(feature, dem)}
                         for index, feature in enumerate(feature_list[:_MAX_RECORDED_GEOMETRIES])
