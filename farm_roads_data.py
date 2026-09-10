@@ -64,7 +64,6 @@ was just asking the wrong layer for it. Fixed two ways, not one:
 
 import json
 import math
-import time
 from typing import Optional
 
 import requests
@@ -72,6 +71,7 @@ from rasterio.warp import transform_geom
 from shapely.geometry import shape
 from shapely.ops import unary_union
 
+import fetch_attempts
 from feature_schema import CONFIDENCE_MEDIUM, make_feature, make_feature_collection
 
 TRANSPORTATION_BASE = "https://carto.nationalmap.gov/arcgis/rest/services/transportation/MapServer"
@@ -181,6 +181,22 @@ def _bounding_box(
     )
 
 
+# --- what a fetch of this module's layers cost, published ---------------
+#
+# PEP 562. Python calls a module's __getattr__ only when a normal
+# attribute lookup fails, and nothing here ever sets the three
+# LAST_FETCH_* names -- so every read of them lands here and gets the
+# CALLING THREAD's totals from the last @fetch_attempts.publishes call it
+# completed in this module. Per-thread and not process-global because two
+# sessions created concurrently on different boundaries would otherwise
+# overwrite each other's counts between the call returning and the
+# diagnostic reading. run_diagnostics.py's contract is unchanged and does
+# not know: it does getattr(module, "LAST_FETCH_ATTEMPTS") and gets an
+# int. See fetch_attempts.py.
+def __getattr__(name):
+    return fetch_attempts.published(__name__, name)
+
+
 def _query_road_layer(
     layer_id: int, bbox: tuple[float, float, float, float], max_retries: int = 2
 ) -> list[dict]:
@@ -212,7 +228,13 @@ def _query_road_layer(
     url = f"{TRANSPORTATION_BASE}/{layer_id}/query"
     last_error = None
 
-    for attempt in range(max_retries + 1):
+    # ATTEMPTS ARE PUBLISHED, NOT SWALLOWED -- fetch_attempts.attempts()
+    # yields exactly what range(max_retries + 1) yielded and counts each
+    # pass into the ledger the calling layer entry point opened, and
+    # fetch_attempts.sleep() pauses for exactly as long as time.sleep(2)
+    # did while recording how long that was. Neither changes the budget,
+    # the backoff or the progressive timeout. See fetch_attempts.py.
+    for attempt in fetch_attempts.attempts(max_retries):
         timeout = 30 + (attempt * 30)
         try:
             response = requests.get(url, params=params, timeout=timeout)
@@ -221,7 +243,7 @@ def _query_road_layer(
         except requests.exceptions.RequestException as e:
             last_error = e
             if attempt < max_retries:
-                time.sleep(2)
+                fetch_attempts.sleep(2)
                 continue
             raise last_error
         else:
@@ -262,6 +284,7 @@ def _deduplicate_road_features(features: list[dict]) -> list[dict]:
     return deduped
 
 
+@fetch_attempts.publishes
 def get_farm_roads_for_boundary(
     boundary_coordinates: list[tuple[float, float]], buffer_meters: float = 150
 ) -> list[dict]:

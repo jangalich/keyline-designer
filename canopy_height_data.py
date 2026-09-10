@@ -52,6 +52,11 @@ get_canopy_height_for_boundary() -- since a fetch failure here is no
 longer something the pipeline quietly shrugs off, it's worth spending
 more attempts to distinguish "genuinely unreachable" from "flaky this
 one time" before giving up and failing the whole production-zone call.
+Neither of those two functions owns a retry LOOP -- both hand their
+budget to _retry(), which is where the attempts are actually made and
+counted -- so a run's published count for this layer covers the STAC
+search and the raster read together, under _retry. See fetch_attempts.py
+and the __getattr__ below it.
 
 CELL MASK LOGIC: tree_root_zone_mask() is deliberately network-free and
 takes a plain HAG array, the same offline/network split raster_grid.py's
@@ -74,7 +79,6 @@ internet access and will not run in a fully offline sandbox.
 """
 
 import math
-import time
 from typing import Optional
 
 import numpy as np
@@ -87,6 +91,7 @@ from rasterio.warp import Resampling, reproject, transform_geom
 from shapely.geometry import Point, Polygon, mapping, shape
 from shapely.prepared import prep
 
+import fetch_attempts
 from raster_grid import binary_dilate, pixel_center_xy
 
 STAC_API_URL = "https://planetarycomputer.microsoft.com/api/stac/v1"
@@ -158,6 +163,22 @@ def _boundary_to_polygon(boundary_coordinates: list) -> Polygon:
     return Polygon(coords)
 
 
+# --- what a fetch of this module's layers cost, published ---------------
+#
+# PEP 562. Python calls a module's __getattr__ only when a normal
+# attribute lookup fails, and nothing here ever sets the three
+# LAST_FETCH_* names -- so every read of them lands here and gets the
+# CALLING THREAD's totals from the last @fetch_attempts.publishes call it
+# completed in this module. Per-thread and not process-global because two
+# sessions created concurrently on different boundaries would otherwise
+# overwrite each other's counts between the call returning and the
+# diagnostic reading. run_diagnostics.py's contract is unchanged and does
+# not know: it does getattr(module, "LAST_FETCH_ATTEMPTS") and gets an
+# int. See fetch_attempts.py.
+def __getattr__(name):
+    return fetch_attempts.published(__name__, name)
+
+
 def _retry(operation, max_retries: int = 2):
     """Identical progressive-timeout retry helper to imagery_data._retry()
     -- see that module's docstring for the reasoning. Duplicated here
@@ -166,14 +187,20 @@ def _retry(operation, max_retries: int = 2):
     own private copy rather than sharing one across modules."""
     last_error = None
 
-    for attempt in range(max_retries + 1):
+    # ATTEMPTS ARE PUBLISHED, NOT SWALLOWED -- fetch_attempts.attempts()
+    # yields exactly what range(max_retries + 1) yielded and counts each
+    # pass into the ledger the calling layer entry point opened, and
+    # fetch_attempts.sleep() pauses for exactly as long as time.sleep(2)
+    # did while recording how long that was. Neither changes the budget,
+    # the backoff or the progressive timeout. See fetch_attempts.py.
+    for attempt in fetch_attempts.attempts(max_retries):
         timeout = 30 + (attempt * 30)
         try:
             return operation(timeout)
         except Exception as e:
             last_error = e
             if attempt < max_retries:
-                time.sleep(2)
+                fetch_attempts.sleep(2)
                 continue
             raise last_error
 
@@ -305,6 +332,7 @@ def _on_parcel_nan_fraction(hag_on_grid: np.ndarray, boundary_coordinates: list,
     return on_parcel_nan_count / on_parcel_count, on_parcel_count
 
 
+@fetch_attempts.publishes
 def get_canopy_height_for_boundary(
     boundary_coordinates: list,
     dem: dict,
