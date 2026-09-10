@@ -8,7 +8,6 @@ public USDA endpoint.
 Docs: https://sdmdataaccess.nrcs.usda.gov/webservicehelp.aspx
 """
 
-import time
 import requests
 from typing import Optional
 
@@ -16,6 +15,7 @@ from shapely import wkt as shapely_wkt
 from shapely.geometry import mapping as shapely_mapping
 from shapely.ops import unary_union
 
+import fetch_attempts
 from feature_schema import (
     CONFIDENCE_HIGH,
     CONFIDENCE_LOW,
@@ -38,6 +38,22 @@ SSURGO_CONFIDENCE_NOTES = (
 )
 
 
+# --- what a fetch of this module's layers cost, published ---------------
+#
+# PEP 562. Python calls a module's __getattr__ only when a normal
+# attribute lookup fails, and nothing here ever sets the three
+# LAST_FETCH_* names -- so every read of them lands here and gets the
+# CALLING THREAD's totals from the last @fetch_attempts.publishes call it
+# completed in this module. Per-thread and not process-global because two
+# sessions created concurrently on different boundaries would otherwise
+# overwrite each other's counts between the call returning and the
+# diagnostic reading. run_diagnostics.py's contract is unchanged and does
+# not know: it does getattr(module, "LAST_FETCH_ATTEMPTS") and gets an
+# int. See fetch_attempts.py.
+def __getattr__(name):
+    return fetch_attempts.published(__name__, name)
+
+
 def _run_sda_query(sql: str, max_retries: int = 2) -> dict:
     """
     Sends a raw SQL query to the SDA REST endpoint and returns the parsed
@@ -57,7 +73,13 @@ def _run_sda_query(sql: str, max_retries: int = 2) -> dict:
 
     last_error = None
 
-    for attempt in range(max_retries + 1):
+    # ATTEMPTS ARE PUBLISHED, NOT SWALLOWED. fetch_attempts.attempts()
+    # yields exactly what range(max_retries + 1) yielded and counts each
+    # pass into the ledger the calling layer entry point opened; fetch_
+    # attempts.sleep() pauses for exactly as long as time.sleep(2) did and
+    # records how long that was. Neither changes the budget, the backoff
+    # or the progressive timeout below -- see fetch_attempts.py.
+    for attempt in fetch_attempts.attempts(max_retries):
         # Give later attempts more time, in case the server is just
         # momentarily under load rather than truly unreachable.
         timeout = 30 + (attempt * 30)
@@ -69,7 +91,7 @@ def _run_sda_query(sql: str, max_retries: int = 2) -> dict:
         except requests.exceptions.RequestException as e:
             last_error = e
             if attempt < max_retries:
-                time.sleep(2)
+                fetch_attempts.sleep(2)
                 continue
             raise last_error
 
@@ -134,6 +156,7 @@ def coordinates_to_wkt_polygon(coordinates: list) -> str:
     return f"polygon(({coord_pairs}))"
 
 
+@fetch_attempts.publishes
 def get_soil_data_for_polygon(wkt_polygon: str) -> list[dict]:
     """
     Same as get_soil_data_for_point, but for a full parcel boundary instead
@@ -201,6 +224,7 @@ def is_prime_farmland(farmland_classification: Optional[str]) -> bool:
     return any(farmland_classification.startswith(p) for p in _PRIME_FARMLAND_PREFIXES)
 
 
+@fetch_attempts.publishes
 def get_farmland_classification_for_polygon(wkt_polygon: str) -> list[dict]:
     """
     Returns SSURGO's official Farmland Classification (farmlndcl) for
@@ -382,6 +406,7 @@ def is_erosion_prone(kwfact, threshold: float = DEFAULT_EROSION_KWFACT_THRESHOLD
         return False
 
 
+@fetch_attempts.publishes
 def get_erosion_factor_for_polygon(wkt_polygon: str) -> list[dict]:
     """
     Returns SSURGO's whole-soil K-factor (erodibility) for the dominant
@@ -485,6 +510,7 @@ def get_erosion_factor_for_polygon(wkt_polygon: str) -> list[dict]:
 # scale would barely differentiate the moderately-low/moderately-high
 # range where most real soils actually fall) rather than inventing its own
 # thresholds.
+@fetch_attempts.publishes
 def get_saturated_hydraulic_conductivity_for_polygon(wkt_polygon: str) -> list[dict]:
     """
     Returns SSURGO's saturated hydraulic conductivity (Ksat, chorizon.ksat_r)
@@ -561,6 +587,7 @@ def _polygonal_parts(geom):
     return None
 
 
+@fetch_attempts.publishes
 def get_soil_geometries_for_polygon(wkt_polygon: str) -> dict[str, dict]:
     """
     Fetches map unit polygon geometry (not just the tabular attributes

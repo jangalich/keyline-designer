@@ -85,10 +85,13 @@ left in place (see its own module docstring).
 MEASURED, NOT CHANGED. Every one of the twelve fetches below sits
 inside a run_diagnostics.time_layer() block, so a session creation with
 KEYLINE_RUN_DIAGNOSTICS set records how long each layer took, in fetch
-order, in that session's diagnostic record. Those blocks read a clock on
-either side of a call that was already there: nothing about what runs,
-in what order, how often, or how it retries is different with them than
-without. Off (the default) each one costs a thread-local lookup and a
+order, in that session's diagnostic record -- and, for the nine layers
+whose module retries, HOW MANY ATTEMPTS that took and how much of the
+wait was the pause between them, published by the loops themselves
+(fetch_attempts.py) and read off the module here. Those blocks read a
+clock on either side of a call that was already there: nothing about
+what runs, in what order, how often, or how it retries is different with
+them than without. Off (the default) each one costs a thread-local lookup and a
 do-nothing singleton. The names are FETCH_LAYERS below, which is also
 what run_diagnostics.self_check() cross-checks the compiled function
 against, so a thirteenth layer added without a timer is reported rather
@@ -290,9 +293,11 @@ def fetch_parcel_data(boundary_coordinates: list[tuple[float, float]]) -> Parcel
     wkt_polygon = coordinates_to_wkt_polygon(boundary_coordinates)
     # THE FIVE SDA CALLS, one after another against the same service. The
     # block to watch when a creation is slow: soil_data._run_sda_query()
-    # retries twice with a longer timeout and a 2-second pause each time,
-    # and none of that is visible to this caller -- so these five rows
-    # carry the wait without being able to say how much of it was retry.
+    # retries twice with a longer timeout and a 2-second pause each time.
+    # That used to be invisible to this caller, so these five rows carried
+    # the wait without being able to say how much of it was retry; the
+    # loop now publishes both, and each row records its own attempts and
+    # its own slept milliseconds beside its elapsed time.
     with run_diagnostics.time_layer("soil_components", get_soil_data_for_polygon):
         soil_components = get_soil_data_for_polygon(wkt_polygon)
     with run_diagnostics.time_layer(

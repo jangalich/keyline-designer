@@ -83,13 +83,15 @@ FIVE CAPTURE GROUPS
    parcel_data.fetch_parcel_data() issues THIRTEEN SEQUENTIAL fetches --
    no threading, no async -- and a session creation waits on all of
    them. Recorded per layer: its wall time, whether the call raised and
-   with what, and how many attempts it took (or, since no retry loop in
-   this codebase publishes that, a statement that the count is not
-   available and the retry BUDGET each helper declares instead). Beside
-   them: the total, whether the fetch RAN AT ALL or was served by the
-   fetch cache -- a warm creation and a cold one are different
-   measurements and must never be averaged -- and, on a failure, which
-   layer, which exception type and what it said. irradiance is recorded
+   with what, how many ATTEMPTS it took and how many milliseconds of
+   that wall time were spent asleep between them -- both published by
+   the retry loops themselves through fetch_attempts.py and read here,
+   never inferred from elapsed time -- with the retry BUDGET each helper
+   declares beside them as the bound. Beside them: the total, whether
+   the fetch RAN AT ALL or was served by the fetch cache -- a warm
+   creation and a cold one are different measurements and must never be
+   averaged -- and, on a failure, which layer, which exception type and
+   what it said. irradiance is recorded
    by its own `status` and NEVER as a failure: it is the one
    deliberately non-hard-failing layer, and a degraded baseline is
    normal operation. See Group 5's own header.
@@ -1135,44 +1137,63 @@ def _collect_wire_features(payload, dem) -> tuple:
 # layer's call returns, which for a strictly sequential fetch is
 # unambiguous.
 #
-# NOTHING PUBLISHES IT TODAY, AND THIS MODULE SAYS SO rather than
-# inventing a number. Five modules behind these thirteen layers retry
-# internally -- soil_data, hydrology_data, farm_roads_data, imagery_data
-# and canopy_height_data each keep their own private copy of the same
-# progressive-timeout loop -- and every one of them swallows its
-# attempts inside a `for attempt in range(max_retries + 1)` that returns
-# only the final payload. A layer that succeeded on the third try is
-# invisible to every caller, including this one.
+# THE FIVE RETRYING MODULES NOW MEET IT, through the one convention in
+# fetch_attempts.py: soil_data, hydrology_data, farm_roads_data,
+# imagery_data and canopy_height_data each open a ledger at their layer
+# entry point, every retry loop underneath counts its attempts and times
+# its own sleeps into it, and the totals are published under the three
+# names below. Before that they were swallowed -- `for attempt in
+# range(max_retries + 1)` returning only the final payload -- and a layer
+# that succeeded on its third try was indistinguishable from one that
+# succeeded on its first.
 #
-# Deriving the count from elapsed time would be exactly the computation
-# THE ONE RULE forbids: the record would then report what this module
-# GUESSED about the retry loop rather than what the retry loop did. So
-# the absence is recorded as an absence -- see _retry_helpers(), which
-# reports the BUDGET each helper declares (the bound on the wait) beside
-# it, and the `retries` block every fetch event carries.
+# WHAT DID NOT CHANGE IS HOW THIS MODULE GETS THEM. It reads the three
+# attributes and nothing else. Deriving a count from elapsed time would
+# be exactly the computation THE ONE RULE forbids -- the record would
+# report what this module GUESSED about the retry loop rather than what
+# the retry loop did -- so a module that does not publish is still
+# recorded as an absence, with a source naming where this module looked
+# so a null can never be read as a zero.
 ATTEMPTS_ATTRIBUTE = "LAST_FETCH_ATTEMPTS"
 
+# Milliseconds a layer spent asleep between attempts, MEASURED BY THE
+# LOOP THAT SLEPT. This is the figure this module could not produce from
+# outside and said so: the retry loops sit inside the layer call, so a
+# layer's elapsed_ms already contains every attempt plus every pause,
+# with no boundary an outside observer can see. The loop itself can see
+# it, so the loop reports it and this reads it.
+RETRY_SLEEP_ATTRIBUTE = "LAST_FETCH_RETRY_SLEEP_MS"
+
+# The same call broken out per retrying helper, plus how it ended -- so
+# "three road layers queried once each" and "one road layer queried three
+# times", which share a total of 3, are told apart in the record.
+ATTEMPT_DETAIL_ATTRIBUTE = "LAST_FETCH_ATTEMPT_DETAIL"
+
 _ATTEMPTS_ABSENT_REASON = (
-    "No fetch module publishes an attempt count. Every retrying helper "
-    "behind these layers (soil_data._run_sda_query and the private "
-    "_retry()/_query_* copies in hydrology_data, farm_roads_data, "
-    "imagery_data and canopy_height_data) counts its attempts in a local "
-    "loop variable and returns only the final payload, so a layer that "
-    "succeeded on attempt 3 is indistinguishable to its caller from one "
-    "that succeeded on attempt 1. This module records that absence "
-    "rather than inferring a count from elapsed time. A module that "
-    "wants its attempts recorded publishes them under "
-    "ATTEMPTS_ATTRIBUTE; this reads that attribute and nothing else."
+    "At least one layer's module published no attempt count. A count is "
+    "read off ATTEMPTS_ATTRIBUTE on the module the timed callable was "
+    "defined in, and nothing else -- so a null means that module did not "
+    "publish, never that the layer made no attempts, and attempts_source "
+    "on each row names where this module looked. The five retrying "
+    "modules publish through fetch_attempts.py; a layer whose callable "
+    "is a test double, or whose module fetches without retrying, has "
+    "nothing to publish and reports so."
 )
 
 _RETRY_TIME_ABSENT_REASON = (
-    "Time spent retrying is not separable from time spent succeeding. "
-    "The retry loops are inside the layer call, so a layer's elapsed_ms "
-    "already contains every attempt it made plus the time.sleep(2) "
-    "between them, with no boundary this module can observe. "
-    "retry_helpers below reports the BUDGET each helper declares, which "
-    "bounds the worst case; what a run actually spent retrying needs the "
-    "loops themselves to say so."
+    "At least one layer's module published no retry sleep time. It is "
+    "read off RETRY_SLEEP_ATTRIBUTE and never derived: a layer's "
+    "elapsed_ms contains every attempt plus every pause between them "
+    "with no boundary this module can observe, so only the loop that "
+    "slept can say how long it slept. retry_helpers below reports the "
+    "BUDGET each helper declares either way, which bounds the worst case."
+)
+
+_NO_LAYERS_REASON = (
+    "No layer ran under this fetch, so there is nothing to have published "
+    "a count. On a cache-served creation this is the whole story: "
+    "fetch_parcel_data() was never entered, no layer timer fired, and no "
+    "row exists that a previous fetch's count could be mistaken for."
 )
 
 # The parameter name that marks a retrying helper. THIS CODEBASE'S OWN
@@ -1205,20 +1226,83 @@ def _qualified(function) -> str:
     return f"{module}.{name}" if isinstance(module, str) else name
 
 
-def _published_attempts(function) -> tuple:
+def _published(function, attribute, accepted) -> tuple:
     """
-    What this layer's module says its last call cost in attempts, READ
-    off ATTEMPTS_ATTRIBUTE and never derived. Returns (value, source),
-    and the source names the absence when there is one so a null here
-    can never be read as a zero.
+    One published value off this layer's module, READ and never derived.
+    Returns (value, source), and the source names the absence when there
+    is one so a null here can never be read as a zero.
+
+    `accepted` is the exact type the contract promises, checked with
+    `type(...) is` and not isinstance: a bool is an int to isinstance,
+    and "published True attempts" is not a number this record should
+    carry. A module that publishes the wrong shape is treated as one that
+    did not publish, which is the safe direction.
+
+    THE MODULE IS RESOLVED FROM THE CALLABLE THAT WAS TIMED, so a layer
+    standing in behind a test double resolves that double's module and
+    honestly reports nothing published -- rather than reading the real
+    module's value from some earlier call and filing it under a call that
+    never happened.
     """
     module = _module_of(function)
     if module is None:
         return None, "no module resolved for this layer's callable"
-    value = getattr(module, ATTEMPTS_ATTRIBUTE, None)
-    if type(value) is int:
-        return value, f"{module.__name__}.{ATTEMPTS_ATTRIBUTE}"
+    value = getattr(module, attribute, None)
+    if type(value) is accepted:
+        return value, f"{module.__name__}.{attribute}"
     return None, f"not published by {module.__name__}"
+
+
+def _published_attempts(function) -> tuple:
+    """How many attempts this layer's last call cost, off
+    ATTEMPTS_ATTRIBUTE. See _published()."""
+    return _published(function, ATTEMPTS_ATTRIBUTE, int)
+
+
+def _published_retry_sleep(function) -> tuple:
+    """How many milliseconds this layer spent asleep between attempts,
+    off RETRY_SLEEP_ATTRIBUTE -- the loop's own measurement of its own
+    pauses. See RETRY_SLEEP_ATTRIBUTE and _published()."""
+    return _published(function, RETRY_SLEEP_ATTRIBUTE, float)
+
+
+def _published_attempt_detail(function) -> tuple:
+    """The call broken out per retrying helper, off
+    ATTEMPT_DETAIL_ATTRIBUTE. Recorded WHOLE, as the module published it:
+    summarising it here would be this module deciding what mattered about
+    a measurement it did not take. See _published()."""
+    return _published(function, ATTEMPT_DETAIL_ATTRIBUTE, dict)
+
+
+def _all_recorded(layers, field: str) -> bool:
+    """
+    Whether EVERY layer row carries this figure.
+
+    EVERY AND NOT ANY, deliberately. A flag that meant "at least one row
+    has a count" would let eleven silent nulls hide behind one real
+    number, which is the shape of a mixed fetch and exactly the thing a
+    reader summarising a directory of records must not average. NO ROWS
+    IS NOT RECORDED EITHER: a cache-served creation ran no layer, so
+    there is nothing to have recorded, and `all()` over nothing would say
+    yes.
+    """
+    return bool(layers) and all(row[field] is not None for row in layers)
+
+
+def _absent_reason(layers, field: str):
+    """
+    Why a `retries` block is not complete, or None when it is.
+
+    THREE STATES, NOT TWO, because "nothing published" and "nothing ran"
+    are different facts and a cache-served creation is the second one.
+    A record that reported a publishing failure for a fetch that never
+    happened would send a reader to the wrong module.
+    """
+    if not layers:
+        return _NO_LAYERS_REASON
+    if all(row[field] is not None for row in layers):
+        return None
+    return _ATTEMPTS_ABSENT_REASON if field == "attempts" else _RETRY_TIME_ABSENT_REASON
 
 
 def _retry_helpers(modules) -> dict:
@@ -1262,13 +1346,43 @@ def _retry_helpers(modules) -> dict:
             if parameter is None:
                 continue
             default = parameter.default
+            # THE CODE THE TWO FLAGS BELOW READ IS THE HELPER'S OWN, not a
+            # decorator's. A layer entry point wrapped by @fetch_attempts.
+            # publishes keeps its identity and its signature through
+            # functools.wraps -- which is why the module and budget reads
+            # above are unaffected -- but its __code__ is the WRAPPER's,
+            # and the wrapper names `attempts` (it reads ledger.attempts)
+            # without owning a loop. __wrapped__ gets back to the function
+            # that was actually written.
+            #
+            # ONE STEP AND GUARDED, not inspect.unwrap(): the scan reaches
+            # whatever a module holds, a Mock answers every attribute with
+            # another Mock, and unwrap() walks that chain until it raises.
+            # A diagnostic that died on the shape of somebody's test
+            # double would be a worse bug than the one it was added to
+            # find. One step is all this decorator needs.
+            written = getattr(function, "__wrapped__", function)
+            code = getattr(written, "__code__", None) or code
+            names = getattr(code, "co_names", ())
+            if not isinstance(names, tuple):
+                names = ()
             helpers[f"{module_name}.{name}"] = {
                 "max_retries_default": (
                     None if default is parameter.empty else _scalar(default)
                 ),
                 # The pause between attempts, which is most of what a
                 # retry costs on a server that is merely slow.
-                "sleeps_between_attempts": "sleep" in code.co_names,
+                "sleeps_between_attempts": "sleep" in names,
+                # WHETHER THIS HELPER IS A LOOP OR A PASS-THROUGH. Three
+                # of the eight functions a `max_retries` parameter finds
+                # -- imagery_data._search_scenes, canopy_height_data.
+                # _search_hag_items and canopy_height_data.get_canopy_
+                # height_for_boundary -- declare a budget and hand it
+                # straight to a helper that owns the loop, so their
+                # attempts are counted under that helper and never under
+                # them. Read the same way as the flag above: whether the
+                # loaded code names fetch_attempts.attempts().
+                "counts_attempts": "attempts" in names,
             }
     return helpers
 
@@ -1399,6 +1513,8 @@ class _LayerTimer:
         elapsed = (time.perf_counter() - self.started) * 1000.0
         try:
             attempts, attempts_source = _published_attempts(self.function)
+            retry_sleep_ms, retry_sleep_source = _published_retry_sleep(self.function)
+            attempt_detail, attempt_detail_source = _published_attempt_detail(self.function)
             module = _module_of(self.function)
             if module is not None:
                 self.probe.modules.setdefault(module.__name__, module)
@@ -1417,6 +1533,26 @@ class _LayerTimer:
                     # null is NOT zero here: attempts_source says which.
                     "attempts": attempts,
                     "attempts_source": attempts_source,
+                    # THE HALF THAT USED TO BE UNANSWERABLE. elapsed_ms
+                    # above is the whole layer -- every attempt plus every
+                    # pause between them -- and nothing outside the loop
+                    # can split the two. This is the loop's own clock on
+                    # its own sleeps, so `elapsed_ms` large with
+                    # `retry_sleep_ms` at 0.0 is one slow request, and
+                    # large with a multiple of two seconds beside it is
+                    # retries. Ends in TIMING_KEY_SUFFIX because it IS a
+                    # duration and moves between runs; `attempts` does
+                    # not, so a run that retried still diffs against one
+                    # that did not.
+                    "retry_sleep_ms": retry_sleep_ms,
+                    "retry_sleep_source": retry_sleep_source,
+                    # WHICH helper under this layer retried, how many
+                    # times it was CALLED as against how many attempts it
+                    # made, and whether the call ended on a value, on a
+                    # documented "nothing found" sentinel, or raising.
+                    # Quoted whole from the module that measured it.
+                    "attempt_detail": attempt_detail,
+                    "attempt_detail_source": attempt_detail_source,
                 }
             )
         except Exception as exc:
@@ -1478,12 +1614,21 @@ def _fetch_event(probe, total_ms, parcel, error) -> dict:
         # replaced fetch function (a test double) or an older loaded
         # parcel_data looks like. self_check() answers which.
         "layers": None if served_by == "fetch_cache" and not layers else layers,
+        # --- what the retry loops cost ----------------------------------
+        #
+        # READ, NEVER DERIVED, and the two `*_recorded` booleans are the
+        # plain restatement of "every row carries one". The absent reasons
+        # are null when nothing is absent: a reason standing beside a
+        # complete set of counts would be a statement the record no longer
+        # supports, and this file is diffed.
         "retries": {
-            "attempts_recorded": any(row["attempts"] is not None for row in layers),
+            "attempts_recorded": _all_recorded(layers, "attempts"),
             "attempts_attribute": ATTEMPTS_ATTRIBUTE,
-            "attempts_absent_reason": _ATTEMPTS_ABSENT_REASON,
-            "retry_time_recorded": False,
-            "retry_time_absent_reason": _RETRY_TIME_ABSENT_REASON,
+            "attempts_absent_reason": _absent_reason(layers, "attempts"),
+            "retry_time_recorded": _all_recorded(layers, "retry_sleep_ms"),
+            "retry_time_attribute": RETRY_SLEEP_ATTRIBUTE,
+            "retry_time_absent_reason": _absent_reason(layers, "retry_sleep_ms"),
+            "attempt_detail_attribute": ATTEMPT_DETAIL_ATTRIBUTE,
             "retry_helpers": _retry_helpers(list(probe.modules.values())),
         },
         # --- the timings ------------------------------------------------
@@ -2048,6 +2193,40 @@ def _hook_sites() -> dict:
     return sites
 
 
+def _timed_callables(parcel_data, declared) -> dict:
+    """
+    {layer name: the callable that layer is timed on}, read out of the
+    COMPILED fetch_parcel_data.
+
+    Every timer in that function is written `time_layer("<layer>",
+    <function>)`, so the layer name is a constant of the code object and
+    the callable is the global loaded immediately after it. Walking the
+    instructions pairs them exactly, which no table written here could do
+    without being a second copy of parcel_data.py's imports -- the same
+    reason time_layer() takes the function rather than looking it up.
+
+    A pairing that finds nothing returns nothing, and the coverage line
+    built from it then reads "0 of 0" and fails, which is the honest
+    answer: this could not be checked.
+    """
+    import dis
+
+    code = getattr(getattr(parcel_data, "fetch_parcel_data", None), "__code__", None)
+    if code is None:
+        return {}
+    pairs = {}
+    pending = None
+    for instruction in dis.get_instructions(code):
+        if instruction.opname == "LOAD_CONST" and instruction.argval in declared:
+            pending = instruction.argval
+        elif pending is not None and instruction.opname in ("LOAD_GLOBAL", "LOAD_NAME"):
+            function = getattr(parcel_data, instruction.argval, None)
+            if function is not None:
+                pairs[pending] = function
+            pending = None
+    return pairs
+
+
 def _fetch_hook_sites() -> dict:
     """
     Whether the FETCH instrumentation is wired into the parcel_data and
@@ -2099,6 +2278,47 @@ def _fetch_hook_sites() -> dict:
         f"parcel_data.fetch_parcel_data times {len(timed)} of "
         f"{len(declared)} declared layers"
     ] = bool(declared) and len(timed) == len(declared)
+
+    # AND A FIFTH, THE SAME KIND OF COVERAGE QUESTION ONE LEVEL DOWN. A
+    # layer entry point in a retrying module that lost its
+    # @fetch_attempts.publishes decorator fails exactly the way this
+    # whole function exists for: nothing raises, and every one of that
+    # layer's rows reports attempts: null forever, which reads as "this
+    # module does not retry" rather than "somebody dropped a line".
+    #
+    # NOTHING IS NAMED HERE. The callable each layer is timed on is read
+    # out of the compiled fetch_parcel_data (see _timed_callables), the
+    # modules expected to publish are the ones _retry_helpers() finds a
+    # COUNTING loop in, and the check is whether those callables are
+    # wrapped. A sixth retrying module is covered on the day it is
+    # written, and a module that stops retrying stops being expected to
+    # publish, both without editing this.
+    import fetch_attempts
+
+    timed_callables = _timed_callables(parcel_data, declared)
+    imported = {}
+    for function in timed_callables.values():
+        module_name = getattr(function, "__module__", None)
+        module = sys.modules.get(module_name) if isinstance(module_name, str) else None
+        if module is not None:
+            imported[module_name] = module
+    retrying = {
+        name.partition(".")[0]
+        for name, helper in _retry_helpers(list(imported.values())).items()
+        if helper["counts_attempts"]
+    }
+    entry_points = [
+        function
+        for function in timed_callables.values()
+        if getattr(function, "__module__", None) in retrying
+    ]
+    publishing = [
+        function for function in entry_points if fetch_attempts.publishes_attempts(function)
+    ]
+    sites[
+        f"parcel_data's retrying layers publish attempts: {len(publishing)} of "
+        f"{len(entry_points)} timed entry points"
+    ] = bool(entry_points) and len(publishing) == len(entry_points)
     return sites
 
 

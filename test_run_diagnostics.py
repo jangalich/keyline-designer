@@ -62,9 +62,12 @@ network calls mocked, on parcel_data's own namespace (see FetchHarness).
           OPERATIONALLY.
  14  [4]  irradiance RECORDS ITS status, and a degraded status is NOT
           recorded as a failure.
- 15  [5]  RETRY COUNTS: no fetch module publishes one, so the absence is
-          reported -- observed against the real entry points, with a
-          published count proved reachable.
+ 15  [5]  RETRY COUNTS AND RETRY TIME REACH THE RECORD, now that the
+          five retrying modules publish them (fetch_attempts.py). A real
+          layer over a transport failing twice records attempts 3 and
+          four seconds of measured sleep; a warm creation carries no
+          stale count. fetch_attempts' own behaviour is
+          test_fetch_attempts.py.
  16  [6]  TIMINGS MOVE AND THE DIFF STILL COMES OUT CLEAN. Section 2's
           byte-identical assertion, held for everything that is not a
           timing.
@@ -2190,32 +2193,54 @@ print(
 
 
 # =========================================================================
-# 15 [fetch test 5]. RETRY COUNTS ARE RECORDED, OR THEIR ABSENCE IS REPORTED
+# 15 [fetch test 5]. RETRY COUNTS AND RETRY TIME REACH THE RECORD
 # =========================================================================
 #
-# THEY ARE NOT AVAILABLE, AND THE RECORD SAYS SO. Five modules behind
-# these twelve layers retry internally -- each keeping its own private
-# copy of the same progressive-timeout loop -- and every one of them
-# counts attempts in a local variable and returns only the final payload.
-# A layer that succeeded on attempt 3 after two 2-second pauses and one
-# that succeeded on attempt 1 are indistinguishable to every caller,
-# including this one. Inferring the count from elapsed time is exactly the
-# computation THE ONE RULE forbids, so the absence is recorded as an
-# absence, and `attempts_source` names WHERE this module looked so a null
-# can never be read as a zero.
+# THEY USED NOT TO EXIST. Five modules behind these twelve layers retry
+# internally, each keeping its own private copy of the same progressive-
+# timeout loop, and every one of them counted attempts in a local
+# variable and returned only the final payload -- so a layer that
+# succeeded on attempt 3 after two 2-second pauses and one that succeeded
+# on attempt 1 were indistinguishable to every caller, this one included.
+# The absence was recorded as an absence, and this module's reading side
+# was already built for a count nobody wrote.
+#
+# THEY NOW PUBLISH, through the one convention in fetch_attempts.py, and
+# THE READING SIDE IS UNCHANGED: this module still reads the three
+# attributes and nothing else. Inferring a count from elapsed time would
+# be exactly the computation THE ONE RULE forbids, so a module that does
+# not publish is still recorded as an absence, with attempts_source
+# naming where this module looked so a null can never be read as a zero.
+#
+# fetch_attempts.py's OWN behaviour -- what the loops count, what they
+# measure, what two threads see -- is test_fetch_attempts.py. What is
+# held here is the RECORD end: that the counts arrive, that they are the
+# layer's own, and that a cache-served creation carries none.
 
 _retries = _cold_fetch["retries"]
+
+# THE MOCKED COLD RUN FIRST, AND ITS NULLS ARE THE RIGHT ANSWER. The
+# twelve layers above are Mocks, whose __module__ is unittest.mock -- so
+# the timer resolves that module, finds nothing published, and says so.
+# This is the negative control the positive below needs: it shows a null
+# means "this callable's module published nothing", not "the reader is
+# broken".
 assert _retries["attempts_recorded"] is False
 assert _retries["retry_time_recorded"] is False
 assert _retries["attempts_attribute"] == run_diagnostics.ATTEMPTS_ATTRIBUTE
+assert _retries["retry_time_attribute"] == run_diagnostics.RETRY_SLEEP_ATTRIBUTE
 assert len(_retries["attempts_absent_reason"]) > 200
 assert len(_retries["retry_time_absent_reason"]) > 100
 assert all(row["attempts"] is None for row in _cold_layers)
+assert all(row["retry_sleep_ms"] is None for row in _cold_layers)
 assert all("not published by" in row["attempts_source"] for row in _cold_layers)
+assert all("not published by" in row["retry_sleep_source"] for row in _cold_layers)
 
-# THE ABSENCE IS OBSERVED, NOT ASSUMED. Asked of the REAL fetch entry
-# points -- not the mocks the section above ran through -- every one of
-# them reports no published count.
+# THE REAL ENTRY POINTS PUBLISH, which is what this branch changed. Asked
+# of the loaded functions, every retrying one is wrapped -- and the two
+# that are not retrying modules at all are not, and must not be.
+import fetch_attempts
+
 _REAL_ENTRY_POINTS = [
     soil_data.get_soil_data_for_polygon,
     soil_data.get_soil_geometries_for_polygon,
@@ -2225,43 +2250,55 @@ _REAL_ENTRY_POINTS = [
     canopy_height_data.get_canopy_height_for_boundary,
 ]
 for _entry in _REAL_ENTRY_POINTS:
-    _attempts, _source = run_diagnostics._published_attempts(_entry)
-    assert _attempts is None, (_entry, _attempts)
-    assert _source.startswith("not published by "), _source
+    assert fetch_attempts.publishes_attempts(_entry), _entry
 
-# AND A COUNT IS REACHABLE, which is what makes the None above mean "not
-# published" rather than "this never works". A module that publishes one
-# under the contract is read, with no edit to run_diagnostics.py.
-with mock_patch.object(soil_data, run_diagnostics.ATTEMPTS_ATTRIBUTE, 3, create=True):
-    _reachable, _reachable_source = run_diagnostics._published_attempts(
-        soil_data.get_soil_data_for_polygon
-    )
-assert _reachable == 3, _reachable
-assert _reachable_source == f"soil_data.{run_diagnostics.ATTEMPTS_ATTRIBUTE}"
-
-# WHAT IS AVAILABLE INSTEAD: the budget each retrying helper declares,
-# read off the LOADED functions rather than a table written in the test.
-# It bounds the worst case; it does not say what a run spent.
+# WHAT IS AVAILABLE BESIDE THE COUNT: the budget each retrying helper
+# declares, read off the LOADED functions rather than a table written in
+# the test. It bounds the worst case; the count says what was spent.
 _HELPER_MODULES = [
     soil_data, hydrology_data, farm_roads_data, imagery_data, canopy_height_data
 ]
 _helpers = run_diagnostics._retry_helpers(_HELPER_MODULES)
 assert "soil_data._run_sda_query" in _helpers, sorted(_helpers)
-assert _helpers["soil_data._run_sda_query"]["max_retries_default"] == 2
-assert _helpers["soil_data._run_sda_query"]["sleeps_between_attempts"] is True
+assert _helpers["soil_data._run_sda_query"] == {
+    "max_retries_default": 2,
+    "sleeps_between_attempts": True,
+    "counts_attempts": True,
+}, _helpers["soil_data._run_sda_query"]
 # canopy's deliberately larger budget is picked up as 5 without this
 # module or this test naming it -- it is read from the function's own
-# __defaults__.
+# signature, THROUGH the publishing decorator, which functools.wraps
+# keeps transparent.
 assert _helpers["canopy_height_data._search_hag_items"]["max_retries_default"] == 5
+assert _helpers["canopy_height_data.get_canopy_height_for_boundary"]["max_retries_default"] == 5
+# AND WHICH OF THEM IS A LOOP. Three of the eight declare a budget and
+# hand it straight to a helper that owns the loop, so their attempts are
+# counted under that helper -- reported rather than left for a reader to
+# discover by finding a helper that never appears in any breakdown.
+assert sorted(name for name, row in _helpers.items() if not row["counts_attempts"]) == [
+    "canopy_height_data._search_hag_items",
+    "canopy_height_data.get_canopy_height_for_boundary",
+    "imagery_data._search_scenes",
+], sorted(_helpers)
 assert len(_helpers) >= 5, sorted(_helpers)
 
-# AND IT REACHES THE RECORD BY THAT ROUTE, not only by being callable.
-# The sections above run through Mocks, whose __module__ is unittest.mock
-# -- so their records honestly report no helpers, and that says nothing
-# about a production run. Here erosion_factor is the REAL soil_data entry
-# point (only its SDA transport is stubbed), so the timer resolves
-# soil_data off the function it timed and the recorded retry_helpers are
-# soil_data's own. This is the shape every real cold run has.
+
+# --- THE RECORD, WITH A REAL LAYER UNDER IT ------------------------------
+#
+# THE SECTIONS ABOVE RUN THROUGH MOCKS. Here erosion_factor is the REAL
+# soil_data entry point and only its SDA TRANSPORT is stubbed, so the
+# whole path runs: parcel_data times the layer, the entry point opens a
+# ledger, _run_sda_query's loop counts its own attempts into it, and the
+# timer reads the published total off soil_data. This is the shape every
+# real cold run now has.
+#
+# TWO RUNS, DIFFERING ONLY IN WHAT THE TRANSPORT DOES. The first answers
+# immediately; the second raises two REAL requests exceptions before it
+# answers, which makes the loop run for real -- three attempts and two
+# actual time.sleep(2) pauses. Nothing about the verdict is stubbed: the
+# failure is induced at requests.post, exactly where a slow USDA server's
+# failure appears.
+
 class _SDAResponse:
     status_code = 200
 
@@ -2272,36 +2309,151 @@ class _SDAResponse:
         return {"Table": [["mukey"], ["111111"]]}
 
 
-_real_dir = tempfile.mkdtemp(prefix="run_diagnostics_realsoil_")
-with Diagnostics(on=True, directory=_real_dir), FetchHarness(
-    overrides={"erosion_factor": soil_data.get_erosion_factor_for_polygon}
-), mock_patch.object(soil_data.requests, "post", return_value=_SDAResponse()):
-    _real_session = Session()
-    _real_fetch = _sole_fetch_event(run_diagnostics.read_record(_real_session.id))
+class _FlakySDA:
+    """Raises a real requests exception the first `failures` times, then
+    answers. The transport boundary, not a stubbed helper."""
 
-_real_row = [row for row in _real_fetch["layers"] if row["layer"] == "erosion_factor"][0]
-assert _real_row["function"] == "soil_data.get_erosion_factor_for_polygon", _real_row
-assert _real_row["attempts"] is None
-assert _real_row["attempts_source"] == "not published by soil_data", _real_row
-_recorded_helpers = _real_fetch["retries"]["retry_helpers"]
+    def __init__(self, failures):
+        self.failures = failures
+        self.calls = 0
+
+    def __call__(self, *args, **kwargs):
+        self.calls += 1
+        if self.calls <= self.failures:
+            raise requests.exceptions.ConnectTimeout("induced at requests.post")
+        return _SDAResponse()
+
+
+def _real_soil_fetch(failures):
+    """One session creation whose erosion_factor layer is the real
+    soil_data entry point over a transport that fails `failures` times.
+    Returns (that layer's row, the whole fetch event)."""
+    directory = tempfile.mkdtemp(prefix="run_diagnostics_realsoil_")
+    transport = _FlakySDA(failures)
+    with Diagnostics(on=True, directory=directory), FetchHarness(
+        overrides={"erosion_factor": soil_data.get_erosion_factor_for_polygon}
+    ), mock_patch.object(soil_data.requests, "post", transport):
+        session = Session()
+        event = _sole_fetch_event(run_diagnostics.read_record(session.id))
+    row = [item for item in event["layers"] if item["layer"] == "erosion_factor"][0]
+    return row, event, transport
+
+
+_clean_row, _clean_event, _clean_transport = _real_soil_fetch(failures=0)
+
+assert _clean_row["function"] == "soil_data.get_erosion_factor_for_polygon", _clean_row
+# ONE, NOT NULL AND NOT ZERO -- the two ways this could be wrong, both of
+# which would read as "this layer does not retry".
+assert _clean_row["attempts"] == 1, _clean_row
+assert _clean_row["attempts_source"] == f"soil_data.{run_diagnostics.ATTEMPTS_ATTRIBUTE}"
+assert _clean_row["retry_sleep_ms"] == 0.0, _clean_row
+assert _clean_row["retry_sleep_source"] == f"soil_data.{run_diagnostics.RETRY_SLEEP_ATTRIBUTE}"
+assert _clean_transport.calls == 1, _clean_transport.calls
+# THE PER-HELPER BREAKDOWN, quoted whole from the module that measured
+# it: which helper retried, and how many times it was CALLED as against
+# how many attempts it made.
+assert _clean_row["attempt_detail"]["entry_point"] == "soil_data.get_erosion_factor_for_polygon"
+assert _clean_row["attempt_detail"]["helpers"] == {
+    "soil_data._run_sda_query": {"calls": 1, "attempts": 1, "sleep_ms": 0.0}
+}, _clean_row["attempt_detail"]
+assert _clean_row["attempt_detail"]["outcome"] == "ok"
+assert _clean_row["attempt_detail"]["returned_sentinel"] is False
+
+_retry_row, _retry_event, _retry_transport = _real_soil_fetch(failures=2)
+
+# THE MEASUREMENT THE RECORD COULD NOT MAKE BEFORE. Same layer, same
+# parcel, same code -- three attempts instead of one, and four seconds of
+# it spent asleep. Before this branch these two rows differed only in
+# elapsed_ms, and nothing said why.
+assert _retry_transport.calls == 3, _retry_transport.calls
+assert _retry_row["attempts"] == 3, _retry_row
+assert _retry_row["retry_sleep_ms"] >= 4000.0, _retry_row
+assert _retry_row["retry_sleep_ms"] < _retry_row["elapsed_ms"], _retry_row
+assert _retry_row["attempt_detail"]["helpers"]["soil_data._run_sda_query"]["calls"] == 1
+assert _retry_row["attempt_detail"]["helpers"]["soil_data._run_sda_query"]["attempts"] == 3
+# AND THE COUNT IS NOT DERIVED FROM THE CLOCK: the clean row's layer took
+# milliseconds and the retrying row's took seconds, but what separates
+# them in the record is a number the loop published, not a threshold this
+# module applied.
+assert _clean_row["elapsed_ms"] < _retry_row["elapsed_ms"]
+
+# THE OTHER ELEVEN LAYERS IN THE SAME RECORD ARE STILL MOCKS, so the
+# fetch-level booleans read false and the absent reasons are present.
+# That is the honest report of a MIXED fetch and worth pinning: a
+# `attempts_recorded: true` that meant "at least one row" would let
+# eleven silent nulls hide behind one real count.
+assert _retry_event["retries"]["attempts_recorded"] is False
+assert _retry_event["retries"]["attempts_absent_reason"] is not None
+assert [row["layer"] for row in _retry_event["layers"] if row["attempts"] is not None] == [
+    "erosion_factor"
+], _retry_event["layers"]
+_recorded_helpers = _retry_event["retries"]["retry_helpers"]
 assert "soil_data._run_sda_query" in _recorded_helpers, sorted(_recorded_helpers)
 assert _recorded_helpers["soil_data._run_sda_query"] == {
     "max_retries_default": 2,
     "sleeps_between_attempts": True,
+    "counts_attempts": True,
 }, _recorded_helpers["soil_data._run_sda_query"]
 
+
+# --- A CACHED LAYER PUBLISHES NO STALE COUNT -----------------------------
+#
+# THE FAILURE THIS RULES OUT. The published values are per-thread and
+# outlive the call that set them, so the question is whether a WARM
+# creation -- which enters no layer at all -- could have an earlier
+# fetch's count filed against it. It cannot, and the reason is
+# structural rather than lucky: a cache hit never enters
+# fetch_parcel_data(), so no layer timer fires and there is no row for a
+# stale number to sit in. The record's `layers` is null.
+#
+# ASSERTED WITH THE STALE VALUE DEMONSTRABLY IN PLACE. The cold creation
+# below leaves soil_data publishing a real count on this thread; the warm
+# creation that follows is then shown to carry none of it.
+
+_stale_dir = tempfile.mkdtemp(prefix="run_diagnostics_stale_")
+_stale_transport = _FlakySDA(failures=2)
+with Diagnostics(on=True, directory=_stale_dir), FetchHarness(
+    overrides={"erosion_factor": soil_data.get_erosion_factor_for_polygon}
+), mock_patch.object(soil_data.requests, "post", _stale_transport):
+    _stale_cold = Session()
+    # THE SAME BOUNDARY, THE SAME FETCH CACHE: nothing is fetched.
+    _stale_warm = Session(fetch_cache=_stale_cold.fetch_cache)
+    _stale_cold_fetch = _sole_fetch_event(run_diagnostics.read_record(_stale_cold.id))
+    _stale_warm_fetch = _sole_fetch_event(run_diagnostics.read_record(_stale_warm.id))
+
+# THE STALE VALUE IS REALLY THERE, on this very thread, right now.
+assert getattr(soil_data, run_diagnostics.ATTEMPTS_ATTRIBUTE, None) == 3, "the stale count"
+assert [row["attempts"] for row in _stale_cold_fetch["layers"] if row["layer"] == "erosion_factor"] == [3]
+
+# AND THE WARM CREATION CARRIES NONE OF IT.
+assert _stale_warm_fetch["cache"]["served_by"] == "fetch_cache"
+assert _stale_warm_fetch["layers"] is None, _stale_warm_fetch["layers"]
+assert _stale_warm_fetch["retries"]["attempts_recorded"] is False
+assert _stale_warm_fetch["retries"]["retry_time_recorded"] is False
+# THREE STATES, NOT TWO. "Nothing published" and "nothing ran" are
+# different facts, and a warm creation is the second -- a record that
+# blamed a publishing failure for a fetch that never happened would send
+# a reader to the wrong module.
+assert "No layer ran under this fetch" in _stale_warm_fetch["retries"]["attempts_absent_reason"]
+assert "No layer ran under this fetch" in _stale_warm_fetch["retries"]["retry_time_absent_reason"]
+
 print(
-    f"15 [fetch test 5]. RETRY COUNTS: THEIR ABSENCE IS REPORTED. No fetch module publishes an "
-    f"attempt count, so every layer row records attempts: null with an attempts_source naming the "
-    f"module it asked -- never a zero. Asked of the six REAL fetch entry points, all six report "
-    f"none; set {run_diagnostics.ATTEMPTS_ATTRIBUTE} on soil_data and the count IS read (3), so "
-    f"the null means 'not published' and not 'never works'. What IS available is each helper's "
-    f"declared budget, read off the loaded functions: {len(_helpers)} retrying helpers found, "
-    f"soil_data._run_sda_query at max_retries=2 with a sleep between attempts, "
-    f"canopy_height_data._search_hag_items at 5. And it reaches the RECORD by that route: a "
-    f"creation whose erosion_factor is the real soil_data entry point (only its SDA transport "
-    f"stubbed) records function 'soil_data.get_erosion_factor_for_polygon', attempts null from "
-    f"'not published by soil_data', and soil_data's own helpers under retry_helpers."
+    f"15 [fetch test 5]. RETRY COUNTS AND RETRY TIME REACH THE RECORD. The reading side is "
+    f"unchanged -- it reads {run_diagnostics.ATTEMPTS_ATTRIBUTE} and "
+    f"{run_diagnostics.RETRY_SLEEP_ATTRIBUTE} off the timed callable's module and nothing else -- "
+    f"and all {len(_REAL_ENTRY_POINTS)} real entry points asked now publish them. Through the "
+    f"REAL soil_data entry point with only requests.post stubbed: a clean transport records "
+    f"attempts=1 (not 0, not null) with retry_sleep_ms 0.0 in "
+    f"{_clean_row['elapsed_ms']:.1f} ms; two REAL induced ConnectTimeouts record attempts="
+    f"{_retry_row['attempts']} with {_retry_row['retry_sleep_ms']:.0f} ms of measured sleep inside "
+    f"{_retry_row['elapsed_ms']:.0f} ms -- the same layer on the same parcel, told apart by a "
+    f"number the loop published rather than a threshold this module applied. attempt_detail names "
+    f"soil_data._run_sda_query at calls=1/attempts=3. The other eleven rows are Mocks and honestly "
+    f"report nulls, so attempts_recorded stays false on a MIXED fetch. Of the {len(_helpers)} "
+    f"functions a max_retries parameter finds, 5 own a counting loop and 3 pass their budget on. "
+    f"AND A WARM CREATION CARRIES NO STALE COUNT: with soil_data still publishing 3 on this "
+    f"thread, the cache-served creation records layers NULL and an absent reason that names "
+    f"'no layer ran' rather than a publishing failure."
 )
 
 
@@ -2373,7 +2525,14 @@ if _comparable_bodies[0] != _comparable_bodies[1]:
 # EVERY TIMING IS REDACTED, AND NOTHING ELSE IS. The `_ms` paths found in
 # the raw record are exactly the values replaced in the comparable one.
 _paths = _timing_keys({k: v for k, v in _shape_records[0].items() if k != "header"})
-assert len(_paths) == 14, _paths  # 12 layer rows + total_ms + layers_total_ms
+# 12 elapsed_ms + 12 retry_sleep_ms + total_ms + layers_total_ms. The
+# retry sleeps are null on this run (its layers are Mocks, which publish
+# nothing) and are redacted anyway: the suffix keys on the NAME, so the
+# slot a duration lives in is redacted whether or not it was filled. What
+# says which happened is retry_sleep_source beside it, which carries no
+# suffix and so still diffs in full -- the same pairing attempts and
+# attempts_source already had.
+assert len(_paths) == 26, _paths
 assert _comparable_bodies[0].count(run_diagnostics.REDACTED_TIMING) == len(_paths)
 assert run_diagnostics.REDACTED_TIMING not in _raw_bodies[0]
 
@@ -2396,8 +2555,9 @@ assert '"served_by": "fetch"' in _comparable_bodies[0]
 print(
     f"16 [fetch test 6]. TIMINGS MOVE AND THE DIFF STILL COMES OUT CLEAN: two identical cold "
     f"creations produced raw bodies that DIFFER on {len(_differing_lines)} lines, and every one "
-    f"of those lines is a `{run_diagnostics.TIMING_KEY_SUFFIX}` key -- the {len(_paths)} durations "
-    f"(12 layer rows plus total_ms and layers_total_ms) are the only values that moved. Through "
+    f"of those lines is a `{run_diagnostics.TIMING_KEY_SUFFIX}` key -- the {len(_paths)} duration "
+    f"slots (each layer's elapsed_ms and retry_sleep_ms, plus total_ms and layers_total_ms) are "
+    f"the only values that moved. Through "
     f"comparable_body() the two are BYTE IDENTICAL at {len(_comparable_bodies[0])} bytes, "
     f"{len(_comparable_bodies[0].splitlines())} lines, 0 differing lines. THE CONTROL: a warm "
     f"creation still differs after redaction, at served_by and at the layer rows."
@@ -2425,7 +2585,11 @@ _FETCH_NEVER = _NEVER + [
     "_fetch_outcome",
     "_irradiance_health",
     "_retry_helpers",
+    "_published",
     "_published_attempts",
+    "_published_retry_sleep",
+    "_published_attempt_detail",
+    "_absent_reason",
     "_qualified",
     "_module_of",
     "_message",
@@ -2488,12 +2652,23 @@ assert _check_ok, _check_output
 _fetch_lines = [
     line for line in _check_output.splitlines() if "fetch instrumentation:" in line
 ]
-assert len(_fetch_lines) == 4, _check_output
+assert len(_fetch_lines) == 5, _check_output
 assert all(line.startswith("[ok]") for line in _fetch_lines), _fetch_lines
 assert any("times 12 of 12 declared layers" in line for line in _fetch_lines), _fetch_lines
 assert any("build_session_context calls begin_fetch" in line for line in _fetch_lines)
 assert any("build_session_context calls record_fetch" in line for line in _fetch_lines)
 assert any("fetch_parcel_data calls time_layer" in line for line in _fetch_lines)
+# THE FIFTH IS THIS BRANCH'S, and it is the same class of silent failure
+# as the other four: a layer entry point that lost its
+# @fetch_attempts.publishes decorator raises nothing and simply publishes
+# no count, forever. Nine of the twelve layers come from a module with a
+# counting retry loop; the three that do not (dem, climate, irradiance)
+# are not expected to publish and are not counted here. Nothing about
+# that split is named in this module -- see _timed_callables().
+assert any(
+    "retrying layers publish attempts: 9 of 9 timed entry points" in line
+    for line in _fetch_lines
+), _fetch_lines
 
 
 def _uninstrumented_fetch(boundary_coordinates):
@@ -2522,18 +2697,45 @@ _torn_output = _torn_stream.getvalue()
 
 assert not _torn_ok, _torn_output
 _torn_lines = [line for line in _torn_output.splitlines() if "fetch instrumentation:" in line]
-assert len(_torn_lines) == 4, _torn_output
+assert len(_torn_lines) == 5, _torn_output
 assert all(line.startswith("[!!]") for line in _torn_lines), _torn_lines
 assert any("times 0 of 12 declared layers" in line for line in _torn_lines), _torn_lines
+# The publishing line fails too, and for the honest reason: the timed
+# callables are read out of the compiled fetch_parcel_data, and this one
+# times nothing, so there are 0 entry points to have checked. "0 of 0" is
+# not a pass -- it is "this could not be checked".
+assert any("publish attempts: 0 of 0 timed entry points" in line for line in _torn_lines), _torn_lines
 assert "RECORDS WOULD NOT BE WRITTEN" in _torn_output
+
+# AND THE PUBLISHING LINE FAILS ON ITS OWN, with everything else wired.
+# A negative control that only ever fires alongside four others would not
+# show that this check can see the thing it names.
+_dropped_dir = tempfile.mkdtemp(prefix="run_diagnostics_dropped_")
+with Diagnostics(on=True, directory=_dropped_dir), mock_patch.object(
+    parcel_data, "get_farm_roads_for_boundary", farm_roads_data.get_farm_roads_for_boundary.__wrapped__
+):
+    _dropped_stream = io.StringIO()
+    _dropped_ok = run_diagnostics.self_check(stream=_dropped_stream)
+_dropped_output = _dropped_stream.getvalue()
+_dropped_lines = [
+    line for line in _dropped_output.splitlines() if "publish attempts:" in line
+]
+assert not _dropped_ok, _dropped_output
+assert len(_dropped_lines) == 1, _dropped_output
+assert _dropped_lines[0].startswith("[!!]"), _dropped_lines
+assert "8 of 9 timed entry points" in _dropped_lines[0], _dropped_lines
+# ... and only that one line moved.
+assert _dropped_output.count("[!!]") == 1, _dropped_output
 
 print(
     f"18 [fetch test 8]. self_check() REPORTS WHETHER FETCH INSTRUMENTATION IS WIRED: it prints "
-    f"four fetch lines, all [ok] against the loaded modules -- build_session_context calls "
-    f"begin_fetch and record_fetch, fetch_parcel_data calls time_layer, and it times 12 of 12 "
-    f"declared layers. THE NEGATIVE CONTROL: with both functions replaced by uninstrumented ones, "
-    f"the same four lines read [!!], the layer count reads 0 of 12, and self_check() returns "
-    f"False with RECORDS WOULD NOT BE WRITTEN."
+    f"five fetch lines, all [ok] against the loaded modules -- build_session_context calls "
+    f"begin_fetch and record_fetch, fetch_parcel_data calls time_layer, it times 12 of 12 "
+    f"declared layers, and 9 of 9 timed entry points from a retrying module publish attempts. "
+    f"TWO NEGATIVE CONTROLS: with both functions replaced by uninstrumented ones the same five "
+    f"lines read [!!] (the layer count 0 of 12, the publishing count 0 of 0 -- not a pass but "
+    f"'could not be checked'); and with ONE entry point's decorator dropped, that line ALONE "
+    f"reads [!!] at 8 of 9. Both return False with RECORDS WOULD NOT BE WRITTEN."
 )
 
 
@@ -2542,7 +2744,8 @@ print(
 # =========================================================================
 
 print(
-    "\n10 [test 10]. REGRESSION: run the other test files separately -- test_step_orchestrator.py, "
+    "\n10 [test 10]. REGRESSION: run the other test files separately -- test_fetch_attempts.py, "
+    "test_step_orchestrator.py, "
     "test_step_commit.py, test_step_registry.py, test_session_api.py, test_session_manager.py, "
     "test_session_cache.py, test_trees_step.py, test_water_step.py, test_roads_step.py, "
     "test_structures_step.py, test_fencing_step.py, test_wire_translation.py, "
