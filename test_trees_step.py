@@ -597,11 +597,32 @@ def _ring_wgs84(polygon_utm) -> list:
     return list(zip(lons, lats))
 
 
-def _box_around(geometry_utm, half_meters: float) -> list:
+def _box_around(geometry_utm, half_meters: float, clip_utm=None) -> list:
     """A square of side 2*half_meters centred on a point INSIDE the
-    geometry, as a lon/lat ring -- a drawn zone that certainly overlaps it."""
-    point = geometry_utm.representative_point()
-    return _ring_wgs84(box(point.x - half_meters, point.y - half_meters, point.x + half_meters, point.y + half_meters))
+    geometry, as a lon/lat ring -- a drawn zone that certainly overlaps it.
+
+    `clip_utm` KEEPS THE SQUARE ON THE PARCEL, and it is a correctness
+    argument rather than tidiness: the centre is a representative point of
+    ground the pipeline chose, so where that ground sits is not this
+    fixture's to assume. A ground that happens to hug the boundary yields a
+    square hanging over the edge, and commit_validation refuses that with
+    outside_boundary -- a rejection about WHERE THE FIXTURE DREW, not about
+    the behaviour under test. So the ground is clipped BEFORE the centre is
+    taken (the centre must be inside the parcel, not merely inside the
+    ground) and the square is clipped after. At 15 m the square is 900 m^2
+    against a 0.05 ac (202 m^2) crossing floor, so a clip has room to bite
+    without dropping the crossing under it.
+
+    This bit the first time the water step narrowed its payload: the
+    committed water ground changed, and a square that had always landed
+    inside started hanging off the edge. Nothing about the drawn-zone
+    behaviour had changed -- only where the fixture happened to be drawing."""
+    source = geometry_utm if clip_utm is None else _largest(geometry_utm.intersection(clip_utm))
+    point = source.representative_point()
+    square = box(point.x - half_meters, point.y - half_meters, point.x + half_meters, point.y + half_meters)
+    if clip_utm is not None:
+        square = _largest(square.intersection(clip_utm))
+    return _ring_wgs84(square)
 
 
 def _utm(feature: dict):
@@ -1526,8 +1547,17 @@ with Harness() as h:
     ).intersection(context.boundary_polygon_utm.buffer(-2.0))
     road_strip = _largest(road_strip)
     zones = {
-        "drawn-production": _drawn("drawn-production", _box_around(grounds[0]["polygon_utm"], 15)),
-        "drawn-water": _drawn("drawn-water", _box_around(grounds[1]["polygon_utm"], 15)),
+        # BOTH CLIPPED TO THE PARCEL, like the road, canopy and hydric zones
+        # below them: every one of these five is centred on ground the
+        # pipeline chose, and none of them may assume where that ground sits.
+        "drawn-production": _drawn(
+            "drawn-production",
+            _box_around(grounds[0]["polygon_utm"], 15, context.boundary_polygon_utm.buffer(-2.0)),
+        ),
+        "drawn-water": _drawn(
+            "drawn-water",
+            _box_around(grounds[1]["polygon_utm"], 15, context.boundary_polygon_utm.buffer(-2.0)),
+        ),
         "drawn-road": _drawn("drawn-road", _ring_wgs84(road_strip.simplify(0.5))),
         "drawn-canopy": _drawn("drawn-canopy", _ring_wgs84(_largest(
             canopy_box.buffer(12).intersection(context.boundary_polygon_utm.buffer(-2.0))
