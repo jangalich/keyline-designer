@@ -1604,6 +1604,42 @@ def build_water_payload(result: dict, assembled: dict) -> dict:
     carries no zone_id of its own kind and a dropped zone is not in this
     collection at all.
 
+    THE PROPOSALS ARE NARROWED TO THE PRESENTED SET, AND THIS IS THE ONE
+    PLACE IN THE PIPELINE THAT NARROWS ANYTHING FOR PRESENTATION. Everywhere
+    else presentation MARKS (water_survey_areas.WATER_ZONE_PRESENTATION_COUNT
+    and its note): every surviving zone keeps its record, its panel block and
+    its feature. Here -- the INTERACTIVE STEP'S wire payload, and nothing
+    else -- only the presented zones are sent, with the unpresented survivors
+    withheld and NAMED as withheld under summary['presentation'].
+
+    WHAT THAT COSTS, stated because it is a real cost and not a tidy-up:
+
+      * A WITHHELD ZONE CANNOT BE SELECTED OR COMMITTED. The step commits out
+        of this collection, so a survivor that is not here is a survivor the
+        user cannot choose however much they might want to. That is the
+        decision this narrowing IS; it is not a side effect of it.
+      * A COMMITTED ZONE CAN FALL OUT OF THE PROPOSALS on a later reopen, if
+        the inputs moved enough between commit and reopen to change the ranks
+        the presented set is drawn from. restore_step_state() already reports
+        exactly that case as `missing_feature_ids` -- "REPORTED RATHER THAN
+        SWALLOWED", its own words -- so the case surfaces rather than
+        silently dropping a user's selection. Before this narrowing that
+        report could only fire on an id instability the backend asserts
+        against; now it has a second, reachable cause, and it is the reason
+        the withheld ids are on the wire rather than merely absent.
+
+    WHAT IT DOES NOT TOUCH, checked rather than assumed:
+
+      * THE BATCH PIPELINE. pipeline_context.build_pipeline_context() reads
+        `water_system_result["zones_geojson"]["features"]` directly, never
+        this payload, so PipelineContext.water_zones is still every survivor.
+      * THE REPORT AND THE DIAGNOSTIC. build_narrative_data() still carries
+        every surviving zone's block (this function narrows its own copy of
+        `zones`, not the narrative), and the diagnostic export builds its own
+        collection from the result including the dropped layer.
+      * SELECTION. selected_water_zone is the pooled rank-1 off the surviving
+        set and is indifferent to presentation, here as everywhere.
+
     `assembled` is the orchestrator's consumes dict. Unread here -- every
     value this payload needs is on `result` -- and taken anyway because the
     payload signature is the registry's, not this step's. The landform
@@ -1611,6 +1647,12 @@ def build_water_payload(result: dict, assembled: dict) -> dict:
     folded its inputs into the result.
     """
     narrative = result["narrative_data"]
+    # THE RULE, off the narrative rather than off the result's own top-level
+    # copy: build_narrative_data() already carries it (verbatim, see its
+    # ['presentation'] note) and this function reads the narrative for
+    # everything else, so taking it from there keeps the result contract this
+    # builder depends on to the one key it already had.
+    presentation = narrative["presentation"]
 
     # THE WIRE FEATURE ID, CARRIED RATHER THAN REBUILT -- see this
     # function's own note. Keyed by the internal zone_id the feature
@@ -1621,10 +1663,46 @@ def build_water_payload(result: dict, assembled: dict) -> dict:
         if feature["properties"]["layer"] in LAYER_SURVEY_ZONES
     }
 
+    # THE NARROWING, over the SAME collection the lookup above read. A zone
+    # envelope rides only if it is presented; a member footprint rides only
+    # if the zone it belongs to does, because a member with no parent
+    # envelope on the wire is a sub-feature of nothing. Features are SELECTED
+    # AND REORDERED, never rebuilt: every feature that ships is the exact
+    # object the entry point built -- the "carries the collection through
+    # unchanged" property above, preserved for the features that survive.
+    envelope_by_zone_id = {}
+    members_by_zone_id = {}
+    for feature in result["zones_geojson"]["features"]:
+        feature_properties = feature["properties"]
+        if feature_properties["layer"] in LAYER_SURVEY_ZONES:
+            envelope_by_zone_id[feature_properties["zone_id"]] = feature
+        else:
+            members_by_zone_id.setdefault(feature_properties["zone_id"], []).append(feature)
+
+    # IN PRESENTATION ORDER, each zone's members immediately behind it. The
+    # order is not cosmetic here: the client builds its tab strip by walking
+    # this collection, so the collection's order IS the order someone reads
+    # the zones in, and shipping the presented set in pipeline id order would
+    # have computed a presentation order and then not used it.
+    presented_features = []
+    for zone_id in presentation["presented_zone_ids"]:
+        presented_features.append(envelope_by_zone_id[zone_id])
+        presented_features.extend(members_by_zone_id.get(zone_id, ()))
+
+    # WHAT WAS WITHHELD, BY NAME. The counts in `summary` are the pipeline's
+    # and still describe every survivor (zone_count, the per-type counts, the
+    # dropped count); these two say what THIS WIRE FORM did on top of that.
+    # Named rather than left as an absence for the same reason a dropped zone
+    # carries a drop_reason: "not here" and "does not exist" must never be
+    # the same wire state, and narrowing the collection is precisely the move
+    # that would otherwise make them one.
+    withheld_zone_ids = [row["id"] for row in narrative["zones"] if not row["presented"]]
+
     return {
-        # The proposals. Named by the water entry's proposal_collection, which
-        # is what the reopen restore matches committed ids against.
-        "survey_zones": result["zones_geojson"],
+        # The proposals, NARROWED TO THE PRESENTED SET -- see this function's
+        # own note. Named by the water entry's proposal_collection, which is
+        # what the reopen restore matches committed ids against.
+        "survey_zones": {**result["zones_geojson"], "features": presented_features},
         # The tabular half, as `zones` is for landform: build_narrative_data()
         # has already reduced every surviving zone to the imperial,
         # JSON-native block the report reads (dual acreage, the criterion
@@ -1632,9 +1710,15 @@ def build_water_payload(result: dict, assembled: dict) -> dict:
         # block, the cross-type finding) AND the curated `panel` rows the
         # map's zone tab renders -- a subset and a reordering of the same
         # block, never a second source. Only `feature_id` is added here.
+        # PRESENTED ROWS ONLY, in narrative order -- which IS presentation
+        # order, because build_narrative_data() sorts the presented set first
+        # by presentation_order. A row for a zone whose feature is not in the
+        # collection above would be a tab with nothing to select and a panel
+        # for ground the map never draws.
         "zones": [
             {**row, "feature_id": feature_id_by_zone_id[row["id"]]}
             for row in narrative["zones"]
+            if row["presented"]
         ],
         # THE STEP-LEVEL BLOCK, whole. Counts per type, the dropped count, the
         # gate accounting, the threshold and grouping distance the zones were
@@ -1642,7 +1726,19 @@ def build_water_payload(result: dict, assembled: dict) -> dict:
         # Passed as one object rather than spread into the payload's top level
         # so the panel reads the same block the report does.
         "summary": {
-            key: value for key, value in narrative.items() if key not in ("zones", "scales")
+            **{key: value for key, value in narrative.items() if key not in ("zones", "scales")},
+            # The pipeline's own presentation block, plus what this payload
+            # withheld on top of it. Merged rather than replaced: the rule
+            # applied and the per-type SURVIVOR totals are the pipeline's
+            # answer and stay verbatim.
+            "presentation": {
+                **narrative["presentation"],
+                "withheld_count": len(withheld_zone_ids),
+                "withheld_zone_ids": withheld_zone_ids,
+                "withheld_feature_ids": [
+                    feature_id_by_zone_id[zone_id] for zone_id in withheld_zone_ids
+                ],
+            },
         },
         # HOW TO READ EVERY SCORED VALUE IN A PANEL ROW, at the payload's
         # top level exactly where the production payload puts its own --
