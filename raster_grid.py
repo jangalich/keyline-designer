@@ -339,6 +339,71 @@ def cells_in_polygon(dem: dict, polygon) -> list[tuple[int, int]]:
     return cells
 
 
+def elevation_range_in_polygon(dem: dict, polygon) -> dict:
+    """
+    Min/max/relief elevation over the DEM cells INSIDE `polygon`, plus how
+    many cells that was -- the parcel's real elevation range, read off the
+    grid every KSOP computation already runs on.
+
+    REPLACES A FETCH. Until this branch the report's one elevation
+    sentence came from elevation_data.get_elevation_grid(), a 6x6 lattice
+    of 36 SEQUENTIAL EPQS point requests with a 0.3 s pause between each --
+    65-90% of a cold session creation's whole fetch wait, for two numbers.
+    The DEM covering the same boundary is already in memory by then (it is
+    fetch_parcel_data()'s FIRST layer, 1-3 s), at ~5 m resolution rather
+    than a 36-point lattice, and min/max over it is microseconds of numpy.
+    A coarse lattice can miss the actual high and low ground outright, so
+    the sampled answer was not merely slower -- it was worse.
+
+    IN-BOUNDARY IS PIXEL-CENTER CONTAINMENT, via cells_in_polygon() above:
+    THIS PIPELINE'S RASTERIZATION CONVENTION, the same test STEP 1 applies
+    for the parcel boundary (see that function's own docstring). Masking
+    matters here and is not optional -- dem_data.py deliberately fetches a
+    DEFAULT_BUFFER_METERS-wide margin of terrain PAST the drawn line so
+    flow routing near the edge is correct, so the raw array's min/max
+    (what dem_data.summarize_dem() reports) describes the fetched window,
+    not the parcel. No second masking pass is written here for that
+    reason.
+
+    NaN cells (nodata, and the blended nodata edges dem_data.py floors out)
+    are dropped, exactly as summarize_dem() drops them.
+
+    Returns a dict:
+        {'min_meters', 'max_meters', 'relief_meters', 'cell_count',
+         'resolution_meters'}
+    'resolution_meters' is the MEAN of the grid's (px, py) -- one number
+    for prose that says roughly how fine the ground the range came off is,
+    not a substitute for dem['resolution_meters'] itself. Every DEM this
+    pipeline fetches is square (dem_data.DEFAULT_RESOLUTION_METERS on both
+    axes), so on real data the two are the same number.
+    ...or an EMPTY DICT when no in-boundary cell has data -- the same
+    "nothing to say" outcome an empty grid used to produce, for the caller
+    to render as such rather than an error.
+    """
+    cells = cells_in_polygon(dem, polygon)
+    if not cells:
+        return {}
+
+    array = dem["array"]
+    rows = np.array([r for r, _ in cells])
+    cols = np.array([c for _, c in cells])
+    values = array[rows, cols]
+    valid = values[~np.isnan(values)]
+
+    if valid.size == 0:
+        return {}
+
+    px, py = dem["resolution_meters"]
+
+    return {
+        "min_meters": float(valid.min()),
+        "max_meters": float(valid.max()),
+        "relief_meters": float(valid.max() - valid.min()),
+        "cell_count": int(valid.size),
+        "resolution_meters": float((px + py) / 2.0),
+    }
+
+
 def waist_erosion_radius_cells(dem: dict, min_waist_meters: float) -> int:
     """
     Converts a real-world minimum waist width into a cell-count erosion

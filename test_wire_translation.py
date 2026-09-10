@@ -505,7 +505,6 @@ def build_fixture(*, empty=False):
         water_features={"streams": [], "water_bodies": []},
         farm_roads=[],
         climate_summary={},
-        elevation_grid=[],
         canopy_height={
             "array": np.zeros((SIZE, SIZE), dtype=np.float32),
             "resolution_meters": RES,

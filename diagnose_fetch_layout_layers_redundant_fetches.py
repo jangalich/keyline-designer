@@ -356,6 +356,12 @@ STUB_SITES = [
     (pd_module, "get_soil_geometries_for_polygon", {"return_value": {}}),
     (pd_module, "get_canopy_height_for_boundary", {"side_effect": _fake_clean_canopy}),
     (pd_module, "get_climate_summary_for_point", {"return_value": {"source": "offline-test-stub"}}),
+    # NO LONGER A BINDING ON parcel_data, and left here on purpose: the
+    # elevation lattice was deleted as a fetch layer (see parcel_data.py's
+    # NO ELEVATION-POINT LAYER section), so the hasattr() gate below skips
+    # this entry outright on the current checkout. It stays so the same
+    # registry still works against an older one, exactly like the other
+    # BEFORE-only entries this script keeps.
     (pd_module, "get_elevation_grid", {"return_value": []}),
     (pd_module, "get_imagery_summary_for_boundary", {"return_value": {"source": "offline-test-stub"}}),
 ]

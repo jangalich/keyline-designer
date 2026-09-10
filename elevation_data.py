@@ -1,6 +1,37 @@
 """
 elevation_data.py
 
+DEMOTED, NOT DELETED: nothing on the pipeline path calls this module any
+more. get_elevation_grid() was the thirteenth layer parcel_data.fetch_
+parcel_data() fetched, and it existed for ONE SENTENCE in the report --
+report_generator._format_elevation_summary()'s min/max/relief line. It
+cost 42.8 s, 31.8 s and 118.8 s across three timed cold session creations,
+65-90% of the entire fetch wait, because a 6x6 lattice is 36 SEQUENTIAL
+EPQS point requests with a time.sleep(0.3) between each (10.8 s of pure
+sleep before a single round trip). The DEM covering the same boundary is
+already in memory by then -- fetch_parcel_data()'s FIRST layer, 1-3 s,
+~5 m resolution, thousands of cells -- so that sentence now comes from
+raster_grid.elevation_range_in_polygon() over the DEM, masked to the
+parcel boundary, in microseconds. The lattice was also the WORSE answer,
+in two ways that have nothing to do with speed. It samples the bounding
+BOX, not the boundary (see get_elevation_grid()'s own note below), so on
+any non-rectangular parcel some of those 36 points stand on ground the
+owner does not own -- the reported range could come off a neighbour's
+hillside. And 36 independent samples can miss the real high and low
+ground a full raster resolves. It is also a DIFFERENT SERVICE from the
+one the design is computed on: EPQS point interpolation here, the
+3DEPElevation ImageServer's 5 m resampled raster there. Both are 3DEP,
+but they are not guaranteed to agree to the meter, and a report quoting
+an elevation the design was not computed from is a defect however small
+the gap.
+
+RETAINED as a diagnostic-consumed module: diagnose_fetch_layout_layers_
+redundant_fetches.py mocks get_elevation_grid by name, imagery_data.py
+references this module's return FORMAT in a comment, and test_elevation_
+grid.py exercises it standalone. Do NOT re-wire it into fetch_parcel_
+data() or any report path -- the DEM is this pipeline's elevation source.
+Do not delete it while those consumers stand.
+
 Fetches elevation data from USGS's 3D Elevation Program (3DEP) via the
 Elevation Point Query Service (EPQS). Free, no API key required, covers
 the entire US.

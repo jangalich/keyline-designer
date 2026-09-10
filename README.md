@@ -24,8 +24,13 @@ report using the Claude API.
   Access API, for either a single point or a full parcel boundary.
   `get_soil_data_as_geojson()` additionally fetches each map unit's actual
   polygon boundary and returns it as a schema-conformant FeatureCollection.
-- `elevation_data.py` — fetches elevation data from USGS 3DEP for a point
-  or as a grid sampled across a boundary (used to gauge slope/relief).
+- `elevation_data.py` — **demoted, not deleted.** Fetches elevation from
+  USGS 3DEP's point query service (EPQS) for a point, or as a lattice
+  sampled across a boundary. No longer on the pipeline path: the lattice
+  was 36 sequential point requests costing 65–90% of a cold session
+  creation's fetch wait, for one report sentence now read off the DEM
+  (`raster_grid.elevation_range_in_polygon()`). Retained for the
+  diagnostics that still consume it — see the module's own docstring.
 - `hydrology_data.py` — fetches nearby streams and standing water from
   USGS's National Hydrography Dataset, with a buffer zone so features
   just outside the exact drawn boundary are still caught.
@@ -35,9 +40,12 @@ report using the Claude API.
   for a property from USGS 3DEP's ImageServer (`exportImage`), reprojected
   to the property's local UTM zone so pixels are true meters. This is the
   raster counterpart of `elevation_data.py`'s point-sampled grid — what
-  flow-direction/accumulation terrain analysis actually needs.
+  flow-direction/accumulation terrain analysis actually needs, and this
+  pipeline's single elevation source: the report's elevation range is read
+  off this raster too, masked to the parcel boundary.
 - `raster_grid.py` — tiny shared, numpy-only helpers (pixel<->coordinate
-  math, 8-connected component labeling) used by every module downstream
+  math, boundary masking, the parcel's elevation range, 8-connected
+  component labeling) used by every module downstream
   of the DEM fetch, so their core logic stays unit-testable against a
   synthetic DEM dict without touching rasterio or the network.
 - `valley_delineation.py` — delineates primary valleys from a DEM via

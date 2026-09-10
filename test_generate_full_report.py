@@ -37,17 +37,26 @@ Covers:
      selected_water_zone / selected_structure_site / parcel_acres straight
      from the context, and production_areas_geojson is production_suitability_
      to_geojson(context.production_areas).
+  7. THE ELEVATION ARG COMES OFF THE DEM, not off a fetch. The second
+     positional arg to generate_scale_of_permanence_report() is
+     raster_grid.elevation_range_in_polygon()'s dict over ParcelData.dem,
+     masked to ParcelData.boundary_polygon_utm -- equal, field for field,
+     to calling that function here on the same two objects. And
+     elevation_data.get_elevation_grid() is called ZERO times across the
+     whole run: the layer that used to fill this arg is gone.
 """
 
 from contextlib import ExitStack
 from unittest.mock import Mock, patch as mock_patch
 
+import numpy as np
 from shapely.geometry import Polygon
 
 import generate_full_report
 from generate_full_report import generate_full_report as run_report
 from feature_schema import make_feature
 from parcel_data import ParcelData
+from raster_grid import elevation_range_in_polygon
 from pipeline_context import PipelineContext
 
 
@@ -95,15 +104,41 @@ def _synthetic_water_features() -> list[dict]:
     ]
 
 
+# A REAL DEM GRID DICT, not an opaque sentinel: generate_full_report.py
+# now reads the report's elevation figures off ParcelData.dem itself
+# (raster_grid.elevation_range_in_polygon(), masked to boundary_polygon_
+# utm) instead of off the deleted elevation_grid fetch, so this fixture
+# has to be a grid something can actually be read from. 20x20 cells at 5 m
+# over the synthetic 100 m x 100 m boundary -- every cell center lands
+# inside it, so all 400 count -- with elevation rising 0.5 m per row:
+# 300.0 m at the north edge to 309.5 m at the south.
+_SYNTHETIC_DEM_ROWS = 20
+_SYNTHETIC_DEM_COLS = 20
+
+
+def _synthetic_dem() -> dict:
+    array = np.zeros((_SYNTHETIC_DEM_ROWS, _SYNTHETIC_DEM_COLS), dtype="float32")
+    for row in range(_SYNTHETIC_DEM_ROWS):
+        array[row, :] = 300.0 + row * 0.5
+    return {
+        "array": array,
+        "resolution_meters": (5.0, 5.0),
+        "origin_x": 0.0,
+        "origin_y": 100.0,
+        "crs": "EPSG:32617",
+        "synthetic": True,
+    }
+
+
 def _synthetic_parcel_data() -> ParcelData:
     """A fully-populated ParcelData with correctly-shaped synthetic fields.
     build_pipeline_context() is mocked so most fields are never actually
     consumed downstream; the ones generate_full_report.py reads directly
-    (water_features['streams'|'water_bodies'], imagery_summary['scene_date'],
-    canopy_height, soil_components, elevation_grid, climate_summary,
-    irradiance) are shaped for real use."""
+    (dem, boundary_polygon_utm, water_features['streams'|'water_bodies'],
+    imagery_summary['scene_date'], canopy_height, soil_components,
+    climate_summary, irradiance) are shaped for real use."""
     return ParcelData(
-        dem={"crs": "EPSG:32617", "synthetic": True},
+        dem=_synthetic_dem(),
         boundary_polygon_utm=Polygon([(0, 0), (100, 0), (100, 100), (0, 100)]),
         soil_components=[{"muname": "Synthetic soil", "comppct_r": 100}],
         farmland_classification=[{"class": "synthetic"}],
@@ -113,7 +148,6 @@ def _synthetic_parcel_data() -> ParcelData:
         water_features={"streams": [{"name": "Synthetic Run"}], "water_bodies": []},
         farm_roads=[{"synthetic": True}],
         climate_summary={"prevailing_wind_direction": "WSW", "avg_annual_precipitation_mm": 1020.0},
-        elevation_grid=[{"latitude": 40.6443, "longitude": -79.9821, "elevation": 330.0}],
         canopy_height={"synthetic_canopy": True},
         imagery_summary={"scene_date": "2026-05-14", "days_since_scene": 63, "cloud_cover_pct": 4.2},
         irradiance={"status": "ok", "annual_ghi_kwh_m2_day": 4.21},
@@ -274,6 +308,19 @@ with ExitStack() as stack:
         )
     )
 
+    # PATCHED WHERE IT IS DEFINED, because nothing on the pipeline path
+    # binds it any more -- that is the point. A side effect rather than a
+    # bare Mock so a re-added call fails loudly at the call site.
+    import elevation_data
+
+    _no_lattice = stack.enter_context(
+        mock_patch.object(
+            elevation_data,
+            "get_elevation_grid",
+            Mock(side_effect=AssertionError("get_elevation_grid() must not be called")),
+        )
+    )
+
     # Patch every KSOP entry point at its SOURCE module and assert none is
     # called. generate_full_report.py no longer imports identify_solar_
     # candidate_zones()/identify_fencing() at all (the extra solar call and the
@@ -327,9 +374,10 @@ with ExitStack() as stack:
         "report.py itself -- the extra solar call and the fencing call are both gone."
     )
 
-    # ---- report generator call args (shared by checks 5 and 6) ----
+    # ---- report generator call args (shared by checks 5, 6 and 7) ----
     report_mock.assert_called_once()
     call_args, call_kwargs = report_mock.call_args
+    passed_elevation = call_args[1]
     passed_water = call_args[5]
     passed_solar = call_args[6]
     passed_road_network = call_args[7]
@@ -376,6 +424,32 @@ with ExitStack() as stack:
         "cardinal position in the KEYPOINT CANDIDATES data block"
     )
     print("   narrative_data and boundary_polygon_utm are forwarded from the context by identity.")
+
+    # ---- 7: the elevation arg is DEM-derived, and no lattice was fetched ----
+    #
+    # THE ARG IS THE COMPUTATION, not a value that happens to look like it.
+    # Recomputing elevation_range_in_polygon() here on the SAME dem and the
+    # SAME boundary polygon and asserting field-for-field equality says the
+    # report is handed the parcel's own DEM range -- the same elevation
+    # every KSOP computation below it runs on -- rather than a separately
+    # sourced number. The synthetic DEM rises 0.5 m per row over 20 rows,
+    # so the expected range is fixed and checked directly too.
+    _expected_elevation = elevation_range_in_polygon(_parcel.dem, _parcel.boundary_polygon_utm)
+    assert passed_elevation == _expected_elevation, (passed_elevation, _expected_elevation)
+    assert passed_elevation["cell_count"] == _SYNTHETIC_DEM_ROWS * _SYNTHETIC_DEM_COLS, passed_elevation
+    assert passed_elevation["min_meters"] == 300.0 and passed_elevation["max_meters"] == 309.5, (
+        passed_elevation
+    )
+    assert _no_lattice.call_count == 0, (
+        "elevation_data.get_elevation_grid() must not be called anywhere in a full report run -- "
+        "the elevation layer is deleted and the report's figures come off the DEM"
+    )
+    print(
+        f"7. the elevation arg is raster_grid.elevation_range_in_polygon(ParcelData.dem, "
+        f"ParcelData.boundary_polygon_utm) -- {passed_elevation['min_meters']}m to "
+        f"{passed_elevation['max_meters']}m over {passed_elevation['cell_count']} in-boundary cells, "
+        f"equal field-for-field to recomputing it here. get_elevation_grid() was called 0 times."
+    )
 
     # ---- bonus: keypoints + irradiance seams still forwarded ----
     assert call_kwargs["keypoints"] is _context.keypoints, (
