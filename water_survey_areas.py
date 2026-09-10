@@ -85,8 +85,9 @@ evidence -- see EXCAVATED_SLOPE_FULL_CREDIT_PCT), the floor (a FILTER
 on the walkable zone acres, drops visible and attributed -- see
 MIN_SURVEY_REGION_AREA_ACRES's history note covering its two prior
 bases), and presentation (a TOP_N cap was tried for one pass and
-DELETED -- every surviving zone is listed; see the history note at the
-old constant's site). The pre-merge pass added the convex-hull
+DELETED for FILTERING; a MARK-ONLY rule replaced it -- the top 2 of
+each type backfilled to WATER_ZONE_PRESENTATION_COUNT, with every
+survivor still on the wire; see that constant's note). The pre-merge pass added the convex-hull
 envelope (the surveyable claim), the sparse_anchor honesty guard, and
 the cross-type agreement report. The diagnostic's instruments
 (threshold comparison, isobands, the excavated interrogation) keep
@@ -233,9 +234,14 @@ status: dropped + drop_reason on the zone, both acreages on the record,
 carried in the diagnostic table and the export's survey_zone_dropped
 layer, never silent (see the constant's history note for its three
 prior bases -- the type-dispatched one is retired now that both types
-draw a hull). EVERY SURVIVING ZONE IS PRESENTED: a presentation cap was
-tried for one pass and deleted -- all survivors are listed, ranked per
-type, with the total count, and the user decides what to walk. Two
+draw a hull). EVERY SURVIVING ZONE IS ON THE WIRE, and a PRESENTATION
+MARK says which ones to lead with: the top 2 of each type by rank,
+backfilled from the other type in rank order to
+WATER_ZONE_PRESENTATION_COUNT, carried as presented /
+presentation_order on every zone. It MARKS, it does not filter -- an
+unpresented survivor keeps its payload entry, its panel block and its
+GeoJSON feature, and the earlier cap was deleted precisely for lacking
+that distinction (see the constant's note). Two
 honesty reports ride each survivor: sparse_anchor -- walkable claim
 vastly exceeding its anchor, on BOTH types now
 (SPARSE_ANCHOR_MEMBER_FRACTION: member footprints for excavated, the
@@ -1273,15 +1279,58 @@ SPARSE_ANCHOR_MEMBER_FRACTION = 0.2
 # CONFIGURABLE.
 CROSS_TYPE_OVERLAP_NOTE_FRACTION = 0.5
 
-# PRESENTATION CAP: DELETED (pre-merge decision). A TOP_N of 3 with a
-# per-type guarantee shipped for one pass and was removed entirely --
-# constant, guarantee, swap logic, and the presented/unpresented
-# distinction (its absence is AST-asserted in the tests; this note is
-# the history). With the floor already pruning noise on the walkable
-# claim, every surviving zone IS presentable: all survivors are listed,
-# ranked per type, with the total count -- the user decides what to
-# walk. Selection (the pooled rank-1 -> selected_water_zone) was always
-# independent of presentation and is unchanged by the deletion.
+# PRESENTATION: THE TOP 2 OF EACH TYPE, BACKFILLED TO FOUR. A MARK, NOT
+# A FILTER -- this is the whole of the distinction and the reason the
+# rule is safe to have at all. Every surviving zone keeps its payload
+# entry, its panel block and its GeoJSON feature; presentation adds
+# `presented` and `presentation_order` to each so a consumer can lead
+# with four and collapse the rest without a second source of truth
+# about which zones exist.
+#
+# THE RULE: the top WATER_ZONE_PRESENTATION_PER_TYPE zones of each type
+# BY THAT TYPE'S OWN RANK, then -- if a type produced fewer than that --
+# backfill from the other type in rank order until the set holds
+# WATER_ZONE_PRESENTATION_COUNT or no survivor is left over. The count
+# is a CAP, NEVER A QUOTA: three survivors present as three, and
+# nothing is padded to reach four.
+#
+# HISTORY, because this is the second attempt and the first one was
+# deleted for cause. A TOP_N of 3 with a per-type guarantee and swap
+# logic shipped for one pass and was removed entirely -- constant,
+# function, and the per-zone property -- because it FILTERED: an
+# unpresented zone left the payload, so "not shown" and "does not
+# exist" became the same wire state and a user could not decide what to
+# walk. The rule returns with that defect designed out. What generation
+# and dropping do is untouched by it (the floor, the dedupe and the
+# catchment ceiling drop zones for their own reasons, never for being
+# unpresented), and SELECTION IS UNTOUCHED BY IT TOO: the pooled rank-1
+# -> selected_water_zone is computed from the surviving set and is
+# indifferent to presentation, exactly as it was under the cap.
+#
+# ORDER WITHIN THE PRESENTED SET: INTERLEAVED BY TYPE -- embankment 1,
+# excavated 1, embankment 2, excavated 2 -- then any backfill entries
+# in rank order. Interleaving is the ordering choice and it is
+# deliberate: a set read as "one type's list with two additions at the
+# bottom" reads as a recommendation of that type, and the two types are
+# two different site visits, not two grades of one answer. The type
+# that leads each pair is fixed (SURVEY_TYPES order, embankment first)
+# rather than decided by score, because deciding it by score would mean
+# comparing a compartment rank score against a member-mean suitability
+# -- the cross-instrument pooling select_survey_zone() documents as
+# PROVISIONAL -- to settle a display question. One arbitrary, stable,
+# documented order is the honest answer there; the pool stays confined
+# to the one place downstream needs a single winner.
+# CONFIGURABLE (both constants; the assertion below keeps them
+# consistent).
+WATER_ZONE_PRESENTATION_COUNT = 4
+WATER_ZONE_PRESENTATION_PER_TYPE = 2
+assert (
+    WATER_ZONE_PRESENTATION_PER_TYPE * len(SURVEY_TYPES) == WATER_ZONE_PRESENTATION_COUNT
+), (
+    "the per-type target must exactly fill the presented set when both types produce enough "
+    f"({WATER_ZONE_PRESENTATION_PER_TYPE} x {len(SURVEY_TYPES)} != {WATER_ZONE_PRESENTATION_COUNT}) "
+    "-- otherwise the 'top N of each type' half of the rule and the total silently disagree"
+)
 
 # Zone lifecycle status values (the established status/reason export
 # pattern): every zone is one or the other, and a dropped zone always
@@ -4190,6 +4239,123 @@ def rank_survey_zones_per_type(zones: list[dict]) -> None:
             zone["rank"] = rank
 
 
+def assign_presentation_order(zones: list[dict]) -> dict:
+    """
+    THE PRESENTATION MARK, assigned IN PLACE to every zone handed in
+    (see WATER_ZONE_PRESENTATION_COUNT's note for the rule and the
+    history of the cap this replaces): `presented` (bool) and
+    `presentation_order` (1-based int on a presented zone, None on an
+    unpresented one). NOTHING IS REMOVED FROM ANY SET BY THIS FUNCTION
+    -- it writes two keys and returns a summary; the caller's list is
+    the same list, in the same order, with the same members.
+
+    Requires `rank` already assigned (rank_survey_zones_per_type()), and
+    reads NOTHING ELSE off a zone: presentation is a function of the
+    per-type ranks and the counts, so it cannot drift away from the
+    ranking it presents.
+
+    Returns the RULE-APPLIED SUMMARY -- the survivor count per type, the
+    presented count per type split into base and backfill, and
+    `rule_applied`, a plain reading of what happened on THIS run ("2
+    embankment + 1 excavated + 1 embankment backfill"). It is returned
+    rather than derived downstream because a run must be able to explain
+    its own presented set without a reader reconstructing the rule from
+    the marks.
+    """
+    by_type = {
+        survey_type: sorted(
+            [zone for zone in zones if zone["survey_type"] == survey_type],
+            key=lambda zone: zone["rank"],
+        )
+        for survey_type in SURVEY_TYPES
+    }
+
+    # THE BASE: the top per-type slice of each type, INTERLEAVED by
+    # slot -- embankment 1, excavated 1, embankment 2, excavated 2 --
+    # so the set reads as both types considered rather than one type's
+    # list. A type with fewer zones than the target simply contributes
+    # nothing at the slots it does not reach.
+    base = {
+        survey_type: by_type[survey_type][:WATER_ZONE_PRESENTATION_PER_TYPE]
+        for survey_type in SURVEY_TYPES
+    }
+    ordered: list[dict] = []
+    for slot in range(WATER_ZONE_PRESENTATION_PER_TYPE):
+        for survey_type in SURVEY_TYPES:
+            if slot < len(base[survey_type]):
+                ordered.append(base[survey_type][slot])
+
+    # THE BACKFILL: whatever slots the base left, filled from the zones
+    # the base did not take, IN RANK ORDER and appended after the
+    # interleaved base (a backfilled zone is the third or fourth choice
+    # and is ordered as one). Only a type that reached the per-type
+    # target can have leftovers, and slots only open when the OTHER
+    # type fell short of it, so "the rest in rank order" is exactly
+    # "the other type in rank order" -- one rule, no type test to get
+    # wrong. The rank tiebreak names the type only to keep the order
+    # total; two zones of the same type never share a rank.
+    taken = {id(zone) for zone in ordered}
+    open_slots = WATER_ZONE_PRESENTATION_COUNT - len(ordered)
+    backfilled: list[dict] = []
+    if open_slots > 0:
+        remaining = sorted(
+            [zone for zone in zones if id(zone) not in taken],
+            key=lambda zone: (zone["rank"], SURVEY_TYPES.index(zone["survey_type"])),
+        )
+        backfilled = remaining[:open_slots]
+        ordered.extend(backfilled)
+
+    # Written over EVERY zone handed in, so an unpresented survivor
+    # carries the explicit False/None rather than a missing key: absent
+    # is not a value, and a consumer must never have to distinguish
+    # "not presented" from "this build did not mark it".
+    for zone in zones:
+        zone["presented"] = False
+        zone["presentation_order"] = None
+    for order, zone in enumerate(ordered, start=1):
+        zone["presented"] = True
+        zone["presentation_order"] = order
+
+    base_counts = {
+        survey_type: len(base[survey_type]) for survey_type in SURVEY_TYPES
+    }
+    backfill_counts = {
+        survey_type: sum(
+            1 for zone in backfilled if zone["survey_type"] == survey_type
+        )
+        for survey_type in SURVEY_TYPES
+    }
+    parts = [
+        f"{base_counts[survey_type]} {survey_type}"
+        for survey_type in SURVEY_TYPES
+        if base_counts[survey_type]
+    ]
+    parts += [
+        f"{backfill_counts[survey_type]} {survey_type} backfill"
+        for survey_type in SURVEY_TYPES
+        if backfill_counts[survey_type]
+    ]
+    return {
+        "presentation_count": WATER_ZONE_PRESENTATION_COUNT,
+        "per_type_count": WATER_ZONE_PRESENTATION_PER_TYPE,
+        # WHAT WAS CONSIDERED, beside what is shown -- the whole point
+        # of reporting the rule rather than just the marks.
+        "survivor_counts": {
+            survey_type: len(by_type[survey_type]) for survey_type in SURVEY_TYPES
+        },
+        "presented_count": len(ordered),
+        "presented_counts": {
+            survey_type: base_counts[survey_type] + backfill_counts[survey_type]
+            for survey_type in SURVEY_TYPES
+        },
+        "base_counts": base_counts,
+        "backfill_counts": backfill_counts,
+        "backfill_applied": bool(backfilled),
+        "presented_zone_ids": [zone["id"] for zone in ordered],
+        "rule_applied": " + ".join(parts) if parts else "no surviving zones",
+    }
+
+
 def attach_cross_type_overlaps(zones: list[dict]) -> None:
     """
     THE AGREEMENT REPORT, attached IN PLACE to every surviving zone: for
@@ -4564,6 +4730,13 @@ def compute_water_survey_areas(
             zone["status"] = ZONE_STATUS_DROPPED
             zone["drop_reason"] = REASON_CATCHMENT_EXCEEDS_CEILING
             zone["rank"] = None
+            # A dropped zone is out of the output entirely, so it is out
+            # of the presented set by construction -- marked explicitly
+            # (never a missing key) because its record still rides the
+            # diagnostic table and the export's dropped layer, and those
+            # read the same two keys every other zone carries.
+            zone["presented"] = False
+            zone["presentation_order"] = None
             zone["cross_type_overlaps"] = []
             dropped_zones.append(zone)
         elif id(zone) in duplicate_set:
@@ -4571,12 +4744,16 @@ def compute_water_survey_areas(
             zone["status"] = ZONE_STATUS_DROPPED
             zone["drop_reason"] = duplicate_of_zone_reason(winner["id"])
             zone["rank"] = None
+            zone["presented"] = False
+            zone["presentation_order"] = None
             zone["cross_type_overlaps"] = []
             dropped_zones.append(zone)
         elif zone["zone_acres"] < MIN_SURVEY_REGION_AREA_ACRES:
             zone["status"] = ZONE_STATUS_DROPPED
             zone["drop_reason"] = FLAG_BELOW_MIN_AREA
             zone["rank"] = None
+            zone["presented"] = False
+            zone["presentation_order"] = None
             zone["cross_type_overlaps"] = []
             zone["below_min_area"] = True
             if FLAG_BELOW_MIN_AREA not in zone["flags"]:
@@ -4589,6 +4766,14 @@ def compute_water_survey_areas(
 
     rank_survey_zones_per_type(surviving_zones)
     attach_cross_type_overlaps(surviving_zones)
+    # PRESENTATION IS A MARK ON THE SURVIVING SET, not a narrowing of
+    # it: `surviving_zones` is the same list before and after, and
+    # `zones`/`zones_by_type` below still carry every survivor. It runs
+    # BEFORE selection deliberately -- select_survey_zone() reads
+    # neither key, so a run in which presentation reorders the set
+    # selects exactly the zone it would have selected without one, and
+    # the call order makes that checkable rather than assumed.
+    presentation = assign_presentation_order(surviving_zones)
     selected = select_survey_zone(surviving_zones)
 
     return {
@@ -4601,6 +4786,10 @@ def compute_water_survey_areas(
             for survey_type in SURVEY_TYPES
         },
         "dropped_zones": dropped_zones,
+        # The rule this run's presented set was produced by, carried out
+        # with the run: which zones are presented is on each zone
+        # (presented / presentation_order), and WHY THAT SET is here.
+        "presentation": presentation,
         "regions": regions,
         "regions_by_type": {
             survey_type: [region for region in regions if region["survey_type"] == survey_type]
@@ -4690,12 +4879,24 @@ def _zone_feature_properties(zone: dict) -> dict:
         "survey_type": zone["survey_type"],
         "nominated_by": zone["nominated_by"],
         # Lifecycle: status/drop_reason are the established
-        # dropped-not-silent pattern. (A `presented` property existed
-        # for one pass and was deleted with the presentation cap --
-        # every surviving zone is presented.)
+        # dropped-not-silent pattern.
         "status": zone["status"],
         "drop_reason": zone["drop_reason"],
         "rank": zone["rank"],
+        # THE PRESENTATION MARK (see WATER_ZONE_PRESENTATION_COUNT):
+        # `presented` says whether this zone is in the set a consumer
+        # leads with, `presentation_order` says where in that set. THIS
+        # IS A MARK, NOT A FILTER -- an unpresented survivor is on this
+        # layer with this same full property set and its own panel
+        # block, so a frontend can style or collapse it without needing
+        # a second source of truth about which zones exist. A dropped
+        # zone carries False/None here for the different reason that it
+        # is out of the output altogether; `status` is what tells the
+        # two apart, and presentation never speaks to existence.
+        # INDEPENDENT OF `rank` ABOVE, which keeps its own meaning:
+        # rank within type across ALL survivors, presented or not.
+        "presented": zone["presented"],
+        "presentation_order": zone["presentation_order"],
         # The cross-type agreement report (fractions of THIS zone's
         # envelope overlapped by surviving zones of the other type).
         "cross_type_overlaps": list(zone["cross_type_overlaps"]),
@@ -4973,6 +5174,17 @@ PANEL_EXCLUDED_KEYS = (
     # difference in their head.
     "compartment_footprint_acres",
     "anchor_acres",
+    # THE PRESENTATION MARK -- DECIDED AGAINST THE PANEL. `presented`
+    # and `presentation_order` are properties of the LIST a zone is
+    # shown in, not of the ground; the panel answers "should I walk
+    # this?" about one zone, and a row saying "this zone is one of the
+    # four we led with" answers a question about the other zones. Both
+    # keys ride the feature properties (where the frontend reads them to
+    # order and collapse) and narrative_data (where the report states
+    # the rule); neither is a measurement the panel can help a reader
+    # act on.
+    "presented",
+    "presentation_order",
 )
 """Keys that are NOT panel rows, asserted absent from build_zone_panel()'s
 output and from its source. Named as a constant rather than left implicit
@@ -5247,9 +5459,12 @@ def build_narrative_data(result: dict) -> dict:
     at this boundary (acres, feet, percent), None (never 0.0) for
     unavailable, no reason strings beyond the flag enumeration, per the
     established narrative_data doctrine. EVERY SURVIVING ZONE is listed
-    with the total count (the presentation cap was deleted -- the user
-    decides what to walk), beside the dropped count so the narrative
-    can state what the floor pruned; per-criterion mean scores (MEMBER
+    with the total count, IN PRESENTATION ORDER and each block marked
+    presented / presentation_order, beside the ['presentation'] block
+    carrying the rule applied and the per-type SURVIVOR totals -- so the
+    narrative states what is shown AND what was considered, and a
+    reader is never left inferring one from the other. Beside the
+    dropped count, so the narrative can state what the floor pruned; per-criterion mean scores (MEMBER
     cells only) are the narrative-honesty mechanism -- prose may only
     claim what a criterion actually scored, and each zone's block
     carries those scores directly. Dual acreage carries the narrative
@@ -5294,8 +5509,23 @@ def build_narrative_data(result: dict) -> dict:
     # either_type_candidate row resolves it to a name here.
     zone_name_by_id = {zone["id"]: zone_display_name(zone) for zone in surviving}
 
+    # PRESENTATION ORDER, then everything else. The presented set leads,
+    # in its own order (interleaved by type, backfill last -- see
+    # WATER_ZONE_PRESENTATION_COUNT); the unpresented survivors follow,
+    # per type by rank, and they are all STILL HERE. `zone_count` below
+    # is the surviving total and the list length matches it, exactly as
+    # before -- what changed is the order and two keys per block, never
+    # the membership.
     zone_blocks = []
-    for zone in sorted(surviving, key=lambda z: (z["survey_type"], z["rank"])):
+    for zone in sorted(
+        surviving,
+        key=lambda z: (
+            0 if z["presented"] else 1,
+            z["presentation_order"] if z["presented"] else 0,
+            z["survey_type"],
+            z["rank"],
+        ),
+    ):
         primary = zone["primary_production_area_relationship"]
         if primary is None:
             gravity = {"has_service_relationship": False, "can_gravity_feed": None}
@@ -5311,6 +5541,13 @@ def build_narrative_data(result: dict) -> dict:
             "id": zone["id"],
             "survey_type": zone["survey_type"],
             "rank": zone["rank"],
+            # The presentation mark on the narrative block, so the
+            # report can lead with the presented set and still describe
+            # the rest -- the list this block sits in carries EVERY
+            # survivor, and these two keys are how the report tells
+            # which is which without recounting the rule.
+            "presented": zone["presented"],
+            "presentation_order": zone["presentation_order"],
             "zone_acres": round(zone["zone_acres"], 1),
             "mean_suitability": zone["mean_suitability"],
             "max_suitability": zone["max_suitability"],
@@ -5434,6 +5671,15 @@ def build_narrative_data(result: dict) -> dict:
         "member_region_count": len(result["regions"]),
         "embankment_zone_count": len(result["zones_by_type"][SURVEY_TYPE_EMBANKMENT]),
         "excavated_zone_count": len(result["zones_by_type"][SURVEY_TYPE_EXCAVATED]),
+        # WHAT IS SHOWN, BESIDE WHAT WAS CONSIDERED. `zones` above lists
+        # every survivor (presentation-ordered, each marked); this block
+        # is the rule that produced the leading set plus the per-type
+        # SURVIVOR totals, so the report can say "showing 4 of 6 -- 2
+        # embankment + 1 excavated + 1 embankment backfill" rather than
+        # leaving a reader to infer either half. Verbatim from
+        # assign_presentation_order(): one computation of the rule, one
+        # reading of it.
+        "presentation": dict(result["presentation"]),
         # The embankment generation accounting (the dropped-feature
         # pattern, seed edition): every seed either built a compartment
         # or failed with its reason named -- a reach with no on-parcel
@@ -5518,6 +5764,17 @@ def build_narrative_data(result: dict) -> dict:
     }
 
 
+def _presented_mark(zone: dict) -> str:
+    """The presented marker for a text line: " [presented #2]" or "" --
+    NEVER a "[not presented]" counterpart. Unpresented is the quiet
+    case (the same negative-space rule the panel's caution rows follow),
+    and the summary's own header states the rule and the counts, so an
+    unmarked line is readable rather than ambiguous."""
+    if zone.get("presented"):
+        return f" [presented #{zone['presentation_order']}]"
+    return ""
+
+
 def summarize_water_survey_areas(result: dict) -> str:
     zones = result["zones"]
     dropped = result["dropped_zones"]
@@ -5528,8 +5785,19 @@ def summarize_water_survey_areas(result: dict) -> str:
             "No water survey zones: no embankment seed qualified and nothing cleared the excavated "
             "suitability threshold."
         )
+    presentation = result.get("presentation")
+    presented_clause = ""
+    if presentation is not None:
+        # The rule this run applied, on the summary's first line: the
+        # per-zone [presented] marks below are useless to a reader who
+        # cannot see what produced them.
+        presented_clause = (
+            f" -- {presentation['presented_count']} presented "
+            f"({presentation['rule_applied']})"
+        )
     lines = [
-        f"Water survey zones ({len(zones)} surviving -- all listed, {len(dropped)} dropped; "
+        f"Water survey zones ({len(zones)} surviving -- all listed{presented_clause}, "
+        f"{len(dropped)} dropped; "
         f"{len(result['regions'])} excavated member region(s); "
         f"{len(seeds)} embankment seed(s), {len(failed_seeds)} failed):"
     ]
@@ -5542,7 +5810,7 @@ def summarize_water_survey_areas(result: dict) -> str:
         flag_text = f" [{', '.join(zone['flags'])}]" if zone["flags"] else ""
         if zone["survey_type"] == SURVEY_TYPE_EMBANKMENT:
             lines.append(
-                f"  - embankment rank {zone['rank']}: zone {zone['id']}, "
+                f"  - embankment rank {zone['rank']}{_presented_mark(zone)}: zone {zone['id']}, "
                 f"{zone['zone_acres']} ac to survey anchored by a "
                 f"{zone['compartment_footprint_acres']} ac valley compartment and a "
                 f"{zone['seed_blend_score']}-scoring seed (pinch width {zone['pinch']['width_m']} m at "
@@ -5564,7 +5832,7 @@ def summarize_water_survey_areas(result: dict) -> str:
             )
         else:
             lines.append(
-                f"  - excavated rank {zone['rank']}: zone {zone['id']}, "
+                f"  - excavated rank {zone['rank']}{_presented_mark(zone)}: zone {zone['id']}, "
                 f"{zone['zone_acres']} ac to survey anchored by {zone['member_acres']} ac "
                 f"({zone['member_count']} member(s)), mean {zone['mean_suitability']}, top criteria: "
                 f"{criteria_text}{flag_text}"
@@ -5788,6 +6056,11 @@ def identify_water_survey_areas(
         "zones": result["zones"],
         "zones_by_type": result["zones_by_type"],
         "dropped_zones": result["dropped_zones"],
+        # The presentation rule this run applied, forwarded at the top
+        # level beside the sets it describes -- the diagnostic and any
+        # other consumer of this entry point reads the rule here rather
+        # than reaching into ["result"] for it.
+        "presentation": result["presentation"],
         "regions": result["regions"],
         "regions_by_type": result["regions_by_type"],
         "embankment_seeds": result["embankment_seeds"],

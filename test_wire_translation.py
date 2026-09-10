@@ -215,6 +215,12 @@ def _water_zone(zid, x0, y0, members):
         "status": "surviving",
         "drop_reason": None,
         "rank": zid,
+        # The presentation mark: a REQUIRED property on a zone feature
+        # (water_survey_areas.assign_presentation_order writes it onto
+        # every zone, surviving or dropped), so this fixture carries it
+        # rather than letting the builder invent a default.
+        "presented": zid == 0,
+        "presentation_order": 1 if zid == 0 else None,
         "sparse_anchor": False,
         "truncated_by_road": False,
         "cross_type_overlaps": [],

@@ -589,7 +589,41 @@ with Harness() as h:
         "scales rides the payload's TOP LEVEL, where production's does -- a "
         "scale describes the instrument, not one step's summary of it"
     )
-    assert summary["zone_count"] == len(ZONES)
+    # THE PAYLOAD IS NARROWED TO THE PRESENTED SET, and the counts say so
+    # rather than merely differing. summary['zone_count'] is the pipeline's
+    # SURVIVOR total and stays that; what ships is the presented subset, and
+    # the difference is named -- withheld_count with the ids, so "not on the
+    # wire" is a stated fact and never an absence a reader has to notice.
+    _presentation = summary["presentation"]
+    assert len(ZONES) == _presentation["presented_count"], (
+        "the collection carries exactly the presented zones"
+    )
+    assert len(ZONES) <= water_survey_areas.WATER_ZONE_PRESENTATION_COUNT, (
+        "and never more than the cap, whatever the parcel produced"
+    )
+    assert summary["zone_count"] == len(ZONES) + _presentation["withheld_count"], (
+        "the survivor total is still the survivor total: what shipped plus what was withheld"
+    )
+    assert len(_presentation["withheld_zone_ids"]) == _presentation["withheld_count"]
+    assert len(_presentation["withheld_feature_ids"]) == _presentation["withheld_count"]
+    _shipped_zone_ids = {feature["properties"]["zone_id"] for feature in ZONES}
+    assert not (_shipped_zone_ids & set(_presentation["withheld_zone_ids"])), (
+        "a zone is shipped or withheld, never both"
+    )
+    for feature in ZONES:
+        assert feature["properties"]["presented"] is True, (
+            "every feature that ships is a presented one -- the mark and the narrowing agree"
+        )
+        assert feature["properties"]["presentation_order"] is not None
+    assert [feature["properties"]["presentation_order"] for feature in ZONES] == sorted(
+        feature["properties"]["presentation_order"] for feature in ZONES
+    ), "and they ride the collection in presentation order"
+    # MEMBERS FOLLOW THEIR PARENT. A member footprint whose zone envelope was
+    # withheld would be a sub-feature of nothing on the wire.
+    for feature in MEMBERS:
+        assert feature["properties"]["zone_id"] in _shipped_zone_ids, (
+            "a member rides only when the zone it belongs to does"
+        )
     assert summary["soil_checked"] is True, (
         "the registry's soil_inputs edge must reach the scorer -- soil_checked "
         "False here means the combine forwarded nothing"
@@ -597,6 +631,9 @@ with Harness() as h:
     assert len(water_payload["zones"]) == len(ZONES), (
         "the tabular half and the map half describe the SAME zones"
     )
+    assert [row["feature_id"] for row in water_payload["zones"]] == [
+        feature["id"] for feature in ZONES
+    ], "in the same order, so a tab and its envelope are the same zone in the same place"
 
     # ZERO NETWORK. The point of the six forwarded edges.
     assert water_generate_network == 0, (
@@ -756,14 +793,29 @@ with Harness() as h:
                 continue
             assert feature["properties"]["mean_suitability"] <= observed[survey_type] + 1e-9
 
-    # rank carries the PER-TYPE COUNT, so "rank 2" renders as "2 of 3".
+    # rank carries the PER-TYPE SURVIVOR COUNT, so "rank 2" renders as "2 of
+    # 4" -- AND THE DENOMINATOR IS DELIBERATELY LARGER THAN WHAT SHIPPED now
+    # that the payload carries only the presented set. The rank scale
+    # describes the instrument (rank within type across every survivor), not
+    # this payload's slice of it, and a denominator quietly reduced to the
+    # shipped count would tell a user that "2 of 2" is the whole of the
+    # embankment reading when the pipeline ranked four.
+    panel_summary = panel_payload["summary"]
     for survey_type in water_survey_areas.SURVEY_TYPES:
         count = scales["rank"][survey_type]["count"]
         of_type = [f for f in PANEL_ZONES if f["properties"]["survey_type"] == survey_type]
-        assert count == len(of_type), f"{survey_type}: scale count {count} vs {len(of_type)} zones"
-        assert sorted(f["properties"]["rank"] for f in of_type) == list(range(1, count + 1)), (
-            "the count is the rank scale's denominator, so the ranks must fill it exactly"
+        assert count == panel_summary[f"{survey_type}_zone_count"], (
+            f"{survey_type}: the rank denominator is the SURVIVOR count, {count} vs "
+            f"{panel_summary[f'{survey_type}_zone_count']}"
         )
+        assert count >= len(of_type), "and it is never smaller than what shipped"
+        # WHAT SHIPPED OF A TYPE IS ITS TOP RANKS, contiguously from 1: the
+        # per-type base takes ranks 1-2 and any backfill continues in rank
+        # order, so a gap here would mean presentation had skipped a
+        # better-ranked zone for a worse one.
+        assert sorted(f["properties"]["rank"] for f in of_type) == list(
+            range(1, len(of_type) + 1)
+        ), f"{survey_type}: the presented zones of a type are its top ranks, with no gap"
 
     # THE PANEL ROWS reach the wire on every tabular row, shaped so a
     # renderer can draw a row it has never heard of.
@@ -1035,11 +1087,11 @@ SYNTHETIC_TREES = step_registry.StepDefinition(
 with Harness() as h, mock_patch.dict(
     step_registry.STEP_REGISTRY, {"trees": SYNTHETIC_TREES}
 ):
-    assert step_registry.dependents_of("water") == ("roads", "trees", "structures"), (
+    assert step_registry.dependents_of("water") == ("roads", "trees", "structures", "fencing"), (
         "the consumes edge IS the invalidation edge -- the real roads entry and "
         "the synthetic trees one both read water's commit"
     )
-    assert step_registry.transitive_dependents("landform") == ("water", "roads", "trees", "structures"), (
+    assert step_registry.transitive_dependents("landform") == ("water", "roads", "trees", "structures", "fencing"), (
         "staleness is transitive: reopening landform makes the tree proposals "
         "stale too, because they were computed from a water answer that was "
         "itself computed from the landform commit"

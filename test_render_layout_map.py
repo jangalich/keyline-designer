@@ -810,7 +810,7 @@ import copy
 
 from rasterio.warp import transform as _warp_transform_check
 from shapely.geometry import LineString
-from raster_grid import chaikin_smooth_coords
+from raster_grid import angular_simplify_closed_ring, chaikin_smooth_coords
 from render_layout_map import (
     ROAD_RENDER_COLOR,
     ROAD_RENDER_INNER_ALPHA,
@@ -1766,7 +1766,12 @@ def _render_capturing_fences(layers: dict, legend_sink: list) -> list:
 def _trim_render_ring(geometry_utm):
     """The same simplified Mercator ring the renderer itself builds for a fence feature --
     the untrimmed reference each drawn piece is measured against below."""
-    return rlm.angular_simplify_closed_ring(
+    # raster_grid's own simplifier, called directly: the renderer no longer
+    # holds a simplify call of its own (both display passes are fence_display_
+    # geometry.fence_display_lines(), which test_fence_display_geometry.py
+    # holds to a literal transcription), so this reference is written out
+    # here rather than read off the code under test.
+    return angular_simplify_closed_ring(
         rlm._reproject_geometry_to_mercator(mapping(_trim_to_wgs84(geometry_utm))),
         rlm.FENCE_RENDER_ANGULAR_SIMPLIFY_TOLERANCE_M,
     )

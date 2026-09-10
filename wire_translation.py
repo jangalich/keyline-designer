@@ -116,6 +116,7 @@ from feature_schema import (
     make_feature,
     make_feature_collection,
 )
+from fence_display_geometry import DISPLAY_ONLY_FENCE_LINE_PROPERTY, display_only_fence_lines_wgs84
 
 METERS_PER_FOOT = 0.3048
 
@@ -151,6 +152,16 @@ LAYER_EXCLUSION_GATE = "exclusion_gate"
 LAYER_SURVEY_ZONE_EMBANKMENT = "survey_zone_embankment"
 LAYER_SURVEY_ZONE_EXCAVATED = "survey_zone_excavated"
 LAYER_SURVEY_ZONES = (LAYER_SURVEY_ZONE_EMBANKMENT, LAYER_SURVEY_ZONE_EXCAVATED)
+# The two fencing layers fencing.py has always emitted. Only the first is
+# COMMITTABLE: "perimeter_fencing" carries the boundary, water-zone and
+# tree-zone fence loops, told apart by each feature's own `fence_type`
+# property (the fencing step's commit unit -- see fence_lines_to_feature_
+# collection()). "exclusion_fencing" is stream exclusion fencing, which is
+# narrative-only; it is named here so the fencing payload can FILTER it out
+# of the proposal collection by the module's own spelling, never so a
+# contract can accept it.
+LAYER_PERIMETER_FENCING = "perimeter_fencing"
+LAYER_EXCLUSION_FENCING = "exclusion_fencing"
 
 # The wire id prefix water_survey_zones_to_feature_collection() mints for a
 # zone. Written down once, here, for the same reason _PRODUCTION_FEATURE_ID_
@@ -3101,3 +3112,426 @@ def road_network_footprint(network):
         return None
     footprint = network["cell_footprint_polygon_utm"]
     return None if footprint is None or footprint.is_empty else footprint
+
+
+# ======================================================================
+# OUTBOUND + INBOUND: fence lines -- the sixth entry's layer, the first
+# whose commit unit is a TYPE and the first with NO area at all
+# ======================================================================
+#
+# WHAT IS DIFFERENT HERE. Every prior layer's commit unit was a feature
+# (or, for roads, a group of features that IS one thing -- a network). A
+# fence's commit unit is a FENCE TYPE: the user commits "water zone
+# fencing", and that means every loop of it. So the outbound half stamps
+# each "perimeter_fencing" feature with its place in its type
+# (`fence_index` of `fence_count`), the inbound half reads that back, and
+# check_fence_type_complete() -- the contract's group_check, run by the
+# gate over every feature sharing a fence_type -- refuses a type committed
+# without all of its features. The same mechanism roads uses for a spur
+# without its trunk; the same reason (a partial group is not a smaller
+# unit, it is an incoherent one).
+#
+# NO AREA, AND WHAT THAT DOES TO THE GATE. A fence line encloses ground but
+# IS NOT ground: it has length and no width. The commit gate's one spatial
+# hard gate measures the ACRES of a feature's polygon_utm outside the
+# parcel, and a line's difference with anything is a line with zero acres,
+# so containment is VACUOUS for this layer -- and honestly so: a water or
+# tree zone fence is by construction 2.5 m OUTSIDE the zone it encloses,
+# and a zone that meets the parcel edge puts its fence a strip outside the
+# parcel on purpose. Handing the gate the ENCLOSED polygon instead would
+# reject a fence the pipeline itself generated for a 2.5 m strip nobody
+# can act on. So polygon_utm IS the line (the roads rehydrator's alias
+# pattern, for the opposite reason), the gate passes, and this comment is
+# the record that it passes for a reason rather than by accident.
+#
+# WHAT IS DERIVED AND WHAT IS INHERITED, the same rule as every layer
+# before: the geometry (line_utm) is derived by ONE reprojection of the
+# wire geometry into dem["crs"] and validated on the way (a real line, no
+# empty parts, closed rings); length_meters is derived from it; everything
+# else -- fence_type, fence_index, fence_count, buffer_meters,
+# segment_index, candidate_rank -- is READ off the feature, because it is
+# what the pass that built the fence said and no shape re-derives it.
+
+# The one place the three outbound id spellings fencing.py mints are written
+# down beside their parsers: boundary_fencing_to_geojson() emits
+# "perimeter-fencing-boundary-<n>", water_zone_fencing_to_geojson() emits
+# "perimeter-fencing-water-zone", tree_zone_fencing_to_geojson() emits
+# "perimeter-fencing-tree-zone-<n>".
+_FENCE_LINE_FEATURE_ID_PREFIX = "perimeter-fencing-"
+_FENCE_LINE_ID_SPELLINGS = {
+    "boundary": "boundary-",
+    "water_zone_exclusion": "water-zone",
+    "tree_zone_exclusion": "tree-zone-",
+}
+
+
+def internal_fence_line_identity(feature_id: Any) -> Optional[tuple]:
+    """
+    (fence_type, ordinal or None) behind an outbound fence-line feature id,
+    or None when fencing.py's outbound half did not build it.
+
+    A boundary or tree-zone id carries a 1-based ordinal; the water-zone id
+    carries none (there is one water fence, around the union of the
+    committed zones). An id with the prefix and anything else returns None
+    and is refused by the rehydrator rather than guessed at -- fencing is
+    SELECT-ONLY, so an id this module did not mint is not a fence.
+    """
+    if not isinstance(feature_id, str) or not feature_id.startswith(_FENCE_LINE_FEATURE_ID_PREFIX):
+        return None
+    tail = feature_id[len(_FENCE_LINE_FEATURE_ID_PREFIX):]
+    if tail == _FENCE_LINE_ID_SPELLINGS["water_zone_exclusion"]:
+        return ("water_zone_exclusion", None)
+    for fence_type in ("boundary", "tree_zone_exclusion"):
+        spelling = _FENCE_LINE_ID_SPELLINGS[fence_type]
+        if tail.startswith(spelling):
+            ordinal = tail[len(spelling):]
+            if ordinal.isdigit() and int(ordinal) >= 1:
+                return (fence_type, int(ordinal))
+            return None
+    return None
+
+
+def fence_lines_to_feature_collection(fencing_result: Optional[dict]) -> dict:
+    """
+    fencing.identify_fencing()'s result -> the FeatureCollection of
+    COMMITTABLE fence lines: every "perimeter_fencing" feature the module
+    built, unchanged, plus four properties this boundary stamps on each:
+
+        fence_index   1-based position among the features of its fence type
+        fence_count   how many features that type has
+        loop_count    closed rings in THIS feature (a MultiLineString fence
+                      around a severed zone is one feature, several loops)
+        length_ft     this feature's length, feet, one decimal -- read off
+                      the module's own narrative_data, never re-measured
+
+    plus ONE DISPLAY-ONLY property, fence_display_geometry.DISPLAY_ONLY_
+    FENCE_LINE_PROPERTY ("display_only_fence_line"): the feature's ring
+    angular-simplified and, for a zone ring, trimmed where it runs on top of
+    another drawn ring -- the two passes render_layout_map.py has always run
+    before drawing, computed by that module's ONE function on the wire side
+    too, in WGS84, or None where the trim left nothing to draw. NOTHING MAY
+    COMPUTE FROM IT: `geometry` stays the real ring, length_ft is read off
+    the narrative block (which measured the real UTM ring), and the
+    rehydrator never reads the field, so a trimmed display line and its
+    reported length legitimately disagree. See fence_display_geometry.py.
+
+    fence_index / fence_count are what make "commit a type, commit every
+    loop of it" checkable server-side (see check_fence_type_complete()).
+    They are stamped HERE and not in fencing.py's own *_to_geojson()
+    helpers, so the batch path's fencing_geojson -- what the layout map
+    draws and test_render_layout_map.py compares -- is byte-identical to
+    what it was. The roads payload rebuilds its collection with network_id
+    for the same reason.
+
+    THE "exclusion_fencing" LAYER IS FILTERED OUT. Stream exclusion fencing
+    is in the result (fencing_geojson carries it, narrative_data counts it)
+    and is NOT a candidate: it never appears in this collection, the
+    contract's `layers` would refuse it by name if a client sent it, and
+    the payload's summary reports it under narrative_only. That is the
+    whole of how a narrative-only fence stays out of the candidate set
+    without leaving the result.
+
+    None or an empty result yields an empty collection.
+    """
+    if not fencing_result:
+        return make_feature_collection([])
+    narrative = fencing_result.get("narrative_data") or {}
+    per_feature = {
+        row["feature_id"]: row
+        for block in narrative.get("fence_types", [])
+        for row in block.get("features", [])
+    }
+    features = [
+        f for f in fencing_result["fencing_geojson"]["features"]
+        if f["properties"].get("layer") == LAYER_PERIMETER_FENCING
+    ]
+    by_type = {}
+    for feature in features:
+        by_type.setdefault(feature["properties"].get("fence_type"), []).append(feature)
+
+    # THE DISPLAY LINES, computed ONCE for the whole collection because pass 2
+    # is a mutual trim: each zone ring is trimmed against every OTHER ring, so
+    # no feature's display line can be computed from that feature alone. In
+    # collection order, one entry per feature, None where nothing is left to
+    # draw. Zone rings are the two non-boundary candidate types; the boundary
+    # ring(s) are simplified and never trimmed. See fence_display_geometry.py.
+    display_lines = display_only_fence_lines_wgs84(
+        features, zone_fence_types=("water_zone_exclusion", "tree_zone_exclusion")
+    )
+
+    stamped = []
+    for feature, display_line in zip(features, display_lines):
+        fence_type = feature["properties"].get("fence_type")
+        siblings = by_type[fence_type]
+        row = per_feature.get(feature["id"], {})
+        stamped.append(
+            {
+                **feature,
+                "properties": {
+                    **feature["properties"],
+                    "fence_index": siblings.index(feature) + 1,
+                    "fence_count": len(siblings),
+                    "loop_count": row.get("loop_count"),
+                    "length_ft": row.get("length_ft"),
+                    DISPLAY_ONLY_FENCE_LINE_PROPERTY: display_line,
+                },
+            }
+        )
+    return make_feature_collection(stamped)
+
+
+def _line_shape_from_wire(geometry: dict, dem: dict, where: str):
+    """
+    One inbound GeoJSON LineString/MultiLineString -> a shapely line in
+    dem['crs'] metres, validated on the way: type, then part vertex counts,
+    then a non-empty, valid reprojection whose every part is a CLOSED ring
+    (every fence this module mints is a closed loop, and an open segment is
+    not a fence the pipeline produced).
+    """
+    from rasterio.warp import transform_geom
+    from shapely.geometry import shape as shapely_shape
+    from shapely.validation import explain_validity
+
+    if not isinstance(geometry, dict):
+        raise InboundGeometryError(f"{where}: geometry must be a GeoJSON geometry dict, got {type(geometry).__name__}")
+    geometry_type = geometry.get("type")
+    if geometry_type not in ("LineString", "MultiLineString"):
+        raise InboundGeometryError(
+            f"{where}: a committed fence must be a LineString or MultiLineString, got {geometry_type!r}. "
+            "A fence is a line; a Polygon is the ground it encloses, not the fence."
+        )
+    coordinates = geometry.get("coordinates")
+    if not coordinates:
+        raise InboundGeometryError(f"{where}: geometry has no coordinates")
+    parts = coordinates if geometry_type == "MultiLineString" else [coordinates]
+    for part_index, part in enumerate(parts):
+        distinct = {(float(position[0]), float(position[1])) for position in part}
+        if len(distinct) < 3:
+            raise InboundGeometryError(
+                f"{where}: part {part_index} has {len(distinct)} distinct vertex/vertices; a closed "
+                "fence loop needs at least 3."
+            )
+        if tuple(map(float, part[0][:2])) != tuple(map(float, part[-1][:2])):
+            raise InboundGeometryError(
+                f"{where}: part {part_index} is not a closed ring (first and last vertex differ). Every "
+                "fence this pipeline produces is a closed loop; an open segment is not one of them."
+            )
+
+    utm_line = shapely_shape(transform_geom("EPSG:4326", dem["crs"], geometry))
+    if utm_line.is_empty:
+        raise InboundGeometryError(f"{where}: geometry is empty after reprojection into {dem['crs']}")
+    if not utm_line.is_valid:
+        raise InboundGeometryError(
+            f"{where}: geometry is not valid -- {explain_validity(utm_line)}. Rehydration does not repair geometry."
+        )
+    if utm_line.geom_type not in ("LineString", "MultiLineString"):
+        raise InboundGeometryError(f"{where}: reprojection produced {utm_line.geom_type}, not a line")
+    if utm_line.length <= 0:
+        raise InboundGeometryError(f"{where}: the fence has zero length")
+    return utm_line
+
+
+def rehydrate_fence_line(feature: dict, dem: dict) -> dict:
+    """
+    One committed fence-line Feature -> the internal fence dict:
+
+        id              the wire feature id (the fence's only identity)
+        fence_type      READ -- "boundary" / "water_zone_exclusion" /
+                        "tree_zone_exclusion"; must agree with the id
+        fence_index, fence_count
+                        READ -- the feature's place in its type
+        line_utm        DERIVED -- the closed loop(s), in dem["crs"]
+        polygon_utm     the SAME line, aliased for the commit gate (see the
+                        section header: a fence has no area to contain)
+        geometry_wgs84  DERIVED -- line_utm back out to WGS84
+        length_meters   DERIVED -- line_utm's own length
+        loop_count      DERIVED -- closed rings in line_utm
+        buffer_meters, segment_index, candidate_rank
+                        READ when present -- the pass's own statements
+
+    SELECT-ONLY: an id this module's outbound half did not mint is refused,
+    never allocated one -- a fence nobody generated is not a fence.
+    """
+    from rasterio.warp import transform_geom
+    from shapely.geometry import mapping
+
+    if not isinstance(feature, dict) or feature.get("type") != "Feature":
+        raise InboundGeometryError("a committed fence must be a GeoJSON Feature")
+    feature_id = feature.get("id")
+    identity = internal_fence_line_identity(feature_id)
+    if identity is None:
+        raise InboundGeometryError(
+            f"feature {feature_id!r} is not a fence this pipeline generated (its id does not parse as "
+            f"'{_FENCE_LINE_FEATURE_ID_PREFIX}<type>[-<n>]'). Fencing is select-only: there is no drawing "
+            "tool and no id is invented."
+        )
+    fence_type, ordinal = identity
+    properties = feature.get("properties") or {}
+    if properties.get("layer") != LAYER_PERIMETER_FENCING:
+        raise InboundGeometryError(
+            f"feature {feature_id!r} carries layer {properties.get('layer')!r}; a committable fence is on "
+            f"{LAYER_PERIMETER_FENCING!r}."
+        )
+    if properties.get("fence_type") != fence_type:
+        raise InboundGeometryError(
+            f"feature {feature_id!r} carries fence_type {properties.get('fence_type')!r} but its id says "
+            f"{fence_type!r}; the two are one statement and they disagree."
+        )
+    fence_index = properties.get("fence_index")
+    fence_count = properties.get("fence_count")
+    for name, value in (("fence_index", fence_index), ("fence_count", fence_count)):
+        if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+            raise InboundGeometryError(
+                f"feature {feature_id!r} carries {name}={value!r}; a fence line carries its 1-based place "
+                "in its type and the type's feature count, stamped by fence_lines_to_feature_collection()."
+            )
+    if fence_index > fence_count:
+        raise InboundGeometryError(
+            f"feature {feature_id!r} is fence_index {fence_index} of fence_count {fence_count}."
+        )
+    if ordinal is not None and ordinal != fence_index:
+        raise InboundGeometryError(
+            f"feature {feature_id!r} carries fence_index {fence_index} but its id's ordinal is {ordinal}."
+        )
+
+    line_utm = _line_shape_from_wire(feature.get("geometry"), dem, f"feature {feature_id!r}")
+    loops = list(line_utm.geoms) if line_utm.geom_type == "MultiLineString" else [line_utm]
+
+    fence = {
+        "id": feature_id,
+        "fence_type": fence_type,
+        "fence_index": fence_index,
+        "fence_count": fence_count,
+        "line_utm": line_utm,
+        "polygon_utm": line_utm,
+        "geometry_wgs84": transform_geom(dem["crs"], "EPSG:4326", mapping(line_utm)),
+        "length_meters": float(line_utm.length),
+        "loop_count": len(loops),
+    }
+    for inherited in ("buffer_meters", "segment_index", "candidate_rank", "label"):
+        if inherited in properties:
+            fence[inherited] = properties[inherited]
+    return fence
+
+
+def rehydrate_fence_lines(collection: Optional[dict], dem: dict) -> list:
+    """
+    A whole committed fence FeatureCollection -> the list of internal fence
+    dicts, in feature order. The fencing step's committed value.
+
+    EMPTY IN, EMPTY OUT: [] is "no fencing", a real committed decision --
+    and, fencing being the LAST step, nothing downstream consumes it, so
+    no sentinel question arises. NO TYPE-COMPLETENESS CHECK HERE, for
+    rehydrate_road_networks()'s reason: the gate rehydrates one feature at
+    a time through this function; completeness is check_fence_type_
+    complete(), the contract's group_check, run over each type together.
+    """
+    features = (collection or {}).get("features") if isinstance(collection, dict) else collection
+    return [rehydrate_fence_line(feature, dem) for feature in list(features or [])]
+
+
+def check_fence_type_complete(fence_type, features: list) -> None:
+    """
+    The fencing contract's group_check, called by the gate as
+    check(fence_type, [features sharing that fence_type]). Raises
+    ValueError naming the defect when the group is not a WHOLE fence type.
+
+    A TAB IS A TYPE, NOT A LOOP. Committing "boundary fencing" on a parcel
+    whose drawn boundary split the fence into two rings commits BOTH rings;
+    committing "tree zone fencing" commits every tree zone's loop. A commit
+    carrying ring 1 without ring 2 is not a shorter fence, it is a fence
+    the pipeline never proposed. So every feature of the type must be
+    present: the fence_count values must agree, and the fence_index values
+    must be exactly 1..fence_count with no gap and no repeat.
+    """
+    if fence_type not in _FENCE_LINE_ID_SPELLINGS:
+        raise ValueError(
+            f"fence_type {fence_type!r} is not one of the three candidate fence types "
+            f"{sorted(_FENCE_LINE_ID_SPELLINGS)}."
+        )
+    counts = {(f.get("properties") or {}).get("fence_count") for f in features}
+    if len(counts) != 1:
+        raise ValueError(
+            f"the {fence_type!r} features disagree about how many features the type has: {sorted(counts, key=str)}."
+        )
+    (count,) = counts
+    if not isinstance(count, int) or isinstance(count, bool) or count < 1:
+        raise ValueError(f"the {fence_type!r} features carry fence_count={count!r}; it is a positive integer.")
+    indexes = sorted((f.get("properties") or {}).get("fence_index") for f in features)
+    if indexes != list(range(1, count + 1)):
+        raise ValueError(
+            f"committing {fence_type!r} commits every one of its {count} fence line(s) (fence_index "
+            f"1..{count}); this commit carries fence_index {indexes}. A fence type is committed whole or "
+            "not at all."
+        )
+
+
+# ======================================================================
+# The reductions the fencing entry's consumes edges declare (Consumed.combine)
+# ======================================================================
+#
+# Each is a SHAPE statement about a resolved committed value, not a place
+# to compute (step_registry.Consumed's ONE SOURCE, ANOTHER SHAPE rule): a
+# list comprehension over one field, or a field read.
+
+
+def production_zone_polygons(patches) -> list:
+    """
+    The committed production ground as the LIST of render-fill polygons
+    fencing.identify_fencing() takes under production_zone_polygons_utm=
+    -- exactly what render_layout_map.fetch_layout_layers() extracts from
+    context.production_areas for the same parameter, so the session path's
+    boundary fence protects the same polygons the batch path's does. []
+    for an empty landform commit: no production ground in the developed
+    footprint, which is that parameter's own "none" and needs no sentinel.
+    """
+    return [
+        patch["render_fill_polygon_utm"]
+        for patch in (patches or [])
+        if patch.get("render_fill_polygon_utm") is not None and not patch["render_fill_polygon_utm"].is_empty
+    ]
+
+
+def structure_site_polygons(sites) -> list:
+    """
+    The committed structure sites -- ANY NUMBER, selected candidates and
+    placed sites alike -- as the LIST of pads (each site's polygon_utm, in
+    the DEM's CRS) fencing.identify_fencing() takes under structure_site_
+    polygons_utm=. Each pad is one more developed part in the boundary
+    fence's footprint union, beside the production zones; no site is
+    picked over another and nothing is unioned here, because the boundary
+    fence's own step 1 is the union.
+
+    THE REDUCTION THE STRUCTURES ENTRY SAID FENCING WOULD DECLARE turns out
+    to be none at all: the consumer takes a list. [] for an empty
+    structures commit is "no building to enclose", which is what None
+    already meant to this consumer -- fencing never self-computes a site.
+    """
+    return [
+        site["polygon_utm"]
+        for site in (sites or [])
+        if site.get("polygon_utm") is not None and not site["polygon_utm"].is_empty
+    ]
+
+
+def selected_road_network_footprint(networks):
+    """
+    The committed road networks -> the ONE undilated cell footprint
+    fencing.identify_fencing() takes under road_corridor_cell_footprint_
+    polygon_utm=, or None when the roads commit is EMPTY.
+
+    A SECOND READ OF THE SAME COMMIT, and why. identify_fencing() takes
+    the road in two shapes: selected_road_corridor= (the network dict,
+    which only the nested tree self-compute reads, and which carries the
+    NO_ROAD_CORRIDOR sentinel) and road_corridor_cell_footprint_polygon_
+    utm= (the polygon the boundary fence actually protects, which the
+    entry point does NOT derive from the network -- render_layout_map.
+    fetch_layout_layers() extracts it). The registry declares one edge
+    per shape, both off the roads commit; this is the second edge's
+    reduction. None, not the sentinel, for an empty commit: this parameter
+    has no self-compute behind it, so None already means "no corridor"
+    and the sentinel would be a bare object() where a polygon is read.
+    """
+    if not networks:
+        return None
+    return road_network_footprint(selected_road_network(networks))

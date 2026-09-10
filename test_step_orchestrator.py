@@ -1080,20 +1080,26 @@ with Harness() as h:
     # A step with no registry entry fails BEFORE a job exists: the request
     # was wrong, and there is nothing to poll for.
     #
-    # "fencing", NOT "water", "roads", "trees" or "structures": all have registry entries as of their
-    # branches. A real STEP_ORDER step whose entry is not written yet and a
-    # step the document has never heard of are still told apart in the
-    # message, which is the assertion -- it just needs a step that is
-    # genuinely unwritten.
+    # EVERY STEP_ORDER STEP HAS AN ENTRY as of the fencing branch, so the
+    # "real step, entry not written" case is exercised with fencing's entry
+    # deliberately removed. A real STEP_ORDER step whose entry is missing
+    # and a step the document has never heard of are still told apart in
+    # the message, which is the assertion.
     edge_failures = 0
-    for bad_step in ("fencing", "orchards"):
-        try:
-            step_orchestrator.generate_step(
-                session_id, bad_step, store,
-                fetch_cache=fetch_cache, cache=cache, runner=runner,
-            )
-        except step_registry.RegistryError:
-            edge_failures += 1
+    _full_registry = step_registry.STEP_REGISTRY
+    step_registry.STEP_REGISTRY = {k: v for k, v in _full_registry.items() if k != "fencing"}
+    try:
+        for bad_step in ("fencing", "orchards"):
+            try:
+                step_orchestrator.generate_step(
+                    session_id, bad_step, store,
+                    fetch_cache=fetch_cache, cache=cache, runner=runner,
+                )
+            except step_registry.RegistryError as exc:
+                assert ("no registry entry yet" if bad_step == "fencing" else "unknown step id") in str(exc)
+                edge_failures += 1
+    finally:
+        step_registry.STEP_REGISTRY = _full_registry
     assert edge_failures == 2
 
     # Landform declares NO user inputs, so any params is an error rather

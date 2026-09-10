@@ -593,27 +593,34 @@ _survey_nd = {
     ],
     "selection": {"selected_zone_id": 0, "selected_survey_type": "excavated",
                   "selection_rule": "pooled_member_mean_suitability_member_acreage_tiebreak"},
+    # THE PRESENTATION BLOCK: the rule applied and the per-type SURVIVOR
+    # totals. Two survivors, both presented -- the count is a cap, so
+    # there is nothing to hold back and the prose must not pretend there
+    # is (the "first N are the ones to lead with" phrasing would invent
+    # a distinction this run does not have).
+    "presentation": {
+        "presentation_count": 4,
+        "per_type_count": 2,
+        "survivor_counts": {"embankment": 1, "excavated": 1},
+        "presented_count": 2,
+        "presented_counts": {"embankment": 1, "excavated": 1},
+        "base_counts": {"embankment": 1, "excavated": 1},
+        "backfill_counts": {"embankment": 0, "excavated": 0},
+        "backfill_applied": False,
+        "presented_zone_ids": [1, 0],
+        "rule_applied": "1 embankment + 1 excavated",
+    },
     "zones": [
-        {"id": 0, "survey_type": "excavated", "rank": 1, "member_count": 2,
-         "member_acres": 1.4, "zone_acres": 2.6,
-         "mean_suitability": 0.71, "max_suitability": 0.83,
-         "criteria": {"wetness": {"weight": 0.35, "mean_score": 0.82},
-                      "soil": {"weight": 0.30, "mean_score": 0.9},
-                      "slope": {"weight": 0.25, "mean_score": 0.95},
-                      "drainage_runon": {"weight": 0.10, "mean_score": 0.1}},
-         "twi_score_mean": 0.88, "depression_depth_max_ft": 1.3,
-         "contributing_area_acres_at_wettest_cell": 3.2, "boundary_adjacency_pct": 42.0,
-         "overlaps": {"canopy_pct": 12.5, "road_pct": None, "production_pct": 0.0},
-         "gravity": {"has_service_relationship": True, "can_gravity_feed": False,
-                     "production_area_id": 3, "elevation_differential_ft": -18.4, "distance_ft": 210.0},
-         "flags": ["sparse_anchor"], "below_min_area": False, "sparse_anchor": True,
-         "truncated_by_road": False,
-         "cross_type_overlaps": [{"zone_id": 1, "overlap_pct": 62.0}], "either_type_candidate": True,
-         "confidence": "high"},
+        # LISTED IN PRESENTATION ORDER, the shape build_narrative_data()
+        # emits: the embankment compartment is presentation #1 (the
+        # interleave leads with embankment), the excavated zone #2. Both
+        # are presented here -- two survivors is under the cap -- so this
+        # fixture drives the "everything surviving is also presented" arm
+        # of the counts line; the capped arm has its own fixture below.
         # The embankment block is a VALLEY COMPARTMENT since the
         # compartment change: no members, the SEED's anchor claim beside
         # the compartment's own criterion means (the honesty split).
-        {"id": 1, "survey_type": "embankment", "rank": 1, "zone_acres": 0.8,
+        {"id": 1, "survey_type": "embankment", "rank": 1, "presented": True, "presentation_order": 1, "zone_acres": 0.8,
          "mean_suitability": 0.55, "max_suitability": 0.61,
          "seed_blend_score": 0.73,
          "seed_criteria_signature": {"slope": 1.0, "soil": 0.5, "twi": 0.9},
@@ -640,6 +647,23 @@ _survey_nd = {
          "flags": ["truncated_by_boundary", "no_service_relationship"], "below_min_area": False,
          "cross_type_overlaps": [], "either_type_candidate": False,
          "confidence": "medium"},
+        {"id": 0, "survey_type": "excavated", "rank": 1, "presented": True, "presentation_order": 2, "member_count": 2,
+         "member_acres": 1.4, "zone_acres": 2.6,
+         "mean_suitability": 0.71, "max_suitability": 0.83,
+         "criteria": {"wetness": {"weight": 0.35, "mean_score": 0.82},
+                      "soil": {"weight": 0.30, "mean_score": 0.9},
+                      "slope": {"weight": 0.25, "mean_score": 0.95},
+                      "drainage_runon": {"weight": 0.10, "mean_score": 0.1}},
+         "twi_score_mean": 0.88, "depression_depth_max_ft": 1.3,
+         "contributing_area_acres_at_wettest_cell": 3.2, "boundary_adjacency_pct": 42.0,
+         "overlaps": {"canopy_pct": 12.5, "road_pct": None, "production_pct": 0.0},
+         "gravity": {"has_service_relationship": True, "can_gravity_feed": False,
+                     "production_area_id": 3, "elevation_differential_ft": -18.4, "distance_ft": 210.0},
+         "flags": ["sparse_anchor"], "below_min_area": False, "sparse_anchor": True,
+         "truncated_by_road": False,
+         "cross_type_overlaps": [{"zone_id": 1, "overlap_pct": 62.0}], "either_type_candidate": True,
+         "confidence": "high"},
+
     ],
 }
 _survey_prose = _format_water_survey_areas_summary(_survey_nd)
@@ -664,10 +688,16 @@ assert "calibrated at the 5 m reference DEM" in _survey_prose, (
     "the resolution-calibration caveat that REPLACED it must reach the prompt, so the report "
     "states the real limitation instead of the retired one"
 )
-assert "All 2 surviving zone(s) are listed, ranked per type -- no presentation cap" in _survey_prose, (
-    "the counts line states that everything surviving is shown -- the cap is deleted"
+assert "All 2 surviving zone(s) are listed and presented, ranked per type" in _survey_prose, (
+    "with every survivor inside the presented set the counts line says exactly that -- no "
+    "'the first N are the ones to lead with' distinction this run does not have"
 )
+assert "nothing surviving is held back" in _survey_prose
 assert "you decide which to walk" in _survey_prose
+assert "presented #1" in _survey_prose and "presented #2" in _survey_prose, (
+    "each zone's sentence carries its place in the presented set, so the prose's order is "
+    "attributable to the rule rather than to the order the blocks happened to arrive in"
+)
 assert "1 zone(s) were dropped (under the 0.1-acre floor, or a duplicate of a better-seeded compartment)" in _survey_prose, (
     "the drops are stated with their possible reasons, never silent"
 )
@@ -763,6 +793,68 @@ assert "No water survey areas were identified" in _format_water_survey_areas_sum
 print("_format_water_survey_areas_summary(): excavated dual-acreage and compartment honesty-split "
       "sentences, seed-failure accounting, the TWI caveat, pump/no-service gravity cases, overlap "
       "sentinels, flags, and the tuning note all rendered; no-region and missing blocks read as no data.")
+
+# --- THE CAPPED ARM of the counts line: MORE SURVIVORS THAN THE
+# PRESENTED SET HOLDS. This is the arm that has to get the claim exactly
+# right, because it is the one where the prose could mislead: the
+# presented set leads, the rest are still described in full below it,
+# and the sentence must say so rather than reading as a shortlist. Built
+# from the fixture above with three extra embankment survivors, so the
+# rule backfills a third embankment into the excavated zone's missing
+# second slot.
+_capped_nd = dict(_survey_nd)
+_capped_extra = []
+for _extra_rank, _extra_id in ((2, 2), (3, 3), (4, 4)):
+    _extra = dict(_survey_nd["zones"][0])
+    _extra.update({
+        "id": _extra_id,
+        "rank": _extra_rank,
+        "presented": _extra_rank <= 3,
+        "presentation_order": {2: 3, 3: 4}.get(_extra_rank),
+        "cross_type_overlaps": [],
+        "either_type_candidate": False,
+    })
+    _capped_extra.append(_extra)
+_capped_nd["zones"] = [
+    _survey_nd["zones"][0], _survey_nd["zones"][1], _capped_extra[0], _capped_extra[1],
+    _capped_extra[2],
+]
+_capped_nd["zone_count"] = 5
+_capped_nd["embankment_zone_count"] = 4
+_capped_nd["presentation"] = {
+    "presentation_count": 4,
+    "per_type_count": 2,
+    "survivor_counts": {"embankment": 4, "excavated": 1},
+    "presented_count": 4,
+    "presented_counts": {"embankment": 3, "excavated": 1},
+    "base_counts": {"embankment": 2, "excavated": 1},
+    "backfill_counts": {"embankment": 1, "excavated": 0},
+    "backfill_applied": True,
+    "presented_zone_ids": [1, 0, 2, 3],
+    "rule_applied": "2 embankment + 1 excavated + 1 embankment backfill",
+}
+_capped_prose = _format_water_survey_areas_summary(_capped_nd)
+assert "All 5 surviving zone(s) are listed, ranked per type (4 embankment, 1 excavated)" in _capped_prose, (
+    "WHAT WAS CONSIDERED, stated as per-type survivor totals, beside what is shown"
+)
+assert "The first 4 below are the ones to lead with" in _capped_prose, "what is shown, and that it leads"
+assert "2 embankment + 1 excavated + 1 embankment backfill" in _capped_prose, (
+    "the rule itself, in the prose -- the report explains its own presented set"
+)
+assert "the rest are described in full after them and are not ruled out" in _capped_prose, (
+    "THE CLAIM THAT KEEPS THIS HONEST: an unpresented survivor is not a rejected one, and the "
+    "prose that leads with four must say so or it reads as a shortlist"
+)
+assert "presented #4" in _capped_prose, "the fourth slot -- the backfilled compartment -- is marked"
+assert "also surviving -- below the presented set" in _capped_prose, (
+    "and the unpresented one says what it is, rather than reading as an unexplained extra"
+)
+assert "nothing surviving is held back" not in _capped_prose, (
+    "the uncapped arm's sentence must not appear on a run that does hold zones back from the lead"
+)
+print("_format_water_survey_areas_summary(): the capped arm names the presented set, the rule that "
+      "produced it, the per-type survivor totals, and states that the rest are described below and "
+      "not ruled out.")
 
 _solar_nd = {
     "site_found": True,

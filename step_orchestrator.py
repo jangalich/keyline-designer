@@ -112,14 +112,11 @@ import commit_validation
 import design_document
 import job_runner
 import production_zone_payload
+import run_diagnostics
 import session_cache
 import session_manager
 import step_registry
 from design_document import mark_step_generated
-# THE DISPLAY-ONLY OUTLINE'S OWN MODULE: the smoothing, and the ONE spelling of
-# the property it rides under -- landform's payload reads the same constant, so
-# the two steps cannot ship a frontend two names for one field.
-from display_outline import DISPLAY_ONLY_OUTLINE_PROPERTY, smoothed_display_outline
 # The two ENVELOPE layer names, from the module that mints them -- never
 # re-typed here (build_water_payload()'s feature_id lookup filters on them,
 # and "starts with survey_zone_" is true of the member layers too).
@@ -1007,6 +1004,17 @@ def _generate(
     # read from it.
     document = store.get(session_id)
 
+    # THE DIAGNOSTIC PROBE, HERE AND NOT LOWER DOWN. It samples the two
+    # cache states, and the next statement destroys both answers:
+    # get_session_context() populates the session cache on a miss and the
+    # fetch cache on a cold boundary, so after it the answer is "warm"
+    # either way. None when diagnostics are off, and then every later
+    # call on it returns on that None -- see run_diagnostics.py's OFF BY
+    # DEFAULT section.
+    probe = run_diagnostics.begin_generate(
+        session_id, definition.step_id, document, fetch_cache=fetch_cache, cache=cache
+    )
+
     # A cache hit, or a rebuild from that document. Either way the terrain
     # warm-up's products are in hand and NOTHING upstream recomputes on a
     # hit -- which is what makes regenerating cheap and what
@@ -1019,7 +1027,9 @@ def _generate(
     assembled = assemble_consumes(definition, context, document)
 
     if definition.accumulate:
-        return _generate_accumulated(definition, store, context, document, assembled, params)
+        return _generate_accumulated(
+            definition, store, context, document, assembled, params, probe=probe
+        )
 
     result = _run_entry_point(definition, assembled, params)
 
@@ -1031,6 +1041,12 @@ def _generate(
     context.step_proposals[definition.step_id] = result
 
     payload = definition.resolve_payload()(result, assembled)
+
+    # The record, over the result and the payload THIS generate produced
+    # -- both already in hand, neither recomputed for it. Before the
+    # document write only because a write that failed would otherwise
+    # lose the record of the generate that preceded it.
+    run_diagnostics.record_generate(probe, result, payload, context)
 
     # The ONLY document write a generate makes. mark_step_generated() is a
     # no-op on a step already generated, so a regenerate does not bump
@@ -1117,7 +1133,7 @@ def _discard_empty_candidate(definition, store, context, document, key: str) -> 
         proposals.pop(key, None)
 
 
-def _generate_accumulated(definition, store, context, document, assembled, params) -> tuple:
+def _generate_accumulated(definition, store, context, document, assembled, params, probe=None) -> tuple:
     """
     The accumulate branch of _generate(): (payload, document).
 
@@ -1158,6 +1174,11 @@ def _generate_accumulated(definition, store, context, document, assembled, param
     proposals[key] = {"inputs": params, "result": result}
 
     payload = definition.resolve_payload()(proposals, assembled)
+
+    # THIS candidate set's result, not the accumulated store: the record
+    # is of the generate that just ran, and the sets it did not touch
+    # were recorded by the generates that produced them.
+    run_diagnostics.record_generate(probe, result, payload, context)
 
     updated = mark_step_generated(document, definition.step_id)
     recorded = recorded_candidate_inputs(definition, updated["steps"][definition.step_id])
@@ -1583,6 +1604,42 @@ def build_water_payload(result: dict, assembled: dict) -> dict:
     carries no zone_id of its own kind and a dropped zone is not in this
     collection at all.
 
+    THE PROPOSALS ARE NARROWED TO THE PRESENTED SET, AND THIS IS THE ONE
+    PLACE IN THE PIPELINE THAT NARROWS ANYTHING FOR PRESENTATION. Everywhere
+    else presentation MARKS (water_survey_areas.WATER_ZONE_PRESENTATION_COUNT
+    and its note): every surviving zone keeps its record, its panel block and
+    its feature. Here -- the INTERACTIVE STEP'S wire payload, and nothing
+    else -- only the presented zones are sent, with the unpresented survivors
+    withheld and NAMED as withheld under summary['presentation'].
+
+    WHAT THAT COSTS, stated because it is a real cost and not a tidy-up:
+
+      * A WITHHELD ZONE CANNOT BE SELECTED OR COMMITTED. The step commits out
+        of this collection, so a survivor that is not here is a survivor the
+        user cannot choose however much they might want to. That is the
+        decision this narrowing IS; it is not a side effect of it.
+      * A COMMITTED ZONE CAN FALL OUT OF THE PROPOSALS on a later reopen, if
+        the inputs moved enough between commit and reopen to change the ranks
+        the presented set is drawn from. restore_step_state() already reports
+        exactly that case as `missing_feature_ids` -- "REPORTED RATHER THAN
+        SWALLOWED", its own words -- so the case surfaces rather than
+        silently dropping a user's selection. Before this narrowing that
+        report could only fire on an id instability the backend asserts
+        against; now it has a second, reachable cause, and it is the reason
+        the withheld ids are on the wire rather than merely absent.
+
+    WHAT IT DOES NOT TOUCH, checked rather than assumed:
+
+      * THE BATCH PIPELINE. pipeline_context.build_pipeline_context() reads
+        `water_system_result["zones_geojson"]["features"]` directly, never
+        this payload, so PipelineContext.water_zones is still every survivor.
+      * THE REPORT AND THE DIAGNOSTIC. build_narrative_data() still carries
+        every surviving zone's block (this function narrows its own copy of
+        `zones`, not the narrative), and the diagnostic export builds its own
+        collection from the result including the dropped layer.
+      * SELECTION. selected_water_zone is the pooled rank-1 off the surviving
+        set and is indifferent to presentation, here as everywhere.
+
     `assembled` is the orchestrator's consumes dict. Unread here -- every
     value this payload needs is on `result` -- and taken anyway because the
     payload signature is the registry's, not this step's. The landform
@@ -1590,6 +1647,12 @@ def build_water_payload(result: dict, assembled: dict) -> dict:
     folded its inputs into the result.
     """
     narrative = result["narrative_data"]
+    # THE RULE, off the narrative rather than off the result's own top-level
+    # copy: build_narrative_data() already carries it (verbatim, see its
+    # ['presentation'] note) and this function reads the narrative for
+    # everything else, so taking it from there keeps the result contract this
+    # builder depends on to the one key it already had.
+    presentation = narrative["presentation"]
 
     # THE WIRE FEATURE ID, CARRIED RATHER THAN REBUILT -- see this
     # function's own note. Keyed by the internal zone_id the feature
@@ -1600,10 +1663,46 @@ def build_water_payload(result: dict, assembled: dict) -> dict:
         if feature["properties"]["layer"] in LAYER_SURVEY_ZONES
     }
 
+    # THE NARROWING, over the SAME collection the lookup above read. A zone
+    # envelope rides only if it is presented; a member footprint rides only
+    # if the zone it belongs to does, because a member with no parent
+    # envelope on the wire is a sub-feature of nothing. Features are SELECTED
+    # AND REORDERED, never rebuilt: every feature that ships is the exact
+    # object the entry point built -- the "carries the collection through
+    # unchanged" property above, preserved for the features that survive.
+    envelope_by_zone_id = {}
+    members_by_zone_id = {}
+    for feature in result["zones_geojson"]["features"]:
+        feature_properties = feature["properties"]
+        if feature_properties["layer"] in LAYER_SURVEY_ZONES:
+            envelope_by_zone_id[feature_properties["zone_id"]] = feature
+        else:
+            members_by_zone_id.setdefault(feature_properties["zone_id"], []).append(feature)
+
+    # IN PRESENTATION ORDER, each zone's members immediately behind it. The
+    # order is not cosmetic here: the client builds its tab strip by walking
+    # this collection, so the collection's order IS the order someone reads
+    # the zones in, and shipping the presented set in pipeline id order would
+    # have computed a presentation order and then not used it.
+    presented_features = []
+    for zone_id in presentation["presented_zone_ids"]:
+        presented_features.append(envelope_by_zone_id[zone_id])
+        presented_features.extend(members_by_zone_id.get(zone_id, ()))
+
+    # WHAT WAS WITHHELD, BY NAME. The counts in `summary` are the pipeline's
+    # and still describe every survivor (zone_count, the per-type counts, the
+    # dropped count); these two say what THIS WIRE FORM did on top of that.
+    # Named rather than left as an absence for the same reason a dropped zone
+    # carries a drop_reason: "not here" and "does not exist" must never be
+    # the same wire state, and narrowing the collection is precisely the move
+    # that would otherwise make them one.
+    withheld_zone_ids = [row["id"] for row in narrative["zones"] if not row["presented"]]
+
     return {
-        # The proposals. Named by the water entry's proposal_collection, which
-        # is what the reopen restore matches committed ids against.
-        "survey_zones": result["zones_geojson"],
+        # The proposals, NARROWED TO THE PRESENTED SET -- see this function's
+        # own note. Named by the water entry's proposal_collection, which is
+        # what the reopen restore matches committed ids against.
+        "survey_zones": {**result["zones_geojson"], "features": presented_features},
         # The tabular half, as `zones` is for landform: build_narrative_data()
         # has already reduced every surviving zone to the imperial,
         # JSON-native block the report reads (dual acreage, the criterion
@@ -1611,9 +1710,15 @@ def build_water_payload(result: dict, assembled: dict) -> dict:
         # block, the cross-type finding) AND the curated `panel` rows the
         # map's zone tab renders -- a subset and a reordering of the same
         # block, never a second source. Only `feature_id` is added here.
+        # PRESENTED ROWS ONLY, in narrative order -- which IS presentation
+        # order, because build_narrative_data() sorts the presented set first
+        # by presentation_order. A row for a zone whose feature is not in the
+        # collection above would be a tab with nothing to select and a panel
+        # for ground the map never draws.
         "zones": [
             {**row, "feature_id": feature_id_by_zone_id[row["id"]]}
             for row in narrative["zones"]
+            if row["presented"]
         ],
         # THE STEP-LEVEL BLOCK, whole. Counts per type, the dropped count, the
         # gate accounting, the threshold and grouping distance the zones were
@@ -1621,7 +1726,19 @@ def build_water_payload(result: dict, assembled: dict) -> dict:
         # Passed as one object rather than spread into the payload's top level
         # so the panel reads the same block the report does.
         "summary": {
-            key: value for key, value in narrative.items() if key not in ("zones", "scales")
+            **{key: value for key, value in narrative.items() if key not in ("zones", "scales")},
+            # The pipeline's own presentation block, plus what this payload
+            # withheld on top of it. Merged rather than replaced: the rule
+            # applied and the per-type SURVIVOR totals are the pipeline's
+            # answer and stay verbatim.
+            "presentation": {
+                **narrative["presentation"],
+                "withheld_count": len(withheld_zone_ids),
+                "withheld_zone_ids": withheld_zone_ids,
+                "withheld_feature_ids": [
+                    feature_id_by_zone_id[zone_id] for zone_id in withheld_zone_ids
+                ],
+            },
         },
         # HOW TO READ EVERY SCORED VALUE IN A PANEL ROW, at the payload's
         # top level exactly where the production payload puts its own --
@@ -1759,15 +1876,29 @@ def build_trees_payload(result: dict, assembled: dict) -> dict:
     computation to include. It is a diagnostic of THIS generate, not a
     gate: drawing outside it is legal and its cautions are the crossings.
 
-    THE ONE THING ADDED TO THE FEATURES: `display_only_smoothed_outline`, on
-    every candidate, put there by _with_display_only_outlines() below. A tree
-    zone is a union of 5 m DEM cells and its outline is a right-angle
-    staircase; this is that staircase smoothed, by the same
-    smoothed_display_outline() the PDF's layout map uses, so
-    the interactive map and the printed one agree. It is DISPLAY ONLY --
-    nothing computes from it, the feature's own `geometry` is untouched, and
-    the crossings below are still measured against real geometry. See
-    display_outline.py.
+    NOTHING IS ADDED TO THE FEATURES, and the one thing that used to be is
+    the reason this paragraph is still here. Tree candidates once shipped
+    `display_only_smoothed_outline`, on the argument that a tree zone is a
+    union of 5 m DEM cells and its staircase should be smoothed the way
+    production's is. That argument does not survive contact with what the
+    layout map actually draws: render_layout_map.py smooths the PRODUCTION
+    FILL, because that geometry is what its contour lines are clipped against
+    and a 5 m staircase shows in the clip; it draws the TREE hatch from the
+    cell-union footprint verbatim -- "no hull, no opening, no smoothing of any
+    kind" -- so a smoothed outline on a tree feature made the interactive map
+    disagree with the printed one rather than agree with it.
+
+    AND THE SMOOTH WAS ANTI-EXTENSIVE, WHICH IS THE PART THAT MATTERED. A
+    simplify-plus-Chaikin pass on a cell union cuts corners inward; measured
+    on the reference parcel it moved 19.56% of a 0.32 ac candidate, all of it
+    a loss, which is exactly the thin-arm deletion tree_zone_candidates.py's
+    own render docstring refuses an opening for. A windbreak row one cell wide
+    is the geometry this layer exists to find, and it was being eaten for a
+    cosmetic reason the PDF does not share.
+
+    PRODUCTION STILL CARRIES ITS OUTLINE, unchanged, through
+    production_zone_payload.py -- there it does match the layout map, byte for
+    byte. See display_outline.py, which owns the rule and the smoothing.
 
     `crossing_grounds` IS WHAT THOSE CAUTIONS ARE MEASURED AGAINST: the
     contract's four grounds, resolved off `assembled` exactly as the commit
@@ -1782,9 +1913,7 @@ def build_trees_payload(result: dict, assembled: dict) -> dict:
         for feature in result["zones_geojson"]["features"]
     }
     return {
-        "tree_zones": _with_display_only_outlines(
-            result["zones_geojson"], result["patches"], assembled["dem"]
-        ),
+        "tree_zones": result["zones_geojson"],
         "zones": [
             {**row, "feature_id": feature_id_by_rank[row["rank"]]}
             for row in narrative["zones"]
@@ -1893,71 +2022,81 @@ def build_structures_payload(result: dict, assembled: dict) -> dict:
     }
 
 
-def _with_display_only_outlines(collection: dict, patches: list, dem: dict) -> dict:
+def build_fencing_payload(result: dict, assembled: dict) -> dict:
     """
-    `collection` with every feature carrying its patch's DISPLAY-ONLY smoothed
-    outline in properties, as a WGS84 GeoJSON geometry.
+    The fencing step's wire payload: the committable fence lines, the
+    per-type blocks the panel's tabs are built from, and the step-level
+    block.
 
-    NOTHING MAY COMPUTE FROM THE FIELD. It is a rendering of the feature's own
-    geometry, not a second version of it -- see display_outline.py, which owns
-    both the rule and the smoothing. The feature's `geometry`, its acreage, its
-    factors and the crossings the commit records are all untouched.
+        {
+          "fence_lines": FeatureCollection,   # every "perimeter_fencing" feature,
+                                              #   stamped fence_index / fence_count /
+                                              #   loop_count / length_ft
+          "fence_types": [                    # ALWAYS ALL THREE, in fencing.
+            {                                 #   CANDIDATE_FENCE_TYPES order
+              "fence_type", "label", "generated", "candidate",
+              "loop_count", "feature_count", "total_length_ft",
+              "feature_ids", "features", "reason"
+            }, ...
+          ],
+          "candidate_fence_types": [...],     # the tabs: the types with candidate=True
+          "summary": {...},                   # the rest of build_narrative_data()
+        }
 
-    COMPUTED HERE, INSIDE THE GENERATE, and not lazily when the layers are
-    fetched: this builder is what a generate returns and what step_payload()
-    rebuilds on a re-read, so the outline is part of the payload wherever the
-    payload comes from. It costs one simplify plus one Chaikin pass per
-    candidate over geometry already in hand.
+    A TAB IS A TYPE. `fence_types` is what the panel renders one tab per
+    candidate from -- the type, its SUMMED length over every loop, its loop
+    count, and `feature_ids`, the ids in `fence_lines` a commit of that
+    type carries (all of them; the contract's group_check enforces that).
+    The geometry is in `fence_lines`, one feature per loop, so the map
+    draws what the tab describes -- and each feature also carries its
+    DISPLAY-ONLY line under fence_display_geometry.DISPLAY_ONLY_FENCE_LINE_
+    PROPERTY, the angular-simplified, coincidence-trimmed rendering the PDF
+    draws, which the map draws too and from which nothing may compute. `features` is the per-feature breakdown
+    of the same measurements, kept because a boundary fence split into two
+    rings is one type and a reader may want to see the split.
 
-    SMOOTHED FROM THE PATCH, NOT FROM THE WIRE. The patch holds
-    render_fill_polygon_utm in the DEM's own projected metres, which is where a
-    metre-denominated tolerance means anything; reprojecting the feature's
-    WGS84 ring back to UTM to smooth it would be a second, lossy route to the
-    same geometry. tree_zone_candidates.py records the same object under
-    polygon_utm and render_fill_polygon_utm ("a tree zone is a real planted
-    footprint"), so the smooth and its re-clip run against one shape here --
-    the same call production's opening takes.
+    ABSENCE IS EXPLICIT. A type with nothing to fence (water committed
+    empty, trees committed empty) is IN the list with generated=False,
+    loop_count 0, total_length_ft None and a reason -- distinguishable from
+    a type whose pass ran and produced nothing (generated=True, loop_count
+    0, total_length_ft 0.0) and from a candidate. Nothing is inferred from
+    a missing key. `candidate_fence_types` is the same answer as a list, so
+    the tab count (one to three) is one read.
 
-    JOINED ON `rank`, the same join build_trees_payload() already makes to put
-    `feature_id` on a tabular row: ranks are 1..n and unique, assigned by the
-    scorer, and both sides carry one. Rebuilding the feature id from the patch
-    id with a format string is the thing this codebase keeps taking out -- one
-    identity with two sources of truth, joined by a template literal nothing
-    checks.
+    NARRATIVE-ONLY FENCING STAYS OUT OF fence_lines AND IN summary. Stream
+    exclusion fencing is computed, is in the result's fencing_geojson, and
+    is counted with its own summed length under summary.narrative_only;
+    it is filtered out of fence_lines by layer (wire_translation.fence_
+    lines_to_feature_collection) so it is never a candidate. Road fencing
+    is listed there with generated=False and the module's reason.
 
-    A PATCH WITH NO FEATURE, OR A FEATURE WITH NO PATCH, IS NOT AN ERROR TO
-    RAISE HERE: a feature the join misses carries None and draws its own
-    geometry, which is what a client does for a drawn zone anyway. A display
-    field is the wrong place to fail a generate.
+    UNITS: FEET, one decimal, converted in fencing.build_narrative_data()
+    and never here -- the road entry's precedent and the report's own
+    convention. Nothing is recomputed, coerced or defaulted in this
+    function; every number is read off the result's narrative block.
+
+    `assembled` is unread: everything this payload needs is on `result`.
     """
-    outlines = {}
-    for patch in patches or []:
-        polygon_utm = patch["render_fill_polygon_utm"]
-        if polygon_utm.is_empty:
-            continue
-        outline_utm = smoothed_display_outline(
-            polygon_utm, patch["polygon_utm"], max(dem["resolution_meters"])
-        )
-        if outline_utm.is_empty:
-            continue
-        outlines[patch["rank"]] = transform_geom(
-            dem["crs"], "EPSG:4326", mapping(outline_utm)
-        )
+    from wire_translation import fence_lines_to_feature_collection
+
+    narrative = result["narrative_data"]
+    fence_lines = fence_lines_to_feature_collection(result)
+    ids_by_type = {}
+    for feature in fence_lines["features"]:
+        ids_by_type.setdefault(feature["properties"]["fence_type"], []).append(feature["id"])
 
     return {
-        **collection,
-        "features": [
-            {
-                **feature,
-                "properties": {
-                    **feature["properties"],
-                    DISPLAY_ONLY_OUTLINE_PROPERTY: outlines.get(
-                        feature["properties"].get("rank")
-                    ),
-                },
-            }
-            for feature in collection["features"]
+        "fence_lines": fence_lines,
+        "fence_types": [
+            {**block, "feature_ids": ids_by_type.get(block["fence_type"], [])}
+            for block in narrative["fence_types"]
         ],
+        "candidate_fence_types": list(narrative["candidate_fence_types"]),
+        "summary": {
+            key: value
+            for key, value in narrative.items()
+            if key not in ("fence_types", "candidate_fence_types")
+        },
     }
 
 
@@ -2143,6 +2282,13 @@ def commit_step(
     the document is touched, so a rejected commit leaves the step exactly as
     it was and can be retried with the same base_revision.
 
+    THE GATE'S VERDICT IS RECORDED EITHER WAY when run diagnostics are
+    enabled -- and on a rejection the offending feature's full GeoJSON goes
+    into the session's diagnostic record, because that geometry does not
+    otherwise outlive the request that carried it and an intermittent
+    rejection cannot be investigated without it. Off by default and
+    free when off; see run_diagnostics.py.
+
     VALIDATION BEFORE THE REVISION CHECK, deliberately. A stale base_revision
     is a retry-after-refetch; a self-intersecting ring is a drawing to fix.
     Both can be true at once, and the second is the one the user has to act
@@ -2167,13 +2313,25 @@ def commit_step(
     )
 
     # 1. THE GATE. Raises CommitRejectedError carrying every problem.
-    check = commit_validation.check_commit(
-        definition,
-        features,
-        provenance,
-        context.dem,
-        context.boundary_polygon_utm,
-    )
+    #
+    # RECORDED EITHER WAY, and the rejection branch is the one this
+    # diagnostic exists for: it dumps the offending feature's full
+    # GeoJSON into the session's record, which is the only place an
+    # intermittent geometry rejection survives the request that produced
+    # it. The error is re-raised untouched -- the record is a bystander
+    # here and changes nothing about what the caller sees.
+    try:
+        check = commit_validation.check_commit(
+            definition,
+            features,
+            provenance,
+            context.dem,
+            context.boundary_polygon_utm,
+        )
+    except commit_validation.CommitRejectedError as exc:
+        run_diagnostics.record_commit(session_id, step_id, features, context, rejection=exc)
+        raise
+    run_diagnostics.record_commit(session_id, step_id, features, context)
     check_features_against_inputs(definition, features, inputs)
 
     # 2. Crossings, recorded alongside each feature. Measured against the

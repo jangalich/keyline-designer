@@ -1120,8 +1120,28 @@ _nd = build_narrative_data(
     existing_canopy_excluded=True,
 )
 assert json.loads(json.dumps(_nd)) == _nd, "narrative_data must be json.dumps()-clean with no custom encoder"
-assert set(_nd) == {"candidate_count", "search_space", "selection", "gates", "zones"}
+assert set(_nd) == {
+    "candidate_count", "dropped_invalid_count", "search_space", "selection", "gates", "zones",
+}
 assert _nd["candidate_count"] == 2
+# A PATCH THE EMISSION GATE REFUSED TO PUT ON THE WIRE IS COUNTED, never
+# silently absent -- water_survey_areas.py's own `dropped_count` convention.
+# Zero here because build_narrative_data() defaults it: this builder is handed
+# patches, and only identify_tree_zone_candidates() sees the drops. Its real
+# wiring is test_tree_zone_geometry_validity.py section 6.
+assert _nd["dropped_invalid_count"] == 0
+assert build_narrative_data(
+    _nd_patches,
+    boundary_polygon_utm=_nd_boundary_polygon,
+    boundary_acres=12.0,
+    claimed_acres=9.0,
+    search_space_acres=3.0,
+    soil_marginality_data_available=True,
+    hydric_data_available=True,
+    stream_data_available=False,
+    existing_canopy_excluded=True,
+    dropped_invalid_count=3,
+)["dropped_invalid_count"] == 3
 assert _nd["search_space"] == {
     "parcel_acres": 12.0,
     "claimed_acres": 9.0,

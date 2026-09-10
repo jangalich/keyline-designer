@@ -558,14 +558,33 @@ def _seed_signature_clause(region: dict) -> str:
     )
 
 
+def _presented_clause(region: dict) -> str:
+    """The presentation mark for one zone's sentence: ", presented #2"
+    on a presented zone, ", also surviving -- below the presented set"
+    on one that is not. BOTH ARMS ARE SPOKEN HERE, unlike the terse
+    diagnostic marker: prose read straight through gives a reader no
+    header to carry, so an unmarked sentence after four marked ones
+    would read as an omission rather than as the deliberate "still
+    listed, not led with" it is."""
+    if region.get("presented"):
+        return f", presented #{region['presentation_order']}"
+    if "presented" in region:
+        return ", also surviving -- below the presented set"
+    return ""
+
+
 def _format_water_survey_areas_summary(water_narrative: Optional[dict]) -> str:
     """Formats water_survey_areas.build_narrative_data()'s block (the
     survey-area water step that replaced the demoted level-pool arc --
     see that module's docstring) for the report prompt. Same rules as
     every _format_*_summary() here: reads ONLY the pre-digested narrative
     block, never geometry; every number was converted and rounded at the
-    source. ALL survey zones are listed (no presentation cap --
-    first-run posture). The two types carry their own sentences since
+    source. ALL survey zones are listed, IN PRESENTATION ORDER, with
+    the presented set (the top 2 of each type by rank, backfilled to
+    four) named as such and the rule that produced it stated -- the
+    prose says what is shown AND what was considered, and an
+    unpresented zone is described in full below the presented ones
+    rather than omitted. The two types carry their own sentences since
     the compartment change: an EXCAVATED zone gets the DUAL ACREAGE
     sentence ("X acres to survey, anchored by Y acres of
     high-suitability ground") with per-criterion means over member
@@ -605,23 +624,66 @@ def _format_water_survey_areas_summary(water_narrative: Optional[dict]) -> str:
         "this step, deliberately. "
         + water_narrative["twi_note"]
     ]
-    # The counts line: everything that survived is shown (the
-    # presentation cap was deleted -- the user decides), plus what the
-    # floor/dedupe pruned and which embankment seeds honestly produced
-    # nothing, so the reader knows exactly what this section is NOT
-    # showing and why.
-    lines.append(
-        f"All {water_narrative['zone_count']} surviving zone(s) are listed, ranked per type -- "
-        "no presentation cap; you decide which to walk"
-        + (
-            f". {water_narrative['dropped_count']} zone(s) were dropped (under the 0.1-acre floor, "
-            "or a duplicate of a better-seeded compartment) -- listed in the diagnostic export "
-            "with their reasons, not planned on"
-            if water_narrative["dropped_count"]
-            else ""
+    # The counts line: everything that survived is described here, with
+    # the PRESENTED set named and the rule that produced it stated, plus
+    # what the floor/dedupe pruned and which embankment seeds honestly
+    # produced nothing -- so the reader knows what this section leads
+    # with, what else it still describes, and what it is NOT showing at
+    # all and why. The presented set is a READING ORDER, never a
+    # shortlist that hides the rest.
+    presentation = water_narrative.get("presentation")
+    if presentation is None:
+        # No presentation block on the narrative: say only what is
+        # certainly true (everything surviving is listed) rather than
+        # claiming a presented set that was never computed.
+        lines.append(
+            f"All {water_narrative['zone_count']} surviving zone(s) are listed, ranked per type -- "
+            "you decide which to walk"
+            + (
+                f". {water_narrative['dropped_count']} zone(s) were dropped (under the 0.1-acre "
+                "floor, or a duplicate of a better-seeded compartment) -- listed in the diagnostic "
+                "export with their reasons, not planned on"
+                if water_narrative["dropped_count"]
+                else ""
+            )
+            + "."
         )
-        + "."
-    )
+    elif presentation["presented_count"] < water_narrative["zone_count"]:
+        survivors = presentation["survivor_counts"]
+        lines.append(
+            f"All {water_narrative['zone_count']} surviving zone(s) are listed, ranked per type "
+            f"({survivors['embankment']} embankment, {survivors['excavated']} excavated). The first "
+            f"{presentation['presented_count']} below are the ones to lead with -- the top "
+            f"{presentation['per_type_count']} of each type by rank, backfilled from the other type "
+            f"in rank order to {presentation['presentation_count']} "
+            f"({presentation['rule_applied']}); the rest are described in full after them and are "
+            "not ruled out -- you decide which to walk"
+            + (
+                f". {water_narrative['dropped_count']} zone(s) were dropped (under the 0.1-acre "
+                "floor, or a duplicate of a better-seeded compartment) -- listed in the diagnostic "
+                "export with their reasons, not planned on"
+                if water_narrative["dropped_count"]
+                else ""
+            )
+            + "."
+        )
+    else:
+        # Every survivor is in the presented set (four or fewer
+        # survived, or the rule reached them all): saying "the first N
+        # are the ones to lead with" would invent a distinction this
+        # run does not have.
+        lines.append(
+            f"All {water_narrative['zone_count']} surviving zone(s) are listed and presented, "
+            "ranked per type -- nothing surviving is held back; you decide which to walk"
+            + (
+                f". {water_narrative['dropped_count']} zone(s) were dropped (under the 0.1-acre "
+                "floor, or a duplicate of a better-seeded compartment) -- listed in the diagnostic "
+                "export with their reasons, not planned on"
+                if water_narrative["dropped_count"]
+                else ""
+            )
+            + "."
+        )
     if water_narrative.get("embankment_failed_seed_count"):
         failed = water_narrative["embankment_failed_seeds"]
         reason_clause = "; ".join(
@@ -650,7 +712,8 @@ def _format_water_survey_areas_summary(water_narrative: Optional[dict]) -> str:
         if region["survey_type"] == "embankment":
             lines.append(
                 f"\nSurvey zone {region['id']} (embankment-type, rank {region['rank']} of its "
-                f"type): {region['zone_acres']} acres to survey -- a valley compartment anchored "
+                f"type{_presented_clause(region)}): {region['zone_acres']} acres to survey -- a "
+                "valley compartment anchored "
                 f"by a {region['seed_blend_score']}-scoring storage cell, dam reach at the "
                 f"downstream end; confidence {region['confidence']}."
             )
@@ -719,7 +782,8 @@ def _format_water_survey_areas_summary(water_narrative: Optional[dict]) -> str:
         else:
             lines.append(
                 f"\nSurvey zone {region['id']} ({region['survey_type']}-type, rank {region['rank']} of its "
-                f"type): {region['zone_acres']} acres to survey, anchored by {region['member_acres']} "
+                f"type{_presented_clause(region)}): {region['zone_acres']} acres to survey, "
+                f"anchored by {region['member_acres']} "
                 f"acres of high-suitability ground ({region['member_count']} member region(s)); member-"
                 f"cell mean suitability {region['mean_suitability']} (max {region['max_suitability']}), "
                 f"confidence {region['confidence']}."

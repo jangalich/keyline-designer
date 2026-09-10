@@ -39,13 +39,54 @@ and the document's is the one the frontend, the cascade and the reset all
 already read. registered_steps() filters that constant; it does not restate
 it.
 
-PARTIALLY POPULATED, ON PURPOSE. FIVE entries today: landform, water,
-roads, trees and structures. fencing is named in STEP_ORDER and absent
-here, and the difference is meaningful rather than an oversight --
-registered_steps() returns what can actually be generated, and asking for
-an unregistered step raises with the list of what is registered. The parity
-test against build_pipeline_context() belongs at the end of stage 3, when
-all six exist and there is something to compare.
+FULLY POPULATED. SIX entries: landform, water, roads, trees, structures and
+fencing -- every step in STEP_ORDER. registered_steps() still FILTERS
+STEP_ORDER rather than restating it, and get_step() still tells "not a
+step" from "no entry yet" apart in its message, even though the second
+case is now unreachable; the parity test against build_pipeline_context()
+is the branch after this one, now that there is a full set to compare.
+
+THE SIXTH ENTRY -- the last step, and the first whose TAB IS A TYPE rather
+than a feature -- found four things the schema strained on, and the
+strain is recorded here because the sixth entry is where the schema stops
+being extended:
+
+  A TAB THAT IS A FENCE TYPE, NOT A FEATURE. Every prior step's selectable
+  unit was one feature (or, for roads, one network of features). A fence
+  type -- boundary, water zone, tree zone -- is one tab whose length is
+  the SUM across every loop of that type, and committing it commits every
+  loop. CommitContract.feature_group carries it ("fence_type", as roads'
+  "network_id") and group_check refuses a type committed without all its
+  loops. Nothing new in the schema; the feature_group field, written for
+  a tree of road branches, turned out to say this too.
+
+  A CANDIDATE SET WHOSE SIZE VARIES WITH THE UPSTREAM COMMITS. One to three
+  tabs: water zone fencing exists only if a water zone was committed, tree
+  zone fencing only if tree zones were; boundary fencing always. The
+  registry has no field for "this type was not generated because that
+  commit was empty" -- and should not: it is a fact about ONE generate's
+  result, and it lives on the result's narrative block (fencing.build_
+  narrative_data(): every type is always listed, with generated=False and
+  a reason when there was nothing to fence, so absence is a state the
+  client reads rather than a key it notices is missing).
+
+  ONE COMMIT CONSUMED IN TWO SHAPES. identify_fencing() takes the road as
+  a network dict (which only the nested tree self-compute reads, and which
+  carries NO_ROAD_CORRIDOR) and separately as the undilated cell footprint
+  the boundary fence protects (which it does not derive from the network).
+  Two consumes edges off the SAME roads commit, one per shape, with
+  different empty answers (the sentinel; None). The schema allowed it --
+  names and forward_as are unique, from_step is not -- and upstream_steps()
+  reports roads once. It had never been done.
+
+  NO AREA. A fence is a line with no width. The commit gate's one spatial
+  hard gate measures ACRES outside the parcel, and a crossing record
+  measures ACRES of overlap; both are vacuous for a line, and a zone fence
+  is BY CONSTRUCTION 2.5 m outside a zone that may meet the parcel edge.
+  So the rehydrated fence carries the line as its polygon_utm (containment
+  passes, honestly -- see wire_translation's fencing section) and the
+  contract declares CROSSINGS_NOT_RECORDED, because "checked, crosses
+  nothing" would be a false statement about every fence.
 
 THE FIFTH ENTRY -- the first POINT layer, and the first whose user-authored
 feature is SCORED -- found three things the schema could not say, and each
@@ -1971,8 +2012,9 @@ STRUCTURES = StepDefinition(
         # decides for the user. The interactive commit is ANY NUMBER of
         # sites, selected and placed, and every consumer will take the
         # list. Naming the list after the singular field would say the two
-        # paths carry the same value when they do not; the fencing entry,
-        # which consumes this, will declare the reduction it needs.
+        # paths carry the same value when they do not. The fencing entry,
+        # which consumes this, needed NO reduction: its boundary fence takes
+        # the sites as a list (see its structure_sites edge).
         "structure_sites",
     ),
     commit_contract=CommitContract(
@@ -2048,12 +2090,315 @@ STRUCTURES = StepDefinition(
 )
 
 
+FENCING = StepDefinition(
+    step_id="fencing",
+    # WHAT FENCING IS, so the edges below read correctly. THREE CANDIDATE
+    # FENCE TYPES, one tab each, SELECT-ONLY, any number of the three
+    # committable: WATER ZONE FENCING (one loop around the union of the
+    # committed water zones -- the water edge's own rule -- buffered 2.5 m
+    # out), TREE ZONE FENCING (one loop per committed tree zone), and
+    # BOUNDARY FENCING (the developed footprint -- production zones, every
+    # committed structure site, the road path -- margined, hulled and
+    # clipped to the parcel, which may come back as several rings).
+    #
+    # A TAB IS ONE FENCE TYPE, NOT ONE LOOP, and this is deliberate rather
+    # than an oversight: it differs from every prior step, where a tab is
+    # one feature. A type's length is the SUM across every loop of that
+    # type; committing a type commits all its loops (feature_group +
+    # group_check below). The tab count VARIES, one to three: a type with
+    # nothing to fence gets NO tab -- not a zero-length one -- and the
+    # payload says so per type (fencing.build_narrative_data()).
+    #
+    # NOT ON THE INTERACTIVE MAP: road fencing and stream exclusion fencing
+    # are NARRATIVE ONLY. Stream exclusion still runs (it needs the cached
+    # NHD rows, the water_features edge) and still reaches the result and
+    # the report; it produces no candidate and no tab, because its layer
+    # ("exclusion_fencing") is not in this contract's `layers` and the
+    # outbound builder filters it out of the proposal collection. No road,
+    # existing or generated, gets a fence loop of its own -- the module's
+    # own position.
+    consumes=(
+        # TEN EDGES: four off the cache, six off commits -- one per
+        # upstream step, with the ROADS commit read TWICE (two shapes; see
+        # the module docstring's ONE COMMIT CONSUMED IN TWO SHAPES). The
+        # first entry to consume every one of the five steps before it.
+        Consumed(
+            name="boundary_coordinates",
+            source=SOURCE_CACHE,
+            cache_path="boundary",
+            forward_as="boundary_coordinates",
+            why=(
+                "The parcel ring, read off the context for landform's reason. "
+                "The stream buffer's UTM CRS is derived from it and the "
+                "boundary polygon is rebuilt from it only when boundary_"
+                "polygon_utm is not supplied (it is, below)."
+            ),
+        ),
+        Consumed(
+            name="dem",
+            source=SOURCE_CACHE,
+            cache_path="dem",
+            forward_as="dem",
+            why=(
+                "ParcelData's already-fetched elevation grid: the CRS every "
+                "fence is computed in and reprojected out of. Omitted, the "
+                "entry point calls get_dem_for_boundary() itself."
+            ),
+        ),
+        Consumed(
+            name="boundary_polygon_utm",
+            source=SOURCE_CACHE,
+            cache_path="boundary_polygon_utm",
+            forward_as="boundary_polygon_utm",
+            why=(
+                "The polygon the boundary fence is clipped to -- the hard "
+                "ceiling on where any fence geometry can go. Forwarded so "
+                "the clip is against the same polygon every upstream commit "
+                "was validated within."
+            ),
+        ),
+        Consumed(
+            name="water_features",
+            source=SOURCE_CACHE,
+            cache_path="parcel_data.water_features",
+            combine="hydrology_data.water_features_to_geojson",
+            forward_as="water_features_geojson",
+            why=(
+                "THE EDGE THAT CLOSES THE ONE FETCH LEFT. Stream exclusion "
+                "fencing buffers the mapped NHD streams, and the entry point "
+                "fetched them (get_water_features_geojson) on every generate "
+                "it was not handed them. ParcelData already holds the same "
+                "rows for the same boundary; the combine wraps them in the "
+                "schema envelope the fetch would have -- a wrapping, not a "
+                "computation. Narrative-only output, but it is still a "
+                "network call the cache exists to close."
+            ),
+        ),
+        Consumed(
+            name="production_zone_polygons_utm",
+            source=SOURCE_COMMITTED,
+            from_step="landform",
+            rehydrate="wire_translation.rehydrate_production_zones",
+            combine="wire_translation.production_zone_polygons",
+            # [] is the explicit empty for a list override: no production
+            # ground in the developed footprint. The entry point never
+            # self-computes production for the boundary fence.
+            empty_commit=None,
+            forward_as="production_zone_polygons_utm",
+            why=(
+                "The first developed part the boundary fence protects: each "
+                "committed zone's render fill, as the LIST the entry point "
+                "takes -- exactly what render_layout_map.fetch_layout_layers() "
+                "extracts from context.production_areas for this parameter. "
+                "Forwarded as polygons rather than as production_areas= "
+                "because the entry point reads production_areas ONLY to feed "
+                "the three self-computes the committed edges below close; "
+                "the fence reads this."
+            ),
+        ),
+        Consumed(
+            name="selected_water_zone",
+            source=SOURCE_COMMITTED,
+            from_step="water",
+            rehydrate="wire_translation.rehydrate_water_survey_zones",
+            combine="wire_translation.water_zone_union",
+            # THE SENTINEL'S FOURTH PRODUCTION USE, and the one the water
+            # branch flagged as blocked: identify_fencing() took the
+            # parameter but did not know the sentinel, and would have
+            # subscripted a bare object(). It normalizes it now (the same
+            # guard tree_zone_candidates and solar_suitability carry): no
+            # water fence, no water ground in the boundary union, and the
+            # water self-compute does not run to invent a zone. Test 3 and
+            # test 10 in test_fencing_step.py.
+            empty_commit="water_suitability.NO_WATER_ZONE",
+            forward_as="selected_water_zone",
+            why=(
+                "The water zone fence encloses the UNION of the committed "
+                "zones at WATER_ZONE_FENCE_BUFFER_METERS, and the boundary "
+                "fence unions the same buffered polygon into its protective "
+                "core. The entry point reads one field, render_fill_polygon_"
+                "utm. Committed EMPTY, the type is NOT GENERATED: no tab."
+            ),
+        ),
+        Consumed(
+            name="selected_road_corridor",
+            source=SOURCE_COMMITTED,
+            from_step="roads",
+            rehydrate="wire_translation.rehydrate_road_networks",
+            combine="wire_translation.selected_road_network",
+            # THE ROAD SENTINEL'S THIRD USE. The entry point already
+            # normalized it (the trees branch's line) -- but normalized it
+            # to None BEFORE the `is None` guard on the nested road
+            # self-compute, so with trees unsupplied the sentinel routed a
+            # network anyway. It now records that the commit was empty and
+            # skips the self-compute, matching its own comment. Test 10.
+            empty_commit="road_corridors.NO_ROAD_CORRIDOR",
+            forward_as="selected_road_corridor",
+            why=(
+                "THE NETWORK SHAPE of the roads commit. Read by the entry "
+                "point only as the siting exclusion it forwards into the "
+                "nested tree self-compute -- which the trees edge closes -- "
+                "and NOT for a fence loop (no road gets one). Declared "
+                "because the entry point's own sentinel guard reads it, and "
+                "because the same commit is a real dependency through the "
+                "footprint edge below; one commit, one invalidation edge, "
+                "two parameters."
+            ),
+        ),
+        Consumed(
+            name="road_corridor_cell_footprint_polygon_utm",
+            source=SOURCE_COMMITTED,
+            from_step="roads",
+            rehydrate="wire_translation.rehydrate_road_networks",
+            combine="wire_translation.selected_road_network_footprint",
+            # NONE, NOT THE SENTINEL, and that is the point of the second
+            # edge: this parameter is a polygon with no self-compute behind
+            # it, so None already means 'no corridor' to it, and the combine
+            # maps an empty commit ([] rehydrated) to None itself.
+            empty_commit=None,
+            forward_as="road_corridor_cell_footprint_polygon_utm",
+            why=(
+                "THE FOOTPRINT SHAPE of the same roads commit: the network's "
+                "undilated cell footprint, the developed part the boundary "
+                "fence actually protects. identify_fencing() does not derive "
+                "it from selected_road_corridor (render_layout_map extracts "
+                "it), so it is forwarded separately -- the second read of "
+                "one commit, see the module docstring."
+            ),
+        ),
+        Consumed(
+            name="tree_zone_patches",
+            source=SOURCE_COMMITTED,
+            from_step="trees",
+            rehydrate="wire_translation.rehydrate_tree_zones",
+            # [] IS 'CHECKED, NOTHING TO STAY CLEAR OF' -- the trees branch's
+            # reading, and it HOLDS for fencing: the entry point maps [] to
+            # zero tree fence loops and no tree ground in the boundary union,
+            # and nothing self-computes (only None reaches the nested tree
+            # generate). Committed EMPTY, the type is NOT GENERATED: no tab.
+            empty_commit=None,
+            forward_as="tree_zone_patches",
+            why=(
+                "One tree zone fence per committed patch (its render_fill_"
+                "polygon_utm buffered at TREE_ZONE_FENCE_BUFFER_METERS), and "
+                "the same buffered polygons in the boundary fence's union. "
+                "Must be the zones the USER committed, drawn and selected "
+                "alike, not a regenerated ranking -- the entry point's None "
+                "path regenerates tree candidates with their own SDA and NHD "
+                "fetches."
+            ),
+        ),
+        Consumed(
+            name="structure_sites",
+            source=SOURCE_COMMITTED,
+            from_step="structures",
+            rehydrate="wire_translation.rehydrate_structure_sites",
+            combine="wire_translation.structure_site_polygons",
+            # [] IS 'NO BUILDING TO ENCLOSE'. What structures committed EMPTY
+            # means to fencing: the developed footprint is the production
+            # zones and the road path alone, and the margin subtracts nothing
+            # for a site. The same thing None means to this parameter --
+            # fencing never self-computes a site (solar is not imported), so
+            # there is no fallback to close and no self-compute to count.
+            empty_commit=None,
+            forward_as="structure_site_polygons_utm",
+            why=(
+                "THE REDUCTION THE STRUCTURES ENTRY SAID THIS ENTRY WOULD "
+                "DECLARE, and it is none: `structure_sites` is a LIST, and the "
+                "boundary fence's developed footprint is already a list "
+                "(production zones + site + road path, unioned in its step 1). "
+                "Every committed site -- selected and placed -- is one more "
+                "entry; nothing inside the module assumed one. Forwarded as "
+                "the list of pads, not a pre-unioned polygon, so the union "
+                "happens where it always did and a test can count the parts."
+            ),
+        ),
+        # NOT DECLARED, DELIBERATELY: valleys, hydric_floodplain_union,
+        # floodplain_data_is_fallback, anchor_lon_lat, canopy_height and
+        # production_areas. The entry point takes all six and forwards every
+        # one of them ONLY into the water, road and tree self-computes that
+        # the committed edges above close (canopy_height is no longer read
+        # by the boundary fence at all); with those committed there is no
+        # code path on which any of them can change the output, so declaring
+        # them would be a false invalidation edge -- the trees and structures
+        # entries' own reasoning. Nor exclusion_zones: no crossings are
+        # recorded, so nothing reads the gates. Test 9 measures the claim:
+        # zero network calls and zero self-computes with the ten edges
+        # forwarded and nothing else.
+    ),
+    generate="fencing.identify_fencing",
+    payload="step_orchestrator.build_fencing_payload",
+    proposal_collection="fence_lines",
+    produces=(
+        # NOT a PipelineContext field name, and honestly so: the batch
+        # context holds NO fencing at all -- render_layout_map.fetch_layout_
+        # layers() computes it after the context is built, under its own
+        # `fencing_result` key -- so there is no batch name to match. The
+        # committed value is the list of fence lines (wire_translation.
+        # rehydrate_fence_lines), and, fencing being the last step, no
+        # registry entry consumes it. The parity test will have to say
+        # this rather than compare it.
+        "fence_lines",
+    ),
+    commit_contract=CommitContract(
+        # wire_translation.LAYER_PERIMETER_FENCING, spelled out for the
+        # module docstring's reason and asserted equal in test_fencing_step.
+        # py. The stream layer ("exclusion_fencing") is deliberately absent:
+        # narrative-only, never committable, refused by name if sent.
+        layers=("perimeter_fencing",),
+        # A fence is a LINE. A closed loop is a LineString; a zone whose
+        # render opening severed it into pieces fences as a MultiLineString,
+        # one ring per piece. The first contract over lines with no width.
+        geometry_types=("LineString", "MultiLineString"),
+        # ZERO IS A DECISION: "no fencing on this parcel".
+        min_features=0,
+        # NO COUNT CEILING, deliberately: the ceiling is the VOCABULARY --
+        # at most one group per candidate fence type, three types -- and
+        # group_check refuses a type outside it. A max_features of 3 would
+        # restate that as a number nothing else reads.
+        max_features=None,
+        # THE UNIT IS THE FENCE TYPE. Features are grouped by their
+        # fence_type property and counted in groups, exactly as roads groups
+        # branches by network_id -- and the coherence check is what makes
+        # "committing a type commits every loop of that type" a server rule
+        # rather than a UI convention: every feature of the type (fence_index
+        # 1..fence_count, stamped outbound) must be present.
+        feature_group="fence_type",
+        group_check="wire_translation.check_fence_type_complete",
+        rehydrate="wire_translation.rehydrate_fence_lines",
+        # SELECT-ONLY, like water and roads: every committable fence is one
+        # the module built and named ("perimeter-fencing-<type>[-<n>]"), and
+        # the rehydrator refuses any other id rather than inventing one.
+        internal_id_parameter=None,
+        requires_provenance=True,
+        # NO CROSSINGS, DECLARED ABSENT, for a different reason than
+        # structures'. A crossing is ACRES of overlap with a ground, and a
+        # fence line has no acres -- every fence would record "checked,
+        # crosses nothing", which is a false statement about a line that
+        # runs straight through canopy (which fencing.py says is fine) or
+        # across hydric soil. No key at all is the honest record.
+        crossings=CROSSINGS_NOT_RECORDED,
+    ),
+    # NONE. The fences are computed from the five commits; the user's input
+    # is the selection of types.
+    user_inputs=(),
+    post_commit=(),
+    # NONE, and honestly so: with the ten edges forwarded the entry point
+    # fetches nothing and self-computes nothing, and the boundary fence
+    # reads no canopy, so no layer failure can escape by name. The generic
+    # error is what a genuine failure reports.
+    failure_layers=(),
+    generic_error="Fencing could not be generated.",
+)
+
+
 STEP_REGISTRY = {
     LANDFORM.step_id: LANDFORM,
     WATER.step_id: WATER,
     ROADS.step_id: ROADS,
     TREES.step_id: TREES,
     STRUCTURES.step_id: STRUCTURES,
+    FENCING.step_id: FENCING,
 }
 
 
@@ -2063,8 +2408,9 @@ STEP_REGISTRY = {
 def registered_steps() -> tuple:
     """
     The steps that can be generated, in STEP_ORDER. Filters that constant --
-    it does not restate the order. Shorter than STEP_ORDER until stage 3 is
-    finished, and that difference is the honest report of what exists.
+    it does not restate the order. Equal to STEP_ORDER now that all six
+    entries exist; it stayed a filter so that an entry removed or not yet
+    written is reported honestly rather than by a second ordered list.
     """
     return tuple(step_id for step_id in STEP_ORDER if step_id in STEP_REGISTRY)
 

@@ -522,17 +522,39 @@ class Session:
             base_revision=self.revision("water"),
         )
 
-    def upstream(self, water_zone_count=3):
+    def upstream(self, water_zone_count=2):
         """Landform committed whole, water generated and committed with the
-        first `water_zone_count` zones (0 for an EMPTY water commit). The
-        first three are all embankment zones on this fixture; the access
-        points above were surveyed against THAT union, and a different
-        selection moves the pond exclusion and changes which edges route a
-        network at all (section 11 commits a cross-type selection and says
-        so)."""
+        first `water_zone_count` EMBANKMENT zones (0 for an EMPTY water
+        commit).
+
+        THE SELECTION IS BY TYPE, NOT BY POSITION, and that is the fixture's
+        premise rather than a convenience. The access points above were
+        surveyed against an EMBANKMENT-ONLY union: a different selection
+        moves the pond exclusion and changes which edges route a network at
+        all (section 11 commits a cross-type selection and says so). Taking
+        a positional slice made that premise depend on the order the water
+        payload happened to arrive in, which is not a fact about the ground
+        and not this fixture's to rely on -- when the water step began
+        shipping its zones in presentation order, `zones[:3]` silently
+        became two embankment zones and an excavated one, the pond exclusion
+        moved, and ACCESS_B stopped routing. Naming the type says what the
+        fixture actually needs.
+
+        THE DEFAULT IS TWO, because two is what the water step now offers of
+        a single type: its payload carries the presented set (the top 2 of
+        each survey type, backfilled to a fixed count), so an all-embankment
+        selection on this parcel is at most those two. Three embankment
+        zones are no longer committable here -- not by this fixture and not
+        by a user."""
         self.commit_landform()
-        zones = self.water_zones()
-        assert len(zones) >= water_zone_count, f"only {len(zones)} water zones on the fixture"
+        zones = [
+            zone for zone in self.water_zones()
+            if zone["properties"]["survey_type"] == "embankment"
+        ]
+        assert len(zones) >= water_zone_count, (
+            f"only {len(zones)} embankment water zone(s) on the fixture, "
+            f"{water_zone_count} needed"
+        )
         return self.commit_water(zones[:water_zone_count])
 
 
@@ -602,7 +624,7 @@ print(
 # --- 1 [test 1]. THE REGISTRY ENTRY ----------------------------------
 
 step_registry.validate_registry()
-assert step_registry.registered_steps() == ("landform", "water", "roads", "trees", "structures"), step_registry.registered_steps()
+assert step_registry.registered_steps() == ("landform", "water", "roads", "trees", "structures", "fencing"), step_registry.registered_steps()
 ROADS = step_registry.get_step("roads")
 
 assert ROADS.generate == "road_corridors.identify_road_corridor_candidates"
@@ -694,10 +716,10 @@ for _c in ROADS.consumes:
 assert _access.parameter in _signature
 
 # THE CASCADE EDGES, read off the declarations.
-assert step_registry.dependents_of("water") == ("roads", "trees", "structures")
-assert step_registry.dependents_of("landform") == ("water", "roads", "trees", "structures")
-assert step_registry.transitive_dependents("landform") == ("water", "roads", "trees", "structures")
-assert step_registry.transitive_dependents("roads") == ("trees", "structures"), (
+assert step_registry.dependents_of("water") == ("roads", "trees", "structures", "fencing")
+assert step_registry.dependents_of("landform") == ("water", "roads", "trees", "structures", "fencing")
+assert step_registry.transitive_dependents("landform") == ("water", "roads", "trees", "structures", "fencing")
+assert step_registry.transitive_dependents("roads") == ("trees", "structures", "fencing"), (
     "trees consumes the roads commit as of the trees branch"
 )
 
@@ -742,7 +764,7 @@ print(
 
 with Harness() as h:
     s = Session()
-    s.upstream(water_zone_count=3)
+    s.upstream(water_zone_count=2)
 
     # THE ACCESS POINT IS NEVER AUTO-ARMED: a roads generate with no params
     # is refused, synchronously, before a job exists.
@@ -811,7 +833,7 @@ with Harness() as h:
     for key in ("network_found", "stop_reason", "determination", "access", "branches"):
         assert key in NETWORK_A, sorted(NETWORK_A)
     assert NETWORK_A["determination"]["water_zone_excluded"] is True, (
-        "three water zones were committed; the union must have been hard-excluded"
+        "water zones were committed; the union must have been hard-excluded"
     )
     assert isinstance(NETWORK_A["access"]["reaches_water_zone"], bool)
     assert NETWORK_A["determination"]["floodplain_data_available"] is True, (
@@ -862,7 +884,7 @@ print(
 
 with Harness() as h:
     s = Session()
-    s.upstream(water_zone_count=3)
+    s.upstream(water_zone_count=2)
 
     payload_a = s.roads(ACCESS_A)
     FEATURES_A = copy.deepcopy(_network_features(payload_a, KEY_A))
@@ -957,7 +979,7 @@ with Harness() as h:
     # (b) B then A, in a fresh session, equals A then B -- feature for
     #     feature: geometry, length, grade, served acres, ids.
     s2 = Session()
-    s2.upstream(water_zone_count=3)
+    s2.upstream(water_zone_count=2)
     payload_b_first = s2.roads(ACCESS_B)
     payload_ba = s2.roads(ACCESS_A)
     assert [n["network_id"] for n in payload_ba["networks"]] == [KEY_B, KEY_A], "order tried is kept"
@@ -1070,7 +1092,7 @@ with Harness() as h:
 
 with Harness() as h:
     s = Session()
-    s.upstream(water_zone_count=3)
+    s.upstream(water_zone_count=2)
     payload = s.roads(ACCESS_A)
     payload = s.roads(ACCESS_B)
     payload = s.roads(ACCESS_C)
@@ -1245,7 +1267,7 @@ with Harness() as h:
     # And an empty commit with NO access point ever tried -- "no road" with
     # nothing placed -- is legal too: an empty list, not an absent key.
     s3 = Session()
-    s3.upstream(water_zone_count=3)
+    s3.upstream(water_zone_count=2)
     no_road = s3.commit("roads", [], {}, base_revision=0, inputs={"access_points": []})
     assert no_road["steps"]["roads"]["status"] == design_document.STATUS_COMMITTED
     assert no_road["steps"]["roads"]["inputs"] == {"access_points": []}
@@ -1501,8 +1523,21 @@ with Harness() as h:
     zones = landform["suggested_zones"]["features"]
     assert http_commit("landform", zones, {f["id"]: "generated" for f in zones}).status_code == 200
     water = api.generate(session_id, "water").get_json()["result"]["payload"]
-    water_zones = [f for f in water["survey_zones"]["features"] if f["properties"]["layer"] in wire_translation.LAYER_SURVEY_ZONES]
-    assert http_commit("water", water_zones[:3], {f["id"]: "generated" for f in water_zones[:3]}).status_code == 200
+    # THE SAME EMBANKMENT-ONLY UNION Session.upstream() commits, and for its
+    # reason: the access points below were surveyed against that union, so a
+    # positional slice of the payload would make this route test depend on
+    # the order the water step ships its zones in. When it began shipping
+    # them in presentation order, `[:3]` quietly picked up an excavated zone,
+    # ACCESS_B stopped routing, and the cap this section is about was never
+    # reached -- a 409 assertion failing three generates away from its cause.
+    water_zones = [
+        f for f in water["survey_zones"]["features"]
+        if f["properties"]["layer"] in wire_translation.LAYER_SURVEY_ZONES
+        and f["properties"]["survey_type"] == "embankment"
+    ]
+    assert len(water_zones) >= 2, f"only {len(water_zones)} embankment zone(s) on the wire"
+    picked = water_zones[:2]
+    assert http_commit("water", picked, {f["id"]: "generated" for f in picked}).status_code == 200
 
     # 400: no access point; 400: an interior one; 202 + done: a real one.
     assert api.generate(session_id, "roads").status_code == 400

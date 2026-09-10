@@ -13,11 +13,21 @@ interior pockets are exactly the geometry this layer exists to find, so they are
 drawn verbatim.
 
 Hand-verifiable, round-number synthetic geometry on a 5m DEM grid (the reference
-property's own resolution). Three behaviors:
+property's own resolution). Four behaviors:
   1. a single-cell-wide diagonal chain SURVIVES as a candidate and renders its
      full geometry (the direct inverse of the removed survival-gate test);
-  2. a patch with a 1-cell interior pocket retains the hole;
+  2. a patch with a 1-cell interior pocket has that pocket FILLED before it is
+     emitted -- this assertion was the other way round until the emission gate
+     existed, and the reason it turned over is written out at the test;
+  2b. a patch with a 4-cell interior pocket RETAINS it, which is the half of
+     the old claim that survives and the half the module's own render docstring
+     is actually about;
   3. drawn area equals footprint area exactly.
+
+THE ONE THING THE GATE DOES NOT DO IS ERODE. Filling a hole only ADDS the
+filled cells and the validity repair preserves area exactly, so tests 1 and 3
+-- the thin arm and the exact-area block -- are unchanged by its existence and
+are what says so.
 """
 
 import numpy as np
@@ -107,12 +117,28 @@ print(
 
 
 # =====================================================================
-# Test 2: a 1-cell interior POCKET is RETAINED as a real hole.
+# Test 2: a 1-cell interior POCKET is FILLED before the patch is emitted.
+#
+# THIS ASSERTION USED TO READ THE OTHER WAY, and the reason it turned over is
+# worth having here rather than only in the module. The claim it used to make
+# -- that an interior pocket stays open because the zone genuinely wraps around
+# something that is really there -- is still the module's position, and test 2b
+# below is that claim. It just does not hold for ONE cell. A single cell is one
+# gate crossing on a 5 m grid: a 25 sqm square whose neighbours on all four
+# sides qualified, which nobody would walk around and which reflects nothing on
+# the ground. Left open it is a hole in the map and a cell subtracted from the
+# acreage for a feature that does not exist.
+#
+# AND IT WAS ALSO A VALIDITY PROBLEM. A generated candidate reaching commit
+# with geometry wire_translation.py refuses is a bug that surfaces after the
+# user has selected candidates and pressed commit; the pinholes were half of
+# what made those candidates ragged. See tree_zone_candidates.
+# FILLED_INTERIOR_RING_MAX_CELLS and test_tree_zone_geometry_validity.py.
 #
 # 9x9 grid, candidate = a 7x7 block (rows/cols 1..7) MINUS its center cell
-# (4, 4): a 48-cell, 1200 sqm frame with a single-cell hole. The raw footprint
-# excludes the pocket, and render_fill_polygon_utm (identical to it) keeps the
-# hole open -- the zone genuinely wraps around the excluded cell.
+# (4, 4): a 48-cell, 1200 sqm frame with a single-cell hole in the SEARCH
+# SPACE. The emitted patch is the full 1225 sqm block -- one cell more than the
+# ground that qualified, and exactly one.
 # =====================================================================
 
 ORIGIN2 = (0.0, 45.0)
@@ -130,19 +156,77 @@ p2 = patches2[0]
 render2 = p2["render_fill_polygon_utm"]
 footprint2 = p2["polygon_utm"]
 
-assert footprint2.intersection(pocket_cell).area < 1e-6, "footprint must carry the 1-cell hole"
+assert not footprint2.interiors, f"the 1-cell pinhole must be filled, got {len(footprint2.interiors)} hole(s)"
 assert render2.equals(footprint2), "render_fill_polygon_utm must be geometrically identical to the real footprint"
-assert not render2.contains(pocket_center), "render_fill_polygon_utm must RETAIN the interior pocket as a real hole"
-assert render2.intersection(pocket_cell).area < 1e-6, (
-    f"the whole pocket cell must stay open, got {render2.intersection(pocket_cell).area} sqm filled"
+assert render2.contains(pocket_center), "the filled pocket must be inside the emitted footprint"
+# EXACTLY ONE CELL, not "roughly the block": the fill adds the ring's own area
+# and nothing else, which is what makes the acreage change a count of cells.
+assert abs(footprint2.area - 1225.0) < 1e-6, (
+    f"the emitted footprint must be the 1200 sqm of qualifying ground plus the one 25 sqm "
+    f"pinhole, got {footprint2.area}"
+)
+# AND THE GATE'S OWN "FILL NOTHING" PATH still produces the old geometry, so
+# the difference above is this threshold and not some other change.
+p2_unfilled = score_tree_search_space(
+    dem2, search2, boundary2, hydric_union=search2, filled_interior_ring_max_cells=0.0
+)[0]
+assert len(p2_unfilled["polygon_utm"].interiors) == 1
+assert abs(p2_unfilled["polygon_utm"].area - 1200.0) < 1e-6
+print(
+    f"Test 2 -- 1-cell interior pocket: the emitted footprint is {render2.area} sqm, the "
+    f"{p2_unfilled['polygon_utm'].area} sqm that qualified plus the one {CELL_SQM} sqm pinhole at "
+    f"{(pocket_center.x, pocket_center.y)} FILLED -- one gate crossing on a 5 m grid is not a "
+    f"feature. With the threshold at 0 cells the old geometry comes back, hole and all."
+)
+
+
+# =====================================================================
+# Test 2b: a 4-cell interior POCKET is RETAINED as a real hole.
+#
+# The half of the old claim that survives, and the one the module's render
+# docstring is actually about: a pocket of two cells or more is at least two
+# independent gate decisions agreeing that the ground inside is different --
+# an excluded canopy stand, say, with real trees standing in it -- and the zone
+# genuinely wraps around it.
+#
+# 10x10 grid, candidate = an 8x8 block MINUS its center 2x2: a 60-cell, 1500
+# sqm frame around a 100 sqm hole that stays open.
+# =====================================================================
+
+ORIGIN2B = (0.0, 50.0)
+dem2b = _make_dem(10, 10, *ORIGIN2B)
+boundary2b = box(0, 0, 50, 50)
+block8 = box(5, 5, 45, 45)  # rows/cols 1..8 -> 40x40 = 1600 sqm = 64 cells
+pocket_2x2 = box(20, 20, 30, 30)  # the center four cells -> 100 sqm
+pocket_2x2_center = pocket_2x2.centroid
+search2b = block8.difference(pocket_2x2)
+assert abs(search2b.area - 1500.0) < 1e-6, f"test setup: 8x8-minus-2x2 must be 1500 sqm, got {search2b.area}"
+
+patches2b = score_tree_search_space(dem2b, search2b, boundary2b, hydric_union=search2b)
+assert len(patches2b) == 1, f"the framed block must be one surviving candidate, got {len(patches2b)}"
+p2b = patches2b[0]
+render2b = p2b["render_fill_polygon_utm"]
+footprint2b = p2b["polygon_utm"]
+
+assert len(footprint2b.interiors) == 1, (
+    f"the 4-cell pocket must survive as a real hole, got {len(footprint2b.interiors)} interior ring(s)"
+)
+assert render2b.equals(footprint2b), "render_fill_polygon_utm must be geometrically identical to the real footprint"
+assert not render2b.contains(pocket_2x2_center), "the multi-cell pocket must stay OPEN"
+assert render2b.intersection(pocket_2x2).area < 1e-6, (
+    f"the whole 4-cell pocket must stay open, got {render2b.intersection(pocket_2x2).area} sqm filled"
+)
+assert abs(footprint2b.area - 1500.0) < 1e-6, (
+    f"a retained pocket must not change the area at all, got {footprint2b.area}"
 )
 # non-vacuous: a convex hull (deliberately NOT used) would have closed the pocket.
-assert footprint2.convex_hull.contains(pocket_center), (
+assert footprint2b.convex_hull.contains(pocket_2x2_center), (
     "sanity check: a convex hull would have closed this pocket -- the raw footprint is drawn precisely so it doesn't"
 )
 print(
-    f"Test 2 -- 1-cell interior pocket: render_fill ({render2.area} sqm) RETAINS the hole at "
-    f"{(pocket_center.x, pocket_center.y)} -- identical to the footprint, whereas a hull would have closed it."
+    f"Test 2b -- 4-cell interior pocket: render_fill ({render2b.area} sqm) RETAINS the hole at "
+    f"{(pocket_2x2_center.x, pocket_2x2_center.y)} -- area unchanged, identical to the footprint, "
+    f"whereas a hull would have closed it. The threshold sits below two cells by construction."
 )
 
 

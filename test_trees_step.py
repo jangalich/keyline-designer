@@ -597,11 +597,32 @@ def _ring_wgs84(polygon_utm) -> list:
     return list(zip(lons, lats))
 
 
-def _box_around(geometry_utm, half_meters: float) -> list:
+def _box_around(geometry_utm, half_meters: float, clip_utm=None) -> list:
     """A square of side 2*half_meters centred on a point INSIDE the
-    geometry, as a lon/lat ring -- a drawn zone that certainly overlaps it."""
-    point = geometry_utm.representative_point()
-    return _ring_wgs84(box(point.x - half_meters, point.y - half_meters, point.x + half_meters, point.y + half_meters))
+    geometry, as a lon/lat ring -- a drawn zone that certainly overlaps it.
+
+    `clip_utm` KEEPS THE SQUARE ON THE PARCEL, and it is a correctness
+    argument rather than tidiness: the centre is a representative point of
+    ground the pipeline chose, so where that ground sits is not this
+    fixture's to assume. A ground that happens to hug the boundary yields a
+    square hanging over the edge, and commit_validation refuses that with
+    outside_boundary -- a rejection about WHERE THE FIXTURE DREW, not about
+    the behaviour under test. So the ground is clipped BEFORE the centre is
+    taken (the centre must be inside the parcel, not merely inside the
+    ground) and the square is clipped after. At 15 m the square is 900 m^2
+    against a 0.05 ac (202 m^2) crossing floor, so a clip has room to bite
+    without dropping the crossing under it.
+
+    This bit the first time the water step narrowed its payload: the
+    committed water ground changed, and a square that had always landed
+    inside started hanging off the edge. Nothing about the drawn-zone
+    behaviour had changed -- only where the fixture happened to be drawing."""
+    source = geometry_utm if clip_utm is None else _largest(geometry_utm.intersection(clip_utm))
+    point = source.representative_point()
+    square = box(point.x - half_meters, point.y - half_meters, point.x + half_meters, point.y + half_meters)
+    if clip_utm is not None:
+        square = _largest(square.intersection(clip_utm))
+    return _ring_wgs84(square)
 
 
 def _utm(feature: dict):
@@ -631,7 +652,7 @@ print(
 # --- 1 [test 1]. THE REGISTRY ENTRY ----------------------------------
 
 step_registry.validate_registry()
-assert step_registry.registered_steps() == ("landform", "water", "roads", "trees", "structures"), (
+assert step_registry.registered_steps() == ("landform", "water", "roads", "trees", "structures", "fencing"), (
     step_registry.registered_steps()
 )
 TREES = step_registry.get_step("trees")
@@ -708,9 +729,10 @@ for _t in ("production", "water", "road"):
     assert _grounds[_t].label
 for _other in step_registry.STEP_REGISTRY.values():
     # structures declares NO crossings at all (step_registry.CROSSINGS_NOT_
-    # RECORDED, its own branch's third declaration); every other entry keeps
-    # the exclusion gates.
-    if _other.step_id not in ("trees", "structures"):
+    # RECORDED, its own branch's third declaration), and so does fencing (a
+    # line has no acres to overlap); every other entry keeps the exclusion
+    # gates.
+    if _other.step_id not in ("trees", "structures", "fencing"):
         assert _other.commit_contract.crossings is None, (
             f"{_other.step_id} keeps the exclusion gates as its grounds"
         )
@@ -736,10 +758,10 @@ assert TREES.failure_layers[0].exception == "canopy_height_data.CanopyCoverageIn
 assert (TREES.failure_layers[0].layer, TREES.failure_layers[0].label) == production_zone_payload.LAYER_CANOPY
 
 # THE EDGE HELPERS see the new entry.
-assert step_registry.dependents_of("roads") == ("trees", "structures")
-assert step_registry.dependents_of("water") == ("roads", "trees", "structures")
-assert step_registry.transitive_dependents("landform") == ("water", "roads", "trees", "structures")
-assert step_registry.transitive_dependents("trees") == ("structures",)
+assert step_registry.dependents_of("roads") == ("trees", "structures", "fencing")
+assert step_registry.dependents_of("water") == ("roads", "trees", "structures", "fencing")
+assert step_registry.transitive_dependents("landform") == ("water", "roads", "trees", "structures", "fencing")
+assert step_registry.transitive_dependents("trees") == ("structures", "fencing")
 
 # THE TWO NEW DECLARATIONS ARE VALIDATED. A copy of the trees entry with
 # each malformation must be refused.
@@ -867,7 +889,14 @@ with Harness() as h:
     # THE STEP-LEVEL BLOCK: the narrative whole, and the FOUR FACTOR WEIGHTS
     # on the wire -- what lets a panel explain a score.
     summary = payload["summary"]
-    assert set(summary) == {"candidate_count", "search_space", "selection", "gates"}, sorted(summary)
+    assert set(summary) == {
+        "candidate_count", "dropped_invalid_count", "search_space", "selection", "gates",
+    }, sorted(summary)
+    # A patch the scorer refused to emit is COUNTED, not silently absent -- the
+    # emission gate's own convention, water's `dropped_count` precedent. Zero
+    # on this fixture, and the count's own coverage is
+    # test_tree_zone_geometry_validity.py's.
+    assert summary["dropped_invalid_count"] == 0, summary["dropped_invalid_count"]
     WEIGHTS = summary["selection"]["factor_weights_pct"]
     assert WEIGHTS == {
         "hydric_overlap": round(tree_zone_candidates.HYDRIC_OVERLAP_FACTOR_WEIGHT * 100, 1),
@@ -1127,43 +1156,26 @@ for original in GENERATED_PATCHES:
 OUTBOUND = wire_translation.tree_zones_to_feature_collection(GENERATED_PATCHES)
 validate_feature_collection(OUTBOUND)
 
-# THE PAYLOAD CARRIES THE OUTBOUND COLLECTION PLUS EXACTLY ONE PROPERTY, and
-# the difference is asserted rather than tolerated. build_trees_payload() adds
-# `display_only_smoothed_outline` -- a DISPLAY-ONLY rendering of each feature's
-# own geometry (display_outline.py) that nothing may compute from. Stripping it
-# must return the collection this file just built, byte for byte: the geometry,
-# the ids, the scores, the four factors and the three availability flags are
-# all untouched by its existence, which is the whole of the claim.
+# THE PAYLOAD CARRIES THE OUTBOUND COLLECTION AND NOTHING ELSE, and the
+# equality is asserted rather than tolerated. build_trees_payload() used to add
+# `display_only_smoothed_outline`, and it no longer does: render_layout_map.py
+# draws the tree hatch from the cell-union footprint verbatim ("no hull, no
+# opening, no smoothing of any kind"), so a smoothed outline on a tree feature
+# made the interactive map disagree with the printed one instead of agreeing
+# with it -- and the smooth is anti-extensive, so what it moved it moved off
+# the thin arms this layer exists to find. Production still carries its
+# outline, where it does match the layout map; that is section 1 of
+# test_display_outline.py. See display_outline.py.
 DISPLAY_ONLY_OUTLINE = display_outline.DISPLAY_ONLY_OUTLINE_PROPERTY
 PAYLOAD_COLLECTION = GENERATE_PAYLOAD["tree_zones"]
 
-
-def _without_display_only_outline(collection):
-    return {
-        **collection,
-        "features": [
-            {
-                **feature,
-                "properties": {
-                    key: value
-                    for key, value in feature["properties"].items()
-                    if key != DISPLAY_ONLY_OUTLINE
-                },
-            }
-            for feature in collection["features"]
-        ],
-    }
-
-
-assert _without_display_only_outline(PAYLOAD_COLLECTION) == OUTBOUND, (
-    "the payload carries the outbound collection unchanged apart from the display-only outline"
+assert PAYLOAD_COLLECTION == OUTBOUND, (
+    "the payload carries the outbound collection unchanged -- nothing added"
 )
-for feature, outbound in zip(PAYLOAD_COLLECTION["features"], OUTBOUND["features"]):
-    assert set(feature["properties"]) - set(outbound["properties"]) == {DISPLAY_ONLY_OUTLINE}, (
-        f"{feature['id']}: the payload added more than the display-only outline"
+for feature in PAYLOAD_COLLECTION["features"]:
+    assert DISPLAY_ONLY_OUTLINE not in feature["properties"], (
+        f"{feature['id']}: a tree feature must carry no display-only smoothed outline"
     )
-    outline = feature["properties"][DISPLAY_ONLY_OUTLINE]
-    assert outline is not None and outline["type"] in ("Polygon", "MultiPolygon"), outline
 
 worst_relative_symmetric_difference = 0.0
 for feature, original in zip(OUTBOUND["features"], GENERATED_PATCHES):
@@ -1535,8 +1547,17 @@ with Harness() as h:
     ).intersection(context.boundary_polygon_utm.buffer(-2.0))
     road_strip = _largest(road_strip)
     zones = {
-        "drawn-production": _drawn("drawn-production", _box_around(grounds[0]["polygon_utm"], 15)),
-        "drawn-water": _drawn("drawn-water", _box_around(grounds[1]["polygon_utm"], 15)),
+        # BOTH CLIPPED TO THE PARCEL, like the road, canopy and hydric zones
+        # below them: every one of these five is centred on ground the
+        # pipeline chose, and none of them may assume where that ground sits.
+        "drawn-production": _drawn(
+            "drawn-production",
+            _box_around(grounds[0]["polygon_utm"], 15, context.boundary_polygon_utm.buffer(-2.0)),
+        ),
+        "drawn-water": _drawn(
+            "drawn-water",
+            _box_around(grounds[1]["polygon_utm"], 15, context.boundary_polygon_utm.buffer(-2.0)),
+        ),
         "drawn-road": _drawn("drawn-road", _ring_wgs84(road_strip.simplify(0.5))),
         "drawn-canopy": _drawn("drawn-canopy", _ring_wgs84(_largest(
             canopy_box.buffer(12).intersection(context.boundary_polygon_utm.buffer(-2.0))
@@ -1772,6 +1793,7 @@ print(
     "\n11 [test 11]. REGRESSION: run the other test files separately -- test_step_registry.py, "
     "test_wire_translation.py, test_wire_translation_inbound.py, test_step_orchestrator.py, "
     "test_step_commit.py, test_water_step.py, test_roads_step.py, test_tree_zone_candidates.py, "
-    "test_session_api.py, test_solar_suitability.py, test_fencing.py, test_render_layout_map.py."
+    "test_session_api.py, test_solar_suitability.py, test_fencing.py, test_render_layout_map.py, "
+    "test_tree_zone_geometry_validity.py, test_tree_zone_render_footprint.py."
 )
 print("\nAll trees step checks passed.")

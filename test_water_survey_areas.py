@@ -1251,8 +1251,12 @@ assert _v_by_seed[(26, 2)]["pinch_catchment_acres"] > _v_by_seed[(14, 2)]["pinch
 # finally able to see that the off-channel compartments on this fixture
 # have real water above them, which no per-seed measurement could say.
 v_exc_zone = exc_zones[0]
-assert "presented" not in v_exc_zone
 assert v_exc_zone["rank"] == 1, "still rank 1 WITHIN its own type -- ranking is per type"
+assert v_exc_zone["presented"] is True and v_exc_zone["presentation_order"] == 2, (
+    "the sole excavated survivor is the presented set's SECOND entry -- the interleave puts "
+    "excavated rank 1 between the two embankment zones, and presentation is a separate mark from "
+    "the rank asserted above"
+)
 assert v_exc_zone["mean_suitability"] == 0.5843
 assert v_result["selected_water_zone"] in v_emb_zones, (
     "the pooled winner is an embankment compartment now: 0.77 over the excavated 0.5843"
@@ -1396,12 +1400,24 @@ assert tiny_result["zones"] == [] and tiny_result["zones_by_type"][SURVEY_TYPE_E
     "a sub-floor zone is OUT of the pipeline output -- the floor is a filter now"
 )
 assert tiny_result["selected_water_zone"] is None, "no survivor -> the selection is honestly None"
-assert "presented_zones" not in tiny_result, "the presentation machinery is deleted, key and all"
+assert "presented_zones" not in tiny_result, (
+    "presentation MARKS zones, it never publishes a separate set -- a second list of zones would be "
+    "a second source of truth about which zones exist, which is exactly what the deleted cap did"
+)
+assert tiny_result["presentation"]["presented_count"] == 0, "nothing survived, so nothing is presented"
+assert tiny_result["presentation"]["rule_applied"] == "no surviving zones", (
+    "the rule line states the honest outcome rather than an empty recipe"
+)
+assert tiny_result["presentation"]["survivor_counts"] == {SURVEY_TYPE_EMBANKMENT: 0, SURVEY_TYPE_EXCAVATED: 0}
 assert len(tiny_result["dropped_zones"]) == 1, "the drop is carried, never silent"
 tiny_dropped = tiny_result["dropped_zones"][0]
 assert tiny_dropped["status"] == wsa.ZONE_STATUS_DROPPED
 assert tiny_dropped["drop_reason"] == FLAG_BELOW_MIN_AREA, "the reason code attributes the drop"
-assert tiny_dropped["rank"] is None and "presented" not in tiny_dropped
+assert tiny_dropped["rank"] is None
+assert tiny_dropped["presented"] is False and tiny_dropped["presentation_order"] is None, (
+    "a dropped zone is out of the output, so it is out of the presented set -- marked explicitly, "
+    "never by a missing key, because its record still rides the diagnostic and the dropped layer"
+)
 # The dual-acreage dropped record: the number the floor JUDGED
 # (zone_acres, the clipped hull) and the anchoring signal, both stated:
 assert tiny_dropped["zone_acres"] < MIN_SURVEY_REGION_AREA_ACRES, "the drop's basis is the ZONE acreage"
@@ -1496,24 +1512,46 @@ print(
     "the walkable envelope is the judged object, sparse-anchor silent at 0.508."
 )
 
-# --- THE PRESENTATION CAP IS DELETED (pre-merge change 3): absence
-# asserted at the module surface, not just unexercised. The constant,
-# the function, and the per-zone property are all gone -- surviving IS
-# shipping -- and no code path in the module even NAMES the deleted
-# machinery (AST-level, so docstring history notes stay legal). ---
-from water_survey_areas import attach_cross_type_overlaps, rank_survey_zones_per_type, select_survey_zone  # noqa: E402
+# --- THE PRESENTATION RULE'S SURFACE. The deleted TOP_N cap FILTERED
+# (an unpresented zone left the payload); this rule MARKS. Both halves
+# are asserted here at the module surface: the deleted machinery stays
+# deleted by name, and the replacement's constants and per-zone keys are
+# present on EVERY zone -- surviving or dropped -- so "not presented"
+# and "not marked by this build" can never be the same wire state. ---
+from water_survey_areas import (  # noqa: E402
+    SURVEY_TYPES,
+    assign_presentation_order,
+    attach_cross_type_overlaps,
+    rank_survey_zones_per_type,
+    select_survey_zone,
+)
 
-assert not hasattr(wsa, "WATER_ZONE_PRESENTATION_TOP_N"), "the cap constant is deleted, not zeroed or bypassed"
-assert not hasattr(wsa, "apply_presentation"), "the presentation function is deleted with its guarantee/swap logic"
-for zone_holder in (flat_result["zones"], v_result["zones"], strip_result["zones"], tiny_result["dropped_zones"]):
-    for z in zone_holder:
-        assert "presented" not in z, "no zone -- surviving or dropped -- carries the deleted property"
+assert not hasattr(wsa, "WATER_ZONE_PRESENTATION_TOP_N"), (
+    "the DELETED cap's constant stays deleted -- the replacement is a different rule with a "
+    "different name, never the old one revived under its old spelling"
+)
+assert not hasattr(wsa, "apply_presentation"), "the deleted cap's guarantee/swap function stays deleted"
 _wsa_module_ast = ast.parse(inspect.getsource(wsa))
 _called_names = {
     node.func.id for node in ast.walk(_wsa_module_ast)
     if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
 }
 assert "apply_presentation" not in _called_names, "nothing in the module still calls the deleted machinery"
+
+assert wsa.WATER_ZONE_PRESENTATION_COUNT == 4 and wsa.WATER_ZONE_PRESENTATION_PER_TYPE == 2
+assert (
+    wsa.WATER_ZONE_PRESENTATION_PER_TYPE * len(SURVEY_TYPES) == wsa.WATER_ZONE_PRESENTATION_COUNT
+), "the two constants must agree: the per-type target exactly fills the set when both types produce"
+for zone_holder in (flat_result["zones"], v_result["zones"], strip_result["zones"], tiny_result["dropped_zones"]):
+    for z in zone_holder:
+        assert "presented" in z and "presentation_order" in z, (
+            "EVERY zone carries both keys -- a survivor that is not presented says so with False/None, "
+            "never with a missing key a consumer would have to interpret"
+        )
+        assert isinstance(z["presented"], bool)
+        assert (z["presentation_order"] is None) is not z["presented"], (
+            "the two keys never disagree: presented <=> an integer order"
+        )
 
 # Rank + selection on hand-built zone dicts: every survivor is ranked
 # within its type ON ITS TYPE'S OWN INSTRUMENT -- embankment by the
@@ -1607,7 +1645,470 @@ assert rank_pool[3]["cross_type_overlaps"] == [{"zone_id": 0, "fraction": 0.5}],
 assert rank_pool[1]["cross_type_overlaps"] == [] and rank_pool[4]["cross_type_overlaps"] == [], (
     "no cross-type intersection -> an empty list, never zero-fraction filler entries"
 )
-print("Cap deletion: constant/function/property absent, all survivors ranked (a rank 3 exists), rank-1 selects, cross-type fractions hand-verified at 0.5.")
+print(
+    "Presentation surface: the deleted cap stays deleted by name, both new constants agree, every "
+    "zone (surviving and dropped) carries presented + presentation_order; all survivors ranked "
+    "(a rank 3 exists), rank-1 selects, cross-type fractions hand-verified at 0.5."
+)
+
+
+# =========================================================================
+# 3d. PRESENTATION -- the top 2 of each type, backfilled to four.
+#     A MARK, NOT A FILTER.
+# =========================================================================
+# THE FOUR CASES ARE DRIVEN END TO END through compute_water_survey_areas()
+# on synthetic DEMs, not asserted against hand-built zone dicts alone: the
+# rule is only worth anything if the real ranking feeds it, and a
+# fixture that hand-writes ranks would pass whatever generation did. Each
+# fixture below is a channel-in-a-plane like the V fixture (same
+# formulas, same absolute TWI curve); the knobs that move the survivor
+# counts are the number of channels, the valley's length, and the
+# cross/downhill grade -- the last of which is what starves the EXCAVATED
+# type, because its slope taper is gone by 15% while embankment seeding
+# still qualifies ground at the 0.30 seeding minimum.
+
+
+def _presentation_dem(rows, cols, channels, accumulation_per_row, cross_grade, down_grade):
+    """A channel-in-a-plane DEM plus the hand-built accumulation ribbon
+    and the parcel box, exactly the V fixture's construction generalized
+    to N channels and a settable grade: elevation =
+    100 + (distance to the nearest channel) * cross - row * down, one
+    accumulation ribbon per channel. Returns (dem, boundary, accumulation)."""
+    array = np.zeros((rows, cols))
+    for r in range(rows):
+        for c in range(cols):
+            array[r, c] = 100.0 + min(abs(c - ch) for ch in channels) * cross_grade - r * down_grade
+    accumulation = np.ones((rows, cols))
+    for r in range(rows):
+        for ch in channels:
+            accumulation[r, ch] = accumulation_per_row * (r + 1)
+    boundary = box(
+        ORIGIN_X + 2 * RESOLUTION + 0.1,
+        ORIGIN_Y - (rows - 2) * RESOLUTION + 0.1,
+        ORIGIN_X + (cols - 2) * RESOLUTION - 0.1,
+        ORIGIN_Y - 2 * RESOLUTION - 0.1,
+    )
+    return _dem(array), boundary, accumulation
+
+
+def _presented_in_order(result):
+    """The presented zones, read back off the marks in presentation
+    order -- the reader's own reconstruction, never the summary's
+    presented_zone_ids list, so the two are checkable against each other."""
+    presented = [zone for zone in result["zones"] if zone["presented"]]
+    presented.sort(key=lambda zone: zone["presentation_order"])
+    return presented
+
+
+def _assert_presentation_invariants(result, label):
+    """The invariants that hold on EVERY run whatever the case, checked
+    on each fixture below so a case-specific assertion never stands
+    alone: the order is 1..N with no gaps, the marks and the summary
+    agree, presentation never exceeds the cap, and NOTHING WAS REMOVED
+    from any set by marking it."""
+    summary = result["presentation"]
+    presented = _presented_in_order(result)
+    assert [zone["presentation_order"] for zone in presented] == list(range(1, len(presented) + 1)), (
+        f"{label}: presentation_order is 1..N over the presented zones, no gaps, no duplicates"
+    )
+    assert [zone["id"] for zone in presented] == summary["presented_zone_ids"], (
+        f"{label}: the per-zone marks and the summary's id list are one answer, not two"
+    )
+    assert summary["presented_count"] == len(presented) <= wsa.WATER_ZONE_PRESENTATION_COUNT, (
+        f"{label}: the count is a CAP -- the presented set never exceeds it"
+    )
+    assert summary["presented_count"] == min(
+        wsa.WATER_ZONE_PRESENTATION_COUNT, len(result["zones"])
+    ), (
+        f"{label}: and it is never a QUOTA either -- with fewer survivors than the cap, the "
+        "presented set is every survivor and nothing is padded to reach four"
+    )
+    assert summary["survivor_counts"] == {
+        survey_type: len(result["zones_by_type"][survey_type]) for survey_type in SURVEY_TYPES
+    }, f"{label}: the per-type survivor totals are the real totals"
+    for survey_type in SURVEY_TYPES:
+        typed_presented = [z for z in presented if z["survey_type"] == survey_type]
+        assert [z["rank"] for z in typed_presented] == sorted(z["rank"] for z in typed_presented), (
+            f"{label}: within a type the presented zones are taken in RANK order, never reordered"
+        )
+        assert summary["presented_counts"][survey_type] == len(typed_presented)
+        assert (
+            summary["base_counts"][survey_type] + summary["backfill_counts"][survey_type]
+            == summary["presented_counts"][survey_type]
+        )
+        assert summary["base_counts"][survey_type] == min(
+            wsa.WATER_ZONE_PRESENTATION_PER_TYPE, len(result["zones_by_type"][survey_type])
+        ), f"{label}: the base is the top {wsa.WATER_ZONE_PRESENTATION_PER_TYPE} that type had"
+    # MARKING, NOT FILTERING -- the assertion this whole rule lives or
+    # dies on. Every survivor is still in the payload set, still in its
+    # per-type list, and still a feature on the wire, presented or not.
+    unpresented = [zone for zone in result["zones"] if not zone["presented"]]
+    assert len(presented) + len(unpresented) == len(result["zones"])
+    assert sum(len(v) for v in result["zones_by_type"].values()) == len(result["zones"]), (
+        f"{label}: zones_by_type still holds every survivor"
+    )
+    collection = survey_areas_to_geojson(result["zones"])
+    validate_feature_collection(collection)
+    zone_features = [
+        f for f in collection["features"]
+        if f["properties"]["layer"].startswith("survey_zone_")
+        and not f["properties"]["layer"].startswith("survey_zone_member_")
+    ]
+    assert {f["properties"]["zone_id"] for f in zone_features} == {z["id"] for z in result["zones"]}, (
+        f"{label}: EVERY survivor has its GeoJSON feature -- an unpresented zone is on the wire "
+        "with the same layer and the same full property set as a presented one"
+    )
+    for feature in zone_features:
+        zone = next(z for z in result["zones"] if z["id"] == feature["properties"]["zone_id"])
+        assert feature["properties"]["presented"] is zone["presented"]
+        assert feature["properties"]["presentation_order"] == zone["presentation_order"]
+        assert feature["properties"]["rank"] == zone["rank"], (
+            f"{label}: `rank` keeps its own meaning -- rank WITHIN TYPE across all survivors, "
+            "presented or not; presentation never renumbers it"
+        )
+    return summary, presented, unpresented
+
+
+# --- CASE 1: BOTH TYPES PRODUCE 2+ -> 2 and 2, interleaved, NO backfill.
+# Two parallel channels 100 m apart in a 61-col plane: nine embankment
+# compartments walk the two valleys and the two channel ribbons stay far
+# enough apart to group into two excavated zones.
+_both_dem, _both_boundary, _both_acc = _presentation_dem(40, 61, [14, 34], 60, 0.30, 0.25)
+both_result = compute_water_survey_areas(_both_dem, _both_boundary, flow_accumulation=_both_acc)
+_both_summary, _both_presented, _both_unpresented = _assert_presentation_invariants(
+    both_result, "case 1 (both types 2+)"
+)
+assert (len(both_result["zones_by_type"][SURVEY_TYPE_EMBANKMENT]),
+        len(both_result["zones_by_type"][SURVEY_TYPE_EXCAVATED])) == (9, 2), (
+    "the fixture's premise: both types produced at least the per-type target "
+    f"{[(t, len(v)) for t, v in both_result['zones_by_type'].items()]}"
+)
+assert _both_summary["rule_applied"] == "2 embankment + 2 excavated"
+assert _both_summary["backfill_applied"] is False and _both_summary["backfill_counts"] == {
+    SURVEY_TYPE_EMBANKMENT: 0, SURVEY_TYPE_EXCAVATED: 0
+}, "neither type fell short, so no slot opened and nothing was backfilled"
+assert [(z["survey_type"], z["rank"]) for z in _both_presented] == [
+    (SURVEY_TYPE_EMBANKMENT, 1), (SURVEY_TYPE_EXCAVATED, 1),
+    (SURVEY_TYPE_EMBANKMENT, 2), (SURVEY_TYPE_EXCAVATED, 2),
+], (
+    "THE DOCUMENTED ORDER: interleaved by type, embankment leading each pair -- not one type's "
+    "list with the other appended, and not ordered by comparing the two types' scores (that "
+    "cross-instrument pool is confined to select_survey_zone, deliberately)"
+)
+assert len(_both_unpresented) == 7, (
+    "seven survivors are unpresented AND STILL IN THE PAYLOAD -- this is the case the deleted cap "
+    "got wrong, so the fixture that has the most to lose is the one asserted hardest"
+)
+print(
+    f"Presentation case 1 (both types 2+): 9 embankment + 2 excavated survivors -> "
+    f"{_both_summary['rule_applied']}, interleaved, no backfill, 7 unpresented survivors all still "
+    "in the payload and on the wire."
+)
+
+# --- CASE 2: ONE EXCAVATED SURVIVOR -> 2 embankment + 1 excavated + 1
+# embankment backfill. A single long valley: ten compartments, one
+# excavated ribbon. The third and fourth slots come from the type that
+# HAS leftovers, in its own rank order, appended after the interleaved
+# base.
+_one_dem, _one_boundary, _one_acc = _presentation_dem(80, 21, [10], 30, 0.30, 0.25)
+one_exc_result = compute_water_survey_areas(_one_dem, _one_boundary, flow_accumulation=_one_acc)
+_one_summary, _one_presented, _one_unpresented = _assert_presentation_invariants(
+    one_exc_result, "case 2 (one excavated survivor)"
+)
+assert (len(one_exc_result["zones_by_type"][SURVEY_TYPE_EMBANKMENT]),
+        len(one_exc_result["zones_by_type"][SURVEY_TYPE_EXCAVATED])) == (10, 1), (
+    "the fixture's premise: exactly ONE excavated survivor, with embankment leftovers to backfill from"
+)
+assert _one_summary["rule_applied"] == "2 embankment + 1 excavated + 1 embankment backfill", (
+    "the rule line reads as the rule was applied, backfill named as backfill -- this exact string "
+    "is what the diagnostic and the report print, so a run explains its own set"
+)
+assert _one_summary["backfill_applied"] is True
+assert _one_summary["backfill_counts"] == {SURVEY_TYPE_EMBANKMENT: 1, SURVEY_TYPE_EXCAVATED: 0}
+assert [(z["survey_type"], z["rank"]) for z in _one_presented] == [
+    (SURVEY_TYPE_EMBANKMENT, 1), (SURVEY_TYPE_EXCAVATED, 1),
+    (SURVEY_TYPE_EMBANKMENT, 2), (SURVEY_TYPE_EMBANKMENT, 3),
+], (
+    "the interleaved base first (embankment 1, excavated 1, embankment 2 -- the excavated slot the "
+    "second pair would have used simply does not exist), THEN the backfill in rank order"
+)
+print(
+    f"Presentation case 2 (one excavated survivor): 10 embankment + 1 excavated -> "
+    f"{_one_summary['rule_applied']}."
+)
+
+# --- CASE 3: ZERO EXCAVATED SURVIVORS -> the top 4 embankment. The same
+# valley at a 12% grade: the excavated slope taper is nearly gone there
+# (1.0 through 5%, 0.5 at 10%, nothing at 15%) so no cell clears the 0.5
+# threshold, while embankment seeding still qualifies ground at its 0.30
+# minimum. THIS IS THE REFERENCE PROPERTY'S OWN HISTORY -- excavated
+# produced nothing for several runs -- which is why it is a fixture and
+# not a hypothetical.
+_no_dem, _no_boundary, _no_acc = _presentation_dem(80, 21, [10], 40, 0.50, 0.35)
+no_exc_result = compute_water_survey_areas(_no_dem, _no_boundary, flow_accumulation=_no_acc)
+_no_summary, _no_presented, _no_unpresented = _assert_presentation_invariants(
+    no_exc_result, "case 3 (zero excavated survivors)"
+)
+assert (len(no_exc_result["zones_by_type"][SURVEY_TYPE_EMBANKMENT]),
+        len(no_exc_result["zones_by_type"][SURVEY_TYPE_EXCAVATED])) == (5, 0), (
+    "the fixture's premise: the excavated type produced NOTHING at this grade"
+)
+assert _no_summary["rule_applied"] == "2 embankment + 2 embankment backfill"
+assert [(z["survey_type"], z["rank"]) for z in _no_presented] == [
+    (SURVEY_TYPE_EMBANKMENT, rank) for rank in (1, 2, 3, 4)
+], "with one type absent the set is that type's top four, in rank order -- no gap, no placeholder"
+assert len(_no_unpresented) == 1 and _no_unpresented[0]["rank"] == 5, (
+    "the fifth compartment is unpresented and still a full survivor"
+)
+print(
+    f"Presentation case 3 (zero excavated survivors): 5 embankment + 0 excavated -> "
+    f"{_no_summary['rule_applied']} (the top 4 embankment)."
+)
+
+# --- CASE 4: FEWER THAN FOUR SURVIVORS IN TOTAL -> all of them, no
+# padding. The V fixture (2 embankment + 1 excavated) and the flat
+# fixture (a single excavated zone) are exactly this case and are
+# already built above -- reusing them is the point, because it means the
+# case is not a special path but the same rule reaching the end of a
+# short list.
+_v_summary, _v_presented, _v_unpresented = _assert_presentation_invariants(
+    v_result, "case 4 (three survivors)"
+)
+assert _v_summary["presented_count"] == 3 and not _v_unpresented, "all three, none held back"
+assert _v_summary["rule_applied"] == "2 embankment + 1 excavated"
+assert [(z["survey_type"], z["rank"]) for z in _v_presented] == [
+    (SURVEY_TYPE_EMBANKMENT, 1), (SURVEY_TYPE_EXCAVATED, 1), (SURVEY_TYPE_EMBANKMENT, 2)
+], "interleaved as far as the excavated list reaches, then the embankment remainder"
+_flat_summary, _flat_presented, _flat_unpresented = _assert_presentation_invariants(
+    flat_result, "case 4 (single survivor)"
+)
+assert _flat_summary["presented_count"] == 1 and _flat_summary["rule_applied"] == "1 excavated"
+print(
+    "Presentation case 4 (fewer than four survivors): 3 and 1 survivors present as 3 and 1 -- the "
+    "count is a cap, never a quota, and nothing is padded to reach four."
+)
+
+# --- SELECTION IS UNTOUCHED BY PRESENTATION. Asserted three ways on the
+# case-2 fixture, where the presented set is NOT the pooled order (the
+# presented set interleaves an excavated zone into second place; the
+# pool has its own winner and does not care):
+#   1. STRUCTURALLY -- select_survey_zone()'s source does not name
+#      either key, so it CANNOT read them;
+#   2. by RECOMPUTATION -- the same selection function, run over the
+#      same zones stripped of both marks and shuffled out of
+#      presentation order, returns the same zone id;
+#   3. by CONTRACT -- the selected zone is whatever the pool says,
+#      presented or not, and its rank is 1 within its own type.
+_selection_source = inspect.getsource(select_survey_zone)
+assert "presented" not in _selection_source and "presentation" not in _selection_source, (
+    "selection must not be able to read the presentation marks at all -- the invariant is "
+    "structural, not a matter of the current call order"
+)
+_selected_before = one_exc_result["selected_water_zone"]
+_stripped = []
+for zone in one_exc_result["zones"]:
+    clone = dict(zone)
+    clone.pop("presented")
+    clone.pop("presentation_order")
+    _stripped.append(clone)
+_stripped.reverse()
+assert select_survey_zone(_stripped)["id"] == _selected_before["id"], (
+    "the pooled rank-1 answer is IDENTICAL with the presentation marks removed and the list "
+    "reordered -- presentation moved the reading order, it did not move the selection"
+)
+assert _selected_before["rank"] == 1, "still the pooled rank-1 zone of its own type"
+assert one_exc_result["zones"].index(_selected_before) >= 0, "and it is a member of the surviving set"
+print(
+    "Presentation vs selection: select_survey_zone() cannot read the marks (source-level), and "
+    "returns the same zone id over the same survivors stripped of them and reordered."
+)
+
+# --- NARRATIVE AND PANEL: the presented set FIRST, in presentation
+# order, with the per-type survivor totals beside it -- and every
+# unpresented survivor still carrying its full block AND its panel. The
+# case-2 fixture is used because its presentation order is genuinely
+# different from the (survey_type, rank) order narrative_data used
+# before this rule existed, so an unchanged sort would fail here.
+_one_narrative = build_narrative_data(one_exc_result)
+assert _one_narrative["zone_count"] == len(one_exc_result["zones"]) == len(_one_narrative["zones"]), (
+    "EVERY survivor still has a narrative block -- presentation ordered this list, it did not "
+    "shorten it"
+)
+assert [block["id"] for block in _one_narrative["zones"][:4]] == _one_summary["presented_zone_ids"], (
+    "the presented set leads the list, in presentation order"
+)
+assert [block["presentation_order"] for block in _one_narrative["zones"][:4]] == [1, 2, 3, 4]
+assert all(block["presented"] is False for block in _one_narrative["zones"][4:]), (
+    "and the unpresented survivors follow, marked as such rather than dropped"
+)
+assert all(block["presentation_order"] is None for block in _one_narrative["zones"][4:])
+_trailing = _one_narrative["zones"][4:]
+assert [(b["survey_type"], b["rank"]) for b in _trailing] == sorted(
+    (b["survey_type"], b["rank"]) for b in _trailing
+), "the unpresented remainder keeps the old per-type, per-rank order"
+_one_presentation_block = _one_narrative["presentation"]
+assert _one_presentation_block["rule_applied"] == "2 embankment + 1 excavated + 1 embankment backfill"
+assert _one_presentation_block["survivor_counts"] == {
+    SURVEY_TYPE_EMBANKMENT: 10, SURVEY_TYPE_EXCAVATED: 1
+}, (
+    "THE LINE STATING WHAT WAS CONSIDERED: per-type survivor totals ride the narrative beside the "
+    "presented set, so the report can say what is shown AND what it is shown out of"
+)
+assert (
+    _one_presentation_block["survivor_counts"][SURVEY_TYPE_EMBANKMENT]
+    == _one_narrative["embankment_zone_count"]
+), "and they agree with the counts the narrative already published -- one answer, not two"
+assert (
+    _one_presentation_block["survivor_counts"][SURVEY_TYPE_EXCAVATED]
+    == _one_narrative["excavated_zone_count"]
+)
+# UNPRESENTED KEEPS EVERYTHING. A block that is not in the presented set
+# is the same shape as one that is -- panel rows included -- because the
+# panel is a reading of a ZONE, and being unpresented says nothing about
+# the ground.
+_presented_block = _one_narrative["zones"][0]
+_unpresented_block = _one_narrative["zones"][-1]
+assert _unpresented_block["presented"] is False
+assert set(_unpresented_block) == set(_presented_block), (
+    "identical block shape -- an unpresented zone is not a reduced record"
+)
+assert _unpresented_block["panel"], "and it still carries its panel block"
+assert [row["key"] for row in _unpresented_block["panel"][:5]] == list(wsa.PANEL_ALWAYS_ROWS), (
+    "the same five always-rows in the same order: the panel never renders a zone differently for "
+    "being unpresented"
+)
+for _block in (_presented_block, _unpresented_block):
+    _panel_keys = {row["key"] for row in _block["panel"]}
+    assert not _panel_keys & {"presented", "presentation_order"}, (
+        "the presentation mark is DECIDED AGAINST THE PANEL (PANEL_EXCLUDED_KEYS): the panel "
+        "answers 'should I walk this zone?', and which list a zone is shown in is a question "
+        "about the other zones"
+    )
+json.dumps(_one_narrative)
+
+# THE DIAGNOSTIC'S ZONE TABLE explains its own presented set: the rule
+# line at the top, the mark on each presented row. Built over the same
+# identify-shaped dict the diagnostic gets from the real entry point.
+_one_identify_like = {
+    "zones": one_exc_result["zones"],
+    "zones_by_type": one_exc_result["zones_by_type"],
+    "dropped_zones": one_exc_result["dropped_zones"],
+    "presentation": one_exc_result["presentation"],
+    "embankment_seeds": one_exc_result["embankment_seeds"],
+    "result": one_exc_result,
+}
+_one_table = diag.summarize_survey_zones_table(_one_identify_like)
+assert "2 embankment + 1 excavated + 1 embankment backfill" in _one_table, (
+    "THE RULE LINE: the table states which rule produced this run's presented set, so a reader "
+    "never has to reconstruct it from which rows happen to be marked"
+)
+assert "4 of 11 survivor(s) presented" in _one_table, "with the two counts it is a rule about"
+assert "10 embankment survivor(s), 1 excavated survivor(s)" in _one_table, (
+    "and the per-type survivor totals -- what was considered"
+)
+assert "A MARK, NOT A FILTER" in _one_table, (
+    "the table says outright that an unmarked row is a survivor, because a marked/unmarked table "
+    "is exactly where a reader would otherwise assume a filter"
+)
+assert _one_table.count("[PRESENTED #") == 4, "one mark per presented zone, and only those"
+for _order in (1, 2, 3, 4):
+    assert f"[PRESENTED #{_order}]" in _one_table
+_one_table_zone_lines = [
+    line for line in _one_table.split("\n") if line.startswith("  #")
+]
+assert len(_one_table_zone_lines) == len(one_exc_result["zones"]) == 11, (
+    "EVERY survivor still gets a line -- the mark is a column, not a filter on the table either"
+)
+print(
+    "Presentation in narrative_data: presented set leads in presentation order, per-type survivor "
+    "totals ride the block, unpresented survivors keep an identical block and panel, and neither "
+    "mark is a panel row. The diagnostic table states the rule and marks 4 of its 11 rows."
+)
+
+# --- THE RULE ITSELF, exercised directly on ranked pools. The four
+# fixtures above prove the rule against real generation; these prove the
+# BOUNDARIES of it cheaply -- including the one shape no DEM here
+# produces (each type with exactly one survivor, where the set is two
+# and there is nothing to backfill FROM).
+def _ranked_pool(embankment_count, excavated_count):
+    pool = []
+    for index in range(embankment_count):
+        pool.append(_mini_zone(
+            index, SURVEY_TYPE_EMBANKMENT, 0.1, 1.0, box(index * 100, 0, index * 100 + 20, 20),
+            seed_blend=round(0.9 - 0.05 * index, 4), pinch_drainage=1.0, catchment=6.0,
+        ))
+    for index in range(excavated_count):
+        pool.append(_mini_zone(
+            1000 + index, SURVEY_TYPE_EXCAVATED, round(0.8 - 0.05 * index, 4), 1.0,
+            box(index * 100, 500, index * 100 + 20, 520),
+        ))
+    rank_survey_zones_per_type(pool)
+    return pool
+
+
+_rule_cases = {
+    (3, 3): ("2 embankment + 2 excavated",
+             [(SURVEY_TYPE_EMBANKMENT, 1), (SURVEY_TYPE_EXCAVATED, 1),
+              (SURVEY_TYPE_EMBANKMENT, 2), (SURVEY_TYPE_EXCAVATED, 2)]),
+    (2, 2): ("2 embankment + 2 excavated",
+             [(SURVEY_TYPE_EMBANKMENT, 1), (SURVEY_TYPE_EXCAVATED, 1),
+              (SURVEY_TYPE_EMBANKMENT, 2), (SURVEY_TYPE_EXCAVATED, 2)]),
+    (4, 1): ("2 embankment + 1 excavated + 1 embankment backfill",
+             [(SURVEY_TYPE_EMBANKMENT, 1), (SURVEY_TYPE_EXCAVATED, 1),
+              (SURVEY_TYPE_EMBANKMENT, 2), (SURVEY_TYPE_EMBANKMENT, 3)]),
+    (1, 4): ("1 embankment + 2 excavated + 1 excavated backfill",
+             [(SURVEY_TYPE_EMBANKMENT, 1), (SURVEY_TYPE_EXCAVATED, 1),
+              (SURVEY_TYPE_EXCAVATED, 2), (SURVEY_TYPE_EXCAVATED, 3)]),
+    (6, 0): ("2 embankment + 2 embankment backfill",
+             [(SURVEY_TYPE_EMBANKMENT, rank) for rank in (1, 2, 3, 4)]),
+    (0, 6): ("2 excavated + 2 excavated backfill",
+             [(SURVEY_TYPE_EXCAVATED, rank) for rank in (1, 2, 3, 4)]),
+    (1, 1): ("1 embankment + 1 excavated",
+             [(SURVEY_TYPE_EMBANKMENT, 1), (SURVEY_TYPE_EXCAVATED, 1)]),
+    (2, 1): ("2 embankment + 1 excavated",
+             [(SURVEY_TYPE_EMBANKMENT, 1), (SURVEY_TYPE_EXCAVATED, 1),
+              (SURVEY_TYPE_EMBANKMENT, 2)]),
+    (0, 0): ("no surviving zones", []),
+}
+for (emb_n, exc_n), (expected_rule, expected_order) in _rule_cases.items():
+    pool = _ranked_pool(emb_n, exc_n)
+    summary = assign_presentation_order(pool)
+    presented = sorted(
+        [z for z in pool if z["presented"]], key=lambda z: z["presentation_order"]
+    )
+    assert summary["rule_applied"] == expected_rule, (
+        f"{emb_n} embankment + {exc_n} excavated -> expected rule {expected_rule!r}, "
+        f"got {summary['rule_applied']!r}"
+    )
+    assert [(z["survey_type"], z["rank"]) for z in presented] == expected_order, (
+        f"{emb_n} embankment + {exc_n} excavated -> expected order {expected_order}, got "
+        f"{[(z['survey_type'], z['rank']) for z in presented]}"
+    )
+    assert len(pool) == emb_n + exc_n, "the function marks in place and REMOVES NOTHING from the list"
+    assert summary["presented_count"] == min(4, emb_n + exc_n), "cap, never quota"
+    for zone in pool:
+        assert (zone["presentation_order"] is None) is not zone["presented"]
+# The two-and-two case with a LOPSIDED pool, stated separately because it
+# is the one a "take the best four overall" rule would get wrong: six
+# embankment zones all out-ranking every excavated one still yield two
+# excavated slots, because the rule is per type by construction.
+_lopsided = _ranked_pool(6, 3)
+for zone in _lopsided:
+    if zone["survey_type"] == SURVEY_TYPE_EXCAVATED:
+        zone["mean_suitability"] = 0.2
+rank_survey_zones_per_type(_lopsided)
+assign_presentation_order(_lopsided)
+assert sorted(
+    z["survey_type"] for z in _lopsided if z["presented"]
+) == [SURVEY_TYPE_EMBANKMENT, SURVEY_TYPE_EMBANKMENT, SURVEY_TYPE_EXCAVATED, SURVEY_TYPE_EXCAVATED], (
+    "the presented set is 2 and 2 even when every embankment zone would out-score every excavated "
+    "one on a pooled scale -- 'both types considered' is the rule, not 'the best four'"
+)
+print(
+    f"Presentation rule: {len(_rule_cases)} survivor shapes exercised directly (both backfill "
+    "directions, both zero-of-a-type shapes, one-each, and the empty run), plus the lopsided pool "
+    "that a best-four-overall rule would get wrong."
+)
 
 
 # =========================================================================
@@ -1619,8 +2120,13 @@ assert selected is not None and isinstance(selected, dict) and selected, (
     "the contract is 'non-empty dict or None' -- truthiness gates in solar/tree/fencing depend on it"
 )
 assert selected is flat_zone, "the pooled rank-1 ZONE is the selection"
-assert selected["status"] == wsa.ZONE_STATUS_NOMINATED and "presented" not in selected, (
-    "the selected zone is a surviving zone, full stop -- the presented distinction no longer exists"
+assert selected["status"] == wsa.ZONE_STATUS_NOMINATED, (
+    "the selected zone is a surviving zone, full stop"
+)
+assert selected["presented"] is True and selected["presentation_order"] == 1, (
+    "the sole survivor here is trivially the presented set -- and note the direction of the "
+    "dependency: selection does not read this mark (asserted structurally in section 3d), the mark "
+    "simply happens to agree on a one-zone parcel"
 )
 
 # The three fields production consumers dereference directly:
@@ -1731,7 +2237,17 @@ assert narrative["zones"] and len(narrative["zones"]) == narrative["zone_count"]
 )
 assert narrative["dropped_count"] == 0
 for gone_key in ("presented_count", "presentation_top_n", "presentation_guarantee_applied"):
-    assert gone_key not in narrative, f"the deleted cap's narrative counter {gone_key} must not resurface"
+    assert gone_key not in narrative, (
+        f"the deleted cap's top-level narrative counter {gone_key} must not resurface -- the "
+        "presentation rule reports itself in ONE block (narrative['presentation']), never as loose "
+        "counters a reader has to assemble"
+    )
+assert narrative["presentation"]["rule_applied"] == "1 excavated", (
+    "the rule line names what this run presented, on a single-survivor parcel"
+)
+assert narrative["presentation"]["survivor_counts"] == {
+    SURVEY_TYPE_EMBANKMENT: 0, SURVEY_TYPE_EXCAVATED: 1
+}, "the per-type SURVIVOR totals ride the block -- what was considered, beside what is shown"
 zone_block = narrative["zones"][0]
 assert zone_block["sparse_anchor"] is False, "the sparse-anchor finding rides every zone block"
 assert zone_block["cross_type_overlaps"] == [] and zone_block["either_type_candidate"] is False, (
@@ -1823,9 +2339,10 @@ assert member_feature["properties"]["region_id"] in zone_feature["properties"]["
 )
 boundary_feature = next(f for f in collection["features"] if f["properties"]["layer"] == "survey_context_boundary")
 assert boundary_feature["properties"]["gated_cells"] == hit_result["gate_mask_stats"]["gated_cells"]
-# The deleted `presented` property never reaches the wire; the honesty
-# reports (sparse anchor + cross-type agreement) do:
-assert "presented" not in zone_feature["properties"]
+# The presentation mark reaches the wire on every zone feature, beside
+# the honesty reports (sparse anchor + cross-type agreement):
+assert zone_feature["properties"]["presented"] is True
+assert zone_feature["properties"]["presentation_order"] == 1
 assert zone_feature["properties"]["sparse_anchor"] is False
 assert zone_feature["properties"]["cross_type_overlaps"] == [], "single-type fixture: an empty agreement list"
 assert zone_feature["properties"]["status"] == "nominated" and zone_feature["properties"]["drop_reason"] is None
@@ -1839,7 +2356,11 @@ dropped_features = [f for f in dropped_collection["features"] if f["properties"]
 assert len(dropped_features) == 1, "the floor's casualty appears on the dropped layer, attributed"
 dropped_props = dropped_features[0]["properties"]
 assert dropped_props["status"] == "dropped" and dropped_props["drop_reason"] == "below_min_area"
-assert "presented" not in dropped_props and dropped_props["rank"] is None
+assert dropped_props["rank"] is None
+assert dropped_props["presented"] is False and dropped_props["presentation_order"] is None, (
+    "the dropped feature carries the mark explicitly too -- `status` is what says it is out of the "
+    "output; presentation never speaks to whether a zone exists"
+)
 assert dropped_props["zone_acres"] < MIN_SURVEY_REGION_AREA_ACRES, (
     "the dual-acreage dropped record travels to the wire: the judged zone acreage rides the feature"
 )

@@ -138,7 +138,24 @@ from hydrology_data import get_water_features_geojson
 from raster_grid import SQUARE_METERS_PER_ACRE
 from road_corridors import NO_ROAD_CORRIDOR, identify_road_corridor_candidates
 from tree_zone_candidates import identify_tree_zone_candidates
-from water_suitability import fetch_and_select_optimal_water_zone
+from water_suitability import NO_WATER_ZONE, fetch_and_select_optimal_water_zone
+
+# THE THREE FENCE TYPES THE INTERACTIVE STEP OFFERS AS CANDIDATES, in the
+# order the report and the panel list them, keyed by the `fence_type`
+# property every "perimeter_fencing" feature has always carried. Stream
+# exclusion fencing (its own "exclusion_fencing" layer) is deliberately NOT
+# here, and neither is any road fence: both are narrative-only -- see the
+# module docstring and build_narrative_data() -- so they are computed, reach
+# the result, and are never candidates.
+FENCE_TYPE_BOUNDARY = "boundary"
+FENCE_TYPE_WATER_ZONE = "water_zone_exclusion"
+FENCE_TYPE_TREE_ZONE = "tree_zone_exclusion"
+CANDIDATE_FENCE_TYPES = (FENCE_TYPE_BOUNDARY, FENCE_TYPE_WATER_ZONE, FENCE_TYPE_TREE_ZONE)
+FENCE_TYPE_LABELS = {
+    FENCE_TYPE_BOUNDARY: "Boundary fencing",
+    FENCE_TYPE_WATER_ZONE: "Water zone fencing",
+    FENCE_TYPE_TREE_ZONE: "Tree zone fencing",
+}
 
 # Buffer distance (meters) used to turn a stream's real NHD centerline
 # into a livestock-exclusion fence-line recommendation: the fence runs
@@ -337,7 +354,7 @@ def stream_exclusion_fencing_to_geojson(
 def find_boundary_fencing(
     boundary_polygon_utm: Polygon,
     production_zone_polygons_utm: list[Polygon],
-    structure_site_polygon_utm: Optional[Polygon],
+    structure_site_polygon_utm: Union[Polygon, list, None],
     road_corridor_cell_footprint_polygon_utm: Optional[Polygon],
     water_zone_polygon_utm: Optional[Polygon],
     tree_zone_polygons_utm: list[Polygon],
@@ -416,9 +433,21 @@ def find_boundary_fencing(
     """
     # Step 1: developed footprint (production + structure + road corridor path).
     # Water/tree zones are deliberately NOT included here -- they enter in step 3.
+    #
+    # structure_site_polygon_utm is ONE polygon (the batch path's single rank-1
+    # site, as it has always been) OR A LIST of them (the interactive path's
+    # committed sites -- any number, selected and placed alike). Every entry
+    # is simply one more developed part, exactly as each production zone is:
+    # nothing below this line knows how many sites there were, because
+    # nothing below this line ever did. The parameter keeps its singular name
+    # so every existing caller is untouched.
     developed_parts = [p for p in production_zone_polygons_utm if p is not None and not p.is_empty]
-    if structure_site_polygon_utm is not None and not structure_site_polygon_utm.is_empty:
-        developed_parts.append(structure_site_polygon_utm)
+    structure_parts = (
+        list(structure_site_polygon_utm)
+        if isinstance(structure_site_polygon_utm, (list, tuple))
+        else [structure_site_polygon_utm]
+    )
+    developed_parts.extend(p for p in structure_parts if p is not None and not p.is_empty)
     if (
         road_corridor_cell_footprint_polygon_utm is not None
         and not road_corridor_cell_footprint_polygon_utm.is_empty
@@ -802,11 +831,20 @@ def identify_boundary_fencing(
     reprojected back to WGS84 before boundary_fencing_to_geojson() wraps
     it in schema.
 
+    structure_site_polygon_utm is one polygon or a LIST of them -- see
+    find_boundary_fencing(), which is where the list is read.
+
     Returns:
         {
             'fencing_geojson': FeatureCollection,   # 1 or more "perimeter_fencing" features
             'segment_count': int,
+            'fence_rings_utm': [LineString, ...],   # the same rings, in dem["crs"], in feature order
         }
+
+    `fence_rings_utm` is ADDITIVE: the rings find_boundary_fencing() returned,
+    before reprojection, one per feature and in the same order, so a caller
+    can measure a length in metres against the geometry that was actually
+    computed rather than re-deriving it from the WGS84 form.
     """
     if dem is None:
         dem = get_dem_for_boundary(boundary_coordinates)
@@ -834,7 +872,11 @@ def identify_boundary_fencing(
     ]
     fencing_geojson = boundary_fencing_to_geojson(rings_wgs84)
 
-    return {"fencing_geojson": fencing_geojson, "segment_count": segment_count}
+    return {
+        "fencing_geojson": fencing_geojson,
+        "segment_count": segment_count,
+        "fence_rings_utm": fence_rings_utm,
+    }
 
 
 def identify_fencing(
@@ -859,6 +901,7 @@ def identify_fencing(
     production_zone_polygons_utm: Optional[list[Polygon]] = None,
     structure_site_feature: Optional[dict] = None,
     road_corridor_cell_footprint_polygon_utm: Optional[Polygon] = None,
+    structure_site_polygons_utm: Optional[list] = None,
 ) -> dict:
     """
     Full pipeline entry point for Subdivision Fences' computed geometry
@@ -992,10 +1035,45 @@ def identify_fencing(
     just passes through whatever it has, substituting no defaults and
     skipping no call.
 
+    structure_site_polygons_utm is the INTERACTIVE path's structure input:
+    a LIST of already-computed site pads in dem["crs"], one per COMMITTED
+    structure site (wire_translation.structure_site_polygons() off the
+    rehydrated structures commit -- selected candidates and placed sites
+    alike), where structure_site_feature is the batch path's ONE rank-1
+    Feature. Both are accepted, both feed the same list, and that list is
+    what find_boundary_fencing() receives: each site is one more developed
+    part beside the production zones, unioned there exactly as a single
+    site always was. A list rather than a pre-unioned polygon, and
+    deliberately: the boundary fence's step 1 IS the union, so handing it
+    an already-unioned polygon would union the same ground twice and hide
+    from a test how many sites actually arrived. [] (structures committed
+    EMPTY) means what None means here -- no building to enclose -- because
+    this entry point never self-computes a site: solar_suitability is not
+    imported and there is no fallback to close, so the empty list needs no
+    sentinel and there is no self-compute for one to skip.
+
+    THE TWO EMPTY-COMMIT SENTINELS. selected_water_zone ALSO accepts
+    water_suitability.NO_WATER_ZONE and selected_road_corridor ALSO accepts
+    road_corridors.NO_ROAD_CORRIDOR -- the explicit "that step already ran
+    and chose nothing" answers an EMPTY water or roads commit arrives as on
+    the interactive path (see each constant's own docstring). Each is
+    normalized back to None for every read below, which keeps None's
+    existing "no zone" / "no corridor" meaning for the fence geometry, AND
+    the matching self-compute (fetch_and_select_optimal_water_zone() /
+    identify_road_corridor_candidates()) is SKIPPED -- a bare None still
+    self-computes exactly as before. Same posture tree_zone_candidates.py
+    and solar_suitability.py take for the same two values, and the same
+    trap: without the guard, a "no water zone" decision reached
+    `selected_water_zone["render_fill_polygon_utm"]` as a bare object() and
+    raised, and a "no road" decision routed a whole network from no anchor
+    purely to hand the nested tree self-compute an exclusion the user had
+    rejected.
+
     Returns:
         {
             'fencing_geojson': FeatureCollection,   # "exclusion_fencing" (stream) + "perimeter_fencing" (boundary + water zone + tree zone) features
             'segment_count': int,                   # identify_boundary_fencing()'s own segment_count, passed through
+            'narrative_data': dict,                 # build_narrative_data()'s digest -- lengths in feet, per fence type
         }
     """
     if water_features_geojson is None:
@@ -1006,13 +1084,25 @@ def identify_fencing(
     # road_corridors.NO_ROAD_CORRIDOR is the EXPLICIT "the roads step already
     # ran and selected no road" answer (see that constant's own docstring)
     # -- what an EMPTY roads commit arrives as on the interactive path.
-    # Normalized back to None up front so every read below (the tree-zone
-    # self-compute's own `is None` guard, and the road footprint handed to
-    # the boundary fence) keeps None's existing "no corridor" meaning, and
-    # the nested road self-compute is SKIPPED. A bare None still
-    # self-computes exactly as before.
-    if selected_road_corridor is NO_ROAD_CORRIDOR:
+    # Normalized back to None up front so every read below (the road
+    # footprint handed to the boundary fence, the value forwarded into the
+    # tree self-compute) keeps None's existing "no corridor" meaning, and
+    # the nested road self-compute is SKIPPED -- `road_committed_empty` is
+    # what skips it; the bare `is None` test below cannot, because after
+    # this line the sentinel IS None. A bare None still self-computes
+    # exactly as before.
+    road_committed_empty = selected_road_corridor is NO_ROAD_CORRIDOR
+    if road_committed_empty:
         selected_road_corridor = None
+    # water_suitability.NO_WATER_ZONE likewise: an EMPTY water commit. The
+    # water fence has no zone to enclose, the boundary fence unions no water
+    # ground, and the water self-compute does not run to invent a zone the
+    # user decided against. Tracked separately from `selected_water_zone is
+    # None` for the same reason as roads: once normalized, the sentinel is
+    # indistinguishable from "not supplied".
+    water_committed_empty = selected_water_zone is NO_WATER_ZONE
+    if water_committed_empty:
+        selected_water_zone = None
 
     if boundary_polygon_utm is None:
         boundary_xs, boundary_ys = warp_transform(
@@ -1031,7 +1121,7 @@ def identify_fencing(
     stream_entries = find_stream_exclusion_fencing(stream_features, utm_crs, stream_exclusion_buffer_meters)
 
     if selected_water_zone_render_fill_polygon_utm is None:
-        if selected_water_zone is None:
+        if selected_water_zone is None and not water_committed_empty:
             selected_water_zone = fetch_and_select_optimal_water_zone(
                 boundary_coordinates,
                 dem=dem,
@@ -1058,7 +1148,7 @@ def identify_fencing(
 
     if tree_zone_render_fill_polygons_utm is None:
         if tree_zone_patches is None:
-            if selected_road_corridor is None:
+            if selected_road_corridor is None and not road_committed_empty:
                 # Derived purely as a real siting-exclusion input for tree zone
                 # candidates below (tree zones must not overlap the road
                 # corridor's own footprint) -- no fence loop of its own is
@@ -1088,8 +1178,12 @@ def identify_fencing(
                 boundary_polygon_utm=boundary_polygon_utm,
                 production_areas=production_areas,
                 valleys=valleys,
-                selected_water_zone=selected_water_zone,
-                selected_road_corridor=selected_road_corridor,
+                # A resolved "nothing" is re-wrapped as its explicit sentinel
+                # so the nested call never re-runs the water pipeline or a
+                # routing pass either -- the same re-wrap tree_zone_
+                # candidates.py and solar_suitability.py make at this hop.
+                selected_water_zone=NO_WATER_ZONE if water_committed_empty else selected_water_zone,
+                selected_road_corridor=NO_ROAD_CORRIDOR if road_committed_empty else selected_road_corridor,
                 hydric_floodplain_union=hydric_floodplain_union,
                 floodplain_data_is_fallback=floodplain_data_is_fallback,
                 canopy_height=canopy_height,
@@ -1123,30 +1217,258 @@ def identify_fencing(
     # pass-throughs (already-computed results a caller supplies, per this function's docstring
     # pattern), each already in dem["crs"]; any that a caller leaves None/empty collapses that
     # part of find_boundary_fencing()'s footprint union cleanly, no substitute/default.
-    structure_site_polygon_utm = None
+    # THE STRUCTURE SITES, AS A LIST: the batch path's one Feature (reprojected
+    # here) and/or the interactive path's already-UTM committed pads. See this
+    # function's docstring on structure_site_polygons_utm for why a list.
+    structure_site_polygons = [
+        p for p in (structure_site_polygons_utm or []) if p is not None and not p.is_empty
+    ]
     if structure_site_feature is not None and structure_site_feature.get("geometry") is not None:
-        structure_site_polygon_utm = shape(
-            transform_geom("EPSG:4326", dem["crs"], structure_site_feature["geometry"])
+        structure_site_polygons.append(
+            shape(transform_geom("EPSG:4326", dem["crs"], structure_site_feature["geometry"]))
         )
 
     boundary_result = identify_boundary_fencing(
         boundary_coordinates,
         dem=dem,
         production_zone_polygons_utm=production_zone_polygons_utm or [],
-        structure_site_polygon_utm=structure_site_polygon_utm,
+        structure_site_polygon_utm=structure_site_polygons,
         road_corridor_cell_footprint_polygon_utm=road_corridor_cell_footprint_polygon_utm,
         water_zone_polygon_utm=selected_water_zone_render_fill_polygon_utm,
         tree_zone_polygons_utm=tree_zone_render_fill_polygons_utm,
     )
 
+    stream_geojson = stream_exclusion_fencing_to_geojson(stream_entries, stream_exclusion_buffer_meters)
     features = (
-        stream_exclusion_fencing_to_geojson(stream_entries, stream_exclusion_buffer_meters)["features"]
+        stream_geojson["features"]
         + boundary_result["fencing_geojson"]["features"]
         + water_zone_geojson["features"]
         + tree_zone_geojson["features"]
     )
 
-    return {"fencing_geojson": make_feature_collection(features), "segment_count": boundary_result["segment_count"]}
+    narrative_data = build_narrative_data(
+        boundary_rings_utm=boundary_result["fence_rings_utm"],
+        boundary_features=boundary_result["fencing_geojson"]["features"],
+        water_fence_line_utm=water_fence_line_utm,
+        water_features=water_zone_geojson["features"],
+        water_zone_fenced=selected_water_zone_render_fill_polygon_utm is not None
+        and not selected_water_zone_render_fill_polygon_utm.is_empty,
+        tree_fence_lines_utm=tree_fence_lines_utm,
+        tree_features=tree_zone_geojson["features"],
+        tree_zones_fenced=len([p for p in tree_zone_render_fill_polygons_utm if p is not None and not p.is_empty]),
+        stream_entries=stream_entries,
+        stream_features=stream_geojson["features"],
+        utm_crs=utm_crs,
+        stream_exclusion_buffer_meters=stream_exclusion_buffer_meters,
+        water_zone_fence_buffer_meters=water_zone_fence_buffer_meters,
+        tree_zone_fence_buffer_meters=tree_zone_fence_buffer_meters,
+        developed_site_count=len(structure_site_polygons),
+    )
+
+    return {
+        "fencing_geojson": make_feature_collection(features),
+        "segment_count": boundary_result["segment_count"],
+        "narrative_data": narrative_data,
+    }
+
+
+def _feet(meters):
+    """Metres to feet at this block's own rounding boundary, None passed
+    straight through -- road_corridors.build_narrative_data()'s own helper
+    and convention (one decimal, converted HERE and never downstream), so
+    a fence length reads in the same unit and at the same precision as a
+    road length in the report and on the wire."""
+    return None if meters is None else round(float(meters) / METERS_PER_FOOT, 1)
+
+
+def _closed_rings(line) -> list:
+    """Every closed LineString ring in a fence geometry -- a LineString is
+    one, a MultiLineString one per part -- which is what a "loop" is."""
+    if line is None or line.is_empty:
+        return []
+    parts = list(line.geoms) if line.geom_type == "MultiLineString" else [line]
+    return [part for part in parts if not part.is_empty]
+
+
+def _fence_type_block(fence_type: str, generated: bool, lines_utm: list, features: list, reason) -> dict:
+    """
+    ONE fence type's digest. `lines_utm` and `features` are parallel: one
+    entry per feature of this type, the UTM geometry the feature was built
+    from and the feature itself.
+
+    THE THREE STATES A TYPE CAN BE IN, and every one is explicit here rather
+    than left to a missing key:
+
+      generated=False           there was NOTHING TO FENCE -- the upstream
+                                commit was empty (no water zone, no tree
+                                zone). No pass ran; total_length_ft is None
+                                and loop_count is 0. No tab.
+      generated=True, loops=0   the pass RAN and produced nothing (the
+                                boundary fence's clip came back empty).
+                                total_length_ft is 0.0. No tab.
+      generated=True, loops>0   a CANDIDATE: `candidate` is True, the tab
+                                exists, and the type's length is the SUM
+                                over every loop of every feature of the
+                                type -- because the unit the user commits
+                                is the TYPE, not the loop.
+    """
+    per_feature = []
+    for line, feature in zip(lines_utm, features):
+        rings = _closed_rings(line)
+        per_feature.append(
+            {
+                "feature_id": feature["id"],
+                "label": feature["properties"]["label"],
+                "loop_count": len(rings),
+                "length_ft": _feet(sum(ring.length for ring in rings)),
+            }
+        )
+    loop_count = sum(entry["loop_count"] for entry in per_feature)
+    total_meters = sum(sum(ring.length for ring in _closed_rings(line)) for line in lines_utm)
+    return {
+        "fence_type": fence_type,
+        "label": FENCE_TYPE_LABELS[fence_type],
+        "generated": bool(generated),
+        "candidate": bool(generated and loop_count > 0),
+        "loop_count": int(loop_count),
+        "feature_count": len(per_feature),
+        "total_length_ft": _feet(total_meters) if generated else None,
+        "features": per_feature,
+        "reason": None if generated and loop_count > 0 else reason,
+    }
+
+
+def build_narrative_data(
+    boundary_rings_utm: list,
+    boundary_features: list,
+    water_fence_line_utm,
+    water_features: list,
+    water_zone_fenced: bool,
+    tree_fence_lines_utm: list,
+    tree_features: list,
+    tree_zones_fenced: int,
+    stream_entries: list,
+    stream_features: list,
+    utm_crs: str,
+    stream_exclusion_buffer_meters: float = STREAM_EXCLUSION_BUFFER_METERS,
+    water_zone_fence_buffer_meters: float = WATER_ZONE_FENCE_BUFFER_METERS,
+    tree_zone_fence_buffer_meters: float = TREE_ZONE_FENCE_BUFFER_METERS,
+    developed_site_count: int = 0,
+) -> dict:
+    """
+    The fencing step's NARRATIVE BLOCK -- the JSON-native, imperial digest of
+    what identify_fencing() computed, in the shape every other KSOP module's
+    build_narrative_data() takes (road_corridors, tree_zone_candidates,
+    solar_suitability, water_survey_areas): a dict the report can format and
+    the interactive payload can ship, built beside the values it reads so no
+    downstream reader has to know a unit.
+
+    WHAT IS MEASURED. Every fence's LENGTH, in FEET at one decimal, off the
+    UTM geometry the fence was actually computed in (metres), through the
+    same _feet() boundary road_corridors.py uses for a road's length. Feet
+    because the report narrates imperial throughout (report_generator.py:
+    "Report all measurements in feet, acres, inches, and °F") and because
+    the only fence-adjacent length precedent in this codebase -- a road
+    branch's length_ft / total_length_ft -- is feet at one decimal.
+    summarize_fencing() reports no length at all, only counts and buffer
+    metres, so it set no unit to match; the report did.
+
+    THE UNIT IS THE TYPE. Each candidate type's total_length_ft is the sum
+    across EVERY loop of EVERY feature of that type (a boundary fence split
+    into two rings by the drawn boundary is one type of length ring1+ring2;
+    two tree zones are one type of length loop1+loop2). loop_count counts
+    closed rings the same way. The per-feature rows under `features` are
+    the same measurements one level down, so a reader can see the split.
+
+    WHAT IS NARRATIVE-ONLY, AND STILL HERE. Stream exclusion fencing is
+    computed and counted under `narrative_only.stream_exclusion` with its
+    own summed length -- it reached the result, it reaches the report, and
+    it is never a candidate (see the module docstring). Road fencing is
+    listed under `narrative_only.road` with generated=False and the reason:
+    no road, existing or generated, gets a fence loop of its own.
+
+    `water_zone_fenced` / `tree_zones_fenced` say whether the water and
+    tree passes had anything to fence -- the difference between "not
+    generated" and "generated nothing" that _fence_type_block() makes
+    explicit. `developed_site_count` is how many structure pads entered
+    the developed footprint, reported so a reader can see that three
+    committed sites were three parts and not one.
+    """
+    boundary = _fence_type_block(
+        FENCE_TYPE_BOUNDARY,
+        generated=True,
+        lines_utm=list(boundary_rings_utm),
+        features=list(boundary_features),
+        reason="The developed footprint clipped to the parcel enclosed no ground above the segment floor.",
+    )
+    water = _fence_type_block(
+        FENCE_TYPE_WATER_ZONE,
+        generated=bool(water_zone_fenced),
+        lines_utm=[water_fence_line_utm] if water_fence_line_utm is not None else [],
+        features=list(water_features),
+        reason=(
+            "The water step was committed with no zone, so there is no water ground to fence."
+            if not water_zone_fenced
+            else "The water zone pass ran and produced no fence loop."
+        ),
+    )
+    trees = _fence_type_block(
+        FENCE_TYPE_TREE_ZONE,
+        generated=tree_zones_fenced > 0,
+        lines_utm=list(tree_fence_lines_utm),
+        features=list(tree_features),
+        reason=(
+            "The trees step was committed with no zone, so there is no tree ground to fence."
+            if tree_zones_fenced <= 0
+            else "The tree zone pass ran and produced no fence loop."
+        ),
+    )
+
+    stream_lines_utm = [
+        shape(transform_geom("EPSG:4326", utm_crs, entry["geometry_wgs84"])) for entry in stream_entries
+    ]
+    stream_total_meters = sum(sum(ring.length for ring in _closed_rings(line)) for line in stream_lines_utm)
+
+    return {
+        # THE THREE CANDIDATE TYPES, ALWAYS ALL THREE, in CANDIDATE_FENCE_TYPES
+        # order. A type is never absent from this list: absence is a state
+        # (generated=False) a reader can see, not a key a reader has to
+        # notice is missing.
+        "fence_types": [boundary, water, trees],
+        "candidate_fence_types": [
+            block["fence_type"] for block in (boundary, water, trees) if block["candidate"]
+        ],
+        "narrative_only": {
+            "stream_exclusion": {
+                "generated": True,
+                "candidate": False,
+                "feature_count": len(stream_features),
+                "loop_count": sum(len(_closed_rings(line)) for line in stream_lines_utm),
+                "total_length_ft": _feet(stream_total_meters),
+                "buffer_ft": _feet(stream_exclusion_buffer_meters),
+                "reason": (
+                    "Stream exclusion fencing is computed for the report and is not offered as a "
+                    "candidate on the map."
+                ),
+            },
+            "road": {
+                "generated": False,
+                "candidate": False,
+                "reason": (
+                    "No road, existing or generated, gets a fence loop of its own; road fencing is "
+                    "narrative only."
+                ),
+            },
+        },
+        "segment_count": len(boundary_rings_utm),
+        "developed_site_count": int(developed_site_count),
+        "buffers_ft": {
+            "boundary_margin_ft": _feet(BOUNDARY_FENCE_MARGIN_METERS),
+            "water_zone_ft": _feet(water_zone_fence_buffer_meters),
+            "tree_zone_ft": _feet(tree_zone_fence_buffer_meters),
+            "stream_exclusion_ft": _feet(stream_exclusion_buffer_meters),
+        },
+    }
 
 
 def summarize_fencing(result: dict) -> str:
