@@ -124,6 +124,7 @@ import farm_roads_data
 import keypoint_detection
 import parcel_data
 import road_corridors
+import run_diagnostics
 import valley_delineation
 
 # --- boundary hashing ------------------------------------------------
@@ -519,6 +520,7 @@ def build_session_context(
     session_id: str,
     boundary_coordinates: list,
     fetch_cache: "FetchCache",
+    reason: str = "create_session",
 ) -> SessionContext:
     """
     THE single constructor for a SessionContext. Session creation calls
@@ -528,8 +530,41 @@ def build_session_context(
 
     Layer 1 arrives through the fetch cache, so this is one network fetch
     on a cold boundary and none on a warm one.
+
+    `reason` names which of those two callers this is, for the diagnostic
+    record below and for nothing else -- it changes no behaviour, and
+    both paths still run the identical code beneath it. A creation's
+    fetch and a rebuild's are the same call with completely different
+    expectations (a rebuild is meant to be network-free, and a record
+    showing one that was not is a real finding), so they must not arrive
+    in the record as the same anonymous event.
+
+    THE FETCH IS THE MINUTES. It is measured here rather than inside
+    parcel_data.fetch_parcel_data() because this is the only place that
+    holds the session id a record is filed under AND the fetch cache the
+    answer may come out of -- and because the cache question is only
+    answerable BEFORE the call. The per-layer breakdown is collected
+    inside that function, off a probe begin_fetch() installs on this
+    thread; see run_diagnostics.py's Group 5.
+
+    RECORDED ON THE FAILURE PATH TOO, WHICH IS THE POINT. A hard-failed
+    Layer 1 creates no session at all -- session_manager.create_session()
+    persists nothing and caches nothing -- so this record is the only
+    evidence such a run ever happened. `except BaseException` and not
+    `except Exception`: the raise continues untouched either way, and the
+    broader clause means even an interrupted fetch leaves its trace. When
+    diagnostics are off, both calls return on a boolean.
     """
-    parcel = fetch_cache.get_or_fetch(boundary_coordinates)
+    probe = run_diagnostics.begin_fetch(
+        session_id, boundary_coordinates, fetch_cache, reason
+    )
+    try:
+        parcel = fetch_cache.get_or_fetch(boundary_coordinates)
+    except BaseException as exc:
+        run_diagnostics.record_fetch(probe, error=exc)
+        raise
+    run_diagnostics.record_fetch(probe, parcel=parcel)
+
     warm = run_terrain_warm_up(boundary_coordinates, parcel)
     return SessionContext(
         session_id=session_id,
@@ -560,7 +595,8 @@ def rebuild_session_context(document: dict, fetch_cache: "FetchCache") -> Sessio
     this function rather than replace it.
     """
     return build_session_context(
-        document["session_id"], document["boundary"], fetch_cache
+        document["session_id"], document["boundary"], fetch_cache,
+        reason="rebuild_session_context",
     )
 
 

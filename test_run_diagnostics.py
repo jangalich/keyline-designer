@@ -1,8 +1,8 @@
 """
 test_run_diagnostics.py
 
-THE RUN DIAGNOSTIC RECORD -- run_diagnostics.py, its two generate hooks
-and its commit hook. Run as:
+THE RUN DIAGNOSTIC RECORD -- run_diagnostics.py, its two fetch hooks, its
+two generate hooks and its commit hook. Run as:
 
     python3 test_run_diagnostics.py
 
@@ -42,6 +42,35 @@ Sections (the branch's numbered tests in brackets):
           defaults, the DEFAULT directory, a file on disk. The positive
           counterpart section 6 needs to mean anything.
  10 [10]  Regression is the other test files, run separately.
+
+THE FETCH TIMING SECTIONS (this branch's numbered tests in brackets)
+===================================================================
+Sections 11-18 measure the OTHER end of a session: parcel_data.fetch_
+parcel_data(), the thirteen sequential fetches a session creation waits
+minutes on. They run through the REAL fetch_parcel_data() -- its real
+order, its real None checks, its real raises -- with only the thirteen
+network calls mocked, on parcel_data's own namespace (see FetchHarness).
+
+ 11  [1]  A COLD CREATION RECORDS THIRTEEN LAYER TIMINGS summing to the
+          recorded total, in fetch order, each row carrying its own
+          layer's wait.
+ 12  [2]  A WARM CREATION SAYS THE CACHE SERVED IT -- layers null, not
+          thirteen zeroes.
+ 13  [3]  A FAILED FETCH STILL WRITES A RECORD, naming the layer and the
+          exception, with NO session left behind. Two REAL induced
+          failures, not stubbed verdicts. THE ONE THAT MATTERS
+          OPERATIONALLY.
+ 14  [4]  irradiance RECORDS ITS status, and a degraded status is NOT
+          recorded as a failure.
+ 15  [5]  RETRY COUNTS: no fetch module publishes one, so the absence is
+          reported -- observed against the real entry points, with a
+          published count proved reachable.
+ 16  [6]  TIMINGS MOVE AND THE DIFF STILL COMES OUT CLEAN. Section 2's
+          byte-identical assertion, held for everything that is not a
+          timing.
+ 17  [7]  DISABLED COSTS NOTHING at the fetch too.
+ 18  [8]  self_check() REPORTS WHETHER FETCH INSTRUMENTATION IS WIRED,
+          with a negative control.
 """
 
 import copy
@@ -52,17 +81,21 @@ import shutil
 import tempfile
 import time
 from contextlib import ExitStack
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, Mock
 from unittest.mock import patch as mock_patch
 
 import numpy as np
+import requests
 from rasterio.warp import transform as warp_transform
 from rasterio.warp import transform_geom
 from shapely.geometry import Point, Polygon, mapping, shape
 
 import canopy_height_data
 import commit_validation
+import document_store
 import farm_roads_data
+import hydrology_data
+import imagery_data
 import job_runner
 import parcel_data
 import production_area
@@ -72,6 +105,7 @@ import run_diagnostics
 import session_api
 import session_cache
 import session_manager
+import soil_data
 import step_orchestrator
 import step_registry
 import tree_zone_candidates
@@ -261,16 +295,29 @@ class Harness:
     counted and never performed. An assertion that a count is zero only
     means something if a nonzero count was reachable -- sections 3 and 4
     each prove theirs is.
+
+    `real_fetch=True` leaves parcel_data.fetch_parcel_data() ALONE so the
+    real one runs and its thirteen layer timers fire; FetchHarness below
+    is that mode plus the thirteen layer functions mocked underneath it,
+    on parcel_data's own namespace. Everything else here -- every warm-up
+    boundary, every step's own fetches and self-computes -- is identical
+    in both modes, so a section that measures the fetch is measuring it
+    inside the same closed pipeline every other section runs in.
     """
+
+    def __init__(self, real_fetch: bool = False):
+        self.real_fetch = real_fetch
 
     def __enter__(self):
         self._stack = ExitStack()
         patch = self._stack.enter_context
 
         # --- Layer 1 and the shared warm-up boundaries -------------------
-        self.fetch_parcel_data = patch(
-            mock_patch.object(parcel_data, "fetch_parcel_data", side_effect=_build_parcel_data)
-        )
+        self.fetch_parcel_data = None
+        if not self.real_fetch:
+            self.fetch_parcel_data = patch(
+                mock_patch.object(parcel_data, "fetch_parcel_data", side_effect=_build_parcel_data)
+            )
         self.soil_components = patch(
             mock_patch.object(production_area, "get_soil_data_for_polygon", return_value=HYDRIC_COMPONENTS)
         )
@@ -439,7 +486,7 @@ class Harness:
     @property
     def total_network_calls(self) -> int:
         return (
-            self.fetch_parcel_data.call_count
+            (self.fetch_parcel_data.call_count if self.fetch_parcel_data is not None else 0)
             + self.soil_components.call_count
             + self.soil_geometries.call_count
             + self.canopy_refetch.call_count
@@ -453,6 +500,101 @@ class Harness:
             "identify_water_suitability": self.tree_water_selfcompute.call_count,
             "identify_optimized_production_areas": self.tree_production_selfcompute.call_count,
         }
+
+
+# --- the thirteen layers, mocked one at a time ---------------------------
+#
+# THE REAL fetch_parcel_data() RUNS. Every section that measures the fetch
+# needs the function under test to be the real one -- its real order, its
+# real thirteen calls, its real None checks and its real raises -- with
+# only the network boundary replaced. Patches therefore target
+# parcel_data's OWN namespace (parcel_data.get_dem_for_boundary, ...) and
+# not each source module's, since parcel_data.py imports every fetch with
+# `from X import Y` and patching X.Y would leave its already-bound
+# reference untouched. That is test_parcel_data.py's own arrangement,
+# reused here for its reason.
+
+_FIXTURE_DEM = _build_dem()
+_FIXTURE_CANOPY = _build_canopy(_FIXTURE_DEM)
+
+# parcel_data's binding name -> what that layer returns. Matched to
+# _build_parcel_data() FIELD FOR FIELD, so the ParcelData the real
+# fetch_parcel_data() assembles here is the same one every other section
+# in this file runs its pipeline against; a fetch section and a geometry
+# section then differ in what they observe, never in what they observed it
+# on. IN FETCH ORDER, pairing positionally with parcel_data.FETCH_LAYERS
+# -- asserted below rather than left to the reader to check.
+FETCH_LAYER_RETURNS = {
+    "get_dem_for_boundary": _FIXTURE_DEM,
+    "get_soil_data_for_polygon": HYDRIC_COMPONENTS,
+    "get_farmland_classification_for_polygon": [],
+    "get_erosion_factor_for_polygon": [],
+    "get_saturated_hydraulic_conductivity_for_polygon": FIXTURE_KSAT,
+    "get_soil_geometries_for_polygon": HYDRIC_GEOMETRIES,
+    "get_water_features_for_boundary": {"streams": [], "water_bodies": []},
+    "get_farm_roads_for_boundary": FIXTURE_ROADS,
+    "get_climate_summary_for_point": {},
+    "get_elevation_grid": [],
+    "get_canopy_height_for_boundary": _FIXTURE_CANOPY,
+    "get_imagery_summary_for_boundary": {},
+    "get_regional_irradiance_baseline": {"status": "ok"},
+}
+
+# FETCH_LAYERS entry -> the parcel_data binding that fills it.
+LAYER_FUNCTIONS = dict(zip(parcel_data.FETCH_LAYERS, FETCH_LAYER_RETURNS))
+assert len(parcel_data.FETCH_LAYERS) == 13, parcel_data.FETCH_LAYERS
+assert len(LAYER_FUNCTIONS) == len(FETCH_LAYER_RETURNS) == 13
+
+
+def _layer_mock(name, delay):
+    """One layer's stand-in. `delay` seconds of sleep before returning, so
+    a section can give the thirteen layers KNOWN, DISTINGUISHABLE waits and
+    then assert that each recorded row carries its own layer's wait and not
+    some other layer's."""
+    value = FETCH_LAYER_RETURNS[name]
+    if not delay:
+        return Mock(return_value=value)
+
+    def call(*args, **kwargs):
+        time.sleep(delay)
+        return value
+
+    return Mock(side_effect=call)
+
+
+class FetchHarness:
+    """
+    Harness(real_fetch=True) plus the thirteen layer functions mocked, so
+    a whole session creation runs through the REAL fetch_parcel_data().
+
+    `delays` is {FETCH_LAYERS entry: seconds}; `overrides` is
+    {FETCH_LAYERS entry: a Mock of your own}, which is how a section
+    induces a REAL failure -- a fetch that raises, or one that returns the
+    documented None sentinel -- rather than stubbing a verdict.
+    """
+
+    def __init__(self, delays=None, overrides=None):
+        self.delays = delays or {}
+        self.overrides = overrides or {}
+
+    def __enter__(self):
+        self._stack = ExitStack()
+        self.harness = self._stack.enter_context(Harness(real_fetch=True))
+        self.layers = {}
+        for layer, name in LAYER_FUNCTIONS.items():
+            mock = self.overrides.get(layer)
+            if mock is None:
+                mock = _layer_mock(name, self.delays.get(layer, 0.0))
+            self._stack.enter_context(mock_patch.object(parcel_data, name, mock))
+            self.layers[layer] = mock
+        return self
+
+    def __exit__(self, *exc_info):
+        self._stack.close()
+        return False
+
+    def call_counts(self) -> dict:
+        return {layer: mock.call_count for layer, mock in self.layers.items()}
 
 
 def _fresh_caches():
@@ -470,11 +612,19 @@ def _fresh_runner():
 
 
 class Session:
-    """One created session plus the caches and store behind it."""
+    """One created session plus the caches and store behind it.
 
-    def __init__(self):
-        self.store = _fresh_store()
-        self.fetch_cache, self.cache = _fresh_caches()
+    `fetch_cache=`/`cache=`/`store=` share another session's -- which is
+    how a WARM creation is arranged: a second session on the same boundary
+    against the same fetch cache fetches nothing. `is None` and never
+    `or`, session_cache.py's documented reason exactly: both cache classes
+    define __len__, so an empty caller-supplied cache is falsy."""
+
+    def __init__(self, fetch_cache=None, cache=None, store=None):
+        fresh_fetch_cache, fresh_cache = _fresh_caches()
+        self.store = _fresh_store() if store is None else store
+        self.fetch_cache = fresh_fetch_cache if fetch_cache is None else fetch_cache
+        self.cache = fresh_cache if cache is None else cache
         self.runner = _fresh_runner()
         self.document = session_manager.create_session(
             REAL_BOUNDARY, self.store, fetch_cache=self.fetch_cache, cache=self.cache
@@ -644,6 +794,51 @@ def _fail(message):
     raise AssertionError(message)
 
 
+def _fetch_events(record):
+    return [event for event in record["events"] if event["event"] == "fetch"]
+
+
+def _sole_fetch_event(record):
+    events = _fetch_events(record)
+    assert len(events) == 1, f"expected exactly one fetch event, got {len(events)}"
+    return events[0]
+
+
+def _only_record_in(directory: str) -> dict:
+    """
+    The one record file in a directory of its own.
+
+    HOW AN OPERATOR ACTUALLY FINDS A FAILED RUN'S RECORD, and why the
+    failure sections each get their own directory. A hard-failed fetch
+    creates NO session: create_session() raises before it persists
+    anything, so the session id it generated is gone with the stack frame
+    and nobody outside ever learns it. The record on disk is the only
+    thing that knows it -- which is exactly the property those sections
+    exist to prove.
+    """
+    names = sorted(name for name in os.listdir(directory) if name.endswith(".json"))
+    assert len(names) == 1, f"expected one record in {directory}, found {names}"
+    with open(os.path.join(directory, names[0]), encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+def _timing_keys(value, path="") -> list:
+    """Every `*_ms` path in a record -- what TIMING_KEY_SUFFIX promises is
+    the complete set of values that legitimately move between two runs."""
+    found = []
+    if isinstance(value, dict):
+        for key, item in value.items():
+            here = f"{path}.{key}" if path else str(key)
+            if isinstance(key, str) and key.endswith(run_diagnostics.TIMING_KEY_SUFFIX):
+                found.append(here)
+            else:
+                found.extend(_timing_keys(item, here))
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            found.extend(_timing_keys(item, f"{path}[{index}]"))
+    return found
+
+
 def _generate_events(record, step_id):
     return [
         event
@@ -670,8 +865,13 @@ with Diagnostics(on=False, directory=_off_dir), Harness():
 
 assert os.listdir(_on_dir) == [f"{_on_session.id}.json"], os.listdir(_on_dir)
 assert not os.path.exists(_off_dir), f"a disabled run created {_off_dir}"
-assert [event["event"] for event in _on_record["events"]] == ["generate", "commit"]
-assert _on_record["events"][0]["step_id"] == "landform"
+# A SESSION'S RECORD NOW OPENS AT ITS CREATION, not at its first
+# generate: the fetch event is written by session_cache.build_session_
+# context() while create_session() is still running. `fetch` carries no
+# step_id -- it belongs to the session, not to a step.
+assert [event["event"] for event in _on_record["events"]] == ["fetch", "generate", "commit"]
+assert _on_record["events"][0]["step_id"] is None
+assert _on_record["events"][1]["step_id"] == "landform"
 
 # THE DEFAULT PATH, with DIRECTORY_ENV saying nothing: `diagnostics/`
 # under the working directory, the cwd-relative shape session_api uses
@@ -718,6 +918,13 @@ print(
 # find it in the fetch cache at generate time. The comparison is on the
 # SERIALIZED body -- byte for byte, through the same sort_keys=True writer
 # the module uses -- because that is what `diff` on the two files sees.
+#
+# THE FETCH GROUP DOES NOT BREAK THIS, and section 16 is where that is
+# proved with real, moving numbers. Every duration is written to a key
+# ending in run_diagnostics.TIMING_KEY_SUFFIX, and comparable_body() --
+# which this section already goes through -- redacts exactly those. What
+# this section compares is therefore unchanged in meaning: everything two
+# runs did, minus the clock.
 
 _diff_dir = tempfile.mkdtemp(prefix="run_diagnostics_diff_")
 _bodies = []
@@ -1055,29 +1262,68 @@ for _entry in _rule_event["geometry"]["patches"]:
 # which between them are every shape a derived figure takes. Addition
 # survives, and only as `sum()` over structural counts (rings, positions),
 # which is enumeration and not derivation.
+#
+# WITH EXACTLY ONE CARVE-OUT, AND IT IS A STOPWATCH. The fetch group's
+# subject IS time, and a stopwatch is irreducibly `(end - start)` scaled
+# into milliseconds. That is a MEASUREMENT, not a derivation: there is no
+# pipeline figure behind it to be a second implementation of, and nothing
+# for it to drift from -- the pipeline never computed how long it took.
+# The carve-out is written structurally and held to two occurrences, so it
+# licenses a clock and nothing else. A ratio, a difference between two
+# recorded values, or a unit conversion of a pipeline number still fails
+# this, wherever it is put.
 import ast as _ast
 import inspect as _inspect
 
+
+def _is_stopwatch(node) -> bool:
+    """`(time.perf_counter() - <something>.started) * 1000.0`, exactly."""
+    if not (isinstance(node, _ast.BinOp) and isinstance(node.op, _ast.Mult)):
+        return False
+    if not (isinstance(node.right, _ast.Constant) and node.right.value == 1000.0):
+        return False
+    inner = node.left
+    if not (isinstance(inner, _ast.BinOp) and isinstance(inner.op, _ast.Sub)):
+        return False
+    return (
+        isinstance(inner.left, _ast.Call)
+        and isinstance(inner.left.func, _ast.Attribute)
+        and inner.left.func.attr == "perf_counter"
+        and isinstance(inner.right, _ast.Attribute)
+        and inner.right.attr == "started"
+    )
+
+
 _tree = _ast.parse(_inspect.getsource(run_diagnostics))
+_stopwatches = [node for node in _ast.walk(_tree) if _is_stopwatch(node)]
+_licensed = {id(node) for node in _stopwatches} | {id(node.left) for node in _stopwatches}
 _arithmetic = [
     node
     for node in _ast.walk(_tree)
-    if isinstance(node, _ast.BinOp) and isinstance(node.op, (_ast.Mult, _ast.Div, _ast.Sub))
+    if isinstance(node, _ast.BinOp)
+    and isinstance(node.op, (_ast.Mult, _ast.Div, _ast.Sub))
+    and id(node) not in _licensed
 ]
 assert not _arithmetic, (
     "run_diagnostics.py contains arithmetic at lines "
     f"{sorted({node.lineno for node in _arithmetic})} -- a figure derived here is a second "
     "implementation of something the pipeline already did"
 )
+# TWO CLOCKS AND NO MORE: one per layer, one per fetch. A third would mean
+# something else started measuring, and this assertion is what makes the
+# carve-out a carve-out rather than a hole.
+assert len(_stopwatches) == 2, sorted({node.lineno for node in _stopwatches})
 
 print(
     f"5 [test 5]. NOTHING IS COMPUTED: {_checked} recorded values were walked back along the "
     f"record's OWN paths into the live pipeline objects and matched by value -- "
     f"{len(_rule_event['inputs']['flags'])} flags, {len(_rule_event['gates']['counts'])} counts, "
     f"narrative_data quoted whole, and every id/acreage/layer in the geometry group off the "
-    f"producer's own fields. The structural reads (type, parts, rings, is_valid) match shapely on "
-    f"the live geometry. The module's source contains no *, / or - in any expression: there is no "
-    f"arithmetic in the writer to drift with."
+    f"producer's own fields. The module's whole source holds no multiplication, division or "
+    f"subtraction except {len(_stopwatches)} stopwatches -- (perf_counter() - started) * 1000.0, "
+    f"one per layer and one per fetch. The structural reads (type, parts, rings, is_valid) match shapely on "
+    f"the live geometry. Outside the two clocks the module's source contains no *, / or - in any "
+    f"expression: there is no arithmetic in the writer to drift with."
 )
 
 
@@ -1214,6 +1460,9 @@ _recorded_steps = [
     (event["event"], event["step_id"]) for event in _full_record["events"]
 ]
 assert _recorded_steps == [
+    # THE SESSION'S OWN EVENT, FIRST AND WITH NO STEP. The fetch is
+    # recorded by session creation, before any step exists to name.
+    ("fetch", None),
     ("generate", "landform"), ("commit", "landform"),
     ("generate", "water"), ("commit", "water"),
     ("generate", "roads"), ("commit", "roads"),
@@ -1513,9 +1762,19 @@ finally:
 
 assert [
     (event["event"], event["step_id"]) for event in _e2e_record["events"]
-] == [("generate", "landform"), ("commit", "landform")], _e2e_record["events"]
-assert _e2e_record["events"][0]["geometry"]["patches"], "the generate event recorded no geometry"
-assert _e2e_record["events"][1]["gate_outcome"] == "accepted"
+] == [
+    ("fetch", None), ("generate", "landform"), ("commit", "landform")
+], _e2e_record["events"]
+# THE FETCH EVENT OVER THE REAL HTTP SURFACE, from POST /api/sessions
+# through the process-wide caches -- the positive counterpart section 17's
+# "nothing fired when off" needs in order to mean anything.
+_e2e_fetch = _e2e_record["events"][0]
+assert _e2e_fetch["reason"] == "create_session"
+assert _e2e_fetch["cache"]["served_by"] == "fetch"
+assert _e2e_fetch["outcome"]["status"] == "ok"
+assert isinstance(_e2e_fetch["timings"]["total_ms"], float)
+assert _e2e_record["events"][1]["geometry"]["patches"], "the generate event recorded no geometry"
+assert _e2e_record["events"][2]["gate_outcome"] == "accepted"
 # NOTHING WAS SWALLOWED. A hook that failed and was caught would leave
 # the run looking exactly like a hook that was never wired, which is the
 # failure mode this section exists to make impossible to miss.
@@ -1548,6 +1807,8 @@ assert "RECORDS WOULD BE WRITTEN" in _selfcheck_out.getvalue()
 # checkout.
 _wiring = run_diagnostics._hook_sites()
 assert _wiring and all(_wiring.values()), _wiring
+_fetch_wiring = run_diagnostics._fetch_hook_sites()
+assert _fetch_wiring and all(_fetch_wiring.values()), _fetch_wiring
 
 print(
     f"9 [test 9]. END TO END over the HTTP surface: session_api.create_app() with NO Dependencies "
@@ -1557,10 +1818,707 @@ print(
     f"202 polled to done, POST .../landform/commit -> 200 with {len(_e2e_zones)} zones. "
     f"{run_diagnostics.DEFAULT_DIRECTORY}/{_e2e_id}.json appeared, carrying "
     f"{[(e['event'], e['step_id']) for e in _e2e_record['events']]} with "
-    f"{len(_e2e_record['events'][0]['geometry']['patches'])} patches recorded on the generate. "
+    f"{len(_e2e_record['events'][1]['geometry']['patches'])} patches recorded on the generate and "
+    f"the creation's own fetch event ahead of it "
+    f"({_e2e_fetch['timings']['total_ms']:.1f} ms, served_by 'fetch'). "
     f"Zero swallowed failures; self_check() agrees from the same posture; and all "
-    f"{len(_wiring)} hook sites read as wired in the LOADED bytecode. Measured against a build "
+    f"{len(_wiring)} generate/commit hook sites and all {len(_fetch_wiring)} fetch sites read as "
+    f"wired in the LOADED bytecode. Measured against a build "
     f"with the four hook calls replaced by `pass`: this section fails and section 6 still passes."
+)
+
+
+# =========================================================================
+# 11 [fetch test 1]. A COLD CREATION RECORDS THIRTEEN LAYER TIMINGS
+# =========================================================================
+#
+# THE DATA A PROGRESS DISPLAY WOULD LATER BE BUILT FROM. Thirteen rows, in
+# fetch order, each with its own wall time, summing into the recorded
+# total. Sequential is what makes that sentence true -- the fetches do not
+# overlap, so "which layer is this run on" has an answer and the times add
+# up rather than merging.
+#
+# EACH LAYER IS GIVEN A DIFFERENT, KNOWN WAIT (2 ms, 4 ms, ... 26 ms) so
+# the assertion is not just "thirteen numbers appeared" but "row N carries
+# LAYER N's wait". A recorder that mixed up which timer belonged to which
+# call, or that recorded one clock thirteen times, passes the first and
+# fails the second.
+
+_cold_dir = tempfile.mkdtemp(prefix="run_diagnostics_cold_")
+_STEP_SECONDS = 0.002
+_DELAYS = {
+    layer: (index + 1) * _STEP_SECONDS
+    for index, layer in enumerate(parcel_data.FETCH_LAYERS)
+}
+
+with Diagnostics(on=True, directory=_cold_dir), FetchHarness(delays=_DELAYS) as _fh:
+    _cold = Session()
+    _cold_counts = _fh.call_counts()
+    # READ INSIDE THE BLOCK: read_record() resolves the directory through
+    # DIRECTORY_ENV, which Diagnostics restores on exit.
+    _cold_record = run_diagnostics.read_record(_cold.id)
+
+_cold_fetch = _sole_fetch_event(_cold_record)
+
+# Every layer fetched EXACTLY ONCE -- this section measures one fetch, and
+# a record of thirteen rows over fourteen calls would be a different thing.
+assert set(_cold_counts.values()) == {1}, _cold_counts
+
+assert _cold_fetch["reason"] == "create_session"
+assert _cold_fetch["cache"]["cached_before"] is False
+assert _cold_fetch["cache"]["served_by"] == "fetch"
+assert _cold_fetch["cache"]["layers_timed"] == 13
+assert _cold_fetch["outcome"]["status"] == "ok"
+
+_cold_layers = _cold_fetch["layers"]
+assert len(_cold_layers) == 13, len(_cold_layers)
+
+# IN THE PIPELINE'S OWN ORDER, and each row says where it sat.
+assert [row["layer"] for row in _cold_layers] == list(parcel_data.FETCH_LAYERS)
+assert [row["order"] for row in _cold_layers] == list(range(13))
+assert all(row["outcome"] == "ok" for row in _cold_layers)
+
+# EACH ROW CARRIES ITS OWN LAYER'S WAIT. The injected waits increase
+# strictly down the list, so the recorded ones must too -- and each must
+# be at least the wait that layer was given.
+_cold_elapsed = [row["elapsed_ms"] for row in _cold_layers]
+for _index, (_layer, _elapsed) in enumerate(zip(parcel_data.FETCH_LAYERS, _cold_elapsed)):
+    _floor = _DELAYS[_layer] * 1000.0
+    assert _elapsed >= _floor, f"{_layer}: {_elapsed:.1f} ms < its own {_floor:.0f} ms wait"
+assert _cold_elapsed == sorted(_cold_elapsed), _cold_elapsed
+
+# THE THIRTEEN SUM TO THE RECORDED TOTAL. layers_total_ms is the sum the
+# record carries; total_ms is the wall clock around the whole fetch, and
+# the gap between them is real non-layer work (the boundary reprojection,
+# the centroid warp, the cache's own bookkeeping) that no layer accounts
+# for. Both are recorded so the gap is visible rather than hidden inside
+# one number.
+_cold_sum = sum(_cold_elapsed)
+_cold_total = _cold_fetch["timings"]["total_ms"]
+_cold_layers_total = _cold_fetch["timings"]["layers_total_ms"]
+assert abs(_cold_sum - _cold_layers_total) < 1e-6, (_cold_sum, _cold_layers_total)
+assert _cold_layers_total <= _cold_total, (_cold_layers_total, _cold_total)
+assert _cold_layers_total >= 0.5 * _cold_total, (
+    f"the thirteen layers account for only {_cold_layers_total / _cold_total:.1%} of the total"
+)
+
+print(
+    f"11 [fetch test 1]. A COLD CREATION RECORDS THIRTEEN LAYER TIMINGS: one session creation "
+    f"through the REAL fetch_parcel_data() recorded {len(_cold_layers)} layer rows, in "
+    f"parcel_data.FETCH_LAYERS' own order, each fetched exactly once. Given thirteen distinct "
+    f"injected waits of {_STEP_SECONDS * 1000:.0f}-{13 * _STEP_SECONDS * 1000:.0f} ms, every row "
+    f"carries ITS OWN layer's wait and the recorded times rise strictly down the list. They sum "
+    f"to layers_total_ms = {_cold_layers_total:.1f} ms, which is "
+    f"{_cold_layers_total / _cold_total:.1%} of the {_cold_total:.1f} ms total; the "
+    f"{_cold_total - _cold_layers_total:.1f} ms remainder is the reprojection and cache work no "
+    f"layer row claims."
+)
+
+
+# =========================================================================
+# 12 [fetch test 2]. A WARM CREATION SAYS THE CACHE SERVED IT
+# =========================================================================
+#
+# A WARM CREATION AND A COLD ONE ARE DIFFERENT MEASUREMENTS AND MUST NEVER
+# BE AVERAGED. The failure mode this guards is a record that reports
+# thirteen zero-millisecond layers on a cache hit -- which reads as
+# thirteen instantaneous fetches, and would quietly drag the average for
+# every layer toward zero the moment anyone summarised a directory of
+# records. `layers` is null instead, and the cache block says plainly who
+# answered.
+
+_warm_dir = tempfile.mkdtemp(prefix="run_diagnostics_warm_")
+with Diagnostics(on=True, directory=_warm_dir), FetchHarness() as _wh:
+    _first = Session()
+    _first_counts = _wh.call_counts()
+    # THE SAME BOUNDARY, THE SAME FETCH CACHE, a different session.
+    _second = Session(fetch_cache=_first.fetch_cache)
+    _second_counts = _wh.call_counts()
+    _warm_fetch = _sole_fetch_event(run_diagnostics.read_record(_second.id))
+    _cold_control = _sole_fetch_event(run_diagnostics.read_record(_first.id))
+    # AND THE REBUILD PATH, named as itself. A rebuild is supposed to be
+    # network-free -- session_cache.py states that as a property, and a
+    # record showing a rebuild that fetched would be a real finding. It
+    # cannot be one unless the two callers arrive under different names.
+    _second.cache.discard(_second.id)
+    _second.context()
+    _rebuild_events = _fetch_events(run_diagnostics.read_record(_second.id))
+
+assert set(_first_counts.values()) == {1}, _first_counts
+# NOT ONE MORE CALL for the second session -- the cache served it whole.
+assert _second_counts == _first_counts, (_first_counts, _second_counts)
+
+assert _cold_control["cache"]["served_by"] == "fetch"
+assert len(_cold_control["layers"]) == 13
+
+assert _warm_fetch["cache"]["cached_before"] is True
+assert _warm_fetch["cache"]["served_by"] == "fetch_cache"
+assert _warm_fetch["cache"]["layers_timed"] == 0
+# THE POINT: null, not thirteen zeroes.
+assert _warm_fetch["layers"] is None, _warm_fetch["layers"]
+assert _warm_fetch["outcome"]["status"] == "ok"
+# The irradiance status still comes back on the warm path -- read off the
+# CACHED ParcelData, which is the status that was actually fetched.
+assert _warm_fetch["irradiance"]["status"] == "ok"
+assert _warm_fetch["timings"]["layers_total_ms"] == 0
+assert _warm_fetch["timings"]["total_ms"] < _cold_control["timings"]["total_ms"]
+
+assert [event["reason"] for event in _rebuild_events] == [
+    "create_session", "rebuild_session_context"
+], [event["reason"] for event in _rebuild_events]
+assert _rebuild_events[1]["cache"]["served_by"] == "fetch_cache"
+assert _rebuild_events[1]["layers"] is None
+
+print(
+    f"12 [fetch test 2]. A WARM CREATION SAYS THE CACHE SERVED IT: a second session on the same "
+    f"boundary against the same fetch cache called not one of the thirteen layer functions again, "
+    f"and its record says served_by 'fetch_cache', layers_timed 0 and layers NULL -- not thirteen "
+    f"zeroes. Its total was {_warm_fetch['timings']['total_ms']:.3f} ms against the cold run's "
+    f"{_cold_control['timings']['total_ms']:.1f} ms, and its irradiance status "
+    f"({_warm_fetch['irradiance']['status']!r}) is the cached ParcelData's own. Dropping that "
+    f"session from the session cache and reading its context back adds a SECOND fetch event named "
+    f"'rebuild_session_context' -- also cache-served, also layers null, which is the network-free "
+    f"rebuild session_cache.py claims, now visible in the record rather than asserted about it."
+)
+
+
+# =========================================================================
+# 13 [fetch test 3]. A FAILED FETCH STILL WRITES A RECORD
+# =========================================================================
+#
+# THE ONE THAT MATTERS OPERATIONALLY. Twelve of the thirteen layers HARD-
+# FAIL the session: fetch_parcel_data() raises, session_manager.create_
+# session() persists nothing and caches nothing, and NO SESSION EXISTS.
+# The record written on that path is the only evidence the run ever
+# happened -- so if it is not written, the runs somebody most needs to
+# diagnose are exactly the ones that leave no trace.
+#
+# BOTH FAILURES ARE REAL AND INDUCED AT THE FETCH, not stubbed verdicts:
+# one fetch function raises a real requests timeout, and one returns the
+# documented None sentinel that parcel_data.py converts into a
+# ParcelDataIncompleteError. Each runs in a directory of its own, because
+# the session id of a creation that never completed is not knowable from
+# outside -- finding the record by looking in the directory IS the
+# operator's situation.
+
+# --- (a) a layer that RAISES, mid-block, in the five soil calls ----------
+
+_raise_dir = tempfile.mkdtemp(prefix="run_diagnostics_raise_")
+_induced = requests.exceptions.ReadTimeout("SDA did not answer in 90 s (induced)")
+_raise_store = _fresh_store()
+_raise_fetch_cache, _raise_cache = _fresh_caches()
+
+with Diagnostics(on=True, directory=_raise_dir), FetchHarness(
+    overrides={"erosion_factor": Mock(side_effect=_induced)}
+):
+    try:
+        session_manager.create_session(
+            REAL_BOUNDARY, _raise_store,
+            fetch_cache=_raise_fetch_cache, cache=_raise_cache,
+        )
+        _fail("the induced SDA timeout must hard-fail the session creation")
+    except requests.exceptions.ReadTimeout as exc:
+        # THE SAME EXCEPTION INSTANCE, untouched -- the recorder does not
+        # replace, wrap or swallow the pipeline's own failure.
+        assert exc is _induced
+
+_raise_record = _only_record_in(_raise_dir)
+_raise_id = _raise_record["header"]["session_id"]
+_raise_fetch = _sole_fetch_event(_raise_record)
+
+# NO SESSION EXISTS. The record is the only thing that knows this run's id.
+try:
+    _raise_store.get(_raise_id)
+    _fail("a hard-failed fetch must not leave a persisted document behind")
+except document_store.SessionNotFoundError:
+    pass
+assert _raise_id not in _raise_cache
+
+assert _raise_fetch["outcome"]["status"] == "failed"
+assert _raise_fetch["outcome"]["error_type"] == "ReadTimeout"
+assert "induced" in _raise_fetch["outcome"]["error_message"]
+# Not a ParcelDataIncompleteError, so it names no layer of its own -- and
+# the layer rows are what say where it happened.
+assert _raise_fetch["outcome"]["failed_layer"] is None
+assert _raise_fetch["outcome"]["failed_layer_label"] is None
+
+_raise_layers = _raise_fetch["layers"]
+assert [row["layer"] for row in _raise_layers] == [
+    "dem", "soil_components", "farmland_classification", "erosion_factor"
+], [row["layer"] for row in _raise_layers]
+_erosion = _raise_layers[-1]
+assert _erosion["outcome"] == "raised"
+assert _erosion["error_type"] == "ReadTimeout"
+assert "induced" in _erosion["error_message"]
+assert all(row["outcome"] == "ok" for row in _raise_layers[:-1])
+# The fetch stopped there: the nine layers after erosion_factor have no
+# rows at all, which is the record saying where the run got to.
+assert _raise_fetch["cache"]["layers_timed"] == 4
+# No ParcelData came back, and the irradiance block says so rather than
+# reporting a status nobody fetched.
+assert _raise_fetch["irradiance"]["status"] is None
+assert _raise_fetch["irradiance"]["source"].startswith("absent")
+
+# --- (b) the None sentinel -> ParcelDataIncompleteError -----------------
+
+_sentinel_dir = tempfile.mkdtemp(prefix="run_diagnostics_sentinel_")
+_sentinel_store = _fresh_store()
+_sentinel_fetch_cache, _sentinel_cache = _fresh_caches()
+
+with Diagnostics(on=True, directory=_sentinel_dir), FetchHarness(
+    overrides={"canopy_height": Mock(return_value=None)}
+):
+    try:
+        session_manager.create_session(
+            REAL_BOUNDARY, _sentinel_store,
+            fetch_cache=_sentinel_fetch_cache, cache=_sentinel_cache,
+        )
+        _fail("a None canopy_height must hard-fail the session creation")
+    except parcel_data.ParcelDataIncompleteError as exc:
+        assert exc.layer == "canopy"
+
+_sentinel_record = _only_record_in(_sentinel_dir)
+_sentinel_fetch = _sole_fetch_event(_sentinel_record)
+
+try:
+    _sentinel_store.get(_sentinel_record["header"]["session_id"])
+    _fail("a hard-failed fetch must not leave a persisted document behind")
+except document_store.SessionNotFoundError:
+    pass
+
+assert _sentinel_fetch["outcome"]["status"] == "failed"
+assert _sentinel_fetch["outcome"]["error_type"] == "ParcelDataIncompleteError"
+# BOTH FIELDS THE EXCEPTION CARRIES -- the same pair session_api puts on
+# the wire as failed_layer{type, label}.
+assert _sentinel_fetch["outcome"]["failed_layer"] == "canopy"
+assert _sentinel_fetch["outcome"]["failed_layer_label"] == "tree canopy height"
+
+# THE SHAPE THIS CASE HAS, AND IT IS NOT THE SAME AS (a). The canopy CALL
+# succeeded -- it ran and it returned -- so its row is "ok" with its real
+# elapsed time, and what failed is this module's mandatory-layer rule
+# applied to the sentinel it returned. Recording the call as having raised
+# would be a lie about the network.
+_canopy_row = [row for row in _sentinel_fetch["layers"] if row["layer"] == "canopy_height"]
+assert len(_canopy_row) == 1
+assert _canopy_row[0]["outcome"] == "ok", _canopy_row[0]
+assert _canopy_row[0]["error_type"] is None
+assert [row["layer"] for row in _sentinel_fetch["layers"]][-1] == "canopy_height"
+
+print(
+    f"13 [fetch test 3]. A FAILED FETCH STILL WRITES A RECORD: two REAL induced failures, each "
+    f"leaving NO session behind (no document persisted, nothing cached) and each leaving a record "
+    f"that is the only evidence the run happened. (a) a real requests.ReadTimeout out of the "
+    f"erosion_factor fetch -- the same exception instance propagates untouched, and the record "
+    f"names ReadTimeout, its message, and the four layer rows that got as far as erosion_factor, "
+    f"whose row reads 'raised'. (b) a None canopy_height -- the record names "
+    f"ParcelDataIncompleteError with the exception's own layer 'canopy' and label 'tree canopy "
+    f"height', while the canopy row itself reads 'ok', because the call DID return and it is the "
+    f"mandatory-layer rule that failed, not the network."
+)
+
+
+# =========================================================================
+# 14 [fetch test 4]. irradiance RECORDS ITS status, AND DEGRADED IS NOT A FAILURE
+# =========================================================================
+#
+# THE ONE DELIBERATELY NON-HARD-FAILING LAYER. get_regional_irradiance_
+# baseline() never raises and always returns a populated dict whose
+# `status` says whether the numbers are real, so a degraded baseline is
+# NORMAL OPERATION. A record that marked it a failure would put a red mark
+# on runs that were fine -- and a reader who learns to ignore that mark
+# stops reading the twelve layers where it means something.
+
+_irr_dir = tempfile.mkdtemp(prefix="run_diagnostics_irr_")
+_DEGRADED = {
+    "status": "no_api_key",
+    "annual_ac_kwh_per_kw": None,
+    "avg_solar_radiation_kwh_per_m2_per_day": None,
+    "capacity_factor_pct": None,
+    "station_distance_miles": None,
+}
+with Diagnostics(on=True, directory=_irr_dir), FetchHarness(
+    overrides={"irradiance": Mock(return_value=_DEGRADED)}
+):
+    # THE SESSION IS CREATED. That is the carve-out, asserted rather than
+    # assumed: a degraded irradiance does not gate a run.
+    _degraded_session = Session()
+    _degraded_fetch = _sole_fetch_event(
+        run_diagnostics.read_record(_degraded_session.id)
+    )
+
+assert _degraded_fetch["outcome"]["status"] == "ok"
+assert _degraded_fetch["outcome"]["failed_layer"] is None
+assert _degraded_fetch["irradiance"]["status"] == "no_api_key"
+assert _degraded_fetch["irradiance"]["degraded"] is True
+assert _degraded_fetch["irradiance"]["recorded_as_failure"] is False
+assert _degraded_fetch["irradiance"]["source"] == "ParcelData.irradiance"
+
+# The LAYER row is "ok" too -- the call succeeded, which is what that row
+# measures. Nothing anywhere in this event reads as a failure.
+_irr_row = [row for row in _degraded_fetch["layers"] if row["layer"] == "irradiance"]
+assert len(_irr_row) == 1 and _irr_row[0]["outcome"] == "ok"
+assert not any(row["outcome"] != "ok" for row in _degraded_fetch["layers"])
+
+# THE CONTROL: an "ok" baseline is recorded as not degraded, so the flag
+# above is reporting the status and not a constant.
+_ok_fetch = _sole_fetch_event(_cold_record)
+assert _ok_fetch["irradiance"]["status"] == "ok"
+assert _ok_fetch["irradiance"]["degraded"] is False
+
+print(
+    f"14 [fetch test 4]. irradiance RECORDS ITS status, AND DEGRADED IS NOT A FAILURE: a "
+    f"'no_api_key' baseline still CREATED the session, and its fetch event reads outcome 'ok' "
+    f"with irradiance {{status: 'no_api_key', degraded: true, recorded_as_failure: false}} and an "
+    f"'ok' layer row -- nothing in the event reads as a failure. The control run's real 'ok' "
+    f"baseline records degraded: false, so the flag reports the status rather than a constant."
+)
+
+
+# =========================================================================
+# 15 [fetch test 5]. RETRY COUNTS ARE RECORDED, OR THEIR ABSENCE IS REPORTED
+# =========================================================================
+#
+# THEY ARE NOT AVAILABLE, AND THE RECORD SAYS SO. Five modules behind
+# these thirteen layers retry internally -- each keeping its own private
+# copy of the same progressive-timeout loop -- and every one of them
+# counts attempts in a local variable and returns only the final payload.
+# A layer that succeeded on attempt 3 after two 2-second pauses and one
+# that succeeded on attempt 1 are indistinguishable to every caller,
+# including this one. Inferring the count from elapsed time is exactly the
+# computation THE ONE RULE forbids, so the absence is recorded as an
+# absence, and `attempts_source` names WHERE this module looked so a null
+# can never be read as a zero.
+
+_retries = _cold_fetch["retries"]
+assert _retries["attempts_recorded"] is False
+assert _retries["retry_time_recorded"] is False
+assert _retries["attempts_attribute"] == run_diagnostics.ATTEMPTS_ATTRIBUTE
+assert len(_retries["attempts_absent_reason"]) > 200
+assert len(_retries["retry_time_absent_reason"]) > 100
+assert all(row["attempts"] is None for row in _cold_layers)
+assert all("not published by" in row["attempts_source"] for row in _cold_layers)
+
+# THE ABSENCE IS OBSERVED, NOT ASSUMED. Asked of the REAL fetch entry
+# points -- not the mocks the section above ran through -- every one of
+# them reports no published count.
+_REAL_ENTRY_POINTS = [
+    soil_data.get_soil_data_for_polygon,
+    soil_data.get_soil_geometries_for_polygon,
+    hydrology_data.get_water_features_for_boundary,
+    farm_roads_data.get_farm_roads_for_boundary,
+    imagery_data.get_imagery_summary_for_boundary,
+    canopy_height_data.get_canopy_height_for_boundary,
+]
+for _entry in _REAL_ENTRY_POINTS:
+    _attempts, _source = run_diagnostics._published_attempts(_entry)
+    assert _attempts is None, (_entry, _attempts)
+    assert _source.startswith("not published by "), _source
+
+# AND A COUNT IS REACHABLE, which is what makes the None above mean "not
+# published" rather than "this never works". A module that publishes one
+# under the contract is read, with no edit to run_diagnostics.py.
+with mock_patch.object(soil_data, run_diagnostics.ATTEMPTS_ATTRIBUTE, 3, create=True):
+    _reachable, _reachable_source = run_diagnostics._published_attempts(
+        soil_data.get_soil_data_for_polygon
+    )
+assert _reachable == 3, _reachable
+assert _reachable_source == f"soil_data.{run_diagnostics.ATTEMPTS_ATTRIBUTE}"
+
+# WHAT IS AVAILABLE INSTEAD: the budget each retrying helper declares,
+# read off the LOADED functions rather than a table written in the test.
+# It bounds the worst case; it does not say what a run spent.
+_HELPER_MODULES = [
+    soil_data, hydrology_data, farm_roads_data, imagery_data, canopy_height_data
+]
+_helpers = run_diagnostics._retry_helpers(_HELPER_MODULES)
+assert "soil_data._run_sda_query" in _helpers, sorted(_helpers)
+assert _helpers["soil_data._run_sda_query"]["max_retries_default"] == 2
+assert _helpers["soil_data._run_sda_query"]["sleeps_between_attempts"] is True
+# canopy's deliberately larger budget is picked up as 5 without this
+# module or this test naming it -- it is read from the function's own
+# __defaults__.
+assert _helpers["canopy_height_data._search_hag_items"]["max_retries_default"] == 5
+assert len(_helpers) >= 5, sorted(_helpers)
+
+# AND IT REACHES THE RECORD BY THAT ROUTE, not only by being callable.
+# The sections above run through Mocks, whose __module__ is unittest.mock
+# -- so their records honestly report no helpers, and that says nothing
+# about a production run. Here erosion_factor is the REAL soil_data entry
+# point (only its SDA transport is stubbed), so the timer resolves
+# soil_data off the function it timed and the recorded retry_helpers are
+# soil_data's own. This is the shape every real cold run has.
+class _SDAResponse:
+    status_code = 200
+
+    def raise_for_status(self):
+        pass
+
+    def json(self):
+        return {"Table": [["mukey"], ["111111"]]}
+
+
+_real_dir = tempfile.mkdtemp(prefix="run_diagnostics_realsoil_")
+with Diagnostics(on=True, directory=_real_dir), FetchHarness(
+    overrides={"erosion_factor": soil_data.get_erosion_factor_for_polygon}
+), mock_patch.object(soil_data.requests, "post", return_value=_SDAResponse()):
+    _real_session = Session()
+    _real_fetch = _sole_fetch_event(run_diagnostics.read_record(_real_session.id))
+
+_real_row = [row for row in _real_fetch["layers"] if row["layer"] == "erosion_factor"][0]
+assert _real_row["function"] == "soil_data.get_erosion_factor_for_polygon", _real_row
+assert _real_row["attempts"] is None
+assert _real_row["attempts_source"] == "not published by soil_data", _real_row
+_recorded_helpers = _real_fetch["retries"]["retry_helpers"]
+assert "soil_data._run_sda_query" in _recorded_helpers, sorted(_recorded_helpers)
+assert _recorded_helpers["soil_data._run_sda_query"] == {
+    "max_retries_default": 2,
+    "sleeps_between_attempts": True,
+}, _recorded_helpers["soil_data._run_sda_query"]
+
+print(
+    f"15 [fetch test 5]. RETRY COUNTS: THEIR ABSENCE IS REPORTED. No fetch module publishes an "
+    f"attempt count, so every layer row records attempts: null with an attempts_source naming the "
+    f"module it asked -- never a zero. Asked of the six REAL fetch entry points, all six report "
+    f"none; set {run_diagnostics.ATTEMPTS_ATTRIBUTE} on soil_data and the count IS read (3), so "
+    f"the null means 'not published' and not 'never works'. What IS available is each helper's "
+    f"declared budget, read off the loaded functions: {len(_helpers)} retrying helpers found, "
+    f"soil_data._run_sda_query at max_retries=2 with a sleep between attempts, "
+    f"canopy_height_data._search_hag_items at 5. And it reaches the RECORD by that route: a "
+    f"creation whose erosion_factor is the real soil_data entry point (only its SDA transport "
+    f"stubbed) records function 'soil_data.get_erosion_factor_for_polygon', attempts null from "
+    f"'not published by soil_data', and soil_data's own helpers under retry_helpers."
+)
+
+
+# =========================================================================
+# 16 [fetch test 6]. TIMINGS MOVE AND THE DIFF STILL COMES OUT CLEAN
+# =========================================================================
+#
+# THE PROBLEM THIS BRANCH HAD TO SOLVE. Section 2's byte-identical
+# assertion is what makes the whole record useful, and a fetch group is
+# nothing but numbers that are different every time. Two runs that did
+# exactly the same thing never take exactly the same number of
+# milliseconds.
+#
+# HOW IT IS KEPT TRUE: every duration is written to a key ending in
+# TIMING_KEY_SUFFIX (`_ms`), at a stable location with stable neighbours
+# and in stable key order, and comparable_body() -- the view two runs are
+# diffed on -- substitutes REDACTED_TIMING for each one. The file keeps
+# the real numbers; the comparison keeps the shape. Asserted from both
+# sides below: the raw bodies DIFFER, and they differ ONLY on `_ms` lines;
+# the comparable bodies are byte identical; and a real difference still
+# shows through the redaction.
+
+_shape_dir = tempfile.mkdtemp(prefix="run_diagnostics_shape_")
+_raw_bodies = []
+_comparable_bodies = []
+_shape_records = []
+with Diagnostics(on=True, directory=_shape_dir), FetchHarness(delays=_DELAYS):
+    for _run in range(2):
+        _shape = Session()
+        _record = run_diagnostics.read_record(_shape.id)
+        _shape_records.append(_record)
+        _raw_bodies.append(
+            json.dumps(
+                {k: v for k, v in _record.items() if k != "header"}, indent=2, sort_keys=True
+            )
+        )
+        _comparable_bodies.append(
+            json.dumps(run_diagnostics.comparable_body(_record), indent=2, sort_keys=True)
+        )
+
+# THE TIMINGS REALLY DO MOVE -- so the redaction is load-bearing and not a
+# no-op that happens to pass.
+assert _raw_bodies[0] != _raw_bodies[1], "the timings did not vary; this section proves nothing"
+
+# AND THEY ARE THE ONLY THING THAT MOVED. Every differing line between the
+# two raw bodies is a `_ms` key, which is TIMING_KEY_SUFFIX's whole claim.
+_left, _right = _raw_bodies[0].splitlines(), _raw_bodies[1].splitlines()
+assert len(_left) == len(_right), (len(_left), len(_right))
+_differing_lines = [a for a, b in zip(_left, _right) if a != b]
+assert _differing_lines, "no differing lines at all"
+for _line in _differing_lines:
+    _key = _line.strip().split(":")[0].strip('"')
+    assert _key.endswith(run_diagnostics.TIMING_KEY_SUFFIX), (
+        f"a non-timing line differed between two identical runs: {_line!r}"
+    )
+
+# THE BYTE-IDENTICAL ASSERTION, ON EVERYTHING THAT IS NOT A TIMING.
+if _comparable_bodies[0] != _comparable_bodies[1]:
+    _a = _comparable_bodies[0].splitlines()
+    _b = _comparable_bodies[1].splitlines()
+    _first = next(
+        (i for i, (x, y) in enumerate(zip(_a, _b)) if x != y), min(len(_a), len(_b))
+    )
+    _fail(
+        "two identical runs differ outside their timings -- first difference at line "
+        f"{_first}:\n  A: {_a[_first:_first + 3]}\n  B: {_b[_first:_first + 3]}"
+    )
+
+# EVERY TIMING IS REDACTED, AND NOTHING ELSE IS. The `_ms` paths found in
+# the raw record are exactly the values replaced in the comparable one.
+_paths = _timing_keys({k: v for k, v in _shape_records[0].items() if k != "header"})
+assert len(_paths) == 15, _paths  # 13 layer rows + total_ms + layers_total_ms
+assert _comparable_bodies[0].count(run_diagnostics.REDACTED_TIMING) == len(_paths)
+assert run_diagnostics.REDACTED_TIMING not in _raw_bodies[0]
+
+# THE CONTROL. A redaction that swallowed real differences would pass
+# everything above by comparing nothing. So: the same parcel, the same
+# steps, but the second creation served by a WARM fetch cache -- a real
+# difference in what the run did -- and it must still show, through the
+# redaction, in the cache attribution and the layer rows.
+with Diagnostics(on=True, directory=_shape_dir), FetchHarness(delays=_DELAYS):
+    _shape_cold = Session()
+    _shape_warm = Session(fetch_cache=_shape_cold.fetch_cache)
+    _warm_body = json.dumps(
+        run_diagnostics.comparable_body(run_diagnostics.read_record(_shape_warm.id)),
+        indent=2, sort_keys=True,
+    )
+assert _warm_body != _comparable_bodies[0], "a cache-served fetch left no trace after redaction"
+assert '"served_by": "fetch_cache"' in _warm_body
+assert '"served_by": "fetch"' in _comparable_bodies[0]
+
+print(
+    f"16 [fetch test 6]. TIMINGS MOVE AND THE DIFF STILL COMES OUT CLEAN: two identical cold "
+    f"creations produced raw bodies that DIFFER on {len(_differing_lines)} lines, and every one "
+    f"of those lines is a `{run_diagnostics.TIMING_KEY_SUFFIX}` key -- the {len(_paths)} durations "
+    f"(13 layer rows plus total_ms and layers_total_ms) are the only values that moved. Through "
+    f"comparable_body() the two are BYTE IDENTICAL at {len(_comparable_bodies[0])} bytes, "
+    f"{len(_comparable_bodies[0].splitlines())} lines, 0 differing lines. THE CONTROL: a warm "
+    f"creation still differs after redaction, at served_by and at the layer rows."
+)
+
+
+# =========================================================================
+# 17 [fetch test 7]. DISABLED COSTS NOTHING, AT THE FETCH TOO
+# =========================================================================
+#
+# SECTION 6'S STANDARD, APPLIED TO THE FETCH PATH AND OVER THE REAL
+# fetch_parcel_data(). Every function that builds any part of a fetch
+# record -- and every one section 6 already lists -- is replaced by one
+# that RAISES, and a whole cold session creation runs clean underneath,
+# through all thirteen layer timers.
+#
+# time_layer() IS DELIBERATELY NOT IN THAT LIST. It DOES run when
+# diagnostics are off -- it is the call site in parcel_data.py, thirteen
+# times per fetch -- so what is asserted about it is what it COSTS: it
+# hands back the module-level do-nothing singleton, having read one
+# thread-local attribute and built nothing.
+
+_FETCH_NEVER = _NEVER + [
+    "_fetch_event",
+    "_fetch_outcome",
+    "_irradiance_health",
+    "_retry_helpers",
+    "_published_attempts",
+    "_qualified",
+    "_module_of",
+    "_message",
+    "_redacted",
+    "FetchProbe",
+    "_LayerTimer",
+]
+
+_off_fetch_dir = os.path.join(tempfile.mkdtemp(prefix="run_diagnostics_fetchcost_"), "never-made")
+with Diagnostics(on=False, directory=_off_fetch_dir), FetchHarness() as _off_fh, ExitStack() as _stack:
+    for _name in _FETCH_NEVER:
+        _stack.enter_context(
+            mock_patch.object(
+                run_diagnostics,
+                _name,
+                side_effect=AssertionError(f"run_diagnostics.{_name}() ran with diagnostics OFF"),
+            )
+        )
+    assert run_diagnostics.time_layer("dem", None) is run_diagnostics._NO_LAYER
+    _off_fetch_session = Session()
+    _off_fetch_counts = _off_fh.call_counts()
+
+# The fetch really did run underneath -- an assertion that nothing fired
+# means nothing if nothing happened.
+assert set(_off_fetch_counts.values()) == {1}, _off_fetch_counts
+assert not os.path.exists(_off_fetch_dir)
+
+print(
+    f"17 [fetch test 7]. DISABLED COSTS NOTHING, AT THE FETCH TOO: with the variable unset, all "
+    f"{len(_FETCH_NEVER)} record-building functions in run_diagnostics.py -- section 6's list plus "
+    f"the {len(_FETCH_NEVER) - len(_NEVER)} the fetch group adds -- were replaced by ones that "
+    f"RAISE, and a full cold session creation ran clean through the REAL fetch_parcel_data(), "
+    f"fetching all thirteen layers exactly once. Not one of them fired and no directory was "
+    f"created. time_layer() is excluded because it DOES run: it returned the do-nothing singleton."
+)
+
+
+# =========================================================================
+# 18 [fetch test 8]. self_check() REPORTS WHETHER FETCH INSTRUMENTATION IS WIRED
+# =========================================================================
+#
+# THE SAME QUESTION IT ALREADY ANSWERS FOR THE GENERATE AND COMMIT HOOKS,
+# and for the same reason: this feature can fail silently and has. It is
+# asked of the LOADED modules -- their compiled code objects -- and not of
+# the checkout, because a long-lived server that imported parcel_data
+# before the checkout changed is exactly the case where those two answers
+# differ and nothing is written.
+#
+# WITH A NEGATIVE CONTROL, which is what makes the positive mean anything:
+# with the instrumentation torn out of the two loaded functions, the same
+# check must say so and self_check() must fail.
+
+_check_dir = tempfile.mkdtemp(prefix="run_diagnostics_check_")
+with Diagnostics(on=True, directory=_check_dir):
+    _check_stream = io.StringIO()
+    _check_ok = run_diagnostics.self_check(stream=_check_stream)
+_check_output = _check_stream.getvalue()
+
+assert _check_ok, _check_output
+_fetch_lines = [
+    line for line in _check_output.splitlines() if "fetch instrumentation:" in line
+]
+assert len(_fetch_lines) == 4, _check_output
+assert all(line.startswith("[ok]") for line in _fetch_lines), _fetch_lines
+assert any("times 13 of 13 declared layers" in line for line in _fetch_lines), _fetch_lines
+assert any("build_session_context calls begin_fetch" in line for line in _fetch_lines)
+assert any("build_session_context calls record_fetch" in line for line in _fetch_lines)
+assert any("fetch_parcel_data calls time_layer" in line for line in _fetch_lines)
+
+
+def _uninstrumented_fetch(boundary_coordinates):
+    """parcel_data.fetch_parcel_data() as it was BEFORE this branch: the
+    same job, no timers, no run_diagnostics in its compiled names."""
+    return _build_parcel_data(boundary_coordinates)
+
+
+def _uninstrumented_build(session_id, boundary_coordinates, fetch_cache, reason="create_session"):
+    """session_cache.build_session_context() with no probe opened."""
+    parcel = fetch_cache.get_or_fetch(boundary_coordinates)
+    return parcel
+
+
+_torn_dir = tempfile.mkdtemp(prefix="run_diagnostics_torn_")
+with Diagnostics(on=True, directory=_torn_dir), ExitStack() as _stack:
+    _stack.enter_context(
+        mock_patch.object(parcel_data, "fetch_parcel_data", _uninstrumented_fetch)
+    )
+    _stack.enter_context(
+        mock_patch.object(session_cache, "build_session_context", _uninstrumented_build)
+    )
+    _torn_stream = io.StringIO()
+    _torn_ok = run_diagnostics.self_check(stream=_torn_stream)
+_torn_output = _torn_stream.getvalue()
+
+assert not _torn_ok, _torn_output
+_torn_lines = [line for line in _torn_output.splitlines() if "fetch instrumentation:" in line]
+assert len(_torn_lines) == 4, _torn_output
+assert all(line.startswith("[!!]") for line in _torn_lines), _torn_lines
+assert any("times 0 of 13 declared layers" in line for line in _torn_lines), _torn_lines
+assert "RECORDS WOULD NOT BE WRITTEN" in _torn_output
+
+print(
+    f"18 [fetch test 8]. self_check() REPORTS WHETHER FETCH INSTRUMENTATION IS WIRED: it prints "
+    f"four fetch lines, all [ok] against the loaded modules -- build_session_context calls "
+    f"begin_fetch and record_fetch, fetch_parcel_data calls time_layer, and it times 13 of 13 "
+    f"declared layers. THE NEGATIVE CONTROL: with both functions replaced by uninstrumented ones, "
+    f"the same four lines read [!!], the layer count reads 0 of 13, and self_check() returns "
+    f"False with RECORDS WOULD NOT BE WRITTEN."
 )
 
 
@@ -1574,7 +2532,7 @@ print(
     "test_session_cache.py, test_trees_step.py, test_water_step.py, test_roads_step.py, "
     "test_structures_step.py, test_fencing_step.py, test_wire_translation.py, "
     "test_wire_translation_inbound.py, test_tree_zone_candidates.py, "
-    "test_tree_zone_geometry_validity.py, test_document_store.py."
+    "test_tree_zone_geometry_validity.py, test_document_store.py, test_parcel_data.py."
 )
 
 shutil.rmtree(DIAGNOSTICS_DIR, ignore_errors=True)

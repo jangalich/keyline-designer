@@ -41,7 +41,7 @@ runs, which is the whole subject of the investigation. Area is NOT in
 that category -- the pipeline computes acreage -- so area is read off
 `patch["area_acres"]` and never measured here.
 
-FOUR CAPTURE GROUPS
+FIVE CAPTURE GROUPS
 ===================
 1. ENVIRONMENT, once per session. shapely's version and its GEOS
    version, the backend git commit, the Python version -- plus the
@@ -79,6 +79,21 @@ FOUR CAPTURE GROUPS
    without the CRS it failed to reproject into is evidence that cannot
    be re-run; see _dem_frame().
 
+5. FETCH TIMING, per session-creating fetch. WHERE THE MINUTES GO.
+   parcel_data.fetch_parcel_data() issues THIRTEEN SEQUENTIAL fetches --
+   no threading, no async -- and a session creation waits on all of
+   them. Recorded per layer: its wall time, whether the call raised and
+   with what, and how many attempts it took (or, since no retry loop in
+   this codebase publishes that, a statement that the count is not
+   available and the retry BUDGET each helper declares instead). Beside
+   them: the total, whether the fetch RAN AT ALL or was served by the
+   fetch cache -- a warm creation and a cold one are different
+   measurements and must never be averaged -- and, on a failure, which
+   layer, which exception type and what it said. irradiance is recorded
+   by its own `status` and NEVER as a failure: it is the one
+   deliberately non-hard-failing layer, and a degraded baseline is
+   normal operation. See Group 5's own header.
+
 THE OPEN HYPOTHESIS, AND WHY EVERY PATCH IS CHECKED TWICE
 =========================================================
 The emission gate in tree_zone_candidates.score_tree_search_space()
@@ -111,13 +126,16 @@ OFF BY DEFAULT, AND FREE WHEN OFF
 =================================
 `KEYLINE_RUN_DIAGNOSTICS` enables it (unset, empty, "0", "false", "no",
 "off" -> disabled). A production session must not pay for this: it
-writes on every generate and every commit.
+writes on every session creation, every generate and every commit.
 
 When disabled, the hooks return on a cached boolean before touching
-anything. `begin_generate()` returns None and `record_generate(None,
-...)` returns immediately -- so no record is built and discarded, no
-geometry is reprojected, no directory is created and no file is opened.
-The cost of a disabled hook is a function call and a boolean test.
+anything. `begin_generate()` and `begin_fetch()` return None,
+`record_generate(None, ...)` and `record_fetch(None, ...)` return
+immediately, and `time_layer()` hands back a module-level singleton
+whose two methods do nothing -- so no record is built and discarded, no
+geometry is reprojected, no clock is read for a number nobody will
+store, no directory is created and no file is opened. The cost of a
+disabled hook is a function call and a boolean test.
 
 WHERE IT WRITES
 ===============
@@ -160,6 +178,17 @@ that diff clean outside the header. That means:
     meant to ignore; `environment` is in the body deliberately, because
     "these two runs had different GEOS" is exactly a difference the diff
     should show.
+  * THE ONE EXCEPTION IS A DURATION, and it is handled by NAME rather
+    than by exclusion. Group 5's whole subject is time, and two runs that
+    did exactly the same thing never take exactly the same number of
+    milliseconds -- so every duration is written to a key ending in
+    TIMING_KEY_SUFFIX (`_ms`), at a stable location with stable
+    neighbours, and `comparable_body()` substitutes REDACTED_TIMING for
+    each one. The file keeps the real numbers; the comparison keeps the
+    shape. Everything about a fetch that is NOT a duration -- which
+    layers ran, in what order, cache-served or not, with what outcome,
+    with how many attempts, against what retry budget -- still diffs in
+    full.
 """
 
 import datetime
@@ -170,6 +199,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 
 # THE ENABLING VARIABLE and the directory variable, named for the two
 # separate questions they answer: whether to record at all, and where.
@@ -201,7 +231,7 @@ _DISABLED_VALUES = frozenset({"", "0", "false", "no", "off"})
 # record changes, so a diff between two records written by different
 # builds of this module is recognizable as such rather than read as a
 # difference between the two runs.
-RECORD_VERSION = 1
+RECORD_VERSION = 2
 
 # Session ids come from secrets.token_urlsafe(); document_store.py
 # refuses anything outside that alphabet before it can touch a path, and
@@ -250,6 +280,30 @@ _MAX_RECORDED_DROPS = 200
 # about the drop. Truncation is marked in the value, never silent.
 _MAX_RECORDED_DROP_STRING = 400
 _TRUNCATION_MARKER = "...[truncated by run_diagnostics]"
+
+# --- what a diff must ignore, and what it must not -------------------
+#
+# EVERY RECORDED DURATION'S KEY ENDS IN THIS, and nothing else in this
+# codebase does -- it is the STABLE LOCATION rule made checkable with a
+# grep. A duration is the ONE value in this record that legitimately
+# differs between two runs that did the very same thing, so it cannot be
+# compared and must still be recorded.
+#
+# THE FILE KEEPS THE REAL NUMBERS. Only comparable_body() -- the view two
+# runs are diffed on -- substitutes REDACTED_TIMING for every `*_ms`
+# value, so the SHAPE of a fetch still diffs in full (which layers ran,
+# in what order, served by the cache or not, with what outcome, with how
+# many attempts, against what retry budget) while the moving numbers do
+# not. A run that fetched a layer the other did not, or hit the cache
+# where the other missed, still shows up; a run that merely took 40 ms
+# longer does not.
+#
+# Deliberately NOT solved by rounding or bucketing the numbers. A bucket
+# is a threshold, and a threshold turns "these two runs are the same" into
+# a judgement this module would be making about timings it exists to
+# report rather than to interpret.
+TIMING_KEY_SUFFIX = "_ms"
+REDACTED_TIMING = "<timing redacted by run_diagnostics.comparable_body>"
 
 # Scan bounds. A result dict holds whole GeoJSON collections, and an
 # unbounded walk over one is both slow and pointless -- a coordinate
@@ -1035,6 +1089,421 @@ def _collect_wire_features(payload, dem) -> tuple:
 
 
 # ======================================================================
+# Group 5 -- the fetch
+# ======================================================================
+#
+# WHERE THE WAIT ACTUALLY IS. Committing a boundary takes minutes, and
+# every one of those minutes is spent inside parcel_data.fetch_parcel_
+# data(): THIRTEEN SEQUENTIAL FETCHES, no threading and no async, in one
+# fixed order (parcel_data.FETCH_LAYERS). Sequential is what makes this
+# group worth recording at all -- the per-layer times sum toward the
+# total and "which layer is this run on" is a question with an answer.
+# Whatever is built on that later is built on THESE numbers; this branch
+# measures and does not build it, and it changes no fetch behaviour,
+# ordering, concurrency or retry loop.
+#
+# IN THE SAME FILE AS EVERY OTHER GROUP, deliberately. A slow run and a
+# fast run then diff against each other exactly the way a failing run
+# and a passing one already do -- same record, same session id, same
+# environment block, one `diff`. A second file would mean correlating
+# two by hand.
+#
+# WHY A THREAD-LOCAL PROBE AND NOT A PARAMETER. fetch_parcel_data() takes
+# a boundary and nothing else, and it is reached through FetchCache.
+# get_or_fetch(), whose _fetch_function is swapped for a plain one-
+# argument callable by half a dozen test files. Threading a collector
+# through both would change two public signatures to carry a diagnostic
+# and force every one of those doubles to grow a parameter it does not
+# use. The probe is installed on the calling thread instead, by the one
+# caller that knows the session id (session_cache.build_session_
+# context()), and read by the layer timers on that same thread. The
+# fetch is synchronous on the caller's thread, so the probe a timer
+# finds is always its own call's -- including under FetchCache's
+# per-key in-flight lock, where a second thread waiting on the same
+# boundary never enters fetch_parcel_data() at all and records a cache
+# hit instead.
+#
+# A FETCH WITH NO PROBE IS NOT RECORDED, which is the batch paths'
+# answer: generate_full_report.py and render_layout_map.py call
+# fetch_parcel_data() directly, outside any session, with no session id
+# to file a record under. Their layer timers find no probe and cost one
+# thread-local attribute lookup.
+
+# THE CONTRACT A FETCH MODULE MUST MEET FOR ITS ATTEMPT COUNT TO BE
+# RECORDED: publish the attempt count of its most recent call as a
+# module attribute of this name. It is read immediately after that
+# layer's call returns, which for a strictly sequential fetch is
+# unambiguous.
+#
+# NOTHING PUBLISHES IT TODAY, AND THIS MODULE SAYS SO rather than
+# inventing a number. Five modules behind these thirteen layers retry
+# internally -- soil_data, hydrology_data, farm_roads_data, imagery_data
+# and canopy_height_data each keep their own private copy of the same
+# progressive-timeout loop -- and every one of them swallows its
+# attempts inside a `for attempt in range(max_retries + 1)` that returns
+# only the final payload. A layer that succeeded on the third try is
+# invisible to every caller, including this one.
+#
+# Deriving the count from elapsed time would be exactly the computation
+# THE ONE RULE forbids: the record would then report what this module
+# GUESSED about the retry loop rather than what the retry loop did. So
+# the absence is recorded as an absence -- see _retry_helpers(), which
+# reports the BUDGET each helper declares (the bound on the wait) beside
+# it, and the `retries` block every fetch event carries.
+ATTEMPTS_ATTRIBUTE = "LAST_FETCH_ATTEMPTS"
+
+_ATTEMPTS_ABSENT_REASON = (
+    "No fetch module publishes an attempt count. Every retrying helper "
+    "behind these layers (soil_data._run_sda_query and the private "
+    "_retry()/_query_* copies in hydrology_data, farm_roads_data, "
+    "imagery_data and canopy_height_data) counts its attempts in a local "
+    "loop variable and returns only the final payload, so a layer that "
+    "succeeded on attempt 3 is indistinguishable to its caller from one "
+    "that succeeded on attempt 1. This module records that absence "
+    "rather than inferring a count from elapsed time. A module that "
+    "wants its attempts recorded publishes them under "
+    "ATTEMPTS_ATTRIBUTE; this reads that attribute and nothing else."
+)
+
+_RETRY_TIME_ABSENT_REASON = (
+    "Time spent retrying is not separable from time spent succeeding. "
+    "The retry loops are inside the layer call, so a layer's elapsed_ms "
+    "already contains every attempt it made plus the time.sleep(2) "
+    "between them, with no boundary this module can observe. "
+    "retry_helpers below reports the BUDGET each helper declares, which "
+    "bounds the worst case; what a run actually spent retrying needs the "
+    "loops themselves to say so."
+)
+
+# The parameter name that marks a retrying helper. THIS CODEBASE'S OWN
+# CONVENTION, repeated verbatim in five modules, so a sixth is picked up
+# on the day it is written with nothing named here.
+_RETRY_PARAMETER = "max_retries"
+
+# The thread the fetch runs on carries its own probe. See this group's
+# header for why this is a thread-local and not a parameter.
+_LOCAL = threading.local()
+
+
+def _module_of(function):
+    """The module a fetch entry point was defined in, or None."""
+    name = getattr(function, "__module__", None)
+    return sys.modules.get(name) if isinstance(name, str) else None
+
+
+def _qualified(function) -> str:
+    """`dem_data.get_dem_for_boundary` -- which callable this layer timed.
+
+    Recorded because it is the one piece of provenance that says whether
+    a row measured the real fetch or a test double standing in for it,
+    and a record that could not tell those apart would average them.
+    """
+    module = getattr(function, "__module__", None)
+    name = getattr(function, "__qualname__", None) or getattr(function, "__name__", None)
+    if not isinstance(name, str):
+        return f"<{type(function).__name__}>"
+    return f"{module}.{name}" if isinstance(module, str) else name
+
+
+def _published_attempts(function) -> tuple:
+    """
+    What this layer's module says its last call cost in attempts, READ
+    off ATTEMPTS_ATTRIBUTE and never derived. Returns (value, source),
+    and the source names the absence when there is one so a null here
+    can never be read as a zero.
+    """
+    module = _module_of(function)
+    if module is None:
+        return None, "no module resolved for this layer's callable"
+    value = getattr(module, ATTEMPTS_ATTRIBUTE, None)
+    if type(value) is int:
+        return value, f"{module.__name__}.{ATTEMPTS_ATTRIBUTE}"
+    return None, f"not published by {module.__name__}"
+
+
+def _retry_helpers(modules) -> dict:
+    """
+    Every retrying helper in the modules these layers came from, and the
+    budget each declares -- read off the LOADED functions, not off a
+    table written here.
+
+    A HELPER IS ONE WITH A `max_retries` PARAMETER, this codebase's own
+    convention (see _RETRY_PARAMETER). The default is read from the
+    function's own __defaults__, so canopy_height_data._search_hag_items'
+    deliberately larger budget of 5 appears as 5 without this module
+    knowing it exists.
+
+    THIS IS THE WORST CASE, NOT THE COST. It says how many attempts a
+    layer is ALLOWED, which bounds the wait; it does not say how many it
+    SPENT, because no helper publishes that. Recording the bound and the
+    absence together is the honest pair -- see _ATTEMPTS_ABSENT_REASON.
+
+    The parameter and its default are read through inspect.signature()
+    rather than off __code__/__defaults__ by index. Not a style choice:
+    the index form is pointer arithmetic into a defaults tuple, and this
+    module carries no arithmetic (test 5 asserts that over its whole
+    source). signature() also gets a keyword-only `max_retries` right,
+    which the index form would miss entirely.
+    """
+    import inspect
+
+    helpers = {}
+    for module in modules:
+        module_name = getattr(module, "__name__", None)
+        for name in dir(module):
+            function = getattr(module, name, None)
+            code = getattr(function, "__code__", None)
+            if code is None or getattr(function, "__module__", None) != module_name:
+                continue
+            try:
+                parameter = inspect.signature(function).parameters.get(_RETRY_PARAMETER)
+            except (TypeError, ValueError):
+                continue
+            if parameter is None:
+                continue
+            default = parameter.default
+            helpers[f"{module_name}.{name}"] = {
+                "max_retries_default": (
+                    None if default is parameter.empty else _scalar(default)
+                ),
+                # The pause between attempts, which is most of what a
+                # retry costs on a server that is merely slow.
+                "sleeps_between_attempts": "sleep" in code.co_names,
+            }
+    return helpers
+
+
+def _message(text) -> str:
+    """An exception message, cut and MARKED at a drop reason's length and
+    for its reason -- see _drop_field()."""
+    return _drop_field(str(text))
+
+
+def _fetch_outcome(error) -> dict:
+    """
+    How the fetch ended, and -- on a failure -- WHICH LAYER, WHICH
+    EXCEPTION TYPE AND WHAT IT SAID.
+
+    THE FAILED CASE IS THE ONE THAT MATTERS OPERATIONALLY. Twelve of the
+    thirteen layers hard-fail the session (parcel_data.py's HARD-FAIL
+    CONTRACT): no document is persisted, no cache entry is written, no
+    session exists. A record of the failed creation is then the ONLY
+    evidence that run ever happened, which is why record_fetch() is
+    called from the `except` arm before the raise continues.
+
+    `failed_layer`/`failed_layer_label` are ParcelDataIncompleteError's
+    OWN two fields, read off the exception -- the same pair session_api
+    puts on the wire as failed_layer{type, label}, so the record and the
+    response cannot disagree about which source did not answer. Both are
+    null on any other exception type, which is a real distinction: an
+    SDA timeout raises requests' own error and names no layer, and the
+    layer rows below are then what says where it happened.
+    """
+    if error is None:
+        return {
+            "status": "ok",
+            "error_type": None,
+            "error_message": None,
+            "failed_layer": None,
+            "failed_layer_label": None,
+        }
+    return {
+        "status": "failed",
+        "error_type": type(error).__name__,
+        "error_message": _message(error),
+        "failed_layer": _scalar(getattr(error, "layer", None)),
+        "failed_layer_label": _scalar(getattr(error, "label", None)),
+    }
+
+
+def _irradiance_health(parcel) -> dict:
+    """
+    THE ONE LAYER THAT IS NOT PASS/FAIL, recorded as such.
+
+    get_regional_irradiance_baseline() NEVER RAISES and always returns a
+    populated dict whose `status` key ("ok"/"no_api_key"/"fetch_failed"/
+    "validation_failed") says whether the numbers are real -- so a
+    degraded irradiance is NORMAL OPERATION, not a failure, and it is
+    the single deliberate carve-out from parcel_data.py's HARD-FAIL
+    CONTRACT. Recording it as a failure would put a red mark on runs
+    that were fine, and would train a reader to ignore the mark.
+
+    The status is READ off the ParcelData field the fetch returned. This
+    module does not judge it; `degraded` is the plain restatement of
+    "status is not 'ok'", carried beside it so a reader does not have to
+    know the four constants, and `recorded_as_failure` is fixed false so
+    the posture is in the record rather than only in this docstring.
+    """
+    irradiance = getattr(parcel, "irradiance", None)
+    known = isinstance(irradiance, dict)
+    status = _scalar(irradiance.get("status")) if known else None
+    return {
+        "status": status,
+        "degraded": None if not known else status != "ok",
+        "recorded_as_failure": False,
+        "source": "ParcelData.irradiance" if known else "absent -- the fetch returned no ParcelData",
+    }
+
+
+class FetchProbe:
+    """
+    One session-creating fetch, being measured.
+
+    THE CACHE STATE IS ONLY ANSWERABLE BEFOREHAND, GenerateProbe's reason
+    exactly: once get_or_fetch() has returned, the boundary is in the
+    fetch cache either way, and asking afterwards would record a
+    constant.
+    """
+
+    __slots__ = ("session_id", "reason", "cached_before", "layers", "modules", "started")
+
+    def __init__(self, session_id, reason, cached_before):
+        self.session_id = session_id
+        self.reason = reason
+        self.cached_before = cached_before
+        self.layers = []
+        # Insertion-ordered {name: module}, the modules the timed layers
+        # were defined in -- what _retry_helpers() is scanned over, so
+        # the retry report covers exactly the code this run went through.
+        self.modules = {}
+        self.started = time.perf_counter()
+
+
+class _LayerTimer:
+    """
+    One layer's wall time, and whether the call raised.
+
+    __exit__ NEVER SWALLOWS AND NEVER REPLACES. It returns False, so an
+    exception from the fetch propagates untouched -- the hard-fail
+    contract is the caller's, not this timer's. Its own bookkeeping is
+    guarded: a recorder that turned a working fetch into a failure would
+    be a worse bug than any it was added to find. strict() is honoured
+    only when the block SUCCEEDED; raising out of __exit__ while an
+    exception is already in flight would replace the pipeline's failure
+    with the diagnostic's, which is the one thing this must not do.
+    """
+
+    __slots__ = ("probe", "layer", "function", "started")
+
+    def __init__(self, probe, layer, function):
+        self.probe = probe
+        self.layer = layer
+        self.function = function
+        self.started = 0.0
+
+    def __enter__(self):
+        self.started = time.perf_counter()
+        return self
+
+    def __exit__(self, exception_type, exception, traceback):
+        elapsed = (time.perf_counter() - self.started) * 1000.0
+        try:
+            attempts, attempts_source = _published_attempts(self.function)
+            module = _module_of(self.function)
+            if module is not None:
+                self.probe.modules.setdefault(module.__name__, module)
+            self.probe.layers.append(
+                {
+                    "layer": self.layer,
+                    # The position this layer was fetched at. The order is
+                    # the pipeline's, not this list's -- recorded on the
+                    # row so one grepped row still says where it sat.
+                    "order": len(self.probe.layers),
+                    "function": _qualified(self.function),
+                    "elapsed_ms": elapsed,
+                    "outcome": "ok" if exception_type is None else "raised",
+                    "error_type": None if exception_type is None else exception_type.__name__,
+                    "error_message": None if exception is None else _message(exception),
+                    # null is NOT zero here: attempts_source says which.
+                    "attempts": attempts,
+                    "attempts_source": attempts_source,
+                }
+            )
+        except Exception as exc:
+            if strict() and exception_type is None:
+                raise
+            _report_failure(f"time_layer({self.layer!r})", exc)
+        return False
+
+
+class _NoLayer:
+    """What time_layer() returns when nothing is being recorded: a
+    module-level singleton whose two methods do nothing. The cost of an
+    unrecorded layer is a thread-local lookup and two no-op calls."""
+
+    __slots__ = ()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exception_info):
+        return False
+
+
+_NO_LAYER = _NoLayer()
+
+
+def _fetch_event(probe, total_ms, parcel, error) -> dict:
+    """
+    Group 5 for one fetch. THE RECORD-BUILDER -- nothing above
+    record_fetch() runs when diagnostics are off.
+    """
+    layers = probe.layers
+    served_by = "fetch_cache" if probe.cached_before else "fetch"
+    return {
+        "event": "fetch",
+        # Every other event names the step it belongs to. This one
+        # belongs to the session, not a step, and says so rather than
+        # borrowing a step_id it does not have.
+        "step_id": None,
+        "reason": probe.reason,
+        # --- cache attribution ------------------------------------------
+        #
+        # A WARM CREATION AND A COLD ONE ARE DIFFERENT MEASUREMENTS AND
+        # MUST NEVER BE AVERAGED. `cached_before` is FetchCache.contains()
+        # -- the cache's OWN predicate, the same one begin_generate() asks
+        # -- sampled BEFORE the call, and `served_by` is its plain
+        # restatement. On a hit `layers` below is null, NOT thirteen
+        # zeroes: nothing ran, and a row of zeroes would read as thirteen
+        # instantaneous fetches.
+        "cache": {
+            "cached_before": probe.cached_before,
+            "served_by": served_by,
+            "layers_timed": len(layers),
+        },
+        "outcome": _fetch_outcome(error),
+        "irradiance": _irradiance_health(parcel),
+        # `[]` on a "fetch" that reported no layers is its own statement:
+        # fetch_parcel_data() ran but no timer fired, which is what a
+        # replaced fetch function (a test double) or an older loaded
+        # parcel_data looks like. self_check() answers which.
+        "layers": None if served_by == "fetch_cache" and not layers else layers,
+        "retries": {
+            "attempts_recorded": any(row["attempts"] is not None for row in layers),
+            "attempts_attribute": ATTEMPTS_ATTRIBUTE,
+            "attempts_absent_reason": _ATTEMPTS_ABSENT_REASON,
+            "retry_time_recorded": False,
+            "retry_time_absent_reason": _RETRY_TIME_ABSENT_REASON,
+            "retry_helpers": _retry_helpers(list(probe.modules.values())),
+        },
+        # --- the timings ------------------------------------------------
+        #
+        # EVERY KEY HERE ENDS IN TIMING_KEY_SUFFIX, which is what makes
+        # the record diff clean while its numbers move; see that
+        # constant and comparable_body(). `layers_total_ms` is a sum of
+        # measurements THIS MODULE took, not a re-derivation of any
+        # pipeline figure -- and it is recorded beside `total_ms` rather
+        # than instead of it, because the gap between them is real work
+        # (the boundary reprojection, the centroid warp, the cache
+        # bookkeeping) that no layer row accounts for.
+        "timings": {
+            "total_ms": total_ms,
+            "layers_total_ms": sum(row["elapsed_ms"] for row in layers),
+        },
+    }
+
+
+# ======================================================================
 # The file
 # ======================================================================
 
@@ -1113,25 +1582,63 @@ def read_record(session_id: str) -> dict:
         return json.load(handle)
 
 
+def _redacted(value):
+    """
+    The same structure with every `*_ms` value replaced by
+    REDACTED_TIMING, at any depth.
+
+    KEYED ON THE NAME, NOT ON THE TYPE. Redacting "every float" would
+    take acreages and coordinates with it, which are exactly the values a
+    diff must still compare; redacting a fixed list of paths would go
+    stale the first time a timing moved. The suffix is the contract, and
+    nothing but a duration carries it.
+    """
+    if isinstance(value, dict):
+        return {
+            key: (
+                REDACTED_TIMING
+                if isinstance(key, str) and key.endswith(TIMING_KEY_SUFFIX)
+                else _redacted(item)
+            )
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_redacted(item) for item in value]
+    return value
+
+
 def comparable_body(record: dict) -> dict:
     """
-    The record minus its header -- WHAT TWO RUNS ARE DIFFED ON.
+    The record minus its header, with its timings redacted -- WHAT TWO
+    RUNS ARE DIFFED ON.
 
     Named and provided here rather than left to each reader to strip,
-    because "everything except the header" is the contract the header
-    exists to serve, and a caller that strips a different set is
+    because "the part two runs are compared on" is the contract the
+    header exists to serve, and a caller that strips a different set is
     comparing something else.
+
+    TWO KINDS OF THING ARE EXCLUDED, FOR TWO DIFFERENT REASONS. The
+    header varies by IDENTITY -- a clock and a session id, which differ
+    between two runs because they are two runs and not because they did
+    anything differently. Timings vary by MEASUREMENT: they are the
+    answer this record's fetch group exists to give, and no two of them
+    are ever equal. Both would swamp a diff; neither is dropped from the
+    file, and read_record() returns the record with both intact.
+
+    See TIMING_KEY_SUFFIX for why the redaction keys on the name.
     """
-    return {key: value for key, value in record.items() if key != "header"}
+    return _redacted({key: value for key, value in record.items() if key != "header"})
 
 
 # ======================================================================
-# The hooks -- two at generate, one at commit
+# The hooks -- two at the fetch, two at generate, one at commit
 # ======================================================================
 #
-# WHAT A DISABLED HOOK COSTS. `begin_generate()` and `record_commit()`
-# test `enabled()` -- one os.environ lookup -- and return. `record_
-# generate()` tests its probe for None and returns. No record is built,
+# WHAT A DISABLED HOOK COSTS. `begin_generate()`, `begin_fetch()` and
+# `record_commit()` test `enabled()` -- one os.environ lookup -- and
+# return. `record_generate()` and `record_fetch()` test their probe for
+# None and return. `time_layer()` reads one thread-local attribute and
+# hands back a do-nothing singleton. No record is built,
 # no geometry is reprojected, no directory is created, no file is
 # opened, and `directory()` is never reached. The whole disabled path is
 # a call and a boolean.
@@ -1400,6 +1907,102 @@ def record_commit(session_id, step_id, features, context, rejection=None) -> Non
         _report_failure(f"record_commit({session_id!r}, {step_id!r})", exc)
 
 
+def begin_fetch(session_id, boundary, fetch_cache, reason) -> "FetchProbe":
+    """
+    Open a measurement of one fetch and INSTALL IT ON THIS THREAD.
+    Returns a probe, or None when disabled.
+
+    Called by session_cache.build_session_context(), the one caller that
+    holds both the session id the record is filed under and the fetch
+    cache the answer may come out of. Everything downstream -- the
+    thirteen layer timers inside parcel_data.fetch_parcel_data() -- finds
+    this probe on the thread rather than being handed it; see the Group 5
+    header for why.
+
+    The cache membership question is asked HERE and nowhere later,
+    through the cache's OWN predicate (FetchCache.contains), because
+    after the fetch the boundary is cached either way. That is
+    begin_generate()'s reason repeated, and it asks the same predicate,
+    so "was this warm" cannot mean two things in one record.
+
+    EVERY PROBE MUST BE CLOSED. record_fetch() clears the thread-local,
+    on the success path and the failure path alike -- which is why
+    build_session_context() calls it from an `except` arm before letting
+    the raise continue, and not only after a successful return.
+    """
+    if not enabled():
+        return None
+    try:
+        probe = FetchProbe(session_id, reason, bool(fetch_cache.contains(boundary)))
+        _LOCAL.fetch_probe = probe
+        return probe
+    except Exception as exc:
+        _LOCAL.fetch_probe = None
+        if strict():
+            raise
+        _report_failure(f"begin_fetch({session_id!r}, {reason!r})", exc)
+        return None
+
+
+def time_layer(layer, function=None):
+    """
+    Time one of the thirteen layers, as a context manager:
+
+        with run_diagnostics.time_layer("dem", get_dem_for_boundary):
+            dem = get_dem_for_boundary(boundary_coordinates)
+
+    `function` is the callable being timed, passed so the row can name it
+    (_qualified) and so its module can be asked for a published attempt
+    count (_published_attempts) and scanned for its retry budget
+    (_retry_helpers). PASSED, not looked up from a table here: a table
+    mapping layer names to modules would be a second copy of
+    parcel_data.py's imports and would drift from them silently.
+
+    FREE WITH NO PROBE. One thread-local attribute lookup, then a
+    module-level singleton whose __enter__/__exit__ do nothing -- which
+    is the disabled case, and also the batch paths that fetch outside any
+    session.
+    """
+    probe = getattr(_LOCAL, "fetch_probe", None)
+    if probe is None:
+        return _NO_LAYER
+    return _LayerTimer(probe, layer, function)
+
+
+def record_fetch(probe, parcel=None, error=None) -> None:
+    """
+    Group 5 for one fetch, appended to the session's record, and the
+    thread-local probe cleared.
+
+    CALLED ON BOTH PATHS, AND THE FAILURE PATH IS THE POINT. Twelve of
+    the thirteen layers hard-fail the session: fetch_parcel_data() raises,
+    session_manager.create_session() persists nothing and caches nothing,
+    and no session exists. The record written here is then the ONLY
+    evidence that run ever happened -- so this is called from the
+    `except` arm, with the exception in hand, before the raise continues.
+    A run that leaves no trace is exactly the run somebody needs to
+    diagnose.
+
+    `parcel` is the ParcelData the fetch returned, read ONLY for
+    irradiance's own `status` -- see _irradiance_health(). None on the
+    failure path, and on the failure path the irradiance block says so
+    rather than reporting a status nobody fetched.
+
+    The total is stopped BEFORE the record is built and written, so the
+    number is the fetch's and not the fetch's plus this module's.
+    """
+    if probe is None:
+        return
+    total_ms = (time.perf_counter() - probe.started) * 1000.0
+    _LOCAL.fetch_probe = None
+    try:
+        append_event(probe.session_id, _fetch_event(probe, total_ms, parcel, error))
+    except Exception as exc:
+        if strict():
+            raise
+        _report_failure(f"record_fetch({probe.session_id!r}, {probe.reason!r})", exc)
+
+
 # ======================================================================
 # self_check() -- one command that says why nothing is being written
 # ======================================================================
@@ -1442,6 +2045,60 @@ def _hook_sites() -> dict:
             sites[name] = None
             continue
         sites[name] = "run_diagnostics" in code.co_names and attribute in code.co_names
+    return sites
+
+
+def _fetch_hook_sites() -> dict:
+    """
+    Whether the FETCH instrumentation is wired into the parcel_data and
+    session_cache THIS INTERPRETER IS RUNNING -- _hook_sites()' technique
+    exactly, and for its reason: `grep` answers a question about the
+    checkout, and a long-lived server that imported those modules before
+    the checkout changed is precisely the case where the two answers
+    differ and nothing is written.
+
+    THREE THINGS HAVE TO BE TRUE, and they fail separately:
+
+      * build_session_context() opens a probe (begin_fetch), so the
+        fetch is measured against a session id at all;
+      * it closes one (record_fetch), so the measurement is written --
+        including on the failure path, which is the one that matters;
+      * fetch_parcel_data() times its layers (time_layer), so the
+        measurement is per-layer rather than one opaque total.
+
+    And a fourth, which is not a wiring question but a coverage one: HOW
+    MANY of the thirteen declared layers actually carry a timer. The
+    layer names are string literals in the `with` statements, so they are
+    constants of the compiled function, and parcel_data.FETCH_LAYERS is
+    that module's own declaration of what it fetches. Comparing the two
+    reports a fourteenth layer added without a timer as "13 of 14" here,
+    rather than as a row that quietly never appears in any record.
+    """
+    import parcel_data
+    import session_cache
+
+    sites = {}
+    for module, name, attribute in (
+        (session_cache, "build_session_context", "begin_fetch"),
+        (session_cache, "build_session_context", "record_fetch"),
+        (parcel_data, "fetch_parcel_data", "time_layer"),
+    ):
+        function = getattr(module, name, None)
+        code = getattr(function, "__code__", None)
+        label = f"{module.__name__}.{name} calls {attribute}"
+        if code is None:
+            sites[label] = None
+            continue
+        sites[label] = "run_diagnostics" in code.co_names and attribute in code.co_names
+
+    declared = tuple(getattr(parcel_data, "FETCH_LAYERS", ()) or ())
+    code = getattr(getattr(parcel_data, "fetch_parcel_data", None), "__code__", None)
+    constants = set(code.co_consts) if code is not None else set()
+    timed = [layer for layer in declared if layer in constants]
+    sites[
+        f"parcel_data.fetch_parcel_data times {len(timed)} of "
+        f"{len(declared)} declared layers"
+    ] = bool(declared) and len(timed) == len(declared)
     return sites
 
 
@@ -1499,6 +2156,18 @@ def self_check(stream=None) -> bool:
         sites = {}
     for name, wired in sorted(sites.items()):
         say(f"hook wired in loaded step_orchestrator.{name}", wired, bool(wired))
+
+    # THE FETCH INSTRUMENTATION, asked separately and guarded separately.
+    # It lives in two other modules, so a failure to import either one is
+    # its own answer and must not be reported as the generate hooks being
+    # unwired -- or hide them.
+    try:
+        fetch_sites = _fetch_hook_sites()
+    except Exception as exc:
+        say("fetch instrumentation", f"{type(exc).__name__}: {exc}", False)
+        fetch_sites = {}
+    for name, wired in sorted(fetch_sites.items()):
+        say(f"fetch instrumentation: {name}", wired, bool(wired))
 
     # THE REAL WRITE. Not os.access() -- a permission bit that says yes
     # and a write that fails are both things that happen, and only one of
