@@ -157,6 +157,7 @@ for _sr, _fragment in (
     ("no_anchor_given", "No access point was provided"),
     ("no_eligible_anchor", "could not be connected to any routable ground"),
     ("corridor_too_short", "shorter than the minimum meaningful road length"),
+    ("all_branches_below_minimum", "came out as a stub too short to be worth building"),
     ("no_demand", "No production area was identified"),
 ):
     _empty_prose = _format_road_corridor_summary(

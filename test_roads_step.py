@@ -142,20 +142,34 @@ def _boundary_point(edge_index: int, fraction: float) -> tuple:
 # one is no longer free. It used to sit on the east edge and be refused by
 # road_corridors.MIN_CORRIDOR_LENGTH_METERS -- the router built an 87.4 m
 # network there and the length floor threw it away. That floor is gone, so
-# that point now routes (ten branches at the current constants) and the
-# refusal has to be the ROUTER'S OWN. Re-surveying the same thirty points
-# found exactly two that route nothing, both on the south-west edge, and
-# this is the first: the cheapest extension the router can find from here
-# already costs more than MAX_ROAD_METERS_PER_SERVED_ACRE per acre it would
-# serve, so it stops before accepting a single branch (stop_reason
-# 'cost_per_acre_exceeded', branches=[]). It shares an edge with D as a
-# result, which the four above deliberately do not -- there is no fifth
-# edge that refuses.
+# that point now routes and the refusal has to be the ROUTER'S OWN.
+# Re-surveying the same thirty points found exactly two that route nothing,
+# both on the south-west edge, and this is the first: the cheapest
+# extension the router can find from here already costs more than
+# MAX_ROAD_METERS_PER_SERVED_ACRE per acre it would serve, so it stops
+# before accepting a single branch (stop_reason 'cost_per_acre_exceeded',
+# branches=[]). It shares an edge with D as a result, which the four above
+# deliberately do not -- there is no fifth edge that refuses.
 #
-# THE REFUSAL IS THE TERRAIN'S, NOT A MOCK'S, which is what makes it worth
-# the survey: section 15 asserts what a real routing pass over real
-# exclusions does with an access point it cannot use, and a retry from the
-# same point is refused identically because nothing about it is chance.
+# THAT SURVEY WAS MEASURED AT A 200 m/acre CEILING, AND THE CEILING HAS
+# SINCE MOVED TO 500. At 500 the router pays two and a half times as much
+# real road per acre before it stops, and this parcel no longer contains an
+# access point it refuses AT ALL: a re-survey of 114 points -- every edge,
+# every 5% of its length -- routed a network from all 114, NO_NETWORK
+# included. So section 15 PINS the ceiling to the 200 the survey was run
+# at, for its own generate only, exactly the way test_road_network_router.py
+# pins the fixture geometry its own sections were measured against. It is a
+# CONFIGURABLE constant, and a fixture measured at one value asserts nothing
+# once another is substituted under it.
+#
+# THE REFUSAL IS STILL THE TERRAIN'S, NOT A MOCK'S, which is what makes it
+# worth the survey: a full, real routing pass runs over the real exclusions
+# and declines every candidate it finds by its own stopping rule -- only the
+# threshold that rule compares against is pinned. Section 15 asserts what
+# the orchestrator does with an access point that routes nothing, and a
+# retry from the same point is refused identically because nothing about it
+# is chance.
+NO_NETWORK_CEILING_METERS_PER_ACRE = 200.0
 ACCESS_A = _boundary_point(0, 0.85)
 ACCESS_B = _boundary_point(3, 0.85)
 ACCESS_C = _boundary_point(4, 0.50)
@@ -682,7 +696,7 @@ assert step_registry.get_step("water").accumulate is None
 
 # THE TWO ROUTING CONSTANTS THIS BRANCH MOVED, asserted against the module
 # that owns them rather than restated here.
-assert road_network_router.MAX_ROAD_METERS_PER_SERVED_ACRE == 200.0
+assert road_network_router.MAX_ROAD_METERS_PER_SERVED_ACRE == 500.0
 assert road_network_router.PRODUCTION_SERVICE_RADIUS_METERS == 25.0
 assert not hasattr(road_corridors, "MIN_CORRIDOR_LENGTH_METERS"), (
     "the network-length floor is deleted, not merely unused: a constant left "
@@ -1400,19 +1414,44 @@ with Harness() as h:
     # THE WATER SPUR, PER NETWORK: C reaches the union; A (section 2) did not.
     # Each network's own narrative block answers for itself.
     assert network["access"]["reaches_water_zone"] is True, (
-        "C's network must run a water spur to the union on this fixture"
+        "C's network must reach the committed union on this fixture"
     )
+    # AT THE CURRENT CEILING THE SPUR IS ZERO-LENGTH, WHICH IS THE STRONGEST
+    # FORM OF REACHING THE WATER, NOT A FAILURE TO. At MAX_ROAD_METERS_PER_
+    # SERVED_ACRE=200 this fixture's coverage loop stopped short of the pond
+    # and the router built a real spur to close the gap, so this section
+    # asserted exactly one water_spur FEATURE and measured its endpoint. At
+    # 500 the loop itself already runs a branch through the traversable cell
+    # beside the pond, so the spur has nothing left to build: it comes back
+    # one cell long with 0.0 m of new construction and is dropped before
+    # geometry (no segment, no line to draw). The road reaches the water in
+    # both cases, which is exactly why reaches_water_zone is read off the
+    # router's own branch list rather than off the drawn features -- see
+    # build_road_network()'s own comment on that field.
     spur = [f for f in _network_features(payload, KEY_C) if f["properties"]["branch_role"] == "water_spur"]
-    assert len(spur) == 1
+    assert len(spur) <= 1, f"at most one water spur per network, got {len(spur)}"
     assert NETWORK_C_NO_WATER["access"]["reaches_water_zone"] is False
     assert NETWORK_C_NO_WATER["access"]["branch_count"] != network["access"]["branch_count"] or (
         NETWORK_C_NO_WATER["access"]["total_length_ft"] != network["access"]["total_length_ft"]
     ), "the committed water ground must change the network"
-    # The spur's end sits just outside the pond buffer -- the road stops
-    # at the water's edge, not across it.
-    end_lon, end_lat = spur[0]["geometry"]["coordinates"][-1]
-    ex, ey = warp_transform("EPSG:4326", CRS, [end_lon], [end_lat])
-    distance = union["render_fill_polygon_utm"].distance(Point(ex[0], ey[0]))
+    # THE ROAD STOPS AT THE WATER'S EDGE, NOT ACROSS IT -- measured over the
+    # whole network's own drawn geometry rather than one spur's endpoint, so
+    # the assertion holds whether or not the spur became a feature. The pond
+    # buffer is a HARD exclusion, so nothing may come closer than it; and
+    # something must come close to it, or "reaches the water zone" would mean
+    # nothing. Both bounds are the same ones the spur endpoint was held to.
+    network_lon_lat = [
+        point
+        for feature in _network_features(payload, KEY_C)
+        for point in feature["geometry"]["coordinates"]
+    ]
+    network_xs, network_ys = warp_transform(
+        "EPSG:4326", CRS, [p[0] for p in network_lon_lat], [p[1] for p in network_lon_lat]
+    )
+    distance = min(
+        union["render_fill_polygon_utm"].distance(Point(x, y))
+        for x, y in zip(network_xs, network_ys)
+    )
     assert road_corridors.POND_ZONE_EXCLUSION_BUFFER_METERS <= distance <= (
         road_corridors.POND_ZONE_EXCLUSION_BUFFER_METERS + 2 * RESOLUTION_METERS
     ), distance
@@ -1597,8 +1636,28 @@ with Harness() as h:
 
 # --- 15 [tests 3, 4, 5]. AN ACCESS POINT THAT ROUTES NOTHING LEAVES NOTHING
 # BEHIND -- and the upstream-failure control that says the narrowing is real.
+#
+# THE WHOLE SECTION RUNS AT THE CEILING NO_NETWORK WAS SURVEYED AT (see the
+# access-point block at the top of this file for the re-survey that made this
+# necessary -- at the shipped 500 this parcel has no refusing point left).
+# road_corridors.build_road_network() binds the shipped default into its own
+# signature at import time, so a module attribute cannot move it; the pin is a
+# wrapper passing the figure explicitly. The REAL function still runs, over the
+# real cost surface and the real exclusions, and still refuses by its own
+# stopping rule -- only the threshold that rule compares against is this
+# section's own. Everything else here (the orchestrator, the document, the cap,
+# the cache) is untouched and is what the section actually asserts about.
+_real_build_road_network = road_corridors.build_road_network
 
-with Harness() as h:
+
+def _build_at_surveyed_ceiling(*args, **kwargs):
+    kwargs["max_meters_per_served_acre"] = NO_NETWORK_CEILING_METERS_PER_ACRE
+    return _real_build_road_network(*args, **kwargs)
+
+
+with Harness() as h, mock_patch.object(
+    road_corridors, "build_road_network", _build_at_surveyed_ceiling
+):
     s = Session()
     s.upstream()
 
