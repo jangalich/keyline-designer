@@ -12,10 +12,11 @@ suitability ISOBAND layers (contour bands of each type's surface at
 ISOBAND_LEVELS, via contourpy -- the contour_lines.py precedent) are THE
 threshold-tuning layer: the user opens the file over imagery and picks
 SUITABILITY_THRESHOLD and the zone-acre floor from where regions cohere
-and dissolve (a presentation cap was tried for one pass and deleted --
-all survivors ship). Region layers are flagged, never filtered -- every
-region however small appears, carrying its below_min_area flag rather
-than being trimmed away.
+and dissolve (all survivors ship: presentation MARKS the set to lead
+with -- top 2 per type, backfilled to four -- and filters nothing).
+Region layers are flagged, never filtered -- every region however small
+appears, carrying its below_min_area flag rather than being trimmed
+away.
 
 Layers written:
     survey_zone_embankment / survey_zone_excavated
@@ -446,19 +447,54 @@ def _overlap_cell(value) -> str:
     return "n/c" if value is None else f"{value}%"
 
 
+def _presented_cell(zone: dict) -> str:
+    """The presented marker for a zone table line: " [PRESENTED #2]" on
+    a presented zone, "" otherwise. No "[not presented]" counterpart --
+    the table's own rule line above states how many were presented and
+    by what rule, so an unmarked line reads as "surviving, not led
+    with", which is exactly what it is."""
+    if zone.get("presented"):
+        return f" [PRESENTED #{zone['presentation_order']}]"
+    return ""
+
+
 def summarize_survey_zones_table(identify_result: dict) -> str:
     """One line per SURVIVING survey zone, per type (ALL survivors --
-    the presentation cap is deleted) -- rank, member count, DUAL acreage
-    (zone acres to survey, anchored by member acres), member-cell
-    mean/max suitability, top two contributing criteria, gravity note,
-    envelope overlaps, cross-type agreement, boundary adjacency, flags
-    -- followed by the DROPPED zones, each with its reason code and both
-    acreages (visible and attributed, never silent). An embankment line
-    carries THREE separate claims and never a composite alone: the
-    seed's blend (good storage ground?), the pinch cell's catchment and
-    drainage score (water above it?), and the rank score the two
-    combine into."""
+    presentation MARKS, it does not filter) -- rank, member count, DUAL
+    acreage (zone acres to survey, anchored by member acres),
+    member-cell mean/max suitability, top two contributing criteria,
+    gravity note, envelope overlaps, cross-type agreement, boundary
+    adjacency, flags -- followed by the DROPPED zones, each with its
+    reason code and both acreages (visible and attributed, never
+    silent). An embankment line carries THREE separate claims and never
+    a composite alone: the seed's blend (good storage ground?), the
+    pinch cell's catchment and drainage score (water above it?), and the
+    rank score the two combine into.
+
+    A PRESENTED zone's line is marked [PRESENTED #n] and the table opens
+    with THE RULE THIS RUN APPLIED ("2 embankment + 1 excavated + 1
+    embankment backfill") -- a run explains its own presented set here,
+    rather than leaving the reader to re-derive the rule from which
+    lines happen to carry the mark."""
     lines = []
+    presentation = identify_result.get("presentation")
+    if presentation is not None:
+        survivors = presentation["survivor_counts"]
+        lines.append(
+            f"=== PRESENTATION: {presentation['presented_count']} of "
+            f"{sum(survivors.values())} survivor(s) presented -- "
+            f"{presentation['rule_applied']} "
+            f"(cap {presentation['presentation_count']}, top "
+            f"{presentation['per_type_count']} per type, backfilled in rank order; "
+            + ", ".join(
+                f"{count} {survey_type} survivor(s)" for survey_type, count in survivors.items()
+            )
+            + ") ==="
+        )
+        lines.append(
+            "  A MARK, NOT A FILTER: every survivor below is in the payload, the panel and the "
+            "GeoJSON whether or not it is presented; nothing here was dropped for being unpresented."
+        )
     for survey_type in SURVEY_TYPES:
         zones = identify_result["zones_by_type"][survey_type]
         lines.append(f"=== {survey_type.upper()}-TYPE SURVEY ZONES ({len(zones)} surviving) ===")
@@ -488,7 +524,8 @@ def summarize_survey_zones_table(identify_result: dict) -> str:
                 # band anchoring it, so a resurrection-by-hull is
                 # readable on this table rather than by eye on the map.
                 lines.append(
-                    f"  #{zone['rank']} zone {zone['id']}: {zone['zone_acres']:.2f} ac to survey "
+                    f"  #{zone['rank']}{_presented_cell(zone)} zone {zone['id']}: "
+                    f"{zone['zone_acres']:.2f} ac to survey "
                     f"anchored by {zone['compartment_footprint_acres']:.2f} ac compartment, "
                     f"seed blend {zone['seed_blend_score']:.3f} / compartment mean "
                     f"{zone['mean_suitability']:.3f}, pinch {zone['pinch']['width_m']:.0f} m wide at "
@@ -505,7 +542,8 @@ def summarize_survey_zones_table(identify_result: dict) -> str:
                 )
             else:
                 lines.append(
-                    f"  #{zone['rank']} zone {zone['id']}: {zone['zone_acres']:.2f} ac to survey "
+                    f"  #{zone['rank']}{_presented_cell(zone)} zone {zone['id']}: "
+                    f"{zone['zone_acres']:.2f} ac to survey "
                     f"anchored by {zone['member_acres']:.2f} ac ({zone['member_count']} member(s)), "
                     f"mean {zone['mean_suitability']:.3f} / max {zone['max_suitability']:.3f}, "
                     f"top: {criteria_text}, {_gravity_cell(zone)}, "

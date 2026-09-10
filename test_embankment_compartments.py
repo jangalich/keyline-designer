@@ -672,6 +672,10 @@ _sparse_feature = wsa._zone_feature_properties(
     {
         **sparse,
         "id": 0, "rank": 1, "status": wsa.ZONE_STATUS_NOMINATED, "drop_reason": None,
+        # The presentation mark is a REQUIRED key on the feature, not an
+        # optional one: a zone the pipeline forgot to mark must fail
+        # loudly here rather than serialize as a quiet False.
+        "presented": True, "presentation_order": 1,
         "cross_type_overlaps": [], "canopy_overlap_pct": None, "road_overlap_pct": None,
         "production_overlap_pct": None, "primary_production_area_relationship": None,
         "production_area_relationships": [], "has_service_relationship": False,
