@@ -1936,6 +1936,13 @@ with Diagnostics(on=True, directory=_warm_dir), FetchHarness() as _wh:
     _second_counts = _wh.call_counts()
     _warm_fetch = _sole_fetch_event(run_diagnostics.read_record(_second.id))
     _cold_control = _sole_fetch_event(run_diagnostics.read_record(_first.id))
+    # AND THE REBUILD PATH, named as itself. A rebuild is supposed to be
+    # network-free -- session_cache.py states that as a property, and a
+    # record showing a rebuild that fetched would be a real finding. It
+    # cannot be one unless the two callers arrive under different names.
+    _second.cache.discard(_second.id)
+    _second.context()
+    _rebuild_events = _fetch_events(run_diagnostics.read_record(_second.id))
 
 assert set(_first_counts.values()) == {1}, _first_counts
 # NOT ONE MORE CALL for the second session -- the cache served it whole.
@@ -1956,13 +1963,22 @@ assert _warm_fetch["irradiance"]["status"] == "ok"
 assert _warm_fetch["timings"]["layers_total_ms"] == 0
 assert _warm_fetch["timings"]["total_ms"] < _cold_control["timings"]["total_ms"]
 
+assert [event["reason"] for event in _rebuild_events] == [
+    "create_session", "rebuild_session_context"
+], [event["reason"] for event in _rebuild_events]
+assert _rebuild_events[1]["cache"]["served_by"] == "fetch_cache"
+assert _rebuild_events[1]["layers"] is None
+
 print(
     f"12 [fetch test 2]. A WARM CREATION SAYS THE CACHE SERVED IT: a second session on the same "
     f"boundary against the same fetch cache called not one of the thirteen layer functions again, "
     f"and its record says served_by 'fetch_cache', layers_timed 0 and layers NULL -- not thirteen "
     f"zeroes. Its total was {_warm_fetch['timings']['total_ms']:.3f} ms against the cold run's "
     f"{_cold_control['timings']['total_ms']:.1f} ms, and its irradiance status "
-    f"({_warm_fetch['irradiance']['status']!r}) is the cached ParcelData's own."
+    f"({_warm_fetch['irradiance']['status']!r}) is the cached ParcelData's own. Dropping that "
+    f"session from the session cache and reading its context back adds a SECOND fetch event named "
+    f"'rebuild_session_context' -- also cache-served, also layers null, which is the network-free "
+    f"rebuild session_cache.py claims, now visible in the record rather than asserted about it."
 )
 
 
