@@ -10,6 +10,14 @@ concern, already covered by test_road_cost_path.py -- this file is purely
 about the coverage-greedy SELECT/STOP loop, the reversible coverage
 counter, branch trimming/joining, and the water spur).
 
+Sections 10-16 are the exception to "synthetic DEM": leaf-spur pruning is
+a rule about branch TOPOLOGY and arithmetic, so those fixtures state the
+topology directly as network dicts and hand them to _prune_leaf_branches()
+-- see the header on section 10 for why routing one off a grid would test
+a Dijkstra tie-break instead of the rule. Section 17 then checks the rule
+is actually wired into route_road_network() itself, on a real routed
+fixture.
+
 A note on distances throughout: a 100m service radius and a 100m/acre
 ceiling together leave very little slack on a uniform cost raster -- a
 demand block has to be both close enough and big enough that its own real
@@ -33,18 +41,21 @@ from raster_grid import SQUARE_METERS_PER_ACRE, cell_area_acres
 from road_cost_path import least_cost_path
 from road_network_router import (
     MAX_ROAD_METERS_PER_SERVED_ACRE,
+    MIN_LEAF_BRANCH_METERS,
     PRODUCTION_SERVICE_RADIUS_METERS,
+    _prune_leaf_branches,
     route_road_network,
 )
 
 # THE GEOMETRY THESE FIXTURES WERE BUILT FOR, PINNED RATHER THAN INHERITED.
 # Every block size, offset and distance below was measured against a 100 m
 # service radius and a 100 m/acre ceiling, and each sits clear of the edge
-# ON THOSE NUMBERS. They are CONFIGURABLE constants, and this branch moved
-# both -- the radius to 25 m, the ceiling to 200 -- which silently re-aimed
-# every fixture here at geometry it was not built for: at a 25 m radius a
-# demand block that used to fall entirely within one trunk's service area
-# no longer does, and section 1's "exactly one branch" became zero.
+# ON THOSE NUMBERS. They are CONFIGURABLE constants, and both have since
+# moved -- the radius to 25 m, the ceiling to 200 and now 500 -- which
+# silently re-aimed every fixture here at geometry it was not built for:
+# at a 25 m radius a demand block that used to fall entirely within one
+# trunk's service area no longer does, and section 1's "exactly one
+# branch" became zero.
 #
 # So the fixtures now state the geometry they mean. This file is about the
 # SELECT/STOP loop, the reversible coverage counter, branch trimming and
@@ -56,18 +67,40 @@ from road_network_router import (
 FIXTURE_SERVICE_RADIUS_METERS = 100.0
 FIXTURE_MAX_METERS_PER_SERVED_ACRE = 100.0
 
+# LEAF PRUNING IS PINNED OFF for sections 1-9, for the same reason the two
+# figures above are pinned: those fixtures were built and measured against
+# a router that did no pruning, and every one of them is about something
+# else -- the SELECT/STOP loop, the reversible coverage counter, branch
+# trimming and joining, the water spur. The shipped 25 m default silently
+# re-aims them: section 4's real, deliberate spur measures under 25 m of
+# NEW construction at this fixture's own 100 m radius (the trunk it joins
+# already carries most of the distance), so the default prunes it and
+# section 4's "exactly two branches" becomes one -- an assertion about
+# joining, failing on a rule about stub length.
+#
+# 0.0 disables pruning outright: the length test is a strict '<', and no
+# real branch has negative length. Pruning gets its own fixtures instead,
+# stating their own topology -- sections 10-16 against
+# _prune_leaf_branches() directly, and section 17 through
+# route_road_network() itself with the threshold set off a branch that run
+# actually produced. The shipped default's real value is asserted once,
+# just below.
+FIXTURE_MIN_LEAF_BRANCH_METERS = 0.0
+
 
 def _route(*args, **kwargs):
     """route_road_network() with this file's own fixture geometry, unless a
     section overrides it explicitly."""
     kwargs.setdefault("service_radius_meters", FIXTURE_SERVICE_RADIUS_METERS)
     kwargs.setdefault("max_meters_per_served_acre", FIXTURE_MAX_METERS_PER_SERVED_ACRE)
+    kwargs.setdefault("min_leaf_branch_meters", FIXTURE_MIN_LEAF_BRANCH_METERS)
     return route_road_network(*args, **kwargs)
 
 
 # The shipped defaults, which the fixtures deliberately do NOT use.
 assert PRODUCTION_SERVICE_RADIUS_METERS == 25.0
-assert MAX_ROAD_METERS_PER_SERVED_ACRE == 200.0
+assert MAX_ROAD_METERS_PER_SERVED_ACRE == 500.0
+assert MIN_LEAF_BRANCH_METERS == 50.0
 
 RESOLUTION = (5.0, 5.0)
 
@@ -325,9 +358,356 @@ for i, run in enumerate(runs9[1:], start=2):
 print(f"9. Determinism: 5 runs of the same fixture produced byte-identical branch cell lists ({len(first_cells9)} branches each).")
 
 
-# --- 10. TIMING, report-only, must not assert. Two measurements, BOTH
+# =====================================================================
+# LEAF-SPUR PRUNING (sections 10-16). Every fixture below is a SYNTHETIC
+# NETWORK DICT handed straight to _prune_leaf_branches(), not a routed
+# grid -- deliberately. What is under test here is a rule about
+# TOPOLOGY and ARITHMETIC ("which branches are leaves, which of those
+# are exempt, and what the totals become"), and stating the topology
+# outright is the only way to test it with numbers a reader can check by
+# hand. Building a real cost raster that happens to produce a 5 m stub
+# hanging off a 7 m continuation would pin the assertion to a Dijkstra
+# tie-break rather than to the pruning rule, and section 2 below -- the
+# continuation chain, the one an iterating implementation fails -- is
+# not reliably constructible from terrain at all.
+#
+# Each fixture's own totals are consistent by construction: total_length
+# _meters is the sum of the branches' lengths, total_served_acres is the
+# anchor's own baseline coverage plus the sum of their newly_served_
+# acres, and unserved_acres is whatever is left of a stated demand
+# figure. That is exactly the shape route_road_network() itself returns.
+
+_PRUNE_ANCHOR_BASELINE_ACRES = 0.40   # the anchor's own coverage, which no branch owns
+_PRUNE_TOTAL_DEMAND_ACRES = 6.00      # a stated demand figure, so unserved is checkable
+
+
+def _branch(role, length, acres, joins):
+    """One branch dict in exactly route_road_network()'s own shape. 'cells'
+    is a placeholder pair -- pruning never reads it, and giving it real
+    geometry would imply this fixture came off a grid, which it did not."""
+    return {
+        "cells": [(0, 0), (0, 1)],
+        "branch_role": role,
+        "length_meters": length,
+        "total_cost": 1.0,
+        "newly_served_acres": acres,
+        "joins_branch_index": joins,
+    }
+
+
+def _network(branches, stop_reason="cost_per_acre_exceeded"):
+    """The network dict those branches add up to, with totals derived from
+    the branches themselves rather than restated -- so a fixture cannot
+    quietly disagree with its own arithmetic."""
+    served = _PRUNE_ANCHOR_BASELINE_ACRES + sum(b["newly_served_acres"] for b in branches)
+    return {
+        "branches": branches,
+        "total_length_meters": float(sum(b["length_meters"] for b in branches)),
+        "total_served_acres": served,
+        "unserved_acres": _PRUNE_TOTAL_DEMAND_ACRES - served,
+        "stop_reason": stop_reason,
+    }
+
+
+# --- 10. A real trunk plus one 5 m terminal stub: the stub is pruned,
+# --- the trunk survives, and each of the three network totals moves by
+# --- EXACTLY the stub's own figures -- no recomputation, no rounding. ---
+
+trunk10 = _branch("trunk", 180.0, 3.20, None)
+stub10 = _branch("spur", 5.0, 0.06, 0)
+before10 = _network([trunk10, stub10])
+after10 = _prune_leaf_branches(before10, MIN_LEAF_BRANCH_METERS)
+
+assert len(after10["branches"]) == 1, f"expected the stub pruned and the trunk kept, got {after10['branches']}"
+assert after10["branches"][0] is trunk10, "the surviving branch must be the trunk itself, unmodified"
+assert abs(after10["total_length_meters"] - (before10["total_length_meters"] - 5.0)) < 1e-12, (
+    f"total_length_meters must drop by exactly the stub's 5.0 m, got {after10['total_length_meters']} "
+    f"from {before10['total_length_meters']}"
+)
+assert abs(after10["total_served_acres"] - (before10["total_served_acres"] - 0.06)) < 1e-12, (
+    f"total_served_acres must drop by exactly the stub's own 0.06 acres, got {after10['total_served_acres']}"
+)
+assert abs(after10["unserved_acres"] - (before10["unserved_acres"] + 0.06)) < 1e-12, (
+    f"unserved_acres must gain back exactly that same 0.06 acres, got {after10['unserved_acres']}"
+)
+assert after10["stop_reason"] == before10["stop_reason"], (
+    "branches survive, so the loop's own stop_reason must be left exactly as it was"
+)
+print(
+    f"10. Trunk (180.0 m) + 5.0 m terminal stub: stub pruned, trunk kept; total_length "
+    f"{before10['total_length_meters']:.2f} -> {after10['total_length_meters']:.2f} m, served "
+    f"{before10['total_served_acres']:.2f} -> {after10['total_served_acres']:.2f} ac, unserved "
+    f"{before10['unserved_acres']:.2f} -> {after10['unserved_acres']:.2f} ac -- each by exactly the stub's own value."
+)
+
+
+# --- 11. THE CONTINUATION CHAIN, the section this rule exists for:
+# --- trunk -> A (5 m, joined by B) -> B (7 m, leaf). ONLY B is pruned.
+# --- A is under the threshold too, and survives anyway, because it is
+# --- NOT A LEAF -- it is the middle of one continuous road. An
+# --- iterate-until-stable implementation notices A became a leaf once B
+# --- left, takes it as well, and trims 12 m off the end of a single
+# --- road instead of removing a stub. It fails here, which is the point
+# --- of the section. ---
+
+trunk11 = _branch("trunk", 150.0, 2.50, None)
+branch_a11 = _branch("spur", 5.0, 0.05, 0)     # joins the trunk; B joins THIS
+branch_b11 = _branch("spur", 7.0, 0.07, 1)     # joins A -- the only leaf in the chain
+before11 = _network([trunk11, branch_a11, branch_b11])
+after11 = _prune_leaf_branches(before11, MIN_LEAF_BRANCH_METERS)
+
+assert after11["branches"] == [trunk11, branch_a11], (
+    f"expected ONLY branch B pruned (trunk and A both survive), got {after11['branches']}"
+)
+assert branch_a11 in after11["branches"], (
+    "branch A (5 m, under the threshold) MUST survive -- it is not a leaf, and pruning it would trim "
+    "12 m off the end of one continuous road. An iterating implementation fails exactly here."
+)
+assert after11["branches"][1]["joins_branch_index"] == 0, "A's own join must be untouched"
+assert abs(after11["total_length_meters"] - 155.0) < 1e-12, (
+    f"only B's 7 m may come off 162.0, got {after11['total_length_meters']}"
+)
+assert abs(after11["total_served_acres"] - (before11["total_served_acres"] - 0.07)) < 1e-12, (
+    "only B's own newly_served_acres may come off"
+)
+print(
+    "11. Continuation chain trunk -> A(5 m, joined by B) -> B(7 m, leaf): ONLY B pruned. A survives "
+    f"despite being under the {MIN_LEAF_BRANCH_METERS:.0f} m threshold, because it is not a leaf; total_length "
+    f"162.00 -> {after11['total_length_meters']:.2f} m (7 m, not 12). Single pass, no cascade."
+)
+
+
+# --- 12. A genuine mid-branch spur ABOVE the threshold survives -- the
+# --- rule is about stubs, not about spurs. Both a leaf spur well over
+# --- the threshold and a leaf spur sitting exactly ON it are kept (the
+# --- test is strictly '<', so the boundary value is worth building). ---
+
+trunk12 = _branch("trunk", 150.0, 2.50, None)
+real_spur12 = _branch("spur", 62.0, 0.80, 0)
+boundary_spur12 = _branch("spur", MIN_LEAF_BRANCH_METERS, 0.30, 0)
+before12 = _network([trunk12, real_spur12, boundary_spur12])
+after12 = _prune_leaf_branches(before12, MIN_LEAF_BRANCH_METERS)
+
+assert after12 is before12, "with nothing to prune, the original network dict must come back untouched"
+assert after12["branches"] == [trunk12, real_spur12, boundary_spur12], (
+    f"a leaf spur at or above the threshold must survive, got {after12['branches']}"
+)
+print(
+    f"12. Mid-branch leaf spurs at {real_spur12['length_meters']:.1f} m and exactly "
+    f"{MIN_LEAF_BRANCH_METERS:.1f} m (the boundary): both survive, network returned untouched."
+)
+
+
+# --- 13. A water_spur BELOW the threshold is NOT pruned, however short.
+# --- It is short by design -- it only has to reach the ring of ground
+# --- just outside the pond buffer -- and its newly_served_acres is 0.0
+# --- by construction, so a length test here measures nothing about
+# --- coverage. Pruning it would silently delete the parcel's pond
+# --- access. An ordinary spur of the SAME length, in the same network,
+# --- IS pruned -- so what is doing the work here is the role, not the
+# --- length. ---
+
+trunk13 = _branch("trunk", 150.0, 2.50, None)
+water_spur13 = _branch("water_spur", 8.0, 0.0, 0)
+plain_spur13 = _branch("spur", 8.0, 0.04, 0)   # same length, no exemption
+before13 = _network([trunk13, water_spur13, plain_spur13])
+after13 = _prune_leaf_branches(before13, MIN_LEAF_BRANCH_METERS)
+
+assert water_spur13 in after13["branches"], (
+    f"the water_spur must NOT be pruned at {water_spur13['length_meters']} m -- it is short by design, "
+    f"got {after13['branches']}"
+)
+assert plain_spur13 not in after13["branches"], (
+    "an ordinary spur of the SAME 8.0 m length must still be pruned -- the exemption is the role, not the length"
+)
+assert after13["branches"] == [trunk13, water_spur13]
+assert abs(after13["total_length_meters"] - 158.0) < 1e-12, (
+    f"only the plain spur's 8 m may come off 166.0, got {after13['total_length_meters']}"
+)
+print(
+    f"13. water_spur at 8.0 m (well under {MIN_LEAF_BRANCH_METERS:.0f} m) survives, while an ordinary spur of the "
+    "SAME 8.0 m in the same network is pruned: the exemption is branch_role, not length."
+)
+
+
+# --- 14. A network whose ONLY branch is a 10 m trunk is returned INTACT.
+# --- It is a leaf, and it is far under the threshold, and it is still a
+# --- legitimate short road -- the road is short because the field is
+# --- close. Deleting it is precisely the mistake the deleted network-
+# --- level corridor-length floor made. ---
+
+trunk14 = _branch("trunk", 10.0, 1.10, None)
+before14 = _network([trunk14], stop_reason="all_demand_served")
+after14 = _prune_leaf_branches(before14, MIN_LEAF_BRANCH_METERS)
+
+assert after14 is before14, "a lone short trunk must come back as the very same untouched network"
+assert after14["branches"] == [trunk14], f"the trunk must survive, got {after14['branches']}"
+assert after14["total_length_meters"] == 10.0
+assert after14["stop_reason"] == "all_demand_served", (
+    "a surviving network keeps its own stop_reason -- it was never emptied"
+)
+print(
+    "14. Lone 10.0 m trunk (a leaf, far under the threshold): NOT pruned, network returned intact with "
+    f"stop_reason='{after14['stop_reason']}' -- a short road is a correct answer, not a stub."
+)
+
+
+# --- 15. Every branch a sub-threshold leaf (no trunk among them, so no
+# --- exemption applies): all are pruned and the result is the empty-
+# --- network shape with the NEW stop_reason. The loop's own original
+# --- reason is deliberately NOT reported -- growth is not why this came
+# --- back empty, and saying so would misdescribe the outcome. ---
+
+leaf_a15 = _branch("spur", 6.0, 0.05, None)
+leaf_b15 = _branch("spur", 9.0, 0.08, None)
+before15 = _network([leaf_a15, leaf_b15], stop_reason="cost_per_acre_exceeded")
+after15 = _prune_leaf_branches(before15, MIN_LEAF_BRANCH_METERS)
+
+assert after15["branches"] == [], f"expected every branch pruned, got {after15['branches']}"
+assert after15["stop_reason"] == "all_branches_below_minimum", (
+    f"expected stop_reason 'all_branches_below_minimum', got {after15['stop_reason']!r} -- reporting the "
+    "loop's own 'cost_per_acre_exceeded' here would be misleading"
+)
+assert after15["total_length_meters"] == 0.0, f"expected 0.0 total length, got {after15['total_length_meters']}"
+assert abs(after15["total_served_acres"] - _PRUNE_ANCHOR_BASELINE_ACRES) < 1e-12, (
+    f"total_served_acres must fall back to the anchor's own baseline coverage "
+    f"({_PRUNE_ANCHOR_BASELINE_ACRES}), got {after15['total_served_acres']}"
+)
+assert abs(after15["unserved_acres"] - (_PRUNE_TOTAL_DEMAND_ACRES - _PRUNE_ANCHOR_BASELINE_ACRES)) < 1e-12, (
+    f"unserved_acres must gain back both leaves' acreage, got {after15['unserved_acres']}"
+)
+assert set(after15) == set(before15), "the empty result must keep exactly the same keys as any other network"
+print(
+    "15. Every branch a sub-threshold leaf: branches=[], total_length_meters=0.0, total_served_acres back to "
+    f"the anchor's own {_PRUNE_ANCHOR_BASELINE_ACRES:.2f} ac baseline, unserved {after15['unserved_acres']:.2f} ac, "
+    f"stop_reason='{after15['stop_reason']}' (NOT the loop's own '{before15['stop_reason']}')."
+)
+
+
+# --- 16. Determinism, and the JOIN LABELS the survivors carry. Branch
+# --- ORDER is preserved, but joins_branch_index is a POSITION in the
+# --- branches list -- road_corridors.build_road_network() re-derives its
+# --- own branch_index by enumerating that list, and the wire feature id
+# --- and the commit gate's tree-closure check are both built on that. So
+# --- removing a branch from the MIDDLE shifts every later position, and
+# --- a label left at its old number names the wrong branch. Both
+# --- fixtures below check the labels still name the SAME BRANCH OBJECTS
+# --- they named before pruning -- once where nothing has to move, and
+# --- once where a label genuinely does. ---
+
+fixture16 = [
+    _branch("trunk", 140.0, 2.40, None),      # 0
+    _branch("spur", 5.0, 0.05, 0),            # 1  under threshold, but branch 2 joins it
+    _branch("spur", 48.0, 0.70, 1),           # 2  under threshold, but branch 3 joins it
+    _branch("spur", 4.0, 0.03, 2),            # 3  stub, and the LAST branch -> pruned
+    _branch("water_spur", 11.0, 0.0, 0),      # 4  short, exempt
+]
+# Branches 1 and 2 are BOTH under the threshold and both survive: 1 because
+# branch 2 joins it, 2 because branch 3 does. And once 3 goes, 2 IS a leaf
+# under the threshold -- a second pass would take it, and then 1, unwinding
+# the whole chain. One pass, so it stands.
+runs16 = [_prune_leaf_branches(_network(fixture16), MIN_LEAF_BRANCH_METERS) for _ in range(5)]
+for i, run in enumerate(runs16[1:], start=2):
+    assert run == runs16[0], f"prune run {i} differed from run 1 -- pruning is not deterministic"
+
+survivors16 = runs16[0]["branches"]
+assert [b["length_meters"] for b in survivors16] == [140.0, 5.0, 48.0, 11.0], (
+    f"expected only the 4 m stub pruned, in the original order, got {[b['length_meters'] for b in survivors16]}"
+)
+# Branch 3 was the last non-exempt branch, so only the water_spur moves
+# (position 4 -> 3) and every label already names the right position.
+assert [b["joins_branch_index"] for b in survivors16] == [None, 0, 1, 0], (
+    f"no label needs to move in this fixture, got {[b['joins_branch_index'] for b in survivors16]}"
+)
+for branch in survivors16:
+    if branch["joins_branch_index"] is not None:
+        assert 0 <= branch["joins_branch_index"] < len(survivors16), (
+            f"joins_branch_index {branch['joins_branch_index']} is not a position in the "
+            f"{len(survivors16)}-branch result"
+        )
+
+# THE SHIFTING CASE: the stub is branch 1, in the MIDDLE, so branch 2 and
+# branch 3 both slide down one and branch 3's own label must follow its
+# target. Hand-derived: survivors are original [0, 2, 3] -> positions
+# [0, 1, 2], so branch 3's "joins 2" must become "joins 1" -- still the
+# 90 m spur, which is the whole point. An implementation that leaves the
+# label at 2 has it naming ITSELF; one that leaves it pointing past the
+# end has the commit gate reject the whole network. Both surviving spurs
+# are deliberately well ABOVE the threshold, so the only branch this
+# fixture prunes is the one it means to.
+fixture16b = [
+    _branch("trunk", 140.0, 2.40, None),      # 0
+    _branch("spur", 4.0, 0.03, 0),            # 1  stub in the MIDDLE -> pruned
+    _branch("spur", 90.0, 1.05, 0),           # 2  joins the trunk
+    _branch("spur", 70.0, 0.85, 2),           # 3  joins branch 2 -- the label that must move
+]
+after16b = _prune_leaf_branches(_network(fixture16b), MIN_LEAF_BRANCH_METERS)
+survivors16b = after16b["branches"]
+
+assert [b["length_meters"] for b in survivors16b] == [140.0, 90.0, 70.0], (
+    f"expected the middle stub pruned and the order otherwise kept, got "
+    f"{[b['length_meters'] for b in survivors16b]}"
+)
+assert [b["joins_branch_index"] for b in survivors16b] == [None, 0, 1], (
+    f"branch 3's label must follow its target from position 2 to position 1, got "
+    f"{[b['joins_branch_index'] for b in survivors16b]}"
+)
+# The label must still name the SAME BRANCH -- checked by identity of the
+# thing at that position, not by the number.
+assert survivors16b[2]["joins_branch_index"] == 1 and survivors16b[1]["length_meters"] == 90.0, (
+    "the 70 m spur must still join the 90 m spur it always joined, not the trunk and not itself"
+)
+assert survivors16b[0] is fixture16b[0], "a branch whose label does not move is passed through untouched"
+assert fixture16b[3]["joins_branch_index"] == 2, (
+    "pruning must not mutate the caller's own branch dicts -- the moved label is a new dict"
+)
+print(
+    "16. Determinism: 5 prunes of the same 5-branch fixture produced identical output, only the 4.0 m stub "
+    "removed. Join labels are positions: pruning a MIDDLE stub re-points the 70 m spur's label 2 -> 1 so it "
+    "still names the same 90 m spur, branch order is preserved, and unmoved branches pass through untouched."
+)
+
+
+# --- 17. END TO END through route_road_network() itself: pruning is
+# --- actually WIRED IN, not merely available. Section 4's two-block
+# --- fixture routes a trunk and a real spur; re-running it with
+# --- min_leaf_branch_meters set above the spur's own measured length
+# --- prunes exactly that spur, and the totals move by exactly its own
+# --- figures. The threshold is read off the branch this run actually
+# --- produced, so this asserts the wiring rather than a distance. ---
+
+result17_kept = _route(dem4, cost_raster4, anchor4, demand4, min_leaf_branch_meters=0.0)
+assert len(result17_kept["branches"]) == 2, f"expected section 4's two branches, got {len(result17_kept['branches'])}"
+trunk17, spur17 = result17_kept["branches"]
+assert spur17["branch_role"] == "spur" and spur17["joins_branch_index"] == 0
+
+result17_pruned = _route(
+    dem4, cost_raster4, anchor4, demand4, min_leaf_branch_meters=spur17["length_meters"] + 1.0
+)
+assert len(result17_pruned["branches"]) == 1, (
+    f"expected the leaf spur pruned by route_road_network() itself, got {len(result17_pruned['branches'])} branches"
+)
+assert result17_pruned["branches"][0]["branch_role"] == "trunk", "the trunk must be what survives"
+assert abs(
+    result17_pruned["total_length_meters"] - (result17_kept["total_length_meters"] - spur17["length_meters"])
+) < 1e-9, "total_length_meters must drop by exactly the pruned spur's own length"
+assert abs(
+    result17_pruned["total_served_acres"] - (result17_kept["total_served_acres"] - spur17["newly_served_acres"])
+) < 1e-9, "total_served_acres must drop by exactly the pruned spur's own newly_served_acres"
+assert abs(
+    result17_pruned["unserved_acres"] - (result17_kept["unserved_acres"] + spur17["newly_served_acres"])
+) < 1e-9, "unserved_acres must gain back exactly that same acreage"
+print(
+    f"17. End to end through route_road_network(): section 4's {spur17['length_meters']:.2f} m leaf spur is kept at "
+    f"min_leaf_branch_meters=0.0 and pruned at {spur17['length_meters'] + 1.0:.2f}; total_length "
+    f"{result17_kept['total_length_meters']:.2f} -> {result17_pruned['total_length_meters']:.2f} m, served "
+    f"{result17_kept['total_served_acres']:.4f} -> {result17_pruned['total_served_acres']:.4f} ac. Pruning is wired in."
+)
+
+
+# --- 18. TIMING, report-only, must not assert. Two measurements, BOTH
 # --- gated behind ROUTER_TIMING=1 (see the bottom of this section) --
-# --- skipped by default because 10b alone takes on the order of 20
+# --- skipped by default because 18b alone takes on the order of 20
 # --- minutes of real wall-clock, on every run of this suite, on every
 # --- branch that so much as touches code near the router -- a cost with
 # --- no corresponding signal for most of those runs, since this section
@@ -402,26 +782,26 @@ if os.environ.get("ROUTER_TIMING") == "1":
     parcel_side_m = math.sqrt(30.0 * SQUARE_METERS_PER_ACRE)
     grid_side_m_a = parcel_side_m + 2 * _TEST_BUFFER_METERS
     print(
-        f"10a. fixture: 30-acre parcel ({parcel_side_m:.1f}m square) + {_TEST_BUFFER_METERS:.0f}m buffer "
+        f"18a. fixture: 30-acre parcel ({parcel_side_m:.1f}m square) + {_TEST_BUFFER_METERS:.0f}m buffer "
         f"-> {grid_side_m_a:.1f}m grid square at {_TEST_RESOLUTION_METERS}m resolution."
     )
-    _run_timing("10a. TIMING (report-only, parcel-scale)", grid_side_m_a, 15.0, _TEST_RESOLUTION_METERS)
+    _run_timing("18a. TIMING (report-only, parcel-scale)", grid_side_m_a, 15.0, _TEST_RESOLUTION_METERS)
 
     grid_side_m_b = _TEST_MAX_GRID_DIMENSION * _TEST_RESOLUTION_METERS
     demand_acres_target_b = 0.4 * (grid_side_m_b**2) / SQUARE_METERS_PER_ACRE
     print(
-        f"10b. fixture: {_TEST_MAX_GRID_DIMENSION}x{_TEST_MAX_GRID_DIMENSION} grid (dem_data.MAX_GRID_DIMENSION, "
+        f"18b. fixture: {_TEST_MAX_GRID_DIMENSION}x{_TEST_MAX_GRID_DIMENSION} grid (dem_data.MAX_GRID_DIMENSION, "
         f"the largest grid get_dem_for_boundary() can ever actually return) at {_TEST_RESOLUTION_METERS}m -> "
         f"{grid_side_m_b:.1f}m square (~{(grid_side_m_b**2)/SQUARE_METERS_PER_ACRE:.0f} acres) -- the true "
         "production worst case, still far beyond this tool's stated 'a few to ~20-30 acre' design range."
     )
     _run_timing(
-        f"10b. TIMING (report-only, worst-case {_TEST_MAX_GRID_DIMENSION}x{_TEST_MAX_GRID_DIMENSION})",
+        f"18b. TIMING (report-only, worst-case {_TEST_MAX_GRID_DIMENSION}x{_TEST_MAX_GRID_DIMENSION})",
         grid_side_m_b, demand_acres_target_b, _TEST_RESOLUTION_METERS,
     )
 else:
     print(
-        "10. TIMING (10a parcel-scale, 10b worst-case) SKIPPED -- report-only, asserts nothing, and 10b alone "
+        "18. TIMING (18a parcel-scale, 18b worst-case) SKIPPED -- report-only, asserts nothing, and 18b alone "
         "takes on the order of 20 minutes. Set ROUTER_TIMING=1 to run both and see the numbers."
     )
 

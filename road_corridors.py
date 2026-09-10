@@ -755,6 +755,8 @@ def build_road_network(
           "stop_reason": str,
           "max_grade_pct": float,                 # steepest single cell across the WHOLE network (max of branches)
           "steep_meters": float,                  # steep-cell length summed across the WHOLE network
+          "reaches_water_zone": bool,             # the ROUTER ran a water spur -- true even when that spur
+                                                  #   was zero-length and so never became a branch below
           "cells": [(r, c), ...],                 # every branch cell, deduped, across the WHOLE network
           "cell_footprint_polygon_utm": Polygon/MultiPolygon,  # union of every branch's own footprint
         }
@@ -782,10 +784,12 @@ def build_road_network(
     same branches=[] shape (with its own stop_reason) when demand_mask has
     no True cells at all ("no_demand"), the anchor's own baseline coverage
     already serves every acre of demand ("all_demand_served"), no
-    remaining demand is reachable at all ("no_reachable_demand"), or even
+    remaining demand is reachable at all ("no_reachable_demand"), even
     the first candidate's own cost-per-acre is already too expensive
-    ("cost_per_acre_exceeded") -- this function just adds "cells"/
-    "cell_footprint_polygon_utm" on top of that same result.
+    ("cost_per_acre_exceeded"), or its own leaf pruning removed every
+    branch it had grown ("all_branches_below_minimum") -- this function
+    just adds "cells"/"cell_footprint_polygon_utm" on top of that same
+    result.
     """
     if slope_pct is None:
         slope_pct, _aspect_deg = compute_slope_and_aspect(dem["array"], dem["resolution_meters"])
@@ -936,6 +940,20 @@ def build_road_network(
         # grade) never contributes.
         "max_grade_pct": max((b["max_grade_pct"] for b in branches_out), default=0.0),
         "steep_meters": float(sum(b["steep_meters"] for b in branches_out)),
+        # Whether the network reaches the selected water ground at all --
+        # read off the ROUTER'S OWN branch list, deliberately, not off
+        # branches_out above. A water spur can come back with a single cell
+        # and zero new length: that means the network ALREADY runs through
+        # the traversable cell next to the pond, so the spur had nothing
+        # left to build. That is the strongest possible "yes" to this
+        # question, and it is exactly the case the sub-2-cell drop removes
+        # from branches_out (no segment, no line to draw) -- deriving this
+        # flag there would answer "the road does not reach the pond" about
+        # a road that runs right past it. The cell itself is in "cells"
+        # and the footprint either way; only the separate feature is gone.
+        "reaches_water_zone": any(
+            b["branch_role"] == "water_spur" for b in network_result["branches"]
+        ),
         "cells": all_cells,
         "cell_footprint_polygon_utm": cell_union_footprint(dem, network_cell_mask),
     }
@@ -1100,7 +1118,10 @@ def build_narrative_data(
                                       #   served / (served + unserved); None when
                                       #   there is no production demand at all
             'service_radius_ft',      #   how far off the road 'served' reaches
-            'reaches_water_zone',     #   a water spur runs to the pond site's edge
+            'reaches_water_zone',     #   the network reaches the pond site's edge --
+                                      #   by its own water spur, or because a branch
+                                      #   already ran through that cell (a zero-length
+                                      #   spur, which draws nothing but still counts)
           },
           'branches': [               # in branch order (trunk first), one entry per
                                       #   drawn branch
@@ -1149,7 +1170,17 @@ def build_narrative_data(
                 _round1(served_acres / total_demand_acres * 100.0) if total_demand_acres > 0 else None
             ),
             "service_radius_ft": _feet(service_radius_meters),
-            "reaches_water_zone": any(b["branch_role"] == "water_spur" for b in branches),
+            # Off the network-level flag build_road_network() publishes (see
+            # there for why it is not re-derived from the branch list). The
+            # fallback scan is for a network dict that predates that field --
+            # a rehydrated one off the wire, which has only the branches that
+            # became features and so cannot know about a dropped zero-length
+            # spur either way.
+            "reaches_water_zone": bool(
+                road_network["reaches_water_zone"]
+                if "reaches_water_zone" in road_network
+                else any(b["branch_role"] == "water_spur" for b in branches)
+            ),
         },
         "branches": [
             {
@@ -1600,7 +1631,8 @@ def road_network_is_empty(result: dict) -> bool:
     opinion assembled here. Every no-network outcome reaches this as
     False: the router's own stop_reason values (no_demand,
     all_demand_served, no_reachable_demand, cost_per_acre_exceeded on the
-    very first candidate) and _empty_road_network()'s two (no_anchor_given,
+    very first candidate, all_branches_below_minimum once leaf pruning
+    took the last branch) and _empty_road_network()'s two (no_anchor_given,
     no_eligible_anchor) alike. They are one answer to the user -- "no road
     comes from here" -- and the access point is the thing they have in
     common, which is why the orchestrator treats them the same.

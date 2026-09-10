@@ -940,12 +940,13 @@ def _format_irradiance_summary(irradiance: Optional[dict]) -> str:
 
 
 # One real sentence per stop_reason value a road narrative block can carry --
-# road_network_router.route_road_network()'s own four values plus the three
-# road_corridors.py adds for outcomes before/after the router runs (see
-# _empty_road_network() and the no-anchor early return there). Deliberately a
-# closed set: an unrecognized value fails loudly in _format_road_corridor_
-# summary() below rather than falling through to a generic, potentially
-# misleading sentence.
+# road_network_router.route_road_network()'s own five values plus the two
+# road_corridors.py adds for outcomes before the router runs (see
+# _empty_road_network() and the no-anchor early return there), plus one
+# retained-vocabulary entry nothing produces any more (see the bottom of
+# this map). Deliberately a closed set: an unrecognized value fails loudly
+# in _format_road_corridor_summary() below rather than falling through to a
+# generic, potentially misleading sentence.
 _ROAD_NETWORK_STOP_REASON_SENTENCES = {
     "cost_per_acre_exceeded": (
         "Routing stopped because further road would not be justified by the "
@@ -969,6 +970,11 @@ _ROAD_NETWORK_STOP_REASON_SENTENCES = {
         "The provided access point could not be connected to any routable ground "
         "(every nearby cell is excluded or impassable), so no road network was "
         "generated."
+    ),
+    "all_branches_below_minimum": (
+        "Every road the router could justify came out as a stub too short to be "
+        "worth building, so no network is recommended — {unserved_acres} acre(s) "
+        "of identified production ground stay off the road network."
     ),
     # RETAINED AS VOCABULARY, THOUGH NOTHING PRODUCES IT ANY MORE. The
     # network-length floor that raised this (road_corridors.MIN_CORRIDOR_
