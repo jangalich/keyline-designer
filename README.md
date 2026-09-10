@@ -803,19 +803,57 @@ One of these is required before this surface is used for real:
 
 ### Run diagnostics (off by default)
 
-`run_diagnostics.py` writes a per-session JSON record of what each generate
-and each commit actually did — the environment (shapely/GEOS, rasterio's
-GDAL/PROJ, Python, the backend git commit), which caches were warm, every
-availability/fallback flag the pipeline set, each step's own
-`narrative_data` verbatim, every drop sink row by row with its reason, and
-the geometry health of every emitted feature. On a commit rejection it dumps
-the offending feature's full GeoJSON, so an intermittent geometry failure
-survives the request that produced it.
+`run_diagnostics.py` writes a per-session JSON record of what the session
+creation, each generate and each commit actually did — the environment
+(shapely/GEOS, rasterio's GDAL/PROJ, Python, the backend git commit), which
+caches were warm, every availability/fallback flag the pipeline set, each
+step's own `narrative_data` verbatim, every drop sink row by row with its
+reason, and the geometry health of every emitted feature. On a commit
+rejection it dumps the offending feature's full GeoJSON, so an intermittent
+geometry failure survives the request that produced it.
 
 It exists to be **diffed**: two runs on the same parcel produce records that
 are byte-identical outside a header carrying the timestamps and the session
 id, so whatever differs between a run that failed and a run that did not is
 what the diff shows.
+
+#### Fetch timing
+
+A session creation waits on `parcel_data.fetch_parcel_data()` — thirteen
+sequential fetches, no threading and no async — and that wait is most of the
+minutes it takes. The record's first event is a `fetch` event carrying, per
+layer: its wall time, the callable that was timed, whether the call raised
+and with what. Beside them: the total, whether the fetch ran at all or the
+boundary was already in the fetch cache (a warm creation records
+`layers: null`, never thirteen zeroes), `irradiance`'s own `status` — the
+one deliberately non-hard-failing layer, so a degraded baseline is recorded
+as degraded and never as a failure — and, on a failure, the exception type,
+its message, and `ParcelDataIncompleteError`'s own `layer`/`label`.
+
+**The record is written even when the fetch raises**, which is the point: a
+hard-failed layer creates no session at all — nothing persisted, nothing
+cached — so the record is the only evidence that run ever happened. Its
+`header.session_id` is the id that creation generated and then discarded.
+
+**Attempt counts are not available and the record says so.** Five modules
+behind these layers retry internally (`soil_data._run_sda_query` and the
+private `_retry()`/`_query_*` copies in `hydrology_data`,
+`farm_roads_data`, `imagery_data`, `canopy_height_data`); each counts
+attempts in a local variable and returns only the final payload, so a layer
+that succeeded on attempt 3 after two two-second pauses is indistinguishable
+from one that succeeded on attempt 1. Every layer row therefore records
+`attempts: null` with an `attempts_source` naming where it looked, never a
+zero, and the `retries` block reports each helper's declared budget instead
+— the bound on the wait, read off the loaded functions. A module that wants
+its attempts recorded publishes them under
+`run_diagnostics.ATTEMPTS_ATTRIBUTE`; nothing does today.
+
+**Timings are the one thing a diff must ignore, and they are handled by
+name.** Every duration is written to a key ending in `_ms`, and
+`comparable_body()` — the view two runs are compared on — substitutes a
+fixed marker for each. The file keeps the real numbers; the comparison keeps
+the shape, so which layers ran, in what order, cache-served or not, with
+what outcome and against what retry budget all still diff in full.
 
 ```
 export KEYLINE_RUN_DIAGNOSTICS=1                 # unset/0/false/no/off = disabled
@@ -843,8 +881,12 @@ It prints the raw environment strings, the resolved absolute path, whether
 the hooks are wired **in the loaded bytecode** (not in the file — a
 long-running server keeps executing the code it imported at start, so a
 checkout that greps clean proves nothing about the process), and whether an
-actual `append_event()` write succeeds. It exits non-zero if a record could
-not be written.
+actual `append_event()` write succeeds. The fetch instrumentation is asked
+the same way and reported on its own lines: whether
+`session_cache.build_session_context()` opens and closes a probe, whether
+`parcel_data.fetch_parcel_data()` times its layers, and how many of the
+thirteen declared in `parcel_data.FETCH_LAYERS` actually carry a timer. It
+exits non-zero if a record could not be written.
 
 Hook failures are swallowed so a diagnostic can never turn a working
 generate into a 500. They are reported on **stderr** with a traceback and
@@ -855,7 +897,8 @@ chasing one:
 export KEYLINE_RUN_DIAGNOSTICS_STRICT=1   # hooks re-raise instead of catching
 ```
 
-**Leave it off in production.** It writes on every generate and every commit.
+**Leave it off in production.** It writes on every session creation, every
+generate and every commit.
 Disabled, the hooks return on an environment lookup before building anything
 — `test_run_diagnostics.py` section 6 asserts that by replacing every
 record-building function in the module with one that raises and running a

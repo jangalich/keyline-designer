@@ -58,6 +58,18 @@ get_regional_irradiance_baseline() never raises and always returns a
 populated dict, so the field is always present and always a dict -- its
 'status' key carries whether the numbers are real.
 
+MEASURED, NOT CHANGED. Every one of the thirteen fetches below sits
+inside a run_diagnostics.time_layer() block, so a session creation with
+KEYLINE_RUN_DIAGNOSTICS set records how long each layer took, in fetch
+order, in that session's diagnostic record. Those blocks read a clock on
+either side of a call that was already there: nothing about what runs,
+in what order, how often, or how it retries is different with them than
+without. Off (the default) each one costs a thread-local lookup and a
+do-nothing singleton. The names are FETCH_LAYERS below, which is also
+what run_diagnostics.self_check() cross-checks the compiled function
+against, so a fourteenth layer added without a timer is reported rather
+than silently missing. See run_diagnostics.py's Group 5.
+
 Standalone module only in this branch -- no wiring into
 pipeline_context.py, generate_full_report.py, render_layout_map.py, or
 any KSOP module yet; that's later, separate branches.
@@ -69,6 +81,7 @@ from typing import Optional
 from rasterio.warp import transform as warp_transform
 from shapely.geometry import Polygon
 
+import run_diagnostics
 from canopy_height_data import get_canopy_height_for_boundary
 from climate_data import get_climate_summary_for_point
 from dem_data import get_dem_for_boundary
@@ -121,6 +134,48 @@ class ParcelDataIncompleteError(RuntimeError):
 # stay below it).
 LAYER_CANOPY = ("canopy", "tree canopy height")
 LAYER_IMAGERY = ("imagery", "satellite imagery")
+
+
+# THE THIRTEEN LAYERS fetch_parcel_data() FETCHES, IN THE ORDER IT
+# FETCHES THEM. Sequential -- no threading, no async -- so this order is
+# real: each layer's wait is added to the one before it, the per-layer
+# times sum toward the total, and "which layer is this run on" is a
+# question with an answer rather than a guess.
+#
+# WHY THIS ORDER IS WHAT IT IS. Exactly one edge is a genuine dependency:
+# canopy_height needs the dem, and is fetched after it for that reason
+# and no other (see the entry point's docstring). Everything from
+# soil_components through imagery_summary is independent of everything
+# beside it and runs sequentially because that is how it was written, not
+# because anything requires it. Stated here as an observation for the
+# record to be read against; changing it is not this module's business
+# today.
+#
+# NAMES ARE THE ParcelData FIELD NAMES, so a row in a diagnostic record
+# points at the field the fetch filled and not at a label invented for
+# the record.
+#
+# DECLARED HERE AND CROSS-CHECKED AGAINST THE COMPILED FUNCTION.
+# run_diagnostics._fetch_hook_sites() reads the LOADED fetch_parcel_
+# data()'s own constants and reports how many of these names appear in
+# it, so a fourteenth layer added without a timer shows up in
+# self_check() as "13 of 14" rather than as a row that quietly never
+# appears in any record.
+FETCH_LAYERS = (
+    "dem",
+    "soil_components",
+    "farmland_classification",
+    "erosion_factor",
+    "saturated_hydraulic_conductivity",
+    "soil_geometries",
+    "water_features",
+    "farm_roads",
+    "climate_summary",
+    "elevation_grid",
+    "canopy_height",
+    "imagery_summary",
+    "irradiance",
+)
 
 
 @dataclass
@@ -194,27 +249,68 @@ def fetch_parcel_data(boundary_coordinates: list[tuple[float, float]]) -> Parcel
     canopy_height is fetched AFTER dem (real ordering dependency --
     get_canopy_height_for_boundary() requires the DEM as an input, unlike
     every other layer here).
+
+    EVERY LAYER IS TIMED, AND ONLY TIMED. Each fetch below sits inside a
+    run_diagnostics.time_layer() block naming the FETCH_LAYERS entry it
+    fills and the callable it calls. Those blocks change nothing about
+    what runs, in what order, or how often -- they read a clock on either
+    side of a call that was already there. With diagnostics off (the
+    default) each one is a thread-local lookup and a do-nothing
+    singleton; with them on, and only inside a session creation that
+    opened a probe, each appends one timing row to that session's
+    record. Nothing here reads a returned value, retries anything, or
+    decides anything: see run_diagnostics.py's Group 5.
     """
-    dem = get_dem_for_boundary(boundary_coordinates)
+    with run_diagnostics.time_layer("dem", get_dem_for_boundary):
+        dem = get_dem_for_boundary(boundary_coordinates)
 
     boundary_polygon_utm = _boundary_polygon_utm(boundary_coordinates, dem)
 
     wkt_polygon = coordinates_to_wkt_polygon(boundary_coordinates)
-    soil_components = get_soil_data_for_polygon(wkt_polygon)
-    farmland_classification = get_farmland_classification_for_polygon(wkt_polygon)
-    erosion_factor = get_erosion_factor_for_polygon(wkt_polygon)
-    saturated_hydraulic_conductivity = get_saturated_hydraulic_conductivity_for_polygon(wkt_polygon)
-    soil_geometries = get_soil_geometries_for_polygon(wkt_polygon)
+    # THE FIVE SDA CALLS, one after another against the same service. The
+    # block to watch when a creation is slow: soil_data._run_sda_query()
+    # retries twice with a longer timeout and a 2-second pause each time,
+    # and none of that is visible to this caller -- so these five rows
+    # carry the wait without being able to say how much of it was retry.
+    with run_diagnostics.time_layer("soil_components", get_soil_data_for_polygon):
+        soil_components = get_soil_data_for_polygon(wkt_polygon)
+    with run_diagnostics.time_layer(
+        "farmland_classification", get_farmland_classification_for_polygon
+    ):
+        farmland_classification = get_farmland_classification_for_polygon(wkt_polygon)
+    with run_diagnostics.time_layer("erosion_factor", get_erosion_factor_for_polygon):
+        erosion_factor = get_erosion_factor_for_polygon(wkt_polygon)
+    with run_diagnostics.time_layer(
+        "saturated_hydraulic_conductivity", get_saturated_hydraulic_conductivity_for_polygon
+    ):
+        saturated_hydraulic_conductivity = get_saturated_hydraulic_conductivity_for_polygon(
+            wkt_polygon
+        )
+    with run_diagnostics.time_layer("soil_geometries", get_soil_geometries_for_polygon):
+        soil_geometries = get_soil_geometries_for_polygon(wkt_polygon)
 
-    water_features = get_water_features_for_boundary(boundary_coordinates)
-    farm_roads = get_farm_roads_for_boundary(boundary_coordinates)
+    with run_diagnostics.time_layer("water_features", get_water_features_for_boundary):
+        water_features = get_water_features_for_boundary(boundary_coordinates)
+    with run_diagnostics.time_layer("farm_roads", get_farm_roads_for_boundary):
+        farm_roads = get_farm_roads_for_boundary(boundary_coordinates)
 
     center_lat, center_lon = _boundary_center(boundary_coordinates)
-    climate_summary = get_climate_summary_for_point(center_lat, center_lon)
+    with run_diagnostics.time_layer("climate_summary", get_climate_summary_for_point):
+        climate_summary = get_climate_summary_for_point(center_lat, center_lon)
 
-    elevation_grid = get_elevation_grid(boundary_coordinates, grid_size=6)
+    with run_diagnostics.time_layer("elevation_grid", get_elevation_grid):
+        elevation_grid = get_elevation_grid(boundary_coordinates, grid_size=6)
 
-    canopy_height = get_canopy_height_for_boundary(boundary_coordinates, dem)
+    with run_diagnostics.time_layer("canopy_height", get_canopy_height_for_boundary):
+        canopy_height = get_canopy_height_for_boundary(boundary_coordinates, dem)
+    # THE None CHECK IS OUTSIDE THE TIMER, deliberately. The call itself
+    # SUCCEEDED -- it ran, it returned, and its row says "ok" with its
+    # real elapsed time; what fails is this module's mandatory-layer rule
+    # applied to the sentinel it returned. Putting the raise inside the
+    # block would record the fetch as having raised, which it did not,
+    # and would attribute the sentinel's cost to the network. The record
+    # reports this shape exactly: the layer row is "ok" and the fetch
+    # event's outcome names the failed layer.
     if canopy_height is None:
         raise ParcelDataIncompleteError(
             "get_canopy_height_for_boundary() found no LiDAR HAG coverage for this "
@@ -224,7 +320,9 @@ def fetch_parcel_data(boundary_coordinates: list[tuple[float, float]]) -> Parcel
             *LAYER_CANOPY,
         )
 
-    imagery_summary = get_imagery_summary_for_boundary(boundary_coordinates)
+    with run_diagnostics.time_layer("imagery_summary", get_imagery_summary_for_boundary):
+        imagery_summary = get_imagery_summary_for_boundary(boundary_coordinates)
+    # Outside the timer for canopy_height's reason above, exactly.
     if imagery_summary is None:
         raise ParcelDataIncompleteError(
             "get_imagery_summary_for_boundary() found no recent low-cloud scene for this "
@@ -250,7 +348,16 @@ def fetch_parcel_data(boundary_coordinates: list[tuple[float, float]]) -> Parcel
     centroid_lons, centroid_lats = warp_transform(
         dem["crs"], "EPSG:4326", [centroid_utm.x], [centroid_utm.y]
     )
-    irradiance = get_regional_irradiance_baseline(centroid_lats[0], centroid_lons[0])
+    # TIMED LIKE THE OTHER TWELVE, JUDGED LIKE NONE OF THEM. The timer
+    # measures the call, which is all it ever does; it cannot record this
+    # layer as a failure because this layer cannot fail -- the function
+    # never raises. What says whether the numbers are real is the
+    # returned dict's own 'status', which the record reads off
+    # ParcelData.irradiance rather than from anything here. The centroid
+    # warp above is deliberately outside the block: it is arithmetic, not
+    # a fetch.
+    with run_diagnostics.time_layer("irradiance", get_regional_irradiance_baseline):
+        irradiance = get_regional_irradiance_baseline(centroid_lats[0], centroid_lons[0])
 
     return ParcelData(
         dem=dem,
