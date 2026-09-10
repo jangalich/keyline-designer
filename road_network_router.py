@@ -125,14 +125,19 @@ MAX_WATER_SPUR_METERS = 150.0
 # worth building at all -- a leaf shorter than this is a stub, one or two
 # cells hanging off the end of a real road, and is pruned after routing
 # finishes (see _prune_leaf_branches() and route_road_network()'s own
-# docstring). Roughly one service radius, deliberately: a spur is only
-# worth its own construction if it is long enough to reach ground its
-# parent branch does not already serve, and a leaf shorter than the
-# service radius by definition cannot. NEVER applied to a non-leaf
+# docstring). The reasoning is in service radii: a spur only earns its
+# own construction if it reaches ground its parent branch does not
+# already serve, so ONE PRODUCTION_SERVICE_RADIUS_METERS is the floor
+# below which that is not even geometrically possible. 50.0 is TWICE
+# that floor, deliberately -- a leaf has to clear its parent's service
+# area AND then run far enough past it to serve a real strip of its own,
+# not merely poke a cell beyond the edge. NEVER applied to a non-leaf
 # branch, to the trunk, or to a water_spur -- see _prune_leaf_branches()
 # for why each of those exemptions exists. CONFIGURABLE, same
-# unvalidated-starting-value caveat as every other threshold here.
-MIN_LEAF_BRANCH_METERS = 25.0
+# unvalidated-starting-value caveat as every other threshold here: the
+# multiple is a judgement about what is worth building, not a figure any
+# sweep has validated.
+MIN_LEAF_BRANCH_METERS = 50.0
 
 # Traversal cost assigned to every cell already part of an accepted
 # branch, once that branch is accepted -- a small POSITIVE epsilon, never

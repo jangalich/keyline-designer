@@ -100,7 +100,7 @@ def _route(*args, **kwargs):
 # The shipped defaults, which the fixtures deliberately do NOT use.
 assert PRODUCTION_SERVICE_RADIUS_METERS == 25.0
 assert MAX_ROAD_METERS_PER_SERVED_ACRE == 500.0
-assert MIN_LEAF_BRANCH_METERS == 25.0
+assert MIN_LEAF_BRANCH_METERS == 50.0
 
 RESOLUTION = (5.0, 5.0)
 
@@ -598,10 +598,14 @@ print(
 fixture16 = [
     _branch("trunk", 140.0, 2.40, None),      # 0
     _branch("spur", 5.0, 0.05, 0),            # 1  under threshold, but branch 2 joins it
-    _branch("spur", 48.0, 0.70, 1),           # 2  real spur off branch 1
+    _branch("spur", 48.0, 0.70, 1),           # 2  under threshold, but branch 3 joins it
     _branch("spur", 4.0, 0.03, 2),            # 3  stub, and the LAST branch -> pruned
     _branch("water_spur", 11.0, 0.0, 0),      # 4  short, exempt
 ]
+# Branches 1 and 2 are BOTH under the threshold and both survive: 1 because
+# branch 2 joins it, 2 because branch 3 does. And once 3 goes, 2 IS a leaf
+# under the threshold -- a second pass would take it, and then 1, unwinding
+# the whole chain. One pass, so it stands.
 runs16 = [_prune_leaf_branches(_network(fixture16), MIN_LEAF_BRANCH_METERS) for _ in range(5)]
 for i, run in enumerate(runs16[1:], start=2):
     assert run == runs16[0], f"prune run {i} differed from run 1 -- pruning is not deterministic"
@@ -626,19 +630,21 @@ for branch in survivors16:
 # branch 3 both slide down one and branch 3's own label must follow its
 # target. Hand-derived: survivors are original [0, 2, 3] -> positions
 # [0, 1, 2], so branch 3's "joins 2" must become "joins 1" -- still the
-# 50 m spur, which is the whole point. An implementation that leaves the
+# 90 m spur, which is the whole point. An implementation that leaves the
 # label at 2 has it naming ITSELF; one that leaves it pointing past the
-# end has the commit gate reject the whole network.
+# end has the commit gate reject the whole network. Both surviving spurs
+# are deliberately well ABOVE the threshold, so the only branch this
+# fixture prunes is the one it means to.
 fixture16b = [
     _branch("trunk", 140.0, 2.40, None),      # 0
     _branch("spur", 4.0, 0.03, 0),            # 1  stub in the MIDDLE -> pruned
-    _branch("spur", 50.0, 0.75, 0),           # 2  joins the trunk
-    _branch("spur", 40.0, 0.60, 2),           # 3  joins branch 2 -- the label that must move
+    _branch("spur", 90.0, 1.05, 0),           # 2  joins the trunk
+    _branch("spur", 70.0, 0.85, 2),           # 3  joins branch 2 -- the label that must move
 ]
 after16b = _prune_leaf_branches(_network(fixture16b), MIN_LEAF_BRANCH_METERS)
 survivors16b = after16b["branches"]
 
-assert [b["length_meters"] for b in survivors16b] == [140.0, 50.0, 40.0], (
+assert [b["length_meters"] for b in survivors16b] == [140.0, 90.0, 70.0], (
     f"expected the middle stub pruned and the order otherwise kept, got "
     f"{[b['length_meters'] for b in survivors16b]}"
 )
@@ -648,8 +654,8 @@ assert [b["joins_branch_index"] for b in survivors16b] == [None, 0, 1], (
 )
 # The label must still name the SAME BRANCH -- checked by identity of the
 # thing at that position, not by the number.
-assert survivors16b[2]["joins_branch_index"] == 1 and survivors16b[1]["length_meters"] == 50.0, (
-    "the 40 m spur must still join the 50 m spur it always joined, not the trunk and not itself"
+assert survivors16b[2]["joins_branch_index"] == 1 and survivors16b[1]["length_meters"] == 90.0, (
+    "the 70 m spur must still join the 90 m spur it always joined, not the trunk and not itself"
 )
 assert survivors16b[0] is fixture16b[0], "a branch whose label does not move is passed through untouched"
 assert fixture16b[3]["joins_branch_index"] == 2, (
@@ -657,8 +663,8 @@ assert fixture16b[3]["joins_branch_index"] == 2, (
 )
 print(
     "16. Determinism: 5 prunes of the same 5-branch fixture produced identical output, only the 4.0 m stub "
-    "removed. Join labels are positions: pruning a MIDDLE stub re-points the 40 m spur's label 2 -> 1 so it "
-    "still names the same 50 m spur, branch order is preserved, and unmoved branches pass through untouched."
+    "removed. Join labels are positions: pruning a MIDDLE stub re-points the 70 m spur's label 2 -> 1 so it "
+    "still names the same 90 m spur, branch order is preserved, and unmoved branches pass through untouched."
 )
 
 
