@@ -1,7 +1,7 @@
 """
 report_generator.py
 
-Takes the output of soil_data.py, elevation_data.py, hydrology_data.py,
+Takes the output of soil_data.py, dem_data.py, hydrology_data.py,
 climate_data.py, and imagery_data.py and generates a narrative Scale of
 Permanence report using the Claude API.
 
@@ -312,23 +312,40 @@ def _format_soil_summary(soil_components: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def _format_elevation_summary(elevation_grid: list[dict]) -> str:
-    """Elevation range and relief only, in feet. The per-point coordinate
-    dump this used to include (so the model could infer slope direction
-    from raw grid points) is deliberately gone: production_area_ceiling's
-    narrative block now carries real per-patch slope/aspect/position
-    figures, so the raw dump was redundant and invited spatial inference
-    the data doesn't support."""
-    if not elevation_grid:
+def _format_elevation_summary(elevation_summary: Optional[dict]) -> str:
+    """Elevation range and relief only, in feet, READ OFF THE DEM.
+
+    THE SOURCE CHANGED IN THIS BRANCH, the sentence with it. This used to
+    take elevation_data.get_elevation_grid()'s 36-point lattice and report
+    min/max "across 36 sample points" -- 36 sequential EPQS requests that
+    cost 65-90% of a cold session creation's fetch wait for these two
+    numbers, sampled the boundary's bounding BOX rather than the boundary,
+    and came off a DIFFERENT USGS service than every KSOP computation is
+    run against. It now takes the figures raster_grid.
+    elevation_range_in_polygon() reads off the DEM already in memory,
+    masked to the parcel boundary. The count in the sentence is therefore
+    no longer a count of network samples -- it is how many DEM cells lie
+    inside the boundary, which is what the range was actually taken over.
+
+    The per-point coordinate dump this used to include (so the model could
+    infer slope direction from raw grid points) is deliberately gone:
+    production_area_ceiling's narrative block now carries real per-patch
+    slope/aspect/position figures, so the raw dump was redundant and
+    invited spatial inference the data doesn't support.
+
+    An empty dict is elevation_range_in_polygon()'s "no in-boundary cell
+    has data" outcome, rendered here the way an empty grid used to be."""
+    if not elevation_summary:
         return "No elevation data available."
 
-    elevations = [pt["elevation"] for pt in elevation_grid]
-    min_ft = round(min(elevations) * _FEET_PER_METER)
-    max_ft = round(max(elevations) * _FEET_PER_METER)
+    min_ft = round(elevation_summary["min_meters"] * _FEET_PER_METER)
+    max_ft = round(elevation_summary["max_meters"] * _FEET_PER_METER)
+    resolution = elevation_summary["resolution_meters"]
 
     return (
         f"Elevation range: {min_ft}ft to {max_ft}ft (total relief: {max_ft - min_ft}ft) "
-        f"across {len(elevation_grid)} sample points."
+        f"across {elevation_summary['cell_count']} DEM cells inside the boundary "
+        f"(~{resolution:.0f}m resolution)."
     )
 
 
@@ -1222,7 +1239,7 @@ def _format_production_areas_summary(production_narrative: Optional[dict]) -> st
     if not production_narrative:
         return (
             "No production-area candidate data available (DEM/soil/canopy data wasn't available "
-            "for this property) — identify production land from the elevation grid alone, and say "
+            "for this property) — identify production land from the elevation range alone, and say "
             "plainly that it isn't backed by computed candidate geometry."
         )
 
@@ -1421,7 +1438,7 @@ def _format_imagery_summary(imagery: Optional[dict]) -> str:
 
 def generate_scale_of_permanence_report(
     soil_components: list[dict],
-    elevation_grid: list[dict],
+    elevation_summary: Optional[dict],
     water_features: dict,
     climate_summary: Optional[dict] = None,
     imagery_summary: Optional[dict] = None,
@@ -1452,7 +1469,7 @@ def generate_scale_of_permanence_report(
     the Scale of Permanence framework, imagery gives Claude a current
     land-cover cross-check against the soil data, the water candidate
     zones give the WATER SUPPLY section a DEM-grounded answer to "where"
-    instead of reasoning from the coarse elevation grid alone, the road
+    instead of reasoning from the elevation range alone, the road
     network does the same for FARM ROADS, and the solar candidate zones do
     the same for PERMANENT BUILDINGS' solar siting discussion.
 
@@ -1530,7 +1547,7 @@ SOIL DATA (SSURGO soil survey):
 {_format_soil_summary(soil_components)}
 
 ELEVATION (USGS):
-{_format_elevation_summary(elevation_grid)}
+{_format_elevation_summary(elevation_summary)}
 
 PRODUCTION AREAS (computed candidates, ceiling-trimmed):
 {_format_production_areas_summary(narrative_data.get("production_area_ceiling"))}
@@ -1604,13 +1621,16 @@ if __name__ == "__main__":
         },
     ]
 
-    test_elevation = [
-        {"latitude": 40.64286, "longitude": -79.98383, "elevation": 326.7},
-        {"latitude": 40.64346, "longitude": -79.98383, "elevation": 332.7},
-        {"latitude": 40.64407, "longitude": -79.98383, "elevation": 335.2},
-        {"latitude": 40.64468, "longitude": -79.98383, "elevation": 337.2},
-        {"latitude": 40.64528, "longitude": -79.98383, "elevation": 344.2},
-    ]
+    # Illustrative placeholder elevation figures for this standalone test
+    # -- the shape raster_grid.elevation_range_in_polygon() returns for a
+    # real DEM masked to a real boundary, not real fetched data.
+    test_elevation = {
+        "min_meters": 326.7,
+        "max_meters": 344.2,
+        "relief_meters": 17.5,
+        "cell_count": 4180,
+        "resolution_meters": 5.0,
+    }
 
     test_water = {
         "streams": [

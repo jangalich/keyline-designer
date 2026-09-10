@@ -1244,7 +1244,6 @@ _spy_parcel_data = ParcelData(
     water_features=_sentinel_water_features,
     farm_roads=_sentinel_farm_roads,
     climate_summary={},
-    elevation_grid=[],
     canopy_height=_sentinel_canopy_height,
     imagery_summary={},
     # irradiance -- irrelevant to this build_pipeline_context() forwarding check (not one of the
@@ -1396,7 +1395,6 @@ _canopy_case_parcel_data = ParcelData(
     water_features={"streams": [], "water_bodies": []},
     farm_roads=[],
     climate_summary={},
-    elevation_grid=[],
     canopy_height=_canopy_override,
     imagery_summary={},
     # irradiance -- not consumed anywhere on this canopy-override path (build_pipeline_context() is

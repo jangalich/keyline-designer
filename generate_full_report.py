@@ -7,8 +7,8 @@ generates a Scale of Permanence report — no manual copy-pasting between
 scripts, and no layer fetched or computed more than once.
 
     boundary --> parcel_data.fetch_parcel_data (every raw KSOP data layer
-                     -- soil, elevation, hydrology, climate, imagery, DEM,
-                     farm roads, canopy, irradiance -- fetched EXACTLY ONCE,
+                     -- soil, hydrology, climate, imagery, DEM, farm
+                     roads, canopy, irradiance -- fetched EXACTLY ONCE,
                      HARD-FAILING on any missing/broken layer)
              --> pipeline_context.build_pipeline_context (every shared
                      derived KSOP input -- valleys, production areas,
@@ -40,6 +40,7 @@ report_generator.py for details).
 from parcel_data import fetch_parcel_data
 from pipeline_context import build_pipeline_context
 from production_suitability import production_suitability_to_geojson
+from raster_grid import elevation_range_in_polygon
 from road_corridors import validate_access_point_on_boundary
 from report_generator import generate_scale_of_permanence_report
 
@@ -62,16 +63,28 @@ def generate_full_report(boundary_coordinates: list, anchor_lon_lat: tuple[float
     """
     validate_access_point_on_boundary(boundary_coordinates, anchor_lon_lat)
 
-    print("Fetching all raw parcel data (soil, elevation, hydrology, climate, imagery, DEM, roads, canopy)...")
+    print("Fetching all raw parcel data (soil, hydrology, climate, imagery, DEM, roads, canopy)...")
     # HARD FAILS here, uncaught -- same contract as parcel_data.py's own
     # module docstring. A raw-data failure stops the report before any KSOP
     # computation begins; there is no per-layer try/except here anymore.
     parcel_data = fetch_parcel_data(boundary_coordinates)
     stream_count = len(parcel_data.water_features["streams"])
     waterbody_count = len(parcel_data.water_features["water_bodies"])
+    # THE REPORT'S ELEVATION SENTENCE, OFF THE DEM -- not a fetch. Until
+    # this branch this came from ParcelData.elevation_grid, a thirteenth
+    # network layer of 36 sequential EPQS point requests that existed for
+    # exactly this one sentence and cost 65-90% of a cold creation's fetch
+    # wait (see parcel_data.py's NO ELEVATION-POINT LAYER section). The DEM
+    # fetched at Layer 1 already covers the same ground at ~5 m, so the
+    # range is read off it here, masked to the parcel by this pipeline's
+    # own pixel-center convention -- microseconds, and the SAME elevation
+    # source every KSOP computation below is run against.
+    elevation_summary = elevation_range_in_polygon(
+        parcel_data.dem, parcel_data.boundary_polygon_utm
+    )
     print(
         f"  {len(parcel_data.soil_components)} soil component(s), "
-        f"{len(parcel_data.elevation_grid)} elevation point(s), "
+        f"{elevation_summary.get('cell_count', 0)} in-boundary DEM cell(s), "
         f"{stream_count} stream(s)/{waterbody_count} water body/bodies, "
         f"imagery scene {parcel_data.imagery_summary['scene_date']}.\n"
     )
@@ -147,7 +160,7 @@ def generate_full_report(boundary_coordinates: list, anchor_lon_lat: tuple[float
     print("Generating Scale of Permanence report via Claude...\n")
     report = generate_scale_of_permanence_report(
         parcel_data.soil_components,
-        parcel_data.elevation_grid,
+        elevation_summary,
         parcel_data.water_features,
         parcel_data.climate_summary,
         parcel_data.imagery_summary,

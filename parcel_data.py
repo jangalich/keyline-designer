@@ -13,10 +13,10 @@ HARD-FAIL CONTRACT: fetch_parcel_data() raises (uncached, uncaught) on
 ANY failure among ANY of the HARD-FAIL layers it fetches -- dem,
 soil_components, farmland_classification, erosion_factor, saturated_
 hydraulic_conductivity, soil_geometries, water_features, farm_roads,
-climate_summary, elevation_grid, canopy_height, and imagery_summary. Data
-completeness is a precondition for a trustworthy report, not an optional
-enhancement -- a missing/broken layer means nothing downstream should run
-against incomplete data. Imagery is included in that list even though the
+climate_summary, canopy_height, and imagery_summary. Data completeness is
+a precondition for a trustworthy report, not an optional enhancement -- a
+missing/broken layer means nothing downstream should run against
+incomplete data. Imagery is included in that list even though the
 map might seem optional: the map is essential to the report, so an imagery
 outage stops the pipeline the same as a DEM outage does.
 
@@ -58,7 +58,31 @@ get_regional_irradiance_baseline() never raises and always returns a
 populated dict, so the field is always present and always a dict -- its
 'status' key carries whether the numbers are real.
 
-MEASURED, NOT CHANGED. Every one of the thirteen fetches below sits
+NO ELEVATION-POINT LAYER, DELIBERATELY. Until this branch there was a
+thirteenth fetch here: elevation_data.get_elevation_grid(boundary,
+grid_size=6), a 6x6 lattice of 36 SEQUENTIAL EPQS point requests with a
+time.sleep(0.3) between each. Three timed cold creations put it at 42.8 s,
+31.8 s and 118.8 s -- 65%, 65% and 90% of the whole fetch wait, the single
+largest cost in a session creation by a wide margin. What consumed it was
+ONE SENTENCE in the report: report_generator._format_elevation_summary()
+printed its min, max and point count. No KSOP module read it; it appears
+in no step registry entry's `consumes`. Meanwhile the dem layer above --
+the FIRST fetch, 1-3 s -- already covers the same boundary at ~5 m
+resolution, and min/max over that array (raster_grid.elevation_range_in_
+polygon(), masked to the boundary by this pipeline's own pixel-center
+convention) is microseconds of numpy over thousands of cells rather than
+minutes of waiting for 36. The lattice was not merely the slow way to get
+those two numbers: it was the WORSE one. It sampled the bounding BOX
+rather than the boundary (its own docstring says so), so on a
+non-rectangular parcel some of its points stood off-parcel; 36 samples can
+miss the real high and low ground a raster resolves; and it came off a
+DIFFERENT USGS service (EPQS points) than the design is computed on (the
+3DEPElevation ImageServer raster), so the report could quote an elevation
+nothing downstream was run against. Do NOT re-add a point-sampled
+elevation layer here; the DEM is the source. elevation_data.py itself is
+left in place (see its own module docstring).
+
+MEASURED, NOT CHANGED. Every one of the twelve fetches below sits
 inside a run_diagnostics.time_layer() block, so a session creation with
 KEYLINE_RUN_DIAGNOSTICS set records how long each layer took, in fetch
 order, in that session's diagnostic record. Those blocks read a clock on
@@ -67,7 +91,7 @@ in what order, how often, or how it retries is different with them than
 without. Off (the default) each one costs a thread-local lookup and a
 do-nothing singleton. The names are FETCH_LAYERS below, which is also
 what run_diagnostics.self_check() cross-checks the compiled function
-against, so a fourteenth layer added without a timer is reported rather
+against, so a thirteenth layer added without a timer is reported rather
 than silently missing. See run_diagnostics.py's Group 5.
 
 Standalone module only in this branch -- no wiring into
@@ -85,7 +109,6 @@ import run_diagnostics
 from canopy_height_data import get_canopy_height_for_boundary
 from climate_data import get_climate_summary_for_point
 from dem_data import get_dem_for_boundary
-from elevation_data import get_elevation_grid
 from farm_roads_data import get_farm_roads_for_boundary
 from hydrology_data import get_water_features_for_boundary
 from imagery_data import get_imagery_summary_for_boundary
@@ -136,7 +159,7 @@ LAYER_CANOPY = ("canopy", "tree canopy height")
 LAYER_IMAGERY = ("imagery", "satellite imagery")
 
 
-# THE THIRTEEN LAYERS fetch_parcel_data() FETCHES, IN THE ORDER IT
+# THE TWELVE LAYERS fetch_parcel_data() FETCHES, IN THE ORDER IT
 # FETCHES THEM. Sequential -- no threading, no async -- so this order is
 # real: each layer's wait is added to the one before it, the per-layer
 # times sum toward the total, and "which layer is this run on" is a
@@ -158,8 +181,8 @@ LAYER_IMAGERY = ("imagery", "satellite imagery")
 # DECLARED HERE AND CROSS-CHECKED AGAINST THE COMPILED FUNCTION.
 # run_diagnostics._fetch_hook_sites() reads the LOADED fetch_parcel_
 # data()'s own constants and reports how many of these names appear in
-# it, so a fourteenth layer added without a timer shows up in
-# self_check() as "13 of 14" rather than as a row that quietly never
+# it, so a thirteenth layer added without a timer shows up in
+# self_check() as "12 of 13" rather than as a row that quietly never
 # appears in any record.
 FETCH_LAYERS = (
     "dem",
@@ -171,7 +194,6 @@ FETCH_LAYERS = (
     "water_features",
     "farm_roads",
     "climate_summary",
-    "elevation_grid",
     "canopy_height",
     "imagery_summary",
     "irradiance",
@@ -190,7 +212,6 @@ class ParcelData:
     water_features: dict
     farm_roads: list[dict]
     climate_summary: dict
-    elevation_grid: list[dict]
     canopy_height: dict
     imagery_summary: dict
     # THE ONE DELIBERATELY NON-HARD-FAILING LAYER 1 FIELD. Every field above
@@ -298,9 +319,6 @@ def fetch_parcel_data(boundary_coordinates: list[tuple[float, float]]) -> Parcel
     with run_diagnostics.time_layer("climate_summary", get_climate_summary_for_point):
         climate_summary = get_climate_summary_for_point(center_lat, center_lon)
 
-    with run_diagnostics.time_layer("elevation_grid", get_elevation_grid):
-        elevation_grid = get_elevation_grid(boundary_coordinates, grid_size=6)
-
     with run_diagnostics.time_layer("canopy_height", get_canopy_height_for_boundary):
         canopy_height = get_canopy_height_for_boundary(boundary_coordinates, dem)
     # THE None CHECK IS OUTSIDE THE TIMER, deliberately. The call itself
@@ -348,7 +366,7 @@ def fetch_parcel_data(boundary_coordinates: list[tuple[float, float]]) -> Parcel
     centroid_lons, centroid_lats = warp_transform(
         dem["crs"], "EPSG:4326", [centroid_utm.x], [centroid_utm.y]
     )
-    # TIMED LIKE THE OTHER TWELVE, JUDGED LIKE NONE OF THEM. The timer
+    # TIMED LIKE THE OTHER ELEVEN, JUDGED LIKE NONE OF THEM. The timer
     # measures the call, which is all it ever does; it cannot record this
     # layer as a failure because this layer cannot fail -- the function
     # never raises. What says whether the numbers are real is the
@@ -370,7 +388,6 @@ def fetch_parcel_data(boundary_coordinates: list[tuple[float, float]]) -> Parcel
         water_features=water_features,
         farm_roads=farm_roads,
         climate_summary=climate_summary,
-        elevation_grid=elevation_grid,
         canopy_height=canopy_height,
         imagery_summary=imagery_summary,
         irradiance=irradiance,

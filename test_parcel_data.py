@@ -25,10 +25,10 @@ Covers:
      ParcelData comes back with every field populated, and
      boundary_polygon_utm is a real, correctly-reprojected Polygon
      (checked against an independent warp_transform computed here).
-  2. HARD FAIL, all twelve layers individually (dem, soil_components,
+  2. HARD FAIL, all eleven layers individually (dem, soil_components,
      farmland_classification, erosion_factor, saturated_hydraulic_
      conductivity, soil_geometries, water_features, farm_roads,
-     climate_summary, elevation_grid, canopy_height, imagery_summary):
+     climate_summary, canopy_height, imagery_summary):
      mocking just that one layer's fetch to raise makes fetch_parcel_
      data() raise the SAME exception instance (identity-checked), no
      ParcelData is returned, and a second call under the same failing
@@ -42,8 +42,17 @@ Covers:
   5. irradiance -- the one non-hard-failing field -- is fetched exactly
      once, at the parcel centroid (WGS84), and a degraded (non-"ok")
      baseline is carried through as a plain dict WITHOUT gating the run.
+  8. TWELVE FETCHES, EXACTLY -- an exact call-count assertion over the
+     whole set, plus the negative it exists to hold: elevation_data.
+     get_elevation_grid() is not called, is not bound in parcel_data's
+     namespace, and elevation_grid is neither a FETCH_LAYERS entry nor a
+     ParcelData field. That layer was 36 sequential EPQS point requests
+     for one report sentence and 65-90% of a cold creation's fetch wait;
+     the report reads its two numbers off the DEM now (see parcel_data.py's
+     NO ELEVATION-POINT LAYER section). An upper bound would not catch a
+     re-added thirteenth fetch, so the count is exact.
 
-Bonus (beyond the required twelve hard-fail cases above): imagery_data.
+Bonus (beyond the required eleven hard-fail cases above): imagery_data.
 get_imagery_summary_for_boundary() and canopy_height_data.get_canopy_
 height_for_boundary() both document returning None as a genuine, non-
 exceptional "nothing usable found" outcome distinct from a raised
@@ -100,7 +109,6 @@ FAKE_CLIMATE_SUMMARY = {
     "prevailing_wind_direction_degrees": 225.0,
     "avg_annual_precipitation_mm": 1000.0,
 }
-FAKE_ELEVATION_GRID = [{"longitude": -79.98, "latitude": 40.64, "elevation_meters": 300.0}]
 FAKE_CANOPY_HEIGHT = {
     "array": np.zeros((10, 10), dtype="float32"),
     "resolution_meters": (5.0, 5.0),
@@ -146,7 +154,6 @@ DEFAULTS = {
     "get_water_features_for_boundary": FAKE_WATER_FEATURES,
     "get_farm_roads_for_boundary": FAKE_FARM_ROADS,
     "get_climate_summary_for_point": FAKE_CLIMATE_SUMMARY,
-    "get_elevation_grid": FAKE_ELEVATION_GRID,
     "get_canopy_height_for_boundary": FAKE_CANOPY_HEIGHT,
     "get_imagery_summary_for_boundary": FAKE_IMAGERY_SUMMARY,
 }
@@ -212,7 +219,6 @@ assert result.soil_geometries is FAKE_SOIL_GEOMETRIES
 assert result.water_features is FAKE_WATER_FEATURES
 assert result.farm_roads is FAKE_FARM_ROADS
 assert result.climate_summary is FAKE_CLIMATE_SUMMARY
-assert result.elevation_grid is FAKE_ELEVATION_GRID
 assert result.canopy_height is FAKE_CANOPY_HEIGHT
 assert result.imagery_summary is FAKE_IMAGERY_SUMMARY
 
@@ -388,5 +394,57 @@ for degraded_status in ("no_api_key", "fetch_failed", "validation_failed"):
 print("irradiance exemption: a degraded baseline (no_api_key/fetch_failed/validation_failed) does NOT "
       "gate fetch_parcel_data(); it is carried through as a plain dict while every hard-fail layer "
       "stays populated -- the deliberate opposite of the canopy/imagery None-sentinel hard fail.")
+
+# --- 8. TWELVE FETCHES, EXACTLY, AND NO ELEVATION LATTICE AMONG THEM ---
+#
+# THE COUNT IS EXACT AND THE SET IS NAMED. Section 1 already proves each
+# mocked layer's value arrives on the right field; what this adds is that
+# the number of network calls a cold fetch makes is TWELVE and that no
+# thirteenth crept back in. A "<= 13" style bound would pass a re-added
+# elevation lattice, which is exactly the regression this section exists
+# to fail on.
+
+import elevation_data
+
+_grid_mock = Mock(side_effect=AssertionError("get_elevation_grid() must not be called"))
+stack, mocks = _mocked()
+with stack, mock_patch.object(elevation_data, "get_elevation_grid", _grid_mock):
+    _counted = fetch_parcel_data(BOUNDARY_COORDINATES)
+
+# The eleven hard-fail layers plus irradiance: twelve fetch functions, each
+# called exactly once. `mocks` carries irradiance alongside DEFAULTS' eleven.
+assert len(mocks) == 12, sorted(mocks)
+_counts = {name: mock.call_count for name, mock in mocks.items()}
+assert set(_counts.values()) == {1}, _counts
+assert sum(_counts.values()) == 12, _counts
+assert len(parcel_data.FETCH_LAYERS) == 12, parcel_data.FETCH_LAYERS
+assert set(parcel_data.FETCH_LAYERS) == set(
+    [
+        "dem", "soil_components", "farmland_classification", "erosion_factor",
+        "saturated_hydraulic_conductivity", "soil_geometries", "water_features",
+        "farm_roads", "climate_summary", "canopy_height", "imagery_summary",
+        "irradiance",
+    ]
+), parcel_data.FETCH_LAYERS
+
+# THE NEGATIVE, THREE WAYS. Not called; not importable from this module's
+# namespace (so nothing here could call it); and gone from both the
+# declared layer list and the dataclass, so no consumer can ask for it.
+assert _grid_mock.call_count == 0, "get_elevation_grid() was called during a cold fetch"
+assert not hasattr(parcel_data, "get_elevation_grid"), (
+    "parcel_data must no longer bind elevation_data.get_elevation_grid at all"
+)
+assert "elevation_grid" not in parcel_data.FETCH_LAYERS
+assert not hasattr(_counted, "elevation_grid"), (
+    "ParcelData must no longer carry an elevation_grid field"
+)
+assert "elevation_grid" not in ParcelData.__dataclass_fields__
+
+print(
+    f"TWELVE FETCHES, EXACTLY: one cold fetch_parcel_data() called {sum(_counts.values())} fetch "
+    f"functions, each exactly once, matching parcel_data.FETCH_LAYERS' {len(parcel_data.FETCH_LAYERS)} "
+    f"entries. get_elevation_grid() was called 0 times, is not bound in parcel_data's namespace, and "
+    f"elevation_grid is neither a FETCH_LAYERS entry nor a ParcelData field."
+)
 
 print("\nAll parcel_data.py checks passed.")

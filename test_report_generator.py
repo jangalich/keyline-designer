@@ -265,7 +265,10 @@ print("_locative_descriptor(): all nine cells named correctly; off-bbox centroid
 # =====================================================================
 # Imperial units at the raw-layer formatter boundary: climate (inches,
 # degF) and elevation (feet, trimmed to range/relief only -- the raw
-# per-point coordinate dump is gone).
+# per-point coordinate dump is gone). The elevation figures come off the
+# DEM now (raster_grid.elevation_range_in_polygon()'s dict), not off a
+# fetched 36-point EPQS lattice, so the sentence counts in-boundary DEM
+# CELLS rather than "sample points" -- asserted below.
 # =====================================================================
 
 _climate_fixture = {
@@ -285,17 +288,29 @@ assert "61.7°F" in _climate_prose and "42.8°F" in _climate_prose
 assert "98.6°F" in _climate_prose and "-7.6°F" in _climate_prose
 assert " mm" not in _climate_prose and "°C" not in _climate_prose, "no metric units may remain"
 
-_elev_fixture = [
-    {"latitude": 40.64286, "longitude": -79.98383, "elevation": 326.7},  # -> 1072 ft
-    {"latitude": 40.64528, "longitude": -79.98383, "elevation": 344.2},  # -> 1129 ft
-]
+_elev_fixture = {
+    "min_meters": 326.7,   # -> 1072 ft
+    "max_meters": 344.2,   # -> 1129 ft
+    "relief_meters": 17.5,
+    "cell_count": 4180,
+    "resolution_meters": 5.0,
+}
 _elev_prose = report_generator._format_elevation_summary(_elev_fixture)
 assert "Elevation range: 1072ft to 1129ft (total relief: 57ft)" in _elev_prose
 assert "40.64286" not in _elev_prose and "-79.98383" not in _elev_prose, (
     "the raw per-point coordinate dump must be gone -- range and relief only"
 )
+# THE SENTENCE NAMES ITS REAL BASIS. "sample points" was true of a
+# 36-point EPQS lattice and is false of a DEM read; a sentence that kept
+# the old wording over the new source would be a lie the report tells.
+assert "across 4180 DEM cells inside the boundary" in _elev_prose, _elev_prose
+assert "sample point" not in _elev_prose, (
+    "the elevation figures come off the DEM now -- nothing is sampled"
+)
+assert report_generator._format_elevation_summary({}) == "No elevation data available."
 assert "m\n" not in _elev_prose and " m " not in _elev_prose
 print("Climate reads in inches/degF and elevation in feet, range/relief only -- no metric units, no point dump.")
+print(f"The report's elevation sentence, from the DEM: {_elev_prose}")
 
 
 # =====================================================================
@@ -339,10 +354,13 @@ def _capture_prompt(**call_kwargs) -> str:
 _irr_soil = [
     {"muname": "Gilpin-Upshur complex", "comppct_r": 50, "drainagecl": "Well drained", "slope_r": 20},
 ]
-_irr_elevation = [
-    {"latitude": 40.64286, "longitude": -79.98383, "elevation": 326.7},
-    {"latitude": 40.64528, "longitude": -79.98383, "elevation": 344.2},
-]
+_irr_elevation = {
+    "min_meters": 326.7,
+    "max_meters": 344.2,
+    "relief_meters": 17.5,
+    "cell_count": 4180,
+    "resolution_meters": 5.0,
+}
 _irr_water = {"streams": [{"name": "Montour Run", "feature_code": None, "geometry": None}], "water_bodies": []}
 
 # A realistic ParcelData.irradiance dict in get_regional_irradiance_
@@ -357,7 +375,7 @@ _irr_fixture = {
 
 _with_irr_content = _capture_prompt(
     soil_components=_irr_soil,
-    elevation_grid=_irr_elevation,
+    elevation_summary=_irr_elevation,
     water_features=_irr_water,
     irradiance=_irr_fixture,
 )
@@ -370,7 +388,7 @@ assert "informs rooftop solar viability, not site choice" in _with_irr_content
 
 _without_irr_content = _capture_prompt(
     soil_components=_irr_soil,
-    elevation_grid=_irr_elevation,
+    elevation_summary=_irr_elevation,
     water_features=_irr_water,
 )
 assert "No regional irradiance baseline available" in _without_irr_content, (
@@ -1016,7 +1034,7 @@ _full_narrative = {
 }
 _wired_prompt = _capture_prompt(
     soil_components=_irr_soil,
-    elevation_grid=_irr_elevation,
+    elevation_summary=_irr_elevation,
     water_features=_irr_water,
     narrative_data=_full_narrative,
 )
@@ -1038,7 +1056,7 @@ assert "Patch 1 (rank 1)" in _wired_prompt and "Rank 1: 0.4 acres" in _wired_pro
 
 _unwired_prompt = _capture_prompt(
     soil_components=_irr_soil,
-    elevation_grid=_irr_elevation,
+    elevation_summary=_irr_elevation,
     water_features=_irr_water,
 )
 for _no_data in (
