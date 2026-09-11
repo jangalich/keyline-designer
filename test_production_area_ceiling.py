@@ -1306,7 +1306,8 @@ for _p in _stripped["narrative_data"]["patches"]:
         "area_acres", "percent_of_parcel", "score", "factors", "rank",
         "area_score", "compactness_score", "avg_slope_pct", "aspect_available",
         "dominant_aspect", "aspect_consistency_pct", "source_region_hydric_pct",
-        "elevation_percentile_of_parcel", "hole_count", "hole_acres",
+        "elevation_percentile_of_parcel", "elevation_position",
+        "hole_count", "hole_acres",
         "from_waist_split", "source_patch_id",
     ):
         assert _needed in _p, f"patch entry cannot answer for {_needed} without reaching outside the block"

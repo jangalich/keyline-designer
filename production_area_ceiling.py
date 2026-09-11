@@ -61,6 +61,27 @@ first" framing as the rest of this pipeline: NOT wired into
 generate_full_report.py/report_generator.py's prompt in this pass, but
 render_layout_map.py and tree_zone_candidates.py both already consume its
 output shape directly.
+
+ELEVATION POSITION IS OWNED HERE, FOR THE WHOLE PIPELINE. ELEVATION_
+POSITION_BANDS below (and _elevation_position(), which reads it) is the
+single definition of how an elevation percentile becomes the words
+"lower field" / "mid field" / "upper field". The tree and structure
+steps need the SAME words on the SAME parcel, and both are DOWNSTREAM of
+production, so both IMPORT the constant from here rather than declaring
+their own. Two copies means "upper" comes to mean one thing in the tool
+and another in the report, off the same number -- which is exactly the
+failure a reader has no way to detect.
+
+WHY THAT IS THE OPPOSITE OF _position_in_parcel() BELOW, which is
+deliberately a duplicate of water_candidate_zones.py's private helper of
+the same name rather than an import. The rule in both cases is the
+pipeline's layering, not a preference about duplication: a module may
+import from UPSTREAM of it and never from downstream. Water is
+downstream of production, so production copying water's helper would
+invert the layering and is forbidden -- hence the duplicate. Trees and
+structures are downstream of production, so THEY may import from here,
+and must. Nobody should "fix" either of these into the other; they are
+the same rule pointing in two directions.
 """
 
 import math
@@ -354,12 +375,72 @@ _SCORE_BANDS = {
     "excellent": [80.0, 100.0],
 }
 
+# WHERE A PATCH SITS BETWEEN THE PARCEL'S LOWEST AND HIGHEST GROUND, AS
+# WORDS. elevation_percentile_of_parcel is a number and stays one -- the
+# report reads it and explains it inline ("at the 68 elevation percentile
+# of the parcel (0 = the parcel's lowest ground, 100 = its highest)"),
+# which is prose a data panel has no room for. Beside a "/100 score" in a
+# column of bare numbers, a bare 68 reads as a SECOND score. These are the
+# words that stop it reading that way; the number is unchanged and still
+# emitted beside them.
+#
+# BAND BOUNDS: identical convention to _SCORE_BANDS above -- lower-
+# inclusive, upper-EXCLUSIVE, top band closing at 100 -- for the same
+# reason: elevation_percentile_of_parcel is a float rounded to 1 decimal
+# place, so closed integer bands would leave 33.5 belonging to no band.
+#
+# THE CUTS ARE EVEN THIRDS, spelled at the 1 decimal place the value being
+# classified is itself rounded to (33.3 / 66.7 rather than 33.333... /
+# 66.666...): a cut point finer than the data it cuts is precision that
+# cannot change an answer.
+#
+# WHAT EVEN THIRDS GET WRONG, stated because it is a real limitation and
+# not a reason to pick different cuts today: the bands are thirds of the
+# parcel's elevation RANGE, not of its ground. On a parcel whose ground is
+# mostly high -- a broad plateau with one short drop off its edge -- most
+# of the walkable land sits above the 66.7 cut, so nearly every patch
+# reads "upper field". That is TRUE, and it is uninformative, which is a
+# different complaint. Fixing it means cutting on the distribution of the
+# parcel's own cells (terciles of on-parcel elevation) rather than on its
+# range, and that is a tuning decision to make against a real property
+# with a real reader, not a default to guess at here.
+#
+# CONFIGURABLE -- tune against a real property, same as every other
+# threshold in this pipeline.
+#
+# PUBLIC, deliberately: the tree and structure steps read these bands
+# rather than declaring their own. See this module's docstring.
+ELEVATION_POSITION_BANDS = {
+    "lower field": [0.0, 33.3],
+    "mid field": [33.3, 66.7],
+    "upper field": [66.7, 100.0],
+}
+
+# Shipped INSIDE _SCALES, as a named sub-scale, rather than as a second
+# top-level narrative_data key: 'scales' is already the one place a
+# consumer looks to learn how to read a value, and both the report and
+# production_zone_payload.py forward the whole block verbatim, so a panel
+# gets these bands with no new plumbing. 'direction' is NOT
+# higher_is_better -- an elevation percentile is a position, not a
+# quality, and nothing in this pipeline scores ground on being high or
+# low -- so it says what the axis means instead.
+_ELEVATION_POSITION_SCALE = {
+    "range": [0.0, 100.0],
+    "direction": "higher_is_upslope",
+    "bands": ELEVATION_POSITION_BANDS,
+    "band_bounds": "lower_inclusive_upper_exclusive_last_band_inclusive",
+    "applies_to": ["elevation_percentile_of_parcel", "elevation_position"],
+}
+
 _SCALES = {
     "range": [0.0, 100.0],
     "direction": "higher_is_better",
     "bands": _SCORE_BANDS,
     "band_bounds": "lower_inclusive_upper_exclusive_last_band_inclusive",
     "applies_to": ["score", "factors.*", "area_score", "compactness_score"],
+    # The one value in this block that is NOT on the 0-100 higher-is-better
+    # scale the four keys above describe. Named rather than folded in.
+    "elevation_position": _ELEVATION_POSITION_SCALE,
 }
 
 
@@ -377,6 +458,37 @@ def _compass_word(aspect_deg) -> Optional[str]:
     if aspect_deg is None or math.isnan(float(aspect_deg)):
         return None
     return _COMPASS_WORDS[int(round((float(aspect_deg) % 360.0) / 45.0)) % 8]
+
+
+def _elevation_position(elevation_percentile) -> Optional[str]:
+    """
+    ELEVATION_POSITION_BANDS' word for an elevation percentile --
+    "lower field" / "mid field" / "upper field" -- or None.
+
+    None IS THE ONLY ANSWER FOR A None PERCENTILE, never a default word.
+    elevation_percentile_of_parcel is None on a parcel with no elevation
+    relief at all (see _patch_narrative_data()), and on that ground
+    "upper" and "lower" do not describe anything: there is no lowest and
+    highest to sit between. A word there would be an invention the reader
+    cannot tell from a measurement -- the same null-not-zero rule every
+    other field in this block obeys, applied to a category rather than a
+    number.
+
+    Bounds are lower-inclusive / upper-exclusive with the top band closing
+    at 100, read off the constant rather than hardcoded here, so retuning
+    the bands retunes this function with them.
+    """
+    if elevation_percentile is None:
+        return None
+    value = float(elevation_percentile)
+    for word, (low, high) in sorted(ELEVATION_POSITION_BANDS.items(), key=lambda kv: kv[1][0]):
+        if low <= value < high:
+            return word
+    # The top band's closing edge: 100.0 itself, which the exclusive upper
+    # bound above cannot match. Anything outside [0, 100] is unreachable --
+    # the percentile is clamped to that range where it is computed -- so
+    # this is the last band, not a fallback for an out-of-range value.
+    return max(ELEVATION_POSITION_BANDS.items(), key=lambda kv: kv[1][0])[0]
 
 
 def _angular_difference_deg(a: float, b: float) -> float:
@@ -552,7 +664,8 @@ def _patch_narrative_data(
     # narrative place the zone as upper or lower ground without being
     # handed parcel-wide elevation data to reason over. None on a parcel
     # with no elevation relief at all, where "upper" and "lower" mean
-    # nothing.
+    # nothing -- and that None carries straight through to
+    # elevation_position below, which is this same number as words.
     mean_elevation = float(np.mean([float(dem["array"][r, c]) for r, c in cells]))
     if parcel_elevation_range is None:
         elevation_percentile = None
@@ -614,14 +727,71 @@ def _patch_narrative_data(
         # component rows, reduces them to a set of disqualifying mukeys,
         # and returns only the unioned geometry -- the rows themselves are
         # discarded before STEP 1 ever sees them, and no per-cell mukey
-        # attribution is kept. Reporting them would require plumbing the
-        # component rows and their geometry through the soil fetch into
-        # STEP 1, which is outside this branch. None (not 0.0, not an
-        # empty list) so a consumer cannot read absence as a measurement.
+        # attribution is kept. None (not 0.0, not an empty list) so a
+        # consumer cannot read absence as a measurement.
+        #
+        # INVESTIGATED, AND THE ANSWER IS NOT "IT NEEDS ANOTHER FETCH".
+        # Written down here so the branch that closes this does not repeat
+        # the investigation:
+        #
+        #   NO NEW NETWORK CALL IS NEEDED. drainage class is SSURGO's
+        #   component-level `drainagecl` ("Well drained", "Somewhat poorly
+        #   drained", ...), and it ALREADY RIDES soil_data.get_soil_data_
+        #   for_polygon()'s existing SELECT, beside compname/comppct_r/
+        #   mukey. Per-map-unit POLYGON geometry is likewise already
+        #   fetched, unconditionally, by get_soil_geometries_for_polygon()
+        #   -- for EVERY mukey intersecting the boundary, not just the
+        #   disqualifying ones. Both land in parcel_data.ParcelData
+        #   (soil_components / soil_geometries) at Layer 1, hard-fail
+        #   governed. The data exists above this module and is thrown away
+        #   on the way down; nothing here has to go back to SDA for it.
+        #
+        #   IT DOES NOT NEED TO GO THROUGH STEP 1 EITHER, which is what
+        #   this comment used to assume. narrative_data is a post-hoc read
+        #   over cells STEP 1 already labelled, so attribution is one
+        #   transform_geom() per mukey into dem['crs'] plus the same
+        #   vectorised shapely.contains_xy() call _on_parcel_cell_mask()
+        #   above already makes -- no gate re-runs, no eligibility change.
+        #
+        #   WHAT MAKES IT A BRANCH OF ITS OWN is the plumbing, not the
+        #   computation. identify_optimized_production_areas() takes
+        #   neither soil_components nor soil_geometries today; build_
+        #   pipeline_context() holds both and forwards them to the
+        #   exclusion gate, the floodplain union and the water step but
+        #   not to production; and the session path reaches this entry
+        #   point through step_registry.LANDFORM, whose declared consumed-
+        #   edge table would gain two edges. Neither may EVER self-fetch
+        #   here: get_soil_geometries_for_polygon() is currently not
+        #   called at all on a parcel with no hydric map unit, so a
+        #   fallback fetch would add an SDA round trip to a path that is
+        #   network-free after Layer 1. Plus one open design question the
+        #   panel's own reading has to settle -- one dominant component
+        #   per patch or several, and dominant by patch cell count (the
+        #   map unit) or by comppct_r (the component within it), which are
+        #   two different "dominant"s stacked.
+        #
+        # Until then these stay None and the panel renders an em-dash.
+        # That is the documented behaviour, not a defect: the keys exist
+        # so the shape is stable and the gap is visible.
         "soil_components": None,
         "drainage_class": None,
         "source_region_hydric_pct": source_region_hydric_pct,
         "elevation_percentile_of_parcel": elevation_percentile,
+        # The SAME fact as the line above, as words. Emitted BESIDE the
+        # number, never instead of it: the report quotes the percentile and
+        # explains the axis inline, while a data panel has one narrow column
+        # and no room for that sentence -- there, a bare 68 next to a
+        # "/100 score" reads as a second score. ELEVATION_POSITION_BANDS
+        # owns the cuts, and ships in narrative_data['scales'], so a
+        # consumer can check a word against the number it came from.
+        #
+        # NOT a second compass word. position_in_parcel above is where the
+        # patch sits on the MAP (a bearing from the parcel centroid); this
+        # is where it sits in the parcel's elevation range. Two different
+        # facts, deliberately worded so they cannot be mistaken for each
+        # other -- "south facing" and "northeast" and "upper field" in one
+        # panel would otherwise read as a contradiction.
+        "elevation_position": _elevation_position(elevation_percentile),
         "hole_count": len(hole_footprints),
         "hole_acres": hole_acres,
         "from_waist_split": bool(from_waist_split),
@@ -663,6 +833,13 @@ def build_narrative_data(
           'scales': {                 # how to read every score/factor below,
                                       #   declared once instead of per field
             'range', 'direction', 'bands', 'band_bounds', 'applies_to',
+            'elevation_position': {    # the one value NOT on that scale --
+                                       #   ELEVATION_POSITION_BANDS, so a
+                                       #   consumer can check a patch's
+                                       #   elevation_position word against
+                                       #   the percentile it came from
+              'range', 'direction', 'bands', 'band_bounds', 'applies_to',
+            },
           },
           'parcel': {
             'total_acres',            # the real, full parcel boundary
