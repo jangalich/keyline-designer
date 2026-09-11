@@ -93,6 +93,7 @@ from rasterio.warp import transform as warp_transform
 from rasterio.warp import transform_geom
 from shapely.geometry import Point, Polygon, mapping, shape
 
+import canopy_cover_data
 import canopy_height_data
 import commit_validation
 import document_store
@@ -2255,8 +2256,19 @@ for _entry in _REAL_ENTRY_POINTS:
 # WHAT IS AVAILABLE BESIDE THE COUNT: the budget each retrying helper
 # declares, read off the LOADED functions rather than a table written in
 # the test. It bounds the worst case; the count says what was spent.
+# SIX MODULES NOW. canopy_cover_data.py is the NLCD Tree Canopy Cover
+# fallback -- the canopy layer's second source, reached from
+# canopy_height_data only where lidar HAG is ABSENT for a parcel. It
+# retries like every other network-backed module here, and its attempts
+# land in the CANOPY LAYER's ledger, since it runs inside that layer's own
+# @fetch_attempts.publishes entry point.
 _HELPER_MODULES = [
-    soil_data, hydrology_data, farm_roads_data, imagery_data, canopy_height_data
+    soil_data,
+    hydrology_data,
+    farm_roads_data,
+    imagery_data,
+    canopy_height_data,
+    canopy_cover_data,
 ]
 _helpers = run_diagnostics._retry_helpers(_HELPER_MODULES)
 assert "soil_data._run_sda_query" in _helpers, sorted(_helpers)
@@ -2271,15 +2283,29 @@ assert _helpers["soil_data._run_sda_query"] == {
 # keeps transparent.
 assert _helpers["canopy_height_data._search_hag_items"]["max_retries_default"] == 5
 assert _helpers["canopy_height_data.get_canopy_height_for_boundary"]["max_retries_default"] == 5
-# AND WHICH OF THEM IS A LOOP. Three of the eight declare a budget and
+# AND WHICH OF THEM IS A LOOP. Five of the eleven declare a budget and
 # hand it straight to a helper that owns the loop, so their attempts are
 # counted under that helper -- reported rather than left for a reader to
 # discover by finding a helper that never appears in any breakdown.
+#
+# FOUR OF THE FIVE ARE THE CANOPY LAYER'S, because its budget is declared
+# once at the layer entry point and handed down a chain: get_canopy_
+# height_for_boundary -> _search_hag_items, and, on the no-HAG-coverage
+# path, -> _tree_canopy_cover_fallback -> get_tree_canopy_cover_for_
+# boundary. No loop is owned anywhere along it; every attempt those spend
+# is counted under a `_retry`.
 assert sorted(name for name, row in _helpers.items() if not row["counts_attempts"]) == [
+    "canopy_cover_data.get_tree_canopy_cover_for_boundary",
     "canopy_height_data._search_hag_items",
+    "canopy_height_data._tree_canopy_cover_fallback",
     "canopy_height_data.get_canopy_height_for_boundary",
     "imagery_data._search_scenes",
 ], sorted(_helpers)
+# The fallback's budget is the CANOPY LAYER's, not a second one: by the
+# time NLCD TCC runs it is the last canopy source there is for the parcel,
+# so it is worth exactly what the HAG search is worth.
+assert _helpers["canopy_height_data._tree_canopy_cover_fallback"]["max_retries_default"] == 5
+assert _helpers["canopy_cover_data.get_tree_canopy_cover_for_boundary"]["max_retries_default"] == 5
 assert len(_helpers) >= 5, sorted(_helpers)
 
 

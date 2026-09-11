@@ -321,8 +321,15 @@ def production_zones_endpoint():
     that says their zones could not be generated is not helped by a
     rasterio traceback or a STAC status code, and the layer identity is the
     only part of the failure they can act on (wait and retry, or accept
-    that this parcel has no lidar coverage). The exception is logged
-    server-side instead.
+    that this parcel has no canopy coverage from either source). The
+    exception is logged server-side instead.
+
+    `failed_layer.reason` is present when the raise site knew which kind of
+    failure it was: "source_unavailable" (the source did not answer -- a
+    retry is reasonable) or "no_data_for_parcel" (the source answered and
+    has nothing for this land -- permanent for this boundary, and a retry
+    is wasted). The two used to be indistinguishable on the wire and in the
+    sentence, which is how a user ended up retrying a permanent gap.
 
     502 rather than 500: the request was well-formed and this service did
     nothing wrong -- an upstream data source (USGS 3DEP, Microsoft
@@ -344,10 +351,24 @@ def production_zones_endpoint():
 
     except LayerFetchError as e:
         app.logger.exception("production-zones: %s layer failed", e.layer)
-        return jsonify({
-            "error": f"The {e.label} could not be retrieved.",
-            "failed_layer": {"type": e.layer, "label": e.label},
-        }), 502
+        # ABSENT IS NOT UNAVAILABLE. "could not be retrieved" is outage
+        # wording and invites a retry; for a layer with no coverage over
+        # this land that retry can never succeed. e.reason says which case
+        # it is -- see LayerFetchError's own docstring -- and a raise site
+        # that recorded none keeps the original wording exactly.
+        reason = getattr(e, "reason", None)
+        if reason == LayerFetchError.REASON_NO_DATA_FOR_PARCEL:
+            error = (
+                f"There is no {e.label} data available for this land. This is a permanent "
+                f"gap in the data for this area, not a temporary outage -- retrying will "
+                f"not help. Try drawing a boundary elsewhere."
+            )
+        else:
+            error = f"The {e.label} could not be retrieved."
+        failed_layer = {"type": e.layer, "label": e.label}
+        if reason:
+            failed_layer["reason"] = reason
+        return jsonify({"error": error, "failed_layer": failed_layer}), 502
 
     except Exception:
         app.logger.exception("production-zones: unexpected failure")

@@ -280,6 +280,54 @@ report using the Claude API.
   itself for an `error` key even on HTTP 200 and raises explicitly, so
   this exact failure mode can't hide silently again
   (`test_farm_roads_data.py`).
+- `canopy_height_data.py` + `canopy_cover_data.py` — the canopy layer, and
+  the ONE layer in this pipeline with genuine national coverage gaps.
+  Primary source is USGS 3DEP lidar height-above-ground (`3dep-lidar-hag`
+  on Microsoft's Planetary Computer), thresholded at
+  `CANOPY_HEIGHT_THRESHOLD_METERS` and dilated by
+  `TREE_ROOT_ZONE_BUFFER_METERS` into the tree-root-zone mask the
+  production/exclusion gates consume. Canopy is MANDATORY — an absent
+  layer hard-fails the whole session — and HAG's coverage is narrower
+  than 3DEP's own near-complete national lidar, because Planetary
+  Computer's HAG is a DERIVED product keyed per acquisition project.
+  Confirmed on a real Maryland property: no HAG item, and no
+  `3dep-lidar-dsm` either (so deriving HAG from DSM−DTM does not help),
+  which meant that parcel could not be used at all — the user could not
+  draw a boundary, let alone reach a step, and no retry would ever help.
+  **FALLBACK**: where — and only where — HAG is ABSENT,
+  `canopy_cover_data.py` fetches NLCD Tree Canopy Cover (USDA Forest
+  Service, 30 m, percent cover 0–100, CONUS) from the same kind of ArcGIS
+  `exportImage` endpoint `dem_data.py` uses, asked for the DEM's OWN
+  window at nearest-neighbour so nothing is reprojected afterward.
+  **ANY NONZERO COVER IS CANOPY** — no threshold, no tuning: TCC already
+  MISSES thin strips and single trees, so the error is toward
+  under-detection, and a threshold above zero would make that worse in
+  the unsafe direction (under-including sites a tree crop into standing
+  forest; over-including only avoids siting into trees). **254 and 255
+  are NOT cover values** (non-processing area; background) and are
+  excluded explicitly by value, not left to a nodata tag — under a
+  nonzero rule both would read as canopy, and 255 could blanket ground
+  simply not in the dataset. FALLBACK ONLY, never a second gate: TCC does
+  not union with HAG where both exist, so every parcel is analysed by one
+  consistent rule, and `canopy_data_source` (`lidar_hag` / `nlcd_tcc`)
+  records which — on the canopy dict, on `exclusion_zones`' canopy layer
+  and its wire entry, and on STEP 1's gates. A TCC parcel is analysed at
+  30 m, so one source pixel spans ~36 cells of the 5 m DEM grid and the
+  mask is blocky where HAG's is not; some ground will be marked wooded
+  that a walk would show as two trees in a field. If BOTH sources are
+  empty the layer still hard-fails, and the message now says the data is
+  ABSENT for that land (permanent; a retry cannot help) rather than that
+  a source did not respond. `test_canopy_cover_fallback.py` — its checks
+  4 (254/255 against real pixels) and 8 (HAG-vs-TCC acreage calibration
+  on the Gibsonia reference parcel) are LIVE and run with
+  `python3 test_canopy_cover_fallback.py --live`. **Not yet confirmed
+  live**: the branch that added this was developed in a sandbox whose
+  egress policy denies `apps.fs.usda.gov`, `elevation.nationalmap.gov`
+  and `planetarycomputer.microsoft.com`, so the TCC ImageServer's exact
+  service name inside `RDW_LandscapeAndWildlife` is unverified (a wrong
+  path fails loudly on the first request, and `KEYLINE_TCC_IMAGESERVER`
+  repoints it without a code change), and checks 4 and 8 have not run.
+  They report a loud skip and exit non-zero rather than passing.
 - `soil_data.py` additionally has `get_farmland_classification_for_polygon()`
   and `is_prime_farmland()` — SSURGO's official Farmland Classification
   (`farmlndcl`), used to flag (never exclude) solar candidates that

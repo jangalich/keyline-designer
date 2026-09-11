@@ -300,6 +300,7 @@ from shapely.geometry import MultiPolygon, Point, Polygon, mapping
 from shapely.prepared import prep
 
 import dem_data
+from canopy_height_data import canopy_source as canopy_source_of
 from production_area import (
     MAX_PRODUCTION_SLOPE_PCT,
     METERS_PER_FOOT,
@@ -769,22 +770,40 @@ def _wire_layers(
     both produce a null geometry, and they must not produce the same caution:
     one means "clear", the other means "unknown". Same class of distinction as
     null-versus-zero in narrative_data.
+
+    `data_source` IS A THIRD STATE ALONGSIDE THOSE TWO, and only the canopy
+    entry carries it (only canopy has two sources). "lidar_hag" is the real
+    measurement; "nlcd_tcc" means this parcel had NO lidar HAG coverage and
+    was analysed on a 30 m percent-cover product under an any-nonzero-cover-
+    is-canopy rule. The canopy check genuinely ran either way --
+    `data_available` is True for both -- so a consumer that reads only
+    `data_available` cannot tell that some ground on a TCC parcel is marked
+    wooded that a walk would show as two trees in a field. Absent when the
+    source was not recorded.
     """
     wire_layers = []
     for name in LAYER_ORDER:
         polygon_utm = layers[name]["polygon_utm"]
-        wire_layers.append(
-            {
-                "type": name,
-                "label": _display_label(name, max_slope_pct, boundary_setback_meters),
-                "data_available": bool(layer_availability[name]),
-                "geometry_wgs84": (
-                    transform_geom(dem["crs"], "EPSG:4326", mapping(polygon_utm))
-                    if not polygon_utm.is_empty
-                    else None
-                ),
-            }
-        )
+        entry = {
+            "type": name,
+            "label": _display_label(name, max_slope_pct, boundary_setback_meters),
+            "data_available": bool(layer_availability[name]),
+            "geometry_wgs84": (
+                transform_geom(dem["crs"], "EPSG:4326", mapping(polygon_utm))
+                if not polygon_utm.is_empty
+                else None
+            ),
+        }
+        # `data_source` RIDES ONLY THE CANOPY ENTRY, and only when the layer
+        # dict recorded one. It is the stable identifier ("lidar_hag" /
+        # "nlcd_tcc"), not prose -- the wording a user reads is the
+        # frontend's, and is deliberately not written in this branch. A
+        # consumer that does not know the key ignores it; one that does can
+        # say the parcel was analysed by the coarser rule.
+        source = layers[name].get("data_source")
+        if source is not None:
+            entry["data_source"] = source
+        wire_layers.append(entry)
     return wire_layers
 
 
@@ -1184,6 +1203,22 @@ def identify_exclusion_zones(
         )
     canopy_fail = slope_only_mask & tree_root_zone_mask_utm
 
+    # WHICH CANOPY SOURCE THIS PARCEL RAN ON -- lidar HAG, or the NLCD TCC
+    # fallback. Read off the canopy dict this call was handed; None when it
+    # was handed a bare mask or nothing (a caller that already derived the
+    # mask, or the legacy self-fetch path), which is "not recorded", NOT
+    # "HAG". Every pipeline path that reaches here from a session carries
+    # the dict (parcel_data.ParcelData.canopy_height), so a real run
+    # records a real source.
+    #
+    # NOT collapsed into data_available. A TCC parcel's canopy check DID
+    # run -- data_available is genuinely True -- but it ran on a 30 m
+    # percent-cover product under an any-nonzero-is-canopy rule, so some
+    # ground is marked wooded that a walk would show as two trees in a
+    # field. That is a different statement from "unavailable" and needs its
+    # own field to be sayable at all.
+    canopy_data_source = canopy_source_of(canopy_height)
+
     soil_available = False
     if check_soil:
         if disqualifying_soil_union_utm is None:
@@ -1278,6 +1313,10 @@ def identify_exclusion_zones(
             "acres": round(int(masks[name].sum()) * area_per_cell, 2),
             "data_available": layer_availability[name],
         }
+    # ONLY the canopy layer carries a source, because only the canopy layer
+    # has two. Added as its own key rather than to every layer so a reader
+    # is not left wondering what the slope gate's "source" would mean.
+    layers["canopy"]["data_source"] = canopy_data_source
 
     parcel_acres = boundary_polygon_utm.area / SQUARE_METERS_PER_ACRE
 

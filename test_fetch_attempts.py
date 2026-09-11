@@ -49,6 +49,7 @@ from unittest.mock import patch
 
 import requests
 
+import canopy_cover_data
 import canopy_height_data
 import farm_roads_data
 import fetch_attempts
@@ -450,12 +451,27 @@ assert _summary is not None
 # no loop -- it passes it to _retry -- so its attempts are counted under
 # _retry and never under it. run_diagnostics._retry_helpers() says which
 # of the eight functions a `max_retries` parameter finds are loops.
+# SIX MODULES NOW, NOT FIVE. canopy_cover_data.py is the NLCD Tree Canopy
+# Cover fallback -- the canopy layer's second source, reached from
+# canopy_height_data only where lidar HAG is ABSENT for a parcel. It
+# retries like every other network-backed module here, and its attempts
+# land in the CANOPY LAYER's ledger (it is called from inside that layer's
+# own @fetch_attempts.publishes entry point), which is correct: a fallback
+# fetch is part of what fetching the canopy layer cost.
 _helpers = run_diagnostics._retry_helpers(
-    [soil_data, hydrology_data, farm_roads_data, imagery_data, canopy_height_data]
+    [
+        soil_data,
+        hydrology_data,
+        farm_roads_data,
+        imagery_data,
+        canopy_height_data,
+        canopy_cover_data,
+    ]
 )
 _loops = sorted(name for name, row in _helpers.items() if row["counts_attempts"])
 _pass_through = sorted(name for name, row in _helpers.items() if not row["counts_attempts"])
 assert _loops == [
+    "canopy_cover_data._retry",
     "canopy_height_data._retry",
     "farm_roads_data._query_road_layer",
     "hydrology_data._query_layer",
@@ -463,7 +479,15 @@ assert _loops == [
     "soil_data._run_sda_query",
 ], _loops
 assert _pass_through == [
+    # The canopy layer's budget is declared at its entry point and handed
+    # down THREE times without a loop being owned anywhere in between --
+    # get_canopy_height_for_boundary to _search_hag_items, and, on the
+    # no-HAG-coverage path, to _tree_canopy_cover_fallback and on to
+    # get_tree_canopy_cover_for_boundary. Every one of those attempts is
+    # counted under a `_retry` above, and none under these.
+    "canopy_cover_data.get_tree_canopy_cover_for_boundary",
     "canopy_height_data._search_hag_items",
+    "canopy_height_data._tree_canopy_cover_fallback",
     "canopy_height_data.get_canopy_height_for_boundary",
     "imagery_data._search_scenes",
 ], _pass_through
@@ -717,6 +741,15 @@ assert _helpers["canopy_height_data._retry"]["max_retries_default"] == 2
 assert _helpers["canopy_height_data._search_hag_items"]["max_retries_default"] == 5
 assert _helpers["canopy_height_data.get_canopy_height_for_boundary"]["max_retries_default"] == 5
 assert _helpers["imagery_data._search_scenes"]["max_retries_default"] == 2
+# THE CANOPY FALLBACK'S BUDGET IS THE CANOPY LAYER'S, not a second one.
+# By the time NLCD Tree Canopy Cover runs it is the LAST canopy source
+# there is for the parcel, and a failure there fails the whole session --
+# so it is worth exactly what the HAG search is worth. 5 on both, and on
+# the two pass-throughs between them, or the layer would quietly spend a
+# different number of attempts depending on which source answered.
+assert _helpers["canopy_height_data._tree_canopy_cover_fallback"]["max_retries_default"] == 5
+assert _helpers["canopy_cover_data._retry"]["max_retries_default"] == 2
+assert _helpers["canopy_cover_data.get_tree_canopy_cover_for_boundary"]["max_retries_default"] == 5
 
 # attempts() YIELDS WHAT range() YIELDED, in a ledger and out of one --
 # which is what makes the progressive timeout `30 + (attempt * 30)`
@@ -770,8 +803,9 @@ with patch.object(soil_data.requests, "post", return_value=SDAResponse()):
 assert _through_wrapper == _through_original, (_through_wrapper, _through_original)
 
 print(
-    f"8 [test 8]. THE LOOPS ARE UNCHANGED: all 8 declared max_retries budgets read off the loaded "
-    f"functions are what they were (five 2s, canopy's two 5s), attempts() yields exactly range("
+    f"8 [test 8]. THE LOOPS ARE UNCHANGED: all {len(_helpers)} declared max_retries budgets read off the loaded "
+    f"functions are what they were (2 on each of the six counting loops and on "
+    f"imagery's own pass-through, 5 on each of the canopy layer's four), attempts() yields exactly range("
     f"n + 1) for budgets 0-5 both inside a ledger and outside one, the transport still sees the "
     f"progressive timeouts {_seen_timeouts} across three attempts, the last attempt's own "
     f"exception instance still escapes untouched, and the wrapped entry point returns by value "

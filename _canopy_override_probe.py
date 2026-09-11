@@ -19,7 +19,9 @@ them re-fetch canopy from the Planetary Computer.
 
 Both patches are installed at production_area's OWN module bindings --
 get_required_tree_root_zone_mask_utm() and _fetch_tree_root_zone_mask_utm()
-look up get_canopy_height_for_boundary() and tree_root_zone_mask() there,
+look up get_canopy_height_for_boundary() there (tree_root_zone_mask() is
+patched at its own home in canopy_height_data, which is where the
+source-dispatching root_zone_mask_from_canopy() looks it up),
 so a single probe observes every path into the shared fetch no matter how
 deeply nested the caller's own entry point is (e.g. solar_suitability's
 four independent canopy gates, water_candidate_zones' two).
@@ -84,7 +86,7 @@ class CanopyOverrideProbe:
     def __enter__(self):
         self._orig_fetch = pa.get_canopy_height_for_boundary
         self._orig_leaf_fetch = chd.get_canopy_height_for_boundary
-        self._orig_mask = pa.tree_root_zone_mask
+        self._orig_mask = chd.tree_root_zone_mask
         real_mask = self._orig_mask
         recorder = self.mask_arrays
 
@@ -96,13 +98,18 @@ class CanopyOverrideProbe:
         # The SAME counter on the module-attribute binding pipeline_context.py
         # reaches -- see this module's own docstring for why one is not enough.
         chd.get_canopy_height_for_boundary = self._counting_fetch
-        pa.tree_root_zone_mask = _capturing_mask
+        # THE LEAF BINDING, not production_area's. root_zone_mask_from_
+        # canopy() looks tree_root_zone_mask() up in canopy_height_data's
+        # own namespace, so that is the only binding a patch can observe.
+        # (The TCC fallback branch reaches canopy_cover_data instead; every
+        # fixture this probe is used with is a lidar-HAG dict.)
+        chd.tree_root_zone_mask = _capturing_mask
         return self
 
     def __exit__(self, *exc):
         pa.get_canopy_height_for_boundary = self._orig_fetch
         chd.get_canopy_height_for_boundary = self._orig_leaf_fetch
-        pa.tree_root_zone_mask = self._orig_mask
+        chd.tree_root_zone_mask = self._orig_mask
         return False
 
     def assert_override_used(self, override, label):

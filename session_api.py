@@ -282,6 +282,14 @@ def _failed_layer_payload(exc: BaseException) -> dict:
     A raise site that carries no layer reports the generic error and NO
     failed_layer -- the "the data sources did not respond" branch the
     frontend already renders for a null layer -- rather than inventing one.
+
+    A raise site that ALSO carries a `reason` gets the wording that matches
+    it. This exists because "could not be retrieved" describes an outage,
+    and a parcel with no canopy coverage anywhere is not an outage: it is a
+    permanent gap in the data for that land, on which a retry is wasted
+    effort. `reason` is echoed onto failed_layer so a consumer can branch
+    without parsing prose. The status stays 502 either way -- the request
+    was fine and the server's own code did not break.
     """
     if isinstance(exc, canopy_height_data.CanopyCoverageIncompleteError):
         layer, label = production_zone_payload.LAYER_CANOPY
@@ -289,10 +297,35 @@ def _failed_layer_payload(exc: BaseException) -> dict:
         layer, label = getattr(exc, "layer", None), getattr(exc, "label", None)
     if not layer:
         return {"error": "The parcel's data sources did not respond."}
-    return {
-        "error": f"The {label} could not be retrieved.",
+
+    # ABSENT IS NOT UNAVAILABLE, AND MUST NOT READ AS IT. "could not be
+    # retrieved" is outage wording: it tells a reader the source was
+    # briefly down and invites a retry. For a layer that simply has no
+    # coverage over this land that retry can never succeed, and the user is
+    # left reloading a page against a permanent gap. The exception says
+    # which case it is (parcel_data.ParcelDataIncompleteError.reason);
+    # nothing here guesses, and a raise site that recorded no reason keeps
+    # the original wording exactly.
+    reason = getattr(exc, "reason", None)
+    if reason == parcel_data.ParcelDataIncompleteError.REASON_NO_DATA_FOR_PARCEL:
+        error = (
+            f"There is no {label} data available for this land. This is a permanent gap "
+            f"in the data for this area, not a temporary outage -- retrying will not help. "
+            f"Try drawing a boundary elsewhere."
+        )
+    else:
+        error = f"The {label} could not be retrieved."
+    payload = {
+        "error": error,
         "failed_layer": {"type": layer, "label": label},
     }
+    # `reason` RIDES THE failed_layer BLOCK, beside the identity it
+    # qualifies, and only when it is known. A frontend that does not read
+    # it renders exactly what it rendered before; one that does can branch
+    # on "down" versus "no data here" without parsing the sentence.
+    if reason:
+        payload["failed_layer"]["reason"] = reason
+    return payload
 
 
 # (exception type, status, payload builder). A payload builder of None means

@@ -36,6 +36,7 @@ of real data fetches" philosophy as the rest of this pipeline's tests.
 import numpy as np
 from shapely.geometry import box
 
+import canopy_height_data as chd
 import production_area as pa
 from canopy_height_data import CANOPY_HEIGHT_THRESHOLD_METERS
 from production_area import (
@@ -132,18 +133,18 @@ BOUNDARY_COORDS = list(zip(_lons, _lats))
 
 # 1a. Override supplied -> zero fetches, supplied array is what's used.
 _orig_fetch = pa.get_canopy_height_for_boundary
-_orig_mask = pa.tree_root_zone_mask
+_orig_mask = chd.tree_root_zone_mask
 spy_fetch = _CountingCanopyFetch(np.full((_ROWS, _COLS), 1.0, dtype=np.float32))
 cap_mask = _CapturingMask(_orig_mask)
 pa.get_canopy_height_for_boundary = spy_fetch
-pa.tree_root_zone_mask = cap_mask
+chd.tree_root_zone_mask = cap_mask
 try:
     mask_supplied = _fetch_tree_root_zone_mask_utm(
         BOUNDARY_COORDS, DEM, canopy_height=OVERRIDE_CANOPY
     )
 finally:
     pa.get_canopy_height_for_boundary = _orig_fetch
-    pa.tree_root_zone_mask = _orig_mask
+    chd.tree_root_zone_mask = _orig_mask
 
 assert spy_fetch.calls == 0, (
     "_fetch_tree_root_zone_mask_utm(): with canopy_height supplied, "
@@ -206,14 +207,14 @@ print(
 spy_fetch3 = _CountingCanopyFetch(np.full((_ROWS, _COLS), 1.0, dtype=np.float32))
 cap_mask3 = _CapturingMask(_orig_mask)
 pa.get_canopy_height_for_boundary = spy_fetch3
-pa.tree_root_zone_mask = cap_mask3
+chd.tree_root_zone_mask = cap_mask3
 try:
     required_supplied = get_required_tree_root_zone_mask_utm(
         BOUNDARY_UTM, DEM, buffer_meters=12.0, canopy_height=OVERRIDE_CANOPY
     )
 finally:
     pa.get_canopy_height_for_boundary = _orig_fetch
-    pa.tree_root_zone_mask = _orig_mask
+    chd.tree_root_zone_mask = _orig_mask
 
 assert spy_fetch3.calls == 0, (
     "get_required_tree_root_zone_mask_utm(): with canopy_height supplied, "

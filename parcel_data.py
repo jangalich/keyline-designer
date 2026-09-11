@@ -20,23 +20,53 @@ incomplete data. Imagery is included in that list even though the
 map might seem optional: the map is essential to the report, so an imagery
 outage stops the pipeline the same as a DEM outage does.
 
-There is exactly ONE deliberate exception to the hard-fail contract, and
-NO others: the irradiance field. It is optional regional context worth a
-single narrative sentence, not a constraint any downstream KSOP step
-consumes, so a missing/failed baseline must NOT gate a run. See the
-comment on the ParcelData.irradiance field for the full rationale. This
-exemption is documented in three places (here, the field comment, and the
-fetch site) precisely so nobody "fixes" the apparent inconsistency by
-folding irradiance back into the hard-fail behavior.
+THE TWO CARVE-OUTS, AND HOW THEY DIFFER. There are exactly TWO named
+departures from the contract above and NO others, and they are NOT the
+same shape -- reading one as the other is the mistake this paragraph
+exists to prevent:
+
+  1. irradiance IS OPTIONAL. The layer can be missing and the run
+     continues. It is optional regional context worth a single narrative
+     sentence, not a constraint any downstream KSOP step consumes, so a
+     missing/failed baseline must NOT gate a run. See the comment on the
+     ParcelData.irradiance field for the full rationale. Documented in
+     three places (here, the field comment, and the fetch site) precisely
+     so nobody "fixes" the apparent inconsistency by folding irradiance
+     back into the hard-fail behavior.
+
+  2. canopy_height IS NOT OPTIONAL -- IT HAS A FALLBACK. It did not
+     become optional and must not be made optional. What changed is that
+     there are now TWO sources for it: USGS 3DEP lidar height-above-
+     ground, and, ONLY where HAG is absent for the parcel, NLCD Tree
+     Canopy Cover (canopy_cover_data.py). canopy_height_data.get_canopy_
+     height_for_boundary() tries the fallback itself before it returns
+     None, so a None reaching the check below means BOTH sources have
+     nothing for this land. The layer then HARD-FAILS exactly as before.
+     Documented in three places (here, the LAYER_CANOPY constant, and the
+     raise site) for the same reason irradiance is.
+
+The difference stated plainly: irradiance can be ABSENT and the run
+proceeds; canopy can be absent from ONE SOURCE and the run proceeds on
+the other, but absent from BOTH still stops the run. A fallback is not an
+exemption.
+
+WHICH SOURCE A PARCEL RAN ON IS RECORDED, not inferred. ParcelData.
+canopy_height carries its own 'source' key ('lidar_hag' | 'nlcd_tcc'),
+read via canopy_height_data.canopy_source(), and it surfaces downstream
+as the `canopy_data_source` flag. A TCC parcel is being analysed by a
+coarser rule -- 30 m percent cover, where any nonzero value counts as
+canopy -- so some ground on it is marked wooded that a walk would show as
+two trees in a field. That is not expressible as an availability flag,
+because the check genuinely ran.
 
 This is a deliberately STRICTER standard than the individual fetch
 functions this module calls. Two of them -- imagery_data.
 get_imagery_summary_for_boundary() and canopy_height_data.
 get_canopy_height_for_boundary() -- document returning None as a genuine,
-non-exceptional "nothing usable found" outcome (persistent cloud cover; no
-LiDAR HAG coverage for this area), distinct from a raised exception on an
-actual request failure. generate_full_report.py's current per-section
-graceful degradation treats that None the same way it treats a caught
+non-exceptional "nothing usable found" outcome (persistent cloud cover;
+no canopy coverage for this area from EITHER canopy source), distinct
+from a raised exception on an actual request failure. generate_full_
+report.py's current per-section graceful degradation treats that None the same way it treats a caught
 exception: skip the section, keep going. This module does not -- since
 ParcelData.imagery_summary and ParcelData.canopy_height are required
 dict fields (no Optional, no None default), a None from either fetch is
@@ -145,15 +175,45 @@ class ParcelDataIncompleteError(RuntimeError):
     of a 500 that cannot say which source did not answer. Both are None on
     a raise site that predates them, and the API then reports the generic
     error rather than inventing a layer.
+
+    `reason` SAYS WHICH KIND OF FAILURE IT WAS, and exists because the two
+    read identically today and must not. A user whose parcel simply has no
+    coverage was told "the tree canopy height could not be retrieved" --
+    the wording of a transient outage, which invites a retry that can never
+    succeed. REASON_SOURCE_UNAVAILABLE is "this source is down" (a retry
+    may help); REASON_NO_DATA_FOR_PARCEL is "this source has no data for
+    your land" (permanent for this boundary; no retry helps). None on a
+    raise site that does not know, and the API then falls back to the
+    generic wording rather than guessing which it was.
     """
 
-    def __init__(self, message: str, layer: Optional[str] = None, label: Optional[str] = None):
+    # Stable identifiers a consumer branches on, not display prose -- the
+    # same split as `layer`/`label` above.
+    REASON_SOURCE_UNAVAILABLE = "source_unavailable"
+    REASON_NO_DATA_FOR_PARCEL = "no_data_for_parcel"
+
+    def __init__(
+        self,
+        message: str,
+        layer: Optional[str] = None,
+        label: Optional[str] = None,
+        reason: Optional[str] = None,
+    ):
         super().__init__(message)
         self.layer = layer
         self.label = label
+        self.reason = reason
 
 
 # The (type, label) pairs the two mandatory-layer raises below report as.
+#
+# CANOPY IS MANDATORY AND STAYS MANDATORY (the second of the module
+# docstring's two carve-outs). It has a FALLBACK, not an exemption: the
+# fetch tries NLCD Tree Canopy Cover wherever lidar HAG is absent and only
+# returns None when BOTH sources have nothing for this land. The raise
+# below is unconditional on that None -- do not soften it into a
+# degrade-and-continue path because "canopy now has a fallback". The
+# fallback is what runs BEFORE this point, not instead of it.
 # The canopy pair is production_zone_payload.LAYER_CANOPY's, asserted equal
 # in test_roads_step.py rather than imported (production_zone_payload
 # imports the whole production pipeline; this module is Layer 1 and must
@@ -335,12 +395,22 @@ def fetch_parcel_data(boundary_coordinates: list[tuple[float, float]]) -> Parcel
     # reports this shape exactly: the layer row is "ok" and the fetch
     # event's outcome names the failed layer.
     if canopy_height is None:
+        # BOTH CANOPY SOURCES ARE OUT. get_canopy_height_for_boundary() has
+        # already tried the NLCD TCC fallback by the time it returns None
+        # (canopy_height_data._tree_canopy_cover_fallback()), so None here
+        # means neither lidar HAG nor TCC has data for this boundary -- not
+        # that a service failed to answer, which would have RAISED instead.
+        # The message says ABSENT, not unresponsive: this is permanent for
+        # this parcel and no retry will change it.
         raise ParcelDataIncompleteError(
-            "get_canopy_height_for_boundary() found no LiDAR HAG coverage for this "
-            "boundary -- canopy_height is a mandatory layer in this module, so a "
-            "genuine no-coverage result is a hard failure here, not a value to degrade "
+            "No canopy data exists for this boundary: USGS 3DEP lidar height-above-ground "
+            "has no coverage here, and the NLCD Tree Canopy Cover fallback has none either. "
+            "This is a permanent gap in the data for this land, not a service outage -- "
+            "retrying will not help. canopy_height is a mandatory layer in this module, so "
+            "a genuine no-coverage result is a hard failure here, not a value to degrade "
             "gracefully on.",
             *LAYER_CANOPY,
+            reason=ParcelDataIncompleteError.REASON_NO_DATA_FOR_PARCEL,
         )
 
     with run_diagnostics.time_layer("imagery_summary", get_imagery_summary_for_boundary):
@@ -353,6 +423,9 @@ def fetch_parcel_data(boundary_coordinates: list[tuple[float, float]]) -> Parcel
             "essential to the report), so a genuine no-scene result is a hard failure "
             "here, not a value to degrade gracefully on.",
             *LAYER_IMAGERY,
+            # Also an absence, not an outage: the search RAN and matched no
+            # scene. A failed request would have raised out of the fetch.
+            reason=ParcelDataIncompleteError.REASON_NO_DATA_FOR_PARCEL,
         )
 
     # irradiance: the ONE non-hard-failing field (see the dataclass comment
