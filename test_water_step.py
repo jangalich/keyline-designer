@@ -57,6 +57,7 @@ import farm_roads_data
 import job_runner
 import keypoint_detection
 import parcel_data
+import display_scale
 import production_area
 import production_area_ceiling
 import session_cache
@@ -765,8 +766,18 @@ with Harness() as h:
     assert scales["compartment_rank_score"]["weights"] == dict(
         water_survey_areas.EMBANKMENT_COMPARTMENT_RANK_WEIGHTS
     ), "the composite's recipe rides with it"
-    assert scales["suitability"]["min"] == 0.0 and scales["suitability"]["max"] == 1.0
+    # THE SUITABILITY ENTRY IS ON THE 0-100 DISPLAY SCALE, because it
+    # describes the panel's own converted row. The two non-panel scores
+    # in this same block stay 0-1, which is readable because every entry
+    # carries its own endpoints.
+    assert scales["suitability"]["min"] == display_scale.DISPLAY_SCALE_MIN == 0
+    assert scales["suitability"]["max"] == display_scale.DISPLAY_SCALE_MAX == 100
     assert scales["suitability"]["higher_is_better"] is True
+    assert (scales["pinch_drainage_score"]["min"], scales["pinch_drainage_score"]["max"]) == (0.0, 1.0)
+    assert (
+        scales["compartment_rank_score"]["min"],
+        scales["compartment_rank_score"]["max"],
+    ) == (0.0, 1.0)
     assert scales["overlap_pct"] == {"min": 0, "max": 100}
     assert scales["boundary_adjacency_pct"] == {"min": 0, "max": 100}
 
@@ -776,15 +787,44 @@ with Harness() as h:
     observed = scales["suitability"]["parcel_observed_max"]
     _surfaces = captured["result"]["result"]["surfaces"]
     for survey_type in water_survey_areas.SURVEY_TYPES:
-        assert observed[survey_type] == round(float(np.max(_surfaces[survey_type])), 4), (
-            f"{survey_type}'s observed ceiling must be its own surface's maximum"
+        assert observed[survey_type] == display_scale.to_display_scale(
+            float(np.max(_surfaces[survey_type]))
+        ), (
+            f"{survey_type}'s observed ceiling must be its own surface's maximum, converted "
+            f"through the same helper the panel row is"
         )
-        assert 0.0 < observed[survey_type] <= 1.0
-        # Every zone of that type reads at or below its own parcel ceiling.
+        assert isinstance(observed[survey_type], int)
+        assert 0 < observed[survey_type] <= 100
         for feature in PANEL_ZONES:
             if feature["properties"]["survey_type"] != survey_type:
                 continue
-            assert feature["properties"]["mean_suitability"] <= observed[survey_type] + 1e-9
+            # THE STORED PROPERTY IS STILL 0-1 -- the feature is the
+            # measurement record and this branch did not touch it.
+            assert 0.0 <= feature["properties"]["mean_suitability"] <= 1.0, (
+                f"the feature's mean_suitability was rescaled: "
+                f"{feature['properties']['mean_suitability']!r}"
+            )
+            # Every zone of that type reads at or below its own parcel
+            # ceiling -- compared ON THE DISPLAY SCALE, since that is the
+            # scale the ceiling is now published on, and the comparison
+            # is exactly what the panel renders as "44 of 87".
+            assert (
+                display_scale.to_display_scale(feature["properties"]["mean_suitability"])
+                <= observed[survey_type]
+            )
+            # AND THE PANEL ROW IS THAT SAME CONVERSION, on the tabular
+            # row that names this very feature -- the panel and the scale
+            # it is read against cannot drift apart.
+            _row = next(
+                entry
+                for entry in panel_payload["zones"]
+                if entry["feature_id"] == feature["id"]
+            )
+            _suitability = next(e for e in _row["panel"] if e["key"] == "suitability")
+            assert _suitability["value"] == display_scale.to_display_scale(
+                feature["properties"]["mean_suitability"]
+            )
+            assert _suitability["unit"] == display_scale.DISPLAY_SCALE_UNIT
 
     # rank carries the PER-TYPE SURVIVOR COUNT, so "rank 2" renders as "2 of
     # 4" -- AND THE DENOMINATOR IS DELIBERATELY LARGER THAN WHAT SHIPPED now

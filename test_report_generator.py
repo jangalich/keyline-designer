@@ -872,6 +872,33 @@ assert "0.8 acres to survey -- a valley compartment anchored by a 0.73-scoring s
 assert "THE HONESTY SPLIT" in _survey_prose and "twi 0.9" in _survey_prose and "twi 0.7 (weight 0.28)" in _survey_prose, (
     "seed signature and compartment means are BOTH in the prose, distinct -- the reporting honesty split"
 )
+# --- THE DISPLAY SCALE IN THE PROSE ---------------------------------
+# The suitability figures -- and ONLY those -- are rendered on the 0-100
+# KSOP display scale, with "/100" on every occurrence so no figure in
+# this paragraph can be read as either scale. The block they were read
+# from is the measurement record and is untouched 0-1; the conversion
+# happens here, at the point of rendering, through the one shared helper.
+assert "compartment mean 55/100, max 61/100" in _survey_prose, (
+    f"the embankment compartment's mean/max render on the display scale: {_survey_prose}"
+)
+assert "member-cell mean suitability 71/100 (max 83/100)" in _survey_prose, (
+    "the excavated zone's mean/max render on the display scale, with the scale spelled out"
+)
+assert "mean 0.55" not in _survey_prose and "suitability 0.71" not in _survey_prose, (
+    "the 0-1 spelling of a suitability figure must not survive in the prose -- two scales for one "
+    "number in one paragraph is the ambiguity this branch exists to prevent"
+)
+assert _survey_nd["zones"][0]["mean_suitability"] == 0.55, (
+    "the formatter READS narrative_data; it never rescales the block it was handed"
+)
+assert _survey_nd["zones"][1]["max_suitability"] == 0.83
+# EVERYTHING ELSE ON THESE LINES STAYS 0-1, printed beside the recipe
+# that produced it: the criterion means, the seed blend, the drainage
+# score, the rank composite.
+assert "0.73-scoring storage cell" in _survey_prose, "the seed blend score stays 0-1"
+assert "slope 0.6 (weight 0.36)" in _survey_prose, "a criterion mean stays 0-1"
+assert "scoring 1.0 on the drainage band" in _survey_prose, "the drainage score stays 0-1"
+assert "Rank score 0.865" in _survey_prose, "the ranking composite stays 0-1"
 assert "drainage_area" not in _survey_prose, (
     "contributing area is no longer a per-cell embankment criterion, so it must not appear as one "
     "in the prose -- it appears as the compartment's FILL CLAIM instead"
@@ -930,6 +957,9 @@ assert "No water survey areas were identified" in _format_water_survey_areas_sum
 print("_format_water_survey_areas_summary(): excavated dual-acreage and compartment honesty-split "
       "sentences, seed-failure accounting, the TWI caveat, pump/no-service gravity cases, overlap "
       "sentinels, flags, and the tuning note all rendered; no-region and missing blocks read as no data.")
+print("  ... and the suitability figures ALONE render on the 0-100 display scale (55/100, 61/100, "
+      "71/100, 83/100 off an untouched 0.55/0.61/0.71/0.83 block) while the criterion means, seed "
+      "blend, drainage score and rank composite stay 0-1 beside their own recipes.")
 
 # --- THE CAPPED ARM of the counts line: MORE SURVIVORS THAN THE
 # PRESENTED SET HOLDS. This is the arm that has to get the claim exactly
