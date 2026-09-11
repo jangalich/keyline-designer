@@ -1756,6 +1756,9 @@ def rehydrate_production_zone(feature: dict, dem: dict, zone_id: Optional[int] =
                                     rasterization convention
         representative_elevation_m  median of dem['array'] over those cells,
                                     exactly as cluster_and_gate() takes it
+        max_elevation_m             max of dem['array'] over those cells, the
+                                    block's high point -- the gravity
+                                    reference, same expression
         area_acres                  polygon_utm.area / SQUARE_METERS_PER_ACRE
         render_fill_polygon_utm     production_area.render_fill_polygon_for_
                                     cluster() -- the pipeline's OWN opening,
@@ -1829,6 +1832,12 @@ def rehydrate_production_zone(feature: dict, dem: dict, zone_id: Optional[int] =
     # instead.
     elevations = [float(dem["array"][r, c]) for r, c in cells]
     representative_elevation_m = float(np.median(elevations))
+    # The patch's HIGH POINT, off the same sampled elevations -- the
+    # reference gravity delivery to the whole block is judged against
+    # (see production_area.cluster_and_gate()'s own note). A nodata cell
+    # would make this NaN exactly as it makes the median NaN, and the
+    # guard below refuses the whole patch before either can travel.
+    max_elevation_m = float(np.max(elevations))
     if math.isnan(representative_elevation_m):
         nodata_count = sum(1 for value in elevations if math.isnan(value))
         raise InboundGeometryError(
@@ -1849,6 +1858,7 @@ def rehydrate_production_zone(feature: dict, dem: dict, zone_id: Optional[int] =
         "id": zone_id,
         "area_acres": round(float(polygon_utm.area / SQUARE_METERS_PER_ACRE), 2),
         "representative_elevation_m": representative_elevation_m,
+        "max_elevation_m": max_elevation_m,
         "polygon_utm": polygon_utm,
         "render_fill_polygon_utm": render_fill_polygon_utm,
         "render_fill_area_acres": round(float(render_fill_polygon_utm.area / SQUARE_METERS_PER_ACRE), 2),

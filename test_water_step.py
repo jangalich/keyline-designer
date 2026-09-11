@@ -528,12 +528,18 @@ with Harness() as h:
         "zone_id", "survey_type", "status", "drop_reason", "rank",
         "cross_type_overlaps", "zone_acres", "mean_suitability",
         "max_suitability", "criterion_contributions", "twi_score_mean",
-        "depression_depth_max_m", "slope_median_pct",
+        # FEET on the wire, not metres: the report's global rule is
+        # imperial and water_survey_areas._feet() does the conversion at
+        # the property builder, so no consumer converts downstream. The
+        # metric measurement keeps its own name on the zone dict.
+        "depression_depth_max_ft", "slope_median_pct",
         "boundary_adjacency_fraction", "canopy_overlap_pct", "road_overlap_pct",
         "production_overlap_pct", "primary_production_area_relationship",
         "has_service_relationship", "served_production_area_ids",
         "soil_coverage_fraction", "criteria_complete", "flags",
-        "truncated_by_road", "representative_elevation_m",
+        # BOTH elevations: the median, and the high point the gravity
+        # answer beside it was actually decided on (max-to-max).
+        "truncated_by_road", "representative_elevation_m", "max_elevation_m",
     )
     EXCAVATED_ZONE_PROPERTIES = ("sparse_anchor", "member_ids", "member_count", "member_acres")
     EMBANKMENT_ZONE_PROPERTIES = (
@@ -1651,6 +1657,143 @@ print(
     f"agreement entry, and the same {len(before)} candidates stay on offer "
     f"after every commit -- it is a finding about the ground, not a report on "
     f"the selection."
+)
+
+
+# --- 10. GRAVITY ON THE REFERENCE PARCEL: BEFORE AND AFTER ------------
+#
+# WHAT THE BUG WAS COSTING, MEASURED ON THIS PARCEL rather than argued
+# about. The rule that decides "gravity feed" changed from comparing the
+# two sides' MEDIAN elevations to comparing their MAXIMA (water_candidate_
+# zones._zone_production_area_relationships()), and the honest way to state
+# the size of that change is to run BOTH rules over the SAME zones and the
+# SAME production blocks and count.
+#
+# BOTH SIDES RE-DERIVED HERE, off this file's own DEM fixture and the
+# pipeline's own production geometry, so nothing is taken on trust: the
+# blocks come from identify_optimized_production_areas() (what
+# build_pipeline_context() feeds the water step) and the zones from
+# compute_water_survey_areas() (what the step runs).
+
+_ref_dem = _build_dem()
+_ref_xs, _ref_ys = BOUNDARY_POLYGON_UTM.exterior.coords.xy
+_ref_lons, _ref_lats = warp_transform(CRS, "EPSG:4326", list(_ref_xs), list(_ref_ys))
+_ref_blocks = production_area_ceiling.identify_optimized_production_areas(
+    list(zip(_ref_lons, _ref_lats)),
+    dem=_ref_dem,
+    canopy_height=_build_canopy(_ref_dem),
+)["scored_patches"]
+assert _ref_blocks, "the fixture must produce production blocks or the counts below are vacuous"
+
+_ref_result = water_survey_areas.compute_water_survey_areas(
+    _ref_dem, BOUNDARY_POLYGON_UTM, production_areas=_ref_blocks
+)
+_ref_zones = _ref_result["zones"]
+assert _ref_zones, "the fixture must produce survey zones or the counts below are vacuous"
+
+_MAX_SERVICE_M = water_survey_areas.MAX_SERVICE_DISTANCE_METERS
+
+
+def _ref_in_range(zone):
+    """The blocks this zone has a relationship WITH at all -- the service-
+    distance gate, unchanged by this fix and applied identically to both
+    rules so the comparison isolates the elevation question."""
+    point = zone["polygon_utm"].centroid
+    return [b for b in _ref_blocks if point.distance(b["polygon_utm"]) <= _MAX_SERVICE_M]
+
+
+def _ref_delivery(zone, elevation_key):
+    """gravity / pump / none under a rule keyed on `elevation_key` -- the
+    retired rule reads representative_elevation_m off both sides, the
+    shipped one reads max_elevation_m off both sides. THE HEADLINE
+    RELATIONSHIP IS THE BEST ONE IN RANGE, exactly as the module picks its
+    primary (relationships sorted by differential, descending)."""
+    in_range = _ref_in_range(zone)
+    if not in_range:
+        return "none"
+    best = max(zone[elevation_key] - block[elevation_key] for block in in_range)
+    return "gravity" if best > 0 else "pump"
+
+
+def _ref_counts(elevation_key):
+    counts = {"gravity": 0, "pump": 0, "none": 0}
+    for zone in _ref_zones:
+        counts[_ref_delivery(zone, elevation_key)] += 1
+    return counts
+
+
+_REF_BEFORE = _ref_counts("representative_elevation_m")
+_REF_AFTER = _ref_counts("max_elevation_m")
+
+# THE SHIPPED ANSWER IS THE "AFTER" COLUMN, asserted rather than assumed --
+# a re-derivation that disagreed with the module would make every number
+# below a statement about this test instead of about the pipeline.
+_ref_shipped = {"gravity": 0, "pump": 0, "none": 0}
+for _zone in _ref_zones:
+    _primary = _zone["primary_production_area_relationship"]
+    if _primary is None:
+        _ref_shipped["none"] += 1
+    elif _primary["above_production_area"]:
+        _ref_shipped["gravity"] += 1
+    else:
+        _ref_shipped["pump"] += 1
+assert _ref_shipped == _REF_AFTER, (
+    f"the re-derived max-to-max rule must agree with what the module actually reported: "
+    f"re-derived {_REF_AFTER}, shipped {_ref_shipped}"
+)
+
+# THE HEADLINE COUNT DOES NOT MOVE ON THIS PARCEL, AND THAT IS THE
+# FINDING, not a reason to weaken the assertion. Every zone here has the
+# parcel's LOWEST-topped block within service range, and a zone only needs
+# ONE block it can gravity-feed to report gravity feed -- so the headline
+# survives a rule change that moves plenty underneath it. Pinned as an
+# equality so a future change to the terrain fixture, the blocks, or the
+# rule has to come back and restate what it did to this parcel.
+assert _REF_BEFORE == {"gravity": 7, "pump": 0, "none": 0}, _REF_BEFORE
+assert _REF_AFTER == {"gravity": 7, "pump": 0, "none": 0}, _REF_AFTER
+
+# WHERE THE CHANGE ACTUALLY LANDS: the per-block answers underneath the
+# headline. This is the measure of what the bug was costing -- a pairing
+# that flips gravity -> pump is one the old rule was reporting as a
+# gravity relationship to a block the water could only have reached the
+# bottom of.
+_REF_PAIRS = [
+    (zone, block)
+    for zone in _ref_zones
+    for block in _ref_in_range(zone)
+]
+_ref_flips_to_pump = [
+    (zone["id"], block["id"])
+    for zone, block in _REF_PAIRS
+    if zone["representative_elevation_m"] > block["representative_elevation_m"]
+    and not zone["max_elevation_m"] > block["max_elevation_m"]
+]
+_ref_flips_to_gravity = [
+    (zone["id"], block["id"])
+    for zone, block in _REF_PAIRS
+    if not zone["representative_elevation_m"] > block["representative_elevation_m"]
+    and zone["max_elevation_m"] > block["max_elevation_m"]
+]
+assert len(_REF_PAIRS) == 35, len(_REF_PAIRS)
+assert len(_ref_flips_to_pump) == 4, _ref_flips_to_pump
+# THE OTHER DIRECTION EXISTS, AND IT IS NOT A LEAK. The water side takes
+# its MAXIMUM deliberately: no pond has been sited inside a survey area,
+# so the area's high ground is the best case a design could still achieve
+# there. That optimism is what rescues these three -- zones whose median
+# sat below a block but whose high end clears it.
+assert len(_ref_flips_to_gravity) == 3, _ref_flips_to_gravity
+
+print(
+    f"10. Gravity before/after on the reference parcel ({len(_ref_zones)} survey zones, "
+    f"{len(_ref_blocks)} production blocks): the HEADLINE count is unchanged -- "
+    f"gravity {_REF_BEFORE['gravity']} -> {_REF_AFTER['gravity']}, "
+    f"pump {_REF_BEFORE['pump']} -> {_REF_AFTER['pump']}, "
+    f"none {_REF_BEFORE['none']} -> {_REF_AFTER['none']} -- because every zone here has the "
+    f"lowest-topped block in range and one feedable block is enough. Underneath it, of "
+    f"{len(_REF_PAIRS)} zone-by-block pairings in service range, {len(_ref_flips_to_pump)} flip "
+    f"gravity -> pump (the bug: reported as feeding a whole block the water could only reach the "
+    f"bottom of) and {len(_ref_flips_to_gravity)} flip pump -> gravity (the water side's "
+    f"deliberate best case: a pond sited at the area's high end clears the block after all)."
 )
 
 

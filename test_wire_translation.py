@@ -203,6 +203,7 @@ def _water_member(mid, x0, y0):
         "flags": [],
         "below_min_area": False,
         "representative_elevation_m": 100.5,
+        "max_elevation_m": 101.2,
     }
 
 
@@ -259,6 +260,10 @@ def _water_zone(zid, x0, y0, members):
         "flags": [],
         "below_min_area": False,
         "representative_elevation_m": 100.9,
+        # The zone's HIGH POINT, which is what the gravity relationship is
+        # measured from (max-to-max, both sides) -- distinct from the median
+        # here on purpose, so a builder that reached for the wrong one shows.
+        "max_elevation_m": 103.4,
     }
 
 

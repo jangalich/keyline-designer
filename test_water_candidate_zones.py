@@ -262,6 +262,7 @@ PRODUCTION_AREA_ABOVE = [
     {
         "id": 0,
         "representative_elevation_m": -5.0,
+        "max_elevation_m": -5.0,
         "polygon_utm": box(500150.0, 4499850.0, 500180.0, 4499900.0),
         "render_fill_polygon_utm": box(500150.0, 4499850.0, 500180.0, 4499900.0),
     }
@@ -277,6 +278,7 @@ CENTER_PA = [
     {
         "id": 0,
         "representative_elevation_m": 50.0,
+        "max_elevation_m": 50.0,
         "polygon_utm": box(500140.0, 4499840.0, 500160.0, 4499860.0),
         "render_fill_polygon_utm": box(0.0, 0.0, 1.0, 1.0),  # off-grid -> no production exclusion
     }
@@ -346,6 +348,7 @@ _ceiling_pa = [
     {
         "id": 0,
         "representative_elevation_m": -5.0,
+        "max_elevation_m": -5.0,
         "polygon_utm": _ceiling_boundary,
         "render_fill_polygon_utm": box(0.0, 0.0, 1.0, 1.0),
     }
@@ -408,6 +411,7 @@ _OP_PA = [
     {
         "id": 0,
         "representative_elevation_m": -5.0,
+        "max_elevation_m": -5.0,
         "polygon_utm": box(500060.0, 4499910.0, 500090.0, 4499940.0),
         "render_fill_polygon_utm": box(0.0, 0.0, 1.0, 1.0),
     }
@@ -472,6 +476,7 @@ PRODUCTION_AREA_BELOW = [
     {
         "id": 5,
         "representative_elevation_m": 100.0,
+        "max_elevation_m": 100.0,
         "polygon_utm": box(500150.0, 4499850.0, 500180.0, 4499900.0),
         "render_fill_polygon_utm": box(500150.0, 4499850.0, 500180.0, 4499900.0),
     }
@@ -574,6 +579,7 @@ _sd_far = [
     {
         "id": 9,
         "representative_elevation_m": -5.0,
+        "max_elevation_m": -5.0,
         "polygon_utm": box(501200.0, 4499850.0, 501230.0, 4499900.0),  # ~1000 m east of the grid
         "render_fill_polygon_utm": box(501200.0, 4499850.0, 501230.0, 4499900.0),
     }
@@ -749,6 +755,7 @@ NOM_PA = [
     {
         "id": 0,
         "representative_elevation_m": 50.0,
+        "max_elevation_m": 50.0,
         "polygon_utm": box(500090.0, 4499890.0, 500110.0, 4499910.0),
         "render_fill_polygon_utm": box(500090.0, 4499890.0, 500110.0, 4499910.0),
     }
@@ -1041,6 +1048,7 @@ U_PA = [
     {
         "id": 0,
         "representative_elevation_m": 50.0,
+        "max_elevation_m": 50.0,
         "polygon_utm": box(500140.0, 4499840.0, 500160.0, 4499860.0),
         "render_fill_polygon_utm": box(500140.0, 4499840.0, 500160.0, 4499860.0),
     }
@@ -1283,6 +1291,7 @@ _cap_pa = [
     {
         "id": 0,
         "representative_elevation_m": 50.0,
+        "max_elevation_m": 50.0,
         "polygon_utm": box(500140.0, 4499840.0, 500160.0, 4499860.0),
         "render_fill_polygon_utm": box(500140.0, 4499840.0, 500160.0, 4499860.0),
     }
@@ -1398,6 +1407,7 @@ _bc_pa = [
     {
         "id": 0,
         "representative_elevation_m": 50.0,
+        "max_elevation_m": 50.0,
         "polygon_utm": box(500090.0, 4499790.0, 500110.0, 4499810.0),
         "render_fill_polygon_utm": box(500090.0, 4499790.0, 500110.0, 4499810.0),
     }
@@ -1496,6 +1506,10 @@ _CONSUMER_READ_ZONE_KEYS = {
     "contributing_area_cells",
     "slope_pct",
     "representative_elevation_m",
+    # The zone's HIGH POINT: what the gravity relationship is actually
+    # computed from (max-to-max, both sides), so a consumer checking
+    # "gravity feed" has the number the answer came off.
+    "max_elevation_m",
 }
 _ADDED_ZONE_KEYS = {
     "nominated_by",
@@ -1624,6 +1638,7 @@ W_PA = [
     {
         "id": 0,
         "representative_elevation_m": 50.0,
+        "max_elevation_m": 50.0,
         "polygon_utm": box(500080.0, 4499800.0, 500120.0, 4499840.0),
         "render_fill_polygon_utm": box(500080.0, 4499800.0, 500120.0, 4499840.0),
     }

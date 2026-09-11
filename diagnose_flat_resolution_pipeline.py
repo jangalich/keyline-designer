@@ -300,7 +300,11 @@ def summarise(context) -> dict:
         "water rank-1": _rank1(water, "max_suitability", id_key="zone_id"),
         "water selected": f"{selected_props.get('zone_id', selected_props.get('id', '-'))}",
         "water selected max_suit": f"{float(selected_props.get('max_suitability') or 0.0):.4f}",
-        "water depression depth m": f"{max((float((z.get('properties', z)).get('depression_depth_max_m') or 0.0) for z in water), default=0.0):.4f}",
+        # FEET, since the water zone's wire property is feet (water_survey_
+        # areas._zone_feature_properties()). The row is renamed with it: a
+        # column headed "m" reading a _ft value is exactly the silent unit
+        # error the module-side conversion exists to prevent.
+        "water depression depth ft": f"{max((float((z.get('properties', z)).get('depression_depth_max_ft') or 0.0) for z in water), default=0.0):.4f}",
         "water TWI score max": f"{max((float((z.get('properties', z)).get('twi_score_max') or 0.0) for z in water), default=0.0):.4f}",
         "water contributing ac": f"{max((float((z.get('properties', z)).get('contributing_area_acres_at_wettest_cell') or 0.0) for z in water), default=0.0):.4f}",
         "road corridor length_m": f"{float(corridor.get('total_length_meters') or 0.0):.2f}",
