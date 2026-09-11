@@ -291,6 +291,12 @@ from shapely.ops import unary_union
 from shapely.prepared import prep
 
 from dem_data import get_dem_for_boundary
+from display_scale import (
+    DISPLAY_SCALE_MAX,
+    DISPLAY_SCALE_MIN,
+    DISPLAY_SCALE_UNIT,
+    to_display_scale,
+)
 from feature_schema import (
     CONFIDENCE_HIGH,
     CONFIDENCE_LOW,
@@ -444,11 +450,24 @@ TWI_MIN_SLOPE_TAN = 0.001
 #   scales.suitability.parcel_observed_max (build_scales) -- boundary-
 #     dependent AND LEGITIMATE, but named here rather than left implicit.
 #     It is the max of the gate-masked surface, and it exists to render
-#     "0.53 of an attainable 0.82" instead of "0.53 of 1.0". It describes
+#     "53 of an attainable 82" instead of "53 of 100". It describes
 #     THE PARCEL, which is what a reader asked for, and it never enters a
 #     score. It does mean the denominator moves when the boundary moves;
 #     that is the honest behavior of a statement about the parcel, and
 #     the block labels it as one.
+#
+#     AND IT IS A DENOMINATOR SHOWN BESIDE THE VALUE, NEVER DIVIDED INTO
+#     IT. Normalizing the display scale so the parcel's observed maximum
+#     reads 100 was considered when the 0-100 display scale arrived, and
+#     was REJECTED for exactly the reason this audit exists: the
+#     reference is computed from the parcel's own cells, so the same
+#     ground would grade differently under a redrawn boundary -- the
+#     class of bug the window-referenced TWI work above eliminated. It
+#     would also destroy cross-property comparability, since a 100 on
+#     poor ground and a 100 on excellent ground would read identically.
+#     The relative reading a normalizer would have given is served by
+#     showing this ceiling beside the value instead. See
+#     display_scale.py.
 #
 #   elevation_percentile_of_parcel (production_area_ceiling.py,
 #     water_candidate_zones.py) -- boundary-dependent AND LEGITIMATE, for
@@ -5096,6 +5115,17 @@ def _feet(meters: Optional[float]) -> Optional[float]:
 # IMPERIAL AT THIS BOUNDARY, like every other narrative_data value: acres
 # and feet, never meters.
 #
+# AND 0-100 FOR A SCORE, which is the same kind of rule one step further:
+# every KSOP step will grade zones on one display scale so a reader
+# moving between panels does not re-learn the units, and water is the
+# first step converted (display_scale.py, reusable as-is by the rest).
+# ONE CONVERSION POINT: build_zone_panel() and build_scales() call
+# to_display_scale() and nothing else multiplies. A CONVERTED VALUE SAYS
+# SO WHERE IT IS READ -- the suitability row's `unit` is "/100" -- and
+# nothing stored moves: the zone dict, the feature properties and
+# narrative_data keep their 0-1 values under their own names, so no
+# consumer can mistake one scale for the other.
+#
 # NEGATIVE SPACE IS THE CHEAPEST CUT. Five rows are always present. Every
 # other row FIRES or is absent -- a zone with nothing wrong shows no
 # cautions at all, so a caution that IS there is worth reading. The one
@@ -5231,11 +5261,20 @@ def build_zone_panel(zone: dict, soil_checked: bool, zone_name_by_id: dict) -> l
       2. survey_type    embankment or excavated. Not decoration -- they
                         are different site visits with different
                         equipment, and the rank above is per type.
-      3. suitability    the zone's mean suitability, read against
-                        scales['suitability'] (which carries the
-                        parcel's own observed ceiling per type, because
-                        a 0-1 reading against a theoretical 1.0
-                        overstates what was attainable here).
+      3. suitability    the zone's mean suitability ON THE 0-100 KSOP
+                        DISPLAY SCALE (display_scale.to_display_scale;
+                        `unit` says "/100" so the number cannot be read
+                        as the 0-1 fraction it was converted from),
+                        read against scales['suitability'] -- whose
+                        min/max and per-type parcel_observed_max are
+                        converted through that same helper, so "44"
+                        renders as "44 of 87 attainable here". The
+                        ceiling is there because a reading against a
+                        theoretical 100 overstates what was attainable
+                        on this parcel. THE STORED VALUE IS UNCHANGED:
+                        zone['mean_suitability'] and the feature
+                        property of that name stay 0-1, and nothing
+                        computed reads this row.
       4. rank           read against scales['rank'][type]['count'], so
                         "2" renders as "2 of 3".
       5. water_delivery gravity_feed / pump_required /
@@ -5289,7 +5328,20 @@ def build_zone_panel(zone: dict, soil_checked: bool, zone_name_by_id: dict) -> l
     rows = [
         _panel_row("zone_acres", "area to survey", round(zone["zone_acres"], 1), "acres"),
         _panel_row("survey_type", "survey type", zone["survey_type"]),
-        _panel_row("suitability", "suitability", zone["mean_suitability"]),
+        # THE ONE CONVERTED ROW ON THIS PANEL. Everything else here is
+        # printed in the units it was measured in; suitability is shown
+        # on the KSOP DISPLAY SCALE (display_scale.py) because every
+        # step will grade zones on 0-100 and a reader moving between
+        # steps should not have to re-learn the units. The stored
+        # mean_suitability is untouched 0-1 and the feature carries it
+        # under that name; this row's `unit` is what keeps the two
+        # tellable apart at a glance.
+        _panel_row(
+            "suitability",
+            "suitability",
+            to_display_scale(zone["mean_suitability"]),
+            DISPLAY_SCALE_UNIT,
+        ),
         _panel_row("rank", "rank", zone["rank"]),
     ]
 
@@ -5369,16 +5421,30 @@ def build_scales(result: dict) -> dict:
     scored value crosses the wire without its scale. A "0.53" with no
     range is not a measurement a reader can act on.
 
-    suitability carries min/max AND parcel_observed_max PER TYPE. The
-    theoretical range is 0.0-1.0, but the SOIL criterion's parcel range
-    caps the blend: on a parcel whose best soil scores 0.6, no cell can
-    reach 1.0 no matter how good its slope, catchment and wetness are.
-    Reading 0.53 against 1.0 says "barely half" when the honest reading
-    is "0.53 of an attainable 0.82". The observed max is the max of the
-    type's own gate-masked suitability surface -- the parcel's own
-    ceiling, measured, not assumed. (The reference run: 0.82 embankment
-    / 0.60 excavated.) It is per type because the two surfaces are kept
+    suitability carries min/max AND parcel_observed_max PER TYPE, ALL
+    THREE ON THE 0-100 DISPLAY SCALE (display_scale.py), because all
+    three describe what the PANEL prints and the panel's suitability row
+    is converted. The internal range is 0.0-1.0 and stays that way
+    everywhere it is computed, stored and scored; this block is the
+    reading, and a scale that disagreed with the value it describes
+    would be worse than no scale at all.
+
+    The theoretical range is the full 0-100, but the SOIL criterion's
+    parcel range caps the blend: on a parcel whose best soil scores 0.6,
+    no cell can reach the top no matter how good its slope, catchment
+    and wetness are. Reading 53 against 100 says "barely half" when the
+    honest reading is "53 of an attainable 82". The observed max is the
+    max of the type's own gate-masked suitability surface -- the
+    parcel's own ceiling, MEASURED on the 0-1 surface and converted
+    here, not assumed. (The reference run: 82 embankment / 60
+    excavated.) It is per type because the two surfaces are kept
     separate end to end and are never comparable on one scale.
+
+    THE CEILING IS NOT A NORMALIZER. It sits BESIDE the value as a
+    denominator a reader can see; it is never divided into it. Making
+    the parcel's best cell read 100 was rejected outright -- see
+    display_scale.py for the reasoning (a boundary-dependent reference,
+    and the loss of cross-property comparability).
 
     rank carries the PER-TYPE COUNT, so "rank 2" renders as "2 of 3".
     The count is per type for the same reason the rank is: each type is
@@ -5396,6 +5462,15 @@ def build_scales(result: dict) -> dict:
     composite whose recipe is not on the wire is a number no consumer
     can argue with.
 
+    THE TWO NON-PANEL SCORES BELOW STAY ON 0-1, deliberately, and this
+    block is readable BECAUSE every entry states its own min/max.
+    pinch_drainage_score and compartment_rank_score are not panel rows;
+    they are read in the report and the diagnostic beside the internal
+    values they were computed from, and converting them would put a
+    display number next to the weights and breakpoints that produced it.
+    A consumer never has to guess which scale an entry is on -- it is
+    written in the entry.
+
     ANY SCORED VALUE THE PANEL LATER GAINS ARRIVES WITH ITS SCALE IN
     THIS BLOCK. That is the contract, not a convention -- a number
     without an entry here is a number the panel cannot honestly render.
@@ -5405,12 +5480,19 @@ def build_scales(result: dict) -> dict:
     """
     surfaces = result["surfaces"]
     return {
+        # THE DISPLAY SCALE, not the internal one. All three numbers
+        # here describe what the PANEL prints, and the panel prints
+        # suitability on 0-100 (display_scale.py) -- so min/max are the
+        # display endpoints and the observed ceiling is converted
+        # through the same helper the panel row uses. The ceiling is
+        # MEASURED on the 0-1 surface and converted once, here; no
+        # second site recomputes or re-converts it.
         "suitability": {
-            "min": 0.0,
-            "max": 1.0,
+            "min": DISPLAY_SCALE_MIN,
+            "max": DISPLAY_SCALE_MAX,
             "higher_is_better": True,
             "parcel_observed_max": {
-                survey_type: round(float(np.max(surfaces[survey_type])), 4)
+                survey_type: to_display_scale(float(np.max(surfaces[survey_type])))
                 for survey_type in SURVEY_TYPES
             },
         },
@@ -5498,6 +5580,21 @@ def build_narrative_data(result: dict) -> dict:
       ['scales'] -- how to read every scored value the panel shows
         (build_scales()), production_area_ceiling's `scales` passthrough
         being the precedent.
+
+    THE PANEL'S SUITABILITY ROW AND THE SUITABILITY SCALE ARE THE ONLY
+    CONVERTED VALUES ANYWHERE UNDER THIS FUNCTION, and they are
+    PRESENTATION, not measurement: both are on the 0-100 KSOP display
+    scale (display_scale.py), both carry their scale where they are read
+    ("/100" as the row's unit, min/max in the scale entry). EVERY VALUE
+    IN THE BLOCK ITSELF IS UNCHANGED AND STAYS 0-1 --
+    `mean_suitability`, `max_suitability`, each criterion's
+    `mean_score`, `seed_blend_score`, `pinch_drainage_score`,
+    `compartment_rank_score` -- because this block is the measurement
+    record the report and the diagnostic read, and the panel is a
+    READING of it. The two carry the same fact at two scales on purpose,
+    under two different names, and a consumer can always tell which it
+    holds: a 0-1 value is under its own measured name, a 0-100 value is
+    on a row that says so.
     """
     surviving = result["zones"]
     dropped = result["dropped_zones"]
@@ -5776,6 +5873,21 @@ def _presented_mark(zone: dict) -> str:
 
 
 def summarize_water_survey_areas(result: dict) -> str:
+    """The terminal zone tables.
+
+    THE ZONE MEAN IS PRINTED ON THE 0-100 DISPLAY SCALE, with the "/100"
+    spelled out on every occurrence, SO THE TERMINAL AND THE PANEL AGREE
+    ABOUT THE SAME ZONE. A diagnostic that reports a different number
+    from the one a user is looking at is a diagnostic that costs an hour
+    the first time someone compares them.
+
+    EVERY OTHER SCORE ON THESE LINES STAYS 0-1 and is printed as
+    computed -- the per-criterion means, the seed blend, the drainage
+    score, the rank composite. They sit here next to the weights and
+    breakpoints that produced them (the rank score is printed as its own
+    arithmetic), and a display number in that company would be a number
+    the line's own equation no longer balances. The "/100" on the mean
+    is what keeps the two kinds apart on one line."""
     zones = result["zones"]
     dropped = result["dropped_zones"]
     seeds = result.get("embankment_seeds", [])
@@ -5815,7 +5927,8 @@ def summarize_water_survey_areas(result: dict) -> str:
                 f"{zone['compartment_footprint_acres']} ac valley compartment and a "
                 f"{zone['seed_blend_score']}-scoring seed (pinch width {zone['pinch']['width_m']} m at "
                 f"{zone['pinch']['walk_distance_m']} m downstream), compartment mean "
-                f"{zone['mean_suitability']}, compartment criteria: {criteria_text}{flag_text}"
+                f"{to_display_scale(zone['mean_suitability'])}{DISPLAY_SCALE_UNIT}, "
+                f"compartment criteria: {criteria_text}{flag_text}"
             )
             # THE FILL CLAIM ON ITS OWN LINE, never merged into the
             # anchor sentence above: the two claims are separate
@@ -5834,7 +5947,8 @@ def summarize_water_survey_areas(result: dict) -> str:
             lines.append(
                 f"  - excavated rank {zone['rank']}{_presented_mark(zone)}: zone {zone['id']}, "
                 f"{zone['zone_acres']} ac to survey anchored by {zone['member_acres']} ac "
-                f"({zone['member_count']} member(s)), mean {zone['mean_suitability']}, top criteria: "
+                f"({zone['member_count']} member(s)), mean "
+                f"{to_display_scale(zone['mean_suitability'])}{DISPLAY_SCALE_UNIT}, top criteria: "
                 f"{criteria_text}{flag_text}"
             )
     for zone in dropped:

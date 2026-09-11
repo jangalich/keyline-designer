@@ -20,6 +20,8 @@ import os
 from typing import Optional
 from anthropic import Anthropic
 
+from display_scale import DISPLAY_SCALE_UNIT, to_display_scale
+
 MODEL = "claude-sonnet-5"
 
 SYSTEM_PROMPT = """You are a regenerative farm design consultant specializing in
@@ -596,7 +598,23 @@ def _format_water_survey_areas_summary(water_narrative: Optional[dict]) -> str:
     see that module's docstring) for the report prompt. Same rules as
     every _format_*_summary() here: reads ONLY the pre-digested narrative
     block, never geometry; every number was converted and rounded at the
-    source. ALL survey zones are listed, IN PRESENTATION ORDER, with
+    source.
+
+    ONE EXCEPTION TO "CONVERTED AT THE SOURCE", and it is a
+    PRESENTATION conversion rather than a unit one: the zone's mean and
+    max SUITABILITY are printed on the 0-100 KSOP display scale
+    (display_scale.to_display_scale), with "/100" spelled out on every
+    occurrence, so this prose agrees with the interactive panel and the
+    diagnostic tables about the same zone. narrative_data itself carries
+    the untouched 0-1 values -- it is the measurement record, and the
+    conversion happens here, at the point of rendering, through the one
+    shared helper. NOTHING ELSE ON THESE LINES IS CONVERTED: the
+    per-criterion means, the seed blend score, the drainage score and
+    the rank composite stay 0-1 and are printed beside the breakpoints
+    and weights that produced them, where a display number would not
+    balance against its own recipe.
+
+    ALL survey zones are listed, IN PRESENTATION ORDER, with
     the presented set (the top 2 of each type by rank, backfilled to
     four) named as such and the rule that produced it stated -- the
     prose says what is shown AND what was considered, and an
@@ -741,8 +759,9 @@ def _format_water_survey_areas_summary(water_narrative: Optional[dict]) -> str:
                 f"seed's own criterion signature is {_seed_signature_clause(region)}; the "
                 "COMPARTMENT's per-criterion means over the walked ground -- which deliberately "
                 "includes low-scoring side slopes and the wall reach, that is its job -- are "
-                f"{criteria_clause} (compartment mean {region['mean_suitability']}, max "
-                f"{region['max_suitability']})."
+                f"{criteria_clause} (compartment mean "
+                f"{to_display_scale(region['mean_suitability'])}{DISPLAY_SCALE_UNIT}, max "
+                f"{to_display_scale(region['max_suitability'])}{DISPLAY_SCALE_UNIT})."
             )
             # THE FILL CLAIM, its own sentence. The anchor claim above
             # says whether the storage ground is any good; this says
@@ -802,7 +821,9 @@ def _format_water_survey_areas_summary(water_narrative: Optional[dict]) -> str:
                 f"type{_presented_clause(region)}): {region['zone_acres']} acres to survey, "
                 f"anchored by {region['member_acres']} "
                 f"acres of high-suitability ground ({region['member_count']} member region(s)); member-"
-                f"cell mean suitability {region['mean_suitability']} (max {region['max_suitability']}), "
+                f"cell mean suitability {to_display_scale(region['mean_suitability'])}"
+                f"{DISPLAY_SCALE_UNIT} (max {to_display_scale(region['max_suitability'])}"
+                f"{DISPLAY_SCALE_UNIT}), "
                 f"confidence {region['confidence']}."
             )
             lines.append(

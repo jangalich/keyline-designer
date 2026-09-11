@@ -41,6 +41,7 @@ from rasterio.warp import transform_geom
 from shapely.geometry import box, mapping, shape
 
 import diagnose_water_survey_areas as diag
+import display_scale
 import water_survey_areas as wsa
 from raster_grid import cell_area_acres
 from water_survey_areas import (
@@ -2519,7 +2520,21 @@ for _type in (SURVEY_TYPE_EMBANKMENT, SURVEY_TYPE_EXCAVATED):
     assert _by_key["zone_acres"]["value"] == 1.2, "acres to 1 dp"
     assert _by_key["zone_acres"]["unit"] == "acres"
     assert _by_key["survey_type"]["value"] == _type
-    assert _by_key["suitability"]["value"] == 0.6123 and _by_key["suitability"]["unit"] is None
+    # THE ONE CONVERTED ROW: 0.6123 stored -> 61 shown, on the 0-100
+    # KSOP display scale, with the scale legible in `unit` so the number
+    # cannot be misread as the fraction it came from. The zone dict it
+    # was read from is asserted untouched below.
+    assert _by_key["suitability"]["value"] == display_scale.to_display_scale(0.6123) == 61, (
+        f"the panel's suitability row is the display reading, not the stored fraction: "
+        f"{_by_key['suitability']['value']!r}"
+    )
+    assert _by_key["suitability"]["unit"] == display_scale.DISPLAY_SCALE_UNIT == "/100", (
+        "a converted value must say its scale where it is read -- an unlabelled 61 could be "
+        "either scale, which is worse than either alone"
+    )
+    assert _clean["mean_suitability"] == 0.6123, (
+        "THE REGRESSION THAT MATTERS: the panel READS the zone, it never rescales it"
+    )
     assert _by_key["rank"]["value"] == 1
     assert _by_key["water_delivery"]["value"] == wsa.WATER_DELIVERY_NONE, (
         "no service relationship reports as ITS OWN VALUE -- never a fabricated 0 ft to nowhere"
@@ -2698,12 +2713,40 @@ assert (
 assert _scales["compartment_rank_score"]["weights"] == dict(
     wsa.EMBANKMENT_COMPARTMENT_RANK_WEIGHTS
 ), "a composite without its recipe is a number no consumer can argue with"
-assert _scales["suitability"]["min"] == 0.0 and _scales["suitability"]["max"] == 1.0
-assert _scales["suitability"]["higher_is_better"] is True
+# THE SUITABILITY ENTRY IS ON THE DISPLAY SCALE, because it describes
+# what the panel prints and the panel's row is converted. A scale that
+# disagreed with the value it describes is worse than no scale at all.
+assert _scales["suitability"]["min"] == display_scale.DISPLAY_SCALE_MIN == 0
+assert _scales["suitability"]["max"] == display_scale.DISPLAY_SCALE_MAX == 100
+assert _scales["suitability"]["higher_is_better"] is True, "unchanged by the display scale"
+# THE OTHER TWO SCORED ENTRIES STAY 0-1, and the block stays readable
+# because every entry states its own endpoints. Neither is a panel row;
+# both are read beside the weights and breakpoints that produced them.
+assert _scales["pinch_drainage_score"]["min"] == 0.0
+assert _scales["pinch_drainage_score"]["max"] == 1.0
+assert _scales["compartment_rank_score"]["min"] == 0.0
+assert _scales["compartment_rank_score"]["max"] == 1.0
 for _type in wsa.SURVEY_TYPES:
-    assert _scales["suitability"]["parcel_observed_max"][_type] == round(
-        float(np.max(flat_result["surfaces"][_type])), 4
-    ), "the observed ceiling IS the type's own surface maximum -- measured, not assumed"
+    assert _scales["suitability"]["parcel_observed_max"][_type] == display_scale.to_display_scale(
+        float(np.max(flat_result["surfaces"][_type]))
+    ), (
+        "the observed ceiling IS the type's own surface maximum -- measured, not assumed -- "
+        "converted through the SAME helper the row is, so value and denominator are one scale"
+    )
+    assert isinstance(_scales["suitability"]["parcel_observed_max"][_type], int), (
+        "a 0-100 grade with a decimal point is a 0-1 fraction wearing a costume"
+    )
+    # AND IT IS NOT A NORMALIZER. The ceiling is shown BESIDE the value,
+    # never divided into it: a parcel whose best cell is 0.82 reads 82,
+    # not 100. Normalizing here would make the same ground grade
+    # differently under a redrawn boundary and would flatten a poor
+    # parcel and an excellent one onto the same top mark.
+    assert _scales["suitability"]["parcel_observed_max"][_type] == display_scale.to_display_scale(
+        float(np.max(flat_result["surfaces"][_type]))
+    ) and (
+        float(np.max(flat_result["surfaces"][_type])) >= 1.0
+        or _scales["suitability"]["parcel_observed_max"][_type] < 100
+    ), "the parcel's own maximum is NOT rescaled to 100"
     assert _scales["rank"][_type]["count"] == len(flat_result["zones_by_type"][_type]), (
         "the rank scale's denominator is the per-type surviving count"
     )
@@ -2723,6 +2766,13 @@ print(
     f"never-checked overlap on the wire as null rather than 0. Scales: observed ceilings "
     f"{_scales['suitability']['parcel_observed_max']} match the surface maxima; rank counts match "
     f"the per-type survivor counts."
+)
+print(
+    f"Display scale: the suitability row reads 61{display_scale.DISPLAY_SCALE_UNIT} off a stored "
+    f"0.6123 that the panel leaves untouched, and the scales block's endpoints "
+    f"({_scales['suitability']['min']}-{_scales['suitability']['max']}) and per-type ceilings are "
+    f"the same conversion -- while pinch_drainage_score and compartment_rank_score stay 0-1, each "
+    f"entry stating its own endpoints."
 )
 
 print("\nAll water_survey_areas checks passed.")
