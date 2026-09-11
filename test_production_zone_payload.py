@@ -23,6 +23,7 @@ from rasterio.warp import transform as warp_transform
 from shapely.geometry import Polygon
 
 import api
+from canopy_height_data import CANOPY_SOURCE_LIDAR_HAG, CANOPY_SOURCE_NLCD_TCC
 from exclusion_zones import LAYER_ORDER
 from production_zone_payload import (
     COORDINATE_PRECISION_DP,
@@ -118,13 +119,31 @@ assert json.dumps(PAYLOAD), "payload must be JSON-serialisable as-is"
 types = [layer["type"] for layer in PAYLOAD["exclusion_layers"]]
 assert types == list(LAYER_ORDER), f"expected LAYER_ORDER {list(LAYER_ORDER)}, got {types}"
 
+_BASE_LAYER_KEYS = {"type", "label", "data_available", "geometry_wgs84"}
 for layer in PAYLOAD["exclusion_layers"]:
-    assert set(layer) == {"type", "label", "data_available", "geometry_wgs84"}, layer
+    # ONLY THE CANOPY LAYER may carry a fifth key, and only that one key.
+    # `data_source` names WHICH canopy product the gate ran on -- 'lidar_hag'
+    # (the real measurement) or 'nlcd_tcc' (the 30 m percent-cover fallback,
+    # used only where a parcel has no lidar HAG coverage at all). No other
+    # gate has two sources, so no other gate may grow the key.
+    _allowed = _BASE_LAYER_KEYS | ({"data_source"} if layer["type"] == "canopy" else set())
+    assert set(layer) <= _allowed, layer
+    assert _BASE_LAYER_KEYS <= set(layer), layer
     # data_available is NOT "is the geometry empty" -- a layer that was never
     # checked and a layer that excludes nothing both carry a null geometry.
     assert isinstance(layer["data_available"], bool)
 
-print(f"exclusion layers: {types}")
+# ...and the canopy layer's source is one of the two identifiers, never
+# display prose and never a guess. It is a SEPARATE question from
+# data_available: a fallback parcel's canopy check genuinely ran.
+_canopy_layer = next(layer for layer in PAYLOAD["exclusion_layers"] if layer["type"] == "canopy")
+assert _canopy_layer.get("data_source") in (
+    CANOPY_SOURCE_LIDAR_HAG,
+    CANOPY_SOURCE_NLCD_TCC,
+    None,
+), _canopy_layer.get("data_source")
+
+print(f"exclusion layers: {types} (canopy source: {_canopy_layer.get('data_source')!r})")
 
 
 # --- the eligible union's holes are real and must survive --------------------

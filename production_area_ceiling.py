@@ -71,6 +71,7 @@ from rasterio.warp import transform as warp_transform
 from shapely import contains_xy
 
 from dem_data import get_dem_for_boundary
+from canopy_height_data import canopy_source as canopy_source_of
 from production_area import (
     MAX_PRODUCTION_SLOPE_PCT,
     METERS_PER_FOOT,
@@ -179,6 +180,7 @@ def optimize_production_areas(
     tree_root_zone_mask_utm=_CANOPY_CHECK_UNCHECKED,
     road_exclusion_union_utm=_ROAD_CHECK_UNCHECKED,
     exclusion_result=_EXCLUSION_RESULT_NOT_SUPPLIED,
+    canopy_source=None,
 ) -> dict:
     """
     Pure logic core (no network I/O) chaining STEP 1 (production_area.
@@ -234,6 +236,11 @@ def optimize_production_areas(
         tree_root_zone_mask_utm=tree_root_zone_mask_utm,
         road_exclusion_union_utm=road_exclusion_union_utm,
         exclusion_result=exclusion_result,
+        # Forwarded verbatim, exactly like tree_root_zone_mask_utm beside
+        # it -- this function fetches nothing and so knows nothing about
+        # where the canopy came from; it only carries what it was told. See
+        # compute_step1_eligible_cells()'s own canopy_source docstring.
+        canopy_source=canopy_source,
     )
     trim_result = trim_to_ceiling(step1, dem, boundary_polygon_utm, ceiling_pct)
 
@@ -748,6 +755,11 @@ def build_narrative_data(
     soil_available = bool(step1["soil_data_available"])
     canopy_available = bool(step1["canopy_data_available"])
     road_available = bool(step1["road_data_available"])
+    # NOT a fourth availability flag -- a statement about WHICH canopy
+    # product the (available) canopy gate ran on. See compute_step1_
+    # eligible_cells()'s canopy_source docstring. .get() because a step1
+    # dict built by an older caller predates the key.
+    canopy_source = step1.get("canopy_data_source")
 
     def _mask_acres(mask) -> float:
         return round(int(np.count_nonzero(mask)) * area_per_cell, 1)
@@ -826,6 +838,12 @@ def build_narrative_data(
             "boundary_setback_feet": _round1(PRODUCTION_BOUNDARY_SETBACK_METERS / METERS_PER_FOOT),
             "soil_data_available": soil_available,
             "canopy_data_available": canopy_available,
+            # 'lidar_hag' | 'nlcd_tcc' | None. A report reading only
+            # canopy_data_available cannot say that a TCC parcel was
+            # analysed at 30 m under an any-nonzero-cover-is-canopy rule --
+            # that some ground here is marked wooded that a walk would show
+            # as two trees in a field. This is the field that lets it.
+            "canopy_data_source": canopy_source,
             "road_data_available": road_available,
         },
         "patches": [
@@ -1005,6 +1023,12 @@ def identify_optimized_production_areas(
         tree_root_zone_mask_utm=tree_root_zone_mask_utm,
         road_exclusion_union_utm=road_exclusion_union_utm,
         exclusion_result=exclusion_result,
+        # Known here only when the caller HANDED us the canopy dict -- the
+        # self-fetch branch above consumes it inside get_required_tree_
+        # root_zone_mask_utm() and only the mask comes back. None then, and
+        # "not recorded" is the honest answer. Same reasoning as
+        # production_area.identify_production_areas()'s own call.
+        canopy_source=canopy_source_of(canopy_height),
     )
 
     scored = score_production_areas(

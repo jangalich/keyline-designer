@@ -136,7 +136,22 @@ from shapely.geometry import Point, Polygon, box, mapping, shape
 from shapely.ops import unary_union
 from shapely.prepared import prep
 
-from canopy_height_data import TREE_ROOT_ZONE_BUFFER_METERS, get_canopy_height_for_boundary, tree_root_zone_mask
+# tree_root_zone_mask is DELIBERATELY NOT IMPORTED HERE any more. This
+# module no longer calls it: _fetch_tree_root_zone_mask_utm() now goes
+# through root_zone_mask_from_canopy(), which dispatches on the canopy
+# dict's own source (lidar HAG's height threshold, or the NLCD TCC
+# fallback's any-nonzero-cover rule). Leaving the old re-export in place
+# would let a probe keep patching `production_area.tree_root_zone_mask`
+# and silently observe nothing, since the real lookup now happens in
+# canopy_height_data's namespace -- an AttributeError is the correct,
+# loud outcome for such a patch. _canopy_override_probe.py patches the
+# leaf binding instead.
+from canopy_height_data import (
+    TREE_ROOT_ZONE_BUFFER_METERS,
+    canopy_source as canopy_source_of,
+    get_canopy_height_for_boundary,
+    root_zone_mask_from_canopy,
+)
 from farm_roads_data import ROAD_EXCLUSION_BUFFER_METERS, get_road_exclusion_union_utm
 from production_suitability import ASPECT_FACTOR_WEIGHT, SLOPE_FACTOR_WEIGHT
 from raster_grid import (
@@ -538,7 +553,13 @@ def _fetch_tree_root_zone_mask_utm(
         canopy = get_canopy_height_for_boundary(boundary_coordinates, dem)
     if canopy is None:
         return None
-    return tree_root_zone_mask(canopy["array"], canopy["resolution_meters"], buffer_meters=buffer_meters)
+    # SOURCE-DISPATCHING, not a bare threshold. root_zone_mask_from_canopy()
+    # reads the dict's own 'source' and applies that source's own canopy
+    # test -- HAG's height threshold, or the TCC fallback's any-nonzero-
+    # cover rule -- through the same dilation at the same buffer. A canopy
+    # dict with no 'source' key (every offline fixture in this repo) reads
+    # as lidar HAG, which is what it is, so nothing below changes for it.
+    return root_zone_mask_from_canopy(canopy, buffer_meters=buffer_meters)
 
 
 def get_required_tree_root_zone_mask_utm(
@@ -578,7 +599,7 @@ def get_required_tree_root_zone_mask_utm(
     canopy_height_data.get_canopy_height_for_boundary() takes) and calls
     _fetch_tree_root_zone_mask_utm().
 
-    Raises RuntimeError if no HAG coverage exists for this boundary at
+    Raises RuntimeError if no canopy coverage exists for this boundary at
     all -- "can't verify this is free of tree cover" is treated as a hard
     failure here, not a lower-confidence result to hand back with a
     caveat (see this module's own identify_production_areas() docstring
@@ -587,6 +608,17 @@ def get_required_tree_root_zone_mask_utm(
     exists but is too sparse to trust -- is left to propagate up
     UNCAUGHT, unchanged: this function does no exception handling beyond
     the None-vs-RuntimeError translation.
+
+    THE NLCD TCC FALLBACK REQUIRED NO CHANGE TO THIS FUNCTION'S BODY, and
+    this paragraph is the only edit it took. The fallback happens one
+    level below, inside canopy_height_data.get_canopy_height_for_boundary
+    (), which returns a canopy dict either way; the mask derivation
+    dispatches on that dict's own 'source'. So "no HAG coverage" is no
+    longer what None means here -- None now means NEITHER lidar HAG NOR
+    NLCD Tree Canopy Cover has anything for this boundary -- and the
+    RuntimeError is raised on exactly that, unchanged. The gate did not
+    become softer: a parcel with no canopy source at all still refuses to
+    produce a production zone.
     """
     xs, ys = boundary_polygon_utm.exterior.coords.xy
     lons, lats = warp_transform(dem["crs"], "EPSG:4326", list(xs), list(ys))
@@ -693,7 +725,8 @@ def _gates_from_exclusion_result(
     (exclusion_zones publishes both on `wire`, as numbers, for exactly
     this kind of check) must match what this call was asked for.
 
-    Returns the six masks/grids and three availability flags STEP 1 would
+    Returns the six masks/grids, three availability flags and the canopy
+    source STEP 1 would
     otherwise have derived itself. Everything else STEP 1 returns
     (aspect_deg, the per-cell factors, the source labels, the carved-acres
     bookkeeping) is a pure derivation of these plus the DEM, is not
@@ -736,6 +769,11 @@ def _gates_from_exclusion_result(
             "hydric_hit": layers["hydric"]["mask"],
             "road_hit": layers["roads"]["mask"],
             "canopy_data_available": bool(layers["canopy"]["data_available"]),
+            # .get(), not [], on purpose: an exclusion result built before
+            # the canopy layer recorded a source is still a valid exclusion
+            # result, and "not recorded" is a real answer. A KeyError here
+            # would reject it over a field no gate depends on.
+            "canopy_data_source": layers["canopy"].get("data_source"),
             "soil_data_available": bool(layers["hydric"]["data_available"]),
             "road_data_available": bool(layers["roads"]["data_available"]),
         }
@@ -766,6 +804,7 @@ def compute_step1_eligible_cells(
     boundary_setback_meters: float = PRODUCTION_BOUNDARY_SETBACK_METERS,
     road_exclusion_union_utm=_ROAD_CHECK_UNCHECKED,
     exclusion_result=_EXCLUSION_RESULT_NOT_SUPPLIED,
+    canopy_source=None,
 ) -> dict:
     """
     STEP 1 of the consolidated production-zone pipeline -- computed ONCE
@@ -823,6 +862,21 @@ def compute_step1_eligible_cells(
     that outcome to the sentinel too (see production_area.
     _fetch_tree_root_zone_mask_utm()).
 
+    canopy_source: which canopy product tree_root_zone_mask_utm was derived
+    from -- canopy_height_data.CANOPY_SOURCE_LIDAR_HAG (the real
+    measurement) or CANOPY_SOURCE_NLCD_TCC (the 30 m percent-cover
+    fallback, used only where a parcel has no lidar HAG coverage at all).
+    Returned verbatim as `canopy_data_source`; None means the caller did
+    not record one, which is "not recorded", NOT "HAG". PURELY
+    INFORMATIONAL -- nothing in this function branches on it, and it
+    cannot change a single cell of any returned mask. It exists because
+    canopy_data_available cannot express it: a TCC parcel's canopy check
+    genuinely RAN (canopy_data_available is True) but ran under an
+    any-nonzero-cover-is-canopy rule over 30 m pixels, so some ground is
+    marked wooded that a walk would show as two trees in a field. Ignored
+    on the exclusion_result path, which reads the source off the exclusion
+    result's own canopy layer instead.
+
     boundary_setback_meters: shrinks (via a plain negative buffer) the
     polygon used ONLY for this function's own on-parcel cell-center test
     below -- boundary_polygon_utm itself is untouched and still what
@@ -876,6 +930,11 @@ def compute_step1_eligible_cells(
                                                # gate also rejected). Already computed
                                                # below -- exposing it adds no work.
             'canopy_data_available': bool,   # whether the woody-vegetation check actually ran
+            'canopy_data_source': str|None,  # WHICH canopy product it ran on:
+                                               # 'lidar_hag', 'nlcd_tcc', or None
+                                               # for "not recorded". Not the same
+                                               # question as data_available -- see
+                                               # the canopy_source parameter above.
             'tree_root_zone_hit': np.ndarray[bool],  # cells excluded by the canopy gate specifically
             'road_data_available': bool,     # whether the existing-road check actually ran
             'road_hit': np.ndarray[bool],    # cells excluded by the existing-road gate specifically
@@ -909,6 +968,12 @@ def compute_step1_eligible_cells(
         soil_data_available = gates["soil_data_available"]
         canopy_data_available = gates["canopy_data_available"]
         road_data_available = gates["road_data_available"]
+        # The exclusion result's own recorded source WINS over any
+        # canopy_source argument on this path, for the same reason the five
+        # gate masks do: on this path the exclusion result is the producer
+        # of the canopy answer, and a caller-supplied source describing a
+        # different fetch would be labelling someone else's mask.
+        canopy_data_source = gates["canopy_data_source"]
     else:
         slope_pct = compute_slope_percent(array, resolution)
 
@@ -938,6 +1003,8 @@ def compute_step1_eligible_cells(
                     hydric_hit[r, c] = True
 
         canopy_data_available = tree_root_zone_mask_utm is not _CANOPY_CHECK_UNCHECKED
+        # A gate that never ran has no source, whatever the caller passed.
+        canopy_data_source = canopy_source if canopy_data_available else None
         tree_root_zone_hit = np.zeros((rows, cols), dtype=bool)
         if canopy_data_available:
             tree_root_zone_hit = slope_only_mask & tree_root_zone_mask_utm
@@ -1015,6 +1082,7 @@ def compute_step1_eligible_cells(
         "soil_data_available": soil_data_available,
         "hydric_hit": hydric_hit,
         "canopy_data_available": canopy_data_available,
+        "canopy_data_source": canopy_data_source,
         "tree_root_zone_hit": tree_root_zone_hit,
         "road_data_available": road_data_available,
         "road_hit": road_hit,
@@ -1632,6 +1700,14 @@ def identify_production_areas(
         tree_root_zone_mask_utm=tree_root_zone_mask_utm,
         road_exclusion_union_utm=road_exclusion_union_utm,
         exclusion_result=exclusion_result,
+        # Only knowable here when the caller HANDED us the canopy dict. On
+        # the self-fetch path above the dict is consumed inside
+        # get_required_tree_root_zone_mask_utm() and only the mask comes
+        # back, so the source is genuinely not recorded -- and saying so is
+        # correct, where defaulting it to "lidar_hag" would assert a fact
+        # this call does not have. Ignored entirely when exclusion_result
+        # is supplied.
+        canopy_source=canopy_source_of(canopy_height),
     )
     return cluster_and_gate(step1["eligible_mask"], dem, boundary_polygon_utm, step1, min_area_acres)
 

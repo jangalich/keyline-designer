@@ -197,12 +197,24 @@ class LayerFetchError(Exception):
     server-side; what crosses the wire is the layer's identity and nothing
     else, because a raw rasterio or STAC traceback in a user-facing panel
     tells the reader nothing they can act on.
+
+    `reason` (optional) SEPARATES "this source is down" from "this source
+    has no data for your land" -- the same two identifiers parcel_data.
+    ParcelDataIncompleteError defines, reused here rather than redefined so
+    one wire contract covers both raise paths. Only the second is permanent
+    for a boundary, and only the second makes a retry pointless; a message
+    that cannot tell them apart tells a user to retry a gap. None when the
+    raise site does not know.
     """
 
-    def __init__(self, layer: str, label: str):
+    REASON_SOURCE_UNAVAILABLE = "source_unavailable"
+    REASON_NO_DATA_FOR_PARCEL = "no_data_for_parcel"
+
+    def __init__(self, layer: str, label: str, reason: Optional[str] = None):
         super().__init__(f"{layer} layer unavailable")
         self.layer = layer
         self.label = label
+        self.reason = reason
 
 
 # The two layers allowed to hard-fail this payload, each as the exact
@@ -279,7 +291,17 @@ def build_production_zone_payload(
             'eligible_union':    GeoJSON MultiPolygon | None,
             'exclusion_layers':  [ {type, label, data_available,
                                     geometry_wgs84}, ... ]  -- five, in
-                                 exclusion_zones.LAYER_ORDER,
+                                 exclusion_zones.LAYER_ORDER. The CANOPY
+                                 entry alone may carry a sixth key,
+                                 `data_source` ('lidar_hag' | 'nlcd_tcc'),
+                                 naming which canopy product that gate ran
+                                 on -- only canopy has two sources. It is
+                                 NOT data_available restated: a parcel on
+                                 the NLCD TCC fallback had its canopy check
+                                 genuinely run, but at 30 m under an
+                                 any-nonzero-cover-is-canopy rule, so some
+                                 ground is marked wooded that a walk would
+                                 show as two trees in a field.
             'suggested_zones':   GeoJSON FeatureCollection,
             'zones':             [ per-zone readout dicts, rank order, each
                                    carrying BOTH `id` (the patch's bare
@@ -329,12 +351,21 @@ def build_production_zone_payload(
         try:
             canopy_height = get_canopy_height_for_boundary(boundary_coordinates, dem)
         except Exception as exc:
-            raise LayerFetchError(*LAYER_CANOPY) from exc
+            # The fetch RAISED -- a source that did not answer (retries
+            # exhausted, an asset that would not open), which a later
+            # attempt may well get past. The opposite case is the None
+            # check just below.
+            raise LayerFetchError(*LAYER_CANOPY, reason=LayerFetchError.REASON_SOURCE_UNAVAILABLE) from exc
         if canopy_height is None:
-            # No HAG coverage at all for this boundary. A genuine no-data
-            # outcome, and a hard failure by the same pipeline rule that
-            # makes the canopy gate mandatory -- not something to degrade on.
-            raise LayerFetchError(*LAYER_CANOPY)
+            # NEITHER canopy source has coverage for this boundary -- the
+            # fetch already tried the NLCD TCC fallback before returning
+            # None (canopy_height_data._tree_canopy_cover_fallback()). A
+            # genuine no-data outcome, and a hard failure by the same
+            # pipeline rule that makes the canopy gate mandatory -- not
+            # something to degrade on. REASON_NO_DATA_FOR_PARCEL, not
+            # SOURCE_UNAVAILABLE: nothing was down, and retrying this
+            # boundary will produce the same answer forever.
+            raise LayerFetchError(*LAYER_CANOPY, reason=LayerFetchError.REASON_NO_DATA_FOR_PARCEL)
 
     exclusion = identify_exclusion_zones(
         boundary_coordinates,

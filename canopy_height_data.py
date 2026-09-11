@@ -32,19 +32,44 @@ cell-for-cell aligned with production_area.py's slope/hydric masks:
 cells() already builds can be OR'd together index-for-index with no
 further alignment work.
 
-NO-COVERAGE CONVENTION: returns None (not an exception) if no `3dep-
-lidar-hag` tile intersects this boundary, or if every clipped/reprojected
-pixel is nodata -- 3DEP lidar coverage is real but not yet nationwide, so
-"no HAG data here" is a genuine outcome, the same "no scene met the
-filter" / "no API key" convention imagery_data.py and irradiance_data.py
-already use for THEIR OWN "nothing usable was found" cases. Unlike those
-modules, though, this is NOT a soft, degrade-and-continue signal for
-production_area.py's woody-vegetation gate: the caller there treats a
-None result as a hard failure (raises RuntimeError) rather than
-proceeding without the check -- see production_area.identify_production_
-areas()'s own docstring for why. Coverage that DOES exist but is too
-sparse to trust is a separate, real exception (CanopyCoverageIncomplete
-Error below), not folded into the None case.
+NO-COVERAGE CONVENTION, AND THE FALLBACK BELOW IT: where this module
+used to return None -- no `3dep-lidar-hag` tile intersecting the
+boundary, or every clipped/reprojected pixel nodata -- it now falls back
+to NLCD Tree Canopy Cover (canopy_cover_data.py) and returns THAT dict
+instead, tagged `source: CANOPY_SOURCE_NLCD_TCC`. None is still returned,
+with the same meaning and the same hard-fail consequence upstream, when
+the fallback ALSO has nothing for this parcel.
+
+WHY A FALLBACK AT ALL. 3DEP lidar coverage is near-complete nationally,
+but Planetary Computer's HAG collection is a DERIVED product keyed per
+acquisition project, built from whatever snapshot Microsoft processed --
+its coverage is narrower than 3DEP's own, and that is the gap. Confirmed
+on a real Maryland property: no `3dep-lidar-hag` item, and no
+`3dep-lidar-dsm` either, so deriving HAG from DSM-DTM does not help. The
+whole 3DEP lidar group is absent for that project area. Canopy is a
+MANDATORY layer, so before the fallback such a parcel could not be used
+at all -- the user could not draw a boundary, let alone reach a step --
+and no retry would ever help, because the absence is permanent for that
+parcel.
+
+ABSENT IS NOT UNAVAILABLE. Only ABSENCE falls back. A HAG fetch that
+RAISES (retries exhausted, an asset that would not open) is a source that
+did not answer; that exception still propagates uncaught, and no fallback
+runs for it. See _tree_canopy_cover_fallback().
+
+FALLBACK ONLY, NEVER A SECOND GATE. TCC is used only where HAG is
+absent. It does NOT union with HAG where both exist -- HAG is the better
+measurement, and mixing them would mean no parcel is analysed by a single
+consistent rule. A parcel gets ONE canopy source and the record says
+which: canopy_source() reads it off the dict, and it surfaces as the
+`canopy_data_source` flag.
+
+Coverage that DOES exist but is too sparse to trust is a separate, real
+exception (CanopyCoverageIncompleteError below), NOT folded into either
+the None case or the fallback: a tile that genuinely covers this parcel
+and reads mostly-nodata is a HAG measurement that went wrong, not an
+absent one, and swapping in a different product would hide it. That case
+is unchanged by this branch.
 
 RETRY BUDGET: max_retries defaults to 5 (not the 2 most other network
 layers in this pipeline use) on both _search_hag_items() and
@@ -332,6 +357,49 @@ def _on_parcel_nan_fraction(hag_on_grid: np.ndarray, boundary_coordinates: list,
     return on_parcel_nan_count / on_parcel_count, on_parcel_count
 
 
+def _tree_canopy_cover_fallback(
+    boundary_coordinates: list, dem: dict, max_retries: int = 5
+) -> Optional[dict]:
+    """
+    THE FALLBACK, AND THE ONLY PLACE IT IS REACHED FROM. Called by
+    get_canopy_height_for_boundary() at each of its three HAG-IS-ABSENT
+    points and nowhere else.
+
+    ABSENT, NOT UNAVAILABLE -- the distinction this whole function turns
+    on. A HAG fetch that RAISES (retries exhausted, a signed URL that
+    would not open) is a source that did not answer, which may answer on
+    the next try; that exception propagates uncaught and no fallback runs
+    for it. Absence -- no item for this project area, or an item whose
+    every pixel over this boundary is nodata -- is permanent for this
+    parcel, and no number of retries changes it. Only absence falls back.
+
+    NOT A SECOND GATE. This runs only where HAG produced nothing; where
+    HAG produced anything at all, this is never called and the two are
+    never unioned (see the module docstring's FALLBACK section, and
+    canopy_cover_data.py's).
+
+    Returns the TCC canopy dict, or None when TCC has nothing usable here
+    either -- in which case the caller has no canopy source at all and
+    the layer hard-fails upstream (parcel_data.py, production_zone_
+    payload.py). Deliberately does NOT swallow a TCC request failure: a
+    raise from the fallback is still a real failure and is reported as
+    one.
+
+    THE CALLER'S OWN RETRY BUDGET is threaded through, not a second one
+    declared here. By the time this runs, TCC is the LAST canopy source
+    there is for this parcel, so it is worth exactly what the HAG search
+    was worth -- see the module docstring's RETRY BUDGET section for why
+    that is 5 and not the 2 most layers use. The attempts land in this
+    layer's own ledger (fetch_attempts.py), which is correct: a fallback
+    fetch is part of what fetching the canopy layer cost.
+    """
+    from canopy_cover_data import get_tree_canopy_cover_for_boundary
+
+    return get_tree_canopy_cover_for_boundary(
+        boundary_coordinates, dem, max_retries=max_retries
+    )
+
+
 @fetch_attempts.publishes
 def get_canopy_height_for_boundary(
     boundary_coordinates: list,
@@ -345,13 +413,24 @@ def get_canopy_height_for_boundary(
     property (reused here, not re-fetched -- this module needs it only as
     the target grid definition), finds the best-covering 3dep-lidar-hag
     tile, clips it to the boundary, and reprojects the result onto the
-    DEM's own grid.
+    DEM's own grid. WHERE THERE IS NO SUCH TILE, falls back to NLCD Tree
+    Canopy Cover -- see _tree_canopy_cover_fallback() and the module
+    docstring.
 
-    Returns:
+    THE RETURN IS ONE OF TWO SHAPES, and 'source' is what tells them
+    apart. Never read 'array' without reading 'source' first: the two
+    arrays are not the same kind of number, and thresholding one the
+    other's way is a silent unit error. Use canopy_source() to read it
+    and root_zone_mask_from_canopy() to derive a mask, rather than
+    branching at each consumer.
+
+    On the lidar HAG path:
         {
             'array': np.ndarray, shape matching dem['array'], float32
-                     meters height-above-ground, np.nan where no HAG
+                     METERS HEIGHT-ABOVE-GROUND, np.nan where no HAG
                      coverage exists for that cell,
+            'units': 'meters_above_ground',
+            'source': CANOPY_SOURCE_LIDAR_HAG,
             'resolution_meters': dem['resolution_meters'],
             'origin_x': dem['origin_x'],
             'origin_y': dem['origin_y'],
@@ -359,14 +438,20 @@ def get_canopy_height_for_boundary(
             'source_item_id': the STAC item id the data came from,
         }
 
-    Returns None if no 3dep-lidar-hag tile intersects this boundary at
-    all, or if the best-covering tile's clipped/reprojected result has no
-    valid (non-nodata) pixels anywhere -- a genuine "no lidar HAG coverage
-    here" outcome (3DEP lidar coverage is real but not yet nationwide)
-    rather than a failed request, same convention imagery_data.get_
-    imagery_summary_for_boundary() and irradiance_data.get_regional_
-    irradiance_baseline() already use for their own "nothing usable was
-    found" cases.
+    On the NLCD TCC fallback path: canopy_cover_data.get_tree_canopy_
+    cover_for_boundary()'s own dict, verbatim -- same grid keys, but
+    'array' is PERCENT COVER 0-100, 'units' is 'percent_cover' and
+    'source' is CANOPY_SOURCE_NLCD_TCC. See that function for the rest.
+
+    Returns None ONLY when BOTH sources have nothing for this boundary:
+    no 3dep-lidar-hag tile intersects it (or the best-covering tile's
+    clipped/reprojected result has no valid pixels anywhere) AND the TCC
+    fallback has no usable cover here either. A genuine "no canopy data
+    exists for this land" outcome rather than a failed request -- same
+    convention imagery_data.get_imagery_summary_for_boundary() and
+    irradiance_data.get_regional_irradiance_baseline() already use for
+    their own "nothing usable was found" cases, and still a hard failure
+    upstream (parcel_data.py), because canopy did not become optional.
 
     Raises CanopyCoverageIncompleteError if coverage exists (so it isn't
     the None case above) but leaves more than MAX_ACCEPTABLE_CANOPY_
@@ -383,7 +468,9 @@ def get_canopy_height_for_boundary(
 
     items = _search_hag_items(polygon, max_retries=max_retries)
     if not items:
-        return None
+        # No HAG ITEM AT ALL for this project area -- the Maryland case.
+        # Permanent for this parcel, not a transient outage. Fall back.
+        return _tree_canopy_cover_fallback(boundary_coordinates, dem, max_retries)
 
     item = items[0]  # already ranked best-covering-first
     href = item.assets[HAG_ASSET_KEY].href
@@ -394,11 +481,13 @@ def get_canopy_height_for_boundary(
 
     valid = (~np.isnan(clipped)) & (~np.isclose(clipped, nodata))
     if not np.any(valid):
-        return None
+        # A tile intersects, but every pixel over this boundary is nodata:
+        # HAG is ABSENT here in the only sense that matters. Fall back.
+        return _tree_canopy_cover_fallback(boundary_coordinates, dem, max_retries)
 
     hag_on_grid = _reproject_to_dem_grid(clipped, clipped_transform, clipped_crs, nodata, dem)
     if not np.any(~np.isnan(hag_on_grid)):
-        return None
+        return _tree_canopy_cover_fallback(boundary_coordinates, dem, max_retries)
 
     nan_fraction, on_parcel_count = _on_parcel_nan_fraction(hag_on_grid, boundary_coordinates, dem)
     if on_parcel_count > 0 and nan_fraction * 100 > MAX_ACCEPTABLE_CANOPY_NODATA_PCT:
@@ -415,6 +504,13 @@ def get_canopy_height_for_boundary(
         "origin_x": dem["origin_x"],
         "origin_y": dem["origin_y"],
         "crs": dem["crs"],
+        # THE SOURCE, ON THE DICT ITSELF. Every consumer that needs to know
+        # a parcel is running on the coarser fallback reads it from here
+        # (via canopy_source()); nothing infers it from which keys are
+        # present. 'units' names what 'array' holds, because the fallback's
+        # array holds something else entirely.
+        "source": CANOPY_SOURCE_LIDAR_HAG,
+        "units": "meters_above_ground",
         "source_item_id": item.id,
     }
 
@@ -456,10 +552,95 @@ def tree_root_zone_mask(
     return binary_dilate(tree_cell_mask, radius_cells)
 
 
-def summarize_canopy_height(canopy: Optional[dict]) -> str:
-    """Plain-language summary, same purpose as dem_data.summarize_dem()."""
+# --- WHICH SOURCE A PARCEL'S CANOPY CAME FROM --------------------------
+#
+# Two values, and there will not quietly be a third: a parcel gets ONE
+# canopy source (see the module docstring's FALLBACK section -- TCC does
+# NOT union with HAG where both exist) and the record says which.
+#
+# STABLE IDENTIFIERS, not display prose. These are what the
+# `canopy_data_source` flag carries onto the wire, into the diagnostics
+# sweep (run_diagnostics.py records any key ending `_source`) and into
+# exclusion_zones' canopy layer. A consumer branches on these strings;
+# the wording a user reads is the frontend's, and is not written in this
+# branch.
+CANOPY_SOURCE_LIDAR_HAG = "lidar_hag"
+CANOPY_SOURCE_NLCD_TCC = "nlcd_tcc"
+
+
+def canopy_source(canopy: Optional[dict]) -> Optional[str]:
+    """
+    Which source a canopy dict came from: CANOPY_SOURCE_LIDAR_HAG or
+    CANOPY_SOURCE_NLCD_TCC. None for a None canopy (no source at all).
+
+    A dict with NO 'source' key reads as lidar HAG. That is not leniency
+    -- it is the only correct reading: every canopy dict predating the
+    fallback is a HAG dict, including the fixtures a dozen offline tests
+    build by hand, and the TCC path always sets the key explicitly.
+    """
     if not canopy:
-        return "No USGS 3DEP lidar height-above-ground coverage was found for this property."
+        return None
+    return canopy.get("source", CANOPY_SOURCE_LIDAR_HAG)
+
+
+def root_zone_mask_from_canopy(
+    canopy: dict,
+    buffer_meters: float = TREE_ROOT_ZONE_BUFFER_METERS,
+) -> np.ndarray:
+    """
+    THE ONE PLACE A CANOPY DICT BECOMES A ROOT-ZONE MASK, dispatching on
+    which source it came from. Network-free.
+
+    This exists because the two sources' 'array' values are not the same
+    KIND of number: HAG's is metres of height above ground (thresholded
+    at CANOPY_HEIGHT_THRESHOLD_METERS), TCC's is percent cover 0-100
+    (any nonzero value is canopy). Thresholding one the other's way is a
+    unit error that would produce a plausible-looking mask -- 4.5 read as
+    a percentage marks almost everything wooded; 15 read as metres marks
+    almost nothing. Dispatching here, once, is what keeps that impossible
+    for every consumer.
+
+    Both branches apply the SAME buffer through the SAME dilation, so the
+    two masks differ by the measurement and by nothing else.
+
+    Raises ValueError on an unrecognised source rather than guessing --
+    a canopy dict this function cannot read is not something to derive a
+    mandatory exclusion gate from.
+    """
+    source = canopy_source(canopy)
+    if source == CANOPY_SOURCE_LIDAR_HAG:
+        return tree_root_zone_mask(
+            canopy["array"], canopy["resolution_meters"], buffer_meters=buffer_meters
+        )
+    if source == CANOPY_SOURCE_NLCD_TCC:
+        from canopy_cover_data import canopy_cover_root_zone_mask
+
+        return canopy_cover_root_zone_mask(
+            canopy["array"], canopy["resolution_meters"], buffer_meters=buffer_meters
+        )
+    raise ValueError(
+        f"canopy dict carries an unrecognised source {source!r} -- expected "
+        f"{CANOPY_SOURCE_LIDAR_HAG!r} or {CANOPY_SOURCE_NLCD_TCC!r}"
+    )
+
+
+def summarize_canopy_height(canopy: Optional[dict]) -> str:
+    """Plain-language summary, same purpose as dem_data.summarize_dem().
+    SOURCE-AWARE: a TCC fallback dict is summarized by canopy_cover_data.
+    summarize_tree_canopy_cover(), which reports percent cover, the
+    254/255 counts and the blockiness -- summarizing it in metres of
+    height-above-ground would be describing a measurement that was never
+    taken."""
+    if not canopy:
+        return (
+            "No canopy coverage was found for this property -- neither USGS 3DEP lidar "
+            "height-above-ground nor the NLCD Tree Canopy Cover fallback has data here."
+        )
+
+    if canopy_source(canopy) == CANOPY_SOURCE_NLCD_TCC:
+        from canopy_cover_data import summarize_tree_canopy_cover
+
+        return summarize_tree_canopy_cover(canopy)
 
     array = canopy["array"]
     valid = array[~np.isnan(array)]

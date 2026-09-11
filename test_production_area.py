@@ -1264,7 +1264,26 @@ _X_ARRAY_KEYS = (
     "tree_root_zone_hit",
     "road_hit",
 )
-_X_FLAG_KEYS = ("soil_data_available", "canopy_data_available", "road_data_available")
+# The three availability flags, plus the canopy SOURCE. The source is not a
+# fourth availability flag: it says WHICH canopy product the (available)
+# canopy gate ran on -- 'lidar_hag', or 'nlcd_tcc' where a parcel has no
+# lidar HAG coverage at all and fell back to NLCD Tree Canopy Cover. It is
+# enumerated here for the reason every other key is: so a key added to
+# STEP 1's contract cannot go unverified across the override.
+#
+# ON THIS FIXTURE IT IS None ON BOTH PATHS, and that is the correct value
+# rather than a gap in the check: the exclusion result above is built from
+# a BARE canopy mask (_X_CANOPY) with no canopy dict behind it, so neither
+# side ever saw a source to record, and "not recorded" is a real answer
+# distinct from "lidar_hag". Both paths agreeing on it is the property
+# being tested here; that a REAL source survives both paths is covered on
+# real dict fixtures in test_canopy_cover_fallback.py's check 3.
+_X_FLAG_KEYS = (
+    "soil_data_available",
+    "canopy_data_available",
+    "road_data_available",
+    "canopy_data_source",
+)
 
 assert set(_x_consumed) == set(_x_self_computed), (
     "the override path must return the SAME KEYS -- a missing key is a downstream KeyError several frames away"
@@ -1287,6 +1306,10 @@ for _key in _X_ARRAY_KEYS:
     )
 for _key in _X_FLAG_KEYS:
     assert _x_consumed[_key] == _x_self_computed[_key], f"{_key}: {_x_consumed[_key]} vs {_x_self_computed[_key]}"
+assert _x_consumed["canopy_data_available"] is True and _x_consumed["canopy_data_source"] is None, (
+    "on a bare-mask fixture the canopy gate RAN (available) with no source recorded -- the two are "
+    "different questions and neither may be inferred from the other"
+)
 
 # The three masks whose bytes are what everything downstream is built from,
 # compared as BYTES rather than as values -- an equal-but-recomputed array
@@ -1302,7 +1325,8 @@ print(
     f"hydric {int(_X_EXCLUSION['layers']['hydric']['mask'].sum())}, "
     f"roads {int(_X_EXCLUSION['layers']['roads']['mask'].sum())}, "
     f"setback {int(_X_EXCLUSION['layers']['setback']['mask'].sum())}), all "
-    f"{len(_X_ARRAY_KEYS)} returned arrays and all {len(_X_FLAG_KEYS)} availability flags are identical to "
+    f"{len(_X_ARRAY_KEYS)} returned arrays and all {len(_X_FLAG_KEYS)} flags (three availability plus the "
+    f"canopy source) are identical to "
     f"the self-computed path; eligible_mask is byte-identical at "
     f"{int(_x_consumed['eligible_mask'].sum())} cells."
 )

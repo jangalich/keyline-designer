@@ -160,10 +160,16 @@ _STEP1_ORIGINAL_PARAMS = [
     "boundary_setback_meters",
     "road_exclusion_union_utm",
 ]
+# APPENDED SINCE, each for the same reason and under the same rule.
+# canopy_source came with the NLCD TCC fallback: STEP 1 reports WHICH
+# canopy product the gate ran on, which is a different question from
+# whether it ran (canopy_data_available), and the answer has to be told
+# to it because the mask arrives as a bare boolean array.
+_STEP1_APPENDED_PARAMS = ["exclusion_result", "canopy_source"]
 _step1_params = list(inspect.signature(compute_step1_eligible_cells).parameters)
-assert _step1_params == _STEP1_ORIGINAL_PARAMS + ["exclusion_result"], (
+assert _step1_params == _STEP1_ORIGINAL_PARAMS + _STEP1_APPENDED_PARAMS, (
     "compute_step1_eligible_cells() must take its seven original parameters, unchanged and in their "
-    "original positions, with exclusion_result APPENDED -- inserting a parameter would silently "
+    "original positions, with every later parameter APPENDED -- inserting one would silently "
     f"re-bind every positional caller. Got: {_step1_params}"
 )
 # NOT None. "Not supplied" and "supplied, and the answer is nothing" are
