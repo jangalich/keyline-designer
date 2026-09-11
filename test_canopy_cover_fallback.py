@@ -10,7 +10,8 @@ session -- a parcel with no coverage cannot be used at all, the user
 cannot draw a boundary, let alone reach a step. Planetary Computer's
 `3dep-lidar-hag` is a DERIVED product keyed per acquisition project, so
 its coverage is narrower than 3DEP's own near-complete national lidar.
-Confirmed by the user on a Maryland property: no HAG item, and no
+Confirmed by the user on a Maryland property -- the Frederick County
+parcel this file uses as MARYLAND_BOUNDARY: no HAG item, and no
 `3dep-lidar-dsm` either, so deriving HAG from DSM-DTM does not help.
 
 NINE CHECKS, and the ninth is a separate file (the full suite). Numbered
@@ -19,13 +20,18 @@ here as they are in the branch that added them:
   1  A parcel WITH HAG uses HAG, and TCC is fetched EXACTLY zero times.
   2  A parcel WITHOUT HAG falls back to TCC and the session is CREATED.
   3  The source flag names which source was used, on both parcels.
-  4  254 and 255 are excluded -- against REAL pixel values.       [LIVE]
+  4  254 and 255 are excluded -- against REAL pixel values, and the
+     fallback parcel's premise (no USABLE HAG, by either of the two
+     absences) verified rather than assumed.                     [LIVE]
   5  Any nonzero cover is canopy; zero is not.
   6  The fallback mask satisfies BOTH consumers: get_required_tree_root_
      zone_mask_utm() (which RAISES rather than degrading) and the
      exclusion gate (which degrades).
   7  Both sources failing still hard-fails, with a message that says the
      data is ABSENT rather than unresponsive.
+  7b The LIVE premise check itself (assert_no_usable_hag), on all four of
+     its paths -- offline, because an assertion that only runs with a
+     network is one nobody can check.
   8  CALIBRATION: on the Gibsonia reference parcel, where BOTH sources
      exist, run the HAG mask and a TCC-derived mask over the same land
      and report where they disagree, in acres.              [LIVE]
@@ -95,27 +101,25 @@ GIBSONIA_BOUNDARY = [
     (-79.9838258, 40.6458343),
 ]
 
-# THE MARYLAND BOUNDARY, which does NOT -- a ~13-acre rectangle of
-# farmland in Kent County, on the Eastern Shore, a few miles outside
-# Chestertown. Written out here as the exact coordinates used, so the
-# result is reproducible against the same ground rather than against "a
-# Maryland property".
+# THE MARYLAND BOUNDARY, which does NOT -- THE USER'S OWN FAILING PARCEL,
+# in Frederick County. This is the parcel the whole fallback exists for:
+# the one where a real person drew a boundary and the session hard-failed
+# with nothing they could do about it. Confirmed live at 0 `3dep-lidar-
+# hag` items, and confirmed falling back to `nlcd_tcc`.
 #
-#   (-76.0820, 39.2110)   NW
-#   (-76.0820, 39.2089)   SW
-#   (-76.0793, 39.2089)   SE
-#   (-76.0793, 39.2110)   NE
-#
-# The LIVE section below VERIFIES the premise rather than assuming it: it
-# asserts that the STAC search genuinely returns no `3dep-lidar-hag` item
-# here. If Microsoft ever processes this project area, that assertion
-# fails loudly and says so -- which is the correct outcome, not a test to
-# relax.
+# NOT AN INVENTED BOUNDARY. An earlier revision of this file used a
+# hand-made rectangle near Chestertown, Kent County, picked as a
+# plausible-looking piece of Eastern Shore farmland. It turned out to
+# have HAG coverage -- three items -- so it tested the opposite of what
+# it claimed to, and the premise assertion below is what caught it. A
+# fixture for "the parcel with no coverage" has to be a parcel actually
+# observed to have none.
 MARYLAND_BOUNDARY = [
-    (-76.0820, 39.2110),
-    (-76.0820, 39.2089),
-    (-76.0793, 39.2089),
-    (-76.0793, 39.2110),
+    (-77.52875829843366, 39.37068357456659),
+    (-77.5244882217246, 39.37103192232765),
+    (-77.52519632490174, 39.37488851360338),
+    (-77.52955223229841, 39.37377717368003),
+    (-77.53033091081994, 39.36936307851048),
 ]
 
 
@@ -208,6 +212,78 @@ class _CountingTcc:
     def __call__(self, boundary_coordinates, dem, *args, **kwargs):
         self.calls += 1
         return self._result
+
+
+def assert_no_usable_hag(boundary, dem, label="the Maryland boundary"):
+    """
+    THE FALLBACK PARCEL'S PREMISE, VERIFIED RATHER THAN ASSUMED.
+
+    THE PREMISE IS "NO USABLE HAG", NOT "NO HAG ITEMS". Those are not the
+    same claim, and asserting the narrow one rejects legitimate fixture
+    parcels. There are TWO ways a parcel lacks usable lidar HAG, and
+    canopy_height_data treats both as absence and falls back on both:
+
+      (a) NO ITEM. The STAC search returns nothing intersecting this
+          boundary -- no acquisition project covers it at all.
+      (b) AN ITEM, ALL NODATA. A tile intersects, but every pixel of it
+          over this boundary is nodata. Check 1b covers exactly this
+          offline, as a valid absence that falls back.
+
+    An earlier revision asserted `_search_hag_items() == []`, which is (a)
+    alone -- a perfectly good fixture parcel of kind (b) would have failed
+    it while the code under test was behaving correctly. So what is
+    asserted here is the thing the fallback actually turns on: THE FETCH
+    COMES BACK ON TCC. The item count is still read, but ONLY to report
+    WHICH of the two absences this parcel is -- never to decide whether
+    the premise holds.
+
+    Returns (canopy_dict, absence_description). Raises AssertionError, with
+    a message naming which absence it found (or which non-absence state it
+    hit instead), if the parcel has usable HAG after all.
+
+    A FUNCTION, NOT INLINE IN THE LIVE SECTION, so its own branches can be
+    exercised offline against mocks -- see the four checks below. The
+    assertion this file's live premise rests on should not itself be code
+    that only ever runs with a network.
+    """
+    from shapely.geometry import Polygon as _Poly
+
+    items = chd._search_hag_items(_Poly(list(boundary) + [boundary[0]]))
+
+    try:
+        canopy = chd.get_canopy_height_for_boundary(boundary, dem)
+    except chd.CanopyCoverageIncompleteError as exc:
+        # A THIRD STATE, AND DELIBERATELY NOT AN ABSENCE. Coverage that
+        # exists and merely reads mostly-nodata is a HAG measurement that
+        # went WRONG; it raises and does NOT fall back, by design (see
+        # canopy_height_data.py's module docstring). Naming it here means
+        # a future failure says which state it hit, instead of surfacing a
+        # bare exception from three frames down.
+        raise AssertionError(
+            f"{label} now has HAG coverage that EXISTS but is too sparse to trust ({exc}). "
+            f"That is NEITHER of the two absences this fixture needs -- it is the "
+            f"CanopyCoverageIncompleteError case, which deliberately does not fall back. The "
+            f"fixture needs a parcel with no usable HAG, not one with bad HAG."
+        ) from exc
+
+    source = canopy_source(canopy)
+    absence = (
+        "(a) no intersecting 3dep-lidar-hag item at all"
+        if not items
+        else f"(b) {len(items)} intersecting item(s), every pixel over this boundary nodata"
+    )
+    if canopy is not None and source == CANOPY_SOURCE_NLCD_TCC:
+        return canopy, absence
+
+    raise AssertionError(
+        f"{label} is in this suite BECAUSE it has no USABLE lidar HAG, and the fetch just came "
+        f"back as {source!r} (expected {CANOPY_SOURCE_NLCD_TCC!r}; None would mean neither "
+        f"source had anything, which is a different failure). The STAC search returned "
+        f"{len(items)} item(s), so the absence this parcel used to have -- {absence} -- no "
+        f"longer holds: there is usable HAG here now. Either the premise changed (this "
+        f"acquisition project was processed) or the boundary is wrong. Pick a parcel still "
+        f"observed to have no usable HAG rather than relaxing this."
+    )
 
 
 print("=" * 72)
@@ -645,6 +721,104 @@ print(f"           message: {_payload['error']}")
 
 
 # =====================================================================
+# 7b. THE LIVE PREMISE CHECK ITSELF, exercised offline on all four paths.
+# =====================================================================
+# assert_no_usable_hag() is what the live section's premise rests on, and
+# the bug this branch fixes was IN that assertion, not in the code it
+# guards: it asserted "no HAG items", which is only ONE of the two ways a
+# parcel lacks usable HAG, and would have rejected a legitimate fixture
+# parcel of the other kind. An assertion that only ever runs with a
+# network is an assertion nobody can check, so all four of its branches
+# run here against mocks.
+
+_P_DEM = _fake_dem(MARYLAND_BOUNDARY)
+_P_TCC = _tcc_canopy(_P_DEM, np.full(_P_DEM["array"].shape, 30.0))
+_P_ROWS, _P_COLS = _P_DEM["array"].shape
+
+
+def _premise_item(item_id="probe-hag-item"):
+    return type(
+        "Item",
+        (),
+        {
+            "id": item_id,
+            "assets": {chd.HAG_ASSET_KEY: type("Asset", (), {"href": "https://example.invalid/h.tif"})()},
+            "geometry": None,
+        },
+    )()
+
+
+# --- (a) NO ITEM AT ALL -> premise holds, and says which absence it is.
+with mock_patch.object(chd, "_search_hag_items", return_value=[]), mock_patch.object(
+    ccd, "get_tree_canopy_cover_for_boundary", return_value=_P_TCC
+):
+    _p_canopy, _p_absence = assert_no_usable_hag(MARYLAND_BOUNDARY, _P_DEM)
+assert _p_canopy is _P_TCC
+assert _p_absence.startswith("(a)"), _p_absence
+assert "no intersecting 3dep-lidar-hag item" in _p_absence
+
+# --- (b) AN ITEM, ALL NODATA OVER THE BOUNDARY -> premise ALSO holds.
+# THIS IS THE CASE THE OLD ASSERTION WOULD HAVE WRONGLY REJECTED. Check
+# 1b already establishes this is a valid absence that falls back; here the
+# premise check must AGREE with that rather than contradict it.
+_p_all_nodata = np.full((_P_ROWS, _P_COLS), -9999.0, dtype="float32")
+with mock_patch.object(
+    chd, "_search_hag_items", return_value=[_premise_item(), _premise_item("second")]
+), mock_patch.object(
+    chd, "_read_clipped_hag", return_value=(_p_all_nodata, None, _P_DEM["crs"], -9999.0)
+), mock_patch.object(ccd, "get_tree_canopy_cover_for_boundary", return_value=_P_TCC):
+    _p_canopy_b, _p_absence_b = assert_no_usable_hag(MARYLAND_BOUNDARY, _P_DEM)
+assert _p_canopy_b is _P_TCC, (
+    "TEST 7b: an intersecting tile that is all nodata over the boundary is a VALID absence -- "
+    "the premise check must accept it, not reject it for having items"
+)
+assert _p_absence_b.startswith("(b)"), _p_absence_b
+assert "2 intersecting item(s)" in _p_absence_b and "nodata" in _p_absence_b, _p_absence_b
+
+# --- USABLE HAG -> premise FAILS, and the message says what it found.
+_p_real_hag = np.full((_P_ROWS, _P_COLS), CANOPY_HEIGHT_THRESHOLD_METERS + 2.0, dtype="float32")
+with mock_patch.object(chd, "_search_hag_items", return_value=[_premise_item()]), mock_patch.object(
+    chd, "_read_clipped_hag", return_value=(_p_real_hag, None, _P_DEM["crs"], -9999.0)
+), mock_patch.object(chd, "_reproject_to_dem_grid", return_value=_p_real_hag), mock_patch.object(
+    chd, "_on_parcel_nan_fraction", return_value=(0.0, _P_ROWS * _P_COLS)
+):
+    try:
+        assert_no_usable_hag(MARYLAND_BOUNDARY, _P_DEM)
+        raise AssertionError("TEST 7b: a parcel with usable HAG must fail the premise check")
+    except AssertionError as exc:
+        _p_msg = str(exc)
+assert "no USABLE lidar HAG" in _p_msg, _p_msg
+assert f"{CANOPY_SOURCE_LIDAR_HAG!r}" in _p_msg, _p_msg
+assert "1 item(s)" in _p_msg and "(b)" in _p_msg, (
+    f"TEST 7b: the failure must name WHICH of the two absences no longer holds -- got {_p_msg!r}"
+)
+
+# --- COVERAGE THAT EXISTS BUT IS TOO SPARSE -> a THIRD state, named as
+# such. It deliberately does not fall back, so it is neither absence, and
+# the message must say so rather than letting a bare exception escape.
+with mock_patch.object(chd, "_search_hag_items", return_value=[_premise_item()]), mock_patch.object(
+    chd,
+    "get_canopy_height_for_boundary",
+    side_effect=chd.CanopyCoverageIncompleteError("only 40.0% complete on-parcel"),
+):
+    try:
+        assert_no_usable_hag(MARYLAND_BOUNDARY, _P_DEM)
+        raise AssertionError("TEST 7b: sparse-but-present HAG must fail the premise check")
+    except AssertionError as exc:
+        _p_sparse_msg = str(exc)
+assert "NEITHER of the two absences" in _p_sparse_msg, _p_sparse_msg
+assert "CanopyCoverageIncompleteError" in _p_sparse_msg, _p_sparse_msg
+assert "40.0% complete" in _p_sparse_msg, _p_sparse_msg
+
+print(
+    "TEST 7b PASS: the live premise check accepts BOTH absences -- no item at all, and an "
+    "intersecting tile that is all nodata (the case the old 'no items' assertion would have "
+    "wrongly rejected) -- names which one it found, fails on usable HAG naming the source and "
+    "item count, and reports sparse-but-present coverage as the third state it is."
+)
+
+
+# =====================================================================
 # Offline support checks for the LIVE ones (so a skip is not total).
 # =====================================================================
 # 4's LOGIC, against hand-built pixel values. This does NOT replace the
@@ -696,7 +870,7 @@ print(
 
 
 print()
-print("All OFFLINE canopy-cover-fallback checks passed (1, 1b, 1c, 2, 3, 5, 5b, 5c, 6, 7).")
+print("All OFFLINE canopy-cover-fallback checks passed (1, 1b, 1c, 2, 3, 5, 5b, 5c, 6, 7, 7b).")
 print()
 
 
@@ -747,7 +921,7 @@ def _run_live():
             lambda timeout: ccd._export_tcc_on_dem_grid(md_dem, timeout), max_retries=2
         )
     except requests.exceptions.RequestException as exc:
-        _unreachable("apps.fs.usda.gov (USDA FS NLCD TCC ImageServer)", exc)
+        _unreachable("imagery.geoplatform.gov (IIPP NLCD TCC ImageServer)", exc)
     uniq, uniq_counts = np.unique(band, return_counts=True)
     print(f"  raw TCC values returned over the Maryland parcel: {dict(zip(uniq.tolist(), uniq_counts.tolist()))}")
     print(f"  service-declared nodata: {service_nodata}")
@@ -755,25 +929,31 @@ def _run_live():
     print(f"  classified: {counts}")
 
     # ---- THE PREMISE, VERIFIED RATHER THAN ASSUMED ------------------
-    # This boundary is in the suite because it has NO 3dep-lidar-hag
-    # coverage. If Microsoft ever processes this acquisition project, the
-    # assertion below fails loudly and says so -- which is the correct
-    # outcome (the fixture has stopped testing what it claims to), not a
-    # check to relax.
-    from shapely.geometry import Polygon as _Poly
-
-    _md_items = chd._search_hag_items(_Poly(MARYLAND_BOUNDARY + [MARYLAND_BOUNDARY[0]]))
-    print(f"  3dep-lidar-hag items intersecting the Maryland boundary: {len(_md_items)}")
-    assert _md_items == [], (
-        "the Maryland boundary is in this suite BECAUSE it has no 3dep-lidar-hag coverage, and "
-        f"the STAC search just returned {len(_md_items)} item(s) for it. Either the premise has "
-        "changed (Microsoft processed this project area) or the boundary is wrong -- pick a "
-        "boundary that is still uncovered rather than relaxing this."
-    )
-    _md_canopy = chd.get_canopy_height_for_boundary(MARYLAND_BOUNDARY, md_dem)
-    assert _md_canopy is not None and canopy_source(_md_canopy) == CANOPY_SOURCE_NLCD_TCC, (
-        "...and with HAG genuinely absent, the live fetch must come back on the TCC fallback"
-    )
+    #
+    # THE PREMISE IS "NO USABLE HAG", NOT "NO HAG ITEMS". Those are not
+    # the same claim, and asserting the narrow one rejects legitimate test
+    # parcels. There are TWO ways a parcel lacks usable lidar HAG, and
+    # canopy_height_data treats both as absence and falls back on both:
+    #
+    #   (a) NO ITEM. The STAC search returns nothing intersecting this
+    #       boundary -- no acquisition project covers it at all.
+    #   (b) AN ITEM, ALL NODATA. A tile intersects, but every pixel of it
+    #       over this boundary is nodata. Check 1b above covers exactly
+    #       this offline, as a valid absence that falls back.
+    #
+    # An earlier revision asserted `_search_hag_items() == []`, which is
+    # (a) alone. A perfectly good fixture parcel of kind (b) would have
+    # failed it while the code under test was behaving correctly. So what
+    # is asserted here is the thing the fallback actually turns on: THE
+    # LIVE FETCH COMES BACK ON TCC. The item count is still read, but only
+    # to REPORT which of the two absences this parcel is -- never to
+    # decide whether the premise holds.
+    #
+    # If this parcel ever gains usable HAG, this fails loudly and says so,
+    # which is the correct outcome (the fixture has stopped testing what
+    # it claims to), not a check to relax.
+    _md_canopy, _absence = assert_no_usable_hag(MARYLAND_BOUNDARY, md_dem)
+    print(f"  HAG is absent here in sense {_absence}")
     print(f"  live canopy source for the Maryland parcel: {canopy_source(_md_canopy)!r}")
     print(f"  {ccd.summarize_tree_canopy_cover(_md_canopy)}")
     n254 = counts["non_processing_254"]
@@ -877,7 +1057,7 @@ if _live_or_skip():
         print("  values and 8 measures two real products over real ground. Neither can be")
         print("  satisfied from a fixture, so neither is reported as passing here.")
         print("  Re-run from an environment with egress to elevation.nationalmap.gov,")
-        print("  planetarycomputer.microsoft.com and apps.fs.usda.gov.")
+        print("  planetarycomputer.microsoft.com and imagery.geoplatform.gov.")
         sys.exit(2)
     print()
     print("All LIVE canopy-cover-fallback checks completed (4, 8).")

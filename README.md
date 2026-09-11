@@ -320,14 +320,21 @@ report using the Claude API.
   a source did not respond. `test_canopy_cover_fallback.py` — its checks
   4 (254/255 against real pixels) and 8 (HAG-vs-TCC acreage calibration
   on the Gibsonia reference parcel) are LIVE and run with
-  `python3 test_canopy_cover_fallback.py --live`. **Not yet confirmed
-  live**: the branch that added this was developed in a sandbox whose
-  egress policy denies `apps.fs.usda.gov`, `elevation.nationalmap.gov`
-  and `planetarycomputer.microsoft.com`, so the TCC ImageServer's exact
-  service name inside `RDW_LandscapeAndWildlife` is unverified (a wrong
-  path fails loudly on the first request, and `KEYLINE_TCC_IMAGESERVER`
-  repoints it without a code change), and checks 4 and 8 have not run.
-  They report a loud skip and exit non-zero rather than passing.
+  `python3 test_canopy_cover_fallback.py --live`. The TCC endpoint is the
+  **IIPP** service
+  (`imagery.geoplatform.gov/iipp/rest/services/Vegetation/USFS_EDW_NLCD_TCC_CONUS/ImageServer`),
+  confirmed live against the reference parcels; the old
+  `apps.fs.usda.gov` host now 403s with a migration notice. Its sibling
+  `USFS_EDW_Science_TCC_CONUS` is **raw model output and must not be
+  substituted** — the NLCD version is masked to remove canopy over water
+  and non-tree crops and smoothed across years, which is load-bearing
+  under the any-nonzero rule (unmasked model noise over a crop field
+  would read as trees). `KEYLINE_TCC_IMAGESERVER` still overrides the
+  default. The no-HAG fixture is the user's real failing parcel in
+  Frederick County, MD, and the live section verifies its premise as
+  **no USABLE HAG** — either no intersecting item, or an intersecting
+  tile that is all nodata over the boundary — rather than as "no items",
+  which would reject a legitimate parcel of the second kind.
 - `soil_data.py` additionally has `get_farmland_classification_for_polygon()`
   and `is_prime_farmland()` — SSURGO's official Farmland Classification
   (`farmlndcl`), used to flag (never exclude) solar candidates that
