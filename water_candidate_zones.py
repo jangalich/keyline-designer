@@ -10,9 +10,9 @@ module is RETAINED as a diagnostic-consumed module: the exploration
 scripts (diagnose_water_zone_mask.py and its tests) still import and run
 it, water_survey_areas.py imports its shared gate/measurement machinery
 (the contributing-area ceiling, the service-distance reference, the
-overlap measurement and its sentinels, the representative-point gravity
-relationships), and the level-pool machinery remains a future "verify
-this survey area" second stage -- a delineation to run ON a chosen area,
+overlap measurement and its sentinels, the high-point-to-high-point
+gravity relationships), and the level-pool machinery remains a future
+"verify this survey area" second stage -- a delineation to run ON a chosen area,
 not the thing that nominates areas. Do not re-wire it into
 build_pipeline_context(); do not delete it while those consumers stand.
 
@@ -876,24 +876,22 @@ def compute_water_eligible_cells(
 
 def _zone_production_area_relationships(
     representative_point: Point,
-    representative_elevation_m: float,
+    max_elevation_m: float,
     production_areas: list[dict],
     max_service_distance_meters: float,
 ) -> list[dict]:
     """
     Whole-zone version of the old per-cell "best production-area
     relationship" tagging + per-cluster median aggregation: computed ONCE
-    per surviving cluster from a single representative point/elevation
-    (see find_candidate_zones()'s own docstring) rather than rolled up
-    (median) across every member cell's own per-cell tag. Same output
-    shape the old aggregation produced, so every downstream consumer
-    (zones_to_geojson(), water_suitability.py) is unaffected by this
-    change:
+    per surviving cluster (see find_candidate_zones()'s own docstring)
+    rather than rolled up (median) across every member cell's own
+    per-cell tag. Output shape:
 
         {
             'production_area_id': int,
-            'elevation_differential_m': float,  # + = zone sits above the
-                                                  # production area
+            'elevation_differential_m': float,  # + = the zone's HIGH POINT
+                                                  # sits above the production
+                                                  # area's HIGH POINT
                                                   # (gravity-favorable);
                                                   # - = below (would need a
                                                   # pump)
@@ -906,6 +904,37 @@ def _zone_production_area_relationships(
     sorted by elevation_differential_m descending (most gravity-favorable
     first), same convention as before.
 
+    MAX-TO-MAX, BOTH SIDES -- AND THAT IS A CORRECTION, NOT A TUNING.
+    This compared the two sides' REPRESENTATIVE (median) elevations until
+    live testing turned up what that costs: a water zone sitting a metre
+    above a production block's LOWEST ground came back reported as
+    gravity feed, on the strength of two medians, for a pond that could
+    water the block's bottom corner and nothing else. Gravity delivery to
+    a block means water reaching the WHOLE block, so the block's
+    reference is its HIGH point (patch['max_elevation_m']) -- clear the
+    high corner and every lower part of the block is downhill of you;
+    clear only the median and half the block is above the waterline.
+
+    THE WATER SIDE IS ITS MAXIMUM TOO, AND THAT HALF ERRS OPTIMISTIC ON
+    PURPOSE. A SURVEY AREA IS NOT A POND. This function is handed the
+    ground a pond might be built on, not a pond: nobody has placed one,
+    and a designer siting it is free to put it at the high end of the
+    area they were given. The area's highest ground is therefore the BEST
+    CASE the design could still achieve, and taking it is what keeps this
+    answer from ruling out a site that a competent siting decision would
+    rescue. It is a best case, not a measurement of a built thing --
+    "gravity feed" here means A POND SITED AT THIS AREA'S HIGH END COULD
+    REACH THIS BLOCK'S HIGH END, and nothing stronger. The optimism is
+    bounded on one side only: the production side takes no such licence,
+    because the block is already committed ground whose high corner is a
+    fact, not a choice.
+
+    THREE ANSWERS, STILL, NOT TWO. A relationship whose differential
+    comes out negative SURVIVES in this list with above_production_area
+    False -- it is the PUMP-REQUIRED answer, a real cost/maintenance
+    tradeoff. "No relationship at all" is the separate third answer, and
+    it is the empty list, never a fabricated below-elevation entry.
+
     Only production areas within max_service_distance_meters are included
     (the same max-service-distance gate compute_water_eligible_cells()
     applies; there is no minimum-service-distance gate) -- a zone
@@ -913,6 +942,10 @@ def _zone_production_area_relationships(
     service-distance window returns [] (see find_candidate_zones()'s own
     handling of this case: such a zone is dropped, since there's no single
     headline "served" relationship left to report for it).
+
+    Both maxima are computed by the CALLERS over their own cells against
+    the cached DEM they already hold -- pure, local, and no network
+    anywhere near it.
     """
     relationships = []
     for patch in production_areas:
@@ -920,7 +953,7 @@ def _zone_production_area_relationships(
         if distance > max_service_distance_meters:
             continue
 
-        elevation_differential_m = representative_elevation_m - patch["representative_elevation_m"]
+        elevation_differential_m = max_elevation_m - patch["max_elevation_m"]
         gradient_pct = (elevation_differential_m / distance * 100) if distance > 0 else 0.0
         relationships.append(
             {
@@ -1442,7 +1475,10 @@ def find_candidate_zones(
             'primary_production_area_relationship': dict,
             'contributing_area_cells': float,   # median across member cells
             'slope_pct': float,                 # median across member cells
-            'representative_elevation_m': float,
+            'representative_elevation_m': float,   # median over 'cells'
+            'max_elevation_m': float,              # max over 'cells' -- the
+                                                   # zone's high point, and the
+                                                   # gravity reference
             'cells': [(row, col), ...],
         }
     """
@@ -1639,10 +1675,14 @@ def find_candidate_zones(
             return None, REASON_BELOW_MIN_AREA, flags
 
         representative_elevation_m = float(np.median([array[r, c] for r, c in kept]))
+        # The zone's HIGH POINT over the same cells the median is taken
+        # from -- the gravity reference (see _zone_production_area_
+        # relationships()). Pure, off the cached DEM already in hand.
+        max_elevation_m = float(np.max([array[r, c] for r, c in kept]))
         representative_point = polygon_utm.centroid
         relationships = _zone_production_area_relationships(
             representative_point,
-            representative_elevation_m,
+            max_elevation_m,
             production_areas,
             max_service_distance_meters,
         )
@@ -1728,6 +1768,7 @@ def find_candidate_zones(
             ),
             "slope_pct": round(float(np.median(cluster_slopes)) if cluster_slopes else 0.0, 2),
             "representative_elevation_m": representative_elevation_m,
+            "max_elevation_m": max_elevation_m,
             "cells": kept,
         }
         return zone, REASON_NOMINATED, flags

@@ -329,7 +329,7 @@ from valley_delineation import (
 # machinery this module reuses -- ONE definition each of the contributing-
 # area ceiling, the service-distance reference, the canopy buffer, the
 # overlap measurement (with its None-means-never-checked semantics), the
-# representative-point gravity relationships, and the unchecked/not-
+# high-point-to-high-point gravity relationships, and the unchecked/not-
 # supplied sentinels. Importing them keeps this module's numbers identical
 # to the ones every existing test and docstring already pins, rather than
 # forking a second copy that can drift.
@@ -2610,6 +2610,13 @@ def _measure_member_cells(
         # keypoint relationship pass reads this field by direct index
         # (consumer contract).
         "representative_elevation_m": float(np.median([raw_array[r, c] for r, c in cells])),
+        # THE ZONE'S HIGH POINT, over the same cells and the same raw
+        # array, and the reason it exists is the gravity question: see
+        # water_candidate_zones._zone_production_area_relationships().
+        # Both survey types reach here (the excavated path over its
+        # member cells, the compartment path over its walked cells), so
+        # one expression gives both sides one definition.
+        "max_elevation_m": float(np.max([raw_array[r, c] for r, c in cells])),
     }
 
 
@@ -4150,6 +4157,22 @@ def _confidence_for_region(region: dict, soil_checked: bool) -> str:
     return CONFIDENCE_LOW
 
 
+# What "gravity feed" claims, said once so both branches of _gravity_note()
+# and the report can say it without paraphrasing it differently. The
+# relationship is HIGH POINT TO HIGH POINT (see water_candidate_zones.
+# _zone_production_area_relationships()), and the survey-area side of that
+# pair is a best case rather than a measurement: no pond has been sited
+# yet, so the area's highest ground is what a designer could still achieve
+# within it.
+_GRAVITY_BEST_CASE_CAVEAT = (
+    "Measured HIGH POINT TO HIGH POINT: gravity delivery has to reach the WHOLE production "
+    "block, so the block's high corner is the reference, and this survey area's own high point "
+    "is what is compared against it. A SURVEY AREA IS NOT A POND -- none has been sited here "
+    "yet -- so read this as a best case the design could still achieve (a pond sited at this "
+    "area's high end could reach that block's high end), not as a measurement of a built thing."
+)
+
+
 def _gravity_note(region: dict) -> str:
     primary = region["primary_production_area_relationship"]
     if primary is None:
@@ -4159,15 +4182,17 @@ def _gravity_note(region: dict) -> str:
         )
     if primary["above_production_area"]:
         return (
-            f"Sits {primary['elevation_differential_m']}m above production area "
-            f"{primary['production_area_id']} over {primary['distance_m']}m -- a real gravity-feed "
-            "relationship, reported as ranking context and narrative, never a gate."
+            f"High point sits {primary['elevation_differential_m']}m above production area "
+            f"{primary['production_area_id']}'s high point, over {primary['distance_m']}m -- a real "
+            f"gravity-feed relationship, reported as ranking context and narrative, never a gate. "
+            f"{_GRAVITY_BEST_CASE_CAVEAT}"
         )
     return (
-        f"Sits {abs(primary['elevation_differential_m'])}m BELOW production area "
-        f"{primary['production_area_id']} over {primary['distance_m']}m -- delivering water there "
-        "would need a pump (PUMP-REQUIRED). A real cost/maintenance tradeoff, not a defect: this "
-        "region survives with the note, exactly as the retired scorer's pump-required candidates did."
+        f"High point sits {abs(primary['elevation_differential_m'])}m BELOW production area "
+        f"{primary['production_area_id']}'s high point, over {primary['distance_m']}m -- water "
+        "reaching all of that block from here would need a pump (PUMP-REQUIRED). A real "
+        "cost/maintenance tradeoff, not a defect: this region survives with the note, exactly as "
+        f"the retired scorer's pump-required candidates did. {_GRAVITY_BEST_CASE_CAVEAT}"
     )
 
 
@@ -4645,9 +4670,11 @@ def compute_water_survey_areas(
     # the ground the road clip REMOVED from the walkable claim -- since
     # the drawn geometry clips at the union and measuring it there
     # would be a guaranteed zero (None still means never checked; 0.0
-    # means checked and nothing removed). Gravity and representative
-    # elevation via the existing representative-point machinery -- from
-    # member cells for excavated, from the compartment for embankment.
+    # means checked and nothing removed). Gravity is measured HIGH
+    # POINT TO HIGH POINT, off elevations _measure_member_cells() has
+    # already taken over the zone's own cells -- member cells for
+    # excavated, the compartment's walked cells for embankment -- with
+    # the representative point still supplying only the DISTANCE.
     for zone in zones:
         envelope_cells = _cells_in_polygon_utm(dem, zone["polygon_utm"])
         zone["canopy_overlap_pct"] = _overlap_fraction_pct(envelope_cells, dem, canopy_checked, mask_utm=canopy_mask)
@@ -4668,10 +4695,16 @@ def compute_water_survey_areas(
             representative_point = unary_union(
                 [member["polygon_utm"] for member in zone["members"]]
             ).centroid
+        # MAX-TO-MAX: the zone's high point against each production
+        # block's high point, never the two medians -- see
+        # _zone_production_area_relationships() for why the median pair
+        # reported gravity feed for ponds that could only reach a block's
+        # bottom corner, and for why the water side's maximum is a
+        # deliberate best case rather than a measurement.
         relationships = (
             _zone_production_area_relationships(
                 representative_point,
-                zone["representative_elevation_m"],
+                zone["max_elevation_m"],
                 production_areas,
                 MAX_SERVICE_DISTANCE_METERS,
             )
@@ -4927,7 +4960,14 @@ def _zone_feature_properties(zone: dict) -> dict:
         "twi_score_mean": zone["twi_score_mean"],
         "twi_score_max": zone["twi_score_max"],
         "depression_depth_mean_m": zone["depression_depth_mean_m"],
-        "depression_depth_max_m": zone["depression_depth_max_m"],
+        # FEET, and the _ft suffix says so. The report's global rule is
+        # imperial, and the conversion belongs HERE beside _feet()'s
+        # other callers rather than in each consumer that prints it --
+        # two consumers converting a metre value is two chances to
+        # forget. The stored measurement stays metric under its own
+        # name on the zone dict (depression_depth_max_m); this is the
+        # reading of it that ships.
+        "depression_depth_max_ft": _feet(zone["depression_depth_max_m"]),
         "contributing_area_acres_at_wettest_cell": zone["contributing_area_acres_at_wettest_cell"],
         "slope_median_pct": zone["slope_median_pct"],
         "boundary_adjacency_fraction": zone["boundary_adjacency_fraction"],
@@ -4948,6 +4988,11 @@ def _zone_feature_properties(zone: dict) -> dict:
         "below_min_area": zone["below_min_area"],
         "truncated_by_road": zone["truncated_by_road"],
         "representative_elevation_m": round(zone["representative_elevation_m"], 2),
+        # The zone's HIGH POINT beside its median, because that is the
+        # elevation the gravity answer above was actually decided on
+        # (_zone_production_area_relationships()) -- a reader who wants
+        # to check "gravity feed" needs the number it was computed from.
+        "max_elevation_m": round(zone["max_elevation_m"], 2),
     }
     if zone["survey_type"] == SURVEY_TYPE_EMBANKMENT:
         properties.update(
@@ -5019,7 +5064,7 @@ def _member_feature_properties(region: dict) -> dict:
         "max_suitability": region["max_suitability"],
         "criterion_contributions": region["criterion_contributions"],
         "twi_score_mean": region["twi_score_mean"],
-        "depression_depth_max_m": region["depression_depth_max_m"],
+        "depression_depth_max_ft": _feet(region["depression_depth_max_m"]),
         "contributing_area_acres_at_wettest_cell": region["contributing_area_acres_at_wettest_cell"],
         "slope_median_pct": region["slope_median_pct"],
         "boundary_adjacency_fraction": region["boundary_adjacency_fraction"],
@@ -5028,6 +5073,7 @@ def _member_feature_properties(region: dict) -> dict:
         "flags": list(region["flags"]),
         "below_min_area": region["below_min_area"],
         "representative_elevation_m": round(region["representative_elevation_m"], 2),
+        "max_elevation_m": round(region["max_elevation_m"], 2),
     }
 
 
@@ -5158,6 +5204,10 @@ PANEL_EXCLUDED_KEYS = (
     "depression_depth_mean_m",
     "contributing_area_acres_at_wettest_cell",
     "representative_elevation_m",
+    # The zone's high point is the gravity answer's INPUT, and the
+    # water_delivery row already carries its consequence in one word.
+    # A reader checking the arithmetic wants the export, not the panel.
+    "max_elevation_m",
     "slope_median_pct",
     "twi_score_mean",
     "twi_score_max",
@@ -5278,13 +5328,29 @@ def build_zone_panel(zone: dict, soil_checked: bool, zone_name_by_id: dict) -> l
       4. rank           read against scales['rank'][type]['count'], so
                         "2" renders as "2 of 3".
       5. water_delivery gravity_feed / pump_required /
-                        no_service_relationship.
+                        no_service_relationship. MEASURED HIGH POINT TO
+                        HIGH POINT (water_candidate_zones._zone_
+                        production_area_relationships()): gravity has to
+                        reach the WHOLE production block, so the block's
+                        high corner is the reference, and the survey
+                        area's own high point is what is compared
+                        against it. That second half is a BEST CASE, not
+                        a measurement -- no pond has been sited inside
+                        the area yet, so its high ground is what a
+                        design could still achieve there. "gravity_feed"
+                        on this row therefore claims exactly: A POND
+                        SITED AT THIS AREA'S HIGH END COULD REACH THAT
+                        BLOCK'S HIGH END. The zone's confidence_notes
+                        say so in prose, which is where a reader who
+                        wants the caveat finds it -- the row itself is
+                        one word, as every panel row is.
 
     WHY water_delivery IS THREE ROWS AND NOT ONE. The row contract is
     {key, label, value, unit}; a row whose value is a nested object is
     not a row a generic renderer can draw, so the elevation differential
-    and the production area id ride as their own rows beside it. They
-    FIRE ONLY WHEN THERE IS A RELATIONSHIP -- absent, never 0.0 --
+    (high point to high point, per the water_delivery row above) and the
+    production area id ride as their own rows beside it. They FIRE ONLY
+    WHEN THERE IS A RELATIONSHIP -- absent, never 0.0 --
     because a 0 ft differential to no production area is precisely the
     fabricated zero this module refuses everywhere else. A zone with
     nothing in range therefore shows the five always-rows and the

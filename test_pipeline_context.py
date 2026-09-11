@@ -264,6 +264,10 @@ fake_patch = {
     "id": 0,
     "area_acres": 1.23,
     "representative_elevation_m": 1000.0,
+    # The gravity reference every water zone is compared against is the
+    # patch's HIGH point, not its median (water_candidate_zones.
+    # _zone_production_area_relationships()); a flat fixture's are equal.
+    "max_elevation_m": 1000.0,
     "polygon_utm": box(0, 0, 10, 10),
     "render_fill_polygon_utm": box(0, 0, 10, 10),
     # production_areas_to_geojson() dereferences this on every patch it is

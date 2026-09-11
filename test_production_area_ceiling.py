@@ -605,6 +605,12 @@ _PRE_NARRATIVE_PATCH_KEYS = {
     "id",
     "area_acres",
     "representative_elevation_m",
+    # The patch's HIGH POINT, added by cluster_and_gate() beside the median
+    # when gravity delivery became a high-point-to-high-point question
+    # (water_candidate_zones._zone_production_area_relationships()) -- same
+    # reason as render_fill_area_acres below: STEP 3 is allowed to gain a
+    # field, narrative_data is not allowed to write one.
+    "max_elevation_m",
     "polygon_utm",
     "render_fill_polygon_utm",
     # Added by cluster_and_gate() alongside render_fill_polygon_utm when the

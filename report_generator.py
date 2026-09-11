@@ -856,15 +856,19 @@ def _format_water_survey_areas_summary(water_narrative: Optional[dict]) -> str:
             )
         elif gravity["can_gravity_feed"]:
             lines.append(
-                f"Sits {gravity['elevation_differential_ft']} ft above production area "
-                f"{gravity['production_area_id']} over {gravity['distance_ft']} ft -- a gravity-feed "
-                "relationship (ranking context, never a gate)."
+                f"High point sits {gravity['elevation_differential_ft']} ft above production area "
+                f"{gravity['production_area_id']}'s high point, over {gravity['distance_ft']} ft -- a "
+                "gravity-feed relationship (ranking context, never a gate). Read HIGH POINT TO HIGH "
+                "POINT: gravity has to reach the WHOLE block, so the block's high corner is the "
+                "reference; and since no pond has been sited within this survey area yet, its own "
+                "high point stands for the best case a design could still achieve here."
             )
         else:
             lines.append(
-                f"Sits {abs(gravity['elevation_differential_ft'])} ft BELOW production area "
-                f"{gravity['production_area_id']} over {gravity['distance_ft']} ft -- PUMP-REQUIRED: a "
-                "real cost/maintenance tradeoff, not a disqualification."
+                f"High point sits {abs(gravity['elevation_differential_ft'])} ft BELOW production "
+                f"area {gravity['production_area_id']}'s high point, over {gravity['distance_ft']} ft "
+                "-- PUMP-REQUIRED: a real cost/maintenance tradeoff, not a disqualification. Even a "
+                "pond sited at this area's high end would not reach all of that block by gravity."
             )
         overlaps = region["overlaps"]
 

@@ -240,6 +240,7 @@ PRODUCTION_AREAS = [
     {
         "id": 0,
         "representative_elevation_m": -5.0,
+        "max_elevation_m": -5.0,
         "polygon_utm": box(500080.0, 4499750.0, 500120.0, 4499800.0),
         "render_fill_polygon_utm": box(500080.0, 4499750.0, 500120.0, 4499800.0),
     }
@@ -393,6 +394,7 @@ BELOW_PRODUCTION_AREAS = [
     {
         "id": 0,
         "representative_elevation_m": 100.0,
+        "max_elevation_m": 100.0,
         "polygon_utm": box(500080.0, 4499750.0, 500120.0, 4499800.0),
         "render_fill_polygon_utm": box(500080.0, 4499750.0, 500120.0, 4499800.0),
     }
@@ -587,12 +589,23 @@ print(
 # --- (not silently falling back to the self-computed default) -----------
 #
 # Same override_result run above (BASELINE_PRODUCTION_AREAS) vs. a second run using
-# a copy of those same patches with every representative_elevation_m shifted sharply
-# UP (simulating a much higher production area) -- if production_areas were silently
-# ignored, both runs would score identically; they must not.
+# a copy of those same patches lifted bodily 500 m -- simulating a much higher
+# production area. If production_areas were silently ignored, both runs would score
+# identically; they must not.
+#
+# BOTH ELEVATIONS MOVE, because a patch lifted 500 m has its median AND its high
+# point 500 m higher, and the gravity relationship is computed off the high point
+# (water_candidate_zones._zone_production_area_relationships(): max-to-max, both
+# sides). Raising only representative_elevation_m would leave the patch internally
+# inconsistent -- and would make this test pass or fail on which field the rule
+# happens to read, which is the opposite of what it is here to prove.
 
 RAISED_PRODUCTION_AREAS = [
-    {**patch, "representative_elevation_m": patch["representative_elevation_m"] + 500.0}
+    {
+        **patch,
+        "representative_elevation_m": patch["representative_elevation_m"] + 500.0,
+        "max_elevation_m": patch["max_elevation_m"] + 500.0,
+    }
     for patch in BASELINE_PRODUCTION_AREAS
 ]
 
@@ -623,18 +636,18 @@ for zone_id in common_ids:
     raised_gravity = raised_by_id[zone_id]["gravity_feed_factor"]
     if baseline_gravity != raised_gravity:
         differed = True
-    # a candidate zone sits at a roughly fixed real elevation -- pushing its served
-    # production area's representative_elevation_m up by 500m must never make its
-    # gravity relationship MORE favorable, only equal or worse (it can never make the
-    # candidate more "above" a production area that just got raised further above it).
+    # a candidate zone sits at a roughly fixed real elevation -- lifting its served
+    # production area 500m must never make its gravity relationship MORE favorable,
+    # only equal or worse (it can never make the candidate more "above" a production
+    # area that just got raised further above it).
     assert raised_gravity <= baseline_gravity, (
         f"zone {zone_id}: raising the served production area's elevation by 500m must not improve "
         f"gravity_feed_factor (baseline={baseline_gravity}, raised={raised_gravity})"
     )
-assert differed, "raising every overridden production area's representative_elevation_m by 500m must change at least one zone's gravity_feed_factor -- production_areas is being silently ignored otherwise"
+assert differed, "lifting every overridden production area 500m must change at least one zone's gravity_feed_factor -- production_areas is being silently ignored otherwise"
 print(
-    "Scoring output genuinely reflects the overridden production_areas: raising every overridden patch's "
-    "representative_elevation_m by 500m correctly lowers (never improves) the served zone(s)' "
+    "Scoring output genuinely reflects the overridden production_areas: lifting every overridden patch "
+    "500m (both its median and its high point) correctly lowers (never improves) the served zone(s)' "
     "gravity_feed_factor, proving the override isn't silently falling back to self-computed patches."
 )
 

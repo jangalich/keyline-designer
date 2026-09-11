@@ -2182,7 +2182,12 @@ production_patch = {
     "id": 7,
     "polygon_utm": FLAT_BOUNDARY.buffer(30.0),
     "render_fill_polygon_utm": FLAT_BOUNDARY.buffer(30.0),
-    "representative_elevation_m": 150.0,  # 50 m ABOVE the zone -> pump required
+    "representative_elevation_m": 150.0,
+    # 50 m ABOVE the zone's own high point -> pump required. The gravity
+    # rule is max-to-max (water_candidate_zones._zone_production_area_
+    # relationships()), so this is the number that decides it; a flat
+    # fixture patch's median and maximum are the same value anyway.
+    "max_elevation_m": 150.0,
 }
 hit_result = compute_water_survey_areas(
     FLAT_DEM,
@@ -2264,6 +2269,255 @@ assert narrative["selection"]["selected_zone_id"] == hit_zone["id"]
 gravity_block = zone_block["gravity"]
 assert gravity_block["can_gravity_feed"] is False and gravity_block["production_area_id"] == 7
 print("narrative_data: JSON-clean, all zones, dual acreage, per-criterion scores, TWI caveat, pump case surfaced.")
+
+
+# =========================================================================
+# 5b. GRAVITY IS HIGH POINT TO HIGH POINT -- the correctness fix
+# =========================================================================
+#
+# THE BUG THIS SECTION EXISTS FOR, found in live testing: a water zone
+# sitting only slightly above a production block's LOWEST ground came back
+# reported as GRAVITY FEED. The rule compared the two sides' MEDIANS, so a
+# pond that could water the block's bottom corner and nothing else read as
+# a gravity relationship to the whole block.
+#
+# THE RULE NOW: the zone's MAXIMUM elevation must be above the production
+# block's MAXIMUM elevation. Max-to-max, both sides -- gravity delivery has
+# to reach the WHOLE block, so the block's high corner is the reference;
+# and since a SURVEY AREA IS NOT A POND (none has been sited in it), the
+# area's own high ground is the best case a design could still achieve
+# there, which is what "gravity feed" now claims and no more.
+#
+# GEOMETRY BUILT TO THE CASE, not a hand-set pair of numbers. Both blocks
+# below are REAL cell populations on a REAL DEM, and both of their
+# elevations are taken with production_area.cluster_and_gate()'s own two
+# expressions (median and max over the cluster's cells) so the fixture
+# cannot drift away from what the pipeline computes.
+
+_GRAV_WATER_ELEVATION = 100.0
+_grav_array = np.full((20, 20), _GRAV_WATER_ELEVATION)
+# THE STRADDLING BLOCK, south of the water ground and outside the parcel
+# boundary: four cell-rows ramping 90 -> 92 -> 98 -> 120. Its LOW point
+# (90) is below the water zone's 100, its HIGH point (120) is above it,
+# and its MEDIAN lands at 95 -- below the water zone too. That median is
+# precisely what used to answer "gravity feed" here.
+_grav_array[16, 5:15] = 90.0
+_grav_array[17, 5:15] = 92.0
+_grav_array[18, 5:15] = 98.0
+_grav_array[19, 5:15] = 120.0
+# THE FULLY-BELOW BLOCK, north of it: the same shape, topping out at 98 --
+# under the water zone's 100 at every cell, including its high corner.
+_grav_array[0, 5:15] = 90.0
+_grav_array[1, 5:15] = 92.0
+_grav_array[2, 5:15] = 96.0
+_grav_array[3, 5:15] = 98.0
+_GRAV_DEM = _dem(_grav_array)
+
+
+def _grav_block(block_id, row_lo, row_hi):
+    """A production patch over rows row_lo..row_hi (inclusive), cols 5..14,
+    with BOTH elevations read off the DEM by production_area.cluster_and_
+    gate()'s own expressions over the block's own cells."""
+    polygon = box(
+        ORIGIN_X + 5 * RESOLUTION + 0.1,
+        ORIGIN_Y - (row_hi + 1) * RESOLUTION + 0.1,
+        ORIGIN_X + 15 * RESOLUTION - 0.1,
+        ORIGIN_Y - row_lo * RESOLUTION - 0.1,
+    )
+    cells = [(r, c) for r in range(row_lo, row_hi + 1) for c in range(5, 15)]
+    elevations = [float(_grav_array[r, c]) for r, c in cells]
+    return {
+        "id": block_id,
+        "cells": cells,
+        "polygon_utm": polygon,
+        "render_fill_polygon_utm": polygon,
+        "representative_elevation_m": float(np.median(elevations)),
+        "max_elevation_m": float(np.max(elevations)),
+    }
+
+
+_STRADDLING_BLOCK = _grav_block(11, 16, 19)
+_BELOW_BLOCK = _grav_block(12, 0, 3)
+
+# The fixture says what it claims to say, before anything is asserted
+# ABOUT it -- a straddling block whose median failed to straddle would
+# make test 1 below pass for the wrong reason.
+assert _STRADDLING_BLOCK["representative_elevation_m"] == 95.0
+assert _STRADDLING_BLOCK["max_elevation_m"] == 120.0
+assert min(float(_grav_array[r, c]) for r, c in _STRADDLING_BLOCK["cells"]) == 90.0
+assert _BELOW_BLOCK["representative_elevation_m"] == 94.0
+assert _BELOW_BLOCK["max_elevation_m"] == 98.0
+
+
+def _grav_run(production_areas):
+    result = compute_water_survey_areas(
+        _GRAV_DEM,
+        FLAT_BOUNDARY,
+        production_areas=production_areas,
+        soil_inputs=GOOD_WET_SOIL_INPUTS,
+    )
+    zone = result["zones_by_type"][SURVEY_TYPE_EXCAVATED][0]
+    assert zone["max_elevation_m"] == _GRAV_WATER_ELEVATION, (
+        "the water ground is flat at 100 m, so the zone's high point IS 100 -- this fixture's "
+        "whole arithmetic rides on that"
+    )
+    return result, zone
+
+
+# --- 1. THE BUG: above the block's LOW point, below its HIGH point -------
+_straddle_result, _straddle_zone = _grav_run([_STRADDLING_BLOCK])
+_straddle_primary = _straddle_zone["primary_production_area_relationship"]
+assert _straddle_primary is not None and _straddle_primary["production_area_id"] == 11
+# The case, stated as the inequalities that define it:
+assert _GRAV_WATER_ELEVATION > min(float(_grav_array[r, c]) for r, c in _STRADDLING_BLOCK["cells"])
+assert _GRAV_WATER_ELEVATION < _STRADDLING_BLOCK["max_elevation_m"]
+assert _straddle_primary["above_production_area"] is False, (
+    "THE BUG, PINNED: a zone whose high point clears the block's LOW ground but not its HIGH "
+    "ground cannot gravity-feed that block -- water would reach the bottom corner and nothing "
+    "else. It is PUMP REQUIRED, and it read as gravity feed for as long as the rule compared "
+    "the two medians"
+)
+assert _straddle_primary["elevation_differential_m"] == round(
+    _GRAV_WATER_ELEVATION - _STRADDLING_BLOCK["max_elevation_m"], 2
+) == -20.0, "max-to-max, both sides -- not 100 - 95 = +5, which is what the medians said"
+# And the panel and the report say it too, in the vocabulary each uses.
+_straddle_panel = {row["key"]: row for row in wsa.build_zone_panel(_straddle_zone, True, {})}
+assert _straddle_panel["water_delivery"]["value"] == wsa.WATER_DELIVERY_PUMP
+assert "PUMP-REQUIRED" in _straddle_zone["confidence_notes"]
+assert "HIGH POINT TO HIGH POINT" in _straddle_zone["confidence_notes"], (
+    "a reader who wants to know what 'gravity feed' would have meant here must be able to find "
+    "out from the zone itself, not from this module's source"
+)
+
+# --- 2. ABOVE THE BLOCK'S HIGH POINT -> gravity feed ---------------------
+_below_result, _below_zone = _grav_run([_BELOW_BLOCK])
+_below_primary = _below_zone["primary_production_area_relationship"]
+assert _below_primary is not None and _below_primary["production_area_id"] == 12
+assert _GRAV_WATER_ELEVATION > _BELOW_BLOCK["max_elevation_m"], "the case: clear of the high corner"
+assert _below_primary["above_production_area"] is True, (
+    "clearing the block's HIGH point is what gravity feed means -- every lower part of the "
+    "block is then downhill of the pond"
+)
+assert _below_primary["elevation_differential_m"] == 2.0, "100 - 98, max to max"
+_below_panel = {row["key"]: row for row in wsa.build_zone_panel(_below_zone, True, {})}
+assert _below_panel["water_delivery"]["value"] == wsa.WATER_DELIVERY_GRAVITY
+assert "A SURVEY AREA IS NOT A POND" in _below_zone["confidence_notes"], (
+    "the gravity claim is a BEST CASE -- a pond sited at this area's high end could reach that "
+    "block's high end -- and the zone has to say so where the claim is made"
+)
+
+# --- 3. ALL THREE STATES STILL REACHABLE ---------------------------------
+# The structures branch established that below-elevation SURVIVES as "a
+# pump would be needed" rather than collapsing into "no". Three answers,
+# and every one of them reachable on this one fixture.
+_far_block = _grav_block(13, 16, 19)
+_far_block["polygon_utm"] = box(
+    ORIGIN_X + 5000.0, ORIGIN_Y - 5000.0, ORIGIN_X + 5030.0, ORIGIN_Y - 4970.0
+)
+_far_block["render_fill_polygon_utm"] = _far_block["polygon_utm"]
+_none_result, _none_zone = _grav_run([_far_block])
+assert _none_zone["primary_production_area_relationship"] is None
+assert _none_zone["has_service_relationship"] is False
+assert FLAG_NO_SERVICE_RELATIONSHIP in _none_zone["flags"]
+_none_panel = {row["key"]: row for row in wsa.build_zone_panel(_none_zone, True, {})}
+assert _none_panel["water_delivery"]["value"] == wsa.WATER_DELIVERY_NONE
+assert "water_delivery_differential" not in _none_panel, (
+    "no relationship means NO differential row -- a 0 ft differential to no production area is "
+    "the fabricated zero this module refuses everywhere"
+)
+_THREE_STATES = {
+    _straddle_panel["water_delivery"]["value"],
+    _below_panel["water_delivery"]["value"],
+    _none_panel["water_delivery"]["value"],
+}
+assert _THREE_STATES == {
+    wsa.WATER_DELIVERY_GRAVITY,
+    wsa.WATER_DELIVERY_PUMP,
+    wsa.WATER_DELIVERY_NONE,
+}, "three answers, not two -- the stricter rule moves zones between the first two, never deletes one"
+# NEVER A GATE, under the stricter rule as under the old one: both the
+# pump-required zone and the no-relationship zone still survive and still
+# get selected on a parcel where they are the only candidate.
+for _result, _zone in ((_straddle_result, _straddle_zone), (_none_result, _none_zone)):
+    assert _zone["status"] == wsa.ZONE_STATUS_NOMINATED
+    assert _result["selected_water_zone"] is _zone
+
+# --- 4. WHAT THE OLD RULE WOULD HAVE SAID, on this same fixture ----------
+# The before/after measure, made mechanical: the retired rule re-computed
+# here from the SAME zone and the SAME blocks, so the count this fix moves
+# is asserted rather than remembered.
+def _old_rule_gravity(zone, block):
+    return zone["representative_elevation_m"] > block["representative_elevation_m"]
+
+
+def _new_rule_gravity(zone, block):
+    return zone["max_elevation_m"] > block["max_elevation_m"]
+
+
+_BEFORE = [
+    _old_rule_gravity(z, b)
+    for z, b in ((_straddle_zone, _STRADDLING_BLOCK), (_below_zone, _BELOW_BLOCK))
+]
+_AFTER = [
+    _new_rule_gravity(z, b)
+    for z, b in ((_straddle_zone, _STRADDLING_BLOCK), (_below_zone, _BELOW_BLOCK))
+]
+assert sum(_BEFORE) == 2, "the old median-to-median rule called BOTH of these gravity feed"
+assert sum(_AFTER) == 1, "the high-point rule keeps one and moves the straddling one to pump"
+print(
+    "Gravity is HIGH POINT TO HIGH POINT: a zone clearing a block's low ground (90) but not its "
+    "high ground (120) reports PUMP REQUIRED where the retired median rule reported gravity feed "
+    "(-20.0 m, not +5.0 m); a zone clearing the high corner (98) still reports gravity feed; all "
+    "three delivery answers reachable, and neither of the two non-gravity ones gates a zone. On "
+    "this fixture the old rule called 2 of 2 gravity feed, the new rule calls 1 of 2."
+)
+
+
+# --- DEPTH IS IN FEET ON THE WIRE ----------------------------------------
+# The report's global rule is imperial, and the conversion happens in the
+# module beside _feet()'s other callers -- never downstream, where two
+# consumers converting is two chances to forget.
+_depth_zone = _straddle_zone
+_depth_properties = wsa._zone_feature_properties(_depth_zone)
+assert "depression_depth_max_m" not in _depth_properties, (
+    "the metric name must be GONE from the wire, not shipped beside the converted one -- a "
+    "consumer that can read either is a consumer that will read the wrong one"
+)
+assert _depth_properties["depression_depth_max_ft"] == wsa._feet(_depth_zone["depression_depth_max_m"])
+assert _depth_zone["depression_depth_max_m"] is not None, (
+    "this fixture's depth is a real MEASURED number (0.0 on ground with no depression is a "
+    "measurement, not a gap), so the conversion is arithmetic and not a None passing through"
+)
+assert math.isclose(
+    _depth_properties["depression_depth_max_ft"],
+    round(_depth_zone["depression_depth_max_m"] / wsa.METERS_PER_FOOT, 1),
+), "feet, by the module's own constant"
+# THE DIRECTION, ON A NONZERO PROBE. This fixture's own ground is flat, so
+# its depth is a true 0.0 and 0.0 m == 0.0 ft -- which is exactly the value
+# a conversion that silently did nothing would also produce. The converter
+# is therefore checked on a depth that can tell the two apart, through the
+# same _feet() the property builder calls.
+assert wsa._feet(2.0) == 6.6 > 2.0, (
+    "a depth in feet is a BIGGER number than the same depth in metres -- 2 m is 6.6 ft"
+)
+# None survives the conversion as None (never coerced to 0.0), and the
+# member features carry the same converted name for the same reason.
+assert wsa._feet(None) is None
+_depth_member_properties = wsa._member_feature_properties(_straddle_result["regions"][0])
+assert "depression_depth_max_m" not in _depth_member_properties
+assert _depth_member_properties["depression_depth_max_ft"] == wsa._feet(
+    _straddle_result["regions"][0]["depression_depth_max_m"]
+)
+# narrative_data was already imperial here and still is -- one name, one
+# unit, whichever side a consumer reads it from.
+_depth_narrative = build_narrative_data(_straddle_result)
+assert _depth_narrative["zones"][0]["depression_depth_max_ft"] == _depth_properties["depression_depth_max_ft"]
+print(
+    f"Depth is FEET on the wire: depression_depth_max_ft = "
+    f"{_depth_properties['depression_depth_max_ft']} ft off a stored "
+    f"{_depth_zone['depression_depth_max_m']} m, the metric name absent from both the zone and "
+    f"the member feature, None still None, and narrative_data agreeing on the same name and unit."
+)
 
 
 # =========================================================================

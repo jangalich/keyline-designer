@@ -644,6 +644,7 @@ wz_full_extent = box(500000.0, 4500000.0 - 100.0, 500000.0 + 100.0, 4500000.0)
 wz_production_area = {
     "id": 0,
     "representative_elevation_m": 50.0,
+    "max_elevation_m": 50.0,
     "polygon_utm": box(500000.0, 4500000.0 - 130.0, 500000.0 + 20.0, 4500000.0 - 100.0),
     # Deliberately overlaps the water zone's own render opening -- see the corresponding
     # test_water_candidate_zones.py check for why this is the expected, allowed outcome

@@ -1546,6 +1546,18 @@ def cluster_and_gate(
                     "id": next_id,
                     "area_acres": round(float(area_acres), 2),
                     "representative_elevation_m": float(np.median(elevations)),
+                    # THE PATCH'S HIGH POINT, stored beside its median.
+                    # Gravity delivery to a production block means water
+                    # reaching the WHOLE block, so the block's reference
+                    # elevation for that question is its HIGHEST ground,
+                    # not its typical ground -- see water_candidate_zones.
+                    # _zone_production_area_relationships(), which reads
+                    # this field and nothing else for the gravity answer.
+                    # Computed here, over the same `elevations` the median
+                    # is taken from, because this is where the cluster's
+                    # cells and the cached DEM are both in hand; every
+                    # consumer of a patch gets it without a second pass.
+                    "max_elevation_m": float(np.max(elevations)),
                     "polygon_utm": polygon_utm,
                     "render_fill_polygon_utm": render_fill_polygon_utm,
                     "render_fill_area_acres": render_fill_area_acres,
@@ -1578,7 +1590,12 @@ def identify_production_areas(
         {
             'id': int,
             'area_acres': float,
-            'representative_elevation_m': float,
+            'representative_elevation_m': float,   # median over 'cells'
+            'max_elevation_m': float,              # max over 'cells' -- the
+                                                   # block's HIGH POINT, which
+                                                   # is what gravity delivery
+                                                   # to the whole block is
+                                                   # referenced against
             'polygon_utm': shapely Polygon/MultiPolygon,
             'render_fill_polygon_utm': shapely Polygon/MultiPolygon,  # bounded opening of the cluster
                                                                    # mask, clipped to polygon_utm -- see cluster_and_gate()

@@ -776,6 +776,18 @@ def _confidence_for(soil_data: Optional[dict], stream_data: Optional[dict]) -> s
 
 # --- confidence_notes -------------------------------------------------
 
+# The high-point-to-high-point caveat, in this module's own voice (see
+# water_candidate_zones._zone_production_area_relationships() for the rule
+# itself and why each side takes its maximum).
+_GRAVITY_BEST_CASE_CAVEAT = (
+    "Measured HIGH POINT TO HIGH POINT: gravity delivery has to reach the WHOLE production "
+    "area, so its high corner is the reference, and this candidate's own high point is what is "
+    "compared against it. A CANDIDATE ZONE IS NOT A POND -- none has been sited within it yet -- "
+    "so this is the best case the design could still achieve (a pond sited at this zone's high "
+    "end could reach that production area's high end), not a measurement of a built thing."
+)
+
+
 def _gravity_note(primary_relationship: dict) -> str:
     differential = primary_relationship["elevation_differential_m"]
     distance = primary_relationship["distance_m"]
@@ -784,16 +796,17 @@ def _gravity_note(primary_relationship: dict) -> str:
 
     if primary_relationship["above_production_area"]:
         return (
-            f"Sits {differential}m above production area {production_area_id} over {distance}m "
-            f"({gradient}% grade) -- a real gravity-feed relationship."
+            f"High point sits {differential}m above production area {production_area_id}'s high "
+            f"point, over {distance}m ({gradient}% grade) -- a real gravity-feed relationship. "
+            f"{_GRAVITY_BEST_CASE_CAVEAT}"
         )
     return (
-        f"Sits {abs(differential)}m BELOW production area {production_area_id} over {distance}m "
-        f"({gradient}% grade) -- delivering water to that production area from here would need a "
-        "pump. This is a real cost/maintenance tradeoff against this candidate's other real "
-        "qualities (soil water-holding, stream access, topography) reflected in gravity_feed_factor "
-        "below -- it is not a defect in the site itself, and this candidate remains a real, valid, "
-        "scoreable option."
+        f"High point sits {abs(differential)}m BELOW production area {production_area_id}'s high "
+        f"point, over {distance}m ({gradient}% grade) -- watering all of that production area from "
+        "here would need a pump. This is a real cost/maintenance tradeoff against this candidate's "
+        "other real qualities (soil water-holding, stream access, topography) reflected in "
+        "gravity_feed_factor below -- it is not a defect in the site itself, and this candidate "
+        f"remains a real, valid, scoreable option. {_GRAVITY_BEST_CASE_CAVEAT}"
     )
 
 
