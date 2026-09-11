@@ -52,7 +52,7 @@ from raster_grid import elevation_range_in_polygon
 from report_generator import _format_elevation_summary
 
 # The reference parcel -- the same real drawn boundary generate_full_
-# report.py, dem_data.py, test_elevation_grid.py and test_session_manager.py
+# report.py, dem_data.py, _elevation_grid_probe.py and test_session_manager.py
 # all use (5614 N Montour Rd, Gibsonia, PA; ~13.23 acres, UTM 17N). Every
 # timing quoted in this branch is this parcel's.
 REFERENCE_PARCEL = [

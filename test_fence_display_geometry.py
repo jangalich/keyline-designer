@@ -48,6 +48,14 @@ import time
 from contextlib import ExitStack, redirect_stdout
 from unittest.mock import patch as mock_patch
 
+# OFFLINE BY CONSTRUCTION: every outbound request is refused instantly and
+# the retry pause is zero, so the graceful-degradation paths this file
+# exercises run without waiting on a network it cannot reach
+# (offline_harness.py). Mocks installed below still take precedence.
+import offline_harness  # noqa: E402
+
+offline_harness.install()
+
 _captured = io.StringIO()
 try:
     with redirect_stdout(_captured):

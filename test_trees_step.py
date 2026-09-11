@@ -107,23 +107,9 @@ from raster_grid import SQUARE_METERS_PER_ACRE, pixel_center_xy
 
 # --- the real property, verbatim from B2, B4, B5a, B5b, water and roads -
 
-REAL_BOUNDARY = [
-    (-79.9838154, 40.6458343),
-    (-79.9836701, 40.6428581),
-    (-79.9813665, 40.6440549),
-    (-79.9804741, 40.6445667),
-    (-79.9827466, 40.6458894),
-    (-79.9838258, 40.6458343),
-]
-
-_mean_lon = sum(lon for lon, _ in REAL_BOUNDARY) / len(REAL_BOUNDARY)
-_mean_lat = sum(lat for _, lat in REAL_BOUNDARY) / len(REAL_BOUNDARY)
-CRS = f"EPSG:{_utm_epsg_for_lonlat(_mean_lon, _mean_lat)}"
-_xs, _ys = warp_transform(
-    "EPSG:4326", CRS, [lon for lon, _ in REAL_BOUNDARY], [lat for _, lat in REAL_BOUNDARY]
-)
-BOUNDARY_POLYGON_UTM = Polygon(zip(_xs, _ys))
-PARCEL_ACRES = BOUNDARY_POLYGON_UTM.area / SQUARE_METERS_PER_ACRE
+# The parcel, its UTM CRS, the projected polygon and its acreage -- one
+# definition shared by every step test (see reference_fixture.py).
+from reference_fixture import BOUNDARY_POLYGON_UTM, CRS, PARCEL_ACRES, REAL_BOUNDARY  # noqa: E402
 
 
 def _boundary_point(edge_index: int, fraction: float) -> tuple:

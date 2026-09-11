@@ -31,6 +31,14 @@ from valley_delineation import delineate_valleys
 import water_candidate_zones as wcz
 from water_candidate_zones import identify_water_system_candidate_zones
 
+# OFFLINE BY CONSTRUCTION: every outbound request is refused instantly and
+# the retry pause is zero, so the graceful-degradation paths this file
+# exercises run without waiting on a network it cannot reach
+# (offline_harness.py). Mocks installed below still take precedence.
+import offline_harness  # noqa: E402
+
+offline_harness.install()
+
 # identify_water_system_candidate_zones() calls production_area.identify_production_areas()
 # internally with no check_soil/check_canopy passthrough of its own (water_candidate_zones.py
 # is unchanged by the canopy-gate work) -- and that gate is now mandatory, with a fetch

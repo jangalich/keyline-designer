@@ -60,6 +60,14 @@ from water_suitability import (
     water_suitability_to_geojson,
 )
 
+# OFFLINE BY CONSTRUCTION: every outbound request is refused instantly and
+# the retry pause is zero, so the graceful-degradation paths this file
+# exercises run without waiting on a network it cannot reach
+# (offline_harness.py). Mocks installed below still take precedence.
+import offline_harness  # noqa: E402
+
+offline_harness.install()
+
 CRS = "EPSG:32617"
 
 assert abs(_WEIGHT_SUM - 1.0) < 1e-6, f"composite weights must sum to 1.0, got {_WEIGHT_SUM}"

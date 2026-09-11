@@ -141,6 +141,14 @@ from dem_data import _utm_epsg_for_lonlat
 # import of the same single object).
 from water_suitability import NO_WATER_ZONE
 
+# OFFLINE BY CONSTRUCTION: every outbound request is refused instantly and
+# the retry pause is zero, so the graceful-degradation paths this file
+# exercises run without waiting on a network it cannot reach
+# (offline_harness.py). Mocks installed below still take precedence.
+import offline_harness  # noqa: E402
+
+offline_harness.install()
+
 # --- synthetic DEM: real-world centroid so the UTM zone/CRS math is genuine ---
 
 CENTER_LON, CENTER_LAT = -79.98, 40.64

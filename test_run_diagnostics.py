@@ -163,23 +163,9 @@ class Diagnostics:
 
 # --- the real property, verbatim from B2, B4, B5a, B5b, water and roads -
 
-REAL_BOUNDARY = [
-    (-79.9838154, 40.6458343),
-    (-79.9836701, 40.6428581),
-    (-79.9813665, 40.6440549),
-    (-79.9804741, 40.6445667),
-    (-79.9827466, 40.6458894),
-    (-79.9838258, 40.6458343),
-]
-
-_mean_lon = sum(lon for lon, _ in REAL_BOUNDARY) / len(REAL_BOUNDARY)
-_mean_lat = sum(lat for _, lat in REAL_BOUNDARY) / len(REAL_BOUNDARY)
-CRS = f"EPSG:{_utm_epsg_for_lonlat(_mean_lon, _mean_lat)}"
-_xs, _ys = warp_transform(
-    "EPSG:4326", CRS, [lon for lon, _ in REAL_BOUNDARY], [lat for _, lat in REAL_BOUNDARY]
-)
-BOUNDARY_POLYGON_UTM = Polygon(zip(_xs, _ys))
-PARCEL_ACRES = BOUNDARY_POLYGON_UTM.area / SQUARE_METERS_PER_ACRE
+# The parcel, its UTM CRS, the projected polygon and its acreage -- one
+# definition shared by every step test (see reference_fixture.py).
+from reference_fixture import BOUNDARY_POLYGON_UTM, CRS, PARCEL_ACRES, REAL_BOUNDARY  # noqa: E402
 
 
 def _boundary_point(edge_index: int, fraction: float) -> tuple:
@@ -1841,14 +1827,17 @@ print(
 # overlap, so "which layer is this run on" has an answer and the times add
 # up rather than merging.
 #
-# EACH LAYER IS GIVEN A DIFFERENT, KNOWN WAIT (2 ms, 4 ms, ... 26 ms) so
+# EACH LAYER IS GIVEN A DIFFERENT, KNOWN WAIT (10 ms, 20 ms, ... 120 ms) so
 # the assertion is not just "twelve numbers appeared" but "row N carries
 # LAYER N's wait". A recorder that mixed up which timer belonged to which
 # call, or that recorded one clock twelve times, passes the first and
 # fails the second.
 
 _cold_dir = tempfile.mkdtemp(prefix="run_diagnostics_cold_")
-_STEP_SECONDS = 0.002
+# 10 ms steps, not 2: the rows are asserted to be in increasing order, and
+# a 2 ms gap is inside the overshoot of one time.sleep() on a loaded box --
+# run_tests.py runs this file beside three others, and it reordered.
+_STEP_SECONDS = 0.01
 _DELAYS = {
     layer: (index + 1) * _STEP_SECONDS
     for index, layer in enumerate(parcel_data.FETCH_LAYERS)
@@ -2242,6 +2231,13 @@ assert all("not published by" in row["retry_sleep_source"] for row in _cold_laye
 # that are not retrying modules at all are not, and must not be.
 import fetch_attempts
 
+# The pause between retry attempts, shortened for the same reason
+# test_fetch_attempts.py shortens it: the loop MEASURES its pause and the
+# record reads the measurement, and that is true at 50 ms as at 2 s.
+assert fetch_attempts.RETRY_PAUSE_SECONDS == 2.0, fetch_attempts.RETRY_PAUSE_SECONDS
+fetch_attempts.RETRY_PAUSE_SECONDS = 0.05
+_TWO_PAUSES_MS = 2 * fetch_attempts.RETRY_PAUSE_SECONDS * 1000.0
+
 _REAL_ENTRY_POINTS = [
     soil_data.get_soil_data_for_polygon,
     soil_data.get_soil_geometries_for_polygon,
@@ -2321,7 +2317,7 @@ assert len(_helpers) >= 5, sorted(_helpers)
 # TWO RUNS, DIFFERING ONLY IN WHAT THE TRANSPORT DOES. The first answers
 # immediately; the second raises two REAL requests exceptions before it
 # answers, which makes the loop run for real -- three attempts and two
-# actual time.sleep(2) pauses. Nothing about the verdict is stubbed: the
+# actual RETRY_PAUSE_SECONDS pauses. Nothing about the verdict is stubbed: the
 # failure is induced at requests.post, exactly where a slow USDA server's
 # failure appears.
 
@@ -2388,12 +2384,12 @@ assert _clean_row["attempt_detail"]["returned_sentinel"] is False
 _retry_row, _retry_event, _retry_transport = _real_soil_fetch(failures=2)
 
 # THE MEASUREMENT THE RECORD COULD NOT MAKE BEFORE. Same layer, same
-# parcel, same code -- three attempts instead of one, and four seconds of
+# parcel, same code -- three attempts instead of one, and two pauses of
 # it spent asleep. Before this branch these two rows differed only in
 # elapsed_ms, and nothing said why.
 assert _retry_transport.calls == 3, _retry_transport.calls
 assert _retry_row["attempts"] == 3, _retry_row
-assert _retry_row["retry_sleep_ms"] >= 4000.0, _retry_row
+assert _retry_row["retry_sleep_ms"] >= _TWO_PAUSES_MS, _retry_row
 assert _retry_row["retry_sleep_ms"] < _retry_row["elapsed_ms"], _retry_row
 assert _retry_row["attempt_detail"]["helpers"]["soil_data._run_sda_query"]["calls"] == 1
 assert _retry_row["attempt_detail"]["helpers"]["soil_data._run_sda_query"]["attempts"] == 3

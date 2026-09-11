@@ -15,7 +15,7 @@ publishing to the standard the record needs:
 
   1  A LAYER THAT RETRIES PUBLISHES ITS TRUE COUNT. Induced at the
      REQUEST BOUNDARY -- two real requests exceptions out of
-     requests.post/requests.get, two real time.sleep(2) pauses, and the
+     requests.post/requests.get, two real RETRY_PAUSE_SECONDS pauses, and the
      count and the slept milliseconds read back off the module. THE ONE
      THAT MATTERS: a stubbed verdict would prove nothing about a loop.
   2  A LAYER THAT SUCCEEDS FIRST TIME PUBLISHES 1 -- not 0, not null.
@@ -53,6 +53,19 @@ import canopy_cover_data
 import canopy_height_data
 import farm_roads_data
 import fetch_attempts
+
+# THE PAUSE IS SHORT HERE, AND MEASURED AGAINST ITS OWN LENGTH. The loops
+# sleep fetch_attempts.RETRY_PAUSE_SECONDS between attempts -- 2.0 in
+# production, pinned below. What this file proves is that the pause is
+# MEASURED and PUBLISHED by the loop that slept, and a 50 ms pause proves
+# that exactly as well as a two-second one; the two-second version cost
+# this file thirty seconds of wall clock per run and proved nothing extra.
+# Every sleep assertion below is relative to the value set here.
+assert fetch_attempts.RETRY_PAUSE_SECONDS == 2.0, fetch_attempts.RETRY_PAUSE_SECONDS
+RETRY_PAUSE_SECONDS = 0.05
+fetch_attempts.RETRY_PAUSE_SECONDS = RETRY_PAUSE_SECONDS
+ONE_PAUSE_MS = RETRY_PAUSE_SECONDS * 1000.0
+TWO_PAUSES_MS = 2 * ONE_PAUSE_MS
 import hydrology_data
 import imagery_data
 import run_diagnostics
@@ -158,7 +171,7 @@ WKT = soil_data.coordinates_to_wkt_polygon(BOUNDARY)
 # where a slow USDA server's failure actually appears -- not a stubbed
 # _run_sda_query, which would prove only that a mock returns what it was
 # told to. The loop runs for real: three attempts at 30/60/90-second
-# timeouts with two real time.sleep(2) pauses between them, and what it
+# timeouts with two real RETRY_PAUSE_SECONDS pauses between them, and what it
 # publishes is read back off soil_data the way the record reads it.
 
 _flaky_post = Flaky(failures=2, response=SDAResponse())
@@ -183,11 +196,11 @@ _read, _source = run_diagnostics._published_attempts(soil_data.get_soil_data_for
 assert _read == 3, (_read, _source)
 assert _source == f"soil_data.{run_diagnostics.ATTEMPTS_ATTRIBUTE}", _source
 
-# THE PAUSES ARE MEASURED, NOT ASSUMED. Two real two-second sleeps, so
-# the published figure is at or just over 4000 ms -- and it is BELOW the
+# THE PAUSES ARE MEASURED, NOT ASSUMED. Two real sleeps of RETRY_PAUSE_SECONDS
+# each, so the published figure is at or just over TWO_PAUSES_MS -- and it is BELOW the
 # wall time of the whole call, because the requests themselves are not
 # free even when they fail instantly.
-assert _sleep_ms >= 4000.0, _sleep_ms
+assert _sleep_ms >= TWO_PAUSES_MS, _sleep_ms
 assert _sleep_ms <= (_wall_seconds * 1000.0), (_sleep_ms, _wall_seconds)
 assert _detail["helpers"] == {
     "soil_data._run_sda_query": {"calls": 1, "attempts": 3, "sleep_ms": _sleep_ms}
@@ -209,7 +222,7 @@ with patch.object(soil_data.requests, "post", _all_failing):
 _failed_attempts, _failed_sleep, _failed_detail = _published(soil_data)
 assert _failed_attempts == 3, _failed_attempts
 assert _all_failing.calls == 3, _all_failing.calls
-assert _failed_sleep >= 4000.0, _failed_sleep
+assert _failed_sleep >= TWO_PAUSES_MS, _failed_sleep
 assert _failed_detail["outcome"] == "raised", _failed_detail
 # Null and not False: a call that raised returned nothing to describe.
 assert _failed_detail["returned_sentinel"] is None, _failed_detail
@@ -219,7 +232,7 @@ print(
     f"requests.exceptions.ConnectTimeout induced at requests.post -- not a stubbed helper -- and "
     f"soil_data.get_soil_data_for_polygon() entered the transport {_flaky_post.calls} times, "
     f"published attempts={_attempts} and {_sleep_ms:.0f} ms of measured sleep (two real "
-    f"time.sleep(2) pauses) inside a {_wall_seconds * 1000.0:.0f} ms call, and still returned its "
+    f"{RETRY_PAUSE_SECONDS} s pauses) inside a {_wall_seconds * 1000.0:.0f} ms call, and still returned its "
     f"data. run_diagnostics._published_attempts() reads the 3 back by its own route, from "
     f"'soil_data.{run_diagnostics.ATTEMPTS_ATTRIBUTE}'. A transport that NEVER answers publishes "
     f"{_failed_attempts} attempts and outcome 'raised' -- the failing case still says what it cost."
@@ -386,7 +399,7 @@ assert _late_flaky.calls == 5, _late_flaky.calls
 assert _late_attempts == 5, _late_attempts
 assert _late_detail["helpers"]["farm_roads_data._query_road_layer"]["calls"] == 3
 assert _late_detail["helpers"]["farm_roads_data._query_road_layer"]["attempts"] == 5
-assert _late_sleep >= 4000.0, _late_sleep
+assert _late_sleep >= TWO_PAUSES_MS, _late_sleep
 
 # --- (c) imagery: three helper calls, the SECOND band read retrying ------
 #
@@ -443,7 +456,7 @@ _imagery_attempts, _imagery_sleep, _imagery_detail = _published(imagery_data)
 assert _imagery_attempts == 5, (_imagery_attempts, _imagery_detail)
 assert _imagery_detail["helpers"]["imagery_data._retry"]["calls"] == 3, _imagery_detail
 assert _imagery_detail["helpers"]["imagery_data._retry"]["attempts"] == 5, _imagery_detail
-assert _imagery_sleep >= 4000.0, _imagery_sleep
+assert _imagery_sleep >= TWO_PAUSES_MS, _imagery_sleep
 assert _summary is not None
 
 # THE ATTRIBUTION IS TO THE HELPER THAT OWNS THE LOOP, and reported as
@@ -528,8 +541,8 @@ assert all(_helpers[name]["sleeps_between_attempts"] for name in _loops), _helpe
 assert not any(_helpers[name]["sleeps_between_attempts"] for name in _pass_through), _helpers
 
 # ... AND THE MEASUREMENT IS THE SLEEP'S OWN, not the seconds asked for.
-# One induced failure is one pause: at least the 2 s time.sleep(2) is
-# contracted for, and not wildly beyond it.
+# One induced failure is one pause: at least the one RETRY_PAUSE_SECONDS pause
+# is contracted for, and not wildly beyond it.
 fetch_attempts.clear()
 _one_failure = Flaky(failures=1, response=ArcGISResponse())
 _hydro_started = time.perf_counter()
@@ -541,7 +554,7 @@ _hydro_attempts, _hydro_sleep, _hydro_detail = _published(hydrology_data)
 # Two layers queried (flowline, waterbody); the first retried once.
 assert _hydro_attempts == 3, _hydro_attempts
 assert _hydro_detail["helpers"]["hydrology_data._query_layer"]["calls"] == 2
-assert 2000.0 <= _hydro_sleep <= _hydro_wall_ms, (_hydro_sleep, _hydro_wall_ms)
+assert ONE_PAUSE_MS <= _hydro_sleep <= _hydro_wall_ms, (_hydro_sleep, _hydro_wall_ms)
 
 # WHERE IT CANNOT: dem_data does not retry, so it publishes nothing at
 # all -- and the reader reports that as an absence naming the module,
