@@ -191,7 +191,9 @@ exactly the same reason, applied to the SSURGO farmland lookup
 specifically — unchanged by this pass.
 """
 
+import hashlib
 import math
+from collections import OrderedDict
 from typing import Optional
 
 import numpy as np
@@ -731,6 +733,45 @@ def find_candidate_solar_zones(
 # candidate dict literal is the same literal, moved.
 
 
+# THE SHADING SCORE, ONCE PER DEM. compute_shading_score() is a horizon
+# search over every cell's southern arc -- 0.6 s on a 13-acre parcel at
+# 5 m, and it grows with the cell count and the search radius. It reads
+# the DEM and nothing else, yet _prepare_scoring_run() recomputed it on
+# every structures generate AND on every placed-site scoring: a user
+# dragging a structure pin paid for the whole grid again per drop, and
+# test_structures_step.py paid for it thirty times on one unchanging DEM.
+# Keyed on the array's bytes, shape, dtype and resolution, so a different
+# DEM -- a different parcel, a re-fetched grid, a synthetic fixture with
+# one cell changed -- is a different entry, and an identical one is a hit
+# whatever object carries it. A few entries: a process serves a handful
+# of sessions at a time and each session has one DEM. The cached array is
+# marked read-only so a consumer that tried to write into it would raise
+# rather than corrupt the next caller's copy; every reader below only
+# indexes it.
+_SHADING_CACHE_ENTRIES = 8
+_SHADING_CACHE: "OrderedDict[tuple, np.ndarray]" = OrderedDict()
+
+
+def _shading_score_for_dem(array: np.ndarray, resolution_meters) -> np.ndarray:
+    contiguous = np.ascontiguousarray(array)
+    key = (
+        hashlib.blake2b(contiguous.tobytes(), digest_size=16).hexdigest(),
+        contiguous.shape,
+        str(contiguous.dtype),
+        tuple(float(r) for r in resolution_meters),
+    )
+    cached = _SHADING_CACHE.get(key)
+    if cached is not None:
+        _SHADING_CACHE.move_to_end(key)
+        return cached
+    shading = compute_shading_score(array, resolution_meters)
+    shading.flags.writeable = False
+    _SHADING_CACHE[key] = shading
+    while len(_SHADING_CACHE) > _SHADING_CACHE_ENTRIES:
+        _SHADING_CACHE.popitem(last=False)
+    return shading
+
+
 def _prepare_scoring_run(
     dem: dict,
     production_areas: list[dict],
@@ -754,7 +795,7 @@ def _prepare_scoring_run(
     rows, cols = array.shape
 
     slope_pct, aspect_deg = compute_slope_and_aspect(array, resolution)
-    shading = compute_shading_score(array, resolution)
+    shading = _shading_score_for_dem(array, resolution)
 
     raw_production_union = (
         unary_union([p["render_fill_polygon_utm"] for p in production_areas]) if production_areas else None

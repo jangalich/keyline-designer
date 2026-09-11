@@ -36,8 +36,9 @@ ring touches itself at a vertex.
 THE FIXTURE, AND WHAT IT CAN AND CANNOT SHOW. Two parcels, both the real 5614
 N Montour Rd boundary:
 
-  - THE SHIPPED REFERENCE PARCEL, imported from test_trees_step.py -- the same
-    session that file has just proved sound, through the real generate. Its DEM
+  - THE SHIPPED REFERENCE PARCEL, imported from trees_step_fixture.py -- the
+    same session test_trees_step.py proves sound in its own run, through the
+    real generate. Its DEM
     is an ANALYTIC bench-and-drainage surface, so its slope field is smooth and
     its candidates come out as clean, hole-free polygons. It is the regression
     guard: every patch a real generate emits is valid, and that is asserted on
@@ -84,7 +85,7 @@ from contextlib import redirect_stdout
 _captured = io.StringIO()
 try:
     with redirect_stdout(_captured):
-        import test_trees_step as fixture
+        import trees_step_fixture as fixture
 except BaseException:
     sys.stdout.write(_captured.getvalue())
     raise

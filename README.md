@@ -617,6 +617,15 @@ layer should install the harness too; `python3 run_tests.py` prints the
 per-file times, and a file that is slow for no computational reason is
 almost always leaking a fetch.
 
+**Fixtures are modules, not test files.** A step test's parcel, DEM,
+mocked network, Harness and Session live in `<step>_step_fixture.py`
+(`fencing_step_fixture.py`, `trees_step_fixture.py`,
+`roads_step_fixture.py`), and a file that needs them imports the fixture
+module -- never `import test_x_step`, which runs that file's whole suite
+before the first line of your own. The roads sections are split across
+test_roads_step.py and test_roads_step_inputs.py for the same reason the
+runner is parallel: wall time is bounded by the longest file.
+
 **Tiers.** A file is in the fast tier unless `run_tests.py` names it in
 `FULL_ONLY`; promote a file there when it measures as slow. The `--live`
 flags some files accept reach the real USGS/USDA services and are never
