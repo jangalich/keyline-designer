@@ -206,7 +206,7 @@ assert step_registry.get_step("water").accumulate is None
 
 # THE TWO ROUTING CONSTANTS THIS BRANCH MOVED, asserted against the module
 # that owns them rather than restated here.
-assert road_network_router.MAX_ROAD_METERS_PER_SERVED_ACRE == 500.0
+assert road_network_router.MAX_ROAD_METERS_PER_SERVED_ACRE == 250.0
 assert road_network_router.PRODUCTION_SERVICE_RADIUS_METERS == 25.0
 assert not hasattr(road_corridors, "MIN_CORRIDOR_LENGTH_METERS"), (
     "the network-length floor is deleted, not merely unused: a constant left "

@@ -180,7 +180,16 @@ from hydrology_data import get_water_features_for_boundary
 from production_area import get_required_tree_root_zone_mask_utm
 from production_area_ceiling import identify_optimized_production_areas
 from raster_grid import binary_dilate, cell_area_acres, cell_union_footprint, pixel_center_xy
-from road_cost_path import build_cost_raster, path_cells_to_points_xyz
+# _BASE_TRAVEL_COST is PRIVATE to road_cost_path.py, and is imported here
+# deliberately rather than restated as a local literal: it is the unit the
+# cost raster's every other term is expressed in (see build_cost_raster()),
+# and _terrain_quality_score() below normalizes against exactly it. A copy
+# of the number here would go stale the moment road_cost_path re-scales its
+# own surface, and the score would keep reporting against a base the cost
+# raster no longer uses -- which is to say it would be meaningless while
+# still looking like a measurement. Reaching for the private name keeps the
+# two locked together.
+from road_cost_path import _BASE_TRAVEL_COST, build_cost_raster, path_cells_to_points_xyz
 from road_network_router import (
     MAX_ROAD_METERS_PER_SERVED_ACRE,
     MAX_WATER_SPUR_METERS,
@@ -643,6 +652,12 @@ def _empty_road_network(stop_reason: str, unserved_acres: float = 0.0) -> dict:
     return {
         "branches": [],
         "total_length_meters": 0.0,
+        # Uniform with route_road_network()'s own returned shape, which
+        # publishes a network-level "total_cost" summed over its surviving
+        # branches -- no branches, no accumulated cost. Carried here so
+        # every consumer can read the key off either producer without a
+        # membership test.
+        "total_cost": 0.0,
         "total_served_acres": 0.0,
         "unserved_acres": unserved_acres,
         "stop_reason": stop_reason,
@@ -929,6 +944,14 @@ def build_road_network(
     return {
         "branches": branches_out,
         "total_length_meters": network_result["total_length_meters"],
+        # Straight through from the router, which already summed it over
+        # the branches that survived its own leaf pruning. NOT re-derived
+        # from branches_out above: a sub-2-cell branch dropped there (no
+        # segment, no line to draw) is still real routed road the router
+        # paid accumulated cost for, and its length is still in
+        # total_length_meters -- dropping its cost while keeping its
+        # length would understate cost-per-meter and flatter the terrain.
+        "total_cost": network_result["total_cost"],
         "total_served_acres": network_result["total_served_acres"],
         "unserved_acres": network_result["unserved_acres"],
         "stop_reason": network_result["stop_reason"],
@@ -1010,11 +1033,22 @@ def corridors_to_geojson(
 # =====================================================================
 # NARRATIVE DATA -- report-facing, FINAL values only
 # =====================================================================
-# Everything below exists to answer TWO report questions about this
+# Everything below exists to answer THREE report questions about this
 # module's deliverable, and nothing else:
 #
 #   1. HOW was the suggested route determined?
 #   2. HOW MUCH ACCESS does it provide to the farm?
+#   3. HOW GOOD IS THE GROUND the route runs on?
+#
+# Question 3 is its own question and its own block. It is not a facet of
+# either of the other two: a network can run over excellent ground and
+# serve almost nothing, or cross a floodplain to reach every acre there
+# is, and a reader needs those told apart. It is also answered WITHOUT
+# any new analysis -- the cost surface already integrated grade, TPI,
+# floodplain, canopy and production traversal, so the router's own
+# accumulated cost is already the answer and only needed normalizing.
+# See _terrain_quality_score() for that normalization and for the claim
+# discipline the resulting number is reported under.
 #
 # The same two hard rules production_area_ceiling.py's narrative block
 # established govern every value here:
@@ -1060,6 +1094,158 @@ def _feet(meters):
     return None if meters is None else round(float(meters) / METERS_PER_FOOT, 1)
 
 
+def _terrain_quality_score(
+    total_cost: float, total_length_meters: float, dem: dict
+) -> Optional[float]:
+    """
+    A 0-100 terrain quality score for a routed road network, derived
+    ENTIRELY from the router's own accumulated path cost -- no new
+    analysis, no second pass over the DEM, no geometry re-measured.
+
+    road_cost_path.build_cost_raster() already integrates everything that
+    makes ground good or bad for a road: TPI ridge preference, the
+    quadratic grade penalty, floodplain crossing, canopy crossing,
+    production traversal. The Dijkstra accumulated cost along a routed
+    branch is therefore ALREADY a quality measure -- it was simply never
+    normalized or exposed. This function normalizes it and nothing else.
+
+    Returns None when total_length_meters is 0 -- there is no road to
+    score. That is deliberately not 0.0: a 0.0 here would read as "a
+    terrible road" when the truth is "no road", and a report quoting it
+    would say something false about ground nothing was ever routed over.
+
+    THE ARITHMETIC
+
+      1. cost_per_meter    = total_cost / total_length_meters
+      2. base_cost_per_meter = road_cost_path._BASE_TRAVEL_COST
+      3. ratio             = cost_per_meter / base_cost_per_meter
+      4. score             = 100.0 - (ratio * 10.0), clamped to
+                             [0.0, 100.0], rounded to one decimal.
+
+    NORMALIZATION, and why the DEM resolution does NOT appear in it.
+    Normalizing is mandatory -- an un-normalized cost-per-meter is just a
+    raw cost figure with no scale to read it against. The base it is
+    normalized against is road_cost_path._BASE_TRAVEL_COST itself,
+    because road_cost_path's own Dijkstra (cost_distance_field(), and
+    least_cost_path() with it) weights every edge as
+
+        math.hypot(dc * px, dr * py) * cost_raster[neighbor]
+
+    -- REAL METERS multiplied by a cost-per-meter. Accumulated cost is
+    therefore already in meter-scaled units, and dividing it by real
+    length already yields an average cost-per-meter directly comparable
+    to _BASE_TRAVEL_COST at ANY grid resolution: identical terrain reads
+    the same ratio at 3 m and at 5 m, which is exactly the property this
+    normalization has to have.
+
+    Dividing additionally by min(px, py) -- which would be the right
+    normalization if accumulated cost were tallied PER CELL EDGE rather
+    than per meter -- would INTRODUCE the resolution dependence rather
+    than remove it (the same ground would read ratio 5.0 at 5 m and 3.0
+    at 3 m) and would put every anchor below out by a factor of the cell
+    size. The edge weight formula above is what settles it; the anchors
+    are the cross-check, and they only come out right against this base:
+    a floodplain crossing on flat ground costs 1.0 + 5.0 = 6.0 per cell
+    by build_cost_raster()'s own arithmetic, and reads ratio 6.0 here.
+
+    THE SCALE. Anchors below come from the cost surface's OWN arithmetic
+    -- _BASE_TRAVEL_COST 1.0, GRADE_PENALTY_WEIGHT 0.0133 on grade
+    percent squared, FLOODPLAIN_CROSSING_COST_PENALTY 5.0,
+    TPI_PREFERENCE_STRENGTH 0.5 -- and are NOT tuned against any
+    property:
+
+        ratio 0.5  (ridge, ideal ground, TPI discount)  -> 95
+        ratio 1.0  (neutral flat ground, base cost)     -> 90
+        ratio 2.3  (sustained 10% grade)                -> 77
+        ratio 4.0  (sustained 15% grade)                -> 60
+        ratio 6.0  (floodplain crossing on flat)        -> 40
+        ratio 10.0 (the bottom of the scale)            ->  0
+
+    Read the rows as rounded: 10% grade is 1 + 0.0133 * 100 = 2.33 -> 76.7
+    and 15% is 3.9925 -> 60.1. A SUSTAINED 25% GRADE, the worst of these,
+    is 9.3125 -> 6.9 -- just short of the bottom rather than exactly at
+    it, so the scale does keep a little resolution past the worst grade a
+    farm road plausibly holds.
+
+    100 IS NOT PRACTICALLY REACHABLE, and that is honest rather than a
+    defect. TPI discounts a ridge cell to about 0.5x base, and no real
+    road runs on ideal ground end to end, so roughly 95 is the realistic
+    ceiling. A scale whose top is unreachable is a scale that does not
+    promise a perfect road exists.
+
+    CLAIM DISCIPLINE. This is a RELATIVE SCREENING VALUE, not a
+    percentage of an ideal road. 77 means "reasonable ground for this
+    terrain" -- it does NOT mean "77% as good as a perfect road", and
+    nothing here supports that reading. It is the same discipline the
+    water standards alignment document applies to suitability scores: a
+    number that ranks and screens, never one that claims a measured
+    fraction of an ideal.
+
+    ONE QUESTION ONLY: how good is the ground this road runs on. No
+    economy, coverage, branch-count or served-acreage term enters it --
+    those are property-suitability questions, already reported under
+    narrative_data's own 'access' block, and folding any of them in here
+    would make a network score badly for serving few acres well.
+
+    UNVALIDATED STARTING VALUES, same caveat every threshold in this
+    pipeline carries: the 10.0 multiplier and the [0.0, 100.0] clamp
+    bounds are a judgement about how fast a report should stop
+    distinguishing bad ground from worse, not figures any sweep has
+    validated. The multiplier sets where the scale bottoms out (ratio 10
+    -- roughly a sustained 25% grade -- reads 0), and the clamp is what
+    keeps a worse-than-that network at 0 rather than negative. Both are
+    expected to move once there is real ground to check them against.
+
+    total_cost and total_length_meters come from the SAME network dict
+    (route_road_network()'s own, summed after leaf pruning, or
+    build_road_network()'s passthrough of it). They are not measured over
+    quite the same road: total_length_meters counts NEW construction
+    only, while each branch's accumulated cost also includes running back
+    along already-accepted branches to reach its own start. That
+    traversal is charged at road_network_router.EXISTING_ROAD_TRAVERSAL_
+    COST (0.01, one percent of base), so the inflation it adds to the
+    ratio is bounded at about 1% of the reused length and is deliberately
+    left in rather than corrected for -- backing it out would mean
+    re-deriving cost from geometry, which this function does not do.
+    """
+    if total_length_meters == 0:
+        return None
+
+    # dem is read for its grid resolution only as a tripwire: a
+    # non-positive or non-finite cell size means total_length_meters was
+    # measured on a grid that does not describe real ground, and every
+    # figure below would be arithmetic over a meaningless denominator.
+    # The resolution itself does NOT enter the ratio -- see the
+    # normalization note above for why it cancels out of the edge weights
+    # entirely.
+    px, py = dem["resolution_meters"]
+    if not (math.isfinite(px) and math.isfinite(py)) or min(px, py) <= 0.0:
+        raise ValueError(
+            f"_terrain_quality_score() got a DEM with resolution_meters {(px, py)!r} -- "
+            "every cell size must be finite and strictly positive or the network's own "
+            "length_meters, and so the cost-per-meter ratio below, describe nothing real."
+        )
+
+    cost_per_meter = float(total_cost) / float(total_length_meters)
+    base_cost_per_meter = _BASE_TRAVEL_COST
+    ratio = cost_per_meter / base_cost_per_meter
+
+    return round(min(100.0, max(0.0, 100.0 - ratio * 10.0)), 1)
+
+
+def _terrain_quality_ratio(total_cost: float, total_length_meters: float) -> Optional[float]:
+    """
+    The normalized cost-per-meter ratio _terrain_quality_score() scores
+    from, rounded to 2 decimals -- published alongside the score so a
+    reader can see the quantity the score is a linear restatement of,
+    rather than having to trust the score alone. None on the same
+    condition, and for the same reason: no road, nothing to report.
+    """
+    if total_length_meters == 0:
+        return None
+    return round((float(total_cost) / float(total_length_meters)) / _BASE_TRAVEL_COST, 2)
+
+
 def build_narrative_data(
     road_network: dict,
     service_radius_meters: float,
@@ -1067,14 +1253,19 @@ def build_narrative_data(
     floodplain_data_available: bool,
     floodplain_data_is_fallback: bool,
     canopy_data_available: bool,
+    dem: dict,
 ) -> dict:
     """
     The 'narrative_data' block identify_road_corridor_candidates()
     attaches to its result -- pre-computed, FINAL, JSON-serialisable
-    values answering the two report questions in this section's header
+    values answering the report questions in this section's header
     comment. Data only: no prose, no interpretation. road_network is
     build_road_network()'s own return dict (or _empty_road_network()'s),
     read but never modified.
+
+    dem is the SAME grid the network was routed on -- passed in, never
+    re-fetched -- and is read only by _terrain_quality_score() below, as
+    its own grid tripwire (see there).
 
     The flag parameters say what the run that produced road_network
     ACTUALLY applied -- water_zone_excluded (a selected water zone
@@ -1123,6 +1314,22 @@ def build_narrative_data(
                                       #   already ran through that cell (a zero-length
                                       #   spur, which draws nothing but still counts)
           },
+          'quality': {                # question 3 -- HOW GOOD IS THE GROUND the
+                                      #   route runs on. Its own key, deliberately:
+                                      #   'determination' answers HOW the route was
+                                      #   determined and 'access' answers HOW MUCH
+                                      #   ACCESS it provides, and terrain quality is
+                                      #   neither of those questions
+            'terrain_quality_score',  #   0-100, higher is better; None when there is
+                                      #   no network to score. A RELATIVE SCREENING
+                                      #   value, never a percentage of an ideal road
+                                      #   -- see _terrain_quality_score() for the
+                                      #   scale, its anchors, and that claim discipline
+            'cost_per_meter_ratio',   #   the normalized ratio the score restates,
+                                      #   2 decimals; None on the same condition
+            'total_path_cost',        #   the router's own raw accumulated cost over
+                                      #   the surviving branches, for diagnostics
+          },
           'branches': [               # in branch order (trunk first), one entry per
                                       #   drawn branch
             {
@@ -1147,6 +1354,8 @@ def build_narrative_data(
     served_acres = float(road_network["total_served_acres"])
     unserved_acres = float(road_network["unserved_acres"])
     total_demand_acres = served_acres + unserved_acres
+    total_length_meters = float(road_network["total_length_meters"])
+    total_cost = float(road_network["total_cost"])
 
     return {
         "network_found": bool(branches),
@@ -1181,6 +1390,19 @@ def build_narrative_data(
                 if "reaches_water_zone" in road_network
                 else any(b["branch_role"] == "water_spur" for b in branches)
             ),
+        },
+        # QUESTION 3, its own top-level key and not a field inside either
+        # block above: 'determination' answers HOW the route was determined,
+        # 'access' answers HOW MUCH ACCESS it provides, and how good the
+        # ground is is a third question that belongs in neither. Purely
+        # additive -- no existing key, value or type above changes.
+        "quality": {
+            "terrain_quality_score": _terrain_quality_score(total_cost, total_length_meters, dem),
+            "cost_per_meter_ratio": _terrain_quality_ratio(total_cost, total_length_meters),
+            # The raw accumulated cost, unrounded and unnormalized, so a
+            # diagnostic can recover the ratio's own numerator without
+            # re-running the router.
+            "total_path_cost": total_cost,
         },
         "branches": [
             {
@@ -1516,6 +1738,7 @@ def identify_road_corridor_candidates(
                 floodplain_data_available=False,
                 floodplain_data_is_fallback=False,
                 canopy_data_available=False,
+                dem=dem,
             ),
         }
 
@@ -1610,6 +1833,7 @@ def identify_road_corridor_candidates(
             floodplain_data_available=hydric_floodplain_union is not None,
             floodplain_data_is_fallback=bool(floodplain_data_is_fallback),
             canopy_data_available=canopy_mask is not None,
+            dem=dem,
         ),
     }
 

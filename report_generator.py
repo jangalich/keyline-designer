@@ -1109,6 +1109,35 @@ def _format_road_corridor_summary(road_narrative: Optional[dict]) -> str:
         f"'served' means within {access['service_radius_ft']} ft of the network. "
         f"{stop_reason_sentence}"
     )
+
+    # Terrain quality, stated as the number and what it reflects, and
+    # NOTHING ELSE. No qualitative band ("excellent", "poor", "fair") is
+    # invented here: the block publishes a screening score on a documented
+    # 0-100 scale, and inventing a word for a range is inventing a claim
+    # the score does not make. The number and its scale go in; the model's
+    # own prose handles tone. Nothing is said at all when there is no
+    # network -- the empty-network early return above never reaches here,
+    # and a None score (no road to score) stays silent rather than
+    # reporting a 0 that would read as terrible ground.
+    #
+    # .get(), not indexing: stop_reason and the two blocks above are
+    # required of every narrative block, but 'quality' is newer than the
+    # design documents this report can be asked to regenerate from, and a
+    # stored block that predates it must still produce a report rather
+    # than a KeyError -- the same reasoning the retained-vocabulary entry
+    # in _ROAD_NETWORK_STOP_REASON_SENTENCES above carries.
+    quality = road_narrative.get("quality") or {}
+    terrain_quality_score = quality.get("terrain_quality_score")
+    if terrain_quality_score is not None:
+        lines.append(
+            f"\nTerrain quality score for this network: {terrain_quality_score} out of 100 "
+            f"(higher is better). This reflects the ground the route actually runs on -- the "
+            f"grade, ridge/hollow position, floodplain and canopy the routed path crosses -- "
+            f"and nothing about how much land the network serves. It is a RELATIVE screening "
+            f"value on a scale where about 95 is the realistic ceiling, not a percentage of an "
+            f"ideal road: do not describe it as the road being that fraction 'as good as' "
+            f"anything, and do not invent a grade or letter band for it."
+        )
     if determination["floodplain_data_is_fallback"]:
         lines.append(
             "\nFloodplain/wet-ground cost scoring used a DEM-only fallback (buffered delineated "
