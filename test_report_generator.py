@@ -27,10 +27,22 @@ from report_generator import (
 )
 
 
-def _road_narrative(branches, stop_reason, served_acres, unserved_acres, max_grade_pct, steep_ft):
+def _road_narrative(
+    branches,
+    stop_reason,
+    served_acres,
+    unserved_acres,
+    max_grade_pct,
+    steep_ft,
+    terrain_quality_score=76.7,
+    cost_per_meter_ratio=2.33,
+    total_path_cost=1165.0,
+):
     """A road narrative block in road_corridors.build_narrative_data()'s own
     shape -- values already FINAL (feet, 1-decimal), exactly as the real
-    block delivers them."""
+    block delivers them. The quality defaults are the scale's own
+    sustained-10%-grade anchor (ratio 2.33 -> 76.7); pass
+    terrain_quality_score=None for a block with no network to score."""
     total_length_ft = round(sum(b["length_ft"] for b in branches), 1)
     total = served_acres + unserved_acres
     return {
@@ -54,6 +66,11 @@ def _road_narrative(branches, stop_reason, served_acres, unserved_acres, max_gra
             "served_pct_of_production": round(served_acres / total * 100.0, 1) if total > 0 else None,
             "service_radius_ft": 200.0,
             "reaches_water_zone": any(b["role"] == "water_spur" for b in branches),
+        },
+        "quality": {
+            "terrain_quality_score": terrain_quality_score,
+            "cost_per_meter_ratio": cost_per_meter_ratio,
+            "total_path_cost": total_path_cost,
         },
         "branches": branches,
     }
@@ -169,6 +186,107 @@ assert "No road network data available" in _format_road_corridor_summary(None), 
     "a missing narrative block must fall back to the honest no-data text"
 )
 print("Every empty-network stop_reason maps to its own sentence; a missing block reads as no data.")
+
+
+# =====================================================================
+# terrain quality: the score is STATED PLAINLY when a network exists,
+# with one clause on what it reflects (the ground the route runs on) and
+# no invented qualitative band; and NOTHING quality-related is said at
+# all for an empty network.
+# =====================================================================
+
+_quality_prose = _format_road_corridor_summary(
+    _road_narrative(
+        branches=[
+            {
+                "branch_index": 0, "role": "trunk", "joins_branch_index": None,
+                "length_ft": 984.3, "newly_served_acres": 2.5, "avg_grade_pct": 4.0,
+                "max_grade_pct": 8.0, "steep_ft": 0.0,
+                "crosses_floodplain": False, "crosses_production_zone": False,
+            }
+        ],
+        stop_reason="all_demand_served",
+        served_acres=2.5, unserved_acres=0.0, max_grade_pct=8.0, steep_ft=0.0,
+        terrain_quality_score=76.7,
+    )
+)
+print("----- _format_road_corridor_summary() output (network with a terrain quality score) -----")
+print(_quality_prose)
+print("----- end output -----")
+
+assert "76.7" in _quality_prose, "the score itself must appear in the prose"
+assert "out of 100" in _quality_prose, "the score must be stated against its own scale, not bare"
+assert "the ground the route actually runs on" in _quality_prose, (
+    "one clause must say what the score reflects -- the terrain the route runs on"
+)
+# NO INVENTED BANDS. The block publishes a number on a documented scale;
+# turning a range into a word ("excellent", "good", "fair", "poor") is
+# inventing a claim the score does not make. Tone is the model's job.
+for _band in ("excellent", "poor", "fair", "good ground", "grade A", "mediocre"):
+    assert _band not in _quality_prose.lower(), (
+        f"the summary must not invent the qualitative band {_band!r} -- report the number and let "
+        "the model's own prose handle tone"
+    )
+
+# EMPTY NETWORK: nothing quality-related at all. The empty-network early
+# return never reaches the quality clause, so a block that still carries a
+# score must not produce one.
+_empty_quality_prose = _format_road_corridor_summary(
+    _road_narrative([], "no_demand", served_acres=0.0, unserved_acres=0.0, max_grade_pct=0.0, steep_ft=0.0)
+)
+for _fragment in ("Terrain quality", "out of 100", "76.7"):
+    assert _fragment not in _empty_quality_prose, (
+        f"an empty network must say nothing about quality, but {_fragment!r} appeared in "
+        f"{_empty_quality_prose!r}"
+    )
+
+# A None score (no road to score) stays silent too, even on a block that
+# reports a network -- never a 0 that would read as terrible ground.
+_none_quality_prose = _format_road_corridor_summary(
+    _road_narrative(
+        branches=[
+            {
+                "branch_index": 0, "role": "trunk", "joins_branch_index": None,
+                "length_ft": 100.0, "newly_served_acres": 1.0, "avg_grade_pct": 3.0,
+                "max_grade_pct": 5.0, "steep_ft": 0.0,
+                "crosses_floodplain": False, "crosses_production_zone": False,
+            }
+        ],
+        stop_reason="all_demand_served",
+        served_acres=1.0, unserved_acres=0.0, max_grade_pct=5.0, steep_ft=0.0,
+        terrain_quality_score=None, cost_per_meter_ratio=None, total_path_cost=0.0,
+    )
+)
+assert "Terrain quality" not in _none_quality_prose and "out of 100" not in _none_quality_prose, (
+    "a None score must stay silent rather than be narrated as a 0"
+)
+
+# A STORED BLOCK THAT PREDATES THE QUALITY KEY still produces a report --
+# the same reasoning the retained stop_reason vocabulary carries. Not a
+# KeyError, and not a quality sentence either.
+_legacy_narrative = _road_narrative(
+    branches=[
+        {
+            "branch_index": 0, "role": "trunk", "joins_branch_index": None,
+            "length_ft": 984.3, "newly_served_acres": 2.5, "avg_grade_pct": 4.0,
+            "max_grade_pct": 8.0, "steep_ft": 0.0,
+            "crosses_floodplain": False, "crosses_production_zone": False,
+        }
+    ],
+    stop_reason="all_demand_served",
+    served_acres=2.5, unserved_acres=0.0, max_grade_pct=8.0, steep_ft=0.0,
+)
+del _legacy_narrative["quality"]
+_legacy_prose = _format_road_corridor_summary(_legacy_narrative)
+assert "Total network length: 984.3ft" in _legacy_prose and "out of 100" not in _legacy_prose, (
+    "a stored narrative block predating the quality key must still format, without a quality sentence"
+)
+
+print(
+    "Terrain quality: a network with a score states 76.7 out of 100 plainly, with one clause on the "
+    "ground the route runs on and no invented qualitative band; an empty network, a None score, and a "
+    "stored block predating the key all say nothing quality-related at all."
+)
 
 
 # =====================================================================

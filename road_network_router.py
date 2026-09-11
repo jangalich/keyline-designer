@@ -100,16 +100,19 @@ PRODUCTION_SERVICE_RADIUS_METERS = 25.0
 # figure -- see this module's own docstring for why SELECT and STOP use
 # different ratios.
 #
-# 500.0 was CHOSEN BY SWEEPING this ceiling against a real reference
-# parcel and comparing the rendered networks side by side -- it is not
-# derived from anything, and no closed form produces it. On that terrain
-# 500 produced materially better networks than the 200 it replaces: 200
-# stopped the router while real, close production ground was still
-# unserved. CONFIGURABLE, and still carries the same unvalidated-
-# starting-value caveat every other threshold here does -- one reference
-# parcel read by eye is a better starting point than a guess, not a
-# validated figure.
-MAX_ROAD_METERS_PER_SERVED_ACRE = 500.0
+# 250.0 is the CURRENT SETTING, and it is a judgement, not a derivation --
+# no closed form produces it and no sweep has validated it. The history
+# it sits in: 200 was the original figure and stopped the router while
+# real, close production ground was still unserved; sweeping this ceiling
+# against a real reference parcel and comparing the rendered networks by
+# eye then put 500 ahead of 200 on that terrain. 250 sits between the two,
+# tightening the ceiling back toward the figure a person would actually
+# defend per acre without returning to the one that under-served.
+# CONFIGURABLE, and carries the same unvalidated-starting-value caveat
+# every other threshold here does -- one reference parcel read by eye is a
+# better starting point than a guess, not a validated figure, and this
+# value has had less of even that than the 500 it replaces.
+MAX_ROAD_METERS_PER_SERVED_ACRE = 250.0
 
 # Real-meters ceiling on the water spur's own NEW construction length
 # (existing-road cells the spur happens to reuse don't count against
@@ -557,6 +560,9 @@ def route_road_network(
             }, ...
           ],
           "total_length_meters": float,
+          "total_cost": float,             # sum of the SURVIVING branches'
+                                           #   own total_cost, summed after
+                                           #   leaf pruning
           "total_served_acres": float,
           "unserved_acres": float,
           "stop_reason": "no_demand" | "all_demand_served" | "no_reachable_demand"
@@ -586,7 +592,10 @@ def route_road_network(
     recomputed. Branch ORDER is untouched; the surviving
     joins_branch_index labels are re-pointed at the positions their own
     targets now hold, which is what keeps them referring to the same
-    branches they always did.
+    branches they always did. The network-level "total_cost" is summed
+    AFTER that pass, over the survivors only, so it never carries cost
+    for road that is not in the returned branch list -- see the comment
+    at the sum itself for why that ordering is load-bearing.
 
     water_target_cells, if non-empty, is tried exactly once after the
     main loop ends, regardless of why it ended: the cheapest reachable
@@ -726,4 +735,30 @@ def route_road_network(
     # a branch, which makes that branch a non-leaf, and it is exempt
     # itself). Nothing is re-routed or recomputed after this -- only
     # leaves are removed, and nothing downstream depends on a leaf.
-    return _prune_leaf_branches(network, min_leaf_branch_meters)
+    pruned_network = _prune_leaf_branches(network, min_leaf_branch_meters)
+
+    # NETWORK-LEVEL ACCUMULATED COST: the plain sum of every SURVIVING
+    # branch's own total_cost, and the only network-level cost figure this
+    # module publishes.
+    #
+    # THIS MUST STAY AFTER LEAF PRUNING. It is summed over
+    # pruned_network["branches"], never over the pre-pruning list, so it
+    # describes exactly the branches actually returned -- a pruned leaf's
+    # cost is not in it, the same way its length_meters and
+    # newly_served_acres are already out of the totals _prune_leaf_
+    # branches() adjusted. If a later change reorders the steps above,
+    # this sum has to move with pruning and stay downstream of it: summing
+    # first and pruning afterwards would publish a cost for road that is
+    # not in the returned network, which is exactly the mismatch
+    # road_corridors._terrain_quality_score() would then divide by the
+    # surviving length and report as worse ground than the network runs
+    # on.
+    #
+    # Deliberately a plain sum, not a re-derivation: each branch's own
+    # total_cost is the router's own accumulated_cost at that branch's
+    # terminus (see the branch dicts above), and nothing here recomputes
+    # cost from geometry.
+    return {
+        **pruned_network,
+        "total_cost": float(sum(branch["total_cost"] for branch in pruned_network["branches"])),
+    }

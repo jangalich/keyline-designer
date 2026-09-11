@@ -99,7 +99,7 @@ def _route(*args, **kwargs):
 
 # The shipped defaults, which the fixtures deliberately do NOT use.
 assert PRODUCTION_SERVICE_RADIUS_METERS == 25.0
-assert MAX_ROAD_METERS_PER_SERVED_ACRE == 500.0
+assert MAX_ROAD_METERS_PER_SERVED_ACRE == 250.0
 assert MIN_LEAF_BRANCH_METERS == 50.0
 
 RESOLUTION = (5.0, 5.0)
@@ -381,15 +381,19 @@ _PRUNE_ANCHOR_BASELINE_ACRES = 0.40   # the anchor's own coverage, which no bran
 _PRUNE_TOTAL_DEMAND_ACRES = 6.00      # a stated demand figure, so unserved is checkable
 
 
-def _branch(role, length, acres, joins):
+def _branch(role, length, acres, joins, cost=1.0):
     """One branch dict in exactly route_road_network()'s own shape. 'cells'
     is a placeholder pair -- pruning never reads it, and giving it real
-    geometry would imply this fixture came off a grid, which it did not."""
+    geometry would imply this fixture came off a grid, which it did not.
+    cost is this branch's own accumulated path cost; it defaults to 1.0
+    (pruning itself never reads it either) and is stated explicitly only
+    by the fixtures in section 17b, which are about the network-level
+    total_cost summed over the survivors."""
     return {
         "cells": [(0, 0), (0, 1)],
         "branch_role": role,
         "length_meters": length,
-        "total_cost": 1.0,
+        "total_cost": cost,
         "newly_served_acres": acres,
         "joins_branch_index": joins,
     }
@@ -702,6 +706,77 @@ print(
     f"min_leaf_branch_meters=0.0 and pruned at {spur17['length_meters'] + 1.0:.2f}; total_length "
     f"{result17_kept['total_length_meters']:.2f} -> {result17_pruned['total_length_meters']:.2f} m, served "
     f"{result17_kept['total_served_acres']:.4f} -> {result17_pruned['total_served_acres']:.4f} ac. Pruning is wired in."
+)
+
+
+# --- 17b. THE NETWORK-LEVEL total_cost, and the fact that it is summed
+# --- AFTER LEAF PRUNING. Two things are under test and they are
+# --- different: that the figure is the plain sum of the branches' own
+# --- total_cost (nothing re-derived from geometry), and that the branch
+# --- list it sums over is the SURVIVING one. Section 4's fixture routes
+# --- a trunk and a real leaf spur, so re-running it with
+# --- min_leaf_branch_meters above the spur's own measured length gives a
+# --- network whose pruned leaf carried real, non-zero cost -- an
+# --- implementation that summed before pruning reports that cost for
+# --- road it did not return, and fails the second assertion below while
+# --- passing nothing else differently. ---
+
+result17b_kept = _route(dem4, cost_raster4, anchor4, demand4, min_leaf_branch_meters=0.0)
+trunk17b, spur17b = result17b_kept["branches"]
+
+# (a) The plain sum, over the branches actually returned.
+assert "total_cost" in result17b_kept, "route_road_network() must publish a network-level total_cost"
+assert abs(
+    result17b_kept["total_cost"] - sum(b["total_cost"] for b in result17b_kept["branches"])
+) < 1e-9, "network total_cost must be exactly the sum of the returned branches' own total_cost"
+assert spur17b["total_cost"] > 0.0, (
+    "the fixture is only discriminating if the branch about to be pruned carries real cost"
+)
+
+# (b) Summed AFTER pruning: the pruned leaf's cost is NOT in the total.
+result17b_pruned = _route(
+    dem4, cost_raster4, anchor4, demand4, min_leaf_branch_meters=spur17b["length_meters"] + 1.0
+)
+assert [b["branch_role"] for b in result17b_pruned["branches"]] == ["trunk"], "the leaf spur must be gone"
+assert abs(
+    result17b_pruned["total_cost"] - sum(b["total_cost"] for b in result17b_pruned["branches"])
+) < 1e-9, "the total must still be the sum over the SURVIVING branches"
+assert abs(result17b_pruned["total_cost"] - trunk17b["total_cost"]) < 1e-9, (
+    f"with only the trunk surviving, total_cost must be the trunk's own "
+    f"{trunk17b['total_cost']:.6f}, got {result17b_pruned['total_cost']:.6f}"
+)
+assert result17b_pruned["total_cost"] < result17b_kept["total_cost"] - 1e-9, (
+    f"summing before pruning would leave the pruned spur's {spur17b['total_cost']:.6f} in the "
+    f"total: kept {result17b_kept['total_cost']:.6f} vs pruned {result17b_pruned['total_cost']:.6f}"
+)
+
+# (c) Every branch pruned -> the empty-network shape still carries a real
+#     0.0, not a missing key: nothing survives, so nothing is summed.
+demand17b_none = np.zeros((40, 40), dtype=bool)
+result17b_empty = _route(_dem((40, 40)), np.ones((40, 40), dtype=np.float64), (0, 0), demand17b_none)
+assert result17b_empty["branches"] == [] and result17b_empty["total_cost"] == 0.0, (
+    f"an empty network must carry total_cost 0.0, got {result17b_empty['total_cost']!r}"
+)
+
+# (d) The same rule stated directly on topology, independent of any
+#     Dijkstra tie-break: hand-picked branch costs, one sub-threshold leaf
+#     among them, and the surviving sum worked out by hand.
+fixture17b = [
+    _branch("trunk", 140.0, 2.40, None, cost=140.0),   # 0  survives
+    _branch("spur", 90.0, 1.05, 0, cost=220.0),        # 1  survives
+    _branch("spur", 4.0, 0.03, 0, cost=33.0),          # 2  stub -> pruned
+]
+survivors17b = _prune_leaf_branches(_network(fixture17b), MIN_LEAF_BRANCH_METERS)["branches"]
+assert [b["length_meters"] for b in survivors17b] == [140.0, 90.0]
+assert sum(b["total_cost"] for b in survivors17b) == 360.0, "140.0 + 220.0, with the stub's 33.0 left out"
+assert sum(b["total_cost"] for b in fixture17b) == 393.0, "the pre-pruning sum, which is NOT what is published"
+
+print(
+    f"17b. Network total_cost: {result17b_kept['total_cost']:.2f} over 2 branches equals the sum of their own "
+    f"total_cost, and summing runs AFTER leaf pruning -- pruning section 4's {spur17b['length_meters']:.2f} m leaf "
+    f"drops the total to {result17b_pruned['total_cost']:.2f} (the trunk's own cost), leaving the pruned branch's "
+    f"{spur17b['total_cost']:.2f} out. An all-pruned/empty network carries a real 0.0; on the hand-stated "
+    "topology the surviving sum is 360.0, not the pre-pruning 393.0."
 )
 
 

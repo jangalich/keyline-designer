@@ -685,6 +685,107 @@ print(
 
 
 # =====================================================================
+# _terrain_quality_score() -- the normalized cost-per-meter ratio and its
+# 0-100 score, HAND-DERIVED with no network routed at all. The function
+# reads two plain floats off a network dict plus the DEM's own grid, so
+# literals are the fully-controlled fixture; every expected value below is
+# worked out from road_cost_path._BASE_TRAVEL_COST and the documented
+# 100 - ratio * 10 scale by hand, never read back off the implementation.
+# =====================================================================
+from road_cost_path import _BASE_TRAVEL_COST  # noqa: E402
+
+from road_corridors import _terrain_quality_ratio, _terrain_quality_score  # noqa: E402
+
+assert _BASE_TRAVEL_COST == 1.0, (
+    "every hand-derived expectation below is worked out against a base travel cost of "
+    "1.0 cost-unit per meter; re-derive them if road_cost_path re-scales its own surface"
+)
+
+_TQ_DEM_5M = {"resolution_meters": (5.0, 5.0)}
+_TQ_DEM_3M = {"resolution_meters": (3.0, 3.0)}
+
+# 1. UNIFORM BASE-COST GROUND at 5 m. A network of 500.0 m over ground
+#    costing exactly _BASE_TRAVEL_COST per meter accumulates 500.0 cost
+#    (road_cost_path's Dijkstra weights each edge as
+#    hypot(dc * px, dr * py) * cell cost -- real meters times a
+#    cost-per-meter). ratio = (500.0 / 500.0) / 1.0 = 1.0 exactly, and
+#    the score is the scale's own neutral-flat-ground anchor, 90.0.
+assert _terrain_quality_ratio(500.0, 500.0) is not None
+assert abs(_terrain_quality_ratio(500.0, 500.0) - 1.0) < 1e-9
+assert _terrain_quality_score(500.0, 500.0, _TQ_DEM_5M) == 90.0
+
+# 2. THE NORMALIZATION TEST -- the SAME ground at 3 m resolution. The
+#    identical physical route over the identical uniform base-cost ground
+#    accumulates the identical cost, because accumulated cost is scaled by
+#    REAL METERS and not by cell count: 500 m of base-cost ground is 500.0
+#    cost at 3 m exactly as at 5 m. The ratio and score must therefore be
+#    IDENTICAL across the two resolutions. An implementation that divided
+#    the base by min(px, py) -- normalizing as if cost were tallied per
+#    cell edge -- would read ratio 5.0 here and 3.0 above, and fails this.
+assert abs(_terrain_quality_ratio(500.0, 500.0) - 1.0) < 1e-9
+assert _terrain_quality_score(500.0, 500.0, _TQ_DEM_3M) == 90.0
+assert _terrain_quality_score(500.0, 500.0, _TQ_DEM_3M) == _terrain_quality_score(500.0, 500.0, _TQ_DEM_5M)
+
+#    Same check on non-base ground, so the invariance is not an artifact
+#    of the ratio being exactly 1: a floodplain crossing on flat ground
+#    costs 1.0 + FLOODPLAIN_CROSSING_COST_PENALTY (5.0) = 6.0 per meter by
+#    build_cost_raster()'s own arithmetic, which is the scale's own
+#    ratio-6.0 anchor -> 100 - 60 = 40.0, at either resolution.
+assert _terrain_quality_score(3000.0, 500.0, _TQ_DEM_5M) == 40.0
+assert _terrain_quality_score(3000.0, 500.0, _TQ_DEM_3M) == 40.0
+
+# 3. NO NETWORK -> None, NEVER 0.0. There is no road to score, and a 0.0
+#    would read as "terrible ground" about ground nothing ran over.
+_tq_no_network = _terrain_quality_score(0.0, 0.0, _TQ_DEM_5M)
+assert _tq_no_network is None, f"no network must score None, got {_tq_no_network!r}"
+assert not isinstance(_tq_no_network, float), "None, never a float 0.0 that reads as terrible ground"
+assert _terrain_quality_score(0.0, 0, _TQ_DEM_5M) is None  # int 0 length, same answer
+assert _terrain_quality_ratio(0.0, 0.0) is None
+
+# 4. WORSE THAN THE SCALE'S BOTTOM -> clamped to 0.0, never negative.
+#    ratio 12.0 (6000.0 / 500.0) would be 100 - 120 = -20 unclamped.
+assert _terrain_quality_ratio(6000.0, 500.0) == 12.0
+assert _terrain_quality_score(6000.0, 500.0, _TQ_DEM_5M) == 0.0
+#    And far past it -- ratio 100.0 -- still 0.0, not a runaway negative.
+assert _terrain_quality_score(50000.0, 500.0, _TQ_DEM_5M) == 0.0
+
+# 5. BETTER THAN NEUTRAL FLAT GROUND -> above 90, and never above 100.
+#    ratio 0.5 is the scale's own ridge/TPI-discount anchor: TPI discounts
+#    a ridge cell to about 0.5x base (TPI_PREFERENCE_STRENGTH 0.5), which
+#    is why ~95 is the realistic ceiling and 100 is not reachable by real
+#    routed ground.
+_tq_ridge = _terrain_quality_score(250.0, 500.0, _TQ_DEM_5M)
+assert _terrain_quality_ratio(250.0, 500.0) == 0.5
+assert _tq_ridge == 95.0 and 90.0 < _tq_ridge <= 100.0
+#    The clamp's own top end: a ratio of 0 cannot arise from a real cost
+#    raster (every finite cell is strictly positive), but the bound holds.
+assert _terrain_quality_score(0.0, 500.0, _TQ_DEM_5M) == 100.0
+
+# The remaining documented anchors, all worked from the cost surface's own
+# arithmetic (GRADE_PENALTY_WEIGHT 0.0133 on grade percent squared):
+#   10% sustained grade -> 1 + 0.0133 * 100  = 2.33 -> 100 - 23.3 = 76.7
+#   15% sustained grade -> 1 + 0.0133 * 225  = 3.9925 -> 100 - 39.925 = 60.1
+assert _terrain_quality_score(2.33 * 500.0, 500.0, _TQ_DEM_5M) == 76.7
+assert _terrain_quality_score(3.9925 * 500.0, 500.0, _TQ_DEM_5M) == 60.1
+
+# A DEM whose grid is not real ground is a programming error, not a score.
+try:
+    _terrain_quality_score(500.0, 500.0, {"resolution_meters": (0.0, 5.0)})
+except ValueError as _exc:
+    assert "resolution_meters" in str(_exc)
+else:
+    raise AssertionError("a non-positive cell size must raise, not silently score")
+
+print(
+    "_terrain_quality_score: uniform base-cost ground reads ratio 1.0 -> 90.0 at BOTH 5m and 3m "
+    "(the normalization check -- a per-cell-edge normalization would read 5.0 and 3.0); the "
+    "floodplain-on-flat anchor reads 6.0 -> 40.0 at both; no network returns None rather than "
+    "0.0; ratio 12.0 clamps to 0.0 rather than -20; ratio 0.5 reads 95.0, above 90 and at or "
+    "below 100; the 10%/15% sustained-grade anchors read 76.7/60.1."
+)
+
+
+# =====================================================================
 # narrative_data -- build_narrative_data()'s own contract, against a
 # hand-built network dict with clean, hand-checkable numbers (the
 # builder reads only plain fields off build_road_network()'s shape, so a
@@ -711,12 +812,21 @@ _nd_network = {
         },
     ],
     "total_length_meters": 182.88,  # 600 ft exactly
+    # 2.5x base cost per meter over that length (182.88 * 2.5), chosen so
+    # the quality block below is hand-checkable: ratio 2.5, score
+    # 100 - 2.5 * 10 = 75.0.
+    "total_cost": 457.2,
     "total_served_acres": 9.0,
     "unserved_acres": 3.0,
     "stop_reason": "diminishing_returns",
     "max_grade_pct": 21.3,
     "steep_meters": 30.48,  # 100 ft exactly
 }
+# The grid the network is nominally routed on. Read by build_narrative_data()
+# only as _terrain_quality_score()'s own grid tripwire -- the resolution does
+# not enter the ratio (see that function on why it cancels out of the cost
+# raster's own edge weights).
+_nd_dem = {"resolution_meters": (5.0, 5.0)}
 _nd = build_narrative_data(
     _nd_network,
     service_radius_meters=60.96,  # 200 ft exactly
@@ -724,9 +834,10 @@ _nd = build_narrative_data(
     floodplain_data_available=True,
     floodplain_data_is_fallback=False,
     canopy_data_available=True,
+    dem=_nd_dem,
 )
 assert json.loads(json.dumps(_nd)) == _nd, "narrative_data must be json.dumps()-clean with no custom encoder"
-assert set(_nd) == {"network_found", "stop_reason", "determination", "access", "branches"}
+assert set(_nd) == {"network_found", "stop_reason", "determination", "access", "quality", "branches"}
 assert _nd["network_found"] is True and _nd["stop_reason"] == "diminishing_returns"
 assert _nd["determination"] == {
     "grade_ceiling_pct": 35.0,
@@ -747,6 +858,17 @@ assert _nd["access"] == {
     "service_radius_ft": 200.0,
     "reaches_water_zone": True,  # the water_spur branch
 }
+# QUESTION 3, its own top-level key -- never folded into 'determination'
+# (HOW the route was determined) or 'access' (HOW MUCH ACCESS it provides).
+assert _nd["quality"] == {
+    "terrain_quality_score": 75.0,  # 100 - 2.5 * 10
+    "cost_per_meter_ratio": 2.5,    # 457.2 / 182.88 / _BASE_TRAVEL_COST
+    "total_path_cost": 457.2,
+}
+assert "terrain_quality_score" not in _nd["determination"] and "terrain_quality_score" not in _nd["access"], (
+    "terrain quality is its own question and its own block -- folding it into either "
+    "existing block would answer a different question than that block's own"
+)
 assert _nd["branches"][0] == {
     "branch_index": 0, "role": "trunk", "joins_branch_index": None, "length_ft": 500.0,
     "newly_served_acres": 9.0, "avg_grade_pct": 6.5, "max_grade_pct": 21.3, "steep_ft": 100.0,
@@ -762,23 +884,31 @@ _nd_empty = build_narrative_data(
     _empty_road_network("no_eligible_anchor"),
     service_radius_meters=60.96, water_zone_excluded=False,
     floodplain_data_available=False, floodplain_data_is_fallback=False,
-    canopy_data_available=False,
+    canopy_data_available=False, dem=_nd_dem,
 )
 assert _nd_empty["network_found"] is False and _nd_empty["branches"] == []
 assert _nd_empty["access"]["served_pct_of_production"] is None
 assert _nd_empty["access"]["reaches_water_zone"] is False
+# NO NETWORK -> NO SCORE, never a 0.0. A 0.0 would read as "terrible
+# ground" about ground nothing was ever routed over.
+assert _nd_empty["quality"] == {
+    "terrain_quality_score": None,
+    "cost_per_meter_ratio": None,
+    "total_path_cost": 0.0,
+}
 _nd_unserved = build_narrative_data(
     _empty_road_network("no_eligible_anchor", unserved_acres=3.0),
     service_radius_meters=60.96, water_zone_excluded=False,
     floodplain_data_available=False, floodplain_data_is_fallback=False,
-    canopy_data_available=False,
+    canopy_data_available=False, dem=_nd_dem,
 )
 assert _nd_unserved["access"]["served_pct_of_production"] == 0.0
 print(
     "narrative_data: json-clean; determination (35% ceiling, 21.3% steepest cell, 100 steep ft, all "
     "constraint flags passed through) and access (600 ft network serving 9.0 of 12.0 demand acres = "
-    "75.0%, water spur reaches the pond) all match hand-checked values; no-demand empty network "
-    "reports served_pct None, real unserved demand reports 0.0."
+    "75.0%, water spur reaches the pond) all match hand-checked values; quality is its own third "
+    "key (ratio 2.5 -> score 75.0, raw cost 457.2 carried for diagnostics); no-demand empty network "
+    "reports served_pct None and a None terrain score, real unserved demand reports 0.0."
 )
 
 
