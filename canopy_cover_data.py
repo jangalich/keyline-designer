@@ -232,7 +232,7 @@ def _retry(operation, max_retries: int = 2):
         except Exception as e:
             last_error = e
             if attempt < max_retries:
-                fetch_attempts.sleep(2)
+                fetch_attempts.sleep(fetch_attempts.RETRY_PAUSE_SECONDS)
                 continue
             raise last_error
 

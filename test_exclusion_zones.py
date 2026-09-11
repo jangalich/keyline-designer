@@ -76,6 +76,14 @@ import production_area
 from production_area import compute_step1_eligible_cells
 from raster_grid import cell_area_acres, cell_union_footprint, disc_closing
 
+# OFFLINE BY CONSTRUCTION: every outbound request is refused instantly and
+# the retry pause is zero, so the graceful-degradation paths this file
+# exercises run without waiting on a network it cannot reach
+# (offline_harness.py). Mocks installed below still take precedence.
+import offline_harness  # noqa: E402
+
+offline_harness.install()
+
 RESOLUTION_M = 5.0
 _TOLERANCE_M2 = 1e-6
 

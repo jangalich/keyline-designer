@@ -31,6 +31,14 @@ from production_zone_payload import (
     build_production_zone_payload,
 )
 
+# OFFLINE BY CONSTRUCTION: every outbound request is refused instantly and
+# the retry pause is zero, so the graceful-degradation paths this file
+# exercises run without waiting on a network it cannot reach
+# (offline_harness.py). Mocks installed below still take precedence.
+import offline_harness  # noqa: E402
+
+offline_harness.install()
+
 # The reference property, verbatim from production_area_ceiling.py's own
 # __main__ block -- roughly 40.643-40.646 N, 79.980-79.984 W, 13.23 acres.
 REFERENCE_BOUNDARY = [

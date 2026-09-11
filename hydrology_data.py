@@ -140,7 +140,7 @@ def _query_layer(
         except requests.exceptions.RequestException as e:
             last_error = e
             if attempt < max_retries:
-                fetch_attempts.sleep(2)
+                fetch_attempts.sleep(fetch_attempts.RETRY_PAUSE_SECONDS)
                 continue
             raise last_error
 

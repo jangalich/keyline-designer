@@ -138,6 +138,17 @@ DETAIL_ATTRIBUTE = "LAST_FETCH_ATTEMPT_DETAIL"
 
 PUBLISHED_ATTRIBUTES = (ATTEMPTS_ATTRIBUTE, SLEEP_ATTRIBUTE, DETAIL_ATTRIBUTE)
 
+# THE PAUSE BETWEEN ATTEMPTS, in seconds. Every retry loop behind the
+# fetch layers sleeps for this long between one failed attempt and the
+# next -- the literal 2 the loops used to carry each in their own copy.
+# One name so a test can shorten it (test_fetch_attempts.py measures the
+# pause; it does not need the pause to be two seconds long to do so) and
+# so an offline harness can zero it: an unreachable host costs three
+# connection refusals and nothing else, instead of three refusals and four
+# seconds asleep per fetch. The budget, the backoff and the progressive
+# timeouts are unchanged; only the length of the pause is a name now.
+RETRY_PAUSE_SECONDS = 2.0
+
 # The calling thread's open ledger (`ledger`) and its published totals
 # (`published`, a {module name: {attribute: value}}). Both thread-local
 # for the module docstring's reason.

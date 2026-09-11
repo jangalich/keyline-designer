@@ -20,15 +20,18 @@ Run as:
 
     python test_display_outline.py
 
-THE FIXTURE IS test_trees_step.py's, AND IMPORTING IT RUNS THAT FILE'S SUITE.
-That is deliberate on both counts. The questions here are about a whole
+THE FIXTURE IS test_trees_step.py's, IMPORTED FROM trees_step_fixture.py --
+its Harness and Session without that file's tests running first (importing
+test_trees_step itself cost ~15 s of its suite before this file's first
+section; the two now run side by side under run_tests.py). Reusing the
+fixture rather than rebuilding it is deliberate. The questions here are about a whole
 session -- production zones AND tree candidates AND water zones AND a road
 network, all off one parcel, all through the real generates -- and that session
 already exists, built on the real 5614 N Montour Rd boundary and the
 bench-and-drainage DEM, with the network mocked and nothing else. Rebuilding it
 here would be a second fixture that agrees with the first until the first
-changes. Its own assertions running first is a feature: every number below is
-taken on a session that file has just proved sound. Its output is captured and
+changes. test_trees_step.py proves that session sound in its own run; every number
+below is taken on the same fixture. The fixture's import output is captured and
 reprinted only if it fails.
 
 Sections (the branch's numbered backend tests in brackets):
@@ -68,7 +71,7 @@ from contextlib import redirect_stdout
 _captured = io.StringIO()
 try:
     with redirect_stdout(_captured):
-        import test_trees_step as fixture
+        import trees_step_fixture as fixture
 except BaseException:
     sys.stdout.write(_captured.getvalue())
     raise

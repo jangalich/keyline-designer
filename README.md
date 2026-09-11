@@ -595,6 +595,51 @@ Individual modules can also be run standalone (`python3 climate_data.py`,
 etc.) to test just one data layer without triggering a full report /
 Claude API call — useful when only testing a new or changed module.
 
+### Running the regression suite
+
+Every `test_*.py` is a script -- top-level asserts that raise on the first
+failure and print what they proved -- and each still runs on its own with
+`python3 test_x.py`. `run_tests.py` is the layer above: one command, one
+process per file, all cores, a per-file clock and verdict.
+
+```
+python3 run_tests.py               # the full suite, in parallel
+python3 run_tests.py --tier fast   # the pre-commit tier (tens of seconds)
+python3 run_tests.py test_water_step.py test_roads_step.py
+python3 run_tests.py --list        # what would run, and in which tier
+```
+
+**The suite is offline by construction.** No test needs the network, and
+none should wait on it: any file that lets a fetch reach a real service
+installs `offline_harness.py`, which makes every outbound `requests` call
+fail instantly and zeroes the retry pause (`fetch_attempts.RETRY_PAUSE_
+SECONDS`). The graceful-degradation paths still run against a real
+`ConnectionError`; they just do not sit through three attempts at 30, 60
+and 90 second timeouts first. Before the harness, an unreachable host cost
+four seconds of sleep per fetch on a network that refused connections and
+three minutes per fetch on one that dropped them -- test_road_corridors_
+pipeline.py alone made 76 such fetches, which is how a suite whose
+computation takes minutes took hours. A new test that exercises a fetch
+layer should install the harness too; `python3 run_tests.py` prints the
+per-file times, and a file that is slow for no computational reason is
+almost always leaking a fetch.
+
+**Fixtures are modules, not test files.** A step test's parcel, DEM,
+mocked network, Harness and Session live in `<step>_step_fixture.py`
+(`fencing_step_fixture.py`, `trees_step_fixture.py`,
+`roads_step_fixture.py`), and a file that needs them imports the fixture
+module -- never `import test_x_step`, which runs that file's whole suite
+before the first line of your own. The roads sections are split across
+test_roads_step.py and test_roads_step_inputs.py for the same reason the
+runner is parallel: wall time is bounded by the longest file.
+
+**Tiers.** A file is in the fast tier unless `run_tests.py` names it in
+`FULL_ONLY`; promote a file there when it measures as slow. The `--live`
+flags some files accept reach the real USGS/USDA services and are never
+passed by the runner -- run those by hand when the question is the
+service itself. `_elevation_grid_probe.py` (formerly test_elevation_grid.py)
+is one such probe, not a test.
+
 ## Key product decision: manual boundary drawing
 
 Rather than trying to auto-fetch legal parcel boundaries (which vary by

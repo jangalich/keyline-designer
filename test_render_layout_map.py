@@ -55,6 +55,14 @@ from production_area import cluster_and_gate, compute_step1_eligible_cells
 from road_corridors import _empty_road_network
 from production_suitability import score_production_areas
 
+# OFFLINE BY CONSTRUCTION: every outbound request is refused instantly and
+# the retry pause is zero, so the graceful-degradation paths this file
+# exercises run without waiting on a network it cannot reach
+# (offline_harness.py). Mocks installed below still take precedence.
+import offline_harness  # noqa: E402
+
+offline_harness.install()
+
 RESOLUTION = (5.0, 5.0)
 RISE_PER_ROW = 0.4  # meters -- a real, modest gradient so contour lines actually exist
 

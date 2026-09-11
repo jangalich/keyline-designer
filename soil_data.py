@@ -91,7 +91,7 @@ def _run_sda_query(sql: str, max_retries: int = 2) -> dict:
         except requests.exceptions.RequestException as e:
             last_error = e
             if attempt < max_retries:
-                fetch_attempts.sleep(2)
+                fetch_attempts.sleep(fetch_attempts.RETRY_PAUSE_SECONDS)
                 continue
             raise last_error
 

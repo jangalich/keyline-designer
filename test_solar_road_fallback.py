@@ -59,6 +59,14 @@ from solar_suitability import (
     identify_solar_candidate_zones,
 )
 
+# OFFLINE BY CONSTRUCTION: every outbound request is refused instantly and
+# the retry pause is zero, so the graceful-degradation paths this file
+# exercises run without waiting on a network it cannot reach
+# (offline_harness.py). Mocks installed below still take precedence.
+import offline_harness  # noqa: E402
+
+offline_harness.install()
+
 
 def _fake_clean_canopy(boundary_coordinates, dem):
     return {

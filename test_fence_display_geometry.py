@@ -9,11 +9,13 @@ object, so the interactive map and the PDF draw one line. Run as:
 
     python test_fence_display_geometry.py
 
-THE FIXTURE IS test_fencing_step.py, IMPORTED. Its module-level assertions
-run first (~40 s) and its Harness / Session are reused, so every number below
-is taken on a session that file has just proved sound -- the same arrangement
-test_display_outline.py makes with test_trees_step.py. Its output is captured
-and released only if it fails.
+THE FIXTURE IS fencing_step_fixture.py, IMPORTED: test_fencing_step.py's own
+Harness and Session, the same parcel, DEM and mocked network, without that
+file's tests running first. (It used to import test_fencing_step itself, and
+paid ~30 s for the fencing suite before its own first section; the fixture
+now lives in a module of its own, and test_fencing_step.py runs separately
+under run_tests.py.) The fixture's import-time output is captured and
+released only if it fails.
 
 Sections (the branch's numbered tests in brackets):
   1  [1]  WHO CARRIES IT: every fence feature carries the field; no
@@ -48,10 +50,18 @@ import time
 from contextlib import ExitStack, redirect_stdout
 from unittest.mock import patch as mock_patch
 
+# OFFLINE BY CONSTRUCTION: every outbound request is refused instantly and
+# the retry pause is zero, so the graceful-degradation paths this file
+# exercises run without waiting on a network it cannot reach
+# (offline_harness.py). Mocks installed below still take precedence.
+import offline_harness  # noqa: E402
+
+offline_harness.install()
+
 _captured = io.StringIO()
 try:
     with redirect_stdout(_captured):
-        import test_fencing_step as fixture
+        import fencing_step_fixture as fixture
 except BaseException:
     sys.stdout.write(_captured.getvalue())
     raise
@@ -536,8 +546,8 @@ print(
 )
 
 print(
-    "7 [test 7]. Regression is the other test files, run separately: test_fencing_step.py (this file's "
-    "fixture, already run above), test_render_layout_map.py, test_display_outline.py, test_fencing.py, "
+    "7 [test 7]. Regression is the other test files, run separately: test_fencing_step.py (the tests "
+    "over this file's fixture), test_render_layout_map.py, test_display_outline.py, test_fencing.py, "
     "test_wire_translation.py, test_step_commit.py."
 )
 print("\nAll fence display geometry checks passed.")

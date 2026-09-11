@@ -39,14 +39,7 @@ from session_cache import (
 # 5614 N Montour Rd, Gibsonia, PA. Implicitly closed (its last vertex is
 # ~0.9 m from its first, not on it), which is the shape a browser map
 # hands back and the shape the rest of this pipeline already accepts.
-REAL_BOUNDARY = [
-    (-79.9838154, 40.6458343),
-    (-79.9836701, 40.6428581),
-    (-79.9813665, 40.6440549),
-    (-79.9804741, 40.6445667),
-    (-79.9827466, 40.6458894),
-    (-79.9838258, 40.6458343),
-]
+from reference_fixture import REAL_BOUNDARY  # noqa: E402
 
 
 class _StubParcel:

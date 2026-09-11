@@ -1,12 +1,20 @@
 """
-test_elevation_grid.py
+_elevation_grid_probe.py
 
-Quick test of elevation_data.py's grid function using a real, user-drawn
-property boundary (from geojson.io).
+A LIVE PROBE, NOT A REGRESSION TEST. Fetches a 6x6 lattice of USGS EPQS
+point elevations for one real, user-drawn property boundary (from
+geojson.io) and prints the summary:
 
-This is a throwaway test script, not part of the core pipeline — once the
-real frontend exists, boundaries will come in through that instead of
-being pasted in here by hand.
+    python3 _elevation_grid_probe.py
+
+This used to be test_elevation_grid.py, and it sat in the regression set
+while being everything a regression test is not: 36 sequential network
+requests to a service the offline suite cannot reach (20 s of failing
+quietly, every run), no assertion, and a module elevation_data.py's own
+docstring marks as demoted from the pipeline. Renamed with the same
+leading-underscore convention as _canopy_override_probe.py so
+run_tests.py's test_*.py discovery leaves it alone. Run it by hand when
+the question is the EPQS service itself.
 """
 
 from elevation_data import get_elevation_grid, summarize_elevation_grid
