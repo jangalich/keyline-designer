@@ -84,22 +84,19 @@ and imagery_data.py already use. A caller that has already exhausted HAG
 and then gets None here has no canopy source at all, and the layer
 hard-fails (parcel_data.py).
 
-THE ENDPOINT PATH IS THE ONE THING HERE NOT CONFIRMED AGAINST A LIVE
-SERVICE. The branch that added this module was developed in a sandbox
-whose egress policy denies apps.fs.usda.gov (403 at the proxy on
-CONNECT), so the folder and host below are the ones identified for this
-work but the SERVICE NAME inside that folder could not be read back off
-the live catalog. It is the one part of an ArcGIS endpoint a publisher
-re-versions without notice anyway, which is why KEYLINE_TCC_IMAGESERVER
-exists (see DEFAULT_TCC_IMAGESERVER). A wrong path fails LOUDLY on the
-first request -- non-2xx, or a body rasterio will not open -- rather than
-returning anything; it cannot silently produce a wrong mask. Confirm it
-by running `python3 canopy_cover_data.py` (or test_canopy_cover_
-fallback.py --live) from an environment with egress, and correct the
-constant or set the variable if the catalog disagrees.
+WHICH SERVICE, AND WHY NOT THE OTHER ONE. The default endpoint is the
+NLCD TCC service on IIPP (imagery.geoplatform.gov) -- see DEFAULT_TCC_
+IMAGESERVER, which also records the dead apps.fs.usda.gov host it
+replaced and the migration notice that host now answers with. Its
+sibling `USFS_EDW_Science_TCC_CONUS` is the RAW MODEL OUTPUT and must
+NOT be substituted: the NLCD version is masked to remove canopy over
+water and non-tree crops and smoothed across years, and under the
+any-nonzero rule above that masking is load-bearing -- unmasked model
+noise over a crop field is a small nonzero percentage, which this module
+would read as trees.
 
-Docs: https://www.mrlc.gov/data (NLCD Tree Canopy Cover, CONUS)
-      https://data.fs.usda.gov/geodata/rastergateway/treecanopycover/
+Docs: https://imagery.geoplatform.gov/iipp/rest/services (IIPP catalog)
+      https://www.mrlc.gov/data (NLCD Tree Canopy Cover, CONUS)
       (ArcGIS REST "exportImage" operation reference:
       https://developers.arcgis.com/rest/services-reference/enterprise/export-image/)
 
@@ -129,24 +126,40 @@ import fetch_attempts
 from canopy_height_data import CANOPY_SOURCE_NLCD_TCC, TREE_ROOT_ZONE_BUFFER_METERS
 from raster_grid import binary_dilate, pixel_center_xy
 
-# The USDA Forest Service ImageServer publishing NLCD Tree Canopy Cover
-# for the conterminous US, in the RDW_LandscapeAndWildlife folder the
-# user identified. Same kind of ArcGIS REST image service dem_data.py
-# queries against 3DEPElevation, so the request shape below is dem_data.
-# py's, not a new integration pattern.
+# The ImageServer publishing NLCD Tree Canopy Cover for the conterminous
+# US, on the Imagery and Image Products Platform (IIPP). Same kind of
+# ArcGIS REST image service dem_data.py queries against 3DEPElevation, so
+# the request shape below is dem_data.py's, not a new integration
+# pattern. CONFIRMED LIVE against the reference parcels.
 #
-# OVERRIDABLE BY ENVIRONMENT, deliberately. A folder's service NAME is
-# the one part of an ArcGIS endpoint that a publisher re-versions (a
-# year suffix, a rename) without notice, and this repo has no way to
-# discover the change except by a request failing. KEYLINE_TCC_
-# IMAGESERVER lets an operator repoint this at the live name without a
-# code change; unset (the default) uses the constant below. Either way a
-# wrong path fails LOUDLY -- a non-2xx or a non-TIFF body raises -- the
-# same "fail loudly on a schema surprise" stance dem_data.py's own
-# docstring takes on its endpoint.
+# THE OLD FOREST SERVICE HOST IS GONE. apps.fs.usda.gov/fsgisx01 now
+# answers 403 with a migration notice -- "The service being requested has
+# been migrated to IIPP. Please visit https://imagery.geoplatform.gov/
+# iipp/rest/services" -- so the previous default could never have worked,
+# whatever service name followed it.
+#
+# USFS_EDW_Science_TCC_CONUS IS THE SIBLING SERVICE AND MUST NOT BE
+# SUBSTITUTED FOR THIS ONE. It is the RAW MODEL OUTPUT. The NLCD version
+# named here is masked to remove canopy over water and non-tree crops,
+# and smoothed across years. That difference is not cosmetic under this
+# module's any-nonzero-is-canopy rule (see the module docstring): an
+# unmasked model's noise over a crop field is a small nonzero percentage,
+# which this module would read as trees and exclude as canopy root zone.
+# The masking is doing load-bearing work that the threshold deliberately
+# does not do.
+#
+# OVERRIDABLE BY ENVIRONMENT, deliberately -- and this migration is
+# exactly why. A service's host and NAME are the parts of an ArcGIS
+# endpoint a publisher re-versions or relocates without notice, and this
+# repo has no way to discover the change except by a request failing.
+# KEYLINE_TCC_IMAGESERVER lets an operator repoint this without a code
+# change; unset (the default) uses the constant below, which is the
+# working one. Either way a wrong path fails LOUDLY -- a non-2xx or a
+# non-TIFF body raises -- the same "fail loudly on a schema surprise"
+# stance dem_data.py's own docstring takes on its endpoint.
 DEFAULT_TCC_IMAGESERVER = (
-    "https://apps.fs.usda.gov/fsgisx01/rest/services/RDW_LandscapeAndWildlife/"
-    "RDW_LandscapeAndWildlife_TreeCanopyCover/ImageServer"
+    "https://imagery.geoplatform.gov/iipp/rest/services/Vegetation/"
+    "USFS_EDW_NLCD_TCC_CONUS/ImageServer"
 )
 
 
@@ -551,14 +564,16 @@ def summarize_tree_canopy_cover(cover: Optional[dict]) -> str:
 if __name__ == "__main__":
     from dem_data import get_dem_for_boundary
 
-    # The Maryland boundary with no 3dep-lidar-hag coverage -- Kent County,
-    # near Chestertown. See test_canopy_cover_fallback.py, which uses the
-    # same coordinates.
+    # THE USER'S OWN FAILING PARCEL -- Frederick County, Maryland.
+    # Confirmed live at 0 `3dep-lidar-hag` items, and confirmed falling
+    # back to NLCD TCC. test_canopy_cover_fallback.py uses these exact
+    # coordinates; they are the reason this module exists.
     maryland_boundary = [
-        (-76.0820, 39.2110),
-        (-76.0820, 39.2089),
-        (-76.0793, 39.2089),
-        (-76.0793, 39.2110),
+        (-77.52875829843366, 39.37068357456659),
+        (-77.5244882217246, 39.37103192232765),
+        (-77.52519632490174, 39.37488851360338),
+        (-77.52955223229841, 39.37377717368003),
+        (-77.53033091081994, 39.36936307851048),
     ]
 
     print("Fetching DEM grid + NLCD Tree Canopy Cover for the Maryland boundary...\n")
@@ -571,6 +586,6 @@ if __name__ == "__main__":
         print(f"Request failed: {e}")
         print(
             "\nNote: this requires internet access to reach USGS's National "
-            "Map ImageServer and the USDA Forest Service ImageServer -- not a "
-            "fully sandboxed environment."
+            "Map ImageServer and the IIPP ImageServer -- not a fully "
+            "sandboxed environment."
         )
