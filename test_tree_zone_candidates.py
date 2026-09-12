@@ -1094,17 +1094,32 @@ from tree_zone_candidates import build_narrative_data  # noqa: E402
 # the parcel's northwest, the rank-2 patch's directly on the centroid --
 # hand-checkable position_in_parcel values.
 _nd_boundary_polygon = box(500000.0, 4499779.6, 500220.4, 4500000.0)
+# THE THREE *_data_available FLAGS RIDE THE PATCH, not just the builder's
+# own run-level parameters, because that is where marginal_benefits() reads
+# them: a gate travels WITH the factor it gates or the pair is meaningless
+# (a measured 0.5 and _NEUTRAL_FACTOR_VALUE are the same number). The
+# scorer sets them on every patch it emits and the rehydrator inherits them
+# verbatim, so a patch without them is a fixture that never existed.
+# stream_data_available is False on BOTH patches here, matching the run-level
+# flag passed to build_narrative_data() below -- which is what makes the
+# rank-2 zone's real 0.8 stream_proximity_factor earn NO stream protection.
 _nd_patches = [
     {
         "rank": 1, "area_acres": 0.42, "tree_suitability_score": 62.6, "avg_slope_pct": 18.3,
+        "slope_median_pct": 17.4, "elevation_percentile_of_parcel": 71.2,
         "hydric_overlap_factor": 1.0, "slope_factor": 0.366,
         "soil_marginality_factor": 1.0, "stream_proximity_factor": 0.25,
+        "soil_marginality_data_available": True, "hydric_data_available": True,
+        "stream_data_available": False,
         "render_fill_polygon_utm": box(500010.0, 4499975.0, 500030.0, 4499995.0),  # northwest
     },
     {
         "rank": 2, "area_acres": 0.15, "tree_suitability_score": 34.0, "avg_slope_pct": 8.0,
+        "slope_median_pct": 7.5, "elevation_percentile_of_parcel": None,
         "hydric_overlap_factor": 0.0, "slope_factor": 0.2,
         "soil_marginality_factor": 1.0, "stream_proximity_factor": 0.8,
+        "soil_marginality_data_available": True, "hydric_data_available": True,
+        "stream_data_available": False,
         "render_fill_polygon_utm": box(500100.0, 4499880.0, 500120.0, 4499900.0),  # on the centroid
     },
 ]
@@ -1164,12 +1179,29 @@ assert _nd["gates"] == {
 }
 assert _nd["zones"][0] == {
     "rank": 1, "position_in_parcel": "northwest", "area_acres": 0.4, "score": 62.6, "avg_slope_pct": 18.3,
+    "slope_median_pct": 17.4,
+    "elevation_percentile_of_parcel": 71.2, "elevation_position": "upper field",
+    # slope_factor 0.366 > 0 (always measured) -> erosion control.
+    # hydric_overlap_factor 1.0 with hydric_data_available True -> nutrient
+    # deposition. stream_proximity_factor 0.25 is real and positive but
+    # stream_data_available is False, so NO stream protection.
+    "marginal_benefits": ["erosion control", "nutrient deposition"],
     "factors": {"hydric_overlap": 100.0, "slope": 36.6, "soil_marginality": 100.0, "stream_proximity": 25.0},
 }, f"rank-1 zone entry mismatch: {_nd['zones'][0]}"
 assert _nd["zones"][1]["rank"] == 2, "zones must come out in rank order regardless of input order"
 assert _nd["zones"][1]["position_in_parcel"] == "center", (
     "a zone whose drawn footprint sits on the parcel centroid must read as 'center'"
 )
+# A None percentile yields a None POSITION, never a default word -- the
+# null-not-zero rule applied to a category. Asserted on the rank-2 patch,
+# which carries elevation_percentile_of_parcel=None (the shape a parcel
+# with no elevation relief at all produces).
+assert _nd["zones"][1]["elevation_percentile_of_parcel"] is None
+assert _nd["zones"][1]["elevation_position"] is None, (
+    "a None percentile must never be given a band word -- got "
+    f"{_nd['zones'][1]['elevation_position']!r}"
+)
+assert _nd["zones"][1]["slope_median_pct"] == 7.5
 
 # Entry-point wiring: the orchestrator run above attached the block,
 # additively, and its figures agree with the result's own top-level keys

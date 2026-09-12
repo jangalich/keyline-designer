@@ -1849,7 +1849,8 @@ def build_trees_payload(result: dict, assembled: dict) -> dict:
 
       PER-FEATURE -> tree_zones_to_feature_collection(), already on every
         feature of the result's zones_geojson: the score, the four factors,
-        avg_slope_pct, rank, and THE THREE *_data_available FLAGS, which
+        avg_slope_pct, slope_median_pct, elevation_percentile_of_parcel,
+        rank, and THE THREE *_data_available FLAGS, which
         are load-bearing rather than decoration -- soil_marginality_factor
         defaults to _NEUTRAL_FACTOR_VALUE (0.5) when the prime-farmland
         data was unavailable, indistinguishable from a measured 0.5 without
@@ -1861,8 +1862,18 @@ def build_trees_payload(result: dict, assembled: dict) -> dict:
         lets a panel explain a score without hardcoding a weight, which is
         the thing water's `scales` could not do. Passed whole.
 
-    THE ONE THING ADDED: `feature_id` on every tabular row, carried from the
-    feature and never rebuilt (build_water_payload()'s precedent). The
+    THE TABULAR ROWS ARE WHERE THE PANEL READS, and TWO of their values
+    exist only there, derived on this side rather than left to whoever
+    renders them: `elevation_position` (the percentile as
+    ELEVATION_POSITION_BANDS' words, production's bands imported), and
+    `marginal_benefits` (what the zone's ground is GOOD FOR, each benefit
+    behind its own data-availability gate -- a factor sitting at the
+    neutral 0.5 because its fetch never ran earns nothing). Both follow
+    the rule the score bands already follow: the mapping stays on the
+    backend, the client renders what it is handed.
+
+    THE ONE THING ADDED HERE: `feature_id` on every tabular row, carried from
+    the feature and never rebuilt (build_water_payload()'s precedent). The
     narrative rows carry no patch id, only `rank`; ranks are unique
     (1..n, assigned by the scorer), so the lookup is by rank against the
     same features.

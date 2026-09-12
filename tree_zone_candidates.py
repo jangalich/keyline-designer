@@ -227,7 +227,14 @@ tree zones (a later, separate pass), not the reverse.
 This module does NOT assign a specific function to a resulting zone
 (windbreak vs. riparian buffer vs. habitat corridor vs. anything else) --
 that's left entirely to report narrative, a separate later pass (see
-confidence_notes on the output feature, which says so explicitly). It also
+confidence_notes on the output feature, which says so explicitly). It DOES
+name the conservation BENEFITS a zone's factors earned -- "erosion
+control", "nutrient deposition", "stream protection" -- which is a
+different thing and stays on the correct side of that line: a benefit is
+what a measured factor implies, a function is what a person decides to
+plant. Each benefit is gated on its factor's own data availability, so a
+factor sitting at _NEUTRAL_FACTOR_VALUE because its fetch never ran earns
+nothing. See MARGINAL_BENEFIT_FACTOR_SOURCES and marginal_benefits(). It also
 does NOT wire into generate_full_report.py/report_generator.py's prompt in
 this pass -- same "validate the layer on its own first" framing every other
 zone-type layer in this pipeline used before being narrated.
@@ -257,7 +264,33 @@ from dem_data import get_dem_for_boundary
 from feature_schema import CONFIDENCE_LOW, make_feature, make_feature_collection
 from hydrology_data import get_water_features_for_boundary
 from production_area import compute_slope_percent, get_required_tree_root_zone_mask_utm
-from production_area_ceiling import identify_optimized_production_areas
+from production_area_ceiling import (
+    # WHERE A PATCH SITS BETWEEN THE PARCEL'S LOWEST AND HIGHEST
+    # GROUND, AS WORDS -- production's bands and the function that
+    # reads them, IMPORTED, never redeclared. production_area_
+    # ceiling.py's module docstring owns this rule: elevation
+    # position is defined once for the whole pipeline, and trees is
+    # DOWNSTREAM of production, so trees imports it. Two copies
+    # means "upper field" comes to mean one thing in the tool and
+    # another in the report off the same number, which is exactly
+    # the failure a reader cannot detect. This is the OPPOSITE
+    # direction from _position_in_parcel below, which this module
+    # also imports rather than copies for the same layering reason
+    # (water is upstream of trees); production copies water's helper
+    # because production is UPSTREAM of water and may not import it.
+    # One rule, pointing three ways.
+    ELEVATION_POSITION_BANDS,
+    _elevation_position,
+    # The cell-center on-parcel mask the parcel's own elevation
+    # range is measured over -- imported for the same reason and by
+    # the same rule. It is one vectorised shapely.contains_xy() call
+    # over the grid and nothing in this module's own Step 1 produces
+    # it: Step 1 tests cells against the SETBACK-SHRUNK boundary, so
+    # the full parcel's low-to-high range is not recoverable from
+    # its output.
+    _on_parcel_cell_mask,
+    identify_optimized_production_areas,
+)
 from raster_grid import SQUARE_METERS_PER_ACRE, binary_dilate, cell_union_footprint, connected_components, pixel_center_xy
 from road_corridors import NO_ROAD_CORRIDOR, identify_road_corridor_candidates
 from soil_data import (
@@ -597,6 +630,119 @@ TREE_ZONE_BOUNDARY_SETBACK_METERS = 5.0
 # Applied uniformly across all three network-fetched factors here, rather
 # than inventing a different missing-data convention per factor.
 _NEUTRAL_FACTOR_VALUE = 0.5
+
+# ---------------------------------------------------------------------
+# MARGINAL BENEFITS -- what this ground is GOOD FOR, as words
+# ---------------------------------------------------------------------
+#
+# A short list of the conservation benefits a zone's own scoring factors
+# EARNED, for a data panel that has one narrow column and no room to
+# explain a weighted composite. The panel reads these instead of the
+# factor numbers; the report still reads the numbers. That is a
+# deliberate move toward "what is this zone good for" over "how was this
+# number computed", and it is the only thing these words are for.
+#
+# NOT A FUNCTION ASSIGNMENT, and the distinction is the module
+# docstring's own. "Erosion control" is a benefit tree cover on steep
+# ground delivers; "windbreak" / "riparian buffer" / "habitat corridor"
+# are PLANTING PLANS, and this module still assigns none of them -- see
+# TREE_ZONE_CONFIDENCE_NOTES_TEMPLATE, which says so on every feature.
+# A benefit names what a measured factor implies; a function names what
+# a person decides to plant. Nothing below crosses that line.
+#
+# NO VALUES, deliberately. A benefit is present or it is absent; there
+# is no "63% erosion control". Attaching a number would re-import the
+# factor decomposition the panel is dropping, one indirection further
+# from the measurement.
+#
+# THE MAPPING, factor -> benefit:
+#
+#     erosion control       <- slope_factor
+#     nutrient deposition   <- soil_marginality_factor OR
+#                              hydric_overlap_factor
+#     stream protection     <- stream_proximity_factor
+#
+# Nutrient deposition is the one with two sources and they are an OR:
+# marginal, non-prime soil and genuinely hydric ground each independently
+# make a case for planting that builds soil rather than mines it, and a
+# zone that has either has earned the words.
+#
+# THE GATE, which is the load-bearing half. A benefit appears when its
+# factor is ABOVE ZERO **and its availability gate is True** -- both
+# conditions, always, never just the first. Three of the four factors
+# fall back to _NEUTRAL_FACTOR_VALUE (0.5) when their data source could
+# not be reached at all, and 0.5 is above zero. A plain above-zero rule
+# would therefore display a benefit a zone never earned, computed from
+# data that was never fetched, and the reader has no way to tell that
+# from a measurement. This is the same null-not-zero discipline the
+# numeric rows already obey, moved from "render an em-dash" to "do not
+# claim the benefit".
+#
+# slope_factor's gate is the constant True below, and that is a
+# statement rather than an oversight: the DEM is fetch-or-raise (see
+# identify_tree_zone_candidates()), so a scored patch exists only if
+# real elevation was in hand. There is no *_data_available flag for it
+# because there is no run in which it could be False. Spelled as a gate
+# anyway so the rule reads the same for all four factors and a future
+# degradable slope source has an obvious place to land.
+_SLOPE_ALWAYS_MEASURED = True
+
+MARGINAL_BENEFIT_EROSION_CONTROL = "erosion control"
+MARGINAL_BENEFIT_NUTRIENT_DEPOSITION = "nutrient deposition"
+MARGINAL_BENEFIT_STREAM_PROTECTION = "stream protection"
+
+# (benefit, ((factor key, availability-gate key or None), ...)) -- a
+# tuple, not a dict, because the EMISSION ORDER is part of the contract:
+# a panel renders the list as given and two zones must list their shared
+# benefits in the same order. A gate key of None means the constant True
+# above.
+MARGINAL_BENEFIT_FACTOR_SOURCES = (
+    (MARGINAL_BENEFIT_EROSION_CONTROL, (("slope_factor", None),)),
+    (
+        MARGINAL_BENEFIT_NUTRIENT_DEPOSITION,
+        (
+            ("soil_marginality_factor", "soil_marginality_data_available"),
+            ("hydric_overlap_factor", "hydric_data_available"),
+        ),
+    ),
+    (MARGINAL_BENEFIT_STREAM_PROTECTION, (("stream_proximity_factor", "stream_data_available"),)),
+)
+
+# Every benefit word this module can emit, in emission order -- for a
+# consumer that wants to lay out a fixed set of rows, and for a test
+# that wants to assert against the mapping rather than a copy of it.
+MARGINAL_BENEFITS = tuple(benefit for benefit, _ in MARGINAL_BENEFIT_FACTOR_SOURCES)
+
+
+def marginal_benefits(patch: dict) -> list[str]:
+    """
+    The conservation benefits this zone's factors EARNED, in
+    MARGINAL_BENEFIT_FACTOR_SOURCES' own order -- see that constant's
+    header comment for the mapping, and for why the availability gate is
+    half of every test here rather than a refinement of it.
+
+    `patch` is one score_tree_search_space() entry (or the rehydrated
+    form of one, which carries the same factor and flag keys verbatim).
+    A benefit qualifies when ANY of its source factors is strictly above
+    zero AND that factor's own data was genuinely available; a zone that
+    qualifies for nothing returns an EMPTY LIST, not None -- the panel
+    renders no section, and "no benefit earned" is a real answer rather
+    than a missing one.
+
+    PURE, and a read only: no factor, weight or threshold is consulted
+    and nothing on `patch` is modified. This is the one place the
+    factor-to-benefit mapping and the gate rule live, which is why it is
+    public -- the same reason the score bands stay on this side rather
+    than being re-derived by whatever renders them.
+    """
+    earned = []
+    for benefit, sources in MARGINAL_BENEFIT_FACTOR_SOURCES:
+        for factor_key, gate_key in sources:
+            available = _SLOPE_ALWAYS_MEASURED if gate_key is None else bool(patch.get(gate_key))
+            if available and float(patch.get(factor_key) or 0.0) > 0.0:
+                earned.append(benefit)
+                break
+    return earned
 
 TREE_ZONE_CONFIDENCE_NOTES_TEMPLATE = (
     "This identifies GENERAL tree-suitable land -- ground within the property's leftover, "
@@ -1170,6 +1316,16 @@ def score_tree_search_space(
             'hydric_overlap_factor': float,    # 0-1
             'stream_proximity_factor': float,  # 0-1
             'avg_slope_pct': float,
+            'slope_median_pct': float,              # the median of the SAME per-cell slope array
+                # avg_slope_pct is the mean of -- production_area_ceiling.py's and
+                # water_candidate_zones.py's own field name, for the same measurement. Both are
+                # kept: the mean is what slope_factor was computed from and what the report reads,
+                # the median is what describes the patch's typical ground.
+            'elevation_percentile_of_parcel': Optional[float],   # 0 = the parcel's lowest ground,
+                # 100 = its highest, off this patch's mean elevation against the REAL, FULL
+                # boundary's own range. None -- never 0.0, never a default -- on a parcel with no
+                # relief at all. build_narrative_data() turns it into ELEVATION_POSITION_BANDS'
+                # words; see production_area_ceiling._elevation_position(), imported here.
             'soil_marginality_data_available': bool,
             'hydric_data_available': bool,
             'stream_data_available': bool,
@@ -1182,6 +1338,32 @@ def score_tree_search_space(
     rows, cols = array.shape
     valid = ~np.isnan(array)
     slope_pct_grid = compute_slope_percent(array, dem["resolution_meters"])
+
+    # THE PARCEL'S OWN LOW-TO-HIGH ELEVATION RANGE, measured once for the
+    # whole run over the REAL, FULL boundary -- not the search space, and
+    # not the setback-shrunk boundary. A zone's elevation position is a
+    # statement about where it sits on the PROPERTY ("upper field"), so
+    # the ground it is positioned against has to be the whole property;
+    # measuring against the leftover search space would make a zone's
+    # position depend on how much ground production and water happened to
+    # claim this run, which is not a fact about the zone.
+    #
+    # None -- never a range of zero width -- on a parcel with no relief at
+    # all, where "upper" and "lower" name nothing. That None carries
+    # straight through to every patch's percentile and from there to its
+    # position word; see _elevation_position(), imported from production,
+    # for why a default word is never the answer.
+    #
+    # PURE AND LOCAL, no fetch: the DEM is already in hand (mandatory for
+    # this function to run at all) and the mask is one vectorised
+    # contains_xy() call over the grid. Exactly production_area_ceiling.
+    # py's own computation, reached through the same imported helper.
+    parcel_elevations = array[_on_parcel_cell_mask(dem, boundary_polygon_utm)]
+    parcel_elevations = parcel_elevations[~np.isnan(parcel_elevations)]
+    if parcel_elevations.size and float(parcel_elevations.max()) > float(parcel_elevations.min()):
+        parcel_elevation_range = (float(parcel_elevations.min()), float(parcel_elevations.max()))
+    else:
+        parcel_elevation_range = None
 
     search_space_prepared = prep(search_space_utm)
     prime_prepared = (
@@ -1347,7 +1529,35 @@ def score_tree_search_space(
         if area_acres < min_area_acres:
             continue
 
-        avg_slope_pct = float(np.mean([float(slope_pct_grid[r, c]) if not np.isnan(slope_pct_grid[r, c]) else 0.0 for r, c in cells]))
+        patch_slopes = [float(slope_pct_grid[r, c]) if not np.isnan(slope_pct_grid[r, c]) else 0.0 for r, c in cells]
+        avg_slope_pct = float(np.mean(patch_slopes))
+        # THE MEDIAN OF THE SAME ARRAY THE MEAN IS TAKEN FROM, and that
+        # sameness is the point: production_area_ceiling.py and
+        # water_candidate_zones.py both publish slope_median_pct, this is
+        # the same measurement on the same ground, and it carries their
+        # name exactly so a reader comparing three layers does not have to
+        # work out whether three spellings mean three things.
+        #
+        # The mean STAYS. slope_factor was computed from it, so it is what
+        # explains the score and the report reads it; the median describes
+        # the patch's typical ground and is what a panel row wants beside
+        # a skewed distribution. Neither replaces the other.
+        slope_median_pct = float(np.median(patch_slopes))
+
+        # WHERE THIS PATCH SITS IN THE PARCEL'S ELEVATION RANGE, 0 = the
+        # parcel's lowest ground, 100 = its highest -- the same linear
+        # position production_area_ceiling.py publishes under this same
+        # name, off this patch's own mean elevation. None on a parcel with
+        # no relief (see parcel_elevation_range above), and clamped to
+        # [0, 100] because a patch can sit on a cell the on-parcel mask
+        # excluded (a cell center just outside the boundary whose square
+        # still intersects it).
+        mean_elevation = float(np.mean([float(array[r, c]) for r, c in cells]))
+        if parcel_elevation_range is None:
+            elevation_percentile = None
+        else:
+            low, high = parcel_elevation_range
+            elevation_percentile = round(max(0.0, min(100.0, (mean_elevation - low) / (high - low) * 100.0)), 1)
         slope_factor = float(np.mean([slope_factor_grid[r, c] for r, c in cells]))
         soil_marginality_factor = float(np.mean([soil_marginality_grid[r, c] for r, c in cells]))
         hydric_overlap_factor = float(np.mean([hydric_overlap_grid[r, c] for r, c in cells]))
@@ -1423,6 +1633,8 @@ def score_tree_search_space(
                 "hydric_overlap_factor": round(hydric_overlap_factor, 3),
                 "stream_proximity_factor": round(stream_proximity_factor, 3),
                 "avg_slope_pct": round(avg_slope_pct, 1),
+                "slope_median_pct": round(slope_median_pct, 1),
+                "elevation_percentile_of_parcel": elevation_percentile,
                 "soil_marginality_data_available": prime_farmland_data_available,
                 "hydric_data_available": hydric_data_available,
                 "stream_data_available": stream_data_available,
@@ -1779,6 +1991,20 @@ def build_narrative_data(
                                                 #   the class
               'area_acres', 'score',            # score 0-100, higher is better
               'avg_slope_pct',
+              'slope_median_pct',               # the same measurement production and
+                                                #   water publish under this same name
+              'elevation_percentile_of_parcel', # 0 = the parcel's lowest ground, 100 =
+                                                #   its highest. None on a parcel with
+                                                #   no relief
+              'elevation_position',             # the line above as words --
+                                                #   ELEVATION_POSITION_BANDS, IMPORTED
+                                                #   from production, never redeclared.
+                                                #   None wherever the percentile is None
+              'marginal_benefits': [str, ...],  # what this ground is GOOD FOR, in
+                                                #   MARGINAL_BENEFIT_FACTOR_SOURCES'
+                                                #   order -- NO VALUES, and EMPTY when
+                                                #   the zone earned none. See
+                                                #   marginal_benefits()
               'factors': {          # each factor rescaled 0-100, higher is
                                     #   better -- the decomposition "why did
                                     #   this patch qualify" is answered from
@@ -1831,6 +2057,38 @@ def build_narrative_data(
                 "area_acres": _round1(patch["area_acres"]),
                 "score": _round1(patch["tree_suitability_score"]),
                 "avg_slope_pct": _round1(patch["avg_slope_pct"]),
+                # The SAME measurement production_area_ceiling.py and
+                # water_candidate_zones.py publish, under the SAME name --
+                # the label a panel prints is "median slope %" for all
+                # three, and a third spelling for one measurement is a
+                # reader's problem, not a layer's prerogative. Read off
+                # the patch; score_tree_search_space() took it from the
+                # same per-cell array avg_slope_pct is the mean of.
+                "slope_median_pct": _round1(patch["slope_median_pct"]),
+                # WHERE THIS ZONE SITS IN THE PARCEL'S ELEVATION RANGE,
+                # as a number and then as words. Two rows, both emitted:
+                # the report quotes the percentile and explains the axis
+                # inline, a panel has one narrow column and prints the
+                # word. None on a parcel with no relief -- and the word
+                # is None there too, NEVER a default, because on flat
+                # ground "upper" and "lower" name nothing a reader could
+                # tell from a measurement.
+                #
+                # THE BANDS ARE PRODUCTION'S, IMPORTED. Trees is
+                # downstream of production, production's module docstring
+                # declares elevation position defined once for the whole
+                # pipeline, and _elevation_position() reads the constant
+                # rather than hardcoding the cuts -- so retuning the
+                # bands there retunes this row with them.
+                "elevation_percentile_of_parcel": patch["elevation_percentile_of_parcel"],
+                "elevation_position": _elevation_position(patch["elevation_percentile_of_parcel"]),
+                # WHAT THIS GROUND IS GOOD FOR, as words with no values --
+                # the benefits this zone's own factors EARNED, each behind
+                # its data-availability gate. The mapping and the gate rule
+                # live in marginal_benefits(); a consumer renders the list
+                # and holds neither. An EMPTY list is a real answer ("this
+                # zone earned none"), and a panel renders no section for it.
+                "marginal_benefits": marginal_benefits(patch),
                 "factors": {
                     "hydric_overlap": _round1(patch["hydric_overlap_factor"] * 100.0),
                     "slope": _round1(patch["slope_factor"] * 100.0),
