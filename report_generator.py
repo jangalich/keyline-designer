@@ -1104,7 +1104,7 @@ def _format_road_corridor_summary(road_narrative: Optional[dict]) -> str:
         f"Recommended road: a single route ({trunk['role']}) {trunk['length_ft']}ft long, "
         f"averaging {trunk['avg_grade_pct']}% grade, newly serving "
         f"{trunk['newly_served_acres']} acre(s) of identified production ground."
-        + (" [crosses a production zone]" if trunk["crosses_production_zone"] else "")
+        + (" [crosses a block]" if trunk["crosses_production_zone"] else "")
         + _steep_section_clause(trunk)
     ]
 
@@ -1115,7 +1115,7 @@ def _format_road_corridor_summary(road_narrative: Optional[dict]) -> str:
         parent = branch_by_index.get(branch["joins_branch_index"])
         parent_note = f"off the {parent['role']}" if parent is not None else "off the network"
         purpose_note = ", reaching the water zone sited in step 3" if branch["role"] == "water_spur" else ""
-        crossing_note = " [crosses a production zone]" if branch["crosses_production_zone"] else ""
+        crossing_note = " [crosses a block]" if branch["crosses_production_zone"] else ""
         lines.append(
             f"  - {branch['length_ft']}ft spur {parent_note}{purpose_note}, "
             f"{branch['avg_grade_pct']}% avg grade, "
@@ -1175,8 +1175,9 @@ def _format_road_corridor_summary(road_narrative: Optional[dict]) -> str:
         "spur only in proportion to its own length/acreage above (a few-foot stub is a minor "
         "detail, not a second corridor — do not call it 'additional access'), and state the total "
         "network length/served acreage and the stop-reason sentence above plainly rather than "
-        "omitting or softening them. Treat a production-zone crossing as a real, valid routing "
-        "option (not a caveat) unless it's a genuine material tradeoff worth naming."
+        "omitting or softening them. Treat a BLOCK crossing as a real, valid routing option "
+        "(not a caveat) unless it's a genuine material tradeoff worth naming -- and say BLOCK, "
+        "which is what a production zone is called in the interface, not 'production zone'."
     )
     return "\n".join(lines)
 

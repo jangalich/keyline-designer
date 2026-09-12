@@ -78,27 +78,35 @@ def _boundary_point(edge_index: int, fraction: float) -> tuple:
 # zones; D on the south edge a single trunk, for the cap test.
 #
 # B MOVED, AND WHY IT HAD TO. It sat on the short east edge and grew five
-# branches there. PRODUCTION_SERVICE_RADIUS_METERS is now 25 m rather than
-# 100, so a road cell serves a sixteenth of the ground it used to and every
-# network on this parcel is smaller: that edge yields a lone trunk at every
-# fraction measured, and section 8 needs a network with a spur to reject
-# half of. The east edge cannot supply one any more, so B is on the
+# branches there. PRODUCTION_SERVICE_RADIUS_METERS had gone to 25 m from
+# 100, so a road cell served a sixteenth of the ground it used to and every
+# network on this parcel was smaller: that edge yielded a lone trunk at
+# every fraction measured, and section 8 needs a network with a spur to
+# reject half of. The east edge could not supply one, so B is on the
 # north-east edge. Its compass labels below were also wrong before this
 # (edge 2 is east, not south-east; edge 1 is south, not south-west) and are
 # now the measured bearing of each edge's own midpoint.
+#
+# THE RADIUS HAS SINCE GONE 25 -> 50, and the four points above all still
+# stand: each still routes and each still yields a different network, so
+# none had to move. The NETWORKS they yield did move, and substantially --
+# see PRODUCTION_SERVICE_RADIUS_METERS' own comment for the measured
+# before/after on A, B and C. Only the refusing point below had to be
+# re-surveyed, because "refuses" is the one property a wider service
+# radius can take away.
 #
 # A FIFTH, NO_NETWORK, IS AN ACCESS POINT THE ROUTER REFUSES, and finding
 # one is no longer free. It used to sit on the east edge and be refused by
 # road_corridors.MIN_CORRIDOR_LENGTH_METERS -- the router built an 87.4 m
 # network there and the length floor threw it away. That floor is gone, so
 # that point now routes and the refusal has to be the ROUTER'S OWN.
-# Re-surveying the same thirty points found exactly two that route nothing,
-# both on the south-west edge, and this is the first: the cheapest
-# extension the router can find from here already costs more than
-# MAX_ROAD_METERS_PER_SERVED_ACRE per acre it would serve, so it stops
-# before accepting a single branch (stop_reason 'cost_per_acre_exceeded',
-# branches=[]). It shares an edge with D as a result, which the four above
-# deliberately do not -- there is no fifth edge that refuses.
+# Re-surveying found points that route nothing on the SOUTH edge (edge 1),
+# and this is one of them: the cheapest extension the router can find from
+# here already costs more than MAX_ROAD_METERS_PER_SERVED_ACRE per acre it
+# would serve, so it stops before accepting a single branch (stop_reason
+# 'cost_per_acre_exceeded', branches=[]). It shares an edge with D as a
+# result, which the four above deliberately do not -- there is no fifth
+# edge that refuses.
 #
 # THAT SURVEY WAS MEASURED AT A 200 m/acre CEILING, AND THE CEILING HAS
 # SINCE MOVED TO 500. At 500 the router pays two and a half times as much
@@ -118,12 +126,43 @@ def _boundary_point(edge_index: int, fraction: float) -> tuple:
 # the orchestrator does with an access point that routes nothing, and a
 # retry from the same point is refused identically because nothing about it
 # is chance.
-NO_NETWORK_CEILING_METERS_PER_ACRE = 200.0
+#
+# AND BOTH THE PIN AND THE POINT HAVE MOVED AGAIN, 200 -> 120 AND
+# EDGE 1 AT 0.35 -> 0.60, FOR THE SAME REASON THE PIN EXISTS.
+# PRODUCTION_SERVICE_RADIUS_METERS went 25 -> 50, which QUADRUPLES the
+# ground one road cell serves and so roughly halves every candidate's
+# metres-per-served-acre. A ceiling the router used to hit it now
+# clears: re-running the same survey at 200 -- all six edges, every 5%
+# of each edge's length, 120 real routing passes -- found ZERO refusing
+# points on this parcel, the old NO_NETWORK included, so the 200 pin
+# stopped pinning anything. That is not a fixture problem; it is the
+# constant change working exactly as predicted, measured.
+#
+# THE SECTION NEEDS TWO THINGS AT ONCE, which is what fixed the new
+# pair: A, B, C and D must all still route (the section fills the cap
+# with three of them and is refused a fourth), and NO_NETWORK must not.
+# Sweeping the ceiling at the new radius:
+#
+#     ceiling   A B C D all route   points that refuse
+#     -------   -----------------   ----------------------------------
+#       150            yes          edge 1 @ 0.60
+#       130            yes          edge 1 @ 0.60, 0.70
+#       120            yes          edge 1 @ 0.60, 0.70
+#       110            yes          edge 1 @ 0.60, 0.70
+#       100            yes          edge 1 @ 0.20, 0.30, 0.60, 0.70
+#        90         NO -- D refuses  edge 1 @ 0.20-0.45, 0.60, 0.70
+#
+# 120 is chosen mid-band rather than at either edge: D's own flip is
+# between 90 and 100, and edge 1 @ 0.60 routes somewhere above 150, so
+# neither a small terrain change nor a small tuning change silently
+# flips the section's premise. TWO points refuse at 120, not one, so
+# the choice does not rest on a single knife-edge cell either.
+NO_NETWORK_CEILING_METERS_PER_ACRE = 120.0
 ACCESS_A = _boundary_point(0, 0.85)
 ACCESS_B = _boundary_point(3, 0.85)
 ACCESS_C = _boundary_point(4, 0.50)
 ACCESS_D = _boundary_point(1, 0.50)
-ACCESS_NO_NETWORK = _boundary_point(1, 0.35)
+ACCESS_NO_NETWORK = _boundary_point(1, 0.60)
 # An interior point, ~40 m inside: not an access point by the validator's
 # own rule.
 _centroid_lon, _centroid_lat = warp_transform(

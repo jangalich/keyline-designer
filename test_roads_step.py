@@ -204,10 +204,14 @@ assert ROADS.accumulate.empty_error and "access point" in ROADS.accumulate.empty
 assert step_registry.get_step("landform").accumulate is None
 assert step_registry.get_step("water").accumulate is None
 
-# THE TWO ROUTING CONSTANTS THIS BRANCH MOVED, asserted against the module
-# that owns them rather than restated here.
+# THE TWO ROUTING CONSTANTS, asserted against the module that owns them
+# rather than restated here. PRODUCTION_SERVICE_RADIUS_METERS is 50.0
+# now (it was 25.0): a doubled radius QUADRUPLES the ground within range
+# of any road cell, so every served-acreage and network-shape figure in
+# this file moves with it -- see that constant's own comment for the
+# measured before/after on this very parcel.
 assert road_network_router.MAX_ROAD_METERS_PER_SERVED_ACRE == 250.0
-assert road_network_router.PRODUCTION_SERVICE_RADIUS_METERS == 25.0
+assert road_network_router.PRODUCTION_SERVICE_RADIUS_METERS == 50.0
 assert not hasattr(road_corridors, "MIN_CORRIDOR_LENGTH_METERS"), (
     "the network-length floor is deleted, not merely unused: a constant left "
     "behind is one a later caller can pass again"

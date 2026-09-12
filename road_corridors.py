@@ -637,6 +637,111 @@ def _cell_steep_stats(
     return max_grade_pct, steep_meters
 
 
+# The three grounds a road network's crossing length is measured against,
+# in the order the panel lists them. Each name is the key used on every
+# crossing dict in this module (per branch and network-level alike); the
+# panel's own row labels are minted in build_narrative_data(), where
+# "production" becomes BLOCK -- the word the interface uses for a
+# production zone now. The internal name stays "production" on purpose:
+# it names the same mask, the same ids and the same per-branch
+# crosses_production_zone boolean the rest of this pipeline already
+# carries, and renaming an id to follow a display word is how a wire
+# contract and a label drift apart.
+_CROSSING_GROUNDS = ("production", "canopy", "floodplain")
+
+
+def _mask_crossing_meters(
+    dem: dict,
+    cells: list[tuple[int, int]],
+    mask: Optional[np.ndarray],
+    already_built: set,
+) -> Optional[float]:
+    """
+    How many real metres of NEW road this branch builds ACROSS the ground
+    `mask` marks -- or None when the mask is None, because a ground whose
+    data never arrived was not measured and must not report a 0.0 that
+    reads as "crossed nothing".
+
+    WHY A LENGTH AND NOT A BOOLEAN. crosses_floodplain/crosses_production_
+    zone answer "did it touch that ground at all", and a corridor clipping
+    a block's corner for 20 ft and one running 300 ft up its middle answer
+    that question identically. They are not the same fact about a road.
+    The precedent is commit_validation.crossings() and the trees contract's
+    four grounds, which both record the ACREAGE of each crossed ground for
+    exactly this reason; a road is a line rather than an area, so the same
+    shape is recorded in the unit a line has.
+
+    TWO CONVENTIONS, BOTH BORROWED RATHER THAN INVENTED:
+
+      * COST/LENGTH ACCRUES ON ENTERING A CELL -- the step from one
+        ordered cell to the next contributes its own real ground length
+        when the cell it ENTERS is in the mask. That is road_cost_path's
+        own Dijkstra edge weight convention, and _cell_steep_stats() above
+        measures steep_meters the same way, so N contiguous marked cells
+        crossed straight through contribute exactly N cells' worth.
+
+      * NEW CONSTRUCTION ONLY -- a cell already belonging to an
+        earlier-accepted branch contributes 0, exactly as road_network_
+        router._new_length_meters() computes the branch's own
+        length_meters. Without it a spur that runs back down the trunk to
+        reach its own start would re-charge the trunk's crossings to the
+        network total, and the summed crossing length could exceed the
+        network's own total_length_meters -- a figure no reader could
+        make sense of beside it.
+
+    Cells are ordered and the first is never counted (there is no step
+    into it), which is the same index-0 treatment steep_meters gives.
+    """
+    if mask is None:
+        return None
+    px, py = dem["resolution_meters"]
+    meters = 0.0
+    for index in range(1, len(cells)):
+        cell = cells[index]
+        if cell in already_built or not mask[cell[0], cell[1]]:
+            continue
+        r0, c0 = cells[index - 1]
+        meters += math.hypot((cell[1] - c0) * px, (cell[0] - r0) * py)
+    return meters
+
+
+def _length_weighted_avg_grade_pct(branches: list[dict]) -> float:
+    """
+    ONE average grade for a whole network: each branch's own centreline
+    average weighted by the branch's own length_meters.
+
+    LENGTH-WEIGHTED, NOT A MEAN OF BRANCH AVERAGES, and the difference is
+    not cosmetic. A plain mean gives a 40 ft spur the same vote as a 900 ft
+    trunk: a network that is 900 ft of 3% trunk plus 40 ft of 20% stub
+    averages 11.5% unweighted and 3.7% weighted, and only the second
+    describes what driving the network is like. The weighted figure is the
+    grade of the average METRE of road, which is the question "what is the
+    average grade of this network" actually asks.
+
+    THERE WAS NO NETWORK-LEVEL AVERAGE BEFORE THIS. avg_grade_pct existed
+    per branch only; max_grade_pct and steep_meters were the only rollups,
+    so nothing had to be un-learned here -- but a consumer reaching for
+    "the network's grade" had only the branch list, and the obvious thing
+    to do with a branch list is average it.
+
+    Weighted over the branches ACTUALLY EMITTED, whose length_meters are
+    the new-construction lengths the router charged, so the denominator is
+    a real road length and never double-counts reused cells. A sub-2-cell
+    branch dropped before geometry has no centreline and so no grade to
+    contribute -- the same exclusion max_grade_pct already makes.
+
+    0.0 for a network with no branches, matching max_grade_pct's own
+    default rather than introducing a lone None beside it: network_found
+    is the guard that says there is no road, for both.
+    """
+    total_length = sum(float(b["length_meters"]) for b in branches)
+    if total_length <= 0.0:
+        return 0.0
+    return float(
+        sum(float(b["avg_grade_pct"]) * float(b["length_meters"]) for b in branches) / total_length
+    )
+
+
 def _empty_road_network(stop_reason: str, unserved_acres: float = 0.0) -> dict:
     """
     The canonical "no road network at all" shape -- returned (never None,
@@ -662,7 +767,19 @@ def _empty_road_network(stop_reason: str, unserved_acres: float = 0.0) -> dict:
         "unserved_acres": unserved_acres,
         "stop_reason": stop_reason,
         "max_grade_pct": 0.0,
+        # The length-weighted network average (see _length_weighted_avg_
+        # grade_pct()) -- 0.0 here for the same reason max_grade_pct above
+        # is: no branches, no grade, and network_found is what tells a
+        # consumer there is no road rather than a suspiciously level one.
+        "avg_grade_pct": 0.0,
         "steep_meters": 0.0,
+        # Zero metres of road cross zero metres of anything, on every
+        # ground, WITHOUT any of the three masks having to exist -- which
+        # is why these are a measured 0.0 rather than the None an
+        # unavailable ground earns on a network that was actually routed
+        # (see build_road_network()). Same shape as steep_meters beside
+        # them: a length summed over branches, and there are none.
+        "crossing_meters": {ground: 0.0 for ground in _CROSSING_GROUNDS},
         "cells": [],
         "cell_footprint_polygon_utm": Polygon(),
     }
@@ -762,6 +879,11 @@ def build_road_network(
               "crosses_floodplain": bool,
               "crosses_production_zone": bool,
               "production_cells_crossed": int,
+              "crossing_meters": {               # NEW-construction metres this branch
+                "production": float | None,      #   builds across each ground, None when
+                "canopy": float | None,          #   that ground's mask was unavailable
+                "floodplain": float | None,      #   (see _mask_crossing_meters())
+              },
             }, ...
           ],                                      # [] when no network at all
           "total_length_meters": float,
@@ -769,7 +891,14 @@ def build_road_network(
           "unserved_acres": float,
           "stop_reason": str,
           "max_grade_pct": float,                 # steepest single cell across the WHOLE network (max of branches)
+          "avg_grade_pct": float,                 # LENGTH-WEIGHTED mean of the branch averages across the
+                                                  #   WHOLE network (see _length_weighted_avg_grade_pct())
           "steep_meters": float,                  # steep-cell length summed across the WHOLE network
+          "crossing_meters": {                    # crossing length per ground, summed across the WHOLE
+            "production": float | None,           #   network -- ONE figure per ground however many
+            "canopy": float | None,               #   separate blocks/patches of it the network crosses.
+            "floodplain": float | None,           #   0.0 = measured, crossed none; None = no mask
+          },
           "reaches_water_zone": bool,             # the ROUTER ran a water spur -- true even when that spur
                                                   #   was zero-length and so never became a branch below
           "cells": [(r, c), ...],                 # every branch cell, deduped, across the WHOLE network
@@ -782,6 +911,14 @@ def build_road_network(
     and steep_meters come from the per-CELL slope raster and surface the
     single 24% cell that gentle average would otherwise hide -- see
     _cell_steep_stats().
+
+    THE TWO NETWORK-LEVEL GRADES REDUCE DIFFERENTLY, and each reduction is
+    the only honest one for its own quantity. max_grade_pct is a MAX over
+    the branches, so it is the steepest point ANYWHERE in the network --
+    the worst pitch does not get averaged away by how much gentle road
+    surrounds it. avg_grade_pct is a LENGTH-WEIGHTED mean, so it is the
+    grade of the average metre of road rather than the average of the
+    branches, which would let a 40 ft stub outvote a 900 ft trunk.
 
     "cells"/"cell_footprint_polygon_utm" at the top level exist so
     exclusion consumers (e.g. tree_zone_candidates.py) get the WHOLE
@@ -892,6 +1029,15 @@ def build_road_network(
 
     for branch_index, branch in enumerate(network_result["branches"]):
         cells = branch["cells"]
+        # Snapshotted BEFORE this branch's own cells join seen_cells: the
+        # crossing measurement below charges NEW construction only, and
+        # "new" means "not already part of a branch accepted before this
+        # one" -- road_network_router._new_length_meters()'s own rule, so
+        # the crossing lengths stay commensurable with length_meters.
+        # Taken before the sub-2-cell `continue` too, because such a
+        # branch is still accepted road the next branch can run back
+        # along, even though it never becomes a drawn feature.
+        already_built = set(seen_cells)
         for cell in cells:
             network_cell_mask[cell[0], cell[1]] = True
             if cell not in seen_cells:
@@ -914,6 +1060,25 @@ def build_road_network(
         crosses_floodplain = hydric_floodplain_union is not None and line.intersects(hydric_floodplain_union)
         production_cells_crossed = sum(1 for r, c in cells if production_mask[r, c])
         crosses_production_zone = production_cells_crossed > 0
+        # HOW FAR this branch runs across each ground, beside the booleans
+        # above rather than instead of them -- measured on the SAME cell
+        # masks the cost raster charged against, which is what makes the
+        # length and the penalty the router paid describe one event.
+        #
+        # THE FLOODPLAIN BOOLEAN AND THE FLOODPLAIN LENGTH CAN DISAGREE AT
+        # THE MARGIN, deliberately and in one direction only. The boolean
+        # is a geometry test (the centreline intersecting the union at
+        # all); the length is a cell test (the cell CENTRE inside it, the
+        # same test that decided whether the router paid the crossing
+        # penalty there). A centreline clipping the union's edge without
+        # any routed cell centre falling inside reads True at 0.0 m. That
+        # is the honest pair: the line does touch that ground, and the
+        # road built none of its length on it.
+        crossing_meters = {
+            "production": _mask_crossing_meters(dem, cells, production_mask, already_built),
+            "canopy": _mask_crossing_meters(dem, cells, canopy_mask, already_built),
+            "floodplain": _mask_crossing_meters(dem, cells, floodplain_mask, already_built),
+        }
 
         xs = [p[0] for p in points]
         ys = [p[1] for p in points]
@@ -938,6 +1103,7 @@ def build_road_network(
                 "crosses_floodplain": crosses_floodplain,
                 "crosses_production_zone": crosses_production_zone,
                 "production_cells_crossed": production_cells_crossed,
+                "crossing_meters": crossing_meters,
             }
         )
 
@@ -962,7 +1128,41 @@ def build_road_network(
         # sub-2-cell branch dropped before geometry (no segment, no reportable
         # grade) never contributes.
         "max_grade_pct": max((b["max_grade_pct"] for b in branches_out), default=0.0),
+        # ONE average grade for the whole network, LENGTH-WEIGHTED across
+        # the branches -- see _length_weighted_avg_grade_pct() for why a
+        # mean of branch averages is the wrong answer and for the fact
+        # that no network-level average existed at all before this.
+        "avg_grade_pct": _length_weighted_avg_grade_pct(branches_out),
         "steep_meters": float(sum(b["steep_meters"] for b in branches_out)),
+        # CROSSING LENGTH PER GROUND, SUMMED ACROSS THE WHOLE NETWORK --
+        # one figure per ground, not one per crossed block: a network
+        # running through three separate production blocks reports the
+        # total length it spends inside production ground, because the
+        # question the panel asks is how much of this road is built on
+        # that ground, not how many pieces of it there are.
+        #
+        # 0.0 AND None ARE DIFFERENT ANSWERS AND BOTH ARE REACHABLE HERE.
+        # 0.0 is measured: the mask existed and no routed cell was in it,
+        # so this network crosses none of that ground (the panel drops the
+        # row, which it can only do safely because the value is not a
+        # stand-in for "we did not look"). None is the canopy or
+        # floodplain fetch having failed, leaving no mask to measure
+        # against -- the block's own "UNAVAILABLE IS None, NEVER 0.0"
+        # rule, with determination's *_data_available flags saying which
+        # case a None is. production_mask is always built, so its figure
+        # is always measured.
+        "crossing_meters": {
+            ground: (
+                0.0
+                if not branches_out
+                else (
+                    None
+                    if any(b["crossing_meters"][ground] is None for b in branches_out)
+                    else float(sum(b["crossing_meters"][ground] for b in branches_out))
+                )
+            )
+            for ground in _CROSSING_GROUNDS
+        },
         # Whether the network reaches the selected water ground at all --
         # read off the ROUTER'S OWN branch list, deliberately, not off
         # branches_out above. A water spur can come back with a single cell
@@ -1033,12 +1233,13 @@ def corridors_to_geojson(
 # =====================================================================
 # NARRATIVE DATA -- report-facing, FINAL values only
 # =====================================================================
-# Everything below exists to answer THREE report questions about this
+# Everything below exists to answer FOUR report questions about this
 # module's deliverable, and nothing else:
 #
 #   1. HOW was the suggested route determined?
 #   2. HOW MUCH ACCESS does it provide to the farm?
 #   3. HOW GOOD IS THE GROUND the route runs on?
+#   4. WHAT GROUND does it cross, and HOW MUCH of it?
 #
 # Question 3 is its own question and its own block. It is not a facet of
 # either of the other two: a network can run over excellent ground and
@@ -1049,6 +1250,45 @@ def corridors_to_geojson(
 # accumulated cost is already the answer and only needed normalizing.
 # See _terrain_quality_score() for that normalization and for the claim
 # discipline the resulting number is reported under.
+#
+# Question 4 is likewise its own block and not a facet of 3. The quality
+# score folds a floodplain crossing into ONE number along with grade and
+# ridge position; "how much floodplain" is a separate fact, and a
+# 20-foot clip of a block's corner is a different fact again from 300
+# feet through its middle -- which the booleans that preceded this could
+# not say at all. See _mask_crossing_meters().
+#
+# ---------------------------------------------------------------------
+# ROADS' PANEL DIVERGES FROM EVERY OTHER STEP'S, DELIBERATELY. DO NOT
+# "FIX" IT INTO CONSISTENCY.
+# ---------------------------------------------------------------------
+# The cross-step panel is three sections: a header (headline figures), a
+# middle section, and the crossings. Everywhere else -- production,
+# water, trees -- the MIDDLE SECTION IS THE SCORE'S OWN FACTORS: the
+# weighted criteria that were combined to produce the number in the
+# header, so the reader can see what made it.
+#
+# Roads' middle section is length, average grade and max grade, and NONE
+# OF THOSE IS A FACTOR OF THE SCORE. They cannot be. This step's score
+# is cost per metre (see _terrain_quality_score()), and length and grade
+# are OUTCOMES of the routing that produced that cost, not inputs the
+# score weighs: the router chose where to go, and the network's length
+# and its grades are what fell out of that choice. Dividing accumulated
+# cost by length is not "weighing length as a factor"; length is the
+# denominator that makes the cost readable, and a longer network is
+# neither better nor worse for being longer.
+#
+# So roads' middle section answers "WHAT IS THIS NETWORK LIKE" rather
+# than "WHAT MADE THIS NUMBER". That is the right answer for this step
+# and a reader is not being short-changed: the score's own composition is
+# published in full in `scales` (the ratio it restates, the base it
+# normalizes against, the anchors), which is where a reader who wants
+# "what made this number" should be sent -- not to a middle section
+# rebuilt out of quantities that did not make it.
+#
+# A future change that replaces this middle section with the score's
+# factors, for consistency with the other steps, will be inventing
+# factors this score does not have.
 #
 # The same two hard rules production_area_ceiling.py's narrative block
 # established govern every value here:
@@ -1094,6 +1334,130 @@ def _feet(meters):
     return None if meters is None else round(float(meters) / METERS_PER_FOOT, 1)
 
 
+# HOW TO READ EVERY SCORED NUMBER THIS BLOCK SHIPS.
+# production_area_ceiling.py's `scales` is the precedent and water_survey_
+# areas.build_scales()'s docstring states the rule outright: NO SCORED
+# VALUE CROSSES THE WIRE WITHOUT ITS SCALE, because a bare number with no
+# range is not a measurement a reader can act on. The terrain quality
+# score has been crossing the wire without one. This is that scale.
+#
+# WHAT 61 OUT OF 100 IS OUT OF, stated plainly because it is the question
+# the whole block exists to answer. The score is a linear restatement of
+# cost_per_meter_ratio, and that ratio is the network's own average cost
+# per metre divided by road_cost_path._BASE_TRAVEL_COST -- the cost of one
+# metre of level, open, non-floodplain, non-canopy, non-production ground
+# on the very cost surface the router ran on. Ratio 1.0 is therefore
+# "ordinary flat ground", and score = 100 - ratio * 10 puts it at 90.
+#
+# IT IS NOT PARCEL-RELATIVE, AND THAT IS THE LOAD-BEARING FACT.
+# _BASE_TRAVEL_COST is a CONSTANT of road_cost_path.py, not a statistic of
+# this parcel: no boundary, no elevation range, no observed best or worst
+# cell enters it. So 61 means the same thing on two different parcels --
+# the same ratio of routing cost to level open ground -- and two
+# properties' scores are directly comparable. That is the opposite of
+# water's suitability scale, which ships `parcel_observed_max` precisely
+# BECAUSE its ceiling is the parcel's own (see build_scales() there), and
+# the contrast is worth stating rather than leaving a reader to assume
+# this one works the same way. `parcel_relative: False` says it on the
+# wire so no consumer has to read either module to find out.
+#
+# NO CEILING IS DECLARED BECAUSE COST PER METRE HAS NONE. There is no
+# terrain-independent worst road: a network crossing a ridge can cost an
+# arbitrary multiple of base. What the scale has instead is a chosen
+# BOTTOM -- ratio 10.0 reads 0.0 and everything worse clamps there -- and
+# that bottom is a judgement about where a report should stop
+# distinguishing bad ground from worse, not a measured limit. It ships as
+# `clamps_at_ratio` so a reader can see that a 0.0 means "at or past the
+# bottom of the scale", never "ten times base cost exactly".
+_TERRAIN_QUALITY_SCALE = {
+    "range": [0.0, 100.0],
+    "direction": "higher_is_better",
+    # ABSOLUTE, not parcel-relative -- see the block comment above. The
+    # normalizer is a constant of the cost surface, so the same score on
+    # two parcels means the same thing.
+    "parcel_relative": False,
+    "normalized_against": "base_travel_cost_per_meter",
+    "normalizer_cost_per_meter": float(_BASE_TRAVEL_COST),
+    "normalizer_means": (
+        "the cost of one metre of level, open, non-floodplain, non-canopy, "
+        "non-block ground on the cost surface this network was routed over"
+    ),
+    "score_from_ratio": "100 - cost_per_meter_ratio * 10, clamped to [0, 100]",
+    "clamps_at_ratio": 10.0,
+    # 100 is not practically reachable: TPI discounts an ideal ridge cell
+    # to about half base cost, and no real road runs on ideal ground end
+    # to end. A scale whose top is unreachable is a scale that does not
+    # promise a perfect road exists -- shipped so a panel does not render
+    # 88 as though 100 were on offer.
+    "practical_max": 95.0,
+    # The cost surface's OWN arithmetic, not anchors tuned against any
+    # property -- see _terrain_quality_score() for the derivation of each.
+    "anchors": [
+        {"ratio": 0.5, "score": 95.0, "ground": "ridge line, ideal ground"},
+        {"ratio": 1.0, "score": 90.0, "ground": "level open ground at base cost"},
+        {"ratio": 2.33, "score": 76.7, "ground": "sustained 10% grade"},
+        {"ratio": 3.99, "score": 60.1, "ground": "sustained 15% grade"},
+        {"ratio": 6.0, "score": 40.0, "ground": "floodplain crossing on the flat"},
+        {"ratio": 9.31, "score": 6.9, "ground": "sustained 25% grade"},
+        {"ratio": 10.0, "score": 0.0, "ground": "the bottom of the scale"},
+    ],
+    # THE CLAIM DISCIPLINE, on the wire rather than only in a docstring,
+    # because it is the panel and the report that would otherwise make the
+    # claim. 77 means "reasonable ground for this terrain"; it does NOT
+    # mean "77% as good as a perfect road", and nothing in the arithmetic
+    # supports that reading.
+    "claim": "relative_screening_value",
+    "not_a": "percentage_of_an_ideal_road",
+    # DELIBERATELY UNVALIDATED, same caveat every threshold in this
+    # pipeline carries: the 10.0 multiplier and the clamp are a judgement,
+    # not figures a sweep has confirmed.
+    "calibration": "unvalidated_starting_values",
+    "applies_to": ["quality.terrain_quality_score"],
+}
+
+# The quantity the score is a linear restatement of, shipped with its own
+# entry for water's stated reason: an entry per value, each declaring its
+# own scale, so a consumer never has to guess which scale it is looking
+# at. LOWER IS BETTER here while the score above is higher-is-better --
+# two directions in one block is exactly the confusion an undeclared
+# scale causes.
+_COST_PER_METER_RATIO_SCALE = {
+    "min": 0.0,
+    "max": None,  # unbounded above: cost per metre has no terrain-independent ceiling
+    "direction": "lower_is_better",
+    "unit": "multiples_of_base_travel_cost_per_meter",
+    "parcel_relative": False,
+    "neutral": 1.0,  # level open ground at base cost
+    "applies_to": ["quality.cost_per_meter_ratio"],
+}
+
+# The crossing lengths are MEASUREMENTS, not scores, and they get an entry
+# anyway -- not for a range they do not have, but for the one thing a
+# reader cannot infer from the number: that 0.0 and null are different
+# answers here. 0.0 is measured ground crossed none of; null is a fetch
+# that did not land, and determination's own *_data_available flags say
+# which ground that was.
+_CROSSING_SCALE = {
+    "unit": "feet",
+    "min": 0.0,
+    "zero_means": "measured_crossed_none",
+    "null_means": "ground_data_unavailable_not_measured",
+    "summed_over": "the whole network, one figure per ground however many separate areas of it are crossed",
+    "counts": "new construction only -- road already built by an earlier branch is not re-counted",
+    "applies_to": [
+        "crossings.crosses_block_ft",
+        "crossings.crosses_canopy_ft",
+        "crossings.crosses_floodplain_ft",
+    ],
+}
+
+_SCALES = {
+    "terrain_quality_score": _TERRAIN_QUALITY_SCALE,
+    "cost_per_meter_ratio": _COST_PER_METER_RATIO_SCALE,
+    "crossings": _CROSSING_SCALE,
+}
+
+
 def _terrain_quality_score(
     total_cost: float, total_length_meters: float, dem: dict
 ) -> Optional[float]:
@@ -1121,6 +1485,14 @@ def _terrain_quality_score(
       3. ratio             = cost_per_meter / base_cost_per_meter
       4. score             = 100.0 - (ratio * 10.0), clamped to
                              [0.0, 100.0], rounded to one decimal.
+
+    WHAT THE SCORE IS OUT OF, and whether that is parcel-relative: see
+    _SCALES above, which now ships the answer on the wire. In short --
+    the base is road_cost_path._BASE_TRAVEL_COST, a CONSTANT of the cost
+    surface rather than any statistic of this parcel, so the score is
+    ABSOLUTE and two properties' scores mean the same thing. Cost per
+    metre has no natural ceiling, so the scale declares a chosen bottom
+    (ratio 10 -> 0.0, clamped) instead of a maximum.
 
     NORMALIZATION, and why the DEM resolution does NOT appear in it.
     Normalizing is mandatory -- an un-normalized cost-per-meter is just a
@@ -1195,6 +1567,29 @@ def _terrain_quality_score(
     -- roughly a sustained 25% grade -- reads 0), and the clamp is what
     keeps a worse-than-that network at 0 rather than negative. Both are
     expected to move once there is real ground to check them against.
+
+    IT IS NOT A PER-BRANCH SCORE, AND THERE IS NO REDUCTION STEP. This
+    function is called ONCE, on the network's own summed total_cost and
+    total_length_meters -- there is no per-branch score to combine, and
+    no branch ever carries one. That is worth stating because the
+    reduction it AMOUNTS TO is the one the network's average grade had to
+    be given explicitly:
+
+        sum(cost_i) / sum(length_i)  ==  sum(length_i * cpm_i) / sum(length_i)
+
+    -- the network's cost per metre is already the LENGTH-WEIGHTED mean
+    of the branches' own costs per metre, because summing both halves
+    before dividing is what length-weighting is. A 40 ft spur over
+    terrible ground cannot drag the score the way it would drag a mean of
+    per-branch scores. The score is a linear function of that ratio, so
+    it inherits the weighting exactly.
+
+    THE ONE CAVEAT, and it is the paragraph below: total_cost includes
+    each branch's traversal back along already-accepted branches while
+    total_length_meters counts new construction only, so the ratio is a
+    length-weighted mean over slightly more cost than length. That
+    inflation is bounded at about 1% of the reused length (see below) and
+    is not a per-branch weighting error.
 
     total_cost and total_length_meters come from the SAME network dict
     (route_road_network()'s own, summed after leaf pruning, or
@@ -1292,7 +1687,10 @@ def build_narrative_data(
             'grade_ceiling_pct',      #   hard exclusion: no branch cell exceeds this
             'steep_grade_threshold_pct',
                                       #   above this, a grade needs real engineering
-            'max_grade_pct',          #   steepest single cell across the network
+            'max_grade_pct',          #   steepest single cell ANYWHERE in the network
+            'avg_grade_pct',          #   the network's LENGTH-WEIGHTED average grade --
+                                      #   the grade of the average metre of road, never a
+                                      #   mean of the branch averages
             'steep_ft',               #   total length of cells above the threshold
             'water_zone_excluded',    #   pond/dam ground was hard-excluded (buffered)
             'floodplain_data_available',
@@ -1330,6 +1728,25 @@ def build_narrative_data(
             'total_path_cost',        #   the router's own raw accumulated cost over
                                       #   the surviving branches, for diagnostics
           },
+          'crossings': {              # question 4 -- WHAT GROUND does the network cross,
+                                      #   and HOW MUCH of it. Lengths, summed across the
+                                      #   WHOLE network, one figure per ground: a network
+                                      #   crossing three separate blocks reports the total
+                                      #   length it spends on block ground, not three
+                                      #   figures. 0.0 is measured ("crossed none of it");
+                                      #   None is that ground's data never arriving
+            'crosses_block_ft',       #   production ground -- BLOCK is the interface's
+                                      #   word for it; the internal id stays 'production'
+            'crosses_canopy_ft',      #   woody vegetation (None when canopy was unavailable)
+            'crosses_floodplain_ft',  #   floodplain/hydric (None when NHD+SSURGO were both out)
+          },
+          'scales': {                 # how to read every scored value above -- see _SCALES.
+                                      #   The terrain quality score's range, direction, what
+                                      #   it normalizes against and whether that is
+                                      #   parcel-relative (it is NOT); the ratio's own
+                                      #   direction and unit; and the crossing lengths'
+                                      #   zero-versus-null rule
+          },
           'branches': [               # in branch order (trunk first), one entry per
                                       #   drawn branch
             {
@@ -1356,6 +1773,7 @@ def build_narrative_data(
     total_demand_acres = served_acres + unserved_acres
     total_length_meters = float(road_network["total_length_meters"])
     total_cost = float(road_network["total_cost"])
+    crossing_meters = road_network["crossing_meters"]
 
     return {
         "network_found": bool(branches),
@@ -1364,6 +1782,14 @@ def build_narrative_data(
             "grade_ceiling_pct": _round1(MAX_ROAD_GRADE_PCT),
             "steep_grade_threshold_pct": _round1(STEEP_GRADE_ENGINEERING_NOTE_THRESHOLD_PCT),
             "max_grade_pct": _round1(road_network["max_grade_pct"]),
+            # THE NETWORK'S AVERAGE, LENGTH-WEIGHTED -- see
+            # _length_weighted_avg_grade_pct(). It sits beside
+            # max_grade_pct because the pair is one fact ("how steep is
+            # this network") told from both ends, and because a consumer
+            # given only max_grade_pct has no honest way to reach the
+            # average: the branch list is per-branch data, and averaging
+            # it is the naive reduction this field exists to prevent.
+            "avg_grade_pct": _round1(road_network["avg_grade_pct"]),
             "steep_ft": _feet(road_network["steep_meters"]),
             "water_zone_excluded": bool(water_zone_excluded),
             "floodplain_data_available": bool(floodplain_data_available),
@@ -1404,6 +1830,40 @@ def build_narrative_data(
             # re-running the router.
             "total_path_cost": total_cost,
         },
+        # QUESTION 4, its own top-level key for the same reason 'quality'
+        # is: what ground the route crosses and how much of it is neither
+        # how the route was determined, how much access it gives, nor how
+        # good the ground it runs on is on average. A road can score well
+        # on ground quality overall and still spend 300 ft inside a
+        # production block, and a reader is entitled to that as its own
+        # number rather than as an inference from a score.
+        #
+        # LENGTHS, NOT BOOLEANS. A corridor clipping a block's corner for
+        # 20 ft and one running 300 ft through its middle are different
+        # facts, and a yes/no cannot tell them apart. The precedents are
+        # commit_validation.crossings() and the trees contract's four
+        # grounds, both of which record the ACREAGE of each crossed
+        # ground; a road is a line rather than an area, so this records
+        # the same shape in the unit a line has. The per-branch booleans
+        # are unchanged and stay in 'branches' below -- this block is the
+        # network-level answer and carries no per-branch data at all.
+        #
+        # BLOCK IS THE WORD, and only in the key. Production zones are
+        # called blocks in the interface now, so the panel-facing name
+        # says block; the mask, the ids, and the per-branch
+        # crosses_production_zone boolean it is measured from all keep
+        # their existing names (see _CROSSING_GROUNDS).
+        "crossings": {
+            "crosses_block_ft": _feet(crossing_meters["production"]),
+            "crosses_canopy_ft": _feet(crossing_meters["canopy"]),
+            "crosses_floodplain_ft": _feet(crossing_meters["floodplain"]),
+        },
+        # HOW TO READ EVERY SCORED VALUE ABOVE -- a module-level constant,
+        # forwarded by identity rather than rebuilt per call, exactly as
+        # production_area_ceiling.py forwards its own _SCALES. It depends
+        # on nothing about this network: it describes the instrument, not
+        # the reading.
+        "scales": _SCALES,
         "branches": [
             {
                 "branch_index": int(b["branch_index"]),

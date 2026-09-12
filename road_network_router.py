@@ -90,7 +90,55 @@ from road_cost_path import backtrace_route, cost_distance_field
 # visited across every iteration. CONFIGURABLE, same deliberately-
 # unvalidated-starting-value caveat every other threshold in this
 # pipeline carries -- not tuned against any real diagnostic sweep yet.
-PRODUCTION_SERVICE_RADIUS_METERS = 25.0
+#
+# 25 -> 50 IS A BEHAVIOURAL CHANGE, NOT A CONSTANT TWEAK, and every
+# number this module publishes moves with it. The disc is an AREA: this
+# radius doubling QUADRUPLES the ground within range of any one road
+# cell, so newly_served_acres rises per branch, served_production_area_
+# ids grows, cost per served acre improves, and a network that previously
+# stopped at 'cost_per_acre_exceeded' can now route further before the
+# MAX_ROAD_METERS_PER_SERVED_ACRE rule bites. A reader comparing a stored
+# network routed at 25 against one routed at 50 is comparing two
+# different questions, not two terrains.
+#
+# MEASURED ON THE REFERENCE PARCEL (5614 N Montour Rd, roads_step_
+# fixture.py's three access points, the whole generate; served/unserved
+# acres, branch count, total length, stop_reason, terrain quality score):
+#
+#     radius  pt  served  unserved  branches  length ft  stop_reason             score
+#     ------  --  ------  --------  --------  ---------  ----------------------  -----
+#      25 m   A     1.2      2.8        4        751.8   cost_per_acre_exceeded   87.5
+#      50 m   A     2.7      1.3        3        827.0   cost_per_acre_exceeded   87.5
+#      25 m   B     0.9      3.1        2        474.1   cost_per_acre_exceeded   83.2
+#      50 m   B     3.7      0.3        5       1319.8   cost_per_acre_exceeded   77.6
+#      25 m   C     1.9      2.1        4       1137.0   cost_per_acre_exceeded   86.0
+#      50 m   C     2.6      1.4        3        871.8   cost_per_acre_exceeded   87.3
+#
+# Served acreage rises at every access point (1.2->2.7, 0.9->3.7,
+# 1.9->2.6) and unserved falls to match, which is the predicted effect.
+# All three still stop on the per-acre rule rather than running out of
+# demand. BRANCH COUNT DOES NOT SIMPLY RISE, and that is the interesting
+# row: A and C both grew LONGER networks out of FEWER branches (4->3 at
+# both). A wider disc means one branch now covers ground that previously
+# needed a second one, so the greedy loop spends its per-acre budget on
+# reach rather than on extra stubs -- fewer, longer branches serving more
+# acres. Only B, whose 25 m network was the smallest on the parcel,
+# grew both.
+#
+# THE SCALE DOES NOT NEED RETUNING FOR THIS -- see road_corridors.
+# _SCALES and _terrain_quality_score(). That score normalizes against
+# road_cost_path._BASE_TRAVEL_COST, an ABSOLUTE property of the cost
+# surface, and this constant is not a term in the cost surface at all:
+# it changes WHICH ground gets routed over, never what a given
+# cost-per-metre means. The scores above move accordingly and stay well
+# inside the scale's own working range -- A unchanged at 87.5, C up 1.3
+# to 87.3, and B down 5.6 to 77.6 because its longer network reaches
+# genuinely steeper ground (max grade 19.4% -> 21.4%). A score falling
+# when the road it describes crosses worse ground is the scale WORKING.
+# None of the three approaches either clamp, so nothing is being
+# compressed at an end. Re-examine the 10.0 multiplier if a real parcel
+# ever routes a network that clamps at 0.0; this one does not.
+PRODUCTION_SERVICE_RADIUS_METERS = 50.0
 
 # Stopping threshold, in real meters of NEW road construction per newly
 # served acre -- once the cheapest remaining extension (by
