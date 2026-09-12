@@ -696,15 +696,25 @@ assert _nd0["network_found"] is False and _nd0["stop_reason"] == "no_anchor_give
 assert _nd0["access"]["branch_count"] == 0 and _nd0["access"]["served_pct_of_production"] is None
 assert _nd0["determination"] == {
     "grade_ceiling_pct": 35.0, "steep_grade_threshold_pct": 10.0,
-    "max_grade_pct": 0.0, "steep_ft": 0.0,
+    "max_grade_pct": 0.0, "avg_grade_pct": 0.0, "steep_ft": 0.0,
     "water_zone_excluded": False, "floodplain_data_available": False,
     "floodplain_data_is_fallback": False, "canopy_data_available": False,
 }
+# No road, so no ground crossed -- a measured 0.0 on every ground, and
+# needing no mask to have existed to say so.
+assert _nd0["crossings"] == {
+    "crosses_block_ft": 0.0, "crosses_canopy_ft": 0.0, "crosses_floodplain_ft": 0.0
+}
+# The scale block rides every result, network or not: it describes the
+# instrument, not the reading.
+assert _nd0["scales"] == _nd["scales"]
+assert _nd0["scales"]["terrain_quality_score"]["parcel_relative"] is False
 print(
     "narrative_data attached end-to-end: purely additive, json-clean, consistent with the same "
     f"result's road_network ({_nd['access']['branch_count']} branch(es), "
     f"{_nd['access']['total_length_ft']} ft, stop_reason={_nd['stop_reason']!r}); the no-anchor "
-    "early return carries it too, with every constraint flag honestly False."
+    "early return carries it too, with every constraint flag honestly False, a measured-zero "
+    "crossing on every ground, and the same `scales` block."
 )
 
 

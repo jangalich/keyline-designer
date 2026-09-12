@@ -811,6 +811,16 @@ _nd_network = {
             "crosses_floodplain": False, "crosses_production_zone": True,
         },
     ],
+    # THE NETWORK-LEVEL GRADE AVERAGE, LENGTH-WEIGHTED, as build_road_
+    # network() publishes it: (152.4 * 6.5 + 30.48 * 4.0) / 182.88 =
+    # 6.0833..., which the block rounds to 6.1. The naive mean of the two
+    # branch averages is 5.25 -- asserted below to be a DIFFERENT number,
+    # so this fixture cannot pass under a naive aggregation either.
+    "avg_grade_pct": (152.4 * 6.5 + 30.48 * 4.0) / 182.88,
+    # Crossing lengths in METRES, summed across the network, exactly as
+    # build_road_network() publishes them; the block converts to feet.
+    # 25.908 m = 85 ft, 36.576 m = 120 ft, 15.24 m = 50 ft.
+    "crossing_meters": {"production": 25.908, "canopy": 36.576, "floodplain": 15.24},
     "total_length_meters": 182.88,  # 600 ft exactly
     # 2.5x base cost per meter over that length (182.88 * 2.5), chosen so
     # the quality block below is hand-checkable: ratio 2.5, score
@@ -837,18 +847,26 @@ _nd = build_narrative_data(
     dem=_nd_dem,
 )
 assert json.loads(json.dumps(_nd)) == _nd, "narrative_data must be json.dumps()-clean with no custom encoder"
-assert set(_nd) == {"network_found", "stop_reason", "determination", "access", "quality", "branches"}
+assert set(_nd) == {
+    "network_found", "stop_reason", "determination", "access", "quality",
+    "crossings", "scales", "branches",
+}
 assert _nd["network_found"] is True and _nd["stop_reason"] == "diminishing_returns"
 assert _nd["determination"] == {
     "grade_ceiling_pct": 35.0,
     "steep_grade_threshold_pct": 10.0,
     "max_grade_pct": 21.3,
+    "avg_grade_pct": 6.1,  # length-weighted; the naive mean of 6.5 and 4.0 is 5.25
     "steep_ft": 100.0,
     "water_zone_excluded": True,
     "floodplain_data_available": True,
     "floodplain_data_is_fallback": False,
     "canopy_data_available": True,
 }
+# THE WEIGHTING IS VISIBLE IN THE PUBLISHED NUMBER, not only in the
+# helper: a naive mean of the two branch averages would have put 5.25 on
+# the wire here.
+assert _nd["determination"]["avg_grade_pct"] != round((6.5 + 4.0) / 2, 1)
 assert _nd["access"] == {
     "branch_count": 2,
     "total_length_ft": 600.0,
@@ -869,6 +887,55 @@ assert "terrain_quality_score" not in _nd["determination"] and "terrain_quality_
     "terrain quality is its own question and its own block -- folding it into either "
     "existing block would answer a different question than that block's own"
 )
+
+# QUESTION 4 -- crossing LENGTHS, summed across the network, in feet, and
+# named for what the interface calls the ground: BLOCK, not production
+# zone. 25.908 m -> 85.0 ft, 36.576 m -> 120.0 ft, 15.24 m -> 50.0 ft.
+assert _nd["crossings"] == {
+    "crosses_block_ft": 85.0,
+    "crosses_canopy_ft": 120.0,
+    "crosses_floodplain_ft": 50.0,
+}
+assert "crosses_production_zone_ft" not in _nd["crossings"], (
+    "the panel-facing key says BLOCK -- the interface's own word for a production zone"
+)
+# NO PER-BRANCH DATA IN THE PANEL BLOCK, and the per-branch booleans are
+# untouched by it: 'crossings' describes the whole network and nothing else.
+assert set(_nd["crossings"]) == {
+    "crosses_block_ft", "crosses_canopy_ft", "crosses_floodplain_ft"
+}
+
+# THE SCALE FOR EVERY SCORED VALUE, on the wire -- production_area_
+# ceiling's rule, which the terrain quality score had been crossing the
+# wire without. Range and direction first, then the load-bearing fact:
+# the score is normalized against an ABSOLUTE base (road_cost_path's own
+# base travel cost per metre), NOT against anything about this parcel, so
+# the same score means the same thing on two different properties.
+_scales = _nd["scales"]
+assert set(_scales) == {"terrain_quality_score", "cost_per_meter_ratio", "crossings"}
+_tq_scale = _scales["terrain_quality_score"]
+assert _tq_scale["range"] == [0.0, 100.0]
+assert _tq_scale["direction"] == "higher_is_better"
+assert _tq_scale["parcel_relative"] is False, (
+    "the terrain quality score normalizes against a CONSTANT of the cost surface, not "
+    "against this parcel's own observed range -- a reader must be able to compare two "
+    "properties' scores, which water's parcel_observed_max scale explicitly cannot"
+)
+assert _tq_scale["normalizer_cost_per_meter"] == _BASE_TRAVEL_COST
+assert _tq_scale["clamps_at_ratio"] == 10.0 and _tq_scale["practical_max"] == 95.0
+assert _tq_scale["claim"] == "relative_screening_value"
+# EVERY ANCHOR IS THE FUNCTION'S OWN ARITHMETIC, not a table that can
+# drift away from it: each row is recomputed through _terrain_quality_
+# score() at a length of 1.0 m, where total_cost IS the ratio.
+for _anchor in _tq_scale["anchors"]:
+    assert _terrain_quality_score(_anchor["ratio"], 1.0, _TQ_DEM_5M) == _anchor["score"], _anchor
+assert _scales["cost_per_meter_ratio"]["direction"] == "lower_is_better", (
+    "the ratio and the score run in OPPOSITE directions -- exactly the confusion an "
+    "undeclared scale causes, so each declares its own"
+)
+assert _scales["cost_per_meter_ratio"]["neutral"] == 1.0
+assert _scales["crossings"]["zero_means"] == "measured_crossed_none"
+assert _scales["crossings"]["null_means"] == "ground_data_unavailable_not_measured"
 assert _nd["branches"][0] == {
     "branch_index": 0, "role": "trunk", "joins_branch_index": None, "length_ft": 500.0,
     "newly_served_acres": 9.0, "avg_grade_pct": 6.5, "max_grade_pct": 21.3, "steep_ft": 100.0,
@@ -896,6 +963,19 @@ assert _nd_empty["quality"] == {
     "cost_per_meter_ratio": None,
     "total_path_cost": 0.0,
 }
+# ZERO METRES OF ROAD CROSS ZERO METRES OF ANYTHING -- a measured 0.0 on
+# every ground, needing no mask to have existed, and the same shape
+# steep_ft already reports for an empty network.
+assert _nd_empty["crossings"] == {
+    "crosses_block_ft": 0.0, "crosses_canopy_ft": 0.0, "crosses_floodplain_ft": 0.0
+}
+# The grade average follows max_grade_pct's own convention rather than
+# introducing a lone None beside it; network_found is the guard for both.
+assert _nd_empty["determination"]["avg_grade_pct"] == 0.0
+assert _nd_empty["determination"]["max_grade_pct"] == 0.0
+# The scale block describes the INSTRUMENT, not the reading -- it ships
+# identically whether or not there is a network to score.
+assert _nd_empty["scales"] == _nd["scales"]
 _nd_unserved = build_narrative_data(
     _empty_road_network("no_eligible_anchor", unserved_acres=3.0),
     service_radius_meters=60.96, water_zone_excluded=False,
@@ -909,6 +989,242 @@ print(
     "75.0%, water spur reaches the pond) all match hand-checked values; quality is its own third "
     "key (ratio 2.5 -> score 75.0, raw cost 457.2 carried for diagnostics); no-demand empty network "
     "reports served_pct None and a None terrain score, real unserved demand reports 0.0."
+)
+print(
+    "narrative_data, the panel's own additions: determination carries the network's LENGTH-WEIGHTED "
+    "avg_grade_pct (6.1, not the naive 5.25 mean of its 6.5 and 4.0 branches); 'crossings' is a "
+    "fourth top-level block of network-summed LENGTHS in feet (block 85.0, canopy 120.0, floodplain "
+    "50.0) with no per-branch data in it and BLOCK as the panel's word for a production zone; "
+    "'scales' ships the terrain score's range, direction, the absolute base it normalizes against "
+    "(parcel_relative False) and every anchor, each recomputed through _terrain_quality_score() "
+    "rather than transcribed."
+)
+
+
+# =====================================================================
+# NETWORK-LEVEL AGGREGATION -- one figure for a whole TREE of branches,
+# and the reduction stated for each. A network's branches have different
+# lengths, grades and roles, so "the network's grade" is a choice, not a
+# read: max is a MAX (the steepest point anywhere), average is
+# LENGTH-WEIGHTED (the grade of the average metre), and the terrain score
+# is already length-weighted by construction.
+# =====================================================================
+from road_corridors import _length_weighted_avg_grade_pct, _mask_crossing_meters  # noqa: E402
+
+# THE CASE A NAIVE AGGREGATION GETS WRONG, built so the two answers are
+# nowhere near each other: ONE LONG GENTLE BRANCH and ONE SHORT STEEP
+# ONE. 900 ft of 3% trunk and a 40 ft 20% stub.
+_agg_branches = [
+    {"length_meters": 274.32, "avg_grade_pct": 3.0},   # 900 ft, gentle
+    {"length_meters": 12.192, "avg_grade_pct": 20.0},  # 40 ft, steep
+]
+_naive_mean = (3.0 + 20.0) / 2                                   # 11.5
+_weighted = (274.32 * 3.0 + 12.192 * 20.0) / (274.32 + 12.192)   # 3.7233...
+assert round(_naive_mean, 1) == 11.5 and round(_weighted, 1) == 3.7
+assert abs(_naive_mean - _weighted) > 7.0, (
+    "this fixture only proves something if the naive and weighted means differ SUBSTANTIALLY -- "
+    "a fixture where they happen to agree would pass under either aggregation"
+)
+assert abs(_length_weighted_avg_grade_pct(_agg_branches) - _weighted) < 1e-9
+assert round(_length_weighted_avg_grade_pct(_agg_branches), 1) != round(_naive_mean, 1), (
+    "a 40 ft stub must not get the same vote as a 900 ft trunk"
+)
+# The order of the branches cannot matter, and neither can the trunk
+# being first: a weighted mean is a weighted mean.
+assert _length_weighted_avg_grade_pct(_agg_branches) == _length_weighted_avg_grade_pct(
+    list(reversed(_agg_branches))
+)
+# Degenerate: no branches, and branches whose lengths sum to zero, both
+# report 0.0 rather than raising on the division.
+assert _length_weighted_avg_grade_pct([]) == 0.0
+assert _length_weighted_avg_grade_pct([{"length_meters": 0.0, "avg_grade_pct": 9.0}]) == 0.0
+
+# THE SAME CASE THROUGH THE WHOLE PUBLICATION PATH, network dict -> wire,
+# so the weighting is asserted where a consumer actually reads it and not
+# only in the helper.
+_agg_network = {
+    "branches": [
+        {
+            "branch_index": 0, "branch_role": "trunk", "joins_branch_index": None,
+            "length_meters": 274.32, "newly_served_acres": 6.0, "avg_grade_pct": 3.0,
+            "max_grade_pct": 5.0, "steep_meters": 0.0,
+            "crosses_floodplain": False, "crosses_production_zone": False,
+        },
+        {
+            "branch_index": 1, "branch_role": "spur", "joins_branch_index": 0,
+            "length_meters": 12.192, "newly_served_acres": 0.4, "avg_grade_pct": 20.0,
+            # THE STEEPEST POINT ANYWHERE IN THE NETWORK sits on this
+            # 40 ft stub -- 4.3% of the network's length. A max that
+            # diluted itself by length would lose it entirely.
+            "max_grade_pct": 26.0, "steep_meters": 12.192,
+            "crosses_floodplain": False, "crosses_production_zone": False,
+        },
+    ],
+    "total_length_meters": 286.512,
+    "total_cost": 286.512 * 1.5,
+    "total_served_acres": 6.4,
+    "unserved_acres": 0.0,
+    "stop_reason": "all_demand_served",
+    "max_grade_pct": 26.0,
+    "avg_grade_pct": _weighted,
+    "steep_meters": 12.192,
+    "crossing_meters": {"production": 0.0, "canopy": 0.0, "floodplain": 0.0},
+}
+_agg_nd = build_narrative_data(
+    _agg_network, service_radius_meters=60.96, water_zone_excluded=False,
+    floodplain_data_available=True, floodplain_data_is_fallback=False,
+    canopy_data_available=True, dem=_nd_dem,
+)
+assert _agg_nd["determination"]["avg_grade_pct"] == 3.7, _agg_nd["determination"]["avg_grade_pct"]
+assert _agg_nd["determination"]["avg_grade_pct"] != round(_naive_mean, 1)
+# MAX GRADE IS THE STEEPEST POINT ANYWHERE, not a length-weighted
+# anything: the 26% cell on a 40 ft stub reaches the wire intact.
+assert _agg_nd["determination"]["max_grade_pct"] == 26.0
+assert _agg_nd["determination"]["max_grade_pct"] == max(
+    b["max_grade_pct"] for b in _agg_network["branches"]
+)
+assert _agg_nd["determination"]["max_grade_pct"] > _agg_nd["determination"]["avg_grade_pct"] * 5
+
+print(
+    "network-level grade aggregation: average is LENGTH-WEIGHTED -- a 900 ft 3% trunk with a 40 ft "
+    "20% stub publishes 3.7%, where a naive mean of the branch averages would publish 11.5%; max "
+    "grade is the steepest point ANYWHERE (26.0% on that same 4%-of-length stub) and is never "
+    "diluted by the gentle road around it."
+)
+
+
+# =====================================================================
+# THE SCORE'S OWN REDUCTION -- _terrain_quality_score() is called once on
+# the network's summed cost and length, which IS the length-weighted mean
+# of the branches' costs per metre. Asserted against the alternative it
+# is not: a mean of per-branch scores.
+# =====================================================================
+_red_branches = [
+    {"length_meters": 900.0, "total_cost": 900.0 * 1.2},   # long, good ground: ratio 1.2
+    {"length_meters": 40.0, "total_cost": 40.0 * 8.0},     # short, terrible ground: ratio 8.0
+]
+_red_length = sum(b["length_meters"] for b in _red_branches)
+_red_cost = sum(b["total_cost"] for b in _red_branches)
+_red_score = _terrain_quality_score(_red_cost, _red_length, _TQ_DEM_5M)
+_red_weighted_ratio = sum(
+    (b["total_cost"] / b["length_meters"]) * b["length_meters"] for b in _red_branches
+) / _red_length
+assert abs(_red_cost / _red_length - _red_weighted_ratio) < 1e-9, (
+    "summing both halves before dividing IS length-weighting -- these are the same number"
+)
+_red_naive_score = sum(
+    _terrain_quality_score(b["total_cost"], b["length_meters"], _TQ_DEM_5M) for b in _red_branches
+) / len(_red_branches)
+assert _red_score == 85.1 and round(_red_naive_score, 1) == 54.0, (_red_score, _red_naive_score)
+assert _red_score != round(_red_naive_score, 1), (
+    "a mean of per-branch scores would let a 40 m patch of terrible ground halve the score of a "
+    "940 m network -- the reduction is length-weighted, which is what summing before dividing does"
+)
+print(
+    "terrain score reduction: the score is computed ONCE on the network's summed cost and length, "
+    "which is already the LENGTH-WEIGHTED mean of the branches' costs per metre (85.1 for a 900 m "
+    "ratio-1.2 trunk plus a 40 m ratio-8.0 stub); a mean of per-branch scores would have published "
+    "54.0 for the same network."
+)
+
+
+# =====================================================================
+# CROSSING LENGTHS -- summed across the whole network, one figure per
+# ground, 0.0 and None kept apart
+# =====================================================================
+
+# A route that must cross TWO SEPARATE production blocks. The anchor sits
+# at one corner and the demand is split into two disjoint column bands,
+# so the network runs through both -- the case the "one figure, not
+# three" rule is about.
+_xdem = _flat_dem()
+_xboundary = box(500000, 4500000, 500205, 4500205)
+_xanchor = _lon_lat_for_cell(_xdem, 38, 2)
+_xblock_a_poly = _cell_box_utm(_xdem, 0, 41, 4, 12)
+_xblock_b_poly = _cell_box_utm(_xdem, 0, 41, 20, 30)
+_xnetwork = build_road_network(
+    _xdem,
+    [
+        {"id": 0, "render_fill_polygon_utm": _xblock_a_poly},
+        {"id": 1, "render_fill_polygon_utm": _xblock_b_poly},
+    ],
+    None,
+    _xboundary,
+    _xanchor,
+    # An all-False canopy mask: canopy data DID arrive and marks nothing
+    # this route crosses. That is the 0.0-versus-None case, side by side
+    # with floodplain, whose union was never supplied at all.
+    canopy_mask=np.zeros(_xdem["array"].shape, dtype=bool),
+)
+assert _xnetwork["branches"], "the two-block fixture must route a network or it asserts nothing"
+
+_xboundary_prepared = prep(_xboundary)
+_xmask_a = _build_production_cell_mask(_xdem, prep(_xblock_a_poly), _xboundary_prepared)
+_xmask_b = _build_production_cell_mask(_xdem, prep(_xblock_b_poly), _xboundary_prepared)
+assert not (_xmask_a & _xmask_b).any(), "the two blocks must be disjoint or the sum below is not a sum"
+
+# Measured per block, independently, with the same new-construction
+# bookkeeping build_road_network() uses.
+_x_per_block = {"a": 0.0, "b": 0.0}
+_x_built: set = set()
+for _xbranch in _xnetwork["branches"]:
+    _xcells = _xbranch["cells"]
+    _x_per_block["a"] += _mask_crossing_meters(_xdem, _xcells, _xmask_a, _x_built)
+    _x_per_block["b"] += _mask_crossing_meters(_xdem, _xcells, _xmask_b, _x_built)
+    _x_built.update(_xcells)
+assert _x_per_block["a"] > 0.0 and _x_per_block["b"] > 0.0, (
+    f"the network must actually cross BOTH blocks for this to be the two-block case: {_x_per_block}"
+)
+
+# ONE FIGURE, EQUAL TO THEIR SUM -- not one per block.
+assert abs(_xnetwork["crossing_meters"]["production"] - (_x_per_block["a"] + _x_per_block["b"])) < 1e-9, (
+    _xnetwork["crossing_meters"]["production"], _x_per_block
+)
+# And it is a sum over the BRANCHES too, not a re-measurement of one of them.
+assert abs(
+    _xnetwork["crossing_meters"]["production"]
+    - sum(b["crossing_meters"]["production"] for b in _xnetwork["branches"])
+) < 1e-9
+# A crossing length can never exceed the road that does the crossing.
+assert _xnetwork["crossing_meters"]["production"] <= _xnetwork["total_length_meters"] + 1e-9
+
+# ZERO IS DISTINGUISHABLE FROM NULL, in the same network dict: canopy
+# data arrived and marked nothing crossed (a measured 0.0), floodplain
+# data never arrived at all (None).
+assert _xnetwork["crossing_meters"]["canopy"] == 0.0
+assert _xnetwork["crossing_meters"]["canopy"] is not None
+assert _xnetwork["crossing_meters"]["floodplain"] is None
+_xnd = build_narrative_data(
+    _xnetwork, service_radius_meters=60.96, water_zone_excluded=False,
+    floodplain_data_available=False, floodplain_data_is_fallback=False,
+    canopy_data_available=True, dem=_xdem,
+)
+assert _xnd["crossings"]["crosses_canopy_ft"] == 0.0
+assert _xnd["crossings"]["crosses_floodplain_ft"] is None
+assert _xnd["crossings"]["crosses_block_ft"] > 0.0
+assert _xnd["determination"]["canopy_data_available"] is True
+assert _xnd["determination"]["floodplain_data_available"] is False, (
+    "the *_data_available flags are what say which ground a None belongs to"
+)
+
+# A NETWORK THAT CROSSES NOTHING AT ALL reports 0.0 on every ground it
+# had a mask for -- same fixture, production demand moved far from the
+# route's own corridor is not reliably arrangeable, so this measures the
+# masks directly: an all-False mask over the real routed cells is 0.0,
+# never None, and a None mask is None, never 0.0.
+_xnone_built: set = set()
+_xall_false = np.zeros(_xdem["array"].shape, dtype=bool)
+for _xbranch in _xnetwork["branches"]:
+    assert _mask_crossing_meters(_xdem, _xbranch["cells"], _xall_false, _xnone_built) == 0.0
+    assert _mask_crossing_meters(_xdem, _xbranch["cells"], None, _xnone_built) is None
+    _xnone_built.update(_xbranch["cells"])
+
+print(
+    f"crossing lengths: a network crossing TWO separate blocks reports ONE figure "
+    f"({_xnetwork['crossing_meters']['production']:.2f} m) equal to the sum of the two measured "
+    f"separately ({_x_per_block['a']:.2f} + {_x_per_block['b']:.2f}), never one figure per block, "
+    f"and never more than the network's own length; a ground whose mask existed and marked nothing "
+    f"reports a measured 0.0 while a ground with no mask at all reports None, in the same dict."
 )
 
 
