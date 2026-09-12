@@ -373,6 +373,29 @@ class SessionContext:
     # exists to fall back on (the same None the batch path forwards).
     hydric_floodplain_union: object = None
     hydric_floodplain_is_fallback: bool = False
+    # THE SAME TWO GROUNDS, SEPARATELY -- road_corridors._fetch_floodplain_
+    # hydric_unions()'s own two halves, of which hydric_floodplain_union
+    # above is the union (derived from these, not fetched a second time).
+    # NHD stream/water-body buffers are the FLOODPLAIN half; SSURGO hydric
+    # map-unit polygons are the HYDRIC half.
+    #
+    # WHY BOTH SHAPES ARE HELD. Roads reads the union: one soft cost
+    # penalty over wet ground, where drainage under a roadbed and flood
+    # risk across it discourage a route the same way. STRUCTURES reads
+    # these two, as independent HARD gates, because a foundation on
+    # poorly drained soil and a building in a floodplain are different
+    # problems and constraints_violated has to name which one a site
+    # broke. A step handed only the union can say "wet ground under this
+    # pad" and no more -- which is what let a structure score for wet
+    # ground in live testing.
+    #
+    # Either may legitimately be None: "that source found nothing here"
+    # on a clean parcel, or "that source never answered". hydric_
+    # floodplain_is_fallback above still says the DEM-only valley-line
+    # proxy stood in, and that proxy lands in floodplain_union alone --
+    # no elevation model stands in for a soil rating.
+    hydric_union: object = None
+    floodplain_union: object = None
     # PER-STEP GENERATE PROPOSALS, step_id -> the entry point's own internal
     # result. Heavy, native, and regenerable from the document, so they
     # belong in this tier and not in the document, which records only
@@ -494,17 +517,23 @@ def run_terrain_warm_up(boundary_coordinates: list, parcel: object) -> dict:
     # issues none of its three fetches; only its clip/buffer/union arithmetic
     # runs. valleys= is the fallback source when neither real source has
     # anything. See SessionContext.hydric_floodplain_union.
-    hydric_floodplain_union, hydric_floodplain_is_fallback = (
-        road_corridors._fetch_floodplain_hydric_union(
-            boundary_coordinates,
-            dem,
-            valleys,
-            boundary_polygon_utm,
-            soil_components=parcel.soil_components,
-            water_features=parcel.water_features,
-            soil_geometries=parcel.soil_geometries,
-        )
+    # ONE CALL, BOTH SHAPES. The SPLIT builder runs (the two halves kept
+    # apart, for the structures gates -- see SessionContext.hydric_union),
+    # and the combined union roads reads is the union OF THOSE TWO rather
+    # than a second call over the same rows. road_corridors._fetch_
+    # floodplain_hydric_union() is that union by construction, so the two
+    # shapes cannot drift.
+    soil_wetness = road_corridors._fetch_floodplain_hydric_unions(
+        boundary_coordinates,
+        dem,
+        valleys,
+        boundary_polygon_utm,
+        soil_components=parcel.soil_components,
+        water_features=parcel.water_features,
+        soil_geometries=parcel.soil_geometries,
     )
+    hydric_floodplain_union = road_corridors.combine_wetness_unions(soil_wetness)
+    hydric_floodplain_is_fallback = soil_wetness["is_fallback"]
 
     return {
         "valleys": valleys,
@@ -513,6 +542,8 @@ def run_terrain_warm_up(boundary_coordinates: list, parcel: object) -> dict:
         "exclusion_zones": exclusion_result,
         "hydric_floodplain_union": hydric_floodplain_union,
         "hydric_floodplain_is_fallback": hydric_floodplain_is_fallback,
+        "hydric_union": soil_wetness["hydric_union"],
+        "floodplain_union": soil_wetness["floodplain_union"],
     }
 
 
@@ -576,6 +607,8 @@ def build_session_context(
         exclusion_zones=warm["exclusion_zones"],
         hydric_floodplain_union=warm["hydric_floodplain_union"],
         hydric_floodplain_is_fallback=warm["hydric_floodplain_is_fallback"],
+        hydric_union=warm["hydric_union"],
+        floodplain_union=warm["floodplain_union"],
     )
 
 

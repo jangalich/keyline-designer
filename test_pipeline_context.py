@@ -472,7 +472,7 @@ with ExitStack() as _stack:
         mock_patch.object(pc.farm_roads_data, "get_road_exclusion_union_utm", return_value=fake_existing_roads_union)
     )
     mock_floodplain = _enter(
-        mock_patch.object(pc.road_corridors, "_fetch_floodplain_hydric_union", return_value=(fake_hydric_union, False))
+        mock_patch.object(pc.road_corridors, "_fetch_floodplain_hydric_unions", return_value={"floodplain_union": None, "hydric_union": fake_hydric_union, "is_fallback": False})
     )
     # THE WATER STEP: ONE call now -- water_survey_areas.identify_water_
     # survey_areas() produces BOTH water_zones and selected_water_zone (the
@@ -747,14 +747,27 @@ print(
 # --- 4. existing_roads / soil_exclusion_unions carry the real fetched unions ---
 
 assert ctx.existing_roads is fake_existing_roads_union
+# FIVE KEYS NOW: the combined union and its fallback flag, plus the TWO
+# SPLIT HALVES beside them -- hydric and floodplain kept apart because the
+# structures step needs them as two independent hard gates and has to name
+# which one a site broke. ROADS and TREES still read the combined union,
+# which is the union OF these two (road_corridors.combine_wetness_unions())
+# and not a second pass over the same rows: with only the hydric half
+# non-None here, the combination is that same object by identity.
 assert ctx.soil_exclusion_unions == {
     "hydric_floodplain_union": fake_hydric_union,
     "hydric_floodplain_is_fallback": False,
+    "hydric_union": fake_hydric_union,
+    "floodplain_union": None,
     "erosion_prone_union": None,
 }, (
-    "soil_exclusion_unions must carry all 3 keys, with hydric_floodplain_is_fallback holding the "
-    "REAL second element _fetch_floodplain_hydric_union() returned (False here, matching the mock's "
+    "soil_exclusion_unions must carry all 5 keys, with hydric_floodplain_is_fallback holding the "
+    "REAL is_fallback _fetch_floodplain_hydric_unions() returned (False here, matching the mock's "
     "own return value) -- not silently dropped the way the prior 2-key shape did"
+)
+assert ctx.soil_exclusion_unions["hydric_floodplain_union"] is ctx.soil_exclusion_unions["hydric_union"], (
+    "with only the hydric half present, the COMBINED union must be that same object -- the "
+    "combination is built from the split, never re-fetched"
 )
 roads_call = mock_roads.call_args
 assert roads_call.args[0] == boundary_coordinates and roads_call.args[1] is synthetic_dem
@@ -1234,7 +1247,7 @@ with mock_patch.object(pc.dem_data, "get_dem_for_boundary", return_value=synthet
      ), \
      mock_patch.object(pc.farm_roads_data, "get_road_exclusion_union_utm", return_value=fake_existing_roads_union), \
      mock_patch.object(
-         pc.road_corridors, "_fetch_floodplain_hydric_union", return_value=(fake_fallback_hydric_union, True)
+         pc.road_corridors, "_fetch_floodplain_hydric_unions", return_value={"floodplain_union": fake_fallback_hydric_union, "hydric_union": None, "is_fallback": True}
      ) as mock_floodplain_fallback_case, \
      mock_patch.object(
          pc.water_survey_areas,
@@ -1256,9 +1269,17 @@ with mock_patch.object(pc.dem_data, "get_dem_for_boundary", return_value=synthet
 
 assert mock_floodplain_fallback_case.call_count == 1
 
+# THE FALLBACK LANDS IN THE FLOODPLAIN HALF, never split across both and
+# never in the hydric half: it is buffered valley LINES, a drainage-network
+# proxy, and no elevation model stands in for a SOIL RATING. So on a run
+# where SSURGO never answered, hydric_union is None -- and a consumer that
+# needs to know whether a site sits on hydric soil must report that it
+# could not check, rather than read a valley buffer as a soil answer.
 assert ctx_fallback_case.soil_exclusion_unions == {
     "hydric_floodplain_union": fake_fallback_hydric_union,
     "hydric_floodplain_is_fallback": True,
+    "hydric_union": None,
+    "floodplain_union": fake_fallback_hydric_union,
     "erosion_prone_union": None,
 }, "soil_exclusion_unions['hydric_floodplain_is_fallback'] must be True when the floodplain fetch itself fell back"
 
@@ -1369,7 +1390,7 @@ with mock_patch.object(
      mock_patch.object(pc.valley_delineation, "delineate_valleys", return_value=[]), \
      mock_patch.object(pc.production_area_ceiling, "identify_optimized_production_areas", return_value=fake_optimized_result), \
      mock_patch.object(pc.farm_roads_data, "get_road_exclusion_union_utm", return_value=fake_existing_roads_union), \
-     mock_patch.object(pc.road_corridors, "_fetch_floodplain_hydric_union", return_value=(fake_hydric_union, False)), \
+     mock_patch.object(pc.road_corridors, "_fetch_floodplain_hydric_unions", return_value={"floodplain_union": None, "hydric_union": fake_hydric_union, "is_fallback": False}), \
      mock_patch.object(
          pc.water_survey_areas,
          "identify_water_survey_areas",
@@ -1455,7 +1476,7 @@ with mock_patch.object(pc.dem_data, "get_dem_for_boundary", return_value=synthet
      mock_patch.object(pc.production_area_ceiling, "identify_optimized_production_areas", return_value=fake_optimized_result), \
      mock_patch.object(pc.farm_roads_data, "get_road_exclusion_union_utm", return_value=fake_existing_roads_union), \
      mock_patch.object(
-         pc.road_corridors, "_fetch_floodplain_hydric_union", return_value=(fake_hydric_union, False)
+         pc.road_corridors, "_fetch_floodplain_hydric_unions", return_value={"floodplain_union": None, "hydric_union": fake_hydric_union, "is_fallback": False}
      ) as mock_floodplain_bpu_case, \
      mock_patch.object(
          pc.water_survey_areas,
@@ -1538,7 +1559,7 @@ with mock_patch.object(pc.dem_data, "get_dem_for_boundary", return_value=synthet
          pc.farm_roads_data, "get_road_exclusion_union_utm", return_value=fake_existing_roads_union
      ) as mock_roads_override_case, \
      mock_patch.object(
-         pc.road_corridors, "_fetch_floodplain_hydric_union", return_value=(fake_hydric_union, False)
+         pc.road_corridors, "_fetch_floodplain_hydric_unions", return_value={"floodplain_union": None, "hydric_union": fake_hydric_union, "is_fallback": False}
      ) as mock_floodplain_override_case, \
      mock_patch.object(
          pc.water_survey_areas,
@@ -1587,7 +1608,7 @@ with mock_patch.object(pc.dem_data, "get_dem_for_boundary", return_value=synthet
      mock_patch.object(pc.production_area_ceiling, "identify_optimized_production_areas", return_value=fake_optimized_result), \
      mock_patch.object(pc.farm_roads_data, "get_road_exclusion_union_utm", return_value=fake_existing_roads_union), \
      mock_patch.object(
-         pc.road_corridors, "_fetch_floodplain_hydric_union", return_value=(fake_hydric_union, False)
+         pc.road_corridors, "_fetch_floodplain_hydric_unions", return_value={"floodplain_union": None, "hydric_union": fake_hydric_union, "is_fallback": False}
      ) as mock_floodplain_water_soil_geom_case, \
      mock_patch.object(
          pc.water_survey_areas,
@@ -1710,7 +1731,7 @@ with ExitStack() as _stack:
         )
     )
     _enter(mock_patch.object(pc.farm_roads_data, "get_road_exclusion_union_utm", return_value=fake_existing_roads_union))
-    _enter(mock_patch.object(pc.road_corridors, "_fetch_floodplain_hydric_union", return_value=(fake_hydric_union, False)))
+    _enter(mock_patch.object(pc.road_corridors, "_fetch_floodplain_hydric_unions", return_value={"floodplain_union": None, "hydric_union": fake_hydric_union, "is_fallback": False}))
 
     # identify_water_survey_areas: left real/wraps= -- UNLIKE the main run above, its own internal
     # get_required_tree_root_zone_mask_utm binding is NOT stubbed with _fake_clean_canopy_mask, so it
@@ -1861,7 +1882,7 @@ with ExitStack() as _stack:
         )
     )
     _enter(mock_patch.object(pc.farm_roads_data, "get_road_exclusion_union_utm", return_value=fake_existing_roads_union))
-    _enter(mock_patch.object(pc.road_corridors, "_fetch_floodplain_hydric_union", return_value=(fake_hydric_union, False)))
+    _enter(mock_patch.object(pc.road_corridors, "_fetch_floodplain_hydric_unions", return_value={"floodplain_union": None, "hydric_union": fake_hydric_union, "is_fallback": False}))
     # water/solar/tree-zone left REAL, canopy gates unstubbed -- a fully-mocked
     # call would never reach a canopy gate and the count would be vacuous.
     _enter(
@@ -1951,7 +1972,7 @@ with ExitStack() as _nwz_stack:
         )
     )
     _enter(mock_patch.object(pc.farm_roads_data, "get_road_exclusion_union_utm", return_value=fake_existing_roads_union))
-    _enter(mock_patch.object(pc.road_corridors, "_fetch_floodplain_hydric_union", return_value=(fake_hydric_union, False)))
+    _enter(mock_patch.object(pc.road_corridors, "_fetch_floodplain_hydric_unions", return_value={"floodplain_union": None, "hydric_union": fake_hydric_union, "is_fallback": False}))
     # the selection genuinely finds nothing -- the ONE water call returns
     # selected_water_zone=None alongside its (empty) zones_geojson
     _enter(
@@ -2040,7 +2061,7 @@ with ExitStack() as _soil_stack:
         )
     )
     _enter(mock_patch.object(pc.farm_roads_data, "get_road_exclusion_union_utm", return_value=fake_existing_roads_union))
-    _enter(mock_patch.object(pc.road_corridors, "_fetch_floodplain_hydric_union", return_value=(fake_hydric_union, False)))
+    _enter(mock_patch.object(pc.road_corridors, "_fetch_floodplain_hydric_unions", return_value={"floodplain_union": None, "hydric_union": fake_hydric_union, "is_fallback": False}))
     # The water step runs REAL (wraps=), with its canopy gate stubbed
     # offline and every soil-fetch binding replaced by a counting mock --
     # the point of this section is that NONE of them fires.
@@ -2216,8 +2237,8 @@ def _x_run_context(**overrides):
                                                   return_value=canopy_override))
         _x_spies["roads"] = _e(mock_patch.object(pc.farm_roads_data, "get_road_exclusion_union_utm",
                                                  return_value=fake_existing_roads_union))
-        _x_spies["floodplain"] = _e(mock_patch.object(pc.road_corridors, "_fetch_floodplain_hydric_union",
-                                                      return_value=(fake_hydric_union, False)))
+        _x_spies["floodplain"] = _e(mock_patch.object(pc.road_corridors, "_fetch_floodplain_hydric_unions",
+                                                      return_value={"floodplain_union": None, "hydric_union": fake_hydric_union, "is_fallback": False}))
         _x_spies["production"] = _e(mock_patch.object(
             pc.production_area_ceiling, "identify_optimized_production_areas",
             return_value=fake_optimized_result))

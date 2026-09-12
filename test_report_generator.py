@@ -1026,20 +1026,34 @@ print("_format_water_survey_areas_summary(): the capped arm names the presented 
 _solar_nd = {
     "site_found": True,
     "candidate_count": 5,
+    "road_proximity_source": "selected_road_corridor",
+    "no_candidates": None,
     "gates": {
         "existing_canopy_excluded": True,
         "water_zone_excluded": True,
         "tree_zone_exclusion_checked": True,
         "road_proximity_source": "selected_road_corridor",
         "prime_farmland_checked": True,
+        "hydric_gate_checked": True,
+        "floodplain_gate_checked": True,
+        "drainage_gates_checked": ["outside_hydric_soil", "outside_floodplain"],
     },
     "selected_site": {
         "score": 87.5,
         "footprint_acres": 0.1,
+        "solar_rating": "excellent",
+        "solar_value": 97.5,
         "location": {
             "position_in_parcel": "southeast",
+            "elevation_percentile_of_parcel": 71.4,
+            "elevation_position": "upper field",
             "production_zone_relationship": "inside",
             "distance_to_production_edge_ft": 42.7,
+            # NEGATIVE: this site's point sits INSIDE a block, 42.7 ft in
+            # from its nearest edge -- which is what makes "42.7ft in from
+            # its nearest edge" and "42.7ft to the nearest block" two
+            # different sentences instead of one ambiguous number.
+            "signed_distance_to_production_ft": -42.7,
             "distance_to_road_ft": 18.0,
             "distance_to_water_zone_ft": 210.0,
         },
@@ -1054,10 +1068,43 @@ _solar_nd = {
 _solar_prose = _format_solar_candidate_zones_summary(_solar_nd)
 assert "rank 1 of 5" in _solar_prose and "score 87.5/100" in _solar_prose
 assert "the parcel's southeast" in _solar_prose
-assert "INSIDE a production zone" in _solar_prose
+# BLOCK, not "production zone" -- the interface's word, as the roads
+# section already requires.
+assert "INSIDE a BLOCK" in _solar_prose
+assert "42.7ft in from its nearest edge" in _solar_prose, (
+    "inside a block the prose must say how far IN, off the signed distance -- not repeat the "
+    "unsigned number as though it were a distance TO production"
+)
+assert "This is NOT 'distance to production'" in _solar_prose
 assert "18.0ft to the property's own selected road corridor" in _solar_prose
 assert "facing south" in _solar_prose and "slope 84.0" in _solar_prose
 assert "PRIME FARMLAND CONFLICT" in _solar_prose
+# THE SOLAR RATING IS A BAND, AND THE PROSE MUST NOT LET IT READ AS A RANK.
+assert "Solar rating: excellent (97.5/100" in _solar_prose
+assert "ABSOLUTE band, not a rank" in _solar_prose
+# THE ELEVATION POSITION, with the percentile explained inline.
+assert "on its upper field" in _solar_prose and "71.4 elevation percentile" in _solar_prose
+# BOTH DRAINAGE GATES RAN, so the site is reported clear of both.
+assert "clear of poorly drained (hydric) soil and floodplain" in _solar_prose
+
+# AND A GATE THAT DID NOT RUN IS NOT A GATE THE SITE PASSED.
+import copy as _copy_for_drainage  # noqa: E402
+
+_solar_nd_no_hydric = _copy_for_drainage.deepcopy(_solar_nd)
+_solar_nd_no_hydric["gates"]["hydric_gate_checked"] = False
+_solar_nd_no_hydric["gates"]["drainage_gates_checked"] = ["outside_floodplain"]
+_no_hydric_prose = _format_solar_candidate_zones_summary(_solar_nd_no_hydric)
+assert "clear of floodplain." in _no_hydric_prose
+assert "SSURGO hydric-soil data was NOT available this run" in _no_hydric_prose
+assert "NOT confirmed clear of that ground" in _no_hydric_prose
+
+# OUTSIDE a block reads as a distance TO it, with no sign in the prose.
+_solar_nd_outside = _copy_for_drainage.deepcopy(_solar_nd)
+_solar_nd_outside["selected_site"]["location"]["production_zone_relationship"] = "adjacent"
+_solar_nd_outside["selected_site"]["location"]["signed_distance_to_production_ft"] = 42.7
+_outside_prose = _format_solar_candidate_zones_summary(_solar_nd_outside)
+assert "42.7ft OUTSIDE the nearest BLOCK's edge" in _outside_prose
+assert "INSIDE a BLOCK" not in _outside_prose
 assert "ft from the selected water-system zone" not in _solar_prose and "210.0" not in _solar_prose, (
     "distance_to_water_zone_ft stays on the narrative block but must NOT be reported -- "
     "building-to-future-water distance isn't actionable and reads as filler (the water-zone HARD "
@@ -1073,8 +1120,61 @@ assert "NOT checked this run" in _format_solar_candidate_zones_summary(_solar_nd
     "an unchecked prime-farmland flag (None) must read as not-checked, never as no-conflict"
 )
 assert "No solar structure candidate site identified" in _format_solar_candidate_zones_summary(None)
+
+# --- THE ZERO-CANDIDATE OUTCOME NAMES THE GROUND THAT DID IT ----------
+# A fully gated parcel is a real finding, not a failed run, and the prompt
+# has to say so or the report will hedge it into nothing.
+_solar_nd_gated = {
+    "site_found": False,
+    "candidate_count": 0,
+    "road_proximity_source": "selected_road_corridor",
+    "gates": dict(_solar_nd["gates"]),
+    "selected_site": None,
+    "no_candidates": {
+        "pads_sampled": 48,
+        "pads_measurable": 41,
+        "blocking_gates": [
+            {"gate": "outside_hydric_soil", "pads_rejected": 33},
+            {"gate": "outside_floodplain", "pads_rejected": 19},
+            {"gate": "outside_existing_canopy", "pads_rejected": 5},
+        ],
+        "reason": "every_pad_failed_a_gate",
+    },
+}
+_gated_prose = _format_solar_candidate_zones_summary(_solar_nd_gated)
+assert "all 41 measurable building pad(s)" in _gated_prose
+assert "poorly drained (hydric) soil (33 of 41 pad(s))" in _gated_prose, _gated_prose
+assert "floodplain (19 of 41 pad(s))" in _gated_prose
+assert "existing tree canopy (5 of 41 pad(s))" in _gated_prose
+assert "REAL FINDING ABOUT THIS PROPERTY" in _gated_prose
+assert "do NOT suggest a site anyway" in _gated_prose
+# The gates are named most-rejections-first, which is the order that says
+# which one to argue with.
+assert _gated_prose.index("hydric") < _gated_prose.index("floodplain") < _gated_prose.index("canopy")
+
+# "nothing could hold a pad at all" is a DIFFERENT sentence.
+_solar_nd_unpaddable = {
+    "site_found": False, "candidate_count": 0, "road_proximity_source": "unavailable",
+    "gates": dict(_solar_nd["gates"]), "selected_site": None,
+    "no_candidates": {
+        "pads_sampled": 9, "pads_measurable": 0, "blocking_gates": [],
+        "reason": "no_pad_was_measurable",
+    },
+}
+_unpaddable_prose = _format_solar_candidate_zones_summary(_solar_nd_unpaddable)
+assert "of 9 grid position(s) tested" in _unpaddable_prose
+assert "NONE could hold a building pad at all" in _unpaddable_prose
+
 print("_format_solar_candidate_zones_summary(): selected site's location/benefits rendered from the block; "
       "unchecked prime farmland reads as not-checked; missing block reads as no data.")
+print(
+    "  BLOCK prose, the SIGNED production distance ('42.7ft in from its nearest edge' inside vs "
+    "'42.7ft OUTSIDE the nearest BLOCK's edge' outside), the solar rating stated as an ABSOLUTE "
+    "band rather than a rank, the elevation position with its percentile explained, a drainage "
+    "gate that did not run reported as NOT confirmed clear, and the ZERO-CANDIDATE outcome naming "
+    "every blocking ground most-rejections-first -- 'no_pad_was_measurable' kept a separate "
+    "sentence from 'every_pad_failed_a_gate'."
+)
 
 _prod_nd = {
     "scales": {"range": [0.0, 100.0], "direction": "higher_is_better"},

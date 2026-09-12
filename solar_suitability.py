@@ -9,8 +9,58 @@ single placement decision — Claude narrates the tradeoffs between them in
 the report (see report_generator.py step 6). Finding "the one best spot"
 is explicitly not this module's job.
 
-CONSTRAINT STACK, this pass (brings this layer in line with the rest of
-the pipeline, which has since moved to render_fill_polygon_utm-based
+--- THIS PASS: THE MEASUREMENT, TWO DRAINAGE GATES, AND THE PANEL ---
+
+FOUR CHANGES, none of them to the four scoring factors or their equal
+weights, and none of them to the 0.1-acre pad:
+
+  1. EVERY REPORTED DISTANCE IS NOW MEASURED FROM THE SITE'S POINT, not
+     from its pad. One cause produced two wrong answers: shapely's
+     .distance() returns 0.0 both when geometries INTERSECT and when one
+     CONTAINS the other. The road-proximity constraint tunes candidates
+     to sit close to a road, so the pad intersected the road on
+     essentially every candidate and "ft to road" -- the data panel's
+     HEADLINE figure -- read 0.0 on nine of the eleven clearing
+     footprints on the reference parcel. Production distance, measured to
+     a block's EDGE, gave a site buried inside a block a positive number
+     indistinguishable from one that far outside. The pad is still what
+     is SCORED over and what every hard gate tests (a gate asks what
+     ground the building occupies); the point is what distances are
+     measured from (a distance asks where the building is). The road GATE
+     moved with its distance, and 'signed_distance_to_production_m' --
+     negative inside a block, positive outside, 0.0 on the edge -- is the
+     other half of the production fix. See find_candidate_solar_zones().
+
+  2. TWO HARD DRAINAGE GATES, hydric soil and floodplain, SEPARATELY.
+     This step had no drainage constraint at all: it received
+     hydric_floodplain_union -- roads' COMBINED soft cost-penalty shape --
+     and forwarded it into its nested calls without ever consuming it, so
+     live testing found a structure sited on wet ground. Drainage under a
+     foundation and flood risk around a building are different problems,
+     a site can break either or both, and constraints_violated must name
+     WHICH; road_corridors._fetch_floodplain_hydric_unions() now keeps the
+     two halves apart for this step alone. HARD for a GENERATED candidate,
+     CAUTION for a PLACED one -- landform's rule exactly. See THE TWO
+     DRAINAGE GATES below.
+
+  3. THE SOLAR RATING, a WORD on the two solar factors together, banded
+     on the backend (SOLAR_RATING_BANDS, shipped in narrative_data
+     ['scales']) so the frontend holds no threshold. A BAND, not a rank.
+
+  4. THE PANEL'S REMAINING TWO VALUES: 'elevation_position', classified
+     by production's own imported ELEVATION_POSITION_BANDS (never a second
+     copy of the cuts), and 'road_proximity_source' promoted to a
+     STEP-LEVEL narrative_data key, since which access tier answered is
+     true of every candidate in the run and decides what the headline
+     ft-to-road figure MEANS.
+
+ROAD_CORRIDOR_PROXIMITY_METERS went 15 m -> 30 m with change 1, and the
+two are one decision: a pad-based 15 m gate really admitted a point ~25 m
+out, so moving the gate to the point tightened the requirement by a
+half-pad. See that constant.
+
+CONSTRAINT STACK, an earlier pass (brings this layer in line with the rest
+of the pipeline, which has since moved to render_fill_polygon_utm-based
 exclusions, optimized/ceiling-trimmed production geometry, and a real
 selected road corridor):
   - Production geometry is now production_area_ceiling.
@@ -127,6 +177,10 @@ first one — a broad eligible-AREA polygon — was replaced):
         --> every ranked tree-zone candidate (tree_zone_candidates.py) --
             NEW hard exclusion, buffered, gracefully degrading (see
             CONSTRAINT STACK above)
+        --> SSURGO hydric soil and NHD floodplain -- TWO independent hard
+            exclusions, unbuffered, applied to a GENERATED candidate only
+            (a PLACED site is scored and told which one it broke). See
+            THE TWO DRAINAGE GATES below
         --> the selected road corridor, else farm roads (farm_roads_data.py)
             -- two-tier hard proximity constraint + reported distance (see
             CONSTRAINT STACK above)
@@ -207,7 +261,20 @@ from canopy_height_data import CanopyCoverageIncompleteError, TREE_ROOT_ZONE_BUF
 from dem_data import get_dem_for_boundary
 from farm_roads_data import get_farm_roads_for_boundary
 from production_area import get_required_tree_root_zone_mask_utm
-from production_area_ceiling import identify_optimized_production_areas
+# ELEVATION_POSITION_BANDS AND ITS CLASSIFIER ARE PRODUCTION'S, IMPORTED,
+# NOT REDECLARED. Production owns the cuts for the trees and structures
+# steps alike (see its own docstring, and tree_zone_candidates.py, which
+# imports the same two names); production is UPSTREAM of this module, so
+# reading its constant is permitted -- the opposite of _position_in_parcel
+# below, which water_candidate_zones.py duplicates because water is
+# DOWNSTREAM. A second copy of the cuts here would let "upper field" mean
+# one thing on a tree zone and another on a structure site.
+from production_area_ceiling import (
+    ELEVATION_POSITION_BANDS,
+    _elevation_position,
+    _on_parcel_cell_mask,
+    identify_optimized_production_areas,
+)
 from raster_grid import SQUARE_METERS_PER_ACRE, pixel_center_xy
 from road_corridors import NO_ROAD_CORRIDOR, POND_ZONE_EXCLUSION_BUFFER_METERS, identify_road_corridor_candidates
 from soil_data import coordinates_to_wkt_polygon, get_farmland_classification_for_polygon, is_prime_farmland
@@ -325,7 +392,31 @@ PRODUCTION_EDGE_ADJACENCY_METERS = 15.0
 # on THIS property, not a generic "somewhere near a mapped road" signal,
 # so a candidate can reasonably be expected to sit close to it, not just
 # within the same broad neighborhood. CONFIGURABLE.
-ROAD_CORRIDOR_PROXIMITY_METERS = 15.0
+#
+# 15.0 -> 30.0, AND THE RIGHT VALUE WAS NOT PICKABLE UNTIL THE
+# MEASUREMENT WAS FIXED. This gate used to be measured from the 0.1-acre
+# PAD, and a pad is 20.1 m per side -- so a pad-based 15 m gate admitted
+# a point up to 15 + 10.05 = 25.05 m from the corridor measured
+# perpendicular, and ~29 m on a diagonal. The constant said 15 m; the
+# requirement was really ~25 m, and the reported distance was 0.0 on nine
+# of the eleven clearing footprints on the reference parcel, because the
+# pad INTERSECTED the road (see _measure_footprint()). The gate now
+# measures from the site's own POINT like the distance it gates, which
+# takes that half-pad of slack away: at 15 m point-based the requirement
+# is a real 15 m and is TIGHTER than what shipped, which nobody asked
+# for.
+#
+# 30.0 m (98 ft) restores the reach the pad-based gate actually had
+# (25.05 m) and adds to it, which is the increase this branch was asked
+# for, and it is a plausible service-drive-and-conduit run from a routed
+# corridor to a barn. MEASURED on the reference parcel: the clearing set
+# goes 11 -> 14 pads, and the reported ft-to-road spreads over
+# 8.6-98.4 ft instead of collapsing onto one value (every clearing
+# candidate read 19.9-21.5 ft at 25 m and under, so the panel's headline
+# figure could not tell two candidates apart). Still five times tighter
+# than TIER 2's 150 m, which is the whole distinction between "this
+# property's own routed alignment" and "somewhere near a mapped road".
+ROAD_CORRIDOR_PROXIMITY_METERS = 30.0
 
 # TIER 2 (fallback, only used when Tier 1 produces zero candidates — see
 # module docstring): candidates must be within this distance of a real
@@ -359,6 +450,176 @@ TREE_ZONE_STRUCTURE_EXCLUSION_BUFFER_METERS = 10 * METERS_PER_FOOT
 # CONFIGURABLE.
 MAX_CANDIDATES = 3
 
+# --------------------------------------------------------------------
+# THE TWO DRAINAGE GATES (hydric soil, floodplain)
+# --------------------------------------------------------------------
+# NO CONSTANTS, DELIBERATELY: both gates are geometry the caller hands
+# in, and neither takes a buffer of its own. A hydric map unit's polygon
+# and a floodplain's buffered stream band are already the ground they
+# describe -- unlike planned tree zones or a pond site, where the
+# clearance IS the judgement (TREE_ZONE_STRUCTURE_EXCLUSION_BUFFER_METERS,
+# POND_ZONE_EXCLUSION_BUFFER_METERS). A structure pad is excluded when it
+# SITS on that ground, not when it comes near it, so there is no distance
+# to tune and no constant to add.
+#
+# TWO GATES, NOT ONE, and that is the whole point of them. This module
+# used to receive hydric_floodplain_union -- the two COMBINED, roads'
+# own soft cost-penalty shape -- and forward it into its nested road and
+# tree calls without ever consuming it, so structures had NO drainage
+# constraint at all: its four factors are gentle ground, sun-facing,
+# open to the sky and edge of production ground, all about solar and
+# placement, and the only soil it read was prime farmland (to avoid
+# siting on good cropland). Live testing found a structure sited inside a
+# tree zone that scored for wet ground -- a building on poorly drained
+# soil. Drainage under a foundation and flood risk around a building are
+# DIFFERENT problems, a site can break either or both, and
+# constraints_violated must name WHICH; a union cannot answer that, which
+# is why road_corridors._fetch_floodplain_hydric_unions() now keeps the
+# two halves apart and this module takes them as separate parameters.
+#
+# HARD FOR GENERATED, CAUTION FOR PLACED -- landform's rule exactly,
+# applied to a point rather than a polygon. A GENERATED candidate is
+# gated: it can never land on hydric soil or in a floodplain. A PLACED
+# site is scored and committable as before, with the gate it broke named
+# in constraints_violated -- the same treatment a user-drawn landform
+# zone gets over excluded ground (it commits, and the crossing is
+# recorded), and the same treatment this step already gives a placed site
+# on the canopy block, which scores and names the gates it breaks.
+#
+# EITHER GATE MAY BE ABSENT, AND ABSENT IS NOT CLEAR. A None union means
+# that source found nothing on this parcel OR never answered; the gate
+# then has no entry in `constraints` at all rather than a trivially-True
+# one, exactly as an unavailable road source or tree-zone polygon does
+# (see _measure_footprint()). run_flags.drainage_gates_checked names the
+# gates a run actually applied, so a candidate is never reported clear of
+# a check that did not run.
+
+# HOW THE COMBINED SOLAR VALUE READS AS A WORD -- "fair" / "good" /
+# "great" / "excellent" -- on the two SOLAR factors together (aspect_
+# score and shading_score, sun-facing and open-to-sky), rescaled to
+# 0-100. Those two are HALF the composite by weight; the other half
+# (slope, production proximity) is deliberately NOT in this rating, which
+# is why it is published beside `suitability_score` rather than instead
+# of it.
+#
+# NOT A RANK, and that distinction is the reason thresholds were chosen
+# over ordering. With up to three generated candidates plus two placed
+# ones, a "rating" that was really a ranking would force one of three
+# sites to read "best" on a parcel where none of them is good, and would
+# have nothing to say at five candidates. A band is an absolute
+# statement: two parcels' "excellent" mean the same thing, and a PLACED
+# site gets an honest rating rather than a slot in someone else's
+# ordering.
+#
+# BAND BOUNDS: production_area_ceiling._SCORE_BANDS' convention exactly --
+# lower-inclusive, upper-EXCLUSIVE, top band closing at 100 -- because
+# solar_value is a float rounded to 1 decimal place and closed integer
+# bands would leave 59.5 belonging to no band.
+#
+# THE CUTS ARE DELIBERATELY UNEVEN, and MEASURED rather than guessed.
+# Even quarters are wrong here for the same reason production's are:
+# the reference parcel's 534 measurable pads run 26.1 to 56.5 (p25 39.8,
+# median 42.7, p75 44.9) -- a tight cluster, because a parcel's terrain
+# has ONE prevailing aspect and the horizon barely moves across 13 acres
+# -- while the values observed on the live reference run were 96.7 and
+# 97.2, a tight cluster at the other end. So the distribution is tight
+# WITHIN a parcel and wide BETWEEN parcels, and what the word has to do
+# is separate parcels honestly, not manufacture spread inside one.
+#
+#   "fair" spans 60 points on purpose. Below the realistic midpoint the
+#   ground is not solar ground, and the difference between a 26 and a 50
+#   changes no decision -- the same argument that gives production's
+#   "poor" a 40-point span. The bands NARROW going up (18, 12, 10),
+#   because near the top a few points is a real difference: at 90+ a
+#   site is within reach of ideal orientation under open sky, and at 60
+#   it is facing sideways.
+#
+# ANCHORS, so the cuts can be argued with rather than only tuned.
+# aspect_score is (1 + cos(aspect - 180))/2: 1.0 due south, 0.5 due
+# east/west, 0.0 due north, and 1.0 on flat ground (no unfavourable
+# orientation to penalise). shading_score on open ground runs about
+# 0.78-1.0. So:
+#   due east/west under a perfect horizon  -> (0.50 + 1.00)/2 = 75.0  "good"
+#   southeast-facing under a good horizon  -> (0.85 + 0.90)/2 = 87.7  "great"
+#   due south under a good horizon         -> (1.00 + 0.90)/2 = 95.0  "excellent"
+#   north-facing open ground               -> (0.05 + 0.85)/2 = 45.0  "fair"
+#
+# CONFIGURABLE -- tune against a real property, same as every other
+# threshold in this pipeline, and unvalidated starting values until one
+# has been.
+SOLAR_RATING_BANDS = {
+    "fair": [0.0, 60.0],
+    "good": [60.0, 78.0],
+    "great": [78.0, 90.0],
+    "excellent": [90.0, 100.0],
+}
+
+# HOW THE SOLAR RATING IS TO BE READ, as its own named sub-scale inside
+# _SCALES below -- production's _ELEVATION_POSITION_SCALE pattern, for the
+# same reason: it is a value on the block's 0-100 higher-is-better axis,
+# but it describes only TWO of the four factors, and a consumer that took
+# it for the composite would misread the panel.
+_SOLAR_RATING_SCALE = {
+    "range": [0.0, 100.0],
+    "direction": "higher_is_better",
+    "bands": SOLAR_RATING_BANDS,
+    "band_bounds": "lower_inclusive_upper_exclusive_last_band_inclusive",
+    "composed_of": ["aspect_score", "shading_score"],
+    "weight_of_composite_pct": round((ASPECT_SCORE_WEIGHT + SHADING_SCORE_WEIGHT) * 100, 1),
+    "not_a": "rank_among_candidates",
+    "calibration": "unvalidated_starting_values",
+    "applies_to": ["solar_value", "solar_rating"],
+}
+
+# WHERE A SITE SITS BETWEEN THE PARCEL'S LOWEST AND HIGHEST GROUND, as
+# production's own bands -- IMPORTED, not redeclared (see the import
+# above). 'direction' is not higher_is_better: an elevation percentile is
+# a position, not a quality.
+_ELEVATION_POSITION_SCALE = {
+    "range": [0.0, 100.0],
+    "direction": "higher_is_upslope",
+    "bands": ELEVATION_POSITION_BANDS,
+    "band_bounds": "lower_inclusive_upper_exclusive_last_band_inclusive",
+    "applies_to": ["elevation_percentile_of_parcel", "elevation_position"],
+}
+
+# How every score and factor this module publishes is to be read --
+# declared ONCE, on the wire, so the frontend never holds a threshold.
+# production_area_ceiling.py's and road_corridors.py's own convention: one
+# entry per value that is not on the block's primary scale, each declaring
+# its own.
+# NO BAND SET ON THE COMPOSITE, and that is a decision rather than an
+# omission: this branch was asked for the SOLAR rating's cuts and nothing
+# else, and production's own composite bands (_SCORE_BANDS there) are
+# private to that module -- importing them would put production's
+# "excellent" on a structures score built from entirely different
+# factors. The composite's range and direction are declared; its words,
+# if it ever needs any, are a later decision made against its own
+# distribution.
+_SCALES = {
+    "range": [0.0, 100.0],
+    "direction": "higher_is_better",
+    "applies_to": ["score", "factors.*"],
+    "solar_rating": _SOLAR_RATING_SCALE,
+    "elevation_position": _ELEVATION_POSITION_SCALE,
+    # A MEASUREMENT, NOT A SCORE, and it gets an entry for the one thing a
+    # reader cannot infer from the number: which side of the block's edge
+    # it is on. NEGATIVE means the site's own point sits INSIDE a block,
+    # that many feet past the nearest edge; POSITIVE means outside;
+    # exactly 0.0 means on the edge. null is "no blocks on this parcel",
+    # never "on the edge".
+    "signed_distance_to_production_ft": {
+        "unit": "feet",
+        "direction": "signed",
+        "negative_means": "inside_a_block_this_far_past_its_nearest_edge",
+        "positive_means": "outside_every_block_this_far_from_the_nearest_edge",
+        "zero_means": "on_a_block_edge",
+        "null_means": "no_production_blocks_on_this_parcel",
+        "measured_from": "the site's own point, not its pad",
+        "applies_to": ["location.signed_distance_to_production_ft"],
+    },
+}
+
 SOLAR_CONFIDENCE_NOTES_TEMPLATE = (
     "This identifies a ranked CANDIDATE SITE for a small, fixed-footprint solar-generating "
     "structure (e.g. a barn or shed with rooftop panels) — NOT a large ground-mounted array, and "
@@ -380,7 +641,7 @@ SOLAR_CONFIDENCE_NOTES_TEMPLATE = (
     "{canopy_buffer_ft:.0f}ft) — this check is MANDATORY and does not degrade; a canopy-data outage "
     "fails this run outright rather than silently skip it. Every ranked TREE-ZONE CANDIDATE "
     "(tree_zone_candidates.py, the full ranked list, not just the top one) is ALSO hard-excluded, "
-    "buffered by {tree_zone_buffer_ft:.0f}ft{tree_zone_availability_note}. It also "
+    "buffered by {tree_zone_buffer_ft:.0f}ft{tree_zone_availability_note}. {drainage_gate_note}It also "
     "inherits the limitations of production_area_ceiling.py (a slope-only production-zone "
     "heuristic, ceiling-trimmed), water_candidate_zones.py (a DEM-derived valley/gradient "
     "heuristic), road_corridors.py (a DEM-only topographic suggestion, not a surveyed alignment), "
@@ -405,6 +666,38 @@ ROAD_PROXIMITY_NOTE_BY_SOURCE = {
         "Neither a selected road corridor nor real mapped road data was available for this run, so "
         "the road-proximity constraint is disabled entirely for these candidates — "
         "distance_to_road_ft is null. "
+    ),
+}
+
+# THE TWO DRAINAGE GATES, in the shared confidence notes -- one sentence
+# per state, because "gated and clear" and "never checked" are different
+# statements about a site and a reader must not have to guess which one a
+# silent note means. Keyed by the tuple of gate names the run applied,
+# which is run_flags.drainage_gates_checked.
+DRAINAGE_GATE_NOTE_BY_GATES_CHECKED = {
+    ("outside_hydric_soil", "outside_floodplain"): (
+        "Poorly drained (hydric) SSURGO soil and NHD floodplain are TWO INDEPENDENT HARD "
+        "EXCLUSIONS for a GENERATED candidate: drainage under a foundation and flood risk around "
+        "a building are different problems, so a generated site sits on neither. A site the USER "
+        "PLACES is still scored and still committable on either ground, with the gate it broke "
+        "named in properties.constraints_violated. "
+    ),
+    ("outside_hydric_soil",): (
+        "Poorly drained (hydric) SSURGO soil is a HARD EXCLUSION for a GENERATED candidate (a "
+        "placed site is scored anyway, with the gate named in properties.constraints_violated). "
+        "NHD floodplain data was NOT available for this run, so these candidates are NOT confirmed "
+        "clear of floodplain. "
+    ),
+    ("outside_floodplain",): (
+        "NHD floodplain is a HARD EXCLUSION for a GENERATED candidate (a placed site is scored "
+        "anyway, with the gate named in properties.constraints_violated). SSURGO hydric-soil data "
+        "was NOT available for this run, so these candidates are NOT confirmed clear of poorly "
+        "drained ground. "
+    ),
+    (): (
+        "Neither SSURGO hydric-soil nor NHD floodplain data was available for this run, so the two "
+        "drainage exclusions could not be checked -- these candidates are NOT confirmed clear of "
+        "poorly drained or flood-prone ground. "
     ),
 }
 
@@ -454,21 +747,72 @@ def _production_proximity_score(
 
 
 def _classify_production_zone_relationship(
-    footprint_polygon,
+    site_point,
     raw_production_union,
     distance_to_production_edge_m: Optional[float],
     adjacency_meters: float,
 ) -> str:
-    """properties.production_zone_relationship: 'inside' if the candidate's
-    own footprint overlaps any production zone at all, 'adjacent' if it
-    doesn't but sits within adjacency_meters of one's edge, else
-    'outside' (including the case where no production zones exist on
-    this property at all)."""
-    if raw_production_union is not None and footprint_polygon.intersects(raw_production_union):
+    """properties.production_zone_relationship: 'inside' if the site's own
+    POINT sits on block ground, 'adjacent' if it doesn't but sits within
+    adjacency_meters of a block's edge, else 'outside' (including the case
+    where no production blocks exist on this property at all).
+
+    FROM THE POINT, LIKE THE DISTANCE IT SITS BESIDE. This used to test
+    the PAD's overlap while the distance was measured off the pad too;
+    with the distance moved to the point, a pad test would let the two
+    disagree -- a pad clipping a block's corner from outside would read
+    'inside' beside a positive signed distance, which is a contradiction
+    a reader cannot resolve. The point is also the honest reference for
+    the panel, which draws the locator marker. The pad and the point
+    differ only for a site within half a pad (about 10 m) of a block
+    edge, and there 'adjacent' is the better word anyway."""
+    if raw_production_union is not None and raw_production_union.contains(site_point):
         return "inside"
     if distance_to_production_edge_m is not None and distance_to_production_edge_m <= adjacency_meters:
         return "adjacent"
     return "outside"
+
+
+def _combined_solar_value(aspect_score_value: float, shading_score_value: float) -> float:
+    """
+    The two SOLAR factors together, on the 0-100 axis SOLAR_RATING_BANDS
+    cuts -- sun-facing and open-to-sky, weighted by their own scoring
+    weights and renormalised so the result is a 0-100 value in its own
+    right rather than a fraction of the composite.
+
+    Weighted, not averaged, deliberately: the two weights happen to be
+    equal today (0.25 each) and a plain mean would be numerically
+    identical, but the rating is defined as "the solar half of the score",
+    and reading the weights means retuning them retunes the rating with
+    them instead of silently decoupling the word from the number it is
+    supposed to describe.
+    """
+    weight_sum = ASPECT_SCORE_WEIGHT + SHADING_SCORE_WEIGHT
+    combined = (ASPECT_SCORE_WEIGHT * aspect_score_value + SHADING_SCORE_WEIGHT * shading_score_value) / weight_sum
+    return 100.0 * combined
+
+
+def _solar_rating(solar_value: Optional[float]) -> Optional[str]:
+    """
+    SOLAR_RATING_BANDS' word for a combined solar value -- "fair" /
+    "good" / "great" / "excellent" -- or None for a None value.
+
+    Bounds are lower-inclusive / upper-exclusive with the top band closing
+    at 100, read off the constant rather than hardcoded here, so retuning
+    the bands retunes this function with them -- production_area_ceiling.
+    _elevation_position()'s own shape, for its own reason.
+    """
+    if solar_value is None:
+        return None
+    value = float(solar_value)
+    for word, (low, high) in sorted(SOLAR_RATING_BANDS.items(), key=lambda kv: kv[1][0]):
+        if low <= value < high:
+            return word
+    # The top band's closing edge: 100.0 itself, which the exclusive upper
+    # bound above cannot match. Both factors are clamped to [0, 1] where
+    # they are computed, so nothing can fall outside [0, 100] -- this is
+    # the last band, not a fallback for an out-of-range value.
+    return max(SOLAR_RATING_BANDS.items(), key=lambda kv: kv[1][0])[0]
 
 
 def _circular_mean_aspect_deg(aspect_values_deg: list[float]) -> Optional[float]:
@@ -533,6 +877,13 @@ def _cells_within_polygon(dem: dict, polygon, rows: int, cols: int) -> list[tupl
     return cells
 
 
+def _empty_rejection_tally() -> dict:
+    """The shape find_candidate_solar_zones() fills into a caller-supplied
+    `rejection_tally` -- see that parameter, and build_narrative_data()'s
+    own `no_candidates` block, which is what it exists for."""
+    return {"sampled": 0, "not_measurable": 0, "gates": {}, "cleared": 0}
+
+
 def find_candidate_solar_zones(
     dem: dict,
     production_areas: list[dict],
@@ -541,6 +892,9 @@ def find_candidate_solar_zones(
     boundary_polygon_utm: Polygon,
     canopy_mask_utm: Optional[np.ndarray] = None,
     tree_zone_exclusion_polygon_utm: Optional[object] = None,
+    hydric_union_utm: Optional[object] = None,
+    floodplain_union_utm: Optional[object] = None,
+    rejection_tally: Optional[dict] = None,
     max_solar_slope_pct: float = MAX_SOLAR_SLOPE_PCT,
     min_suitability_score: float = MIN_SUITABILITY_SCORE,
     water_zone_exclusion_buffer_meters: float = POND_ZONE_EXCLUSION_BUFFER_METERS,
@@ -620,12 +974,34 @@ def find_candidate_solar_zones(
     what actually decides eligibility, since a footprint can straddle the
     restricted region's own edge.
 
-    Every reported distance (production-zone EDGE, water zone, road) is
-    the real nearest-geometry distance from the candidate's own clipped
-    footprint polygon — not its centroid, and not a buffered/derived
-    intermediate geometry — same "answer 'how far is this candidate from
-    the thing itself,' not from some derived approximation" reasoning the
-    previous zone model already used for water/road distance.
+    EVERY REPORTED DISTANCE IS MEASURED FROM THE SITE'S OWN POINT -- the
+    locator marker the user sees -- and not from its pad. The pad is still
+    what is SCORED over (its cells' slope, aspect and shading) and what
+    every hard exclusion gate tests, because a gate asks what ground the
+    building occupies; a distance asks where the building is.
+
+    THIS IS A FIX, NOT A PREFERENCE, AND ONE CAUSE PRODUCED TWO WRONG
+    ANSWERS. shapely's .distance() returns 0.0 both when two geometries
+    INTERSECT and when one CONTAINS the other, so a 0.1-acre pad gave:
+
+      ROAD DISTANCE 0.0 EVERY TIME. The road-proximity constraint tunes
+        candidates to sit close to a road, so the pad intersects the road
+        on essentially every candidate -- nine of the eleven clearing
+        footprints on the reference parcel read exactly 0.0 ft, and the
+        other two read 0.3 and 4.9. "How far is this site from a road" is
+        the panel's headline figure, and it was answering zero.
+
+      A POSITIVE DISTANCE FROM INSIDE A BLOCK. Production distance is
+        measured to a block's EDGE (deliberately -- see PRODUCTION_
+        PROXIMITY_SCORE_WEIGHT), so a site well inside a block reports
+        some feet "to production" and reads exactly like one that far
+        OUTSIDE. Moving to the point fixes half of that; the other half is
+        'signed_distance_to_production_m' below, whose SIGN says which
+        side of the edge the site is on.
+
+    The road GATE moved with the distance, for one definition of "how far
+    is this site from a road" -- see _measure_footprint(). Water-zone
+    distance moved too, for consistency; nothing reads it as a headline.
 
     Returns up to max_candidates entries, ranked best-first:
         {
@@ -638,8 +1014,20 @@ def find_candidate_solar_zones(
             'avg_slope_pct': float,
             'aspect_deg': Optional[float],      # None if the candidate is essentially flat
             'aspect_label': str,
-            'distance_to_road_m': Optional[float],
-            'distance_to_production_zone_m': Optional[float],  # to nearest production zone EDGE; None only if no production zones exist at all
+            'solar_value': float,               # 0-100, the two SOLAR factors together
+            'solar_rating': str,                # SOLAR_RATING_BANDS' word for it
+            'elevation_percentile_of_parcel': Optional[float],  # 0 = the parcel's lowest
+                                                #   ground, 100 = its highest; None on a
+                                                #   parcel with no relief at all
+            'elevation_position': Optional[str],  # the line above as words -- production's
+                                                #   own ELEVATION_POSITION_BANDS, IMPORTED
+            'distance_to_road_m': Optional[float],   # FROM THE POINT
+            'distance_to_production_zone_m': Optional[float],  # to the nearest block EDGE, from
+                                                #   the POINT, UNSIGNED; None only if no blocks
+                                                #   exist at all
+            'signed_distance_to_production_m': Optional[float],  # the same distance SIGNED:
+                                                #   negative INSIDE a block, positive outside,
+                                                #   0.0 on the edge, None if no blocks exist
             'production_zone_relationship': str,  # 'inside' | 'adjacent' | 'outside'
             'distance_to_water_zone_m': Optional[float],
             'footprint_area_acres': float,      # <= max_structure_footprint_acres; smaller only if boundary-clipped
@@ -655,6 +1043,8 @@ def find_candidate_solar_zones(
         boundary_polygon_utm,
         canopy_mask_utm=canopy_mask_utm,
         tree_zone_exclusion_polygon_utm=tree_zone_exclusion_polygon_utm,
+        hydric_union_utm=hydric_union_utm,
+        floodplain_union_utm=floodplain_union_utm,
         max_solar_slope_pct=max_solar_slope_pct,
         min_suitability_score=min_suitability_score,
         water_zone_exclusion_buffer_meters=water_zone_exclusion_buffer_meters,
@@ -680,20 +1070,36 @@ def find_candidate_solar_zones(
             search_region = restricted
 
     candidates = []
+    tally = _empty_rejection_tally()
 
     for x, y in _generate_candidate_points(search_region, candidate_point_spacing_meters):
+        tally["sampled"] += 1
         measured = _measure_footprint(x, y, run)
         if measured is None:
-            continue  # off-parcel, too little pad survives clipping, or no measurable DEM under it
+            # off-parcel, too little pad survives clipping, or no measurable DEM under it
+            tally["not_measurable"] += 1
+            continue
         # A GENERATED CANDIDATE PASSES EVERY GATE OR IS NOT ONE. The
         # conjunction the inline loop used to express as a chain of
         # `continue`s; the outcomes themselves are not stored on a
         # generated candidate (they are all True by construction), which
         # keeps its dict exactly the shape it has always been.
         constraints = measured.pop("constraints")
-        if not all(constraints.values()):
+        failed = [name for name, satisfied in constraints.items() if not satisfied]
+        if failed:
+            # EVERY gate it failed, not just the first -- a fully gated
+            # parcel has to be able to say which grounds left nothing, and
+            # "the first gate in dict order" would name whichever one
+            # happens to be tested earliest rather than the binding one.
+            for name in failed:
+                tally["gates"][name] = tally["gates"].get(name, 0) + 1
             continue
+        tally["cleared"] += 1
         candidates.append(measured)
+
+    if rejection_tally is not None:
+        rejection_tally.clear()
+        rejection_tally.update(tally)
 
     candidates.sort(key=lambda cand: -cand["suitability_score"])
     candidates = candidates[:max_candidates]
@@ -780,6 +1186,8 @@ def _prepare_scoring_run(
     boundary_polygon_utm: Polygon,
     canopy_mask_utm: Optional[np.ndarray] = None,
     tree_zone_exclusion_polygon_utm: Optional[object] = None,
+    hydric_union_utm: Optional[object] = None,
+    floodplain_union_utm: Optional[object] = None,
     max_solar_slope_pct: float = MAX_SOLAR_SLOPE_PCT,
     min_suitability_score: float = MIN_SUITABILITY_SCORE,
     water_zone_exclusion_buffer_meters: float = POND_ZONE_EXCLUSION_BUFFER_METERS,
@@ -812,6 +1220,30 @@ def _prepare_scoring_run(
     road_union = unary_union(road_geometries_utm) if road_geometries_utm else None
     apply_road_constraint = road_geometries_utm is not None  # None = data unavailable, don't apply
 
+    # THE PARCEL'S OWN ELEVATION RANGE, once per run -- what every
+    # candidate's elevation_percentile_of_parcel is measured against.
+    # Against the WHOLE parcel, not the road-restricted search region: a
+    # site's elevation position is a statement about where it sits on the
+    # PROPERTY ("upper field"), so the ground it is positioned against has
+    # to be the whole property, exactly as tree_zone_candidates.py argues
+    # for its own patches.
+    #
+    # None -- never a range of zero width -- on a parcel with no relief at
+    # all, where "upper" and "lower" name nothing. That None carries
+    # through to every candidate's percentile and from there to its
+    # position word; see production_area_ceiling._elevation_position() for
+    # why a default word is never the answer.
+    #
+    # PURE AND LOCAL, no fetch: the DEM is already in hand and the mask is
+    # one vectorised contains_xy() call over the grid, through the same
+    # imported helper production and trees both use.
+    parcel_elevations = array[_on_parcel_cell_mask(dem, boundary_polygon_utm)]
+    parcel_elevations = parcel_elevations[~np.isnan(parcel_elevations)]
+    if parcel_elevations.size and float(parcel_elevations.max()) > float(parcel_elevations.min()):
+        parcel_elevation_range = (float(parcel_elevations.min()), float(parcel_elevations.max()))
+    else:
+        parcel_elevation_range = None
+
     footprint_side_m = _footprint_side_meters(max_structure_footprint_acres)
     min_footprint_area_m2 = (
         max_structure_footprint_acres * SQUARE_METERS_PER_ACRE * MIN_STRUCTURE_FOOTPRINT_FRACTION
@@ -834,6 +1266,10 @@ def _prepare_scoring_run(
         "road_proximity_buffer_meters": road_proximity_buffer_meters,
         "canopy_mask_utm": canopy_mask_utm,
         "tree_zone_exclusion_polygon_utm": tree_zone_exclusion_polygon_utm,
+        "hydric_union_utm": hydric_union_utm,
+        "floodplain_union_utm": floodplain_union_utm,
+        "parcel_elevation_range": parcel_elevation_range,
+        "array": array,
         "max_solar_slope_pct": max_solar_slope_pct,
         "min_suitability_score": min_suitability_score,
         "footprint_side_m": footprint_side_m,
@@ -862,12 +1298,30 @@ def _measure_footprint(x: float, y: float, run: dict) -> Optional[dict]:
     collection() publishes under `constraints_satisfied`, so a placed
     site's outcomes reach the wire under the names a generated candidate's
     guarantees already use. A constraint the run does NOT apply (no road
-    source, no tree-zone exclusion polygon) has no key -- absent, not
-    trivially True -- for the same reason an unavailable exclusion gate is
-    omitted from a crossing record rather than reported clear.
+    source, no tree-zone exclusion polygon, no hydric or floodplain union)
+    has no key -- absent, not trivially True -- for the same reason an
+    unavailable exclusion gate is omitted from a crossing record rather
+    than reported clear.
+
+    TWO GEOMETRIES, TWO JOBS, and the split is the whole of this pass's
+    first change. THE PAD -- the clipped, fixed-size footprint -- is what
+    is scored over (its cells' slope, aspect and shading) and what EVERY
+    HARD GATE tests, because a gate asks what ground the building
+    occupies. THE POINT -- (x, y), the locator marker the user sees on the
+    map -- is what EVERY REPORTED DISTANCE is measured from, because a
+    distance asks where the building is. The road gate is the one
+    exception to the first half and deliberately so: it gates on the
+    POINT, so that the gate and the figure it bounds are one definition of
+    "how far is this site from a road" rather than two. See
+    find_candidate_solar_zones() for the two wrong answers a pad-based
+    measurement produced and why one cause explains both.
     """
     dem = run["dem"]
     footprint_side_m = run["footprint_side_m"]
+    # THE SITE'S OWN POINT -- the locator marker the user sees on the map,
+    # and what EVERY REPORTED DISTANCE below is measured from. See this
+    # function's DISTANCES ARE MEASURED FROM THE POINT note.
+    point = Point(x, y)
     nominal_footprint = box(
         x - footprint_side_m / 2, y - footprint_side_m / 2, x + footprint_side_m / 2, y + footprint_side_m / 2
     )
@@ -888,6 +1342,8 @@ def _measure_footprint(x: float, y: float, run: dict) -> Optional[dict]:
 
     water_exclusion = run["water_exclusion"]
     tree_zone_exclusion_polygon_utm = run["tree_zone_exclusion_polygon_utm"]
+    hydric_union_utm = run["hydric_union_utm"]
+    floodplain_union_utm = run["floodplain_union_utm"]
     canopy_mask_utm = run["canopy_mask_utm"]
     road_union = run["road_union"]
     max_solar_slope_pct = run["max_solar_slope_pct"]
@@ -901,6 +1357,20 @@ def _measure_footprint(x: float, y: float, run: dict) -> Optional[dict]:
             water_exclusion is not None and footprint.intersects(water_exclusion)
         ),
     }
+    # THE TWO DRAINAGE GATES, SEPARATELY -- drainage under a foundation and
+    # flood risk around a building are different problems and a site can
+    # break either or both, so each is its own named outcome and the
+    # violated one reaches the wire by name. Tested against the PAD, not
+    # the point: what a gate asks is what ground the BUILDING occupies,
+    # which is the pad, while a reported DISTANCE asks where the building
+    # is, which is the point. A None union is a gate the run did not apply
+    # -- no key at all rather than a trivially-True one -- so a site is
+    # never reported clear of a check that never ran. See THE TWO DRAINAGE
+    # GATES at the top of this module.
+    if hydric_union_utm is not None:
+        constraints["outside_hydric_soil"] = not footprint.intersects(hydric_union_utm)
+    if floodplain_union_utm is not None:
+        constraints["outside_floodplain"] = not footprint.intersects(floodplain_union_utm)
     if tree_zone_exclusion_polygon_utm is not None:
         # a structure shouldn't sit on/against planned tree-zone ground
         constraints["outside_tree_zone_candidate_buffer"] = not footprint.intersects(
@@ -913,8 +1383,14 @@ def _measure_footprint(x: float, y: float, run: dict) -> Optional[dict]:
     # too steep to build on -- a real buildability ceiling, independent of production-zone proximity
     constraints[f"max_slope<={max_solar_slope_pct:.0f}pct"] = avg_slope_pct <= max_solar_slope_pct
     if run["apply_road_constraint"]:
+        # FROM THE POINT, like the distance it gates -- one definition of
+        # "how far is this site from a road", used by the gate and by the
+        # reported figure alike. Measuring the gate off the pad while
+        # reporting the point's distance would let a candidate whose pad
+        # clips the road report 60 ft and still pass a 15 m gate it never
+        # actually cleared.
         constraints["within_road_proximity_buffer"] = (
-            road_union is not None and footprint.distance(road_union) <= run["road_proximity_buffer_meters"]
+            road_union is not None and point.distance(road_union) <= run["road_proximity_buffer_meters"]
         )
 
     aspect_deg = run["aspect_deg"]
@@ -928,12 +1404,34 @@ def _measure_footprint(x: float, y: float, run: dict) -> Optional[dict]:
 
     s_score = _slope_score(avg_slope_pct, max_solar_slope_pct)
 
+    # DISTANCE TO THE NEAREST BLOCK'S EDGE, FROM THE POINT. Still to the
+    # BOUNDARY LINE rather than the filled area (see PRODUCTION_PROXIMITY_
+    # SCORE_WEIGHT for why the score peaks at an edge and falls off in both
+    # directions), and still the scoring input unchanged -- only the
+    # geometry it is measured from moved from the pad to the point.
     production_boundary_geom = run["production_boundary_geom"]
     distance_to_production_edge_m = (
-        float(footprint.distance(production_boundary_geom)) if production_boundary_geom is not None else None
+        float(point.distance(production_boundary_geom)) if production_boundary_geom is not None else None
     )
     p_score = _production_proximity_score(
         distance_to_production_edge_m, run["production_proximity_reference_meters"]
+    )
+    # AND WHICH SIDE OF THAT EDGE THE SITE IS ON, as the distance's SIGN.
+    # "0 ft to production" and "inside the block" read differently, and an
+    # unsigned distance to an edge says neither: a site buried 200 ft
+    # inside a block reports 200 ft and reads exactly like one 200 ft
+    # outside. Negative is inside, positive is outside, 0.0 is on the
+    # edge, None is "no blocks on this parcel" -- see the signed_distance_
+    # to_production_ft entry in _SCALES. The sign is the POINT's
+    # containment, which is also what production_zone_relationship reports,
+    # so the two can never disagree.
+    inside_production = (
+        run["raw_production_union"] is not None and run["raw_production_union"].contains(point)
+    )
+    signed_distance_to_production_m = (
+        None
+        if distance_to_production_edge_m is None
+        else (-distance_to_production_edge_m if inside_production else distance_to_production_edge_m)
     )
 
     combined = (
@@ -946,7 +1444,7 @@ def _measure_footprint(x: float, y: float, run: dict) -> Optional[dict]:
     constraints[f"suitability_score>={min_suitability_score * 100:.0f}"] = combined >= min_suitability_score
 
     relationship = _classify_production_zone_relationship(
-        footprint,
+        point,
         run["raw_production_union"],
         distance_to_production_edge_m,
         run["production_edge_adjacency_meters"],
@@ -954,9 +1452,41 @@ def _measure_footprint(x: float, y: float, run: dict) -> Optional[dict]:
 
     raw_water_union = run["raw_water_union"]
     distance_to_water_zone_m = (
-        float(footprint.distance(raw_water_union)) if raw_water_union is not None else None
+        float(point.distance(raw_water_union)) if raw_water_union is not None else None
     )
-    distance_to_road_m = float(footprint.distance(road_union)) if road_union is not None else None
+    # THE PANEL'S HEADLINE FIGURE, AND THE BRANCH'S REASON TO EXIST. From
+    # the POINT. Measured off the pad it was 0.0 on essentially every
+    # candidate: the road-proximity constraint tunes candidates to sit
+    # close to a road, the 0.1-acre pad therefore INTERSECTS the road, and
+    # shapely's .distance() returns 0.0 for intersecting geometry -- so
+    # "how far is this site from a road" answered zero every time, for nine
+    # of eleven clearing footprints on the reference parcel.
+    distance_to_road_m = float(point.distance(road_union)) if road_union is not None else None
+
+    # WHERE THIS SITE SITS IN THE PARCEL'S ELEVATION RANGE, 0 = the
+    # parcel's lowest ground, 100 = its highest -- the same linear position
+    # production_area_ceiling.py and tree_zone_candidates.py both publish
+    # under this same name, off this pad's own mean elevation. None on a
+    # parcel with no relief. Clamped to [0, 100] because a pad can cover a
+    # cell the on-parcel mask excluded (a cell centre just outside the
+    # boundary whose square still intersects it).
+    parcel_elevation_range = run["parcel_elevation_range"]
+    if parcel_elevation_range is None:
+        elevation_percentile = None
+    else:
+        low, high = parcel_elevation_range
+        mean_elevation = float(np.mean([float(run["array"][r, c]) for r, c in cells]))
+        elevation_percentile = round(
+            max(0.0, min(100.0, (mean_elevation - low) / (high - low) * 100.0)), 1
+        )
+
+    # THE COMBINED SOLAR VALUE AND ITS WORD -- the two solar factors
+    # together on the 0-100 axis, and SOLAR_RATING_BANDS' band for it.
+    # Stored rather than derived downstream, for the same reason the four
+    # factor scores are: the narrative and the wire both read it off the
+    # candidate instead of re-deriving it, and the bands live in exactly
+    # one place.
+    solar_value = round(_combined_solar_value(a_score, sh_score), 1)
 
     geometry_wgs84 = transform_geom(dem["crs"], "EPSG:4326", mapping(footprint))
 
@@ -975,9 +1505,18 @@ def _measure_footprint(x: float, y: float, run: dict) -> Optional[dict]:
         "avg_slope_pct": round(avg_slope_pct, 1),
         "aspect_deg": round(mean_aspect, 1) if mean_aspect is not None else None,
         "aspect_label": aspect_to_compass_label(mean_aspect) if mean_aspect is not None else "flat",
+        "solar_value": solar_value,
+        "solar_rating": _solar_rating(solar_value),
+        "elevation_percentile_of_parcel": elevation_percentile,
+        "elevation_position": _elevation_position(elevation_percentile),
         "distance_to_road_m": round(distance_to_road_m, 1) if distance_to_road_m is not None else None,
         "distance_to_production_zone_m": (
             round(distance_to_production_edge_m, 1) if distance_to_production_edge_m is not None else None
+        ),
+        "signed_distance_to_production_m": (
+            round(signed_distance_to_production_m, 1)
+            if signed_distance_to_production_m is not None
+            else None
         ),
         "production_zone_relationship": relationship,
         "distance_to_water_zone_m": (
@@ -1010,6 +1549,8 @@ def measure_structure_site(
     boundary_polygon_utm: Polygon,
     canopy_mask_utm: Optional[np.ndarray] = None,
     tree_zone_exclusion_polygon_utm: Optional[object] = None,
+    hydric_union_utm: Optional[object] = None,
+    floodplain_union_utm: Optional[object] = None,
     **thresholds,
 ) -> Optional[dict]:
     """
@@ -1027,6 +1568,12 @@ def measure_structure_site(
     question, and "this spot averages 27% slope, above the 20% ceiling" is
     the answer -- so every gate's outcome comes back beside the score.
 
+    hydric_union_utm/floodplain_union_utm are the run's own two drainage
+    gates, forwarded like every other exclusion: a placed site on either
+    ground is MEASURED AND KEPT, with that gate named in its
+    `constraints` -- never dropped, which is the whole point of this
+    entry.
+
     PURE AND LOCAL: one Horn pass and one shading pass over the cached
     DEM, a handful of shapely predicates against geometry already in hand,
     one reprojection out. No network, asserted in test_structures_step.py
@@ -1040,6 +1587,8 @@ def measure_structure_site(
         boundary_polygon_utm,
         canopy_mask_utm=canopy_mask_utm,
         tree_zone_exclusion_polygon_utm=tree_zone_exclusion_polygon_utm,
+        hydric_union_utm=hydric_union_utm,
+        floodplain_union_utm=floodplain_union_utm,
         **thresholds,
     )
     return _measure_footprint(x_utm, y_utm, run)
@@ -1086,7 +1635,13 @@ def score_placed_structure_site(lon_lat, result: dict) -> dict:
         placed_lon_lat   the point as placed, [lon, lat]
         point_utm        the same point in the DEM's CRS
         constraints      {wire name -> bool}, every hard gate the run
-                         applied, from _measure_footprint()
+                         applied, from _measure_footprint() -- including
+                         the two DRAINAGE gates, so a site on hydric soil
+                         or in a floodplain is told which one it broke
+                         rather than refused. A generated candidate can
+                         never land on either; a placed one commits with
+                         the crossing recorded. Landform's rule exactly,
+                         applied to a point rather than a polygon
         rank             WHERE THIS SPOT WOULD SIT in the generated
                          shortlist: 1 + the number of generated candidates
                          that score strictly higher. Rank 1 means better
@@ -1136,6 +1691,13 @@ def score_placed_structure_site(lon_lat, result: dict) -> dict:
         boundary_polygon_utm,
         canopy_mask_utm=run_inputs["canopy_mask_utm"],
         tree_zone_exclusion_polygon_utm=run_inputs["tree_zone_exclusion_polygon_utm"],
+        # THE TWO DRAINAGE GATES, from the run the generated candidates
+        # were scored against -- which is what makes "this spot is on
+        # hydric soil" a statement about the same data the shortlist was
+        # built from. A placed site is NOT dropped for failing one: it is
+        # scored, committable, and told which gate it broke.
+        hydric_union_utm=run_inputs["hydric_union_utm"],
+        floodplain_union_utm=run_inputs["floodplain_union_utm"],
         **run_inputs["thresholds"],
     )
     if measured is None:
@@ -1314,6 +1876,46 @@ def _compass_word(aspect_deg) -> Optional[str]:
     return _COMPASS_WORDS[int(round((float(aspect_deg) % 360.0) / 45.0)) % 8]
 
 
+def _no_candidates_block(rejection_tally: Optional[dict]) -> Optional[dict]:
+    """
+    WHY A RUN RETURNED NOTHING, off find_candidate_solar_zones()'s own
+    rejection tally -- the block narrative_data carries in place of a
+    selected site.
+
+    THIS EXISTS BECAUSE A FULLY GATED PARCEL IS A REAL OUTCOME, not a
+    failure. Trees deliberately targets hydric ground, so on a wet parcel
+    trees and structures want opposite qualities -- and hydric plus
+    floodplain plus the existing canopy, road-proximity and score-floor
+    gates can together leave ZERO ground a building may stand on. The step
+    has to SAY that, naming the grounds that did it, rather than hand back
+    an empty list that reads as a broken generate. `blocking_gates` is
+    sorted most-rejections-first, which is the order a reader wants: the
+    gate at the top is the one to argue with.
+
+    None when no tally was collected (a caller that passed none) -- absent,
+    not a fabricated "no reason", the same null-not-zero rule the rest of
+    this block obeys.
+    """
+    if not rejection_tally:
+        return None
+    sampled = int(rejection_tally.get("sampled", 0))
+    not_measurable = int(rejection_tally.get("not_measurable", 0))
+    measurable = sampled - not_measurable
+    gates = rejection_tally.get("gates") or {}
+    return {
+        "pads_sampled": sampled,
+        "pads_measurable": measurable,
+        "blocking_gates": [
+            {"gate": name, "pads_rejected": int(count)}
+            for name, count in sorted(gates.items(), key=lambda kv: (-kv[1], kv[0]))
+        ],
+        # "nothing on this parcel could hold a building pad at all" and
+        # "every pad that could be measured failed a gate" are different
+        # answers and a reader needs to be told which.
+        "reason": "no_pad_was_measurable" if measurable <= 0 else "every_pad_failed_a_gate",
+    }
+
+
 def build_narrative_data(
     candidates: list[dict],
     boundary_polygon_utm: Polygon,
@@ -1321,6 +1923,8 @@ def build_narrative_data(
     tree_zone_exclusion_available: bool,
     water_zone_excluded: bool,
     existing_canopy_excluded: bool,
+    drainage_gates_checked: tuple = (),
+    rejection_tally: Optional[dict] = None,
 ) -> dict:
     """
     The 'narrative_data' block identify_solar_candidate_zones() attaches
@@ -1343,6 +1947,14 @@ def build_narrative_data(
     passes its own real outcomes; without these a narrative could claim
     clearances off a run whose checks never ran.
 
+    drainage_gates_checked names the drainage gates the run APPLIED
+    ('outside_hydric_soil', 'outside_floodplain', either, both or
+    neither), so a narrative can never report a site clear of hydric soil
+    on a run where SSURGO never answered. rejection_tally is find_
+    candidate_solar_zones()'s own count of what the gates dropped; it is
+    what makes the ZERO-CANDIDATE case reportable rather than blank (see
+    'no_candidates' below).
+
     Shape:
 
         {
@@ -1350,6 +1962,23 @@ def build_narrative_data(
           'candidate_count': int,       # how many ranked candidates the winner
                                         #   was selected from (capped at
                                         #   MAX_CANDIDATES)
+          'road_proximity_source',      # STEP-LEVEL: which access source every
+                                        #   candidate's ft-to-road was measured
+                                        #   against -- 'selected_road_corridor' |
+                                        #   'real_mapped_road' | 'unavailable'.
+                                        #   True of the whole run, which is why it
+                                        #   is promoted here beside candidate_count
+                                        #   rather than left only inside 'gates':
+                                        #   ft-to-road is the panel's headline
+                                        #   figure and its MEANING depends entirely
+                                        #   on this -- a distance to a road that
+                                        #   does not exist yet is a different fact
+                                        #   from one to today's driveway -- so the
+                                        #   panel renders it as a run-level notice.
+                                        #   The same value stays in 'gates' (the
+                                        #   report reads it there); this is one
+                                        #   value in two places by design, not two
+                                        #   values.
           'gates': {
             'existing_canopy_excluded', # mandatory on the identify path -- any
                                         #   result at all was canopy-gated
@@ -1357,15 +1986,58 @@ def build_narrative_data(
             'tree_zone_exclusion_checked',
             'road_proximity_source',
             'prime_farmland_checked',
+            'hydric_gate_checked',      # SSURGO hydric soil was gated against
+            'floodplain_gate_checked',  # NHD floodplain was gated against
+            'drainage_gates_checked',   # the two above as the gate NAMES applied,
+                                        #   which are the names constraints_
+                                        #   violated uses on a placed site
+          },
+          'scales': {...},              # HOW TO READ EVERY VALUE HERE -- see
+                                        #   _SCALES. Carries SOLAR_RATING_BANDS
+                                        #   and production's imported ELEVATION_
+                                        #   POSITION_BANDS, so the frontend holds
+                                        #   no threshold of its own
+          'no_candidates': None when site_found is True, else {
+                                        # WHY THE RUN RETURNED NOTHING, so a fully
+                                        #   gated parcel says so instead of looking
+                                        #   broken. On a wet parcel hydric plus
+                                        #   floodplain plus canopy, road proximity
+                                        #   and the score floor can genuinely leave
+                                        #   zero ground, and that is an answer
+            'pads_sampled',             #   grid points tested
+            'pads_measurable',          #   of those, pads with a real measurement
+            'blocking_gates': [         #   every gate that rejected a measurable
+                                        #     pad, most-rejections first
+              {'gate', 'pads_rejected'},
+            ],
+            'reason',                   #   'no_pad_was_measurable' (nothing on this
+                                        #     parcel could hold a building pad) or
+                                        #     'every_pad_failed_a_gate'
           },
           'selected_site': None when site_found is False, else {
             'score',                    # 0-100
             'footprint_acres',
+            'solar_rating',             # SOLAR_RATING_BANDS' word for the two
+                                        #   SOLAR factors together
+            'solar_value',              # 0-100, the number that word bands
             'location': {               # question 1 -- WHERE on the map
               'position_in_parcel',     #   "center" or an 8-point compass word
+              'elevation_percentile_of_parcel',  # 0 = the parcel's lowest ground,
+                                        #     100 = its highest; None on a parcel
+                                        #     with no relief at all
+              'elevation_position',     #   the line above as words -- production's
+                                        #     own ELEVATION_POSITION_BANDS, IMPORTED
               'production_zone_relationship',   # 'inside' | 'adjacent' | 'outside'
-              'distance_to_production_edge_ft', # None if no production zones exist
-              'distance_to_road_ft',            # None if no road source was available
+              'distance_to_production_edge_ft', # UNSIGNED, to the nearest block's
+                                        #     edge; None if no blocks exist
+              'signed_distance_to_production_ft',  # the same distance SIGNED --
+                                        #     NEGATIVE inside a block, positive
+                                        #     outside, 0.0 on the edge. This is what
+                                        #     lets a narrative say "142 ft inside the
+                                        #     block" rather than "142 ft to
+                                        #     production" from inside one
+              'distance_to_road_ft',            # FROM THE SITE'S POINT; None if no
+                                        #     road source was available
               'distance_to_water_zone_ft',      # None if no water zone exists
             },
             'benefits': {               # question 2 -- the measured qualities
@@ -1382,29 +2054,46 @@ def build_narrative_data(
     """
     selected = select_optimal_structure_site(candidates)
     prime_farmland_checked = selected is not None and "prime_farmland_conflict" in selected
+    drainage_gates_checked = tuple(drainage_gates_checked or ())
 
     data = {
         "site_found": selected is not None,
         "candidate_count": len(candidates),
+        # STEP-LEVEL, promoted beside candidate_count -- see the docstring.
+        "road_proximity_source": str(road_proximity_source),
         "gates": {
             "existing_canopy_excluded": bool(existing_canopy_excluded),
             "water_zone_excluded": bool(water_zone_excluded),
             "tree_zone_exclusion_checked": bool(tree_zone_exclusion_available),
             "road_proximity_source": str(road_proximity_source),
             "prime_farmland_checked": prime_farmland_checked,
+            "hydric_gate_checked": "outside_hydric_soil" in drainage_gates_checked,
+            "floodplain_gate_checked": "outside_floodplain" in drainage_gates_checked,
+            "drainage_gates_checked": list(drainage_gates_checked),
         },
+        "scales": _SCALES,
+        "no_candidates": None,
         "selected_site": None,
     }
     if selected is None:
+        data["no_candidates"] = _no_candidates_block(rejection_tally)
         return data
 
     data["selected_site"] = {
         "score": _round1(selected["suitability_score"]),
         "footprint_acres": _round1(selected["footprint_area_acres"]),
+        # THE WORD AND THE NUMBER IT BANDS, both read off the candidate --
+        # SOLAR_RATING_BANDS is applied once, in the scorer, and nothing
+        # here re-derives it.
+        "solar_rating": selected["solar_rating"],
+        "solar_value": _round1(selected["solar_value"]),
         "location": {
             "position_in_parcel": _position_in_parcel(selected["polygon_utm"], boundary_polygon_utm),
+            "elevation_percentile_of_parcel": _round1(selected["elevation_percentile_of_parcel"]),
+            "elevation_position": selected["elevation_position"],
             "production_zone_relationship": str(selected["production_zone_relationship"]),
             "distance_to_production_edge_ft": _feet(selected["distance_to_production_zone_m"]),
+            "signed_distance_to_production_ft": _feet(selected["signed_distance_to_production_m"]),
             "distance_to_road_ft": _feet(selected["distance_to_road_m"]),
             "distance_to_water_zone_ft": _feet(selected["distance_to_water_zone_m"]),
         },
@@ -1430,6 +2119,7 @@ def candidates_to_geojson(
     shading_is_rough_proxy: bool = True,
     road_proximity_source: str = "unavailable",
     tree_zone_exclusion_available: bool = True,
+    drainage_gates_checked: tuple = (),
     spacing_meters: float = CANDIDATE_POINT_SPACING_METERS,
     max_structure_footprint_acres: float = MAX_STRUCTURE_FOOTPRINT_ACRES,
 ) -> dict:
@@ -1459,6 +2149,7 @@ def candidates_to_geojson(
         shading_is_rough_proxy=shading_is_rough_proxy,
         road_proximity_source=road_proximity_source,
         tree_zone_exclusion_available=tree_zone_exclusion_available,
+        drainage_gates_checked=drainage_gates_checked,
         spacing_meters=spacing_meters,
         max_structure_footprint_acres=max_structure_footprint_acres,
     )
@@ -1475,6 +2166,8 @@ def identify_solar_candidate_zones(
     selected_road_corridor: Optional[dict] = None,
     hydric_floodplain_union=None,
     floodplain_data_is_fallback: Optional[bool] = None,
+    hydric_union=None,
+    floodplain_union=None,
     check_prime_farmland: bool = True,
     canopy_height: Optional[dict] = None,
     tree_zone_patches: Optional[list[dict]] = None,
@@ -1535,6 +2228,24 @@ def identify_solar_candidate_zones(
     compares the regenerated set against the committed one on the
     reference parcel and reports whether the candidates move.
 
+    hydric_union and floodplain_union are THE TWO HARD DRAINAGE GATES,
+    and they are NOT in the override family every other parameter here
+    belongs to: a None does not self-compute, it means the gate is simply
+    not applied, and nothing here fetches either one. That is deliberate.
+    A gate is a claim about the ground under a building, and a fetch that
+    did not land is not the same answer as ground that came back clean --
+    so a run that was handed neither reports `drainage_gates_checked`
+    empty rather than gating on invented geometry or, worse, reporting
+    sites clear of an unrun check. Both are derived upstream, once, from
+    ParcelData's own rows (road_corridors._fetch_floodplain_hydric_
+    unions(), through the terrain warm-up or build_pipeline_context()) and
+    reach this step as its own two registry cache edges.
+      hydric_floodplain_union above is the COMBINATION of these two and is
+      a different parameter for a different purpose: it is forwarded,
+      untouched, into the nested road and tree self-computes, which read
+      wet ground as ONE soft cost penalty. It is not taken apart here, and
+      these two are not built from it -- the union cannot be split back.
+
     farm_roads and farmland_classifications are cache closures in the same
     None-falls-back-to-self-fetch family, each the rows the corresponding
     fetch returns (farm_roads_data.get_farm_roads_for_boundary() and
@@ -1585,9 +2296,12 @@ def identify_solar_candidate_zones(
     'run_inputs' is the native counterpart: the DEM, the parcel polygon,
     the production patches, the water zones, the road geometry and buffer
     of the tier that ACTUALLY produced the candidates, the canopy mask,
-    the tree-zone exclusion polygon, and the thresholds. It is what
-    score_placed_structure_site() scores a user-placed site against, so a
-    placed site and a generated candidate are measured against one run.
+    the tree-zone exclusion polygon, THE TWO DRAINAGE GATE GEOMETRIES, and
+    the thresholds. It is what score_placed_structure_site() scores a
+    user-placed site against, so a placed site and a generated candidate
+    are measured against one run -- which is what makes "this spot is on
+    hydric soil" a statement about the same data the shortlist was built
+    from.
     Native objects (numpy, shapely), like all_scored_candidates -- not
     JSON, and not for the wire.
 
@@ -1865,11 +2579,39 @@ def identify_solar_candidate_zones(
         tree_zone_union = unary_union([p["render_fill_polygon_utm"] for p in tree_zone_patches])
         tree_zone_exclusion_polygon_utm = tree_zone_union.buffer(TREE_ZONE_STRUCTURE_EXCLUSION_BUFFER_METERS)
 
+    # THE TWO DRAINAGE GATES, in the DEM's own CRS, exactly as supplied.
+    # NOT derived from hydric_floodplain_union above: that union is the
+    # COMBINATION roads and trees read as one soft cost penalty, and it
+    # cannot be taken apart again. When these are not supplied the gates
+    # are simply not applied -- no self-compute, no fetch (see this
+    # function's docstring for why that is deliberate, and how it is
+    # reported).
     common_zone_kwargs = dict(
         canopy_mask_utm=canopy_mask_utm,
         tree_zone_exclusion_polygon_utm=tree_zone_exclusion_polygon_utm,
+        hydric_union_utm=hydric_union,
+        floodplain_union_utm=floodplain_union,
     )
     common_zone_kwargs.update(zone_kwargs)
+
+    # WHICH DRAINAGE GATES THIS RUN ACTUALLY APPLIED, by the names
+    # constraints_violated uses -- the run-level answer to "was this
+    # checked at all", which a None union makes different from "checked
+    # and clear". Empty means neither was applied.
+    drainage_gates_checked = tuple(
+        name
+        for name, union in (
+            ("outside_hydric_soil", common_zone_kwargs["hydric_union_utm"]),
+            ("outside_floodplain", common_zone_kwargs["floodplain_union_utm"]),
+        )
+        if union is not None
+    )
+
+    # THE REJECTION TALLY OF WHICHEVER TIER ANSWERED. Each scoring call
+    # below fills it (clearing it first), so after the tier branching it
+    # describes the run whose candidates were kept -- which is the run a
+    # zero-candidate report has to explain.
+    rejection_tally = _empty_rejection_tally()
 
     # --- Tier 1 (primary) scoring: within ROAD_CORRIDOR_PROXIMITY_METERS
     # of the selected_road_corridor resolved above (self-compute moved
@@ -1890,6 +2632,7 @@ def identify_solar_candidate_zones(
             road_source[0],
             boundary_polygon_utm,
             road_proximity_buffer_meters=road_source[1],
+            rejection_tally=rejection_tally,
             **common_zone_kwargs,
         )
         if candidates:
@@ -1922,6 +2665,7 @@ def identify_solar_candidate_zones(
                 road_source[0],
                 boundary_polygon_utm,
                 road_proximity_buffer_meters=road_source[1],
+                rejection_tally=rejection_tally,
                 **common_zone_kwargs,
             )
             road_proximity_source = "real_mapped_road"
@@ -1936,6 +2680,7 @@ def identify_solar_candidate_zones(
                 water_zones,
                 None,
                 boundary_polygon_utm,
+                rejection_tally=rejection_tally,
                 **common_zone_kwargs,
             )
             road_proximity_source = "unavailable"
@@ -1958,6 +2703,19 @@ def identify_solar_candidate_zones(
         "shading_is_rough_proxy": True,
         "road_proximity_source": road_proximity_source,
         "tree_zone_exclusion_available": tree_zone_exclusion_available,
+        # FIVE NOW, not four: which drainage gates the run applied, by the
+        # names constraints_violated uses. It belongs with the other
+        # run-level flags for exactly their reason -- a GENERATED
+        # candidate's constraints_satisfied list is reconstructed on the
+        # wire from the gates the RUN applied (its own outcomes are all
+        # True by construction and are not stored), so without this flag
+        # the wire could not tell "gated and clear" from "never checked",
+        # and would have to claim one of them.
+        # A LIST, not a tuple: run_flags must be json.dumps()-clean (the
+        # step payload carries it under summary.run_flags), and a tuple
+        # round-trips as a list -- so it IS a list from the start rather
+        # than a shape that only survives one direction.
+        "drainage_gates_checked": list(drainage_gates_checked),
         "spacing_meters": zone_kwargs.get("candidate_point_spacing_meters", CANDIDATE_POINT_SPACING_METERS),
         "max_structure_footprint_acres": zone_kwargs.get(
             "max_structure_footprint_acres", MAX_STRUCTURE_FOOTPRINT_ACRES
@@ -1970,7 +2728,8 @@ def identify_solar_candidate_zones(
         key: value
         for key, value in zone_kwargs.items()
         if key not in ("candidate_point_spacing_meters", "max_candidates", "canopy_mask_utm",
-                       "tree_zone_exclusion_polygon_utm", "road_proximity_buffer_meters")
+                       "tree_zone_exclusion_polygon_utm", "road_proximity_buffer_meters",
+                       "hydric_union_utm", "floodplain_union_utm", "rejection_tally")
     }
     thresholds["road_proximity_buffer_meters"] = road_source[1]
     run_inputs = {
@@ -1981,6 +2740,11 @@ def identify_solar_candidate_zones(
         "road_geometries_utm": road_source[0],
         "canopy_mask_utm": common_zone_kwargs["canopy_mask_utm"],
         "tree_zone_exclusion_polygon_utm": common_zone_kwargs["tree_zone_exclusion_polygon_utm"],
+        # THE TWO DRAINAGE GATES THE GENERATED CANDIDATES WERE GATED BY,
+        # so score_placed_structure_site() measures a placed site against
+        # the same two -- which is the whole basis of the comparison.
+        "hydric_union_utm": common_zone_kwargs["hydric_union_utm"],
+        "floodplain_union_utm": common_zone_kwargs["floodplain_union_utm"],
         "thresholds": thresholds,
     }
 
@@ -1997,6 +2761,13 @@ def identify_solar_candidate_zones(
             # The canopy gate above is fetch-or-raise, so any result this
             # function returns at all was canopy-gated.
             existing_canopy_excluded=True,
+            drainage_gates_checked=drainage_gates_checked,
+            # WHAT THE GATES DROPPED, from whichever tier answered -- so a
+            # run that found nothing explains itself. Read only when
+            # `candidates` is empty; carried unconditionally because which
+            # of the two it is is build_narrative_data()'s call, not this
+            # function's.
+            rejection_tally=rejection_tally,
         ),
         "run_flags": run_flags,
         "run_inputs": run_inputs,

@@ -323,6 +323,9 @@ def _solar_candidate(rank, x0, y0):
         "footprint_area_acres": 0.15,
         "distance_to_road_m": 40.0,
         "distance_to_production_zone_m": 25.0,
+        # POSITIVE: this synthetic site is 'adjacent', i.e. OUTSIDE every
+        # block. Negative would be inside one.
+        "signed_distance_to_production_m": 25.0,
         "production_zone_relationship": "adjacent",
         "distance_to_water_zone_m": 60.0,
         "polygon_utm": footprint,
@@ -331,6 +334,13 @@ def _solar_candidate(rank, x0, y0):
         "aspect_score": 0.8,
         "shading_score": 0.7,
         "production_proximity_score": 0.6,
+        # The two SOLAR factors together and the band's word for them --
+        # (0.8 + 0.7)/2 = 0.75 -> 75.0, which SOLAR_RATING_BANDS reads as
+        # "good".
+        "solar_value": 75.0,
+        "solar_rating": "good",
+        "elevation_percentile_of_parcel": 70.0,
+        "elevation_position": "upper field",
     }
 
 

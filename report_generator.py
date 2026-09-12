@@ -1192,6 +1192,76 @@ _SOLAR_ROAD_SOURCE_DESCRIPTIONS = {
 }
 
 
+# What each hard gate is CALLED in prose, for the zero-candidate
+# explanation below. Keyed by the gate's own wire name (solar_suitability.
+# _measure_footprint()'s `constraints` keys, which are also what
+# properties.constraints_violated carries), so a gate that gains or loses
+# a name here is a one-line change beside it. A gate with no entry is
+# reported under its wire name rather than dropped -- an unnamed gate is
+# still the reason the parcel came back empty.
+_SOLAR_GATE_DESCRIPTIONS = {
+    "outside_water_candidate_zone": "the committed water-system (pond/dam) ground",
+    "outside_hydric_soil": "poorly drained (hydric) soil",
+    "outside_floodplain": "floodplain",
+    "outside_tree_zone_candidate_buffer": "the committed tree zones",
+    "outside_existing_canopy": "existing tree canopy",
+    "within_road_proximity_buffer": "road proximity (too far from the access source)",
+}
+
+
+def _format_no_solar_candidates(solar_narrative: Optional[dict]) -> str:
+    """
+    The ZERO-CANDIDATE outcome, with the reason when the step gave one.
+
+    A FULLY GATED PARCEL IS A REAL ANSWER, NOT A FAILED RUN, and the
+    report has to say which ground did it rather than shrug. Trees
+    deliberately targets hydric ground, so on a wet parcel trees and
+    structures want opposite qualities -- and hydric plus floodplain plus
+    the existing canopy, road-proximity and score-floor gates can together
+    leave no ground a building may stand on. narrative_data's
+    'no_candidates' block carries the counts; this turns them into the
+    sentence the prompt reads.
+    """
+    if not solar_narrative:
+        return (
+            "No solar structure candidate site identified (the structures layer did not run for "
+            "this property, or its DEM/road data wasn't available)."
+        )
+
+    reasons = solar_narrative.get("no_candidates")
+    if not reasons:
+        return (
+            "No solar structure candidate site identified (either "
+            "nothing cleared the exclusion/proximity/suitability "
+            "constraint stack, or DEM/road data wasn't available for "
+            "this property)."
+        )
+
+    if reasons["reason"] == "no_pad_was_measurable":
+        return (
+            f"No solar structure candidate site identified: of {reasons['pads_sampled']} grid "
+            "position(s) tested across this property, NONE could hold a building pad at all "
+            "(every one fell outside the parcel, kept too little of a pad inside it, or had no "
+            "elevation data under it). This is a real finding about the property, not a failed "
+            "run -- say so plainly and do not suggest a site anyway."
+        )
+
+    blocking = ", ".join(
+        f"{_SOLAR_GATE_DESCRIPTIONS.get(entry['gate'], entry['gate'])} "
+        f"({entry['pads_rejected']} of {reasons['pads_measurable']} pad(s))"
+        for entry in reasons["blocking_gates"]
+    )
+    return (
+        f"No solar structure candidate site identified: all {reasons['pads_measurable']} "
+        f"measurable building pad(s) on this property failed at least one hard constraint. What "
+        f"ruled them out, most-rejections first: {blocking}. A pad is counted against every "
+        "constraint it failed, so these do not sum to the pad count. THIS IS A REAL FINDING ABOUT "
+        "THIS PROPERTY, not a failed run: present it as the answer -- name the ground that ruled "
+        "the parcel out and what it would take to change that (which constraint the owner could "
+        "reasonably argue with) -- and do NOT suggest a site anyway."
+    )
+
+
 def _format_solar_candidate_zones_summary(solar_narrative: Optional[dict]) -> str:
     """Formats solar_suitability.py's own 'narrative_data' block (see
     build_narrative_data() there for the field contract) for the report
@@ -1201,12 +1271,7 @@ def _format_solar_candidate_zones_summary(solar_narrative: Optional[dict]) -> st
     the other DEM/network-backed layers above — a fetch failure shouldn't
     take down the whole report."""
     if not solar_narrative or not solar_narrative.get("site_found"):
-        return (
-            "No solar structure candidate site identified (either "
-            "nothing cleared the exclusion/proximity/suitability "
-            "constraint stack, or DEM/road data wasn't available for "
-            "this property)."
-        )
+        return _format_no_solar_candidates(solar_narrative)
 
     site = solar_narrative["selected_site"]
     location = site["location"]
@@ -1214,18 +1279,29 @@ def _format_solar_candidate_zones_summary(solar_narrative: Optional[dict]) -> st
     gates = solar_narrative["gates"]
     factors = benefits["factors"]
 
+    # INSIDE A BLOCK AND ON ITS EDGE READ DIFFERENTLY, and the signed
+    # distance is what lets this say which. An unsigned distance to a
+    # block's edge is the same number from 142ft inside and 142ft outside;
+    # signed_distance_to_production_ft is NEGATIVE inside, so "142ft inside
+    # the block" and "142ft from the nearest block" are now two sentences
+    # instead of one ambiguous one. BLOCK is the interface's word for a
+    # production zone (the roads section above says the same); the internal
+    # id stays 'production'.
+    signed_ft = location["signed_distance_to_production_ft"]
     if location["production_zone_relationship"] == "inside":
+        depth = "" if signed_ft is None else f", {abs(signed_ft)}ft in from its nearest edge"
         production_note = (
-            "production_zone_relationship: inside -- the footprint sits INSIDE a production zone "
-            "(intentional — a small structure can coexist with production land)"
+            f"production_zone_relationship: inside -- the site sits INSIDE a BLOCK{depth} "
+            "(intentional — a small structure can coexist with production land). This is NOT "
+            "'distance to production': the site is ON block ground"
         )
     elif location["distance_to_production_edge_ft"] is not None:
         production_note = (
             f"production_zone_relationship: {location['production_zone_relationship']}, "
-            f"{location['distance_to_production_edge_ft']}ft from the nearest production zone's edge"
+            f"{location['distance_to_production_edge_ft']}ft OUTSIDE the nearest BLOCK's edge"
         )
     else:
-        production_note = "no production zones identified on this property"
+        production_note = "no BLOCKS identified on this property"
 
     road_source_description = _SOLAR_ROAD_SOURCE_DESCRIPTIONS.get(gates["road_proximity_source"])
     if location["distance_to_road_ft"] is not None and road_source_description is not None:
@@ -1258,11 +1334,55 @@ def _format_solar_candidate_zones_summary(solar_narrative: Optional[dict]) -> st
         "clear of planned tree-zone ground."
     )
 
+    # THE TWO DRAINAGE GATES, and the one thing a reader must not be left
+    # to assume: a gate that did not RUN is not a gate the site passed.
+    # Both are hard gates for a generated candidate, so a selected site is
+    # clear of whichever ran -- and explicitly NOT confirmed clear of
+    # whichever did not.
+    _drainage_cleared = [
+        name
+        for name, checked in (
+            ("poorly drained (hydric) soil", gates["hydric_gate_checked"]),
+            ("floodplain", gates["floodplain_gate_checked"]),
+        )
+        if checked
+    ]
+    _drainage_unchecked = [
+        name
+        for name, checked in (
+            ("SSURGO hydric-soil", gates["hydric_gate_checked"]),
+            ("NHD floodplain", gates["floodplain_gate_checked"]),
+        )
+        if not checked
+    ]
+    drainage_note = ""
+    if _drainage_cleared:
+        drainage_note += f" It is also clear of {' and '.join(_drainage_cleared)}."
+    if _drainage_unchecked:
+        drainage_note += (
+            f" {' and '.join(_drainage_unchecked)} data was NOT available this run, so the site is "
+            "NOT confirmed clear of that ground -- do not claim it is."
+        )
+
+    position_note = f"in the parcel's {location['position_in_parcel']}"
+    if location["elevation_position"] is not None:
+        position_note += (
+            f", on its {location['elevation_position']} (at the "
+            f"{location['elevation_percentile_of_parcel']} elevation percentile of the parcel, "
+            "where 0 is the parcel's lowest ground and 100 its highest)"
+        )
+
     lines = [
         f"Selected site (rank 1 of {solar_narrative['candidate_count']} ranked candidate(s)): "
-        f"score {site['score']}/100, {site['footprint_acres']} acre footprint, in the parcel's "
-        f"{location['position_in_parcel']}.",
+        f"score {site['score']}/100, {site['footprint_acres']} acre footprint, {position_note}.",
         f"Location: {production_note}; {road_note}.",
+        # THE SOLAR RATING IS A BAND, NOT A RANK, and the prompt says so:
+        # left unqualified a report would write "the best of the three",
+        # which is a claim the thresholds deliberately do not make.
+        f"Solar rating: {site['solar_rating']} ({site['solar_value']}/100 on the two solar "
+        "factors together -- sun-facing and open-to-sky, which are half the score). This is an "
+        "ABSOLUTE band, not a rank among the candidates: do not describe it as the best or worst "
+        "of them, and do not invent a different word for it.",
         f"Measured qualities: {benefits['avg_slope_pct']}% average slope, "
         + (
             f"facing {benefits['facing']}"
@@ -1276,9 +1396,11 @@ def _format_solar_candidate_zones_summary(solar_narrative: Optional[dict]) -> st
         "\nThis is the SELECTED candidate site for a small, fixed-footprint solar-generating "
         "structure (a barn or shed with rooftop panels — not a large ground-mounted array, and not "
         "a permitting-ready placement). It already cleared hard exclusions for existing tree "
-        "canopy and the selected water-system zone." + tree_zone_note + " A site sitting inside or "
-        "near a production zone is a genuine, intentional option here, not a caveat; treat the "
-        "site as a starting point to walk and ground-truth, not a final site plan.",
+        "canopy and the selected water-system zone." + tree_zone_note + drainage_note + " A site "
+        "sitting inside or near a BLOCK is a genuine, intentional option here, not a caveat -- and "
+        "say BLOCK, which is what a production zone is called in the interface, not 'production "
+        "zone'; treat the site as a starting point to walk and ground-truth, not a final site "
+        "plan.",
     ]
     return "\n".join(lines)
 

@@ -54,10 +54,13 @@ from solar_suitability import (
     _cells_within_polygon,
     _footprint_side_meters,
     _generate_candidate_points,
+    SOLAR_RATING_BANDS,
     _production_proximity_score,
+    _solar_rating,
     candidates_to_geojson,
     find_candidate_solar_zones,
     flag_prime_farmland_conflicts,
+    measure_structure_site,
 )
 
 CRS = "EPSG:32617"
@@ -500,6 +503,8 @@ print(
 # =====================================================================
 import json  # noqa: E402
 
+import solar_suitability  # noqa: E402
+from production_area_ceiling import ELEVATION_POSITION_BANDS, _elevation_position  # noqa: E402
 from solar_suitability import build_narrative_data  # noqa: E402
 
 _nd_candidates = find_candidate_solar_zones(DEM, PRODUCTION_AREAS, WATER_ZONES, ROAD, BOUNDARY, max_candidates=5)
@@ -528,15 +533,36 @@ _nd = build_narrative_data(
     existing_canopy_excluded=False,
 )
 assert json.loads(json.dumps(_nd)) == _nd, "narrative_data must be json.dumps()-clean with no custom encoder"
-assert set(_nd) == {"site_found", "candidate_count", "gates", "selected_site"}
+assert set(_nd) == {
+    "site_found", "candidate_count", "road_proximity_source", "gates", "scales",
+    "no_candidates", "selected_site",
+}, sorted(_nd)
 assert _nd["site_found"] is True and _nd["candidate_count"] == len(_nd_candidates)
+# STEP-LEVEL: the same value gates carries, promoted beside candidate_count
+# because ft-to-road is the panel's headline figure and its MEANING depends
+# entirely on which access source answered.
+assert _nd["road_proximity_source"] == "real_mapped_road" == _nd["gates"]["road_proximity_source"]
+assert _nd["no_candidates"] is None, "a run that found a site has no zero-candidate explanation"
 assert _nd["gates"] == {
     "existing_canopy_excluded": False,
     "water_zone_excluded": True,
     "tree_zone_exclusion_checked": True,
     "road_proximity_source": "real_mapped_road",
     "prime_farmland_checked": False,  # flag_prime_farmland_conflicts() never ran on these
+    # NEITHER DRAINAGE GATE WAS APPLIED on this call (no unions supplied),
+    # and absent is not clear: both read False and the name list is empty.
+    "hydric_gate_checked": False,
+    "floodplain_gate_checked": False,
+    "drainage_gates_checked": [],
 }
+# THE BANDS ARE ON THE WIRE, so the frontend holds no threshold. Solar's
+# own cuts, and production's ELEVATION_POSITION_BANDS by IMPORT -- asserted
+# against the imported constant itself, not a copy of its values.
+assert _nd["scales"]["solar_rating"]["bands"] == solar_suitability.SOLAR_RATING_BANDS
+assert _nd["scales"]["elevation_position"]["bands"] is ELEVATION_POSITION_BANDS, (
+    "elevation_position must ship PRODUCTION's own bands object, not a second copy of the cuts"
+)
+assert _nd["scales"]["solar_rating"]["not_a"] == "rank_among_candidates"
 _nd_selected = max(_nd_candidates, key=lambda c: c["suitability_score"])
 _nd_site = _nd["selected_site"]
 assert _nd_site["score"] == round(_nd_selected["suitability_score"], 1)
@@ -546,6 +572,15 @@ assert _nd_site["location"]["distance_to_road_ft"] == round(_nd_selected["distan
 assert _nd_site["location"]["distance_to_production_edge_ft"] == round(
     _nd_selected["distance_to_production_zone_m"] / 0.3048, 1
 )
+assert _nd_site["location"]["signed_distance_to_production_ft"] == round(
+    _nd_selected["signed_distance_to_production_m"] / 0.3048, 1
+)
+assert _nd_site["location"]["elevation_position"] == _nd_selected["elevation_position"]
+assert _nd_site["location"]["elevation_percentile_of_parcel"] == _nd_selected[
+    "elevation_percentile_of_parcel"
+]
+assert _nd_site["solar_rating"] == _nd_selected["solar_rating"]
+assert _nd_site["solar_value"] == _nd_selected["solar_value"]
 assert _nd_site["location"]["distance_to_water_zone_ft"] == round(
     _nd_selected["distance_to_water_zone_m"] / 0.3048, 1
 )
@@ -577,7 +612,44 @@ _nd_none = build_narrative_data(
 assert _nd_none["site_found"] is False and _nd_none["selected_site"] is None
 assert _nd_none["candidate_count"] == 0
 assert _nd_none["gates"]["road_proximity_source"] == "unavailable"
+assert _nd_none["no_candidates"] is None, (
+    "no tally was collected on this call, so there is NO reason to report -- None, never a "
+    "fabricated explanation"
+)
 assert json.loads(json.dumps(_nd_none)) == _nd_none
+
+# AND WITH A TALLY, THE ZERO SAYS WHY. A fully gated parcel is a real
+# outcome and must not read as a broken generate.
+_nd_gated = build_narrative_data(
+    [], BOUNDARY, road_proximity_source="selected_road_corridor",
+    tree_zone_exclusion_available=True, water_zone_excluded=True, existing_canopy_excluded=True,
+    drainage_gates_checked=("outside_hydric_soil", "outside_floodplain"),
+    rejection_tally={
+        "sampled": 40, "not_measurable": 6, "cleared": 0,
+        "gates": {"outside_hydric_soil": 30, "outside_floodplain": 12, "outside_existing_canopy": 4},
+    },
+)
+assert _nd_gated["site_found"] is False and _nd_gated["selected_site"] is None
+_reasons = _nd_gated["no_candidates"]
+assert _reasons["reason"] == "every_pad_failed_a_gate"
+assert _reasons["pads_sampled"] == 40 and _reasons["pads_measurable"] == 34
+assert [entry["gate"] for entry in _reasons["blocking_gates"]] == [
+    "outside_hydric_soil", "outside_floodplain", "outside_existing_canopy"
+], "blocking gates must be ordered most-rejections-first -- the top one is the one to argue with"
+assert _reasons["blocking_gates"][0]["pads_rejected"] == 30
+assert _nd_gated["gates"]["hydric_gate_checked"] is True
+assert _nd_gated["gates"]["floodplain_gate_checked"] is True
+assert json.loads(json.dumps(_nd_gated)) == _nd_gated
+
+# "nothing could hold a pad at all" is a DIFFERENT answer from "every pad
+# failed a gate", and the reason says which.
+_nd_unpaddable = build_narrative_data(
+    [], BOUNDARY, road_proximity_source="unavailable",
+    tree_zone_exclusion_available=True, water_zone_excluded=False, existing_canopy_excluded=True,
+    rejection_tally={"sampled": 7, "not_measurable": 7, "cleared": 0, "gates": {}},
+)
+assert _nd_unpaddable["no_candidates"]["reason"] == "no_pad_was_measurable"
+assert _nd_unpaddable["no_candidates"]["blocking_gates"] == []
 print(
     "narrative_data: stored factor scores recompose the composite on every candidate; the selected "
     f"site narrates its location (position {_nd_site['location']['position_in_parcel']!r}, "
@@ -585,6 +657,342 @@ print(
     f"(south-facing, factors {_nd_site['benefits']['factors']}) consistently with its own stored "
     "values; unchecked prime farmland reads None; the no-candidate case reports site_found=False "
     "with selected_site=None."
+)
+print(
+    f"  scales on the wire: solar_rating bands {solar_suitability.SOLAR_RATING_BANDS} (cuts owned "
+    f"here, marked CONFIGURABLE) and elevation_position bands {ELEVATION_POSITION_BANDS} "
+    "(production's own object, IMPORTED, asserted by identity). The selected site reads "
+    f"{_nd_site['solar_rating']!r} at {_nd_site['solar_value']}/100 solar and sits on the "
+    f"{_nd_site['location']['elevation_position']!r} at percentile "
+    f"{_nd_site['location']['elevation_percentile_of_parcel']}."
+)
+print(
+    "  ZERO CANDIDATES SAYS WHY: a fully gated parcel reports reason "
+    f"{_reasons['reason']!r} over {_reasons['pads_measurable']} measurable pad(s) with blocking "
+    f"gates {[ (e['gate'], e['pads_rejected']) for e in _reasons['blocking_gates'] ]} "
+    "(most-rejections first); a parcel where no pad was measurable at all reports "
+    f"{_nd_unpaddable['no_candidates']['reason']!r} instead. Neither reads as a broken generate."
+)
+
+
+
+# =====================================================================
+# THE POINT, NOT THE PAD: the two distances, measured
+# =====================================================================
+# Branch test 1 and test 2. Both wrong answers came from ONE cause --
+# shapely's .distance() returns 0.0 when geometries INTERSECT and when one
+# CONTAINS the other -- so both are asserted against the OLD pad-based
+# value as well as the new one. An assertion that only checked the fix
+# would not show that there was anything to fix.
+
+_road_union = unary_union(ROAD)
+_production_union = unary_union([p["render_fill_polygon_utm"] for p in PRODUCTION_AREAS])
+
+
+def _pad_for(x, y):
+    """The clipped 0.1-acre pad a candidate at (x, y) is scored over --
+    _measure_footprint()'s own construction, so the 'before' value is the
+    number the shipped code actually produced."""
+    half = FOOTPRINT_SIDE_M / 2
+    return box(x - half, y - half, x + half, y + half).intersection(BOUNDARY)
+
+
+# --- test 1: ROAD DISTANCE. A pad that intersects the road ------------
+# The road runs along the parcel's south edge (y = 4500000) and the pad is
+# 20.1 m per side, so a point 8 m north of the road has a pad that CROSSES
+# it. That is not a contrived case: the road-proximity constraint tunes
+# candidates to sit close to a road, which is exactly why the pad
+# intersected one on essentially every candidate.
+_ROAD_X, _ROAD_Y = 500150.0, 4500008.0
+_road_pad = _pad_for(_ROAD_X, _ROAD_Y)
+assert _road_pad.intersects(_road_union), "this fixture point must have a pad that crosses the road"
+assert _road_pad.distance(_road_union) == 0.0, (
+    "THE BEFORE: a pad intersecting the road measures 0.0 m from it, which is what shipped as "
+    "'ft to road' -- if this ever stops being 0.0 the branch's premise has changed"
+)
+
+_road_site = measure_structure_site(
+    _ROAD_X, _ROAD_Y, DEM, PRODUCTION_AREAS, WATER_ZONES, ROAD, BOUNDARY
+)
+assert _road_site is not None
+_expected_point_m = Point(_ROAD_X, _ROAD_Y).distance(_road_union)
+assert _road_site["distance_to_road_m"] == round(_expected_point_m, 1), (
+    f"distance_to_road_m must be the POINT's distance ({_expected_point_m:.1f} m), got "
+    f"{_road_site['distance_to_road_m']}"
+)
+assert _road_site["distance_to_road_m"] > 0.0, (
+    "THE AFTER: the same geometry now reports a real, non-zero distance from the site's own point"
+)
+print(
+    f"[test 1] ROAD DISTANCE from the POINT: a pad that CROSSES the road measured "
+    f"{_road_pad.distance(_road_union):.1f} m (0.0 -- the shipped value, on every such candidate); "
+    f"the same site's point measures {_road_site['distance_to_road_m']} m "
+    f"({_road_site['distance_to_road_m'] / 0.3048:.1f} ft), which is the honest answer to 'how far "
+    "is this site from a road' and is now the panel's headline figure."
+)
+
+# The GATE moved with the distance, or a candidate could report 60 ft and
+# still clear a 15 m buffer it never actually cleared.
+_gated = measure_structure_site(
+    _ROAD_X, _ROAD_Y, DEM, PRODUCTION_AREAS, WATER_ZONES, ROAD, BOUNDARY,
+    road_proximity_buffer_meters=_expected_point_m / 2,
+)
+assert _gated["constraints"]["within_road_proximity_buffer"] is False, (
+    "the road gate must be measured from the POINT too -- a pad-based gate would pass this site, "
+    "whose pad touches the road, against a buffer half its point's real distance"
+)
+_ungated = measure_structure_site(
+    _ROAD_X, _ROAD_Y, DEM, PRODUCTION_AREAS, WATER_ZONES, ROAD, BOUNDARY,
+    road_proximity_buffer_meters=_expected_point_m * 2,
+)
+assert _ungated["constraints"]["within_road_proximity_buffer"] is True
+print(
+    f"  and the GATE moved with it: the same site fails a "
+    f"{_expected_point_m / 2:.1f} m buffer and passes a {_expected_point_m * 2:.1f} m one -- one "
+    "definition of 'how far is this site from a road', used by the gate and the figure alike."
+)
+
+
+# --- test 2: PRODUCTION. Inside a block vs at its edge ----------------
+# The production block is box(500000, 4500000, 500150, 4500300). A point
+# deep in its middle and a point right on its eastern edge are the two
+# cases that used to be indistinguishable.
+_DEEP_X, _DEEP_Y = 500070.0, 4500150.0     # ~70 m inside the block's east edge
+_EDGE_X, _EDGE_Y = 500150.0, 4500150.0     # exactly ON the block's east edge
+_OUT_X, _OUT_Y = 500220.0, 4500150.0       # ~70 m outside it
+
+_deep = measure_structure_site(_DEEP_X, _DEEP_Y, DEM, PRODUCTION_AREAS, WATER_ZONES, ROAD, BOUNDARY)
+_edge = measure_structure_site(_EDGE_X, _EDGE_Y, DEM, PRODUCTION_AREAS, WATER_ZONES, ROAD, BOUNDARY)
+_out = measure_structure_site(_OUT_X, _OUT_Y, DEM, PRODUCTION_AREAS, WATER_ZONES, ROAD, BOUNDARY)
+
+# THE BEFORE, both halves of it: the pad-based reading called the edge
+# site 0.0 (it intersects the boundary LINE) and gave the deep site a
+# POSITIVE number indistinguishable from the outside site's.
+assert _pad_for(_EDGE_X, _EDGE_Y).distance(_production_union.boundary) == 0.0
+_deep_pad_m = _pad_for(_DEEP_X, _DEEP_Y).distance(_production_union.boundary)
+_out_pad_m = _pad_for(_OUT_X, _OUT_Y).distance(_production_union.boundary)
+assert _deep_pad_m > 0.0 and _out_pad_m > 0.0, (
+    "THE BEFORE: a site buried inside a block and one outside it both measured a POSITIVE "
+    "distance to the block's edge, with nothing in the number to tell them apart"
+)
+
+# THE AFTER: the SIGN tells them apart, and the relationship agrees with it.
+assert _deep["production_zone_relationship"] == "inside"
+assert _deep["signed_distance_to_production_m"] < 0.0, "inside a block is NEGATIVE"
+assert _deep["distance_to_production_zone_m"] == abs(_deep["signed_distance_to_production_m"])
+assert abs(_edge["signed_distance_to_production_m"]) < 1e-6, "on the edge is 0.0, neither sign"
+assert _out["production_zone_relationship"] == "outside"
+assert _out["signed_distance_to_production_m"] > 0.0, "outside every block is POSITIVE"
+# The two cases the old reading confused are now different numbers.
+assert _deep["signed_distance_to_production_m"] != _out["signed_distance_to_production_m"]
+print(
+    f"[test 2] PRODUCTION, inside vs edge vs outside, as the distance's SIGN: deep inside "
+    f"{_deep['signed_distance_to_production_m']} m ({_deep['production_zone_relationship']}), on the "
+    f"edge {_edge['signed_distance_to_production_m']} m ({_edge['production_zone_relationship']}), "
+    f"outside {_out['signed_distance_to_production_m']} m ({_out['production_zone_relationship']}). "
+    f"Measured off the PAD the deep site read +{_deep_pad_m:.1f} m and the outside site "
+    f"+{_out_pad_m:.1f} m -- same sign, nothing to tell them apart -- and the edge site read 0.0, "
+    "which is the same 0.0 an intersecting pad reports."
+)
+# A site with NO blocks at all reports None, never 0.0 and never a sign.
+_no_blocks = measure_structure_site(_DEEP_X, _DEEP_Y, DEM, [], WATER_ZONES, ROAD, BOUNDARY)
+assert _no_blocks["signed_distance_to_production_m"] is None
+assert _no_blocks["distance_to_production_zone_m"] is None
+assert _no_blocks["production_zone_relationship"] == "outside"
+print("  with no blocks on the parcel both distances are None -- never a 0.0 that reads as 'on the edge'.")
+
+
+# =====================================================================
+# THE TWO DRAINAGE GATES (branch tests 4 and 6)
+# =====================================================================
+# Real gated geometry, not a stub: a hydric band across the parcel's
+# middle and a floodplain band down its east side, both plain polygons of
+# the kind road_corridors._fetch_floodplain_hydric_unions() returns.
+
+HYDRIC_UNION = box(500000, 4500120, 500300, 4500180)      # an east-west wet band
+FLOODPLAIN_UNION = box(500240, 4500000, 500300, 4500300)  # a north-south flood band
+assert HYDRIC_UNION.intersects(FLOODPLAIN_UNION), (
+    "the two fixture grounds must OVERLAP somewhere, so a site on BOTH is reachable -- that is the "
+    "case a single combined union can never report"
+)
+
+_ungated_run = find_candidate_solar_zones(
+    DEM, PRODUCTION_AREAS, WATER_ZONES, ROAD, BOUNDARY, max_candidates=10 ** 6
+)
+_gated_run = find_candidate_solar_zones(
+    DEM, PRODUCTION_AREAS, WATER_ZONES, ROAD, BOUNDARY,
+    hydric_union_utm=HYDRIC_UNION,
+    floodplain_union_utm=FLOODPLAIN_UNION,
+    max_candidates=10 ** 6,
+)
+assert len(_gated_run) < len(_ungated_run), (
+    "the two gates must actually exclude ground on this fixture, or the zero below would be "
+    "vacuous"
+)
+# THE GATE, ASSERTED AGAINST THE GEOMETRY ITSELF: not one generated
+# candidate's pad touches either ground.
+for _c in _gated_run:
+    assert not _c["polygon_utm"].intersects(HYDRIC_UNION), (
+        f"a GENERATED candidate landed on hydric soil: {_c['polygon_utm'].centroid}"
+    )
+    assert not _c["polygon_utm"].intersects(FLOODPLAIN_UNION), (
+        f"a GENERATED candidate landed in the floodplain: {_c['polygon_utm'].centroid}"
+    )
+# And the ground they used to sit on is real ground they were dropped from.
+_dropped_hydric = [c for c in _ungated_run if c["polygon_utm"].intersects(HYDRIC_UNION)]
+_dropped_flood = [c for c in _ungated_run if c["polygon_utm"].intersects(FLOODPLAIN_UNION)]
+assert _dropped_hydric and _dropped_flood
+print(
+    f"[test 4] GENERATED CANDIDATES ARE HARD-GATED: {len(_ungated_run)} pads clear the stack "
+    f"ungated, {len(_gated_run)} with the two drainage gates applied -- and NOT ONE of the "
+    f"{len(_gated_run)} intersects either ground, asserted against the gate geometry itself. "
+    f"Ungated, {len(_dropped_hydric)} sat on hydric soil and {len(_dropped_flood)} in the "
+    "floodplain."
+)
+
+# EACH GATE IS INDEPENDENT: applied alone, it excludes its own ground and
+# leaves the other's alone. A combined union cannot make this statement.
+_hydric_only = find_candidate_solar_zones(
+    DEM, PRODUCTION_AREAS, WATER_ZONES, ROAD, BOUNDARY,
+    hydric_union_utm=HYDRIC_UNION, max_candidates=10 ** 6,
+)
+_flood_only = find_candidate_solar_zones(
+    DEM, PRODUCTION_AREAS, WATER_ZONES, ROAD, BOUNDARY,
+    floodplain_union_utm=FLOODPLAIN_UNION, max_candidates=10 ** 6,
+)
+assert not any(c["polygon_utm"].intersects(HYDRIC_UNION) for c in _hydric_only)
+assert any(c["polygon_utm"].intersects(FLOODPLAIN_UNION) for c in _hydric_only), (
+    "the hydric gate alone must NOT exclude floodplain ground -- they are two gates, not one"
+)
+assert not any(c["polygon_utm"].intersects(FLOODPLAIN_UNION) for c in _flood_only)
+assert any(c["polygon_utm"].intersects(HYDRIC_UNION) for c in _flood_only)
+print(
+    f"  and the two are INDEPENDENT: hydric alone leaves {len(_hydric_only)} pads (none on hydric, "
+    f"some still in floodplain), floodplain alone leaves {len(_flood_only)} (none in floodplain, "
+    "some still on hydric). One combined union could not tell those two runs apart."
+)
+
+# AN UNAPPLIED GATE IS ABSENT, NOT TRIVIALLY TRUE -- the same convention
+# the road source and the tree-zone polygon already use.
+_no_gates = measure_structure_site(
+    _DEEP_X, _DEEP_Y, DEM, PRODUCTION_AREAS, WATER_ZONES, ROAD, BOUNDARY
+)
+assert "outside_hydric_soil" not in _no_gates["constraints"]
+assert "outside_floodplain" not in _no_gates["constraints"]
+_both_gates = measure_structure_site(
+    _DEEP_X, _DEEP_Y, DEM, PRODUCTION_AREAS, WATER_ZONES, ROAD, BOUNDARY,
+    hydric_union_utm=HYDRIC_UNION, floodplain_union_utm=FLOODPLAIN_UNION,
+)
+assert {"outside_hydric_soil", "outside_floodplain"} <= set(_both_gates["constraints"])
+print(
+    "  an unapplied gate has NO constraint entry at all (absent, never a trivially-satisfied "
+    "True): a site is never reported clear of a check that did not run."
+)
+
+# --- test 6: a FULLY GATED parcel returns zero, and says why ----------
+_wall_to_wall = box(*BOUNDARY.bounds)
+_tally = {}
+_none_left = find_candidate_solar_zones(
+    DEM, PRODUCTION_AREAS, WATER_ZONES, ROAD, BOUNDARY,
+    hydric_union_utm=_wall_to_wall,
+    rejection_tally=_tally,
+    max_candidates=10 ** 6,
+)
+assert _none_left == [], "a parcel entirely on hydric soil must generate NO candidate at all"
+assert _tally["cleared"] == 0
+assert _tally["sampled"] > 0 and _tally["gates"]["outside_hydric_soil"] > 0
+_zero_narrative = build_narrative_data(
+    _none_left, BOUNDARY, road_proximity_source="real_mapped_road",
+    tree_zone_exclusion_available=True, water_zone_excluded=True, existing_canopy_excluded=True,
+    drainage_gates_checked=("outside_hydric_soil",), rejection_tally=_tally,
+)
+assert _zero_narrative["site_found"] is False
+assert _zero_narrative["candidate_count"] == 0
+assert _zero_narrative["selected_site"] is None
+assert _zero_narrative["no_candidates"]["reason"] == "every_pad_failed_a_gate"
+assert _zero_narrative["no_candidates"]["blocking_gates"][0]["gate"] == "outside_hydric_soil"
+assert _zero_narrative["gates"]["hydric_gate_checked"] is True
+assert _zero_narrative["gates"]["floodplain_gate_checked"] is False, (
+    "only the hydric gate ran here, and the floodplain answer must say 'not checked' rather than "
+    "'clear'"
+)
+print(
+    f"[test 6] A FULLY GATED PARCEL REPORTS THAT STATE: with hydric soil wall to wall, "
+    f"{_tally['sampled']} pad(s) sampled, {_tally['cleared']} cleared, and the narrative says "
+    f"reason={_zero_narrative['no_candidates']['reason']!r} with blocking gate "
+    f"{_zero_narrative['no_candidates']['blocking_gates'][0]['gate']!r} rejecting "
+    f"{_zero_narrative['no_candidates']['blocking_gates'][0]['pads_rejected']} of "
+    f"{_zero_narrative['no_candidates']['pads_measurable']} measurable pad(s). Empty, and it says "
+    "why -- not a blank result that reads as a broken generate."
+)
+
+
+# =====================================================================
+# THE SOLAR RATING AND THE ELEVATION POSITION (branch tests 7 and 8)
+# =====================================================================
+
+# NOT A RANK: the same value gets the same word whatever it is ranked
+# against, and every band boundary is lower-inclusive / upper-exclusive
+# with the top band closing at 100.
+for _word, (_low, _high) in SOLAR_RATING_BANDS.items():
+    assert _solar_rating(_low) == _word, f"{_low} must read {_word!r} (lower-inclusive)"
+    if _high < 100.0:
+        assert _solar_rating(_high) != _word, f"{_high} must NOT read {_word!r} (upper-exclusive)"
+assert _solar_rating(100.0) == "excellent", "the top band closes AT 100"
+assert _solar_rating(None) is None, "no value is no word, never a default one"
+_covered = sorted(SOLAR_RATING_BANDS.values(), key=lambda b: b[0])
+assert _covered[0][0] == 0.0 and _covered[-1][1] == 100.0
+for _a, _b in zip(_covered, _covered[1:]):
+    assert _a[1] == _b[0], "the bands must be gapless and non-overlapping across [0, 100]"
+
+# The value is the two SOLAR factors together, weighted by their own
+# weights -- so retuning a weight retunes the rating with it.
+for _c in candidates[:5]:
+    _expected = round(
+        100.0
+        * (ASPECT_SCORE_WEIGHT * _c["aspect_score"] + SHADING_SCORE_WEIGHT * _c["shading_score"])
+        / (ASPECT_SCORE_WEIGHT + SHADING_SCORE_WEIGHT),
+        1,
+    )
+    assert abs(_c["solar_value"] - _expected) <= 0.1, (_c["solar_value"], _expected)
+    assert _c["solar_rating"] == _solar_rating(_c["solar_value"])
+
+# THE DISTRIBUTION, REPORTED -- the cuts were chosen against it, so it is
+# printed rather than only asserted.
+_solar_values = sorted(c["solar_value"] for c in candidates)
+_by_word = {}
+for _c in candidates:
+    _by_word[_c["solar_rating"]] = _by_word.get(_c["solar_rating"], 0) + 1
+print(
+    f"[test 7] SOLAR RATING: {len(_solar_values)} pads on this uniform south-facing fixture run "
+    f"{_solar_values[0]} to {_solar_values[-1]} (median {_solar_values[len(_solar_values) // 2]}) "
+    f"-- a TIGHT CLUSTER, which is the distribution the uneven cuts were chosen against. Words: "
+    f"{dict(sorted(_by_word.items()))}. Bands {SOLAR_RATING_BANDS}, CONFIGURABLE, on the wire in "
+    "narrative_data['scales'] so the frontend holds no threshold."
+)
+
+# --- test 8: elevation_position is PRODUCTION'S bands, by import ------
+for _c in candidates:
+    assert _c["elevation_position"] == _elevation_position(_c["elevation_percentile_of_parcel"]), (
+        "a candidate's position word must be production's own classifier applied to its own "
+        "percentile -- not a second implementation"
+    )
+    if _c["elevation_percentile_of_parcel"] is not None:
+        assert 0.0 <= _c["elevation_percentile_of_parcel"] <= 100.0
+        _low, _high = ELEVATION_POSITION_BANDS[_c["elevation_position"]]
+        assert _low <= _c["elevation_percentile_of_parcel"] <= _high
+# ASSERTED AGAINST THE IMPORTED CONSTANT, NOT A COPY: this is the same
+# object production declares, so a retune there retunes structures with it.
+assert solar_suitability.ELEVATION_POSITION_BANDS is ELEVATION_POSITION_BANDS
+assert solar_suitability._SCALES["elevation_position"]["bands"] is ELEVATION_POSITION_BANDS
+_positions = {}
+for _c in candidates:
+    _positions[_c["elevation_position"]] = _positions.get(_c["elevation_position"], 0) + 1
+print(
+    f"[test 8] ELEVATION POSITION from PRODUCTION'S OWN BANDS, imported (identity-checked, not a "
+    f"copy of the cuts): {dict(sorted(_positions.items(), key=lambda kv: ELEVATION_POSITION_BANDS[kv[0]][0]))} "
+    f"across {len(candidates)} pads on a parcel falling {array.max() - array.min():.1f} m "
+    "north to south."
 )
 
 
