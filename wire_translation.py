@@ -1462,6 +1462,17 @@ def tree_zones_to_feature_collection(patches: Optional[list[dict]]) -> dict:
                     "hydric_overlap_factor": patch["hydric_overlap_factor"],
                     "stream_proximity_factor": patch["stream_proximity_factor"],
                     "avg_slope_pct": patch["avg_slope_pct"],
+                    # The median of the same per-cell slope array the mean
+                    # above is taken from, and the parcel-relative
+                    # elevation position of the patch's mean elevation --
+                    # both produced by score_tree_search_space(), both
+                    # carried verbatim. elevation_percentile_of_parcel is
+                    # None on a parcel with no relief, and that None rides
+                    # the wire as null rather than being flattened to a 0.0
+                    # that would read as "this zone sits on the parcel's
+                    # lowest ground".
+                    "slope_median_pct": patch["slope_median_pct"],
+                    "elevation_percentile_of_parcel": patch["elevation_percentile_of_parcel"],
                     "rank": patch["rank"],
                     "soil_marginality_data_available": patch["soil_marginality_data_available"],
                     "hydric_data_available": patch["hydric_data_available"],
@@ -2587,7 +2598,17 @@ def rehydrate_road_networks(collection: Optional[dict], dem: dict) -> list:
 #   scored, and ABSENT -- not zeroed, not None -- when it was not
 #   (_TREE_ADVISORY_WIRE_FIELDS, gated on `tree_suitability_score`):
 #     rank, tree_suitability_score, the four *_factor values, avg_slope_pct,
-#     and the three *_data_available flags.
+#     slope_median_pct, elevation_percentile_of_parcel, and the three
+#     *_data_available flags.
+#
+#   elevation_percentile_of_parcel IS THE ONE THAT CAN BE None, and it
+#   rides as null rather than being flattened: it is None on a parcel with
+#   no elevation relief at all, where a 0.0 would read as "this zone sits
+#   on the parcel's lowest ground". Inheriting it verbatim is what keeps
+#   the round trip field-identical; the words it becomes
+#   (ELEVATION_POSITION_BANDS) are NOT on the wire, because the narrative
+#   block the panel reads derives them on this side -- see
+#   tree_zone_candidates.build_narrative_data().
 #
 # THE ADVISORY BLOCK IS DERIVABLE IN PRINCIPLE AND IS NOT DERIVED, and the
 # report should be honest about which. Every factor is a per-cell function
@@ -2642,6 +2663,8 @@ _TREE_ADVISORY_WIRE_FIELDS = (
     "hydric_overlap_factor",
     "stream_proximity_factor",
     "avg_slope_pct",
+    "slope_median_pct",
+    "elevation_percentile_of_parcel",
     "soil_marginality_data_available",
     "hydric_data_available",
     "stream_data_available",

@@ -392,6 +392,42 @@ with Harness() as h:
         assert row["feature_id"] in by_id and by_id[row["feature_id"]]["properties"]["rank"] == row["rank"]
         assert set(row["factors"]) == {"hydric_overlap", "slope", "soil_marginality", "stream_proximity"}
 
+    # THE PANEL'S OWN THREE, on a real generate. Two of them ride the
+    # feature as well (the report reads the numbers); the words and the
+    # benefits list exist only on the row, derived on THIS side -- that is
+    # the point of shipping them at all, and their own coverage is
+    # test_tree_zone_panel_data.py.
+    BENEFITS_ON_THE_FIXTURE = {}
+    for row in payload["zones"]:
+        feature = by_id[row["feature_id"]]["properties"]
+        assert row["slope_median_pct"] == feature["slope_median_pct"]
+        assert row["elevation_percentile_of_parcel"] == feature["elevation_percentile_of_parcel"]
+        # THE LABEL IS PRODUCTION'S AND WATER'S, because it is the same
+        # measurement -- one spelling across three layers.
+        assert isinstance(row["slope_median_pct"], (int, float))
+        # The fixture has real relief, so the position is a word, and the
+        # word is PRODUCTION's -- asserted against the imported constant,
+        # never a copy of the three strings.
+        assert row["elevation_position"] in production_area_ceiling.ELEVATION_POSITION_BANDS, (
+            row["elevation_position"]
+        )
+        band_low, band_high = production_area_ceiling.ELEVATION_POSITION_BANDS[row["elevation_position"]]
+        assert band_low <= row["elevation_percentile_of_parcel"] <= band_high, row
+        # THE BENEFITS: a list of plain words with no values, every one of
+        # them from the module's own vocabulary.
+        assert isinstance(row["marginal_benefits"], list)
+        assert set(row["marginal_benefits"]) <= set(tree_zone_candidates.MARGINAL_BENEFITS), row
+        BENEFITS_ON_THE_FIXTURE[row["rank"]] = row["marginal_benefits"]
+        # AND THE GATE HOLDS ON THE REAL PIPELINE TOO. This fixture's NHD
+        # rows are genuinely empty with stream_data_available True, so
+        # stream_proximity_factor is a MEASURED 0.0 -- no stream
+        # protection, and not because a gate was False.
+        assert feature["stream_proximity_factor"] == 0.0 and feature["stream_data_available"] is True
+        assert "stream protection" not in row["marginal_benefits"], row
+        # Every benefit that IS claimed traces to a factor above zero
+        # whose own data really was available.
+        assert row["marginal_benefits"] == tree_zone_candidates.marginal_benefits(feature), row
+
     # THE STEP-LEVEL BLOCK: the narrative whole, and the FOUR FACTOR WEIGHTS
     # on the wire -- what lets a panel explain a score.
     summary = payload["summary"]
@@ -455,7 +491,14 @@ print(
     f"{summary['search_space']['parcel_acres']}), with {trees_network_calls} network calls and "
     f"{selfcomputes} self-computes. The entry point received all three committed values (none "
     f"None), scoring_inputs off the cache, and no undeclared edge. Factor weights on the wire: "
-    f"{WEIGHTS}; all three availability flags True on every feature and in summary.gates."
+    f"{WEIGHTS}; all three availability flags True on every feature and in summary.gates. "
+    f"THE PANEL ROWS [test 8]: median slope "
+    f"{[r['slope_median_pct'] for r in payload['zones']]}%, elevation position "
+    f"{[r['elevation_position'] for r in payload['zones']]} (production's imported bands, each "
+    f"word containing its own percentile "
+    f"{[r['elevation_percentile_of_parcel'] for r in payload['zones']]}), and marginal benefits "
+    f"{BENEFITS_ON_THE_FIXTURE} -- no stream protection anywhere, off a MEASURED 0.0 with the "
+    f"stream gate True, which is the honest answer on a fixture with no NHD streams."
 )
 
 
@@ -645,7 +688,8 @@ REPROJECTION_SYMMETRIC_DIFFERENCE_TOLERANCE = 1e-9
 PRODUCER_FIELDS = {
     "id", "polygon_utm", "render_fill_polygon_utm", "geometry_wgs84", "area_acres",
     "tree_suitability_score", "soil_marginality_factor", "slope_factor", "hydric_overlap_factor",
-    "stream_proximity_factor", "avg_slope_pct", "soil_marginality_data_available",
+    "stream_proximity_factor", "avg_slope_pct", "slope_median_pct",
+    "elevation_percentile_of_parcel", "soil_marginality_data_available",
     "hydric_data_available", "stream_data_available", "rank",
 }
 ADVISORY_ON_THE_WIRE = wire_translation._TREE_ADVISORY_WIRE_FIELDS

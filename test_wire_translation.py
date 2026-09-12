@@ -351,6 +351,8 @@ def _tree_patch(pid, x0, y0):
         "hydric_overlap_factor": 0.4,
         "stream_proximity_factor": 0.3,
         "avg_slope_pct": 9.9,
+        "slope_median_pct": 9.4,
+        "elevation_percentile_of_parcel": 58.0,
         "soil_marginality_data_available": True,
         "hydric_data_available": True,
         "stream_data_available": False,
