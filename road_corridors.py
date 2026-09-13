@@ -1955,6 +1955,142 @@ def _fetch_canopy_soft_cost_mask(
         return None
 
 
+def combine_wetness_unions(unions: dict):
+    """
+    The single wet-ground geometry from _fetch_floodplain_hydric_unions()'s
+    two halves -- ONE definition of "the combination", so the split form
+    and the combined form cannot drift.
+
+    _fetch_floodplain_hydric_union() below is this applied to that
+    function; session_cache.run_terrain_warm_up() and pipeline_context.
+    build_pipeline_context() both call it on the split they already hold,
+    so neither pays a second pass over the same rows to get the union
+    roads and trees read. None when neither half has anything.
+    """
+    pieces = [
+        union
+        for union in (unions["floodplain_union"], unions["hydric_union"])
+        if union is not None and not union.is_empty
+    ]
+    if not pieces:
+        return None
+    return pieces[0] if len(pieces) == 1 else unary_union(pieces)
+
+
+def _fetch_floodplain_hydric_unions(
+    boundary_coordinates,
+    dem,
+    valleys,
+    boundary_polygon_utm,
+    soil_components: Optional[list[dict]] = None,
+    water_features: Optional[dict] = None,
+    soil_geometries: Optional[dict] = None,
+) -> dict:
+    """
+    THE TWO GROUNDS, SEPARATELY -- the split half of _fetch_floodplain_
+    hydric_union() below, which is now a thin wrapper that unions what this
+    returns. Every fetch, clip, buffer and threshold below is that
+    function's own, unchanged and in the same order; the only difference is
+    that the two piece lists are kept apart instead of being appended to
+    one.
+
+        {
+          'floodplain_union': Optional[geometry],  # NHD stream/water-body buffers
+          'hydric_union': Optional[geometry],      # SSURGO hydric soil polygons
+          'is_fallback': bool,                     # BOTH real sources came back
+                                                   #   empty and the DEM-only
+                                                   #   valley-line proxy stood in
+        }
+
+    WHY THE SPLIT EXISTS. Roads consumes the COMBINATION and always has: a
+    single soft cost penalty over "wet ground", where drainage under a
+    roadbed and flood risk across it are the same discouragement. The
+    STRUCTURES step cannot use that shape -- hydric soil under a
+    foundation and floodplain around a building are two different
+    problems, a site can break either or both, and the step has to name
+    WHICH in constraints_violated. A step handed the union can only say
+    "wet ground somewhere under this pad", which is the answer that let a
+    structure score for wet ground in live testing.
+
+    THE FALLBACK IS FLOODPLAIN'S, not hydric's, and not split across both.
+    It is buffered valley LINES -- a drainage-network proxy, which is what
+    the NHD half of this union is -- so attributing it to floodplain is
+    what it actually approximates. Hydric soil is a SOIL RATING, and no
+    elevation model can stand in for one: on a run where SSURGO never
+    answered, 'hydric_union' is None and a consumer that needs to know
+    whether a site sits on hydric soil has to say it could not check,
+    rather than read a valley buffer as a soil answer. `is_fallback` says
+    the substitution happened, exactly as before.
+
+    BYTE-FOR-BYTE EQUIVALENT TO THE COMBINED FORM. unary_union of the two
+    values this returns is the same geometry _fetch_floodplain_hydric_
+    union() has always returned, and `is_fallback` is the same flag -- the
+    wrapper below is the proof, and test_floodplain_union_scope.py runs
+    against it unchanged.
+    """
+    context_region = boundary_polygon_utm.buffer(FLOODPLAIN_FETCH_CONTEXT_BUFFER_METERS)
+    final_relevance_region = boundary_polygon_utm.buffer(FLOODPLAIN_FINAL_RELEVANCE_BUFFER_METERS)
+    floodplain_pieces = []
+    hydric_pieces = []
+
+    try:
+        if water_features is None:
+            water_features = get_water_features_for_boundary(boundary_coordinates)
+        for feature in water_features["streams"] + water_features["water_bodies"]:
+            geometry = feature.get("geometry")
+            if geometry is None:
+                continue
+            utm_geometry = shape(transform_geom("EPSG:4326", dem["crs"], geometry))
+            clipped_geometry = utm_geometry.intersection(context_region)
+            if clipped_geometry.is_empty:
+                continue
+            buffered_geometry = clipped_geometry.buffer(FLOODPLAIN_STREAM_BUFFER_METERS)
+            relevant_geometry = buffered_geometry.intersection(final_relevance_region)
+            if relevant_geometry.is_empty:
+                continue
+            floodplain_pieces.append(relevant_geometry)
+    except Exception as e:
+        _log_fetch_failure("NHD stream/water-body fetch", e)
+
+    try:
+        wkt_polygon = coordinates_to_wkt_polygon(boundary_coordinates)
+        if soil_components is None:
+            soil_components = get_soil_data_for_polygon(wkt_polygon)
+        hydric_mukeys = hydric_disqualifying_mukeys(soil_components)
+        if hydric_mukeys:
+            if soil_geometries is None:
+                soil_geometries = get_soil_geometries_for_polygon(wkt_polygon)
+            for mukey in hydric_mukeys:
+                geometry = soil_geometries.get(mukey)
+                if geometry is not None:
+                    hydric_pieces.append(shape(transform_geom("EPSG:4326", dem["crs"], geometry)))
+    except Exception as e:
+        _log_fetch_failure("SSURGO hydric soil fetch", e)
+
+    if floodplain_pieces or hydric_pieces:
+        return {
+            "floodplain_union": unary_union(floodplain_pieces) if floodplain_pieces else None,
+            "hydric_union": unary_union(hydric_pieces) if hydric_pieces else None,
+            "is_fallback": False,
+        }
+
+    # Fallback: neither NHD nor SSURGO reachable -- use the valley network
+    # already computed for pond-zone identification as a coarse,
+    # elevation-only "probably wet ground follows drainage lines" proxy.
+    # It lands on FLOODPLAIN alone; see this function's docstring.
+    fallback_pieces = []
+    for valley in valleys:
+        for branch in valley["branches_utm"]:
+            line = LineString([(p[0], p[1]) for p in branch])
+            fallback_pieces.append(line.buffer(FLOODPLAIN_STREAM_BUFFER_METERS))
+
+    return {
+        "floodplain_union": unary_union(fallback_pieces) if fallback_pieces else None,
+        "hydric_union": None,
+        "is_fallback": True,
+    }
+
+
 def _fetch_floodplain_hydric_union(
     boundary_coordinates,
     dem,
@@ -2022,58 +2158,28 @@ def _fetch_floodplain_hydric_union(
     only 0.077 acres (0.6%) actually overlapped the real parcel — a long
     buffered band along Montour Run, entirely on the far side of N Montour
     Rd from the field.
+
+    THE COMBINATION, AND WHERE IT NOW HAPPENS. The fetch/clip/buffer
+    arithmetic above moved to _fetch_floodplain_hydric_unions(), which
+    keeps the NHD and SSURGO halves apart; this function is the union of
+    the two, with the identical return shape and the identical
+    `is_fallback` flag it has always had. Roads consumes THIS -- one soft
+    cost penalty over wet ground, drainage and flood risk together --
+    and nothing about that changed. Structures consumes the SPLIT, because
+    it needs two independent hard gates and has to name which one a site
+    broke; see that function's docstring for why the union cannot answer
+    that question.
     """
-    context_region = boundary_polygon_utm.buffer(FLOODPLAIN_FETCH_CONTEXT_BUFFER_METERS)
-    final_relevance_region = boundary_polygon_utm.buffer(FLOODPLAIN_FINAL_RELEVANCE_BUFFER_METERS)
-    pieces = []
-
-    try:
-        if water_features is None:
-            water_features = get_water_features_for_boundary(boundary_coordinates)
-        for feature in water_features["streams"] + water_features["water_bodies"]:
-            geometry = feature.get("geometry")
-            if geometry is None:
-                continue
-            utm_geometry = shape(transform_geom("EPSG:4326", dem["crs"], geometry))
-            clipped_geometry = utm_geometry.intersection(context_region)
-            if clipped_geometry.is_empty:
-                continue
-            buffered_geometry = clipped_geometry.buffer(FLOODPLAIN_STREAM_BUFFER_METERS)
-            relevant_geometry = buffered_geometry.intersection(final_relevance_region)
-            if relevant_geometry.is_empty:
-                continue
-            pieces.append(relevant_geometry)
-    except Exception as e:
-        _log_fetch_failure("NHD stream/water-body fetch", e)
-
-    try:
-        wkt_polygon = coordinates_to_wkt_polygon(boundary_coordinates)
-        if soil_components is None:
-            soil_components = get_soil_data_for_polygon(wkt_polygon)
-        hydric_mukeys = hydric_disqualifying_mukeys(soil_components)
-        if hydric_mukeys:
-            if soil_geometries is None:
-                soil_geometries = get_soil_geometries_for_polygon(wkt_polygon)
-            for mukey in hydric_mukeys:
-                geometry = soil_geometries.get(mukey)
-                if geometry is not None:
-                    pieces.append(shape(transform_geom("EPSG:4326", dem["crs"], geometry)))
-    except Exception as e:
-        _log_fetch_failure("SSURGO hydric soil fetch", e)
-
-    if pieces:
-        return unary_union(pieces), False
-
-    # Fallback: neither NHD nor SSURGO reachable -- use the valley network
-    # already computed for pond-zone identification as a coarse,
-    # elevation-only "probably wet ground follows drainage lines" proxy.
-    fallback_pieces = []
-    for valley in valleys:
-        for branch in valley["branches_utm"]:
-            line = LineString([(p[0], p[1]) for p in branch])
-            fallback_pieces.append(line.buffer(FLOODPLAIN_STREAM_BUFFER_METERS))
-
-    return (unary_union(fallback_pieces) if fallback_pieces else None), True
+    unions = _fetch_floodplain_hydric_unions(
+        boundary_coordinates,
+        dem,
+        valleys,
+        boundary_polygon_utm,
+        soil_components=soil_components,
+        water_features=water_features,
+        soil_geometries=soil_geometries,
+    )
+    return combine_wetness_unions(unions), unions["is_fallback"]
 
 
 def identify_road_corridor_candidates(

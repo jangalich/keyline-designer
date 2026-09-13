@@ -1097,6 +1097,7 @@ def structure_sites_to_feature_collection(
     shading_is_rough_proxy: bool = True,
     road_proximity_source: str = "unavailable",
     tree_zone_exclusion_available: bool = True,
+    drainage_gates_checked: tuple = (),
     spacing_meters: Optional[float] = None,
     max_structure_footprint_acres: Optional[float] = None,
 ) -> dict:
@@ -1111,9 +1112,10 @@ def structure_sites_to_feature_collection(
     (they cannot be evaluated in this signature without a module-level
     import that would close an import cycle -- see the module docstring).
 
-    FOUR RUN-LEVEL FLAGS ARE INPUTS, NOT DERIVABLE FROM A CANDIDATE.
+    FIVE RUN-LEVEL FLAGS ARE INPUTS, NOT DERIVABLE FROM A CANDIDATE.
     shading_is_rough_proxy, road_proximity_source,
-    tree_zone_exclusion_available, and the two threshold parameters all
+    tree_zone_exclusion_available, drainage_gates_checked, and the two
+    threshold parameters all
     feed the SHARED confidence_notes string every candidate carries. None
     of them lives on a candidate dict, on PipelineContext, or on
     identify_solar_candidate_zones()'s return dict -- they exist only
@@ -1123,12 +1125,22 @@ def structure_sites_to_feature_collection(
     which are a different (and possibly wrong) statement about the run.
     This is a real gap in what the pipeline carries forward, flagged in
     the branch report rather than papered over here.
+
+    drainage_gates_checked is the ONE of the five that also changes a
+    per-feature property rather than only the notes: a GENERATED
+    candidate's constraints_satisfied list is RECONSTRUCTED here (its own
+    outcomes are all True by construction and are not stored on it), so
+    without knowing which drainage gates the run applied this function
+    could not tell "gated and clear" from "never checked" and would have
+    to claim one. It is the tuple of gate names the run applied --
+    ('outside_hydric_soil', 'outside_floodplain'), either alone, or empty.
     """
     from solar_suitability import (
         CANDIDATE_POINT_SPACING_METERS,
         MAX_SOLAR_SLOPE_PCT,
         MAX_STRUCTURE_FOOTPRINT_ACRES,
         MIN_SUITABILITY_SCORE,
+        DRAINAGE_GATE_NOTE_BY_GATES_CHECKED,
         ROAD_PROXIMITY_NOTE_BY_SOURCE,
         SHADING_CAVEAT_HORIZON_ONLY,
         SOLAR_CONFIDENCE_NOTES_TEMPLATE,
@@ -1159,6 +1171,10 @@ def structure_sites_to_feature_collection(
         canopy_buffer_ft=TREE_ROOT_ZONE_BUFFER_METERS / METERS_PER_FOOT,
         tree_zone_buffer_ft=TREE_ZONE_STRUCTURE_EXCLUSION_BUFFER_METERS / METERS_PER_FOOT,
         tree_zone_availability_note="" if tree_zone_exclusion_available else TREE_ZONE_EXCLUSION_UNAVAILABLE_NOTE,
+        drainage_gate_note=DRAINAGE_GATE_NOTE_BY_GATES_CHECKED[
+            tuple(gate for gate in ("outside_hydric_soil", "outside_floodplain")
+                  if gate in tuple(drainage_gates_checked or ()))
+        ],
         road_proximity_note=ROAD_PROXIMITY_NOTE_BY_SOURCE[road_proximity_source],
         farmland_note=farmland_note,
     )
@@ -1180,7 +1196,10 @@ def structure_sites_to_feature_collection(
                 confidence=CONFIDENCE_LOW,
                 confidence_notes=confidence_notes,
                 extra_properties=_structure_site_properties(
-                    candidate, road_proximity_source, tree_zone_exclusion_available
+                    candidate,
+                    road_proximity_source,
+                    tree_zone_exclusion_available,
+                    drainage_gates_checked,
                 ),
             )
         )
@@ -1189,7 +1208,10 @@ def structure_sites_to_feature_collection(
 
 
 def _structure_site_properties(
-    candidate: dict, road_proximity_source: str, tree_zone_exclusion_available: bool
+    candidate: dict,
+    road_proximity_source: str,
+    tree_zone_exclusion_available: bool,
+    drainage_gates_checked: tuple = (),
 ) -> dict:
     """
     THE MEASUREMENT SET ON THE WIRE, for a generated candidate and a placed
@@ -1216,6 +1238,18 @@ def _structure_site_properties(
     `site_origin` says which kind of site this is, on the wire, without a
     document to consult: "generated" or "user_placed". See
     solar_suitability.SITE_ORIGIN_USER_PLACED.
+
+    THE PANEL'S OWN FOUR ROWS ride here too, each a value the panel reads
+    directly rather than a number it has to interpret: `solar_rating`
+    (SOLAR_RATING_BANDS' word for the two SOLAR factors together) beside
+    `solar_value` (the 0-100 number it bands), and `elevation_position`
+    (production's own imported ELEVATION_POSITION_BANDS) beside
+    `elevation_percentile_of_parcel`. Both words are computed in the
+    scorer, off the bands, so THE FRONTEND HOLDS NO THRESHOLD -- the cuts
+    ship on narrative_data['scales'] for a client that wants to show them.
+    `signed_distance_to_production_ft` is the same distance as
+    `distance_to_production_zone_ft` with a SIGN: negative INSIDE a block,
+    positive outside, 0.0 on the edge.
     """
     from solar_suitability import (
         MAX_SOLAR_SLOPE_PCT,
@@ -1236,6 +1270,13 @@ def _structure_site_properties(
         ]
         if tree_zone_exclusion_available:
             constraints_satisfied.append("outside_tree_zone_candidate_buffer")
+        # ONLY THE DRAINAGE GATES THE RUN ACTUALLY APPLIED. A gate whose
+        # union never arrived is absent from this guarantee rather than
+        # listed in it: a generated candidate is clear of what was
+        # checked, and claiming more would be claiming an unrun check.
+        for gate in ("outside_hydric_soil", "outside_floodplain"):
+            if gate in tuple(drainage_gates_checked or ()):
+                constraints_satisfied.append(gate)
         if candidate.get("distance_to_road_m") is not None:
             constraints_satisfied.append("within_road_proximity_buffer")
         constraints_violated = None
@@ -1255,6 +1296,11 @@ def _structure_site_properties(
         if candidate.get("distance_to_water_zone_m") is not None
         else None
     )
+    signed_distance_to_production_ft = (
+        round(candidate["signed_distance_to_production_m"] / METERS_PER_FOOT, 1)
+        if candidate.get("signed_distance_to_production_m") is not None
+        else None
+    )
 
     extra_properties = {
         "rank": candidate["rank"],
@@ -1263,13 +1309,18 @@ def _structure_site_properties(
         "aspect_score": candidate["aspect_score"],
         "shading_score": candidate["shading_score"],
         "production_proximity_score": candidate["production_proximity_score"],
+        "solar_value": candidate["solar_value"],
+        "solar_rating": candidate["solar_rating"],
         "avg_slope_pct": candidate["avg_slope_pct"],
         "aspect": candidate["aspect_label"],
         "aspect_degrees": candidate["aspect_deg"],
+        "elevation_percentile_of_parcel": candidate["elevation_percentile_of_parcel"],
+        "elevation_position": candidate["elevation_position"],
         "footprint_area_acres": candidate["footprint_area_acres"],
         "distance_to_road_ft": distance_to_road_ft,
         "road_proximity_source": road_proximity_source,
         "distance_to_production_zone_ft": distance_to_production_zone_ft,
+        "signed_distance_to_production_ft": signed_distance_to_production_ft,
         "production_zone_relationship": candidate["production_zone_relationship"],
         "distance_to_water_zone_ft": distance_to_water_zone_ft,
         "constraints_satisfied": constraints_satisfied,
@@ -1340,6 +1391,7 @@ def placed_structure_site_to_feature(site: dict, result: dict) -> dict:
         run_flags["max_structure_footprint_acres"] = MAX_STRUCTURE_FOOTPRINT_ACRES
     road_proximity_source = run_flags.get("road_proximity_source", "unavailable")
     tree_zone_exclusion_available = bool(run_flags.get("tree_zone_exclusion_available", True))
+    drainage_gates_checked = tuple(run_flags.get("drainage_gates_checked") or ())
 
     # THE RUN'S OWN NOTES, taken off a one-candidate build through the
     # same function rather than re-templated here -- so the placed site's
@@ -1349,7 +1401,9 @@ def placed_structure_site_to_feature(site: dict, result: dict) -> dict:
     ]
 
     lon, lat = float(site["placed_lon_lat"][0]), float(site["placed_lon_lat"][1])
-    properties = _structure_site_properties(site, road_proximity_source, tree_zone_exclusion_available)
+    properties = _structure_site_properties(
+        site, road_proximity_source, tree_zone_exclusion_available, drainage_gates_checked
+    )
     properties["site_origin"] = SITE_ORIGIN_USER_PLACED
     properties["placed_lon_lat"] = [lon, lat]
     properties["footprint_wgs84"] = site["geometry_wgs84"]
@@ -2869,11 +2923,16 @@ _STRUCTURE_ADVISORY_WIRE_FIELDS = (
     ("aspect_score", "aspect_score", None),
     ("shading_score", "shading_score", None),
     ("production_proximity_score", "production_proximity_score", None),
+    ("solar_value", "solar_value", None),
+    ("solar_rating", "solar_rating", None),
     ("avg_slope_pct", "avg_slope_pct", None),
     ("aspect_degrees", "aspect_deg", None),
     ("aspect", "aspect_label", None),
+    ("elevation_percentile_of_parcel", "elevation_percentile_of_parcel", None),
+    ("elevation_position", "elevation_position", None),
     ("distance_to_road_ft", "distance_to_road_m", "feet"),
     ("distance_to_production_zone_ft", "distance_to_production_zone_m", "feet"),
+    ("signed_distance_to_production_ft", "signed_distance_to_production_m", "feet"),
     ("distance_to_water_zone_ft", "distance_to_water_zone_m", "feet"),
     ("production_zone_relationship", "production_zone_relationship", None),
     ("road_proximity_source", "road_proximity_source", None),

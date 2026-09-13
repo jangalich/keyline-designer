@@ -385,6 +385,14 @@ assert set(vars(context)) == {
     # steps -- regenerable from the document, so it belongs here.
     "hydric_floodplain_union",
     "hydric_floodplain_is_fallback",
+    # THE SAME TWO GROUNDS, SEPARATELY, from the same single derivation --
+    # the STRUCTURES step reads these as two independent hard gates
+    # (drainage under a foundation versus flood risk around a building)
+    # and has to name which one a placed site broke, which the combined
+    # union above cannot answer. Same tier, same reason: regenerable from
+    # the document.
+    "hydric_union",
+    "floodplain_union",
     "step_proposals",
     "step_committed",
     "step_restored",

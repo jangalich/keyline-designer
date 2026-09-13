@@ -1961,10 +1961,32 @@ def build_structures_payload(result: dict, assembled: dict) -> dict:
         the selected site's own digest. Passed whole under `summary`,
         with three things beside it that the narrative does not carry:
         the two caps (three generated, from solar's own MAX_CANDIDATES;
-        two placed, from this entry's contract), the four run-level flags
+        two placed, from this entry's contract), the run-level flags
         surfaced by this branch, and the four factor weights, for
         trees' reason -- a panel that explains a score without hardcoding
         a weight.
+
+    THE TWO STEP-LEVEL VALUES THE PANEL RENDERS AS NOTICES, both reached
+    through `summary` because both are true of the whole run rather than
+    of any one site:
+
+      summary.road_proximity_source -- which access source every
+        candidate's ft-to-road was measured against. With ft-to-road now
+        the panel's headline figure its MEANING depends entirely on this:
+        a distance to a committed corridor that does not exist yet is a
+        different fact from one to the driveway that is there today, and
+        'unavailable' means the figure is null.
+      summary.no_candidates -- present (non-null) only when the run found
+        NOTHING, naming the gates that rejected the pads and how many
+        each. A fully gated parcel is a real outcome here (hydric plus
+        floodplain plus canopy, road proximity and the score floor can
+        leave no ground at all on a wet parcel), and the panel says so
+        rather than rendering an empty list that reads as a broken
+        generate.
+
+    summary.scales carries every band set this step publishes --
+    SOLAR_RATING_BANDS and production's imported ELEVATION_POSITION_BANDS
+    -- so the frontend holds no threshold of its own.
 
     `sites` IS A PROJECTION OF THE FEATURES, NOT A SECOND MEASUREMENT. The
     narrative has no per-candidate rows (its winner-only convention), and
@@ -2002,8 +2024,18 @@ def build_structures_payload(result: dict, assembled: dict) -> dict:
         "rank", "suitability_score", "slope_score", "aspect_score", "shading_score",
         "production_proximity_score", "avg_slope_pct", "aspect", "footprint_area_acres",
         "distance_to_road_ft", "road_proximity_source", "distance_to_production_zone_ft",
+        "signed_distance_to_production_ft",
         "production_zone_relationship", "distance_to_water_zone_ft", "prime_farmland_conflict",
         "site_origin",
+        # THE PANEL'S FOUR CATEGORICAL/MEASURED ROWS, added with the
+        # cross-step data panel: the solar rating word and the number it
+        # bands, and the elevation position word and the percentile it
+        # bands. Both words are computed in solar_suitability.py off its
+        # own bands (SOLAR_RATING_BANDS; production's imported ELEVATION_
+        # POSITION_BANDS), so the panel renders a word it never has to
+        # derive and holds no threshold.
+        "solar_value", "solar_rating",
+        "elevation_percentile_of_parcel", "elevation_position",
     )
     sites = [
         {

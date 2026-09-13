@@ -357,8 +357,38 @@ report using the Claude API.
   and `distance_to_production_zone_ft`), not one forced placement.
   Water-candidate (pond/dam siting) zones are still HARD-excluded
   (buffered); road proximity is still a hard constraint with a reported
-  distance. Flags (never excludes) SSURGO prime-farmland overlap as a
-  tradeoff note, unchanged. This REPLACED an earlier eligible-AREA/
+  distance. SSURGO hydric soil and NHD floodplain are TWO INDEPENDENT
+  hard gates (`road_corridors._fetch_floodplain_hydric_unions()` keeps
+  the two halves of the combined wet-ground union roads reads apart for
+  this step): a GENERATED candidate can never land on either, while a
+  site the user PLACES is still scored and committable with the gate it
+  broke named in `properties.constraints_violated` — landform's rule
+  (generated candidates are gated; a user-drawn feature commits with the
+  crossing recorded), applied to a point rather than a polygon. Flags
+  (never excludes) SSURGO prime-farmland overlap as a tradeoff note,
+  unchanged.
+
+  EVERY REPORTED DISTANCE IS MEASURED FROM THE SITE'S OWN POINT (the
+  locator marker), not from its pad — the pad stays what is scored over
+  and what every hard gate tests. shapely's `.distance()` returns 0.0
+  both for intersecting geometry and for containment, so a pad-based
+  reading made `distance_to_road_ft` (the data panel's headline figure)
+  0.0 on essentially every candidate, since the road-proximity
+  constraint tunes candidates to sit close to a road. Production distance
+  additionally carries `signed_distance_to_production_ft` — negative
+  INSIDE a block, positive outside, 0.0 on the edge — so "inside the
+  block" and "N ft to the nearest block" are different answers.
+  `ROAD_CORRIDOR_PROXIMITY_METERS` went 15 m → 30 m with that change: a
+  pad-based 15 m gate really admitted a point ~25 m out, so moving the
+  gate to the point tightened the requirement by a half-pad. Band sets
+  ship on the wire in `narrative_data['scales']` so the frontend holds no
+  threshold: `SOLAR_RATING_BANDS` (fair/good/great/excellent on the two
+  SOLAR factors together — an absolute band, never a rank among
+  candidates) and production's own `ELEVATION_POSITION_BANDS`, imported
+  rather than re-declared, for `elevation_position`. A run that clears
+  ZERO candidates reports `narrative_data['no_candidates']` naming the
+  gates that rejected the pads and how many each — a fully gated wet
+  parcel is a real outcome, not a broken generate. This REPLACED an earlier eligible-AREA/
   connected-component "zone" model (production zones hard-excluded, the
   same shape `production_area.py` itself uses) after `production_area.py`'s
   own slope ceiling was raised to match this module's — with both layers

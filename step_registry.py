@@ -1816,8 +1816,11 @@ STRUCTURES = StepDefinition(
     # ground, existing canopy and the committed TREE ZONES are hard
     # exclusions; the committed ROAD is the primary proximity source.
     consumes=(
-        # TEN EDGES: six off the cache, four off commits -- one per upstream
-        # step, the first entry to consume all four. The cache edges are
+        # TWELVE EDGES: eight off the cache, four off commits -- one per
+        # upstream step, the first entry to consume all four. TWO of the
+        # cache edges are this branch's own: hydric_union and
+        # floodplain_union, the two hard drainage gates, split apart from
+        # the combined wet-ground union roads reads. The cache edges are
         # what keep a generate network-free: identify_solar_candidate_zones()
         # FETCHES every override it does not get (a DEM, a canopy mask, the
         # production optimiser, the water pipeline, a routing pass, the
@@ -1883,6 +1886,46 @@ STRUCTURES = StepDefinition(
                 "rows, already in hand. A cache closure the structures "
                 "branch added beyond its two named solar changes, reported "
                 "as such."
+            ),
+        ),
+        Consumed(
+            name="hydric_union",
+            source=SOURCE_CACHE,
+            cache_path="hydric_union",
+            forward_as="hydric_union",
+            why=(
+                "THE FIRST OF THE TWO HARD DRAINAGE GATES: SSURGO hydric "
+                "(poorly drained) map-unit polygons, which a GENERATED "
+                "candidate can never land on. This step had NO drainage "
+                "constraint at all before this branch -- its four factors "
+                "are gentle ground, sun-facing, open to the sky and edge of "
+                "production ground, and the only soil it read was prime "
+                "farmland -- and live testing found a structure sited on "
+                "wet ground for it. The terrain warm-up already derives "
+                "this from ParcelData's own rows (network-free), because "
+                "the ROADS edge above needed the combined union; the split "
+                "half is the same derivation kept apart. A real None is "
+                "'that source found nothing, or never answered' and the "
+                "entry point applies no gate -- it does NOT self-fetch one, "
+                "which is why the run reports which gates it checked."
+            ),
+        ),
+        Consumed(
+            name="floodplain_union",
+            source=SOURCE_CACHE,
+            cache_path="floodplain_union",
+            forward_as="floodplain_union",
+            why=(
+                "THE SECOND HARD DRAINAGE GATE: NHD stream and water-body "
+                "buffers. Its own edge and not folded into the one above, "
+                "because the two are DIFFERENT PROBLEMS -- drainage under a "
+                "foundation versus flood risk around a building -- a site "
+                "can break either or both, and properties.constraints_"
+                "violated must name WHICH. Roads consumes the two COMBINED "
+                "(one soft cost penalty over wet ground) and still does, "
+                "unchanged; this step is the reason road_corridors._fetch_"
+                "floodplain_hydric_unions() keeps them apart. Same None "
+                "semantics as the hydric edge."
             ),
         ),
         Consumed(
@@ -2001,6 +2044,14 @@ STRUCTURES = StepDefinition(
         # change the output, so declaring them would be a false invalidation
         # edge (the trees entry's own reasoning). Nor exclusion_zones: this
         # step records no crossings, so nothing reads the gates.
+        #
+        # hydric_floodplain_union STAYS UNDECLARED even though its two
+        # SPLIT halves are now declared above, and that is not an
+        # inconsistency: the combined union reaches this entry point for
+        # the nested self-computes alone, exactly as before, while the two
+        # halves are CONSUMED here as gates. One is a pass-through this
+        # step's committed edges make unreachable; the others change the
+        # output on every generate.
     ),
     generate="solar_suitability.identify_solar_candidate_zones",
     payload="step_orchestrator.build_structures_payload",

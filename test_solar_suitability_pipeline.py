@@ -153,7 +153,9 @@ with mock_patch.object(production_area, "_fetch_disqualifying_soil_union", retur
      mock_patch.object(production_area_ceiling, "_fetch_disqualifying_soil_union", return_value=None), \
      mock_patch.object(production_area, "get_canopy_height_for_boundary", _fake_clean_canopy), \
      mock_patch.object(solar_suitability, "identify_tree_zone_candidates", return_value={"patches": []}):
-    result = identify_solar_candidate_zones(boundary_coordinates, dem=synthetic_dem)
+    result = identify_solar_candidate_zones(
+        boundary_coordinates, dem=synthetic_dem, max_candidates=10 ** 6
+    )
 
 assert "zones_geojson" in result
 validate_feature_collection(result["zones_geojson"])
@@ -165,7 +167,18 @@ assert len(features) >= 1, (
     "aspect/shading suitability floor everywhere sampled"
 )
 
-relationships_seen = {f["properties"]["production_zone_relationship"] for f in features}
+# OVER THE WHOLE SCORED SET, not just the top MAX_CANDIDATES. The
+# production-proximity factor peaks right AT a block's edge and falls off
+# in both directions (solar_suitability.PRODUCTION_PROXIMITY_SCORE_
+# WEIGHT), so the best-scoring sites on a parcel that is one big block
+# are the ones nearest its edge -- and with distances now measured from
+# the site's own POINT rather than its pad, a point 5 m outside the edge
+# reads 'adjacent', which is the honest word for it. The claim this test
+# makes is about the MODEL (production land does not exclude a structure
+# and a site genuinely can sit inside it), not about which three
+# candidates happen to rank highest, so it is asserted over every scored
+# candidate.
+relationships_seen = {c["production_zone_relationship"] for c in result["all_scored_candidates"]}
 assert "inside" in relationships_seen, (
     "expected at least one candidate classified 'inside' the (whole-parcel) production zone here -- "
     "this is the exact scenario the point-candidate redesign exists to enable; under the old "
@@ -173,6 +186,29 @@ assert "inside" in relationships_seen, (
 )
 print(f"production_zone_relationship values observed: {sorted(relationships_seen)} -- "
       f"candidates correctly form inside/near production land instead of being excluded by it.")
+
+# INSIDE A BLOCK IS DISTINGUISHABLE FROM ITS EDGE, which an unsigned
+# distance to the edge cannot say: a site 100 ft inside reports the same
+# number as one 100 ft outside. The SIGN is the answer.
+_inside = [c for c in result["all_scored_candidates"] if c["production_zone_relationship"] == "inside"]
+_outside = [c for c in result["all_scored_candidates"] if c["production_zone_relationship"] == "outside"]
+assert _inside and all(c["signed_distance_to_production_m"] < 0 for c in _inside), (
+    "every candidate whose point sits inside a block must carry a NEGATIVE signed distance"
+)
+assert all(c["signed_distance_to_production_m"] > 0 for c in _outside), (
+    "every candidate outside every block must carry a POSITIVE signed distance"
+)
+assert all(
+    abs(c["signed_distance_to_production_m"]) == c["distance_to_production_zone_m"]
+    for c in result["all_scored_candidates"]
+), "the signed distance must be the unsigned edge distance with a sign, not a second measurement"
+print(
+    f"  signed_distance_to_production: {len(_inside)} inside (negative, deepest "
+    f"{min(c['signed_distance_to_production_m'] for c in _inside) / 0.3048:.1f} ft in), "
+    f"{len(_outside)} outside (positive, furthest "
+    f"{max(c['signed_distance_to_production_m'] for c in _outside) / 0.3048:.1f} ft out) -- the sign "
+    f"is what 'inside the block' and 'N ft to the block' are told apart by."
+)
 
 for feature in features:
     props = feature["properties"]
@@ -593,7 +629,7 @@ print(
 import json  # noqa: E402
 
 # SIX top-level keys: the four the point-candidate model always carried,
-# plus the two the structures registry entry added -- run_flags (the four
+# plus the two the structures registry entry added -- run_flags (the
 # run-level flags candidates_to_geojson() bakes into confidence_notes,
 # surfaced so a caller can rebuild the wire form of any candidate under
 # the notes of the run that produced it) and run_inputs (what the run
@@ -603,10 +639,19 @@ assert set(result) == {
     "zones_geojson", "all_scored_candidates", "selected_structure_site", "narrative_data",
     "run_flags", "run_inputs",
 }, f"unexpected top-level keys on identify_solar_candidate_zones(): {set(result)}"
+# FIVE FLAGS NOW: drainage_gates_checked joined them with the two hard
+# drainage gates. It is the one that also changes a per-feature property
+# (a generated candidate's constraints_satisfied guarantee is
+# reconstructed on the wire, so the wire has to be told which drainage
+# gates the run applied) rather than only the shared notes.
 assert set(result["run_flags"]) == {
     "shading_is_rough_proxy", "road_proximity_source", "tree_zone_exclusion_available",
-    "spacing_meters", "max_structure_footprint_acres",
+    "drainage_gates_checked", "spacing_meters", "max_structure_footprint_acres",
 }, sorted(result["run_flags"])
+assert result["run_flags"]["drainage_gates_checked"] == [], (
+    "no hydric or floodplain union was supplied on this fixture, so NEITHER gate was applied -- "
+    "and an unapplied gate is absent, never reported clear"
+)
 # The flags reproduce the run's own wire form byte for byte.
 from solar_suitability import candidates_to_geojson as _ctg  # noqa: E402
 assert _ctg(result["all_scored_candidates"], **result["run_flags"]) == result["zones_geojson"], (

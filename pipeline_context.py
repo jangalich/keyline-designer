@@ -808,7 +808,15 @@ def build_pipeline_context(
     # the ceiling optimizer's return.
     parcel_acres = optimized_production["parcel_acres"]
 
-    hydric_floodplain_union, hydric_floodplain_is_fallback = road_corridors._fetch_floodplain_hydric_union(
+    # ONE CALL, BOTH SHAPES, same as the session cache's own warm-up:
+    # the SPLIT builder runs and the combined union is the union of its two
+    # halves rather than a second pass over the same rows. Roads and trees
+    # read the COMBINED union (one soft wet-ground cost penalty);
+    # STRUCTURES reads the two halves as independent hard gates, because a
+    # foundation on poorly drained soil and a building in a floodplain are
+    # different problems and constraints_violated has to name which one a
+    # site broke. See road_corridors._fetch_floodplain_hydric_unions().
+    _soil_wetness = road_corridors._fetch_floodplain_hydric_unions(
         boundary_coordinates,
         dem,
         valleys,
@@ -817,9 +825,17 @@ def build_pipeline_context(
         water_features=water_features,
         soil_geometries=soil_geometries,
     )
+    hydric_floodplain_union = road_corridors.combine_wetness_unions(_soil_wetness)
+    hydric_floodplain_is_fallback = _soil_wetness["is_fallback"]
     soil_exclusion_unions = {
         "hydric_floodplain_union": hydric_floodplain_union,
         "hydric_floodplain_is_fallback": hydric_floodplain_is_fallback,
+        # THE SPLIT HALVES, beside the union they make. Either may be None
+        # ("that source found nothing" or "that source never answered");
+        # the valley-line fallback lands in floodplain_union alone, since
+        # no elevation model stands in for a soil rating.
+        "hydric_union": _soil_wetness["hydric_union"],
+        "floodplain_union": _soil_wetness["floodplain_union"],
         # See module docstring, KNOWN LIMITATIONS #3 -- no shared
         # union-builder for erosion-prone soil currently exists to call.
         "erosion_prone_union": None,
@@ -942,6 +958,12 @@ def build_pipeline_context(
         selected_road_corridor=selected_road_corridor,
         hydric_floodplain_union=soil_exclusion_unions["hydric_floodplain_union"],
         floodplain_data_is_fallback=soil_exclusion_unions["hydric_floodplain_is_fallback"],
+        # THE TWO HARD DRAINAGE GATES, separately -- see the split above.
+        # Structures is the only consumer that takes them apart; it
+        # forwards the COMBINED union unchanged into its own nested road
+        # and tree self-computes, which read wet ground as one soft term.
+        hydric_union=soil_exclusion_unions["hydric_union"],
+        floodplain_union=soil_exclusion_unions["floodplain_union"],
         canopy_height=canopy_height,
     )
     selected_structure_site = solar_result["selected_structure_site"]
