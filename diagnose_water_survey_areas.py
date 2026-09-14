@@ -161,7 +161,6 @@ from water_survey_areas import (
     DEPRESSION_FULL_CREDIT_METERS,
     DEPRESSION_NOISE_FLOOR_METERS,
     DUPLICATE_OF_ZONE_REASON_PREFIX,
-    EMBANKMENT_COMPARTMENT_RANK_WEIGHTS,
     EMBANKMENT_DRAINAGE_FULL_CREDIT_ACRES,
     EMBANKMENT_DRAINAGE_MIN_ACRES,
     EMBANKMENT_SEED_MIN_SCORE,
@@ -466,10 +465,12 @@ def summarize_survey_zones_table(identify_result: dict) -> str:
     gravity note, envelope overlaps, cross-type agreement, boundary
     adjacency, flags -- followed by the DROPPED zones, each with its
     reason code and both acreages (visible and attributed, never
-    silent). An embankment line carries THREE separate claims and never
-    a composite alone: the seed's blend (good storage ground?), the
-    pinch cell's catchment and drainage score (water above it?), and the
-    rank score the two combine into.
+    silent). An embankment line carries BOTH of its claims, separately
+    and never combined: the seed's blend (good storage ground?) and the
+    pinch cell's catchment with its drainage score (water above it?).
+    Neither one is the rank -- rank is the compartment mean's position
+    among its type, printed on the same line -- and the composite that
+    used to combine them is retired with the ranking rule it served.
 
     A PRESENTED zone's line is marked [PRESENTED #n] and the table opens
     with THE RULE THIS RUN APPLIED ("2 embankment + 1 excavated + 1
@@ -532,7 +533,6 @@ def summarize_survey_zones_table(identify_result: dict) -> str:
                     f"{zone['pinch']['walk_distance_m']:.0f} m draining "
                     f"{zone['pinch_catchment_acres']:.2f} ac "
                     f"(drainage {zone['pinch_drainage_score']:.3f}), "
-                    f"rank score {zone['compartment_rank_score']:.3f}, "
                     f"top: {criteria_text}, {_gravity_cell(zone)}, "
                     f"canopy {_overlap_cell(zone['canopy_overlap_pct'])} / road-clip "
                     f"{_overlap_cell(zone['road_overlap_pct'])} / prod "
@@ -655,7 +655,6 @@ def _seed_outcome(record: dict, zone_by_id: dict) -> tuple:
         f"band {zone['compartment_footprint_acres']:.4f} ac / hull {zone['zone_acres']:.4f} ac"
         f"; pinch catchment {zone['pinch_catchment_acres']:.2f} ac"
         f" -> drainage {zone['pinch_drainage_score']:.3f}"
-        f"; rank score {zone['compartment_rank_score']:.4f}"
     )
     if zone.get("status") == ZONE_STATUS_DROPPED:
         drop_reason = zone.get("drop_reason")

@@ -751,39 +751,35 @@ with Harness() as h:
 
     # THE SCALES, so no number renders without meaning.
     scales = panel_payload["scales"]
-    # pinch_drainage_score and compartment_rank_score joined the block
-    # when the drainage band moved to the pinch cell: neither is a panel
-    # row (PANEL_EXCLUDED_KEYS says why the catchment figure stayed off
-    # the five-row budget), but both ride narrative_data and both are
-    # scored values that cannot be read without their scale -- the
-    # drainage band reads 0.0 at BOTH ends, and a composite without its
-    # weights is unarguable.
+    # pinch_drainage_score joined the block when the drainage band moved
+    # to the pinch cell: it is not a panel row (PANEL_EXCLUDED_KEYS says
+    # why the catchment figure stayed off the five-row budget), but it
+    # rides narrative_data and it is a scored value that cannot be read
+    # without its scale -- the band reads 0.0 at BOTH ends. The rank
+    # composite that used to sit beside it is retired with the ranking
+    # rule it served, and its scale entry went with it: rank is the
+    # order of the `suitability` entry above, so that entry is now the
+    # whole story of how a rank was arrived at.
     assert set(scales) == {
         "suitability",
         "rank",
         "overlap_pct",
         "boundary_adjacency_pct",
         "pinch_drainage_score",
-        "compartment_rank_score",
     }, sorted(scales)
     assert scales["pinch_drainage_score"]["zero_means"] == "below_min_acres_or_above_ceiling", (
         "a band that reads 0.0 for too-little AND too-much water must say so on the wire"
     )
-    assert scales["compartment_rank_score"]["weights"] == dict(
-        water_survey_areas.EMBANKMENT_COMPARTMENT_RANK_WEIGHTS
-    ), "the composite's recipe rides with it"
     # THE SUITABILITY ENTRY IS ON THE 0-100 DISPLAY SCALE, because it
-    # describes the panel's own converted row. The two non-panel scores
-    # in this same block stay 0-1, which is readable because every entry
-    # carries its own endpoints.
+    # describes the panel's own converted row -- and, since rank orders
+    # that same score, it is also how a consumer checks the order the
+    # payload arrived in. The non-panel score in this same block stays
+    # 0-1, which is readable because every entry carries its own
+    # endpoints.
     assert scales["suitability"]["min"] == display_scale.DISPLAY_SCALE_MIN == 0
     assert scales["suitability"]["max"] == display_scale.DISPLAY_SCALE_MAX == 100
     assert scales["suitability"]["higher_is_better"] is True
     assert (scales["pinch_drainage_score"]["min"], scales["pinch_drainage_score"]["max"]) == (0.0, 1.0)
-    assert (
-        scales["compartment_rank_score"]["min"],
-        scales["compartment_rank_score"]["max"],
-    ) == (0.0, 1.0)
     assert scales["overlap_pct"] == {"min": 0, "max": 100}
     assert scales["boundary_adjacency_pct"] == {"min": 0, "max": 100}
 

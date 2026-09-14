@@ -761,13 +761,13 @@ _survey_nd = {
          "mean_suitability": 0.55, "max_suitability": 0.61,
          "seed_blend_score": 0.73,
          "seed_criteria_signature": {"slope": 1.0, "soil": 0.5, "twi": 0.9},
-         # THE FILL CLAIM, the third separately-reported number: the
-         # catchment at the DAM REACH (not at the seed) and the
-         # unchanged drainage band scored on it, plus the composite the
-         # rank was assigned on. 6.2 ac is past the band's 2 ac full
-         # credit and well under the 20 ac ceiling -> 1.0.
+         # THE FILL CLAIM, reported apart from the anchor claim above
+         # and ranking nothing: the catchment at the DAM REACH (not at
+         # the seed) and the unchanged drainage band scored on it. 6.2
+         # ac is past the band's 2 ac full credit and well under the 20
+         # ac ceiling -> 1.0.
          "pinch_catchment_acres": 6.2, "pinch_drainage_score": 1.0,
-         "catchment_ceiling_acres": 20.0, "compartment_rank_score": 0.865,
+         "catchment_ceiling_acres": 20.0,
          "pinch_width_ft": 88.6, "pinch_walk_distance_ft": 137.8, "baseline_length_ft": 137.8,
          # A TERMINAL pinch at the property line, still narrowing -- the
          # accepted-not-refused disclosure the caveat sentence keys on.
@@ -858,10 +858,10 @@ assert "dugout or seep-fed excavated pond" in _survey_prose, "the seep-widened e
 assert "Selected for downstream planning: zone 0 (excavated-type)" in _survey_prose
 assert "provisional selection rule" in _survey_prose
 assert (
-    "embankment by its compartment rank score -- seed blend combined with the catchment at its "
-    "dam reach -- excavated by member-mean suitability"
+    "pooled on the same suitability score each survey area is ranked and reported on"
 ) in _survey_prose, (
-    "the pooled rule states each type's own instrument"
+    "the pooled rule names the ONE number it reads -- the same one the panel shows and the rank "
+    "orders -- so a reader can check the selection against the areas' own scores"
 )
 assert "2.6 acres to survey, anchored by 1.4 acres of high-suitability ground" in _survey_prose, (
     "the DUAL-ACREAGE sentence is the excavated narrative's spine -- both numbers, both labeled"
@@ -894,18 +894,20 @@ assert _survey_nd["zones"][0]["mean_suitability"] == 0.55, (
 assert _survey_nd["zones"][1]["max_suitability"] == 0.83
 # EVERYTHING ELSE ON THESE LINES STAYS 0-1, printed beside the recipe
 # that produced it: the criterion means, the seed blend, the drainage
-# score, the rank composite.
+# score.
 assert "0.73-scoring storage cell" in _survey_prose, "the seed blend score stays 0-1"
 assert "slope 0.6 (weight 0.36)" in _survey_prose, "a criterion mean stays 0-1"
 assert "scoring 1.0 on the drainage band" in _survey_prose, "the drainage score stays 0-1"
-assert "Rank score 0.865" in _survey_prose, "the ranking composite stays 0-1"
+assert "Rank score" not in _survey_prose, (
+    "the retired ranking composite is out of the prose with the rest of the wire -- the report "
+    "may not print a number no payload carries"
+)
 assert "drainage_area" not in _survey_prose, (
     "contributing area is no longer a per-cell embankment criterion, so it must not appear as one "
     "in the prose -- it appears as the compartment's FILL CLAIM instead"
 )
-# THE FILL CLAIM AS ITS OWN SENTENCE, with all three numbers legible and
-# none of them standing in for another: the catchment, the band score,
-# and the composite whose recipe the sentence names.
+# THE FILL CLAIM AS ITS OWN SENTENCE, with both numbers legible and
+# neither standing in for the other: the catchment and the band score.
 assert "6.2 acres of catchment drain through the dam reach" in _survey_prose, (
     "the catchment is measured AT THE PINCH and the prose says where"
 )
@@ -914,8 +916,12 @@ assert "not at the seed" in _survey_prose, (
     "the sentence states which cell was measured -- the whole finding is that it used to be the "
     "wrong one"
 )
-assert "Rank score 0.865" in _survey_prose and "provisional" in _survey_prose, (
-    "the composite is published with its inputs and flagged as the v1 prior it is"
+assert "READ THIS BESIDE THE ANCHOR CLAIM ABOVE AND NEITHER ONE AS THE RANK" in _survey_prose, (
+    "the fill claim's sentence says what it is FOR now that it ranks nothing -- a reader who used "
+    "to find the composite here must be told where the order actually comes from"
+)
+assert "its suitability score's position among the survey areas of its type" in _survey_prose, (
+    "...and told it in the same breath, in the reader's own terms"
 )
 assert "OVERSTATES dam length" in _survey_prose, (
     "crest-to-crest width is a survey measure, not a dam length -- the caveat must reach the prose"

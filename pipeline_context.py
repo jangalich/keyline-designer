@@ -119,8 +119,10 @@ FIELD NOTES
 
   selected_water_zone is water_survey_areas.identify_water_survey_
   areas()'s own pooled rank-1 SURVEY ZONE (embankment and excavated
-  pooled by member-mean suitability, member-acreage tiebreak -- a
-  PROVISIONAL selection rule, documented at select_survey_zone()), or
+  pooled by mean_suitability -- the same score each type is RANKED and
+  DISPLAYED on -- with a per-type acreage tiebreak; pooling two
+  differently-weighted surfaces at all is a PROVISIONAL rule, documented
+  at select_survey_zone()), or
   None if no zone exists because nothing cleared the suitability
   threshold. The same call produces water_zones above, so the water
   step runs ONCE per context build. The zone dict carries the full

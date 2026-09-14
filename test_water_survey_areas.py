@@ -1237,20 +1237,32 @@ for zone in v_emb_zones:
     )
     assert zone["pinch_drainage_score"] == 1.0, "full credit on the unchanged band"
     assert zone["catchment_exceeds_ceiling"] is False
-    # The composite, and both its inputs, on the same record.
-    assert zone["compartment_rank_score"] == wsa.compartment_rank_score(0.54, 1.0) == 0.77
+    # BOTH CLAIMS ON THE SAME RECORD, and no composite of them anywhere
+    # on it: the equal-weight mean that used to be asserted here ranked
+    # the compartment, and rank reads the displayed suitability now.
+    assert zone["seed_blend_score"] == 0.54
+    assert "compartment_rank_score" not in zone
 _v_by_seed = {zone["seed"]["rowcol"]: zone for zone in v_emb_zones}
 assert _v_by_seed[(26, 2)]["pinch_catchment_acres"] > _v_by_seed[(14, 2)]["pinch_catchment_acres"], (
     "the downstream compartment's dam reach carries more catchment"
 )
 
-# THE SELECTION FLIPPED, AND SAYING SO IS THE POINT. Pooled selection
-# compares the embankment COMPARTMENT RANK SCORE against the excavated
-# member mean. On the seed blend alone (0.54) the excavated zone won at
-# 0.5843; combined with a full-credit fill claim the compartment reads
-# 0.77 and wins. That is not a tuning artifact -- it is the pipeline
-# finally able to see that the off-channel compartments on this fixture
-# have real water above them, which no per-seed measurement could say.
+# THE SELECTION FLIPPED BACK, AND SAYING SO IS THE POINT. This fixture
+# is where the ranking rule's history is most legible, so it is asserted
+# hardest. Three eras, one parcel:
+#
+#   seed blend alone     embankment 0.54   vs excavated 0.5843 -> excavated
+#   + the fill claim     embankment 0.77   vs excavated 0.5843 -> EMBANKMENT
+#   the displayed score  embankment 0.5608 vs excavated 0.5843 -> excavated
+#
+# The middle era is the one that made the payload unreadable: the
+# compartment won the pool on 0.77, a number that appeared on no panel,
+# while the panel showed 56/100 for it against the excavated zone's
+# 58/100. A reader looking at the two panels could not reach the
+# pipeline's answer from them. Now they can, and the cost is stated
+# plainly rather than hidden: these compartments really do have water
+# above them (full-credit fill claims, asserted above), the report says
+# so per zone, and the ORDER no longer says it for them.
 v_exc_zone = exc_zones[0]
 assert v_exc_zone["rank"] == 1, "still rank 1 WITHIN its own type -- ranking is per type"
 assert v_exc_zone["presented"] is True and v_exc_zone["presentation_order"] == 2, (
@@ -1259,10 +1271,27 @@ assert v_exc_zone["presented"] is True and v_exc_zone["presentation_order"] == 2
     "the rank asserted above"
 )
 assert v_exc_zone["mean_suitability"] == 0.5843
-assert v_result["selected_water_zone"] in v_emb_zones, (
-    "the pooled winner is an embankment compartment now: 0.77 over the excavated 0.5843"
+assert v_result["selected_water_zone"] is v_exc_zone, (
+    "the pooled winner is the highest DISPLAYED score on the parcel: excavated 0.5843 over the "
+    f"best embankment {v_emb_zones[0]['mean_suitability']} -- and a reader can check that off the "
+    "two panels, which is the whole of the change"
 )
 assert v_result["selected_water_zone"]["rank"] == 1
+# THE POOL AND THE RANK READ ONE FUNCTION, so the winner is its type's
+# rank 1 by construction -- asserted here as the property, not as this
+# fixture's coincidence.
+assert v_result["selected_water_zone"]["rank"] == 1 and max(
+    v_result["zones"], key=lambda z: z["mean_suitability"]
+) is v_result["selected_water_zone"]
+# AND THE FINER 0-1 VALUE ORDERS ZONES THAT DISPLAY THE SAME INTEGER:
+# both compartments read 56/100, so the display alone cannot separate
+# them, and rank falls to the stored value the display rounds from --
+# never to the acreage tiebreak, which is reached only on an exact tie.
+assert (v_emb_zones[0]["mean_suitability"], v_emb_zones[1]["mean_suitability"]) == (0.5608, 0.5599)
+assert display_scale.to_display_scale(v_emb_zones[0]["mean_suitability"]) == display_scale.to_display_scale(
+    v_emb_zones[1]["mean_suitability"]
+) == 56, "two zones can display the same integer; the stored value still orders them"
+assert [z["rank"] for z in v_emb_zones] == [1, 2]
 assert v_exc_zone["sparse_anchor"] is False
 
 # The narrative carries the seed accounting: 18 seeds, 10 failed, each
@@ -1555,82 +1584,112 @@ for zone_holder in (flat_result["zones"], v_result["zones"], strip_result["zones
         )
 
 # Rank + selection on hand-built zone dicts: every survivor is ranked
-# within its type ON ITS TYPE'S OWN INSTRUMENT -- embankment by the
-# COMPARTMENT RANK SCORE (seed blend combined with the pinch cell's
-# drainage score), excavated by member-mean suitability -- and the
-# pooled rank-1 invariant holds with NO cap in between. The embankment
-# minis carry a deliberately LOW compartment mean_suitability (0.1)
-# beside their two claims: if ranking or selection ever read the
-# compartment mean, every assertion below flips -- the walked ground's
-# mean must never rank a compartment.
+# within its type ON THE SCORE THE PAYLOAD DISPLAYS -- mean_suitability,
+# both types, no type test -- and the pooled rank-1 invariant holds with
+# NO cap in between. THE EMBANKMENT MINIS CARRY DECOY CLAIMS: a seed
+# blend and a pinch drainage score deliberately ordered AGAINST their
+# compartment means, so if ranking or selection ever reads either claim
+# again (or any composite of them), every assertion below flips.
 def _mini_zone(zid, stype, mean, acres, poly, seed_blend=None, pinch_drainage=None, catchment=None):
     zone = {
         "id": zid, "survey_type": stype, "mean_suitability": mean,
         "polygon_utm": poly,
     }
     if stype == SURVEY_TYPE_EMBANKMENT:
-        # The composite is DERIVED from the two claims by the module's
-        # own unit, never hand-written into the fixture: a test that
-        # typed 0.95 here would pass whatever the ranking rule did.
+        # The two claims ride the record and rank nothing. They are
+        # written here ONLY so the fixture can prove they are not read:
+        # no composite of them exists on a zone any more, and the
+        # module has no function left that would build one.
         zone["seed_blend_score"] = seed_blend
         zone["pinch_drainage_score"] = pinch_drainage
         zone["pinch_catchment_acres"] = catchment
-        zone["compartment_rank_score"] = wsa.compartment_rank_score(seed_blend, pinch_drainage)
         zone["zone_acres"] = acres
     else:
         zone["member_acres"] = acres
     return zone
 
 
+assert not hasattr(wsa, "compartment_rank_score"), (
+    "the retired composite's FUNCTION is gone too, not just its field -- a helper that ranks "
+    "nothing is how a retired ranking rule comes back"
+)
+assert not hasattr(wsa, "EMBANKMENT_COMPARTMENT_RANK_WEIGHTS"), "and its weights with it"
+
+
+# THE CLAIMS RUN BACKWARDS TO THE MEANS ON PURPOSE. Zone 0 carries the
+# best claims on the pool (0.9 anchor, full-credit fill) and the WORST
+# compartment mean; zone 2 carries the worst claims and the best mean.
+# Under the retired composite the embankment ranks were 0, 1, 2; under
+# the rule this asserts they are the reverse, and there is no ordering
+# of the two claims -- composite, seed-blend-only or fill-only -- that
+# produces it.
 rank_pool = [
-    _mini_zone(0, SURVEY_TYPE_EMBANKMENT, 0.1, 1.0, box(0, 0, 20, 20),
+    _mini_zone(0, SURVEY_TYPE_EMBANKMENT, 0.41, 1.0, box(0, 0, 20, 20),
                seed_blend=0.9, pinch_drainage=1.0, catchment=6.0),
-    _mini_zone(1, SURVEY_TYPE_EMBANKMENT, 0.1, 1.0, box(100, 0, 120, 20),
+    _mini_zone(1, SURVEY_TYPE_EMBANKMENT, 0.52, 1.0, box(100, 0, 120, 20),
                seed_blend=0.8, pinch_drainage=0.8, catchment=1.7),
-    _mini_zone(2, SURVEY_TYPE_EMBANKMENT, 0.1, 1.0, box(200, 0, 220, 20),
+    _mini_zone(2, SURVEY_TYPE_EMBANKMENT, 0.68, 1.0, box(200, 0, 220, 20),
                seed_blend=0.7, pinch_drainage=0.6, catchment=1.4),
     _mini_zone(3, SURVEY_TYPE_EXCAVATED, 0.65, 1.0, box(10, 0, 30, 20)),
     _mini_zone(4, SURVEY_TYPE_EXCAVATED, 0.6, 1.0, box(300, 0, 320, 20)),
 ]
 rank_survey_zones_per_type(rank_pool)
-assert [z["rank"] for z in rank_pool] == [1, 2, 3, 1, 2], (
-    "EVERY survivor is ranked within its type (embankment by its compartment rank score, despite "
-    "the 0.1 compartment means) -- rank 3 exists because nothing caps the list at 3 anymore"
+assert [z["rank"] for z in rank_pool] == [3, 2, 1, 1, 2], (
+    "EVERY survivor is ranked within its type BY ITS DISPLAYED SUITABILITY, which on this pool "
+    "runs opposite to both embankment claims -- rank 3 exists because nothing caps the list at 3 "
+    f"anymore: {[(z['id'], z['mean_suitability'], z['rank']) for z in rank_pool]}"
 )
-assert [z["compartment_rank_score"] for z in rank_pool[:3]] == [0.95, 0.8, 0.65], (
-    "the composite is the equal-weight mean of the two claims, computed by the module"
-)
-assert select_survey_zone(rank_pool) is rank_pool[0], (
-    "the pooled rank-1 invariant on the per-type scores: compartment rank score 0.95 beats "
-    "member-mean 0.65 -- and the 0.1 compartment mean never enters the pool"
+# THE INVARIANT ITSELF, stated as the rule rather than as this pool's
+# answer: within a type, rank order IS display-score order, and rank 1
+# holds the maximum. Checked per type on the same pool.
+for _stype in wsa.SURVEY_TYPES:
+    _typed = sorted(
+        [z for z in rank_pool if z["survey_type"] == _stype], key=lambda z: z["rank"]
+    )
+    _displayed = [display_scale.to_display_scale(z["mean_suitability"]) for z in _typed]
+    assert _displayed == sorted(_displayed, reverse=True), (
+        f"{_stype}: the displayed scores must run non-increasing down the ranks, got {_displayed}"
+    )
+    assert _typed[0]["rank"] == 1 and _displayed[0] == max(_displayed), (
+        f"{_stype}: rank 1 is the highest display score, always"
+    )
+assert select_survey_zone(rank_pool) is rank_pool[2], (
+    "the pooled rank-1 invariant on ONE number: the 0.68 embankment beats the 0.65 excavated, and "
+    "the 0.9/1.0 claims on zone 0 -- which won this pool under the retired composite -- move "
+    "nothing"
 )
 
-# IDENTICAL SEED BLENDS, DIFFERENT CATCHMENTS: the fill claim breaks the
-# tie, which is the entire reason the composite exists. Under the
-# retired seed-blend-only ranking these two were indistinguishable and
-# their order fell to the acreage tiebreak -- so the pair is built with
-# the WORSE-FILLED one holding the LARGER acreage, which means an
-# acreage-tiebreak ordering and a fill-claim ordering disagree and only
-# one of them can produce the ranks asserted here.
+# IDENTICAL DISPLAYED SCORES, OPPOSITE FILL CLAIMS: the ACREAGE breaks
+# the tie and the fill claim does not, which is the exact reversal this
+# change makes. The pair is built so the two orderings disagree -- the
+# dry compartment (fill 0.0, 0.2 ac of catchment) holds the LARGER
+# acreage -- so only one rule can produce the ranks asserted here, and
+# under the retired composite it was the other one.
 tie_pool = [
-    _mini_zone(0, SURVEY_TYPE_EMBANKMENT, 0.1, 5.0, box(0, 0, 20, 20),
+    _mini_zone(0, SURVEY_TYPE_EMBANKMENT, 0.5, 5.0, box(0, 0, 20, 20),
                seed_blend=0.6, pinch_drainage=0.0, catchment=0.2),
-    _mini_zone(1, SURVEY_TYPE_EMBANKMENT, 0.1, 1.0, box(100, 0, 120, 20),
+    _mini_zone(1, SURVEY_TYPE_EMBANKMENT, 0.5, 1.0, box(100, 0, 120, 20),
                seed_blend=0.6, pinch_drainage=1.0, catchment=9.4),
 ]
 rank_survey_zones_per_type(tie_pool)
-assert tie_pool[1]["rank"] == 1 and tie_pool[0]["rank"] == 2, (
-    "equal seed blends rank by the catchment above their dam reaches, not by acreage: "
-    f"{[(z['id'], z['rank'], z['compartment_rank_score']) for z in tie_pool]}"
+assert tie_pool[0]["rank"] == 1 and tie_pool[1]["rank"] == 2, (
+    "two zones displaying the SAME score rank by acreage -- the tiebreak is only ever reached on "
+    "an exact tie, so it can never lift a lower-scoring zone above a higher-scoring one: "
+    f"{[(z['id'], z['mean_suitability'], z['zone_acres'], z['rank']) for z in tie_pool]}"
 )
 assert tie_pool[0]["seed_blend_score"] == tie_pool[1]["seed_blend_score"] == 0.6, (
-    "and BOTH inputs stay on the record beside the composite -- the anchor claim is not consumed "
-    "by the ranking, it is reported next to it"
+    "both claims stay ON THE RECORD -- retiring the composite retired a ranking rule, not the "
+    "measurements a surveyor reads"
 )
-assert (tie_pool[0]["compartment_rank_score"], tie_pool[1]["compartment_rank_score"]) == (0.3, 0.8)
-assert select_survey_zone(tie_pool) is tie_pool[1], (
-    "a compartment with no water above it does not win a pool against one that has water, however "
-    "much ground it covers"
+assert (tie_pool[0]["pinch_drainage_score"], tie_pool[1]["pinch_drainage_score"]) == (0.0, 1.0), (
+    "and the fill claims really are opposite, so 'the fill claim did not decide this' is a "
+    "finding rather than a pair of equal numbers"
+)
+assert select_survey_zone(tie_pool) is tie_pool[0], (
+    "the pool reads the same one number and the same tiebreak as the rank, so the pooled winner "
+    "is its type's rank 1 -- here the larger of two equally-scoring compartments, DRY though it "
+    "is. That cost is the change: the fill claim is published on both records and the report "
+    "states it, but it no longer reorders anything behind the reader's back"
 )
 
 # attach_cross_type_overlaps on the same pool, hand-derived: emb zone 0
@@ -2034,8 +2093,13 @@ print(
 def _ranked_pool(embankment_count, excavated_count):
     pool = []
     for index in range(embankment_count):
+        # DESCENDING MEANS, so each pool has a real ranking rather than a
+        # column of ties resolved by list order -- with the seed blend
+        # descending alongside and the fill claim held constant, none of
+        # which the rank may read.
         pool.append(_mini_zone(
-            index, SURVEY_TYPE_EMBANKMENT, 0.1, 1.0, box(index * 100, 0, index * 100 + 20, 20),
+            index, SURVEY_TYPE_EMBANKMENT, round(0.75 - 0.05 * index, 4), 1.0,
+            box(index * 100, 0, index * 100 + 20, 20),
             seed_blend=round(0.9 - 0.05 * index, 4), pinch_drainage=1.0, catchment=6.0,
         ))
     for index in range(excavated_count):
@@ -2105,10 +2169,89 @@ assert sorted(
     "the presented set is 2 and 2 even when every embankment zone would out-score every excavated "
     "one on a pooled scale -- 'both types considered' is the rule, not 'the best four'"
 )
+# --- THE DISPLAY-ORDER INVARIANT, the one this whole section exists to
+# protect: WITHIN A TYPE, RANK IS THE DESCENDING ORDER OF THE SCORE THE
+# PAYLOAD DISPLAYS, AND SO IS THE PRESENTED SET. Asserted over every
+# shape the rule cases build, plus the real generated fixtures above,
+# because the defect it replaces was invisible in exactly this place:
+# the marks and the ranks agreed with each other perfectly while both
+# disagreed with the number on the panel.
+def _assert_display_order(zones, label):
+    for stype in wsa.SURVEY_TYPES:
+        typed = sorted(
+            [z for z in zones if z["survey_type"] == stype], key=lambda z: z["rank"]
+        )
+        if not typed:
+            continue
+        displayed = [display_scale.to_display_scale(z["mean_suitability"]) for z in typed]
+        assert displayed == sorted(displayed, reverse=True), (
+            f"{label} / {stype}: displayed scores must run non-increasing down the ranks, got "
+            f"{displayed}"
+        )
+        assert displayed[0] == max(displayed), (
+            f"{label} / {stype}: rank 1 must hold the highest displayed score"
+        )
+        # AND THE PRESENTED PAIR IS THE TOP OF THAT ORDER, never a
+        # window into the middle of it: whatever a reader would pick by
+        # sorting this type's payload rows on their own score column.
+        presented = [z for z in typed if z["presented"]]
+        assert presented == typed[: len(presented)], (
+            f"{label} / {stype}: the presented zones of a type are its highest-scoring ones, "
+            f"contiguous from rank 1 -- got ranks {[z['rank'] for z in presented]}"
+        )
+
+
+for (emb_n, exc_n) in _rule_cases:
+    _pool = _ranked_pool(emb_n, exc_n)
+    assign_presentation_order(_pool)
+    _assert_display_order(_pool, f"{emb_n}emb+{exc_n}exc")
+for _label, _res in (
+    ("flat fixture", flat_result), ("V fixture", v_result), ("both-types fixture", both_result),
+):
+    _assert_display_order(_res["zones"], _label)
+# THE CROSS-TYPE CASE THE USER-VISIBLE BUG LIVED IN: two types, and the
+# top zone of one displaying BELOW the top zones of the other. The
+# presented set must still be that type's own two best -- presentation
+# reads rank, rank reads the display score, and neither reads the other
+# type at all.
+_mixed = [
+    _mini_zone(0, SURVEY_TYPE_EXCAVATED, 0.68, 1.0, box(0, 0, 20, 20)),
+    _mini_zone(1, SURVEY_TYPE_EXCAVATED, 0.60, 1.0, box(100, 0, 120, 20)),
+    _mini_zone(2, SURVEY_TYPE_EMBANKMENT, 0.65, 1.0, box(200, 0, 220, 20),
+               seed_blend=0.30, pinch_drainage=0.30, catchment=1.0),
+    _mini_zone(3, SURVEY_TYPE_EMBANKMENT, 0.52, 1.0, box(300, 0, 320, 20),
+               seed_blend=0.90, pinch_drainage=1.00, catchment=6.0),
+    _mini_zone(4, SURVEY_TYPE_EMBANKMENT, 0.48, 1.0, box(400, 0, 420, 20),
+               seed_blend=0.85, pinch_drainage=1.00, catchment=6.0),
+]
+rank_survey_zones_per_type(_mixed)
+assign_presentation_order(_mixed)
+_assert_display_order(_mixed, "mixed pool")
+assert [
+    z["id"]
+    for z in sorted(
+        (z for z in _mixed if z["presented"]), key=lambda z: z["presentation_order"]
+    )
+] == [2, 0, 3, 1], (
+    "THE REPORTED DEFECT, PINNED: the 65/100 embankment leads its type and is presented FIRST. "
+    "Under the retired composite its 0.30/0.30 claims put it third and the payload presented the "
+    "52 and the 48 instead -- two zones scoring below every excavated candidate -- which is what "
+    f"made the set look like it was chosen against the other type's scores: {[(z['id'], z['mean_suitability'], z['rank'], z['presented']) for z in _mixed]}"
+)
+assert select_survey_zone(_mixed)["id"] == 0, (
+    "and the pooled winner is the parcel's highest displayed score, 0.68, whichever type holds it"
+)
+
 print(
     f"Presentation rule: {len(_rule_cases)} survivor shapes exercised directly (both backfill "
     "directions, both zero-of-a-type shapes, one-each, and the empty run), plus the lopsided pool "
     "that a best-four-overall rule would get wrong."
+)
+print(
+    "Display order: rank 1 holds the highest DISPLAYED score in every pool and every generated "
+    "fixture, the presented zones of a type are contiguous from rank 1, and the reported defect "
+    "is pinned -- a 65/100 embankment with the worst claims on the parcel leads its type instead "
+    "of dropping behind a 52 and a 48."
 )
 
 
@@ -2954,7 +3097,6 @@ assert set(_scales) == {
     "overlap_pct",
     "boundary_adjacency_pct",
     "pinch_drainage_score",
-    "compartment_rank_score",
 }, sorted(_scales)
 assert _scales["pinch_drainage_score"]["min_acres"] == wsa.EMBANKMENT_DRAINAGE_MIN_ACRES
 assert (
@@ -2964,22 +3106,22 @@ assert (
 assert (
     _scales["pinch_drainage_score"]["ceiling_acres"] == wsa.MAX_VALLEY_CONTRIBUTING_AREA_ACRES
 ), "the band's three externally anchored numbers ride with the score they produced"
-assert _scales["compartment_rank_score"]["weights"] == dict(
-    wsa.EMBANKMENT_COMPARTMENT_RANK_WEIGHTS
-), "a composite without its recipe is a number no consumer can argue with"
+assert "compartment_rank_score" not in _scales, (
+    "THE RETIRED COMPOSITE HAS NO SCALE ENTRY, because it has no value on the wire to read. This "
+    "block's contract runs both ways: every scored value that ships states how to read it, and an "
+    "entry describing a value nothing ships is a scale for a number that does not exist"
+)
 # THE SUITABILITY ENTRY IS ON THE DISPLAY SCALE, because it describes
 # what the panel prints and the panel's row is converted. A scale that
 # disagreed with the value it describes is worse than no scale at all.
 assert _scales["suitability"]["min"] == display_scale.DISPLAY_SCALE_MIN == 0
 assert _scales["suitability"]["max"] == display_scale.DISPLAY_SCALE_MAX == 100
 assert _scales["suitability"]["higher_is_better"] is True, "unchanged by the display scale"
-# THE OTHER TWO SCORED ENTRIES STAY 0-1, and the block stays readable
-# because every entry states its own endpoints. Neither is a panel row;
-# both are read beside the weights and breakpoints that produced them.
+# THE OTHER SCORED ENTRY STAYS 0-1, and the block stays readable because
+# every entry states its own endpoints. It is not a panel row; it is
+# read beside the breakpoints that produced it.
 assert _scales["pinch_drainage_score"]["min"] == 0.0
 assert _scales["pinch_drainage_score"]["max"] == 1.0
-assert _scales["compartment_rank_score"]["min"] == 0.0
-assert _scales["compartment_rank_score"]["max"] == 1.0
 for _type in wsa.SURVEY_TYPES:
     assert _scales["suitability"]["parcel_observed_max"][_type] == display_scale.to_display_scale(
         float(np.max(flat_result["surfaces"][_type]))
@@ -3025,7 +3167,7 @@ print(
     f"Display scale: the suitability row reads 61{display_scale.DISPLAY_SCALE_UNIT} off a stored "
     f"0.6123 that the panel leaves untouched, and the scales block's endpoints "
     f"({_scales['suitability']['min']}-{_scales['suitability']['max']}) and per-type ceilings are "
-    f"the same conversion -- while pinch_drainage_score and compartment_rank_score stay 0-1, each "
+    f"the same conversion -- while pinch_drainage_score stays 0-1, each "
     f"entry stating its own endpoints."
 )
 

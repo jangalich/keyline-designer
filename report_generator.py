@@ -733,10 +733,11 @@ def _format_water_survey_areas_summary(water_narrative: Optional[dict]) -> str:
     if selection["selected_zone_id"] is not None:
         lines.append(
             f"Selected for downstream planning: zone {selection['selected_zone_id']} "
-            f"({selection['selected_survey_type']}-type) -- the two types pooled on each type's own "
-            "score (embankment by its compartment rank score -- seed blend combined with the "
-            "catchment at its dam reach -- excavated by member-mean suitability; a provisional "
-            "selection rule awaiting tuning against the next real run)."
+            f"({selection['selected_survey_type']}-type) -- the two types pooled on the same "
+            "suitability score each survey area is ranked and reported on, so the selected area "
+            "is the highest-scoring one on the property and the rank-1 area of its own type "
+            "(pooling the two pond types at all remains a provisional selection rule, awaiting "
+            "tuning against the next real run)."
         )
 
     for region in water_narrative["zones"]:
@@ -777,10 +778,11 @@ def _format_water_survey_areas_summary(water_narrative: Optional[dict]) -> str:
                 f"{region['catchment_ceiling_acres']}-acre ceiling, where a pond would need an "
                 f"engineered spillway). This is measured AT THE PINCH CELL, which is the outlet of "
                 f"the catchment this compartment would impound -- not at the seed, whose own "
-                f"drainage says only whether the storage ground sits in a channel. Rank score "
-                f"{region['compartment_rank_score']} combines the two claims at equal weight, a "
-                f"provisional rule: read the seed blend and the drainage score, not just the "
-                f"composite."
+                f"drainage says only whether the storage ground sits in a channel. READ THIS "
+                f"BESIDE THE ANCHOR CLAIM ABOVE AND NEITHER ONE AS THE RANK: this area's rank is "
+                f"its suitability score's position among the survey areas of its type, and good "
+                f"ground with no water above it -- or the reverse -- is a finding about the site "
+                f"that the rank is not asked to express."
             )
             # The terminal-pinch caveat (accepted, disclosed): a dam
             # reach at the property line / an existing road / the walk

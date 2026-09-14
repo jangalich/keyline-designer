@@ -286,10 +286,10 @@ for _zone_record in _result["zones"]:
         assert _block["criteria"][_name]["weight"] == _entry["weight"]
 
     if _zone_record["survey_type"] == SURVEY_TYPE_EMBANKMENT:
-        for _field in ("seed_blend_score", "pinch_drainage_score", "compartment_rank_score"):
+        for _field in ("seed_blend_score", "pinch_drainage_score"):
             assert 0.0 <= _zone_record[_field] <= 1.0, (
-                f"zone {_zid}: {_field} left 0-1 -- the seed minimum, the drainage band and the "
-                f"ranking composite are INTERNAL and this branch changed none of them"
+                f"zone {_zid}: {_field} left 0-1 -- the seed minimum and the drainage band are "
+                f"INTERNAL and this branch changed neither"
             )
             assert _feature["properties"][_field] == _zone_record[_field]
             assert _block[_field] == _zone_record[_field]
@@ -493,9 +493,12 @@ print(
 # ======================================================================
 # A presentation change must be invisible to everything downstream of the
 # measurement. selected_water_zone is the sharpest statement available
-# here: it is chosen by pooling an embankment's compartment_rank_score
-# against an excavated zone's mean_suitability, so if any of those had
-# followed the display, the pooled comparison would pick differently.
+# here: it is chosen by pooling the zones' STORED mean_suitability, the
+# 0-1 value the display rounds from -- so if the conversion had ever
+# been written back onto the record, the pool would be comparing
+# integers and could pick differently. That the pool reads the same
+# number the panel displays is the ranking rule's doing; that it reads
+# the 0-1 side of it is this module's rule, and the two are independent.
 
 _selected = _result["selected_water_zone"]
 assert _selected is not None, "the fixture selects a zone, or this section proves nothing"
