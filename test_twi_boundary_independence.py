@@ -922,7 +922,6 @@ _floor_dropped_zone = {
     # about it when it is refused as when it survives.
     "pinch_catchment_acres": 3.25,
     "pinch_drainage_score": 1.0,
-    "compartment_rank_score": 0.79,
 }
 _bucket, _detail, _key = diag._seed_outcome(_built_then_dropped, {99: _floor_dropped_zone})
 assert _bucket == "dropped" and _key == f"dropped:{wsa.FLAG_BELOW_MIN_AREA}"

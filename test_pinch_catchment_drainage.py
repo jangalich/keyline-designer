@@ -73,7 +73,6 @@ from water_survey_areas import (
     SURVEY_TYPE_EXCAVATED,
     build_embankment_compartment,
     compartment_pinch_catchment,
-    compartment_rank_score,
     compute_suitability_surfaces,
     compute_water_survey_areas,
     drainage_band_score,
@@ -295,12 +294,23 @@ assert inverted["pinch_drainage_score"] == 0.0, (
     "the storage cell's own drainage looks"
 )
 
-# THE COMPOSITE, and the fact that it never replaces its inputs.
-assert comp["compartment_rank_score"] == compartment_rank_score(0.6, 1.0) == 0.8
-assert inverted["compartment_rank_score"] == compartment_rank_score(0.6, 0.0) == 0.3
+# TWO CLAIMS, NEITHER COMBINED INTO THE OTHER AND NEITHER RANKING
+# ANYTHING. The equal-weight composite that used to be asserted here is
+# retired with the ranking rule that was its only reader (see
+# _rank_score()), so the record's honesty claim is now the plain one:
+# opposite fill claims, identical anchor claims, both numbers present
+# and separate on both records.
 assert comp["seed_blend_score"] == inverted["seed_blend_score"] == 0.6, (
     "identical anchor claims, opposite fill claims -- both records carry both numbers"
 )
+assert comp["pinch_drainage_score"] == 1.0 and inverted["pinch_drainage_score"] == 0.0, (
+    "the fill claims really are opposite on these two records"
+)
+for record in (comp, inverted):
+    assert "compartment_rank_score" not in record, (
+        "the retired composite is GONE from the compartment record, not merely unread: a mean of "
+        "the two claims above is a number no rank consults and no reader can check"
+    )
 # NO NEW COMPUTATION: the number is read off the grid handed in, and a
 # different grid gives a different answer with nothing else touched.
 assert comp["compartment_footprint_acres"] == inverted["compartment_footprint_acres"], (
@@ -310,8 +320,9 @@ assert comp["compartment_footprint_acres"] == inverted["compartment_footprint_ac
 print(
     f"1. Pinch-cell measurement: seed {SEED_ACRES:.4f} ac (band 0.0) vs pinch {PINCH_ACRES:.4f} ac "
     f"(band 1.0) -- the compartment reports the PINCH's, and reports the SMALL one when the two "
-    f"are swapped; composite {comp['compartment_rank_score']} vs "
-    f"{inverted['compartment_rank_score']} with the same 0.6 seed blend."
+    f"are swapped; fill {comp['pinch_drainage_score']} vs "
+    f"{inverted['pinch_drainage_score']} against the same 0.6 seed blend, with no composite of "
+    "the two on either record."
 )
 
 
@@ -492,7 +503,7 @@ print(
 
 
 # =========================================================================
-# 4 [4]. THE FILL CLAIM ON THE WIRE -- three numbers, reported apart
+# 4 [4]. THE FILL CLAIM ON THE WIRE -- both claims, reported apart
 # =========================================================================
 result = compute_water_survey_areas(DEM, BOUNDARY, flow_accumulation=ACC)
 survivors = result["zones_by_type"][SURVEY_TYPE_EMBANKMENT]
@@ -512,14 +523,19 @@ for key in (
     "seed_blend_score",
     "pinch_catchment_acres",
     "pinch_drainage_score",
-    "compartment_rank_score",
     "catchment_exceeds_ceiling",
 ):
     assert key in props, f"the feature properties carry {key} separately"
 assert props["pinch_catchment_acres"] == zone["pinch_catchment_acres"]
-assert props["compartment_rank_score"] == compartment_rank_score(
-    props["seed_blend_score"], props["pinch_drainage_score"]
-), "the composite is recomputable from its two published inputs -- that is what 'reported apart' means"
+assert "compartment_rank_score" not in props, (
+    "THE COMPOSITE IS OFF THE WIRE. It ranked the compartment and nothing else; rank reads "
+    "mean_suitability now, so a field named for a ranking it no longer performs would be a lie "
+    "the payload told every consumer"
+)
+assert props["mean_suitability"] == zone["mean_suitability"], (
+    "and the number the rank IS assigned on rides the same feature, so a consumer can check the "
+    "order it was given"
+)
 
 narrative = wsa.build_narrative_data(result)
 json.dumps(narrative)
@@ -528,24 +544,29 @@ for key in (
     "seed_blend_score",
     "pinch_catchment_acres",
     "pinch_drainage_score",
-    "compartment_rank_score",
 ):
     assert key in block, f"narrative_data carries {key} separately: {sorted(block)}"
-assert block["compartment_rank_score"] == compartment_rank_score(
-    block["seed_blend_score"], block["pinch_drainage_score"]
-)
+assert "compartment_rank_score" not in block, "retired from narrative_data too"
 assert narrative["scales"]["pinch_drainage_score"]["ceiling_acres"] == MAX_VALLEY_CONTRIBUTING_AREA_ACRES
-assert narrative["scales"]["compartment_rank_score"]["weights"] == dict(
-    wsa.EMBANKMENT_COMPARTMENT_RANK_WEIGHTS
+assert "compartment_rank_score" not in narrative["scales"], (
+    "AND ITS SCALE ENTRY WENT WITH IT: build_scales()'s contract is that every scored value on "
+    "the wire states how to read it, which makes an entry for a value no payload carries worse "
+    "than no entry at all"
 )
 
-# THE PANEL DELIBERATELY CARRIES NONE OF THE THREE, and the decision is
+# THE PANEL DELIBERATELY CARRIES NEITHER CLAIM, and the decision is
 # recorded structurally rather than left as an omission: the five
 # always-rows are the panel's whole budget and they are TYPE-GENERIC, so
 # an embankment-only acreage cannot join them without either blanking on
-# every excavated zone or making the always-set type-dependent.
+# every excavated zone or making the always-set type-dependent. What the
+# panel DOES carry is every number the order depends on -- suitability
+# and the rank read off it -- which is the property the retired
+# composite broke.
 panel_keys = {row["key"] for row in block["panel"]}
-for excluded in ("pinch_catchment_acres", "pinch_drainage_score", "compartment_rank_score"):
+assert "compartment_rank_score" not in wsa.PANEL_EXCLUDED_KEYS, (
+    "a retired field does not linger on the exclusion list -- there is nothing left to exclude"
+)
+for excluded in ("pinch_catchment_acres", "pinch_drainage_score"):
     assert excluded in wsa.PANEL_EXCLUDED_KEYS, f"{excluded} is an explicit panel exclusion"
     assert excluded not in panel_keys, f"{excluded} must not be a panel row"
 assert len([row for row in block["panel"] if row["key"] in wsa.PANEL_ALWAYS_ROWS]) == 5, (
@@ -558,7 +579,10 @@ summary = wsa.summarize_water_survey_areas(result)
 assert "fill claim:" in summary
 assert f"{zone['pinch_catchment_acres']} ac of catchment at the pinch cell" in summary
 assert f"drainage {zone['pinch_drainage_score']}" in summary
-assert f"rank score {zone['compartment_rank_score']}" in summary
+assert "informs the reader, not the rank" in summary, (
+    "the summary states what the fill claim is FOR now that it ranks nothing"
+)
+assert "rank score" not in summary, "and stops printing a composite that no longer exists"
 
 # THE DIAGNOSTIC EXPORT's pinch layer -- the layer where "what does this
 # dam impound" is answerable by clicking the dam.
@@ -576,10 +600,10 @@ assert pinch_feature["properties"]["drainage_score"] == zone["pinch_drainage_sco
 assert pinch_feature["properties"]["catchment_exceeds_ceiling"] is False
 assert "of catchment above it" in pinch_feature["properties"]["label"]
 print(
-    f"4. Three numbers, reported apart: seed blend {zone['seed_blend_score']}, pinch catchment "
-    f"{zone['pinch_catchment_acres']} ac -> drainage {zone['pinch_drainage_score']}, composite "
-    f"{zone['compartment_rank_score']} (recomputable from the two published inputs) -- on the "
-    "feature, in narrative_data, in the summary and on the pinch layer; NONE of them on the panel."
+    f"4. Both claims, reported apart: seed blend {zone['seed_blend_score']}, pinch catchment "
+    f"{zone['pinch_catchment_acres']} ac -> drainage {zone['pinch_drainage_score']} -- on the "
+    "feature, in narrative_data, in the summary and on the pinch layer; NEITHER on the panel, and "
+    "the retired composite absent from all five plus the scales block."
 )
 
 
@@ -647,9 +671,9 @@ assert (
 # the excavated half not notice. The accumulation grid is held byte-
 # identical (so drainage_runon reads the same numbers it always did) and
 # the drainage BAND -- the thing that moved to the pinch -- is perturbed
-# hard, along with the compartment ranking weights. If any of that could
-# reach the excavated path, this fails; and the sensitivity assertion
-# above proves the signature is capable of failing.
+# hard. If that could reach the excavated path, this fails; and the
+# sensitivity assertion above proves the signature is capable of
+# failing.
 #
 # The band's constants are chosen to invert its verdict everywhere: a
 # minimum above the fixture's largest catchment means every compartment
@@ -657,23 +681,20 @@ assert (
 _saved = (
     wsa.EMBANKMENT_DRAINAGE_MIN_ACRES,
     wsa.EMBANKMENT_DRAINAGE_FULL_CREDIT_ACRES,
-    wsa.EMBANKMENT_COMPARTMENT_RANK_WEIGHTS,
 )
 try:
     wsa.EMBANKMENT_DRAINAGE_MIN_ACRES = 100.0
     wsa.EMBANKMENT_DRAINAGE_FULL_CREDIT_ACRES = 200.0
-    wsa.EMBANKMENT_COMPARTMENT_RANK_WEIGHTS = {"seed_blend": 0.9, "pinch_drainage": 0.1}
     perturbed = compute_water_survey_areas(DEM, BOUNDARY, flow_accumulation=ACC)
 finally:
     (
         wsa.EMBANKMENT_DRAINAGE_MIN_ACRES,
         wsa.EMBANKMENT_DRAINAGE_FULL_CREDIT_ACRES,
-        wsa.EMBANKMENT_COMPARTMENT_RANK_WEIGHTS,
     ) = _saved
 assert _excavated_signature(perturbed) == baseline_excavated, (
-    "BYTE-IDENTICAL EXCAVATED OUTPUT: neither the drainage band's constants nor the compartment "
-    "ranking weights can reach the excavated path -- drainage_runon is its own scorer on its own "
-    "criterion, and this branch did not touch it"
+    "BYTE-IDENTICAL EXCAVATED OUTPUT: the drainage band's constants cannot reach the excavated "
+    "path -- drainage_runon is its own scorer on its own criterion, and this branch did not touch "
+    "it"
 )
 # ...and the perturbation DID land where it was aimed, so the equality
 # above is a finding about isolation rather than about a no-op.
@@ -682,10 +703,20 @@ assert _perturbed_embankment, "the fixture still produces compartments under the
 assert all(zone["pinch_drainage_score"] == 0.0 for zone in _perturbed_embankment), (
     "the perturbed band scores every one of this fixture's catchments zero -- the change went in"
 )
-assert any(
-    zone["compartment_rank_score"] != original["compartment_rank_score"]
-    for zone, original in zip(_perturbed_embankment, survivors)
-), "and the embankment ranking moved with it"
+# AND THE EMBANKMENT ORDER DID NOT MOVE WITH IT. This assertion is the
+# inverse of the one it replaces, and the inversion is the point: while
+# the fill claim was half of the ranking composite, zeroing every
+# catchment on the parcel necessarily reshuffled the ranks. Rank reads
+# the displayed suitability now, which this perturbation does not touch,
+# so the fill claim can swing from full credit to zero across the whole
+# fixture without reordering a single zone -- and a reader who orders
+# the payload by its own suitability column gets the pipeline's order.
+assert [(zone["id"], zone["rank"]) for zone in _perturbed_embankment] == [
+    (zone["id"], zone["rank"]) for zone in survivors
+], (
+    "zeroing every fill claim on the parcel leaves the embankment ranking identical: rank is the "
+    "order of the DISPLAYED score, and the fill claim is not it"
+)
 
 # The two surfaces are separate end to end: disqualifying compartments
 # on the embankment side removes no excavated zone.
@@ -696,8 +727,9 @@ assert over_result["zones_by_type"][SURVEY_TYPE_EXCAVATED], (
 assert wsa.EXCAVATED_WEIGHTS["drainage_runon"] == 0.10, "the weight is stated, not inferred"
 print(
     "5. Excavated untouched: drainage_runon still a per-cell criterion at 0.10, the weight table "
-    "unchanged, and the excavated signature BYTE-IDENTICAL while the drainage band's constants and "
-    "the compartment ranking weights are perturbed hard enough to zero every fill claim -- with "
+    "unchanged, and the excavated signature BYTE-IDENTICAL while the drainage band's constants "
+    "are perturbed hard enough to zero every fill claim (which leaves the embankment RANKING "
+    "identical too, the fill claim no longer being a ranking input) -- with "
     "the signature demonstrably sensitive to accumulation, so the comparison has teeth."
 )
 

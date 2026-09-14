@@ -1085,14 +1085,43 @@ with Harness() as h:
     s = GENERATE_SESSION
     result = s.result()
     top = result["selected_structure_site"]
-    # Three distinct placed sites, all on good ground.
+    # Three distinct placed sites, all on good ground: three distinct
+    # BEARINGS off the selected site's centroid, each pulled in along its
+    # own bearing until it lands inside the parcel.
+    #
+    # THE PULL-IN REPLACES A SHARED FALLBACK, and the difference is the
+    # only thing this loop has to get right. It used to send any offset
+    # that missed the parcel to BOUNDARY_POLYGON_UTM.representative_
+    # point() -- one point, the same one every time -- so the moment TWO
+    # offsets missed, two placed sites landed on the identical cell, got
+    # the identical id, and the cap this section exists to test was being
+    # offered two features instead of three. That is a latent trap rather
+    # than a finding about the ground: which offsets clear the boundary
+    # depends on where the selected site sits, and the selected site
+    # moves whenever an upstream exclusion moves (here: the water step's
+    # ranking rule changed, so the pond exclusion moved and the structure
+    # scoring moved with it). Shrinking along the bearing keeps the three
+    # points distinct BY CONSTRUCTION -- three non-parallel bearings from
+    # one origin at positive scales cannot coincide -- and keeps each one
+    # near the selected site, which is the good ground the section wants.
     placed = []
     for dx, dy in ((12.0, 0.0), (-12.0, 30.0), (30.0, -30.0)):
-        point = Point(top["polygon_utm"].centroid.x + dx, top["polygon_utm"].centroid.y + dy)
-        if not BOUNDARY_POLYGON_UTM.contains(point):
-            point = BOUNDARY_POLYGON_UTM.representative_point()
+        for _scale in (1.0, 0.5, 0.25, 0.125):
+            point = Point(
+                top["polygon_utm"].centroid.x + dx * _scale,
+                top["polygon_utm"].centroid.y + dy * _scale,
+            )
+            if BOUNDARY_POLYGON_UTM.contains(point):
+                break
+        else:
+            raise AssertionError(
+                f"no point on the ({dx}, {dy}) bearing lands inside the parcel -- the fixture "
+                "cannot place three sites near the selected one"
+            )
         placed.append(s.score(_lon_lat(point)))
-    assert len({f["id"] for f in placed}) == 3
+    assert len({f["id"] for f in placed}) == 3, (
+        f"three distinct bearings must yield three distinct sites: {[f['id'] for f in placed]}"
+    )
     selected = list(CANDIDATES)
 
     three = selected + placed

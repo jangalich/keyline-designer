@@ -157,12 +157,43 @@ def _boundary_point(edge_index: int, fraction: float) -> tuple:
 # neither a small terrain change nor a small tuning change silently
 # flips the section's premise. TWO points refuse at 120, not one, so
 # the choice does not rest on a single knife-edge cell either.
+#
+# AND THE POINT HAS MOVED ONCE MORE, EDGE 1 @ 0.60 -> EDGE 2 @ 0.70,
+# WHILE THE 120 PIN HELD. The water step's ranking rule changed: rank is
+# now the order of the suitability score a survey area DISPLAYS, where it
+# used to be a per-type instrument (for embankment, a composite of the
+# seed blend and the pinch drainage score that appeared on no panel). That
+# reordered which two embankment zones the water payload presents, and
+# upstream() commits the presented embankment zones -- so THE POND
+# EXCLUSION MOVED, which is precisely the dependency upstream()'s own
+# docstring warns about. Edge 1 @ 0.60 routes over the new exclusion.
+#
+# The same survey re-run against it -- all six edges, every 5% of each
+# edge's length, 120 real routing passes per ceiling:
+#
+#     ceiling   A B C D all route   points that refuse
+#     -------   -----------------   ----------------------------------
+#       150            yes          edge 2 @ 0.40-0.95, 3 @ 0.00-0.10,
+#                                   5 @ 0.30-0.35            (17)
+#       130            yes          edge 2 @ 0.40-0.95, 3 @ 0.00-0.15,
+#                                   5 @ 0.30-0.35            (18)
+#       120            yes          identical to 130         (18)
+#       100            yes          edge 2 @ 0.30-0.95, 3 @ 0.00-0.15,
+#                                   5 @ 0.30-0.40            (21)
+#
+# THE BAND IS WIDER AND FLATTER THAN THE ONE IT REPLACES, which is why
+# the pin did not have to move with the point: edge 2 @ 0.40-0.95 refuses
+# at every ceiling surveyed, 100 through 150, and A/B/C/D route at every
+# one of them. Edge 2 @ 0.70 is taken from the middle of that run -- six
+# surveyed points either side of it inside the same band -- so the
+# section's premise now rests on a plateau rather than on the two
+# knife-edge cells the old pair had left.
 NO_NETWORK_CEILING_METERS_PER_ACRE = 120.0
 ACCESS_A = _boundary_point(0, 0.85)
 ACCESS_B = _boundary_point(3, 0.85)
 ACCESS_C = _boundary_point(4, 0.50)
 ACCESS_D = _boundary_point(1, 0.50)
-ACCESS_NO_NETWORK = _boundary_point(1, 0.60)
+ACCESS_NO_NETWORK = _boundary_point(2, 0.70)
 # An interior point, ~40 m inside: not an access point by the validator's
 # own rule.
 _centroid_lon, _centroid_lat = warp_transform(
@@ -618,5 +649,5 @@ print(
     f"  B (north-east edge)  {ACCESS_B}  key {KEY_B}\n"
     f"  C (north edge)       {ACCESS_C}  key {KEY_C}\n"
     f"  D (south edge)       {ACCESS_D}  key {KEY_D}\n"
-    f"  NO_NETWORK (south)   {ACCESS_NO_NETWORK}  key {KEY_NO_NETWORK}\n"
+    f"  NO_NETWORK (east)    {ACCESS_NO_NETWORK}  key {KEY_NO_NETWORK}\n"
 )

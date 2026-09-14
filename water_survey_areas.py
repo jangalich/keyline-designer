@@ -110,10 +110,13 @@ So the band moved rather than being deleted, with its constants
 untouched: it is scored at the PINCH CELL of an assembled compartment
 (compartment_pinch_catchment()), which by construction is the outlet of
 the catchment that compartment would impound. The seeding blend
-renormalized to slope/soil/TWI, and a compartment is now RANKED on both
-claims -- the seed's blend (good storage ground?) combined with the
-pinch cell's drainage score (water above it?) -- reported separately
-everywhere so neither hides inside the composite. The 20-acre ceiling
+renormalized to slope/soil/TWI, and both claims -- the seed's blend
+(good storage ground?) and the pinch cell's drainage score (water above
+it?) -- are reported separately on every compartment. Neither is a
+ranking instrument: rank carries no score of its own (see
+rank_survey_zones_per_type()), and the equal-weight composite that once
+combined these two to assign it is retired (see the RETIRED note at
+COMPARTMENT_DUPLICATE_OVERLAP_FRACTION). The 20-acre ceiling
 does double duty: still a hard gate on the nomination mask, and now also
 a compartment-level disqualifier (a pinch sits downstream of its gated
 seed, so it can carry more -- REASON_CATCHMENT_EXCEEDS_CEILING). The
@@ -250,18 +253,28 @@ two surfaces agreeing about the same ground --
 CROSS_TYPE_OVERLAP_NOTE_FRACTION drives the either-type narrative
 line).
 
-SELECTION (the pooled rule, still provisional, documented): each type
-ranks on its own instrument -- embankment by SEED blend score (the
-anchor claim; the compartment's walked-ground mean deliberately
-includes low-scoring side slopes and would punish a compartment for
-doing its job), excavated by member-mean suitability as always -- and
-the two are POOLED on those scores (acreage tiebreak); the pooled
-rank-1 SURVIVING zone becomes `selected_water_zone` for downstream
-consumers (tree search-space subtraction, fencing, solar exclusion,
-road exclusion, the map's ripple clip, keypoint relationships).
-Pooling embankment against excavated compares two different
-instruments on one scale -- kept because downstream needs ONE
-unambiguous answer; revisit from the tuned run. The selected zone
+RANK AND SELECTION READ THE DISPLAYED SCORE AND NOTHING ELSE. Rank
+orders each type's survivors by `mean_suitability` -- the stored 0-1
+value the panel's suitability row is a rounding of -- so rank 1 is
+always the highest-scoring zone ON THE NUMBER THE PAYLOAD SHOWS, with
+acreage as the tiebreak. Rank carries no score of its own: a rank
+assigned on a number the reader cannot see is a rank the reader cannot
+check, which is exactly what the retired compartment composite made of
+it (embankment zones displaying 65/100 ranked below zones displaying
+52/100, because the displayed number was not the ranked number). The
+cost is accepted and stated: a compartment's walked-ground mean
+averages in its side slopes and wall reach, so the ranking no longer
+credits a compartment for the ground it deliberately encloses -- the
+anchor and fill claims stay on the record for a reader who wants that
+argument, they simply do not reorder anything. SELECTION pools both
+types on that same one number (acreage tiebreak); the pooled rank-1
+SURVIVING zone becomes `selected_water_zone` for downstream consumers
+(tree search-space subtraction, fencing, solar exclusion, road
+exclusion, the map's ripple clip, keypoint relationships). Pooling is
+still PROVISIONAL -- two surfaces are still two surfaces -- but it is
+now one kind of number on one scale rather than a composite weighed
+against a mean, and the pooled winner is by construction its type's
+rank 1. The selected zone
 carries every field on the established selected_water_zone consumer
 contract (render_fill_polygon_utm = the clipped geometry, identity;
 representative_elevation_m; id -- plus rank and
@@ -910,8 +923,7 @@ MIN_SOIL_COVERAGE_FRACTION = 0.3
 # PER-COMPARTMENT measurement taken AFTER the pinch is found, scored on
 # the SAME band and the SAME constants at the PINCH CELL -- which is,
 # by construction, the outlet of the catchment the compartment would
-# impound. See compartment_pinch_catchment() and
-# EMBANKMENT_COMPARTMENT_RANK_WEIGHTS.
+# impound. See compartment_pinch_catchment().
 #
 # THESE THREE WEIGHTS ARE DERIVED BY RENORMALIZATION, NOT BY TUNING.
 # The retired blend's slope 0.25 / soil 0.25 / twi 0.20 sum to 0.70;
@@ -1151,38 +1163,45 @@ RIDGE_WALK_MAX_HALF_WIDTH_METERS = 100.0
 # CONFIGURABLE.
 COMPARTMENT_DUPLICATE_OVERLAP_FRACTION = 0.5
 
-# HOW A COMPARTMENT RANKS: the two claims a compartment makes, weighted.
+# --- RETIRED: the compartment rank composite and its weights -------------
+# DELETED OUTRIGHT, and the difference from the fixed TWI breakpoints
+# above is the reason: those are RETIRED-NOT-DELETED because a
+# diagnostic still scores the same cells on them, so the before/after
+# stays measurable. This composite has no second reader. It was
 #
-#   seed_blend       THE ANCHOR CLAIM -- is the storage ground any good?
-#                    (the seed's own slope/soil/TWI blend)
-#   pinch_drainage   THE FILL CLAIM -- is there water above it?
-#                    (drainage_band_score() at the compartment's PINCH
-#                    CELL, i.e. the catchment the dam would impound)
+#     EMBANKMENT_COMPARTMENT_RANK_WEIGHTS = {"seed_blend":     0.5,
+#                                            "pinch_drainage": 0.5}
+#     compartment_rank_score(seed_blend, pinch_drainage)
 #
-# A pond needs BOTH and neither substitutes for the other: suitable
-# storage ground with no catchment above it is a dry hole, and a large
-# catchment delivered onto ground that cannot hold a pool is a
-# spillway. Ranking on the anchor claim alone -- what this pipeline did
-# until the drainage criterion moved to the pinch -- could not see the
-# second question at all, which is precisely how a parcel's whole
-# surviving set came to carry drainage 0.000.
+# -- an equal-weight v1 prior combining the ANCHOR claim (is the storage
+# ground any good? the seed's slope/soil/TWI blend) with the FILL claim
+# (is there water above it? drainage_band_score() at the compartment's
+# pinch cell) -- and it existed for exactly one purpose, stated in its
+# own first line: to be THE ONE NUMBER AN EMBANKMENT COMPARTMENT IS
+# RANKED ON.
 #
-# EQUAL WEIGHT IS A v1 PRIOR AND NOTHING MORE. There is no evidence yet
-# that the two claims deserve the same say; equal weight is the honest
-# starting position when neither has earned dominance, the same posture
-# WETNESS_TWI_SUBWEIGHT takes for the same reason. The ladder this
-# branch prints -- every compartment's seed blend, pinch catchment and
-# drainage score side by side with its outcome -- is what retunes this.
-# The two inputs are REPORTED SEPARATELY everywhere the composite
-# appears, so neither claim can hide inside the mean. CONFIGURABLE.
-EMBANKMENT_COMPARTMENT_RANK_WEIGHTS = {
-    "seed_blend": 0.5,
-    "pinch_drainage": 0.5,
-}
-_rank_weight_sum = sum(EMBANKMENT_COMPARTMENT_RANK_WEIGHTS.values())
-assert math.isclose(_rank_weight_sum, 1.0, abs_tol=1e-9), (
-    f"compartment ranking weights must sum to 1.0, got {_rank_weight_sum}"
-)
+# RANK STOPPED CARRYING A SCORE OF ITS OWN (rank_survey_zones_per_type()
+# now orders each type by the displayed suitability), so the composite
+# ranked nothing. A composite that ranks nothing is a number with no
+# question behind it: its 50/50 recipe was an admitted prior rather than
+# a finding, its own docstring forbade reading it without its inputs,
+# and it had already cost a reader real confusion -- while it ranked,
+# the payload showed one number and ordered by another, so a compartment
+# displaying 65/100 could sit below two displaying 52 and 48. It is gone
+# from the wire rather than kept as a field nobody is allowed to use.
+#
+# WHAT SURVIVES IT, unchanged and still reported separately on every
+# compartment: seed_blend_score (the anchor claim) and
+# pinch_catchment_acres / pinch_drainage_score (the fill claim, measured
+# at the pinch cell -- compartment_pinch_catchment(), whose constants
+# this retirement does not touch). Those two were always the reportable
+# findings; only their mean is retired, and the report still states both
+# claims per compartment. A pond still needs BOTH -- storage ground with
+# no catchment above it is a dry hole, a catchment delivered onto ground
+# that cannot hold a pool is a spillway -- and that argument is now made
+# in prose against two published numbers instead of inside a mean. A
+# later branch wanting a composite again should derive one from the
+# seed ladder's evidence rather than restore this prior.
 
 
 # --- survey-zone grouping (the closing over extracted regions) ------------
@@ -1333,12 +1352,20 @@ CROSS_TYPE_OVERLAP_NOTE_FRACTION = 0.5
 # bottom" reads as a recommendation of that type, and the two types are
 # two different site visits, not two grades of one answer. The type
 # that leads each pair is fixed (SURVEY_TYPES order, embankment first)
-# rather than decided by score, because deciding it by score would mean
-# comparing a compartment rank score against a member-mean suitability
-# -- the cross-instrument pooling select_survey_zone() documents as
-# PROVISIONAL -- to settle a display question. One arbitrary, stable,
-# documented order is the honest answer there; the pool stays confined
-# to the one place downstream needs a single winner.
+# rather than decided by score, because the two surfaces are built from
+# different criteria and weights: an embankment 0.61 and an excavated
+# 0.61 are the same number about different questions, and settling a
+# display question by comparing them would read as a ranking of the two
+# pond types. One arbitrary, stable, documented order is the honest
+# answer there; the pool that does compare them stays confined to the
+# one place downstream needs a single winner (select_survey_zone(),
+# PROVISIONAL and documented as such).
+#
+# WITHIN a type, though, the order is not arbitrary at all and must not
+# become so: presentation reads `rank`, and rank is the descending order
+# of the score the panel displays (rank_survey_zones_per_type()), so the
+# two presented zones of a type are exactly its two highest-scoring
+# survivors as a reader would count them off the payload.
 # CONFIGURABLE (both constants; the assertion below keeps them
 # consistent).
 WATER_ZONE_PRESENTATION_COUNT = 4
@@ -3451,39 +3478,6 @@ def compartment_pinch_catchment(
     }
 
 
-def compartment_rank_score(
-    seed_blend_score: float,
-    pinch_drainage_score: float,
-    weights: dict = EMBANKMENT_COMPARTMENT_RANK_WEIGHTS,
-) -> float:
-    """
-    The one number an embankment compartment is RANKED on: the weighted
-    combination of its two claims -- the seed's blend score (suitable
-    storage ground) and the pinch cell's drainage-band score (a
-    catchment that fills it).
-
-    THIS IS A v1 PRIOR AWAITING THE LADDER'S EVIDENCE, and equal weight
-    is the honest form of "neither claim has earned dominance yet"
-    rather than a finding about ponds. What it encodes is only the
-    structural claim that a compartment needs BOTH: storage ground with
-    nothing above it is a dry hole; a catchment delivered onto ground
-    that cannot hold a pool is a spillway. Ranking on the seed blend
-    alone -- what this pipeline did until the drainage band moved to the
-    pinch -- could not ask the second question at all.
-
-    Both inputs are reported separately wherever this composite appears
-    (feature properties, narrative_data, the summary, the seed ladder),
-    on purpose: a mean of two 0-1 numbers is unreadable without them,
-    and neither claim may hide inside it. See
-    EMBANKMENT_COMPARTMENT_RANK_WEIGHTS.
-    """
-    return round(
-        weights["seed_blend"] * float(seed_blend_score)
-        + weights["pinch_drainage"] * float(pinch_drainage_score),
-        4,
-    )
-
-
 def _line_geometry_wgs84(dem: dict, points_utm: list) -> dict:
     """LineString WGS84 wire form for a list of (x, y) UTM points, built
     at the object's birth (stored wire forms -- no serialization-time
@@ -3591,10 +3585,13 @@ def build_embankment_compartment(
     CELL off the flow-accumulation grid already in gate_context and
     scores it on the embankment drainage band -- the catchment this
     compartment would impound, which is what fills a pond. It rides as
-    pinch_catchment_acres / pinch_drainage_score, and combines with the
-    seed blend into compartment_rank_score, the number the compartment
-    is RANKED on (compartment_rank_score()). All three stay separately
-    readable; the composite never replaces its inputs anywhere.
+    pinch_catchment_acres / pinch_drainage_score, BESIDE the seed blend
+    and never folded into it: the two claims answer two questions and
+    both stay separately readable. Neither ranks anything -- rank is
+    assigned on the displayed suitability (rank_survey_zones_per_type()),
+    and the composite that once combined these two to assign it is
+    retired (see the RETIRED note at COMPARTMENT_DUPLICATE_OVERLAP_
+    FRACTION).
 
     A compartment whose pinch catchment EXCEEDS the ceiling is marked
     catchment_exceeds_ceiling (flag and boolean) and built out complete
@@ -3801,7 +3798,6 @@ def build_embankment_compartment(
     )
     if pinch_catchment["exceeds_ceiling"]:
         flags.append(FLAG_CATCHMENT_EXCEEDS_CEILING)
-    rank_score = compartment_rank_score(seed["blend_score"], pinch_catchment["score"])
 
     measurements = _measure_member_cells(
         dem,
@@ -3868,10 +3864,12 @@ def build_embankment_compartment(
         "pinch_drainage_score": pinch_catchment["score"],
         "catchment_exceeds_ceiling": pinch_catchment["exceeds_ceiling"],
         "catchment_ceiling_acres": pinch_catchment["ceiling_acres"],
-        # THE COMPOSITE THE COMPARTMENT RANKS ON -- reported here, but
-        # never in place of the two inputs above (see
-        # compartment_rank_score()).
-        "compartment_rank_score": rank_score,
+        # NO COMPOSITE OF THE TWO CLAIMS IS CARRIED. The equal-weight
+        # mean that used to sit here ranked the compartment and nothing
+        # else; rank no longer reads it, so it is retired rather than
+        # left on the record as a number with no question behind it
+        # (see the RETIRED note at COMPARTMENT_DUPLICATE_OVERLAP_
+        # FRACTION).
         "pinch": {
             "rowcol": pinch_rowcol,
             "xy": pinch_xy,
@@ -4069,10 +4067,12 @@ def dedupe_compartments_by_overlap(
     COMPARTMENTS DISQUALIFIED BY THE CATCHMENT CEILING NEVER REACH
     HERE: the compute core partitions them out first, precisely so a
     compartment that cannot survive on its own evidence cannot claim a
-    valley away from one that can. Ordering by seed blend (rather than
-    by the composite compartment_rank_score) is deliberate and
-    unchanged: dedupe asks which SEED better anchors one piece of
-    ground, which is the anchor claim's question, not the fill claim's.
+    valley away from one that can. Ordering by SEED BLEND -- not by the
+    fill claim, and not by the compartment's own walked mean that rank
+    now reads -- is deliberate and unchanged: dedupe asks which SEED
+    better anchors one piece of ground, which is the anchor claim's
+    question. It survived the retirement of the rank composite untouched
+    because it never used it.
     """
     ordered = sorted(compartments, key=lambda z: -z["seed_blend_score"])
     kept: list[dict] = []
@@ -4231,26 +4231,43 @@ def _confidence_notes_for_region(region: dict, soil_checked: bool) -> str:
     )
 
 
-def _selection_score(zone: dict) -> float:
-    """The one number each type ranks and pools on: the COMPARTMENT RANK
-    SCORE for an embankment compartment, and the MEMBER-mean suitability
-    for an excavated zone (as today).
+def _rank_score(zone: dict) -> float:
+    """THE NUMBER RANK ORDERS, and the only one: `mean_suitability`, the
+    stored 0-1 value the panel's suitability row shows as 0-100
+    (to_display_scale()). ONE INSTRUMENT, BOTH TYPES -- there is no
+    type test here and there must not be one again.
 
-    THE EMBANKMENT NUMBER GAINED ITS SECOND HALF when the drainage band
-    moved to the pinch. It used to be the seed's blend score alone --
-    the ANCHOR claim (is this good storage ground?) -- which is still
-    the right instrument for that question and still the reason the
-    compartment's own walked-ground mean is NOT used here (that mean
-    deliberately includes low-scoring side slopes and the wall reach, so
-    ranking on it would punish a compartment for doing its job). What
-    the anchor claim could not ask is whether any water arrives: a
-    compartment now ranks on the anchor claim COMBINED with the FILL
-    claim, the drainage band scored at its pinch cell
-    (compartment_rank_score(), EMBANKMENT_COMPARTMENT_RANK_WEIGHTS).
-    Both inputs stay separately reported everywhere the composite
-    appears."""
-    if zone["survey_type"] == SURVEY_TYPE_EMBANKMENT:
-        return zone["compartment_rank_score"]
+    THE DISPLAYED SCORE IS THE RANKED SCORE. That is the whole content
+    of this function and the reason it exists as a named thing rather
+    than as an expression inside the sort: rank is a claim about the
+    order of the numbers a reader can see, so it must be computed from
+    those numbers. It is deliberately the STORED 0-1 value and never the
+    converted one -- display_scale.py's rule is that a converted number
+    never flows back into a computation, and it does not need to here:
+    to_display_scale() is monotonic, so ordering by the 0-1 value
+    guarantees the 0-100 readings run non-increasing down the ranks,
+    with the rounding's ties settled by the acreage tiebreak below.
+
+    WHAT THIS REPLACED, because the defect is worth keeping named: rank
+    used to read a per-type instrument -- the embankment COMPARTMENT
+    RANK SCORE (the seed blend combined with the pinch cell's drainage
+    score) against the excavated member-mean. Both were defensible
+    measurements and the panel showed NEITHER of them for embankment; it
+    showed the compartment's walked mean. So the payload published one
+    number per zone and ordered the zones by a different one, and the
+    visible result was an embankment zone displaying 65/100 sitting
+    unpresented below two displaying 52 and 48.
+
+    THE COST IS REAL AND ACCEPTED. A compartment's walked-ground mean
+    averages in the side slopes and the wall reach the compartment
+    exists to enclose, so ranking on it credits a compartment less for
+    doing its job than the retired composite did -- and the fill claim
+    (is there water above the dam reach at all?) no longer moves the
+    order. Both claims stay published per compartment
+    (seed_blend_score, pinch_catchment_acres, pinch_drainage_score) and
+    the report states them per zone, so the argument a reader wants to
+    make against a rank is still fully in their hands; it simply is not
+    made silently on their behalf by a number the panel never showed."""
     return zone["mean_suitability"]
 
 
@@ -4258,7 +4275,9 @@ def _selection_tiebreak_acres(zone: dict) -> float:
     """Acreage tiebreak between equally-scored zones: the anchoring
     member acres for excavated (the envelope's own acreage never ranks
     anything there); the compartment's own acreage for embankment (the
-    only acreage a compartment has)."""
+    only acreage a compartment has). A TIEBREAK ONLY -- it is reached
+    exactly when two zones carry the identical suitability, so it can
+    never put a lower-scoring zone above a higher-scoring one."""
     if zone["survey_type"] == SURVEY_TYPE_EMBANKMENT:
         return zone["zone_acres"]
     return zone["member_acres"]
@@ -4267,18 +4286,33 @@ def _selection_tiebreak_acres(zone: dict) -> float:
 def rank_survey_zones_per_type(zones: list[dict]) -> None:
     """
     Assigns `rank` per type IN PLACE: 1 = highest score within that
-    type, acreage as the tiebreak (see _selection_score() /
-    _selection_tiebreak_acres() for the per-type definitions --
-    embankment ranks by the COMPARTMENT RANK SCORE, the documented
-    combination of the seed's blend score and the pinch cell's drainage
-    score; excavated by member-mean suitability with member acreage, as
-    always). Two compartments with identical seed blends therefore rank
-    by the catchment above their dam reaches, which is the whole point
-    of the composite. Every zone is ranked; flags never affect rank.
+    type, ordered by THE SCORE THE PAYLOAD DISPLAYS and nothing else --
+    `mean_suitability`, the 0-1 value the panel renders on the 0-100
+    display scale (_rank_score()) -- with acreage as the tiebreak
+    (_selection_tiebreak_acres(), reached only on an exact tie).
+
+    RANK 1 IS ALWAYS THE HIGHEST DISPLAYED SCORE OF ITS TYPE. Rank
+    carries no score of its own: it assigns an ORDER to numbers the
+    reader can already see, so "why is this one ranked above that one?"
+    is answerable from the panel alone. The per-type ranking instruments
+    this replaced -- an embankment composite of the seed blend and the
+    pinch drainage score, against an excavated member-mean -- are
+    retired from ranking entirely; their inputs remain published per
+    compartment as findings, and the COSTS of ranking on the walked mean
+    instead are set out in _rank_score().
+
+    WHY IT IS STILL PER TYPE: the two surfaces are built from different
+    criteria and weights, and an embankment rank 1 and an excavated rank
+    1 name different ground for different site visits (zone_display_
+    name() joins the type to the rank for exactly this reason). Ranking
+    each type on its own list is not the same claim as scoring them on
+    their own instruments -- one number, two lists.
+
+    Every zone is ranked; flags never affect rank.
     """
     for survey_type in SURVEY_TYPES:
         typed = [zone for zone in zones if zone["survey_type"] == survey_type]
-        typed.sort(key=lambda zone: (-_selection_score(zone), -_selection_tiebreak_acres(zone)))
+        typed.sort(key=lambda zone: (-_rank_score(zone), -_selection_tiebreak_acres(zone)))
         for rank, zone in enumerate(typed, start=1):
             zone["rank"] = rank
 
@@ -4431,22 +4465,30 @@ def attach_cross_type_overlaps(zones: list[dict]) -> None:
 def select_survey_zone(zones: list[dict]) -> Optional[dict]:
     """
     The single selected_water_zone answer for downstream consumers:
-    embankment and excavated POOLED on each type's own selection score
-    (acreage tiebreak), rank-1 of the pool wins. The pooled scale
-    compares an embankment COMPARTMENT RANK SCORE (seed blend combined
-    with the pinch cell's drainage score) against an excavated zone's
-    MEMBER-mean suitability -- two different instruments' numbers on one
-    0-1 scale.
-    PROVISIONAL AND DOCUMENTED AS SUCH, deliberately simple: pooling
-    two instruments is defensible only because downstream needs ONE
-    unambiguous answer; revisit from the tuned run (the winner's type
-    is itself a finding). Flags never affect selection. Returns None
-    when no zone exists at all -- the real, reportable "nothing
-    survived" outcome, not an error.
+    embankment and excavated POOLED on the SAME number rank orders --
+    `mean_suitability`, the score the payload displays (_rank_score())
+    -- with the acreage tiebreak, highest wins.
+
+    THE WINNER IS ALWAYS ITS TYPE'S RANK 1, by construction rather than
+    by coincidence: selection and rank read one function, so the zone
+    downstream builds on can never be a zone the panel ranked second.
+    That is what the retired per-type ranking instruments could not
+    promise -- they pooled an embankment composite against an excavated
+    member-mean, two different measurements on one 0-1 scale.
+
+    STILL PROVISIONAL, for the one reason that survives: the two
+    suitability surfaces are built from different criteria and weights,
+    so a 0.61 embankment and a 0.61 excavated are not the same claim
+    about the ground even though they are now the same KIND of number on
+    the same scale. Pooling at all is defensible only because downstream
+    needs ONE unambiguous answer; revisit from the tuned run (the
+    winner's type is itself a finding). Flags never affect selection.
+    Returns None when no zone exists at all -- the real, reportable
+    "nothing survived" outcome, not an error.
     """
     if not zones:
         return None
-    return max(zones, key=lambda zone: (_selection_score(zone), _selection_tiebreak_acres(zone)))
+    return max(zones, key=lambda zone: (_rank_score(zone), _selection_tiebreak_acres(zone)))
 
 
 # ==========================================================================
@@ -4908,17 +4950,19 @@ def _zone_feature_properties(zone: dict) -> dict:
                   wall reach), the pinch record (crest-to-crest width,
                   walk distance, and the FILL claim -- catchment acres
                   at the pinch cell with the drainage band scored on
-                  them), the composite the compartment ranks on, the
-                  baseline length, and the truncation/bound flags.
+                  them), the baseline length, and the truncation/bound
+                  flags.
 
-                  THE THREE EMBANKMENT NUMBERS ARE REPORTED SEPARATELY
-                  AND ALWAYS WILL BE: seed_blend_score (good storage
-                  ground?), pinch_drainage_score with its
-                  pinch_catchment_acres (water above it?), and
-                  compartment_rank_score (the documented v1
-                  combination). A consumer that wants to argue with the
-                  ranking rule can recompute it from the two inputs on
-                  this same record.
+                  THE TWO EMBANKMENT CLAIMS ARE REPORTED SEPARATELY AND
+                  ALWAYS WILL BE: seed_blend_score (good storage
+                  ground?) and pinch_drainage_score with its
+                  pinch_catchment_acres (water above it?). NO COMPOSITE
+                  OF THEM IS CARRIED -- the equal-weight mean that used
+                  to ride here ranked the compartment and nothing else,
+                  and rank now reads the displayed suitability like
+                  every other zone (_rank_score()). A consumer that
+                  wants to argue with an order has both claims on this
+                  same record and the ranked number beside them.
 
     NOTHING IS REMOVED FROM THIS SET by the panel block that now rides
     the payload. This is the DIAGNOSTIC AND IMAGERY CONTRACT -- the
@@ -5001,16 +5045,17 @@ def _zone_feature_properties(zone: dict) -> dict:
                 # criterion_contributions above (the walked ground).
                 "seed_blend_score": zone["seed_blend_score"],
                 "seed_criteria_signature": dict(zone["seed"]["criteria_signature"]),
-                # THE FILL CLAIM, kept separate from BOTH of those: the
-                # catchment above the dam reach and the drainage band
-                # scored on it. Three numbers, three questions, none of
-                # them folded into another -- the composite below is the
-                # ranking instrument, never a substitute for its inputs.
+                # THE FILL CLAIM, kept separate from the anchor claim
+                # above: the catchment over the dam reach and the
+                # drainage band scored on it. Two claims, two questions,
+                # neither folded into the other and NEITHER OF THEM A
+                # RANKING INSTRUMENT -- `rank` above is assigned on
+                # mean_suitability, the score this feature already
+                # carries and the panel already shows.
                 "pinch_catchment_acres": zone["pinch_catchment_acres"],
                 "pinch_drainage_score": zone["pinch_drainage_score"],
                 "catchment_exceeds_ceiling": zone["catchment_exceeds_ceiling"],
                 "catchment_ceiling_acres": zone["catchment_ceiling_acres"],
-                "compartment_rank_score": zone["compartment_rank_score"],
                 "seed_rowcol": list(zone["seed"]["rowcol"]),
                 "pinch_rowcol": list(zone["pinch"]["rowcol"]),
                 "pinch_width_m": zone["pinch"]["width_m"],
@@ -5224,13 +5269,17 @@ PANEL_EXCLUDED_KEYS = (
     # always-set type-dependent, and both break the thing this block
     # exists to guarantee. The catchment figure rides narrative_data and
     # the feature properties instead, where the report has room to say
-    # what it means. compartment_rank_score is excluded for the
-    # different reason that a composite with its inputs off-panel is
-    # exactly the number a reader cannot check -- the `rank` row already
-    # carries its consequence.
+    # what it means.
+    #
+    # THE COMPOSITE THAT USED TO BE EXCLUDED HERE NO LONGER EXISTS. It
+    # was kept off the panel because a composite with its inputs
+    # off-panel is exactly the number a reader cannot check -- and while
+    # it was also the number `rank` was assigned on, that exclusion left
+    # the panel showing one score and ordering by another. Rank now
+    # reads the suitability row above it (_rank_score()), so the panel
+    # is self-consistent: every number the order depends on is on it.
     "pinch_catchment_acres",
     "pinch_drainage_score",
-    "compartment_rank_score",
     # EMBANKMENT INSTRUMENT DETAIL.
     "pinch_width_m",
     "pinch_width_ft",
@@ -5513,8 +5562,11 @@ def build_scales(result: dict) -> dict:
     and the loss of cross-property comparability).
 
     rank carries the PER-TYPE COUNT, so "rank 2" renders as "2 of 3".
-    The count is per type for the same reason the rank is: each type is
-    ranked on its own instrument.
+    The count is per type because the LIST is per type -- an embankment
+    rank 1 and an excavated rank 1 name different ground for different
+    site visits. Both lists are now ordered by the suitability entry
+    above them (_rank_score()), so a reader can check any rank on this
+    block's own terms.
 
     pinch_drainage_score carries the BAND ITSELF, not just 0-1, because
     that band is non-monotonic in the thing it scores: it reads 0.0
@@ -5524,18 +5576,20 @@ def build_scales(result: dict) -> dict:
     "0.0" with a plain 0-1 range would draw the wrong conclusion half
     the time, so the ramp, the plateau and the ceiling ride with it and
     the catchment acreage sits beside it on every zone block.
-    compartment_rank_score carries its WEIGHTS for the same reason: a
-    composite whose recipe is not on the wire is a number no consumer
-    can argue with.
+    THE NON-PANEL SCORE BELOW STAYS ON 0-1, deliberately, and this block
+    is readable BECAUSE every entry states its own min/max.
+    pinch_drainage_score is not a panel row; it is read in the report
+    and the diagnostic beside the internal values it was computed from,
+    and converting it would put a display number next to the
+    breakpoints that produced it. A consumer never has to guess which
+    scale an entry is on -- it is written in the entry.
 
-    THE TWO NON-PANEL SCORES BELOW STAY ON 0-1, deliberately, and this
-    block is readable BECAUSE every entry states its own min/max.
-    pinch_drainage_score and compartment_rank_score are not panel rows;
-    they are read in the report and the diagnostic beside the internal
-    values they were computed from, and converting them would put a
-    display number next to the weights and breakpoints that produced it.
-    A consumer never has to guess which scale an entry is on -- it is
-    written in the entry.
+    THE RETIRED COMPOSITE HAD AN ENTRY HERE TOO, carrying its weights on
+    the principle that a composite whose recipe is not on the wire is a
+    number no consumer can argue with. The composite is gone
+    (see the RETIRED note at COMPARTMENT_DUPLICATE_OVERLAP_FRACTION) and
+    its entry with it: an entry describing a value no payload carries is
+    worse than no entry.
 
     ANY SCORED VALUE THE PANEL LATER GAINS ARRIVES WITH ITS SCALE IN
     THIS BLOCK. That is the contract, not a convention -- a number
@@ -5585,12 +5639,6 @@ def build_scales(result: dict) -> dict:
             "full_credit_acres": EMBANKMENT_DRAINAGE_FULL_CREDIT_ACRES,
             "ceiling_acres": MAX_VALLEY_CONTRIBUTING_AREA_ACRES,
         },
-        "compartment_rank_score": {
-            "min": 0.0,
-            "max": 1.0,
-            "higher_is_better": True,
-            "weights": dict(EMBANKMENT_COMPARTMENT_RANK_WEIGHTS),
-        },
     }
 
 
@@ -5624,15 +5672,18 @@ def build_narrative_data(result: dict) -> dict:
     when TWI became absolute -- so the report layer states the real
     limitation and cannot revive the old one.
 
-    AN EMBANKMENT BLOCK NOW CARRIES THREE NUMBERS WHERE IT CARRIED ONE,
-    and they are three because they answer three questions that must
-    stay answerable apart: seed_blend_score (is the storage ground any
-    good?), pinch_catchment_acres with pinch_drainage_score (is there
-    water above the dam reach to fill it?), and compartment_rank_score
-    (the documented v1 combination the rank was assigned on). Reporting
-    only the composite would let a compartment with excellent ground and
-    no catchment read as a middling site rather than as the specific,
-    reportable finding it is.
+    AN EMBANKMENT BLOCK CARRIES BOTH OF ITS CLAIMS, SEPARATELY, and that
+    is the point of reporting them at all: seed_blend_score (is the
+    storage ground any good?) and pinch_catchment_acres with
+    pinch_drainage_score (is there water above the dam reach to fill
+    it?). A single combined number would let a compartment with
+    excellent ground and no catchment read as a middling site rather
+    than as the specific, reportable finding it is -- which is one of
+    the reasons the composite that used to ride here is retired. The
+    OTHER reason is that it was the number `rank` was assigned on while
+    the panel displayed a different one; rank now reads
+    mean_suitability, the displayed score, and these two claims inform a
+    reader without quietly reordering anything for them.
 
     TWO BLOCKS EXIST FOR THE INTERACTIVE PANEL RATHER THAN THE REPORT,
     and they are built here because they are readings OF these same
@@ -5654,8 +5705,8 @@ def build_narrative_data(result: dict) -> dict:
     ("/100" as the row's unit, min/max in the scale entry). EVERY VALUE
     IN THE BLOCK ITSELF IS UNCHANGED AND STAYS 0-1 --
     `mean_suitability`, `max_suitability`, each criterion's
-    `mean_score`, `seed_blend_score`, `pinch_drainage_score`,
-    `compartment_rank_score` -- because this block is the measurement
+    `mean_score`, `seed_blend_score`, `pinch_drainage_score` -- because
+    this block is the measurement
     record the report and the diagnostic read, and the panel is a
     READING of it. The two carry the same fact at two scales on purpose,
     under two different names, and a consumer can always tell which it
@@ -5772,17 +5823,18 @@ def build_narrative_data(result: dict) -> dict:
                     # reach, and what the (unchanged) embankment
                     # drainage band scores it. Acres, already imperial.
                     # Reported beside the anchor claim rather than
-                    # inside compartment_rank_score, so the report can
-                    # say "good ground, no water above it" -- which on
-                    # this pipeline's reference property may well be
-                    # the honest finding.
+                    # combined with it, so the report can say "good
+                    # ground, no water above it" -- which on this
+                    # pipeline's reference property may well be the
+                    # honest finding. NEITHER CLAIM IS A RANKING
+                    # INPUT any more: `rank` in this same block is
+                    # assigned on mean_suitability, which the block also
+                    # carries, so the rank is checkable against the
+                    # number the panel prints rather than against a
+                    # composite the panel never showed.
                     "pinch_catchment_acres": round(zone["pinch_catchment_acres"], 2),
                     "pinch_drainage_score": zone["pinch_drainage_score"],
                     "catchment_ceiling_acres": zone["catchment_ceiling_acres"],
-                    # The composite the rank above was assigned on --
-                    # published so the rank is checkable against its two
-                    # inputs, never as a replacement for them.
-                    "compartment_rank_score": zone["compartment_rank_score"],
                     "pinch_width_ft": _feet(zone["pinch"]["width_m"]),
                     "pinch_walk_distance_ft": _feet(zone["pinch"]["walk_distance_m"]),
                     # The terminal-pinch disclosure: None for an
@@ -5912,16 +5964,13 @@ def build_narrative_data(result: dict) -> dict:
         "selection": {
             "selected_zone_id": selected["id"] if selected is not None else None,
             "selected_survey_type": selected["survey_type"] if selected is not None else None,
-            # PROVISIONAL pooling rule, restated where the report reads it
-            # -- see select_survey_zone().
-            # NAMES BOTH INSTRUMENTS, because the pool compares two:
-            # an embankment compartment's seed-blend/pinch-drainage
-            # composite against an excavated zone's member-mean
-            # suitability. Still PROVISIONAL -- see select_survey_zone().
-            "selection_rule": (
-                "pooled_embankment_compartment_rank_score_vs_excavated_member_mean_suitability"
-                "_acreage_tiebreak"
-            ),
+            # PROVISIONAL pooling rule, restated where the report reads
+            # it -- see select_survey_zone(). NAMES THE ONE NUMBER the
+            # pool now reads, which is the same number rank reads and
+            # the panel displays; what stays provisional is pooling two
+            # differently-weighted surfaces at all, not which instrument
+            # each side brings to it.
+            "selection_rule": "pooled_mean_suitability_acreage_tiebreak",
         },
         "zones": zone_blocks,
     }
@@ -5949,11 +5998,12 @@ def summarize_water_survey_areas(result: dict) -> str:
 
     EVERY OTHER SCORE ON THESE LINES STAYS 0-1 and is printed as
     computed -- the per-criterion means, the seed blend, the drainage
-    score, the rank composite. They sit here next to the weights and
-    breakpoints that produced them (the rank score is printed as its own
-    arithmetic), and a display number in that company would be a number
-    the line's own equation no longer balances. The "/100" on the mean
-    is what keeps the two kinds apart on one line."""
+    score. They sit here next to the weights and breakpoints that
+    produced them, and a display number in that company would be a
+    number the line's own equation no longer balances. The "/100" on the
+    mean is what keeps the two kinds apart on one line -- and the mean
+    is the one that carries the rank, so the converted number and the
+    ranked number are the same measurement, printed once each way."""
     zones = result["zones"]
     dropped = result["dropped_zones"]
     seeds = result.get("embankment_seeds", [])
@@ -6005,9 +6055,8 @@ def summarize_water_survey_areas(result: dict) -> str:
                 f"cell -> drainage {zone['pinch_drainage_score']} "
                 f"(band {EMBANKMENT_DRAINAGE_MIN_ACRES}-{EMBANKMENT_DRAINAGE_FULL_CREDIT_ACRES} ac "
                 f"ramp, {zone['catchment_ceiling_acres']} ac ceiling); "
-                f"rank score {zone['compartment_rank_score']} "
-                f"= {EMBANKMENT_COMPARTMENT_RANK_WEIGHTS['seed_blend']}*seed "
-                f"+ {EMBANKMENT_COMPARTMENT_RANK_WEIGHTS['pinch_drainage']}*drainage"
+                f"informs the reader, not the rank -- rank {zone['rank']} is the compartment "
+                f"mean's position among the embankment survivors"
             )
         else:
             lines.append(

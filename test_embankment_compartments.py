@@ -1130,14 +1130,24 @@ _ = 101.5 - selected["representative_elevation_m"]              # keypoint eleva
 _ = f"Water zone {selected['id']}: log line"                    # render_layout_map id branch
 print("   Contract: the rank-1 compartment carries every consumer access pattern intact.")
 
-# --- terminal-pinch compartment as the pooled RANK-1, full compute path ---
+# --- terminal-pinch compartment as its type's RANK-1, full compute path ---
 # Fixture A2 with the parcel line drawn at the FIRST waist row (28):
 # the winning seed's walk is cut at the line while still narrowing, the
 # terminal minimum is accepted, and the boundary-flagged compartment is
-# the pooled rank-1 -- the first networked run's pinch_off_parcel
+# the embankment rank-1 -- the first networked run's pinch_off_parcel
 # failures, converted into the property's honest answer. (The same
 # case runs through the real build_pipeline_context() in
 # test_pipeline_context.py.)
+#
+# IT IS NOT THE POOLED WINNER, and that is asserted rather than worked
+# around: the compartment's walked mean is 0.396 against the excavated
+# zone's 0.544, and ranking now reads exactly the score each zone
+# displays. Under the retired composite the compartment's claims carried
+# it over the excavated zone, so a terminal-pinch disclosure could ride
+# `selected_water_zone` -- which is precisely the coupling this section
+# should not depend on. What it is testing is the DISCLOSURE on a
+# terminal-pinch compartment, so it reaches that compartment by its own
+# identity.
 WAIST_BOUNDARY = box(
     ORIGIN_X + 1 * RESOLUTION + 0.1,
     ORIGIN_Y - 29 * RESOLUTION + 0.1,
@@ -1150,11 +1160,19 @@ WAIST_BOUNDARY = box(
 terminal_result = compute_water_survey_areas(
     A2_DEM, WAIST_BOUNDARY, flow_accumulation=a2_accumulation
 )
-terminal_zone = terminal_result["selected_water_zone"]
-assert terminal_zone is not None and terminal_zone["survey_type"] == SURVEY_TYPE_EMBANKMENT, (
-    "the boundary-terminal compartment is the pooled rank-1 on this fixture"
+terminal_embankment = terminal_result["zones_by_type"][SURVEY_TYPE_EMBANKMENT]
+assert len(terminal_embankment) == 1, (
+    "this fixture's premise: one surviving compartment, the boundary-terminal one"
 )
-assert terminal_zone["rank"] == 1
+terminal_zone = terminal_embankment[0]
+assert terminal_zone["survey_type"] == SURVEY_TYPE_EMBANKMENT
+assert terminal_zone["rank"] == 1, "rank 1 WITHIN its type, which is what rank means"
+_terminal_exc = terminal_result["zones_by_type"][SURVEY_TYPE_EXCAVATED]
+assert terminal_result["selected_water_zone"] is _terminal_exc[0], (
+    "and the POOL goes to the higher displayed score -- excavated "
+    f"{_terminal_exc[0]['mean_suitability']} over the compartment's {terminal_zone['mean_suitability']}. "
+    "A terminal pinch is a disclosure about a compartment, not a claim on the pool"
+)
 assert terminal_zone["pinch"]["rowcol"] == (28, A_CHANNEL), "the dam reach sits at the line"
 assert terminal_zone["pinch_terminal"] == "boundary"
 assert terminal_zone["still_narrowing_at_termination"] is True
@@ -1189,8 +1207,9 @@ assert terminal_feature["properties"]["width_profile_min_m"] == terminal_zone["p
 assert wsa.FLAG_PINCH_AT_BOUNDARY in terminal_feature["properties"]["flags"]
 print(
     f"   Terminal rank-1: the boundary-cut walk yields a {terminal_zone['zone_acres']} ac compartment "
-    "with pinch_at_boundary + still_narrowing_at_termination, selected, contract intact, disclosure "
-    "on the narrative block and the wire."
+    "with pinch_at_boundary + still_narrowing_at_termination, rank 1 of its type (the pool goes to "
+    "the higher-displayed excavated zone), contract intact, disclosure on the narrative block and "
+    "the wire."
 )
 
 # --- 7 [7]. excavated regression: byte-identical roadless, clipped+flagged with a road ---
