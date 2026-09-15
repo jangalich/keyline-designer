@@ -1155,13 +1155,59 @@ EMBANKMENT_PINCH_WALK_MAX_METERS = 100.0
 # CONFIGURABLE.
 RIDGE_PROMINENCE_METERS = 1.0
 
-# Bound on each outward crest walk's half-width. A "valley" wider than
-# ~200 m crest-to-crest is not a pond narrows at this pipeline's parcel
-# scale, and an unbounded walk on a plain would march to the grid edge.
-# Hitting the bound is FLAGGED (half_width_bound_hit), never silent:
-# the width recorded at a bounded station is a floor on the truth, not
-# a measurement of it. v1 prior, TUNE FROM FIRST RUN. CONFIGURABLE.
-RIDGE_WALK_MAX_HALF_WIDTH_METERS = 100.0
+# Bound on each outward crest walk's half-width. An unbounded walk on a
+# plain would march to the grid edge, so a cap is needed; hitting it is
+# FLAGGED (half_width_bound_hit), never silent, because the width
+# recorded at a bounded station is a floor on the truth rather than a
+# measurement of it.
+#
+# 150 m, MEASURED, NOT ASSUMED -- and this is the one constant on this
+# path whose value came off a curve rather than a prior. The 100 m it
+# replaces was a v1 guess ("a valley wider than ~200 m crest-to-crest is
+# not a pond narrows at this parcel scale"), and the sweep the bound
+# branch shipped took the reference property's whole station population
+# at three values:
+#
+#     bound     absent flanks     stopped BY THE BOUND     at the grid edge
+#     100 m         107                   107                     0
+#     150 m          29                    29                     0
+#     200 m           8                     8                     0
+#
+# The 100 m cap was suppressing roughly four-fifths of the crest
+# measurements this pipeline could have made, on a DEM window that had
+# room to spare -- ZERO stations ran out of grid at ANY swept value, so
+# nothing was being stopped by data extent.
+#
+# WHY 150 AND NOT 200. 150 takes the knee: 5.6% of flanks still absent
+# against 37% at 100 m, so most of the recoverable measurement is
+# recovered. The 1.5% still absent at 200 m are, on this terrain, very
+# likely genuinely unbounded hillside rather than a shoulder just out of
+# reach -- ground where the crest concept does not apply -- and chasing
+# them costs walk distance on EVERY station of EVERY seed, not just the
+# ones that would benefit.
+#
+# THIS IS NOT A FREE COMPLETENESS GAIN. A longer walk changes measured
+# widths, the width profile's minimum moves with them, and the minimum
+# IS the dam cell -- so catchments, baselines, transects and drawn zones
+# all move. The bound branch's attribution table reports exactly what
+# moved and why; it is not a number to change without rerunning it.
+#
+# CALIBRATED ON ONE PROPERTY'S TERRAIN. The curve above is a single
+# parcel's, and a flatter or more open landscape could put the knee
+# elsewhere. diagnose_pinch_bearing_and_bound.py still prints the sweep
+# at 100/150/200 on every run, so the choice stays re-measurable rather
+# than becoming folklore. CONFIGURABLE.
+#
+# A CAVEAT THE CURVE CANNOT SETTLE BY ITSELF: get_dem_for_boundary()
+# fetches the boundary bbox plus dem_data.DEFAULT_BUFFER_METERS (100 m),
+# so a 150 m half-width walk from a station near the parcel edge can in
+# principle reach past the fetched window. It did not on the reference
+# property -- zero grid-edge stops at any swept value -- but where it
+# does, the walk ends at the array edge and the instrument tallies it
+# under LEFT-THE-GRID rather than RAN-THE-BOUND, which is the honest
+# reading: a DEM-extent limit says nothing about terrain and nothing
+# about this constant.
+RIDGE_WALK_MAX_HALF_WIDTH_METERS = 150.0
 
 # How walk_embankment_pinch() reads the channel's direction at a station,
 # which is the line every width it measures is taken perpendicular to.
@@ -3294,10 +3340,11 @@ def crest_height_above_channel(dem: dict, crest_walk: dict, channel_rowcol: tupl
     output) carries depression fill and flat-resolution epsilon
     increments, which are hydrological bookkeeping and not terrain
     truth. A filled pocket anywhere on the transect would inflate a
-    channel elevation and shrink the height it is subtracted from.
-    ridge_crest_walk() already samples the raw array, so crest_
-    elevation_m is raw; the channel reading below is taken from the same
-    array.
+    channel elevation and shrink the height it is subtracted from. Both
+    readings below come from dem["array"] directly -- the crest one
+    re-read at crest_rowcol rather than taken from the walk's
+    already-rounded crest_elevation_m, so the subtraction rounds once
+    instead of twice (see the code).
 
     WHAT THE NUMBER IS -- "HEIGHT TO THE NEAREST LOCAL CREST", NOT
     "HEIGHT TO THE RIDGE LINE". A crest is declared under the
@@ -3341,12 +3388,22 @@ def crest_height_above_channel(dem: dict, crest_walk: dict, channel_rowcol: tupl
     """
     if crest_walk["bound_hit"]:
         return None
-    crest_elevation = crest_walk["crest_elevation_m"]
-    if crest_elevation is None:
+    crest_rowcol = crest_walk["crest_rowcol"]
+    if crest_rowcol is None:
         return None
-    row, col = channel_rowcol
-    channel_elevation = float(dem["array"][row, col])
-    if math.isnan(channel_elevation):
+    # BOTH ELEVATIONS RAW AND UNROUNDED, and the crest one is re-read at
+    # crest_rowcol rather than taken from the walk's crest_elevation_m.
+    # That field is already rounded to 2 dp, so subtracting an unrounded
+    # channel elevation from it computed round(round(e, 2) - e, 2) and
+    # put up to +/-0.005 m of DOUBLE-ROUNDING error on every crest
+    # height -- most visibly as a -0.00 where the crest IS the station
+    # cell and the true answer is exactly zero. Rounding once, at the
+    # end, is the whole fix. (The walk still reports its own rounded
+    # crest_elevation_m for readers who want it; this function just
+    # stops building on it.)
+    channel_elevation = float(dem["array"][channel_rowcol[0], channel_rowcol[1]])
+    crest_elevation = float(dem["array"][crest_rowcol[0], crest_rowcol[1]])
+    if math.isnan(channel_elevation) or math.isnan(crest_elevation):
         return None
     return round(crest_elevation - channel_elevation, 2)
 
@@ -4817,6 +4874,7 @@ def compute_water_survey_areas(
     slope_pct: Optional[np.ndarray] = None,
     flow_to_row: Optional[np.ndarray] = None,
     flow_to_col: Optional[np.ndarray] = None,
+    max_half_width_meters: float = RIDGE_WALK_MAX_HALF_WIDTH_METERS,
 ) -> dict:
     """
     Pure computation over already-fetched inputs -- no network I/O
@@ -4985,6 +5043,7 @@ def compute_water_survey_areas(
         flow_to_row,
         flow_to_col,
         gate_context,
+        max_half_width_meters=max_half_width_meters,
     )
     # THE COMPARTMENT-LEVEL CEILING, APPLIED BEFORE DEDUPE. The pinch
     # cell sits downstream of its gated seed, so its catchment can
@@ -6522,6 +6581,7 @@ def identify_water_survey_areas(
     soil_inputs=_SOIL_INPUTS_NOT_SUPPLIED,
     check_soil: bool = True,
     threshold: float = SUITABILITY_THRESHOLD,
+    max_half_width_meters: float = RIDGE_WALK_MAX_HALF_WIDTH_METERS,
 ) -> dict:
     """
     Full water-step entry point: fetches whatever wasn't supplied,
@@ -6629,6 +6689,7 @@ def identify_water_survey_areas(
         road_exclusion_union_utm=road_exclusion_union_utm,
         soil_inputs=soil_inputs,
         threshold=threshold,
+        max_half_width_meters=max_half_width_meters,
     )
 
     return {

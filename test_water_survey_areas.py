@@ -1844,8 +1844,17 @@ both_result = compute_water_survey_areas(_both_dem, _both_boundary, flow_accumul
 _both_summary, _both_presented, _both_unpresented = _assert_presentation_invariants(
     both_result, "case 1 (both types 2+)"
 )
-assert (len(both_result["zones_by_type"][SURVEY_TYPE_EMBANKMENT]),
-        len(both_result["zones_by_type"][SURVEY_TYPE_EXCAVATED])) == (9, 2), (
+# THE PREMISE, STATED AS THE PREMISE. This asserted (9, 2) until the
+# half-width bound went 100 -> 150 m; the embankment count is now 7,
+# because a longer crest walk changes measured widths, the profile
+# minimum moves with them, and two more of these near-identical parallel
+# compartments collapse into their neighbours at dedupe. What the case
+# needs is that BOTH types clear the per-type presentation target of 2,
+# so the interleave fills all four slots and nothing is backfilled --
+# never a particular count.
+_both_emb_count = len(both_result["zones_by_type"][SURVEY_TYPE_EMBANKMENT])
+_both_exc_count = len(both_result["zones_by_type"][SURVEY_TYPE_EXCAVATED])
+assert _both_emb_count >= 2 and _both_exc_count >= 2, (
     "the fixture's premise: both types produced at least the per-type target "
     f"{[(t, len(v)) for t, v in both_result['zones_by_type'].items()]}"
 )
@@ -1861,14 +1870,16 @@ assert [(z["survey_type"], z["rank"]) for z in _both_presented] == [
     "list with the other appended, and not ordered by comparing the two types' scores (that "
     "cross-instrument pool is confined to select_survey_zone, deliberately)"
 )
-assert len(_both_unpresented) == 7, (
-    "seven survivors are unpresented AND STILL IN THE PAYLOAD -- this is the case the deleted cap "
-    "got wrong, so the fixture that has the most to lose is the one asserted hardest"
+assert len(_both_unpresented) == _both_emb_count + _both_exc_count - 4, (
+    "every survivor the four presented slots did not take is unpresented AND STILL IN THE PAYLOAD "
+    "-- this is the case the deleted cap got wrong, so the fixture that has the most to lose is "
+    f"the one asserted hardest: {len(_both_unpresented)} unpresented"
 )
+assert len(_both_unpresented) > 0, "and there must BE leftovers, or the case proves nothing"
 print(
-    f"Presentation case 1 (both types 2+): 9 embankment + 2 excavated survivors -> "
-    f"{_both_summary['rule_applied']}, interleaved, no backfill, 7 unpresented survivors all still "
-    "in the payload and on the wire."
+    f"Presentation case 1 (both types 2+): {_both_emb_count} embankment + {_both_exc_count} "
+    f"excavated survivors -> {_both_summary['rule_applied']}, interleaved, no backfill, "
+    f"{len(_both_unpresented)} unpresented survivors all still in the payload and on the wire."
 )
 
 # --- CASE 2: ONE EXCAVATED SURVIVOR -> 2 embankment + 1 excavated + 1

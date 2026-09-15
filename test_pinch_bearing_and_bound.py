@@ -477,19 +477,29 @@ _tally_150 = _absent_tally(_resolved, 150.0)
 assert _tally_150 == {"absent": 1, "total": 2, "at_bound": 0, "at_edge": 1}, _tally_150
 
 assert HALF_WIDTH_SWEEP_METERS == (100.0, 150.0, 200.0)
-assert RIDGE_WALK_MAX_HALF_WIDTH_METERS == 100.0, (
-    "THE SWEEP CHOOSES NOTHING: the shipped constant is untouched by this branch, and the "
-    "instrument reports a curve so a value can be chosen from evidence later"
-)
+# THIS BRANCH CHOSE NOTHING; A LATER ONE DID. The assertion here was
+# "RIDGE_WALK_MAX_HALF_WIDTH_METERS == 100.0 -- the sweep chooses
+# nothing", which was this branch's whole discipline: report a curve,
+# leave the constant alone. The curve then chose, and the bound moved to
+# 150 m on its own branch with its own attribution rerun. The discipline
+# is unchanged and still asserted -- what is pinned is that the SWEEP
+# still brackets whatever is shipped, so the choice stays re-measurable
+# from the instrument rather than frozen. (The 150 m evidence lives in
+# test_crest_bound_150.py and in the constant's own docstring.)
 assert RIDGE_WALK_MAX_HALF_WIDTH_METERS in HALF_WIDTH_SWEEP_METERS, (
-    "the sweep contains its own baseline, so the curve is readable against what shipped"
+    f"the sweep must contain the shipped value ({RIDGE_WALK_MAX_HALF_WIDTH_METERS} m), so the "
+    "curve is readable against what shipped and a future change is measured, not guessed"
 )
+assert min(HALF_WIDTH_SWEEP_METERS) < RIDGE_WALK_MAX_HALF_WIDTH_METERS < max(
+    HALF_WIDTH_SWEEP_METERS
+), "and must BRACKET it, so the curve shows both what was given up and what is left on the table"
 
 print(
     f"5. Bound sweep: a shoulder at 117.5 m is ABSENT at the 100 m bound (gave up exactly at it) "
     f"and measured at 150 m with its hand-derived 4.00 m height; a flank leaving the grid at "
-    f"{_off_grid['half_width_m']} m is tallied as GRID EDGE, never as bound; and "
-    f"RIDGE_WALK_MAX_HALF_WIDTH_METERS stays {RIDGE_WALK_MAX_HALF_WIDTH_METERS} m -- nothing chosen."
+    f"{_off_grid['half_width_m']} m is tallied as GRID EDGE, never as bound; and the sweep "
+    f"{HALF_WIDTH_SWEEP_METERS} still brackets the shipped "
+    f"{RIDGE_WALK_MAX_HALF_WIDTH_METERS} m, so the choice stays re-measurable."
 )
 
 
