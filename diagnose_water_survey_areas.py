@@ -157,6 +157,9 @@ from production_area_ceiling import identify_optimized_production_areas
 from raster_grid import cell_area_acres, connected_components, pixel_center_xy
 from rasterio.warp import transform_geom
 from shapely.geometry import mapping
+# The BEARING A/B instrument (diagnostic-only, imported by no production
+# path -- see the module's own docstring and the AST pin in its tests).
+from diagnose_transect_bearing import summarize_transect_bearing_comparison
 from water_survey_areas import (
     DEPRESSION_FULL_CREDIT_METERS,
     DEPRESSION_NOISE_FLOOR_METERS,
@@ -2127,6 +2130,14 @@ def main() -> None:
     production_areas = identify_result["_production_areas"]
 
     print(summarize_survey_zones_table(identify_result))
+    print()
+    # THE BEARING A/B, printed directly after the zone table (and so
+    # directly after the enclosure-depth lines it interrogates): is the
+    # shallow enclosure those lines report a fact about this parcel, or
+    # an artifact of the transects running perpendicular to the
+    # seed->pinch BASELINE rather than to the local channel? Read-only;
+    # it re-measures and compares, and changes nothing.
+    print(summarize_transect_bearing_comparison(dem, identify_result))
     print()
     print(summarize_seed_ladder(identify_result))
     print()
