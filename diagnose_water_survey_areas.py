@@ -165,6 +165,7 @@ from diagnose_pinch_bearing_and_bound import (
     summarize_bound_outcome_shift,
     summarize_dam_site_objective,
     summarize_pinch_bearing_and_bound,
+    summarize_shoulder_gate,
 )
 from diagnose_transect_bearing import summarize_transect_bearing_comparison
 from water_survey_areas import (
@@ -2176,6 +2177,11 @@ def main() -> None:
     # attribution it extends: which station the RETIRED minimum-width
     # rule picks against what each candidate exponent picks, per seed.
     print(summarize_dam_site_objective(dem, identify_result["result"]))
+    print()
+    # THE ENCLOSURE GATE, printed after the objective it qualifies: what
+    # every selected dam site on this parcel actually holds, the
+    # distribution across all of them, and the sensitivity ladder.
+    print(summarize_shoulder_gate(identify_result["result"]))
     print()
     # THE OUTCOME SHIFT: the same water step run a second time at the
     # RETIRED half-width bound, with this run's own DEM and production

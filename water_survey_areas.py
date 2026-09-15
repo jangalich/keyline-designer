@@ -1295,6 +1295,40 @@ DAM_SITE_HEIGHT_EXPONENT = DAM_SITE_HEIGHT_EXPONENT_STORAGE
 DAM_SITE_SELECTION_RATIO = "ratio"
 DAM_SITE_SELECTION_MIN_WIDTH = "min_width"
 
+# THE MINIMUM BINDING SHOULDER a dam site must offer to be a dam site at
+# all. EXTERNALLY ANCHORED, not tuned.
+#
+# NRCS Conservation Practice Standard 378 (Pond) classifies an
+# impoundment as an EMBANKMENT POND at 3 ft -- 0.91 m -- of water
+# impounded against the embankment. A site whose BINDING (lower)
+# shoulder stands below that cannot hold the minimum impoundment the
+# practice standard recognises, whatever its width and whatever its
+# catchment: water reaching 0.91 m simply runs around the low abutment.
+#
+# THE BRACKET, stated the way POOL_REFERENCE_HEIGHT_METERS states its
+# own. CPS 378's 3 ft is the FLOOR of the range this tool works in;
+# valley_level_pool.POOL_REFERENCE_HEIGHT_METERS (2.5 m) is the
+# measuring stick the level-pool arc compares candidate sites against,
+# the upper end. 0.91 m is deliberately the PERMISSIVE end: a site is
+# refused only when it cannot support the smallest pond the standard
+# recognises, never merely for being modest.
+#
+# AND THE NUMBER THAT BELONGS IN THE RECORD: on the reference property
+# the deepest binding shoulder measured ANYWHERE, under any bearing,
+# any half-width bound and either objective, is 2.27 m. A gate at the
+# 2.5 m pool reference height would therefore leave ZERO embankment
+# survivors on that parcel. That is the sharpest single statement of
+# the TERRAIN verdict this project has produced, and it is why the gate
+# sits at the permissive end rather than at the measuring stick.
+#
+# RIDGE_PROMINENCE_METERS IS NOT THIS LEVER AND DOES NOT MOVE. It is a
+# crest DETECTOR -- "is this a local high point or LiDAR speckle?" --
+# and 1.0 m sits well clear of 3DEP's ~10 cm vertical accuracy.
+# Lowering it would declare crests on noise; raising it would miss real
+# small shoulders. Detection was never the problem; QUALIFICATION was
+# missing, and this constant is qualification. CONFIGURABLE.
+MIN_BINDING_SHOULDER_METERS = 0.91
+
 # When two compartments overlap by more than this fraction of the
 # SMALLER one's area, they are duplicates -- two seeds describing one
 # valley compartment -- and collapse to the higher-blend seed's
@@ -1637,6 +1671,12 @@ tightening."""
 # in view. See REASON_CATCHMENT_EXCEEDS_CEILING for the reasoning.
 FLAG_CATCHMENT_EXCEEDS_CEILING = "catchment_exceeds_ceiling"
 
+# The enclosure disqualifier as a FLAG as well as a drop reason, the same
+# pairing FLAG_CATCHMENT_EXCEEDS_CEILING keeps, so the finding rides
+# zone['flags'] and is readable on the wire wherever the drop reason is
+# not in view. See REASON_SHOULDER_BELOW_MINIMUM.
+FLAG_SHOULDER_BELOW_MINIMUM = "shoulder_below_minimum"
+
 # THE WALK FAILURES, SPLIT BY WHAT ACTUALLY WENT WRONG.
 #
 # RETIRED: "no_constriction". That name was correct only while the
@@ -1672,6 +1712,33 @@ compartment needs a baseline from the seed to the dam reach, and a
 baseline of zero length is not one. Kept DISTINCT from the two codes
 above because it is a statement about the SHAPE of a real measured
 profile, not about a missing measurement."""
+
+REASON_SHOULDER_BELOW_MINIMUM = "shoulder_below_minimum"
+"""THE SITE CANNOT IMPOUND. A compartment was built -- the walk found
+its best dam site and the objective chose it -- but that site's BINDING
+(lower) shoulder stands below MIN_BINDING_SHOULDER_METERS, so it cannot
+hold the 3 ft impoundment CPS 378 recognises as an embankment pond.
+
+A GATE, NOT A SCORE PENALTY AND NOT A SELECTION FILTER, and the
+separation is deliberate. The objective still picks the BEST available
+station out of the profile; this then asks whether the best available is
+good enough. Keeping the two apart is what lets the diagnostic say "the
+best site this reach offers holds 0.4 m" instead of silently reporting
+no site at all -- the reach, its chosen station and its measured
+shoulder all survive on the dropped record.
+
+DISTINCT FROM REASON_NO_MEASURABLE_SHOULDER, and the two must never be
+merged: that one means no station on the walk had a shoulder to
+measure, this one means one was measured and it is too low. An absent
+shoulder is still SKIPPED at selection, unchanged.
+REASON_BEST_SITE_AT_SEED takes precedence over both -- it fails before
+there is a site to gate at all.
+
+Applied BEFORE the acreage floor and BEFORE the overlap dedupe, the
+same ordering REASON_CATCHMENT_EXCEEDS_CEILING uses and for the same
+two reasons: a compartment refused for enclosure is reported for THAT
+rather than for being small, and a compartment that cannot impound must
+not be able to take a valid neighbour with it as a duplicate."""
 
 REASON_CATCHMENT_EXCEEDS_CEILING = "catchment_exceeds_ceiling"
 """THE 20-ACRE CEILING AS A COMPARTMENT-LEVEL DISQUALIFIER, the second
@@ -4415,6 +4482,28 @@ def build_embankment_compartment(
     if pinch_catchment["exceeds_ceiling"]:
         flags.append(FLAG_CATCHMENT_EXCEEDS_CEILING)
 
+    # THE ENCLOSURE GATE, evaluated here and ACTED ON in the compute core
+    # (before dedupe and before the floor -- see
+    # REASON_SHOULDER_BELOW_MINIMUM). The compartment is built out
+    # COMPLETE either way, exactly as the catchment ceiling builds out a
+    # refused reach: the chosen station, its measured shoulder and the
+    # whole walk stay on the record so the diagnostic can report what the
+    # reach actually offers rather than reporting nothing.
+    #
+    # The selected station always HAS a binding height by construction --
+    # dam_site_score() refuses to score a station whose shoulder is
+    # absent, so an unscoreable station can never be chosen. The None
+    # branch is therefore unreachable; it is written as "cannot judge,
+    # do not gate" rather than as a crash, because a gate that fires on
+    # a missing measurement would be the absent-is-not-zero error in its
+    # most damaging form.
+    binding_height = walk["pinch_binding_height_m"]
+    shoulder_below_minimum = (
+        binding_height is not None and binding_height < MIN_BINDING_SHOULDER_METERS
+    )
+    if shoulder_below_minimum:
+        flags.append(FLAG_SHOULDER_BELOW_MINIMUM)
+
     measurements = _measure_member_cells(
         dem,
         measurement_cells,
@@ -4524,6 +4613,13 @@ def build_embankment_compartment(
             "width_profile_min_m": walk["width_profile_min_m"],
             "width_profile_max_m": walk["width_profile_max_m"],
         },
+        # THE ENCLOSURE GATE'S VERDICT AND ITS INPUTS, both on the
+        # record: what the best site this reach offers actually holds,
+        # and the bar it was held to. A reader must be able to see how
+        # far a refusal missed by, not only that it was refused.
+        "shoulder_below_minimum": shoulder_below_minimum,
+        "pinch_binding_height_m": binding_height,
+        "min_binding_shoulder_m": MIN_BINDING_SHOULDER_METERS,
         "pinch_terminal": pinch_terminal,
         "still_narrowing_at_termination": (
             pinch_terminal is not None and walk["still_narrowing_at_termination"]
@@ -5375,8 +5471,35 @@ def compute_water_survey_areas(
     within_ceiling_compartments = [
         compartment for compartment in compartments if not compartment["catchment_exceeds_ceiling"]
     ]
+
+    # THE ENCLOSURE GATE, PARTITIONED OUT ON THE SAME PRINCIPLE AND IN
+    # THE SAME PLACE as the catchment ceiling above -- before the overlap
+    # dedupe and before the acreage floor (see
+    # REASON_SHOULDER_BELOW_MINIMUM, and the epsilon-fill branch's
+    # ceiling-before-dedupe finding it follows).
+    #
+    # BEFORE THE FLOOR so a compartment that cannot impound is reported
+    # for THAT, not for being small: the two often coincide -- a site
+    # with no shoulder tends to draw a thin compartment -- and whichever
+    # reason is applied first is the one a reader sees.
+    #
+    # BEFORE DEDUPE for the sharper reason: a compartment that cannot
+    # hold water must not be able to take a valid neighbour out of the
+    # run as its duplicate. Left in the dedupe population it could win a
+    # valley on acreage alone and collapse a site that CAN impound into
+    # a duplicate_of_zone_<id> drop.
+    below_shoulder_compartments = [
+        compartment
+        for compartment in within_ceiling_compartments
+        if compartment["shoulder_below_minimum"]
+    ]
+    qualified_compartments = [
+        compartment
+        for compartment in within_ceiling_compartments
+        if not compartment["shoulder_below_minimum"]
+    ]
     kept_compartments, duplicate_compartments = dedupe_compartments_by_overlap(
-        within_ceiling_compartments
+        qualified_compartments
     )
 
     # One cross-type zone list: kept compartments and excavated zones
@@ -5384,7 +5507,11 @@ def compute_water_survey_areas(
     # compartments ride along for identity/attribution and are
     # force-dropped below.
     zones = (
-        kept_compartments + excavated_zones + duplicate_compartments + over_ceiling_compartments
+        kept_compartments
+        + excavated_zones
+        + duplicate_compartments
+        + over_ceiling_compartments
+        + below_shoulder_compartments
     )
 
     # Overlaps + gravity on the ZONE, both pure measurements over inputs
@@ -5494,8 +5621,23 @@ def compute_water_survey_areas(
     dropped_zones: list[dict] = []
     duplicate_set = {id(zone) for zone in duplicate_compartments}
     over_ceiling_set = {id(zone) for zone in over_ceiling_compartments}
+    below_shoulder_set = {id(zone) for zone in below_shoulder_compartments}
     for zone in zones:
-        if id(zone) in over_ceiling_set:
+        if id(zone) in below_shoulder_set:
+            # THE ENCLOSURE GATE: the best dam site this reach offers
+            # cannot hold the minimum impoundment CPS 378 recognises.
+            # Dropped with its full record -- the chosen station, its
+            # measured binding shoulder and the gate it missed -- so the
+            # diagnostic can report how far short the parcel's best
+            # available site falls, which is the finding.
+            zone["status"] = ZONE_STATUS_DROPPED
+            zone["drop_reason"] = REASON_SHOULDER_BELOW_MINIMUM
+            zone["rank"] = None
+            zone["presented"] = False
+            zone["presentation_order"] = None
+            zone["cross_type_overlaps"] = []
+            dropped_zones.append(zone)
+        elif id(zone) in over_ceiling_set:
             # The compartment-level catchment disqualifier, decided
             # before dedupe and before the floor: this compartment's
             # dam reach carries more catchment than farm-pond scale
@@ -5753,6 +5895,16 @@ def _zone_feature_properties(zone: dict) -> dict:
                 "pinch_drainage_score": zone["pinch_drainage_score"],
                 "catchment_exceeds_ceiling": zone["catchment_exceeds_ceiling"],
                 "catchment_ceiling_acres": zone["catchment_ceiling_acres"],
+                # THE ENCLOSURE GATE on the wire: the verdict, the
+                # measured binding shoulder at the CHOSEN dam site, and
+                # the bar it was held to. All three, because "refused"
+                # without "by how much" is not a measurement -- and a
+                # surviving zone carries them too, so a reader can see
+                # how close the parcel's sites sit to the threshold
+                # rather than only which side they fell.
+                "shoulder_below_minimum": zone["shoulder_below_minimum"],
+                "pinch_binding_height_m": zone["pinch_binding_height_m"],
+                "min_binding_shoulder_m": zone["min_binding_shoulder_m"],
                 "seed_rowcol": list(zone["seed"]["rowcol"]),
                 "pinch_rowcol": list(zone["pinch"]["rowcol"]),
                 "pinch_width_m": zone["pinch"]["width_m"],

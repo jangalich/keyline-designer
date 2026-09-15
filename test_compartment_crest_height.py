@@ -714,10 +714,32 @@ _wire_zone.update(
         "served_production_area_ids": [],
     }
 )
+# Keys added to the wire by branches that landed AFTER this file's six.
+# Named literally, with the branch that added each, so a later addition is
+# a deliberate line here rather than a quietly relaxed assertion. The
+# equality below still fails on an unrecorded key.
+LATER_BRANCH_PROPERTY_KEYS = frozenset(
+    {
+        # All three from "Minimum binding shoulder -- the dam site must
+        # be able to impound": the gate's verdict, the binding shoulder
+        # measured at the CHOSEN dam site (a walk field since "The dam
+        # site chooses on width AND height", promoted to the wire by the
+        # gate) and the threshold it was held to. A refusal has to be
+        # readable off the feature together with how far it missed by.
+        "shoulder_below_minimum",
+        "pinch_binding_height_m",
+        "min_binding_shoulder_m",
+    }
+)
+
 _properties = _zone_feature_properties(_wire_zone)
 _added = set(_properties) - MAIN_PROPERTY_KEYS
-assert _added == set(HEIGHT_FIELDS), (
-    f"this branch adds exactly the six crest-height keys and nothing else; added {sorted(_added)}"
+assert _added == set(HEIGHT_FIELDS) | LATER_BRANCH_PROPERTY_KEYS, (
+    "the wire gains exactly the six crest-height keys plus the keys later branches recorded in "
+    f"LATER_BRANCH_PROPERTY_KEYS and nothing else; added {sorted(_added)}"
+)
+assert set(HEIGHT_FIELDS).isdisjoint(LATER_BRANCH_PROPERTY_KEYS), (
+    "a later branch may not launder one of this branch's six keys through the allowance list"
 )
 _removed = MAIN_PROPERTY_KEYS - set(_properties) - {"member_acres", "member_count", "member_ids"}
 assert not _removed, f"no existing consumer-read property may disappear: {sorted(_removed)}"
@@ -752,7 +774,8 @@ for _zone in _result["zones_by_type"][SURVEY_TYPE_EMBANKMENT]:
     _ = _zone["render_fill_polygon_utm"].buffer(6.096)
 
 print(
-    f"6. Contract: the wire property set gains exactly the six crest-height keys and loses none "
+    f"6. Contract: the wire property set gains the six crest-height keys plus "
+    f"{len(LATER_BRANCH_PROPERTY_KEYS)} keys from later branches, and loses none "
     f"({len(_properties)} properties on a compartment feature); the full compute still selects zone "
     f"{_selected['id']} ({_selected['survey_type']}) and every compartment's consumer access "
     "patterns are intact."

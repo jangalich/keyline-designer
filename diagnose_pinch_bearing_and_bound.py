@@ -56,6 +56,7 @@ about terrain.
 
 from typing import Optional
 
+from valley_level_pool import POOL_REFERENCE_HEIGHT_METERS
 from water_survey_areas import (
     DAM_SITE_HEIGHT_EXPONENT,
     DAM_SITE_HEIGHT_EXPONENT_LINEAR,
@@ -64,7 +65,10 @@ from water_survey_areas import (
     DAM_SITE_SELECTION_RATIO,
     PINCH_BEARING_D8,
     PINCH_BEARING_SECANT,
+    MIN_BINDING_SHOULDER_METERS,
+    REASON_SHOULDER_BELOW_MINIMUM,
     RIDGE_WALK_MAX_HALF_WIDTH_METERS,
+    SURVEY_TYPE_EMBANKMENT,
     generate_embankment_compartments,
 )
 
@@ -396,6 +400,132 @@ def _delta(new: Optional[float], old: Optional[float]) -> str:
         return f"{old:.2f} -> absent"
     difference = new - old
     return f"{difference:+.2f}" if difference else "unchanged"
+
+
+# The sensitivity ladder. DIAGNOSTIC-ONLY: the shipped gate, a midpoint,
+# and the level-pool arc's own measuring stick. The line reports how many
+# compartments clear each; it chooses nothing, the same curve-then-choose
+# discipline the half-width sweep used.
+SHOULDER_SENSITIVITY_METERS = (MIN_BINDING_SHOULDER_METERS, 1.5, POOL_REFERENCE_HEIGHT_METERS)
+
+
+def summarize_shoulder_gate(result: dict) -> str:
+    """THE ENCLOSURE GATE'S REPORT: what every selected dam site on this
+    parcel actually holds, against the bar it is held to.
+
+    THE DISTRIBUTION IS THE POINT, not the pass/fail count. A reader
+    needs to see how far this land sits from being able to impound --
+    whether the refusals missed by centimetres or by metres -- because
+    that is the difference between a threshold worth revisiting and a
+    parcel with no embankment sites on it. So every compartment's
+    binding shoulder is listed, survivors and refusals together, sorted.
+
+    Reads the compute core's own return: refused compartments keep their
+    full record on dropped_zones, which is what makes this reportable at
+    all."""
+    surviving = list(result["zones_by_type"][SURVEY_TYPE_EMBANKMENT])
+    refused = [
+        zone
+        for zone in result["dropped_zones"]
+        if zone["survey_type"] == SURVEY_TYPE_EMBANKMENT
+        and zone["drop_reason"] == REASON_SHOULDER_BELOW_MINIMUM
+    ]
+    other_drops = [
+        zone
+        for zone in result["dropped_zones"]
+        if zone["survey_type"] == SURVEY_TYPE_EMBANKMENT
+        and zone["drop_reason"] != REASON_SHOULDER_BELOW_MINIMUM
+    ]
+    lines = [
+        "=== THE ENCLOSURE GATE: CAN THE CHOSEN DAM SITE IMPOUND? ===",
+        f"  MIN_BINDING_SHOULDER_METERS = {MIN_BINDING_SHOULDER_METERS} m -- NRCS CPS 378's 3 ft,",
+        "  the smallest impoundment the practice standard recognises as an embankment pond. A site",
+        "  whose BINDING (lower) shoulder stands below it cannot hold that, whatever its width or",
+        "  catchment. The objective still picks the best available station; this asks whether the",
+        "  best available is good enough, which is why a refusal can say what the reach offers.",
+        "",
+        f"  {len(surviving)} compartment(s) clear the gate, {len(refused)} refused by it, "
+        f"{len(other_drops)} dropped for other reasons.",
+        "",
+    ]
+
+    def _row(zone, verdict):
+        height = zone["pinch_binding_height_m"]
+        measured = "absent" if height is None else f"{height:.2f} m"
+        return (
+            f"    {verdict:>18}  zone {zone['id']:>3}  binding shoulder {measured:>8}  "
+            f"pinch {tuple(zone['pinch']['rowcol'])}  w {zone['pinch']['width_m']:.1f} m  "
+            f"hull {zone['zone_acres']:.4f} ac  catchment {zone['pinch_catchment_acres']:.2f} ac"
+        )
+
+    # EVERY COMPARTMENT THE RUN BUILT, not only the ones that reached the
+    # output. A compartment dropped at the acreage floor or as an overlap
+    # duplicate still HAS a selected dam site with a measured shoulder,
+    # and the question this section answers -- how far is this land from
+    # being able to impound -- is about the sites the walk found, not
+    # about which of them survived later rules. Each is labelled with
+    # what became of it so a reader can discount duplicates if they want.
+    lines.append("  EVERY SELECTED DAM SITE THE RUN FOUND, deepest first:")
+    _all = (
+        [(zone, "CLEARS") for zone in surviving]
+        + [(zone, "refused") for zone in refused]
+        + [(zone, str(zone["drop_reason"])[:18]) for zone in other_drops]
+    )
+    if not _all:
+        lines.append("    (no compartment was built on this parcel at all)")
+    for zone, verdict in sorted(
+        _all, key=lambda entry: -(entry[0]["pinch_binding_height_m"] or -1.0)
+    ):
+        lines.append(_row(zone, verdict))
+    if _all:
+        lines.append(
+            f"    ({len(surviving)} in the output, {len(refused)} refused by this gate, "
+            f"{len(other_drops)} dropped by a later rule -- every one a real chosen site)"
+        )
+
+    # --- THE DISTRIBUTION, which is the number that matters ---
+    _heights = [
+        zone["pinch_binding_height_m"]
+        for zone, _ in _all
+        if zone["pinch_binding_height_m"] is not None
+    ]
+    lines.append("")
+    if _heights:
+        _heights_sorted = sorted(_heights)
+        _median = _heights_sorted[len(_heights_sorted) // 2]
+        lines.append(
+            f"  DISTRIBUTION across {len(_heights)} selected dam site(s): "
+            f"min {min(_heights):.2f} m, median {_median:.2f} m, max {max(_heights):.2f} m "
+            f"(gate {MIN_BINDING_SHOULDER_METERS} m)."
+        )
+        lines.append("    " + " ".join(f"{height:.2f}" for height in _heights_sorted))
+        if max(_heights) < MIN_BINDING_SHOULDER_METERS:
+            lines.append(
+                "    NOT ONE SITE ON THIS PARCEL CLEARS THE GATE. That is a finding about the land, "
+                "not a defect in the threshold -- the best dam site the whole run could find cannot "
+                f"hold {MIN_BINDING_SHOULDER_METERS} m."
+            )
+    else:
+        lines.append("  DISTRIBUTION: no selected dam site carries a measured binding shoulder.")
+
+    # --- THE SENSITIVITY LADDER: how many survive at each bar ---
+    lines.append("")
+    lines.append("  SENSITIVITY -- compartments clearing each candidate bar (CHOOSES NOTHING):")
+    for bar in SHOULDER_SENSITIVITY_METERS:
+        clearing = sum(1 for height in _heights if height >= bar)
+        note = ""
+        if bar == MIN_BINDING_SHOULDER_METERS:
+            note = "   <- SHIPPED (CPS 378's 3 ft, the permissive end of the bracket)"
+        elif bar == POOL_REFERENCE_HEIGHT_METERS:
+            note = "   <- valley_level_pool's POOL_REFERENCE_HEIGHT_METERS, the measuring stick"
+        lines.append(
+            f"    {bar:>5.2f} m: {clearing} of {len(_heights)} selected site(s) clear it{note}"
+        )
+    lines.append(
+        "    The ladder is printed so the gate's placement stays re-measurable from evidence, the "
+        "same discipline the half-width sweep used. Nothing here is chosen by this line."
+    )
+    return "\n".join(lines)
 
 
 def summarize_bound_outcome_shift(retired_run: dict, shipped_run: dict) -> str:
