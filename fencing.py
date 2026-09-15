@@ -153,7 +153,14 @@ FENCE_TYPE_TREE_ZONE = "tree_zone_exclusion"
 CANDIDATE_FENCE_TYPES = (FENCE_TYPE_BOUNDARY, FENCE_TYPE_WATER_ZONE, FENCE_TYPE_TREE_ZONE)
 FENCE_TYPE_LABELS = {
     FENCE_TYPE_BOUNDARY: "Boundary fencing",
-    FENCE_TYPE_WATER_ZONE: "Water zone fencing",
+    # "WATER AREA", NOT "WATER ZONE", and the fence is the one surface that
+    # says it. The water step's own candidates are survey AREAS -- ground to
+    # survey for a pond or an embankment -- and "zone" is this module's
+    # internal word for the polygon it fences, not the word the reader has
+    # been reading upstream. The wire key (FENCE_TYPE_WATER_ZONE) is unchanged
+    # and stays "water_zone_exclusion": it is an identifier, and renaming it
+    # would be a contract change to make a display string read better.
+    FENCE_TYPE_WATER_ZONE: "Water area fencing",
     FENCE_TYPE_TREE_ZONE: "Tree zone fencing",
 }
 
@@ -712,7 +719,9 @@ def water_zone_fencing_to_geojson(
         feature_id="perimeter-fencing-water-zone",
         geometry=geometry_wgs84,
         layer="perimeter_fencing",
-        label="Water zone fencing",
+        # THE TYPE'S OWN LABEL, not a second spelling of it. Two strings for
+        # one name is how the tab and the feature come to disagree.
+        label=FENCE_TYPE_LABELS[FENCE_TYPE_WATER_ZONE],
         confidence=CONFIDENCE_HIGH,
         confidence_notes=confidence_notes,
         extra_properties={
