@@ -2037,7 +2037,11 @@ def build_structures_payload(result: dict, assembled: dict) -> dict:
 
     row_fields = (
         "rank", "suitability_score", "slope_score", "aspect_score", "shading_score",
-        "production_proximity_score", "avg_slope_pct", "aspect", "footprint_area_acres",
+        # `aspect` is the 16-point abbreviation; `dominant_aspect` is the same
+        # direction as the 8-point whole word a panel prints as prose, with
+        # `aspect_available` saying whether the ground faces anywhere at all.
+        "production_proximity_score", "avg_slope_pct", "aspect",
+        "dominant_aspect", "aspect_available", "footprint_area_acres",
         "distance_to_road_ft", "road_proximity_source", "distance_to_production_zone_ft",
         "signed_distance_to_production_ft",
         "production_zone_relationship", "distance_to_water_zone_ft", "prime_farmland_conflict",

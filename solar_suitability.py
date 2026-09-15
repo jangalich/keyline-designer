@@ -1013,7 +1013,15 @@ def find_candidate_solar_zones(
             'production_proximity_score': float,  # inline comment where they're set)
             'avg_slope_pct': float,
             'aspect_deg': Optional[float],      # None if the candidate is essentially flat
-            'aspect_label': str,
+            'aspect_label': str,                # 16-point ABBREVIATION ("S", "NNW"), or
+                                                #   "flat"; what the report quotes
+            'dominant_aspect': Optional[str],   # the same direction as an 8-POINT WHOLE
+                                                #   WORD ("south"), production's own name
+                                                #   for it and its own vocabulary; None on
+                                                #   ground too flat to face anywhere
+            'aspect_available': bool,           # False = no well-defined downhill
+                                                #   direction, so the word above is None
+                                                #   rather than missing
             'solar_value': float,               # 0-100, the two SOLAR factors together
             'solar_rating': str,                # SOLAR_RATING_BANDS' word for it
             'elevation_percentile_of_parcel': Optional[float],  # 0 = the parcel's lowest
@@ -1505,6 +1513,32 @@ def _measure_footprint(x: float, y: float, run: dict) -> Optional[dict]:
         "avg_slope_pct": round(avg_slope_pct, 1),
         "aspect_deg": round(mean_aspect, 1) if mean_aspect is not None else None,
         "aspect_label": aspect_to_compass_label(mean_aspect) if mean_aspect is not None else "flat",
+        # THE SAME DIRECTION AS A WHOLE WORD, AND THE FLAG THAT SAYS IT WAS
+        # MEASURED -- production_area_ceiling's own pair, under its own two
+        # names, because a reader reads the same field on two panels and it
+        # must be the same field.
+        #
+        # 'aspect_label' ABOVE IS THE 16-POINT ABBREVIATION ("S", "NNW") and it
+        # stays exactly as it is: it is what the report and the log line quote,
+        # and shortening is what an abbreviation is for. What it is NOT is
+        # prose. A panel that prints it renders "s" -- one letter, and one that
+        # a stylesheet setting the panel in lower case makes unreadable
+        # entirely. So the word ships beside it, as production has always
+        # shipped 'dominant_aspect' beside its own degrees.
+        #
+        # 8 POINTS, NOT 16, and that is the consistency rather than a loss of
+        # precision: production says "southeast facing" and this must not say
+        # "east-southeast facing" about the same kind of fact on the next panel
+        # along. The degrees are on the wire for anything that needs the finer
+        # reading. _compass_word() is this module's own tuple (see its note on
+        # why it is separate from production's identical one).
+        #
+        # NONE, NEVER A FABRICATED WORD, on ground with no well-defined
+        # downhill direction -- and 'aspect_available' is what lets a consumer
+        # tell that from a word that failed to arrive, which is the same
+        # distinction production's flag draws for its own aspect_factor.
+        "dominant_aspect": _compass_word(mean_aspect),
+        "aspect_available": mean_aspect is not None,
         "solar_value": solar_value,
         "solar_rating": _solar_rating(solar_value),
         "elevation_percentile_of_parcel": elevation_percentile,

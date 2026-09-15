@@ -398,6 +398,27 @@ with Harness() as h:
         assert p["site_origin"] == "generated"
         assert p["road_proximity_source"] in ("selected_road_corridor", "real_mapped_road", "unavailable")
         assert "constraints_violated" not in p, "a generated candidate has no gate it failed"
+
+        # THE DIRECTION, IN BOTH SPELLINGS, AND THE FLAG THAT SAYS IT WAS
+        # MEASURED. `aspect` is the 16-point abbreviation the report quotes;
+        # `dominant_aspect` is the 8-point WHOLE WORD a panel can print as
+        # prose. A panel rendering the abbreviation shows "S" -- one letter,
+        # and unreadable once the panel's own lower-casing has had it -- which
+        # is what the word ships beside it to fix.
+        assert isinstance(p["aspect"], str) and p["aspect"], p["aspect"]
+        if p["aspect_available"]:
+            # PRODUCTION'S OWN VOCABULARY, and it must be exactly that: the
+            # same field on the next panel along says "southeast facing", so
+            # this one may not say "east-southeast facing" about the same kind
+            # of fact. Identity-checked against production's tuple rather than
+            # compared to a list spelled here.
+            assert p["dominant_aspect"] in production_area_ceiling._COMPASS_WORDS, p["dominant_aspect"]
+            assert p["dominant_aspect"] == solar_suitability._compass_word(p["aspect_degrees"])
+        else:
+            # NEVER A FABRICATED DIRECTION on ground that faces nowhere, and
+            # the flag is what tells that from a word that failed to arrive.
+            assert p["dominant_aspect"] is None
+            assert p["aspect_degrees"] is None
         assert "prime_farmland_conflict" in p, "the farmland rows off the cache flagged every candidate"
         composite = 100.0 * (
             solar_suitability.SLOPE_SCORE_WEIGHT * p["slope_score"]
@@ -963,7 +984,8 @@ with Harness() as h:
     assert abs(home["point_utm"].x - nudged.x) < 1e-6 and abs(home["point_utm"].y - nudged.y) < 1e-6
     assert home["placed_lon_lat"] == [PLACED_A[0], PLACED_A[1]]
     for field in ("suitability_score", "slope_score", "aspect_score", "shading_score", "production_proximity_score",
-                  "avg_slope_pct", "aspect_deg", "aspect_label", "production_zone_relationship", "rank"):
+                  "avg_slope_pct", "aspect_deg", "aspect_label", "dominant_aspect", "aspect_available",
+                  "production_zone_relationship", "rank"):
         assert home[field] == site[field], (field, home[field], site[field])
     # The three WIRE-level fields -- the run's tier and the two constraint
     # lists -- are inherited from the Feature; the internal dict carries the
@@ -997,6 +1019,7 @@ with Harness() as h:
         assert back["polygon_utm"].symmetric_difference(original["polygon_utm"]).area / original["polygon_utm"].area < 1e-9
         for field in ("rank", "suitability_score", "slope_score", "aspect_score", "shading_score",
                       "production_proximity_score", "avg_slope_pct", "aspect_deg", "aspect_label",
+                      "dominant_aspect", "aspect_available",
                       "production_zone_relationship", "prime_farmland_conflict", "prime_farmland_note"):
             assert back[field] == original[field], (field, back[field], original[field])
         for field in ("distance_to_road_m", "distance_to_production_zone_m", "distance_to_water_zone_m"):

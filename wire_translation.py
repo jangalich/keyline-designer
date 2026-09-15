@@ -1312,7 +1312,16 @@ def _structure_site_properties(
         "solar_value": candidate["solar_value"],
         "solar_rating": candidate["solar_rating"],
         "avg_slope_pct": candidate["avg_slope_pct"],
+        # THREE SPELLINGS OF ONE DIRECTION, EACH FOR A DIFFERENT READER.
+        # `aspect` is the 16-point abbreviation the report quotes, `dominant_
+        # aspect` the 8-point whole word a panel can print as prose (and the
+        # name production's own payload gives it), `aspect_degrees` the bearing
+        # either was derived from. `aspect_available` false means the ground
+        # faces nowhere well enough to name, so the word is null rather than
+        # absent -- see _measure_footprint().
         "aspect": candidate["aspect_label"],
+        "dominant_aspect": candidate.get("dominant_aspect"),
+        "aspect_available": bool(candidate.get("aspect_available", False)),
         "aspect_degrees": candidate["aspect_deg"],
         "elevation_percentile_of_parcel": candidate["elevation_percentile_of_parcel"],
         "elevation_position": candidate["elevation_position"],
@@ -2884,7 +2893,8 @@ def rehydrate_tree_zones(
 # ...and THE MEASUREMENT SET IS INHERITED, verbatim where the wire carries
 # the internal spelling and through the inverse of the outbound rename
 # where it does not (aspect -> aspect_label, aspect_degrees -> aspect_deg,
-# *_ft -> *_m). All-or-nothing on `suitability_score`, as for the two
+# *_ft -> *_m; dominant_aspect and aspect_available are spelled the same
+# on both sides, so they inherit verbatim). All-or-nothing on `suitability_score`, as for the two
 # prior layers. THIS IS THE DIVERGENCE FROM TREES, and it is deliberate:
 # a drawn tree zone comes home UNSCORED because trees would not score it;
 # a placed structure site comes home SCORED because solar did -- score_
@@ -2928,6 +2938,8 @@ _STRUCTURE_ADVISORY_WIRE_FIELDS = (
     ("avg_slope_pct", "avg_slope_pct", None),
     ("aspect_degrees", "aspect_deg", None),
     ("aspect", "aspect_label", None),
+    ("dominant_aspect", "dominant_aspect", None),
+    ("aspect_available", "aspect_available", None),
     ("elevation_percentile_of_parcel", "elevation_percentile_of_parcel", None),
     ("elevation_position", "elevation_position", None),
     ("distance_to_road_ft", "distance_to_road_m", "feet"),
