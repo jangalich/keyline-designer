@@ -729,6 +729,13 @@ LATER_BRANCH_PROPERTY_KEYS = frozenset(
         "shoulder_below_minimum",
         "pinch_binding_height_m",
         "min_binding_shoulder_m",
+        # From "the binding shoulder ships in feet too": the map's zone
+        # panel prints this measurement, so the conversion moved to the
+        # wire beside the metric original -- the rule
+        # depression_depth_max_ft already follows. The metres stay
+        # because min_binding_shoulder_m above is the bar this is
+        # compared against, and a refusal has to be readable in one unit.
+        "pinch_binding_height_ft",
     }
 )
 

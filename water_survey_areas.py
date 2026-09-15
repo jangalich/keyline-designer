@@ -5904,6 +5904,25 @@ def _zone_feature_properties(zone: dict) -> dict:
                 # rather than only which side they fell.
                 "shoulder_below_minimum": zone["shoulder_below_minimum"],
                 "pinch_binding_height_m": zone["pinch_binding_height_m"],
+                # AND THE SAME SHOULDER IN FEET, because the map's zone
+                # panel prints it and the conversion belongs on THIS side
+                # of the wire -- the rule depression_depth_max_ft already
+                # follows, for the reason stated there: two consumers
+                # converting one metre value is two chances to forget.
+                # The note on the per-transect heights below says they
+                # ship metric "because no consumer prints them yet"; this
+                # one now has a consumer, so it gets its converted
+                # reading and the rest still do not.
+                #
+                # BESIDE THE METRIC ORIGINAL, NOT INSTEAD OF IT, which is
+                # where this differs from the depression depth. The two
+                # fields around it are the gate's verdict and its
+                # THRESHOLD in metres (min_binding_shoulder_m), and a
+                # reader checking a refusal has to compare the measured
+                # shoulder against the bar in one unit. Dropping the
+                # metres to ship feet would break that comparison to save
+                # a key.
+                "pinch_binding_height_ft": _feet(zone["pinch_binding_height_m"]),
                 "min_binding_shoulder_m": zone["min_binding_shoulder_m"],
                 "seed_rowcol": list(zone["seed"]["rowcol"]),
                 "pinch_rowcol": list(zone["pinch"]["rowcol"]),
