@@ -25,18 +25,24 @@ Column 2 minus column 1 is attributable to the bearing. Column 3 minus
 column 2 is attributable to the bound. The table prints both deltas
 rather than leaving a reader to subtract.
 
-ONE OF THESE IS A PRODUCTION CHANGE AND ONE IS NOT, which is the most
-important sentence in this module. The BEARING has shipped:
-walk_embankment_pinch() now measures perpendicular to
-local_stem_direction()'s de-quantized secant, and configuration 1 is
-reachable only through the PINCH_BEARING_D8 escape hatch that exists for
-this table. The BOUND has not and does not ship here: this module SWEEPS
-RIDGE_WALK_MAX_HALF_WIDTH_METERS and reports a curve so a value can be
-chosen from evidence. It picks nothing. If the absent-flank count falls
-off sharply by 150 m that suggests a value; if absences persist at 200 m
-the flanks are genuinely unbounded hillside and the crest concept needs
-rethinking rather than extending -- and this module says which the data
-shows, without choosing.
+BOTH CHANGES HAVE NOW SHIPPED, and the escape hatches that reach their
+retired forms exist for this table and nowhere else. The BEARING shipped
+first: walk_embankment_pinch() measures perpendicular to
+local_stem_direction()'s de-quantized secant, and the D8 columns are
+reachable only through PINCH_BEARING_D8. The BOUND shipped second, and
+this module's own sweep is what chose it -- on the reference property
+absent flanks ran 107 / 29 / 8 at 100 / 150 / 200 m with ZERO stopped by
+the grid edge at any value, so the old 100 m cap was suppressing roughly
+four-fifths of the crest measurements the DEM window could support. 150 m
+is the knee: 5.6% absent, most of the benefit, and the 1.5% still absent
+at 200 m are very likely unbounded hillside rather than a shoulder just
+out of reach.
+
+THE SWEEP STILL PRINTS, at 100/150/200, and still brackets whatever is
+shipped. That is deliberate: a constant chosen from a curve on ONE
+property stays honest only while the curve keeps being drawn, so this
+module reports the evidence on every run rather than leaving the value
+to become folklore. It still chooses nothing by itself.
 
 A CAVEAT THE SWEEP CANNOT ESCAPE, stated where the numbers are. The DEM
 is fetched over the boundary bbox plus a fixed margin, so a walk given a
@@ -58,12 +64,17 @@ from water_survey_areas import (
 )
 
 # The swept values. DIAGNOSTIC-ONLY: this list is read by this module and
-# nothing else, and no entry of it is a candidate that has been chosen.
-# 100 is the shipped RIDGE_WALK_MAX_HALF_WIDTH_METERS, present so the
-# sweep contains its own baseline.
+# nothing else. It spans the RETIRED bound, the SHIPPED one, and the next
+# step up, so the curve that chose 150 keeps printing on every run and
+# the choice stays re-measurable rather than becoming folklore.
 HALF_WIDTH_SWEEP_METERS = (100.0, 150.0, 200.0)
 
-CONFIG_BASELINE = "1 D8 + 100 m"
+# THE RETIRED BOUND, named so the attribution table can label its own
+# before-column honestly. Production's value is
+# RIDGE_WALK_MAX_HALF_WIDTH_METERS; this is what it was until the sweep's
+# curve replaced it, and it is a constant HERE and nowhere else -- no
+# production path may reach for it.
+RETIRED_HALF_WIDTH_BOUND_METERS = 100.0
 
 
 def _config_label(bearing: str, bound: float) -> str:
@@ -185,6 +196,80 @@ def _delta(new: Optional[float], old: Optional[float]) -> str:
     return f"{difference:+.2f}" if difference else "unchanged"
 
 
+def summarize_bound_outcome_shift(retired_run: dict, shipped_run: dict) -> str:
+    """What the half-width bound did to the OUTPUT, not just to the
+    measurements: the survivor set, the presented set and the pooled
+    selection, at the retired bound against the shipped one.
+
+    WHY THIS NEEDS TWO FULL RUNS and cannot be read off the compartment
+    table above. Everything between "a compartment exists" and "a
+    compartment ships" happens in the compute core -- the catchment
+    ceiling, compartment-overlap dedupe, the acreage floor, per-type
+    ranking, the presentation rule and the pooled selection -- and
+    re-deriving any of it here would make this report a second
+    implementation of the thing it is checking. So both arguments are
+    real identify_water_survey_areas() returns, run over one parcel with
+    one DEM and one set of production areas, differing in the bound and
+    in nothing else.
+
+    REPORTED, NOT ASSERTED. A longer walk changes widths, so the
+    profile's minimum changes, so the dam cell changes -- the selection
+    moving is a legitimate consequence and this says whether it did."""
+    lines = ["  OUTCOME SHIFT (survivors / presented / pooled selection):"]
+    for label, run in (("retired bound", retired_run), ("shipped bound", shipped_run)):
+        result = run["result"]
+        counts = {
+            survey_type: len(result["zones_by_type"][survey_type])
+            for survey_type in result["zones_by_type"]
+        }
+        presented = [
+            (zone["survey_type"], zone["rank"])
+            for zone in sorted(
+                (z for z in result["zones"] if z["presented"]),
+                key=lambda z: z["presentation_order"],
+            )
+        ]
+        selected = result["selected_water_zone"]
+        lines.append(
+            f"    {label:>14}: survivors {counts}, presented {presented}, "
+            f"rule '{result['presentation']['rule_applied']}'"
+        )
+        lines.append(
+            f"                    selection "
+            + (
+                "None"
+                if selected is None
+                else f"{selected['survey_type']} rank {selected['rank']}, "
+                f"mean {selected['mean_suitability']:.4f}, "
+                f"{selected['zone_acres']:.4f} ac"
+            )
+        )
+    retired_selected = retired_run["result"]["selected_water_zone"]
+    shipped_selected = shipped_run["result"]["selected_water_zone"]
+
+    def _identity(zone):
+        # NOT the zone id: ids are assigned per run over the full
+        # cross-type list, so a compartment appearing or disappearing
+        # renumbers everything after it and two runs' ids are not
+        # comparable. Type plus geometry is.
+        if zone is None:
+            return None
+        return (zone["survey_type"], round(zone["polygon_utm"].area, 3))
+
+    if _identity(retired_selected) == _identity(shipped_selected):
+        lines.append(
+            "    selected_water_zone: UNCHANGED (same type, same polygon area) -- the bound moved "
+            "measurements without moving the pooled winner."
+        )
+    else:
+        lines.append(
+            f"    selected_water_zone: MOVED -- {_identity(retired_selected)} -> "
+            f"{_identity(shipped_selected)}. A longer walk changes widths, so the profile minimum "
+            "changes, so the dam cell changes; this is that consequence reaching the output."
+        )
+    return "\n".join(lines)
+
+
 def summarize_pinch_bearing_and_bound(dem: dict, result: dict) -> str:
     """The whole instrument as terminal text.
 
@@ -192,27 +277,44 @@ def summarize_pinch_bearing_and_bound(dem: dict, result: dict) -> str:
     mask, surface and polygon the embankment pass ran on."""
     lines = [
         "=== PINCH BEARING + HALF-WIDTH BOUND: THREE-WAY ATTRIBUTION ===",
-        "  Configuration 1 is the record as it stood (D8 bearing, 100 m bound). 2 varies ONLY the",
-        "  bearing, 3 varies ONLY the bound on top of 2, so (2 - 1) is the bearing's effect and",
-        "  (3 - 2) is the bound's. Every configuration runs on this run's OWN arrays, masks,",
-        "  surfaces and polygons -- nothing is rebuilt.",
+        f"  1  D8 + {RETIRED_HALF_WIDTH_BOUND_METERS:.0f} m      the record before either change",
+        f"  2  secant + {RETIRED_HALF_WIDTH_BOUND_METERS:.0f} m  the BEARING alone      (2 - 1)",
+        f"  3  secant + {RIDGE_WALK_MAX_HALF_WIDTH_METERS:.0f} m  PRODUCTION TODAY: the BOUND on "
+        f"top of it   (3 - 2)",
+        "  4+ the rest of the sweep, so the curve that chose the shipped bound keeps printing.",
         "",
-        "  THE BEARING HAS SHIPPED: walk_embankment_pinch() measures perpendicular to the",
-        "  de-quantized secant now, and the D8 column exists only through the escape hatch kept",
-        "  for this table. THE BOUND HAS NOT: the sweep reports a curve and chooses nothing.",
+        "  Every configuration runs on this run's OWN arrays, masks, surfaces and polygons --",
+        "  nothing is rebuilt, which is the whole validity of the comparison.",
+        "",
+        "  BOTH CHANGES HAVE NOW SHIPPED. The D8 column reaches the retired bearing through the",
+        f"  escape hatch kept for this table; the {RETIRED_HALF_WIDTH_BOUND_METERS:.0f} m columns "
+        "reach the retired bound the same way.",
+        "  A LONGER BOUND IS NOT JUST MISSING CRESTS FILLED IN: measured widths change, so the",
+        "  profile's minimum changes, so the DAM CELL changes -- and catchments, baselines,",
+        "  transects and drawn zones follow it. That is what the relocation column is for.",
         "",
     ]
 
-    baseline = run_configuration(dem, result, PINCH_BEARING_D8, RIDGE_WALK_MAX_HALF_WIDTH_METERS)
+    # THE FOUR COLUMNS, named explicitly rather than derived by excluding
+    # whatever happens to be shipped -- so that changing the shipped
+    # constant moves which column is labelled PRODUCTION without silently
+    # changing what any column MEANS.
+    baseline = run_configuration(
+        dem, result, PINCH_BEARING_D8, RETIRED_HALF_WIDTH_BOUND_METERS
+    )
     bearing_only = run_configuration(
+        dem, result, PINCH_BEARING_SECANT, RETIRED_HALF_WIDTH_BOUND_METERS
+    )
+    production = run_configuration(
         dem, result, PINCH_BEARING_SECANT, RIDGE_WALK_MAX_HALF_WIDTH_METERS
     )
-    swept = [
+    beyond = [
         run_configuration(dem, result, PINCH_BEARING_SECANT, bound)
         for bound in HALF_WIDTH_SWEEP_METERS
-        if bound != RIDGE_WALK_MAX_HALF_WIDTH_METERS
+        if bound not in (RETIRED_HALF_WIDTH_BOUND_METERS, RIDGE_WALK_MAX_HALF_WIDTH_METERS)
     ]
-    configurations = [baseline, bearing_only] + swept
+    configurations = [baseline, bearing_only, production] + beyond
+    swept = [production] + beyond
 
     # --- per-zone attribution, keyed by SEED cell ---
     # The seed is the stable identity across configurations: zone ids are
@@ -267,6 +369,27 @@ def summarize_pinch_bearing_and_bound(dem: dict, result: dict) -> str:
                     else "  [PINCH CELL RELOCATED]"
                 )
             )
+        # GAINED OR LOST A COMPARTMENT is its own line, because a seed
+        # that finds no constriction at one bound and builds at another
+        # is not a delta on any number -- it is a zone appearing or
+        # disappearing, and a table of signed differences would show it
+        # as two blanks.
+        _production_zone = production["by_seed"].get(seed)
+        if middle is None and _production_zone is not None:
+            lines.append(
+                f"      BOUND  (3-2): SEED GAINS A COMPARTMENT -- no constriction at "
+                f"{RETIRED_HALF_WIDTH_BOUND_METERS:.0f} m, builds at "
+                f"{RIDGE_WALK_MAX_HALF_WIDTH_METERS:.0f} m "
+                f"(pinch {tuple(_production_zone['pinch']['rowcol'])}, "
+                f"{_production_zone['zone_acres']:.4f} ac hull)"
+            )
+        elif middle is not None and _production_zone is None:
+            lines.append(
+                f"      BOUND  (3-2): SEED LOSES ITS COMPARTMENT -- built at "
+                f"{RETIRED_HALF_WIDTH_BOUND_METERS:.0f} m "
+                f"(pinch {tuple(middle['pinch']['rowcol'])}), none at "
+                f"{RIDGE_WALK_MAX_HALF_WIDTH_METERS:.0f} m"
+            )
         for configuration in swept:
             after = configuration["by_seed"].get(seed)
             if middle is None or after is None:
@@ -318,26 +441,29 @@ def summarize_pinch_bearing_and_bound(dem: dict, result: dict) -> str:
         )
         if first_bound_absences == 0:
             lines.append(
-                "    The bound was never binding on this run, so the sweep has nothing to say "
-                "about its value here."
+                "    The bound is not binding on this run, so the curve has nothing to say about "
+                f"whether the shipped {RIDGE_WALK_MAX_HALF_WIDTH_METERS:.0f} m is right for THIS "
+                "parcel -- it was chosen on another."
             )
         elif last_bound_absences == 0:
             lines.append(
-                "    Every bound-stopped flank resolves by the last swept value: the bound WAS "
-                "too short for this terrain, and the curve suggests where a new one would sit. "
-                "It is still not chosen here."
+                "    Every bound-stopped flank resolves by the last swept value, so on this "
+                f"parcel the shipped {RIDGE_WALK_MAX_HALF_WIDTH_METERS:.0f} m is still leaving "
+                "measurement on the table. Whether that is worth another change is a decision for "
+                "the curve, not for this line."
             )
         elif last_bound_absences >= first_bound_absences * 0.5:
             lines.append(
                 "    Absences PERSIST as the bound grows: these flanks are unbounded hillside "
-                "rather than a shoulder just out of reach, and extending the bound is not the "
-                "answer -- the crest concept itself needs rethinking. Nothing is chosen here."
+                "rather than a shoulder just out of reach, and extending the bound further is not "
+                "the answer -- the crest concept itself would need rethinking."
             )
         else:
             lines.append(
-                "    Absences fall off but do not vanish: part of the tally is a bound that was "
-                "too short and part is genuinely unbounded ground. The split is above; no value "
-                "is chosen here."
+                "    Absences fall off but do not vanish: part of the tally is a bound that is "
+                "still short and part is genuinely unbounded ground. The split is above -- this is "
+                f"the shape that chose the shipped {RIDGE_WALK_MAX_HALF_WIDTH_METERS:.0f} m on the "
+                "reference property, at its knee rather than its floor."
             )
         if last[1]["at_edge"] > last[1]["at_bound"]:
             lines.append(

@@ -142,6 +142,7 @@ production areas, canopy, roads, soil)
 """
 
 import argparse
+from typing import Optional
 import json
 import math
 
@@ -159,10 +160,15 @@ from rasterio.warp import transform_geom
 from shapely.geometry import mapping
 # The BEARING A/B instrument (diagnostic-only, imported by no production
 # path -- see the module's own docstring and the AST pin in its tests).
-from diagnose_pinch_bearing_and_bound import summarize_pinch_bearing_and_bound
+from diagnose_pinch_bearing_and_bound import (
+    RETIRED_HALF_WIDTH_BOUND_METERS,
+    summarize_bound_outcome_shift,
+    summarize_pinch_bearing_and_bound,
+)
 from diagnose_transect_bearing import summarize_transect_bearing_comparison
 from water_survey_areas import (
     DEPRESSION_FULL_CREDIT_METERS,
+    RIDGE_WALK_MAX_HALF_WIDTH_METERS,
     DEPRESSION_NOISE_FLOOR_METERS,
     DUPLICATE_OF_ZONE_REASON_PREFIX,
     EMBANKMENT_DRAINAGE_FULL_CREDIT_ACRES,
@@ -2035,16 +2041,35 @@ def _finish_boundary_stability(lines: list, label_a: str, label_b: str, zones_a:
     return "\n".join(lines)
 
 
-def run_water_step(boundary: list, dem: dict) -> dict:
+def run_water_step(
+    boundary: list,
+    dem: dict,
+    production_areas: Optional[list] = None,
+    max_half_width_meters: float = RIDGE_WALK_MAX_HALF_WIDTH_METERS,
+) -> dict:
     """One full water step for one boundary over a SUPPLIED dem, with the
     few internals the comparison sections need attached under underscore
     keys (the dem itself, the on-parcel mask the retired percentile's
     population was built from, and the road cell mask, so the
     without-TWI seed re-derivation holds every other input identical).
     Underscored because they are instrument scaffolding, not part of any
-    wire form."""
-    production_areas = identify_optimized_production_areas(boundary, dem=dem)["scored_patches"]
-    identify_result = identify_water_survey_areas(boundary, dem=dem, production_areas=production_areas)
+    wire form.
+
+    production_areas and max_half_width_meters exist for ONE caller: the
+    bound comparison, which runs this whole step TWICE over one parcel --
+    once at the retired half-width bound and once at the shipped one --
+    to report whether the survivor set, the presented set and the pooled
+    selection move. Supplying the production areas keeps the second run
+    from re-fetching them, so the two runs differ in the bound and in
+    nothing else."""
+    if production_areas is None:
+        production_areas = identify_optimized_production_areas(boundary, dem=dem)["scored_patches"]
+    identify_result = identify_water_survey_areas(
+        boundary,
+        dem=dem,
+        production_areas=production_areas,
+        max_half_width_meters=max_half_width_meters,
+    )
     result = identify_result["result"]
     identify_result["_dem"] = dem
     identify_result["_dem_resolution_meters"] = dem["resolution_meters"]
@@ -2145,6 +2170,25 @@ def main() -> None:
     # embankment pass ran on, so each configuration re-runs that pass on
     # identical inputs with only the bearing and the bound varied).
     print(summarize_pinch_bearing_and_bound(dem, identify_result["result"]))
+    print()
+    # THE OUTCOME SHIFT: the same water step run a second time at the
+    # RETIRED half-width bound, with this run's own DEM and production
+    # areas supplied so the two differ in the bound and nothing else.
+    # The compartment table above says what the bound did to the
+    # measurements; this says what it did to the survivor set, the
+    # presented set and the pooled selection -- which only the compute
+    # core can answer, so the core is run rather than reimplemented.
+    print(
+        summarize_bound_outcome_shift(
+            run_water_step(
+                property_boundary,
+                dem,
+                production_areas=production_areas,
+                max_half_width_meters=RETIRED_HALF_WIDTH_BOUND_METERS,
+            ),
+            identify_result,
+        )
+    )
     print()
     print(summarize_seed_ladder(identify_result))
     print()

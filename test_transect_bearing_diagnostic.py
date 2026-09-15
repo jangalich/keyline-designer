@@ -685,25 +685,50 @@ assert tuple(_over_the_edge["crest_rowcol"]) == _station, (
 )
 
 _stored = wsa.crest_height_above_channel(_ROUNDING_STRIP, _over_the_edge, _station)
-_raw = float(_ROUNDING_STRIP["array"][_over_the_edge["crest_rowcol"]]) - float(
+_raw = float(_ROUNDING_STRIP["array"][tuple(_over_the_edge["crest_rowcol"])]) - float(
     _ROUNDING_STRIP["array"][_station]
 )
 assert _raw == 0.0, "the honest difference of a cell with itself is exactly zero"
-assert _stored == 0.0, "-0.0 == 0.0 in Python, so equality alone cannot see the problem"
-assert dtb._negative_zero(_stored), (
-    f"the field stores a NEGATIVE zero here -- the reference run's -0.00, reproduced: {_stored!r}"
+
+# SINCE FIXED, ON THE BOUND BRANCH, and this section is kept as the
+# defect's record rather than rewritten away. What it used to assert
+# here was that the field REPRODUCED the reference run's -0.00:
+#
+#     assert dtb._negative_zero(_stored)
+#     assert repr(_stored) == "-0.0"
+#
+# crest_height_above_channel() now re-reads the crest elevation raw at
+# crest_rowcol instead of building on ridge_crest_walk()'s already
+# rounded crest_elevation_m, so the subtraction rounds once and a
+# coincident crest is exactly 0.0. The diagnosis above is unchanged and
+# still worth reading; only the last line of it has moved from "is" to
+# "was". (The fix and its own regression guard live in
+# test_crest_bound_150.py section 5.)
+assert _stored == 0.0
+assert not dtb._negative_zero(_stored), (
+    f"the sign is gone: a coincident crest reads exactly 0.0, not -0.0 -- got {_stored!r}"
 )
-assert not dtb._negative_zero(_raw)
-assert repr(_stored) == "-0.0", f"reproduced exactly: {_stored!r}"
+assert repr(_stored) == "0.0", f"fixed: {_stored!r}"
+assert _stored == _raw, "and the stored value IS the raw difference, rounded once"
 
-# The magnitude of the defect, stated: it is a half-centimetre, which is
-# why it changes no verdict -- the comparison margin is 1.0 m.
-assert abs(_stored - _raw) < 0.005
-assert VERDICT_MARGIN_METERS > 100 * abs(_stored - _raw)
+# THE OLD ARITHMETIC, reproduced explicitly, so the magnitude this
+# section describes stays checkable and the audit below still has
+# something to catch.
+_old_arithmetic = round(
+    _over_the_edge["crest_elevation_m"] - float(_ROUNDING_STRIP["array"][_station]), 2
+)
+assert dtb._negative_zero(_old_arithmetic), (
+    f"the defect, as it was: {_old_arithmetic!r} where the truth is {_raw!r}"
+)
+# Its magnitude: a half-centimetre, which is why it changed no verdict --
+# the comparison margin is 1.0 m.
+assert abs(_old_arithmetic - _raw) < 0.005
+assert VERDICT_MARGIN_METERS > 100 * abs(_old_arithmetic - _raw)
 
-# And the audit must actually catch it. (It cannot be caught by an
+# And the audit must still catch it. (It cannot be caught by an
 # equality test: -0.0 == 0.0 is True, which is the trap.)
 assert (-0.0) == 0.0, "the trap itself, stated so the next reader does not re-lay it"
+_stored = _old_arithmetic  # the audit below is fed the DEFECT, deliberately
 _fake_comparison = [
     {
         "zone_id": 0,
@@ -768,19 +793,25 @@ assert dtb._rounding_audit(_CLEAN_STRIP, _clean_comparison)["mismatched"] == 0, 
     "the audit must stay silent where there is nothing wrong, or it is not evidence of anything"
 )
 
-# THE PRODUCTION FIELD IS UNCHANGED ON THIS BRANCH. The defect is
-# reported, not fixed -- the brief says change no production behaviour,
-# and a sub-centimetre correction is its own one-line branch.
-assert "round(crest_elevation - channel_elevation, 2)" in (
-    _REPO / "water_survey_areas.py"
-).read_text(), "crest_height_above_channel() is untouched here -- the defect is reported, not fixed"
+# AND THE FIELD ITSELF IS FIXED, asserted at the source so this section
+# cannot go back to passing because the defect returned. The old form
+# subtracted from the walk's rounded crest_elevation_m; the new one
+# re-reads the crest cell raw.
+_WSA_SOURCE = (_REPO / "water_survey_areas.py").read_text()
+assert "round(crest_elevation - channel_elevation, 2)" in _WSA_SOURCE, (
+    "the subtraction still rounds once, at the end"
+)
+assert 'crest_elevation = float(dem["array"][crest_rowcol[0], crest_rowcol[1]])' in _WSA_SOURCE, (
+    "and the crest elevation is read RAW at crest_rowcol -- if this line goes, the double "
+    "rounding is back"
+)
 
 print(
     f"7. The -0.00: mechanism CONFIRMED (crest_rowcol {tuple(_over_the_edge['crest_rowcol'])} == "
-    f"station {_station}, so the zero correctly means no shoulder at all) -- and the MINUS SIGN is "
-    f"a separate double-rounding defect, reproduced here as {_stored!r} where the raw difference is "
-    f"exactly {_raw!r}. Magnitude < 5 mm against a {VERDICT_MARGIN_METERS} m margin; audit catches "
-    "it, stays silent on the clean control, and the production field is left untouched."
+    f"station {_station}, so the zero correctly means no shoulder at all), and the MINUS SIGN it "
+    f"used to carry is GONE -- the field now reads {_over_the_edge['crest_rowcol']} raw and returns "
+    f"exactly 0.0. The old arithmetic is reproduced here as {_old_arithmetic!r} so the audit still "
+    "has a defect to catch, and it catches it."
 )
 
 print("\nAll transect-bearing diagnostic checks passed.")
