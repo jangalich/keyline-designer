@@ -338,6 +338,15 @@ from valley_delineation import (
     fill_and_resolve,
 )
 
+# THE DE-QUANTIZED SECANT, reused rather than reimplemented: the same
+# local-direction estimator valley_level_pool.py's abutment search runs
+# on, and the one the transect-bearing A/B diagnostic measured its
+# method B with before this branch promoted it onto the pinch walk. It
+# is defined once, there. (Until this branch, an AST assertion pinned
+# this import as diagnostic-only -- RETIRED here deliberately, not
+# lapsed; see test_transect_bearing_diagnostic.py section 5.)
+from valley_level_pool import STEM_DIRECTION_WINDOW_CELLS, local_stem_direction
+
 # The demoted level-pool arc stays the home of the shared gate/measurement
 # machinery this module reuses -- ONE definition each of the contributing-
 # area ceiling, the service-distance reference, the canopy buffer, the
@@ -1153,6 +1162,18 @@ RIDGE_PROMINENCE_METERS = 1.0
 # the width recorded at a bounded station is a floor on the truth, not
 # a measurement of it. v1 prior, TUNE FROM FIRST RUN. CONFIGURABLE.
 RIDGE_WALK_MAX_HALF_WIDTH_METERS = 100.0
+
+# How walk_embankment_pinch() reads the channel's direction at a station,
+# which is the line every width it measures is taken perpendicular to.
+# SECANT is the only value production uses: local_stem_direction()'s
+# de-quantized secant over +/- STEM_DIRECTION_WINDOW_CELLS path cells.
+# D8 is the RETIRED quantized bearing -- the single flow step, one of 8
+# headings -- kept reachable ONLY so the attribution instrument can run
+# the walk both ways on one parcel and show what the change moved. It is
+# not a tuning choice and not a fallback: see walk_embankment_pinch()'s
+# own docstring.
+PINCH_BEARING_SECANT = "secant"
+PINCH_BEARING_D8 = "d8"
 
 # When two compartments overlap by more than this fraction of the
 # SMALLER one's area, they are duplicates -- two seeds describing one
@@ -3377,16 +3398,59 @@ def walk_embankment_pinch(
     max_walk_meters: float = EMBANKMENT_PINCH_WALK_MAX_METERS,
     prominence_meters: float = RIDGE_PROMINENCE_METERS,
     max_half_width_meters: float = RIDGE_WALK_MAX_HALF_WIDTH_METERS,
+    direction_window_cells: int = STEM_DIRECTION_WINDOW_CELLS,
+    direction_mode: str = PINCH_BEARING_SECANT,
 ) -> dict:
     """
-    The pinch walk: from the seed, downstream along the D8 flow
-    direction, measuring crest-to-crest valley width (perpendicular to
-    the LOCAL flow direction) at every channel cell visited, bounded by
+    The pinch walk: from the seed, downstream along the D8 flow field,
+    measuring crest-to-crest valley width (perpendicular to the
+    channel's LOCAL DIRECTION) at every channel cell visited, bounded by
     max_walk_meters of along-channel ground distance. The walk
     TERMINATES before stepping onto an off-parcel cell, onto a
     road-exclusion cell, past the distance bound, or off the flow field
     (the -1 outlet/flat sentinel) -- so every measured station is
     on-parcel, pre-road, within bound by construction.
+
+    THE BEARING EACH WIDTH IS TAKEN ON, and why it is not the flow step.
+    The path is still TRACED by D8 -- that is the flow field, and it is
+    correct -- but the width at a station is measured perpendicular to
+    local_stem_direction()'s DE-QUANTIZED SECANT over
+    +/- direction_window_cells path cells, not perpendicular to
+    _flow_direction_unit()'s single D8 step.
+
+    A D8 step names one of only EIGHT bearings, so a perpendicular built
+    from it is up to 22.5 degrees off the true cross-section, which
+    alone inflates a width by up to ~8% (1/cos 22.5). The reason it
+    mattered enough to change is not the magnitude but the VARIANCE: the
+    error depends on which of the eight directions each cell happened to
+    snap to, so on a channel running near 200 degrees the bearing flips
+    between 180 and 225 from one cell to the next and the width profile
+    carries a SAWTOOTH that is an artifact of the grid rather than a
+    feature of the ground.
+
+    AND THE PINCH IS THE MINIMUM OF THAT PROFILE. A station that
+    happened to be sampled square could win the minimum over a genuinely
+    tighter one that happened to be sampled obliquely -- and the winning
+    cell then determines the catchment, the baseline, both transects and
+    the drawn zone. The sawtooth was never noise on a reported number;
+    it was noise in a SELECTION.
+
+    TRACE FIRST, THEN MEASURE, because a secant needs path cells on both
+    sides of a station and the interleaved walk this replaced could not
+    see downstream of the cell it was measuring. Stations within
+    direction_window_cells of either end get a CLAMPED one-sided window
+    and say so (clamped_window on the station record); a path too short
+    to have a direction at all falls back to the D8 step, which is the
+    only place the quantized bearing survives in normal operation.
+
+    direction_mode EXISTS FOR ONE READER and is not a tuning knob.
+    PINCH_BEARING_D8 reinstates the retired quantized bearing so the
+    attribution instrument can run this walk BOTH ways over one parcel
+    and show what the change bought -- the before column of a before/
+    after table has to come from somewhere, and re-deriving it in the
+    diagnostic would make that column a second implementation of the
+    thing it is measuring. No production path passes it; the default is
+    the secant and nothing but a diagnostic may say otherwise.
 
     THE EMBANKMENT CELL is the MINIMUM-WIDTH station among ALL walked
     stations -- interior or terminal. A minimum sitting at the walk's
@@ -3412,38 +3476,41 @@ def walk_embankment_pinch(
     'pinch_width_m', 'walk_distance_m', 'half_width_bound_hit',
     'terminal' (None for an interior pinch)} or {'reason_code'}}.
     Stations carry each cell's width measurement for the
-    diagnostic/export instruments.
+    diagnostic/export instruments, plus the direction_unit that width
+    was taken perpendicular to and the clamped_window /
+    degenerate_direction disclosures described above.
     """
     px, py = dem["resolution_meters"]
-    stations: list[dict] = []
+
+    # PHASE 1 -- TRACE. The channel path is walked to its end BEFORE any
+    # width is measured, because the secant bearing at a station is
+    # defined by cells on BOTH sides of it and a station cannot be
+    # measured until the cells below it are known. The termination rules
+    # and their order are unchanged from the interleaved version this
+    # replaced: every recorded cell is on-parcel, pre-road and within
+    # bound by construction.
+    if int(flow_to_row[seed_rowcol[0], seed_rowcol[1]]) < 0:
+        # The seed itself sits on the -1 outlet/flat sentinel: no
+        # channel leaves it, so there is no path and nothing measurable.
+        # Reported as the zero-station failure exactly as before.
+        return {
+            "found": False,
+            "reason_code": REASON_NO_CONSTRICTION,
+            "terminator": "flow_end",
+            "stations": [],
+            "still_narrowing_at_termination": False,
+            "width_profile_min_m": None,
+            "width_profile_max_m": None,
+        }
+
+    path: list[tuple] = []
+    distances: list[float] = []
     current = seed_rowcol
     distance = 0.0
     terminator = "flow_end"
-    previous_direction = None
-
     while True:
-        direction = _flow_direction_unit(dem, current, flow_to_row, flow_to_col)
-        if direction is None and previous_direction is not None:
-            # Terminal station on an outlet: measure with the incoming
-            # direction rather than skipping the cell.
-            direction = previous_direction
-        if direction is None:
-            # The seed itself has no flow direction: nothing measurable.
-            terminator = "flow_end"
-            break
-
-        measurement = measure_valley_width(
-            dem, current, direction, prominence_meters, max_half_width_meters
-        )
-        stations.append(
-            {
-                "rowcol": current,
-                "distance_m": round(distance, 1),
-                "width_m": measurement["width_m"],
-                "measurement": measurement,
-            }
-        )
-
+        path.append(current)
+        distances.append(distance)
         r, c = current
         tr, tc = int(flow_to_row[r, c]), int(flow_to_col[r, c])
         if tr < 0:
@@ -3459,9 +3526,76 @@ def walk_embankment_pinch(
         if road_cell_mask[tr, tc]:
             terminator = "road"
             break
-        previous_direction = direction
         current = (tr, tc)
         distance += step_meters
+
+    # PHASE 2 -- MEASURE, at the traced path's own bearings. See the
+    # docstring's BEARING paragraph for why this is a secant and not the
+    # D8 step.
+    #
+    # local_stem_direction() documents its input as ordered
+    # DOWNSTREAM-FIRST (downstream = DECREASING index) while this walk
+    # records its path upstream-first from the seed, so the path is
+    # REVERSED for the call rather than the returned vector negated --
+    # staying inside that function's stated contract instead of
+    # second-guessing its sign.
+    stem = list(reversed(path))
+    last_index = len(path) - 1
+    stations: list[dict] = []
+    for index, rowcol in enumerate(path):
+        stem_index = last_index - index
+        if direction_mode == PINCH_BEARING_D8:
+            # The RETIRED bearing, reachable only by an instrument (see
+            # the docstring): the raw D8 step, quantized to 8 headings.
+            direction = _flow_direction_unit(dem, rowcol, flow_to_row, flow_to_col)
+            degenerate = direction is None
+            if direction is None and index > 0:
+                # The terminal outlet cell has no step of its own; the
+                # interleaved walk this replaced measured it with the
+                # INCOMING direction, so the reproduction does too.
+                direction = _flow_direction_unit(
+                    dem, path[index - 1], flow_to_row, flow_to_col
+                )
+                degenerate = direction is None
+        else:
+            direction, degenerate = local_stem_direction(
+                dem, stem, stem_index, window_cells=direction_window_cells
+            )
+        if degenerate:
+            # A stem too short to have a direction at all (a one-cell
+            # path: the seed's very first step was refused by a
+            # termination rule). local_stem_direction() hands back a
+            # fixed fallback vector in that case, which says nothing
+            # about this channel -- so the D8 step, which does exist
+            # here, is the better answer and is used instead. This is
+            # the ONLY surviving use of the quantized bearing.
+            fallback = _flow_direction_unit(dem, rowcol, flow_to_row, flow_to_col)
+            if fallback is not None:
+                direction = fallback
+        measurement = measure_valley_width(
+            dem, rowcol, direction, prominence_meters, max_half_width_meters
+        )
+        stations.append(
+            {
+                "rowcol": rowcol,
+                "distance_m": round(distances[index], 1),
+                "width_m": measurement["width_m"],
+                "measurement": measurement,
+                # THE BEARING THIS STATION WAS MEASURED ON, carried so a
+                # diagnostic can show it and a reader can check a width
+                # against the line it was taken across.
+                "direction_unit": direction,
+                # WINDOW DISCLOSURE. The secant wants
+                # direction_window_cells of path on EACH side; a station
+                # within that of either end gets a CLAMPED, one-sided
+                # window (local_stem_direction() clamps rather than
+                # refusing). Still far better than a single D8 step, but
+                # a weaker estimate, and flagged so it reads as one.
+                "clamped_window": stem_index < direction_window_cells
+                or stem_index > last_index - direction_window_cells,
+                "degenerate_direction": degenerate,
+            }
+        )
 
     if not stations:
         # The seed itself was unmeasurable (no flow direction at all):
@@ -4104,6 +4238,8 @@ def generate_embankment_compartments(
     flow_to_row: np.ndarray,
     flow_to_col: np.ndarray,
     gate_context: dict,
+    max_half_width_meters: float = RIDGE_WALK_MAX_HALF_WIDTH_METERS,
+    direction_mode: str = PINCH_BEARING_SECANT,
 ) -> tuple[list[dict], list[dict]]:
     """
     The full embankment generation pass: seed, walk, assemble, and
@@ -4120,6 +4256,15 @@ def generate_embankment_compartments(
     the winner seed if the winner itself is later deduped away.
     COMPARTMENT-level overlap dedupe happens in the compute core, after
     every compartment exists (it needs the assembled polygons).
+
+    max_half_width_meters and direction_mode forward to
+    walk_embankment_pinch() AND to the compartment's own transects, so a
+    swept bound moves both the profile and the enclosure depths rather
+    than half of each. They exist for ONE caller: the attribution
+    instrument that re-runs this pass over a single parcel with the
+    bearing and the bound varied and every other input held identical.
+    Production passes neither. See walk_embankment_pinch()'s docstring
+    for what direction_mode is and is not.
     """
     seeds = select_embankment_seeds(
         dem,
@@ -4143,7 +4288,14 @@ def generate_embankment_compartments(
             "criteria_signature": seed["criteria_signature"],
         }
         walk = walk_embankment_pinch(
-            dem, seed["rowcol"], flow_to_row, flow_to_col, on_parcel_mask, road_cell_mask
+            dem,
+            seed["rowcol"],
+            flow_to_row,
+            flow_to_col,
+            on_parcel_mask,
+            road_cell_mask,
+            max_half_width_meters=max_half_width_meters,
+            direction_mode=direction_mode,
         )
         if not walk["found"]:
             record["status"] = SEED_STATUS_FAILED
@@ -4188,6 +4340,7 @@ def generate_embankment_compartments(
             road_union_utm,
             surfaces,
             gate_context,
+            max_half_width_meters=max_half_width_meters,
         )
         if compartment is None:
             record["status"] = SEED_STATUS_FAILED
@@ -5076,6 +5229,19 @@ def compute_water_survey_areas(
         # truth for a mask this function already holds.
         "on_parcel_mask": on_parcel,
         "road_cell_mask": road_cells,
+        # THE REST OF WHAT THE EMBANKMENT PASS RAN ON, returned for the
+        # same reason on_parcel_mask and road_cell_mask are (see the
+        # note above): an instrument that re-runs that pass to show a
+        # before/after must run it on THESE objects, not on a second
+        # construction of them. The attribution instrument for the
+        # de-quantized pinch bearing re-runs
+        # generate_embankment_compartments() over one parcel with the
+        # bearing and the half-width bound varied, and every other input
+        # held identical is the entire validity of that comparison.
+        "flow_to_row": flow_to_row,
+        "flow_to_col": flow_to_col,
+        "boundary_polygon_utm": boundary_polygon_utm,
+        "road_union_utm": road_union,
         "gate_mask_stats": gate_stats,
         "soil": soil,
         "soil_checked": soil_checked,

@@ -893,16 +893,41 @@ assert _channel_comps[0]["pinch"]["rowcol"] == (28, A_CHANNEL), (
     "the channel compartment's embankment cell sits at the waist"
 )
 
-# THE RESURRECTED FLANK COMPARTMENTS -- see the fixture note. Each
-# carries BOTH acreages, each clears the floor on the hull and would
-# not have on the band, and neither trips the sparse-anchor guard.
+# THE FLANK COMPARTMENTS. Each carries BOTH acreages and neither trips
+# the sparse-anchor guard.
+#
+# THESE TWO WERE RESURRECTIONS UNTIL THE DE-QUANTIZED PINCH BEARING, and
+# the change is worth stating because it is the clearest small example
+# of what that bearing fixed. The D8 bearing quantizes each station's
+# cross-section to one of eight headings; on this flank draw two
+# stations were being sampled OBLIQUELY and read narrower than they are.
+# Width profiles, same fixture, same cells:
+#
+#   D8      ... 42.5, 42.5, 42.5, 40.0, |27.5|, 27.5, 27.5, 27.5, ...
+#   secant  ... 42.5, 42.5, 45.0, 30.0,  30.0,  30.0, |27.5|, ...
+#
+# Stations 14 and 15 are not 27.5 m wide; they are 30.0 m wide and were
+# cross-sectioned off-square. The minimum is a TIE across the tail and
+# argmin takes the first of it, so correcting those two moved the pinch
+# two cells downstream (32, 1) -> (34, 1). A longer baseline means a
+# longer watershed band, and the band grew 0.0925 -> 0.1046 ac, crossing
+# the 0.1 ac floor it used to sit under.
+#
+# So this fixture no longer demonstrates a RESURRECTION (band under the
+# floor, hull over it) -- said out loud rather than quietly dropped. The
+# floor's rule, that it judges the DRAWN HULL and not the band, is
+# pinned by _floor_drops below; a worked resurrection example lives in
+# test_pinch_bearing_and_bound.py, which owns the bearing change.
 _flank_comps = [z for z in a_comps if z["seed"]["rowcol"][1] != A_CHANNEL]
-assert len(_flank_comps) == 2, f"two flank compartments resurrect: {[z['id'] for z in a_comps]}"
+assert len(_flank_comps) == 2, f"two flank compartments survive: {[z['id'] for z in a_comps]}"
 for zone in _flank_comps:
-    assert zone["compartment_footprint_acres"] < wsa.MIN_SURVEY_REGION_AREA_ACRES, (
-        "the band alone would not have cleared the floor -- this zone is a resurrection"
+    assert zone["pinch"]["rowcol"][0] == 34, (
+        f"the de-quantized bearing puts each flank pinch at row 34: {zone['pinch']['rowcol']}"
     )
-    assert zone["zone_acres"] >= wsa.MIN_SURVEY_REGION_AREA_ACRES, "its walkable claim does"
+    assert zone["compartment_footprint_acres"] < zone["zone_acres"], (
+        "the hull still reads wider than the band it is drawn over -- the dual-acreage split"
+    )
+    assert zone["zone_acres"] >= wsa.MIN_SURVEY_REGION_AREA_ACRES, "the walkable claim clears the floor"
     assert zone["sparse_anchor"] is False, (
         "read for sliver-with-a-generous-hull: these are anchored at ~0.67, not near the 0.2 ratio"
     )

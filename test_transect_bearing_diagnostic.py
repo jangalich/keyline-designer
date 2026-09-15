@@ -33,9 +33,11 @@ Sections (the design's numbered test items in brackets):
   4  [4]  ABSENT SEMANTICS IN B -- None not 0.0; a measured 0.0 still a
           real reading that wins the binding reduction.
   5  [5]  DIAGNOSTIC-ONLY -- AST: no production module imports the
-          instrument, production never calls the secant, and the
-          instrument defines neither a crest walk nor a direction
-          estimator of its own.
+          instrument, and the instrument defines neither a crest walk
+          nor a direction estimator of its own. The two pins that made
+          the SECANT diagnostic-only are RETIRED here, deliberately:
+          it has shipped onto the pinch walk. The TRANSECT bearing
+          stays pinned.
   6       THE VERDICT RULE -- pinned thresholds applied to synthetic
           classification sets, including the "do not force a verdict"
           mixed case.
@@ -322,7 +324,7 @@ def _curved_array():
 
 
 CURVED_DEM = _dem(_curved_array())
-curved_compartment, _curved_walk = _build(CURVED_DEM, (4, 8), 160.0)
+curved_compartment, _curved_walk = _build(CURVED_DEM, (4, 8), 138.0)
 assert curved_compartment["pinch"]["rowcol"] == (10, 28), (
     f"the waist is at (10, 28): got {curved_compartment['pinch']['rowcol']}"
 )
@@ -493,7 +495,6 @@ _PRODUCTION = [
 assert len(_PRODUCTION) > 20, f"the production sweep must actually find modules: {len(_PRODUCTION)}"
 
 _importers = []
-_secant_callers = []
 for _path in _PRODUCTION:
     _tree = ast.parse(_path.read_text())
     for _node in ast.walk(_tree):
@@ -504,27 +505,57 @@ for _path in _PRODUCTION:
         elif isinstance(_node, ast.ImportFrom):
             if _node.module == "diagnose_transect_bearing":
                 _importers.append(_path.name)
-            # The secant itself: valley_level_pool owns it, and only the
-            # level-pool arc and the diagnostics may pull it in.
-            if _node.module == "valley_level_pool" and _path.name != "valley_level_pool.py":
-                for _alias in _node.names:
-                    if _alias.name == "local_stem_direction":
-                        _secant_callers.append(_path.name)
 
 assert not _importers, (
     f"diagnose_transect_bearing is diagnostic-only -- imported by production module(s) {_importers}"
 )
-assert not _secant_callers, (
-    "no production module may import local_stem_direction while the production transect bearing is "
-    f"unchanged: {_secant_callers}"
+
+# TWO ASSERTIONS ARE RETIRED HERE, DELIBERATELY AND NOT SILENTLY.
+#
+# This section used to assert two more things: that no production module
+# imports local_stem_direction, and that the string "local_stem_direction"
+# appears nowhere in water_survey_areas.py. Both were pinning the secant
+# as a DIAGNOSTIC-ONLY path, which was the correct pin while the only
+# thing that had been measured with it was this module's method B.
+#
+# THE SECANT HAS SINCE SHIPPED, on the PINCH WALK: walk_embankment_pinch()
+# measures every width perpendicular to local_stem_direction()'s
+# de-quantized secant instead of the raw D8 step. So water_survey_areas
+# imports it, and those two assertions would now fail on a change that is
+# correct. Retiring them is the branch's decision, recorded here so a
+# reader does not have to reconstruct it from a diff.
+#
+# WHAT IS NOT RETIRED, and why the distinction matters: the TRANSECT
+# bearing is untouched. build_embankment_compartment() still takes its
+# crest walks perpendicular to the seed->pinch BASELINE, which is what
+# this whole module's A/B compares, and the assertion above -- that no
+# production module imports this INSTRUMENT -- still holds and still
+# means what it meant. The pinch walk's bearing and the transects'
+# bearing are two different questions; only the first has been answered.
+_wsa_source = (_REPO / "water_survey_areas.py").read_text()
+assert "local_stem_direction" in _wsa_source, (
+    "the secant has shipped onto the pinch walk -- if this fails, either the bearing change was "
+    "reverted (in which case restore the diagnostic-only pins above) or the reuse was replaced by "
+    "a local reimplementation"
+)
+# And it is REUSED, not copied: still defined exactly once, in the module
+# that owns it.
+_secant_definitions = [
+    f"{_path.name}:{_node.lineno}"
+    for _path in sorted(_REPO.rglob("*.py"))
+    for _node in ast.walk(ast.parse(_path.read_text()))
+    if isinstance(_node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    and _node.name == "local_stem_direction"
+]
+assert _secant_definitions == ["valley_level_pool.py:436"] or len(_secant_definitions) == 1, (
+    f"local_stem_direction must stay defined exactly once repo-wide: {_secant_definitions}"
 )
 
-# water_survey_areas in particular: the production transect construction
-# still uses the baseline perpendicular and nothing else.
-_wsa_source = (_REPO / "water_survey_areas.py").read_text()
-assert "local_stem_direction" not in _wsa_source, (
-    "the production transect bearing is UNCHANGED on this branch -- changing it is the next branch "
-    "IF the verdict says so"
+# THE TRANSECT bearing itself, pinned directly rather than by proxy: the
+# compartment's transects are still built off the baseline perpendicular.
+assert "perpendicular = (-baseline_unit[1], baseline_unit[0])" in _wsa_source, (
+    "the production TRANSECT bearing is unchanged -- changing it is a different branch, and this "
+    "module's A/B is what would justify it"
 )
 
 # THE REUSE PIN, the same shape the crest-height branch uses: the
@@ -554,9 +585,10 @@ for _required in ("ridge_crest_walk", "local_stem_direction", "crest_height_abov
 
 print(
     f"5. Diagnostic-only: across {len(_PRODUCTION)} production module(s), none imports the "
-    "instrument and none imports the secant; water_survey_areas still knows nothing of "
-    "local_stem_direction; and the instrument redefines none of the six borrowed functions while "
-    "calling five of them."
+    "INSTRUMENT, and it redefines none of the six borrowed functions while calling five of them. "
+    "The two pins that made the SECANT diagnostic-only are RETIRED here (it has shipped onto the "
+    f"pinch walk, defined once at {_secant_definitions[0]}); the TRANSECT bearing stays pinned to "
+    "the baseline perpendicular."
 )
 
 

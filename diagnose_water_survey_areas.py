@@ -159,6 +159,7 @@ from rasterio.warp import transform_geom
 from shapely.geometry import mapping
 # The BEARING A/B instrument (diagnostic-only, imported by no production
 # path -- see the module's own docstring and the AST pin in its tests).
+from diagnose_pinch_bearing_and_bound import summarize_pinch_bearing_and_bound
 from diagnose_transect_bearing import summarize_transect_bearing_comparison
 from water_survey_areas import (
     DEPRESSION_FULL_CREDIT_METERS,
@@ -2138,6 +2139,12 @@ def main() -> None:
     # seed->pinch BASELINE rather than to the local channel? Read-only;
     # it re-measures and compares, and changes nothing.
     print(summarize_transect_bearing_comparison(dem, identify_result))
+    print()
+    # THE THREE-WAY ATTRIBUTION + the half-width sweep, on the compute
+    # core's own return (which carries every array, mask and polygon the
+    # embankment pass ran on, so each configuration re-runs that pass on
+    # identical inputs with only the bearing and the bound varied).
+    print(summarize_pinch_bearing_and_bound(dem, identify_result["result"]))
     print()
     print(summarize_seed_ladder(identify_result))
     print()

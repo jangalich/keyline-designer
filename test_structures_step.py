@@ -1383,11 +1383,37 @@ with Harness() as h:
     assert [c["suitability_score"] for c in ROW_BOTH[:len(GENERATED)]] == [
         c["suitability_score"] for c in GENERATED
     ], "the 'both' row must reproduce the shipped generate, or it is measuring something else"
-    # THE BEFORE COLUMN IS ZEROS. That is the branch's reason to exist.
-    assert all(c["_road_ft"] == 0.0 for c in ROW_BEFORE[:3]), (
-        f"the pad-based reading must be 0.0 on the top three: {[c['_road_ft'] for c in ROW_BEFORE[:3]]}"
+    # THE BEFORE COLUMN COLLAPSES TO ZERO. That is the branch's reason to
+    # exist: a pad that TOUCHES the corridor is 0.0 m from it however far
+    # its centre is, so the panel's headline figure carried no
+    # information for any such candidate.
+    #
+    # RE-PINNED FROM "all three read exactly 0.0" when the de-quantized
+    # pinch bearing shifted this fixture's committed road corridor
+    # (area 1175 -> 1225 m^2, length 490 -> 530 m: the water step's zone
+    # ids shifted, the corridor's cost path moved with them). The old
+    # form encoded a COINCIDENCE of the fixture -- that every top-three
+    # pad happened to intersect -- as though it were the mechanism. The
+    # mechanism is the collapse, and it is asserted directly below, on
+    # the whole row rather than on whichever three happen to sort first.
+    _before_ft = sorted(c["_road_ft"] for c in ROW_BEFORE)
+    assert sum(1 for ft in _before_ft if ft == 0.0) >= 2, (
+        f"pads that intersect the corridor must read exactly 0.0: {_before_ft}"
     )
-    assert all(c["_road_ft"] > 0.0 for c in ROW_PART1[:3]) and all(c["_road_ft"] > 0.0 for c in ROW_BOTH[:3])
+    assert sum(1 for ft in _before_ft if ft <= 0.2) >= len(_before_ft) - 1, (
+        "and all but one candidate must be at or indistinguishably close to zero -- a panel cannot "
+        f"tell 0.0 from 0.2 ft apart: {_before_ft}"
+    )
+    # THE AFTER COLUMNS NEVER COLLAPSE: a point-based distance is
+    # strictly positive for every candidate in both later rows, which is
+    # the whole of what the measurement change bought.
+    assert all(c["_road_ft"] > 0.0 for c in ROW_PART1) and all(c["_road_ft"] > 0.0 for c in ROW_BOTH), (
+        f"part1 {sorted(c['_road_ft'] for c in ROW_PART1)}, "
+        f"both {sorted(c['_road_ft'] for c in ROW_BOTH)}"
+    )
+    assert min(c["_road_ft"] for c in ROW_BOTH) > max(
+        ft for ft in _before_ft if ft <= 0.2
+    ), "every point-based reading clears every collapsed pad-based one"
 
     def _row_text(label, row):
         return (
@@ -1426,11 +1452,50 @@ with Harness() as h:
     # A floodplain band over a GENERATED candidate's own ground -- so the
     # gate bites a real candidate in 12d rather than empty ground, and so
     # the floodplain-only probe sits on a spot the step actually offered.
-    FLOOD_TARGET = GENERATED[-1]["polygon_utm"].centroid
-    FLOOD_BAND = FLOOD_TARGET.buffer(30.0)
+    #
+    # THE CANDIDATE IS CHOSEN FOR CLEARANCE, not by index. It used to be
+    # GENERATED[-1], which worked only while that happened to sit clear
+    # of the two things this band must avoid; when the de-quantized pinch
+    # bearing moved this fixture's road corridor the candidate set moved
+    # with it, the 30 m band swallowed PLACED_A, and the "clear of both
+    # gates" case below was silently testing a site inside one of them.
+    #
+    # The band must stay clear of TWO points: PLACED_A (the clear-of-both
+    # control, 30 m away is enough) and rank 1's centroid (section 12d
+    # puts a 22 m HYDRIC_BAND there and needs the two gate grounds
+    # disjoint, so 52 m). Choosing the candidate that maximises the
+    # SMALLER of those two clearances makes the separation deliberate;
+    # the preconditions below and in 12d fail loudly if it stops holding.
+    _rank_one_centroid = GENERATED[0]["polygon_utm"].centroid
+    _flood_candidate = max(
+        GENERATED,
+        key=lambda candidate: min(
+            candidate["polygon_utm"].centroid.distance(nudged),
+            candidate["polygon_utm"].centroid.distance(_rank_one_centroid),
+        ),
+    )
+    FLOOD_TARGET = _flood_candidate["polygon_utm"].centroid
+    # THE RADIUS IS SIZED FROM WHAT THE BAND MUST DO, not picked. It has
+    # to COVER its candidate's pad (or the gate bites nothing and 12d is
+    # vacuous) while staying clear of the 22 m HYDRIC_BAND on rank 1's
+    # pad. It was a flat 30.0 m, which fitted only while the candidate
+    # set left more than 52 m between those two pads; this fixture's
+    # current set leaves 50.0 m, so 30.0 would overlap by 2 m and 12d's
+    # disjointness precondition would fail. Both requirements are
+    # asserted immediately below, so a radius that stops satisfying
+    # either says so instead of quietly weakening a gate.
+    FLOOD_BAND = FLOOD_TARGET.buffer(24.0)
+    assert FLOOD_BAND.contains(_flood_candidate["polygon_utm"]), (
+        "the floodplain band must COVER its candidate's pad, or the gate it models excludes "
+        "nothing and every assertion about it passes vacuously"
+    )
     assert not FLOOD_BAND.intersects(HYDRIC_UNION), (
         "the two fixture grounds must be DISJOINT, or 'hydric only' and 'floodplain only' are not "
         "separate cases"
+    )
+    assert not FLOOD_BAND.contains(nudged), (
+        "the clear-of-both control point must sit OUTSIDE the floodplain band, or the 'neither "
+        f"gate violated' case is vacuous (band centre {FLOOD_TARGET.distance(nudged):.1f} m away)"
     )
     # And a band covering BOTH probes, for the site that breaks both gates.
     BOTH_BAND = unary_union([FLOOD_BAND, HYDRIC_POINT.buffer(30.0)])
