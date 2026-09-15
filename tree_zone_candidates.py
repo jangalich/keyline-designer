@@ -714,6 +714,95 @@ MARGINAL_BENEFIT_FACTOR_SOURCES = (
 MARGINAL_BENEFITS = tuple(benefit for benefit, _ in MARGINAL_BENEFIT_FACTOR_SOURCES)
 
 
+# ---------------------------------------------------------------------
+# SCALES -- how to read every scored value this module publishes
+# ---------------------------------------------------------------------
+#
+# WHY THIS BLOCK EXISTS AT ALL, and it is the convention every other
+# scoring module here already keeps: production_area_ceiling._SCALES,
+# water_survey_areas.build_scales(), road_corridors._SCALES and
+# solar_suitability._SCALES. A score means nothing without the axis it
+# sits on, and the axis is the SERVER's to publish -- so a consumer
+# never holds a threshold, a range or a band cut of its own.
+#
+# TREES WAS THE ONE STEP THAT SHIPPED NO SCALE, and the gap surfaced
+# where a gap like this always surfaces: at a consumer. The interactive
+# panel prints a score's denominator ("58.3" under "/100 score") by
+# reading the top of the published scale, in whichever spelling the
+# payload uses -- and on this payload there was nothing to read, so it
+# printed a bare "score" rather than invent a 100 it could not back.
+# The alternative it declined is the failure this block prevents: a 100
+# written down on the client is a second copy of the number below, in
+# the one place nobody would think to check the day this is retuned.
+#
+# READ OFF SUITABILITY_SCORE_SCALE, never written twice. That constant
+# is what score_tree_search_space() multiplies the 0-1 composite by, so
+# the published top of the scale and the conversion that produces the
+# values ON it cannot come apart.
+#
+# NO BAND SET ON THE SCORE, and that is a decision rather than an
+# omission. Production's _SCORE_BANDS are private to that module and
+# name qualities ("excellent") of a composite built from entirely
+# different factors; this axis rewards what production rejects, so
+# borrowing its words would invert their meaning. The range and the
+# direction are what a reader needs and are what is declared. The
+# selection floor is not here either -- it is a decision this run made,
+# not a property of the axis, and it ships under 'selection'.
+#
+# 'calibration' IS SAID OUT LOUD, road_corridors' own key and for its
+# own reason: the four composite weights above are documented starting
+# values to be tuned against a ground-truthed property, and a consumer
+# rendering "58.3" beside "41.0" should be able to learn that the gap
+# between them is not yet validated.
+
+# WHERE A ZONE SITS BETWEEN THE PARCEL'S LOWEST AND HIGHEST GROUND, as
+# production's own bands -- IMPORTED, not redeclared (see the import at
+# the top of this module), which is the same rule _elevation_position()
+# already follows. Shipped as a named sub-scale rather than a second
+# top-level key: 'scales' is the one place a consumer looks to learn how
+# to read a value, and both the report and the interactive payload
+# forward the whole block verbatim.
+#
+# 'direction' IS NOT higher_is_better. An elevation percentile is a
+# POSITION, not a quality, and nothing here scores ground on being high
+# or low. production_area_ceiling and solar_suitability say exactly this
+# at their own copies of this sub-scale; the words are theirs.
+_ELEVATION_POSITION_SCALE = {
+    "range": [0.0, 100.0],
+    "direction": "higher_is_upslope",
+    "bands": ELEVATION_POSITION_BANDS,
+    "band_bounds": "lower_inclusive_upper_exclusive_last_band_inclusive",
+    "applies_to": ["elevation_percentile_of_parcel", "elevation_position"],
+}
+
+_SCALES = {
+    "range": [0.0, float(SUITABILITY_SCORE_SCALE)],
+    "direction": "higher_is_better",
+    "applies_to": ["score", "factors.*"],
+    "calibration": "unvalidated_starting_values",
+    # HIGH MEANS MARGINAL, which is the one thing about this axis a
+    # reader coming from production's panel will get backwards. Said in
+    # the block rather than left to the label beside the number, because
+    # a scale is where "what does a big number mean here" is answered.
+    "higher_is_better_means": "more_marginal_for_production_and_better_for_tree_cover",
+    # The one value in this block that is NOT on the 0-100
+    # higher-is-better axis the keys above describe. Named, not folded in.
+    "elevation_position": _ELEVATION_POSITION_SCALE,
+    # WHAT THE BENEFIT WORDS ARE, as a closed set in emission order -- not
+    # a scale, and here for the reason the bands are: a consumer laying
+    # out rows should never have to hold this list, and one that renders
+    # whatever it is handed needs no copy at all. The MAPPING from factor
+    # to benefit and the availability gate stay in marginal_benefits()
+    # and are not on the wire in any form.
+    "marginal_benefits": {
+        "values": list(MARGINAL_BENEFITS),
+        "order": "as_emitted",
+        "empty_means": "this_zone_earned_none",
+        "applies_to": ["marginal_benefits"],
+    },
+}
+
+
 def marginal_benefits(patch: dict) -> list[str]:
     """
     The conservation benefits this zone's factors EARNED, in
@@ -1956,6 +2045,17 @@ def build_narrative_data(
                                           #   scored but refused to emit
                                           #   because their geometry could
                                           #   not be made valid -- see below
+          'scales': {               # HOW TO READ EVERY SCORED VALUE HERE --
+                                    #   the axis 'score' and 'factors' sit on,
+                                    #   production's imported elevation bands,
+                                    #   and the closed set of benefit words.
+                                    #   See _SCALES. A consumer holds no
+                                    #   threshold, range or band cut of its own
+            'range', 'direction', 'applies_to', 'calibration',
+            'higher_is_better_means',
+            'elevation_position': {...},
+            'marginal_benefits': {...},
+          },
           'search_space': {         # stage 1 -- what ground was considered
             'parcel_acres',
             'claimed_acres',        #   production + selected water + road
@@ -2017,6 +2117,11 @@ def build_narrative_data(
     return {
         "candidate_count": len(patches),
         "dropped_invalid_count": int(dropped_invalid_count),
+        # HOW TO READ EVERY SCORED VALUE BELOW -- see _SCALES. Top level of
+        # this block, not inside a zone: a scale describes the instrument,
+        # not one reading of it. Forwarded whole by the report and lifted to
+        # the interactive payload's root by build_trees_payload().
+        "scales": _SCALES,
         "search_space": {
             "parcel_acres": _round1(boundary_acres),
             "claimed_acres": _round1(claimed_acres),

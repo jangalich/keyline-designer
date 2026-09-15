@@ -329,7 +329,24 @@ with Harness() as h:
     trees_network_calls = h.total_network_calls - network_before
     selfcomputes = {k: v - selfcomputes_before[k] for k, v in h.tree_selfcomputes().items()}
 
-    assert sorted(payload) == ["crossing_grounds", "search_space", "summary", "tree_zones", "zones"], sorted(payload)
+    assert sorted(payload) == [
+        "crossing_grounds", "scales", "search_space", "summary", "tree_zones", "zones",
+    ], sorted(payload)
+
+    # `scales` IS AT THE ROOT AND NOT IN `summary` -- production_zone_payload's
+    # and build_water_payload's own shape. A scale describes the INSTRUMENT and
+    # `summary` is what this run did, so there is one copy and one place to
+    # look. The interactive panel reads the top of it to print a score's
+    # denominator; before this it found nothing and printed none.
+    assert "scales" not in payload["summary"], sorted(payload["summary"])
+    assert payload["scales"]["range"] == [0.0, float(tree_zone_candidates.SUITABILITY_SCORE_SCALE)]
+    assert payload["scales"]["direction"] == "higher_is_better"
+    assert payload["scales"]["elevation_position"]["bands"] == (
+        production_area_ceiling.ELEVATION_POSITION_BANDS
+    )
+    assert payload["scales"]["marginal_benefits"]["values"] == list(
+        tree_zone_candidates.MARGINAL_BENEFITS
+    )
     assert h.identify_trees.call_count == 1
     validate_feature_collection(payload["tree_zones"])
     CANDIDATES = payload["tree_zones"]["features"]

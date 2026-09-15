@@ -80,6 +80,7 @@ import session_cache
 import session_manager
 import step_orchestrator
 import step_registry
+import tree_zone_candidates
 import valley_delineation
 import wire_translation
 from dem_data import _utm_epsg_for_lonlat
@@ -1595,9 +1596,15 @@ with Harness() as h:
 
     # THE STEP THIS SECTION EXISTS FOR.
     trees_payload = s.generate("trees")
-    assert sorted(trees_payload) == ["crossing_grounds", "search_space", "summary", "tree_zones", "zones"], (
-        sorted(trees_payload)
-    )
+    assert sorted(trees_payload) == [
+        "crossing_grounds", "scales", "search_space", "summary", "tree_zones", "zones",
+    ], sorted(trees_payload)
+    # `scales` AT THE ROOT, not in `summary`: how to read every scored value,
+    # published once so no consumer holds a range or a band cut of its own.
+    assert "scales" not in trees_payload["summary"]
+    assert trees_payload["scales"]["range"] == [
+        0.0, float(tree_zone_candidates.SUITABILITY_SCORE_SCALE)
+    ], trees_payload["scales"]["range"]
     candidates = trees_payload["tree_zones"]["features"]
     grounds = trees_payload["crossing_grounds"]
     assert [g["type"] for g in grounds] == ["production", "water", "road", "canopy"], [g["type"] for g in grounds]
