@@ -137,8 +137,36 @@ FENCE_RENDER_ANGULAR_SIMPLIFY_TOLERANCE_M = 6.0  # was 4.0
 # independent simplification left the rings a few metres apart), not just
 # pixel-exact overlap; note that widening it widens the inter-zone gap the
 # symmetric trim leaves too. Was render_layout_map.ZONE_FENCE_BOUNDARY_
-# COINCIDENCE_TOLERANCE_M, unchanged in value. CONFIGURABLE.
-ZONE_FENCE_BOUNDARY_COINCIDENCE_TOLERANCE_M = 5.0  # was 1.0
+# COINCIDENCE_TOLERANCE_M. CONFIGURABLE.
+#
+# 8.0, AND THE 5.0 IT REPLACES WAS NOT WIDE ENOUGH TO FINISH THE JOB. At 5.0
+# the reference parcel still drew 18.2% of its total fence length within 6
+# ground metres of another drawn fence line -- pairs of near-parallel lines a
+# few pixels apart at whole-parcel zoom, which is the artefact this pass
+# exists to remove. The trim was cutting at its own radius and leaving
+# everything just outside it. Swept through the real pipeline (five committed
+# steps, the reference DEM), sampling every drawn line every 2 m:
+#
+#     trim   ground m   zone ring kept   still <6 m from another line   pieces
+#      5.0       3.79            52.1%                          18.2%       20
+#      6.6       5.01            42.0%                           5.6%       13
+#      8.0       6.07            39.5%                           0.0%       11
+#     13.0       9.86            33.6%                           0.0%        9
+#
+# 8.0 IS THE FIRST VALUE THAT REACHES ZERO, and going past it buys nothing
+# and keeps costing: the zone rings give up another 12.6 points of length
+# against 5.0, and the symmetric gaps get longer (20 drawn pieces become 11),
+# which is the cost this comment's second sentence has always named. Both are
+# the intended trade -- a real gap between two zones is the answer, and two
+# lines 4 m apart at this zoom is not.
+#
+# THE SECOND COLUMN IS WHY THE FIRST IS NOT IN METRES. Both passes run in
+# WEB MERCATOR (see THE CRS), where a unit is a metre scaled by 1/cos(lat) --
+# at the reference parcel's 40.64 N, 8.0 is 6.07 ground metres, and the same
+# constant is a different ground distance at a different latitude. The name
+# says _M because the renderer's did; what it is is Mercator units, and the
+# table above is the ground reading at the one parcel the sweep was run on.
+ZONE_FENCE_BOUNDARY_COINCIDENCE_TOLERANCE_M = 8.0  # was 5.0, was 1.0
 
 
 def simplified_fence_ring(ring, tolerance: float = FENCE_RENDER_ANGULAR_SIMPLIFY_TOLERANCE_M):

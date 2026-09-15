@@ -198,7 +198,7 @@ for forbidden in ("angular_simplify_closed_ring(", "unary_union(", ".buffer(ZONE
 # AND THE TWO TOLERANCES ARE ONE NUMBER EACH: the renderer's names are the
 # module's values, re-exported, not a second declaration.
 assert rlm.FENCE_RENDER_ANGULAR_SIMPLIFY_TOLERANCE_M == FENCE_RENDER_ANGULAR_SIMPLIFY_TOLERANCE_M == 6.0
-assert rlm.ZONE_FENCE_BOUNDARY_COINCIDENCE_TOLERANCE_M == ZONE_FENCE_BOUNDARY_COINCIDENCE_TOLERANCE_M == 5.0
+assert rlm.ZONE_FENCE_BOUNDARY_COINCIDENCE_TOLERANCE_M == ZONE_FENCE_BOUNDARY_COINCIDENCE_TOLERANCE_M == 8.0
 assert not re.search(r"^FENCE_RENDER_ANGULAR_SIMPLIFY_TOLERANCE_M\s*=", _renderer_source, re.M)
 assert not re.search(r"^ZONE_FENCE_BOUNDARY_COINCIDENCE_TOLERANCE_M\s*=", _renderer_source, re.M)
 
@@ -207,7 +207,7 @@ print(
     "fence_display_geometry.fence_display_lines; wire_translation.display_only_fence_lines_wgs84 is the "
     f"module's own and ran the shared function exactly once over ({_calls[0][0]} boundary + {_calls[0][1]} zone) "
     "rings; render_layout_map.py holds no simplify(), union or buffer-trim call of its own and declares "
-    "neither tolerance (6.0 m / 5.0 m are read from the module)."
+    "neither tolerance (6.0 / 8.0 Mercator units are read from the module)."
 )
 
 
@@ -246,7 +246,21 @@ def _simplify_literal(geometry, tolerance):
     return angular_simplify_closed_ring(geometry, tolerance)
 
 
-def _transcription(boundary_rings, zone_rings, simplify_tolerance=6.0, coincidence_tolerance=5.0):
+# AND ONE NUMBER THAT HAS MOVED SINCE. The snippet above spells 5.0 because
+# that is what the inline code carried; the trim tolerance has since been
+# retuned to 8.0 (see fence_display_geometry, which has the sweep that chose
+# it). The transcription takes the CONSTANTS rather than the literals, because
+# what this section proves is that the shared function runs the inline code's
+# ALGORITHM -- two passes, the mutual difference, no ordering -- and a tuning
+# change is not a change to that. Pinning the literal here would turn every
+# future retune into a failure of a parity test that has nothing to say about
+# it.
+def _transcription(
+    boundary_rings,
+    zone_rings,
+    simplify_tolerance=FENCE_RENDER_ANGULAR_SIMPLIFY_TOLERANCE_M,
+    coincidence_tolerance=ZONE_FENCE_BOUNDARY_COINCIDENCE_TOLERANCE_M,
+):
     boundary_fence_render_rings = [_simplify_literal(g, simplify_tolerance) for g in boundary_rings]
     zone_fence_render_rings = [_simplify_literal(g, simplify_tolerance) for g in zone_rings]
     trimmed = []
