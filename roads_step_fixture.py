@@ -188,12 +188,31 @@ def _boundary_point(edge_index: int, fraction: float) -> tuple:
 # surveyed points either side of it inside the same band -- so the
 # section's premise now rests on a plateau rather than on the two
 # knife-edge cells the old pair had left.
+#
+# AND THE POINT HAS MOVED AGAIN, EDGE 2 @ 0.70 -> EDGE 2 @ 0.50, WHILE
+# THE 120 PIN HELD ONCE MORE. Same dependency, same cause as last time:
+# the water step's DAM-SITE OBJECTIVE changed -- the embankment cell is
+# now the best ratio of binding shoulder height to crest-to-crest width
+# rather than the narrowest station -- so dam cells moved, compartments
+# moved with them, and the presented embankment zones upstream() commits
+# moved again. THE POND EXCLUSION MOVED, exactly what upstream()'s own
+# docstring warns about, and edge 2 @ 0.70 now routes over the new one.
+#
+# Re-surveyed along edge 2 at ceiling 120, the same way:
+#
+#     fraction   0.35 0.40 0.45 0.50 0.55 0.60 0.65 0.70 0.80 0.90
+#     outcome     X    X    X    X    X    X    X    ok   ok    X
+#
+# A contiguous refusing run from 0.35 to 0.65, so 0.50 is taken from its
+# middle with three surveyed points either side inside the same band --
+# the plateau rule this fixture has used since the knife-edge pair was
+# retired, not a fresh coordinate that happens to fail today.
 NO_NETWORK_CEILING_METERS_PER_ACRE = 120.0
 ACCESS_A = _boundary_point(0, 0.85)
 ACCESS_B = _boundary_point(3, 0.85)
 ACCESS_C = _boundary_point(4, 0.50)
 ACCESS_D = _boundary_point(1, 0.50)
-ACCESS_NO_NETWORK = _boundary_point(2, 0.70)
+ACCESS_NO_NETWORK = _boundary_point(2, 0.50)
 # An interior point, ~40 m inside: not an access point by the validator's
 # own rule.
 _centroid_lon, _centroid_lat = warp_transform(

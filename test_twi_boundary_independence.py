@@ -953,7 +953,8 @@ assert diag._seed_outcome(_built_then_dropped, {})[0] == "compartment"
 # BAND, so one outcome class cannot be split across as many keys as
 # there are winning zones.
 assert diag._collapse_reason("duplicate_of_zone_7") == "duplicate_of_zone"
-assert diag._collapse_reason(wsa.REASON_NO_CONSTRICTION) == wsa.REASON_NO_CONSTRICTION
+assert diag._collapse_reason(wsa.REASON_BEST_SITE_AT_SEED) == wsa.REASON_BEST_SITE_AT_SEED
+assert diag._collapse_reason(wsa.REASON_NO_MEASURABLE_SHOULDER) == wsa.REASON_NO_MEASURABLE_SHOULDER
 assert diag._collapse_reason(None) == "unknown"
 
 # THE BANDS: every seed lands in exactly one, the counts reconcile with

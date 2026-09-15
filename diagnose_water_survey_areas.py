@@ -163,7 +163,9 @@ from shapely.geometry import mapping
 from diagnose_pinch_bearing_and_bound import (
     RETIRED_HALF_WIDTH_BOUND_METERS,
     summarize_bound_outcome_shift,
+    summarize_dam_site_objective,
     summarize_pinch_bearing_and_bound,
+    summarize_shoulder_gate,
 )
 from diagnose_transect_bearing import summarize_transect_bearing_comparison
 from water_survey_areas import (
@@ -904,8 +906,8 @@ def summarize_seed_ladder(identify_result: dict) -> str:
         if zone["survey_type"] == SURVEY_TYPE_EMBANKMENT
     ]
     lines.append(
-        "  THE QUESTION THIS BRANCH ASKS: do the high-catchment reaches that previously died at "
-        "no_constriction now appear as WELL-FILLED compartments anchored on off-channel seeds "
+        "  THE QUESTION THIS BRANCH ASKS: do the high-catchment reaches that previously died "
+        "on the walk now appear as WELL-FILLED compartments anchored on off-channel seeds "
         "ABOVE them -- i.e. does measuring drainage at the PINCH recover the catchment signal the "
         f"seed-level measurement was throwing away? The band is {EMBANKMENT_DRAINAGE_MIN_ACRES}-"
         f"{EMBANKMENT_DRAINAGE_FULL_CREDIT_ACRES} ac ramp to full credit, hard zero above "
@@ -2170,6 +2172,16 @@ def main() -> None:
     # embankment pass ran on, so each configuration re-runs that pass on
     # identical inputs with only the bearing and the bound varied).
     print(summarize_pinch_bearing_and_bound(dem, identify_result["result"]))
+    print()
+    # THE DAM-SITE OBJECTIVE, printed beside the bearing/bound
+    # attribution it extends: which station the RETIRED minimum-width
+    # rule picks against what each candidate exponent picks, per seed.
+    print(summarize_dam_site_objective(dem, identify_result["result"]))
+    print()
+    # THE ENCLOSURE GATE, printed after the objective it qualifies: what
+    # every selected dam site on this parcel actually holds, the
+    # distribution across all of them, and the sensitivity ladder.
+    print(summarize_shoulder_gate(identify_result["result"]))
     print()
     # THE OUTCOME SHIFT: the same water step run a second time at the
     # RETIRED half-width bound, with this run's own DEM and production

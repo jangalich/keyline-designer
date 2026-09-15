@@ -1419,13 +1419,22 @@ with Harness() as h:
     # pad happened to intersect -- as though it were the mechanism. The
     # mechanism is the collapse, and it is asserted directly below, on
     # the whole row rather than on whichever three happen to sort first.
+    # RE-PINNED AS A PROPORTION, not a count. "All but one" was itself a
+    # property of how many candidates the run happened to produce, and
+    # the dam-site objective moved the water zone, the corridor and the
+    # candidate set again. What the section is about is the COLLAPSE:
+    # a pad that touches the corridor reads 0.0 however far its centre
+    # is, so the panel's headline figure carried no information for any
+    # such candidate. That is a proportion of the row, and it is
+    # overwhelming rather than universal.
     _before_ft = sorted(c["_road_ft"] for c in ROW_BEFORE)
-    assert sum(1 for ft in _before_ft if ft == 0.0) >= 2, (
+    _collapsed = sum(1 for ft in _before_ft if ft == 0.0)
+    assert _collapsed >= 2, (
         f"pads that intersect the corridor must read exactly 0.0: {_before_ft}"
     )
-    assert sum(1 for ft in _before_ft if ft <= 0.2) >= len(_before_ft) - 1, (
-        "and all but one candidate must be at or indistinguishably close to zero -- a panel cannot "
-        f"tell 0.0 from 0.2 ft apart: {_before_ft}"
+    assert _collapsed >= (2 * len(_before_ft)) // 3, (
+        "and the collapse must dominate the row -- if most candidates carried a real distance "
+        f"under the pad rule there would have been nothing to fix: {_before_ft}"
     )
     # THE AFTER COLUMNS NEVER COLLAPSE: a point-based distance is
     # strictly positive for every candidate in both later rows, which is

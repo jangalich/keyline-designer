@@ -1175,77 +1175,71 @@ assert 0.54 > 0.5, (
 # EVERY CHANNEL SEED FAILS, honestly, because this prism valley has a
 # CONSTANT cross-section -- crest-to-crest width is identical at every
 # station, so the along-channel minimum lands on the seed's own station
-# (argmin tie -> index 0: the valley never narrows below the seed) --
-# the ONE failure the accepted-terminal doctrine kept: no_constriction.
+# (a flat ratio profile -> first-of-ties argmax at index 0: the seed is
+# its own best dam site) -- best_site_at_seed, the degenerate-baseline
+# failure the accepted-terminal doctrine has always kept.
 _channel_records = v_seeds[:6]
 assert all(record["status"] == wsa.SEED_STATUS_FAILED for record in _channel_records), (
     "a constant-width prism never narrows below any channel seed -- every one reports nothing"
 )
-assert all(record["reason_code"] == wsa.REASON_NO_CONSTRICTION for record in _channel_records), (
-    f"widths never drop below the seed station -> no_constriction, got "
+# RENAMED WITH THE RULE, AND THE REASON CHANGED WITH IT. This prism is a
+# pure V rising to the grid edge: no ray ever falls back a prominence, so
+# NO STATION ON THIS FIXTURE HAS A MEASURABLE SHOULDER. Under the retired
+# minimum-width rule that did not matter -- width was the only axis --
+# and the channel tier failed for never narrowing while the side tier
+# built compartments. Under the width-and-height objective it matters
+# completely: a dam site cannot be chosen on depth where no depth was
+# measured, so every seed here fails no_measurable_shoulder, channel and
+# side alike, and NOT ONE compartment is built.
+#
+# THAT IS THE OBJECTIVE BEING RIGHT, not a fixture regression. Ground
+# with no shoulders anywhere offers no defensible dam site, and the
+# retired rule was manufacturing compartments on it from the widths
+# alone -- which is precisely the failure the objective exists to stop.
+# The refusal is asserted as the finding it is.
+assert all(
+    record["reason_code"] == wsa.REASON_NO_MEASURABLE_SHOULDER for record in _channel_records
+), (
+    f"a shoulderless prism offers no dam site anywhere -> no_measurable_shoulder, got "
     f"{[r['reason_code'] for r in _channel_records]}"
 )
 
-# THE SIDE TIER IS THE POINT OF THE LOWER MINIMUM, and it does not all
-# succeed either -- which is the shape the change predicted. The four
-# upslope-most side seeds walk reaches that never narrow (no_constriction
-# again); eight build compartments, four of those lose the
-# compartment-overlap dedupe and two fall under the acre floor, and TWO
-# SURVIVE. Ground scoring 0.375 -- less than half what the channel
-# scores -- is the only ground on this fixture that produces an
-# embankment survey zone at all.
 _side_records = v_seeds[6:]
-assert sum(1 for r in _side_records if r["status"] == wsa.SEED_STATUS_COMPARTMENT) == 8
-assert sum(
-    1 for r in _side_records
-    if r["status"] == wsa.SEED_STATUS_FAILED and r["reason_code"] == wsa.REASON_NO_CONSTRICTION
-) == 4
-# The dedupe that culls four of those eight is a ZONE-level overlap
-# dedupe, so it lands on the dropped ZONE's drop_reason, not on the seed
-# record (a pinch-level duplicate would land on the seed; this fixture
-# has none).
-_v_dropped_reasons = [zone["drop_reason"] for zone in v_result["dropped_zones"]]
-assert sum(1 for r in _v_dropped_reasons if r.startswith(wsa.DUPLICATE_OF_ZONE_REASON_PREFIX)) == 4
-assert sum(1 for r in _v_dropped_reasons if r == wsa.FLAG_BELOW_MIN_AREA) == 2
-v_emb_zones = v_result["zones_by_type"][SURVEY_TYPE_EMBANKMENT]
-assert len(v_emb_zones) == 2, "two off-channel compartments survive the floor"
-assert {zone["seed"]["rowcol"] for zone in v_emb_zones} == {(14, 2), (26, 2)}
-assert all(zone["seed_blend_score"] == 0.54 for zone in v_emb_zones)
+assert all(
+    record["status"] == wsa.SEED_STATUS_FAILED
+    and record["reason_code"] == wsa.REASON_NO_MEASURABLE_SHOULDER
+    for record in _side_records
+), (
+    "the SIDE tier fails for the same reason and not a different one: these seeds walk down into "
+    "the same shoulderless channel"
+)
+assert not v_result["zones_by_type"][SURVEY_TYPE_EMBANKMENT], (
+    "and so this fixture produces NO embankment zone at all -- the honest outcome on ground that "
+    "has no cross-section to dam"
+)
+assert not [
+    zone for zone in v_result["dropped_zones"] if zone["survey_type"] == SURVEY_TYPE_EMBANKMENT
+], "nothing was built and then dropped either; the walks refused before a compartment existed"
 
-# THE FILL CLAIM, AND IT IS THIS BRANCH'S WHOLE ARGUMENT IN ONE FIXTURE.
-# Both surviving compartments are anchored on SIDE-SLOPE seeds whose own
-# contributing area is a single cell -- 0.0062 ac, which the drainage
-# band scores 0.0. Under the retired per-cell measurement that 0.0 was
-# 30% of their nomination score and the reason the whole off-channel
-# class was capped. But their pinches sit down in the channel, and the
-# catchment ABOVE THE DAM REACH -- the water that would actually fill
-# these ponds -- is 8.5 and 13.0 acres, full credit on the very same
-# band with the very same constants. The criterion was asking the right
-# question of the wrong cell, and this is what recovering it looks like.
+# WHAT THIS SECTION USED TO CARRY, AND WHERE IT LIVES NOW. Two
+# side-seeded compartments survived here, and they were this file's
+# worked demonstration of the FILL CLAIM: a side-slope seed whose own
+# contributing area is one cell (scoring 0.0 on the drainage band) but
+# whose PINCH sits down in the channel and inherits 8.5 and 13.0 acres
+# of catchment -- "the criterion was asking the right question of the
+# wrong cell". That argument is not lost and is not weakened: it is the
+# whole subject of test_pinch_catchment_drainage.py, which builds the
+# compartment directly, asserts the seed's own catchment scores 0.0 and
+# the pinch's 1.0, and runs the fixture INVERTED to prove the direction
+# is not an artifact of which number happens to be larger. It needs no
+# shoulderless prism to make the point.
 _v_seed_acres = 1 * CA
 assert wsa.drainage_band_score(np.array(_v_seed_acres)) == 0.0, (
-    "a side-slope seed's OWN catchment is one cell and scores zero -- the measurement that was "
-    "killing this archetype"
+    "the measurement that was killing the off-channel archetype is still exactly zero -- kept here "
+    "because the 0.54 seed blend above is the other half of that finding"
 )
-for zone in v_emb_zones:
-    assert zone["pinch_catchment_acres"] > 8.0, (
-        f"the pinch of an off-channel compartment sits in the channel: "
-        f"{zone['pinch_catchment_acres']} ac"
-    )
-    assert zone["pinch_catchment_acres"] < wsa.MAX_VALLEY_CONTRIBUTING_AREA_ACRES, (
-        "and still under the ceiling -- this fixture is not testing the disqualifier"
-    )
-    assert zone["pinch_drainage_score"] == 1.0, "full credit on the unchanged band"
-    assert zone["catchment_exceeds_ceiling"] is False
-    # BOTH CLAIMS ON THE SAME RECORD, and no composite of them anywhere
-    # on it: the equal-weight mean that used to be asserted here ranked
-    # the compartment, and rank reads the displayed suitability now.
-    assert zone["seed_blend_score"] == 0.54
-    assert "compartment_rank_score" not in zone
-_v_by_seed = {zone["seed"]["rowcol"]: zone for zone in v_emb_zones}
-assert _v_by_seed[(26, 2)]["pinch_catchment_acres"] > _v_by_seed[(14, 2)]["pinch_catchment_acres"], (
-    "the downstream compartment's dam reach carries more catchment"
-)
+
+v_emb_zones = v_result["zones_by_type"][SURVEY_TYPE_EMBANKMENT]
 
 # THE SELECTION FLIPPED BACK, AND SAYING SO IS THE POINT. This fixture
 # is where the ranking rule's history is most legible, so it is asserted
@@ -1265,40 +1259,40 @@ assert _v_by_seed[(26, 2)]["pinch_catchment_acres"] > _v_by_seed[(14, 2)]["pinch
 # so per zone, and the ORDER no longer says it for them.
 v_exc_zone = exc_zones[0]
 assert v_exc_zone["rank"] == 1, "still rank 1 WITHIN its own type -- ranking is per type"
-assert v_exc_zone["presented"] is True and v_exc_zone["presentation_order"] == 2, (
-    "the sole excavated survivor is the presented set's SECOND entry -- the interleave puts "
-    "excavated rank 1 between the two embankment zones, and presentation is a separate mark from "
-    "the rank asserted above"
-)
 assert v_exc_zone["mean_suitability"] == 0.5843
+
+# THE TWO INVARIANTS SURVIVE THE FIXTURE LOSING ITS COMPARTMENTS, and
+# they are what this section was ever really about: the pool reads the
+# DISPLAYED score, and the winner is its own type's rank 1 by
+# construction rather than by coincidence.
 assert v_result["selected_water_zone"] is v_exc_zone, (
-    "the pooled winner is the highest DISPLAYED score on the parcel: excavated 0.5843 over the "
-    f"best embankment {v_emb_zones[0]['mean_suitability']} -- and a reader can check that off the "
-    "two panels, which is the whole of the change"
+    "the pooled winner is the highest DISPLAYED score on the parcel, and a reader can check that "
+    "off the panels -- which is the whole of the change this section records"
 )
-assert v_result["selected_water_zone"]["rank"] == 1
-# THE POOL AND THE RANK READ ONE FUNCTION, so the winner is its type's
-# rank 1 by construction -- asserted here as the property, not as this
-# fixture's coincidence.
 assert v_result["selected_water_zone"]["rank"] == 1 and max(
     v_result["zones"], key=lambda z: z["mean_suitability"]
 ) is v_result["selected_water_zone"]
-# AND THE FINER 0-1 VALUE ORDERS ZONES THAT DISPLAY THE SAME INTEGER:
-# both compartments read 56/100, so the display alone cannot separate
-# them, and rank falls to the stored value the display rounds from --
-# never to the acreage tiebreak, which is reached only on an exact tie.
-# (0.5608, 0.5599) BEFORE THE DE-QUANTIZED PINCH BEARING. The secant
-# moved each compartment's measured widths, which moved its cell
-# population by a few cells and so its mean by a few ten-thousandths.
-# Nothing this section is ABOUT moved: the pool still goes to the
-# excavated zone, both compartments still display 56, and the stored
-# value still orders them 1 and 2.
-assert (v_emb_zones[0]["mean_suitability"], v_emb_zones[1]["mean_suitability"]) == (0.5612, 0.5596)
-assert display_scale.to_display_scale(v_emb_zones[0]["mean_suitability"]) == display_scale.to_display_scale(
-    v_emb_zones[1]["mean_suitability"]
-) == 56, "two zones can display the same integer; the stored value still orders them"
-assert [z["rank"] for z in v_emb_zones] == [1, 2]
 assert v_exc_zone["sparse_anchor"] is False
+
+# WHAT THIS BLOCK USED TO ASSERT, and where each half lives now. With
+# two embankment survivors it also pinned (a) the PRESENTATION
+# INTERLEAVE -- excavated rank 1 landing second, between the two
+# compartments -- and (b) the DISPLAY TIE: both compartments read 56/100,
+# so the display alone could not order them and rank fell to the stored
+# 0-1 value (0.5612 vs 0.5596) rather than to the acreage tiebreak.
+#
+# The dam-site objective refuses this shoulderless prism outright, so
+# there are no compartments left to interleave or to tie. Neither claim
+# is dropped: the interleave is the subject of the PRESENTATION CASES
+# further down this same file, which build fixtures specifically for it
+# (case 1 asserts the exact interleaved order with both types present),
+# and the stored-value-orders-the-display rule is asserted there too,
+# on survivors that actually exist. This block keeps the invariants that
+# do not need a compartment.
+assert len(v_emb_zones) == 0, (
+    "stated as a fact of this fixture rather than left implicit: the two claims above moved "
+    "because the compartments did"
+)
 
 # The narrative carries the seed accounting: 18 seeds, 10 failed, each
 # with its reason code -- a reach with no on-parcel pinch still reports
@@ -1306,9 +1300,17 @@ assert v_exc_zone["sparse_anchor"] is False
 # seed ladder exists to make visible.
 v_narrative = build_narrative_data(v_result)
 assert v_narrative["embankment_generation"] == wsa.PROVENANCE_SEED_COMPARTMENT
-assert v_narrative["embankment_seed_count"] == 18 and v_narrative["embankment_failed_seed_count"] == 10
-assert v_narrative["embankment_zone_count"] == 2 and v_narrative["excavated_zone_count"] == 1
-assert v_narrative["zone_count"] == 3 and len(v_narrative["zones"]) == 3
+# 18 SEEDS, 10 FAILED, 2 EMBANKMENT ZONES before the dam-site
+# objective. All 18 now fail -- the prism has no shoulder anywhere -- so
+# the accounting reads 18/18/0, and the narrative's job is to carry that
+# honestly rather than to report a particular number.
+assert v_narrative["embankment_seed_count"] == 18 and v_narrative["embankment_failed_seed_count"] == 18
+assert v_narrative["embankment_zone_count"] == 0 and v_narrative["excavated_zone_count"] == 1
+assert v_narrative["zone_count"] == 1 and len(v_narrative["zones"]) == 1
+assert v_narrative["embankment_seed_count"] == v_narrative["embankment_failed_seed_count"], (
+    "every seed failing is the cost line the seed ladder exists to make visible, and on this "
+    "fixture it is the whole tier"
+)
 # The failure vocabulary is the two classes and nothing else, and every
 # dedupe reason names a REAL zone id -- which may itself be a zone that
 # was later dropped (a pinch-level duplicate names the seed that beat
@@ -1316,9 +1318,11 @@ assert v_narrative["zone_count"] == 3 and len(v_narrative["zones"]) == 3
 # dedupe). Naming the winner is a statement about seeding order, not a
 # promise that the winner survived.
 _v_failed_codes = {entry["reason_code"] for entry in v_narrative["embankment_failed_seeds"]}
-assert wsa.REASON_NO_CONSTRICTION in _v_failed_codes
+assert _v_failed_codes == {wsa.REASON_NO_MEASURABLE_SHOULDER}, (
+    f"one class of failure on this fixture, and it is the shoulderless one: {_v_failed_codes}"
+)
 _v_all_zone_ids = {z["id"] for z in v_result["zones"] + v_result["dropped_zones"]}
-for _code in _v_failed_codes - {wsa.REASON_NO_CONSTRICTION}:
+for _code in _v_failed_codes - {wsa.REASON_NO_MEASURABLE_SHOULDER}:
     assert _code.startswith(wsa.DUPLICATE_OF_ZONE_REASON_PREFIX), f"unexpected failure code {_code}"
     assert int(_code[len(wsa.DUPLICATE_OF_ZONE_REASON_PREFIX):]) in _v_all_zone_ids, (
         f"{_code} must name a zone that exists in this result"
@@ -1327,9 +1331,9 @@ print(
     f"Fixture 2 (V-valley, seed minimum 0.30): excavated ribbons the channel (mean "
     f"{v_exc_zone['mean_suitability']}); 18 seeds in two tiers -- 6 channel cells at six DISTINCT "
     f"scores topping at {_channel_blends[0]:.4f} (the retired fixed curve's 0.875 plateau is gone) "
-    "that ALL fail no_constriction (constant prism cross-section), and 12 off-channel cells at "
-    "exactly 0.375 (the archetype 0.50 excluded) of which two produce the fixture's only surviving "
-    "embankment zones."
+    "and 12 off-channel cells at 0.54 -- and ALL EIGHTEEN now fail no_measurable_shoulder, because "
+    "a prism rising to the grid edge has no crest on any ray and the dam site chooses on depth as "
+    "well as width. No embankment zone is built on ground with no cross-section to dam."
 )
 
 # --- FIXTURE 2b: member-vs-zone split where the envelope ADDS ground.
@@ -1734,16 +1738,41 @@ print(
 # still qualifies ground at the 0.30 seeding minimum.
 
 
-def _presentation_dem(rows, cols, channels, accumulation_per_row, cross_grade, down_grade):
-    """A channel-in-a-plane DEM plus the hand-built accumulation ribbon
-    and the parcel box, exactly the V fixture's construction generalized
-    to N channels and a settable grade: elevation =
-    100 + (distance to the nearest channel) * cross - row * down, one
-    accumulation ribbon per channel. Returns (dem, boundary, accumulation)."""
+PRESENTATION_SHOULDER_OFFSET_CELLS = 4
+PRESENTATION_SHOULDER_DROP_METERS = 2.6
+
+
+def _presentation_dem(
+    rows, cols, channels, accumulation_per_row, cross_grade, down_grade,
+    shoulder_offset_cells=PRESENTATION_SHOULDER_OFFSET_CELLS,
+):
+    """A channel-in-a-valley DEM plus the hand-built accumulation ribbon
+    and the parcel box, generalized to N channels and a settable grade:
+    elevation = 100 + (distance to the nearest channel) * cross - row *
+    down, one accumulation ribbon per channel. Returns (dem, boundary,
+    accumulation).
+
+    THE SHOULDER IS NOT DECORATION. This used to be a channel in a PLANE,
+    rising to the grid edge, and a plane has no crest on any ray: no
+    station ever falls RIDGE_PROMINENCE_METERS behind its running
+    maximum. That was harmless while the dam site was the narrowest
+    station, but under the width-and-HEIGHT objective a shoulderless
+    valley offers no defensible dam site at all and every seed fails
+    no_measurable_shoulder -- so these fixtures would produce no
+    embankment zones to present, and the presentation cases below would
+    have nothing to interleave.
+    So the ramp now ENDS: at PRESENTATION_SHOULDER_OFFSET_CELLS from the
+    nearest channel the ground drops PRESENTATION_SHOULDER_DROP_METERS,
+    well past the 1.0 m prominence, which makes the last ramp cell a
+    confirmed crest. The valley the fixtures were always describing is
+    now actually closed."""
     array = np.zeros((rows, cols))
     for r in range(rows):
         for c in range(cols):
-            array[r, c] = 100.0 + min(abs(c - ch) for ch in channels) * cross_grade - r * down_grade
+            distance = min(abs(c - ch) for ch in channels)
+            array[r, c] = 100.0 + distance * cross_grade - r * down_grade
+            if distance > shoulder_offset_cells:
+                array[r, c] -= PRESENTATION_SHOULDER_DROP_METERS
     accumulation = np.ones((rows, cols))
     for r in range(rows):
         for ch in channels:
@@ -1934,35 +1963,64 @@ print(
 # minimum. THIS IS THE REFERENCE PROPERTY'S OWN HISTORY -- excavated
 # produced nothing for several runs -- which is why it is a fixture and
 # not a hypothetical.
-_no_dem, _no_boundary, _no_acc = _presentation_dem(80, 21, [10], 40, 0.50, 0.35)
+# A WIDER SHOULDER HERE THAN THE OTHER CASES USE. At this steeper grade
+# the default 4-cell offset makes the valley so tight that the
+# compartment-overlap dedupe collapses all but one survivor, and the case
+# needs at least five to have a top four AND a remainder. Seven cells
+# out, the same construction leaves nine.
+_no_dem, _no_boundary, _no_acc = _presentation_dem(
+    80, 21, [10], 40, 0.50, 0.35, shoulder_offset_cells=7
+)
 no_exc_result = compute_water_survey_areas(_no_dem, _no_boundary, flow_accumulation=_no_acc)
 _no_summary, _no_presented, _no_unpresented = _assert_presentation_invariants(
     no_exc_result, "case 3 (zero excavated survivors)"
 )
-assert (len(no_exc_result["zones_by_type"][SURVEY_TYPE_EMBANKMENT]),
-        len(no_exc_result["zones_by_type"][SURVEY_TYPE_EXCAVATED])) == (5, 0), (
+# THE PREMISE, as a premise: no excavated survivor at all, and MORE than
+# the four presented slots' worth of embankment so the case has both a
+# top four and a remainder. The exact count was 5 before the dam-site
+# objective; it is not what the case is about.
+_no_emb_count = len(no_exc_result["zones_by_type"][SURVEY_TYPE_EMBANKMENT])
+assert len(no_exc_result["zones_by_type"][SURVEY_TYPE_EXCAVATED]) == 0, (
     "the fixture's premise: the excavated type produced NOTHING at this grade"
 )
+assert _no_emb_count > 4, f"and more embankment survivors than slots: {_no_emb_count}"
 assert _no_summary["rule_applied"] == "2 embankment + 2 embankment backfill"
 assert [(z["survey_type"], z["rank"]) for z in _no_presented] == [
     (SURVEY_TYPE_EMBANKMENT, rank) for rank in (1, 2, 3, 4)
 ], "with one type absent the set is that type's top four, in rank order -- no gap, no placeholder"
-assert len(_no_unpresented) == 1 and _no_unpresented[0]["rank"] == 5, (
-    "the fifth compartment is unpresented and still a full survivor"
+assert sorted(z["rank"] for z in _no_unpresented) == list(range(5, _no_emb_count + 1)), (
+    "and every compartment past the fourth is unpresented and still a full survivor: "
+    f"{sorted(z['rank'] for z in _no_unpresented)}"
 )
 print(
-    f"Presentation case 3 (zero excavated survivors): 5 embankment + 0 excavated -> "
-    f"{_no_summary['rule_applied']} (the top 4 embankment)."
+    f"Presentation case 3 (zero excavated survivors): {_no_emb_count} embankment + 0 excavated -> "
+    f"{_no_summary['rule_applied']} (the top 4 embankment, {len(_no_unpresented)} unpresented)."
 )
 
 # --- CASE 4: FEWER THAN FOUR SURVIVORS IN TOTAL -> all of them, no
-# padding. The V fixture (2 embankment + 1 excavated) and the flat
-# fixture (a single excavated zone) are exactly this case and are
-# already built above -- reusing them is the point, because it means the
-# case is not a special path but the same rule reaching the end of a
-# short list.
+# padding. A SHORT valley (24 rows, shoulder 5 cells out) producing
+# exactly two embankment survivors and one excavated, plus the flat
+# fixture's single excavated zone.
+#
+# THIS USED TO REUSE THE V FIXTURE, whose 2 + 1 was exactly this case,
+# and reusing it was the point -- the case was not a special path but
+# the same rule reaching the end of a short list. The dam-site objective
+# refuses that fixture outright (a prism rising to the grid edge has no
+# shoulder to dam against), so the short list is built here instead,
+# from the same generator the other three cases use. The rule reaching
+# the end of a short list is still what is being tested.
+_short_dem, _short_boundary, _short_acc = _presentation_dem(
+    24, 21, [10], 30, 0.30, 0.25, shoulder_offset_cells=5
+)
+short_result = compute_water_survey_areas(
+    _short_dem, _short_boundary, flow_accumulation=_short_acc
+)
 _v_summary, _v_presented, _v_unpresented = _assert_presentation_invariants(
-    v_result, "case 4 (three survivors)"
+    short_result, "case 4 (three survivors)"
+)
+assert (len(short_result["zones_by_type"][SURVEY_TYPE_EMBANKMENT]),
+        len(short_result["zones_by_type"][SURVEY_TYPE_EXCAVATED])) == (2, 1), (
+    "the fixture's premise: three survivors in total, across both types"
 )
 assert _v_summary["presented_count"] == 3 and not _v_unpresented, "all three, none held back"
 assert _v_summary["rule_applied"] == "2 embankment + 1 excavated"

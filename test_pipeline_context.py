@@ -1010,9 +1010,22 @@ assert _terminal_zones, (
     "with its terminator named, never refused"
 )
 for _terminal in _terminal_zones:
-    assert _terminal["still_narrowing_at_termination"] is True
     assert "pinch_at_walk_bound" in _terminal["flags"]
-    assert "still_narrowing_at_termination" in _terminal["flags"]
+    # still_narrowing NOW DISCRIMINATES, where it used to be true by
+    # construction. Under the retired minimum-width rule a terminal
+    # station could only be chosen by being the strict width minimum, so
+    # every terminal pinch was still narrowing. The width-and-height
+    # objective can choose a terminal station for its SHOULDER while the
+    # profile is widening there, so the flag is now a real property of
+    # the profile -- and the two must agree with each other, which is
+    # what is asserted instead of a constant.
+    assert isinstance(_terminal["still_narrowing_at_termination"], bool)
+    assert ("still_narrowing_at_termination" in _terminal["flags"]) == (
+        _terminal["still_narrowing_at_termination"]
+    ), (
+        "the flag and the boolean are one finding reported twice; they may not disagree: "
+        f"{_terminal['still_narrowing_at_termination']} vs {_terminal['flags']}"
+    )
 assert ctx.selected_water_zone["render_fill_polygon_utm"] is ctx.selected_water_zone["polygon_utm"], (
     "the compartment's render_fill is the IDENTITY of its clipped compartment polygon"
 )

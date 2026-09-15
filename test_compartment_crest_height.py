@@ -249,33 +249,41 @@ def _compartment(dem, **kwargs):
 # 1 [1]. THE V-VALLEY: both transects, both sides, hand-derived
 # =========================================================================
 # Rises chosen so all four shoulders differ and nothing can pass by
-# coincidence:  LEFT 4.0 above the seed station / 2.5 above the pinch;
-# RIGHT 5.0 / 3.5.
+# coincidence:  LEFT 4.0 above the seed station / 6.0 above the pinch;
+# RIGHT 5.0 / 7.0.
+#
+# THE WAIST IS THE DEEPER REACH, and that is not decoration: since the
+# dam site chooses on width AND height (dam_site_score()), a waist whose
+# shoulders were SHALLOWER than the seed reach's would not be chosen as
+# the dam cell at all -- the objective would take the seed reach and the
+# walk would fail best_site_at_seed. The fixture was built when only
+# width mattered; the rises below make its waist a site the objective
+# agrees with, which is also the physically sensible shape.
 #
 # HAND-DERIVED, per the cross-section above (crest height = rise):
 #   seed station, row 5   (k=4, base 98.75): crest L = 98.75 + 4.0 =
 #       102.75, crest R = 103.75, channel = 98.75 -> L 4.0, R 5.0
 #   pinch station, row 14 (k=2, base 96.50): crest L = 99.00,
-#       crest R = 100.00, channel = 96.50               -> L 2.5, R 3.5
-#   _min_ = the LOWER shoulder: 4.0 at the seed, 2.5 at the pinch.
+#       crest R = 103.50, channel = 96.50               -> L 6.0, R 7.0
+#   _min_ = the LOWER shoulder: 4.0 at the seed, 6.0 at the pinch.
 #
 # THE TWO STATIONS' CHANNEL CELLS DIFFER BY 2.25 m (98.75 vs 96.50), so
 # a single-datum implementation would have to miss one of these pairs.
 
-V_DEM = _dem(_v_array(lambda r: 4.0 if r < 14 else 2.5, lambda r: 5.0 if r < 14 else 3.5))
+V_DEM = _dem(_v_array(lambda r: 4.0 if r < 14 else 6.0, lambda r: 5.0 if r < 14 else 7.0))
 v_compartment = _compartment(V_DEM)
 
 assert V_DEM["array"][SEED_ROW, CHANNEL] == 98.75
 assert V_DEM["array"][PINCH_ROW, CHANNEL] == 96.50
 assert v_compartment["seed_crest_height_left_m"] == 4.0
 assert v_compartment["seed_crest_height_right_m"] == 5.0
-assert v_compartment["pinch_crest_height_left_m"] == 2.5
-assert v_compartment["pinch_crest_height_right_m"] == 3.5
+assert v_compartment["pinch_crest_height_left_m"] == 6.0
+assert v_compartment["pinch_crest_height_right_m"] == 7.0
 assert v_compartment["seed_crest_height_min_m"] == 4.0, (
     "the seed station's binding shoulder is its LOWER side (4.0), not the right one (5.0)"
 )
-assert v_compartment["pinch_crest_height_min_m"] == 2.5, (
-    "the pinch station's binding shoulder is its LOWER side (2.5), not the right one (3.5)"
+assert v_compartment["pinch_crest_height_min_m"] == 6.0, (
+    "the pinch station's binding shoulder is its LOWER side (6.0), not the right one (7.0)"
 )
 
 # The DEPTH is independent of the WIDTH, which this same fixture also
@@ -284,12 +292,12 @@ assert v_compartment["pinch_crest_height_min_m"] == 2.5, (
 by_end = {transect["end"]: transect for transect in v_compartment["transects"]}
 assert by_end["seed"]["width_m"] == 37.5 and by_end["pinch"]["width_m"] == 17.5
 assert by_end["seed"]["crest_height_min_m"] == 4.0
-assert by_end["pinch"]["crest_height_min_m"] == 2.5
+assert by_end["pinch"]["crest_height_min_m"] == 6.0
 
 print(
-    "1. V-valley: shoulder heights 4.0/5.0 m at the seed station and 2.5/3.5 m at the pinch -- each "
+    "1. V-valley: shoulder heights 4.0/5.0 m at the seed station and 6.0/7.0 m at the pinch -- each "
     "differenced against its OWN channel cell (98.75 vs 96.50 m, 2.25 m apart) -- and _min_ takes "
-    "the lower side at both (4.0, 2.5), beside the widths 37.5 / 17.5 m."
+    "the lower side at both (4.0, 6.0), beside the widths 37.5 / 17.5 m."
 )
 
 
@@ -510,7 +518,7 @@ print(
 # THE FIXTURE: section 1's V-valley with a 1.5 m pit gouged into the
 # PINCH's own channel cell. Raw, that cell reads 96.50 - 1.5 = 95.00,
 # and the pinch shoulders stand at 99.00 (left) and 100.00 (right), so
-# the hand-derived RAW heights are 4.0 and 5.0 -- the fixture's 2.5/3.5
+# the hand-derived RAW heights are 7.5 and 8.5 -- the fixture's 6.0/7.0
 # rises PLUS the 1.5 m the channel was dropped. The conditioned surface
 # fills that pit back to ~96.25 and would report ~2.75 / ~3.75 instead.
 # The seed station, untouched by the pit, must not move at all.
@@ -518,8 +526,8 @@ print(
 PIT_DEPTH = 1.5
 PIT_DEM = _dem(
     _v_array(
-        lambda r: 4.0 if r < 14 else 2.5,
-        lambda r: 5.0 if r < 14 else 3.5,
+        lambda r: 4.0 if r < 14 else 6.0,
+        lambda r: 5.0 if r < 14 else 7.0,
         pit=((PINCH_ROW, CHANNEL), PIT_DEPTH),
     )
 )
@@ -533,13 +541,14 @@ assert conditioned_channel > raw_channel + 1.0, (
 )
 
 pit = _compartment(PIT_DEM)
-assert pit["pinch_crest_height_left_m"] == 2.5 + PIT_DEPTH == 4.0
-assert pit["pinch_crest_height_right_m"] == 3.5 + PIT_DEPTH == 5.0
-assert pit["pinch_crest_height_min_m"] == 4.0
+assert pit["pinch_crest_height_left_m"] == 6.0 + PIT_DEPTH == 7.5
+assert pit["pinch_crest_height_right_m"] == 7.0 + PIT_DEPTH == 8.5
+assert pit["pinch_crest_height_min_m"] == 7.5
 
 # And the value the conditioned surface WOULD have produced is different
 # -- asserted, not assumed, so this cannot pass by the two agreeing.
-conditioned_left = round(99.00 - conditioned_channel, 2)
+# The pinch shoulder sits at base(14) + 6.0 = 102.50.
+conditioned_left = round(102.50 - conditioned_channel, 2)
 assert abs(pit["pinch_crest_height_left_m"] - conditioned_left) > 1.0, (
     f"raw {pit['pinch_crest_height_left_m']} m and conditioned {conditioned_left} m must differ, or "
     "the fixture does not discriminate between the two surfaces"
@@ -553,7 +562,7 @@ assert pit["seed_crest_height_min_m"] == v_compartment["seed_crest_height_min_m"
 
 print(
     f"4. Raw not conditioned: a {PIT_DEPTH} m pit at the pinch's channel cell (raw {raw_channel} m, "
-    f"conditioned {conditioned_channel:.3f} m) gives raw heights 4.0 / 5.0 m -- the conditioned "
+    f"conditioned {conditioned_channel:.3f} m) gives raw heights 7.5 / 8.5 m -- the conditioned "
     f"surface would have said {conditioned_left} m -- and the unfilled seed station does not move."
 )
 
@@ -705,10 +714,32 @@ _wire_zone.update(
         "served_production_area_ids": [],
     }
 )
+# Keys added to the wire by branches that landed AFTER this file's six.
+# Named literally, with the branch that added each, so a later addition is
+# a deliberate line here rather than a quietly relaxed assertion. The
+# equality below still fails on an unrecorded key.
+LATER_BRANCH_PROPERTY_KEYS = frozenset(
+    {
+        # All three from "Minimum binding shoulder -- the dam site must
+        # be able to impound": the gate's verdict, the binding shoulder
+        # measured at the CHOSEN dam site (a walk field since "The dam
+        # site chooses on width AND height", promoted to the wire by the
+        # gate) and the threshold it was held to. A refusal has to be
+        # readable off the feature together with how far it missed by.
+        "shoulder_below_minimum",
+        "pinch_binding_height_m",
+        "min_binding_shoulder_m",
+    }
+)
+
 _properties = _zone_feature_properties(_wire_zone)
 _added = set(_properties) - MAIN_PROPERTY_KEYS
-assert _added == set(HEIGHT_FIELDS), (
-    f"this branch adds exactly the six crest-height keys and nothing else; added {sorted(_added)}"
+assert _added == set(HEIGHT_FIELDS) | LATER_BRANCH_PROPERTY_KEYS, (
+    "the wire gains exactly the six crest-height keys plus the keys later branches recorded in "
+    f"LATER_BRANCH_PROPERTY_KEYS and nothing else; added {sorted(_added)}"
+)
+assert set(HEIGHT_FIELDS).isdisjoint(LATER_BRANCH_PROPERTY_KEYS), (
+    "a later branch may not launder one of this branch's six keys through the allowance list"
 )
 _removed = MAIN_PROPERTY_KEYS - set(_properties) - {"member_acres", "member_count", "member_ids"}
 assert not _removed, f"no existing consumer-read property may disappear: {sorted(_removed)}"
@@ -743,7 +774,8 @@ for _zone in _result["zones_by_type"][SURVEY_TYPE_EMBANKMENT]:
     _ = _zone["render_fill_polygon_utm"].buffer(6.096)
 
 print(
-    f"6. Contract: the wire property set gains exactly the six crest-height keys and loses none "
+    f"6. Contract: the wire property set gains the six crest-height keys plus "
+    f"{len(LATER_BRANCH_PROPERTY_KEYS)} keys from later branches, and loses none "
     f"({len(_properties)} properties on a compartment feature); the full compute still selects zone "
     f"{_selected['id']} ({_selected['survey_type']}) and every compartment's consumer access "
     "patterns are intact."
