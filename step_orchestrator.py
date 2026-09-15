@@ -1862,6 +1862,18 @@ def build_trees_payload(result: dict, assembled: dict) -> dict:
         lets a panel explain a score without hardcoding a weight, which is
         the thing water's `scales` could not do. Passed whole.
 
+    `scales` IS LIFTED TO THE PAYLOAD ROOT and kept out of `summary`, which
+    is production_zone_payload.py's and build_water_payload()'s own shape:
+    a scale describes the INSTRUMENT, not this run, and `summary` is what
+    this run did. One copy, at the root, so a consumer has one place to
+    look and no second spelling can drift from it.
+
+    IT IS NEW ON THIS PAYLOAD and trees was the last scoring step without
+    one. The gap surfaced at a consumer: the interactive panel renders a
+    score's denominator by reading the top of the published scale, found
+    nothing to read here, and correctly printed a bare "score" rather than
+    write a 100 of its own. tree_zone_candidates._SCALES says the rest.
+
     THE TABULAR ROWS ARE WHERE THE PANEL READS, and TWO of their values
     exist only there, derived on this side rather than left to whoever
     renders them: `elevation_position` (the percentile as
@@ -1929,7 +1941,10 @@ def build_trees_payload(result: dict, assembled: dict) -> dict:
             {**row, "feature_id": feature_id_by_rank[row["rank"]]}
             for row in narrative["zones"]
         ],
-        "summary": {key: value for key, value in narrative.items() if key != "zones"},
+        "summary": {
+            key: value for key, value in narrative.items() if key not in ("zones", "scales")
+        },
+        "scales": narrative["scales"],
         "search_space": result["search_space_geojson"],
         "crossing_grounds": wire_crossing_grounds(step_registry.get_step("trees"), assembled),
     }

@@ -1087,7 +1087,12 @@ print(
 # =====================================================================
 import json  # noqa: E402
 
-from tree_zone_candidates import build_narrative_data  # noqa: E402
+from tree_zone_candidates import (  # noqa: E402
+    MARGINAL_BENEFITS,
+    SUITABILITY_SCORE_SCALE,
+    build_narrative_data,
+)
+from production_area_ceiling import ELEVATION_POSITION_BANDS  # noqa: E402
 
 # A ~12-acre square parcel (side ~220.4 m) whose centroid sits at
 # (500110.2, 4499889.8): the rank-1 patch's drawn footprint is placed in
@@ -1136,8 +1141,50 @@ _nd = build_narrative_data(
 )
 assert json.loads(json.dumps(_nd)) == _nd, "narrative_data must be json.dumps()-clean with no custom encoder"
 assert set(_nd) == {
-    "candidate_count", "dropped_invalid_count", "search_space", "selection", "gates", "zones",
+    "candidate_count", "dropped_invalid_count", "scales", "search_space", "selection", "gates", "zones",
 }
+
+# THE SCALES BLOCK: how to read every scored value in this narrative, so no
+# consumer holds a threshold, a range or a band cut of its own. Trees was the
+# last scoring module without one, and the gap surfaced at a consumer -- an
+# interactive panel that prints a score's denominator had nothing to read and
+# correctly printed none rather than invent a 100.
+#
+# THE TOP OF THE SCALE IS SUITABILITY_SCORE_SCALE, asserted against the
+# constant rather than against a 100 typed here: this test would otherwise be
+# a third copy of the number, and the point of the block is that there is one.
+assert _nd["scales"]["range"] == [0.0, float(SUITABILITY_SCORE_SCALE)], _nd["scales"]["range"]
+assert _nd["scales"]["direction"] == "higher_is_better"
+assert _nd["scales"]["applies_to"] == ["score", "factors.*"]
+# HIGH MEANS MARGINAL, said in the block, because it is the one thing a reader
+# coming from production's panel gets backwards.
+assert "marginal" in _nd["scales"]["higher_is_better_means"]
+# NO BAND SET ON THE SCORE. Production's words name qualities of a composite
+# built from opposite factors; borrowing them would invert their meaning.
+assert "bands" not in _nd["scales"], _nd["scales"].keys()
+# AND THE SELECTION FLOOR IS NOT IN IT: that is a decision this run made, not
+# a property of the axis, and it ships under 'selection'.
+assert "min_suitability_score" not in _nd["scales"]
+# THE ELEVATION BANDS ARE PRODUCTION'S, IMPORTED -- asserted against the
+# constant itself, so retuning them there retunes this.
+assert _nd["scales"]["elevation_position"]["bands"] == ELEVATION_POSITION_BANDS
+assert _nd["scales"]["elevation_position"]["direction"] == "higher_is_upslope", (
+    "an elevation percentile is a position, not a quality"
+)
+assert _nd["scales"]["elevation_position"]["applies_to"] == [
+    "elevation_percentile_of_parcel", "elevation_position",
+]
+# THE BENEFIT WORDS AS A CLOSED SET, in emission order, off the module's own
+# tuple -- so a consumer laying out a fixed set of rows holds no copy.
+assert _nd["scales"]["marginal_benefits"]["values"] == list(MARGINAL_BENEFITS)
+assert _nd["scales"]["marginal_benefits"]["empty_means"] == "this_zone_earned_none"
+# AND THE MAPPING IS NOT ON THE WIRE IN ANY FORM. The words ship; which factor
+# earns which, and the availability gate that is half of every test, stay in
+# marginal_benefits(). A consumer that could read the mapping could apply it.
+_scales_json = json.dumps(_nd["scales"])
+for _factor_key in ("slope_factor", "soil_marginality_factor", "hydric_overlap_factor",
+                    "stream_proximity_factor", "data_available"):
+    assert _factor_key not in _scales_json, _factor_key
 assert _nd["candidate_count"] == 2
 # A PATCH THE EMISSION GATE REFUSED TO PUT ON THE WIRE IS COUNTED, never
 # silently absent -- water_survey_areas.py's own `dropped_count` convention.
