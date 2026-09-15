@@ -1287,7 +1287,13 @@ assert v_result["selected_water_zone"]["rank"] == 1 and max(
 # both compartments read 56/100, so the display alone cannot separate
 # them, and rank falls to the stored value the display rounds from --
 # never to the acreage tiebreak, which is reached only on an exact tie.
-assert (v_emb_zones[0]["mean_suitability"], v_emb_zones[1]["mean_suitability"]) == (0.5608, 0.5599)
+# (0.5608, 0.5599) BEFORE THE DE-QUANTIZED PINCH BEARING. The secant
+# moved each compartment's measured widths, which moved its cell
+# population by a few cells and so its mean by a few ten-thousandths.
+# Nothing this section is ABOUT moved: the pool still goes to the
+# excavated zone, both compartments still display 56, and the stored
+# value still orders them 1 and 2.
+assert (v_emb_zones[0]["mean_suitability"], v_emb_zones[1]["mean_suitability"]) == (0.5612, 0.5596)
 assert display_scale.to_display_scale(v_emb_zones[0]["mean_suitability"]) == display_scale.to_display_scale(
     v_emb_zones[1]["mean_suitability"]
 ) == 56, "two zones can display the same integer; the stored value still orders them"
@@ -1875,9 +1881,22 @@ one_exc_result = compute_water_survey_areas(_one_dem, _one_boundary, flow_accumu
 _one_summary, _one_presented, _one_unpresented = _assert_presentation_invariants(
     one_exc_result, "case 2 (one excavated survivor)"
 )
-assert (len(one_exc_result["zones_by_type"][SURVEY_TYPE_EMBANKMENT]),
-        len(one_exc_result["zones_by_type"][SURVEY_TYPE_EXCAVATED])) == (10, 1), (
-    "the fixture's premise: exactly ONE excavated survivor, with embankment leftovers to backfill from"
+# THE PREMISE, STATED AS THE PREMISE. This asserted (10, 1) until the
+# de-quantized pinch bearing; the embankment count is now 8, because the
+# secant makes neighbouring seeds on one long valley agree about where
+# the true narrows is and two more of them collapse into their
+# neighbours at the pinch-level dedupe. That is the dedupe working
+# better, not a survivor being lost -- and the exact count was never
+# what this case needs. What it needs is ONE excavated survivor (so the
+# second excavated slot cannot be filled) and ENOUGH embankment
+# survivors to backfill from.
+_one_emb_count = len(one_exc_result["zones_by_type"][SURVEY_TYPE_EMBANKMENT])
+assert len(one_exc_result["zones_by_type"][SURVEY_TYPE_EXCAVATED]) == 1, (
+    "the fixture's premise: exactly ONE excavated survivor, so the interleave runs out of "
+    "excavated zones and the fourth slot must be backfilled"
+)
+assert _one_emb_count >= 3, (
+    f"and enough embankment survivors to backfill from: {_one_emb_count}"
 )
 assert _one_summary["rule_applied"] == "2 embankment + 1 excavated + 1 embankment backfill", (
     "the rule line reads as the rule was applied, backfill named as backfill -- this exact string "
@@ -2008,8 +2027,12 @@ assert [(b["survey_type"], b["rank"]) for b in _trailing] == sorted(
 ), "the unpresented remainder keeps the old per-type, per-rank order"
 _one_presentation_block = _one_narrative["presentation"]
 assert _one_presentation_block["rule_applied"] == "2 embankment + 1 excavated + 1 embankment backfill"
+# _one_emb_count, not a literal 10 -- see the premise note above: the
+# de-quantized pinch bearing collapses two more near-duplicate
+# compartments on this fixture, and what this assertion is about is that
+# the narrative's counts ARE the run's counts, whatever they are.
 assert _one_presentation_block["survivor_counts"] == {
-    SURVEY_TYPE_EMBANKMENT: 10, SURVEY_TYPE_EXCAVATED: 1
+    SURVEY_TYPE_EMBANKMENT: _one_emb_count, SURVEY_TYPE_EXCAVATED: 1
 }, (
     "THE LINE STATING WHAT WAS CONSIDERED: per-type survivor totals ride the narrative beside the "
     "presented set, so the report can say what is shown AND what it is shown out of"
@@ -2062,8 +2085,11 @@ assert "2 embankment + 1 excavated + 1 embankment backfill" in _one_table, (
     "THE RULE LINE: the table states which rule produced this run's presented set, so a reader "
     "never has to reconstruct it from which rows happen to be marked"
 )
-assert "4 of 11 survivor(s) presented" in _one_table, "with the two counts it is a rule about"
-assert "10 embankment survivor(s), 1 excavated survivor(s)" in _one_table, (
+assert f"4 of {_one_emb_count + 1} survivor(s) presented" in _one_table, (
+    "with the two counts it is a rule about (the total tracks the run's own survivor count -- see "
+    "the premise note above)"
+)
+assert f"{_one_emb_count} embankment survivor(s), 1 excavated survivor(s)" in _one_table, (
     "and the per-type survivor totals -- what was considered"
 )
 assert "A MARK, NOT A FILTER" in _one_table, (
@@ -2076,7 +2102,7 @@ for _order in (1, 2, 3, 4):
 _one_table_zone_lines = [
     line for line in _one_table.split("\n") if line.startswith("  #")
 ]
-assert len(_one_table_zone_lines) == len(one_exc_result["zones"]) == 11, (
+assert len(_one_table_zone_lines) == len(one_exc_result["zones"]) == _one_emb_count + 1, (
     "EVERY survivor still gets a line -- the mark is a column, not a filter on the table either"
 )
 print(
