@@ -544,6 +544,24 @@ assert _properties["shoulder_below_minimum"] is True
 assert _properties["pinch_binding_height_m"] == _below_refused[0]["pinch_binding_height_m"] == 0.85
 assert _properties["min_binding_shoulder_m"] == MIN_BINDING_SHOULDER_METERS
 assert _properties["drop_reason"] == REASON_SHOULDER_BELOW_MINIMUM
+# AND IN FEET BESIDE THE METRES, because the map's zone panel prints
+# this one and the conversion belongs on this side -- the rule
+# depression_depth_max_ft already follows. 0.85 m is 2.8 ft at _feet()'s
+# one decimal place.
+assert _properties["pinch_binding_height_ft"] == 2.8, (
+    f"the binding shoulder ships converted too; got {_properties['pinch_binding_height_ft']}"
+)
+# THE METRES ARE NOT REPLACED BY THE FEET. min_binding_shoulder_m above
+# is the bar this measurement is held to, and a reader checking a
+# refusal must be able to compare the two in ONE unit -- which is the
+# whole reason "refused" carries "by how much". A ft-only shoulder
+# beside a metric threshold would be a measurement nobody can check.
+assert _properties["pinch_binding_height_m"] < _properties["min_binding_shoulder_m"]
+# ABSENT STAYS ABSENT THROUGH THE CONVERSION. _feet() returns None for
+# None rather than 0.0, so a shoulder nobody measured does not become a
+# site with no shoulder -- the absent-is-not-zero rule, applied to the
+# unit change as well as to the measurement.
+assert wsa._feet(None) is None
 
 # SELECTED_WATER_ZONE: REPORTED, NEVER ASSERTED STABLE -- and this
 # branch adds a specific legitimate way for it to move. If the gate
