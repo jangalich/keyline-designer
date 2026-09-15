@@ -227,9 +227,9 @@ print(
 # transects and the drawn zone. The cap is choosing the dam.
 #
 # THE FIXTURE, 70x70 at 5 m, channel down col 30, base(r) = 100 - 0.25r:
-#   rows < 12   shoulders at d = 14  ->  127.5 m  (the seed's own reach,
+#   rows < 12   shoulders at d = 14  ->  137.5 m  (the seed's own reach,
 #               widest, so the profile has somewhere to narrow to)
-#   rows >= 12  shoulders at d = 12  ->  107.5 m  (the genuine narrows)
+#   rows >= 12  shoulders at d = 12  ->  117.5 m  (the genuine narrows)
 #   ROW 16      the right flank has its shoulder at d = 1 (half-width
 #               5.0 m) while the LEFT flank rises 0.3 m/cell to the grid
 #               edge and never falls back a prominence -- so that side
@@ -239,8 +239,8 @@ print(
 # Row 16's recorded width is therefore cap + 5.0, and that is the whole
 # trick: the tighter the cap, the NARROWER an unmeasurable station looks.
 #
-#   at 100 m:  127.5 x4  107.5 x4  |105.0|  107.5 ...   pinch (16, 30)
-#   at 150 m:  127.5 x4 |107.5| x4  155.0   107.5 ...   pinch (12, 30)
+#   at 100 m:  137.5 x4  117.5 x4  |105.0|  117.5 ...   pinch (16, 30)
+#   at 150 m:  137.5 x4 |117.5| x4  155.0   117.5 ...   pinch (12, 30)
 #
 # At the retired cap the dam cell is row 16 -- a station whose width the
 # instrument COULD NOT MEASURE, flagged bound_hit the whole time. At the
@@ -264,7 +264,18 @@ def _relocation_array():
                 continue
             k = 1 if special else (14 if r < 12 else 12)
             if d < k:
-                array[r, c] = base + 0.5 * d
+                # A GENTLE floor (0.05 m/cell, not 0.5) so the shoulder
+                # at d == k is genuinely the highest thing on the ray.
+                # At 0.5 m/cell the inner floor of a k = 14 reach climbs
+                # to base + 6.5 and the crest walk declares ITS high
+                # point rather than the shoulder -- which made this
+                # fixture's binding heights track k, and under the
+                # width-and-height objective that would hand the widest
+                # reach the best score and fail the walk at the seed.
+                # The fixture is about the BOUND; a flat 3.0 m shoulder
+                # everywhere keeps height constant so the objective
+                # reduces to 1/w and the bound is the only thing moving.
+                array[r, c] = base + 0.05 * d
             elif d == k:
                 array[r, c] = base + 3.0
             else:
@@ -279,14 +290,14 @@ assert _rel_retired["found"] and _rel_shipped["found"]
 
 _retired_profile = [s["width_m"] for s in _rel_retired["stations"]]
 _shipped_profile = [s["width_m"] for s in _rel_shipped["stations"]]
-assert _retired_profile[:9] == [127.5] * 4 + [107.5] * 4 + [105.0], _retired_profile[:9]
-assert _shipped_profile[:9] == [127.5] * 4 + [107.5] * 4 + [155.0], _shipped_profile[:9]
+assert _retired_profile[:9] == [137.5] * 4 + [117.5] * 4 + [105.0], _retired_profile[:9]
+assert _shipped_profile[:9] == [137.5] * 4 + [117.5] * 4 + [155.0], _shipped_profile[:9]
 
 # THE RELOCATION.
 assert _rel_retired["pinch_rowcol"] == (_REL_SPECIAL_ROW, _REL_CHANNEL), _rel_retired["pinch_rowcol"]
 assert _rel_shipped["pinch_rowcol"] == (12, _REL_CHANNEL), _rel_shipped["pinch_rowcol"]
 assert _rel_retired["pinch_rowcol"] != _rel_shipped["pinch_rowcol"], "the dam cell MOVES"
-assert _rel_retired["pinch_width_m"] == 105.0 and _rel_shipped["pinch_width_m"] == 107.5
+assert _rel_retired["pinch_width_m"] == 105.0 and _rel_shipped["pinch_width_m"] == 117.5
 
 # AND WHAT THE CAP HAD CHOSEN WAS UNMEASURABLE. This is the assertion
 # that makes the relocation a fix rather than a difference: at the
@@ -336,7 +347,7 @@ print(
     f"3. Relocation: at the retired {RETIRED_HALF_WIDTH_BOUND_METERS:.0f} m cap the dam cell is "
     f"{_rel_retired['pinch_rowcol']} at 105.0 m -- a width the walk never measured (bound_hit) -- "
     f"and at the shipped {RIDGE_WALK_MAX_HALF_WIDTH_METERS:.0f} m it moves to "
-    f"{_rel_shipped['pinch_rowcol']} at 107.5 m, measured. The cap was choosing the dam."
+    f"{_rel_shipped['pinch_rowcol']} at 117.5 m, measured. The cap was choosing the dam."
 )
 
 # MONOTONICITY, the property behind all of that: a longer walk can only

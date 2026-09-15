@@ -239,7 +239,7 @@ print("1b. Prominence guard: the walk passes the 0.5 m knoll (crest at the real 
 
 # --- 2 [1-2 of the terminal-acceptance correction]. TERMINAL MINIMA ARE
 # --- ACCEPTED, DISCLOSED, NOT REFUSED; the sole failure is
-# --- no_constriction (minimum at the seed station) ---
+# --- best_site_at_seed (the seed is its own best dam site) ---
 
 # Monotonically widening: k grows downstream from the seed, so the width
 # minimum is the seed's own station -- a dam at the storage cell is
@@ -256,8 +256,14 @@ B_DEM = _dem(_valley_array(A_ROWS, A_COLS, A_CHANNEL, _widening_k))
 B_FILLED, B_FTR, B_FTC = _flow(B_DEM)
 B_ON_PARCEL = _on_parcel(B_DEM, A_BOUNDARY)
 widening = walk_embankment_pinch(B_DEM, (2, A_CHANNEL), B_FTR, B_FTC, B_ON_PARCEL, A_NO_ROAD)
-assert widening["found"] is False and widening["reason_code"] == wsa.REASON_NO_CONSTRICTION, (
-    f"a monotonically widening valley yields nothing -- no_constriction: {widening.get('reason_code')}"
+# RENAMED with the rule it named. Under the width-and-height objective
+# "no constriction" is not a failure -- narrowness is not the goal -- and
+# a monotonically widening valley fails because the SEED is its own best
+# dam site: REASON_BEST_SITE_AT_SEED, which keeps the degenerate-baseline
+# case distinct from "nothing had a measurable shoulder".
+assert widening["found"] is False and widening["reason_code"] == wsa.REASON_BEST_SITE_AT_SEED, (
+    f"a monotonically widening valley yields nothing -- best_site_at_seed: "
+    f"{widening.get('reason_code')}"
 )
 assert widening["still_narrowing_at_termination"] is False
 assert widening["width_profile_min_m"] == 17.5 and widening["width_profile_max_m"] == 47.5, (
@@ -344,7 +350,7 @@ assert rewidened["still_narrowing_at_termination"] is False, (
 print(
     "2. Terminal acceptance x3 (boundary / road / walk bound), each flagged with its terminator and "
     "still-narrowing True; the rewidened variant keeps its interior pinch (flag None, disclosure "
-    "False); monotone widening is the one failure: no_constriction."
+    "False); monotone widening is the one failure: best_site_at_seed."
 )
 
 # --- 3 [3]. compartment assembly: transects, the watershed band, area ---
@@ -639,6 +645,12 @@ _v_walk = {
     "pinch_index": 2,
     "pinch_rowcol": _v_pinch,
     "pinch_width_m": 17.5,
+    # The dam-site objective's own record of the chosen station -- part
+    # of the walk contract since the selection stopped being minimum
+    # width, so a hand-made walk carries it too.
+    "pinch_binding_height_m": 3.0,
+    "pinch_dam_site_score": 3.0 ** wsa.DAM_SITE_HEIGHT_EXPONENT / 17.5,
+    "height_exponent": wsa.DAM_SITE_HEIGHT_EXPONENT,
     "walk_distance_m": 50.0,
     "half_width_bound_hit": False,
     "terminal": None,
@@ -806,8 +818,11 @@ for retired_value in ("pinch_off_parcel", "pinch_blocked_by_road", "no_pinch_wit
         "in the module -- a docstring may NARRATE it inside prose, but no literal equal to the code "
         "itself may exist for anything to emit"
     )
-assert wsa.REASON_NO_CONSTRICTION == "no_constriction"
-print("   Retirement: the three refusal codes are absent at the attribute, AST-name, and string-constant level; no_constriction replaces them.")
+assert (wsa.REASON_BEST_SITE_AT_SEED, wsa.REASON_NO_MEASURABLE_SHOULDER,
+        wsa.REASON_NO_CHANNEL_FROM_SEED) == (
+    "best_site_at_seed", "no_measurable_shoulder", "no_channel_from_seed"
+), "the three walk failures the width-and-height objective split no_constriction into"
+print("   Retirement: the three refusal codes are absent at the attribute, AST-name, and string-constant level; the walk's own failures are now best_site_at_seed / no_measurable_shoulder / no_channel_from_seed.")
 
 # --- the full compute path: seeds, waist pinch, dedupe codes ---
 # FIXTURE A2: the same construction with the waist moved DOWNSTREAM
@@ -1037,9 +1052,13 @@ a_failed = [r for r in a_seeds if r["status"] == wsa.SEED_STATUS_FAILED]
 assert a_failed, "the never-narrowing/duplicate seeds report their reasons"
 for record in a_failed:
     assert record.get("reason_code"), f"every failed seed carries a reason code: {record}"
-    assert record["reason_code"] == wsa.REASON_NO_CONSTRICTION or record["reason_code"].startswith(
+    assert record["reason_code"] in (
+        wsa.REASON_BEST_SITE_AT_SEED,
+        wsa.REASON_NO_MEASURABLE_SHOULDER,
+        wsa.REASON_NO_CHANNEL_FROM_SEED,
+    ) or record["reason_code"].startswith(
         wsa.DUPLICATE_OF_ZONE_REASON_PREFIX
-    ), f"the failure vocabulary is no_constriction + dedupe only now: {record['reason_code']}"
+    ), f"the failure vocabulary is the three walk failures + dedupe only: {record['reason_code']}"
 _dup_codes = [r["reason_code"] for r in a_failed if r["reason_code"].startswith(wsa.DUPLICATE_OF_ZONE_REASON_PREFIX)]
 for code in _dup_codes:
     named = int(code[len(wsa.DUPLICATE_OF_ZONE_REASON_PREFIX):])
@@ -1288,11 +1307,21 @@ checked_far = compute_water_survey_areas(
 # this road-posture check needs. Asserted as the real outcome rather
 # than as an empty list, so a change in either direction is visible.
 assert unchecked["embankment_seeds"], "the 0.30 minimum nominates on this fixture; 0.50 did not"
-assert all(
-    record["status"] == wsa.SEED_STATUS_FAILED
-    and record["reason_code"] == wsa.REASON_NO_CONSTRICTION
-    for record in unchecked["embankment_seeds"]
-), "dead-flat ground never narrows -- every seed reports no_constriction, honestly"
+# DEAD-FLAT GROUND FAILS DIFFERENTLY NOW, and the difference is the
+# point of the width-and-height objective. Under the retired rule every
+# seed here reported no_constriction ("never narrows"). Under the
+# objective a flat has no SHOULDER either, so the walks fail with
+# whichever of the two honest findings applies -- nothing measurable to
+# score, or the seed being its own best site. Both are asserted rather
+# than one being assumed, because which one fires is a property of the
+# fixture and not of the rule.
+_flat_codes = {record["reason_code"] for record in unchecked["embankment_seeds"]}
+assert all(record["status"] == wsa.SEED_STATUS_FAILED for record in unchecked["embankment_seeds"])
+assert _flat_codes <= {
+    wsa.REASON_NO_MEASURABLE_SHOULDER,
+    wsa.REASON_BEST_SITE_AT_SEED,
+    wsa.REASON_NO_CHANNEL_FROM_SEED,
+}, f"dead-flat ground fails on the walk's own vocabulary, honestly: {_flat_codes}"
 assert unchecked["zones_by_type"][SURVEY_TYPE_EMBANKMENT] == [], (
     "and so no embankment zone exists: the excavated comparison below is unaffected"
 )

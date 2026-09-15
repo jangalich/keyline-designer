@@ -1221,6 +1221,80 @@ RIDGE_WALK_MAX_HALF_WIDTH_METERS = 150.0
 PINCH_BEARING_SECANT = "secant"
 PINCH_BEARING_D8 = "d8"
 
+# THE DAM-SITE OBJECTIVE'S HEIGHT EXPONENT -- how hard the selection
+# trades narrowness against depth of enclosure.
+#
+# WHY THERE IS AN OBJECTIVE AT ALL. The embankment cell used to be the
+# MINIMUM-WIDTH station of the downstream walk, and width alone has been
+# shown insufficient: ridge_crest_walk() stops as soon as ground falls
+# RIDGE_PROMINENCE_METERS behind its running maximum, so a declared
+# crest certifies only that a local high point EXISTS -- it may stand
+# 5 cm above the channel or 5 m. A 10 m pinch between 5 cm shoulders is
+# a narrow spot on a flat, not a dam site. The reference property shows
+# the two axes moving independently: one seed's station reads 4.47 /
+# 2.24 m of shoulder at 122 m wide while its chosen pinch read 0.53 m at
+# 122 m -- the width barely moved and the height collapsed.
+#
+# THE RATIO. A dam site should maximise impoundment per unit of wall.
+# Wall cost scales with the WIDTH that has to be spanned; how high the
+# pool can rise before spilling around the abutments is bounded by the
+# BINDING (lower) shoulder. So the station score is h**exponent / w.
+#
+# EXPONENT 1 (h/w) is the linear trade: a 2 m shoulder at 100 m scores
+# the same as a 1 m shoulder at 50 m.
+# EXPONENT 2 (h**2/w) reflects that impounded VOLUME grows faster than
+# linearly with depth -- a pool's area grows as it deepens, so storage
+# goes roughly as the square -- and therefore favours depth over
+# narrowness more aggressively.
+#
+# The two differ only in how far a station must be taller to justify
+# being wider: A beats B under h/w when hA/hB > wA/wB, and under h**2/w
+# when (hA/hB)**2 > wA/wB. They disagree exactly when wA/wB falls
+# between those, so a taller-and-wider station is where the choice
+# shows. diagnose_pinch_bearing_and_bound.py reports the selection EACH
+# exponent makes, per seed, on every run.
+#
+# SHIPPED: h**2/w, and the evidence is a table rather than a preference.
+# On the deciding fixture (test_dam_site_objective.py section 2) three
+# reaches of one channel offer:
+#
+#     station    w        h      h/w       h**2/w
+#     seed      67.5 m   0.40 m  0.00593   0.00237
+#     narrow    27.5 m   1.00 m  0.03636   0.03636
+#     wide-deep 47.5 m   1.50 m  0.03158   0.04737
+#
+# h/w picks the NARROW station -- the same cell the retired minimum-
+# width rule picks. On a fixture built so that depth is the deciding
+# variable, the linear exponent reproduces the answer of the rule this
+# branch exists to replace; it is too weak to do the work asked of it.
+# h**2/w picks the wide-deep station: 50% more shoulder for 73% more
+# wall, which for a farm pond is the better trade -- a 1.0 m shoulder is
+# barely an impoundment, and depth is what makes stored water useful
+# (storage per acre-foot of wall, evaporation, stock depth).
+#
+# THE TABLE THIS RESTS ON IS SYNTHETIC. It proves the two exponents
+# separate and which way, on ground built to separate them; it is not
+# the reference property's per-seed table, which the instrument prints
+# on every networked run and which is the confirmation this choice is
+# owed. If that table shows h/w and h**2/w agreeing everywhere on real
+# terrain, the choice is untestable there and rests on the physics
+# alone -- and the instrument says so in as many words.
+DAM_SITE_HEIGHT_EXPONENT_LINEAR = 1
+DAM_SITE_HEIGHT_EXPONENT_STORAGE = 2
+DAM_SITE_HEIGHT_EXPONENT = DAM_SITE_HEIGHT_EXPONENT_STORAGE
+
+# How walk_embankment_pinch() picks the embankment cell out of its
+# station profile. RATIO is the only value production uses:
+# dam_site_score()'s width-and-height objective. MIN_WIDTH is the
+# RETIRED rule -- the narrowest station wins, height unconsidered --
+# kept reachable ONLY so the attribution instrument can run the walk
+# both ways on one parcel and show which dam cells the objective moved
+# and where to. It is not a tuning choice and not a fallback: no
+# production path passes it, and the failure paths never fall back to
+# it (see REASON_NO_MEASURABLE_SHOULDER).
+DAM_SITE_SELECTION_RATIO = "ratio"
+DAM_SITE_SELECTION_MIN_WIDTH = "min_width"
+
 # When two compartments overlap by more than this fraction of the
 # SMALLER one's area, they are duplicates -- two seeds describing one
 # valley compartment -- and collapse to the higher-blend seed's
@@ -1543,11 +1617,19 @@ edges and nodata-walled ground -- grouped here deliberately: either way
 the SURVEYED EXTENT ended, and 'walk limit' is the honest noun for
 both)."""
 FLAG_STILL_NARROWING = "still_narrowing_at_termination"
-"""Rides every terminal pinch whose terminal width is strictly below
-the preceding station's (by the first-of-ties minimum rule this is
-every terminal pinch -- carried explicitly anyway so the disclosure is
-a readable property, not an inference): the valley was still narrowing
-when the walk was cut off."""
+"""Rides a terminal pinch whose terminal width is strictly below the
+preceding station's: the valley was still narrowing when the walk was
+cut off, so a narrower crossing may exist just past the surveyed extent.
+
+IT NOW DISCRIMINATES, where under the retired minimum-width rule it did
+not. That rule could only choose a terminal station by making it the
+strict width minimum, so every terminal pinch was still narrowing and
+the flag was true by construction. The width-and-height objective can
+choose a terminal station for its SHOULDER while the profile is
+widening there, so this flag is now a real property of the profile
+rather than an inference from the selection -- and a terminal pinch
+without it means the walk stopped somewhere the valley was not
+tightening."""
 
 # The compartment-level catchment disqualifier as a FLAG as well as a
 # drop reason, so it rides zone['flags'] like every other finding about
@@ -1555,11 +1637,41 @@ when the walk was cut off."""
 # in view. See REASON_CATCHMENT_EXCEEDS_CEILING for the reasoning.
 FLAG_CATCHMENT_EXCEEDS_CEILING = "catchment_exceeds_ceiling"
 
-# The SOLE remaining walk failure: the width minimum sits at the SEED
-# station itself (a monotonically widening -- or never-narrowing --
-# profile). A compartment needs a baseline, and a dam at the storage
-# cell is degenerate; this seed honestly produces nothing.
-REASON_NO_CONSTRICTION = "no_constriction"
+# THE WALK FAILURES, SPLIT BY WHAT ACTUALLY WENT WRONG.
+#
+# RETIRED: "no_constriction". That name was correct only while the
+# objective was minimum WIDTH -- it said "the valley never narrowed
+# below its seed station". Under the width-and-height objective
+# (dam_site_score()) narrowness is not the goal, so "no constriction" no
+# longer names a failure: a walk can fail because nothing along it has a
+# MEASURABLE shoulder, or because the best site it found is the seed
+# itself. Those are different findings about different ground and they
+# get different codes. The old name is gone from the code (an AST check
+# pins its absence); docstrings still narrate it where the history
+# matters.
+
+REASON_NO_CHANNEL_FROM_SEED = "no_channel_from_seed"
+"""The seed sits on the flow field's -1 outlet/flat sentinel, so no
+channel leaves it and there is no walk at all. Not a judgement about
+terrain -- there was nothing to measure."""
+
+REASON_NO_MEASURABLE_SHOULDER = "no_measurable_shoulder"
+"""Stations were walked and widths measured, but NOT ONE of them has a
+binding shoulder height: every station had at least one flank whose
+crest walk ran out RIDGE_WALK_MAX_HALF_WIDTH_METERS without declaring a
+crest. A dam site cannot be chosen on depth where no depth was
+measured, and this path deliberately does NOT fall back to the
+minimum-width station -- falling back would reinstate the objective this
+branch replaced, silently, exactly where the evidence for it is
+weakest."""
+
+REASON_BEST_SITE_AT_SEED = "best_site_at_seed"
+"""The best-scoring station IS the seed station: the storage anchor is
+its own best dam site. Degenerate for the reason it always was -- a
+compartment needs a baseline from the seed to the dam reach, and a
+baseline of zero length is not one. Kept DISTINCT from the two codes
+above because it is a statement about the SHAPE of a real measured
+profile, not about a missing measurement."""
 
 REASON_CATCHMENT_EXCEEDS_CEILING = "catchment_exceeds_ceiling"
 """THE 20-ACRE CEILING AS A COMPARTMENT-LEVEL DISQUALIFIER, the second
@@ -3445,6 +3557,64 @@ def lower_crest_height(left_m: Optional[float], right_m: Optional[float]) -> Opt
     return min(measured)
 
 
+def dam_site_score(
+    binding_height_m: Optional[float],
+    width_m: float,
+    height_exponent: int = DAM_SITE_HEIGHT_EXPONENT,
+) -> Optional[float]:
+    """
+    ONE STATION'S DAM-SITE SCORE: impoundment per unit of wall,
+    h**height_exponent / w, or None where the station cannot be scored
+    at all.
+
+    h is the BINDING shoulder height (lower_crest_height() over the
+    station's two crest walks -- the side that limits how high water can
+    rise before spilling around the abutment) and w is the crest-to-crest
+    width the same two walks measured. See DAM_SITE_HEIGHT_EXPONENT for
+    why the ratio and what the exponent trades.
+
+    NONE MEANS "CANNOT BE SCORED", NEVER "SCORED BADLY", and the
+    distinction is the whole reason this returns an Optional rather than
+    a float. Two cases produce it:
+
+    ABSENT SHOULDER. A station whose binding height is None had at least
+    one flank whose crest walk ran out its half-width bound without
+    declaring a crest, and lower_crest_height() refuses to reduce over
+    an unmeasured side. Such a station is SKIPPED by the selection --
+    not disqualified, not scored zero. "Skipped" is the honest word:
+    disqualified would mean it was judged and failed, and it was never
+    measured. Scoring it 0.0 would be worse still -- it would lose on
+    merit it was never measured for, which is exactly the absent-is-not-
+    zero rule this project has enforced since unreachable_stem_end.
+
+    ZERO WIDTH, which is real on this terrain and is NOT the best
+    possible site. w == 0 means BOTH crest walks declared their crest at
+    distance zero -- i.e. both crests ARE the station's own channel
+    cell, because ground fell a full prominence immediately on both
+    sides. That is not a narrows between two shoulders; it is a channel
+    cell that is a local HIGH POINT in cross-section (a spur or nose the
+    flow crosses, or a DEM artifact). Treating w -> 0 as an infinitely
+    good dam site would be exactly backwards, so it is refused.
+    Note the guard changes no selection on its own: both crests
+    coinciding with the station forces both heights to 0.0 and therefore
+    h == 0, so such a station would score 0 and lose to any station with
+    a real shoulder anyway. The guard exists to make that reasoning
+    explicit and to keep the division defined, rather than to decide
+    anything.
+
+    A MEASURED h == 0.0 IS SCORED, at 0.0, and that is deliberate: it
+    means the shoulder was found and stands level with the channel --
+    a real finding ("water spills immediately here"), not a gap. It
+    loses to every station with a positive shoulder, which is correct,
+    and it loses on a measurement rather than on an absence.
+    """
+    if binding_height_m is None:
+        return None
+    if width_m <= 0.0:
+        return None
+    return (binding_height_m ** height_exponent) / width_m
+
+
 def walk_embankment_pinch(
     dem: dict,
     seed_rowcol: tuple,
@@ -3457,6 +3627,8 @@ def walk_embankment_pinch(
     max_half_width_meters: float = RIDGE_WALK_MAX_HALF_WIDTH_METERS,
     direction_window_cells: int = STEM_DIRECTION_WINDOW_CELLS,
     direction_mode: str = PINCH_BEARING_SECANT,
+    height_exponent: int = DAM_SITE_HEIGHT_EXPONENT,
+    selection_mode: str = DAM_SITE_SELECTION_RATIO,
 ) -> dict:
     """
     The pinch walk: from the seed, downstream along the D8 flow field,
@@ -3509,9 +3681,33 @@ def walk_embankment_pinch(
     thing it is measuring. No production path passes it; the default is
     the secant and nothing but a diagnostic may say otherwise.
 
-    THE EMBANKMENT CELL is the MINIMUM-WIDTH station among ALL walked
-    stations -- interior or terminal. A minimum sitting at the walk's
-    terminal station is ACCEPTED AND DISCLOSED, never refused (the
+    THE EMBANKMENT CELL is the BEST DAM SITE among all walked stations,
+    where "best" is dam_site_score()'s ratio of binding shoulder height
+    to crest-to-crest width -- impoundment per unit of wall -- and NOT
+    the minimum width.
+
+    WIDTH ALONE WAS INSUFFICIENT, which is why this changed.
+    ridge_crest_walk() stops the moment ground falls
+    prominence_meters behind its running maximum, so a declared crest
+    certifies only that a local high point EXISTS: it may stand 5 cm
+    above the channel or 5 m. A 10 m pinch between 5 cm shoulders is a
+    narrow spot on a flat, not a dam site, and the minimum-width rule
+    could not tell the two apart. The two axes are measurably
+    independent on real ground -- the reference property has a station
+    reading 4.47 / 2.24 m of shoulder at 122 m wide beside a chosen
+    pinch reading 0.53 m at the same 122 m.
+
+    STATIONS THAT CANNOT BE SCORED ARE SKIPPED, not zeroed: a station
+    whose binding shoulder is ABSENT (a flank that ran out its
+    half-width bound without declaring a crest) was never measured for
+    depth and must not lose on merit it was never measured for. Zero
+    width is refused too, and for a reason that is the opposite of
+    "infinitely narrow is infinitely good" -- see dam_site_score().
+    unscoreable_station_count rides the result so the skipped population
+    is reportable.
+
+    A best site sitting at the walk's terminal station is ACCEPTED AND
+    DISCLOSED, never refused (the
     dam-at-the-edge doctrine -- see the pinch_at_* flag constants for
     the history that retired the interior-only rule): the narrowest
     buildable crossing within the surveyed extent is a legitimate,
@@ -3522,20 +3718,36 @@ def walk_embankment_pinch(
     still_narrowing_at_termination and the walked width profile's
     min/max, so the constriction's strength is readable.
 
-    THE SOLE REMAINING FAILURE, honest, no fallback: the minimum sits
-    at the SEED station itself (a monotonically widening -- or
-    never-narrowing -- profile). A compartment needs a baseline, and a
-    dam at the storage cell is degenerate: reason_code no_constriction.
+    THE FAILURES, honest and split by what went wrong, with NO fallback
+    to the retired width rule in any of them:
+      REASON_NO_CHANNEL_FROM_SEED    no channel leaves the seed, so
+                                     nothing was walked or measured.
+      REASON_NO_MEASURABLE_SHOULDER  stations were measured but not one
+                                     has a binding shoulder, so the
+                                     objective has nothing to score.
+      REASON_BEST_SITE_AT_SEED       the seed is its own best site: a
+                                     baseline of zero length is not one.
+    ("no_constriction" is retired with the rule it named -- see the
+    reason-code block.)
 
     Returns {'found', 'stations', 'terminator',
     'still_narrowing_at_termination', 'width_profile_min_m',
     'width_profile_max_m', and either {'pinch_index', 'pinch_rowcol',
-    'pinch_width_m', 'walk_distance_m', 'half_width_bound_hit',
+    'pinch_width_m', 'pinch_binding_height_m', 'pinch_dam_site_score',
+    'height_exponent', 'walk_distance_m', 'half_width_bound_hit',
     'terminal' (None for an interior pinch)} or {'reason_code'}}.
     Stations carry each cell's width measurement for the
-    diagnostic/export instruments, plus the direction_unit that width
-    was taken perpendicular to and the clamped_window /
-    degenerate_direction disclosures described above.
+    diagnostic/export instruments, plus the two crest heights and the
+    binding one, that station's dam_site_score (None where it cannot be
+    scored), the direction_unit the width was taken perpendicular to,
+    and the clamped_window / degenerate_direction disclosures described
+    above.
+
+    height_exponent and selection_mode exist for ONE reader: the
+    attribution instrument, which runs this walk over a single parcel
+    under each candidate exponent and under the RETIRED minimum-width
+    rule, so the objective's effect is reported per seed rather than
+    asserted. Production passes neither.
     """
     px, py = dem["resolution_meters"]
 
@@ -3549,10 +3761,9 @@ def walk_embankment_pinch(
     if int(flow_to_row[seed_rowcol[0], seed_rowcol[1]]) < 0:
         # The seed itself sits on the -1 outlet/flat sentinel: no
         # channel leaves it, so there is no path and nothing measurable.
-        # Reported as the zero-station failure exactly as before.
         return {
             "found": False,
-            "reason_code": REASON_NO_CONSTRICTION,
+            "reason_code": REASON_NO_CHANNEL_FROM_SEED,
             "terminator": "flow_end",
             "stations": [],
             "still_narrowing_at_termination": False,
@@ -3632,12 +3843,39 @@ def walk_embankment_pinch(
         measurement = measure_valley_width(
             dem, rowcol, direction, prominence_meters, max_half_width_meters
         )
+        # THE HEIGHT AXIS, off the SAME two crest walks that just
+        # measured the width -- no third walk, no second crest finder.
+        # Each side's crest above THIS station's own channel cell, and
+        # the binding (lower) side, which is what limits how high water
+        # can rise before spilling around the abutment.
+        #
+        # A BEARING NOTE WORTH HAVING IN VIEW: these heights are taken
+        # on the LOCAL-CHANNEL perpendicular (the secant this walk
+        # measures widths on), while the compartment's stored
+        # seed_/pinch_crest_height_* fields are taken on the
+        # SEED->PINCH BASELINE perpendicular in
+        # build_embankment_compartment(). Two different lines through
+        # the same cell, so the two numbers can differ. That is not a
+        # discrepancy to reconcile: the selection must use a bearing it
+        # can know BEFORE the pinch is chosen, and the baseline is not
+        # one -- it is defined by the choice. The diagnostic prints both.
+        left_height = crest_height_above_channel(dem, measurement["left"], rowcol)
+        right_height = crest_height_above_channel(dem, measurement["right"], rowcol)
+        binding_height = lower_crest_height(left_height, right_height)
         stations.append(
             {
                 "rowcol": rowcol,
                 "distance_m": round(distances[index], 1),
                 "width_m": measurement["width_m"],
                 "measurement": measurement,
+                "crest_height_left_m": left_height,
+                "crest_height_right_m": right_height,
+                "binding_height_m": binding_height,
+                # None where the station cannot be scored at all -- an
+                # absent shoulder or a zero width; see dam_site_score().
+                "dam_site_score": dam_site_score(
+                    binding_height, measurement["width_m"], height_exponent
+                ),
                 # THE BEARING THIS STATION WAS MEASURED ON, carried so a
                 # diagnostic can show it and a reader can check a width
                 # against the line it was taken across.
@@ -3655,11 +3893,11 @@ def walk_embankment_pinch(
         )
 
     if not stations:
-        # The seed itself was unmeasurable (no flow direction at all):
-        # degenerate in the same way a seed-station minimum is.
+        # No channel leaves the seed at all -- nothing was measured, so
+        # this is not a finding about terrain.
         return {
             "found": False,
-            "reason_code": REASON_NO_CONSTRICTION,
+            "reason_code": REASON_NO_CHANNEL_FROM_SEED,
             "terminator": terminator,
             "stations": stations,
             "still_narrowing_at_termination": False,
@@ -3668,41 +3906,94 @@ def walk_embankment_pinch(
         }
 
     widths = [station["width_m"] for station in stations]
-    minimum_index = int(np.argmin(widths))
     still_narrowing = len(widths) >= 2 and widths[-1] < widths[-2]
     profile = {
         "still_narrowing_at_termination": still_narrowing,
         "width_profile_min_m": round(min(widths), 1),
         "width_profile_max_m": round(max(widths), 1),
+        # THE SKIPPED POPULATION, carried so the diagnostic can say how
+        # often the objective had nothing to score rather than leaving a
+        # reader to infer it from a failure count.
+        "unscoreable_station_count": sum(
+            1 for station in stations if station["dam_site_score"] is None
+        ),
     }
-    if minimum_index == 0:
-        # The valley never narrows below its seed station: no baseline
-        # exists to build a compartment on -- the one honest failure.
+
+    # THE SELECTION: the best dam site, not the narrowest station.
+    # Stations that cannot be scored are SKIPPED -- they are not
+    # compared and cannot win (see dam_site_score() for why skipping
+    # rather than zeroing).
+    if selection_mode == DAM_SITE_SELECTION_MIN_WIDTH:
+        # THE RETIRED RULE, reachable only by an instrument (see
+        # DAM_SITE_SELECTION_MIN_WIDTH): narrowest station wins, height
+        # unconsidered, every station eligible. Reproduced exactly --
+        # argmin's first-of-ties included -- so the attribution's
+        # before-column is the old behaviour rather than an
+        # approximation of it.
+        _narrowest = int(np.argmin(widths))
+        scoreable = [(_narrowest, stations[_narrowest])]
+    else:
+        scoreable = [
+            (index, station)
+            for index, station in enumerate(stations)
+            if station["dam_site_score"] is not None
+        ]
+    if not scoreable:
+        # Not one station on the whole walk has a binding shoulder. The
+        # objective has nothing to work with, and it deliberately does
+        # NOT fall back to minimum width.
         return {
             "found": False,
-            "reason_code": REASON_NO_CONSTRICTION,
+            "reason_code": REASON_NO_MEASURABLE_SHOULDER,
+            "terminator": terminator,
+            "stations": stations,
+            **profile,
+        }
+    # max() over the scoreable stations, first-of-ties (max() keeps the
+    # earliest maximum), which is the same tie rule the width minimum
+    # used -- the UPSTREAM-most of equally good sites, so a tie puts the
+    # dam as close to the storage anchor as it can.
+    if selection_mode == DAM_SITE_SELECTION_MIN_WIDTH:
+        best_index, best_station = scoreable[0]
+    else:
+        best_index, best_station = max(
+            scoreable, key=lambda entry: entry[1]["dam_site_score"]
+        )
+
+    if best_index == 0:
+        # The seed is its own best dam site: no baseline exists to build
+        # a compartment on. Degenerate for the reason it always was.
+        return {
+            "found": False,
+            "reason_code": REASON_BEST_SITE_AT_SEED,
             "terminator": terminator,
             "stations": stations,
             **profile,
         }
 
-    # A terminal minimum is ACCEPTED: `terminal` names what ended the
+    # A terminal choice is ACCEPTED: `terminal` names what ended the
     # walk (distance bound and the flow field running out both read
     # walk_bound -- the surveyed extent ended either way).
     terminal = None
-    if minimum_index == len(stations) - 1:
+    if best_index == len(stations) - 1:
         terminal = {"boundary": "boundary", "road": "road"}.get(terminator, "walk_bound")
 
-    pinch_station = stations[minimum_index]
+    pinch_station = best_station
     return {
         "found": True,
         "terminator": terminator,
         "stations": stations,
-        "pinch_index": minimum_index,
+        "pinch_index": best_index,
         "pinch_rowcol": pinch_station["rowcol"],
         "pinch_width_m": pinch_station["width_m"],
         "walk_distance_m": pinch_station["distance_m"],
         "half_width_bound_hit": pinch_station["measurement"]["bound_hit"],
+        # THE OBJECTIVE'S OWN NUMBERS at the chosen station, carried so a
+        # reader can check the choice against the profile rather than
+        # taking it on trust.
+        "pinch_binding_height_m": pinch_station["binding_height_m"],
+        "pinch_dam_site_score": pinch_station["dam_site_score"],
+        "height_exponent": height_exponent,
         "terminal": terminal,
         **profile,
     }
@@ -4200,6 +4491,21 @@ def build_embankment_compartment(
             "xy": pinch_xy,
             "geometry_wgs84": {"type": "Point", "coordinates": (pinch_lons[0], pinch_lats[0])},
             "width_m": walk["pinch_width_m"],
+            # THE OBJECTIVE'S OWN NUMBERS AT THE CHOSEN CELL: the
+            # binding shoulder height the selection scored on and the
+            # score itself, so the dam cell's choice is checkable
+            # against the profile rather than taken on trust.
+            #
+            # binding_height_m is measured on the LOCAL-CHANNEL
+            # perpendicular (the bearing the walk measures widths on),
+            # NOT on the seed->pinch baseline perpendicular that
+            # pinch_crest_height_min_m above uses. Two lines through one
+            # cell; the two can differ. The selection must use a bearing
+            # it can know BEFORE the pinch exists, and the baseline is
+            # defined by the choice, so it cannot.
+            "binding_height_m": walk["pinch_binding_height_m"],
+            "dam_site_score": walk["pinch_dam_site_score"],
+            "height_exponent": walk["height_exponent"],
             "walk_distance_m": walk["walk_distance_m"],
             "half_width_bound_hit": walk["half_width_bound_hit"],
             # The fill claim, repeated inside the pinch record because
@@ -4297,6 +4603,8 @@ def generate_embankment_compartments(
     gate_context: dict,
     max_half_width_meters: float = RIDGE_WALK_MAX_HALF_WIDTH_METERS,
     direction_mode: str = PINCH_BEARING_SECANT,
+    height_exponent: int = DAM_SITE_HEIGHT_EXPONENT,
+    selection_mode: str = DAM_SITE_SELECTION_RATIO,
 ) -> tuple[list[dict], list[dict]]:
     """
     The full embankment generation pass: seed, walk, assemble, and
@@ -4314,7 +4622,7 @@ def generate_embankment_compartments(
     COMPARTMENT-level overlap dedupe happens in the compute core, after
     every compartment exists (it needs the assembled polygons).
 
-    max_half_width_meters and direction_mode forward to
+    max_half_width_meters, direction_mode and height_exponent forward to
     walk_embankment_pinch() AND to the compartment's own transects, so a
     swept bound moves both the profile and the enclosure depths rather
     than half of each. They exist for ONE caller: the attribution
@@ -4353,6 +4661,8 @@ def generate_embankment_compartments(
             road_cell_mask,
             max_half_width_meters=max_half_width_meters,
             direction_mode=direction_mode,
+            height_exponent=height_exponent,
+            selection_mode=selection_mode,
         )
         if not walk["found"]:
             record["status"] = SEED_STATUS_FAILED
@@ -4875,6 +5185,8 @@ def compute_water_survey_areas(
     flow_to_row: Optional[np.ndarray] = None,
     flow_to_col: Optional[np.ndarray] = None,
     max_half_width_meters: float = RIDGE_WALK_MAX_HALF_WIDTH_METERS,
+    height_exponent: int = DAM_SITE_HEIGHT_EXPONENT,
+    selection_mode: str = DAM_SITE_SELECTION_RATIO,
 ) -> dict:
     """
     Pure computation over already-fetched inputs -- no network I/O
@@ -5044,6 +5356,8 @@ def compute_water_survey_areas(
         flow_to_col,
         gate_context,
         max_half_width_meters=max_half_width_meters,
+        height_exponent=height_exponent,
+        selection_mode=selection_mode,
     )
     # THE COMPARTMENT-LEVEL CEILING, APPLIED BEFORE DEDUPE. The pinch
     # cell sits downstream of its gated seed, so its catchment can

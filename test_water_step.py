@@ -1738,15 +1738,29 @@ assert _ref_shipped == _REF_AFTER, (
     f"re-derived {_REF_AFTER}, shipped {_ref_shipped}"
 )
 
-# THE HEADLINE COUNT DOES NOT MOVE ON THIS PARCEL, AND THAT IS THE
-# FINDING, not a reason to weaken the assertion. Every zone here has the
-# parcel's LOWEST-topped block within service range, and a zone only needs
-# ONE block it can gravity-feed to report gravity feed -- so the headline
-# survives a rule change that moves plenty underneath it. Pinned as an
-# equality so a future change to the terrain fixture, the blocks, or the
-# rule has to come back and restate what it did to this parcel.
-assert _REF_BEFORE == {"gravity": 7, "pump": 0, "none": 0}, _REF_BEFORE
-assert _REF_AFTER == {"gravity": 7, "pump": 0, "none": 0}, _REF_AFTER
+# THE HEADLINE NOW MOVES ON THIS PARCEL, AND RESTATING THAT IS THE
+# POINT OF PINNING IT AS AN EQUALITY.
+#
+# It used to read 7 / 0 / 0 on both sides: seven surviving zones, every
+# one of them with the parcel's LOWEST-topped block within service
+# range, and a zone needs only ONE block it can gravity-feed to report
+# gravity feed -- so the headline survived a rule change that moved
+# plenty underneath it.
+#
+# The width-and-height dam-site objective changed which station each
+# seed dams, and on this fixture that leaves SIXTEEN surviving zones
+# instead of seven. The larger set includes one zone that the corrected
+# max-to-max rule flips from gravity to PUMP -- so the rule fix is now
+# visible in the headline itself, not only in the per-block pairings
+# below. That is the honest restatement the old comment asked a future
+# change to come back and make: the headline's stability was a property
+# of the old zone set, not of the rule.
+assert _REF_BEFORE == {"gravity": 16, "pump": 0, "none": 0}, _REF_BEFORE
+assert _REF_AFTER == {"gravity": 15, "pump": 1, "none": 0}, _REF_AFTER
+assert _REF_BEFORE != _REF_AFTER, (
+    "and the two columns now DIFFER -- if they ever agree again, the finding above needs "
+    "restating a third time rather than the assertion being relaxed"
+)
 
 # WHERE THE CHANGE ACTUALLY LANDS: the per-block answers underneath the
 # headline. This is the measure of what the bug was costing -- a pairing
@@ -1770,22 +1784,32 @@ _ref_flips_to_gravity = [
     if not zone["representative_elevation_m"] > block["representative_elevation_m"]
     and zone["max_elevation_m"] > block["max_elevation_m"]
 ]
-assert len(_REF_PAIRS) == 35, len(_REF_PAIRS)
-assert len(_ref_flips_to_pump) == 4, _ref_flips_to_pump
+# 35 / 4 / 3 BEFORE THE DAM-SITE OBJECTIVE, when this fixture produced
+# seven surviving zones. Sixteen zones produce 80 pairings in range, and
+# the two flip counts scale with them. The RATIO is what the section is
+# about and it is unchanged in character: the bug still costs an order
+# of magnitude more pairings than the water side's optimism rescues.
+assert len(_REF_PAIRS) == 80, len(_REF_PAIRS)
+assert len(_ref_flips_to_pump) == 11, _ref_flips_to_pump
 # THE OTHER DIRECTION EXISTS, AND IT IS NOT A LEAK. The water side takes
 # its MAXIMUM deliberately: no pond has been sited inside a survey area,
 # so the area's high ground is the best case a design could still achieve
-# there. That optimism is what rescues these three -- zones whose median
+# there. That optimism is what rescues these five -- zones whose median
 # sat below a block but whose high end clears it.
-assert len(_ref_flips_to_gravity) == 3, _ref_flips_to_gravity
+assert len(_ref_flips_to_gravity) == 5, _ref_flips_to_gravity
+assert len(_ref_flips_to_pump) > len(_ref_flips_to_gravity), (
+    "the bug the max-to-max rule fixed must still cost more pairings than the deliberate optimism "
+    "rescues, or the section's framing needs re-examining rather than its numbers re-pinning"
+)
 
 print(
     f"10. Gravity before/after on the reference parcel ({len(_ref_zones)} survey zones, "
-    f"{len(_ref_blocks)} production blocks): the HEADLINE count is unchanged -- "
+    f"{len(_ref_blocks)} production blocks): the HEADLINE now MOVES -- "
     f"gravity {_REF_BEFORE['gravity']} -> {_REF_AFTER['gravity']}, "
     f"pump {_REF_BEFORE['pump']} -> {_REF_AFTER['pump']}, "
-    f"none {_REF_BEFORE['none']} -> {_REF_AFTER['none']} -- because every zone here has the "
-    f"lowest-topped block in range and one feedable block is enough. Underneath it, of "
+    f"none {_REF_BEFORE['none']} -> {_REF_AFTER['none']} -- the larger zone set the dam-site "
+    f"objective produces includes one zone without a feedable block, so the rule fix is visible "
+    f"in the headline and not only underneath it. Of "
     f"{len(_REF_PAIRS)} zone-by-block pairings in service range, {len(_ref_flips_to_pump)} flip "
     f"gravity -> pump (the bug: reported as feeding a whole block the water could only reach the "
     f"bottom of) and {len(_ref_flips_to_gravity)} flip pump -> gravity (the water side's "

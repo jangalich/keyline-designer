@@ -729,9 +729,11 @@ _EMBANKMENT_DETAIL_NOTE = (
 
 _FAILED_SEED_NOTE = (
     "FAILED embankment seed (the dropped-feature pattern, seed edition): this seed qualified on the "
-    "nomination surface but produced NO compartment -- the reason_code names why (no_constriction: "
-    "the valley never narrows below the seed station, so no baseline exists and a dam at the storage "
-    "cell would be degenerate; or a dedupe collapse into duplicate_of_zone_<id>). A compartment that "
+    "nomination surface but produced NO compartment -- the reason_code names why "
+    "(best_site_at_seed: the seed is its own best dam site, so no baseline exists and a dam at the "
+    "storage cell would be degenerate; no_measurable_shoulder: stations were walked but not one has "
+    "a binding shoulder height to score; no_channel_from_seed: no channel leaves the seed at all; "
+    "or a dedupe collapse into duplicate_of_zone_<id>). A compartment that "
     "was BUILT and then refused for its catchment (catchment_exceeds_ceiling) is not here -- it is a "
     "dropped ZONE, on survey_zone_dropped, because it has geometry to show. A width minimum at "
     "the walk's TERMINAL station is not a failure: it is accepted as a compartment and disclosed with "

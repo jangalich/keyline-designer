@@ -57,6 +57,11 @@ about terrain.
 from typing import Optional
 
 from water_survey_areas import (
+    DAM_SITE_HEIGHT_EXPONENT,
+    DAM_SITE_HEIGHT_EXPONENT_LINEAR,
+    DAM_SITE_HEIGHT_EXPONENT_STORAGE,
+    DAM_SITE_SELECTION_MIN_WIDTH,
+    DAM_SITE_SELECTION_RATIO,
     PINCH_BEARING_D8,
     PINCH_BEARING_SECANT,
     RIDGE_WALK_MAX_HALF_WIDTH_METERS,
@@ -96,6 +101,203 @@ def _gate_context(result: dict) -> dict:
         "soil_covered_mask": result["soil"]["covered_mask"],
         "soil_checked": result["soil_checked"],
     }
+
+
+def run_objective(
+    dem: dict,
+    result: dict,
+    selection_mode: str,
+    height_exponent: int = DAM_SITE_HEIGHT_EXPONENT,
+    label: Optional[str] = None,
+) -> dict:
+    """One full embankment generation pass under ONE dam-site objective,
+    on the run's own inputs with the bearing and the bound held at their
+    shipped values.
+
+    Same reuse rule as run_configuration(): every array, mask, surface
+    and polygon comes off the result dict the real run returned, so the
+    only thing differing between objectives is the objective."""
+    compartments, seeds = generate_embankment_compartments(
+        dem,
+        result["surfaces"],
+        result["gate_mask"],
+        result["on_parcel_mask"],
+        result["road_cell_mask"],
+        result["road_union_utm"],
+        result["boundary_polygon_utm"],
+        result["flow_to_row"],
+        result["flow_to_col"],
+        _gate_context(result),
+        selection_mode=selection_mode,
+        height_exponent=height_exponent,
+    )
+    if label is None:
+        label = (
+            "min-width (retired)"
+            if selection_mode == DAM_SITE_SELECTION_MIN_WIDTH
+            else f"ratio h**{height_exponent}/w"
+        )
+    return {
+        "label": label,
+        "selection_mode": selection_mode,
+        "height_exponent": height_exponent,
+        "compartments": compartments,
+        "seeds": seeds,
+        "by_seed": {tuple(zone["seed"]["rowcol"]): zone for zone in compartments},
+    }
+
+
+def summarize_dam_site_objective(dem: dict, result: dict) -> str:
+    """THE OBJECTIVE TABLE: which station each rule picks, per seed.
+
+    Three columns, all on one parcel with everything but the objective
+    held identical:
+      MIN-WIDTH   the retired rule -- narrowest station wins, height
+                  unconsidered. Reachable only through the escape hatch
+                  kept for this table.
+      h/w         the linear trade.
+      h**2/w      storage grows faster than linearly with depth.
+
+    THE EXPONENT IS CHOSEN FROM THIS TABLE, not from taste, and the
+    table keeps printing so the choice stays re-measurable. The two
+    exponents differ only in how far a station must be TALLER to justify
+    being WIDER -- A beats B under h/w when hA/hB > wA/wB and under
+    h**2/w when (hA/hB)**2 > wA/wB -- so they disagree exactly on
+    taller-and-wider stations, and the disagreement count below is the
+    number that matters."""
+    lines = [
+        "=== DAM-SITE OBJECTIVE: WIDTH ALONE vs WIDTH AND HEIGHT ===",
+        "  The embankment cell used to be the MINIMUM-WIDTH station. A declared crest only",
+        "  certifies that a local high point EXISTS -- it may stand 5 cm above the channel or 5 m --",
+        "  so a narrow spot on a flat scored like a dam site. The objective is now",
+        "  h**exponent / w: impoundment per unit of wall, with h the BINDING (lower) shoulder.",
+        "",
+        f"  SHIPPED: h**{DAM_SITE_HEIGHT_EXPONENT}/w. The columns below are what each rule picks.",
+        "  Stations with an ABSENT binding shoulder are SKIPPED, never scored 0 -- they were never",
+        "  measured for depth and must not lose on merit they were never measured for.",
+        "",
+    ]
+    columns = [
+        run_objective(dem, result, DAM_SITE_SELECTION_MIN_WIDTH),
+        run_objective(dem, result, DAM_SITE_SELECTION_RATIO, DAM_SITE_HEIGHT_EXPONENT_LINEAR),
+        run_objective(dem, result, DAM_SITE_SELECTION_RATIO, DAM_SITE_HEIGHT_EXPONENT_STORAGE),
+    ]
+    retired, linear, storage = columns
+    seeds = sorted({seed for column in columns for seed in column["by_seed"]})
+    if not seeds:
+        lines.append("  (no seed built a compartment under any objective)")
+        return "\n".join(lines)
+
+    exponent_disagreements = []
+    relocations = []
+    for seed in seeds:
+        lines.append(f"  SEED {seed}:")
+        for column in columns:
+            zone = column["by_seed"].get(seed)
+            if zone is None:
+                lines.append(
+                    f"    {column['label']:>20}: no compartment "
+                    "(this objective found no defensible dam site for this seed)"
+                )
+                continue
+            lines.append(
+                f"    {column['label']:>20}: pinch {tuple(zone['pinch']['rowcol'])} "
+                f"w {zone['pinch']['width_m']:.1f} m, binding h "
+                f"{_depth_cell(zone['pinch'].get('binding_height_m'))}, catchment "
+                f"{zone['pinch_catchment_acres']:.2f} ac, band "
+                f"{zone['compartment_footprint_acres']:.4f} ac, hull "
+                f"{zone['zone_acres']:.4f} ac"
+            )
+        _retired_zone = retired["by_seed"].get(seed)
+        _linear_zone = linear["by_seed"].get(seed)
+        _storage_zone = storage["by_seed"].get(seed)
+        if _linear_zone is not None and _storage_zone is not None:
+            if tuple(_linear_zone["pinch"]["rowcol"]) != tuple(_storage_zone["pinch"]["rowcol"]):
+                exponent_disagreements.append(
+                    (seed, tuple(_linear_zone["pinch"]["rowcol"]),
+                     tuple(_storage_zone["pinch"]["rowcol"]))
+                )
+                lines.append(
+                    f"      EXPONENTS DISAGREE: h/w picks "
+                    f"{tuple(_linear_zone['pinch']['rowcol'])} "
+                    f"(w {_linear_zone['pinch']['width_m']:.1f}, h "
+                    f"{_depth_cell(_linear_zone['pinch'].get('binding_height_m'))}), "
+                    f"h**2/w picks {tuple(_storage_zone['pinch']['rowcol'])} "
+                    f"(w {_storage_zone['pinch']['width_m']:.1f}, h "
+                    f"{_depth_cell(_storage_zone['pinch'].get('binding_height_m'))})"
+                )
+        shipped_zone = storage if DAM_SITE_HEIGHT_EXPONENT == 2 else linear
+        shipped_zone = shipped_zone["by_seed"].get(seed)
+        if _retired_zone is None and shipped_zone is not None:
+            relocations.append((seed, None, tuple(shipped_zone["pinch"]["rowcol"])))
+            lines.append(
+                f"      SEED GAINS A COMPARTMENT under the objective "
+                f"({shipped_zone['zone_acres']:.4f} ac hull)"
+            )
+        elif _retired_zone is not None and shipped_zone is None:
+            relocations.append((seed, tuple(_retired_zone["pinch"]["rowcol"]), None))
+            lines.append(
+                f"      SEED LOSES ITS COMPARTMENT under the objective -- the retired rule put a "
+                f"dam at {tuple(_retired_zone['pinch']['rowcol'])} on a station the objective "
+                "cannot defend"
+            )
+        elif _retired_zone is not None and shipped_zone is not None:
+            _before = tuple(_retired_zone["pinch"]["rowcol"])
+            _after = tuple(shipped_zone["pinch"]["rowcol"])
+            if _before != _after:
+                relocations.append((seed, _before, _after))
+                lines.append(
+                    f"      DAM CELL RELOCATES {_before} -> {_after}: width "
+                    f"{_retired_zone['pinch']['width_m']:.1f} -> "
+                    f"{shipped_zone['pinch']['width_m']:.1f} m, binding height "
+                    f"{_depth_cell(_retired_zone['pinch'].get('binding_height_m'))} -> "
+                    f"{_depth_cell(shipped_zone['pinch'].get('binding_height_m'))}, hull "
+                    f"{_retired_zone['zone_acres']:.4f} -> {shipped_zone['zone_acres']:.4f} ac"
+                )
+        lines.append("")
+
+    lines.append(
+        f"  EXPONENT VERDICT: h/w and h**2/w disagree on {len(exponent_disagreements)} of "
+        f"{len(seeds)} seed(s)."
+    )
+    if not exponent_disagreements:
+        lines.append(
+            "    The two are INDISTINGUISHABLE on this parcel, so the shipped exponent cannot be "
+            "argued from these numbers alone -- it rests on the physics (storage grows faster than "
+            "linearly with depth) and stays re-measurable here."
+        )
+    else:
+        for seed, linear_pick, storage_pick in exponent_disagreements:
+            lines.append(f"    seed {seed}: h/w -> {linear_pick}, h**2/w -> {storage_pick}")
+    lines.append(
+        f"  RELOCATIONS: the objective moved, gained or lost a dam cell on {len(relocations)} of "
+        f"{len(seeds)} seed(s)."
+    )
+
+    # --- the skipped population, which the failure counts do not show ---
+    lines.append("")
+    for column in columns:
+        _unscoreable = sum(
+            station["dam_site_score"] is None
+            for zone in column["compartments"]
+            for station in zone["walk_stations"]
+        )
+        _total = sum(len(zone["walk_stations"]) for zone in column["compartments"])
+        _failures = {}
+        for record in column["seeds"]:
+            # A seed can fail without a reason_code on the walk (the
+            # compartment-empty guard patches its own), so the key is
+            # read defensively rather than assumed -- an instrument that
+            # crashes on one odd record reports nothing at all.
+            _reason = record.get("reason_code", "unattributed")
+            if record.get("status") == "failed":
+                _failures[_reason] = _failures.get(_reason, 0) + 1
+        lines.append(
+            f"    {column['label']:>20}: {len(column['compartments'])} compartment(s); "
+            f"{_unscoreable} of {_total} walked stations unscoreable (absent shoulder or zero "
+            f"width); seed failures {_failures or '{}'}"
+        )
+    return "\n".join(lines)
 
 
 def run_configuration(dem: dict, result: dict, bearing: str, bound: float) -> dict:
