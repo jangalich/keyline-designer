@@ -169,6 +169,12 @@ from water_survey_areas import (
     MAX_VALLEY_CONTRIBUTING_AREA_ACRES,
     MIN_SURVEY_REGION_AREA_ACRES,
     REASON_CATCHMENT_EXCEEDS_CEILING,
+    # The prominence threshold that DECIDED every crest height printed
+    # on the enclosure-depth line below -- carried into the output beside
+    # the numbers so a reader can see what produced them (a crest is the
+    # first point ground falls this far behind the running maximum, which
+    # is why every height is a lower bound).
+    RIDGE_PROMINENCE_METERS,
     # RETIRED from every scoring path (see the constants' own note).
     # Imported HERE, and only here, so the before/after can score the
     # same cells on the fixed curve the window-referenced one replaced.
@@ -446,6 +452,61 @@ def _overlap_cell(value) -> str:
     return "n/c" if value is None else f"{value}%"
 
 
+def _crest_height_cell(value) -> str:
+    """One shoulder height for the enclosure-depth line. An absent side
+    prints "no crest within bound" -- the walk ran out
+    RIDGE_WALK_MAX_HALF_WIDTH_METERS without the prominence fall, so
+    there is no height -- rather than a blank, which a reader would have
+    to guess at, or a 0.0, which means something else entirely here.
+
+    "0.00 m" IS A REAL READING and the line must not be misread as
+    printing it for a missing side: it is a crest the walk CONFIRMED at
+    the station itself, i.e. no shoulder above the channel on that side
+    at all -- the worst enclosure a compartment can report, and the
+    opposite finding from an unresolved flank. The two are printed as
+    visibly different things for exactly that reason."""
+    return "no crest within bound" if value is None else f"{value:.2f} m"
+
+
+def _enclosure_depth_cell(zone: dict) -> str:
+    """The compartment's DEPTH line, printed under its width line so the
+    two read together.
+
+    WHY BOTH DIMENSIONS BELONG ON ONE READING. The width line says how
+    wide the valley is at the dam reach and nothing about how deep the
+    enclosure is, and those are independent: a 20 m pinch between
+    shoulders standing 6 m above the channel and the same 20 m pinch
+    between shoulders standing 1 m up are different sites -- the second
+    spills around its abutments at any useful pool height, and a width
+    figure alone would never say so.
+
+    WHAT IS PRINTED, and what it is not. Per transect (seed station and
+    pinch station), the left and right shoulder heights above THAT
+    station's channel cell, both read off the raw DEM, and the MIN --
+    the lower shoulder, which is the side that limits how high water
+    can rise, not the mean. Every height is a LOWER BOUND: it is the
+    height to the NEAREST LOCAL CREST, declared at the first point
+    ground falls RIDGE_PROMINENCE_METERS behind the running maximum,
+    which on a long gentle shoulder can sit well short of the true
+    ridge. The threshold is printed with the numbers for that reason.
+
+    METRES, matching the width figures on the line above (this table
+    reads the stored metric record; the report's imperial conversion is
+    a separate boundary and no consumer prints these yet)."""
+    parts = []
+    for end in ("seed", "pinch"):
+        parts.append(
+            f"{end} L {_crest_height_cell(zone[f'{end}_crest_height_left_m'])} / "
+            f"R {_crest_height_cell(zone[f'{end}_crest_height_right_m'])} / "
+            f"min {_crest_height_cell(zone[f'{end}_crest_height_min_m'])}"
+        )
+    return (
+        f"      enclosure depth above channel (raw DEM, nearest local crest at "
+        f"{RIDGE_PROMINENCE_METERS} m prominence -- a LOWER BOUND, min = the lower/binding "
+        f"shoulder): " + "; ".join(parts)
+    )
+
+
 def _presented_cell(zone: dict) -> str:
     """The presented marker for a zone table line: " [PRESENTED #2]" on
     a presented zone, "" otherwise. No "[not presented]" counterpart --
@@ -540,6 +601,14 @@ def summarize_survey_zones_table(identify_result: dict) -> str:
                     f"boundary-adj {zone['boundary_adjacency_fraction']:.0%}, "
                     f"conf {zone['confidence']}{cross}{flags}"
                 )
+                # DEPTH BESIDE WIDTH, on its own continuation line so
+                # the two read together: the line above says how wide
+                # the valley is at each end, this one says how far its
+                # shoulders stand above the channel there. An absent
+                # side is spelled out rather than left blank, and is
+                # printed differently from a measured 0.00 m -- the two
+                # are opposite findings (see _crest_height_cell()).
+                lines.append(_enclosure_depth_cell(zone))
             else:
                 lines.append(
                     f"  #{zone['rank']}{_presented_cell(zone)} zone {zone['id']}: "

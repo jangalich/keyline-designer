@@ -3250,6 +3250,123 @@ def measure_valley_width(
     }
 
 
+def crest_height_above_channel(dem: dict, crest_walk: dict, channel_rowcol: tuple) -> Optional[float]:
+    """
+    DEPTH OF ENCLOSURE for ONE side of ONE station: the crest's RAW
+    elevation minus the CHANNEL cell's RAW elevation at that station,
+    in metres. None when that side declared no crest.
+
+    THE QUESTION IT ANSWERS, and why it is not the width question. The
+    compartment already reports how WIDE the valley is at its transects
+    (pinch_width_m, the width profile, the transect lengths). It says
+    nothing about how DEEP the enclosure is, and the two are
+    independent: a 20 m pinch between shoulders standing 6 m above the
+    channel and the same 20 m pinch between shoulders standing 1 m up
+    are different sites, and the second spills around its abutments at
+    any useful pool height. This is the vertical dimension the retired
+    level-pool abutment search used to measure and the crest-to-crest
+    construction dropped; it is recovered here from the SAME walk, not
+    from a second crest-finding pass.
+
+    RAW DEM ON BOTH SIDES OF THE SUBTRACTION, deliberately. dem["array"]
+    is the raw surface; the conditioned surface (fill_and_resolve()'s
+    output) carries depression fill and flat-resolution epsilon
+    increments, which are hydrological bookkeeping and not terrain
+    truth. A filled pocket anywhere on the transect would inflate a
+    channel elevation and shrink the height it is subtracted from.
+    ridge_crest_walk() already samples the raw array, so crest_
+    elevation_m is raw; the channel reading below is taken from the same
+    array.
+
+    WHAT THE NUMBER IS -- "HEIGHT TO THE NEAREST LOCAL CREST", NOT
+    "HEIGHT TO THE RIDGE LINE". A crest is declared under the
+    RIDGE_PROMINENCE_METERS rule at the FIRST point where ground has
+    fallen a metre behind the running maximum, which on a long gentle
+    shoulder can sit well short of the true ridge top. Every height this
+    returns is therefore a LOWER BOUND on the enclosure depth at that
+    station -- never an overstatement, sometimes a large understatement.
+    Read it as "the shoulder stands at least this far above the
+    channel". The threshold that produced it travels beside it in the
+    diagnostic for exactly this reason.
+
+    ABSENT IS NOT ZERO. A side whose walk ran out
+    RIDGE_WALK_MAX_HALF_WIDTH_METERS (or left the grid / hit nodata)
+    without the prominence fall has no crest, and ridge_crest_walk()
+    says so with bound_hit: its crest_elevation_m is then the walk's
+    END elevation, an unconfirmed running point, not a crest. There is
+    no height to report and None is reported -- the same sentinel
+    discipline road_overlap_pct and unreachable_stem_end keep.
+
+    AND A MEASURED 0.0 IS NOT ABSENT, which is the other half of that
+    rule and the one a reader is likelier to trip over. ridge_crest_walk()
+    seeds its running maximum with the START cell, so when ground falls
+    the full prominence IMMEDIATELY off the station the crest is
+    declared AT the station itself -- half_width_m 0.0, crest_rowcol
+    the channel cell, bound_hit False. That is a confirmed crest and
+    this returns 0.0 for it, a real reading meaning THERE IS NO
+    SHOULDER ABOVE THE CHANNEL ON THAT SIDE: the station stands on the
+    lip of a drop and water rising here spills immediately. It is the
+    most alarming enclosure figure the instrument can produce, and it
+    is measured, not missing. Real terrain does produce these: the
+    full-context synthetic in test_pipeline_context.py has two
+    compartments reading 0.00 m at the pinch. None and 0.0 must
+    therefore never be collapsed into one another -- "we could not find
+    the shoulder" and "there is no shoulder" are opposite findings.
+
+    THIS FIELD CURRENTLY FEEDS NOTHING. It does not score, rank, gate a
+    compartment or reach the panel. It exists to be measured on the
+    reference property first; whether enclosure depth should enter any
+    of those is a later decision this measurement exists to inform.
+    """
+    if crest_walk["bound_hit"]:
+        return None
+    crest_elevation = crest_walk["crest_elevation_m"]
+    if crest_elevation is None:
+        return None
+    row, col = channel_rowcol
+    channel_elevation = float(dem["array"][row, col])
+    if math.isnan(channel_elevation):
+        return None
+    return round(crest_elevation - channel_elevation, 2)
+
+
+def lower_crest_height(left_m: Optional[float], right_m: Optional[float]) -> Optional[float]:
+    """
+    The BINDING side of one station: the LOWER of the two shoulder
+    heights, or None when neither side declared a crest.
+
+    WHY THE LOWER AND NOT THE MEAN. Water rising in the compartment
+    spills at the FIRST place the enclosure runs out, which is the
+    lower shoulder; the higher one is irrelevant to that limit. A mean
+    of 3 m and 12 m reads 7.5 m and describes no constraint that
+    exists on the ground -- the site still spills around its low
+    abutment a little over 3 m up. The lower shoulder is the
+    constraint, so it is the reduction carried.
+
+    A MISSING SIDE IS NEVER THE LOWER ONE. An absent height is an
+    unmeasured side, not a short one, and letting None win this
+    comparison would turn "we could not find that shoulder" into "that
+    shoulder is the binding constraint" -- exactly the zero-for-absent
+    error the per-side sentinel exists to prevent. So the reduction
+    runs over the sides that actually reported: one side present means
+    that side's height (stated as what it is -- the lower of the
+    MEASURED sides, with the other unknown and possibly lower still),
+    and both absent means None.
+
+    A MEASURED 0.0 DOES COMPETE, and wins, which is why the filter
+    below tests `is not None` rather than truthiness: 0.0 is a
+    confirmed crest at the station itself (see crest_height_above_
+    channel()) and a shoulder standing level with the channel is the
+    hardest binding constraint there is. Dropping it as falsy would
+    hand the station's verdict to the OTHER, higher side and report an
+    unenclosed site as an enclosed one.
+    """
+    measured = [height for height in (left_m, right_m) if height is not None]
+    if not measured:
+        return None
+    return min(measured)
+
+
 def walk_embankment_pinch(
     dem: dict,
     seed_rowcol: tuple,
@@ -3613,12 +3730,25 @@ def build_embankment_compartment(
     perpendicular = (-baseline_unit[1], baseline_unit[0])
 
     transects = []
-    for end_name, end_xy in (("seed", seed_xy), ("pinch", pinch_xy)):
+    for end_name, end_xy, end_rowcol in (
+        ("seed", seed_xy, seed_rowcol),
+        ("pinch", pinch_xy, pinch_rowcol),
+    ):
         left = ridge_crest_walk(dem, end_xy, perpendicular, prominence_meters, max_half_width_meters)
         right = ridge_crest_walk(
             dem, end_xy, (-perpendicular[0], -perpendicular[1]), prominence_meters, max_half_width_meters
         )
         points_utm = [left["crest_xy"], end_xy, right["crest_xy"]]
+        # THE DEPTH DIMENSION, off the SAME two walks that just measured
+        # the width -- no second crest-finding pass exists or may be
+        # added. Each side's crest elevation minus this station's own
+        # CHANNEL cell elevation, both read raw; None where that side
+        # never declared a crest, and the LOWER of the two carried as
+        # the binding constraint. See crest_height_above_channel() for
+        # what the number is (a lower bound on enclosure depth) and
+        # lower_crest_height() for why the lower side and not the mean.
+        left_height = crest_height_above_channel(dem, left, end_rowcol)
+        right_height = crest_height_above_channel(dem, right, end_rowcol)
         transects.append(
             {
                 "end": end_name,
@@ -3626,10 +3756,14 @@ def build_embankment_compartment(
                 "right": right,
                 "width_m": round(left["half_width_m"] + right["half_width_m"], 1),
                 "bound_hit": left["bound_hit"] or right["bound_hit"],
+                "crest_height_left_m": left_height,
+                "crest_height_right_m": right_height,
+                "crest_height_min_m": lower_crest_height(left_height, right_height),
                 "points_utm": points_utm,
                 "geometry_wgs84": _line_geometry_wgs84(dem, points_utm),
             }
         )
+    transect_by_end = {transect["end"]: transect for transect in transects}
 
     # The watershed band: every cell draining through the embankment
     # cell, cut to the strip between the two transects. The band
@@ -3903,6 +4037,28 @@ def build_embankment_compartment(
             "geometry_wgs84": _line_geometry_wgs84(dem, baseline_points_utm),
         },
         "transects": transects,
+        # THE DEPTH OF ENCLOSURE, one pair of shoulders per transect
+        # plus the binding (lower) side, in METRES -- the vertical
+        # companion to the width figures above, which say how wide the
+        # valley is at the dam reach and nothing about how deep it is.
+        # Each is a LOWER BOUND: the height to the NEAREST LOCAL CREST
+        # under the RIDGE_PROMINENCE_METERS rule, not to the ridge line
+        # (crest_height_above_channel() states the full caveat). None
+        # means that side's walk found no crest inside the half-width
+        # bound -- absent, never 0.0.
+        #
+        # THESE FEED NOTHING TODAY. No score, no rank, no gate, no
+        # panel row reads them; they ride the record and the diagnostic
+        # so the reference run can say what enclosure depths this
+        # pipeline actually finds. Whether depth should gate or score a
+        # compartment is a decision this measurement exists to inform,
+        # deliberately not taken here.
+        "seed_crest_height_left_m": transect_by_end["seed"]["crest_height_left_m"],
+        "seed_crest_height_right_m": transect_by_end["seed"]["crest_height_right_m"],
+        "seed_crest_height_min_m": transect_by_end["seed"]["crest_height_min_m"],
+        "pinch_crest_height_left_m": transect_by_end["pinch"]["crest_height_left_m"],
+        "pinch_crest_height_right_m": transect_by_end["pinch"]["crest_height_right_m"],
+        "pinch_crest_height_min_m": transect_by_end["pinch"]["crest_height_min_m"],
         "walk_stations": walk["stations"],
         "flags": flags,
         "below_min_area": False,  # decided at the floor, over zone_acres
@@ -4950,8 +5106,10 @@ def _zone_feature_properties(zone: dict) -> dict:
                   wall reach), the pinch record (crest-to-crest width,
                   walk distance, and the FILL claim -- catchment acres
                   at the pinch cell with the drainage band scored on
-                  them), the baseline length, and the truncation/bound
-                  flags.
+                  them), the baseline length, the per-transect
+                  ENCLOSURE DEPTH (shoulder heights above the channel,
+                  which nothing downstream reads yet -- see the block
+                  itself), and the truncation/bound flags.
 
                   THE TWO EMBANKMENT CLAIMS ARE REPORTED SEPARATELY AND
                   ALWAYS WILL BE: seed_blend_score (good storage
@@ -5069,6 +5227,36 @@ def _zone_feature_properties(zone: dict) -> dict:
                 "still_narrowing_at_termination": zone["still_narrowing_at_termination"],
                 "width_profile_min_m": zone["pinch"]["width_profile_min_m"],
                 "width_profile_max_m": zone["pinch"]["width_profile_max_m"],
+                # DEPTH OF ENCLOSURE beside the widths, per transect and
+                # per side, METRES (the stored unit -- these are not
+                # among the lengths the report converts, because no
+                # consumer prints them yet). The width figures above say
+                # how wide the valley is at the dam reach; these say how
+                # high its shoulders stand above the channel, which is
+                # what limits how far a pool can rise before it spills
+                # around the abutment. _min_ is the LOWER shoulder --
+                # the binding side, not the mean.
+                #
+                # Each is a LOWER BOUND on the real depth: height to the
+                # NEAREST LOCAL CREST under the RIDGE_PROMINENCE_METERS
+                # prominence rule, not to the ridge line. A side whose
+                # walk declared no crest inside the half-width bound is
+                # None -- absent, never 0.0 -- and half_width_bound_hit
+                # above is the flag that says a walk on this compartment
+                # ran out. A 0.0 that IS here is the opposite reading: a
+                # crest confirmed at the station itself, i.e. no
+                # shoulder above the channel at all.
+                #
+                # NOTHING READS THESE YET, by design: no score, no rank,
+                # no gate, no panel row. They are on the wire so the
+                # reference run's numbers can decide whether they should
+                # (see crest_height_above_channel()).
+                "seed_crest_height_left_m": zone["seed_crest_height_left_m"],
+                "seed_crest_height_right_m": zone["seed_crest_height_right_m"],
+                "seed_crest_height_min_m": zone["seed_crest_height_min_m"],
+                "pinch_crest_height_left_m": zone["pinch_crest_height_left_m"],
+                "pinch_crest_height_right_m": zone["pinch_crest_height_right_m"],
+                "pinch_crest_height_min_m": zone["pinch_crest_height_min_m"],
                 "baseline_length_m": zone["baseline"]["length_m"],
                 "truncated_by_boundary": zone["truncated_by_boundary"],
                 "half_width_bound_hit": zone["half_width_bound_hit"],

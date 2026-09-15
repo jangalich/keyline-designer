@@ -1026,6 +1026,47 @@ assert "seed_blend_score" in ctx.selected_water_zone and "pinch" in ctx.selected
 assert "members" not in ctx.selected_water_zone and "member_acres" not in ctx.selected_water_zone, (
     "a compartment has NO members -- member-only statistics must not resurface on it"
 )
+# THE ENCLOSURE-DEPTH MEASUREMENT, through the same single call: the
+# shoulder heights above the channel at both transects ride the wire
+# beside the widths. Nothing here scores, ranks or gates -- the pooled
+# selection above is asserted unchanged for exactly that reason -- so
+# what this checks is that the six fields SURVIVE the full context in
+# their stored metric form, with an unresolved flank arriving as None
+# rather than as a 0.0 that would read as a shoulder level with the
+# channel.
+_CREST_HEIGHT_FIELDS = (
+    "seed_crest_height_left_m",
+    "seed_crest_height_right_m",
+    "seed_crest_height_min_m",
+    "pinch_crest_height_left_m",
+    "pinch_crest_height_right_m",
+    "pinch_crest_height_min_m",
+)
+_compartment_properties = [
+    feature["properties"]
+    for feature in ctx.water_zones
+    if feature["properties"]["survey_type"] == "embankment"
+]
+assert _compartment_properties, "the fixture's throat produces compartments, or this proves nothing"
+for _wire in _compartment_properties:
+    for _field in _CREST_HEIGHT_FIELDS:
+        assert _field in _wire, f"the compartment lost {_field} through the context"
+        _height = _wire[_field]
+        assert _height is None or isinstance(_height, float), (
+            f"{_field} is {_height!r} -- a height or the absent sentinel, nothing else"
+        )
+    # The binding side is the LOWER of the two MEASURED sides, never a
+    # missing one, and never below either of them.
+    for _end in ("seed", "pinch"):
+        _sides = [
+            _wire[f"{_end}_crest_height_left_m"],
+            _wire[f"{_end}_crest_height_right_m"],
+        ]
+        _measured = [height for height in _sides if height is not None]
+        assert _wire[f"{_end}_crest_height_min_m"] == (min(_measured) if _measured else None), (
+            f"{_end}: the min must be the lower MEASURED shoulder ({_measured}), got "
+            f"{_wire[f'{_end}_crest_height_min_m']!r}"
+        )
 print(
     "selected_water_zone is the single identify_water_survey_areas() call's own pooled selection "
     f"({'a real ' + ctx.selected_water_zone['survey_type'] + '-type region' if ctx.selected_water_zone is not None else 'genuinely None'} "
