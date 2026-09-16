@@ -201,14 +201,95 @@ def _build_canopy(dem: dict) -> dict:
     }
 
 
+# THREE MAP UNITS, ONE OF THEM HYDRIC -- test_step_orchestrator.py's fixture,
+# same shape and for the same reason. 111111 is the original exclusion fixture
+# and nothing about it changes: it is the hydric box the disqualifying-soil
+# union is built from, and no other map unit here is hydric, so every gate,
+# every acreage and every score this harness produces is what it was.
+#
+# WHAT THE OTHER TWO ARE FOR is the thing the rows now ALSO feed: the per-patch
+# 'soil_components'/'drainage_class' narrative fields, which name the soil
+# under each production block. The hydric box alone touches no patch cell, so
+# without map units big enough to contain some, every block on this harness --
+# and on serve_test_backend.py over it, which is what the frontend's end-to-end
+# suite drives -- would report None for both and the panel's soil rows could
+# only ever be checked in their em-dash state.
+#
+# Rows arrive globally ORDER BY comppct_r DESC, exactly as get_soil_data_for_
+# polygon() returns them, because the dominant-component-per-mukey rule every
+# consumer of these rows uses is POSITIONAL (first row per mukey).
 HYDRIC_COMPONENTS = [
     {
         "mukey": "111111",
+        "muname": "Fixture silt loam, frequently flooded",
         "comppct_r": "85",
         "hydricrating": "Yes",
         "compname": "Fixture silt loam",
-    }
+        "drainagecl": "Poorly drained",
+    },
+    {
+        "mukey": "333333",
+        "muname": "Fixture channery loam, 8 to 15 percent slopes",
+        "comppct_r": "75",
+        "hydricrating": "No",
+        "compname": "Fixture channery loam",
+        "drainagecl": "Somewhat excessively drained",
+    },
+    {
+        "mukey": "222222",
+        "muname": "Fixture bench loam complex",
+        "comppct_r": "60",
+        "hydricrating": "No",
+        "compname": "Fixture bench loam",
+        "drainagecl": "Well drained",
+    },
+    {
+        "mukey": "444444",
+        "muname": "Fixture terrace loam",
+        "comppct_r": "55",
+        "hydricrating": "No",
+        "compname": "Fixture terrace loam",
+        "drainagecl": "Moderately well drained",
+    },
+    {
+        "mukey": "555555",
+        "muname": "Fixture shale complex",
+        "comppct_r": "50",
+        "hydricrating": "No",
+        "compname": "Fixture shale loam",
+        "drainagecl": "Well drained",
+    },
+    {
+        "mukey": "444444",
+        "muname": "Fixture terrace loam",
+        "comppct_r": "45",
+        "hydricrating": "No",
+        "compname": "Fixture terrace stony",
+        "drainagecl": "Somewhat poorly drained",
+    },
+    {
+        "mukey": "222222",
+        "muname": "Fixture bench loam complex",
+        "comppct_r": "40",
+        "hydricrating": "No",
+        "compname": "Fixture bench swale",
+        "drainagecl": "Moderately well drained",
+    },
+    {
+        "mukey": "333333",
+        "muname": "Fixture channery loam, 8 to 15 percent slopes",
+        "comppct_r": "25",
+        "hydricrating": "No",
+        "compname": "Fixture channery outcrop",
+        "drainagecl": "Excessively drained",
+    },
 ]
+# Clipped per-mukey geometry, the shape get_soil_geometries_for_polygon()
+# returns. The three are mutually disjoint (the two big ones sit either side of
+# longitude -79.9822, and the hydric box sits below latitude 40.6440 where
+# neither reaches), and together they leave the parcel's south-west corner
+# UNCOVERED -- partial survey coverage is a real case, and it is what makes
+# "cells with no map unit" something this fixture actually exercises.
 HYDRIC_GEOMETRIES = {
     "111111": {
         "type": "Polygon",
@@ -221,7 +302,55 @@ HYDRIC_GEOMETRIES = {
                 [-79.9830, 40.6434],
             ]
         ],
-    }
+    },
+    "222222": {  # the north-west half, above the hydric box
+        "type": "Polygon",
+        "coordinates": [
+            [
+                [-79.9840, 40.6440],
+                [-79.98345, 40.6440],
+                [-79.98345, 40.6465],
+                [-79.9840, 40.6465],
+                [-79.9840, 40.6440],
+            ]
+        ],
+    },
+    "444444": {  # beside it, the middle strip of that same half
+        "type": "Polygon",
+        "coordinates": [
+            [
+                [-79.98345, 40.6440],
+                [-79.98305, 40.6440],
+                [-79.98305, 40.6465],
+                [-79.98345, 40.6465],
+                [-79.98345, 40.6440],
+            ]
+        ],
+    },
+    "555555": {  # and the narrow strip against the hydric box's longitude
+        "type": "Polygon",
+        "coordinates": [
+            [
+                [-79.98305, 40.6440],
+                [-79.9822, 40.6440],
+                [-79.9822, 40.6465],
+                [-79.98305, 40.6465],
+                [-79.98305, 40.6440],
+            ]
+        ],
+    },
+    "333333": {  # the whole east half
+        "type": "Polygon",
+        "coordinates": [
+            [
+                [-79.9822, 40.6425],
+                [-79.9800, 40.6425],
+                [-79.9800, 40.6465],
+                [-79.9822, 40.6465],
+                [-79.9822, 40.6425],
+            ]
+        ],
+    },
 }
 FIXTURE_ROADS = [
     {
