@@ -170,6 +170,8 @@ assert set(_consumed) == {
     "boundary_polygon_utm",
     "canopy_height",
     "exclusion_zones",
+    "soil_components",
+    "soil_geometries",
 }, f"landform's consumes set: {sorted(_consumed)}"
 
 assert all(c.source == step_registry.SOURCE_CACHE for c in _LANDFORM.consumes), (
@@ -194,6 +196,20 @@ assert _consumed["dem"].forward_as == "dem"
 assert _consumed["canopy_height"].forward_as == "canopy_height"
 assert _consumed["canopy_height"].cache_path == "parcel_data.canopy_height"
 assert _consumed["boundary_coordinates"].forward_as == "boundary_coordinates"
+# THE TWO SOIL EDGES. Both forward, and both MUST: identify_optimized_
+# production_areas() reads them only to name the soil under each block, and
+# it may never fall back to fetching them -- get_soil_geometries_for_polygon()
+# is not called at all on a parcel with no hydric map unit, so a fallback
+# would ADD an SDA round trip to a generate that is asserted network-free.
+assert _consumed["soil_components"].forward_as == "soil_components"
+assert _consumed["soil_components"].cache_path == "parcel_data.soil_components"
+assert _consumed["soil_geometries"].forward_as == "soil_geometries"
+assert _consumed["soil_geometries"].cache_path == "parcel_data.soil_geometries"
+assert _consumed["soil_components"].combine is None and _consumed["soil_geometries"].combine is None, (
+    "each soil layer reaches the entry point in the shape ParcelData holds "
+    "it -- these are identity edges, not water's assembled soil_inputs trio"
+)
+
 assert _consumed["boundary_polygon_utm"].forward_as is None, (
     "identify_optimized_production_areas() derives boundary_polygon_utm "
     "itself and exposes no override; declaring a forward_as for it would be "
@@ -468,7 +484,14 @@ assert _water_forwards == _WATER_BATCH_FORWARDS, (
 # same function. The batch path and the session path are one computation
 # reached two ways (proposal section 2.3), so a divergence here is the two
 # drivers starting to disagree.
-_BATCH_FORWARDS = {"boundary_coordinates", "dem", "canopy_height", "exclusion_result"}
+_BATCH_FORWARDS = {
+    "boundary_coordinates",
+    "dem",
+    "canopy_height",
+    "exclusion_result",
+    "soil_components",
+    "soil_geometries",
+}
 _registry_forwards = {c.forward_as for c in _LANDFORM.consumes if c.forward_as}
 assert _registry_forwards == _BATCH_FORWARDS, (
     f"the landform entry must forward exactly what build_pipeline_context() "

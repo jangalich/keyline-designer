@@ -134,7 +134,7 @@ box_a = box(x0 + 3 * px, y0 - 23 * py, x0 + 23 * px, y0 - 3 * py)
 box_b = box(x0 + 50 * px, y0 - 23 * py, x0 + 70 * px, y0 - 3 * py)
 tight_boundary_two_region = unary_union([box_a, box_b])  # tight around BOTH regions -- eligible pct > ceiling
 
-from raster_grid import cell_area_acres
+from raster_grid import SQUARE_METERS_PER_ACRE, cell_area_acres
 
 step1_two_region = compute_step1_eligible_cells(dem_two_region, tight_boundary_two_region)
 eligible_count = int(step1_two_region["eligible_mask"].sum())
@@ -678,6 +678,13 @@ def _nd_row_band_union(dem: dict, first_row: int, last_row: int):
     return box(dem["origin_x"] - px, bottom, dem["origin_x"] + (cols + 1) * px, top)
 
 
+# Distinguishes "the test passed soil_components=None" from "the test did
+# not pass soil_components at all" -- both must produce the same None
+# fields, and the second is the case that would break if a fallback fetch
+# ever appeared.
+_NOT_SUPPLIED = object()
+
+
 def _nd_run(
     dem,
     boundary_coords,
@@ -686,6 +693,8 @@ def _nd_run(
     road_union=None,
     roads_checked=None,
     ceiling_pct=100.0,
+    soil_components=_NOT_SUPPLIED,
+    soil_geometries=_NOT_SUPPLIED,
 ):
     """Runs the real entry point offline, with each of its three optional
     network layers replaced by an exact synthetic input (or left at its own
@@ -723,12 +732,18 @@ def _nd_run(
         for p in patches:
             p.start()
             stack.append(p)
+        soil_kwargs = {}
+        if soil_components is not _NOT_SUPPLIED:
+            soil_kwargs["soil_components"] = soil_components
+        if soil_geometries is not _NOT_SUPPLIED:
+            soil_kwargs["soil_geometries"] = soil_geometries
         return pac.identify_optimized_production_areas(
             boundary_coords,
             dem=dem,
             check_soil=hydric_union is not None,
             check_roads=roads_checked,
             ceiling_pct=ceiling_pct,
+            **soil_kwargs,
         )
     finally:
         for p in reversed(stack):
@@ -1536,6 +1551,465 @@ print(
     f"entry point's gate fetches from canopy/soil/road 1/1/1 to 0/0/0, while all "
     f"{len(_e_res_self['scored_patches'])} scored patch(es) -- id, rank, area, geometry, score, every "
     f"factor -- and every narrative_data field stay identical. An explicit None self-computes (1/1/1)."
+)
+
+
+# ======================================================================
+# THE SOIL UNDER A BLOCK -- narrative_data's per-patch soil_components /
+# drainage_class
+# ======================================================================
+#
+# Both fields used to be hardcoded None with a comment saying why. They are
+# now read off the two SSURGO layers ParcelData already holds, forwarded in
+# and NEVER fetched here. Every fixture below therefore hands the entry
+# point its soil the way the pipeline does -- as data -- and the last
+# section proves that omitting it does not quietly turn into a fetch.
+#
+# THE GRID. nd_flat_dem is 40x40 at 5 m and this file runs STEP 1 with the
+# boundary setback at 0 (see the top of the file), so the single patch is
+# the whole grid: 40 equal columns of 40 cells. Map units are therefore
+# defined as COLUMN BANDS, and a band's share of the patch is its own column
+# count over the patch's -- a number every assertion below computes from the
+# PATCH'S OWN CELLS and the band's column range, never by reading it back
+# out of the answer under test.
+
+import soil_data as _soil_data  # noqa: E402
+
+_SOIL_PATCH_CELLS = np.array(nd_flat_result["scored_patches"][0]["cells"])
+assert len(nd_flat_result["scored_patches"]) == 1, (
+    "this section is written against the single-patch flat fixture"
+)
+
+
+def _nd_col_band_wgs84(dem: dict, first_col: int, last_col: int) -> dict:
+    """A WGS84 GeoJSON polygon covering the CENTERS of every cell in columns
+    first_col..last_col, full grid height -- the shape get_soil_geometries_
+    for_polygon() returns, in the CRS it returns it in (map unit geometry
+    arrives in lon/lat and is projected into the DEM's CRS on the way in).
+    Inset a quarter cell on each side so the cell-center containment test is
+    unambiguous at the band's own edges, and the bands are mutually
+    disjoint."""
+    rows, _ = dem["array"].shape
+    px, py = dem["resolution_meters"]
+    band = box(
+        dem["origin_x"] + (first_col + 0.25) * px,
+        dem["origin_y"] - (rows + 1) * py,
+        dem["origin_x"] + (last_col + 0.75) * px,
+        dem["origin_y"] + py,
+    )
+    lons, lats = warp_transform(CRS, "EPSG:4326", *band.exterior.coords.xy)
+    return {"type": "Polygon", "coordinates": [list(zip(lons, lats))]}
+
+
+def _soil_rows(*specs) -> list[dict]:
+    """Component rows in the order SDA returns them: globally ORDER BY
+    comppct_r DESC. Every consumer of these rows reads a map unit's dominant
+    component POSITIONALLY (first row for that mukey), so a fixture in any
+    other order would be testing against a convention SDA does not produce.
+    Sorted here rather than written pre-sorted so a spec can be read as
+    "this map unit is these components" and still arrive correctly."""
+    rows = [
+        {
+            "mukey": mukey,
+            "muname": muname,
+            "compname": compname,
+            "comppct_r": comppct_r,
+            "drainagecl": drainagecl,
+            "hydricrating": "No",
+        }
+        for mukey, muname, compname, comppct_r, drainagecl in specs
+    ]
+    return sorted(rows, key=lambda row: -int(row["comppct_r"]))
+
+
+def _soil_zone(result: dict, patch_id: int = 0) -> dict:
+    entries = [p for p in result["narrative_data"]["patches"] if int(p["id"]) == patch_id]
+    assert entries, f"no patch {patch_id} in narrative_data"
+    return entries[0]
+
+
+def _band_cells(first_col: int, last_col: int) -> int:
+    """How many of the PATCH's own cells fall in a column band -- counted off
+    the patch's cell list, which STEP 3 produced and this branch does not
+    touch, rather than off the attribution being tested."""
+    cols = _SOIL_PATCH_CELLS[:, 1]
+    return int(((cols >= first_col) & (cols <= last_col)).sum())
+
+
+def _expected_share(first_col: int, last_col: int) -> float:
+    """A column band's share of the patch's own cell count."""
+    return round(_band_cells(first_col, last_col) / len(_SOIL_PATCH_CELLS) * 100.0, 1)
+
+
+# --- S1. a patch reports its map units, RANKED, with real cell shares ---
+#
+# Three bands over the one patch: a dominant one, a second real one, and a
+# two-column sliver that the floor must reject (S2 asserts that separately).
+
+_S_BANDS = ((0, 30, "700001"), (31, 36, "700002"), (37, 39, "700003"))
+_S_GEOMETRIES = {
+    mukey: _nd_col_band_wgs84(nd_flat_dem, first, last) for first, last, mukey in _S_BANDS
+}
+_S_COMPONENTS = _soil_rows(
+    ("700001", "Fixture bench loam complex", "Fixture bench loam", "70", "Well drained"),
+    ("700001", "Fixture bench loam complex", "Fixture bench swale", "30", "Somewhat poorly drained"),
+    ("700002", "Fixture terrace loam", "Fixture terrace loam", "90", "Poorly drained"),
+    ("700003", "Fixture channery loam", "Fixture channery loam", "95", "Excessively drained"),
+)
+
+_s_result = _nd_run(
+    nd_flat_dem, nd_flat_coords, soil_components=_S_COMPONENTS, soil_geometries=_S_GEOMETRIES
+)
+_s_zone = _soil_zone(_s_result)
+_s_entries = _s_zone["soil_components"]
+
+assert _s_entries is not None, "the patch must be attributed -- every assertion below depends on it"
+assert [e["mukey"] for e in _s_entries] == ["700001", "700002"], (
+    f"the list must be RANKED by cell share, sliver excluded: {[e['mukey'] for e in _s_entries]}"
+)
+assert [e["cell_share_pct"] for e in _s_entries] == [
+    _expected_share(0, 30),
+    _expected_share(31, 36),
+], (
+    f"published shares must be each band's own cell count over the patch's own cell count: "
+    f"{[e['cell_share_pct'] for e in _s_entries]} vs "
+    f"{[_expected_share(0, 30), _expected_share(31, 36)]}"
+)
+# The shares are shares OF THE PATCH's own cells, so they account for the
+# attributed ground exactly -- the shortfall from 100 is the sliver the
+# floor dropped, not a rounding error or an unattributed remainder.
+assert round(sum(e["cell_share_pct"] for e in _s_entries) + _expected_share(37, 39), 1) == 100.0, (
+    "the published shares plus the floored-out sliver must account for the whole patch"
+)
+assert [e["component_name"] for e in _s_entries] == ["Fixture bench loam", "Fixture terrace loam"], (
+    "each entry names the map unit's DOMINANT component (highest comppct_r), not its first-listed one"
+)
+assert [e["map_unit_name"] for e in _s_entries] == ["Fixture bench loam complex", "Fixture terrace loam"]
+assert [e["label"] for e in _s_entries] == ["78% Fixture bench loam", "15% Fixture terrace loam"], (
+    f"the label is the panel's whole value cell -- share and name, composed here, at whole percent: "
+    f"{[e['label'] for e in _s_entries]}"
+)
+# THE BLOCK'S OWN TWO CONTRACTS, re-checked on a result that CARRIES soil:
+# N1 above proved narrative_data is JSON-native and 1-decimal-rounded, but
+# it ran on a fixture with no soil at all, so these two fields were None
+# there and neither contract was tested against them.
+_s1_json = json.dumps(_s_result["narrative_data"])
+assert json.loads(_s1_json) == _s_result["narrative_data"], (
+    "a narrative_data carrying soil must still survive a plain json.dumps()/json.loads() round trip "
+    "-- no numpy scalars out of the cell counting, no geometry out of the attribution"
+)
+_assert_one_decimal(_s_result["narrative_data"], "narrative_data")
+assert all(isinstance(e["mukey"], str) for e in _s_entries), "mukey ships as text, as SDA returns it"
+assert {"soil_components", "drainage_class"} <= set(_s_zone), (
+    "both keys must still be present on every patch entry -- the shape is stable whether or not "
+    "there is soil to put in them"
+)
+
+print(
+    f"S1. RANKED SOIL: the patch's {len(_SOIL_PATCH_CELLS)} cells span three map units; "
+    f"the two above the floor are published in rank order as "
+    f"{[e['label'] for e in _s_entries]}, their shares "
+    f"{[e['cell_share_pct'] for e in _s_entries]} plus the "
+    f"{_expected_share(37, 39)}% sliver accounting for the patch exactly."
+)
+
+
+# --- S2. the 10% floor excludes an edge sliver --------------------------
+#
+# S1's own third band IS the sliver -- two of thirty-eight columns, 5.3% of
+# the patch, the width a 1:24,000 map unit line lands on by accident. Here
+# it is isolated: the same run, asked directly whether the sliver made it
+# in, and then re-run with the floor lowered to prove the exclusion is the
+# FLOOR's doing and not the cap's or a missing geometry.
+
+assert pac.PATCH_SOIL_MIN_CELL_SHARE_PCT == 10.0, (
+    "the floor this section is written against"
+)
+assert _expected_share(37, 39) < pac.PATCH_SOIL_MIN_CELL_SHARE_PCT, (
+    f"fixture sanity: the sliver band must actually be below the floor "
+    f"({_expected_share(37, 39)}% vs {pac.PATCH_SOIL_MIN_CELL_SHARE_PCT}%)"
+)
+assert "700003" not in [e["mukey"] for e in _s_entries], (
+    "the sliver map unit must not be published -- it is an edge artefact of a "
+    "boundary digitised at 1:24,000, not ground the block sits on"
+)
+
+with mock_patch.object(pac, "PATCH_SOIL_MIN_CELL_SHARE_PCT", 1.0):
+    _s2_lowered = _soil_zone(
+        _nd_run(
+            nd_flat_dem,
+            nd_flat_coords,
+            soil_components=_S_COMPONENTS,
+            soil_geometries=_S_GEOMETRIES,
+        )
+    )
+assert [e["mukey"] for e in _s2_lowered["soil_components"]] == ["700001", "700002", "700003"], (
+    "with the floor lowered the sliver appears -- so the exclusion above is the FLOOR's "
+    "doing, and the sliver's geometry, cells and rank were all reaching the attribution"
+)
+assert _s2_lowered["soil_components"][2]["cell_share_pct"] == _expected_share(37, 39)
+print(
+    f"S2. THE FLOOR: a {_expected_share(37, 39)}% three-column sliver is excluded at "
+    f"PATCH_SOIL_MIN_CELL_SHARE_PCT={pac.PATCH_SOIL_MIN_CELL_SHARE_PCT}; lowering the floor to 1.0 "
+    f"publishes it at that same share, so the exclusion is the threshold and not a gap in the data."
+)
+
+
+# --- S3. the three-entry cap, and what happens past it ------------------
+#
+# Five bands, EVERY ONE of them above the floor -- the fragmented-block case
+# the cap exists for. Three are published; the remaining two are DROPPED,
+# not summed into an "other" entry. The two ties (three bands of 8 columns,
+# two of 7) are resolved by mukey ascending, so the answer is the same on
+# every run rather than dependent on dict order.
+
+_S3_BANDS = ((0, 10, "800001"), (11, 20, "800002"), (21, 27, "800003"), (28, 34, "800004"), (35, 39, "800005"))
+_S3_GEOMETRIES = {
+    mukey: _nd_col_band_wgs84(nd_flat_dem, first, last) for first, last, mukey in _S3_BANDS
+}
+_S3_COMPONENTS = _soil_rows(
+    *(
+        (mukey, f"Fixture unit {mukey}", f"Fixture soil {mukey}", "100", "Well drained")
+        for _, _, mukey in _S3_BANDS
+    )
+)
+_s3_zone = _soil_zone(
+    _nd_run(
+        nd_flat_dem, nd_flat_coords, soil_components=_S3_COMPONENTS, soil_geometries=_S3_GEOMETRIES
+    )
+)
+_s3_entries = _s3_zone["soil_components"]
+
+assert all(
+    _expected_share(first, last) >= pac.PATCH_SOIL_MIN_CELL_SHARE_PCT for first, last, _ in _S3_BANDS
+), "fixture sanity: every one of the five bands must clear the floor, or the cap is not what bites"
+assert pac.PATCH_SOIL_MAX_ENTRIES == 3, "the cap this section is written against"
+assert len(_s3_entries) == 3, (
+    f"five map units above the floor must still publish only {pac.PATCH_SOIL_MAX_ENTRIES}: "
+    f"{len(_s3_entries)}"
+)
+assert [e["mukey"] for e in _s3_entries] == ["800001", "800002", "800003"], (
+    f"the three largest -- and 800003/800004 are the SAME size, so this also fixes the "
+    f"tie-break as mukey ascending and the answer as stable across runs: "
+    f"{[e['mukey'] for e in _s3_entries]}"
+)
+# PAST THE CAP THE REMAINDER IS DROPPED. The two excluded map units appear
+# nowhere -- not as entries, not folded into an "other" share -- and the
+# published shares consequently do NOT sum to 100. That shortfall is the
+# contract, not a bug: the list names the soils under a block, it does not
+# partition it.
+_s3_published = round(sum(e["cell_share_pct"] for e in _s3_entries), 1)
+_s3_dropped = round(
+    _expected_share(28, 34) + _expected_share(35, 39), 1
+)
+assert "800004" not in [e["mukey"] for e in _s3_entries]
+assert "800005" not in [e["mukey"] for e in _s3_entries]
+assert all(e["component_name"] is not None for e in _s3_entries), (
+    "no entry may be a nameless 'other' bucket -- every published entry names a soil"
+)
+assert round(_s3_published + _s3_dropped, 1) == 100.0, (
+    f"the dropped remainder must be exactly what is missing from the published shares: "
+    f"{_s3_published} + {_s3_dropped}"
+)
+assert _s3_published < 100.0, "the published shares must NOT sum to 100 -- this list is not a partition"
+print(
+    f"S3. THE CAP: five map units clear the floor, {pac.PATCH_SOIL_MAX_ENTRIES} are published "
+    f"({_s3_published}% of the patch between them); the remaining {_s3_dropped}% is DROPPED rather "
+    f"than summed into an 'other' entry, so the published shares deliberately fall short of 100."
+)
+
+
+# --- S4. drainage_class is the DOMINANT map unit's DOMINANT component ---
+#
+# Two dominances stacked, and the fixture is built so that getting either
+# one wrong produces a different, visible answer: the dominant map unit
+# (700001) is "Well drained" through its 70% component and "Somewhat poorly
+# drained" through its 30% one, while the second map unit is "Poorly
+# drained" throughout.
+
+assert _s_zone["drainage_class"] == "Well drained", (
+    f"drainage_class must be the dominant map unit's DOMINANT component's drainagecl "
+    f"-- 'Somewhat poorly drained' would mean the wrong component within the map unit, "
+    f"'Poorly drained' the wrong map unit. Got {_s_zone['drainage_class']!r}"
+)
+_s_dominant_row = next(r for r in _S_COMPONENTS if r["mukey"] == _s_entries[0]["mukey"])
+assert _s_zone["drainage_class"] == _s_dominant_row["drainagecl"]
+assert isinstance(_s_zone["drainage_class"], str), "ONE value, not a list -- the panel has one drainage row"
+
+# Reversing which component dominates 700001 moves the answer, and nothing
+# else about the run changes -- so the value is genuinely read off that row.
+_S4_SWAPPED = _soil_rows(
+    ("700001", "Fixture bench loam complex", "Fixture bench swale", "70", "Somewhat poorly drained"),
+    ("700001", "Fixture bench loam complex", "Fixture bench loam", "30", "Well drained"),
+    ("700002", "Fixture terrace loam", "Fixture terrace loam", "90", "Poorly drained"),
+    ("700003", "Fixture channery loam", "Fixture channery loam", "95", "Excessively drained"),
+)
+_s4_zone = _soil_zone(
+    _nd_run(
+        nd_flat_dem, nd_flat_coords, soil_components=_S4_SWAPPED, soil_geometries=_S_GEOMETRIES
+    )
+)
+assert _s4_zone["drainage_class"] == "Somewhat poorly drained", (
+    f"swapping which component dominates the dominant map unit must move drainage_class: "
+    f"{_s4_zone['drainage_class']!r}"
+)
+assert _s4_zone["soil_components"][0]["component_name"] == "Fixture bench swale", (
+    "...and must move the name published beside it, off the same row"
+)
+print(
+    f"S4. DRAINAGE: the dominant map unit's dominant component gives {_s_zone['drainage_class']!r} -- "
+    f"one value, not one per soil; swapping that map unit's two components moves it to "
+    f"{_s4_zone['drainage_class']!r} and moves the published name with it."
+)
+
+
+# --- S5. no soil survey coverage -> None for both, the em-dash path -----
+#
+# Three ways to have nothing to say, all of which the panel renders the same
+# way. Checked, genuinely nothing (empty layers); the layers never supplied
+# at all; and real coverage that simply does not reach this patch.
+
+_s5_empty = _soil_zone(_nd_run(nd_flat_dem, nd_flat_coords, soil_components=[], soil_geometries={}))
+assert _s5_empty["soil_components"] is None and _s5_empty["drainage_class"] is None, (
+    f"a parcel with no soil survey coverage reports None for both, never [] or 0.0 -- got "
+    f"{_s5_empty['soil_components']!r} / {_s5_empty['drainage_class']!r}"
+)
+
+_s5_absent = _soil_zone(_nd_run(nd_flat_dem, nd_flat_coords))
+assert _s5_absent["soil_components"] is None and _s5_absent["drainage_class"] is None, (
+    "omitting the two layers entirely must report None for both -- the standalone endpoint path"
+)
+
+# Real rows and real geometry, placed on ground this patch does not occupy:
+# the fetch answered, the parcel has coverage, and this BLOCK still has no
+# map unit under it. Same answer, same reason -- nothing to name.
+_S5_ELSEWHERE = {"900001": _nd_col_band_wgs84(nd_flat_dem, 200, 260)}
+_s5_off_patch = _soil_zone(
+    _nd_run(
+        nd_flat_dem,
+        nd_flat_coords,
+        soil_components=_soil_rows(
+            ("900001", "Fixture far loam", "Fixture far loam", "100", "Well drained")
+        ),
+        soil_geometries=_S5_ELSEWHERE,
+    )
+)
+assert _s5_off_patch["soil_components"] is None and _s5_off_patch["drainage_class"] is None, (
+    "a map unit that covers none of this patch's cells leaves both fields None"
+)
+
+# The em-dash path is the WHOLE block still working, not just two null
+# fields: everything else on the patch entry must be unchanged from the run
+# that had soil.
+_s5_without = dict(_s5_absent)
+_s5_with = dict(_s_zone)
+for _field in ("soil_components", "drainage_class"):
+    _s5_without.pop(_field)
+    _s5_with.pop(_field)
+assert _s5_without == _s5_with, (
+    "supplying soil must change NOTHING else on a patch entry -- these two fields are a read, "
+    f"not a gate. Differing: {[k for k in _s5_with if _s5_with[k] != _s5_without[k]]}"
+)
+print(
+    "S5. NO COVERAGE: empty layers, omitted layers, and coverage that misses this patch all report "
+    "None for both fields (never [] or 0.0), and every other field on the patch entry is byte-identical "
+    "to the run that had soil."
+)
+
+
+# --- S6. ZERO NETWORK CALLS -- the branch's hard constraint -------------
+#
+# The one that matters most. get_soil_geometries_for_polygon() is not called
+# AT ALL on a parcel with no hydric map unit, so a fallback fetch here would
+# not re-use an existing call -- it would ADD one, to a path that is
+# network-free after Layer 1, and it would show up as "generate got slow"
+# rather than as a failure. Counted at BOTH bindings each helper is
+# reachable through (soil_data's own, and production_area's import of it),
+# because patching one and not the other measures nothing.
+
+_s6_calls = {"components": 0, "geometries": 0}
+
+
+def _s6_counted(name):
+    def _fn(*_a, **_k):
+        _s6_calls[name] += 1
+        raise AssertionError(
+            f"soil_data.{name} must NEVER be called from the narrative path -- "
+            "neither parameter may self-fetch"
+        )
+
+    return _fn
+
+
+def _s6_run(**kwargs):
+    _s6_calls.update({"components": 0, "geometries": 0})
+    with mock_patch.object(_soil_data, "get_soil_data_for_polygon", side_effect=_s6_counted("components")), \
+         mock_patch.object(_soil_data, "get_soil_geometries_for_polygon", side_effect=_s6_counted("geometries")), \
+         mock_patch.object(pa, "get_soil_data_for_polygon", side_effect=_s6_counted("components")), \
+         mock_patch.object(pa, "get_soil_geometries_for_polygon", side_effect=_s6_counted("geometries")):
+        result = _nd_run(nd_flat_dem, nd_flat_coords, **kwargs)
+    return result, dict(_s6_calls)
+
+_s6_supplied, _s6_n_supplied = _s6_run(
+    soil_components=_S_COMPONENTS, soil_geometries=_S_GEOMETRIES
+)
+assert _s6_n_supplied == {"components": 0, "geometries": 0}, (
+    f"a run WITH the layers supplied must issue zero SDA queries: {_s6_n_supplied}"
+)
+assert _soil_zone(_s6_supplied)["soil_components"] is not None, (
+    "fixture sanity: that run must actually have produced an attribution, or the zero measures nothing"
+)
+
+_s6_absent, _s6_n_absent = _s6_run()
+assert _s6_n_absent == {"components": 0, "geometries": 0}, (
+    f"a run with the layers OMITTED must ALSO issue zero SDA queries -- this is the fallback that "
+    f"must never exist: {_s6_n_absent}"
+)
+assert _soil_zone(_s6_absent)["soil_components"] is None
+
+_s6_partial_a, _s6_n_partial_a = _s6_run(soil_components=_S_COMPONENTS)
+_s6_partial_b, _s6_n_partial_b = _s6_run(soil_geometries=_S_GEOMETRIES)
+assert _s6_n_partial_a == _s6_n_partial_b == {"components": 0, "geometries": 0}, (
+    "HALF the pair supplied is the likeliest place a fallback would hide -- one layer present, "
+    "the other 'just fetched'. Both halves must stay at zero"
+)
+assert _soil_zone(_s6_partial_a)["soil_components"] is None
+assert _soil_zone(_s6_partial_b)["soil_components"] is None
+print(
+    "S6. ZERO NETWORK: both SSURGO helpers, at both bindings, are called 0 times -- with the layers "
+    "supplied, with them omitted, and with either one supplied alone. A half-supplied pair reports "
+    "None rather than fetching the missing half."
+)
+
+
+# --- S7. cell share IS area share, on this grid -------------------------
+#
+# The ranking measures cells; the panel reads it as ground. Those are the
+# same measure only because every cell of a UTM DEM covers the same px*py --
+# asserted here rather than assumed, because it stops being true the day the
+# grid stops being equal-area, and nothing else in this block would notice.
+
+_s7_area_per_cell = cell_area_acres(nd_flat_dem)
+_s7_px, _s7_py = nd_flat_dem["resolution_meters"]
+assert _s7_area_per_cell == (_s7_px * _s7_py) / SQUARE_METERS_PER_ACRE, (
+    "cell_area_acres() takes no cell index: one area for every cell in the grid"
+)
+_s7_patch_cells = len(_SOIL_PATCH_CELLS)
+_s7_patch_acres = _s7_patch_cells * _s7_area_per_cell
+for _entry, (_first, _last, _mukey) in zip(_s_entries, _S_BANDS):
+    _n_cells = _band_cells(_first, _last)
+    _band_acres = _n_cells * _s7_area_per_cell
+    assert _entry["mukey"] == _mukey
+    assert _entry["cell_share_pct"] == round(_n_cells / _s7_patch_cells * 100.0, 1)
+    assert _entry["cell_share_pct"] == round(_band_acres / _s7_patch_acres * 100.0, 1), (
+        f"map unit {_mukey}: cell share {_entry['cell_share_pct']}% must equal area share "
+        f"{round(_band_acres / _s7_patch_acres * 100.0, 1)}% -- {_band_acres:.3f} of "
+        f"{_s7_patch_acres:.3f} acres"
+    )
+print(
+    f"S7. CELL SHARE == AREA SHARE: every cell covers {_s7_area_per_cell:.6f} acres, so each published "
+    f"share is simultaneously a count over {_s7_patch_cells} cells and an acreage over "
+    f"{_s7_patch_acres:.2f} acres -- asserted through cell_area_acres(), not assumed."
 )
 
 

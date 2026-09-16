@@ -638,10 +638,12 @@ def build_pipeline_context(
     KNOWN LIMITATIONS #5 and #6 (both now RESOLVED) for the history of
     closing this.
 
-    soil_components/soil_geometries therefore reach THREE consumers, not
-    one: the exclusion gate, the floodplain union, and the water step.
-    That is the point -- one Layer 1 pair of SSURGO fetches, read three
-    times, rather than three independent pairs of the same two queries.
+    soil_components/soil_geometries therefore reach FOUR consumers, not
+    one: the exclusion gate, the floodplain union, the water step, and
+    production's own narrative block (which soil each production block
+    sits on, and how it drains -- a read, not a gate). That is the point
+    -- one Layer 1 pair of SSURGO fetches, read four times, rather than
+    four independent pairs of the same two queries.
 
     THE WATER STEP'S SOIL TRIO rides three of these: when soil_components
     AND soil_geometries AND saturated_hydraulic_conductivity are all
@@ -796,11 +798,24 @@ def build_pipeline_context(
     # does NOT supply an exclusion result, and dropping the override here
     # would silently arm a redundant fetch the day this pass-through is
     # removed or made conditional.
+    #
+    # soil_components=/soil_geometries= are the SAME two pass-throughs this
+    # function already forwards into the exclusion gate, the floodplain
+    # union and the water step -- production is the fourth consumer and was
+    # the last one still getting neither. They feed the per-patch
+    # 'soil_components'/'drainage_class' narrative fields (which soil a
+    # block sits on, and how it drains) and NOTHING else: no gate, no
+    # geometry, no score reads them. Pure passthroughs, as everywhere else
+    # here -- this file never fetches SSURGO rows itself, and the entry
+    # point may never fall back to fetching them either, so a caller
+    # holding no ParcelData simply gets None in those two fields.
     optimized_production = production_area_ceiling.identify_optimized_production_areas(
         boundary_coordinates,
         dem=dem,
         canopy_height=canopy_height,
         exclusion_result=exclusion_result,
+        soil_components=soil_components,
+        soil_geometries=soil_geometries,
     )
     production_areas = optimized_production["scored_patches"]
     # Total parcel acreage the ceiling optimizer already computed

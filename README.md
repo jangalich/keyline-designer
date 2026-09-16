@@ -206,7 +206,35 @@ report using the Claude API.
   and `render_layout_map.py` consume, returning the same
   `production_area_candidate` GeoJSON / `scored_patches` shape plus
   top-level summary fields (`total_selected_acreage`, `percent_of_parcel`,
-  `production_ceiling_target_met`, `total_cells_removed`). Every module-
+  `production_ceiling_target_met`, `total_cells_removed`).
+
+  **WHICH SOIL A BLOCK SITS ON.** Each entry in that entry point's
+  `narrative_data['patches']` carries `soil_components` — a RANKED list of
+  the SSURGO map units the block occupies, each with its share of the
+  block's own cells, the map unit's dominant component name, and a
+  ready-composed `label` (`"78% Gilpin"`) for the panel's value column —
+  and `drainage_class`, the `drainagecl` of the DOMINANT map unit's
+  dominant component, as one value rather than one per soil. Dominance is
+  decided twice and by two different measures: which map unit dominates
+  the block by CELL SHARE (on an equal-area UTM grid that is area share,
+  asserted rather than assumed), which component dominates a map unit by
+  `comppct_r`. `PATCH_SOIL_MIN_CELL_SHARE_PCT` (10.0) floors the list so a
+  1:24,000 digitising sliver is not named beside the block's real ground;
+  `PATCH_SOIL_MAX_ENTRIES` (3) caps it, and the remainder past the cap is
+  DROPPED rather than summed into an "other" row — the published shares
+  name the soils under a block, they do not partition it, and they do not
+  sum to 100.
+
+  Both fields are fed by `soil_components=`/`soil_geometries=` — the same
+  two `ParcelData` SSURGO layers the exclusion gate, the floodplain union
+  and the water step already read, forwarded from `build_pipeline_context()`
+  on the batch path and declared as two `consumes` edges on
+  `step_registry.LANDFORM` for the session path. **Neither may ever
+  self-fetch**: `get_soil_geometries_for_polygon()` is not called at all on
+  a parcel with no hydric map unit, so a fallback would ADD an SDA round
+  trip to a generate that is asserted network-free after Layer 1. Absent,
+  both fields are `None` together and the panel renders its em-dash —
+  ground with no soil survey coverage is a real case. Every module-
   level tunable (`MAX_PRODUCTION_SLOPE_PCT`, `MIN_PRODUCTION_AREA_ACRES`,
   `PRODUCTION_CEILING_PCT_OF_PARCEL`, `MIN_HYDRIC_COMPONENT_PCT_TO_EXCLUDE`,
   the three composite weights, the two per-cell weights) kept its exact
@@ -714,6 +742,16 @@ tool (built with Leaflet).
   (`water_candidate_zones.py`), and `water_suitability.py`'s own composite
   factor weights accordingly — all deliberately exposed as module-level
   constants for exactly this.
+- `production_area_ceiling.py`'s `PATCH_SOIL_MIN_CELL_SHARE_PCT` (10.0)
+  and `PATCH_SOIL_MAX_ENTRIES` (3) decide which of the SSURGO map units
+  under a production block get NAMED in that block's narrative soil list.
+  Both are reasoned defaults, not ground-truthed figures: 10% is "below
+  this a map unit is an edge artefact of a boundary digitised at
+  1:24,000", and 3 is what the panel's soil row plus continuation lines
+  holds. Tune them against a real property — a parcel whose blocks
+  routinely clear the floor on four or five map units is the signal that
+  the cap is too tight, and one where a named soil is visibly not the
+  soil underfoot is the signal the floor is too low.
 - `production_area_ceiling.py`'s `PRODUCTION_CEILING_PCT_OF_PARCEL` (80.0)
   is a documented starting ceiling, not a value derived from or validated
   against a real property yet — same "tune once ground-truthed" status
