@@ -88,7 +88,7 @@ import math
 from typing import Optional
 
 import numpy as np
-from rasterio.warp import transform as warp_transform
+from rasterio.warp import transform as warp_transform, transform_geom
 from shapely import contains_xy
 
 from dem_data import get_dem_for_boundary
@@ -114,7 +114,7 @@ from production_suitability import (
     score_production_areas,
 )
 from raster_grid import SQUARE_METERS_PER_ACRE, cell_area_acres
-from shapely.geometry import Polygon
+from shapely.geometry import Polygon, shape as shapely_shape
 from soil_data import coordinates_to_wkt_polygon
 
 # Ceiling on how much of the FULL PARCEL boundary's own area may be
@@ -444,6 +444,43 @@ _SCALES = {
 }
 
 
+# --- the two soil thresholds a patch's soil attribution is published by ---
+#
+# A patch typically spans several SSURGO map units, and the panel names the
+# ones the block actually sits ON. Both of these are about what gets NAMED,
+# not about what gets measured: the attribution itself counts every covered
+# cell, and these two decide which of the resulting map units are worth a
+# row.
+#
+# THE FLOOR. Below this share of the patch's own cells a map unit is an edge
+# sliver -- the boundary of the next soil over, caught because a 5 m cell
+# center happened to land on the far side of a line digitised at 1:24,000
+# (see soil_data.SSURGO_CONFIDENCE_NOTES: map unit boundaries are generalised
+# to that scale and do not carry field-level precision). Naming it beside the
+# soil the block really sits on would give a digitising artefact the same
+# standing as the block's own ground. CONFIGURABLE -- tune against a real
+# property, same as every other threshold in this pipeline.
+PATCH_SOIL_MIN_CELL_SHARE_PCT = 10.0
+
+# THE CAP. The floor alone does not bound the list: a fragmented block --
+# one following a bench across a slope break -- can genuinely clear 10% on
+# four or five map units, and the panel has one soil row plus continuation
+# lines, not a table. Three is what that space holds while still admitting
+# that a block spanning three soils HAS three soils, which is the whole
+# reason this ships as a ranked list rather than a single winner.
+#
+# PAST THE CAP THE REMAINDER IS DROPPED, not summed into an "other" entry,
+# and that is a deliberate choice rather than the easier one. The floor has
+# already made this list a NAMING of the soils under a block and not a
+# partition of it -- the published shares do not sum to 100 and are not
+# meant to. An "other" row would put a share back in the reader's hands
+# that names no soil, which reads as a fourth soil called "other" and
+# invites exactly the "so it adds up now" arithmetic the floor already
+# broke. A reader who wants the partition has the shares and can see they
+# fall short; a reader who wants the soils has the soils. CONFIGURABLE.
+PATCH_SOIL_MAX_ENTRIES = 3
+
+
 def _round1(value):
     """1 decimal place, or None passed straight through -- the single
     rounding boundary for this whole block. None means 'not known', and
@@ -537,12 +574,31 @@ def _on_parcel_cell_mask(dem: dict, boundary_polygon_utm: Polygon) -> np.ndarray
     output. One vectorised shapely.contains_xy() call over the whole grid,
     once per pipeline run.
     """
+    xs, ys = _cell_center_grids(dem)
+    return np.asarray(contains_xy(boundary_polygon_utm, xs, ys), dtype=bool)
+
+
+def _cell_center_grids(dem: dict) -> tuple[np.ndarray, np.ndarray]:
+    """
+    The (x, y) UTM coordinate of every cell's CENTER, as two grid-shaped
+    arrays -- the raster<->vector convention this whole pipeline tests
+    containment by, in the one form a vectorised shapely.contains_xy()
+    takes.
+
+    Factored out because this block now makes the same test twice per run
+    against two different geometries: the parcel boundary
+    (_on_parcel_cell_mask() above) and each SSURGO map unit polygon
+    (_soil_attribution() below). Two copies of the half-cell offset would
+    be two chances for one of them to drift off the convention, and a
+    half-cell drift is exactly the error that would not show up as a
+    failure -- only as a soil attribution quietly shifted one cell
+    north-west of the ground it describes.
+    """
     rows, cols = dem["array"].shape
     px, py = dem["resolution_meters"]
     col_centers = dem["origin_x"] + (np.arange(cols) + 0.5) * px
     row_centers = dem["origin_y"] - (np.arange(rows) + 0.5) * py
-    xs, ys = np.meshgrid(col_centers, row_centers)
-    return np.asarray(contains_xy(boundary_polygon_utm, xs, ys), dtype=bool)
+    return np.meshgrid(col_centers, row_centers)
 
 
 def _waist_split_flags(scored: list[dict]) -> dict[int, bool]:
@@ -579,6 +635,201 @@ def _waist_split_flags(scored: list[dict]) -> dict[int, bool]:
     return flags
 
 
+def _soil_attribution(
+    dem: dict,
+    soil_components: Optional[list[dict]],
+    soil_geometries: Optional[dict],
+) -> Optional[dict]:
+    """
+    Which SSURGO map unit each DEM cell sits in, plus each map unit's
+    dominant component -- everything the per-patch soil fields below are
+    read off, computed ONCE per run rather than per patch.
+
+    NEITHER INPUT IS EVER FETCHED HERE, and that is this block's hard
+    constraint, not a preference. Both layers ride parcel_data.ParcelData
+    from Layer 1 (hard-fail governed, fetched once) and reach this module
+    as pure pass-throughs; adding a fallback fetch would put an SDA round
+    trip on a path that is network-free after Layer 1 -- and
+    get_soil_geometries_for_polygon() is not called AT ALL on a parcel with
+    no hydric map unit, so the fallback would be a NEW network call on that
+    parcel, not a re-used one. Every step in this pipeline asserts its
+    generate's exact network-call count; that assertion is what this
+    function must not break. Either input missing (None) therefore returns
+    None, and the per-patch fields report None with it.
+
+    THE COMPUTATION IS SMALL, and deliberately does not go through STEP 1.
+    narrative_data is a post-hoc read over cells STEP 1 already labelled,
+    so attribution is one transform_geom() per mukey into dem['crs'] plus
+    the same vectorised contains_xy() call _on_parcel_cell_mask() above
+    already makes -- no gate re-runs, no eligibility change, nothing
+    upstream of this block can move because of it.
+
+    Returns None, or:
+
+        {
+          'mukeys':      (mukey, ...)            # index order of the grid
+          'index_grid':  int32 grid, -1 where no map unit contains the
+                         cell center, else an index into 'mukeys'
+          'dominant':    {mukey: the map unit's dominant component ROW}
+        }
+
+    OVERLAP IS RESOLVED FIRST-WINS IN SORTED MUKEY ORDER. SSURGO map units
+    do not overlap by construction, but their clipped polygons share edges,
+    and a cell center landing exactly on a shared edge can test inside
+    both. Sorting makes that tie resolve the same way on every run rather
+    than on dict insertion order, which is the fetch's row order and is not
+    a property anything guarantees.
+
+    THE DOMINANT COMPONENT IS THE FIRST ROW PER MUKEY. get_soil_data_for_
+    polygon() returns rows globally ORDER BY comppct_r DESC, which
+    preserves per-mukey DESC -- the same positional convention
+    water_survey_areas.py already reads hydrologic group off, and
+    soil_data.py's own dominant-per-mukey helpers use. Not re-sorted here:
+    a second ordering rule for the same fact is how the two come to
+    disagree.
+    """
+    if soil_components is None or soil_geometries is None:
+        return None
+
+    # Keyed by the mukey AS TEXT on both sides, so a geometry dict keyed by
+    # one type and component rows carrying the other still join. SDA returns
+    # mukey as text in both queries and this is belt-and-braces -- but the
+    # failure it prevents is an attribution that silently finds no component
+    # for a map unit it did place on the ground, which reads as "this soil
+    # has no name" rather than as an error.
+    by_mukey = {str(mukey): geometry for mukey, geometry in soil_geometries.items()}
+    mukeys = tuple(sorted(by_mukey))
+
+    dominant: dict[str, dict] = {}
+    for row in soil_components:
+        dominant.setdefault(str(row.get("mukey")), row)
+
+    index_grid = np.full(dem["array"].shape, -1, dtype=np.int32)
+    if mukeys:
+        xs, ys = _cell_center_grids(dem)
+        for index, mukey in enumerate(mukeys):
+            geometry_utm = shapely_shape(
+                transform_geom("EPSG:4326", dem["crs"], by_mukey[mukey])
+            )
+            inside = np.asarray(contains_xy(geometry_utm, xs, ys), dtype=bool)
+            index_grid[inside & (index_grid < 0)] = index
+
+    return {"mukeys": mukeys, "index_grid": index_grid, "dominant": dominant}
+
+
+def _patch_soil_fields(cells, attribution: Optional[dict]) -> tuple:
+    """
+    One patch's ('soil_components', 'drainage_class') pair -- see build_
+    narrative_data()'s docstring for the published contract.
+
+    (None, None) whenever this block cannot NAME a soil, which covers three
+    causes that the panel has one row for: no SSURGO data reached this
+    module at all, the parcel has no soil survey coverage under this block,
+    and every map unit under it falls below PATCH_SOIL_MIN_CELL_SHARE_PCT.
+    Distinguishing them would need rows the panel does not have, and the
+    em-dash it renders for None is the true answer to "which soil is this
+    block on?" in all three. 0.0 or [] would read as a measurement.
+
+    CELL SHARE IS AREA SHARE, exactly, and that is a property of the grid
+    rather than an approximation: every cell of a UTM DEM covers the same
+    px*py of ground (raster_grid.cell_area_acres() takes no cell index for
+    that reason), so counting cells and summing area are the same measure
+    up to the rounding. Asserted in test_production_area_ceiling.py rather
+    than assumed, because it stops being true the day the grid stops being
+    equal-area.
+    """
+    if attribution is None:
+        return None, None
+
+    total_cells = len(cells)
+    if not total_cells:
+        return None, None
+
+    rows = np.fromiter((int(cell[0]) for cell in cells), dtype=np.intp, count=total_cells)
+    cols = np.fromiter((int(cell[1]) for cell in cells), dtype=np.intp, count=total_cells)
+    indices = attribution["index_grid"][rows, cols]
+    indices = indices[indices >= 0]
+    if not indices.size:
+        return None, None
+
+    counts = np.bincount(indices, minlength=len(attribution["mukeys"]))
+    # Cell count DESC, then mukey ASC so a tie between two map units
+    # covering the same number of cells resolves identically on every run.
+    ranked = sorted(
+        ((int(count), attribution["mukeys"][index]) for index, count in enumerate(counts) if count),
+        key=lambda pair: (-pair[0], pair[1]),
+    )
+
+    entries = []
+    for count, mukey in ranked:
+        share = count / total_cells * 100.0
+        # Ranked descending, so the first map unit under the floor ends the
+        # list -- every one after it is smaller.
+        if share < PATCH_SOIL_MIN_CELL_SHARE_PCT:
+            break
+        entries.append(_soil_entry(mukey, share, attribution["dominant"].get(mukey)))
+        if len(entries) == PATCH_SOIL_MAX_ENTRIES:
+            break
+
+    if not entries:
+        return None, None
+
+    # ONE drainage value, off the DOMINANT map unit -- which is the first
+    # published entry, since the list is ranked by the same cell share that
+    # decides dominance. Not one per soil: the panel shows a single drainage
+    # row beneath the ranked list, and three rows of "Moderately well
+    # drained" under three soil names is a column of repeating long phrases
+    # that says less than one line does.
+    drainage = attribution["dominant"].get(entries[0]["mukey"], {}).get("drainagecl")
+    return entries, (drainage or None)
+
+
+def _soil_entry(mukey: str, share_pct: float, dominant_component: Optional[dict]) -> dict:
+    """
+    One entry in a patch's ranked 'soil_components' list.
+
+    'label' IS THE PANEL'S WHOLE VALUE CELL, composed here rather than in
+    the frontend: the share and the name render as ONE STRING in the value
+    position of a categorical row ("62% Gilpin"), and a frontend
+    re-deriving it from the parts would be a second place that decides how
+    a share is spelled. The parts are published beside it anyway -- a
+    narrative that wants to say "just over three fifths", or to compare two
+    blocks, needs the number and not the string.
+
+    THE LABEL SPELLS THE SHARE AT WHOLE PERCENT while 'cell_share_pct'
+    carries it at this block's own 1 decimal place, and the difference is
+    deliberate. The measurement is exact -- it is a cell count over a cell
+    count -- but what it measures is position against a boundary digitised
+    at 1:24,000 and generalised to that scale (soil_data.SSURGO_CONFIDENCE_
+    NOTES), so "62.4%" on a panel row claims a precision the LINE does not
+    have even though the arithmetic does. The number is published unrounded
+    past that for anything that wants to compute; the row reads as a
+    person would say it. Rounded half-UP rather than through format()'s
+    half-to-even, so 62.5 spells 63 on every run and in every reader's
+    head.
+
+    THE NAME IS THE MAP UNIT'S DOMINANT COMPONENT (compname: "Gilpin"),
+    falling back to the map unit name (muname: "Gilpin-Upshur complex, 15
+    to 25 percent slopes") on a component row that carries no compname.
+    A map unit with GEOMETRY BUT NO COMPONENT ROW AT ALL -- which SSURGO
+    does produce, for some miscellaneous areas -- has neither, and its
+    'label' is None so the panel renders its em-dash for that line: a bare
+    "62%" of nothing named is not an answer. The entry is still published,
+    because the ground is still under the block and dropping it would move
+    the shares of the soils that are named.
+    """
+    component = dominant_component or {}
+    name = component.get("compname") or component.get("muname") or None
+    share = _round1(share_pct)
+    return {
+        "label": f"{math.floor(share + 0.5):.0f}% {name}" if name else None,
+        "cell_share_pct": share,
+        "component_name": component.get("compname") or None,
+        "map_unit_name": component.get("muname") or None,
+        "mukey": str(mukey),
+    }
+
+
 def _patch_narrative_data(
     patch: dict,
     dem: dict,
@@ -587,6 +838,7 @@ def _patch_narrative_data(
     parcel_acres: float,
     parcel_elevation_range: Optional[tuple[float, float]],
     from_waist_split: bool,
+    soil_attribution: Optional[dict],
 ) -> dict:
     """
     One patch's entry in narrative_data['patches'] -- see build_narrative_
@@ -666,6 +918,8 @@ def _patch_narrative_data(
     # with no elevation relief at all, where "upper" and "lower" mean
     # nothing -- and that None carries straight through to
     # elevation_position below, which is this same number as words.
+    patch_soil_components, drainage_class = _patch_soil_fields(cells, soil_attribution)
+
     mean_elevation = float(np.mean([float(dem["array"][r, c]) for r, c in cells]))
     if parcel_elevation_range is None:
         elevation_percentile = None
@@ -722,59 +976,21 @@ def _patch_narrative_data(
         # them, it does not recompute the geometry.
         "area_score": _round1(patch["area_score"] * 100.0),
         "compactness_score": _round1(patch["compactness_score"] * 100.0),
-        # SSURGO component names and drainage class are NOT available on
-        # this path: _fetch_disqualifying_soil_union() fetches the
-        # component rows, reduces them to a set of disqualifying mukeys,
-        # and returns only the unioned geometry -- the rows themselves are
-        # discarded before STEP 1 ever sees them, and no per-cell mukey
-        # attribution is kept. None (not 0.0, not an empty list) so a
-        # consumer cannot read absence as a measurement.
+        # THE SOIL UNDER THIS BLOCK -- a RANKED list of the SSURGO map
+        # units it sits on, and the drainage class of the dominant one.
+        # See build_narrative_data()'s docstring for the published shape,
+        # PATCH_SOIL_MIN_CELL_SHARE_PCT / PATCH_SOIL_MAX_ENTRIES for what
+        # gets named, and _soil_attribution() for the two rules that
+        # govern how it is computed: it NEVER fetches, and it does not go
+        # through STEP 1.
         #
-        # INVESTIGATED, AND THE ANSWER IS NOT "IT NEEDS ANOTHER FETCH".
-        # Written down here so the branch that closes this does not repeat
-        # the investigation:
-        #
-        #   NO NEW NETWORK CALL IS NEEDED. drainage class is SSURGO's
-        #   component-level `drainagecl` ("Well drained", "Somewhat poorly
-        #   drained", ...), and it ALREADY RIDES soil_data.get_soil_data_
-        #   for_polygon()'s existing SELECT, beside compname/comppct_r/
-        #   mukey. Per-map-unit POLYGON geometry is likewise already
-        #   fetched, unconditionally, by get_soil_geometries_for_polygon()
-        #   -- for EVERY mukey intersecting the boundary, not just the
-        #   disqualifying ones. Both land in parcel_data.ParcelData
-        #   (soil_components / soil_geometries) at Layer 1, hard-fail
-        #   governed. The data exists above this module and is thrown away
-        #   on the way down; nothing here has to go back to SDA for it.
-        #
-        #   IT DOES NOT NEED TO GO THROUGH STEP 1 EITHER, which is what
-        #   this comment used to assume. narrative_data is a post-hoc read
-        #   over cells STEP 1 already labelled, so attribution is one
-        #   transform_geom() per mukey into dem['crs'] plus the same
-        #   vectorised shapely.contains_xy() call _on_parcel_cell_mask()
-        #   above already makes -- no gate re-runs, no eligibility change.
-        #
-        #   WHAT MAKES IT A BRANCH OF ITS OWN is the plumbing, not the
-        #   computation. identify_optimized_production_areas() takes
-        #   neither soil_components nor soil_geometries today; build_
-        #   pipeline_context() holds both and forwards them to the
-        #   exclusion gate, the floodplain union and the water step but
-        #   not to production; and the session path reaches this entry
-        #   point through step_registry.LANDFORM, whose declared consumed-
-        #   edge table would gain two edges. Neither may EVER self-fetch
-        #   here: get_soil_geometries_for_polygon() is currently not
-        #   called at all on a parcel with no hydric map unit, so a
-        #   fallback fetch would add an SDA round trip to a path that is
-        #   network-free after Layer 1. Plus one open design question the
-        #   panel's own reading has to settle -- one dominant component
-        #   per patch or several, and dominant by patch cell count (the
-        #   map unit) or by comppct_r (the component within it), which are
-        #   two different "dominant"s stacked.
-        #
-        # Until then these stay None and the panel renders an em-dash.
-        # That is the documented behaviour, not a defect: the keys exist
-        # so the shape is stable and the gap is visible.
-        "soil_components": None,
-        "drainage_class": None,
+        # BOTH ARE None TOGETHER, never one without the other -- they are
+        # two readings of one attribution, and a drainage class beside an
+        # em-dashed soil row would be a claim about ground this block
+        # could not name. None (not 0.0, not an empty list) so a consumer
+        # cannot read absence as a measurement.
+        "soil_components": patch_soil_components,
+        "drainage_class": drainage_class,
         "source_region_hydric_pct": source_region_hydric_pct,
         "elevation_percentile_of_parcel": elevation_percentile,
         # The SAME fact as the line above, as words. Emitted BESIDE the
@@ -808,6 +1024,8 @@ def build_narrative_data(
     max_slope_pct: float,
     total_selected_acreage: float,
     percent_of_parcel: float,
+    soil_components: Optional[list[dict]] = None,
+    soil_geometries: Optional[dict] = None,
 ) -> dict:
     """
     The 'narrative_data' block identify_optimized_production_areas()
@@ -865,6 +1083,64 @@ def build_narrative_data(
           'gates': { ... see the OVERLAP contract below ... },
           'patches': [ one entry per patch, in rank order ],
         }
+
+    SOIL -- soil_components= / soil_geometries=, AND THEY MAY NEVER SELF-
+    FETCH. Both are parcel_data.ParcelData layers (get_soil_data_for_
+    polygon() rows and get_soil_geometries_for_polygon()'s clipped per-
+    mukey geometry), fetched once at Layer 1 under that module's hard-fail
+    contract and forwarded here as PURE PASS-THROUGHS. Omitted, the two
+    per-patch soil fields report None and the panel renders its em-dash --
+    a fallback fetch is forbidden, not merely undesirable: get_soil_
+    geometries_for_polygon() is not called at all on a parcel with no
+    hydric map unit, so a fallback would add an SDA round trip to a path
+    that is network-free after Layer 1, which every step in this pipeline
+    has an exact call-count assertion against.
+
+    THE TWO PER-PATCH SOIL FIELDS THEY FEED:
+
+      'soil_components' -- a RANKED LIST, not a single winner. A patch
+          typically spans several SSURGO map units and a block spanning
+          three soils genuinely HAS three soils; collapsing that to one
+          name is a confident wrong answer on exactly the ground a farmer
+          would want to know about. Ranked by the map unit's share of the
+          patch's OWN cells, each entry:
+
+              {
+                'label',           # "62% Gilpin" -- the panel's whole
+                                   #   value cell, composed here
+                'cell_share_pct',  # the same share, 1 decimal place
+                'component_name',  # the map unit's DOMINANT component
+                'map_unit_name',   # the map unit itself (muname)
+                'mukey',
+              }
+
+          DOMINANT IS DECIDED TWICE, at two different levels, and the two
+          are different measures on purpose. Which MAP UNIT dominates the
+          patch is decided by CELL SHARE (on an equal-area UTM grid that
+          IS area share -- asserted in this module's tests, not assumed,
+          since it stops being true if the grid ever changes). Which
+          COMPONENT dominates that map unit is decided by comppct_r, read
+          positionally off rows that arrive globally DESC -- the
+          convention water_survey_areas.py already relies on.
+
+          PATCH_SOIL_MIN_CELL_SHARE_PCT floors the list and
+          PATCH_SOIL_MAX_ENTRIES caps it; past the cap the remainder is
+          DROPPED, not summed into an "other" entry. See both constants
+          for why. The published shares therefore do NOT sum to 100 and
+          are not a partition of the patch -- this is a NAMING of the
+          soils under a block.
+
+      'drainage_class' -- ONE value, the drainagecl of the DOMINANT map
+          unit's dominant component. Not one per soil: the panel shows a
+          single drainage row beneath the ranked list, and a class per
+          soil would be four rows of long repeating phrases. SSURGO's
+          vocabulary is a fixed seven-class set from "Very poorly drained"
+          to "Excessively drained"; this republishes whatever the survey
+          says, unmapped.
+
+    Both are None together whenever the block cannot name a soil -- see
+    _patch_soil_fields() for the three causes that collapse to that one
+    answer.
 
     OVERLAP -- READ BEFORE USING THE GATE FIGURES. A single cell can be
     rejected by more than one gate at once: ground can be both hydric and
@@ -968,6 +1244,12 @@ def build_narrative_data(
 
     waist_flags = _waist_split_flags(scored)
 
+    # ONCE per run, not once per patch: every patch entry below reads the
+    # same grid. None when either layer was not supplied -- see this
+    # function's own SOIL section, and _soil_attribution() for why a
+    # fallback fetch is forbidden rather than merely unwanted.
+    soil_attribution = _soil_attribution(dem, soil_components, soil_geometries)
+
     # cells_removed and the per-cell acreage are both already in hand --
     # STEP 2's own trim result. Nothing is re-trimmed to report this.
     acres_trimmed = round(int(optimized["cells_removed"]) * area_per_cell, 1)
@@ -1032,6 +1314,7 @@ def build_narrative_data(
                 parcel_acres,
                 parcel_elevation_range,
                 waist_flags.get(int(patch["id"]), False),
+                soil_attribution,
             )
             for patch in sorted(scored, key=lambda p: p["rank"])
         ],
@@ -1049,6 +1332,8 @@ def identify_optimized_production_areas(
     reference_max_area_acres: float = REFERENCE_MAX_AREA_ACRES,
     canopy_height: Optional[dict] = None,
     exclusion_result=_EXCLUSION_RESULT_NOT_SUPPLIED,
+    soil_components: Optional[list[dict]] = None,
+    soil_geometries: Optional[dict] = None,
 ) -> dict:
     """
     Full pipeline entry point: fetches the DEM (unless one is passed in),
@@ -1109,6 +1394,27 @@ def identify_optimized_production_areas(
     Omitted (the default sentinel) or a real None leaves this function
     byte-for-byte what it was; see production_area.compute_step1_eligible_
     cells() for the contract and for why None is not the sentinel.
+
+    soil_components / soil_geometries are PURE PASS-THROUGHS to build_
+    narrative_data(), and NOTHING ELSE IN THIS FUNCTION READS THEM. They
+    are parcel_data.ParcelData's own two SSURGO layers (the get_soil_data_
+    for_polygon() rows and get_soil_geometries_for_polygon()'s clipped
+    per-mukey geometry), and they feed the per-patch 'soil_components' /
+    'drainage_class' narrative fields -- which name the soil under each
+    block, and change no geometry, no gate and no score. Omitted, those
+    two fields are None and the panel renders its em-dash; a patch on
+    ground with no soil survey coverage is a real case and that path stays
+    working.
+
+    NEITHER EVER FALLS BACK TO A FETCH, unlike check_soil above, and the
+    difference is the point: this function's hydric gate has always been
+    allowed to go to SDA, but these two arrive on a path that is network-
+    free after Layer 1 (the session path forwards them off the terrain
+    warm-up's ParcelData, see step_registry.LANDFORM). get_soil_
+    geometries_for_polygon() is not called AT ALL on a parcel with no
+    hydric map unit, so a fallback here would not re-use a fetch -- it
+    would ADD one, to a generate that is repeatable by contract and has an
+    exact zero-network-call assertion over it. Absent means None, always.
 
     Returns the same "production_area_candidate" GeoJSON FeatureCollection
     / scored_patches shape this pipeline has always returned, plus
@@ -1233,6 +1539,8 @@ def identify_optimized_production_areas(
             max_slope_pct,
             total_selected_acreage,
             percent_of_parcel,
+            soil_components=soil_components,
+            soil_geometries=soil_geometries,
         ),
     }
 

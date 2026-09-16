@@ -284,6 +284,8 @@ def build_production_zone_payload(
     boundary_coordinates: list[tuple[float, float]],
     dem: Optional[dict] = None,
     canopy_height: Optional[dict] = None,
+    soil_components: Optional[list[dict]] = None,
+    soil_geometries: Optional[dict] = None,
 ) -> dict:
     """
     Returns:
@@ -320,6 +322,18 @@ def build_production_zone_payload(
     network fetch happens for that layer. They exist so this function can be
     exercised end to end against a synthetic grid with no network at all,
     which is the only way it can be tested in a sandboxed environment.
+
+    soil_components / soil_geometries are the SAME family, and they are the
+    reason a zone row can name the soil under it at all: identify_optimized_
+    production_areas() reads them ONLY to build its per-patch
+    'soil_components'/'drainage_class' narrative fields, which arrive here
+    on `zones`. Omitted -- which is what /api/production-zones itself does,
+    having no ParcelData to hand -- those two fields are None and the
+    panel's em-dash renders. They are forwarded to PRODUCTION ONLY, not to
+    identify_exclusion_zones() below: the hydric gate's own row override is
+    already threaded on the pipeline path (pipeline_context.build_pipeline_
+    context()), and this branch is not changing what this standalone
+    endpoint fetches, only what it can say about what it found.
 
     Raises LayerFetchError for a hard failure of elevation or canopy. Soil
     and road failures do NOT raise -- see this module's docstring.
@@ -377,6 +391,8 @@ def build_production_zone_payload(
         boundary_coordinates,
         dem=dem,
         canopy_height=canopy_height,
+        soil_components=soil_components,
+        soil_geometries=soil_geometries,
     )
 
     return assemble_production_zone_payload(exclusion, production)

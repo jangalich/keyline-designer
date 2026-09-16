@@ -976,6 +976,44 @@ LANDFORM = StepDefinition(
                 "Identical to what build_pipeline_context() passes."
             ),
         ),
+        Consumed(
+            name="soil_components",
+            source=SOURCE_CACHE,
+            cache_path="parcel_data.soil_components",
+            forward_as="soil_components",
+            why=(
+                "SSURGO component rows -- which soil each production block "
+                "sits on, and its drainage class, both read straight off "
+                "ParcelData's Layer-1 fetch. A NARRATIVE edge, not a gate: "
+                "the entry point forwards it to build_narrative_data() and "
+                "nothing else reads it, so no geometry, gate or score "
+                "depends on it. Declared anyway because a published value "
+                "IS a dependency -- the panel's soil rows change when these "
+                "rows do, which is exactly what the cascade's edges are "
+                "for. IT MUST BE FORWARDED, because the entry point may "
+                "never fall back to fetching it: omitted, the fields report "
+                "None and the panel's em-dash renders; self-fetched, this "
+                "generate would stop being network-free. Identical to what "
+                "build_pipeline_context() passes."
+            ),
+        ),
+        Consumed(
+            name="soil_geometries",
+            source=SOURCE_CACHE,
+            cache_path="parcel_data.soil_geometries",
+            forward_as="soil_geometries",
+            why=(
+                "The per-mukey map unit polygons, clipped to this boundary, "
+                "that put the component rows above on the ground: without "
+                "them there is no way to say which map unit a block's cells "
+                "fall in, and the pair reports None together. Same Layer-1 "
+                "fetch, same never-self-fetch rule -- and this is the one "
+                "that would COST a new call rather than re-use an old one, "
+                "since get_soil_geometries_for_polygon() is not called at "
+                "all on a parcel with no hydric map unit. Identical to what "
+                "build_pipeline_context() passes."
+            ),
+        ),
     ),
     generate="production_area_ceiling.identify_optimized_production_areas",
     payload="step_orchestrator.build_landform_payload",

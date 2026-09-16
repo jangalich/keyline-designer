@@ -2346,6 +2346,30 @@ assert _x_spies_supplied["helper"].call_args.kwargs["soil_geometries"] is _x_geo
     "the exact caller-supplied map-unit geometry must reach the helper"
 )
 
+# ...AND INTO PRODUCTION, the fourth consumer of this same pair. It reads
+# them for one thing only -- naming the soil under each production block in
+# narrative_data -- and it may never fall back to fetching them, so this
+# forward is the whole supply. Asserted by IDENTITY: a pure passthrough, not
+# a copy, and not something assembled on the way.
+_x_production_call = _x_spies_supplied["production"].call_args
+assert _x_production_call.kwargs["soil_components"] is _x_components, (
+    "the exact caller-supplied component rows must reach identify_optimized_production_areas() -- "
+    "the per-patch soil_components/drainage_class fields have no other source"
+)
+assert _x_production_call.kwargs["soil_geometries"] is _x_geometries, (
+    "the exact caller-supplied map-unit geometry must reach identify_optimized_production_areas()"
+)
+_x_baseline_production_call = _x_baseline_spies["production"].call_args
+assert _x_baseline_production_call.kwargs["soil_components"] is None, (
+    "with the overrides omitted, production must receive soil_components=None -- it reports the two "
+    "fields as None and renders the panel's em-dash. It must NOT be silently defaulted to something "
+    "else, and it must never self-fetch"
+)
+assert _x_baseline_production_call.kwargs["soil_geometries"] is None, (
+    "likewise soil_geometries=None -- and this is the one that would COST a new SDA call, since "
+    "get_soil_geometries_for_polygon() is not otherwise reached on a parcel with no hydric map unit"
+)
+
 # --- 20c. NO MORE QUERIES ANYWHERE ELSE than before this branch -----------
 #
 # The change must not have relocated a fetch rather than removed one. Every

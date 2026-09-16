@@ -191,14 +191,68 @@ def _build_canopy(dem: dict) -> dict:
     }
 
 
+# THREE MAP UNITS, ONE OF THEM HYDRIC. 111111 is the original exclusion
+# fixture -- the hydric box the disqualifying-soil union is built from, and
+# nothing about it changes. 222222 and 333333 are NOT hydric and exist for
+# the other thing these rows now feed: the per-patch 'soil_components' /
+# 'drainage_class' narrative fields, which name the soil under each
+# production block. Without map units big enough to actually contain patch
+# cells, those two fields would be None on every zone and every assertion
+# about them would be vacuously true.
+#
+# Rows arrive globally ORDER BY comppct_r DESC, exactly as get_soil_data_
+# for_polygon() returns them, because the dominant-component-per-mukey rule
+# every consumer of these rows uses is POSITIONAL (first row per mukey).
+# A fixture in some other order would be testing against a convention SDA
+# does not actually produce.
 HYDRIC_COMPONENTS = [
     {
         "mukey": "111111",
+        "muname": "Fixture silt loam, frequently flooded",
         "comppct_r": "85",
         "hydricrating": "Yes",
         "compname": "Fixture silt loam",
-    }
+        "drainagecl": "Poorly drained",
+    },
+    {
+        "mukey": "333333",
+        "muname": "Fixture channery loam, 8 to 15 percent slopes",
+        "comppct_r": "75",
+        "hydricrating": "No",
+        "compname": "Fixture channery loam",
+        "drainagecl": "Somewhat excessively drained",
+    },
+    {
+        "mukey": "222222",
+        "muname": "Fixture bench loam complex",
+        "comppct_r": "60",
+        "hydricrating": "No",
+        "compname": "Fixture bench loam",
+        "drainagecl": "Well drained",
+    },
+    {
+        "mukey": "222222",
+        "muname": "Fixture bench loam complex",
+        "comppct_r": "40",
+        "hydricrating": "No",
+        "compname": "Fixture bench swale",
+        "drainagecl": "Moderately well drained",
+    },
+    {
+        "mukey": "333333",
+        "muname": "Fixture channery loam, 8 to 15 percent slopes",
+        "comppct_r": "25",
+        "hydricrating": "No",
+        "compname": "Fixture channery outcrop",
+        "drainagecl": "Excessively drained",
+    },
 ]
+# Clipped per-mukey geometry, the shape get_soil_geometries_for_polygon()
+# returns. The three are mutually disjoint (the two big ones sit either side
+# of longitude -79.9822, and the hydric box sits below latitude 40.6440
+# where neither reaches), and together they leave the parcel's south-west
+# corner UNCOVERED -- partial survey coverage is a real case, and it is what
+# makes "cells with no map unit" something the fixture actually exercises.
 HYDRIC_GEOMETRIES = {
     "111111": {
         "type": "Polygon",
@@ -211,7 +265,31 @@ HYDRIC_GEOMETRIES = {
                 [-79.9830, 40.6434],
             ]
         ],
-    }
+    },
+    "222222": {  # the north-west half, above the hydric box
+        "type": "Polygon",
+        "coordinates": [
+            [
+                [-79.9840, 40.6440],
+                [-79.9822, 40.6440],
+                [-79.9822, 40.6465],
+                [-79.9840, 40.6465],
+                [-79.9840, 40.6440],
+            ]
+        ],
+    },
+    "333333": {  # the whole east half
+        "type": "Polygon",
+        "coordinates": [
+            [
+                [-79.9822, 40.6425],
+                [-79.9800, 40.6425],
+                [-79.9800, 40.6465],
+                [-79.9822, 40.6465],
+                [-79.9822, 40.6425],
+            ]
+        ],
+    },
 }
 FIXTURE_ROADS = [
     {
@@ -536,6 +614,12 @@ with Harness() as h:
         REAL_BOUNDARY,
         dem=_context.dem,
         canopy_height=_context.parcel_data.canopy_height,
+        # The same two SSURGO layers the registry forwards on the session
+        # path. Omitting them here would not make the comparison fail -- it
+        # would make it PASS for the wrong reason, with both sides reporting
+        # None for every soil field and the two new edges unmeasured.
+        soil_components=_context.parcel_data.soil_components,
+        soil_geometries=_context.parcel_data.soil_geometries,
     )
     difference = equivalent(payload, endpoint_payload, "payload")
     assert difference is None, (
@@ -1145,6 +1229,117 @@ print(
     f"rejected by name; an unknown session fails INSIDE the job; the "
     f"committed-source resolver is registered and REFUSES an uncommitted "
     f"upstream step rather than self-computing it."
+)
+
+
+# --- 10. THE SOIL UNDER EACH BLOCK ------------------------------------
+#
+# The two soil edges the landform entry declares, end to end and through the
+# payload the frontend actually reads. Section 2 above already proves the
+# generate is network-free; this proves the soil the panel names got there
+# WITHOUT a fetch, off ParcelData's own Layer-1 rows, and that the batch
+# path publishes the same values for the same patch.
+
+with Harness() as h:
+    store = _fresh_store()
+    fetch_cache, cache = _fresh_caches()
+    runner = _fresh_runner()
+    document = session_manager.create_session(
+        REAL_BOUNDARY, store, fetch_cache=fetch_cache, cache=cache
+    )
+    session_id = document["session_id"]
+
+    before_soil = h.total_network_calls
+    soil_payload = _generate(session_id, store, fetch_cache, cache, runner)
+    assert h.total_network_calls == before_soil, (
+        "the soil edges must not have armed a fetch: a generate that names "
+        "the soil under a block still makes ZERO network calls"
+    )
+
+    _attributed = [z for z in soil_payload["zones"] if z["soil_components"]]
+    assert _attributed, (
+        "no zone was attributed to a map unit -- the fixture's soil "
+        "geometry does not reach any patch, so every assertion below would "
+        "be vacuously true"
+    )
+    _vocabulary = set()
+    for _zone in soil_payload["zones"]:
+        _entries = _zone["soil_components"]
+        if _entries is None:
+            assert _zone["drainage_class"] is None, (
+                "soil_components and drainage_class are two readings of one "
+                "attribution and must be None together"
+            )
+            continue
+        assert 1 <= len(_entries) <= production_area_ceiling.PATCH_SOIL_MAX_ENTRIES
+        _shares = [e["cell_share_pct"] for e in _entries]
+        assert _shares == sorted(_shares, reverse=True), (
+            f"zone {_zone['id']}'s soil list must be RANKED by cell share: {_shares}"
+        )
+        assert all(
+            share >= production_area_ceiling.PATCH_SOIL_MIN_CELL_SHARE_PCT
+            for share in _shares
+        ), f"an entry below the floor was published: {_shares}"
+        assert round(sum(_shares), 1) <= 100.0
+        for _entry in _entries:
+            assert set(_entry) == {
+                "label", "cell_share_pct", "component_name", "map_unit_name", "mukey"
+            }, f"unexpected soil entry shape: {sorted(_entry)}"
+            assert _entry["label"] == (
+                f"{_entry['cell_share_pct']:.0f}% {_entry['component_name']}"
+            ), "the label must be the share and the component name, composed here"
+        # The drainage row describes the soil named at the TOP of the list.
+        _dominant = _entries[0]
+        _dominant_rows = [
+            row for row in HYDRIC_COMPONENTS if row["mukey"] == _dominant["mukey"]
+        ]
+        assert _zone["drainage_class"] == _dominant_rows[0]["drainagecl"], (
+            f"zone {_zone['id']}'s drainage_class must be the DOMINANT map unit's "
+            f"DOMINANT component's drainagecl: {_zone['drainage_class']!r} vs "
+            f"{_dominant_rows[0]['drainagecl']!r}"
+        )
+        assert _dominant["component_name"] == _dominant_rows[0]["compname"]
+        _vocabulary.add(_zone["drainage_class"])
+
+    # THE BATCH PATH, for the same patches. build_pipeline_context() reaches
+    # production with exactly these arguments (test_pipeline_context.py
+    # asserts the forward itself); calling it the same way here is what shows
+    # the two drivers publish the same answer rather than two answers that
+    # happen to agree today.
+    _soil_context = session_manager.get_session_context(
+        session_id, store, fetch_cache=fetch_cache, cache=cache
+    )
+    _batch = production_area_ceiling.identify_optimized_production_areas(
+        REAL_BOUNDARY,
+        dem=_soil_context.dem,
+        canopy_height=_soil_context.parcel_data.canopy_height,
+        exclusion_result=_soil_context.exclusion_zones,
+        soil_components=_soil_context.parcel_data.soil_components,
+        soil_geometries=_soil_context.parcel_data.soil_geometries,
+    )
+    _batch_soil = {
+        int(p["id"]): (p["soil_components"], p["drainage_class"])
+        for p in _batch["narrative_data"]["patches"]
+    }
+    _session_soil = {
+        int(z["id"]): (z["soil_components"], z["drainage_class"])
+        for z in soil_payload["zones"]
+    }
+    assert _session_soil, "fixture sanity: the session payload carried no zones"
+    for _pid, _values in _session_soil.items():
+        assert _batch_soil[_pid] == _values, (
+            f"patch {_pid}: the batch path and the session path must publish the "
+            f"SAME soil -- {_batch_soil[_pid]!r} vs {_values!r}"
+        )
+
+print(
+    f"10. SOIL: {len(_attributed)} of {len(soil_payload['zones'])} zone(s) name the map "
+    f"unit(s) under them, ranked by cell share, floored at "
+    f"{production_area_ceiling.PATCH_SOIL_MIN_CELL_SHARE_PCT}% and capped at "
+    f"{production_area_ceiling.PATCH_SOIL_MAX_ENTRIES}; drainage classes seen: "
+    f"{sorted(_vocabulary)}. ZERO network calls during the generate that produced "
+    f"them, and the batch path publishes the identical values for all "
+    f"{len(_session_soil)} patch(es)."
 )
 
 
