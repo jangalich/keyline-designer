@@ -287,7 +287,8 @@ fake_patch = {
     "suitability_score": 87.5,
     "rank": 1,
     "slope_factor": 0.9,
-    "size_factor": 0.8,
+    "shape_factor": 0.8,
+    "soil_factor": 0.85,
     "aspect_factor": 0.7,
 }
 fake_optimized_result = {

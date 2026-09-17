@@ -1203,8 +1203,11 @@ _prod_nd = {
             "slope_min_pct": 1.2, "slope_max_pct": 18.9, "slope_median_pct": 8.4, "avg_slope_pct": 8.9,
             "dominant_aspect": "southeast", "aspect_consistency_pct": 84, "aspect_available": True,
             "score": 78.2,
-            "factors": {"slope_factor": 71.0, "size_factor": 80.0, "aspect_factor": 88.0},
-            "area_score": 90.0, "compactness_score": 70.0,
+            "factors": {
+                "slope_factor": 71.0, "shape_factor": 80.0, "aspect_factor": 88.0,
+                "soil_factor": 85.0,
+            },
+            "soil_available": True,
             "soil_components": None, "drainage_class": None, "source_region_hydric_pct": None,
             "elevation_percentile_of_parcel": 62.0, "hole_count": 1, "hole_acres": 0.2,
             "from_waist_split": False, "source_patch_id": 0,

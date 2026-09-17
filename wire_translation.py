@@ -577,8 +577,9 @@ def scored_production_areas_to_feature_collection(
                     "rank": patch["rank"],
                     "suitability_score": patch["suitability_score"],
                     "slope_factor": patch["slope_factor"],
-                    "size_factor": patch["size_factor"],
+                    "shape_factor": patch["shape_factor"],
                     "aspect_factor": patch["aspect_factor"],
+                    "soil_factor": patch["soil_factor"],
                     "avg_slope_pct": patch["avg_slope_pct"],
                     "aspect_deg": patch["aspect_deg"],
                     "soil_carved_acres": patch["soil_carved_acres"],
@@ -589,6 +590,66 @@ def scored_production_areas_to_feature_collection(
             )
         )
     return make_feature_collection(features)
+
+
+def drawn_production_block_to_feature(block: dict, result: dict) -> dict:
+    """
+    ONE block the user DREW -- production_area_ceiling.score_drawn_
+    production_block()'s dict -- as the Feature the client reads its panel
+    off, measured against the run it was scored against.
+
+    THE SAME ROW AS A SUGGESTION, FIELD FOR FIELD. Everything the landform
+    payload's `zones` table carries for a suggested block is on these
+    properties under the same names -- score, the four factors, the slope
+    figures, the aspect word, the elevation position, the soil run and the
+    drainage class -- because the panel shows one kind of row and the
+    reader is entitled to compare them. The three fields that can only
+    mean something for a generated block (rank, source_patch_id,
+    from_waist_split, and the hydric share of a source region there is
+    none of) are ABSENT, not null: see the scorer for why each one cannot
+    exist here.
+
+    `block_origin` IS THE TAG THAT SAYS WHICH KIND THIS IS, "user_drawn",
+    the same job SITE_ORIGIN_USER_PLACED does for a placed structure site.
+    A consumer that mixes the two lists reads it rather than inferring the
+    difference from a missing rank.
+
+    THE GEOMETRY IS THE CLAMPED BLOCK -- the ring the user drew,
+    intersected with the parcel, which is the ground the measurements were
+    actually taken over. A client that drew its own unclamped ring and
+    showed these numbers beside it would be captioning one shape with
+    another's readings.
+
+    THE ID IS A PLACEHOLDER AND THE CLIENT KEEPS ITS OWN. A drawn block's
+    identity is minted client-side when the ring closes and travels into
+    the commit as that id; this Feature exists to carry a measurement set
+    back, not to name anything, and the id is here because a Feature has
+    to have one. It deliberately does not parse as "production-area-<n>"
+    (internal_zone_id() returns None for it), so nothing can mistake it
+    for a generated block coming home.
+
+    THE SCORER'S OWN confidence_notes RIDE ALONG, the ones score_
+    production_areas() composed for this block -- the four weights, what
+    each factor was read off and which of them were defaulted. A drawn
+    block's `confidence` stays LOW whatever it scores: the score is a
+    measurement of the ground, and `confidence` is about who chose the
+    boundary, which here was a person with a mouse.
+    """
+    readout = dict(block["readout"])
+    properties = {
+        "block_origin": block["block_origin"],
+        **readout,
+    }
+
+    return make_feature(
+        feature_id=DRAWN_PRODUCTION_BLOCK_FEATURE_ID,
+        geometry=block["geometry_wgs84"],
+        layer=LAYER_PRODUCTION_AREA,
+        label="Drawn block",
+        confidence=CONFIDENCE_LOW,
+        confidence_notes=block["patch"]["confidence_notes"],
+        extra_properties=properties,
+    )
 
 
 def water_survey_zones_to_feature_collection(
@@ -1622,8 +1683,9 @@ _ADVISORY_WIRE_FIELDS = (
     "rank",
     "suitability_score",
     "slope_factor",
-    "size_factor",
+    "shape_factor",
     "aspect_factor",
+    "soil_factor",
     "avg_slope_pct",
     "aspect_deg",
     "soil_carved_acres",
@@ -1637,12 +1699,19 @@ _ADVISORY_WIRE_FIELDS = (
 # scored_production_areas_to_feature_collection(), so nothing inbound can
 # recover them. Named here rather than left implicit because this is exactly
 # the outbound/inbound asymmetry the proposal puts both directions in one
-# module to make visible -- see the branch report. All three are advisory
-# sub-scores read only by production_area_ceiling._patch_narrative_data()
-# (the report path, which runs inside the GENERATOR and never sees a
-# rehydrated patch); no consumer of the `production_areas=` override touches
-# any of them.
-_ADVISORY_FIELDS_NOT_ON_THE_WIRE = ("area_score", "compactness_score", "aspect_available")
+# module to make visible -- see the branch report. Both are read only by
+# production_area_ceiling._patch_narrative_data() (the report path, which
+# runs inside the GENERATOR and never sees a rehydrated patch); no consumer
+# of the `production_areas=` override touches either.
+#
+# IT WAS FIVE, AND TWO OF THEM NO LONGER EXIST: area_score and
+# compactness_score were size_factor's two sub-scores, and the factor they
+# decomposed is now compactness alone under the name shape_factor. The two
+# remaining are AVAILABILITY FLAGS rather than scores, and they are alike on
+# purpose -- each says whether its factor was measured or defaulted to a
+# neutral value, which is a thing no consumer can recover from the factor
+# itself.
+_ADVISORY_FIELDS_NOT_ON_THE_WIRE = ("aspect_available", "soil_available")
 
 
 # The one place the outbound feature-id spelling is written down, so inbound
@@ -1651,6 +1720,13 @@ _ADVISORY_FIELDS_NOT_ON_THE_WIRE = ("area_score", "compactness_score", "aspect_a
 # scored_production_areas_to_feature_collection() emit
 # f"production-area-{patch['id']}".
 _PRODUCTION_FEATURE_ID_PREFIX = "production-area-"
+
+# The wire id on a scored DRAWN block's Feature. A placeholder by design --
+# the client minted the block's real id when the ring closed and keeps it --
+# and deliberately not spelled like a generated block's, so internal_zone_
+# id() returns None for it and the commit path allocates an internal id the
+# way it always has for a shape a person drew.
+DRAWN_PRODUCTION_BLOCK_FEATURE_ID = "drawn-production-block"
 
 # The same statement for tree zones: tree_zones_to_feature_collection()
 # emits f"tree-zone-candidate-{patch['id']}" and internal_tree_zone_id()

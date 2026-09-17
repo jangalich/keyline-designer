@@ -479,12 +479,46 @@ def _check_lon_lat(value, where: str) -> tuple:
     )
 
 
+def _check_ring(value, where: str) -> tuple:
+    """A closed-or-open ring of [lon, lat] pairs -> a tuple of (lon, lat)
+    floats.
+
+    THE SAME PAIR CHECK, PER VERTEX. _check_lon_lat() owns what a point is
+    and this reuses it rather than restating the bounds, so a ring cannot
+    accept a coordinate a point would refuse.
+
+    THREE POINTS IS THE FLOOR, because fewer encloses no ground. The ring
+    is NOT closed here and a repeated last vertex is NOT stripped: shapely
+    accepts both, the drawing tool sends what the user drew, and a
+    normalisation at the edge would be this layer quietly editing the shape
+    it is validating. It is also capped -- a ring is a hand gesture, and a
+    body carrying a hundred thousand vertices is not one.
+    """
+    if not isinstance(value, (list, tuple)) or len(value) < 3:
+        raise StepOrchestrationError(
+            f"{where} must be a ring of at least 3 [lon, lat] pairs; got {value!r}"
+        )
+    if len(value) > _MAX_RING_POINTS:
+        raise StepOrchestrationError(
+            f"{where} carries {len(value)} points; at most {_MAX_RING_POINTS} are accepted"
+        )
+    return tuple(_check_lon_lat(point, f"{where} point {index}") for index, point in enumerate(value))
+
+
+# A drawn ring is a hand gesture sampled by a map, not a survey: the
+# landform tool's own rings run to tens of points. The cap is three orders
+# of magnitude above that -- it refuses a body that is not a gesture at all,
+# and never a real one.
+_MAX_RING_POINTS = 10000
+
+
 # ONE CHECK PER step_registry.VALID_INPUT_SHAPES ENTRY. The registry names
 # the shape; this is where it is enforced. A shape added there without a
 # check here fails validate_params() with a KeyError rather than passing
 # unchecked, which is the right failure.
 _INPUT_SHAPE_CHECKS = {
     step_registry.INPUT_SHAPE_LON_LAT: _check_lon_lat,
+    step_registry.INPUT_SHAPE_RING: _check_ring,
 }
 
 

@@ -103,18 +103,19 @@ from production_area import (
     _ROAD_CHECK_UNCHECKED,
     _SOIL_CHECK_UNCHECKED,
     _fetch_disqualifying_soil_union,
+    _detect_hole_footprints,
     _fetch_road_exclusion_union_utm,
     cluster_and_gate,
     compute_step1_eligible_cells,
+    per_cell_factors,
     get_required_tree_root_zone_mask_utm,
 )
 from production_suitability import (
-    REFERENCE_MAX_AREA_ACRES,
     production_suitability_to_geojson,
     score_production_areas,
 )
-from raster_grid import SQUARE_METERS_PER_ACRE, cell_area_acres
-from shapely.geometry import Polygon, shape as shapely_shape
+from raster_grid import SQUARE_METERS_PER_ACRE, cell_area_acres, cells_in_polygon
+from shapely.geometry import Polygon, mapping, shape as shapely_shape
 from soil_data import coordinates_to_wkt_polygon
 
 # Ceiling on how much of the FULL PARCEL boundary's own area may be
@@ -352,9 +353,14 @@ _CENTER_POSITION_MAX_OFFSET_FRACTION = 0.2
 # here, rather than repeated per field or explained in prose next to each
 # number. A declared scale plus "higher is better" is everything a
 # narrative needs to interpret a value; the better form of "why" is the
-# decomposition itself (size_factor into area_score and compactness_score),
-# which is data the narrative reasons FROM rather than a sentence this
-# module writes FOR it.
+# FACTORS themselves (slope, shape, aspect and soil, each published on this
+# same 0-100 scale), which are data the narrative reasons FROM rather than
+# a sentence this module writes FOR it.
+#
+# THE FACTORS USED TO DECOMPOSE ONE STEP FURTHER, into size_factor's
+# area_score and compactness_score halves, and that decomposition is gone
+# with the blend it described: the factor is compactness alone now and is
+# named shape_factor for it (see production_suitability.py).
 #
 # BAND BOUNDS: lower-inclusive, upper-EXCLUSIVE, with the top band closing
 # at 100. Every score here is a float rounded to 1 decimal place, so closed
@@ -437,7 +443,9 @@ _SCALES = {
     "direction": "higher_is_better",
     "bands": _SCORE_BANDS,
     "band_bounds": "lower_inclusive_upper_exclusive_last_band_inclusive",
-    "applies_to": ["score", "factors.*", "area_score", "compactness_score"],
+    # The composite and its four factors. It listed size_factor's two
+    # sub-scores too; they went with the blend they decomposed.
+    "applies_to": ["score", "factors.*"],
     # The one value in this block that is NOT on the 0-100 higher-is-better
     # scale the four keys above describe. Named rather than folded in.
     "elevation_position": _ELEVATION_POSITION_SCALE,
@@ -830,6 +838,35 @@ def _soil_entry(mukey: str, share_pct: float, dominant_component: Optional[dict]
     }
 
 
+def _parcel_elevation_range(
+    dem: dict, boundary_polygon_utm: Polygon, on_parcel: Optional[np.ndarray] = None
+):
+    """
+    The parcel's own (lowest, highest) on-parcel elevation, or None on a
+    parcel with no relief at all -- the axis `elevation_percentile_of_
+    parcel` and the `elevation_position` word derived from it are measured
+    against.
+
+    A FUNCTION BECAUSE TWO PATHS NEED THE SAME AXIS. build_narrative_data()
+    places every suggested block on it; score_drawn_production_block()
+    places a block the user drew on it, and a drawn block reading "upper
+    field" against a different axis than the suggestion beside it would be
+    two rows of one panel disagreeing about the same hill. `on_parcel` is
+    the already-computed cell mask when the caller has one (the narrative
+    path does), and is computed here when it does not.
+
+    None -- never (x, x) -- on a flat parcel: "upper" and "lower" describe
+    nothing there, and a zero-width range would divide by zero to say so.
+    """
+    if on_parcel is None:
+        on_parcel = _on_parcel_cell_mask(dem, boundary_polygon_utm)
+    elevations = dem["array"][on_parcel]
+    elevations = elevations[~np.isnan(elevations)]
+    if elevations.size and float(elevations.max()) > float(elevations.min()):
+        return (float(elevations.min()), float(elevations.max()))
+    return None
+
+
 def _patch_narrative_data(
     patch: dict,
     dem: dict,
@@ -957,25 +994,34 @@ def _patch_narrative_data(
         # equally undetectable by the reader.
         "aspect_available": bool(patch["aspect_available"]),
         "score": _round1(patch["suitability_score"]),
-        # Every component of STEP 4's composite, all three of them, each
+        # Every component of STEP 4's composite, all FOUR of them, each
         # rescaled from its native 0-1 to 0-100 so they are directly
         # comparable to each other and to `score` with no scale
-        # explanation needed. Higher is better for all three. Deliberately
+        # explanation needed. Higher is better for all four. Deliberately
         # NOT pre-selecting a "dominant" or "limiting" factor -- the
         # narrative reads them and decides.
+        #
+        # size_factor WAS HERE and is now shape_factor, with its two
+        # sub-scores (area_score, compactness_score) gone: the area half
+        # measured a block against a reference acreage this pipeline chose
+        # rather than against anything on the ground, and a factor with one
+        # input has no halves to publish. soil_factor is the fourth, new on
+        # the same branch -- and a low one is a measure of how much
+        # improvement this block needs, never a verdict on it (see
+        # production_suitability.py for the Scale of Permanence argument
+        # both changes rest on).
         "factors": {
             "slope_factor": _round1(patch["slope_factor"] * 100.0),
-            "size_factor": _round1(patch["size_factor"] * 100.0),
+            "shape_factor": _round1(patch["shape_factor"] * 100.0),
             "aspect_factor": _round1(patch["aspect_factor"] * 100.0),
+            "soil_factor": _round1(patch["soil_factor"] * 100.0),
         },
-        # size_factor's own two halves, on the same 0-100 higher-is-better
-        # scale. Without them a size_factor of 35 is ambiguous between
-        # "this patch is small" and "this patch is a sliver" -- different
-        # sentences with different management implications. Both were
-        # already computed inside score_production_areas(); this reads
-        # them, it does not recompute the geometry.
-        "area_score": _round1(patch["area_score"] * 100.0),
-        "compactness_score": _round1(patch["compactness_score"] * 100.0),
+        # soil_available distinguishes a measured soil_factor from the
+        # neutral 0.5 STEP 4 defaults to on a block with no readable
+        # drainage class -- the same rule, for the same reason, as
+        # aspect_available just above. Both are on the wire because
+        # neither default is detectable from the value alone.
+        "soil_available": bool(patch["soil_available"]),
         # THE SOIL UNDER THIS BLOCK -- a RANKED list of the SSURGO map
         # units it sits on, and the drainage class of the dominant one.
         # See build_narrative_data()'s docstring for the published shape,
@@ -1026,6 +1072,7 @@ def build_narrative_data(
     percent_of_parcel: float,
     soil_components: Optional[list[dict]] = None,
     soil_geometries: Optional[dict] = None,
+    soil_attribution: Optional[dict] = None,
 ) -> dict:
     """
     The 'narrative_data' block identify_optimized_production_areas()
@@ -1190,10 +1237,10 @@ def build_narrative_data(
 
     NO REASON STRINGS. Nothing here explains itself in prose. A declared
     scale plus higher-is-better tells a narrative how to read any number,
-    and decomposing a composite into its parts (size_factor into
-    area_score and compactness_score) is the better form of "why" --
-    data the narrative reasons FROM, not a sentence this module writes FOR
-    it. This module emits values; the report writes prose.
+    and decomposing a composite into its four factors (slope, shape,
+    aspect, soil) is the better form of "why" -- data the narrative reasons
+    FROM, not a sentence this module writes FOR it. This module emits
+    values; the report writes prose.
     """
     step1 = optimized["step1"]
     area_per_cell = cell_area_acres(dem)
@@ -1235,12 +1282,7 @@ def build_narrative_data(
     slope_ok = (~np.isnan(slope_pct)) & (slope_pct <= max_slope_pct)
     setback_excluded = on_parcel & slope_ok & ~slope_only_mask
 
-    parcel_elevations = dem["array"][on_parcel]
-    parcel_elevations = parcel_elevations[~np.isnan(parcel_elevations)]
-    if parcel_elevations.size and float(parcel_elevations.max()) > float(parcel_elevations.min()):
-        parcel_elevation_range = (float(parcel_elevations.min()), float(parcel_elevations.max()))
-    else:
-        parcel_elevation_range = None
+    parcel_elevation_range = _parcel_elevation_range(dem, boundary_polygon_utm, on_parcel=on_parcel)
 
     waist_flags = _waist_split_flags(scored)
 
@@ -1248,7 +1290,16 @@ def build_narrative_data(
     # same grid. None when either layer was not supplied -- see this
     # function's own SOIL section, and _soil_attribution() for why a
     # fallback fetch is forbidden rather than merely unwanted.
-    soil_attribution = _soil_attribution(dem, soil_components, soil_geometries)
+    #
+    # HANDED IN BY THE ENTRY POINT NOW, because STEP 4 needs it FIRST:
+    # soil_factor is scored off the same attribution this block narrates,
+    # and scoring happens before any of this runs. Computing it twice would
+    # be two answers to "which map unit is this block on" that agree until
+    # the first edit. A caller that supplies neither the attribution nor the
+    # rows gets None and the per-patch soil fields report None with it --
+    # unchanged, and still never a fetch.
+    if soil_attribution is None:
+        soil_attribution = _soil_attribution(dem, soil_components, soil_geometries)
 
     # cells_removed and the per-cell acreage are both already in hand --
     # STEP 2's own trim result. Nothing is re-trimmed to report this.
@@ -1329,7 +1380,6 @@ def identify_optimized_production_areas(
     ceiling_pct: float = PRODUCTION_CEILING_PCT_OF_PARCEL,
     max_slope_pct: float = MAX_PRODUCTION_SLOPE_PCT,
     min_area_acres: float = MIN_PRODUCTION_AREA_ACRES,
-    reference_max_area_acres: float = REFERENCE_MAX_AREA_ACRES,
     canopy_height: Optional[dict] = None,
     exclusion_result=_EXCLUSION_RESULT_NOT_SUPPLIED,
     soil_components: Optional[list[dict]] = None,
@@ -1514,8 +1564,24 @@ def identify_optimized_production_areas(
         canopy_source=canopy_source_of(canopy_height),
     )
 
+    # THE SOIL ATTRIBUTION, ONCE, BEFORE SCORING. STEP 4's soil_factor is
+    # read off the drainage class of the map unit covering most of a block,
+    # so the attribution that names it has to exist before the composite
+    # does; build_narrative_data() below is handed the same object rather
+    # than computing a second one. Network-free by construction -- see
+    # _soil_attribution(), which never fetches and returns None when either
+    # SSURGO layer was not supplied.
+    soil_attribution = _soil_attribution(dem, soil_components, soil_geometries)
+    drainage_class_by_patch_id = {
+        int(patch["id"]): _patch_soil_fields(patch["cells"], soil_attribution)[1]
+        for patch in optimized["patches"]
+    }
+
     scored = score_production_areas(
-        optimized["patches"], dem, optimized["step1"], reference_max_area_acres=reference_max_area_acres
+        optimized["patches"],
+        dem,
+        optimized["step1"],
+        drainage_class_by_patch_id=drainage_class_by_patch_id,
     )
 
     total_selected_acreage = round(sum(p["area_acres"] for p in scored), 2)
@@ -1541,8 +1607,265 @@ def identify_optimized_production_areas(
             percent_of_parcel,
             soil_components=soil_components,
             soil_geometries=soil_geometries,
+            soil_attribution=soil_attribution,
         ),
+        # WHAT A BLOCK THE USER DREW IS MEASURED AGAINST -- solar_
+        # suitability's own `run_inputs` convention, for the same reason it
+        # exists there: score_drawn_production_block() must measure a drawn
+        # block on THIS run's ground, with the same slope and aspect arrays,
+        # the same soil attribution and the same parcel the suggestions were
+        # scored against, or the two numbers are not comparable and the
+        # panel showing them side by side is a lie.
+        #
+        # REFERENCES, NOT COPIES. Every value here is already held by the
+        # session's context for this step; this dict is a name for them, and
+        # holding it costs nothing beyond the dict itself.
+        "run_inputs": {
+            "dem": dem,
+            "boundary_polygon_utm": boundary_polygon_utm,
+            "step1": optimized["step1"],
+            "soil_attribution": soil_attribution,
+            "parcel_acres": parcel_acres,
+            "max_slope_pct": max_slope_pct,
+        },
     }
+
+
+# ======================================================================
+# A block the user DREW
+# ======================================================================
+
+# The internal id and source-patch id a drawn block is measured under.
+#
+# NEGATIVE ON PURPOSE, and never emitted. cluster_and_gate() numbers its
+# clusters from 0 upward and the commit path allocates a drawn zone an id
+# above every id in the same commit, so no real block can ever hold either
+# of these; they exist because score_production_areas() and _patch_
+# narrative_data() both key on an id, and a drawn block has to be handed
+# one to be measured by the same code. Both are stripped from the readout
+# before it goes anywhere -- see score_drawn_production_block().
+_DRAWN_BLOCK_ID = -1
+_DRAWN_BLOCK_NO_SOURCE_PATCH = -1
+
+
+def score_drawn_production_block(ring, result: dict) -> dict:
+    """
+    A block the USER DREW, measured against the run that produced `result`
+    -- identify_optimized_production_areas()'s own return dict -- ON THE
+    SAME INSTRUMENT as the suggestions beside it, and directly comparable
+    to them.
+
+    WHY IT IS SCORED AT ALL, having not been. The panel printed an em dash
+    for a drawn block's score, and the reason given was the tree step's:
+    a drawn zone scoring below MIN_TREE_SUITABILITY_SCORE would read as
+    scored BADLY rather than as unscored. PRODUCTION HAS NO SUCH FLOOR.
+    Its gates are the exclusion masks -- they decide which ground is a
+    candidate, cell by cell, before any score exists -- and _SCORE_BANDS
+    runs the whole 0-100 range with "poor" as a BAND (0-40), not a cutoff.
+    A production block scoring 34 is a real reading of real ground, which
+    is exactly what the suggestions on this parcel score. The reasoning was
+    borrowed from a step that had a floor by a step that does not.
+
+    What the earlier branch actually established was narrower and still
+    holds: nothing downstream computes off a scoring field, which made an
+    unscored drawn zone SAFE. Safe is not preferable -- an unexplained em
+    dash invites the reader to conclude something failed, and a score you
+    cannot compare with the one above it is worse than no score at all.
+
+    EVERY FACTOR IS DERIVABLE FROM THE BLOCK'S OWN CELLS, which is why this
+    can be honest rather than partial: slope and aspect off STEP 1's
+    per-cell arrays (the cached DEM's, computed once for the run), shape
+    off the drawn polygon's own cell footprint, and drainage off the same
+    soil attribution the suggestions were scored against. Nothing here
+    requires the block to have come from clustering.
+
+    PURE AND LOCAL. NO NETWORK, by contract -- every input is already in
+    `result` (see its `run_inputs`), and this function fetches nothing,
+    exactly as step_registry.Placement requires of a scorer. The step's
+    zero-network-call assertions cover the generate and the commit; this
+    runs between them and adds no call to either.
+
+    `ring` is the drawn ring as [lon, lat] pairs, WGS84 -- what the drawing
+    tool has, clamped to the parcel client-side. It is clamped AGAIN here,
+    against the run's own boundary polygon, because the server measures
+    what it can defend: a ring reaching off the parcel is scored on the
+    part that is on it, and one entirely off it is refused (ValueError ->
+    400), which is the containment rule structures already applies to a
+    placed point.
+
+    Returns the internal drawn-block dict -- the shape wire_translation.
+    drawn_production_block_to_feature() turns into the Feature a client
+    displays:
+
+        {
+          'block_origin'    "user_drawn", the tag that distinguishes this
+                            from a generated block in any mixed list
+          'polygon_utm'     the clamped block, in the DEM's CRS
+          'geometry_wgs84'  the same, on the wire
+          'cells'           its DEM cells, STEP 1's own convention
+          'patch'           the scored patch dict, score_production_areas()'
+                            own output for this one block
+          'readout'         the SAME shape a suggestion's row carries on the
+                            payload's `zones` table, so the panel reads one
+                            kind of row (see below for the four fields it
+                            cannot have)
+        }
+
+    THE FOUR FIELDS A DRAWN BLOCK CANNOT HAVE, removed rather than faked:
+
+      rank                   a position among candidates this block was not
+                             one of. Structures reports where a PLACED site
+                             WOULD rank because its panel shows a rank
+                             column and the comparison is the answer the
+                             user asked for; production's panel shows no
+                             rank at all, so the honest and the simple
+                             choice are the same one here -- it is omitted.
+      source_patch_id        the STEP 1 region a cluster was carved from.
+                             A drawn block was carved from nothing.
+      source_region_hydric_pct   how much of that region was wet ground.
+                             No region, no share -- and it comes back None
+                             on its own because the sentinel source id
+                             matches no cell, rather than being special-
+                             cased here.
+      from_waist_split       whether STEP 3 split this cluster at a waist.
+                             STEP 3 never saw it.
+
+    Raises ValueError, naming the reason, for a ring that is not a ring, a
+    ring entirely off the parcel, or a block too thin to cover a single DEM
+    cell center. Never returns a half-measured block.
+    """
+    run_inputs = result.get("run_inputs")
+    if not run_inputs:
+        raise ValueError(
+            "score_drawn_production_block() needs the run's own inputs (result['run_inputs']); the "
+            "result handed in does not carry them, so a drawn block could not be measured against the "
+            "same ground the suggestions were"
+        )
+    dem = run_inputs["dem"]
+    boundary_polygon_utm = run_inputs["boundary_polygon_utm"]
+    step1 = run_inputs["step1"]
+    soil_attribution = run_inputs["soil_attribution"]
+
+    polygon_utm = _drawn_ring_to_polygon_utm(ring, dem)
+    clamped = polygon_utm.intersection(boundary_polygon_utm)
+    if clamped.is_empty:
+        raise ValueError(
+            "the drawn block lies entirely outside the parcel boundary. The parcel is the one hard "
+            "limit on a drawn block; everything else this step checks is measured and reported, never "
+            "refused."
+        )
+
+    cells = cells_in_polygon(dem, clamped)
+    if not cells:
+        raise ValueError(
+            f"the drawn block covers no DEM cell center ({clamped.area:.2f} m^2 at "
+            f"{dem['resolution_meters'][0]:.1f}x{dem['resolution_meters'][1]:.1f} m resolution), so there "
+            "is no ground under it to measure. A block has to be at least about one cell across to be a "
+            "block."
+        )
+
+    # THE DRAWN SHAPE IS BOTH SHAPES. A suggested block carries a cell-union
+    # footprint AND the disc opening the map actually draws, and every
+    # readout measured against position or acreage uses the opening. A drawn
+    # block has one shape -- the ring the user drew -- and it is already the
+    # shape on the map, so the two entries are the same polygon rather than
+    # an opening invented for it. Opening a drawn ring would move the
+    # boundary the user authored.
+    patch = {
+        "id": _DRAWN_BLOCK_ID,
+        "source_patch_id": _DRAWN_BLOCK_NO_SOURCE_PATCH,
+        "cells": cells,
+        "area_acres": round(float(clamped.area / SQUARE_METERS_PER_ACRE), 2),
+        "polygon_utm": clamped,
+        "render_fill_polygon_utm": clamped,
+        "hole_footprints": _detect_hole_footprints(cells, dem),
+    }
+
+    # THE SAME FUNCTION, not the same arithmetic written out again. Every
+    # weight, every factor and the neutral-soil rule reach a drawn block
+    # because it is handed to the scorer the suggestions went through --
+    # which is the whole claim the panel makes when it prints the two
+    # scores in one column.
+    drainage_class = _patch_soil_fields(cells, soil_attribution)[1]
+
+    # THE FALLBACK FOR CELLS STEP 1 NEVER SCORED. A drawn block may cover
+    # wooded, wet or steep ground -- the cautions exist to tell the user
+    # exactly that -- and STEP 1 records per-cell factors only for cells
+    # that cleared every gate. per_cell_factors() is the function STEP 1
+    # filled those arrays WITH, so a block half on excluded ground is
+    # measured on all of itself by one instrument rather than on the half
+    # that passed. It applies no gate and changes no eligibility; see that
+    # function.
+    max_slope_pct = float(run_inputs.get("max_slope_pct") or MAX_PRODUCTION_SLOPE_PCT)
+    slope_grid = step1["slope_pct"]
+    aspect_grid = step1["aspect_deg"]
+
+    def ungated_cell_factors(row, col):
+        return per_cell_factors(
+            float(slope_grid[row, col]), float(aspect_grid[row, col]), max_slope_pct
+        )
+
+    scored = score_production_areas(
+        [patch],
+        dem,
+        step1,
+        drainage_class_by_patch_id={_DRAWN_BLOCK_ID: drainage_class},
+        ungated_cell_factors=ungated_cell_factors,
+    )[0]
+
+    readout = _patch_narrative_data(
+        scored,
+        dem,
+        step1,
+        boundary_polygon_utm,
+        float(run_inputs["parcel_acres"]),
+        _parcel_elevation_range(dem, boundary_polygon_utm),
+        False,
+        soil_attribution,
+    )
+    for field in ("id", "rank", "source_patch_id", "source_region_hydric_pct", "from_waist_split"):
+        readout.pop(field, None)
+
+    return {
+        "block_origin": "user_drawn",
+        "polygon_utm": clamped,
+        "geometry_wgs84": transform_geom(dem["crs"], "EPSG:4326", mapping(clamped)),
+        "cells": cells,
+        "patch": scored,
+        "readout": readout,
+    }
+
+
+def _drawn_ring_to_polygon_utm(ring, dem: dict) -> Polygon:
+    """
+    A drawn [lon, lat] ring as a valid polygon in the DEM's CRS.
+
+    THE SAME PROJECTION EVERY OTHER RING IN THIS PIPELINE TAKES -- one
+    warp_transform() of the whole ring, then a Polygon -- so a drawn block
+    lands on the same grid as the parcel boundary and the clusters.
+
+    A ring that cannot be a polygon (fewer than three points, or one that
+    crosses itself) is a ValueError naming the defect, which the
+    orchestrator reports as a 400. buffer(0) is deliberately NOT applied:
+    it would silently repair a self-crossing ring into some polygon the
+    user did not draw, and then measure that.
+    """
+    points = list(ring or [])
+    if len(points) < 3:
+        raise ValueError(
+            f"a drawn block needs at least 3 points to enclose ground; got {len(points)}"
+        )
+    xs, ys = warp_transform(
+        "EPSG:4326", dem["crs"], [float(p[0]) for p in points], [float(p[1]) for p in points]
+    )
+    polygon = Polygon(zip(xs, ys))
+    if not polygon.is_valid:
+        from shapely.validation import explain_validity
+
+        raise ValueError(f"the drawn block is not a valid polygon: {explain_validity(polygon)}")
+    if polygon.area <= 0:
+        raise ValueError("the drawn block encloses no area")
+    return polygon
 
 
 def summarize_optimized_production_areas(result: dict) -> str:

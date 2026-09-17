@@ -289,13 +289,18 @@ assert CLUSTER_AND_GATE_FIELDS <= set(GENERATED_PATCHES[0]), (
 # asserted EXACTLY equal below, and they hold exactly.
 REPROJECTION_SYMMETRIC_DIFFERENCE_TOLERANCE = 1e-9
 
-# The advisory block the wire carries, and the three fields it does NOT.
+# The advisory block the wire carries, and the two fields it does NOT.
+#
+# size_factor BECAME shape_factor and soil_factor JOINED IT on the
+# rescoring branch; area_score and compactness_score -- size_factor's two
+# halves -- went with the blend they decomposed, which is why the
+# not-on-the-wire tuple is down to the two AVAILABILITY FLAGS.
 ADVISORY_ON_THE_WIRE = (
-    "rank", "suitability_score", "slope_factor", "size_factor", "aspect_factor",
-    "avg_slope_pct", "aspect_deg", "soil_carved_acres", "soil_carved_pct",
+    "rank", "suitability_score", "slope_factor", "shape_factor", "aspect_factor",
+    "soil_factor", "avg_slope_pct", "aspect_deg", "soil_carved_acres", "soil_carved_pct",
     "soil_data_available", "source_patch_id", "confidence_notes",
 )
-ADVISORY_NOT_ON_THE_WIRE = ("area_score", "compactness_score", "aspect_available")
+ADVISORY_NOT_ON_THE_WIRE = ("aspect_available", "soil_available")
 
 worst_relative_symmetric_difference = 0.0
 for feature, original in zip(OUTBOUND["features"], GENERATED_PATCHES):

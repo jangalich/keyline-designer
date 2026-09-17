@@ -139,10 +139,12 @@ assert abs(
     (pa.PER_CELL_SLOPE_WEIGHT / pa.PER_CELL_ASPECT_WEIGHT)
     - (pa.SLOPE_FACTOR_WEIGHT / pa.ASPECT_FACTOR_WEIGHT)
 ) < 1e-9, "renormalizing must preserve the EXISTING zone-level slope:aspect ratio, not invent a new one"
-assert not hasattr(pa, "PER_CELL_SIZE_WEIGHT"), (
-    "size_factor is a cluster-level shape property with no meaning for a single grid cell -- "
-    "per-cell scoring must not invent a per-cell size weight"
-)
+for _no_per_cell in ("PER_CELL_SIZE_WEIGHT", "PER_CELL_SHAPE_WEIGHT", "PER_CELL_SOIL_WEIGHT"):
+    assert not hasattr(pa, _no_per_cell), (
+        "shape_factor is a cluster-level property ('compact or a sliver' means nothing for one cell) "
+        "and soil_factor is read per BLOCK off the map unit under it -- per-cell scoring must invent "
+        f"neither, and it must not have a {_no_per_cell}"
+    )
 assert per_cell_score(0.0, 180.0) == 1.0, "flat, due-south ground must score the max, 1.0"
 worst = per_cell_score(pa.MAX_PRODUCTION_SLOPE_PCT, 0.0)
 assert abs(worst - 0.0) < 1e-9, f"max slope + due-north aspect should score ~0.0, got {worst}"

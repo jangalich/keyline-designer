@@ -476,9 +476,10 @@ for zone in (zone_1, zone_2):
         "suitability_score must be identical whether or not render_fill_polygon_utm is present on the "
         "patch dict"
     )
-    assert _same_score(stripped["area_score"], zone["area_score"]) and _same_score(
-        stripped["compactness_score"], zone["compactness_score"]
-    ), "size_factor's sub-scores must be identical whether or not the render-only fill field is present"
+    assert _same_score(stripped["shape_factor"], zone["shape_factor"]), (
+        "shape_factor -- the compactness of the patch's own CELL footprint -- must be identical "
+        "whether or not the render-only fill field is present on the patch dict"
+    )
 
 print(
     "render_fill_polygon_utm invariant: area_acres, geometry_wgs84 (zones_geojson), and suitability "

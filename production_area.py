@@ -250,15 +250,22 @@ PRODUCTION_BOUNDARY_SETBACK_METERS = 10 * METERS_PER_FOOT  # ~3.048m
 # --- per-cell weighting (STEP 1's own scoring, used to order STEP 2's
 # worst-first ceiling trim) ---
 #
-# production_suitability.py's zone-level composite score weights three
-# factors: SLOPE_FACTOR_WEIGHT (0.55), SIZE_FACTOR_WEIGHT (0.30, acreage +
-# Polsby-Popper shape compactness), ASPECT_FACTOR_WEIGHT (0.15). size_factor
-# is a CLUSTER-level shape property -- "is this patch's footprint compact
-# or a thin sliver" has no meaning for a single grid cell, so it's excluded
-# from per-cell scoring entirely rather than forced onto cells it can't
-# describe. The remaining two factors' EXISTING relative weight (0.55:0.15,
-# i.e. 11:3) is preserved here, just renormalized to sum to 1.0 on its own
-# -- not a new ratio invented for this pass.
+# production_suitability.py's zone-level composite score weights FOUR
+# factors: SLOPE_FACTOR_WEIGHT, SHAPE_FACTOR_WEIGHT (Polsby-Popper
+# compactness), ASPECT_FACTOR_WEIGHT and SOIL_FACTOR_WEIGHT. Two of them
+# have no per-cell counterpart and are excluded from this scoring entirely
+# rather than forced onto cells they cannot describe: shape is a CLUSTER-
+# level property ("is this footprint compact or a thin sliver" means
+# nothing for one grid cell), and soil is read per BLOCK off the map unit
+# covering most of it. The remaining two factors' EXISTING RELATIVE weight
+# is preserved here, renormalized to sum to 1.0 on its own -- not a new
+# ratio invented for this pass.
+#
+# THE PROPORTIONAL RESCALE THAT MADE ROOM FOR SOIL LEFT THIS UNTOUCHED, and
+# that is arithmetic rather than luck: slope and aspect were multiplied by
+# the same 0.80, and a ratio is unchanged by scaling both sides. STEP 2's
+# worst-first trim orders cells by exactly the same numbers it did before
+# the fourth factor existed.
 _PER_CELL_WEIGHT_SUM = SLOPE_FACTOR_WEIGHT + ASPECT_FACTOR_WEIGHT
 PER_CELL_SLOPE_WEIGHT = SLOPE_FACTOR_WEIGHT / _PER_CELL_WEIGHT_SUM
 PER_CELL_ASPECT_WEIGHT = ASPECT_FACTOR_WEIGHT / _PER_CELL_WEIGHT_SUM
@@ -390,17 +397,42 @@ def _slope_factor(slope_values_pct: list[float], max_slope_pct: float) -> float:
     return max(0.0, min(1.0, 1.0 - avg_slope / max_slope_pct))
 
 
+def per_cell_factors(
+    slope_pct: float, aspect_deg: float, max_slope_pct: float = MAX_PRODUCTION_SLOPE_PCT
+) -> tuple[float, float]:
+    """
+    (slope_factor, aspect_factor) for ONE DEM cell's own real slope and
+    aspect -- _slope_factor() (called on a length-1 list, the same formula
+    production_suitability.py's STEP 4 composite uses at the cluster level)
+    and terrain_metrics.aspect_score() (already a per-value function, so it
+    needs no adaptation).
+
+    THE ONE IMPLEMENTATION OF THE TWO PER-CELL SCORES, and it has three
+    callers for a reason. STEP 1 fills its per-cell arrays with it, but only
+    for cells that cleared every gate -- those arrays are NaN everywhere
+    else by design. per_cell_score() below blends the pair. And production_
+    area_ceiling.score_drawn_production_block() needs the pair for cells
+    STEP 1 left NaN, because a block a person drew may cover ground that
+    failed a gate and that ground still has a real slope and a real aspect.
+    Scoring such a block over its eligible cells alone would report the
+    quality of the part of it that passed, presented as the quality of the
+    whole shape the user drew.
+
+    NO GATE IS APPLIED OR IMPLIED HERE. This says how good a cell's terrain
+    is, never whether it is a candidate -- eligibility is STEP 1's, decided
+    by the masks, and nothing about these two numbers changes it.
+    """
+    return _slope_factor([slope_pct], max_slope_pct), aspect_score(aspect_deg)
+
+
 def per_cell_score(slope_pct: float, aspect_deg: float, max_slope_pct: float = MAX_PRODUCTION_SLOPE_PCT) -> float:
     """
     0-1 per-cell quality score for one DEM cell's own real slope/aspect --
-    reuses _slope_factor() (called on a length-1 list, the same formula
-    production_suitability.py's STEP 4 composite uses at the cluster level)
-    and terrain_metrics.aspect_score() (already a per-value function, so it
-    needs no adaptation). See PER_CELL_SLOPE_WEIGHT/PER_CELL_ASPECT_WEIGHT
-    above for the weighting and why size has no per-cell counterpart.
+    the two factors per_cell_factors() computes, blended. See PER_CELL_
+    SLOPE_WEIGHT/PER_CELL_ASPECT_WEIGHT above for the weighting and why
+    size has no per-cell counterpart.
     """
-    slope_factor = _slope_factor([slope_pct], max_slope_pct)
-    aspect_factor = aspect_score(aspect_deg)
+    slope_factor, aspect_factor = per_cell_factors(slope_pct, aspect_deg, max_slope_pct)
     return PER_CELL_SLOPE_WEIGHT * slope_factor + PER_CELL_ASPECT_WEIGHT * aspect_factor
 
 
@@ -1036,8 +1068,7 @@ def compute_step1_eligible_cells(
     per_cell_composite = np.full((rows, cols), np.nan, dtype=np.float32)
     for r, c in np.argwhere(eligible_mask):
         r, c = int(r), int(c)
-        sf = _slope_factor([float(slope_pct[r, c])], max_slope_pct)
-        af = aspect_score(float(aspect_deg[r, c]))
+        sf, af = per_cell_factors(float(slope_pct[r, c]), float(aspect_deg[r, c]), max_slope_pct)
         per_cell_slope_factor[r, c] = sf
         per_cell_aspect_factor[r, c] = af
         per_cell_composite[r, c] = PER_CELL_SLOPE_WEIGHT * sf + PER_CELL_ASPECT_WEIGHT * af

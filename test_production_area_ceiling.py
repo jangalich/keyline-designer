@@ -596,6 +596,18 @@ _PRE_NARRATIVE_RESULT_KEYS = {
     "parcel_acres",
     "production_ceiling_target_met",
     "total_cells_removed",
+    # 'run_inputs' -- the run's own DEM, boundary polygon, STEP 1 result and
+    # soil attribution, named so a block the user DRAWS can be measured
+    # against the same ground the suggestions were (production_area_ceiling.
+    # score_drawn_production_block(), reached through the landform step's
+    # Placement). Listed here for the reason render_fill_area_acres is
+    # listed in the patch set below: this set is the entry point's own key
+    # list, and the assertion is that narrative_data does not write one, not
+    # that the entry point may never gain one. It holds no new measurement
+    # -- every value in it is a reference to something the run already
+    # computed -- and the equality check below still fails if narrative_data
+    # adds or drops anything.
+    "run_inputs",
 }
 
 # Same idea for one scored patch: the fields STEP 3/STEP 4 attached before
@@ -628,13 +640,17 @@ _PRE_NARRATIVE_PATCH_KEYS = {
     "source_patch_id",
     "suitability_score",
     "slope_factor",
-    "size_factor",
+    # size_factor, area_score and compactness_score were here. The factor is
+    # compactness alone now and is named for it; the two sub-scores went
+    # with the blend they decomposed. soil_factor and soil_available are the
+    # fourth factor and its availability flag, added by the same branch.
+    "shape_factor",
     "aspect_factor",
+    "soil_factor",
     "avg_slope_pct",
     "aspect_deg",
-    "area_score",
-    "compactness_score",
     "aspect_available",
+    "soil_available",
     "soil_carved_acres",
     "soil_carved_pct",
     "soil_data_available",
@@ -1012,7 +1028,7 @@ assert _nd_A["id"] != _nd_C["id"] != _nd_B["id"] != _nd_A["id"]
 
 assert _nd_A["factors"]["slope_factor"] > _nd_B["factors"]["slope_factor"], "gentler ground must score higher"
 assert _nd_A["factors"]["aspect_factor"] > _nd_B["factors"]["aspect_factor"], "south-facing must score higher"
-assert _nd_A["factors"]["size_factor"] > _nd_C["factors"]["size_factor"], "the bigger, blockier patch must score higher"
+assert _nd_A["factors"]["shape_factor"] > _nd_C["factors"]["shape_factor"], "the blockier patch must score higher"
 assert _nd_A["score"] > _nd_B["score"] and _nd_A["score"] > _nd_C["score"]
 assert _nd_A["rank"] == 1
 assert _nd_A["dominant_aspect"] == "south" and _nd_B["dominant_aspect"] == "north"
@@ -1245,35 +1261,48 @@ json.dumps(nd_show)
 print("\nnarrative_data, in full, on a synthetic three-patch fixture:")
 print(json.dumps(nd_show, indent=2))
 
-# --- N11. area_score / compactness_score resolve the size ambiguity ---
-# size_factor blends acreage and shape, so a single number cannot say
-# WHICH one is holding a patch back. The N5 fixture already carries the
-# exact pair that makes the point: a 20x20 block and a 20x5 sliver on
-# identical ground. Splitting size_factor into its two halves is what lets
-# a narrative say "small" or "awkwardly shaped" instead of guessing.
+# --- N11. shape_factor says "awkwardly shaped" on its own -------------
+# THIS SECTION USED TO ASSERT A DECOMPOSITION THAT NO LONGER EXISTS.
+# size_factor blended acreage with compactness, so a single number could
+# not say which half was holding a patch back, and area_score /
+# compactness_score were published to resolve it. The acreage half is gone
+# -- it measured a block against a reference acreage this pipeline chose
+# rather than against the ground -- so the factor IS the shape, and the
+# question the two sub-scores answered cannot be asked any more.
+#
+# What survives is the comparison that made the point, now stated on the
+# factor itself: the N5 fixture's 20x20 block and 20x5 sliver sit on
+# identical ground, and the sliver must read as substantially worse SHAPE
+# while the two 20x20 blocks read identically.
 
 for _p in nd_fac_patches:
-    for _name in ("area_score", "compactness_score"):
-        assert 0.0 <= _p[_name] <= 100.0, f"patch {_p['id']} {_name} = {_p[_name]} is outside 0-100"
+    assert 0.0 <= _p["factors"]["shape_factor"] <= 100.0, (
+        f"patch {_p['id']} shape_factor = {_p['factors']['shape_factor']} is outside 0-100"
+    )
 
-# The 20x20 block and the 20x20 steep block are the same size and shape --
-# their size halves must match exactly, isolating the comparison below.
-assert _nd_A["area_score"] == _nd_B["area_score"]
-assert _nd_A["compactness_score"] == _nd_B["compactness_score"]
-# Against the sliver: both halves are worse, and compactness is what
-# collapses -- the sliver is not merely smaller, it is a bad shape.
-assert _nd_A["area_score"] > _nd_C["area_score"]
-assert _nd_A["compactness_score"] > _nd_C["compactness_score"]
-assert (_nd_A["compactness_score"] - _nd_C["compactness_score"]) >= 20.0, (
-    "a same-ground sliver must read as substantially less compact than a solid block -- that is the "
-    f"ambiguity these two fields exist to resolve: {_nd_A['compactness_score']} vs "
-    f"{_nd_C['compactness_score']}"
+# The 20x20 block and the 20x20 steep block are the same size and shape, so
+# the factor cannot tell them apart -- which is the point: it measures
+# shape and nothing else, and their slopes differ.
+assert _nd_A["factors"]["shape_factor"] == _nd_B["factors"]["shape_factor"]
+# Against the sliver: the shape collapses. It is not merely smaller ground,
+# it is ground that is harder to work.
+assert (_nd_A["factors"]["shape_factor"] - _nd_C["factors"]["shape_factor"]) >= 20.0, (
+    "a same-ground sliver must read as substantially less compact than a solid block: "
+    f"{_nd_A['factors']['shape_factor']} vs {_nd_C['factors']['shape_factor']}"
 )
+# AND ACREAGE NO LONGER MOVES IT. The 20x20 block is four times the sliver's
+# acreage; nothing in the factor may respond to that except through shape.
+assert _nd_A["area_acres"] > _nd_C["area_acres"]
+for _name in ("area_score", "compactness_score"):
+    assert _name not in _nd_A, (
+        f"{_name} was size_factor's sub-score and must be gone with it -- a factor with one input "
+        "publishes no halves"
+    )
 print(
-    f"narrative_data size decomposition: the 20x20 block reads area {_nd_A['area_score']} / compactness "
-    f"{_nd_A['compactness_score']} and the same-ground sliver area {_nd_C['area_score']} / compactness "
-    f"{_nd_C['compactness_score']} -- both fold into size_factor {_nd_A['factors']['size_factor']} vs "
-    f"{_nd_C['factors']['size_factor']}, which alone could not tell 'small' from 'a sliver'."
+    f"narrative_data shape_factor: the 20x20 block reads {_nd_A['factors']['shape_factor']} and the "
+    f"same-ground sliver {_nd_C['factors']['shape_factor']}, on {_nd_A['area_acres']} vs "
+    f"{_nd_C['area_acres']} acres -- the factor separates them by SHAPE, and area_score / "
+    "compactness_score are gone with the blend they decomposed."
 )
 
 
@@ -1325,7 +1354,7 @@ assert len(_stripped["narrative_data"]["patches"]) == 3                         
 for _p in _stripped["narrative_data"]["patches"]:
     for _needed in (
         "area_acres", "percent_of_parcel", "score", "factors", "rank",
-        "area_score", "compactness_score", "avg_slope_pct", "aspect_available",
+        "avg_slope_pct", "aspect_available", "soil_available",
         "dominant_aspect", "aspect_consistency_pct", "source_region_hydric_pct",
         "elevation_percentile_of_parcel", "elevation_position",
         "hole_count", "hole_acres",
@@ -1379,12 +1408,12 @@ def _band_of(value: float) -> str:
 
 _banded = []
 for _p in nd_fac_patches:
-    for _label, _value in [("score", _p["score"])] + sorted(_p["factors"].items()) + [
-        ("area_score", _p["area_score"]),
-        ("compactness_score", _p["compactness_score"]),
-    ]:
+    for _label, _value in [("score", _p["score"])] + sorted(_p["factors"].items()):
         _banded.append((_p["id"], _label, _value, _band_of(_value)))
-assert len(_banded) == len(nd_fac_patches) * 6
+# The score plus FOUR factors -- slope, shape, aspect and soil. It was the
+# score plus three factors plus size_factor's two sub-scores; the sub-scores
+# are gone and soil is the new fourth.
+assert len(_banded) == len(nd_fac_patches) * 5
 print("narrative_data score bands -- every emitted score and factor on the good/steep/sliver fixture:")
 for _pid, _label, _value, _band in _banded:
     print(f"    patch {_pid}  {_label:<18} {_value:>6} -> {_band}")
@@ -1540,8 +1569,8 @@ assert _e_res_self["narrative_data"] == _e_res_ovr["narrative_data"] == _e_res_n
 )
 assert len(_e_res_self["scored_patches"]) == len(_e_res_ovr["scored_patches"])
 for _e_a, _e_b in zip(_e_res_self["scored_patches"], _e_res_ovr["scored_patches"]):
-    for _e_field in ("id", "rank", "area_acres", "suitability_score", "slope_factor", "size_factor",
-                     "aspect_factor", "representative_elevation_m", "render_fill_area_acres",
+    for _e_field in ("id", "rank", "area_acres", "suitability_score", "slope_factor", "shape_factor",
+                     "aspect_factor", "soil_factor", "representative_elevation_m", "render_fill_area_acres",
                      "source_patch_id", "cells", "geometry_wgs84"):
         assert _e_a[_e_field] == _e_b[_e_field], f"scored patch field '{_e_field}' differs across the override"
     assert _e_a["polygon_utm"].wkb == _e_b["polygon_utm"].wkb
@@ -1898,22 +1927,43 @@ assert _s5_off_patch["soil_components"] is None and _s5_off_patch["drainage_clas
     "a map unit that covers none of this patch's cells leaves both fields None"
 )
 
-# The em-dash path is the WHOLE block still working, not just two null
-# fields: everything else on the patch entry must be unchanged from the run
-# that had soil.
+# THE UNSURVEYED BLOCK SCORES AT THE NEUTRAL VALUE, AND SAYS SO. Soil is a
+# scoring factor now, so "no coverage" can no longer mean "identical patch
+# entry": it means the neutral 0.5 (50.0 on the published scale) with
+# soil_available False beside it, which is what makes the default
+# distinguishable from a genuinely measured mid-value.
+assert _s5_absent["soil_available"] is False
+assert _s5_empty["soil_available"] is False
+assert _s5_off_patch["soil_available"] is False
+assert _s5_absent["factors"]["soil_factor"] == 50.0, (
+    "a block with no drainage class under it scores the NEUTRAL soil factor -- neither penalised nor "
+    f"rewarded for a check that did not run: {_s5_absent['factors']['soil_factor']}"
+)
+assert _s_zone["soil_available"] is True and _s_zone["drainage_class"] is not None
+
+# ...AND NOTHING THE SOIL DOES NOT SPEAK TO MOVES WITH IT. Supplying the
+# soil layers may change the soil fields, the soil factor, the availability
+# flag and the composite they feed; every other reading on the patch entry
+# is about the terrain and must be byte-identical.
 _s5_without = dict(_s5_absent)
 _s5_with = dict(_s_zone)
-for _field in ("soil_components", "drainage_class"):
+for _field in ("soil_components", "drainage_class", "soil_available", "score"):
     _s5_without.pop(_field)
     _s5_with.pop(_field)
+_s5_without["factors"] = {
+    k: v for k, v in _s5_without["factors"].items() if k != "soil_factor"
+}
+_s5_with["factors"] = {k: v for k, v in _s5_with["factors"].items() if k != "soil_factor"}
 assert _s5_without == _s5_with, (
-    "supplying soil must change NOTHING else on a patch entry -- these two fields are a read, "
-    f"not a gate. Differing: {[k for k in _s5_with if _s5_with[k] != _s5_without[k]]}"
+    "supplying soil must move the soil fields, the soil factor and the composite -- and NOTHING else. "
+    f"Differing: {[k for k in _s5_with if _s5_with[k] != _s5_without[k]]}"
 )
 print(
-    "S5. NO COVERAGE: empty layers, omitted layers, and coverage that misses this patch all report "
-    "None for both fields (never [] or 0.0), and every other field on the patch entry is byte-identical "
-    "to the run that had soil."
+    "S5. NO COVERAGE: empty layers, omitted layers, and coverage that misses this patch all report None "
+    f"for both soil fields (never [] or 0.0), score the NEUTRAL soil factor "
+    f"{_s5_absent['factors']['soil_factor']} with soil_available False beside it, and leave every "
+    f"terrain reading on the entry byte-identical to the run that had soil (score "
+    f"{_s5_absent['score']} unsurveyed vs {_s_zone['score']} on {_s_zone['drainage_class']!r})."
 )
 
 

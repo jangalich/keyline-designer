@@ -39,8 +39,11 @@ from feature_schema import validate_feature_collection
 from production_area import cluster_and_gate, compute_step1_eligible_cells
 from production_suitability import (
     ASPECT_FACTOR_WEIGHT,
-    SIZE_FACTOR_WEIGHT,
+    DRAINAGE_CLASS_FACTORS,
+    SHAPE_FACTOR_WEIGHT,
     SLOPE_FACTOR_WEIGHT,
+    SOIL_FACTOR_WEIGHT,
+    _NEUTRAL_FACTOR_VALUE,
     _WEIGHT_SUM,
     production_suitability_to_geojson,
     score_production_areas,
@@ -82,27 +85,102 @@ def _step1_and_patches(dem, boundary, disqualifying_soil_union_utm=None):
     return step1, patches
 
 
-# --- weights: documented, sum to 1.0, soil is NOT one of them ---
+# --- weights: FOUR of them now, summing to 1.0, in the old proportions ---
 
 assert abs(_WEIGHT_SUM - 1.0) < 1e-6, f"suitability factor weights must sum to 1.0, got {_WEIGHT_SUM}"
-assert ASPECT_FACTOR_WEIGHT < SLOPE_FACTOR_WEIGHT and ASPECT_FACTOR_WEIGHT < SIZE_FACTOR_WEIGHT, (
+assert ASPECT_FACTOR_WEIGHT < SLOPE_FACTOR_WEIGHT and ASPECT_FACTOR_WEIGHT < SHAPE_FACTOR_WEIGHT, (
     "aspect must be the minor factor per the feature spec (matters far less than for solar)"
 )
 import production_suitability as ps  # noqa: E402  (kept near use)
 
-assert not hasattr(ps, "SOIL_FACTOR_WEIGHT"), (
-    "soil must NOT be a weighted composite factor -- it's a hard STEP 1 exclusion, not a graded score"
-)
+# SOIL IS A WEIGHTED FACTOR NOW, and this assertion is the inverse of the
+# one that stood here. Production scoring read only terrain -- slope,
+# aspect, area, shape -- so a block on well-drained ground and a block on
+# somewhat poorly drained ground scored identically whenever their slope
+# and shape matched. Drainage is the single most directly relevant thing
+# SSURGO says about production ground, and it is now 0.20 of the composite.
+assert SOIL_FACTOR_WEIGHT == 0.20, SOIL_FACTOR_WEIGHT
+
+# THE OTHER THREE SHRANK PROPORTIONALLY rather than slope holding at 0.55
+# while shape and aspect paid for soil alone. Their RELATIVE shares are
+# exactly what they were -- which is the property this asserts, rather than
+# the three numbers themselves.
+_OLD = {"slope": 0.55, "shape": 0.30, "aspect": 0.15}
+_NEW = {"slope": SLOPE_FACTOR_WEIGHT, "shape": SHAPE_FACTOR_WEIGHT, "aspect": ASPECT_FACTOR_WEIGHT}
+for _a in _OLD:
+    for _b in _OLD:
+        assert abs(_NEW[_a] / _NEW[_b] - _OLD[_a] / _OLD[_b]) < 1e-9, (
+            f"the three terrain factors must keep their relative shares: {_a}:{_b} was "
+            f"{_OLD[_a] / _OLD[_b]}, is {_NEW[_a] / _NEW[_b]}"
+        )
+assert abs(sum(_NEW.values()) - (1.0 - SOIL_FACTOR_WEIGHT)) < 1e-9
+
+# THE AREA SUB-WEIGHT IS GONE, not zeroed, and so is the reference acreage
+# it normalised against -- there is no sub-weight left to set, and no
+# caller can hand a scorer a ceiling it does not measure against.
+for _dead in ("SIZE_FACTOR_WEIGHT", "SIZE_AREA_SUBWEIGHT", "SIZE_SHAPE_SUBWEIGHT",
+              "REFERENCE_MAX_AREA_ACRES", "_size_factor"):
+    assert not hasattr(ps, _dead), (
+        f"{_dead} belonged to the area/shape blend and must be gone with it -- the factor is "
+        "compactness alone and is named shape_factor for it"
+    )
+assert hasattr(ps, "_shape_factor") and hasattr(ps, "_soil_factor")
+
 assert not hasattr(ps, "_carve_soil_from_patch"), "the old continuous-geometry carving machinery must be gone"
 assert not hasattr(ps, "_fetch_disqualifying_soil_union"), (
     "the soil fetch now lives in production_area.py (STEP 1 needs it before clustering) -- "
     "production_suitability.py must not still own a second copy"
 )
-print(f"Factor weights sum to 1.0 ({SLOPE_FACTOR_WEIGHT}+{SIZE_FACTOR_WEIGHT}+{ASPECT_FACTOR_WEIGHT}), aspect is the "
-      "smallest weight, soil is not a weighted factor, and the old carving machinery is gone entirely.")
+print(
+    f"Factor weights sum to 1.0 ({SLOPE_FACTOR_WEIGHT}+{SHAPE_FACTOR_WEIGHT}+{ASPECT_FACTOR_WEIGHT}+"
+    f"{SOIL_FACTOR_WEIGHT}), aspect is the smallest, the three terrain factors keep their old relative "
+    "shares, and the area sub-weight, its reference acreage and _size_factor() are gone entirely."
+)
 
 
-# --- 1. size_factor: compact square outranks an elongated sliver of similar acreage ---
+# --- the drainage mapping: compressed at the top, spread at the bottom ---
+
+_CLASSES = [
+    "very poorly drained", "poorly drained", "somewhat poorly drained",
+    "moderately well drained", "excessively drained", "somewhat excessively drained",
+    "well drained",
+]
+assert set(DRAINAGE_CLASSes := set(DRAINAGE_CLASS_FACTORS)) == set(_CLASSES), sorted(DRAINAGE_CLASSes)
+for _class, _value in DRAINAGE_CLASS_FACTORS.items():
+    assert 0.0 <= _value <= 1.0, (_class, _value)
+
+# The workable end: well drained, somewhat excessively drained and
+# moderately well drained are all fine ground, and the factor says so by
+# separating them narrowly.
+_TOP = [DRAINAGE_CLASS_FACTORS[c] for c in
+        ("well drained", "somewhat excessively drained", "moderately well drained")]
+assert max(_TOP) - min(_TOP) <= 0.20, f"the workable classes must sit close together: {_TOP}"
+# The wet end: this is where the difference changes what a farmer does, and
+# the spacing has to be able to say so.
+assert (DRAINAGE_CLASS_FACTORS["somewhat poorly drained"]
+        - DRAINAGE_CLASS_FACTORS["very poorly drained"]) >= 0.40
+assert (DRAINAGE_CLASS_FACTORS["moderately well drained"]
+        - DRAINAGE_CLASS_FACTORS["somewhat poorly drained"]) > (max(_TOP) - min(_TOP))
+# NOT EVENLY SPACED, which is the whole argument: even spacing would put
+# moderately well drained at 0.5 and well drained at 0.667.
+_even = {c: i / 6 for i, c in enumerate(_CLASSES)}
+assert any(abs(DRAINAGE_CLASS_FACTORS[c] - _even[c]) > 0.05 for c in _CLASSES)
+# Drainage past "well" is droughtiness, not more quality.
+assert DRAINAGE_CLASS_FACTORS["excessively drained"] < DRAINAGE_CLASS_FACTORS["well drained"]
+assert ps._soil_factor("Well Drained") == (1.0, True), "the class is matched case-insensitively"
+assert ps._soil_factor(None) == (_NEUTRAL_FACTOR_VALUE, False)
+assert ps._soil_factor("Subaqueous") == (_NEUTRAL_FACTOR_VALUE, False), (
+    "a class this table does not carry is neutral AND flagged, never guessed onto the scale"
+)
+print(
+    "Drainage mapping: "
+    + ", ".join(f"{c}={DRAINAGE_CLASS_FACTORS[c]}" for c in reversed(_CLASSES))
+    + f"; a missing or unrecognised class scores the neutral {_NEUTRAL_FACTOR_VALUE} with its "
+    "availability flag False."
+)
+
+
+# --- 1. shape_factor: compact square outranks an elongated sliver of similar acreage ---
 
 rows, cols = 30, 90
 array = _steep_background(rows, cols)
@@ -119,22 +197,27 @@ step1_shape, shape_patches = _step1_and_patches(dem_shape, full_extent_shape)
 assert len(shape_patches) == 2, f"expected 2 isolated clusters, got {len(shape_patches)}"
 
 scored_shape = score_production_areas(shape_patches, dem_shape, step1_shape)
-square = next(p for p in scored_shape if p["compactness_score"] == max(x["compactness_score"] for x in scored_shape))
+square = next(p for p in scored_shape if p["shape_factor"] == max(x["shape_factor"] for x in scored_shape))
 sliver = next(p for p in scored_shape if p is not square)
 
 assert abs(square["area_acres"] - sliver["area_acres"]) / square["area_acres"] < 0.15, (
     "the two regions should be close in acreage -- the test isolates SHAPE, not size"
 )
-assert square["compactness_score"] > sliver["compactness_score"]
-assert square["size_factor"] > sliver["size_factor"], "higher compactness should lift size_factor at equal acreage"
+assert square["shape_factor"] > sliver["shape_factor"]
 assert square["suitability_score"] > sliver["suitability_score"]
 assert square["rank"] == 1 and sliver["rank"] == 2
 assert square["soil_carved_acres"] == 0.0 and sliver["soil_carved_acres"] == 0.0, "no soil union was passed -- nothing should be carved"
+# THE FACTOR IS COMPACTNESS AND NOTHING ELSE, asserted rather than assumed:
+# shape_factor must be exactly the Polsby-Popper score of the block's own
+# cell footprint, with no acreage term folded in.
+for _p in scored_shape:
+    assert _p["shape_factor"] == round(ps._shape_factor(_p["cells"], dem_shape), 3)
+    assert "area_score" not in _p and "compactness_score" not in _p and "size_factor" not in _p
 print(
-    f"Compact square (compactness={square['compactness_score']}, {square['area_acres']} ac, "
+    f"Compact square (shape_factor={square['shape_factor']}, {square['area_acres']} ac, "
     f"score={square['suitability_score']}) outranks the elongated sliver "
-    f"(compactness={sliver['compactness_score']}, {sliver['area_acres']} ac, score={sliver['suitability_score']}) "
-    "despite similar acreage."
+    f"(shape_factor={sliver['shape_factor']}, {sliver['area_acres']} ac, score={sliver['suitability_score']}) "
+    "despite similar acreage, and the factor is the compactness score itself -- no area term, no sub-scores."
 )
 
 
@@ -160,7 +243,7 @@ north = next(p for p in scored_aspect if p["aspect_deg"] is not None and abs(p["
 
 assert south["aspect_factor"] == 1.0 and north["aspect_factor"] == 0.0
 assert abs(south["slope_factor"] - north["slope_factor"]) < 1e-6
-assert abs(south["size_factor"] - north["size_factor"]) < 1e-6
+assert abs(south["shape_factor"] - north["shape_factor"]) < 1e-6
 assert south["suitability_score"] > north["suitability_score"]
 
 score_gap = south["suitability_score"] - north["suitability_score"]
@@ -183,14 +266,37 @@ clipped_square = next(p for p in clipped_patches if p["id"] == square["id"])
 assert clipped_square["area_acres"] < square["area_acres"]
 
 clipped_scored = score_production_areas([dict(clipped_square)], dem_shape, step1_clipped)
-assert clipped_scored[0]["area_score"] < square["area_score"], (
-    "clipped area_score should be lower than the unclipped square's -- confirms scoring reflects the "
-    "ON-PARCEL cells STEP 1/STEP 3 already clipped to"
+
+# THE CLIP IS REFLECTED IN THE CELLS AND THE ACREAGE -- STEP 1/STEP 3 did
+# it, and this module scores what they hand it.
+assert len(clipped_scored[0]["cells"]) < len(square["cells"])
+assert clipped_scored[0]["area_acres"] < square["area_acres"]
+
+# AND LOSING ACREAGE NO LONGER LOSES SCORE BY ITSELF. This section used to
+# assert the opposite -- that a clipped block's area_score fell -- which was
+# the behaviour the rescoring removed: the block was penalised for being
+# small relative to a ceiling this module chose, on a 13-acre parcel where
+# nothing can approach it. Every factor here is now a statement about the
+# ground rather than about the block's size, so the only thing the clip may
+# move is the SHAPE of what is left.
+assert clipped_scored[0]["slope_factor"] == square["slope_factor"]
+assert clipped_scored[0]["soil_factor"] == square["soil_factor"]
+_expected = round(
+    (square["suitability_score"] - SHAPE_FACTOR_WEIGHT * square["shape_factor"] * 100.0)
+    + SHAPE_FACTOR_WEIGHT * clipped_scored[0]["shape_factor"] * 100.0,
+    1,
+)
+assert abs(clipped_scored[0]["suitability_score"] - _expected) < 0.15, (
+    "with slope, aspect and soil unchanged, the clipped block's score may differ from the whole "
+    f"block's ONLY by the shape factor's own contribution: {clipped_scored[0]['suitability_score']} "
+    f"vs {_expected}"
 )
 print(
-    f"Clipping the compact square to its west half correctly shrinks both its reported area_acres "
-    f"({square['area_acres']} -> {clipped_square['area_acres']}) AND its scored area_score "
-    f"({square['area_score']} -> {clipped_scored[0]['area_score']})."
+    f"Clipping the compact square to its west half shrinks its cells ({len(square['cells'])} -> "
+    f"{len(clipped_scored[0]['cells'])}) and its acreage ({square['area_acres']} -> "
+    f"{clipped_square['area_acres']}), and moves its score ({square['suitability_score']} -> "
+    f"{clipped_scored[0]['suitability_score']}) by the shape factor's contribution alone -- losing "
+    "acreage is no longer losing score."
 )
 
 
@@ -293,7 +399,7 @@ print("confidence_notes is identical between scored_patches and the GeoJSON feat
 geojson = production_suitability_to_geojson(scored_split)
 validate_feature_collection(geojson)
 required_props = {
-    "suitability_score", "slope_factor", "size_factor", "aspect_factor",
+    "suitability_score", "slope_factor", "shape_factor", "aspect_factor", "soil_factor",
     "area_acres", "representative_elevation_m", "rank",
     "soil_carved_acres", "soil_carved_pct", "soil_data_available", "source_patch_id",
 }
@@ -302,14 +408,14 @@ for feature in geojson["features"]:
     assert required_props.issubset(feature["properties"].keys()), (
         f"missing required properties: {required_props - feature['properties'].keys()}"
     )
-    assert "soil_factor" not in feature["properties"], "soil must not appear as a graded factor property"
     score = feature["properties"]["suitability_score"]
     assert 0.0 <= score <= 100.0
-    for factor_name in ("slope_factor", "size_factor", "aspect_factor"):
+    for factor_name in ("slope_factor", "shape_factor", "aspect_factor", "soil_factor"):
         assert 0.0 <= feature["properties"][factor_name] <= 1.0
     assert feature["properties"]["soil_carved_acres"] > 0
 print("production_suitability_to_geojson output is schema-valid, layer='production_area_candidate', "
-      "with soil_carved_acres/soil_carved_pct/source_patch_id and no soil_factor property.")
+      "carrying all four factors (soil_factor among them) plus soil_carved_acres/soil_carved_pct/"
+      "source_patch_id.")
 
 
 # --- ranking: rank 1 always has the highest suitability_score ---
