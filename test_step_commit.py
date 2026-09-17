@@ -1630,6 +1630,26 @@ with Harness() as h:
     features = _collection([proposals[0], drawn])
     provenance = {proposals[0]["id"]: "generated", "drawn-1": "user_added"}
 
+    # SCORING THE DRAWN BLOCK SITS BETWEEN THE TWO, and it is measured here
+    # rather than in its own section because the claim is about this exact
+    # sequence: the branch that scores a drawn block put a new server call
+    # on the path between a generate and a commit, and the step's
+    # zero-network guarantee has to survive it. Every input the scorer
+    # reads is on the generate's own result (its `run_inputs`).
+    before_score = h.total_network_calls
+    scored_drawn = step_orchestrator.score_placed_feature(
+        s.id, "landform", s.store,
+        params={"ring": [list(point) for point in HYDRIC_ZONE_RING]},
+        fetch_cache=s.fetch_cache, cache=s.cache,
+    )
+    score_network = h.total_network_calls - before_score
+    assert score_network == 0, (
+        f"scoring a block the user drew must make ZERO network calls -- it measures the drawn ring "
+        f"against the run already in memory. Got {score_network}"
+    )
+    assert scored_drawn["properties"]["score"] is not None
+    assert scored_drawn["properties"]["block_origin"] == "user_drawn"
+
     before_commit = h.total_network_calls
     s.commit(features, provenance, base_revision=0)
     commit_network = h.total_network_calls - before_commit
@@ -1653,7 +1673,8 @@ with Harness() as h:
     assert h.rehydrate.call_count >= 1, "the commit did rehydrate"
 
 print(
-    f"13. NO NETWORK: {commit_network} network calls during the commit and "
+    f"13. NO NETWORK: {score_network} network calls scoring a drawn block "
+    f"(score {scored_drawn['properties']['score']}/100), {commit_network} during the commit and "
     f"{reopen_network} during the reopen, summed over every mocked boundary "
     f"(parcel fetch, two SDA queries, two canopy bindings, two road bindings). "
     f"The reopen re-ran the generate "

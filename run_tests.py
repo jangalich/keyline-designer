@@ -58,6 +58,10 @@ FULL_ONLY = (
     "test_roads_step_inputs.py",
     "test_structures_step.py",
     "test_step_commit.py",
+    # Imports test_step_commit.py for its harness (the reference parcel, its
+    # DEM and its SSURGO rows) and so pays that file's own runtime before it
+    # starts. Measured at 24.6 s, which is the full tier by this list's rule.
+    "test_production_rescoring.py",
     "test_trees_step.py",
     "test_session_api.py",
     "test_session_manager.py",

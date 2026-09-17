@@ -252,9 +252,16 @@ assert isinstance(_placement, step_registry.Placement)
 assert _placement.input == "site" and _placement.shape == step_registry.INPUT_SHAPE_LON_LAT
 assert _placement.score == "solar_suitability.score_placed_structure_site"
 assert _placement.feature == "wire_translation.placed_structure_site_to_feature"
+# LANDFORM DECLARES ONE TOO, since the branch that scores a block the user
+# drew -- a ring rather than a point, measured by production's own scorer.
+# The other four steps declare none: their users author nothing the server
+# is asked to measure before a commit.
 for _other in step_registry.STEP_REGISTRY.values():
-    if _other.step_id != "structures":
-        assert _other.placement is None
+    if _other.step_id not in ("structures", "landform"):
+        assert _other.placement is None, _other.step_id
+_landform_placement = step_registry.get_step("landform").placement
+assert _landform_placement.input == "ring"
+assert _landform_placement.shape == step_registry.INPUT_SHAPE_RING
 
 # CONSTANTS AGREE with the modules that own them.
 assert solar_suitability.MAX_CANDIDATES == 3

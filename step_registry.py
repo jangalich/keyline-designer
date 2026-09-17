@@ -643,12 +643,16 @@ class UserInput:
         return self.forward_as or self.name
 
 
-# The vocabulary of UserInput.shape. ONE value today, and that is honest:
-# the access point is the only user input any step collects. A second
-# shape is added here WITH its check in step_orchestrator, never as a bare
-# string that nothing enforces.
+# The vocabulary of UserInput.shape and Placement.shape. TWO values, and
+# each was added here WITH its check in step_orchestrator (_INPUT_SHAPE_
+# CHECKS), never as a bare string that nothing enforces.
+#
+# lon_lat is a single point -- the roads access point, the placed structure
+# site. ring is a closed ring of them, which is what a person draws: the
+# landform step measures a block the user drew, and the ring is the block.
 INPUT_SHAPE_LON_LAT = "lon_lat"
-VALID_INPUT_SHAPES = (INPUT_SHAPE_LON_LAT,)
+INPUT_SHAPE_RING = "ring"
+VALID_INPUT_SHAPES = (INPUT_SHAPE_LON_LAT, INPUT_SHAPE_RING)
 
 
 @dataclass(frozen=True)
@@ -1055,6 +1059,31 @@ LANDFORM = StepDefinition(
         # eligible ground, so the gates it may knowingly cross ARE its
         # cautions.
         crossings=None,
+    ),
+    # THE USER DRAWS A BLOCK AND THE SERVER MEASURES IT, on the same
+    # instrument the suggestions were measured on. The drawn ring is not a
+    # generate input -- the generate never sees it, and the block is drawn
+    # AFTER the run it is compared against exists -- so it is a Placement,
+    # the same third kind of authorship structures introduced for a placed
+    # site. See Placement, and production_area_ceiling.score_drawn_
+    # production_block() for why production scores a drawn shape where
+    # trees deliberately does not (trees has a suitability FLOOR; production
+    # has gates and a band that runs to zero).
+    placement=Placement(
+        input="ring",
+        shape=INPUT_SHAPE_RING,
+        score="production_area_ceiling.score_drawn_production_block",
+        feature="wire_translation.drawn_production_block_to_feature",
+        why=(
+            "A drawn block reported no score and the panel printed an em "
+            "dash for it, which reads as a failure rather than as an "
+            "absence. Every factor is derivable from the block's own cells "
+            "-- slope and aspect off the cached DEM, shape off the polygon, "
+            "drainage off the cached soil geometries -- so the measurement "
+            "was available and withheld. Scoring is a READ: nothing is "
+            "persisted, the drawn block holds no slot, and the same ring can "
+            "be asked about any number of times."
+        ),
     ),
     # NONE. The landform step runs on the traced boundary alone -- the same
     # reason /api/production-zones takes no access_point: nothing here routes

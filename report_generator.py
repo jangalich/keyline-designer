@@ -1501,8 +1501,10 @@ def _format_production_areas_summary(production_narrative: Optional[dict]) -> st
             f"  - Patch {patch['id'] + 1} (rank {patch['rank']}): {patch['area_acres']} acres "
             f"({patch['percent_of_parcel']}% of parcel), in the parcel's "
             f"{patch['position_in_parcel']}, score {patch['score']}/100 "
-            f"(slope {patch['factors']['slope_factor']}, size {patch['factors']['size_factor']}, "
-            f"aspect {patch['factors']['aspect_factor']}); median slope {patch['slope_median_pct']}% "
+            f"(slope {patch['factors']['slope_factor']}, shape {patch['factors']['shape_factor']}, "
+            f"aspect {patch['factors']['aspect_factor']}, soil {patch['factors']['soil_factor']}"
+            f"{'' if patch.get('soil_available', True) else ', not surveyed'}); "
+            f"median slope {patch['slope_median_pct']}% "
             f"(range {patch['slope_min_pct']}-{patch['slope_max_pct']}%); {aspect_note}"
             f"{percentile_note}{hydric_note}{hole_note}."
         )
