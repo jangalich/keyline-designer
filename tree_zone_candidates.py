@@ -289,9 +289,20 @@ from production_area_ceiling import (
     # the full parcel's low-to-high range is not recoverable from
     # its output.
     _on_parcel_cell_mask,
+    # The parcel's low-to-high elevation range, and the projection of a
+    # ring the user drew into the DEM's CRS -- both imported for the same
+    # layering reason as the two above. score_drawn_tree_zone() needs the
+    # first to place a drawn zone in the parcel's relief and the second to
+    # get the ring onto the grid at all, and production's copies are the
+    # ones every other drawn shape in this pipeline already goes through:
+    # a second projection here would be a second answer to "where is this
+    # ring", which is exactly the drift the imports above prevent for
+    # "where in the parcel is it".
+    _drawn_ring_to_polygon_utm,
+    _parcel_elevation_range,
     identify_optimized_production_areas,
 )
-from raster_grid import SQUARE_METERS_PER_ACRE, binary_dilate, cell_union_footprint, connected_components, pixel_center_xy
+from raster_grid import SQUARE_METERS_PER_ACRE, binary_dilate, cell_union_footprint, cells_in_polygon, connected_components, pixel_center_xy
 from road_corridors import NO_ROAD_CORRIDOR, identify_road_corridor_candidates
 from soil_data import (
     coordinates_to_wkt_polygon,
@@ -1294,6 +1305,71 @@ def compute_tree_search_space(
     return search_space, claimed_union
 
 
+def _cell_factor_values(
+    point,
+    raw_slope_pct: float,
+    prime_prepared,
+    prime_farmland_data_available: bool,
+    hydric_prepared,
+    hydric_geom,
+    hydric_data_available: bool,
+    stream_geom,
+    stream_data_available: bool,
+    slope_reference_pct: float,
+    stream_proximity_reference_meters: float,
+) -> tuple[float, float, float, float]:
+    """
+    THE FOUR FACTORS FOR ONE CELL CENTER -- (slope, soil marginality,
+    hydric overlap, stream proximity), each 0-1, higher meaning more
+    marginal for production and therefore better for tree cover.
+
+    EXTRACTED SO THERE IS ONE INSTRUMENT AND NOT TWO. It was inline in
+    score_tree_search_space()'s per-cell loop and had exactly one caller;
+    score_drawn_tree_zone() is the second, and a zone the user drew is
+    only comparable with the suggestions beside it if the same arithmetic
+    -- the same neutral fallback, the same containment tests, the same
+    two reference distances -- produced both. A copy of these fourteen
+    lines in the drawn path would be the kind of drift no reader could
+    see: both numbers would look like scores.
+
+    `prime_prepared` / `hydric_prepared` are shapely prepared geometries
+    or None, and `hydric_geom` is the unprepared hydric union (or None) --
+    prepared geometries answer `contains` and nothing else, and the
+    drawn path needs no distance off either of the two soil unions, so
+    only the stream union is carried unprepared. A None union under a
+    True availability flag is the real answer "checked, found none"; the
+    flag being False is "could not check at all" and takes
+    _NEUTRAL_FACTOR_VALUE, which is the whole reason the flags are
+    separate arguments from the geometries.
+
+    PURE. No fetch, no grid, no state -- the caller has already read the
+    slope off its own array and built the point.
+    """
+    slope = _slope_factor(raw_slope_pct, slope_reference_pct)
+
+    if not prime_farmland_data_available:
+        soil_marginality = _NEUTRAL_FACTOR_VALUE
+    elif prime_prepared is not None and prime_prepared.contains(point):
+        soil_marginality = 0.0
+    else:
+        soil_marginality = 1.0
+
+    if not hydric_data_available:
+        hydric_overlap = _NEUTRAL_FACTOR_VALUE
+    elif hydric_prepared is not None and hydric_prepared.contains(point):
+        hydric_overlap = 1.0
+    else:
+        hydric_overlap = 0.0
+
+    if not stream_data_available:
+        stream_proximity = _NEUTRAL_FACTOR_VALUE
+    else:
+        distance_m = point.distance(stream_geom) if stream_geom is not None else None
+        stream_proximity = _stream_proximity_factor(distance_m, stream_proximity_reference_meters)
+
+    return slope, soil_marginality, hydric_overlap, stream_proximity
+
+
 def score_tree_search_space(
     dem: dict,
     search_space_utm,
@@ -1447,12 +1523,13 @@ def score_tree_search_space(
     # this function to run at all) and the mask is one vectorised
     # contains_xy() call over the grid. Exactly production_area_ceiling.
     # py's own computation, reached through the same imported helper.
-    parcel_elevations = array[_on_parcel_cell_mask(dem, boundary_polygon_utm)]
-    parcel_elevations = parcel_elevations[~np.isnan(parcel_elevations)]
-    if parcel_elevations.size and float(parcel_elevations.max()) > float(parcel_elevations.min()):
-        parcel_elevation_range = (float(parcel_elevations.min()), float(parcel_elevations.max()))
-    else:
-        parcel_elevation_range = None
+    # THROUGH PRODUCTION'S OWN FUNCTION, not a second copy of its four
+    # lines. score_drawn_tree_zone() places a zone the user drew on this
+    # same axis, and a drawn zone reading "upper field" against a
+    # differently-computed range than the suggestion beside it would be two
+    # rows of one panel disagreeing about the same hill -- which is exactly
+    # what _parcel_elevation_range() exists on that side to prevent.
+    parcel_elevation_range = _parcel_elevation_range(dem, boundary_polygon_utm)
 
     search_space_prepared = prep(search_space_utm)
     prime_prepared = (
@@ -1483,27 +1560,21 @@ def score_tree_search_space(
                 continue
 
             raw_slope = float(slope_pct_grid[r, c]) if not np.isnan(slope_pct_grid[r, c]) else 0.0
-            sf = _slope_factor(raw_slope, slope_reference_pct)
-
-            if not prime_farmland_data_available:
-                sm = _NEUTRAL_FACTOR_VALUE
-            elif prime_prepared is not None and prime_prepared.contains(point):
-                sm = 0.0
-            else:
-                sm = 1.0
-
-            if not hydric_data_available:
-                ho = _NEUTRAL_FACTOR_VALUE
-            elif hydric_prepared is not None and hydric_prepared.contains(point):
-                ho = 1.0
-            else:
-                ho = 0.0
-
-            if not stream_data_available:
-                sp = _NEUTRAL_FACTOR_VALUE
-            else:
-                distance_m = point.distance(stream_geom) if stream_geom is not None else None
-                sp = _stream_proximity_factor(distance_m, stream_proximity_reference_meters)
+            # THE SAME FOUR-FACTOR READING A DRAWN ZONE GETS, through the
+            # same function. See _cell_factor_values().
+            sf, sm, ho, sp = _cell_factor_values(
+                point,
+                raw_slope,
+                prime_prepared,
+                prime_farmland_data_available,
+                hydric_prepared,
+                hydric_union,
+                hydric_data_available,
+                stream_geom,
+                stream_data_available,
+                slope_reference_pct,
+                stream_proximity_reference_meters,
+            )
 
             composite = (
                 HYDRIC_OVERLAP_FACTOR_WEIGHT * ho
@@ -2152,57 +2223,83 @@ def build_narrative_data(
         "zones": [
             {
                 "rank": int(patch["rank"]),
-                # WHERE this zone sits on the map -- the map legend labels
-                # feature CLASSES ("Tree Crop Areas"), not individual
-                # features, so a cardinal position is what lets a
-                # narrative tell several zones apart. Measured on the
-                # zone's DRAWN geometry (render_fill_polygon_utm -- for
-                # tree zones identical to polygon_utm by design).
-                "position_in_parcel": _position_in_parcel(patch["render_fill_polygon_utm"], boundary_polygon_utm),
-                "area_acres": _round1(patch["area_acres"]),
-                "score": _round1(patch["tree_suitability_score"]),
-                "avg_slope_pct": _round1(patch["avg_slope_pct"]),
-                # The SAME measurement production_area_ceiling.py and
-                # water_candidate_zones.py publish, under the SAME name --
-                # the label a panel prints is "median slope %" for all
-                # three, and a third spelling for one measurement is a
-                # reader's problem, not a layer's prerogative. Read off
-                # the patch; score_tree_search_space() took it from the
-                # same per-cell array avg_slope_pct is the mean of.
-                "slope_median_pct": _round1(patch["slope_median_pct"]),
-                # WHERE THIS ZONE SITS IN THE PARCEL'S ELEVATION RANGE,
-                # as a number and then as words. Two rows, both emitted:
-                # the report quotes the percentile and explains the axis
-                # inline, a panel has one narrow column and prints the
-                # word. None on a parcel with no relief -- and the word
-                # is None there too, NEVER a default, because on flat
-                # ground "upper" and "lower" name nothing a reader could
-                # tell from a measurement.
-                #
-                # THE BANDS ARE PRODUCTION'S, IMPORTED. Trees is
-                # downstream of production, production's module docstring
-                # declares elevation position defined once for the whole
-                # pipeline, and _elevation_position() reads the constant
-                # rather than hardcoding the cuts -- so retuning the
-                # bands there retunes this row with them.
-                "elevation_percentile_of_parcel": patch["elevation_percentile_of_parcel"],
-                "elevation_position": _elevation_position(patch["elevation_percentile_of_parcel"]),
-                # WHAT THIS GROUND IS GOOD FOR, as words with no values --
-                # the benefits this zone's own factors EARNED, each behind
-                # its data-availability gate. The mapping and the gate rule
-                # live in marginal_benefits(); a consumer renders the list
-                # and holds neither. An EMPTY list is a real answer ("this
-                # zone earned none"), and a panel renders no section for it.
-                "marginal_benefits": marginal_benefits(patch),
-                "factors": {
-                    "hydric_overlap": _round1(patch["hydric_overlap_factor"] * 100.0),
-                    "slope": _round1(patch["slope_factor"] * 100.0),
-                    "soil_marginality": _round1(patch["soil_marginality_factor"] * 100.0),
-                    "stream_proximity": _round1(patch["stream_proximity_factor"] * 100.0),
-                },
+                **_zone_row(patch, boundary_polygon_utm),
             }
             for patch in sorted(patches, key=lambda p: p["rank"])
         ],
+    }
+
+
+def _zone_row(patch: dict, boundary_polygon_utm: Polygon) -> dict:
+    """
+    ONE ZONE'S ROW of the narrative block's `zones` table -- everything a
+    consumer reads about a scored zone EXCEPT its rank.
+
+    RANK IS THE CALLER'S, and it is left out for the reason this function
+    was pulled out of build_narrative_data() at all: a zone the USER DREW
+    gets this row too (see score_drawn_tree_zone()), and a rank is a
+    position among candidates it was never one of. Everything else on this
+    row is a measurement of ground, which a drawn zone has exactly as much
+    of as a suggestion does.
+
+    ONE BUILDER, SO ONE ROW SHAPE. The panel shows a drawn zone and a
+    suggested one in the same column and invites the reader to compare
+    them; two functions composing two rows that happen to agree today is
+    the arrangement in which that stops being true without anyone
+    noticing. `patch` is a score_tree_search_space() entry (the drawn
+    scorer builds one in that same shape, deliberately).
+
+    PURE. No fetch, and nothing on `patch` is modified.
+    """
+    return {
+    # WHERE this zone sits on the map -- the map legend labels
+    # feature CLASSES ("Tree Crop Areas"), not individual
+    # features, so a cardinal position is what lets a
+    # narrative tell several zones apart. Measured on the
+    # zone's DRAWN geometry (render_fill_polygon_utm -- for
+    # tree zones identical to polygon_utm by design).
+    "position_in_parcel": _position_in_parcel(patch["render_fill_polygon_utm"], boundary_polygon_utm),
+    "area_acres": _round1(patch["area_acres"]),
+    "score": _round1(patch["tree_suitability_score"]),
+    "avg_slope_pct": _round1(patch["avg_slope_pct"]),
+    # The SAME measurement production_area_ceiling.py and
+    # water_candidate_zones.py publish, under the SAME name --
+    # the label a panel prints is "median slope %" for all
+    # three, and a third spelling for one measurement is a
+    # reader's problem, not a layer's prerogative. Read off
+    # the patch; score_tree_search_space() took it from the
+    # same per-cell array avg_slope_pct is the mean of.
+    "slope_median_pct": _round1(patch["slope_median_pct"]),
+    # WHERE THIS ZONE SITS IN THE PARCEL'S ELEVATION RANGE,
+    # as a number and then as words. Two rows, both emitted:
+    # the report quotes the percentile and explains the axis
+    # inline, a panel has one narrow column and prints the
+    # word. None on a parcel with no relief -- and the word
+    # is None there too, NEVER a default, because on flat
+    # ground "upper" and "lower" name nothing a reader could
+    # tell from a measurement.
+    #
+    # THE BANDS ARE PRODUCTION'S, IMPORTED. Trees is
+    # downstream of production, production's module docstring
+    # declares elevation position defined once for the whole
+    # pipeline, and _elevation_position() reads the constant
+    # rather than hardcoding the cuts -- so retuning the
+    # bands there retunes this row with them.
+    "elevation_percentile_of_parcel": patch["elevation_percentile_of_parcel"],
+    "elevation_position": _elevation_position(patch["elevation_percentile_of_parcel"]),
+    # WHAT THIS GROUND IS GOOD FOR, as words with no values --
+    # the benefits this zone's own factors EARNED, each behind
+    # its data-availability gate. The mapping and the gate rule
+    # live in marginal_benefits(); a consumer renders the list
+    # and holds neither. An EMPTY list is a real answer ("this
+    # zone earned none"), and a panel renders no section for it.
+    "marginal_benefits": marginal_benefits(patch),
+    "factors": {
+        "hydric_overlap": _round1(patch["hydric_overlap_factor"] * 100.0),
+        "slope": _round1(patch["slope_factor"] * 100.0),
+        "soil_marginality": _round1(patch["soil_marginality_factor"] * 100.0),
+        "stream_proximity": _round1(patch["stream_proximity_factor"] * 100.0),
+    },
     }
 
 
@@ -2569,6 +2666,40 @@ def identify_tree_zone_candidates(
         # rides here, beside `patches`, where the other internal-shaped
         # values live.
         "dropped_invalid": dropped_invalid,
+        # WHAT A ZONE THE USER DREW IS MEASURED AGAINST -- production_area_
+        # ceiling's and solar_suitability's own `run_inputs` convention,
+        # here for the reason it exists there: score_drawn_tree_zone() must
+        # measure a drawn ring on THIS run's ground, against the same soil,
+        # hydric and stream unions and the same two reference distances the
+        # suggestions were scored against, or the two numbers are not
+        # comparable and the panel printing them in one column is a lie.
+        #
+        # THE AVAILABILITY FLAGS TRAVEL WITH THE UNIONS, and they have to:
+        # a None union under a True flag is "checked, found none" and scores
+        # a real zero, while the same None under a False flag is "could not
+        # check" and takes the neutral 0.5 that claims no benefit. A drawn
+        # zone reading the geometry without the flag would award benefits
+        # off data nobody fetched -- see marginal_benefits().
+        #
+        # REFERENCES, NOT COPIES. Every value here is already held for this
+        # run; this dict is a name for them, and it fetches nothing itself.
+        "run_inputs": {
+            "dem": dem,
+            "boundary_polygon_utm": boundary_polygon_utm,
+            "prime_farmland_union": prime_farmland_union,
+            "prime_farmland_data_available": prime_farmland_data_available,
+            "hydric_union": hydric_union,
+            "hydric_data_available": hydric_data_available,
+            "stream_union": stream_union,
+            "stream_data_available": stream_data_available,
+            # THE VALUES THE RUN ACTUALLY USED -- a score_kwargs override or
+            # this module's defaults, read the same way narrative_data reads
+            # the floor it reports.
+            "slope_reference_pct": score_kwargs.get("slope_reference_pct", TREE_SLOPE_REFERENCE_PCT),
+            "stream_proximity_reference_meters": score_kwargs.get(
+                "stream_proximity_reference_meters", STREAM_PROXIMITY_REFERENCE_METERS
+            ),
+        },
         "narrative_data": build_narrative_data(
             patches,
             boundary_polygon_utm,
@@ -2587,6 +2718,275 @@ def identify_tree_zone_candidates(
             min_area_acres=score_kwargs.get("min_area_acres", MIN_TREE_ZONE_ACRES),
             dropped_invalid_count=len(dropped_invalid),
         ),
+    }
+
+
+# ======================================================================
+# A zone the user DREW
+# ======================================================================
+
+# The internal id a drawn zone is measured under.
+#
+# NEGATIVE ON PURPOSE, and never emitted. score_tree_search_space()
+# numbers its components from 0 upward and the commit path allocates a
+# drawn zone an id above every id in the same commit, so no real zone can
+# hold this one; it exists because the patch shape carries an id and a
+# drawn zone has to be handed one to be measured by the same code. It is
+# stripped before the row goes anywhere -- see score_drawn_tree_zone().
+_DRAWN_ZONE_ID = -1
+
+# The tag that says which kind of zone a mixed list is looking at --
+# production's `block_origin` value, under trees' own key. A consumer
+# that shows generated and drawn zones in one column reads this rather
+# than inferring the difference from a missing rank.
+ZONE_ORIGIN_USER_DRAWN = "user_drawn"
+
+
+def score_drawn_tree_zone(ring, result: dict) -> dict:
+    """
+    A zone the USER DREW, measured against the run that produced `result`
+    -- identify_tree_zone_candidates()'s own return dict -- ON THE SAME
+    INSTRUMENT as the suggestions beside it, and directly comparable to
+    them.
+
+    WHY IT IS SCORED AT ALL, having not been. A drawn tree zone reported
+    no score, and the panel said so in words: "not scored: drawn by hand,
+    no factor measured". The reason was MIN_TREE_SUITABILITY_SCORE -- a
+    real floor every generated candidate has to clear, so a drawn zone
+    scoring 22 would read as scored BADLY rather than as unscored, and
+    the user would have no way to tell the two apart because the floor
+    was never on screen.
+
+    WHAT CHANGED IS THAT LAST CLAUSE. The floor was a row in the panel
+    when the argument was made; the panel dropped it, along with the
+    factor decomposition, when it stopped answering "how was this number
+    computed" and started answering "what is this ground good for". So
+    31.0 is no longer a number the reader sees, and "22" beside a
+    suggestion's "58" now reads as exactly what it is -- this ground
+    scores lower than the ones the pipeline found, on the same axis.
+    (The same reasoning ran the other way for production, which turned
+    out to have no floor at all and had borrowed this step's: see
+    production_area_ceiling.score_drawn_production_block().)
+
+    AND THE BENEFITS ARE THE BIGGER GAIN. `marginal_benefits` is the most
+    useful thing this step publishes -- erosion control, nutrient
+    deposition, stream protection, each earned by a factor above zero
+    whose data was genuinely fetched -- and it is computed FROM the
+    factors. An unscored zone has no factors, so it earned nothing, so
+    the panel said nothing about what the user's own ground is for. That
+    was the real cost of withholding the measurement.
+
+    THE GATE RULE IS UNCHANGED AND IS NOT THIS FUNCTION'S. marginal_
+    benefits() is handed the patch this builds, availability flags and
+    all, and applies the same test it applies to a generated patch: above
+    zero AND the factor's own data available. A neutral 0.5 standing in
+    for a source that could not be reached still claims nothing.
+
+    A LOW SCORE IS CORRECT FEEDBACK, NOT A DEFECT. Every factor here
+    rewards a CONDITION rather than measuring quality: steep scores high,
+    wet scores high, poor farmland scores high, near a stream scores
+    high. So a zone drawn on good, flat, dry, prime ground scores near
+    zero -- and that is the tool working. It is saying this is not
+    marginal land, and production probably wants it. Nobody reading this
+    later should take a near-zero drawn score for a measurement that
+    failed; an em dash is what a failure looks like here, and this
+    function does not produce one.
+
+    EVERY FACTOR IS DERIVABLE FROM THE ZONE'S OWN CELLS, which is why
+    this can be honest rather than partial: slope off the cached DEM's
+    own array, hydric overlap and soil marginality off the SSURGO
+    geometry unions the run already holds, stream proximity off the NHD
+    features it already fetched. Nothing here requires the zone to have
+    come out of the search space, and nothing here needs the search
+    space at all.
+
+    PURE AND LOCAL. NO NETWORK, by contract -- every input is already in
+    `result` (see its `run_inputs`), and this function fetches nothing,
+    exactly as step_registry.Placement requires of a scorer. The step's
+    zero-network assertions cover the generate, the rehydration and the
+    commit; this runs between them and adds no call to any of them.
+
+    THE SEARCH SPACE IS NOT APPLIED, AND NEITHER IS THE CANOPY GATE.
+    Both are CANDIDACY rules -- they decide which ground the pipeline may
+    SUGGEST -- and a drawn zone is not a suggestion. A zone drawn over
+    committed production, over the water zone, over the road corridor or
+    over standing canopy is warned about (commit_validation.annotate_
+    crossings records the crossing; the client shows a caution and, for
+    canopy, says in words that there are already trees here) and is
+    measured on all of itself. Refusing to measure the part of a zone
+    that sits on excluded ground would report a number about a shape the
+    user did not draw.
+
+    `ring` is the drawn ring as [lon, lat] pairs, WGS84 -- what the
+    drawing tool has, clamped to the parcel client-side. It is clamped
+    AGAIN here, against the run's own boundary polygon, because the
+    server measures what it can defend: a ring reaching off the parcel is
+    scored on the part that is on it, and one entirely off it is refused
+    (ValueError -> 400), which is the containment rule landform and
+    structures already apply.
+
+    Returns the internal drawn-zone dict -- the shape wire_translation.
+    drawn_tree_zone_to_feature() turns into the Feature a client displays:
+
+        {
+          'zone_origin'     "user_drawn", the tag that distinguishes this
+                            from a generated zone in any mixed list
+          'polygon_utm'     the clamped zone, in the DEM's CRS
+          'geometry_wgs84'  the same, on the wire
+          'cells'           its DEM cells
+          'patch'           the scored patch dict, score_tree_search_
+                            space()'s own output shape for this one zone
+          'readout'         the SAME row a suggestion carries on the
+                            payload's `zones` table (_zone_row()), so the
+                            panel reads one kind of row
+        }
+
+    THE ONE FIELD A DRAWN ZONE CANNOT HAVE is `rank`: a position among
+    candidates it was never one of. _zone_row() omits it by construction
+    rather than this function stripping it, which is why that function
+    exists. Structures reports where a PLACED site WOULD rank because its
+    panel has a rank column and the comparison is the answer the user
+    asked for; this panel has none, so the honest and the simple choice
+    are the same one.
+
+    Raises ValueError, naming the reason, for a ring that is not a ring, a
+    ring entirely off the parcel, or a zone too thin to cover a single DEM
+    cell center. Never returns a half-measured zone.
+    """
+    run_inputs = result.get("run_inputs")
+    if not run_inputs:
+        raise ValueError(
+            "score_drawn_tree_zone() needs the run's own inputs (result['run_inputs']); the result "
+            "handed in does not carry them, so a drawn zone could not be measured against the same "
+            "ground the suggestions were"
+        )
+    dem = run_inputs["dem"]
+    boundary_polygon_utm = run_inputs["boundary_polygon_utm"]
+
+    polygon_utm = _drawn_ring_to_polygon_utm(ring, dem)
+    clamped = polygon_utm.intersection(boundary_polygon_utm)
+    if clamped.is_empty:
+        raise ValueError(
+            "the drawn zone lies entirely outside the parcel boundary. The parcel is the one hard "
+            "limit on a drawn zone; everything else this step checks is measured and reported, never "
+            "refused."
+        )
+
+    cells = cells_in_polygon(dem, clamped)
+    if not cells:
+        raise ValueError(
+            f"the drawn zone covers no DEM cell center ({clamped.area:.2f} m^2 at "
+            f"{dem['resolution_meters'][0]:.1f}x{dem['resolution_meters'][1]:.1f} m resolution), so "
+            "there is no ground under it to measure. A zone has to be at least about one cell across "
+            "to be a zone."
+        )
+
+    array = dem["array"]
+    slope_pct_grid = compute_slope_percent(array, dem["resolution_meters"])
+
+    prime_farmland_union = run_inputs["prime_farmland_union"]
+    hydric_union = run_inputs["hydric_union"]
+    stream_union = run_inputs["stream_union"]
+    prime_prepared = (
+        prep(prime_farmland_union)
+        if prime_farmland_union is not None and not prime_farmland_union.is_empty
+        else None
+    )
+    hydric_prepared = prep(hydric_union) if hydric_union is not None and not hydric_union.is_empty else None
+    stream_geom = stream_union if stream_union is not None and not stream_union.is_empty else None
+
+    slopes = []
+    factor_values = []
+    for row, col in cells:
+        raw_slope = float(slope_pct_grid[row, col]) if not np.isnan(slope_pct_grid[row, col]) else 0.0
+        slopes.append(raw_slope)
+        # THE SAME FUNCTION THE SUGGESTIONS WENT THROUGH, not the same
+        # arithmetic written out again -- which is the whole claim the
+        # panel makes when it prints the two scores in one column.
+        factor_values.append(
+            _cell_factor_values(
+                Point(pixel_center_xy(dem, row, col)),
+                raw_slope,
+                prime_prepared,
+                run_inputs["prime_farmland_data_available"],
+                hydric_prepared,
+                hydric_union,
+                run_inputs["hydric_data_available"],
+                stream_geom,
+                run_inputs["stream_data_available"],
+                run_inputs["slope_reference_pct"],
+                run_inputs["stream_proximity_reference_meters"],
+            )
+        )
+
+    slope_factor = float(np.mean([values[0] for values in factor_values]))
+    soil_marginality_factor = float(np.mean([values[1] for values in factor_values]))
+    hydric_overlap_factor = float(np.mean([values[2] for values in factor_values]))
+    stream_proximity_factor = float(np.mean([values[3] for values in factor_values]))
+
+    # Composed from the ZONE-level averaged factors, not by averaging
+    # per-cell composites -- score_tree_search_space()'s own rule, and
+    # mathematically the same thing since the composite is linear. This
+    # form is what keeps the four factor values on the row visibly
+    # consistent with the score above them.
+    composite_score = (
+        HYDRIC_OVERLAP_FACTOR_WEIGHT * hydric_overlap_factor
+        + SLOPE_FACTOR_WEIGHT * slope_factor
+        + SOIL_MARGINALITY_FACTOR_WEIGHT * soil_marginality_factor
+        + STREAM_PROXIMITY_FACTOR_WEIGHT * stream_proximity_factor
+    )
+
+    # WHERE THIS ZONE SITS IN THE PARCEL'S ELEVATION RANGE, against the
+    # REAL, FULL boundary -- the same range score_tree_search_space()
+    # measures its own patches against, computed the same way, so a drawn
+    # zone's "upper field" means what a suggestion's does. None on a
+    # parcel with no relief, and the word is None there too.
+    parcel_elevation_range = _parcel_elevation_range(dem, boundary_polygon_utm)
+    mean_elevation = float(np.mean([float(array[row, col]) for row, col in cells]))
+    if parcel_elevation_range is None:
+        elevation_percentile = None
+    else:
+        low, high = parcel_elevation_range
+        elevation_percentile = round(
+            max(0.0, min(100.0, (mean_elevation - low) / (high - low) * 100.0)), 1
+        )
+
+    # THE DRAWN SHAPE IS BOTH SHAPES. A generated patch carries a
+    # cell-union footprint and a render fill that are identical for this
+    # layer by design; a drawn zone has one shape -- the ring the user
+    # drew, clamped -- and it is already what the map draws, so the two
+    # entries are the same polygon rather than a footprint invented for
+    # it. Snapping a drawn ring to the cell grid would move a boundary the
+    # user placed vertex by vertex.
+    patch = {
+        "id": _DRAWN_ZONE_ID,
+        "polygon_utm": clamped,
+        "render_fill_polygon_utm": clamped,
+        "geometry_wgs84": transform_geom(dem["crs"], "EPSG:4326", mapping(clamped)),
+        "area_acres": round(clamped.area / SQUARE_METERS_PER_ACRE, 2),
+        "tree_suitability_score": round(composite_score * SUITABILITY_SCORE_SCALE, 1),
+        "soil_marginality_factor": round(soil_marginality_factor, 3),
+        "slope_factor": round(slope_factor, 3),
+        "hydric_overlap_factor": round(hydric_overlap_factor, 3),
+        "stream_proximity_factor": round(stream_proximity_factor, 3),
+        "avg_slope_pct": round(float(np.mean(slopes)), 1),
+        "slope_median_pct": round(float(np.median(slopes)), 1),
+        "elevation_percentile_of_parcel": elevation_percentile,
+        # THE RUN'S OWN FLAGS, CARRIED ONTO THE PATCH -- which is what
+        # makes marginal_benefits() below apply the availability half of
+        # its gate to this zone exactly as it does to a generated one.
+        "soil_marginality_data_available": bool(run_inputs["prime_farmland_data_available"]),
+        "hydric_data_available": bool(run_inputs["hydric_data_available"]),
+        "stream_data_available": bool(run_inputs["stream_data_available"]),
+    }
+
+    return {
+        "zone_origin": ZONE_ORIGIN_USER_DRAWN,
+        "polygon_utm": clamped,
+        "geometry_wgs84": patch["geometry_wgs84"],
+        "cells": cells,
+        "patch": patch,
+        "readout": _zone_row(patch, boundary_polygon_utm),
     }
 
 

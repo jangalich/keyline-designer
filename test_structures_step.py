@@ -252,16 +252,32 @@ assert isinstance(_placement, step_registry.Placement)
 assert _placement.input == "site" and _placement.shape == step_registry.INPUT_SHAPE_LON_LAT
 assert _placement.score == "solar_suitability.score_placed_structure_site"
 assert _placement.feature == "wire_translation.placed_structure_site_to_feature"
-# LANDFORM DECLARES ONE TOO, since the branch that scores a block the user
-# drew -- a ring rather than a point, measured by production's own scorer.
-# The other four steps declare none: their users author nothing the server
-# is asked to measure before a commit.
+# THE TWO DRAWING STEPS DECLARE ONE TOO -- a RING rather than a point,
+# measured by each layer's own scorer. Landform's came with the branch that
+# scores a block the user drew; TREES' came with the branch that withdrew
+# this step's own argument for not scoring one (see that Placement's `why`:
+# the reasoning rested on MIN_TREE_SUITABILITY_SCORE being visible in the
+# panel, and the panel dropped the floor row).
+#
+# THE REMAINING THREE DECLARE NONE, and that is the assertion worth keeping:
+# their users author nothing the server is asked to measure before a commit.
+# Water and roads' users SELECT; fencing's authors nothing at all.
 for _other in step_registry.STEP_REGISTRY.values():
-    if _other.step_id not in ("structures", "landform"):
+    if _other.step_id not in ("structures", "landform", "trees"):
         assert _other.placement is None, _other.step_id
+for _drawing_step in ("landform", "trees"):
+    _ring_placement = step_registry.get_step(_drawing_step).placement
+    assert _ring_placement.input == "ring", _drawing_step
+    assert _ring_placement.shape == step_registry.INPUT_SHAPE_RING, _drawing_step
+    # BOTH HALVES RESOLVE, which is what makes the declaration a wiring
+    # rather than a note: the scorer and the wire builder are both callable.
+    assert callable(step_registry.resolve(_ring_placement.score)), _drawing_step
+    assert callable(step_registry.resolve(_ring_placement.feature)), _drawing_step
 _landform_placement = step_registry.get_step("landform").placement
-assert _landform_placement.input == "ring"
-assert _landform_placement.shape == step_registry.INPUT_SHAPE_RING
+assert _landform_placement.score == "production_area_ceiling.score_drawn_production_block"
+_trees_placement = step_registry.get_step("trees").placement
+assert _trees_placement.score == "tree_zone_candidates.score_drawn_tree_zone"
+assert _trees_placement.feature == "wire_translation.drawn_tree_zone_to_feature"
 
 # CONSTANTS AGREE with the modules that own them.
 assert solar_suitability.MAX_CANDIDATES == 3
@@ -972,15 +988,31 @@ with Harness() as h:
             pass
         else:
             raise AssertionError(f"params {bad_params!r} must be refused")
-    # A step with no placement is refused by declaration.
+    # A STEP WITH NO PLACEMENT IS REFUSED BY DECLARATION. Water is one: its
+    # user SELECTS survey zones and authors no geometry for the server to
+    # measure. (Trees used to stand here and no longer can -- it scores a
+    # ring the user drew now, see its own Placement.)
+    try:
+        step_orchestrator.score_placed_feature(
+            s.id, "water", s.store, params={"site": list(PLACED_A)}, fetch_cache=s.fetch_cache, cache=s.cache
+        )
+    except step_orchestrator.StepOrchestrationError as exc:
+        assert "declares no placement" in str(exc), str(exc)
+    else:
+        raise AssertionError("water declares no placement and must refuse")
+
+    # AND A STEP THAT DECLARES ONE STILL REFUSES ANOTHER STEP'S INPUT NAME.
+    # Trees scores a `ring`; asking it to score a `site` is a client with the
+    # wrong step, and the refusal names the key rather than measuring
+    # something it was not handed.
     try:
         step_orchestrator.score_placed_feature(
             s.id, "trees", s.store, params={"site": list(PLACED_A)}, fetch_cache=s.fetch_cache, cache=s.cache
         )
     except step_orchestrator.StepOrchestrationError as exc:
-        assert "declares no placement" in str(exc)
+        assert "site" in str(exc), str(exc)
     else:
-        raise AssertionError("trees declares no placement and must refuse")
+        raise AssertionError("trees scores a ring, not a site, and must refuse one")
 
     # ROUND TRIP through the rehydrator: the placed Feature comes home as a
     # site dict carrying the measurement set -- the divergence from trees'
@@ -1282,8 +1314,12 @@ with Harness() as h:
     assert ok.get_json()["feature"]["properties"]["suitability_score"] == PLACED_A_FEATURE["properties"]["suitability_score"]
     off = http.post(f"/api/sessions/{s.id}/steps/structures/score", json={"params": {"site": [-79.99, 40.60]}})
     assert off.status_code == 400 and "outside the parcel" in off.get_json()["error"], off.get_json()
-    no_placement = http.post(f"/api/sessions/{s.id}/steps/trees/score", json={"params": {"site": list(PLACED_A)}})
-    assert no_placement.status_code == 400 and "declares no placement" in no_placement.get_json()["error"]
+    # Water: a step whose user selects and authors nothing. (Trees stood here
+    # until it grew a Placement of its own -- it scores a `ring` now.)
+    no_placement = http.post(f"/api/sessions/{s.id}/steps/water/score", json={"params": {"site": list(PLACED_A)}})
+    assert no_placement.status_code == 400 and "declares no placement" in no_placement.get_json()["error"], (
+        no_placement.get_json()
+    )
     s.commit("structures", [], {})
     committed = http.post(f"/api/sessions/{s.id}/steps/structures/score", json={"params": {"site": list(PLACED_A)}})
     assert committed.status_code == 409, committed.get_json()

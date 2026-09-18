@@ -492,6 +492,19 @@ class Session:
     def trees(self):
         return self.generate("trees")
 
+    def score(self, step_id, ring_lon_lat):
+        """
+        The sixth verb over a ring the user drew -- step_orchestrator.
+        score_placed_feature(), through the step's own Placement
+        declaration. A READ: nothing is persisted and the same ring can be
+        asked about any number of times.
+        """
+        return step_orchestrator.score_placed_feature(
+            self.id, step_id, self.store,
+            params={"ring": [list(point) for point in ring_lon_lat]},
+            fetch_cache=self.fetch_cache, cache=self.cache,
+        )
+
 
 # --- drawn zones ---------------------------------------------------------
 

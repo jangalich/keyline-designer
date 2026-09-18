@@ -1276,4 +1276,260 @@ print(
 )
 
 
+# =====================================================================
+# score_drawn_tree_zone(): A ZONE THE USER DREW, measured on the same
+# instrument the suggestions were -- over the six-region synthetic DEM
+# above, whose regions are exactly the cases this needs.
+# =====================================================================
+#
+# WHY THIS FIXTURE AND NOT A NEW ONE. Every claim below is about a drawn
+# zone reading the SAME ground the same way a generated one does, and the
+# regions above already have hand-checked factor values for ground that
+# does and does not qualify. Region 4 in particular -- flat, dry, PRIME
+# farmland -- is ground the generate deliberately excluded, which is the
+# only place a drawn zone's score can be compared against "no candidate
+# exists here" at all.
+
+from tree_zone_candidates import (  # noqa: E402
+    MARGINAL_BENEFIT_EROSION_CONTROL,
+    MARGINAL_BENEFIT_NUTRIENT_DEPOSITION,
+    MARGINAL_BENEFIT_STREAM_PROTECTION,
+    ZONE_ORIGIN_USER_DRAWN,
+    score_drawn_tree_zone,
+)
+from rasterio.warp import transform_geom as _transform_geom  # noqa: E402
+
+
+def _drawn_run(**overrides):
+    """
+    The `result` shape score_drawn_tree_zone() reads -- its `run_inputs`
+    and nothing else, because that is the whole of its contract. Built by
+    hand here rather than taken off an orchestrator run so a test can put
+    a flag False without arranging a fetch outage; the wiring check below
+    asserts a REAL run carries the same keys.
+    """
+    run_inputs = {
+        "dem": dem,
+        "boundary_polygon_utm": boundary_polygon_utm,
+        "prime_farmland_union": prime_farmland_union,
+        "prime_farmland_data_available": True,
+        "hydric_union": hydric_union,
+        "hydric_data_available": True,
+        "stream_union": stream_union,
+        "stream_data_available": True,
+        "slope_reference_pct": TREE_SLOPE_REFERENCE_PCT,
+        "stream_proximity_reference_meters": STREAM_PROXIMITY_REFERENCE_METERS,
+    }
+    run_inputs.update(overrides)
+    return {"run_inputs": run_inputs}
+
+
+def _ring_wgs84(polygon_utm):
+    """A UTM box as the [lon, lat] ring the drawing tool sends."""
+    return [list(point) for point in _transform_geom(CRS, "EPSG:4326", mapping(polygon_utm))["coordinates"][0]]
+
+
+# --- [1] A DRAWN ZONE IS SCORED, ALL FOUR FACTORS PRESENT -------------
+#
+# Drawn over region 1: hydric, flat, non-prime, no stream. Hand-checked:
+# hydric_overlap 1.0, slope 0.0 (the flat baseline), soil_marginality 1.0
+# (outside the prime union), stream_proximity 0.0 (far from the line), so
+# the composite is HYDRIC + SOIL = 40 + 20 = 60.
+drawn_hydric = score_drawn_tree_zone(_ring_wgs84(region1_hydric_flat), _drawn_run())
+_dh = drawn_hydric["patch"]
+_dh_row = drawn_hydric["readout"]
+for _field in ("hydric_overlap_factor", "slope_factor", "soil_marginality_factor", "stream_proximity_factor"):
+    assert _dh[_field] is not None, f"a drawn zone must carry {_field} -- all four factors are derivable"
+assert sorted(_dh_row["factors"]) == ["hydric_overlap", "slope", "soil_marginality", "stream_proximity"], (
+    "the drawn zone's row must carry all four factors, under the same keys a suggestion's row does"
+)
+assert _dh["hydric_overlap_factor"] == 1.0 and _dh["soil_marginality_factor"] == 1.0
+assert _dh["slope_factor"] == 0.0 and _dh["stream_proximity_factor"] == 0.0
+_expected_hydric_score = round(
+    (HYDRIC_OVERLAP_FACTOR_WEIGHT * 1.0 + SOIL_MARGINALITY_FACTOR_WEIGHT * 1.0) * SUITABILITY_SCORE_SCALE, 1
+)
+assert _dh_row["score"] == _expected_hydric_score, (_dh_row["score"], _expected_hydric_score)
+assert drawn_hydric["zone_origin"] == ZONE_ORIGIN_USER_DRAWN
+# THE ONE FIELD IT CANNOT HAVE -- absent, not null. A rank is a position
+# among candidates this zone was never one of.
+assert "rank" not in _dh_row, "a drawn zone must carry NO rank at all, not a null one"
+# THE SAME ROW A SUGGESTION CARRIES, key for key. Both come out of
+# _zone_row(), which is what makes the panel's one column honest.
+_suggestion_row = {key for key in _nd_orch["zones"][0] if key != "rank"}
+assert set(_dh_row) == _suggestion_row, (sorted(set(_dh_row) ^ _suggestion_row))
+print(
+    f"[1] A DRAWN ZONE IS SCORED: a ring drawn over region 1 (hydric, flat, non-prime) scores "
+    f"{_dh_row['score']}/100 with all four factors present "
+    f"(hydric={_dh['hydric_overlap_factor']}, slope={_dh['slope_factor']}, "
+    f"soil={_dh['soil_marginality_factor']}, stream={_dh['stream_proximity_factor']}), on the same "
+    f"row shape a suggestion carries ({len(_dh_row)} keys) minus the rank it cannot have."
+)
+
+
+# --- [2] BENEFITS WHERE THE FACTORS QUALIFY, AND THE GATE HOLDS -------
+#
+# The gate rule is unchanged and is marginal_benefits()': above zero AND
+# the factor's own data available. Three drawn zones say the whole of it.
+#
+# Region 1 (hydric, flat): nutrient deposition is earned off BOTH of its
+# source factors; erosion control is not (slope is a real, measured 0.0)
+# and neither is stream protection.
+assert _dh_row["marginal_benefits"] == [MARGINAL_BENEFIT_NUTRIENT_DEPOSITION], _dh_row["marginal_benefits"]
+
+# Region 2 (the steep ramp, non-hydric, non-prime): erosion control off
+# the slope, nutrient deposition off soil marginality alone.
+drawn_steep = score_drawn_tree_zone(_ring_wgs84(region2_steep), _drawn_run())
+assert drawn_steep["patch"]["slope_factor"] == 1.0, drawn_steep["patch"]["slope_factor"]
+assert drawn_steep["readout"]["marginal_benefits"] == [
+    MARGINAL_BENEFIT_EROSION_CONTROL, MARGINAL_BENEFIT_NUTRIENT_DEPOSITION
+], drawn_steep["readout"]["marginal_benefits"]
+
+# AND THE HALF THAT MATTERS: the SAME ring over region 1, scored on a run
+# whose three fetches failed. Every gated factor is the neutral 0.5 --
+# which is ABOVE ZERO, and would earn two benefits under the "above zero"
+# half of the rule alone -- and the zone claims NOTHING gated. Erosion
+# control still stands, because slope is not gated: it is read off the DEM
+# every run has, and _SLOPE_ALWAYS_MEASURED says so.
+drawn_unfetched = score_drawn_tree_zone(
+    _ring_wgs84(region1_hydric_flat),
+    _drawn_run(
+        prime_farmland_data_available=False,
+        hydric_data_available=False,
+        stream_data_available=False,
+    ),
+)
+_du = drawn_unfetched["patch"]
+assert _du["hydric_overlap_factor"] == 0.5 and _du["soil_marginality_factor"] == 0.5, _du
+assert _du["stream_proximity_factor"] == 0.5, _du
+assert _du["hydric_overlap_factor"] > 0.0, "the neutral value must be ABOVE zero or this proves nothing"
+assert drawn_unfetched["readout"]["marginal_benefits"] == [], (
+    "a neutral 0.5 standing in for data nobody fetched must claim NO benefit, however far above zero "
+    f"it is. Got {drawn_unfetched['readout']['marginal_benefits']}"
+)
+assert _du["slope_factor"] == 0.0, "region 1 is flat, so the ungated factor is a real measured zero here"
+# The same three false flags over the STEEP region: slope is ungated, so
+# erosion control survives an outage that takes the other two with it.
+drawn_steep_unfetched = score_drawn_tree_zone(
+    _ring_wgs84(region2_steep),
+    _drawn_run(
+        prime_farmland_data_available=False, hydric_data_available=False, stream_data_available=False
+    ),
+)
+assert drawn_steep_unfetched["readout"]["marginal_benefits"] == [MARGINAL_BENEFIT_EROSION_CONTROL], (
+    drawn_steep_unfetched["readout"]["marginal_benefits"]
+)
+assert MARGINAL_BENEFIT_STREAM_PROTECTION not in drawn_steep_unfetched["readout"]["marginal_benefits"]
+print(
+    f"[2] BENEFITS AND THE GATE: region 1 earns {_dh_row['marginal_benefits']}, the steep ramp earns "
+    f"{drawn_steep['readout']['marginal_benefits']}. With all three fetches failed the same region-1 "
+    f"ring holds three factors at the neutral 0.5 -- above zero -- and claims "
+    f"{drawn_unfetched['readout']['marginal_benefits']}; over the steep ramp the ungated slope still "
+    f"earns {drawn_steep_unfetched['readout']['marginal_benefits']}."
+)
+
+
+# --- [3] FLAT, DRY, GOOD GROUND SCORES NEAR ZERO ----------------------
+#
+# THE CASE THE CODE COMMENT EXPLAINS, asserted so nobody later reads it as
+# a defect. Region 4 is flat, non-hydric, PRIME farmland and far from a
+# stream -- every factor rewards a CONDITION rather than measuring
+# quality, so ground that has none of those conditions scores nothing.
+# That is the tool saying "this is not marginal land, production probably
+# wants it", and it is the correct answer.
+#
+# The generate refuses to suggest this ground at all (region 4 is one of
+# the three regions the six-region test above asserts produce NO
+# candidate), which is exactly why a drawn zone here has to be measurable:
+# the user drew it precisely where the pipeline had nothing to say.
+# The WESTERN part of region 4 (cols 90-104), which is the part more than
+# STREAM_PROXIMITY_REFERENCE_METERS from the fixture's stream line -- the
+# region's eastern edge is 78 m from it and picks up a real, measured
+# stream bonus, which is the factor working rather than a case to dodge.
+# Zero on all four is what "no marginal condition at all" looks like, and
+# it needs ground that genuinely has none.
+region4_prime_flat_dry = _col_box(90, 104)
+drawn_prime_flat = score_drawn_tree_zone(_ring_wgs84(region4_prime_flat_dry), _drawn_run())
+_dp = drawn_prime_flat["patch"]
+assert _dp["slope_factor"] == 0.0 and _dp["hydric_overlap_factor"] == 0.0
+assert _dp["soil_marginality_factor"] == 0.0 and _dp["stream_proximity_factor"] == 0.0
+assert drawn_prime_flat["readout"]["score"] == 0.0, drawn_prime_flat["readout"]["score"]
+assert drawn_prime_flat["readout"]["score"] < tzc.MIN_TREE_SUITABILITY_SCORE, (
+    "the case is a score BELOW the floor no generated candidate could clear -- which is the whole "
+    "thing the old refusal to score was worried about, now shown as a reading rather than a verdict"
+)
+assert drawn_prime_flat["readout"]["marginal_benefits"] == [], (
+    "ground with no marginal condition at all earns no conservation benefit -- an empty list is the "
+    "real answer, not a missing one"
+)
+assert drawn_prime_flat["readout"]["score"] is not None, (
+    "and it is a NUMBER, not the em dash a failed measurement would print"
+)
+print(
+    f"[3] FLAT DRY GOOD GROUND: a ring drawn over region 4's dry west end (flat, PRIME farmland, "
+    f"over 100 m from the stream) -- "
+    f"ground the generate suggests nothing on -- scores {drawn_prime_flat['readout']['score']}/100 "
+    f"with all four factors at 0.0 and no benefit earned. Below the {tzc.MIN_TREE_SUITABILITY_SCORE} "
+    f"floor, and a reading rather than a failure: the tool saying this is not marginal land."
+)
+
+
+# --- THE REFUSALS, AND THE ONE HARD GATE ------------------------------
+_off_parcel_ring = _ring_wgs84(box(ORIGIN_X - 500.0, ORIGIN_Y - 500.0, ORIGIN_X - 400.0, ORIGIN_Y - 400.0))
+try:
+    score_drawn_tree_zone(_off_parcel_ring, _drawn_run())
+except ValueError as exc:
+    assert "outside the parcel boundary" in str(exc), exc
+else:
+    raise AssertionError("a ring entirely off the parcel must be refused, naming the parcel as the reason")
+
+try:
+    score_drawn_tree_zone([[0.0, 0.0], [0.1, 0.0]], _drawn_run())
+except ValueError as exc:
+    assert "at least 3 points" in str(exc), exc
+else:
+    raise AssertionError("a two-point ring is not a ring")
+
+try:
+    score_drawn_tree_zone(_ring_wgs84(region1_hydric_flat), {})
+except ValueError as exc:
+    assert "run_inputs" in str(exc), exc
+else:
+    raise AssertionError("a result with no run_inputs cannot measure anything and must say so")
+print(
+    "REFUSALS: a ring off the parcel, a ring of two points and a result carrying no run_inputs each "
+    "raise ValueError naming the defect -- the parcel is the one hard gate, and everything else about "
+    "the ground under a drawn zone is measured and reported."
+)
+
+
+# --- THE WIRING: A REAL RUN CARRIES run_inputs ------------------------
+#
+# The hand-built dict above is the contract; this is the proof the
+# orchestrator run actually satisfies it, against `result` from the
+# full identify_tree_zone_candidates() section above.
+assert "run_inputs" in result, "identify_tree_zone_candidates() must publish what a drawn zone is measured against"
+assert set(result["run_inputs"]) == {
+    "dem", "boundary_polygon_utm",
+    "prime_farmland_union", "prime_farmland_data_available",
+    "hydric_union", "hydric_data_available",
+    "stream_union", "stream_data_available",
+    "slope_reference_pct", "stream_proximity_reference_meters",
+}, sorted(result["run_inputs"])
+assert result["run_inputs"]["dem"] is not None
+_live_drawn = score_drawn_tree_zone(
+    _ring_wgs84(result["run_inputs"]["boundary_polygon_utm"].centroid.buffer(20.0).envelope), result
+)
+assert _live_drawn["readout"]["score"] is not None
+assert _live_drawn["readout"]["position_in_parcel"] in {
+    "center", "north", "northeast", "east", "southeast", "south", "southwest", "west", "northwest",
+}
+print(
+    f"WIRING: identify_tree_zone_candidates()' own result carries run_inputs, and a ring drawn on the "
+    f"parcel's centroid scores {_live_drawn['readout']['score']}/100 "
+    f"({_live_drawn['readout']['position_in_parcel']}, {_live_drawn['readout']['area_acres']} ac) "
+    f"straight off it -- no fetch, no search space, no second instrument."
+)
+
+
+
 print("\nAll tree_zone_candidates checks passed.")
