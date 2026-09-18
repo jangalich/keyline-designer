@@ -694,8 +694,18 @@ assert sorted(layers.keys()) == sorted([
     "dem", "exclusion_zones", "production_areas", "water_zone", "road_corridor",
     "tree_zone_result", "structure_site", "keypoints", "water_features",
     "contour_lines", "fencing_result",
+    # THE TWO PLURAL KEYS the committed-design branch added. On THIS path
+    # they are derived from the two singulars beside them and carry nothing
+    # new -- build_pipeline_context() picks one water zone and one structure
+    # site, so each list is that one or empty. They exist because a SESSION's
+    # committed design can hold several of either (session_design.
+    # layout_layers()), and render_layout_map() iterates the plural so one
+    # drawing path serves both.
+    "water_zones", "structure_sites",
 ]), sorted(layers.keys())
-print("  Return dict keys unchanged.")
+assert layers["water_zones"] == [layers["water_zone"]]
+assert layers["structure_sites"] == [layers["structure_site"]]
+print("  Return dict keys unchanged but for the two plural keys, each the singular beside it.")
 
 # road_corridor is THE key this branch re-routed. Asserted equal to the
 # exact expression the function used to return -- identify_road_corridor_
@@ -737,6 +747,10 @@ assert empty_layers["road_corridor"] == EMPTY["road_result"]["zones_geojson"]["f
 assert empty_layers["structure_site"] is None
 assert empty_layers["production_areas"] == []
 assert empty_layers["water_zone"] is None
+# EMPTY, not [None]: the plural key is the singular's one-element list only
+# when there IS one.
+assert empty_layers["water_zones"] == []
+assert empty_layers["structure_sites"] == []
 print("  Empty parcel: same result through the same path (road_corridor [], "
       "structure_site None -- fetch_layout_layers()' own established contract).")
 

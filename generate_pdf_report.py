@@ -34,7 +34,6 @@ from typing import Optional
 import markdown as markdown_lib
 from weasyprint import HTML
 
-from dem_data import get_dem_for_boundary
 from generate_full_report import generate_full_report
 from render_layout_map import fetch_layout_layers, render_layout_map
 
@@ -174,8 +173,13 @@ def generate_full_report_pdf(
     print("  Narrative report generated.\n")
 
     print("Fetching layout layers and rendering the final static map page...")
-    dem = get_dem_for_boundary(boundary_coordinates)
-    layers = fetch_layout_layers(boundary_coordinates, dem=dem, anchor_lon_lat=anchor_lon_lat)
+    # NO PRE-FETCHED DEM. This used to call get_dem_for_boundary() and pass
+    # the result as fetch_layout_layers(dem=...) -- a 3DEP raster fetch that
+    # that function stopped reading when it started taking its DEM off
+    # ParcelData, and then re-fetched inside fetch_parcel_data() anyway. The
+    # parameter is gone with this call; the render is unchanged and one
+    # raster fetch cheaper.
+    layers = fetch_layout_layers(boundary_coordinates, anchor_lon_lat=anchor_lon_lat)
     render_layout_map(boundary_coordinates, map_image_path, layers=layers)
     print(f"  Map image written to {map_image_path}\n")
 

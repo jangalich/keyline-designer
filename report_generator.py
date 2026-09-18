@@ -267,6 +267,81 @@ _FEET_PER_METER = 1.0 / 0.3048
 _MM_PER_INCH = 25.4
 
 
+# ======================================================================
+# A SECTION THAT NARRATES A DECISION RATHER THAN A CANDIDATE SET
+# ======================================================================
+
+# The key a SESSION-derived narrative block carries on top of the producing
+# module's own block. session_design.py puts it there; this module is the
+# only thing that reads it, which is why the spelling lives here.
+#
+# WHY IT HAS TO EXIST AT ALL. Every _format_*_summary() below narrates a
+# CANDIDATE SET, because that is what a narrative_data block is on the batch
+# path: the pipeline walked the boundary, produced candidates, and picked
+# its own winners. On the SESSION path the block has been reduced to what
+# the USER COMMITTED, and two things about that cannot be read off the
+# reduced block itself:
+#
+#   HOW MANY THEY DECLINED. "Three water survey zones" reads as "this parcel
+#   has three" unless something says thirteen were found and three were
+#   kept.
+#
+#   THAT AN EMPTY ONE IS A DECISION. This is the case that matters. Every
+#   formatter's own nothing-here text describes a GAP IN THE DATA -- "no
+#   water survey areas were identified ... or DEM data wasn't available" --
+#   and printing that for a user who looked at nine candidate ponds and
+#   decided against all of them would put a falsehood in the report with no
+#   way for the reader to catch it. So an empty commit REPLACES the section
+#   rather than leading it: see _committed_section().
+COMMITTED_DESIGN_KEY = "commitment"
+
+
+def _committed_section(block, formatter, subject: str) -> str:
+    """
+    One report section, formatted from a block that may be a DECISION.
+
+    THE BATCH PATH IS UNTOUCHED AND MUST STAY SO: a block with no
+    COMMITTED_DESIGN_KEY is handed straight to its formatter and this
+    function contributes nothing at all. Everything below runs only for a
+    session-derived block.
+
+    `subject` is the plain-English name of what was committed, in the
+    plural ("production block", "water survey zone"), used to write the
+    empty-commit sentence -- the one piece of prose this module has to
+    supply that no module's block can.
+    """
+    commitment = (block or {}).get(COMMITTED_DESIGN_KEY) if isinstance(block, dict) else None
+    if commitment is None:
+        return formatter(block)
+
+    candidates = commitment["candidate_count"]
+    declined = commitment["declined_count"]
+    if commitment["empty"]:
+        # NOT the formatter's own text, on purpose -- see COMMITTED_DESIGN_KEY.
+        return (
+            f"THE OWNER'S DECISION: NO {subject.upper()} IS PART OF THIS DESIGN. "
+            f"{candidates} candidate(s) were computed for this property and the "
+            f"owner declined all of them. This is a deliberate, committed "
+            f"choice on their part -- it is NOT missing data, a failed "
+            f"computation, or ground this property lacks. Narrate it as the "
+            f"decision it is, and do not suggest that the analysis is "
+            f"incomplete here."
+        )
+    lead = (
+        f"THE OWNER'S COMMITTED DESIGN: {commitment['committed_count']} of "
+        f"{candidates} computed candidate(s) were committed"
+        + (
+            f"; the other {declined} were declined and are deliberately not "
+            f"described below."
+            if declined
+            else " -- every candidate computed was kept."
+        )
+        + " Everything that follows describes what the owner CHOSE, not what "
+        "the pipeline would have picked."
+    )
+    return f"{lead}\n{formatter(block)}"
+
+
 def _celsius_to_fahrenheit(celsius: float) -> float:
     return round(celsius * 9.0 / 5.0 + 32.0, 1)
 
@@ -1617,6 +1692,80 @@ def _format_imagery_summary(imagery: Optional[dict]) -> str:
     )
 
 
+def build_data_summary(
+    soil_components,
+    elevation_summary,
+    water_features,
+    climate_summary=None,
+    imagery_summary=None,
+    keypoints=None,
+    irradiance=None,
+    narrative_data=None,
+    boundary_polygon_utm=None,
+) -> str:
+    """
+    THE DATA BLOCKS THE PROMPT CARRIES, assembled and nothing more.
+
+    Split out of generate_scale_of_permanence_report() so the prompt's data
+    half can be read, asserted on and diffed WITHOUT an API key and without
+    an LLM call. That is not a testing convenience bolted on: what a report
+    narrates is decided here, and "the report describes the owner's
+    committed design rather than the pipeline's own winners" is a property
+    of this string. A test that has to call the model to check it would be
+    checking the model.
+
+    Every argument is the one generate_scale_of_permanence_report() takes,
+    at the same value; that function now calls this and adds only the
+    request around it.
+    """
+    # Every KSOP-derived block below is formatted from narrative_data (the
+    # per-module blocks captured on PipelineContext, or the COMMITTED
+    # design's own reduced blocks -- see _committed_section()). An absent
+    # module key formats as that block's honest "no data available" text.
+    narrative_data = narrative_data or {}
+
+    # Block headers use the map legend's own feature-class names (Keypoint
+    # Candidates, Production Areas, Water System Survey Area, Suggested
+    # Road Corridor, Tree Crop Areas, Permanent Building Site) so the
+    # narrative's references and the data blocks resolve to the same names
+    # a reader sees on the map.
+    return f"""CLIMATE DATA:
+{_format_climate_summary(climate_summary)}
+
+SOIL DATA (SSURGO soil survey):
+{_format_soil_summary(soil_components)}
+
+ELEVATION (USGS):
+{_format_elevation_summary(elevation_summary)}
+
+PRODUCTION AREAS (computed candidates, ceiling-trimmed):
+{_committed_section(narrative_data.get("production_area_ceiling"), _format_production_areas_summary, "production block")}
+
+KEYPOINT CANDIDATES (DEM-derived):
+{_format_keypoints_summary(keypoints, boundary_polygon_utm)}
+
+WATER FEATURES (mapped NHD streams/water bodies):
+{_format_water_summary(water_features)}
+
+SATELLITE IMAGERY / LAND COVER (NDVI-derived):
+{_format_imagery_summary(imagery_summary)}
+
+WATER SYSTEM SURVEY AREAS (computed):
+{_committed_section(narrative_data.get("water_survey_areas"), _format_water_survey_areas_summary, "water survey zone")}
+
+SUGGESTED ROAD CORRIDOR (computed network, grown from the real access point):
+{_committed_section(narrative_data.get("road_corridors"), _format_road_corridor_summary, "farm road")}
+
+TREE CROP AREAS (computed candidates):
+{_committed_section(narrative_data.get("tree_zone_candidates"), _format_tree_zones_summary, "tree crop area")}
+
+PERMANENT BUILDING SITE (computed, selected structure site):
+{_committed_section(narrative_data.get("solar_suitability"), _format_solar_candidate_zones_summary, "permanent building site")}
+
+SOLAR IRRADIANCE (regional baseline):
+{_format_irradiance_summary(irradiance)}"""
+
+
 def generate_scale_of_permanence_report(
     soil_components: list[dict],
     elevation_summary: Optional[dict],
@@ -1710,52 +1859,18 @@ def generate_scale_of_permanence_report(
 
     client = Anthropic(api_key=api_key)
 
-    # Every KSOP-derived block below is formatted from narrative_data (the
-    # per-module blocks captured on PipelineContext) -- see this function's
-    # own docstring. An absent module key formats as that block's honest
-    # "no data available" text.
-    narrative_data = narrative_data or {}
+    data_summary = build_data_summary(
+        soil_components,
+        elevation_summary,
+        water_features,
+        climate_summary=climate_summary,
+        imagery_summary=imagery_summary,
+        keypoints=keypoints,
+        irradiance=irradiance,
+        narrative_data=narrative_data,
+        boundary_polygon_utm=boundary_polygon_utm,
+    )
 
-    # Block headers use the map legend's own feature-class names (Keypoint
-    # Candidates, Production Areas, Water System Survey Area, Suggested
-    # Road Corridor, Tree Crop Areas, Permanent Building Site) so the
-    # narrative's references and the data blocks resolve to the same names
-    # a reader sees on the map.
-    data_summary = f"""CLIMATE DATA:
-{_format_climate_summary(climate_summary)}
-
-SOIL DATA (SSURGO soil survey):
-{_format_soil_summary(soil_components)}
-
-ELEVATION (USGS):
-{_format_elevation_summary(elevation_summary)}
-
-PRODUCTION AREAS (computed candidates, ceiling-trimmed):
-{_format_production_areas_summary(narrative_data.get("production_area_ceiling"))}
-
-KEYPOINT CANDIDATES (DEM-derived):
-{_format_keypoints_summary(keypoints, boundary_polygon_utm)}
-
-WATER FEATURES (mapped NHD streams/water bodies):
-{_format_water_summary(water_features)}
-
-SATELLITE IMAGERY / LAND COVER (NDVI-derived):
-{_format_imagery_summary(imagery_summary)}
-
-WATER SYSTEM SURVEY AREAS (computed):
-{_format_water_survey_areas_summary(narrative_data.get("water_survey_areas"))}
-
-SUGGESTED ROAD CORRIDOR (computed network, grown from the real access point):
-{_format_road_corridor_summary(narrative_data.get("road_corridors"))}
-
-TREE CROP AREAS (computed candidates):
-{_format_tree_zones_summary(narrative_data.get("tree_zone_candidates"))}
-
-PERMANENT BUILDING SITE (computed, selected structure site):
-{_format_solar_candidate_zones_summary(narrative_data.get("solar_suitability"))}
-
-SOLAR IRRADIANCE (regional baseline):
-{_format_irradiance_summary(irradiance)}"""
 
     message = client.messages.create(
         model=MODEL,

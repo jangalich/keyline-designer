@@ -1299,7 +1299,6 @@ def _draw_keypoint_marker(ax, point) -> None:
 
 def fetch_layout_layers(
     boundary_coordinates: list[tuple[float, float]],
-    dem: Optional[dict] = None,
     anchor_lon_lat: Optional[tuple[float, float]] = None,
     parcel_data: Optional[ParcelData] = None,
 ) -> dict:
@@ -1318,16 +1317,15 @@ def fetch_layout_layers(
     solar/fencing never even start on a boundary whose raw data is
     incomplete.
 
-    dem (the parameter): kept in the signature so an existing caller that
-    passes dem= (generate_pdf_report.py's own pre-fetched-DEM call) doesn't
-    break, but it is NO LONGER USED in this function's body -- every dem
-    value used below now comes from parcel_data.dem instead, since that's
-    the one ParcelData is guaranteed to carry regardless of whether the
-    caller passed anything in. A caller passing dem= without also passing
-    parcel_data= gets a real, working render, just without the redundant-
-    fetch avoidance dem= used to buy it (parcel_data.fetch_parcel_data()
-    always re-fetches its own DEM) -- migrating that caller to build and
-    pass its own parcel_data= instead is flagged as separate, future work.
+    dem (the parameter): GONE. It had been kept in the signature for one
+    caller -- generate_pdf_report.py's pre-fetched-DEM call -- while being
+    unused in the body, because every dem value here comes from
+    parcel_data.dem, the one ParcelData is guaranteed to carry. Keeping it
+    was worse than useless: a caller passing dem= without parcel_data= paid
+    for a 3DEP raster fetch this function then ignored and re-fetched inside
+    fetch_parcel_data(). That caller has been migrated (it now passes no DEM
+    at all, and its own get_dem_for_boundary() call is deleted with the
+    parameter), so the parameter had nothing left to not-break.
 
     Builds a single pipeline_context.PipelineContext ONCE (build_pipeline_
     context()) and reuses its fields across every call below, instead of
@@ -1622,10 +1620,20 @@ def fetch_layout_layers(
         # and no other layer in this dict depends on it.
         "exclusion_zones": context.exclusion_zones,
         "production_areas": context.production_areas,
+        # SINGULAR AND PLURAL, BOTH, and the batch path fills the plural
+        # with exactly what the singular holds. build_pipeline_context()
+        # picks ONE water zone and ONE structure site, so these lists are
+        # one-element (or empty); a SESSION fills them with everything its
+        # owner committed, which is where they earn their existence --
+        # see session_design.layout_layers(). render_layout_map() iterates
+        # the plural and falls back to the singular, so a layers dict built
+        # before this branch still renders.
         "water_zone": water_zone,
+        "water_zones": [water_zone] if water_zone is not None else [],
         "road_corridor": road_corridor_features,
         "tree_zone_result": tree_zone_result,
         "structure_site": structure_site,
+        "structure_sites": [structure_site] if structure_site is not None else [],
         # context.keypoints IS keypoint_detection.detect_keypoints()'s own
         # per-valley list (see pipeline_context.py's field notes) -- carried
         # through to render_layout_map() for an asterisk per keypoint, and to the
@@ -1640,7 +1648,6 @@ def fetch_layout_layers(
 def render_layout_map(
     boundary_coordinates: list[tuple[float, float]],
     output_path: str,
-    dem: Optional[dict] = None,
     layers: Optional[dict] = None,
     anchor_lon_lat: Optional[tuple[float, float]] = None,
 ) -> str:
@@ -1654,21 +1661,50 @@ def render_layout_map(
     report's own data fetches) doesn't pay for a second, redundant fetch.
     Omit it (default) to have this function fetch everything itself.
 
+    IT IS ALSO HOW A SESSION'S COMMITTED DESIGN IS DRAWN. session_design.
+    layout_layers() returns this same dict built from what the owner
+    committed rather than from a pipeline walk, and handing it in here is
+    the whole of the wiring: nothing about how this function draws anything
+    changes, because the shape it reads did not.
+
+    THE PLURAL LAYERS. `water_zones` and `structure_sites` are lists, and
+    they are what this function iterates; `water_zone` and `structure_site`
+    are the one-of-each the batch path has always carried, read as a
+    one-element list when the plural key is absent. That is what lets a
+    design with TWO PLACED STRUCTURE SITES draw two pins, and a water
+    commit of several zones draw several ripple regions, with no second
+    drawing path.
+
+    dem (the parameter): GONE, with fetch_layout_layers()' own -- it was
+    only ever forwarded into that call, which has not used it since it
+    started reading parcel_data.dem. The DEM this function draws against is
+    layers["dem"], as it already was.
+
     anchor_lon_lat: the real, user-picked access point -- only used when
     layers isn't already supplied (this function's own internal
     fetch_layout_layers() call needs it for road-corridor routing);
     ignored otherwise, since a pre-fetched layers dict already baked in
-    whatever anchor its own caller used.
+    whatever anchor its own caller used. A session's layers dict is exactly
+    that case: its access point is the roads step's committed input and was
+    applied when the network was routed, long before this call.
     """
     if layers is None:
-        layers = fetch_layout_layers(boundary_coordinates, dem=dem, anchor_lon_lat=anchor_lon_lat)
+        layers = fetch_layout_layers(boundary_coordinates, anchor_lon_lat=anchor_lon_lat)
 
     dem = layers["dem"]
     scored_patches = layers["production_areas"]
-    water_zone = layers["water_zone"]
+    # THE PLURAL KEY WINS; the singular is its one-element fallback. .get()
+    # so a layers dict built before the plural keys existed (the synthetic
+    # fixtures in test_render_layout_map.py, and any caller holding an older
+    # dict) still renders exactly what it always did.
+    water_zones = layers.get("water_zones")
+    if water_zones is None:
+        water_zones = [layers["water_zone"]] if layers["water_zone"] is not None else []
     road_corridor_features = layers["road_corridor"]
     tree_zone_result = layers["tree_zone_result"]
-    structure_site = layers["structure_site"]
+    structure_sites = layers.get("structure_sites")
+    if structure_sites is None:
+        structure_sites = [layers["structure_site"]] if layers["structure_site"] is not None else []
     # .get() so a pre-fetched layers dict built before keypoints existed (e.g.
     # the synthetic fixtures in test_render_layout_map.py) still renders --
     # missing key means simply "no keypoint layer to draw", not an error.
@@ -1892,7 +1928,14 @@ def render_layout_map(
 
         drew_production = True
 
-    if water_zone is not None:
+    # ONE RIPPLE PASS PER COMMITTED ZONE. On the batch path this loop runs
+    # at most once, over build_pipeline_context()'s single selected zone --
+    # byte-identical to the `if water_zone is not None:` it replaces. In a
+    # session the owner may have committed several survey zones, and each
+    # one is real, separately-walked ground: drawing their union as one
+    # region would merge two claims a surveyor would rope off apart, and
+    # drawing only the first would silently drop a decision.
+    for water_zone in water_zones:
         # DISPLAY-ONLY ripple geometry: render_fill_polygon_utm is the zone's
         # bounded render opening (see water_candidate_zones.find_candidate_
         # zones()'s own docstring), already in the DEM's own UTM CRS --
@@ -2017,7 +2060,14 @@ def render_layout_map(
         _draw_keypoint_marker(ax, point)
         drew_keypoints = True
 
-    if structure_site is not None:
+    # ONE PIN PER COMMITTED SITE. At most one on the batch path (the
+    # context holds a single selected_structure_site); in a session, every
+    # site the owner committed -- up to three generated plus two they
+    # PLACED. A design with two placed sites draws two pins, which is the
+    # whole of what the plural key is for. Every site collapses into the one
+    # "Permanent Building Site" legend entry, the same treatment every other
+    # possibly-multiple layer here already gets.
+    for structure_site in structure_sites:
         # Real, scored footprint still drives placement -- only what gets
         # drawn at its representative_point() changes (see this module's
         # own STRUCTURE SITE STYLE docstring section): a single fixed-size
