@@ -652,6 +652,96 @@ def drawn_production_block_to_feature(block: dict, result: dict) -> dict:
     )
 
 
+def drawn_tree_zone_to_feature(zone: dict, result: dict) -> dict:
+    """
+    ONE zone the user DREW -- tree_zone_candidates.score_drawn_tree_zone()'s
+    dict -- as the Feature the client reads its panel off, measured against
+    the run it was scored against.
+
+    THE SAME ROW AS A SUGGESTION, FIELD FOR FIELD, and by construction
+    rather than by agreement: both come out of tree_zone_candidates.
+    _zone_row(). Everything the trees payload's `zones` table carries for a
+    suggested zone is on these properties under the same names -- the score,
+    the four factors, the two slope figures, the compass and elevation
+    positions, and the marginal benefits -- because the panel shows one kind
+    of row and the reader is entitled to compare them.
+
+    THE ONE FIELD THAT IS ABSENT, not null, is `rank`: a position among
+    candidates this zone was never one of. See _zone_row() for why it is
+    left out there instead of stripped here.
+
+    `zone_origin` IS THE TAG THAT SAYS WHICH KIND THIS IS, "user_drawn" --
+    the job `block_origin` does for a drawn production block and
+    SITE_ORIGIN_USER_PLACED for a placed structure site. A consumer that
+    mixes the two lists reads it rather than inferring the difference from a
+    missing rank.
+
+    THE GEOMETRY IS THE CLAMPED ZONE -- the ring the user drew, intersected
+    with the parcel, which is the ground the measurements were actually
+    taken over. A client that drew its own unclamped ring and showed these
+    numbers beside it would be captioning one shape with another's readings.
+
+    THE ID IS A PLACEHOLDER AND THE CLIENT KEEPS ITS OWN (see
+    DRAWN_TREE_ZONE_FEATURE_ID). This Feature exists to carry a measurement
+    set back, not to name anything.
+
+    `confidence` STAYS LOW WHATEVER IT SCORES, with the drawn note the
+    client already put on the zone unchanged by this round trip: the score
+    is a measurement of the ground, and `confidence` is about who chose the
+    boundary -- which here was a person with a mouse. The notes are this
+    layer's own template, the same sentences a suggestion carries, because
+    they describe the INSTRUMENT and the instrument is the same one.
+    """
+    from tree_zone_candidates import (
+        HYDRIC_OVERLAP_FACTOR_WEIGHT,
+        SLOPE_FACTOR_WEIGHT,
+        SOIL_MARGINALITY_FACTOR_WEIGHT,
+        STREAM_PROXIMITY_FACTOR_WEIGHT,
+        TREE_ZONE_BOUNDARY_SETBACK_METERS,
+        TREE_ZONE_CONFIDENCE_NOTES_TEMPLATE,
+        TREE_ZONE_PRODUCTION_BUFFER_METERS,
+        TREE_ZONE_WATER_BUFFER_METERS,
+        _data_availability_note,
+    )
+
+    patch = zone["patch"]
+    confidence_notes = TREE_ZONE_CONFIDENCE_NOTES_TEMPLATE.format(
+        hydric_weight=HYDRIC_OVERLAP_FACTOR_WEIGHT,
+        slope_weight=SLOPE_FACTOR_WEIGHT,
+        soil_weight=SOIL_MARGINALITY_FACTOR_WEIGHT,
+        stream_weight=STREAM_PROXIMITY_FACTOR_WEIGHT,
+        production_buffer_meters=TREE_ZONE_PRODUCTION_BUFFER_METERS,
+        water_buffer_meters=TREE_ZONE_WATER_BUFFER_METERS,
+        boundary_setback_meters=TREE_ZONE_BOUNDARY_SETBACK_METERS,
+        data_availability_note=_data_availability_note(
+            patch["soil_marginality_data_available"],
+            patch["hydric_data_available"],
+            patch["stream_data_available"],
+        ),
+    )
+
+    return make_feature(
+        feature_id=DRAWN_TREE_ZONE_FEATURE_ID,
+        geometry=zone["geometry_wgs84"],
+        layer=LAYER_TREE_ZONE,
+        label="Drawn tree zone",
+        confidence=CONFIDENCE_LOW,
+        confidence_notes=confidence_notes,
+        extra_properties={
+            "zone_origin": zone["zone_origin"],
+            **zone["readout"],
+            # THE THREE AVAILABILITY FLAGS, beside the row. They are not on
+            # the row because a narrative block states them once at step
+            # level (`gates`), and a placement answer has no step-level
+            # block to state them in -- so they ride the feature, which is
+            # the same place a generated zone's Feature carries them.
+            "soil_marginality_data_available": patch["soil_marginality_data_available"],
+            "hydric_data_available": patch["hydric_data_available"],
+            "stream_data_available": patch["stream_data_available"],
+        },
+    )
+
+
 def water_survey_zones_to_feature_collection(
     zones: Optional[list[dict]],
     dropped_zones: Optional[list[dict]] = None,
@@ -1727,6 +1817,14 @@ _PRODUCTION_FEATURE_ID_PREFIX = "production-area-"
 # id() returns None for it and the commit path allocates an internal id the
 # way it always has for a shape a person drew.
 DRAWN_PRODUCTION_BLOCK_FEATURE_ID = "drawn-production-block"
+
+# The same statement for a scored DRAWN TREE ZONE, and a placeholder for the
+# same reason: the client minted the zone's real id when the ring closed and
+# keeps it, and this deliberately does not parse as a generated tree zone's
+# id (internal_tree_zone_id() returns None for it), so the commit path
+# allocates an internal id above every generated one exactly as it always
+# has for a shape a person drew.
+DRAWN_TREE_ZONE_FEATURE_ID = "drawn-tree-zone"
 
 # The same statement for tree zones: tree_zones_to_feature_collection()
 # emits f"tree-zone-candidate-{patch['id']}" and internal_tree_zone_id()

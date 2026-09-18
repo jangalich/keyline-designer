@@ -1846,6 +1846,37 @@ TREES = StepDefinition(
             CrossingGround(type="canopy", exclusion_layer="canopy"),
         ),
     ),
+    # THE USER DRAWS A ZONE AND THE SERVER MEASURES IT, on the same
+    # instrument the suggestions were measured on -- landform's Placement,
+    # for the reason landform's exists, and the withdrawal of the argument
+    # that used to say this step was different.
+    placement=Placement(
+        input="ring",
+        shape=INPUT_SHAPE_RING,
+        score="tree_zone_candidates.score_drawn_tree_zone",
+        feature="wire_translation.drawn_tree_zone_to_feature",
+        why=(
+            "A drawn tree zone reported no score and the panel said so in "
+            "words. The reason was this step's MIN_TREE_SUITABILITY_SCORE: "
+            "a real floor every generated candidate clears, so a drawn zone "
+            "below it would read as scored badly rather than unscored. THAT "
+            "ARGUMENT RESTED ON THE FLOOR BEING VISIBLE, and the panel "
+            "dropped the floor row when it stopped explaining how the score "
+            "was computed -- so 31.0 is no longer a number the reader ever "
+            "sees, and a drawn 22 beside a suggested 58 now reads as what "
+            "it is. The bigger gain is the marginal benefits, which are "
+            "computed FROM the factors: an unscored zone earned none, so "
+            "the panel could say nothing about what the user's own ground "
+            "is good for, which is the most useful thing this step "
+            "publishes. Every factor is derivable from the zone's own cells "
+            "-- slope off the cached DEM, hydric overlap and soil "
+            "marginality off the cached SSURGO geometry, stream proximity "
+            "off the cached NHD features -- so the measurement was "
+            "available and withheld. Scoring is a READ: nothing is "
+            "persisted, the drawn zone holds no slot, and the same ring can "
+            "be asked about any number of times."
+        ),
+    ),
     # NONE. The suitability surface is computed over the leftover ground
     # and the user's input is the selection plus what they draw.
     user_inputs=(),

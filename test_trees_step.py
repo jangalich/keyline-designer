@@ -61,7 +61,13 @@ Sections (the branch's numbered tests in brackets):
   9  [9]  The three availability flags survive to the wire, and a False
           flag beside a neutral 0.5 comes back distinguishable.
  10  [10] NO NETWORK during rehydration -- a socket counter that raises.
- 11  [11] Regression is the other test files, run separately.
+ 11       A DRAWN ZONE IS SCORED: the ring goes up through the trees
+          entry's own Placement, comes back carrying the same measurement
+          row a suggestion carries (and no rank), and the scoring, the
+          commit and the reopen around it are each ZERO network calls. The
+          factor-by-factor arithmetic is in test_tree_zone_candidates.py,
+          over a fixture whose ground is hand-checkable.
+ 12       Regression is the other test files, run separately.
 """
 
 import copy
@@ -1356,8 +1362,145 @@ print(
     f"counter that raises -- {len(_connection_attempts)} connection attempts."
 )
 
+# --- 11. A DRAWN ZONE IS SCORED, AND STILL NO NETWORK -----------------
+#
+# THE SIXTH VERB OVER THIS STEP. A ring the user drew goes up through
+# step_orchestrator.score_placed_feature() -- the trees entry's own
+# Placement declaration -- and comes back as a Feature carrying the same
+# measurement row a suggestion carries. See tree_zone_candidates.
+# score_drawn_tree_zone() for why this step scores one now, and
+# test_tree_zone_candidates.py for the factor-by-factor arithmetic over a
+# fixture whose ground is hand-checkable.
+#
+# WHAT IS ASSERTED HERE IS THE PATH, AND THE ZERO. The branch that scores a
+# drawn zone put a new server call between a generate and a commit, and the
+# step's zero-network guarantee has to survive it: every input the scorer
+# reads is on the generate's own result (its `run_inputs`), so the count is
+# summed over every mocked boundary and must not move.
+
+with Harness() as h:
+    s = Session()
+    s.upstream()
+    payload = s.trees()
+    context = s.context()
+    grounds = step_orchestrator.crossing_grounds(TREES, context, s.stored())
+    # A square over ground the pipeline itself chose -- the production
+    # ground, which a tree zone may knowingly cross -- clipped to the
+    # parcel, so this is a ring a user could really have drawn.
+    drawn_ring = _box_around(
+        _largest(grounds[0]["polygon_utm"]), 25.0, clip_utm=context.boundary_polygon_utm
+    )
+
+    before_score = h.total_network_calls
+    scored = s.score("trees", drawn_ring)
+    score_network = h.total_network_calls - before_score
+    assert score_network == 0, (
+        f"scoring a zone the user drew must make ZERO network calls -- it measures the drawn ring "
+        f"against the run already in memory. Got {score_network}"
+    )
+
+    # [test 1] ALL FOUR FACTORS, AND A SCORE. Not an em dash, and not a
+    # subset: the panel's whole argument for printing a drawn zone beside a
+    # suggestion is that the same four things were measured.
+    props = scored["properties"]
+    assert props["zone_origin"] == tree_zone_candidates.ZONE_ORIGIN_USER_DRAWN, props["zone_origin"]
+    assert props["score"] is not None, "a drawn zone reports a score"
+    assert sorted(props["factors"]) == [
+        "hydric_overlap", "slope", "soil_marginality", "stream_proximity"
+    ], sorted(props["factors"])
+    assert all(value is not None for value in props["factors"].values()), props["factors"]
+    assert "rank" not in props, "a drawn zone competes for no ranking slot, so it carries no rank"
+    assert props["layer"] == wire_translation.LAYER_TREE_ZONE
+    assert props["confidence"] == "low", "the score measures ground; confidence is about who drew the edge"
+
+    # THE SAME ROW AS A SUGGESTION, key for key, because both come out of
+    # tree_zone_candidates._zone_row(). This is the claim the panel makes
+    # when it prints the two scores in one column.
+    # `feature_id` is the PAYLOAD's join key onto the map's features, added
+    # by build_trees_payload(), not part of the measurement row; `rank` is
+    # the one measurement field a drawn zone cannot have.
+    _suggested_row = set(payload["zones"][0]) - {"rank", "feature_id"}
+    assert _suggested_row <= set(props), sorted(_suggested_row - set(props))
+
+    # [test 2] THE BENEFITS ARE ON IT, AND THEY ARE THE GATED LIST. Every
+    # benefit traces to a factor above zero whose own flag is True -- the
+    # rule is marginal_benefits()' and is unchanged; the three flags ride
+    # the Feature so a consumer can check the pairing for itself.
+    assert isinstance(props["marginal_benefits"], list), props["marginal_benefits"]
+    for benefit in props["marginal_benefits"]:
+        assert benefit in tree_zone_candidates.MARGINAL_BENEFITS, benefit
+    _flags = {
+        "soil_marginality_data_available": props["soil_marginality_data_available"],
+        "hydric_data_available": props["hydric_data_available"],
+        "stream_data_available": props["stream_data_available"],
+    }
+    assert _flags == payload["summary"]["gates"], (_flags, payload["summary"]["gates"])
+    for benefit, sources in tree_zone_candidates.MARGINAL_BENEFIT_FACTOR_SOURCES:
+        qualifies = any(
+            (gate is None or _flags[gate]) and float(props["factors"][key.removesuffix("_factor")] or 0.0) > 0.0
+            for key, gate in sources
+        )
+        assert (benefit in props["marginal_benefits"]) == qualifies, (
+            f"{benefit}: earned={benefit in props['marginal_benefits']} but the gate rule says "
+            f"{qualifies} over factors {props['factors']} and flags {_flags}"
+        )
+
+    # IT IS A READ. Nothing was persisted, the step is still `generated`,
+    # and asking twice about the same ring gives the same answer.
+    assert s.stored()["steps"]["trees"]["status"] == design_document.STATUS_GENERATED
+    again = s.score("trees", drawn_ring)
+    assert again["properties"]["score"] == props["score"]
+    assert h.total_network_calls - before_score == 0, "the second read fetches nothing either"
+
+    # AND THE COMMIT AND THE REOPEN AROUND IT ARE STILL ZERO. The drawn
+    # zone commits carrying NOTHING the scorer produced: the client keeps
+    # the id, the geometry and the confidence notes it minted when the ring
+    # closed, and the measurement was a reading to show, never a decision
+    # to store.
+    drawn_feature = _drawn("drawn-scored", drawn_ring)
+    candidates = payload["tree_zones"]["features"][:1]
+    commit_features = list(candidates) + [drawn_feature]
+    provenance = {f["id"]: "generated" for f in candidates}
+    provenance["drawn-scored"] = "user_added"
+
+    before_commit = h.total_network_calls
+    document = s.commit("trees", commit_features, provenance)
+    commit_network = h.total_network_calls - before_commit
+
+    before_reopen = h.total_network_calls
+    s.reopen("trees")
+    reopen_network = h.total_network_calls - before_reopen
+
+    assert commit_network == 0, f"a commit must make ZERO network calls. Got {commit_network}"
+    assert reopen_network == 0, f"a reopen re-runs the generate, which is network-free. Got {reopen_network}"
+    assert h.identify_trees.call_count >= 2, "the reopen re-ran the generate, so the zero is a closed fetch"
+
+    # THE STORED DRAWN ZONE IS STILL UNSCORED ON THE WIRE, which is the
+    # other half of "scoring is a read": the document holds a decision, and
+    # a measurement of ground is not one. Section 6's assertion, restated
+    # here because THIS zone was scored before it was committed.
+    stored_drawn = next(
+        f for f in document["steps"]["trees"]["features"]["features"] if f["id"] == "drawn-scored"
+    )
+    for field in ("score", "tree_suitability_score", "rank", "factors", "marginal_benefits"):
+        assert field not in stored_drawn["properties"], (
+            f"{field} must not be stored on a committed drawn zone -- the score was a reading shown "
+            f"in the panel, not a decision the document keeps"
+        )
+
 print(
-    "\n11 [test 11]. REGRESSION: run the other test files separately -- test_step_registry.py, "
+    f"11. A DRAWN ZONE IS SCORED, ZERO NETWORK: a ring drawn over the committed "
+    f"production ground scores {props['score']}/100 "
+    f"(factors {props['factors']}, benefits {props['marginal_benefits']}) in {score_network} network "
+    f"calls, on the same row shape a suggestion carries and with no rank. Asked twice, the same "
+    f"answer; the step stays `generated` and the committed feature stores none of it. "
+    f"{commit_network} calls during the commit and {reopen_network} during the reopen, over "
+    f"{h.identify_trees.call_count} tree generates in the section."
+)
+
+
+print(
+    "\n12. REGRESSION: run the other test files separately -- test_step_registry.py, "
     "test_wire_translation.py, test_wire_translation_inbound.py, test_step_orchestrator.py, "
     "test_step_commit.py, test_water_step.py, test_roads_step.py, test_tree_zone_candidates.py, "
     "test_session_api.py, test_solar_suitability.py, test_fencing.py, test_render_layout_map.py, "
