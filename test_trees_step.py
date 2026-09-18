@@ -1475,17 +1475,26 @@ with Harness() as h:
     assert reopen_network == 0, f"a reopen re-runs the generate, which is network-free. Got {reopen_network}"
     assert h.identify_trees.call_count >= 2, "the reopen re-ran the generate, so the zero is a closed fetch"
 
-    # THE STORED DRAWN ZONE IS STILL UNSCORED ON THE WIRE, which is the
-    # other half of "scoring is a read": the document holds a decision, and
-    # a measurement of ground is not one. Section 6's assertion, restated
-    # here because THIS zone was scored before it was committed.
+    # THE SCORE IS NOT A SIDE EFFECT OF THE COMMIT, which is the other half
+    # of "scoring is a read". The feature committed here carries no reading
+    # -- it is the drawing tool's own honest output, a shape and a caption --
+    # and the commit path adds none, although this exact ring was scored
+    # moments ago on this exact session. Nothing server-side remembers that
+    # it was asked.
+    #
+    # WHAT A CLIENT SENDS IS THE CLIENT'S, and it is not what this asserts. A
+    # client that showed the reading in a panel may send it back on the
+    # feature (landform's drawn block already does, through its own declared
+    # merge list) and the document keeps what it is given; the claim here is
+    # narrower and is the one the read/write split actually rests on -- the
+    # SCORE call wrote nothing.
     stored_drawn = next(
         f for f in document["steps"]["trees"]["features"]["features"] if f["id"] == "drawn-scored"
     )
     for field in ("score", "tree_suitability_score", "rank", "factors", "marginal_benefits"):
         assert field not in stored_drawn["properties"], (
-            f"{field} must not be stored on a committed drawn zone -- the score was a reading shown "
-            f"in the panel, not a decision the document keeps"
+            f"{field} must not APPEAR on a committed drawn zone that was sent without it -- the "
+            f"score was a reading, and the commit path invents none"
         )
 
 print(
