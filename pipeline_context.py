@@ -610,9 +610,10 @@ def build_pipeline_context(
     other override in this pipeline uses (see e.g. production_area_
     ceiling.identify_optimized_production_areas()). A caller that already
     fetched a DEM for this exact boundary (e.g. render_layout_map.
-    fetch_layout_layers(), which accepts its own dem= for the same reason)
-    passes it through here instead of paying for a second, redundant
-    fetch.
+    fetch_layout_layers(), which passes parcel_data.dem straight through --
+    its own dem= parameter is gone, having been unused since it started
+    reading the DEM off ParcelData) passes it through here instead of
+    paying for a second, redundant fetch.
 
     boundary_polygon_utm is optional the same way -- a caller that already
     computed it (e.g. parcel_data.fetch_parcel_data(), which derives it

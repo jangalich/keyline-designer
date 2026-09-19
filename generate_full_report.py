@@ -33,6 +33,22 @@ deliberately NO per-section try/except graceful degradation here anymore
 mirrors. This matches the pipeline architecture documented in pipeline-
 architecture-guide.md.
 
+TWO ENTRY POINTS, AND WHICH ONE A CALLER IS ON IS A DECISION THEY MAKE BY
+NAME:
+
+    generate_full_report(boundary, anchor)     THE BATCH PATH -- above.
+    generate_session_report(session_id, store) THE SESSION PATH -- below.
+
+The batch path is what this docstring describes: a boundary goes in, the
+pipeline walks it, and the report narrates the winners the pipeline picked.
+The session path narrates a design SOMEONE COMMITTED, read back out of the
+session through session_design.py, and runs no KSOP computation at all.
+
+They are two functions rather than a flag because the failure mode of
+getting it wrong is silent: a batch report generated for a session looks
+entirely normal -- correct acreages, correct geometry, correct prose -- and
+describes a design nobody chose.
+
 Requires ANTHROPIC_API_KEY to be set in your environment (see
 report_generator.py for details).
 """
@@ -184,6 +200,99 @@ def generate_full_report(boundary_coordinates: list, anchor_lon_lat: tuple[float
     )
 
     return report
+
+
+# ======================================================================
+# THE SESSION PATH: a report of the design the owner actually committed
+# ======================================================================
+
+
+def generate_session_report(
+    session_id: str,
+    store,
+    fetch_cache=None,
+    cache=None,
+) -> str:
+    """
+    The Scale of Permanence report for ONE INTERACTIVE SESSION's COMMITTED
+    DESIGN.
+
+        generate_session_report(session_id, store) -> the narrative report
+
+    THE DIFFERENCE FROM generate_full_report() ABOVE IS WHERE THE CONTEXT
+    COMES FROM, AND NOTHING ELSE. That function walks the boundary through
+    build_pipeline_context() and narrates the winners the pipeline picks;
+    this one reads session_design.build_session_design() and narrates the
+    winners THE OWNER picked. Same report_generator call, same data blocks,
+    same prompt. A KSOP module computes nothing differently on this path --
+    it does not run at all.
+
+    WHY THAT MATTERS ENOUGH TO BE A SEPARATE ENTRY POINT. Running the batch
+    path for a session would produce a report that looks completely normal
+    and describes a design nobody chose: the pipeline's own rank-1 water
+    zone in place of the three the owner committed, its own top solar site
+    in place of the one they placed. The failure has no symptom. So the two
+    paths are two functions, and which one a caller is on is a decision they
+    make once, by name.
+
+    NO ANCHOR ARGUMENT. generate_full_report() takes anchor_lon_lat and
+    validates it because on the batch path there is nothing else to get it
+    from. Here the access point is the roads step's own committed user
+    input -- already validated at generate and again at commit -- and
+    session_design reads it off the commit. Passing one in would invite a
+    second, different answer to a question the document has already
+    answered; it is on the design (`anchor_lon_lat`) for a caller that wants
+    to report it.
+
+    RAISES session_design.SessionWorkingDataExpiredError if this session's
+    working data has been evicted -- see that class. A report is generated
+    in the session that made the design; that is a product decision, and
+    this is what it looks like when the session is gone.
+
+    Requires ANTHROPIC_API_KEY, same as every other path into
+    report_generator.
+    """
+    import session_design
+
+    design = session_design.build_session_design(
+        session_id, store, fetch_cache=fetch_cache, cache=cache
+    )
+    parcel_data = design.parcel_data
+
+    # THE ELEVATION SENTENCE, off the DEM already in hand -- the identical
+    # read generate_full_report() makes, against the identical objects. No
+    # fetch: the session's ParcelData came from the fetch cache at creation.
+    elevation_summary = elevation_range_in_polygon(
+        parcel_data.dem, parcel_data.boundary_polygon_utm
+    )
+
+    # The committed production blocks as the "production_area_candidate"
+    # FeatureCollection, wrapped from geometry already in memory -- the same
+    # forward generate_full_report() makes off the context, over the OWNER'S
+    # blocks rather than the pipeline's.
+    production_areas_geojson = production_suitability_to_geojson(design.production_areas)
+
+    return generate_scale_of_permanence_report(
+        parcel_data.soil_components,
+        elevation_summary,
+        parcel_data.water_features,
+        parcel_data.climate_summary,
+        parcel_data.imagery_summary,
+        design.selected_water_zone,
+        design.selected_structure_site,
+        design.selected_road_corridor,
+        keypoints=design.keypoints,
+        irradiance=parcel_data.irradiance,
+        parcel_acres=design.parcel_acres,
+        production_areas_geojson=production_areas_geojson,
+        # THE WHOLE POINT OF THIS FUNCTION. Every data section in the report
+        # is formatted from these blocks, and on this path each one has been
+        # reduced to the owner's committed members and marked as a decision
+        # (session_design.py's own per-step routes; report_generator.
+        # _committed_section() reads the marker).
+        narrative_data=design.narrative_data,
+        boundary_polygon_utm=design.boundary_polygon_utm,
+    )
 
 
 if __name__ == "__main__":
