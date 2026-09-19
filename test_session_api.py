@@ -42,7 +42,8 @@ Sections:
   7.  RESUME -- a fresh client, and the document says where the wizard is.
   8.  LAYERS AFTER EVICTION -- rebuilt, byte-identical.
   9.  404s -- unknown session, unknown step, unknown job.
-  10. /api/production-zones UNCHANGED -- the frontend spike still works.
+  10. /api/production-zones UNCHANGED -- the frontend spike still works,
+      and the deployed app carries every session, job and report route.
   11. GET /api/steps -- the step order, with no session in existence.
 """
 
@@ -1262,6 +1263,7 @@ with Harness() as h:
         for rule in api.app.url_map.iter_rules()
         if rule.rule.startswith("/api/sessions")
         or rule.rule.startswith("/api/jobs")
+        or rule.rule.startswith("/api/reports")
         or rule.rule == "/api/steps"
     }
     assert served == {
@@ -1278,7 +1280,19 @@ with Harness() as h:
         # The placing step's own read verb (the structures entry): measure
         # a site the user placed against the current proposals.
         "/api/sessions/<session_id>/steps/<step_id>/score",
+        # THE REPORT, AND IT IS SESSION-SCOPED RATHER THAN STEP-SCOPED --
+        # there is no <step_id> in it, because the report is not a step. It
+        # has no candidates, nothing to select and nothing to commit; it is
+        # a terminal action over a session whose six steps are all decided.
+        # See session_report.py. STEP_ORDER is asserted unchanged (six ids)
+        # in section 1 and again in test_session_report_route.py.
+        "/api/sessions/<session_id>/report",
         "/api/jobs/<job_id>",
+        # The produced PDF, by its own id. Not under /api/sessions/: a
+        # report is produced FROM a session and is then its own artifact,
+        # and a client holding the download link should not also have to
+        # hold the session it came from.
+        "/api/reports/<report_id>",
     }, sorted(served)
 
 print(
@@ -1287,8 +1301,8 @@ print(
     f"({len(spike_payload['suggested_zones']['features'])} suggested zones, "
     f"{spike_payload['summary']['selected_acres']} selected acres), its "
     f"missing-boundary branch still 400s, and /api/health still 200s. The "
-    f"deployed app carries all {len(served)} session/job routes from the same "
-    f"blueprint factory sections 1-9 ran over."
+    f"deployed app carries all {len(served)} session/job/report routes from the "
+    f"same blueprint factory sections 1-9 ran over."
 )
 
 

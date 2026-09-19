@@ -254,9 +254,36 @@ def generate_session_report(
     """
     import session_design
 
-    design = session_design.build_session_design(
-        session_id, store, fetch_cache=fetch_cache, cache=cache
+    return report_from_design(
+        session_design.build_session_design(
+            session_id, store, fetch_cache=fetch_cache, cache=cache
+        )
     )
+
+
+def report_from_design(design) -> str:
+    """
+    The narrative report for a SessionDesign ALREADY IN HAND.
+
+    THE BODY OF generate_session_report(), SPLIT OUT AT ITS ONE SEAM -- the
+    line between "get the design" and "narrate it" -- because the PDF path
+    needs both halves of the design and must not build it twice.
+    generate_pdf_report.generate_session_report_pdf() narrates the design AND
+    draws it (session_design.layout_layers() over the same object): calling
+    generate_session_report() there would build the design, throw it away,
+    and build it again for the map. Two builds of a pure read cannot disagree
+    today, but they are two reads of an evictable cache spanning a Claude
+    call -- a window in which the session CAN be evicted between them, so the
+    map would raise SessionWorkingDataExpiredError after the narrative had
+    already been paid for.
+
+    NOT A SECOND ENTRY POINT. generate_session_report() above is still THE
+    name for "report this session", still builds the design itself, and is
+    unchanged in signature and behaviour; this is its body, reachable by a
+    caller that already holds the design. Everything the docstring above
+    says about which winners are narrated is a statement about the design
+    object, and is therefore equally true here.
+    """
     parcel_data = design.parcel_data
 
     # THE ELEVATION SENTENCE, off the DEM already in hand -- the identical

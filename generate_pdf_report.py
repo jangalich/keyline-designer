@@ -22,9 +22,20 @@ its own zero-margin page box while every narrative page keeps normal
 print margins -- both page kinds are declared in the same stylesheet, no
 separate document/merge step needed.
 
-This does NOT wire the frontend's "Generate Report" button to PDF output
--- see this module's __main__ block and api.py's /api/generate-report-pdf
-endpoint for how to call it directly instead.
+TWO ENTRY POINTS NOW, AND THE DIFFERENCE IS THE SAME ONE
+generate_full_report.py DRAWS:
+
+    generate_full_report_pdf(boundary, path, anchor)   THE BATCH PATH
+    generate_session_report_pdf(session_id, store, path)   THE SESSION PATH
+
+The batch one walks a boundary through build_pipeline_context() and
+assembles a PDF about the design the PIPELINE would pick. The session one
+reads session_design.build_session_design() and assembles a PDF about the
+design THE OWNER COMMITTED -- narrative from generate_full_report.
+report_from_design(), map from session_design.layout_layers(), over ONE
+design object. Everything between those inputs and the PDF -- the CSS, the
+named map page, the markdown conversion, the weasyprint call -- is shared
+and identical, because the difference is entirely upstream of it.
 """
 
 import os
@@ -164,9 +175,7 @@ def generate_full_report_pdf(
     path if you want to keep/inspect the image separately from the PDF.
     """
     if map_image_path is None:
-        map_image_path = os.path.join(
-            tempfile.gettempdir(), f"{os.path.splitext(os.path.basename(output_path))[0]}_layout_map.png"
-        )
+        map_image_path = _default_map_image_path(output_path)
 
     print("Generating narrative Scale of Permanence report...")
     report_markdown = generate_full_report(boundary_coordinates, anchor_lon_lat)
@@ -183,12 +192,107 @@ def generate_full_report_pdf(
     render_layout_map(boundary_coordinates, map_image_path, layers=layers)
     print(f"  Map image written to {map_image_path}\n")
 
+    return _write_pdf(report_markdown, map_image_path, output_path, property_label)
+
+
+def _default_map_image_path(output_path: str) -> str:
+    """Where the intermediate map PNG goes when the caller names nowhere --
+    a temp file beside the system temp directory, keyed off the PDF's own
+    basename so two concurrent reports do not write the same image."""
+    return os.path.join(
+        tempfile.gettempdir(),
+        f"{os.path.splitext(os.path.basename(output_path))[0]}_layout_map.png",
+    )
+
+
+def _write_pdf(
+    report_markdown: str,
+    map_image_path: str,
+    output_path: str,
+    property_label: str,
+) -> str:
+    """
+    Markdown + a rendered map PNG -> the PDF on disk. Returns output_path.
+
+    THE SHARED HALF OF BOTH ENTRY POINTS, and the reason it is a function:
+    the batch path and the session path differ only in where the narrative
+    and the layers came from. A second copy of this would be a second
+    stylesheet, a second named-page declaration and a second cover block,
+    and the day one of them gained a heading style the two PDFs would
+    quietly stop looking like the same document.
+    """
     print("Assembling final PDF...")
     html_document = _build_html_document(report_markdown, map_image_path, property_label)
     HTML(string=html_document, base_url=os.path.dirname(os.path.abspath(output_path)) or ".").write_pdf(output_path)
     print(f"  PDF written to {output_path}\n")
 
     return output_path
+
+
+# ======================================================================
+# THE SESSION PATH: the PDF of the design the owner actually committed
+# ======================================================================
+
+
+def generate_session_report_pdf(
+    session_id: str,
+    store,
+    output_path: str,
+    fetch_cache=None,
+    cache=None,
+    property_label: str = "Property Design Report",
+    map_image_path: Optional[str] = None,
+) -> str:
+    """
+    The assembled PDF -- narrative plus final-page layout map -- for ONE
+    INTERACTIVE SESSION'S COMMITTED DESIGN. Returns output_path.
+
+    ONE DESIGN OBJECT, BOTH HALVES. build_session_design() is called exactly
+    once here and its result feeds the narrative (generate_full_report.
+    report_from_design()) and the map (session_design.layout_layers()). That
+    is not an optimisation: a Claude call sits between the two reads, and the
+    session cache is evictable, so two builds would open a window in which
+    the map fails on an eviction the narrative had already been paid for.
+
+    NO BOUNDARY ARGUMENT AND NO ANCHOR ARGUMENT. Both are on the design --
+    the boundary off the Design Document, the access point off the roads
+    commit -- and taking either here would invite a second, different answer
+    to a question the document has already answered. The batch entry point
+    takes both because on that path there is nothing else to get them from.
+
+    RAISES session_design.SessionWorkingDataExpiredError if the session's
+    working data has been evicted, from the one build below, BEFORE the
+    Claude call. That is the only failure on this path a user can act on
+    (reopen and recommit); see session_report.py, which maps it.
+
+    Requires ANTHROPIC_API_KEY, same as every other path into
+    report_generator.
+    """
+    import session_design
+    from generate_full_report import report_from_design
+
+    if map_image_path is None:
+        map_image_path = _default_map_image_path(output_path)
+
+    design = session_design.build_session_design(
+        session_id, store, fetch_cache=fetch_cache, cache=cache
+    )
+
+    print("Generating narrative Scale of Permanence report from the committed design...")
+    report_markdown = report_from_design(design)
+    print("  Narrative report generated.\n")
+
+    print("Rendering the final static map page from the committed design...")
+    # NO fetch_layout_layers() CALL. layout_layers() is the session's own
+    # answer to the same question, built from what the owner committed: no
+    # KSOP walk, no fetch (the basemap tiles render_layout_map() pulls are
+    # the only network this whole path touches).
+    render_layout_map(
+        design.boundary, map_image_path, layers=session_design.layout_layers(design)
+    )
+    print(f"  Map image written to {map_image_path}\n")
+
+    return _write_pdf(report_markdown, map_image_path, output_path, property_label)
 
 
 if __name__ == "__main__":
