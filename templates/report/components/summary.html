@@ -1,0 +1,14 @@
+{#- 3. SUMMARY LINE -- one or two templated sentences in the prose face,
+    every measured value inside them set as data.
+
+    `parts` is a list. A string is prose; a mapping with a `value` key is a
+    measurement and is wrapped in the data span. The section builder decides
+    what is measured; this macro only sets it. Nothing here composes a
+    sentence, so a value can never be pasted into prose unwrapped. -#}
+{% macro summary(parts) -%}
+<p class="summary">
+{%- for part in parts -%}
+{%- if part is mapping -%}<span class="data">{{ part.value }}</span>{%- else -%}{{ part }}{%- endif -%}
+{%- endfor -%}
+</p>
+{%- endmacro %}

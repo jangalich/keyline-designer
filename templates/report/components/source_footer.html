@@ -1,0 +1,12 @@
+{#- 6. SOURCE FOOTER -- the source, its version and citation, and the honest
+    limit of the data, stated at the point of use. Same part list as the
+    summary line: strings are prose, {value} mappings are data (the years,
+    the version) -- and the citation is a value the fetch returned, never a
+    string typed here. -#}
+{% macro source_footer(parts) -%}
+<p class="source-footer">
+{%- for part in parts -%}
+{%- if part is mapping -%}<span class="data">{{ part.value }}</span>{%- else -%}{{ part }}{%- endif -%}
+{%- endfor -%}
+</p>
+{%- endmacro %}

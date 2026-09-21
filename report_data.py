@@ -184,6 +184,23 @@ def fetch_report_data(boundary) -> ReportData:
     )
 
 
+def report_data_from_daily(boundary, daymet_daily: dict) -> ReportData:
+    """
+    A ReportData from daily arrays ALREADY IN HAND -- a parsed Daymet CSV
+    (the reference fixture, a diagnostic run) -- with the climate block
+    derived exactly as fetch_report_data() derives it. No network. What a
+    test or a diagnostic uses to render a report offline; the production
+    path is fetch_report_data().
+    """
+    return ReportData(
+        boundary=list(boundary),
+        centroid=boundary_centroid_lat_lon(boundary),
+        daymet_daily=daymet_daily,
+        climate=derive_climate(daymet_daily),
+        unavailable={},
+    )
+
+
 def _build_default_cache():
     # Imported here, not at module top: session_cache imports parcel_data
     # and the whole Layer 1 import graph, and this module is also imported

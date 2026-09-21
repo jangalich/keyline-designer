@@ -70,6 +70,15 @@ session_expired" as "must be the other kind" is one new failure mode away
 from telling a user to reopen and recommit against something a recommit
 cannot touch.
 
+A THIRD SHAPE, FOR THE SITE DATA REPORT'S OWN DATA LAYER. report_data.
+ReportDataIncompleteError -- a REQUIRED report-time source (Daymet) that
+did not answer -- carries `failed_layer {type, label, reason}`, the shape
+the frontend already renders for a generate and a session creation, with
+`report_failed` beside it so a client that knows only the two shapes above
+still reads a report failure. See _failed_layer_payload(). Nothing raises
+it on the job today (site_report.py is not yet wired into run_report_job);
+the mapping is here so the day it is, the failure has its words.
+
 --- SERVING THE FILE ----------------------------------------------------
 
 The job's result carries a URL; the client fetches it and gets the bytes.
@@ -120,6 +129,7 @@ from typing import Optional
 
 import design_document
 import job_runner
+import report_data
 import session_design
 
 # The download route this module's result points at. ONE SPELLING, imported
@@ -425,6 +435,16 @@ def error_payload(exc: BaseException) -> dict:
                 "remedy": "reopen_and_recommit",
             },
         }
+    if isinstance(exc, report_data.ReportDataIncompleteError):
+        # A REQUIRED REPORT-TIME LAYER DID NOT ANSWER (report_data.py's
+        # table). The failed_layer block is the shape the frontend already
+        # renders for a generate and for a session creation (session_api.
+        # _failed_layer_payload), with its wording: outage wording for a
+        # source that was down, permanent-gap wording for a source that has
+        # no data here. `report_failed` rides beside it so a client built
+        # before this layer existed still reads a non-actionable report
+        # failure; `actionable` says whether a retry can ever help.
+        return _failed_layer_payload(exc)
     return {
         "error": GENERATION_FAILED,
         # `actionable: false` is said out loud rather than left to the
@@ -434,6 +454,30 @@ def error_payload(exc: BaseException) -> dict:
         # next failure shape can break by accident.
         "report_failed": {"actionable": False},
     }
+
+
+def _failed_layer_payload(exc: "report_data.ReportDataIncompleteError") -> dict:
+    """The failed_layer shape for a report-layer failure -- see error_payload()."""
+    no_data = exc.reason == report_data.ReportDataIncompleteError.REASON_NO_DATA_FOR_PARCEL
+    if no_data:
+        error = (
+            f"There is no {exc.label} data available for this land, so the report could not be "
+            f"generated. This is a permanent gap in the data for this area, not a temporary "
+            f"outage -- retrying will not help. Your committed design is unharmed."
+        )
+    else:
+        error = (
+            f"The report could not be generated: the {exc.label} could not be retrieved. Your "
+            f"committed design is unharmed and nothing about it needs to change."
+        )
+    payload = {
+        "error": error,
+        "failed_layer": {"type": exc.layer, "label": exc.label},
+        "report_failed": {"actionable": not no_data},
+    }
+    if exc.reason:
+        payload["failed_layer"]["reason"] = exc.reason
+    return payload
 
 
 def submit_report(
