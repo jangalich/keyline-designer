@@ -13,6 +13,8 @@ THE HTTP SURFACE over the session orchestrator
     GET    /api/sessions/<sid>/steps/<step>/layers   -> 200 step payload
     POST   /api/sessions/<sid>/steps/<step>/discard  -> 200 document
     POST   /api/sessions/<sid>/steps/<step>/score    -> 200 {feature}
+    POST   /api/sessions/<sid>/report                -> 202 {job_id, status}
+    GET    /api/reports/<rid>                        -> 200 application/pdf
     GET    /api/jobs/<jid>                           -> 200 {status, result|error}
 
 WIRING, AND NOTHING BUT. Every behaviour these routes expose already exists
@@ -84,7 +86,7 @@ import os
 from dataclasses import dataclass
 from typing import Optional
 
-from flask import Blueprint, current_app, jsonify, request
+from flask import Blueprint, current_app, jsonify, request, send_file
 
 import canopy_height_data
 import commit_validation
@@ -95,6 +97,7 @@ import parcel_data
 import production_zone_payload
 import session_cache
 import session_manager
+import session_report
 import step_orchestrator
 import step_registry
 
@@ -155,6 +158,10 @@ class Dependencies:
     fetch_cache: Optional[session_cache.FetchCache] = None
     cache: Optional[session_cache.SessionCache] = None
     runner: Optional[job_runner.JobRunner] = None
+    # Where a finished report PDF lives until it is downloaded. None is
+    # session_report.DEFAULT_REPORT_STORE, the same convention as the three
+    # above -- and the `is None` check that makes it safe is in that module.
+    reports: Optional[session_report.ReportStore] = None
 
     def resolved_store(self) -> document_store.DocumentStore:
         return self.store if self.store is not None else default_store()
@@ -233,6 +240,28 @@ def _upstream_payload(exc: step_orchestrator.UpstreamNotCommittedError) -> dict:
         "step_id": exc.step_id,
         "upstream_step": exc.upstream_step,
         "upstream_status": exc.upstream_status,
+    }
+
+
+def _not_ready_payload(exc: session_report.ReportNotReadyError) -> dict:
+    """
+    409 NAMING EVERY STEP THAT IS NOT COMMITTED, with its status.
+
+    The same answer _upstream_payload() gives, over a set rather than an
+    edge: the client's next action is "go back and finish these", and a
+    collapsed "the session is not ready" sends a user three steps short
+    back one step at a time to rediscover the refusal twice. The exception
+    already carries the list, in STEP_ORDER, for that reason.
+
+    SYNCHRONOUS, WITH NO JOB ISSUED -- the thing this response proves. See
+    session_report.check_ready(): a precondition a client has to poll for
+    says the work was accepted when it never could be, and arrives looking
+    like the report broke.
+    """
+    return {
+        "error": str(exc),
+        "session_id": exc.session_id,
+        "uncommitted_steps": exc.missing,
     }
 
 
@@ -334,6 +363,10 @@ _API_ERRORS = (
     # --- 404: the thing addressed does not exist -----------------------
     (document_store.SessionNotFoundError, 404, None),
     (job_runner.JobNotFoundError, 404, None),
+    # A report id this process does not hold: never produced, evicted, or
+    # lost with the process (session_report.py's ephemerality note). One
+    # answer -- ask for the report again -- so one status code.
+    (session_report.ReportNotFoundError, 404, None),
     # A step id that is not in STEP_ORDER, or a real step with no registry
     # entry yet: both are "this URL names no resource", and get_step()'s
     # message already tells the two apart in prose.
@@ -363,6 +396,12 @@ _API_ERRORS = (
     # commits a step needs, a second opinion about the consumes edges kept
     # where the registry's cascade cannot see it.
     (step_orchestrator.UpstreamNotCommittedError, 409, _upstream_payload),
+    # A report over a session that is not fully committed. The SAME 409
+    # family and the same reason: the request is fine, the session's state
+    # is not, and the response names what to go back to. Raised by
+    # session_report.check_ready() before a job exists, which is what makes
+    # it a status code rather than a failed poll.
+    (session_report.ReportNotReadyError, 409, _not_ready_payload),
     (step_orchestrator.StepNotGeneratedError, 409, _not_generated_payload),
     # SchemaVersionError -> 409. THE CHOICE, and the reasoning:
     #
@@ -442,8 +481,8 @@ def _handled(function):
     Run a route body, mapping any known exception through _API_ERRORS.
 
     A DECORATOR RATHER THAN A try/except IN EVERY HANDLER: the mapping must
-    be identical on all nine routes, and nine copies of it is nine chances
-    for one of them to drift. Flask's own errorhandler() would apply to the
+    be identical on every route, and a copy per handler is a chance per
+    handler for one of them to drift. Flask's own errorhandler() would apply to the
     whole app, which would silently change how api.py's existing endpoints
     report failures -- explicitly out of scope for this branch.
     """
@@ -501,11 +540,13 @@ def _json_body() -> dict:
 
 def build_blueprint(deps: Optional[Dependencies] = None, name: str = "sessions"):
     """
-    The nine routes, bound to `deps`. `name` is Flask's blueprint name and
+    The eleven routes, bound to `deps`. `name` is Flask's blueprint name and
     only has to be unique per app -- a test registering a second blueprint on
     a fresh app passes its own.
 
-    EIGHT OF THEM TOUCH A SESSION AND ONE DOES NOT. GET /api/steps takes no
+    NINE OF THEM TOUCH A SESSION AND TWO DO NOT -- GET /api/steps, and GET
+    /api/reports/<id>, which serves an artifact a session produced and whose
+    id is thereafter the only handle on it. GET /api/steps takes no
     `deps` at all -- it serves a constant -- and it is registered here anyway
     rather than on its own blueprint, because it is the same surface, under
     the same prefix, with the same CORS policy and the same JSON conventions.
@@ -846,6 +887,107 @@ def build_blueprint(deps: Optional[Dependencies] = None, name: str = "sessions")
             cache=deps.cache,
         )
         return jsonify({"feature": feature})
+
+    @blueprint.route("/api/sessions/<session_id>/report", methods=["POST"])
+    @_handled
+    def generate_report_endpoint(session_id):
+        """
+        Generate the PDF report for this session's COMMITTED DESIGN.
+        202 + {"job_id", "status"}; the result arrives via GET
+        /api/jobs/<job_id> as
+
+            {"report_id", "download_url", "filename", "size_bytes"}
+
+        and the client fetches `download_url` (GET /api/reports/<id> below)
+        for the bytes. Optional body: {"property_label": "..."} -- the cover
+        page's subtitle, an address if the client has geocoded one.
+
+        A JOB BECAUSE IT IS THE LONGEST OPERATION IN THE PRODUCT: the full
+        narrative through Claude, the layout map render and its basemap
+        imagery. Well past what a request should hold a connection open for,
+        and the same 202-and-poll shape a generate already uses -- one
+        polling path on the client, not two.
+
+        NOT A SEVENTH STEP. There is no `report` in STEP_ORDER, no registry
+        entry and no status on the document: it has no candidates, nothing
+        to select and nothing to commit. It is a terminal action over a
+        finished session, which is why it is a session-scoped URL rather
+        than a step-scoped one. See session_report.py.
+
+        EVERY STEP MUST BE COMMITTED, AND A SESSION THAT IS NOT IS REFUSED
+        SYNCHRONOUSLY -- 409 naming every uncommitted step, with NO job
+        created. The report reads the current committed state, so a partial
+        design produces a finished-looking document with a hole in it; and a
+        precondition the client discovers by polling tells it the work was
+        accepted when it never could be. session_report.check_ready() runs
+        before submit() for exactly that reason, and this route adds no rule
+        of its own -- it does not re-derive which steps are needed, it hands
+        over the document.
+
+        AN UNKNOWN SESSION IS A 404, from the store read check_ready() makes
+        -- generate_step_endpoint()'s own argument, and here it costs
+        nothing extra because the preconditions need the document anyway.
+
+        WHAT THE CLIENT POLLS FOR is a failure it cannot prevent: the Claude
+        call, the imagery, the renderer -- or an EXPIRED session, which is
+        the one it can act on. session_report.error_payload() keeps those
+        two apart by the key each carries.
+        """
+        job = session_report.submit_report(
+            session_id,
+            deps.resolved_store(),
+            fetch_cache=deps.fetch_cache,
+            cache=deps.cache,
+            runner=deps.runner,
+            reports=deps.reports,
+            property_label=_json_body().get("property_label")
+            or "Property Design Report",
+        )
+        return jsonify({"job_id": job.id, "status": job.status}), 202
+
+    @blueprint.route(f"{session_report.REPORT_URL_PREFIX}/<report_id>", methods=["GET"])
+    @_handled
+    def download_report_endpoint(report_id):
+        """
+        The finished PDF, as a file download. The URL a report job's result
+        hands the client, and the only place the bytes are served.
+
+        THE RULE IS BUILT FROM session_report.REPORT_URL_PREFIX, the same
+        constant download_url() builds the wire value from -- a URL invented
+        in one module and re-spelled in the other is a 404 the day either is
+        renamed, and it would be a 404 the client could not distinguish from
+        an evicted report.
+
+        NOT UNDER /api/sessions/<sid>/. A report is produced FROM a session
+        and is then its own artifact: the id is the handle, and hanging it
+        off the session would mean a client holding a download link also
+        has to hold the session it came from, for no gain. It is the same
+        capability-URL posture -- an unguessable id, no auth -- as the
+        session ids themselves; see session_report.py, which writes that
+        down as a decision rather than an oversight.
+
+        A REPORT ID THIS PROCESS DOES NOT HOLD IS A 404, and that covers
+        the ephemeral-filesystem case too: the ReportStore is in-memory and
+        the PDFs sit in a temp directory, so a restart loses both. That is
+        accepted for a download taken immediately, which is what this
+        branch offers -- the expiring link arrives with the payment work.
+
+        NO CLEANUP AFTER SENDING. api.py's /api/generate-report-pdf deletes
+        its temp file in an after_this_request hook because that PDF has no
+        id and no second reader; this one has both, so a user who reloads
+        the download or fetches it from a second tab gets the same file
+        rather than a 404 the first fetch caused. Eviction is the
+        ReportStore's, oldest-first and capped.
+        """
+        reports = deps.reports
+        if reports is None:
+            reports = session_report.DEFAULT_REPORT_STORE
+        return send_file(
+            reports.path(report_id),
+            mimetype=session_report.PDF_MIME_TYPE,
+            as_attachment=True,
+            download_name=session_report.DOWNLOAD_FILENAME,
+        )
 
     @blueprint.route("/api/jobs/<job_id>", methods=["GET"])
     @_handled

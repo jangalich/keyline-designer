@@ -366,10 +366,11 @@ into a georeferenced raster behind a matplotlib axes). Tiles are plain
 {z}/{y}/{x} ArcGIS REST tiles, assumed (correctly, for this service) to be
 in Web Mercator (EPSG:3857) -- see NAIP_TILE_URL_TEMPLATE below.
 
-Output resolution: 300 DPI at US Letter portrait (8.5in x 11in), i.e.
-2550x3300px -- print-quality for the full-bleed final page of the PDF
-report (see generate_pdf_report.py), and consistent with the page size
-the rest of that document renders at.
+Output resolution: 150 DPI at US Letter portrait (8.5in x 11in), i.e.
+1275x1650px -- the full-bleed final page of the PDF report (see
+generate_pdf_report.py), at the page size the rest of that document
+renders at. See OUTPUT_DPI, which is the only place the number lives and
+which nothing else on this map is scaled against.
 """
 
 import math
@@ -572,7 +573,24 @@ HALO_COLOR = "white"
 HALO_ALPHA = 0.55
 
 FIGURE_SIZE_INCHES = (8.5, 11)  # US Letter, portrait -- matches the report's page size
-OUTPUT_DPI = 300
+
+# 150, HALVED FROM 300. The page is still US Letter and every stroke on it is
+# still the same physical size -- what changed is how finely it is sampled:
+# 1275x1650px instead of 2550x3300, a quarter of the pixels.
+#
+# NOTHING TUNED AGAINST THE OLD NUMBER MOVES WITH IT, and that is why this is
+# one constant rather than a retune. Every size on this map is declared in
+# POINTS (markersize, linewidth) or as an OffsetImage zoom, and matplotlib
+# scales all of those with the figure's DPI -- so a 10pt keypoint asterisk is
+# 10pt on the page at either resolution, and the structure pin covers the same
+# patch of ground. The comments below that say "tuned against the 300 DPI
+# output" are still true statements about where those values came from; they
+# were never statements about a pixel count.
+#
+# WHAT IT COSTS is print resolution: 150 DPI is a good screen and a decent
+# print rather than a press-ready one. The report is a PDF people read and
+# download, and the map page is a quarter of the file it used to be.
+OUTPUT_DPI = 150
 
 STREAM_COLOR = "#3B82C4"
 BOUNDARY_COLOR = "#1A1A1A"
