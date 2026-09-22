@@ -32,8 +32,9 @@ the network is refused by offline_harness.
      and the two climate pages), and its monthly table aligns -- right
      edges equal within a column across values of differing digit counts,
      minus signs and dashes included, and the digit advance is uniform
-     (tabular figures) -- measured off the laid-out boxes. The sources,
-     the running label and date are in the PDF's text.
+     (tabular figures) -- measured off the laid-out boxes; and NO BOX ON
+     ANY PAGE crosses the page's content width (report_layout). The
+     sources, the running label and date are in the PDF's text.
   5. THE FAILURE SHAPE: session_report.error_payload() maps a
      ReportDataIncompleteError to failed_layer {type, label, reason} with
      the outage or permanent-gap wording, beside report_failed.
@@ -53,6 +54,7 @@ import requests
 
 import climate_section
 import report_chart
+import report_layout
 import report_map
 import session_report
 import site_report
@@ -160,7 +162,7 @@ assert all(v == ZERO_DASH or re.fullmatch(MINUS + r"?\d+\.\d", v) for v in balan
 caption = section["table_caption"]
 assert [p["value"] for p in caption if isinstance(p, dict)] == ["0.96"]
 assert "".join(p if isinstance(p, str) else "{}" for p in caption) == (
-    "Precipitation is Daymet's, scaled by {} to the 5 nearest NOAA station normals; days over 1 in are the same 5 stations' normals."
+    "Precipitation scaled by {} to the 5 nearest NOAA station normals; days over 1 in from the same stations."
 )
 
 # DESIGN STORMS at the source's own precision; SEVERE WEATHER as reports per year and a peak month.
@@ -187,7 +189,10 @@ assert [b["sign"] for b in wb["chart"]["bands"]] == ["surplus", "deficit", "surp
 assert wb["caption"] == ["Potential evaporation is estimated from temperature; actual loss depends on cover and soil."]
 roses = section["wind_roses"]
 assert roses["unavailable"] is None and roses["chart"]["svg"].count(">wind from</text>") == 2
-assert [r["prevailing"] for r in roses["chart"]["roses"]] == ["SW", "SW"]
+assert [r["prevailing"] for r in roses["chart"]["roses"]] == ["W", "SW"], "the modal sectors, and the solid wedges"
+for rose in roses["chart"]["roses"]:
+    assert rose["wedge_radii"][rose["prevailing"]] == max(rose["wedge_radii"].values()), "the solid wedge is the longest"
+assert any("Resultant wind" in n and "winter from SW (246°)" in n for n in section["methods"][3]["notes"])
 assert "regional estimate" in roses["caption"][0]
 
 # THE SOURCES: one line per source, names and periods only, no data part.
@@ -301,7 +306,7 @@ assert "<title>Site Data Report — 40.6446° N, 79.9826° W</title>" in html
 assert '<h1 class="cover__title">Site Data Report</h1>' in html
 assert "Generated 21 September 2026" in html
 for marker in ('class="eyebrow"', 'class="heading"', 'class="summary"', 'class="key-figures"',
-               'class="source-footer"', 'report-chart--water-balance', 'report-chart--wind-roses', 'class="side-by-side"'):
+               'class="source-footer"', 'report-chart--water-balance', 'report-chart--wind-roses'):
     assert html.count(marker) == 1, marker
 assert html.count('class="data-table') == 3 and html.count('class="caption"') == 6
 assert '<span class="eyebrow__number">II</span> · Climate' in html
@@ -430,6 +435,11 @@ else:
     assert "".join("40.6446° N, 79.9826° W".split()) in "".join(flat.split())
     assert "".join("21 September 2026".split()) in "".join(flat.split())
     assert len(document.pages) == 3, len(document.pages)
+    # NO BOX PAST THE MEASURE, on any page: the check the review asked for
+    # after the severe-weather table sat 51 pt past the right margin.
+    overruns = report_layout.overflowing_boxes(document)
+    assert overruns == [], overruns[:5]
+    print(f"   {len(document.pages)} pages, no box past the content width on any of them")
     print(f"   {len(document.pages)} pages; families {sorted(f.decode() for f in families)}")
 
 # ======================================================================

@@ -210,6 +210,28 @@ th.num {
 .section--chart .data-table {
   margin-bottom: var(--space-2);
 }
+/* Thirteen columns must fit the measure: the monthly table's cells give
+   up a point and a half of side padding each. Measured, not guessed --
+   test_site_report.py holds every box inside the content width. */
+.section--chart .data-table th,
+.section--chart .data-table td {
+  padding: 2.5pt 4.5pt;
+}
+.section--chart .data-table thead th {
+  padding-top: var(--space-1);
+  padding-bottom: var(--space-1);
+}
+.section--chart .key-figures {
+  row-gap: var(--space-3);
+}
+.section--chart .caption {
+  margin-bottom: var(--space-2);
+}
+/* The two compact tables stack, design storms above severe weather,
+   each at its own content width: side by side they overran the measure. */
+.section--chart .data-table--compact {
+  margin-bottom: var(--space-1);
+}
 
 /* 1. Eyebrow */
 .eyebrow {
@@ -424,24 +446,6 @@ th.num {
   color: var(--ink);
   margin: 0 0 var(--space-4) 0;
   max-width: 6.4in;
-}
-
-/* Two compact tables beside each other -- design storms and severe
-   weather -- each with its own caption beneath. */
-.side-by-side {
-  display: flex;
-  column-gap: var(--space-5);
-  align-items: flex-start;
-  margin: 0 0 var(--space-3) 0;
-}
-.side-by-side__item {
-  flex: 1 1 0;
-  min-width: 0;
-}
-.side-by-side .data-table--compact {
-  min-width: 0;
-  width: 100%;
-  margin-bottom: var(--space-2);
 }
 
 /* 6. Source footer -- the caveat, then the citation smaller */

@@ -30,9 +30,19 @@ unit-vector mean missed by 6.5 and an arithmetic mean by 21.7. So a
 daily WD10M is the direction of the day's resultant wind vector, and the
 daily WS10M is the scalar mean of hourly speeds (matched to 0.003 m/s).
 A day is therefore sectored by its served direction with no further
-vector arithmetic; the SEASONAL prevailing direction is a speed-weighted
-vector mean over days (prevailing_direction_degrees), because averaging
-directions arithmetically puts 350 and 10 degrees at 180.
+vector arithmetic.
+
+PREVAILING MEANS MOST FREQUENT. A season's prevailing sector is the
+MODAL sector -- the one the most days blew from -- and the rose's solid
+wedge is by construction its longest wedge. The speed-weighted vector
+mean over days (resultant_direction_degrees) is a different quantity,
+the RESULTANT wind, and is recorded as such: at the reference parcel it
+falls at 246 degrees in winter, inside the SW sector, while more winter
+days blow from W. Branch 7's first render marked SW as prevailing on
+that basis and contradicted its own longest wedge; the review caught
+it. The resultant is kept on the block for the methods note only, and
+averaging directions is still done as vectors there, because an
+arithmetic mean puts 350 and 10 degrees at 180.
 
 DIRECTION IS WHERE THE WIND COMES FROM. Meteorological convention,
 degrees clockwise from north, as POWER documents and as every rose
@@ -115,13 +125,14 @@ def compass_sector(degrees_from: float) -> str:
     return SECTORS[index]
 
 
-def prevailing_direction_degrees(directions_from, speeds) -> Optional[float]:
+def resultant_direction_degrees(directions_from, speeds) -> Optional[float]:
     """
-    Speed-weighted vector mean of from-directions, in degrees from north.
-    Each day contributes a vector of its speed pointing FROM its
-    direction; the mean vector's direction is the prevailing one.
-    None when there are no days or the mean vector is zero (winds
-    balanced all round).
+    Speed-weighted vector mean of from-directions, in degrees from north
+    -- the RESULTANT wind, not the prevailing one (see the module
+    docstring). Each day contributes a vector of its speed pointing FROM
+    its direction; the mean vector's direction is returned. None when
+    there are no days or the mean vector is zero (winds balanced all
+    round).
     """
     sin_sum = cos_sum = 0.0
     n = 0
@@ -135,6 +146,17 @@ def prevailing_direction_degrees(directions_from, speeds) -> Optional[float]:
     # A mean a hair below north comes out of the modulo as 359.999...;
     # north is 0.
     return 0.0 if 360.0 - degrees < 1e-9 else degrees
+
+
+def prevailing_sector(counts: dict) -> Optional[str]:
+    """The MODAL sector: the one with the most days, ties going to the
+    first in clockwise order from N. None when no sector has a day."""
+    best = None
+    for sector in SECTORS:
+        n = counts.get(sector, 0)
+        if n > 0 and (best is None or n > counts[best]):
+            best = sector
+    return best
 
 
 # ======================================================================
@@ -266,8 +288,9 @@ def derive_wind(parsed: dict, seasons=SEASONS) -> dict:
                        'sector_counts': {'N': n, ...},
                        'sector_frequency': {'N': share, ...},   # sums to 1
                        'mean_speed_m_s': float,
-                       'prevailing_degrees': float | None,
-                       'prevailing_sector': 'SW' | None},
+                       'prevailing_sector': 'W' | None,       # the MODAL sector
+                       'resultant_degrees': float | None,     # speed-weighted vector mean
+                       'resultant_sector': 'SW' | None},
             'summer': {...},
           },
         }
@@ -292,15 +315,16 @@ def derive_wind(parsed: dict, seasons=SEASONS) -> dict:
         for d in directions:
             counts[compass_sector(d)] += 1
         days = len(speeds)
-        prevailing = prevailing_direction_degrees(directions, speeds)
+        resultant = resultant_direction_degrees(directions, speeds)
         out[name] = {
             "months": tuple(seasons[name]),
             "days": days,
             "sector_counts": counts,
             "sector_frequency": {s: (counts[s] / days if days else 0.0) for s in SECTORS},
             "mean_speed_m_s": (sum(speeds) / days) if days else None,
-            "prevailing_degrees": prevailing,
-            "prevailing_sector": compass_sector(prevailing) if prevailing is not None else None,
+            "prevailing_sector": prevailing_sector(counts),
+            "resultant_degrees": resultant,
+            "resultant_sector": compass_sector(resultant) if resultant is not None else None,
         }
     return {
         "convention": "from",
@@ -366,8 +390,8 @@ def summarize_wind(block: dict) -> str:
     for name, season in block["seasons"].items():
         speed = season["mean_speed_m_s"]
         parts.append(
-            f"{name} {season['days']} days, mean {speed:.2f} m/s, prevailing from "
-            f"{season['prevailing_sector']} ({season['prevailing_degrees']:.0f} deg)"
+            f"{name} {season['days']} days, mean {speed:.2f} m/s, prevailing (modal) from "
+            f"{season['prevailing_sector']}, resultant from {season['resultant_sector']} ({season['resultant_degrees']:.0f} deg)"
         )
     return f"Wind {block['period']['start']}-{block['period']['end']} (direction FROM): " + "; ".join(parts)
 

@@ -352,6 +352,8 @@ from weasyprint import HTML  # noqa: E402
 document = HTML(string=html, base_url=site_report.TEMPLATES_DIRECTORY).render()
 pages = document.pages
 assert len(pages) == 5, len(pages)      # cover, Climate x2, Landform x2
+import report_layout  # noqa: E402
+assert report_layout.overflowing_boxes(document) == [], "a box past the page's content width"
 
 
 def _walk(box):

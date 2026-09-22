@@ -1,8 +1,8 @@
 {#- THE CLIMATE SECTION -- composed entirely from the components, on TWO
     PAGES BY RULE (the rhythm the map sections set): the pictures and the
     takeaway (summary, water balance diagram, wind roses) on the first,
-    every number (key figures, the monthly table, design storms, severe
-    weather, the sources) on the second. No styling here, no numbers here:
+    every number (key figures, the monthly table, design storms above
+    severe weather, the sources) on the second. No styling here, no numbers here:
     `section` is climate_section.build_climate_section()'s dict, every
     value already formatted. Each figure carries at most one caption line
     -- the one caveat that could change a decision, at the point of use. -#}
@@ -33,22 +33,16 @@
     {{ c9.caption(section.key_figures_caption) }}
     {{ c5.data_table(section.table) }}
     {{ c9.caption(section.table_caption) }}
-    <div class="side-by-side">
-      <div class="side-by-side__item">
 {%- if section.design_storms.table %}
-        {{ c5.data_table(section.design_storms.table) }}
-        {{ c9.caption(section.design_storms.caption) }}
+    {{ c5.data_table(section.design_storms.table) }}
+    {{ c9.caption(section.design_storms.caption) }}
 {%- else %}
-        {{ c9.unavailable(section.design_storms.unavailable) }}
+    {{ c9.unavailable(section.design_storms.unavailable) }}
 {%- endif %}
-      </div>
 {%- if section.severe_weather %}
-      <div class="side-by-side__item">
-        {{ c5.data_table(section.severe_weather.table) }}
-        {{ c9.caption(section.severe_weather.caption) }}
-      </div>
+    {{ c5.data_table(section.severe_weather.table) }}
+    {{ c9.caption(section.severe_weather.caption) }}
 {%- endif %}
-    </div>
     {{ c6.source_footer({"lines": section.sources}) }}
   </div>
 </section>

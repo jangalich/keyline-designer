@@ -23,14 +23,16 @@ runs through a band. Values arrive ALREADY IN THE DISPLAY UNIT (inches):
 the chart scales and draws, it converts nothing -- climate_section's
 rule. The y axis runs from zero to the next whole tick above the
 larger series; month initials sit under their points in the prose
-face; tick labels are numbers and take the data face.
+face; tick labels are numbers and take the data face, and the unit
+rides beside the top value ("6 in") rather than above it.
 
 THE WIND ROSES are two small roses side by side, winter and summer,
 eight sectors, in ink: each sector's wedge reaches a radius in
 proportion to the share of days the wind came FROM that sector, against
-rings at whole tens of percent; the prevailing sector -- the one the
-season's speed-weighted vector mean falls in -- is filled solid, the
-rest tinted. The compass letters sit outside the rings; each rose is
+rings at whole tens of percent; the PREVAILING sector -- the modal one,
+the longest wedge, by construction: the renderer picks the largest
+share itself and refuses a caller whose `prevailing` names another --
+is filled solid, the rest tinted. The compass letters sit outside the rings; each rose is
 titled with its season and months and carries the words "wind from",
 so a reader cannot take a wedge for a heading. The mean speed is set
 under the rose in the data face, already formatted by the section.
@@ -57,7 +59,7 @@ BALANCE_FRAME = (FRAME_WIDTH_PT, 212.0)
 ROSES_FRAME = (FRAME_WIDTH_PT, 188.0)
 
 # Water balance geometry, in points.
-BALANCE_MARGIN_LEFT_PT = 30.0
+BALANCE_MARGIN_LEFT_PT = 34.0
 BALANCE_MARGIN_RIGHT_PT = 10.0
 BALANCE_MARGIN_TOP_PT = 12.0
 BALANCE_MARGIN_BOTTOM_PT = 18.0
@@ -67,7 +69,6 @@ GRID_STROKE_PT = 0.4
 AXIS_STROKE_PT = 0.6
 TICK_LABEL_SIZE_PT = 6.5
 MONTH_LABEL_SIZE_PT = 7.5
-UNIT_LABEL_SIZE_PT = 6.5
 
 # Wind rose geometry.
 ROSE_RADIUS_PT = 57.0
@@ -201,9 +202,9 @@ def render_water_balance(
         stroke = ink if tick == 0 else rule
         stroke_w = AXIS_STROKE_PT if tick == 0 else GRID_STROKE_PT
         parts.append(f'<line x1="{_fmt(gx0)}" y1="{_fmt(gy)}" x2="{_fmt(gx1)}" y2="{_fmt(gy)}" stroke="{stroke}" stroke-width="{_fmt(stroke_w)}"/>')
-        label = f"{tick:g}"
+        # The unit rides beside the top value ("6 in"), never stacked above it.
+        label = f"{tick:g} {unit}" if tick == ticks[-1] else f"{tick:g}"
         parts.append(_text(x0 - 4.0, gy + TICK_LABEL_SIZE_PT * 0.35, label, font=FONT_DATA, size=TICK_LABEL_SIZE_PT, fill=muted, anchor="end"))
-    parts.append(_text(x0 - 4.0, y0 - 3.0, unit, font=FONT_DATA, size=UNIT_LABEL_SIZE_PT, fill=muted, anchor="end"))
     # Bands.
     bands = balance_bands(precipitation, evaporation)
     for band in bands:
@@ -263,10 +264,12 @@ def render_wind_roses(seasons: list, tokens: dict, frame: tuple = ROSES_FRAME) -
 
     Each season is {'title': 'Winter', 'months': 'Dec–Feb',
     'sectors': [8 names clockwise from N], 'frequency': {name: share},
-    'prevailing': name | None, 'speed_label': '6.1 mph' | None}. All
-    roses share one ring scale -- the smallest multiple of ten percent
-    above the largest share in any season -- so the two can be read
-    against each other.
+    'prevailing': name | None, 'speed_label': '6.1 mph' | None}. The
+    solid wedge is the LONGEST one -- the sector with the largest share
+    -- and a `prevailing` that names a different sector raises: the
+    picture and the word must agree. All roses share one ring scale --
+    the smallest multiple of ten percent above the largest share in any
+    season -- so the two can be read against each other.
     """
     if not seasons:
         raise ValueError("render_wind_roses: at least one season")
@@ -297,13 +300,21 @@ def render_wind_roses(seasons: list, tokens: dict, frame: tuple = ROSES_FRAME) -
             parts.append(_text(cx + (r + 1.0) * math.sin(diagonal) + 1.0, cy - (r + 1.0) * math.cos(diagonal) - 0.5,
                                f"{round(ring * 100):d}%", font=FONT_DATA, size=ROSE_RING_LABEL_SIZE_PT, fill=muted, anchor="start"))
         wedge_radii = {}
+        longest = max(sectors, key=lambda sec: (season["frequency"].get(sec, 0.0), -sectors.index(sec)))
+        if season["frequency"].get(longest, 0.0) <= 0:
+            longest = None
+        if season.get("prevailing") is not None and season["prevailing"] != longest:
+            raise ValueError(
+                f"render_wind_roses: {season['title']} names {season['prevailing']!r} as prevailing but the "
+                f"largest share is {longest!r}; prevailing is the modal sector"
+            )
         for i, sector in enumerate(sectors):
             share = season["frequency"].get(sector, 0.0)
             r = ROSE_RADIUS_PT * share / ring_max
             wedge_radii[sector] = r
             if r <= 0:
                 continue
-            opacity = 1.0 if sector == season.get("prevailing") else ROSE_WEDGE_OPACITY
+            opacity = 1.0 if sector == longest else ROSE_WEDGE_OPACITY
             parts.append(f'<path d="{_wedge(cx, cy, r, i * 360.0 / SECTOR_COUNT, half)}" fill="{ink}" fill-opacity="{_fmt(opacity)}" stroke="{ink}" stroke-width="{_fmt(ROSE_STROKE_PT)}" stroke-linejoin="round"/>')
         for i, sector in enumerate(sectors):
             if i % 2:
@@ -322,7 +333,7 @@ def render_wind_roses(seasons: list, tokens: dict, frame: tuple = ROSES_FRAME) -
                 "radius": ROSE_RADIUS_PT,
                 "sectors": sectors,
                 "wedge_radii": wedge_radii,
-                "prevailing": season.get("prevailing"),
+                "prevailing": longest,
             }
         )
     parts.append("</svg>")

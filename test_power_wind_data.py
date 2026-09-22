@@ -14,8 +14,10 @@ network is refused by offline_harness.
   2. THE CONVENTION IS "FROM": compass_sector() puts 0 in N and 270 in W,
      sector boundaries fall at 22.5 degrees either side, and a season of
      days all from 270 is reported as prevailing from W, never E.
-  3. THE VECTOR MEAN: 350 and 10 average to 0, not 180; weights pull the
-     mean toward the stronger day; balanced winds give None.
+  3. THE RESULTANT (speed-weighted vector mean): 350 and 10 average to 0,
+     not 180; weights pull the mean toward the stronger day; balanced
+     winds give None. It is NOT the prevailing direction: prevailing is
+     the modal sector, and the two are told apart on the block.
   4. DAILY WD10M IS A VECTOR MEAN -- the step 0 finding, tested: for every
      day of the hourly fixture, the speed-weighted vector mean of the 24
      hourly directions reproduces the daily WD10M to within 0.15 degrees,
@@ -24,7 +26,8 @@ network is refused by offline_harness.
   5. THE CALENDAR: DOY 366 exists in 2024 and is refused in 2023.
   6. derive_wind() on synthetic data: winter is Dec/Jan/Feb and summer
      Jun/Jul/Aug, sector frequencies sum to one, a fill day is dropped and
-     counted, and the prevailing sector follows the vector mean.
+     counted, the prevailing sector is the modal one and the resultant
+     can differ from it.
   7. THE FETCH: the request names both parameters, the community and the
      window; a missing year raises PowerIncompleteError; no network raises
      the RequestException with attempts published.
@@ -50,7 +53,7 @@ from power_wind_data import (
     get_power_wind_for_point,
     parse_power_csv,
     power_date,
-    prevailing_direction_degrees,
+    resultant_direction_degrees,
 )
 
 with open("power_wind_reference_fixture.csv", encoding="utf-8") as _handle:
@@ -107,21 +110,21 @@ westerly.update({"fill_value": -999.0, "years": [2001]})
 block = derive_wind(westerly)
 assert block["convention"] == "from"
 winter = block["seasons"]["winter"]
-assert winter["prevailing_sector"] == "W" and _close(winter["prevailing_degrees"], 270.0)
+assert winter["prevailing_sector"] == "W" and winter["resultant_sector"] == "W" and _close(winter["resultant_degrees"], 270.0)
 assert winter["sector_frequency"]["W"] == 1.0 and winter["sector_frequency"]["E"] == 0.0
 print("   0 -> N, 270 -> W, boundary 337.5 -> N; a westerly season is 'from W', not E")
 
 # ======================================================================
 # 3. The vector mean
 # ======================================================================
-print("3. the prevailing direction is a speed-weighted vector mean")
-assert _close(prevailing_direction_degrees([350.0, 10.0], [1.0, 1.0]), 0.0, 1e-6)
+print("3. the resultant is a speed-weighted vector mean; prevailing is the modal sector")
+assert _close(resultant_direction_degrees([350.0, 10.0], [1.0, 1.0]), 0.0, 1e-6)
 arithmetic = (350.0 + 10.0) / 2
-assert arithmetic == 180.0 and not _close(prevailing_direction_degrees([350.0, 10.0], [1.0, 1.0]), arithmetic)
-weighted = prevailing_direction_degrees([0.0, 90.0], [3.0, 1.0])
+assert arithmetic == 180.0 and not _close(resultant_direction_degrees([350.0, 10.0], [1.0, 1.0]), arithmetic)
+weighted = resultant_direction_degrees([0.0, 90.0], [3.0, 1.0])
 assert _close(weighted, math.degrees(math.atan2(1.0, 3.0)), 1e-6), weighted   # 18.43, toward the stronger day
-assert prevailing_direction_degrees([0.0, 180.0], [2.0, 2.0]) is None
-assert prevailing_direction_degrees([], []) is None
+assert resultant_direction_degrees([0.0, 180.0], [2.0, 2.0]) is None
+assert resultant_direction_degrees([], []) is None
 print(f"   350 & 10 -> 0 (arithmetic says 180); 0 at 3 m/s & 90 at 1 m/s -> {weighted:.2f}; balanced -> None")
 
 # ======================================================================
@@ -141,7 +144,7 @@ for day, keys in sorted(by_day.items()):
     d = date(int(day[:4]), int(day[4:6]), int(day[6:]))
     row = daily_index[(d.year, d.timetuple().tm_yday)]
     served_direction, served_speed = daily["WD10M"][row], daily["WS10M"][row]
-    vector_errors.append(_angle_error(prevailing_direction_degrees(directions, speeds), served_direction))
+    vector_errors.append(_angle_error(resultant_direction_degrees(directions, speeds), served_direction))
     arithmetic_errors.append(_angle_error(sum(directions) / 24.0, served_direction))
     speed_errors.append(abs(sum(speeds) / 24.0 - served_speed))
 assert len(vector_errors) == 31
@@ -195,12 +198,18 @@ assert winter["days"] == 2 * (31 + 31 + 28) - 1 and summer["days"] == 2 * (30 + 
 assert _close(sum(winter["sector_frequency"].values()), 1.0) and _close(sum(summer["sector_frequency"].values()), 1.0)
 assert winter["sector_frequency"]["NW"] + winter["sector_frequency"]["SW"] == 1.0
 assert _close(winter["mean_speed_m_s"], 4.0)
-assert winter["prevailing_sector"] == "W", winter      # halfway between 300 and 240 is 270
-# Summer: two light days from E for every strong day from S; the vector
-# mean leans S (5 m/s once vs 1 m/s twice), the sector count leans E.
+assert winter["prevailing_sector"] in ("NW", "SW") and winter["resultant_sector"] == "W", winter   # resultant halfway between 300 and 240
+assert winter["sector_counts"]["NW"] + winter["sector_counts"]["SW"] == winter["days"]
+# Summer: two light days from E for every strong day from S. PREVAILING is
+# the modal sector, E; the RESULTANT leans S (5 m/s once vs 1 m/s twice)
+# and is recorded as the different quantity it is.
 assert summer["sector_counts"]["E"] > summer["sector_counts"]["S"]
-assert summer["prevailing_sector"] == "S", summer["prevailing_degrees"]
-print(f"   winter {winter['days']} days prevailing {winter['prevailing_sector']}; summer count-leader E but vector-mean S")
+assert summer["prevailing_sector"] == "E", summer
+assert summer["resultant_sector"] == "S", summer["resultant_degrees"]
+from power_wind_data import prevailing_sector
+assert prevailing_sector({"N": 3, "E": 5, "S": 5}) == "E", "a tie goes to the first clockwise from N"
+assert prevailing_sector({s: 0 for s in SECTORS}) is None
+print(f"   winter {winter['days']} days prevailing {winter['prevailing_sector']}; summer prevailing E (modal) while the resultant is S")
 
 # ======================================================================
 # 7. The fetch

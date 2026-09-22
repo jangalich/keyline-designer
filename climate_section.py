@@ -333,14 +333,14 @@ def build_table_caption(correction, heavy_rain) -> list:
     parts = []
     if correction and correction["applied"]:
         parts += [
-            "Precipitation is Daymet's, scaled by ",
+            "Precipitation scaled by ",
             {"value": f"{correction['factor']:.2f}"},
             f" to the {correction['station_count']} nearest NOAA station normals; ",
         ]
     else:
         parts += ["Precipitation is Daymet's, uncorrected (too few station normals nearby); "]
     if heavy_rain and heavy_rain["applied"]:
-        parts += [f"days over 1 in are the same {heavy_rain['station_count']} stations' normals."]
+        parts += ["days over 1 in from the same stations."]
     else:
         parts += ["days over 1 in are Daymet's, which understates them."]
     return parts
@@ -526,10 +526,15 @@ def build_methods(report_data) -> list:
                             "Langley Research Center (LaRC) Prediction of Worldwide Energy Resource (POWER) Project "
                             "funded through the NASA Earth Science/Applied Science Program.",
                 "method": "Eight-sector frequencies by winter (Dec–Feb) and summer (Jun–Aug); direction the wind "
-                          "comes from; prevailing direction by speed-weighted vector mean over days.",
+                          "comes from; the prevailing sector is the most frequent (modal) sector.",
                 "notes": [
                     "POWER's daily direction was verified to be the speed-weighted vector mean of its hourly "
                     "directions, so a day is sectored by its served direction.",
+                    "Resultant wind (speed-weighted vector mean over days, a different quantity from the "
+                    "prevailing sector): " + "; ".join(
+                        f"{name} from {s['resultant_sector']} ({s['resultant_degrees']:.0f}°)"
+                        for name, s in wind["seasons"].items() if s["resultant_degrees"] is not None
+                    ) + ".",
                     "A 0.5° × 0.625° reanalysis cell, about 55 km: regional wind, not the parcel's.",
                 ],
             }

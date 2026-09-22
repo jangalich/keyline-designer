@@ -142,7 +142,7 @@ def main(argv) -> int:
         for name, season in data.wind["seasons"].items():
             freq = "  ".join(f"{s} {season['sector_frequency'][s] * 100:4.1f}%" for s in data.wind["sectors"])
             print(f"   {name:6} {season['days']} days  mean {season['mean_speed_m_s']:.2f} m/s ({season['mean_speed_m_s'] * MPH_PER_M_S:.1f} mph)  "
-                  f"prevailing {season['prevailing_sector']} ({season['prevailing_degrees']:.0f} deg)")
+                  f"prevailing (modal) {season['prevailing_sector']}; resultant {season['resultant_sector']} ({season['resultant_degrees']:.0f} deg)")
             print(f"          {freq}")
         print(f"   fill days dropped: {data.wind['fill_days']}")
     else:

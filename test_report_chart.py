@@ -17,10 +17,11 @@ the render reaches none.
   3. THE AXIS: y runs from zero to the next tick above the larger
      series; months sit at twelve equal x positions across the plot;
      month labels are in the prose face and tick labels in the data
-     face; the unit label is set once.
+     face; the unit rides beside the top tick value.
   4. THE ROSES: sector order clockwise from north, a wedge's radius in
      proportion to its share against a ring scale shared by both roses,
-     the prevailing sector filled solid and the others tinted, the four
+     the LONGEST wedge filled solid (a caller naming another sector as
+     prevailing is refused) and the others tinted, the four
      cardinal letters placed outside the rings at their compass angles,
      "wind from" under each title, the speed label set in the data face.
   5. THE LEGEND is legend_entries()' shape, four entries in the order
@@ -59,7 +60,7 @@ with open(report_chart.__file__, encoding="utf-8") as handle:
 balance = render_water_balance(MONTHS, [3.0] * 12, [1.0] * 12, "in", TOKENS)
 roses = render_wind_roses(
     [{"title": "Winter", "months": "Dec–Feb", "sectors": list("N NE E SE S SW W NW".split()),
-      "frequency": {s: 0.125 for s in "N NE E SE S SW W NW".split()}, "prevailing": "W", "speed_label": "6.1 mph"}],
+      "frequency": {s: 0.125 for s in "N NE E SE S SW W NW".split()}, "prevailing": None, "speed_label": "6.1 mph"}],
     TOKENS,
 )
 for svg in (balance["svg"], roses["svg"]):
@@ -115,9 +116,9 @@ assert rendered["frame"] == report_chart.BALANCE_FRAME and x1 < rendered["frame"
 svg = rendered["svg"]
 month_texts = re.findall(r'<text[^>]*font-family="Source Serif 4"[^>]*>([A-Z])</text>', svg)
 assert month_texts == MONTHS, month_texts
-tick_texts = re.findall(r'<text[^>]*font-family="IBM Plex Mono"[^>]*>([\d.]+)</text>', svg)
-assert tick_texts == [f"{t:g}" for t in rendered["ticks"]], tick_texts
-assert svg.count(">in</text>") == 1
+tick_texts = re.findall(r'<text[^>]*font-family="IBM Plex Mono"[^>]*>([\d.]+(?: in)?)</text>', svg)
+assert tick_texts == [f"{t:g}" for t in rendered["ticks"][:-1]] + [f"{rendered['ticks'][-1]:g} in"], tick_texts
+assert svg.count(">in</text>") == 0, "the unit rides beside the top value, never on its own above it"
 assert svg.startswith('<svg xmlns="http://www.w3.org/2000/svg"') and 'viewBox="0 0 489.60 212.00"' in svg
 # Fills: the surplus band in water, the deficit band in ochre; lines the same.
 assert svg.count(f'fill="{TOKENS["water"]}"') == 2 and svg.count(f'fill="{TOKENS["ochre"]}"') == 1
@@ -174,6 +175,15 @@ except ValueError:
     pass
 else:
     raise AssertionError("four sectors must be refused")
+# The solid wedge is the longest by construction; a caller's "prevailing" that disagrees is refused.
+try:
+    render_wind_roses([dict(seasons[0], prevailing="SW")], TOKENS)
+except ValueError as exc:
+    assert "modal" in str(exc) and "'W'" in str(exc)
+else:
+    raise AssertionError("SW is not the longest winter wedge; naming it prevailing must be refused")
+unnamed = render_wind_roses([dict(seasons[0], prevailing=None)], TOKENS)
+assert unnamed["roses"][0]["prevailing"] == "W" and unnamed["svg"].count('fill-opacity="1.00"') == 1
 print(f"   ring scale {two['ring_max']}; W solid in winter, SW in summer; letters at their angles")
 
 # ======================================================================

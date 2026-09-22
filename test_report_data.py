@@ -142,7 +142,8 @@ assert data.heavy_rain_normals["applied"] is True and 6.0 <= data.heavy_rain_nor
 assert data.climate["year_count"] == 30 and data.climate["frost"]["frost_free_days"] > 0
 assert data.climate["annual"]["pet_mm"] > 0 and data.climate["annual"]["deficit_months"] == [6, 7, 8]
 assert data.atlas14 is FIXTURE_ATLAS14 and data.design_storms["rows"][1]["depths"][100] == 4.98
-assert data.power_wind is FIXTURE_POWER and data.wind["seasons"]["winter"]["prevailing_sector"] == "SW"
+assert data.power_wind is FIXTURE_POWER and data.wind["seasons"]["winter"]["prevailing_sector"] == "W"
+assert data.wind["seasons"]["winter"]["resultant_sector"] == "SW", "the resultant differs from the modal sector here"
 assert data.wind["period"] == {"start": 1995, "end": 2024} == data.climate["period"]
 # The polygon centroid, 45 m from the fixture point, takes one more hail and one more wind report into the circle.
 assert data.severe_weather["counts"] == {"hail": 615, "wind": 1917, "tornado": 36} and data.severe_weather["radius_miles"] == 25.0
