@@ -260,6 +260,27 @@ for bad in (dict(kind="point", labels=["x"]), dict(kind="line", labels=["a", "b"
 # The keypoint is the asterisk convention: three strokes through one point.
 keypoint_group = [g for g in root.getElementsByTagName("g") if g.getAttribute("id") == "layer-keypoints"][0]
 assert len(keypoint_group.getElementsByTagName("line")) == 3
+# The dot marker: one filled circle in the stroke token, on the map and in the swatch; a set-back line
+# carries stroke-opacity; an unknown marker is refused.
+dotted = render_map(
+    BOUNDARY_POLYGON_UTM,
+    [layer("dots", [Point((minx + maxx) / 2, (miny + maxy) / 2)], kind="point", stroke="ink-muted", marker="dot", legend="Dots"),
+     layer("faint", [LineString([(minx + 50, miny + 50), (maxx - 50, maxy - 50)])], kind="line", stroke="terrain", stroke_opacity=0.55)],
+    TOKENS,
+)
+dot_group = [g for g in minidom.parseString(dotted["svg"]).documentElement.getElementsByTagName("g") if g.getAttribute("id") == "layer-dots"][0]
+circles = dot_group.getElementsByTagName("circle")
+assert len(circles) == 1 and circles[0].getAttribute("fill") == TOKENS["ink-muted"] and not dot_group.getElementsByTagName("line")
+assert float(circles[0].getAttribute("r")) == report_map.DOT_RADIUS_PT
+assert "<circle" in dotted["legend"][0]["swatch"] and "<line" not in dotted["legend"][0]["swatch"]
+faint_group = dotted["svg"].split('<g id="layer-faint">', 1)[1].split("</g>", 1)[0]
+assert 'stroke-opacity="0.55"' in faint_group and "stroke-opacity" not in svg, "opacity only when set back"
+try:
+    layer("bad", [Point(0, 0)], kind="point", stroke="ink", marker="star")
+except ValueError:
+    pass
+else:
+    raise AssertionError("an unknown marker must be refused")
 # The boundary is in ink at the boundary weight; contours in terrain.
 boundary_path = [p for p in root.getElementsByTagName("path") if p.getAttribute("id") == "parcel-boundary"][0]
 assert boundary_path.getAttribute("stroke") == TOKENS["ink"]

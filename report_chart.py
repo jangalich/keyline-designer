@@ -11,6 +11,7 @@ draw theirs with the same helpers.
 
     render_water_balance(months, tokens)  -> {svg, legend, ...measurements}
     render_wind_roses(seasons, tokens)    -> {svg, ...measurements}
+    render_valley_profile(profile, tokens) -> {svg, legend, ...measurements}
 
 THE WATER BALANCE DIAGRAM is the classic hydrology-bulletin form: monthly
 precipitation and monthly potential evapotranspiration as two lines
@@ -36,6 +37,18 @@ is filled solid, the rest tinted. The compass letters sit outside the rings; eac
 titled with its season and months and carries the words "wind from",
 so a reader cannot take a wedge for a heading. The mean speed is set
 under the rose in the data face, already formatted by the section.
+
+THE VALLEY PROFILE is a long section down one valley's main stem: ground
+distance along the stem across, elevation up, both in feet, the line in
+the water token (the valley's colour on the map). The vertical scale is
+exaggerated, as every long profile is, and the exaggeration is a WHOLE
+NUMBER chosen by the renderer -- the largest that keeps the relief inside
+the plot -- and returned so the caption can state it. The keypoint is a
+filled dot on the line with its elevation set beside it and the grades
+above and below it set on their reaches; a tick on the distance axis
+marks each place the stem crosses the parcel boundary, so the reader can
+see how much of the profile is this property. A profile without a
+keypoint draws the line alone, and the section says why in words.
 
 NO COLOUR LITERAL LIVES HERE (test_site_report.py greps this module
 too). The legend is a list of report_map.layer() specs run through
@@ -81,6 +94,18 @@ ROSE_COMPASS_SIZE_PT = 7.0
 ROSE_RING_LABEL_SIZE_PT = 5.5
 ROSE_SPEED_SIZE_PT = 7.0
 SECTOR_COUNT = 8
+
+# Valley profile geometry.
+PROFILE_FRAME = (FRAME_WIDTH_PT, 170.0)
+PROFILE_MARGIN_LEFT_PT = 40.0
+PROFILE_MARGIN_RIGHT_PT = 12.0
+PROFILE_MARGIN_TOP_PT = 16.0
+PROFILE_MARGIN_BOTTOM_PT = 26.0
+PROFILE_LINE_PT = 1.1
+PROFILE_KEYPOINT_RADIUS_PT = 2.2
+PROFILE_TICK_PT = 5.0
+PROFILE_ANNOTATION_SIZE_PT = 6.5
+PROFILE_MAX_EXAGGERATION = 10
 
 
 # ======================================================================
@@ -236,6 +261,138 @@ def render_water_balance(
         "points_per_month": per_month,
         "crossings": crossings,
         "bands": bands,
+        "legend": legend_entries(legend_layers, tokens),
+    }
+
+
+# ======================================================================
+# The valley profile
+# ======================================================================
+
+
+def profile_exaggeration(plot_width: float, plot_height: float, run: float, relief: float) -> int:
+    """The largest whole-number vertical exaggeration at which `relief`
+    fits `plot_height` when `run` fills `plot_width`; at least 1, at most
+    PROFILE_MAX_EXAGGERATION."""
+    if run <= 0 or relief <= 0:
+        return 1
+    horizontal = plot_width / run
+    fits = int(math.floor(plot_height / (relief * horizontal)))
+    return max(1, min(PROFILE_MAX_EXAGGERATION, fits))
+
+
+def render_valley_profile(profile: dict, tokens: dict, frame: tuple = PROFILE_FRAME) -> dict:
+    """
+    The profile and its measurements:
+
+        {'svg': str, 'frame': (w, h), 'plot': (x0, y0, x1, y1),
+         'exaggeration': int, 'x_per_ft': float, 'y_per_ft': float,
+         'y_range': (low, high), 'x_ticks': [...], 'y_ticks': [...],
+         'keypoint_xy': (x, y) | None, 'boundary_ticks_x': [...],
+         'legend': [...]}
+
+    `profile` carries, ALREADY IN FEET: 'distance' and 'elevation' (equal-
+    length lists, upstream first), 'crossings' (distances along the stem
+    where it crosses the parcel boundary), and 'keypoint' -- None, or
+    {'distance', 'elevation', 'grade_above_pct', 'grade_below_pct',
+    'label'} with the label already formatted by the section.
+    """
+    distance, elevation = list(profile["distance"]), list(profile["elevation"])
+    if len(distance) != len(elevation) or len(distance) < 2:
+        raise ValueError("render_valley_profile: distance and elevation are equal lists of at least two")
+    width, height = frame
+    x0, y1 = PROFILE_MARGIN_LEFT_PT, height - PROFILE_MARGIN_BOTTOM_PT
+    x1, y0 = width - PROFILE_MARGIN_RIGHT_PT, PROFILE_MARGIN_TOP_PT
+    run = distance[-1] - distance[0]
+    low, high = min(elevation), max(elevation)
+    y_step = _tick_step(high - low) if high > low else 1.0
+    y_low = math.floor(low / y_step) * y_step
+    y_high = math.ceil(high / y_step) * y_step
+    if y_high == y_low:
+        y_high = y_low + y_step
+    exaggeration = profile_exaggeration(x1 - x0, y1 - y0, run, y_high - y_low)
+    x_per_ft = (x1 - x0) / run if run > 0 else 1.0
+    y_per_ft = x_per_ft * exaggeration
+    # The plot's vertical extent at the chosen exaggeration; the axis sits at the bottom.
+    y_base = y1
+
+    def xy(d, z):
+        return (x0 + (d - distance[0]) * x_per_ft, y_base - (z - y_low) * y_per_ft)
+
+    ink, muted, rule = _colour(tokens, "ink"), _colour(tokens, "ink-muted"), _colour(tokens, "rule")
+    water = _colour(tokens, "water")
+    parts = [_svg_open(width, height, "Valley profile", tokens)]
+    # Elevation grid and tick labels, the unit beside the top tick.
+    y_ticks = []
+    tick = y_low
+    while tick <= y_high + 1e-9:
+        y_ticks.append(round(tick, 6))
+        tick += y_step
+    for tick in y_ticks:
+        gx0, gy = xy(distance[0], tick)
+        gx1, _ = xy(distance[-1], tick)
+        parts.append(f'<line x1="{_fmt(gx0)}" y1="{_fmt(gy)}" x2="{_fmt(gx1)}" y2="{_fmt(gy)}" stroke="{rule}" stroke-width="{_fmt(GRID_STROKE_PT)}"/>')
+        label = f"{tick:,.0f} ft" if tick == y_ticks[-1] else f"{tick:,.0f}"
+        parts.append(_text(x0 - 4.0, gy + TICK_LABEL_SIZE_PT * 0.35, label, font=FONT_DATA, size=TICK_LABEL_SIZE_PT, fill=muted, anchor="end"))
+    # The distance axis with ticks at round distances.
+    parts.append(f'<line x1="{_fmt(x0)}" y1="{_fmt(y_base)}" x2="{_fmt(x1)}" y2="{_fmt(y_base)}" stroke="{ink}" stroke-width="{_fmt(AXIS_STROKE_PT)}"/>')
+    x_step = _tick_step(run / 100.0) * 100.0
+    x_ticks = []
+    tick = 0.0
+    while tick <= run + 1e-9:
+        x_ticks.append(round(tick, 6))
+        tick += x_step
+    for tick in x_ticks:
+        tx, _ = xy(distance[0] + tick, y_low)
+        parts.append(f'<line x1="{_fmt(tx)}" y1="{_fmt(y_base)}" x2="{_fmt(tx)}" y2="{_fmt(y_base + 3.0)}" stroke="{ink}" stroke-width="{_fmt(AXIS_STROKE_PT)}"/>')
+        label = f"{tick:,.0f} ft" if tick == x_ticks[-1] else f"{tick:,.0f}"
+        parts.append(_text(tx, y_base + 3.0 + TICK_LABEL_SIZE_PT + 1.5, label, font=FONT_DATA, size=TICK_LABEL_SIZE_PT, fill=muted, anchor="middle"))
+    # Boundary ticks: a longer tick through the axis, labelled once.
+    boundary_x = []
+    for crossing in profile.get("crossings") or []:
+        bx, _ = xy(crossing, y_low)
+        boundary_x.append(bx)
+        parts.append(f'<line x1="{_fmt(bx)}" y1="{_fmt(y_base - PROFILE_TICK_PT)}" x2="{_fmt(bx)}" y2="{_fmt(y_base + PROFILE_TICK_PT)}" stroke="{ink}" stroke-width="{_fmt(AXIS_STROKE_PT * 1.5)}"/>')
+    if boundary_x:
+        label_x = sum(boundary_x) / len(boundary_x)
+        parts.append(_text(label_x, y_base - PROFILE_TICK_PT - 2.5, "parcel boundary", font=FONT_PROSE, size=PROFILE_ANNOTATION_SIZE_PT, fill=ink, anchor="middle"))
+    # The profile line.
+    parts.append(_polyline([xy(d, z) for d, z in zip(distance, elevation)], water, PROFILE_LINE_PT))
+    # The keypoint and its grades.
+    keypoint = profile.get("keypoint")
+    keypoint_xy = None
+    if keypoint:
+        kx, ky = xy(keypoint["distance"], keypoint["elevation"])
+        keypoint_xy = (kx, ky)
+        parts.append(f'<circle cx="{_fmt(kx)}" cy="{_fmt(ky)}" r="{_fmt(PROFILE_KEYPOINT_RADIUS_PT)}" fill="{ink}" stroke="none"/>')
+        parts.append(_text(kx + 5.0, ky - 4.0, keypoint["label"], font=FONT_DATA, size=PROFILE_ANNOTATION_SIZE_PT, fill=ink, anchor="start"))
+        # Grades on their reaches: above sits up-profile of the keypoint, below down-profile.
+        above_x = (x0 + kx) / 2
+        below_x = (kx + x1) / 2
+        above_z = max(z for d, z in zip(distance, elevation) if d <= keypoint["distance"])
+        below_z = max(z for d, z in zip(distance, elevation) if d >= keypoint["distance"])
+        _, above_y = xy(keypoint["distance"], above_z)
+        _, below_y = xy(keypoint["distance"], below_z)
+        parts.append(_text(above_x, above_y - 5.0, f"{keypoint['grade_above_pct']:.1f}% above", font=FONT_DATA, size=PROFILE_ANNOTATION_SIZE_PT, fill=ink, anchor="middle"))
+        parts.append(_text(below_x, below_y - 5.0, f"{keypoint['grade_below_pct']:.1f}% below", font=FONT_DATA, size=PROFILE_ANNOTATION_SIZE_PT, fill=ink, anchor="middle"))
+    parts.append("</svg>")
+    legend_layers = [
+        layer("profile", [], kind="line", stroke="water", stroke_width=PROFILE_LINE_PT, legend="valley floor"),
+    ]
+    if keypoint:
+        legend_layers.append(layer("keypoint", [], kind="point", stroke="ink", marker="dot", legend="keypoint"))
+    return {
+        "svg": "".join(parts),
+        "frame": frame,
+        "plot": (x0, y0, x1, y1),
+        "exaggeration": exaggeration,
+        "x_per_ft": x_per_ft,
+        "y_per_ft": y_per_ft,
+        "y_range": (y_low, y_high),
+        "x_ticks": x_ticks,
+        "y_ticks": y_ticks,
+        "keypoint_xy": keypoint_xy,
+        "boundary_ticks_x": boundary_x,
         "legend": legend_entries(legend_layers, tokens),
     }
 

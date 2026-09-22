@@ -111,6 +111,8 @@ BOUNDARY_STROKE_PT = 1.1
 CONTOUR_STROKE_PT = 0.45
 INDEX_CONTOUR_STROKE_PT = 0.95
 FRAME_STROKE_PT = 0.5
+ASTERISK_RADIUS_PT = 3.2
+DOT_RADIUS_PT = 1.8
 
 # Type, in points. The prose face for names, the data face for figures.
 FONT_PROSE = "Source Serif 4"
@@ -153,6 +155,8 @@ def layer(
     legend=None,
     dash: Optional[str] = None,
     labels: Optional[list] = None,
+    marker: str = "asterisk",
+    stroke_opacity: float = 1.0,
 ) -> dict:
     """
     One styled layer. `geometries` are shapely geometries in the DEM's UTM
@@ -162,9 +166,15 @@ def layer(
     {"value": ...} mapping is a measurement) -- or None for a layer that
     draws without an entry. `labels`, for a line layer, is one string or
     None per geometry, set along the line with the line broken behind it.
+    `marker`, for a point layer, is "asterisk" (the layout map's keypoint
+    convention) or "dot" (a small filled circle in the stroke token, for a
+    point that sits where two lines meet). `stroke_opacity` below 1 sets
+    a line back, for linework that is context rather than subject.
     """
     if kind not in ("polygon", "line", "point"):
         raise ValueError(f"layer kind must be polygon, line or point, got {kind!r}")
+    if marker not in ("asterisk", "dot"):
+        raise ValueError(f"marker must be asterisk or dot, got {marker!r}")
     if labels is not None:
         if kind != "line":
             raise ValueError("labels are drawn along lines only")
@@ -181,6 +191,8 @@ def layer(
         "legend": legend,
         "dash": dash,
         "labels": list(labels) if labels is not None else None,
+        "marker": marker,
+        "stroke_opacity": float(stroke_opacity),
     }
 
 
@@ -455,6 +467,17 @@ def _asterisk(cx: float, cy: float, radius: float, stroke: str, width: float) ->
     return "".join(lines)
 
 
+def _dot(cx: float, cy: float, radius: float, fill: str) -> str:
+    """The keyline-structure convention: a small filled circle."""
+    return f'<circle cx="{_fmt(cx)}" cy="{_fmt(cy)}" r="{_fmt(radius)}" fill="{fill}" stroke="none"/>'
+
+
+def _marker(spec: dict, x: float, y: float, stroke: str) -> str:
+    if spec.get("marker") == "dot":
+        return _dot(x, y, DOT_RADIUS_PT, stroke)
+    return _asterisk(x, y, ASTERISK_RADIUS_PT, stroke, spec["stroke_width"])
+
+
 def _colour(tokens: dict, name: Optional[str]) -> str:
     if name is None:
         return "none"
@@ -467,6 +490,9 @@ def _layer_svg(spec: dict, projection, tokens: dict) -> str:
     stroke = _colour(tokens, spec["stroke"])
     fill = _colour(tokens, spec["fill"])
     dash = f' stroke-dasharray="{spec["dash"]}"' if spec.get("dash") else ""
+    opacity = spec.get("stroke_opacity", 1.0)
+    if opacity < 1.0:
+        dash += f' stroke-opacity="{_fmt(opacity)}"'
     pieces = [f'<g id="layer-{escape(spec["id"])}">']
     labels = spec.get("labels") or [None] * len(spec["geometries"])
     for geometry, label in zip(spec["geometries"], labels):
@@ -494,7 +520,7 @@ def _layer_svg(spec: dict, projection, tokens: dict) -> str:
             points = list(geometry.geoms) if isinstance(geometry, MultiPoint) else [geometry]
             for point in points:
                 x, y = projection.xy(point.x, point.y)
-                pieces.append(_asterisk(x, y, 3.2, stroke, spec["stroke_width"]))
+                pieces.append(_marker(spec, x, y, stroke))
             continue
         d = _geometry_path(geometry, projection)
         if not d:
@@ -577,7 +603,7 @@ def _swatch(spec: dict, tokens: dict) -> str:
             f'stroke="{stroke}" stroke-width="{_fmt(spec["stroke_width"])}"{dash}/>'
         )
     else:
-        body = _asterisk(w / 2, h / 2, 3.2, stroke, spec["stroke_width"])
+        body = _marker(spec, w / 2, h / 2, stroke)
     return (
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{_fmt(w)}pt" height="{_fmt(h)}pt" '
         f'viewBox="0 0 {_fmt(w)} {_fmt(h)}" class="report-map__swatch">{body}</svg>'

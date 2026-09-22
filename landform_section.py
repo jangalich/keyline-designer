@@ -79,9 +79,11 @@ from typing import Optional
 
 import contourpy
 import numpy as np
-from shapely.geometry import LineString, MultiPolygon, Polygon
-from shapely.ops import unary_union
+from shapely.geometry import LineString, MultiLineString, MultiPolygon, Point, Polygon
+from shapely.ops import substring, unary_union
 
+import landform_derivations
+import report_chart
 import report_map
 from contour_lines import _grid_axes
 from raster_grid import SQUARE_METERS_PER_ACRE, cells_in_polygon
@@ -123,6 +125,15 @@ FLAT_LABEL = "Flat"
 VALLEY_STROKE_PT = 0.9
 VALLEY_DASH = "3 2"
 KEYPOINT_STROKE_PT = 0.9
+
+# The keyline-structure map: contours set back, valleys in the water token
+# dashed, ridges in the terrain token dash-dot, keylines in ink solid and
+# heaviest, keypoints as small filled dots -- in ink on the parcel, in the
+# muted ink just outside it.
+STRUCTURE_CONTOUR_OPACITY = 0.55
+RIDGE_STROKE_PT = 0.9
+RIDGE_DASH = "5 2 1 2"
+KEYLINE_STROKE_PT = 1.3
 
 SOURCE_LINE = "Source: USGS 3DEP elevation, resampled to 5 m · retrieved "
 CAVEAT_LINE = (
@@ -368,8 +379,15 @@ def _polygonal(geometry):
 
 def valley_lines(terrain: TerrainInputs) -> list:
     """Every valley branch as a line clipped to the boundary."""
-    lines = []
+    return [line for _, line in valley_lines_by_valley(terrain)]
+
+
+def valley_lines_by_valley(terrain: TerrainInputs) -> list:
+    """[(valley id, the valley's branches on the parcel as one geometry)],
+    for the valleys that have any."""
+    result = []
     for valley in terrain.valleys:
+        lines = []
         for branch in valley.get("branches_utm") or []:
             coords = [(float(x), float(y)) for x, y, *_ in branch]
             if len(coords) < 2:
@@ -377,12 +395,21 @@ def valley_lines(terrain: TerrainInputs) -> list:
             clipped = report_map._linear_parts(LineString(coords).intersection(terrain.boundary_polygon_utm))
             if clipped is not None:
                 lines.append(clipped)
-    return lines
+        if lines:
+            merged = report_map._linear_parts(unary_union(lines))
+            if merged is not None:
+                result.append((int(valley["id"]), merged))
+    return result
 
 
 def parcel_keypoints(terrain: TerrainInputs) -> list:
     """The keypoints on the parcel, as points."""
     return [kp["point_utm"] for kp in terrain.keypoints if kp.get("on_parcel") and kp.get("point_utm") is not None]
+
+
+def outside_keypoints(terrain: TerrainInputs) -> list:
+    """The keypoints the detector kept just outside the boundary, as points."""
+    return [kp["point_utm"] for kp in terrain.keypoints if not kp.get("on_parcel") and kp.get("point_utm") is not None]
 
 
 # ======================================================================
@@ -472,22 +499,225 @@ def build_summary(relief_ft: float, slope_counts: dict, aspect_counts: dict) -> 
     return parts
 
 
-def build_key_figures(contours: dict, classified: dict, keypoint_count: int) -> list:
-    """keypoint_count is parcel_keypoints()'s count -- the keypoints ON this
-    property, which is what the map draws and what the figure must therefore
-    say. It is NOT detect_keypoints()'s own total: a keypoint may legitimately
-    sit just outside the drawn boundary (keypoint_detection's margin), so the
-    detector can hold more than this section shows. The label said "keypoints
-    detected" and so disagreed with the detector whenever one did."""
+def build_key_figures(contours: dict, classified: dict, derived: landform_derivations.TerrainDerived) -> list:
+    """Nine figures. The keypoint count is the DETECTOR'S -- every keypoint
+    it kept, on the parcel or just outside it within its margin -- because
+    that is what the keyline-structure map draws (the outside one in the
+    muted ink) and the count must agree with the map; the split is stated
+    in words beside the figures (build_keypoint_statement()). The ridges
+    are the divides with any length on the parcel; the keyline length is
+    the sum of the keylines' lengths within the boundary."""
     sector = dominant_aspect(classified["aspect_counts"])
+    counts = derived.keypoint_counts
+    keyline_ft = sum(k["length_on_parcel_m"] for k in derived.keylines) / METERS_PER_FOOT
     return [
         {"value": f"{_feet(contours['min_ft'])} ft", "label": "lowest elevation"},
         {"value": f"{_feet(contours['max_ft'])} ft", "label": "highest elevation"},
         {"value": f"{_feet(contours['relief_ft'])} ft", "label": "relief"},
         {"value": f"{_one_decimal(classified['mean_slope_pct'])}%", "label": "mean slope"},
         {"value": ASPECT_WORDS[sector].capitalize() if sector else FLAT_LABEL, "label": "dominant aspect", "word": True},
-        {"value": f"{keypoint_count:,}", "label": "keypoints on this property"},
+        {"value": str(counts["detected"]), "label": "keypoints detected"},
+        {"value": str(counts["valleys_on_parcel"]), "label": "valleys crossing the parcel"},
+        {"value": str(counts["ridges_on_parcel"]), "label": "ridges crossing the parcel"},
+        {"value": f"{_feet(keyline_ft)} ft", "label": "keyline length on the parcel"},
     ]
+
+
+# ======================================================================
+# Keypoints, keylines, the profile and the valley table
+# ======================================================================
+
+
+def _plural(count: int, noun: str) -> str:
+    return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
+
+
+def build_keypoint_statement(derived: landform_derivations.TerrainDerived, keypoints: list) -> list:
+    """The count, in words, at the point of use: how many keypoints, how
+    many on the property, how many just outside and how far. No keypoint
+    means no keyline, said plainly."""
+    counts = derived.keypoint_counts
+    if counts["detected"] == 0:
+        return ["No keypoint was found on this property, so there is no keyline to draw."]
+    parts = [{"value": str(counts["detected"])}, " keypoint" + ("s" if counts["detected"] != 1 else "")]
+    if counts["outside"] == 0:
+        parts += [", all on the property."]
+    else:
+        outside = [kp for kp in keypoints if not kp.get("on_parcel")]
+        farthest_ft = max(float(kp.get("distance_outside_boundary_m") or 0.0) for kp in outside) / METERS_PER_FOOT
+        parts += [
+            ": ", {"value": str(counts["on_parcel"])}, " on the property and ",
+            {"value": str(counts["outside"])}, " just outside the boundary, within ",
+            {"value": f"{_feet(farthest_ft)} ft"}, " of it",
+        ]
+        crossing = sum(1 for k in derived.keylines if not k["keypoint_on_parcel"] and k["on_parcel"] is not None)
+        if crossing:
+            parts += ["; its keyline still crosses the parcel and is drawn." if crossing == 1
+                      else "; their keylines still cross the parcel and are drawn."]
+        else:
+            parts += ["."]
+    missing = [k for k in derived.keylines if k["geometry"] is None]
+    if missing:
+        parts += [f" {_plural(len(missing), 'keypoint')} could not be given a keyline: {missing[0]['reason']}."]
+    return parts
+
+
+def build_valley_table(derived: landform_derivations.TerrainDerived) -> Optional[dict]:
+    """One row per valley whose main stem crosses the parcel, the profile's
+    valley first. Lengths and elevations in whole feet, grades to one
+    decimal; a dash where a valley has no keypoint."""
+    rows = []
+    for row in derived.valley_rows:
+        kp = row["keypoint"]
+        cells = [
+            _feet(row["length_m"] / METERS_PER_FOOT),
+            _feet(row["fall_m"] / METERS_PER_FOOT),
+            _one_decimal(row["grade_pct"]),
+        ]
+        if kp is None:
+            cells += [ZERO_DASH, ZERO_DASH, ZERO_DASH]
+        else:
+            cells += [_feet(kp["elevation_m"] / METERS_PER_FOOT), _one_decimal(kp["grade_above_pct"]), _one_decimal(kp["grade_below_pct"])]
+        rows.append({"label": ["Valley ", {"value": str(row["number"])}], "cells": cells})
+    if not rows:
+        return None
+    return {
+        "corner": "",
+        "columns": ["Stem on parcel, ft", "Fall, ft", "Grade, %", "Keypoint, ft", "Grade above, %", "Grade below, %"],
+        "rows": rows,
+    }
+
+
+def build_valley_table_caption(derived: landform_derivations.TerrainDerived) -> list:
+    parts = ["The stem is the valley's main line traced from its outlet up to the ridge; the fall is its drop "
+             "between entering and leaving the parcel."]
+    for row in derived.valley_rows:
+        kp = row["keypoint"]
+        if kp is None:
+            parts.append(f" Valley {row['number']} has no keypoint, so it has no keyline.")
+        elif not kp["on_parcel"]:
+            parts += [f" Valley {row['number']}'s keypoint lies ", {"value": f"{_feet(kp['distance_outside_boundary_m'] / METERS_PER_FOOT)} ft"},
+                      " outside the boundary."]
+    return parts
+
+
+def build_profile(derived: landform_derivations.TerrainDerived, tokens: dict) -> dict:
+    """The primary valley's long profile as a chart, or the statement that
+    stands in its place, with its caption."""
+    profile = derived.profile
+    if profile is None:
+        return {"chart": None, "caption": [], "valley_number": None,
+                "unavailable": ["No valley line crosses this property, so there is no profile to draw."]}
+    number = next(r["number"] for r in derived.valley_rows if r["valley_id"] == profile["valley_id"])
+    keypoint = profile["keypoint"]
+    chart_input = {
+        "distance": [d / METERS_PER_FOOT for d in profile["distance_m"]],
+        "elevation": [z / METERS_PER_FOOT for z in profile["elevation_m"]],
+        "crossings": [c["distance_m"] / METERS_PER_FOOT for c in profile["crossings"]],
+        "keypoint": None if keypoint is None else {
+            "distance": keypoint["distance_m"] / METERS_PER_FOOT,
+            "elevation": keypoint["elevation_m"] / METERS_PER_FOOT,
+            "grade_above_pct": keypoint["grade_above_pct"],
+            "grade_below_pct": keypoint["grade_below_pct"],
+            "label": f"{_feet(keypoint['elevation_m'] / METERS_PER_FOOT)} ft",
+        },
+    }
+    chart = report_chart.render_valley_profile(chart_input, tokens)
+    caption = [f"Valley {number}, from its head to where it leaves the elevation model; vertical exaggeration ",
+               {"value": f"{chart['exaggeration']}×"}, "."]
+    if keypoint is None:
+        caption.append(" No keypoint was found on this valley, so no grades are marked and it has no keyline.")
+    elif not keypoint["on_parcel"]:
+        caption += [" The keypoint lies ", {"value": f"{_feet(keypoint['distance_outside_boundary_m'] / METERS_PER_FOOT)} ft"},
+                    " outside the boundary."]
+    return {"chart": chart, "caption": caption, "valley_number": number, "unavailable": None}
+
+
+def _split_at(geometry, point) -> object:
+    """The keyline as two parts either side of its keypoint, so the
+    elevation label -- set at the midpoint of the longest part -- lands
+    on the longer reach and never on the keypoint's dot. A keyline whose
+    keypoint is not on it (outside the parcel) is returned whole."""
+    parts = [geometry] if isinstance(geometry, LineString) else list(geometry.geoms)
+    split = []
+    for part in parts:
+        if part.distance(point) < 1.0:
+            at = part.project(point)
+            for piece in (substring(part, 0.0, at), substring(part, at, part.length)):
+                if isinstance(piece, LineString) and piece.length > 0:
+                    split.append(piece)
+        else:
+            split.append(part)
+    return split[0] if len(split) == 1 else MultiLineString(split)
+
+
+def _reach_to_keypoint(keyline: dict, keypoint: dict, boundary_polygon_utm):
+    """For a keypoint just outside the boundary: the piece of its keyline
+    from the boundary out to the keypoint, drawn in the muted ink so the
+    dot is tied to its line. None when the line does not leave the
+    parcel toward the keypoint."""
+    line = keyline["geometry"]
+    point = keypoint["point_utm"]
+    if line is None or line.distance(point) > 1.0:
+        return None
+    outside = line.difference(boundary_polygon_utm)
+    parts = [outside] if isinstance(outside, LineString) else [g for g in getattr(outside, "geoms", []) if isinstance(g, LineString)]
+    touching = [p for p in parts if p.distance(point) < 1.0 and p.distance(boundary_polygon_utm) < 1e-6]
+    if not touching:
+        return None
+    part = touching[0]
+    at = part.project(point)
+    start_on_boundary = boundary_polygon_utm.exterior.distance(Point(part.coords[0])) < 1e-6
+    reach = substring(part, 0.0, at) if start_on_boundary else substring(part, at, part.length)
+    return reach if isinstance(reach, LineString) and reach.length > 0 else None
+
+
+def build_structure_layers(terrain: TerrainInputs, contours: dict, derived: landform_derivations.TerrainDerived) -> list:
+    """The keyline-structure map's layers, in drawing order: contours set
+    back, valleys, ridges, keylines with their elevation labels, keypoints
+    on the parcel, keypoints just outside it."""
+    layers = []
+    for spec in report_map.contour_layers(contours, legend=["Contours, ", {"value": f"{contours['interval_ft']} ft"}]):
+        spec["stroke_opacity"] = STRUCTURE_CONTOUR_OPACITY
+        layers.append(spec)
+    numbers = {row["valley_id"]: row["number"] for row in derived.valley_rows}
+    by_valley = valley_lines_by_valley(terrain)
+    if by_valley:
+        layers.append(report_map.layer(
+            "valleys", [line for _, line in by_valley], kind="line", stroke="water", stroke_width=VALLEY_STROKE_PT,
+            dash=VALLEY_DASH, legend="Valleys", labels=[str(numbers[vid]) if vid in numbers else None for vid, _ in by_valley],
+        ))
+    ridges = [r["on_parcel"] for r in derived.ridges if r["on_parcel"] is not None]
+    if ridges:
+        layers.append(report_map.layer(
+            "ridges", ridges, kind="line", stroke="terrain", stroke_width=RIDGE_STROKE_PT, dash=RIDGE_DASH, legend="Ridges",
+        ))
+    keylines = [k for k in derived.keylines if k["on_parcel"] is not None]
+    by_id = {kp["id"]: kp for kp in terrain.keypoints}
+    if keylines:
+        layers.append(report_map.layer(
+            "keylines", [_split_at(k["on_parcel"], by_id[k["keypoint_id"]]["point_utm"]) for k in keylines],
+            kind="line", stroke="ink", stroke_width=KEYLINE_STROKE_PT,
+            legend="Keylines, elevation in ft", labels=[_feet(k["elevation_m"] / METERS_PER_FOOT) for k in keylines],
+        ))
+    reaches = [r for r in (_reach_to_keypoint(k, by_id[k["keypoint_id"]], terrain.boundary_polygon_utm) for k in keylines
+                           if not k["keypoint_on_parcel"]) if r is not None]
+    if reaches:
+        layers.append(report_map.layer(
+            "keylines-outside", reaches, kind="line", stroke="ink-muted", stroke_width=KEYLINE_STROKE_PT,
+        ))
+    points = parcel_keypoints(terrain)
+    if points:
+        layers.append(report_map.layer(
+            "keypoints", points, kind="point", stroke="ink", stroke_width=KEYPOINT_STROKE_PT, marker="dot", legend="Keypoints",
+        ))
+    outside = outside_keypoints(terrain)
+    if outside:
+        layers.append(report_map.layer(
+            "keypoints-outside", outside, kind="point", stroke="ink-muted", stroke_width=KEYPOINT_STROKE_PT, marker="dot",
+            legend="Keypoint just outside the boundary",
+        ))
+    return layers
 
 
 def build_footer(retrieved_on: date) -> dict:
@@ -544,9 +774,10 @@ def build_landform_section(terrain: TerrainInputs, tokens: Optional[dict] = None
     contours = report_map.parcel_contours(terrain.dem, terrain.boundary_polygon_utm)
     classified = classify_cells(terrain)
     class_geometries = slope_class_geometries(terrain, classified["slope_counts"])
-    keypoints = parcel_keypoints(terrain)
+    derived = landform_derivations.derive(terrain)
     layers = build_map_layers(terrain, contours, class_geometries)
     rendered = report_map.render_map(terrain.boundary_polygon_utm, layers, tokens)
+    structure = report_map.render_map(terrain.boundary_polygon_utm, build_structure_layers(terrain, contours, derived), tokens)
     slope_table = build_slope_table(classified["slope_counts"], terrain.parcel_acres)
     aspect_table = build_aspect_table(classified["aspect_counts"], terrain.parcel_acres)
     return {
@@ -556,10 +787,16 @@ def build_landform_section(terrain: TerrainInputs, tokens: Optional[dict] = None
         "heading": SECTION_NAME,
         "summary": build_summary(contours["relief_ft"], classified["slope_counts"], classified["aspect_counts"]),
         "map": rendered,
-        "key_figures": build_key_figures(contours, classified, len(keypoints)),
+        "structure_map": structure,
+        "key_figures": build_key_figures(contours, classified, derived),
+        "keypoint_statement": build_keypoint_statement(derived, terrain.keypoints),
+        "profile": build_profile(derived, tokens),
+        "valley_table": build_valley_table(derived),
+        "valley_table_caption": build_valley_table_caption(derived),
         "slope_table": slope_table,
         "aspect_table": aspect_table,
         "footer": build_footer(terrain.retrieved_on),
+        "derived": derived,
         # For tests and diagnostics, not the template.
         "contours": {k: v for k, v in contours.items() if k != "levels"},
         "classified": {k: v for k, v in classified.items() if k != "cells"},
