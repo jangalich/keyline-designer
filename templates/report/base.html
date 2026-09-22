@@ -27,6 +27,12 @@
   <h1 class="cover__title">{{ cover.title }}</h1>
   <hr class="cover__rule">
   <p class="cover__label">{{ cover.label }}</p>
+{%- if cover.acres %}
+  {#- THE PARCEL ACREAGE every acreage table in the report sums to exactly
+      (landform_section.allocate_exactly): the boundary polygon's area in
+      the pipeline's UTM zone, to one decimal. -#}
+  <p class="cover__acres"><span class="data">{{ cover.acres }}</span> acres</p>
+{%- endif %}
   <p class="cover__meta">{{ cover.meta }}</p>
 </div>
 

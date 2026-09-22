@@ -21,10 +21,23 @@ small in the file; WeasyPrint embeds inline SVG as paths, not pixels
 (verified, site-data-report-proposal.md branch 6 step 0).
 
 FIXED FURNITURE, EVERY MAP: the parcel boundary in ink, a north arrow, a
-scale bar in feet at a round length chosen for the parcel's extent, a
-legend slot populated from the layers passed in, and an extent fitted to
-the parcel with a consistent margin. A section adds layers; it does not
-restyle the frame.
+scale bar in feet at a round length chosen for the parcel's extent, an
+extent fitted to the parcel with a consistent margin, and a legend BELOW
+the frame -- the same strip, in the same place, on every section's map.
+The legend is not drawn into the SVG: render_map() returns its entries
+(a swatch drawn from the layer's own style, a label as summary-style
+parts) and the map.html macro sets them under the frame in the report's
+type, so a legend label obeys the page's data rule the way a table cell
+does. A section adds layers; it does not restyle the frame.
+
+LABELLED LINES. A line layer may carry `labels`, one per geometry (a
+string or None): the label is set along the line at the midpoint of its
+longest part, in the data face, and the line is BROKEN behind it -- a gap
+the width of the label plus padding is cut from the geometry rather than
+masked with a page-coloured box, so nothing opaque sits over the tints
+beneath. The index contours use this for their elevations in whole feet.
+A part too short to hold its label with clear line either side is left
+unlabelled rather than crowded.
 
 NO COLOUR LITERAL LIVES HERE. Every colour is a TOKEN NAME on a layer
 ("ink", "terrain", ...) resolved at render time against the `tokens` dict
@@ -83,10 +96,15 @@ FRAME_HEIGHT_PT = 340.0
 FRAME = (FRAME_WIDTH_PT, FRAME_HEIGHT_PT)
 
 # Inside the frame: the margin around the parcel extent, and the band along
-# the bottom reserved for the legend (left) and the scale bar (right) so
-# neither is drawn over the parcel.
+# the bottom reserved for the scale bar so it is never drawn over the
+# parcel. The legend lives below the frame, not in this band.
 MARGIN_PT = 14.0
-FURNITURE_BAND_PT = 30.0
+FURNITURE_BAND_PT = 22.0
+
+# The legend strip below the frame: swatch geometry in points, shared by
+# the map.html macro's layout (report.css sizes the strip to match).
+LEGEND_SWATCH_W_PT = 14.0
+LEGEND_SWATCH_H_PT = 8.0
 
 # Line weights, in points.
 BOUNDARY_STROKE_PT = 1.1
@@ -99,6 +117,12 @@ FONT_PROSE = "Source Serif 4"
 FONT_DATA = "IBM Plex Mono"
 LABEL_SIZE_PT = 7.5
 NORTH_SIZE_PT = 8.5
+LINE_LABEL_SIZE_PT = 6.5
+# IBM Plex Mono's advance is 0.6 em; the gap either side of a line label.
+MONO_ADVANCE_EM = 0.6
+LINE_LABEL_PAD_PT = 3.0
+# A part must hold its label plus this much clear line on each side.
+LINE_LABEL_MIN_CLEAR_PT = 18.0
 
 # The contour interval rule: the intervals a reader expects on a US map,
 # and the line-count band the choice aims for.
@@ -126,17 +150,26 @@ def layer(
     stroke_width: float = 0.75,
     fill: Optional[str] = None,
     fill_opacity: float = 1.0,
-    legend: Optional[str] = None,
+    legend=None,
     dash: Optional[str] = None,
+    labels: Optional[list] = None,
 ) -> dict:
     """
     One styled layer. `geometries` are shapely geometries in the DEM's UTM
     CRS; `kind` is "polygon", "line" or "point"; `stroke` and `fill` are
-    TOKEN NAMES, never values; `legend` is the label the legend slot shows
-    for this layer, or None for a layer that draws without an entry.
+    TOKEN NAMES, never values; `legend` is this layer's legend entry -- a
+    string (prose), or a list of summary-style parts (a string is prose, a
+    {"value": ...} mapping is a measurement) -- or None for a layer that
+    draws without an entry. `labels`, for a line layer, is one string or
+    None per geometry, set along the line with the line broken behind it.
     """
     if kind not in ("polygon", "line", "point"):
         raise ValueError(f"layer kind must be polygon, line or point, got {kind!r}")
+    if labels is not None:
+        if kind != "line":
+            raise ValueError("labels are drawn along lines only")
+        if len(labels) != len(geometries):
+            raise ValueError("labels must be one per geometry")
     return {
         "id": layer_id,
         "kind": kind,
@@ -147,6 +180,7 @@ def layer(
         "fill_opacity": float(fill_opacity),
         "legend": legend,
         "dash": dash,
+        "labels": list(labels) if labels is not None else None,
     }
 
 
@@ -218,10 +252,18 @@ def contour_layers(contours: dict, legend: Optional[str] = None) -> list:
     parcel_contours()' result, both in the terrain token. `legend` names the
     one legend entry the pair shares, or None for no entry."""
     intermediate = [level["geometry"] for level in contours["levels"] if not level["index"]]
-    index = [level["geometry"] for level in contours["levels"] if level["index"]]
+    index = [level for level in contours["levels"] if level["index"]]
     return [
         layer("contours", intermediate, kind="line", stroke="terrain", stroke_width=CONTOUR_STROKE_PT, legend=legend),
-        layer("index-contours", index, kind="line", stroke="terrain", stroke_width=INDEX_CONTOUR_STROKE_PT),
+        layer(
+            "index-contours",
+            [level["geometry"] for level in index],
+            kind="line",
+            stroke="terrain",
+            stroke_width=INDEX_CONTOUR_STROKE_PT,
+            # The elevation in whole feet, set along the line.
+            labels=[f"{round(level['elevation_ft']):,}" for level in index],
+        ),
     ]
 
 
@@ -319,6 +361,68 @@ def _line_path(coords, projection) -> str:
     return f"{head} {body}"
 
 
+def _units_path(points) -> str:
+    """An open subpath from points already in SVG units."""
+    if len(points) < 2:
+        return ""
+    head = f"M{_fmt(points[0][0])} {_fmt(points[0][1])}"
+    body = " ".join(f"L{_fmt(x)} {_fmt(y)}" for x, y in points[1:])
+    return f"{head} {body}"
+
+
+def _linear_parts_list(geometry) -> list:
+    if isinstance(geometry, LineString):
+        return [geometry]
+    if isinstance(geometry, MultiLineString):
+        return list(geometry.geoms)
+    if isinstance(geometry, GeometryCollection):
+        parts = []
+        for part in geometry.geoms:
+            parts.extend(_linear_parts_list(part))
+        return parts
+    return []
+
+
+def _label_width(text: str, size: float) -> float:
+    return len(text) * size * MONO_ADVANCE_EM
+
+
+def _labelled_line(geometry, label: str, projection, size: float) -> tuple:
+    """
+    The line's parts in SVG units with a gap cut for `label`, and the
+    label's placement (x, y, angle_deg) -- or None for the placement when
+    no part is long enough to carry it.
+
+    The gap is cut from the LONGEST part at its midpoint: the label sits
+    on the line, reads along it, and is flipped to stay upright.
+    """
+    from shapely.ops import substring
+
+    parts = [
+        LineString([projection.xy(x, y) for x, y in part.coords])
+        for part in _linear_parts_list(geometry)
+        if len(part.coords) >= 2
+    ]
+    if not parts:
+        return [], None
+    longest = max(parts, key=lambda p: p.length)
+    gap = _label_width(label, size) + 2 * LINE_LABEL_PAD_PT
+    if longest.length < gap + 2 * LINE_LABEL_MIN_CLEAR_PT:
+        return [list(p.coords) for p in parts], None
+    mid = longest.length / 2
+    before = substring(longest, 0, mid - gap / 2)
+    after = substring(longest, mid + gap / 2, longest.length)
+    centre = longest.interpolate(mid)
+    ahead = longest.interpolate(min(longest.length, mid + 1.0))
+    behind = longest.interpolate(max(0.0, mid - 1.0))
+    angle = math.degrees(math.atan2(ahead.y - behind.y, ahead.x - behind.x))
+    if angle > 90 or angle <= -90:
+        angle += 180.0 if angle <= -90 else -180.0
+    drawn = [list(p.coords) for p in parts if p is not longest]
+    drawn += [list(before.coords), list(after.coords)]
+    return drawn, (centre.x, centre.y, angle)
+
+
 def _geometry_path(geometry, projection) -> str:
     """One SVG path `d` for a shapely geometry: polygons as closed rings
     (holes included, evenodd), lines as open subpaths."""
@@ -364,8 +468,27 @@ def _layer_svg(spec: dict, projection, tokens: dict) -> str:
     fill = _colour(tokens, spec["fill"])
     dash = f' stroke-dasharray="{spec["dash"]}"' if spec.get("dash") else ""
     pieces = [f'<g id="layer-{escape(spec["id"])}">']
-    for geometry in spec["geometries"]:
+    labels = spec.get("labels") or [None] * len(spec["geometries"])
+    for geometry, label in zip(spec["geometries"], labels):
         if geometry is None or geometry.is_empty:
+            continue
+        if label and spec["kind"] == "line":
+            parts, placement = _labelled_line(geometry, label, projection, LINE_LABEL_SIZE_PT)
+            d = " ".join(p for p in (_units_path(pts) for pts in parts) if p)
+            if d:
+                pieces.append(
+                    f'<path d="{d}" fill="none" stroke="{stroke}" stroke-width="{_fmt(spec["stroke_width"])}" '
+                    f'stroke-linejoin="round" stroke-linecap="round"{dash}/>'
+                )
+            if placement:
+                x, y, angle = placement
+                pieces.append(
+                    _text(
+                        x, y + LINE_LABEL_SIZE_PT * 0.35, label,
+                        font=FONT_DATA, size=LINE_LABEL_SIZE_PT, fill=stroke, anchor="middle",
+                        transform=f"rotate({_fmt(angle)} {_fmt(x)} {_fmt(y)})",
+                    )
+                )
             continue
         if spec["kind"] == "point":
             points = list(geometry.geoms) if isinstance(geometry, MultiPoint) else [geometry]
@@ -390,11 +513,12 @@ def _layer_svg(spec: dict, projection, tokens: dict) -> str:
     return "".join(pieces)
 
 
-def _text(x, y, content, *, font, size, fill, anchor="start", weight=None) -> str:
+def _text(x, y, content, *, font, size, fill, anchor="start", weight=None, transform=None) -> str:
     weight_attr = f' font-weight="{weight}"' if weight else ""
+    transform_attr = f' transform="{transform}"' if transform else ""
     return (
         f'<text x="{_fmt(x)}" y="{_fmt(y)}" font-family="{escape(font)}" font-size="{_fmt(size)}" '
-        f'fill="{fill}" text-anchor="{anchor}"{weight_attr}>{escape(str(content))}</text>'
+        f'fill="{fill}" text-anchor="{anchor}"{weight_attr}{transform_attr}>{escape(str(content))}</text>'
     )
 
 
@@ -434,40 +558,44 @@ def _scale_bar(frame, projection, tokens) -> tuple:
     return svg, {"feet": feet, "units": units}
 
 
-def _legend(frame, layers, tokens) -> str:
-    """The legend slot along the bottom-left: one swatch and label per
-    layer that names a legend entry, in layer order. Empty when none does
-    -- the slot is still reserved, the group is still emitted."""
-    _, height = frame
-    entries = [spec for spec in layers if spec.get("legend")]
-    pieces = ['<g id="legend">']
-    x = MARGIN_PT
-    y = height - MARGIN_PT - 9.0
-    for spec in entries:
-        stroke = _colour(tokens, spec["stroke"])
-        fill = _colour(tokens, spec["fill"])
-        if spec["kind"] == "polygon":
-            pieces.append(
-                f'<rect x="{_fmt(x)}" y="{_fmt(y - 5)}" width="10" height="7" fill="{fill}" '
-                f'fill-opacity="{_fmt(spec["fill_opacity"])}" stroke="{stroke}" stroke-width="0.5"/>'
-            )
-        elif spec["kind"] == "line":
-            pieces.append(
-                f'<line x1="{_fmt(x)}" y1="{_fmt(y - 1.5)}" x2="{_fmt(x + 10)}" y2="{_fmt(y - 1.5)}" '
-                f'stroke="{stroke}" stroke-width="{_fmt(spec["stroke_width"])}"/>'
-            )
-        else:
-            pieces.append(_asterisk(x + 5, y - 1.5, 3.2, stroke, spec["stroke_width"]))
-        pieces.append(_text(x + 14, y + 1.2, spec["legend"], font=FONT_PROSE, size=LABEL_SIZE_PT, fill=tokens["ink"]))
-        x += 14 + _text_width_estimate(spec["legend"], LABEL_SIZE_PT) + 16
-    pieces.append("</g>")
-    return "".join(pieces)
+def _swatch(spec: dict, tokens: dict) -> str:
+    """One legend swatch: a small standalone SVG drawn from the layer's own
+    style -- a tinted square for a polygon layer, a stroke for a line, the
+    asterisk for points."""
+    w, h = LEGEND_SWATCH_W_PT, LEGEND_SWATCH_H_PT
+    stroke = _colour(tokens, spec["stroke"])
+    fill = _colour(tokens, spec["fill"])
+    dash = f' stroke-dasharray="{spec["dash"]}"' if spec.get("dash") else ""
+    if spec["kind"] == "polygon":
+        body = (
+            f'<rect x="0.25" y="0.25" width="{_fmt(w - 0.5)}" height="{_fmt(h - 0.5)}" fill="{fill}" '
+            f'fill-opacity="{_fmt(spec["fill_opacity"])}" stroke="{stroke}" stroke-width="0.5"/>'
+        )
+    elif spec["kind"] == "line":
+        body = (
+            f'<line x1="0" y1="{_fmt(h / 2)}" x2="{_fmt(w)}" y2="{_fmt(h / 2)}" '
+            f'stroke="{stroke}" stroke-width="{_fmt(spec["stroke_width"])}"{dash}/>'
+        )
+    else:
+        body = _asterisk(w / 2, h / 2, 3.2, stroke, spec["stroke_width"])
+    return (
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{_fmt(w)}pt" height="{_fmt(h)}pt" '
+        f'viewBox="0 0 {_fmt(w)} {_fmt(h)}" class="report-map__swatch">{body}</svg>'
+    )
 
 
-def _text_width_estimate(text: str, size: float) -> float:
-    """A serif's average advance is about half its size; the legend only
-    needs entries not to overlap, so an estimate is enough."""
-    return len(text) * size * 0.52
+def legend_entries(layers: list, tokens: dict) -> list:
+    """The legend, in layer order: [{'id', 'swatch': svg, 'parts': [...]}]
+    for every layer that names an entry. A string legend becomes a
+    one-part prose label."""
+    entries = []
+    for spec in layers:
+        legend = spec.get("legend")
+        if not legend:
+            continue
+        parts = [legend] if isinstance(legend, str) else list(legend)
+        entries.append({"id": spec["id"], "swatch": _swatch(spec, tokens), "parts": parts})
+    return entries
 
 
 def render_map(boundary_polygon_utm, layers: list, tokens: dict, frame: tuple = FRAME) -> dict:
@@ -479,11 +607,13 @@ def render_map(boundary_polygon_utm, layers: list, tokens: dict, frame: tuple = 
          'meters_per_unit': float,        # ground metres per SVG user unit
          'extent_utm': (minx, miny, maxx, maxy),
          'drawn_bbox': (x0, y0, x1, y1),  # where the boundary's bbox landed
-         'scale_bar': {'feet': int, 'units': float}}
+         'scale_bar': {'feet': int, 'units': float},
+         'legend': legend_entries(layers, tokens)}
 
     Layers draw in the order given, under the boundary; the boundary, the
-    north arrow, the scale bar and the legend draw last. The frame's
-    outline is a hairline in the rule token.
+    north arrow and the scale bar draw last. The frame's outline is a
+    hairline in the rule token. The legend is returned, not drawn: the
+    map.html macro sets it below the frame.
     """
     width, height = frame
     projection = _Projection(boundary_polygon_utm.bounds, frame, MARGIN_PT, FURNITURE_BAND_PT)
@@ -506,7 +636,6 @@ def render_map(boundary_polygon_utm, layers: list, tokens: dict, frame: tuple = 
     parts.append(_north_arrow(frame, tokens))
     scale_svg, scale_bar = _scale_bar(frame, projection, tokens)
     parts.append(scale_svg)
-    parts.append(_legend(frame, layers, tokens))
     parts.append(
         f'<rect x="{_fmt(FRAME_STROKE_PT / 2)}" y="{_fmt(FRAME_STROKE_PT / 2)}" '
         f'width="{_fmt(width - FRAME_STROKE_PT)}" height="{_fmt(height - FRAME_STROKE_PT)}" '
@@ -520,4 +649,5 @@ def render_map(boundary_polygon_utm, layers: list, tokens: dict, frame: tuple = 
         "extent_utm": boundary_polygon_utm.bounds,
         "drawn_bbox": projection.drawn_bbox,
         "scale_bar": scale_bar,
+        "legend": legend_entries(layers, tokens),
     }

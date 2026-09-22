@@ -211,15 +211,52 @@ for text in texts:
 by_content = {t.firstChild.data: t.getAttribute("font-family") for t in texts}
 assert by_content["N"] == "Source Serif 4"
 assert by_content[f"{full['scale_bar']['feet']:,} ft"] == "IBM Plex Mono", by_content
-assert by_content["Contours, 5 ft"] == "Source Serif 4" and by_content["Valleys"] == "Source Serif 4"
+# The legend is NOT in the SVG: no legend text, no legend group. It comes
+# back as entries -- swatch plus label parts -- for the macro to set below
+# the frame, in layer order; the empty case is an empty list.
+assert "Contours, 5 ft" not in by_content and "Valleys" not in by_content
 ids = {g.getAttribute("id") for g in root.getElementsByTagName("g")} | {p.getAttribute("id") for p in root.getElementsByTagName("path")}
-for required in ("parcel-boundary", "north-arrow", "scale-bar", "legend", "layer-contours", "layer-index-contours", "layer-valleys", "layer-keypoints"):
+for required in ("parcel-boundary", "north-arrow", "scale-bar", "layer-contours", "layer-index-contours", "layer-valleys", "layer-keypoints"):
     assert required in ids, required
-# The legend lists the labelled layers in order; the empty case reserves the slot.
-legend_labels = [t.firstChild.data for t in texts if t.getAttribute("font-family") == "Source Serif 4" and t.firstChild.data != "N"]
+assert "legend" not in ids
+legend_labels = ["".join(p if isinstance(p, str) else p["value"] for p in e["parts"]) for e in full["legend"]]
 assert legend_labels == ["Contours, 5 ft", "Valleys", "Keypoints"], legend_labels
-empty_legend = [g for g in minidom.parseString(plain["svg"]).documentElement.getElementsByTagName("g") if g.getAttribute("id") == "legend"]
-assert len(empty_legend) == 1 and not empty_legend[0].getElementsByTagName("text")
+assert [e["id"] for e in full["legend"]] == ["contours", "valleys", "keypoints"]
+for entry in full["legend"]:
+    minidom.parseString(entry["swatch"])
+    assert 'class="report-map__swatch"' in entry["swatch"]
+assert plain["legend"] == []
+# A legend given as parts keeps them: the macro sets the mapping as data.
+parts_layer = layer("x", [], kind="line", stroke="ink", legend=["Contours, ", {"value": "5 ft"}])
+assert report_map.legend_entries([parts_layer], TOKENS)[0]["parts"] == ["Contours, ", {"value": "5 ft"}]
+# INDEX LABELS: the index layer carries one whole-feet label per level,
+# the label is set in the data face along the line, and the line is
+# BROKEN behind it -- the labelled level draws as more subpaths than the
+# same level unlabelled.
+index_layer = contour_layers(moderate)[1]
+assert index_layer["labels"] == [f"{round(lv['elevation_ft']):,}" for lv in moderate["levels"] if lv["index"]]
+labels = [t for t in texts if t.getAttribute("font-family") == "IBM Plex Mono" and t.getAttribute("transform")]
+assert labels, "no index label was set"
+assert all(t.getAttribute("transform").startswith("rotate(") for t in labels)
+assert all(t.getAttribute("fill") == TOKENS["terrain"] for t in labels)
+assert {t.firstChild.data for t in labels} <= set(index_layer["labels"]), [t.firstChild.data for t in labels]
+unlabelled = dict(index_layer, labels=None)
+with_label = render_map(BOUNDARY_POLYGON_UTM, [index_layer], TOKENS)["svg"]
+without_label = render_map(BOUNDARY_POLYGON_UTM, [unlabelled], TOKENS)["svg"]
+assert with_label.count("M") > without_label.count("M"), "the labelled line was not broken"
+assert "rotate(" not in without_label
+# The angle keeps the label upright: within (-90, 90].
+for t in labels:
+    angle = float(t.getAttribute("transform")[len("rotate("):].split()[0])
+    assert -90 < angle <= 90, angle
+# A label on a layer that is not a line, or a count that does not match, is refused.
+for bad in (dict(kind="point", labels=["x"]), dict(kind="line", labels=["a", "b"])):
+    try:
+        layer("bad", [Point(0, 0)], stroke="ink", **bad)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError(bad)
 # The keypoint is the asterisk convention: three strokes through one point.
 keypoint_group = [g for g in root.getElementsByTagName("g") if g.getAttribute("id") == "layer-keypoints"][0]
 assert len(keypoint_group.getElementsByTagName("line")) == 3
@@ -228,7 +265,7 @@ boundary_path = [p for p in root.getElementsByTagName("path") if p.getAttribute(
 assert boundary_path.getAttribute("stroke") == TOKENS["ink"]
 contour_group = [g for g in root.getElementsByTagName("g") if g.getAttribute("id") == "layer-contours"][0]
 assert all(p.getAttribute("stroke") == TOKENS["terrain"] for p in contour_group.getElementsByTagName("path"))
-print(f"   {len(texts)} text elements, all attributed; legend {legend_labels}")
+print(f"   {len(texts)} text elements, all attributed; {len(labels)} index label(s) {[t.firstChild.data for t in labels]}; legend {legend_labels}")
 
 # ======================================================================
 # 6. The macro and the token
@@ -242,10 +279,16 @@ assert "map.svg | safe" in macro and 'class="report-map"' in macro
 assert not HEX.findall(macro)
 env = site_report.jinja_environment()
 rendered = env.from_string('{% import "components/map.html" as m %}{{ m.map(map) }}').render(map=full)
-assert rendered.startswith('<figure class="report-map"><svg') and rendered.endswith("</svg></figure>")
+assert rendered.startswith('<figure class="report-map">') and rendered.rstrip().endswith("</figure>")
+assert '<div class="report-map__frame"><svg' in rendered
+assert rendered.count('<li class="report-map__entry">') == 3
+assert '<span class="data">5 ft</span>' not in rendered  # this legend was given as strings
+parts_map = dict(full, legend=report_map.legend_entries([parts_layer], TOKENS))
+parts_rendered = env.from_string('{% import "components/map.html" as m %}{{ m.map(map) }}').render(map=parts_map)
+assert 'Contours, <span class="data">5 ft</span>' in parts_rendered
 css = site_report.render_stylesheet()
-assert ".report-map svg" in css and "--terrain: #7a5c3a;" in css
-print("   macro renders the SVG inline; stylesheet declares --terrain")
+assert ".report-map__frame svg" in css and ".report-map__legend" in css and "--terrain: #7a5c3a;" in css
+print("   macro renders the SVG inline with the legend strip below; stylesheet declares --terrain")
 
 print("\ntest_report_map.py: all sections passed")
 print(offline_harness.summary())
