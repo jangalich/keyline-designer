@@ -1,0 +1,37 @@
+{#- base.html -- the document: stylesheet, running strings, cover, sections.
+    Autoescape is on for every template in this directory (site_report.py's
+    Environment), so `cover.label` -- user input, when the frontend sends
+    one -- is escaped here and reaches the page footer through string-set
+    as text, never as a CSS string. -#}
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>{{ cover.title }} — {{ cover.label }}</title>
+<style>
+{#- The stylesheet is this module's own CSS with its own tokens and font
+    paths in it -- no user input -- rendered without escaping and marked
+    safe here. Everything else on this page is escaped. -#}
+{{ stylesheet | safe }}
+</style>
+</head>
+<body>
+<div class="cover">
+  {#- The running strings live INSIDE the cover: an element before the
+      first named page would open a page of its own. string-set carries
+      them forward to every section page's footer; the cover page itself
+      declares no margin boxes. -#}
+  <span class="running running-label">{{ cover.label }}</span>
+  <span class="running running-date">{{ cover.generated_on }}</span>
+  <p class="cover__eyebrow">{{ cover.eyebrow }}</p>
+  <h1 class="cover__title">{{ cover.title }}</h1>
+  <hr class="cover__rule">
+  <p class="cover__label">{{ cover.label }}</p>
+  <p class="cover__meta">{{ cover.meta }}</p>
+</div>
+
+{% for section in sections -%}
+{% include "sections/" ~ section.template %}
+{% endfor %}
+</body>
+</html>

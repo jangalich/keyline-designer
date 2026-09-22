@@ -1,0 +1,20 @@
+{#- 6. SOURCE FOOTER -- the honest limit of the data FIRST, as its own
+    sentence(s), then the source, its version and its citation as a
+    separate, smaller line. Both halves take the summary line's part
+    list: strings are prose, {value} mappings are data -- a later section
+    may have a figure in its caveat; this one has none, and a product
+    name or a year range is a name, not a measurement. -#}
+{% macro source_footer(footer) -%}
+<div class="source-footer">
+  <p class="source-footer__caveat">
+{%- for part in footer.caveat -%}
+{%- if part is mapping -%}<span class="data">{{ part.value }}</span>{%- else -%}{{ part }}{%- endif -%}
+{%- endfor -%}
+  </p>
+  <p class="source-footer__citation">
+{%- for part in footer.citation -%}
+{%- if part is mapping -%}<span class="data">{{ part.value }}</span>{%- else -%}{{ part }}{%- endif -%}
+{%- endfor -%}
+  </p>
+</div>
+{%- endmacro %}

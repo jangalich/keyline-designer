@@ -2279,6 +2279,32 @@ def _fetch_hook_sites() -> dict:
         f"{len(declared)} declared layers"
     ] = bool(declared) and len(timed) == len(declared)
 
+    # THE REPORT-TIME DATA LAYER, ASKED THE SAME TWO QUESTIONS. report_data.
+    # fetch_report_data() (the site data report's own fetch layer -- see
+    # that module) declares what it fetches in REPORT_FETCH_LAYERS, a
+    # {layer: policy} table, and times each with the same time_layer()
+    # block parcel_data uses. A second report layer added without a timer
+    # reads "1 of 2" here, exactly as a thirteenth Layer 1 layer would
+    # above. Imported inside a guard of its own: a report_data that does
+    # not import must not read as Layer 1's instrumentation being unwired.
+    try:
+        import report_data
+    except Exception as exc:  # reported as its own row, never hidden
+        sites["report_data imports"] = f"{type(exc).__name__}: {exc}"
+    else:
+        function = getattr(report_data, "fetch_report_data", None)
+        code = getattr(function, "__code__", None)
+        sites["report_data.fetch_report_data calls time_layer"] = (
+            code is not None and "run_diagnostics" in code.co_names and "time_layer" in code.co_names
+        )
+        report_declared = tuple(getattr(report_data, "REPORT_FETCH_LAYERS", {}) or {})
+        report_constants = set(code.co_consts) if code is not None else set()
+        report_timed = [layer for layer in report_declared if layer in report_constants]
+        sites[
+            f"report_data.fetch_report_data times {len(report_timed)} of "
+            f"{len(report_declared)} declared report layers"
+        ] = bool(report_declared) and len(report_timed) == len(report_declared)
+
     # AND A FIFTH, THE SAME KIND OF COVERAGE QUESTION ONE LEVEL DOWN. A
     # layer entry point in a retrying module that lost its
     # @fetch_attempts.publishes decorator fails exactly the way this

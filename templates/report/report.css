@@ -1,0 +1,315 @@
+/* report.css -- THE SITE DATA REPORT'S ONE STYLESHEET, rendered by Jinja.
+
+   No colour literal lives here. Every colour is a custom property on :root,
+   and the values are injected from site_report.TOKENS -- the one place in
+   the backend a hex value may appear. Every font file is injected the same
+   way, as an absolute file URI computed from the assets directory, so the
+   stylesheet carries no path either.
+
+   Three faces, two weights each (assets/fonts/README.md):
+     display  Bitter            400 / 600   headings, the cover title
+     prose    Source Serif 4    400 / 600   sentences, row labels, footers
+     data     IBM Plex Mono     400 / 500   EVERY measured value
+
+   THE DATA RULE. A measured value -- in a table cell, a key figure, or the
+   middle of a sentence -- is set in the data face with tabular figures
+   turned on EXPLICITLY (font-variant-numeric: tabular-nums), so a column of
+   numbers aligns on the decimal whatever digits it holds. That is the
+   signature of the design and the thing a layout can defeat even when the
+   font honours it; test_site_report.py measures the alignment across values
+   of differing width rather than trusting one.
+
+   THE PAGE IS WHITE. Stock (the frontend's page tint) is used only for small
+   filled areas -- the key-figures panel and the table header -- so it reads
+   as a mark rather than a tint that has to survive a printer. */
+
+{% for face in fonts %}
+@font-face {
+  font-family: "{{ face.family }}";
+  font-style: normal;
+  font-weight: {{ face.weight }};
+  src: url("{{ face.uri }}") format("woff2");
+}
+{% endfor %}
+
+:root {
+{% for name, value in tokens.items() %}
+  --{{ name }}: {{ value }};
+{% endfor %}
+  --font-display: "Bitter", Georgia, serif;
+  --font-prose: "Source Serif 4", Georgia, serif;
+  --font-data: "IBM Plex Mono", ui-monospace, monospace;
+
+  /* Scale, in points -- this is a printed page. */
+  --text-eyebrow: 7.5pt;
+  --text-label: 8pt;
+  --text-footer: 8.5pt;
+  --text-table: 8.75pt;
+  --text-body: 10.5pt;
+  --text-heading: 20pt;
+  --text-figure: 21pt;
+  --text-cover: 34pt;
+
+  --leading-body: 1.5;
+  --hairline: 0.5pt solid var(--rule);
+  --space-1: 3pt;
+  --space-2: 6pt;
+  --space-3: 10pt;
+  --space-4: 16pt;
+  --space-5: 24pt;
+  --space-6: 40pt;
+}
+
+/* --- page geometry ------------------------------------------------------ */
+
+@page {
+  size: Letter;
+  margin: 0.9in 0.85in 0.95in 0.85in;
+  background: var(--page);
+
+  @bottom-left {
+    content: string(running-label);
+    font-family: var(--font-prose);
+    font-size: var(--text-label);
+    color: var(--ink-muted);
+    vertical-align: top;
+    padding-top: 10pt;
+  }
+  @bottom-center {
+    content: counter(page);
+    font-family: var(--font-data);
+    font-variant-numeric: tabular-nums;
+    font-size: var(--text-label);
+    color: var(--ink-muted);
+    vertical-align: top;
+    padding-top: 10pt;
+  }
+  @bottom-right {
+    content: string(running-date);
+    font-family: var(--font-prose);
+    font-size: var(--text-label);
+    color: var(--ink-muted);
+    vertical-align: top;
+    padding-top: 10pt;
+  }
+}
+
+@page cover {
+  margin: 0.9in 0.85in;
+  @bottom-left { content: none; }
+  @bottom-center { content: none; }
+  @bottom-right { content: none; }
+}
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--page);
+  color: var(--ink);
+  font-family: var(--font-prose);
+  font-size: var(--text-body);
+  font-weight: 400;
+  line-height: var(--leading-body);
+}
+
+/* The running strings the page footer reads. Hidden inline so the text
+   reaches string-set without taking space; the element, not a CSS string
+   literal, carries user input, which is what keeps it escaped. */
+.running {
+  display: block;
+  height: 0;
+  overflow: hidden;
+  font-size: 0;
+}
+.running-label { string-set: running-label content(); }
+.running-date  { string-set: running-date content(); }
+
+/* --- the data rule ------------------------------------------------------ */
+
+.data,
+.figure,
+td.num,
+th.num {
+  font-family: var(--font-data);
+  font-variant-numeric: tabular-nums;
+  font-weight: 400;
+}
+
+/* --- the cover ---------------------------------------------------------- */
+
+.cover {
+  page: cover;
+  padding-top: 2.4in;
+}
+.cover__eyebrow {
+  font-family: var(--font-data);
+  font-size: var(--text-eyebrow);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--ink-muted);
+  margin: 0 0 var(--space-3) 0;
+}
+.cover__title {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: var(--text-cover);
+  line-height: 1.1;
+  color: var(--ink);
+  margin: 0 0 var(--space-4) 0;
+}
+.cover__rule {
+  border: 0;
+  border-top: 1.5pt solid var(--oxide);
+  width: 1.2in;
+  margin: 0 0 var(--space-4) 0;
+}
+.cover__label {
+  font-size: 13pt;
+  margin: 0 0 var(--space-2) 0;
+}
+.cover__meta {
+  font-size: var(--text-label);
+  color: var(--ink-muted);
+  margin: 0;
+}
+
+/* --- sections ----------------------------------------------------------- */
+
+.section {
+  break-before: page;
+}
+.section + .section {
+  break-before: page;
+}
+
+/* 1. Eyebrow */
+.eyebrow {
+  font-family: var(--font-data);
+  font-size: var(--text-eyebrow);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--ink-muted);
+  margin: 0 0 var(--space-2) 0;
+}
+.eyebrow__number {
+  font-weight: 500;
+}
+
+/* 2. Heading */
+.heading {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: var(--text-heading);
+  line-height: 1.15;
+  color: var(--ink);
+  margin: 0 0 var(--space-3) 0;
+}
+
+/* 3. Summary line */
+.summary {
+  font-size: 11.5pt;
+  line-height: 1.55;
+  margin: 0 0 var(--space-5) 0;
+  max-width: 6in;
+}
+.summary .data {
+  font-weight: 500;
+  font-size: 10.5pt;
+}
+
+/* 4. Key figures grid -- three columns, stock panel */
+.key-figures {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  column-gap: var(--space-4);
+  row-gap: var(--space-4);
+  background: var(--stock);
+  padding: var(--space-4) var(--space-5);
+  margin: 0 0 var(--space-5) 0;
+  break-inside: avoid;
+}
+.key-figure {
+  border-left: var(--hairline);
+  padding-left: var(--space-3);
+}
+.key-figure .figure {
+  display: block;
+  font-size: var(--text-figure);
+  font-weight: 500;
+  line-height: 1.1;
+  color: var(--ink);
+  margin: 0 0 var(--space-1) 0;
+}
+.key-figure__label {
+  display: block;
+  font-size: var(--text-label);
+  color: var(--ink-muted);
+  line-height: 1.3;
+}
+
+/* 5. Data table */
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--text-table);
+  margin: 0 0 var(--space-4) 0;
+  break-inside: avoid;
+}
+.data-table th,
+.data-table td {
+  padding: var(--space-1) var(--space-2);
+  border-bottom: var(--hairline);
+  vertical-align: baseline;
+}
+/* ONE CONTINUOUS BAND. The tint sits on the header ROW, not on each th:
+   under border-collapse a per-cell background is drawn cell by cell and
+   the seams between cells showed as alternating stripes at print
+   resolution. A row background is one rectangle. */
+.data-table thead tr {
+  background: var(--stock);
+}
+.data-table thead th {
+  border-bottom: 0.75pt solid var(--rule);
+  font-weight: 500;
+  color: var(--ink-muted);
+  padding-top: var(--space-2);
+  padding-bottom: var(--space-2);
+}
+.data-table th.label,
+.data-table td.label {
+  font-family: var(--font-prose);
+  font-weight: 400;
+  text-align: left;
+  white-space: nowrap;
+  color: var(--ink);
+}
+.data-table th.num,
+.data-table td.num {
+  text-align: right;
+  white-space: nowrap;
+}
+.data-table tbody tr:last-child td {
+  border-bottom: 0.75pt solid var(--rule);
+}
+
+/* 6. Source footer -- the caveat, then the citation smaller */
+.source-footer {
+  color: var(--ink-muted);
+  padding-top: var(--space-2);
+}
+.source-footer__caveat {
+  font-size: var(--text-footer);
+  font-style: italic;
+  line-height: 1.45;
+  margin: 0 0 var(--space-2) 0;
+}
+.source-footer__citation {
+  font-size: var(--text-label);
+  font-style: normal;
+  line-height: 1.4;
+  margin: 0;
+}
+.source-footer .data {
+  font-style: normal;
+  font-size: 8pt;
+}

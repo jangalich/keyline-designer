@@ -2674,9 +2674,18 @@ assert _check_ok, _check_output
 _fetch_lines = [
     line for line in _check_output.splitlines() if "fetch instrumentation:" in line
 ]
-assert len(_fetch_lines) == 5, _check_output
+assert len(_fetch_lines) == 7, _check_output
 assert all(line.startswith("[ok]") for line in _fetch_lines), _fetch_lines
 assert any("times 12 of 12 declared layers" in line for line in _fetch_lines), _fetch_lines
+# THE SIXTH AND SEVENTH ARE THE REPORT-TIME DATA LAYER'S (report_data.py,
+# the site data report's own fetch layer), asked the same two questions
+# Layer 1 is asked: does its fetch call time_layer, and does it time every
+# layer REPORT_FETCH_LAYERS declares. One layer today; a second added
+# without a timer would read "1 of 2" and fail here.
+assert any("report_data.fetch_report_data calls time_layer" in line for line in _fetch_lines), _fetch_lines
+assert any(
+    "report_data.fetch_report_data times 1 of 1 declared report layers" in line for line in _fetch_lines
+), _fetch_lines
 assert any("build_session_context calls begin_fetch" in line for line in _fetch_lines)
 assert any("build_session_context calls record_fetch" in line for line in _fetch_lines)
 assert any("fetch_parcel_data calls time_layer" in line for line in _fetch_lines)
@@ -2719,8 +2728,17 @@ _torn_output = _torn_stream.getvalue()
 
 assert not _torn_ok, _torn_output
 _torn_lines = [line for line in _torn_output.splitlines() if "fetch instrumentation:" in line]
-assert len(_torn_lines) == 5, _torn_output
-assert all(line.startswith("[!!]") for line in _torn_lines), _torn_lines
+assert len(_torn_lines) == 7, _torn_output
+# THE FIVE LAYER 1 LINES FAIL; THE TWO REPORT-LAYER LINES DO NOT, and that
+# is the honest reading: this control tears down parcel_data's and
+# session_cache's instrumentation, and report_data.fetch_report_data() is
+# neither of those. A report line reading [!!] here would mean the check
+# could not tell the two layers apart.
+_torn_layer1 = [line for line in _torn_lines if "report_data" not in line]
+_torn_report = [line for line in _torn_lines if "report_data" in line]
+assert len(_torn_layer1) == 5 and len(_torn_report) == 2, _torn_lines
+assert all(line.startswith("[!!]") for line in _torn_layer1), _torn_lines
+assert all(line.startswith("[ok]") for line in _torn_report), _torn_lines
 assert any("times 0 of 12 declared layers" in line for line in _torn_lines), _torn_lines
 # The publishing line fails too, and for the honest reason: the timed
 # callables are read out of the compiled fetch_parcel_data, and this one
@@ -2751,11 +2769,13 @@ assert _dropped_output.count("[!!]") == 1, _dropped_output
 
 print(
     f"18 [fetch test 8]. self_check() REPORTS WHETHER FETCH INSTRUMENTATION IS WIRED: it prints "
-    f"five fetch lines, all [ok] against the loaded modules -- build_session_context calls "
+    f"seven fetch lines, all [ok] against the loaded modules -- build_session_context calls "
     f"begin_fetch and record_fetch, fetch_parcel_data calls time_layer, it times 12 of 12 "
-    f"declared layers, and 9 of 9 timed entry points from a retrying module publish attempts. "
-    f"TWO NEGATIVE CONTROLS: with both functions replaced by uninstrumented ones the same five "
-    f"lines read [!!] (the layer count 0 of 12, the publishing count 0 of 0 -- not a pass but "
+    f"declared layers, 9 of 9 timed entry points from a retrying module publish attempts, and "
+    f"the report-time layer's fetch_report_data calls time_layer and times 1 of 1 declared "
+    f"report layers. TWO NEGATIVE CONTROLS: with both Layer 1 functions replaced by "
+    f"uninstrumented ones the five Layer 1 lines read [!!] while the two report-layer lines "
+    f"stay [ok] (the layer count 0 of 12, the publishing count 0 of 0 -- not a pass but "
     f"'could not be checked'); and with ONE entry point's decorator dropped, that line ALONE "
     f"reads [!!] at 8 of 9. Both return False with RECORDS WOULD NOT BE WRITTEN."
 )

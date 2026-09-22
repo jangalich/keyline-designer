@@ -1,0 +1,17 @@
+{#- THE CLIMATE SECTION -- composed entirely from the six components. No
+    styling here, no numbers here: `section` is climate_section.build_
+    climate_section()'s dict, every value already formatted. -#}
+{% import "components/eyebrow.html" as c1 %}
+{% import "components/heading.html" as c2 %}
+{% import "components/summary.html" as c3 %}
+{% import "components/key_figures.html" as c4 %}
+{% import "components/data_table.html" as c5 %}
+{% import "components/source_footer.html" as c6 %}
+<section class="section section--climate">
+  {{ c1.eyebrow(section.number, section.name) }}
+  {{ c2.heading(section.heading) }}
+  {{ c3.summary(section.summary) }}
+  {{ c4.key_figures(section.key_figures) }}
+  {{ c5.data_table(section.table) }}
+  {{ c6.source_footer(section.footer) }}
+</section>

@@ -4,6 +4,12 @@ FROM python:3.11-slim-bookworm
 # at the system level -- pip can't provide these, and Render's native
 # Python runtime doesn't include them either, so this project deploys
 # via Docker instead of Render's native runtime.
+#
+# libharfbuzz-subset0: from WeasyPrint 70 on, font subsetting goes through
+# HarfBuzz-Subset; without it WeasyPrint falls back to fontTools with a
+# deprecation warning, and a later release will refuse. Pinned together
+# with the weasyprint==70.0 line in requirements.txt, so production
+# resolves exactly the version the site data report was verified on.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libpango-1.0-0 \
     libpangocairo-1.0-0 \
@@ -14,6 +20,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     shared-mime-info \
     fonts-liberation \
     fontconfig \
+    libharfbuzz-subset0 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

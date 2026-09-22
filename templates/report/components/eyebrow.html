@@ -1,0 +1,6 @@
+{#- 1. EYEBROW -- the section's number and name, small and muted, in the
+    data face. `number` is the section's position in the rendered report,
+    assigned by the assembler; `name` is the section's own. -#}
+{% macro eyebrow(number, name) -%}
+<p class="eyebrow"><span class="eyebrow__number">{{ number }}</span> · {{ name }}</p>
+{%- endmacro %}

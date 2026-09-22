@@ -13,6 +13,11 @@ contourpy>=1.2.0
 contextily>=1.6.0
 xyzservices>=2023.10.0
 mercantile>=1.2.1
-weasyprint>=62.0
+# PINNED. CSS custom properties, WOFF2 loading and variable-font weights
+# were each verified on exactly this version (site-data-report-proposal.md,
+# phase 2); a resolver picking a different release could lose any of them
+# silently. Bump deliberately, re-running test_site_report.py.
+weasyprint==70.0
+jinja2>=3.1.0
 markdown>=3.6
 gunicorn>=22.0.0
