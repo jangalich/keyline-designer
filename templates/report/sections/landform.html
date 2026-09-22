@@ -1,8 +1,13 @@
-{#- THE LANDFORM SECTION -- the six components plus the map, two tables,
-    on TWO PAGES BY RULE: the picture and its takeaways (summary, map,
-    legend, key figures) on the first, every number (the tables, the
-    footer) on the second. .section__figures / .section__detail carry the
-    split; every later section with a map takes the same shape.
+{#- THE LANDFORM SECTION -- THREE PAGES BY RULE. The terrain: eyebrow,
+    heading, summary, the terrain map (slope tints, contours, valleys,
+    keypoints) and its legend. The keyline structure: the continuation
+    eyebrow, the keyline-structure map at the SAME extent and scale
+    (contours set back, valley stems, ridges, keylines with their
+    elevations, keypoints) with the keypoint count in words under it, then
+    the primary valley's profile with its caption. The numbers: the
+    continuation eyebrow, the nine key figures, the slope, aspect and
+    valley tables with the valley table's caption, the footer. .section__
+    figures / .section__structure / .section__detail carry the split.
     No styling here, no numbers here: `section` is landform_section.build_
     landform_section()'s dict, every value already formatted. -#}
 {% import "components/eyebrow.html" as c1 %}
@@ -12,17 +17,37 @@
 {% import "components/data_table.html" as c5 %}
 {% import "components/source_footer.html" as c6 %}
 {% import "components/map.html" as c7 %}
+{% import "components/chart.html" as c8 %}
+{% import "components/caption.html" as c9 %}
 <section class="section section--landform section--map">
   <div class="section__figures">
     {{ c1.eyebrow(section.number, section.name) }}
     {{ c2.heading(section.heading) }}
     {{ c3.summary(section.summary) }}
     {{ c7.map(section.map) }}
-    {{ c4.key_figures(section.key_figures) }}
+  </div>
+  <div class="section__structure">
+    {{ c1.eyebrow(section.number, section.name, continued=True) }}
+    {{ c7.map(section.structure_map) }}
+    {{ c9.caption(section.structure_caption) }}
+{%- if section.profile.chart %}
+    {{ c8.chart(section.profile.chart, "valley-profile") }}
+    {{ c9.caption(section.profile.caption) }}
+{%- else %}
+    {{ c9.unavailable(section.profile.unavailable) }}
+{%- endif %}
   </div>
   <div class="section__detail">
+    {{ c1.eyebrow(section.number, section.name, continued=True) }}
+    {{ c4.key_figures(section.key_figures) }}
     {{ c5.data_table(section.slope_table) }}
     {{ c5.data_table(section.aspect_table) }}
+{%- if section.valley_table %}
+    {{ c5.data_table(section.valley_table) }}
+    {{ c9.caption(section.valley_table_caption) }}
+{%- else %}
+    {{ c9.unavailable(section.valley_table_unavailable) }}
+{%- endif %}
     {{ c6.source_footer(section.footer) }}
   </div>
 </section>

@@ -377,7 +377,7 @@ def render_valley_profile(profile: dict, tokens: dict, frame: tuple = PROFILE_FR
         parts.append(_text(below_x, below_y - 5.0, f"{keypoint['grade_below_pct']:.1f}% below", font=FONT_DATA, size=PROFILE_ANNOTATION_SIZE_PT, fill=ink, anchor="middle"))
     parts.append("</svg>")
     legend_layers = [
-        layer("profile", [], kind="line", stroke="water", stroke_width=PROFILE_LINE_PT, legend="valley floor"),
+        layer("profile", [], kind="line", stroke="water", stroke_width=PROFILE_LINE_PT, legend="valley stem"),
     ]
     if keypoint:
         legend_layers.append(layer("keypoint", [], kind="point", stroke="ink", marker="dot", legend="keypoint"))

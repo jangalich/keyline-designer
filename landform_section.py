@@ -126,14 +126,20 @@ VALLEY_STROKE_PT = 0.9
 VALLEY_DASH = "3 2"
 KEYPOINT_STROKE_PT = 0.9
 
-# The keyline-structure map: contours set back, valleys in the water token
-# dashed, ridges in the terrain token dash-dot, keylines in ink solid and
-# heaviest, keypoints as small filled dots -- in ink on the parcel, in the
-# muted ink just outside it.
-STRUCTURE_CONTOUR_OPACITY = 0.55
-RIDGE_STROKE_PT = 0.9
-RIDGE_DASH = "5 2 1 2"
+# THE KEYLINE-STRUCTURE MAP'S HIERARCHY, explicit and in this order:
+# keylines heaviest (ink, solid), contours next (the terrain map's own
+# weights, index labels left to the terrain map a page earlier at the same
+# extent), valley STEMS lighter (water, dashed -- the tributaries are not
+# drawn: on a keyline map only the primary stems matter), ridges lightest
+# (terrain, a long dash so they neither shimmer nor compete with the
+# contours in the same hue). Keypoints are small filled dots with a halo,
+# in ink on the parcel and in the muted ink just outside it; a keyline too
+# short to carry its elevation in a gap sets it beside the dot instead.
 KEYLINE_STROKE_PT = 1.3
+VALLEY_STEM_STROKE_PT = 0.55
+VALLEY_STEM_DASH = "4 2.5"
+RIDGE_STROKE_PT = 0.4
+RIDGE_DASH = "6 3"
 
 SOURCE_LINE = "Source: USGS 3DEP elevation, resampled to 5 m · retrieved "
 CAVEAT_LINE = (
@@ -582,15 +588,15 @@ def build_valley_table(derived: landform_derivations.TerrainDerived) -> Optional
     if not rows:
         return None
     return {
-        "corner": "",
-        "columns": ["Stem on parcel, ft", "Fall, ft", "Grade, %", "Keypoint, ft", "Grade above, %", "Grade below, %"],
+        "corner": "Valley",
+        "columns": ["Stem, ft", "Fall, ft", "Grade, %", "Keypoint, ft", "Above, %", "Below, %"],
         "rows": rows,
     }
 
 
 def build_valley_table_caption(derived: landform_derivations.TerrainDerived) -> list:
-    parts = ["The stem is the valley's main line traced from its outlet up to the ridge; the fall is its drop "
-             "between entering and leaving the parcel."]
+    parts = ["The stem is the valley's main line traced from its outlet up to the ridge, measured on the parcel; the "
+             "fall is its drop between entering and leaving; above and below are the grades either side of the keypoint."]
     for row in derived.valley_rows:
         kp = row["keypoint"]
         if kp is None:
@@ -623,8 +629,20 @@ def build_profile(derived: landform_derivations.TerrainDerived, tokens: dict) ->
         },
     }
     chart = report_chart.render_valley_profile(chart_input, tokens)
-    caption = [f"Valley {number}, from its head to where it leaves the elevation model; vertical exaggeration ",
+    caption = [f"Valley {number}, the full stem from its head to where it leaves the elevation model; vertical exaggeration ",
                {"value": f"{chart['exaggeration']}×"}, "."]
+    crossings = profile["crossings"]
+    if len(crossings) >= 2:
+        reach_ft = sum(b["distance_m"] - a["distance_m"] for a, b in zip(crossings, crossings[1:]) if a["entering"]) / METERS_PER_FOOT
+        caption += [" The parcel is the short reach between the ticks, ", {"value": f"{_feet(reach_ft)} ft"},
+                    " of it." if reach_ft / (profile["distance_m"][-1] / METERS_PER_FOOT) < 0.25 else " of it."]
+        if reach_ft / (profile["distance_m"][-1] / METERS_PER_FOOT) >= 0.25:
+            caption[-3] = " The parcel is the reach between the ticks, "
+    elif len(crossings) == 1:
+        caption.append(" The tick is where the stem enters the parcel." if crossings[0]["entering"]
+                       else " The tick is where the stem leaves the parcel.")
+    elif all(profile["on_parcel"]):
+        caption.append(" The whole stem lies on the parcel.")
     if keypoint is None:
         caption.append(" No keypoint was found on this valley, so no grades are marked and it has no keyline.")
     elif not keypoint["on_parcel"]:
@@ -673,51 +691,130 @@ def _reach_to_keypoint(keyline: dict, keypoint: dict, boundary_polygon_utm):
 
 
 def build_structure_layers(terrain: TerrainInputs, contours: dict, derived: landform_derivations.TerrainDerived) -> list:
-    """The keyline-structure map's layers, in drawing order: contours set
-    back, valleys, ridges, keylines with their elevation labels, keypoints
-    on the parcel, keypoints just outside it."""
+    """The keyline-structure map's layers in drawing order (lightest
+    context first): contours, ridges, valley stems, keylines with their
+    elevation labels, the outside keypoint's reach, keypoints on the
+    parcel, keypoints just outside it. See the hierarchy note above."""
+    boundary = terrain.boundary_polygon_utm
     layers = []
     for spec in report_map.contour_layers(contours, legend=["Contours, ", {"value": f"{contours['interval_ft']} ft"}]):
-        spec["stroke_opacity"] = STRUCTURE_CONTOUR_OPACITY
+        spec["labels"] = None      # elevations are on the terrain map, same extent, a page earlier
         layers.append(spec)
-    numbers = {row["valley_id"]: row["number"] for row in derived.valley_rows}
-    by_valley = valley_lines_by_valley(terrain)
-    if by_valley:
-        layers.append(report_map.layer(
-            "valleys", [line for _, line in by_valley], kind="line", stroke="water", stroke_width=VALLEY_STROKE_PT,
-            dash=VALLEY_DASH, legend="Valleys", labels=[str(numbers[vid]) if vid in numbers else None for vid, _ in by_valley],
-        ))
     ridges = [r["on_parcel"] for r in derived.ridges if r["on_parcel"] is not None]
     if ridges:
         layers.append(report_map.layer(
             "ridges", ridges, kind="line", stroke="terrain", stroke_width=RIDGE_STROKE_PT, dash=RIDGE_DASH, legend="Ridges",
         ))
-    keylines = [k for k in derived.keylines if k["on_parcel"] is not None]
-    by_id = {kp["id"]: kp for kp in terrain.keypoints}
-    if keylines:
+    stems = []
+    for row in derived.valley_rows:
+        line = landform_derivations.stem_line(derived.stems[row["valley_id"]], terrain.dem)
+        clipped = report_map._linear_parts(line.intersection(boundary)) if line is not None else None
+        if clipped is not None:
+            stems.append((row["number"], clipped))
+    if stems:
         layers.append(report_map.layer(
+            "valley-stems", [line for _, line in stems], kind="line", stroke="water", stroke_width=VALLEY_STEM_STROKE_PT,
+            dash=VALLEY_STEM_DASH, legend="Valley stems, numbered as in the table",
+            labels=[str(number) for number, _ in stems],
+        ))
+    by_id = {kp["id"]: kp for kp in terrain.keypoints}
+    keylines = [k for k in derived.keylines if k["on_parcel"] is not None]
+    dot_labels = {}
+    if keylines:
+        keyline_layer = report_map.layer(
             "keylines", [_split_at(k["on_parcel"], by_id[k["keypoint_id"]]["point_utm"]) for k in keylines],
             kind="line", stroke="ink", stroke_width=KEYLINE_STROKE_PT,
             legend="Keylines, elevation in ft", labels=[_feet(k["elevation_m"] / METERS_PER_FOOT) for k in keylines],
-        ))
-    reaches = [r for r in (_reach_to_keypoint(k, by_id[k["keypoint_id"]], terrain.boundary_polygon_utm) for k in keylines
+        )
+        layers.append(keyline_layer)
+        # A keyline too short to carry its label sets the elevation beside its keypoint's dot.
+        for keyline, placed in zip(keylines, report_map.label_placements(boundary, keyline_layer)):
+            if not placed:
+                dot_labels[keyline["keypoint_id"]] = _feet(keyline["elevation_m"] / METERS_PER_FOOT)
+    reaches = [r for r in (_reach_to_keypoint(k, by_id[k["keypoint_id"]], boundary) for k in keylines
                            if not k["keypoint_on_parcel"]) if r is not None]
     if reaches:
         layers.append(report_map.layer(
             "keylines-outside", reaches, kind="line", stroke="ink-muted", stroke_width=KEYLINE_STROKE_PT,
         ))
-    points = parcel_keypoints(terrain)
-    if points:
+    on_parcel = [kp for kp in terrain.keypoints if kp.get("on_parcel") and kp.get("point_utm") is not None]
+    if on_parcel:
         layers.append(report_map.layer(
-            "keypoints", points, kind="point", stroke="ink", stroke_width=KEYPOINT_STROKE_PT, marker="dot", legend="Keypoints",
+            "keypoints", [kp["point_utm"] for kp in on_parcel], kind="point", stroke="ink", stroke_width=KEYPOINT_STROKE_PT,
+            marker="dot", legend="Keypoints", labels=[dot_labels.get(kp["id"]) for kp in on_parcel],
         ))
-    outside = outside_keypoints(terrain)
+    outside = [kp for kp in terrain.keypoints if not kp.get("on_parcel") and kp.get("point_utm") is not None]
     if outside:
         layers.append(report_map.layer(
-            "keypoints-outside", outside, kind="point", stroke="ink-muted", stroke_width=KEYPOINT_STROKE_PT, marker="dot",
-            legend="Keypoint just outside the boundary",
+            "keypoints-outside", [kp["point_utm"] for kp in outside], kind="point", stroke="ink-muted",
+            stroke_width=KEYPOINT_STROKE_PT, marker="dot", legend="Keypoint just outside the boundary",
+            labels=[dot_labels.get(kp["id"]) for kp in outside],
         ))
     return layers
+
+
+def build_structure_caption(derived: landform_derivations.TerrainDerived, keypoints: list) -> list:
+    """Under the keyline-structure map: what a keyline is, then the
+    keypoint count as a rule."""
+    parts = ["A keyline is the contour through its keypoint, drawn out to the ridges either side of its valley: "
+             "the reference line from which cultivation is laid out. "]
+    return parts + build_keypoint_statement(derived, keypoints)
+
+
+# ======================================================================
+# Sources and methods
+# ======================================================================
+
+CITATION_3DEP = ("U.S. Geological Survey, 3D Elevation Program (3DEP) seamless 1/3 arc-second digital elevation model, "
+                 "served by The National Map elevation service and resampled to 5 m in the parcel's UTM zone.")
+
+
+def build_sources(terrain: TerrainInputs) -> list:
+    """One line per source: Landform has one."""
+    return [[f"USGS 3DEP elevation, 1/3 arc-second, resampled to 5 m, retrieved {format_retrieved_on(terrain.retrieved_on)}."]]
+
+
+def build_methods(terrain: TerrainInputs, derived: landform_derivations.TerrainDerived) -> list:
+    """The methods note's inputs -- the full citation and the method behind
+    each figure -- for the note the Site overview branch builds. Not
+    rendered by this section."""
+    from keypoint_detection import KEYPOINT_BOUNDARY_MARGIN_METERS, KEYPOINT_MIN_RUN_CELLS, KEYPOINT_MIN_SLOPE_DROP_PCT
+    from valley_delineation import MIN_PRIMARY_VALLEY_CONTRIBUTING_AREA_ACRES, MIN_STREAM_CONTRIBUTING_AREA_ACRES
+
+    resolution = max(terrain.dem["resolution_meters"])
+    return [
+        {
+            "source": "USGS 3DEP",
+            "identifier": f"3DEP 1/3 arc-second DEM, resampled to {resolution:.0f} m, {terrain.dem['crs']}",
+            "period": format_retrieved_on(terrain.retrieved_on),
+            "citation": CITATION_3DEP,
+            "method": "Contours by contourpy over the raw grid at 2, 5, 10 or 20 ft, the interval chosen for 8–15 lines "
+                      "across the parcel; slope by finite differences (production_area.compute_slope_percent) classed "
+                      "by the SSURGO slope phases; aspect by Horn's method in eight sectors, Flat under 2%; acreages "
+                      "from cell counts allocated exactly to the parcel's polygon area.",
+            "notes": [
+                f"Valleys: depressions filled with an epsilon gradient, D8 flow direction and accumulation; a stream where "
+                f"at least {MIN_STREAM_CONTRIBUTING_AREA_ACRES} acres drain to a cell, a primary valley where the largest "
+                f"contributing area reaches {MIN_PRIMARY_VALLEY_CONTRIBUTING_AREA_ACRES} acres. The map draws each valley's "
+                "main stem, traced from its outlet up to the ridge by the highest-accumulation feeder at each step.",
+                f"Keypoints: the two-segment least-squares split of the stem's raw long profile among positions where the "
+                f"smoothed grade drops by at least {KEYPOINT_MIN_SLOPE_DROP_PCT:.0f} points over {KEYPOINT_MIN_RUN_CELLS} cells "
+                f"either side, within {KEYPOINT_BOUNDARY_MARGIN_METERS:.0f} m of the drawn boundary; one per valley at most, "
+                "none where the profile holds no inflection.",
+                "Ridges: the divides between the valleys' drainage areas -- each cell labelled by the valley its flow "
+                "first reaches, cells whose flow leaves the elevation model labelled as off-window drainage, the shared "
+                "boundaries of the labelled areas rounded by two passes of Chaikin's corner cutting (within half a cell "
+                "of the cell-edge divide).",
+                "Keylines: the contour at the keypoint's raw elevation through the keypoint, clipped to the keypoint "
+                "valley's drainage area so it ends at the divides, then to the parcel. No keypoint, no keyline.",
+                "The profile is the primary valley's stem -- the largest contributing area among the valleys whose stem "
+                "crosses the parcel -- with raw elevations against ground distance; grades either side of the keypoint "
+                "are the detector's own, from a 5-cell moving average.",
+                f"The {resolution:.0f} m grid smooths features narrower than about {2 * resolution:.0f} m; 3DEP's vertical "
+                "accuracy is about 0.8 m, so elevations are set in whole feet and the finest contour interval is 2 ft.",
+            ],
+        },
+    ]
 
 
 def build_footer(retrieved_on: date) -> dict:
@@ -788,14 +885,18 @@ def build_landform_section(terrain: TerrainInputs, tokens: Optional[dict] = None
         "summary": build_summary(contours["relief_ft"], classified["slope_counts"], classified["aspect_counts"]),
         "map": rendered,
         "structure_map": structure,
+        "structure_caption": build_structure_caption(derived, terrain.keypoints),
         "key_figures": build_key_figures(contours, classified, derived),
         "keypoint_statement": build_keypoint_statement(derived, terrain.keypoints),
         "profile": build_profile(derived, tokens),
         "valley_table": build_valley_table(derived),
         "valley_table_caption": build_valley_table_caption(derived),
+        "valley_table_unavailable": ["No valley stem crosses this property, so there is no valley table."],
         "slope_table": slope_table,
         "aspect_table": aspect_table,
         "footer": build_footer(terrain.retrieved_on),
+        "sources": build_sources(terrain),
+        "methods": build_methods(terrain, derived),
         "derived": derived,
         # For tests and diagnostics, not the template.
         "contours": {k: v for k, v in contours.items() if k != "levels"},

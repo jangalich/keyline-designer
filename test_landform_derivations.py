@@ -32,9 +32,13 @@ session, so every product below is read the way the report job reads it.
      the profile's valley first, dashes for a valley without a keypoint.
   7. The section's words: the keypoint count as a rule (n keypoints, m on
      the property, k just outside within so many feet), the valley table
-     and its caption, the nine key figures; and on the synthetic parcel
+     and its caption, the nine key figures, the structure map's hierarchy
+     and labels, the sources and methods; and on the synthetic parcel
      with no keypoint at all, the plain statement that there is no
      keyline. No water or storage language anywhere in the section.
+  8. The report on the real terrain through WeasyPrint: six pages, the
+     three Landform pages in order, no box past the measure, the captions
+     and the continuation eyebrows on the page.
 """
 
 import math
@@ -57,6 +61,7 @@ import terrain_reference_fixture as real  # noqa: E402
 import valley_delineation  # noqa: E402
 from landform_section import ZERO_DASH  # noqa: E402
 from raster_grid import pixel_center_xy  # noqa: E402
+from reference_fixture import REAL_BOUNDARY  # noqa: E402
 from site_report import TOKENS  # noqa: E402
 
 METERS_PER_FOOT = ls.METERS_PER_FOOT
@@ -282,7 +287,7 @@ assert list(figures) == ["lowest elevation", "highest elevation", "relief", "mea
 assert figures["keypoints detected"] == "3" and figures["valleys crossing the parcel"] == "3" and figures["ridges crossing the parcel"] == "3"
 assert figures["keyline length on the parcel"] == f"{round(total_ft):,} ft"
 table = SECTION["valley_table"]
-assert table["columns"] == ["Stem on parcel, ft", "Fall, ft", "Grade, %", "Keypoint, ft", "Grade above, %", "Grade below, %"]
+assert table["columns"] == ["Stem, ft", "Fall, ft", "Grade, %", "Keypoint, ft", "Above, %", "Below, %"] and table["corner"] == "Valley"
 assert [_text(r["label"]) for r in table["rows"]] == ["Valley 1", "Valley 2", "Valley 3"]
 for row, derived_row in zip(table["rows"], rows_):
     assert row["cells"][0] == f"{round(derived_row['length_m'] / METERS_PER_FOOT):,}"
@@ -292,7 +297,7 @@ assert table["rows"][0]["cells"][3] == "1,109" and table["rows"][0]["cells"][4:]
 caption = _text(SECTION["valley_table_caption"])
 assert "Valley 1's keypoint lies 64 ft outside the boundary." in caption
 profile_caption = _text(SECTION["profile"]["caption"])
-assert profile_caption.startswith("Valley 1, from its head") and "vertical exaggeration 3×" in profile_caption
+assert profile_caption.startswith("Valley 1, the full stem from its head") and "vertical exaggeration 3×" in profile_caption
 assert "64 ft outside the boundary" in profile_caption
 # The table with a valley lacking a keypoint reads dashes.
 dashed = ls.build_valley_table(none)
@@ -307,18 +312,33 @@ words = " ".join([
 ]).lower()
 for banned in ("water", "dam", "storage", "catchment", "irrigat", "harvest"):
     assert banned not in words, banned
-# The structure map: valleys in water, ridges dash-dot in terrain, keylines heaviest in ink with their
-# elevations, keypoints as dots -- the outside one in the muted ink.
+# The structure map, lightest context first: contours, ridges (terrain, long dash, lightest), valley STEMS
+# (water, dashed, no tributaries), keylines (ink, heaviest) with their elevations, keypoints as haloed dots --
+# the outside one in the muted ink, its keyline carried out to it. The hierarchy is explicit in the weights.
 structure = SECTION["structure_map"]["svg"]
-order = [structure.index(f'id="layer-{name}"') for name in ("contours", "valleys", "ridges", "keylines", "keypoints", "keypoints-outside")]
+structure_layers = ls.build_structure_layers(TERRAIN, report_map.parcel_contours(DEM, real.BOUNDARY_POLYGON_UTM), DERIVED)
+order = [structure.index(f'id="layer-{name}"') for name in ("contours", "ridges", "valley-stems", "keylines", "keylines-outside", "keypoints", "keypoints-outside")]
 assert order == sorted(order)
+assert "layer-valleys" not in structure, "tributaries are not drawn on the keyline map"
+weights = {l["id"]: l["stroke_width"] for l in structure_layers}
+assert weights["keylines"] > weights["index-contours"] > weights["valley-stems"] > weights["contours"] > weights["ridges"], weights
+stem_layer = [l for l in structure_layers if l["id"] == "valley-stems"][0]
+assert stem_layer["stroke"] == "water" and stem_layer["dash"] and stem_layer["labels"] == ["1", "2", "3"]
+assert all(g.within(real.BOUNDARY_POLYGON_UTM.buffer(0.01)) for g in stem_layer["geometries"])
+assert abs(stem_layer["geometries"][1].length - rows_[1]["length_m"]) < 1e-6, "the drawn stem is the measured stem"
+ridge_layer = [l for l in structure_layers if l["id"] == "ridges"][0]
+assert ridge_layer["stroke"] == "terrain" and ridge_layer["dash"] == ls.RIDGE_DASH and ls.RIDGE_STROKE_PT < report_map.CONTOUR_STROKE_PT
+index_layer = [l for l in structure_layers if l["id"] == "index-contours"][0]
+assert index_layer["labels"] is None, "contour elevations are on the terrain map at the same extent"
+assert SECTION["structure_map"]["labels_placed"]["valley-stems"] == [False, True, True], "valley 1's 14 m stem cannot carry its number and drops it"
+assert SECTION["structure_map"]["meters_per_unit"] == SECTION["map"]["meters_per_unit"]
+assert SECTION["structure_map"]["drawn_bbox"] == SECTION["map"]["drawn_bbox"], "the two maps share extent and scale"
 keyline_group = structure.split('<g id="layer-keylines">', 1)[1].split("</g>", 1)[0]
 assert f'stroke="{TOKENS["ink"]}"' in keyline_group and f'stroke-width="{ls.KEYLINE_STROKE_PT:.2f}"' in keyline_group
-# Every keyline carries its elevation as a label; the renderer sets a label only where the line has room for
-# it clear of the keypoint's dot (the keyline is split at its keypoint so a label never lands on the dot), and on
-# this parcel the two short keylines (89 and 84 m) cannot carry theirs -- a legibility finding for phase 2, not
-# something to hide here.
-structure_layers = ls.build_structure_layers(TERRAIN, report_map.parcel_contours(DEM, real.BOUNDARY_POLYGON_UTM), DERIVED)
+# Every keyline carries its elevation as a label; the renderer sets a label in the line only where the line has
+# room for it clear of the keypoint's dot (the keyline is split at its keypoint so a label never lands on the
+# dot). On this parcel the two short keylines (89 and 84 m) cannot carry theirs, so their elevations are set
+# beside the dots.
 keyline_layer = [l for l in structure_layers if l["id"] == "keylines"][0]
 assert keyline_layer["labels"] == ["1,173", "1,094", "1,109"]
 for g, k in zip(keyline_layer["geometries"], DERIVED.keylines):
@@ -327,13 +347,24 @@ for g, k in zip(keyline_layer["geometries"], DERIVED.keylines):
         assert len(_parts(g)) >= 2 and min(e.distance(by_keypoint[k["keypoint_id"]]["point_utm"]) for e in endpoints) < 0.2, "split at the keypoint"
 placed = set(re.findall(r">([\d,]+)</text>", keyline_group))
 assert placed == {"1,109"}, placed
+assert SECTION["structure_map"]["labels_placed"]["keylines"] == [False, False, True]
+# ...so those two elevations are set beside their keypoints' dots instead, and 1,109's is not.
+keypoint_layer = [l for l in structure_layers if l["id"] == "keypoints"][0]
+assert keypoint_layer["labels"] == ["1,173", "1,094"] and [l for l in structure_layers if l["id"] == "keypoints-outside"][0]["labels"] == [None]
 reach_group = structure.split('<g id="layer-keylines-outside">', 1)[1].split("</g>", 1)[0]
 assert f'stroke="{TOKENS["ink-muted"]}"' in reach_group, "the outside keypoint's keyline reaches it in the muted ink"
 outside_group = structure.split('<g id="layer-keypoints-outside">', 1)[1].split("</g>", 1)[0]
-assert outside_group.count("<circle") == 1 and f'fill="{TOKENS["ink-muted"]}"' in outside_group
+assert outside_group.count("<circle") == 2 and f'fill="{TOKENS["ink-muted"]}"' in outside_group, "one dot: a halo and a fill"
 on_group = structure.split('<g id="layer-keypoints">', 1)[1].split("</g>", 1)[0]
-assert on_group.count("<circle") == 2 and f'fill="{TOKENS["ink"]}"' in on_group
-assert 'stroke-opacity="0.55"' in structure.split('<g id="layer-contours">', 1)[1].split("</g>", 1)[0]
+assert on_group.count("<circle") == 4 and f'fill="{TOKENS["ink"]}"' in on_group and on_group.count(f'fill="{TOKENS["page"]}"') == 2
+assert {"1,173", "1,094"} == set(re.findall(r">([\d,]+)</text>", on_group)) and "<text" not in outside_group
+caption_text = _text(SECTION["structure_caption"])
+assert caption_text.startswith("A keyline is the contour through its keypoint") and caption_text.endswith(statement)
+# The sources line and the methods entry the Site overview will render.
+assert SECTION["sources"] == [["USGS 3DEP elevation, 1/3 arc-second, resampled to 5 m, retrieved " + ls.format_retrieved_on(TERRAIN.retrieved_on) + "."]]
+methods = SECTION["methods"]
+assert len(methods) == 1 and methods[0]["source"] == "USGS 3DEP" and methods[0]["citation"] == ls.CITATION_3DEP
+assert len(methods[0]["notes"]) == 6 and any("No keypoint, no keyline" in n for n in methods[0]["notes"])
 
 # The synthetic parcel: valleys but no keypoint anywhere -> no keyline, said plainly.
 with synthetic.Harness():
@@ -343,13 +374,59 @@ with synthetic.Harness():
 assert synthetic_terrain.keypoints == []
 assert _text(synthetic_section["keypoint_statement"]) == "No keypoint was found on this property, so there is no keyline to draw."
 assert synthetic_section["derived"].keylines == [] and "layer-keylines" not in synthetic_section["structure_map"]["svg"]
+assert "layer-keypoints" not in synthetic_section["structure_map"]["svg"] and "layer-valley-stems" in synthetic_section["structure_map"]["svg"]
 assert {f["label"]: f["value"] for f in synthetic_section["key_figures"]}["keypoints detected"] == "0"
 assert {f["label"]: f["value"] for f in synthetic_section["key_figures"]}["keyline length on the parcel"] == "0 ft"
 synthetic_profile = synthetic_section["profile"]
 assert synthetic_profile["chart"] is not None and synthetic_profile["chart"]["keypoint_xy"] is None
 assert "No keypoint was found on this valley, so no grades are marked and it has no keyline." in _text(synthetic_profile["caption"])
+assert "The parcel is the short reach between the ticks, 45 ft of it." in profile_caption, profile_caption
 assert all(r["cells"][3:] == [ZERO_DASH] * 3 for r in synthetic_section["valley_table"]["rows"])
 print(f"   \"{statement}\"; synthetic parcel: \"{_text(synthetic_section['keypoint_statement'])}\"")
+
+# ======================================================================
+# 8. The pages, on the real terrain
+# ======================================================================
+print("8. the report on the real terrain: six pages, the three Landform pages in order, nothing past the measure")
+import os  # noqa: E402
+from datetime import date  # noqa: E402
+
+import report_layout  # noqa: E402
+import site_report  # noqa: E402
+from daymet_data import parse_daymet_csv  # noqa: E402
+from report_data import report_data_from_daily  # noqa: E402
+from weasyprint import HTML  # noqa: E402
+
+with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "daymet_reference_fixture.csv"), encoding="utf-8") as handle:
+    DATA = report_data_from_daily(REAL_BOUNDARY, parse_daymet_csv(handle.read()))
+html = site_report.render_site_report_html(DATA, generated_on=date(2026, 9, 22), terrain=TERRAIN)
+document = HTML(string=html, base_url=site_report.TEMPLATES_DIRECTORY).render()
+assert len(document.pages) == 6, len(document.pages)
+assert report_layout.overflowing_boxes(document) == []
+
+
+def _walk(box):
+    yield box
+    for child in getattr(box, "children", []) or []:
+        yield from _walk(child)
+
+
+def _classes(page):
+    return {(b.element.get("class") or "").split()[0] for b in _walk(page._page_box)
+            if getattr(b, "element", None) is not None and b.element.get("class")}
+
+
+pages = document.pages
+assert {"heading", "summary", "report-map"} <= _classes(pages[3]) and "key-figures" not in _classes(pages[3])
+assert {"report-map", "report-chart", "caption"} <= _classes(pages[4]) and "data-table" not in _classes(pages[4])
+assert {"key-figures", "data-table", "source-footer"} <= _classes(pages[5]) and "report-map" not in _classes(pages[5])
+flat = "".join("".join(b.text for b in _walk(p._page_box) if type(b).__name__ == "TextBox") for p in pages[3:])
+squash = "".join(flat.split())
+for expected in ("3keypoints:2onthepropertyand1justoutsidetheboundary", "verticalexaggeration3×", "Valley1'skeypointlies64ftoutside",
+                 "III·LANDFORM,CONTINUED", "Keylines,elevationinft"):
+    assert expected in squash, expected
+assert squash.count("III·LANDFORM,CONTINUED") == 2
+print("   6 pages; pages 4-6 are the terrain, the structure and the numbers; the captions read on the page")
 
 print("\ntest_landform_derivations.py: all sections passed")
 print(offline_harness.summary())

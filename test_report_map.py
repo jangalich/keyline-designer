@@ -250,7 +250,7 @@ for t in labels:
     angle = float(t.getAttribute("transform")[len("rotate("):].split()[0])
     assert -90 < angle <= 90, angle
 # A label on a layer that is not a line, or a count that does not match, is refused.
-for bad in (dict(kind="point", labels=["x"]), dict(kind="line", labels=["a", "b"])):
+for bad in (dict(kind="polygon", labels=["x"]), dict(kind="line", labels=["a", "b"])):
     try:
         layer("bad", [Point(0, 0)], stroke="ink", **bad)
     except ValueError:
@@ -270,9 +270,27 @@ dotted = render_map(
 )
 dot_group = [g for g in minidom.parseString(dotted["svg"]).documentElement.getElementsByTagName("g") if g.getAttribute("id") == "layer-dots"][0]
 circles = dot_group.getElementsByTagName("circle")
-assert len(circles) == 1 and circles[0].getAttribute("fill") == TOKENS["ink-muted"] and not dot_group.getElementsByTagName("line")
-assert float(circles[0].getAttribute("r")) == report_map.DOT_RADIUS_PT
+# A halo in the page colour under the dot, so it reads as a point on a line rather than a thickening of it.
+assert len(circles) == 2 and not dot_group.getElementsByTagName("line")
+assert circles[0].getAttribute("fill") == TOKENS["page"] and float(circles[0].getAttribute("r")) == report_map.DOT_RADIUS_PT + report_map.DOT_HALO_PT
+assert circles[1].getAttribute("fill") == TOKENS["ink-muted"] and float(circles[1].getAttribute("r")) == report_map.DOT_RADIUS_PT
 assert "<circle" in dotted["legend"][0]["swatch"] and "<line" not in dotted["legend"][0]["swatch"]
+# A point layer's labels are set beside the marker, in the data face, in the layer's own token; None sets nothing.
+labelled_points = render_map(
+    BOUNDARY_POLYGON_UTM,
+    [layer("pts", [Point(minx + 100, miny + 100), Point(maxx - 100, maxy - 100)], kind="point", stroke="ink", marker="dot", labels=["1,173", None])],
+    TOKENS,
+)
+pts_texts = [t for t in minidom.parseString(labelled_points["svg"]).documentElement.getElementsByTagName("text")
+             if t.parentNode.getAttribute("id") == "layer-pts"]
+assert [t.firstChild.data for t in pts_texts] == ["1,173"] and pts_texts[0].getAttribute("font-family") == "IBM Plex Mono"
+assert pts_texts[0].getAttribute("fill") == TOKENS["ink"] and pts_texts[0].getAttribute("text-anchor") == "start"
+assert labelled_points["labels_placed"] == {}, "point labels always fit; only line layers report placements"
+# A labelled line layer reports which labels were set, by the same rule the renderer applies.
+assert full["labels_placed"] == {"index-contours": report_map.label_placements(BOUNDARY_POLYGON_UTM, index_layer)}
+assert any(full["labels_placed"]["index-contours"]) and len(full["labels_placed"]["index-contours"]) == len(index_layer["labels"])
+short = layer("short", [LineString([(minx + 10, miny + 10), (minx + 12, miny + 12)])], kind="line", stroke="ink", labels=["1,000"])
+assert report_map.label_placements(BOUNDARY_POLYGON_UTM, short) == [False], "a part too short to carry its label drops it"
 faint_group = dotted["svg"].split('<g id="layer-faint">', 1)[1].split("</g>", 1)[0]
 assert 'stroke-opacity="0.55"' in faint_group and "stroke-opacity" not in svg, "opacity only when set back"
 try:

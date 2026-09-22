@@ -27,10 +27,10 @@ the pages.
      legend entry.
   6. the pages: the cover carries the acreage; every colour literal in the
      stylesheet, the templates, the renderer and the section builder is in
-     site_report.TOKENS; figures before detail (three pages while the nine
-     key figures overflow the two-page template, until branch 8 phase 2
-     lays the section out); decimal alignment measured in both tables; the
-     footer's two lines; Climate still renders.
+     site_report.TOKENS; the three-page rule (the terrain, the keyline
+     structure, the numbers) with the continuation eyebrow on the follow-on
+     pages; decimal alignment measured in all three tables; the two maps at
+     one extent and scale; the footer's two lines; Climate still renders.
 """
 
 import os
@@ -342,8 +342,10 @@ html = site_report.render_site_report_html(DATA, generated_on=GENERATED_ON, terr
 assert f'<p class="cover__acres"><span class="data">{COVER_ACRES:.1f}</span> acres</p>' in html
 assert 'class="section section--landform section--map"' in html and 'class="section section--climate section--chart"' in html
 assert '<div class="section__figures">' in html and '<div class="section__detail">' in html
-assert 'class="data-table data-table--compact"' in html and html.count('class="data-table"') == 2  # aspect + Climate
-assert html.index("section--climate") < html.index("section--landform"), "outline order"
+assert 'class="data-table data-table--compact"' in html and html.count('class="data-table"') == 3  # aspect + valley + Climate
+assert html.count("Landform, continued") == 2, "the structure page and the numbers page carry the continuation eyebrow"
+assert '<div class="section__structure">' in html
+assert html.index('class="section section--climate') < html.index('class="section section--landform'), "outline order"
 assert "III" in html and "Landform" in html
 # Colour literals: the stylesheet, every template, the renderer, the section builder -> only TOKENS.
 files = [report_map.__file__, landform_section.__file__, landform_derivations.__file__, report_chart.__file__]
@@ -364,9 +366,7 @@ from weasyprint import HTML  # noqa: E402
 
 document = HTML(string=html, base_url=site_report.TEMPLATES_DIRECTORY).render()
 pages = document.pages
-# Cover, Climate x2, Landform x3: since branch 8 phase 1 the nine key figures no longer fit under the map,
-# so the panel takes a page of its own until phase 2 lays the section out as three pages by design
-# (terrain map; keyline-structure map and profile; the numbers).
+# Cover, Climate x2, Landform x3: the terrain map; the keyline-structure map and the profile; the numbers.
 assert len(pages) == 6, len(pages)
 import report_layout  # noqa: E402
 assert report_layout.overflowing_boxes(document) == [], "a box past the page's content width"
@@ -401,25 +401,37 @@ def _classes_on(page):
     }
 
 
-assert {"report-map", "summary", "heading"} <= _classes_on(pages[3]), _classes_on(pages[3])
-assert not _tables(pages[3]) and not _tables(pages[4]), "no table on the figures pages"
-assert "key-figures" in _classes_on(pages[4]), "the nine figures overflow to their own page (see above)"
-assert {"data-table", "source-footer"} <= _classes_on(pages[5])
-assert "key-figures" not in _classes_on(pages[5]) and "report-map" not in _classes_on(pages[5])
+# THE THREE-PAGE RULE: the terrain (heading, summary, map); the structure (a second map, its caption, the
+# profile chart and its caption); the numbers (key figures, three tables, the footer).
+assert {"report-map", "summary", "heading", "eyebrow"} <= _classes_on(pages[3]), _classes_on(pages[3])
+assert not ({"key-figures", "report-chart", "data-table"} & _classes_on(pages[3]))
+assert {"report-map", "report-chart", "caption", "eyebrow"} <= _classes_on(pages[4]), _classes_on(pages[4])
+assert not ({"key-figures", "data-table", "heading", "summary"} & _classes_on(pages[4]))
+assert not _tables(pages[3]) and not _tables(pages[4]), "no table on the figure pages"
+assert {"key-figures", "data-table", "source-footer", "eyebrow"} <= _classes_on(pages[5])
+assert "report-map" not in _classes_on(pages[5]) and "report-chart" not in _classes_on(pages[5])
 landform_tables = _tables(pages[5])
-assert len(landform_tables) == 2, len(landform_tables)
-# The compact table is narrower than the measure; the aspect table takes it.
-slope_box, aspect_box = landform_tables
+assert len(landform_tables) == 3, len(landform_tables)
+# The compact table is narrower than the measure; the aspect and valley tables take it.
+slope_box, aspect_box, valley_box = landform_tables
 assert slope_box.width < 0.8 * aspect_box.width, (slope_box.width, aspect_box.width)
-slope_cells, aspect_cells = (_numeric_cells(t) for t in landform_tables)
-# 3 per class row + 2 in the total row; 18 in the aspect table.
+assert abs(valley_box.width - aspect_box.width) < 1.0
+slope_cells, aspect_cells, valley_cells = (_numeric_cells(t) for t in landform_tables)
+# 3 per class row + 2 in the total row; 18 in the aspect table; 6 per valley row.
 assert len(slope_cells) == 3 * len(slope_table["classes"]) + 2, len(slope_cells)
 assert len(aspect_cells) == 18, len(aspect_cells)
+valley_table = SECTION["valley_table"]
+assert len(valley_cells) == 6 * len(valley_table["rows"]) and len(valley_table["rows"]) == 2, "the synthetic parcel's two valleys"
 landform_cells = slope_cells + aspect_cells
-# Right edges: every cell in a column shares one -- 3 columns, then 9.
-for cells, expected in ((slope_cells, 3), (aspect_cells, 9)):
+# Right edges: every cell in a column shares one -- 3 columns, then 9, then 6.
+for cells, expected in ((slope_cells, 3), (aspect_cells, 9), (valley_cells, 6)):
     edges = {right for right, _, _ in cells}
     assert len(edges) == expected, (expected, sorted(edges))
+# The valley table: whole feet in the stem, fall and keypoint columns, one decimal in the grades, dashes for
+# a valley without a keypoint (the synthetic parcel has none).
+for row in valley_table["rows"]:
+    assert re.match(r"^\d{1,3}(,\d{3})*$", row["cells"][0]) and re.match(r"^\d{1,3}(,\d{3})*$", row["cells"][1])
+    assert re.match(r"^\d+\.\d$", row["cells"][2]) and row["cells"][3:] == [ZERO_DASH] * 3
 by_edge = {right for right, _, _ in slope_cells} | {right for right, _, _ in aspect_cells}
 # Tabular figures: one glyph advance across every numeric cell of both tables.
 advances = set()
@@ -445,6 +457,10 @@ assert "III·LANDFORM" in squash.upper() or "III" in squash
 # severe-weather table's 6 (this report data carries no Atlas 14 answer, so the design-storm table is a
 # statement, not cells).
 assert len(_numeric_cells(pages[2]._page_box)) == 108 + 6
+# The two maps share extent and scale, so a feature sits at the same place on both pages.
+assert SECTION["structure_map"]["meters_per_unit"] == SECTION["map"]["meters_per_unit"]
+assert SECTION["structure_map"]["drawn_bbox"] == SECTION["map"]["drawn_bbox"]
+assert SECTION["structure_map"]["scale_bar"] == SECTION["map"]["scale_bar"]
 print(f"   6 pages; {len(landform_cells)} Landform numeric cells in 3 + 9 columns, one glyph advance "
       f"{advances.pop()} pt; literals only in TOKENS across {len(files) + 1} files")
 

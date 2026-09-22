@@ -112,7 +112,9 @@ CONTOUR_STROKE_PT = 0.45
 INDEX_CONTOUR_STROKE_PT = 0.95
 FRAME_STROKE_PT = 0.5
 ASTERISK_RADIUS_PT = 3.2
-DOT_RADIUS_PT = 1.8
+DOT_RADIUS_PT = 2.4
+DOT_HALO_PT = 1.1          # a page-coloured ring so a dot on a line reads as a point, not a thickening
+POINT_LABEL_GAP_PT = 3.0
 
 # Type, in points. The prose face for names, the data face for figures.
 FONT_PROSE = "Source Serif 4"
@@ -165,7 +167,8 @@ def layer(
     string (prose), or a list of summary-style parts (a string is prose, a
     {"value": ...} mapping is a measurement) -- or None for a layer that
     draws without an entry. `labels`, for a line layer, is one string or
-    None per geometry, set along the line with the line broken behind it.
+    None per geometry, set along the line with the line broken behind it;
+    for a point layer, one string or None per point, set beside the marker.
     `marker`, for a point layer, is "asterisk" (the layout map's keypoint
     convention) or "dot" (a small filled circle in the stroke token, for a
     point that sits where two lines meet). `stroke_opacity` below 1 sets
@@ -176,8 +179,8 @@ def layer(
     if marker not in ("asterisk", "dot"):
         raise ValueError(f"marker must be asterisk or dot, got {marker!r}")
     if labels is not None:
-        if kind != "line":
-            raise ValueError("labels are drawn along lines only")
+        if kind == "polygon":
+            raise ValueError("labels are drawn along lines or beside points, never on polygons")
         if len(labels) != len(geometries):
             raise ValueError("labels must be one per geometry")
     return {
@@ -467,15 +470,23 @@ def _asterisk(cx: float, cy: float, radius: float, stroke: str, width: float) ->
     return "".join(lines)
 
 
-def _dot(cx: float, cy: float, radius: float, fill: str) -> str:
-    """The keyline-structure convention: a small filled circle."""
-    return f'<circle cx="{_fmt(cx)}" cy="{_fmt(cy)}" r="{_fmt(radius)}" fill="{fill}" stroke="none"/>'
+def _dot(cx: float, cy: float, radius: float, fill: str, halo: str) -> str:
+    """The keyline-structure convention: a small filled circle with a
+    page-coloured halo, so it reads as a point sitting on a line."""
+    return (
+        f'<circle cx="{_fmt(cx)}" cy="{_fmt(cy)}" r="{_fmt(radius + DOT_HALO_PT)}" fill="{halo}" stroke="none"/>'
+        f'<circle cx="{_fmt(cx)}" cy="{_fmt(cy)}" r="{_fmt(radius)}" fill="{fill}" stroke="none"/>'
+    )
 
 
-def _marker(spec: dict, x: float, y: float, stroke: str) -> str:
+def _marker(spec: dict, x: float, y: float, stroke: str, tokens: dict) -> str:
     if spec.get("marker") == "dot":
-        return _dot(x, y, DOT_RADIUS_PT, stroke)
+        return _dot(x, y, DOT_RADIUS_PT, stroke, _colour(tokens, "page"))
     return _asterisk(x, y, ASTERISK_RADIUS_PT, stroke, spec["stroke_width"])
+
+
+def _marker_radius(spec: dict) -> float:
+    return DOT_RADIUS_PT + DOT_HALO_PT if spec.get("marker") == "dot" else ASTERISK_RADIUS_PT
 
 
 def _colour(tokens: dict, name: Optional[str]) -> str:
@@ -520,7 +531,13 @@ def _layer_svg(spec: dict, projection, tokens: dict) -> str:
             points = list(geometry.geoms) if isinstance(geometry, MultiPoint) else [geometry]
             for point in points:
                 x, y = projection.xy(point.x, point.y)
-                pieces.append(_marker(spec, x, y, stroke))
+                pieces.append(_marker(spec, x, y, stroke, tokens))
+                if label:
+                    # Beside and a little above the marker, so the text clears a line running through it.
+                    pieces.append(_text(
+                        x + _marker_radius(spec) + POINT_LABEL_GAP_PT, y - _marker_radius(spec) * 0.6, label,
+                        font=FONT_DATA, size=LINE_LABEL_SIZE_PT, fill=stroke, anchor="start",
+                    ))
             continue
         d = _geometry_path(geometry, projection)
         if not d:
@@ -603,11 +620,27 @@ def _swatch(spec: dict, tokens: dict) -> str:
             f'stroke="{stroke}" stroke-width="{_fmt(spec["stroke_width"])}"{dash}/>'
         )
     else:
-        body = _marker(spec, w / 2, h / 2, stroke)
+        body = _marker(spec, w / 2, h / 2, stroke, tokens)
     return (
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{_fmt(w)}pt" height="{_fmt(h)}pt" '
         f'viewBox="0 0 {_fmt(w)} {_fmt(h)}" class="report-map__swatch">{body}</svg>'
     )
+
+
+def label_placements(boundary_polygon_utm, spec: dict, frame: tuple = FRAME) -> list:
+    """For a labelled line layer, whether each geometry's label will be
+    set (True) or dropped for want of a part long enough to carry it
+    clear of the line either side (False) -- the same rule _labelled_line
+    applies at render time, so a caller can put the label elsewhere."""
+    projection = _Projection(boundary_polygon_utm.bounds, frame, MARGIN_PT, FURNITURE_BAND_PT)
+    placed = []
+    for geometry, label in zip(spec["geometries"], spec.get("labels") or []):
+        if not label or geometry is None or geometry.is_empty or spec["kind"] != "line":
+            placed.append(False)
+            continue
+        _, placement = _labelled_line(geometry, label, projection, LINE_LABEL_SIZE_PT)
+        placed.append(placement is not None)
+    return placed
 
 
 def legend_entries(layers: list, tokens: dict) -> list:
@@ -634,7 +667,8 @@ def render_map(boundary_polygon_utm, layers: list, tokens: dict, frame: tuple = 
          'extent_utm': (minx, miny, maxx, maxy),
          'drawn_bbox': (x0, y0, x1, y1),  # where the boundary's bbox landed
          'scale_bar': {'feet': int, 'units': float},
-         'legend': legend_entries(layers, tokens)}
+         'legend': legend_entries(layers, tokens),
+         'labels_placed': {layer id: [bool per geometry]}}   # labelled line layers
 
     Layers draw in the order given, under the boundary; the boundary, the
     north arrow and the scale bar draw last. The frame's outline is a
@@ -676,4 +710,8 @@ def render_map(boundary_polygon_utm, layers: list, tokens: dict, frame: tuple = 
         "drawn_bbox": projection.drawn_bbox,
         "scale_bar": scale_bar,
         "legend": legend_entries(layers, tokens),
+        "labels_placed": {
+            spec["id"]: label_placements(boundary_polygon_utm, spec, frame)
+            for spec in layers if spec["kind"] == "line" and spec.get("labels")
+        },
     }

@@ -238,7 +238,7 @@ for text in doc.documentElement.getElementsByTagName("text"):
     elif text.firstChild.data[0].isdigit():
         assert text.getAttribute("font-family") == "IBM Plex Mono", text.firstChild.data
 legend = ["".join(p if isinstance(p, str) else p["value"] for p in e["parts"]) for e in profile["legend"]]
-assert legend == ["valley floor", "keypoint"] and "<circle" in profile["legend"][1]["swatch"]
+assert legend == ["valley stem", "keypoint"] and "<circle" in profile["legend"][1]["swatch"]
 # No keypoint: the line alone, no dot, no grades, one legend entry.
 bare = render_valley_profile(dict(PROFILE, keypoint=None, crossings=[]), TOKENS)
 assert bare["keypoint_xy"] is None and "<circle" not in bare["svg"] and "above" not in bare["svg"]
