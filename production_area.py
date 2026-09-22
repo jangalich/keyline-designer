@@ -200,7 +200,7 @@ MIN_PRODUCTION_AREA_ACRES = 0.5
 #
 # RADII TUNING CAVEAT (applies to this constant, RENDER_OPENING_RADIUS_METERS,
 # and RENDER_LEAD_ERODE_CELLS below): these radii were tuned against two
-# boundaries of a single ~16-acre reference property. The working window is
+# boundaries of a single 13.23-acre reference property. The working window is
 # narrow -- 24 m was the only swept value at which BOTH boundaries produced two
 # zones, with 18 m under-detecting and 30 m over-splitting on both. A fixed
 # metre value may not hold across parcel sizes: a 3-acre parcel and a 30-acre

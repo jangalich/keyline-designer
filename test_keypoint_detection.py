@@ -25,7 +25,13 @@ Verification map (task's numbered list):
       slope-dropping split is chosen instead.
   5.  One per valley: a multi-tributary valley yields exactly one keypoint.
   6.  Boundary margin: keypoints 10 m and 20 m outside a boundary are kept
-      and flagged; 60 m outside is dropped.
+      and flagged; at 60 m the terrain's own split is inadmissible and is not
+      chosen, and no returned keypoint ever sits past the margin.
+  6b. The margin constrains the CHOICE, not just the result: with the
+      terrain's best split outside it, the constrained fit returns the
+      lowest-residual ADMISSIBLE split rather than nothing. And a valley with
+      no stem cell within the margin is dropped before it is profiled,
+      counted as rejected_valley_off_margin.
   7.  Short stem: a valley whose stem is shorter than 2*MIN_RUN+2 returns no
       keypoint, no exception.
   8.  Empty result is honest: a DEM with no primary valley returns [].
@@ -422,11 +428,12 @@ print(
 
 
 # ============================================================================
-# TEST 6 -- Boundary margin: 10 m and 20 m kept and flagged; 60 m dropped.
+# TEST 6 -- Boundary margin: 10 m and 20 m kept and flagged; at 60 m the
+# terrain's own split is never chosen, and nothing outside the margin is
+# EVER returned.
 #
-# The keypoint location is fixed by terrain (independent of the boundary,
-# which only feeds the margin gate). Find it once, then place boundaries whose
-# nearest edge is 10 m, 20 m, and 60 m from it.
+# The unconstrained keypoint location is fixed by terrain. Find it once, then
+# place boundaries whose nearest edge is 10 m, 20 m, and 60 m from it.
 #
 # FIXTURE CORRECTED BY THE EPSILON-FILL BRANCH. This test used to borrow
 # TEST 1's DEM, which no longer yields a keypoint at all: the epsilon fill
@@ -436,6 +443,16 @@ print(
 # valley with a keypoint in it -- so it now builds TEST 1's DEM WITHOUT the
 # bowl: the same profile and cross-section, pure landform, whose keypoint
 # lands at (24, 7), the profile's true steep-to-gentle inflection at row 24.
+#
+# EXPECTATION CORRECTED BY THE MARGIN-CONSTRAINS-THE-CHOICE BRANCH. The 60 m
+# case used to assert an EMPTY result: the fit picked (24, 7) regardless of
+# the boundary and the margin then threw the whole valley away. The margin is
+# now part of the choice, so the valley instead offers its best split from
+# among the admissible ones -- here (17, 7), sitting at exactly the 25 m
+# margin. The INVARIANT the gate exists for is unchanged and is what is
+# asserted now: nothing further than the margin is ever returned. The old
+# assertion tested the implementation's order of operations, not that
+# invariant, which is why it moved.
 # ============================================================================
 _arr6 = _v_valley(_rows1, _cols1, _profile1, cross=2.0)
 _dem6 = _dem(_arr6)
@@ -452,16 +469,123 @@ for _offset in (10.0, 20.0, 60.0):
     _res = detect_keypoints(_dem6, _bnd)
     _kept6[_offset] = _res
 
+# Inside the margin: the terrain's own split is returned, flagged and measured.
 assert len(_kept6[10.0]) == 1 and _kept6[10.0][0]["on_parcel"] is False
+assert tuple(_kept6[10.0][0]["rowcol"]) == (24, 7)
 assert abs(_kept6[10.0][0]["distance_outside_boundary_m"] - 10.0) < 0.01
 assert len(_kept6[20.0]) == 1 and _kept6[20.0][0]["on_parcel"] is False
+assert tuple(_kept6[20.0][0]["rowcol"]) == (24, 7)
 assert abs(_kept6[20.0][0]["distance_outside_boundary_m"] - 20.0) < 0.01
-assert _kept6[60.0] == [], "a keypoint 60 m outside the boundary (> 25 m margin) must be dropped"
+
+# Beyond it: (24, 7) is NOT returned, and whatever is returned is inside the
+# margin -- the gate's actual guarantee, asserted over every case at once.
+assert all(
+    tuple(_k["rowcol"]) != (24, 7) for _k in _kept6[60.0]
+), "the split 60 m outside the boundary must never be the one chosen"
+for _offset, _res in _kept6.items():
+    for _k in _res:
+        assert _k["distance_outside_boundary_m"] <= KEYPOINT_BOUNDARY_MARGIN_METERS + 1e-9, (
+            f"boundary {_offset} m away returned a keypoint "
+            f"{_k['distance_outside_boundary_m']} m outside, past the "
+            f"{KEYPOINT_BOUNDARY_MARGIN_METERS} m margin"
+        )
+_far6 = _kept6[60.0][0]
 print(
-    f"Test 6: on the bowl-free landform DEM the keypoint lands at {tuple(_kp6['rowcol'])} (row 24 is the "
-    "profile's true inflection). Kept at 10 m outside (on_parcel=False, distance="
+    f"Test 6: on the bowl-free landform DEM the unconstrained keypoint lands at {tuple(_kp6['rowcol'])} "
+    "(row 24 is the profile's true inflection). Kept at 10 m outside (on_parcel=False, distance="
     f"{_kept6[10.0][0]['distance_outside_boundary_m']} m) and at 20 m outside (distance="
-    f"{_kept6[20.0][0]['distance_outside_boundary_m']} m); dropped at 60 m outside (empty)."
+    f"{_kept6[20.0][0]['distance_outside_boundary_m']} m). With the boundary 60 m away row 24 is "
+    f"inadmissible and is not chosen; the valley offers {tuple(_far6['rowcol'])} instead, at "
+    f"{_far6['distance_outside_boundary_m']} m -- inside the {KEYPOINT_BOUNDARY_MARGIN_METERS} m margin, "
+    "which no returned keypoint in any case exceeds."
+)
+
+
+# ============================================================================
+# TEST 6b -- The margin constrains the CHOICE, and a valley wholly outside it
+# is dropped before it is ever profiled.
+#
+# TWO behaviours, one fixture, because they are two halves of one rule.
+#
+# (a) THE CHOICE. A boundary is placed so that the terrain's best split
+#     (24, 7) is outside the margin but admissible splits remain. The
+#     unconstrained fit and the constrained fit must disagree, and the
+#     constrained answer must be the best-fitting ADMISSIBLE split -- not
+#     merely some admissible split. Checked against two_segment_keypoint_split
+#     run directly over the same profile, so the assertion is on the choice
+#     rule itself and not on a hard-coded row.
+#
+# (b) THE VALLEY GATE. A boundary far enough away that NO stem cell is within
+#     the margin returns nothing, and says so as rejected_valley_off_margin
+#     rather than as rejected_off_margin: delineate_valleys() runs on the
+#     buffered DEM, so a valley in the window that never comes near the drawn
+#     boundary has nothing to say about this property, and the diagnostics
+#     distinguish "not this parcel's valley" from "this parcel's valley, but
+#     its inflections are all too far out".
+# ============================================================================
+_stem6b = kd.trace_stem_from_outlet(
+    delineate_valleys(_dem6)[0],
+    kd.build_upstream_map(*_flow(_dem6)[1:3]),
+    _flow(_dem6)[3],
+)
+_dist6b, _elev6b, _slope6b = kd._profile_along_stem(
+    _stem6b, _dem6["array"], _dem6, KEYPOINT_PROFILE_SMOOTH_CELLS
+)
+_bnd6b = box(_P6.x - 100.0, _P6.y + 60.0, _P6.x + 100.0, _P6.y + 360.0)
+_margin6b = kd._stem_boundary_margin(_stem6b, _dem6, _bnd6b)
+
+
+def _admissible6b(index):
+    _point, _on, _out = _margin6b[index]
+    return _on or _out <= KEYPOINT_BOUNDARY_MARGIN_METERS
+
+
+_free6b = two_segment_keypoint_split(
+    _dist6b, _elev6b, _slope6b, KEYPOINT_MIN_RUN_CELLS, KEYPOINT_MIN_SLOPE_DROP_PCT
+)
+_held6b = two_segment_keypoint_split(
+    _dist6b, _elev6b, _slope6b, KEYPOINT_MIN_RUN_CELLS, KEYPOINT_MIN_SLOPE_DROP_PCT,
+    position_is_eligible=_admissible6b,
+)
+assert _free6b is not None and _held6b is not None
+assert _free6b[0] != _held6b[0], "the fixture must make the two fits disagree, or it proves nothing"
+assert not _admissible6b(_free6b[0]), "the unconstrained winner must be the inadmissible one"
+assert _admissible6b(_held6b[0])
+# The constrained winner is the LOWEST-residual admissible split, not just any.
+_best_admissible6b = min(
+    (
+        two_segment_keypoint_split(
+            _dist6b, _elev6b, _slope6b, KEYPOINT_MIN_RUN_CELLS, KEYPOINT_MIN_SLOPE_DROP_PCT,
+            position_is_eligible=lambda i, _k=_k6: i == _k,
+        )
+        for _k6 in range(len(_elev6b))
+        if _admissible6b(_k6)
+    ),
+    key=lambda _s: float("inf") if _s is None else _s[4],
+)
+assert _held6b[0] == _best_admissible6b[0], (
+    f"constrained fit chose split {_held6b[0]} (residual {_held6b[4]:.4f}) but the best "
+    f"admissible split is {_best_admissible6b[0]} (residual {_best_admissible6b[4]:.4f})"
+)
+assert tuple(_stem6b[_held6b[0]]) == tuple(detect_keypoints(_dem6, _bnd6b)[0]["rowcol"])
+
+_diag6b = {}
+_far_boundary6b = box(_P6.x - 100.0, _P6.y + 500.0, _P6.x + 100.0, _P6.y + 800.0)
+_none6b = detect_keypoints(_dem6, _far_boundary6b, diagnostics=_diag6b)
+assert _none6b == [], _none6b
+assert _diag6b["rejected_valley_off_margin"] == 1, _diag6b
+assert _diag6b["rejected_off_margin"] == 0, (
+    "a valley with no stem cell near the boundary is dropped as a valley, not as a split: "
+    f"{_diag6b}"
+)
+assert _diag6b["rejected_no_slope_drop"] == 0, _diag6b
+print(
+    f"Test 6b: with the boundary 60 m out the unconstrained fit picks split {_free6b[0]} "
+    f"(inadmissible, {_margin6b[_free6b[0]][2]:.1f} m outside) and the constrained fit picks "
+    f"{_held6b[0]} -- the lowest-residual admissible split of "
+    f"{sum(1 for _i in range(len(_elev6b)) if _admissible6b(_i))} cells within the margin, and the "
+    f"cell detect_keypoints returns. With the boundary 500 m out no stem cell is within the margin: "
+    f"[] returned, counted as rejected_valley_off_margin=1 (off_margin=0, no_slope_drop=0)."
 )
 
 
