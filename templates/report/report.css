@@ -292,6 +292,20 @@ th.num {
   border-bottom: 0.75pt solid var(--rule);
 }
 
+/* 7. Map -- report_map.render_map()'s SVG, full content width. The SVG
+   carries its own fonts and colours as attributes (WeasyPrint applies no
+   document CSS to SVG text); this only places the frame. */
+.report-map {
+  display: block;
+  margin: 0 0 var(--space-4) 0;
+  break-inside: avoid;
+}
+.report-map svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
 /* 6. Source footer -- the caveat, then the citation smaller */
 .source-footer {
   color: var(--ink-muted);

@@ -76,6 +76,11 @@ TOKENS = {
     "ink": "#2b2b26",
     "ink-muted": "#8a8477",
     "oxide": "#9c4a2f",
+    # NEW ON BRANCH 6, and the first terrain colour in the palette: the
+    # report map's contour lines and slope tints (report_map.py). A muted,
+    # warm brown between ink and oxide in tone -- a printed contour line,
+    # not a cartographic tan. Judged rendered on the Landform proof map.
+    "terrain": "#7a5c3a",
 }
 
 # --- fonts -------------------------------------------------------------

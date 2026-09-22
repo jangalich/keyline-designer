@@ -1,0 +1,7 @@
+{#- 7. MAP -- report_map.render_map()'s SVG, inlined. The SVG is the
+    renderer's own output over pipeline geometry and the token table; its
+    text is escaped inside the renderer, so it is marked safe here and
+    nowhere else. `map` is the render_map() result dict. -#}
+{% macro map(map) -%}
+<figure class="report-map">{{ map.svg | safe }}</figure>
+{%- endmacro %}

@@ -160,7 +160,7 @@ templates_dir = site_report.TEMPLATES_DIRECTORY
 template_files = []
 for root, _, files in os.walk(templates_dir):
     template_files += [os.path.join(root, f) for f in files]
-assert len(template_files) == 9, sorted(template_files)   # css, base, 6 components, 1 section
+assert len(template_files) == 10, sorted(template_files)   # css, base, 7 components, 1 section
 for path in template_files:
     with open(path, encoding="utf-8") as handle:
         hits = HEX.findall(handle.read())
@@ -176,6 +176,7 @@ assert sorted(inside) == sorted(site_report.TOKENS.values()), inside
 assert site_report.TOKENS == {
     "page": "#ffffff", "stock": "#f4f1ea", "rule": "#ddd6c8",
     "ink": "#2b2b26", "ink-muted": "#8a8477", "oxide": "#9c4a2f",
+    "terrain": "#7a5c3a",
 }
 # The rendered stylesheet declares each token once and reads colours only
 # through var().
