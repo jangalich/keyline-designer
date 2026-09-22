@@ -67,6 +67,9 @@ FULL_ONLY = (
     # Water layer failing alone, each building the bundled severe-weather
     # block. Measured at 20.3 s.
     "test_report_data.py",
+    # Branch 9 phase 2: two WeasyPrint renders of the nine-page report,
+    # the degraded one beside the full one. Measured at 11.7 s.
+    "test_water_section.py",
     "test_trees_step.py",
     "test_session_api.py",
     "test_session_manager.py",
