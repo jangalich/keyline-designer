@@ -2680,11 +2680,12 @@ assert any("times 12 of 12 declared layers" in line for line in _fetch_lines), _
 # THE SIXTH AND SEVENTH ARE THE REPORT-TIME DATA LAYER'S (report_data.py,
 # the site data report's own fetch layer), asked the same two questions
 # Layer 1 is asked: does its fetch call time_layer, and does it time every
-# layer REPORT_FETCH_LAYERS declares. One layer today; a second added
-# without a timer would read "1 of 2" and fail here.
+# layer REPORT_FETCH_LAYERS declares. Three layers since branch 7 (Daymet,
+# Atlas 14, POWER wind; the station ratios are bundled, not fetched); a
+# fourth added without a timer would read "3 of 4" and fail here.
 assert any("report_data.fetch_report_data calls time_layer" in line for line in _fetch_lines), _fetch_lines
 assert any(
-    "report_data.fetch_report_data times 1 of 1 declared report layers" in line for line in _fetch_lines
+    "report_data.fetch_report_data times 3 of 3 declared report layers" in line for line in _fetch_lines
 ), _fetch_lines
 assert any("build_session_context calls begin_fetch" in line for line in _fetch_lines)
 assert any("build_session_context calls record_fetch" in line for line in _fetch_lines)

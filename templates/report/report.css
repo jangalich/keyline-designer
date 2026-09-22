@@ -195,6 +195,43 @@ th.num {
 .section--map .section__detail {
   break-before: page;
 }
+/* A SECTION WITH A CHART TAKES THE SAME TWO PAGES: the pictures and the
+   takeaway first, the numbers second (Climate). Its second page holds
+   nine key figures, a nine-row table, two compact tables, four captions
+   and five source lines, so the panel and the tables sit closer than
+   the map sections' do: the same components, tighter margins. */
+.section--chart .section__detail {
+  break-before: page;
+}
+.section--chart .key-figures {
+  padding: var(--space-3) var(--space-5);
+  margin-bottom: var(--space-3);
+}
+.section--chart .data-table {
+  margin-bottom: var(--space-2);
+}
+/* Thirteen columns must fit the measure: the monthly table's cells give
+   up a point and a half of side padding each. Measured, not guessed --
+   test_site_report.py holds every box inside the content width. */
+.section--chart .data-table th,
+.section--chart .data-table td {
+  padding: 2.5pt 4.5pt;
+}
+.section--chart .data-table thead th {
+  padding-top: var(--space-1);
+  padding-bottom: var(--space-1);
+}
+.section--chart .key-figures {
+  row-gap: var(--space-3);
+}
+.section--chart .caption {
+  margin-bottom: var(--space-2);
+}
+/* The two compact tables stack, design storms above severe weather,
+   each at its own content width: side by side they overran the measure. */
+.section--chart .data-table--compact {
+  margin-bottom: var(--space-1);
+}
 
 /* 1. Eyebrow */
 .eyebrow {
@@ -368,6 +405,49 @@ th.num {
   font-size: var(--text-eyebrow);
 }
 
+/* 8. Chart -- report_chart's SVG at full content width, then the same
+   legend strip the map uses. The legend strip is shorter than the map's:
+   a chart's legend is one row, and a chart without one takes no strip. */
+.report-chart {
+  display: block;
+  margin: 0 0 var(--space-1) 0;
+  break-inside: avoid;
+}
+.report-chart__frame svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+.report-chart__legend {
+  min-height: 13pt;
+  margin-top: var(--space-1);
+}
+
+/* 9. Caption -- one line under a figure or table: the one caveat that
+   could change a decision. Smaller than the footer, muted, italic like
+   the footer's caveat so the two read as one voice. */
+.caption {
+  font-size: var(--text-label);
+  font-style: italic;
+  line-height: 1.4;
+  color: var(--ink-muted);
+  margin: 0 0 var(--space-3) 0;
+  max-width: 6.4in;
+}
+.caption .data {
+  font-style: normal;
+  font-size: 7.5pt;
+}
+/* The statement that stands in a missing figure's place: the page's own
+   size and colour, so it reads as content, not as a note. */
+.unavailable {
+  font-size: var(--text-body);
+  line-height: 1.45;
+  color: var(--ink);
+  margin: 0 0 var(--space-4) 0;
+  max-width: 6.4in;
+}
+
 /* 6. Source footer -- the caveat, then the citation smaller */
 .source-footer {
   color: var(--ink-muted);
@@ -388,4 +468,7 @@ th.num {
 .source-footer .data {
   font-style: normal;
   font-size: 8pt;
+}
+.source-footer__line {
+  margin: 0 0 1.5pt 0;
 }

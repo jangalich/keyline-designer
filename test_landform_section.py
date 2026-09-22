@@ -327,7 +327,7 @@ print(f"   layers {ids}; ramp {opacities}; legend {legend}; keypoint asterisk ve
 print("6. the pages: cover acreage, colour literals, decimal alignment, the footer, Climate intact")
 html = site_report.render_site_report_html(DATA, generated_on=GENERATED_ON, terrain=TERRAIN)
 assert f'<p class="cover__acres"><span class="data">{COVER_ACRES:.1f}</span> acres</p>' in html
-assert 'class="section section--landform section--map"' in html and 'class="section section--climate"' in html
+assert 'class="section section--landform section--map"' in html and 'class="section section--climate section--chart"' in html
 assert '<div class="section__figures">' in html and '<div class="section__detail">' in html
 assert 'class="data-table data-table--compact"' in html and html.count('class="data-table"') == 2  # aspect + Climate
 assert html.index("section--climate") < html.index("section--landform"), "outline order"
@@ -351,7 +351,9 @@ from weasyprint import HTML  # noqa: E402
 
 document = HTML(string=html, base_url=site_report.TEMPLATES_DIRECTORY).render()
 pages = document.pages
-assert len(pages) == 4, len(pages)
+assert len(pages) == 5, len(pages)      # cover, Climate x2, Landform x2
+import report_layout  # noqa: E402
+assert report_layout.overflowing_boxes(document) == [], "a box past the page's content width"
 
 
 def _walk(box):
@@ -383,11 +385,11 @@ def _classes_on(page):
     }
 
 
-assert {"report-map", "key-figures", "summary", "heading"} <= _classes_on(pages[2]), _classes_on(pages[2])
-assert not _tables(pages[2]), "no table on the figures page"
-assert {"data-table", "source-footer"} <= _classes_on(pages[3])
-assert "key-figures" not in _classes_on(pages[3]) and "report-map" not in _classes_on(pages[3])
-landform_tables = _tables(pages[3])
+assert {"report-map", "key-figures", "summary", "heading"} <= _classes_on(pages[3]), _classes_on(pages[3])
+assert not _tables(pages[3]), "no table on the figures page"
+assert {"data-table", "source-footer"} <= _classes_on(pages[4])
+assert "key-figures" not in _classes_on(pages[4]) and "report-map" not in _classes_on(pages[4])
+landform_tables = _tables(pages[4])
 assert len(landform_tables) == 2, len(landform_tables)
 # The compact table is narrower than the measure; the aspect table takes it.
 slope_box, aspect_box = landform_tables
@@ -416,15 +418,17 @@ for right, text, box in landform_cells:
         continue
     assert "." in text and len(text) - text.index(".") == 2, text
 assert any(text == ZERO_DASH for _, text, _ in landform_cells), "the rendered aspect table shows dashes"
-flat = "".join("".join(b.text for b in _walk(p._page_box) if type(b).__name__ == "TextBox") for p in pages[2:])
+flat = "".join("".join(b.text for b in _walk(p._page_box) if type(b).__name__ == "TextBox") for p in pages[3:])
 squash = "".join(flat.split())
 assert "".join(landform_section.CAVEAT_LINE.split()) in squash
 assert "".join(("Source: USGS 3DEP elevation, resampled to 5 m · retrieved "
                 + landform_section.format_retrieved_on(TERRAIN.retrieved_on)).split()) in squash
 assert "III·LANDFORM" in squash.upper() or "III" in squash
-# Climate is untouched: its page still carries its 60 numeric cells.
-assert len(_numeric_cells(pages[1]._page_box)) == 60
-print(f"   4 pages; {len(landform_cells)} Landform numeric cells in 3 + 9 columns, one glyph advance "
+# Climate is intact ahead of Landform: its numbers page carries the monthly table's 108 cells and the
+# severe-weather table's 6 (this report data carries no Atlas 14 answer, so the design-storm table is a
+# statement, not cells).
+assert len(_numeric_cells(pages[2]._page_box)) == 108 + 6
+print(f"   5 pages; {len(landform_cells)} Landform numeric cells in 3 + 9 columns, one glyph advance "
       f"{advances.pop()} pt; literals only in TOKENS across {len(files) + 1} files")
 
 print("\ntest_landform_section.py: all sections passed")

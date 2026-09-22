@@ -83,6 +83,18 @@ TOKENS = {
     # warm brown between ink and oxide in tone -- a printed contour line,
     # not a cartographic tan. Judged rendered on the Landform proof map.
     "terrain": "#7a5c3a",
+    # NEW ON BRANCH 7, the report's first water colour: the water balance
+    # diagram's precipitation line and surplus fill (report_chart.py). The
+    # plate system reserves blue for water. Desaturated and mid-dark, a
+    # tonal sibling of terrain brown (about the same lightness and
+    # saturation, the hue turned to blue) -- a printed hydrology-bulletin
+    # blue, not a cartographic cyan. Judged rendered on the Climate proof.
+    "water": "#3f5d75",
+    # NEW ON BRANCH 7, carried over from the frontend palette
+    # (src/index.css --ochre, where it marks a live point): the water
+    # balance's evaporation line and deficit fill. The frontend's value,
+    # unchanged.
+    "ochre": "#c99a2e",
 }
 
 # --- fonts -------------------------------------------------------------

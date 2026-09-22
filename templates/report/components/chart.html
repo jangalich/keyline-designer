@@ -1,0 +1,24 @@
+{#- 8. CHART -- report_chart's result: the SVG at full content width, then
+    the legend in the same strip the map uses, when the chart carries one.
+
+    `chart` is a render_*() dict; `kind` names the figure for the class.
+    The SVG carries its own fonts and colours as attributes; the legend is
+    set here in the report's type, so a label obeys the page's data rule
+    the way a table cell does: strings are prose, {value} mappings are
+    measurements. -#}
+{% macro chart(chart, kind) -%}
+<figure class="report-chart report-chart--{{ kind }}">
+  <div class="report-chart__frame">{{ chart.svg | safe }}</div>
+{%- if chart.legend %}
+  <ul class="report-map__legend report-chart__legend">
+{%- for entry in chart.legend %}
+    <li class="report-map__entry">{{ entry.swatch | safe }}<span class="report-map__label">
+{%- for part in entry.parts -%}
+{%- if part is mapping -%}<span class="data">{{ part.value }}</span>{%- else -%}{{ part }}{%- endif -%}
+{%- endfor -%}
+</span></li>
+{%- endfor %}
+  </ul>
+{%- endif %}
+</figure>
+{%- endmacro %}

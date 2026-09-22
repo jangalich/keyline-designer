@@ -7,26 +7,34 @@ verification of site-data-report-proposal.md that a test can hold. The
 report is built from the real Daymet fixture and the reference parcel;
 the network is refused by offline_harness.
 
-  1. THE CLIMATE SECTION'S CONTENT: month-parts, the six key figures, the
-     table's rows and rounding, and the footer -- caveat first, then the
-     citation with Daymet's CSV semicolons turned back into commas --
-     read straight off the builder, before any template touches it. The
-     section numeral comes from the fixed outline, not the render order. A missing frost median reads "none recorded"
-     and drops the frost clause rather than inventing a date.
+  1. THE CLIMATE SECTION'S CONTENT: month-parts, the summary's two
+     sentences, the nine key figures, the nine-row table at print
+     precision (one decimal, a dash for a true zero, a true minus sign
+     for a deficit), the design-storm and severe-weather tables, the
+     caption under each figure, the sources footer with one line per
+     source, and the methods structure -- read straight off the builder,
+     before any template touches it. The section numeral comes from the
+     fixed outline, not the render order. A missing frost median reads
+     "none recorded" and drops the frost clause rather than inventing a
+     date; a degradable layer that is missing leaves a visible statement
+     that distinguishes "not covered" from "did not answer".
   2. NO COLOUR LITERAL OUTSIDE TOKENS: a hex-colour grep over the
-     stylesheet template, every component and section template, and
-     site_report.py hits only inside site_report.TOKENS.
-  3. THE HTML: every section composes the six components and nothing
-     else; every measured value is inside a data-face element; a hostile
-     property label is escaped everywhere it appears; without a label the
-     cover shows the centroid; the title is "Site Data Report".
+     stylesheet template, every component and section template,
+     site_report.py, the map renderer and the chart renderer hits only
+     inside site_report.TOKENS -- nine tokens, water and ochre new.
+  3. THE HTML: the climate section composes the components and nothing
+     else, on two page blocks; every measured value is inside a
+     data-face element; a hostile property label is escaped everywhere it
+     appears; without a label the cover shows the centroid; the title is
+     "Site Data Report".
   4. THE PDF (skipped, loudly, if WeasyPrint is not importable): renders
-     with no network, embeds all three faces, is two pages, and its
-     monthly table aligns -- right edges equal within a column across
-     values of differing digit counts, and the digit advance is uniform
-     (tabular figures) -- measured off the PDF's own text positions with
-     no PDF library beyond WeasyPrint's output stream. The footer
-     citation and the running label/date are in the PDF's text.
+     with no network, embeds all three faces, is three pages (the cover
+     and the two climate pages), and its monthly table aligns -- right
+     edges equal within a column across values of differing digit counts,
+     minus signs and dashes included, and the digit advance is uniform
+     (tabular figures) -- measured off the laid-out boxes; and NO BOX ON
+     ANY PAGE crosses the page's content width (report_layout). The
+     sources, the running label and date are in the PDF's text.
   5. THE FAILURE SHAPE: session_report.error_payload() maps a
      ReportDataIncompleteError to failed_layer {type, label, reason} with
      the outage or permanent-gap wording, beside report_failed.
@@ -45,16 +53,27 @@ offline_harness.install()
 import requests
 
 import climate_section
+import report_chart
+import report_layout
+import report_map
 import session_report
 import site_report
+from atlas14_data import parse_atlas14_csv
 from daymet_data import parse_daymet_csv
+from landform_section import ZERO_DASH
+from power_wind_data import parse_power_csv
 from reference_fixture import REAL_BOUNDARY
-from report_data import LAYER_CLIMATE, ReportDataIncompleteError, report_data_from_daily
+from report_data import LAYER_CLIMATE, ReportDataIncompleteError, report_data_from_daily, report_data_from_fixtures
 
 with open("daymet_reference_fixture.csv", encoding="utf-8") as _handle:
     DAILY = parse_daymet_csv(_handle.read())
-DATA = report_data_from_daily(REAL_BOUNDARY, DAILY)
+with open("atlas14_reference_fixture.csv", encoding="utf-8") as _handle:
+    ATLAS14 = parse_atlas14_csv(_handle.read())
+with open("power_wind_reference_fixture.csv", encoding="utf-8") as _handle:
+    POWER = parse_power_csv(_handle.read())
+DATA = report_data_from_fixtures(REAL_BOUNDARY, DAILY, atlas14=ATLAS14, power_wind=POWER)
 GENERATED_ON = date(2026, 9, 21)
+MINUS = "\u2212"
 
 # ======================================================================
 # 1. The climate section's content
@@ -82,73 +101,157 @@ assert climate_section.month_part({"month": 4, "day": 11}) == "mid April"
 assert climate_section.month_part({"month": 4, "day": 20}) == "mid April"
 assert climate_section.month_part({"month": 10, "day": 21}) == "late October"
 
-# ONLY THE COUNT IS DATA; the month-parts and the month are prose.
+# ONLY THE COUNTS ARE DATA; the month-parts and the month runs are prose.
 summary_values = [p["value"] for p in section["summary"] if isinstance(p, dict)]
-assert summary_values == ["177"], summary_values
+assert summary_values == ["177", "1.9"], summary_values
 prose = "".join(p if isinstance(p, str) else "{}" for p in section["summary"])
 assert prose == (
     "The frost-free season runs about {} days, from late April to mid October. "
-    "Precipitation peaks in June."
+    "Rainfall exceeds evaporation from September through May; June through August run a deficit of about {} in."
 ), prose
+assert climate_section.month_run([10, 11, 12, 1, 2]) == "October through February"
+assert climate_section.month_run([6, 7, 9]) == "June, July and September"
+assert climate_section.month_run([7]) == "July" and climate_section.month_run([]) == ""
 
-figures = {f["label"]: f["value"] for f in section["key_figures"]}
-assert figures == {
-    "median last spring frost": "Apr 27",
-    "median first fall frost": "Oct 20",
-    "frost-free days": "177",
-    "inches precipitation per year": "45.5",
-    "growing degree days, base 50°F": "2,933",
-    "est. hardiness zone": "6b",
-}, figures
+# NINE KEY FIGURES, in the brief's order, with months in deficit last.
+figures = [(f["label"], f["value"]) for f in section["key_figures"]]
+assert figures == [
+    ("median last spring frost", "Apr 27"),
+    ("median first fall frost", "Oct 20"),
+    ("frost-free days", "177"),
+    ("inches precipitation per year", "43.7"),
+    ("inches in the driest year, 1995", "34.5"),
+    ("inches in the wettest year, 2018", "60.9"),
+    ("growing degree days, base 50°F", "2,933"),
+    ("est. hardiness zone", "6b"),
+    ("months in deficit, Jun–Aug", "3"),
+], figures
+assert not any(f.get("word") for f in section["key_figures"])
+assert "".join(section["key_figures_caption"]).startswith("Low ground and valley floors typically frost later")
 
+# THE MONTHLY TABLE: nine rows in the brief's order, at print precision.
 table = section["table"]
 assert table["columns"] == ["J", "F", "M", "A", "M", "J", "J", "A", "S", "O", "N", "D"]
 rows = {r["label"]: r["cells"] for r in table["rows"]}
-assert list(rows) == ["Mean high °F", "Mean low °F", "Precipitation, in", "GDD, base 50°F", "Solar, kWh/m²/day"]
-assert rows["Mean high °F"][0] == "36" and rows["Mean high °F"][6] == "83"
-assert rows["Precipitation, in"][5] == "4.8" and rows["GDD, base 50°F"][6] == "686"
-assert rows["Solar, kWh/m²/day"][5] == "5.7" and rows["Solar, kWh/m²/day"][11] == "1.5"
+assert list(rows) == [
+    "Mean high °F", "Mean low °F", "Precipitation, in", "Potential evaporation, in", "Water balance, in",
+    "Days over 1 in", "GDD, base 50°F", "Day length, h", "Solar, kWh/m²/day",
+], list(rows)
 assert all(len(r["cells"]) == 12 for r in table["rows"])
-# Whole numbers for temperatures and GDD, one decimal for precipitation
-# and solar -- the brief's example, row by row.
+assert rows["Mean high °F"][0] == "36" and rows["Mean high °F"][6] == "83"
+assert rows["Precipitation, in"] == ["3.3", "2.8", "3.2", "3.9", "4.3", "4.6", "4.2", "4.2", "3.7", "3.3", "3.2", "3.1"], rows["Precipitation, in"]
+# January, February and December evaporate nothing at one decimal: dashes, not "0.0".
+assert rows["Potential evaporation, in"][:2] == [ZERO_DASH, ZERO_DASH] and rows["Potential evaporation, in"][11] == ZERO_DASH
+assert rows["Potential evaporation, in"][6] == "5.4"
+# The balance row: a deficit month carries a TRUE MINUS SIGN, never a hyphen; a rounded zero is a dash.
+balance = rows["Water balance, in"]
+assert balance[6] == MINUS + "1.2" and balance[7] == MINUS + "0.6" and balance[5] == MINUS + "0.1", balance
+assert not any("-" in cell for cell in balance), "no hyphen-minus in the balance row"
+assert balance[0] == "3.3" and balance[11] == "3.1"
+# Days over 1 in are the STATIONS' normals (medians), not Daymet's count.
+assert rows["Days over 1 in"] == ["0.5", "0.3", "0.5", "0.5", "0.6", "0.9", "1.0", "0.7", "0.8", "0.5", "0.6", "0.5"], rows["Days over 1 in"]
+assert rows["GDD, base 50°F"][6] == "686"
+assert rows["Day length, h"][5] == "14.9" and rows["Day length, h"][11] == "9.1"
+assert rows["Solar, kWh/m²/day"][5] == "5.7" and rows["Solar, kWh/m²/day"][11] == "1.5"
 assert all(re.fullmatch(r"-?\d+", v) for v in rows["Mean high °F"] + rows["Mean low °F"] + rows["GDD, base 50°F"])
-assert all(re.fullmatch(r"\d+\.\d", v) for v in rows["Precipitation, in"] + rows["Solar, kWh/m²/day"])
+for label in ("Precipitation, in", "Day length, h", "Solar, kWh/m²/day"):
+    assert all(re.fullmatch(r"\d+\.\d", v) for v in rows[label]), label
+for label in ("Potential evaporation, in", "Days over 1 in"):
+    assert all(v == ZERO_DASH or re.fullmatch(r"\d+\.\d", v) for v in rows[label]), label
+assert all(v == ZERO_DASH or re.fullmatch(MINUS + r"?\d+\.\d", v) for v in balance)
+caption = section["table_caption"]
+assert [p["value"] for p in caption if isinstance(p, dict)] == ["0.96"]
+assert "".join(p if isinstance(p, str) else "{}" for p in caption) == (
+    "Precipitation scaled by {} to the 5 nearest NOAA station normals; days over 1 in from the same stations."
+)
 
-# THE FOOTER: caveat first, citation second, and no data part in either --
-# a product name and a year range are names.
-footer = section["footer"]
-assert list(footer) == ["caveat", "citation"]
-assert all(isinstance(p, str) for p in footer["caveat"] + footer["citation"])
-caveat_text = "".join(footer["caveat"])
-citation_text = "".join(footer["citation"])
-assert caveat_text.startswith("Daymet interpolates between weather stations on a 1 km grid")
-assert "simple-average method" in caveat_text and "not the official USDA map" in caveat_text
-assert "stands on" not in caveat_text, "every year had both frosts, so no shortfall sentence"
-assert citation_text.startswith("Source: Daymet Version 4 R1, 30-year means 1995–2024. Thornton, M.M., R. Shrestha,")
-# The commas Daymet's CSV header swapped for semicolons are restored for
-# display; the served line is kept verbatim on the data.
-assert ";" not in citation_text
-assert climate_section.display_citation(DAILY["citation"]) in citation_text
-assert climate_section.display_citation(DAILY["citation"]) == DAILY["citation"].replace(";", ",")
-assert DAILY["citation"].count(";") == 10 and ";" in DAILY["citation"]
-assert citation_text.endswith("ORNL DAAC, Oak Ridge, Tennessee, USA. https://doi.org/10.3334/ORNLDAAC/2129")
-footer_text = caveat_text + " " + citation_text
-# A citation without a version label falls back to the software version.
+# DESIGN STORMS at the source's own precision; SEVERE WEATHER as reports per year and a peak month.
+storms = section["design_storms"]
+assert storms["unavailable"] is None
+assert storms["table"]["columns"] == ["2-yr", "10-yr", "25-yr", "100-yr"] and storms["table"]["compact"] is True
+assert [(r["label"], r["cells"]) for r in storms["table"]["rows"]] == [
+    ("1-hour, in", ["1.19", "1.74", "2.07", "2.58"]),
+    ("24-hour, in", ["2.38", "3.34", "3.96", "4.98"]),
+]
+assert storms["caption"] == ["Point estimates from records through 2000; heavier recent storms are not reflected."]
+severe = section["severe_weather"]
+assert severe["table"]["corner"] == "Within 25 miles" and severe["table"]["columns"] == ["Reports per year", "Peak month"]
+severe_rows = severe["table"]["rows"]
+assert severe_rows[0]["label"] == ["Hail (largest ", {"value": "2.5 in"}, ")"] and severe_rows[0]["cells"] == ["20.5", "Jun"]
+assert severe_rows[1]["label"] == "Damaging wind" and severe_rows[1]["cells"] == ["63.9", "Jun"]
+assert severe_rows[2]["label"] == "Tornado" and severe_rows[2]["cells"] == ["1.2", ZERO_DASH], "no tornado month"
+assert "cluster near roads and towns" in severe["caption"][0]
+
+# THE CHARTS: the water balance from the corrected months, the roses labelled "wind from".
+wb = section["water_balance"]
+assert wb["chart"]["svg"].startswith("<svg") and [round(x, 2) for x in wb["chart"]["crossings"]] == [4.92, 7.65], wb["chart"]["crossings"]
+assert [b["sign"] for b in wb["chart"]["bands"]] == ["surplus", "deficit", "surplus"]
+assert wb["caption"] == ["Potential evaporation is estimated from temperature; actual loss depends on cover and soil."]
+roses = section["wind_roses"]
+assert roses["unavailable"] is None and roses["chart"]["svg"].count(">wind from</text>") == 2
+assert [r["prevailing"] for r in roses["chart"]["roses"]] == ["W", "SW"], "the modal sectors, and the solid wedges"
+for rose in roses["chart"]["roses"]:
+    assert rose["wedge_radii"][rose["prevailing"]] == max(rose["wedge_radii"].values()), "the solid wedge is the longest"
+assert any("Resultant wind" in n and "winter from SW (246°)" in n for n in section["methods"][3]["notes"])
+assert "regional estimate" in roses["caption"][0]
+
+# THE SOURCES: one line per source, names and periods only, no data part.
+sources = ["".join(line) for line in section["sources"]]
+assert all(isinstance(p, str) for line in section["sources"] for p in line)
+assert sources == [
+    "Daymet Version 4 R1, 1 km daily grid, 30-year means 1995–2024.",
+    "NCEI U.S. Climate Normals 1991–2020, 5 stations within 14 miles.",
+    "NOAA Atlas 14 Volume 2 Version 3 (Ohio River Basin), partial-duration series, records through 2000.",
+    "NASA POWER (MERRA-2), 0.5° × 0.625° cell, 1995–2024.",
+    "NOAA Storm Prediction Center severe weather reports 1995–2024, files of 13 May 2025.",
+], sources
+# THE METHODS structure for the note at the back: one entry per source, full citations, not rendered.
+methods = section["methods"]
+assert [m["source"] for m in methods] == ["Daymet", "NCEI U.S. Climate Normals", "NOAA Atlas 14", "NASA POWER", "NOAA Storm Prediction Center"]
+assert methods[0]["citation"] == climate_section.display_citation(DAILY["citation"]) and ";" not in methods[0]["citation"]
+assert "Thornthwaite" in methods[0]["method"] and any("Hargreaves" in n for n in methods[0]["notes"])
+assert any("0.960" in n for n in methods[1]["notes"]) and any("Atlas 15" in n for n in methods[2]["notes"])
+assert methods[3]["citation"].startswith("The data was obtained from the National Aeronautics and Space Administration")
 assert climate_section.daymet_version_label({"citation": "no version here", "software_version": "4.0"}) == "Daymet Version 4.0"
+assert climate_section.display_citation(DAILY["citation"]) == DAILY["citation"].replace(";", ",")
 
-# A missing median: no date invented, the clause dropped, the shortfall said.
+# A missing median: no date invented, the clause dropped, the shortfall said in the key-figures caption.
 import copy
 short = copy.deepcopy(DATA)
 short.climate["frost"]["first_fall"] = None
 short.climate["frost"]["frost_free_days"] = None
 short.climate["frost"]["years_with_fall_frost"] = 12
 short_section = climate_section.build_climate_section(short)
-assert [p["value"] for p in short_section["summary"] if isinstance(p, dict)] == []
-assert "".join(short_section["summary"]) == "Precipitation peaks in June."
-assert {f["label"]: f["value"] for f in short_section["key_figures"]}["median first fall frost"] == "none recorded"
-short_footer = "".join(short_section["footer"]["caveat"])
-assert "The median fall frost stands on 12 of the 30 years" in short_footer
-print("   summary parts, six key figures, five table rows, footer citation verbatim; the missing-median path")
+assert [p["value"] for p in short_section["summary"] if isinstance(p, dict)] == ["1.9"]
+assert "".join(p if isinstance(p, str) else "{}" for p in short_section["summary"]).startswith("Rainfall exceeds evaporation")
+short_figures = {f["label"]: f for f in short_section["key_figures"]}
+assert short_figures["median first fall frost"]["value"] == "none recorded" and short_figures["median first fall frost"]["word"] is True
+assert "The median fall frost stands on 12 of the 30 years" in "".join(short_section["key_figures_caption"])
+
+# DEGRADED LAYERS leave a visible statement: "not covered" is told from "did not answer".
+uncovered = report_data_from_fixtures(
+    REAL_BOUNDARY, DAILY, atlas14=None, power_wind=None,
+    unavailable={
+        "atlas14": {"label": "design storm depths", "reason": "no_data_for_parcel",
+                    "error": "Atlas 14 server: Error 3.0: Selected location is not within a project area"},
+        "power_wind": {"label": "wind records", "reason": "source_unavailable", "error": "timed out"},
+    },
+)
+degraded_section = climate_section.build_climate_section(uncovered)
+statement = "".join(p if isinstance(p, str) else p["value"] for p in degraded_section["design_storms"]["unavailable"])
+assert degraded_section["design_storms"]["table"] is None
+assert statement.startswith("Design storm depths are unavailable: NOAA Atlas 14 does not cover this location.")
+assert "Atlas 15" in statement and "2027" in statement and "Washington, Oregon, Idaho, Montana and Wyoming" in statement
+wind_statement = "".join(degraded_section["wind_roses"]["unavailable"])
+assert degraded_section["wind_roses"]["chart"] is None and "did not answer" in wind_statement and "timed out" in wind_statement
+down = report_data_from_fixtures(
+    REAL_BOUNDARY, DAILY, atlas14=None, power_wind=POWER,
+    unavailable={"atlas14": {"label": "design storm depths", "reason": "source_unavailable", "error": "503"}},
+)
+down_statement = climate_section.build_climate_section(down)["design_storms"]["unavailable"]
+assert "did not answer" in down_statement[0] and "503" in down_statement[0] and down_statement[1]["value"] == "40.6446, -79.9826"
+assert [s[:4] for s in ["".join(l) for l in degraded_section["sources"]]] == ["Daym", "NCEI", "NOAA"], "only the sources used are listed"
+print("   two summary sentences, nine key figures, nine table rows at print precision, two tables, five source lines, methods; the missing-median and degraded paths")
 
 # ======================================================================
 # 2. No colour literal outside TOKENS
@@ -160,11 +263,14 @@ templates_dir = site_report.TEMPLATES_DIRECTORY
 template_files = []
 for root, _, files in os.walk(templates_dir):
     template_files += [os.path.join(root, f) for f in files]
-assert len(template_files) == 11, sorted(template_files)   # css, base, 7 components, 2 sections
+assert len(template_files) == 13, sorted(template_files)   # css, base, 9 components, 2 sections
 for path in template_files:
     with open(path, encoding="utf-8") as handle:
         hits = HEX.findall(handle.read())
     assert not hits, f"{path} carries colour literal(s) {hits}"
+for renderer in (report_map, report_chart):
+    with open(renderer.__file__, encoding="utf-8") as handle:
+        assert HEX.findall(handle.read()) == [], f"{renderer.__name__} carries a colour literal"
 with open(site_report.__file__, encoding="utf-8") as handle:
     module_source = handle.read()
 tokens_start = module_source.index("TOKENS = {")
@@ -177,7 +283,10 @@ assert site_report.TOKENS == {
     "page": "#ffffff", "stock": "#f4f1ea", "rule": "#ddd6c8",
     "ink": "#2b2b26", "ink-muted": "#8a8477", "oxide": "#9c4a2f",
     "terrain": "#7a5c3a",
+    "water": "#3f5d75", "ochre": "#c99a2e",
 }
+# Ochre is the frontend's own value; water is new to the plate system.
+assert site_report.TOKENS["ochre"] == "#c99a2e"
 # The rendered stylesheet declares each token once and reads colours only
 # through var().
 css = site_report.render_stylesheet()
@@ -197,23 +306,26 @@ assert "<title>Site Data Report — 40.6446° N, 79.9826° W</title>" in html
 assert '<h1 class="cover__title">Site Data Report</h1>' in html
 assert "Generated 21 September 2026" in html
 for marker in ('class="eyebrow"', 'class="heading"', 'class="summary"', 'class="key-figures"',
-               'class="data-table"', 'class="source-footer"'):
+               'class="source-footer"', 'report-chart--water-balance', 'report-chart--wind-roses'):
     assert html.count(marker) == 1, marker
+assert html.count('class="data-table') == 3 and html.count('class="caption"') == 6
 assert '<span class="eyebrow__number">II</span> · Climate' in html
-assert '<span class="data">177</span>' in html
+assert '<span class="data">177</span>' in html and '<span class="data">1.9</span>' in html
 assert 'from late April to mid October' in html and '<span class="data">late April</span>' not in html
-assert html.count('<span class="data">') == 1, "the summary's one figure is the only data span on the page"
-# The footer: caveat paragraph before the citation paragraph, citation with commas.
-assert html.index('class="source-footer__caveat"') < html.index('class="source-footer__citation"')
-assert "Thornton, M.M., R. Shrestha" in html and "Thornton; M.M." not in html
-assert html.count('class="key-figure"') == 6 and html.count('<td class="num">') == 60
-assert html.count('<th class="num">') == 12
-assert climate_section.display_citation(DAILY["citation"]) in html
+# The data spans on the page: the summary's two, the table caption's factor, the hail label's size.
+assert html.count('<span class="data">') == 4, html.count('<span class="data">')
+assert html.count('class="key-figure"') == 9
+assert html.count('<td class="num">') == 9 * 12 + 2 * 4 + 3 * 2 and html.count('<th class="num">') == 12 + 4 + 2
+assert html.count('class="source-footer__citation source-footer__line"') == 5 and 'class="source-footer__caveat"' not in html
+assert html.index('class="section__figures"') < html.index('class="section__detail"')
+assert html.index('report-chart--water-balance') < html.index('report-chart--wind-roses') < html.index('class="section__detail"')
+assert MINUS + "1.2" in html and "-1.2" not in html
+assert html.count("<svg xmlns") == 2 + 4, "two charts and the four legend swatches"
 # Section templates carry no styling of their own.
 with open(os.path.join(templates_dir, "sections", "climate.html"), encoding="utf-8") as handle:
     section_template = handle.read()
 assert "style" not in section_template.lower() and "<style" not in section_template
-for name in ("eyebrow", "heading", "summary", "key_figures", "data_table", "source_footer"):
+for name in ("eyebrow", "heading", "summary", "key_figures", "data_table", "source_footer", "chart", "caption"):
     assert f'components/{name}.html' in section_template, name
 
 hostile = '<script>alert(1)</script> & "Farm" \'Lane\''
@@ -223,12 +335,12 @@ assert "&lt;script&gt;alert(1)&lt;/script&gt; &amp; &#34;Farm&#34; &#39;Lane&#39
 assert escaped.count("&lt;script&gt;") == 3, "title, running label, cover label"
 # The stylesheet, by contrast, is not escaped: its quotes are CSS.
 assert '@font-face {\n  font-family: "Bitter";' in escaped
-print("   six components once each, 60 numeric cells, hostile label escaped three times, stylesheet unescaped")
+print("   components composed on two page blocks, 122 numeric cells, hostile label escaped three times, stylesheet unescaped")
 
 # ======================================================================
 # 4. The PDF
 # ======================================================================
-print("4. the PDF: offline, three faces embedded, two pages, decimal alignment measured")
+print("4. the PDF: offline, three faces embedded, three pages, decimal alignment measured with minus signs and dashes")
 
 import importlib.util
 
@@ -272,7 +384,7 @@ else:
     from weasyprint import HTML
 
     document = HTML(string=site_report.render_site_report_html(DATA, generated_on=GENERATED_ON)).render()
-    page = document.pages[1]
+    page = document.pages[2]      # the numbers page
 
     def _walk(box):
         yield box
@@ -282,29 +394,35 @@ else:
     cells = []
     for box in _walk(page._page_box):
         # The cell box itself -- a td also owns the inline wrappers beneath
-        # it, which report the same element and must not count again.
+        # it, which report the same element and must not count again. The
+        # monthly table is the first data table on the page: its 108 cells
+        # come first in document order.
         if type(box).__name__ == "TableCellBox" and box.element_tag == "td" and "num" in (box.element.get("class") or ""):
             text = "".join(box.element.itertext()).strip()
             cells.append((round(box.position_x + box.width, 3), text, box))
-    assert len(cells) == 60, len(cells)
+    assert len(cells) == 122, len(cells)
+    monthly = cells[:108]
     columns = {}
-    for right, text, box in cells:
+    for right, text, box in monthly:
         columns.setdefault(right, []).append(text)
     assert len(columns) == 12, f"expected 12 right edges, got {sorted(columns)}"
     for right, values in columns.items():
         widths = {len(v) for v in values}
         assert len(widths) >= 2, f"column at {right} has no digit-width variety: {values}"
+    # A minus sign and a dash share the column's right edge with the plain figures.
+    assert any(text.startswith(MINUS) for _, text, _ in monthly) and any(text == ZERO_DASH for _, text, _ in monthly)
     # Tabular figures: every glyph in a numeric cell advances the same.
     # The text box inside each cell reports its own width; width / glyph
-    # count must be one constant across the table.
+    # count must be one constant across the table -- the minus sign and
+    # the dash included, since the data face carries both glyphs.
     advances = set()
-    for right, text, box in cells:
+    for right, text, box in monthly:
         line_boxes = [b for b in _walk(box) if type(b).__name__ == "TextBox"]
         assert line_boxes, text
         width = sum(b.width for b in line_boxes)
         advances.add(round(width / len(text), 2))
     assert len(advances) == 1, f"glyph advances differ across numeric cells: {sorted(advances)}"
-    print(f"   {len(cells)} numeric cells in 12 columns, every column mixing digit widths, one glyph advance {advances.pop()} pt")
+    print(f"   {len(monthly)} monthly cells in 12 columns, every column mixing digit widths, one glyph advance {advances.pop()} pt")
 
     # The rendered text carries the citation, the running label and date.
     flat = "".join(
@@ -312,10 +430,16 @@ else:
         for p in document.pages
     )
     # Line wraps drop the space at a break, so compare with whitespace removed.
-    assert "".join(climate_section.display_citation(DAILY["citation"]).split()) in "".join(flat.split())
+    for line in section["sources"]:
+        assert "".join("".join(line).split()) in "".join(flat.split()), line
     assert "".join("40.6446° N, 79.9826° W".split()) in "".join(flat.split())
     assert "".join("21 September 2026".split()) in "".join(flat.split())
-    assert len(document.pages) == 2
+    assert len(document.pages) == 3, len(document.pages)
+    # NO BOX PAST THE MEASURE, on any page: the check the review asked for
+    # after the severe-weather table sat 51 pt past the right margin.
+    overruns = report_layout.overflowing_boxes(document)
+    assert overruns == [], overruns[:5]
+    print(f"   {len(document.pages)} pages, no box past the content width on any of them")
     print(f"   {len(document.pages)} pages; families {sorted(f.decode() for f in families)}")
 
 # ======================================================================
