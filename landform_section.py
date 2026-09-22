@@ -51,8 +51,25 @@ slope-class tints (a graduated ramp of ONE hue, the terrain token, light
 for flat ground to dark for steep -- only the classes present), the
 contours with their index labels, valleys as dashed lines, keypoints as
 asterisks. THE DARKEST TINT IS CAPPED at SLOPE_TINT_OPACITY['F'] so a
-full-strength terrain contour still reads over class F ground; the ramp
-is a table of opacities on the one token, never a second colour.
+full-strength terrain contour still reads over class F ground, and the
+LIGHTEST IS LIFTED so the class covering most of a parcel never reads as
+blank paper; the ramp is a table of opacities on the one token, never a
+second colour.
+
+COMPUTE ON CELLS, DRAW WHAT READS CORRECTLY -- the production zones' own
+split. The tables count cells (pixel-centre containment, the pipeline's
+rasterization convention). The tints are FILLED CONTOURS of the slope
+grid at the class breaks -- 3, 8, 15, 25, 35% -- drawn by contourpy the
+way the elevation contours are drawn from the DEM, so their edges are the
+smooth iso-lines of the same surface the linework comes from, and they
+clip cleanly to the boundary with no cell-edge slivers. The acreages do
+not move: nothing in a table reads a fill polygon.
+
+TWO PAGES, BY RULE. A section with a map is two pages: the picture and
+its takeaways (summary, map, legend, key figures) on the first, every
+number (the tables, the footer) on the second. landform.html marks the
+split with .section__figures / .section__detail; every later section
+with a map takes the same shape.
 """
 
 import math
@@ -60,11 +77,14 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Optional
 
+import contourpy
 import numpy as np
-from shapely.geometry import LineString
+from shapely.geometry import LineString, MultiPolygon, Polygon
+from shapely.ops import unary_union
 
 import report_map
-from raster_grid import SQUARE_METERS_PER_ACRE, cell_union_footprint, cells_in_polygon
+from contour_lines import _grid_axes
+from raster_grid import SQUARE_METERS_PER_ACRE, cells_in_polygon
 from report_outline import section_number
 
 SECTION_NAME = "Landform"
@@ -83,9 +103,11 @@ SLOPE_CLASSES = (
 )
 
 # The slope ramp: fill-opacity of the terrain token per class, light to
-# dark. Six steps of about 0.09-0.11; the darkest is CAPPED at 0.55 so the
-# contours, drawn in the token at full strength, stay legible over class F.
-SLOPE_TINT_OPACITY = {"A": 0.06, "B": 0.15, "C": 0.25, "D": 0.35, "E": 0.45, "F": 0.55}
+# dark. Six steps of 0.07-0.09; the darkest is CAPPED at 0.55 so the
+# contours, drawn in the token at full strength, stay legible over class
+# F, and the lightest starts at 0.14 so the lightest class present is
+# clearly toned rather than paper.
+SLOPE_TINT_OPACITY = {"A": 0.14, "B": 0.22, "C": 0.31, "D": 0.40, "E": 0.48, "F": 0.55}
 SLOPE_TINT_CAP = 0.55
 
 # Ground under this slope has no meaningful downhill direction.
@@ -248,8 +270,7 @@ def classify_cells(terrain: TerrainInputs) -> dict:
     the pipeline's own rasterization convention):
 
         {'cells', 'slope_counts': {class: n}, 'aspect_counts': {sector: n},
-         'unclassified_aspect': n, 'mean_slope_pct', 'valid_cells',
-         'slope_masks': {class: bool array}}
+         'unclassified_aspect': n, 'mean_slope_pct', 'valid_cells'}
     """
     cells = cells_in_polygon(terrain.dem, terrain.boundary_polygon_utm)
     rows = np.array([r for r, _ in cells], dtype=int)
@@ -259,7 +280,6 @@ def classify_cells(terrain: TerrainInputs) -> dict:
 
     slope_counts = {name: 0 for name, _, _ in SLOPE_CLASSES}
     aspect_counts = {sector: 0 for sector in ASPECT_SECTORS + (FLAT_LABEL,)}
-    slope_masks = {name: np.zeros(terrain.dem["array"].shape, dtype=bool) for name, _, _ in SLOPE_CLASSES}
     unclassified_aspect = 0
     valid = []
     for (r, c), slope, aspect in zip(cells, slope_values, aspect_values):
@@ -268,7 +288,6 @@ def classify_cells(terrain: TerrainInputs) -> dict:
             continue
         valid.append(float(slope))
         slope_counts[cls] += 1
-        slope_masks[cls][r, c] = True
         sector = aspect_sector(float(aspect), float(slope))
         if sector is None:
             unclassified_aspect += 1
@@ -281,7 +300,6 @@ def classify_cells(terrain: TerrainInputs) -> dict:
         "unclassified_aspect": unclassified_aspect,
         "mean_slope_pct": float(np.mean(valid)) if valid else float("nan"),
         "valid_cells": len(valid),
-        "slope_masks": slope_masks,
     }
 
 
@@ -290,17 +308,62 @@ def classify_cells(terrain: TerrainInputs) -> dict:
 # ======================================================================
 
 
-def slope_class_geometries(terrain: TerrainInputs, slope_masks: dict) -> dict:
-    """{class: geometry} for the classes with any cell, each the union of
-    its cells' ground squares clipped to the boundary."""
-    out = {}
-    for name, mask in slope_masks.items():
-        if not mask.any():
+def _filled_polygons(points_list, offsets_list) -> list:
+    """contourpy FillType.OuterOffset -> shapely polygons: each entry is
+    one outer ring followed by its holes, delimited by offsets."""
+    polygons = []
+    for points, offsets in zip(points_list, offsets_list):
+        rings = [points[offsets[i]:offsets[i + 1]] for i in range(len(offsets) - 1)]
+        rings = [ring for ring in rings if len(ring) >= 4]
+        if not rings:
             continue
-        footprint = cell_union_footprint(terrain.dem, mask).intersection(terrain.boundary_polygon_utm)
-        if not footprint.is_empty:
-            out[name] = footprint
+        polygon = Polygon(rings[0], rings[1:]).buffer(0)
+        if not polygon.is_empty:
+            polygons.append(polygon)
+    return polygons
+
+
+def slope_class_geometries(terrain: TerrainInputs, slope_counts: dict) -> dict:
+    """
+    {class: geometry} -- FILLED CONTOURS of the slope grid between the
+    class breaks, clipped to the boundary, for the classes that have any
+    on-parcel cell. The grid's NaN cells are masked out, exactly as the
+    elevation contours exclude nodata. Display only: the acreage tables
+    never read these.
+    """
+    slope = np.ma.masked_invalid(terrain.slope_pct.astype(float))
+    if slope.count() == 0:
+        return {}
+    x, y = _grid_axes(terrain.dem)
+    generator = contourpy.contour_generator(x=x, y=y, z=slope, fill_type=contourpy.FillType.OuterOffset)
+    top = float(slope.max()) + 1.0
+    out = {}
+    for name, low, high in SLOPE_CLASSES:
+        if slope_counts.get(name, 0) <= 0:
+            continue
+        upper = top if high is None else float(high)
+        if upper <= low:
+            continue
+        polygons = _filled_polygons(*generator.filled(float(low) if low > 0 else -1.0, upper))
+        if not polygons:
+            continue
+        clipped = unary_union(polygons).intersection(terrain.boundary_polygon_utm)
+        clipped = _polygonal(clipped)
+        if clipped is not None:
+            out[name] = clipped
     return out
+
+
+def _polygonal(geometry):
+    """The polygonal part of a clip result, or None."""
+    if geometry is None or geometry.is_empty:
+        return None
+    if isinstance(geometry, (Polygon, MultiPolygon)):
+        return geometry
+    parts = [g for g in getattr(geometry, "geoms", []) if isinstance(g, (Polygon, MultiPolygon)) and not g.is_empty]
+    if not parts:
+        return None
+    return unary_union(parts)
 
 
 def valley_lines(terrain: TerrainInputs) -> list:
@@ -335,6 +398,15 @@ def _one_decimal(value: float) -> str:
     return f"{value:,.1f}"
 
 
+# A true zero in a one-decimal column is set as a dash: it reads as "none",
+# not as a measurement, and keeps the decimal line down the column.
+ZERO_DASH = "–"
+
+
+def _one_decimal_or_dash(value: float) -> str:
+    return ZERO_DASH if value == 0 else _one_decimal(value)
+
+
 def format_retrieved_on(when: date) -> str:
     from climate_section import format_generated_on
 
@@ -351,11 +423,11 @@ def build_slope_table(counts: dict, parcel_acres: float) -> dict:
     for name, acre, share in zip(present, acres, shares):
         rows.append({
             "label": ["Class ", {"value": name}],
-            "cells": [slope_range_label(name), _one_decimal(acre), _one_decimal(share)],
+            "cells": [slope_range_label(name), _one_decimal_or_dash(acre), _one_decimal_or_dash(share)],
         })
     rows.append({"label": "Total", "cells": ["", _one_decimal(round(parcel_acres, 1)), _one_decimal(100.0)]})
     return {"corner": "Slope class", "columns": ["Range", "Acres", "% of parcel"], "rows": rows,
-            "acres": acres, "shares": shares, "classes": present}
+            "compact": True, "acres": acres, "shares": shares, "classes": present}
 
 
 def build_aspect_table(counts: dict, parcel_acres: float) -> dict:
@@ -367,8 +439,8 @@ def build_aspect_table(counts: dict, parcel_acres: float) -> dict:
         "corner": "Aspect",
         "columns": columns,
         "rows": [
-            {"label": "Acres", "cells": [_one_decimal(a) for a in acres]},
-            {"label": "% of parcel", "cells": [_one_decimal(s) for s in shares]},
+            {"label": "Acres", "cells": [_one_decimal_or_dash(a) for a in acres]},
+            {"label": "% of parcel", "cells": [_one_decimal_or_dash(s) for s in shares]},
         ],
         "acres": acres,
         "shares": shares,
@@ -389,7 +461,7 @@ def dominant_slope_class(counts: dict) -> str:
 def build_summary(relief_ft: float, slope_counts: dict, aspect_counts: dict) -> list:
     cls = dominant_slope_class(slope_counts)
     parts = [
-        "Elevation ranges ", {"value": _feet(relief_ft)}, " ft across the parcel. Most of it is in slope class ",
+        "The land rises ", {"value": _feet(relief_ft)}, " ft across the parcel. Most of it is in slope class ",
         {"value": cls}, ", ", {"value": slope_range_label(cls)},
     ]
     sector = dominant_aspect(aspect_counts)
@@ -465,7 +537,7 @@ def build_landform_section(terrain: TerrainInputs, tokens: Optional[dict] = None
         tokens = site_report.TOKENS
     contours = report_map.parcel_contours(terrain.dem, terrain.boundary_polygon_utm)
     classified = classify_cells(terrain)
-    class_geometries = slope_class_geometries(terrain, classified["slope_masks"])
+    class_geometries = slope_class_geometries(terrain, classified["slope_counts"])
     keypoints = parcel_keypoints(terrain)
     layers = build_map_layers(terrain, contours, class_geometries)
     rendered = report_map.render_map(terrain.boundary_polygon_utm, layers, tokens)
@@ -484,7 +556,7 @@ def build_landform_section(terrain: TerrainInputs, tokens: Optional[dict] = None
         "footer": build_footer(terrain.retrieved_on),
         # For tests and diagnostics, not the template.
         "contours": {k: v for k, v in contours.items() if k != "levels"},
-        "classified": {k: v for k, v in classified.items() if k not in ("slope_masks", "cells")},
+        "classified": {k: v for k, v in classified.items() if k != "cells"},
         "classes_present": list(class_geometries),
         "aspect_source": terrain.aspect_source,
     }

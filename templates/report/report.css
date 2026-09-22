@@ -188,6 +188,13 @@ th.num {
 .section + .section {
   break-before: page;
 }
+/* A SECTION WITH A MAP IS TWO PAGES, BY RULE: the picture and its
+   takeaways (summary, map, legend, key figures) on the first page, every
+   number (the tables, the footer) on the second. The split is structural
+   -- two blocks -- so the rhythm is the same whatever the tables hold. */
+.section--map .section__detail {
+  break-before: page;
+}
 
 /* 1. Eyebrow */
 .eyebrow {
@@ -308,6 +315,18 @@ th.num {
 }
 .data-table tbody tr:last-child td {
   border-bottom: 0.75pt solid var(--rule);
+}
+/* Sized to its content, not the measure: a few narrow columns should sit
+   together, not be spaced across the page. Cells get a little more room
+   so the columns still breathe. */
+.data-table--compact {
+  width: auto;
+  min-width: 3.4in;
+}
+.data-table--compact th,
+.data-table--compact td {
+  padding-left: var(--space-3);
+  padding-right: var(--space-3);
 }
 
 /* 7. Map -- report_map.render_map()'s SVG at full content width, then

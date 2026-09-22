@@ -4,12 +4,16 @@ diagnose_landform_section.py
 THE LANDFORM SECTION'S PROOF RENDER, judged as pages -- branch 6, phase 2
 of site-data-report-proposal.md's build sequence:
 
-    python3 diagnose_landform_section.py [out_dir]
+    python3 diagnose_landform_section.py [out_dir]          # offline, the fixture DEM
+    python3 diagnose_landform_section.py [out_dir] --live   # the REAL parcel, over the network
 
   * an OFFLINE SESSION (roads_step_fixture.Harness: every network call
     mocked, every real computation run and counted) created on the real
     reference boundary, its terrain warm-up done -- the same context the
-    report reads in production;
+    report reads in production; or, with --live, a REAL session --
+    session_manager.create_session() on the reference boundary with
+    Layer 1 fetched from USGS/USDA and the Daymet record fetched for
+    Climate -- which is the real-DEM render the offline run cannot give;
   * the whole report -- cover, Climate from the Daymet fixture, Landform
     from that session -- as PDF, and EVERY PAGE as PNG;
   * the measurements: both acreage columns against the cover's acreage;
@@ -17,11 +21,12 @@ of site-data-report-proposal.md's build sequence:
     contour interval, count and labels; the legend entries; the call
     counts that prove Landform recomputed nothing the warm-up built.
 
-THE DEM is the fixture's synthetic terrain over the real boundary (a 4%
-bench, an incised drainage, flanking levees) -- no real 3DEP raster is
-checked in and the sandbox has no network. The classes, acreages and
-contours are real computations over that array; the land is not the
-parcel's.
+THE DEM, offline, is the fixture's synthetic terrain over the real
+boundary (a 4% bench, an incised drainage, flanking levees) -- no real
+3DEP raster is checked in and the sandbox has no network. The classes,
+acreages and contours are real computations over that array; the land is
+not the parcel's. Run --live from a machine with network for the parcel's
+own ground.
 """
 
 import os
@@ -30,9 +35,11 @@ import tempfile
 from datetime import date
 from unittest.mock import patch
 
-import offline_harness
+LIVE = "--live" in sys.argv
+if not LIVE:
+    import offline_harness
 
-offline_harness.install()
+    offline_harness.install()
 
 import exclusion_zones  # noqa: E402
 import keypoint_detection  # noqa: E402
@@ -46,7 +53,10 @@ from reference_fixture import REAL_BOUNDARY  # noqa: E402
 from report_data import report_data_from_daily  # noqa: E402
 
 FIXTURE = "daymet_reference_fixture.csv"
-GENERATED_ON = date(2026, 9, 21)
+# The generation date is the render date, as in real use (site_report
+# defaults generated_on to date.today()); pinning it here would put the
+# running footer's date before the source line's retrieval date.
+GENERATED_ON = date.today()
 
 
 def report_data():
@@ -54,12 +64,56 @@ def report_data():
         return report_data_from_daily(REAL_BOUNDARY, parse_daymet_csv(handle.read()))
 
 
+class _LiveSession:
+    """A REAL session on the reference boundary -- Layer 1 over the network,
+    the warm-up on the parcel's own DEM. Same three reads the offline
+    Session offers."""
+
+    def __init__(self):
+        import tempfile as _tempfile
+
+        import session_cache
+        import session_manager
+        from document_store import JSONFileStore
+
+        self.store = JSONFileStore(_tempfile.mkdtemp(prefix="landform_live_"))
+        self.fetch_cache = session_cache.FetchCache(max_entries=2)
+        self.cache = session_cache.SessionCache(max_sessions=2, idle_timeout_seconds=1800.0)
+        self.document = session_manager.create_session(
+            REAL_BOUNDARY, self.store, fetch_cache=self.fetch_cache, cache=self.cache
+        )
+        self.id = self.document["session_id"]
+        self._session_manager = session_manager
+
+    def context(self):
+        return self._session_manager.get_session_context(
+            self.id, self.store, fetch_cache=self.fetch_cache, cache=self.cache
+        )
+
+    def stored(self):
+        return self.store.get(self.id)
+
+
+class _NoHarness:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
 def main(out_dir: str) -> int:
     os.makedirs(out_dir, exist_ok=True)
-    data = report_data()
+    if LIVE:
+        import report_data as report_data_module
 
-    with fixture.Harness():
-        session = fixture.Session()
+        data = report_data_module.default_report_fetch_cache().get_or_fetch(REAL_BOUNDARY)
+        print("LIVE: Layer 1 and Daymet fetched over the network for the reference parcel")
+    else:
+        data = report_data()
+
+    with (_NoHarness() if LIVE else fixture.Harness()):
+        session = _LiveSession() if LIVE else fixture.Session()
         context = session.context()
         document = session.stored()
 
@@ -153,4 +207,5 @@ def main(out_dir: str) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1] if len(sys.argv) > 1 else tempfile.mkdtemp(prefix="landform-")))
+    positional = [a for a in sys.argv[1:] if not a.startswith("--")]
+    sys.exit(main(positional[0] if positional else tempfile.mkdtemp(prefix="landform-")))

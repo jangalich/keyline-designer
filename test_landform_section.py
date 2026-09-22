@@ -17,15 +17,19 @@ the pages.
      zero with one.
   4. the tables: both acreage columns sum to the cover's acreage, both
      share columns to 100.0, only the classes present, a total row that IS
-     the parcel, one decimal everywhere; the summary line's template.
-  5. the map: slope tints under contours under valleys under keypoints,
-     only the classes present, the ramp's opacities on the terrain token
-     with the darkest capped, index labels, legend entries in order; a
-     synthetic keypoint draws as the asterisk and earns its legend entry.
+     the parcel, one decimal everywhere with a dash for a true zero; the
+     summary line's template.
+  5. the map: slope tints as FILLED CONTOURS of the slope grid clipped to
+     the boundary, under contours under valleys under keypoints, only the
+     classes present, the ramp's opacities on the terrain token with the
+     darkest capped and the lightest lifted, index labels, legend entries
+     in order; a synthetic keypoint draws as the asterisk and earns its
+     legend entry.
   6. the pages: the cover carries the acreage; every colour literal in the
      stylesheet, the templates, the renderer and the section builder is in
-     site_report.TOKENS; decimal alignment measured in both tables; the
-     footer's two lines; Climate still renders.
+     site_report.TOKENS; the two-page rule (figures, then detail); decimal
+     alignment measured in both tables; the footer's two lines; Climate
+     still renders.
 """
 
 import os
@@ -35,7 +39,7 @@ from datetime import date
 from unittest.mock import patch
 
 import numpy as np
-from shapely.geometry import Point
+from shapely.geometry import MultiPolygon, Point, Polygon
 
 import offline_harness
 
@@ -57,6 +61,7 @@ from landform_section import (  # noqa: E402
     SLOPE_TINT_CAP,
     SLOPE_TINT_OPACITY,
     TerrainInputs,
+    ZERO_DASH,
     allocate_exactly,
     aspect_sector,
     build_landform_section,
@@ -203,17 +208,25 @@ assert total["label"] == "Total" and total["cells"] == ["", f"{COVER_ACRES:.1f}"
 assert aspect_table["columns"] == list(ASPECT_SECTORS) + [FLAT_LABEL]
 assert [r["label"] for r in aspect_table["rows"]] == ["Acres", "% of parcel"]
 one_decimal = re.compile(r"^\d{1,3}(,\d{3})*\.\d$")
+zero_cells = 0
 for table in (slope_table, aspect_table):
     for row in table["rows"]:
         for cell in row["cells"][1:] if table is slope_table else row["cells"]:
+            if cell == ZERO_DASH:
+                zero_cells += 1
+                continue
             assert one_decimal.match(cell), cell
+            assert float(cell.replace(",", "")) != 0.0, "a zero is set as the dash, never as 0.0"
+assert zero_cells >= 1, "the fixture has empty aspect sectors; they must read as dashes"
+assert "0.0" not in [c for r in aspect_table["rows"] for c in r["cells"]]
+assert slope_table["compact"] is True and "compact" not in aspect_table
 # The parcel's own acreage from the tables' columns, sure to the cent of an acre.
 assert sum(float(r["cells"][1]) for r in slope_table["rows"][:-1]) == float(total["cells"][1])
-assert round(sum(float(c) for c in aspect_table["rows"][0]["cells"]), 6) == COVER_ACRES
+assert round(sum(0.0 if c == ZERO_DASH else float(c) for c in aspect_table["rows"][0]["cells"]), 6) == COVER_ACRES
 # The summary line's template.
 summary = _label_text(SECTION["summary"])
 relief = SECTION["contours"]["relief_ft"]
-assert summary.startswith(f"Elevation ranges {round(relief):,} ft across the parcel. Most of it is in slope class ")
+assert summary.startswith(f"The land rises {round(relief):,} ft across the parcel. Most of it is in slope class ")
 dominant = max((c for c, _, _ in SLOPE_CLASSES), key=lambda c: counts[c])
 assert f"slope class {dominant}, {slope_range_label(dominant)}, and it falls toward the " in summary
 assert SECTION["summary"][1] == {"value": f"{round(relief):,}"}, "the relief figure is data"
@@ -240,11 +253,35 @@ print(f"   cover {COVER_ACRES}; slope acres {slope_table['acres']}; aspect acres
 # ======================================================================
 print("5. the map: tints under contours under valleys under keypoints; the ramp; the legend")
 assert SLOPE_TINT_OPACITY["F"] == SLOPE_TINT_CAP == max(SLOPE_TINT_OPACITY.values()), "the darkest tint is the cap"
+assert SLOPE_TINT_OPACITY["A"] >= 0.12, "the lightest tint is lifted off the paper"
 opacities = [SLOPE_TINT_OPACITY[c] for c, _, _ in SLOPE_CLASSES]
-assert opacities == sorted(opacities) and all(b - a >= 0.08 for a, b in zip(opacities, opacities[1:])), opacities
+assert opacities == sorted(opacities) and all(b - a >= 0.07 for a, b in zip(opacities, opacities[1:])), opacities
+fills = landform_section.slope_class_geometries(TERRAIN, counts)
+assert list(fills) == slope_table["classes"], (list(fills), slope_table["classes"])
+boundary = TERRAIN.boundary_polygon_utm
+for name, geometry in fills.items():
+    assert isinstance(geometry, (Polygon, MultiPolygon)), type(geometry)
+    assert geometry.within(boundary.buffer(0.01)), f"class {name} fill is not clipped to the boundary"
+    # A filled contour's edge is an iso-line of the slope grid, not a cell edge:
+    # its vertices do not sit on the 5 m grid lines the way a cell footprint's do.
+    px, py = TERRAIN.dem["resolution_meters"]
+    interior = [
+        (x, y) for part in getattr(geometry, "geoms", [geometry]) for x, y in part.exterior.coords
+        if boundary.buffer(-1.0).contains(Point(x, y))
+    ]
+    on_grid = sum(
+        1 for x, y in interior
+        if abs(((x - TERRAIN.dem["origin_x"]) / px) % 1.0) < 1e-6 and abs(((TERRAIN.dem["origin_y"] - y) / py) % 1.0) < 1e-6
+    )
+    assert on_grid < len(interior) / 2, f"class {name} fill looks like cell footprints ({on_grid}/{len(interior)} on grid lines)"
+# The fills together cover the parcel: filled contours between the breaks
+# tile the surface, so their union is (nearly) the whole boundary.
+covered = landform_section.unary_union(list(fills.values()))
+assert covered.area >= 0.97 * boundary.area, covered.area / boundary.area
+# A fill polygon never enters a table: the acreages come from cell counts alone.
+assert round(sum(slope_table["acres"]), 6) == COVER_ACRES
 layers = landform_section.build_map_layers(
-    TERRAIN, report_map.parcel_contours(TERRAIN.dem, TERRAIN.boundary_polygon_utm),
-    landform_section.slope_class_geometries(TERRAIN, landform_section.classify_cells(TERRAIN)["slope_masks"]),
+    TERRAIN, report_map.parcel_contours(TERRAIN.dem, TERRAIN.boundary_polygon_utm), fills,
 )
 ids = [l["id"] for l in layers]
 tint_ids = [i for i in ids if i.startswith("slope-")]
@@ -290,7 +327,9 @@ print(f"   layers {ids}; ramp {opacities}; legend {legend}; keypoint asterisk ve
 print("6. the pages: cover acreage, colour literals, decimal alignment, the footer, Climate intact")
 html = site_report.render_site_report_html(DATA, generated_on=GENERATED_ON, terrain=TERRAIN)
 assert f'<p class="cover__acres"><span class="data">{COVER_ACRES:.1f}</span> acres</p>' in html
-assert 'class="section section--landform"' in html and 'class="section section--climate"' in html
+assert 'class="section section--landform section--map"' in html and 'class="section section--climate"' in html
+assert '<div class="section__figures">' in html and '<div class="section__detail">' in html
+assert 'class="data-table data-table--compact"' in html and html.count('class="data-table"') == 2  # aspect + Climate
 assert html.index("section--climate") < html.index("section--landform"), "outline order"
 assert "III" in html and "Landform" in html
 # Colour literals: the stylesheet, every template, the renderer, the section builder -> only TOKENS.
@@ -335,8 +374,24 @@ def _tables(page):
     return [b for b in _walk(page._page_box) if type(b).__name__ == "TableBox"]
 
 
-landform_tables = _tables(pages[2]) + _tables(pages[3])
+# THE TWO-PAGE RULE: figures on the first page, every number on the second.
+def _classes_on(page):
+    return {
+        (getattr(b, "element", None) is not None and b.element.get("class") or "").split()[0]
+        for b in _walk(page._page_box)
+        if getattr(b, "element", None) is not None and b.element.get("class")
+    }
+
+
+assert {"report-map", "key-figures", "summary", "heading"} <= _classes_on(pages[2]), _classes_on(pages[2])
+assert not _tables(pages[2]), "no table on the figures page"
+assert {"data-table", "source-footer"} <= _classes_on(pages[3])
+assert "key-figures" not in _classes_on(pages[3]) and "report-map" not in _classes_on(pages[3])
+landform_tables = _tables(pages[3])
 assert len(landform_tables) == 2, len(landform_tables)
+# The compact table is narrower than the measure; the aspect table takes it.
+slope_box, aspect_box = landform_tables
+assert slope_box.width < 0.8 * aspect_box.width, (slope_box.width, aspect_box.width)
 slope_cells, aspect_cells = (_numeric_cells(t) for t in landform_tables)
 # 3 per class row + 2 in the total row; 18 in the aspect table.
 assert len(slope_cells) == 3 * len(slope_table["classes"]) + 2, len(slope_cells)
@@ -354,10 +409,13 @@ for right, text, box in landform_cells:
     assert text_boxes, text
     advances.add(round(sum(b.width for b in text_boxes) / len(text), 2))
 assert len(advances) == 1, sorted(advances)
-# The decimal point sits one glyph in from the right edge in every one-decimal cell.
+# The decimal point sits one glyph in from the right edge in every one-decimal cell;
+# a dash cell is the one exception and is a single glyph.
 for right, text, box in landform_cells:
-    if "." in text:
-        assert len(text) - text.index(".") == 2, text
+    if text == ZERO_DASH or "%" in text:  # the dash, or the slope table's Range column
+        continue
+    assert "." in text and len(text) - text.index(".") == 2, text
+assert any(text == ZERO_DASH for _, text, _ in landform_cells), "the rendered aspect table shows dashes"
 flat = "".join("".join(b.text for b in _walk(p._page_box) if type(b).__name__ == "TextBox") for p in pages[2:])
 squash = "".join(flat.split())
 assert "".join(landform_section.CAVEAT_LINE.split()) in squash

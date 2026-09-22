@@ -2,13 +2,15 @@
     figures right-aligned in every other column, hairline rules, a stock
     header row.
 
-    `table` is {corner, columns: [str], rows: [{label, cells: [str]}]}.
-    A row label is a string (prose) or a list of summary-style parts, so a
-    code inside it -- a slope class letter -- can be set as data.
+    `table` is {corner, columns: [str], rows: [{label, cells: [str]}],
+    compact?}. A row label is a string (prose) or a list of summary-style
+    parts, so a code inside it -- a slope class letter -- can be set as
+    data. `compact` sizes the table to its content instead of the full
+    measure -- for a table of three or four narrow columns.
     Every value arrives ALREADY FORMATTED by the section builder (unit
     conversion and rounding are its job); this macro sets and aligns. -#}
 {% macro data_table(table) -%}
-<table class="data-table">
+<table class="data-table{% if table.compact %} data-table--compact{% endif %}">
   <thead>
     <tr>
       <th class="label">{{ table.corner }}</th>
