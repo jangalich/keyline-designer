@@ -46,11 +46,12 @@ polygon's acreage, rounded by largest remainder (allocate_exactly) so the
 rounded column adds up to the rounded total, never to a tenth either side
 of it. Percent columns are allocated the same way to 100.0.
 
-THE MAP adds four kinds of layer to the fixed frame, drawn in this order:
-slope-class tints (a graduated ramp of ONE hue, the terrain token, light
-for flat ground to dark for steep -- only the classes present), the
-contours with their index labels, valleys as dashed lines, keypoints as
-asterisks. THE DARKEST TINT IS CAPPED at SLOPE_TINT_OPACITY['F'] so a
+THE TERRAIN MAP adds two kinds of layer to the fixed frame, drawn in this
+order: slope-class tints (a graduated ramp of ONE hue, the terrain token,
+light for flat ground to dark for steep -- only the classes present), then
+the contours with their index labels. Valleys, ridges, keypoints and
+keylines are the KEYLINE-STRUCTURE MAP's, a page later at the same extent
+(build_structure_layers). THE DARKEST TINT IS CAPPED at SLOPE_TINT_OPACITY['F'] so a
 full-strength terrain contour still reads over class F ground, and the
 LIGHTEST IS LIFTED so the class covering most of a parcel never reads as
 blank paper; the ramp is a table of opacities on the one token, never a
@@ -65,11 +66,12 @@ smooth iso-lines of the same surface the linework comes from, and they
 clip cleanly to the boundary with no cell-edge slivers. The acreages do
 not move: nothing in a table reads a fill polygon.
 
-TWO PAGES, BY RULE. A section with a map is two pages: the picture and
-its takeaways (summary, map, legend, key figures) on the first, every
-number (the tables, the footer) on the second. landform.html marks the
-split with .section__figures / .section__detail; every later section
-with a map takes the same shape.
+THREE PAGES, BY RULE. The terrain: summary, the terrain map and, under
+it, the slope table -- the map's legend in numbers. The keyline structure:
+the structure map, its caption, the primary valley's profile. The
+numbers: the nine key figures, the aspect and valley tables, the footer.
+landform.html marks the split with .section__figures / .section__structure
+/ .section__detail.
 """
 
 import math
@@ -431,13 +433,23 @@ def _one_decimal(value: float) -> str:
     return f"{value:,.1f}"
 
 
-# A true zero in a one-decimal column is set as a dash: it reads as "none",
-# not as a measurement, and keeps the decimal line down the column.
+# A TRUE zero in a one-decimal column is set as a dash: it reads as "none",
+# not as a measurement, and keeps the decimal line down the column. A value
+# that is not zero but rounds below the displayed precision is NOT none and
+# reads "<0.1", so a sector with a few cells can never show a dash beside a
+# nonzero share. `count` is the cell count behind the allocated value when
+# the caller has one; without it the value itself decides.
 ZERO_DASH = "–"
+BELOW_PRECISION = "<0.1"
 
 
-def _one_decimal_or_dash(value: float) -> str:
-    return ZERO_DASH if value == 0 else _one_decimal(value)
+def _one_decimal_or_dash(value: float, count: Optional[int] = None) -> str:
+    nonzero = (count > 0) if count is not None else (value != 0)
+    if not nonzero:
+        return ZERO_DASH
+    if round(value, 1) == 0:
+        return BELOW_PRECISION
+    return _one_decimal(value)
 
 
 def format_retrieved_on(when: date) -> str:
@@ -456,7 +468,7 @@ def build_slope_table(counts: dict, parcel_acres: float) -> dict:
     for name, acre, share in zip(present, acres, shares):
         rows.append({
             "label": ["Class ", {"value": name}],
-            "cells": [slope_range_label(name), _one_decimal_or_dash(acre), _one_decimal_or_dash(share)],
+            "cells": [slope_range_label(name), _one_decimal_or_dash(acre, counts[name]), _one_decimal_or_dash(share, counts[name])],
         })
     rows.append({"label": "Total", "cells": ["", _one_decimal(round(parcel_acres, 1)), _one_decimal(100.0)]})
     return {"corner": "Slope class", "columns": ["Range", "Acres", "% of parcel"], "rows": rows,
@@ -472,8 +484,8 @@ def build_aspect_table(counts: dict, parcel_acres: float) -> dict:
         "corner": "Aspect",
         "columns": columns,
         "rows": [
-            {"label": "Acres", "cells": [_one_decimal_or_dash(a) for a in acres]},
-            {"label": "% of parcel", "cells": [_one_decimal_or_dash(s) for s in shares]},
+            {"label": "Acres", "cells": [_one_decimal_or_dash(a, counts.get(name, 0)) for name, a in zip(columns, acres)]},
+            {"label": "% of parcel", "cells": [_one_decimal_or_dash(v, counts.get(name, 0)) for name, v in zip(columns, shares)]},
         ],
         "acres": acres,
         "shares": shares,
@@ -522,9 +534,9 @@ def build_key_figures(contours: dict, classified: dict, derived: landform_deriva
         {"value": f"{_feet(contours['relief_ft'])} ft", "label": "relief"},
         {"value": f"{_one_decimal(classified['mean_slope_pct'])}%", "label": "mean slope"},
         {"value": ASPECT_WORDS[sector].capitalize() if sector else FLAT_LABEL, "label": "dominant aspect", "word": True},
-        {"value": str(counts["detected"]), "label": "keypoints detected"},
-        {"value": str(counts["valleys_on_parcel"]), "label": "valleys crossing the parcel"},
-        {"value": str(counts["ridges_on_parcel"]), "label": "ridges crossing the parcel"},
+        {"value": str(counts["detected"]), "label": keypoint_figure_label(counts)},
+        {"value": str(counts["valleys_on_parcel"]), "label": "valleys on the parcel"},
+        {"value": str(counts["ridges_on_parcel"]), "label": "ridges on the parcel"},
         {"value": f"{_feet(keyline_ft)} ft", "label": "keyline length on the parcel"},
     ]
 
@@ -532,6 +544,15 @@ def build_key_figures(contours: dict, classified: dict, derived: landform_deriva
 # ======================================================================
 # Keypoints, keylines, the profile and the valley table
 # ======================================================================
+
+
+def keypoint_figure_label(counts: dict) -> str:
+    """The figure most likely to be misread carries its qualifier: how
+    many of the detected keypoints sit just outside the boundary."""
+    outside = counts["outside"]
+    if outside == 0:
+        return "keypoints detected"
+    return f"keypoints detected, {outside} just outside the boundary"
 
 
 def _plural(count: int, noun: str) -> str:
@@ -830,6 +851,10 @@ def build_footer(retrieved_on: date) -> dict:
 
 
 def build_map_layers(terrain: TerrainInputs, contours: dict, class_geometries: dict) -> list:
+    """The terrain map: slope-class tints under the contours, nothing
+    else. Valleys and keypoints belong to the keyline-structure map a
+    page later; drawn here too they were a second, partial copy (the
+    on-parcel keypoints only) that disagreed with the figures."""
     layers = []
     for name, _, _ in SLOPE_CLASSES:
         geometry = class_geometries.get(name)
@@ -841,17 +866,6 @@ def build_map_layers(terrain: TerrainInputs, contours: dict, class_geometries: d
             legend=[{"value": name}, " ", {"value": slope_range_label(name)}],
         ))
     layers += report_map.contour_layers(contours, legend=["Contours, ", {"value": f"{contours['interval_ft']} ft"}])
-    valleys = valley_lines(terrain)
-    if valleys:
-        layers.append(report_map.layer(
-            "valleys", valleys, kind="line", stroke="ink-muted", stroke_width=VALLEY_STROKE_PT,
-            dash=VALLEY_DASH, legend="Valleys",
-        ))
-    points = parcel_keypoints(terrain)
-    if points:
-        layers.append(report_map.layer(
-            "keypoints", points, kind="point", stroke="ink", stroke_width=KEYPOINT_STROKE_PT, legend="Keypoints",
-        ))
     return layers
 
 

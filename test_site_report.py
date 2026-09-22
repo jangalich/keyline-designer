@@ -140,8 +140,9 @@ assert list(rows) == [
 assert all(len(r["cells"]) == 12 for r in table["rows"])
 assert rows["Mean high °F"][0] == "36" and rows["Mean high °F"][6] == "83"
 assert rows["Precipitation, in"] == ["3.3", "2.8", "3.2", "3.9", "4.3", "4.6", "4.2", "4.2", "3.7", "3.3", "3.2", "3.1"], rows["Precipitation, in"]
-# January, February and December evaporate nothing at one decimal: dashes, not "0.0".
-assert rows["Potential evaporation, in"][:2] == [ZERO_DASH, ZERO_DASH] and rows["Potential evaporation, in"][11] == ZERO_DASH
+# January and February evaporate NOTHING (Thornthwaite at or below 0 °C): dashes, not "0.0". December
+# evaporates 0.04 in -- not nothing -- and reads "<0.1", never a dash: the dash is for a true zero only.
+assert rows["Potential evaporation, in"][:2] == [ZERO_DASH, ZERO_DASH] and rows["Potential evaporation, in"][11] == "<0.1"
 assert rows["Potential evaporation, in"][6] == "5.4"
 # The balance row: a deficit month carries a TRUE MINUS SIGN, never a hyphen; a rounded zero is a dash.
 balance = rows["Water balance, in"]
@@ -157,7 +158,7 @@ assert all(re.fullmatch(r"-?\d+", v) for v in rows["Mean high °F"] + rows["Mean
 for label in ("Precipitation, in", "Day length, h", "Solar, kWh/m²/day"):
     assert all(re.fullmatch(r"\d+\.\d", v) for v in rows[label]), label
 for label in ("Potential evaporation, in", "Days over 1 in"):
-    assert all(v == ZERO_DASH or re.fullmatch(r"\d+\.\d", v) for v in rows[label]), label
+    assert all(v in (ZERO_DASH, "<0.1") or re.fullmatch(r"\d+\.\d", v) for v in rows[label]), label
 assert all(v == ZERO_DASH or re.fullmatch(MINUS + r"?\d+\.\d", v) for v in balance)
 caption = section["table_caption"]
 assert [p["value"] for p in caption if isinstance(p, dict)] == ["0.96"]

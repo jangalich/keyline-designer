@@ -1,12 +1,13 @@
 {#- THE LANDFORM SECTION -- THREE PAGES BY RULE. The terrain: eyebrow,
-    heading, summary, the terrain map (slope tints, contours, valleys,
-    keypoints) and its legend. The keyline structure: the continuation
+    heading, summary, the terrain map (slope tints and contours), its
+    legend and, under it, the slope table -- the map's legend in numbers.
+    The keyline structure: the continuation
     eyebrow, the keyline-structure map at the SAME extent and scale
     (contours set back, valley stems, ridges, keylines with their
     elevations, keypoints) with the keypoint count in words under it, then
     the primary valley's profile with its caption. The numbers: the
-    continuation eyebrow, the nine key figures, the slope, aspect and
-    valley tables with the valley table's caption, the footer. .section__
+    continuation eyebrow, the nine key figures, the aspect and valley
+    tables with the valley table's caption, the footer. .section__
     figures / .section__structure / .section__detail carry the split.
     No styling here, no numbers here: `section` is landform_section.build_
     landform_section()'s dict, every value already formatted. -#}
@@ -25,6 +26,7 @@
     {{ c2.heading(section.heading) }}
     {{ c3.summary(section.summary) }}
     {{ c7.map(section.map) }}
+    {{ c5.data_table(section.slope_table) }}
   </div>
   <div class="section__structure">
     {{ c1.eyebrow(section.number, section.name, continued=True) }}
@@ -40,7 +42,6 @@
   <div class="section__detail">
     {{ c1.eyebrow(section.number, section.name, continued=True) }}
     {{ c4.key_figures(section.key_figures) }}
-    {{ c5.data_table(section.slope_table) }}
     {{ c5.data_table(section.aspect_table) }}
 {%- if section.valley_table %}
     {{ c5.data_table(section.valley_table) }}

@@ -282,9 +282,11 @@ assert statement == ("3 keypoints: 2 on the property and 1 just outside the boun
 assert {"value": "3"} in SECTION["keypoint_statement"] and {"value": "64 ft"} in SECTION["keypoint_statement"]
 figures = {f["label"]: f["value"] for f in SECTION["key_figures"]}
 assert list(figures) == ["lowest elevation", "highest elevation", "relief", "mean slope", "dominant aspect",
-                         "keypoints detected", "valleys crossing the parcel", "ridges crossing the parcel",
+                         "keypoints detected, 1 just outside the boundary", "valleys on the parcel", "ridges on the parcel",
                          "keyline length on the parcel"]
-assert figures["keypoints detected"] == "3" and figures["valleys crossing the parcel"] == "3" and figures["ridges crossing the parcel"] == "3"
+assert figures["keypoints detected, 1 just outside the boundary"] == "3"
+assert figures["valleys on the parcel"] == "3" and figures["ridges on the parcel"] == "3"
+assert ls.keypoint_figure_label({"outside": 0}) == "keypoints detected"
 assert figures["keyline length on the parcel"] == f"{round(total_ft):,} ft"
 table = SECTION["valley_table"]
 assert table["columns"] == ["Stem, ft", "Fall, ft", "Grade, %", "Keypoint, ft", "Above, %", "Below, %"] and table["corner"] == "Valley"
@@ -376,6 +378,7 @@ assert _text(synthetic_section["keypoint_statement"]) == "No keypoint was found 
 assert synthetic_section["derived"].keylines == [] and "layer-keylines" not in synthetic_section["structure_map"]["svg"]
 assert "layer-keypoints" not in synthetic_section["structure_map"]["svg"] and "layer-valley-stems" in synthetic_section["structure_map"]["svg"]
 assert {f["label"]: f["value"] for f in synthetic_section["key_figures"]}["keypoints detected"] == "0"
+assert "layer-valleys" not in SECTION["map"]["svg"] and "layer-keypoints" not in SECTION["map"]["svg"], "the terrain map is slope and contours"
 assert {f["label"]: f["value"] for f in synthetic_section["key_figures"]}["keyline length on the parcel"] == "0 ft"
 synthetic_profile = synthetic_section["profile"]
 assert synthetic_profile["chart"] is not None and synthetic_profile["chart"]["keypoint_xy"] is None
@@ -417,7 +420,7 @@ def _classes(page):
 
 
 pages = document.pages
-assert {"heading", "summary", "report-map"} <= _classes(pages[3]) and "key-figures" not in _classes(pages[3])
+assert {"heading", "summary", "report-map", "data-table"} <= _classes(pages[3]) and "key-figures" not in _classes(pages[3])
 assert {"report-map", "report-chart", "caption"} <= _classes(pages[4]) and "data-table" not in _classes(pages[4])
 assert {"key-figures", "data-table", "source-footer"} <= _classes(pages[5]) and "report-map" not in _classes(pages[5])
 flat = "".join("".join(b.text for b in _walk(p._page_box) if type(b).__name__ == "TextBox") for p in pages[3:])
