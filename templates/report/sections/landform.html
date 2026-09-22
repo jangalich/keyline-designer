@@ -1,0 +1,28 @@
+{#- THE LANDFORM SECTION -- the six components plus the map, two tables,
+    on TWO PAGES BY RULE: the picture and its takeaways (summary, map,
+    legend, key figures) on the first, every number (the tables, the
+    footer) on the second. .section__figures / .section__detail carry the
+    split; every later section with a map takes the same shape.
+    No styling here, no numbers here: `section` is landform_section.build_
+    landform_section()'s dict, every value already formatted. -#}
+{% import "components/eyebrow.html" as c1 %}
+{% import "components/heading.html" as c2 %}
+{% import "components/summary.html" as c3 %}
+{% import "components/key_figures.html" as c4 %}
+{% import "components/data_table.html" as c5 %}
+{% import "components/source_footer.html" as c6 %}
+{% import "components/map.html" as c7 %}
+<section class="section section--landform section--map">
+  <div class="section__figures">
+    {{ c1.eyebrow(section.number, section.name) }}
+    {{ c2.heading(section.heading) }}
+    {{ c3.summary(section.summary) }}
+    {{ c7.map(section.map) }}
+    {{ c4.key_figures(section.key_figures) }}
+  </div>
+  <div class="section__detail">
+    {{ c5.data_table(section.slope_table) }}
+    {{ c5.data_table(section.aspect_table) }}
+    {{ c6.source_footer(section.footer) }}
+  </div>
+</section>

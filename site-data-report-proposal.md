@@ -896,6 +896,11 @@ USGS / NHD
     flowline layer and covers the reference parcel.
 11. Whether 3DEP's index services can state the source resolution under the
     fetched 5 m grid.
+11a. (Logged at branch 6, Step 0.) Whether a 3DEP project-metadata query —
+    the elevation project index / WESM work-unit service — returns the lidar
+    project name, collection dates and quality level for the reference
+    parcel. Until it is verified, the Landform footer states the retrieval
+    date ("retrieved 21 September 2026"), not a survey vintage.
 
 New live sources (class D)
 12. Census reverse geocoder: endpoint path, parameters, county/state fields.

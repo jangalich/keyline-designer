@@ -1,0 +1,22 @@
+{#- 7. MAP -- report_map.render_map()'s result: the SVG frame, then the
+    legend in a FIXED strip below it, the same on every section's map.
+
+    `map` is render_map()'s dict. The SVG carries its own fonts and colours
+    as attributes; the legend is set here in the report's type, so a label
+    obeys the data rule the way any other text does: strings are prose,
+    {value} mappings are measurements. An empty legend still reserves the
+    strip, so the frame sits at the same height on every page. -#}
+{% macro map(map) -%}
+<figure class="report-map">
+  <div class="report-map__frame">{{ map.svg | safe }}</div>
+  <ul class="report-map__legend">
+{%- for entry in map.legend %}
+    <li class="report-map__entry">{{ entry.swatch | safe }}<span class="report-map__label">
+{%- for part in entry.parts -%}
+{%- if part is mapping -%}<span class="data">{{ part.value }}</span>{%- else -%}{{ part }}{%- endif -%}
+{%- endfor -%}
+</span></li>
+{%- endfor %}
+  </ul>
+</figure>
+{%- endmacro %}

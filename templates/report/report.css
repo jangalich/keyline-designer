@@ -167,6 +167,13 @@ th.num {
   font-size: 13pt;
   margin: 0 0 var(--space-2) 0;
 }
+.cover__acres {
+  font-size: var(--text-body);
+  margin: 0 0 var(--space-2) 0;
+}
+.cover__acres .data {
+  font-weight: 500;
+}
 .cover__meta {
   font-size: var(--text-label);
   color: var(--ink-muted);
@@ -179,6 +186,13 @@ th.num {
   break-before: page;
 }
 .section + .section {
+  break-before: page;
+}
+/* A SECTION WITH A MAP IS TWO PAGES, BY RULE: the picture and its
+   takeaways (summary, map, legend, key figures) on the first page, every
+   number (the tables, the footer) on the second. The split is structural
+   -- two blocks -- so the rhythm is the same whatever the tables hold. */
+.section--map .section__detail {
   break-before: page;
 }
 
@@ -240,6 +254,17 @@ th.num {
   color: var(--ink);
   margin: 0 0 var(--space-1) 0;
 }
+/* A figure that is a word, not a measurement: the prose face at the
+   figure's size, so it sits on the same baseline as its neighbours. */
+.key-figure .figure-word {
+  display: block;
+  font-family: var(--font-prose);
+  font-size: var(--text-figure);
+  font-weight: 600;
+  line-height: 1.1;
+  color: var(--ink);
+  margin: 0 0 var(--space-1) 0;
+}
 .key-figure__label {
   display: block;
   font-size: var(--text-label);
@@ -290,6 +315,57 @@ th.num {
 }
 .data-table tbody tr:last-child td {
   border-bottom: 0.75pt solid var(--rule);
+}
+/* Sized to its content, not the measure: a few narrow columns should sit
+   together, not be spaced across the page. Cells get a little more room
+   so the columns still breathe. */
+.data-table--compact {
+  width: auto;
+  min-width: 3.4in;
+}
+.data-table--compact th,
+.data-table--compact td {
+  padding-left: var(--space-3);
+  padding-right: var(--space-3);
+}
+
+/* 7. Map -- report_map.render_map()'s SVG at full content width, then
+   THE LEGEND IN A FIXED STRIP BELOW THE FRAME: two rows tall whether it
+   holds nine entries or none, so the frame and whatever follows it sit at
+   the same height on every section's page. The SVG carries its own fonts
+   and colours as attributes (WeasyPrint applies no document CSS to SVG
+   text); the legend is HTML and takes the page's type. */
+.report-map {
+  display: block;
+  margin: 0 0 var(--space-4) 0;
+  break-inside: avoid;
+}
+.report-map__frame svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+.report-map__legend {
+  list-style: none;
+  margin: var(--space-2) 0 0 0;
+  padding: 0;
+  min-height: 26pt;
+  font-size: var(--text-eyebrow);
+  line-height: 13pt;
+  color: var(--ink);
+}
+.report-map__entry {
+  display: inline-block;
+  margin: 0 var(--space-4) 0 0;
+  white-space: nowrap;
+}
+.report-map__swatch {
+  display: inline-block;
+  vertical-align: -1.5pt;
+  margin-right: 4pt;
+}
+.report-map__legend .data {
+  font-size: var(--text-eyebrow);
 }
 
 /* 6. Source footer -- the caveat, then the citation smaller */

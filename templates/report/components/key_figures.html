@@ -1,13 +1,16 @@
-{#- 4. KEY FIGURES GRID -- three columns, a large data-face figure over a
-    small prose-face label, on a stock panel.
+{#- 4. KEY FIGURES GRID -- three columns, a large figure over a small
+    prose-face label, on a stock panel.
 
-    `figures` is a list of {value, label}. Six figures make two rows of
-    three; the grid wraps whatever count it is given. -#}
+    `figures` is a list of {value, label, word?}. A figure is a measurement
+    and is set in the data face; a figure that is a WORD -- a compass
+    direction, "none recorded" -- says so with `word: true` and is set in
+    the prose face, because mono is for measurements only. Six figures
+    make two rows of three; the grid wraps whatever count it is given. -#}
 {% macro key_figures(figures) -%}
 <div class="key-figures">
 {%- for figure in figures %}
   <div class="key-figure">
-    <span class="figure">{{ figure.value }}</span>
+    <span class="{{ 'figure-word' if figure.word else 'figure' }}">{{ figure.value }}</span>
     <span class="key-figure__label">{{ figure.label }}</span>
   </div>
 {%- endfor %}

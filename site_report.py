@@ -62,7 +62,9 @@ from typing import Optional
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 import climate_section
+import landform_section
 import report_data as report_data_module
+import session_manager
 
 # --- tokens ------------------------------------------------------------
 #
@@ -76,6 +78,11 @@ TOKENS = {
     "ink": "#2b2b26",
     "ink-muted": "#8a8477",
     "oxide": "#9c4a2f",
+    # NEW ON BRANCH 6, and the first terrain colour in the palette: the
+    # report map's contour lines and slope tints (report_map.py). A muted,
+    # warm brown between ink and oxide in tone -- a printed contour line,
+    # not a cartographic tan. Judged rendered on the Landform proof map.
+    "terrain": "#7a5c3a",
 }
 
 # --- fonts -------------------------------------------------------------
@@ -144,11 +151,24 @@ def cover_label(report_data, property_label: Optional[str]) -> str:
     return f"{abs(lat):.4f}° {'N' if lat >= 0 else 'S'}, {abs(lon):.4f}° {'E' if lon >= 0 else 'W'}"
 
 
-def build_sections(report_data) -> list:
-    """Every section the report renders, in outline order. One today. A
-    later section is one more builder call here; each carries its own
-    numeral from report_outline, so adding one renumbers nothing."""
-    return [climate_section.build_climate_section(report_data)]
+def build_sections(report_data, terrain=None) -> list:
+    """Every section the report renders, in outline order. Climate from
+    the report data; Landform from the session's terrain reads
+    (landform_section.TerrainInputs) when the caller has a session to read
+    -- the report-data-only path renders without it. Each section carries
+    its own numeral from report_outline, so adding one renumbers nothing."""
+    sections = [climate_section.build_climate_section(report_data)]
+    if terrain is not None:
+        sections.append(landform_section.build_landform_section(terrain, TOKENS))
+    return sections
+
+
+def parcel_acres_label(terrain) -> Optional[str]:
+    """The cover's acreage, to one decimal -- the figure every acreage
+    table sums to exactly. None without a session to read it from."""
+    if terrain is None:
+        return None
+    return f"{round(terrain.parcel_acres, 1):,.1f}"
 
 
 def render_site_report_html(
@@ -157,21 +177,25 @@ def render_site_report_html(
     generated_on: Optional[date] = None,
     env: Optional[Environment] = None,
     fonts_directory: str = FONTS_DIRECTORY,
+    terrain=None,
 ) -> str:
-    """The whole document as HTML, stylesheet inlined."""
+    """The whole document as HTML, stylesheet inlined. `terrain` is the
+    session's landform_section.TerrainInputs, or None for a report built
+    from report data alone."""
     env = env or jinja_environment()
     generated_on = generated_on or date.today()
     cover = {
         "title": COVER_TITLE,
         "eyebrow": COVER_EYEBROW,
         "label": cover_label(report_data, property_label),
+        "acres": parcel_acres_label(terrain),
         "generated_on": climate_section.format_generated_on(generated_on),
         "meta": f"Generated {climate_section.format_generated_on(generated_on)}",
     }
     return env.get_template("base.html").render(
         stylesheet=render_stylesheet(env, fonts_directory),
         cover=cover,
-        sections=build_sections(report_data),
+        sections=build_sections(report_data, terrain),
     )
 
 
@@ -180,12 +204,15 @@ def generate_site_report_pdf(
     output_path: str,
     property_label: Optional[str] = None,
     generated_on: Optional[date] = None,
+    terrain=None,
 ) -> str:
     """HTML -> PDF on disk. Returns output_path. No network: the fonts are
     local files and the data is already in hand."""
     from weasyprint import HTML
 
-    html = render_site_report_html(report_data, property_label=property_label, generated_on=generated_on)
+    html = render_site_report_html(
+        report_data, property_label=property_label, generated_on=generated_on, terrain=terrain
+    )
     HTML(string=html, base_url=TEMPLATES_DIRECTORY).write_pdf(output_path)
     return output_path
 
@@ -197,23 +224,29 @@ def generate_session_site_report_pdf(
     property_label: Optional[str] = None,
     report_fetch_cache=None,
     generated_on: Optional[date] = None,
+    fetch_cache=None,
+    cache=None,
 ) -> str:
     """
     The site data report for ONE SESSION: the boundary off the Design
     Document, the report data through the report fetch cache (fetched
-    exactly once per boundary), the PDF at output_path.
+    exactly once per boundary), the terrain off the session context (the
+    warm-up's own products -- session_manager.get_session_context, a cache
+    hit or a rebuild, never a recompute here), the PDF at output_path.
 
-    Reads the document only -- the site inventory describes the property,
-    not the design, so no step's commit state is consulted here. The
-    design record (site-data-report-proposal.md, section 3 of the report)
-    will add that read when it is built. Raises report_data.
-    ReportDataIncompleteError for a REQUIRED layer that fails, which
-    session_report.error_payload() maps to the failed_layer shape.
+    Reads the document and the context only -- the site inventory
+    describes the property, not the design, so no step's commit state is
+    consulted here. The design record (site-data-report-proposal.md,
+    section 3 of the report) will add that read when it is built. Raises
+    report_data.ReportDataIncompleteError for a REQUIRED layer that fails,
+    which session_report.error_payload() maps to the failed_layer shape.
     """
     document = store.get(session_id)
     if report_fetch_cache is None:
         report_fetch_cache = report_data_module.default_report_fetch_cache()
     data = report_fetch_cache.get_or_fetch(document["boundary"])
+    context = session_manager.get_session_context(session_id, store, fetch_cache=fetch_cache, cache=cache)
+    terrain = landform_section.terrain_inputs_from_context(context, document)
     return generate_site_report_pdf(
-        data, output_path, property_label=property_label, generated_on=generated_on
+        data, output_path, property_label=property_label, generated_on=generated_on, terrain=terrain
     )
