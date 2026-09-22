@@ -250,7 +250,7 @@ for t in labels:
     angle = float(t.getAttribute("transform")[len("rotate("):].split()[0])
     assert -90 < angle <= 90, angle
 # A label on a layer that is not a line, or a count that does not match, is refused.
-for bad in (dict(kind="point", labels=["x"]), dict(kind="line", labels=["a", "b"])):
+for bad in (dict(kind="polygon", labels=["x"]), dict(kind="line", labels=["a", "b"])):
     try:
         layer("bad", [Point(0, 0)], stroke="ink", **bad)
     except ValueError:
@@ -260,6 +260,45 @@ for bad in (dict(kind="point", labels=["x"]), dict(kind="line", labels=["a", "b"
 # The keypoint is the asterisk convention: three strokes through one point.
 keypoint_group = [g for g in root.getElementsByTagName("g") if g.getAttribute("id") == "layer-keypoints"][0]
 assert len(keypoint_group.getElementsByTagName("line")) == 3
+# The dot marker: one filled circle in the stroke token, on the map and in the swatch; a set-back line
+# carries stroke-opacity; an unknown marker is refused.
+dotted = render_map(
+    BOUNDARY_POLYGON_UTM,
+    [layer("dots", [Point((minx + maxx) / 2, (miny + maxy) / 2)], kind="point", stroke="ink-muted", marker="dot", legend="Dots"),
+     layer("faint", [LineString([(minx + 50, miny + 50), (maxx - 50, maxy - 50)])], kind="line", stroke="terrain", stroke_opacity=0.55)],
+    TOKENS,
+)
+dot_group = [g for g in minidom.parseString(dotted["svg"]).documentElement.getElementsByTagName("g") if g.getAttribute("id") == "layer-dots"][0]
+circles = dot_group.getElementsByTagName("circle")
+# A halo in the page colour under the dot, so it reads as a point on a line rather than a thickening of it.
+assert len(circles) == 2 and not dot_group.getElementsByTagName("line")
+assert circles[0].getAttribute("fill") == TOKENS["page"] and float(circles[0].getAttribute("r")) == report_map.DOT_RADIUS_PT + report_map.DOT_HALO_PT
+assert circles[1].getAttribute("fill") == TOKENS["ink-muted"] and float(circles[1].getAttribute("r")) == report_map.DOT_RADIUS_PT
+assert "<circle" in dotted["legend"][0]["swatch"] and "<line" not in dotted["legend"][0]["swatch"]
+# A point layer's labels are set beside the marker, in the data face, in the layer's own token; None sets nothing.
+labelled_points = render_map(
+    BOUNDARY_POLYGON_UTM,
+    [layer("pts", [Point(minx + 100, miny + 100), Point(maxx - 100, maxy - 100)], kind="point", stroke="ink", marker="dot", labels=["1,173", None])],
+    TOKENS,
+)
+pts_texts = [t for t in minidom.parseString(labelled_points["svg"]).documentElement.getElementsByTagName("text")
+             if t.parentNode.getAttribute("id") == "layer-pts"]
+assert [t.firstChild.data for t in pts_texts] == ["1,173"] and pts_texts[0].getAttribute("font-family") == "IBM Plex Mono"
+assert pts_texts[0].getAttribute("fill") == TOKENS["ink"] and pts_texts[0].getAttribute("text-anchor") == "start"
+assert labelled_points["labels_placed"] == {}, "point labels always fit; only line layers report placements"
+# A labelled line layer reports which labels were set, by the same rule the renderer applies.
+assert full["labels_placed"] == {"index-contours": report_map.label_placements(BOUNDARY_POLYGON_UTM, index_layer)}
+assert any(full["labels_placed"]["index-contours"]) and len(full["labels_placed"]["index-contours"]) == len(index_layer["labels"])
+short = layer("short", [LineString([(minx + 10, miny + 10), (minx + 12, miny + 12)])], kind="line", stroke="ink", labels=["1,000"])
+assert report_map.label_placements(BOUNDARY_POLYGON_UTM, short) == [False], "a part too short to carry its label drops it"
+faint_group = dotted["svg"].split('<g id="layer-faint">', 1)[1].split("</g>", 1)[0]
+assert 'stroke-opacity="0.55"' in faint_group and "stroke-opacity" not in svg, "opacity only when set back"
+try:
+    layer("bad", [Point(0, 0)], kind="point", stroke="ink", marker="star")
+except ValueError:
+    pass
+else:
+    raise AssertionError("an unknown marker must be refused")
 # The boundary is in ink at the boundary weight; contours in terrain.
 boundary_path = [p for p in root.getElementsByTagName("path") if p.getAttribute("id") == "parcel-boundary"][0]
 assert boundary_path.getAttribute("stroke") == TOKENS["ink"]

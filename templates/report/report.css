@@ -195,6 +195,51 @@ th.num {
 .section--map .section__detail {
   break-before: page;
 }
+/* LANDFORM IS THREE PAGES: the terrain, then the keyline structure (a
+   second map at the same extent and the valley profile), then the
+   numbers. The structure page is its own block; the eyebrow on it and on
+   the numbers page reads ", continued". */
+.section--map .section__structure {
+  break-before: page;
+}
+.section__structure .report-map {
+  margin-bottom: var(--space-2);
+}
+.section__structure .caption {
+  margin-bottom: var(--space-4);
+}
+.eyebrow--continued {
+  margin-bottom: var(--space-4);
+}
+/* THE TERRAIN PAGE holds the summary, the map with its legend and the
+   slope table beneath it -- the map's legend in numbers -- which fits
+   only with the summary and the map sitting closer; the compact table's
+   rows give up a point each. Measured: 161 pt under the map at the
+   section's usual spacing against a 172 pt table. */
+.section--landform .section__figures .summary {
+  margin-bottom: var(--space-4);
+}
+.section--landform .section__figures .report-map {
+  margin-bottom: var(--space-2);
+}
+.section--landform .section__figures .data-table--compact th,
+.section--landform .section__figures .data-table--compact td {
+  padding-top: 2pt;
+  padding-bottom: 2pt;
+}
+/* The numbers page holds nine key figures, two tables, a caption and
+   the footer: the panel and the tables sit closer, as Climate's do. */
+.section--landform .key-figures {
+  padding: var(--space-3) var(--space-5);
+  row-gap: var(--space-3);
+  margin-bottom: var(--space-3);
+}
+.section--landform .data-table {
+  margin-bottom: var(--space-2);
+}
+.section--landform .section__detail .caption {
+  margin-bottom: var(--space-3);
+}
 /* A SECTION WITH A CHART TAKES THE SAME TWO PAGES: the pictures and the
    takeaway first, the numbers second (Climate). Its second page holds
    nine key figures, a nine-row table, two compact tables, four captions

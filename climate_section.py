@@ -28,7 +28,7 @@ the whole number. Precipitation, evaporation, balance, heavy-rain days
 and day length to ONE decimal -- phase 1's two were for verification,
 not print. A true zero in a one-decimal row is set as a dash, the
 Landform rule (landform_section.ZERO_DASH): January's evaporation reads
-"–", not "0.0". A deficit in the balance row carries a TRUE MINUS SIGN
+"–", not "0.0", when it is truly zero, and "<0.1" when it is not. A deficit in the balance row carries a TRUE MINUS SIGN
 (U+2212), not a hyphen. Design-storm depths keep the two decimals Atlas
 14 serves: a design figure at the source's own precision.
 
@@ -63,6 +63,7 @@ from datetime import date
 
 import report_chart
 from climate_report import celsius_to_fahrenheit
+import landform_section
 from landform_section import ZERO_DASH
 from report_outline import section_number
 
@@ -117,9 +118,10 @@ def _one_decimal(value: float) -> str:
 
 
 def _one_decimal_or_dash(value: float) -> str:
-    """The Landform rule: a value that rounds to zero at one decimal is a
-    dash, so the row reads 'none' rather than a measurement of nothing."""
-    return ZERO_DASH if round(value, 1) == 0 else _one_decimal(value)
+    """The Landform rule: a TRUE zero is a dash, so the row reads 'none'
+    rather than a measurement of nothing; a value that is not zero but
+    rounds below one decimal reads '<0.1', never a dash."""
+    return landform_section._one_decimal_or_dash(value)
 
 
 def _signed_one_decimal(value: float) -> str:

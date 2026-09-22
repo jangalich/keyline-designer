@@ -32,12 +32,14 @@ the render reaches none.
 import math
 import re
 
+from xml.dom import minidom
+
 import offline_harness
 
 offline_harness.install()
 
 import report_chart
-from report_chart import balance_bands, render_water_balance, render_wind_roses
+from report_chart import balance_bands, profile_exaggeration, render_valley_profile, render_water_balance, render_wind_roses
 
 TOKENS = {
     "page": "#ffffff", "stock": "#f4f1ea", "rule": "#ddd6c8", "ink": "#2b2b26", "ink-muted": "#8a8477",
@@ -197,6 +199,60 @@ assert TOKENS["water"] in legend[0]["swatch"] and TOKENS["ochre"] in legend[1]["
 assert 'class="report-map__swatch"' in legend[2]["swatch"] and f'fill="{TOKENS["water"]}"' in legend[2]["swatch"]
 assert roses.get("legend") is None, "the roses carry their own labels; no legend strip"
 print("   four entries, swatches in water and ochre")
+
+# ======================================================================
+# 6. The valley profile
+# ======================================================================
+print("6. the valley profile: whole-number exaggeration, the keypoint and its grades, boundary ticks, feet")
+PROFILE = {
+    "distance": [0.0, 200.0, 400.0, 600.0, 800.0, 1000.0],
+    "elevation": [1240.0, 1220.0, 1195.0, 1180.0, 1172.0, 1165.0],
+    "crossings": [300.0, 700.0],
+    "keypoint": {"distance": 400.0, "elevation": 1195.0, "grade_above_pct": 8.88, "grade_below_pct": 5.87, "label": "1,195 ft"},
+}
+profile = render_valley_profile(PROFILE, TOKENS)
+x0, y0, x1, y1 = profile["plot"]
+assert profile["frame"][0] == 489.6 and x1 - x0 > 400
+assert isinstance(profile["exaggeration"], int) and profile["exaggeration"] >= 1
+assert abs(profile["y_per_ft"] / profile["x_per_ft"] - profile["exaggeration"]) < 1e-9
+assert profile["exaggeration"] == profile_exaggeration(x1 - x0, y1 - y0, 1000.0, profile["y_range"][1] - profile["y_range"][0])
+# The relief at that exaggeration fits the plot; one step more would not.
+relief_pt = (profile["y_range"][1] - profile["y_range"][0]) * profile["y_per_ft"]
+assert relief_pt <= y1 - y0 + 1e-9 and (profile["exaggeration"] == 10 or relief_pt * (profile["exaggeration"] + 1) / profile["exaggeration"] > y1 - y0)
+assert profile["y_range"] == (1160.0, 1240.0) and profile["y_ticks"][0] == 1160.0 and profile["y_ticks"][-1] == 1240.0
+assert profile["x_ticks"] == [0.0, 200.0, 400.0, 600.0, 800.0, 1000.0]
+kx, ky = profile["keypoint_xy"]
+assert abs(kx - (x0 + 400.0 * profile["x_per_ft"])) < 1e-9 and abs(ky - (y1 - (1195.0 - 1160.0) * profile["y_per_ft"])) < 1e-9
+assert [round(b - x0, 6) for b in profile["boundary_ticks_x"]] == [round(300.0 * profile["x_per_ft"], 6), round(700.0 * profile["x_per_ft"], 6)]
+svg = profile["svg"]
+assert "1,195 ft" in svg and "8.9% above" in svg and "5.9% below" in svg and "parcel boundary" in svg
+assert svg.count("<circle") == 1 and f'fill="{TOKENS["ink"]}"' in svg.split("<circle", 1)[1].split("/>", 1)[0]
+assert f'stroke="{TOKENS["water"]}"' in svg, "the valley floor is in the water token"
+assert "1,240 ft" in svg and "1,000 ft" in svg, "the unit rides beside the top and the last tick"
+assert set(re.findall(r'(?:fill|stroke)="(#[0-9a-fA-F]{6})"', svg)) <= set(TOKENS.values())
+doc = minidom.parseString(svg)
+for text in doc.documentElement.getElementsByTagName("text"):
+    assert text.getAttribute("font-family") in ("IBM Plex Mono", "Source Serif 4")
+    if text.firstChild.data == "parcel boundary":
+        assert text.getAttribute("font-family") == "Source Serif 4", "a word is prose"
+    elif text.firstChild.data[0].isdigit():
+        assert text.getAttribute("font-family") == "IBM Plex Mono", text.firstChild.data
+legend = ["".join(p if isinstance(p, str) else p["value"] for p in e["parts"]) for e in profile["legend"]]
+assert legend == ["valley stem", "keypoint"] and "<circle" in profile["legend"][1]["swatch"]
+# No keypoint: the line alone, no dot, no grades, one legend entry.
+bare = render_valley_profile(dict(PROFILE, keypoint=None, crossings=[]), TOKENS)
+assert bare["keypoint_xy"] is None and "<circle" not in bare["svg"] and "above" not in bare["svg"]
+assert bare["boundary_ticks_x"] == [] and "parcel boundary" not in bare["svg"] and len(bare["legend"]) == 1
+# A steep short profile caps at the maximum; a flat one at 1; bad input refused.
+assert profile_exaggeration(400.0, 120.0, 4000.0, 10.0) == 10 and profile_exaggeration(400.0, 120.0, 100.0, 200.0) == 1
+for bad in (dict(PROFILE, distance=[0.0]), dict(PROFILE, elevation=PROFILE["elevation"][:-1])):
+    try:
+        render_valley_profile(bad, TOKENS)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError(bad)
+print(f"   exaggeration {profile['exaggeration']}x; keypoint at {kx:.1f}, {ky:.1f}; ticks at {[round(b, 1) for b in profile['boundary_ticks_x']]}")
 
 print("\ntest_report_chart.py: all sections passed")
 print(offline_harness.summary())

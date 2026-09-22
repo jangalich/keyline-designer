@@ -27,9 +27,10 @@ the pages.
      legend entry.
   6. the pages: the cover carries the acreage; every colour literal in the
      stylesheet, the templates, the renderer and the section builder is in
-     site_report.TOKENS; the two-page rule (figures, then detail); decimal
-     alignment measured in both tables; the footer's two lines; Climate
-     still renders.
+     site_report.TOKENS; the three-page rule (the terrain, the keyline
+     structure, the numbers) with the continuation eyebrow on the follow-on
+     pages; decimal alignment measured in all three tables; the two maps at
+     one extent and scale; the footer's two lines; Climate still renders.
 """
 
 import os
@@ -47,7 +48,9 @@ offline_harness.install()
 
 import exclusion_zones  # noqa: E402
 import keypoint_detection  # noqa: E402
+import landform_derivations  # noqa: E402
 import landform_section  # noqa: E402
+import report_chart  # noqa: E402
 import report_map  # noqa: E402
 import roads_step_fixture as fixture  # noqa: E402
 import site_report  # noqa: E402
@@ -61,6 +64,7 @@ from landform_section import (  # noqa: E402
     SLOPE_TINT_CAP,
     SLOPE_TINT_OPACITY,
     TerrainInputs,
+    BELOW_PRECISION,
     ZERO_DASH,
     allocate_exactly,
     aspect_sector,
@@ -139,12 +143,15 @@ with fixture.Harness():
     with patch.object(exclusion_zones, "compute_slope_percent", wraps=exclusion_zones.compute_slope_percent) as slope_calls, \
          patch.object(valley_delineation, "delineate_valleys", wraps=valley_delineation.delineate_valleys) as valley_calls, \
          patch.object(keypoint_detection, "detect_keypoints", wraps=keypoint_detection.detect_keypoints) as keypoint_calls, \
-         patch.object(terrain_metrics, "compute_slope_and_aspect", wraps=terrain_metrics.compute_slope_and_aspect) as aspect_calls:
+         patch.object(terrain_metrics, "compute_slope_and_aspect", wraps=terrain_metrics.compute_slope_and_aspect) as aspect_calls, \
+         patch.object(valley_delineation, "fill_and_resolve", wraps=valley_delineation.fill_and_resolve) as fill_calls, \
+         patch.object(valley_delineation, "compute_flow_accumulation", wraps=valley_delineation.compute_flow_accumulation) as flow_calls:
         TERRAIN = terrain_inputs_from_context(CONTEXT, DOCUMENT)
         SECTION = build_landform_section(TERRAIN, TOKENS)
     assert slope_calls.call_count == 0, slope_calls.call_count
     assert valley_calls.call_count == 0 and keypoint_calls.call_count == 0
     assert aspect_calls.call_count == 1, "no landform proposal in the cache -> one Horn pass"
+    assert fill_calls.call_count == 1 and flow_calls.call_count == 1, "the flow pass the ridges and the profile need, once"
     assert TERRAIN.aspect_source == "one Horn pass" and SECTION["aspect_source"] == "one Horn pass"
     assert TERRAIN.slope_pct is CONTEXT.exclusion_zones["slope_pct"], "the slope grid is the warm-up's own object"
     assert TERRAIN.valleys == CONTEXT.valleys and TERRAIN.keypoints == CONTEXT.keypoints
@@ -182,8 +189,8 @@ with fixture.Harness():
         assert "slope grid" in str(exc)
     else:
         raise AssertionError("a missing slope grid must raise, not recompute")
-print("   compute_slope_percent 0, delineate_valleys 0, detect_keypoints 0; aspect: one Horn pass without the "
-      "landform proposal, zero with it")
+print("   compute_slope_percent 0, delineate_valleys 0, detect_keypoints 0, the flow pass 1; aspect: one Horn pass "
+      "without the landform proposal, zero with it")
 
 # ======================================================================
 # 4. The tables and the summary
@@ -215,14 +222,28 @@ for table in (slope_table, aspect_table):
             if cell == ZERO_DASH:
                 zero_cells += 1
                 continue
+            if cell == BELOW_PRECISION:
+                continue
             assert one_decimal.match(cell), cell
             assert float(cell.replace(",", "")) != 0.0, "a zero is set as the dash, never as 0.0"
 assert zero_cells >= 1, "the fixture has empty aspect sectors; they must read as dashes"
 assert "0.0" not in [c for r in aspect_table["rows"] for c in r["cells"]]
+# THE DASH IS FOR A TRUE ZERO ONLY. A dash in the acres row never sits over a nonzero share, and a sector
+# with cells whose allocated acres round to nothing reads "<0.1", never the dash.
+aspect_counts = SECTION["classified"]["aspect_counts"]
+for name, acre_cell, share_cell in zip(aspect_table["columns"], aspect_table["rows"][0]["cells"], aspect_table["rows"][1]["cells"]):
+    if aspect_counts.get(name, 0) == 0:
+        assert acre_cell == ZERO_DASH and share_cell == ZERO_DASH, name
+    else:
+        assert acre_cell != ZERO_DASH and share_cell != ZERO_DASH, (name, acre_cell, share_cell)
+assert (acre_cell == ZERO_DASH) == (share_cell == ZERO_DASH)
+assert landform_section._one_decimal_or_dash(0.0) == ZERO_DASH and landform_section._one_decimal_or_dash(0.0, 0) == ZERO_DASH
+assert landform_section._one_decimal_or_dash(0.0, 3) == BELOW_PRECISION and landform_section._one_decimal_or_dash(0.04) == BELOW_PRECISION
+assert landform_section._one_decimal_or_dash(0.05) == "0.1" and landform_section._one_decimal_or_dash(2.0, 5) == "2.0"
 assert slope_table["compact"] is True and "compact" not in aspect_table
 # The parcel's own acreage from the tables' columns, sure to the cent of an acre.
 assert sum(float(r["cells"][1]) for r in slope_table["rows"][:-1]) == float(total["cells"][1])
-assert round(sum(0.0 if c == ZERO_DASH else float(c) for c in aspect_table["rows"][0]["cells"]), 6) == COVER_ACRES
+assert round(sum(0.0 if c in (ZERO_DASH, BELOW_PRECISION) else float(c) for c in aspect_table["rows"][0]["cells"]), 6) == COVER_ACRES
 # The summary line's template.
 summary = _label_text(SECTION["summary"])
 relief = SECTION["contours"]["relief_ft"]
@@ -232,13 +253,17 @@ assert f"slope class {dominant}, {slope_range_label(dominant)}, and it falls tow
 assert SECTION["summary"][1] == {"value": f"{round(relief):,}"}, "the relief figure is data"
 assert {"value": dominant} in SECTION["summary"] and {"value": slope_range_label(dominant)} in SECTION["summary"]
 assert isinstance(SECTION["summary"][-1], str) and "falls toward the" in SECTION["summary"][-1], "the direction is prose"
-# Key figures: whole feet, one-decimal slope, the aspect as a WORD.
+# Key figures: whole feet, one-decimal slope, the aspect as a WORD; nine of them (the last four are
+# the detector's keypoint count and the derivations' counts -- test_landform_derivations.py holds those).
 figures = {f["label"]: f for f in SECTION["key_figures"]}
-assert set(figures) == {"lowest elevation", "highest elevation", "relief", "mean slope", "dominant aspect", "keypoints on this property"}
+assert list(figures) == ["lowest elevation", "highest elevation", "relief", "mean slope", "dominant aspect",
+                         "keypoints detected", "valleys on the parcel", "ridges on the parcel",
+                         "keyline length on the parcel"]
 assert figures["lowest elevation"]["value"] == f"{round(SECTION['contours']['min_ft']):,} ft"
 assert re.match(r"^\d+\.\d%$", figures["mean slope"]["value"]), figures["mean slope"]
 assert figures["dominant aspect"].get("word") is True and figures["dominant aspect"]["value"][0].isupper()
-assert figures["keypoints on this property"]["value"] == str(len(landform_section.parcel_keypoints(TERRAIN)))
+assert figures["keypoints detected"]["value"] == str(len(TERRAIN.keypoints)) == "0"
+assert figures["keyline length on the parcel"]["value"] == "0 ft" and figures["valleys on the parcel"]["value"] == "2"
 # The footer: caveat first, the source line with the retrieval date.
 assert SECTION["footer"]["caveat"] == [landform_section.CAVEAT_LINE]
 assert SECTION["footer"]["citation"] == [
@@ -251,7 +276,7 @@ print(f"   cover {COVER_ACRES}; slope acres {slope_table['acres']}; aspect acres
 # ======================================================================
 # 5. The map
 # ======================================================================
-print("5. the map: tints under contours under valleys under keypoints; the ramp; the legend")
+print("5. the terrain map: tints under contours and nothing else; the ramp; the legend")
 assert SLOPE_TINT_OPACITY["F"] == SLOPE_TINT_CAP == max(SLOPE_TINT_OPACITY.values()), "the darkest tint is the cap"
 assert SLOPE_TINT_OPACITY["A"] >= 0.12, "the lightest tint is lifted off the paper"
 opacities = [SLOPE_TINT_OPACITY[c] for c, _, _ in SLOPE_CLASSES]
@@ -286,40 +311,40 @@ layers = landform_section.build_map_layers(
 ids = [l["id"] for l in layers]
 tint_ids = [i for i in ids if i.startswith("slope-")]
 assert tint_ids == [f"slope-{c}" for c in slope_table["classes"]], "one tint per class present, in class order"
-assert ids[len(tint_ids):len(tint_ids) + 2] == ["contours", "index-contours"], ids
-assert "valleys" in ids and ids.index("valleys") > ids.index("index-contours")
-assert "keypoints" not in ids, "the fixture terrain has no on-parcel keypoint; nothing is invented"
+assert ids[len(tint_ids):] == ["contours", "index-contours"], ids
+assert "valleys" not in ids and "keypoints" not in ids, "valleys and keypoints are the structure map's, not the terrain map's"
 for spec in layers:
     if spec["id"].startswith("slope-"):
         assert spec["kind"] == "polygon" and spec["fill"] == "terrain" and spec["stroke"] is None
         assert spec["fill_opacity"] == SLOPE_TINT_OPACITY[spec["id"][-1]] <= SLOPE_TINT_CAP
         assert spec["legend"] == [{"value": spec["id"][-1]}, " ", {"value": slope_range_label(spec["id"][-1])}]
-valleys = [l for l in layers if l["id"] == "valleys"][0]
-assert valleys["kind"] == "line" and valleys["stroke"] == "ink-muted" and valleys["dash"]
-assert all(g.within(TERRAIN.boundary_polygon_utm.buffer(0.01)) for g in valleys["geometries"]), "valleys are clipped"
 rendered = SECTION["map"]
 svg = rendered["svg"]
 colours = set(re.findall(r'(?:fill|stroke)="(#[0-9a-fA-F]{6})"', svg))
 assert colours <= set(TOKENS.values()), colours - set(TOKENS.values())
-assert svg.index('id="layer-slope-') < svg.index('id="layer-contours"') < svg.index('id="layer-valleys"') < svg.index('id="parcel-boundary"')
+assert svg.index('id="layer-slope-') < svg.index('id="layer-contours"') < svg.index('id="parcel-boundary"')
+assert "layer-valleys" not in svg and "layer-keypoints" not in svg
 assert "rotate(" in svg, "an index label was set"
 legend = [_label_text(e["parts"]) for e in rendered["legend"]]
 interval = SECTION["contours"]["interval_ft"]
-assert legend == [f"{c} {slope_range_label(c)}" for c in slope_table["classes"]] + [f"Contours, {interval} ft", "Valleys"], legend
-# A keypoint, when the session has one on the parcel, draws as the asterisk and earns its entry.
+assert legend == [f"{c} {slope_range_label(c)}" for c in slope_table["classes"]] + [f"Contours, {interval} ft"], legend
+# Keypoints, when the session has them, draw on the STRUCTURE map (dots, the outside one muted) and never on
+# the terrain map; the figure counts the detector's and says how many sit just outside the boundary.
 centre = TERRAIN.boundary_polygon_utm.representative_point()
 with_keypoint = TerrainInputs(**{**TERRAIN.__dict__, "keypoints": [
-    {"point_utm": Point(centre.x, centre.y), "on_parcel": True, "elevation_m": 310.0},
-    {"point_utm": Point(centre.x + 900, centre.y), "on_parcel": False, "elevation_m": 300.0},
+    {"id": 0, "valley_id": 0, "point_utm": Point(centre.x, centre.y), "on_parcel": True, "elevation_m": 310.0,
+     "rowcol": (0, 0), "position_along_stem": 0, "slope_above_pct": 5.0, "slope_below_pct": 2.0},
+    {"id": 1, "valley_id": 1, "point_utm": Point(centre.x + 900, centre.y), "on_parcel": False, "elevation_m": 300.0,
+     "rowcol": (0, 1), "position_along_stem": 0, "slope_above_pct": 5.0, "slope_below_pct": 2.0,
+     "distance_outside_boundary_m": 900.0},
 ]})
 kp_section = build_landform_section(with_keypoint, TOKENS)
-assert '<g id="layer-keypoints">' in kp_section["map"]["svg"]
-assert kp_section["map"]["svg"].count('id="layer-keypoints"') == 1
-kp_group = kp_section["map"]["svg"].split('<g id="layer-keypoints">', 1)[1].split("</g>", 1)[0]
-assert kp_group.count("<line") == 3, "one on-parcel keypoint -> one asterisk of three strokes"
-assert [_label_text(e["parts"]) for e in kp_section["map"]["legend"]][-1] == "Keypoints"
-assert {f["label"]: f["value"] for f in kp_section["key_figures"]}["keypoints on this property"] == "1"
-print(f"   layers {ids}; ramp {opacities}; legend {legend}; keypoint asterisk verified")
+assert "layer-keypoints" not in kp_section["map"]["svg"] and kp_section["map"]["legend"] == rendered["legend"]
+assert '<g id="layer-keypoints">' in kp_section["structure_map"]["svg"] and '<g id="layer-keypoints-outside">' in kp_section["structure_map"]["svg"]
+kp_figures = {f["label"]: f["value"] for f in kp_section["key_figures"]}
+assert kp_figures["keypoints detected, 1 just outside the boundary"] == "2", kp_figures
+assert "keypoints detected" not in kp_figures, "the qualifier is in the label when a keypoint sits outside"
+print(f"   layers {ids}; ramp {opacities}; legend {legend}; keypoints drawn on the structure map only")
 
 # ======================================================================
 # 6. The pages
@@ -329,11 +354,13 @@ html = site_report.render_site_report_html(DATA, generated_on=GENERATED_ON, terr
 assert f'<p class="cover__acres"><span class="data">{COVER_ACRES:.1f}</span> acres</p>' in html
 assert 'class="section section--landform section--map"' in html and 'class="section section--climate section--chart"' in html
 assert '<div class="section__figures">' in html and '<div class="section__detail">' in html
-assert 'class="data-table data-table--compact"' in html and html.count('class="data-table"') == 2  # aspect + Climate
-assert html.index("section--climate") < html.index("section--landform"), "outline order"
+assert 'class="data-table data-table--compact"' in html and html.count('class="data-table"') == 3  # aspect + valley + Climate
+assert html.count("Landform, continued") == 2, "the structure page and the numbers page carry the continuation eyebrow"
+assert '<div class="section__structure">' in html
+assert html.index('class="section section--climate') < html.index('class="section section--landform'), "outline order"
 assert "III" in html and "Landform" in html
 # Colour literals: the stylesheet, every template, the renderer, the section builder -> only TOKENS.
-files = [report_map.__file__, landform_section.__file__]
+files = [report_map.__file__, landform_section.__file__, landform_derivations.__file__, report_chart.__file__]
 for root, _, names in os.walk(site_report.TEMPLATES_DIRECTORY):
     files += [os.path.join(root, n) for n in names]
 for path in files:
@@ -351,7 +378,8 @@ from weasyprint import HTML  # noqa: E402
 
 document = HTML(string=html, base_url=site_report.TEMPLATES_DIRECTORY).render()
 pages = document.pages
-assert len(pages) == 5, len(pages)      # cover, Climate x2, Landform x2
+# Cover, Climate x2, Landform x3: the terrain map; the keyline-structure map and the profile; the numbers.
+assert len(pages) == 6, len(pages)
 import report_layout  # noqa: E402
 assert report_layout.overflowing_boxes(document) == [], "a box past the page's content width"
 
@@ -385,24 +413,37 @@ def _classes_on(page):
     }
 
 
-assert {"report-map", "key-figures", "summary", "heading"} <= _classes_on(pages[3]), _classes_on(pages[3])
-assert not _tables(pages[3]), "no table on the figures page"
-assert {"data-table", "source-footer"} <= _classes_on(pages[4])
-assert "key-figures" not in _classes_on(pages[4]) and "report-map" not in _classes_on(pages[4])
-landform_tables = _tables(pages[4])
-assert len(landform_tables) == 2, len(landform_tables)
-# The compact table is narrower than the measure; the aspect table takes it.
-slope_box, aspect_box = landform_tables
+# THE THREE-PAGE RULE: the terrain (heading, summary, map, the slope table under it); the structure (a second
+# map, its caption, the profile chart and its caption); the numbers (key figures, aspect and valley tables, footer).
+assert {"report-map", "summary", "heading", "eyebrow", "data-table"} <= _classes_on(pages[3]), _classes_on(pages[3])
+assert not ({"key-figures", "report-chart"} & _classes_on(pages[3]))
+assert {"report-map", "report-chart", "caption", "eyebrow"} <= _classes_on(pages[4]), _classes_on(pages[4])
+assert not ({"key-figures", "data-table", "heading", "summary"} & _classes_on(pages[4]))
+assert len(_tables(pages[3])) == 1 and not _tables(pages[4]), "the slope table under the terrain map; none on the structure page"
+assert {"key-figures", "data-table", "source-footer", "eyebrow"} <= _classes_on(pages[5])
+assert "report-map" not in _classes_on(pages[5]) and "report-chart" not in _classes_on(pages[5])
+landform_tables = _tables(pages[3]) + _tables(pages[5])
+assert len(landform_tables) == 3, len(landform_tables)
+# The compact table is narrower than the measure; the aspect and valley tables take it.
+slope_box, aspect_box, valley_box = landform_tables
 assert slope_box.width < 0.8 * aspect_box.width, (slope_box.width, aspect_box.width)
-slope_cells, aspect_cells = (_numeric_cells(t) for t in landform_tables)
-# 3 per class row + 2 in the total row; 18 in the aspect table.
+assert abs(valley_box.width - aspect_box.width) < 1.0
+slope_cells, aspect_cells, valley_cells = (_numeric_cells(t) for t in landform_tables)
+# 3 per class row + 2 in the total row; 18 in the aspect table; 6 per valley row.
 assert len(slope_cells) == 3 * len(slope_table["classes"]) + 2, len(slope_cells)
 assert len(aspect_cells) == 18, len(aspect_cells)
+valley_table = SECTION["valley_table"]
+assert len(valley_cells) == 6 * len(valley_table["rows"]) and len(valley_table["rows"]) == 2, "the synthetic parcel's two valleys"
 landform_cells = slope_cells + aspect_cells
-# Right edges: every cell in a column shares one -- 3 columns, then 9.
-for cells, expected in ((slope_cells, 3), (aspect_cells, 9)):
+# Right edges: every cell in a column shares one -- 3 columns, then 9, then 6.
+for cells, expected in ((slope_cells, 3), (aspect_cells, 9), (valley_cells, 6)):
     edges = {right for right, _, _ in cells}
     assert len(edges) == expected, (expected, sorted(edges))
+# The valley table: whole feet in the stem, fall and keypoint columns, one decimal in the grades, dashes for
+# a valley without a keypoint (the synthetic parcel has none).
+for row in valley_table["rows"]:
+    assert re.match(r"^\d{1,3}(,\d{3})*$", row["cells"][0]) and re.match(r"^\d{1,3}(,\d{3})*$", row["cells"][1])
+    assert re.match(r"^\d+\.\d$", row["cells"][2]) and row["cells"][3:] == [ZERO_DASH] * 3
 by_edge = {right for right, _, _ in slope_cells} | {right for right, _, _ in aspect_cells}
 # Tabular figures: one glyph advance across every numeric cell of both tables.
 advances = set()
@@ -414,7 +455,7 @@ assert len(advances) == 1, sorted(advances)
 # The decimal point sits one glyph in from the right edge in every one-decimal cell;
 # a dash cell is the one exception and is a single glyph.
 for right, text, box in landform_cells:
-    if text == ZERO_DASH or "%" in text:  # the dash, or the slope table's Range column
+    if text in (ZERO_DASH, BELOW_PRECISION) or "%" in text:  # the dash, "<0.1", or the slope table's Range column
         continue
     assert "." in text and len(text) - text.index(".") == 2, text
 assert any(text == ZERO_DASH for _, text, _ in landform_cells), "the rendered aspect table shows dashes"
@@ -428,7 +469,11 @@ assert "III·LANDFORM" in squash.upper() or "III" in squash
 # severe-weather table's 6 (this report data carries no Atlas 14 answer, so the design-storm table is a
 # statement, not cells).
 assert len(_numeric_cells(pages[2]._page_box)) == 108 + 6
-print(f"   5 pages; {len(landform_cells)} Landform numeric cells in 3 + 9 columns, one glyph advance "
+# The two maps share extent and scale, so a feature sits at the same place on both pages.
+assert SECTION["structure_map"]["meters_per_unit"] == SECTION["map"]["meters_per_unit"]
+assert SECTION["structure_map"]["drawn_bbox"] == SECTION["map"]["drawn_bbox"]
+assert SECTION["structure_map"]["scale_bar"] == SECTION["map"]["scale_bar"]
+print(f"   6 pages; {len(landform_cells)} Landform numeric cells in 3 + 9 columns, one glyph advance "
       f"{advances.pop()} pt; literals only in TOKENS across {len(files) + 1} files")
 
 print("\ntest_landform_section.py: all sections passed")

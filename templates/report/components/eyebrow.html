@@ -1,6 +1,9 @@
 {#- 1. EYEBROW -- the section's number and name, small and muted, in the
     data face. `number` is the section's position in the rendered report,
-    assigned by the assembler; `name` is the section's own. -#}
-{% macro eyebrow(number, name) -%}
-<p class="eyebrow"><span class="eyebrow__number">{{ number }}</span> · {{ name }}</p>
+    assigned by the assembler; `name` is the section's own. A follow-on
+    page of the same section carries the continuation eyebrow: the same
+    line with ", continued", so a page read on its own still says which
+    section it belongs to. -#}
+{% macro eyebrow(number, name, continued=False) -%}
+<p class="eyebrow{% if continued %} eyebrow--continued{% endif %}"><span class="eyebrow__number">{{ number }}</span> · {{ name }}{% if continued %}, continued{% endif %}</p>
 {%- endmacro %}
