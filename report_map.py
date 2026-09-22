@@ -627,6 +627,21 @@ def _swatch(spec: dict, tokens: dict) -> str:
     )
 
 
+def visible_extent_utm(boundary_polygon_utm, frame: tuple = FRAME) -> tuple:
+    """The ground rectangle the frame shows, in the DEM's CRS, above the
+    furniture band: (minx, miny, maxx, maxy). A section drawing context
+    beyond the parcel -- a stream next door, a flood zone along it --
+    clips to this so nothing is drawn under the scale bar or outside
+    the frame, and the extent and scale stay the parcel's."""
+    projection = _Projection(boundary_polygon_utm.bounds, frame, MARGIN_PT, FURNITURE_BAND_PT)
+    width, height = frame
+    minx = (0 - projection.offset_x) / projection.scale
+    maxx = (width - projection.offset_x) / projection.scale
+    maxy = projection.offset_y / projection.scale
+    miny = (projection.offset_y - (height - FURNITURE_BAND_PT)) / projection.scale
+    return (minx, miny, maxx, maxy)
+
+
 def label_placements(boundary_polygon_utm, spec: dict, frame: tuple = FRAME) -> list:
     """For a labelled line layer, whether each geometry's label will be
     set (True) or dropped for want of a part long enough to carry it

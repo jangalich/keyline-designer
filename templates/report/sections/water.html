@@ -1,0 +1,66 @@
+{#- THE WATER & HYDROLOGY SECTION -- THREE PAGES ON LANDFORM'S RHYTHM.
+    The hydrology map: eyebrow, heading, summary, the map (streams,
+    waterbodies, wetlands, flood zone, flow paths over lighter contours)
+    with its legend and caption and, under it, the surface-water table
+    with its caption. The wetness map: the continuation eyebrow, the
+    wetness map at the SAME extent and scale, its caption, then the
+    seasonal water table in the twelve-column form with flooding and
+    ponding as further rows, and its caption. The numbers: the
+    continuation eyebrow, the nine key figures, the wet-ground
+    comparison, catchment and land cover, flood, the footer.
+    .section__figures / .section__structure / .section__detail carry the
+    split. No styling here, no numbers here: `section` is
+    water_section.build_water_section()'s dict, every value already
+    formatted. A degradable source that did not answer leaves its
+    statement where its figure would be. -#}
+{% import "components/eyebrow.html" as c1 %}
+{% import "components/heading.html" as c2 %}
+{% import "components/summary.html" as c3 %}
+{% import "components/key_figures.html" as c4 %}
+{% import "components/data_table.html" as c5 %}
+{% import "components/source_footer.html" as c6 %}
+{% import "components/map.html" as c7 %}
+{% import "components/caption.html" as c9 %}
+<section class="section section--water section--map">
+  <div class="section__figures">
+    {{ c1.eyebrow(section.number, section.name) }}
+    {{ c2.heading(section.heading) }}
+    {{ c3.summary(section.summary) }}
+    {{ c7.map(section.map) }}
+    {{ c9.caption(section.map_caption) }}
+{%- if section.surface_water_table %}
+    {{ c5.data_table(section.surface_water_table) }}
+{%- endif %}
+    {{ c9.caption(section.surface_water_caption) }}
+  </div>
+  <div class="section__structure">
+    {{ c1.eyebrow(section.number, section.name, continued=True) }}
+    {{ c7.map(section.wetness_map) }}
+    {{ c9.caption(section.wetness_caption) }}
+{%- if section.water_table %}
+    {{ c5.data_table(section.water_table) }}
+    {{ c9.caption(section.water_table_caption) }}
+{%- else %}
+    {{ c9.unavailable(section.water_table_unavailable) }}
+{%- endif %}
+  </div>
+  <div class="section__detail">
+    {{ c1.eyebrow(section.number, section.name, continued=True) }}
+    {{ c4.key_figures(section.key_figures) }}
+    {{ c5.data_table(section.comparison_table) }}
+    {{ c9.caption(section.comparison_caption) }}
+{%- if section.land_cover_table %}
+    {{ c5.data_table(section.land_cover_table) }}
+    {{ c9.caption(section.land_cover_caption) }}
+{%- else %}
+    {{ c9.unavailable(section.land_cover_unavailable) }}
+{%- endif %}
+{%- if section.flood_table %}
+    {{ c5.data_table(section.flood_table) }}
+    {{ c9.caption(section.flood_caption) }}
+{%- else %}
+    {{ c9.unavailable(section.flood_unavailable) }}
+{%- endif %}
+    {{ c6.source_footer({"lines": section.sources}) }}
+  </div>
+</section>

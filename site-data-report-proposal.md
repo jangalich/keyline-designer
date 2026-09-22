@@ -766,7 +766,9 @@ Expected shape, dependencies first.
    answered by NHDPlus HR's reach drainage area, which is not truncated by
    the DEM window; the window-derived watershed is reported beneath it with
    its truncation stated, so the wider context DEM is no longer needed for
-   this section.*
+   this section. Phase 2 rendered the three pages (`water_section.py`,
+   `templates/report/sections/water.html`); the report now carries II, III
+   and IV.*
 9. **Class E bundles** (per-state deer table, listed species by county,
    bedrock extract) when a section they serve is scheduled; each with a
    refresh note in the repo.

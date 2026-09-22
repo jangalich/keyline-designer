@@ -727,6 +727,25 @@ a paid report. Each absent layer leaves a visible statement in its place.
   depth; DEEPER THAN the component's described profile (rows exist, no
   layer is Wet); NO DATA (no rows).
 
+`water_section.py` sets the three pages on Landform's rhythm: the
+hydrology map (streams weighted by order and dashed for intermittent,
+waterbodies, wetlands as marsh tufts, the 1%-annual-chance flood zone as
+a light hatch, flow paths as context, contours set back) with the
+surface-water table under it; the wetness map (the wetness index tinted
+at the pipeline's own breakpoints, with the depressions the flow model
+filled) with the seasonal water table under it in the twelve-column
+form -- a depth in the data face, a "deeper than" bound prefixed and
+muted, "no data" in words, the four-month form when a parcel has more map
+units than the page holds; the numbers (nine key figures, the wet-ground
+comparison, land cover of the window's contributing area and of the
+parcel as two named extents, flood, the footer). Both maps are at
+Landform's extent and scale, and context beyond the parcel is clipped to
+what the frame shows (`report_map.visible_extent_utm`). The marsh tufts
+and the hatch are geometry through the ordinary line layer, not SVG
+patterns. `test_water_section.py` greps the section's words for siting
+language, the reverse of Landform's grep, and renders the degraded pages
+with FEMA and NWI unavailable.
+
 `water_derivations.py` derives every figure on the report path from the
 session's reads and these blocks — one flow pass per report, shared with
 Landform and asserted at the count; raw TWI, depression depth and the

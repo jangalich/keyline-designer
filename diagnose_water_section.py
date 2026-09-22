@@ -22,6 +22,8 @@ import sys
 from unittest.mock import patch
 
 LIVE = "--live" in sys.argv
+_positional = [a for a in sys.argv[1:] if not a.startswith("--")]
+OUT_DIR = _positional[0] if _positional else None
 if not LIVE:
     import offline_harness
 
@@ -166,6 +168,71 @@ def main() -> int:
         print(f"  {z['label']:40s} sfha {z['sfha']} study {z['study_type']} bfe {z['static_bfe']}; on parcel {z['cells_on_parcel']} cells; "
               f"in window {z['area_in_window_m2'] * ACRES_PER_M2:.2f} ac")
     _acres_row("flood partition", fl["counts"], parcel_acres)
+
+    # ------------------------------------------------------------------
+    # PHASE 2: the pages. The whole report -- cover, Climate, Landform,
+    # Water -- as PDF and every page as PNG, then a second render with
+    # FEMA and NWI unavailable for the degraded statements.
+    # ------------------------------------------------------------------
+    import os
+    import tempfile
+    from datetime import date
+
+    import pymupdf
+
+    import site_report
+    import water_section
+
+    out_dir = OUT_DIR or tempfile.mkdtemp(prefix="water-")
+    os.makedirs(out_dir, exist_ok=True)
+    section = water_section.build_water_section(inputs, site_report.TOKENS, flow=flow)
+    print("\nsummary:", "".join(p if isinstance(p, str) else p["value"] for p in section["summary"]))
+    print("key figures:", [(f["value"], f["label"]) for f in section["key_figures"]])
+    for name in ("map", "wetness_map"):
+        m = section[name]
+        print(f"{name}: legend", [("".join(p if isinstance(p, str) else p["value"] for p in e["parts"])) for e in m["legend"]],
+              f"m/unit {m['meters_per_unit']:.4f} bbox {tuple(round(v, 1) for v in m['drawn_bbox'])} scale bar {m['scale_bar']}")
+    if section["water_table"]:
+        for row in section["water_table"]["rows"]:
+            label = row["label"] if isinstance(row["label"], str) else "".join(p if isinstance(p, str) else p["value"] for p in row["label"])
+            print(f"  {label:44s}", " ".join(f"{(c['value'] if isinstance(c, dict) else c):>7s}" for c in row["cells"]))
+    for name in ("surface_water_table", "comparison_table", "land_cover_table", "flood_table"):
+        table = section[name]
+        if not table:
+            print(f"  {name}: none"); continue
+        print(f"  {name}: {table['corner']} | {table['columns']}")
+        for row in table["rows"]:
+            label = row["label"] if isinstance(row["label"], str) else "".join(p if isinstance(p, str) else p["value"] for p in row["label"])
+            print(f"    {label:48s}", " ".join(f"{(c['value'] if isinstance(c, dict) else c):>9s}" for c in row["cells"]))
+    for name in ("map_caption", "surface_water_caption", "wetness_caption", "water_table_caption", "comparison_caption",
+                 "land_cover_caption", "flood_caption"):
+        print(f"  {name}: " + "".join(p if isinstance(p, str) else p["value"] for p in section[name]))
+    print("  sources:", ["".join(l) for l in section["sources"]])
+
+    generated_on = date.today()
+    html = site_report.render_site_report_html(data, generated_on=generated_on, terrain=terrain, water=inputs)
+    with open(os.path.join(out_dir, "site-report.html"), "w", encoding="utf-8") as handle:
+        handle.write(html)
+    pdf_path = os.path.join(out_dir, "site-report.pdf")
+    site_report.generate_site_report_pdf(data, pdf_path, generated_on=generated_on, terrain=terrain, water=inputs)
+    doc = pymupdf.open(pdf_path)
+    for index, page in enumerate(doc, start=1):
+        page.get_pixmap(dpi=110).save(os.path.join(out_dir, f"page-{index}.png"))
+    print(f"{len(doc)} pages -> {out_dir}/page-N.png")
+    # The degraded render: FEMA and NWI unavailable.
+    if not LIVE:
+        degraded = fixture.report_data(nwi=None, fema_nfhl=None, unavailable={
+            "nwi": {"label": "mapped wetlands", "reason": "source_unavailable", "error": "down"},
+            "fema_nfhl": {"label": "flood hazard zones", "reason": "source_unavailable", "error": "down"},
+        })
+        degraded_inputs = wd.water_inputs_from_context(context, document, degraded)
+        degraded_pdf = os.path.join(out_dir, "site-report-degraded.pdf")
+        site_report.generate_site_report_pdf(degraded, degraded_pdf, generated_on=generated_on, terrain=terrain, water=degraded_inputs)
+        ddoc = pymupdf.open(degraded_pdf)
+        for index, page in enumerate(ddoc, start=1):
+            if index >= 7:
+                page.get_pixmap(dpi=110).save(os.path.join(out_dir, f"degraded-page-{index}.png"))
+        print(f"degraded: {len(ddoc)} pages -> {out_dir}/degraded-page-N.png")
     return 0
 
 

@@ -10,8 +10,8 @@ ReportData, through Jinja2 and WeasyPrint to a PDF.
                                                     -> the PDF for a session
 
 This is the replacement for generate_pdf_report.py's narrated document
-(site-data-report-proposal.md). It carries ONE section in this branch --
-Climate -- and the foundation every later section composes: the tokens,
+(site-data-report-proposal.md). It carries Climate, Landform and Water &
+hydrology, and the foundation every later section composes: the tokens,
 the fonts, the page geometry, and the six reusable components as Jinja
 macros under templates/report/components/. A section is a builder that
 turns a ReportData into a dict of already-formatted values
@@ -65,6 +65,8 @@ import climate_section
 import landform_section
 import report_data as report_data_module
 import session_manager
+import water_derivations
+import water_section
 
 # --- tokens ------------------------------------------------------------
 #
@@ -163,15 +165,21 @@ def cover_label(report_data, property_label: Optional[str]) -> str:
     return f"{abs(lat):.4f}° {'N' if lat >= 0 else 'S'}, {abs(lon):.4f}° {'E' if lon >= 0 else 'W'}"
 
 
-def build_sections(report_data, terrain=None) -> list:
+def build_sections(report_data, terrain=None, water=None) -> list:
     """Every section the report renders, in outline order. Climate from
     the report data; Landform from the session's terrain reads
     (landform_section.TerrainInputs) when the caller has a session to read
-    -- the report-data-only path renders without it. Each section carries
-    its own numeral from report_outline, so adding one renumbers nothing."""
+    -- the report-data-only path renders without it; Water (branch 9)
+    from the session's water reads (water_derivations.WaterInputs) and the
+    report data's Water blocks, handed Landform's flow pass so the report
+    runs it ONCE. Each section carries its own numeral from
+    report_outline, so adding one renumbers nothing."""
     sections = [climate_section.build_climate_section(report_data)]
     if terrain is not None:
-        sections.append(landform_section.build_landform_section(terrain, TOKENS))
+        landform = landform_section.build_landform_section(terrain, TOKENS)
+        sections.append(landform)
+        if water is not None:
+            sections.append(water_section.build_water_section(water, TOKENS, flow=landform["derived"]))
     return sections
 
 
@@ -190,10 +198,12 @@ def render_site_report_html(
     env: Optional[Environment] = None,
     fonts_directory: str = FONTS_DIRECTORY,
     terrain=None,
+    water=None,
 ) -> str:
     """The whole document as HTML, stylesheet inlined. `terrain` is the
     session's landform_section.TerrainInputs, or None for a report built
-    from report data alone."""
+    from report data alone; `water` the session's water_derivations.
+    WaterInputs, rendered only beside `terrain`."""
     env = env or jinja_environment()
     generated_on = generated_on or date.today()
     cover = {
@@ -207,7 +217,7 @@ def render_site_report_html(
     return env.get_template("base.html").render(
         stylesheet=render_stylesheet(env, fonts_directory),
         cover=cover,
-        sections=build_sections(report_data, terrain),
+        sections=build_sections(report_data, terrain, water),
     )
 
 
@@ -217,13 +227,14 @@ def generate_site_report_pdf(
     property_label: Optional[str] = None,
     generated_on: Optional[date] = None,
     terrain=None,
+    water=None,
 ) -> str:
     """HTML -> PDF on disk. Returns output_path. No network: the fonts are
     local files and the data is already in hand."""
     from weasyprint import HTML
 
     html = render_site_report_html(
-        report_data, property_label=property_label, generated_on=generated_on, terrain=terrain
+        report_data, property_label=property_label, generated_on=generated_on, terrain=terrain, water=water
     )
     HTML(string=html, base_url=TEMPLATES_DIRECTORY).write_pdf(output_path)
     return output_path
@@ -259,6 +270,7 @@ def generate_session_site_report_pdf(
     data = report_fetch_cache.get_or_fetch(document["boundary"])
     context = session_manager.get_session_context(session_id, store, fetch_cache=fetch_cache, cache=cache)
     terrain = landform_section.terrain_inputs_from_context(context, document)
+    water = water_derivations.water_inputs_from_context(context, document, data)
     return generate_site_report_pdf(
-        data, output_path, property_label=property_label, generated_on=generated_on, terrain=terrain
+        data, output_path, property_label=property_label, generated_on=generated_on, terrain=terrain, water=water
     )
