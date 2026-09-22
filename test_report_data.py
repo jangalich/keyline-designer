@@ -6,23 +6,24 @@ layer, its REQUIRED/DEGRADABLE table, its failure shape and its cache.
 The network is refused by offline_harness; every fetch is mocked on
 report_data's OWN namespace (it imports the fetch functions directly, so
 patching their modules would leave its bound references alone). The
-mocks answer with the reference fixtures: Daymet at the parcel, Daymet
-at the five nearest normals stations, Atlas 14 and POWER.
+mocks answer with the reference fixtures: Daymet at the parcel, Atlas 14
+and POWER. The precipitation correction and the heavy-rain normals come
+off the committed bundle -- no mock, no fetch.
 
-  1. THE TABLE: four layers, each named once with a policy the module
+  1. THE TABLE: three layers, each named once with a policy the module
      defines, each a ReportData field, and the fetch function times every
      one of them (the diagnostics self-check's own test, run here against
-     the compiled function so it cannot pass on a stale checkout).
+     the compiled function so it cannot pass on a stale checkout). The
+     bundled blocks are fields and not layers.
   2. HAPPY PATH: every mocked answer -> a ReportData with the centroid the
-     fetches were made at, every block derived once, POWER asked for the
-     Daymet block's own years, the precipitation factor applied to the
-     climate block, severe weather off the bundle, nothing unavailable.
+     fetches were made at, ONE Daymet call, every block derived once,
+     POWER asked for the Daymet block's own years, the bundled factor
+     applied to the climate block, the heavy-rain normals beside it,
+     severe weather off the bundle, nothing unavailable.
   3. A REQUIRED FAILURE RAISES ReportDataIncompleteError carrying the
      (layer, label, reason) triple -- source_unavailable for a
-     RequestException, no_data_for_parcel for an incomplete answer -- for
-     Daymet at the parcel and for Daymet at the stations; a station Daymet
-     has no data for is dropped, not fatal; the real fetch under the
-     offline harness raises the first kind.
+     RequestException, no_data_for_parcel for an incomplete answer; the
+     real fetch under the offline harness raises the first kind.
   4. A DEGRADABLE FAILURE is recorded, not raised: Atlas 14 down ->
      design_storms None and unavailable['atlas14'] source_unavailable;
      Atlas 14 outside coverage -> no_data_for_parcel with the server's
@@ -31,7 +32,6 @@ at the five nearest normals stations, Atlas 14 and POWER.
      a failure is never cached; a different boundary is a miss.
 """
 
-import os
 from unittest import mock
 
 import offline_harness
@@ -52,7 +52,6 @@ from report_data import (
     LAYER_ATLAS14,
     LAYER_CLIMATE,
     LAYER_POWER_WIND,
-    LAYER_STATIONS,
     REPORT_FETCH_LAYERS,
     REQUIRED,
     ReportData,
@@ -67,52 +66,37 @@ with open("atlas14_reference_fixture.csv", encoding="utf-8") as _handle:
     FIXTURE_ATLAS14 = parse_atlas14_csv(_handle.read())
 with open("power_wind_reference_fixture.csv", encoding="utf-8") as _handle:
     FIXTURE_POWER = parse_power_csv(_handle.read())
-STATION_IDS = ["USC00362574", "USC00360022", "USC00363343", "USC00366151", "USC00361139"]
-FIXTURE_STATIONS = {}
-for _sid in STATION_IDS:
-    with open(os.path.join("daymet_station_fixtures", _sid + ".csv"), encoding="utf-8") as _handle:
-        FIXTURE_STATIONS[_sid] = parse_daymet_csv(_handle.read(), required_variables=("prcp",))
-_STATION_BY_POINT = {
-    (round(d["latitude"], 3), round(d["longitude"], 3)): d for d in FIXTURE_STATIONS.values()
-}
 
 # ======================================================================
 # 1. The table
 # ======================================================================
 print("1. REPORT_FETCH_LAYERS names each layer once with a known policy, and each is timed")
-assert REPORT_FETCH_LAYERS == {
-    "daymet_daily": REQUIRED,
-    "daymet_at_stations": REQUIRED,
-    "atlas14": DEGRADABLE,
-    "power_wind": DEGRADABLE,
-}, REPORT_FETCH_LAYERS
+assert REPORT_FETCH_LAYERS == {"daymet_daily": REQUIRED, "atlas14": DEGRADABLE, "power_wind": DEGRADABLE}, REPORT_FETCH_LAYERS
 assert set(REPORT_FETCH_LAYERS.values()) <= {REQUIRED, DEGRADABLE}
 for layer in REPORT_FETCH_LAYERS:
     assert layer in ReportData.__dataclass_fields__, f"{layer} is not a ReportData field"
-for bundled in ("severe_weather", "precipitation_correction"):
+for bundled in ("severe_weather", "precipitation_correction", "heavy_rain_normals"):
     assert bundled in ReportData.__dataclass_fields__ and bundled not in REPORT_FETCH_LAYERS
+assert "daymet_at_stations" not in ReportData.__dataclass_fields__, "the station ratios are bundled, not fetched"
 sites = run_diagnostics._fetch_hook_sites()
 assert sites["report_data.fetch_report_data calls time_layer"] is True, sites
 coverage = [k for k in sites if k.startswith("report_data.fetch_report_data times")]
-assert coverage == ["report_data.fetch_report_data times 4 of 4 declared report layers"], sites
+assert coverage == ["report_data.fetch_report_data times 3 of 3 declared report layers"], sites
 assert sites[coverage[0]] is True
-# Layer 1's own rows are untouched by the addition.
 assert sites["parcel_data.fetch_parcel_data calls time_layer"] is True
 print(f"   {coverage[0]}")
 
 # ======================================================================
 # 2. Happy path
 # ======================================================================
-print("2. every answer becomes a ReportData with each block derived once")
+print("2. every answer becomes a ReportData with each block derived once, from ONE Daymet call")
 daymet_calls = []
 power_calls = []
 atlas_calls = []
 
 
-def _fake_daymet(lat, lon, years=None, variables=None, **kwargs):
-    daymet_calls.append((lat, lon, tuple(years) if years else None, variables))
-    if variables == ("prcp",):
-        return _STATION_BY_POINT[(round(lat, 3), round(lon, 3))]
+def _fake_daymet(lat, lon, **kwargs):
+    daymet_calls.append((lat, lon, kwargs))
     return FIXTURE_DAILY
 
 
@@ -144,11 +128,7 @@ data = _fetch_all()
 assert isinstance(data, ReportData)
 assert data.boundary == list(REAL_BOUNDARY)
 assert data.centroid == boundary_centroid_lat_lon(REAL_BOUNDARY)
-# One Daymet call at the parcel (the module's default window and variables, so neither is passed),
-# then one per station with prcp only over 1991-2020.
-assert daymet_calls[0] == (data.centroid[0], data.centroid[1], None, None)
-assert len(daymet_calls) == 6
-assert all(call[2] == tuple(range(1991, 2021)) and call[3] == ("prcp",) for call in daymet_calls[1:])
+assert daymet_calls == [(data.centroid[0], data.centroid[1], {})], daymet_calls
 assert atlas_calls == [data.centroid] and power_calls == [(data.centroid[0], data.centroid[1], list(range(1995, 2025)))]
 # The fixture was extracted at (40.6443, -79.9821), about 45 m from this
 # polygon centroid (40.64455, -79.98260) -- a different hand-picked point,
@@ -156,9 +136,9 @@ assert atlas_calls == [data.centroid] and power_calls == [(data.centroid[0], dat
 assert abs(data.centroid[0] - FIXTURE_DAILY["latitude"]) < 0.005, data.centroid
 assert abs(data.centroid[1] - FIXTURE_DAILY["longitude"]) < 0.005, data.centroid
 assert data.daymet_daily is FIXTURE_DAILY
-assert set(data.daymet_at_stations) == set(STATION_IDS)
 assert data.precipitation_correction["applied"] is True and abs(data.precipitation_correction["factor"] - 0.96) < 0.002
 assert data.climate["prcp_factor"] == data.precipitation_correction["factor"]
+assert data.heavy_rain_normals["applied"] is True and 6.0 <= data.heavy_rain_normals["annual"] <= 9.0
 assert data.climate["year_count"] == 30 and data.climate["frost"]["frost_free_days"] > 0
 assert data.climate["annual"]["pet_mm"] > 0 and data.climate["annual"]["deficit_months"] == [6, 7, 8]
 assert data.atlas14 is FIXTURE_ATLAS14 and data.design_storms["rows"][1]["depths"][100] == 4.98
@@ -167,7 +147,7 @@ assert data.wind["period"] == {"start": 1995, "end": 2024} == data.climate["peri
 # The polygon centroid, 45 m from the fixture point, takes one more hail and one more wind report into the circle.
 assert data.severe_weather["counts"] == {"hail": 615, "wind": 1917, "tornado": 36} and data.severe_weather["radius_miles"] == 25.0
 assert data.unavailable == {}
-print(f"   centroid {data.centroid[0]:.4f}, {data.centroid[1]:.4f}; factor {data.climate['prcp_factor']:.3f}; "
+print(f"   centroid {data.centroid[0]:.4f}, {data.centroid[1]:.4f}; 1 Daymet call; factor {data.climate['prcp_factor']:.3f}; "
       f"zone {data.climate['hardiness']['zone']}; wind from {data.wind['seasons']['winter']['prevailing_sector']}")
 
 # ======================================================================
@@ -192,38 +172,6 @@ with mock.patch.object(report_data, "get_daymet_daily_for_point", side_effect=Da
     else:
         raise AssertionError("an incomplete answer must raise")
 
-
-def _daymet_stations_down(lat, lon, years=None, variables=None, **kwargs):
-    if variables == ("prcp",):
-        raise requests.exceptions.ConnectionError("down at the station")
-    return FIXTURE_DAILY
-
-
-with mock.patch.object(report_data, "get_daymet_daily_for_point", _daymet_stations_down):
-    try:
-        fetch_report_data(REAL_BOUNDARY)
-    except ReportDataIncompleteError as exc:
-        assert (exc.layer, exc.label) == LAYER_STATIONS and "daymet_at_stations" in str(exc)
-        assert exc.reason == ReportDataIncompleteError.REASON_SOURCE_UNAVAILABLE
-    else:
-        raise AssertionError("Daymet down at the stations must raise")
-
-
-def _one_station_uncovered(lat, lon, years=None, variables=None, **kwargs):
-    if variables == ("prcp",):
-        station = _STATION_BY_POINT[(round(lat, 3), round(lon, 3))]
-        if station["latitude"] == FIXTURE_STATIONS["USC00361139"]["latitude"]:
-            raise DaymetIncompleteError("no cell for this station")
-        return station
-    return FIXTURE_DAILY
-
-
-a, b, c = _all_mocked()
-with mock.patch.object(report_data, "get_daymet_daily_for_point", _one_station_uncovered), b, c:
-    four = fetch_report_data(REAL_BOUNDARY)
-assert set(four.daymet_at_stations) == set(STATION_IDS) - {"USC00361139"}
-assert four.precipitation_correction["applied"] is True and four.precipitation_correction["station_count"] == 4
-
 # The REAL fetch, no mock: the harness refuses daymet.ornl.gov and the
 # error that reaches a caller is the wire-shaped one, source_unavailable.
 try:
@@ -237,7 +185,7 @@ assert any(host == "daymet.ornl.gov" for _, host in offline_harness.refused())
 import parcel_data
 assert ReportDataIncompleteError.REASON_SOURCE_UNAVAILABLE == parcel_data.ParcelDataIncompleteError.REASON_SOURCE_UNAVAILABLE
 assert ReportDataIncompleteError.REASON_NO_DATA_FOR_PARCEL == parcel_data.ParcelDataIncompleteError.REASON_NO_DATA_FOR_PARCEL
-print("   source_unavailable on a RequestException, no_data_for_parcel on an incomplete answer; an uncovered station is dropped")
+print("   source_unavailable on a RequestException, no_data_for_parcel on an incomplete answer; reasons match Layer 1's")
 
 # ======================================================================
 # 4. The degradable path

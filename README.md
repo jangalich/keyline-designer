@@ -649,15 +649,19 @@ layer, separate from Layer 1. After branch 7 the Climate section draws on:
   **Thornthwaite potential evapotranspiration and the climatic water
   balance** (no soil term), heavy-rain days (>= 25.4 mm), day length, the
   driest and wettest year. REQUIRED.
-- `precipitation_normals.py` — the **precipitation correction**: Daymet runs
-  a few percent above the NCEI 1991–2020 station normals around the
-  reference parcel, so the parcel's Daymet precipitation is scaled by the
-  median of normal / Daymet-at-station over the five nearest stations
-  (0.960 there). The normals are bundled
-  (`assets/reference/ncei_prcp_normals_1991_2020.csv`, built by
-  `make_normals_bundle.py` from NCEI's versioned by-station archive — not
-  the access API, which serves 1981–2010 under the same dataset name); the
-  Daymet fetches at the stations are the REQUIRED `daymet_at_stations` layer.
+- `precipitation_normals.py` — the **precipitation correction** and the
+  **heavy-rain normals**: Daymet runs a few percent above the NCEI
+  1991–2020 station normals around the reference parcel, so the parcel's
+  Daymet precipitation is scaled by the median of normal / Daymet-at-station
+  over the five nearest stations (0.960 there); days with at least 1 in are
+  the median of the same stations' monthly normals, because Daymet's
+  interpolation undercounts them. Everything is bundled
+  (`assets/reference/ncei_prcp_normals_1991_2020.csv`: the normals from
+  NCEI's versioned annual and monthly by-station archives — not the access
+  API, which serves 1981–2010 under the same dataset name — plus Daymet's
+  1991–2020 mean at every station, fetched once by
+  `make_normals_daymet_cache.py` and folded in by `make_normals_bundle.py`),
+  so a report makes one Daymet call.
 - `atlas14_data.py` — NOAA Atlas 14 design-storm depths (partial-duration
   series; the page prints the volume, version and end of record). DEGRADABLE;
   a point outside every volume (the Pacific Northwest) reads as not covered.
@@ -671,10 +675,13 @@ layer, separate from Layer 1. After branch 7 the Climate section draws on:
 
 Fixtures are real service output for the reference parcel
 (`atlas14_reference_fixture.csv`, `power_wind_reference_fixture.csv`,
-`power_hourly_reference_fixture.json`, `daymet_station_fixtures/`), captured
-by `make_climate_fixtures.py`; every test runs from them with the network
+`power_hourly_reference_fixture.json`), captured by
+`make_climate_fixtures.py`; every test runs from them with the network
 refused. `diagnose_climate_sources.py` prints every figure from the fixtures
-(or `--live` from the services).
+(or `--live` from the services). The page draws two SVG charts through
+`report_chart.py` — the water balance diagram and the seasonal wind roses —
+on the map renderer's principles: token names, not colours; fonts as
+attributes; the legend set by the template.
 
 ## Running it yourself
 

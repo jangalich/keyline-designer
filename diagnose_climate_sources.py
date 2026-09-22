@@ -4,10 +4,10 @@ diagnose_climate_sources.py
 
 PRINTS EVERY FIGURE BRANCH 7 ADDED TO THE CLIMATE SECTION, RAW, FOR THE
 EYE -- the phase 1 checkpoint. Offline by default: the reference
-fixtures (Daymet at the parcel and at the five nearest normals
-stations, Atlas 14, POWER) and the two bundles (SPC reports, NCEI
-normals), through report_data.report_data_from_fixtures(), which
-derives every block exactly as the report job's fetch does.
+fixtures (Daymet at the parcel, Atlas 14, POWER) and the two bundles
+(SPC reports; NCEI normals with the bundled Daymet ratios and monthly
+heavy-day normals), through report_data.report_data_from_fixtures(),
+which derives every block exactly as the report job's fetch does.
 
     python3 diagnose_climate_sources.py           # from the fixtures, no network
     python3 diagnose_climate_sources.py --live    # fetch_report_data() for real
@@ -22,8 +22,8 @@ method stated in its module rather than trusted:
   3. Annual PET against the published Thornthwaite figure (671 mm,
      Pittsburgh airport) and FAO-56 Penman-Monteith from POWER (716 mm,
      step 0), with the gap. Deficit months and total.
-  4. Heavy-rain days per year against the NCEI normals' own count of
-     days >= 1.00 in at the same stations.
+  4. Heavy-rain days: the stations' monthly normals (the figure the page
+     prints) beside Daymet's own count (diagnostic).
   5. Day length, driest and wettest year, the largest day.
   6. Design storms as served, and the series.
   7. Wind by season: sector frequencies, mean speed, prevailing.
@@ -54,7 +54,6 @@ def load_fixtures():
     from power_wind_data import parse_power_csv
     from reference_fixture import REAL_BOUNDARY
     from report_data import report_data_from_fixtures
-    import precipitation_normals
 
     with open("daymet_reference_fixture.csv", encoding="utf-8") as handle:
         daily = parse_daymet_csv(handle.read())
@@ -62,13 +61,7 @@ def load_fixtures():
         atlas14 = parse_atlas14_csv(handle.read())
     with open("power_wind_reference_fixture.csv", encoding="utf-8") as handle:
         power = parse_power_csv(handle.read())
-    centroid = __import__("report_data").boundary_centroid_lat_lon(REAL_BOUNDARY)
-    stations = {}
-    for station in precipitation_normals.nearest_stations(*centroid):
-        path = os.path.join("daymet_station_fixtures", station["station"] + ".csv")
-        with open(path, encoding="utf-8") as handle:
-            stations[station["station"]] = parse_daymet_csv(handle.read(), required_variables=("prcp",))
-    return report_data_from_fixtures(REAL_BOUNDARY, daily, station_daily=stations, atlas14=atlas14, power_wind=power)
+    return report_data_from_fixtures(REAL_BOUNDARY, daily, atlas14=atlas14, power_wind=power)
 
 
 def main(argv) -> int:
@@ -85,15 +78,14 @@ def main(argv) -> int:
         data = load_fixtures()
     climate = data.climate
     annual = climate["annual"]
-    import precipitation_normals
 
     print(f"\nPoint {data.centroid[0]:.4f}, {data.centroid[1]:.4f}; Daymet {climate['period']['start']}-{climate['period']['end']}\n")
 
-    print("1. PRECIPITATION CORRECTION (normals 1991-2020 / Daymet 1991-2020 at each station)")
+    print("1. PRECIPITATION CORRECTION (normals 1991-2020 / Daymet 1991-2020 at each station, bundled)")
     correction = data.precipitation_correction
     for row in correction["stations"]:
         print(f"   {row['name']:<36} {row['distance_miles']:5.1f} mi  normal {row['normal_in']:6.2f} in  "
-              f"Daymet {row['daymet_mm'] / MM_PER_INCH:6.2f} in  ratio {row['ratio']:.3f}  ({row['flag']}, {row['years']} yr)")
+              f"Daymet {row['daymet_mm'] / MM_PER_INCH:6.2f} in  ratio {row['ratio']:.3f}  ({row['flag']}, {row['years']} yr, Daymet {row['daymet_version']})")
     raw_annual = annual["prcp_total_mm"] / climate["prcp_factor"]
     print(f"   factor {correction['factor']:.3f} (median of {correction['station_count']}); applied: {correction['applied']}")
     print(f"   parcel annual: raw {raw_annual / MM_PER_INCH:.1f} in -> corrected {annual['prcp_total_mm'] / MM_PER_INCH:.1f} in\n")
@@ -115,14 +107,17 @@ def main(argv) -> int:
     print(f"   annual balance {annual['balance_mm'] / MM_PER_INCH:+.1f} in; deficit months {[MONTHS[m - 1] for m in annual['deficit_months']]}, "
           f"total deficit {annual['deficit_mm'] / MM_PER_INCH:.2f} in ({annual['deficit_mm']:.0f} mm)\n")
 
-    print("4. HEAVY-RAIN DAYS (>= 25.4 mm)")
-    print(f"   parcel: {annual['heavy_rain_days']:.2f} days/yr (corrected series); by month "
-          f"{[round(m['heavy_rain_days'], 2) for m in climate['monthly']]}")
-    _, stations = precipitation_normals.load_bundle()
-    by_id = {s["station"]: s for s in stations}
-    for row in correction["stations"]:
-        print(f"   NCEI normal days >= 1.00 in at {row['name'].split(',')[0]}: {by_id[row['station']]['days_ge_1in']}")
-    print()
+    print("4. HEAVY-RAIN DAYS (>= 1.00 in)")
+    heavy = data.heavy_rain_normals
+    if heavy and heavy["applied"]:
+        print(f"   stations' normals (the page's figure): {heavy['annual']:.1f} days/yr; by month "
+              f"{[round(v, 1) for v in heavy['monthly']]}")
+        for row in heavy["stations"]:
+            print(f"      {row['name'].split(',')[0]:<28} annual {row['annual']:4.1f}  months {row['monthly']}  ({row['flag']})")
+    else:
+        print(f"   stations' normals not applied: {heavy['reason'] if heavy else 'no block'}")
+    print(f"   Daymet's own count (diagnostic): {annual['heavy_rain_days']:.2f} days/yr; by month "
+          f"{[round(m['heavy_rain_days'], 2) for m in climate['monthly']]}\n")
 
     print("5. DAY LENGTH, VARIABILITY")
     dl = climate["day_length"]

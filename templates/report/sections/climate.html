@@ -1,17 +1,54 @@
-{#- THE CLIMATE SECTION -- composed entirely from the six components. No
-    styling here, no numbers here: `section` is climate_section.build_
-    climate_section()'s dict, every value already formatted. -#}
+{#- THE CLIMATE SECTION -- composed entirely from the components, on TWO
+    PAGES BY RULE (the rhythm the map sections set): the pictures and the
+    takeaway (summary, water balance diagram, wind roses) on the first,
+    every number (key figures, the monthly table, design storms, severe
+    weather, the sources) on the second. No styling here, no numbers here:
+    `section` is climate_section.build_climate_section()'s dict, every
+    value already formatted. Each figure carries at most one caption line
+    -- the one caveat that could change a decision, at the point of use. -#}
 {% import "components/eyebrow.html" as c1 %}
 {% import "components/heading.html" as c2 %}
 {% import "components/summary.html" as c3 %}
 {% import "components/key_figures.html" as c4 %}
 {% import "components/data_table.html" as c5 %}
 {% import "components/source_footer.html" as c6 %}
-<section class="section section--climate">
-  {{ c1.eyebrow(section.number, section.name) }}
-  {{ c2.heading(section.heading) }}
-  {{ c3.summary(section.summary) }}
-  {{ c4.key_figures(section.key_figures) }}
-  {{ c5.data_table(section.table) }}
-  {{ c6.source_footer(section.footer) }}
+{% import "components/chart.html" as c8 %}
+{% import "components/caption.html" as c9 %}
+<section class="section section--climate section--chart">
+  <div class="section__figures">
+    {{ c1.eyebrow(section.number, section.name) }}
+    {{ c2.heading(section.heading) }}
+    {{ c3.summary(section.summary) }}
+    {{ c8.chart(section.water_balance.chart, "water-balance") }}
+    {{ c9.caption(section.water_balance.caption) }}
+{%- if section.wind_roses.chart %}
+    {{ c8.chart(section.wind_roses.chart, "wind-roses") }}
+    {{ c9.caption(section.wind_roses.caption) }}
+{%- else %}
+    {{ c9.unavailable(section.wind_roses.unavailable) }}
+{%- endif %}
+  </div>
+  <div class="section__detail">
+    {{ c4.key_figures(section.key_figures) }}
+    {{ c9.caption(section.key_figures_caption) }}
+    {{ c5.data_table(section.table) }}
+    {{ c9.caption(section.table_caption) }}
+    <div class="side-by-side">
+      <div class="side-by-side__item">
+{%- if section.design_storms.table %}
+        {{ c5.data_table(section.design_storms.table) }}
+        {{ c9.caption(section.design_storms.caption) }}
+{%- else %}
+        {{ c9.unavailable(section.design_storms.unavailable) }}
+{%- endif %}
+      </div>
+{%- if section.severe_weather %}
+      <div class="side-by-side__item">
+        {{ c5.data_table(section.severe_weather.table) }}
+        {{ c9.caption(section.severe_weather.caption) }}
+      </div>
+{%- endif %}
+    </div>
+    {{ c6.source_footer({"lines": section.sources}) }}
+  </div>
 </section>

@@ -1,0 +1,26 @@
+{#- 9. CAPTION -- one line under a figure or table: the ONE caveat that
+    could change a decision, at the point of use. `parts` takes the
+    summary line's shape: strings are prose, {value} mappings are data.
+    An empty list renders nothing.
+
+    `unavailable` is the visible statement that stands in a degradable
+    figure's place when its source did not answer or does not cover the
+    point -- the same part list, set as a short paragraph rather than a
+    caption so it cannot be mistaken for a note under a figure that is
+    there. -#}
+{% macro caption(parts) -%}
+{%- if parts %}
+<p class="caption">
+{%- for part in parts -%}
+{%- if part is mapping -%}<span class="data">{{ part.value }}</span>{%- else -%}{{ part }}{%- endif -%}
+{%- endfor -%}
+</p>
+{%- endif %}
+{%- endmacro %}
+{% macro unavailable(parts) -%}
+<p class="unavailable">
+{%- for part in parts -%}
+{%- if part is mapping -%}<span class="data">{{ part.value }}</span>{%- else -%}{{ part }}{%- endif -%}
+{%- endfor -%}
+</p>
+{%- endmacro %}

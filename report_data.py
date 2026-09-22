@@ -39,20 +39,11 @@ source REQUIRED or DEGRADABLE:
 THE TABLE AFTER BRANCH 7 (Climate: additions):
 
   daymet_daily        REQUIRED    a site report without climate is not a
-                                  site report.
-  daymet_at_stations  REQUIRED    the precipitation correction's Daymet
-                                  fetches at the nearest normals stations
-                                  (precipitation_normals.py). Same source
-                                  as daymet_daily: if it is down, the
-                                  report is already lost; and a report
-                                  that printed an uncorrected figure
-                                  beside corrected ones would be the
-                                  inconsistency the correction exists to
-                                  prevent. A STATION that Daymet cannot
-                                  serve (outside its coverage) is dropped
-                                  from the median, not a failure; fewer
-                                  than three stations means the factor is
-                                  1.0 and the block says so.
+                                  site report. THE ONE DAYMET CALL: the
+                                  precipitation correction's five
+                                  station ratios are bundled with the
+                                  normals (precipitation_normals.py,
+                                  phase 2), not fetched.
   atlas14             DEGRADABLE  design-storm depths. A hole a consultant
                                   can fill from the public server in a
                                   minute, unlike a missing climate; and a
@@ -65,17 +56,19 @@ THE TABLE AFTER BRANCH 7 (Climate: additions):
   power_wind          DEGRADABLE  regional wind; context, not a decision
                                   input on its own.
 
-SEVERE WEATHER AND THE NORMALS ARE BUNDLED, NOT FETCHED (class E:
-spc_reports.py, precipitation_normals.py). They read files in the
-repository and carry no fetch risk, so they have no row in the table;
-a bundle that cannot be read is a broken deployment and raises.
+SEVERE WEATHER, THE NORMALS AND THE STATION RATIOS ARE BUNDLED, NOT
+FETCHED (class E: spc_reports.py, precipitation_normals.py). They read
+files in the repository and carry no fetch risk, so they have no row in
+the table; a bundle that cannot be read is a broken deployment and
+raises. The precipitation correction and the heavy-rain normals are
+derived from the five nearest bundled stations for the centroid.
 
 THE SAME INSTRUMENTATION AS LAYER 1. Every fetch sits in a
 run_diagnostics.time_layer() block naming its REPORT_FETCH_LAYERS entry,
 and run_diagnostics._fetch_hook_sites() cross-checks this module's
 compiled fetch_report_data() against REPORT_FETCH_LAYERS exactly as it
 checks parcel_data -- a layer added without a timer shows up in
-self_check() as "3 of 4". time_layer() is a no-op until a probe is opened
+self_check() as "2 of 3". time_layer() is a no-op until a probe is opened
 on the thread (run_diagnostics.begin_fetch); opening one on the report job
 is the job's wiring, not this module's.
 
@@ -122,7 +115,6 @@ DEGRADABLE = "degradable"
 # run_diagnostics._fetch_hook_sites().
 REPORT_FETCH_LAYERS = {
     "daymet_daily": REQUIRED,
-    "daymet_at_stations": REQUIRED,
     "atlas14": DEGRADABLE,
     "power_wind": DEGRADABLE,
 }
@@ -131,7 +123,6 @@ REPORT_FETCH_LAYERS = {
 # every other layer error carries: a stable type to branch on, display
 # prose to print.
 LAYER_CLIMATE = ("climate", "climate records")
-LAYER_STATIONS = ("climate_stations", "precipitation station check")
 LAYER_ATLAS14 = ("design_storms", "design storm depths")
 LAYER_POWER_WIND = ("wind", "wind records")
 
@@ -169,12 +160,13 @@ class ReportData:
     # daymet_data.parse_daymet_csv()'s dict: the daily arrays, the citation
     # and DOI of the version served, the years used.
     daymet_daily: Optional[dict]
-    # {station id: parsed Daymet dict (prcp only, 1991-2020)} at the
-    # nearest normals stations -- the precipitation correction's inputs.
-    daymet_at_stations: Optional[dict]
     # precipitation_normals.precipitation_correction()'s block: the factor
-    # applied to the parcel's Daymet precipitation, and the stations.
+    # applied to the parcel's Daymet precipitation, and the stations --
+    # off the bundle, no fetch.
     precipitation_correction: Optional[dict]
+    # precipitation_normals.heavy_rain_normals()'s block: days >= 1.00 in
+    # by month, the median of the same stations' NCEI normals.
+    heavy_rain_normals: Optional[dict]
     # climate_report.derive_climate() over daymet_daily with the factor --
     # derived ONCE.
     climate: Optional[dict]
@@ -218,30 +210,16 @@ def _failure(field_name: str, wire_pair: tuple, exc: BaseException) -> ReportDat
     )
 
 
-def _fetch_daymet_at_stations(stations: list) -> dict:
-    """{station id: parsed Daymet prcp dict} for the stations Daymet can
-    serve. A station Daymet has no data for is skipped (it leaves the
-    median); a service that does not answer raises."""
-    served = {}
-    for station in stations:
-        try:
-            served[station["station"]] = get_daymet_daily_for_point(
-                station["latitude"],
-                station["longitude"],
-                years=precipitation_normals.NORMALS_YEARS,
-                variables=("prcp",),
-            )
-        except DaymetIncompleteError:
-            continue
-    return served
-
-
-def derive_precipitation_correction(stations: list, station_daily: dict) -> dict:
-    """The correction block from the stations and their parsed Daymet
-    dicts -- the one derivation the fetch path and the fixture path share."""
+def station_blocks(centroid) -> tuple:
+    """(precipitation_correction, heavy_rain_normals) for a point, both
+    off the bundle -- the one derivation the fetch path and the fixture
+    path share. No network."""
+    stations = precipitation_normals.nearest_stations(centroid[0], centroid[1])
     vintage, _ = precipitation_normals.load_bundle()
-    annual = {sid: precipitation_normals.annual_precipitation_mm(daily) for sid, daily in station_daily.items()}
-    return precipitation_normals.precipitation_correction(stations, annual, vintage)
+    return (
+        precipitation_normals.precipitation_correction(stations, vintage),
+        precipitation_normals.heavy_rain_normals(stations),
+    )
 
 
 def fetch_report_data(boundary) -> ReportData:
@@ -271,23 +249,13 @@ def fetch_report_data(boundary) -> ReportData:
     except (requests.exceptions.RequestException, DaymetIncompleteError) as exc:
         _degrade("daymet_daily", LAYER_CLIMATE, exc)
 
-    # The precipitation correction: the nearest normals stations off the
-    # bundle (no fetch), then Daymet at each of them.
-    daymet_at_stations = None
-    correction = None
-    if daymet_daily is not None:
-        stations = precipitation_normals.nearest_stations(centroid[0], centroid[1])
-        try:
-            with run_diagnostics.time_layer("daymet_at_stations", get_daymet_daily_for_point):
-                daymet_at_stations = _fetch_daymet_at_stations(stations)
-        except requests.exceptions.RequestException as exc:
-            _degrade("daymet_at_stations", LAYER_STATIONS, exc)
-        if daymet_at_stations is not None:
-            correction = derive_precipitation_correction(stations, daymet_at_stations)
+    # The precipitation correction and the heavy-rain normals: the nearest
+    # bundled stations for the point, no fetch.
+    correction, heavy_rain = station_blocks(centroid)
 
     climate = None
     if daymet_daily is not None:
-        climate = derive_climate(daymet_daily, prcp_factor=correction["factor"] if correction else 1.0)
+        climate = derive_climate(daymet_daily, prcp_factor=correction["factor"])
 
     atlas14 = storms = None
     try:
@@ -314,8 +282,8 @@ def fetch_report_data(boundary) -> ReportData:
         boundary=list(boundary),
         centroid=centroid,
         daymet_daily=daymet_daily,
-        daymet_at_stations=daymet_at_stations,
         precipitation_correction=correction,
+        heavy_rain_normals=heavy_rain,
         climate=climate,
         atlas14=atlas14,
         design_storms=storms,
@@ -329,35 +297,33 @@ def fetch_report_data(boundary) -> ReportData:
 def report_data_from_fixtures(
     boundary,
     daymet_daily: dict,
-    station_daily: Optional[dict] = None,
     atlas14: Optional[dict] = None,
     power_wind: Optional[dict] = None,
     severe_weather: bool = True,
     unavailable: Optional[dict] = None,
+    correct_precipitation: bool = True,
 ) -> ReportData:
     """
     A ReportData from parsed responses ALREADY IN HAND -- the reference
     fixtures, a diagnostic run -- with every block derived exactly as
-    fetch_report_data() derives it. No network. `station_daily` is
-    {station id: parsed Daymet prcp dict}; when given, the nearest
-    stations are taken off the bundle for the boundary's centroid and the
-    correction computed; when None the factor is 1.0 and no correction
-    block is carried. A layer passed as None is absent, as if it degraded;
-    `unavailable` may then name it. The production path is
-    fetch_report_data().
+    fetch_report_data() derives it. No network: the correction and the
+    heavy-rain normals come off the bundle for the boundary's centroid
+    (`correct_precipitation=False` leaves the factor at 1.0 and both
+    blocks None, the branch 5 shape). A layer passed as None is absent,
+    as if it degraded; `unavailable` may then name it. The production
+    path is fetch_report_data().
     """
     centroid = boundary_centroid_lat_lon(boundary)
-    correction = None
-    if station_daily is not None:
-        stations = precipitation_normals.nearest_stations(centroid[0], centroid[1])
-        correction = derive_precipitation_correction(stations, station_daily)
+    correction = heavy_rain = None
+    if correct_precipitation:
+        correction, heavy_rain = station_blocks(centroid)
     climate = derive_climate(daymet_daily, prcp_factor=correction["factor"] if correction else 1.0)
     return ReportData(
         boundary=list(boundary),
         centroid=centroid,
         daymet_daily=daymet_daily,
-        daymet_at_stations=station_daily,
         precipitation_correction=correction,
+        heavy_rain_normals=heavy_rain,
         climate=climate,
         atlas14=atlas14,
         design_storms=design_storms(atlas14) if atlas14 is not None else None,
@@ -369,8 +335,8 @@ def report_data_from_fixtures(
 
 
 def report_data_from_daily(boundary, daymet_daily: dict) -> ReportData:
-    """The branch 5 shape, kept for its callers: Daymet alone, factor
-    1.0, no other layer. See report_data_from_fixtures()."""
+    """The branch 5 shape, kept for its callers: Daymet alone with the
+    bundled correction, no fetched layer. See report_data_from_fixtures()."""
     return report_data_from_fixtures(boundary, daymet_daily)
 
 
