@@ -758,6 +758,15 @@ Expected shape, dependencies first.
    then the animals content (VIII), then buildings (VII) if it is ever worth a
    page. Each with its own timer, retry pattern (`fetch_attempts`), diagnostic
    row, and footer vintage.
+
+   *Branch 9 (Water, IV) took FEMA, NWI, NLCD land cover, NHDPlus HR stream
+   order, NHD springs and the SSURGO seasonal water table into the report
+   layer, all degradable, with the fixtures and the fetch-size findings
+   recorded in `README.md`. The catchment question §1.IV left open is
+   answered by NHDPlus HR's reach drainage area, which is not truncated by
+   the DEM window; the window-derived watershed is reported beneath it with
+   its truncation stated, so the wider context DEM is no longer needed for
+   this section.*
 9. **Class E bundles** (per-state deer table, listed species by county,
    bedrock extract) when a section they serve is scheduled; each with a
    refresh note in the repo.
