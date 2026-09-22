@@ -473,6 +473,12 @@ def build_summary(relief_ft: float, slope_counts: dict, aspect_counts: dict) -> 
 
 
 def build_key_figures(contours: dict, classified: dict, keypoint_count: int) -> list:
+    """keypoint_count is parcel_keypoints()'s count -- the keypoints ON this
+    property, which is what the map draws and what the figure must therefore
+    say. It is NOT detect_keypoints()'s own total: a keypoint may legitimately
+    sit just outside the drawn boundary (keypoint_detection's margin), so the
+    detector can hold more than this section shows. The label said "keypoints
+    detected" and so disagreed with the detector whenever one did."""
     sector = dominant_aspect(classified["aspect_counts"])
     return [
         {"value": f"{_feet(contours['min_ft'])} ft", "label": "lowest elevation"},
@@ -480,7 +486,7 @@ def build_key_figures(contours: dict, classified: dict, keypoint_count: int) -> 
         {"value": f"{_feet(contours['relief_ft'])} ft", "label": "relief"},
         {"value": f"{_one_decimal(classified['mean_slope_pct'])}%", "label": "mean slope"},
         {"value": ASPECT_WORDS[sector].capitalize() if sector else FLAT_LABEL, "label": "dominant aspect", "word": True},
-        {"value": f"{keypoint_count:,}", "label": "keypoints detected"},
+        {"value": f"{keypoint_count:,}", "label": "keypoints on this property"},
     ]
 
 

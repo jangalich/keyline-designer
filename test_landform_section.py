@@ -234,11 +234,11 @@ assert {"value": dominant} in SECTION["summary"] and {"value": slope_range_label
 assert isinstance(SECTION["summary"][-1], str) and "falls toward the" in SECTION["summary"][-1], "the direction is prose"
 # Key figures: whole feet, one-decimal slope, the aspect as a WORD.
 figures = {f["label"]: f for f in SECTION["key_figures"]}
-assert set(figures) == {"lowest elevation", "highest elevation", "relief", "mean slope", "dominant aspect", "keypoints detected"}
+assert set(figures) == {"lowest elevation", "highest elevation", "relief", "mean slope", "dominant aspect", "keypoints on this property"}
 assert figures["lowest elevation"]["value"] == f"{round(SECTION['contours']['min_ft']):,} ft"
 assert re.match(r"^\d+\.\d%$", figures["mean slope"]["value"]), figures["mean slope"]
 assert figures["dominant aspect"].get("word") is True and figures["dominant aspect"]["value"][0].isupper()
-assert figures["keypoints detected"]["value"] == str(len(landform_section.parcel_keypoints(TERRAIN)))
+assert figures["keypoints on this property"]["value"] == str(len(landform_section.parcel_keypoints(TERRAIN)))
 # The footer: caveat first, the source line with the retrieval date.
 assert SECTION["footer"]["caveat"] == [landform_section.CAVEAT_LINE]
 assert SECTION["footer"]["citation"] == [
@@ -318,7 +318,7 @@ assert kp_section["map"]["svg"].count('id="layer-keypoints"') == 1
 kp_group = kp_section["map"]["svg"].split('<g id="layer-keypoints">', 1)[1].split("</g>", 1)[0]
 assert kp_group.count("<line") == 3, "one on-parcel keypoint -> one asterisk of three strokes"
 assert [_label_text(e["parts"]) for e in kp_section["map"]["legend"]][-1] == "Keypoints"
-assert {f["label"]: f["value"] for f in kp_section["key_figures"]}["keypoints detected"] == "1"
+assert {f["label"]: f["value"] for f in kp_section["key_figures"]}["keypoints on this property"] == "1"
 print(f"   layers {ids}; ramp {opacities}; legend {legend}; keypoint asterisk verified")
 
 # ======================================================================
