@@ -145,9 +145,10 @@ def cover_label(report_data, property_label: Optional[str]) -> str:
 
 
 def build_sections(report_data) -> list:
-    """Every section the report renders, in order, numbered by position.
-    One today. A later section is one more builder call here."""
-    return [climate_section.build_climate_section(report_data, number=1)]
+    """Every section the report renders, in outline order. One today. A
+    later section is one more builder call here; each carries its own
+    numeral from report_outline, so adding one renumbers nothing."""
+    return [climate_section.build_climate_section(report_data)]
 
 
 def render_site_report_html(

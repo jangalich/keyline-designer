@@ -8,9 +8,10 @@ report is built from the real Daymet fixture and the reference parcel;
 the network is refused by offline_harness.
 
   1. THE CLIMATE SECTION'S CONTENT: month-parts, the six key figures, the
-     table's rows and rounding, and the footer carrying the fixture's
-     citation VERBATIM -- read straight off the builder, before any
-     template touches it. A missing frost median reads "none recorded"
+     table's rows and rounding, and the footer -- caveat first, then the
+     citation with Daymet's CSV semicolons turned back into commas --
+     read straight off the builder, before any template touches it. The
+     section numeral comes from the fixed outline, not the render order. A missing frost median reads "none recorded"
      and drops the frost clause rather than inventing a date.
   2. NO COLOUR LITERAL OUTSIDE TOKENS: a hex-colour grep over the
      stylesheet template, every component and section template, and
@@ -60,18 +61,35 @@ GENERATED_ON = date(2026, 9, 21)
 # ======================================================================
 print("1. the climate section's content, off the builder")
 
-section = climate_section.build_climate_section(DATA, number=1)
-assert section["number"] == 1 and section["name"] == "Climate" and section["template"] == "climate.html"
+section = climate_section.build_climate_section(DATA)
+# THE NUMERAL IS THE OUTLINE'S, NOT THE RENDER ORDER'S: Climate is II with
+# Site overview unbuilt ahead of it.
+assert section["number"] == "II" and section["name"] == "Climate" and section["template"] == "climate.html"
+import report_outline
+assert report_outline.section_number("Site overview") == "I"
+assert report_outline.section_number("Climate") == "II"
+assert report_outline.section_number("Soils & geology") == "IX"
+assert len(report_outline.SECTION_OUTLINE) == 9
+try:
+    report_outline.section_number("Weather")
+except ValueError:
+    pass
+else:
+    raise AssertionError("a name outside the outline must not be numbered")
 
 assert climate_section.month_part({"month": 4, "day": 10}) == "early April"
 assert climate_section.month_part({"month": 4, "day": 11}) == "mid April"
 assert climate_section.month_part({"month": 4, "day": 20}) == "mid April"
 assert climate_section.month_part({"month": 10, "day": 21}) == "late October"
 
+# ONLY THE COUNT IS DATA; the month-parts and the month are prose.
 summary_values = [p["value"] for p in section["summary"] if isinstance(p, dict)]
-assert summary_values == ["177", "late April", "mid October", "June"], summary_values
+assert summary_values == ["177"], summary_values
 prose = "".join(p if isinstance(p, str) else "{}" for p in section["summary"])
-assert prose == "The frost-free season runs about {} days, from {} to {}. Precipitation peaks in {}."
+assert prose == (
+    "The frost-free season runs about {} days, from late April to mid October. "
+    "Precipitation peaks in June."
+), prose
 
 figures = {f["label"]: f["value"] for f in section["key_figures"]}
 assert figures == {
@@ -86,22 +104,35 @@ assert figures == {
 table = section["table"]
 assert table["columns"] == ["J", "F", "M", "A", "M", "J", "J", "A", "S", "O", "N", "D"]
 rows = {r["label"]: r["cells"] for r in table["rows"]}
-assert list(rows) == ["Mean high °F", "Mean low °F", "Precipitation in", "GDD, base 50°F", "Solar kWh/m²/day"]
+assert list(rows) == ["Mean high °F", "Mean low °F", "Precipitation, in", "GDD, base 50°F", "Solar, kWh/m²/day"]
 assert rows["Mean high °F"][0] == "36" and rows["Mean high °F"][6] == "83"
-assert rows["Precipitation in"][5] == "4.8" and rows["GDD, base 50°F"][6] == "686"
-assert rows["Solar kWh/m²/day"][5] == "5.7" and rows["Solar kWh/m²/day"][11] == "1.5"
+assert rows["Precipitation, in"][5] == "4.8" and rows["GDD, base 50°F"][6] == "686"
+assert rows["Solar, kWh/m²/day"][5] == "5.7" and rows["Solar, kWh/m²/day"][11] == "1.5"
 assert all(len(r["cells"]) == 12 for r in table["rows"])
 # Whole numbers for temperatures and GDD, one decimal for precipitation
 # and solar -- the brief's example, row by row.
 assert all(re.fullmatch(r"-?\d+", v) for v in rows["Mean high °F"] + rows["Mean low °F"] + rows["GDD, base 50°F"])
-assert all(re.fullmatch(r"\d+\.\d", v) for v in rows["Precipitation in"] + rows["Solar kWh/m²/day"])
+assert all(re.fullmatch(r"\d+\.\d", v) for v in rows["Precipitation, in"] + rows["Solar, kWh/m²/day"])
 
-footer_text = "".join(p if isinstance(p, str) else p["value"] for p in section["footer"])
-assert DAILY["citation"] in footer_text, "the footer must carry the fetched citation verbatim"
-assert footer_text.startswith("Source: Daymet Version 4 R1, Thornton;")
-assert "30-year means 1995–2024." in footer_text
-assert "simple-average method" in footer_text and "not the official USDA map" in footer_text
-assert "stands on" not in footer_text, "every year had both frosts, so no shortfall sentence"
+# THE FOOTER: caveat first, citation second, and no data part in either --
+# a product name and a year range are names.
+footer = section["footer"]
+assert list(footer) == ["caveat", "citation"]
+assert all(isinstance(p, str) for p in footer["caveat"] + footer["citation"])
+caveat_text = "".join(footer["caveat"])
+citation_text = "".join(footer["citation"])
+assert caveat_text.startswith("Daymet interpolates between weather stations on a 1 km grid")
+assert "simple-average method" in caveat_text and "not the official USDA map" in caveat_text
+assert "stands on" not in caveat_text, "every year had both frosts, so no shortfall sentence"
+assert citation_text.startswith("Source: Daymet Version 4 R1, 30-year means 1995–2024. Thornton, M.M., R. Shrestha,")
+# The commas Daymet's CSV header swapped for semicolons are restored for
+# display; the served line is kept verbatim on the data.
+assert ";" not in citation_text
+assert climate_section.display_citation(DAILY["citation"]) in citation_text
+assert climate_section.display_citation(DAILY["citation"]) == DAILY["citation"].replace(";", ",")
+assert DAILY["citation"].count(";") == 10 and ";" in DAILY["citation"]
+assert citation_text.endswith("ORNL DAAC, Oak Ridge, Tennessee, USA. https://doi.org/10.3334/ORNLDAAC/2129")
+footer_text = caveat_text + " " + citation_text
 # A citation without a version label falls back to the software version.
 assert climate_section.daymet_version_label({"citation": "no version here", "software_version": "4.0"}) == "Daymet Version 4.0"
 
@@ -111,10 +142,11 @@ short = copy.deepcopy(DATA)
 short.climate["frost"]["first_fall"] = None
 short.climate["frost"]["frost_free_days"] = None
 short.climate["frost"]["years_with_fall_frost"] = 12
-short_section = climate_section.build_climate_section(short, number=1)
-assert [p["value"] for p in short_section["summary"] if isinstance(p, dict)] == ["June"]
+short_section = climate_section.build_climate_section(short)
+assert [p["value"] for p in short_section["summary"] if isinstance(p, dict)] == []
+assert "".join(short_section["summary"]) == "Precipitation peaks in June."
 assert {f["label"]: f["value"] for f in short_section["key_figures"]}["median first fall frost"] == "none recorded"
-short_footer = "".join(p if isinstance(p, str) else p["value"] for p in short_section["footer"])
+short_footer = "".join(short_section["footer"]["caveat"])
 assert "The median fall frost stands on 12 of the 30 years" in short_footer
 print("   summary parts, six key figures, five table rows, footer citation verbatim; the missing-median path")
 
@@ -166,11 +198,16 @@ assert "Generated 21 September 2026" in html
 for marker in ('class="eyebrow"', 'class="heading"', 'class="summary"', 'class="key-figures"',
                'class="data-table"', 'class="source-footer"'):
     assert html.count(marker) == 1, marker
-assert '<span class="eyebrow__number">1</span> · Climate' in html
-assert '<span class="data">177</span>' in html and '<span class="data">late April</span>' in html
+assert '<span class="eyebrow__number">II</span> · Climate' in html
+assert '<span class="data">177</span>' in html
+assert 'from late April to mid October' in html and '<span class="data">late April</span>' not in html
+assert html.count('<span class="data">') == 1, "the summary's one figure is the only data span on the page"
+# The footer: caveat paragraph before the citation paragraph, citation with commas.
+assert html.index('class="source-footer__caveat"') < html.index('class="source-footer__citation"')
+assert "Thornton, M.M., R. Shrestha" in html and "Thornton; M.M." not in html
 assert html.count('class="key-figure"') == 6 and html.count('<td class="num">') == 60
 assert html.count('<th class="num">') == 12
-assert DAILY["citation"] in html
+assert climate_section.display_citation(DAILY["citation"]) in html
 # Section templates carry no styling of their own.
 with open(os.path.join(templates_dir, "sections", "climate.html"), encoding="utf-8") as handle:
     section_template = handle.read()
@@ -274,7 +311,7 @@ else:
         for p in document.pages
     )
     # Line wraps drop the space at a break, so compare with whitespace removed.
-    assert "".join(DAILY["citation"].split()) in "".join(flat.split())
+    assert "".join(climate_section.display_citation(DAILY["citation"]).split()) in "".join(flat.split())
     assert "".join("40.6446° N, 79.9826° W".split()) in "".join(flat.split())
     assert "".join("21 September 2026".split()) in "".join(flat.split())
     assert len(document.pages) == 2

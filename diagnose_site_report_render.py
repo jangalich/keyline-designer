@@ -15,7 +15,8 @@ RENDERS THE SITE DATA REPORT FROM THE FIXTURE, OFFLINE, AND SHOWS ITS WORK
     column, the right edge of every numeric cell, and the x of every
     decimal point among the cells that carry one, across rows whose values
     differ in digit count (36 beside 3.4 beside 683);
-  * the footer's citation against the fixture header's, verbatim.
+  * the footer's citation against the fixture header's, with the commas
+    Daymet's CSV header swapped for semicolons put back.
 
 Prints what it measured. Nothing here is a test; test_site_report.py
 asserts the parts of this that a test can hold.
@@ -120,10 +121,12 @@ def main(out_dir: str) -> int:
         )
     print(f"worst right-edge spread {worst_right:.2f} pt; worst decimal spread {worst_decimal:.2f} pt")
 
+    from climate_section import display_citation
+
     text = "".join(page.get_text() for page in doc)
-    citation = daily["citation"]
-    normalised = " ".join(text.split())
-    print(f"footer carries the fixture's citation verbatim: {' '.join(citation.split()) in normalised}")
+    normalised = "".join(text.split())
+    shown = "".join(display_citation(daily["citation"]).split())
+    print(f"footer carries the fixture's citation, commas restored: {shown in normalised}")
     return 0
 
 

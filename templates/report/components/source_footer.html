@@ -1,12 +1,20 @@
-{#- 6. SOURCE FOOTER -- the source, its version and citation, and the honest
-    limit of the data, stated at the point of use. Same part list as the
-    summary line: strings are prose, {value} mappings are data (the years,
-    the version) -- and the citation is a value the fetch returned, never a
-    string typed here. -#}
-{% macro source_footer(parts) -%}
-<p class="source-footer">
-{%- for part in parts -%}
+{#- 6. SOURCE FOOTER -- the honest limit of the data FIRST, as its own
+    sentence(s), then the source, its version and its citation as a
+    separate, smaller line. Both halves take the summary line's part
+    list: strings are prose, {value} mappings are data -- a later section
+    may have a figure in its caveat; this one has none, and a product
+    name or a year range is a name, not a measurement. -#}
+{% macro source_footer(footer) -%}
+<div class="source-footer">
+  <p class="source-footer__caveat">
+{%- for part in footer.caveat -%}
 {%- if part is mapping -%}<span class="data">{{ part.value }}</span>{%- else -%}{{ part }}{%- endif -%}
 {%- endfor -%}
-</p>
+  </p>
+  <p class="source-footer__citation">
+{%- for part in footer.citation -%}
+{%- if part is mapping -%}<span class="data">{{ part.value }}</span>{%- else -%}{{ part }}{%- endif -%}
+{%- endfor -%}
+  </p>
+</div>
 {%- endmacro %}
