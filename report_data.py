@@ -8,6 +8,8 @@ boundary, and governed by its own failure table.
     fetch_report_data(boundary)   -> ReportData, or raises
     REPORT_FETCH_LAYERS           -> {layer: REQUIRED | DEGRADABLE}
     default_report_fetch_cache()  -> the process-wide FetchCache for it
+    report_data_from_fixtures(..) -> a ReportData with no network (tests,
+                                     diagnostics)
 
 WHY A SEPARATE LAYER (site-data-report-proposal.md, decision D1, option 3
 with 4c). parcel_data.fetch_parcel_data() -- Layer 1 -- hard-fails a
@@ -34,16 +36,46 @@ source REQUIRED or DEGRADABLE:
               reason, so a section cannot mistake "not fetched" for
               "fetched and empty".
 
-Daymet daily weather is REQUIRED: a site report without climate is not a
-site report. It is the only layer in this branch; later sources (FEMA,
-NWI, occurrence records, ...) join this table, not Layer 1.
+THE TABLE AFTER BRANCH 7 (Climate: additions):
+
+  daymet_daily        REQUIRED    a site report without climate is not a
+                                  site report.
+  daymet_at_stations  REQUIRED    the precipitation correction's Daymet
+                                  fetches at the nearest normals stations
+                                  (precipitation_normals.py). Same source
+                                  as daymet_daily: if it is down, the
+                                  report is already lost; and a report
+                                  that printed an uncorrected figure
+                                  beside corrected ones would be the
+                                  inconsistency the correction exists to
+                                  prevent. A STATION that Daymet cannot
+                                  serve (outside its coverage) is dropped
+                                  from the median, not a failure; fewer
+                                  than three stations means the factor is
+                                  1.0 and the block says so.
+  atlas14             DEGRADABLE  design-storm depths. A hole a consultant
+                                  can fill from the public server in a
+                                  minute, unlike a missing climate; and a
+                                  point outside every Atlas 14 volume
+                                  (Washington, Oregon, Idaho, Montana,
+                                  Wyoming) is a real, common case that
+                                  must not fail a report --
+                                  no_data_for_parcel, rendered as "not
+                                  covered".
+  power_wind          DEGRADABLE  regional wind; context, not a decision
+                                  input on its own.
+
+SEVERE WEATHER AND THE NORMALS ARE BUNDLED, NOT FETCHED (class E:
+spc_reports.py, precipitation_normals.py). They read files in the
+repository and carry no fetch risk, so they have no row in the table;
+a bundle that cannot be read is a broken deployment and raises.
 
 THE SAME INSTRUMENTATION AS LAYER 1. Every fetch sits in a
 run_diagnostics.time_layer() block naming its REPORT_FETCH_LAYERS entry,
 and run_diagnostics._fetch_hook_sites() cross-checks this module's
 compiled fetch_report_data() against REPORT_FETCH_LAYERS exactly as it
-checks parcel_data -- a second layer added without a timer shows up in
-self_check() as "1 of 2". time_layer() is a no-op until a probe is opened
+checks parcel_data -- a layer added without a timer shows up in
+self_check() as "3 of 4". time_layer() is a no-op until a probe is opened
 on the thread (run_diagnostics.begin_fetch); opening one on the report job
 is the job's wiring, not this module's.
 
@@ -51,15 +83,20 @@ THE CACHE. default_report_fetch_cache() is a session_cache.FetchCache
 built over fetch_report_data (lazily, on first use -- session_cache pulls
 in the whole Layer 1 import graph and this module must stay importable by
 the diagnostics self-check on its own): keyed by the normalised boundary,
-LRU-capped, per-key in-flight lock, failures never cached. A second report on the same
-land pays no second fetch. It holds a ReportData, which is a value: the
-climate block is derived once here, so no consumer recomputes it.
+LRU-capped, per-key in-flight lock, failures never cached. A second report
+on the same land pays no second fetch. It holds a ReportData, which is a
+value: every block is derived once here, so no consumer recomputes it.
 
 THE POINT. Daymet is 1 km gridded data, so one point represents the
 parcel: the boundary polygon's centroid in WGS84 (shapely over lon/lat --
 at parcel scale the difference from a projected centroid is metres, and
 the Daymet cell is a kilometre). ReportData.centroid records it so the
-footer and the cover can print the same point the fetch used.
+footer and the cover can print the same point the fetch used. Atlas 14,
+POWER and the severe-weather radius all take the same point.
+
+ONE PERIOD ACROSS THE SECTION. POWER is asked for the calendar years the
+Daymet block actually used (climate['years']), so the wind roses and the
+monthly table describe the same thirty years.
 """
 
 from dataclasses import dataclass, field
@@ -68,9 +105,13 @@ from typing import Optional
 import requests
 from shapely.geometry import Polygon
 
+import precipitation_normals
 import run_diagnostics
+import spc_reports
+from atlas14_data import Atlas14IncompleteError, design_storms, get_atlas14_for_point
 from climate_report import derive_climate
 from daymet_data import DaymetIncompleteError, get_daymet_daily_for_point
+from power_wind_data import PowerIncompleteError, derive_wind, get_power_wind_for_point
 
 REQUIRED = "required"
 DEGRADABLE = "degradable"
@@ -81,12 +122,22 @@ DEGRADABLE = "degradable"
 # run_diagnostics._fetch_hook_sites().
 REPORT_FETCH_LAYERS = {
     "daymet_daily": REQUIRED,
+    "daymet_at_stations": REQUIRED,
+    "atlas14": DEGRADABLE,
+    "power_wind": DEGRADABLE,
 }
 
-# The (type, label) pair a Daymet failure reports as -- the same split
+# The (type, label) pair each layer's failure reports as -- the same split
 # every other layer error carries: a stable type to branch on, display
 # prose to print.
 LAYER_CLIMATE = ("climate", "climate records")
+LAYER_STATIONS = ("climate_stations", "precipitation station check")
+LAYER_ATLAS14 = ("design_storms", "design storm depths")
+LAYER_POWER_WIND = ("wind", "wind records")
+
+# The exception kinds that mean "the source answered without the data",
+# as opposed to a RequestException, "the source did not answer".
+_NO_DATA_ERRORS = (DaymetIncompleteError, Atlas14IncompleteError, PowerIncompleteError)
 
 
 class ReportDataIncompleteError(RuntimeError):
@@ -118,8 +169,26 @@ class ReportData:
     # daymet_data.parse_daymet_csv()'s dict: the daily arrays, the citation
     # and DOI of the version served, the years used.
     daymet_daily: Optional[dict]
-    # climate_report.derive_climate() over daymet_daily -- derived ONCE.
+    # {station id: parsed Daymet dict (prcp only, 1991-2020)} at the
+    # nearest normals stations -- the precipitation correction's inputs.
+    daymet_at_stations: Optional[dict]
+    # precipitation_normals.precipitation_correction()'s block: the factor
+    # applied to the parcel's Daymet precipitation, and the stations.
+    precipitation_correction: Optional[dict]
+    # climate_report.derive_climate() over daymet_daily with the factor --
+    # derived ONCE.
     climate: Optional[dict]
+    # atlas14_data.parse_atlas14_csv()'s dict, and the design-storm block
+    # drawn from it. None when the layer degraded.
+    atlas14: Optional[dict]
+    design_storms: Optional[dict]
+    # power_wind_data.parse_power_csv()'s dict, and derive_wind() over it.
+    # None when the layer degraded.
+    power_wind: Optional[dict]
+    wind: Optional[dict]
+    # spc_reports.reports_within() at the centroid -- bundled, always
+    # present.
+    severe_weather: Optional[dict]
     # {layer: {"label", "reason", "error"}} for every DEGRADABLE layer that
     # failed. Empty when everything answered. A REQUIRED failure never
     # reaches a ReportData; it raises.
@@ -137,16 +206,42 @@ def _failure(field_name: str, wire_pair: tuple, exc: BaseException) -> ReportDat
     """The wire-shaped error for one failed layer: `field_name` is the
     ReportData field (the diagnostic row's name), `wire_pair` the (type,
     label) the frontend renders. The reason is read off the exception kind:
-    a RequestException is the source not answering; a DaymetIncompleteError
+    a RequestException is the source not answering; an *IncompleteError
     is the source answering without the data."""
     layer, label = wire_pair
-    if isinstance(exc, DaymetIncompleteError):
+    if isinstance(exc, _NO_DATA_ERRORS):
         reason = ReportDataIncompleteError.REASON_NO_DATA_FOR_PARCEL
     else:
         reason = ReportDataIncompleteError.REASON_SOURCE_UNAVAILABLE
     return ReportDataIncompleteError(
         f"report layer '{field_name}' ({label}) failed: {exc}", layer, label, reason
     )
+
+
+def _fetch_daymet_at_stations(stations: list) -> dict:
+    """{station id: parsed Daymet prcp dict} for the stations Daymet can
+    serve. A station Daymet has no data for is skipped (it leaves the
+    median); a service that does not answer raises."""
+    served = {}
+    for station in stations:
+        try:
+            served[station["station"]] = get_daymet_daily_for_point(
+                station["latitude"],
+                station["longitude"],
+                years=precipitation_normals.NORMALS_YEARS,
+                variables=("prcp",),
+            )
+        except DaymetIncompleteError:
+            continue
+    return served
+
+
+def derive_precipitation_correction(stations: list, station_daily: dict) -> dict:
+    """The correction block from the stations and their parsed Daymet
+    dicts -- the one derivation the fetch path and the fixture path share."""
+    vintage, _ = precipitation_normals.load_bundle()
+    annual = {sid: precipitation_normals.annual_precipitation_mm(daily) for sid, daily in station_daily.items()}
+    return precipitation_normals.precipitation_correction(stations, annual, vintage)
 
 
 def fetch_report_data(boundary) -> ReportData:
@@ -163,42 +258,120 @@ def fetch_report_data(boundary) -> ReportData:
     centroid = boundary_centroid_lat_lon(boundary)
     unavailable = {}
 
+    def _degrade(field_name, wire_pair, exc):
+        error = _failure(field_name, wire_pair, exc)
+        if REPORT_FETCH_LAYERS[field_name] == REQUIRED:
+            raise error from exc
+        unavailable[field_name] = {"label": wire_pair[1], "reason": error.reason, "error": str(exc)}
+
     daymet_daily = None
     try:
         with run_diagnostics.time_layer("daymet_daily", get_daymet_daily_for_point):
             daymet_daily = get_daymet_daily_for_point(centroid[0], centroid[1])
     except (requests.exceptions.RequestException, DaymetIncompleteError) as exc:
-        error = _failure("daymet_daily", LAYER_CLIMATE, exc)
-        if REPORT_FETCH_LAYERS["daymet_daily"] == REQUIRED:
-            raise error from exc
-        unavailable["daymet_daily"] = {"label": LAYER_CLIMATE[1], "reason": error.reason, "error": str(exc)}
+        _degrade("daymet_daily", LAYER_CLIMATE, exc)
 
-    climate = derive_climate(daymet_daily) if daymet_daily is not None else None
+    # The precipitation correction: the nearest normals stations off the
+    # bundle (no fetch), then Daymet at each of them.
+    daymet_at_stations = None
+    correction = None
+    if daymet_daily is not None:
+        stations = precipitation_normals.nearest_stations(centroid[0], centroid[1])
+        try:
+            with run_diagnostics.time_layer("daymet_at_stations", get_daymet_daily_for_point):
+                daymet_at_stations = _fetch_daymet_at_stations(stations)
+        except requests.exceptions.RequestException as exc:
+            _degrade("daymet_at_stations", LAYER_STATIONS, exc)
+        if daymet_at_stations is not None:
+            correction = derive_precipitation_correction(stations, daymet_at_stations)
+
+    climate = None
+    if daymet_daily is not None:
+        climate = derive_climate(daymet_daily, prcp_factor=correction["factor"] if correction else 1.0)
+
+    atlas14 = storms = None
+    try:
+        with run_diagnostics.time_layer("atlas14", get_atlas14_for_point):
+            atlas14 = get_atlas14_for_point(centroid[0], centroid[1])
+        storms = design_storms(atlas14)
+    except (requests.exceptions.RequestException, Atlas14IncompleteError) as exc:
+        atlas14 = storms = None
+        _degrade("atlas14", LAYER_ATLAS14, exc)
+
+    power_wind = wind = None
+    if climate is not None:
+        try:
+            with run_diagnostics.time_layer("power_wind", get_power_wind_for_point):
+                power_wind = get_power_wind_for_point(centroid[0], centroid[1], climate["years"])
+            wind = derive_wind(power_wind)
+        except (requests.exceptions.RequestException, PowerIncompleteError) as exc:
+            power_wind = wind = None
+            _degrade("power_wind", LAYER_POWER_WIND, exc)
+
+    severe_weather = spc_reports.reports_within(centroid[0], centroid[1])
 
     return ReportData(
         boundary=list(boundary),
         centroid=centroid,
         daymet_daily=daymet_daily,
+        daymet_at_stations=daymet_at_stations,
+        precipitation_correction=correction,
         climate=climate,
+        atlas14=atlas14,
+        design_storms=storms,
+        power_wind=power_wind,
+        wind=wind,
+        severe_weather=severe_weather,
         unavailable=unavailable,
     )
 
 
-def report_data_from_daily(boundary, daymet_daily: dict) -> ReportData:
+def report_data_from_fixtures(
+    boundary,
+    daymet_daily: dict,
+    station_daily: Optional[dict] = None,
+    atlas14: Optional[dict] = None,
+    power_wind: Optional[dict] = None,
+    severe_weather: bool = True,
+    unavailable: Optional[dict] = None,
+) -> ReportData:
     """
-    A ReportData from daily arrays ALREADY IN HAND -- a parsed Daymet CSV
-    (the reference fixture, a diagnostic run) -- with the climate block
-    derived exactly as fetch_report_data() derives it. No network. What a
-    test or a diagnostic uses to render a report offline; the production
-    path is fetch_report_data().
+    A ReportData from parsed responses ALREADY IN HAND -- the reference
+    fixtures, a diagnostic run -- with every block derived exactly as
+    fetch_report_data() derives it. No network. `station_daily` is
+    {station id: parsed Daymet prcp dict}; when given, the nearest
+    stations are taken off the bundle for the boundary's centroid and the
+    correction computed; when None the factor is 1.0 and no correction
+    block is carried. A layer passed as None is absent, as if it degraded;
+    `unavailable` may then name it. The production path is
+    fetch_report_data().
     """
+    centroid = boundary_centroid_lat_lon(boundary)
+    correction = None
+    if station_daily is not None:
+        stations = precipitation_normals.nearest_stations(centroid[0], centroid[1])
+        correction = derive_precipitation_correction(stations, station_daily)
+    climate = derive_climate(daymet_daily, prcp_factor=correction["factor"] if correction else 1.0)
     return ReportData(
         boundary=list(boundary),
-        centroid=boundary_centroid_lat_lon(boundary),
+        centroid=centroid,
         daymet_daily=daymet_daily,
-        climate=derive_climate(daymet_daily),
-        unavailable={},
+        daymet_at_stations=station_daily,
+        precipitation_correction=correction,
+        climate=climate,
+        atlas14=atlas14,
+        design_storms=design_storms(atlas14) if atlas14 is not None else None,
+        power_wind=power_wind,
+        wind=derive_wind(power_wind) if power_wind is not None else None,
+        severe_weather=spc_reports.reports_within(centroid[0], centroid[1]) if severe_weather else None,
+        unavailable=dict(unavailable or {}),
     )
+
+
+def report_data_from_daily(boundary, daymet_daily: dict) -> ReportData:
+    """The branch 5 shape, kept for its callers: Daymet alone, factor
+    1.0, no other layer. See report_data_from_fixtures()."""
+    return report_data_from_fixtures(boundary, daymet_daily)
 
 
 def _build_default_cache():

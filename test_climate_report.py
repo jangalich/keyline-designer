@@ -259,4 +259,126 @@ assert all(1.0 < row["solar_kwh_m2_day"] < 7.0 for row in fixture["monthly"])
 assert all(-15.0 < row["tmin_mean_c"] < 20.0 and -5.0 < row["tmax_mean_c"] < 35.0 for row in fixture["monthly"])
 print(f"   frost-free {frost['frost_free_days']} d (gaps median), zone {fixture['hardiness']['zone']}, wettest month {fixture['annual']['wettest_month']}")
 
+
+# ======================================================================
+# K. The heavy-rain threshold, at exactly 25.4 mm
+# ======================================================================
+print("K. a heavy-rain day is >= 25.4 mm: exactly 25.4 counts, 25.39 does not")
+from climate_report import HEAVY_RAIN_MM, is_heavy_rain_day
+assert HEAVY_RAIN_MM == 25.4 and is_heavy_rain_day(25.4) and not is_heavy_rain_day(25.39) and is_heavy_rain_day(25.41)
+assert is_heavy_rain_day(1.0 * 25.4), "one inch converted is the threshold itself"
+heavy = derive_climate(
+    _synthetic([2001, 2002], lambda y, d: 20.0, lambda y, d: 10.0,
+               prcp_fn=lambda y, d: 25.4 if (y, d) == (2001, 10) else 25.39 if (y, d) == (2001, 11) else 40.0 if (y, d) == (2002, 200) else 0.0)
+)
+assert heavy["annual"]["heavy_rain_days_by_year"] == {2001: 1, 2002: 1}
+assert _close(heavy["annual"]["heavy_rain_days"], 1.0)
+assert _close(heavy["monthly"][0]["heavy_rain_days"], 0.5)          # one January day in one of two years
+assert _close(heavy["monthly"][6]["heavy_rain_days"], 0.5)          # yday 200 is Jul 19
+assert heavy["annual"]["largest_day"] == {"date": date(2002, 7, 19), "prcp_mm": 40.0}
+print("   25.4 counts, 25.39 does not; largest day Jul 19 2002 at 40 mm")
+
+# ======================================================================
+# L. Thornthwaite PET against a hand-computed case
+# ======================================================================
+print("L. Thornthwaite: a constant 10 C, 12 h, 30-day month evaporates 48.9 mm; zero at or below 0 C")
+from climate_report import (
+    thornthwaite_exponent, thornthwaite_heat_index, thornthwaite_monthly_pet_mm, PET_METHOD,
+)
+# By hand: 2^1.514 = e^(1.514 x 0.693147) = e^1.04942 = 2.8560, so I = 12 x 2.8560 = 34.272;
+# a = 6.75e-7 I^3 - 7.71e-5 I^2 + 1.792e-2 I + 0.49239 = 0.02717 - 0.09056 + 0.61415 + 0.49239 = 1.0432;
+# PET = 16 x (100 / 34.272)^1.0432 = 16 x e^(1.0432 x ln 2.9178) = 16 x e^1.1172 = 16 x 3.0563 = 48.90 mm.
+I = thornthwaite_heat_index([10.0] * 12)
+a = thornthwaite_exponent(I)
+assert abs(I - 34.272) < 0.001 and abs(a - 1.0432) < 0.0005, (I, a)
+pet = thornthwaite_monthly_pet_mm(10.0, I, a, 12.0, 30.0)
+assert abs(pet - 48.89) < 0.05, pet
+assert _close(thornthwaite_monthly_pet_mm(10.0, I, a, 24.0, 30.0), 2 * pet), "day length scales linearly"
+assert _close(thornthwaite_monthly_pet_mm(10.0, I, a, 12.0, 15.0), pet / 2), "days scale linearly"
+assert thornthwaite_monthly_pet_mm(0.0, I, a, 12.0, 30.0) == 0.0 and thornthwaite_monthly_pet_mm(-5.0, I, a, 12.0, 30.0) == 0.0
+assert thornthwaite_heat_index([-3.0] * 12) == 0.0 and thornthwaite_monthly_pet_mm(5.0, 0.0, 0.5, 12.0, 30.0) == 0.0
+# Above 26.5 C the Willmott polynomial: -415.85 + 32.24 x 30 - 0.43 x 900 = 164.35 mm at 12 h / 30 d.
+assert abs(thornthwaite_monthly_pet_mm(30.0, I, a, 12.0, 30.0) - 164.35) < 0.01
+# Through derive_climate: constant 15/5 C (mean 10 C), 12 h days, the
+# block's monthly PET is the hand figure scaled by each month's days.
+flat10 = derive_climate(_synthetic([2001], lambda y, d: 15.0, lambda y, d: 5.0, dayl=43200.0))
+assert abs(flat10["pet"]["heat_index"] - I) < 1e-9 and flat10["pet"]["method"] == PET_METHOD
+assert abs(flat10["monthly"][0]["pet_mm"] - pet * 31 / 30) < 1e-6 and abs(flat10["monthly"][1]["pet_mm"] - pet * 28 / 30) < 1e-6
+assert abs(flat10["annual"]["pet_mm"] - pet * 365 / 30) < 1e-6
+print(f"   I {I:.3f}, a {a:.4f}, PET {pet:.2f} mm; 30 C -> 164.35 mm by the high-temperature polynomial")
+
+# ======================================================================
+# M. The climatic water balance
+# ======================================================================
+print("M. balance is precipitation minus PET by month; deficit months and total follow; no soil term exists")
+balance = derive_climate(
+    _synthetic([2001], lambda y, d: 15.0, lambda y, d: 5.0, prcp_fn=lambda y, d: 3.0 if d <= 181 else 0.5, dayl=43200.0)
+)
+for row in balance["monthly"]:
+    assert _close(row["balance_mm"], row["prcp_total_mm"] - row["pet_mm"]), row
+# Jan-Jun: 3 mm/day against ~1.63 mm/day PET -> surplus; Jul-Dec: 0.5 mm/day -> deficit.
+assert balance["annual"]["surplus_months"] == [1, 2, 3, 4, 5, 6] and balance["annual"]["deficit_months"] == [7, 8, 9, 10, 11, 12]
+assert _close(balance["annual"]["deficit_mm"], -sum(r["balance_mm"] for r in balance["monthly"] if r["balance_mm"] < 0))
+assert _close(balance["annual"]["balance_mm"], balance["annual"]["prcp_total_mm"] - balance["annual"]["pet_mm"])
+assert not any("soil" in key for key in balance["annual"]) and not any("soil" in key for key in balance["monthly"][0])
+print(f"   six surplus months, six deficit months, deficit {balance['annual']['deficit_mm']:.1f} mm")
+
+# ======================================================================
+# N. The precipitation factor
+# ======================================================================
+print("N. prcp_factor scales every precipitation figure and nothing else")
+half = derive_climate(two_years := _synthetic([2001, 2002], lambda y, d: 20.0, lambda y, d: 10.0,
+                                              prcp_fn=lambda y, d: 30.0 if d == 100 else 2.0), prcp_factor=0.5)
+full = derive_climate(two_years)
+assert half["prcp_factor"] == 0.5 and full["prcp_factor"] == 1.0
+assert _close(half["annual"]["prcp_total_mm"], full["annual"]["prcp_total_mm"] / 2)
+assert all(_close(h["prcp_total_mm"], f["prcp_total_mm"] / 2) for h, f in zip(half["monthly"], full["monthly"]))
+assert all(h["pet_mm"] == f["pet_mm"] and h["tmax_mean_c"] == f["tmax_mean_c"] for h, f in zip(half["monthly"], full["monthly"]))
+assert _close(half["annual"]["largest_day"]["prcp_mm"], 15.0) and full["annual"]["largest_day"]["prcp_mm"] == 30.0
+assert full["annual"]["heavy_rain_days"] == 1.0 and half["annual"]["heavy_rain_days"] == 0.0, "a 30 mm day at 0.5 is 15 mm, not heavy"
+assert _close(half["annual"]["driest_year"]["prcp_total_mm"], full["annual"]["driest_year"]["prcp_total_mm"] / 2)
+print("   totals, largest day and driest year halve; heavy days recount on the scaled series; PET and temperature untouched")
+
+# ======================================================================
+# O. Day length, and the driest and wettest year
+# ======================================================================
+print("O. day length is dayl/3600 by month; the longest and shortest day carry their usual dates; years ranked")
+import math as _math
+def _dayl(y, d):
+    # Peak on yday 172 (Jun 21 in a common year), trough exactly on yday 355 (Dec 21): a 366-day period puts the
+    # trough 183 days after the peak, on one row rather than between two.
+    return 43200.0 + 10800.0 * _math.cos(2 * _math.pi * (d - 172) / 366)
+cycle = {k: [] for k in ("year", "yday", "tmax", "tmin", "prcp", "srad", "dayl")}
+for y in (2001, 2002, 2003):
+    for d in range(1, DAYS_PER_DAYMET_YEAR + 1):
+        cycle["year"].append(y); cycle["yday"].append(d); cycle["tmax"].append(20.0); cycle["tmin"].append(10.0)
+        cycle["prcp"].append(float(y - 2000)); cycle["srad"].append(200.0); cycle["dayl"].append(_dayl(y, d))
+cyc = derive_climate(cycle)
+assert _close(cyc["day_length"]["longest"]["hours"], 15.0) and (cyc["day_length"]["longest"]["month"], cyc["day_length"]["longest"]["day"]) == (6, 21)
+assert _close(cyc["day_length"]["shortest"]["hours"], 9.0) and (cyc["day_length"]["shortest"]["month"], cyc["day_length"]["shortest"]["day"]) == (12, 21)
+assert abs(cyc["monthly"][5]["day_length_h"] - 14.9) < 0.1 and abs(cyc["monthly"][11]["day_length_h"] - 9.1) < 0.1
+assert cyc["annual"]["driest_year"] == {"year": 2001, "prcp_total_mm": 365.0}
+assert cyc["annual"]["wettest_year"] == {"year": 2003, "prcp_total_mm": 3 * 365.0}
+assert two["annual"]["driest_year"]["year"] == 2002 and two["annual"]["wettest_year"]["year"] == 2001   # section D's case
+print("   longest Jun 21 at 15.0 h, shortest Dec 21 at 9.0 h; driest 2001, wettest 2003")
+
+# ======================================================================
+# P. The fixture's water figures against the published references
+# ======================================================================
+print("P. the fixture: Thornthwaite against the Penn State atlas figure, and the rest reported")
+pet_mm = fixture["annual"]["pet_mm"]
+published_mm = 671.0   # Pittsburgh airport, Thornthwaite on 1961-1990 normals (Waltman et al., Soil Climate Regimes of Pennsylvania)
+assert abs(pet_mm - published_mm) / published_mm < 0.03, f"{pet_mm:.0f} mm vs {published_mm} mm published"
+# UNCORRECTED precipitation here (factor 1.0): June's balance is +2 mm, so the deficit is July and August.
+# With the 0.96 factor the report applies (test_precipitation_normals.py) June joins them.
+assert fixture["annual"]["deficit_months"] == [7, 8], fixture["annual"]["deficit_months"]
+assert (fixture["day_length"]["longest"]["month"], fixture["day_length"]["longest"]["day"]) == (6, 21)
+assert (fixture["day_length"]["shortest"]["month"], fixture["day_length"]["shortest"]["day"]) == (12, 21)
+assert 14.5 < fixture["day_length"]["longest"]["hours"] < 15.5 and 8.5 < fixture["day_length"]["shortest"]["hours"] < 9.5
+assert fixture["annual"]["driest_year"]["year"] == 1995 and fixture["annual"]["wettest_year"]["year"] == 2018
+assert fixture["annual"]["largest_day"]["date"] == date(2004, 9, 17)   # the remnants of Hurricane Ivan
+print(f"   PET {pet_mm:.0f} mm vs 671 mm published ({(pet_mm - published_mm) / published_mm * 100:+.1f}%); "
+      f"deficit months {fixture['annual']['deficit_months']}, {fixture['annual']['deficit_mm'] / 25.4:.2f} in uncorrected; "
+      f"heavy days {fixture['annual']['heavy_rain_days']:.2f}/yr; largest day {fixture['annual']['largest_day']['prcp_mm']:.1f} mm on {fixture['annual']['largest_day']['date']}")
+
 print("\ntest_climate_report.py: all sections passed")

@@ -320,11 +320,11 @@ def incomplete_years(parsed: dict, years) -> list:
 # ======================================================================
 
 
-def _request_csv(latitude: float, longitude: float, years, max_retries: int) -> str:
+def _request_csv(latitude: float, longitude: float, years, max_retries: int, variables=DAYMET_VARIABLES) -> str:
     params = {
         "lat": f"{latitude:.6f}",
         "lon": f"{longitude:.6f}",
-        "vars": ",".join(DAYMET_VARIABLES),
+        "vars": ",".join(variables),
         "years": ",".join(str(y) for y in years),
         "format": "csv",
     }
@@ -354,6 +354,7 @@ def get_daymet_daily_for_point(
     years=None,
     max_retries: int = 2,
     today: Optional[date] = None,
+    variables=DAYMET_VARIABLES,
 ) -> dict:
     """
     Daymet daily tmax/tmin/prcp/srad/dayl at one point for `years` (default:
@@ -367,19 +368,31 @@ def get_daymet_daily_for_point(
     expected cause -- see the module docstring's VERIFY note) the window is
     shifted back one year and requested once more. A second shortfall is
     raised, naming the years, rather than reported as a 29-year mean under
-    a 30-year label.
+    a 30-year label. The shift applies ONLY to the default window: a caller
+    that named its years (precipitation_normals, fetching 1991-2020 at a
+    station) asked for a fixed period, and a shifted answer would be the
+    wrong period under the right label.
+
+    `variables` narrows the request (precipitation alone for a station
+    check); the parser then requires only those columns.
     """
+    shift_on_incomplete = years is None
     if years is None:
         years = most_recent_complete_years(today)
     years = list(years)
 
-    text = _request_csv(latitude, longitude, years, max_retries)
-    parsed = parse_daymet_csv(text)
+    text = _request_csv(latitude, longitude, years, max_retries, variables)
+    parsed = parse_daymet_csv(text, required_variables=variables)
     missing = incomplete_years(parsed, years)
+    if missing and not shift_on_incomplete:
+        raise DaymetIncompleteError(
+            f"Daymet served incomplete data: years {missing} missing or partial for the "
+            f"requested window {years[0]}-{years[-1]}"
+        )
     if missing:
         shifted = [y - 1 for y in years]
-        text = _request_csv(latitude, longitude, shifted, max_retries)
-        parsed = parse_daymet_csv(text)
+        text = _request_csv(latitude, longitude, shifted, max_retries, variables)
+        parsed = parse_daymet_csv(text, required_variables=variables)
         still_missing = incomplete_years(parsed, shifted)
         if still_missing:
             raise DaymetIncompleteError(
