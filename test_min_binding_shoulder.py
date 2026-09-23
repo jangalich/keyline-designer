@@ -110,7 +110,7 @@ def _boundary_for(dem):
 # fixture able to put a sub-gate site in the chosen position at all.
 GATE_ROWS, GATE_COLS, GATE_CHANNEL = 40, 31, 15
 GATE_SEED = (4, GATE_CHANNEL)
-GATE_WAIST = (14, GATE_CHANNEL)
+GATE_WAIST = (26, GATE_CHANNEL)
 
 
 def _gate_array(waist_left_rise, waist_right_rise=None):
@@ -121,7 +121,7 @@ def _gate_array(waist_left_rise, waist_right_rise=None):
     array = np.zeros((GATE_ROWS, GATE_COLS))
     for r in range(GATE_ROWS):
         base = 100.0 - 0.25 * r
-        waist = 14 <= r <= 25
+        waist = GATE_WAIST[0] <= r <= GATE_WAIST[0] + 11
         k = 2 if waist else 7
         for c in range(GATE_COLS):
             d = abs(c - GATE_CHANNEL)
@@ -409,7 +409,7 @@ print(
 # reason is the informative one: "this cannot impound" tells an owner
 # something about their land; "this is small" does not.
 # A 0.70 m waist: sub-gate at every station, and the compartment the
-# seeder builds around it is 0.068 ac -- under the 0.1 ac floor too. It
+# seeder builds around it is 0.0618 ac -- under the 0.1 ac floor too. It
 # is therefore refusable by BOTH rules, which is exactly what makes the
 # ordering testable rather than assumed.
 _tiny_dem, _tiny_result = _zones_for(0.70)

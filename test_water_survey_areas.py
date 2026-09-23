@@ -1739,12 +1739,17 @@ print(
 
 
 PRESENTATION_SHOULDER_OFFSET_CELLS = 4
+# The waist's offset, for fixtures that pass waist_rows: a valley
+# narrow enough that the objective has a genuine narrows to choose.
+PRESENTATION_WAIST_OFFSET_CELLS = 2
 PRESENTATION_SHOULDER_DROP_METERS = 2.6
 
 
 def _presentation_dem(
     rows, cols, channels, accumulation_per_row, cross_grade, down_grade,
     shoulder_offset_cells=PRESENTATION_SHOULDER_OFFSET_CELLS,
+    waist_rows=(),
+    waist_offset_cells=PRESENTATION_WAIST_OFFSET_CELLS,
 ):
     """A channel-in-a-valley DEM plus the hand-built accumulation ribbon
     and the parcel box, generalized to N channels and a settable grade:
@@ -1765,13 +1770,33 @@ def _presentation_dem(
     nearest channel the ground drops PRESENTATION_SHOULDER_DROP_METERS,
     well past the 1.0 m prominence, which makes the last ramp cell a
     confirmed crest. The valley the fixtures were always describing is
-    now actually closed."""
+    now actually closed.
+
+    AND SOME FIXTURES NEED A NARROWS, not only a closed valley, which is
+    what waist_rows adds. A valley of CONSTANT width offers no dam site
+    worth walking to: every station scores the same, the objective's
+    first-of-ties keeps the earliest, and the seed is its own best site
+    (REASON_BEST_SITE_AT_SEED). Such fixtures used to get their
+    compartments from OFF-CHANNEL seeds out on the valley's outer plane,
+    where the ground rises to the grid edge on one side -- stations that
+    are ONE-SIDED, and that lower_crest_height() now refuses to give a
+    binding height to, correctly: there is no shoulder that way inside
+    the bound, so water leaves that way at any pool height, and the
+    compartments those seeds produced were selected on an unmeasured
+    flank. Rather than restore them, a fixture that needs embankment
+    survivors now pinches the CHANNEL over waist_rows -- a real narrows,
+    seeded from the channel, with both flanks measured."""
     array = np.zeros((rows, cols))
     for r in range(rows):
+        offset = (
+            waist_offset_cells
+            if any(low <= r <= high for low, high in waist_rows)
+            else shoulder_offset_cells
+        )
         for c in range(cols):
             distance = min(abs(c - ch) for ch in channels)
             array[r, c] = 100.0 + distance * cross_grade - r * down_grade
-            if distance > shoulder_offset_cells:
+            if distance > offset:
                 array[r, c] -= PRESENTATION_SHOULDER_DROP_METERS
     accumulation = np.ones((rows, cols))
     for r in range(rows):
@@ -1912,11 +1937,28 @@ print(
 )
 
 # --- CASE 2: ONE EXCAVATED SURVIVOR -> 2 embankment + 1 excavated + 1
-# embankment backfill. A single long valley: ten compartments, one
+# embankment backfill. A single long valley with THREE WAISTS in it, one
 # excavated ribbon. The third and fourth slots come from the type that
 # HAS leftovers, in its own rank order, appended after the interleaved
 # base.
-_one_dem, _one_boundary, _one_acc = _presentation_dem(80, 21, [10], 30, 0.30, 0.25)
+#
+# THE WAISTS ARE NEW, and so is the wider shoulder offset. This valley
+# used to be the same constant width from top to bottom, and its
+# embankment survivors all came from OFF-CHANNEL seeds whose outward
+# crest walk rose to the grid edge and never declared a crest -- stations
+# lower_crest_height() now refuses to hand a binding height to, because a
+# flank with no shoulder inside the bound is unbounded rather than tall.
+# A constant-width valley offers the objective nothing to walk to (every
+# station ties, and the first of a tie is the seed itself), so the
+# fixture now pinches the channel three times. The compartments are
+# seeded ON the channel, both their flanks are measured, and the case
+# keeps testing what it is about -- the interleave running out of
+# excavated zones -- rather than resting on an unmeasured flank.
+_one_dem, _one_boundary, _one_acc = _presentation_dem(
+    80, 21, [10], 30, 0.30, 0.25,
+    shoulder_offset_cells=6,
+    waist_rows=((18, 21), (38, 41), (58, 61)),
+)
 one_exc_result = compute_water_survey_areas(_one_dem, _one_boundary, flow_accumulation=_one_acc)
 _one_summary, _one_presented, _one_unpresented = _assert_presentation_invariants(
     one_exc_result, "case 2 (one excavated survivor)"
@@ -2009,8 +2051,14 @@ print(
 # shoulder to dam against), so the short list is built here instead,
 # from the same generator the other three cases use. The rule reaching
 # the end of a short list is still what is being tested.
+#
+# ONE WAIST, for the same reason case 2 has three: a valley of constant
+# width has no dam site to walk to, and the two embankment survivors this
+# case needs used to come from off-channel seeds whose outward flank ran
+# to the grid edge unmeasured. Both of these are seeded on the channel
+# and pinch at the waist, so the short list is three REAL survivors.
 _short_dem, _short_boundary, _short_acc = _presentation_dem(
-    24, 21, [10], 30, 0.30, 0.25, shoulder_offset_cells=5
+    24, 21, [10], 30, 0.30, 0.25, shoulder_offset_cells=6, waist_rows=((10, 13),)
 )
 short_result = compute_water_survey_areas(
     _short_dem, _short_boundary, flow_accumulation=_short_acc

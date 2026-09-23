@@ -169,6 +169,8 @@ from diagnose_pinch_bearing_and_bound import (
 )
 from diagnose_transect_bearing import summarize_transect_bearing_comparison
 from water_survey_areas import (
+    CREST_ABSENCE_AT_BOUND,
+    CREST_ABSENCE_AT_GRID_EDGE,
     DEPRESSION_FULL_CREDIT_METERS,
     RIDGE_WALK_MAX_HALF_WIDTH_METERS,
     DEPRESSION_NOISE_FLOOR_METERS,
@@ -464,12 +466,33 @@ def _overlap_cell(value) -> str:
     return "n/c" if value is None else f"{value}%"
 
 
-def _crest_height_cell(value) -> str:
+# What each absence CODE reads as on the line. The wording says what
+# stopped the walk, because the two demand different responses: a
+# bound-stopped flank is open ground this parcel genuinely has, while a
+# DEM-edge flank is the fetched window ending (get_dem_for_boundary()'s
+# 100 m margin is shorter than the 150 m half-width bound) and says
+# nothing about terrain at all.
+_ABSENCE_PHRASES = {
+    CREST_ABSENCE_AT_BOUND: "no crest within bound",
+    CREST_ABSENCE_AT_GRID_EDGE: "no crest, DEM edge",
+}
+
+
+def _absence_phrase(absence) -> str:
+    """The walk's own reason, in words. Unknown codes are printed rather
+    than swallowed -- an instrument that quietly renders a value it does
+    not recognise as a familiar phrase would hide the one thing worth
+    seeing."""
+    return _ABSENCE_PHRASES.get(absence, f"no crest ({absence})")
+
+
+def _crest_height_cell(value, absence=None) -> str:
     """One shoulder height for the enclosure-depth line. An absent side
-    prints "no crest within bound" -- the walk ran out
-    RIDGE_WALK_MAX_HALF_WIDTH_METERS without the prominence fall, so
-    there is no height -- rather than a blank, which a reader would have
-    to guess at, or a 0.0, which means something else entirely here.
+    prints WHY there is no height -- "no crest within bound" when the
+    walk spent its whole RIDGE_WALK_MAX_HALF_WIDTH_METERS allowance on
+    rising ground, "no crest, DEM edge" when the fetched grid ran out
+    first -- rather than a blank, which a reader would have to guess at,
+    or a 0.0, which means something else entirely here.
 
     "0.00 m" IS A REAL READING and the line must not be misread as
     printing it for a missing side: it is a crest the walk CONFIRMED at
@@ -477,7 +500,34 @@ def _crest_height_cell(value) -> str:
     at all -- the worst enclosure a compartment can report, and the
     opposite finding from an unresolved flank. The two are printed as
     visibly different things for exactly that reason."""
-    return "no crest within bound" if value is None else f"{value:.2f} m"
+    return _absence_phrase(absence) if value is None else f"{value:.2f} m"
+
+
+def _binding_cell(value, absence_left, absence_right) -> str:
+    """The BINDING side of one transect, or -- when there is none -- the
+    reason there is none, naming the flank and what stopped it.
+
+    A MIN THAT REFUSES IS NOT A MIN THAT IS MISSING. lower_crest_height()
+    returns None when EITHER flank is absent, because an unmeasured side
+    is unbounded rather than short: no shoulder within the half-width
+    means water leaves that way at any pool height, so there is no
+    limiting height to report. Printing that as a bare "no crest within
+    bound" would read as though the reduction had merely come up empty;
+    printing "undefined -- L no crest within bound" says the station is
+    open on the left and therefore cannot be scored at all, which is the
+    finding.
+
+    The value is READ, never recomputed: this takes the stored min and
+    only decorates its absence, so the line cannot disagree with the
+    reduction the selection actually ran."""
+    if value is not None:
+        return f"{value:.2f} m"
+    reasons = [
+        f"{side} {_absence_phrase(absence)}"
+        for side, absence in (("L", absence_left), ("R", absence_right))
+        if absence is not None
+    ]
+    return ("undefined -- " + "; ".join(reasons)) if reasons else "undefined"
 
 
 def _enclosure_depth_cell(zone: dict) -> str:
@@ -502,20 +552,36 @@ def _enclosure_depth_cell(zone: dict) -> str:
     which on a long gentle shoulder can sit well short of the true
     ridge. The threshold is printed with the numbers for that reason.
 
+    AND WHY A SIDE IS MISSING, not merely that it is. Each absent flank
+    prints what stopped its walk -- the half-width bound (open ground)
+    or the DEM edge (the fetched window) -- and an undefined min names
+    the flank that made it undefined. That distinction decides different
+    questions: bound absences are a statement about this terrain, DEM-
+    edge ones about the fetch margin, and a min that refuses is a
+    station the objective cannot score at all rather than one that
+    scored badly.
+
     METRES, matching the width figures on the line above (this table
     reads the stored metric record; the report's imperial conversion is
     a separate boundary and no consumer prints these yet)."""
+    # The absence codes live on the TRANSECT records the heights were
+    # measured from, so they are read from there rather than duplicated
+    # onto the zone: one record, one place, and no chance of a printed
+    # reason drifting from the walk that produced it.
+    transect_by_end = {transect["end"]: transect for transect in zone["transects"]}
     parts = []
     for end in ("seed", "pinch"):
+        transect = transect_by_end[end]
         parts.append(
-            f"{end} L {_crest_height_cell(zone[f'{end}_crest_height_left_m'])} / "
-            f"R {_crest_height_cell(zone[f'{end}_crest_height_right_m'])} / "
-            f"min {_crest_height_cell(zone[f'{end}_crest_height_min_m'])}"
+            f"{end} L {_crest_height_cell(zone[f'{end}_crest_height_left_m'], transect['crest_absence_left'])} / "
+            f"R {_crest_height_cell(zone[f'{end}_crest_height_right_m'], transect['crest_absence_right'])} / "
+            f"min {_binding_cell(zone[f'{end}_crest_height_min_m'], transect['crest_absence_left'], transect['crest_absence_right'])}"
         )
     return (
         f"      enclosure depth above channel (raw DEM, nearest local crest at "
         f"{RIDGE_PROMINENCE_METERS} m prominence -- a LOWER BOUND, min = the lower/binding "
-        f"shoulder): " + "; ".join(parts)
+        f"shoulder, UNDEFINED where either flank is absent because an unmeasured side is "
+        f"unbounded): " + "; ".join(parts)
     )
 
 

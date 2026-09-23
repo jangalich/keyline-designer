@@ -627,7 +627,25 @@ with Harness() as h:
     features_a, provenance_a = _commit_body(payload, KEY_A)
     features_b, provenance_b = _commit_body(payload, KEY_B)
     ALL_INPUTS = {"access_points": [list(ACCESS_A), list(ACCESS_B), list(ACCESS_C)]}
-    assert len(features_a) >= 2 and len(features_b) >= 2, "both networks need a spur for section 8"
+    # WHAT EACH NETWORK HAS TO BE FOR THE CASES BELOW: A needs a trunk
+    # AND a spur (the incoherent-group case commits the spur without the
+    # trunk), while B only has to be a whole network, of any size, for
+    # the two-network rejection and the single-network commit.
+    #
+    # B USED TO CARRY FOUR BRANCHES and now carries one. The water step's
+    # committed zones are this network's destinations, and refusing
+    # one-sided dam stations moved which compartments the water step
+    # offers -- so B routes to a nearer set and needs fewer branches to
+    # reach it. Nothing in section 8 depends on B's size, so the
+    # requirement is stated per network rather than raised or relaxed as
+    # a pair.
+    assert len(features_a) >= 2, (
+        f"network A needs a trunk and at least one spur: {len(features_a)} branch(es)"
+    )
+    assert any(f["properties"]["branch_role"] != "trunk" for f in features_a), (
+        "and that spur has to be a non-trunk branch, or the incoherent-group case is untested"
+    )
+    assert len(features_b) >= 1, f"network B has to be a whole network: {len(features_b)}"
 
     # --- 8 [test 8]. max_features 1, COUNTED IN NETWORKS.
     try:

@@ -486,12 +486,15 @@ _fake_configuration = {
         }
     ]
 }
-_tally_100 = _absent_tally(_fake_configuration, 100.0)
+# The bound is no longer an argument: the split is read off each
+# walk's own `absence`, so a tally cannot mislabel a walk run at
+# another bound.
+_tally_100 = _absent_tally(_fake_configuration)
 assert _tally_100 == {"absent": 2, "total": 2, "at_bound": 1, "at_edge": 1}, _tally_100
 _resolved = {
     "compartments": [{"walk_stations": [{"measurement": {"left": _at_150, "right": _off_grid}}]}]
 }
-_tally_150 = _absent_tally(_resolved, 150.0)
+_tally_150 = _absent_tally(_resolved)
 assert _tally_150 == {"absent": 1, "total": 2, "at_bound": 0, "at_edge": 1}, _tally_150
 
 assert HALF_WIDTH_SWEEP_METERS == (100.0, 150.0, 200.0)

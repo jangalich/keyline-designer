@@ -86,6 +86,7 @@ from valley_level_pool import (
     local_stem_direction,
 )
 from water_survey_areas import (
+    CREST_ABSENCE_AT_BOUND,
     RIDGE_PROMINENCE_METERS,
     RIDGE_WALK_MAX_HALF_WIDTH_METERS,
     SURVEY_TYPE_EMBANKMENT,
@@ -285,10 +286,15 @@ def _bound_cell(walk: dict) -> str:
     'bound' means it ran the full RIDGE_WALK_MAX_HALF_WIDTH_METERS;
     'edge' means it left the grid (or hit nodata) sooner, which is a
     different problem and must not be read as the bound being too
-    short."""
-    if not walk["bound_hit"]:
+    short.
+
+    The verdict is the WALK's, read off `absence` rather than inferred
+    from its distance: only the walk knows which of its exits it took,
+    and a distance comparison against a module constant would mislabel
+    any walk run at another bound."""
+    if walk["absence"] is None:
         return f"crest@{walk['half_width_m']:.1f}m"
-    if walk["half_width_m"] >= RIDGE_WALK_MAX_HALF_WIDTH_METERS:
+    if walk["absence"] == CREST_ABSENCE_AT_BOUND:
         return f"bound@{walk['half_width_m']:.1f}m"
     return f"edge@{walk['half_width_m']:.1f}m"
 
@@ -310,11 +316,11 @@ def _absent_flank_tally(comparisons: list[dict]) -> dict:
                 for side in ("left", "right"):
                     walk = station[method][side]
                     total += 1
-                    if not walk["bound_hit"]:
+                    if walk["absence"] is None:
                         continue
                     absent += 1
                     distances.append(walk["half_width_m"])
-                    if walk["half_width_m"] >= RIDGE_WALK_MAX_HALF_WIDTH_METERS:
+                    if walk["absence"] == CREST_ABSENCE_AT_BOUND:
                         at_bound += 1
                     else:
                         at_edge += 1

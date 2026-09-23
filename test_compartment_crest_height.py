@@ -61,6 +61,7 @@ from shapely import contains_xy
 from shapely.geometry import box
 
 import water_survey_areas as wsa
+import diagnose_water_survey_areas as diag
 from diagnose_water_survey_areas import summarize_survey_zones_table
 from keypoint_detection import build_upstream_map
 from raster_grid import pixel_center_xy
@@ -335,7 +336,7 @@ print(
 
 
 # =========================================================================
-# 3 [3]. ABSENT IS NOT ZERO
+# 3 [3]. ABSENT IS NOT ZERO -- AND NOT IGNORABLE EITHER
 # =========================================================================
 # THE SENTINEL, STATED. A walk that runs out RIDGE_WALK_MAX_HALF_WIDTH_
 # METERS (or leaves the grid) without the prominence fall never declared
@@ -346,21 +347,131 @@ print(
 # with the channel"), the same discipline road_overlap_pct and
 # unreachable_stem_end keep.
 #
+# AND THE _MIN_ REFUSES RATHER THAN FALLING BACK (3a). A side that could
+# not be measured is UNBOUNDED, not tall: within the half-width this
+# instrument can see there is no shoulder that way at all, so water
+# rising at that station leaves that way at any pool height. The
+# limiting height is therefore undefined, and lower_crest_height()
+# returns None the moment EITHER side is absent. Reducing over "the
+# sides that reported" -- which this code did until this branch -- turned
+# "we could not find that shoulder" into "that shoulder is 2.66 m", and
+# because the dam-site objective is h**2 / w it let very wide, one-sided
+# stations WIN. "Absent is not zero" protects a station from LOSING on
+# unmeasured merit; it must never become "absent is ignored".
+#
 # THE CONVERSE IS ALSO ASSERTED (3d): a MEASURED 0.0 -- a crest the walk
 # confirmed at the station itself, meaning no shoulder above the channel
 # at all -- is a real reading and must never collapse into the absent
 # sentinel, in either direction.
 
-# --- 3a. ONE SIDE ABSENT: the left flank rises to the grid edge ---
-# Left of the channel (c > 10) the ground climbs 0.6 m/cell all the way
-# to col 20 and never falls, so the +x walk leaves the grid at
-# (20 - 10) * 5 + 2.5 = 52.5 m with no crest: absent. The right flank is
-# the ordinary V with a 3.0 m shoulder, so the right side measures.
-# The valley still PINCHES (the right half-width tracks k(r): 20 -> 10
-# -> 25 m), which is what keeps the walk and the compartment real.
+# --- 3a. ONE SIDE ABSENT: the min is UNDEFINED, not the other side ---
+# THE FIXTURE, hand-derived. The RIGHT flank is the ordinary V, its
+# shoulder 3.0 m up at d == k(r) cells -- 4 cells (20.0 m) at the seed
+# row, 2 cells (10.0 m) at the pinch row. The LEFT flank is pushed OUT:
+# its floor climbs a gentle 0.25 m/cell and its own 3.0 m shoulder sits
+# at d == 8 cells (37.5 m, where the ray's half-cell sampling lands on
+# col 18), with the usual 2.6 m step off it to confirm it.
+#
+# So the two flanks are measurable at DIFFERENT REACHES, and a bound
+# between them makes the transect one-sided on purpose:
+#   at the walk's default 150 m bound   both flanks measure -- the walk
+#                                       pinches at row 14 and the
+#                                       compartment builds
+#   at a 30.0 m transect bound          the right shoulder is inside it
+#                                       -- 20.0 m at the seed, 10.0 m at
+#                                       the pinch, each CONFIRMED by the
+#                                       2.6 m step one cell further out
+#                                       (25.0 / 15.0 m), so the bound has
+#                                       to clear the confirming sample
+#                                       and not merely the crest -- while
+#                                       the left one is not (37.5 m, its
+#                                       own confirmation at 42.5 m): L
+#                                       absent AT THE BOUND, R 3.00 m
+# That is the zone-7 shape from the reference run in miniature: one
+# flank at the bound, the other a real shoulder. The min must refuse.
+LEFT_CREST_CELLS = 8
+ONE_SIDED_TRANSECT_BOUND_M = 30.0
 
 
 def _one_sided_array():
+    array = np.zeros((ROWS, COLS))
+    for r in range(ROWS):
+        base = 100.0 - 0.25 * r
+        k = _k_of_row(r)
+        for c in range(COLS):
+            d = abs(c - CHANNEL)
+            if c > CHANNEL:
+                # THE LEFT RAY (+x): a far shoulder, reachable only by a
+                # walk allowed past 37.5 m.
+                if d < LEFT_CREST_CELLS:
+                    array[r, c] = base + 0.25 * d
+                elif d == LEFT_CREST_CELLS:
+                    array[r, c] = base + 3.0
+                else:
+                    array[r, c] = base + 3.0 - 2.6 - 0.05 * (d - LEFT_CREST_CELLS - 1)
+                continue
+            # THE RIGHT RAY (-x): the ordinary V of section 1.
+            if d < k:
+                array[r, c] = base + 0.5 * d
+            elif d == k:
+                array[r, c] = base + 3.0
+            else:
+                array[r, c] = base + 3.0 - 2.6 - 0.05 * (d - k - 1)
+    return array
+
+
+one_sided = _compartment(
+    _dem(_one_sided_array()), max_half_width_meters=ONE_SIDED_TRANSECT_BOUND_M
+)
+one_sided_transects = {t["end"]: t for t in one_sided["transects"]}
+for end in ("seed", "pinch"):
+    assert one_sided[f"{end}_crest_height_left_m"] is None, (
+        f"{end}: the far flank is outside the transect bound -- the height is ABSENT, got "
+        f"{one_sided[f'{end}_crest_height_left_m']!r}"
+    )
+    assert one_sided_transects[end]["left"]["bound_hit"] is True, (
+        "the walk itself must be the thing reporting the absence"
+    )
+    assert one_sided[f"{end}_crest_height_right_m"] == 3.0
+    # THE CHANGE, and the whole point of this section: the min does NOT
+    # fall to the side that measured. 3.0 m is what the right flank
+    # holds; it is not what the STATION holds, because the left side has
+    # no shoulder inside the bound and water leaves that way at any
+    # height. An undefined constraint is reported as undefined.
+    assert one_sided[f"{end}_crest_height_min_m"] is None, (
+        "one flank absent -> the binding side is UNDEFINED, not the measured side: got "
+        f"{one_sided[f'{end}_crest_height_min_m']!r}"
+    )
+    assert one_sided[f"{end}_crest_height_min_m"] != 3.0, (
+        "if this were 3.0 the reduction would be crediting the station with a shoulder on a side "
+        "nobody measured -- the defect this branch removes"
+    )
+    # WHICH ABSENCE, on the record. The left walk spent its whole
+    # allowance on rising ground (terrain); nothing here left the grid.
+    assert one_sided_transects[end]["crest_absence_left"] == wsa.CREST_ABSENCE_AT_BOUND
+    assert one_sided_transects[end]["crest_absence_right"] is None
+    # The absence is disclosed by the existing bound flag, not invented
+    # here: the same walk that found no crest also floors the width.
+    assert one_sided_transects[end]["left"]["half_width_m"] == ONE_SIDED_TRANSECT_BOUND_M
+
+assert one_sided["half_width_bound_hit"] is True, (
+    "a compartment with an unresolved flank carries the existing bound flag"
+)
+# The RIGHT shoulders are the hand-derived 20.0 m / 10.0 m reaches, so
+# the fixture is measuring what the comment says it is.
+assert one_sided_transects["seed"]["right"]["half_width_m"] == 20.0
+assert one_sided_transects["pinch"]["right"]["half_width_m"] == 10.0
+
+# --- 3a-ii. EVERY STATION ONE-SIDED -> NO COMPARTMENT AT ALL ---
+# The flank that never crests: left of the channel the ground climbs
+# 0.6 m/cell to the grid edge and never falls, so the +x walk LEAVES THE
+# GRID at (20 - 10) * 5 + 2.5 = 52.5 m with no crest. Every station on
+# the walk is therefore one-sided, every one is unscoreable, and the
+# objective has nothing to compare: the walk fails at
+# REASON_NO_MEASURABLE_SHOULDER. Before this branch each of those
+# stations scored on its right flank alone and this fixture built a
+# compartment.
+def _all_one_sided_array():
     array = np.zeros((ROWS, COLS))
     for r in range(ROWS):
         base = 100.0 - 0.25 * r
@@ -379,28 +490,34 @@ def _one_sided_array():
     return array
 
 
-one_sided = _compartment(_dem(_one_sided_array()))
-one_sided_transects = {t["end"]: t for t in one_sided["transects"]}
-for end in ("seed", "pinch"):
-    assert one_sided[f"{end}_crest_height_left_m"] is None, (
-        f"{end}: the endlessly-rising flank declared no crest -- the height is ABSENT, got "
-        f"{one_sided[f'{end}_crest_height_left_m']!r}"
-    )
-    assert one_sided_transects[end]["left"]["bound_hit"] is True, (
-        "the walk itself must be the thing reporting the absence"
-    )
-    assert one_sided[f"{end}_crest_height_right_m"] == 3.0
-    assert one_sided[f"{end}_crest_height_min_m"] == 3.0, (
-        "_min_ falls to the side that MEASURED -- a missing side is unmeasured, not short, and can "
-        "never win this comparison"
-    )
-    # The absence is disclosed by the existing bound flag, not invented
-    # here: the same walk that found no crest also floors the width.
-    assert one_sided_transects[end]["left"]["half_width_m"] == 52.5
-
-assert one_sided["half_width_bound_hit"] is True, (
-    "a compartment with an unresolved flank carries the existing bound flag"
+_all_one_sided_dem = _dem(_all_one_sided_array())
+_filled, _ftr, _ftc = _flow(_all_one_sided_dem)
+_all_one_sided_walk = walk_embankment_pinch(
+    _all_one_sided_dem,
+    (SEED_ROW, CHANNEL),
+    _ftr,
+    _ftc,
+    _on_parcel(_all_one_sided_dem, BOUNDARY),
+    NO_ROAD,
 )
+assert _all_one_sided_walk["found"] is False
+assert _all_one_sided_walk["reason_code"] == wsa.REASON_NO_MEASURABLE_SHOULDER, (
+    "a walk whose every station is one-sided fails at the EXISTING absent-shoulder code -- not a "
+    f"new one, and not a fallback to the measured side: {_all_one_sided_walk.get('reason_code')}"
+)
+assert _all_one_sided_walk["unscoreable_station_count"] == len(_all_one_sided_walk["stations"])
+for _station in _all_one_sided_walk["stations"]:
+    assert _station["crest_height_left_m"] is None
+    assert _station["crest_height_right_m"] == 3.0, "the right flank DID measure, on every station"
+    assert _station["binding_height_m"] is None
+    assert _station["dam_site_score"] is None
+    # AND THIS ABSENCE IS THE OTHER KIND: the DEM ran out, not the
+    # bound. Same verdict for the binding height, different finding
+    # about why -- a wider fetch could resolve these, a longer bound
+    # could not.
+    assert _station["crest_absence_left"] == wsa.CREST_ABSENCE_AT_GRID_EDGE
+    assert _station["crest_absence_right"] is None
+    assert _station["measurement"]["left"]["half_width_m"] == 52.5
 
 # --- 3b. BOTH SIDES ABSENT ---
 # The same V-valley of section 1, walked under a 6.0 m half-width bound.
@@ -486,9 +603,18 @@ assert crest_height_above_channel(CLIFF_STRIP, _real_shoulder, _station_rowcol) 
 # it and hand the verdict to the 3.0 m side, reporting an unenclosed
 # station as an enclosed one.
 assert lower_crest_height(0.0, 3.0) == 0.0 and lower_crest_height(3.0, 0.0) == 0.0
-assert lower_crest_height(0.0, None) == 0.0, (
-    "a measured 0.0 beside an absent side is 0.0 -- not None, and not the absent side"
+# AGAINST AN ABSENT SIDE, HOWEVER, EVEN A 0.0 DOES NOT STAND IN. This is
+# the one place the two halves of the rule meet, and they do not fight:
+# 0.0 beats any MEASURED height, and no measured height -- 0.0 included
+# -- can name the binding side while the other side is unmeasured, because
+# an unmeasured side is unbounded and could only be lower still. The
+# station is refused, and 0.0 would have been the answer only if that
+# other flank had been walked and found.
+assert lower_crest_height(0.0, None) is None, (
+    "a measured 0.0 beside an ABSENT side does not become the binding height: the other side was "
+    "never measured, so there is no limiting side to name"
 )
+assert lower_crest_height(None, 0.0) is None
 
 # The helper's own two refusals, direct: a bounded walk has no height
 # whatever elevation it stopped at, and neither does an empty reduction.
@@ -496,14 +622,21 @@ assert crest_height_above_channel(
     V_DEM, {"bound_hit": True, "crest_elevation_m": 120.0}, (SEED_ROW, CHANNEL)
 ) is None, "a bound-hit walk's END elevation is not a crest and yields no height"
 assert lower_crest_height(None, None) is None
-assert lower_crest_height(None, 2.0) == 2.0 and lower_crest_height(2.0, None) == 2.0
+assert lower_crest_height(None, 2.0) is None and lower_crest_height(2.0, None) is None, (
+    "one side absent is as undefined as both: the minimum's job is to name the LIMITING side, and "
+    "a flank with no crest inside the bound limits nothing -- water leaves that way at any height"
+)
 
 print(
-    "3. Absent is not zero: a flank that rises past the bound stores None at both transects (its "
-    "walk bound-hit at 52.5 m) and _min_ falls to the 3.0 m side; under a 6.0 m bound all four "
-    "flanks go absent and all six fields are None; 0.0 appears on neither record. And the converse "
-    "holds -- a station on the lip of a drop measures 0.0 (a crest confirmed at distance 0, NOT an "
-    "absence) and that 0.0 wins the binding-side reduction against a 3.0 m shoulder."
+    f"3. Absent is not zero, and not ignorable: with the far flank outside a "
+    f"{ONE_SIDED_TRANSECT_BOUND_M:.1f} m transect bound the left height is None at both transects "
+    "and the min is UNDEFINED rather than the 3.00 m the right flank measured; a walk whose every "
+    f"station is one-sided fails at {wsa.REASON_NO_MEASURABLE_SHOULDER} with no compartment built; "
+    "under a 6.0 m bound all four flanks go absent and all six fields are None; 0.0 appears on "
+    "neither record; the two absences are named apart (bound vs grid edge). And the converse holds "
+    "-- a station on the lip of a drop measures 0.00 m (a crest confirmed at distance 0, NOT an "
+    "absence) and that 0.0 wins the reduction against a 3.0 m shoulder, while beside an ABSENT "
+    "side even it yields None."
 )
 
 
@@ -840,23 +973,47 @@ for _index, _zone in enumerate(_survivors):
                 f"{_depth_line!r}"
             )
 
-# An absent flank is words, not a blank: the one-sided fixture's table
-# says so in full.
-_one_sided_result = compute_water_survey_areas(_dem(_one_sided_array()), BOUNDARY)
-_one_sided_table = summarize_survey_zones_table(_one_sided_result)
-if _one_sided_result["zones_by_type"][SURVEY_TYPE_EMBANKMENT]:
-    assert "no crest within bound" in _one_sided_table, (
-        "an unresolved flank is stated on the diagnostic, never left blank or printed as 0.00 m"
-    )
-    _absent_line = next(
-        line for line in _one_sided_table.splitlines() if "no crest within bound" in line
-    )
-    assert "0.00 m" not in _absent_line
+# AN ABSENT FLANK IS WORDS, NOT A BLANK -- and an UNDEFINED min says so
+# in its own words, naming the flank that made it undefined. Asserted on
+# the line builder itself, over section 3a's real one-sided compartment
+# record, because the case only reaches a full run's table when the walk
+# and the baseline disagree about a flank (two different bearings through
+# one cell) and manufacturing that through compute_water_survey_areas()
+# would be hunting a coincidence rather than testing the rendering.
+_one_sided_line = diag._enclosure_depth_cell(one_sided)
+assert "no crest within bound" in _one_sided_line, (
+    "an unresolved flank is stated on the diagnostic, never left blank or printed as 0.00 m"
+)
+assert "R 3.00 m" in _one_sided_line, "the flank that DID measure still prints its height"
+assert "min undefined -- L no crest within bound" in _one_sided_line, (
+    "an undefined min must read as undefined AND name the flank and the reason -- a bare 'no crest "
+    f"within bound' would read as the reduction coming up empty: {_one_sided_line!r}"
+)
+assert "0.00 m" not in _one_sided_line
+assert "min 3.00 m" not in _one_sided_line, (
+    "and it must never print the measured side as the binding one"
+)
+
+# THE TWO ABSENCES READ DIFFERENTLY, which is the whole reason the walk
+# names which one it hit. Checked on the cell helper directly, at both
+# codes, so the wording cannot drift into one phrase for both.
+assert diag._crest_height_cell(None, wsa.CREST_ABSENCE_AT_BOUND) == "no crest within bound"
+assert diag._crest_height_cell(None, wsa.CREST_ABSENCE_AT_GRID_EDGE) == "no crest, DEM edge"
+assert diag._crest_height_cell(2.66, None) == "2.66 m"
+assert diag._binding_cell(None, wsa.CREST_ABSENCE_AT_GRID_EDGE, None) == (
+    "undefined -- L no crest, DEM edge"
+), "a DEM-edge absence is a fetch finding, not a terrain one, and the line must not blur them"
+assert diag._binding_cell(
+    None, wsa.CREST_ABSENCE_AT_BOUND, wsa.CREST_ABSENCE_AT_GRID_EDGE
+) == "undefined -- L no crest within bound; R no crest, DEM edge"
+assert diag._binding_cell(2.07, None, None) == "2.07 m"
 
 print(
     "7. Diagnostic: every surviving compartment gets one enclosure-depth line under its width line "
     f"-- both transects' L/R/min in metres, the {RIDGE_PROMINENCE_METERS} m prominence that "
-    "declared the crests, and 'no crest within bound' written out for an unresolved flank."
+    "declared the crests, an unresolved flank written out with WHAT STOPPED IT ('no crest within "
+    "bound' for the half-width allowance, 'no crest, DEM edge' for the fetched window), and an "
+    "undefined min naming the flank that made it undefined."
 )
 
 print("\nAll crest-height checks passed.")

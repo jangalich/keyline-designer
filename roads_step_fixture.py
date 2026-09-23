@@ -207,12 +207,40 @@ def _boundary_point(edge_index: int, fraction: float) -> tuple:
 # middle with three surveyed points either side inside the same band --
 # the plateau rule this fixture has used since the knife-edge pair was
 # retired, not a fresh coordinate that happens to fail today.
+#
+# AND THE POINT HAS MOVED ONCE MORE, EDGE 2 @ 0.50 -> EDGE 1 @ 0.75,
+# WITH THE 120 PIN HOLDING A THIRD TIME. Same dependency, same cause,
+# one layer further back: the water step now refuses a dam station with
+# a ONE-SIDED shoulder -- a flank that declared no crest inside the
+# half-width bound leaves the binding height undefined, because an
+# unmeasured flank is unbounded rather than tall -- so the compartments
+# it offers moved again, upstream()'s committed embankment zones with
+# them, and THE POND EXCLUSION MOVED. Edge 2 @ 0.50 now routes over the
+# new one: it is not near-miss either, routing at every ceiling swept
+# down to 8 m/acre.
+#
+# Re-surveyed at ceiling 120 across ALL FIVE EDGES, every 10% of each
+# edge's length (50 real routing passes), A routing on every one:
+#
+#     edge 0   ok at every fraction
+#     edge 1   ok  ok  ok  ok  ok  ok  X  X  X  ok      (0.05 .. 0.95)
+#     edge 2   ok at every fraction
+#     edge 3   ok  ok  ok  ok  ok  X  X  ok  ok  ok
+#     edge 4   ok at every fraction
+#
+# Edge 1 carries the wider run, refined at 0.60 / 0.70 / 0.80 / 0.90 to
+# fix its ends: ok / X / X / ok. So the refusing band is 0.65 to 0.85 and
+# 0.75 is taken from its middle, with two surveyed points either side
+# inside it -- the same plateau rule, not a coordinate that happens to
+# fail today. It shares edge 1 with D, at a different fraction, which the
+# comment above already anticipated: there is no edge that refuses along
+# its whole length.
 NO_NETWORK_CEILING_METERS_PER_ACRE = 120.0
 ACCESS_A = _boundary_point(0, 0.85)
 ACCESS_B = _boundary_point(3, 0.85)
 ACCESS_C = _boundary_point(4, 0.50)
 ACCESS_D = _boundary_point(1, 0.50)
-ACCESS_NO_NETWORK = _boundary_point(2, 0.50)
+ACCESS_NO_NETWORK = _boundary_point(1, 0.75)
 # An interior point, ~40 m inside: not an access point by the validator's
 # own rule.
 _centroid_lon, _centroid_lat = warp_transform(

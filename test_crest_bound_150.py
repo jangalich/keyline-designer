@@ -60,6 +60,7 @@ from diagnose_pinch_bearing_and_bound import (
 from raster_grid import pixel_center_xy
 from valley_delineation import compute_flow_direction, fill_depressions
 from water_survey_areas import (
+    CREST_ABSENCE_AT_BOUND,
     PINCH_BEARING_SECANT,
     RIDGE_PROMINENCE_METERS,
     RIDGE_WALK_MAX_HALF_WIDTH_METERS,
@@ -242,11 +243,26 @@ print(
 #   at 100 m:  137.5 x4  117.5 x4  |105.0|  117.5 ...   pinch (16, 30)
 #   at 150 m:  137.5 x4 |117.5| x4  155.0   117.5 ...   pinch (12, 30)
 #
-# At the retired cap the dam cell is row 16 -- a station whose width the
-# instrument COULD NOT MEASURE, flagged bound_hit the whole time. At the
-# shipped bound it moves to row 12, the narrowest station that was
-# actually measured. The relocation is four cells and it is the cap
-# letting go of a choice it should never have made.
+# At the retired cap the dam cell WAS row 16 -- a station whose width the
+# instrument COULD NOT MEASURE, flagged bound_hit the whole time -- and
+# at the shipped bound it moved to row 12, the narrowest station actually
+# measured. That relocation is what this section demonstrated.
+#
+# IT CANNOT HAPPEN AT ALL ANY MORE, and the section now demonstrates
+# that instead. Row 16 is ONE-SIDED: its left flank declares no crest at
+# any bound, so lower_crest_height() gives it no binding height, and
+# dam_site_score() therefore refuses to score it. The selection skips it
+# at EVERY bound, the retired cap included, and both bounds choose row 12.
+#
+# TWO INDEPENDENT GUARDS, and it is worth being clear which does what.
+# The BOUND stopped the width UNDERSTATEMENT (the recorded 105.0 m was a
+# floor, not a narrows) and that fix stands -- the profile assertions
+# below are unchanged. The ONE-SIDED RULE stops an unmeasurable station
+# being CHOSEN, whatever its recorded width says. The bound made the
+# numbers honest; the rule makes the selection refuse to act on a number
+# that is still a floor. Neither makes the other redundant: a two-sided
+# station whose crests both sit past the cap is understated by the cap
+# and perfectly scoreable, which is section 2's flank.
 _REL_SIZE, _REL_CHANNEL, _REL_SPECIAL_ROW = 70, 30, 16
 
 
@@ -293,22 +309,44 @@ _shipped_profile = [s["width_m"] for s in _rel_shipped["stations"]]
 assert _retired_profile[:9] == [137.5] * 4 + [117.5] * 4 + [105.0], _retired_profile[:9]
 assert _shipped_profile[:9] == [137.5] * 4 + [117.5] * 4 + [155.0], _shipped_profile[:9]
 
-# THE RELOCATION.
-assert _rel_retired["pinch_rowcol"] == (_REL_SPECIAL_ROW, _REL_CHANNEL), _rel_retired["pinch_rowcol"]
+# THE RELOCATION, PREVENTED AT THE SOURCE. Both bounds now choose row 12
+# -- the narrowest station either of them actually measured -- because
+# the station the cap used to hand the minimum to cannot be scored at all.
+assert _rel_retired["pinch_rowcol"] == (12, _REL_CHANNEL), _rel_retired["pinch_rowcol"]
 assert _rel_shipped["pinch_rowcol"] == (12, _REL_CHANNEL), _rel_shipped["pinch_rowcol"]
-assert _rel_retired["pinch_rowcol"] != _rel_shipped["pinch_rowcol"], "the dam cell MOVES"
-assert _rel_retired["pinch_width_m"] == 105.0 and _rel_shipped["pinch_width_m"] == 117.5
+assert _rel_retired["pinch_rowcol"] == _rel_shipped["pinch_rowcol"], (
+    "with the one-sided station refused, the cap has no unmeasurable narrows left to manufacture "
+    "and the dam cell no longer moves with the bound on this fixture"
+)
+assert _rel_retired["pinch_width_m"] == _rel_shipped["pinch_width_m"] == 117.5
 
-# AND WHAT THE CAP HAD CHOSEN WAS UNMEASURABLE. This is the assertion
-# that makes the relocation a fix rather than a difference: at the
-# retired cap the dam cell's own width was a bounded FLOOR, and at the
-# shipped bound the chosen cell is a real measurement.
-assert _rel_retired["half_width_bound_hit"] is True, (
-    "the retired cap's dam cell was a station whose width the walk never measured"
-)
-assert _rel_shipped["half_width_bound_hit"] is False, (
-    "the shipped bound's dam cell is a measured station"
-)
+# AND WHAT THE CAP USED TO CHOOSE IS UNSCOREABLE AT EVERY BOUND. This is
+# the assertion that makes the prevention a rule rather than a
+# coincidence of this fixture's widths: row 16's left flank never
+# declares a crest, so it has no binding height, so it has no score --
+# at the retired cap, at the shipped bound, and at every swept value.
+for _label, _run in (("retired", _rel_retired), ("shipped", _rel_shipped)):
+    _special_station = next(
+        s for s in _run["stations"] if s["rowcol"][0] == _REL_SPECIAL_ROW
+    )
+    assert _special_station["crest_height_left_m"] is None, _label
+    assert _special_station["crest_height_right_m"] is not None, (
+        f"{_label}: the RIGHT flank does measure -- which is exactly what the retired reduction "
+        "used to score this station on"
+    )
+    assert _special_station["binding_height_m"] is None, (
+        f"{_label}: one flank absent leaves no binding side to name"
+    )
+    assert _special_station["dam_site_score"] is None, (
+        f"{_label}: and no binding height means no score, so the selection cannot reach it"
+    )
+    assert _special_station["crest_absence_left"] == CREST_ABSENCE_AT_BOUND, (
+        f"{_label}: the flank rises to the grid edge but the CAP stops it first at this bound"
+    )
+# The chosen cell is a measured station under both, which is what the
+# bound bought and the rule preserves.
+assert _rel_retired["half_width_bound_hit"] is False
+assert _rel_shipped["half_width_bound_hit"] is False
 
 # The trick stated as a property: row 16's recorded width is cap + 5.0
 # while the CAP is what stops the open flank, so a tighter cap makes an
@@ -344,10 +382,12 @@ for _bound in HALF_WIDTH_SWEEP_METERS:
         )
 
 print(
-    f"3. Relocation: at the retired {RETIRED_HALF_WIDTH_BOUND_METERS:.0f} m cap the dam cell is "
-    f"{_rel_retired['pinch_rowcol']} at 105.0 m -- a width the walk never measured (bound_hit) -- "
-    f"and at the shipped {RIDGE_WALK_MAX_HALF_WIDTH_METERS:.0f} m it moves to "
-    f"{_rel_shipped['pinch_rowcol']} at 117.5 m, measured. The cap was choosing the dam."
+    f"3. Relocation, prevented: the cap-manufactured narrows at row {_REL_SPECIAL_ROW} still reads "
+    f"105.0 m at the retired {RETIRED_HALF_WIDTH_BOUND_METERS:.0f} m cap and 155.0 m at the "
+    f"shipped {RIDGE_WALK_MAX_HALF_WIDTH_METERS:.0f} m -- the understatement the bound fixed -- but "
+    "it is ONE-SIDED, so it carries no binding height and no score and the selection skips it at "
+    f"every bound. Both bounds choose {_rel_shipped['pinch_rowcol']} at 117.5 m, measured. The cap "
+    "was choosing the dam; it cannot choose an unmeasurable one now."
 )
 
 # MONOTONICITY, the property behind all of that: a longer walk can only
@@ -402,7 +442,12 @@ assert _off_grid["half_width_m"] < RETIRED_HALF_WIDTH_BOUND_METERS, (
 _one_of_each = {
     "compartments": [{"walk_stations": [{"measurement": {"left": _retired, "right": _off_grid}}]}]
 }
-assert _absent_tally(_one_of_each, RETIRED_HALF_WIDTH_BOUND_METERS) == {
+# THE TALLY NO LONGER TAKES A BOUND. Each walk names which exit it
+# took on `absence`, so the split is the walk's own word rather than
+# a distance compared against a cap the caller supplied -- which is
+# what made it right at every bound rather than only at the shipped
+# one.
+assert _absent_tally(_one_of_each) == {
     "absent": 2, "total": 2, "at_bound": 1, "at_edge": 1
 }, "one of each, in its own column"
 # At the shipped bound the cap-stopped flank RESOLVES and only the
@@ -411,7 +456,7 @@ assert _absent_tally(_one_of_each, RETIRED_HALF_WIDTH_BOUND_METERS) == {
 _resolved = {
     "compartments": [{"walk_stations": [{"measurement": {"left": _shipped, "right": _off_grid}}]}]
 }
-assert _absent_tally(_resolved, RIDGE_WALK_MAX_HALF_WIDTH_METERS) == {
+assert _absent_tally(_resolved) == {
     "absent": 1, "total": 2, "at_bound": 0, "at_edge": 1
 }, "the cap-stopped flank is gone; the grid-edge one stays, still as grid edge"
 

@@ -1069,17 +1069,22 @@ for _wire in _compartment_properties:
         assert _height is None or isinstance(_height, float), (
             f"{_field} is {_height!r} -- a height or the absent sentinel, nothing else"
         )
-    # The binding side is the LOWER of the two MEASURED sides, never a
-    # missing one, and never below either of them.
+    # The binding side is the LOWER of the two sides when BOTH were
+    # measured, and UNDEFINED when either was not. A flank with no crest
+    # inside the half-width bound is UNBOUNDED, not tall: water leaves
+    # that way at any pool height, so there is no limiting side to name
+    # and None says so (lower_crest_height() carries the reasoning, and
+    # the asymmetry with a maximum that makes skipping absences right
+    # there and wrong here).
     for _end in ("seed", "pinch"):
         _sides = [
             _wire[f"{_end}_crest_height_left_m"],
             _wire[f"{_end}_crest_height_right_m"],
         ]
-        _measured = [height for height in _sides if height is not None]
-        assert _wire[f"{_end}_crest_height_min_m"] == (min(_measured) if _measured else None), (
-            f"{_end}: the min must be the lower MEASURED shoulder ({_measured}), got "
-            f"{_wire[f'{_end}_crest_height_min_m']!r}"
+        _expected = None if any(height is None for height in _sides) else min(_sides)
+        assert _wire[f"{_end}_crest_height_min_m"] == _expected, (
+            f"{_end}: the min must be the lower shoulder where both were measured and undefined "
+            f"where either was not ({_sides}), got {_wire[f'{_end}_crest_height_min_m']!r}"
         )
 print(
     "selected_water_zone is the single identify_water_survey_areas() call's own pooled selection "

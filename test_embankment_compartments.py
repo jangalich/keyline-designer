@@ -836,19 +836,39 @@ print("   Retirement: the three refusal codes are absent at the attribute, AST-n
 # the seep taper's meaningful range at these wetness levels), so the
 # channel compartment is also the pooled rank-1 selection.
 #
-# THE RESURRECTIONS ARE THE POINT OF THE HULL CHANGE AND ARE ASSERTED
-# HERE. Two off-channel compartments on the valley's outer flanks
-# measured 0.0801/0.0803 ac of watershed band and were dropped under
-# the 0.1 ac floor; their hulls measure 0.1197/0.1205 ac and they now
-# survive. That is the floor asking the right question (the walkable
-# claim) rather than a floor quietly widened -- and the read the design
-# asked for is whether a resurrection is a survey area or a sliver
-# wearing a generous hull. These two are survey areas: anchor/claim of
-# ~0.67, nowhere near the 0.2 sparse_anchor ratio. A compartment
-# genuinely too small still drops.
+# THE TWO OFF-CHANNEL FLANK COMPARTMENTS ARE GONE, and the reason is the
+# subject of a later branch rather than a loss here. They sat out on the
+# valley's outer apron, where this 21-column fixture rises to the grid
+# edge on one side: their chosen stations were ONE-SIDED, with the
+# outward crest walk leaving the array without ever declaring a crest.
+# lower_crest_height() now refuses to name a binding side when either
+# flank is absent -- an unmeasured flank is unbounded, not tall, so water
+# leaves that way at any pool height -- which makes those stations
+# unscoreable and those seeds fail at no_measurable_shoulder. They were
+# compartments selected on a shoulder nobody measured, and the fixture
+# does not get them back.
+#
+# WHAT THEY USED TO CARRY, and where it went. They were this file's
+# worked RESURRECTION (band 0.0801/0.0803 ac under hulls 0.1197/0.1205
+# ac), and that example had ALREADY moved to
+# test_pinch_bearing_and_bound.py when the de-quantized bearing pushed
+# these two over the floor as bands too -- said out loud there at the
+# time. What remains here is the dual-acreage split and the
+# sparse-anchor read, which the CHANNEL compartment carries just as
+# well, and the floor's own drop, which the short upstream narrows at
+# rows 6-7 now supplies.
 
 
 def _k2_of_row(r):
+    # TWO narrows: a SHORT one at rows 6-7 and the main waist at rows
+    # 28-31. The short one exists so the fixture still builds a
+    # compartment that is genuinely too small -- the floor's own case,
+    # asserted below. It used to get that case for free from the
+    # off-channel flank draws; those are gone (see the block below), so
+    # the fixture makes it on the channel, where both flanks are
+    # measured.
+    if 6 <= r <= 7:
+        return 2
     if 28 <= r <= 31:
         return 2
     return 4 if r < 28 else 5
@@ -908,44 +928,57 @@ assert _channel_comps[0]["pinch"]["rowcol"] == (28, A_CHANNEL), (
     "the channel compartment's embankment cell sits at the waist"
 )
 
-# THE FLANK COMPARTMENTS. Each carries BOTH acreages and neither trips
-# the sparse-anchor guard.
+# THE CHANNEL COMPARTMENT CARRIES BOTH ACREAGES and does not trip the
+# sparse-anchor guard -- the dual-acreage split, read on the compartment
+# this fixture still builds.
 #
-# THESE TWO WERE RESURRECTIONS UNTIL THE DE-QUANTIZED PINCH BEARING, and
-# the change is worth stating because it is the clearest small example
-# of what that bearing fixed. The D8 bearing quantizes each station's
-# cross-section to one of eight headings; on this flank draw two
-# stations were being sampled OBLIQUELY and read narrower than they are.
-# Width profiles, same fixture, same cells:
+# THE DE-QUANTIZED PINCH BEARING is still visible in this fixture's
+# history and worth keeping in view, because it is the clearest small
+# example of what that bearing fixed. The D8 bearing quantizes each
+# station's cross-section to one of eight headings; on the flank draws
+# two stations were being sampled OBLIQUELY and read narrower than they
+# are. Width profiles, same fixture, same cells:
 #
 #   D8      ... 42.5, 42.5, 42.5, 40.0, |27.5|, 27.5, 27.5, 27.5, ...
 #   secant  ... 42.5, 42.5, 45.0, 30.0,  30.0,  30.0, |27.5|, ...
 #
-# Stations 14 and 15 are not 27.5 m wide; they are 30.0 m wide and were
-# cross-sectioned off-square. The minimum is a TIE across the tail and
-# argmin takes the first of it, so correcting those two moved the pinch
-# two cells downstream (32, 1) -> (34, 1). A longer baseline means a
-# longer watershed band, and the band grew 0.0925 -> 0.1046 ac, crossing
-# the 0.1 ac floor it used to sit under.
-#
-# So this fixture no longer demonstrates a RESURRECTION (band under the
-# floor, hull over it) -- said out loud rather than quietly dropped. The
-# floor's rule, that it judges the DRAWN HULL and not the band, is
-# pinned by _floor_drops below; a worked resurrection example lives in
-# test_pinch_bearing_and_bound.py, which owns the bearing change.
+# Those stations are not 27.5 m wide; they are 30.0 m wide and were
+# cross-sectioned off-square. (The draws themselves no longer produce
+# compartments at all -- see above -- so this is history rather than an
+# assertion now. The bearing's own worked example lives in
+# test_pinch_bearing_and_bound.py, which owns that change.)
+assert len(a_comps) == 1, (
+    f"one compartment survives on this fixture, the channel one: "
+    f"{[(tuple(z['seed']['rowcol']), tuple(z['pinch']['rowcol'])) for z in a_comps]}"
+)
 _flank_comps = [z for z in a_comps if z["seed"]["rowcol"][1] != A_CHANNEL]
-assert len(_flank_comps) == 2, f"two flank compartments survive: {[z['id'] for z in a_comps]}"
-for zone in _flank_comps:
-    assert zone["pinch"]["rowcol"][0] == 34, (
-        f"the de-quantized bearing puts each flank pinch at row 34: {zone['pinch']['rowcol']}"
-    )
+assert not _flank_comps, (
+    "and nothing is seeded off the channel any more: those seeds walk stations whose outward "
+    f"flank leaves the array, which is not a dam site this survey can defend: {_flank_comps}"
+)
+for zone in _channel_comps:
     assert zone["compartment_footprint_acres"] < zone["zone_acres"], (
         "the hull still reads wider than the band it is drawn over -- the dual-acreage split"
     )
     assert zone["zone_acres"] >= wsa.MIN_SURVEY_REGION_AREA_ACRES, "the walkable claim clears the floor"
     assert zone["sparse_anchor"] is False, (
-        "read for sliver-with-a-generous-hull: these are anchored at ~0.67, not near the 0.2 ratio"
+        "read for sliver-with-a-generous-hull: this band anchors its hull at ~0.97, nowhere near "
+        "the 0.2 ratio"
     )
+    # BOTH FLANKS OF THE CHOSEN STATION ARE MEASURED, which is what
+    # makes this compartment a defensible one rather than a survivor of
+    # the reduction this branch removed.
+    _chosen = next(
+        station for station in zone["walk_stations"]
+        if tuple(station["rowcol"]) == tuple(zone["pinch"]["rowcol"])
+    )
+    assert _chosen["crest_height_left_m"] is not None
+    assert _chosen["crest_height_right_m"] is not None
+    assert _chosen["crest_absence_left"] is None and _chosen["crest_absence_right"] is None
+    assert zone["pinch_binding_height_m"] == min(
+        _chosen["crest_height_left_m"], _chosen["crest_height_right_m"]
+    ), "and the binding height is the lower of the two, both of them measured"
+
 # ... AND A GENUINELY TINY ONE STILL DROPS, with the reason and both
 # acreages on its record. The floor moving basis is not the floor going
 # away: the same run that resurrects two compartments drops a third.

@@ -1209,6 +1209,35 @@ RIDGE_PROMINENCE_METERS = 1.0
 # about this constant.
 RIDGE_WALK_MAX_HALF_WIDTH_METERS = 150.0
 
+# WHY A CREST WALK GAVE UP, when it gave up without declaring one. Both
+# values mean the same thing to the measurement -- there is no shoulder
+# inside the half-width this instrument can see, so the side is ABSENT
+# and lower_crest_height() refuses to name a binding side at all -- but
+# they mean opposite things about what could be done about it, so the
+# walk NAMES which one it hit rather than leaving a reader to infer it
+# from a distance.
+#
+#   CREST_ABSENCE_AT_BOUND     the walk spent its whole
+#                              max_half_width_meters allowance on
+#                              rising-or-level ground. That is a
+#                              statement about TERRAIN (open hillside
+#                              with no crest within the bound), and a
+#                              longer bound might resolve it.
+#   CREST_ABSENCE_AT_GRID_EDGE the walk ran off the DEM or into nodata
+#                              first. That is a statement about the
+#                              DATA, not the ground: the bound is
+#                              irrelevant, a longer one cannot help, and
+#                              the fix (if the tally ever warrants one)
+#                              is a wider fetch margin -- get_dem_for_
+#                              boundary()'s 100 m margin is smaller than
+#                              this 150 m bound, so a station near the
+#                              parcel edge CAN walk out of the window.
+#
+# Conflating them would read a DEM-extent limit as evidence about
+# terrain, or vice versa. Neither is a defect in the other's fix.
+CREST_ABSENCE_AT_BOUND = "bound"
+CREST_ABSENCE_AT_GRID_EDGE = "grid_edge"
+
 # How walk_embankment_pinch() reads the channel's direction at a station,
 # which is the line every width it measures is taken perpendicular to.
 # SECANT is the only value production uses: local_stem_direction()'s
@@ -3390,8 +3419,17 @@ def ridge_crest_walk(
     ended it), and bound_hit is True: the number is a FLOOR on the
     valley's true half-width, never presented as a measurement of it.
 
+    AND WHICH OF THE TWO ENDED IT is named, not left to be inferred.
+    `absence` is None on a confirmed crest, CREST_ABSENCE_AT_BOUND when
+    the allowance ran out on rising ground, and CREST_ABSENCE_AT_GRID_
+    EDGE when the DEM did. The distinction was previously re-derived by
+    instruments comparing half_width_m against the bound they passed in,
+    which is a second implementation of something this function already
+    knows -- and one that silently mislabels every walk run at a
+    non-default bound. See the constants for why the two must not merge.
+
     Returns {'half_width_m', 'crest_xy', 'crest_rowcol',
-    'crest_elevation_m', 'bound_hit'}.
+    'crest_elevation_m', 'bound_hit', 'absence'}.
     """
     array = dem["array"]
     rows, cols = array.shape
@@ -3429,7 +3467,8 @@ def ridge_crest_walk(
         sample = _sample(x, y)
         if sample is None:
             # Off-grid or nodata before a confirmed crest: the walk ends
-            # at its last measurable point, flagged.
+            # at its last measurable point, flagged -- and flagged as
+            # the DATA running out, not the bound.
             return {
                 "half_width_m": round(distance, 1),
                 "crest_xy": last_xy,
@@ -3438,6 +3477,7 @@ def ridge_crest_walk(
                     round(last_elevation, 2) if math.isfinite(last_elevation) else None
                 ),
                 "bound_hit": True,
+                "absence": CREST_ABSENCE_AT_GRID_EDGE,
             }
         row, col, elevation = sample
         last_xy, last_rowcol, last_elevation = (x, y), (row, col), elevation
@@ -3453,6 +3493,8 @@ def ridge_crest_walk(
                 "crest_rowcol": best_rowcol,
                 "crest_elevation_m": round(best_elevation, 2),
                 "bound_hit": False,
+                # A CREST WAS DECLARED, so there is no absence to name.
+                "absence": None,
             }
 
     return {
@@ -3463,6 +3505,9 @@ def ridge_crest_walk(
             round(last_elevation, 2) if math.isfinite(last_elevation) else None
         ),
         "bound_hit": True,
+        # The ALLOWANCE ran out, on ground that never fell far enough
+        # behind its running maximum. Terrain, not data.
+        "absence": CREST_ABSENCE_AT_BOUND,
     }
 
 
@@ -3560,10 +3605,18 @@ def crest_height_above_channel(dem: dict, crest_walk: dict, channel_rowcol: tupl
     therefore never be collapsed into one another -- "we could not find
     the shoulder" and "there is no shoulder" are opposite findings.
 
-    THIS FIELD CURRENTLY FEEDS NOTHING. It does not score, rank, gate a
-    compartment or reach the panel. It exists to be measured on the
-    reference property first; whether enclosure depth should enter any
-    of those is a later decision this measurement exists to inform.
+    WHERE THIS NUMBER GOES, on the two lines that call it. Measured on
+    the WALK's local-channel perpendicular it is an input to the dam-site
+    objective: lower_crest_height() reduces the pair to a binding side,
+    dam_site_score() scores h**2 / w on it, and the enclosure gate holds
+    the chosen site's binding shoulder to MIN_BINDING_SHOULDER_METERS.
+    Measured on the COMPARTMENT's baseline perpendicular (the stored
+    seed_/pinch_crest_height_* fields) it still feeds nothing -- it does
+    not score, rank, gate or reach the panel, and rides the record and
+    the diagnostic so the reference run can say what enclosure depths
+    this pipeline finds. The two lines through one cell can differ; see
+    walk_embankment_pinch()'s bearing note for why neither can stand in
+    for the other.
     """
     if crest_walk["bound_hit"]:
         return None
@@ -3590,7 +3643,7 @@ def crest_height_above_channel(dem: dict, crest_walk: dict, channel_rowcol: tupl
 def lower_crest_height(left_m: Optional[float], right_m: Optional[float]) -> Optional[float]:
     """
     The BINDING side of one station: the LOWER of the two shoulder
-    heights, or None when neither side declared a crest.
+    heights, or None when EITHER side is absent.
 
     WHY THE LOWER AND NOT THE MEAN. Water rising in the compartment
     spills at the FIRST place the enclosure runs out, which is the
@@ -3600,28 +3653,57 @@ def lower_crest_height(left_m: Optional[float], right_m: Optional[float]) -> Opt
     abutment a little over 3 m up. The lower shoulder is the
     constraint, so it is the reduction carried.
 
-    A MISSING SIDE IS NEVER THE LOWER ONE. An absent height is an
-    unmeasured side, not a short one, and letting None win this
-    comparison would turn "we could not find that shoulder" into "that
-    shoulder is the binding constraint" -- exactly the zero-for-absent
-    error the per-side sentinel exists to prevent. So the reduction
-    runs over the sides that actually reported: one side present means
-    that side's height (stated as what it is -- the lower of the
-    MEASURED sides, with the other unknown and possibly lower still),
-    and both absent means None.
+    AN ABSENT SIDE IS UNBOUNDED, NOT IGNORABLE, and this is the rule
+    that makes the whole function refuse rather than reduce. A flank
+    that ran out RIDGE_WALK_MAX_HALF_WIDTH_METERS -- or left the grid
+    -- without the prominence fall declared NO CREST INSIDE THE BOUND.
+    Within the half-width this instrument can see, there is no shoulder
+    on that side at all, so water rising at this station leaves that way
+    at ANY pool height. The binding constraint is therefore not the
+    other side's measured height; it is undefined, and None says so.
 
-    A MEASURED 0.0 DOES COMPETE, and wins, which is why the filter
-    below tests `is not None` rather than truthiness: 0.0 is a
-    confirmed crest at the station itself (see crest_height_above_
-    channel()) and a shoulder standing level with the channel is the
-    hardest binding constraint there is. Dropping it as falsy would
-    hand the station's verdict to the OTHER, higher side and report an
-    unenclosed site as an enclosed one.
+    THE ERROR THIS EXISTS TO PREVENT, stated because the function used
+    to make it. Reducing over "the sides that reported" credited a
+    one-sided station with its MEASURED side's height as the binding
+    shoulder. On the second test parcel that credit carried 233 m-wide
+    ribbons past the enclosure gate and -- because dam_site_score()'s
+    objective is h**2 / w -- actively REWARDED them: a large h over a
+    very large w still wins. "Absent is not zero" protects a station
+    from LOSING on unmeasured merit; it must never become "absent is
+    ignored", which lets a station WIN on unmeasured merit. Those are
+    not the same protection, and only the first one is honest.
+
+    THE ASYMMETRY WITH A MAXIMUM, so nobody "restores symmetry" later.
+    Excluding an absent side from a MAXIMUM would be right: a maximum
+    asks "how high does this station reach", an unmeasured side can only
+    raise that answer, and the measured sides already establish a floor
+    under it. A MINIMUM asks the opposite question -- "which side gives
+    way first" -- and an unmeasured side can only LOWER that answer,
+    without bound. The reduction that is safe over a maximum is exactly
+    the reduction that is unsound over a minimum. Skipping absences here
+    would not be consistency with a maximum; it would be the same
+    arithmetic applied to a question it does not answer.
+
+    WHAT REFUSING COSTS, and why it is the right cost. A None here makes
+    the station UNSCOREABLE -- dam_site_score() refuses it, the
+    selection skips it, and a seed whose every station is one-sided
+    fails at REASON_NO_MEASURABLE_SHOULDER. Nothing falls back to the
+    one-sided reading. A station nobody could measure both sides of is
+    not a dam site this survey can defend, and saying so is the finding.
+
+    A MEASURED 0.0 DOES COMPETE, and wins, which is why the guard below
+    tests `is None` rather than truthiness: 0.0 is a confirmed crest at
+    the station itself (see crest_height_above_channel()) and a shoulder
+    standing level with the channel is the hardest binding constraint
+    there is. Dropping it as falsy would hand the station's verdict to
+    the OTHER, higher side and report an unenclosed site as an enclosed
+    one. "We could not find the shoulder" and "there is no shoulder"
+    stay opposite findings -- the first is refused here, the second is
+    the answer.
     """
-    measured = [height for height in (left_m, right_m) if height is not None]
-    if not measured:
+    if left_m is None or right_m is None:
         return None
-    return min(measured)
+    return min(left_m, right_m)
 
 
 def dam_site_score(
@@ -3644,15 +3726,27 @@ def dam_site_score(
     distinction is the whole reason this returns an Optional rather than
     a float. Two cases produce it:
 
-    ABSENT SHOULDER. A station whose binding height is None had at least
-    one flank whose crest walk ran out its half-width bound without
-    declaring a crest, and lower_crest_height() refuses to reduce over
-    an unmeasured side. Such a station is SKIPPED by the selection --
-    not disqualified, not scored zero. "Skipped" is the honest word:
+    ABSENT SHOULDER -- which now includes the ONE-SIDED station. A
+    station whose binding height is None had at least one flank whose
+    crest walk ran out its half-width bound (or left the grid) without
+    declaring a crest, and lower_crest_height() refuses to name a
+    binding side when EITHER flank is absent: within the bound there is
+    no shoulder that way, so water leaves that way at any pool height
+    and the limiting height is undefined rather than equal to the other
+    side's. Such a station is SKIPPED by the selection -- not
+    disqualified, not scored zero. "Skipped" is the honest word:
     disqualified would mean it was judged and failed, and it was never
     measured. Scoring it 0.0 would be worse still -- it would lose on
     merit it was never measured for, which is exactly the absent-is-not-
     zero rule this project has enforced since unreachable_stem_end.
+
+    THE SKIPPED SET IS LARGE, and deliberately so. Refusing one-sided
+    stations put three of the reference run's eight embankment survivors
+    back in this branch, and on the second test parcel it is what stops
+    a 233 m-wide ribbon from being credited with its one measured
+    shoulder and winning on h**2 / w. A thinner embankment class is the
+    consequence of measuring honestly, not a reason to relax the
+    reduction.
 
     ZERO WIDTH, which is real on this terrain and is NOT the best
     possible site. w == 0 means BOTH crest walks declared their crest at
@@ -3765,13 +3859,18 @@ def walk_embankment_pinch(
     pinch reading 0.53 m at the same 122 m.
 
     STATIONS THAT CANNOT BE SCORED ARE SKIPPED, not zeroed: a station
-    whose binding shoulder is ABSENT (a flank that ran out its
-    half-width bound without declaring a crest) was never measured for
-    depth and must not lose on merit it was never measured for. Zero
-    width is refused too, and for a reason that is the opposite of
-    "infinitely narrow is infinitely good" -- see dam_site_score().
-    unscoreable_station_count rides the result so the skipped population
-    is reportable.
+    whose binding shoulder is ABSENT -- EITHER flank having run out its
+    half-width bound, or left the grid, without declaring a crest -- was
+    never measured for depth on that side and must not lose on merit it
+    was never measured for, nor WIN on it. A one-sided station is
+    unscoreable for the second reason: its unmeasured flank is unbounded,
+    not tall, so the objective has no binding height to score (see
+    lower_crest_height()). Zero width is refused too, and for a reason
+    that is the opposite of "infinitely narrow is infinitely good" --
+    see dam_site_score(). unscoreable_station_count rides the result so
+    the skipped population is reportable, and each station carries
+    crest_absence_left / crest_absence_right so a reader can tell a
+    bound-stopped flank from one the DEM window cut off.
 
     A best site sitting at the walk's terminal station is ACCEPTED AND
     DISCLOSED, never refused (the
@@ -3937,6 +4036,18 @@ def walk_embankment_pinch(
                 "measurement": measurement,
                 "crest_height_left_m": left_height,
                 "crest_height_right_m": right_height,
+                # WHY A SIDE IS ABSENT, beside the height that is not
+                # there. None on a measured side; CREST_ABSENCE_AT_BOUND
+                # or CREST_ABSENCE_AT_GRID_EDGE otherwise, taken from
+                # the walk's own word rather than re-derived from a
+                # distance. Both make binding_height_m undefined -- a
+                # shoulder that could not be measured cannot be the
+                # limiting side either way -- but one is a statement
+                # about this terrain and the other about the DEM window,
+                # and a station that goes unscoreable deserves to say
+                # which.
+                "crest_absence_left": measurement["left"]["absence"],
+                "crest_absence_right": measurement["right"]["absence"],
                 "binding_height_m": binding_height,
                 # None where the station cannot be scored at all -- an
                 # absent shoulder or a zero width; see dam_site_score().
@@ -4307,6 +4418,13 @@ def build_embankment_compartment(
                 "bound_hit": left["bound_hit"] or right["bound_hit"],
                 "crest_height_left_m": left_height,
                 "crest_height_right_m": right_height,
+                # The absence reason per side, carried for the same
+                # reason the walk stations carry it (see there): an
+                # undefined min has to be able to say which side was
+                # unmeasurable and whether the bound or the DEM window
+                # stopped it.
+                "crest_absence_left": left["absence"],
+                "crest_absence_right": right["absence"],
                 "crest_height_min_m": lower_crest_height(left_height, right_height),
                 "points_utm": points_utm,
                 "geometry_wgs84": _line_geometry_wgs84(dem, points_utm),
@@ -4497,6 +4615,18 @@ def build_embankment_compartment(
     # do not gate" rather than as a crash, because a gate that fires on
     # a missing measurement would be the absent-is-not-zero error in its
     # most damaging form.
+    #
+    # RE-VERIFIED when lower_crest_height() began refusing ONE-SIDED
+    # stations, which enlarged the unscoreable set considerably (three
+    # of the reference run's eight survivors were selected on a
+    # one-sided station). The reachability argument is unchanged and
+    # does not depend on how big that set is: it runs through
+    # dam_site_score() returning None on a None height, the selection
+    # comparing only stations whose score is not None, and
+    # REASON_NO_MEASURABLE_SHOULDER being returned when none is. Growing
+    # the refused set moves compartments into that failure, never into
+    # this branch. No second guard was added here; a guard would hide
+    # the very thing that argument asserts.
     binding_height = walk["pinch_binding_height_m"]
     shoulder_below_minimum = (
         binding_height is not None and binding_height < MIN_BINDING_SHOULDER_METERS
@@ -4637,8 +4767,14 @@ def build_embankment_compartment(
         # Each is a LOWER BOUND: the height to the NEAREST LOCAL CREST
         # under the RIDGE_PROMINENCE_METERS rule, not to the ridge line
         # (crest_height_above_channel() states the full caveat). None
-        # means that side's walk found no crest inside the half-width
-        # bound -- absent, never 0.0.
+        # on a side means that side's walk found no crest inside the
+        # half-width bound -- absent, never 0.0 -- and None on the _min_
+        # means EITHER side was absent, because an unmeasured flank is
+        # unbounded rather than ignorable and there is then no limiting
+        # side to name (lower_crest_height()). The transects carry
+        # crest_absence_left / crest_absence_right so an undefined min
+        # can say which flank and whether the bound or the DEM window
+        # stopped it.
         #
         # THESE FEED NOTHING TODAY. No score, no rank, no gate, no
         # panel row reads them; they ride the record and the diagnostic

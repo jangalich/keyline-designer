@@ -359,7 +359,16 @@ assert seed_station[METHOD_BASELINE]["right_height_m"] == 0.0, (
 assert tuple(seed_station[METHOD_BASELINE]["right"]["crest_rowcol"]) == (4, 8), (
     "and that 0.00 m must be the station cell, which is what makes it a reading rather than a bug"
 )
-assert seed_station[METHOD_BASELINE]["min_height_m"] == 0.0
+# AND THE BINDING SIDE IS UNDEFINED, not that 0.0. One flank absent
+# means one flank UNBOUNDED -- A's up-channel ray found no crest inside
+# the bound, so there is no shoulder that way at any height and no
+# limiting side to name. The 0.0 is a real reading about the DOWN-channel
+# side and stays on the record as one; it is simply not the station's
+# constraint while the other side is unmeasured.
+assert seed_station[METHOD_BASELINE]["min_height_m"] is None, (
+    "a one-sided station has no binding height, whatever the measured side reads: got "
+    f"{seed_station[METHOD_BASELINE]['min_height_m']!r}"
+)
 
 # METHOD B: the hand-derived shoulder, both sides, and the absent flank
 # RECOVERED.
@@ -457,25 +466,31 @@ for _station in _all_stations:
                     assert tuple(_walk["crest_rowcol"]) == _station["rowcol"], (
                         "a 0.0 must be a crest at the station cell, or it is not this mechanism"
                     )
-        # The binding side is the LOWER of the MEASURED sides, never a
-        # missing one -- and a measured 0.0 competes and wins.
-        _measured = [
-            _data[f"{_s}_height_m"] for _s in ("left", "right") if _data[f"{_s}_height_m"] is not None
-        ]
-        assert _data["min_height_m"] == (min(_measured) if _measured else None)
+        # The binding side is the LOWER of the two sides when BOTH were
+        # measured, and UNDEFINED when either was not: an absent flank is
+        # unbounded, not tall, so it cannot be skipped over in a minimum
+        # (lower_crest_height() carries the full reasoning). A measured
+        # 0.0 still competes and still wins against a measured side.
+        _heights = [_data[f"{_s}_height_m"] for _s in ("left", "right")]
+        assert _data["min_height_m"] == (
+            None if any(_h is None for _h in _heights) else min(_heights)
+        )
 
 assert _absent > 0 and _measured_zero > 0, (
     f"both sentinels must actually be exercised here: {_absent} absent, {_measured_zero} measured zero"
 )
 # The headline case, restated on the fixture that produces it: absent
-# beside a measured 0.0, and the 0.0 is the binding side.
+# beside a measured 0.0. The 0.0 stays a reading about its own side; the
+# STATION has no binding height, because the other flank was never found.
 assert curved_by_end["seed"][METHOD_BASELINE]["left_height_m"] is None
-assert curved_by_end["seed"][METHOD_BASELINE]["min_height_m"] == 0.0
+assert curved_by_end["seed"][METHOD_BASELINE]["right_height_m"] == 0.0
+assert curved_by_end["seed"][METHOD_BASELINE]["min_height_m"] is None
 
 print(
     f"4. Absent semantics in B: across {len(_all_stations)} station(s) x 2 methods x 2 sides, every "
-    f"bound-hit flank is None ({_absent} of them) and every measured 0.0 ({_measured_zero}) is a "
-    "crest at its own station cell that wins the binding reduction."
+    f"bound-hit flank is None ({_absent} of them) and takes the station's binding height with it, "
+    f"and every measured 0.0 ({_measured_zero}) is a crest at its own station cell that wins the "
+    "binding reduction wherever both sides were measured."
 )
 
 

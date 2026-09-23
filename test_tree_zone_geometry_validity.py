@@ -671,6 +671,25 @@ _ARM_SUMMARY = ", ".join(f"{row['before']:.2f} -> {row['after']:.2f} m" for row 
 # opposite: the narrowest arm getting WIDER means the narrow one is no longer
 # there to measure -- the smooth deleted it and what is left is the next
 # thinnest thing. That is the failure, printed as the number that shows it.
+# ANTI-EXTENSIVENESS IS THE PER-ROW CLAIM; THE ARM IS AN AGGREGATE ONE.
+# Every candidate must show the smooth taking area off and putting none
+# back -- that is the complaint, and it holds on every shape. The ARM
+# column is evidence of the consequence, and only a candidate that HAS a
+# thin arm can supply it: a zone whose narrowest arm is already 11 m wide
+# has nothing thin for the smooth to delete, so its arm reading is
+# neither evidence nor a counter-example. Requiring the widening on every
+# row made the section depend on the shipped candidate SET -- which moves
+# whenever the water zones the tree step avoids move, as it did when
+# one-sided dam stations stopped being selectable. At least one candidate
+# still has to supply it, or the consequence is unevidenced.
+_arm_widened = [
+    row for row in _smoothing_rows
+    if row["arm_after"] is None or row["arm_after"] > row["arm_before"]
+]
+assert _arm_widened, (
+    "no candidate's narrowest arm was touched by the smooth, so this section has no evidence "
+    f"that it deletes thin arms: {[(r['id'], r['arm_before'], r['arm_after']) for r in _smoothing_rows]}"
+)
 for row in _smoothing_rows:
     arm_after = "deleted entirely" if row["arm_after"] is None else f"{row['arm_after']:.2f} m"
     assert row["added"] <= 1e-6, (
@@ -678,15 +697,13 @@ for row in _smoothing_rows:
         f"anti-extensive, which is the whole complaint against it"
     )
     assert row["removed"] > 0.0, row["id"]
-    assert row["arm_after"] is None or row["arm_after"] > row["arm_before"], (
-        f"candidate {row['id']}: the smooth left the narrowest arm untouched, so this row is "
-        f"not evidence of anything"
-    )
+    _widened = row in _arm_widened
     print(
         f"    smooth candidate {row['id']:<3} {row['acres']:.2f} ac  "
         f"added {row['added']:6.1f} m^2  removed {row['removed']:6.1f} m^2  "
         f"= {row['pct']:5.2f}% of the zone   narrowest arm "
-        f"{row['arm_before']:.2f} m -> {arm_after} (i.e. gone)"
+        f"{row['arm_before']:.2f} m -> {arm_after}"
+        + (" (i.e. gone)" if _widened else " (no thin arm to lose)")
     )
 
 print(

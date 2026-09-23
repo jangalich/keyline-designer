@@ -58,6 +58,8 @@ from typing import Optional
 
 from valley_level_pool import POOL_REFERENCE_HEIGHT_METERS
 from water_survey_areas import (
+    CREST_ABSENCE_AT_BOUND,
+    CREST_ABSENCE_AT_GRID_EDGE,
     DAM_SITE_HEIGHT_EXPONENT,
     DAM_SITE_HEIGHT_EXPONENT_LINEAR,
     DAM_SITE_HEIGHT_EXPONENT_STORAGE,
@@ -279,13 +281,33 @@ def summarize_dam_site_objective(dem: dict, result: dict) -> str:
     )
 
     # --- the skipped population, which the failure counts do not show ---
+    #
+    # SPLIT BY CAUSE, because the three are different findings and the
+    # middle one is the largest. ONE-SIDED means exactly one flank came
+    # back absent: the station was measured on one side and is open on
+    # the other, so the binding height is undefined (an unmeasured flank
+    # is unbounded, not tall) and the objective cannot score it. BOTH
+    # ABSENT means neither flank declared a crest. ZERO WIDTH is the
+    # separate refusal for a station whose two crests both land on its
+    # own cell -- a cross-section high point, not a narrows.
     lines.append("")
     for column in columns:
-        _unscoreable = sum(
-            station["dam_site_score"] is None
-            for zone in column["compartments"]
-            for station in zone["walk_stations"]
-        )
+        _one_sided = _both_absent = _zero_width = 0
+        for zone in column["compartments"]:
+            for station in zone["walk_stations"]:
+                if station["dam_site_score"] is not None:
+                    continue
+                _absent_sides = sum(
+                    station[field] is None
+                    for field in ("crest_height_left_m", "crest_height_right_m")
+                )
+                if _absent_sides == 1:
+                    _one_sided += 1
+                elif _absent_sides == 2:
+                    _both_absent += 1
+                else:
+                    _zero_width += 1
+        _unscoreable = _one_sided + _both_absent + _zero_width
         _total = sum(len(zone["walk_stations"]) for zone in column["compartments"])
         _failures = {}
         for record in column["seeds"]:
@@ -298,8 +320,9 @@ def summarize_dam_site_objective(dem: dict, result: dict) -> str:
                 _failures[_reason] = _failures.get(_reason, 0) + 1
         lines.append(
             f"    {column['label']:>20}: {len(column['compartments'])} compartment(s); "
-            f"{_unscoreable} of {_total} walked stations unscoreable (absent shoulder or zero "
-            f"width); seed failures {_failures or '{}'}"
+            f"{_unscoreable} of {_total} walked stations unscoreable "
+            f"({_one_sided} ONE-SIDED, {_both_absent} both flanks absent, "
+            f"{_zero_width} zero width); seed failures {_failures or '{}'}"
         )
     return "\n".join(lines)
 
@@ -336,7 +359,7 @@ def run_configuration(dem: dict, result: dict, bearing: str, bound: float) -> di
     }
 
 
-def _absent_tally(configuration: dict, bound: float) -> dict:
+def _absent_tally(configuration: dict) -> dict:
     """Absent flanks across every WALKED STATION of every compartment in
     one configuration, split by why the walk gave up.
 
@@ -345,7 +368,16 @@ def _absent_tally(configuration: dict, bound: float) -> dict:
     one might resolve the flank. LEFT-THE-GRID means it ran off the DEM
     or into nodata first: the bound is irrelevant there and a longer one
     cannot help, because the elevation data simply stops. Conflating
-    them would read a DEM-extent limit as evidence about a constant."""
+    them would read a DEM-extent limit as evidence about a constant.
+
+    THE SPLIT IS THE WALK'S OWN WORD now, not a distance compared
+    against the bound this function used to be handed.
+    ridge_crest_walk() knows which of its two exits it took and says so
+    on `absence`; re-deriving it here was a second implementation of
+    that fact, and one that would have mislabelled a walk whose bound
+    differed from the value passed in. The `bound` parameter went with
+    the derivation -- the caller still labels its own rows with
+    configuration['bound_m']."""
     absent = at_bound = at_edge = 0
     total = 0
     for zone in configuration["compartments"]:
@@ -353,10 +385,10 @@ def _absent_tally(configuration: dict, bound: float) -> dict:
             for side in ("left", "right"):
                 walk = station["measurement"][side]
                 total += 1
-                if not walk["bound_hit"]:
+                if walk["absence"] is None:
                     continue
                 absent += 1
-                if walk["half_width_m"] >= bound:
+                if walk["absence"] == CREST_ABSENCE_AT_BOUND:
                     at_bound += 1
                 else:
                     at_edge += 1
@@ -369,6 +401,25 @@ def _binding_depths(zone: dict) -> tuple:
 
 def _depth_cell(value: Optional[float]) -> str:
     return "absent" if value is None else f"{value:.2f} m"
+
+
+def _chosen_station(zone: dict) -> Optional[dict]:
+    """The walk station the objective SELECTED, found by its cell on the
+    zone's own station list -- the same lookup the gate's tests do, and
+    the only way to reach the two flank readings the binding height was
+    reduced from (zone['pinch'] carries the reduction, not its inputs).
+
+    Returns None rather than raising if no station matches: an
+    instrument that dies on one odd record reports nothing at all."""
+    pinch = tuple(zone["pinch"]["rowcol"])
+    return next(
+        (
+            station
+            for station in zone["walk_stations"]
+            if tuple(station["rowcol"]) == pinch
+        ),
+        None,
+    )
 
 
 def _profile_digest(zone: dict, limit: int = 12) -> str:
@@ -449,11 +500,39 @@ def summarize_shoulder_gate(result: dict) -> str:
         "",
     ]
 
+    def _flank_cell(height, absence) -> str:
+        """One flank of the CHOSEN station: its height, or the reason
+        there isn't one. A bare "absent" would leave the two absences
+        looking alike, and they are not -- see the absence constants."""
+        if height is not None:
+            return f"{height:.2f} m"
+        return {
+            CREST_ABSENCE_AT_BOUND: "absent@bound",
+            CREST_ABSENCE_AT_GRID_EDGE: "absent@edge",
+        }.get(absence, f"absent({absence})")
+
     def _row(zone, verdict):
         height = zone["pinch_binding_height_m"]
         measured = "absent" if height is None else f"{height:.2f} m"
+        # BOTH FLANKS BESIDE THE BINDING FIGURE, read off the chosen
+        # station's own record. The binding height is a reduction over
+        # two readings and a reduction hides its inputs; printing them
+        # makes a ONE-SIDED station visible as one wherever the binding
+        # height is printed, which is exactly what went unseen while
+        # lower_crest_height() reduced over "the sides that reported".
+        # Under the current rule a selected site cannot be one-sided --
+        # dam_site_score() refuses it -- so these two columns are also
+        # the standing check that it still cannot be.
+        station = _chosen_station(zone)
+        flanks = "--"
+        if station is not None:
+            flanks = (
+                f"L {_flank_cell(station['crest_height_left_m'], station['crest_absence_left'])}"
+                f" / R {_flank_cell(station['crest_height_right_m'], station['crest_absence_right'])}"
+            )
         return (
             f"    {verdict:>18}  zone {zone['id']:>3}  binding shoulder {measured:>8}  "
+            f"[{flanks:>29}]  "
             f"pinch {tuple(zone['pinch']['rowcol'])}  w {zone['pinch']['width_m']:.1f} m  "
             f"hull {zone['zone_acres']:.4f} ac  catchment {zone['pinch_catchment_acres']:.2f} ac"
         )
@@ -743,7 +822,7 @@ def summarize_pinch_bearing_and_bound(dem: dict, result: dict) -> str:
     lines.append("  ABSENT-FLANK CURVE (every walked station, both flanks, per configuration):")
     curve = []
     for configuration in configurations:
-        tally = _absent_tally(configuration, configuration["bound_m"])
+        tally = _absent_tally(configuration)
         curve.append((configuration, tally))
         share = (100.0 * tally["absent"] / tally["total"]) if tally["total"] else 0.0
         lines.append(
