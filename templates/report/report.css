@@ -202,6 +202,12 @@ th.num {
 .section--map .section__structure {
   break-before: page;
 }
+/* SOILS IS THREE PAGES ON THE SAME RULE, with a third block of its own:
+   the soil map and the map unit table, then the surface horizon, then
+   the classification, the geology and the sources. */
+.section--map .section__classification {
+  break-before: page;
+}
 .section__structure .report-map {
   margin-bottom: var(--space-2);
 }
@@ -404,6 +410,84 @@ th.num {
   width: 50%;
 }
 
+/* SOILS IS THREE PAGES ON TREES' RHYTHM: the soil map with the map unit
+   table under it, then the surface horizon table with the soil-test
+   statement, then the classification tables, the geology line and the
+   sources. The map page carries the widest table in the report -- eight
+   columns beside a map unit's full name -- so its cells take the
+   tightest leading and the least side padding of any section's. */
+.section--soils .summary {
+  margin-bottom: var(--space-3);
+}
+.section--soils .report-map {
+  margin-bottom: var(--space-1);
+}
+.section--soils .data-table {
+  margin-bottom: var(--space-1);
+}
+.section--soils .data-table th,
+.section--soils .data-table td {
+  padding-top: 1.5pt;
+  padding-bottom: 1.5pt;
+  padding-left: 3pt;
+  padding-right: 3pt;
+  line-height: 1.25;
+}
+.section--soils .caption {
+  margin-bottom: var(--space-2);
+  max-width: none;
+}
+.section--soils .section__detail .eyebrow--continued,
+.section--soils .section__classification .eyebrow--continued {
+  margin-bottom: var(--space-3);
+}
+.section--soils .section__detail .summary,
+.section--soils .section__classification .summary {
+  font-size: var(--text-body);
+  margin-bottom: var(--space-2);
+  max-width: none;
+}
+.section--soils .unavailable {
+  margin-bottom: var(--space-2);
+}
+.section--soils .source-footer {
+  padding-top: var(--space-2);
+}
+/* A MAP UNIT'S NAME IS A SENTENCE and has to wrap. "Gilpin, Weikert,
+   Culleoka channery silt loams and 25 to 80 percent slopes" set on one
+   line is wider than the measure on its own; the label column's default
+   nowrap is for a class letter or a month. */
+.section--soils .data-table th.label,
+.section--soils .data-table td.label {
+  white-space: normal;
+  line-height: 1.2;
+}
+/* THE MAP UNIT TABLE'S COLUMNS ARE SET, NOT LEFT TO THE CONTENT. Its two
+   wrapping columns -- the unit's name and the survey's farmland wording --
+   would otherwise take whatever the nowrap figure columns left them and
+   run to three lines a row. The widths are on the TABLE, not on the page
+   block it sits in: this table moves between pages under the spill rule,
+   and geometry that changed when it moved would not be the same table. */
+.data-table--units th.label {
+  width: 42%;
+}
+.data-table--units td.text,
+.data-table--units th.text {
+  width: 20%;
+}
+/* THE SURFACE HORIZON TABLE has eight narrow numeric columns; its row
+   labels take what is left. */
+.data-table--horizon th.label {
+  width: 19%;
+}
+/* The last column carries the depth to bedrock AND, where there is one,
+   the note about what stops a root above it. It takes the width that note
+   needs to read in two lines rather than four. */
+.data-table--horizon th:last-child,
+.data-table--horizon td:last-child {
+  width: 17%;
+}
+
 /* A BOUND IS NOT A MEASUREMENT: "> 72" is the depth a water table is
    deeper than, set muted so a column of depths cannot be read across it;
    a WORD in a numeric column -- "no data" -- takes the prose face. */
@@ -414,6 +498,26 @@ th.num {
   font-family: var(--font-prose);
   font-style: italic;
   color: var(--ink-muted);
+}
+/* A NOTE INSIDE A CELL: the fact that qualifies one figure, set under it
+   in the prose face and the muted ink, at the point where a reader takes
+   the figure. Not a footnote -- no marker, no hunting below the table.
+   The Soils section's fragipan is the case: a map unit whose bedrock
+   column honestly reads "deeper than 72 in" has a root restriction at
+   28 in, and a caption under seven rows would be read after the
+   conclusion it exists to prevent. */
+.data-table .cell-note {
+  display: block;
+  font-family: var(--font-prose);
+  font-size: var(--text-caption);
+  font-style: italic;
+  line-height: 1.2;
+  color: var(--ink-muted);
+  white-space: normal;
+  padding-top: 0.5pt;
+}
+.data-table .cell-note .data {
+  font-style: normal;
 }
 
 /* A SECTION WITH A CHART TAKES THE SAME TWO PAGES: the pictures and the

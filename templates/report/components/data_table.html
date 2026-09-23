@@ -3,7 +3,11 @@
     header row.
 
     `table` is {corner, columns: [str], rows: [{label, cells: [str]}],
-    compact?, monthly?}. A row label is a string (prose) or a list of
+    compact?, monthly?, variant?}. `variant` adds data-table--<name> so a
+    section can set one of its tables' column widths without scoping the
+    rule to the page block the table happens to sit on -- which a table
+    that moves between pages (the Access and Soils spill rules) cannot
+    rely on. A row label is a string (prose) or a list of
     summary-style parts, so a code inside it -- a slope class letter -- can
     be set as data. `compact` sizes the table to its content instead of the
     full measure -- for a table of three or four narrow columns; `monthly`
@@ -16,11 +20,25 @@
     prose face; kind "text" is a PROSE COLUMN -- the Access section's
     limiting features -- set left, wrapping, in the page's ink, so the
     words that matter are not subordinate to the figures beside them.
+    A CELL OF ANY KIND MAY CARRY A `note`: summary-style parts set on their
+    own line INSIDE the cell, under the value. For a fact that qualifies
+    one figure and nothing else -- a root restriction that is not the rock
+    the depth column reports -- and that a caption below seven rows would
+    be read after the conclusion it exists to prevent. It is not a
+    footnote: there is no marker to follow, the words sit against the
+    number they correct.
     Every value arrives ALREADY FORMATTED by the section
     builder (unit conversion and rounding are its job); this macro sets and
     aligns. -#}
+{% macro cell_note(parts) -%}
+{%- if parts %}<span class="cell-note">
+{%- for part in parts -%}
+{%- if part is mapping -%}<span class="data">{{ part.value }}</span>{%- else -%}{{ part }}{%- endif -%}
+{%- endfor -%}
+</span>{% endif %}
+{%- endmacro %}
 {% macro data_table(table) -%}
-<table class="data-table{% if table.compact %} data-table--compact{% endif %}{% if table.monthly %} data-table--monthly{% endif %}">
+<table class="data-table{% if table.compact %} data-table--compact{% endif %}{% if table.monthly %} data-table--monthly{% endif %}{% if table.variant %} data-table--{{ table.variant }}{% endif %}">
   <thead>
     <tr>
       <th class="label">{{ table.corner }}</th>
@@ -40,9 +58,9 @@
 {%- endif -%}</td>
 {%- for value in row.cells %}
 {%- if value is mapping and value.kind == "text" %}
-      <td class="text">{{ value.value }}</td>
+      <td class="text">{{ value.value }}{{ cell_note(value.note) }}</td>
 {%- elif value is mapping %}
-      <td class="num num--{{ value.kind }}">{{ value.value }}</td>
+      <td class="num{% if value.kind %} num--{{ value.kind }}{% endif %}">{{ value.value }}{{ cell_note(value.note) }}</td>
 {%- else %}
       <td class="num">{{ value }}</td>
 {%- endif %}

@@ -303,7 +303,10 @@ sliver = box(maxx - 60, maxy - 66, maxx - 54, maxy - 60)
 units = layer("units", [big, sliver], kind="polygon", stroke="ink", fill="stock", labels=["GvD", "At"])
 rendered = render_map(BOUNDARY_POLYGON_UTM, [units], TOKENS)
 assert rendered["labels_placed"]["units"] == [True, False], rendered["labels_placed"]
-assert rendered["svg"].count(">GvD</text>") == 1 and ">At</text>" not in rendered["svg"]
+# Twice: the knock-out stroke under the glyphs, then the glyphs.
+assert rendered["svg"].count(">GvD</text>") == 2 and ">At</text>" not in rendered["svg"]
+assert f'fill="none" stroke="{TOKENS["page"]}" stroke-width="{report_map.LINE_LABEL_SIZE_PT * report_map.HALO_WIDTH_EM:.2f}"' \
+    in rendered["svg"], "the polygon label is knocked out of what it sits on"
 # The placed label sits at the pole, in the data face, and label_placements agrees with the render.
 bx, by, _ = report_map.polygon_pole(big)
 projection = report_map._Projection(
@@ -318,9 +321,10 @@ assert report_map.label_placements(BOUNDARY_POLYGON_UTM, units) == [True, False]
 mpu = rendered["meters_per_unit"]
 assert report_map.polygon_pole(big)[2] / mpu >= report_map.polygon_label_radius_pt("GvD")
 assert report_map.polygon_pole(sliver)[2] / mpu < report_map.polygon_label_radius_pt("At")
-# An unlabelled polygon layer renders exactly as it did before labels existed.
+# An unlabelled polygon layer renders exactly as it did before labels existed: the ONE placed label costs
+# two elements, the knock-out and the glyphs.
 assert render_map(BOUNDARY_POLYGON_UTM, [dict(units, labels=None)], TOKENS)["svg"].count("<text") \
-    == rendered["svg"].count("<text") - 1
+    == rendered["svg"].count("<text") - 2
 print(f"   polygon labels: pole at {radius:.0f} m clearance on the L, {report_map.polygon_label_radius_pt('GvD'):.1f} pt "
       f"needed for GvD; 1 of 2 placed, the sliver dropped")
 # The keypoint is the asterisk convention: three strokes through one point.

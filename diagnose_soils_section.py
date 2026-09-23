@@ -1,10 +1,10 @@
 """
 diagnose_soils_section.py
 
-EVERY SOILS & GEOLOGY FIGURE FOR THE REFERENCE PARCEL, TABLED -- branch
-12 PHASE 1's verification, printed:
+EVERY SOILS & GEOLOGY FIGURE FOR THE REFERENCE PARCEL, TABLED, and the
+section's three pages rendered -- branch 12's verification, printed:
 
-    python3 diagnose_soils_section.py
+    python3 diagnose_soils_section.py [out_dir]
 
   * an offline session on the real DEM with the parcel's real SSURGO
     rows, map unit polygons and K factors (soils_reference_fixture), its
@@ -20,19 +20,30 @@ EVERY SOILS & GEOLOGY FIGURE FOR THE REFERENCE PARCEL, TABLED -- branch
   * the erosion factors, the geology, and the survey version;
   * the call count: what the derivations fetched and what they recomputed;
   * the map's label fit, polygon by polygon: which symbols will be set
-    and which are too small to hold one.
+    and which are too small to hold one, and the tint each unit took
+    beside the tints of the units it touches;
+  * the whole report rendered, the Soils pages rasterised to PNG
+    (PyMuPDF), each page's slack measured and the spill rule's break
+    point rendered on both sides.
 
 Offline by construction: the network is refused (offline_harness).
 """
 
+import os
 import sys
+from datetime import date
 
 import offline_harness
 
 offline_harness.install()
 
+import access_derivations as ad  # noqa: E402
+import landform_section  # noqa: E402
+import report_layout  # noqa: E402
 import report_map  # noqa: E402
 import site_report  # noqa: E402
+import soils_section as ssn  # noqa: E402
+import trees_derivations as td  # noqa: E402
 import soil_survey as ss  # noqa: E402
 import soils_derivations as sd  # noqa: E402
 import soils_reference_fixture as fixture  # noqa: E402
@@ -52,7 +63,31 @@ def _partition(label, counts: dict, keys: list, parcel_acres: float):
     return acres
 
 
-def main() -> int:
+GENERATED_ON = date(2026, 9, 23)
+
+
+def _slack(rendered, first_page: int) -> list:
+    rows = []
+    for number, page in enumerate(rendered.pages, start=1):
+        if number < first_page:
+            continue
+        page_box = page._page_box
+        bottom = page_box.content_box_y() + page_box.height
+        lowest = 0.0
+        for box in report_layout._walk(page_box):
+            element = getattr(box, "element", None)
+            cls = (element.get("class") or "") if element is not None else ""
+            if hasattr(box, "position_y") and "section" not in cls and any(
+                c in cls for c in ("caption", "data-table", "source-footer", "summary", "report-map",
+                                   "unavailable", "heading", "eyebrow")
+            ):
+                lowest = max(lowest, box.position_y + box.height)
+        rows.append((number, round(bottom - lowest, 1)))
+    return rows
+
+
+def main(out_dir: str) -> int:
+    os.makedirs(out_dir, exist_ok=True)
     data = fixture.report_data()
     with fixture.Harness():
         session = fixture.Session()
@@ -60,7 +95,12 @@ def main() -> int:
         document = session.stored()
         inputs = sd.soils_inputs_from_context(context, document, data)
         water_inputs = wd.water_inputs_from_context(context, document, data)
+        terrain = landform_section.terrain_inputs_from_context(context, document)
+        access = ad.access_inputs_from_context(context, document, data)
+        trees = td.trees_inputs_from_context(context, document, data)
         derived = sd.derive(inputs)
+        html = site_report.render_site_report_html(data, generated_on=GENERATED_ON, terrain=terrain,
+                                                   water=water_inputs, access=access, trees=trees, soils=inputs)
 
     cells = derived.cells
     parcel_acres = cells["on_parcel_count"] * cells["cell_acres"]
@@ -162,9 +202,48 @@ def main() -> int:
         dropped_acres += 0.0 if fits else acre
         print(f"    {symbol:>5} {acre:6.1f} {radius:10.2f} {needed:9.2f}  {'yes' if fits else 'NO -- too small'}")
     print(f"    {placed} of {len(order)} symbols will be set; {len(order) - placed} dropped, "
-          f"{dropped_acres:.1f} ac in all -- the table beneath the map carries every symbol")
+          f"{dropped_acres:.1f} ac in all -- the map unit table carries every symbol")
     print(f"    map scale {mpu:.4f} m per pt, frame {rendered['frame'][0]:.0f} x {rendered['frame'][1]:.0f} pt, "
           f"scale bar {rendered['scale_bar']['feet']} ft")
+    tints = ssn.assign_tints(derived)
+    adjacency = ssn.neighbours(derived)
+    print(f"    {'sym':>5} {'tint':>5}  touches (tint)")
+    for mukey in order:
+        unit = derived.map_units[mukey]
+        touching = ", ".join(f"{derived.map_units[n]['musym']} ({tints[n]:.2f})" for n in sorted(
+            adjacency[mukey], key=lambda k: -derived.map_units[k]["cells"]))
+        print(f"    {unit['musym']:>5} {tints[mukey]:5.2f}  {touching or '(none)'}")
+    clashes = [(a, b) for a, ns in adjacency.items() for b in ns if tints[a] == tints[b]]
+    print(f"    {len(set(tints.values()))} of {len(ssn.SOIL_TINTS)} tints used; "
+          f"{len(clashes)} touching pair(s) share one")
+    print()
+
+    # --- the pages --------------------------------------------------------
+    print("  THE PAGES")
+    print(f"    spill: {ssn.spills(derived)} ({len(order)} units, the map page holds "
+          f"{ssn.MAP_UNIT_ROWS_MAX})")
+    pdf_path = os.path.join(out_dir, "site-report.pdf")
+    site_report.generate_site_report_pdf(data, pdf_path, generated_on=GENERATED_ON, terrain=terrain,
+                                         water=water_inputs, access=access, trees=trees, soils=inputs)
+    from weasyprint import HTML
+
+    document_ = HTML(string=html, base_url=site_report.TEMPLATES_DIRECTORY).render()
+    overflow = report_layout.overflowing_boxes(document_)
+    first = len(document_.pages) - 2
+    print(f"    {len(document_.pages)} pages; {len(overflow)} box(es) past the measure")
+    for number, slack in _slack(document_, first):
+        print(f"      page {number}: {slack:6.1f} pt of slack")
+    try:
+        import pymupdf
+    except ImportError:
+        print("    (PyMuPDF not installed: no PNGs)")
+    else:
+        opened = pymupdf.open(pdf_path)
+        for index, name in zip(range(first - 1, len(document_.pages)),
+                               ("soils-1-map", "soils-2-properties", "soils-3-classification")):
+            path = os.path.join(out_dir, f"{name}.png")
+            opened[index].get_pixmap(dpi=140).save(path)
+            print(f"      wrote {path}")
     print()
 
     print("  SOURCES READ")
@@ -179,4 +258,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(sys.argv[1] if len(sys.argv) > 1 else "_proof"))

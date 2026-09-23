@@ -1,0 +1,91 @@
+{#- THE SOILS & GEOLOGY SECTION -- THREE PAGES, AN INVENTORY.
+
+    The map page: eyebrow, heading, the summary line (how many units over
+    how much ground, the texture class the parcel is, and the reaction it
+    is at -- both sentences rather than columns), the soil map at
+    LANDFORM'S EXTENT AND SCALE (each map unit outlined over its tint and
+    labelled with its symbol, contours reading through beneath) with its
+    legend and caption, and the map unit table with its caption.
+
+    THE SPILL RULE (section.spill), Access's: with more map units than the
+    map page holds beneath the map, the map unit table and its caption
+    move whole to the properties page and the map caption says so. Every
+    unit stays listed; nothing is condensed or truncated.
+
+    The properties page: the continuation eyebrow, the map unit table when
+    it spilled, the surface horizon
+    table with its caption, the sentence saying a soil test is the only
+    way to know organic matter and pH on this ground, and the profile's
+    own water figure on its own depth basis.
+
+    The classification page: the continuation eyebrow, capability and
+    farmland by acres, the erosion factors, the formation as a line, the
+    cross-reference naming where the rest of this survey's figures live,
+    and the sources.
+
+    No styling here, no numbers here: `section` is soils_section.build_
+    soils_section()'s dict, every value already formatted. A degradable
+    source that did not answer leaves its statement where its figures
+    would be. -#}
+{% import "components/eyebrow.html" as c1 %}
+{% import "components/heading.html" as c2 %}
+{% import "components/summary.html" as c3 %}
+{% import "components/data_table.html" as c5 %}
+{% import "components/source_footer.html" as c6 %}
+{% import "components/map.html" as c7 %}
+{% import "components/caption.html" as c9 %}
+{% macro map_units() -%}
+    {{ c5.data_table(section.map_unit_table) }}
+    {{ c9.caption(section.map_unit_caption) }}
+{%- endmacro %}
+<section class="section section--soils section--map">
+  <div class="section__figures">
+    {{ c1.eyebrow(section.number, section.name) }}
+    {{ c2.heading(section.heading) }}
+    {{ c3.summary(section.summary) }}
+    {{ c7.map(section.map) }}
+    {{ c9.caption(section.map_caption) }}
+{%- if not section.spill %}
+    {{ map_units() }}
+{%- endif %}
+  </div>
+  <div class="section__detail">
+    {{ c1.eyebrow(section.number, section.name, continued=True) }}
+{%- if section.spill %}
+    {{ map_units() }}
+{%- endif %}
+{%- if section.properties_table %}
+    {{ c5.data_table(section.properties_table) }}
+    {{ c9.caption(section.properties_caption) }}
+    {{ c3.summary(section.soil_test) }}
+{%- if section.profile_water %}
+    {{ c9.caption(section.profile_water) }}
+{%- endif %}
+{%- else %}
+    {{ c9.unavailable(section.survey_unavailable) }}
+{%- endif %}
+  </div>
+  <div class="section__classification">
+    {{ c1.eyebrow(section.number, section.name, continued=True) }}
+{%- if section.capability_table %}
+    {{ c5.data_table(section.capability_table) }}
+    {{ c9.caption(section.capability_caption) }}
+{%- endif %}
+{%- if section.farmland_table %}
+    {{ c5.data_table(section.farmland_table) }}
+    {{ c9.caption(section.farmland_caption) }}
+{%- endif %}
+{%- if section.erosion_table %}
+    {{ c5.data_table(section.erosion_table) }}
+    {{ c9.caption(section.erosion_caption) }}
+{%- endif %}
+{%- if section.geology %}
+    {{ c3.summary(section.geology) }}
+    {{ c9.caption(section.geology_caption) }}
+{%- else %}
+    {{ c9.unavailable(section.geology_unavailable) }}
+{%- endif %}
+    {{ c9.caption(section.cross_reference) }}
+    {{ c6.source_footer({"lines": section.sources}) }}
+  </div>
+</section>

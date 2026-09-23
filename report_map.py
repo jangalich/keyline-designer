@@ -63,6 +63,11 @@ published soil surveys this is built for set a map unit's symbol where
 the unit is widest. polygon_pole() finds it by a coarse-to-fine grid
 search in the geometry's own metres, with no dependency beyond shapely.
 
+A POLYGON LABEL IS KNOCKED OUT of what it sits on -- a stroked copy in
+the page colour under the glyphs -- because unlike a line label it has
+nothing to break behind it: it lands on a tint, on contours, and on
+whatever those contours' own labels have already put there.
+
 A POLYGON TOO SMALL TO HOLD ITS LABEL IS LEFT UNLABELLED, the same rule
 the lines follow and for the same reason: crowding a 0.06-acre sliver
 with three characters costs more than the sliver's symbol is worth, and
@@ -167,6 +172,9 @@ FONT_DATA = "IBM Plex Mono"
 LABEL_SIZE_PT = 7.5
 NORTH_SIZE_PT = 8.5
 LINE_LABEL_SIZE_PT = 6.5
+# A polygon label's knock-out, as a fraction of its size: wide enough to
+# clear a contour and its own label, narrow enough not to eat the tint.
+HALO_WIDTH_EM = 0.38
 # IBM Plex Mono's advance is 0.6 em; the gap either side of a line label.
 MONO_ADVANCE_EM = 0.6
 LINE_LABEL_PAD_PT = 3.0
@@ -753,6 +761,7 @@ def _layer_svg(spec: dict, projection, tokens: dict) -> str:
                     pieces.append(_text(
                         lx, ly + LINE_LABEL_SIZE_PT * 0.35, label,
                         font=FONT_DATA, size=LINE_LABEL_SIZE_PT, fill=stroke, anchor="middle",
+                        halo=_colour(tokens, "page"),
                     ))
         else:
             pieces.append(
@@ -763,13 +772,35 @@ def _layer_svg(spec: dict, projection, tokens: dict) -> str:
     return "".join(pieces)
 
 
-def _text(x, y, content, *, font, size, fill, anchor="start", weight=None, transform=None) -> str:
+def _text(x, y, content, *, font, size, fill, anchor="start", weight=None, transform=None, halo=None) -> str:
+    """One <text>, or TWO when `halo` is a colour: a stroked copy in that
+    colour first and the filled glyphs over it, which knocks the label out
+    of whatever it sits on. Two elements rather than SVG's `paint-order`,
+    which WeasyPrint does not implement -- a single stroked-and-filled
+    text there draws the stroke OVER the glyphs and thickens them.
+
+    A line label does not need this and does not get it: the line is
+    broken behind it instead, which leaves no ink to knock out. A polygon
+    label has no such option -- it sits over a tint, over contours, and
+    over whatever those contours' own labels put there."""
     weight_attr = f' font-weight="{weight}"' if weight else ""
     transform_attr = f' transform="{transform}"' if transform else ""
-    return (
-        f'<text x="{_fmt(x)}" y="{_fmt(y)}" font-family="{escape(font)}" font-size="{_fmt(size)}" '
-        f'fill="{fill}" text-anchor="{anchor}"{weight_attr}{transform_attr}>{escape(str(content))}</text>'
-    )
+    glyphs = escape(str(content))
+
+    def element(paint):
+        # THE ATTRIBUTE ORDER IS PART OF THE OUTPUT. report_chart.py draws
+        # through this function too, and its test reads the compass
+        # letters back with a regex over the whole tag, so a text with no
+        # halo is byte for byte what it was before haloes existed.
+        return (f'<text x="{_fmt(x)}" y="{_fmt(y)}" font-family="{escape(font)}" font-size="{_fmt(size)}" '
+                f'{paint} text-anchor="{anchor}"{weight_attr}{transform_attr}>{glyphs}</text>')
+
+    parts = []
+    if halo:
+        parts.append(element(f'fill="none" stroke="{halo}" stroke-width="{_fmt(size * HALO_WIDTH_EM)}" '
+                             f'stroke-linejoin="round"'))
+    parts.append(element(f'fill="{fill}"'))
+    return "".join(parts)
 
 
 def _north_arrow(frame, tokens) -> str:
