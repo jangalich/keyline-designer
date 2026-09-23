@@ -97,7 +97,7 @@ INTERPRETATION_LABELS = {
     HARVEST_EQUIPMENT: "Harvest equipment operability",
     SEEDLING_MORTALITY: "Seedling mortality",
     WINDTHROW: "Windthrow hazard",
-    EROSION_OFF_ROAD: "Erosion hazard, off-road",
+    EROSION_OFF_ROAD: "Erosion hazard off-road",
 }
 
 SSURGO_CITATION = (

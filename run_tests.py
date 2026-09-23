@@ -76,8 +76,11 @@ FULL_ONLY = (
     # rasterise the exclusion union twice (5.5 s).
     "test_access_section.py",
     "test_access_derivations.py",
-    # Branch 11: the derivations build two sessions (the lidar one and
-    # the fallback one) on the real canopy. Measured at 6.7 s.
+    # Branch 11: the page test renders the thirteen-page report five
+    # times, the fallback and two degraded renders beside the full one
+    # (27.8 s); the derivations build two sessions (the lidar one and
+    # the fallback one) on the real canopy (6.7 s).
+    "test_trees_section.py",
     "test_trees_derivations.py",
     "test_trees_step.py",
     "test_session_api.py",

@@ -157,17 +157,18 @@ canopy_pct = _acres([canopy[td.CANOPY], canopy[td.OPEN], canopy[td.NO_DATA]], 10
 assert canopy_acres == [1.6, 11.5, 0.1] and round(sum(canopy_acres), 6) == COVER
 assert canopy_pct == [12.0, 87.4, 0.6] and round(sum(canopy_pct), 6) == 100.0
 # Height classes: the first break is the design threshold itself, the rest 30, 50 and 80 ft.
-assert [name for name, _, _ in td.HEIGHT_CLASSES] == ["under", "15-30", "30-50", "50-80", "80+"]
+assert [name for name, _, _ in td.HEIGHT_CLASSES] == ["under", "15-30", "30-50", "50+"]
 assert td.HEIGHT_CLASSES[0][2] == chd.CANOPY_HEIGHT_THRESHOLD_METERS == td.HEIGHT_CLASSES[1][1]
-assert [round(high * FT) for _, _, high in td.HEIGHT_CLASSES[1:4]] == [30, 50, 80] and td.HEIGHT_CLASSES[4][2] is None
+assert [round(high * FT) for _, _, high in td.HEIGHT_CLASSES[1:3]] == [30, 50] and td.HEIGHT_CLASSES[3][2] is None
 heights = DERIVED.heights
-assert heights["counts"] == {"under": 1872, "15-30": 53, "30-50": 89, "50-80": 109, "80+": 7, td.NO_DATA: 13}
+# Four classes: the seven cells over 80 ft (0.04 ac, below the display floor) ride in 50 ft and over; the tallest cell is the figure.
+assert heights["counts"] == {"under": 1872, "15-30": 53, "30-50": 89, "50+": 116, td.NO_DATA: 13}
 assert sum(heights["counts"].values()) == ON
 assert sum(heights["counts"][name] for name in td.CANOPY_CLASSES) == canopy[td.CANOPY], "the classed cells are the canopy cells"
 assert heights["counts"]["under"] == canopy[td.OPEN]
 height_names = [name for name, _, _ in td.HEIGHT_CLASSES] + [td.NO_DATA]
 height_acres = _acres([heights["counts"][n] for n in height_names], INPUTS.parcel_acres)
-assert height_acres == [11.5, 0.3, 0.6, 0.7, 0.0, 0.1] and round(sum(height_acres), 6) == COVER
+assert height_acres == [11.5, 0.3, 0.6, 0.7, 0.1] and round(sum(height_acres), 6) == COVER
 assert round(heights["max_m"] * FT) == 86 and 14.0 < heights["canopy_mean_m"] < 15.0 and 14.0 < heights["canopy_median_m"] < 15.0
 # Closure at the 30 m grain.
 closure = DERIVED.closure
@@ -279,8 +280,8 @@ print(f"   TCC {_acres([193, 1950, 0], TCC_INPUTS.parcel_acres)[0]} ac (9.0%), y
 # ======================================================================
 print("6. the class breaks, a species named two ways, the unrated major component, the degraded layers")
 assert td.height_class(float("nan")) is None and td.height_class(0.0) == "under" and td.height_class(4.49) == "under"
-assert td.height_class(4.5) == "15-30" and td.height_class(30 * 0.3048) == "30-50" and td.height_class(24.384) == "80+"
-assert td.height_class(80 * 0.3048 - 0.001) == "50-80" and td.height_class(1000.0) == "80+"
+assert td.height_class(4.5) == "15-30" and td.height_class(30 * 0.3048) == "30-50" and td.height_class(24.384) == "50+"
+assert td.height_class(50 * 0.3048 - 0.001) == "30-50" and td.height_class(1000.0) == "50+"
 assert td.density_class(0.0) is None and td.density_class(0.1) == "1-25" and td.density_class(25.0) == "1-25"
 assert td.density_class(25.01) == "26-50" and td.density_class(75.0) == "51-75" and td.density_class(100.0) == "76-100"
 # A species rated under two common names on two components is one row, keyed by its symbol; a minor component takes no part;

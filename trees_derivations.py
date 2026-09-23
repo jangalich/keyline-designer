@@ -44,11 +44,14 @@ HEIGHT CLASSES (HAG only), in feet because the page is imperial, with the
 first break the design threshold ITSELF (4.5 m, printed as 15 ft) so the
 classed cells are exactly the canopy cells: under 15 ft is not canopy
 (open ground, crops, scrub and anything below the design's rule); 15-30
-ft scrub and young regrowth; 30-50 ft a young stand; 50-80 ft a maturing
-stand; 80 ft and over mature canopy. The top break is the survey's own
-site index for the oaks and yellow-poplar on this ground (70-95 ft at 50
-years), so it reads as roughly a 50-year stand here rather than as a
-round number.
+ft scrub and young regrowth; 30-50 ft a young stand; 50 ft and over a
+maturing to mature stand. FOUR CLASSES, NOT FIVE: an 80 ft break was
+proposed (the survey's own site index for the oaks and yellow-poplar on
+this ground, 70-95 ft at 50 years) and merged on review -- on the
+reference parcel it held seven cells, below the display floor, and a
+table row implying a mature stand on ground that has a handful of tall
+cells says more than the data does. The tallest cell is reported as a
+figure instead, which is the real statement.
 
 CLOSURE (HAG only) answers scattered-trees-or-woodland: the 5 m grid is
 cut into 30 m blocks (CLOSURE_BLOCK_METERS, the grain of the fallback
@@ -102,13 +105,10 @@ HEIGHT_CLASSES = (
     ("under", 0.0, CANOPY_HEIGHT_THRESHOLD_METERS),
     ("15-30", CANOPY_HEIGHT_THRESHOLD_METERS, 30 * METERS_PER_FOOT),
     ("30-50", 30 * METERS_PER_FOOT, 50 * METERS_PER_FOOT),
-    ("50-80", 50 * METERS_PER_FOOT, 80 * METERS_PER_FOOT),
-    ("80+", 80 * METERS_PER_FOOT, None),
+    ("50+", 50 * METERS_PER_FOOT, None),
 )
-HEIGHT_CLASS_LABELS = {
-    "under": "Under 15 ft", "15-30": "15–30 ft", "30-50": "30–50 ft", "50-80": "50–80 ft", "80+": "80 ft and over",
-}
-CANOPY_CLASSES = ("15-30", "30-50", "50-80", "80+")
+HEIGHT_CLASS_LABELS = {"under": "Under 15 ft", "15-30": "15–30 ft", "30-50": "30–50 ft", "50+": "50 ft and over"}
+CANOPY_CLASSES = ("15-30", "30-50", "50+")
 
 CLOSURE_BLOCK_METERS = 30.0
 # Closure and cover classes, (id, low % exclusive of 0, high % inclusive).

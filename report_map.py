@@ -30,6 +30,21 @@ parts) and the map.html macro sets them under the frame in the report's
 type, so a legend label obeys the page's data rule the way a table cell
 does. A section adds layers; it does not restyle the frame.
 
+SCREENED TINTS (branch 11). A `screen` layer is a polygon drawn as a
+dot screen -- rows of round dots at SCREEN_SPACING_PT, the mid-century
+convention for woodland -- rather than a flat fill, so contours and
+linework beneath and above it read through the gaps. The dots are
+GEOMETRY, not an SVG pattern: rows are cut across the polygon in the
+DEM's metres at the spacing the frame's scale gives, clipped to it, and
+each row is one stroked path with a zero-length dash and round caps,
+its dash offset set so the dots fall on one grid across every row and
+every polygon. The screen's weight is the dot's diameter
+(`screen_dot_pt`): a graduated ramp is several screen layers of one
+token at growing dot sizes, the way Landform's slope ramp is one token at
+growing opacities, and the darkest is capped by the caller so a contour
+stays legible over it. A screen's legend swatch is drawn with the same
+dots.
+
 LABELLED LINES. A line layer may carry `labels`, one per geometry (a
 string or None): the label is set along the line at the midpoint of its
 longest part, in the data face, and the line is BROKEN behind it -- a gap
@@ -142,6 +157,12 @@ CONTOUR_INTERVALS_FT = (2, 5, 10, 20)
 CONTOUR_TARGET_MAX_LINES = 15
 INDEX_CONTOUR_EVERY = 5
 
+# The dot screen: rows this far apart, in points, alternate rows offset by
+# half a spacing so the dots sit on a staggered grid. A dot's diameter is
+# the layer's own `screen_dot_pt`; coverage is pi r^2 / spacing^2, so a
+# 1.7 pt dot on a 3 pt grid covers about a quarter of the ground.
+SCREEN_SPACING_PT = 3.0
+
 # Round scale-bar lengths, in feet, and the largest fraction of the frame
 # width the bar may take.
 SCALE_BAR_CANDIDATES_FT = (20, 50, 100, 200, 250, 500, 1000, 2000, 5000)
@@ -167,6 +188,7 @@ def layer(
     labels: Optional[list] = None,
     marker: str = "asterisk",
     stroke_opacity: float = 1.0,
+    screen_dot_pt: float = 1.2,
 ) -> dict:
     """
     One styled layer. `geometries` are shapely geometries in the DEM's UTM
@@ -180,10 +202,15 @@ def layer(
     `marker`, for a point layer, is "asterisk" (the layout map's keypoint
     convention) or "dot" (a small filled circle in the stroke token, for a
     point that sits where two lines meet). `stroke_opacity` below 1 sets
-    a line back, for linework that is context rather than subject.
+    a line back, for linework that is context rather than subject. A
+    "screen" layer is a polygon drawn as a dot screen in the `fill`
+    token, dots `screen_dot_pt` across on the SCREEN_SPACING_PT grid (see
+    the module docstring); `stroke` and `fill_opacity` do not apply to it.
     """
-    if kind not in ("polygon", "line", "point"):
-        raise ValueError(f"layer kind must be polygon, line or point, got {kind!r}")
+    if kind not in ("polygon", "line", "point", "screen"):
+        raise ValueError(f"layer kind must be polygon, line, point or screen, got {kind!r}")
+    if kind == "screen" and fill is None:
+        raise ValueError("a screen layer names the token its dots are drawn in")
     if marker not in ("asterisk", "dot"):
         raise ValueError(f"marker must be asterisk or dot, got {marker!r}")
     if labels is not None:
@@ -204,6 +231,7 @@ def layer(
         "labels": list(labels) if labels is not None else None,
         "marker": marker,
         "stroke_opacity": float(stroke_opacity),
+        "screen_dot_pt": float(screen_dot_pt),
     }
 
 
@@ -505,9 +533,58 @@ def _colour(tokens: dict, name: Optional[str]) -> str:
     return tokens[name]
 
 
+def _screen_rows(geometry, projection) -> list:
+    """The dot rows of a screen over one polygon: [(units path, dash
+    offset), ...], rows SCREEN_SPACING_PT apart in the frame, alternate
+    rows staggered by half a spacing, each clipped to the polygon and its
+    dash offset set so the dots land on the frame-wide grid."""
+    spacing_m = SCREEN_SPACING_PT * projection.meters_per_unit
+    minx, miny, maxx, maxy = geometry.bounds
+    rows = []
+    # Row positions on a frame-wide grid, so two polygons' screens align.
+    first = math.floor(miny / spacing_m)
+    last = math.ceil(maxy / spacing_m)
+    for index in range(first, last + 1):
+        y = index * spacing_m
+        if y < miny or y > maxy:
+            continue
+        clipped = geometry.intersection(LineString([(minx - spacing_m, y), (maxx + spacing_m, y)]))
+        for part in _linear_parts_list(clipped):
+            coords = list(part.coords)
+            if len(coords) < 2:
+                continue
+            (x0, y0), (x1, y1) = coords[0], coords[-1]
+            if x1 < x0:
+                x0, x1 = x1, x0
+            start = projection.xy(x0, y0)
+            end = projection.xy(x1, y1)
+            stagger = SCREEN_SPACING_PT / 2 if index % 2 else 0.0
+            offset = (start[0] - stagger) % SCREEN_SPACING_PT
+            rows.append((f"M {_fmt(start[0])} {_fmt(start[1])} L {_fmt(end[0])} {_fmt(end[1])}", offset))
+    return rows
+
+
+def _screen_svg(spec: dict, projection, fill: str) -> list:
+    pieces = []
+    dot = spec.get("screen_dot_pt", 1.2)
+    for geometry in spec["geometries"]:
+        if geometry is None or geometry.is_empty:
+            continue
+        polygons = [geometry] if isinstance(geometry, Polygon) else [g for g in getattr(geometry, "geoms", []) if isinstance(g, Polygon)]
+        for polygon in polygons:
+            for d, offset in _screen_rows(polygon, projection):
+                pieces.append(
+                    f'<path d="{d}" fill="none" stroke="{fill}" stroke-width="{_fmt(dot)}" stroke-linecap="round" '
+                    f'stroke-dasharray="0 {_fmt(SCREEN_SPACING_PT)}" stroke-dashoffset="{_fmt(offset)}"/>'
+                )
+    return pieces
+
+
 def _layer_svg(spec: dict, projection, tokens: dict) -> str:
     stroke = _colour(tokens, spec["stroke"])
     fill = _colour(tokens, spec["fill"])
+    if spec["kind"] == "screen":
+        return f'<g id="layer-{escape(spec["id"])}">' + "".join(_screen_svg(spec, projection, fill)) + "</g>"
     dash = f' stroke-dasharray="{spec["dash"]}"' if spec.get("dash") else ""
     opacity = spec.get("stroke_opacity", 1.0)
     if opacity < 1.0:
@@ -621,6 +698,20 @@ def _swatch(spec: dict, tokens: dict) -> str:
         body = (
             f'<rect x="0.25" y="0.25" width="{_fmt(w - 0.5)}" height="{_fmt(h - 0.5)}" fill="{fill}" '
             f'fill-opacity="{_fmt(spec["fill_opacity"])}" stroke="{stroke}" stroke-width="0.5"/>'
+        )
+    elif spec["kind"] == "screen":
+        # The same dots, three staggered rows across the swatch, inside a hairline of the token.
+        dot = spec.get("screen_dot_pt", 1.2)
+        rows = []
+        for index, y in enumerate((1.5, 4.0, 6.5)):
+            offset = _fmt((SCREEN_SPACING_PT / 2) if index % 2 else 0.0)
+            rows.append(
+                f'<path d="M 1.5 {_fmt(y)} L {_fmt(w - 1.5)} {_fmt(y)}" fill="none" stroke="{fill}" stroke-width="{_fmt(dot)}" '
+                f'stroke-linecap="round" stroke-dasharray="0 {_fmt(SCREEN_SPACING_PT)}" stroke-dashoffset="{offset}"/>'
+            )
+        body = (
+            f'<rect x="0.25" y="0.25" width="{_fmt(w - 0.5)}" height="{_fmt(h - 0.5)}" fill="none" stroke="{fill}" '
+            f'stroke-width="0.4"/>' + "".join(rows)
         )
     elif spec["kind"] == "line":
         opacity = spec.get("stroke_opacity", 1.0)
