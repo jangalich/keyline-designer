@@ -5,7 +5,7 @@ THE SITE DATA REPORT'S FIXED SECTION ORDER -- the Scale of Permanence,
 as site-data-report-proposal.md lays it out -- and the numeral each
 section carries because of its place in it.
 
-    SECTION_OUTLINE          the nine section names, in order
+    SECTION_OUTLINE          the seven section names, in order
     section_number("Climate") -> "II"
 
 A SECTION'S NUMBER IS ITS PLACE IN THE OUTLINE, NOT ITS PLACE IN THE
@@ -16,6 +16,28 @@ sits in the method, and the method does not change with what was built.
 Numbering by render position would renumber every section each time one
 was added, and would make the same section read differently in two
 reports. Roman numerals, to match the outline the proposal is written in.
+
+SEVEN SECTIONS, NOT NINE (branch 12). The outline shipped with nine
+names, two of which no longer name a section of this report:
+
+    Buildings & utilities   FOLDED INTO SITE OVERVIEW. What the report
+                            has to say about what is built and what is
+                            serviced is a handful of facts about the
+                            property, not a section's worth of survey --
+                            it belongs beside the parcel, the address and
+                            the acreage on page one.
+    Fencing & animals       INVESTIGATED AND DROPPED. There is no public
+                            dataset that describes a parcel's fencing or
+                            its stock, so a section under that heading
+                            could only repeat the design's own choices
+                            back at the reader, which is not inventory.
+
+THE OUTLINE IS NOT THE MODULE LIST. fencing.py and the fencing step are
+KSOP design modules and are untouched by this: what changed is what the
+site data REPORT has a numbered section for. Soils & geology moves from
+IX to VII because the two names ahead of it are gone, which is the one
+renumbering the outline has taken and the reason the numeral lives here
+rather than being counted at render time.
 """
 
 SECTION_OUTLINE = (
@@ -25,8 +47,6 @@ SECTION_OUTLINE = (
     "Water & hydrology",
     "Access",
     "Trees & forestry",
-    "Buildings & utilities",
-    "Fencing & animals",
     "Soils & geology",
 )
 

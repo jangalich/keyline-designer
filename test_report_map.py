@@ -31,7 +31,7 @@ from xml.dom import minidom
 
 import numpy as np
 from shapely.affinity import scale as affine_scale
-from shapely.geometry import LineString, Point
+from shapely.geometry import LineString, Point, Polygon, box
 
 import offline_harness
 
@@ -269,14 +269,64 @@ assert "rotate(" not in without_label
 for t in labels:
     angle = float(t.getAttribute("transform")[len("rotate("):].split()[0])
     assert -90 < angle <= 90, angle
-# A label on a layer that is not a line, or a count that does not match, is refused.
-for bad in (dict(kind="polygon", labels=["x"]), dict(kind="line", labels=["a", "b"])):
+# A label on a tint, or a count that does not match, is refused. A label on a POLYGON is not:
+# branch 12 made it a capability (the soil map's symbols; Site overview may want it too).
+for bad in (dict(kind="screen", labels=["x"], fill="stock"), dict(kind="line", labels=["a", "b"])):
     try:
         layer("bad", [Point(0, 0)], stroke="ink", **bad)
     except ValueError:
         pass
     else:
         raise AssertionError(bad)
+layer("fine", [Polygon([(0, 0), (1, 0), (1, 1)])], kind="polygon", stroke="ink", labels=["x"])
+
+# --- POLYGON LABELS (branch 12): the pole of inaccessibility, and the drop rule --------------
+# The pole is inside the polygon and further from every edge than the centroid is -- on an L the
+# centroid falls OUTSIDE the shape entirely, which is the case a centroid-placed label gets wrong.
+ell = Polygon([(0, 0), (100, 0), (100, 20), (20, 20), (20, 100), (0, 100)])
+px, py, radius = report_map.polygon_pole(ell)
+assert not ell.contains(ell.centroid), "the L's centroid is outside it, which is why the pole is used"
+assert ell.contains(Point(px, py)) and abs(radius - 10.0) < 1e-6, (px, py, radius)
+assert abs(ell.boundary.distance(Point(px, py)) - radius) < 1e-6, "the radius is the clearance it claims"
+# A hole is an edge: the pole of a donut sits in the ring, not in the hole.
+donut = Polygon([(0, 0), (100, 0), (100, 100), (0, 100)], [[(20, 20), (80, 20), (80, 80), (20, 80)]])
+dx, dy, dradius = report_map.polygon_pole(donut)
+assert donut.contains(Point(dx, dy)) and abs(dradius - 10.0) < 1e-6, (dx, dy, dradius)
+# A MultiPolygon's symbol goes in the largest part.
+scattered = box(0, 0, 4, 4).union(box(200, 200, 260, 260))
+mx, my, _ = report_map.polygon_pole(scattered)
+assert 200 <= mx <= 260 and 200 <= my <= 260, (mx, my)
+assert report_map.polygon_pole(Polygon()) is None
+# The drop rule: a polygon that cannot hold its box is left unlabelled, and render_map says so.
+big = box(minx + 40, miny + 40, minx + 160, miny + 160)
+sliver = box(maxx - 60, maxy - 66, maxx - 54, maxy - 60)
+units = layer("units", [big, sliver], kind="polygon", stroke="ink", fill="stock", labels=["GvD", "At"])
+rendered = render_map(BOUNDARY_POLYGON_UTM, [units], TOKENS)
+assert rendered["labels_placed"]["units"] == [True, False], rendered["labels_placed"]
+# Twice: the knock-out stroke under the glyphs, then the glyphs.
+assert rendered["svg"].count(">GvD</text>") == 2 and ">At</text>" not in rendered["svg"]
+assert f'fill="none" stroke="{TOKENS["page"]}" stroke-width="{report_map.LINE_LABEL_SIZE_PT * report_map.HALO_WIDTH_EM:.2f}"' \
+    in rendered["svg"], "the polygon label is knocked out of what it sits on"
+# The placed label sits at the pole, in the data face, and label_placements agrees with the render.
+bx, by, _ = report_map.polygon_pole(big)
+projection = report_map._Projection(
+    BOUNDARY_POLYGON_UTM.bounds, report_map.fitted_frame(BOUNDARY_POLYGON_UTM, report_map.FRAME),
+    report_map.MARGIN_PT, report_map.FURNITURE_BAND_PT)
+ex, ey = projection.xy(bx, by)
+placed_text = re.search(r'<text x="([\d.-]+)" y="([\d.-]+)"[^>]*font-family="IBM Plex Mono"[^>]*>GvD</text>', rendered["svg"])
+assert placed_text, rendered["svg"][:400]
+assert abs(float(placed_text.group(1)) - ex) < 0.01 and abs(float(placed_text.group(2)) - ey) < report_map.LINE_LABEL_SIZE_PT
+assert report_map.label_placements(BOUNDARY_POLYGON_UTM, units) == [True, False]
+# The label's box fits inside the circle the pole claims, and the sliver's does not.
+mpu = rendered["meters_per_unit"]
+assert report_map.polygon_pole(big)[2] / mpu >= report_map.polygon_label_radius_pt("GvD")
+assert report_map.polygon_pole(sliver)[2] / mpu < report_map.polygon_label_radius_pt("At")
+# An unlabelled polygon layer renders exactly as it did before labels existed: the ONE placed label costs
+# two elements, the knock-out and the glyphs.
+assert render_map(BOUNDARY_POLYGON_UTM, [dict(units, labels=None)], TOKENS)["svg"].count("<text") \
+    == rendered["svg"].count("<text") - 2
+print(f"   polygon labels: pole at {radius:.0f} m clearance on the L, {report_map.polygon_label_radius_pt('GvD'):.1f} pt "
+      f"needed for GvD; 1 of 2 placed, the sliver dropped")
 # The keypoint is the asterisk convention: three strokes through one point.
 keypoint_group = [g for g in root.getElementsByTagName("g") if g.getAttribute("id") == "layer-keypoints"][0]
 assert len(keypoint_group.getElementsByTagName("line")) == 3

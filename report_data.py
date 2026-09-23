@@ -108,6 +108,30 @@ layer leaves a visible statement where its table would be):
                                   report-time queries on the same service
                                   Layer 1 already reached (soil_woodland).
 
+THE TABLE AFTER BRANCH 12 (Soils & geology: two more, both DEGRADABLE --
+the section stands on Layer 1's map unit polygons, components, farmland
+classification, K factor and Ksat, which it always has; each absent layer
+leaves a visible statement where its figures would be):
+
+  soil_survey         DEGRADABLE  SSURGO's core survey reading: the map
+                                  unit symbol, the surface horizon's
+                                  texture and properties, depth to
+                                  bedrock, land capability and the T
+                                  factor, one report-time query on the
+                                  same service Layer 1 already reached
+                                  (soil_survey). The section's map unit
+                                  POLYGONS come from Layer 1, so a
+                                  degraded render still draws them --
+                                  outlined and unlabelled, the symbols
+                                  being the one thing only this layer
+                                  carries.
+  bedrock_geology     DEGRADABLE  USGS State Geologic Map Compilation:
+                                  the geologic unit under the parcel,
+                                  named and dated (bedrock_geology). One
+                                  line of the report. A parcel outside
+                                  the conterminous compilation is a real
+                                  no-data answer, not an outage.
+
 THE WINDOW-BASED LAYERS take the boundary alone: nwi_data, nfhl_data,
 nlcd_landcover_data and forest_type_data derive the parcel's UTM window from the boundary with
 dem_data.dem_window_bounds(), the function the DEM fetch itself uses, so
@@ -151,6 +175,7 @@ monthly table describe the same thirty years.
 
 from dataclasses import dataclass, field
 from typing import Optional
+from xml.etree import ElementTree
 
 import requests
 from shapely.geometry import Polygon
@@ -164,7 +189,9 @@ import nfhl_data
 import nhdplus_data
 import nlcd_landcover_data
 import nwi_data
+import bedrock_geology
 import soil_road_ratings
+import soil_survey
 import soil_water_table
 import soil_woodland
 from atlas14_data import Atlas14IncompleteError, design_storms, get_atlas14_for_point
@@ -192,6 +219,8 @@ REPORT_FETCH_LAYERS = {
     "soil_road_ratings": DEGRADABLE,
     "forest_type_group": DEGRADABLE,
     "soil_woodland": DEGRADABLE,
+    "soil_survey": DEGRADABLE,
+    "bedrock_geology": DEGRADABLE,
 }
 
 # The (type, label) pair each layer's failure reports as -- the same split
@@ -209,6 +238,8 @@ LAYER_SOIL_WATER_TABLE = ("soil_water_table", "seasonal water table")
 LAYER_SOIL_ROAD_RATINGS = ("soil_road_ratings", "soil road-construction ratings")
 LAYER_FOREST_TYPE_GROUP = ("forest_type_group", "forest type group")
 LAYER_SOIL_WOODLAND = ("soil_woodland", "soil woodland ratings")
+LAYER_SOIL_SURVEY = ("soil_survey", "soil survey properties")
+LAYER_BEDROCK_GEOLOGY = ("bedrock_geology", "bedrock geology")
 
 # What a Water layer's fetch or parse can raise besides a RequestException:
 # a TIFF rasterio cannot open (OSError), a response whose shape the parser
@@ -216,9 +247,16 @@ LAYER_SOIL_WOODLAND = ("soil_woodland", "soil woodland ratings")
 # answer usefully" and degrade the same way.
 _WATER_FETCH_ERRORS = (requests.exceptions.RequestException, OSError, ValueError, KeyError, TypeError)
 
+# The geology fetch adds two: an XML body ElementTree cannot read, and
+# the compilation answering that it maps nothing here. The first is "the
+# source did not answer usefully"; the second is a no-data answer, and
+# _failure() tells them apart through _NO_DATA_ERRORS below.
+_GEOLOGY_FETCH_ERRORS = _WATER_FETCH_ERRORS + (ElementTree.ParseError, bedrock_geology.GeologyIncompleteError)
+
 # The exception kinds that mean "the source answered without the data",
 # as opposed to a RequestException, "the source did not answer".
-_NO_DATA_ERRORS = (DaymetIncompleteError, Atlas14IncompleteError, PowerIncompleteError)
+_NO_DATA_ERRORS = (DaymetIncompleteError, Atlas14IncompleteError, PowerIncompleteError,
+                   bedrock_geology.GeologyIncompleteError)
 
 
 class ReportDataIncompleteError(RuntimeError):
@@ -290,6 +328,10 @@ class ReportData:
     # block and soil_woodland.parse_woodland's, each None when it degraded.
     forest_type_group: Optional[dict] = None
     soil_woodland: Optional[dict] = None
+    # THE SOILS LAYERS (branch 12): soil_survey.parse_survey's block and
+    # bedrock_geology.parse_geology's, each None when it degraded.
+    soil_survey: Optional[dict] = None
+    bedrock_geology: Optional[dict] = None
     # {layer: {"label", "reason", "error"}} for every DEGRADABLE layer that
     # failed. Empty when everything answered. A REQUIRED failure never
     # reaches a ReportData; it raises.
@@ -463,6 +505,24 @@ def fetch_report_data(boundary) -> ReportData:
         woodland = None
         _degrade("soil_woodland", LAYER_SOIL_WOODLAND, exc)
 
+    # THE SOILS LAYERS. soil_survey is one query on the service Layer 1
+    # already reached; bedrock_geology is a different service entirely.
+    survey = None
+    try:
+        with run_diagnostics.time_layer("soil_survey", soil_survey.get_survey_for_boundary):
+            survey = soil_survey.parse_survey(soil_survey.get_survey_for_boundary(boundary))
+    except _WATER_FETCH_ERRORS as exc:
+        survey = None
+        _degrade("soil_survey", LAYER_SOIL_SURVEY, exc)
+
+    geology = None
+    try:
+        with run_diagnostics.time_layer("bedrock_geology", bedrock_geology.get_geology_for_boundary):
+            geology = bedrock_geology.parse_geology(bedrock_geology.get_geology_for_boundary(boundary))
+    except _GEOLOGY_FETCH_ERRORS as exc:
+        geology = None
+        _degrade("bedrock_geology", LAYER_BEDROCK_GEOLOGY, exc)
+
     return ReportData(
         boundary=list(boundary),
         centroid=centroid,
@@ -484,6 +544,8 @@ def fetch_report_data(boundary) -> ReportData:
         soil_road_ratings=road_ratings,
         forest_type_group=forest_type,
         soil_woodland=woodland,
+        soil_survey=survey,
+        bedrock_geology=geology,
         unavailable=unavailable,
     )
 
@@ -505,6 +567,8 @@ def report_data_from_fixtures(
     soil_road_ratings_rows: Optional[list] = None,
     forest_type_group: Optional[dict] = None,
     soil_woodland_rows: Optional[dict] = None,
+    soil_survey_rows: Optional[list] = None,
+    bedrock_geology_raw: Optional[dict] = None,
 ) -> ReportData:
     """
     A ReportData from parsed responses ALREADY IN HAND -- the reference
@@ -521,7 +585,9 @@ def report_data_from_fixtures(
     way fetch_report_data() parses them; None is absent. The Access
     layer's rows (access_reference_fixture) the same way, and the Trees
     layers' raw answers (trees_reference_fixture): the forest type TIFF
-    dict and the two woodland row sets.
+    dict and the two woodland row sets. The Soils layers' the same way
+    (soils_reference_fixture): the survey rows, and the geology fetch's
+    three-part raw answer.
     """
     centroid = boundary_centroid_lat_lon(boundary)
     correction = heavy_rain = None
@@ -549,6 +615,8 @@ def report_data_from_fixtures(
         soil_road_ratings=soil_road_ratings.parse_road_ratings(soil_road_ratings_rows) if soil_road_ratings_rows is not None else None,
         forest_type_group=forest_type_data.parse_forest_type(forest_type_group) if forest_type_group is not None else None,
         soil_woodland=soil_woodland.parse_woodland(soil_woodland_rows) if soil_woodland_rows is not None else None,
+        soil_survey=soil_survey.parse_survey(soil_survey_rows) if soil_survey_rows is not None else None,
+        bedrock_geology=bedrock_geology.parse_geology(bedrock_geology_raw) if bedrock_geology_raw is not None else None,
         unavailable=dict(unavailable or {}),
     )
 

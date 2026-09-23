@@ -1,0 +1,92 @@
+{#- THE SOILS & GEOLOGY SECTION -- THREE PAGES, AN INVENTORY.
+
+    The map page: eyebrow, heading, the summary line (how many units, the
+    texture class the parcel is and the reaction it is at -- both
+    sentences rather than columns), the soil map at LANDFORM'S EXTENT AND
+    SCALE (each map unit outlined over its tint and labelled with its
+    symbol, contours reading through beneath) with its legend and caption,
+    then the two CLASSIFICATION tables -- land capability and farmland,
+    each three or four rows of acres.
+
+    THE CLASSIFICATION TABLES SIT UNDER THE MAP, not the map unit table
+    they were specified with. Seven map units do not fit beneath a
+    full-measure map and three do (measured: the map draws at 453 pt of
+    an 878 pt page and the table is 261 pt), so the pairing the
+    specification assumed does not survive a parcel with a normal number
+    of soils. Capability and farmland are the two shortest and most
+    scannable tables in the section; they fill the page without crowding
+    it, and the map unit table gets the room it needs on the next page
+    beside the properties it belongs with. Each of the two is wrapped in a
+    .table-block so a table and its caption break together: a caption
+    stranded at the top of the next page without the figure it belongs to
+    is a layout fault, not a judgement. The map page runs 4 pt short of
+    full on the reference parcel, so a parcel whose summary or map caption
+    runs a line longer moves the farmland block whole to the next page --
+    which is why the block exists.
+
+    The properties page: the continuation eyebrow, the map unit table with
+    its caption, the surface horizon table with its caption, the sentence
+    saying a soil test is the only way to know organic matter and pH on
+    this ground, and the profile's own water figure on its own depth
+    basis.
+
+    The last page: the continuation eyebrow, the erosion factors, the
+    formation as a line, the cross-reference naming where the rest of this
+    survey's figures live, and the sources.
+
+    No styling here, no numbers here: `section` is soils_section.build_
+    soils_section()'s dict, every value already formatted. A degradable
+    source that did not answer leaves its statement where its figures
+    would be. -#}
+{% import "components/eyebrow.html" as c1 %}
+{% import "components/heading.html" as c2 %}
+{% import "components/summary.html" as c3 %}
+{% import "components/data_table.html" as c5 %}
+{% import "components/source_footer.html" as c6 %}
+{% import "components/map.html" as c7 %}
+{% import "components/caption.html" as c9 %}
+<section class="section section--soils section--map">
+  <div class="section__figures">
+    {{ c1.eyebrow(section.number, section.name) }}
+    {{ c2.heading(section.heading) }}
+    {{ c3.summary(section.summary) }}
+    {{ c7.map(section.map) }}
+    {{ c9.caption(section.map_caption) }}
+{%- if section.capability_table %}
+    <div class="table-block">{{ c5.data_table(section.capability_table) }}{{ c9.caption(section.capability_caption) }}</div>
+{%- endif %}
+{%- if section.farmland_table %}
+    <div class="table-block">{{ c5.data_table(section.farmland_table) }}{{ c9.caption(section.farmland_caption) }}</div>
+{%- endif %}
+  </div>
+  <div class="section__detail">
+    {{ c1.eyebrow(section.number, section.name, continued=True) }}
+    {{ c5.data_table(section.map_unit_table) }}
+    {{ c9.caption(section.map_unit_caption) }}
+{%- if section.properties_table %}
+    {{ c5.data_table(section.properties_table) }}
+    {{ c9.caption(section.properties_caption) }}
+    {{ c3.summary(section.soil_test) }}
+{%- if section.profile_water %}
+    {{ c9.caption(section.profile_water) }}
+{%- endif %}
+{%- else %}
+    {{ c9.unavailable(section.survey_unavailable) }}
+{%- endif %}
+  </div>
+  <div class="section__classification">
+    {{ c1.eyebrow(section.number, section.name, continued=True) }}
+{%- if section.erosion_table %}
+    {{ c5.data_table(section.erosion_table) }}
+    {{ c9.caption(section.erosion_caption) }}
+{%- endif %}
+{%- if section.geology %}
+    {{ c3.summary(section.geology) }}
+    {{ c9.caption(section.geology_caption) }}
+{%- else %}
+    {{ c9.unavailable(section.geology_unavailable) }}
+{%- endif %}
+    {{ c9.caption(section.cross_reference) }}
+    {{ c6.source_footer({"lines": section.sources}) }}
+  </div>
+</section>
