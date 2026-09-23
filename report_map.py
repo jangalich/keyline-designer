@@ -100,6 +100,14 @@ FRAME = (FRAME_WIDTH_PT, FRAME_HEIGHT_PT)
 # parcel. The legend lives below the frame, not in this band.
 MARGIN_PT = 14.0
 FURNITURE_BAND_PT = 22.0
+# THE FRAME IS NARROWED TO THE PARCEL. A tall parcel in the wide frame
+# left 126 m of empty ground either side of the reference boundary --
+# room a section with context beyond the parcel would fill, and a blank
+# that a section without it read as a failure. The frame's width is cut
+# so that no more than this much ground shows beyond the parcel's bbox on
+# either side; the height, and so the scale, never change, and every
+# section's map of one parcel gets the same narrowed frame (fitted_frame).
+MAX_CONTEXT_MARGIN_M = 50.0
 
 # The legend strip below the frame: swatch geometry in points, shared by
 # the map.html macro's layout (report.css sizes the strip to match).
@@ -615,9 +623,11 @@ def _swatch(spec: dict, tokens: dict) -> str:
             f'fill-opacity="{_fmt(spec["fill_opacity"])}" stroke="{stroke}" stroke-width="0.5"/>'
         )
     elif spec["kind"] == "line":
+        opacity = spec.get("stroke_opacity", 1.0)
+        faint = f' stroke-opacity="{_fmt(opacity)}"' if opacity < 1.0 else ""
         body = (
             f'<line x1="0" y1="{_fmt(h / 2)}" x2="{_fmt(w)}" y2="{_fmt(h / 2)}" '
-            f'stroke="{stroke}" stroke-width="{_fmt(spec["stroke_width"])}"{dash}/>'
+            f'stroke="{stroke}" stroke-width="{_fmt(spec["stroke_width"])}"{dash}{faint}/>'
         )
     else:
         body = _marker(spec, w / 2, h / 2, stroke, tokens)
@@ -627,12 +637,27 @@ def _swatch(spec: dict, tokens: dict) -> str:
     )
 
 
+def fitted_frame(boundary_polygon_utm, frame: tuple = FRAME) -> tuple:
+    """The frame a parcel is drawn in: `frame`, its width cut so that at
+    most MAX_CONTEXT_MARGIN_M of ground shows beyond the parcel's bbox on
+    either side. The height is the page's and is never changed, so the
+    scale is the full frame's; the cut only removes empty width."""
+    projection = _Projection(boundary_polygon_utm.bounds, frame, MARGIN_PT, FURNITURE_BAND_PT)
+    width, height = frame
+    x0, _, x1, _ = projection.drawn_bbox
+    allowed = MAX_CONTEXT_MARGIN_M * projection.scale
+    if x0 - MARGIN_PT > allowed + 1e-6:
+        width = (x1 - x0) + 2 * (MARGIN_PT + allowed)
+    return (width, height)
+
+
 def visible_extent_utm(boundary_polygon_utm, frame: tuple = FRAME) -> tuple:
-    """The ground rectangle the frame shows, in the DEM's CRS, above the
-    furniture band: (minx, miny, maxx, maxy). A section drawing context
-    beyond the parcel -- a stream next door, a flood zone along it --
-    clips to this so nothing is drawn under the scale bar or outside
+    """The ground rectangle the (fitted) frame shows, in the DEM's CRS,
+    above the furniture band: (minx, miny, maxx, maxy). A section drawing
+    context beyond the parcel -- a stream next door, a flood zone along
+    it -- clips to this so nothing is drawn under the scale bar or outside
     the frame, and the extent and scale stay the parcel's."""
+    frame = fitted_frame(boundary_polygon_utm, frame)
     projection = _Projection(boundary_polygon_utm.bounds, frame, MARGIN_PT, FURNITURE_BAND_PT)
     width, height = frame
     minx = (0 - projection.offset_x) / projection.scale
@@ -647,7 +672,7 @@ def label_placements(boundary_polygon_utm, spec: dict, frame: tuple = FRAME) -> 
     set (True) or dropped for want of a part long enough to carry it
     clear of the line either side (False) -- the same rule _labelled_line
     applies at render time, so a caller can put the label elsewhere."""
-    projection = _Projection(boundary_polygon_utm.bounds, frame, MARGIN_PT, FURNITURE_BAND_PT)
+    projection = _Projection(boundary_polygon_utm.bounds, fitted_frame(boundary_polygon_utm, frame), MARGIN_PT, FURNITURE_BAND_PT)
     placed = []
     for geometry, label in zip(spec["geometries"], spec.get("labels") or []):
         if not label or geometry is None or geometry.is_empty or spec["kind"] != "line":
@@ -672,12 +697,12 @@ def legend_entries(layers: list, tokens: dict) -> list:
     return entries
 
 
-def render_map(boundary_polygon_utm, layers: list, tokens: dict, frame: tuple = FRAME) -> dict:
+def render_map(boundary_polygon_utm, layers: list, tokens: dict, frame: tuple = FRAME, note: Optional[dict] = None) -> dict:
     """
     The map, and its measurements:
 
         {'svg': str,
-         'frame': (w, h),                 # pt
+         'frame': (w, h),                 # pt, the FITTED frame (fitted_frame)
          'meters_per_unit': float,        # ground metres per SVG user unit
          'extent_utm': (minx, miny, maxx, maxy),
          'drawn_bbox': (x0, y0, x1, y1),  # where the boundary's bbox landed
@@ -689,7 +714,14 @@ def render_map(boundary_polygon_utm, layers: list, tokens: dict, frame: tuple = 
     north arrow and the scale bar draw last. The frame's outline is a
     hairline in the rule token. The legend is returned, not drawn: the
     map.html macro sets it below the frame.
+
+    `note` is a quiet statement set ON the map -- {'lines': [str, ...],
+    'point': a shapely Point in the DEM's CRS} -- in the prose face and
+    the muted ink, centred on the point, between the layers and the
+    boundary: what a section says where a parcel has nothing to draw, so
+    an empty shape reads as a finding rather than a failure.
     """
+    frame = fitted_frame(boundary_polygon_utm, frame)
     width, height = frame
     projection = _Projection(boundary_polygon_utm.bounds, frame, MARGIN_PT, FURNITURE_BAND_PT)
     ink = tokens["ink"]
@@ -703,6 +735,15 @@ def render_map(boundary_polygon_utm, layers: list, tokens: dict, frame: tuple = 
     ]
     for spec in layers:
         parts.append(_layer_svg(spec, projection, tokens))
+    if note and note.get("lines"):
+        x, y = projection.xy(note["point"].x, note["point"].y)
+        lines = list(note["lines"])
+        leading = LABEL_SIZE_PT * 1.35
+        top = y - leading * (len(lines) - 1) / 2 + LABEL_SIZE_PT * 0.35
+        parts.append('<g id="map-note">' + "".join(
+            _text(x, top + i * leading, line, font=FONT_PROSE, size=LABEL_SIZE_PT, fill=tokens["ink-muted"], anchor="middle")
+            for i, line in enumerate(lines)
+        ) + "</g>")
     boundary_d = _geometry_path(boundary_polygon_utm, projection)
     parts.append(
         f'<path id="parcel-boundary" d="{boundary_d}" fill="none" stroke="{ink}" '

@@ -258,8 +258,12 @@ def _polygonal(geometry):
 
 
 def adjacency_window(boundary_polygon_utm, buffer_meters: float = ADJACENCY_BUFFER_METERS):
-    minx, miny, maxx, maxy = boundary_polygon_utm.bounds
-    return box(minx - buffer_meters, miny - buffer_meters, maxx + buffer_meters, maxy + buffer_meters)
+    """THE GROUND WITHIN buffer_meters OF THE BOUNDARY -- a true distance,
+    the boundary buffered, not the fetch box. The fetches ask the services
+    for the parcel's bounding box plus 150 m, which on a triangular parcel
+    reaches ground 266 m from the boundary at a corner; "within 500 ft"
+    on the page has to mean 500 ft, so adjacency is measured here."""
+    return boundary_polygon_utm.buffer(buffer_meters)
 
 
 # ======================================================================

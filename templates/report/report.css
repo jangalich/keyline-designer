@@ -505,10 +505,14 @@ th.num {
   margin: 0 0 var(--space-4) 0;
   break-inside: avoid;
 }
+/* The frame is drawn at its own size and centred: report_map narrows it
+   to the parcel (fitted_frame), and a narrowed frame scaled back up to
+   the measure would change the scale the scale bar claims. */
 .report-map__frame svg {
   display: block;
-  width: 100%;
+  max-width: 100%;
   height: auto;
+  margin: 0 auto;
 }
 .report-map__legend {
   list-style: none;

@@ -34,6 +34,7 @@ session, the Daymet fixture for Climate, WeasyPrint for the pages.
      page count.
 """
 
+import copy
 import os
 import re
 from datetime import date
@@ -129,14 +130,30 @@ order = [i for i in ("layer-contours", "layer-flood-zone", "layer-wetlands", "la
 assert order == sorted(order, key=svg.index) and "layer-flood-zone" in svg and "layer-wetlands" in svg
 assert svg.index('id="layer-contours"') < svg.index('id="layer-flood-zone"') < svg.index('id="layer-wetlands"') \
     < svg.index('id="layer-flow-paths"') < svg.index('id="layer-streams-perennial') < svg.index('id="parcel-boundary"')
-assert "Montour Run" in svg, "the stream is labelled along its line"
 assert "layer-streams-intermittent" not in svg, "the intermittent tributary lies beyond the frame"
+# THE FRAME IS FITTED: no more than 50 m of ground beyond the bbox either side (report_map.MAX_CONTEXT_MARGIN_M), so
+# Montour Run at 78 m is off the frame but for a stub at a corner, and the empty parcel says so ON the map.
+assert SECTION["map"]["frame"][0] < report_map.FRAME_WIDTH_PT and SECTION["map"]["frame"] == LANDFORM["map"]["frame"]
+assert '<g id="map-note">' in svg and "No mapped stream, waterbody, wetland" in svg and "or 1%-annual-chance flood zone on the parcel." in svg
+note = ws.empty_parcel_note(DERIVED, INPUTS.boundary_polygon_utm)
+assert note["lines"] == ["No mapped stream, waterbody, wetland", "or 1%-annual-chance flood zone on the parcel."]
+assert INPUTS.boundary_polygon_utm.contains(note["point"])
+# A parcel with a stream on it gets no note; one where NWI and FEMA were not read names only what was checked.
+with_stream = copy.deepcopy(DERIVED.surface_water)
+with_stream["streams"][0]["length_on_parcel_m"] = 12.0
+assert ws.empty_parcel_note(wd.WaterDerived(**{**DERIVED.__dict__, "surface_water": with_stream}), INPUTS.boundary_polygon_utm) is None
+assert "map-note" not in SECTION["wetness_map"]["svg"]
 assert 'stroke-opacity="0.55"' in svg, "the contours are set back"
 layers = ws.build_hydrology_layers(INPUTS, DERIVED, report_map.parcel_contours(INPUTS.dem, INPUTS.boundary_polygon_utm))
 by_id = {l["id"]: l for l in layers}
 assert by_id["streams-perennial-1"]["stroke_width"] == ws.STREAM_STROKE_BY_ORDER_PT[2] and by_id["streams-perennial-1"]["dash"] is None
 assert by_id["streams-perennial-1"]["stroke"] == "water" and by_id["flood-zone"]["stroke"] == "water" and by_id["wetlands"]["stroke"] == "water"
 assert by_id["flood-zone"]["stroke_opacity"] == ws.HATCH_OPACITY < 1 and by_id["flow-paths"]["stroke_opacity"] == ws.FLOW_PATH_OPACITY
+# The hatch is the lightest thing on the map: fainter and wider-spaced than the tufts, which sit on top of it.
+assert ws.HATCH_OPACITY <= 0.3 and ws.HATCH_SPACING_M >= 2 * ws.TUFT_SPACING_M and ws.HATCH_STROKE_PT < ws.TUFT_STROKE_PT
+assert by_id["wetlands"]["stroke_opacity"] == 1.0
+hatch_swatch = next(e["swatch"] for e in SECTION["map"]["legend"] if e["id"] == "flood-zone")
+assert f'stroke-opacity="{ws.HATCH_OPACITY:.2f}"' in hatch_swatch, "the legend swatch is as faint as the hatch"
 assert ws._stream_stroke(1) < ws._stream_stroke(2) < ws._stream_stroke(3) and ws._stream_stroke(None) == ws.STREAM_STROKE_UNKNOWN_PT
 visible = box(*report_map.visible_extent_utm(INPUTS.boundary_polygon_utm))
 for spec in layers:
@@ -182,8 +199,10 @@ print("4. the tables: three states in the water table; every acreage table sums 
 COVER = round(INPUTS.parcel_acres, 1)
 surface = SECTION["surface_water_table"]
 assert surface["columns"] == ["Permanence", "Order", "On the parcel, ft", "Within 500 ft, ft", "Distance, ft"]
-assert [r["label"] for r in surface["rows"]] == ["Montour Run", "Montour Run", "Unnamed stream"]
-assert surface["rows"][0]["cells"] == ["perennial", "2", ZERO_DASH, "934", "255"] and surface["rows"][2]["cells"][:2] == ["intermittent", "1"]
+# Two rows: the reaches within 500 ft of the boundary. The tributary at 873 ft is not in a table headed "within 500 ft".
+assert [r["label"] for r in surface["rows"]] == ["Montour Run", "Montour Run"]
+assert surface["rows"][0]["cells"] == ["perennial", "2", ZERO_DASH, "785", "255"] and surface["rows"][1]["cells"][-1] == "490"
+assert all(int(r["cells"][-1]) <= 500 for r in surface["rows"])
 table = SECTION["water_table"]
 assert table["monthly"] is True and len(table["columns"]) == 12 and len(table["rows"]) == 7 + 4
 labels = [_text(r["label"]) for r in table["rows"]]
@@ -201,8 +220,6 @@ assert table["rows"][8]["cells"][0] == "76.1" and table["rows"][8]["cells"][6] =
 assert table["rows"][9]["cells"][0] == "1.3" and table["rows"][9]["cells"][6] == ZERO_DASH
 assert table["rows"][10]["cells"][0] == ZERO_DASH and table["rows"][10]["cells"][4] == "0.6"
 # A map unit with no month rows reads "no data" in words, distinct from the bound.
-import copy  # noqa: E402
-
 stripped = copy.deepcopy(DATA.soil_water_table)
 for cokey in stripped["map_units"]["541690"]["components"]:
     stripped["components"][cokey]["months"] = {}
@@ -233,9 +250,21 @@ assert _text(land["rows"][0]["label"]) == "Contributing area within the window, 
 assert _text(land["rows"][1]["label"]) == "The parcel, 13.2 ac, %" and land["rows"][2]["label"] == "The parcel, acres"
 assert round(sum(land["parcel_acres"]), 6) == COVER and round(sum(land["catchment_shares"]), 6) == 100.0
 assert land["rows"][0]["cells"] == ["45.9", "48.8", "5.3"] and land["rows"][2]["cells"] == ["0.4", "11.8", "1.0"]
-flood = SECTION["flood_table"]
-assert [r["label"] for r in flood["rows"]] == ["Zone X, area of minimal flood hazard", "Total"]
-assert round(sum(flood["acres"]), 6) == COVER and flood["rows"][0]["cells"] == [f"{COVER:.1f}", "100.0"]
+# A parcel wholly in one zone gets a sentence, not a two-row table saying the same thing twice.
+assert SECTION["flood_table"] is None
+flood_statement = _text(SECTION["flood_statement"])
+assert flood_statement == ("The whole parcel lies in FEMA Zone X, an area of minimal flood hazard, on FIRM panel 42003C0065H "
+                           "effective 26 September 2014.")
+# Two zones on the parcel -> the table, a partition summing to the cover.
+split = copy.deepcopy(DATA.fema_nfhl)
+sx0, sy0, sx1, sy1 = INPUTS.boundary_polygon_utm.bounds
+split["zones"].append({"zone": "AE", "subtype": None, "sfha": True, "study_type": "NP", "static_bfe": 1010.0, "dfirm_id": "42003C",
+                       "fld_ar_id": "42003C_test", "geometry_utm": box(sx0, sy0, sx0 + (sx1 - sx0) / 2, sy1)})
+two_zones = ws.build_water_section(wd.WaterInputs(**{**INPUTS.__dict__, "fema_nfhl": split}), TOKENS, flow=LANDFORM["derived"])
+flood = two_zones["flood_table"]
+assert two_zones["flood_statement"] is None and [r["label"] for r in flood["rows"]] == ["Zone AE", "Zone X, area of minimal flood hazard", "Total"]
+assert round(sum(flood["acres"]), 6) == COVER and flood["rows"][-1]["cells"] == [f"{COVER:.1f}", "100.0"] and all(a > 0 for a in flood["acres"])
+assert "layer-flood-zone" in two_zones["map"]["svg"] and "map-note" not in two_zones["map"]["svg"], "a zone on the parcel is hatched, and the parcel is not empty"
 figures = SECTION["key_figures"]
 assert len(figures) == 9 and [f["label"] for f in figures] == [
     "to the nearest mapped stream", "hydric soil, predominantly", "mapped wetland on the parcel", "wet ground by terrain",
@@ -259,7 +288,8 @@ assert len(SECTION["sources"]) == 7 and all(len(line) == 1 for line in SECTION["
 assert [m["source"] for m in SECTION["methods"]] == ["USGS NHD", "USGS NHDPlus HR", "USDA NRCS SSURGO", "USFWS NWI", "FEMA NFHL",
                                                      "USGS Annual NLCD", "USGS 3DEP"]
 assert all(m["terms"] for m in SECTION["methods"]) and "Use_Constraints" in SECTION["methods"][3]["terms"]
-print(f"   water table {len(table['rows'])} rows x 12; comparison {comparison['acres']}; land cover parcel {land['parcel_acres']}; flood {flood['acres']}")
+print(f"   water table {len(table['rows'])} rows x 12; comparison {comparison['acres']}; land cover parcel {land['parcel_acres']}; "
+      f"flood: a sentence for one zone, a table {flood['acres']} for two")
 
 # ======================================================================
 # 5. No siting language
@@ -275,7 +305,8 @@ words = " ".join([
     " ".join(" ".join([_text(r["label"])] + [_cell_text(c) for c in r["cells"]]) for t in
              (surface, table, comparison, land, flood) for r in t["rows"]),
     " ".join(" ".join(t["columns"]) + " " + t["corner"] for t in (surface, table, comparison, land, flood)),
-    " ".join(_text(line) for line in SECTION["sources"]), SECTION["heading"],
+    " ".join(_text(line) for line in SECTION["sources"]), SECTION["heading"], flood_statement,
+    " ".join(note["lines"]),
 ]).lower()
 for banned in (r"\bsit(e|es|ing|ed)\b", r"\bsurvey (area|zone)s?\b", r"\bponds?\b", r"\bdams?\b", r"\bstorage\b", r"\bembankment",
                r"\bexcavat", r"\bcandidate", r"\bsuitab", r"\brecommend", r"\bshould\b", r"\bbuild", r"\bpropos", r"\bkeyline",
@@ -334,9 +365,10 @@ assert {"report-map", "summary", "heading", "eyebrow", "data-table", "caption"} 
 assert not ({"key-figures", "source-footer"} & _classes_on(pages[6]))
 assert {"report-map", "data-table", "eyebrow", "caption"} <= _classes_on(pages[7]) and not ({"key-figures", "heading", "summary"} & _classes_on(pages[7]))
 assert {"key-figures", "data-table", "source-footer", "eyebrow", "caption"} <= _classes_on(pages[8]) and "report-map" not in _classes_on(pages[8])
-assert len(_tables(pages[6])) == 1 and len(_tables(pages[7])) == 1 and len(_tables(pages[8])) == 3
+assert len(_tables(pages[6])) == 1 and len(_tables(pages[7])) == 1 and len(_tables(pages[8])) == 2
+assert "unavailable" in _classes_on(pages[8]), "the one-zone flood sentence stands where the table would"
 water_tables = _tables(pages[6]) + _tables(pages[7]) + _tables(pages[8])
-expected_columns = (5, 12, 2, 3, 2)
+expected_columns = (5, 12, 2, 3)
 advances = set()
 for table_box, columns in zip(water_tables, expected_columns):
     cells = _numeric_cells(table_box)
@@ -376,8 +408,10 @@ assert _text(degraded_section["map_caption"]).startswith("The National Wetlands 
 assert [r["label"] for r in degraded_section["comparison_table"]["rows"]] == ["Terrain wetness only", "Hydric soil only",
                                                                                "Two or more indicators", "Neither", "Total"]
 assert round(sum(degraded_section["comparison_table"]["acres"]), 6) == COVER
-assert degraded_section["key_figures"][2] == {"value": "Not read", "label": "mapped wetland on the parcel", "word": True}
-assert degraded_section["key_figures"][8] == {"value": "Not read", "label": "FEMA flood zone", "word": True}
+assert degraded_section["key_figures"][2] == {"value": "Unavailable", "label": "mapped wetland on the parcel", "word": True}
+assert degraded_section["key_figures"][8] == {"value": "Unavailable", "label": "FEMA flood zone", "word": True}
+assert "map-note" in degraded_section["map"]["svg"] and "No mapped stream</text>" in degraded_section["map"]["svg"]
+assert "wetland" not in ws.empty_parcel_note(degraded_section["derived"], INPUTS.boundary_polygon_utm)["lines"][0]
 assert _text(degraded_section["summary"]).endswith("terrain wetness marks 1.1 acres.")
 assert len(degraded_section["sources"]) == 5
 degraded_html = site_report.render_site_report_html(degraded_data, generated_on=GENERATED_ON, terrain=TERRAIN, water=degraded_inputs)

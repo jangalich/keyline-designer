@@ -174,9 +174,13 @@ assert round(max(s["total_drainage_acres"] for s in montour)) == 532 and round(m
 tributary = next(s for s in surface["streams"] if s["name"] != "Montour Run")
 assert tributary["permanence"] == "intermittent" and tributary["stream_order"] == 1 and round(tributary["total_drainage_acres"]) == 56
 assert all(s["length_on_parcel_m"] == 0.0 and s["on_parcel"] is None for s in surface["streams"]), "no NHD line crosses this parcel"
-assert all(s["length_in_window_m"] > 0 for s in surface["streams"]), "all three are within the 150 m window"
+# "Within 150 m" is a true distance from the boundary: the two Montour Run reaches (78 m and 149 m) are, the
+# tributary at 266 m is not, although the fetch box (the bbox + 150 m) reached it at a corner.
+assert [s["length_in_window_m"] > 0 for s in surface["streams"]] == [s["distance_m"] <= wd.ADJACENCY_BUFFER_METERS for s in surface["streams"]]
+assert tributary["length_in_window_m"] == 0.0 and tributary["distance_m"] > wd.ADJACENCY_BUFFER_METERS
+assert 230 < max(s["length_in_window_m"] for s in montour) < 250
 assert 77 < surface["nearest_stream_distance_m"] < 78, surface["nearest_stream_distance_m"]
-assert surface["streams_in_window_by_permanence"] == {"perennial": 2, "intermittent": 1}
+assert surface["streams_in_window_by_permanence"] == {"perennial": 2}
 assert surface["springs_fetched"] is True and surface["springs"] == [] and surface["order_available"] is True
 # Without the NHDPlus join the order and the reach figure read None, the rest unchanged.
 without = wd.derive_surface_water(wd.WaterInputs(**{**INPUTS.__dict__, "nhdplus_hr": None}))
@@ -206,7 +210,7 @@ wetlands = DERIVED.wetlands
 assert wetlands["fetched"] is True and wetlands["on_parcel_cells"] == 0 and wetlands["counts_by_type"] == {}
 assert all(60 <= f["distance_m"] <= 140 for f in wetlands["features"]), [f["distance_m"] for f in wetlands["features"]]
 window_acres = {k: v / 4046.8564224 for k, v in wetlands["window_area_by_type_m2"].items()}
-assert 4.9 < window_acres["Freshwater Forested/Shrub Wetland"] < 5.2 and 0.4 < window_acres["Riverine"] < 0.5, window_acres
+assert 4.1 < window_acres["Freshwater Forested/Shrub Wetland"] < 4.4 and 0.4 < window_acres["Riverine"] < 0.5, window_acres
 assert wetlands["project"]["image_year"] == 2023
 assert wet["wet_cells"] == int(wet["mask"].sum()) == 182 and wet["measured_cells"] == CELLS["on_parcel_count"]
 assert wet["percentiles_on_parcel"]["p90"] < wet["threshold"] < wet["percentiles_on_parcel"]["max"]
@@ -315,7 +319,7 @@ assert flood["fetched"] and flood["available"] is True and flood["study_ids"] ==
 assert flood["panel"]["firm_pan"] == "42003C0065H" and str(flood["panel"]["effective_on"]) == "2014-09-26"
 labels = {z["label"]: z for z in flood["zones"]}
 assert set(labels) == {"Zone A", "Zone X, area of minimal flood hazard"}
-assert labels["Zone A"]["sfha"] is True and labels["Zone A"]["cells_on_parcel"] == 0 and 5 < labels["Zone A"]["area_in_window_m2"] / 4046.86 < 6
+assert labels["Zone A"]["sfha"] is True and labels["Zone A"]["cells_on_parcel"] == 0 and 4.5 < labels["Zone A"]["area_in_window_m2"] / 4046.86 < 5
 assert labels["Zone X, area of minimal flood hazard"]["cells_on_parcel"] == CELLS["on_parcel_count"]
 assert flood["counts"] == {"Zone X, area of minimal flood hazard": 2143, wd.FLOOD_NOT_IN_ANY_ZONE: 0}
 assert flood["sfha_cells"] == 0 and flood["unmapped_label"] == wd.FLOOD_NOT_IN_ANY_ZONE

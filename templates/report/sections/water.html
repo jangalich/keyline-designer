@@ -58,6 +58,9 @@
 {%- if section.flood_table %}
     {{ c5.data_table(section.flood_table) }}
     {{ c9.caption(section.flood_caption) }}
+{%- elif section.flood_statement %}
+    {{ c9.unavailable(section.flood_statement) }}
+    {{ c9.caption(section.flood_caption) }}
 {%- else %}
     {{ c9.unavailable(section.flood_unavailable) }}
 {%- endif %}

@@ -33,8 +33,13 @@ comparison, catchment and land cover, flood, the sources footer.
 THE MAPS ARE AT LANDFORM'S EXTENT AND SCALE -- render_map() fits the
 frame to the boundary, so the same parcel gives the same projection --
 and context beyond the parcel is clipped to what the frame shows
-(report_map.visible_extent_utm), never to the parcel: a stream 250 ft
-off the boundary is on the map when the frame reaches it.
+(report_map.visible_extent_utm), never to the parcel: a stream off the
+boundary is on the map when the frame reaches it, and the frame reaches
+at most 50 m beyond the parcel's bbox (report_map.MAX_CONTEXT_MARGIN_M).
+A PARCEL WITH NOTHING TO DRAW SAYS SO ON THE MAP: a quiet line in its
+middle names what is absent (empty_parcel_note), so an empty shape reads
+as a finding, not a failure. "Within 500 ft" is a true distance from the
+boundary (water_derivations.adjacency_window), not the fetch box.
 
 THE MARSH AND THE HATCH ARE GEOMETRY, NOT SVG PATTERNS. The tufts are
 short horizontal lines on a staggered grid inside each wetland polygon;
@@ -110,10 +115,12 @@ WATERBODY_STROKE_PT = 0.8
 TUFT_SPACING_M = 9.0
 TUFT_LENGTH_M = 5.0
 TUFT_STROKE_PT = 0.7
-# The flood zone: diagonal hatch, the lightest treatment on the map.
-HATCH_SPACING_M = 12.0
-HATCH_STROKE_PT = 0.4
-HATCH_OPACITY = 0.55
+# The flood zone: diagonal hatch, the lightest treatment on the map --
+# wide-spaced and faint, so the wetland tufts, which sit inside the zone
+# where a stream has both, read on top of it rather than into it.
+HATCH_SPACING_M = 22.0
+HATCH_STROKE_PT = 0.35
+HATCH_OPACITY = 0.3
 # Flow paths: context only.
 FLOW_PATH_STROKE_PT = 0.5
 FLOW_PATH_OPACITY = 0.4
@@ -323,6 +330,32 @@ def build_hydrology_layers(inputs: wd.WaterInputs, derived: wd.WaterDerived, con
             legend="Springs and seeps, NHD",
         ))
     return layers
+
+
+def empty_parcel_note(derived: wd.WaterDerived, boundary_polygon_utm) -> Optional[dict]:
+    """The quiet statement set in the middle of a parcel with nothing to
+    draw: no mapped stream, waterbody, wetland or 1%-annual-chance flood
+    zone on it -- each named only when its source was read, so the note
+    never claims an absence nobody checked. None when anything is drawn."""
+    surface = derived.surface_water
+    if any(s["length_on_parcel_m"] > 0 for s in surface["streams"]) or any(w["area_on_parcel_m2"] > 0 for w in surface["waterbodies"]):
+        return None
+    if any(s["on_parcel"] for s in (surface["springs"] or [])):
+        return None
+    if derived.wetlands["fetched"] and derived.wetlands["on_parcel_cells"] > 0:
+        return None
+    if derived.flood["fetched"] and derived.flood["sfha_cells"] > 0:
+        return None
+    absent = ["stream", "waterbody"]
+    if derived.wetlands["fetched"]:
+        absent.append("wetland")
+    if derived.flood["fetched"] and derived.flood["available"]:
+        absent.append("1%-annual-chance flood zone")
+    if len(absent) > 2:
+        first, last = ", ".join(absent[:-1]), absent[-1]
+    else:
+        first, last = absent[0], absent[1]
+    return {"lines": [f"No mapped {first}", f"or {last} on the parcel."], "point": boundary_polygon_utm.representative_point()}
 
 
 # ======================================================================
@@ -724,11 +757,42 @@ def build_land_cover_unavailable(derived: wd.WaterDerived, inputs: wd.WaterInput
     return parts
 
 
-def build_flood_table(derived: wd.WaterDerived) -> Optional[dict]:
-    """Flood zone by designation, a partition of the parcel; None when the
-    layer did not answer or no digital flood map covers the parcel."""
+def single_flood_zone(derived: wd.WaterDerived) -> Optional[str]:
+    """The one zone label covering every on-parcel cell, or None."""
     flood = derived.flood
     if not flood["fetched"] or not flood["available"]:
+        return None
+    present = [label for label, n in flood["counts"].items() if n > 0]
+    if len(present) == 1 and present[0] != flood["unmapped_label"]:
+        return present[0]
+    return None
+
+
+def build_flood_statement(derived: wd.WaterDerived) -> Optional[list]:
+    """A parcel that lies wholly in one zone gets a sentence, not a
+    two-row table saying the same thing twice."""
+    label = single_flood_zone(derived)
+    if label is None:
+        return None
+    zone, _, subtype = label.partition(", ")
+    parts = [f"The whole parcel lies in FEMA {zone}"]
+    if subtype:
+        parts.append(f", {'an ' if subtype[0] in 'aeiou' else 'a '}{subtype}")
+    panel = derived.flood["panel"]
+    if panel and panel.get("firm_pan"):
+        parts.append(f", on FIRM panel {panel['firm_pan']}")
+        if panel.get("effective_on"):
+            parts += [" effective ", {"value": format_retrieved_on(panel["effective_on"])}]
+    parts.append(".")
+    return parts
+
+
+def build_flood_table(derived: wd.WaterDerived) -> Optional[dict]:
+    """Flood zone by designation, a partition of the parcel; None when the
+    layer did not answer, no digital flood map covers the parcel, or the
+    parcel lies wholly in one zone (build_flood_statement)."""
+    flood = derived.flood
+    if not flood["fetched"] or not flood["available"] or single_flood_zone(derived) is not None:
         return None
     cells = derived.cells
     names = [(label, n) for label, n in flood["counts"].items() if n > 0 or label != flood["unmapped_label"]]
@@ -790,7 +854,7 @@ def build_key_figures(derived: wd.WaterDerived) -> list:
         figures.append({"value": f"{_one_decimal(_acres(wet, cells['cell_acres']))} ac" if wet else "None",
                         "label": "mapped wetland on the parcel", "word": not wet})
     else:
-        figures.append({"value": "Not read", "label": "mapped wetland on the parcel", "word": True})
+        figures.append({"value": "Unavailable", "label": "mapped wetland on the parcel", "word": True})
     figures.append({"value": f"{_one_decimal(_acres(derived.wetness['wet_cells'], cells['cell_acres']))} ac", "label": "wet ground by terrain"})
     table = derived.water_table
     if table["fetched"] and table["parcel"]:
@@ -798,12 +862,12 @@ def build_key_figures(derived: wd.WaterDerived) -> list:
         share = table["parcel"][month]["wet_share"]
         figures.append({"value": f"{share * 100:.0f}%", "label": f"with a water table in {MONTH_NAMES[month - 1]}"})
     else:
-        figures.append({"value": "Not read", "label": "seasonal water table", "word": True})
+        figures.append({"value": "Unavailable", "label": "seasonal water table", "word": True})
     catchment = derived.catchment
     if catchment["stream_catchment_acres"] is not None:
         figures.append({"value": f"{round(catchment['stream_catchment_acres']):,} ac", "label": "stream catchment at the reach"})
     else:
-        figures.append({"value": "Not read", "label": "stream catchment at the reach", "word": True})
+        figures.append({"value": "Unavailable", "label": "stream catchment at the reach", "word": True})
     figures.append({"value": f"{_one_decimal(catchment['watershed_cells'] * cells['cell_acres'])} ac",
                     "label": "contributing area in the window" + (", at least" if catchment["truncated"] else "")})
     figures.append({"value": f"{_one_decimal(catchment['off_parcel_cells'] * cells['cell_acres'])} ac", "label": "of it beyond the parcel"})
@@ -818,7 +882,7 @@ def build_key_figures(derived: wd.WaterDerived) -> list:
     elif flood["fetched"]:
         figures.append({"value": "Not mapped", "label": "FEMA flood zone", "word": True})
     else:
-        figures.append({"value": "Not read", "label": "FEMA flood zone", "word": True})
+        figures.append({"value": "Unavailable", "label": "FEMA flood zone", "word": True})
     return figures
 
 
@@ -920,7 +984,10 @@ def build_water_section(inputs: wd.WaterInputs, tokens: Optional[dict] = None,
         tokens = site_report.TOKENS
     derived = wd.derive(inputs, flow)
     contours = report_map.parcel_contours(inputs.dem, inputs.boundary_polygon_utm)
-    hydrology = report_map.render_map(inputs.boundary_polygon_utm, build_hydrology_layers(inputs, derived, contours), tokens)
+    hydrology = report_map.render_map(
+        inputs.boundary_polygon_utm, build_hydrology_layers(inputs, derived, contours), tokens,
+        note=empty_parcel_note(derived, inputs.boundary_polygon_utm),
+    )
     wetness = report_map.render_map(inputs.boundary_polygon_utm, build_wetness_layers(inputs, derived, contours), tokens)
     water_table = build_water_table(derived)
     return {
@@ -946,6 +1013,7 @@ def build_water_section(inputs: wd.WaterInputs, tokens: Optional[dict] = None,
         "land_cover_caption": build_land_cover_caption(derived),
         "land_cover_unavailable": build_land_cover_unavailable(derived, inputs),
         "flood_table": build_flood_table(derived),
+        "flood_statement": build_flood_statement(derived),
         "flood_caption": build_flood_caption(derived),
         "flood_unavailable": build_flood_unavailable(derived, inputs),
         "sources": build_sources(inputs, derived),
