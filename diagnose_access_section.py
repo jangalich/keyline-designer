@@ -22,6 +22,8 @@ import sys
 from unittest.mock import patch
 
 LIVE = "--live" in sys.argv
+_positional = [a for a in sys.argv[1:] if not a.startswith("--")]
+OUT_DIR = _positional[0] if _positional else None
 if not LIVE:
     import offline_harness
 
@@ -141,7 +143,86 @@ def main() -> int:
           f"{derived.exclusion_union.equals(existing) if derived.exclusion_union is not None else existing is None}")
     print(f"  exclusion roads layer: {int(roads_layer['mask'].sum())} cells, {roads_layer['acres']} ac, data_available {roads_layer['data_available']}; "
           f"union on parcel {derived.exclusion_union.intersection(inputs.boundary_polygon_utm).area:.1f} m2")
+    if OUT_DIR:
+        render_pages(OUT_DIR, data, context, document, inputs)
     return 0
+
+
+def _text(parts) -> str:
+    return "".join(p if isinstance(p, str) else str(p["value"]) for p in parts)
+
+
+def render_pages(out_dir: str, data, context, document, inputs) -> None:
+    """PHASE 2: the section's words and tables printed, the whole report
+    rendered to PDF and every Access page to PNG, plus the overflow case
+    (frontage on nine roads) on its own."""
+    import os
+    from datetime import date
+
+    import pymupdf
+
+    import access_section as acs
+    import landform_section
+    import site_report
+    import water_derivations as wd
+
+    os.makedirs(out_dir, exist_ok=True)
+    terrain = landform_section.terrain_inputs_from_context(context, document)
+    water = wd.water_inputs_from_context(context, document, data)
+    section = acs.build_access_section(inputs, site_report.TOKENS)
+    print("\nTHE PAGE")
+    print("  summary:", _text(section["summary"]))
+    print("  legend:", [_text(e["parts"]) for e in section["map"]["legend"]],
+          f"m/unit {section['map']['meters_per_unit']:.4f} frame {section['map']['frame']} scale bar {section['map']['scale_bar']}")
+    print("  map caption:", _text(section["map_caption"]))
+    for name in ("frontage_table", "soil_table"):
+        table = section[name]
+        if not table:
+            print(f"  {name}: none"); continue
+        print(f"  {name}: {table['corner']} | {table['columns']}")
+        for row in table["rows"]:
+            cells = [c["value"] if isinstance(c, dict) else c for c in row["cells"]]
+            print(f"    {row['label']:40s}", " | ".join(cells))
+    print("  frontage caption:", _text(section["frontage_caption"]))
+    print("  soil caption:", _text(section["soil_caption"]))
+    print("  sources:", [_text(l) for l in section["sources"]])
+    generated_on = date.today()
+    pdf_path = os.path.join(out_dir, "site-report.pdf")
+    site_report.generate_site_report_pdf(data, pdf_path, generated_on=generated_on, terrain=terrain, water=water, access=inputs)
+    doc = pymupdf.open(pdf_path)
+    for index, page in enumerate(doc, start=1):
+        if index >= len(doc):
+            page.get_pixmap(dpi=150).save(os.path.join(out_dir, f"access-page-{index}.png"))
+    print(f"{len(doc)} pages -> {out_dir}/access-page-{len(doc)}.png")
+    # THE OVERFLOW CASE: frontage on nine roads, condensed to five rows and one "other roads" row.
+    from shapely.geometry import LineString
+    from shapely.ops import substring
+    from rasterio.warp import transform as warp_transform
+
+    parcel = inputs.boundary_polygon_utm
+    ring = LineString(parcel.exterior.coords)
+    outward = ring.offset_curve(-6.0)
+    if parcel.contains(outward.interpolate(0.5, normalized=True)):
+        outward = ring.offset_curve(6.0)
+    rows = []
+    count = 9
+    for k in range(count):
+        piece = substring(outward, k * outward.length / count, (k + 1) * outward.length / count)
+        xs, ys = warp_transform(inputs.dem["crs"], "EPSG:4326", [c[0] for c in piece.coords], [c[1] for c in piece.coords])
+        rows.append({"name": f"Road {k + 1}", "geometry": {"type": "LineString", "coordinates": [[x, y] for x, y in zip(xs, ys)]},
+                     "properties": {"layer": 32, "layer_name": "Local road"}})
+    many = ad.AccessInputs(**{**inputs.__dict__, "farm_roads": rows})
+    many_section = acs.build_access_section(many, site_report.TOKENS)
+    print("  overflow frontage rows:", [(r["label"], [c if isinstance(c, str) else c["value"] for c in r["cells"]]) for r in many_section["frontage_table"]["rows"]],
+          "spill", many_section["spill"])
+    print("  overflow caption:", _text(many_section["frontage_caption"]))
+    many_pdf = os.path.join(out_dir, "site-report-overflow.pdf")
+    site_report.generate_site_report_pdf(data, many_pdf, generated_on=generated_on, terrain=terrain, water=water, access=many)
+    mdoc = pymupdf.open(many_pdf)
+    for index, page in enumerate(mdoc, start=1):
+        if index >= len(doc):
+            page.get_pixmap(dpi=150).save(os.path.join(out_dir, f"overflow-page-{index}.png"))
+    print(f"overflow: {len(mdoc)} pages -> {out_dir}/overflow-page-N.png")
 
 
 if __name__ == "__main__":

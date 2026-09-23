@@ -311,6 +311,59 @@ th.num {
   padding-top: var(--space-1);
   padding-bottom: var(--space-1);
 }
+/* A PROSE COLUMN in a data table (cell kind "text": the Access section's
+   limiting features): the prose face, set left, wrapping, in the page's
+   ink -- the words are the content of that table, not a note beside it. */
+.data-table td.text {
+  font-family: var(--font-prose);
+  text-align: left;
+  white-space: normal;
+  color: var(--ink);
+  line-height: 1.35;
+}
+.data-table th.text {
+  text-align: left;
+  white-space: nowrap;
+}
+.data-table--compact td.text {
+  max-width: 3.6in;
+}
+/* ACCESS IS ONE PAGE: the summary, the map with its legend and caption,
+   two short tables with their captions, three source lines. The map and
+   the tables sit closer than the map sections' default, as Water's do.
+   With frontage on more than two roads the section SPILLS (the
+   template's section.spill): the soil table and the sources take a
+   continuation page. */
+.section--access .section__detail {
+  break-before: page;
+}
+.section--access .summary {
+  margin-bottom: var(--space-2);
+}
+.section--access .report-map {
+  margin-bottom: var(--space-1);
+}
+.section--access .data-table {
+  margin-bottom: var(--space-1);
+}
+.section--access .data-table th,
+.section--access .data-table td {
+  padding-top: 2pt;
+  padding-bottom: 2pt;
+}
+.section--access .caption {
+  margin-bottom: var(--space-2);
+  max-width: none;
+}
+.section--access .source-footer {
+  padding-top: var(--space-1);
+}
+/* The soil table's prose column takes the width the figures do not need,
+   so a class's five features sit on one line. */
+.section--access .data-table td.text,
+.section--access .data-table th.text {
+  width: 58%;
+}
 /* A BOUND IS NOT A MEASUREMENT: "> 72" is the depth a water table is
    deeper than, set muted so a column of depths cannot be read across it;
    a WORD in a numeric column -- "no data" -- takes the prose face. */

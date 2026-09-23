@@ -771,6 +771,56 @@ NFHL_TERMS_BASIS`); NLCD is a USGS product and USGS states its data are
 in the U.S. public domain. All three are U.S. federal works with no stated
 restriction.
 
+## Site data report: the Access section's sources
+
+Branch 10 adds section V, one page, an inventory of the access that
+exists: frontage, tracks and what the ground allows. No proposed road,
+route, corridor or cost appears in it (`test_access_section.py` greps for
+that language); where a new road should go is the roads step's job and
+appears on the layout map and in the design record.
+
+- `farm_roads_data.py` — Layer 1's road rows now keep the attributes the
+  National Map service already returns, as a `properties` dict beside
+  `name` and `geometry` (`road_row()`: the TIGER feature class, the layer
+  the segment came from and its name, route designations, the vintage).
+  Every consumer reads name and geometry only and the exclusion union
+  reads geometry only, so the exclusion mask cannot move;
+  `test_access_derivations.py` holds it byte-identical with and without
+  the key. The source has no surface attribute and does not say whether
+  a road is public.
+- `soil_road_ratings.py` — SSURGO's road-construction interpretations
+  from `cointerp` joined to `component`, one report-time query (DEGRADABLE
+  row `soil_road_ratings` in `report_data.REPORT_FETCH_LAYERS`): ENG -
+  Local Roads and Streets, the unpaved variant and roadfill, each with
+  its limiting features (frost action, low strength, shrink-swell, depth
+  to saturated zone, slope, flooding, bedrock, fragipan). A map unit's
+  class is NRCS's dominant condition, ties to the more limiting class.
+- `access_derivations.py` — every figure from the session's reads:
+  frontage by road name within 15 m of a centreline (a judgment, stated
+  on the page and in the methods note), the nearest road when there is
+  none, the on-parcel tracks with their grades, the boundary's drivable
+  and undrivable pieces (Landform's class D break, 15%, sampled 5 m
+  inside every 5 m) partitioning the perimeter exactly, stream
+  crossings, and the soil partition on the Water section's own map-unit
+  cell grid, summing to the cover.
+
+`access_section.py` sets the page: the summary line carrying frontage,
+the drivable boundary and the very-limited soil share; the map at half
+of Landform's drawable height and so exactly half its scale on a parcel
+whose fitted frame is taller than wide (the same extent, the scale bar
+saying so) — roads in ink on a page casing, the track dashed, frontage
+as a soft band under the boundary, undrivable boundary hachured in the
+terrain token, contours set back; the frontage table; the soil table
+with the limiting features as a prose column; the sources. Drawing and
+measuring are different jobs: runs of boundary shorter than two samples
+are merged for drawing only, and the caption says so. With frontage on
+more than two roads the section spills to a second page by a stated
+rule rather than condense. Fixtures are the parcel's own five mapped
+road segments and its SSURGO ratings (`assets/reference/access/`,
+captured by `make_access_fixtures.py`); `diagnose_access_section.py`
+prints every figure and, given an output directory, renders the page and
+the overflow case to PNG.
+
 ## Running it yourself
 
 Needs internet access (won't run in a fully offline sandbox). Setup:

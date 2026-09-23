@@ -264,7 +264,7 @@ templates_dir = site_report.TEMPLATES_DIRECTORY
 template_files = []
 for root, _, files in os.walk(templates_dir):
     template_files += [os.path.join(root, f) for f in files]
-assert len(template_files) == 14, sorted(template_files)   # css, base, 9 components, 3 sections
+assert len(template_files) == 15, sorted(template_files)   # css, base, 9 components, 4 sections
 for path in template_files:
     with open(path, encoding="utf-8") as handle:
         hits = HEX.findall(handle.read())
