@@ -22,8 +22,10 @@ fixture for Climate, WeasyPrint for the pages.
      cover; texture carried as a sentence and not a column.
   4. NO MANAGEMENT LANGUAGE anywhere in the section's words.
   5. THE PAGES: sixteen, the three-page rule with continuation eyebrows,
-     the spill rule measured, no box past the measure, decimal alignment
-     across every table; and the degraded renders.
+     the map page carrying the two classification tables and the map unit
+     table opening the next, a table and its caption breaking together,
+     no box past the measure, decimal alignment across every table; and
+     the degraded renders.
 """
 
 import os
@@ -161,6 +163,7 @@ horizon = SECTION["properties_table"]
 assert not any("texture" in c.lower() for c in horizon["columns"]), horizon["columns"]
 summary_words = "".join(p if isinstance(p, str) else str(p["value"]) for p in SECTION["summary"])
 assert "silt loam" in summary_words and "pH 5.0–5.9" in summary_words.replace(" –", "–")
+assert "across the parcel" in summary_words
 assert "very strongly to moderately acid" in summary_words
 assert ssn.texture_classes(DERIVED)[0]["texture"] == "Silt loam"
 # The one unit whose survey phrase differs is the caption's, not a column's.
@@ -237,7 +240,7 @@ print(f"   {len(text.split()) and 26} patterns, none found; the soil-test senten
 # ======================================================================
 # 5. The pages
 # ======================================================================
-print("5. sixteen pages, the three-page rule, the spill, no overflow, decimal alignment")
+print("5. sixteen pages, the three-page rule, the map page's two tables, no overflow, decimal alignment")
 from weasyprint import HTML  # noqa: E402
 
 
@@ -283,43 +286,49 @@ def _numeric_cells(table_box):
 
 
 MAP_PAGE, TABLES_PAGE, CLASS_PAGE = pages[13], pages[14], pages[15]
-assert {"report-map", "summary", "heading", "eyebrow", "caption"} <= _classes_on(MAP_PAGE)
+assert {"report-map", "summary", "heading", "eyebrow", "caption", "table-block"} <= _classes_on(MAP_PAGE)
 assert "source-footer" not in _classes_on(MAP_PAGE)
-# THE SPILL: seven map units do not fit beneath the map, so the table opens the next page.
-assert SECTION["spill"] is True and len(DERIVED.order) > ssn.MAP_UNIT_ROWS_MAX
-assert _tables(MAP_PAGE) == [], "the map page carries the map, not the table"
-assert len(_tables(TABLES_PAGE)) == 2 and len(_tables(CLASS_PAGE)) == 3
+# THE COMPOSITION: the map page carries the map and the two CLASSIFICATION tables -- seven map units are
+# 261 pt of table against the room a 453 pt map leaves, so the map unit table opens the next page beside the
+# properties instead, and the map caption says so.
+assert len(_tables(MAP_PAGE)) == 2, "capability and farmland sit under the map"
+assert [t.element.get("class").split()[-1] for t in _tables(MAP_PAGE)] == ["data-table--compact"] * 2
+assert len(_tables(TABLES_PAGE)) == 2, "the map unit table and the surface horizon table"
+assert [t.element.get("class").split()[-1] for t in _tables(TABLES_PAGE)] == ["data-table--units", "data-table--horizon"]
+assert len(_tables(CLASS_PAGE)) == 1, "the erosion factors"
 assert "report-map" not in _classes_on(TABLES_PAGE) and "source-footer" in _classes_on(CLASS_PAGE)
-# MAP_UNIT_ROWS_MAX IS MEASURED, AND BOTH SIDES OF THE BREAK ARE HELD HERE: a parcel with that many units
-# keeps the published survey's own pairing and the table sits beneath the map; one more and it spills.
+assert "source-footer" not in _classes_on(TABLES_PAGE)
+# A TABLE AND ITS CAPTION BREAK TOGETHER: neither classification caption is stranded from its table.
+blocks = [b for b in _walk(MAP_PAGE._page_box)
+          if getattr(b, "element", None) is not None and "table-block" in (b.element.get("class") or "")]
+assert len(blocks) == 2, len(blocks)
+for block in blocks:
+    assert any(type(c).__name__ == "TableBox" for c in _walk(block)), "a block on the page carries its table"
+    assert any((getattr(c, "element", None) is not None and "caption" in (c.element.get("class") or ""))
+               for c in _walk(block)), "and its caption"
+# THE MAP PAGE IS FULL, and a longer summary moves the FARMLAND BLOCK WHOLE rather than stranding its
+# caption -- the .table-block guarantee, on the case that actually exercises it.
 ENV = site_report.jinja_environment()
-
-
-def _render_units(count):
-    few = list(DERIVED.order[:count])
-    small = sd.SoilsDerived(**{**DERIVED.__dict__, "order": few,
-                               "map_units": {k: v for k, v in DERIVED.map_units.items() if k in few}})
-    section = dict(SECTION, spill=ssn.spills(small), map_unit_table=ssn.build_map_unit_table(small),
-                   map_unit_caption=ssn.build_map_unit_caption(small), derived=small)
-    rendered = HTML(string=ENV.get_template("base.html").render(
-        stylesheet=site_report.render_stylesheet(),
-        cover={"title": "x", "eyebrow": "x", "label": "x", "acres": None, "generated_on": "x", "meta": "x"},
-        sections=[section]), base_url=site_report.TEMPLATES_DIRECTORY).render()
-    assert report_layout.overflowing_boxes(rendered) == [], count
-    return section["spill"], len(_tables(rendered.pages[1]))
-
-
-fits_spill, fits_tables = _render_units(ssn.MAP_UNIT_ROWS_MAX)
-over_spill, over_tables = _render_units(ssn.MAP_UNIT_ROWS_MAX + 1)
-assert (fits_spill, fits_tables) == (False, 1), "at the limit the table sits beneath the map"
-assert (over_spill, over_tables) == (True, 0), "one row more and it moves whole to the next page"
+long_summary = list(SECTION["summary"]) + [
+    "A longer summary than this parcel's, to push the page past what it holds and prove what gives way."]
+crowded = HTML(string=ENV.get_template("base.html").render(
+    stylesheet=site_report.render_stylesheet(),
+    cover={"title": "x", "eyebrow": "x", "label": "x", "acres": None, "generated_on": "x", "meta": "x"},
+    sections=[dict(SECTION, summary=long_summary)]), base_url=site_report.TEMPLATES_DIRECTORY).render()
+assert report_layout.overflowing_boxes(crowded) == []
+crowded_map, crowded_next = crowded.pages[1], crowded.pages[2]
+assert len(_tables(crowded_map)) == 1, "only capability fits when the summary runs longer"
+moved = [b for b in _walk(crowded_next._page_box)
+         if getattr(b, "element", None) is not None and "table-block" in (b.element.get("class") or "")]
+assert len(moved) == 1 and any(type(c).__name__ == "TableBox" for c in _walk(moved[0])), \
+    "the farmland table moves WITH its caption, not without it"
 
 # DECIMAL ALIGNMENT: every numeric column is right-aligned to one edge, and every value in a column that
 # carries a decimal point carries the SAME NUMBER OF PLACES, so the points line up down the column. Not a
 # fixed one place: Ksat and available water are two, and the rule is that a column is consistent with
 # itself. One glyph advance across the lot, the data face's.
 advances = set()
-for page, counts in ((TABLES_PAGE, (5, 8)), (CLASS_PAGE, (2, 2, 2))):
+for page, counts in ((MAP_PAGE, (2, 2)), (TABLES_PAGE, (5, 8)), (CLASS_PAGE, (2,))):
     for table_box, columns in zip(_tables(page), counts):
         cells = _numeric_cells(table_box)
         edges = {right for right, _, _ in cells}
@@ -343,8 +352,8 @@ flat = "".join("".join(b.text for b in _walk(p._page_box) if type(b).__name__ ==
 squash = "".join(flat.split())
 for needle in ("a soil test is the only way to know either on this parcel",
                "fragipan at 28 in stops roots above the rock",
-               "the tint only separates neighbouring units and carries no value",
-               "The map unit table overleaf names every symbol on this map",
+               "the tint separates neighbouring units and carries no value",
+               "The map unit table overleaf names every symbol",
                "a different depth basis from the surface horizon's figures above",
                "at that scale a contact is not placed to parcel precision",
                "The same soil survey supplies the seasonal water table"):
@@ -376,8 +385,9 @@ for missing, expect in (({"soil_survey": None}, "The soil survey's detailed prop
             assert row["cells"][2] == DERIVED.map_units[mukey]["hydrologic_group"], "the Layer 1 readings survive"
         assert all(e["tfact"] is None and e["kwfact"] is not None
                    for e in degraded_section["derived"].erosion.values()), "K survives, T does not"
-print(f"   16 pages; the map page, the tables page ({len(_tables(TABLES_PAGE))} tables) and the classification page "
-      f"({len(_tables(CLASS_PAGE))}); one glyph advance {advances.pop():.1f} pt; three degraded renders")
+print(f"   16 pages; the map page ({len(_tables(MAP_PAGE))} classification tables under the map), the tables page "
+      f"({len(_tables(TABLES_PAGE))}) and the last ({len(_tables(CLASS_PAGE))}); one glyph advance "
+      f"{advances.pop():.1f} pt; a crowded page moves the farmland block whole; three degraded renders")
 
 print("\ntest_soils_section.py: all sections passed")
 print(offline_harness.summary())

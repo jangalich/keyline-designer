@@ -220,8 +220,8 @@ def main(out_dir: str) -> int:
 
     # --- the pages --------------------------------------------------------
     print("  THE PAGES")
-    print(f"    spill: {ssn.spills(derived)} ({len(order)} units, the map page holds "
-          f"{ssn.MAP_UNIT_ROWS_MAX})")
+    print(f"    one: the map and the two classification tables; two: the map unit table "
+          f"({len(order)} units) and the surface horizon; three: erosion, geology, sources")
     pdf_path = os.path.join(out_dir, "site-report.pdf")
     site_report.generate_site_report_pdf(data, pdf_path, generated_on=GENERATED_ON, terrain=terrain,
                                          water=water_inputs, access=access, trees=trees, soils=inputs)

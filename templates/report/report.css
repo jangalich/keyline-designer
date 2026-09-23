@@ -417,7 +417,7 @@ th.num {
    columns beside a map unit's full name -- so its cells take the
    tightest leading and the least side padding of any section's. */
 .section--soils .summary {
-  margin-bottom: var(--space-3);
+  margin-bottom: var(--space-2);
 }
 .section--soils .report-map {
   margin-bottom: var(--space-1);
@@ -427,8 +427,8 @@ th.num {
 }
 .section--soils .data-table th,
 .section--soils .data-table td {
-  padding-top: 1.5pt;
-  padding-bottom: 1.5pt;
+  padding-top: 1pt;
+  padding-bottom: 1pt;
   padding-left: 3pt;
   padding-right: 3pt;
   line-height: 1.25;
@@ -436,6 +436,34 @@ th.num {
 .section--soils .caption {
   margin-bottom: var(--space-2);
   max-width: none;
+}
+/* The map page carries the map, its caption and TWO tables with captions
+   of their own, so everything on it sits at the tightest spacing the
+   section uses -- measured against the page, not chosen. */
+.section--soils .section__figures .caption {
+  margin-bottom: var(--space-1);
+}
+.section--soils .section__figures .eyebrow {
+  margin-bottom: var(--space-1);
+}
+.section--soils .section__figures .heading {
+  margin-bottom: var(--space-2);
+}
+.section--soils .section__figures .summary {
+  margin-bottom: var(--space-1);
+}
+/* A TABLE AND ITS CAPTION BREAK TOGETHER. The caption is the one caveat
+   that could change how the figure above it is read; stranded at the top
+   of the next page without that figure it is worse than useless. */
+.table-block {
+  break-inside: avoid;
+}
+.table-block .caption:last-child {
+  margin-bottom: var(--space-3);
+}
+/* The last block on a page has nothing under it to be separated from. */
+.table-block:last-child .caption:last-child {
+  margin-bottom: 0;
 }
 .section--soils .section__detail .eyebrow--continued,
 .section--soils .section__classification .eyebrow--continued {

@@ -15,20 +15,32 @@ language, the reverse of Landform's grep.
 
 THE PAGES, top to bottom.
 
-  ONE, THE SOIL MAP. The summary line, then the published survey's own
-  pairing -- each map unit polygon outlined and labelled with its symbol
-  over the parcel -- then the map unit table. Without the map a reader
-  knows what soils are present but not where, which is what makes the
-  table usable.
+  ONE, THE SOIL MAP. The summary line, each map unit polygon outlined and
+  labelled with its symbol over the parcel, and then the two
+  CLASSIFICATION tables -- land capability and farmland, three or four
+  rows of acres each.
 
-  TWO, PHYSICAL PROPERTIES. The surface horizon by map unit: the
-  particle-size split, water capacity, organic matter, reaction, and the
-  depth at which something stops a root. Then the profile's own water
-  figure, on its own depth basis.
+  TWO, THE MAP UNIT TABLE AND THE PHYSICAL PROPERTIES. What each symbol
+  on the map means and how much ground it covers, then the surface
+  horizon by map unit: the particle-size split, water capacity, organic
+  matter, reaction, and the depth at which something stops a root. Then
+  the profile's own water figure, on its own depth basis.
 
-  THREE, CLASSIFICATION AND GEOLOGY. Capability and farmland by acres,
-  the erosion factors, the formation as a line, the cross-reference and
-  the sources.
+  THREE, EROSION AND GEOLOGY. The K and T factors, the formation as a
+  line, the cross-reference and the sources.
+
+THE MAP UNIT TABLE IS NOT ON THE MAP'S PAGE, though the two were
+specified as a pair and that pairing is what makes either usable: without
+the map a reader knows what soils are present but not where. It does not
+fit. The map draws at 453 pt of an 878 pt page at the extent and scale
+every section's map shares, and seven map units are 261 pt of table
+against the 182 pt left under the caption -- measured, with three units
+the most that ever fit there. Rather than leave a half-page of air
+defending an ordering that does not survive a parcel with a normal number
+of soils, the page takes the two CLASSIFICATION tables, the shortest and
+most scannable in the section, and the map unit table gets the room it
+needs overleaf beside the properties it belongs with. The map caption
+says where it went, and the section reads in one direction either way.
 
 TEXTURE IS A SENTENCE, NOT A COLUMN (the author's decision, phase 2
 review). Every one of the reference parcel's seven map units is a silt
@@ -152,22 +164,6 @@ PH_CLASSES = (
 # caption names rather than a class the summary line lists.
 TEXTURE_MINOR_SHARE = 0.05
 
-# OVERFLOW, THE ACCESS RULE. The map page holds the map unit table beneath
-# the map when the table fits there, and SPILLS it whole to the properties
-# page when it does not -- the same rule, and the same word for it, as the
-# Access section's frontage table. Measured, not guessed: the map renders
-# at 453 pt on every section's page (the full measure at the shared
-# extent and scale), which leaves 221 pt under the caption, and a map
-# unit row is two lines of a name the survey wrote -- "Gilpin, Weikert,
-# Culleoka channery silt loams and 25 to 80 percent slopes" is 72
-# characters -- so THREE rows and a total are what fit there with the
-# table's own caption, and a fourth spills. Measured by rendering one to
-# seven units and reading which page the table landed on, not estimated;
-# test_soils_section.py holds both sides of the break to account. The
-# reference parcel has seven map units and spills; nothing is condensed,
-# truncated or set smaller to avoid it, and the map caption says where
-# the table went.
-MAP_UNIT_ROWS_MAX = 3
 
 
 # ======================================================================
@@ -366,13 +362,12 @@ def build_summary(derived: sd.SoilsDerived) -> list:
     is, and the reaction it is at. Both are sentences rather than columns
     (see the module docstring)."""
     count = len(derived.order)
-    parts = ["The survey maps ", {"value": f"{count}"},
-             f" soil map unit{'s' if count != 1 else ''} across the parcel. "]
+    parts = ["The survey maps ", {"value": f"{count}"}, f" soil map unit{'s' if count != 1 else ''} here. "]
 
     textures = texture_classes(derived)
     major = [t for t in textures if t["share"] >= TEXTURE_MINOR_SHARE]
     if len(textures) == 1:
-        parts += ["Every one of them is a ", {"value": _lower(textures[0]["texture"])}, " at the surface"]
+        parts += ["Every one is a ", {"value": _lower(textures[0]["texture"])}, " at the surface"]
     elif major:
         names = [_lower(t["texture"]) for t in major]
         share = sum(t["share"] for t in major)
@@ -386,34 +381,27 @@ def build_summary(derived: sd.SoilsDerived) -> list:
             parts += ["pH ", {"value": f"{low:.1f}"}]
         else:
             parts += ["pH ", {"value": f"{low:.1f}"}, "–", {"value": f"{high:.1f}"}]
-        parts.append(f" — {ph_class_span(low, high)} on every unit of it.")
+        parts.append(f" — {ph_class_span(low, high)} across the parcel.")
     elif textures:
         parts.append(".")
     return parts
 
 
-def spills(derived: sd.SoilsDerived) -> bool:
-    """Whether the map unit table moves whole to the properties page. See
-    MAP_UNIT_ROWS_MAX."""
-    return len(derived.order) > MAP_UNIT_ROWS_MAX
-
-
 def build_map_caption(derived: sd.SoilsDerived, missed: list) -> list:
     """The one caveat at the point of use: what the tint is not, which
-    symbols the map could not carry, and -- when the table does not fit
-    beneath the map -- where it went."""
-    parts = ["Boundaries are the survey's own, generalised to 1:24,000; the tint only separates neighbouring units "
-             "and carries no value. "]
+    symbols the map could not carry, and where the table that names them
+    is."""
+    parts = ["Boundaries are the survey's own at 1:24,000; the tint separates neighbouring units and carries no "
+             "value. "]
     if missed:
         symbols = [derived.map_units[m]["musym"] for m in missed]
         acres = allocate_exactly([derived.map_units[m]["cells"] for m in derived.order],
                                  derived.cells["on_parcel_count"] * derived.cells["cell_acres"], 1)
         missed_acres = sum(a for m, a in zip(derived.order, acres) if m in missed)
-        parts += [_list(symbols), f" {'are' if len(missed) != 1 else 'is'} too small to hold ",
-                  "their symbols" if len(missed) != 1 else "its symbol", " — ",
-                  {"value": _one_decimal_or_dash(missed_acres)}, " acres in all — and go unlabelled. "]
-    parts.append("The map unit table overleaf names every symbol on this map." if spills(derived)
-                 else "The map unit table below names every symbol on this map.")
+        parts += [_list(symbols), f" — {_one_decimal_or_dash(missed_acres)} acres — ",
+                  "are" if len(missed) != 1 else "is", " too small to hold ",
+                  "their symbols" if len(missed) != 1 else "its symbol", " and go unlabelled. "]
+    parts.append("The map unit table overleaf names every symbol.")
     return parts
 
 
@@ -608,9 +596,9 @@ def build_capability_table(derived: sd.SoilsDerived) -> Optional[dict]:
 
 
 def build_capability_caption(derived: sd.SoilsDerived) -> list:
-    return ["NRCS land capability for non-irrigated use, the dominant component's, by the ground each map unit "
-            "covers. The class counts the limitations the survey records; the subclass names the chief one. No "
-            "irrigated class is assigned in this survey area."]
+    # The absence of an irrigated class is not a caveat on this figure; it
+    # is a fact about the survey area, and it is stated in the methods.
+    return ["NRCS land capability for non-irrigated use, the dominant component's, by the ground each unit covers."]
 
 
 def build_farmland_table(derived: sd.SoilsDerived) -> Optional[dict]:
@@ -628,9 +616,10 @@ def build_farmland_table(derived: sd.SoilsDerived) -> Optional[dict]:
 
 
 def build_farmland_caption(derived: sd.SoilsDerived) -> list:
-    return ["The survey's own farmland classification, in its own words, by the ground each map unit covers. It is a "
-            "statement about the soil's grade, and where it reads \"if drained\" or \"if irrigated\" that grade is "
-            "conditional on a practice the survey does not say is in place."]
+    # "By the ground each unit covers" is the caption above this one, two
+    # inches away; what this figure needs said is the conditional grade.
+    return ["The survey's own wording: \"if drained\" or \"if irrigated\" makes the grade conditional on a practice "
+            "the survey does not state."]
 
 
 def build_erosion_table(derived: sd.SoilsDerived) -> Optional[dict]:
@@ -827,7 +816,6 @@ def build_soils_section(inputs: sd.SoilsInputs, tokens: Optional[dict] = None) -
         "summary": build_summary(derived),
         "map": rendered,
         "map_caption": build_map_caption(derived, missed),
-        "spill": spills(derived),
         "map_unit_table": build_map_unit_table(derived),
         "map_unit_caption": build_map_unit_caption(derived),
         "properties_table": build_properties_table(derived),
