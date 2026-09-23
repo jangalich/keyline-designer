@@ -93,6 +93,23 @@ TRANSPORTATION_BASE = "https://carto.nationalmap.gov/arcgis/rest/services/transp
 # assumption is exactly how the original bug happened).
 ROAD_LAYERS = [30, 31, 32]
 
+# The layer names as the service publishes them (`{TRANSPORTATION_BASE}?f=json`,
+# verified live 2026-09-23), carried onto each row's `properties` as its
+# classification: the layer a segment came back from IS its functional
+# class in this service, and the row would otherwise forget it.
+ROAD_LAYER_NAMES = {30: "Secondary highway", 31: "Local connecting road", 32: "Local road"}
+
+# THE ATTRIBUTES A ROW KEEPS beside its name and geometry (see
+# get_farm_roads_for_boundary()). Every one is a column the three layers
+# publish (their `fields` lists, verified live); `layer` and `layer_name`
+# are added by this module. Read by the site data report's Access section
+# (access_derivations.py) and by nothing on the design path.
+ROAD_PROPERTY_FIELDS = (
+    "permanent_identifier", "tnmfrc", "mtfcc_code",
+    "interstate", "us_route", "state_route", "county_route", "federal_lands_route",
+    "source_datadesc", "source_originator", "loaddate",
+)
+
 FARM_ROAD_CONFIDENCE_NOTES = (
     "Road geometry is USGS National Map Transportation data — public "
     "road/right-of-way sources, not a survey of this specific property. "
@@ -144,6 +161,15 @@ FARM_ROAD_CONFIDENCE_NOTES = (
 # parcel a mapped road actually crosses (synthetic-fixture behavior is
 # asserted in test_farm_roads_data.py/test_exclusion_zones.py/
 # test_water_candidate_zones.py).
+#
+# SINCE VALIDATED ON THE REFERENCE PARCEL (site data report branch 10,
+# step 0): with the layer fix above in place the reference boundary has
+# five mapped local-road segments, one of which runs along its north
+# edge and enters it for 38 m. That segment's band covers 423 m2 of the
+# parcel; the roads gate itself takes 1 cell of it, because the rest
+# lies in the boundary setback ring or on cells the slope gate already
+# took. assets/reference/access/farm_roads.json holds the rows, and
+# test_access_derivations.py holds the gate to them.
 #
 # THIS IS NOT the generated road corridor: road_corridors.py's routed,
 # PROPOSED road and everything that feeds it (POND_ZONE_EXCLUSION_BUFFER_
@@ -310,7 +336,11 @@ def get_farm_roads_for_boundary(
     layer_errors = []
     for layer_id in ROAD_LAYERS:
         try:
-            all_features.extend(_query_road_layer(layer_id, bbox))
+            for feature in _query_road_layer(layer_id, bbox):
+                # The layer a segment came back from is its classification
+                # in this service; the feature itself does not say.
+                feature["_layer_id"] = layer_id
+                all_features.append(feature)
         except Exception as e:
             layer_errors.append((layer_id, e))
 
@@ -325,14 +355,46 @@ def get_farm_roads_for_boundary(
 
     road_features = _deduplicate_road_features(all_features)
 
-    return [
-        {
-            "name": f["properties"].get("name") or f["properties"].get("fullname") or "Unnamed road",
-            "geometry": f["geometry"],
-        }
-        for f in road_features
-        if f.get("geometry") is not None
-    ]
+    return [road_row(f) for f in road_features if f.get("geometry") is not None]
+
+
+def road_row(feature: dict) -> dict:
+    """
+    One fetched feature -> the row ParcelData.farm_roads holds:
+
+        {'name', 'geometry', 'properties': {...}}
+
+    `properties` is ADDITIVE (site data report, branch 10, step 0): the
+    ROAD_PROPERTY_FIELDS the service returned, plus `layer` (the
+    ROAD_LAYERS id the segment came from) and `layer_name`. It is the
+    same pattern hydrology_data.get_water_features_for_boundary() uses
+    for `permanent_identifier`: every consumer of these rows -- the
+    exclusion union (get_road_exclusion_union_utm), the layout map,
+    solar's Tier 2 proximity, the roads step's forwarded rows -- reads
+    `name` and `geometry` only, and the union reads `geometry` only, so
+    carrying the attributes cannot move the exclusion mask. test_access_
+    derivations.py asserts that mask byte-identical with and without the
+    key; test_farm_roads_data.py asserts the union ignores it.
+
+    WHY THE REPORT NEEDS THEM. The Access section prints a road's
+    classification beside its frontage. The fetch already asks the
+    service for every field (outFields=*) and threw all but the name
+    away; the alternative was a second fetch of the same rows at report
+    time, which is the redundancy this codebase's cache closures exist to
+    remove. A field the service did not return is absent from the dict,
+    not None-filled, so a reader can tell "not published" from "empty".
+    """
+    attributes = feature.get("properties") or {}
+    properties = {key: attributes[key] for key in ROAD_PROPERTY_FIELDS if attributes.get(key) not in (None, "")}
+    layer_id = feature.get("_layer_id")
+    if layer_id is not None:
+        properties["layer"] = int(layer_id)
+        properties["layer_name"] = ROAD_LAYER_NAMES.get(int(layer_id), f"Layer {layer_id}")
+    return {
+        "name": attributes.get("name") or attributes.get("fullname") or "Unnamed road",
+        "geometry": feature["geometry"],
+        "properties": properties,
+    }
 
 
 def get_road_exclusion_union_utm(

@@ -10,7 +10,7 @@ mocks answer with the reference fixtures: Daymet at the parcel, Atlas 14
 and POWER. The precipitation correction and the heavy-rain normals come
 off the committed bundle -- no mock, no fetch.
 
-  1. THE TABLE: nine layers (three Climate, six Water), each named once with a policy the module
+  1. THE TABLE: ten layers (three Climate, six Water, one Access), each named once with a policy the module
      defines, each a ReportData field, and the fetch function times every
      one of them (the diagnostics self-check's own test, run here against
      the compiled function so it cannot pass on a stale checkout). The
@@ -53,7 +53,9 @@ import nhdplus_data
 import nlcd_landcover_data
 import nwi_data
 import report_data
+import soil_road_ratings
 import soil_water_table
+import access_reference_fixture
 import water_reference_fixture
 import run_diagnostics
 import session_cache
@@ -90,6 +92,8 @@ assert REPORT_FETCH_LAYERS == {
     # THE WATER LAYERS (branch 9), every one degradable: context beside a Layer 1 the section always has.
     "nhd_points": DEGRADABLE, "nhdplus_hr": DEGRADABLE, "nwi": DEGRADABLE, "fema_nfhl": DEGRADABLE,
     "nlcd_landcover": DEGRADABLE, "soil_water_table": DEGRADABLE,
+    # THE ACCESS LAYER (branch 10): the soil road-construction ratings, context beside Layer 1's road rows.
+    "soil_road_ratings": DEGRADABLE,
 }, REPORT_FETCH_LAYERS
 assert set(REPORT_FETCH_LAYERS.values()) <= {REQUIRED, DEGRADABLE}
 for layer in REPORT_FETCH_LAYERS:
@@ -100,7 +104,7 @@ assert "daymet_at_stations" not in ReportData.__dataclass_fields__, "the station
 sites = run_diagnostics._fetch_hook_sites()
 assert sites["report_data.fetch_report_data calls time_layer"] is True, sites
 coverage = [k for k in sites if k.startswith("report_data.fetch_report_data times")]
-assert coverage == ["report_data.fetch_report_data times 9 of 9 declared report layers"], sites
+assert coverage == ["report_data.fetch_report_data times 10 of 10 declared report layers"], sites
 assert sites[coverage[0]] is True
 assert sites["parcel_data.fetch_parcel_data calls time_layer"] is True
 print(f"   {coverage[0]}")
@@ -141,6 +145,7 @@ def _all_mocked():
 # this file (branch 9): each is patched on ITS module, which report_data
 # reaches by attribute. Section 6 fails them one at a time.
 _WATER_RAW = water_reference_fixture.raw_water_layers()
+_WATER_RAW["soil_road_ratings_rows"] = access_reference_fixture.raw_soil_road_ratings()
 _WATER_FETCHES = (
     (hydrology_data, "get_nhd_points_for_boundary", "nhd_points"),
     (nhdplus_data, "get_flowline_attributes_for_boundary", "nhdplus_hr"),
@@ -148,6 +153,8 @@ _WATER_FETCHES = (
     (nfhl_data, "get_flood_hazard_for_boundary", "fema_nfhl"),
     (nlcd_landcover_data, "get_land_cover_for_boundary", "nlcd_landcover"),
     (soil_water_table, "get_seasonal_water_table_for_boundary", "soil_water_table_rows"),
+    # The Access layer (branch 10) rides the same loop: its raw rows come from the access fixture.
+    (soil_road_ratings, "get_road_ratings_for_boundary", "soil_road_ratings_rows"),
 )
 _water_stack = contextlib.ExitStack()
 for _module, _name, _key in _WATER_FETCHES:
@@ -189,6 +196,7 @@ assert data.unavailable == {}
 assert data.nhd_points == [] and len(data.nhdplus_hr) == 3 and len(data.nwi["features"]) == 5
 assert data.fema_nfhl["available"] is True and data.nlcd_landcover["year"] == nlcd_landcover_data.NLCD_YEAR == 2024
 assert data.nlcd_landcover["array"].shape == (108, 96) and len(data.soil_water_table["map_units"]) == 7
+assert len(data.soil_road_ratings["map_units"]) == 7 and len(data.soil_road_ratings["components"]) == 30
 print(f"   centroid {data.centroid[0]:.4f}, {data.centroid[1]:.4f}; 1 Daymet call; factor {data.climate['prcp_factor']:.3f}; "
       f"zone {data.climate['hardiness']['zone']}; wind from {data.wind['seasons']['winter']['prevailing_sector']}")
 
@@ -294,10 +302,10 @@ print("   1 fetch for 2 calls on one boundary; a failed fetch leaves the cache e
 # ======================================================================
 # 6. Each Water layer degrades alone
 # ======================================================================
-print("6. each of the six Water layers failing is recorded alone; an empty NWI answer is not a degradation")
+print("6. each of the six Water layers and the Access layer failing is recorded alone; an empty NWI answer is not a degradation")
 _water_stack.close()
 for module, name, key in _WATER_FETCHES:
-    layer = "soil_water_table" if key == "soil_water_table_rows" else key
+    layer = key[:-len("_rows")] if key.endswith("_rows") else key
     with contextlib.ExitStack() as stack:
         for other_module, other_name, other_key in _WATER_FETCHES:
             if other_key != key:
@@ -310,7 +318,7 @@ for module, name, key in _WATER_FETCHES:
     assert list(one_down.unavailable) == [layer] and one_down.unavailable[layer]["reason"] == ReportDataIncompleteError.REASON_SOURCE_UNAVAILABLE
     assert one_down.unavailable[layer]["label"] and one_down.unavailable[layer]["error"] == "down"
     for other_module, other_name, other_key in _WATER_FETCHES:
-        other = "soil_water_table" if other_key == "soil_water_table_rows" else other_key
+        other = other_key[:-len("_rows")] if other_key.endswith("_rows") else other_key
         if other != layer:
             assert getattr(one_down, other) is not None, (layer, other)
     assert one_down.climate is not None and REPORT_FETCH_LAYERS[layer] == DEGRADABLE
@@ -340,7 +348,8 @@ assert none_mapped.nwi is not None and none_mapped.nwi["features"] == [] and non
 a, b, c = _all_mocked()
 with a, b, c:
     all_down = fetch_report_data(REAL_BOUNDARY)
-assert set(all_down.unavailable) == {"nhd_points", "nhdplus_hr", "nwi", "fema_nfhl", "nlcd_landcover", "soil_water_table"}
+assert set(all_down.unavailable) == {"nhd_points", "nhdplus_hr", "nwi", "fema_nfhl", "nlcd_landcover", "soil_water_table",
+                                     "soil_road_ratings"}
 assert all_down.climate is not None
 print("   six layers, each down alone -> one `unavailable` entry, the other five parsed; a bad TIFF degrades; an empty NWI answer does not")
 

@@ -84,6 +84,16 @@ paid report; each absent layer leaves a visible statement in its place):
                                   query on the same service Layer 1
                                   already reached (soil_water_table).
 
+THE TABLE AFTER BRANCH 10 (Access: one more, DEGRADABLE -- the section
+stands on Layer 1's road rows, which it always has; a missing rating
+leaves a visible statement where the soil table would be):
+
+  soil_road_ratings   DEGRADABLE  SSURGO's road-construction
+                                  interpretations (local roads and
+                                  streets, the unpaved variant, roadfill)
+                                  with their limiting features, one
+                                  report-time query (soil_road_ratings).
+
 THE WINDOW-BASED LAYERS take the boundary alone: nwi_data, nfhl_data and
 nlcd_landcover_data derive the parcel's UTM window from the boundary with
 dem_data.dem_window_bounds(), the function the DEM fetch itself uses, so
@@ -139,6 +149,7 @@ import nfhl_data
 import nhdplus_data
 import nlcd_landcover_data
 import nwi_data
+import soil_road_ratings
 import soil_water_table
 from atlas14_data import Atlas14IncompleteError, design_storms, get_atlas14_for_point
 from climate_report import derive_climate
@@ -162,6 +173,7 @@ REPORT_FETCH_LAYERS = {
     "fema_nfhl": DEGRADABLE,
     "nlcd_landcover": DEGRADABLE,
     "soil_water_table": DEGRADABLE,
+    "soil_road_ratings": DEGRADABLE,
 }
 
 # The (type, label) pair each layer's failure reports as -- the same split
@@ -176,6 +188,7 @@ LAYER_NWI = ("wetlands", "mapped wetlands")
 LAYER_NFHL = ("flood_hazard", "flood hazard zones")
 LAYER_NLCD = ("land_cover", "land cover")
 LAYER_SOIL_WATER_TABLE = ("soil_water_table", "seasonal water table")
+LAYER_SOIL_ROAD_RATINGS = ("soil_road_ratings", "soil road-construction ratings")
 
 # What a Water layer's fetch or parse can raise besides a RequestException:
 # a TIFF rasterio cannot open (OSError), a response whose shape the parser
@@ -250,6 +263,9 @@ class ReportData:
     fema_nfhl: Optional[dict] = None
     nlcd_landcover: Optional[dict] = None
     soil_water_table: Optional[dict] = None
+    # THE ACCESS LAYER (branch 10): soil_road_ratings.parse_road_ratings'
+    # block, None when it degraded.
+    soil_road_ratings: Optional[dict] = None
     # {layer: {"label", "reason", "error"}} for every DEGRADABLE layer that
     # failed. Empty when everything answered. A REQUIRED failure never
     # reaches a ReportData; it raises.
@@ -399,6 +415,14 @@ def fetch_report_data(boundary) -> ReportData:
         water_table = None
         _degrade("soil_water_table", LAYER_SOIL_WATER_TABLE, exc)
 
+    road_ratings = None
+    try:
+        with run_diagnostics.time_layer("soil_road_ratings", soil_road_ratings.get_road_ratings_for_boundary):
+            road_ratings = soil_road_ratings.parse_road_ratings(soil_road_ratings.get_road_ratings_for_boundary(boundary))
+    except _WATER_FETCH_ERRORS as exc:
+        road_ratings = None
+        _degrade("soil_road_ratings", LAYER_SOIL_ROAD_RATINGS, exc)
+
     return ReportData(
         boundary=list(boundary),
         centroid=centroid,
@@ -417,6 +441,7 @@ def fetch_report_data(boundary) -> ReportData:
         fema_nfhl=fema_nfhl,
         nlcd_landcover=nlcd_landcover,
         soil_water_table=water_table,
+        soil_road_ratings=road_ratings,
         unavailable=unavailable,
     )
 
@@ -435,6 +460,7 @@ def report_data_from_fixtures(
     fema_nfhl: Optional[dict] = None,
     nlcd_landcover: Optional[dict] = None,
     soil_water_table_rows: Optional[list] = None,
+    soil_road_ratings_rows: Optional[list] = None,
 ) -> ReportData:
     """
     A ReportData from parsed responses ALREADY IN HAND -- the reference
@@ -448,7 +474,8 @@ def report_data_from_fixtures(
 
     The Water layers take the RAW response each fetch function returns
     (water_reference_fixture.raw_water_layers()) and are parsed here the
-    way fetch_report_data() parses them; None is absent.
+    way fetch_report_data() parses them; None is absent. The Access
+    layer's rows (access_reference_fixture) the same way.
     """
     centroid = boundary_centroid_lat_lon(boundary)
     correction = heavy_rain = None
@@ -473,6 +500,7 @@ def report_data_from_fixtures(
         fema_nfhl=nfhl_data.parse_flood_hazard(fema_nfhl) if fema_nfhl is not None else None,
         nlcd_landcover=nlcd_landcover_data.parse_land_cover(nlcd_landcover) if nlcd_landcover is not None else None,
         soil_water_table=soil_water_table.parse_seasonal_water_table(soil_water_table_rows) if soil_water_table_rows is not None else None,
+        soil_road_ratings=soil_road_ratings.parse_road_ratings(soil_road_ratings_rows) if soil_road_ratings_rows is not None else None,
         unavailable=dict(unavailable or {}),
     )
 
