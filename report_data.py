@@ -94,8 +94,22 @@ leaves a visible statement where the soil table would be):
                                   with their limiting features, one
                                   report-time query (soil_road_ratings).
 
-THE WINDOW-BASED LAYERS take the boundary alone: nwi_data, nfhl_data and
-nlcd_landcover_data derive the parcel's UTM window from the boundary with
+THE TABLE AFTER BRANCH 11 (Trees & forestry: two more, both DEGRADABLE --
+the section stands on Layer 1's canopy, which it always has; each absent
+layer leaves a visible statement where its table would be):
+
+  forest_type_group   DEGRADABLE  USFS FIA BIGMAP forest type group on
+                                  the DEM grid, 30 m (forest_type_data).
+                                  A modelled product beside a measured
+                                  canopy: context.
+  soil_woodland       DEGRADABLE  SSURGO's woodland productivity by
+                                  species and its four woodland
+                                  management interpretations, two
+                                  report-time queries on the same service
+                                  Layer 1 already reached (soil_woodland).
+
+THE WINDOW-BASED LAYERS take the boundary alone: nwi_data, nfhl_data,
+nlcd_landcover_data and forest_type_data derive the parcel's UTM window from the boundary with
 dem_data.dem_window_bounds(), the function the DEM fetch itself uses, so
 the NLCD grid is cell-for-cell the DEM's without the DEM being here.
 
@@ -144,6 +158,7 @@ from shapely.geometry import Polygon
 import precipitation_normals
 import run_diagnostics
 import spc_reports
+import forest_type_data
 import hydrology_data
 import nfhl_data
 import nhdplus_data
@@ -151,6 +166,7 @@ import nlcd_landcover_data
 import nwi_data
 import soil_road_ratings
 import soil_water_table
+import soil_woodland
 from atlas14_data import Atlas14IncompleteError, design_storms, get_atlas14_for_point
 from climate_report import derive_climate
 from daymet_data import DaymetIncompleteError, get_daymet_daily_for_point
@@ -174,6 +190,8 @@ REPORT_FETCH_LAYERS = {
     "nlcd_landcover": DEGRADABLE,
     "soil_water_table": DEGRADABLE,
     "soil_road_ratings": DEGRADABLE,
+    "forest_type_group": DEGRADABLE,
+    "soil_woodland": DEGRADABLE,
 }
 
 # The (type, label) pair each layer's failure reports as -- the same split
@@ -189,6 +207,8 @@ LAYER_NFHL = ("flood_hazard", "flood hazard zones")
 LAYER_NLCD = ("land_cover", "land cover")
 LAYER_SOIL_WATER_TABLE = ("soil_water_table", "seasonal water table")
 LAYER_SOIL_ROAD_RATINGS = ("soil_road_ratings", "soil road-construction ratings")
+LAYER_FOREST_TYPE_GROUP = ("forest_type_group", "forest type group")
+LAYER_SOIL_WOODLAND = ("soil_woodland", "soil woodland ratings")
 
 # What a Water layer's fetch or parse can raise besides a RequestException:
 # a TIFF rasterio cannot open (OSError), a response whose shape the parser
@@ -266,6 +286,10 @@ class ReportData:
     # THE ACCESS LAYER (branch 10): soil_road_ratings.parse_road_ratings'
     # block, None when it degraded.
     soil_road_ratings: Optional[dict] = None
+    # THE TREES LAYERS (branch 11): forest_type_data.parse_forest_type's
+    # block and soil_woodland.parse_woodland's, each None when it degraded.
+    forest_type_group: Optional[dict] = None
+    soil_woodland: Optional[dict] = None
     # {layer: {"label", "reason", "error"}} for every DEGRADABLE layer that
     # failed. Empty when everything answered. A REQUIRED failure never
     # reaches a ReportData; it raises.
@@ -423,6 +447,22 @@ def fetch_report_data(boundary) -> ReportData:
         road_ratings = None
         _degrade("soil_road_ratings", LAYER_SOIL_ROAD_RATINGS, exc)
 
+    forest_type = None
+    try:
+        with run_diagnostics.time_layer("forest_type_group", forest_type_data.get_forest_type_for_boundary):
+            forest_type = forest_type_data.parse_forest_type(forest_type_data.get_forest_type_for_boundary(boundary))
+    except _WATER_FETCH_ERRORS as exc:
+        forest_type = None
+        _degrade("forest_type_group", LAYER_FOREST_TYPE_GROUP, exc)
+
+    woodland = None
+    try:
+        with run_diagnostics.time_layer("soil_woodland", soil_woodland.get_woodland_for_boundary):
+            woodland = soil_woodland.parse_woodland(soil_woodland.get_woodland_for_boundary(boundary))
+    except _WATER_FETCH_ERRORS as exc:
+        woodland = None
+        _degrade("soil_woodland", LAYER_SOIL_WOODLAND, exc)
+
     return ReportData(
         boundary=list(boundary),
         centroid=centroid,
@@ -442,6 +482,8 @@ def fetch_report_data(boundary) -> ReportData:
         nlcd_landcover=nlcd_landcover,
         soil_water_table=water_table,
         soil_road_ratings=road_ratings,
+        forest_type_group=forest_type,
+        soil_woodland=woodland,
         unavailable=unavailable,
     )
 
@@ -461,6 +503,8 @@ def report_data_from_fixtures(
     nlcd_landcover: Optional[dict] = None,
     soil_water_table_rows: Optional[list] = None,
     soil_road_ratings_rows: Optional[list] = None,
+    forest_type_group: Optional[dict] = None,
+    soil_woodland_rows: Optional[dict] = None,
 ) -> ReportData:
     """
     A ReportData from parsed responses ALREADY IN HAND -- the reference
@@ -475,7 +519,9 @@ def report_data_from_fixtures(
     The Water layers take the RAW response each fetch function returns
     (water_reference_fixture.raw_water_layers()) and are parsed here the
     way fetch_report_data() parses them; None is absent. The Access
-    layer's rows (access_reference_fixture) the same way.
+    layer's rows (access_reference_fixture) the same way, and the Trees
+    layers' raw answers (trees_reference_fixture): the forest type TIFF
+    dict and the two woodland row sets.
     """
     centroid = boundary_centroid_lat_lon(boundary)
     correction = heavy_rain = None
@@ -501,6 +547,8 @@ def report_data_from_fixtures(
         nlcd_landcover=nlcd_landcover_data.parse_land_cover(nlcd_landcover) if nlcd_landcover is not None else None,
         soil_water_table=soil_water_table.parse_seasonal_water_table(soil_water_table_rows) if soil_water_table_rows is not None else None,
         soil_road_ratings=soil_road_ratings.parse_road_ratings(soil_road_ratings_rows) if soil_road_ratings_rows is not None else None,
+        forest_type_group=forest_type_data.parse_forest_type(forest_type_group) if forest_type_group is not None else None,
+        soil_woodland=soil_woodland.parse_woodland(soil_woodland_rows) if soil_woodland_rows is not None else None,
         unavailable=dict(unavailable or {}),
     )
 

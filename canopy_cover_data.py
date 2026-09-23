@@ -84,6 +84,17 @@ and imagery_data.py already use. A caller that has already exhausted HAG
 and then gets None here has no canopy source at all, and the layer
 hard-fails (parcel_data.py).
 
+THE YEAR IS PINNED (branch 11, step 0). The service is a mosaic of one
+item per year, 1985 through 2025 in the v2025-6 product suite, and its
+default Northwest mosaic method happened to return the 2025 item on the
+day this was verified -- nothing guaranteed it would the next day, and
+an unpinned export could have been any year in a forty-year span of
+regrowth. Every export now carries a mosaic rule selecting TCC_YEAR, the
+same rule nlcd_landcover_data.py sends for land cover, and the returned
+dict records the year and the product version so the site data report
+can say what the design measured. Verified live on the reference window
+that the pinned 2025 export is byte-identical to the default's.
+
 WHICH SERVICE, AND WHY NOT THE OTHER ONE. The default endpoint is the
 NLCD TCC service on IIPP (imagery.geoplatform.gov) -- see DEFAULT_TCC_
 IMAGESERVER, which also records the dead apps.fs.usda.gov host it
@@ -104,6 +115,7 @@ Like every other network-backed module in this repo, this requires real
 internet access and will not run in a fully offline sandbox.
 """
 
+import json
 import math
 import os
 from typing import Optional
@@ -176,6 +188,13 @@ def tcc_export_endpoint() -> str:
 # non-processing area, 255 is background. Both are excluded explicitly in
 # _classify_cover() rather than being left to the raster's nodata tag,
 # which the service may or may not set on an exported window.
+# THE PINNED YEAR AND THE PRODUCT VERSION IT BELONGS TO. The service's
+# catalogue names its items nlcd_tcc_conus_wgs84_v2025_6_<year>...; step 0
+# of branch 11 queried it and found items for every year 1985-2025. Bump
+# deliberately, re-running test_canopy_cover_fallback.py --live.
+TCC_YEAR = 2025
+TCC_PRODUCT_VERSION = "v2025-6"
+
 TCC_NON_PROCESSING_VALUE = 254
 TCC_BACKGROUND_VALUE = 255
 
@@ -261,7 +280,14 @@ def dem_grid_window(dem: dict) -> dict:
     return {"bbox": (min_x, min_y, max_x, max_y), "size": (cols, rows), "crs": crs, "epsg": epsg}
 
 
-def _export_tcc_on_dem_grid(dem: dict, timeout: float) -> tuple[np.ndarray, Optional[float]]:
+def mosaic_rule(year: int = TCC_YEAR) -> str:
+    """The mosaic rule that selects one year's item -- nlcd_landcover_data.
+    mosaic_rule()'s shape, on this service's own `beginyear` field."""
+    return json.dumps({"mosaicMethod": "esriMosaicAttribute", "where": f"beginyear={int(year)}",
+                       "sortField": "beginyear", "ascending": True})
+
+
+def _export_tcc_on_dem_grid(dem: dict, timeout: float, year: int = TCC_YEAR) -> tuple[np.ndarray, Optional[float]]:
     """
     One exportImage request for the DEM's exact window, returning the raw
     band (unclassified, still carrying 254/255) and whatever nodata value
@@ -273,7 +299,8 @@ def _export_tcc_on_dem_grid(dem: dict, timeout: float) -> tuple[np.ndarray, Opti
     and 255 rather than as floats near them. `noData` is deliberately NOT
     sent: this module classifies 254/255 itself and wants to SEE them, and
     a client-supplied noData would fold both into one indistinguishable
-    value before they ever reach _classify_cover().
+    value before they ever reach _classify_cover(). `mosaicRule` pins
+    `year` (see the module docstring's THE YEAR IS PINNED).
     """
     window = dem_grid_window(dem)
     min_x, min_y, max_x, max_y = window["bbox"]
@@ -287,6 +314,7 @@ def _export_tcc_on_dem_grid(dem: dict, timeout: float) -> tuple[np.ndarray, Opti
         "format": "tiff",
         "pixelType": "U8",
         "interpolation": "RSP_NearestNeighbor",
+        "mosaicRule": mosaic_rule(year),
         "f": "image",
     }
 
@@ -422,6 +450,9 @@ def get_tree_canopy_cover_for_boundary(
                      many cells carried 254 and how many carried 255,
             'on_parcel_nodata_pct': percent of ON-PARCEL cells with no
                      usable cover value,
+            'year': TCC_YEAR, the year the mosaic rule selected,
+            'product_version': TCC_PRODUCT_VERSION -- the two the report
+                     prints, so a fallback parcel's canopy has a vintage,
         }
 
     Returns None when the window comes back with no usable cover on-parcel
@@ -474,6 +505,8 @@ def get_tree_canopy_cover_for_boundary(
         "dem_cells_per_source_pixel": round(cells_per_source_pixel, 1),
         "value_counts": counts,
         "on_parcel_nodata_pct": round(nan_fraction * 100, 2),
+        "year": TCC_YEAR,
+        "product_version": TCC_PRODUCT_VERSION,
     }
 
 
@@ -547,7 +580,7 @@ def summarize_tree_canopy_cover(cover: Optional[dict]) -> str:
     counts = cover["value_counts"]
 
     return (
-        f"NLCD Tree Canopy Cover (FALLBACK -- no lidar HAG coverage here). "
+        f"NLCD Tree Canopy Cover {cover.get('year', TCC_YEAR)} (FALLBACK -- no lidar HAG coverage here). "
         f"Percent cover range: {valid.min():.0f}% to {valid.max():.0f}%. "
         f"{valid.size}/{array.size} cells carry a usable cover value "
         f"({counts['non_processing_254']} cells were 254/non-processing, "
