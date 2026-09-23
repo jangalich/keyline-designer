@@ -324,6 +324,58 @@ def get_water_features_geojson(
     return make_feature_collection(features)
 
 
+# --- springs and seeps: NHD's point layer ------------------------------
+#
+# NHD maps a spring or seep as a point feature (FCode 45800) on the Point
+# layer of the same service the flowlines come from. The site data
+# report's Water section asks for them by name; it is one more query over
+# the same bbox, and the honest common answer -- none mapped -- is a real
+# finding that the section states with the field-verification caveat.
+# NOT on the Layer 1 path: parcel_data.fetch_parcel_data() is unchanged;
+# report_data.fetch_report_data() calls this at report time.
+POINT_LAYER = 0
+SPRING_SEEP_FCODE = 45800
+
+
+@fetch_attempts.publishes
+def get_nhd_points_for_boundary(
+    boundary_coordinates: list[tuple[float, float]], buffer_meters: float = 150
+) -> list[dict]:
+    """
+    Every NHD point feature in the boundary's bbox plus buffer_meters:
+    [{name, feature_code, feature_type, geometry, permanent_identifier}].
+    A spring or seep carries feature_code SPRING_SEEP_FCODE; other point
+    types (gaging stations, dam points, ...) come back too and the caller
+    picks. Same fetch box, same retry loop as the flowlines.
+    """
+    bbox = _bounding_box(boundary_coordinates, buffer_meters=buffer_meters)
+    rows = []
+    for f in _query_layer(POINT_LAYER, bbox):
+        # The Point layer publishes its fields in UPPER CASE (GNIS_NAME,
+        # FCODE), the flowline layer in lower case; read either.
+        props = {str(k).lower(): v for k, v in (f.get("properties") or {}).items()}
+        rows.append({
+            "name": props.get("gnis_name"),
+            "feature_code": props.get("fcode"),
+            "feature_type": props.get("ftype"),
+            "geometry": f.get("geometry"),
+            "permanent_identifier": props.get("permanent_identifier") or props.get("objectid"),
+        })
+    return rows
+
+
+def springs_and_seeps(points: Optional[list]) -> list[dict]:
+    """The spring/seep rows among get_nhd_points_for_boundary()'s output."""
+    out = []
+    for row in points or []:
+        try:
+            if int(row.get("feature_code")) == SPRING_SEEP_FCODE:
+                out.append(row)
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
 def summarize_water_features(features: dict) -> str:
     """Plain-language summary of what water features were found nearby."""
     streams = features["streams"]

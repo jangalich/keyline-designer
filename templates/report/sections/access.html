@@ -1,0 +1,56 @@
+{#- THE ACCESS SECTION -- TWO PAGES, AN INVENTORY. The map page: eyebrow,
+    heading, the summary line (frontage, the drivable boundary and the
+    very-limited soil share as a sentence), the access map at LANDFORM'S
+    EXTENT AND SCALE (contours set back, the frontage band, undrivable
+    hachures, mapped roads on their casing, the track dashed) with its
+    legend and the terrain-constraints caption, and the frontage table
+    with its caption. The numbers page: the continuation eyebrow, the
+    soil road-construction table with its caption, the sources. No
+    key-figures panel.
+
+    THE SPILL RULE (section.spill): with frontage on more roads than the
+    map page holds beneath the map, the frontage table and its caption
+    move whole to the numbers page above the soil table, and the map
+    caption says so. Every road stays listed; nothing is condensed or
+    truncated. No styling here, no numbers here: `section` is
+    access_section.build_access_section()'s dict, every value already
+    formatted. A degradable source that did not answer leaves its
+    statement where its table would be. -#}
+{% import "components/eyebrow.html" as c1 %}
+{% import "components/heading.html" as c2 %}
+{% import "components/summary.html" as c3 %}
+{% import "components/data_table.html" as c5 %}
+{% import "components/source_footer.html" as c6 %}
+{% import "components/map.html" as c7 %}
+{% import "components/caption.html" as c9 %}
+{% macro frontage() -%}
+{%- if section.frontage_table %}
+    {{ c5.data_table(section.frontage_table) }}
+{%- endif %}
+    {{ c9.caption(section.frontage_caption) }}
+{%- endmacro %}
+<section class="section section--access section--map">
+  <div class="section__figures">
+    {{ c1.eyebrow(section.number, section.name) }}
+    {{ c2.heading(section.heading) }}
+    {{ c3.summary(section.summary) }}
+    {{ c7.map(section.map) }}
+    {{ c9.caption(section.map_caption) }}
+{%- if not section.spill %}
+    {{ frontage() }}
+{%- endif %}
+  </div>
+  <div class="section__detail">
+    {{ c1.eyebrow(section.number, section.name, continued=True) }}
+{%- if section.spill %}
+    {{ frontage() }}
+{%- endif %}
+{%- if section.soil_table %}
+    {{ c5.data_table(section.soil_table) }}
+    {{ c9.caption(section.soil_caption) }}
+{%- else %}
+    {{ c9.unavailable(section.soil_unavailable) }}
+{%- endif %}
+    {{ c6.source_footer({"lines": section.sources}) }}
+  </div>
+</section>

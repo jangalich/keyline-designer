@@ -195,6 +195,220 @@ th.num {
 .section--map .section__detail {
   break-before: page;
 }
+/* LANDFORM IS THREE PAGES: the terrain, then the keyline structure (a
+   second map at the same extent and the valley profile), then the
+   numbers. The structure page is its own block; the eyebrow on it and on
+   the numbers page reads ", continued". */
+.section--map .section__structure {
+  break-before: page;
+}
+.section__structure .report-map {
+  margin-bottom: var(--space-2);
+}
+.section__structure .caption {
+  margin-bottom: var(--space-4);
+}
+.eyebrow--continued {
+  margin-bottom: var(--space-4);
+}
+/* THE TERRAIN PAGE holds the summary, the map with its legend and the
+   slope table beneath it -- the map's legend in numbers -- which fits
+   only with the summary and the map sitting closer; the compact table's
+   rows give up a point each. Measured: 161 pt under the map at the
+   section's usual spacing against a 172 pt table. */
+.section--landform .section__figures .summary {
+  margin-bottom: var(--space-4);
+}
+.section--landform .section__figures .report-map {
+  margin-bottom: var(--space-2);
+}
+.section--landform .section__figures .data-table--compact th,
+.section--landform .section__figures .data-table--compact td {
+  padding-top: 2pt;
+  padding-bottom: 2pt;
+}
+/* The numbers page holds nine key figures, two tables, a caption and
+   the footer: the panel and the tables sit closer, as Climate's do. */
+.section--landform .key-figures {
+  padding: var(--space-3) var(--space-5);
+  row-gap: var(--space-3);
+  margin-bottom: var(--space-3);
+}
+.section--landform .data-table {
+  margin-bottom: var(--space-2);
+}
+.section--landform .section__detail .caption {
+  margin-bottom: var(--space-3);
+}
+/* WATER IS THREE PAGES ON LANDFORM'S RHYTHM: the hydrology map with the
+   surface-water table under it; the wetness map with the seasonal water
+   table under it; the numbers. The same blocks, the same breaks; the
+   twelve-column water table takes the monthly form's tighter cells. */
+.section--water .section__figures .summary,
+.section--water .section__structure .summary {
+  margin-bottom: var(--space-4);
+}
+.section--water .report-map {
+  margin-bottom: var(--space-2);
+}
+.section--water .section__figures .data-table th,
+.section--water .section__figures .data-table td {
+  padding-top: 2pt;
+  padding-bottom: 2pt;
+}
+/* The numbers page holds nine key figures, THREE tables, three captions
+   and a seven-line footer; the wetness page a map and a twelve-row table.
+   Measured against the page: the panel, the tables and the captions sit
+   closer than Landform's, and the monthly cells give up a point. */
+.section--water .key-figures {
+  padding: var(--space-2) var(--space-5);
+  row-gap: var(--space-2);
+  margin-bottom: var(--space-2);
+}
+.section--water .data-table {
+  margin-bottom: var(--space-1);
+}
+.section--water .caption {
+  margin-bottom: var(--space-2);
+}
+.section--water .section__structure .report-map {
+  margin-bottom: var(--space-1);
+}
+.section--water .section__detail .data-table th,
+.section--water .section__detail .data-table td {
+  padding-top: 2pt;
+  padding-bottom: 2pt;
+}
+.data-table--monthly th,
+.data-table--monthly td {
+  padding: 1.5pt 3.5pt;
+}
+/* The wetness page: the map, its legend and caption, then twelve rows.
+   Measured 20 pt short of the page at the body leading; the water
+   table's rows take a tighter leading, which is what fits it under the
+   map. Scoped to this section: Climate's monthly table is unchanged. */
+.section--water .data-table--monthly th,
+.section--water .data-table--monthly td {
+  line-height: 1.25;
+  padding: 1pt 2.5pt;
+}
+.section--water .section__structure .caption {
+  margin-bottom: var(--space-1);
+}
+/* THE LABEL COLUMN IS SIZED, NOT LEFT TO THE AUTO LAYOUT: with the table
+   at the full measure the auto algorithm hands the spare width to the
+   twelve numeric columns and wraps every label. A third of the measure
+   holds "Guernsey-Vandergrift, 4.4 ac" on one line; a name that runs
+   longer still ("Gilpin, Weikert, Culleoka") wraps rather than push the
+   columns past the measure. */
+.section--water .data-table--monthly th.label {
+  width: 33%;
+}
+.section--water .data-table--monthly td.label {
+  white-space: normal;
+}
+.data-table--monthly thead th {
+  padding-top: var(--space-1);
+  padding-bottom: var(--space-1);
+}
+/* A PROSE COLUMN in a data table (cell kind "text": the Access section's
+   limiting features): the prose face, set left, wrapping, in the page's
+   ink -- the words are the content of that table, not a note beside it. */
+.data-table td.text {
+  font-family: var(--font-prose);
+  text-align: left;
+  white-space: normal;
+  color: var(--ink);
+  line-height: 1.35;
+}
+.data-table th.text {
+  text-align: left;
+  white-space: nowrap;
+}
+.data-table--compact td.text {
+  max-width: 3.6in;
+}
+/* ACCESS IS TWO PAGES ON LANDFORM'S RHYTHM: the map at Landform's
+   extent and scale with the frontage table under it, then the soil table
+   and the sources. The map page's spacing is Water's: with more road
+   rows than fit beneath the map the frontage table moves whole to the
+   second page (the template's section.spill). */
+.section--access .summary {
+  margin-bottom: var(--space-4);
+}
+.section--access .report-map {
+  margin-bottom: var(--space-1);
+}
+.section--access .data-table {
+  margin-bottom: var(--space-1);
+}
+.section--access .data-table th,
+.section--access .data-table td {
+  padding-top: 2pt;
+  padding-bottom: 2pt;
+}
+.section--access .caption {
+  margin-bottom: var(--space-2);
+  max-width: none;
+}
+.section--access .source-footer {
+  padding-top: var(--space-1);
+}
+/* The soil table's prose column takes the width the figures do not need,
+   so a class's five features sit on one line. */
+.section--access .data-table td.text,
+.section--access .data-table th.text {
+  width: 58%;
+}
+/* A BOUND IS NOT A MEASUREMENT: "> 72" is the depth a water table is
+   deeper than, set muted so a column of depths cannot be read across it;
+   a WORD in a numeric column -- "no data" -- takes the prose face. */
+.data-table td.num--bound {
+  color: var(--ink-muted);
+}
+.data-table td.num--word {
+  font-family: var(--font-prose);
+  font-style: italic;
+  color: var(--ink-muted);
+}
+
+/* A SECTION WITH A CHART TAKES THE SAME TWO PAGES: the pictures and the
+   takeaway first, the numbers second (Climate). Its second page holds
+   nine key figures, a nine-row table, two compact tables, four captions
+   and five source lines, so the panel and the tables sit closer than
+   the map sections' do: the same components, tighter margins. */
+.section--chart .section__detail {
+  break-before: page;
+}
+.section--chart .key-figures {
+  padding: var(--space-3) var(--space-5);
+  margin-bottom: var(--space-3);
+}
+.section--chart .data-table {
+  margin-bottom: var(--space-2);
+}
+/* Thirteen columns must fit the measure: the monthly table's cells give
+   up a point and a half of side padding each. Measured, not guessed --
+   test_site_report.py holds every box inside the content width. */
+.section--chart .data-table th,
+.section--chart .data-table td {
+  padding: 2.5pt 4.5pt;
+}
+.section--chart .data-table thead th {
+  padding-top: var(--space-1);
+  padding-bottom: var(--space-1);
+}
+.section--chart .key-figures {
+  row-gap: var(--space-3);
+}
+.section--chart .caption {
+  margin-bottom: var(--space-2);
+}
+/* The two compact tables stack, design storms above severe weather,
+   each at its own content width: side by side they overran the measure. */
+.section--chart .data-table--compact {
+  margin-bottom: var(--space-1);
+}
 
 /* 1. Eyebrow */
 .eyebrow {
@@ -340,10 +554,14 @@ th.num {
   margin: 0 0 var(--space-4) 0;
   break-inside: avoid;
 }
+/* The frame is drawn at its own size and centred: report_map narrows it
+   to the parcel (fitted_frame), and a narrowed frame scaled back up to
+   the measure would change the scale the scale bar claims. */
 .report-map__frame svg {
   display: block;
-  width: 100%;
+  max-width: 100%;
   height: auto;
+  margin: 0 auto;
 }
 .report-map__legend {
   list-style: none;
@@ -368,6 +586,49 @@ th.num {
   font-size: var(--text-eyebrow);
 }
 
+/* 8. Chart -- report_chart's SVG at full content width, then the same
+   legend strip the map uses. The legend strip is shorter than the map's:
+   a chart's legend is one row, and a chart without one takes no strip. */
+.report-chart {
+  display: block;
+  margin: 0 0 var(--space-1) 0;
+  break-inside: avoid;
+}
+.report-chart__frame svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+.report-chart__legend {
+  min-height: 13pt;
+  margin-top: var(--space-1);
+}
+
+/* 9. Caption -- one line under a figure or table: the one caveat that
+   could change a decision. Smaller than the footer, muted, italic like
+   the footer's caveat so the two read as one voice. */
+.caption {
+  font-size: var(--text-label);
+  font-style: italic;
+  line-height: 1.4;
+  color: var(--ink-muted);
+  margin: 0 0 var(--space-3) 0;
+  max-width: 6.4in;
+}
+.caption .data {
+  font-style: normal;
+  font-size: 7.5pt;
+}
+/* The statement that stands in a missing figure's place: the page's own
+   size and colour, so it reads as content, not as a note. */
+.unavailable {
+  font-size: var(--text-body);
+  line-height: 1.45;
+  color: var(--ink);
+  margin: 0 0 var(--space-4) 0;
+  max-width: 6.4in;
+}
+
 /* 6. Source footer -- the caveat, then the citation smaller */
 .source-footer {
   color: var(--ink-muted);
@@ -388,4 +649,7 @@ th.num {
 .source-footer .data {
   font-style: normal;
   font-size: 8pt;
+}
+.source-footer__line {
+  margin: 0 0 1.5pt 0;
 }

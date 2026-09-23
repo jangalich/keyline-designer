@@ -3,19 +3,29 @@
     header row.
 
     `table` is {corner, columns: [str], rows: [{label, cells: [str]}],
-    compact?}. A row label is a string (prose) or a list of summary-style
-    parts, so a code inside it -- a slope class letter -- can be set as
-    data. `compact` sizes the table to its content instead of the full
-    measure -- for a table of three or four narrow columns.
-    Every value arrives ALREADY FORMATTED by the section builder (unit
-    conversion and rounding are its job); this macro sets and aligns. -#}
+    compact?, monthly?}. A row label is a string (prose) or a list of
+    summary-style parts, so a code inside it -- a slope class letter -- can
+    be set as data. `compact` sizes the table to its content instead of the
+    full measure -- for a table of three or four narrow columns; `monthly`
+    is the twelve-column form (Climate's table, the seasonal water table),
+    whose cells give up side padding to fit the measure.
+    A CELL is a string, set in the data face, or a mapping {value, kind}:
+    kind "bound" is a limit, not a measurement -- "> 72", the depth a water
+    table is deeper than -- and is set muted so it cannot read as a depth;
+    kind "word" is prose in a numeric column -- "no data" -- and takes the
+    prose face; kind "text" is a PROSE COLUMN -- the Access section's
+    limiting features -- set left, wrapping, in the page's ink, so the
+    words that matter are not subordinate to the figures beside them.
+    Every value arrives ALREADY FORMATTED by the section
+    builder (unit conversion and rounding are its job); this macro sets and
+    aligns. -#}
 {% macro data_table(table) -%}
-<table class="data-table{% if table.compact %} data-table--compact{% endif %}">
+<table class="data-table{% if table.compact %} data-table--compact{% endif %}{% if table.monthly %} data-table--monthly{% endif %}">
   <thead>
     <tr>
       <th class="label">{{ table.corner }}</th>
 {%- for column in table.columns %}
-      <th class="num">{{ column }}</th>
+      <th class="{{ 'text' if column in (table.text_columns or []) else 'num' }}">{{ column }}</th>
 {%- endfor %}
     </tr>
   </thead>
@@ -29,7 +39,13 @@
 {%- endfor -%}
 {%- endif -%}</td>
 {%- for value in row.cells %}
+{%- if value is mapping and value.kind == "text" %}
+      <td class="text">{{ value.value }}</td>
+{%- elif value is mapping %}
+      <td class="num num--{{ value.kind }}">{{ value.value }}</td>
+{%- else %}
       <td class="num">{{ value }}</td>
+{%- endif %}
 {%- endfor %}
     </tr>
 {%- endfor %}

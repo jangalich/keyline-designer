@@ -202,7 +202,27 @@ full = render_map(
 svg = full["svg"]
 document = minidom.parseString(svg)
 root = document.documentElement
-assert root.getAttribute("width") == f"{width:.2f}pt" and root.getAttribute("viewBox") == f"0 0 {width:.2f} {height:.2f}"
+# THE FRAME IS FITTED TO THE PARCEL (fitted_frame): the tall reference boundary in the wide frame would leave
+# 126 m of empty ground either side, so the width is cut to MAX_CONTEXT_MARGIN_M beyond the bbox; the height, and
+# so the scale, is the full frame's. A wide parcel is width-limited and keeps the full frame.
+from report_map import MAX_CONTEXT_MARGIN_M, fitted_frame, render_map as _render, visible_extent_utm  # noqa: E402
+fitted_w, fitted_h = full["frame"]
+assert fitted_h == height and fitted_w < width and fitted_frame(BOUNDARY_POLYGON_UTM) == (fitted_w, fitted_h)
+assert root.getAttribute("width") == f"{fitted_w:.2f}pt" and root.getAttribute("viewBox") == f"0 0 {fitted_w:.2f} {fitted_h:.2f}"
+assert full["meters_per_unit"] == plain["meters_per_unit"], "the cut changes no scale"
+fx0, _, fx1, _ = full["drawn_bbox"]
+assert abs((fx0 - MARGIN_PT) * full["meters_per_unit"] - MAX_CONTEXT_MARGIN_M) < 1e-6
+assert abs((fitted_w - MARGIN_PT - fx1) * full["meters_per_unit"] - MAX_CONTEXT_MARGIN_M) < 1e-6
+vx0, vy0, vx1, vy1 = visible_extent_utm(BOUNDARY_POLYGON_UTM)
+assert abs((minx - vx0) - MAX_CONTEXT_MARGIN_M - MARGIN_PT * full["meters_per_unit"]) < 1e-6 and vx1 > maxx and vy1 > maxy > miny > vy0
+wide = affine_scale(BOUNDARY_POLYGON_UTM, xfact=4.0, yfact=1.0)
+assert fitted_frame(wide) == FRAME, "a width-limited parcel keeps the whole frame"
+# A NOTE ON THE MAP: prose face, muted ink, centred on the point, between the layers and the boundary.
+noted = _render(BOUNDARY_POLYGON_UTM, [], TOKENS, note={"lines": ["Nothing mapped", "on the parcel."], "point": BOUNDARY_POLYGON_UTM.representative_point()})
+assert '<g id="map-note">' in noted["svg"] and noted["svg"].index("map-note") < noted["svg"].index("parcel-boundary")
+note_texts = [t for t in minidom.parseString(noted["svg"]).getElementsByTagName("text") if t.firstChild.data in ("Nothing mapped", "on the parcel.")]
+assert len(note_texts) == 2 and all(t.getAttribute("fill") == TOKENS["ink-muted"] and t.getAttribute("font-family") == "Source Serif 4" for t in note_texts)
+assert "map-note" not in plain["svg"]
 texts = root.getElementsByTagName("text")
 assert texts, "the map has no text"
 for text in texts:
@@ -250,7 +270,7 @@ for t in labels:
     angle = float(t.getAttribute("transform")[len("rotate("):].split()[0])
     assert -90 < angle <= 90, angle
 # A label on a layer that is not a line, or a count that does not match, is refused.
-for bad in (dict(kind="point", labels=["x"]), dict(kind="line", labels=["a", "b"])):
+for bad in (dict(kind="polygon", labels=["x"]), dict(kind="line", labels=["a", "b"])):
     try:
         layer("bad", [Point(0, 0)], stroke="ink", **bad)
     except ValueError:
@@ -260,6 +280,45 @@ for bad in (dict(kind="point", labels=["x"]), dict(kind="line", labels=["a", "b"
 # The keypoint is the asterisk convention: three strokes through one point.
 keypoint_group = [g for g in root.getElementsByTagName("g") if g.getAttribute("id") == "layer-keypoints"][0]
 assert len(keypoint_group.getElementsByTagName("line")) == 3
+# The dot marker: one filled circle in the stroke token, on the map and in the swatch; a set-back line
+# carries stroke-opacity; an unknown marker is refused.
+dotted = render_map(
+    BOUNDARY_POLYGON_UTM,
+    [layer("dots", [Point((minx + maxx) / 2, (miny + maxy) / 2)], kind="point", stroke="ink-muted", marker="dot", legend="Dots"),
+     layer("faint", [LineString([(minx + 50, miny + 50), (maxx - 50, maxy - 50)])], kind="line", stroke="terrain", stroke_opacity=0.55)],
+    TOKENS,
+)
+dot_group = [g for g in minidom.parseString(dotted["svg"]).documentElement.getElementsByTagName("g") if g.getAttribute("id") == "layer-dots"][0]
+circles = dot_group.getElementsByTagName("circle")
+# A halo in the page colour under the dot, so it reads as a point on a line rather than a thickening of it.
+assert len(circles) == 2 and not dot_group.getElementsByTagName("line")
+assert circles[0].getAttribute("fill") == TOKENS["page"] and float(circles[0].getAttribute("r")) == report_map.DOT_RADIUS_PT + report_map.DOT_HALO_PT
+assert circles[1].getAttribute("fill") == TOKENS["ink-muted"] and float(circles[1].getAttribute("r")) == report_map.DOT_RADIUS_PT
+assert "<circle" in dotted["legend"][0]["swatch"] and "<line" not in dotted["legend"][0]["swatch"]
+# A point layer's labels are set beside the marker, in the data face, in the layer's own token; None sets nothing.
+labelled_points = render_map(
+    BOUNDARY_POLYGON_UTM,
+    [layer("pts", [Point(minx + 100, miny + 100), Point(maxx - 100, maxy - 100)], kind="point", stroke="ink", marker="dot", labels=["1,173", None])],
+    TOKENS,
+)
+pts_texts = [t for t in minidom.parseString(labelled_points["svg"]).documentElement.getElementsByTagName("text")
+             if t.parentNode.getAttribute("id") == "layer-pts"]
+assert [t.firstChild.data for t in pts_texts] == ["1,173"] and pts_texts[0].getAttribute("font-family") == "IBM Plex Mono"
+assert pts_texts[0].getAttribute("fill") == TOKENS["ink"] and pts_texts[0].getAttribute("text-anchor") == "start"
+assert labelled_points["labels_placed"] == {}, "point labels always fit; only line layers report placements"
+# A labelled line layer reports which labels were set, by the same rule the renderer applies.
+assert full["labels_placed"] == {"index-contours": report_map.label_placements(BOUNDARY_POLYGON_UTM, index_layer)}
+assert any(full["labels_placed"]["index-contours"]) and len(full["labels_placed"]["index-contours"]) == len(index_layer["labels"])
+short = layer("short", [LineString([(minx + 10, miny + 10), (minx + 12, miny + 12)])], kind="line", stroke="ink", labels=["1,000"])
+assert report_map.label_placements(BOUNDARY_POLYGON_UTM, short) == [False], "a part too short to carry its label drops it"
+faint_group = dotted["svg"].split('<g id="layer-faint">', 1)[1].split("</g>", 1)[0]
+assert 'stroke-opacity="0.55"' in faint_group and "stroke-opacity" not in svg, "opacity only when set back"
+try:
+    layer("bad", [Point(0, 0)], kind="point", stroke="ink", marker="star")
+except ValueError:
+    pass
+else:
+    raise AssertionError("an unknown marker must be refused")
 # The boundary is in ink at the boundary weight; contours in terrain.
 boundary_path = [p for p in root.getElementsByTagName("path") if p.getAttribute("id") == "parcel-boundary"][0]
 assert boundary_path.getAttribute("stroke") == TOKENS["ink"]

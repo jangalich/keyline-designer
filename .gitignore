@@ -13,3 +13,5 @@ __pycache__/
 # DIFFERENT machine or a different run, so a checked-in one would be
 # somebody else's evidence sitting where yours belongs.
 diagnostics/
+_spc_download/
+_normals_download/

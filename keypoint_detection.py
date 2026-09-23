@@ -28,15 +28,17 @@ D8 hydrology):
         --> per valley: outlet = highest-accumulation branch endpoint; trace
             the main stem UPSTREAM FROM THE OUTLET, always taking the
             highest-accumulation feeder, until the valley runs out
+        --> drop any valley with no stem cell within KEYPOINT_BOUNDARY_
+            MARGIN_METERS of the drawn boundary (the buffered window holds
+            valleys that are not this property's)
         --> sample RAW elevation + cumulative distance along the stem,
             smooth, take cell-to-cell slope percent, smooth again
         --> locate the keypoint by a TWO-SEGMENT LEAST-SQUARES FIT over the
-            long profile, restricted to splits where slope actually drops
+            long profile, restricted to splits where slope actually drops AND
+            that lie within the boundary margin, flag on/off parcel
         --> fill-artifact + stem-length gates -> one keypoint per valley
-        --> boundary margin: keep any keypoint within KEYPOINT_BOUNDARY_
-            MARGIN_METERS of the drawn boundary, flag on/off parcel
 
-FOUR CRITERIA THAT FAILED, encoded here so they are not reintroduced (each
+FIVE CRITERIA THAT FAILED, encoded here so they are not reintroduced (each
 was diagnosed from a real dead end -- see the tests for the executable
 form):
 
@@ -88,6 +90,24 @@ form):
      PCT over KEYPOINT_MIN_RUN_CELLS either side) moves every affected valley
      onto a legitimate inflection.
 
+  5. Make the boundary margin part of the CHOICE, not a filter on it.
+     The margin used to be applied after the fit had already committed the
+     valley to its globally best split, so a valley running straight through
+     the parcel reported NOTHING whenever that one split happened to land
+     further out in the buffer than the margin allows -- the admissible
+     splits it also held were never ranked. Measured on the reference
+     property: the 8.17-acre valley carries 150 m of channel across the
+     parcel and 13 eligible on-parcel splits, and returned no keypoint at
+     all, because its best fit sat 47 m out. Since where a keypoint may sit
+     is known before any line is fitted, it belongs in the candidate set
+     (two_segment_keypoint_split's position_is_eligible), and the valley then
+     answers with its best ADMISSIBLE split. This is not a relaxed gate: the
+     margin is enforced exactly as before, and nothing beyond it is ever
+     returned -- what changed is that a valley is no longer silenced by a
+     split it was never allowed to use. Contrast the marsh gate, which stays
+     a filter on the chosen split for the reason recorded at its own call
+     site.
+
 A GATE THAT WAS TRIED AND IS DELIBERATELY NOT INCLUDED: a normalised two-
 segment residual gate (residual as a fraction of the profile's elevation
 variance) accepted 14 of 14 valleys with values clustering in 0.0010-0.0058
@@ -134,15 +154,16 @@ _LOGGER = logging.getLogger(__name__)
 #
 # CALIBRATION CAVEAT (repeated in every constant's docstring below): every
 # KEYPOINT_* threshold here was tuned against TWO independently-drawn
-# boundaries of a SINGLE ~16-acre reference property. None has been validated
-# on any other property. Treat them as a first calibration, not a settled
-# default.
+# boundaries of a SINGLE 13.23-acre reference property (the drawn boundary in
+# reference_fixture.py; these caveats said "~16-acre" until it was measured).
+# None has been validated on any other property. Treat them as a first
+# calibration, not a settled default.
 # --------------------------------------------------------------------------
 
 # Cells over which the raw elevation profile (and, separately, the derived
 # slope profile) is smoothed with a centered moving average before the
 # inflection search -- enough to damp single-cell DEM noise without erasing a
-# real slope break. Tuned against two boundaries of one ~16-acre reference
+# real slope break. Tuned against two boundaries of one 13.23-acre reference
 # property; NOT validated elsewhere. CONFIGURABLE.
 KEYPOINT_PROFILE_SMOOTH_CELLS = 5
 
@@ -151,7 +172,7 @@ KEYPOINT_PROFILE_SMOOTH_CELLS = 5
 # at least this many cells for the split to be considered, and the slope-drop
 # window (mean slope above vs below) is measured over exactly this many
 # slopes on each side. Guards against a one-cell blip being read as an
-# inflection. Tuned against two boundaries of one ~16-acre reference
+# inflection. Tuned against two boundaries of one 13.23-acre reference
 # property; NOT validated elsewhere. CONFIGURABLE.
 KEYPOINT_MIN_RUN_CELLS = 6
 
@@ -160,7 +181,7 @@ KEYPOINT_MIN_RUN_CELLS = 6
 # keypoint candidate at all. This is fix #4 in the module docstring: without
 # it the least-squares fit can settle on a split where slope INCREASES
 # downstream, the opposite of a keypoint. Tuned against two boundaries of one
-# ~16-acre reference property; NOT validated elsewhere. CONFIGURABLE.
+# 13.23-acre reference property; NOT validated elsewhere. CONFIGURABLE.
 KEYPOINT_MIN_SLOPE_DROP_PCT = 3.0
 
 # The marsh gate. A keypoint whose fill depth (filled minus raw elevation at
@@ -171,26 +192,39 @@ KEYPOINT_MIN_SLOPE_DROP_PCT = 3.0
 # alongside fix #1 (raw profiling): the inflection on a filled profile lands
 # at the pit RIM, where fill depth is ~0, so the fill gate alone would not
 # catch it -- raw profiling is what does; this catches the residual case.
-# Tuned against two boundaries of one ~16-acre reference property; NOT
+# Tuned against two boundaries of one 13.23-acre reference property; NOT
 # validated elsewhere. CONFIGURABLE.
 KEYPOINT_FILL_ARTIFACT_THRESHOLD_M = 0.15
 
 # Boundary margin. delineate_valleys() runs on the buffered DEM, so valleys
-# extending past the property line are found and their keypoints may sit off
-# it. A keypoint is kept if it is inside the drawn boundary OR within this
-# distance of it, and flagged (on_parcel / distance_outside_boundary_m); one
-# any further outside is dropped.
+# extending past the property line are found and their stems run off it. This
+# distance is what "near the drawn boundary" means, and it does THREE things
+# in detect_keypoints(): a valley with no stem cell this close is dropped
+# before it is profiled; the two-segment fit may only choose among stem cells
+# this close; and the chosen keypoint is flagged and measured (on_parcel /
+# distance_outside_boundary_m). Nothing further outside is ever returned.
 #
 # The justification is DRAWING PRECISION, not terrain: a boundary traced by
 # hand over aerial imagery is easily 10-25 m off, so a keypoint 14 m outside
-# is within the error of the line rather than genuinely off the property. On
-# the ~16-acre reference property, 8 of 14 keypoints landed on-parcel; the
-# off-parcel distances were 14, 20, 52, 125, 231, and 236 m. 25 m sits in the
-# clean gap between 20 and 52 in that observed data. The two keypoints this
-# margin retains are that property's most significant -- 6.36 and 6.69 ac of
-# catchment, found independently from two different drawn boundaries at 346.5
-# m and 347.0 m elevation, i.e. the same ground. Tuned against two boundaries
-# of one ~16-acre reference property; NOT validated elsewhere. CONFIGURABLE.
+# is within the error of the line rather than genuinely off the property.
+#
+# THE OBSERVED DATA BEHIND 25 m, re-measured 2026-09-22 on a live 3DEP fetch
+# for the reference property. Taking each primary valley's UNCONSTRAINED best
+# split (the positions that set the threshold, before the margin narrows the
+# choice): 1 of 4 landed on-parcel and the off-parcel distances were 19.6,
+# 47.1 and 228.4 m. 25 m sits in the clean gap between 19.6 and 47.1.
+#
+# The earlier note here cited a different dataset -- 8 of 14 keypoints
+# on-parcel, off-parcel distances 14, 20, 52, 125, 231, 236 m, and two
+# retained keypoints of 6.36/6.69 ac at 346.5/347.0 m. Those figures were
+# measured before d4dc2ee ("Epsilon fill: filled flats get a defined flow
+# direction") corrected a flow field that dead-ended on 73 interior cells and
+# split this property's drainage into 8 valleys where there are 4. They are
+# recorded here only so nobody looks for the keypoints they name: the code no
+# longer produces them, and the gap those distances showed (20 to 52 m) is not
+# the gap 25 m now sits in. The VALUE has not moved; its evidence has been
+# replaced. Tuned against two boundaries of one 13.23-acre reference property;
+# NOT validated elsewhere. CONFIGURABLE.
 KEYPOINT_BOUNDARY_MARGIN_METERS = 25.0
 
 
@@ -204,7 +238,7 @@ KEYPOINT_CONFIDENCE_NOTES = (
     "field-verified, inherits every limitation of the DEM and the D8 valley "
     "delineation beneath it (see valley_delineation.py), and every detection "
     "threshold was tuned against two independently-drawn boundaries of a "
-    "single ~16-acre reference property and has NOT been validated elsewhere. "
+    "single 13.23-acre reference property and has NOT been validated elsewhere. "
     "A keypoint may legitimately sit just outside the drawn boundary (within "
     "a small margin for hand-drawing precision -- see distance_outside_"
     "boundary_m / on_parcel); flow paths do not stop at a property line. "
@@ -391,6 +425,7 @@ def two_segment_keypoint_split(
     slope_pct: np.ndarray,
     min_run_cells: int,
     min_slope_drop_pct: float,
+    position_is_eligible=None,
 ) -> Optional[tuple[int, float, float, float, float]]:
     """
     Locates the keypoint by the two-segment least-squares fit (fix #3), among
@@ -408,11 +443,20 @@ def two_segment_keypoint_split(
     min_slope_drop_pct -- without this the fit can settle where slope
     increases downstream, the opposite of a keypoint.
 
+    position_is_eligible, when given, is an additional per-position predicate
+    (k -> bool) narrowing the candidate set BEFORE the fit chooses. It exists
+    for the boundary margin (see detect_keypoints): a constraint on WHERE a
+    keypoint may sit has to be part of the choice, not a filter applied to the
+    choice, or a valley whose best-fitting split falls outside the constraint
+    reports nothing at all rather than its best admissible split. Omitted, the
+    candidate set is exactly the slope-dropping positions, as before.
+
     Among eligible splits, the chosen k minimises the total residual sum of
     squares of the two independent OLS lines (elevation vs distance). Returns
     (k, slope_above_pct, slope_below_pct, slope_drop_pct, total_residual), or
-    None if no eligible split exists (too short a profile, or slope never
-    drops by the required amount -- the honest "no keypoint here" answer).
+    None if no eligible split exists (too short a profile, slope never drops
+    by the required amount, or nothing satisfying position_is_eligible -- the
+    honest "no keypoint here" answer).
     """
     n = len(elevation)
     best = None
@@ -422,6 +466,8 @@ def two_segment_keypoint_split(
         slope_drop = slope_above - slope_below
         if slope_drop < min_slope_drop_pct:
             continue
+        if position_is_eligible is not None and not position_is_eligible(k):
+            continue
         residual = (
             _line_residual_sum_of_squares(distance[:k + 1], elevation[:k + 1])
             + _line_residual_sum_of_squares(distance[k:], elevation[k:])
@@ -429,6 +475,27 @@ def two_segment_keypoint_split(
         if best is None or residual < best[4]:
             best = (k, slope_above, slope_below, slope_drop, residual)
     return best
+
+
+def _stem_boundary_margin(stem: list, dem: dict, boundary_polygon_utm) -> list:
+    """
+    Measures every stem cell against the drawn boundary ONCE per valley,
+    returning [(point, on_parcel, distance_outside_boundary_m), ...] in stem
+    order (0.0 outside-distance when the cell is on the parcel).
+
+    One pass, read three times: by the valley-level margin gate, by the fit's
+    per-split eligibility test, and by the surviving keypoint's own
+    on_parcel / distance_outside_boundary_m fields. Measuring inside the fit
+    loop instead would repeat a shapely distance per candidate split.
+    """
+    measured = []
+    for row, col in stem:
+        point = Point(*pixel_center_xy(dem, row, col))
+        if boundary_polygon_utm.contains(point) or boundary_polygon_utm.touches(point):
+            measured.append((point, True, 0.0))
+        else:
+            measured.append((point, False, float(point.distance(boundary_polygon_utm))))
+    return measured
 
 
 def detect_keypoints(
@@ -466,17 +533,23 @@ def detect_keypoints(
     main stem is traced upstream from it (trace_stem_from_outlet()); the RAW-
     elevation long profile is sampled and smoothed along the stem; the
     keypoint is the two-segment-fit split among slope-dropping positions
+    WITHIN boundary_margin_meters of the drawn boundary
     (two_segment_keypoint_split()).
 
     Gates -- a valley yields NO keypoint if:
       * its stem is shorter than 2 * min_run_cells + 2 cells (too short to
         hold a steep run, a gentle run, and a split between them);
+      * no stem cell at all is within boundary_margin_meters of the drawn
+        boundary (the valley is somewhere else in the buffered DEM window and
+        has nothing to say about this property);
       * no split has a slope drop of at least min_slope_drop_pct (the profile
         is effectively straight -- no inflection);
+      * every such split is more than boundary_margin_meters outside the
+        drawn boundary;
       * the chosen split sits on ground the fill raised by more than
-        fill_artifact_threshold_m (the marsh gate);
-      * the keypoint is more than boundary_margin_meters outside the drawn
-        boundary.
+        fill_artifact_threshold_m (the marsh gate).
+    The margin CONSTRAINS THE CHOICE; the marsh gate FILTERS IT. See the
+    inline comments at each -- the order is the point, not an accident.
     There is deliberately NO catchment gate, NO deduplication, NO production
     exclusion, and NO residual/normalised-fit gate (see the module
     docstring for why each was rejected).
@@ -530,6 +603,7 @@ def detect_keypoints(
     stats = {
         "valleys": len(valleys),
         "rejected_short_stem": 0,
+        "rejected_valley_off_margin": 0,
         "rejected_no_slope_drop": 0,
         "rejected_fill_artifact": 0,
         "rejected_off_margin": 0,
@@ -546,6 +620,24 @@ def detect_keypoints(
             stats["rejected_short_stem"] += 1
             continue
 
+        # The margin, measured over the whole stem before anything is fitted.
+        # delineate_valleys() runs on the BUFFERED dem, so some primary
+        # valleys never come within reach of the drawn boundary at all; one
+        # with no stem cell inside the margin has nothing to say about this
+        # property and is dropped here rather than profiled and then thrown
+        # away. (Behaviourally the same as letting the fit find nothing
+        # eligible below -- this is what makes the diagnostics say which of
+        # the two actually happened.)
+        stem_margin = _stem_boundary_margin(stem, dem, boundary_polygon_utm)
+
+        def within_margin(index, _margin=stem_margin):
+            _point, on_parcel, distance_outside = _margin[index]
+            return on_parcel or distance_outside <= boundary_margin_meters
+
+        if not any(within_margin(i) for i in range(len(stem))):
+            stats["rejected_valley_off_margin"] += 1
+            continue
+
         # Distance, smoothed elevation, and smoothed slope all come from one
         # pass over the SAME profile array (raw on the real path -- fix #1);
         # the fit's residual reads elevation-vs-distance, the eligibility
@@ -553,32 +645,53 @@ def detect_keypoints(
         distance, elevation, slope_pct = _profile_along_stem(
             stem, profile_array, dem, profile_smooth_cells
         )
+        # THE MARGIN IS PART OF THE CHOICE, not a filter on it. Fitting first
+        # and testing the winner afterwards loses a valley that runs through
+        # the parcel whenever its globally best-fitting split happens to land
+        # further out in the buffer than the margin allows -- the valley then
+        # reports nothing, though it holds admissible splits the fit was never
+        # asked to rank. Measured on the reference property: the 8.17-acre
+        # valley carries 150 m of channel across the parcel and 13 on-parcel
+        # eligible splits, and reported no keypoint at all because its best
+        # fit sat 47 m out.
         split = two_segment_keypoint_split(
-            distance, elevation, slope_pct, min_run_cells, min_slope_drop_pct
+            distance,
+            elevation,
+            slope_pct,
+            min_run_cells,
+            min_slope_drop_pct,
+            position_is_eligible=within_margin,
         )
         if split is None:
-            stats["rejected_no_slope_drop"] += 1
+            # Two honest "no keypoint" answers, told apart rather than
+            # merged: a profile with NO inflection anywhere, versus one whose
+            # inflections all lie further outside the boundary than the margin
+            # allows. Re-fit unconstrained only on this rejection path -- the
+            # answer is needed for the counters, never for the return value.
+            unconstrained = two_segment_keypoint_split(
+                distance, elevation, slope_pct, min_run_cells, min_slope_drop_pct
+            )
+            stats[
+                "rejected_no_slope_drop" if unconstrained is None else "rejected_off_margin"
+            ] += 1
             continue
 
         k, slope_above, slope_below, slope_drop, _residual = split
         r, c = stem[k]
 
+        # The marsh gate stays a filter on the chosen split rather than a
+        # constraint on the choice, deliberately. The margin describes the
+        # DRAWN LINE, which is a hand-traced approximation, so choosing within
+        # it is choosing on better information; fill depth describes the
+        # GROUND, and a valley whose best inflection sits on ground the flood
+        # raised has a real problem that "no keypoint here" reports honestly.
         fill_depth = float(filled[r, c]) - float(raw_array[r, c])
         if fill_depth > fill_artifact_threshold_m:
             stats["rejected_fill_artifact"] += 1
             continue
 
-        x, y = pixel_center_xy(dem, r, c)
-        point = Point(x, y)
-        if boundary_polygon_utm.contains(point) or boundary_polygon_utm.touches(point):
-            on_parcel = True
-            distance_outside = 0.0
-        else:
-            on_parcel = False
-            distance_outside = float(point.distance(boundary_polygon_utm))
-            if distance_outside > boundary_margin_meters:
-                stats["rejected_off_margin"] += 1
-                continue
+        point, on_parcel, distance_outside = stem_margin[k]
+        x, y = point.x, point.y
 
         contributing_acres = float(flow_accumulation[r, c]) * area_per_cell
         lon, lat = warp_transform(dem["crs"], "EPSG:4326", [x], [y])
@@ -614,10 +727,11 @@ def detect_keypoints(
         diagnostics.update(stats)
 
     _LOGGER.info(
-        "keypoint detection: valleys=%d rejected(short_stem=%d no_slope_drop=%d "
-        "fill_artifact=%d off_margin=%d) surviving=%d",
+        "keypoint detection: valleys=%d rejected(short_stem=%d valley_off_margin=%d "
+        "no_slope_drop=%d fill_artifact=%d off_margin=%d) surviving=%d",
         stats["valleys"],
         stats["rejected_short_stem"],
+        stats["rejected_valley_off_margin"],
         stats["rejected_no_slope_drop"],
         stats["rejected_fill_artifact"],
         stats["rejected_off_margin"],

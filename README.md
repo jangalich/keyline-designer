@@ -638,6 +638,191 @@ report using the Claude API.
   (see below) as the actual product approach, but kept as a working
   reference.
 
+## Site data report: the Climate section's sources
+
+The site data report (`site_report.py`, `report_data.py`; the design
+record is in `site-data-report-proposal.md`) reads its own report-time
+layer, separate from Layer 1. After branch 7 the Climate section draws on:
+
+- `daymet_data.py` / `climate_report.py` — Daymet daily weather at the
+  parcel, 30 years, and every derived figure: frost dates, GDD, solar,
+  **Thornthwaite potential evapotranspiration and the climatic water
+  balance** (no soil term), heavy-rain days (>= 25.4 mm), day length, the
+  driest and wettest year. REQUIRED.
+- `precipitation_normals.py` — the **precipitation correction** and the
+  **heavy-rain normals**: Daymet runs a few percent above the NCEI
+  1991–2020 station normals around the reference parcel, so the parcel's
+  Daymet precipitation is scaled by the median of normal / Daymet-at-station
+  over the five nearest stations (0.960 there); days with at least 1 in are
+  the median of the same stations' monthly normals, because Daymet's
+  interpolation undercounts them. Everything is bundled
+  (`assets/reference/ncei_prcp_normals_1991_2020.csv`: the normals from
+  NCEI's versioned annual and monthly by-station archives — not the access
+  API, which serves 1981–2010 under the same dataset name — plus Daymet's
+  1991–2020 mean at every station, fetched once by
+  `make_normals_daymet_cache.py` and folded in by `make_normals_bundle.py`),
+  so a report makes one Daymet call.
+- `atlas14_data.py` — NOAA Atlas 14 design-storm depths (partial-duration
+  series; the page prints the volume, version and end of record). DEGRADABLE;
+  a point outside every volume (the Pacific Northwest) reads as not covered.
+- `power_wind_data.py` — NASA POWER daily wind for the same 30 years, eight
+  sectors by winter and summer, direction FROM, prevailing by speed-weighted
+  vector mean (POWER's daily direction was verified to be one). DEGRADABLE.
+- `spc_reports.py` — Storm Prediction Center hail, wind and tornado reports
+  within 25 miles, from a bundled packed-point file
+  (`assets/reference/spc_reports_1995_2024.bin.gz`, 3.5 MB, built by
+  `make_spc_bundle.py`). Bundled, so no fetch and no failure policy.
+
+Fixtures are real service output for the reference parcel
+(`atlas14_reference_fixture.csv`, `power_wind_reference_fixture.csv`,
+`power_hourly_reference_fixture.json`), captured by
+`make_climate_fixtures.py`; every test runs from them with the network
+refused. `diagnose_climate_sources.py` prints every figure from the fixtures
+(or `--live` from the services). The page draws two SVG charts through
+`report_chart.py` — the water balance diagram and the seasonal wind roses —
+on the map renderer's principles: token names, not colours; fonts as
+attributes; the legend set by the template.
+
+## Site data report: the Water & hydrology section's sources
+
+Branch 9 adds section IV's report-time layer, six more rows in
+`report_data.REPORT_FETCH_LAYERS`, every one DEGRADABLE: the section
+describes the water that is there beside a Layer 1 it always has (the NHD
+rows, the SSURGO rows, the DEM), and a missing wetland layer must not sink
+a paid report. Each absent layer leaves a visible statement in its place.
+
+- `hydrology_data.get_nhd_points_for_boundary()` — NHD's Point layer, for
+  mapped springs and seeps (FCode 45800). "None mapped" is the expected
+  answer; seeps and springs need field verification either way.
+- `nhdplus_data.py` — NHDPlus HR stream order and the reach's total
+  drainage area, joined to the NHD rows by `permanent_identifier`. The
+  reach figure is the stream's un-truncated catchment and leads the
+  section's catchment block; the DEM-window watershed (parcel + 100 m)
+  is reported beneath it as what the terrain analysis sees, with its rim
+  cells counted — on the reference parcel 77 of 4,421 watershed cells sit
+  on the window's edge, so it is truncated and says so.
+- `nwi_data.py` — USFWS National Wetlands Inventory, TWO-STAGE: attributes
+  for the parcel's bbox + 150 m, then geometry by objectid at 1 m for
+  features under 1,000 acres and at 10 m for the rest, clipped and made
+  valid on receipt. The riverine network polygon next to the reference
+  parcel is 44,740 acres and 42.7 MB as GeoJSON; the two-stage fetch is
+  816 KB. The mapping project's imagery year rides with it.
+- `nfhl_data.py` — FEMA's National Flood Hazard Layer: availability (no
+  study polygon means "no digital flood map", never "not at risk"),
+  zones over the bbox + 150 m in UTM at a 5 m offset (a county-wide Zone
+  X is 29 MB ungeneralised), the FIRM panel and its effective date. The
+  host drops TLS connections intermittently; every query runs in the
+  `fetch_attempts` retry loop.
+- `nlcd_landcover_data.py` — Annual NLCD land cover on the DEM grid, the
+  same IIPP host and `exportImage` pattern as the tree canopy cover
+  fallback, the YEAR PINNED by a mosaic rule (`NLCD_YEAR`) and printed;
+  the class legend is bundled because the service carries no attribute
+  table.
+- `soil_water_table.py` — SSURGO's seasonal water table, flooding and
+  ponding by month: ONE report-time query joining `comonth`,
+  `cosoilmoist`, `muaggatt` and `sacatalog` over the same WKT intersection
+  Layer 1's soil queries use. Depth to water table in a month is the top
+  of the shallowest `Wet` layer, NRCS's own definition behind
+  `wtdepannmin`, and it closes against it. Three states are kept apart: a
+  depth; DEEPER THAN the component's described profile (rows exist, no
+  layer is Wet); NO DATA (no rows).
+
+`water_section.py` sets the three pages on Landform's rhythm: the
+hydrology map (streams weighted by order and dashed for intermittent,
+waterbodies, wetlands as marsh tufts, the 1%-annual-chance flood zone as
+a light hatch, flow paths as context, contours set back) with the
+surface-water table under it; the wetness map (the wetness index tinted
+at the pipeline's own breakpoints, with the depressions the flow model
+filled) with the seasonal water table under it in the twelve-column
+form -- a depth in the data face, a "deeper than" bound prefixed and
+muted, "no data" in words, the four-month form when a parcel has more map
+units than the page holds; the numbers (nine key figures, the wet-ground
+comparison, land cover of the window's contributing area and of the
+parcel as two named extents, flood, the footer). Both maps are at
+Landform's extent and scale, and context beyond the parcel is clipped to
+what the frame shows (`report_map.visible_extent_utm`). The marsh tufts
+and the hatch are geometry through the ordinary line layer, not SVG
+patterns. `test_water_section.py` greps the section's words for siting
+language, the reverse of Landform's grep, and renders the degraded pages
+with FEMA and NWI unavailable.
+
+`water_derivations.py` derives every figure on the report path from the
+session's reads and these blocks — one flow pass per report, shared with
+Landform and asserted at the count; raw TWI, depression depth and the
+accumulation equal the water step's own screens cell for cell; "wet ground
+by terrain" is the on-parcel cells at or above the water step's own
+window-referenced full-credit breakpoint, the TWI value printed. Wet
+ground three ways — hydric soil, mapped wetland, terrain wetness — are cell
+masks whose overlaps are counted, and every acreage partition sums to the
+cover's acreage. Fixtures are one real response per source for the
+reference parcel (`assets/reference/water/`, captured by
+`make_water_fixtures.py`, loaded by `water_reference_fixture.py` with the
+real SSURGO and NHD rows under the real DEM); `diagnose_water_section.py`
+prints every figure from them (or `--live`). Terms of use, as recorded for
+the methods note, from the records where they live: NWI's FGDC metadata
+states Access_Constraints "None" and Use_Constraints "None.
+Acknowledgement of the U.S. Fish and Wildlife Service and (or) the
+National Wetlands Inventory would be appreciated" (`nwi_data.
+NWI_USE_CONSTRAINTS`); the NFHL map service's item description carries an
+empty licence field and FEMA's website information page says most
+material on FEMA.gov is free of copyright and may be copied and
+distributed without permission, citation appreciated (`nfhl_data.
+NFHL_TERMS_BASIS`); NLCD is a USGS product and USGS states its data are
+in the U.S. public domain. All three are U.S. federal works with no stated
+restriction.
+
+## Site data report: the Access section's sources
+
+Branch 10 adds section V, two pages, an inventory of the access that
+exists: frontage, tracks and what the ground allows. No proposed road,
+route, corridor or cost appears in it (`test_access_section.py` greps for
+that language); where a new road should go is the roads step's job and
+appears on the layout map and in the design record.
+
+- `farm_roads_data.py` — Layer 1's road rows now keep the attributes the
+  National Map service already returns, as a `properties` dict beside
+  `name` and `geometry` (`road_row()`: the TIGER feature class, the layer
+  the segment came from and its name, route designations, the vintage).
+  Every consumer reads name and geometry only and the exclusion union
+  reads geometry only, so the exclusion mask cannot move;
+  `test_access_derivations.py` holds it byte-identical with and without
+  the key. The source has no surface attribute and does not say whether
+  a road is public.
+- `soil_road_ratings.py` — SSURGO's road-construction interpretations
+  from `cointerp` joined to `component`, one report-time query (DEGRADABLE
+  row `soil_road_ratings` in `report_data.REPORT_FETCH_LAYERS`): ENG -
+  Local Roads and Streets, the unpaved variant and roadfill, each with
+  its limiting features (frost action, low strength, shrink-swell, depth
+  to saturated zone, slope, flooding, bedrock, fragipan). A map unit's
+  class is NRCS's dominant condition, ties to the more limiting class.
+- `access_derivations.py` — every figure from the session's reads:
+  frontage by road name within 15 m of a centreline (a judgment, stated
+  on the page and in the methods note), the nearest road when there is
+  none, the on-parcel tracks with their grades, the boundary's drivable
+  and undrivable pieces (Landform's class D break, 15%, sampled 5 m
+  inside every 5 m) partitioning the perimeter exactly, stream
+  crossings, and the soil partition on the Water section's own map-unit
+  cell grid, summing to the cover.
+
+`access_section.py` sets two pages on Landform's rhythm: the summary line
+carrying frontage, the drivable boundary and the very-limited soil share;
+the map AT LANDFORM'S EXTENT AND SCALE, so the sections' maps compare as
+pictures of the same land — roads in ink on a page casing, the track
+dashed, frontage as a soft band under the boundary, undrivable boundary
+hachured in the terrain token, contours set back — with the frontage
+table under it; then the soil table with the limiting features as a prose
+column, and the sources. Frontage is measured as intervals along the
+boundary ring, so two roads whose tolerance bands overlap cover the same
+stretch once and the total can never exceed the perimeter. Drawing and
+measuring are different jobs: runs of boundary shorter than two samples
+are merged for drawing only, and the caption says so. Four road rows fit
+under the map, measured; with more, the frontage table moves whole to the
+second page and the map caption says so. Fixtures are the parcel's own
+five mapped road segments and its SSURGO ratings
+(`assets/reference/access/`, captured by `make_access_fixtures.py`);
+`diagnose_access_section.py` prints every figure and, given an output
+directory, renders the pages and the overflow case to PNG.
+
 ## Running it yourself
 
 Needs internet access (won't run in a fully offline sandbox). Setup:

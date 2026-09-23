@@ -255,3 +255,42 @@ assert no_override_union is not None and no_override_union.area == buffered_unio
 print("get_road_exclusion_union_utm(): omitting farm_roads= entirely still self-fetches, unchanged.")
 
 print("\nAll farm_roads_data checks passed.")
+
+# --- branch 10: the rows keep the service's attributes, and the union ignores them ---
+#
+# get_farm_roads_for_boundary() now carries a `properties` dict beside name
+# and geometry (farm_roads_data.road_row): the fields the service already
+# returned and the layer the segment came from. Every consumer reads name
+# and geometry only; get_road_exclusion_union_utm() reads geometry only,
+# so the exclusion union is the same geometry with or without the key.
+
+import numpy as np
+
+attributed_body = {
+    "type": "FeatureCollection",
+    "features": [{"type": "Feature", "geometry": LINE_A, "properties": {
+        "name": "N Montour Rd", "tnmfrc": 4, "mtfcc_code": "S1400", "permanent_identifier": "abc", "county_route": None,
+        "state_route": "", "source_datadesc": "2016 April MAFTIGER", "loaddate": 1563078002000, "OBJECTID": 7,
+    }}],
+}
+
+
+def attributed_query(layer_id, bbox, max_retries=2):
+    return copy.deepcopy(attributed_body["features"]) if layer_id == 32 else []
+
+
+import copy
+
+with patch.object(farm_roads_data, "_query_road_layer", attributed_query):
+    attributed = get_farm_roads_for_boundary(boundary)
+assert len(attributed) == 1 and set(attributed[0]) == {"name", "geometry", "properties"}
+props = attributed[0]["properties"]
+assert props == {"permanent_identifier": "abc", "tnmfrc": 4, "mtfcc_code": "S1400", "source_datadesc": "2016 April MAFTIGER",
+                 "loaddate": 1563078002000, "layer": 32, "layer_name": "Local road"}, props
+assert "OBJECTID" not in props and "county_route" not in props and "state_route" not in props, "absent means not published, never None-filled"
+stripped = [{"name": r["name"], "geometry": r["geometry"]} for r in attributed]
+with_props = get_road_exclusion_union_utm(boundary, ROAD_EXCLUSION_DEM, farm_roads=attributed)
+without_props = get_road_exclusion_union_utm(boundary, ROAD_EXCLUSION_DEM, farm_roads=stripped)
+assert with_props.equals(without_props) and with_props.wkb == without_props.wkb, "the union reads geometry only"
+print("Rows carry a `properties` dict of the service's own attributes plus the layer; the exclusion union is "
+      "byte-identical with and without it.")
