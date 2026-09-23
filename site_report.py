@@ -11,7 +11,7 @@ ReportData, through Jinja2 and WeasyPrint to a PDF.
 
 This is the replacement for generate_pdf_report.py's narrated document
 (site-data-report-proposal.md). It carries Climate, Landform, Water &
-hydrology and Access, and the foundation every later section composes: the tokens,
+hydrology, Access and Trees & forestry, and the foundation every later section composes: the tokens,
 the fonts, the page geometry, and the six reusable components as Jinja
 macros under templates/report/components/. A section is a builder that
 turns a ReportData into a dict of already-formatted values
@@ -67,6 +67,8 @@ import climate_section
 import landform_section
 import report_data as report_data_module
 import session_manager
+import trees_derivations
+import trees_section
 import water_derivations
 import water_section
 
@@ -99,6 +101,13 @@ TOKENS = {
     # balance's evaporation line and deficit fill. The frontend's value,
     # unchanged.
     "ochre": "#c99a2e",
+    # NEW ON BRANCH 11, carried over from the frontend palette
+    # (src/index.css --field, where it draws the boundary ring and the
+    # map's geometry): the Trees section's canopy screen and its height
+    # ramp. Trees are green in the plate system; this token is MAP-ONLY
+    # here as it is there -- never a control, a rule or a tint on the
+    # page. The frontend's value, unchanged.
+    "field": "#4a5f3a",
 }
 
 # --- fonts -------------------------------------------------------------
@@ -167,7 +176,7 @@ def cover_label(report_data, property_label: Optional[str]) -> str:
     return f"{abs(lat):.4f}° {'N' if lat >= 0 else 'S'}, {abs(lon):.4f}° {'E' if lon >= 0 else 'W'}"
 
 
-def build_sections(report_data, terrain=None, water=None, access=None) -> list:
+def build_sections(report_data, terrain=None, water=None, access=None, trees=None) -> list:
     """Every section the report renders, in outline order. Climate from
     the report data; Landform from the session's terrain reads
     (landform_section.TerrainInputs) when the caller has a session to read
@@ -176,8 +185,10 @@ def build_sections(report_data, terrain=None, water=None, access=None) -> list:
     report data's Water blocks, handed Landform's flow pass so the report
     runs it ONCE; Access (branch 10) from the session's access reads
     (access_derivations.AccessInputs) and the report data's soil road
-    ratings. Each section carries its own numeral from report_outline,
-    so adding one renumbers nothing."""
+    ratings; Trees & forestry (branch 11) from the session's canopy reads
+    (trees_derivations.TreesInputs) and the report data's forest type and
+    woodland blocks. Each section carries its own numeral from
+    report_outline, so adding one renumbers nothing."""
     sections = [climate_section.build_climate_section(report_data)]
     if terrain is not None:
         landform = landform_section.build_landform_section(terrain, TOKENS)
@@ -186,6 +197,8 @@ def build_sections(report_data, terrain=None, water=None, access=None) -> list:
             sections.append(water_section.build_water_section(water, TOKENS, flow=landform["derived"]))
         if access is not None:
             sections.append(access_section.build_access_section(access, TOKENS))
+        if trees is not None:
+            sections.append(trees_section.build_trees_section(trees, TOKENS))
     return sections
 
 
@@ -206,12 +219,14 @@ def render_site_report_html(
     terrain=None,
     water=None,
     access=None,
+    trees=None,
 ) -> str:
     """The whole document as HTML, stylesheet inlined. `terrain` is the
     session's landform_section.TerrainInputs, or None for a report built
     from report data alone; `water` the session's water_derivations.
-    WaterInputs and `access` its access_derivations.AccessInputs, each
-    rendered only beside `terrain`."""
+    WaterInputs, `access` its access_derivations.AccessInputs and `trees`
+    its trees_derivations.TreesInputs, each rendered only beside
+    `terrain`."""
     env = env or jinja_environment()
     generated_on = generated_on or date.today()
     cover = {
@@ -225,7 +240,7 @@ def render_site_report_html(
     return env.get_template("base.html").render(
         stylesheet=render_stylesheet(env, fonts_directory),
         cover=cover,
-        sections=build_sections(report_data, terrain, water, access),
+        sections=build_sections(report_data, terrain, water, access, trees),
     )
 
 
@@ -237,13 +252,14 @@ def generate_site_report_pdf(
     terrain=None,
     water=None,
     access=None,
+    trees=None,
 ) -> str:
     """HTML -> PDF on disk. Returns output_path. No network: the fonts are
     local files and the data is already in hand."""
     from weasyprint import HTML
 
     html = render_site_report_html(
-        report_data, property_label=property_label, generated_on=generated_on, terrain=terrain, water=water, access=access
+        report_data, property_label=property_label, generated_on=generated_on, terrain=terrain, water=water, access=access, trees=trees
     )
     HTML(string=html, base_url=TEMPLATES_DIRECTORY).write_pdf(output_path)
     return output_path
@@ -281,6 +297,8 @@ def generate_session_site_report_pdf(
     terrain = landform_section.terrain_inputs_from_context(context, document)
     water = water_derivations.water_inputs_from_context(context, document, data)
     access = access_derivations.access_inputs_from_context(context, document, data)
+    trees = trees_derivations.trees_inputs_from_context(context, document, data)
     return generate_site_report_pdf(
-        data, output_path, property_label=property_label, generated_on=generated_on, terrain=terrain, water=water, access=access
+        data, output_path, property_label=property_label, generated_on=generated_on, terrain=terrain, water=water, access=access,
+        trees=trees,
     )

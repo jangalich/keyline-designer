@@ -10,7 +10,7 @@ mocks answer with the reference fixtures: Daymet at the parcel, Atlas 14
 and POWER. The precipitation correction and the heavy-rain normals come
 off the committed bundle -- no mock, no fetch.
 
-  1. THE TABLE: ten layers (three Climate, six Water, one Access), each named once with a policy the module
+  1. THE TABLE: twelve layers (three Climate, six Water, one Access, two Trees), each named once with a policy the module
      defines, each a ReportData field, and the fetch function times every
      one of them (the diagnostics self-check's own test, run here against
      the compiled function so it cannot pass on a stale checkout). The
@@ -54,6 +54,9 @@ import nlcd_landcover_data
 import nwi_data
 import report_data
 import soil_road_ratings
+import soil_woodland
+import forest_type_data
+import trees_reference_fixture
 import soil_water_table
 import access_reference_fixture
 import water_reference_fixture
@@ -94,6 +97,8 @@ assert REPORT_FETCH_LAYERS == {
     "nlcd_landcover": DEGRADABLE, "soil_water_table": DEGRADABLE,
     # THE ACCESS LAYER (branch 10): the soil road-construction ratings, context beside Layer 1's road rows.
     "soil_road_ratings": DEGRADABLE,
+    # THE TREES LAYERS (branch 11): the forest type group and the soil woodland ratings, context beside Layer 1's canopy.
+    "forest_type_group": DEGRADABLE, "soil_woodland": DEGRADABLE,
 }, REPORT_FETCH_LAYERS
 assert set(REPORT_FETCH_LAYERS.values()) <= {REQUIRED, DEGRADABLE}
 for layer in REPORT_FETCH_LAYERS:
@@ -104,7 +109,7 @@ assert "daymet_at_stations" not in ReportData.__dataclass_fields__, "the station
 sites = run_diagnostics._fetch_hook_sites()
 assert sites["report_data.fetch_report_data calls time_layer"] is True, sites
 coverage = [k for k in sites if k.startswith("report_data.fetch_report_data times")]
-assert coverage == ["report_data.fetch_report_data times 10 of 10 declared report layers"], sites
+assert coverage == ["report_data.fetch_report_data times 12 of 12 declared report layers"], sites
 assert sites[coverage[0]] is True
 assert sites["parcel_data.fetch_parcel_data calls time_layer"] is True
 print(f"   {coverage[0]}")
@@ -146,6 +151,8 @@ def _all_mocked():
 # reaches by attribute. Section 6 fails them one at a time.
 _WATER_RAW = water_reference_fixture.raw_water_layers()
 _WATER_RAW["soil_road_ratings_rows"] = access_reference_fixture.raw_soil_road_ratings()
+_WATER_RAW["forest_type_group"] = trees_reference_fixture.raw_forest_type()
+_WATER_RAW["soil_woodland_rows"] = trees_reference_fixture.raw_soil_woodland()
 _WATER_FETCHES = (
     (hydrology_data, "get_nhd_points_for_boundary", "nhd_points"),
     (nhdplus_data, "get_flowline_attributes_for_boundary", "nhdplus_hr"),
@@ -155,6 +162,9 @@ _WATER_FETCHES = (
     (soil_water_table, "get_seasonal_water_table_for_boundary", "soil_water_table_rows"),
     # The Access layer (branch 10) rides the same loop: its raw rows come from the access fixture.
     (soil_road_ratings, "get_road_ratings_for_boundary", "soil_road_ratings_rows"),
+    # The Trees layers (branch 11) likewise: the forest type TIFF and the two woodland row sets from the trees fixture.
+    (forest_type_data, "get_forest_type_for_boundary", "forest_type_group"),
+    (soil_woodland, "get_woodland_for_boundary", "soil_woodland_rows"),
 )
 _water_stack = contextlib.ExitStack()
 for _module, _name, _key in _WATER_FETCHES:
@@ -197,6 +207,11 @@ assert data.nhd_points == [] and len(data.nhdplus_hr) == 3 and len(data.nwi["fea
 assert data.fema_nfhl["available"] is True and data.nlcd_landcover["year"] == nlcd_landcover_data.NLCD_YEAR == 2024
 assert data.nlcd_landcover["array"].shape == (108, 96) and len(data.soil_water_table["map_units"]) == 7
 assert len(data.soil_road_ratings["map_units"]) == 7 and len(data.soil_road_ratings["components"]) == 30
+# The Trees layers: the forest type grid the DEM's shape with one forest group, the woodland block's seven units.
+assert data.forest_type_group["array"].shape == (108, 96) and data.forest_type_group["nodata_cells"] == 0
+assert set(forest_type_data.class_counts(data.forest_type_group["array"])) == {0, 500, 800}
+assert len(data.soil_woodland["map_units"]) == 7 and len(data.soil_woodland["components"]) == 30
+assert sum(len(c["species"]) for c in data.soil_woodland["components"].values()) == 132
 print(f"   centroid {data.centroid[0]:.4f}, {data.centroid[1]:.4f}; 1 Daymet call; factor {data.climate['prcp_factor']:.3f}; "
       f"zone {data.climate['hardiness']['zone']}; wind from {data.wind['seasons']['winter']['prevailing_sector']}")
 
@@ -302,7 +317,7 @@ print("   1 fetch for 2 calls on one boundary; a failed fetch leaves the cache e
 # ======================================================================
 # 6. Each Water layer degrades alone
 # ======================================================================
-print("6. each of the six Water layers and the Access layer failing is recorded alone; an empty NWI answer is not a degradation")
+print("6. each of the six Water layers, the Access layer and the two Trees layers failing is recorded alone; an empty NWI answer is not a degradation")
 _water_stack.close()
 for module, name, key in _WATER_FETCHES:
     layer = key[:-len("_rows")] if key.endswith("_rows") else key
@@ -349,9 +364,9 @@ a, b, c = _all_mocked()
 with a, b, c:
     all_down = fetch_report_data(REAL_BOUNDARY)
 assert set(all_down.unavailable) == {"nhd_points", "nhdplus_hr", "nwi", "fema_nfhl", "nlcd_landcover", "soil_water_table",
-                                     "soil_road_ratings"}
+                                     "soil_road_ratings", "forest_type_group", "soil_woodland"}
 assert all_down.climate is not None
-print("   six layers, each down alone -> one `unavailable` entry, the other five parsed; a bad TIFF degrades; an empty NWI answer does not")
+print("   nine layers, each down alone -> one `unavailable` entry, the other eight parsed; a bad TIFF degrades; an empty NWI answer does not")
 
 print("\ntest_report_data.py: all sections passed")
 print(offline_harness.summary())

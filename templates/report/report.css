@@ -360,6 +360,50 @@ th.num {
 .section--access .data-table th.text {
   width: 58%;
 }
+/* TREES IS TWO PAGES ON ACCESS'S RHYTHM: the canopy map at Landform's
+   extent and scale with the extent table under it, then the height,
+   site index and limitations tables and the sources. The numbers page
+   holds three tables, a figure paragraph, four captions and a four-line
+   footer, so everything sits as close as Water's numbers page. */
+.section--trees .summary {
+  margin-bottom: var(--space-4);
+}
+.section--trees .report-map {
+  margin-bottom: var(--space-1);
+}
+.section--trees .data-table {
+  margin-bottom: var(--space-1);
+}
+.section--trees .data-table th,
+.section--trees .data-table td {
+  padding-top: 1.5pt;
+  padding-bottom: 1.5pt;
+  line-height: 1.25;
+}
+.section--trees .caption {
+  margin-bottom: var(--space-1);
+  max-width: none;
+}
+.section--trees .section__detail .eyebrow--continued {
+  margin-bottom: var(--space-3);
+}
+.section--trees .section__detail .summary {
+  font-size: var(--text-body);
+  margin-bottom: var(--space-1);
+  max-width: none;
+}
+.section--trees .unavailable {
+  margin-bottom: var(--space-1);
+}
+.section--trees .source-footer {
+  padding-top: var(--space-1);
+}
+/* The limitations table's prose column takes the width the figures do not need. */
+.section--trees .data-table td.text,
+.section--trees .data-table th.text {
+  width: 50%;
+}
+
 /* A BOUND IS NOT A MEASUREMENT: "> 72" is the depth a water table is
    deeper than, set muted so a column of depths cannot be read across it;
    a WORD in a numeric column -- "no data" -- takes the prose face. */

@@ -264,7 +264,7 @@ templates_dir = site_report.TEMPLATES_DIRECTORY
 template_files = []
 for root, _, files in os.walk(templates_dir):
     template_files += [os.path.join(root, f) for f in files]
-assert len(template_files) == 15, sorted(template_files)   # css, base, 9 components, 4 sections
+assert len(template_files) == 16, sorted(template_files)   # css, base, 9 components, 5 sections
 for path in template_files:
     with open(path, encoding="utf-8") as handle:
         hits = HEX.findall(handle.read())
@@ -285,9 +285,11 @@ assert site_report.TOKENS == {
     "ink": "#2b2b26", "ink-muted": "#8a8477", "oxide": "#9c4a2f",
     "terrain": "#7a5c3a",
     "water": "#3f5d75", "ochre": "#c99a2e",
+    # Branch 11: the frontend's map-geometry green, the Trees section's canopy screen.
+    "field": "#4a5f3a",
 }
-# Ochre is the frontend's own value; water is new to the plate system.
-assert site_report.TOKENS["ochre"] == "#c99a2e"
+# Ochre and field are the frontend's own values; water is new to the plate system.
+assert site_report.TOKENS["ochre"] == "#c99a2e" and site_report.TOKENS["field"] == "#4a5f3a"
 # The rendered stylesheet declares each token once and reads colours only
 # through var().
 css = site_report.render_stylesheet()

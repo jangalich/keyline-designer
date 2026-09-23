@@ -1,0 +1,61 @@
+{#- THE TREES & FORESTRY SECTION -- TWO PAGES, AN INVENTORY. The map page:
+    eyebrow, heading, the summary line, the canopy map at LANDFORM'S
+    EXTENT AND SCALE (the canopy screened in the field green, graduated
+    by height class, the contours reading through) with its legend and
+    caption, the canopy extent table with its caption. The numbers page:
+    the continuation eyebrow; the height table with its caption or, on
+    the fallback path, the stated absence and the product's own cover
+    classes; the forest type figure with its caption; the site index
+    table; the limitations table with its caption; the sources. No
+    styling here, no numbers here: `section` is trees_section.build_
+    trees_section()'s dict, every value already formatted. A degradable
+    source that did not answer leaves its statement where its table
+    would be. -#}
+{% import "components/eyebrow.html" as c1 %}
+{% import "components/heading.html" as c2 %}
+{% import "components/summary.html" as c3 %}
+{% import "components/data_table.html" as c5 %}
+{% import "components/source_footer.html" as c6 %}
+{% import "components/map.html" as c7 %}
+{% import "components/caption.html" as c9 %}
+<section class="section section--trees section--map">
+  <div class="section__figures">
+    {{ c1.eyebrow(section.number, section.name) }}
+    {{ c2.heading(section.heading) }}
+    {{ c3.summary(section.summary) }}
+    {{ c7.map(section.map) }}
+    {{ c9.caption(section.map_caption) }}
+    {{ c5.data_table(section.extent_table) }}
+    {{ c9.caption(section.extent_caption) }}
+  </div>
+  <div class="section__detail">
+    {{ c1.eyebrow(section.number, section.name, continued=True) }}
+{%- if section.height_table %}
+    {{ c5.data_table(section.height_table) }}
+    {{ c9.caption(section.height_caption) }}
+{%- else %}
+    {{ c9.unavailable(section.height_unavailable) }}
+{%- if section.cover_table %}
+    {{ c5.data_table(section.cover_table) }}
+    {{ c9.caption(section.cover_caption) }}
+{%- endif %}
+{%- endif %}
+{%- if section.forest_type %}
+    {{ c3.summary(section.forest_type) }}
+    {{ c9.caption(section.forest_type_caption) }}
+{%- else %}
+    {{ c9.unavailable(section.forest_type_unavailable) }}
+{%- endif %}
+{%- if section.species_table %}
+    {{ c5.data_table(section.species_table) }}
+    {{ c9.caption(section.species_caption) }}
+{%- else %}
+    {{ c9.unavailable(section.species_unavailable) }}
+{%- endif %}
+{%- if section.limitations_table %}
+    {{ c5.data_table(section.limitations_table) }}
+    {{ c9.caption(section.limitations_caption) }}
+{%- endif %}
+    {{ c6.source_footer({"lines": section.sources}) }}
+  </div>
+</section>
