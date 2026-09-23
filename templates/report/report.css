@@ -328,17 +328,13 @@ th.num {
 .data-table--compact td.text {
   max-width: 3.6in;
 }
-/* ACCESS IS ONE PAGE: the summary, the map with its legend and caption,
-   two short tables with their captions, three source lines. The map and
-   the tables sit closer than the map sections' default, as Water's do.
-   With frontage on more than two roads the section SPILLS (the
-   template's section.spill): the soil table and the sources take a
-   continuation page. */
-.section--access .section__detail {
-  break-before: page;
-}
+/* ACCESS IS TWO PAGES ON LANDFORM'S RHYTHM: the map at Landform's
+   extent and scale with the frontage table under it, then the soil table
+   and the sources. The map page's spacing is Water's: with more road
+   rows than fit beneath the map the frontage table moves whole to the
+   second page (the template's section.spill). */
 .section--access .summary {
-  margin-bottom: var(--space-2);
+  margin-bottom: var(--space-4);
 }
 .section--access .report-map {
   margin-bottom: var(--space-1);

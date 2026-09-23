@@ -8,7 +8,7 @@ map.
 
     build_access_section(inputs, tokens) -> the section dict
 
-ONE PAGE, AN INVENTORY. Existing access only: frontage, tracks, and what
+TWO PAGES, AN INVENTORY. Existing access only: frontage, tracks, and what
 the ground allows. No proposed road, no route, no corridor, no cost --
 where a new road should go is the roads step's job and appears on the
 layout map and in the design record, never here; test_access_section.py
@@ -17,12 +17,16 @@ either: cost depends on cut and fill, culverts, surfacing and local
 rates, and a figure here would be checked against a contractor's quote
 and found wrong. The section gives what a contractor prices from.
 
-THE PAGE, top to bottom: the summary line carrying the three figures
+THE PAGES, top to bottom: the summary line carrying the three figures
 worth featuring (frontage, the drivable boundary, the very-limited soil
-share) as a sentence; the access map at Landform's extent and scale;
-its legend and caption (the terrain constraints, in words); the frontage
-table; the soil road-construction table; the sources. No key-figures
-panel: three numbers do not fill a nine-figure grid.
+share) as a sentence; the access map AT LANDFORM'S EXTENT AND SCALE, so
+a reader can compare Landform's contours, Water's streams and this map
+as pictures of the same land; its legend and caption (the terrain
+constraints, in words); the frontage table. Then, on a continuation
+page: the soil road-construction table and the sources. Two pages at
+the same scale rather than one page at a different one (the author's
+decision, phase 2 review). No key-figures panel: three numbers do not
+fill a nine-figure grid.
 
 THE MAP'S PLATE. Roads and tracks are culture, in ink: a mapped road a
 solid ink line on a page-coloured casing, a track (the part of a mapped
@@ -40,16 +44,13 @@ neighbours, because a dotted boundary would imply a precision the
 sampling does not have. The caption says so. Same split as Landform's
 slope tints: compute on cells, draw what reads.
 
-OVERFLOW. A parcel with frontage on many roads would not fit one page.
-The frontage table is already merged by road name and the soil table is
-condensed by construction (three classes, plus a row only for a state
-that is present), so the rule is a SPILL, stated: with frontage on more
-than FRONTAGE_ROWS_MAX roads the section takes two pages -- the summary,
-the map and the frontage table with every road on the first, the soil
-table and the sources on a continuation page -- and the frontage
-caption says so. Nothing is condensed or truncated silently. Measured
-on the reference parcel: two road rows fit the page with the map at
-half scale; a third does not.
+OVERFLOW. The frontage table is merged by road name and the soil table
+is condensed by construction (three classes, plus a row only for a
+state that is present); the first page holds the map and up to
+FRONTAGE_ROWS_MAX road rows beneath it, measured. With frontage on more
+roads than that the rule is a SPILL, stated: the frontage table and its
+caption move whole to the continuation page above the soil table, and
+the map caption says so. Nothing is condensed or truncated silently.
 
 EVERY ACREAGE TABLE SUMS TO THE COVER'S ACREAGE (landform_section.
 allocate_exactly). A dash is a true zero; a nonzero value below display
@@ -86,18 +87,10 @@ SECTION_TEMPLATE = "access.html"
 METERS_PER_FOOT = report_map.METERS_PER_FOOT
 
 # --- the access map's plate ---------------------------------------------
-# HALF OF LANDFORM'S MAP, THE SAME EXTENT. This map shows which edges
-# have frontage, the track and the undrivable boundary, not contour
-# detail, and the page holds two tables beneath it. The frame's DRAWABLE
-# height (the frame less its margins and the scale bar's band, which do
-# not shrink) is exactly half the full frame's, so on a parcel whose
-# fitted frame is taller than wide the scale is exactly half Landform's:
-# the same parcel at half size, the scale bar saying so. The frame is
-# fitted to the parcel as every section's is (report_map.fitted_frame),
-# so the ground extent is the other maps' -- the parcel plus the same
-# context margin either side. test_access_section.py measures both.
-_DRAWABLE_PT = report_map.FRAME_HEIGHT_PT - 2 * report_map.MARGIN_PT - report_map.FURNITURE_BAND_PT
-ACCESS_FRAME = (report_map.FRAME_WIDTH_PT, _DRAWABLE_PT / 2 + 2 * report_map.MARGIN_PT + report_map.FURNITURE_BAND_PT)
+# LANDFORM'S FRAME, EXTENT AND SCALE: report_map.render_map() fits the
+# same frame to the same boundary, so the map is the other sections' map
+# of this parcel with different layers on it. test_access_section.py
+# measures the scale, the drawn bbox and the frame against Landform's.
 ROAD_STROKE_PT = 1.3
 ROAD_CASING_PT = 3.0
 TRACK_STROKE_PT = 1.1
@@ -113,8 +106,10 @@ TICK_STROKE_PT = 0.55
 CONTOUR_OPACITY = 0.4
 # A run of fewer stations than this is merged into its neighbours for drawing.
 DRAWN_RUN_MIN_STATIONS = 2
-# Beyond this many roads with frontage the section spills to a second page.
-FRONTAGE_ROWS_MAX = 2
+# The first page holds the map and this many road rows beneath it
+# (measured on the reference parcel); beyond it the frontage table moves
+# whole to the continuation page.
+FRONTAGE_ROWS_MAX = 4
 # A limiting feature is named in the table when it affects at least this
 # share of its class's ground; the rest are in the methods note.
 FEATURE_NAME_SHARE = 0.25
@@ -241,9 +236,9 @@ def build_map_layers(inputs: ad.AccessInputs, derived: ad.AccessDerived, contour
     frontage band, the undrivable hachures, road casings, roads (named),
     track casings, tracks."""
     parcel = inputs.boundary_polygon_utm
-    visible = box(*report_map.visible_extent_utm(parcel, ACCESS_FRAME))
+    visible = box(*report_map.visible_extent_utm(parcel))
     meters_per_unit = report_map._Projection(
-        parcel.bounds, report_map.fitted_frame(parcel, ACCESS_FRAME), report_map.MARGIN_PT, report_map.FURNITURE_BAND_PT
+        parcel.bounds, report_map.fitted_frame(parcel), report_map.MARGIN_PT, report_map.FURNITURE_BAND_PT
     ).meters_per_unit
     layers = []
     for spec in report_map.contour_layers(contours, legend=["Contours, ", {"value": f"{contours['interval_ft']} ft"}]):
@@ -285,7 +280,7 @@ def build_map_layers(inputs: ad.AccessInputs, derived: ad.AccessDerived, contour
 
 def empty_map_note(derived: ad.AccessDerived, parcel) -> Optional[dict]:
     """The quiet statement on a map with no road in the frame."""
-    visible = box(*report_map.visible_extent_utm(parcel, ACCESS_FRAME))
+    visible = box(*report_map.visible_extent_utm(parcel))
     if any(road["geometry_utm"].intersects(visible) for road in derived.roads):
         return None
     if derived.roads:
@@ -374,6 +369,9 @@ def build_map_caption(derived: ad.AccessDerived) -> list:
     else:
         acres = crossings["beyond_crossing_m2"] / wd.SQUARE_METERS_PER_ACRE
         parts += [{"value": _one_decimal(acres)}, " acres lie across a mapped stream from every frontage."]
+    frontage = derived.frontage
+    if len(frontage["roads"]) > FRONTAGE_ROWS_MAX:
+        parts += [f" Frontage on {len(frontage['roads'])} roads: the frontage table is on the next page."]
     return parts
 
 
@@ -383,13 +381,10 @@ def build_map_caption(derived: ad.AccessDerived) -> list:
 
 
 def _drivable_frontage_m(road: dict, boundary: dict) -> float:
-    total = 0.0
-    if road["geometry"] is None:
-        return total
-    for run in boundary["runs"]:
-        if run["state"] == ad.DRIVABLE and run["geometry"] is not None:
-            total += float(run["geometry"].buffer(0.05).intersection(road["geometry"]).length)
-    return total
+    """The road's frontage that is drivable: its intervals along the ring
+    against the drivable runs', exact."""
+    drivable = [(run["start_m"], run["end_m"]) for run in boundary["runs"] if run["state"] == ad.DRIVABLE]
+    return ad.intervals_overlap_m(road["intervals"], drivable)
 
 
 def build_frontage_table(derived: ad.AccessDerived) -> Optional[dict]:
@@ -423,7 +418,7 @@ def build_frontage_caption(derived: ad.AccessDerived, table: Optional[dict]) -> 
         parts += ["Frontage is the boundary within ", {"value": f"{_ft(frontage['tolerance_m'])} ft"},
                   " of a mapped road; the second column is its length under ", {"value": _pct(derived.boundary["threshold_pct"])}, ". "]
         if table["spill"]:
-            parts += [f"Frontage on more than {FRONTAGE_ROWS_MAX} roads: the soil table and the sources continue on the next page. "]
+            parts += [f"Frontage on more than {FRONTAGE_ROWS_MAX} roads, so the table is on this page rather than under the map. "]
     tracks = derived.tracks["tracks"]
     unnamed = [r for r in frontage["roads"] if r["name"] == "Unnamed road"]
     if unnamed and any(t["name"] == "Unnamed road" for t in tracks):
@@ -592,8 +587,7 @@ def build_access_section(inputs: ad.AccessInputs, tokens: Optional[dict] = None)
     derived = ad.derive(inputs)
     parcel = inputs.boundary_polygon_utm
     contours = report_map.parcel_contours(inputs.dem, parcel)
-    rendered = report_map.render_map(parcel, build_map_layers(inputs, derived, contours), tokens, frame=ACCESS_FRAME,
-                                     note=empty_map_note(derived, parcel))
+    rendered = report_map.render_map(parcel, build_map_layers(inputs, derived, contours), tokens, note=empty_map_note(derived, parcel))
     frontage_table = build_frontage_table(derived)
     spill = bool(frontage_table and frontage_table["spill"])
     return {

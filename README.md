@@ -773,7 +773,7 @@ restriction.
 
 ## Site data report: the Access section's sources
 
-Branch 10 adds section V, one page, an inventory of the access that
+Branch 10 adds section V, two pages, an inventory of the access that
 exists: frontage, tracks and what the ground allows. No proposed road,
 route, corridor or cost appears in it (`test_access_section.py` greps for
 that language); where a new road should go is the roads step's job and
@@ -804,22 +804,24 @@ appears on the layout map and in the design record.
   crossings, and the soil partition on the Water section's own map-unit
   cell grid, summing to the cover.
 
-`access_section.py` sets the page: the summary line carrying frontage,
-the drivable boundary and the very-limited soil share; the map at half
-of Landform's drawable height and so exactly half its scale on a parcel
-whose fitted frame is taller than wide (the same extent, the scale bar
-saying so) — roads in ink on a page casing, the track dashed, frontage
-as a soft band under the boundary, undrivable boundary hachured in the
-terrain token, contours set back; the frontage table; the soil table
-with the limiting features as a prose column; the sources. Drawing and
+`access_section.py` sets two pages on Landform's rhythm: the summary line
+carrying frontage, the drivable boundary and the very-limited soil share;
+the map AT LANDFORM'S EXTENT AND SCALE, so the sections' maps compare as
+pictures of the same land — roads in ink on a page casing, the track
+dashed, frontage as a soft band under the boundary, undrivable boundary
+hachured in the terrain token, contours set back — with the frontage
+table under it; then the soil table with the limiting features as a prose
+column, and the sources. Frontage is measured as intervals along the
+boundary ring, so two roads whose tolerance bands overlap cover the same
+stretch once and the total can never exceed the perimeter. Drawing and
 measuring are different jobs: runs of boundary shorter than two samples
-are merged for drawing only, and the caption says so. With frontage on
-more than two roads the section spills to a second page by a stated
-rule rather than condense. Fixtures are the parcel's own five mapped
-road segments and its SSURGO ratings (`assets/reference/access/`,
-captured by `make_access_fixtures.py`); `diagnose_access_section.py`
-prints every figure and, given an output directory, renders the page and
-the overflow case to PNG.
+are merged for drawing only, and the caption says so. Four road rows fit
+under the map, measured; with more, the frontage table moves whole to the
+second page and the map caption says so. Fixtures are the parcel's own
+five mapped road segments and its SSURGO ratings
+(`assets/reference/access/`, captured by `make_access_fixtures.py`);
+`diagnose_access_section.py` prints every figure and, given an output
+directory, renders the pages and the overflow case to PNG.
 
 ## Running it yourself
 

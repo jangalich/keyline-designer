@@ -138,10 +138,23 @@ assert all(r["class"] == "Local road" and r["route"] is None and r["properties"]
 assert all(r["properties"]["source_datadesc"] == "2016 April MAFTIGER" for r in DERIVED.roads)
 frontage = DERIVED.frontage
 assert frontage["tolerance_m"] == 15.0 and round(frontage["perimeter_m"], 1) == 995.1
+# Frontage is stretches of the ring as INTERVALS along it: N Montour Rd's two segments overlap for 15 m and count
+# once (349.0, not their sum 364.7); the two roads overlap at the north-west corner, so the total is the union, 463.7,
+# not the per-road sum 483.2. (A linework union double-counted 33 m here and read exactly half the perimeter.)
 assert [(r["name"], r["class"], r["segments"], round(r["length_m"], 1)) for r in frontage["roads"]] == [
-    ("N Montour Rd", "Local road", 2, 363.8), ("Unnamed road", "Local road", 1, 134.3)]
-assert round(frontage["total_m"], 1) == 497.2 and frontage["nearest"] is None and frontage["mapped_roads"] == 5
-assert round(frontage["total_m"] / frontage["perimeter_m"], 3) == 0.5
+    ("N Montour Rd", "Local road", 2, 349.0), ("Unnamed road", "Local road", 1, 134.3)]
+assert round(frontage["total_m"], 1) == 463.7 and round(frontage["sum_of_roads_m"], 1) == 483.2
+assert frontage["nearest"] is None and frontage["mapped_roads"] == 5
+assert round(frontage["total_m"] / frontage["perimeter_m"], 3) == 0.466 and frontage["total_m"] < frontage["perimeter_m"]
+assert abs(frontage["geometry"].length - frontage["total_m"]) < 1e-6
+assert [(round(a), round(b)) for a, b in frontage["intervals"]] == [(0, 340), (871, 995)]
+# Nine bands that overlap at every join cover the whole ring once: the total is the perimeter, the sum is not.
+ring_ = LineString(INPUTS.boundary_polygon_utm.exterior.coords)
+assert ad.merge_intervals([(0, 10), (5, 20), (30, 40)]) == [(0, 20), (30, 40)]
+assert ad.ring_intervals(ring_, None) == [] and ad.ring_intervals(ring_, ring_) == [(0.0, ring_.length)]
+first_edge = LineString(list(ring_.coords)[:2])
+around_origin = LineString([ring_.interpolate(ring_.length - 5.0), ring_.coords[0], ring_.interpolate(5.0)])
+assert [(round(a, 3), round(b, 3)) for a, b in ad.ring_intervals(ring_, around_origin)] == [(0.0, 5.0), (round(ring_.length - 5.0, 3), round(ring_.length, 3))]
 # N Montour Dr, 15.5 m off the north-east edge, is decided by the tolerance: 0 at 15 m, frontage at 20 m.
 at_20 = ad.derive_frontage(INPUTS, ad.derive_roads(INPUTS, tolerance_m=20.0), tolerance_m=20.0)
 assert [r["name"] for r in at_20["roads"]] == ["N Montour Rd", "Unnamed road", "N Montour Dr"]
@@ -161,7 +174,8 @@ lengths = boundary["lengths_m"]
 assert round(sum(lengths.values()), 6) == round(boundary["perimeter_m"], 6) == round(sum(r["length_m"] for r in boundary["runs"]), 6)
 assert round(lengths[ad.DRIVABLE], 1) == 395.0 and round(lengths[ad.UNDRIVABLE], 1) == 600.1 and lengths[ad.UNKNOWN] == 0.0
 assert len(boundary["stations"]) == 200 and all(s["slope_pct"] is not None for s in boundary["stations"])
-assert round(boundary["frontage_lengths_m"][ad.DRIVABLE], 1) == 178.1 and round(boundary["frontage_lengths_m"][ad.UNDRIVABLE], 1) == 320.3
+assert round(boundary["frontage_lengths_m"][ad.DRIVABLE], 1) == 177.6 and round(boundary["frontage_lengths_m"][ad.UNDRIVABLE], 1) == 286.2
+assert abs(sum(boundary["frontage_lengths_m"].values()) - frontage["total_m"]) < 1e-6, "the frontage partitions into drivable and not"
 edges = [(ad.compass_sector(e["midpoint_bearing_deg"]), round(e["length_m"], 1), round(e["mean_slope_pct"], 1), round(e["undrivable_share"] * 100))
          for e in boundary["edges"] if e["length_m"] > 1]
 assert edges == [("W", 330.6, 13.8, 49), ("S", 235.8, 12.4, 17), ("E", 94.5, 21.4, 95), ("NE", 241.8, 23.3, 90), ("N", 91.5, 19.3, 100)], edges

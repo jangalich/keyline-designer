@@ -191,9 +191,9 @@ def render_pages(out_dir: str, data, context, document, inputs) -> None:
     site_report.generate_site_report_pdf(data, pdf_path, generated_on=generated_on, terrain=terrain, water=water, access=inputs)
     doc = pymupdf.open(pdf_path)
     for index, page in enumerate(doc, start=1):
-        if index >= len(doc):
+        if index >= len(doc) - 1:
             page.get_pixmap(dpi=150).save(os.path.join(out_dir, f"access-page-{index}.png"))
-    print(f"{len(doc)} pages -> {out_dir}/access-page-{len(doc)}.png")
+    print(f"{len(doc)} pages -> {out_dir}/access-page-N.png")
     # THE OVERFLOW CASE: frontage on nine roads, condensed to five rows and one "other roads" row.
     from shapely.geometry import LineString
     from shapely.ops import substring
@@ -220,7 +220,7 @@ def render_pages(out_dir: str, data, context, document, inputs) -> None:
     site_report.generate_site_report_pdf(data, many_pdf, generated_on=generated_on, terrain=terrain, water=water, access=many)
     mdoc = pymupdf.open(many_pdf)
     for index, page in enumerate(mdoc, start=1):
-        if index >= len(doc):
+        if index >= len(doc) - 1:
             page.get_pixmap(dpi=150).save(os.path.join(out_dir, f"overflow-page-{index}.png"))
     print(f"overflow: {len(mdoc)} pages -> {out_dir}/overflow-page-N.png")
 

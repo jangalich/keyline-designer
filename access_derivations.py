@@ -252,38 +252,98 @@ def derive_roads(inputs: AccessInputs, tolerance_m: float = FRONTAGE_TOLERANCE_M
     return roads
 
 
+def ring_intervals(ring, geometry) -> list:
+    """The stretches of `ring` (a LineString of the boundary's coordinates)
+    that `geometry` (ring pieces) covers, as merged [start, end] distances
+    along the ring. Intervals, not geometry, are what frontage adds up
+    in: two roads whose tolerance bands overlap cover the SAME stretch of
+    boundary once, and a union of their pieces as linework can keep both
+    when floating point leaves them a hair off collinear."""
+    if geometry is None or geometry.is_empty:
+        return []
+    parts = [geometry] if isinstance(geometry, LineString) else [g for g in getattr(geometry, "geoms", []) if isinstance(g, LineString)]
+    length = float(ring.length)
+    raw = []
+    for part in parts:
+        if part.length <= 0:
+            continue
+        stations = [ring.project(Point(c)) for c in part.coords]
+        # Consecutive coordinates, so a piece that runs through the ring's
+        # origin splits there rather than spanning the whole ring.
+        for s0, s1 in zip(stations, stations[1:]):
+            low, high = min(s0, s1), max(s0, s1)
+            if high - low <= length / 2:
+                raw.append((low, high))
+            else:
+                raw.append((high, length))
+                raw.append((0.0, low))
+    return merge_intervals(raw)
+
+
+def merge_intervals(intervals: list) -> list:
+    merged = []
+    for start, end in sorted(intervals):
+        if merged and start <= merged[-1][1] + 1e-6:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+    return [(a, b) for a, b in merged]
+
+
+def intervals_overlap_m(a: list, b: list) -> float:
+    """The length two interval lists share along the ring."""
+    total = 0.0
+    for a0, a1 in a:
+        for b0, b1 in b:
+            total += max(0.0, min(a1, b1) - max(a0, b0))
+    return total
+
+
+def intervals_geometry(ring, intervals: list):
+    pieces = [substring(ring, a, b) for a, b in intervals if b > a]
+    pieces = [p for p in pieces if isinstance(p, LineString) and p.length > 0]
+    return None if not pieces else (pieces[0] if len(pieces) == 1 else MultiLineString(pieces))
+
+
 def derive_frontage(inputs: AccessInputs, roads: list, tolerance_m: float = FRONTAGE_TOLERANCE_METERS) -> dict:
     """
     Frontage merged by road name, and the nearest road when there is none:
 
         {'tolerance_m', 'perimeter_m', 'roads': [{'name', 'class', 'route',
-          'segments', 'length_m', 'geometry'}] (longest first),
-         'total_m', 'geometry' (the union of every road's ring pieces | None),
+          'segments', 'length_m', 'intervals', 'geometry'}] (longest first),
+         'total_m', 'intervals', 'geometry' (the boundary every road covers,
+          counted ONCE where bands overlap), 'sum_of_roads_m',
          'nearest': None | {'name', 'class', 'distance_m', 'bearing_deg',
                             'sector', 'from_xy', 'to_xy'},
          'mapped_roads': n}
+
+    Lengths are stretches of the boundary ring, as intervals along it:
+    a road's frontage is the union of its segments' stretches, and the
+    total is the union over every road, so it can never exceed the
+    perimeter; `sum_of_roads_m` is the per-road sum, for the record.
     """
     parcel = inputs.boundary_polygon_utm
-    ring = parcel.exterior
+    ring = LineString(parcel.exterior.coords)
     by_name = {}
     for road in roads:
         if road["frontage"] is None:
             continue
         entry = by_name.setdefault(road["name"], {"name": road["name"], "class": road["class"], "route": road["route"],
-                                                  "segments": 0, "pieces": []})
+                                                  "segments": 0, "intervals": []})
         entry["segments"] += 1
-        entry["pieces"].append(road["frontage"])
+        entry["intervals"] += ring_intervals(ring, road["frontage"])
         if entry["class"] is None:
             entry["class"] = road["class"]
     merged = []
     for entry in by_name.values():
-        geometry = wd._linear(unary_union(entry["pieces"]))
-        length = float(geometry.length) if geometry is not None else 0.0
+        intervals = merge_intervals(entry["intervals"])
         merged.append({"name": entry["name"], "class": entry["class"], "route": entry["route"], "segments": entry["segments"],
-                       "length_m": length, "geometry": geometry})
+                       "length_m": sum(b - a for a, b in intervals), "intervals": intervals,
+                       "geometry": intervals_geometry(ring, intervals)})
     merged.sort(key=lambda r: -r["length_m"])
-    union = wd._linear(unary_union([r["geometry"] for r in merged if r["geometry"] is not None])) if merged else None
-    total = float(union.length) if union is not None else 0.0
+    all_intervals = merge_intervals([i for r in merged for i in r["intervals"]])
+    union = intervals_geometry(ring, all_intervals) if merged else None
+    total = sum(b - a for a, b in all_intervals)
     nearest = None
     if not merged and roads:
         closest = min(roads, key=lambda r: r["distance_m"])
@@ -293,7 +353,8 @@ def derive_frontage(inputs: AccessInputs, roads: list, tolerance_m: float = FRON
                    "bearing_deg": bearing, "sector": compass_sector(bearing),
                    "from_xy": (on_ring.x, on_ring.y), "to_xy": (on_road.x, on_road.y)}
     return {"tolerance_m": tolerance_m, "perimeter_m": float(ring.length), "roads": merged, "total_m": total,
-            "geometry": union, "nearest": nearest, "mapped_roads": len(roads)}
+            "intervals": all_intervals, "geometry": union, "sum_of_roads_m": sum(r["length_m"] for r in merged),
+            "nearest": nearest, "mapped_roads": len(roads)}
 
 
 def _line_profile(line, dem: dict, step_m: float) -> dict:
@@ -438,13 +499,11 @@ def derive_boundary(inputs: AccessInputs, frontage: dict, step_m: float = BOUNDA
     lengths = {DRIVABLE: 0.0, UNDRIVABLE: 0.0, UNKNOWN: 0.0}
     for piece in pieces:
         lengths[piece["state"]] += piece["length_m"]
+    # The frontage's drivable and undrivable lengths, as intervals along the ring: exact, and a partition of the frontage.
     frontage_lengths = {DRIVABLE: 0.0, UNDRIVABLE: 0.0, UNKNOWN: 0.0}
-    if frontage.get("geometry") is not None:
-        for piece in pieces:
-            if piece["geometry"] is None:
-                continue
-            overlap = piece["geometry"].buffer(0.05).intersection(frontage["geometry"])
-            frontage_lengths[piece["state"]] += float(overlap.length)
+    frontage_intervals = frontage.get("intervals") or []
+    for piece in pieces:
+        frontage_lengths[piece["state"]] += intervals_overlap_m([(piece["start_m"], piece["end_m"])], frontage_intervals)
     # Per drawn edge: the stations whose distance falls on it.
     edges = []
     coords = list(parcel.exterior.coords)
@@ -457,9 +516,7 @@ def derive_boundary(inputs: AccessInputs, frontage: dict, step_m: float = BOUNDA
         cursor = end
         on_edge = [s for s in stations if start <= s["distance_m"] < end and s["slope_pct"] is not None]
         values = [s["slope_pct"] for s in on_edge]
-        frontage_m = 0.0
-        if frontage.get("geometry") is not None:
-            frontage_m = float(edge.buffer(0.05).intersection(frontage["geometry"]).length)
+        frontage_m = intervals_overlap_m([(start, end)], frontage_intervals)
         edges.append({
             "index": index, "length_m": float(edge.length),
             "mean_slope_pct": float(np.mean(values)) if values else None,

@@ -70,9 +70,9 @@ FULL_ONLY = (
     # Branch 9 phase 2: two WeasyPrint renders of the nine-page report,
     # the degraded one beside the full one. Measured at 11.7 s.
     "test_water_section.py",
-    # Branch 10: the page test renders the ten-page report five times,
+    # Branch 10: the page test renders the eleven-page report five times,
     # the spill rule at three road counts and the degraded case beside
-    # the full one (18.1 s); the derivations build a session and
+    # the full one (about 20 s); the derivations build a session and
     # rasterise the exclusion union twice (5.5 s).
     "test_access_section.py",
     "test_access_derivations.py",

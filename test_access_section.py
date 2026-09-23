@@ -9,9 +9,9 @@ soil road ratings, WeasyPrint for the pages.
 
   1. NO COLOUR LITERAL OUTSIDE TOKENS: the stylesheet, every template,
      both renderers, the Access builder and derivations.
-  2. THE MAP: at Landform's parcel extent with the same context margin
-     either side, at HALF the frame height and so exactly half the scale
-     on this parcel, measured; the plate in order (contours set back, the
+  2. THE MAP: at Landform's extent, scale and frame -- the same metres
+     per unit, drawn bbox and scale bar, measured -- so the sections'
+     maps compare as pictures of the same land; the plate in order (contours set back, the
      frontage band, the hachures, road casing under roads, track casing
      under the dashed track); every geometry within the frame; the
      hachures as ticks inward; drawn runs merge nothing longer than two
@@ -26,12 +26,13 @@ soil road ratings, WeasyPrint for the pages.
      parcel's sentence.
   4. NO PROPOSED-ROAD LANGUAGE anywhere in the section's words: corridor,
      route, cost, propose, recommend, should, build, candidate, suitable.
-  5. THE PAGES: ten (cover, Climate 2, Landform 3, Water 3, Access 1) on
-     the reference parcel, no box past the measure, decimal alignment
-     across both tables with dashes included; the SPILL RULE measured --
-     two roads one page, three roads two, nine roads two with the
-     continuation eyebrow and every road listed; the degraded render at
-     the same page count.
+  5. THE PAGES: eleven (cover, Climate 2, Landform 3, Water 3, Access 2),
+     the map page and the numbers page with the continuation eyebrow, no
+     box past the measure, decimal alignment across both tables with
+     dashes included; the SPILL RULE measured -- four road rows sit under
+     the map, five move the frontage table whole to the numbers page,
+     nine likewise with every road listed; the degraded render at the
+     same page count.
 """
 
 import copy
@@ -95,7 +96,7 @@ print(f"   {len(files) + 1} files checked")
 # ======================================================================
 # 2. The map
 # ======================================================================
-print("2. the map: Landform's extent, half the height and exactly half the scale; the plate in order")
+print("2. the map at Landform's extent, scale and frame; the plate in order")
 DATA = fixture.report_data()
 with fixture.Harness():
     SESSION = fixture.Session()
@@ -110,21 +111,15 @@ LANDFORM, SECTION = SECTIONS[1], SECTIONS[3]
 assert SECTION["name"] == "Access" and SECTION["template"] == "access.html" and SECTION["heading"] == "Access"
 DERIVED = SECTION["derived"]
 m = SECTION["map"]
-assert m["extent_utm"] == LANDFORM["map"]["extent_utm"], "the parcel extent is Landform's"
-assert m["frame"][1] == acs.ACCESS_FRAME[1] == 195.0 and m["frame"][0] < report_map.FRAME_WIDTH_PT
-assert m["frame"][1] - 2 * report_map.MARGIN_PT - report_map.FURNITURE_BAND_PT == (LANDFORM["map"]["frame"][1] - 2 * report_map.MARGIN_PT - report_map.FURNITURE_BAND_PT) / 2
-# On this parcel the fitted frame is taller than wide, so the height binds and the scale is exactly half Landform's.
-assert abs(m["meters_per_unit"] / LANDFORM["map"]["meters_per_unit"] - 2.0) < 1e-9, (m["meters_per_unit"], LANDFORM["map"]["meters_per_unit"])
-assert m["scale_bar"]["feet"] == LANDFORM["map"]["scale_bar"]["feet"] and abs(m["scale_bar"]["units"] * 2 - LANDFORM["map"]["scale_bar"]["units"]) < 1e-6
-# The same fitting rule either side of the parcel on both maps: report_map.MAX_CONTEXT_MARGIN_M of context plus the
-# frame's own margin, which is fixed in points and so twice the ground at half the scale.
+# IDENTICAL TO LANDFORM'S, MEASURED: the same metres per unit, the same drawn bbox, the same scale bar, the same
+# fitted frame -- the other sections' map of this parcel with different layers on it.
+assert m["extent_utm"] == LANDFORM["map"]["extent_utm"] and m["meters_per_unit"] == LANDFORM["map"]["meters_per_unit"]
+assert m["drawn_bbox"] == LANDFORM["map"]["drawn_bbox"] and m["scale_bar"] == LANDFORM["map"]["scale_bar"] and m["frame"] == LANDFORM["map"]["frame"]
+assert m["frame"] == (SECTIONS[2]["map"]["frame"]) and m["meters_per_unit"] == SECTIONS[2]["map"]["meters_per_unit"], "and Water's"
 parcel = INPUTS.boundary_polygon_utm
 minx, miny, maxx, maxy = parcel.bounds
-landform_visible = report_map.visible_extent_utm(parcel)
-access_visible = report_map.visible_extent_utm(parcel, acs.ACCESS_FRAME)
-for visible_extent, scale_m in ((landform_visible, LANDFORM["map"]["meters_per_unit"]), (access_visible, m["meters_per_unit"])):
-    assert abs((minx - visible_extent[0]) - (report_map.MAX_CONTEXT_MARGIN_M + report_map.MARGIN_PT * scale_m)) < 1e-6
-    assert abs((visible_extent[2] - maxx) - (report_map.MAX_CONTEXT_MARGIN_M + report_map.MARGIN_PT * scale_m)) < 1e-6
+access_visible = report_map.visible_extent_utm(parcel)
+assert access_visible == report_map.visible_extent_utm(parcel)
 colours = set(re.findall(r'(?:fill|stroke)="(#[0-9a-fA-F]{6})"', m["svg"]))
 assert colours <= set(TOKENS.values()), colours - set(TOKENS.values())
 svg = m["svg"]
@@ -147,7 +142,7 @@ for spec in layers:
         assert geometry.within(visible.buffer(0.01)), f"{spec['id']} draws outside the frame"
 # Hachures: ticks of one length, each starting on the boundary and pointing inward.
 ticks = by_id["undrivable"]["geometries"][0]
-assert isinstance(ticks, MultiLineString) and len(ticks.geoms) == 78, len(ticks.geoms)
+assert isinstance(ticks, MultiLineString) and len(ticks.geoms) == 159, len(ticks.geoms)
 tick_length = acs.TICK_LENGTH_PT * m["meters_per_unit"]
 for tick in list(ticks.geoms)[::7]:
     (x0, y0), (x1, y1) = tick.coords
@@ -181,13 +176,14 @@ print(f"   m/unit {m['meters_per_unit']:.4f} = 2 x {LANDFORM['map']['meters_per_
 print("3. the summary, the tables, the captions, the sources; the degraded and landlocked cases")
 COVER = round(INPUTS.parcel_acres, 1)
 summary = _text(SECTION["summary"])
-assert summary == ("Mapped roads front 1,631 ft of the 3,265 ft boundary, N Montour Rd on the west and an unnamed road on the north. "
-                   "1,296 ft of the boundary is under 15% slope, 584 ft of it on that frontage; the edges from east round to north are "
+assert summary == ("Mapped roads front 1,521 ft of the 3,265 ft boundary, N Montour Rd on the west and an unnamed road on the north. "
+                   "1,296 ft of the boundary is under 15% slope, 583 ft of it on that frontage; the edges from east round to north are "
                    "steeper. Soil rated very limited for a local road covers 65% of the parcel."), summary
-assert [p["value"] for p in SECTION["summary"] if isinstance(p, dict)] == ["1,631 ft", "3,265 ft", "1,296 ft", "15%", "584 ft", "65%"]
+assert [p["value"] for p in SECTION["summary"] if isinstance(p, dict)] == ["1,521 ft", "3,265 ft", "1,296 ft", "15%", "583 ft", "65%"]
+assert DERIVED.frontage["total_m"] < DERIVED.frontage["perimeter_m"] and round(DERIVED.frontage["total_m"] / DERIVED.frontage["perimeter_m"], 3) == 0.466
 frontage = SECTION["frontage_table"]
 assert frontage["columns"] == ["Along the boundary, ft", "Under 15%, ft"] and frontage["compact"] and frontage["spill"] is False
-assert [(r["label"], r["cells"]) for r in frontage["rows"]] == [("N Montour Rd, local road", ["1,194", "584"]),
+assert [(r["label"], r["cells"]) for r in frontage["rows"]] == [("N Montour Rd, local road", ["1,145", "583"]),
                                                                 ("Unnamed road, local road", ["441", ZERO_DASH])]
 assert not any(r["label"] == "Total" for r in frontage["rows"]), "the summary carries the totals"
 soil = SECTION["soil_table"]
@@ -253,16 +249,16 @@ print("   14 patterns, none found")
 # ======================================================================
 # 5. The pages
 # ======================================================================
-print("5. ten pages, no overflow, decimal alignment; the spill rule at two, three and nine roads; the degraded render")
+print("5. eleven pages, no overflow, decimal alignment; the spill rule at four, five and nine roads; the degraded render")
 from weasyprint import HTML  # noqa: E402
 
 html = site_report.render_site_report_html(DATA, generated_on=GENERATED_ON, terrain=TERRAIN, water=WATER, access=INPUTS)
-assert 'class="section section--access"' in html and "Access, continued" not in html and html.count("V</span> · Access") == 1
+assert 'class="section section--access section--map"' in html and html.count("Access, continued") == 1 and html.count("V</span> · Access") == 2
 assert '<td class="text">' in html and '<th class="text">Limiting features</th>' in html
 assert set(HEX.findall(html)) == set(TOKENS.values())
 document = HTML(string=html, base_url=site_report.TEMPLATES_DIRECTORY).render()
 pages = document.pages
-assert len(pages) == 10, len(pages)
+assert len(pages) == 11, len(pages)
 assert report_layout.overflowing_boxes(document) == [], report_layout.overflowing_boxes(document)
 
 
@@ -291,11 +287,13 @@ def _numeric_cells(table_box):
     return cells
 
 
-page = pages[9]
-assert {"report-map", "summary", "heading", "eyebrow", "data-table", "caption", "source-footer"} <= _classes_on(page)
-assert "key-figures" not in _classes_on(page) and len(_tables(page)) == 2
+page, numbers = pages[9], pages[10]
+assert {"report-map", "summary", "heading", "eyebrow", "data-table", "caption"} <= _classes_on(page)
+assert not ({"key-figures", "source-footer"} & _classes_on(page)) and len(_tables(page)) == 1
+assert {"eyebrow", "data-table", "caption", "source-footer"} <= _classes_on(numbers) and "report-map" not in _classes_on(numbers)
+assert len(_tables(numbers)) == 1
 advances = set()
-for table_box, columns in zip(_tables(page), (2, 2)):
+for table_box, columns in zip(_tables(page) + _tables(numbers), (2, 2)):
     cells = _numeric_cells(table_box)
     edges = {right for right, _, _ in cells}
     assert len(edges) == columns, (columns, sorted(edges))
@@ -307,11 +305,11 @@ for table_box, columns in zip(_tables(page), (2, 2)):
         if "." in text:
             assert len(text) - text.index(".") == 2, text
 assert len(advances) == 1, sorted(advances)
-flat = "".join("".join(b.text for b in _walk(page._page_box) if type(b).__name__ == "TextBox"))
+flat = "".join("".join(b.text for b in _walk(p._page_box) if type(b).__name__ == "TextBox") for p in (page, numbers))
 squash = "".join(flat.split())
 for needle in ("merged for drawing only", "shallow water table", "may be a private lane", "not the elevation model's grid above"):
     assert "".join(needle.split()) in squash, needle
-assert "V·ACCESS" in squash.upper() and "CONTINUED" not in squash.upper()
+assert "V·ACCESS" in squash.upper() and "V·ACCESS,CONTINUED" in squash.upper()
 # The landform maps and Water intact ahead of it.
 assert len(_numeric_cells(pages[2]._page_box)) == 108 + 6 and 'class="section section--water section--map"' in html
 
@@ -336,26 +334,30 @@ def _render(inputs):
     return h, HTML(string=h, base_url=site_report.TEMPLATES_DIRECTORY).render()
 
 
-# THE SPILL RULE, measured: two roads fit the page; three spill; nine spill with every road listed.
-for count, expected_pages, spill in ((2, 10, False), (3, 11, True), (9, 11, True)):
+# THE SPILL RULE, measured: four road rows sit under the map; five move the frontage table whole to the numbers page,
+# nine likewise, every road listed and the total the perimeter, not the sum. Eleven pages every time.
+assert acs.FRONTAGE_ROWS_MAX == 4
+for count, spill in ((4, False), (5, True), (9, True)):
     many = ad.AccessInputs(**{**INPUTS.__dict__, "farm_roads": _roads_around(count)})
     section = acs.build_access_section(many, TOKENS)
     assert section["spill"] is spill and len(section["frontage_table"]["rows"]) == count, (count, section["spill"])
+    assert section["derived"].frontage["total_m"] <= section["derived"].frontage["perimeter_m"] + 1e-6
+    assert section["derived"].frontage["sum_of_roads_m"] > section["derived"].frontage["total_m"], "overlapping bands, counted once"
     many_html, many_document = _render(many)
-    assert len(many_document.pages) == expected_pages, (count, len(many_document.pages))
+    assert len(many_document.pages) == 11, (count, len(many_document.pages))
     assert report_layout.overflowing_boxes(many_document) == []
-    assert ("Access, continued" in many_html) is spill
-    if spill:
-        assert "continue on the next page" in _text(section["frontage_caption"])
-        assert "source-footer" in _classes_on(many_document.pages[10]) and "report-map" not in _classes_on(many_document.pages[10])
-        assert "source-footer" not in _classes_on(many_document.pages[9]) and len(_tables(many_document.pages[9])) == 1
-    else:
-        assert "continue on the next page" not in _text(section["frontage_caption"])
-# The degraded render: the statement where the soil table would be, still one page.
+    map_page, numbers_page = many_document.pages[9], many_document.pages[10]
+    assert ("the frontage table is on the next page" in _text(section["map_caption"])) is spill
+    assert ("on this page rather than under the map" in _text(section["frontage_caption"])) is spill
+    assert len(_tables(map_page)) == (0 if spill else 1) and len(_tables(numbers_page)) == (2 if spill else 1)
+    assert "source-footer" in _classes_on(numbers_page) and "report-map" not in _classes_on(numbers_page)
+nine = acs.build_access_section(ad.AccessInputs(**{**INPUTS.__dict__, "farm_roads": _roads_around(9)}), TOKENS)
+assert _text(nine["summary"]).startswith("Mapped roads front 3,265 ft of the 3,265 ft boundary")
+# The degraded render: the statement where the soil table would be, still eleven pages.
 degraded_html, degraded_document = _render(degraded_inputs)
-assert len(degraded_document.pages) == 10 and report_layout.overflowing_boxes(degraded_document) == []
-assert "unavailable" in _classes_on(degraded_document.pages[9]) and len(_tables(degraded_document.pages[9])) == 1
-print(f"   10 pages, both tables aligned at one advance {advances.pop()} pt; 2 roads -> 10 pages, 3 -> 11, 9 -> 11; degraded 10")
+assert len(degraded_document.pages) == 11 and report_layout.overflowing_boxes(degraded_document) == []
+assert "unavailable" in _classes_on(degraded_document.pages[10]) and len(_tables(degraded_document.pages[10])) == 0
+print(f"   11 pages, both tables aligned at one advance {advances.pop()} pt; 4 roads under the map, 5 and 9 spill; degraded 11")
 
 print("\ntest_access_section.py: all sections passed")
 print(offline_harness.summary())
