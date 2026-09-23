@@ -56,6 +56,39 @@ THE TABLE AFTER BRANCH 7 (Climate: additions):
   power_wind          DEGRADABLE  regional wind; context, not a decision
                                   input on its own.
 
+THE TABLE AFTER BRANCH 9 (Water & hydrology: six more, all DEGRADABLE --
+they are context beside a Layer 1 the section always has (the NHD rows,
+the SSURGO rows, the DEM), and a missing wetland layer must not sink a
+paid report; each absent layer leaves a visible statement in its place):
+
+  nhd_points          DEGRADABLE  NHD's Point layer: mapped springs and
+                                  seeps (hydrology_data). "None mapped" is
+                                  the expected answer and a real one.
+  nhdplus_hr          DEGRADABLE  NHDPlus HR stream order and the reach's
+                                  total drainage area, joined to the NHD
+                                  rows by permanent_identifier
+                                  (nhdplus_data).
+  nwi                 DEGRADABLE  USFWS National Wetlands Inventory, two-
+                                  stage (nwi_data). An EMPTY answer is
+                                  "no mapped wetland", never a
+                                  degradation.
+  fema_nfhl           DEGRADABLE  FEMA flood hazard zones and whether a
+                                  digital flood map exists at all
+                                  (nfhl_data). "No digital flood map" is
+                                  a no-data answer with its own statement,
+                                  distinct from an outage.
+  nlcd_landcover      DEGRADABLE  Annual NLCD land cover on the DEM grid,
+                                  the year pinned (nlcd_landcover_data).
+  soil_water_table    DEGRADABLE  SSURGO's seasonal water table, flooding
+                                  and ponding by month, one report-time
+                                  query on the same service Layer 1
+                                  already reached (soil_water_table).
+
+THE WINDOW-BASED LAYERS take the boundary alone: nwi_data, nfhl_data and
+nlcd_landcover_data derive the parcel's UTM window from the boundary with
+dem_data.dem_window_bounds(), the function the DEM fetch itself uses, so
+the NLCD grid is cell-for-cell the DEM's without the DEM being here.
+
 SEVERE WEATHER, THE NORMALS AND THE STATION RATIOS ARE BUNDLED, NOT
 FETCHED (class E: spc_reports.py, precipitation_normals.py). They read
 files in the repository and carry no fetch risk, so they have no row in
@@ -101,6 +134,12 @@ from shapely.geometry import Polygon
 import precipitation_normals
 import run_diagnostics
 import spc_reports
+import hydrology_data
+import nfhl_data
+import nhdplus_data
+import nlcd_landcover_data
+import nwi_data
+import soil_water_table
 from atlas14_data import Atlas14IncompleteError, design_storms, get_atlas14_for_point
 from climate_report import derive_climate
 from daymet_data import DaymetIncompleteError, get_daymet_daily_for_point
@@ -117,6 +156,12 @@ REPORT_FETCH_LAYERS = {
     "daymet_daily": REQUIRED,
     "atlas14": DEGRADABLE,
     "power_wind": DEGRADABLE,
+    "nhd_points": DEGRADABLE,
+    "nhdplus_hr": DEGRADABLE,
+    "nwi": DEGRADABLE,
+    "fema_nfhl": DEGRADABLE,
+    "nlcd_landcover": DEGRADABLE,
+    "soil_water_table": DEGRADABLE,
 }
 
 # The (type, label) pair each layer's failure reports as -- the same split
@@ -125,6 +170,18 @@ REPORT_FETCH_LAYERS = {
 LAYER_CLIMATE = ("climate", "climate records")
 LAYER_ATLAS14 = ("design_storms", "design storm depths")
 LAYER_POWER_WIND = ("wind", "wind records")
+LAYER_NHD_POINTS = ("springs", "mapped springs and seeps")
+LAYER_NHDPLUS_HR = ("stream_order", "stream order")
+LAYER_NWI = ("wetlands", "mapped wetlands")
+LAYER_NFHL = ("flood_hazard", "flood hazard zones")
+LAYER_NLCD = ("land_cover", "land cover")
+LAYER_SOIL_WATER_TABLE = ("soil_water_table", "seasonal water table")
+
+# What a Water layer's fetch or parse can raise besides a RequestException:
+# a TIFF rasterio cannot open (OSError), a response whose shape the parser
+# rejects (ValueError, KeyError, TypeError). All are "the source did not
+# answer usefully" and degrade the same way.
+_WATER_FETCH_ERRORS = (requests.exceptions.RequestException, OSError, ValueError, KeyError, TypeError)
 
 # The exception kinds that mean "the source answered without the data",
 # as opposed to a RequestException, "the source did not answer".
@@ -181,6 +238,18 @@ class ReportData:
     # spc_reports.reports_within() at the centroid -- bundled, always
     # present.
     severe_weather: Optional[dict]
+    # THE WATER LAYERS (branch 9), each None when it degraded. The NHD
+    # point rows as hydrology_data returns them; the others PARSED by
+    # their modules (nhdplus_data.parse_flowline_attributes,
+    # nwi_data.parse_wetlands, nfhl_data.parse_flood_hazard,
+    # nlcd_landcover_data.parse_land_cover,
+    # soil_water_table.parse_seasonal_water_table).
+    nhd_points: Optional[list] = None
+    nhdplus_hr: Optional[dict] = None
+    nwi: Optional[dict] = None
+    fema_nfhl: Optional[dict] = None
+    nlcd_landcover: Optional[dict] = None
+    soil_water_table: Optional[dict] = None
     # {layer: {"label", "reason", "error"}} for every DEGRADABLE layer that
     # failed. Empty when everything answered. A REQUIRED failure never
     # reaches a ReportData; it raises.
@@ -278,6 +347,58 @@ def fetch_report_data(boundary) -> ReportData:
 
     severe_weather = spc_reports.reports_within(centroid[0], centroid[1])
 
+    # THE WATER LAYERS, in the order the section reads them. Each is one
+    # timed block; each degrades on its own.
+    nhd_points = None
+    try:
+        with run_diagnostics.time_layer("nhd_points", hydrology_data.get_nhd_points_for_boundary):
+            nhd_points = hydrology_data.get_nhd_points_for_boundary(boundary)
+    except _WATER_FETCH_ERRORS as exc:
+        nhd_points = None
+        _degrade("nhd_points", LAYER_NHD_POINTS, exc)
+
+    nhdplus_hr = None
+    try:
+        with run_diagnostics.time_layer("nhdplus_hr", nhdplus_data.get_flowline_attributes_for_boundary):
+            nhdplus_hr = nhdplus_data.parse_flowline_attributes(nhdplus_data.get_flowline_attributes_for_boundary(boundary))
+    except _WATER_FETCH_ERRORS as exc:
+        nhdplus_hr = None
+        _degrade("nhdplus_hr", LAYER_NHDPLUS_HR, exc)
+
+    nwi = None
+    try:
+        with run_diagnostics.time_layer("nwi", nwi_data.get_wetlands_for_boundary):
+            nwi = nwi_data.parse_wetlands(nwi_data.get_wetlands_for_boundary(boundary))
+    except _WATER_FETCH_ERRORS as exc:
+        nwi = None
+        _degrade("nwi", LAYER_NWI, exc)
+
+    fema_nfhl = None
+    try:
+        with run_diagnostics.time_layer("fema_nfhl", nfhl_data.get_flood_hazard_for_boundary):
+            fema_nfhl = nfhl_data.parse_flood_hazard(nfhl_data.get_flood_hazard_for_boundary(boundary))
+    except _WATER_FETCH_ERRORS as exc:
+        fema_nfhl = None
+        _degrade("fema_nfhl", LAYER_NFHL, exc)
+
+    nlcd_landcover = None
+    try:
+        with run_diagnostics.time_layer("nlcd_landcover", nlcd_landcover_data.get_land_cover_for_boundary):
+            nlcd_landcover = nlcd_landcover_data.parse_land_cover(nlcd_landcover_data.get_land_cover_for_boundary(boundary))
+    except _WATER_FETCH_ERRORS as exc:
+        nlcd_landcover = None
+        _degrade("nlcd_landcover", LAYER_NLCD, exc)
+
+    water_table = None
+    try:
+        with run_diagnostics.time_layer("soil_water_table", soil_water_table.get_seasonal_water_table_for_boundary):
+            water_table = soil_water_table.parse_seasonal_water_table(
+                soil_water_table.get_seasonal_water_table_for_boundary(boundary)
+            )
+    except _WATER_FETCH_ERRORS as exc:
+        water_table = None
+        _degrade("soil_water_table", LAYER_SOIL_WATER_TABLE, exc)
+
     return ReportData(
         boundary=list(boundary),
         centroid=centroid,
@@ -290,6 +411,12 @@ def fetch_report_data(boundary) -> ReportData:
         power_wind=power_wind,
         wind=wind,
         severe_weather=severe_weather,
+        nhd_points=nhd_points,
+        nhdplus_hr=nhdplus_hr,
+        nwi=nwi,
+        fema_nfhl=fema_nfhl,
+        nlcd_landcover=nlcd_landcover,
+        soil_water_table=water_table,
         unavailable=unavailable,
     )
 
@@ -302,6 +429,12 @@ def report_data_from_fixtures(
     severe_weather: bool = True,
     unavailable: Optional[dict] = None,
     correct_precipitation: bool = True,
+    nhd_points: Optional[list] = None,
+    nhdplus_hr: Optional[dict] = None,
+    nwi: Optional[dict] = None,
+    fema_nfhl: Optional[dict] = None,
+    nlcd_landcover: Optional[dict] = None,
+    soil_water_table_rows: Optional[list] = None,
 ) -> ReportData:
     """
     A ReportData from parsed responses ALREADY IN HAND -- the reference
@@ -312,6 +445,10 @@ def report_data_from_fixtures(
     blocks None, the branch 5 shape). A layer passed as None is absent,
     as if it degraded; `unavailable` may then name it. The production
     path is fetch_report_data().
+
+    The Water layers take the RAW response each fetch function returns
+    (water_reference_fixture.raw_water_layers()) and are parsed here the
+    way fetch_report_data() parses them; None is absent.
     """
     centroid = boundary_centroid_lat_lon(boundary)
     correction = heavy_rain = None
@@ -330,6 +467,12 @@ def report_data_from_fixtures(
         power_wind=power_wind,
         wind=derive_wind(power_wind) if power_wind is not None else None,
         severe_weather=spc_reports.reports_within(centroid[0], centroid[1]) if severe_weather else None,
+        nhd_points=list(nhd_points) if nhd_points is not None else None,
+        nhdplus_hr=nhdplus_data.parse_flowline_attributes(nhdplus_hr) if nhdplus_hr is not None else None,
+        nwi=nwi_data.parse_wetlands(nwi) if nwi is not None else None,
+        fema_nfhl=nfhl_data.parse_flood_hazard(fema_nfhl) if fema_nfhl is not None else None,
+        nlcd_landcover=nlcd_landcover_data.parse_land_cover(nlcd_landcover) if nlcd_landcover is not None else None,
+        soil_water_table=soil_water_table.parse_seasonal_water_table(soil_water_table_rows) if soil_water_table_rows is not None else None,
         unavailable=dict(unavailable or {}),
     )
 

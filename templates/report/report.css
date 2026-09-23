@@ -240,6 +240,89 @@ th.num {
 .section--landform .section__detail .caption {
   margin-bottom: var(--space-3);
 }
+/* WATER IS THREE PAGES ON LANDFORM'S RHYTHM: the hydrology map with the
+   surface-water table under it; the wetness map with the seasonal water
+   table under it; the numbers. The same blocks, the same breaks; the
+   twelve-column water table takes the monthly form's tighter cells. */
+.section--water .section__figures .summary,
+.section--water .section__structure .summary {
+  margin-bottom: var(--space-4);
+}
+.section--water .report-map {
+  margin-bottom: var(--space-2);
+}
+.section--water .section__figures .data-table th,
+.section--water .section__figures .data-table td {
+  padding-top: 2pt;
+  padding-bottom: 2pt;
+}
+/* The numbers page holds nine key figures, THREE tables, three captions
+   and a seven-line footer; the wetness page a map and a twelve-row table.
+   Measured against the page: the panel, the tables and the captions sit
+   closer than Landform's, and the monthly cells give up a point. */
+.section--water .key-figures {
+  padding: var(--space-2) var(--space-5);
+  row-gap: var(--space-2);
+  margin-bottom: var(--space-2);
+}
+.section--water .data-table {
+  margin-bottom: var(--space-1);
+}
+.section--water .caption {
+  margin-bottom: var(--space-2);
+}
+.section--water .section__structure .report-map {
+  margin-bottom: var(--space-1);
+}
+.section--water .section__detail .data-table th,
+.section--water .section__detail .data-table td {
+  padding-top: 2pt;
+  padding-bottom: 2pt;
+}
+.data-table--monthly th,
+.data-table--monthly td {
+  padding: 1.5pt 3.5pt;
+}
+/* The wetness page: the map, its legend and caption, then twelve rows.
+   Measured 20 pt short of the page at the body leading; the water
+   table's rows take a tighter leading, which is what fits it under the
+   map. Scoped to this section: Climate's monthly table is unchanged. */
+.section--water .data-table--monthly th,
+.section--water .data-table--monthly td {
+  line-height: 1.25;
+  padding: 1pt 2.5pt;
+}
+.section--water .section__structure .caption {
+  margin-bottom: var(--space-1);
+}
+/* THE LABEL COLUMN IS SIZED, NOT LEFT TO THE AUTO LAYOUT: with the table
+   at the full measure the auto algorithm hands the spare width to the
+   twelve numeric columns and wraps every label. A third of the measure
+   holds "Guernsey-Vandergrift, 4.4 ac" on one line; a name that runs
+   longer still ("Gilpin, Weikert, Culleoka") wraps rather than push the
+   columns past the measure. */
+.section--water .data-table--monthly th.label {
+  width: 33%;
+}
+.section--water .data-table--monthly td.label {
+  white-space: normal;
+}
+.data-table--monthly thead th {
+  padding-top: var(--space-1);
+  padding-bottom: var(--space-1);
+}
+/* A BOUND IS NOT A MEASUREMENT: "> 72" is the depth a water table is
+   deeper than, set muted so a column of depths cannot be read across it;
+   a WORD in a numeric column -- "no data" -- takes the prose face. */
+.data-table td.num--bound {
+  color: var(--ink-muted);
+}
+.data-table td.num--word {
+  font-family: var(--font-prose);
+  font-style: italic;
+  color: var(--ink-muted);
+}
+
 /* A SECTION WITH A CHART TAKES THE SAME TWO PAGES: the pictures and the
    takeaway first, the numbers second (Climate). Its second page holds
    nine key figures, a nine-row table, two compact tables, four captions
@@ -422,10 +505,14 @@ th.num {
   margin: 0 0 var(--space-4) 0;
   break-inside: avoid;
 }
+/* The frame is drawn at its own size and centred: report_map narrows it
+   to the parcel (fitted_frame), and a narrowed frame scaled back up to
+   the measure would change the scale the scale bar claims. */
 .report-map__frame svg {
   display: block;
-  width: 100%;
+  max-width: 100%;
   height: auto;
+  margin: 0 auto;
 }
 .report-map__legend {
   list-style: none;

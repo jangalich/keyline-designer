@@ -202,7 +202,27 @@ full = render_map(
 svg = full["svg"]
 document = minidom.parseString(svg)
 root = document.documentElement
-assert root.getAttribute("width") == f"{width:.2f}pt" and root.getAttribute("viewBox") == f"0 0 {width:.2f} {height:.2f}"
+# THE FRAME IS FITTED TO THE PARCEL (fitted_frame): the tall reference boundary in the wide frame would leave
+# 126 m of empty ground either side, so the width is cut to MAX_CONTEXT_MARGIN_M beyond the bbox; the height, and
+# so the scale, is the full frame's. A wide parcel is width-limited and keeps the full frame.
+from report_map import MAX_CONTEXT_MARGIN_M, fitted_frame, render_map as _render, visible_extent_utm  # noqa: E402
+fitted_w, fitted_h = full["frame"]
+assert fitted_h == height and fitted_w < width and fitted_frame(BOUNDARY_POLYGON_UTM) == (fitted_w, fitted_h)
+assert root.getAttribute("width") == f"{fitted_w:.2f}pt" and root.getAttribute("viewBox") == f"0 0 {fitted_w:.2f} {fitted_h:.2f}"
+assert full["meters_per_unit"] == plain["meters_per_unit"], "the cut changes no scale"
+fx0, _, fx1, _ = full["drawn_bbox"]
+assert abs((fx0 - MARGIN_PT) * full["meters_per_unit"] - MAX_CONTEXT_MARGIN_M) < 1e-6
+assert abs((fitted_w - MARGIN_PT - fx1) * full["meters_per_unit"] - MAX_CONTEXT_MARGIN_M) < 1e-6
+vx0, vy0, vx1, vy1 = visible_extent_utm(BOUNDARY_POLYGON_UTM)
+assert abs((minx - vx0) - MAX_CONTEXT_MARGIN_M - MARGIN_PT * full["meters_per_unit"]) < 1e-6 and vx1 > maxx and vy1 > maxy > miny > vy0
+wide = affine_scale(BOUNDARY_POLYGON_UTM, xfact=4.0, yfact=1.0)
+assert fitted_frame(wide) == FRAME, "a width-limited parcel keeps the whole frame"
+# A NOTE ON THE MAP: prose face, muted ink, centred on the point, between the layers and the boundary.
+noted = _render(BOUNDARY_POLYGON_UTM, [], TOKENS, note={"lines": ["Nothing mapped", "on the parcel."], "point": BOUNDARY_POLYGON_UTM.representative_point()})
+assert '<g id="map-note">' in noted["svg"] and noted["svg"].index("map-note") < noted["svg"].index("parcel-boundary")
+note_texts = [t for t in minidom.parseString(noted["svg"]).getElementsByTagName("text") if t.firstChild.data in ("Nothing mapped", "on the parcel.")]
+assert len(note_texts) == 2 and all(t.getAttribute("fill") == TOKENS["ink-muted"] and t.getAttribute("font-family") == "Source Serif 4" for t in note_texts)
+assert "map-note" not in plain["svg"]
 texts = root.getElementsByTagName("text")
 assert texts, "the map has no text"
 for text in texts:

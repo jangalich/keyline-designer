@@ -683,6 +683,94 @@ refused. `diagnose_climate_sources.py` prints every figure from the fixtures
 on the map renderer's principles: token names, not colours; fonts as
 attributes; the legend set by the template.
 
+## Site data report: the Water & hydrology section's sources
+
+Branch 9 adds section IV's report-time layer, six more rows in
+`report_data.REPORT_FETCH_LAYERS`, every one DEGRADABLE: the section
+describes the water that is there beside a Layer 1 it always has (the NHD
+rows, the SSURGO rows, the DEM), and a missing wetland layer must not sink
+a paid report. Each absent layer leaves a visible statement in its place.
+
+- `hydrology_data.get_nhd_points_for_boundary()` — NHD's Point layer, for
+  mapped springs and seeps (FCode 45800). "None mapped" is the expected
+  answer; seeps and springs need field verification either way.
+- `nhdplus_data.py` — NHDPlus HR stream order and the reach's total
+  drainage area, joined to the NHD rows by `permanent_identifier`. The
+  reach figure is the stream's un-truncated catchment and leads the
+  section's catchment block; the DEM-window watershed (parcel + 100 m)
+  is reported beneath it as what the terrain analysis sees, with its rim
+  cells counted — on the reference parcel 77 of 4,421 watershed cells sit
+  on the window's edge, so it is truncated and says so.
+- `nwi_data.py` — USFWS National Wetlands Inventory, TWO-STAGE: attributes
+  for the parcel's bbox + 150 m, then geometry by objectid at 1 m for
+  features under 1,000 acres and at 10 m for the rest, clipped and made
+  valid on receipt. The riverine network polygon next to the reference
+  parcel is 44,740 acres and 42.7 MB as GeoJSON; the two-stage fetch is
+  816 KB. The mapping project's imagery year rides with it.
+- `nfhl_data.py` — FEMA's National Flood Hazard Layer: availability (no
+  study polygon means "no digital flood map", never "not at risk"),
+  zones over the bbox + 150 m in UTM at a 5 m offset (a county-wide Zone
+  X is 29 MB ungeneralised), the FIRM panel and its effective date. The
+  host drops TLS connections intermittently; every query runs in the
+  `fetch_attempts` retry loop.
+- `nlcd_landcover_data.py` — Annual NLCD land cover on the DEM grid, the
+  same IIPP host and `exportImage` pattern as the tree canopy cover
+  fallback, the YEAR PINNED by a mosaic rule (`NLCD_YEAR`) and printed;
+  the class legend is bundled because the service carries no attribute
+  table.
+- `soil_water_table.py` — SSURGO's seasonal water table, flooding and
+  ponding by month: ONE report-time query joining `comonth`,
+  `cosoilmoist`, `muaggatt` and `sacatalog` over the same WKT intersection
+  Layer 1's soil queries use. Depth to water table in a month is the top
+  of the shallowest `Wet` layer, NRCS's own definition behind
+  `wtdepannmin`, and it closes against it. Three states are kept apart: a
+  depth; DEEPER THAN the component's described profile (rows exist, no
+  layer is Wet); NO DATA (no rows).
+
+`water_section.py` sets the three pages on Landform's rhythm: the
+hydrology map (streams weighted by order and dashed for intermittent,
+waterbodies, wetlands as marsh tufts, the 1%-annual-chance flood zone as
+a light hatch, flow paths as context, contours set back) with the
+surface-water table under it; the wetness map (the wetness index tinted
+at the pipeline's own breakpoints, with the depressions the flow model
+filled) with the seasonal water table under it in the twelve-column
+form -- a depth in the data face, a "deeper than" bound prefixed and
+muted, "no data" in words, the four-month form when a parcel has more map
+units than the page holds; the numbers (nine key figures, the wet-ground
+comparison, land cover of the window's contributing area and of the
+parcel as two named extents, flood, the footer). Both maps are at
+Landform's extent and scale, and context beyond the parcel is clipped to
+what the frame shows (`report_map.visible_extent_utm`). The marsh tufts
+and the hatch are geometry through the ordinary line layer, not SVG
+patterns. `test_water_section.py` greps the section's words for siting
+language, the reverse of Landform's grep, and renders the degraded pages
+with FEMA and NWI unavailable.
+
+`water_derivations.py` derives every figure on the report path from the
+session's reads and these blocks — one flow pass per report, shared with
+Landform and asserted at the count; raw TWI, depression depth and the
+accumulation equal the water step's own screens cell for cell; "wet ground
+by terrain" is the on-parcel cells at or above the water step's own
+window-referenced full-credit breakpoint, the TWI value printed. Wet
+ground three ways — hydric soil, mapped wetland, terrain wetness — are cell
+masks whose overlaps are counted, and every acreage partition sums to the
+cover's acreage. Fixtures are one real response per source for the
+reference parcel (`assets/reference/water/`, captured by
+`make_water_fixtures.py`, loaded by `water_reference_fixture.py` with the
+real SSURGO and NHD rows under the real DEM); `diagnose_water_section.py`
+prints every figure from them (or `--live`). Terms of use, as recorded for
+the methods note, from the records where they live: NWI's FGDC metadata
+states Access_Constraints "None" and Use_Constraints "None.
+Acknowledgement of the U.S. Fish and Wildlife Service and (or) the
+National Wetlands Inventory would be appreciated" (`nwi_data.
+NWI_USE_CONSTRAINTS`); the NFHL map service's item description carries an
+empty licence field and FEMA's website information page says most
+material on FEMA.gov is free of copyright and may be copied and
+distributed without permission, citation appreciated (`nfhl_data.
+NFHL_TERMS_BASIS`); NLCD is a USGS product and USGS states its data are
+in the U.S. public domain. All three are U.S. federal works with no stated
+restriction.
+
 ## Running it yourself
 
 Needs internet access (won't run in a fully offline sandbox). Setup:
