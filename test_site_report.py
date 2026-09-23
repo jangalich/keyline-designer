@@ -87,14 +87,25 @@ assert section["number"] == "II" and section["name"] == "Climate" and section["t
 import report_outline
 assert report_outline.section_number("Site overview") == "I"
 assert report_outline.section_number("Climate") == "II"
-assert report_outline.section_number("Soils & geology") == "IX"
-assert len(report_outline.SECTION_OUTLINE) == 9
-try:
-    report_outline.section_number("Weather")
-except ValueError:
-    pass
-else:
-    raise AssertionError("a name outside the outline must not be numbered")
+# SEVEN SECTIONS SINCE BRANCH 12: Buildings & utilities folded into Site
+# overview, Fencing & animals investigated and dropped, and Soils &
+# geology moved from IX to VII because of it. The numeral is the
+# outline's place, so this is the one renumbering there has been.
+assert report_outline.SECTION_OUTLINE == (
+    "Site overview", "Climate", "Landform", "Water & hydrology", "Access", "Trees & forestry", "Soils & geology")
+assert report_outline.section_number("Soils & geology") == "VII"
+assert len(report_outline.SECTION_OUTLINE) == 7
+assert [report_outline.section_number(n) for n in report_outline.SECTION_OUTLINE] == \
+    ["I", "II", "III", "IV", "V", "VI", "VII"]
+# The two dropped names are not numbered any more -- a section the method
+# does not have is a mistake to surface, not to number.
+for gone in ("Weather", "Buildings & utilities", "Fencing & animals"):
+    try:
+        report_outline.section_number(gone)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError(f"{gone!r} is outside the outline and must not be numbered")
 
 assert climate_section.month_part({"month": 4, "day": 10}) == "early April"
 assert climate_section.month_part({"month": 4, "day": 11}) == "mid April"

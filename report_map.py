@@ -54,6 +54,26 @@ beneath. The index contours use this for their elevations in whole feet.
 A part too short to hold its label with clear line either side is left
 unlabelled rather than crowded.
 
+LABELLED POLYGONS (branch 12). A polygon layer may carry `labels` the
+same way, and the label is set INSIDE the polygon at its POLE OF
+INACCESSIBILITY -- the centre of the largest circle the polygon
+contains, which is the point furthest from any edge. Not the centroid: a
+centroid falls outside a crescent and hugs the notch of an L, and the
+published soil surveys this is built for set a map unit's symbol where
+the unit is widest. polygon_pole() finds it by a coarse-to-fine grid
+search in the geometry's own metres, with no dependency beyond shapely.
+
+A POLYGON TOO SMALL TO HOLD ITS LABEL IS LEFT UNLABELLED, the same rule
+the lines follow and for the same reason: crowding a 0.06-acre sliver
+with three characters costs more than the sliver's symbol is worth, and
+the section's own table carries every symbol anyway. The alternative --
+a leader line to a label set outside the polygon, which is what the
+published sheets do -- would put collision handling into a shared
+component for the smallest shapes on the page. The label fits when the
+pole's radius covers half the diagonal of the label's box; render_map()
+reports what was placed and what was dropped in `labels_placed`, exactly
+as it does for lines, so a section can state the count in its caption.
+
 NO COLOUR LITERAL LIVES HERE. Every colour is a TOKEN NAME on a layer
 ("ink", "terrain", ...) resolved at render time against the `tokens` dict
 the caller passes -- site_report.TOKENS, the one table the stylesheet
@@ -95,8 +115,10 @@ from shapely.geometry import (
     MultiLineString,
     MultiPoint,
     MultiPolygon,
+    Point,
     Polygon,
 )
+from shapely.ops import unary_union
 
 from contour_lines import compute_contour_lines
 from raster_grid import elevation_range_in_polygon
@@ -198,7 +220,9 @@ def layer(
     {"value": ...} mapping is a measurement) -- or None for a layer that
     draws without an entry. `labels`, for a line layer, is one string or
     None per geometry, set along the line with the line broken behind it;
-    for a point layer, one string or None per point, set beside the marker.
+    for a polygon layer, one per polygon, set inside it at its pole of
+    inaccessibility and dropped when the polygon cannot hold it; for a
+    point layer, one string or None per point, set beside the marker.
     `marker`, for a point layer, is "asterisk" (the layout map's keypoint
     convention) or "dot" (a small filled circle in the stroke token, for a
     point that sits where two lines meet). `stroke_opacity` below 1 sets
@@ -214,8 +238,8 @@ def layer(
     if marker not in ("asterisk", "dot"):
         raise ValueError(f"marker must be asterisk or dot, got {marker!r}")
     if labels is not None:
-        if kind == "polygon":
-            raise ValueError("labels are drawn along lines or beside points, never on polygons")
+        if kind == "screen":
+            raise ValueError("a screen layer is a tint, not a labelled shape")
         if len(labels) != len(geometries):
             raise ValueError("labels must be one per geometry")
     return {
@@ -474,6 +498,96 @@ def _labelled_line(geometry, label: str, projection, size: float) -> tuple:
     return drawn, (centre.x, centre.y, angle)
 
 
+# The pole search: the widest part is found on a coarse grid over the
+# bounding box and refined by halving the step around the best point so
+# far, which needs no dependency beyond shapely. Twelve halvings take the
+# step below a millimetre on any parcel-sized polygon.
+POLE_GRID_STEPS = 16
+POLE_REFINEMENTS = 12
+# A label fits when the pole's inscribed radius covers half the diagonal
+# of its box, plus this much clear ground all round.
+POLYGON_LABEL_PAD_PT = 1.5
+
+
+def _largest_part(geometry):
+    """The biggest polygon of a MultiPolygon, or the polygon itself. A map
+    unit clipped to a boundary can arrive as several disjoint fragments;
+    its symbol goes in the one with room for it."""
+    if isinstance(geometry, Polygon):
+        return geometry if not geometry.is_empty else None
+    if isinstance(geometry, MultiPolygon):
+        parts = [g for g in geometry.geoms if not g.is_empty]
+        return max(parts, key=lambda g: g.area) if parts else None
+    if isinstance(geometry, GeometryCollection):
+        parts = [g for g in geometry.geoms if isinstance(g, (Polygon, MultiPolygon)) and not g.is_empty]
+        return _largest_part(unary_union(parts)) if parts else None
+    return None
+
+
+def polygon_pole(geometry):
+    """
+    (x, y, radius) of the polygon's POLE OF INACCESSIBILITY in the
+    geometry's own units -- the centre of the largest circle the polygon
+    contains, and that circle's radius -- or None for an empty geometry.
+
+    The point furthest from any edge, which is where a label has the most
+    room and where a published soil survey sets a map unit's symbol. A
+    centroid will not do: it falls outside a crescent entirely, and on an
+    L-shaped unit it lands in the notch hard against an edge. Holes count
+    as edges, because `boundary` carries the interior rings too.
+    """
+    polygon = _largest_part(geometry)
+    if polygon is None or polygon.area <= 0:
+        return None
+    minx, miny, maxx, maxy = polygon.bounds
+    step = max(maxx - minx, maxy - miny) / POLE_GRID_STEPS
+    if step <= 0:
+        return None
+    seed = polygon.representative_point()
+    best = (seed.x, seed.y)
+    best_distance = polygon.boundary.distance(seed)
+    candidates = []
+    x = minx + step / 2
+    while x < maxx:
+        y = miny + step / 2
+        while y < maxy:
+            candidates.append((x, y))
+            y += step
+        x += step
+    for _ in range(POLE_REFINEMENTS):
+        for cx, cy in candidates:
+            point = Point(cx, cy)
+            if not polygon.contains(point):
+                continue
+            distance = polygon.boundary.distance(point)
+            if distance > best_distance:
+                best_distance, best = distance, (cx, cy)
+        step /= 2.0
+        candidates = [
+            (best[0] + dx * step, best[1] + dy * step)
+            for dx in (-1, 0, 1) for dy in (-1, 0, 1) if (dx, dy) != (0, 0)
+        ]
+    return (best[0], best[1], best_distance)
+
+
+def polygon_label_radius_pt(label: str, size: float = LINE_LABEL_SIZE_PT) -> float:
+    """The inscribed radius, in points, a polygon needs to hold `label`:
+    half the diagonal of the label's box plus clear ground."""
+    return math.hypot(_label_width(label, size) / 2, size / 2) + POLYGON_LABEL_PAD_PT
+
+
+def _labelled_polygon(geometry, label: str, projection, size: float):
+    """(x, y) in SVG units for `label` inside `geometry`, or None when the
+    polygon cannot hold it clear of its own edges."""
+    pole = polygon_pole(geometry)
+    if pole is None:
+        return None
+    x, y, radius_m = pole
+    if radius_m / projection.meters_per_unit < polygon_label_radius_pt(label, size):
+        return None
+    return projection.xy(x, y)
+
+
 def _geometry_path(geometry, projection) -> str:
     """One SVG path `d` for a shapely geometry: polygons as closed rings
     (holes included, evenodd), lines as open subpaths."""
@@ -632,6 +746,14 @@ def _layer_svg(spec: dict, projection, tokens: dict) -> str:
                 f'<path d="{d}" fill="{fill}" fill-opacity="{_fmt(spec["fill_opacity"])}" fill-rule="evenodd" '
                 f'stroke="{stroke}" stroke-width="{_fmt(spec["stroke_width"])}" stroke-linejoin="round"{dash}/>'
             )
+            if label:
+                placement = _labelled_polygon(geometry, label, projection, LINE_LABEL_SIZE_PT)
+                if placement:
+                    lx, ly = placement
+                    pieces.append(_text(
+                        lx, ly + LINE_LABEL_SIZE_PT * 0.35, label,
+                        font=FONT_DATA, size=LINE_LABEL_SIZE_PT, fill=stroke, anchor="middle",
+                    ))
         else:
             pieces.append(
                 f'<path d="{d}" fill="none" stroke="{stroke}" stroke-width="{_fmt(spec["stroke_width"])}" '
@@ -759,18 +881,24 @@ def visible_extent_utm(boundary_polygon_utm, frame: tuple = FRAME) -> tuple:
 
 
 def label_placements(boundary_polygon_utm, spec: dict, frame: tuple = FRAME) -> list:
-    """For a labelled line layer, whether each geometry's label will be
-    set (True) or dropped for want of a part long enough to carry it
-    clear of the line either side (False) -- the same rule _labelled_line
-    applies at render time, so a caller can put the label elsewhere."""
+    """For a labelled line or polygon layer, whether each geometry's label
+    will be SET (True) or DROPPED (False) -- for want of a part long
+    enough to carry it clear of the line either side, or of room inside
+    the polygon for its box. The same rules _labelled_line and
+    _labelled_polygon apply at render time, so a caller can state the
+    count or put the label elsewhere."""
     projection = _Projection(boundary_polygon_utm.bounds, fitted_frame(boundary_polygon_utm, frame), MARGIN_PT, FURNITURE_BAND_PT)
     placed = []
     for geometry, label in zip(spec["geometries"], spec.get("labels") or []):
-        if not label or geometry is None or geometry.is_empty or spec["kind"] != "line":
+        if not label or geometry is None or geometry.is_empty:
             placed.append(False)
-            continue
-        _, placement = _labelled_line(geometry, label, projection, LINE_LABEL_SIZE_PT)
-        placed.append(placement is not None)
+        elif spec["kind"] == "line":
+            _, placement = _labelled_line(geometry, label, projection, LINE_LABEL_SIZE_PT)
+            placed.append(placement is not None)
+        elif spec["kind"] == "polygon":
+            placed.append(_labelled_polygon(geometry, label, projection, LINE_LABEL_SIZE_PT) is not None)
+        else:
+            placed.append(False)
     return placed
 
 
@@ -799,7 +927,7 @@ def render_map(boundary_polygon_utm, layers: list, tokens: dict, frame: tuple = 
          'drawn_bbox': (x0, y0, x1, y1),  # where the boundary's bbox landed
          'scale_bar': {'feet': int, 'units': float},
          'legend': legend_entries(layers, tokens),
-         'labels_placed': {layer id: [bool per geometry]}}   # labelled line layers
+         'labels_placed': {layer id: [bool per geometry]}}   # labelled line and polygon layers
 
     Layers draw in the order given, under the boundary; the boundary, the
     north arrow and the scale bar draw last. The frame's outline is a
@@ -859,6 +987,6 @@ def render_map(boundary_polygon_utm, layers: list, tokens: dict, frame: tuple = 
         "legend": legend_entries(layers, tokens),
         "labels_placed": {
             spec["id"]: label_placements(boundary_polygon_utm, spec, frame)
-            for spec in layers if spec["kind"] == "line" and spec.get("labels")
+            for spec in layers if spec["kind"] in ("line", "polygon") and spec.get("labels")
         },
     }
