@@ -13,29 +13,80 @@ Web Mercator, fourteen colour literals) stays exactly as it is for the
 narrated report until D4 retires it. This map is report_map's vector SVG
 in the pipeline's UTM zone, every colour a token, over NAIP photography.
 
-THE PLATE SYSTEM, APPLIED TO THE DESIGN. One mark per element, each cased
-in the page colour: over photography no single ink wins against every
-patch of ground, and a mark with a halo is legible because one of the two
-always separates from what is under it.
+THE INTERACTIVE MAP'S VOCABULARY, IN ITS ACTIVE STATE, FOR EVERY LAYER AT
+ONCE (branch 16). The page reproduces the marks the user worked with, at
+the levels the step in hand draws at: --pattern-active 0.75 for a mark,
+--tint-active 0.22 for a wash. On the plate nothing was decided more
+recently than anything else, so nothing recedes -- no committed state, no
+eligible tint, no focus. Values are the rendering audit's as branch 15
+amended them, CSS pixels at 0.75 pt each (WeasyPrint's px):
 
-    production blocks   oxide hatch, no outline
-    water survey areas  water tint, a firmer water edge
-    road                ink, solid
-    fencing             ink, dashed and lighter
-    structure sites     ink building glyph
-    tree zones          field dot screen
-    contours            terrain, LIGHTER THAN LANDFORM'S, NO LABELS
-    streams             water line (NHD)
-    access point        ochre -- the user placed it; ink is what the tool sited
-    boundary            ink (report_map's own, cased)
+    production    8 px tile, rising "/" hatch, oxide, 1 px, square caps, on a
+                  --rule screen at 0.12 in the tile; no edge -- the edge is
+                  where the hatching stops
+    trees         the same tile falling "\", --tree, no screen, no edge
+    embankment    --survey-embankment wash at 0.22, its own colour edge 2 px
+    excavated     64 px tile, 24 x 24 dot lattice, r 1 px, --survey-excavated,
+                  on a --halo screen at 0.16; its own colour edge 2 px
+    road          ink, 2 px, at 0.75 -- on a HALF-WIDTH --halo rim
+    fencing       ink, 1.25 px, dashed 8,5, at 0.75, uncased
+    structure     the 28 px teardrop pin on a --halo halo: ink where the tool
+      sites       sited it, ochre where the user placed it
+    access point  an 18 px ochre disc ringed 2 px in --halo
+    boundary      ink, 2 px, uncased, over a graded edge
+    contours      terrain, 0.6 pt, uncased, no labels
+    streams       --stream, lighter than either survey blue
+
+FILLS ARE NOT CASED. A white casing under a hatch or a wash is what fogged
+the parcel and made the interior read hazier than the neighbouring land.
+The only screens are the two the interactive map's tiles carry: production
+on --rule, excavated on --halo. Trees and embankment carry none.
+
+THE ROAD IS THE ONE CASED LINE, AND ITS CASING IS HALF THE SCREEN'S.
+Rendered over the reference NAIP (diagnose_layout_map_variants.py): an
+uncased ink road at 0.75 disappears where it crosses the canopy shadow,
+and the screen's full casing turns it into a pale line with a grey core --
+the look branch 15 rejected for the fence. Half a pixel each side is the
+middle -- AND IT IS A RIM, not a stroke under the line (report_map's
+casing_rim): a stroked casing of any width lies under the line's whole
+width, and the 0.75 ink over it still read as a faded line. The rim
+leaves the core over the ground, as dark as the uncased road, and lifts
+only its edges off the shadow. THE FENCE STAYS UNCASED: its dashes fade over canopy shadow too,
+but a fence through shadow is rare and a cased dash reads as white beads
+everywhere else.
+
+THE BOUNDARY IS DRAWN, IN INK, AND THE PARCEL IS LIFTED. The off-parcel
+wash here is 0.35 against the interactive map's 0.55 scrim, and rendered
+without a line the parcel edge goes soft wherever it meets woods of the
+same tone -- and it is the line someone in the field traces. Outside it,
+a GRADED EDGE: four disjoint rings of ink stepping 0.18, 0.10, 0.05, 0.02
+across 25 pt (report_map's `edge`), so the parcel reads as lifted off its
+neighbours. Built with shapely buffers, not an SVG filter -- WeasyPrint
+ignores feGaussianBlur and feDropShadow -- and disjoint rather than
+stacked, so each band prints at exactly its stated opacity. At 15 pt the
+lift read only in close-up.
+
+THE PIN'S DROP SHADOW DOES NOT PRINT (it is a CSS filter on screen), so
+the --halo stroke carries the separation alone; test_design_section.py
+holds it over dark canopy.
+
+GEOMETRY IS THE SERVER'S DISPLAY FIELDS, NEVER REIMPLEMENTED. A suggested
+production block draws its display_only_smoothed_outline, never
+re-smoothed; a drawn block as stored. Trees the raw cell union -- smoothing
+removed 19.6% of a 0.32 ac candidate. Water the envelope as sent, never
+the member features. Roads the routed LineString as sent, unsimplified.
+Fencing its display_only_fence_line, which already carries the 8 m
+coincidence trim against the boundary and the zone edges; a null value
+draws nothing. A structure pad is not drawn: it places the pin at the
+area-weighted centroid of its largest piece.
 
 CONTOURS ARE HERE because they are the only thing on the page that says
 why the design sits where it does: photography shows cover, not slope, so
 without them a road following a grade or a block stopping at a break
-looks arbitrary. They are SUBORDINATE to Landform's: one hairline weight,
-set back, and no elevation labels -- Landform is where an elevation is
-read, and labels here would compete with the design's own. The same call
-the soil map made.
+looks arbitrary. With no casing under them they are drawn HEAVIER than
+the section maps' lightest (0.6 pt against Landform's 0.45) -- 0.6 is the
+floor, below which they drop out over the hatches; do not thin them. No
+elevation labels: Landform is where an elevation is read.
 
 STREAMS ARE HERE by the same rule: a survey area sited on a drainage, or
 a road crossing one, is only legible with the stream shown.
@@ -85,7 +136,8 @@ from shapely.geometry import LineString, MultiLineString, Point, box, mapping, s
 import design_record
 import naip_imagery
 import report_map
-from fence_display_geometry import fence_display_lines
+from display_outline import DISPLAY_ONLY_OUTLINE_PROPERTY
+from fence_display_geometry import DISPLAY_ONLY_FENCE_LINE_PROPERTY
 from landform_section import format_retrieved_on
 from report_outline import section_number
 
@@ -94,36 +146,50 @@ SECTION_TEMPLATE = "design.html"
 MAP_HEADING = "The layout"
 RECORD_HEADING = "The design record"
 
-# THE OFF-PARCEL WASH: the neighbours' land set back, lighter than the old
-# layout map's 0.55 so the photography still reads as context.
+# THE OFF-PARCEL WASH: the neighbours' land set back, lighter than the
+# interactive map's 0.55 scrim so the photography still reads as context.
 WASH = {"token": "page", "opacity": 0.35}
 
-# Weights, in points. Contours are one hairline weight, BELOW Landform's
-# lightest (report_map.CONTOUR_STROKE_PT, 0.45) and set back further.
-CONTOUR_STROKE_PT = 0.35
-CONTOUR_OPACITY = 0.9
-STREAM_STROKE_PT = 0.9
-ROAD_STROKE_PT = 1.5
-FENCE_STROKE_PT = 0.7
-FENCE_DASH = "3 2"
-WATER_EDGE_PT = 1.0
-WATER_TINT_OPACITY = 0.28
-HATCH_STROKE_PT = 0.75
-TREE_DOT_PT = 1.5
-CASING_PT = 0.9          # the page-coloured halo each side of a line or a dot
-HATCH_CASING_PT = 0.3    # a hatch's, thinner: one per line, and a thick one bleaches the tint
-CONTOUR_CASING_PT = 0.3  # the contours' own, lighter and set back -- they are context, not design
-CONTOUR_CASING_OPACITY = 0.35
+# THE GRADED EDGE outside the boundary: (band width pt, opacity) outward,
+# disjoint rings, 25 pt in all. See the module docstring.
+EDGE = {"token": "ink", "steps": [(3.0, 0.18), (5.0, 0.10), (7.0, 0.05), (10.0, 0.02)]}
+
+# THE INTERACTIVE MAP'S VALUES, in CSS pixels, and the pixel in points.
+PX = 0.75
+PATTERN_ACTIVE = 0.75   # --pattern-active: every mark and outline
+TINT_ACTIVE = 0.22      # --tint-active: the embankment wash
+LINE_PT = 2 * PX        # layers.jsx LINE_WEIGHT: road, boundary, the survey edges
+# The road's casing: HALF the screen's CASING_WEIGHT 4 under LINE_WEIGHT 2,
+# so half a pixel each side rather than one. See the module docstring.
+ROAD_CASING_PT = (4 - 2) / 2 * PX / 2
+ROAD_CASING_RIM = True
+FENCE_PT = 1.25 * PX
+FENCE_DASH = f"{8 * PX:g} {5 * PX:g}"
+HATCH_TILE = {"tile_pt": 8 * PX, "weight_pt": 1 * PX}
+PRODUCTION_TILE = {"type": "hatch", **HATCH_TILE, "rise": "up", "screen": {"token": "rule", "opacity": 0.12}}
+TREE_TILE = {"type": "hatch", **HATCH_TILE, "rise": "down", "screen": None}
+EXCAVATED_TILE = {"type": "dots", "tile_pt": 64 * PX, "grid": 24, "radius_pt": 1.0 * PX,
+                  "screen": {"token": "halo", "opacity": 0.16}}
+PIN_PT = 28 * PX
+ACCESS_PT = 18 * PX
+ACCESS_RING_PT = 2 * PX
+# CONTOURS: 0.6 pt, uncased -- THE FLOOR. Heavier than Landform's 0.45
+# because nothing is cased here; any thinner and they drop out over the
+# hatches (rendered, branch 16). Do not thin them.
+CONTOUR_STROKE_PT = 0.6
+STREAM_STROKE_PT = 1.1
 
 ACCESS_LABEL = "Access"
 
 LEGEND = {
     "production": "Production blocks",
-    "water": "Water survey areas",
+    "water-embankment": "Water survey area, embankment",
+    "water-excavated": "Water survey area, excavated",
     "roads": "Road",
     "access": "Access point",
     "trees": "Tree zones",
-    "structures": "Structure sites",
+    "structures": "Structure site, suggested",
+    "structures-placed": "Structure site, placed",
     "fencing": "Fencing",
     "streams": "Streams",
     "boundary": "Parcel boundary",
@@ -216,96 +282,112 @@ def map_labels(record: dict) -> dict:
     return labels
 
 
+def _pin_point(geometry):
+    """Where a structure's pin points: a placed site's own coordinate, or
+    the area-weighted centroid of its pad's largest piece (the interactive
+    map's largestPieceCentroid). The pad itself is never drawn."""
+    if geometry.geom_type == "Point":
+        return geometry
+    parts = list(geometry.geoms) if geometry.geom_type == "MultiPolygon" else [geometry]
+    return max(parts, key=lambda g: g.area).centroid
+
+
 def build_map_layers(inputs: DesignInputs, record: dict, contours: dict) -> list:
     """The layers, in draw order, each only when it has something to draw.
     Every legend entry is a layer's own, so the legend names exactly what
-    was drawn."""
+    was drawn. The geometry is the server's display fields, as sent; see
+    the module docstring."""
     crs = inputs.dem["crs"]
-    parcel = inputs.boundary_polygon_utm
     document = inputs.document
     steps = {s["step_id"]: s for s in record["steps"]}
     names = map_labels(record)
     layers = []
 
-    lines = [level["geometry"] for level in contours["levels"]]
-    if lines:
-        layers.append(report_map.layer(
-            "contours", lines, kind="line", stroke="terrain", stroke_width=CONTOUR_STROKE_PT,
-            stroke_opacity=CONTOUR_OPACITY, casing_pt=CONTOUR_CASING_PT, casing_opacity=CONTOUR_CASING_OPACITY,
-            legend=["Contours, ", {"value": f"{contours['interval_ft']} ft"}],
-        ))
+    def add(spec):
+        if spec["geometries"]:
+            layers.append(spec)
+
+    add(report_map.layer("contours", [level["geometry"] for level in contours["levels"]], kind="line", stroke="terrain",
+                         stroke_width=CONTOUR_STROKE_PT, legend=["Contours, ", {"value": f"{contours['interval_ft']} ft"}]))
 
     frame = box(*map_extent(inputs))
     streams = []
     for row in inputs.streams:
         if row.get("geometry"):
             streams += _linear(_utm(row["geometry"], crs).intersection(frame))
-    if streams:
-        layers.append(report_map.layer("streams", streams, kind="line", stroke="water", stroke_width=STREAM_STROKE_PT,
-                                       casing_pt=CASING_PT, legend=LEGEND["streams"]))
+    add(report_map.layer("streams", streams, kind="line", stroke="stream", stroke_width=STREAM_STROKE_PT,
+                         legend=LEGEND["streams"]))
 
+    # Trees: the raw cell union, never smoothed.
     trees = _features(document, "trees")
-    if trees:
-        layers.append(report_map.layer(
-            "trees", [_utm(f["geometry"], crs) for f in trees], kind="screen", fill="field", screen_dot_pt=TREE_DOT_PT,
-            casing_pt=CASING_PT / 2, labels=[names[f["id"]] for f in trees], legend=LEGEND["trees"],
-        ))
+    add(report_map.layer("trees", [_utm(f["geometry"], crs) for f in trees], kind="pattern", fill="tree",
+                         pattern=TREE_TILE, pattern_opacity=PATTERN_ACTIVE, labels=[names[f["id"]] for f in trees],
+                         legend=LEGEND["trees"]))
 
+    # Production: a suggestion's display outline as sent, a drawn block as stored.
     blocks = _features(document, "landform")
-    if blocks:
-        layers.append(report_map.layer(
-            "production", [_utm(f["geometry"], crs) for f in blocks], kind="hatch", fill="oxide",
-            stroke_width=HATCH_STROKE_PT, casing_pt=HATCH_CASING_PT, labels=[names[f["id"]] for f in blocks],
-            legend=LEGEND["production"],
-        ))
+    add(report_map.layer(
+        "production",
+        [_utm(f["properties"].get(DISPLAY_ONLY_OUTLINE_PROPERTY) or f["geometry"], crs) for f in blocks],
+        kind="pattern", fill="oxide", pattern=PRODUCTION_TILE, pattern_opacity=PATTERN_ACTIVE,
+        labels=[names[f["id"]] for f in blocks], legend=LEGEND["production"]))
 
+    # Water: two marks, the envelope as sent.
     zones = _features(document, "water")
-    if zones:
-        layers.append(report_map.layer(
-            "water", [_utm(f["geometry"], crs) for f in zones], kind="polygon", fill="water", fill_opacity=WATER_TINT_OPACITY,
-            stroke="water", stroke_width=WATER_EDGE_PT, casing_pt=CASING_PT,
-            labels=[names[f["id"]] for f in zones], legend=LEGEND["water"],
-        ))
+    embankment = [f for f in zones if f["properties"].get("survey_type") == "embankment"]
+    excavated = [f for f in zones if f["properties"].get("survey_type") == "excavated"]
+    add(report_map.layer(
+        "water-embankment", [_utm(f["geometry"], crs) for f in embankment], kind="polygon", fill="survey-embankment",
+        fill_opacity=TINT_ACTIVE, stroke="survey-embankment", stroke_width=LINE_PT, stroke_opacity=PATTERN_ACTIVE,
+        labels=[names[f["id"]] for f in embankment], legend=LEGEND["water-embankment"]))
+    add(report_map.layer(
+        "water-excavated", [_utm(f["geometry"], crs) for f in excavated], kind="pattern", fill="survey-excavated",
+        pattern=EXCAVATED_TILE, pattern_opacity=PATTERN_ACTIVE, stroke="survey-excavated", stroke_width=LINE_PT,
+        stroke_opacity=PATTERN_ACTIVE, labels=[names[f["id"]] for f in excavated], legend=LEGEND["water-excavated"]))
 
-    fences = _features(document, "fencing")
-    if fences:
-        boundary_rings = [_utm(f["geometry"], crs) for f in fences if f["properties"]["fence_type"] == "boundary"]
-        zone_rings = [_utm(f["geometry"], crs) for f in fences if f["properties"]["fence_type"] != "boundary"]
-        drawn_boundary, drawn_zones = fence_display_lines(boundary_rings, zone_rings)
-        fence_lines = [g for g in drawn_boundary if g is not None and not g.is_empty]
-        for ring in drawn_zones:
-            fence_lines += _linear(ring.intersection(parcel)) if ring is not None else []
-        if fence_lines:
-            layers.append(report_map.layer("fencing", fence_lines, kind="line", stroke="ink", stroke_width=FENCE_STROKE_PT,
-                                           dash=FENCE_DASH, casing_pt=CASING_PT, legend=LEGEND["fencing"]))
+    # Fencing: the display line, trimmed server-side; a null one draws nothing.
+    fence_lines = []
+    for f in _features(document, "fencing"):
+        line = f["properties"].get(DISPLAY_ONLY_FENCE_LINE_PROPERTY)
+        if line is not None:
+            fence_lines += _linear(_utm(line, crs))
+    add(report_map.layer("fencing", fence_lines, kind="line", stroke="ink", stroke_width=FENCE_PT, dash=FENCE_DASH,
+                         stroke_opacity=PATTERN_ACTIVE, legend=LEGEND["fencing"]))
 
+    # Roads: the routed LineString as sent.
     branches = _features(document, "roads")
+    add(report_map.layer("roads", [_utm(f["geometry"], crs) for f in branches], kind="line", stroke="ink",
+                         stroke_width=LINE_PT, stroke_opacity=PATTERN_ACTIVE, casing_pt=ROAD_CASING_PT,
+                         casing_opacity=PATTERN_ACTIVE, casing_rim=ROAD_CASING_RIM, legend=LEGEND["roads"]))
     if branches:
-        layers.append(report_map.layer("roads", [_utm(f["geometry"], crs) for f in branches], kind="line", stroke="ink",
-                                       stroke_width=ROAD_STROKE_PT, casing_pt=CASING_PT, legend=LEGEND["roads"]))
         lon, lat = steps["roads"]["access_point"]["lon_lat"]
-        layers.append(report_map.layer("access", [_utm(mapping(Point(lon, lat)), crs)], kind="point", stroke="ochre",
-                                       marker="dot", labels=[ACCESS_LABEL], label_halo=True, legend=LEGEND["access"]))
+        add(report_map.layer("access", [_utm(mapping(Point(lon, lat)), crs)], kind="point", stroke="ochre",
+                             marker="disc", marker_size_pt=ACCESS_PT, marker_halo_pt=ACCESS_RING_PT,
+                             labels=[ACCESS_LABEL], label_halo=True, legend=LEGEND["access"]))
 
+    # Structure sites: pins by provenance -- ink the tool's, ochre the user's.
     sites = _features(document, "structures")
-    if sites:
-        layers.append(report_map.layer(
-            "structures", [_utm(f["geometry"], crs).representative_point() for f in sites], kind="point", stroke="ink",
-            marker="glyph", labels=[names[f["id"]] for f in sites], label_halo=True, legend=LEGEND["structures"],
-        ))
+    provenance = document["steps"]["structures"].get("provenance") or {}
+    for layer_id, token, placed in (("structures", "ink", False), ("structures-placed", "ochre", True)):
+        chosen = [f for f in sites if (provenance.get(f["id"]) == "user_added") == placed]
+        add(report_map.layer(layer_id, [_pin_point(_utm(f["geometry"], crs)) for f in chosen], kind="point",
+                             stroke=token, marker="pin", marker_size_pt=PIN_PT, labels=[names[f["id"]] for f in chosen],
+                             label_halo=True, legend=LEGEND[layer_id]))
     return layers
 
 
 # The legend's order: the design in step order, then the terrain beneath it,
 # then the boundary -- not the draw order, which puts tints under lines.
-LEGEND_ORDER = ("production", "water", "roads", "access", "trees", "structures", "fencing", "contours", "streams")
+LEGEND_ORDER = ("production", "water-embankment", "water-excavated", "roads", "access", "trees", "structures",
+                "structures-placed", "fencing", "contours", "streams")
+
+BOUNDARY_STYLE = {"stroke": "ink", "width": LINE_PT, "casing": False}
 
 
 def boundary_legend_spec() -> dict:
     """The boundary's legend entry, drawn by report_map itself rather than
     as a layer."""
-    return report_map.layer("boundary", [], kind="line", stroke="ink", stroke_width=report_map.BOUNDARY_STROKE_PT,
-                            legend=LEGEND["boundary"])
+    return report_map.layer("boundary", [], kind="line", stroke="ink", stroke_width=LINE_PT, legend=LEGEND["boundary"])
 
 
 def build_map(inputs: DesignInputs, record: dict, tokens: dict) -> dict:
@@ -320,6 +402,7 @@ def build_map(inputs: DesignInputs, record: dict, tokens: dict) -> dict:
     rendered = report_map.render_map(
         inputs.boundary_polygon_utm, layers, tokens, report_map.LAYOUT_FRAME,
         fit=False, underlay=underlay, wash=WASH if underlay else None, halo=True, labels_on_top=True,
+        boundary_style=BOUNDARY_STYLE, edge=EDGE,
     )
     by_id = {spec["id"]: spec for spec in layers}
     ordered = [by_id[i] for i in LEGEND_ORDER if i in by_id] + [boundary_legend_spec()]

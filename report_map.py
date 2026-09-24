@@ -240,6 +240,7 @@ def layer(
     pattern_opacity: float = 1.0,
     marker_size_pt: Optional[float] = None,
     marker_halo_pt: Optional[float] = None,
+    casing_rim: bool = False,
 ) -> dict:
     """
     One styled layer. `geometries` are shapely geometries in the DEM's UTM
@@ -298,6 +299,13 @@ def layer(
     its tip on the point, on a page-coloured halo; `marker="disc"` is a
     filled circle `marker_size_pt` across, ringed `marker_halo_pt` wide in
     the page colour inside that size.
+
+    `casing_rim` draws a line's casing as a RIM: the ring between the
+    line's own outline and the casing's, filled in the page colour at
+    `casing_opacity`, with nothing under the line itself. A stroked casing
+    lies under the whole width of the line, so a translucent line over it
+    reads as a washed-out line with a faded core; a rim leaves the core over the
+    ground, as an uncased line is, and separates only its edges.
     """
     if kind not in ("polygon", "line", "point", "screen", "hatch", "pattern"):
         raise ValueError(f"layer kind must be polygon, line, point, screen, hatch or pattern, got {kind!r}")
@@ -335,6 +343,7 @@ def layer(
         "pattern_opacity": float(pattern_opacity),
         "marker_size_pt": marker_size_pt,
         "marker_halo_pt": marker_halo_pt,
+        "casing_rim": bool(casing_rim),
     }
 
 
@@ -1002,6 +1011,8 @@ def _casing_svg(spec: dict, projection, tokens: dict) -> str:
                         f'stroke-dasharray="0 {_fmt(SCREEN_SPACING_PT)}" stroke-dashoffset="{_fmt(offset)}"/>'
                     )
         return "".join(pieces)
+    if spec.get("casing_rim"):
+        return _casing_rim(spec, projection, page)
     width = spec["stroke_width"] + 2 * casing
     faint = spec.get("casing_opacity", 1.0)
     faint = f' stroke-opacity="{_fmt(faint)}"' if faint < 1.0 else ""
@@ -1019,6 +1030,26 @@ def _casing_svg(spec: dict, projection, tokens: dict) -> str:
             pieces.append(f'<path d="{d}" fill="none" stroke="{page}" stroke-width="{_fmt(width)}" '
                           f'stroke-linejoin="round" stroke-linecap="round"{faint}/>')
     return "".join(pieces)
+
+
+def _casing_rim(spec: dict, projection, page: str) -> str:
+    """A line layer's casing as a rim (see layer()): each line buffered to
+    the casing's outer edge, minus its buffer to the line's own, in the
+    ground's metres at the map's scale, round-capped and round-joined as
+    the line is drawn."""
+    half = spec["stroke_width"] / 2 * projection.meters_per_unit
+    outer = (spec["stroke_width"] / 2 + spec["casing_pt"]) * projection.meters_per_unit
+    lines = [g for g in spec["geometries"] if g is not None and not g.is_empty]
+    if not lines:
+        return ""
+    whole = unary_union(lines)
+    rim = whole.buffer(outer, join_style="round", cap_style="round").difference(
+        whole.buffer(half, join_style="round", cap_style="round"))
+    if rim.is_empty:
+        return ""
+    faint = spec.get("casing_opacity", 1.0)
+    faint = f' fill-opacity="{_fmt(faint)}"' if faint < 1.0 else ""
+    return f'<path d="{_geometry_path(rim, projection)}" fill="{page}"{faint} fill-rule="evenodd" stroke="none"/>'
 
 
 def _layer_svg(spec: dict, projection, tokens: dict, sink: Optional[list] = None) -> str:
@@ -1478,7 +1509,6 @@ def render_map(boundary_polygon_utm, layers: list, tokens: dict, frame: tuple = 
         frame = fitted_frame(boundary_polygon_utm, frame)
     width, height = frame
     projection = _Projection(boundary_polygon_utm.bounds, frame, MARGIN_PT, FURNITURE_BAND_PT)
-    ink = tokens["ink"]
     rule = tokens["rule"]
     page = tokens["page"]
 

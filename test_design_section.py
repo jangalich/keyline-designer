@@ -115,43 +115,166 @@ print(f"   {len(checked) + 1} files checked; the rendered map's colours are all 
 # ======================================================================
 # 2. The map
 # ======================================================================
-print("2. the map: its frame, its layers and their marks, the legend naming every one")
+print("2. the map: its frame, each layer's treatment, its geometry, the legend naming every one")
 # EXEMPT FROM THE SHARED SECTION SCALE: the layout map takes LAYOUT_FRAME
 # whole, unfitted -- not FRAME, and not Landform's fitted scale.
 assert MAP["frame"] == report_map.LAYOUT_FRAME and report_map.LAYOUT_FRAME[0] == report_map.FRAME_WIDTH_PT
 assert report_map.LAYOUT_FRAME[1] > report_map.FRAME_HEIGHT_PT
 assert MAP["scale_bar"]["feet"] in report_map.SCALE_BAR_CANDIDATES_FT
-# The plate system: each element's mark and token.
+PX = 0.75  # a CSS pixel, in points: the interactive map's values carry over at WeasyPrint's px
+
+
+def group(layer_id, svg=None):
+    body = re.search(rf'<g id="layer-{layer_id}">(.*?)</g>(?=<g id=|<path id=|<g id="labels")', svg or SVG, re.S)
+    assert body, layer_id
+    return body.group(1)
+
+
+# THE INTERACTIVE MAP'S ACTIVE STATE, EVERY LAYER AT ONCE: (kind, stroke, fill, width pt, stroke opacity).
 expected = {
-    "production": ("hatch", None, "oxide"), "water": ("polygon", "water", "water"), "roads": ("line", "ink", None),
-    "fencing": ("line", "ink", None), "structures": ("point", "ink", None), "trees": ("screen", None, "field"),
-    "contours": ("line", "terrain", None), "streams": ("line", "water", None), "access": ("point", "ochre", None),
+    "production": ("pattern", None, "oxide", None, None),
+    "trees": ("pattern", None, "tree", None, None),
+    "water-embankment": ("polygon", "survey-embankment", "survey-embankment", 2 * PX, 0.75),
+    "water-excavated": ("pattern", "survey-excavated", "survey-excavated", 2 * PX, 0.75),
+    "roads": ("line", "ink", None, 2 * PX, 0.75),
+    "fencing": ("line", "ink", None, 1.25 * PX, 0.75),
+    "structures": ("point", "ink", None, None, None),
+    "structures-placed": ("point", "ochre", None, None, None),
+    "access": ("point", "ochre", None, None, None),
+    "contours": ("line", "terrain", None, 0.6, 1.0),
+    "streams": ("line", "stream", None, 1.1, 1.0),
 }
 assert set(LAYERS) == set(expected), sorted(LAYERS)
-for layer_id, (kind, stroke, fill) in expected.items():
+for layer_id, (kind, stroke, fill, width, opacity) in expected.items():
     spec = LAYERS[layer_id]
     assert (spec["kind"], spec["stroke"], spec["fill"]) == (kind, stroke, fill), (layer_id, spec["kind"], spec["stroke"], spec["fill"])
-    # HALO CASING ON EVERYTHING: a line, a tint, a hatch in the page colour beneath; a point marker carries its own.
-    assert spec["casing_pt"] > 0 or spec["kind"] == "point", layer_id
-assert LAYERS["production"]["stroke"] is None, "the production hatch has no outline"
-assert LAYERS["fencing"]["dash"] and not LAYERS["roads"]["dash"], "fencing dashed, the road solid"
-assert LAYERS["fencing"]["stroke_width"] < LAYERS["roads"]["stroke_width"], "fencing lighter than the road"
-assert LAYERS["structures"]["marker"] == "glyph" and LAYERS["access"]["marker"] == "dot"
-assert LAYERS["water"]["stroke_width"] >= 1.0, "the water tint carries a firm edge"
-assert 'id="parcel-boundary-casing"' in SVG and 'id="parcel-boundary"' in SVG
-for group in ("north-arrow", "scale-bar"):
-    assert f'id="{group}"' in SVG
-# Every layer drawn, drawn: each has marks in its group.
-drawn = set()
-for layer_id in LAYERS:
-    body = re.search(rf'<g id="layer-{layer_id}">(.*?)</g>', SVG, re.S)
-    assert body and ("<path" in body.group(1) or "<circle" in body.group(1)), layer_id
-    drawn.add(layer_id)
-# THE LEGEND NAMES EVERY ELEMENT DRAWN, and nothing that is not: every layer, and the boundary report_map draws itself.
+    if width is not None:
+        assert abs(spec["stroke_width"] - width) < 1e-9 and abs(spec["stroke_opacity"] - opacity) < 1e-9, layer_id
+# NO CASING ON ANY FILL -- a page-coloured casing under a hatch or a wash is
+# what fogged the parcel -- and none on the fence or the terrain. THE ROAD
+# ALONE IS CASED: half the screen's width, as a rim at the line's level.
+for layer_id, spec in LAYERS.items():
+    if layer_id != "roads":
+        assert spec["casing_pt"] == 0, layer_id
+roads = LAYERS["roads"]
+assert abs(roads["casing_pt"] - PX / 2) < 1e-9 and roads["casing_rim"] and roads["casing_opacity"] == 0.75
+for layer_id in ("production", "trees", "water-embankment", "water-excavated", "fencing", "contours", "streams"):
+    assert f'stroke="{TOKENS["page"]}"' not in group(layer_id), f"{layer_id} carries a page-coloured casing"
+road_body = group("roads")
+assert road_body.count(f'fill="{TOKENS["page"]}" fill-opacity="0.75" fill-rule="evenodd"') == 1, "the road's rim, once"
+assert f'stroke="{TOKENS["page"]}"' not in road_body, "a rim, not a stroked casing under the line"
+# THE TILES: the audit's values in points, userSpaceOnUse, and the screens only where the audit has them.
+production_tile = re.search(r'<pattern id="pattern-production" patternUnits="userSpaceOnUse" x="0" y="0" width="6.00" '
+                            r'height="6.00">(.*?)</pattern>', SVG, re.S).group(1)
+assert f'fill="{TOKENS["rule"]}" fill-opacity="0.12"' in production_tile, "production's --rule screen at 0.12"
+assert f'stroke="{TOKENS["oxide"]}" stroke-width="0.75" stroke-linecap="square"' in production_tile
+assert production_tile.count("<path") == 1 and "M0 6.00 L6.00 0.00" in production_tile, "rising: /"
+tree_tile = re.search(r'<pattern id="pattern-trees" patternUnits="userSpaceOnUse" x="0" y="0" width="6.00" '
+                      r'height="6.00">(.*?)</pattern>', SVG, re.S).group(1)
+assert "<rect" not in tree_tile, "trees carry no screen"
+assert f'stroke="{TOKENS["tree"]}" stroke-width="0.75"' in tree_tile and "M0 0.00 L6.00 6.00" in tree_tile, "falling: \\"
+excavated_tile = re.search(r'<pattern id="pattern-water-excavated" patternUnits="userSpaceOnUse" x="0" y="0" '
+                           r'width="48.00" height="48.00">(.*?)</pattern>', SVG, re.S).group(1)
+assert f'fill="{TOKENS["halo"]}" fill-opacity="0.16"' in excavated_tile, "excavated's --halo screen at 0.16"
+dots = re.findall(r'<circle cx="([\d.]+)" cy="([\d.]+)" r="0.75" fill="' + TOKENS["survey-excavated"] + '"/>', excavated_tile)
+assert len(dots) == 24 * 24 and abs(float(dots[1][0]) - float(dots[0][0]) - 2.0) < 0.011, "24 x 24, pitch 2 pt (2.67 px)"
+for layer_id in ("production", "trees", "water-excavated"):
+    assert f'fill="url(#pattern-{layer_id})" fill-opacity="0.75"' in group(layer_id), f"{layer_id} at --pattern-active"
+assert 'stroke="none"' in group("production") and "stroke-width" not in group("production").split("</defs>")[1], \
+    "the production hatch has no edge"
+assert f'fill="{TOKENS["survey-embankment"]}" fill-opacity="0.22"' in group("water-embankment"), "--tint-active"
+assert f'stroke="{TOKENS["survey-excavated"]}" stroke-width="1.50" stroke-linejoin="round" stroke-opacity="0.75"' in \
+    group("water-excavated"), "excavated's edge, weight 2 px"
+assert 'stroke-dasharray="6 3.75"' in group("fencing") and LAYERS["fencing"]["dash"] == "6 3.75", "dash 8,5 px"
+assert LAYERS["contours"]["labels"] is None and LAYERS["contours"]["stroke_width"] >= 0.6, "the 0.6 pt floor"
+# PINS BY PROVENANCE, the 28 px teardrop on a --halo halo; the access point an 18 px ochre disc ringed 2 px.
+assert LAYERS["structures"]["marker"] == LAYERS["structures-placed"]["marker"] == "pin"
+assert LAYERS["structures"]["marker_size_pt"] == 28 * PX
+assert LAYERS["access"]["marker"] == "disc" and LAYERS["access"]["marker_size_pt"] == 18 * PX
+assert LAYERS["access"]["marker_halo_pt"] == 2 * PX
+assert f'<path d="{report_map.PIN_PATH}" fill="{TOKENS["ink"]}"' in group("structures")
+assert f'<path d="{report_map.PIN_PATH}" fill="{TOKENS["ochre"]}"' in group("structures-placed")
+# THE HALO CARRIES THE PIN ALONE -- the screen's drop shadow is a CSS filter
+# and does not print -- so it is the screen's full 4 units, in --halo.
+assert f'stroke="{TOKENS["halo"]}" stroke-width="4.00"' in group("structures") and "filter" not in SVG
+# THE BOUNDARY: ink, 2 px, uncased, over a 25 pt graded edge of disjoint rings.
+assert 'id="parcel-boundary-casing"' not in SVG
+assert '<path id="parcel-boundary" d="' in SVG and re.search(
+    rf'<path id="parcel-boundary" d="[^"]+" fill="none" stroke="{TOKENS["ink"]}" stroke-width="1.50"', SVG)
+edge = re.search(r'<g id="parcel-edge">(.*?)</g>', SVG, re.S).group(1)
+assert re.findall(r'fill-opacity="([\d.]+)"', edge) == ["0.18", "0.10", "0.05", "0.02"]
+assert sum(width for width, _ in ds.EDGE["steps"]) == 25.0
+assert SVG.index('id="off-parcel-wash"') < SVG.index('id="parcel-edge"') < SVG.index('<g id="layer-')
+for group_id in ("north-arrow", "scale-bar"):
+    assert f'id="{group_id}"' in SVG
+
+# THE GEOMETRY IS THE SERVER'S DISPLAY FIELDS, AS SENT.
+projection = report_map._Projection(BOUNDARY_POLYGON_UTM.bounds, report_map.LAYOUT_FRAME, report_map.MARGIN_PT,
+                                    report_map.FURNITURE_BAND_PT)
+DOC = FIXTURE["full"]["document"]
+
+
+def drawn(geometry_wgs84):
+    return report_map._geometry_path(ds._utm(geometry_wgs84, PARCEL.dem["crs"]), projection)
+
+
+blocks = DOC["steps"]["landform"]["features"]["features"]
+suggested = [f for f in blocks if f["properties"].get("display_only_smoothed_outline")]
+drawn_blocks = [f for f in blocks if not f["properties"].get("display_only_smoothed_outline")]
+assert suggested and drawn_blocks
+for f in suggested:  # the display outline, never re-smoothed and never the cell union
+    assert drawn(f["properties"]["display_only_smoothed_outline"]) in group("production")
+    assert drawn(f["geometry"]) not in group("production")
+for f in drawn_blocks:  # as stored
+    assert drawn(f["geometry"]) in group("production")
+for f in DOC["steps"]["trees"]["features"]["features"]:  # the raw cell union, not smoothed
+    assert drawn(f["geometry"]) in group("trees")
+for f in DOC["steps"]["water"]["features"]["features"]:  # the envelope as sent; member features never draw
+    assert drawn(f["geometry"]) in group(f"water-{f['properties']['survey_type']}")
+for f in DOC["steps"]["roads"]["features"]["features"]:  # the routed LineString as sent, every vertex: no simplify
+    assert drawn(f["geometry"]) in road_body
+def drawn_parts(geometry_wgs84):
+    return [report_map._geometry_path(part, projection) for part in ds._linear(ds._utm(geometry_wgs84, PARCEL.dem["crs"]))]
+
+
+for f in DOC["steps"]["fencing"]["features"]["features"]:  # the trimmed display line, part by part, never the ring
+    assert all(d in group("fencing") for d in drawn_parts(f["properties"]["display_only_fence_line"])), f["id"]
+    assert f["properties"]["display_only_fence_line"] == f["geometry"] or \
+        not all(d in group("fencing") for d in drawn_parts(f["geometry"])), f["id"]
+# A NULL DISPLAY LINE DRAWS NOTHING -- not the ring it trimmed away.
+nulled = copy.deepcopy(DOC)
+gone = nulled["steps"]["fencing"]["features"]["features"][1]
+gone["properties"]["display_only_fence_line"] = None
+case = inputs()
+case.document = nulled
+nulled_svg = ds.build_design_section(case, TOKENS)["map"]["svg"]
+assert not any(d in group("fencing", nulled_svg) for d in drawn_parts(gone["geometry"]))
+assert len(group("fencing", nulled_svg)) < len(group("fencing"))
+# THE PAD IS NOT DRAWN; IT PLACES THE PIN at its largest piece's area-weighted centroid. A placed site is its point.
+sites = DOC["steps"]["structures"]["features"]["features"]
+for f in sites:
+    geometry = ds._utm(f["geometry"], PARCEL.dem["crs"])
+    if geometry.geom_type != "Point":
+        assert report_map._geometry_path(geometry, projection) not in SVG, "a pad was drawn"
+        piece = max(getattr(geometry, "geoms", [geometry]), key=lambda g: g.area)
+        x, y = projection.xy(piece.centroid.x, piece.centroid.y)
+    else:
+        x, y = projection.xy(geometry.x, geometry.y)
+    k = LAYERS["structures"]["marker_size_pt"] / report_map.PIN_VIEWBOX
+    assert f'translate({x - 12 * k:.2f} {y - 22 * k:.2f})' in SVG, f["id"]
+
+# THE LEGEND NAMES EVERY ELEMENT DRAWN, and nothing that is not; water has two entries, each its own swatch.
 legend_ids = [entry["id"] for entry in MAP["legend"]]
-assert set(legend_ids) == drawn | {"boundary"}, (sorted(legend_ids), sorted(drawn))
+assert set(legend_ids) == set(LAYERS) | {"boundary"}, (sorted(legend_ids), sorted(LAYERS))
 assert len(legend_ids) == len(set(legend_ids))
-assert legend_ids[:7] == ["production", "water", "roads", "access", "trees", "structures", "fencing"], legend_ids
+assert legend_ids[:8] == ["production", "water-embankment", "water-excavated", "roads", "access", "trees", "structures",
+                          "structures-placed"], legend_ids
+swatches = {entry["id"]: entry["swatch"] for entry in MAP["legend"]}
+assert f'fill="{TOKENS["survey-embankment"]}" fill-opacity="0.22"' in swatches["water-embankment"]
+assert "url(#swatch-pattern-water-excavated)" in swatches["water-excavated"]
+assert swatches["water-embankment"] != swatches["water-excavated"]
+assert "swatch-pattern-production" in swatches["production"] and "swatch-pattern-trees" in swatches["trees"]
+assert TOKENS["ochre"] in swatches["structures-placed"] and TOKENS["ink"] in swatches["structures"]
 # Short labels name elements -- the record's names -- and no rationale sits on the map.
 labels = [text for text, _ in MAP["label_boxes"]]
 for name in ("Block 1", "Block 5", "Drawn block 1", "Embankment 1", "Excavated 1", "Zone 1", "Drawn zone 1", "Site 1",
@@ -165,11 +288,13 @@ for i, (a, box_a) in enumerate(boxes):
     for b, box_b in boxes[i + 1:]:
         if a in point_labels or b in point_labels:
             assert not report_map._overlaps(box_a, box_b), (a, b)
-# Committed empty: the empty step's layer is absent, and so is its legend entry.
+# Committed empty: the empty step's layers are absent, and so are their legend entries.
 EMPTY = ds.build_design_section(inputs("empty_water"), TOKENS)
-assert "water" not in {s["id"] for s in EMPTY["map"]["layers"]} and "water" not in [e["id"] for e in EMPTY["map"]["legend"]]
-print(f"   frame {MAP['frame'][0]:.1f} x {MAP['frame'][1]:.1f} pt unfitted (Landform's {report_map.FRAME_HEIGHT_PT:.0f} pt tall); "
-      f"{len(drawn)} layers each cased and in the legend with the boundary; {len(labels)} labels, points clear")
+empty_ids = {s["id"] for s in EMPTY["map"]["layers"]} | {e["id"] for e in EMPTY["map"]["legend"]}
+assert not {"water-embankment", "water-excavated"} & empty_ids
+print(f"   frame {MAP['frame'][0]:.1f} x {MAP['frame'][1]:.1f} pt unfitted; {len(LAYERS)} layers at the active levels, "
+      f"fills uncased, the road alone on a {roads['casing_pt']} pt rim; tiles, pins, boundary and 25 pt edge as audited; "
+      f"geometry the display fields; {len(legend_ids)} legend entries, water two; {len(labels)} labels, points clear")
 
 # ======================================================================
 # 3. What this map must not draw
@@ -260,21 +385,24 @@ print(f"   {len(KEYPOINTS)} keypoints and {len(exclusion_geometries)} exclusion 
 # ======================================================================
 # 4. Contours
 # ======================================================================
-print("4. contours: present, lighter than Landform's, no elevation labels")
+print("4. contours: present, heavier than Landform's lightest, uncased, no elevation labels")
 contours = LAYERS["contours"]
 landform_layers = report_map.contour_layers(report_map.parcel_contours(PARCEL.dem, BOUNDARY_POLYGON_UTM))
 landform_lightest = min(spec["stroke_width"] for spec in landform_layers)
 assert contours["geometries"], "contours are drawn"
-assert contours["stroke_width"] < landform_lightest, (contours["stroke_width"], landform_lightest)
-assert contours["stroke_opacity"] < 1.0 and all(spec["stroke_opacity"] >= contours["stroke_opacity"] for spec in landform_layers)
+# NOTHING IS CASED HERE, so the contours carry themselves: heavier than the
+# section maps' lightest, and 0.6 pt is the floor below which they drop out
+# over the hatches (rendered, branch 16).
+assert contours["stroke_width"] > landform_lightest and contours["stroke_width"] >= 0.6
+assert contours["casing_pt"] == 0 and contours["stroke_opacity"] == 1.0
 assert any(spec.get("labels") for spec in landform_layers), "Landform labels its index contours; the comparison is real"
 assert contours["labels"] is None
-body = re.search(r'<g id="layer-contours">(.*?)</g>', SVG, re.S).group(1)
+body = group("contours")
 assert "<text" not in body, "no elevation label in the contour group"
 assert not re.search(r">\s*\d{3,4}\s*<", SVG), "no elevation figure anywhere on the map"
 interval = MAP["contours"]["interval_ft"]
-print(f"   {len(contours['geometries'])} lines at {interval} ft, {contours['stroke_width']} pt at "
-      f"{contours['stroke_opacity']} opacity against Landform's lightest {landform_lightest} pt; no <text>")
+print(f"   {len(contours['geometries'])} lines at {interval} ft, {contours['stroke_width']} pt uncased against "
+      f"Landform's lightest {landform_lightest} pt; no <text>")
 
 # ======================================================================
 # 5. The imagery
